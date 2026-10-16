@@ -445,6 +445,37 @@ export const Util = {
   // Escape HTML special characters to safely render untrusted values in HTML contexts.
   // Returns empty string for null/undefined, otherwise coerces to string and escapes
   // &, <, >, ", and ' to their respective HTML entities.
+  /** WCAG relative luminance of an opaque CSS hex or RGB color. */
+  relativeLuminance(color: string): number {
+    const value = color.trim();
+    let rgb: number[];
+    if (/^#[0-9a-f]{3}$/i.test(value)) rgb = [...value.slice(1)].map(c => parseInt(c + c, 16));
+    else if (/^#[0-9a-f]{6}$/i.test(value)) rgb = [1, 3, 5].map(i => parseInt(value.slice(i, i + 2), 16));
+    else {
+      const match = /^rgb\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)\s*\)$/i.exec(value);
+      if (!match) return NaN;
+      rgb = match.slice(1).map(Number);
+    }
+    const linear = rgb.map(channel => {
+      const v = Math.max(0, Math.min(255, channel)) / 255;
+      return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    });
+    return .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2];
+  },
+
+  /** Pick readable text for an opaque data fill, retaining palette colors when AA-safe. */
+  contrastText(background: string, candidates: string[] = ['#0c1c30', '#ffffff']): string {
+    const luminance = Util.relativeLuminance(background);
+    const contrast = (color: string): number => {
+      const foreground = Util.relativeLuminance(color);
+      return (Math.max(luminance, foreground) + .05) / (Math.min(luminance, foreground) + .05);
+    };
+    const palette = candidates.filter(color => Number.isFinite(contrast(color)))
+      .sort((a, b) => contrast(b) - contrast(a));
+    if (palette.length && contrast(palette[0]) >= 4.5) return palette[0];
+    return contrast('#000000') > contrast('#ffffff') ? '#000000' : '#ffffff';
+  },
+
   escapeHtml(value: unknown): string {
     if (value == null) return '';
     const s = String(value);
@@ -1800,7 +1831,16 @@ function _modalFocusInto(dlg: HTMLElement, items: HTMLElement[], last = false): 
 }
 
 function _modalFocusables(dlg: HTMLElement): HTMLElement[] {
-  return Array.from(dlg.querySelectorAll<HTMLElement>(_MODAL_FOCUSABLE)).filter(el => !el.hidden && !el.closest('[hidden]'));
+  return Array.from(dlg.querySelectorAll<HTMLElement>(_MODAL_FOCUSABLE)).filter(_modalCanFocus);
+}
+
+function _modalCanFocus(el: HTMLElement): boolean {
+  if (el.hidden || el.closest?.('[hidden]') || el.closest?.('[inert]')) return false;
+  // Layout catches display:none on any ancestor, including inactive tabs.
+  if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) return false;
+  const view = el.ownerDocument?.defaultView;
+  if (view && view.getComputedStyle(el).visibility !== 'visible') return false;
+  return true;
 }
 
 function _modalOpened(el: HTMLElement, id: string): void {
@@ -1836,11 +1876,12 @@ function _modalOpened(el: HTMLElement, id: string): void {
       if (el.hidden || dlg.contains(document.activeElement)) return;
       const explicit = dlg.querySelector<HTMLElement>('[data-autofocus], [autofocus]');
       // A confirm defaults to Cancel: a stray Enter must never trigger the destructive action.
-      const target = explicit
-        ?? (id === 'confirm-modal' ? document.getElementById('confirm-cancel-btn') : null)
-        ?? dlg.querySelector<HTMLElement>('.modal-body input:not([disabled]):not([type="hidden"]), .modal-body select:not([disabled]), .modal-body textarea:not([disabled])')
-        ?? _modalFocusables(dlg)[0];
-      target?.focus();
+      const preferred = [explicit,
+        id === 'confirm-modal' ? document.getElementById('confirm-cancel-btn') : null,
+        ...Array.from(dlg.querySelectorAll<HTMLElement>('.modal-body input:not([disabled]):not([type="hidden"]), .modal-body select:not([disabled]), .modal-body textarea:not([disabled])')),
+      ].find(target => target && _modalCanFocus(target));
+      if (preferred) preferred.focus();
+      else _modalFocusInto(dlg, _modalFocusables(dlg));
     }, 0);
     if (_modalEscapeWired !== document && typeof document !== 'undefined' && document.addEventListener) {
       _modalEscapeWired = document;

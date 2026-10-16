@@ -2024,28 +2024,43 @@ export const SetupAdmin = (() => {
   }
 
   async function wireCompatibility(target: HTMLElement, snapshot: SetupSnapshot): Promise<void> {
-    const cacheKey = `${snapshot.plant}\u0000${_lineScope}`;
+    const line = _lineScope;
+    const cacheKey = `${snapshot.plant}\u0000${line}`;
     const saved = _compatibilityByLine[cacheKey];
     const compatible = saved?.setup_compatible !== false;
     const statePanel = target.querySelector('[data-setup-state-inline]');
     if (!statePanel) return;
     const compat = document.createElement('div'); compat.className = 'setup-compatibility';
-    compat.innerHTML = `<label class="setup-check"><input type="checkbox" data-setup-compatible ${compatible ? 'checked' : ''}>${Util.escapeHtml(Util.t('ui.setup_compatibility'))}</label><input class="input" data-setup-compatibility-reason placeholder="${Util.escapeHtml(Util.t('ui.setup_compatibility_reason'))}" value="${Util.escapeHtml(saved?.setup_compatibility_reason || '')}" ${compatible ? 'disabled' : ''}><button class="btn btn-ghost sm" data-setup-save-compatibility ${compatible ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.save'))}</button><p>${Util.escapeHtml(Util.t('ui.setup_not_global_exclusion'))}</p>`;
+    compat.innerHTML = `<label class="setup-check"><input type="checkbox" data-setup-compatible ${compatible ? 'checked' : ''}>${Util.escapeHtml(Util.t('ui.setup_compatibility'))}</label><input class="input" data-setup-compatibility-reason placeholder="${Util.escapeHtml(Util.t('ui.setup_compatibility_reason'))}" value="${Util.escapeHtml(saved?.setup_compatibility_reason || '')}" ${compatible ? 'disabled' : ''}><button class="btn btn-ghost sm" data-setup-save-compatibility disabled>${Util.escapeHtml(Util.t('btn.save'))}</button><p>${Util.escapeHtml(Util.t('ui.setup_not_global_exclusion'))}</p>`;
     statePanel.appendChild(compat);
     const checkbox = compat.querySelector<HTMLInputElement>('[data-setup-compatible]')!;
     const reason = compat.querySelector<HTMLInputElement>('[data-setup-compatibility-reason]')!;
     const save = compat.querySelector<HTMLButtonElement>('[data-setup-save-compatibility]')!;
+    let baseline = { compatible, reason: saved?.setup_compatibility_reason || '' };
+    let saving = false;
+    const sync = () => {
+      reason.disabled = checkbox.checked || saving;
+      checkbox.disabled = saving;
+      save.disabled = saving || (checkbox.checked === baseline.compatible
+        && (checkbox.checked || reason.value.trim() === baseline.reason));
+    };
     const persist = async () => {
-      if (!checkbox.checked && !reason.value.trim()) { reason.disabled = false; reason.focus(); Toast.show(Util.t('ui.setup_reason_required'), 'error'); return; }
-      reason.disabled = checkbox.checked;
+      if (saving) return;
+      if (!checkbox.checked && !reason.value.trim()) { reason.focus(); Toast.show(Util.t('ui.setup_reason_required'), 'error'); return; }
+      const next = { compatible: checkbox.checked, reason: checkbox.checked ? '' : reason.value.trim() };
+      saving = true; sync();
       try {
-        const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/lines/${encodeURIComponent(_lineScope)}/compatibility`, { method: 'PUT', headers: headers(), body: JSON.stringify({ setup_compatible: checkbox.checked, reason: reason.value.trim() }) });
+        const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(snapshot.plant)}/lines/${encodeURIComponent(line)}/compatibility`, { method: 'PUT', headers: headers(), body: JSON.stringify({ setup_compatible: next.compatible, reason: next.reason }) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         Persistence.noteSetupWrite(snapshot.plant, 'override');
-        _compatibilityByLine[cacheKey] = { setup_compatible: checkbox.checked, setup_compatibility_reason: checkbox.checked ? null : reason.value.trim() }; Toast.show(Util.t('toast.line_settings_updated'), 'success');
-      } catch (error) { checkbox.checked = compatible; reason.disabled = compatible; Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+        baseline = next;
+        _compatibilityByLine[cacheKey] = { setup_compatible: next.compatible, setup_compatibility_reason: next.reason || null };
+        Toast.show(Util.t('toast.line_settings_updated'), 'success');
+      } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); }
+      finally { saving = false; sync(); }
     };
-    checkbox.addEventListener('change', () => { reason.disabled = checkbox.checked; save.disabled = checkbox.checked; if (!checkbox.checked) reason.focus(); });
+    checkbox.addEventListener('change', () => { sync(); if (!checkbox.checked) reason.focus(); });
+    reason.addEventListener('input', sync);
     save.addEventListener('click', persist);
   }
 
@@ -2064,7 +2079,12 @@ export const SetupAdmin = (() => {
     } catch (error) { Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error'); return false; }
   }
 
-  return { permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, deleteAllConfirmationMatches, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render, invalidatePlant, setSetupActive,
+  return {
+    _wireCompatibilityForTest: (target: HTMLElement, snapshot: SetupSnapshot, line: string, compatible: boolean) => {
+      _lineScope = line;
+      _compatibilityByLine[`${snapshot.plant}\u0000${line}`] = { setup_compatible: compatible, setup_compatibility_reason: compatible ? null : 'Blocked' };
+      return wireCompatibility(target, snapshot);
+    }, permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, deleteAllConfirmationMatches, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render, invalidatePlant, setSetupActive,
     // Grid helpers — exported for direct unit testing, matching this file's
     // existing pattern of testing pure logic without a DOM harness.
     stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText,

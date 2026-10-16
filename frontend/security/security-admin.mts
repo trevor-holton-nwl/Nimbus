@@ -138,6 +138,7 @@ export const Security = (() => {
 
   // ---- Roles tab state ----
   let _roles: SecurityRoleRow[] = [];         // GET /master-data/roles rows: [{role, description}]
+  const _plantSearchByRole = new Map<string, string>();
   let _rolePlants: SecurityRolePlantRow[] = []; // GET /master-data/role_plants rows: [{role, plant}]
   let _rolesInUse: Set<string> = new Set();     // role names currently assigned to >=1 user (best-effort; disables delete)
   let _selectedRole: string | null = null;
@@ -674,21 +675,16 @@ export const Security = (() => {
     const el = document.getElementById('sec-roles-detail');
     if (!el) return;
     const role = _selectedRole;
+    const query = role ? _plantSearchByRole.get(role) || '' : '';
     const roleRow = role ? _roles.find((r) => r.role === role) : undefined;
     const header = role ? Util.t('sec.plants_for_role', { role }) : Util.t('sec.no_role_selected');
-    const plants = role ? _rolePlants.filter((rp) => rp.role === role).map((rp) => rp.plant).sort() : [];
     const addHtml = !role ? '' : `
-      <div class="sap-section-label">${Util.escapeHtml(Util.t('sec.add_plant'))}</div>
-      <div class="hps-combobox" id="sec-plant-combobox" style="max-width:280px">
-        <input type="text" class="input" id="sec-plant-search" placeholder="${Util.escapeHtml(Util.t('sec.search_plants_ph'))}" autocomplete="off">
-        <div class="hps-dropdown" id="sec-plant-dropdown" hidden></div>
+      <label for="sec-plant-search" class="sap-section-label">${Util.escapeHtml(Util.t('sec.search_plants_ph'))}</label>
+      <input type="search" class="input" id="sec-plant-search" placeholder="${Util.escapeHtml(Util.t('sec.search_plants_ph'))}" autocomplete="off">
+      <div class="sec-plant-lists">
+        <section><h4>${Util.escapeHtml(Util.t('sec.assigned_plants'))}</h4><div id="sec-plant-assigned" class="sec-plant-list"></div></section>
+        <section><h4>${Util.escapeHtml(Util.t('sec.available_plants'))}</h4><div id="sec-plant-dropdown" class="sec-plant-list"></div></section>
       </div>`;
-    const listHtml = !role ? '' : !plants.length
-      ? `<div class="sap-help" style="margin-top:12px">${Util.escapeHtml(Util.t('sec.no_plants_yet'))}</div>`
-      : `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px">${plants.map((p) =>
-          `<span class="sap-keychip">${Util.escapeHtml(p)}<button data-remove-plant="${Util.escapeHtml(p)}" title="${Util.escapeHtml(Util.t('tip.delete_row'))}"
-             style="border:none;background:transparent;cursor:pointer;color:var(--fg-mute);font-size:12px;line-height:1;padding:0;margin-left:2px">✕</button></span>`
-        ).join('')}</div>`;
     const pageAccessHtml = !role ? '' : `
       <div class="sap-section-label" style="margin-top:20px">${Util.escapeHtml(Util.t('sec.page_access'))}</div>
       <div class="sap-help" style="margin:2px 0 8px">${Util.escapeHtml(Util.t('sec.page_access_sub'))}</div>
@@ -697,59 +693,62 @@ export const Security = (() => {
       </div>`;
     el.innerHTML = `<div class="panel">
       <div class="sap-detail-head"><span class="sap-detail-name">${Util.escapeHtml(header)}</span></div>
-      <div class="panel-body">${addHtml}${listHtml}${pageAccessHtml}</div>
+      <div class="panel-body">${addHtml}${pageAccessHtml}</div>
     </div>`;
     if (role) {
       const srch = document.getElementById('sec-plant-search') as HTMLInputElement | null;
-      srch?.addEventListener('focus', () => { _renderPlantDropdown(srch.value); (document.getElementById('sec-plant-dropdown') as HTMLElement).hidden = false; });
-      srch?.addEventListener('input', () => { _renderPlantDropdown(srch.value); (document.getElementById('sec-plant-dropdown') as HTMLElement).hidden = false; });
-      srch?.addEventListener('blur', () => { setTimeout(() => { const dd = document.getElementById('sec-plant-dropdown'); if (dd) dd.hidden = true; }, 150); });
+      srch?.addEventListener('input', () => { _plantSearchByRole.set(role, srch.value); _renderPlantDropdown(srch.value); });
+      if (srch) srch.value = query;
+      _renderPlantDropdown(query);
     }
-    el.querySelectorAll<HTMLElement>('[data-remove-plant]').forEach((b) =>
-      b.addEventListener('click', () => _removePlantFromRole(b.dataset.removePlant as string)));
     el.querySelectorAll<HTMLInputElement>('[data-page-toggle]').forEach((cb) =>
       cb.addEventListener('change', () => _setRolePageAccess(cb.dataset.pageToggle as TopLevelTab, cb.checked)));
   }
 
-  // Type-to-filter Store.knownPlants() down to matches, click one to add it —
-  // NIMBUS's plant lists must never be a plain <select> at 50+ plant scale (see
-  // CLAUDE.md); mirrors the PlantSelector/OptimizeDialog filterPlants pattern.
+  // Both assignment sets remain searchable and use native keyboard-operable buttons.
   function _renderPlantDropdown(query: string): void {
-    const dd = document.getElementById('sec-plant-dropdown');
-    if (!dd || !_selectedRole) return;
-    const assigned = new Set(_rolePlants.filter((rp) => rp.role === _selectedRole).map((rp) => rp.plant));
-    const all = Store.knownPlants().filter((p) => !assigned.has(p));
-    const q = (query || '').trim().toLowerCase();
-    const filtered = q ? all.filter((p) => p.toLowerCase().includes(q)) : all;
-    if (!filtered.length) {
-      dd.innerHTML = `<div class="hps-empty">${all.length ? 'No matches' : 'No plants available'}</div>`;
-      return;
+    if (!_selectedRole) return;
+    const assigned = new Set(_rolePlants.filter(rp => rp.role === _selectedRole).map(rp => rp.plant));
+    const q = query.trim().toLowerCase();
+    const all = [...new Set([...Store.knownPlants(), ...assigned])].sort();
+    for (const [id, isAssigned] of [['sec-plant-assigned', true], ['sec-plant-dropdown', false]] as const) {
+      const host = document.getElementById(id);
+      if (!host) continue;
+      const plants = all.filter(p => assigned.has(p) === isAssigned && `${p} ${Store.plantLabel(p)}`.toLowerCase().includes(q));
+      host.innerHTML = plants.length ? plants.map(p => `<div class="sec-plant-row"><span>${Util.escapeHtml(Store.plantLabel(p))}</span><button type="button" class="btn btn-ghost sm" data-plant="${Util.escapeHtml(p)}" aria-label="${Util.escapeHtml(Util.t(isAssigned ? 'btn.remove' : 'sec.add_plant'))} ${Util.escapeHtml(p)}">${Util.escapeHtml(Util.t(isAssigned ? 'btn.remove' : 'sec.add_plant'))}</button></div>`).join('')
+        : `<div class="sap-help">${Util.escapeHtml(Util.t('ui.no_matches'))}</div>`;
+      host.querySelectorAll<HTMLButtonElement>('[data-plant]').forEach(button => button.addEventListener('click', () => {
+        button.disabled = true;
+        if (isAssigned) void _removePlantFromRole(button.dataset.plant as string);
+        else void _addPlantToRole(button.dataset.plant as string);
+      }));
     }
-    dd.innerHTML = filtered.map((p) => `<div class="hps-option" data-plant="${Util.escapeHtml(p)}">${Util.escapeHtml(p)}</div>`).join('');
-    dd.querySelectorAll<HTMLElement>('[data-plant]').forEach((optEl) =>
-      optEl.addEventListener('mousedown', (e) => { e.preventDefault(); _addPlantToRole(optEl.dataset.plant as string); }));
   }
 
   async function _addPlantToRole(plant: string): Promise<void> {
-    if (!_selectedRole) return;
+    const role = _selectedRole;
+    if (!role) return;
     try {
-      await _postJSON(`${API}/master-data/role_plants/bulk`, { upserts: [{ role: _selectedRole, plant }] });
+      await _postJSON(`${API}/master-data/role_plants/bulk`, { upserts: [{ role, plant }] });
     } catch (e) {
       Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
       ErrorLog.error('security', `Add plant to role failed: ${(e as Error).message}`);
     }
     await _reloadRoles();
+    if (_tab === 'roles' && _selectedRole === role) document.getElementById('sec-plant-search')?.focus();
   }
 
   async function _removePlantFromRole(plant: string): Promise<void> {
-    if (!_selectedRole) return;
+    const role = _selectedRole;
+    if (!role) return;
     try {
-      await _postJSON(`${API}/master-data/role_plants/bulk`, { deletes: [{ role: _selectedRole, plant }] });
+      await _postJSON(`${API}/master-data/role_plants/bulk`, { deletes: [{ role, plant }] });
     } catch (e) {
       Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
       ErrorLog.error('security', `Remove plant from role failed: ${(e as Error).message}`);
     }
     await _reloadRoles();
+    if (_tab === 'roles' && _selectedRole === role) document.getElementById('sec-plant-search')?.focus();
   }
 
   // The backend merges partial page keys under a row lock. Send only the

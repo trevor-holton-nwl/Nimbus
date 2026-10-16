@@ -1,0 +1,22 @@
+{
+  "note": "Local HTTP smoke, not browser render-performance evidence",
+  "requested_fixture_orders": 10000,
+  "results": [
+    {
+      "plant": "AUD01",
+      "status": 200,
+      "seconds": 5.062,
+      "bytes": 12600325,
+      "task_count": 9500,
+      "plant_scope_verified": true
+    },
+    {
+      "plant": "AUD02",
+      "status": 200,
+      "seconds": 0.148,
+      "bytes": 662986,
+      "task_count": 500,
+      "plant_scope_verified": true
+    }
+  ]
+}

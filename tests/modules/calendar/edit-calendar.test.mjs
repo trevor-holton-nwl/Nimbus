@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { EditCalendar } from '../../../frontend/calendar/edit-calendar.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
+import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 import { Toast } from '../../../frontend/platform/foundation.mjs';
 
 test('EditCalendar exposes the documented public API', () => {
@@ -51,7 +52,8 @@ test('EditCalendar plant mode saves an end time of 00:00 as 24 (end of day)', ()
   };
   const persisted = [];
   globalThis.NIMBUS = { Plant: { _persistPlantHours(...a) { persisted.push(a); }, render() {} } };
-  Toast.show = () => {};
+  const toasts = [];
+  Toast.show = (...args) => toasts.push(args);
   CalendarSync.savePlantHours = () => {};
   CalendarSync.saveLineHours = () => {};
   try {
@@ -73,7 +75,14 @@ test('EditCalendar plant mode saves an end time of 00:00 as 24 (end of day)', ()
     EditCalendar.save();
     assert.deepEqual(Store.plants['1006'].workHours[1], [6, 24]);
     assert.equal(persisted.length, 1, 'plant hours persisted exactly once');
+    assert.equal(toasts.at(-1)[0], 'toast.calendar_changes_pending');
+    assert.equal(toasts.at(-1)[1], 'info');
+    Sandbox.active = true;
+    EditCalendar.openPlant('1006');
+    EditCalendar.save();
+    assert.equal(toasts.at(-1)[0], 'toast.calendar_whatif_local');
   } finally {
+    Sandbox.active = false;
     if (hadPlant) Store.plants['1006'] = priorPlantEntry;
     else delete Store.plants['1006'];
     Toast.show = priorToastShow;

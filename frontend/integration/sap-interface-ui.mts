@@ -383,6 +383,9 @@ export const Interface = (() => {
   let _selected: string | null = null;    // selected object_key (master selection)
   type SapTab = 'overview' | 'staging' | 'mapping' | 'history';
   let _tab: SapTab = 'overview'; // active detail tab
+  let _archiveOffset = 0;
+  let _archiveSearch = '';
+  const _stageReads = new WeakMap<HTMLElement, number>();
   let _stagePlant = '';                   // plant chosen in the Staging tab's combobox ('' = none yet)
   const _latest: Record<string, StageBatch | null> = {}; // object_key -> newest batch header (rail status line)
   const _rejectedOpen = new Set<string>(); // batch_ids whose rejected-rows drawer is open
@@ -1129,6 +1132,14 @@ export const Interface = (() => {
     return document.getElementById('sap-tabbody') === body && _tab === 'staging' && _selected === o.object_key;
   }
 
+  function _beginStageRead(o: SapObject, body: HTMLElement, host: HTMLElement): () => boolean {
+    const plant = _stagePlant;
+    const token = (_stageReads.get(host) || 0) + 1;
+    _stageReads.set(host, token);
+    return () => _stageIsCurrent(o, body) && _stagePlant === plant
+      && document.getElementById(host.id) === host && _stageReads.get(host) === token;
+  }
+
   async function _renderStaging(o: SapObject): Promise<void> {
     const body = document.getElementById('sap-tabbody');
     if (!body) return;
@@ -1163,6 +1174,8 @@ export const Interface = (() => {
       placeholder: Util.t('ph.select_plant'),
       onSelect: (p) => {
         _stagePlant = p || '';
+        _archiveOffset = 0;
+        _archiveSearch = '';
         syncUpload();
         void _loadBatches(o, body);
         if (isOrders) { void _renderOutbound(o, body); void _renderArchive(o, body); }
@@ -1176,11 +1189,13 @@ export const Interface = (() => {
   async function _loadBatches(o: SapObject, body: HTMLElement): Promise<void> {
     const host = document.getElementById('sap-stage-batches');
     if (!host) return;
+    const current = _beginStageRead(o, body, host);
+    host.innerHTML = `<div class="md-loading">${Util.escapeHtml(Util.t('ui.loading'))}</div>`;
     try {
       const params = new URLSearchParams({ object: o.object_key, limit: '50' });
       if (_stagePlant) params.set('plant', _stagePlant);
       const d = await _getJson<StageBatchesResponse>(`/sap/staging/batches?${params.toString()}`);
-      if (!_stageIsCurrent(o, body)) return;
+      if (!current()) return;
       const batches = d.batches || [];
       if (!batches.length) {
         host.innerHTML = `<div class="sap-empty"><div class="sap-empty-ico">◍</div><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_stage_no_batches'))}</div></div>`;
@@ -1201,6 +1216,7 @@ export const Interface = (() => {
         }));
       _rejectedOpen.forEach((bid) => { if (host.querySelector(`#sap-rej-${CSS.escape(bid)}`)) void _fillRejected(bid, host); });
     } catch (e) {
+      if (!current()) return;
       host.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_load_failed'))}</div><div class="sap-empty-d">${Util.escapeHtml((e as Error).message)}</div></div>`;
       ErrorLog.error('sap-interface', `Load batches failed: ${(e as Error).message}`);
     }
@@ -1383,6 +1399,8 @@ export const Interface = (() => {
   async function _renderOutbound(o: SapObject, body: HTMLElement): Promise<void> {
     const host = document.getElementById('sap-stage-outbound');
     if (!host) return;
+    const current = _beginStageRead(o, body, host);
+    host.innerHTML = `<div class="md-loading">${Util.escapeHtml(Util.t('ui.loading'))}</div>`;
     const title = `<div class="sap-section-label">${Util.escapeHtml(Util.t('ui.sap_outbound'))}</div>`;
     const plant = _stagePlant;
     if (!plant) {
@@ -1392,7 +1410,7 @@ export const Interface = (() => {
     }
     try {
       const s = await _getJson<SendStatus>(`/sap/staging/send/${encodeURIComponent(plant)}/status`);
-      if (!_stageIsCurrent(o, body) || plant !== _stagePlant) return;
+      if (!current()) return;
       const tile = (key: string, n: number, cls: string) =>
         `<div class="kpi-tile${cls ? ' ' + cls : ''}"><div class="k">${Util.escapeHtml(Util.t(key))}</div><div class="v">${n}</div></div>`;
       host.innerHTML = `${title}
@@ -1407,6 +1425,7 @@ export const Interface = (() => {
       document.getElementById('sap-send-errcsv')?.addEventListener('click', () =>
         void _downloadCsv(`/sap/staging/send/${encodeURIComponent(plant)}/rows?status=error&format=csv`, `sap_send_errors_${plant}.csv`));
     } catch (e) {
+      if (!current()) return;
       host.innerHTML = `${title}<div class="sap-help">${Util.escapeHtml((e as Error).message)}</div>`;
     }
   }
@@ -1434,30 +1453,41 @@ export const Interface = (() => {
   async function _renderArchive(o: SapObject, body: HTMLElement): Promise<void> {
     const host = document.getElementById('sap-stage-archive');
     if (!host) return;
+    const current = _beginStageRead(o, body, host);
+    host.innerHTML = `<div class="md-loading">${Util.escapeHtml(Util.t('ui.loading'))}</div>`;
     const title = `<div class="sap-section-label">${Util.escapeHtml(Util.t('ui.sap_archive'))}</div>`;
     const plant = _stagePlant;
     if (!plant) { host.innerHTML = `${title}<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_stage_plant_required'))}</div>`; return; }
     try {
-      const d = await _getJson<{ orders: ArchivedOrder[] }>(`/sap/staging/archive/${encodeURIComponent(plant)}?limit=50`);
-      if (!_stageIsCurrent(o, body) || plant !== _stagePlant) return;
+      const params = new URLSearchParams({ limit: '50', offset: String(_archiveOffset), search: _archiveSearch });
+      const d = await _getJson<{ orders: ArchivedOrder[]; has_more?: boolean }>(`/sap/staging/archive/${encodeURIComponent(plant)}?${params}`);
+      if (!current()) return;
       const orders = d.orders || [];
-      if (!orders.length) { host.innerHTML = `${title}<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_archive_empty'))}</div>`; return; }
+
       const row = (a: ArchivedOrder): string => `<tr>
         <td>${Util.escapeHtml(a.production_order ?? a.order_id ?? '')}</td><td>${Util.escapeHtml(a.material_number ?? '')}</td><td>${Util.escapeHtml(a.machine ?? '')}</td>
         <td>${Util.escapeHtml(_fmtTs(a.deleted_at))}</td><td>${Util.escapeHtml(a.deleted_by ?? '')}</td>
         <td>${a.restored_at
           ? `${Util.escapeHtml(Util.t('ui.sap_archive_restored'))} ${Util.escapeHtml(_fmtTs(a.restored_at))}`
           : `<button class="btn btn-sm" data-restore="${Util.escapeHtml(String(a.id))}">${Util.escapeHtml(Util.t('ui.sap_archive_restore'))}</button>`}</td></tr>`;
-      host.innerHTML = `${title}<div class="sap-batch-rej-scroll"><table class="sap-batch-table"><thead><tr>
+      const controls = `<form data-archive-search class="sap-stage-panel-actions"><input class="input" type="search" maxlength="200" aria-label="${Util.escapeHtml(Util.t('ui.sap_archive_search'))}" placeholder="${Util.escapeHtml(Util.t('ui.sap_archive_search'))}" value="${Util.escapeHtml(_archiveSearch)}"><button class="btn btn-sm" type="submit">${Util.escapeHtml(Util.t('btn.search'))}</button></form>`;
+      const pager = `<div class="sap-stage-panel-actions"><button class="btn btn-sm" data-archive-prev ${_archiveOffset === 0 ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.setup_list_prev'))}</button><span>${_archiveOffset + (orders.length ? 1 : 0)}–${_archiveOffset + orders.length}</span><button class="btn btn-sm" data-archive-next ${d.has_more ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.setup_list_next'))}</button></div>`;
+      host.innerHTML = `${title}${controls}<div class="sap-batch-rej-scroll"><table class="sap-batch-table"><thead><tr>
         <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_order'))}</th><th>${Util.escapeHtml(Util.t('col.material'))}</th><th>${Util.escapeHtml(Util.t('col.machine'))}</th>
         <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_deleted_at'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_deleted_by'))}</th><th></th></tr></thead>
-        <tbody>${orders.map(row).join('')}</tbody></table></div>`;
+        <tbody>${orders.map(row).join('')}</tbody></table></div>${orders.length ? '' : `<div class="sap-help">${Util.escapeHtml(Util.t('ui.sap_archive_empty'))}</div>`}${pager}`;
+      host.querySelector('[data-archive-search]')?.addEventListener('submit', e => {
+        e.preventDefault(); _archiveSearch = host.querySelector<HTMLInputElement>('input[type=search]')!.value.trim(); _archiveOffset = 0; void _renderArchive(o, body);
+      });
+      host.querySelector('[data-archive-prev]')?.addEventListener('click', () => { _archiveOffset = Math.max(0, _archiveOffset - 50); void _renderArchive(o, body); });
+      host.querySelector('[data-archive-next]')?.addEventListener('click', () => { _archiveOffset += 50; void _renderArchive(o, body); });
       host.querySelectorAll<HTMLButtonElement>('[data-restore]').forEach((btn) =>
         btn.addEventListener('click', () => {
           const a = orders.find((x) => String(x.id) === btn.dataset.restore);
           if (a) void _restoreArchived(a, btn);
         }));
     } catch (e) {
+      if (!current()) return;
       host.innerHTML = `${title}<div class="sap-help">${Util.escapeHtml((e as Error).message)}</div>`;
     }
   }
@@ -1481,6 +1511,7 @@ export const Interface = (() => {
   async function _renderHistory(o: SapObject): Promise<void> {
     const body = document.getElementById('sap-tabbody');
     if (!body) return;
+    const current = () => document.getElementById('sap-tabbody') === body && _tab === 'history' && _selected === o.object_key;
     body.innerHTML = `<div class="md-loading">${Util.escapeHtml(Util.t('ui.loading'))}</div>`;
     try {
       // Fetch both SAP runs and SAP-related upload audit entries
@@ -1490,13 +1521,15 @@ export const Interface = (() => {
         return r.json();
       });
 
+      if (!current()) return;
+
       // Also fetch upload audit for SAP syncs (filename='sap:sap')
       const auditData: SapUploadAuditResponse = await Util.fetchTraced(`${API}/upload/audit?source=sap&limit=50`).then((r) => {
         if (!r.ok) return { audit: [] };
         return r.json().catch(() => ({ audit: [] }));
       });
 
-      if (document.getElementById('sap-tabbody') !== body || _tab !== 'history' || _selected !== o.object_key) return;
+      if (!current()) return;
       const runs = runsData.runs || [];
 
       // The server already filtered to SAP syncs (?source=sap) before applying the limit.
@@ -1550,6 +1583,7 @@ export const Interface = (() => {
         });
       });
     } catch (e) {
+      if (!current()) return;
       body.innerHTML = `<div class="sap-empty"><div class="sap-empty-t">${Util.escapeHtml(Util.t('ui.sap_runs_load_failed'))}</div><div class="sap-empty-d">${Util.escapeHtml((e as Error).message)}</div></div>`;
       ErrorLog.error('sap-interface', `Load runs failed: ${(e as Error).message}`);
     }
@@ -1734,6 +1768,15 @@ export const Interface = (() => {
     _stageErrorCodeTextForTest: stageErrorCodeText,
     _stageApplyNeedsConfirmForTest: stageApplyNeedsConfirm,
     _pollCountsForTest: pollCounts,
+    _renderHistoryForTest: (key: string) => {
+      _selected = key; _tab = 'history';
+      return _renderHistory({ object_key: key } as SapObject);
+    },
+    _loadStagePanelForTest: (panel: 'batches' | 'outbound' | 'archive', plant: string, body: HTMLElement) => {
+      _stagePlant = plant; _tab = 'staging'; _selected = 'stage_planned_orders';
+      const object = { object_key: _selected } as SapObject;
+      return panel === 'batches' ? _loadBatches(object, body) : panel === 'outbound' ? _renderOutbound(object, body) : _renderArchive(object, body);
+    },
   };
 })();
 

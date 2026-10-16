@@ -1,0 +1,44 @@
+[
+  {
+    "path": "/",
+    "status": 200,
+    "ms": 1305.0,
+    "bytes": 151376
+  },
+  {
+    "path": "/app-entry.mjs",
+    "status": 200,
+    "ms": 11.9,
+    "bytes": 9532
+  },
+  {
+    "path": "/master-data/plants?limit=100",
+    "status": 200,
+    "ms": 31.7,
+    "bytes": 37337
+  },
+  {
+    "path": "/master-data/machine?plant=AUD01&limit=100",
+    "status": 200,
+    "ms": 26.5,
+    "bytes": 17700
+  },
+  {
+    "path": "/tasks?plant=AUD01",
+    "status": 200,
+    "ms": 811.4,
+    "bytes": 1254830
+  },
+  {
+    "path": "/labor-plan?plant=AUD01",
+    "status": 200,
+    "ms": 19.7,
+    "bytes": 2858
+  },
+  {
+    "path": "/plant-calendar?plant=AUD01",
+    "status": 200,
+    "ms": 33.6,
+    "bytes": 4938
+  }
+]

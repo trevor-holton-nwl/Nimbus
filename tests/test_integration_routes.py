@@ -12,6 +12,7 @@ db.py call) ever runs, so no database is needed for this file.
 import os
 import sys
 from io import BytesIO
+from contextlib import suppress
 
 import pandas as pd
 import pytest
@@ -190,10 +191,8 @@ def test_upload_orders_unexpected_failure_logs_traceback_and_stage(admin_client,
     monkeypatch.setattr(int_routes.db, "ingest_orders_from_excel", fake_ingest)
     from backend.admin_ops.logbuffer import _BACKEND_LOG
     _BACKEND_LOG.clear()
-    try:
+    with suppress(RuntimeError):  # TestClient re-raises server exceptions by default
         admin_client.post("/upload", files={"file": ("bad.xlsx", b"x")})
-    except RuntimeError:
-        pass  # TestClient re-raises server exceptions by default
     entry = next(e for e in _BACKEND_LOG if e["msg"] == "Orders upload failed")
     assert entry["error_type"] == "RuntimeError" and "boom" in entry["exc"]
     assert entry["ctx"]["stage"] == "upsert_orders" and entry["ctx"]["rows"] == 7
@@ -837,3 +836,23 @@ def test_run_sap_staging_poll_offloads_poll_once_and_never_raises(monkeypatch, r
 
     monkeypatch.setattr(brain.sap_staging, "poll_once", _boom)
     asyncio.run(brain._run_sap_staging_poll())     # must not raise
+
+
+def test_stage_archive_pagination_search_and_scope(stage_client, monkeypatch):
+    from backend.integration import sap_staging
+
+    calls = []
+    def listing(plant, **kwargs):
+        calls.append((plant, kwargs))
+        return [{"id": n} for n in range(51)]
+
+    monkeypatch.setattr(sap_staging, "list_archived", listing)
+    response = stage_client.get("/sap/staging/archive/PL1?limit=50&offset=50&search=MAT%25_1")
+    assert response.status_code == 200
+    assert response.json() == {"orders": [{"id": n} for n in range(50)], "limit": 50, "offset": 50, "has_more": True}
+    assert calls == [("PL1", {"limit": 51, "offset": 50, "search": "MAT%_1"})]
+    assert stage_client.get("/sap/staging/archive/PL1?offset=-1").status_code == 422
+    assert stage_client.get("/sap/staging/archive/PL1?search=" + "a" * 201).status_code == 422
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["OTHER"]
+    assert stage_client.get("/sap/staging/archive/PL1?offset=50").status_code == 403
+    assert len(calls) == 1

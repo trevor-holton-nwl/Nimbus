@@ -105,16 +105,16 @@
 /* ── Command Palette Panel ─────────────────────────────── */
 #ni-cmd-panel {
   position:fixed; bottom:80px; right:24px; z-index:9989;
-  width:520px; max-height:calc(100vh - 104px);
+  width:520px; max-width:calc(100vw - 48px); max-height:calc(100vh - 104px);
   background:linear-gradient(160deg,var(--bg-elev) 0%,var(--bg-subtle) 100%);
   border:1.5px solid rgba(199,198,189,0.7);
   border-radius:20px;
   box-shadow:0 24px 64px rgba(26,27,31,0.18),0 8px 24px rgba(26,27,31,0.1),0 1px 4px rgba(26,27,31,0.06);
   overflow:hidden; display:flex; flex-direction:column;
-  opacity:0; transform:translateY(20px) scale(0.96); pointer-events:none;
+  opacity:0; visibility:hidden; transform:translateY(20px) scale(0.96); pointer-events:none;
   transition:opacity 220ms ease,transform 260ms cubic-bezier(0.34,1.56,0.64,1);
 }
-#ni-cmd-panel.ni-cp-open { opacity:1; transform:translateY(0) scale(1); pointer-events:auto; }
+#ni-cmd-panel.ni-cp-open { opacity:1; visibility:visible; transform:translateY(0) scale(1); pointer-events:auto; }
 
 .ni-cp-search-row {
   display:flex; align-items:center;
@@ -169,7 +169,7 @@
 .ni-cp-empty { padding:28px 18px; text-align:center; font-size:13px; color:var(--fg-faint); }
 
 .ni-cp-footer { padding:8px 18px; font-size:11px; color:var(--fg-faint);
-  border-top:1px solid var(--line); display:flex; gap:14px; align-items:center;
+  border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center;
   background:var(--bg-subtle); }
 .ni-cp-hint { display:flex; align-items:center; gap:4px; }
 .ni-cp-hint kbd { display:inline-block; font-family:inherit; font-size:10px; font-weight:700;
@@ -225,7 +225,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 #ni-dm-pill.ni-dm-dark .ni-dm-icon:last-child  { opacity:1; }
 
 /* ── Language Switcher Pill ──────────────────────────────── */
-#ni-lang-pill{position:relative;display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:100px;background:var(--bg-elev);border:1px solid var(--line-strong);cursor:pointer;font-size:11px;font-weight:600;color:var(--fg);user-select:none;white-space:nowrap;}
+#ni-lang-pill{width:100px;min-width:70px;height:28px;padding:3px 6px;border-radius:var(--r-sm);background:var(--bg-elev);border:1px solid var(--line-strong);cursor:pointer;font-size:11px;font-weight:600;color:var(--fg);}
 #ni-lang-pill:hover{border-color:var(--accent);}
 .ni-lang-caret{font-size:9px;opacity:.7;}
 .ni-lang-dropdown{display:none;position:absolute;bottom:calc(100% + 6px);left:0;min-width:160px;background:var(--bg-elev);border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.18);z-index:9999;}
@@ -246,14 +246,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 .ni-cp-index-count { margin-left:auto; font-size:10px; color:var(--fg-faint); font-variant-numeric:tabular-nums; }
 
 /* ── Time Machine ──────────────────────────────────────── */
-.ni-tm-panel { position:fixed; top:calc(var(--chrome-h) + 8px); right:16px; width:340px; max-height:480px;
+.ni-tm-panel { position:fixed; top:calc(var(--chrome-h) + 8px); right:16px; width:340px; max-width:calc(100vw - 32px); max-height:min(480px, calc(100vh - var(--chrome-h) - 24px));
   background:var(--bg-elev); border:1.5px solid var(--line-strong); border-radius:var(--r-xl);
   box-shadow:var(--shadow-lg); z-index:500; display:flex; flex-direction:column; overflow:hidden; }
 .ni-tm-panel[hidden] { display:none !important; }
 .ni-tm-head { display:flex; align-items:center; justify-content:space-between; padding:12px 14px;
   border-bottom:1px solid var(--line); font-size:13px; }
 .ni-tm-close { background:none; border:none; cursor:pointer; font-size:16px; color:var(--fg-mute); padding:2px 6px; }
-.ni-tm-list { overflow-y:auto; flex:1; }
+.ni-tm-list { overflow-y:auto; flex:1; min-height:0; }
 .ni-tm-row { display:grid; grid-template-columns:72px 1fr auto; align-items:center; gap:8px;
   padding:7px 14px; border-bottom:1px solid var(--bg-subtle); }
 .ni-tm-row:hover { background:var(--bg-subtle); }
@@ -292,7 +292,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 #vis-timeline.ripple-mode .vis-itemset { cursor: crosshair; }
 
 /* ── Diff dialog ───────────────────────────────────────── */
-.ni-diff-dlg { border:none; padding:0; border-radius:var(--r-xl); box-shadow:var(--shadow-lg); width:720px; max-width:96vw; }
+.ni-diff-dlg { border:none; padding:0; border-radius:var(--r-xl); box-shadow:var(--shadow-lg); width:720px; max-width:96vw; max-height:calc(100vh - 32px); overflow:auto; color:var(--fg); background:var(--bg-elev); }
 .ni-diff-dlg::backdrop { background:rgba(26,27,31,0.45); }
 .ni-diff-dlg > div { background:var(--bg-elev); border-radius:var(--r-xl); }
 /* snap picker list */
@@ -301,7 +301,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 .ni-diff-snaplist::-webkit-scrollbar { width:5px; }
 .ni-diff-snaplist::-webkit-scrollbar-thumb { background:var(--line); border-radius:3px; }
 .ni-diff-snap-row { display:grid; grid-template-columns:88px 1fr auto; align-items:center; gap:8px;
+  width:100%; text-align:left; font:inherit; color:var(--fg); background:var(--bg-elev); border:0;
   padding:8px 12px; cursor:pointer; border-bottom:1px solid var(--line); border-left:2px solid transparent; transition:background 0.1s,border-color 0.1s; }
+.ni-diff-snap-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .ni-diff-snap-row:last-child { border-bottom:none; }
 .ni-diff-snap-row:hover { background:var(--bg-subtle); }
 .ni-diff-snap-row.ni-diff-snap-sel { background:color-mix(in srgb,var(--accent) 10%,transparent); border-left-color:var(--accent); }
@@ -850,6 +852,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      COMMAND PALETTE — Cmd/Ctrl+K fuzzy search
      ========================================================================== */
+  let commandPaletteOpener = null;
   const CommandPalette = {
     _panel:     null,
     _index:     null,
@@ -927,18 +930,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           <span class="ni-cp-hint"><kbd>↵</kbd> ${t('ui.hint_select')}</span>
           <span class="ni-cp-hint"><kbd>esc</kbd> ${t('ui.hint_close')}</span>
           <span class="ni-cp-index-count" id="ni-cp-index-count"></span>
-          <div id="ni-lang-pill" title="${t('tip.lang_switcher')}">
-            <span id="ni-lang-current">${LangSwitcher.current().toUpperCase()}</span>
-            <span class="ni-lang-caret">▾</span>
-            <div class="ni-lang-dropdown" id="ni-lang-dropdown">
-              ${LangSwitcher._langs.map(l =>
-                `<button class="ni-lang-opt${l.code === LangSwitcher.current() ? ' ni-lang-active' : ''}" data-lang="${l.code}">${l.label} — ${l.name}</button>`
-              ).join('')}
-            </div>
-          </div>
-          <div id="ni-dm-pill" title="${t('tip.toggle_light_dark')}">
-            <span class="ni-dm-icon">☀️</span><span class="ni-dm-thumb"></span><span class="ni-dm-icon">🌙</span>
-          </div>
+          <select id="ni-lang-pill" title="${t('tip.lang_switcher')}" aria-label="${t('tip.lang_switcher')}">
+            ${LangSwitcher._langs.map(l => `<option value="${l.code}"${l.code === LangSwitcher.current() ? ' selected' : ''}>${l.label} — ${l.name}</option>`).join('')}
+          </select>
+          <button type="button" id="ni-dm-pill" title="${t('tip.toggle_light_dark')}" aria-label="${t('tip.toggle_light_dark')}" aria-pressed="${DarkMode.isDark()}">
+            <span class="ni-dm-icon" aria-hidden="true">☀️</span><span class="ni-dm-thumb"></span><span class="ni-dm-icon" aria-hidden="true">🌙</span>
+          </button>
         </div>`;
       document.body.appendChild(panel);
       CommandPalette._panel = panel;
@@ -949,22 +946,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       pill.addEventListener('click', () => DarkMode.toggle());
 
       const langPill = panel.querySelector('#ni-lang-pill');
-      const langDropdown = panel.querySelector('#ni-lang-dropdown');
-      if (langPill) {
-        langPill.addEventListener('click', e => {
-          e.stopPropagation();
-          langDropdown.classList.toggle('ni-lang-open');
-        });
-        langDropdown.querySelectorAll('.ni-lang-opt').forEach(btn => {
-          btn.addEventListener('click', e => {
-            e.stopPropagation();
-            LangSwitcher.set(btn.dataset.lang);
-          });
-        });
-        document.addEventListener('click', function(e) {
-          if (!langPill.contains(e.target)) langDropdown.classList.remove('ni-lang-open');
-        });
-      }
+      langPill.addEventListener('change', () => LangSwitcher.set(langPill.value));
+      panel.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && e.target !== langPill) {
+          e.preventDefault(); e.stopPropagation(); CommandPalette.close();
+        }
+      });
 
       const input = panel.querySelector('#ni-cp-input');
       input.addEventListener('focus',  () => panel.classList.add('ni-cp-focused'));
@@ -984,7 +971,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     _buildIndex() {
       const idx = [...CommandPalette._buildSelectionCommands()];
-      for (const t of Store.tasksArr.slice(0, 2000)) {
+      const tasks = Store.tasksForSelectedPlant();
+      for (const t of tasks) {
         const order = t.ORDER || t.PRODUCTION_ORDER;
         const label = [t.text, order, t.MATERIAL_NUMBER].filter(Boolean).join(' · ');
         const sub   = `${t.MACHINE || '?'} · ${t.COLOR || ''}`.trim().replace(/·\s*$/, '');
@@ -1000,14 +988,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           }
         });
       }
-      const lines = [...new Set(Store.tasksArr.map(t => t.MACHINE).filter(Boolean))];
+      const lines = [...new Set(tasks.map(t => t.MACHINE).filter(Boolean))];
       for (const line of lines) {
         idx.push({
           type: 'line', label: t('cmdp.label_go_to_line', { line }), sub: t('cmdp.sub_scroll_to_this_line'), icon: '🏭',
           run() {
             CommandPalette.close();
             NIMBUS.App.gotoGanttTimeline();
-            const sample = NIMBUS.Store.tasksArr.find(t => t.MACHINE === line);
+            const sample = Store.tasksForSelectedPlant().find(t => t.MACHINE === line);
             if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
           }
         });
@@ -1288,19 +1276,22 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     open() {
       if (!CommandPalette._panel) return;
+      if (!CommandPalette.isOpen()) commandPaletteOpener = document.activeElement;
       if (!CommandPalette._index) CommandPalette._buildIndex();
       CommandPalette._search('');
       CommandPalette._panel.classList.add('ni-cp-open');
       document.getElementById('ni-cmd-fab')?.classList.add('ni-fab-active');
-      setTimeout(() => document.getElementById('ni-cp-input')?.focus(), 30);
+      setTimeout(() => { if (CommandPalette.isOpen()) document.getElementById('ni-cp-input')?.focus(); }, 30);
     },
 
     close() {
+      const returnFocus = CommandPalette._panel?.contains(document.activeElement);
       CommandPalette._panel?.classList.remove('ni-cp-open');
       document.getElementById('ni-cmd-fab')?.classList.remove('ni-fab-active');
       const inp = document.getElementById('ni-cp-input');
       if (inp) inp.value = '';
       CommandPalette._lastQuery = '';
+      if (returnFocus) commandPaletteOpener?.focus?.();
     }
   };
 
@@ -1322,6 +1313,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
      ========================================================================== */
   // In-memory history cap; matches the IndexedDB prune (IntelDB.pruneSnapshots(200)).
   const TM_MAX_SNAPSHOTS = 200;
+  let timeMachineOpener = null;
   const TimeMachine = {
     _snapshots: [],
     _panel:     null,
@@ -1340,6 +1332,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (evt.type === 'undo:pushed') TimeMachine._snapshotAuto(evt.label);
       }, 'TimeMachine.autoSnapshot');
       Store.subscribe(evt => {
+        if (evt.type === 'plant:selected' && TimeMachine._panel && !TimeMachine._panel.hidden) TimeMachine.closeUI();
+      }, 'TimeMachine.panelScope');
+      Store.subscribe(evt => {
         if (['tasks:bulk','tasks:bulkUpdate'].includes(evt.type) &&
             evt.source !== 'undo' && evt.source !== 'time-machine') {
           TimeMachine._snapshotAuto(evt.type === 'tasks:bulk' ? 'Data loaded' : 'Bulk update');
@@ -1356,8 +1351,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         label: (label || 'Snapshot').substring(0, 80),
         auto:  !!opts.auto,
         plant: Store.selectedPlant || null,
-        tasks: Store.tasksArr.map(t => ({
+        schemaVersion: 2,
+        tasks: Store.tasksForSelectedPlant().map(t => ({
           id:               t.id,
+          PLANT:            t.PLANT || Store.selectedPlant,
           start_date:       t.start_date ? t.start_date.getTime() : null,
           end_date:         t.end_date   ? t.end_date.getTime()   : null,
           MACHINE:  t.MACHINE  || '',
@@ -1403,15 +1400,27 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     openUI() {
+      timeMachineOpener = document.activeElement;
       if (!TimeMachine._panel) {
         const p = document.createElement('div');
         p.id = 'ni-tm-panel';
         p.className = 'ni-tm-panel';
+        p.setAttribute('role', 'dialog');
+        p.setAttribute('aria-label', t('cmdp.label_time_machine'));
+        p.addEventListener('keydown', e => {
+          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); TimeMachine.closeUI(); }
+        });
         document.body.appendChild(p);
         TimeMachine._panel = p;
       }
       TimeMachine._panel.hidden = false;
       TimeMachine._renderPanel();
+      TimeMachine._panel.querySelector('#ni-tm-close-btn')?.focus();
+    },
+
+    closeUI() {
+      if (TimeMachine._panel) TimeMachine._panel.hidden = true;
+      timeMachineOpener?.focus?.();
     },
 
     _renderPanel() {
@@ -1420,40 +1429,56 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const snaps = TimeMachine._plantSnaps().slice(-60).reverse();
       p.innerHTML = `
         <div class="ni-tm-head">
-          <span>⏱ Time Machine <span style="font-size:11px;color:var(--fg-mute)">${snaps.length} entries</span></span>
-          <button class="ni-tm-close" id="ni-tm-close-btn">✕</button>
+          <span>${t('cmdp.label_time_machine')} <span style="font-size:11px;color:var(--fg-mute)">${t('intel.snapshot_entries', { count: snaps.length })}</span></span>
+          <button class="ni-tm-close" id="ni-tm-close-btn" aria-label="${t('btn.close')}">✕</button>
         </div>
         <div class="ni-tm-list">
           ${snaps.length ? snaps.map(s => `
             <div class="ni-tm-row">
               <span class="ni-tm-time">${TimeMachine._relTime(s.ts)}</span>
               <span class="ni-tm-label" title="${Util.escapeHtml(s.label)}">${Util.escapeHtml(s.label)}</span>
-              <button class="ni-tm-restore-btn" data-ts="${s.ts}">Restore</button>
-            </div>`).join('') : '<div style="padding:16px;font-size:12.5px;color:var(--fg-mute)">No snapshots yet. Actions will be recorded here.</div>'}
+              <button class="ni-tm-restore-btn" data-ts="${s.ts}">${t('btn.restore')}</button>
+            </div>`).join('') : `<div style="padding:16px;font-size:12.5px;color:var(--fg-mute)">${t('ui.no_snapshots_tm')}</div>`}
         </div>`;
-      p.querySelector('#ni-tm-close-btn').onclick = () => { p.hidden = true; };
+      p.querySelector('#ni-tm-close-btn').onclick = () => TimeMachine.closeUI();
       p.querySelectorAll('.ni-tm-restore-btn').forEach(btn => {
         btn.addEventListener('click', () => TimeMachine.restore(+btn.dataset.ts));
       });
     },
 
     restore(ts) {
-      const snap = TimeMachine._snapshots.find(s => s.ts === ts);
+      const plant = Store.selectedPlant;
+      const snap = plant && TimeMachine._snapshots.find(s => s.ts === ts && s.plant === plant);
       if (!snap) { Toast.show(t('toast.snapshot_not_found'), 'error'); return; }
-      const beforeSnap = UndoStack.snapshotTasks(Store.tasksArr.map(t => t.id));
-      UndoStack._entries.push({ label: 'Before Time Machine restore', undoFn: () => UndoStack.restoreTasks(beforeSnap), at: Date.now() });
+      const scopedIds = new Set(Store.tasksForSelectedPlant().map(task => String(task.id)));
+      let skipped = 0;
       // OQ21 (group 15): a restore brings back the FINISH; the stored start is a placeholder, so each row is flagged
       // stale and the engine re-derives the start from the finish under the current run time.
       const patches = snap.tasks
-        .filter(s => Store.tasks[s.id])
+        .filter(s => {
+          const task = Store.tasks[s.id];
+          if (!task || !scopedIds.has(String(s.id))) return false;
+          // Bulk history restore has no explicit protection override or atomic
+          // distributed-family workflow. Leave those rows for their own editors.
+          if (task.PARENT_ORDER || task.placement_exception || NIMBUS.Engine.firmingStatus(task).firmed) { skipped++; return false; }
+          return true;
+        })
         .map(s => ({
           id: s.id,
           changes: {
             start_date: s.start_date ? new Date(s.start_date) : null,
             end_date:   s.end_date   ? new Date(s.end_date)   : null,
+            // The current split envelope belongs to the current finish. Clear
+            // it before Store normalizes dates; reconcile derives fresh pieces.
+            scheduleSegments: [],
             runtime_schedule_mismatch: true
           }
         }));
+      if (skipped) Toast.show(t('toast.snapshot_restore_skipped', { count: skipped }), 'warn', 5000);
+      if (!patches.length) return;
+      const affectedIds = patches.map(p => p.id);
+      const beforeSnap = UndoStack.snapshotTasks(affectedIds);
+      UndoStack.push('Before Time Machine restore', () => UndoStack.restoreTasks(beforeSnap), affectedIds);
       // U31: the rows that already carried unsaved edits BEFORE this restore, read before updateMany dirties them,
       // like the undo path (afterRestore): a never-placed row with a null snapshot start keeps its dirty id.
       const wasDirty = new Set(patches.map(p => String(p.id)).filter(id => NIMBUS.UndoStack?.dirtyProbe?.(id)));
@@ -1461,7 +1486,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       NIMBUS.Engine?.reconcileRestored?.(patches.map(p => p.id), wasDirty);
       Alerts.scheduleRecompute();
       Toast.show(t('toast.restored', { label: snap.label, time: TimeMachine._relTime(ts) }), 'success', 3000);
-      if (TimeMachine._panel) TimeMachine._panel.hidden = true;
+      TimeMachine.closeUI();
     }
   };
 
@@ -1587,7 +1612,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _injectBadge() {
       const actions = document.querySelector('.topbar-actions');
       if (!actions) return;
-      const badge = document.createElement('div');
+      const badge = document.createElement('button');
+      badge.type = 'button';
       badge.id = 'ni-conf-badge';
       badge.className = 'ni-conf-badge';
       badge.title = t('tip.schedule_confidence');
@@ -2160,6 +2186,33 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      DIFF — compare two schedule snapshots visually
      ========================================================================== */
+  // Version 1 snapshots were labelled by selected plant but contained every
+  // loaded task. Infer legacy row ownership only from unambiguous evidence.
+  function scopeSnapshotTasks(snapshot, plant) {
+    const machinePlants = new Map();
+    const remember = (machine, owner) => {
+      if (!machine || !owner) return;
+      if (!machinePlants.has(machine)) machinePlants.set(machine, new Set());
+      machinePlants.get(machine).add(owner);
+    };
+    for (const row of Store.masterData?.lines || []) remember(row.machine, row.plant);
+    for (const [machine, settings] of Object.entries(Store.lineSettings || {})) remember(machine, settings.plant);
+    for (const task of Store.tasksArr) remember(task.MACHINE, task.PLANT);
+    let unknown = 0;
+    const tasks = (snapshot.tasks || []).filter(task => {
+      let owner = task.PLANT || null;
+      if (!owner && snapshot.schemaVersion >= 2) owner = snapshot.plant || null;
+      if (!owner) owner = Store.tasks[task.id]?.PLANT || null;
+      if (!owner) {
+        const owners = machinePlants.get(task.MACHINE);
+        if (owners?.size === 1) owner = [...owners][0];
+      }
+      if (!owner) { unknown++; return false; }
+      return owner === plant;
+    });
+    return { tasks, unknown };
+  }
+
   const Diff = {
     _fmtDate(ms) {
       if (!ms) return '—';
@@ -2363,41 +2416,47 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       const dlg = document.createElement('dialog');
       dlg.className = 'ni-diff-dlg';
+      const plant = Store.selectedPlant;
 
       const snapRows = snaps.slice(-40).reverse().map((s, i) => {
         const badge = s.auto
           ? '<span class="ni-diff-snap-badge auto">auto</span>'
           : '<span class="ni-diff-snap-badge manual">manual</span>';
-        const taskCt = s.tasks?.length ? `${s.tasks.length} orders` : '';
-        return `<div class="ni-diff-snap-row${i === 0 ? ' ni-diff-snap-sel' : ''}" data-ts="${s.ts}">
+        const scopedCount = scopeSnapshotTasks(s, plant).tasks.length;
+        const taskCt = scopedCount ? `${scopedCount} orders` : '';
+        return `<button type="button" class="ni-diff-snap-row${i === 0 ? ' ni-diff-snap-sel' : ''}" aria-pressed="${i === 0}" data-ts="${s.ts}">
           <span class="ni-diff-snap-ago">${TimeMachine._relTime(s.ts)}</span>
           <span class="ni-diff-snap-lbl" title="${Util.escapeHtml(s.label)}">${Util.escapeHtml(s.label)}</span>
           <span style="display:flex;gap:5px;align-items:center">
             <span style="font-size:10px;color:var(--fg-mute)">${taskCt}</span>
             ${badge}
           </span>
-        </div>`;
+        </button>`;
       }).join('');
 
       dlg.innerHTML = `
         <div style="padding:20px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-            <h3 style="margin:0;font-size:14px;font-weight:700">⇄ Compare Schedules</h3>
-            <button id="ni-diff-close" style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--fg-mute);padding:2px 6px">✕</button>
+            <h3 id="ni-diff-title" style="margin:0;font-size:14px;font-weight:700">${t('cmdp.label_compare_schedules')}</h3>
+            <button id="ni-diff-close" aria-label="${t('btn.close')}" style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--fg-mute);padding:2px 6px">✕</button>
           </div>
-          <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:var(--fg-mute);margin-bottom:6px">Compare current schedule against:</div>
+          <div style="font-size:12px;color:var(--fg-mute);margin-bottom:6px">${t('ui.diff_compare_against')}</div>
           <div class="ni-diff-snaplist" id="ni-diff-snaplist">${snapRows}</div>
           <div class="ni-diff-results" id="ni-diff-out">
-            <div style="color:var(--fg-mute);font-size:12.5px;padding:8px 0">Select a snapshot above to compare.</div>
+            <div style="color:var(--fg-mute);font-size:12.5px;padding:8px 0">${t('intel.select_snapshot')}</div>
           </div>
           <div style="margin-top:14px;text-align:right">
-            <button class="btn btn-ghost sm" id="ni-diff-close2">Close</button>
+            <button class="btn btn-ghost sm" id="ni-diff-close2">${t('btn.close')}</button>
           </div>
         </div>`;
 
+      dlg.setAttribute('aria-labelledby', 'ni-diff-title');
       document.body.appendChild(dlg);
       try { dlg.showModal(); } catch { dlg.open = true; }
-      dlg.addEventListener('close', () => dlg.remove());
+      const unsubscribe = Store.subscribe(evt => {
+        if (evt.type === 'plant:selected' && Store.selectedPlant !== plant) dlg.close();
+      });
+      dlg.addEventListener('close', () => { unsubscribe(); dlg.remove(); });
       dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
       dlg.querySelector('#ni-diff-close').addEventListener('click',  () => dlg.close());
       dlg.querySelector('#ni-diff-close2').addEventListener('click', () => dlg.close());
@@ -2405,7 +2464,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const runDiff = ts => {
         const snap = snaps.find(s => s.ts === ts);
         if (!snap) return;
-        const curr = Store.tasksArr.map(t => ({
+        const curr = Store.tasksForSelectedPlant().map(t => ({
           id:               t.id,
           start_date:       t.start_date?.getTime?.() || null,
           end_date:         t.end_date?.getTime?.()   || null,
@@ -2417,15 +2476,25 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           FIRMED:           !!t.firmed,
           scheduleSegments: snapshotSegments(t),
         }));
-        const d = Diff.compute(snap.tasks, curr);
-        document.getElementById('ni-diff-out').innerHTML = Diff._renderResults(d);
+        const historical = scopeSnapshotTasks(snap, plant);
+        const d = Diff.compute(historical.tasks, curr);
+        const notice = historical.unknown
+          ? `<p role="status">${Util.escapeHtml(t('intel.snapshot_scope_unknown', { count: historical.unknown }))}</p>` : '';
+        const hasChanges = d.moved.length || d.added.length || d.removed.length;
+        // Unknown rows are deliberately omitted, so do not claim identical
+        // schedules merely because all known rows happen to match.
+        document.getElementById('ni-diff-out').innerHTML = notice
+          + (hasChanges || !historical.unknown ? Diff._renderResults(d) : '');
       };
 
       // Wire up snapshot row clicks
       dlg.querySelectorAll('.ni-diff-snap-row').forEach(row => {
         row.addEventListener('click', () => {
-          dlg.querySelectorAll('.ni-diff-snap-row').forEach(r => r.classList.remove('ni-diff-snap-sel'));
+          dlg.querySelectorAll('.ni-diff-snap-row').forEach(r => {
+            r.classList.remove('ni-diff-snap-sel'); r.setAttribute('aria-pressed', 'false');
+          });
           row.classList.add('ni-diff-snap-sel');
+          row.setAttribute('aria-pressed', 'true');
           runDiff(+row.dataset.ts);
         });
       });
@@ -2511,6 +2580,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const pill = document.getElementById('ni-dm-pill');
       if (!pill) return;
       pill.classList.toggle('ni-dm-dark', DarkMode.isDark());
+      pill.setAttribute('aria-pressed', String(DarkMode.isDark()));
     },
 
     // Apply a specific theme with write-through: body.dark + the offline nimbus.theme

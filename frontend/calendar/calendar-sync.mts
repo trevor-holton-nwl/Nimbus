@@ -37,6 +37,9 @@ interface PlantCalendarConfig {
  *  named in this phase's plan, since the existing early-return literal
  *  `{ ok: true, skipped: true }` needs it and this file's zero-behavior-change
  *  discipline forbids dropping that field to fit a narrower type. */
+interface HoursEdit { revision: number; pending: boolean }
+interface HoursReadGuard { revision: number; pending: Set<string> }
+
 interface CalendarSyncResult {
   ok: boolean;
   status?: number;
@@ -81,8 +84,13 @@ function _writePendingDeletes(pending: PendingDeletes): void {
    ========================================================================== */
 export const CalendarSync = {
   _hydrating: false,
+  // Per-plant keys are machine names; the empty key represents plant-wide hours.
+  // Successful revisions remain so GETs already in flight cannot reinstall an older snapshot.
+  _hoursRevision: 0,
+  _hoursEdits: {} as Record<string, Record<string, HoursEdit>>,
   _pendingLineHours: {} as Record<string, Record<string, WorkHours>>,   // plant → { line → workHours } awaiting a batched flush
   _whDebounce: {} as Record<string, ReturnType<typeof setTimeout>>,         // plant → timeout id
+  _lineHoursWait: {} as Record<string, () => void>,
   _deferredHydrationPlant: null as string | null,  // plant whose config GET resolved mid-What-If (re-hydrate on exit)
   /** Per plant: has the SERVER's calendar landed in Store? `pending` until the first GET resolves, `hydrated`
    *  once `_applyConfig` has run, `failed` when the GET failed and nothing from the server is on hand. `lines`
@@ -131,6 +139,7 @@ export const CalendarSync = {
     // resolves reliably even when the master-data fetch REJECTED (the .finally still
     // runs us). Otherwise the migration/clear filters misfire on a stale/empty index. (F4)
     Store.rebuildPlantIndex();
+    const hoursRead = this._captureHoursRead(plant);
     // A plant that was never hydrated is `pending` while the GET is in flight; one that already holds a server
     // copy keeps it (a refetch that fails must not un-know what the server told us earlier).
     if (this._hydration[plant]?.state !== 'hydrated') this._setHydration(plant, 'pending');
@@ -138,7 +147,7 @@ export const CalendarSync = {
                             { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<PlantCalendarConfig> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(cfg => CalendarSync._replayPendingDeletes(plant).then(() => CalendarSync._withoutPendingDeletes(plant, cfg)))
-      .then(cfg => CalendarSync._applyConfig(plant, cfg))
+      .then(cfg => CalendarSync._applyConfig(plant, cfg, hoursRead))
       .catch(e => {
         // The localStorage restore already painted the UI — degrade gracefully.
         ErrorLog.warn('calendar-sync', `Fetch plant-calendar failed for ${plant}: ${e.message}`);
@@ -197,7 +206,23 @@ export const CalendarSync = {
     };
   },
 
-  _applyConfig(plant: string, cfg: PlantCalendarConfig): void {
+  _markHoursEdit(plant: string, line: string): HoursEdit {
+    const edit = { revision: ++this._hoursRevision, pending: true };
+    (this._hoursEdits[plant] ||= {})[line] = edit;
+    return edit;
+  },
+
+  _captureHoursRead(plant: string): HoursReadGuard {
+    return { revision: this._hoursRevision,
+      pending: new Set(Object.entries(this._hoursEdits[plant] || {}).filter(([, edit]) => edit.pending).map(([line]) => line)) };
+  },
+
+  _protectHours(plant: string, line: string, read: HoursReadGuard): boolean {
+    const edit = this._hoursEdits[plant]?.[line];
+    return read.pending.has(line) || !!edit && (edit.pending || edit.revision > read.revision);
+  },
+
+  _applyConfig(plant: string, cfg: PlantCalendarConfig, hoursRead: HoursReadGuard = CalendarSync._captureHoursRead(plant)): void {
     // Never overwrite live What-If state — mirror the _post guard. A plant switch or a
     // late in-flight fetch during What-If must not clobber sandbox edits (the write path
     // already no-ops under Sandbox.active; the hydration write path must too). (F2)
@@ -225,7 +250,7 @@ export const CalendarSync = {
     if (!has.plantBlackouts) CalendarSync._discardLegacyGlobalPlantBlocks();
     this._hydrating = true;
     try {
-      if (has.plantHours) {
+      if (has.plantHours && !this._protectHours(plant, '', hoursRead)) {
         Store.ensurePlant(plant);
         Store.plants[plant].workHours = cfg.plant_work_hours!;
       }
@@ -233,9 +258,11 @@ export const CalendarSync = {
         // Clear this plant's line calendars (backend line set ∪ getPlantForLine===plant), then apply.
         const backendLines = new Set(Object.keys(cfg.line_work_hours!));
         for (const line of Object.keys(Store.calendars)) {
-          if (backendLines.has(line) || Store.getPlantForLine(line) === plant) delete Store.calendars[line];
+          if ((backendLines.has(line) || Store.getPlantForLine(line) === plant)
+              && !this._protectHours(plant, line, hoursRead)) delete Store.calendars[line];
         }
         for (const [line, wh] of Object.entries(cfg.line_work_hours!)) {
+          if (this._protectHours(plant, line, hoursRead)) continue;
           Store.ensureCalendar(line);
           Store.calendars[line].workHours = wh;
         }
@@ -284,7 +311,7 @@ export const CalendarSync = {
   _migrateMissingSlices(plant: string, has: { plantHours: boolean; lineHours: boolean; lineBlackouts: boolean; plantBlackouts: boolean }): void {
     if (!plant) return;
     const jobs: Array<Promise<{ ok: boolean; status?: number; error?: string }>> = [];
-    if (!has.plantHours) {
+    if (!has.plantHours && !this._hoursEdits[plant]?.['']?.pending) {
       const wh = Store.plants[plant]?.workHours || null;
       // Don't migrate the auto-seeded DEFAULT_SHIFT — a missing backend row means
       // "no override", which the client already reproduces from the seed. Migrating it
@@ -294,6 +321,7 @@ export const CalendarSync = {
     if (!has.lineHours) {
       const lines = Object.keys(Store.calendars)
         .filter(l => Store.getPlantForLine(l) === plant
+                  && !this._hoursEdits[plant]?.[l]?.pending
                   && !CalendarSync._isDefaultWorkHours(Store.calendars[l].workHours))  // F11
         .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
       if (lines.length) {
@@ -381,22 +409,48 @@ export const CalendarSync = {
   // Enqueue one line's hours; a per-plant debounce coalesces the ~70-line clamp
   // fan-out from a single plant-hours edit into ONE /line-hours request.
   saveLineHours(plant: string | null, line: string, workHours: WorkHours): void {
-    if (!plant || !line) return;
-    (this._pendingLineHours[plant] ||= {})[line] = workHours;
+    if (!plant || !line || this._hydrating || Sandbox.active) return;
+    this._markHoursEdit(plant, line);
+    (this._pendingLineHours[plant] ||= {})[line] = Util.clone(workHours);
     clearTimeout(this._whDebounce[plant]);
     this._whDebounce[plant] = setTimeout(() => this._flushLineHours(plant), 600);
   },
   _flushLineHours(plant: string): Promise<CalendarSyncResult> | undefined {
     const pending = this._pendingLineHours[plant];
     if (!pending || !Object.keys(pending).length) return;
-    delete this._pendingLineHours[plant];
+    // Live edits queued before entering What-If must survive a timer that fires
+    // inside it. Discard resumes that live batch; promotion flushes current state.
+    if (Sandbox.active) {
+      this._lineHoursWait[plant] ||= Store.subscribe(event => {
+        if (event.type !== 'sandbox:exited') return;
+        this._lineHoursWait[plant]?.();
+        delete this._lineHoursWait[plant];
+        if (event.applied && this._pendingLineHours[plant]) {
+          this._pendingLineHours[plant] = Object.fromEntries(Object.keys(this._pendingLineHours[plant])
+            .filter(line => Store.calendars[line])
+            .map(line => [line, Util.clone(Store.calendars[line].workHours)]));
+        }
+        void this._flushLineHours(plant);
+      });
+      return;
+    }
+    this._clearLineHoursQueue(plant);
     const lines = Object.entries(pending).map(([machine, work_hours]) => ({ machine, work_hours }));
     return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours')
       .then(r => this._noteServerLines(plant, lines.map(l => l.machine), r));
   },
 
+  _clearLineHoursQueue(plant: string): void {
+    clearTimeout(this._whDebounce[plant]);
+    delete this._whDebounce[plant];
+    delete this._pendingLineHours[plant];
+    this._lineHoursWait[plant]?.();
+    delete this._lineHoursWait[plant];
+  },
+
   saveLineBlackoutUpsert(block: NimbusBlock): Promise<CalendarSyncResult> {
     if (!block?.plant) return Promise.resolve({ ok: false });
+    if (this._hydrating || Sandbox.active) return Promise.resolve({ ok: true, skipped: true });
     this._trackPendingDeletes(block.plant, 'line', [block.id], false); // a re-created id must not be replayed as a delete
     return this._post('/plant-calendar/line-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, true)] }, 'line-blackout-upsert');
   },
@@ -406,6 +460,7 @@ export const CalendarSync = {
   },
   savePlantBlackoutUpsert(block: NimbusPlantBlock): Promise<CalendarSyncResult> {
     if (!block?.plant) return Promise.resolve({ ok: false });
+    if (this._hydrating || Sandbox.active) return Promise.resolve({ ok: true, skipped: true });
     this._trackPendingDeletes(block.plant, 'plant', [block.id], false);
     return this._post('/plant-calendar/plant-blackouts', { plant: block.plant, upserts: [this._blockPayload(block, false)] }, 'plant-blackout-upsert');
   },
@@ -425,7 +480,9 @@ export const CalendarSync = {
     removed?: { line: string[]; plant: string[] },
     capturedLinePlants?: ReadonlyMap<string, string | null>,
   ): void {
-    if (!plant) return;
+    if (!plant || this._hydrating || Sandbox.active) return;
+    // A pre-scenario debounce must never overwrite the newly promoted state.
+    this._clearLineHoursQueue(plant);
     removed = removed || { line: [], plant: [] };
     this.savePlantHours(plant, Store.plants[plant]?.workHours);
     const lineOwner = (line: string): string | null =>
@@ -479,6 +536,10 @@ export const CalendarSync = {
     if (this._hydrating || (typeof Sandbox !== 'undefined' && Sandbox.active)) {
       return Promise.resolve({ ok: true, skipped: true });
     }
+    const plant = String(body.plant ?? '');
+    const hoursEdits = path === '/plant-calendar/plant-hours' ? [this._markHoursEdit(plant, '')]
+      : path === '/plant-calendar/line-hours'
+        ? ((body.lines as Array<{ machine: string }> | undefined) || []).map(line => this._markHoursEdit(plant, line.machine)) : [];
     return Util.fetchTraced(`${Config.API_BASE}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -491,6 +552,8 @@ export const CalendarSync = {
         ErrorLog.warn('calendar-sync', `${label} failed: HTTP ${r.status}`);
         return { ok: false, status: r.status };
       }
+      // Only these sent revisions settle. A newer edit has a different record.
+      for (const edit of hoursEdits) edit.pending = false;
       return { ok: true };
     }).catch(e => {
       // The edit is already in Store + localStorage; only backend sync is deferred.

@@ -4663,8 +4663,16 @@ export const MasterData = (() => {
 
     document.body.appendChild(menu);
     const rect = anchor.getBoundingClientRect();
-    menu.style.top  = `${rect.bottom + 4}px`;
-    menu.style.left = `${rect.left}px`;
+    menu.style.maxHeight = `${Math.max(80, window.innerHeight - 16)}px`;
+    menu.style.maxWidth = `${Math.max(80, window.innerWidth - 16)}px`;
+    menu.style.overflowY = 'auto';
+    const bounds = menu.getBoundingClientRect();
+    menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - bounds.height - 8))}px`;
+    menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - bounds.width - 8))}px`;
+    menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+    menu.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { menu.remove(); anchor.focus(); }
+    });
 
     const close = (e: MouseEvent): void => { if (!menu.contains(e.target as Node)) { menu.remove(); document.removeEventListener('click', close); } };
     setTimeout(() => document.addEventListener('click', close), 0);

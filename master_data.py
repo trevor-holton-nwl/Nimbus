@@ -2238,18 +2238,41 @@ _LABOR_PERIOD_RE = re.compile(r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$")
 _LABOR_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _validate_labor_cells(cells: list, field: str) -> None:
-    """Reject a malformed `period` (ISO week, YYYY-Www) or `day` (ISO date,
-    YYYY-MM-DD) before it reaches a TEXT primary-key column."""
+def _validate_labor_cells(cells: list, field: str, *, strict: bool = False) -> None:
+    """Validate date keys; batch writes additionally validate hours and provenance."""
+    from math import isfinite
+
+    if not isinstance(cells, list):
+        raise ValueError("cells must be a list")
     for c in cells:
+        if not isinstance(c, dict):
+            raise ValueError("each labor cell must be an object")
+        if strict:
+            hours = c.get("avail_hours")
+            if hours is not None and hours != "":
+                try:
+                    valid_hours = not isinstance(hours, bool) and isfinite(float(hours)) and float(hours) >= 0
+                except (TypeError, ValueError, OverflowError):
+                    valid_hours = False
+                if not valid_hours:
+                    raise ValueError("avail_hours must be a finite nonnegative number or null")
+            if field == "day" and c.get("source", "auto_split") not in ("auto_split", "override"):
+                raise ValueError("source must be auto_split or override")
+            key_field = "wc_group" if field == "period" else "machine"
+            if not isinstance(c.get(key_field), str) or not c[key_field].strip():
+                raise ValueError(f"{key_field} is required")
         val = c.get(field)
-        if not val:
+        if not val and not strict:
             continue
         ok = isinstance(val, str) and (
             _LABOR_PERIOD_RE.match(val) if field == "period" else _LABOR_DAY_RE.match(val))
-        if ok and field == "day":
+        if ok:
             try:
-                datetime.strptime(val, "%Y-%m-%d")
+                if field == "day":
+                    datetime.strptime(val, "%Y-%m-%d")
+                elif strict:
+                    year, week = val.split("-W")
+                    datetime.fromisocalendar(int(year), int(week), 1)
             except ValueError:
                 ok = False
         if not ok:
@@ -2258,6 +2281,17 @@ def _validate_labor_cells(cells: list, field: str) -> None:
 
 
 def upsert_labor_plan(subnetwork: str, plant: str, cells: list, user_email: str | None = None) -> dict:
+    if not subnetwork or not plant:
+        raise ValueError("subnetwork and plant are required")
+    valid = [c for c in cells if c.get("wc_group") and c.get("period")]
+    _validate_labor_cells(valid, "period")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        result = _write_labor_plan(cur, subnetwork, plant, cells, user_email)
+        conn.commit()
+    return result
+
+
+def _write_labor_plan(cur, subnetwork: str, plant: str, cells: list, user_email: str | None = None) -> dict:
     """Upsert or delete aggregate labor-plan cells. A null/empty avail_hours deletes the cell."""
     if not subnetwork or not plant:
         raise ValueError("subnetwork and plant are required")
@@ -2265,35 +2299,58 @@ def upsert_labor_plan(subnetwork: str, plant: str, cells: list, user_email: str 
     _validate_labor_cells(valid, "period")
     to_delete = [c for c in valid if c.get("avail_hours") is None or c.get("avail_hours") == ""]
     to_upsert = [c for c in valid if c not in to_delete]
-    with _pool.connection() as conn, conn.cursor() as cur:
-        deleted = 0
-        if to_delete:
-            cur.execute(
-                "DELETE FROM labor_plan WHERE subnetwork=%s AND plant=%s"
-                " AND (wc_group, period) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
-                (subnetwork, plant,
-                 [c["wc_group"] for c in to_delete],
-                 [c["period"] for c in to_delete]),
-            )
-            deleted = cur.rowcount
-        upserted = 0
-        if to_upsert:
-            cur.executemany(
-                "INSERT INTO labor_plan (subnetwork, plant, wc_group, period, avail_hours)"
-                " VALUES (%s, %s, %s, %s, %s)"
-                " ON CONFLICT (subnetwork, plant, wc_group, period)"
-                " DO UPDATE SET avail_hours = EXCLUDED.avail_hours, updated_at = NOW()",
-                [(subnetwork, plant, c["wc_group"], c["period"], c["avail_hours"])
-                 for c in to_upsert],
-            )
-            upserted = len(to_upsert)
+    deleted = 0
+    if to_delete:
         cur.execute(
-            "INSERT INTO admin_audit (table_name, action, details, user_email)"
-            " VALUES ('labor_plan', 'upsert', %s, %s)",
-            (Jsonb({"upserted": upserted, "deleted": deleted, "plant": plant}), user_email),
+            "DELETE FROM labor_plan WHERE subnetwork=%s AND plant=%s"
+            " AND (wc_group, period) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
+            (subnetwork, plant,
+             [c["wc_group"] for c in to_delete],
+             [c["period"] for c in to_delete]),
         )
-        conn.commit()
+        deleted = cur.rowcount
+    upserted = 0
+    if to_upsert:
+        cur.executemany(
+            "INSERT INTO labor_plan (subnetwork, plant, wc_group, period, avail_hours)"
+            " VALUES (%s, %s, %s, %s, %s)"
+            " ON CONFLICT (subnetwork, plant, wc_group, period)"
+            " DO UPDATE SET avail_hours = EXCLUDED.avail_hours, updated_at = NOW()",
+            [(subnetwork, plant, c["wc_group"], c["period"], c["avail_hours"])
+             for c in to_upsert],
+        )
+        upserted = len(to_upsert)
+    cur.execute(
+        "INSERT INTO admin_audit (table_name, action, details, user_email)"
+        " VALUES ('labor_plan', 'upsert', %s, %s)",
+        (Jsonb({"upserted": upserted, "deleted": deleted, "plant": plant}), user_email),
+    )
     return {"upserted": upserted, "deleted": deleted}
+
+
+def upsert_labor_plan_batch(subnetwork: str, plant: str, cells: list, line_cells: list,
+                           user_email: str | None = None, intent: str | None = None) -> dict:
+    """Persist an edit and all of its derived cells atomically, including Undo."""
+    if not subnetwork or not plant:
+        raise ValueError("subnetwork and plant are required")
+    _validate_labor_cells(cells, "period", strict=True)
+    _validate_labor_cells(line_cells, "day", strict=True)
+    intent = intent or ("reconcile" if cells else "explicit")
+    if intent not in ("reconcile", "explicit", "undo"):
+        raise ValueError("intent must be reconcile, explicit or undo")
+    if intent == "explicit" and cells:
+        raise ValueError("aggregate edits require reconcile or undo intent")
+    if intent == "reconcile" and any(c.get("source", "auto_split") != "auto_split" for c in line_cells):
+        raise ValueError("automatic reconciliation requires auto_split source")
+    keys = [(c["machine"], c["day"]) for c in line_cells]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate line cell keys")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        aggregate = _write_labor_plan(cur, subnetwork, plant, cells, user_email)
+        lines = _write_labor_plan_machine(cur, subnetwork, plant, line_cells, user_email,
+                                         batch_intent=intent)
+        conn.commit()
+    return {"aggregate": aggregate, "lines": lines}
 
 
 def load_labor_plan_machine(plant: str, group: str | None = None,
@@ -2332,45 +2389,120 @@ def load_labor_plan_machine(plant: str, group: str | None = None,
 
 
 def upsert_labor_plan_machine(subnetwork: str, plant: str, cells: list, user_email: str | None = None) -> dict:
-    """Upsert or delete line-level labor cells."""
+    if not subnetwork or not plant:
+        raise ValueError("subnetwork and plant are required")
+    valid = [c for c in cells if c.get("machine") and c.get("day")]
+    _validate_labor_cells(valid, "day")
+    with _pool.connection() as conn, conn.cursor() as cur:
+        result = _write_labor_plan_machine(cur, subnetwork, plant, cells, user_email)
+        conn.commit()
+    return result
+
+
+def _write_labor_plan_machine(cur, subnetwork: str, plant: str, cells: list, user_email: str | None = None,
+                              *, batch_intent: str | None = None) -> dict:
+    """Upsert or delete line-level labor cells; retain the legacy route contract."""
+    if batch_intent is not None:
+        return _write_labor_plan_machine_batch(cur, subnetwork, plant, cells, user_email, batch_intent)
     if not subnetwork or not plant:
         raise ValueError("subnetwork and plant are required")
     valid = [c for c in cells if c.get("machine") and c.get("day")]
     _validate_labor_cells(valid, "day")
     to_delete = [c for c in valid if c.get("avail_hours") is None or c.get("avail_hours") == ""]
     to_upsert = [c for c in valid if c not in to_delete]
-    with _pool.connection() as conn, conn.cursor() as cur:
-        deleted = 0
-        if to_delete:
-            cur.execute(
-                "DELETE FROM labor_plan_machine WHERE subnetwork=%s AND plant=%s"
-                " AND (machine, day) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
-                (subnetwork, plant,
-                 [c["machine"] for c in to_delete],
-                 [c["day"] for c in to_delete]),
-            )
-            deleted = cur.rowcount
-        upserted = 0
-        if to_upsert:
-            cur.executemany(
-                "INSERT INTO labor_plan_machine"
-                " (subnetwork, plant, machine, day, avail_hours, source)"
-                " VALUES (%s, %s, %s, %s, %s, %s)"
-                " ON CONFLICT (subnetwork, plant, machine, day)"
-                " DO UPDATE SET avail_hours = EXCLUDED.avail_hours,"
-                " source = EXCLUDED.source, updated_at = NOW()",
-                [(subnetwork, plant, c["machine"], c["day"],
-                  c["avail_hours"], c.get("source", "auto_split"))
-                 for c in to_upsert],
-            )
-            upserted = len(to_upsert)
+    deleted = 0
+    if to_delete:
         cur.execute(
-            "INSERT INTO admin_audit (table_name, action, details, user_email)"
-            " VALUES ('labor_plan_machine', 'upsert', %s, %s)",
-            (Jsonb({"upserted": upserted, "deleted": deleted, "plant": plant}), user_email),
+            "DELETE FROM labor_plan_machine WHERE subnetwork=%s AND plant=%s"
+            " AND (machine, day) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
+            (subnetwork, plant,
+             [c["machine"] for c in to_delete],
+             [c["day"] for c in to_delete]),
         )
-        conn.commit()
+        deleted = cur.rowcount
+    upserted = 0
+    if to_upsert:
+        cur.executemany(
+            "INSERT INTO labor_plan_machine"
+            " (subnetwork, plant, machine, day, avail_hours, source)"
+            " VALUES (%s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (subnetwork, plant, machine, day)"
+            " DO UPDATE SET avail_hours = EXCLUDED.avail_hours,"
+            " source = EXCLUDED.source, updated_at = NOW()",
+            [(subnetwork, plant, c["machine"], c["day"],
+              c["avail_hours"], c.get("source", "auto_split"))
+             for c in to_upsert],
+        )
+        upserted = len(to_upsert)
+    cur.execute(
+        "INSERT INTO admin_audit (table_name, action, details, user_email)"
+        " VALUES ('labor_plan_machine', 'upsert', %s, %s)",
+        (Jsonb({"upserted": upserted, "deleted": deleted, "plant": plant}), user_email),
+    )
     return {"upserted": upserted, "deleted": deleted}
+
+
+def _write_labor_plan_machine_batch(cur, subnetwork: str, plant: str, cells: list,
+                                   user_email: str | None, intent: str) -> dict:
+    """Conditional reconciliation plus canonical acknowledgements in the same transaction.
+
+    The conditions belong to the mutations: PostgreSQL rechecks them after waiting
+    for a concurrent writer, so an override committed while we wait survives too.
+    Explicit daily edit/reset and Undo intentionally retain unconditional writes.
+    """
+    preserve = intent == "reconcile"
+    to_delete = [c for c in cells if c.get("avail_hours") in (None, "")]
+    to_upsert = [c for c in cells if c.get("avail_hours") not in (None, "")]
+    applied: set[tuple[str, str]] = set()
+    deleted = upserted = 0
+    if to_delete:
+        condition = " AND source <> 'override'" if preserve else ""
+        cur.execute(
+            "DELETE FROM labor_plan_machine WHERE subnetwork=%s AND plant=%s"
+            " AND (machine, day) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))"
+            + condition + " RETURNING machine, day",
+            (subnetwork, plant, [c["machine"] for c in to_delete], [c["day"] for c in to_delete]),
+        )
+        removed = cur.fetchall()
+        deleted = len(removed)
+        applied.update(removed)
+    if to_upsert:
+        condition = " WHERE labor_plan_machine.source <> 'override'" if preserve else ""
+        cur.execute(
+            "INSERT INTO labor_plan_machine (subnetwork, plant, machine, day, avail_hours, source)"
+            " SELECT %s, %s, unnest(%s::text[]), unnest(%s::text[]), unnest(%s::numeric[]), unnest(%s::text[])"
+            " ON CONFLICT (subnetwork, plant, machine, day) DO UPDATE"
+            " SET avail_hours=EXCLUDED.avail_hours, source=EXCLUDED.source, updated_at=NOW()"
+            + condition + " RETURNING machine, day",
+            (subnetwork, plant, [c["machine"] for c in to_upsert], [c["day"] for c in to_upsert],
+             [c["avail_hours"] for c in to_upsert], [c.get("source", "auto_split") for c in to_upsert]),
+        )
+        written = cur.fetchall()
+        upserted = len(written)
+        applied.update(written)
+    canonical = {}
+    if cells:
+        cur.execute(
+            "SELECT machine, day, avail_hours, source FROM labor_plan_machine"
+            " WHERE subnetwork=%s AND plant=%s"
+            " AND (machine, day) IN (SELECT unnest(%s::text[]), unnest(%s::text[]))",
+            (subnetwork, plant, [c["machine"] for c in cells], [c["day"] for c in cells]),
+        )
+        canonical = {(r[0], r[1]): {"machine": r[0], "day": r[1],
+                     "avail_hours": float(r[2]) if r[2] is not None else None, "source": r[3]}
+                     for r in cur.fetchall()}
+    rows = [canonical.get((c["machine"], c["day"]),
+            {"machine": c["machine"], "day": c["day"], "avail_hours": None, "source": "auto_split"}) for c in cells]
+    skipped = [r for r in rows if preserve and (r["machine"], r["day"]) not in applied and r["source"] == "override"]
+    cur.execute(
+        "INSERT INTO admin_audit (table_name, action, details, user_email)"
+        " VALUES ('labor_plan_machine', 'upsert', %s, %s)",
+        (Jsonb({"upserted": upserted, "deleted": deleted, "plant": plant,
+                "intent": intent, "preserved_overrides": len(skipped)}), user_email),
+    )
+    return {"upserted": upserted, "deleted": deleted, "rows": rows, "skipped": skipped,
+            "applied": [{"machine": c["machine"], "day": c["day"]} for c in cells
+                        if (c["machine"], c["day"]) in applied]}
 
 
 # ---------------------------------------------------------------------------

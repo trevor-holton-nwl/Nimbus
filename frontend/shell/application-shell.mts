@@ -1972,8 +1972,27 @@ const App = {
     e?.stopPropagation();
     const drop = document.getElementById('context-lines-dropdown');
     if (!drop) return;
-    drop.hidden = !drop.hidden;
-    if (!drop.hidden) App._renderLinesPillChecklist();
+    App._setLinesPillOpen(drop.hidden);
+  },
+
+  _setLinesPillOpen(open: boolean, restoreFocus = false): void {
+    const drop = document.getElementById('context-lines-dropdown');
+    if (!drop) return;
+    drop.hidden = !open;
+    const button = document.getElementById('context-lines-pill');
+    button?.setAttribute('aria-expanded', String(open));
+    if (open) {
+      App._renderLinesPillChecklist();
+      document.getElementById('context-lines-search')?.focus();
+    } else if (restoreFocus) button?.focus();
+  },
+
+  _onLinesPillKeydown(e: KeyboardEvent): void {
+    const drop = document.getElementById('context-lines-dropdown');
+    if (e.key === 'Escape' && drop && !drop.hidden) {
+      e.preventDefault(); e.stopPropagation();
+      App._setLinesPillOpen(false, true);
+    }
   },
 
   init(): void {
@@ -2046,10 +2065,11 @@ const App = {
     linesPillBtn?.addEventListener('click', e => App._toggleLinesPillDropdown(e));
     document.addEventListener('click', (e: MouseEvent) => {
       if (linesPillDrop && !linesPillDrop.hidden
-          && !linesPillDrop.contains(e.target as Node) && e.target !== linesPillBtn) {
-        linesPillDrop.hidden = true;
+          && !linesPillDrop.contains(e.target as Node) && !linesPillBtn?.contains(e.target as Node)) {
+        App._setLinesPillOpen(false);
       }
     });
+    document.getElementById('context-lines-group')?.addEventListener('keydown', App._onLinesPillKeydown);
     const linesPillSearch = document.getElementById('context-lines-search') as HTMLInputElement | null;
     if (linesPillSearch) {
       linesPillSearch.oninput = () => {
@@ -2062,12 +2082,19 @@ const App = {
     }
     App._refreshLinesPillLabel();
     Store.subscribe(evt => {
-      if (evt.type === 'lines:selected') App._refreshLinesPillLabel();
+      if (evt.type === 'lines:selected') {
+        App._refreshLinesPillLabel();
+        // Preserve checkbox focus for this picker's own events. Other filter
+        // controls can change the shared Set while this checklist is open.
+        if (evt.source !== 'header' && linesPillDrop && !linesPillDrop.hidden) App._renderLinesPillChecklist();
+      }
       if (evt.type === 'plant:selected') {
         App._linesPillSearch = '';
+        if (linesPillSearch) linesPillSearch.value = '';
         App._renderLinesPillChecklist();
         App._refreshLinesPillLabel();
       }
+      if (evt.type === 'master-data-changed' && linesPillDrop && !linesPillDrop.hidden) App._renderLinesPillChecklist();
     }, 'ContextLinesPill');
 
     /* Manage Master Data sub-tabs (Production Lines / Plant) */
@@ -2098,6 +2125,7 @@ const App = {
 
     /* Alert bell */
     document.getElementById('alert-bell')!.onclick = () => AlertsUIAdapter.toggleDrawer();
+    document.getElementById('alert-dismiss-visible')?.addEventListener('click', () => AlertsUIAdapter.dismissVisible());
 
     /* Resize handles for side panels */
     App._wireResize('left',  document.getElementById('left-sidebar')!);
@@ -2152,7 +2180,8 @@ const App = {
           Alerts.scheduleRecompute();
       }
       // Alert drawer always reflects current state if open
-      if (evt.type === 'alerts:change') {
+      if (evt.type === 'alerts:change' || evt.type === 'plant:selected'
+          || evt.type === 'master-data-changed' || evt.type === 'settings:change') {
         const d = document.getElementById('alert-drawer');
         if (d && d.classList.contains('open') && typeof AlertsUIAdapter.renderDrawer === 'function') AlertsUIAdapter.renderDrawer();
         AlertsUIAdapter.renderBell();

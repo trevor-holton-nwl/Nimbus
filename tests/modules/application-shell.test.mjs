@@ -7,6 +7,28 @@ import { Sandbox } from '../../frontend/optimization/sandbox.mjs';
 import { Persistence } from '../../frontend/scheduling/persistence.mjs';
 import { DistributionPane } from '../../frontend/distribution/distribution-pane.mjs';
 
+test('header Lines picker announces open state and Escape returns focus', () => {
+  const priorDoc = globalThis.document, priorRender = App._renderLinesPillChecklist;
+  const button = { attrs: {}, setAttribute(k,v) { this.attrs[k] = v; }, focus() { this.focused = true; } };
+  const drop = { hidden: true };
+  const search = { focus() { this.focused = true; } };
+  let renders = 0;
+  try {
+    globalThis.document = { getElementById: id => ({ 'context-lines-pill': button, 'context-lines-dropdown': drop, 'context-lines-search': search })[id] || null };
+    App._renderLinesPillChecklist = () => { renders++; };
+    App._toggleLinesPillDropdown();
+    assert.equal(button.attrs['aria-expanded'], 'true');
+    assert.equal(search.focused, true);
+    assert.equal(renders, 1);
+    let prevented = false;
+    App._onLinesPillKeydown({ key: 'Escape', preventDefault() { prevented = true; }, stopPropagation() {} });
+    assert.equal(prevented, true);
+    assert.equal(drop.hidden, true);
+    assert.equal(button.attrs['aria-expanded'], 'false');
+    assert.equal(button.focused, true);
+  } finally { globalThis.document = priorDoc; App._renderLinesPillChecklist = priorRender; }
+});
+
 test('application-shell exposes the documented public API', () => {
   assert.equal(typeof App.goto, 'function');
   assert.equal(typeof App._renderSettingsPane, 'undefined', 'this method relocated to Plant in Task 1 — must not still exist here');
@@ -280,7 +302,7 @@ test('a date-only edit does not send FIRMED (a stale local copy must never overw
   } finally { globalThis.fetch = originalFetch; }
 }));
 
-test('firmed:change from sandbox or refresh never dirties; What-If apply leaves the dirty set unchanged', () => withDirtyTracking(({ App, Sandbox }) => {
+test('firmed:change from sandbox or refresh never dirties; What-If apply leaves the dirty set unchanged', () => withDirtyTracking(() => {
   Store.setTasks([firmTask('wi-a', { firmed: true }), firmTask('wi-b')], 'unit-test');
   App._trackDirty({ type: 'firmed:change', ids: ['wi-a', 'wi-b'], source: 'sandbox', revision: 1, mode: 'live' });
   App._trackDirty({ type: 'firmed:change', ids: ['wi-a'], source: 'refresh', revision: 2, mode: 'live' });

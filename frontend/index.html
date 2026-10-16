@@ -1215,11 +1215,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </div>
 
     <div class="dash-filter-group" id="context-lines-group">
-      <button type="button" class="context-pill" id="context-lines-pill" aria-haspopup="listbox" aria-expanded="false">
+      <button type="button" class="context-pill" id="context-lines-pill" aria-haspopup="dialog" aria-controls="context-lines-dropdown" aria-expanded="false">
         <span id="context-lines-label" data-i18n="ui.lines_section">Lines</span>
         <span class="dash-filter-arrow">▾</span>
       </button>
-      <div class="dash-filter-dropdown" id="context-lines-dropdown" role="listbox" hidden>
+      <div class="dash-filter-dropdown" id="context-lines-dropdown" role="dialog" aria-labelledby="context-lines-label" hidden>
         <div class="dash-filter-paste-row">
           <input type="text" class="dash-filter-paste-input" id="context-lines-search"
                  placeholder="Search lines…" data-i18n-placeholder="ph.search_lines" autocomplete="off" spellcheck="false">
@@ -2209,11 +2209,12 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <header class="drawer-head">
     <h3 data-i18n="ui.alerts_title">Alerts</h3>
     <div>
-      <button class="btn btn-ghost sm" onclick="NIMBUS.Alerts.dismissAll()" data-i18n="btn.dismiss_all">Dismiss all</button>
+      <button class="btn btn-ghost sm" id="alert-dismiss-visible" data-i18n="btn.dismiss_all">Dismiss all</button>
       <button class="icon-btn sm" onclick="NIMBUS.AlertsUIAdapter.toggleDrawer()" aria-label="Close">✕</button>
     </div>
   </header>
   <div class="drawer-body" id="alert-drawer-body"></div>
+  <div class="drawer-footer" id="alert-drawer-footer" hidden></div>
 </aside>
 
 <!-- =========================================================
@@ -2407,6 +2408,13 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;">From <input type="text" id="print-start" class="input" style="font-size:13px;" readonly></label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;">To <input type="text" id="print-end" class="input" style="font-size:13px;" readonly></label>
+        <label><span data-i18n="ui.print_scope">Scope</span>
+          <select id="print-scope" class="input">
+            <option value="all" data-i18n="ui.print_scope_all">All loaded orders</option>
+            <option value="plant" data-i18n="ui.print_scope_plant">Selected plant</option>
+            <option value="filtered" data-i18n="ui.print_scope_filtered">Current Orders filters</option>
+          </select>
+        </label>
         <button class="btn btn-ghost sm" data-autofocus onclick="NIMBUS.Printer.preview()">Preview</button>
       </div>
       <div id="print-results" style="margin-top:14px;overflow:auto;max-height:460px;"></div>

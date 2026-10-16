@@ -27,7 +27,8 @@ test('Aggregate grid writes the RAW week key into data-period, even where CSS.es
   // Spec-correct CSS.escape: a leading digit becomes `\3X ` (what browsers do).
   const BS = String.fromCharCode(92);
   const specEscape = (s) => String(s).replace(/^[0-9]/, (d) => BS + '3' + d + ' ').replace(/["\\]/g, (c) => BS + c);
-  const saved = { CSS: globalThis.CSS, document: globalThis.document, fetch: globalThis.fetch, flatpickr: globalThis.flatpickr };
+  const saved = { window: globalThis.window, CSS: globalThis.CSS, document: globalThis.document, fetch: globalThis.fetch, flatpickr: globalThis.flatpickr };
+  globalThis.window ||= {};
   globalThis.flatpickr = () => ({ setDate() {} });
   globalThis.CSS = { escape: specEscape };
   let html = '';
@@ -54,10 +55,11 @@ test('Aggregate grid writes the RAW week key into data-period, even where CSS.es
 });
 
 test('group 8 (labor downstream): the KPI strip reads the proportionally re-bucketed utilization hours, so a bar crossing midnight no longer piles on its start day', async () => {
-  const saved = { CSS: globalThis.CSS, document: globalThis.document, fetch: globalThis.fetch, flatpickr: globalThis.flatpickr,
+  const saved = { window: globalThis.window, CSS: globalThis.CSS, document: globalThis.document, fetch: globalThis.fetch, flatpickr: globalThis.flatpickr,
     NimbusComputeCore: globalThis.NimbusComputeCore };
   // Utilization delegates to the UMD compute core through this ambient global (a real browser loads it first).
   globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || (await import('node:module')).createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
+  globalThis.window ||= {};
   globalThis.flatpickr = () => ({ setDate() {} });
   globalThis.CSS = { escape: (s) => String(s) };
   const html = { grid: '', kpi: '' };

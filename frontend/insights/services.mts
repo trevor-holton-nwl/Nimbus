@@ -393,9 +393,15 @@ export const Alerts = {
     Alerts._dismissed.add(alertId);
     Store.dismissAlert(alertId, 'alerts');
   },
-  dismissAll(): void {
-    for (const a of Store.alerts) Alerts._dismissed.add(a.id);
-    Store.dismissAllAlerts('alerts');
+  dismissAll(ids?: Iterable<string>): void {
+    if (ids === undefined) {
+      for (const a of Store.alerts) Alerts._dismissed.add(a.id);
+      Store.dismissAllAlerts('alerts');
+      return;
+    }
+    const selected = new Set(ids);
+    for (const id of selected) Alerts._dismissed.add(id);
+    Store.setAlerts(Store.alerts.filter(a => !selected.has(a.id)), 'alerts');
   },
   // Clear dismissals (so new runs of recompute() can re-surface the same issue).
   // Returns whether any dismissal actually existed — callers that follow this

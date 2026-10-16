@@ -82,3 +82,23 @@ def labor_plan_line_post(request: Request, body: dict = Body(default={}), allowe
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/labor-plan/batch", dependencies=[Depends(auth.require_authenticated)])
+def labor_plan_batch_post(
+    request: Request, body: dict = Body(default={}),
+    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+):
+    """Save aggregate and line-cell changes in one transaction (also used by Undo)."""
+    plant = body.get("plant", "")
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+        return md.upsert_labor_plan_batch(
+            subnetwork=body.get("subnetwork", ""), plant=plant,
+            cells=body.get("cells", []), line_cells=body.get("line_cells", []),
+            user_email=request.headers.get("x-user-email"), intent=body.get("intent"),
+        )
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

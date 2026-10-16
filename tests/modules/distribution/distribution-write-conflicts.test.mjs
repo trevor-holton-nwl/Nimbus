@@ -24,7 +24,7 @@ async function pane(realDetail = false, realList = false) {
     ${realDetail ? '' : '_openDetail = async () => {};'}
     _renderDetail = () => {};
     _renderList = () => {};
-    return { _onSaveClick, _onUndoClick, _runWritePipeline, _onBulkReset, _repairRow, _openDetail,
+    return { _setDetailExpanded, _onSaveClick, _onUndoClick, _runWritePipeline, _onBulkReset, _repairRow, _openDetail,
       _markReviewed, _onSaveScheduleClick, _postReview, _runDryRun,
       _fetchAndRenderList, _fetchMoreAndAppend, _mkCombobox,
       switchDetail(detail) { _detail = detail; _selectedKey = _rowKey(detail.header); _lastWrite = null; },
@@ -824,4 +824,36 @@ test('fix round 1 — a Load More already in flight is dropped by a concurrent r
   assert.equal(p.rows().length, 2, 'the stale Load More response must not append onto the refreshed rows');
   assert.equal(p.total(), 2, 'the stale Load More\'s meta.total must not overwrite the refresh\'s count');
   assert.equal(p.page(), 1, '_page must remain exactly what the refresh set it to');
+});
+
+
+test('expanded Distribution detail preserves draft weights and preview identity without rebuilding editor DOM', async t => {
+  const p = await pane();
+  const previousDocument = globalThis.document;
+  t.after(() => { globalThis.document = previousDocument; });
+  const classes = new Set();
+  const button = { attributes: {}, setAttribute(k, v) { this.attributes[k] = v; }, textContent: '' };
+  const body = { classList: { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); } } };
+  const input = { value: '7.25' };
+  const editor = { input, get innerHTML() { return 'existing draft'; }, set innerHTML(_) { assert.fail('expansion must not rebuild inputs'); } };
+  globalThis.document = { getElementById: id => ({ 'dist-body': body, 'dist-detail-expand': button, 'dist-detail-pane': editor })[id] };
+  t.mock.method(Util, 't', key => key);
+  p.setup(detail, dryRunSignature(header, detail.shares));
+  const initialDetail = p.detail();
+  const initialWeights = p.editorWeights();
+  const initialStatus = p.dryRunStatus();
+  p._setDetailExpanded(true);
+  assert.equal(classes.has('dist-detail-expanded'), true);
+  assert.equal(button.attributes['aria-expanded'], 'true');
+  assert.equal(button.textContent, 'btn.dist_collapse_detail');
+  assert.equal(editor.input, input);
+  assert.equal(editor.input.value, '7.25');
+  assert.equal(p.detail(), initialDetail);
+  assert.deepEqual(p.editorWeights(), initialWeights);
+  assert.equal(p.dryRunStatus(), initialStatus);
+  p._setDetailExpanded(false);
+  assert.equal(classes.has('dist-detail-expanded'), false);
+  assert.equal(button.attributes['aria-expanded'], 'false');
+  assert.equal(button.textContent, 'btn.dist_expand_detail');
+  assert.equal(editor.input.value, '7.25');
 });

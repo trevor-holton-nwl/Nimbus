@@ -629,7 +629,7 @@ export const Dashboard = {
   // Read a real CSS custom property so heatmap colors stay theme-correct and
   // in sync with DESIGN.md's tokens instead of hand-duplicated light/dark hex pairs.
   _cssVar(name: string, fallback: string): string {
-    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const v = getComputedStyle(document.body).getPropertyValue(name).trim();
     return v || fallback;
   },
   _lerpHex(a: string, b: string, frac: number): string {
@@ -641,11 +641,13 @@ export const Dashboard = {
   // WCAG relative luminance — picks readable text color from the actual resolved
   // background instead of a hand-tuned per-theme pct threshold.
   _relLuminance(hex: string): number {
-    const c = [1, 3, 5].map(i => {
-      const v = parseInt(hex.slice(i, i + 2), 16) / 255;
-      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-    });
-    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    return Util.relativeLuminance(hex);
+  },
+
+  _heatForeground(bg: string, ink: string, onColor: string): string {
+    // In dark mode both content foregrounds are light. Include the permanent
+    // chrome ink, then use black/white only if no palette candidate meets AA.
+    return Util.contrastText(bg, [ink, onColor, '#0c1c30']);
   },
 
   // A companion computeMatrix fix now always pads the matrix with every plant line
@@ -692,7 +694,7 @@ export const Dashboard = {
     }
     function heatText(pct: number, bg: string): string {
       if (pct <= 0) return muteTxt;
-      return Dashboard._relLuminance(bg) > 0.45 ? inkTxt : onTxt;
+      return Dashboard._heatForeground(bg, inkTxt, onTxt);
     }
 
     const cols = `74px repeat(${days.length}, 1fr)`;
@@ -865,14 +867,8 @@ export const Dashboard = {
     // boundary and creates a DOM-injection sink.
     list.onclick = AlertsUIAdapter._handleAction;
 
-    const plantLines = new Set(Store.linesForSelectedPlant());
-    const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
-    const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
-    const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
-    const alerts = Store.alerts.filter(a => {
-      if (a.line && !plantLines.has(a.line)) return false;
+    const alerts = AlertsUIAdapter._visibleAlerts().alerts.filter(a => {
       if (Dashboard._filterLines.size > 0 && a.line && !Dashboard._filterLines.has(a.line)) return false;
-      if (cutoff && a.time && a.time > cutoff) return false;
       return true;
     });
 
@@ -889,21 +885,21 @@ export const Dashboard = {
     const errN  = alerts.filter(a => a.sev === 'err').length;
     const warnN = alerts.filter(a => a.sev === 'warn').length;
     count.textContent = errN > 0 || warnN > 0
-      ? `${errN} err · ${warnN} warn · ${alerts.length} open`
-      : `${alerts.length} open`;
+      ? Util.t('alert.summary_counts', { errors: errN, warnings: warnN, count: alerts.length })
+      : Util.t('alert.summary_open', { count: alerts.length });
 
     if (!alerts.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_alerts')}</div>`; return; }
     list.innerHTML = alerts.slice(0, 8).map(a => `
       <div class="alert-row sev-${a.sev}" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">
         <span class="sev" data-sev="${a.sev}" aria-label="${a.sev === 'err' ? 'Error' : a.sev === 'warn' ? 'Warning' : 'Info'}"></span>
-        <div class="msg">${Util.escapeHtml(Util.alertMessage(a))}</div>
+        <button type="button" class="msg alert-summary-focus" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.escapeHtml(Util.alertMessage(a))}</button>
         <span class="meta">${a.time ? Util.fmtDT(a.time).slice(5, 16) : ''}</span>
-        <button type="button" class="dismiss" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">×</button>
+        <button type="button" class="dismiss" aria-label="${Util.t('btn.dismiss')}" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">×</button>
       </div>
     `).join('');
     if (alerts.length > 8) {
       list.insertAdjacentHTML('beforeend',
-        `<div class="alert-summary-more" onclick="NIMBUS.AlertsUIAdapter.toggleDrawer()">See all ${alerts.length} alerts →</div>`);
+        `<button type="button" class="alert-summary-more" data-alert-action="show-all">${Util.t('btn.see_all_alerts', { count: alerts.length })}</button>`);
     }
   },
 
@@ -1011,7 +1007,7 @@ export const Dashboard = {
     }
     function cellText(h: number, bg: string): string {
       if (h <= 0) return muteTxt;
-      return Dashboard._relLuminance(bg) > 0.45 ? inkTxt : onTxt;
+      return Dashboard._heatForeground(bg, inkTxt, onTxt);
     }
 
     const cols = `120px repeat(${days.length}, 1fr)`;
@@ -1174,6 +1170,7 @@ export const AlertsUIAdapter = {
     if (!trigger) return;
 
     const action = trigger.dataset.alertAction;
+    if (action === 'show-all') { AlertsUIAdapter.toggleDrawer(); return; }
     if (action === 'override') {
       const taskId = trigger.dataset.taskId;
       if (!taskId) return;
@@ -1479,7 +1476,13 @@ export const AlertsUIAdapter = {
     const d = document.getElementById('alert-drawer');
     if (!d) return;
     const isOpen = d.classList.toggle('open');
-    if (isOpen) AlertsUIAdapter.renderDrawer();
+    if (isOpen) {
+      AlertsUIAdapter.renderDrawer();
+      d.querySelector<HTMLElement>('.drawer-head button')?.focus();
+      d.onkeydown = e => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); AlertsUIAdapter.toggleDrawer(); }
+      };
+    } else document.getElementById('alert-bell')?.focus();
   },
 
   _renderAlertRow(a: NimbusAlert): string {
@@ -1501,27 +1504,37 @@ export const AlertsUIAdapter = {
       `</div></div>`;
   },
 
+  _visibleAlerts(): { alerts: NimbusAlert[]; hiddenCount: number; hz: number | null } {
+    const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant);
+    const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
+    const cutoff = typeof hz === 'number'
+      ? new Date(Util.plantClock(Store.selectedPlant).getTime() + hz * Config.MS_MIN) : null;
+    const plantLines = new Set(Store.linesForSelectedPlant());
+    const scoped = Store.alerts.filter(a => !a.line || plantLines.has(a.line));
+    const alerts = cutoff ? scoped.filter(a => !a.time || a.time <= cutoff) : scoped;
+    return { alerts, hiddenCount: scoped.length - alerts.length, hz };
+  },
+
+  dismissVisible(): void {
+    Alerts.dismissAll(AlertsUIAdapter._visibleAlerts().alerts.map(a => a.id));
+  },
+
   renderDrawer() {
     const body = document.getElementById('alert-drawer-body');
     if (!body) return;
     body.onclick = AlertsUIAdapter._handleAction;
-    // Store._state.masterData direct touch — deliberate, out of scope for this
-    // task (see the file header comment above OptimizeDialog's own identical read).
-    const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
-    const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
-    const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
-    // Scope to the selected plant's lines, matching Dashboard._renderAlertSummary —
-    // otherwise an alert for another plant (reachable once the compute worker has
-    // permanently fallen back to an unscoped sync recompute, see CLAUDE.md) can be
-    // shown and clicked here even though Timeline/scrollToLine can't navigate to it.
-    const plantLines = new Set(Store.linesForSelectedPlant());
-    const timeFiltered = cutoff ? Store.alerts.filter(a => !a.time || a.time <= cutoff) : Store.alerts;
-    const alerts = timeFiltered.filter(a => !a.line || plantLines.has(a.line));
-    const hiddenCount = Store.alerts.length - timeFiltered.length;
+    const { alerts, hiddenCount, hz } = AlertsUIAdapter._visibleAlerts();
+    const footer = document.getElementById('alert-drawer-footer');
+    if (footer) {
+      footer.hidden = hiddenCount === 0;
+      footer.textContent = hiddenCount ? Util.t('alert.horizon_hidden_duration', {
+        count: hiddenCount, duration: Util.fmtHours((hz as number) / 60),
+      }) : '';
+    }
 
     if (!alerts.length) {
       if (AlertsUIAdapter._drawerVL) { AlertsUIAdapter._drawerVL.destroy(); AlertsUIAdapter._drawerVL = null; }
-      body.innerHTML = `<div class="empty-state" style="padding:24px;color:#888;">${Util.t('empty.no_active_alerts')}</div>`;
+      body.innerHTML = `<div class="empty-state" style="padding:24px;color:var(--fg-mute);">${Util.t('empty.no_active_alerts')}</div>`;
       return;
     }
 
@@ -1537,23 +1550,13 @@ export const AlertsUIAdapter = {
     AlertsUIAdapter._drawerVLPlant = Store.selectedPlant;
     AlertsUIAdapter._drawerVL.update(alerts, identityChanged ? { anchor: 'top' } : undefined);
 
-    if (hiddenCount > 0) {
-      const hzDays = Math.max(1, Math.round((hz as number) / 1440));
-      body.insertAdjacentHTML('beforeend',
-        `<div style="padding:10px 16px;font-size:11.5px;color:var(--fg-mute);border-top:1px solid var(--border);">` +
-        `${hiddenCount} alert${hiddenCount > 1 ? 's' : ''} beyond the ${hzDays}-day window hidden — adjust in System Settings.</div>`);
-    }
   },
 /* ----- BELL BADGE ------------------------------------------------------ */
   renderBell() {
     const badge = document.getElementById('alert-badge');
     const bell  = document.getElementById('alert-bell');
-    // Store._state.masterData direct touch — same deliberate out-of-scope carve-out
-    // as renderDrawer() above.
-    const plantRow = Store._state.masterData?.plants?.find(p => p.plant === Store.selectedPlant) ?? null;
-    const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
-    const cutoff = typeof hz === 'number' ? new Date(Date.now() + hz * Config.MS_MIN) : null;
-    const visible = cutoff ? Store.alerts.filter(a => !a.time || a.time <= cutoff) : Store.alerts;
+    if (!badge || !bell) return;
+    const visible = AlertsUIAdapter._visibleAlerts().alerts;
     const n = visible.length;
     if (n > 0) {
       badge!.textContent = n > 99 ? '99+' : String(n);

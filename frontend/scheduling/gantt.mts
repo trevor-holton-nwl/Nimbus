@@ -2984,7 +2984,7 @@ export const GanttFilter = {
     if (GanttFilter._selectedForms.size  > 0 && !GanttFilter._selectedForms.has((task.FORM_SIZE || '').toUpperCase())) return false;
     if (!Util.taskMatchesPasteSet(task, GanttFilter._pastedIds)) return false;
     if (text) {
-      const haystack = [(task.text || ''), (task.ORDER || ''), (task.MATERIAL_DESCRIPTION || '')].join(' ').toLowerCase();
+      const haystack = [task.text, task.id, task.ORDER, task.PRODUCTION_ORDER, task.PARENT_ORDER, task.MATERIAL_NUMBER, task.MATERIAL_DESCRIPTION].join(' ').toLowerCase();
       if (!haystack.includes(text)) return false;
     }
     return true;
@@ -3589,6 +3589,7 @@ export const Interaction = {
     /* ----- context menu -------------------------------------------------- */
     const container = document.getElementById('vis-timeline');
     if (container) {
+      container.tabIndex = 0;
       container.addEventListener('contextmenu', e => {
         const p = Timeline._tl!.getEventProperties(e);
         e.preventDefault();
@@ -4759,6 +4760,13 @@ export const Interaction = {
   },
 
   _onKeyDown(e: KeyboardEvent): void {
+    if (e.defaultPrevented || (e.target as HTMLElement | null)?.closest?.('#ctx-menu')) return;
+    if ((e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey))
+        && (e.target as HTMLElement | null)?.closest?.('#vis-timeline') && Selection.size()) {
+      e.preventDefault();
+      ContextMenu.openFromKeyboard(Selection._anchor || Selection.ids()[0], e.target as HTMLElement);
+      return;
+    }
     // Ignore when typing in inputs.
     const target = e.target as HTMLElement | null;
     const tag = (target && target.tagName) || '';

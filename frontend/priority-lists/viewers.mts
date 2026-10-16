@@ -34,6 +34,8 @@ interface ColorWheelResponse {
    ========================================================================== */
 export const ColorWheelViewer = (() => {
   let _plant: string | null = null;
+  let _generation = 0;
+  let _closeTimer: ReturnType<typeof setTimeout> | null = null;
   let _entries: ColorWheelEntry[] = [];
   let _search  = '';
   let _sort: 'priority' | 'name' = 'priority';
@@ -64,6 +66,7 @@ export const ColorWheelViewer = (() => {
     _sort   = 'priority';
     const el = document.getElementById('modal-cw-viewer');
     if (!el) return;
+    if (_closeTimer) clearTimeout(_closeTimer);
     el.hidden = false;
     // Reset search UI
     const srch = document.getElementById('cw-viewer-search') as HTMLInputElement | null;
@@ -75,13 +78,15 @@ export const ColorWheelViewer = (() => {
   }
 
   function close() {
+    ++_generation;
     const el = document.getElementById('modal-cw-viewer');
     if (!el) return;
     el.querySelector('.cw-viewer-modal')?.classList.remove('visible');
-    setTimeout(() => { el.hidden = true; }, 240);
+    _closeTimer = setTimeout(() => { el.hidden = true; }, 240);
   }
 
   function _load() {
+    const generation = ++_generation;
     const titleEl   = document.getElementById('cw-viewer-plant-name');
     const countEl   = document.getElementById('cw-viewer-count');
     const listEl    = document.getElementById('cw-viewer-list');
@@ -92,6 +97,7 @@ export const ColorWheelViewer = (() => {
     Util.fetchTraced(`${Config.API_BASE}/color-wheel/${encodeURIComponent(_plant!)}`, { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<ColorWheelResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(body => {
+        if (generation !== _generation) return;
         _entries = body.entries || [];
         // Populate file meta below title
         const metaEl = document.getElementById('cw-viewer-meta');
@@ -102,6 +108,7 @@ export const ColorWheelViewer = (() => {
         _render();
       })
       .catch((err: Error) => {
+        if (generation !== _generation) return;
         _entries = [];
         if (listEl) listEl.innerHTML = `<div class="cw-viewer-empty">${Util.t('empty.cw_no_wheel_for_plant', { plant: Util.escapeHtml(_plant) })}</div>`;
         const metaEl = document.getElementById('cw-viewer-meta');
@@ -199,6 +206,8 @@ export const ColorWheelViewer = (() => {
    ========================================================================== */
 export const PriorityListViewer = (() => {
   let _plant: string | null = null;
+  let _generation = 0;
+  let _closeTimer: ReturnType<typeof setTimeout> | null = null;
   let _fieldKey: string | null = null;
   let _line = '';
   let _entries: PriorityListEntry[] = [];
@@ -221,6 +230,7 @@ export const PriorityListViewer = (() => {
     _plant = plant; _fieldKey = fieldKey; _line = line; _search = '';
     const el = document.getElementById('modal-priority-viewer');
     if (!el) return;
+    if (_closeTimer) clearTimeout(_closeTimer);
     el.hidden = false;
     const srch = document.getElementById('pl-viewer-search') as HTMLInputElement | null;
     if (srch) srch.value = '';
@@ -229,13 +239,15 @@ export const PriorityListViewer = (() => {
   }
 
   function close() {
+    ++_generation;
     const el = document.getElementById('modal-priority-viewer');
     if (!el) return;
     el.querySelector('.cw-viewer-modal')?.classList.remove('visible');
-    setTimeout(() => { el.hidden = true; }, 240);
+    _closeTimer = setTimeout(() => { el.hidden = true; }, 240);
   }
 
   function _load() {
+    const generation = ++_generation;
     const labelEl = document.getElementById('pl-viewer-field-label');
     const nameEl  = document.getElementById('pl-viewer-plant-name');
     const listEl  = document.getElementById('pl-viewer-list');
@@ -255,6 +267,7 @@ export const PriorityListViewer = (() => {
           { signal: AbortSignal.timeout(8000) })
       .then(r => r.ok ? r.json() as Promise<PriorityListResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(body => {
+        if (generation !== _generation) return;
         _entries = body.entries || [];
         const metaEl = document.getElementById('pl-viewer-meta');
         const m = body.meta || {};
@@ -270,6 +283,7 @@ export const PriorityListViewer = (() => {
         _render();
       })
       .catch((err: Error) => {
+        if (generation !== _generation) return;
         _entries = [];
         if (listEl) listEl.innerHTML = `<div class="cw-viewer-empty">${Util.t('empty.pl_no_list_for_plant')}</div>`;
         const metaEl = document.getElementById('pl-viewer-meta');

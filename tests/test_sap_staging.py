@@ -1415,7 +1415,8 @@ def test_snapshot_vanish_audit_is_written_before_the_deletes_and_finished_after(
 
 def test_mulesoft_role_file_does_not_grant_server_owned_header_columns():
     path = os.path.join(ROOT, "migrations", "manual", "2026-10-08-nimbus-mulesoft-role.sql")
-    text = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as source:
+        text = source.read()
     grant = next(line for line in text.splitlines() if line.startswith("GRANT INSERT (batch_id"))
     assert "received_at" not in grant and "ready_at" not in grant and "created_by" not in grant
     assert "NEW.received_at := now()" in text and "NEW.ready_at := now()" in text   # the trigger owns the clocks
@@ -2074,3 +2075,25 @@ def test_ingest_stores_the_date_only_flag_from_the_sap_time(pg, stg_plant):
         cur.execute("SELECT production_order, original_finish_date_only FROM orders WHERE plant = %s"
                     " ORDER BY production_order", (PLANT,))
         assert cur.fetchall() == [("DO1", True), ("TM1", False)]
+
+
+@pytest.mark.pg
+def test_archive_paging_and_literal_search(pg, stg_plant):
+    with _conn(pg) as (conn, cur):
+        for n in range(65):
+            cur.execute(
+                "INSERT INTO sap_stage_vanished_order (plant, order_id, order_row, deleted_at)"
+                " VALUES (%s, %s, %s, '2026-10-16T00:00:00Z')",
+                (PLANT, f"ARCHIVE-{n:03}", Jsonb({"production_order": f"PO-{n:03}",
+                                                "material_number": "MAT%_1" if n == 0 else "MAT-other",
+                                                "machine": "LINE1"})),
+            )
+        conn.commit()
+    first = st.list_archived(PLANT, limit=50)
+    second = st.list_archived(PLANT, limit=50, offset=50)
+    assert len(first) == 50 and len(second) == 15
+    assert not {r["id"] for r in first} & {r["id"] for r in second}
+    assert len(st.list_archived(PLANT, search="mat%_1")) == 1
+    assert len(st.list_archived(PLANT, search="line1")) == 65
+    assert len(st.list_archived(PLANT, search="po-064")) == 1
+    assert st.list_archived("NOT-THIS-PLANT", search="line1") == []

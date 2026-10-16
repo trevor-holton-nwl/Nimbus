@@ -625,6 +625,7 @@ test('TimeMachine.snapshot prunes IndexedDB to 200 and trims the in-memory histo
 test('gate 15: TimeMachine.restore brings back each row\'s finish, flags it stale and hands the ids to Engine.reconcileRestored (OQ21)', () => {
   const { TimeMachine, UndoStack, Toast } = nimbus;
   const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
   const priorEntries = UndoStack._entries.slice();
   const priorSnaps = TimeMachine._snapshots;
   const priorNimbus = globalThis.NIMBUS;
@@ -638,6 +639,7 @@ test('gate 15: TimeMachine.restore brings back each row\'s finish, flags it stal
   Toast.show = () => {};
   Engine.reconcileRestored = ids => { reconciled.push([...ids].map(String)); };
   try {
+    Store.setSelectedPlant('TM-P', 'test');
     Store.setTasks([{ id: 'tm1', PLANT: 'TM-P', MACHINE: 'TM-L', RUN_TIME: 2, runtime_schedule_mismatch: false,
       start_date: new Date('2031-03-04T08:00:00'), end_date: new Date('2031-03-04T10:00:00') }], 'test');
     TimeMachine._snapshots = [{ id: 1, ts: 4242, label: 'before', plant: 'TM-P', tasks: [
@@ -657,6 +659,7 @@ test('gate 15: TimeMachine.restore brings back each row\'s finish, flags it stal
     Alerts.scheduleRecompute = priorSchedule;
     globalThis.NIMBUS = priorNimbus;
     Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
   }
 });
 
@@ -716,7 +719,7 @@ test('U31: Time Machine restore hands the pre-restore dirty set to the reconcile
   try {
     Store.setTasks([{ id: 'tm-dirty', PLANT: 'TM-P', MACHINE: 'TM-L', RUN_TIME: 3 }, { id: 'tm-clean', PLANT: 'TM-P', MACHINE: 'TM-L', RUN_TIME: 2 }], 'test');
     Store.setSelectedPlant('TM-P', 'test');
-    TimeMachine._snapshots = [{ ts: 4242, label: 'snap', tasks: [{ id: 'tm-dirty', start_date: null, end_date: null }, { id: 'tm-clean', start_date: null, end_date: null }] }];
+    TimeMachine._snapshots = [{ ts: 4242, label: 'snap', plant: 'TM-P', tasks: [{ id: 'tm-dirty', start_date: null, end_date: null }, { id: 'tm-clean', start_date: null, end_date: null }] }];
     TimeMachine.restore(4242);
     assert.equal(seen.length, 1, 'the restore reconciles once');
     assert.equal(typeof seen[0].wasDirty?.has, 'function', 'the second argument is the wasDirty set');

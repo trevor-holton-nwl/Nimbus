@@ -450,3 +450,37 @@ test('grid listeners read the current render context, not the first render closu
   assert.match(source, /_setupGridCtx = \{ snapshot: snapshot0/);
   assert.match(source, /const \{ snapshot, definition, rows, permissions \} = ctx\(\)/);
 });
+
+
+test('compatibility can be restored, retries preserve the draft, and each save uses the mounted line', async t => {
+  const { Toast } = await import('../../../frontend/platform/foundation.mjs');
+  const { Persistence } = await import('../../../frontend/scheduling/persistence.mjs');
+  t.mock.method(Toast, 'show', () => {});
+  t.mock.method(Persistence, 'noteSetupWrite', () => {});
+  globalThis.window ||= {};
+  const nodes = Object.fromEntries(['compatible', 'compatibility-reason', 'save-compatibility'].map(key => [key, {
+    checked: false, disabled: false, value: 'Blocked', listeners: {}, focus() {}, addEventListener(type, fn) { this.listeners[type] = fn; },
+  }]));
+  const compat = { className: '', innerHTML: '', querySelector: selector => nodes[selector.replace('[data-setup-', '').replace(']', '')] };
+  const previous = globalThis.document;
+  globalThis.document = { createElement: () => compat };
+  t.after(() => { globalThis.document = previous; });
+  await SetupAdmin._wireCompatibilityForTest({ querySelector: () => ({ appendChild() {} }) }, { plant: 'A' }, 'LINE1', false);
+  const cb = nodes.compatible; const save = nodes['save-compatibility'];
+  cb.checked = true; cb.listeners.change();
+  assert.equal(save.disabled, false, 'checking compatibility must enable Save');
+  const requests = [];
+  t.mock.method(Util, 'fetchTraced', async (url, opts) => {
+    requests.push({ url, data: JSON.parse(opts.body) });
+    return { ok: requests.length > 1, status: 500 };
+  });
+  await save.listeners.click();
+  assert.equal(cb.checked, true, 'failed write retains the requested compatible state');
+  assert.equal(save.disabled, false, 'failure remains retryable');
+  const saveFirstLine = save.listeners.click;
+  await SetupAdmin._wireCompatibilityForTest({ querySelector: () => ({ appendChild() {} }) }, { plant: 'A' }, 'LINE2', false);
+  await saveFirstLine();
+  assert.match(requests[1].url, /A\/lines\/LINE1\/compatibility$/);
+  assert.deepEqual(requests[1].data, { setup_compatible: true, reason: '' });
+  assert.equal(save.disabled, true, 'saved baseline is clean');
+});

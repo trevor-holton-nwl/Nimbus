@@ -35,6 +35,80 @@ if (typeof globalThis.document === 'undefined') {
 }
 globalThis.window = globalThis.window || {};
 
+test('heatmap foreground meets AA across both theme ramps, including warning orange', () => {
+  const themes = [
+    ['#f4f7fa', '#93610a', '#f39c12', '#b02a20', '#1c2b3a'],
+    ['#16212f', '#d09010', '#e0a018', '#d94a3a', '#e8edf3'],
+  ];
+  for (const colors of themes) {
+    for (let pair = 0; pair < 3; pair++) {
+      for (let step = 0; step <= 100; step++) {
+        const bg = Dashboard._lerpHex(colors[pair], colors[pair + 1], step / 100);
+        const fg = Dashboard._heatForeground(bg, colors[4], '#ffffff');
+        const a = Dashboard._relLuminance(bg), b = Dashboard._relLuminance(fg);
+        assert.ok((Math.max(a, b) + .05) / (Math.min(a, b) + .05) >= 4.5, `${fg} on ${bg}`);
+      }
+    }
+  }
+});
+
+test('heatmap reads tokens from the themed body', () => {
+  const prior = globalThis.getComputedStyle;
+  const priorDoc = globalThis.document;
+  try {
+    globalThis.document = { body: {}, documentElement: {} };
+    globalThis.getComputedStyle = el => ({ getPropertyValue: () => el === globalThis.document.body ? '#16212f' : '#f4f7fa' });
+    assert.equal(Dashboard._cssVar('--bg-subtle', '#ffffff'), '#16212f');
+  } finally { globalThis.getComputedStyle = prior; globalThis.document = priorDoc; }
+});
+
+test('bell and drawer share plant-scoped horizons using the plant clock; footer remains singular', () => {
+  const prior = { doc: globalThis.document, plant: Store.selectedPlant, alerts: Store.alerts, master: Store.masterData,
+    clock: Util.plantClock, vl: AlertsUIAdapter._drawerVL, vlPlant: AlertsUIAdapter._drawerVLPlant,
+    dismissed: new Set(Alerts._dismissed), translate: Util.t };
+  const badge = { style: {}, textContent: '' }, bell = { style: {} }, footer = { hidden: true, textContent: '' };
+  const body = { innerHTML: '', insertAdjacentHTML() { throw new Error('footer must live outside virtual rows'); } };
+  let rows = [];
+  try {
+    globalThis.document = { ...prior.doc, getElementById: id => ({ 'alert-badge': badge, 'alert-bell': bell,
+      'alert-drawer-body': body, 'alert-drawer-footer': footer })[id] || null };
+    Store.setMasterData({ plants: [{ plant: 'AUDIT-P', alt_flag_horizon: 60 }],
+      lines: [{ plant: 'AUDIT-P', machine: 'AUDIT-L' }, { plant: 'OTHER-P', machine: 'OTHER-L' }] }, 'test');
+    Store.setSelectedPlant('AUDIT-P', 'test');
+    Util.plantClock = () => new Date('2020-01-01T08:00:00');
+    Util.t = (key, vars) => key === 'alert.horizon_hidden_duration' ? vars.duration : prior.translate(key, vars);
+    Store.setAlerts([
+      { id: 'visible', line: 'AUDIT-L', sev: 'warn', time: new Date('2020-01-01T08:30:00') },
+      { id: 'hidden', line: 'AUDIT-L', sev: 'err', time: new Date('2020-01-01T10:00:00') },
+      { id: 'other', line: 'OTHER-L', sev: 'err', time: new Date('2020-01-01T08:30:00') },
+      { id: 'other-hidden', line: 'OTHER-L', sev: 'err', time: new Date('2020-01-01T10:00:00') },
+    ], 'test');
+    AlertsUIAdapter._drawerVL = { update(next) { rows = next; }, destroy() {} };
+    AlertsUIAdapter.renderBell();
+    assert.equal(badge.textContent, '1');
+    assert.equal(bell.style.color, 'var(--warn-text)');
+    AlertsUIAdapter.renderDrawer(); AlertsUIAdapter.renderDrawer();
+    assert.deepEqual(rows.map(a => a.id), ['visible']);
+    assert.equal(footer.hidden, false);
+    assert.equal(footer.textContent, '1h', 'a 60-minute horizon must not be described as one day');
+    Store.masterData.plants[0].alt_flag_horizon = 90;
+    AlertsUIAdapter.renderDrawer();
+    assert.equal(footer.textContent, '1h 30m', 'minute precision is retained');
+    assert.equal(AlertsUIAdapter._visibleAlerts().hiddenCount, 1);
+    AlertsUIAdapter.dismissVisible();
+    assert.deepEqual(Store.alerts.map(a => a.id), ['hidden', 'other', 'other-hidden']);
+    assert.ok(!Alerts._dismissed.has('other'), 'dismiss all respects the displayed plant and window');
+    AlertsUIAdapter.renderDrawer();
+    assert.equal(footer.hidden, false, 'all-hidden state still explains the horizon');
+  } finally {
+    globalThis.document = prior.doc; Util.plantClock = prior.clock;
+    Util.t = prior.translate;
+    AlertsUIAdapter._drawerVL = prior.vl; AlertsUIAdapter._drawerVLPlant = prior.vlPlant;
+    Alerts.restoreDismissed(prior.dismissed);
+    Store.setMasterData(prior.master, 'test'); Store.setSelectedPlant(prior.plant, 'test'); Store.setAlerts(prior.alerts, 'test');
+  }
+});
+
 test('Dashboard exposes init/render', () => {
   assert.equal(typeof Dashboard.init, 'function');
   assert.equal(typeof Dashboard.render, 'function');

@@ -191,3 +191,68 @@ test('apply asks for confirmation whenever the batch will delete rows (held, or 
   assert.equal(needs(batch('ready', 3), 'validate'), false);
   assert.equal(needs(batch('ready', 3), 'discard'), false);
 });
+
+
+for (const panel of ['batches', 'outbound', 'archive']) {
+  for (const failOld of [false, true]) {
+    test(`${panel} ignores a stale ${failOld ? 'error' : 'success'} after A-B-A selection`, async t => {
+      const { Util } = await import('../../../frontend/platform/foundation.mjs');
+      const body = {}; const host = { id: `sap-stage-${panel}`, innerHTML: '', querySelectorAll: () => [], querySelector: () => null };
+      const prior = globalThis.document;
+      globalThis.document = { getElementById: id => id === 'sap-tabbody' ? body : id === host.id ? host : null };
+      t.after(() => { globalThis.document = prior; });
+      const requests = [];
+      t.mock.method(Util, 'fetchTraced', (url) => new Promise(resolve => requests.push({ url, resolve })));
+      const first = Interface._loadStagePanelForTest(panel, 'A', body);
+      const middle = Interface._loadStagePanelForTest(panel, 'B', body);
+      const latest = Interface._loadStagePanelForTest(panel, 'A', body);
+      const payload = panel === 'outbound' ? { ready: 12345 } : panel === 'archive' ? { orders: [{ id: 1, production_order: 'CURRENT' }] } : { batches: [{ batch_id: 'CURRENT', status: 'applied', plant: 'A' }] };
+      requests[2].resolve({ ok: true, json: async () => payload }); await latest;
+      const current = host.innerHTML;
+      assert.match(current, panel === 'outbound' ? /12345/ : /CURRENT/);
+      requests[1].resolve({ ok: false, status: 500, json: async () => ({ detail: 'OLD B' }) }); await middle;
+      requests[0].resolve({ ok: !failOld, status: 500, json: async () => ({ detail: 'OLD A', batches: [], orders: [], ready: 0 }) }); await first;
+      assert.equal(host.innerHTML, current);
+    });
+  }
+}
+
+test('archive paging requests older rows and search starts again at the first page', async t => {
+  const { Util } = await import('../../../frontend/platform/foundation.mjs');
+  const body = {}; const handlers = {}; const search = { value: 'MAT%_1' };
+  const host = { id: 'sap-stage-archive', innerHTML: '', querySelectorAll: () => [], querySelector: selector =>
+    selector === 'input[type=search]' ? search : { addEventListener(event, fn) { handlers[selector] = fn; } } };
+  const prior = globalThis.document;
+  globalThis.document = { getElementById: id => id === 'sap-tabbody' ? body : id === host.id ? host : null };
+  t.after(() => { globalThis.document = prior; });
+  const urls = [];
+  t.mock.method(Util, 'fetchTraced', async url => { urls.push(url); return { ok: true, json: async () => ({ orders: [{ id: 1, order_id: 'ORDER' }], has_more: true }) }; });
+  await Interface._loadStagePanelForTest('archive', 'A', body);
+  assert.match(host.innerHTML, />1\u20131</, 'archive range uses a real en dash');
+  handlers['[data-archive-next]'](); await new Promise(resolve => setImmediate(resolve));
+  assert.match(urls.at(-1), /offset=50/);
+  handlers['[data-archive-search]']({ preventDefault() {} }); await new Promise(resolve => setImmediate(resolve));
+  const params = new URL(urls.at(-1), 'http://localhost').searchParams;
+  assert.equal(params.get('offset'), '0'); assert.equal(params.get('search'), 'MAT%_1');
+});
+
+
+for (const failure of [false, true]) {
+  test(`history ignores obsolete ${failure ? 'error' : 'success'} after its host is replaced`, async t => {
+    const { Util } = await import('../../../frontend/platform/foundation.mjs');
+    let body = { innerHTML: '' }; const old = body;
+    const prior = globalThis.document;
+    globalThis.document = { getElementById: id => id === 'sap-tabbody' ? body : null };
+    t.after(() => { globalThis.document = prior; });
+    const requests = [];
+    t.mock.method(Util, 'fetchTraced', url => new Promise(resolve => requests.push({ url, resolve })));
+    const loading = Interface._renderHistoryForTest('stage_planned_orders');
+    const previousHtml = old.innerHTML;
+    body = { innerHTML: 'Replacement tab' };
+    requests[0].resolve({ ok: !failure, status: 500, json: async () => ({ runs: [] }) });
+    await loading;
+    assert.equal(body.innerHTML, 'Replacement tab');
+    assert.equal(old.innerHTML, previousHtml, 'detached host must not be repainted');
+    assert.equal(requests.length, 1, 'obsolete success does not start a second audit request');
+  });
+}

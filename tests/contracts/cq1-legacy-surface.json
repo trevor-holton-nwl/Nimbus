@@ -69,11 +69,6 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.Alerts.dismissAll()"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
       "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
     },
     {
@@ -464,32 +459,12 @@
     {
       "file": "insights/insights-ui.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
-    },
-    {
-      "file": "insights/insights-ui.mjs",
-      "attribute": "onclick",
       "expression": "NIMBUS.Dashboard._latenessDrillClear()"
     },
     {
       "file": "labor/labor-planning.mjs",
       "attribute": "onchange",
-      "expression": "NIMBUS.LaborPlanning.onGroupToggle(this.value,this.checked)"
-    },
-    {
-      "file": "labor/labor-planning.mjs",
-      "attribute": "onchange",
       "expression": "NIMBUS.LaborPlanning.setSpan(+this.value)"
-    },
-    {
-      "file": "labor/labor-planning.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.App.gotoLaborSub('line-plan')"
-    },
-    {
-      "file": "labor/labor-planning.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.LaborPlanning.clearGroupFilter()"
     },
     {
       "file": "master-data/admin-ui.mjs",
@@ -554,7 +529,6 @@
   ],
   "htmlCommands": [
     "AdminCockpit.gotoOvTab",
-    "Alerts.dismissAll",
     "AlertsUIAdapter.toggleDrawer",
     "ColorWheelViewer.close",
     "ColorWheelViewer.search",
@@ -617,6 +591,7 @@
     "App.gotoGanttTimeline",
     "Compute.available",
     "Compute.utilization",
+    "Engine.firmingStatus",
     "ErrorLog.warn",
     "GanttFilter.isolateLine",
     "Hierarchy.render",
@@ -628,6 +603,8 @@
     "Store.blocks",
     "Store.distributionSummary",
     "Store.isFirmed",
+    "Store.lineSettings",
+    "Store.masterData",
     "Store.masterPlant",
     "Store.plantBlocks",
     "Store.pref",
@@ -638,13 +615,13 @@
     "Store.subscribe",
     "Store.tasks",
     "Store.tasksArr",
+    "Store.tasksForSelectedPlant",
     "Store.updateMany",
     "Store.userSettings",
     "Timeline.focus",
     "Timeline.gotoNow",
     "Timeline.rebuild",
     "Toast.show",
-    "UndoStack._entries",
     "UndoStack.push",
     "UndoStack.restoreTasks",
     "UndoStack.snapshotTasks",
@@ -740,7 +717,6 @@
     "TimeMachine._renderPanel",
     "TimeMachine._snapshotAuto",
     "TimeMachine._snapshots",
-    "UndoStack._entries",
     "Utilization._cache"
   ]
 }

@@ -12,6 +12,7 @@
 /* global NIMBUS */
 import { Util, Toast } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
+import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from './calendar-sync.mjs';
 import type { WorkHours } from '../platform/types.mjs';
 
@@ -238,14 +239,14 @@ export const EditCalendar = (() => {
       NIMBUS!.Plant!._persistPlantHours!(_plantName, changed);
       NIMBUS!.Plant!.render!();
       close();
-      Toast.show(Util.t('toast.plant_calendar_clamped'), 'success');
+      Toast.show(Util.t(Sandbox.active ? 'toast.calendar_whatif_local' : 'toast.calendar_changes_pending'), 'info');
     } else {
       Store.setCalendar(_line!, newWh, 'edit-calendar');
       const plant = Store.getPlantForLine(_line!) || Store.selectedPlant;
       if (plant) CalendarSync.saveLineHours(plant, _line!, newWh);
       NIMBUS!.ProdLines!.render!();
       close();
-      Toast.show(Util.t('toast.line_calendar_updated', { line: _line! }), 'success');
+      Toast.show(Util.t(Sandbox.active ? 'toast.calendar_whatif_local' : 'toast.calendar_changes_pending'), 'info');
     }
   }
 

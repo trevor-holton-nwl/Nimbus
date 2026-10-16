@@ -25,19 +25,19 @@ for (const locale of LOCALES) {
 // Locale entries are usually one per line, but valid object literals may keep
 // several short translations together; key discovery must not mistake that
 // formatting choice for a missing translation.
-const KEY_RE = /'([\w.]+)'\s*:/g;
+const KEY_RE = /(['"])([\w.]+)\1\s*:/g;
 
 function keysOf(locale) {
   const text = readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8');
   const keys = new Set();
   let m;
-  while ((m = KEY_RE.exec(text))) keys.add(m[1]);
+  while ((m = KEY_RE.exec(text))) keys.add(m[2]);
   return keys;
 }
 
 function keyCount(locale, key) {
   const text = readFileSync(join(LOCALES_DIR, `${locale}.js`), 'utf8');
-  return [...text.matchAll(new RegExp(`'${key}'\\s*:`, 'g'))].length;
+  return [...text.matchAll(KEY_RE)].filter(match => match[2] === key).length;
 }
 
 test('every constraint.<field> key exists in all 5 locales', () => {
@@ -626,6 +626,34 @@ const localeDict = locale => {
   return sandbox.window.__NIMBUS_LOCALES[locale];
 };
 const placeholdersOf = s => [...String(s).matchAll(/\{\{(\w+)\}\}/g)].map(m => m[1]).sort().join(',');
+
+const FRONTEND_AUDIT_KEYS = [
+  'alert.horizon_hidden_duration', 'intel.snapshot_scope_unknown',
+  'ui.system_config_saving', 'ui.system_config_unsaved', 'alert.summary_counts', 'alert.summary_open',
+  'ui.sap_archive_search', 'btn.search', 'sec.assigned_plants', 'sec.available_plants',
+  'intel.snapshot_entries', 'intel.select_snapshot', 'ui.material_draft_retained',
+  'btn.dist_expand_detail', 'btn.dist_collapse_detail', 'ui.dist_editor_region',
+  'toast.calendar_changes_pending', 'toast.calendar_whatif_local', 'toast.snapshot_restore_skipped',
+  'ui.print_scope', 'ui.print_scope_all', 'ui.print_scope_plant', 'ui.print_scope_filtered',
+  ...['save_failed', 'invalid_save_response', 'pins_preserved', 'aggregate_hint', 'empty_groups',
+    'horizon_filtered', 'capacity_note', 'group_note', 'line_hours_label', 'group_hours_label',
+    'line_cell_title', 'pinned', 'reset_split', 'reset_calendar', 'pasted', 'undo_delete',
+    'undo_paste', 'undo_group', 'undo_line', 'undo_reset', 'split_hint', 'reconciliation_help',
+    'loading', 'load_failed', 'retry', 'search_groups', 'no_matching_groups', 'all_groups',
+    'selected_groups', 'clear_groups'].map(key => `labor.${key}`),
+];
+
+test('frontend audit copy exists once in every locale with complete interpolation parameters', () => {
+  const dicts = Object.fromEntries(LOCALES.map(locale => [locale, localeDict(locale)]));
+  for (const key of FRONTEND_AUDIT_KEYS) {
+    for (const locale of LOCALES) {
+      assert.ok(keysOf(locale).has(key), `${locale} key discovery missed ${key}`);
+      assert.equal(keyCount(locale, key), 1, `${locale} must define ${key} exactly once`);
+      assert.ok(typeof dicts[locale][key] === 'string' && dicts[locale][key].trim(), `${locale} has no usable ${key}`);
+      assert.equal(placeholdersOf(dicts[locale][key]), placeholdersOf(dicts.en[key]), `${locale} interpolation differs for ${key}`);
+    }
+  }
+});
 
 test('U32: every key this branch added exists in all five locales, non-empty, with the same {{placeholder}} set as en.js', () => {
   const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));

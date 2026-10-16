@@ -808,7 +808,7 @@ export interface paths {
         };
         /**
          * Sap Stage Archive
-         * @description Vanish-deleted orders of the last 30 days. Response: {orders: [...]}.
+         * @description Paged vanished orders; optional literal search by order, material or machine.
          */
         get: operations["sap_stage_archive_sap_staging_archive__plant__get"];
         put?: never;
@@ -2530,6 +2530,26 @@ export interface paths {
          * @description Upsert or delete line-level labor cells. Payload: { subnetwork, plant, cells:[{machine, day, avail_hours, source}] }
          */
         post: operations["labor_plan_line_post_labor_plan_line_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/labor-plan/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Labor Plan Batch Post
+         * @description Save aggregate and line-cell changes in one transaction (also used by Undo).
+         */
+        post: operations["labor_plan_batch_post_labor_plan_batch_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5220,6 +5240,8 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                offset?: number;
+                search?: string;
             };
             header?: never;
             path: {
@@ -8128,6 +8150,41 @@ export interface operations {
         };
     };
     labor_plan_line_post_labor_plan_line_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    labor_plan_batch_post_labor_plan_batch_post: {
         parameters: {
             query?: never;
             header?: never;

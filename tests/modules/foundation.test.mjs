@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Config, PerfMonitor, VirtualList, Toast, Modal } from '../../frontend/platform/foundation.mjs';
+
+test('contrastText handles equivalent hex and RGB heatmap fills', async () => {
+  const { Util } = await import('../../frontend/platform/foundation.mjs');
+  for (const color of ['#f39c12', 'rgb(243, 156, 18)', 'rgb(243 156 18)']) {
+    const foreground = Util.contrastText(color);
+    assert.equal(foreground, '#0c1c30');
+    assert.ok((Util.relativeLuminance(color) + .05) / (Util.relativeLuminance(foreground) + .05) >= 4.5);
+  }
+  assert.equal(Util.relativeLuminance('#fff'), 1);
+});
 import { Util, ErrorLog } from '../../frontend/platform/foundation.mjs';
 import { createRequire as makeRequire } from 'node:module';
 
@@ -567,6 +577,11 @@ test('Modal: Tab stays trapped (including focus on <body> and dialogs with no fo
     globalThis.document.activeElement = root; // a click on the backdrop left focus on <body>
     assert.equal(key(root, 'Tab').prevented, true, 'Tab from <body> is pulled back into the open dialog');
     assert.ok(A.m.contains(globalThis.document.activeElement));
+    A.btns[0].getClientRects = () => [];
+    A.btns[1].getClientRects = () => [{}];
+    globalThis.document.activeElement = root;
+    key(root, 'Tab');
+    assert.equal(globalThis.document.activeElement, A.btns[1], 'CSS-hidden controls are skipped');
     Modal.close('tabA');
     globalThis.document.activeElement = root;
     assert.equal(key(root, 'Tab').prevented, false, 'no trap once the dialog is closed');

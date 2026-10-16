@@ -60,3 +60,9 @@ Run: `node --test tests/modules/calendar/*.test.mjs`
 - Two distinct import cycles touch this domain (see Key invariants above) — they're independent of each other; don't describe them as one loop.
 
 **Cross-link:** `frontend/platform/CLAUDE.md` carries a one-line pointer to the capacity-math mirror rule; the substance lives here.
+
+
+**Calendar persistence boundaries (frontend audit, 2026-10-16):** `saveLineHours` guards at enqueue time and clones the hours payload. A live batch whose 600 ms timer expires during What-If waits for `sandbox:exited`: discard sends the preserved live values; promotion uses current retained values. `flushPlant` cancels any old queued batch before promoting a plant, preventing its timer from overwriting the promotion. Blackout upsert guards run before pending-delete tombstones are modified. The Edit Calendar modal reports local/pending or What-If-only changes, never a durable backend acknowledgment before sync completes. Regressions: `calendar-sync-boundaries.test.mjs`, `edit-calendar.test.mjs`.
+
+
+**Deferred hydration race (review R-PLN-001):** Hours edits carry per-plant/per-machine revisions (`''` is the plant-hours key). A calendar GET captures its start revision and pending keys. Hydration leaves queued, in-flight, failed, and subsequently edited hours intact, including when the POST acknowledges before the older GET body arrives. A successful POST clears only its own revision; failed edits remain protected and use the existing Retry action. Unrelated lines/plants still hydrate. Migration does not silently resubmit failed/pending hour edits. `calendar-hydration-races.test.mjs` exercises real SandboxAdapter-before-queue subscription ordering on discard/promotion.

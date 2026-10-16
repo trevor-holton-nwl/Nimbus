@@ -399,3 +399,56 @@ test('refresh with no plant selected resolves false without fetching', async t =
   assert.equal(await f.grid.refresh('material-plant'), false);
   assert.equal(f.requests.length, count);
 });
+
+
+test('unsaved Material Plant drafts survive plant switches and are saved only to their plant', async t => {
+  const f = await gridFixture(t);
+  await f.load('A', 'white'); f.edit('red');
+  await f.load('B', 'green'); f.edit('blue');
+  await f.load('A', 'white');
+  assert.equal(f.rows()[0].color, 'red');
+  assert.equal(f.saveButton().disabled, false);
+  f.grid._save('material-plant');
+  assert.deepEqual(JSON.parse(f.requests.at(-1).opts.body), { plant: 'A', updates: [{ material_id: 'MAT', color: 'red' }] });
+  f.respond(f.requests.at(-1), { updated: 1 }); await settle();
+  await f.load('B', 'green');
+  assert.equal(f.rows()[0].color, 'blue');
+  f.grid._discard('material-plant');
+  assert.equal(f.rows()[0].color, 'green');
+});
+
+
+for (const action of ['save', 'discard']) {
+  test(`plant drafts do not replay a previously ${action === 'save' ? 'saved' : 'discarded'} field over fresh data`, async t => {
+    const f = await gridFixture(t);
+    await f.load('A', 'white'); f.edit('red');
+    if (action === 'save') {
+      f.grid._save('material-plant'); f.respond(f.requests.at(-1), { updated: 1 }); await settle();
+    } else f.grid._discard('material-plant');
+    f.edit('TOOL', 'prt_01');
+    await f.load('B', 'green'); await f.load('A', 'purple');
+    assert.equal(f.rows()[0].color, 'purple');
+    assert.equal(f.rows()[0].prt_01, 'TOOL');
+    f.grid._save('material-plant');
+    assert.deepEqual(JSON.parse(f.requests.at(-1).opts.body).updates, [{ material_id: 'MAT', prt_01: 'TOOL' }]);
+    f.respond(f.requests.at(-1), { updated: 1 }); await settle();
+  });
+}
+
+for (const later of ['red', 'blue', 'white']) {
+  test(`offscreen save acknowledgement retires submitted fields and preserves later ${later} edits`, async t => {
+    const f = await gridFixture(t);
+    await f.load('A', 'white'); f.edit('red'); f.grid._save('material-plant');
+    const pending = f.requests.at(-1);
+    f.edit(later); f.edit('TOOL', 'prt_01');
+    await f.load('B', 'green');
+    f.respond(pending, { updated: 1 }); await settle();
+    await f.load('A', 'purple');
+    assert.equal(f.rows()[0].color, later === 'red' ? 'purple' : later);
+    assert.equal(f.rows()[0].prt_01, 'TOOL');
+    f.grid._save('material-plant');
+    assert.deepEqual(JSON.parse(f.requests.at(-1).opts.body).updates,
+      [{ material_id: 'MAT', ...(later === 'red' ? {} : { color: later }), prt_01: 'TOOL' }]);
+    f.respond(f.requests.at(-1), { updated: 1 }); await settle();
+  });
+}

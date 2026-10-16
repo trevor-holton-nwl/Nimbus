@@ -12,20 +12,6 @@ let storage;
 let calls;
 let restoreGlobals;
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
-// Mark only the known assertion as TODO. Setup errors or changed failure shapes
-// fail normally; an unexpected pass also fails so the marker must be removed.
-function knownFailure(t, reason, check, actual, expected) {
-  try {
-    check();
-  } catch (error) {
-    assert.equal(error.code, 'ERR_ASSERTION');
-    assert.deepEqual(error.actual, actual);
-    assert.deepEqual(error.expected, expected);
-    t.todo(reason);
-    throw error;
-  }
-  assert.fail(`Known defect no longer reproduces; remove expected-failure wrapper: ${reason}`);
-}
 const block = (id = 'b', plant = 'P1', line = 'L1') => ({
   id, plant, line, start: new Date('2031-01-06T09:00:00Z'), end: new Date('2031-01-06T10:00:00Z'), reason: 'maintenance',
 });
@@ -44,6 +30,7 @@ beforeEach(t => {
   t.mock.method(Toast, 'show', () => {});
   for (const method of ['warn', 'error', 'info']) t.mock.method(ErrorLog, method, () => {});
   CalendarSync._hydrating = false;
+  CalendarSync._hoursEdits = {};
   CalendarSync._pendingLineHours = {};
   CalendarSync._whDebounce = {};
   CalendarSync._deferredHydrationPlant = null;
@@ -59,6 +46,8 @@ beforeEach(t => {
 });
 
 afterEach(() => {
+  for (const unsubscribe of Object.values(CalendarSync._lineHoursWait)) unsubscribe();
+  CalendarSync._lineHoursWait = {};
   for (const timer of Object.values(CalendarSync._whDebounce)) clearTimeout(timer);
   CalendarSync._hydrating = false;
   Sandbox.active = false;
@@ -76,10 +65,7 @@ test('discarding What-If before the debounce expires must not persist its specul
   assert.deepEqual(Store.calendars.L1.workHours, hours);
   t.mock.timers.tick(600);
   await settle();
-  assert.deepEqual(calls[0]?.body, { plant: 'P1', lines: [{ machine: 'L1', work_hours: laterHours }] });
-  knownFailure(t,
-    'saveLineHours queues during What-If; after discard the delayed _post writes discarded hours.',
-    () => assert.equal(calls.length, 0, 'discarded What-If calendar changes must never reach the backend'), 1, 0);
+  assert.equal(calls.length, 0, 'discarded What-If calendar changes must never reach the backend');
 });
 
 for (const kind of ['line', 'plant']) {
@@ -91,9 +77,7 @@ for (const kind of ['line', 'plant']) {
     else await CalendarSync.savePlantBlackoutUpsert(block());
     Sandbox.exit(false, 'test');
     assert.equal(calls.length, 0);
-    knownFailure(t,
-      'Upsert clears durable pending deletes before checking Sandbox.active; discarded recreation loses the live delete.',
-      () => assert.equal(storage.get(pendingKey), before, 'What-If must not alter the durable live delete queue'), undefined, before);
+    assert.equal(storage.get(pendingKey), before, 'What-If must not alter the durable live delete queue');
   });
 }
 
@@ -303,4 +287,77 @@ test('promotion includes explicit removals and only the selected plants current 
   assert.deepEqual(lineWrite.upserts.map(b => b.id), ['own']);
   assert.deepEqual(lineWrite.deletes, ['removed']);
   assert.equal(storage.has(pendingKey), false);
+});
+
+
+test('live queued hours survive a debounce that expires inside a discarded scenario', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  Store.setCalendar('L1', hours, 'test');
+  CalendarSync.saveLineHours('P1', 'L1', hours);
+  Sandbox.enter('test');
+  Store.setCalendar('L1', laterHours, 'test');
+  CalendarSync.saveLineHours('P1', 'L1', laterHours);
+  t.mock.timers.tick(600);
+  await settle();
+  assert.equal(calls.length, 0);
+  Sandbox.exit(false, 'test');
+  await settle();
+  assert.deepEqual(calls.map(call => call.body), [{ plant: 'P1', lines: [{ machine: 'L1', work_hours: hours }] }]);
+});
+
+test('promotion cancels old live debounce so it cannot overwrite promoted hours', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  Store.setCalendar('L1', hours, 'test');
+  CalendarSync.saveLineHours('P1', 'L1', hours);
+  Sandbox.enter('test');
+  Store.setCalendar('L1', laterHours, 'test');
+  CalendarSync.saveLineHours('P1', 'L1', laterHours);
+  Sandbox.exit(true, 'test');
+  CalendarSync.flushPlant('P1');
+  t.mock.timers.tick(600);
+  await settle();
+  const lineWrites = calls.filter(call => call.url.endsWith('/line-hours'));
+  assert.deepEqual(lineWrites.map(call => call.body.lines), [[{ machine: 'L1', work_hours: laterHours }]]);
+});
+
+
+test('a live batch cannot be altered through a work-hours object mutated inside What-If', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const mutable = { 1: [8, 16] };
+  CalendarSync.saveLineHours('P1', 'L1', mutable);
+  Sandbox.enter('test');
+  mutable[1][0] = 11;
+  Sandbox.exit(false, 'test');
+  t.mock.timers.tick(600);
+  await settle();
+  assert.deepEqual(calls[0].body.lines[0].work_hours, hours);
+});
+
+test('a pretrial batch for an unchanged other plant resumes on promotion after its timer elapsed', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  Store.setCalendar('L2', hours, 'test');
+  CalendarSync.saveLineHours('P2', 'L2', hours);
+  Sandbox.enter('test');
+  Store.setCalendar('L1', laterHours, 'test');
+  t.mock.timers.tick(600);
+  assert.equal(calls.length, 0);
+  Sandbox.exit(true, 'test');
+  CalendarSync.flushPlant('P1');
+  await settle();
+  const other = calls.filter(call => call.url.endsWith('/line-hours') && call.body.plant === 'P2');
+  assert.deepEqual(other.map(call => call.body.lines), [[{ machine: 'L2', work_hours: hours }]]);
+});
+
+test('hydration must not leave delayed line-hours or clear pending-delete tombstones', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  CalendarSync._trackPendingDeletes('P1', 'line', ['b'], true);
+  const before = storage.get(pendingKey);
+  CalendarSync._hydrating = true;
+  CalendarSync.saveLineHours('P1', 'L1', hours);
+  await CalendarSync.saveLineBlackoutUpsert(block());
+  CalendarSync._hydrating = false;
+  t.mock.timers.tick(600);
+  await settle();
+  assert.equal(calls.length, 0);
+  assert.equal(storage.get(pendingKey), before);
 });

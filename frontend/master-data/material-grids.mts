@@ -115,6 +115,7 @@ interface GridState {
   distinctSet: Map<string, Set<string>>;
   search: Map<string, string>;
   dirty: Map<string, MatPlantPatch>;
+  drafts: Map<string, MatPlantPatch[]>;
   baseline: Map<string, { prt_01: string; prt_02: string; color: string; default_machine: string }>;
   readOnly: boolean;
   writes: Map<string, PendingWrite>;
@@ -339,7 +340,7 @@ function _mkState(): GridState {
   return {
     api: null, rows: [], plant: null, inflight: null,
     selected: new Map(), distinct: new Map(), distinctSet: new Map(), search: new Map(),
-    dirty: new Map(), baseline: new Map(), readOnly: false, writes: new Map(), edited: new Map(),
+    dirty: new Map(), drafts: new Map(), baseline: new Map(), readOnly: false, writes: new Map(), edited: new Map(),
     loaded: false, generation: 0,
   };
 }
@@ -394,6 +395,23 @@ function _indexRows(spec: GridSpec, rows: MaterialGridRow[]): void {
 function _resetGridForPlant(spec: GridSpec): void {
   const st = _state[spec.id];
   st.generation++;
+  // Keep unsaved scalar edits by plant; fresh reads establish the baseline on return.
+  if (st.plant && (st.dirty.size || st.writes.has(st.plant))) {
+    const patches = st.rows.flatMap(row => {
+      const key = spec.rowKey(row);
+      const fields = new Set(Object.keys(st.dirty.get(key) || {}));
+      // A pending write can make a return to the old baseline dirty later.
+      // Keep only those pending fields, never the historical edit set.
+      const submitted = st.writes.get(st.plant!)?.updates.find(update => update.material_id === row.material_id);
+      for (const field of MP_EDITABLE) {
+        if (submitted && field in submitted && String(row[field] ?? '') !== String(submitted[field] ?? '')) fields.add(field);
+      }
+      const patch: MatPlantPatch = { material_id: row.material_id };
+      for (const field of MP_EDITABLE) if (fields.has(field)) patch[field] = String(row[field] ?? '');
+      return MP_EDITABLE.some(field => field in patch) ? [patch] : [];
+    });
+    if (patches.length) st.drafts.set(st.plant, patches);
+  }
   st.inflight?.abort();
   st.inflight = null;
   st.rows = [];
@@ -453,6 +471,21 @@ async function _load(spec: GridSpec, plant: string): Promise<void> {
         });
       }
     }
+    for (const patch of st.drafts.get(plant) || []) {
+      const key = `${patch.material_id}|${plant}`;
+      const row = st.rows.find(r => spec.rowKey(r) === key);
+      const baseline = st.baseline.get(key);
+      if (!row || !baseline) continue;
+      const remaining: MatPlantPatch = { material_id: patch.material_id };
+      for (const field of MP_EDITABLE) if (field in patch) {
+        row[field] = patch[field];
+        if (String(patch[field] ?? '') !== baseline[field]) remaining[field] = patch[field];
+      }
+      st.edited.set(key, new Set(MP_EDITABLE.filter(field => field in patch)));
+      if (MP_EDITABLE.some(field => field in remaining)) st.dirty.set(key, remaining);
+    }
+    st.drafts.delete(plant);
+    _indexRows(spec, st.rows);
     st.plant = plant;
     st.loaded = true;
     st.readOnly = false;
@@ -865,6 +898,19 @@ async function _save(id: GridId): Promise<void> {
     }
     const body = await res.json() as { updated?: number; columns?: string[] };
     pendingWrite.succeeded = true;
+    const retained = st.drafts.get(plant);
+    if (retained) {
+      for (const patch of retained) {
+        const submitted = updates.find(update => update.material_id === patch.material_id);
+        if (!submitted) continue;
+        for (const field of MP_EDITABLE) {
+          if (field in submitted && patch[field] === submitted[field]) delete patch[field];
+        }
+      }
+      const remaining = retained.filter(patch => MP_EDITABLE.some(field => field in patch));
+      if (remaining.length) st.drafts.set(plant, remaining);
+      else st.drafts.delete(plant);
+    }
     if (st.plant !== plant) return;
     for (const u of updates) {
       const key = `${u.material_id}|${plant}`;
@@ -989,7 +1035,7 @@ export const MaterialGrids = {
       // re-invoked by gotoMasterSub for the active sub-tab).
       for (const spec of Object.values(SPECS)) {
         if (_state[spec.id].dirty.size) {
-          Toast.show(Util.t('ui.n_unsaved', { count: _state[spec.id].dirty.size }), 'warn');
+          Toast.show(Util.t('ui.material_draft_retained', { plant: _state[spec.id].plant || '' }), 'warn');
         }
         _resetGridForPlant(spec);
       }

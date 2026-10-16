@@ -68,7 +68,10 @@ def test_material_grids_traverse_every_material_once_with_constant_query_budget(
                 assert row["plant"] == plant
                 assert row["min_lot_size"] == 1
         seen.extend(row["material_id"] for row in page["rows"])
-    assert seen == expected
+    # PostgreSQL uses the database collation: punctuation can sort before
+    # digits on Windows. Assert complete, once-only traversal independently
+    # of Python's code-point order; duplicate/missing pages still fail.
+    assert sorted(seen) == expected
     assert len(set(seen)) == len(expected)
     assert len(set(query_counts)) == 1
     assert max(query_counts) <= 4, "catalog enrichment must not query once per material"

@@ -2,7 +2,7 @@
 
 ## What lives here
 
-- `routes.py` (84 lines, 4 routes) — `GET /labor-plan` (aggregate line-group × ISO-week cells), `POST /labor-plan` (upsert/delete aggregate cells), `GET /labor-plan/line` (line-level machine × calendar-day cells, optionally filtered by group/date range), `POST /labor-plan/line` (upsert/delete line-level cells). All four are thin wrappers over `master_data.py` functions — no logic of its own beyond payload unpacking, a 400 on missing `plant`, and the per-user plant-scope check (`md._assert_plant_allowed`, 403 out of scope). Reads and writes need an authenticated user, not an admin.
+- `routes.py` (5 routes) — `GET /labor-plan` (aggregate line-group × ISO-week cells), `POST /labor-plan` (upsert/delete aggregate cells), `GET /labor-plan/line` (line-level machine × calendar-day cells, optionally filtered by group/date range), `POST /labor-plan/line` (upsert/delete line-level cells). `POST /labor-plan/batch` atomically persists aggregate and derived line cells, including Undo. The routes are thin wrappers over `master_data.py` functions — no logic of its own beyond payload unpacking, a 400 on missing `plant`, and the per-user plant-scope check (`md._assert_plant_allowed`, 403 out of scope). Reads and writes need an authenticated user, not an admin.
 
 This is a small, self-contained domain by route count, but it earns its own folder anyway: it has its **own tables** (the aggregate labor-plan table and the line-level labor-cell table, both owned by `master_data.py`), which is the source plan's stated reasoning for giving it a dedicated home rather than folding it into `master_data`.
 
@@ -26,11 +26,18 @@ Deferred split: the actual data functions (`load_labor_plan`, `upsert_labor_plan
 
 **Imported by:** nothing outside `brain.py`'s router registration — no other domain imports `backend.labor.routes`.
 
-**Endpoints:** `GET /labor-plan`, `POST /labor-plan`, `GET /labor-plan/line`, `POST /labor-plan/line`.
+**Endpoints:** `GET /labor-plan`, `POST /labor-plan`, `GET /labor-plan/line`, `POST /labor-plan/line`, `POST /labor-plan/batch`.
 
 ## Tests
 
-No dedicated Python test file exists for this domain (`tests/` has no `test_labor*.py`); plant-scope 403s on all four routes are covered in `tests/test_rbac_plant_scoping.py`, and the frontend editor in `tests/modules/labor/labor-planning.test.mjs`. If you add labor-plan-specific tests, they belong in a new `tests/test_labor_plan.py` rather than folded into `tests/test_master_data.py`.
+`tests/test_labor_plan.py` covers the atomic batch, validation, RBAC and actual PostgreSQL rollback. `tests/test_labor_persistence_workflows.py` and `tests/test_api_labor_coverage.py` cover the legacy endpoints; the latter retains known malformed-payload xfails. Plant-scope checks also live in `tests/test_rbac_plant_scoping.py`. Frontend behavior is covered by `tests/modules/labor/labor-planning.test.mjs` and `labor-audit.test.mjs`.
+
+## Atomic edit contract (2026-10-16)
+
+The frontend uses `/labor-plan/batch` with `{subnetwork, plant, cells, line_cells, intent}` (`reconcile`, `explicit`, or `undo`). The batch validates ISO keys, finite nonnegative hours and `auto_split`/`override` provenance; both tables and audit rows commit in one transaction. Automatic reconciliation conditions its upsert/delete mutations on the current row not being an override, including after concurrent row-lock waits. Explicit daily reset and Undo intentionally can replace a pin. The response includes canonical `lines.rows`, actual `lines.applied` keys and preserved `lines.skipped` rows; frontend cache and Undo follow the acknowledgement. Audits count actual affected rows. Legacy POST routes retain their compatibility behavior. No table migration is required.
+
+Frontend automatic splits preserve pinned daily cells; clearing an aggregate deletes only automatic descendants. Undo restores both levels including cell absence and source. The split denominator still includes every open line/day slot; overrides may make line totals differ from group totals. All five views use the selected horizon (up to 112 days), and daily views/KPIs share group/line scope. Aggregate cells always edit the full group, even when selected lines narrow which groups are visible. The in-page write queue orders rapid edits and defers plant-cache invalidation until queued writes finish. Daily save acknowledgements patch existing inputs to preserve subsequent drafts/focus. Cross-client version checking for explicit edits/Undo remains a follow-up, documented in `docs/frontend-audit/2026-10-16/labor.md`.
+
 
 ## Gotchas
 

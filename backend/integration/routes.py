@@ -843,10 +843,12 @@ async def sap_stage_upload(object: str, request: Request, file: UploadFile = Fil
 
 @router.get("/sap/staging/archive/{plant}", dependencies=[Depends(require_admin)])
 def sap_stage_archive(plant: str, limit: int = Query(default=200, ge=1, le=1000),
+                      offset: int = Query(default=0, ge=0), search: str = Query(default="", max_length=200),
                       allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Vanish-deleted orders of the last 30 days. Response: {orders: [...]}."""
+    """Paged vanished orders; optional literal search by order, material or machine."""
     _assert_stage_plant_allowed(plant, allowed_plants)
-    return {"orders": sap_staging.list_archived(plant, limit=limit)}
+    orders = sap_staging.list_archived(plant, limit=limit + 1, offset=offset, search=search)
+    return {"orders": orders[:limit], "offset": offset, "limit": limit, "has_more": len(orders) > limit}
 
 
 @router.post("/sap/staging/archive/{archive_id}/restore",

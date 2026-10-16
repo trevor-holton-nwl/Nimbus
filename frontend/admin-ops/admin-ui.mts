@@ -3033,7 +3033,33 @@ export const AdminCockpit = {
    ========================================================================== */
 export const SystemConfig = (() => {
   const API = Config.API_BASE;
-  let _orderFields: Record<string, { grid?: boolean; inspector?: boolean }> = {};
+  type Fields = Record<string, { grid: boolean; inspector: boolean }>;
+  let _baseline: Fields = {};
+  let _draft: Fields = {};
+  let _loaded = false;
+  let _saving = false;
+  let _loadGeneration = 0;
+  let _revision = 0;
+
+  function _normalize(fields: Record<string, { grid?: boolean; inspector?: boolean }>): Fields {
+    return Object.fromEntries(ORDER_FIELD_CATALOG.map(field => [field.key, {
+      grid: fields[field.key]?.grid ?? field.gridDefault,
+      inspector: fields[field.key]?.inspector ?? field.inspectorDefault,
+    }]));
+  }
+
+  function _dirty(): boolean {
+    return _loaded && ORDER_FIELD_CATALOG.some(field =>
+      _draft[field.key].grid !== _baseline[field.key].grid || _draft[field.key].inspector !== _baseline[field.key].inspector);
+  }
+
+  function _sync(): void {
+    const host = document.getElementById('system-config-host');
+    const save = host?.querySelector<HTMLButtonElement>('#sc-save-btn');
+    if (save) save.disabled = _saving || !_dirty();
+    const state = host?.querySelector<HTMLElement>('#sc-save-state');
+    if (state) state.textContent = _saving ? Util.t('ui.system_config_saving') : _dirty() ? Util.t('ui.system_config_unsaved') : '';
+  }
 
   function _writeHeaders(): Record<string, string> {
     return { 'x-user-email': Session.actor(), 'content-type': 'application/json' };
@@ -3043,6 +3069,10 @@ export const SystemConfig = (() => {
   async function render(): Promise<void> {
     const host = document.getElementById('system-config-host');
     if (!host) return;
+    const generation = ++_loadGeneration;
+    if (_loaded && (_saving || _dirty())) { _paint(); return; }
+    const revision = _revision;
+    const current = () => generation === _loadGeneration && revision === _revision && document.getElementById('system-config-host') === host;
     try {
       // Response body IS the settings content directly ({"orderFields": {...}}),
       // no wrapper envelope — see master_data.get_system_settings() in brain.py.
@@ -3051,9 +3081,13 @@ export const SystemConfig = (() => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
-      _orderFields = data.orderFields ?? {};
+      if (!current()) return;
+      _baseline = _normalize(data.orderFields ?? {});
+      _draft = _normalize(_baseline);
+      _loaded = true;
       _paint();
     } catch (e) {
+      if (!current()) return;
       host.innerHTML = `<div class="empty-state">${Util.escapeHtml(Util.t('ui.system_config_load_failed'))}: ${Util.escapeHtml((e as Error).message)}</div>`;
       ErrorLog.error('system-config', `Load system settings failed: ${(e as Error).message}`);
     }
@@ -3063,13 +3097,13 @@ export const SystemConfig = (() => {
     const host = document.getElementById('system-config-host');
     if (!host) return;
     const rows = ORDER_FIELD_CATALOG.map((f) => {
-      const cfg = _orderFields[f.key] || {};
+      const cfg = _draft[f.key] || {};
       const gridChecked = cfg.grid ?? f.gridDefault;
       const inspChecked = cfg.inspector ?? f.inspectorDefault;
       return `<tr>
         <td class="md-th">${Util.escapeHtml(Util.t(f.i18nInspectorKey))}</td>
-        <td style="text-align:center"><input type="checkbox" data-sc-field="${Util.escapeHtml(f.key)}" data-sc-surface="grid" ${gridChecked ? 'checked' : ''}></td>
-        <td style="text-align:center"><input type="checkbox" data-sc-field="${Util.escapeHtml(f.key)}" data-sc-surface="inspector" ${inspChecked ? 'checked' : ''}></td>
+        <td style="text-align:center"><input type="checkbox" data-sc-field="${Util.escapeHtml(f.key)}" data-sc-surface="grid" aria-label="${Util.escapeHtml(Util.t(f.i18nInspectorKey))}: ${Util.escapeHtml(Util.t('ui.system_config_show_grid'))}" ${gridChecked ? 'checked' : ''}></td>
+        <td style="text-align:center"><input type="checkbox" data-sc-field="${Util.escapeHtml(f.key)}" data-sc-surface="inspector" aria-label="${Util.escapeHtml(Util.t(f.i18nInspectorKey))}: ${Util.escapeHtml(Util.t('ui.system_config_show_inspector'))}" ${inspChecked ? 'checked' : ''}></td>
       </tr>`;
     }).join('');
 
@@ -3088,26 +3122,31 @@ export const SystemConfig = (() => {
           </table>
         </div>
         <div style="margin-top:12px;display:flex;align-items:center;gap:10px;">
-          <button class="btn btn-primary" id="sc-save-btn">${Util.escapeHtml(Util.t('btn.save'))}</button>
+          <button class="btn btn-primary" id="sc-save-btn" disabled>${Util.escapeHtml(Util.t('btn.save'))}</button>
+          <span id="sc-save-state" role="status" aria-live="polite"></span>
         </div>
       </div>
     `;
 
     host.querySelector('#sc-save-btn')?.addEventListener('click', _save);
+    host.querySelectorAll<HTMLInputElement>('input[data-sc-field]').forEach(input => {
+      input.addEventListener('change', () => {
+        const key = input.dataset.scField!;
+        const surface = input.dataset.scSurface as 'grid' | 'inspector';
+        _draft[key][surface] = input.checked;
+        ++_revision;
+        _sync();
+      });
+    });
+    _sync();
   }
 
   async function _save(): Promise<void> {
-    const host = document.getElementById('system-config-host');
-    if (!host) return;
-    const next: Record<string, { grid: boolean; inspector: boolean }> = {};
-    for (const f of ORDER_FIELD_CATALOG) {
-      const gridEl = host.querySelector<HTMLInputElement>(`input[data-sc-field="${f.key}"][data-sc-surface="grid"]`);
-      const inspEl = host.querySelector<HTMLInputElement>(`input[data-sc-field="${f.key}"][data-sc-surface="inspector"]`);
-      next[f.key] = {
-        grid: gridEl ? gridEl.checked : f.gridDefault,
-        inspector: inspEl ? inspEl.checked : f.inspectorDefault,
-      };
-    }
+    if (_saving || !_dirty()) return;
+    const next = _normalize(_draft);
+    _saving = true;
+    ++_revision; // Any earlier GET is obsolete once a write starts.
+    _sync();
     try {
       // POST body and response are both the unwrapped { orderFields: {...} }
       // shape (same contract as the GET above) — the whole map is always sent,
@@ -3121,12 +3160,15 @@ export const SystemConfig = (() => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
-      _orderFields = saved.orderFields ?? next;
-      Store.setOrderFieldVisibility(_orderFields, 'system-config');
+      _baseline = _normalize(saved.orderFields ?? next);
+      Store.setOrderFieldVisibility(_baseline, 'system-config');
       Toast.show(Util.t('toast.system_config_saved'), 'success');
     } catch (e) {
       ErrorLog.error('system-config', `Save system settings failed: ${(e as Error).message}`);
       Toast.show(Util.t('toast.system_config_save_failed'), 'error');
+    } finally {
+      _saving = false;
+      _sync();
     }
   }
 

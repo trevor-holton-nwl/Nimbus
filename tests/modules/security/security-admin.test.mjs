@@ -6,25 +6,38 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Security } from '../../../frontend/security/security-admin.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 let fixtureId = 0;
 
-async function rolesFixture(t) {
+async function rolesFixture(t, plants = []) {
   function node(dataset = {}) {
     let html = '';
     const children = new Map();
     const listeners = new Map();
+    const descendants = new Set();
     return {
+      value: '',
+      focus() { globalThis.document.activeElement = this; },
+      detach() {
+        if (globalThis.document.activeElement === this) globalThis.document.activeElement = null;
+        for (const id of descendants) { nodes.get(id)?.detach(); nodes.delete(id); }
+        descendants.clear();
+      },
       dataset,
       addEventListener(type, listener) { listeners.set(type, listener); },
       fire(type) { listeners.get(type)?.(); },
       querySelectorAll: selector => children.get(selector) || [],
       get innerHTML() { return html; },
       set innerHTML(value) {
+        this.detach();
         html = value;
-        for (const [attr, key] of [['data-tab', 'tab'], ['data-role-select', 'roleSelect'], ['data-page-toggle', 'pageToggle']]) {
+        for (const match of value.matchAll(/\sid="([^"]+)"/g)) {
+          nodes.set(match[1], node()); descendants.add(match[1]);
+        }
+        for (const [attr, key] of [['data-tab', 'tab'], ['data-role-select', 'roleSelect'], ['data-page-toggle', 'pageToggle'], ['data-plant', 'plant']]) {
           children.set(`[${attr}]`, [...value.matchAll(new RegExp(`<[^>]+${attr}="([^"]+)"[^>]*>`, 'g'))].map(match => {
             const item = node({ [key]: match[1] });
             item.checked = /\schecked(?:\s|>)/.test(match[0]);
@@ -34,7 +47,7 @@ async function rolesFixture(t) {
       },
     };
   }
-  const nodes = new Map(['security-host', 'security-tabbody', 'sec-roles-rail', 'sec-roles-detail'].map(id => [id, node()]));
+  const nodes = new Map([['security-host', node()]]);
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
   globalThis.window = {};
@@ -48,9 +61,15 @@ async function rolesFixture(t) {
     other: { home: true, gantt: true, labor: true, masterdata: true, admin: false },
   };
   const requests = [];
+  t.mock.method(Store, 'knownPlants', () => plants);
+  t.mock.method(Store, 'plantLabel', plant => plant);
   t.mock.method(Session, 'actor', () => 'test-admin');
   t.mock.method(Toast, 'show', () => {});
   t.mock.method(Util, 'fetchTraced', (url, opts) => {
+    if (opts?.method === 'POST' && url.endsWith('/role_plants/bulk')) {
+      requests.push(JSON.parse(opts.body));
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    }
     if (opts?.method === 'POST') {
       return new Promise(resolve => {
         const role = decodeURIComponent(url.match(/roles\/([^/]+)\/page-access/)[1]);
@@ -62,7 +81,7 @@ async function rolesFixture(t) {
       });
     }
     const data = url.endsWith('/roles') ? { rows: Object.entries(saved).map(([role, pages]) => ({ role, pages: { ...pages } })) }
-      : url.endsWith('/role_plants') ? { rows: [] } : { users: [] };
+      : url.endsWith('/role_plants') ? { rows: plants.slice(0, 25).map(plant => ({ role: 'planner', plant })) } : { users: [] };
     return Promise.resolve({ ok: true, json: async () => data });
   });
   const { Security: security } = await import(`../../../frontend/security/security-admin.mjs?fixture=${++fixtureId}`);
@@ -74,7 +93,7 @@ async function rolesFixture(t) {
   }
   function checkbox(page) { return nodes.get('sec-roles-detail').querySelectorAll('[data-page-toggle]').find(n => n.dataset.pageToggle === page); }
   select('planner');
-  return { requests, saved, select, checkbox, toggle(page, checked) { const cb = checkbox(page); cb.checked = checked; cb.fire('change'); } };
+  return { nodes, requests, saved, select, checkbox, toggle(page, checked) { const cb = checkbox(page); cb.checked = checked; cb.fire('change'); } };
 }
 
 test('Security exposes its documented public API', () => {
@@ -131,4 +150,25 @@ test('different roles may save independently and old role responses preserve sel
   f.select('planner');
   assert.equal(f.checkbox('home').checked, false);
   assert.equal(f.checkbox('labor').checked, true);
+});
+
+
+test('role plant assignment searches both bounded lists and uses native named buttons', async t => {
+  const f = await rolesFixture(t, Array.from({ length: 55 }, (_, n) => `PLANT-${String(n).padStart(2, '0')}`));
+  const assigned = f.nodes.get('sec-plant-assigned'); const available = f.nodes.get('sec-plant-dropdown');
+  assert.equal(assigned.querySelectorAll('[data-plant]').length, 25);
+  assert.equal(available.querySelectorAll('[data-plant]').length, 30);
+  assert.match(available.innerHTML, /<button type="button"[^>]+aria-label="sec.add_plant PLANT-25"/);
+  assert.doesNotMatch(f.nodes.get('sec-roles-detail').innerHTML, /sap-keychip/);
+  const search = f.nodes.get('sec-plant-search'); search.value = 'PLANT-3'; search.fire('input');
+  assert.equal(assigned.querySelectorAll('[data-plant]').length, 0);
+  assert.equal(available.querySelectorAll('[data-plant]').length, 10);
+  available.querySelectorAll('[data-plant]')[0].fire('click');
+  assert.deepEqual(f.requests.at(-1), { upserts: [{ role: 'planner', plant: 'PLANT-30' }] });
+  await settle();
+  const rebuilt = f.nodes.get('sec-plant-search');
+  assert.notEqual(rebuilt, search, 'outer role markup replaces descendant nodes');
+  assert.equal(rebuilt.value, 'PLANT-3');
+  assert.equal(f.nodes.get('sec-plant-dropdown').querySelectorAll('[data-plant]').length, 10);
+  assert.equal(globalThis.document.activeElement, rebuilt, 'keyboard workflow resumes at search after reload');
 });

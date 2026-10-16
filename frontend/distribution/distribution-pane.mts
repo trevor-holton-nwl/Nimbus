@@ -474,6 +474,7 @@ export const DistributionPane = (() => {
   let _workcenters: WorkCenterOption[] = [];
 
   let _selectedKey: string | null = null;
+  let _detailExpanded = false;
   let _detail: DistDetailResponse | null = null;
   let _detailLoading = false;
 
@@ -1917,6 +1918,7 @@ export const DistributionPane = (() => {
     pane.addEventListener('click', (e) => {
       const target = e.target as HTMLElement;
 
+      if (target.closest('#dist-detail-expand')) { _setDetailExpanded(!_detailExpanded); return; }
       if (target.closest('#dist-save-btn')) { void _onSaveClick(); return; }
       if (target.closest('#dist-reset-btn')) { void _onResetClick(); return; }
       if (target.closest('#dist-undo-btn')) { void _onUndoClick(); return; }
@@ -2390,11 +2392,20 @@ export const DistributionPane = (() => {
     return null;
   }
 
+  function _setDetailExpanded(expanded: boolean): void {
+    _detailExpanded = expanded;
+    document.getElementById('dist-body')?.classList.toggle('dist-detail-expanded', expanded);
+    const button = document.getElementById('dist-detail-expand');
+    button?.setAttribute('aria-expanded', String(expanded));
+    if (button) button.textContent = Util.t(expanded ? 'btn.dist_collapse_detail' : 'btn.dist_expand_detail');
+  }
+
   function _renderDetail(): void {
     const el = document.getElementById('dist-detail-pane');
     if (!el) return;
     const focusTarget = _consumeFocusRestoreTarget(el);
     if (!_selectedKey) {
+      _setDetailExpanded(false);
       el.innerHTML = `<div class="dist-detail-empty">${Util.escapeHtml(Util.t('ui.dist_detail_empty'))}</div>`;
       return;
     }
@@ -2408,8 +2419,11 @@ export const DistributionPane = (() => {
     const updatedBy = h.updated_by || Util.t('ui.dist_upload');
     el.innerHTML = `
       <div class="dist-detail-header">
-        <div class="dist-detail-title">${Util.escapeHtml(h.production_order)}</div>
-        <div class="dist-detail-sub">${Util.escapeHtml(h.material_number)}</div>
+        <div>
+          <div class="dist-detail-title">${Util.escapeHtml(h.production_order)}</div>
+          <div class="dist-detail-sub">${Util.escapeHtml(h.material_number)}</div>
+        </div>
+        <button type="button" class="btn btn-ghost sm" id="dist-detail-expand" aria-expanded="${_detailExpanded}" aria-controls="dist-detail-pane">${Util.escapeHtml(Util.t(_detailExpanded ? 'btn.dist_collapse_detail' : 'btn.dist_expand_detail'))}</button>
       </div>
       <dl class="dist-detail-facts">
         <dt>${Util.escapeHtml(Util.t('ui.dist_col_workcenter'))}</dt><dd>${Util.escapeHtml(h.sap_workcenter || '')}</dd>
@@ -2468,6 +2482,7 @@ export const DistributionPane = (() => {
 
     return `
       <div class="dist-editor" id="dist-editor">
+        <div class="dist-editor-scroll" role="region" tabindex="0" aria-label="${Util.escapeHtml(Util.t('ui.dist_editor_region'))}">
         <table class="dist-editor-table" id="dist-editor-table">
           <thead>
             <tr>
@@ -2494,6 +2509,7 @@ export const DistributionPane = (() => {
             </tr>
           </tfoot>
         </table>
+        </div>
         <div class="dist-editor-actions">
           <button type="button" class="btn btn-ghost sm" id="dist-editor-even-btn" ${whatIf ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.dist_even'))}</button>
           <button type="button" class="btn btn-primary" id="dist-save-btn" ${saveState.disabled || _writeBusy ? 'disabled' : ''}>${Util.escapeHtml(saveLabel)}</button>

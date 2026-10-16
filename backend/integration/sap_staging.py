@@ -2128,14 +2128,22 @@ def stage_rows_from_upload(object_key: str, plant: str, file_bytes: bytes, filen
 # ---------------------------------------------------------------------------
 # Vanish archive
 # ---------------------------------------------------------------------------
-def list_archived(plant: str, *, limit: int = 200) -> list[dict]:
+def list_archived(plant: str, *, limit: int = 200, offset: int = 0, search: str = "") -> list[dict]:
     """Vanish-deleted orders of a plant (newest first; restored ones carry `restored_at`)."""
+    where = "plant = %s"
+    params: list = [plant]
+    if search.strip():
+        where += (
+            " AND (strpos(lower(order_id), %s) > 0 OR strpos(lower(order_row->>'production_order'), %s) > 0"
+            " OR strpos(lower(order_row->>'material_number'), %s) > 0 OR strpos(lower(order_row->>'machine'), %s) > 0)"
+        )
+        params.extend([search.strip().lower()] * 4)
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT id, batch_id, plant, order_id, order_row->>'production_order', order_row->>'material_number',"
             " order_row->>'machine', deleted_at, deleted_by, restored_at, restored_by"
-            " FROM sap_stage_vanished_order WHERE plant = %s ORDER BY deleted_at DESC, id DESC LIMIT %s",
-            (plant, int(limit)))
+            f" FROM sap_stage_vanished_order WHERE {where} ORDER BY deleted_at DESC, id DESC LIMIT %s OFFSET %s",
+            (*params, int(limit), int(offset)))
         return [{"id": int(r[0]), "batch_id": str(r[1]) if r[1] else None, "plant": r[2], "order_id": r[3],
                  "production_order": r[4], "material_number": r[5], "machine": r[6],
                  "deleted_at": _iso(r[7]), "deleted_by": r[8], "restored_at": _iso(r[9]), "restored_by": r[10]}

@@ -621,6 +621,12 @@ export const Table = {
       onCellKeyDown: (p: TableCellKeyDownEvent) => {
         const ctrl = p.event.ctrlKey || p.event.metaKey;
         const key  = p.event.key;
+        if (key === 'ContextMenu' || (key === 'F10' && p.event.shiftKey)) {
+          p.event.preventDefault();
+          p.event.stopPropagation();
+          if (p.data?.id != null) ContextMenu.openFromKeyboard(String(p.data.id), p.event.target as HTMLElement | null);
+          return;
+        }
         if (ctrl && key === 'y') {
           p.event.preventDefault();
           Table._toggleRangeMode();
@@ -658,7 +664,7 @@ export const Table = {
       onColumnResized:  () => Table._captureLayout(),
       onColumnVisible:  () => Table._captureLayout(),
       onColumnPinned:   () => Table._captureLayout(),
-      onFilterChanged:  () => Table._captureLayout(),
+      onFilterChanged:  () => { Table._captureLayout(); Table._refreshChipButtons(); },
       onGridReady: (params: TableGridReadyEvent) => {
         Table._api = params.api;
         Table._colApi = params.columnApi;
@@ -946,6 +952,9 @@ export const Table = {
   },
 
   _clearChipFilters(): void {
+    const quickFilter = document.getElementById('quick-filter') as HTMLInputElement | null;
+    if (quickFilter) quickFilter.value = '';
+    Table._api?.setGridOption('quickFilterText', '');
     // Routes through Store so the clear propagates to every other line-
     // filterable screen too (self-sourced, so Table's own _onStore guard
     // skips reprocessing — the calls below already do the local refresh).
@@ -1061,8 +1070,9 @@ export const Table = {
     // Native AG Grid per-column filters (from a saved layout, or set directly
     // via a column header menu) can suppress rows with zero acknowledgment in
     // this bar otherwise — surface + fold them into the same Clear action.
-    const hasNative = !!(Table._api && Table._api.isAnyFilterPresent());
-    const hasAny = Table._hasChipFilters() || hasNative;
+    const hasNative = Object.keys(Table._api?.getFilterModel?.() || {}).length > 0;
+    const hasQuick = !!(document.getElementById('quick-filter') as HTMLInputElement | null)?.value;
+    const hasAny = Table._hasChipFilters() || hasNative || hasQuick;
     const clear = document.getElementById('tbl-flt-clear');
     if (clear) clear.hidden = !hasAny;
 
@@ -1221,8 +1231,6 @@ export const Table = {
         btn.textContent = Util.t('btn.clear_filters');
         btn.onclick = () => {
           Table._clearChipFilters();
-          const qf = document.getElementById('quick-filter') as HTMLInputElement | null;
-          if (qf) { qf.value = ''; Table._api!.setGridOption('quickFilterText', ''); }
         };
         this._eGui.querySelector('.nimbus-empty-state')?.appendChild(btn);
       }
@@ -2618,15 +2626,19 @@ export const Inspector = {
    ========================================================================== */
 export const ContextMenu = {
   _targetId: null as string | null,
+  _returnFocus: null as HTMLElement | null,
 
   init(): void {
     const menu = document.getElementById('ctx-menu');
     if (!menu) return;
+    menu.setAttribute('role', 'menu');
     menu.querySelectorAll('button').forEach(btn => {
+      btn.setAttribute('role', 'menuitem');
+      btn.tabIndex = -1;
       btn.onclick = () => {
         const action = btn.dataset.action;
         const id = ContextMenu._targetId;
-        ContextMenu.close();
+        ContextMenu.close(true);
         if (!id) return;
         if (action === 'firm')       { Store.setFirmed([id], true, 'ctx');  Alerts.scheduleRecompute(); }
         else if (action === 'unfirm'){ Store.setFirmed([id], false, 'ctx'); Alerts.scheduleRecompute(); notifyResidualFirming([id]); }
@@ -2635,33 +2647,62 @@ export const ContextMenu = {
       };
     });
     document.addEventListener('click', () => ContextMenu.close());
-    document.addEventListener('scroll', () => ContextMenu.close(), true);
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') ContextMenu.close(); });
+    document.addEventListener('scroll', e => { if (!menu.contains(e.target as Node)) ContextMenu.close(); }, true);
+    menu.addEventListener('keydown', e => ContextMenu._onKeyDown(e));
+  },
+
+  _buttons(): HTMLButtonElement[] {
+    return Array.from(document.getElementById('ctx-menu')?.querySelectorAll<HTMLButtonElement>('button') || [])
+      .filter(button => !button.disabled && !button.hidden && button.style.display !== 'none');
+  },
+
+  _onKeyDown(e: KeyboardEvent): void {
+    const buttons = ContextMenu._buttons();
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === 'Escape') {
+      e.preventDefault(); e.stopPropagation(); ContextMenu.close(true); return;
+    }
+    if (e.key === 'Tab') { ContextMenu.close(true); return; }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key) || !buttons.length) return;
+    e.preventDefault(); e.stopPropagation();
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
+      : (index + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next].focus();
+  },
+
+  openFromKeyboard(targetId: string, target: HTMLElement | null): void {
+    const anchor = target?.closest<HTMLElement>('.ag-cell') || target;
+    const rect = anchor?.getBoundingClientRect();
+    ContextMenu.open(rect?.left ?? 6, rect?.bottom ?? 6, targetId);
   },
 
   open(x: number, y: number, targetId: string): void {
-    ContextMenu._targetId = targetId;
     const menu = document.getElementById('ctx-menu') as HTMLElement | null;
     if (!menu) return;
-    menu.hidden = false;
-    menu.style.left = x + 'px';
-    menu.style.top  = y + 'px';
-    // Position correctness (don't overflow viewport)
-    requestAnimationFrame(() => {
-      const r = menu.getBoundingClientRect();
-      if (r.right > window.innerWidth)  menu.style.left = (window.innerWidth  - r.width  - 6) + 'px';
-      if (r.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - r.height - 6) + 'px';
-    });
-    // Toggle firm/unfirm visibility based on the MANUAL layer only — see
-    // context-menu spec: visibility keyed off Store.isFirmed.
+    ContextMenu._targetId = targetId;
+    ContextMenu._returnFocus = document.activeElement as HTMLElement | null;
     const firmed = Store.isFirmed(targetId);
-    (menu.querySelector('[data-action="firm"]') as HTMLElement | null)!.style.display   = firmed ? 'none' : '';
+    (menu.querySelector('[data-action="firm"]') as HTMLElement | null)!.style.display = firmed ? 'none' : '';
     (menu.querySelector('[data-action="unfirm"]') as HTMLElement | null)!.style.display = firmed ? '' : 'none';
+    menu.hidden = false;
+    menu.style.maxHeight = Math.max(0, window.innerHeight - 12) + 'px';
+    menu.style.maxWidth = Math.max(0, window.innerWidth - 12) + 'px';
+    menu.style.left = Math.max(6, x) + 'px';
+    menu.style.top = Math.max(6, y) + 'px';
+    requestAnimationFrame(() => {
+      if (menu.hidden) return;
+      const rect = menu.getBoundingClientRect();
+      menu.style.left = Math.max(6, Math.min(x, window.innerWidth - rect.width - 6)) + 'px';
+      menu.style.top = Math.max(6, Math.min(y, window.innerHeight - rect.height - 6)) + 'px';
+      ContextMenu._buttons()[0]?.focus();
+    });
   },
-  close(): void {
+  close(restoreFocus = false): void {
     ContextMenu._targetId = null;
     const menu = document.getElementById('ctx-menu');
     if (menu) menu.hidden = true;
+    if (restoreFocus && ContextMenu._returnFocus?.isConnected) ContextMenu._returnFocus.focus();
+    ContextMenu._returnFocus = null;
   }
 };
 
@@ -2677,7 +2718,9 @@ export const Printer = {
   _fpEnd: null as NimbusVendor.FlatpickrInstance | null,
 
   open() {
-    const scheduled = Store.tasksArr.filter(t => t.start_date && t.end_date);
+    const scope = document.getElementById('print-scope') as HTMLSelectElement | null;
+    if (scope) { scope.value = 'all'; scope.onchange = () => Printer.preview(); }
+    const scheduled = Printer._scopeRows('all').filter(t => t.start_date && t.end_date);
     const today = new Date();
     let defStart = today;
     let defEnd   = new Date(today); defEnd.setDate(today.getDate() + 7);
@@ -2701,6 +2744,22 @@ export const Printer = {
     Printer.preview();
   },
 
+  /** Use the grid's displayed row model so quick, chip and native column filters agree. */
+  _scopeRows(scope: string): NimbusTask[] {
+    if (scope === 'filtered') {
+      if (!Table._api) return [];
+      const rows: NimbusTask[] = [];
+      for (let index = 0; index < Table._api.getDisplayedRowCount(); index++) {
+        const node = Table._api.getDisplayedRowAtIndex(index) as AgGridRowNode | undefined;
+        if (node?.data) rows.push(node.data);
+      }
+      return rows;
+    }
+    if (scope === 'plant') return Store.selectedPlant
+      ? Store.tasksArr.filter(task => (task.PLANT || Store.getPlantForLine(task.MACHINE)) === Store.selectedPlant) : [];
+    return Store.tasksArr;
+  },
+
   /** OQ43 a: an order is in the print range when its bar overlaps it (a split order is tested piece by piece). */
   _rowsInRange(tasks: NimbusTask[], rangeStart: Date, rangeEnd: Date): NimbusTask[] {
     return tasks.filter(t => {
@@ -2717,6 +2776,7 @@ export const Printer = {
     if (!host) return;
 
     if (!startVal || !endVal) {
+      Printer._rows = [];
       host.innerHTML = `<p style="color:var(--text-muted);font-size:13px;">${Util.t('empty.pick_date_range')}</p>`;
       return;
     }
@@ -2724,7 +2784,8 @@ export const Printer = {
     const rangeStart = new Date(startVal + 'T00:00:00');
     const rangeEnd   = new Date(endVal   + 'T23:59:59');
 
-    const rows = Printer._rowsInRange(Store.tasksArr, rangeStart, rangeEnd)
+    const scope = (document.getElementById('print-scope') as HTMLSelectElement | null)?.value || 'all';
+    const rows = Printer._rowsInRange(Printer._scopeRows(scope), rangeStart, rangeEnd)
       .sort((a, b) => {
         const la = (a.MACHINE || 'Unknown'), lb = (b.MACHINE || 'Unknown');
         if (la !== lb) return la.localeCompare(lb);
