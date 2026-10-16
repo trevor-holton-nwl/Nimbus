@@ -636,8 +636,9 @@ body[data-tab="gantt"][data-gantt-sub="distribution"] #context-sched-actions { d
 .btn-optimize:hover { background: var(--bg-subtle); border-color: var(--accent, #1f5fbf); }
 
 /* --- INPUTS --------------------------------------------------------------- */
-.input, input[type="text"], input[type="search"], input[type="number"],
-input[type="datetime-local"], select, textarea {
+/* Component classes must win over baseline input defaults. */
+.input, input:where([type="text"], [type="search"], [type="number"],
+[type="datetime-local"]), select, textarea {
   height: 30px;
   padding: 5px 10px;
   background: var(--bg-elev);
@@ -664,7 +665,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .chk input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); }
 
 /* --- TAB PANELS ----------------------------------------------------------- */
-.tab-panel { display: none; flex: 1; min-height: 0; flex-direction: column; }
+.tab-panel { display: none; flex: 1; min-height: 0; min-width: 0; flex-direction: column; }
 .tab-panel.active { display: flex; }
 
 /* =============================================================================
@@ -809,6 +810,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
 }
 .panel-head {
   display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px 12px; flex-wrap: wrap;
   padding: 14px 18px 12px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-elev);
@@ -837,7 +839,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
 /* Plant tab — two-column layout ------------------------------------------- */
 .plant-two-col {
   display: grid;
-  grid-template-columns: 480px 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr));
   gap: 18px;
   margin-bottom: 18px;
   align-items: start;
@@ -1601,8 +1603,9 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   background: var(--bg-elev);
   border-bottom: 1px solid var(--line);
   min-height: 50px;
+  flex-wrap: wrap;
 }
-.table-toolbar .input { width: 340px; }
+.table-toolbar .input { width: 340px; max-width: 100%; min-width: 0; flex: 0 1 340px; }
 
 /* Orders filter chip bar — sits below the toolbar, above the grid */
 .table-filterbar {
@@ -1735,13 +1738,14 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
 /* =============================================================================
    CALENDAR TAB
    ========================================================================== */
-.cal-scroll { flex: 1; overflow: auto; }
+.cal-scroll { flex: 1; min-width: 0; min-height: 0; overflow: auto; }
 .cal-container {
   max-width: 1080px; margin: 0 auto;
   padding: 32px 32px 60px;
 }
 .cal-head {
   display: flex; align-items: flex-start; justify-content: space-between;
+  flex-wrap: wrap;
   margin-bottom: 24px; gap: 20px;
 }
 .cal-head h2 { font-size: 22px; margin-bottom: 4px; }
@@ -1892,6 +1896,7 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   align-items: center;
   gap: 10px;
   margin-bottom: 20px;
+  flex-wrap: wrap; overflow-wrap: anywhere;
 }
 .ld-name {
   font-size: 20px;
@@ -2076,7 +2081,7 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
   background: rgba(12, 28, 48, 0.42);
   z-index: 2000;
   display: flex; align-items: center; justify-content: center;
-  padding: 20px;
+  padding: 16px;
   backdrop-filter: blur(3px);
 }
 .modal-backdrop[hidden] { display: none; }
@@ -2099,16 +2104,19 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
   width: 100%;
   max-width: 440px;
   display: flex; flex-direction: column;
-  max-height: 90vh;
+  max-height: min(90vh, calc(100dvh - 32px));
 }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
+  flex: none; gap: 12px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--line);
 }
-.modal-head h3 { font-size: 14px; }
-.modal-body { padding: 18px; overflow: auto; }
+.modal-head h3 { font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
+.modal-head > button { flex-shrink: 0; }
+.modal-body { padding: 18px; overflow: auto; min-width: 0; min-height: 0; }
 .modal-foot {
+  flex: none; flex-wrap: wrap;
   padding: 12px 18px;
   display: flex; justify-content: flex-end; gap: 8px;
   border-top: 1px solid var(--line);
@@ -2179,15 +2187,15 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
   background: var(--chrome-bg);
   display: flex;
   flex-direction: column;
-  justify-content: center;
   padding: 0 56px;
+  overflow-y: auto;
   box-sizing: border-box;
   position: relative;
 }
 .login-panel-brand {
-  position: absolute; top: 0; left: 0; right: 0; height: 56px;
+  min-height: 56px; flex: none;
   display: flex; align-items: center; gap: 12px;
-  padding: 0 56px;
+  padding: 0 56px; margin: 0 -56px 24px;
   border-bottom: 1px solid var(--chrome-border);
   box-sizing: border-box;
 }
@@ -2211,7 +2219,7 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
   margin-left: auto;
 }
 
-#login-form { display: flex; flex-direction: column; gap: 0; }
+#login-form { display: flex; flex-direction: column; gap: 0; flex: none; margin-block: auto; }
 .login-heading {
   font-family: 'Archivo', 'Public Sans', sans-serif;
   font-weight: 700; font-size: 26px; letter-spacing: -0.015em;
@@ -2272,7 +2280,7 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
 .login-error[hidden] { display: none; }
 
 .login-panel-footer {
-  position: absolute; bottom: 0; left: 0; right: 0; height: 46px;
+  min-height: 46px; flex: none; margin: 24px -56px 0;
   display: flex; align-items: center; justify-content: space-between;
   padding: 0 56px;
   border-top: 1px solid var(--chrome-border);
@@ -2966,7 +2974,7 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
 .opt-modal {
   width: 100%;
   max-width: 550px;
-  max-height: 90vh;
+  max-height: min(90vh, calc(100dvh - 32px));
   display: flex;
   flex-direction: column;
   background: var(--bg-elev);
@@ -2990,6 +2998,7 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
 /* ── Header ── */
 .opt-header {
   display: flex; align-items: center; gap: 14px;
+  flex: none;
   padding: 20px 22px;
   background: #1e222d;
   border-bottom: 1px solid rgba(255,255,255,0.07);
@@ -3044,7 +3053,7 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
 }
 
 /* ── Body ── */
-.opt-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 12px; overflow: auto; flex: 1; }
+.opt-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 12px; overflow: auto; flex: 1; min-height: 0; min-width: 0; }
 
 .opt-section-label {
   font-size: 10px; font-weight: 700;
@@ -3260,6 +3269,7 @@ span.flatpickr-weekday {
 /* ── Footer ── */
 .opt-footer {
   display: flex; justify-content: flex-end; align-items: center; gap: 8px;
+  flex: none; flex-wrap: wrap;
   padding: 14px 22px;
   border-top: 1px solid var(--line);
   background: var(--bg-subtle);
@@ -3294,13 +3304,14 @@ span.flatpickr-weekday {
   background: rgba(10, 12, 18, 0.72);
   backdrop-filter: blur(12px);
   z-index: 3000;
+  padding: 16px;
 }
 .cal-edit-backdrop[hidden] { display: none; }
 
 .cal-edit-modal {
   width: 100%;
   max-width: 640px;
-  max-height: 92vh;
+  max-height: min(92vh, calc(100dvh - 32px));
   display: flex;
   flex-direction: column;
   background: var(--bg-elev);
@@ -3319,10 +3330,16 @@ span.flatpickr-weekday {
 .cal-edit-modal.visible { opacity: 1; transform: none; }
 
 .cal-edit-body {
-  padding: 8px 0 4px;
+  padding: 16px 20px;
   overflow-y: auto;
   flex: 1;
+  min-height: 0;
+  display: flex; flex-direction: column; gap: 20px;
+  container-type: inline-size;
 }
+.cal-edit-section { display: flex; flex-direction: column; gap: 10px; flex: none; min-width: 0; }
+.cal-edit-section .opt-section-label { margin: 0; }
+.cal-edit-section .cal-copy-plant-btn { align-self: flex-start; margin-top: 0; }
 
 /* Plant badge in header subtitle */
 .cal-edit-plant-tag {
@@ -3349,7 +3366,7 @@ span.flatpickr-weekday {
 /* ── Single day row ── */
 .cal-day-row {
   display: grid;
-  grid-template-columns: 44px 36px 1fr 52px;
+  grid-template-columns: 44px 36px minmax(0, 1fr) 52px;
   align-items: center;
   gap: 10px;
   padding: 9px 14px;
@@ -3426,6 +3443,7 @@ span.flatpickr-weekday {
 }
 .cal-time-input {
   width: 110px; height: 28px;
+  min-width: 0; flex: 1 1 110px;
   padding: 0 8px;
   border: 1px solid var(--line-strong);
   border-radius: var(--r-sm);
@@ -3464,6 +3482,11 @@ span.flatpickr-weekday {
   color: var(--accent);
   border-color: rgba(var(--accent-rgb),0.28);
   background: rgba(var(--accent-rgb),0.06);
+}
+@container (max-width: 460px) {
+  .cal-day-row { grid-template-columns: 44px 36px minmax(0, 1fr); }
+  .cal-day-times { grid-column: 1 / -1; grid-row: 2; }
+  .cal-day-badge-hrs { grid-column: 3; grid-row: 1; justify-self: end; }
 }
 
 /* ── Copy-from-plant link ── */
@@ -3517,6 +3540,7 @@ span.flatpickr-weekday {
 }
 .lines-nav-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 4px 0;
 }
@@ -3569,12 +3593,12 @@ span.flatpickr-weekday {
 .line-hours-pills {
   display: flex;
   gap: 5px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   margin-top: 6px;
 }
 .line-hours-pill {
   display: flex; flex-direction: column; align-items: center;
-  flex: 1;
+  flex: 1 0 78px;
   padding: 10px 8px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -4374,7 +4398,7 @@ body.dark .cw-active-card {
 
 .cw-viewer-modal {
   width: 100%; max-width: 580px;
-  max-height: 88vh;
+  max-height: min(88vh, calc(100dvh - 32px));
   display: flex; flex-direction: column;
   background: var(--bg-elev);
   border-radius: 18px; overflow: hidden;
@@ -4393,6 +4417,7 @@ body.dark .cw-active-card {
 /* ── Toolbar ── */
 .cw-viewer-toolbar {
   display: flex; align-items: center; gap: 10px;
+  flex: none;
   padding: 12px 18px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-subtle);
@@ -4411,6 +4436,7 @@ body.dark .cw-active-card {
 .cw-search-input {
   border: none; background: transparent; outline: none;
   font-size: 12.5px; color: var(--fg); flex: 1;
+  min-width: 0; width: 100%;
 }
 .cw-sort-group { display: flex; align-items: center; gap: 4px; }
 .cw-sort-label { font-size: 11px; color: var(--fg-mute); margin-right: 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -4434,6 +4460,7 @@ body.dark .cw-active-card {
 /* ── List ── */
 .cw-viewer-list {
   flex: 1; overflow-y: auto; overflow-x: hidden;
+  min-height: 0;
   padding: 6px 0;
 }
 .cw-viewer-row {
@@ -4504,6 +4531,7 @@ body.dark .cw-active-card {
 
 /* ── Footer ── */
 .cw-viewer-footer {
+  flex: none;
   padding: 12px 18px;
   border-top: 1px solid var(--line);
   background: var(--bg-subtle);
@@ -4754,7 +4782,10 @@ body.dark .cw-active-card {
   gap: 2px;
   border-bottom: 2px solid var(--line);
   margin: 12px 0 20px;
+  min-width: 0; overflow-x: auto;
+  scroll-padding-inline: 4px;
 }
+.admin-subtabs > button { flex-shrink: 0; }
 .admin-subtab {
   padding: 8px 18px;
   border: none;
@@ -4814,9 +4845,11 @@ body.dark .cw-active-card {
 #md-master-plant-pane,
 #md-master-material-pane,
 #md-master-material-plant-pane,
-#md-master-routing-pv-pane {
+#md-master-routing-pv-pane,
+#md-master-work-centers-pane {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
@@ -4824,7 +4857,8 @@ body.dark .cw-active-card {
 #md-master-plant-pane[hidden],
 #md-master-material-pane[hidden],
 #md-master-material-plant-pane[hidden],
-#md-master-routing-pv-pane[hidden] { display: none; }
+#md-master-routing-pv-pane[hidden],
+#md-master-work-centers-pane[hidden] { display: none; }
 /* Previously an inline style on the Plant pane itself (height:100%;overflow:hidden),
    removed so gotoMasterSub can toggle all four sub-panes uniformly via [hidden].
    Scoped here rather than folded into the shared rule above: the Plant pane's
@@ -4832,6 +4866,10 @@ body.dark .cw-active-card {
    this ancestor; the other three panes don't need it. */
 #md-master-plant-pane { overflow: hidden; }
 .md-master-subtabs { margin: 0; flex: 0 0 auto; }
+.tab-strip-row { display: flex; align-items: center; gap: 8px; min-width: 0; flex: none; }
+.tab-strip-row > nav { flex: 1; margin: 0; }
+.tab-strip-row > button { flex: none; margin-right: 8px; }
+.md-table-nav-row { margin-bottom: 16px; }
 .md-master-refresh { align-self: center; margin: 0 8px 2px 0; }
 /* The Plant pane inner tabs sit flush beneath the master-data sub-tab row —
    same zero-margin treatment as .settings-inner-tabs one level further in. */
@@ -4878,7 +4916,10 @@ body.dark .cw-active-card {
   gap: 2px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 16px;
+  min-width: 0; overflow-x: auto;
+  scroll-padding-inline: 4px;
 }
+.md-tabs > button { flex-shrink: 0; }
 .md-tab {
   padding: 6px 16px;
   border: 1px solid transparent;
@@ -4913,6 +4954,8 @@ body.dark .cw-active-card {
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
+.sec-users-toolbar { padding: 12px 14px; margin-bottom: 0; }
+#sec-users-actions { flex-wrap: wrap; }
 .md-search {
   width: 220px;
   height: 30px;
@@ -4958,7 +5001,8 @@ body.dark .cw-active-card {
   color: var(--fg-mute);
   white-space: nowrap;
 }
-.md-th:hover .md-col-menu-btn { opacity: 1; }
+.md-th:has(.md-col-menu-btn) { padding-right: 32px; }
+.md-th:hover .md-col-menu-btn, .md-th:focus-within .md-col-menu-btn { opacity: 1; }
 .md-col-menu-btn {
   position: absolute;
   right: 4px;
@@ -5098,7 +5142,8 @@ tr:last-child .md-td { border-bottom: none; }
    membership table — only the pieces unique to this pane get new rules below.
    ============================================================================= */
 .wc-nav { width: 220px; }
-.wc-load-more { width: calc(100% - 24px); margin: 8px 12px; }
+.wc-load-more { width: calc(100% - 24px); margin: 8px 12px; flex: none; }
+#wc-search { width: 100%; min-width: 0; }
 .wc-member-count {
   font-size: 10px;
   line-height: 1;
@@ -5834,10 +5879,9 @@ body.dark .sub-subtab.active { color: #ffffff; }
 .adm-help-dot { width:15px; height:15px; border-radius:50%; border:1.5px solid var(--accent); color:var(--accent); font-size:9px; font-weight:700; display:flex; align-items:center; justify-content:center; transition:background .15s,color .15s; user-select:none; flex-shrink:0; }
 .adm-help:hover .adm-help-dot,
 .adm-help:focus-within .adm-help-dot { background:var(--accent); color:#fff; }
-.adm-help-tip { position:fixed; bottom:calc(100vh - var(--tip-y,0px) + 8px); left:var(--tip-x,50%); transform:translateX(-50%); width:260px; background:#1a1a2e; color:#fff; font-size:11px; line-height:1.5; padding:9px 11px; border-radius:6px; border:1px solid rgba(255,255,255,.15); box-shadow:0 4px 20px rgba(0,0,0,.7); pointer-events:none; opacity:0; transition:opacity .15s; z-index:99999; white-space:normal; text-align:left; font-weight:400; }
-.adm-help-tip::after { content:''; position:absolute; top:100%; left:50%; transform:translateX(-50%); border:5px solid transparent; border-top-color:#1a1a2e; }
+.adm-help-tip { position:fixed; top:var(--tip-top,0px); left:var(--tip-left,0px); width:260px; max-width:calc(100vw - 16px); max-height:calc(100dvh - 16px); overflow:auto; background:#1a1a2e; color:#fff; font-size:11px; line-height:1.5; padding:9px 11px; border-radius:6px; border:1px solid rgba(255,255,255,.15); box-shadow:0 4px 20px rgba(0,0,0,.7); pointer-events:none; opacity:0; transition:opacity .15s; z-index:99999; white-space:normal; overflow-wrap:anywhere; text-align:left; font-weight:400; }
 .adm-help:hover .adm-help-tip,
-.adm-help:focus-within .adm-help-tip { opacity:1; }
+.adm-help:focus-within .adm-help-tip { opacity:1; pointer-events:auto; }
 
 /* ── Labor Planning 2.0 ──────────────────────────────────────────────────── */
 
@@ -6610,12 +6654,12 @@ body.dark .sap-kind-orders { color: var(--accent); }
 .setup-check { display: flex; align-items: center; gap: 7px; font-size: 12px; }
 .setup-check input { accent-color: var(--primary); }
 
-.setup-standard-rail { display: grid; grid-template-columns: minmax(190px, 1fr) minmax(250px, 1.15fr) minmax(230px, .95fr); gap: 16px 28px; align-items: start; }
+.setup-standard-rail { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 16px 28px; align-items: start; }
 .setup-signature-wrap, .setup-scope-wrap, .setup-coverage-wrap { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .setup-signature-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .setup-signature-chip { font: 600 13px/1.3 var(--body-font, inherit); color: var(--fg); }
 .setup-scale-readout { margin: 2px 0 0; font-size: 11.5px; color: var(--fg-mute); }
-.setup-scope-wrap .md-bom-combobox { min-width: 220px; }
+.setup-scope-wrap .md-bom-combobox { min-width: 0; }
 .setup-state-inline { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; margin-top: 2px; }
 .setup-state-readout { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; font-family: var(--font-mono); }
 .setup-coverage-tiles { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -6649,7 +6693,7 @@ button.setup-coverage-tile { cursor: pointer; }
 .setup-compatibility { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; }
 .setup-compatibility p { margin: 4px 0 0; color: var(--fg-mute); }
 .setup-compatibility .input { margin-top: 8px; width: min(100%, 420px); }
-.setup-audit-row { display: grid; grid-template-columns: 74px minmax(160px, 1fr) auto minmax(120px, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.setup-audit-row { display: grid; grid-template-columns: 74px minmax(0, 1fr) auto minmax(0, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
 .setup-audit-row:last-child { border-bottom: 0; }
 .setup-audit-row strong { color: var(--warn); font: 700 10px var(--font-mono); }
 @media (max-width: 760px) {
@@ -6726,7 +6770,12 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
    one live <input> per cell; repositioned over whichever cell is focused. */
 .setup-grid-editor-input { position: fixed; z-index: 30; border: 0; outline: 2px solid var(--accent); outline-offset: -2px; background: var(--bg-elev); text-align: right; font-family: var(--font-mono); font-size: 12px; padding: 0 8px; color: var(--fg); }
 
-.setup-mass-upload-modal { width: min(720px, 92vw); }
+.setup-mass-upload-modal, .setup-history-modal { width: 100%; max-width: 720px; }
+.setup-history-modal .modal-body { container-type: inline-size; }
+@container (max-width: 560px) {
+  .setup-audit-row { grid-template-columns: 1fr; gap: 4px; }
+  .setup-audit-row .setup-num { text-align: left; }
+}
 .setup-mass-upload-body { display: flex; flex-direction: column; gap: 16px; }
 .setup-mass-upload-section { display: flex; flex-direction: column; gap: 7px; }
 .setup-mass-upload-textarea { min-height: 120px; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; resize: vertical; }

@@ -254,7 +254,7 @@ export const Security = (() => {
   function _usersShellHtml(): string {
     return `
       <div class="panel">
-        <div class="md-toolbar">
+        <div class="md-toolbar sec-users-toolbar">
           <input type="search" class="input md-search" id="sec-user-search" placeholder="${Util.escapeHtml(Util.t('sec.search_users_ph'))}" value="${Util.escapeHtml(_usersSearch)}">
           <span class="spacer"></span>
           <button class="btn btn-ghost sm" id="sec-paste-users" title="${Util.escapeHtml(Util.t('tip.paste_rows'))}">${Util.escapeHtml(Util.t('btn.paste_rows'))}</button>

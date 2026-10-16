@@ -1107,7 +1107,7 @@ export const SetupAdmin = (() => {
     const overrides = overridesFor(snapshot);
     const backdrop = document.createElement('div');
     backdrop.className = 'modal-backdrop';
-    backdrop.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="setup-history-title">
+    backdrop.innerHTML = `<div class="modal setup-history-modal" role="dialog" aria-modal="true" aria-labelledby="setup-history-title">
       <header class="modal-head"><h3 id="setup-history-title">${Util.escapeHtml(Util.t('ui.setup_override_audit'))}</h3><button type="button" class="btn btn-ghost sm" data-setup-history-close aria-label="${Util.escapeHtml(Util.t('btn.close'))}">&times;</button></header>
       <div class="modal-body">${overrides.length ? overrides.map(override => `<div class="setup-audit-row"><strong>${Util.escapeHtml(override.status.toUpperCase())}</strong><span>${Util.escapeHtml(override.machine)} &middot; ${Util.escapeHtml(keyText(override.predecessor_state_key))} &rarr; ${Util.escapeHtml(keyText(override.successor_state_key))}</span><span class="setup-num">${override.remaining_min}/${override.standard_min} min</span><span>${Util.escapeHtml(override.reason)}</span></div>`).join('') : emptyState(Util.t('ui.setup_no_overrides'))}</div>
       <footer class="modal-foot"><button type="button" class="btn btn-ghost sm" data-setup-history-close>${Util.escapeHtml(Util.t('btn.close'))}</button></footer>

@@ -10,20 +10,6 @@
      CDN assets below are protected by Subresource Integrity (integrity= +
      crossorigin="anonymous"); the Google Fonts stylesheet cannot take SRI because
      its content varies by user agent. -->
-<script>
-// Lock page zoom — Gantt timeline zoom via scroll is unaffected
-(function () {
-  window.addEventListener('wheel', function (e) {
-    if (e.ctrlKey) e.preventDefault();
-  }, { passive: false });
-  window.addEventListener('keydown', function (e) {
-    if ((e.ctrlKey || e.metaKey) &&
-        (e.key === '+' || e.key === '-' || e.key === '=' || e.key === '_' || e.key === '0')) {
-      e.preventDefault();
-    }
-  }, { capture: true });
-})();
-</script>
 <title>NIMBUS — Production Scheduling</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧹</text></svg>">
 
@@ -1657,6 +1643,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
        TAB: MANAGE MASTER DATA — wraps Production Lines + Plant
        ========================================================= -->
   <section class="tab-panel" id="masterdata-tab" role="tabpanel">
+    <div class="tab-strip-row">
     <nav class="admin-subtabs md-master-subtabs" role="tablist">
       <button class="admin-subtab active" data-md-master="lines" role="tab" data-i18n="tab.machine">Production Lines</button>
       <button class="admin-subtab" data-md-master="plant" role="tab" data-i18n="tab.plant">Plant</button>
@@ -1664,10 +1651,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button class="admin-subtab" data-md-master="material-plant" role="tab" data-i18n="tab.material_plant">Material Plant</button>
       <button class="admin-subtab" data-md-master="routing-pv" role="tab" data-i18n="tab.routing_pv">Routing & Production Versions</button>
       <button class="admin-subtab" data-md-master="work-centers" role="tab" data-i18n="tab.work_centers">Work Centers</button>
-      <div class="spacer"></div>
+    </nav>
       <button id="md-master-refresh" class="btn btn-ghost sm md-master-refresh"
               data-i18n="btn.refresh" data-i18n-title="tip.md_refresh">↻ Refresh</button>
-    </nav>
+    </div>
 
     <!-- SUB-PANE: PRODUCTION LINES -->
     <div id="md-master-lines-pane">
@@ -2107,6 +2094,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 
         <!-- MANAGE PLANT DATA PANE -->
         <div id="admin-manage-pane" hidden>
+          <div class="tab-strip-row md-table-nav-row">
           <nav class="md-tabs" role="tablist">
             <button class="md-tab active" data-md-tab="subnetworks" role="tab" data-i18n="tab.subnetworks">Subnetworks</button>
             <button class="md-tab" data-md-tab="plants" role="tab" data-i18n="tab.plants">Plants</button>
@@ -2118,8 +2106,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <button class="md-tab" data-md-tab="routing_operation" role="tab" data-i18n="tab.routing_operation">Routing Operations</button>
             <button class="md-tab" data-md-tab="routing_rules" role="tab" data-i18n="tab.routing_rules">Routing Rules</button>
             <button class="md-tab" data-md-tab="sap_workcenter" role="tab" data-i18n="tab.sap_workcenter">Work Centers</button>
-            <button class="btn btn-ghost sm" id="md-export-schema-btn" style="margin-left:auto" data-i18n="btn.export_schema">Export Schema</button>
           </nav>
+            <button class="btn btn-ghost sm" id="md-export-schema-btn" data-i18n="btn.export_schema">Export Schema</button>
+          </div>
           <div id="md-host"></div>
         </div>
         <div id="admin-interface-pane" hidden><div id="sap-interface-host"></div></div>
@@ -2774,7 +2763,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <div class="modal" style="max-width:520px">
     <div class="modal-head">
       <h3 data-i18n="ui.mapping_modal_title">Map columns</h3>
-      <button class="modal-close" id="pl-mapping-close-btn" aria-label="Close">&times;</button>
+      <button class="icon-btn sm" id="pl-mapping-close-btn" aria-label="Close">&times;</button>
     </div>
     <div class="modal-body">
       <p style="margin:0 0 12px;font-size:12.5px;color:var(--fg-mute)" data-i18n="ui.mapping_modal_sub">
@@ -2859,7 +2848,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <div class="cal-edit-body">
 
       <!-- Quick Presets -->
-      <div class="opt-section">
+      <div class="cal-edit-section">
         <div class="opt-section-label">Quick Presets</div>
         <div class="opt-presets">
           <button class="opt-preset-chip cal-preset-chip" data-preset="mf"
@@ -2872,7 +2861,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
 
       <!-- Weekly Schedule -->
-      <div class="opt-section">
+      <div class="cal-edit-section">
         <div class="opt-section-label">Weekly Schedule</div>
         <div class="cal-day-rows">
 

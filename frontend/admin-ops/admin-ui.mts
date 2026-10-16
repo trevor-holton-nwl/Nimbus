@@ -8,6 +8,7 @@
 // grouping.
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from '../platform/foundation.mjs';
+import { revealHorizontalItem } from '../platform/layout.mjs';
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Session } from '../security/session.mjs';
@@ -472,8 +473,10 @@ export const AdminCockpit = {
 
   gotoOvTab(tab: 'diagnostics' | 'data-ops' | 'logs' | 'thread'): void {
     AdminCockpit._activeOvTab = tab;
-    document.querySelectorAll<HTMLElement>('.admin-ov-tabs .sub-subtab').forEach((b) =>
-      b.classList.toggle('active', b.dataset.ovTab === tab));
+    document.querySelectorAll<HTMLElement>('.admin-ov-tabs .sub-subtab').forEach((b) => {
+      b.classList.toggle('active', b.dataset.ovTab === tab);
+      if (b.dataset.ovTab === tab) revealHorizontalItem(b);
+    });
     (['diagnostics', 'data-ops', 'logs', 'thread'] as const).forEach(t => {
       const el = document.getElementById(`admin-ov-${t}`);
       if (el) el.hidden = (t !== tab);
@@ -483,8 +486,10 @@ export const AdminCockpit = {
 
   _setSub(sub: string | undefined): void {
     AdminCockpit._activeSub = sub ?? 'overview';
-    document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) =>
-      b.classList.toggle('active', b.dataset.sub === sub));
+    document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) => {
+      b.classList.toggle('active', b.dataset.sub === sub);
+      if (b.dataset.sub === sub) revealHorizontalItem(b);
+    });
     const ov = document.getElementById('admin-overview-pane');
     const mg = document.getElementById('admin-manage-pane');
     const ifc = document.getElementById('admin-interface-pane');
@@ -605,14 +610,6 @@ export const AdminCockpit = {
         }
       }
     }, 'AdminCockpit');
-
-    document.addEventListener('mouseover', (e: MouseEvent) => {
-      const el = (e.target as HTMLElement).closest?.('.adm-help') as HTMLElement | null;
-      if (!el) return;
-      const r = el.getBoundingClientRect();
-      el.style.setProperty('--tip-x', `${r.left + r.width / 2}px`);
-      el.style.setProperty('--tip-y', `${r.top}px`);
-    });
   },
 
   render(): void {
