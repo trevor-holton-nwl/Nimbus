@@ -45,6 +45,27 @@ def test_validate_matches_vectors(case):
         assert sorted(overlap) == sorted(case["ids"])
 
 
+def _r(pid, vf, vt):
+    return {"id": pid, "valid_from": date.fromisoformat(vf), "valid_to": date.fromisoformat(vt) if vt else None}
+
+
+def test_overlap_check_compares_every_pair_not_just_sorted_neighbours():
+    # existing A[1..100] and B[10..20] already overlap; upserting C[50..60] still clashes with A
+    # (the sorted neighbour pairs are (A,B) and (B,C), and B does not touch C)
+    rows = [_r("A", "2026-01-01", "2026-04-10"), _r("B", "2026-01-10", "2026-01-20"),
+            _r("C", "2026-02-19", "2026-03-01")]
+    assert md._period_overlaps(rows, involving_ids={"C"}) == ("A", "C")
+
+
+def test_overlap_involving_ids_ignores_pre_existing_bad_pairs():
+    rows = [_r("A", "2026-01-01", "2026-04-10"), _r("B", "2026-01-10", "2026-01-20"),
+            _r("C", "2027-01-01", "2027-01-31")]
+    assert md._period_overlaps(rows) == ("A", "B")
+    assert md._period_overlaps(rows, involving_ids={"C"}) is None
+    assert md._period_overlaps(rows, involving_ids={"B"}) == ("A", "B")
+    assert md._period_overlaps(rows, involving_ids=set()) is None
+
+
 def _p(**kw):
     return {"id": "p1", "valid_from": "2026-10-20", "valid_to": None, "work_hours": {"1": [8, 16]}, **kw}
 

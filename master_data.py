@@ -2988,14 +2988,19 @@ def _prepare_periods(upserts) -> list:
     return out
 
 
-def _period_overlaps(rows) -> tuple | None:
-    """First pair of overlapping periods as (id, id), else None. rows carry id/valid_from/
-    valid_to (date|None). NULL valid_to = +infinity; both ends inclusive, so a shared day
-    overlaps and adjacent days do not."""
+def _period_overlaps(rows, involving_ids=None) -> tuple | None:
+    """First pair of overlapping periods as (earlier id, later id), else None. rows carry
+    id/valid_from/valid_to (date|None). NULL valid_to = +infinity; both ends inclusive, so a
+    shared day overlaps and adjacent days do not. Every pair is compared (not just sorted
+    neighbours, which pre-existing illegal data can hide). With `involving_ids`, only pairs
+    that include one of those ids count, so old bad data never blocks an unrelated write."""
     ordered = sorted(rows, key=lambda r: r["valid_from"])
-    for prev, nxt in zip(ordered, ordered[1:], strict=False):
-        if prev["valid_to"] is None or nxt["valid_from"] <= prev["valid_to"]:
-            return (prev["id"], nxt["id"])
+    for i, a in enumerate(ordered):
+        for b in ordered[i + 1:]:
+            if involving_ids is not None and a["id"] not in involving_ids and b["id"] not in involving_ids:
+                continue
+            if a["valid_to"] is None or b["valid_from"] <= a["valid_to"]:
+                return (a["id"], b["id"])
     return None
 
 
@@ -3034,13 +3039,9 @@ def save_plant_periods(plant: str, upserts: list, deletes: list | None = None,
         for p in prepared:
             result[p["id"]] = p
         # only pairs that involve an upserted id: pre-existing bad data never blocks a delete
-        ordered = sorted(result.values(), key=lambda r: r["valid_from"])
-        for prev, nxt in zip(ordered, ordered[1:], strict=False):
-            if (prev["id"] in up_ids or nxt["id"] in up_ids) and (
-                    prev["valid_to"] is None or nxt["valid_from"] <= prev["valid_to"]):
-                raise PlantPeriodError(
-                    "period_overlap",
-                    f"periods {prev['id']!r} and {nxt['id']!r} overlap", [prev["id"], nxt["id"]])
+        clash = _period_overlaps(list(result.values()), involving_ids=up_ids)
+        if clash:
+            raise PlantPeriodError("period_overlap", f"periods {clash[0]!r} and {clash[1]!r} overlap", list(clash))
         deleted = 0
         if del_ids:
             cur.execute(
