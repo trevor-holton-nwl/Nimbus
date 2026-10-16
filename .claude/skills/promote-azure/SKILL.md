@@ -19,7 +19,7 @@ This consolidates the authoritative runbook in `DEPLOYMENT.md` — read that fil
 - **Build, roll, and verify run automatically, always — no pause for go-ahead.** Image build (step 2), app roll (step 3), and verification (step 4) proceed straight through without stopping for confirmation. Narrate each command as it runs so the operator can see what's happening, but don't wait on a response before continuing.
 - **Migration apply is the one step that still gates on confirmation** — surface the pending migration file(s) and the dry-run output, and get explicit go-ahead before running the real apply. This is deliberate asymmetry: code/roll is a one-liner rollback, a bad schema change usually isn't.
 - **A destructive migration is never folded into an auto run**, confirmation gate or not — stop and sequence it as its own deliberate decision (see Red flags).
-- **CI gate before build.** Never run `az acr build` until the step 1b CI gate passes (GitHub check-runs green for HEAD + local `npm test` + `check:static-assets`), or the operator passes `-OverrideCi "<reason>"` and the reason is recorded in the deploy note.
+- **CI gate before build.** Never run `az acr build` until the step 1b local gate passes (`npm test` + `check:static-assets`).
 - **Do not set `NIMBUS_SAP_SYNC_ENABLED`** unless the operator explicitly wants the SAP scheduler live (it's a stub skeleton).
 
 ## Sequence
@@ -46,24 +46,13 @@ Run from a host with `psql` + DB firewall access (the dev laptop's `DevLaptop` r
 - **Manual-only migrations.** A file whose header carries `-- nimbus-migration: manual-only` (the backward-scheduling snapshot `2026-10-20-0` and cutover `2026-10-20-1`) is SKIPPED by the runner in every mode, `-AllowDestructive` included, with a visible warning. It runs only when the operator names it: `apply-migrations.ps1 -Only 2026-10-20-1 -AllowDestructive` (`-Only` takes file names or id prefixes, applies exactly those, and is still subject to the destructive check and the ledger). **Never pass `-AllowDestructive` to get past a manual-only skip, and never run these from a routine promote**; follow `docs/DEPLOYMENT.md` -> "Backward-scheduling cutover" (rehearsal, quiet window, image built first).
 - Schema goes before the roll so the new code never serves traffic against missing tables.
 
-### 1b. CI gate — required before `az acr build` (read-only, safe to run)
-Deploys build from the working tree, so nothing else stops a red or untested commit from shipping. Before step 2, **all three** must hold for the exact commit being built (`git rev-parse HEAD`; the tree must be clean or the build must be of a pushed commit):
+### 1b. Local gate — required before `az acr build` (read-only, safe to run)
+Deploys build from the working tree, so nothing else stops a red or untested commit from shipping. Before step 2, **both** must pass locally for the working tree being built (there is no GitHub CI gate: no GitHub token is enabled, so check-runs are not consulted):
 
-1. **GitHub Actions check-runs for HEAD are green.** There is no `gh` CLI on this machine, so use the REST API with a token in an env var (`$env:GITHUB_TOKEN`, a fine-grained read-only token with Actions/Checks read on the repo; the operator sets it, never paste it into chat or a command line). Push HEAD first if needed.
-```powershell
-$sha  = (git rev-parse HEAD).Trim()
-$h    = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json"; "X-GitHub-Api-Version" = "2022-11-28" }
-$runs = (Invoke-RestMethod "https://api.github.com/repos/trevor-holton-nwl/Nimbus/commits/$sha/check-runs?per_page=100" -Headers $h).check_runs
-$runs | Select-Object name, status, conclusion | Format-Table
-# PASS only if at least one run exists, every run is completed, and every conclusion is success/skipped/neutral.
-$bad = $runs | Where-Object { $_.status -ne 'completed' -or $_.conclusion -notin 'success','skipped','neutral' }
-if (-not $runs -or $bad) { throw "CI is not green for $sha - stop (or use -OverrideCi, below)" }
-```
-   Zero check-runs means CI has not run for that SHA: that is a failure, not a pass.
-2. **`npm test`** passes locally (it runs the build first).
-3. **`npm run check:static-assets`** passes locally.
+1. **`npm test`** passes (it runs the build first).
+2. **`npm run check:static-assets`** passes.
 
-**Escape hatch: `-OverrideCi "<reason>"`.** For an urgent hotfix (e.g. a known-flaky timing test blocking an otherwise-good commit), the operator may invoke the promotion as `promote-azure -OverrideCi "<reason>"`. This skips only the GitHub check-run requirement in item 1 (never the local `npm test` / `check:static-assets` unless the reason names why they cannot run). A non-empty reason is mandatory, and it must be written into the deploy note together with the HEAD sha, the failing/missing check names and the date, e.g. `CI OVERRIDE (<date>, <sha>): <reason>; failing: <checks>`. Without `-OverrideCi`, a red/missing gate means stop and report; do not proceed to step 2.
+A red local gate means stop and report; do not proceed to step 2.
 
 ### 2. Build the image (fresh tag) — automatic, no pause
 ```powershell

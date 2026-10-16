@@ -59,3 +59,6 @@ desktop.ini
 # The build recipe itself
 Dockerfile
 .dockerignore
+
+# Local git worktrees (not needed in the image; slow the ACR context upload)
+.worktrees
