@@ -1,0 +1,24 @@
+{
+  "active": [
+    {"name": "no periods -> default", "default": {"1": [8, 16]}, "periods": [], "day": "2026-10-21", "expected": "default"},
+    {"name": "day before valid_from -> default", "default": {"1": [8, 16]}, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": "2027-04-19", "work_hours": {"1": [6, 14]}}], "day": "2026-10-19", "expected": "default"},
+    {"name": "on valid_from -> period", "default": {"1": [8, 16]}, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": "2027-04-19", "work_hours": {"1": [6, 14]}}], "day": "2026-10-20", "expected": "p1"},
+    {"name": "inside range -> period", "default": {"1": [8, 16]}, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": "2027-04-19", "work_hours": {"1": [6, 14]}}], "day": "2026-10-21", "expected": "p1"},
+    {"name": "on valid_to -> period (inclusive)", "default": {"1": [8, 16]}, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": "2027-04-19", "work_hours": {"1": [6, 14]}}], "day": "2027-04-19", "expected": "p1"},
+    {"name": "day after valid_to -> default", "default": {"1": [8, 16]}, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": "2027-04-19", "work_hours": {"1": [6, 14]}}], "day": "2027-04-20", "expected": "default"},
+    {"name": "open-ended period far future", "default": {"1": [8, 16]}, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": null, "work_hours": {"1": [6, 14]}}], "day": "2040-01-01", "expected": "p1"},
+    {"name": "second period selected by date", "default": {"1": [8, 16]}, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": "2026-11-30", "work_hours": {"1": [6, 14]}}, {"id": "p2", "valid_from": "2026-12-01", "valid_to": null, "work_hours": {"1": [7, 15]}}], "day": "2026-12-01", "expected": "p2"},
+    {"name": "gap between periods -> default", "default": {"1": [8, 16]}, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": "2026-11-15", "work_hours": {"1": [6, 14]}}, {"id": "p2", "valid_from": "2026-12-01", "valid_to": null, "work_hours": {"1": [7, 15]}}], "day": "2026-11-20", "expected": "default"},
+    {"name": "null default plus matching period", "default": null, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": null, "work_hours": {"1": [6, 14]}}], "day": "2026-10-21", "expected": "p1"},
+    {"name": "null default no matching period", "default": null, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": null, "work_hours": {"1": [6, 14]}}], "day": "2026-01-01", "expected": "default"},
+    {"name": "closed day in period beats default open day", "default": {"3": [8, 16]}, "periods": [{"id": "p1", "valid_from": "2026-10-20", "valid_to": null, "work_hours": {"3": null}}], "day": "2026-10-21", "expected": "p1"},
+    {"name": "overlap: earliest valid_from wins", "default": {"1": [8, 16]}, "periods": [{"id": "p2", "valid_from": "2026-10-25", "valid_to": "2026-12-31", "work_hours": {"1": [1, 2]}}, {"id": "p1", "valid_from": "2026-10-20", "valid_to": "2026-11-30", "work_hours": {"1": [6, 14]}}], "day": "2026-10-27", "expected": "p1"}
+  ],
+  "validate": [
+    {"name": "empty list ok", "periods": [], "expected": "ok", "ids": []},
+    {"name": "adjacent periods ok", "periods": [{"id": "a", "valid_from": "2026-10-01", "valid_to": "2026-10-31", "work_hours": {}}, {"id": "b", "valid_from": "2026-11-01", "valid_to": null, "work_hours": {}}], "expected": "ok", "ids": []},
+    {"name": "shared day overlaps", "periods": [{"id": "a", "valid_from": "2026-10-01", "valid_to": "2026-10-31", "work_hours": {}}, {"id": "b", "valid_from": "2026-10-31", "valid_to": "2026-12-01", "work_hours": {}}], "expected": "period_overlap", "ids": ["a", "b"]},
+    {"name": "open-ended then later period overlaps", "periods": [{"id": "a", "valid_from": "2026-10-01", "valid_to": null, "work_hours": {}}, {"id": "b", "valid_from": "2027-01-01", "valid_to": "2027-02-01", "work_hours": {}}], "expected": "period_overlap", "ids": ["a", "b"]},
+    {"name": "valid_to before valid_from", "periods": [{"id": "a", "valid_from": "2026-10-10", "valid_to": "2026-10-09", "work_hours": {}}], "expected": "period_dates_invalid", "ids": ["a"]}
+  ]
+}

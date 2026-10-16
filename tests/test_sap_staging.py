@@ -2032,6 +2032,78 @@ def test_review_focus_4_a_24_00_close_sends_23_59_59_of_the_due_date(pg, stg_pla
         _clear_outbound(pg)
 
 
+class _PlantHoursCursor:
+    """Fake cursor for `_working_window_close` with no machine: the only query is the plant's default hours."""
+
+    def __init__(self, plant_hours):
+        self._row = (plant_hours,) if plant_hours is not None else None
+
+    def execute(self, *_a, **_k):
+        pass
+
+    def fetchone(self):
+        return self._row
+
+
+def _period(pid, vf, vt, hours):
+    return {"id": pid, "valid_from": vf, "valid_to": vt, "work_hours": hours}
+
+
+_TUE = date(2030, 2, 5)    # a Tuesday: stored key 2 (0 = Sunday)
+
+
+def test_a_period_overriding_the_default_on_the_due_date_changes_the_close():
+    cur = _PlantHoursCursor({"2": [6, 20]})
+    periods = [_period("p", date(2030, 2, 1), None, {"2": [6, 16]})]
+    assert st._working_window_close(cur, "P", None, _TUE, periods) == datetime(2030, 2, 5, 16, 0)
+
+
+def test_a_due_inside_a_period_with_a_closed_weekday_walks_back_into_the_prior_pattern():
+    cur = _PlantHoursCursor({"1": [6, 18], "2": [6, 20]})
+    periods = [_period("p", _TUE, None, {"1": [6, 15], "2": None})]   # period starts on the due Tuesday and closes it
+    assert st._working_window_close(cur, "P", None, _TUE, periods) == datetime(2030, 2, 4, 18, 0)
+
+
+def test_a_24_hour_period_sends_23_59_59():
+    cur = _PlantHoursCursor({"2": [6, 20]})
+    periods = [_period("p", date(2030, 2, 1), date(2030, 2, 28), {str(i): [0, 24] for i in range(7)})]
+    assert st._working_window_close(cur, "P", None, _TUE, periods) == datetime(2030, 2, 5, 23, 59, 59)
+
+
+def test_no_periods_behaves_as_before():
+    assert st._working_window_close(_PlantHoursCursor({"2": [6, 20]}), "P", None, _TUE, []) == datetime(2030, 2, 5, 20, 0)
+    assert st._working_window_close(_PlantHoursCursor(None), "P", None, _TUE, []) == datetime(2030, 2, 5, 23, 59, 59)
+
+
+def test_a_period_applies_to_its_dates_when_the_plant_has_no_default_hours():
+    periods = [_period("p", date(2030, 2, 1), None, {"2": [6, 14]})]
+    assert st._working_window_close(_PlantHoursCursor(None), "P", None, _TUE, periods) == datetime(2030, 2, 5, 14, 0)
+
+
+@pytest.mark.pg
+def test_send_uses_the_calendar_period_covering_the_due_date(pg, stg_plant):
+    _set_plant(pg, routing=False, horizon_days=None)
+    _date_only_order(pg)
+    with _conn(pg) as (conn, cur):
+        cur.execute("UPDATE plants SET timezone = 'Europe/Berlin', work_hours = %s WHERE plant = %s",
+                    (Jsonb({"2": [6, 20]}), PLANT))
+        cur.execute("SELECT subnetwork FROM plants WHERE plant = %s", (PLANT,))
+        sub = cur.fetchone()[0]
+        cur.execute("INSERT INTO plant_calendar_period (subnetwork, plant, period_id, valid_from, valid_to, work_hours)"
+                    " VALUES (%s, %s, 'zzstg-p', '2030-02-01', NULL, %s)", (sub, PLANT, Jsonb({"2": [6, 16]})))
+        conn.commit()
+    try:
+        st.queue_send_to_sap(PLANT, actor="pytest")
+        (row,) = st.outbound_rows(PLANT)
+        d, t = st.plant_local_to_sap(datetime(2030, 2, 5, 16, 0), "Europe/Berlin")
+        assert row["pedtr"] == d.isoformat() and row["pedti"] == t.isoformat()
+    finally:
+        _clear_outbound(pg)
+        with _conn(pg) as (conn, cur):
+            cur.execute("DELETE FROM plant_calendar_period WHERE plant = %s", (PLANT,))
+            conn.commit()
+
+
 @pytest.mark.pg
 def test_send_refuses_a_plant_with_no_time_zone(pg, stg_plant):
     _set_plant(pg, routing=False, horizon_days=None)

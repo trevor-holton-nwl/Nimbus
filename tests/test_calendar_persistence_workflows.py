@@ -168,11 +168,131 @@ def test_unknown_plant_hydration_is_empty_but_write_is_rejected(planning_pg):
     unknown = c.plant + "_MISSING"
     assert md.load_plant_calendar(unknown) == {
         "plant": unknown, "subnetwork": None, "plant_work_hours": None,
-        "line_work_hours": {}, "machine_blackouts": [], "plant_blackouts": [],
+        "line_work_hours": {}, "machine_blackouts": [], "plant_blackouts": [], "plant_periods": [],
     }
     with pytest.raises(ValueError, match="not in Master Data"):
         md.save_plant_blackouts(unknown, [block()], user_email=c.actor)
     assert audit_rows(c, "plant_blackout") == []
+
+
+def period(pid="winter", valid_from="2026-10-20", valid_to="2027-04-19", **changes):
+    return {"id": pid, "name": "Winter", "valid_from": valid_from, "valid_to": valid_to,
+            "work_hours": {"1": [6, 14]}, **changes}
+
+
+def _period_count(c, plant=None):
+    with c.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM plant_calendar_period WHERE plant = %s", (plant or c.plant,))
+        return cur.fetchone()[0]
+
+
+def test_period_round_trip_is_sorted_with_seven_keys_and_iso_dates(planning_pg):
+    c = planning_pg
+    md.save_plant_periods(c.plant, [period("b", "2027-01-01", None), period("a", "2026-10-20", "2026-12-31")],
+                          user_email=c.actor)
+    loaded = md.load_plant_periods(c.plant)
+    assert [p["id"] for p in loaded] == ["a", "b"]
+    assert loaded[0]["valid_from"] == "2026-10-20" and loaded[0]["valid_to"] == "2026-12-31"
+    assert loaded[1]["valid_to"] is None
+    assert sorted(loaded[0]["work_hours"]) == list("0123456")
+    assert loaded[0]["work_hours"]["1"] == [6, 14] and loaded[0]["work_hours"]["0"] is None
+    assert md.load_plant_calendar(c.plant)["plant_periods"] == loaded
+    assert md.load_plant_periods(c.other) == []
+
+
+def test_period_delta_never_prunes_by_omission_and_deletes_are_plant_scoped(planning_pg):
+    c = planning_pg
+    md.save_plant_periods(c.plant, [period("a")], user_email=c.actor)
+    md.save_plant_periods(c.other, [period("a")], user_email=c.actor)
+    md.save_plant_periods(c.plant, [period("b", "2027-05-01", None)], user_email=c.actor)
+    assert [p["id"] for p in md.load_plant_periods(c.plant)] == ["a", "b"]
+    assert md.save_plant_periods(c.plant, [], deletes=["a", "unknown"], user_email=c.actor) == {
+        "upserted": 0, "deleted": 1}
+    assert [p["id"] for p in md.load_plant_periods(c.plant)] == ["b"]
+    assert [p["id"] for p in md.load_plant_periods(c.other)] == ["a"]
+
+
+def test_period_overlap_rejected_on_insert_and_edit_but_adjacent_accepted(planning_pg):
+    c = planning_pg
+    md.save_plant_periods(c.plant, [period("a", "2026-10-01", "2026-10-31")], user_email=c.actor)
+    with pytest.raises(md.PlantPeriodError) as e:
+        md.save_plant_periods(c.plant, [period("b", "2026-10-31", "2026-11-30")], user_email=c.actor)
+    assert e.value.code == "period_overlap" and sorted(e.value.ids) == ["a", "b"]
+    md.save_plant_periods(c.plant, [period("b", "2026-11-01", "2026-11-30")], user_email=c.actor)
+    with pytest.raises(md.PlantPeriodError) as e:
+        md.save_plant_periods(c.plant, [period("b", "2026-10-15", "2026-11-30")], user_email=c.actor)
+    assert e.value.code == "period_overlap"
+    assert [p["valid_from"] for p in md.load_plant_periods(c.plant)] == ["2026-10-01", "2026-11-01"]
+
+
+def test_period_same_request_delete_plus_conflicting_upsert_is_accepted(planning_pg):
+    c = planning_pg
+    md.save_plant_periods(c.plant, [period("a", "2026-10-01", "2026-10-31")], user_email=c.actor)
+    md.save_plant_periods(c.plant, [period("b", "2026-10-15", "2026-11-30")], deletes=["a"], user_email=c.actor)
+    assert [p["id"] for p in md.load_plant_periods(c.plant)] == ["b"]
+
+
+@pytest.mark.parametrize("bad,code", [
+    (period(valid_from="2026-1-2"), "period_dates_invalid"),
+    (period(valid_from="2026-10-20", valid_to="2026-10-19"), "period_dates_invalid"),
+    (period(work_hours={"1": [16, 8]}), "period_hours_invalid"),
+    (period(work_hours={}), "period_hours_invalid"),
+    (period(pid=""), "period_invalid"),
+])
+def test_bad_period_is_rejected_with_code_and_leaves_db_and_audit_untouched(planning_pg, bad, code):
+    c = planning_pg
+    with pytest.raises(md.PlantPeriodError) as e:
+        md.save_plant_periods(c.plant, [period("ok", "2030-01-01", None), bad], user_email=c.actor)
+    assert e.value.code == code
+    assert _period_count(c) == 0
+    assert audit_rows(c, "plant_calendar_period") == []
+
+
+def test_period_save_writes_one_audit_row(planning_pg):
+    c = planning_pg
+    md.save_plant_periods(c.plant, [period("a")], user_email=c.actor)
+    ((action, details),) = audit_rows(c, "plant_calendar_period")
+    assert action == "save" and details["plant"] == c.plant
+    assert details["upserted"] == 1 and details["deleted"] == 0 and details["ids"] == ["a"]
+
+
+def test_plant_delete_cascades_to_periods(planning_pg):
+    c = planning_pg
+    md.save_plant_periods(c.other, [period("a")], user_email=c.actor)
+    with c.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM plants WHERE plant = %s", (c.other,))
+        conn.commit()
+    assert _period_count(c, c.other) == 0
+
+
+def test_unknown_plant_periods_load_empty_and_write_is_rejected(planning_pg):
+    c = planning_pg
+    unknown = c.plant + "_MISSING"
+    assert md.load_plant_periods(unknown) == []
+    with pytest.raises(ValueError, match="not in Master Data"):
+        md.save_plant_periods(unknown, [period()], user_email=c.actor)
+    assert audit_rows(c, "plant_calendar_period") == []
+
+
+def test_http_periods_round_trip_and_400_carries_code_and_ids(planning_pg, monkeypatch):
+    c = planning_pg
+    monkeypatch.setattr(auth, "NIMBUS_API_KEY", "calendar-test-key")
+    monkeypatch.setattr(auth, "get_user_role", lambda email: "admin" if email == c.actor else None)
+    headers = {"x-user-email": c.actor, "x-api-key": "calendar-test-key"}
+    with closing(TestClient(brain.api)) as client:
+        url = "/plant-calendar/plant-periods"
+        ok = client.post(url, headers=headers, json={"plant": c.plant, "upserts": [period("a", "2026-10-01", "2026-10-31")]})
+        assert ok.status_code == 200 and ok.json() == {"upserted": 1, "deleted": 0}
+        config = client.get("/plant-calendar", headers=headers, params={"plant": c.plant}).json()
+        assert [p["id"] for p in config["plant_periods"]] == ["a"]
+        bad = client.post(url, headers=headers, json={"plant": c.plant, "upserts": [period("b", "2026-10-31", None)]})
+        assert bad.status_code == 400
+        detail = bad.json()["detail"]
+        assert detail["code"] == "period_overlap" and sorted(detail["ids"]) == ["a", "b"] and detail["message"]
+        missing = client.post(url, headers=headers, json={"plant": c.plant + "_MISSING", "upserts": [period()]})
+        assert missing.status_code == 400 and missing.json()["detail"]["code"] == "plant_not_mastered"
+        gone = client.post(url, headers=headers, json={"plant": c.plant, "deletes": ["a"]})
+        assert gone.status_code == 200 and gone.json() == {"upserted": 0, "deleted": 1}
 
 
 def test_http_calendar_save_hydrate_delete_round_trip_uses_real_database(planning_pg, monkeypatch):

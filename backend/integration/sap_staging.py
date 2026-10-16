@@ -2249,14 +2249,18 @@ def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
     return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
 
 
-def _working_window_close(cur, plant: str, machine: str | None, day: date) -> datetime:
+def _working_window_close(cur, plant: str, machine: str | None, day: date,
+                          periods: list | None = None) -> datetime:
     """The close of the working window on `day` (naive plant-local), for a due date SAP sent with no time
     (D10, VI12). Weekly hours are `{0..6: [open, close] | null}`, day 0 = Sunday, fractional hours. Like the
     browser's `workWindow`, the machine's calendar is INTERSECTED with the plant's hours when both exist (a
     weekday missing from either is closed, an empty intersection is closed); a machine with no calendar uses
     the plant's hours alone, and a plant with none uses the machine's alone. A closed day walks back up to 30
     days to the previous open day's close (mirrors `dueDateInstant`). A close at or after the next midnight
-    (a 24:00 close, a 24/7 line) sends 23:59:59 of that day; no calendar at all sends 23:59:59 of `day`."""
+    (a 24:00 close, a 24/7 line) sends 23:59:59 of that day; no calendar at all sends 23:59:59 of `day`.
+    The plant's hours for each day walked are its dated calendar period when one covers that day, else its
+    default weekly hours (`md.active_work_hours`); `periods` is that plant's period list (loaded here when
+    None, pass it to avoid one query per order)."""
     line_hours = plant_hours = None
     if machine:
         cur.execute("SELECT work_hours FROM machine_calendar WHERE plant = %s AND machine = %s"
@@ -2268,13 +2272,17 @@ def _working_window_close(cur, plant: str, machine: str | None, day: date) -> da
     plant_hours = r[0] if r else None
     line_hours = line_hours if isinstance(line_hours, dict) and line_hours else None
     plant_hours = plant_hours if isinstance(plant_hours, dict) and plant_hours else None
+    if periods is None:
+        periods = md._load_plant_period_rows(cur, plant)
     end_of_day = lambda d: datetime.combine(d, dt_time(23, 59, 59))  # noqa: E731
-    if line_hours is None and plant_hours is None:
+    if line_hours is None and plant_hours is None and not periods:
         return end_of_day(day)
     for back in range(31):
         d = day - timedelta(days=back)
         key = str((d.weekday() + 1) % 7)                # stored keys follow JS getDay(): 0 = Sunday
-        wins = [h.get(key) for h in (line_hours, plant_hours) if h is not None]
+        plant_day_hours = md.active_work_hours(plant_hours, periods, d)
+        plant_day_hours = plant_day_hours if isinstance(plant_day_hours, dict) and plant_day_hours else None
+        wins = [h.get(key) for h in (line_hours, plant_day_hours) if h is not None]
         if not all(wins):
             continue
         opened, close = max(float(w[0]) for w in wins), min(float(w[1]) for w in wins)
@@ -2317,13 +2325,15 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
                                      "sending to SAP (VI13)")
                 _vis, frozen_end = db._horizon_bounds_for_plant(cur, plant)
                 candidates = _outbound_candidate_rows(cur, plant)
+                periods = md._load_plant_period_rows(cur, plant)   # once, not per row
                 for row in candidates:
                     # D10 (VI12): a never-placed order's finish is SAP's own date with no time; send the close of
                     # the plant's working window on that date, not a zone-converted midnight (which moves the date)
                     if (row["planning_status"] != "needs_planning" and row["scheduled_end"] is None
                             and (row["segment_count"] or 0) < 2 and row["date_only"]
                             and row["eff_end"] is not None):
-                        row["eff_end"] = _working_window_close(cur, plant, row["machine"], row["eff_end"].date())
+                        row["eff_end"] = _working_window_close(cur, plant, row["machine"], row["eff_end"].date(),
+                                                          periods)
                 groups, skipped, skipped_unfirmed = build_outbound_groups(candidates, frozen_end)
                 cur.execute("UPDATE sap_stage_planned_order_out SET row_status = 'error', error_text = 'requeued',"
                             " sent_at = now() WHERE plant = %s AND row_status = 'ready'", (plant,))

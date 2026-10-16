@@ -303,6 +303,7 @@ async def lifespan(app: FastAPI):
     md.ensure_machine_blackout_table()
     md.ensure_machine_key_columns()
     md.ensure_plant_blackout_table()
+    md.ensure_plant_calendar_periods()
     md.ensure_unique_plant()
     md.ensure_material_plant_attributes()
     md.ensure_roles_table()
@@ -750,6 +751,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/plant-calendar/line-hours": "calendar.line_hours_update",
     "/plant-calendar/line-blackouts": "calendar.line_blackouts_update",
     "/plant-calendar/plant-blackouts": "calendar.plant_blackouts_update",
+    "/plant-calendar/plant-periods": "calendar.plant_periods_update",
     "/setup/{plant}/definition": "setup.definition_write",
     "/setup/{plant}/active": "setup.active_write",  # D2: vestigial-but-retained; see plant.setup_active_update below
     "/plant/{plant}/setup-active": "plant.setup_active_update",

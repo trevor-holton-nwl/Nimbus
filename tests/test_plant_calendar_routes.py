@@ -36,6 +36,7 @@ _PLANT_CALENDAR_POST_PATHS = [
     "/plant-calendar/line-hours",
     "/plant-calendar/line-blackouts",
     "/plant-calendar/plant-blackouts",
+    "/plant-calendar/plant-periods",
 ]
 
 

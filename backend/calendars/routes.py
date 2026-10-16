@@ -20,7 +20,8 @@ router = APIRouter()
 def plant_calendar_get(plant: str):
     """Return a plant's full calendar/blackout config for Store hydration:
     { plant, subnetwork, plant_work_hours, line_work_hours:{line:{0..6}},
-      machine_blackouts:[{id, machine, start, end, reason}], plant_blackouts:[...] }."""
+      machine_blackouts:[{id, machine, start, end, reason}], plant_blackouts:[...],
+      plant_periods:[{id, name, valid_from, valid_to, work_hours}] }."""
     if not plant:
         raise HTTPException(status_code=400, detail="plant query param is required")
     try:
@@ -99,3 +100,28 @@ def plant_calendar_plant_blackouts_post(request: Request, body: dict = Body(defa
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/plant-calendar/plant-periods", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def plant_calendar_plant_periods_post(request: Request, body: dict = Body(default={})):
+    """Delta write of effective-dated calendar periods. Payload:
+    { plant, upserts:[{id, name?, valid_from, valid_to?, work_hours}], deletes?:[id] }.
+    A rejected write answers 400 with detail {code, message, ids}."""
+    try:
+        result = md.save_plant_periods(
+            plant=body.get("plant", ""),
+            upserts=body.get("upserts", []),
+            deletes=body.get("deletes", []),
+            user_email=request.headers.get("x-user-email"),
+        )
+        _set_admin_log_details(
+            request, plant=body.get("plant", ""), upsert_count=len(body.get("upserts", [])),
+            delete_count=len(body.get("deletes", [])),
+        )
+        return result
+    except md.PlantPeriodError as e:
+        raise HTTPException(status_code=400,
+                            detail={"code": e.code, "message": str(e), "ids": e.ids}) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400,
+                            detail={"code": "plant_not_mastered", "message": str(e)}) from e

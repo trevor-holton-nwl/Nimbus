@@ -9,7 +9,7 @@ parameter placeholder.  The user cannot inject SQL through any of these paths.
 import io
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import psycopg
@@ -2629,6 +2629,35 @@ def ensure_plant_blackout_table() -> None:
         conn.commit()
 
 
+def ensure_plant_calendar_periods() -> None:
+    """Idempotent: effective-dated plant calendar periods. Each period overrides the
+    plant's default weekly work_hours for an inclusive date range (valid_to NULL = no
+    end). period_id is client-supplied. Non-overlap is enforced in save_plant_periods
+    (no btree_gist exclusion constraint: Azure Flexible Server extension allow-list)."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS plant_calendar_period (
+                subnetwork  TEXT      NOT NULL,
+                plant       TEXT      NOT NULL,
+                period_id   TEXT      NOT NULL,
+                name        TEXT      NOT NULL DEFAULT '',
+                valid_from  DATE      NOT NULL,
+                valid_to    DATE,
+                work_hours  JSONB     NOT NULL,
+                created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (subnetwork, plant, period_id),
+                FOREIGN KEY (subnetwork, plant) REFERENCES plants(subnetwork, plant)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                CONSTRAINT chk_plant_calendar_period_range CHECK (valid_to IS NULL OR valid_to >= valid_from),
+                CONSTRAINT chk_plant_calendar_period_hours CHECK (jsonb_typeof(work_hours) = 'object')
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_plant_calendar_period_plant"
+                    " ON plant_calendar_period(plant, valid_from)")
+        conn.commit()
+
+
 def ensure_unique_plant() -> None:
     """Idempotent: enforce that a plant code is globally unique across subnetworks
     — an invariant the app already assumes (getPlantForLine, /tasks?plant=,
@@ -2890,6 +2919,189 @@ def save_plant_blackouts(plant: str, upserts: list, deletes: list | None = None,
     return {"upserted": len(prepared), "deleted": deleted}
 
 
+# ----- plant calendar periods ---------------------------------------------
+
+_PERIOD_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MAX_PERIOD_UPSERTS = 200
+
+
+class PlantPeriodError(ValueError):
+    """A calendar-period write rejected for a reason the UI can act on.
+    code: period_invalid | period_dates_invalid | period_hours_invalid | period_overlap;
+    ids: the offending period ids (the two that collide for period_overlap), or None."""
+
+    def __init__(self, code: str, message: str, ids: list | None = None):
+        super().__init__(message)
+        self.code = code
+        self.ids = ids
+
+
+def _period_date(v, field: str, pid: str):
+    if not isinstance(v, str) or not _PERIOD_DATE_RE.match(v):
+        raise PlantPeriodError("period_dates_invalid", f"{field} must be YYYY-MM-DD", [pid])
+    try:
+        return date.fromisoformat(v)
+    except ValueError:
+        raise PlantPeriodError("period_dates_invalid", f"{field} {v!r} is not a real date", [pid]) from None
+
+
+def _prepare_periods(upserts) -> list:
+    """Validate + normalise period upserts -> [{id, name, valid_from, valid_to, work_hours}]
+    (dates as `date`, work_hours with all keys '0'..'6'). Raises PlantPeriodError."""
+    upserts = upserts or []
+    if not isinstance(upserts, list):
+        raise PlantPeriodError("period_invalid", "upserts must be a list")
+    if len(upserts) > _MAX_PERIOD_UPSERTS:
+        raise PlantPeriodError("period_invalid", f"at most {_MAX_PERIOD_UPSERTS} periods per request")
+    out: list = []
+    seen: set = set()
+    for u in upserts:
+        if not isinstance(u, dict):
+            raise PlantPeriodError("period_invalid", "each period must be an object")
+        pid = u.get("id")
+        if not isinstance(pid, str) or not pid.strip():
+            raise PlantPeriodError("period_invalid", "period id is required")
+        if len(pid) > 64:
+            raise PlantPeriodError("period_invalid", "period id is longer than 64 characters", [pid])
+        if pid in seen:
+            raise PlantPeriodError("period_invalid", f"duplicate period id {pid!r}", [pid])
+        seen.add(pid)
+        name = u.get("name")
+        name = "" if name is None else str(name).strip()
+        if len(name) > 80:
+            raise PlantPeriodError("period_invalid", "period name is longer than 80 characters", [pid])
+        vf = _period_date(u.get("valid_from"), "valid_from", pid)
+        vt_raw = u.get("valid_to")
+        vt = None if vt_raw is None else _period_date(vt_raw, "valid_to", pid)
+        if vt is not None and vt < vf:
+            raise PlantPeriodError("period_dates_invalid", "valid_to is before valid_from", [pid])
+        wh = u.get("work_hours")
+        if not isinstance(wh, dict) or not wh:
+            raise PlantPeriodError("period_hours_invalid", "work_hours must be a non-empty object", [pid])
+        try:
+            clean = _clean_work_hours(wh)
+        except ValueError as e:
+            raise PlantPeriodError("period_hours_invalid", str(e), [pid]) from None
+        for k in "0123456":
+            clean.setdefault(k, None)
+        out.append({"id": pid, "name": name, "valid_from": vf, "valid_to": vt, "work_hours": clean})
+    return out
+
+
+def _period_overlaps(rows) -> tuple | None:
+    """First pair of overlapping periods as (id, id), else None. rows carry id/valid_from/
+    valid_to (date|None). NULL valid_to = +infinity; both ends inclusive, so a shared day
+    overlaps and adjacent days do not."""
+    ordered = sorted(rows, key=lambda r: r["valid_from"])
+    for prev, nxt in zip(ordered, ordered[1:], strict=False):
+        if prev["valid_to"] is None or nxt["valid_from"] <= prev["valid_to"]:
+            return (prev["id"], nxt["id"])
+    return None
+
+
+def _as_date(v):
+    return date.fromisoformat(v) if isinstance(v, str) else v
+
+
+def active_work_hours(default, periods, day: date):
+    """Canonical active-pattern rule (Python twin of the frontend one): the period with
+    valid_from <= day <= valid_to (NULL = +infinity) wins, the earliest valid_from on an
+    (illegal) overlap; else `default` (which may be None). A period replaces the default whole."""
+    best = None
+    for p in periods or []:
+        vf, vt = _as_date(p["valid_from"]), _as_date(p.get("valid_to"))
+        if vf <= day and (vt is None or day <= vt) and (best is None or vf < best[0]):
+            best = (vf, p)
+    return best[1]["work_hours"] if best else default
+
+
+def save_plant_periods(plant: str, upserts: list, deletes: list | None = None,
+                       user_email: str | None = None) -> dict:
+    """Delta write of effective-dated calendar periods (upsert + explicit delete). Validates
+    first (no DB touched on failure), then one transaction that locks the plant row so two
+    concurrent saves cannot both pass the non-overlap check."""
+    prepared = _prepare_periods(upserts)
+    del_ids = [d for d in (deletes or []) if d]
+    with _pool.connection() as conn, conn.cursor() as cur:
+        subnet = _resolve_subnetwork(cur, plant)
+        cur.execute("SELECT 1 FROM plants WHERE subnetwork = %s AND plant = %s FOR UPDATE", (subnet, plant))
+        cur.execute("SELECT period_id, valid_from, valid_to FROM plant_calendar_period"
+                    " WHERE subnetwork = %s AND plant = %s", (subnet, plant))
+        result = {r[0]: {"id": r[0], "valid_from": r[1], "valid_to": r[2]} for r in cur.fetchall()}
+        for d in del_ids:
+            result.pop(d, None)
+        up_ids = {p["id"] for p in prepared}
+        for p in prepared:
+            result[p["id"]] = p
+        # only pairs that involve an upserted id: pre-existing bad data never blocks a delete
+        ordered = sorted(result.values(), key=lambda r: r["valid_from"])
+        for prev, nxt in zip(ordered, ordered[1:], strict=False):
+            if (prev["id"] in up_ids or nxt["id"] in up_ids) and (
+                    prev["valid_to"] is None or nxt["valid_from"] <= prev["valid_to"]):
+                raise PlantPeriodError(
+                    "period_overlap",
+                    f"periods {prev['id']!r} and {nxt['id']!r} overlap", [prev["id"], nxt["id"]])
+        deleted = 0
+        if del_ids:
+            cur.execute(
+                "DELETE FROM plant_calendar_period WHERE subnetwork = %s AND plant = %s"
+                " AND period_id = ANY(%s)",
+                (subnet, plant, del_ids),
+            )
+            deleted = cur.rowcount
+        if prepared:
+            cur.executemany(
+                "INSERT INTO plant_calendar_period"
+                " (subnetwork, plant, period_id, name, valid_from, valid_to, work_hours)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (subnetwork, plant, period_id) DO UPDATE SET"
+                " name = EXCLUDED.name, valid_from = EXCLUDED.valid_from,"
+                " valid_to = EXCLUDED.valid_to, work_hours = EXCLUDED.work_hours,"
+                " updated_at = NOW()",
+                [(subnet, plant, p["id"], p["name"], p["valid_from"], p["valid_to"],
+                  Jsonb(p["work_hours"])) for p in prepared],
+            )
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plant_calendar_period', 'save', %s, %s)",
+            (Jsonb({"plant": plant, "subnetwork": subnet, "upserted": len(prepared),
+                    "deleted": deleted, "ids": sorted(up_ids)}), user_email),
+        )
+        conn.commit()
+    return {"upserted": len(prepared), "deleted": deleted}
+
+
+def _load_plant_period_rows(cur, plant: str) -> list:
+    """A plant's periods as dicts with `date` objects, read on the caller's cursor. Probes
+    for the table first so a pre-migration DB returns [] without poisoning the caller's
+    transaction."""
+    cur.execute("SELECT to_regclass('public.plant_calendar_period')")
+    if cur.fetchone()[0] is None:
+        return []
+    cur.execute(
+        "SELECT period_id, name, valid_from, valid_to, work_hours FROM plant_calendar_period"
+        " WHERE plant = %s ORDER BY valid_from, period_id", (plant,))
+    return [{"id": r[0], "name": r[1], "valid_from": r[2], "valid_to": r[3], "work_hours": r[4]}
+            for r in cur.fetchall()]
+
+
+def load_plant_periods(plant: str) -> list:
+    """A plant's periods as wire dicts (ISO date strings). Own connection; [] if the table is
+    absent (pre-migration/restored DB) so the consolidated GET never 500s."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT period_id, name, valid_from, valid_to, work_hours FROM plant_calendar_period"
+                " WHERE plant = %s ORDER BY valid_from, period_id", (plant,))
+            return [
+                {"id": r[0], "name": r[1], "valid_from": r[2].isoformat(),
+                 "valid_to": r[3].isoformat() if r[3] is not None else None, "work_hours": r[4]}
+                for r in cur.fetchall()
+            ]
+    except psycopg.errors.UndefinedTable:
+        return []
+
+
 # ----- loaders (hydration) -------------------------------------------------
 
 def load_machine_blackouts(plant: str) -> list:
@@ -2975,6 +3187,7 @@ def load_plant_calendar(plant: str) -> dict:
         "line_work_hours": line_wh,
         "machine_blackouts": load_machine_blackouts(plant),
         "plant_blackouts": load_plant_blackouts(plant),
+        "plant_periods": load_plant_periods(plant),
     }
 
 
