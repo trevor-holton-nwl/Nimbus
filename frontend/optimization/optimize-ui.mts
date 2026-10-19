@@ -371,9 +371,11 @@ export const OptimizeDialog = (() => {
     const hint = document.getElementById('opt-strategy-hint');
     if (hint) hint.textContent = Util.t('tip.' + mode + '_mode');
     _applyModeOptions();
-    // Remove Backlog is not a search; the Search time option only applies to the three setup-aware strategies.
-    const budgetSel = document.getElementById('opt-search-budget') as HTMLSelectElement | null;
-    if (budgetSel) { budgetSel.disabled = mode === 'backlog'; if (mode === 'backlog') budgetSel.value = '8'; }
+    // Remove Backlog is not a search; Run in background only applies to the three setup-aware strategies.
+    const bgChk = document.getElementById('opt-chk-background') as HTMLInputElement | null;
+    if (bgChk) { bgChk.disabled = mode === 'backlog'; if (mode === 'backlog') bgChk.checked = false; }
+    const bgLabel = document.getElementById('opt-background-label');
+    if (bgLabel) bgLabel.title = mode === 'backlog' ? 'Remove Backlog is not a search, so it always runs in the foreground.' : '';
     if (mode === 'backlog') _applyBacklogDefaults();
     else _updatePlantBadge();
   }
@@ -533,9 +535,9 @@ export const OptimizeDialog = (() => {
     // "Optimizing…" state (e.g., Cancel mid-fetch).
     const runBtn = document.getElementById('opt-run-btn');
     if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon">📈</span>${Util.t('btn.run_optimization')}`;
-    // Search time always opens on Normal; the planner opts into Exhaustive per run.
-    const budgetSelect = document.getElementById('opt-search-budget') as HTMLSelectElement | null;
-    if (budgetSelect) budgetSelect.value = '8';
+    // Run in background always opens unticked; the planner opts in per run.
+    const bgChkOpen = document.getElementById('opt-chk-background') as HTMLInputElement | null;
+    if (bgChkOpen) bgChkOpen.checked = false;
     // A background run holds the optimizer: show that instead of an enabled Run.
     if (runBtn && OptimizerPreview._backgroundRun) {
       (runBtn as HTMLButtonElement).disabled = true;
@@ -603,9 +605,9 @@ export const OptimizeDialog = (() => {
     }
     const sfEl = document.getElementById('opt-chk-firmed') as HTMLInputElement | null;
     const scEl = document.getElementById('opt-chk-calendar') as HTMLInputElement | null;
-    const budgetEl = document.getElementById('opt-search-budget') as HTMLSelectElement | null;
+    const bgEl = document.getElementById('opt-chk-background') as HTMLInputElement | null;
     // Exhaustive runs in the background: no preview spinner, the planner keeps working.
-    const exhaustive = budgetEl?.value === '180' && _mode !== 'backlog';
+    const exhaustive = bgEl?.checked === true && _mode !== 'backlog';
 
     // Remember the chosen strategy/window/options as this user's optimizer
     // defaults so the dialog pre-fills the same way next time (feature: optimizer

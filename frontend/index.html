@@ -2829,15 +2829,13 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <span class="opt-check-box"></span>
               <span>Respect calendar blackouts</span>
             </label>
+            <label class="opt-check" id="opt-background-label">
+              <input type="checkbox" id="opt-chk-background" aria-describedby="opt-background-hint">
+              <span class="opt-check-box"></span>
+              <span data-i18n="ui.opt_run_background">Run in background</span>
+            </label>
           </div>
-          <label class="opt-select-row" id="opt-budget-label" for="opt-search-budget">
-            <span data-i18n="ui.opt_search_time">Search time</span>
-            <select id="opt-search-budget" class="input" aria-describedby="opt-search-budget-hint">
-              <option value="8" data-i18n="ui.opt_search_time_normal">Normal (8 s)</option>
-              <option value="180" data-i18n="ui.opt_search_time_exhaustive">Exhaustive (up to 3 min, runs in the background)</option>
-            </select>
-          </label>
-          <p id="opt-search-budget-hint" class="opt-strategy-hint" data-i18n="ui.opt_search_time_hint">Exhaustive keeps searching for up to 3 minutes while you keep working and tells you when it is done. Comparison plans always use the normal budget.</p>
+          <p id="opt-background-hint" class="opt-strategy-hint" data-i18n="ui.opt_run_background_hint">Runs a deeper search while you keep working and tells you when it is done. Comparison plans use the normal search.</p>
         </div>
       </div>
 
@@ -2914,17 +2912,17 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
-     MODAL: Exhaustive optimization finished (background run)
+     MODAL: Background optimization finished (background run)
      ========================================================= -->
 <div class="modal-backdrop" id="modal-opt-background-done" data-no-backdrop-close hidden>
   <div class="modal" style="max-width:520px;" role="dialog" aria-labelledby="opt-bg-done-title">
     <header class="modal-head">
-      <h3 id="opt-bg-done-title" data-i18n="ui.opt_bg_done_title">Exhaustive optimization finished</h3>
+      <h3 id="opt-bg-done-title" data-i18n="ui.opt_bg_done_title">Background optimization finished</h3>
       <button class="icon-btn sm" id="opt-bg-close-btn" aria-label="Close">✕</button>
     </header>
     <div class="modal-body" id="opt-bg-done-body" style="padding:16px 20px;"></div>
     <footer class="modal-foot">
-      <button class="btn btn-ghost" id="opt-bg-switch-btn" data-i18n="ui.opt_bg_switch_plant" hidden>Switch to plant</button>
+      <button class="btn btn-ghost" id="opt-bg-switch-btn" hidden></button>
       <button class="btn btn-ghost" id="opt-bg-view-btn" data-i18n="ui.opt_bg_view">View preview</button>
       <button class="btn btn-primary" id="opt-bg-apply-btn" data-i18n="ui.opt_bg_apply">Apply without preview</button>
     </footer>

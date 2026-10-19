@@ -1807,7 +1807,7 @@ test('senior review U21: the Optimize dialog refuses to run on a plant with no v
 });
 
 /* ---------------------------------------------------------------------------
-   Task 3: Search time option, background (Exhaustive) run, finish popup, partial apply
+   Task 3: Run in background option, background run, finish popup, partial apply
    ------------------------------------------------------------------------- */
 const enLocaleSource = readFileSync(new URL('../../../frontend/locales/en.js', import.meta.url), 'utf8');
 const enString = key => enLocaleSource.match(new RegExp(`'${key.replace(/\./g, '\\.')}':\\s*'((?:[^'\\\\]|\\\\.)*)'`))?.[1];
@@ -1822,8 +1822,9 @@ function openBackgroundFixture(plant = 'SR', tasks = singleRevealTasks) {
       'btn.opt_run_bg_busy', 'btn.run_optimization'].map(key => [key, enString(key)])),
   } };
   const extra = new Map(['btn-optimize', 'modal-opt-background-done', 'opt-bg-done-body', 'opt-bg-apply-btn',
-    'opt-bg-view-btn', 'opt-bg-switch-btn', 'opt-search-budget', 'opt-run-btn'].map(id => [id, makeSandboxElement(id)]));
-  extra.get('opt-search-budget').value = '8';
+    'opt-bg-view-btn', 'opt-bg-switch-btn', 'opt-chk-background', 'opt-background-label', 'opt-run-btn'].map(id => [id, makeSandboxElement(id)]));
+  extra.get('opt-chk-background').checked = false;
+  extra.get('opt-chk-background').disabled = false;
   const baseGet = globalThis.document.getElementById;
   globalThis.document.getElementById = id => extra.get(id) || baseGet(id);
   const priorOpen = Modal.open;
@@ -1969,7 +1970,7 @@ test('Task 3: viewing a background result after local edits keeps "Apply what st
 test('Task 3: a running background run blocks OptimizeDialog.run with a toast and starts nothing', async () => {
   const fx = openBackgroundFixture();
   try {
-    fx.extra.get('opt-search-budget').value = '180';
+    fx.extra.get('opt-chk-background').checked = true;
     const stub = { plant: 'SR', mode: 'spt', startedAt: 0, controller: new AbortController(), result: null, error: null };
     OptimizerPreview._backgroundRun = stub;
     const seq = OptimizerPreview._runSeq;
@@ -1982,7 +1983,7 @@ test('Task 3: a running background run blocks OptimizeDialog.run with a toast an
   }
 });
 
-test('Task 3: OptimizeDialog.open resets Search time to Normal', async () => {
+test('Task 3: OptimizeDialog.open resets Run in background to unticked', async () => {
   const fx = openBackgroundFixture();
   const priorRaf = globalThis.requestAnimationFrame;
   try {
@@ -1992,9 +1993,9 @@ test('Task 3: OptimizeDialog.open resets Search time to Normal', async () => {
     const modal = makeSandboxElement('modal-optimize');
     const baseGet = globalThis.document.getElementById;
     globalThis.document.getElementById = id => (id === 'modal-optimize' ? modal : baseGet(id));
-    fx.extra.get('opt-search-budget').value = '180';
+    fx.extra.get('opt-chk-background').checked = true;
     OptimizeDialog.open();
-    assert.equal(fx.extra.get('opt-search-budget').value, '8');
+    assert.equal(fx.extra.get('opt-chk-background').checked, false);
   } finally {
     delete globalThis.flatpickr;
     globalThis.requestAnimationFrame = priorRaf;
@@ -2373,17 +2374,17 @@ test('Final wave M2: the limit note key follows the run mode (preview and popup)
   assert.equal(OptimizerPreview._limitNoteKey(true), 'ui.opt_pv_diag_limit_reached_note_exhaustive');
   const fx = openBackgroundFixture();
   try {
-    assert.match(Util.t('ui.opt_pv_diag_limit_reached_note'), /Exhaustive/);
-    assert.doesNotMatch(Util.t('ui.opt_pv_diag_limit_reached_note_exhaustive'), /choose/i);
+    assert.match(Util.t('ui.opt_pv_diag_limit_reached_note'), /Run in background/);
+    assert.doesNotMatch(Util.t('ui.opt_pv_diag_limit_reached_note_exhaustive'), /tick|choose/i);
     await OptimizerPreview.runInBackground('spt', fx.opts);
     const run = OptimizerPreview._backgroundRun;
     run.result.candidate.diagnostics.limitReached = true;
     run.result.opts = { ...run.result.opts, exhaustive: true };
     OptimizerPreview._renderBackgroundDone();
-    assert.match(fx.extra.get('opt-bg-done-body').innerHTML, /even on an exhaustive run/);
+    assert.match(fx.extra.get('opt-bg-done-body').innerHTML, /even on a background run/);
     run.result.opts = { ...run.result.opts, exhaustive: false };
     OptimizerPreview._renderBackgroundDone();
-    assert.match(fx.extra.get('opt-bg-done-body').innerHTML, /choose Exhaustive/);
+    assert.match(fx.extra.get('opt-bg-done-body').innerHTML, /tick Run in background/);
   } finally {
     fx.restore();
   }
@@ -2416,6 +2417,88 @@ test('Final wave M8: the Run button is restored when the background run finishes
     assert.match(runBtn.innerHTML, new RegExp(Util.t('btn.run_optimization')));
   } finally {
     OptimizerPreview._backgroundRun = null;
+    fx.restore();
+  }
+});
+
+test('Run in background: ticked run() goes to runInBackground with exhaustive:true; unticked takes the foreground path', async () => {
+  const fx = openBackgroundFixture();
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorBg = OptimizerPreview.runInBackground;
+  const priorFg = OptimizerPreview.runWithPreview;
+  const priorLoading = OptimizerPreview.showLoading;
+  const priorRankPlant = Persistence._rankMapsPlant;
+  const priorPlantNow = Store.plantNow;
+  try {
+    Store.plantNow = () => new Date('2026-08-03T08:00:00');
+    globalThis.requestAnimationFrame = fn => { fn(); return 1; };
+    globalThis.flatpickr = () => new Proxy({ selectedDates: [] }, { get: (target, key) => (key in target ? target[key] : () => {}) });
+    const modal = makeSandboxElement('modal-optimize');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'modal-optimize' ? modal : baseGet(id));
+    const bgCalls = [];
+    const fgCalls = [];
+    OptimizerPreview.runInBackground = async (mode, opts) => { bgCalls.push({ mode, opts }); };
+    OptimizerPreview.runWithPreview = async (mode, opts) => { fgCalls.push({ mode, opts }); };
+    OptimizerPreview.showLoading = () => {};
+    OptimizeDialog.open();
+    OptimizeDialog.selectMode('spt');
+    Persistence._rankMapsPlant = 'SR';
+    const chk = fx.extra.get('opt-chk-background');
+
+    chk.checked = true;
+    await OptimizeDialog.run();
+    assert.equal(bgCalls.length, 1, `ticked run goes to the background, toasts ${JSON.stringify(fx.toasts)}`);
+    assert.equal(bgCalls[0].opts.exhaustive, true);
+    assert.equal(fgCalls.length, 0);
+
+    chk.checked = false;
+    await OptimizeDialog.run();
+    await wait(20);
+    assert.equal(bgCalls.length, 1, 'unticked run does not go to the background');
+    assert.equal(fgCalls.length, 1, 'unticked run takes the foreground preview path');
+    assert.equal(fgCalls[0].opts.exhaustive, false);
+  } finally {
+    OptimizerPreview.runInBackground = priorBg;
+    OptimizerPreview.runWithPreview = priorFg;
+    OptimizerPreview.showLoading = priorLoading;
+    Persistence._rankMapsPlant = priorRankPlant;
+    Store.plantNow = priorPlantNow;
+    delete globalThis.flatpickr;
+    globalThis.requestAnimationFrame = priorRaf;
+    fx.restore();
+  }
+});
+
+test('Run in background: selectMode(backlog) disables and unchecks the box; other strategies re-enable it', () => {
+  const fx = openBackgroundFixture();
+  try {
+    const chk = fx.extra.get('opt-chk-background');
+    const label = fx.extra.get('opt-background-label');
+    chk.checked = true;
+    OptimizeDialog.selectMode('backlog');
+    assert.equal(chk.disabled, true);
+    assert.equal(chk.checked, false);
+    assert.ok(label.title, 'the disabled box carries a tooltip');
+    OptimizeDialog.selectMode('spt');
+    assert.equal(chk.disabled, false);
+    assert.equal(label.title, '');
+  } finally {
+    OptimizeDialog.selectMode('changeover');
+    fx.restore();
+  }
+});
+
+test('Background popup: a same-plant result keeps the Switch button hidden and never shows an unfilled placeholder', async () => {
+  const fx = openBackgroundFixture();
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    OptimizerPreview._renderBackgroundDone();
+    const switchBtn = fx.extra.get('opt-bg-switch-btn');
+    assert.equal(switchBtn.hidden, true);
+    assert.ok(!String(switchBtn.textContent).includes('{{'), 'no raw {{plant}} placeholder');
+    assert.ok(!String(fx.extra.get('opt-bg-done-body').innerHTML).includes('{{'));
+  } finally {
     fx.restore();
   }
 });
