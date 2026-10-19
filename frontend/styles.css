@@ -4887,14 +4887,18 @@ body.dark .cw-active-card {
    this ancestor; the other three panes don't need it. */
 #md-master-plant-pane { overflow: hidden; }
 .md-master-subtabs { margin: 0; flex: 0 0 auto; }
-.tab-strip-row { display: flex; align-items: center; gap: 8px; min-width: 0; flex: none; }
-.tab-strip-row > nav { flex: 1; margin: 0; }
-.tab-strip-row > button { flex: none; margin-right: 8px; }
-.md-table-nav-row { margin-bottom: 16px; }
-.md-master-refresh { align-self: center; margin: 0 8px 2px 0; }
+/* The row owns the underline so it runs the full width, under the trailing button too. The nav
+   drops its own line and stretches, so the active tab's negative margin lands on the row border.
+   --tab-strip-line keeps each row's own weight (Manage Plant Data uses 1px). */
+.tab-strip-row { display: flex; align-items: center; gap: 8px; min-width: 0; flex: none;
+  border-bottom: var(--tab-strip-line, 2px) solid var(--line); }
+.tab-strip-row > nav { flex: 1; margin: 0; border-bottom: 0; align-self: stretch; }
+.tab-strip-row > button { flex: none; margin: 0 8px 0 0; }
+.md-table-nav-row { margin-bottom: 16px; --tab-strip-line: 1px; }
 /* The Plant pane inner tabs sit flush beneath the master-data sub-tab row —
-   same zero-margin treatment as .settings-inner-tabs one level further in. */
-.plant-inner-tabs { flex: 0 0 auto; margin: 0; padding: 0 24px; border-top: 1px solid var(--border); }
+   same zero-margin treatment as .settings-inner-tabs one level further in. No top border:
+   the master row above already draws the separating line. */
+.plant-inner-tabs { flex: 0 0 auto; margin: 0; padding: 0 24px; border-top: 0; }
 
 /* The System Settings inner tabs are navigation, not content: keep them
    visible while the Rules or Setup Matrix panel scrolls independently. */
@@ -4916,19 +4920,21 @@ body.dark .cw-active-card {
 #plant-tab-calendar .cal-container > .panel { margin-bottom: 18px; }
 .plant-cal-grid {
   display: grid;
-  grid-template-columns: minmax(300px, 380px) 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   margin-bottom: 18px;
   align-items: start;
 }
 .plant-cal-grid > .panel { min-width: 0; }
-@media (max-width: 780px) {
-  .plant-cal-grid { grid-template-columns: 1fr; }
-}
-/* The default-week pills share a 300-380px column here, so let a long
-   "6am–2pm" range wrap at the dash instead of overflowing its cell. */
-#plant-tab-calendar #plant-hours-body .lhp-time {
-  white-space: normal; text-align: center; font-size: 11px; line-height: 1.25;
+/* The default week and the period timeline each take the full content width (one column).
+   Pill times stay on one line while the panel is wide; once the panel itself is narrower than
+   800px each time breaks deliberately at the dash (the markup is two spans, see _renderHours).
+   A container query, not a media query: the panel width follows the tab, not the window. */
+#plant-hours-panel { container-type: inline-size; }
+#plant-hours-body .lhp-time { white-space: nowrap; text-align: center; }
+@container (max-width: 800px) {
+  #plant-hours-body .lhp-time { line-height: 1.25; }
+  #plant-hours-body .lhp-time > span { display: block; }
 }
 #plant-tab-calendar .plant-no-sel { padding: 16px 18px; margin: 0; font-size: 12.5px; color: var(--fg-faint); }
 
@@ -4979,7 +4985,7 @@ body.dark .cw-active-card {
 }
 
 /* Period timeline strip. Container queries (not media queries): the strip sits in
-   a column whose width depends on the Calendar tab's own two-column grid. */
+   a column whose width follows the Calendar tab, not the window. */
 .period-strip { container-type: inline-size; }
 .period-ticks {
   position: relative; height: 16px; overflow: hidden;
@@ -5071,7 +5077,8 @@ body.dark .period-seg-active { color: var(--bg); }
   font-size: 12px; font-weight: 500; color: var(--fg); cursor: pointer;
   text-transform: none; letter-spacing: normal;
 }
-.form-row label.chk-inline { display: inline-flex; margin-bottom: 0; text-transform: none; letter-spacing: normal; font-size: 12px; font-weight: 500; color: var(--fg); }
+.chk-inline input[type="checkbox"] { width: 14px; height: 14px; margin: 0; flex: none; accent-color: var(--accent); }
+.form-row label.chk-inline { white-space: nowrap; display: inline-flex; margin-bottom: 0; text-transform: none; letter-spacing: normal; font-size: 12px; font-weight: 500; color: var(--fg); }
 #cal-edit-period-fields .form-row { margin-bottom: 0; }
 #cal-edit-period-fields .form-row-2 > div { min-width: 0; }
 #cal-edit-period-fields .form-row-2 label { display: block; font-size: 11px; font-weight: 600; color: var(--fg-mute); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }

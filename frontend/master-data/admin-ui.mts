@@ -441,7 +441,9 @@ export const Plant = {
 
     const pillsHtml = [0,1,2,3,4,5,6].map(d => {
       const wh = plant.workHours[d];
-      const time = wh ? `${ProdLines._fmtHour(wh[0])}–${ProdLines._fmtHour(wh[1])}` : Util.t('ui.off');
+      // Open days: two spans so a narrow panel can break at the dash (CSS container query);
+      // textContent still reads "7am–7pm". Closed days stay plain text.
+      const time = wh ? `<span>${ProdLines._fmtHour(wh[0])}–</span><span>${ProdLines._fmtHour(wh[1])}</span>` : Util.t('ui.off');
       const hrs = wh ? (() => { const h = wh[1] - wh[0]; return h % 1 === 0 ? `${h}h` : `${h.toFixed(1)}h`; })() : '—';
       return `<div class="line-hours-pill ${wh ? 'on' : 'off'}" data-day="${d}">
         <span class="lhp-day">${dayLabels[d]}</span>
