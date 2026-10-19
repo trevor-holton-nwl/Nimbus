@@ -1101,6 +1101,8 @@ window.__NIMBUS_LOCALES.fr = {
   /* ── Conseils des panneaux du tableau de bord ────────────────────────────── */
   'ui.line_status_title':              'État des machines',
   'ui.line_status_hint':               'utilisation / capacité / prochain changement',
+  'ui.ls_day_prev':                    'Jour précédent',
+  'ui.ls_day_next':                    'Jour suivant',
   'ui.util_capacity_hint':             '% de la capacité disponible · inactif → surcharge',
   'ui.lateness_hint':                  'Heures de retard cumulées par machine / jour · cliquez sur une cellule pour inspecter',
 

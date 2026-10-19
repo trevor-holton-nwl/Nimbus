@@ -450,3 +450,110 @@ test('U30: the derive-paused banner is a status region and stacks below the conc
   assert.match(css, /\.concurrency-off #derive-paused-banner\s*\{\s*top:\s*calc\(var\(--chrome-h\) \+ 34px\)/);
   assert.match(css, /\.concurrency-off\.derive-paused \.tab-panel[^{]*\{\s*margin-top:\s*68px/);
 });
+
+// ── W6: Machine Status card day stepper ─────────────────────────────────────
+function lsFixture() {
+  const now = new Date('2026-10-19T09:00:00');
+  const keys = Dashboard._lsDayKeys(now);
+  const cell = (s, c) => ({ scheduled: s, capacity: c, effectiveCapacity: c, pct: s / c });
+  const matrix = { 'L-1': {}, 'L-2': {} };
+  keys.forEach((k, i) => { matrix['L-1'][k] = cell(2 + i, 16); matrix['L-2'][k] = cell(i === 1 ? 20 : 4, 16); });
+  return { now, keys, matrix };
+}
+
+test('W6: day keys are 7 plant days from today and the active key clamps into them', () => {
+  const { keys } = lsFixture();
+  assert.equal(keys.length, 7);
+  assert.deepEqual(keys.slice(0, 2), ['2026-10-19', '2026-10-20']);
+  const prior = Dashboard._lsDayKey;
+  try {
+    Dashboard._lsDayKey = null;            assert.equal(Dashboard._lsActiveKey(keys), keys[0]);
+    Dashboard._lsDayKey = '2026-10-01';    assert.equal(Dashboard._lsActiveKey(keys), keys[0]);   // midnight rolled past it
+    Dashboard._lsDayKey = '2027-01-01';    assert.equal(Dashboard._lsActiveKey(keys), keys[6]);
+    Dashboard._lsDayKey = keys[3];         assert.equal(Dashboard._lsActiveKey(keys), keys[3]);
+  } finally { Dashboard._lsDayKey = prior; }
+});
+
+test('W6: card rows for day N equal the heatmap matrix column for that day; Next CO is a dash off today', () => {
+  const { now, keys, matrix } = lsFixture();
+  const lines = ['L-1', 'L-2'], byLine = { 'L-1': [], 'L-2': [] };
+  for (let i = 0; i < 7; i++) {
+    const rows = Dashboard._lsRowData(lines, byLine, matrix, keys[i], i === 0, now);
+    rows.forEach(r => {
+      const u = matrix[r.line][keys[i]];
+      assert.equal(r.sched, u.scheduled.toFixed(2));
+      assert.equal(r.effCap, u.effectiveCapacity.toFixed(2));
+      assert.equal(r.pct, Math.round(u.pct * 100));
+      assert.equal(r.isOver, u.scheduled > u.effectiveCapacity);
+      if (i > 0) assert.equal(r.nxtCO, '—');
+    });
+  }
+  assert.equal(Dashboard._lsRowData(lines, byLine, matrix, keys[1], false, now)[1].isOver, true);
+});
+
+test('W6: stepping moves the day key, clamps at both ends, and re-renders only the card', () => {
+  const { now, keys, matrix } = lsFixture();
+  const prior = { key: Dashboard._lsDayKey, clock: Util.plantClock, plant: Store.selectedPlant, cache: Dashboard._matrix7Cache,
+    render: Dashboard._renderLineStatus, sync: Dashboard._syncLineStatusHeight, full: Dashboard.render };
+  const seen = []; let full = 0;
+  try {
+    Util.plantClock = () => now;
+    Dashboard._matrix7Cache = { key: 'k', matrix };
+    Dashboard._renderLineStatus = m => { seen.push([Dashboard._lsDayKey, m]); };
+    Dashboard._syncLineStatusHeight = () => {};
+    Dashboard.render = () => { full++; };
+    Dashboard._lsDayKey = null;
+    Dashboard._lsStep(-1);                       // already at today: stays
+    assert.equal(Dashboard._lsDayKey, keys[0]);
+    Dashboard._lsStep(1); Dashboard._lsStep(1);
+    assert.equal(Dashboard._lsDayKey, keys[2]);
+    for (let i = 0; i < 10; i++) Dashboard._lsStep(1);
+    assert.equal(Dashboard._lsDayKey, keys[6]);  // clamped at the last day
+    Dashboard._lsStep(-1);
+    assert.equal(Dashboard._lsDayKey, keys[5]);
+    assert.ok(seen.every(([, m]) => m === matrix), 'card reads the cached 7-day matrix');
+    assert.equal(full, 0, 'stepping never triggers a full dashboard render');
+  } finally {
+    Dashboard._lsDayKey = prior.key; Util.plantClock = prior.clock; Dashboard._matrix7Cache = prior.cache;
+    Dashboard._renderLineStatus = prior.render; Dashboard._syncLineStatusHeight = prior.sync; Dashboard.render = prior.full;
+  }
+});
+
+test('W6: day control labels, aria and disabled ends', () => {
+  const { keys } = lsFixture();
+  const mk = () => ({ textContent: '', title: '', disabled: false, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } });
+  const label = mk(), prev = mk(), next = mk();
+  const priorDoc = globalThis.document, priorKey = Dashboard._lsDayKey, priorT = Util.t;
+  try {
+    globalThis.document = { ...priorDoc, getElementById: id => ({ 'ls-day-label': label, 'ls-day-prev': prev, 'ls-day-next': next })[id] || null };
+    Util.t = k => k;
+    Dashboard._renderLsDayControl(keys, keys[0]);
+    assert.equal(label.textContent, 'ui.today'); assert.equal(prev.disabled, true); assert.equal(next.disabled, false);
+    Dashboard._renderLsDayControl(keys, keys[1]);
+    assert.equal(label.textContent, 'ui.tomorrow'); assert.equal(prev.disabled, false);
+    assert.equal(prev.attrs['aria-label'], 'ui.ls_day_prev'); assert.equal(next.attrs['aria-label'], 'ui.ls_day_next');
+    Dashboard._renderLsDayControl(keys, keys[6]);
+    assert.equal(next.disabled, true);
+    assert.match(label.textContent, /\d/);       // short weekday + numeric date
+  } finally { globalThis.document = priorDoc; Dashboard._lsDayKey = priorKey; Util.t = priorT; }
+});
+
+test('W6: plant:selected resets the Machine Status day to today', () => {
+  const prior = { sub: Store.subscribe, key: Dashboard._lsDayKey, st: globalThis.setTimeout, si: globalThis.setInterval, win: globalThis.window,
+    drop: Dashboard._refreshLineDropdown, btns: Dashboard._refreshFilterBtns, render: Dashboard.render };
+  let handler = null;
+  try {
+    Store.subscribe = fn => { handler = fn; return () => {}; };
+    globalThis.setTimeout = () => 0; globalThis.setInterval = () => 0;
+    globalThis.window = { ...prior.win, addEventListener() {} };
+    Dashboard._refreshLineDropdown = () => {}; Dashboard._refreshFilterBtns = () => {}; Dashboard.render = () => {};
+    Dashboard.init();
+    assert.ok(handler, 'init subscribes to the Store');
+    Dashboard._lsDayKey = '2026-10-23';
+    handler({ type: 'plant:selected' });
+    assert.equal(Dashboard._lsDayKey, null);
+  } finally {
+    Store.subscribe = prior.sub; Dashboard._lsDayKey = prior.key; globalThis.setTimeout = prior.st; globalThis.setInterval = prior.si;
+    globalThis.window = prior.win; Dashboard._refreshLineDropdown = prior.drop; Dashboard._refreshFilterBtns = prior.btns; Dashboard.render = prior.render;
+  }
+});

@@ -1312,6 +1312,8 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Dashboard panel hints ───────────────────────────────────────────────── */
   'ui.line_status_title':              'Machine Status',
   'ui.line_status_hint':               'util / capacity / next CO',
+  'ui.ls_day_prev':                    'Previous day',
+  'ui.ls_day_next':                    'Next day',
   'ui.util_capacity_hint':             '% of available capacity · idle → overload',
   'ui.lateness_hint':                  'cumulative late hours per machine / day · click a cell to inspect',
 

@@ -339,6 +339,18 @@ body.dark .hm-cell:hover {
   background: var(--accent, #b8791a);
   color: #ffffff;
 }
+/* Machine Status day stepper: ‹ label › sits beside the title; the header already wraps (flex-wrap). */
+.ls-head-title { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; min-width: 0; }
+.ls-day-group { align-items: stretch; }
+.ls-day-group .seg-btn { padding: 4px 9px; line-height: 1.2; }
+.ls-day-group .seg-btn:disabled { opacity: 0.35; cursor: default; }
+.ls-day-label {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 78px; max-width: 120px; padding: 0 8px;
+  font-size: 11px; font-weight: 600; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-right: 1px solid var(--line);
+}
 .lh-scroll-wrap {
   max-height: 360px;
   overflow-y: auto;
@@ -1292,7 +1304,14 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 
           <div class="panel" id="line-status-card">
             <header class="panel-head">
-              <h3><span data-i18n="ui.line_status_title">Line Status</span> <span style="color:var(--fg-faint);font-weight:400;font-size:11px;letter-spacing:0.04em;">· <span data-i18n="ui.today">Today</span></span></h3>
+              <div class="ls-head-title">
+                <h3 data-i18n="ui.line_status_title">Machine Status</h3>
+                <div class="lateness-horizon-group ls-day-group" id="ls-day-group" role="group">
+                  <button type="button" class="seg-btn" id="ls-day-prev" data-ls-step="-1" data-i18n-title="ui.ls_day_prev" title="Previous day" aria-label="Previous day">‹</button>
+                  <span class="ls-day-label" id="ls-day-label" aria-live="polite">Today</span>
+                  <button type="button" class="seg-btn" id="ls-day-next" data-ls-step="1" data-i18n-title="ui.ls_day_next" title="Next day" aria-label="Next day">›</button>
+                </div>
+              </div>
               <span class="panel-hint" data-i18n="ui.line_status_hint">util / capacity / next CO</span>
             </header>
             <div class="panel-body panel-body-flush">

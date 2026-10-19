@@ -1101,6 +1101,8 @@ window.__NIMBUS_LOCALES.de = {
   /* ── Dashboard-Panel-Hinweise ────────────────────────────────────────────── */
   'ui.line_status_title':              'Maschinenstatus',
   'ui.line_status_hint':               'Auslastung / Kapazität / Nächster Wechsel',
+  'ui.ls_day_prev':                    'Vorheriger Tag',
+  'ui.ls_day_next':                    'Nächster Tag',
   'ui.util_capacity_hint':             '% der verfügbaren Kapazität · leer → Überlast',
   'ui.lateness_hint':                  'Kumulative Verspätungsstunden pro Maschine / Tag · Zelle anklicken um zu prüfen',
 

@@ -1101,6 +1101,8 @@ window.__NIMBUS_LOCALES.pt = {
   /* ── Dicas dos painéis do painel de controle ─────────────────────────────── */
   'ui.line_status_title':              'Status da máquina',
   'ui.line_status_hint':               'utilização / capacidade / próxima troca',
+  'ui.ls_day_prev':                    'Dia anterior',
+  'ui.ls_day_next':                    'Dia seguinte',
   'ui.util_capacity_hint':             '% da capacidade disponível · ocioso → sobrecarga',
   'ui.lateness_hint':                  'Horas de atraso acumuladas por máquina / dia · clique em uma célula para inspecionar',
 

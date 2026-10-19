@@ -1105,6 +1105,8 @@ window.__NIMBUS_LOCALES.es = {
   /* ── Sugerencias del panel del dashboard ─────────────────────────────────── */
   'ui.line_status_title':              'Estado de máquina',
   'ui.line_status_hint':               'utilización / capacidad / próximo cambio',
+  'ui.ls_day_prev':                    'Día anterior',
+  'ui.ls_day_next':                    'Día siguiente',
   'ui.util_capacity_hint':             '% de la capacidad disponible · inactivo → sobrecarga',
   'ui.lateness_hint':                  'Horas de retraso acumuladas por máquina / día · haga clic en una celda para inspeccionar',
 

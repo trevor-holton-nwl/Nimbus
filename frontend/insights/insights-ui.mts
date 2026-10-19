@@ -89,6 +89,9 @@ export const Dashboard = {
   _resizeDebounced: null as ReturnType<typeof setTimeout> | null,
   _matrix7Cache: null as { key: string; matrix: DashboardUtilMatrix } | null,
   _lsVL:         null as VirtualList<DashboardLineStatusRow> | null,
+  // Day the Machine Status card shows (a dayKey, not an index, so midnight can't
+  // silently shift it). null = plant-today; clamped to the 7-day matrix's keys.
+  _lsDayKey:     null as string | null,
   // Last plant _lsVL was populated for (Part A1/A2) — the instance is never
   // destroyed on a plant switch (unlike AlertsUIAdapter._drawerVL, which
   // destroys on an empty list), so without this its remembered scroll
@@ -107,6 +110,7 @@ export const Dashboard = {
   init(): void {
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected') {
+        Dashboard._lsDayKey = null;
         Dashboard._refreshLineDropdown();
         Dashboard._refreshFilterBtns();
         Dashboard.render();
@@ -178,6 +182,12 @@ export const Dashboard = {
         Dashboard._renderLatenessHeatmap();
       });
     }
+    // Machine Status day stepper (‹ label ›): delegated click, re-renders only the card.
+    document.getElementById('ls-day-group')?.addEventListener('click', (e: MouseEvent) => {
+      const btn = (e.target as HTMLElement).closest('button[data-ls-step]') as HTMLButtonElement | null;
+      if (!btn || btn.disabled) return;
+      Dashboard._lsStep(parseInt(btn.dataset.lsStep || '0', 10));
+    });
     // Line Status card height is copied from the heatmap panel's rendered size
     // (_syncLineStatusHeight) — without a resize listener the two panels drift
     // out of sync until the next data-driven re-render.
@@ -334,7 +344,7 @@ export const Dashboard = {
 
     Dashboard._renderKPIs(_matrix7, _filtered);
     Dashboard._renderHeatmap(_matrix7);
-    Dashboard._renderLineStatus();
+    Dashboard._renderLineStatus(_matrix7);
     Dashboard._renderAlertSummary();
     Dashboard._renderFirmedList();
     Dashboard._renderLatenessHeatmap();
@@ -794,11 +804,94 @@ export const Dashboard = {
     return `+${Math.round(hrs / 24)}d`;
   },
 
-  _renderLineStatus(): void {
+  /** The 7 day keys the dashboard matrix covers, starting at plant-today (mirrors computeMatrix's key build). */
+  _lsDayKeys(now: Date): string[] {
+    const start = Util.startOfDay(now)!;
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(start); d.setDate(start.getDate() + i);
+      return Util.dayKey(d);
+    });
+  },
+
+  /** The day the card shows: the stored key clamped into [today, today+6]; null -> today. */
+  _lsActiveKey(keys: string[]): string {
+    const k = Dashboard._lsDayKey;
+    if (!k || k < keys[0]) return keys[0];
+    if (k > keys[keys.length - 1]) return keys[keys.length - 1];
+    return k;
+  },
+
+  /** Step the card by +/-1 day (clamped) and re-render only the card. */
+  _lsStep(dir: number): void {
+    const keys = Dashboard._lsDayKeys(Util.plantClock(Store.selectedPlant));
+    const idx = Math.max(0, Math.min(keys.length - 1, keys.indexOf(Dashboard._lsActiveKey(keys)) + (dir < 0 ? -1 : 1)));
+    Dashboard._lsDayKey = keys[idx];
+    if (Dashboard._matrix7Cache) Dashboard._renderLineStatus(Dashboard._matrix7Cache.matrix);
+    else Dashboard.render();
+    Dashboard._syncLineStatusHeight();
+  },
+
+  _lsDayLabel(key: string, keys: string[]): string {
+    if (key === keys[0]) return Util.t('ui.today');
+    if (key === keys[1]) return Util.t('ui.tomorrow');
+    const dt = new Date(key + 'T12:00:00');
+    try {
+      const loc = Util.locale();
+      return `${new Intl.DateTimeFormat(loc, { weekday: 'short' }).format(dt)} ${new Intl.DateTimeFormat(loc, { month: 'numeric', day: 'numeric' }).format(dt)}`;
+    } catch {
+      return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+    }
+  },
+
+  _renderLsDayControl(keys: string[], active: string): void {
+    const label = document.getElementById('ls-day-label');
+    const prev  = document.getElementById('ls-day-prev') as HTMLButtonElement | null;
+    const next  = document.getElementById('ls-day-next') as HTMLButtonElement | null;
+    if (label) {
+      label.textContent = Dashboard._lsDayLabel(active, keys);
+      label.title = label.textContent;
+    }
+    const idx = keys.indexOf(active);
+    if (prev) {
+      prev.disabled = idx <= 0;
+      prev.title = Util.t('ui.ls_day_prev'); prev.setAttribute('aria-label', prev.title);
+    }
+    if (next) {
+      next.disabled = idx >= keys.length - 1;
+      next.title = Util.t('ui.ls_day_next'); next.setAttribute('aria-label', next.title);
+    }
+  },
+
+  /** Pure row builder: the chosen day's cell from the 7-day matrix (the heatmap's own column). */
+  _lsRowData(lines: string[], byLine: Record<string, NimbusTask[]>, matrix: DashboardUtilMatrix,
+             dayKey: string, isToday: boolean, now: Date): DashboardLineStatusRow[] {
+    return lines.map((line): DashboardLineStatusRow => {
+      const ci    = Timeline._colorIndex(line);
+      const color = Config.COLORS[ci % Config.COLORS.length];
+      const u = matrix[line]?.[dayKey];
+      const sched   = u ? u.scheduled.toFixed(2)                         : '0.00';
+      const cap     = u ? u.capacity.toFixed(2)                          : '0.00';
+      const effCap  = u ? (u.effectiveCapacity ?? u.capacity).toFixed(2) : cap;
+      const pct     = u ? Math.round((u.pct ?? 0) * 100)                 : 0;
+      const overloadAt = u && u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD;
+      const sev     = u ? Utilization.sev(u.pct ?? 0, overloadAt) : 'ok';
+      const barW    = Math.min(pct, 100);
+      const isOver  = u ? u.scheduled > (u.effectiveCapacity ?? u.capacity) : false;
+      const sorted  = (byLine[line] || []).slice().sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
+      // Next changeover is "from now" — meaningless for a future day, so show a dash.
+      const nxtCO   = isToday ? Dashboard._fmtNextCO(Dashboard._nextChangeover(sorted, now), now) : '—';
+      return { line, color, sched, cap, effCap, pct, sev, barW, isOver, nxtCO };
+    });
+  },
+
+  _renderLineStatus(matrix7?: DashboardUtilMatrix): void {
     const el = document.getElementById('line-status-panel');
     if (!el) return;
     const tasks = Dashboard._filteredTasks();
     const now   = Util.plantClock(Store.selectedPlant);
+    const dayKeys = Dashboard._lsDayKeys(now);
+    const activeKey = Dashboard._lsActiveKey(dayKeys);
+    Dashboard._renderLsDayControl(dayKeys, activeKey);
 
     const byLine: Record<string, NimbusTask[]> = {};
     for (const l of Dashboard._selectedPlantLines()) byLine[l] = [];  // idle lines show up with zero rows
@@ -811,26 +904,12 @@ export const Dashboard = {
       return;
     }
 
-    const matrix   = Utilization.computeMatrix(now, 1, tasks);
-    const todayKey = Util.dayKey(Util.startOfDay(now));
+    // Same cached 7-day matrix the heatmap reads (built in render()), so the card's
+    // day matches the heatmap column exactly; standalone callers get a fresh one.
+    const matrix = matrix7 ?? Utilization.computeMatrix(now, 7, tasks);
 
     // Pre-compute row data so renderFn is a pure template with no heavy closures.
-    const rowData: DashboardLineStatusRow[] = lines.map((line): DashboardLineStatusRow => {
-      const ci    = Timeline._colorIndex(line);
-      const color = Config.COLORS[ci % Config.COLORS.length];
-      const u = matrix[line]?.[todayKey];
-      const sched   = u ? u.scheduled.toFixed(2)                         : '0.00';
-      const cap     = u ? u.capacity.toFixed(2)                          : '0.00';
-      const effCap  = u ? (u.effectiveCapacity ?? u.capacity).toFixed(2) : cap;
-      const pct     = u ? Math.round((u.pct ?? 0) * 100)                 : 0;
-      const overloadAt = u && u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD;
-      const sev     = u ? Utilization.sev(u.pct ?? 0, overloadAt) : 'ok';
-      const barW    = Math.min(pct, 100);
-      const isOver  = u ? u.scheduled > (u.effectiveCapacity ?? u.capacity) : false;
-      const sorted  = byLine[line].slice().sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
-      const nxtCO   = Dashboard._fmtNextCO(Dashboard._nextChangeover(sorted, now), now);
-      return { line, color, sched, cap, effCap, pct, sev, barW, isOver, nxtCO };
-    });
+    const rowData = Dashboard._lsRowData(lines, byLine, matrix, activeKey, activeKey === dayKeys[0], now);
 
     if (!Dashboard._lsVL) {
       el.innerHTML = '';
