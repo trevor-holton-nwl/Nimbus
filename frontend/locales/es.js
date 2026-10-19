@@ -2259,4 +2259,11 @@ window.__NIMBUS_LOCALES.es = {
   "btn.save_block": "Guardar interrupción",
   "toast.plant_blackout_updated": "Interrupción de la planta actualizada",
   "toast.plant_blackout_gone": "Esa interrupción ya no existe. Actualice e inténtelo de nuevo.",
+  "ui.timeline_next_12_months": "próximos 12 meses",
+  "ui.timeline_through": "hasta {{month}}",
+  "ui.blackout_legend": "Interrupción",
+  "ui.blackout_cluster": "{{count}} interrupciones, {{from}} – {{to}}",
+  "ui.blackout_more": "+{{count}} más — ver lista",
+  "aria.blackout_mark": "Interrupción: {{label}}",
+  "toast.plant_blackout_duplicate": "Otra interrupción ya tiene estas fechas y este motivo. Cambie uno de ellos.",
 };

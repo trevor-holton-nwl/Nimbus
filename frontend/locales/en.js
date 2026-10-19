@@ -2505,4 +2505,11 @@ window.__NIMBUS_LOCALES.en = {
   "btn.save_block": "Save block",
   "toast.plant_blackout_updated": "Plant blackout updated",
   "toast.plant_blackout_gone": "That blackout no longer exists. Refresh and try again.",
+  "ui.timeline_next_12_months": "next 12 months",
+  "ui.timeline_through": "through {{month}}",
+  "ui.blackout_legend": "Blackout",
+  "ui.blackout_cluster": "{{count}} blackouts, {{from}} – {{to}}",
+  "ui.blackout_more": "+{{count}} more — see list",
+  "aria.blackout_mark": "Blackout: {{label}}",
+  "toast.plant_blackout_duplicate": "Another blackout already has these dates and reason. Change one of them.",
 };

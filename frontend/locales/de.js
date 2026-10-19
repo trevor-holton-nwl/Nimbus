@@ -2298,4 +2298,11 @@ window.__NIMBUS_LOCALES.de = {
   "btn.save_block": "Unterbrechung speichern",
   "toast.plant_blackout_updated": "Werksunterbrechung aktualisiert",
   "toast.plant_blackout_gone": "Diese Unterbrechung existiert nicht mehr. Bitte aktualisieren und erneut versuchen.",
+  "ui.timeline_next_12_months": "nächste 12 Monate",
+  "ui.timeline_through": "bis {{month}}",
+  "ui.blackout_legend": "Werksunterbrechung",
+  "ui.blackout_cluster": "{{count}} Werksunterbrechungen, {{from}} – {{to}}",
+  "ui.blackout_more": "+{{count}} weitere — siehe Liste",
+  "aria.blackout_mark": "Werksunterbrechung: {{label}}",
+  "toast.plant_blackout_duplicate": "Eine andere Werksunterbrechung hat bereits diese Daten und diesen Grund. Ändern Sie eines davon.",
 };

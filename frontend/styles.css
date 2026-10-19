@@ -5032,7 +5032,34 @@ body.dark .period-seg-active { color: var(--bg); }
   font-family: var(--font-mono); font-size: 10px; line-height: 18px; color: var(--fg-mute);
 }
 .period-today-tag { position: absolute; top: 0; transform: translateX(-50%); color: var(--accent); font-weight: 700; white-space: nowrap; }
-.period-track-cap { position: absolute; right: 0; top: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Blackout markers: a lane BELOW the track, never inside it (the track is overflow:hidden and its
+   segments, labels and today line would sit under or over an inner lane). overflow-x:clip keeps the
+   widened hit areas of edge markers from creating a horizontal scrollbar at narrow widths. */
+.period-blk-lane { position: relative; z-index: 1; height: 6px; margin: 3px 1px 0; overflow-x: clip; }
+.period-blk {
+  position: absolute; top: 0; bottom: 0; min-width: 3px; padding: 0;
+  border: 0; border-radius: 1px; background: var(--err); cursor: pointer;
+}
+.period-blk::before { content: ""; position: absolute; inset: -5px -2px; }
+.period-blk:hover { box-shadow: 0 0 0 1px var(--err); }
+.period-blk:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Legend under the today row: wraps instead of overflowing, so it holds at 320px. */
+.period-legend {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 12px;
+  margin-top: 2px; font-family: var(--font-mono); font-size: 10px; color: var(--fg-mute);
+}
+.period-legend > span { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.period-legend-sw {
+  display: inline-block; width: 10px; height: 6px; margin-right: 5px;
+  border-radius: 1px; background: var(--err); vertical-align: middle;
+}
+#plant-periods-horizon:not(:empty)::before { content: " · "; white-space: pre; }
+/* A cluster click flashes its rows in the blackout list; the fade is skipped for reduced motion. */
+#plant-blackouts-panel .block-row { transition: background-color 1.2s ease-out; }
+#plant-blackouts-panel .block-row.is-flash { background-color: var(--err-soft); transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  #plant-blackouts-panel .block-row { transition: none; }
+}
 
 /* Inline field validation (period editor). */
 .field-error { color: var(--err); font-size: 11px; margin-top: 4px; }

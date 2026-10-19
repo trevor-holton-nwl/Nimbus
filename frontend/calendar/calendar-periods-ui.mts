@@ -13,8 +13,8 @@ import { Util, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { CalendarSync } from './calendar-sync.mjs';
 import { EditCalendar } from './edit-calendar.mjs';
-import { buildPeriodStrip, keyToDate, periodStatus, summarizeWeek } from './calendar-periods.mjs';
-import type { PeriodStatus } from './calendar-periods.mjs';
+import { addDaysKey, buildBlackoutMarks, buildPeriodStrip, keyToDate, periodStatus, summarizeWeek } from './calendar-periods.mjs';
+import type { BlackoutItem, PeriodStatus, PeriodStrip } from './calendar-periods.mjs';
 import type { PlantPeriod } from '../platform/types.mjs';
 
 const DAY_KEYS = ['day.sun', 'day.mon', 'day.tue', 'day.wed', 'day.thu', 'day.fri', 'day.sat'];
@@ -61,8 +61,53 @@ function _rowHtml(p: PlantPeriod, todayKey: string, dayLabels: string[]): string
   </div>`;
 }
 
-function _stripHtml(periods: PlantPeriod[], todayKey: string): string {
-  const strip = buildPeriodStrip(periods, todayKey, { fmtMonth: _fmtMonth });
+/** The caption after the timeline hint: the axis always reaches a year out, and a longer one says where it ends. */
+function _horizonText(strip: PeriodStrip, todayKey: string): string {
+  if (strip.axisEndKey === addDaysKey(todayKey, 365)) return Util.t('ui.timeline_next_12_months');
+  const end = keyToDate(strip.axisEndKey);
+  return Util.t('ui.timeline_through', { month: `${_fmtMonth(end)} ${end.getFullYear()}` });
+}
+
+interface PlantBlockLike { id: string; plant?: string; start: unknown; end: unknown; reason?: string }
+
+/** The blackout lane: one marker per run of touching blackouts, drawn outside .period-track so it never
+ *  covers a period segment or the today line. `html` is empty when the plant has nothing in the window. */
+function _blackoutLaneHtml(plant: string, strip: PeriodStrip): { html: string; count: number; truncated: number } {
+  const byId = new Map<string, { b: PlantBlockLike; s: Date; e: Date }>();
+  const items: BlackoutItem[] = [];
+  for (const raw of Store.plantBlocks as PlantBlockLike[]) {
+    if (raw.plant !== plant) continue;
+    const s = Util.parseDate(raw.start), e = Util.parseDate(raw.end);
+    if (!s || !e || e.getTime() <= s.getTime()) continue;
+    byId.set(raw.id, { b: raw, s, e });
+    // End is exclusive: the last blocked day is the one containing end - 1 ms.
+    items.push({ id: raw.id, fromKey: Util.dayKey(s), toKey: Util.dayKey(new Date(e.getTime() - 1)) });
+  }
+  const { marks, truncated } = buildBlackoutMarks(strip, items);
+  if (!marks.length) return { html: '', count: 0, truncated };
+  const reasonOf = (b: PlantBlockLike) => b.reason || Util.t('ui.plant_blackout_default');
+  const btns = marks.map(m => {
+    const rows = m.ids.map(id => byId.get(id)!);
+    let label: string;
+    if (rows.length === 1) {
+      label = `${reasonOf(rows[0].b)} · ${Util.fmtBlockRange(rows[0].s, rows[0].e)}`;
+    } else {
+      const first = new Date(Math.min(...rows.map(r => r.s.getTime())));
+      const last = new Date(Math.max(...rows.map(r => r.e.getTime())) - 1);
+      const head = Util.t('ui.blackout_cluster', { count: rows.length, from: Util._fmtDatePref(first), to: Util._fmtDatePref(last) });
+      const reasons = rows.slice(0, 3).map(r => reasonOf(r.b)).join('; ') + (rows.length > 3 ? '…' : '');
+      label = `${head}\n${reasons}`;
+    }
+    const ids = rows.length === 1
+      ? `data-id="${Util.escapeHtml(m.ids[0])}"`
+      : `data-ids="${Util.escapeHtml(JSON.stringify(m.ids))}"`;
+    const aria = Util.escapeHtml(Util.t('aria.blackout_mark', { label: label.replace('\n', ' — ') }));
+    return `<button type="button" class="period-blk" data-action="edit-blackout" ${ids} style="left:${m.leftPct.toFixed(3)}%;width:${m.widthPct.toFixed(3)}%" title="${Util.escapeHtml(label)}" aria-label="${aria}" tabindex="-1"></button>`;
+  }).join('');
+  return { html: `<div class="period-blk-lane">${btns}</div>`, count: marks.length, truncated };
+}
+
+function _stripHtml(periods: PlantPeriod[], todayKey: string, plant: string, strip: PeriodStrip): string {
   const ticks = strip.ticks.map(t =>
     `<span class="period-tick" style="left:${t.leftPct.toFixed(3)}%">${Util.escapeHtml(t.label)}</span>`).join('');
   const byId = new Map(periods.map(p => [p.id, p] as const));
@@ -73,13 +118,21 @@ function _stripHtml(periods: PlantPeriod[], todayKey: string): string {
     return `<button type="button" class="${cls}" data-action="edit-period" data-id="${Util.escapeHtml(s.id)}" style="left:${s.leftPct.toFixed(3)}%;width:${s.widthPct.toFixed(3)}%" title="${title}"><span class="period-seg-label">${Util.escapeHtml(s.name)}</span></button>`;
   }).join('');
   const today = strip.today.leftPct.toFixed(3);
+  const lane = _blackoutLaneHtml(plant, strip);
+  const legend = [
+    `<span>${Util.escapeHtml(Util.t('ui.default_week_legend'))}</span>`,
+    lane.count ? `<span class="period-legend-blk"><i class="period-legend-sw" aria-hidden="true"></i>${Util.escapeHtml(Util.t('ui.blackout_legend'))}</span>` : '',
+    lane.truncated ? `<span>${Util.escapeHtml(Util.t('ui.blackout_more', { count: lane.truncated }))}</span>` : '',
+  ].join('');
   return `<div class="period-strip">
     <div class="period-ticks" aria-hidden="true">${ticks}</div>
     <div class="period-track">
       ${segs}
       <div class="period-today" style="left:${today}%"></div>
     </div>
-    <div class="period-today-row" aria-hidden="true"><span class="period-track-cap">${Util.escapeHtml(Util.t('ui.default_week_legend'))}</span><span class="period-today-tag" style="left:${today}%">${Util.escapeHtml(Util.t('ui.today'))}</span></div>
+    ${lane.html}
+    <div class="period-today-row" aria-hidden="true"><span class="period-today-tag" style="left:${today}%">${Util.escapeHtml(Util.t('ui.today'))}</span></div>
+    <div class="period-legend">${legend}</div>
   </div>`;
 }
 
@@ -121,6 +174,7 @@ export const CalendarPeriodsUI = {
     const timeline = document.getElementById('plant-periods-timeline');
     const countEl = document.getElementById('plant-periods-count');
     const addBtn = document.getElementById('plant-add-period-btn') as HTMLButtonElement | null;
+    const horizonEl = document.getElementById('plant-periods-horizon');
     if (!list && !timeline) return;
     const plant = Store.selectedPlant;
     if (!plant) {
@@ -128,6 +182,7 @@ export const CalendarPeriodsUI = {
       if (list) list.innerHTML = msg;
       if (timeline) timeline.innerHTML = msg;
       if (countEl) countEl.textContent = '';
+      if (horizonEl) horizonEl.textContent = '';
       if (addBtn) addBtn.disabled = true;
       return;
     }
@@ -141,7 +196,9 @@ export const CalendarPeriodsUI = {
         ? periods.map(p => _rowHtml(p, todayKey, dayLabels)).join('')
         : `<div class="empty-state">${Util.escapeHtml(Util.t('empty.no_periods'))}</div>`;
     }
-    if (timeline) timeline.innerHTML = _stripHtml(periods, todayKey);
+    const strip = buildPeriodStrip(periods, todayKey, { fmtMonth: _fmtMonth });
+    if (timeline) timeline.innerHTML = _stripHtml(periods, todayKey, plant, strip);
+    if (horizonEl) horizonEl.textContent = _horizonText(strip, todayKey);
   },
 
   openModal(id?: string): void {

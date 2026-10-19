@@ -8,7 +8,7 @@ import { CalendarPeriodsUI } from '../../../frontend/calendar/calendar-periods-u
 import { EditCalendar } from '../../../frontend/calendar/edit-calendar.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Toast, Modal } from '../../../frontend/platform/foundation.mjs';
+import { Toast, Modal, Util } from '../../../frontend/platform/foundation.mjs';
 
 globalThis.NimbusComputeCore ??= createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 // Real English strings, so assertions read like the UI.
@@ -22,7 +22,7 @@ const wh = (a, b) => ({ 0: null, 1: [a, b], 2: [a, b], 3: [a, b], 4: [a, b], 5: 
 const per = (id, name, from, to) => ({ id, name, validFrom: from, validTo: to, workHours: wh(6, 14) });
 
 // ---- tiny fake DOM, built once: init() binds listeners to these exact objects ----
-const IDS = ['plant-periods-list', 'plant-periods-timeline', 'plant-periods-count', 'plant-add-period-btn', 'plant-tab-calendar', 'cal-edit-save-btn'];
+const IDS = ['plant-periods-list', 'plant-periods-timeline', 'plant-periods-horizon', 'plant-periods-count', 'plant-add-period-btn', 'plant-tab-calendar', 'cal-edit-save-btn'];
 const els = {};
 for (const id of IDS) {
   els[id] = {
@@ -234,4 +234,102 @@ test('a calendar:change while the Calendar tab is showing re-renders; hidden tab
   els['plant-tab-calendar'].hidden = false;
   Store.setPlantPeriods('P1', [per('a', 'Always on', '2000-01-01', null), per('c', 'Far future', '2999-01-01', null)], 'test');
   assert.match(els['plant-periods-list'].innerHTML, /Far future/);
+});
+
+// ---- blackout markers on the timeline ----
+const atDay = (n, h = 0) => { const d = new Date(); d.setHours(h, 0, 0, 0); d.setDate(d.getDate() + n); return d; };
+const pblk = (id, plant, s, e, reason = 'Holiday') => ({ id, plant, start: s, end: e, reason });
+const seedBlocks = (blocks) => Store.replacePlantBlocks(blocks, 'test');
+afterEach(() => { Store.replacePlantBlocks([], 'test-restore'); });
+
+test('blackout marks: only the selected plant\'s blackouts, and no lane at all when there are none', () => {
+  Store.replacePlants({ P1: { workHours: wh(8, 16) }, P2: { workHours: wh(8, 16) } }, 'test');
+  Store.setSelectedPlant('P1', 'test');
+  CalendarPeriodsUI.render();
+  assert.doesNotMatch(els['plant-periods-timeline'].innerHTML, /period-blk-lane/);
+  assert.doesNotMatch(els['plant-periods-timeline'].innerHTML, /period-legend-blk/);
+  seedBlocks([pblk('p1a', 'P1', atDay(10), atDay(11)), pblk('p2a', 'P2', atDay(40), atDay(41))]);
+  CalendarPeriodsUI.render();
+  const tl = els['plant-periods-timeline'].innerHTML;
+  assert.equal((tl.match(/class="period-blk"/g) || []).length, 1);
+  assert.match(tl, /data-action="edit-blackout" data-id="p1a"/);
+  assert.doesNotMatch(tl, /p2a/);
+  assert.match(tl, /class="period-legend-blk"/);
+  // The lane is a sibling after the track, never inside it.
+  const todayAt = tl.indexOf('class="period-today"');
+  assert.ok(tl.indexOf('period-blk-lane') > tl.indexOf('</div>', todayAt), 'lane comes after the track closes');
+  Store.setSelectedPlant('P2', 'test');
+  CalendarPeriodsUI.render();
+  assert.match(els['plant-periods-timeline'].innerHTML, /data-id="p2a"/);
+  assert.doesNotMatch(els['plant-periods-timeline'].innerHTML, /p1a/);
+});
+
+test('blackout marks: reason is escaped in title and aria-label; invalid and out-of-window blocks are skipped', () => {
+  seedBlocks([
+    pblk('x1', 'P1', atDay(5), atDay(6), '<img src=x onerror=alert(1)> "quoted"'),
+    pblk('bad', 'P1', atDay(8), atDay(8)),
+    pblk('inv', 'P1', 'not a date', atDay(9)),
+    pblk('far', 'P1', atDay(900), atDay(901)),
+  ]);
+  CalendarPeriodsUI.render();
+  const tl = els['plant-periods-timeline'].innerHTML;
+  assert.equal((tl.match(/class="period-blk"/g) || []).length, 1);
+  assert.doesNotMatch(tl, /<img/);
+  assert.match(tl, /title="&lt;img src=x onerror=alert\(1\)&gt; &quot;quoted&quot; · /);
+  assert.match(tl, /aria-label="Blackout: &lt;img/);
+  assert.match(tl, /tabindex="-1"/);
+});
+
+test('blackout marks: touching blackouts become one cluster button that lists its ids and reasons', () => {
+  seedBlocks([pblk('c1', 'P1', atDay(20), atDay(22), 'Alpha'), pblk('c2', 'P1', atDay(22), atDay(24), 'Beta')]);
+  CalendarPeriodsUI.render();
+  const tl = els['plant-periods-timeline'].innerHTML;
+  assert.equal((tl.match(/class="period-blk"/g) || []).length, 1);
+  assert.match(tl, /data-ids="\[&quot;c1&quot;,&quot;c2&quot;\]"/);
+  assert.match(tl, /title="2 blackouts, [^"]*\nAlpha; Beta"/);
+  assert.doesNotMatch(tl, /data-id="c1"/);
+});
+
+test('blackout marks: an end at exclusive midnight does not paint the following day', () => {
+  seedBlocks([pblk('m1', 'P1', atDay(30), atDay(31)), pblk('m2', 'P1', atDay(32), atDay(33))]);
+  CalendarPeriodsUI.render();
+  // Days 30 and 32 with the 31st free between them: two marks, not one cluster.
+  assert.equal((els['plant-periods-timeline'].innerHTML.match(/class="period-blk"/g) || []).length, 2);
+});
+
+test('blackout marks: more than 60 clusters shows "+N more" in the legend', () => {
+  const blocks = [];
+  for (let i = 0; i < 64; i++) blocks.push(pblk('t' + i, 'P1', atDay(i * 4 + 1), atDay(i * 4 + 2), 'R' + i));
+  seedBlocks(blocks);
+  CalendarPeriodsUI.render();
+  const tl = els['plant-periods-timeline'].innerHTML;
+  assert.equal((tl.match(/class="period-blk"/g) || []).length, 60);
+  assert.match(tl, /\+4 more — see list/);
+});
+
+test('the legend carries the default-week caption and lives outside the today row', () => {
+  CalendarPeriodsUI.render();
+  const tl = els['plant-periods-timeline'].innerHTML;
+  assert.match(tl, /<div class="period-legend"><span>Default week outside periods<\/span><\/div>/);
+  assert.doesNotMatch(tl, /period-track-cap/);
+});
+
+test('clicking a blackout marker never opens the period modal', () => {
+  seedBlocks([pblk('p1a', 'P1', atDay(10), atDay(11))]);
+  CalendarPeriodsUI.init();
+  calls.length = 0;
+  click('plant-periods-timeline', { action: 'edit-blackout', id: 'p1a' });
+  click('plant-periods-timeline', { action: 'edit-blackout', ids: '["a","b"]' });
+  assert.deepEqual(calls.filter(c => c[0] === 'openPeriod'), []);
+});
+
+test('horizon caption: "next 12 months" by default, "through <month year>" when a period pushes the axis out', () => {
+  CalendarPeriodsUI.render();
+  assert.equal(els['plant-periods-horizon'].textContent, 'next 12 months');
+  Store.setPlantPeriods('P1', [per('f', 'Far future', Util.dayKey(atDay(500)), null)], 'test');
+  CalendarPeriodsUI.render();
+  assert.match(els['plant-periods-horizon'].textContent, /^through [A-Za-z]{3,} \d{4}$/);
+  Store.setSelectedPlant(null, 'test');
+  CalendarPeriodsUI.render();
+  assert.equal(els['plant-periods-horizon'].textContent, '');
 });
