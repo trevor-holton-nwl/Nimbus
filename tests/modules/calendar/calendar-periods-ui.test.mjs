@@ -310,7 +310,7 @@ test('blackout marks: more than 60 clusters shows "+N more" in the legend', () =
 test('the legend is a dashed Default calendar swatch (plus the red Blackout one when there are blackouts) outside the today row', () => {
   CalendarPeriodsUI.render();
   let tl = els['plant-periods-timeline'].innerHTML;
-  assert.match(tl, /<div class="period-legend"><span class="period-legend-default"><i class="period-legend-sw period-legend-sw-default" aria-hidden="true"><\/i>Default calendar<\/span><\/div>/);
+  assert.match(tl, /<div class="period-legend"><span class="period-legend-default"><i class="period-legend-sw period-legend-sw-default" aria-hidden="true"><\/i>Default Calendar<\/span><\/div>/);
   assert.doesNotMatch(tl, /period-track-cap/);
   seedBlocks([pblk('p1a', 'P1', atDay(10), atDay(11))]);
   CalendarPeriodsUI.render();
@@ -329,11 +329,11 @@ test('default segments: no periods is one full-width Default calendar segment, d
   assert.equal(d.length, 1);
   assert.match(d[0], /data-action="edit-default"/);
   assert.match(d[0], /style="left:0\.000%;width:100\.000%"/);
-  assert.match(d[0], /<span class="period-seg-label">Default calendar<\/span>/);
+  assert.match(d[0], /<span class="period-seg-label">Default Calendar<\/span>/);
   assert.doesNotMatch(d[0], /data-id/);
   assert.ok(tl.indexOf('period-seg-default') > tl.indexOf('class="period-track"') && tl.indexOf('period-seg-default') < tl.indexOf('class="period-today"'));
-  assert.match(tl, /Default calendar · Mon–Fri 08:00–16:00 · Sat–Sun Closed \(/, 'title carries the default-week summary');
-  assert.match(d[0], /aria-label="Default calendar · /);
+  assert.match(tl, /Default Calendar · Mon–Fri 08:00–16:00 · Sat–Sun Closed \(/, 'title carries the default-week summary');
+  assert.match(d[0], /aria-label="Default Calendar ·/);
 });
 
 test('default segments: sit before period segments in the markup, with a gap each side of a middle period', () => {
@@ -366,7 +366,7 @@ test('default segments: a tiny gap renders without a label span (no stray ellips
   assert.equal(d.length, 2);
   const tiny = d.find(x => !x.includes('period-seg-label'));
   assert.ok(tiny, 'the one-day gap has no label');
-  assert.match(tiny, /title="Default calendar · /, 'but keeps its title');
+  assert.match(tiny, /title="Default Calendar ·/, 'but keeps its title');
   assert.ok(d.find(x => x.includes('period-seg-label')), 'the wide gap before keeps its label');
 });
 
@@ -374,7 +374,7 @@ test('default segments: the summary and dates in title/aria are escaped and foll
   Store.replacePlants({ P1: { workHours: { 0: null, 1: [6, 22], 2: [6, 22], 3: [6, 22], 4: [6, 22], 5: [6, 22], 6: null } } }, 'test');
   Store.setSelectedPlant('P1', 'test');
   CalendarPeriodsUI.render();
-  assert.match(els['plant-periods-timeline'].innerHTML, /title="Default calendar · Mon–Fri 06:00–22:00 · Sat–Sun Closed \(/);
+  assert.match(els['plant-periods-timeline'].innerHTML, /title="Default Calendar · Mon–Fri 06:00–22:00 · Sat–Sun Closed \(/);
   // Day labels come from locale text; a hostile one must not break out of the attribute.
   const w = globalThis.window.__NIMBUS_LOCALES.en;
   const prior = w['day.mon'];
