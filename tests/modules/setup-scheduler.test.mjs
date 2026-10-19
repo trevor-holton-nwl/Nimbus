@@ -624,16 +624,16 @@ test('gap fill has a separate budget and labels unchecked orders when it expires
   assert.equal(result.gapFill.complete, false);
   assert.equal(result.gapFill.unchecked, 1);
   assert.match(result.dispositions[0].reason.message, /Capacity check incomplete/);
-  assert.match(result.dispositions[0].reason.message, /Choose Exhaustive/);
+  assert.match(result.dispositions[0].reason.message, /Tick Run in background/);
   assert.equal(result.patches[0].changes.start_date, null);
 });
 
-test('gap fill on an Exhaustive run does not tell the planner to choose Exhaustive', () => {
+test('gap fill on an exhaustive run does not tell the planner to run in the background', () => {
   const { snapshot, bounds, candidate } = gapFillFixture([scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00')]);
   const result = SetupScheduler.fillPlanningGaps(snapshot, { ...bounds, exhaustive: true }, candidate, 0);
   assert.equal(result.dispositions[0].reason.code, 'search_limit');
   assert.match(result.dispositions[0].reason.message, /Capacity check incomplete/);
-  assert.doesNotMatch(result.dispositions[0].reason.message, /Exhaustive/);
+  assert.doesNotMatch(result.dispositions[0].reason.message, /Run in background/);
 });
 
 test('VI10: fillPlanningGaps with a zero budget keeps overlong_never for an overlong order on a never plant', () => {
@@ -5853,11 +5853,11 @@ test('F2 run-level: candidate count, patches and objective are identical with th
   }
 });
 
-test('fillPlanningGaps default budget comes from bounds.gapFillBudgetMs and the message names Exhaustive', () => {
+test('fillPlanningGaps default budget comes from bounds.gapFillBudgetMs and the message points at Run in background', () => {
   const { snapshot, bounds, candidate } = gapFillFixture([scheduledTask('waiting', 1, 'GREEN', '2026-08-03T18:00')]);
   const starved = SetupScheduler.fillPlanningGaps(snapshot, { ...bounds, gapFillBudgetMs: 0 }, candidate);
   assert.equal(starved.gapFill.complete, false);
-  assert.match(starved.dispositions[0].reason.message, /Exhaustive/);
+  assert.match(starved.dispositions[0].reason.message, /Run in background/);
   const generous = SetupScheduler.fillPlanningGaps(snapshot, { ...bounds, gapFillBudgetMs: 60000 }, candidate);
   assert.equal(generous.gapFill.complete, true);
 });
