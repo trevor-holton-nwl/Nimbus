@@ -143,6 +143,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.save_failed':                 'Échec de l\'enregistrement : {{msg}}',
   'toast.paste_result':                'Collé : {{added}} ajoutés, {{updated}} mis à jour',
   'toast.paste_result_skip':           'Collé : {{added}} ajoutés, {{updated}} mis à jour, {{skipped}} ignorés',
+  'toast.machines_autolinked':         'Lié au poste de travail SAP de même ID : {{machines}}',
   'toast.clipboard_denied':            'Accès au presse-papiers refusé — accordez la permission et réessayez',
   'toast.clipboard_empty':             'Le presse-papiers est vide',
   'toast.no_rows_paste':               'Aucune ligne trouvée dans le texte collé',
@@ -1054,7 +1055,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.no_write_permission':         'Vous n\'avez pas la permission d\'enregistrer ces modifications',
   'ui.all_pomat':                      'Ordre / Matière',
   'ui.n_pomat_filter':                 '{{count}} collés',
-  'ph.paste_po_material':              'Collez des numéros d\'ordre de fabrication ou de matière — un par ligne ou colonne Excel…',
+  'ph.paste_po_material':              'Collez des numéros d\'ordre de fabrication ou de matière — un par ligne ou colonne Excel. Utilisez * comme joker : 204*, *204*, *204…',
   'toast.paste_pomat_match':           '{{matched}} sur {{total}} correspondent à une commande visible',
   'ui.pomat_count':                    '{{count}} valeur(s) collée(s)',
   'btn.clear_pasted':                  'Effacer le collage',
@@ -1101,6 +1102,8 @@ window.__NIMBUS_LOCALES.fr = {
   /* ── Conseils des panneaux du tableau de bord ────────────────────────────── */
   'ui.line_status_title':              'État des machines',
   'ui.line_status_hint':               'utilisation / capacité / prochain changement',
+  'ui.ls_day_prev':                    'Jour précédent',
+  'ui.ls_day_next':                    'Jour suivant',
   'ui.util_capacity_hint':             '% de la capacité disponible · inactif → surcharge',
   'ui.lateness_hint':                  'Heures de retard cumulées par machine / jour · cliquez sur une cellule pour inspecter',
 
@@ -1127,7 +1130,6 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.all_lines_filter':               'Toutes les machines',
   'ui.filter_label':                   'Filtre',
   'ui.line_label':                     'Machine',
-  'ui.no_plant_data':                  'Pas de données de site — chargez d\'abord les commandes',
   'ui.no_lines_plant':                 'Aucune machine disponible pour ce site',
   'ui.lines_selected':                 '{{sel}} sur {{total}} sélectionné(s)',
   'ui.orders_count':                   '{{count}} commande{{plural}}',
@@ -1402,7 +1404,6 @@ window.__NIMBUS_LOCALES.fr = {
   'tip.diag_clear_cache':              'Effacer le cache local et recharger',
 
   /* ── Placeholders ────────────────────────────────────────────────────────── */
-  'ph.search_plants':                  'Rechercher des sites…',
   'ph.search_colors':                  'Rechercher des couleurs…',
   'ph.blackout_reason_line':           'Maintenance, nettoyage, changement d\'équipe…',
   'ph.blackout_reason_plant':          'Vacances, arrêt, nettoyage en profondeur…',
@@ -1717,7 +1718,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_status_ready_review':     'Prêt pour l’examen d’activation.',
   'toast.setup_saved': 'Administration de réglage enregistrée', 'toast.setup_copied': 'Lignes de réglage copiées',
   'ui.setup_import_csv': 'Importer CSV',
-  'ui.setup_detail_title': 'Détail de réglage dérivé', 'ui.setup_predecessor': 'Ordre prédécesseur',
+  'ui.setup_detail_title': 'Détail de réglage dérivé', 'ui.setup_predecessor': 'Ordre prédécesseur', 'ui.setup_first_on_machine': 'Premier sur la machine',
   'ui.setup_predecessor_state': 'État prédécesseur',
   'ui.setup_required': 'Réglage requis', 'ui.setup_effective': 'Réglage effectif', 'ui.setup_standard': 'Réglage standard',
   'ui.setup_override': 'Remplacement d’occurrence', 'ui.setup_missing': 'Données de matrice de réglage manquantes',
@@ -1772,6 +1773,7 @@ window.__NIMBUS_LOCALES.fr = {
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Règles de planification',
   'ui.settings_subtab_setup':          'Matrice de réglage',
+  'ui.settings_rules_rightclick_hint':  'Clic droit sur un réglage pour plus d’infos',
   'ui.setup_step1_definition':         'Signature de réglage',
   'ui.setup_grid_filter_from_placeholder': 'Filtrer De…',
   'ui.setup_grid_filter_to_placeholder':   'Filtrer Vers…',

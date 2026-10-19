@@ -143,6 +143,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.save_failed':                 'Speichern fehlgeschlagen: {{msg}}',
   'toast.paste_result':                'Eingefügt: {{added}} hinzugefügt, {{updated}} aktualisiert',
   'toast.paste_result_skip':           'Eingefügt: {{added}} hinzugefügt, {{updated}} aktualisiert, {{skipped}} übersprungen',
+  'toast.machines_autolinked':         'Mit dem SAP-Arbeitsplatz gleicher ID verknüpft: {{machines}}',
   'toast.clipboard_denied':            'Zugriff auf Zwischenablage verweigert — Berechtigung erteilen und erneut versuchen',
   'toast.clipboard_empty':             'Zwischenablage ist leer',
   'toast.no_rows_paste':               'Keine Zeilen im eingefügten Text gefunden',
@@ -1054,7 +1055,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.no_write_permission':         'Sie haben keine Berechtigung, diese Änderungen zu speichern',
   'ui.all_pomat':                      'Auftrag / Material',
   'ui.n_pomat_filter':                 '{{count}} eingefügt',
-  'ph.paste_po_material':              'Fertigungsauftrags- oder Materialnummern einfügen — eine pro Zeile oder Excel-Spalte…',
+  'ph.paste_po_material':              'Fertigungsauftrags- oder Materialnummern einfügen — eine pro Zeile oder Excel-Spalte. * als Platzhalter: 204*, *204*, *204…',
   'toast.paste_pomat_match':           '{{matched}} von {{total}} einem sichtbaren Auftrag zugeordnet',
   'ui.pomat_count':                    '{{count}} Wert(e) eingefügt',
   'btn.clear_pasted':                  'Eingefügtes löschen',
@@ -1101,6 +1102,8 @@ window.__NIMBUS_LOCALES.de = {
   /* ── Dashboard-Panel-Hinweise ────────────────────────────────────────────── */
   'ui.line_status_title':              'Maschinenstatus',
   'ui.line_status_hint':               'Auslastung / Kapazität / Nächster Wechsel',
+  'ui.ls_day_prev':                    'Vorheriger Tag',
+  'ui.ls_day_next':                    'Nächster Tag',
   'ui.util_capacity_hint':             '% der verfügbaren Kapazität · leer → Überlast',
   'ui.lateness_hint':                  'Kumulative Verspätungsstunden pro Maschine / Tag · Zelle anklicken um zu prüfen',
 
@@ -1127,7 +1130,6 @@ window.__NIMBUS_LOCALES.de = {
   'ui.all_lines_filter':               'Alle Maschinen',
   'ui.filter_label':                   'Filter',
   'ui.line_label':                     'Maschine',
-  'ui.no_plant_data':                  'Keine Werksdaten — laden Sie zuerst Aufträge',
   'ui.no_lines_plant':                 'Keine Maschinen für dieses Werk verfügbar',
   'ui.lines_selected':                 '{{sel}} von {{total}} ausgewählt',
   'ui.orders_count':                   '{{count}} Auftrag{{plural}}',
@@ -1401,7 +1403,6 @@ window.__NIMBUS_LOCALES.de = {
   'tip.diag_clear_cache':              'Lokalen Cache löschen und neu laden',
 
   /* ── Placeholders ────────────────────────────────────────────────────────── */
-  'ph.search_plants':                  'Werke suchen…',
   'ph.search_colors':                  'Farben suchen…',
   'ph.blackout_reason_line':           'Wartung, Reinigung, Schichtwechsel…',
   'ph.blackout_reason_plant':          'Feiertag, Stillstand, Grundreinigung…',
@@ -1719,7 +1720,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_status_ready_review':     'Bereit zur Aktivierungsprüfung.',
   'toast.setup_saved': 'Setup-Verwaltung gespeichert', 'toast.setup_copied': 'Setup-Zeilen kopiert',
   'ui.setup_import_csv': 'CSV importieren',
-  'ui.setup_detail_title': 'Abgeleitete Setup-Details', 'ui.setup_predecessor': 'Vorgängerauftrag',
+  'ui.setup_detail_title': 'Abgeleitete Setup-Details', 'ui.setup_predecessor': 'Vorgängerauftrag', 'ui.setup_first_on_machine': 'Erster Auftrag auf der Maschine',
   'ui.setup_predecessor_state': 'Vorgängerzustand',
   'ui.setup_required': 'Erforderliches Setup', 'ui.setup_effective': 'Effektives Setup', 'ui.setup_standard': 'Standard-Setup',
   'ui.setup_override': 'Vorgangsüberschreibung', 'ui.setup_missing': 'Setup-Matrixdaten fehlen',
@@ -1774,6 +1775,7 @@ window.__NIMBUS_LOCALES.de = {
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Planungsregeln',
   'ui.settings_subtab_setup':          'Rüstmatrix',
+  'ui.settings_rules_rightclick_hint':  'Rechtsklick auf eine Einstellung für mehr Infos',
   'ui.setup_step1_definition':         'Rüstsignatur',
   'ui.setup_grid_filter_from_placeholder': 'Von filtern…',
   'ui.setup_grid_filter_to_placeholder':   'Nach filtern…',

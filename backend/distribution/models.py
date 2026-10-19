@@ -20,3 +20,5 @@ class WorkCenterSaveResult(BaseModel):
     review_required: bool
     distribute_tooled: bool
     weights: dict[str, float | None] = {}
+    # True when this save auto-linked the same-named machine to the work center (2026-10-19).
+    auto_linked: bool = False

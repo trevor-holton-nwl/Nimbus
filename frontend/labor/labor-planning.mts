@@ -1027,7 +1027,7 @@ export const LaborPlanning = (() => {
     if (_weeks.length) {
       if (!_fpHorizon) {
         _fpHorizon = flatpickr('#labor-horizon-input', {
-          dateFormat: 'M j, Y',
+          dateFormat: Util._dateFormatPref(),
           onChange(dates: Date[]) {
             if (!dates[0]) return;
             const now = new Date();

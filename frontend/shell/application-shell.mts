@@ -183,7 +183,7 @@ const Settings = (() => {
     { key: 'pinnedLines',  category: 'personalization', type: 'array',  default: [],   tier: 'user', region: false },
     // ── Workflow ───────────────────────────────────────────────────────
     { key: 'timeFormat',        category: 'workflow', type: 'enum',     default: '12h',              tier: 'user', region: false },
-    { key: 'dateFormat',        category: 'workflow', type: 'enum',     default: 'M j, Y',           tier: 'user', region: false },
+    { key: 'dateFormat',        category: 'workflow', type: 'enum',     default: 'm/d/Y',             tier: 'user', region: false },
     { key: 'timezone',          category: 'workflow', type: 'timezone', default: 'America/New_York', tier: 'user', region: true  },
     { key: 'firstDayOfWeek',    category: 'workflow', type: 'enum',     default: 0,                  tier: 'user', region: true  },
     { key: 'optimizerDefaults', category: 'workflow', type: 'object',   default: null,               tier: 'user', region: false },
@@ -787,7 +787,7 @@ const SessionUIAdapter = {
       try { if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(now, tok); } catch {}
       return tok;
     };
-    const dfTokens = ['M j, Y', 'm/d/Y', 'd/m/Y', 'Y-m-d', 'j M Y'];
+    const dfTokens = ['m/d/Y', 'd/m/Y', 'Y-m-d', 'j M Y', 'M j, Y'];
     if (df && !dfTokens.includes(df)) dfTokens.unshift(df);   // keep a role/legacy value selectable
     const dfOpts = dfTokens.map(tok => SessionUIAdapter._optTag(tok, sample(tok), df)).join('');
     const fdow = Number(Session.pref('firstDayOfWeek'));

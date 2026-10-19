@@ -339,6 +339,18 @@ body.dark .hm-cell:hover {
   background: var(--accent, #b8791a);
   color: #ffffff;
 }
+/* Machine Status day stepper: ‹ label › sits beside the title; the header already wraps (flex-wrap). */
+.ls-head-title { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; min-width: 0; }
+.ls-day-group { align-items: stretch; }
+.ls-day-group .seg-btn { padding: 4px 9px; line-height: 1.2; }
+.ls-day-group .seg-btn:disabled { opacity: 0.35; cursor: default; }
+.ls-day-label {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 78px; max-width: 120px; padding: 0 8px;
+  font-size: 11px; font-weight: 600; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-right: 1px solid var(--line);
+}
 .lh-scroll-wrap {
   max-height: 360px;
   overflow-y: auto;
@@ -1292,7 +1304,14 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 
           <div class="panel" id="line-status-card">
             <header class="panel-head">
-              <h3><span data-i18n="ui.line_status_title">Line Status</span> <span style="color:var(--fg-faint);font-weight:400;font-size:11px;letter-spacing:0.04em;">· <span data-i18n="ui.today">Today</span></span></h3>
+              <div class="ls-head-title">
+                <h3 data-i18n="ui.line_status_title">Machine Status</h3>
+                <div class="lateness-horizon-group ls-day-group" id="ls-day-group" role="group" aria-label="Machine Status">
+                  <button type="button" class="seg-btn" id="ls-day-prev" data-ls-step="-1" data-i18n-title="ui.ls_day_prev" title="Previous day" aria-label="Previous day">‹</button>
+                  <span class="ls-day-label" id="ls-day-label" aria-live="polite">Today</span>
+                  <button type="button" class="seg-btn" id="ls-day-next" data-ls-step="1" data-i18n-title="ui.ls_day_next" title="Next day" aria-label="Next day">›</button>
+                </div>
+              </div>
               <span class="panel-hint" data-i18n="ui.line_status_hint">util / capacity / next CO</span>
             </header>
             <div class="panel-body panel-body-flush">
@@ -1408,7 +1427,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="dash-filter-dropdown dash-filter-pomat-panel" id="gantt-pomat-dropdown" hidden>
           <textarea id="gantt-pomat-textarea" class="dash-filter-pomat-textarea" rows="6"
                     data-i18n-placeholder="ph.paste_po_material"
-                    placeholder="Paste Production Order or Material Number values — one per line or Excel column…"></textarea>
+                    placeholder="Paste Production Order or Material Number values — one per line or Excel column. Use * as a wildcard: 204*, *204*, *204…"></textarea>
           <div class="dash-filter-pomat-actions">
             <span class="dash-filter-pomat-count" id="gantt-pomat-count"></span>
             <button type="button" class="btn btn-ghost sm" id="gantt-pomat-clear" data-i18n="btn.clear_pasted">Clear pasted</button>
@@ -1543,7 +1562,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="dash-filter-dropdown dash-filter-pomat-panel" id="tbl-flt-pomat-dropdown" hidden>
           <textarea id="tbl-flt-pomat-textarea" class="dash-filter-pomat-textarea" rows="6"
                     data-i18n-placeholder="ph.paste_po_material"
-                    placeholder="Paste Production Order or Material Number values — one per line or Excel column…"></textarea>
+                    placeholder="Paste Production Order or Material Number values — one per line or Excel column. Use * as a wildcard: 204*, *204*, *204…"></textarea>
           <div class="dash-filter-pomat-actions">
             <span class="dash-filter-pomat-count" id="tbl-flt-pomat-count"></span>
             <button type="button" class="btn btn-ghost sm" id="tbl-flt-pomat-clear" data-i18n="btn.clear_pasted">Clear pasted</button>
@@ -2714,20 +2733,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="opt-header-title">Optimization Settings</div>
       </div>
       <div class="opt-header-plant">
-        <div class="opt-plant-select" id="opt-plant-select">
-          <button class="opt-plant-trigger" id="opt-plant-trigger" type="button"
-                  onclick="NIMBUS.OptimizeDialog.toggleDropdown()">
-            <span class="opt-plant-trigger-label" id="opt-plant-trigger-label">Select plant…</span>
-            <span class="opt-plant-trigger-arrow">▾</span>
-          </button>
-          <div class="opt-plant-dropdown" id="opt-plant-dropdown" hidden>
-            <div class="opt-plant-search-wrap">
-              <input class="opt-plant-search" id="opt-plant-search" type="text"
-                     placeholder="Search plants…" data-i18n-placeholder="ph.search_plants" autocomplete="off"
-                     oninput="NIMBUS.OptimizeDialog.filterPlants(this.value)">
-            </div>
-            <ul class="opt-plant-list" id="opt-plant-list" role="listbox"></ul>
-          </div>
+        <div class="opt-plant-fixed" id="opt-plant-fixed">
+          <span class="opt-plant-fixed-cap" data-i18n="ui.plant_label">Plant</span>
+          <span class="opt-plant-fixed-val" id="opt-plant-label"></span>
         </div>
         <span id="opt-wheel-badge" class="opt-wheel-badge compact none" title="No wheel loaded" data-i18n-title="tip.no_wheel_loaded">
           <span class="owb-icon">○</span>

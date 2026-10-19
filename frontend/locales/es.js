@@ -143,6 +143,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.save_failed':                 'Error al guardar: {{msg}}',
   'toast.paste_result':                'Pegado: {{added}} añadidos, {{updated}} actualizados',
   'toast.paste_result_skip':           'Pegado: {{added}} añadidos, {{updated}} actualizados, {{skipped}} omitidos',
+  'toast.machines_autolinked':         'Vinculado al centro de trabajo SAP con el mismo ID: {{machines}}',
   'toast.clipboard_denied':            'Acceso al portapapeles denegado — conceda permiso e inténtelo de nuevo',
   'toast.clipboard_empty':             'El portapapeles está vacío',
   'toast.no_rows_paste':               'No se encontraron filas en el texto pegado',
@@ -1058,7 +1059,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.no_write_permission':         'No tiene permiso para guardar estos cambios',
   'ui.all_pomat':                      'Orden / Material',
   'ui.n_pomat_filter':                 '{{count}} pegados',
-  'ph.paste_po_material':              'Pegue números de orden de producción o de material — uno por línea o columna de Excel…',
+  'ph.paste_po_material':              'Pegue números de orden de producción o de material — uno por línea o columna de Excel. Use * como comodín: 204*, *204*, *204…',
   'toast.paste_pomat_match':           '{{matched}} de {{total}} coincide con un pedido visible',
   'ui.pomat_count':                    '{{count}} valor(es) pegado(s)',
   'btn.clear_pasted':                  'Borrar pegado',
@@ -1105,6 +1106,8 @@ window.__NIMBUS_LOCALES.es = {
   /* ── Sugerencias del panel del dashboard ─────────────────────────────────── */
   'ui.line_status_title':              'Estado de máquina',
   'ui.line_status_hint':               'utilización / capacidad / próximo cambio',
+  'ui.ls_day_prev':                    'Día anterior',
+  'ui.ls_day_next':                    'Día siguiente',
   'ui.util_capacity_hint':             '% de la capacidad disponible · inactivo → sobrecarga',
   'ui.lateness_hint':                  'Horas de retraso acumuladas por máquina / día · haga clic en una celda para inspeccionar',
 
@@ -1131,7 +1134,6 @@ window.__NIMBUS_LOCALES.es = {
   'ui.all_lines_filter':               'Todas las máquinas',
   'ui.filter_label':                   'Filtro',
   'ui.line_label':                     'Máquina',
-  'ui.no_plant_data':                  'Sin datos de planta — cargue pedidos primero',
   'ui.no_lines_plant':                 'No hay máquinas disponibles para esta planta',
   'ui.lines_selected':                 '{{sel}} de {{total}} seleccionado(s)',
   'ui.orders_count':                   '{{count}} pedido{{plural}}',
@@ -1403,7 +1405,6 @@ window.__NIMBUS_LOCALES.es = {
   'tip.diag_clear_cache':              'Borrar caché local y recargar',
 
   /* ── Placeholders ────────────────────────────────────────────────────────── */
-  'ph.search_plants':                  'Buscar plantas…',
   'ph.search_colors':                  'Buscar colores…',
   'ph.blackout_reason_line':           'Mantenimiento, limpieza, cambio de turno…',
   'ph.blackout_reason_plant':          'Festivo, parada, limpieza profunda…',
@@ -1717,7 +1718,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.setup_status_ready_review':     'Listo para revisión de activación.',
   'toast.setup_saved': 'Administración de preparación guardada', 'toast.setup_copied': 'Filas de preparación copiadas',
   'ui.setup_import_csv': 'Importar CSV',
-  'ui.setup_detail_title': 'Detalle de preparación derivado', 'ui.setup_predecessor': 'Orden predecesora',
+  'ui.setup_detail_title': 'Detalle de preparación derivado', 'ui.setup_predecessor': 'Orden predecesora', 'ui.setup_first_on_machine': 'Primera en la máquina',
   'ui.setup_predecessor_state': 'Estado predecesor',
   'ui.setup_required': 'Preparación requerida', 'ui.setup_effective': 'Preparación efectiva', 'ui.setup_standard': 'Preparación estándar',
   'ui.setup_override': 'Anulación de ocurrencia', 'ui.setup_missing': 'Faltan datos de la matriz de preparación',
@@ -1772,6 +1773,7 @@ window.__NIMBUS_LOCALES.es = {
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Reglas de programación',
   'ui.settings_subtab_setup':          'Matriz de preparación',
+  'ui.settings_rules_rightclick_hint':  'Clic derecho en un ajuste para más información',
   'ui.setup_step1_definition':         'Firma de preparación',
   'ui.setup_grid_filter_from_placeholder': 'Filtrar Desde…',
   'ui.setup_grid_filter_to_placeholder':   'Filtrar Hasta…',

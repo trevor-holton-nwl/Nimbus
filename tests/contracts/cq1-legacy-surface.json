@@ -299,11 +299,6 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.OptimizeDialog.toggleDropdown()"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
       "expression": "NIMBUS.OptimizerPreview.apply()"
     },
     {
@@ -447,11 +442,6 @@
       "expression": "NIMBUS.OptimizeDialog.filterLines(this.value)"
     },
     {
-      "file": "index.html",
-      "attribute": "oninput",
-      "expression": "NIMBUS.OptimizeDialog.filterPlants(this.value)"
-    },
-    {
       "file": "insights/insights-ui.mjs",
       "attribute": "onchange",
       "expression": "..."
@@ -558,14 +548,12 @@
     "OptimizeDialog.commitFrom",
     "OptimizeDialog.commitTo",
     "OptimizeDialog.filterLines",
-    "OptimizeDialog.filterPlants",
     "OptimizeDialog.open",
     "OptimizeDialog.openFromPicker",
     "OptimizeDialog.openToPicker",
     "OptimizeDialog.run",
     "OptimizeDialog.selectAllLines",
     "OptimizeDialog.setScope",
-    "OptimizeDialog.toggleDropdown",
     "OptimizerPreview.apply",
     "OptimizerPreview.discard",
     "Persistence.saveAll",

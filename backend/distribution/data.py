@@ -51,6 +51,7 @@ import db
 import backend.distribution.service as service
 import backend.setup.data as setup_data
 from db import _pool
+from master_data import _autolink_same_named_machines
 
 log = logging.getLogger(__name__)
 
@@ -131,8 +132,12 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
     routes.py can surface a structured `{"code": ...}` 400 body:
       - wc_code_shadowed_by_machine -- if a machine in this plant is named
         exactly like the code, it must be linked to it
-        (machine.sap_workcenter = code, a 1:1 work center). Fires only when
-        that machine is unlinked or linked to another work center.
+        (machine.sap_workcenter = code, a 1:1 work center). An EMPTY link is
+        auto-filled in this same transaction (master_data's
+        `_autolink_same_named_machines`, 2026-10-19); the rule fires only when
+        that machine is linked to another work center, the work center is an
+        aggregate (distribute mode or other members), or the name exists in
+        several subnetworks.
       - wc_code_is_member_of_aggregate -- a 1:1 machine linked to its own
         code may not share the work center with a second member or use
         distribute mode: orders would land on that machine and never
@@ -172,19 +177,60 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
     clean_weights = _clean_weights(weights)
 
     with _pool.connection() as conn, conn.cursor() as cur:
+        # Write the policy row FIRST, then let the shared auto-link rule fill an EMPTY
+        # same-named machine link (2026-10-19; it needs this row to exist and only acts in
+        # single mode). The checks below then run on the linked state; any ValueError rolls
+        # the whole transaction back, so a refused save leaves no row and no link behind.
+        cur.execute(
+            """
+            INSERT INTO sap_workcenter
+                (plant, sap_workcenter, description, distribution_mode,
+                 default_machine, max_separation, review_required, distribute_tooled, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (plant, sap_workcenter) DO UPDATE SET
+                description       = EXCLUDED.description,
+                distribution_mode = EXCLUDED.distribution_mode,
+                default_machine   = EXCLUDED.default_machine,
+                max_separation    = EXCLUDED.max_separation,
+                review_required   = EXCLUDED.review_required,
+                distribute_tooled = EXCLUDED.distribute_tooled,
+                updated_at        = now()
+            """,
+            (plant, wc_clean, description_clean, mode, default_machine_clean, separation,
+             review_required_clean, distribute_tooled_clean),
+        )
+        auto_linked = _autolink_same_named_machines(cur, None, only=[(plant, wc_clean)])
+
         # M = the machine named exactly like this code (a 1:1 work center), if any.
         # wc_code_shadowed_by_machine: M must be linked to this code, or the
         # orders land on M and the work center is silently inert
-        # (aggregate_to_detail.md §3.1).
+        # (aggregate_to_detail.md §3.1). An empty link was just auto-filled above, so
+        # this fires only when M is linked elsewhere, the work center is an aggregate
+        # (distribute mode / other members), or the name exists in several subnetworks.
         cur.execute("SELECT sap_workcenter FROM machine WHERE plant = %s AND machine = %s", (plant, wc_clean))
-        m_row = cur.fetchone()
+        m_rows = cur.fetchall()
+        # With the name in several subnetworks, one machine linked here is enough to
+        # count as the 1:1 member; otherwise the first row stands for the lot.
+        m_row = next((r for r in m_rows if r[0] == wc_clean), m_rows[0] if m_rows else None)
         m_linked_here = m_row is not None and m_row[0] == wc_clean
         if m_row is not None and not m_linked_here:
             if m_row[0] is None:
+                # Auto-link left an EMPTY link alone, so linking is not the way out: say why.
+                cur.execute(
+                    "SELECT count(*) FROM machine WHERE plant = %s AND sap_workcenter = %s", (plant, wc_clean))
+                has_members = cur.fetchone()[0] > 0
+                if len(m_rows) > 1:
+                    why = f"machine {wc_clean!r} exists in several subnetworks — rename the machine or the work center"
+                elif mode == "distribute":
+                    why = ("a distribute work center cannot share its code with a machine — "
+                           "rename the machine or the work center")
+                elif has_members:
+                    why = ("this work center already has other member machines — "
+                           "rename the machine or the work center")
+                else:
+                    why = "rename the machine or the work center"
                 raise ValueError(
-                    f"wc_code_shadowed_by_machine: {wc_clean!r} is also a machine name in plant {plant!r}; "
-                    f"set that machine's SAP work center to {wc_clean!r} (so it becomes this work center's "
-                    "1:1 member) or rename the machine"
+                    f"wc_code_shadowed_by_machine: {wc_clean!r} is also a machine name in plant {plant!r}; {why}"
                 )
             raise ValueError(
                 f"wc_code_shadowed_by_machine: {wc_clean!r} is also a machine name in plant {plant!r}, "
@@ -223,25 +269,6 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
                     f"weight_machine_not_member: {machine_name!r} is not a member of work center {wc_clean!r}"
                 )
 
-        cur.execute(
-            """
-            INSERT INTO sap_workcenter
-                (plant, sap_workcenter, description, distribution_mode,
-                 default_machine, max_separation, review_required, distribute_tooled, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
-            ON CONFLICT (plant, sap_workcenter) DO UPDATE SET
-                description       = EXCLUDED.description,
-                distribution_mode = EXCLUDED.distribution_mode,
-                default_machine   = EXCLUDED.default_machine,
-                max_separation    = EXCLUDED.max_separation,
-                review_required   = EXCLUDED.review_required,
-                distribute_tooled = EXCLUDED.distribute_tooled,
-                updated_at        = now()
-            """,
-            (plant, wc_clean, description_clean, mode, default_machine_clean, separation,
-             review_required_clean, distribute_tooled_clean),
-        )
-
         for machine_name, weight in clean_weights.items():
             cur.execute(
                 "UPDATE machine SET distribution_weight = %s"
@@ -257,11 +284,12 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
                 "default_machine": default_machine_clean, "max_separation": separation,
                 "review_required": review_required_clean, "distribute_tooled": distribute_tooled_clean,
                 "weights": clean_weights,
+                **({"auto_linked": auto_linked} if auto_linked else {}),
             }), user_email),
         )
         conn.commit()
 
-    return {
+    result = {
         "plant": plant,
         "sap_workcenter": wc_clean,
         "description": description_clean,
@@ -272,6 +300,9 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
         "distribute_tooled": distribute_tooled_clean,
         "weights": clean_weights,
     }
+    if auto_linked:
+        result["auto_linked"] = True
+    return result
 
 
 # =====================================================================

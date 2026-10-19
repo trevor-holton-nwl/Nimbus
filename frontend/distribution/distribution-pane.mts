@@ -2028,7 +2028,7 @@ export const DistributionPane = (() => {
   /** Lazily-initialized module-level Flatpickr instance per input id, the
    *  established `_fp*` convention (frontend/shell/CLAUDE.md) — date-only
    *  row from that file's table (`dateFormat:"Y-m-d"`, `altInput`,
-   *  `altFormat:"M j, Y"`). Falls back to a plain text input (no picker)
+   *  `altFormat:Util._dateFormatPref()`). Falls back to a plain text input (no picker)
    *  when Flatpickr hasn't loaded, same guarded pattern `Util._fmtDatePref`
    *  uses. */
   const _fpInstances: Record<string, unknown> = {};
@@ -2038,7 +2038,7 @@ export const DistributionPane = (() => {
     try {
       if (typeof flatpickr !== 'undefined') {
         _fpInstances[id] = flatpickr(el, {
-          dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+          dateFormat: 'Y-m-d', altInput: true, altFormat: Util._dateFormatPref(),
           onChange: (selected: Date[]) => onChange(selected[0] ? Util.dayKey(selected[0]) : null),
         });
         return;

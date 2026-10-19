@@ -252,8 +252,7 @@
     const h24 = date.getHours(), min = date.getMinutes();
     const ampm = h24 < 12 ? 'AM' : 'PM';
     const h12 = h24 % 12 || 12;
-    const minStr = min === 0 ? '' : `:${String(min).padStart(2, '0')}`;
-    return `${p(date.getMonth()+1)}/${p(date.getDate())}/${String(date.getFullYear()).slice(-2)} · ${h12}${minStr} ${ampm}`;
+    return `${p(date.getMonth()+1)}/${p(date.getDate())}/${date.getFullYear()} · ${p(h12)}:${p(min)} ${ampm}`;
   }
 
   // Naive local-time serializers — the backend save contract (no `Z`; see brain.py

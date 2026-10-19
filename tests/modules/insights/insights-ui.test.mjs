@@ -5,7 +5,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Dashboard, AlertsUIAdapter } from '../../../frontend/insights/insights-ui.mjs';
-import { Table } from '../../../frontend/scheduling/orders.mjs';
+import { Table, Inspector } from '../../../frontend/scheduling/orders.mjs';
+import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
+import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Util } from '../../../frontend/platform/foundation.mjs';
@@ -262,6 +264,42 @@ test('alert drawer delegates fix and override actions without compiling IDs into
   }
 });
 
+test('AlertsUIAdapter.focus: Go To selects via Selection, flashes the target, and closes the drawer only if open', () => {
+  const prior = {
+    gotoLineDay: Timeline.gotoLineDay, flash: Timeline.flashTarget, tl: Timeline._tl,
+    show: Inspector.show, toggle: AlertsUIAdapter.toggleDrawer, doc: globalThis.document,
+    alerts: Store._state.alerts, ids: Selection.ids(),
+  };
+  const calls = [];
+  let drawerOpen = true;
+  try {
+    Timeline.gotoLineDay = (line, day, cb) => { calls.push('goto'); cb(); };
+    Timeline.flashTarget = id => calls.push(`flash:${id}`);
+    Timeline._tl = {};
+    Inspector.show = t => calls.push(`inspector:${t.id}`);
+    AlertsUIAdapter.toggleDrawer = () => { calls.push('toggle'); drawerOpen = !drawerOpen; };
+    globalThis.document = { getElementById: () => ({ classList: { contains: () => drawerOpen } }) };
+    Store._state.tasks.T1 = { id: 'T1' };
+    Store._state.alerts = [{ id: 'a1', taskId: 'T1', line: 'L1', time: new Date('2026-08-12T08:00:00') }];
+    Selection.clear();
+
+    AlertsUIAdapter.focus('a1');
+    assert.deepEqual(Selection.ids(), ['T1'], 'target is selected through Selection');
+    assert.ok(!calls.includes('inspector:T1'), 'Inspector is driven by the Selection listener, not called directly');
+    assert.deepEqual(calls.filter(c => c !== 'goto'), ['flash:T1', 'toggle']);
+
+    // Already the sole selection: Selection.set no-ops, so Inspector.show is called explicitly.
+    calls.length = 0; drawerOpen = false;
+    AlertsUIAdapter.focus('a1');
+    assert.ok(calls.includes('inspector:T1'));
+    assert.ok(!calls.includes('toggle'), 'closed drawer is not toggled (would reopen it)');
+  } finally {
+    Timeline.gotoLineDay = prior.gotoLineDay; Timeline.flashTarget = prior.flash; Timeline._tl = prior.tl;
+    Inspector.show = prior.show; AlertsUIAdapter.toggleDrawer = prior.toggle; globalThis.document = prior.doc;
+    Store._state.alerts = prior.alerts; delete Store._state.tasks.T1; Selection.set(prior.ids);
+  }
+});
+
 test('alert drawer renders tool-conflict alerts with localized text and a fix button', () => {
   const row = AlertsUIAdapter._renderAlertRow({
     id: 'tool-conflict|task-b|task-a', type: 'tool-conflict', sev: 'err',
@@ -411,4 +449,133 @@ test('U30: the derive-paused banner is a status region and stacks below the conc
   const css = readFileSync(new URL('styles.css', root), 'utf8');
   assert.match(css, /\.concurrency-off #derive-paused-banner\s*\{\s*top:\s*calc\(var\(--chrome-h\) \+ 34px\)/);
   assert.match(css, /\.concurrency-off\.derive-paused \.tab-panel[^{]*\{\s*margin-top:\s*68px/);
+});
+
+// ── W6: Machine Status card day stepper ─────────────────────────────────────
+function lsFixture() {
+  const now = new Date('2026-10-19T09:00:00');
+  const keys = Dashboard._lsDayKeys(now);
+  const cell = (s, c) => ({ scheduled: s, capacity: c, effectiveCapacity: c, pct: s / c });
+  const matrix = { 'L-1': {}, 'L-2': {} };
+  keys.forEach((k, i) => { matrix['L-1'][k] = cell(2 + i, 16); matrix['L-2'][k] = cell(i === 1 ? 20 : 4, 16); });
+  return { now, keys, matrix };
+}
+
+test('W6: day keys are 7 plant days from today and the active key clamps into them', () => {
+  const { keys } = lsFixture();
+  assert.equal(keys.length, 7);
+  assert.deepEqual(keys.slice(0, 2), ['2026-10-19', '2026-10-20']);
+  const prior = Dashboard._lsDayKey;
+  try {
+    Dashboard._lsDayKey = null;            assert.equal(Dashboard._lsActiveKey(keys), keys[0]);
+    Dashboard._lsDayKey = '2026-10-01';    assert.equal(Dashboard._lsActiveKey(keys), keys[0]);   // midnight rolled past it
+    Dashboard._lsDayKey = '2027-01-01';    assert.equal(Dashboard._lsActiveKey(keys), keys[6]);
+    Dashboard._lsDayKey = keys[3];         assert.equal(Dashboard._lsActiveKey(keys), keys[3]);
+  } finally { Dashboard._lsDayKey = prior; }
+});
+
+test('W6: card rows for day N equal the heatmap matrix column for that day; Next CO is a dash off today', () => {
+  const { now, keys, matrix } = lsFixture();
+  const lines = ['L-1', 'L-2'], byLine = { 'L-1': [], 'L-2': [] };
+  for (let i = 0; i < 7; i++) {
+    const rows = Dashboard._lsRowData(lines, byLine, matrix, keys[i], i === 0, now);
+    rows.forEach(r => {
+      const u = matrix[r.line][keys[i]];
+      assert.equal(r.sched, u.scheduled.toFixed(2));
+      assert.equal(r.effCap, u.effectiveCapacity.toFixed(2));
+      assert.equal(r.pct, Math.round(u.pct * 100));
+      assert.equal(r.isOver, u.scheduled > u.effectiveCapacity);
+      if (i > 0) assert.equal(r.nxtCO, '—');
+    });
+  }
+  assert.equal(Dashboard._lsRowData(lines, byLine, matrix, keys[1], false, now)[1].isOver, true);
+});
+
+test('W6: stepping moves the day key, clamps at both ends, and re-renders only the card', () => {
+  const { now, keys, matrix } = lsFixture();
+  const prior = { key: Dashboard._lsDayKey, clock: Util.plantClock, plant: Store.selectedPlant, cache: Dashboard._matrix7Cache,
+    render: Dashboard._renderLineStatus, sync: Dashboard._syncLineStatusHeight, full: Dashboard.render };
+  const seen = []; let full = 0;
+  try {
+    Util.plantClock = () => now;
+    Dashboard._matrix7Cache = { key: `${Util.startOfDay(now).getTime()}|7|1|`, matrix };
+    Dashboard._renderLineStatus = m => { seen.push([Dashboard._lsDayKey, m]); };
+    Dashboard._syncLineStatusHeight = () => {};
+    Dashboard.render = () => { full++; };
+    Dashboard._lsDayKey = null;
+    Dashboard._lsStep(-1);                       // already at today: stays
+    assert.equal(Dashboard._lsDayKey, keys[0]);
+    Dashboard._lsStep(1); Dashboard._lsStep(1);
+    assert.equal(Dashboard._lsDayKey, keys[2]);
+    for (let i = 0; i < 10; i++) Dashboard._lsStep(1);
+    assert.equal(Dashboard._lsDayKey, keys[6]);  // clamped at the last day
+    Dashboard._lsStep(-1);
+    assert.equal(Dashboard._lsDayKey, keys[5]);
+    assert.ok(seen.every(([, m]) => m === matrix), 'card reads the cached 7-day matrix');
+    assert.equal(full, 0, 'stepping never triggers a full dashboard render');
+  } finally {
+    Dashboard._lsDayKey = prior.key; Util.plantClock = prior.clock; Dashboard._matrix7Cache = prior.cache;
+    Dashboard._renderLineStatus = prior.render; Dashboard._syncLineStatusHeight = prior.sync; Dashboard.render = prior.full;
+  }
+});
+
+test('W6: a stale cached matrix (day 0 is no longer today) triggers a full render instead of the cache', () => {
+  const { now, matrix } = lsFixture();
+  const prior = { key: Dashboard._lsDayKey, clock: Util.plantClock, cache: Dashboard._matrix7Cache,
+    render: Dashboard._renderLineStatus, sync: Dashboard._syncLineStatusHeight, full: Dashboard.render };
+  let cardRenders = 0, full = 0;
+  try {
+    Util.plantClock = () => now;
+    const yesterday = new Date(Util.startOfDay(now)); yesterday.setDate(yesterday.getDate() - 1);
+    Dashboard._matrix7Cache = { key: `${yesterday.getTime()}|7|1|`, matrix };
+    Dashboard._renderLineStatus = () => { cardRenders++; };
+    Dashboard._syncLineStatusHeight = () => {};
+    Dashboard.render = () => { full++; };
+    Dashboard._lsDayKey = null;
+    Dashboard._lsStep(1);
+    assert.equal(full, 1, 'stale cache falls back to a full render');
+    assert.equal(cardRenders, 0, 'card never paints from the stale matrix');
+  } finally {
+    Dashboard._lsDayKey = prior.key; Util.plantClock = prior.clock; Dashboard._matrix7Cache = prior.cache;
+    Dashboard._renderLineStatus = prior.render; Dashboard._syncLineStatusHeight = prior.sync; Dashboard.render = prior.full;
+  }
+});
+
+test('W6: day control labels, aria and disabled ends', () => {
+  const { keys } = lsFixture();
+  const mk = () => ({ textContent: '', title: '', disabled: false, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } });
+  const label = mk(), prev = mk(), next = mk();
+  const priorDoc = globalThis.document, priorKey = Dashboard._lsDayKey, priorT = Util.t;
+  try {
+    globalThis.document = { ...priorDoc, getElementById: id => ({ 'ls-day-label': label, 'ls-day-prev': prev, 'ls-day-next': next })[id] || null };
+    Util.t = k => k;
+    Dashboard._renderLsDayControl(keys, keys[0]);
+    assert.equal(label.textContent, 'ui.today'); assert.equal(prev.disabled, true); assert.equal(next.disabled, false);
+    Dashboard._renderLsDayControl(keys, keys[1]);
+    assert.equal(label.textContent, 'ui.tomorrow'); assert.equal(prev.disabled, false);
+    assert.equal(prev.attrs['aria-label'], 'ui.ls_day_prev'); assert.equal(next.attrs['aria-label'], 'ui.ls_day_next');
+    Dashboard._renderLsDayControl(keys, keys[6]);
+    assert.equal(next.disabled, true);
+    assert.match(label.textContent, /\d/);       // short weekday + numeric date
+  } finally { globalThis.document = priorDoc; Dashboard._lsDayKey = priorKey; Util.t = priorT; }
+});
+
+test('W6: plant:selected resets the Machine Status day to today', () => {
+  const prior = { sub: Store.subscribe, key: Dashboard._lsDayKey, st: globalThis.setTimeout, si: globalThis.setInterval, win: globalThis.window,
+    drop: Dashboard._refreshLineDropdown, btns: Dashboard._refreshFilterBtns, render: Dashboard.render };
+  let handler = null;
+  try {
+    Store.subscribe = fn => { handler = fn; return () => {}; };
+    globalThis.setTimeout = () => 0; globalThis.setInterval = () => 0;
+    globalThis.window = { ...prior.win, addEventListener() {} };
+    Dashboard._refreshLineDropdown = () => {}; Dashboard._refreshFilterBtns = () => {}; Dashboard.render = () => {};
+    Dashboard.init();
+    assert.ok(handler, 'init subscribes to the Store');
+    Dashboard._lsDayKey = '2026-10-23';
+    handler({ type: 'plant:selected' });
+    assert.equal(Dashboard._lsDayKey, null);
+  } finally {
+    Store.subscribe = prior.sub; Dashboard._lsDayKey = prior.key; globalThis.setTimeout = prior.st; globalThis.setInterval = prior.si;
+    globalThis.window = prior.win; Dashboard._refreshLineDropdown = prior.drop; Dashboard._refreshFilterBtns = prior.btns; Dashboard.render = prior.render;
+  }
 });

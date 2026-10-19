@@ -42,6 +42,12 @@ type UtilizationResolverFn = (
   date: Date, days: number, tasks: NimbusTask[], context?: unknown
 ) => Record<string, Record<string, { pct?: number } | undefined>>;
 
+export interface PasteMatcher {
+  exact: Set<string>;
+  patterns: RegExp[];
+  size: number;
+}
+
 interface VirtualListOptions<T> {
   rowH?: number;
   getRowH?: (item: T) => number;
@@ -286,32 +292,34 @@ export const Util = {
     try { return _prefResolver('timeFormat') || '12h'; } catch { return '12h'; }
   },
   _dateFormatPref(): string {
-    try { return _prefResolver('dateFormat') || 'M j, Y'; } catch { return 'M j, Y'; }
+    try { return _prefResolver('dateFormat') || 'm/d/Y'; } catch { return 'm/d/Y'; }
   },
-  // Format a Date's time part per timeFormat: 12h ("6 PM" / "6:30 PM") or 24h ("18:30").
+  // 12-hour clock with zero-padded hour and always-present minutes: "06:00 PM".
+  _fmtTime12(date: Date): string {
+    const h24 = date.getHours();
+    const h12 = h24 % 12 || 12;
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${p(h12)}:${p(date.getMinutes())} ${h24 < 12 ? 'AM' : 'PM'}`;
+  },
+  // Format a Date's time part per timeFormat: 12h ("06:30 PM") or 24h ("18:30").
   _fmtTimePref(date: Date): string {
-    const min = date.getMinutes();
     if (Util._timeFormatPref() === '24h') {
       const p = (n: number) => String(n).padStart(2, '0');
-      return `${p(date.getHours())}:${p(min)}`;
+      return `${p(date.getHours())}:${p(date.getMinutes())}`;
     }
-    const h24 = date.getHours();
-    const ampm = h24 < 12 ? 'AM' : 'PM';
-    const h12 = h24 % 12 || 12;
-    const minStr = min === 0 ? '' : `:${String(min).padStart(2, '0')}`;
-    return `${h12}${minStr} ${ampm}`;
+    return Util._fmtTime12(date);
   },
   // Format a Date's date part per the Flatpickr-token dateFormat pref, via the
-  // Flatpickr static formatter; falls back to compact MM/DD/YY if unavailable.
+  // Flatpickr static formatter; falls back to MM/DD/YYYY if unavailable.
   _fmtDatePref(date: Date): string {
     const tok = Util._dateFormatPref();
     try {
       if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(date, tok);
     } catch { /* fall through to legacy compact format */ }
     const p = (n: number) => String(n).padStart(2, '0');
-    return `${p(date.getMonth() + 1)}/${p(date.getDate())}/${String(date.getFullYear()).slice(-2)}`;
+    return `${p(date.getMonth() + 1)}/${p(date.getDate())}/${date.getFullYear()}`;
   },
-  // Human-readable datetime (e.g. "May 15, 2026 · 6 PM"), routed through the
+  // Human-readable datetime (e.g. "05/15/2026 · 06:00 PM"), routed through the
   // per-user dateFormat + timeFormat display prefs.
   fmtDTReadable(d: unknown): string {
     const date = Util.parseDate(d);
@@ -319,32 +327,16 @@ export const Util = {
     return `${Util._fmtDatePref(date)} · ${Util._fmtTimePref(date)}`;
   },
 
-  // Compact range for blackout rows. Same day: "05/15/26 · 6–7 PM". Multi-day: "05/15/26 → 05/17/26".
+  // Compact range for blackout rows, honoring the user's date/time display prefs.
+  // Same day: "05/15/2026 · 06:00 PM – 07:00 PM". Multi-day: "05/15/2026 06:00 PM → 05/17/2026 06:00 PM".
   fmtBlockRange(s: unknown, e: unknown): string {
     const ds = Util.parseDate(s), de = Util.parseDate(e);
     if (!ds || !de) return '';
-    const p = (n: number) => String(n).padStart(2, '0');
-    const dateStr = (d: Date) => `${p(d.getMonth()+1)}/${p(d.getDate())}/${String(d.getFullYear()).slice(-2)}`;
     const sameDay = ds.getFullYear() === de.getFullYear()
                  && ds.getMonth()    === de.getMonth()
                  && ds.getDate()     === de.getDate();
-    const fmtTime = (h24: number, min: number) => {
-      const ampm = h24 < 12 ? 'AM' : 'PM';
-      const h12  = h24 % 12 || 12;
-      const m    = min === 0 ? '' : `:${String(min).padStart(2,'0')}`;
-      return `${h12}${m}${ampm}`;
-    };
-    if (sameDay) {
-      const sAmpm = ds.getHours() < 12 ? 'AM' : 'PM';
-      const eAmpm = de.getHours() < 12 ? 'AM' : 'PM';
-      const sH    = ds.getHours() % 12 || 12;
-      const eH    = de.getHours() % 12 || 12;
-      const sM    = ds.getMinutes() === 0 ? '' : `:${String(ds.getMinutes()).padStart(2,'0')}`;
-      const eM    = de.getMinutes() === 0 ? '' : `:${String(de.getMinutes()).padStart(2,'0')}`;
-      const suffix = sAmpm === eAmpm ? `${sH}${sM}–${eH}${eM} ${eAmpm}` : `${sH}${sM}${sAmpm}–${eH}${eM}${eAmpm}`;
-      return `${dateStr(ds)} · ${suffix}`;
-    }
-    return `${dateStr(ds)} ${fmtTime(ds.getHours(), ds.getMinutes())} → ${dateStr(de)} ${fmtTime(de.getHours(), de.getMinutes())}`;
+    if (sameDay) return `${Util._fmtDatePref(ds)} · ${Util._fmtTimePref(ds)} – ${Util._fmtTimePref(de)}`;
+    return `${Util._fmtDatePref(ds)} ${Util._fmtTimePref(ds)} → ${Util._fmtDatePref(de)} ${Util._fmtTimePref(de)}`;
   },
 
   /** Sum the hours of `intervals` ([{s:Date, e:Date}, …]) intersected with `win`
@@ -423,7 +415,11 @@ export const Util = {
   _fpAltFormat(): string {
     const df = Util._dateFormatPref();
     const tf = Util._timeFormatPref();
-    return `${df} · ${tf === '24h' ? 'H:i' : 'h:i K'}`;
+    return `${df} · ${tf === '24h' ? 'H:i' : 'G:i K'}`;
+  },
+  // Time-only variant of _fpAltFormat for the working-hours pickers.
+  _fpTimeAltFormat(): string {
+    return Util._timeFormatPref() === '24h' ? 'H:i' : 'G:i K';
   },
   fpDatetime(sel: string | HTMLElement, extra: Record<string, unknown> = {}) {
     return flatpickr(sel, {
@@ -991,15 +987,45 @@ export const Util = {
   // production order as .ORDER (brain.py aliases PRODUCTION_ORDER -> ORDER
   // in the /tasks response) — .PRODUCTION_ORDER is kept as a fallback only
   // for parity with the same convention used by Table's own valueGetter.
-  taskMatchesPasteSet(task: NimbusTask, idSet: Set<string> | null | undefined): boolean {
+  // Accepts either a plain Set of exact ids (legacy callers) or a
+  // PasteMatcher from compilePasteMatcher (exact ids plus `*` wildcard
+  // patterns). Exact ids are tried first; patterns only when no exact hit.
+  taskMatchesPasteSet(task: NimbusTask, idSet: Set<string> | PasteMatcher | null | undefined): boolean {
     if (!idSet || idSet.size === 0) return true;
+    const exact: Set<string> = idSet instanceof Set ? idSet : idSet.exact;
+    const patterns: RegExp[] = idSet instanceof Set ? [] : idSet.patterns;
     const po     = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER);
     const mat    = Util.norm(task.MATERIAL_NUMBER);
     // Matching the SAP parent order too means pasting/searching a parent
     // order number (e.g. "1000") selects every sub-order (A-1000, B-1000, …),
     // not just an exact PRODUCTION_ORDER match (aggregate_to_detail.md §8).
     const parent = Util.norm(task.PARENT_ORDER);
-    return !!((po && idSet.has(po)) || (mat && idSet.has(mat)) || (parent && idSet.has(parent)));
+    if ((po && exact.has(po)) || (mat && exact.has(mat)) || (parent && exact.has(parent))) return true;
+    for (const re of patterns) {
+      if ((po && re.test(po)) || (mat && re.test(mat)) || (parent && re.test(parent))) return true;
+    }
+    return false;
+  },
+
+  // Compile pasted filter tokens once per apply. A token containing `*` is a
+  // wildcard (`204*` starts-with, `*204*` contains, `*204` ends-with); other
+  // tokens stay exact. Upper-cased to match Util.norm; regex metacharacters
+  // are escaped so `2.4*` treats `.` literally; a bare `*` is ignored.
+  compilePasteMatcher(tokens: Iterable<string>): PasteMatcher {
+    const exact = new Set<string>();
+    const patterns: RegExp[] = [];
+    const seen = new Set<string>();
+    for (const raw of tokens) {
+      const t = Util.norm(raw).replace(/\*+/g, '*');   // `20**4` behaves like `20*4`
+      if (!t) continue;
+      if (t.indexOf('*') === -1) { exact.add(t); continue; }
+      if (/^\*+$/.test(t)) continue;
+      const src = '^' + t.split('*').map(p => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$';
+      if (seen.has(src)) continue;
+      seen.add(src);
+      patterns.push(new RegExp(src));
+    }
+    return { exact, patterns, size: exact.size + patterns.length };
   },
 
   // Shared search+checkbox "N selected" multi-select combobox — the pattern
@@ -1084,8 +1110,16 @@ export const Util = {
   // Diagnostic "how many of these pasted values matched a known id" count,
   // used for the paste toast on the Production Order / Material filter.
   countPasteMatches(text: string, knownIdSet: Set<string>): { matched: number; total: number } {
-    const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))];
-    return { matched: distinct.filter(v => knownIdSet.has(v)).length, total: distinct.length };
+    // A wildcard token counts as matched when any known id matches its pattern.
+    const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))]
+      .filter(v => !/^\*+$/.test(v));
+    const known = [...knownIdSet];
+    const hit = (v: string): boolean => {
+      if (v.indexOf('*') === -1) return knownIdSet.has(v);
+      const re = Util.compilePasteMatcher([v]).patterns[0];
+      return !!re && known.some(k => re.test(k));
+    };
+    return { matched: distinct.filter(hit).length, total: distinct.length };
   },
 
   // Fractional-hours <-> "HH:MM" string conversion, shared by CalendarUI

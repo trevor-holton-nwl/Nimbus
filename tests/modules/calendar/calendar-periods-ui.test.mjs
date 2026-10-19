@@ -86,7 +86,7 @@ test('render: rows carry the right badge, range, summary and no inline handlers'
   assert.match(html, /line-badge badge-info">Upcoming</);
   assert.match(html, /line-badge badge-muted">Past</);
   assert.equal((html.match(/period-row-past/g) || []).length, 1);
-  assert.match(html, /01\/01\/00 → No end date/, 'open-ended range through the date-format pref');
+  assert.match(html, /01\/01\/2000 → No end date/, 'open-ended range through the date-format pref');
   assert.match(html, /Mon–Fri 06:00–14:00 · Sat–Sun Closed/);
   assert.ok(!/onclick|NIMBUS\./.test(html), 'no inline handler or NIMBUS reference in rendered markup');
   assert.ok(!/onclick|NIMBUS\./.test(els['plant-periods-timeline'].innerHTML));
@@ -150,7 +150,7 @@ test('delete: confirms, then saves the list without that period', async () => {
   assert.equal(confirm.title, 'Delete period?');
   assert.equal(confirm.tone, 'danger');
   assert.equal(confirm.confirmLabel, 'Delete period');
-  assert.match(confirm.message, /Delete Old shutdown \(01\/01\/01 to 12\/31\/01\)\? Those dates go back to the default calendar\./);
+  assert.match(confirm.message, /Delete Old shutdown \(01\/01\/2001 to 12\/31\/2001\)\? Those dates go back to the default calendar\./);
   const save = calls.find(c => c[0] === 'save');
   assert.deepEqual(save[2].map(p => p.id), ['a', 'c']);
   assert.deepEqual(toasts.at(-1), ['Calendar period deleted.', 'success']);
@@ -203,7 +203,7 @@ test('save refused for overlap: stays open, names the other period inline, re-en
   assert.equal(calls.some(c => c[0] === 'close'), false, 'modal stays open');
   const err = calls.find(c => c[0] === 'setPeriodError');
   assert.equal(err[1], 'overlap');
-  assert.match(err[2], /^Overlaps Always on \(01\/01\/00 to No end date\)\. Periods cannot share dates\.$/);
+  assert.match(err[2], /^Overlaps Always on \(01\/01\/2000 to No end date\)\. Periods cannot share dates\.$/);
   assert.equal(els['cal-edit-save-btn'].disabled, false);
   assert.equal(toasts.length, 0, 'inline only, no toast');
 });
@@ -343,7 +343,7 @@ test('default segments: sit before period segments in the markup, with a gap eac
   const tl = els['plant-periods-timeline'].innerHTML;
   assert.equal(defSegs(tl).length, 2);
   assert.ok(tl.lastIndexOf('period-seg-default') < tl.indexOf('period-seg-upcoming'), 'defaults come first so periods paint over them');
-  assert.match(tl, /\(\d\d\/\d\d\/\d\d – \d\d\/\d\d\/\d\d\)"/, 'title carries the date range');
+  assert.match(tl, /\(\d\d\/\d\d\/\d{4} – \d\d\/\d\d\/\d{4}\)"/, 'title carries the date range');
 });
 
 test('default segments: adjacent periods leave no sliver between them; open-ended leaves no trailing gap', () => {

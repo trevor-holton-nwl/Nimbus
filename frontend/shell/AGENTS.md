@@ -34,8 +34,8 @@ None — this is a frontend-only shell/boot domain.
 
   | Type | `enableTime` | `noCalendar` | `dateFormat` | `altInput` | `altFormat` |
   |------|:---:|:---:|---|:---:|---|
-  | Date-only | — | — | `"Y-m-d"` | `true` | `"M j, Y"` |
-  | Datetime | `true` | — | `"Y-m-d\\TH:i"` | `true` | `"M j, Y · h:i K"` |
+  | Date-only | — | — | `"Y-m-d"` | `true` | `Util._dateFormatPref()` (default `"m/d/Y"`) |
+  | Datetime | `true` | — | `"Y-m-d\\TH:i"` | `true` | `Util._dateFormatPref()` + `Util._fpTimeAltFormat()` |
   | Time-only (hours table) | `true` | `true` | `"H:i"` | — | — |
 
   Modal pickers are **module-level, lazily initialized, and conventionally named `_fp*`** — built once behind an `if (!Module._fpX)` guard, then `Module._fpX.setDate(d, false)` (`false` suppresses `onChange`); table time inputs are built inline per row. `grep -n "flatpickr(" frontend/*.mjs` finds every instance. With `altInput: true`, existing `.value` reads keep working: the hidden original input holds the `dateFormat` value, the visible alt input shows `altFormat`.

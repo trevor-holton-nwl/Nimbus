@@ -182,6 +182,28 @@ test('Toast.show dedupe: a later call with no action clears a previous one (late
   assert.equal(el.children.length, 0, 'omitting the action on the latest call removes the existing button');
 });
 
+test('_fmtTime12 zero-pads the hour and maps midnight/noon', () => {
+  assert.equal(Util._fmtTime12(new Date(2026, 0, 5, 0, 0)), '12:00 AM');
+  assert.equal(Util._fmtTime12(new Date(2026, 0, 5, 12, 0)), '12:00 PM');
+  assert.equal(Util._fmtTime12(new Date(2026, 0, 5, 13, 5)), '01:05 PM');
+});
+
+test('_fmtTimePref honors the 12h/24h pref; fmtBlockRange follows date+time prefs', () => {
+  const d1 = new Date(2026, 4, 15, 6, 0), d2 = new Date(2026, 4, 15, 19, 30), d3 = new Date(2026, 4, 17, 6, 0);
+  try {
+    Util.setPreferenceResolver(() => undefined);
+    assert.equal(Util._fmtTimePref(d2), '07:30 PM');
+    assert.equal(Util.fmtBlockRange(d1, d2), '05/15/2026 · 06:00 AM – 07:30 PM');
+    assert.equal(Util.fmtBlockRange(d1, d3), '05/15/2026 06:00 AM → 05/17/2026 06:00 AM');
+    Util.setPreferenceResolver(key => ({ timeFormat: '24h' }[key]));
+    assert.equal(Util._fmtTimePref(d2), '19:30');
+    assert.equal(Util.fmtBlockRange(d1, d2), '05/15/2026 · 06:00 – 19:30');
+    assert.equal(Util.fmtBlockRange(d1, d3), '05/15/2026 06:00 → 05/17/2026 06:00');
+  } finally {
+    Util.setPreferenceResolver(() => undefined);
+  }
+});
+
 test('Util.setPreferenceResolver changes what _timeFormatPref/_dateFormatPref read', () => {
   Util.setPreferenceResolver(key => ({ timeFormat: '24h', dateFormat: 'd/m/Y' }[key]));
   assert.equal(Util._timeFormatPref(), '24h');
@@ -732,4 +754,68 @@ test('sapDueDate: a plant period that changes the close time on the due date cha
   } finally {
     Util.setDueCalendarResolver(null);
   }
+});
+
+/* PO/Material filter wildcards (W5) */
+const _wcTasks = [
+  { ORDER: '2040001', MATERIAL_NUMBER: 'M-A', PARENT_ORDER: '' },
+  { ORDER: '1204999', MATERIAL_NUMBER: 'M-B', PARENT_ORDER: '' },
+  { ORDER: '5550204', MATERIAL_NUMBER: 'M-C', PARENT_ORDER: '' },
+  { ORDER: '204',     MATERIAL_NUMBER: 'M-D', PARENT_ORDER: '' },
+  { ORDER: 'A-777',   MATERIAL_NUMBER: 'M-E', PARENT_ORDER: '5550204' },
+  { ORDER: '2X4Y',    MATERIAL_NUMBER: 'M-F', PARENT_ORDER: '' },
+  { ORDER: '2.4Z',    MATERIAL_NUMBER: 'M-G', PARENT_ORDER: '' },
+];
+const _wcHits = (text) => {
+  const m = Util.compilePasteMatcher(Util.parsePasteList(text));
+  return _wcTasks.filter(t => Util.taskMatchesPasteSet(t, m)).map(t => t.ORDER);
+};
+
+test('wildcard starts-with 204*', () => {
+  assert.deepEqual(_wcHits('204*'), ['2040001', '204']);
+});
+test('wildcard contains *204*', () => {
+  assert.deepEqual(_wcHits('*204*'), ['2040001', '1204999', '5550204', '204', 'A-777']);
+});
+test('wildcard ends-with *204 (also pulls sub-orders via PARENT_ORDER)', () => {
+  assert.deepEqual(_wcHits('*204'), ['5550204', '204', 'A-777']);
+});
+test('plain 204 stays an exact match', () => {
+  assert.deepEqual(_wcHits('204'), ['204']);
+});
+test('wildcard input is case-insensitive and matches material numbers', () => {
+  assert.deepEqual(_wcHits('m-*'), _wcTasks.map(t => t.ORDER));
+  assert.deepEqual(_wcHits('a-7*'), ['A-777']);
+});
+test('regex metacharacters in a wildcard token are literal', () => {
+  assert.deepEqual(_wcHits('2.4*'), ['2.4Z']);
+});
+test('bare * is ignored; exact and wildcard tokens combine', () => {
+  const m = Util.compilePasteMatcher(['*', '**', '204', '1204*']);
+  assert.equal(m.exact.size, 1);
+  assert.equal(m.patterns.length, 1);
+  assert.equal(m.size, 2);
+  assert.equal(Util.compilePasteMatcher(['*']).size, 0);
+  assert.deepEqual(_wcHits('204\n1204*'), ['1204999', '204']);
+});
+test('lone * and ** compile to an empty matcher, so no filter is active; runs of * collapse', () => {
+  for (const toks of [['*'], ['**'], ['*', '***']]) {
+    const m = Util.compilePasteMatcher(toks);
+    assert.equal(m.size, 0);
+    assert.equal(Util.taskMatchesPasteSet(_wcTasks[0], m), true, 'empty matcher = everything passes');
+  }
+  const a = Util.compilePasteMatcher(['204*']).patterns[0], b = Util.compilePasteMatcher(['204**']).patterns[0];
+  assert.equal(a.source, b.source);
+  assert.equal(Util.compilePasteMatcher(['2**4', '2*4']).patterns.length, 1);
+  assert.deepEqual(Util.countPasteMatches('**', new Set(['204'])), { matched: 0, total: 0 });
+});
+test('taskMatchesPasteSet still accepts a plain Set', () => {
+  assert.equal(Util.taskMatchesPasteSet(_wcTasks[3], new Set(['204'])), true);
+  assert.equal(Util.taskMatchesPasteSet(_wcTasks[0], new Set(['204'])), false);
+  assert.equal(Util.taskMatchesPasteSet(_wcTasks[0], new Set()), true);
+});
+test('countPasteMatches counts wildcard tokens against known ids', () => {
+  const known = new Set(['2040001', '204', 'M-A']);
+  assert.deepEqual(Util.countPasteMatches('204*\n999*\n204\nzzz', known), { matched: 2, total: 4 });
+  assert.deepEqual(Util.countPasteMatches('*', known), { matched: 0, total: 0 });
 });

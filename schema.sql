@@ -2139,3 +2139,19 @@ BEGIN
   END IF;
 END
 $mig$;
+
+-- Same-ID machine <-> SAP work center auto-link backfill (mirrors migrations/2026-10-19-1-machine-workcenter-autolink.sql).
+-- Ledger-guarded; fills only EMPTY links, never re-points one. See that file for the full rule.
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'machine_workcenter_autolink_backfill') THEN
+    UPDATE machine m SET sap_workcenter = m.machine, updated_at = NOW()
+      FROM sap_workcenter w
+     WHERE w.plant = m.plant AND w.sap_workcenter = m.machine
+       AND m.sap_workcenter IS NULL AND w.distribution_mode = 'single'
+       AND NOT EXISTS (SELECT 1 FROM machine o WHERE o.plant = m.plant AND o.sap_workcenter = w.sap_workcenter)
+       AND (SELECT count(*) FROM machine d WHERE d.plant = m.plant AND d.machine = m.machine) = 1;
+    INSERT INTO schema_migrations (id) VALUES ('machine_workcenter_autolink_backfill');
+  END IF;
+END
+$mig$;

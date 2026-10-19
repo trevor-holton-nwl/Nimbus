@@ -3060,6 +3060,16 @@ export interface components {
             /** Entries */
             entries: components["schemas"]["AuditLogEntry"][];
         };
+        /**
+         * AutoLinkedMachine
+         * @description A machine bulk_apply auto-linked to the SAP work center sharing its ID.
+         */
+        AutoLinkedMachine: {
+            /** Plant */
+            plant: string;
+            /** Machine */
+            machine: string;
+        };
         /** Body_sap_stage_upload_sap_staging_upload__object__post */
         Body_sap_stage_upload_sap_staging_upload__object__post: {
             /** File */
@@ -3125,6 +3135,11 @@ export interface components {
              * @default []
              */
             warnings: components["schemas"]["BulkWriteWarning"][];
+            /**
+             * Linked
+             * @default []
+             */
+            linked: components["schemas"]["AutoLinkedMachine"][];
         };
         /**
          * BulkUpdateResult
@@ -4076,6 +4091,11 @@ export interface components {
             weights: {
                 [key: string]: number | null;
             };
+            /**
+             * Auto Linked
+             * @default false
+             */
+            auto_linked: boolean;
         };
     };
     responses: never;

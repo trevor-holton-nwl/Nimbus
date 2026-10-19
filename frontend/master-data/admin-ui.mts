@@ -1324,11 +1324,18 @@ export const Plant = {
 
     const subTab = Plant._currentSettingsSubTab;
     const subTabVisibility = Plant._settingsSubTabVisibility(subTab);
+    const rulesHintText = Util.t('ui.settings_rules_rightclick_hint');
+    const rulesHint = subTab === 'rules'
+      ? `<span class="panel-hint settings-rules-hint" title="${Util.escapeHtml(rulesHintText)}">ⓘ ${Util.escapeHtml(rulesHintText)}</span>`
+      : '';
     pane.innerHTML = `
+        <div class="tab-strip-row settings-tab-row">
         <nav class="admin-subtabs settings-inner-tabs" role="tablist">
           <button id="settings-subtab-rules-tab" class="sub-subtab${subTab === 'rules' ? ' active' : ''}" data-settings-subtab="rules" role="tab" aria-selected="${subTab === 'rules'}" aria-controls="settings-subtab-rules">${Util.t('ui.settings_subtab_rules')}</button>
           <button id="settings-subtab-setup-tab" class="sub-subtab${subTab === 'setup' ? ' active' : ''}" data-settings-subtab="setup" role="tab" aria-selected="${subTab === 'setup'}" aria-controls="settings-subtab-setup">${Util.t('ui.settings_subtab_setup')}</button>
         </nav>
+        ${rulesHint}
+        </div>
 
       <div class="settings-content-scroll"><div class="cal-container settings-content-container">
         <div id="settings-subtab-rules" role="tabpanel" aria-labelledby="settings-subtab-rules-tab" style="display:${subTabVisibility.rules ? 'flex' : 'none'};flex-direction:column;gap:24px" ${subTabVisibility.rules ? '' : 'hidden'}>
@@ -2909,6 +2916,8 @@ interface MasterDataBulkResult {
   updated: number;
   deleted: number;
   warnings?: MasterDataBulkWarning[];
+  /** Machines the server auto-linked to the same-ID SAP work center (2026-10-19). */
+  linked?: { plant: string; machine: string }[];
 }
 
 /** A SCOPED_TABLES entry's scope filter (`_buildScopeFilterBar`/`_scopeFilter`).
@@ -4707,6 +4716,10 @@ export const MasterData = (() => {
         Util.t('toast.paste_result', { added: res.inserted, updated: res.updated }) + `, ${res.deleted} deleted`,
         'success'
       );
+      if (res.linked?.length) {
+        const names = res.linked.slice(0, 5).map((m) => m.machine).join(', ') + (res.linked.length > 5 ? ', …' : '');
+        Toast.show(Util.t('toast.machines_autolinked', { machines: names }), 'info');
+      }
       delete _cache[table];
       await _loadAndRender(table);
       // `_loadAndRender` → `_renderTable` rebuilds `#md-bulk-warnings` fresh

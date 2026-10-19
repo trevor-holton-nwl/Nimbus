@@ -1355,11 +1355,11 @@ export const AdminCockpit = {
 
     if (!AdminCockpit._fpPurgeStart) {
       AdminCockpit._fpPurgeStart = flatpickr('#admin-purge-start', {
-        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        dateFormat: 'Y-m-d', altInput: true, altFormat: Util._dateFormatPref(),
         onChange: () => AdminCockpit._updatePurgeCount(),
       });
       AdminCockpit._fpPurgeEnd = flatpickr('#admin-purge-end', {
-        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        dateFormat: 'Y-m-d', altInput: true, altFormat: Util._dateFormatPref(),
         onChange: () => AdminCockpit._updatePurgeCount(),
       });
     }

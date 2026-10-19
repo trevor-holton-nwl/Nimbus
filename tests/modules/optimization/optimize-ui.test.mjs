@@ -1763,7 +1763,8 @@ test('OQ56 a: the Remove Backlog dialog names how many orders are backlog only b
       mk('n3', { code: 'reversal_forward', detail: 'due_date_past' }),   // late for another reason: not counted
       mk('n4', null),
     ], 'unit-test');
-    await OptimizeDialog.selectPlant('NOTE-P');
+    Store.setSelectedPlant('NOTE-P', 'unit-test');
+    OptimizeDialog._buildPlantSelect();
     OptimizeDialog.selectMode('backlog');
     assert.ok(hintEl.textContent.includes(Util.t('ui.opt_backlog_runtime_grew', { count: 2 })),
       `the hint carries the run-time-grew count (2), got: ${hintEl.textContent}`);
@@ -1789,7 +1790,8 @@ test('senior review U21: the Optimize dialog refuses to run on a plant with no v
     Store._blockedPlants.clear();
     Store.setTasks([{ id: 'z1', PLANT: 'NTZ-P', MACHINE: 'NTZ-L', RUN_TIME: 2,
       start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T10:00:00') }], 'unit-test');
-    await OptimizeDialog.selectPlant('NTZ-P');
+    Store.setSelectedPlant('NTZ-P', 'unit-test');
+    OptimizeDialog._buildPlantSelect();
     const seqBefore = OptimizerPreview._runSeq;
     await OptimizeDialog.run();
     assert.equal(OptimizerPreview._runSeq, seqBefore, 'no optimizer run was started');
@@ -1997,6 +1999,38 @@ test('Task 3: OptimizeDialog.open resets Search time to Normal', async () => {
     delete globalThis.flatpickr;
     globalThis.requestAnimationFrame = priorRaf;
     fx.restore();
+  }
+});
+
+test('W4: the Optimize dialog shows the header plant read-only and closes when the header plant changes', async () => {
+  const fx = openBackgroundFixture();
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorMaster = Store.masterData;
+  const priorPlant = Store.selectedPlant;
+  try {
+    globalThis.requestAnimationFrame = () => 1;
+    globalThis.flatpickr = () => new Proxy({ selectedDates: [] }, { get: (target, key) => (key in target ? target[key] : () => {}) });
+    Store.setMasterData({ plants: [{ plant: 'SR', description: 'Sample Plant' }, { plant: 'OTHER' }] }, 'unit-test');
+    Store.setSelectedPlant('SR', 'unit-test');
+    const modal = makeSandboxElement('modal-optimize');
+    modal.hidden = true;
+    const label = makeSandboxElement('opt-plant-label');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'modal-optimize' ? modal : id === 'opt-plant-label' ? label : baseGet(id));
+    OptimizeDialog.open();
+    assert.equal(modal.hidden, false, 'the dialog opened');
+    assert.equal(label.textContent, 'SR — Sample Plant', 'the label shows the header plant, with its description');
+    assert.equal(typeof OptimizeDialog.selectPlant, 'undefined', 'the dialog no longer exposes a plant picker');
+    Store.setSelectedPlant('OTHER', 'unit-test');
+    assert.equal(modal.hidden, true, 'a header plant change closes an open dialog');
+    OptimizeDialog.open();
+    assert.equal(label.textContent, 'OTHER', 'reopened, the label follows the new header plant');
+  } finally {
+    delete globalThis.flatpickr;
+    globalThis.requestAnimationFrame = priorRaf;
+    fx.restore();
+    Store.setMasterData(priorMaster, 'unit-test');
+    if (priorPlant) Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });
 

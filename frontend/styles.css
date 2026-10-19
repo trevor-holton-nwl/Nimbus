@@ -931,7 +931,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
 }
 /* A long reason ellipsizes instead of pushing the range and the remove button out of the row. */
 #plant-blackouts-panel .plant-blk-edit .reason { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#plant-blackouts-panel .plant-blk-edit .range { flex: 0 0 auto; white-space: nowrap; }
+#plant-blackouts-panel .plant-blk-edit .range { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #plant-blackouts-panel .plant-blk-edit { overflow: hidden; }
 #plant-blackouts-panel .plant-blk-edit:hover { background: var(--bg-hover); }
 #plant-blackouts-panel .plant-blk-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -1243,6 +1243,24 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 }
 .vis-item.dist-sibling {
   box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.55) !important;
+}
+/* "Go To" target (Timeline.flashTarget): dark ink ring (light in dark mode — --fg) with a
+   --bg-elev gap so it separates from the selection blue and from a red alert outline.
+   3px total outer reach (rows have ~4px margin). Must follow .dist-sibling to win. */
+/* The pulse animates the registered --goto-a (ring opacity) rather than box-shadow itself:
+   a declaration marked !important beats keyframe values, so animating box-shadow would be
+   blocked. 1px gap + 2px ring keeps the 3px reach. */
+@property --goto-a { syntax: '<percentage>'; inherits: false; initial-value: 100%; }
+.vis-item.goto-target {
+  box-shadow: 0 0 0 1px var(--bg-elev), 0 0 0 3px color-mix(in srgb, var(--fg) var(--goto-a), transparent) !important;
+  animation: goto-target-pulse 0.5s ease-in-out 5;
+}
+@keyframes goto-target-pulse {
+  0%, 100% { --goto-a: 100%; }
+  50%      { --goto-a: 30%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vis-item.goto-target { animation: none; }
 }
 
 /* Custom vis background areas for blackout blocks */
@@ -4183,60 +4201,6 @@ body.dark .cw-active-card {
 /* =============================================================================
    OPTIMIZE DIALOG — plant scope + wheel badge
    ============================================================================= */
-.opt-plant-section { padding-bottom: 2px; }
-.opt-plant-row {
-  display: flex; align-items: center; gap: 10px;
-  flex-wrap: wrap;
-}
-
-/* Searchable plant selector */
-.opt-plant-select { position: relative; min-width: 220px; flex-shrink: 0; }
-.opt-plant-trigger {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  width: 100%; padding: 8px 12px; border-radius: var(--r-md);
-  background: var(--bg-subtle); border: 1px solid var(--line);
-  color: var(--fg); font-size: 13px; font-weight: 500; cursor: pointer;
-  transition: border-color var(--t-med), background var(--t-med);
-  text-align: left;
-}
-.opt-plant-trigger:hover,
-.opt-plant-select.open .opt-plant-trigger { border-color: var(--accent); background: var(--bg); }
-.opt-plant-trigger-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.opt-plant-trigger-arrow {
-  font-size: 11px; color: var(--fg-mute); flex-shrink: 0;
-  transition: transform var(--t-med); display: inline-block;
-}
-.opt-plant-select.open .opt-plant-trigger-arrow { transform: rotate(180deg); }
-.opt-plant-dropdown {
-  position: fixed; /* escapes overflow:hidden on .opt-modal and .opt-body */
-  /* top / left / width are set by JS in toggleDropdown() */
-  background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-md);
-  box-shadow: 0 8px 28px rgba(0,0,0,0.30); z-index: 9999;
-  overflow: hidden;
-}
-.opt-plant-search-wrap { padding: 8px; border-bottom: 1px solid var(--line); }
-.opt-plant-search {
-  width: 100%; padding: 6px 10px; border-radius: var(--r-sm, 6px);
-  background: var(--bg-subtle); border: 1px solid var(--line);
-  color: var(--fg); font-size: 12px; outline: none; box-sizing: border-box;
-}
-.opt-plant-search:focus { border-color: var(--accent); }
-.opt-plant-list {
-  list-style: none; margin: 0; padding: 4px 0;
-  max-height: 200px; overflow-y: auto;
-}
-.opt-plant-item {
-  padding: 8px 12px; font-size: 13px; cursor: pointer;
-  color: var(--fg); transition: background 80ms;
-}
-.opt-plant-item:hover { background: var(--bg-subtle); }
-.opt-plant-item.selected {
-  color: var(--accent); font-weight: 600;
-  background: rgba(var(--accent-rgb, 210,140,0), 0.08);
-}
-.opt-plant-empty { padding: 10px 12px; font-size: 12px; color: var(--fg-mute); list-style: none; }
-.opt-no-plants { font-size: 12px; color: var(--fg-mute); padding: 6px 2px; }
-
 /* Wheel badge states */
 .opt-wheel-badge {
   display: inline-flex; align-items: center; gap: 6px;
@@ -4356,20 +4320,24 @@ body.dark .cw-active-card {
   display: flex; align-items: center; gap: 8px;
   position: relative; z-index: 1; flex-shrink: 0;
 }
-.opt-header-plant .opt-plant-select { min-width: 140px; }
-.opt-header-plant .opt-plant-trigger {
-  height: 32px; padding: 0 10px;
-  background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.14);
-  color: var(--chrome-fg);
-  font-size: 12.5px;
+/* Fixed (read-only) plant display: the planner's header plant, not a control */
+.opt-plant-fixed {
+  display: flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 10px; max-width: 260px; min-width: 0;
+  border-radius: var(--r-md);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  cursor: default; user-select: text;
 }
-.opt-header-plant .opt-plant-trigger:hover,
-.opt-header-plant .opt-plant-select.open .opt-plant-trigger {
-  background: rgba(255,255,255,0.14);
-  border-color: rgba(255,255,255,0.24);
+.opt-plant-fixed-cap {
+  flex: none; font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--chrome-fg-mute);
 }
-.opt-header-plant .opt-plant-trigger-arrow { color: rgba(255,255,255,0.55); }
+.opt-plant-fixed-val {
+  min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--chrome-fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* Compact wheel badge — icon-only chip for the header */
 .opt-wheel-badge.compact {
@@ -4924,7 +4892,10 @@ body.dark .cw-active-card {
    visible while the Rules or Setup Matrix panel scrolls independently. */
 .plant-settings-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .plant-settings-pane[hidden] { display: none; }
-.settings-inner-tabs { flex: 0 0 auto; margin: 0; padding: 0 24px; border-top: 1px solid var(--border); }
+.settings-tab-row { flex: 0 0 auto; padding: 0 24px; border-top: 1px solid var(--border); }
+.settings-tab-row > .settings-inner-tabs { flex: 0 1 auto; min-width: 0; margin: 0; padding: 0; }
+.settings-rules-hint { flex: 0 1 auto; min-width: 0; margin-left: auto; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
 .settings-content-scroll { flex: 1; min-height: 0; overflow: auto; }
 .settings-content-container { padding-top: 16px; }
 

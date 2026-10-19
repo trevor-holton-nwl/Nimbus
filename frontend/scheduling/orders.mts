@@ -24,10 +24,11 @@
 // ESM cycle is safe).
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
+import type { PasteMatcher } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
-import { Engine } from '../optimization/engine.mjs';
+import { Engine, predecessorOnMachine } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
@@ -58,6 +59,9 @@ interface TableChipFilters {
   status: TableStatusFilter | null;
   dateKey: string | null;
   poMat: Set<string>;
+  // Compiled from poMat on Apply (exact ids + `*` wildcard patterns); only
+  // consulted while poMat is non-empty, so the plain clear() paths stay valid.
+  poMatMatcher: PasteMatcher | null;
 }
 
 /** Table._currentLayout()/_applySavedLayout()/_setLayoutEnabled() — the saved
@@ -214,7 +218,7 @@ export const Table = {
   // lines aliases the shared Store.selectedLines Set (same object, not a copy) —
   // the cross-screen production-line filter. See GanttFilter._selectedLines
   // for the identical convention and why it must never be reassigned.
-  _chipFilters: { lines: Store.selectedLines, colors: new Set<string>(), status: null, dateKey: null, poMat: new Set<string>() } as TableChipFilters,
+  _chipFilters: { lines: Store.selectedLines, colors: new Set<string>(), status: null, dateKey: null, poMat: new Set<string>(), poMatMatcher: null } as TableChipFilters,
   _lineSearch:       '',
   _colorSearch:      '',
   _rangeMode:        false,
@@ -768,7 +772,7 @@ export const Table = {
     const f = Table._chipFilters;
     if (f.lines.size > 0 && !f.lines.has(data.MACHINE)) return false;
     if (f.colors.size > 0 && !f.colors.has(String(data.COLOR || '').toUpperCase())) return false;
-    if (!Util.taskMatchesPasteSet(data, f.poMat)) return false;
+    if (!Util.taskMatchesPasteSet(data, f.poMat.size > 0 ? (f.poMatMatcher ?? f.poMat) : null)) return false;
     // OQ42: a day chip keeps every order whose bar overlaps that day (a bar crossing midnight shows on both days).
     if (f.dateKey && !Util.overlapsDay(data, f.dateKey)) return false;
     // C1 (2026-08-20), OD-C1d/e: gate on start only, hide (not merely block
@@ -979,7 +983,9 @@ export const Table = {
   _onPoMatApply(): void {
     const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
     if (!ta) return;
-    Table._chipFilters.poMat = new Set(Util.parsePasteList(ta.value).map(Util.norm));
+    const tokens = Util.parsePasteList(ta.value).map(Util.norm).filter(t => !/^\*+$/.test(t));   // a lone `*` filters nothing
+    Table._chipFilters.poMat = new Set(tokens);
+    Table._chipFilters.poMatMatcher = Util.compilePasteMatcher(tokens);
     const cnt = document.getElementById('tbl-flt-pomat-count');
     if (cnt) {
       const n = Table._chipFilters.poMat.size;
@@ -996,6 +1002,7 @@ export const Table = {
     (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
       const po = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER); if (po) known.add(po);
       const mat = Util.norm(task.MATERIAL_NUMBER); if (mat) known.add(mat);
+      const parent = Util.norm(task.PARENT_ORDER); if (parent) known.add(parent);
     });
     const { matched, total } = Util.countPasteMatches(text, known);
     if (total) Toast.show(Util.t('toast.paste_pomat_match', { matched, total }), matched > 0 ? 'success' : 'warn');
@@ -1723,7 +1730,7 @@ export const Table = {
 
     const rows = rel.map(a => {
       const icon  = a.sev === 'err' ? '🔴' : '🟡';
-      const date  = a.time ? a.time.toLocaleDateString('en-US', { month:'short', day:'numeric' }) : '';
+      const date  = a.time ? Util.fmtDTReadable(a.time) : '';
       return `
         <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg-subtle);margin-bottom:6px">
           <span style="flex-shrink:0;font-size:13px;margin-top:1px">${icon}</span>
@@ -2106,11 +2113,15 @@ export const Inspector = {
       ? resolveSetup({ definition, machine: task.MACHINE, predecessorState, successorState,
         predecessorOrderId: entry.predecessorOrderId ?? null, successorOrderId: id,
         plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides }) : null;
+    const scheduledPredecessor = predecessorOnMachine(task, Store.tasksByPlant(String(task.PLANT ?? task.plant ?? '') || null));
     const predecessorStateText = hasObservedEntry
       ? (Inspector._formatSetupState(predecessorState ?? null, definition) || entry.predecessorState || null)
       : null;
     return {
-      predecessorOrderId: entry.predecessorOrderId ?? null,
+      // Naming the predecessor needs no setup definition, so it comes from the
+      // schedule rather than the observation entry (which still drives state/resolve above).
+      // undefined = unknown (unscheduled / no machine); null = first on machine.
+      predecessorOrderId: scheduledPredecessor === undefined ? undefined : (scheduledPredecessor ? String(scheduledPredecessor.id) : null),
       predecessorState: predecessorStateText,
       successorOrderId: id,
       requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
@@ -2186,6 +2197,12 @@ export const Inspector = {
     const setupDetail = Inspector._setupDetailForTask(task);
     const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
     const missingSetupPlaceholder = '—';
+    const firstOnMachine = Util.t('ui.setup_first_on_machine');
+    const setupPredecessorText = setupDetail.predecessorOrderId === undefined
+      ? missingSetupPlaceholder
+      : setupDetail.predecessorOrderId
+        ? Util.orderNumber(Store.tasks[setupDetail.predecessorOrderId], setupDetail.predecessorOrderId)
+        : (firstOnMachine === 'ui.setup_first_on_machine' ? 'First on machine' : firstOnMachine);
     const setupPlant = Store.getPlantForLine(task.MACHINE) || task.PLANT || Store.selectedPlant || '';
     const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
     // Distribution card (aggregate_to_detail.md §8): only rendered for a
@@ -2322,7 +2339,7 @@ export const Inspector = {
 
       <div class="insp-card insp-setup-detail" aria-label="${Util.escapeHtml(Util.t('ui.setup_detail_title'))}">
         <h4>${Util.escapeHtml(Util.t('ui.setup_detail_title'))}</h4>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorOrderId || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${Util.escapeHtml(setupPredecessorText)}</div></div>
         <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
         <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
         <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
@@ -2730,11 +2747,11 @@ export const Printer = {
     }
     if (!Printer._fpStart) {
       Printer._fpStart = flatpickr('#print-start', {
-        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        dateFormat: 'Y-m-d', altInput: true, altFormat: Util._dateFormatPref(),
         altInputClass: 'input', onChange() { Printer.preview(); }
       });
       Printer._fpEnd = flatpickr('#print-end', {
-        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        dateFormat: 'Y-m-d', altInput: true, altFormat: Util._dateFormatPref(),
         altInputClass: 'input', onChange() { Printer.preview(); }
       });
     }
@@ -2799,11 +2816,7 @@ export const Printer = {
       return;
     }
 
-    const pad2 = (n: number) => String(n).padStart(2, '0');
-    const fmtDt = (d: Date | null) => {
-      if (!d) return '—';
-      return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-    };
+    const fmtDt = (d: Date | null) => (d ? Util.fmtDTReadable(d) : '—');
 
     const MAX_PRINT_ROWS = 500;
     const printRows = rows.length > MAX_PRINT_ROWS ? rows.slice(0, MAX_PRINT_ROWS) : rows;
