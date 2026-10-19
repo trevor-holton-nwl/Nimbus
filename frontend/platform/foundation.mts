@@ -1016,7 +1016,7 @@ export const Util = {
     const patterns: RegExp[] = [];
     const seen = new Set<string>();
     for (const raw of tokens) {
-      const t = Util.norm(raw);
+      const t = Util.norm(raw).replace(/\*+/g, '*');   // `20**4` behaves like `20*4`
       if (!t) continue;
       if (t.indexOf('*') === -1) { exact.add(t); continue; }
       if (/^\*+$/.test(t)) continue;

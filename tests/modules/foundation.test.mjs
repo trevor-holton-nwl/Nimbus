@@ -798,6 +798,17 @@ test('bare * is ignored; exact and wildcard tokens combine', () => {
   assert.equal(Util.compilePasteMatcher(['*']).size, 0);
   assert.deepEqual(_wcHits('204\n1204*'), ['1204999', '204']);
 });
+test('lone * and ** compile to an empty matcher, so no filter is active; runs of * collapse', () => {
+  for (const toks of [['*'], ['**'], ['*', '***']]) {
+    const m = Util.compilePasteMatcher(toks);
+    assert.equal(m.size, 0);
+    assert.equal(Util.taskMatchesPasteSet(_wcTasks[0], m), true, 'empty matcher = everything passes');
+  }
+  const a = Util.compilePasteMatcher(['204*']).patterns[0], b = Util.compilePasteMatcher(['204**']).patterns[0];
+  assert.equal(a.source, b.source);
+  assert.equal(Util.compilePasteMatcher(['2**4', '2*4']).patterns.length, 1);
+  assert.deepEqual(Util.countPasteMatches('**', new Set(['204'])), { matched: 0, total: 0 });
+});
 test('taskMatchesPasteSet still accepts a plain Set', () => {
   assert.equal(Util.taskMatchesPasteSet(_wcTasks[3], new Set(['204'])), true);
   assert.equal(Util.taskMatchesPasteSet(_wcTasks[0], new Set(['204'])), false);

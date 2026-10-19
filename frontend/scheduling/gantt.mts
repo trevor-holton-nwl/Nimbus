@@ -3336,7 +3336,7 @@ export const GanttFilter = {
   _onPoMatApply(): void {
     const ta = document.getElementById('gantt-pomat-textarea') as HTMLTextAreaElement | null;
     if (!ta) return;
-    const tokens = Util.parsePasteList(ta.value).map(Util.norm);
+    const tokens = Util.parsePasteList(ta.value).map(Util.norm).filter(t => !/^\*+$/.test(t));   // a lone `*` filters nothing
     GanttFilter._pastedIds = new Set(tokens);
     GanttFilter._pastedMatcher = Util.compilePasteMatcher(tokens);
     const cnt = document.getElementById('gantt-pomat-count');

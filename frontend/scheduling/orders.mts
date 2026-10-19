@@ -983,7 +983,7 @@ export const Table = {
   _onPoMatApply(): void {
     const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
     if (!ta) return;
-    const tokens = Util.parsePasteList(ta.value).map(Util.norm);
+    const tokens = Util.parsePasteList(ta.value).map(Util.norm).filter(t => !/^\*+$/.test(t));   // a lone `*` filters nothing
     Table._chipFilters.poMat = new Set(tokens);
     Table._chipFilters.poMatMatcher = Util.compilePasteMatcher(tokens);
     const cnt = document.getElementById('tbl-flt-pomat-count');
