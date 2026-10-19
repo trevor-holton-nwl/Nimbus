@@ -807,7 +807,7 @@ export const Timeline = {
       const cur = Timeline._gotoFlash;
       Timeline._gotoFlash = null;
       if (cur) Timeline._setGotoClass(cur.taskId, false);
-    }, Timeline.GOTO_FLASH_MS);
+    }, Timeline.GOTO_FLASH_MS + 100);   // +100ms so the last pulse completes before the class is stripped
   },
   GOTO_FLASH_MS: 2500,
 

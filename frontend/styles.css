@@ -1247,13 +1247,17 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 /* "Go To" target (Timeline.flashTarget): dark ink ring (light in dark mode — --fg) with a
    --bg-elev gap so it separates from the selection blue and from a red alert outline.
    3px total outer reach (rows have ~4px margin). Must follow .dist-sibling to win. */
+/* The pulse animates the registered --goto-a (ring opacity) rather than box-shadow itself:
+   a declaration marked !important beats keyframe values, so animating box-shadow would be
+   blocked. 1px gap + 2px ring keeps the 3px reach. */
+@property --goto-a { syntax: '<percentage>'; inherits: false; initial-value: 100%; }
 .vis-item.goto-target {
-  box-shadow: 0 0 0 2px var(--bg-elev), 0 0 0 3px var(--fg) !important;
+  box-shadow: 0 0 0 1px var(--bg-elev), 0 0 0 3px color-mix(in srgb, var(--fg) var(--goto-a), transparent) !important;
   animation: goto-target-pulse 0.5s ease-in-out 5;
 }
 @keyframes goto-target-pulse {
-  0%, 100% { box-shadow: 0 0 0 2px var(--bg-elev), 0 0 0 3px var(--fg); }
-  50%      { box-shadow: 0 0 0 2px var(--bg-elev), 0 0 0 3px color-mix(in srgb, var(--fg) 30%, transparent); }
+  0%, 100% { --goto-a: 100%; }
+  50%      { --goto-a: 30%; }
 }
 @media (prefers-reduced-motion: reduce) {
   .vis-item.goto-target { animation: none; }

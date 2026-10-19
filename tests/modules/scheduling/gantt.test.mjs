@@ -334,7 +334,7 @@ test('Timeline.flashTarget: goto-target rides _itemForTask/_itemsForTask for eve
   Timeline._gotoFlash.until = Date.now() - 1;
   assert.doesNotMatch(Timeline._itemForTask(task).className, /goto-target/);
   Timeline._gotoFlash.until = Date.now() + 1000;
-  await new Promise(r => setTimeout(r, Timeline.GOTO_FLASH_MS + 100));
+  await new Promise(r => setTimeout(r, Timeline.GOTO_FLASH_MS + 300));
   assert.equal(Timeline._gotoFlash, null);
   assert.ok(ids.every(id => !/goto-target/.test(rows.get(id).className)), 'timer strips the class');
 });
