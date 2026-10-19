@@ -207,3 +207,21 @@ test('buildBlackoutMarks: caps at 60 clusters and counts the rest', () => {
   assert.deepEqual(marks[0].ids, ['b0'], 'the earliest clusters are the ones kept');
   assert.deepEqual(buildBlackoutMarks(axis, []), { marks: [], truncated: 0 });
 });
+
+test('buildBlackoutMarks: over the cap with todayKey keeps clusters nearest today forward, drops oldest past', () => {
+  const axis = { axisStartKey: '2026-01-01', axisEndKey: '2026-12-31' };
+  const items = [];
+  for (let i = 0; i < 70; i++) { const k = addDaysKey('2026-01-01', i * 4); items.push(blk('b' + i, k, k)); }
+  // today = day 40 (b10 sits exactly on it): 60 ahead (b10..b69) fit, so every past cluster drops.
+  const r1 = buildBlackoutMarks(axis, items, addDaysKey('2026-01-01', 40));
+  assert.equal(r1.marks.length, 60);
+  assert.equal(r1.truncated, 10);
+  assert.deepEqual(r1.marks[0].ids, ['b10']);
+  // today = day 100 (b25): 45 ahead (b25..b69) + the 15 most recent past (b10..b24); time-sorted.
+  const r2 = buildBlackoutMarks(axis, items, addDaysKey('2026-01-01', 100));
+  assert.equal(r2.marks.length, 60);
+  assert.equal(r2.truncated, 10);
+  assert.deepEqual(r2.marks.map(m => m.ids[0]), items.slice(10).map(i => i.id));
+  // Under the cap, todayKey changes nothing.
+  assert.equal(buildBlackoutMarks(axis, items.slice(0, 5), '2026-06-01').marks.length, 5);
+});

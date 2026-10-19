@@ -72,7 +72,7 @@ interface PlantBlockLike { id: string; plant?: string; start: unknown; end: unkn
 
 /** The blackout lane: one marker per run of touching blackouts, drawn outside .period-track so it never
  *  covers a period segment or the today line. `html` is empty when the plant has nothing in the window. */
-function _blackoutLaneHtml(plant: string, strip: PeriodStrip): { html: string; count: number; truncated: number } {
+function _blackoutLaneHtml(plant: string, strip: PeriodStrip, todayKey: string): { html: string; count: number; truncated: number } {
   const byId = new Map<string, { b: PlantBlockLike; s: Date; e: Date }>();
   const items: BlackoutItem[] = [];
   for (const raw of Store.plantBlocks as PlantBlockLike[]) {
@@ -83,7 +83,7 @@ function _blackoutLaneHtml(plant: string, strip: PeriodStrip): { html: string; c
     // End is exclusive: the last blocked day is the one containing end - 1 ms.
     items.push({ id: raw.id, fromKey: Util.dayKey(s), toKey: Util.dayKey(new Date(e.getTime() - 1)) });
   }
-  const { marks, truncated } = buildBlackoutMarks(strip, items);
+  const { marks, truncated } = buildBlackoutMarks(strip, items, todayKey);
   if (!marks.length) return { html: '', count: 0, truncated };
   const reasonOf = (b: PlantBlockLike) => b.reason || Util.t('ui.plant_blackout_default');
   const btns = marks.map(m => {
@@ -118,7 +118,7 @@ function _stripHtml(periods: PlantPeriod[], todayKey: string, plant: string, str
     return `<button type="button" class="${cls}" data-action="edit-period" data-id="${Util.escapeHtml(s.id)}" style="left:${s.leftPct.toFixed(3)}%;width:${s.widthPct.toFixed(3)}%" title="${title}"><span class="period-seg-label">${Util.escapeHtml(s.name)}</span></button>`;
   }).join('');
   const today = strip.today.leftPct.toFixed(3);
-  const lane = _blackoutLaneHtml(plant, strip);
+  const lane = _blackoutLaneHtml(plant, strip, todayKey);
   const legend = [
     `<span>${Util.escapeHtml(Util.t('ui.default_week_legend'))}</span>`,
     lane.count ? `<span class="period-legend-blk"><i class="period-legend-sw" aria-hidden="true"></i>${Util.escapeHtml(Util.t('ui.blackout_legend'))}</span>` : '',

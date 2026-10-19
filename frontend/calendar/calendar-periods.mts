@@ -231,7 +231,7 @@ export function buildPeriodStrip(periods: PlantPeriod[], todayKey: string, opts:
  *  (dropped when wholly outside), then items that overlap or sit on adjacent days merge into one
  *  cluster so dense holiday runs stay readable. Only the first MAX_BLACKOUT_MARKS clusters in time
  *  order are returned; `truncated` counts the rest. Keys are inclusive 'YYYY-MM-DD' day keys. */
-export function buildBlackoutMarks(strip: Pick<PeriodStrip, 'axisStartKey' | 'axisEndKey'>, items: BlackoutItem[]): BlackoutMarks {
+export function buildBlackoutMarks(strip: Pick<PeriodStrip, 'axisStartKey' | 'axisEndKey'>, items: BlackoutItem[], todayKey?: string): BlackoutMarks {
   const startIdx = dayIndex(strip.axisStartKey);
   const endIdx = dayIndex(strip.axisEndKey);
   const total = endIdx - startIdx + 1;
@@ -254,7 +254,19 @@ export function buildBlackoutMarks(strip: Pick<PeriodStrip, 'axisStartKey' | 'ax
       clusters.push({ ids: [c.id], from: c.from, to: c.to });
     }
   }
-  const marks: BlackoutMark[] = clusters.slice(0, MAX_BLACKOUT_MARKS).map(c => ({
+  let kept = clusters;
+  if (clusters.length > MAX_BLACKOUT_MARKS) {
+    if (todayKey) {
+      const todayIdx = dayIndex(todayKey);
+      const ahead = clusters.filter(c => c.to >= todayIdx).slice(0, MAX_BLACKOUT_MARKS);
+      const past = clusters.filter(c => c.to < todayIdx);
+      const room = MAX_BLACKOUT_MARKS - ahead.length;
+      kept = [...past.slice(Math.max(0, past.length - room)), ...ahead];
+    } else {
+      kept = clusters.slice(0, MAX_BLACKOUT_MARKS);
+    }
+  }
+  const marks: BlackoutMark[] = kept.map(c => ({
     ids: c.ids,
     fromKey: keyFromIndex(c.from),
     toKey: keyFromIndex(c.to),

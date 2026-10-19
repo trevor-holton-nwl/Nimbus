@@ -1091,6 +1091,17 @@ def test_plant_blackouts_write_maps_blank_plant_to_400_not_500(blackout_planner_
     assert calls == []
 
 
+def test_plant_blackouts_write_maps_non_string_plant_to_400_not_500(blackout_planner_client, monkeypatch):
+    import master_data as md
+    calls = []
+    monkeypatch.setattr(md, "save_plant_blackouts", lambda *a, **k: calls.append(1))
+    for bad in (5, [PLANT_A], {"a": 1}, None):
+        response = blackout_planner_client.post("/plant-calendar/plant-blackouts",
+                                                json={"plant": bad, **_BLACKOUT_BODY})
+        assert response.status_code == 400, bad
+    assert calls == []
+
+
 def test_plant_blackouts_write_requires_authentication(monkeypatch):
     import master_data as md
     calls = []

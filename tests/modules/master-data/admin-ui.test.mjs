@@ -1575,13 +1575,13 @@ test('Plant.savePlantBlockFromModal edit of a vanished block makes no POST and d
   } finally { h.restore(); }
 });
 
-test('Plant._renderBlocks applies the collapse state before the empty-state return', () => {
+test('Plant._renderBlocks shows the empty-state message even when collapsed', () => {
   const h = _blockModalHarness([]);
   try {
     Plant._blocksCollapsed = true;
     Plant._renderBlocks();
     assert.match(h.els['plant-blocks-list'].innerHTML, /empty-state/);
-    assert.equal(h.els['plant-blocks-list'].style.display, 'none');
+    assert.equal(h.els['plant-blocks-list'].style.display, '', 'an empty list has no chevron, so collapse never hides its message');
     Plant._blocksCollapsed = false;
     Plant._renderBlocks();
     assert.equal(h.els['plant-blocks-list'].style.display, '', 'expanding re-shows the empty-state message');
@@ -1593,7 +1593,7 @@ test('Plant._renderBlocks renders each row as an edit button plus a remove butto
   const h = _blockModalHarness([_blk('pb1')]);
   try {
     Plant._renderBlocks();
-    assert.match(h.els['plant-blocks-list'].innerHTML, /<button type="button" class="plant-blk-edit" data-block-id="pb1">/);
+    assert.match(h.els['plant-blocks-list'].innerHTML, /<button type="button" class="plant-blk-edit" data-block-id="pb1" title="Holiday · [^"]+">/);
     assert.match(h.els['plant-blocks-list'].innerHTML, /plant-blk-remove/);
     assert.equal(h.els['plant-blocks-list'].style.display, '');
   } finally { h.restore(); }
@@ -1673,4 +1673,40 @@ test('timeline delegated click: a single marker opens the blackout editor, a clu
     if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
     if (priorWindow === undefined) delete globalThis.window; else globalThis.window = priorWindow;
   }
+});
+
+test('Plant.savePlantBlockFromModal: an untouched Save of a legacy row (seconds, blank reason) writes nothing', () => {
+  const legacy = { id: 'pbL', plant: '1006', reason: '', start: new Date('2026-12-24T00:00:30'), end: new Date('2026-12-26T00:00:45') };
+  const h = _blockModalHarness([legacy]);
+  try {
+    Plant.openBlockModal('pbL');
+    // The picker shows minutes only, so the form holds the stored instants cut to the minute.
+    h.els['plant-blk-start'].value = '2026-12-24T00:00:00';
+    h.els['plant-blk-end'].value = '2026-12-26T00:00:00';
+    h.els['plant-blk-reason'].value = '';
+    Plant.savePlantBlockFromModal();
+    assert.equal(h.log.posts.length, 0, 'untouched form must not rewrite the row');
+    assert.equal(Store.plantBlocks[0].reason, '');
+    assert.deepEqual(h.log.closed, ['modal-plant-block']);
+    // A real edit of the same row still writes.
+    Plant.openBlockModal('pbL');
+    h.els['plant-blk-start'].value = '2026-12-24T00:00:00';
+    h.els['plant-blk-end'].value = '2026-12-26T00:00:00';
+    h.els['plant-blk-reason'].value = 'Shutdown';
+    Plant.savePlantBlockFromModal();
+    assert.equal(h.log.posts.length, 1);
+  } finally { h.restore(); }
+});
+
+test('Plant._renderBlocks: a collapsed list that becomes empty shows its empty message (no chevron to reopen it)', () => {
+  const h = _blockModalHarness([_blk('pb1')]);
+  try {
+    Plant._blocksCollapsed = true;
+    Plant._renderBlocks();
+    assert.equal(h.els['plant-blocks-list'].style.display, 'none', 'collapsed with a row stays hidden');
+    Store.replacePlantBlocks([], 'test');
+    Plant._renderBlocks();
+    assert.equal(h.els['plant-blocks-list'].style.display, '');
+    assert.match(h.els['plant-blocks-list'].innerHTML, /empty-state/);
+  } finally { h.restore(); }
 });

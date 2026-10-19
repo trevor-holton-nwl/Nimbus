@@ -654,7 +654,8 @@ export const Plant = {
     }
 
     // Applied before the empty-state return too, so the collapse state hides (or shows) it consistently.
-    list.style.display = Plant._blocksCollapsed ? 'none' : '';
+    // An empty list has no chevron to reopen it, so it always shows its empty message.
+    list.style.display = (Plant._blocksCollapsed && blocks.length) ? 'none' : '';
     if (!blocks.length) {
       list.innerHTML = `<div class="empty-state">${Util.t('empty.no_plant_blackouts')}</div>`;
       return;
@@ -663,7 +664,7 @@ export const Plant = {
     // Clicks are handled by the delegated listener on #plant-blocks-list (_wireStaticHandlers).
     list.innerHTML = blocks.map(b => `
       <div class="block-row" style="padding-left:6px;padding-right:6px;">
-        <button type="button" class="plant-blk-edit" data-block-id="${Util.escapeHtml(b.id)}">
+        <button type="button" class="plant-blk-edit" data-block-id="${Util.escapeHtml(b.id)}" title="${Util.escapeHtml(`${b.reason || Util.t('ui.plant_blackout_default')} · ${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}`)}">
           <span class="ico">■</span>
           <span class="reason">${Util.escapeHtml(b.reason) || Util.t('ui.blackouts_label', {plural: ''})}</span>
           <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
@@ -805,7 +806,8 @@ export const Plant = {
 
     const start  = Util.parseDate(startEl.value);
     const end    = Util.parseDate(endEl.value);
-    const reason = reasonEl.value.trim() || Util.t('ui.plant_blackout_default');
+    const rawReason = reasonEl.value.trim();
+    const reason = rawReason || Util.t('ui.plant_blackout_default');
     if (!start || !end) { Toast.show(Util.t('toast.please_set_start_end'), 'error'); return; }
     if (end <= start)   { Toast.show(Util.t('toast.end_must_be_after_start'), 'error'); return; }
     if (!Store.selectedPlant) { Toast.show(Util.t('toast.select_plant_first'), 'warn'); return; }
@@ -821,8 +823,15 @@ export const Plant = {
         Toast.show(Util.t('toast.plant_blackout_gone'), 'warn');
         return;
       }
-      const unchanged = Util.parseDate(cur.start)?.getTime() === start.getTime() &&
-        Util.parseDate(cur.end)?.getTime() === end.getTime() && (cur.reason || '') === reason;
+      // "Untouched" means the form still holds what openBlockModal prefilled: the stored instants cut to the
+      // minute the picker shows, and the stored reason as typed (blank stays blank, not the default text).
+      // Comparing the saved row itself would rewrite a legacy row (seconds, blank reason) on a plain Save.
+      const sameInstant = (stored: unknown, formed: Date): boolean => {
+        const t = Util.parseDate(stored)?.getTime();
+        return t !== undefined && (t === formed.getTime() || Math.floor(t / 60000) * 60000 === formed.getTime());
+      };
+      const unchanged = sameInstant(cur.start, start) && sameInstant(cur.end, end) &&
+        (cur.reason || '').trim() === rawReason;
       if (!unchanged) {
         // The Store refuses an edit that equals another blackout; say so and keep the form open for a fix.
         const dup = Store.plantBlocks.some(b => b.id !== editId && b.plant === plant &&

@@ -910,6 +910,10 @@ textarea { min-height: 60px; padding: 7px 10px; }
   margin: 0; padding: 0; border: 0; border-radius: 3px; background: none;
   font: inherit; color: inherit; text-align: left; cursor: pointer;
 }
+/* A long reason ellipsizes instead of pushing the range and the remove button out of the row. */
+#plant-blackouts-panel .plant-blk-edit .reason { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#plant-blackouts-panel .plant-blk-edit .range { flex: 0 0 auto; white-space: nowrap; }
+#plant-blackouts-panel .plant-blk-edit { overflow: hidden; }
 #plant-blackouts-panel .plant-blk-edit:hover { background: var(--bg-hover); }
 #plant-blackouts-panel .plant-blk-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .plant-blk-stats {
@@ -4936,6 +4940,18 @@ body.dark .cw-active-card {
   #plant-hours-body .lhp-time { line-height: 1.25; }
   #plant-hours-body .lhp-time > span { display: block; }
 }
+/* Very narrow panel (about 320px window: ~40px day cells): shrink the time text and the pill gutters
+   so "12:30pm" fits, with clipping as a last guard so it never bleeds into the next day. */
+#plant-hours-body .lhp-time > span { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
+@container (max-width: 480px) {
+  #plant-hours-body .line-hours-pill { padding-left: 3px; padding-right: 3px; }
+  #plant-hours-body .lhp-time { font-size: 11px; }
+  #plant-hours-body .lhp-time > span { display: block; }
+}
+@container (max-width: 360px) {
+  #plant-hours-body .line-hours-pill { padding-left: 2px; padding-right: 2px; }
+  #plant-hours-body .lhp-time { font-size: 10px; }
+}
 #plant-tab-calendar .plant-no-sel { padding: 16px 18px; margin: 0; font-size: 12.5px; color: var(--fg-faint); }
 
 /* Status badge for an in-force period / a finished one (info reuses .badge-info). */
@@ -5046,7 +5062,8 @@ body.dark .period-seg-active { color: var(--bg); }
   position: absolute; top: 0; bottom: 0; min-width: 3px; padding: 0;
   border: 0; border-radius: 1px; background: var(--err); cursor: pointer;
 }
-.period-blk::before { content: ""; position: absolute; inset: -5px -2px; }
+/* Top inset = the lane margin-top (3px), so the hit area ends at the track bottom border and never covers a period segment. */
+.period-blk::before { content: ""; position: absolute; inset: -3px -2px -5px; }
 .period-blk:hover { box-shadow: 0 0 0 1px var(--err); }
 .period-blk:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Legend under the today row: wraps instead of overflowing, so it holds at 320px. */

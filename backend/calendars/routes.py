@@ -106,6 +106,8 @@ def plant_calendar_plant_blackouts_post(request: Request, body: dict = Body(defa
     { plant, upserts:[{id, start, end, reason?}], deletes?:[id] }.
     Planner-writable (any signed-in user whose role_plants scope covers the
     plant); line blackouts, hours and periods stay admin-only."""
+    if not isinstance(body.get("plant", ""), str):
+        raise HTTPException(status_code=400, detail="plant must be a string")
     _calendar_plant_guard(body.get("plant", ""), allowed_plants)
     try:
         result = md.save_plant_blackouts(
