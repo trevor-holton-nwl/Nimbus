@@ -1934,3 +1934,122 @@ test('Plant roster flags cell marks only the machine with its own hours', () => 
   assert.ok(!a1.includes('ui.custom_hours'));
   assert.ok(a2.includes('ui.custom_hours'));
 }));
+
+// Part B (2026-10-19): Machines-pane SAP Work Center / weight sync.
+test('Store.applyMasterLinesToSettings copies sap_workcenter and distribution_weight (and clears them)', () => {
+  const priorMasterData = Store.masterData;
+  const prior = structuredClone(Store.lineSettings);
+  try {
+    Store.setMasterData({ plants: [], workcenters: [], lines: [
+      { machine: 'ZB1', plant: 'ZBP', sap_workcenter: 'ZB1', distribution_weight: 0.5, excl_optimizer: 'X' },
+      { machine: 'ZB2', plant: 'ZBP', sap_workcenter: null, distribution_weight: null },
+    ] }, 'test');
+    assert.equal(Store.applyMasterLinesToSettings(), 2);
+    assert.equal(Store.lineSettings.ZB1.sapWorkcenter, 'ZB1');
+    assert.equal(Store.lineSettings.ZB1.distributionWeight, 0.5);
+    assert.equal(Store.lineSettings.ZB1.excludeFromOpt, true);
+    assert.equal(Store.lineSettings.ZB2.sapWorkcenter, null);
+    assert.equal(Store.lineSettings.ZB2.distributionWeight, null);
+    assert.equal(Store.applyMasterLinesToSettings(), 0, 'idempotent: nothing changed the second time');
+    Store.masterData.lines[1].sap_workcenter = '';
+    Store.masterData.lines[0].sap_workcenter = null;
+    Store.applyMasterLinesToSettings();
+    assert.equal(Store.lineSettings.ZB1.sapWorkcenter, null);
+  } finally {
+    for (const k of Object.keys(Store.lineSettings)) delete Store.lineSettings[k];
+    Object.assign(Store.lineSettings, prior);
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
+test('a Machines-pane write patches Store.masterData.lines so a following master-data-changed keeps the edit', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const prior = structuredClone(Store.lineSettings);
+  const priorFetch = Util.fetchTraced;
+  const priorToast = Toast.show;
+  const priorDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Toast.show = () => {};
+  const keyed = { subnetwork: 'S', plant: 'ZBP', machine: 'ZB3', sap_workcenter: null };
+  Util.fetchTraced = (url, opts) => {
+    if (opts?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({ inserted: 0, updated: 1, deleted: 0 }) });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ columns: [], rows: [{ ...keyed }] }) });
+  };
+  try {
+    Store.setSelectedPlant('ZBP', 'test');
+    Store.setMasterData({ plants: [], workcenters: [], lines: [{ ...keyed }] }, 'test');
+    Store.applyMasterLinesToSettings();
+    await MasterData.syncLineSettings('ZB3', { sapWorkcenter: 'WC-X' });
+    assert.equal(Store.masterData.lines[0].sap_workcenter, 'WC-X', 'cache row patched');
+    Store.setLineSetting('ZB3', { sapWorkcenter: 'WC-X' }, 'test');
+    Store.applyMasterLinesToSettings(); // what app.js does on master-data-changed
+    assert.equal(Store.lineSettings.ZB3.sapWorkcenter, 'WC-X');
+  } finally {
+    Util.fetchTraced = priorFetch;
+    Toast.show = priorToast;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    for (const k of Object.keys(Store.lineSettings)) delete Store.lineSettings[k];
+    Object.assign(Store.lineSettings, prior);
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
+});
+
+test('WorkCenters._write patches _machines (weights, auto_linked) and re-pulls the machine rows into the Store', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorIsAdmin = Session.isAdmin;
+  const priorRecompute = Alerts.scheduleRecompute;
+  const priorDocument = globalThis.document;
+  const priorCSS = globalThis.CSS;
+  const priorRows = WorkCenters._rows;
+  const priorMachines = WorkCenters._machines;
+  const priorSelected = WorkCenters._selected;
+  const priorLoadedPlant = WorkCenters._loadedPlant;
+  const urls = [];
+  Session.isAdmin = () => true;
+  Alerts.scheduleRecompute = () => {};
+  globalThis.document = { querySelector: () => null, getElementById: () => null };
+  globalThis.CSS = { escape: (s) => s };
+  Util.fetchTraced = (url, opts) => {
+    urls.push(`${opts?.method || 'GET'} ${url}`);
+    if (opts?.method === 'PUT') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        description: null, distribution_mode: 'single', default_machine: null, max_separation: 'none',
+        review_required: true, distribute_tooled: false, weights: { "WC-N": 3 }, auto_linked: true,
+      }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [{ plant: 'ZBP', machine: 'WC-N', sap_workcenter: 'WC-N', distribution_weight: 3 }] }) });
+  };
+  try {
+    WorkCenters._rows = [];
+    WorkCenters._selected = null;
+    WorkCenters._loadedPlant = null;
+    WorkCenters._machines = [{ plant: 'ZBP', machine: 'WC-N', sap_workcenter: null, distribution_weight: null }];
+    Store.setSelectedPlant('ZBP', 'test');
+    Store.setMasterData({ plants: [], workcenters: [], lines: [] }, 'test');
+    await WorkCenters._write('ZBP', 'WC-N', {
+      description: null, distribution_mode: 'single', default_machine: null, max_separation: 'none',
+      review_required: true, distribute_tooled: false, weights: { 'WC-N': 3 },
+    }, ['WC-N'], WorkCenters._editSeq);
+    assert.equal(WorkCenters._machines[0].sap_workcenter, 'WC-N', 'auto_linked patches the pane machine');
+    assert.equal(WorkCenters._machines[0].distribution_weight, 3);
+    assert.ok(urls.some((u) => u.startsWith('GET') && u.includes('/master-data/machine?plant=ZBP')), `machine rows re-pulled: ${urls}`);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(Store.masterData.lines[0]?.distribution_weight, 3, 'the weight reaches Store.masterData.lines');
+  } finally {
+    Session.isAdmin = priorIsAdmin;
+    Alerts.scheduleRecompute = priorRecompute;
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    if (priorCSS === undefined) delete globalThis.CSS; else globalThis.CSS = priorCSS;
+    WorkCenters._rows = priorRows;
+    WorkCenters._machines = priorMachines;
+    WorkCenters._selected = priorSelected;
+    WorkCenters._loadedPlant = priorLoadedPlant;
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
+});

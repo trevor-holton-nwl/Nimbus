@@ -695,6 +695,36 @@ export const Store = {
       distributionWeight: null,
     };
   },
+  /** Copy the master `machine` rows (`masterData.lines`) into `lineSettings` with direct writes
+   *  (no per-line emit — the caller coalesces one 'lineSettings:change' and rebuilds the plant
+   *  index when this returns > 0). Moved out of app.js's master-data-changed subscriber so it is
+   *  typechecked and testable; also carries sap_workcenter + distribution_weight, which the
+   *  Machines pane reads. Returns how many lines changed. */
+  applyMasterLinesToSettings(): number {
+    const mdLines = (this._state.masterData?.lines ?? []) as unknown as Array<Record<string, unknown>>;
+    let touched = 0;
+    for (const row of mdLines) {
+      const line = row.machine as string | undefined;
+      if (!line) continue;
+      this.ensureLineSettings(line);
+      const ls = this._state.lineSettings[line];
+      const before = JSON.stringify(ls);
+      ls.excludeFromOpt = row.excl_optimizer === 'X';
+      ls.bottleneck     = row.bottleneck === 'X';
+      if (row.buffer_type === '%')        ls.bufferUnit = 'pct';
+      else if (row.buffer_type === 'hrs') ls.bufferUnit = 'hours';
+      if (row.buffer_percent != null && row.buffer_percent !== '')
+        ls.bufferPct = parseFloat(String(row.buffer_percent)) || 0;
+      if (row.buffer_hours != null && row.buffer_hours !== '')
+        ls.bufferHours = parseFloat(String(row.buffer_hours)) || 0;
+      ls.plGroup = (row.wc_group as string) || '';
+      ls.plant   = (row.plant as string) || null;
+      ls.sapWorkcenter = (row.sap_workcenter as string) || null;
+      ls.distributionWeight = (row.distribution_weight as number | null | undefined) ?? null;
+      if (JSON.stringify(ls) !== before) touched++;
+    }
+    return touched;
+  },
   setLineSetting(line: string, patch: Partial<NimbusLineSetting>, source?: string): void {
     this.ensureLineSettings(line);
     Object.assign(this._state.lineSettings[line], patch);

@@ -2997,6 +2997,8 @@ interface WorkCenterSaveResult {
   review_required: boolean;
   distribute_tooled: boolean;
   weights: Record<string, number | null>;
+  /** True when this save auto-linked the same-named machine (creation only). */
+  auto_linked?: boolean;
 }
 
 /** The Work Centers tab's client-side staged-edit buffer for the currently
@@ -5037,14 +5039,24 @@ export const MasterData = (() => {
     state.dirty.delete(_rowKey('machine', updatedRow));
 
     try {
-      await Util.fetchTraced(`${API}/master-data/machine/bulk`, {
+      const res = await Util.fetchTraced(`${API}/master-data/machine/bulk`, {
         method:  'POST',
         headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ upserts: [upsertRow], deletes: [] }),
       }).then((r) => {
         if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
-        return r.json();
+        return r.json() as Promise<MasterDataBulkResult>;
       });
+      // Patch the Store cache with what was just written (no emit): a later
+      // 'master-data-changed' re-applies Store.masterData.lines onto lineSettings and
+      // would otherwise revert this edit from a stale row.
+      const cachedRow = (Store.masterData?.lines ?? []).find((r) => r.machine === line && r.plant === plant);
+      if (cachedRow) Object.assign(cachedRow, changed);
+      if (res?.linked?.length) {
+        const names = res.linked.slice(0, 5).map((m) => m.machine).join(', ') + (res.linked.length > 5 ? ', …' : '');
+        Toast.show(Util.t('toast.machines_autolinked', { machines: names }), 'info');
+        void refreshStoreMasterData('line-settings', 'machine');
+      }
       if (_activeTable === 'machine') _renderTable('machine');
     } catch (e) {
       ErrorLog.error('prod-lines', `Failed to save line setting: ${(e as Error).message}`);
@@ -6054,6 +6066,16 @@ export const WorkCenters = {
       for (const m of members) {
         const mach = WorkCenters._machines.find((x) => x.machine === m);
         if (mach) mach.distribution_weight = res.weights[m] ?? null;
+      }
+      // A creating save may have auto-linked the same-named machine server-side: show it here
+      // and re-pull the Store's machine rows (the Machines pane reads them) — this also
+      // repairs stale weights, not only auto-links. Selected plant only, like every Store slice.
+      if (plant === Store.selectedPlant) {
+        if (res.auto_linked) {
+          const linked = WorkCenters._machines.find((x) => x.machine === code);
+          if (linked) linked.sap_workcenter = code;
+        }
+        void refreshStoreMasterData('work-centers', 'machine');
       }
       WorkCenters._refreshSidebarRow(code);
 
