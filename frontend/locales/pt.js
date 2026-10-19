@@ -1127,7 +1127,6 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.all_lines_filter':               'Todas as máquinas',
   'ui.filter_label':                   'Filtro',
   'ui.line_label':                     'Máquina',
-  'ui.no_plant_data':                  'Sem dados de planta — carregue pedidos primeiro',
   'ui.no_lines_plant':                 'Nenhuma máquina disponível para esta planta',
   'ui.lines_selected':                 '{{sel}} de {{total}} selecionado(s)',
   'ui.orders_count':                   '{{count}} pedido{{plural}}',
@@ -1401,7 +1400,6 @@ window.__NIMBUS_LOCALES.pt = {
   'tip.diag_clear_cache':              'Limpar cache local e recarregar',
 
   /* ── Placeholders ────────────────────────────────────────────────────────── */
-  'ph.search_plants':                  'Pesquisar plantas…',
   'ph.search_colors':                  'Pesquisar cores…',
   'ph.blackout_reason_line':           'Manutenção, limpeza, troca de turno…',
   'ph.blackout_reason_plant':          'Feriado, parada, limpeza profunda…',

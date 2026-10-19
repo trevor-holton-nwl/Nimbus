@@ -115,8 +115,6 @@ export const OptimizeDialog = (() => {
   let _fpStart: NimbusVendor.FlatpickrInstance | null = null;
   let _fpEnd: NimbusVendor.FlatpickrInstance | null   = null;
   let _plant: string | null   = null;
-  let _allPlants: string[] = [];
-  let _dropdownListenerSet = false;
   let _scope: 'plant' | 'lines' = 'plant';
   let _selectedLines = new Set<string>();    // line names when _scope === 'lines'
   let _lineSearch = '';              // current line-list filter text
@@ -138,104 +136,16 @@ export const OptimizeDialog = (() => {
     });
   }
 
+  /** Plant scope is owned by the header selector: the dialog shows it read-only
+   *  and never changes it. A header plant change closes the dialog (see open()). */
   function _buildPlantSelect() {
-    const dynamic = Store.tasksArr.map(t => Store.getPlantForLine(t.MACHINE)).filter(Boolean) as string[];
-    _allPlants = [...new Set([...Config.KNOWN_PLANTS, ...dynamic])].sort();
-    const list = document.getElementById('opt-plant-list');
-    if (!list) return;
-    if (!_allPlants.length) {
-      list.innerHTML = `<li class="opt-plant-empty">${Util.t('ui.no_plant_data')}</li>`;
-      _plant = null;
-      _updateTriggerLabel();
-      return;
+    _plant = Store.selectedPlant || null;
+    const lbl = document.getElementById('opt-plant-label');
+    if (lbl) {
+      const text = _plant ? Store.plantLabel(_plant) : '';
+      lbl.textContent = text;
+      lbl.title = text;
     }
-    _plant = (Store.selectedPlant && _allPlants.includes(Store.selectedPlant))
-      ? Store.selectedPlant
-      : (_plant && _allPlants.includes(_plant) ? _plant : null);
-    if (_plant && Persistence._dirtyIds.size === 0) Store.setSelectedPlant(_plant, 'optimize-dialog');
-    _renderPlantList(_allPlants);
-    _updateTriggerLabel();
-    _initDropdownListener();
-  }
-
-  function _renderPlantList(plants: string[]) {
-    const list = document.getElementById('opt-plant-list');
-    if (!list) return;
-    if (!plants.length) {
-      list.innerHTML = `<li class="opt-plant-empty">${Util.t('ui.no_matches')}</li>`;
-      return;
-    }
-    list.innerHTML = plants.map((p) => {
-      return `<li class="opt-plant-item${_plant === p ? ' selected' : ''}" role="option"
-           aria-selected="${_plant === p}"
-           data-plant="${Util.escapeHtml(p)}">${Util.escapeHtml(p)}</li>`;
-    }).join('');
-    list.querySelectorAll<HTMLElement>('.opt-plant-item').forEach(item =>
-      item.addEventListener('click', () => { void selectPlant(item.dataset.plant || ''); }));
-  }
-
-  function _updateTriggerLabel() {
-    const lbl = document.getElementById('opt-plant-trigger-label');
-    if (lbl) lbl.textContent = _plant || Util.t('ui.select_plant_label');
-  }
-
-  function _initDropdownListener() {
-    if (_dropdownListenerSet) return;
-    _dropdownListenerSet = true;
-    document.addEventListener('click', (e: MouseEvent) => {
-      const sel = document.getElementById('opt-plant-select');
-      if (sel && !sel.contains(e.target as Node | null)) _closeDropdown();
-    }, true);
-  }
-
-  function toggleDropdown() {
-    const dd      = document.getElementById('opt-plant-dropdown');
-    const trigger = document.getElementById('opt-plant-trigger');
-    const sel     = document.getElementById('opt-plant-select');
-    if (!dd) return;
-    const opening = dd.hidden;
-    if (opening && trigger) {
-      const rect = trigger.getBoundingClientRect();
-      dd.style.top   = (rect.bottom + 4) + 'px';
-      dd.style.left  = rect.left + 'px';
-      dd.style.width = rect.width + 'px';
-    }
-    dd.hidden = !opening;
-    sel?.classList.toggle('open', opening);
-    if (opening) {
-      const srch = document.getElementById('opt-plant-search') as HTMLInputElement | null;
-      if (srch) { srch.value = ''; srch.focus(); }
-      _renderPlantList(_allPlants);
-    }
-  }
-
-  function _closeDropdown() {
-    const dd = document.getElementById('opt-plant-dropdown');
-    const sel = document.getElementById('opt-plant-select');
-    if (dd) dd.hidden = true;
-    sel?.classList.remove('open');
-  }
-
-  function filterPlants(query: string) {
-    const q = query.toLowerCase().trim();
-    _renderPlantList(q ? _allPlants.filter((p) => p.toLowerCase().includes(q)) : _allPlants);
-  }
-
-  async function selectPlant(plant: string) {
-    if (!await Persistence.confirmPlantSwitch(plant)) return;
-    _plant = plant;
-    Store.setSelectedPlant(plant, 'optimize-dialog');
-    _renderPlantList(_allPlants);
-    _updateTriggerLabel();
-    _closeDropdown();
-    _updatePlantBadge();
-    _selectedLines.clear();
-    _lineSearch = '';
-    const srch = document.getElementById('opt-line-search') as HTMLInputElement | null;
-    if (srch) srch.value = '';
-    if (_scope === 'lines') _renderLines();
-    if (_mode === 'backlog') _applyBacklogDefaults();
-    else if (_preset === 'horizon') applyPreset('horizon');
   }
 
   function setScope(scope: string) {
@@ -468,8 +378,8 @@ export const OptimizeDialog = (() => {
     else _updatePlantBadge();
   }
 
-  /** One-time listener binding for the strategy `<select>` — mirrors
-   *  `_initDropdownListener`'s guarded-boolean pattern so `open()` can call
+  /** One-time listener binding for the strategy `<select>` — uses
+   *  a guarded-boolean pattern so `open()` can call
    *  this on every open without stacking duplicate `change` listeners. */
   let _strategySelectListenerSet = false;
   function _initStrategySelectListener() {
@@ -532,8 +442,8 @@ export const OptimizeDialog = (() => {
     // on submit — the same "populated by _updatePlantBadge, consumed by run()"
     // role the retired per-plant color→rank cache played. Safe to load into the
     // shared (non-plant-keyed) Store cache from here because `_plant` is always
-    // Store.selectedPlant at this point: both callers (_buildPlantSelect and
-    // selectPlant) call Store.setSelectedPlant first. Never rejects.
+    // Store.selectedPlant at this point: _buildPlantSelect reads it from the header
+    // selector, and a header plant change closes the dialog. Never rejects.
     Persistence.loadPriorityRankMaps(plant).then(() => {
       if (token !== _wheelFetchToken) return; // stale response — ignore
       if (Persistence._rankMapsPlant !== plant) {
@@ -607,6 +517,7 @@ export const OptimizeDialog = (() => {
     _initPickers();
     _buildPlantSelect();
     _initStrategySelectListener();
+    _initPlantChangeListener();
     // Only the "safe" no-date presets seed cleanly (custom needs explicit dates).
     const savedPreset = _od?.preset;
     const _seedPreset: string = (savedPreset && ['horizon', '2w'].includes(savedPreset)) ? savedPreset : 'horizon';
@@ -638,6 +549,20 @@ export const OptimizeDialog = (() => {
     if (lineSrch) lineSrch.value = '';
     setScope('plant');
     requestAnimationFrame(() => el.querySelector('.opt-modal')?.classList.add('visible'));
+  }
+
+  /** The dialog is locked to the header plant, so a header plant change while it
+   *  is open (background-run "Switch to plant", focus escaping the non-modal
+   *  overlay) closes it rather than leaving it scoped to a stale plant. */
+  let _plantChangeListenerSet = false;
+  function _initPlantChangeListener() {
+    if (_plantChangeListenerSet) return;
+    _plantChangeListenerSet = true;
+    Store.subscribe(evt => {
+      if (evt.type !== 'plant:selected') return;
+      const el = document.getElementById('modal-optimize');
+      if (el && !el.hidden) close(true);
+    }, 'OptimizeDialog');
   }
 
   function close(immediate = false) {
@@ -866,7 +791,7 @@ export const OptimizeDialog = (() => {
     Modal.close('modal-opt-to');
   }
 
-  return { open, close, run, applyPreset, selectMode, selectPlant, toggleDropdown, filterPlants, _updatePlantBadge, setScope, filterLines, selectAllLines, _onLineToggle, openFromPicker, cancelFromPicker, commitFrom, openToPicker, cancelToPicker, commitTo };
+  return { open, close, run, applyPreset, selectMode, _buildPlantSelect, _updatePlantBadge, setScope, filterLines, selectAllLines, _onLineToggle, openFromPicker, cancelFromPicker, commitFrom, openToPicker, cancelToPicker, commitTo };
 })();
 
 /** Return shape of Util.scheduleKpis — same ReturnType<typeof ...> precedent as

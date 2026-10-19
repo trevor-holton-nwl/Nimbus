@@ -1127,7 +1127,6 @@ window.__NIMBUS_LOCALES.de = {
   'ui.all_lines_filter':               'Alle Maschinen',
   'ui.filter_label':                   'Filter',
   'ui.line_label':                     'Maschine',
-  'ui.no_plant_data':                  'Keine Werksdaten — laden Sie zuerst Aufträge',
   'ui.no_lines_plant':                 'Keine Maschinen für dieses Werk verfügbar',
   'ui.lines_selected':                 '{{sel}} von {{total}} ausgewählt',
   'ui.orders_count':                   '{{count}} Auftrag{{plural}}',
@@ -1401,7 +1400,6 @@ window.__NIMBUS_LOCALES.de = {
   'tip.diag_clear_cache':              'Lokalen Cache löschen und neu laden',
 
   /* ── Placeholders ────────────────────────────────────────────────────────── */
-  'ph.search_plants':                  'Werke suchen…',
   'ph.search_colors':                  'Farben suchen…',
   'ph.blackout_reason_line':           'Wartung, Reinigung, Schichtwechsel…',
   'ph.blackout_reason_plant':          'Feiertag, Stillstand, Grundreinigung…',

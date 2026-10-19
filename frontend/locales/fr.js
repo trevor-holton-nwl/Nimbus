@@ -1127,7 +1127,6 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.all_lines_filter':               'Toutes les machines',
   'ui.filter_label':                   'Filtre',
   'ui.line_label':                     'Machine',
-  'ui.no_plant_data':                  'Pas de données de site — chargez d\'abord les commandes',
   'ui.no_lines_plant':                 'Aucune machine disponible pour ce site',
   'ui.lines_selected':                 '{{sel}} sur {{total}} sélectionné(s)',
   'ui.orders_count':                   '{{count}} commande{{plural}}',
@@ -1402,7 +1401,6 @@ window.__NIMBUS_LOCALES.fr = {
   'tip.diag_clear_cache':              'Effacer le cache local et recharger',
 
   /* ── Placeholders ────────────────────────────────────────────────────────── */
-  'ph.search_plants':                  'Rechercher des sites…',
   'ph.search_colors':                  'Rechercher des couleurs…',
   'ph.blackout_reason_line':           'Maintenance, nettoyage, changement d\'équipe…',
   'ph.blackout_reason_plant':          'Vacances, arrêt, nettoyage en profondeur…',

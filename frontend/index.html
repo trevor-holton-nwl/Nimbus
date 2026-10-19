@@ -2714,20 +2714,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="opt-header-title">Optimization Settings</div>
       </div>
       <div class="opt-header-plant">
-        <div class="opt-plant-select" id="opt-plant-select">
-          <button class="opt-plant-trigger" id="opt-plant-trigger" type="button"
-                  onclick="NIMBUS.OptimizeDialog.toggleDropdown()">
-            <span class="opt-plant-trigger-label" id="opt-plant-trigger-label">Select plant…</span>
-            <span class="opt-plant-trigger-arrow">▾</span>
-          </button>
-          <div class="opt-plant-dropdown" id="opt-plant-dropdown" hidden>
-            <div class="opt-plant-search-wrap">
-              <input class="opt-plant-search" id="opt-plant-search" type="text"
-                     placeholder="Search plants…" data-i18n-placeholder="ph.search_plants" autocomplete="off"
-                     oninput="NIMBUS.OptimizeDialog.filterPlants(this.value)">
-            </div>
-            <ul class="opt-plant-list" id="opt-plant-list" role="listbox"></ul>
-          </div>
+        <div class="opt-plant-fixed" id="opt-plant-fixed">
+          <span class="opt-plant-fixed-cap" data-i18n="ui.plant_label">Plant</span>
+          <span class="opt-plant-fixed-val" id="opt-plant-label"></span>
         </div>
         <span id="opt-wheel-badge" class="opt-wheel-badge compact none" title="No wheel loaded" data-i18n-title="tip.no_wheel_loaded">
           <span class="owb-icon">○</span>
