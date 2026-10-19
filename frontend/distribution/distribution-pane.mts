@@ -2038,7 +2038,7 @@ export const DistributionPane = (() => {
     try {
       if (typeof flatpickr !== 'undefined') {
         _fpInstances[id] = flatpickr(el, {
-          dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+          dateFormat: 'Y-m-d', altInput: true, altFormat: Util._dateFormatPref(),
           onChange: (selected: Date[]) => onChange(selected[0] ? Util.dayKey(selected[0]) : null),
         });
         return;

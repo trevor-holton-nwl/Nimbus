@@ -223,7 +223,7 @@ export const EditCalendar = (() => {
     for (let d = 0; d < 7; d++) {
       const mkCfg = () => ({
         enableTime: true, noCalendar: true,
-        dateFormat: 'H:i', altInput: true, altFormat: 'h:i K',
+        dateFormat: 'H:i', altInput: true, altFormat: Util._fpTimeAltFormat(),
         minuteIncrement: 30,
         onChange: () => { _refreshBadge(d); _onPeriodFieldChange(); },
       });

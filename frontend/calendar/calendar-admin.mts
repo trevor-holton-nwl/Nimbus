@@ -101,8 +101,8 @@ export const CalendarUI = {
         Store.emit({ type: 'calendar:change', line, source: 'calendar' });
         Toast.show(Util.t('toast.calendar_updated'), 'success');
       };
-      flatpickr(inS, { enableTime: true, noCalendar: true, dateFormat: 'H:i', altInput: true, altFormat: 'h:i K', onChange: upd });
-      flatpickr(inE, { enableTime: true, noCalendar: true, dateFormat: 'H:i', altInput: true, altFormat: 'h:i K', onChange: upd });
+      flatpickr(inS, { enableTime: true, noCalendar: true, dateFormat: 'H:i', altInput: true, altFormat: Util._fpTimeAltFormat(), onChange: upd });
+      flatpickr(inE, { enableTime: true, noCalendar: true, dateFormat: 'H:i', altInput: true, altFormat: Util._fpTimeAltFormat(), onChange: upd });
     });
 
     CalendarUI._renderBlocks();

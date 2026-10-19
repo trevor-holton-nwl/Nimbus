@@ -286,32 +286,34 @@ export const Util = {
     try { return _prefResolver('timeFormat') || '12h'; } catch { return '12h'; }
   },
   _dateFormatPref(): string {
-    try { return _prefResolver('dateFormat') || 'M j, Y'; } catch { return 'M j, Y'; }
+    try { return _prefResolver('dateFormat') || 'm/d/Y'; } catch { return 'm/d/Y'; }
   },
-  // Format a Date's time part per timeFormat: 12h ("6 PM" / "6:30 PM") or 24h ("18:30").
+  // 12-hour clock with zero-padded hour and always-present minutes: "06:00 PM".
+  _fmtTime12(date: Date): string {
+    const h24 = date.getHours();
+    const h12 = h24 % 12 || 12;
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${p(h12)}:${p(date.getMinutes())} ${h24 < 12 ? 'AM' : 'PM'}`;
+  },
+  // Format a Date's time part per timeFormat: 12h ("06:30 PM") or 24h ("18:30").
   _fmtTimePref(date: Date): string {
-    const min = date.getMinutes();
     if (Util._timeFormatPref() === '24h') {
       const p = (n: number) => String(n).padStart(2, '0');
-      return `${p(date.getHours())}:${p(min)}`;
+      return `${p(date.getHours())}:${p(date.getMinutes())}`;
     }
-    const h24 = date.getHours();
-    const ampm = h24 < 12 ? 'AM' : 'PM';
-    const h12 = h24 % 12 || 12;
-    const minStr = min === 0 ? '' : `:${String(min).padStart(2, '0')}`;
-    return `${h12}${minStr} ${ampm}`;
+    return Util._fmtTime12(date);
   },
   // Format a Date's date part per the Flatpickr-token dateFormat pref, via the
-  // Flatpickr static formatter; falls back to compact MM/DD/YY if unavailable.
+  // Flatpickr static formatter; falls back to MM/DD/YYYY if unavailable.
   _fmtDatePref(date: Date): string {
     const tok = Util._dateFormatPref();
     try {
       if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(date, tok);
     } catch { /* fall through to legacy compact format */ }
     const p = (n: number) => String(n).padStart(2, '0');
-    return `${p(date.getMonth() + 1)}/${p(date.getDate())}/${String(date.getFullYear()).slice(-2)}`;
+    return `${p(date.getMonth() + 1)}/${p(date.getDate())}/${date.getFullYear()}`;
   },
-  // Human-readable datetime (e.g. "May 15, 2026 · 6 PM"), routed through the
+  // Human-readable datetime (e.g. "05/15/2026 · 06:00 PM"), routed through the
   // per-user dateFormat + timeFormat display prefs.
   fmtDTReadable(d: unknown): string {
     const date = Util.parseDate(d);
@@ -319,32 +321,17 @@ export const Util = {
     return `${Util._fmtDatePref(date)} · ${Util._fmtTimePref(date)}`;
   },
 
-  // Compact range for blackout rows. Same day: "05/15/26 · 6–7 PM". Multi-day: "05/15/26 → 05/17/26".
+  // Compact range for blackout rows. Same day: "05/15/2026 · 06:00 PM – 07:00 PM". Multi-day: "05/15/2026 06:00 PM → 05/17/2026 06:00 PM".
   fmtBlockRange(s: unknown, e: unknown): string {
     const ds = Util.parseDate(s), de = Util.parseDate(e);
     if (!ds || !de) return '';
     const p = (n: number) => String(n).padStart(2, '0');
-    const dateStr = (d: Date) => `${p(d.getMonth()+1)}/${p(d.getDate())}/${String(d.getFullYear()).slice(-2)}`;
+    const dateStr = (d: Date) => `${p(d.getMonth()+1)}/${p(d.getDate())}/${d.getFullYear()}`;
     const sameDay = ds.getFullYear() === de.getFullYear()
                  && ds.getMonth()    === de.getMonth()
                  && ds.getDate()     === de.getDate();
-    const fmtTime = (h24: number, min: number) => {
-      const ampm = h24 < 12 ? 'AM' : 'PM';
-      const h12  = h24 % 12 || 12;
-      const m    = min === 0 ? '' : `:${String(min).padStart(2,'0')}`;
-      return `${h12}${m}${ampm}`;
-    };
-    if (sameDay) {
-      const sAmpm = ds.getHours() < 12 ? 'AM' : 'PM';
-      const eAmpm = de.getHours() < 12 ? 'AM' : 'PM';
-      const sH    = ds.getHours() % 12 || 12;
-      const eH    = de.getHours() % 12 || 12;
-      const sM    = ds.getMinutes() === 0 ? '' : `:${String(ds.getMinutes()).padStart(2,'0')}`;
-      const eM    = de.getMinutes() === 0 ? '' : `:${String(de.getMinutes()).padStart(2,'0')}`;
-      const suffix = sAmpm === eAmpm ? `${sH}${sM}–${eH}${eM} ${eAmpm}` : `${sH}${sM}${sAmpm}–${eH}${eM}${eAmpm}`;
-      return `${dateStr(ds)} · ${suffix}`;
-    }
-    return `${dateStr(ds)} ${fmtTime(ds.getHours(), ds.getMinutes())} → ${dateStr(de)} ${fmtTime(de.getHours(), de.getMinutes())}`;
+    if (sameDay) return `${dateStr(ds)} · ${Util._fmtTime12(ds)} – ${Util._fmtTime12(de)}`;
+    return `${dateStr(ds)} ${Util._fmtTime12(ds)} → ${dateStr(de)} ${Util._fmtTime12(de)}`;
   },
 
   /** Sum the hours of `intervals` ([{s:Date, e:Date}, …]) intersected with `win`
@@ -423,7 +410,11 @@ export const Util = {
   _fpAltFormat(): string {
     const df = Util._dateFormatPref();
     const tf = Util._timeFormatPref();
-    return `${df} · ${tf === '24h' ? 'H:i' : 'h:i K'}`;
+    return `${df} · ${tf === '24h' ? 'H:i' : 'G:i K'}`;
+  },
+  // Time-only variant of _fpAltFormat for the working-hours pickers.
+  _fpTimeAltFormat(): string {
+    return Util._timeFormatPref() === '24h' ? 'H:i' : 'G:i K';
   },
   fpDatetime(sel: string | HTMLElement, extra: Record<string, unknown> = {}) {
     return flatpickr(sel, {

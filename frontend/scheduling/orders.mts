@@ -1723,7 +1723,7 @@ export const Table = {
 
     const rows = rel.map(a => {
       const icon  = a.sev === 'err' ? '🔴' : '🟡';
-      const date  = a.time ? a.time.toLocaleDateString('en-US', { month:'short', day:'numeric' }) : '';
+      const date  = a.time ? Util.fmtDTReadable(a.time) : '';
       return `
         <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:6px;background:var(--bg-subtle);margin-bottom:6px">
           <span style="flex-shrink:0;font-size:13px;margin-top:1px">${icon}</span>
@@ -2730,11 +2730,11 @@ export const Printer = {
     }
     if (!Printer._fpStart) {
       Printer._fpStart = flatpickr('#print-start', {
-        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        dateFormat: 'Y-m-d', altInput: true, altFormat: Util._dateFormatPref(),
         altInputClass: 'input', onChange() { Printer.preview(); }
       });
       Printer._fpEnd = flatpickr('#print-end', {
-        dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y',
+        dateFormat: 'Y-m-d', altInput: true, altFormat: Util._dateFormatPref(),
         altInputClass: 'input', onChange() { Printer.preview(); }
       });
     }
@@ -2799,11 +2799,7 @@ export const Printer = {
       return;
     }
 
-    const pad2 = (n: number) => String(n).padStart(2, '0');
-    const fmtDt = (d: Date | null) => {
-      if (!d) return '—';
-      return `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-    };
+    const fmtDt = (d: Date | null) => (d ? Util.fmtDTReadable(d) : '—');
 
     const MAX_PRINT_ROWS = 500;
     const printRows = rows.length > MAX_PRINT_ROWS ? rows.slice(0, MAX_PRINT_ROWS) : rows;
