@@ -159,11 +159,11 @@ One pure `Timeline._nonWorkingDesired(rangeMs)` builds the items. `Timeline._nwR
 Next to `.vis-item.day-gridline` in `styles.css`:
 
 ```css
-.vis-item.nonworking { background: rgba(93,113,134,0.10) !important; border: none !important; pointer-events: none !important; }
-body.dark .vis-item.nonworking { background: rgba(144,162,184,0.08) !important; }
+.vis-item.nonworking { background: rgba(93,113,134,0.35) !important; border: none !important; pointer-events: none !important; }
+body.dark .vis-item.nonworking { background: rgba(144,162,184,0.20) !important; }
 ```
 
-It must read clearly lighter than `.past-zone` (`rgba(150,150,160,.42)`). Add `z-index: 0` only if the browser check shows it painting above grouped bands. Ungrouped items paint beneath grouped zone washes; items painted after existing gridlines may sit above them, which is cosmetic at 10% alpha; if visible, raise the gridline's z-index rather than reorder.
+In light mode it is about as dark as `.past-zone` but slate-tinted, so closed time reads as inactive; elapsed closed time stacks both washes into a visibly darker band. Add `z-index: 0` only if the browser check shows it painting above grouped bands. Ungrouped items paint beneath grouped zone washes; items painted after existing gridlines may sit above them, which is cosmetic at 35% alpha in light mode, 20% in dark (raised from 10% on 2026-10-19); if visible, raise the gridline's z-index rather than reorder.
 
 ### 5.6 Minimap guard (required)
 

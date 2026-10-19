@@ -1302,15 +1302,17 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 
 /* Non-working-time shading — ungrouped full-height background items
    ('nonworking-<dayKey>' from Timeline._nonWorkingDesired): closed days and
-   off-shift hours of the plant pattern. Far quieter than .past-zone
-   (rgba(150,150,160,.42)). No position/top/height: vis owns the geometry. */
+   off-shift hours of the plant pattern. About as dark as .past-zone
+   (rgba(150,150,160,.42)) but slate-tinted (35% light / 20% dark; the
+   dark step is lower so the wash does not swallow bar-adjacent text).
+   No position/top/height: vis owns the geometry. */
 .vis-item.nonworking {
-  background: rgba(93, 113, 134, 0.10) !important;
+  background: rgba(93, 113, 134, 0.35) !important;
   border: none !important;
   pointer-events: none !important;
 }
 body.dark .vis-item.nonworking {
-  background: rgba(144, 162, 184, 0.08) !important;
+  background: rgba(144, 162, 184, 0.20) !important;
 }
 
 /* Plant visibility-horizon marker (C1, 2026-08-21) — a thin labeled vertical
