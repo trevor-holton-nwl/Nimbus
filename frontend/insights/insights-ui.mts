@@ -851,6 +851,8 @@ export const Dashboard = {
     const label = document.getElementById('ls-day-label');
     const prev  = document.getElementById('ls-day-prev') as HTMLButtonElement | null;
     const next  = document.getElementById('ls-day-next') as HTMLButtonElement | null;
+    // No aria sweep mechanism exists, so the group's accessible name is localized here.
+    document.getElementById('ls-day-group')?.setAttribute('aria-label', Util.t('ui.line_status_title'));
     if (label) {
       label.textContent = Dashboard._lsDayLabel(active, keys);
       label.title = label.textContent;
