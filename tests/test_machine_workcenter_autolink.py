@@ -137,6 +137,39 @@ class TestAutolinkRule:
         _apply("machine", m_rows)
         assert _links(seeded) == [("ZZ-M8", "ZZ-M8")]
 
+    def test_a_machine_write_links_only_the_machines_written(self, seeded):
+        # Raw inserts so the in-application rule does not pre-empt the scenario: B is an
+        # unrelated, unlinked, same-named machine in the same plant.
+        with seeded._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) VALUES "
+                        "(%s,'ZZ-SA','single'),(%s,'ZZ-SB','single')", (PLANT, PLANT))
+            cur.execute("INSERT INTO machine (subnetwork, plant, machine) VALUES (%s,%s,'ZZ-SB')", (SUB1, PLANT))
+            conn.commit()
+        res = _apply("machine", [_machine("ZZ-SA")])
+        assert res["linked"] == [{"plant": PLANT, "machine": "ZZ-SA"}]
+        assert dict(_links(seeded)) == {"ZZ-SA": "ZZ-SA", "ZZ-SB": None}
+
+    def test_a_work_center_write_links_only_that_code(self, seeded):
+        with seeded._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) VALUES "
+                        "(%s,'ZZ-WY','single')", (PLANT,))
+            cur.execute("INSERT INTO machine (subnetwork, plant, machine) VALUES "
+                        "(%s,%s,'ZZ-WX'),(%s,%s,'ZZ-WY')", (SUB1, PLANT, SUB1, PLANT))
+            conn.commit()
+        res = _apply("sap_workcenter", [_wc("ZZ-WX")])
+        assert res["linked"] == [{"plant": PLANT, "machine": "ZZ-WX"}]
+        assert dict(_links(seeded)) == {"ZZ-WX": "ZZ-WX", "ZZ-WY": None}
+
+    def test_a_cleared_link_is_refilled_when_that_machine_is_next_saved(self, seeded):
+        _apply("sap_workcenter", [_wc("ZZ-RF")])
+        _apply("machine", [_machine("ZZ-RF")])
+        with seeded._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE machine SET sap_workcenter = NULL WHERE plant = %s", (PLANT,))
+            conn.commit()
+        assert _links(seeded) == [("ZZ-RF", None)]
+        _apply("machine", [_machine("ZZ-RF")])
+        assert _links(seeded) == [("ZZ-RF", "ZZ-RF")]
+
     def test_the_audit_row_records_the_auto_link(self, seeded):
         _apply("sap_workcenter", [_wc("ZZ-M9")])
         _apply("machine", [_machine("ZZ-M9")])

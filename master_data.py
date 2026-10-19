@@ -1023,7 +1023,7 @@ def _bulk_apply_readable_error(table: str, exc: psycopg.Error) -> str:
     )
 
 
-def _autolink_same_named_machines(cur, plants) -> list[dict]:
+def _autolink_same_named_machines(cur, plants, only=None) -> list[dict]:
     """Auto-link a machine to the SAP work center sharing its ID (owner decision
     2026-10-19, reversing the 2026-10-12 explicit-link rule; aggregate_to_detail.md §3.1).
 
@@ -1037,9 +1037,24 @@ def _autolink_same_named_machines(cur, plants) -> list[dict]:
         (subnetwork, plant, machine), so a duplicate across subnetworks is skipped
         with a warning log instead of guessing which one).
     No default machine is written: a 1:1 work center's default is implied.
+    `only` (optional list of `(plant, name)` pairs) restricts candidates to the machines
+    with that plant + machine name, so a write only ever links the rows it actually wrote
+    (a machine write passes its machine names, a work-center write passes its codes --
+    the match is the same text either way); it overrides `plants`. The backfill
+    migration is plant-wide and does not use it.
     Runs on the caller's cursor, so it joins the caller's transaction. Returns
     `[{plant, machine}, ...]` for the machines it linked."""
-    plant_list = sorted({p for p in (plants or []) if p})
+    scope_sql = ""
+    scope_args: tuple = ()
+    if only is not None:
+        pairs = sorted({(p, n) for p, n in only if p and n})
+        if not pairs:
+            return []
+        plant_list = sorted({p for p, _ in pairs})
+        scope_sql = " AND (m.plant, m.machine) IN (SELECT * FROM unnest(%s::text[], %s::text[]))"
+        scope_args = ([p for p, _ in pairs], [n for _, n in pairs])
+    else:
+        plant_list = sorted({p for p in (plants or []) if p})
     if not plant_list:
         return []
     cur.execute(
@@ -1047,8 +1062,9 @@ def _autolink_same_named_machines(cur, plants) -> list[dict]:
         " JOIN sap_workcenter w ON w.plant = m.plant AND w.sap_workcenter = m.machine"
         " WHERE m.plant = ANY(%s) AND m.sap_workcenter IS NULL AND w.distribution_mode = 'single'"
         "   AND NOT EXISTS (SELECT 1 FROM machine o WHERE o.plant = m.plant AND o.sap_workcenter = w.sap_workcenter)"
+        + scope_sql +
         " GROUP BY m.plant, m.machine HAVING count(*) > 1",
-        (plant_list,),
+        (plant_list, *scope_args),
     )
     for p, mname in cur.fetchall():
         log.warning("Same-named machine %r in plant %r exists in several subnetworks; not auto-linked", mname, p)
@@ -1059,8 +1075,9 @@ def _autolink_same_named_machines(cur, plants) -> list[dict]:
         "   AND m.sap_workcenter IS NULL AND w.distribution_mode = 'single'"
         "   AND NOT EXISTS (SELECT 1 FROM machine o WHERE o.plant = m.plant AND o.sap_workcenter = w.sap_workcenter)"
         "   AND (SELECT count(*) FROM machine d WHERE d.plant = m.plant AND d.machine = m.machine) = 1"
+        + scope_sql +
         " RETURNING m.plant, m.machine",
-        (plant_list,),
+        (plant_list, *scope_args),
     )
     return [{"plant": p, "machine": mname} for p, mname in sorted(cur.fetchall())]
 
@@ -1254,7 +1271,11 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         # gets it whichever of the two rows arrives second.
         linked: list[dict] = []
         if table in ("machine", "sap_workcenter") and upserts:
-            linked = _autolink_same_named_machines(cur, {r.get("plant") for r in upserts})
+            # Scoped to the rows just written: a machine write considers those machine
+            # names, a work-center write those codes (the match is machine == code).
+            name_col = "machine" if table == "machine" else "sap_workcenter"
+            linked = _autolink_same_named_machines(
+                cur, None, only=[(r.get("plant"), r.get(name_col)) for r in upserts])
 
         # Audit
         audit_details = {"inserted": inserted, "updated": updated, "deleted": deleted}

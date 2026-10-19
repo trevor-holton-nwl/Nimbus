@@ -199,7 +199,7 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
             (plant, wc_clean, description_clean, mode, default_machine_clean, separation,
              review_required_clean, distribute_tooled_clean),
         )
-        auto_linked = [m for m in _autolink_same_named_machines(cur, [plant]) if m["machine"] == wc_clean]
+        auto_linked = _autolink_same_named_machines(cur, None, only=[(plant, wc_clean)])
 
         # M = the machine named exactly like this code (a 1:1 work center), if any.
         # wc_code_shadowed_by_machine: M must be linked to this code, or the
@@ -215,10 +215,22 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
         m_linked_here = m_row is not None and m_row[0] == wc_clean
         if m_row is not None and not m_linked_here:
             if m_row[0] is None:
+                # Auto-link left an EMPTY link alone, so linking is not the way out: say why.
+                cur.execute(
+                    "SELECT count(*) FROM machine WHERE plant = %s AND sap_workcenter = %s", (plant, wc_clean))
+                has_members = cur.fetchone()[0] > 0
+                if len(m_rows) > 1:
+                    why = f"machine {wc_clean!r} exists in several subnetworks — rename the machine or the work center"
+                elif mode == "distribute":
+                    why = ("a distribute work center cannot share its code with a machine — "
+                           "rename the machine or the work center")
+                elif has_members:
+                    why = ("this work center already has other member machines — "
+                           "rename the machine or the work center")
+                else:
+                    why = "rename the machine or the work center"
                 raise ValueError(
-                    f"wc_code_shadowed_by_machine: {wc_clean!r} is also a machine name in plant {plant!r}; "
-                    f"set that machine's SAP work center to {wc_clean!r} (so it becomes this work center's "
-                    "1:1 member) or rename the machine"
+                    f"wc_code_shadowed_by_machine: {wc_clean!r} is also a machine name in plant {plant!r}; {why}"
                 )
             raise ValueError(
                 f"wc_code_shadowed_by_machine: {wc_clean!r} is also a machine name in plant {plant!r}, "
@@ -272,7 +284,7 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
                 "default_machine": default_machine_clean, "max_separation": separation,
                 "review_required": review_required_clean, "distribute_tooled": distribute_tooled_clean,
                 "weights": clean_weights,
-                **({"auto_linked_machine": wc_clean} if auto_linked else {}),
+                **({"auto_linked": auto_linked} if auto_linked else {}),
             }), user_email),
         )
         conn.commit()
