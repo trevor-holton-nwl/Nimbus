@@ -72,6 +72,7 @@ import { Persistence } from '../scheduling/persistence.mjs';
 import { Session } from '../security/session.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter } from '../scheduling/gantt.mjs';
 import { Table } from '../scheduling/orders.mjs';
+import { GanttLegend } from '../scheduling/gantt-legend.mjs';
 import { Dashboard, AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { AdminCockpit } from '../admin-ops/admin-ui.mjs';
 import { Plant, ProdLines, WorkCenters } from '../master-data/admin-ui.mjs';
@@ -2032,6 +2033,13 @@ const App = {
     if (navDrawerClose) {
       navDrawerClose.setAttribute('aria-label', Util.t('aria.nav_drawer_close'));
       navDrawerClose.addEventListener('click', () => App._closeDrawer());
+    }
+    // Board legend: modal wiring + toolbar button (aria-label set inline, no aria sweep exists).
+    GanttLegend.init();
+    const ganttLegendBtn = document.getElementById('btn-gantt-legend');
+    if (ganttLegendBtn) {
+      ganttLegendBtn.setAttribute('aria-label', Util.t('tip.legend'));
+      ganttLegendBtn.addEventListener('click', () => GanttLegend.open());
     }
     // Gantt nav-group chevron — manual expand/collapse of the sub-list,
     // independent of the parent button's own navigate-and-expand click.

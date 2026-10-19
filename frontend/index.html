@@ -1222,6 +1222,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <!-- .sandbox-btn is load-bearing: SandboxAdapter rewrites textContent + onclick. Keep flat, no inner spans. -->
       <button class="seg-btn sandbox-btn" onclick="NIMBUS.SandboxAdapter.enter()" data-i18n="ui.sandbox_off" data-i18n-title="tip.what_if" title="Try changes in an isolated sandbox">🔮 What-If</button>
       <button class="seg-btn" onclick="NIMBUS.Printer.open()" data-i18n-title="tip.print_export" title="Print or export schedule"><span aria-hidden="true">⎙</span><span class="sa-label" data-i18n="btn.print">Print</span></button>
+      <button id="btn-gantt-legend" class="seg-btn" data-i18n-title="tip.legend" title="What the colors and markers on the board mean"><span aria-hidden="true">◧</span><span class="sa-label" data-i18n="btn.legend">Legend</span></button>
     </div>
   </div>
 
