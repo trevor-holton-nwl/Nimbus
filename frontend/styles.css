@@ -5038,6 +5038,18 @@ body.dark .cw-active-card {
 .period-seg-past { background: var(--bg-strong); border-color: var(--line); color: var(--fg-faint); }
 /* The dark accent is a light blue: white text on it is too faint, so use the page navy. */
 body.dark .period-seg-active { color: var(--bg); }
+/* Default-week gap: an unfilled dashed outline (periods are solid fills, past is a solid grey fill), under
+   real periods. min-width:0 overrides .period-seg's 6px so a 1-2 day gap cannot spill over a neighbour; the
+   title carries the detail. The button is its own size container so the label hides itself when the
+   segment's content box is too narrow to show more than a stray ellipsis (works at any strip width). */
+.period-seg-default {
+  z-index: 0; min-width: 0; padding: 0 4px;
+  container-type: inline-size;
+  background: transparent; border: 1px dashed var(--line-strong); color: var(--fg-mute); font-weight: 500;
+}
+@container (max-width: 44px) {
+  .period-seg-default .period-seg-label { display: none; }
+}
 /* Open-ended: runs to the right edge with a trailing fade and an arrow. */
 .period-seg-open {
   padding-right: 20px;
@@ -5075,6 +5087,9 @@ body.dark .period-seg-active { color: var(--bg); }
 .period-legend-sw {
   display: inline-block; width: 10px; height: 6px; margin-right: 5px;
   border-radius: 1px; background: var(--err); vertical-align: middle;
+}
+.period-legend-sw-default {
+  box-sizing: border-box; width: 12px; height: 8px; background: transparent; border: 1px dashed var(--line-strong); border-radius: 2px;
 }
 #plant-periods-horizon:not(:empty)::before { content: " · "; white-space: pre; }
 /* A cluster click flashes its rows in the blackout list; the fade is skipped for reduced motion. */

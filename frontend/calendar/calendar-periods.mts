@@ -44,6 +44,8 @@ export interface PeriodStrip {
   today: { leftPct: number };
   ticks: Array<{ leftPct: number; label: string }>;
 }
+/** A gap between periods (or around them) where the default week applies; keys are inclusive. */
+export interface DefaultSegment { fromKey: string; toKey: string; leftPct: number; widthPct: number }
 export interface PeriodStripOpts { fmtMonth?: (date: Date) => string }
 
 /** One blackout reduced to inclusive local day keys (the caller derives them; this module stays Util-free). */
@@ -225,6 +227,39 @@ export function buildPeriodStrip(periods: PlantPeriod[], todayKey: string, opts:
     today: { leftPct: pct(todayIdx - startIdx) },
     ticks,
   };
+}
+
+/** The stretches of the strip's axis where no period applies, i.e. where the plant's default week is in
+ *  force. Works on day indices, clamping each segment exactly as buildPeriodStrip draws it (the segment's
+ *  fromKey/toKey are the unclipped period dates), so the gaps are the exact complement of the drawn
+ *  segments: a period ending the 31st with the next starting the 1st leaves no gap, and an open-ended
+ *  period leaves no trailing one. `fromKey`/`toKey` are inclusive. */
+export function buildDefaultSegments(strip: Pick<PeriodStrip, 'axisStartKey' | 'axisEndKey' | 'segments'>): DefaultSegment[] {
+  const startIdx = dayIndex(strip.axisStartKey);
+  const endIdx = dayIndex(strip.axisEndKey);
+  const total = endIdx - startIdx + 1;
+  const spans = strip.segments.map(s => {
+    const from = Math.max(Math.min(dayIndex(s.fromKey), endIdx), startIdx);
+    const to = s.toKey === null ? endIdx : Math.max(Math.min(dayIndex(s.toKey), endIdx), from);
+    return { from, to };
+  }).sort((a, b) => a.from - b.from || a.to - b.to);
+  const out: DefaultSegment[] = [];
+  const push = (from: number, to: number) => {
+    if (to < from) return;
+    out.push({
+      fromKey: keyFromIndex(from),
+      toKey: keyFromIndex(to),
+      leftPct: ((from - startIdx) / total) * 100,
+      widthPct: ((to - from + 1) / total) * 100,
+    });
+  };
+  let cursor = startIdx;
+  for (const sp of spans) {
+    push(cursor, sp.from - 1);
+    if (sp.to + 1 > cursor) cursor = sp.to + 1;
+  }
+  push(cursor, endIdx);
+  return out;
 }
 
 /** Marker geometry for plant blackouts over the strip's axis. Each item is clipped to the axis

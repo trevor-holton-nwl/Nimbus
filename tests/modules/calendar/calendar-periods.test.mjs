@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   periodStatus, summarizeWeek, validatePeriodDraft, periodWarnings,
-  buildPeriodStrip, buildBlackoutMarks, nextPeriodDefaults, addDaysKey, dayIndex,
+  buildPeriodStrip, buildBlackoutMarks, buildDefaultSegments, nextPeriodDefaults, addDaysKey, dayIndex,
 } from '../../../frontend/calendar/calendar-periods.mjs';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -224,4 +224,66 @@ test('buildBlackoutMarks: over the cap with todayKey keeps clusters nearest toda
   assert.deepEqual(r2.marks.map(m => m.ids[0]), items.slice(10).map(i => i.id));
   // Under the cap, todayKey changes nothing.
   assert.equal(buildBlackoutMarks(axis, items.slice(0, 5), '2026-06-01').marks.length, 5);
+});
+
+// ---- buildDefaultSegments: the axis stretches no period covers (2026-01-01..2026-01-10, 10% per day) ----
+const seg = (fromKey, toKey, openEnded = false) => ({ id: fromKey, name: fromKey, status: 'upcoming', leftPct: 0, widthPct: 0, openEnded, fromKey, toKey });
+const dstrip = (...segments) => ({ ...AXIS, segments });
+const keys = (r) => r.map(g => [g.fromKey, g.toKey]);
+
+test('buildDefaultSegments: no periods is one gap spanning the whole axis', () => {
+  const r = buildDefaultSegments(dstrip());
+  assert.deepEqual(keys(r), [['2026-01-01', '2026-01-10']]);
+  assert.equal(r[0].leftPct, 0);
+  assert.ok(Math.abs(r[0].widthPct - 100) < 1e-9);
+});
+
+test('buildDefaultSegments: a period in the middle leaves a gap on each side', () => {
+  const r = buildDefaultSegments(dstrip(seg('2026-01-04', '2026-01-06')));
+  assert.deepEqual(keys(r), [['2026-01-01', '2026-01-03'], ['2026-01-07', '2026-01-10']]);
+  assert.ok(Math.abs(r[0].widthPct - 30) < 1e-9 && Math.abs(r[1].leftPct - 60) < 1e-9 && Math.abs(r[1].widthPct - 40) < 1e-9);
+});
+
+test('buildDefaultSegments: adjacent periods leave no zero-width gap, one-day gaps are kept', () => {
+  assert.deepEqual(keys(buildDefaultSegments(dstrip(seg('2026-01-03', '2026-01-04'), seg('2026-01-05', '2026-01-07')))),
+    [['2026-01-01', '2026-01-02'], ['2026-01-08', '2026-01-10']]);
+  assert.deepEqual(keys(buildDefaultSegments(dstrip(seg('2026-01-03', '2026-01-04'), seg('2026-01-06', '2026-01-07')))),
+    [['2026-01-01', '2026-01-02'], ['2026-01-05', '2026-01-05'], ['2026-01-08', '2026-01-10']]);
+});
+
+test('buildDefaultSegments: an open-ended period leaves no trailing gap', () => {
+  assert.deepEqual(keys(buildDefaultSegments(dstrip(seg('2026-01-04', null, true)))), [['2026-01-01', '2026-01-03']]);
+});
+
+test('buildDefaultSegments: periods clipped at the axis edges leave no phantom gap there', () => {
+  // Starts before the axis (unclipped fromKey) and ends inside it: the gap begins after it.
+  assert.deepEqual(keys(buildDefaultSegments(dstrip(seg('2025-12-20', '2026-01-03')))), [['2026-01-04', '2026-01-10']]);
+  // Runs past the axis end: no trailing gap.
+  assert.deepEqual(keys(buildDefaultSegments(dstrip(seg('2026-01-08', '2026-03-01')))), [['2026-01-01', '2026-01-07']]);
+  // Covers the whole axis: nothing left.
+  assert.deepEqual(buildDefaultSegments(dstrip(seg('2025-01-01', '2027-01-01'))), []);
+});
+
+test('buildDefaultSegments: segment order does not matter and overlapping input never double-counts', () => {
+  const r = buildDefaultSegments(dstrip(seg('2026-01-07', '2026-01-08'), seg('2026-01-02', '2026-01-05'), seg('2026-01-04', '2026-01-06')));
+  assert.deepEqual(keys(r), [['2026-01-01', '2026-01-01'], ['2026-01-09', '2026-01-10']]);
+});
+
+test('buildDefaultSegments: gaps and drawn segments tile the real strip exactly (percentages sum to 100)', () => {
+  const today = '2026-10-16';
+  const periods = [per('a', '2026-10-01', '2026-10-31'), per('b', '2026-11-01', '2026-11-20'), per('c', '2027-01-05', '2027-02-01'), per('d', '2027-03-01', null)];
+  const strip = buildPeriodStrip(periods, today);
+  const gaps = buildDefaultSegments(strip);
+  const sum = [...strip.segments, ...gaps].reduce((n, s) => n + s.widthPct, 0);
+  assert.ok(Math.abs(sum - 100) < 1e-6, `tiles to 100%, got ${sum}`);
+  // a/b are adjacent: no gap between them.
+  assert.ok(!gaps.some(g => g.fromKey > '2026-10-31' && g.toKey < '2026-11-01'));
+  assert.equal(gaps[0].fromKey, strip.axisStartKey);
+  for (const g of gaps) assert.ok(g.widthPct > 0 && g.fromKey <= g.toKey);
+});
+
+test('buildDefaultSegments: a period wholly older than the clipped axis is drawn as a one-day sliver, and the gap math matches', () => {
+  const strip = buildPeriodStrip([per('old', '2020-01-01', '2020-06-30'), per('x', '2026-11-01', '2026-11-05')], '2026-10-16');
+  const sum = [...strip.segments, ...buildDefaultSegments(strip)].reduce((n, s) => n + s.widthPct, 0);
+  assert.ok(Math.abs(sum - 100) < 1e-6);
 });

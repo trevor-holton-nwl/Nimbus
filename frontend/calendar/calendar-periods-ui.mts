@@ -13,13 +13,18 @@ import { Util, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { CalendarSync } from './calendar-sync.mjs';
 import { EditCalendar } from './edit-calendar.mjs';
-import { addDaysKey, buildBlackoutMarks, buildPeriodStrip, keyToDate, periodStatus, summarizeWeek } from './calendar-periods.mjs';
+import { addDaysKey, buildBlackoutMarks, buildDefaultSegments, buildPeriodStrip, keyToDate, periodStatus, summarizeWeek } from './calendar-periods.mjs';
 import type { BlackoutItem, PeriodStatus, PeriodStrip } from './calendar-periods.mjs';
 import type { PlantPeriod } from '../platform/types.mjs';
 
 const DAY_KEYS = ['day.sun', 'day.mon', 'day.tue', 'day.wed', 'day.thu', 'day.fri', 'day.sat'];
 const BADGE_CLASS: Record<PeriodStatus, string> = { active: 'badge-ok', upcoming: 'badge-info', past: 'badge-muted' };
 const STATUS_KEY: Record<PeriodStatus, string> = { active: 'ui.period_active', upcoming: 'ui.period_upcoming', past: 'ui.period_past' };
+
+/** Smallest default-week segment (percent of the axis) that gets its text label. At the widest strip
+ *  (~1000px) 5% is ~50px: room for a clipped "Default w…"; below it the segment is a bare dashed
+ *  outline whose title carries the detail. Narrow containers hide the label in CSS by segment width. */
+const DEFAULT_LABEL_MIN_PCT = 5;
 
 let _inited = false;
 let _saving = false;
@@ -119,15 +124,29 @@ function _stripHtml(periods: PlantPeriod[], todayKey: string, plant: string, str
   }).join('');
   const today = strip.today.leftPct.toFixed(3);
   const lane = _blackoutLaneHtml(plant, strip, todayKey);
+  // Default-week gaps. Same hours source as Plant._renderHours (admin-ui); ensurePlant only creates the
+  // default entry when missing and emits nothing.
+  Store.ensurePlant(plant);
+  const dayLabels = DAY_KEYS.map(k => Util.t(k));
+  const defaultSummary = summarizeWeek(Store.plants[plant]?.workHours ?? {}, dayLabels,
+    { closed: Util.t('ui.week_closed'), closedAll: Util.t('ui.week_closed_all') }).full;
+  const defaultName = Util.t('ui.default_week_legend');
+  const defaults = buildDefaultSegments(strip).map(g => {
+    const title = Util.escapeHtml(Util.t('ui.default_week_segment', { summary: defaultSummary, from: _fmtKey(g.fromKey), to: _fmtKey(g.toKey) }));
+    // The label is dropped for slivers that could only show a stray ellipsis (CSS also hides it when the
+    // segment's own width is too small, which covers narrow containers).
+    const label = g.widthPct >= DEFAULT_LABEL_MIN_PCT ? `<span class="period-seg-label">${Util.escapeHtml(defaultName)}</span>` : '';
+    return `<button type="button" class="period-seg period-seg-default" data-action="edit-default" style="left:${g.leftPct.toFixed(3)}%;width:${g.widthPct.toFixed(3)}%" title="${title}" aria-label="${title}">${label}</button>`;
+  }).join('');
   const legend = [
-    `<span>${Util.escapeHtml(Util.t('ui.default_week_legend'))}</span>`,
+    `<span class="period-legend-default"><i class="period-legend-sw period-legend-sw-default" aria-hidden="true"></i>${Util.escapeHtml(defaultName)}</span>`,
     lane.count ? `<span class="period-legend-blk"><i class="period-legend-sw" aria-hidden="true"></i>${Util.escapeHtml(Util.t('ui.blackout_legend'))}</span>` : '',
     lane.truncated ? `<span>${Util.escapeHtml(Util.t('ui.blackout_more', { count: lane.truncated }))}</span>` : '',
   ].join('');
   return `<div class="period-strip">
     <div class="period-ticks" aria-hidden="true">${ticks}</div>
     <div class="period-track">
-      ${segs}
+      ${defaults}${segs}
       <div class="period-today" style="left:${today}%"></div>
     </div>
     ${lane.html}
@@ -158,9 +177,17 @@ export const CalendarPeriodsUI = {
     _inited = true;
     const onClick = (ev: Event) => {
       const el = (ev.target as HTMLElement | null)?.closest?.('[data-action]') as HTMLElement | null;
-      const id = el?.dataset?.id;
-      if (!el || !id) return;
+      if (!el) return;
       const action = el.dataset.action;
+      // The default-week segment has no id: it opens the plant's default-week editor. The guard matters
+      // because EditCalendar.openPlant('') would crash in _populate (same as the panel's Edit Calendar button).
+      if (action === 'edit-default') {
+        const plant = Store.selectedPlant;
+        if (plant) EditCalendar.openPlant(plant);
+        return;
+      }
+      const id = el.dataset.id;
+      if (!id) return;
       if (action === 'edit-period') CalendarPeriodsUI.openModal(id);
       else if (action === 'delete-period') void CalendarPeriodsUI.remove(id);
     };

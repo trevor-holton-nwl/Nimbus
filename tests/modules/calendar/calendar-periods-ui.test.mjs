@@ -307,11 +307,107 @@ test('blackout marks: more than 60 clusters shows "+N more" in the legend', () =
   assert.match(tl, /\+4 more — see list/);
 });
 
-test('the legend carries the default-week caption and lives outside the today row', () => {
+test('the legend is a dashed Default week swatch (plus the red Blackout one when there are blackouts) outside the today row', () => {
+  CalendarPeriodsUI.render();
+  let tl = els['plant-periods-timeline'].innerHTML;
+  assert.match(tl, /<div class="period-legend"><span class="period-legend-default"><i class="period-legend-sw period-legend-sw-default" aria-hidden="true"><\/i>Default week<\/span><\/div>/);
+  assert.doesNotMatch(tl, /period-track-cap/);
+  seedBlocks([pblk('p1a', 'P1', atDay(10), atDay(11))]);
+  CalendarPeriodsUI.render();
+  tl = els['plant-periods-timeline'].innerHTML;
+  assert.ok(tl.indexOf('period-legend-default') < tl.indexOf('period-legend-blk'), 'Default week first, then Blackout');
+  assert.ok(tl.indexOf('class="period-legend"') > tl.indexOf('period-today-row'));
+});
+
+// ---- default-week segments ----
+const defSegs = (tl) => [...tl.matchAll(/<button type="button" class="period-seg period-seg-default"[^>]*>(?:<span class="period-seg-label">[^<]*<\/span>)?<\/button>/g)].map(m => m[0]);
+
+test('default segments: no periods is one full-width Default week segment, drawn before the periods inside the track', () => {
   CalendarPeriodsUI.render();
   const tl = els['plant-periods-timeline'].innerHTML;
-  assert.match(tl, /<div class="period-legend"><span>Default week outside periods<\/span><\/div>/);
-  assert.doesNotMatch(tl, /period-track-cap/);
+  const d = defSegs(tl);
+  assert.equal(d.length, 1);
+  assert.match(d[0], /data-action="edit-default"/);
+  assert.match(d[0], /style="left:0\.000%;width:100\.000%"/);
+  assert.match(d[0], /<span class="period-seg-label">Default week<\/span>/);
+  assert.doesNotMatch(d[0], /data-id/);
+  assert.ok(tl.indexOf('period-seg-default') > tl.indexOf('class="period-track"') && tl.indexOf('period-seg-default') < tl.indexOf('class="period-today"'));
+  assert.match(tl, /Default week · Mon–Fri 08:00–16:00 · Sat–Sun Closed \(/, 'title carries the default-week summary');
+  assert.match(d[0], /aria-label="Default week · /);
+});
+
+test('default segments: sit before period segments in the markup, with a gap each side of a middle period', () => {
+  const t0 = Util.dayKey(atDay(40)), t1 = Util.dayKey(atDay(50));
+  Store.setPlantPeriods('P1', [per('m', 'Middle', t0, t1)], 'test');
+  CalendarPeriodsUI.render();
+  const tl = els['plant-periods-timeline'].innerHTML;
+  assert.equal(defSegs(tl).length, 2);
+  assert.ok(tl.lastIndexOf('period-seg-default') < tl.indexOf('period-seg-upcoming'), 'defaults come first so periods paint over them');
+  assert.match(tl, /\(\d\d\/\d\d\/\d\d – \d\d\/\d\d\/\d\d\)"/, 'title carries the date range');
+});
+
+test('default segments: adjacent periods leave no sliver between them; open-ended leaves no trailing gap', () => {
+  Store.setPlantPeriods('P1', [
+    per('a', 'A', Util.dayKey(atDay(10)), Util.dayKey(atDay(19))),
+    per('b', 'B', Util.dayKey(atDay(20)), null),
+  ], 'test');
+  CalendarPeriodsUI.render();
+  assert.equal(defSegs(els['plant-periods-timeline'].innerHTML).length, 1, 'only the stretch before A');
+});
+
+test('default segments: a tiny gap renders without a label span (no stray ellipsis); a wide one keeps it', () => {
+  // Two periods with exactly one free day between them: ~0.27% of a 366-day axis.
+  Store.setPlantPeriods('P1', [
+    per('a', 'A', Util.dayKey(atDay(10)), Util.dayKey(atDay(19))),
+    per('b', 'B', Util.dayKey(atDay(21)), null),
+  ], 'test');
+  CalendarPeriodsUI.render();
+  const d = defSegs(els['plant-periods-timeline'].innerHTML);
+  assert.equal(d.length, 2);
+  const tiny = d.find(x => !x.includes('period-seg-label'));
+  assert.ok(tiny, 'the one-day gap has no label');
+  assert.match(tiny, /title="Default week · /, 'but keeps its title');
+  assert.ok(d.find(x => x.includes('period-seg-label')), 'the wide gap before keeps its label');
+});
+
+test('default segments: the summary and dates in title/aria are escaped and follow the plant default hours', () => {
+  Store.replacePlants({ P1: { workHours: { 0: null, 1: [6, 22], 2: [6, 22], 3: [6, 22], 4: [6, 22], 5: [6, 22], 6: null } } }, 'test');
+  Store.setSelectedPlant('P1', 'test');
+  CalendarPeriodsUI.render();
+  assert.match(els['plant-periods-timeline'].innerHTML, /title="Default week · Mon–Fri 06:00–22:00 · Sat–Sun Closed \(/);
+  // Day labels come from locale text; a hostile one must not break out of the attribute.
+  const w = globalThis.window.__NIMBUS_LOCALES.en;
+  const prior = w['day.mon'];
+  w['day.mon'] = '"><img src=x>';
+  try {
+    CalendarPeriodsUI.render();
+    const tl = els['plant-periods-timeline'].innerHTML;
+    assert.doesNotMatch(tl, /<img/);
+    assert.match(tl, /&quot;&gt;&lt;img src=x&gt;/);
+  } finally { w['day.mon'] = prior; }
+});
+
+test('edit-default click opens the default-week editor for the selected plant and never the period editor', () => {
+  CalendarPeriodsUI.init();
+  const prior = EditCalendar.openPlant;
+  const opened = [];
+  EditCalendar.openPlant = (...a) => opened.push(a);
+  try {
+    calls.length = 0;
+    click('plant-periods-timeline', { action: 'edit-default' });
+    assert.deepEqual(opened, [['P1']]);
+    assert.deepEqual(calls.filter(c => c[0] === 'openPeriod'), []);
+    // Empty plant: guarded, never opens.
+    Store.setSelectedPlant(null, 'test');
+    click('plant-periods-timeline', { action: 'edit-default' });
+    assert.equal(opened.length, 1);
+    // Existing actions still route, and a data-id-less non-default action does nothing.
+    Store.setSelectedPlant('P1', 'test');
+    click('plant-periods-timeline', { action: 'edit-period', id: 'zz' });
+    click('plant-periods-timeline', { action: 'edit-period' });
+    assert.deepEqual(calls.filter(c => c[0] === 'openPeriod'), [['openPeriod', 'P1', 'zz']]);
+    assert.equal(opened.length, 1);
+  } finally { EditCalendar.openPlant = prior; }
 });
 
 test('clicking a blackout marker never opens the period modal', () => {
