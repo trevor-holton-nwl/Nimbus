@@ -19,7 +19,7 @@ A plant today has exactly one weekly working-hours pattern. The owner needs a pl
 | D2 | **The Gantt shades all non-working time**: closed days fully grey, plus off-shift hours on open days (a 12:00-24:00 shift greys 00:00-12:00). Plant pattern only, not per-line hours. | Planners want to see at a glance where the plant is not producing. Per-line shading would roughly triple the item count and vary by line filter. |
 | D3 | **New "Calendar" inner tab** on Master Data > Plant, next to General / Optimization / System Settings: default week and a horizontal period timeline strip stacked full width, then the periods list with add/edit modal, then Plant Blackouts. The existing "Plant Working Hours" panel **moves** into this tab. *(Rev. 2026-10-19: blackouts moved here from General, are editable, and show as red marks on the timeline; see section 11.)* | Working hours, periods and blackouts all decide when the plant can run, so planners tune them in one place; the timeline shows how they interact. |
 | D4 | **Line hours intersect on the fly** with whichever plant pattern is active on the date. Stored line hours are never changed by a period edit. | A period edit must be reversible by deleting the period; rewriting stored line hours would make it destructive. |
-| D5 | **Line clamping uses the widest pattern.** When the default hours are edited, `Store.clampLinesToPlant` trims each line's weekday hours to the **union** of the default and every period's hours for that weekday, not the default alone. Read-time intersection keeps ordinary weeks correct. | Otherwise a period that widens production (say 01:00-13:00 against a 12:00-24:00 default) could never be used by the lines, because they would already have been trimmed away. |
+| D5 | **SUPERSEDED 2026-10-19 (see section 4.4): there is no clamp.** *(Original text:)* **Line clamping uses the widest pattern.** When the default hours are edited, `Store.clampLinesToPlant` trims each line's weekday hours to the **union** of the default and every period's hours for that weekday, not the default alone. Read-time intersection keeps ordinary weeks correct. | Otherwise a period that widens production (say 01:00-13:00 against a 12:00-24:00 default) could never be used by the lines, because they would already have been trimmed away. |
 | D6 | **A period save raises alerts only.** Bars stay put, "outside working hours" alerts recompute, planners move, Fix or Optimize. | Same as default-hours and blackout edits today. Moving orders on a calendar edit would surprise planners. |
 
 ### 1.2 Orchestrator decisions (reconciling the two design passes)
@@ -110,7 +110,10 @@ The optimizer worker imports `../nimbus-compute-core.js` without a `?v=` cache-b
 
 `Utilization._cache` and `Dashboard._matrix7Cache` key on `Store.rev()`. Period writes must therefore go through `Store.setPlantPeriods` (which emits) and never assign `plants[plant].periods` directly outside `_applyConfig`.
 
-### 4.4 Line clamping (D5)
+### 4.4 Line clamping (D5): superseded 2026-10-19 by machine calendar inheritance
+
+**Superseded.** `Store.clampLinesToPlant` is deleted and a plant save writes the plant row only. The clamp also narrowed machines that had no calendar of their own and POSTed the narrowed copies as `machine_calendar` rows, so plant 7pm to 5pm to 7pm left every machine pinned at 5pm. The rule now: **no machine row = the machine follows its plant; an inherited machine is all-day and the plant bounds it; an override keeps its own hours and the per-date intersection caps it.** See `frontend/calendar/CLAUDE.md`, "Machine calendar inheritance". The original text follows for the record.
+
 
 `Store.clampLinesToPlant` (~582-609): for each weekday the clamp bound is the union of the default and every period's hours (minimum start, maximum end; open if any pattern is open), computed by `unionWeeklyHours`. The persist-only-changed-lines behaviour is unchanged. Period saves do not call it (D4).
 
