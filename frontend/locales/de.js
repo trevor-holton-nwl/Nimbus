@@ -1774,6 +1774,7 @@ window.__NIMBUS_LOCALES.de = {
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Planungsregeln',
   'ui.settings_subtab_setup':          'Rüstmatrix',
+  'ui.settings_rules_rightclick_hint':  'Rechtsklick auf eine Einstellung für mehr Infos',
   'ui.setup_step1_definition':         'Rüstsignatur',
   'ui.setup_grid_filter_from_placeholder': 'Von filtern…',
   'ui.setup_grid_filter_to_placeholder':   'Nach filtern…',

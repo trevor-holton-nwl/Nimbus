@@ -2017,6 +2017,7 @@ window.__NIMBUS_LOCALES.en = {
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Scheduling Rules',
   'ui.settings_subtab_setup':          'Setup Matrix',
+  'ui.settings_rules_rightclick_hint':  'Right-click a setting for more info',
   'ui.setup_step1_definition':         'Setup signature',
   'ui.setup_grid_filter_from_placeholder': 'Filter From…',
   'ui.setup_grid_filter_to_placeholder':   'Filter To…',

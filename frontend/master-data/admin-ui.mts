@@ -1324,11 +1324,18 @@ export const Plant = {
 
     const subTab = Plant._currentSettingsSubTab;
     const subTabVisibility = Plant._settingsSubTabVisibility(subTab);
+    const rulesHintText = Util.t('ui.settings_rules_rightclick_hint');
+    const rulesHint = subTab === 'rules'
+      ? `<span class="panel-hint settings-rules-hint" title="${Util.escapeHtml(rulesHintText)}">ⓘ ${Util.escapeHtml(rulesHintText)}</span>`
+      : '';
     pane.innerHTML = `
+        <div class="tab-strip-row settings-tab-row">
         <nav class="admin-subtabs settings-inner-tabs" role="tablist">
           <button id="settings-subtab-rules-tab" class="sub-subtab${subTab === 'rules' ? ' active' : ''}" data-settings-subtab="rules" role="tab" aria-selected="${subTab === 'rules'}" aria-controls="settings-subtab-rules">${Util.t('ui.settings_subtab_rules')}</button>
           <button id="settings-subtab-setup-tab" class="sub-subtab${subTab === 'setup' ? ' active' : ''}" data-settings-subtab="setup" role="tab" aria-selected="${subTab === 'setup'}" aria-controls="settings-subtab-setup">${Util.t('ui.settings_subtab_setup')}</button>
         </nav>
+        ${rulesHint}
+        </div>
 
       <div class="settings-content-scroll"><div class="cal-container settings-content-container">
         <div id="settings-subtab-rules" role="tabpanel" aria-labelledby="settings-subtab-rules-tab" style="display:${subTabVisibility.rules ? 'flex' : 'none'};flex-direction:column;gap:24px" ${subTabVisibility.rules ? '' : 'hidden'}>

@@ -353,6 +353,33 @@ test('Plant Settings pane has one fixed strip plus a scrollable body', () => {
   assert.match(source, /<nav class="admin-subtabs settings-inner-tabs"/);
 });
 
+test('Plant Settings tab row shows the right-click hint on Scheduling Rules only, outside the tablist', () => {
+  const priorDocument = globalThis.document;
+  const priorWindow = globalThis.window;
+  const priorSub = Plant._currentSettingsSubTab;
+  const render = (sub) => {
+    const pane = { innerHTML: '' };
+    globalThis.document = { getElementById: id => id === 'plant-tab-settings' ? pane : null,
+      querySelector: () => null, querySelectorAll: () => [] };
+    globalThis.window = {};
+    Plant._currentSettingsSubTab = sub;
+    try { Plant._renderSettingsPane(); } catch { /* post-innerHTML DOM wiring is irrelevant here */ }
+    return pane.innerHTML;
+  };
+  try {
+    const rules = render('rules');
+    assert.match(rules, /<div class="tab-strip-row settings-tab-row">/);
+    assert.match(rules, /class="panel-hint settings-rules-hint"/);
+    // The hint is a sibling after </nav>, never inside role="tablist".
+    assert.ok(rules.indexOf('</nav>') < rules.indexOf('settings-rules-hint'));
+    assert.doesNotMatch(render('setup'), /settings-rules-hint/);
+  } finally {
+    globalThis.document = priorDocument;
+    Plant._currentSettingsSubTab = priorSub;
+    globalThis.window = priorWindow;
+  }
+});
+
 test('Plant exposes the generalized priority-list optimization API', () => {
   assert.equal(typeof Plant._renderOptimization, 'function');
   assert.equal(typeof Plant._uploadPriorityList, 'function');

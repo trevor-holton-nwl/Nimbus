@@ -1772,6 +1772,7 @@ window.__NIMBUS_LOCALES.es = {
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Reglas de programación',
   'ui.settings_subtab_setup':          'Matriz de preparación',
+  'ui.settings_rules_rightclick_hint':  'Clic derecho en un ajuste para más información',
   'ui.setup_step1_definition':         'Firma de preparación',
   'ui.setup_grid_filter_from_placeholder': 'Filtrar Desde…',
   'ui.setup_grid_filter_to_placeholder':   'Filtrar Hasta…',

@@ -4888,7 +4888,10 @@ body.dark .cw-active-card {
    visible while the Rules or Setup Matrix panel scrolls independently. */
 .plant-settings-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .plant-settings-pane[hidden] { display: none; }
-.settings-inner-tabs { flex: 0 0 auto; margin: 0; padding: 0 24px; border-top: 1px solid var(--border); }
+.settings-tab-row { flex: 0 0 auto; padding: 0 24px; border-top: 1px solid var(--border); }
+.settings-tab-row > .settings-inner-tabs { flex: 0 0 auto; margin: 0; padding: 0; }
+.settings-rules-hint { flex: 0 1 auto; min-width: 0; margin-left: auto; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
 .settings-content-scroll { flex: 1; min-height: 0; overflow: auto; }
 .settings-content-container { padding-top: 16px; }
 

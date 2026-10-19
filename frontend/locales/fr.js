@@ -1772,6 +1772,7 @@ window.__NIMBUS_LOCALES.fr = {
   // Setup Matrix grid redesign (docs/Setup_matrix_redesign.md)
   'ui.settings_subtab_rules':          'Règles de planification',
   'ui.settings_subtab_setup':          'Matrice de réglage',
+  'ui.settings_rules_rightclick_hint':  'Clic droit sur un réglage pour plus d’infos',
   'ui.setup_step1_definition':         'Signature de réglage',
   'ui.setup_grid_filter_from_placeholder': 'Filtrer De…',
   'ui.setup_grid_filter_to_placeholder':   'Filtrer Vers…',
