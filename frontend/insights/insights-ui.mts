@@ -826,7 +826,11 @@ export const Dashboard = {
     const keys = Dashboard._lsDayKeys(Util.plantClock(Store.selectedPlant));
     const idx = Math.max(0, Math.min(keys.length - 1, keys.indexOf(Dashboard._lsActiveKey(keys)) + (dir < 0 ? -1 : 1)));
     Dashboard._lsDayKey = keys[idx];
-    if (Dashboard._matrix7Cache) Dashboard._renderLineStatus(Dashboard._matrix7Cache.matrix);
+    // The cached matrix is only valid while its day 0 is still plant-today (its key leads
+    // with that day's start); after midnight rolls over, rebuild via a full render.
+    const cache = Dashboard._matrix7Cache;
+    const cacheFresh = !!cache && cache.key.split('|')[0] === String(Util.startOfDay(Util.plantClock(Store.selectedPlant))!.getTime());
+    if (cache && cacheFresh) Dashboard._renderLineStatus(cache.matrix);
     else Dashboard.render();
     Dashboard._syncLineStatusHeight();
   },
