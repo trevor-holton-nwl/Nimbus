@@ -720,7 +720,7 @@ export const Store = {
       ls.plGroup = (row.wc_group as string) || '';
       ls.plant   = (row.plant as string) || null;
       ls.sapWorkcenter = (row.sap_workcenter as string) || null;
-      ls.distributionWeight = (row.distribution_weight as number | null | undefined) ?? null;
+      ls.distributionWeight = row.distribution_weight == null ? null : Number(row.distribution_weight);
       if (JSON.stringify(ls) !== before) touched++;
     }
     return touched;

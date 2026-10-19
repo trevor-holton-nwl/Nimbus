@@ -54,7 +54,7 @@ test('ProdLines.refresh re-fetches plants, the plant-scoped machines and the pla
   }
 });
 
-test('ProdLines.refresh resolves false, keeps the Store rows and still emits master-data-changed when both fetches fail', async () => {
+test('ProdLines.refresh resolves false, keeps the Store rows and does NOT emit master-data-changed when both fetches fail', async () => {
   const priorPlant = Store.selectedPlant;
   const priorMasterData = Store.masterData;
   const priorFetch = Util.fetchTraced;
@@ -75,8 +75,7 @@ test('ProdLines.refresh resolves false, keeps the Store rows and still emits mas
     unsubscribe();
     assert.equal(result, false, 'no fresh rows landed');
     assert.equal(Store.masterData, sentinel, 'a failed refresh never blanks the Store rows');
-    assert.equal(events.length, 1, 'the no-op branch still emits exactly one master-data-changed');
-    assert.equal(events[0].source, 'master-data-refresh');
+    assert.equal(events.length, 0, 'a failed refresh must not re-emit (it would re-apply stale lines)');
   } finally {
     Util.fetchTraced = priorFetch;
     if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
@@ -996,6 +995,26 @@ test('MasterData bulk-save for routing_rules also refreshes Runtime for plants w
   assert.match(source, /_refreshRuntimeFor\(\[\.\.\.upserts, \.\.\.deletes\]\.map\(\(row\) => row\.plant as string \| undefined\)\)/);
 });
 
+// syncLineSettings' per-plant machine cache is module-private; a successful refresh for the
+// plant is the only public path that drops it, so tests call this in their finally blocks.
+async function _dropLineSyncCache(plant) {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Util.fetchTraced = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+  try {
+    Store.setSelectedPlant(plant, 'test');
+    await ProdLines.refresh();
+  } finally {
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
+}
+
 test('syncLineSettings posts only the key columns and the changed column, not the whole cached row (#46)', async () => {
   const priorFetch = globalThis.fetch;
   const priorToast = Toast.show;
@@ -1022,6 +1041,7 @@ test('syncLineSettings posts only the key columns and the changed column, not th
     Store.getPlantForLine = priorGetPlant;
     globalThis.fetch = priorFetch;
     Toast.show = priorToast;
+    await _dropLineSyncCache('P46');
   }
 });
 
@@ -1060,7 +1080,7 @@ test('syncLineSettings drops its cache and refetches once when the line is absen
     assert.match(h.gets[1], /\/master-data\/machine\?plant=P-miss$/);
     assert.equal(h.posts.length, 2, 'the new machine\'s edit is saved, not silently dropped');
     assert.equal(h.posts[1].upserts[0].machine, 'M-B');
-  } finally { h.restore(); }
+  } finally { h.restore(); await _dropLineSyncCache('P-miss'); }
 });
 
 test('syncLineSettings refetches once and then gives up without posting when the line is still absent', async () => {
@@ -1070,7 +1090,7 @@ test('syncLineSettings refetches once and then gives up without posting when the
     await MasterData.syncLineSettings('M-Z', { bottleneck: true });
     assert.equal(h.gets.length, 2);
     assert.equal(h.posts.length, 1, 'no POST for a machine the server does not have');
-  } finally { h.restore(); }
+  } finally { h.restore(); await _dropLineSyncCache('P-gone'); }
 });
 
 test('a successful master-data refresh invalidates the line-sync machine cache for that plant', async () => {
@@ -1950,6 +1970,12 @@ test('Store.applyMasterLinesToSettings copies sap_workcenter and distribution_we
     assert.equal(Store.lineSettings.ZB1.excludeFromOpt, true);
     assert.equal(Store.lineSettings.ZB2.sapWorkcenter, null);
     assert.equal(Store.lineSettings.ZB2.distributionWeight, null);
+    Store.masterData.lines.push({ machine: 'ZB0', plant: 'ZBP', sap_workcenter: 'ZB1', distribution_weight: 0 });
+    Store.masterData.lines.push({ machine: 'ZBS', plant: 'ZBP', sap_workcenter: 'ZB1', distribution_weight: '2.5' });
+    Store.applyMasterLinesToSettings();
+    assert.equal(Store.lineSettings.ZB0.distributionWeight, 0, 'a zero weight is kept, not nulled');
+    assert.equal(Store.lineSettings.ZBS.distributionWeight, 2.5, 'a string NUMERIC is coerced to a number');
+    Store.masterData.lines.length = 2;
     assert.equal(Store.applyMasterLinesToSettings(), 0, 'idempotent: nothing changed the second time');
     Store.masterData.lines[1].sap_workcenter = '';
     Store.masterData.lines[0].sap_workcenter = null;
@@ -1996,6 +2022,88 @@ test('a Machines-pane write patches Store.masterData.lines so a following master
   }
 });
 
+test('syncLineSettings with a linked response toasts and re-pulls the plant machine rows', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorToast = Toast.show;
+  const priorDocument = globalThis.document;
+  const priorGetPlant = Store.getPlantForLine;
+  const gets = [];
+  const toasts = [];
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Toast.show = (m, kind) => toasts.push({ m, kind });
+  const priorWindow = globalThis.window;
+  globalThis.window = { ...(priorWindow || {}), __NIMBUS_LOCALES: priorWindow?.__NIMBUS_LOCALES || { en: {} } }; // Util.t reads it
+  Store.getPlantForLine = (line) => (line === 'M-LK' ? 'P-lk' : priorGetPlant.call(Store, line));
+  Util.fetchTraced = (url, opts) => {
+    if (opts?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({ linked: [{ plant: 'P-lk', machine: 'M-LK' }] }) });
+    gets.push(String(url));
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ columns: [], rows: [{ subnetwork: 'S', plant: 'P-lk', machine: 'M-LK' }] }) });
+  };
+  try {
+    Store.setSelectedPlant('P-lk', 'test');
+    Store.setMasterData({ plants: [], workcenters: [], lines: [] }, 'test');
+    await MasterData.syncLineSettings('M-LK', { bottleneck: true });
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(gets.length, 3, `cache fill + plants + machine refresh: ${gets}`);
+    assert.ok(gets.filter((u) => u.endsWith('/master-data/machine?plant=P-lk')).length === 2);
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].kind, 'info');
+  } finally {
+    Util.fetchTraced = priorFetch;
+    Toast.show = priorToast;
+    Store.getPlantForLine = priorGetPlant;
+    if (priorWindow === undefined) delete globalThis.window; else globalThis.window = priorWindow;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    await _dropLineSyncCache('P-lk');
+  }
+});
+
+test('a refresh in flight while a Machines-pane write commits is discarded, so the pane edit is kept', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorToast = Toast.show;
+  const priorDocument = globalThis.document;
+  const priorGetPlant = Store.getPlantForLine;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Toast.show = () => {};
+  Store.getPlantForLine = (line) => (line === 'M-RC' ? 'P-rc' : priorGetPlant.call(Store, line));
+  let releaseStale;
+  const stale = new Promise((r) => { releaseStale = r; });
+  Util.fetchTraced = (url, opts) => {
+    if (opts?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    if (String(url).includes('/master-data/machine?plant=P-rc')) {
+      if (opts?.signal) { // the refresh's GET (the only one with a timeout signal): held until after the write commits, returns the pre-edit row
+        return stale.then(() => ({ ok: true, json: () => Promise.resolve({ rows: [{ subnetwork: 'S', plant: 'P-rc', machine: 'M-RC', bottleneck: null }] }) }));
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ columns: [], rows: [{ subnetwork: 'S', plant: 'P-rc', machine: 'M-RC', bottleneck: null }] }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+  };
+  try {
+    Store.setSelectedPlant('P-rc', 'test');
+    Store.setMasterData({ plants: [], workcenters: [], lines: [{ subnetwork: 'S', plant: 'P-rc', machine: 'M-RC', bottleneck: null }] }, 'test');
+    const refreshing = ProdLines.refresh();
+    await MasterData.syncLineSettings('M-RC', { bottleneck: true });
+    releaseStale();
+    await refreshing;
+    assert.equal(Store.masterData.lines[0].bottleneck, 'X', 'the stale refresh did not revert the pane edit');
+  } finally {
+    releaseStale();
+    Util.fetchTraced = priorFetch;
+    Toast.show = priorToast;
+    Store.getPlantForLine = priorGetPlant;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    await _dropLineSyncCache('P-rc');
+  }
+});
+
 test('WorkCenters._write patches _machines (weights, auto_linked) and re-pulls the machine rows into the Store', async () => {
   const priorPlant = Store.selectedPlant;
   const priorMasterData = Store.masterData;
@@ -2008,6 +2116,11 @@ test('WorkCenters._write patches _machines (weights, auto_linked) and re-pulls t
   const priorMachines = WorkCenters._machines;
   const priorSelected = WorkCenters._selected;
   const priorLoadedPlant = WorkCenters._loadedPlant;
+  const priorWindow = globalThis.window;
+  globalThis.window = { ...(priorWindow || {}), __NIMBUS_LOCALES: priorWindow?.__NIMBUS_LOCALES || { en: {} } };
+  const priorToast = Toast.show;
+  const toasts = [];
+  Toast.show = (m, kind) => toasts.push({ m, kind });
   const urls = [];
   Session.isAdmin = () => true;
   Alerts.scheduleRecompute = () => {};
@@ -2036,10 +2149,13 @@ test('WorkCenters._write patches _machines (weights, auto_linked) and re-pulls t
     }, ['WC-N'], WorkCenters._editSeq);
     assert.equal(WorkCenters._machines[0].sap_workcenter, 'WC-N', 'auto_linked patches the pane machine');
     assert.equal(WorkCenters._machines[0].distribution_weight, 3);
+    assert.deepEqual(toasts.map((t) => t.kind), ['info'], 'auto-link toasts once');
     assert.ok(urls.some((u) => u.startsWith('GET') && u.includes('/master-data/machine?plant=ZBP')), `machine rows re-pulled: ${urls}`);
     await new Promise((r) => setTimeout(r, 0));
     assert.equal(Store.masterData.lines[0]?.distribution_weight, 3, 'the weight reaches Store.masterData.lines');
   } finally {
+    if (priorWindow === undefined) delete globalThis.window; else globalThis.window = priorWindow;
+    Toast.show = priorToast;
     Session.isAdmin = priorIsAdmin;
     Alerts.scheduleRecompute = priorRecompute;
     Util.fetchTraced = priorFetch;

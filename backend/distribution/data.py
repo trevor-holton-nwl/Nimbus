@@ -233,7 +233,10 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
                     why = ("this work center already has other member machines — "
                            "rename the machine or the work center")
                 else:
-                    why = "rename the machine or the work center"
+                    raise ValueError(
+                        f"wc_code_shadowed_by_machine: Machine {wc_clean} exists with no work center link. "
+                        "Link it in the Machines pane, or rename the machine or the work center."
+                    )
                 raise ValueError(
                     f"wc_code_shadowed_by_machine: {wc_clean!r} is also a machine name in plant {plant!r}; {why}"
                 )

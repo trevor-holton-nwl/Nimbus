@@ -70,6 +70,12 @@ const PLANT_TOTAL_COVERAGE_KEY = '__plant_total__';
  *  `refreshStoreMasterData` can drop a plant's entry once fresh machine rows land. */
 const _lineSyncMachineCache: Record<string, MasterDataTableState<ProductionLineRow>> = {};
 
+/** Bumped by `MasterData.syncLineSettings` after it patches `Store.masterData.lines` with a
+ *  just-committed Machines-pane write. `refreshStoreMasterData` captures it at start and
+ *  discards its result when it moved: that GET may have read the row before the write
+ *  committed and would otherwise revert the pane to the pre-edit value. */
+let _lineWriteGen = 0;
+
 /** Re-pull `plants` + the selected plant's `machine` rows into `Store.masterData` so
  *  Hierarchy/ProdLines/Plant stay in sync with Postgres. Shared by `MasterData._save`
  *  (fire-and-forget, `source: 'master-data-save'`) and the Production Lines / Plant
@@ -85,6 +91,7 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
   const API = Config.API_BASE;
   const refreshPlant = Store.selectedPlant;
   const refreshLoadGen = Persistence._loadRequest;
+  const refreshWriteGen = _lineWriteGen;
   try {
     const [pData, lData] = await Promise.all([
       Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
@@ -95,6 +102,9 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
         : Promise.resolve(null),
     ]);
     if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return false;
+    // A Machines-pane write committed while these GETs were in flight: they may carry the
+    // pre-edit row, so drop them (the locally patched Store rows already hold the new value).
+    if (_lineWriteGen !== refreshWriteGen) return false;
     if (pData || lData) {
       // Public Store.setMasterData(...) equivalent of the former direct
       // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
@@ -128,10 +138,10 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
       // refresh reports success.
       return !!(pData && lData);
     }
-    Store.emit({ type: 'master-data-changed', table, source });
+    // Non-ok responses: nothing new landed, and re-emitting would re-apply stale lines.
     return false;
   } catch {
-    Store.emit({ type: 'master-data-changed', table, source });
+    // A failed fetch must not emit 'master-data-changed' (it re-applies the stale Store lines).
     return false;
   }
 }
@@ -5052,6 +5062,7 @@ export const MasterData = (() => {
       // would otherwise revert this edit from a stale row.
       const cachedRow = (Store.masterData?.lines ?? []).find((r) => r.machine === line && r.plant === plant);
       if (cachedRow) Object.assign(cachedRow, changed);
+      _lineWriteGen++;
       if (res?.linked?.length) {
         const names = res.linked.slice(0, 5).map((m) => m.machine).join(', ') + (res.linked.length > 5 ? ', …' : '');
         Toast.show(Util.t('toast.machines_autolinked', { machines: names }), 'info');
@@ -6071,11 +6082,24 @@ export const WorkCenters = {
       // and re-pull the Store's machine rows (the Machines pane reads them) — this also
       // repairs stale weights, not only auto-links. Selected plant only, like every Store slice.
       if (plant === Store.selectedPlant) {
+        // Patch the Store's machine rows and lineSettings directly so the Machines pane shows
+        // the new weights (and link) without waiting on a refresh GET.
+        const mdLines = (Store.masterData?.lines ?? []) as Array<NimbusMasterLine & { distribution_weight?: number | null }>;
+        for (const m of members) {
+          const w = res.weights[m] ?? null;
+          const row = mdLines.find((r) => r.plant === plant && r.machine === m);
+          if (row) row.distribution_weight = w;
+          Store.setLineSetting(m, { distributionWeight: w }, 'work-centers');
+        }
         if (res.auto_linked) {
           const linked = WorkCenters._machines.find((x) => x.machine === code);
           if (linked) linked.sap_workcenter = code;
+          const row = mdLines.find((r) => r.plant === plant && r.machine === code);
+          if (row) row.sap_workcenter = code;
+          Store.setLineSetting(code, { sapWorkcenter: code }, 'work-centers');
+          Toast.show(Util.t('toast.machines_autolinked', { machines: code }), 'info');
+          void refreshStoreMasterData('work-centers', 'machine');
         }
-        void refreshStoreMasterData('work-centers', 'machine');
       }
       WorkCenters._refreshSidebarRow(code);
 

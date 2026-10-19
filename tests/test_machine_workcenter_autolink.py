@@ -180,11 +180,18 @@ class TestAutolinkRule:
         assert "linked" not in res
         assert _links(seeded) == [("ZZ-RG", None)]
 
-    def test_a_new_machine_whose_payload_carries_the_link_key_is_never_auto_linked(self, seeded):
+    def test_a_new_machine_with_a_blank_link_key_is_still_auto_linked(self, seeded):
+        # Nothing to clear on creation: a blank/null sap_workcenter must not suppress the link.
         _apply("sap_workcenter", [_wc("ZZ-RH")])
         res = _apply("machine", [_machine("ZZ-RH", wc="")])
+        assert res["linked"] == [{"plant": PLANT, "machine": "ZZ-RH"}]
+        assert _links(seeded) == [("ZZ-RH", "ZZ-RH")]
+
+    def test_a_new_machine_with_an_explicit_other_link_keeps_it(self, seeded):
+        _apply("sap_workcenter", [_wc("ZZ-RH"), _wc("ZZ-RI")])
+        res = _apply("machine", [_machine("ZZ-RH", wc="ZZ-RI")])
         assert "linked" not in res
-        assert _links(seeded) == [("ZZ-RH", None)]
+        assert _links(seeded) == [("ZZ-RH", "ZZ-RI")]
 
     def test_the_audit_row_records_the_auto_link(self, seeded):
         _apply("sap_workcenter", [_wc("ZZ-M9")])

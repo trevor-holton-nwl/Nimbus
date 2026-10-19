@@ -3826,6 +3826,23 @@ class TestOneToOneWorkcenterRules(_ReweightFixtureBase):
         # The refused save rolled back: no link, no work-center edit.
         assert self._machine_link(pg) == [None]
 
+    def test_creating_save_refused_for_cleared_machine_rolls_back_the_policy_row(self, pg):
+        # A creating save in distribute mode against a same-named unlinked machine is refused;
+        # the policy row it just upserted must roll back with it.
+        self._drop_wc(pg)
+        with pytest.raises(ValueError, match="wc_code_shadowed_by_machine"):
+            self._save(mode="distribute")
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                        (self.PLANT, self.WC))
+            assert cur.fetchone()[0] == 0
+        assert self._machine_link(pg) == [None]
+
+    def test_cleared_single_machine_with_no_members_gets_the_link_it_message(self, pg):
+        with pytest.raises(ValueError, match="wc_code_shadowed_by_machine") as ei:
+            self._save()
+        assert "exists with no work center link. Link it in the Machines pane" in str(ei.value)
+
     def test_unlinked_same_named_machine_is_shadowed_when_wc_has_other_members(self, pg):
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(

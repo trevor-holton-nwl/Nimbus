@@ -1150,8 +1150,9 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         group_order: list[tuple] = []
         # (plant, name) of rows this call INSERTED (not updated) on machine/sap_workcenter:
         # the auto-link below fires only for newly created rows, so a planner's explicit
-        # clear of a link sticks (2026-10-19). A machine payload carrying a sap_workcenter
-        # key is an explicit link decision and is never auto-linked.
+        # clear of a link sticks (2026-10-19). A NEW machine whose payload carries a NON-blank
+        # sap_workcenter is an explicit link decision and is never auto-linked; a blank/null
+        # value has nothing to clear on creation, so it still auto-links.
         created_for_autolink: list[tuple] = []
         autolink_name_col = {"machine": "machine", "sap_workcenter": "sap_workcenter"}.get(table)
         for row in upserts:
@@ -1235,7 +1236,9 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                     row_result = cur.fetchone()
                     if row_result is not None and row_result[0]:
                         inserted += 1
-                        if autolink_name_col and not (table == "machine" and "sap_workcenter" in group_rows[_idx]):
+                        if autolink_name_col and not (
+                                table == "machine"
+                                and str(group_rows[_idx].get("sap_workcenter") or "").strip()):
                             created_for_autolink.append(
                                 (group_rows[_idx].get("plant"), group_rows[_idx].get(autolink_name_col)))
                     else:
