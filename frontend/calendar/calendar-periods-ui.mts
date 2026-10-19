@@ -11,6 +11,8 @@
 // is answered from the DOM instead.
 import { Util, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
+import { Sandbox } from '../optimization/sandbox.mjs';
+import { Session } from '../security/session.mjs';
 import { CalendarSync } from './calendar-sync.mjs';
 import { EditCalendar } from './edit-calendar.mjs';
 import { addDaysKey, buildBlackoutMarks, buildDefaultSegments, buildPeriodStrip, keyToDate, periodStatus, summarizeWeek } from './calendar-periods.mjs';
@@ -194,6 +196,41 @@ export const CalendarPeriodsUI = {
     document.getElementById('plant-periods-list')?.addEventListener('click', onClick);
     document.getElementById('plant-periods-timeline')?.addEventListener('click', onClick);
     document.getElementById('plant-add-period-btn')?.addEventListener('click', () => CalendarPeriodsUI.openModal());
+    document.getElementById('plant-reset-machines-btn')?.addEventListener('click', () => void CalendarPeriodsUI.resetAllMachines());
+  },
+
+  /** Footer row of the periods panel: how many machines hold their own hours, with an admin-only "Reset all
+   *  machines to plant". Hidden when there are none (or for a non-admin, who could not write the reset). */
+  renderResetRow(): void {
+    const row = document.getElementById('plant-reset-machines');
+    if (!row) return;
+    const count = Session.isAdmin() ? CalendarSync.overrideLines(Store.selectedPlant).length : 0;
+    row.hidden = count === 0;
+    const hint = document.getElementById('plant-reset-machines-hint');
+    if (hint) hint.textContent = count ? Util.t(count === 1 ? 'ui.machines_custom_hours_one' : 'ui.machines_custom_hours', { count }) : '';
+  },
+
+  /** Reset every machine of the selected plant that has its own hours back to following the plant. Admin only;
+   *  confirms first (it clears many rows at once), then queues one batched null write. */
+  async resetAllMachines(): Promise<boolean> {
+    const plant = Store.selectedPlant;
+    if (!plant || !Session.isAdmin()) return false;
+    const lines = CalendarSync.overrideLines(plant);
+    if (!lines.length) return false;
+    const confirmed = await Modal.confirm({
+      title: Util.t('confirm.reset_machines_title'),
+      message: Util.t(lines.length === 1 ? 'confirm.reset_machines_one' : 'confirm.reset_machines', { count: lines.length, plant }),
+      confirmLabel: Util.t('btn.reset_machines'),
+      tone: 'warn',
+    });
+    if (!confirmed) return false;
+    // Re-read after the dialog: a machine could have been reset or edited while it was open.
+    const now = CalendarSync.overrideLines(Store.selectedPlant === plant ? plant : null);
+    if (!now.length) return false;
+    CalendarSync.resetLinesToPlant(plant, now);
+    CalendarPeriodsUI.renderResetRow();
+    Toast.show(Util.t(Sandbox.active ? 'toast.calendar_whatif_local' : 'toast.calendar_changes_pending'), 'info');
+    return true;
   },
 
   render(): void {
@@ -211,6 +248,7 @@ export const CalendarPeriodsUI = {
       if (countEl) countEl.textContent = '';
       if (horizonEl) horizonEl.textContent = '';
       if (addBtn) addBtn.disabled = true;
+      CalendarPeriodsUI.renderResetRow();
       return;
     }
     if (addBtn) addBtn.disabled = false;
@@ -226,6 +264,7 @@ export const CalendarPeriodsUI = {
     const strip = buildPeriodStrip(periods, todayKey, { fmtMonth: _fmtMonth });
     if (timeline) timeline.innerHTML = _stripHtml(periods, todayKey, plant, strip);
     if (horizonEl) horizonEl.textContent = _horizonText(strip, todayKey);
+    CalendarPeriodsUI.renderResetRow();
   },
 
   openModal(id?: string): void {

@@ -4940,6 +4940,16 @@ body.dark .cw-active-card {
   #plant-hours-body .line-hours-pill { padding-left: 2px; padding-right: 2px; }
   #plant-hours-body .lhp-time { font-size: 10px; }
 }
+/* Reset-all-machines footer of the periods panel: hint left, action right, wrapping on a narrow pane. */
+.plant-reset-machines {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 8px 12px; padding: 10px 18px; border-top: 1px solid var(--border-subtle);
+}
+.plant-reset-machines[hidden] { display: none; }
+/* Line detail Working-hours head: title + "Custom hours" badge left, actions right; wraps when narrow. */
+.ld-section-head { flex-wrap: wrap; gap: 6px 12px; }
+.ld-head-main, .ld-head-actions { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.ld-hours-note { margin: 8px 0 0; }
 #plant-tab-calendar .plant-no-sel { padding: 16px 18px; margin: 0; font-size: 12.5px; color: var(--fg-faint); }
 
 /* Status badge for an in-force period / a finished one (info reuses .badge-info). */

@@ -9,6 +9,7 @@ import { EditCalendar } from '../../../frontend/calendar/edit-calendar.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Toast, Modal, Util } from '../../../frontend/platform/foundation.mjs';
+import { Session } from '../../../frontend/security/session.mjs';
 
 globalThis.NimbusComputeCore ??= createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 // Real English strings, so assertions read like the UI.
@@ -22,7 +23,8 @@ const wh = (a, b) => ({ 0: null, 1: [a, b], 2: [a, b], 3: [a, b], 4: [a, b], 5: 
 const per = (id, name, from, to) => ({ id, name, validFrom: from, validTo: to, workHours: wh(6, 14) });
 
 // ---- tiny fake DOM, built once: init() binds listeners to these exact objects ----
-const IDS = ['plant-periods-list', 'plant-periods-timeline', 'plant-periods-horizon', 'plant-periods-count', 'plant-add-period-btn', 'plant-tab-calendar', 'cal-edit-save-btn'];
+const IDS = ['plant-periods-list', 'plant-periods-timeline', 'plant-periods-horizon', 'plant-periods-count', 'plant-add-period-btn', 'plant-tab-calendar', 'cal-edit-save-btn',
+  'plant-reset-machines', 'plant-reset-machines-hint', 'plant-reset-machines-btn'];
 const els = {};
 for (const id of IDS) {
   els[id] = {
@@ -428,4 +430,65 @@ test('horizon caption: "next 12 months" by default, "through <month year>" when 
   Store.setSelectedPlant(null, 'test');
   CalendarPeriodsUI.render();
   assert.equal(els['plant-periods-horizon'].textContent, '');
+});
+
+// ---- Reset all machines to plant (machine calendar inheritance, 2026-10-19) ----
+test('reset-all row: hidden with no overrides, shows the count for an admin, hidden for a non-admin', t => {
+  const priorCals = Store.calendars, priorMd = Store.masterData;
+  t.after(() => { Store.replaceCalendars(priorCals, 'test'); Store.setMasterData(priorMd, 'test'); });
+  Store.setMasterData({ plants: [{ plant: 'P1' }], lines: [{ machine: 'M1', plant: 'P1' }, { machine: 'M2', plant: 'P1' }, { machine: 'M3', plant: 'P1' }] }, 'test');
+  Store.replaceCalendars({}, 'test');
+  Store.ensureCalendar('M1');
+  t.mock.method(Session, 'isAdmin', () => true);
+  CalendarPeriodsUI.render();
+  assert.equal(els['plant-reset-machines'].hidden, true, 'no machine has its own hours');
+  Store.setCalendar('M2', wh(6, 18), 'test');
+  CalendarPeriodsUI.render();
+  assert.equal(els['plant-reset-machines'].hidden, false);
+  assert.equal(els['plant-reset-machines-hint'].textContent, '1 machine has its own hours');
+  Store.setCalendar('M3', wh(6, 18), 'test');
+  CalendarPeriodsUI.render();
+  assert.equal(els['plant-reset-machines-hint'].textContent, '2 machines have their own hours');
+  Session.isAdmin.mock.mockImplementation(() => false);
+  CalendarPeriodsUI.render();
+  assert.equal(els['plant-reset-machines'].hidden, true, 'a non-admin cannot write the reset');
+});
+
+test('reset-all: confirms with the count (warn tone), then queues one null write per machine and toasts once', async t => {
+  const priorCals = Store.calendars, priorMd = Store.masterData, priorSave = CalendarSync.saveLineHours;
+  const saves = [];
+  t.after(() => { Store.replaceCalendars(priorCals, 'test'); Store.setMasterData(priorMd, 'test'); CalendarSync.saveLineHours = priorSave; });
+  Store.setMasterData({ plants: [{ plant: 'P1' }], lines: [{ machine: 'M1', plant: 'P1' }, { machine: 'M2', plant: 'P1' }] }, 'test');
+  Store.replaceCalendars({}, 'test');
+  Store.setCalendar('M1', wh(6, 18), 'test');
+  Store.setCalendar('M2', wh(6, 18), 'test');
+  CalendarSync.saveLineHours = (...a) => saves.push(a);
+  t.mock.method(Session, 'isAdmin', () => true);
+  CalendarPeriodsUI.init();
+  els['plant-reset-machines-btn'].listeners.click.forEach(fn => fn({}));
+  await new Promise(r => setTimeout(r, 0));
+  const confirm = calls.find(c => c[0] === 'confirm')[1];
+  assert.equal(confirm.tone, 'warn');
+  assert.match(confirm.message, /2 machines at plant P1/);
+  assert.equal(confirm.confirmLabel, 'Reset machines');
+  assert.deepEqual(saves.map(s => [s[0], s[1], s[2]]).sort(), [['P1', 'M1', null], ['P1', 'M2', null]]);
+  assert.equal(Store.calendars.M1.inherited, true);
+  assert.equal(Store.calendars.M2.inherited, true);
+  assert.equal(toasts.length, 1);
+});
+
+test('reset-all: declining the confirm changes nothing', async t => {
+  const priorCals = Store.calendars, priorMd = Store.masterData, priorSave = CalendarSync.saveLineHours;
+  const saves = [];
+  t.after(() => { Store.replaceCalendars(priorCals, 'test'); Store.setMasterData(priorMd, 'test'); CalendarSync.saveLineHours = priorSave; });
+  Store.setMasterData({ plants: [{ plant: 'P1' }], lines: [{ machine: 'M1', plant: 'P1' }] }, 'test');
+  Store.replaceCalendars({}, 'test');
+  Store.setCalendar('M1', wh(6, 18), 'test');
+  CalendarSync.saveLineHours = (...a) => saves.push(a);
+  Modal.confirm = async () => false;
+  t.mock.method(Session, 'isAdmin', () => true);
+  await CalendarPeriodsUI.resetAllMachines();
+  assert.equal(saves.length, 0);
+  assert.equal(Store.calendars.M1.inherited, false);
+  assert.equal(toasts.length, 0);
 });
