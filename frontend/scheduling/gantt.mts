@@ -22,6 +22,7 @@
 // precedent as setup-admin.mts's Plant cycle from Phase P2).
 /* global NIMBUS */
 import { Config, Util, PerfMonitor, ErrorLog, Toast, VirtualList } from '../platform/foundation.mjs';
+import type { PasteMatcher } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Selection } from './selection.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
@@ -3025,6 +3026,8 @@ export const GanttFilter = {
   _selectedColors: new Set<string>(),
   _selectedForms:  new Set<string>(),
   _pastedIds:      new Set<string>(),
+  // Compiled from _pastedIds on Apply (exact + `*` wildcard patterns).
+  _pastedMatcher:  null as PasteMatcher | null,
   _bar:            null as HTMLElement | null,
   _lineSearch:     '',
   _colorSearch:    '',
@@ -3135,7 +3138,7 @@ export const GanttFilter = {
     const { text } = GanttFilter._active;
     if (GanttFilter._selectedColors.size > 0 && !GanttFilter._selectedColors.has((task.COLOR || '').toUpperCase())) return false;
     if (GanttFilter._selectedForms.size  > 0 && !GanttFilter._selectedForms.has((task.FORM_SIZE || '').toUpperCase())) return false;
-    if (!Util.taskMatchesPasteSet(task, GanttFilter._pastedIds)) return false;
+    if (!Util.taskMatchesPasteSet(task, GanttFilter._pastedIds.size > 0 ? (GanttFilter._pastedMatcher ?? GanttFilter._pastedIds) : null)) return false;
     if (text) {
       const haystack = [task.text, task.id, task.ORDER, task.PRODUCTION_ORDER, task.PARENT_ORDER, task.MATERIAL_NUMBER, task.MATERIAL_DESCRIPTION].join(' ').toLowerCase();
       if (!haystack.includes(text)) return false;
@@ -3333,7 +3336,9 @@ export const GanttFilter = {
   _onPoMatApply(): void {
     const ta = document.getElementById('gantt-pomat-textarea') as HTMLTextAreaElement | null;
     if (!ta) return;
-    GanttFilter._pastedIds = new Set(Util.parsePasteList(ta.value).map(Util.norm));
+    const tokens = Util.parsePasteList(ta.value).map(Util.norm);
+    GanttFilter._pastedIds = new Set(tokens);
+    GanttFilter._pastedMatcher = Util.compilePasteMatcher(tokens);
     const cnt = document.getElementById('gantt-pomat-count');
     if (cnt) {
       const n = GanttFilter._pastedIds.size;

@@ -1054,7 +1054,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.no_write_permission':         'Você não tem permissão para salvar essas alterações',
   'ui.all_pomat':                      'Ordem / Material',
   'ui.n_pomat_filter':                 '{{count}} colados',
-  'ph.paste_po_material':              'Cole números de ordem de produção ou de material — um por linha ou coluna do Excel…',
+  'ph.paste_po_material':              'Cole números de ordem de produção ou de material — um por linha ou coluna do Excel. Use * como curinga: 204*, *204*, *204…',
   'toast.paste_pomat_match':           '{{matched}} de {{total}} corresponde a um pedido visível',
   'ui.pomat_count':                    '{{count}} valor(es) colado(s)',
   'btn.clear_pasted':                  'Limpar colados',

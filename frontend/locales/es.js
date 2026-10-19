@@ -1058,7 +1058,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.no_write_permission':         'No tiene permiso para guardar estos cambios',
   'ui.all_pomat':                      'Orden / Material',
   'ui.n_pomat_filter':                 '{{count}} pegados',
-  'ph.paste_po_material':              'Pegue números de orden de producción o de material — uno por línea o columna de Excel…',
+  'ph.paste_po_material':              'Pegue números de orden de producción o de material — uno por línea o columna de Excel. Use * como comodín: 204*, *204*, *204…',
   'toast.paste_pomat_match':           '{{matched}} de {{total}} coincide con un pedido visible',
   'ui.pomat_count':                    '{{count}} valor(es) pegado(s)',
   'btn.clear_pasted':                  'Borrar pegado',

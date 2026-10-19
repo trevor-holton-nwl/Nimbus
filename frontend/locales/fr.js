@@ -1054,7 +1054,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.no_write_permission':         'Vous n\'avez pas la permission d\'enregistrer ces modifications',
   'ui.all_pomat':                      'Ordre / Matière',
   'ui.n_pomat_filter':                 '{{count}} collés',
-  'ph.paste_po_material':              'Collez des numéros d\'ordre de fabrication ou de matière — un par ligne ou colonne Excel…',
+  'ph.paste_po_material':              'Collez des numéros d\'ordre de fabrication ou de matière — un par ligne ou colonne Excel. Utilisez * comme joker : 204*, *204*, *204…',
   'toast.paste_pomat_match':           '{{matched}} sur {{total}} correspondent à une commande visible',
   'ui.pomat_count':                    '{{count}} valeur(s) collée(s)',
   'btn.clear_pasted':                  'Effacer le collage',

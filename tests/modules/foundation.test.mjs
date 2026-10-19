@@ -733,3 +733,56 @@ test('sapDueDate: a plant period that changes the close time on the due date cha
     Util.setDueCalendarResolver(null);
   }
 });
+
+/* PO/Material filter wildcards (W5) */
+const _wcTasks = [
+  { ORDER: '2040001', MATERIAL_NUMBER: 'M-A', PARENT_ORDER: '' },
+  { ORDER: '1204999', MATERIAL_NUMBER: 'M-B', PARENT_ORDER: '' },
+  { ORDER: '5550204', MATERIAL_NUMBER: 'M-C', PARENT_ORDER: '' },
+  { ORDER: '204',     MATERIAL_NUMBER: 'M-D', PARENT_ORDER: '' },
+  { ORDER: 'A-777',   MATERIAL_NUMBER: 'M-E', PARENT_ORDER: '5550204' },
+  { ORDER: '2X4Y',    MATERIAL_NUMBER: 'M-F', PARENT_ORDER: '' },
+  { ORDER: '2.4Z',    MATERIAL_NUMBER: 'M-G', PARENT_ORDER: '' },
+];
+const _wcHits = (text) => {
+  const m = Util.compilePasteMatcher(Util.parsePasteList(text));
+  return _wcTasks.filter(t => Util.taskMatchesPasteSet(t, m)).map(t => t.ORDER);
+};
+
+test('wildcard starts-with 204*', () => {
+  assert.deepEqual(_wcHits('204*'), ['2040001', '204']);
+});
+test('wildcard contains *204*', () => {
+  assert.deepEqual(_wcHits('*204*'), ['2040001', '1204999', '5550204', '204', 'A-777']);
+});
+test('wildcard ends-with *204 (also pulls sub-orders via PARENT_ORDER)', () => {
+  assert.deepEqual(_wcHits('*204'), ['5550204', '204', 'A-777']);
+});
+test('plain 204 stays an exact match', () => {
+  assert.deepEqual(_wcHits('204'), ['204']);
+});
+test('wildcard input is case-insensitive and matches material numbers', () => {
+  assert.deepEqual(_wcHits('m-*'), _wcTasks.map(t => t.ORDER));
+  assert.deepEqual(_wcHits('a-7*'), ['A-777']);
+});
+test('regex metacharacters in a wildcard token are literal', () => {
+  assert.deepEqual(_wcHits('2.4*'), ['2.4Z']);
+});
+test('bare * is ignored; exact and wildcard tokens combine', () => {
+  const m = Util.compilePasteMatcher(['*', '**', '204', '1204*']);
+  assert.equal(m.exact.size, 1);
+  assert.equal(m.patterns.length, 1);
+  assert.equal(m.size, 2);
+  assert.equal(Util.compilePasteMatcher(['*']).size, 0);
+  assert.deepEqual(_wcHits('204\n1204*'), ['1204999', '204']);
+});
+test('taskMatchesPasteSet still accepts a plain Set', () => {
+  assert.equal(Util.taskMatchesPasteSet(_wcTasks[3], new Set(['204'])), true);
+  assert.equal(Util.taskMatchesPasteSet(_wcTasks[0], new Set(['204'])), false);
+  assert.equal(Util.taskMatchesPasteSet(_wcTasks[0], new Set()), true);
+});
+test('countPasteMatches counts wildcard tokens against known ids', () => {
+  const known = new Set(['2040001', '204', 'M-A']);
+  assert.deepEqual(Util.countPasteMatches('204*\n999*\n204\nzzz', known), { matched: 2, total: 4 });
+  assert.deepEqual(Util.countPasteMatches('*', known), { matched: 0, total: 0 });
+});

@@ -1054,7 +1054,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.no_write_permission':         'Sie haben keine Berechtigung, diese Änderungen zu speichern',
   'ui.all_pomat':                      'Auftrag / Material',
   'ui.n_pomat_filter':                 '{{count}} eingefügt',
-  'ph.paste_po_material':              'Fertigungsauftrags- oder Materialnummern einfügen — eine pro Zeile oder Excel-Spalte…',
+  'ph.paste_po_material':              'Fertigungsauftrags- oder Materialnummern einfügen — eine pro Zeile oder Excel-Spalte. * als Platzhalter: 204*, *204*, *204…',
   'toast.paste_pomat_match':           '{{matched}} von {{total}} einem sichtbaren Auftrag zugeordnet',
   'ui.pomat_count':                    '{{count}} Wert(e) eingefügt',
   'btn.clear_pasted':                  'Eingefügtes löschen',

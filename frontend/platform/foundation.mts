@@ -42,6 +42,12 @@ type UtilizationResolverFn = (
   date: Date, days: number, tasks: NimbusTask[], context?: unknown
 ) => Record<string, Record<string, { pct?: number } | undefined>>;
 
+export interface PasteMatcher {
+  exact: Set<string>;
+  patterns: RegExp[];
+  size: number;
+}
+
 interface VirtualListOptions<T> {
   rowH?: number;
   getRowH?: (item: T) => number;
@@ -982,15 +988,45 @@ export const Util = {
   // production order as .ORDER (brain.py aliases PRODUCTION_ORDER -> ORDER
   // in the /tasks response) — .PRODUCTION_ORDER is kept as a fallback only
   // for parity with the same convention used by Table's own valueGetter.
-  taskMatchesPasteSet(task: NimbusTask, idSet: Set<string> | null | undefined): boolean {
+  // Accepts either a plain Set of exact ids (legacy callers) or a
+  // PasteMatcher from compilePasteMatcher (exact ids plus `*` wildcard
+  // patterns). Exact ids are tried first; patterns only when no exact hit.
+  taskMatchesPasteSet(task: NimbusTask, idSet: Set<string> | PasteMatcher | null | undefined): boolean {
     if (!idSet || idSet.size === 0) return true;
+    const exact: Set<string> = idSet instanceof Set ? idSet : idSet.exact;
+    const patterns: RegExp[] = idSet instanceof Set ? [] : idSet.patterns;
     const po     = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER);
     const mat    = Util.norm(task.MATERIAL_NUMBER);
     // Matching the SAP parent order too means pasting/searching a parent
     // order number (e.g. "1000") selects every sub-order (A-1000, B-1000, …),
     // not just an exact PRODUCTION_ORDER match (aggregate_to_detail.md §8).
     const parent = Util.norm(task.PARENT_ORDER);
-    return !!((po && idSet.has(po)) || (mat && idSet.has(mat)) || (parent && idSet.has(parent)));
+    if ((po && exact.has(po)) || (mat && exact.has(mat)) || (parent && exact.has(parent))) return true;
+    for (const re of patterns) {
+      if ((po && re.test(po)) || (mat && re.test(mat)) || (parent && re.test(parent))) return true;
+    }
+    return false;
+  },
+
+  // Compile pasted filter tokens once per apply. A token containing `*` is a
+  // wildcard (`204*` starts-with, `*204*` contains, `*204` ends-with); other
+  // tokens stay exact. Upper-cased to match Util.norm; regex metacharacters
+  // are escaped so `2.4*` treats `.` literally; a bare `*` is ignored.
+  compilePasteMatcher(tokens: Iterable<string>): PasteMatcher {
+    const exact = new Set<string>();
+    const patterns: RegExp[] = [];
+    const seen = new Set<string>();
+    for (const raw of tokens) {
+      const t = Util.norm(raw);
+      if (!t) continue;
+      if (t.indexOf('*') === -1) { exact.add(t); continue; }
+      if (/^\*+$/.test(t)) continue;
+      const src = '^' + t.split('*').map(p => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$';
+      if (seen.has(src)) continue;
+      seen.add(src);
+      patterns.push(new RegExp(src));
+    }
+    return { exact, patterns, size: exact.size + patterns.length };
   },
 
   // Shared search+checkbox "N selected" multi-select combobox — the pattern
@@ -1075,8 +1111,16 @@ export const Util = {
   // Diagnostic "how many of these pasted values matched a known id" count,
   // used for the paste toast on the Production Order / Material filter.
   countPasteMatches(text: string, knownIdSet: Set<string>): { matched: number; total: number } {
-    const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))];
-    return { matched: distinct.filter(v => knownIdSet.has(v)).length, total: distinct.length };
+    // A wildcard token counts as matched when any known id matches its pattern.
+    const distinct = [...new Set(Util.parsePasteList(text).map(Util.norm))]
+      .filter(v => !/^\*+$/.test(v));
+    const known = [...knownIdSet];
+    const hit = (v: string): boolean => {
+      if (v.indexOf('*') === -1) return knownIdSet.has(v);
+      const re = Util.compilePasteMatcher([v]).patterns[0];
+      return !!re && known.some(k => re.test(k));
+    };
+    return { matched: distinct.filter(hit).length, total: distinct.length };
   },
 
   // Fractional-hours <-> "HH:MM" string conversion, shared by CalendarUI

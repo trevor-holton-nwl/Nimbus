@@ -1265,7 +1265,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.no_write_permission':         'You do not have permission to save these changes',
   'ui.all_pomat':                      'PO / Material',
   'ui.n_pomat_filter':                 '{{count}} pasted',
-  'ph.paste_po_material':              'Paste Production Order or Material Number values — one per line or Excel column…',
+  'ph.paste_po_material':              'Paste Production Order or Material Number values — one per line or Excel column. Use * as a wildcard: 204*, *204*, *204…',
   'toast.paste_pomat_match':           '{{matched}} of {{total}} matched a visible order',
   'ui.pomat_count':                    '{{count}} value(s) pasted',
   'btn.clear_pasted':                  'Clear pasted',

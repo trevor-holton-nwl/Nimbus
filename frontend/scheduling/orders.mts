@@ -24,6 +24,7 @@
 // ESM cycle is safe).
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
+import type { PasteMatcher } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
@@ -58,6 +59,9 @@ interface TableChipFilters {
   status: TableStatusFilter | null;
   dateKey: string | null;
   poMat: Set<string>;
+  // Compiled from poMat on Apply (exact ids + `*` wildcard patterns); only
+  // consulted while poMat is non-empty, so the plain clear() paths stay valid.
+  poMatMatcher: PasteMatcher | null;
 }
 
 /** Table._currentLayout()/_applySavedLayout()/_setLayoutEnabled() — the saved
@@ -214,7 +218,7 @@ export const Table = {
   // lines aliases the shared Store.selectedLines Set (same object, not a copy) —
   // the cross-screen production-line filter. See GanttFilter._selectedLines
   // for the identical convention and why it must never be reassigned.
-  _chipFilters: { lines: Store.selectedLines, colors: new Set<string>(), status: null, dateKey: null, poMat: new Set<string>() } as TableChipFilters,
+  _chipFilters: { lines: Store.selectedLines, colors: new Set<string>(), status: null, dateKey: null, poMat: new Set<string>(), poMatMatcher: null } as TableChipFilters,
   _lineSearch:       '',
   _colorSearch:      '',
   _rangeMode:        false,
@@ -768,7 +772,7 @@ export const Table = {
     const f = Table._chipFilters;
     if (f.lines.size > 0 && !f.lines.has(data.MACHINE)) return false;
     if (f.colors.size > 0 && !f.colors.has(String(data.COLOR || '').toUpperCase())) return false;
-    if (!Util.taskMatchesPasteSet(data, f.poMat)) return false;
+    if (!Util.taskMatchesPasteSet(data, f.poMat.size > 0 ? (f.poMatMatcher ?? f.poMat) : null)) return false;
     // OQ42: a day chip keeps every order whose bar overlaps that day (a bar crossing midnight shows on both days).
     if (f.dateKey && !Util.overlapsDay(data, f.dateKey)) return false;
     // C1 (2026-08-20), OD-C1d/e: gate on start only, hide (not merely block
@@ -979,7 +983,9 @@ export const Table = {
   _onPoMatApply(): void {
     const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
     if (!ta) return;
-    Table._chipFilters.poMat = new Set(Util.parsePasteList(ta.value).map(Util.norm));
+    const tokens = Util.parsePasteList(ta.value).map(Util.norm);
+    Table._chipFilters.poMat = new Set(tokens);
+    Table._chipFilters.poMatMatcher = Util.compilePasteMatcher(tokens);
     const cnt = document.getElementById('tbl-flt-pomat-count');
     if (cnt) {
       const n = Table._chipFilters.poMat.size;
@@ -996,6 +1002,7 @@ export const Table = {
     (Store.selectedPlant ? Store.tasksForSelectedPlant() : []).forEach(task => {
       const po = Util.norm(task.ORDER ?? task.PRODUCTION_ORDER); if (po) known.add(po);
       const mat = Util.norm(task.MATERIAL_NUMBER); if (mat) known.add(mat);
+      const parent = Util.norm(task.PARENT_ORDER); if (parent) known.add(parent);
     });
     const { matched, total } = Util.countPasteMatches(text, known);
     if (total) Toast.show(Util.t('toast.paste_pomat_match', { matched, total }), matched > 0 ? 'success' : 'warn');
