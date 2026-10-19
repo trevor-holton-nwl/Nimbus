@@ -74,7 +74,7 @@ interface TimelineVisItem {
 }
 
 export interface SetupPresentationDetail {
-  predecessorOrderId: string | null;
+  predecessorOrderId: string | null | undefined;
   predecessorState: string | null;
   successorOrderId: string;
   requiredMinutes: number | null;

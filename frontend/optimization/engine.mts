@@ -471,21 +471,22 @@ function compareSetupOrders(left: SetupSpan, right: SetupSpan): number {
 }
 
 /**
- * The order scheduled immediately before `task` on its own plant/machine, or
- * null when it is first. Independent of any setup definition or matrix, so the
+ * The order scheduled immediately before `task` on its own plant/machine;
+ * null when it is genuinely first; undefined ("unknown") when the task has no
+ * interval, plant or machine to place it. Independent of any setup definition or matrix, so the
  * Inspector can name the predecessor even where no setup is derived. A split
  * order is one span, so its own segments never make it its own predecessor.
  */
-export function predecessorOnMachine(task: NimbusTask, tasks: ReadonlyArray<NimbusTask>): NimbusTask | null {
+export function predecessorOnMachine(task: NimbusTask, tasks: ReadonlyArray<NimbusTask>): NimbusTask | null | undefined {
   const plant = String(task.PLANT ?? task.plant ?? '');
   const line = String(task.MACHINE ?? '');
-  if (!plant || !line) return null;
+  if (!plant || !line) return undefined;
   const spanOf = (candidate: NimbusTask): SetupSpan | null => {
     const intervals = setupOrderIntervals(candidate);
     return intervals.length ? { task: candidate, start: intervals[0].start, end: intervals.at(-1)!.end } : null;
   };
   const own = spanOf(task);
-  if (!own) return null;
+  if (!own) return undefined;
   let best: SetupSpan | null = null;
   for (const candidate of tasks) {
     if (String(candidate.id) === String(task.id)) continue;

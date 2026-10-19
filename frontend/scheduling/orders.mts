@@ -2113,14 +2113,15 @@ export const Inspector = {
       ? resolveSetup({ definition, machine: task.MACHINE, predecessorState, successorState,
         predecessorOrderId: entry.predecessorOrderId ?? null, successorOrderId: id,
         plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides }) : null;
-    const scheduledPredecessor = predecessorOnMachine(task, Store.tasksArr);
+    const scheduledPredecessor = predecessorOnMachine(task, Store.tasksByPlant(String(task.PLANT ?? task.plant ?? '') || null));
     const predecessorStateText = hasObservedEntry
       ? (Inspector._formatSetupState(predecessorState ?? null, definition) || entry.predecessorState || null)
       : null;
     return {
       // Naming the predecessor needs no setup definition, so it comes from the
       // schedule rather than the observation entry (which still drives state/resolve above).
-      predecessorOrderId: scheduledPredecessor ? String(scheduledPredecessor.id) : null,
+      // undefined = unknown (unscheduled / no machine); null = first on machine.
+      predecessorOrderId: scheduledPredecessor === undefined ? undefined : (scheduledPredecessor ? String(scheduledPredecessor.id) : null),
       predecessorState: predecessorStateText,
       successorOrderId: id,
       requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
@@ -2197,9 +2198,11 @@ export const Inspector = {
     const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
     const missingSetupPlaceholder = '—';
     const firstOnMachine = Util.t('ui.setup_first_on_machine');
-    const setupPredecessorText = setupDetail.predecessorOrderId
-      ? Util.orderNumber(Store.tasks[setupDetail.predecessorOrderId], setupDetail.predecessorOrderId)
-      : (firstOnMachine === 'ui.setup_first_on_machine' ? 'First on machine' : firstOnMachine);
+    const setupPredecessorText = setupDetail.predecessorOrderId === undefined
+      ? missingSetupPlaceholder
+      : setupDetail.predecessorOrderId
+        ? Util.orderNumber(Store.tasks[setupDetail.predecessorOrderId], setupDetail.predecessorOrderId)
+        : (firstOnMachine === 'ui.setup_first_on_machine' ? 'First on machine' : firstOnMachine);
     const setupPlant = Store.getPlantForLine(task.MACHINE) || task.PLANT || Store.selectedPlant || '';
     const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
     // Distribution card (aggregate_to_detail.md §8): only rendered for a

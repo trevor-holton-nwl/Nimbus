@@ -151,25 +151,55 @@ test('Inspector exposes keyboard-equivalent setup detail on the successor, inclu
   const predecessorTask = { id: 'detail-predecessor', PLANT: 'P-SETUP', MACHINE: 'SETUP-L4', RUN_TIME: 1,
     start_date: new Date('2026-08-14T06:00:00'), end_date: new Date('2026-08-14T07:00:00') };
   const priorTasks = structuredClone(Store.tasksArr);
-  Store.setTasks([predecessorTask, task], 'unit-test');
-  const detail = Inspector._setupDetailForTask(task, {
-    intervals: [{ line: 'SETUP-L4', predecessorOrderId: 'detail-predecessor', successorOrderId: 'detail-successor',
-      start: new Date('2026-08-14T07:30:00'), end: task.start_date, requiredMinutes: 30, availableMinutes: 15,
-      predecessorState: 'COLOR=RED', standardMinutes: 45, source: 'occurrence', overrideStatus: 'active' }],
-    diagnostics: [{ type: 'setup-uncovered', line: 'SETUP-L4', successorOrderId: 'detail-successor', message: 'Matrix row missing.' }],
-  });
-  assert.equal(detail.predecessorOrderId, 'detail-predecessor');
-  assert.equal(detail.predecessorState, 'COLOR=RED');
-  assert.equal(detail.requiredMinutes, 30);
-  assert.equal(detail.effectiveMinutes, 30);
-  assert.equal(detail.standardMinutes, 45);
-  assert.equal(detail.source, 'occurrence');
-  assert.equal(detail.overrideStatus, 'active');
-  assert.equal(detail.missingDetail, 'Matrix row missing.');
-  assert.equal(detail.shortMinutes, 15);
-  assert.match(Inspector._setupCapacityConflictText(detail), /15.*30.*15/,
-    'the successor detail must state available, required, and short capacity in text');
-  Store.setTasks(priorTasks, 'unit-test');
+  try {
+    Store.setTasks([predecessorTask, task], 'unit-test');
+    const detail = Inspector._setupDetailForTask(task, {
+      intervals: [{ line: 'SETUP-L4', predecessorOrderId: 'detail-predecessor', successorOrderId: 'detail-successor',
+        start: new Date('2026-08-14T07:30:00'), end: task.start_date, requiredMinutes: 30, availableMinutes: 15,
+        predecessorState: 'COLOR=RED', standardMinutes: 45, source: 'occurrence', overrideStatus: 'active' }],
+      diagnostics: [{ type: 'setup-uncovered', line: 'SETUP-L4', successorOrderId: 'detail-successor', message: 'Matrix row missing.' }],
+    });
+    assert.equal(detail.predecessorOrderId, 'detail-predecessor');
+    assert.equal(detail.predecessorState, 'COLOR=RED');
+    assert.equal(detail.requiredMinutes, 30);
+    assert.equal(detail.effectiveMinutes, 30);
+    assert.equal(detail.standardMinutes, 45);
+    assert.equal(detail.source, 'occurrence');
+    assert.equal(detail.overrideStatus, 'active');
+    assert.equal(detail.missingDetail, 'Matrix row missing.');
+    assert.equal(detail.shortMinutes, 15);
+    assert.match(Inspector._setupCapacityConflictText(detail), /15.*30.*15/,
+      'the successor detail must state available, required, and short capacity in text');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+  }
+});
+
+test('Inspector setup detail: an unscheduled order has an unknown predecessor, not "first on machine"', () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const unscheduled = { id: 'detail-unscheduled', PLANT: 'P-SETUP', MACHINE: 'SETUP-L4', RUN_TIME: 1 };
+  try {
+    Store.setTasks([unscheduled], 'unit-test');
+    const detail = Inspector._setupDetailForTask(unscheduled, { intervals: [], diagnostics: [] });
+    assert.equal(detail.predecessorOrderId, undefined);
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+  }
+});
+
+test('Inspector setup detail: the same machine code in another plant is not a predecessor', () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const task = { id: 'detail-plant-a', PLANT: 'P-A', MACHINE: 'SAME-L1', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  const otherPlant = { id: 'detail-plant-b', PLANT: 'P-B', MACHINE: 'SAME-L1', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T06:00:00'), end_date: new Date('2026-08-14T07:00:00') };
+  try {
+    Store.setTasks([otherPlant, task], 'unit-test');
+    const detail = Inspector._setupDetailForTask(task, { intervals: [], diagnostics: [] });
+    assert.equal(detail.predecessorOrderId, null);
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+  }
 });
 
 test('Inspector renders derived setup details for orders without setup observations and keeps notes last', () => {
