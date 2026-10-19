@@ -5050,7 +5050,7 @@ body.dark { --period-default-fill: #313d4d; --period-default-fg: color-mix(in sr
   container-type: inline-size;
   background: var(--period-default-fill); border: 1px dashed var(--line-strong); color: var(--period-default-fg); font-weight: 500;
 }
-@container (max-width: 44px) {
+@container (max-width: 72px) {
   .period-seg-default .period-seg-label { display: none; }
 }
 /* Open-ended: runs to the right edge with a trailing fade and an arrow. */
