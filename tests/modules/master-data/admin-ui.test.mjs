@@ -372,7 +372,9 @@ test('Plant Settings tab row shows the right-click hint on Scheduling Rules only
     assert.match(rules, /class="panel-hint settings-rules-hint"/);
     // The hint is a sibling after </nav>, never inside role="tablist".
     assert.ok(rules.indexOf('</nav>') < rules.indexOf('settings-rules-hint'));
-    assert.doesNotMatch(render('setup'), /settings-rules-hint/);
+    const setup = render('setup');
+    assert.match(setup, /<div class="tab-strip-row settings-tab-row">/, 'the tab row renders on every settings sub-tab');
+    assert.doesNotMatch(setup, /settings-rules-hint/);
   } finally {
     globalThis.document = priorDocument;
     Plant._currentSettingsSubTab = priorSub;
