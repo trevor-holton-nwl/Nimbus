@@ -308,7 +308,10 @@ const NIMBUS = (function () {
     const row = Store.calendars[line];
     if (!row) return null;
     const plant = Store.getPlantForLine(line);
-    return { lineHours: row.workHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plantPeriods: plant ? (Store.plants[plant]?.periods ?? null) : null, plant, rev: Store.rev() };
+    // An inherited line is open all day and relies on the plant's hours bounding it; this reader only intersects
+    // when the plant has a calendar entry, so without one fall back to the default week instead.
+    const lineHours = row.inherited && !(plant && Store.plants[plant]) ? Store.effectiveLineHours(line) : row.workHours;
+    return { lineHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plantPeriods: plant ? (Store.plants[plant]?.periods ?? null) : null, plant, rev: Store.rev() };
   });
   ErrorLog.setPlantResolver(() => Store.selectedPlant);
   ErrorLog.setRouteResolver(() => ({ tab: App._currentTab, ganttSub: App._ganttSub }));

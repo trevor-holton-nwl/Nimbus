@@ -181,11 +181,21 @@ export const EditCalendar = (() => {
     return isEnd && h >= 24 ? '00:00' : Util.hoursToTimeString(h);
   }
 
+  /** What the grid opens on: for a machine, its own hours, or the plant's default week when it follows the plant. */
   function _currentHours(): WorkHours {
     if (_mode === 'period') return _periodHours!;
     return _mode === 'plant'
       ? Store.plants[_plantName!].workHours
-      : Store.calendars[_line!].workHours;
+      : Store.effectiveLineHours(_line!);
+  }
+
+  function _sameHours(a: WorkHours, b: WorkHours): boolean {
+    for (let d = 0; d < 7; d++) {
+      const x = a[d] ?? null, y = b[d] ?? null;
+      if (!x || !y) { if (x !== y) return false; continue; }
+      if (x[0] !== y[0] || x[1] !== y[1]) return false;
+    }
+    return true;
   }
 
   function _populate() {
@@ -511,7 +521,7 @@ export const EditCalendar = (() => {
     if (!wh) return;
     const draft = _validatePeriod(wh, true);
     if (!draft) return;
-    // Period mode deliberately skips _persistPlantHours / clampLinesToPlant / ProdLines.render:
+    // Period mode deliberately skips _persistPlantHours / ProdLines.render:
     // a period never rewrites the plant default or any line calendar.
     void CalendarPeriodsUI.save(draft, _periodPlant);
   }
@@ -523,13 +533,21 @@ export const EditCalendar = (() => {
     if (!newWh) return;
     if (_mode === 'plant') {
       Store.plants[_plantName!].workHours = newWh;
-      const changed = new Set<string>();
-      for (let d = 0; d < 7; d++) for (const l of Store.clampLinesToPlant(_plantName!, d)) changed.add(l);
-      NIMBUS!.Plant!._persistPlantHours!(_plantName, changed);
+      // A plant save writes the plant row only: machines either follow it (inherited) or are intersected with it
+      // per date by every reader, so no machine row is rewritten (the old clamp pinned narrowed copies).
+      Store.emit({ type: 'calendar:change', source: 'edit-calendar', plant: _plantName });
+      NIMBUS!.Plant!._persistPlantHours!(_plantName);
       NIMBUS!.Plant!.render!();
       close();
       Toast.show(Util.t(Sandbox.active ? 'toast.calendar_whatif_local' : 'toast.calendar_changes_pending'), 'info');
     } else {
+      const entry = Store.calendars[_line!];
+      // An inherited machine saved with no change stays inherited (no write): the editor opened on the plant's
+      // hours, so an unchanged Save must not pin them as the machine's own.
+      if (entry?.inherited && _sameHours(newWh, Store.effectiveLineHours(_line!))) {
+        close();
+        return;
+      }
       Store.setCalendar(_line!, newWh, 'edit-calendar');
       const plant = Store.getPlantForLine(_line!) || Store.selectedPlant;
       if (plant) CalendarSync.saveLineHours(plant, _line!, newWh);

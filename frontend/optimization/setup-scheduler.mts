@@ -384,7 +384,7 @@ export interface ScheduleSnapshot {
   selectedPlant: string | null;
   blocks: ReadonlyArray<NimbusBlock>;
   plantBlocks: ReadonlyArray<NimbusPlantBlock>;
-  calendars: Readonly<Record<string, { workHours: WorkHours }>>;
+  calendars: Readonly<Record<string, { workHours: WorkHours; inherited?: boolean }>>;
   plants: Readonly<Record<string, PlantCalendarEntry>>;
   lineSettings: Readonly<Record<string, NimbusLineSetting>>;
   masterData: NimbusMasterData | null;
@@ -1303,7 +1303,9 @@ function dueWindowForDay(scope: DueScope, line: string, plant: string | null, da
   if (lineRow) {
     const lineWin = localWindow(lineRow.workHours, dayStart);
     const plantRow = plant ? scope.snapshot.plants[plant] : undefined;
-    const plantWin = plantRow ? localWindow(plantHoursOn(plantRow, dayStart)!, dayStart) : lineWin;
+    // An inherited line is open all day and relies on the plant to bound it; with no plant entry use the default week.
+    const plantWin = plantRow ? localWindow(plantHoursOn(plantRow, dayStart)!, dayStart)
+      : lineRow.inherited ? localWindow(candidateDefaultWorkHours(), dayStart) : lineWin;
     result = lineWin && plantWin ? intersectWindows(lineWin, plantWin) : null;
     if (result && result.start >= result.end) result = null;
   }

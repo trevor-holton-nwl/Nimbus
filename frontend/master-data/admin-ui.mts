@@ -8,6 +8,7 @@
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Engine } from '../optimization/engine.mjs';
+import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
@@ -15,7 +16,7 @@ import { Runtime } from '../routing/runtime-client.mjs';
 import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { PriorityListViewer } from '../priority-lists/viewers.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
+import type { WorkHours, NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
 // Cross-domain seams (see docs/architecture/domain-refactor-plan.md Phase P2
 // task brief / report for the full verified cross-reference list):
 //   - `SetupAdmin.render` is called from Plant's Settings pane. `SetupAdmin`
@@ -471,20 +472,11 @@ export const Plant = {
     EditCalendar.openPlant(pName);
   },
 
-  /** Persist a plant's working hours + only the line hours the clamp actually rewrote
-   *  (changedLines, a Set/array). Narrowing to changed lines means a concurrent
-   *  single-line edit that still fits the new plant window is NOT re-POSTed and so not
-   *  clobbered by the plant-hours batch. (F9) Per-line saves are batched into one
-   *  /line-hours POST by CalendarSync. Falls back to all in-plant lines if no set given. */
-  _persistPlantHours(pName: string | null, changedLines?: Set<string> | string[]): void {
+  /** Persist a plant's working hours. Plant saves write the plant row only: machines follow the plant
+   *  (inherited) or are intersected with it per date, so no machine row is ever rewritten here. */
+  _persistPlantHours(pName: string | null): void {
     if (!pName) return;
     CalendarSync.savePlantHours(pName, Store.plants[pName]?.workHours);
-    const lines = changedLines
-      ? [...changedLines].filter(l => Store.calendars[l] && Store.getPlantForLine(l) === pName)
-      : Object.keys(Store.calendars).filter(l => Store.getPlantForLine(l) === pName);
-    for (const line of lines) {
-      CalendarSync.saveLineHours(pName, line, Store.calendars[line].workHours);
-    }
   },
 
   _pillRightClick(d: number, e: MouseEvent): void {
@@ -513,9 +505,7 @@ export const Plant = {
         Store.setPlantWorkHours(_pName, d, [8, 17], 'pill');
         Toast.show(Util.t('day.sun_enabled', { day: dayName }), 'success');
       }
-      const changed = new Set<string>();
-      for (let i = 0; i < 7; i++) for (const l of Store.clampLinesToPlant(_pName, i)) changed.add(l);
-      Plant._persistPlantHours(_pName, changed);
+      Plant._persistPlantHours(_pName);
       Plant._renderHours();
     };
 
@@ -708,7 +698,12 @@ export const Plant = {
           const exclBadge = ls.excludeFromOpt
             ? `<span style="background:#6366f1;color:#fff;font-size:11px;padding:2px 6px;border-radius:4px;">${Util.t('ui.excl_optimizer')}</span>`
             : '';
-          const cal = Store.calendars[line]?.workHours || {};
+          // Only the exception is marked: a machine with its own saved hours. Inherited machines show the plant's
+          // week (effectiveLineHours) with no badge.
+          const customBadge = Store.calendars[line] && !Store.calendars[line].inherited
+            ? `<span class="line-badge badge-info">${Util.escapeHtml(Util.t('ui.custom_hours'))}</span>`
+            : '';
+          const cal = Store.effectiveLineHours(line);
           const schedCells = [0,1,2,3,4,5,6].map(d => {
             const wh = cal[d];
             const timeStr = wh ? `${ProdLines._fmtHour(wh[0])}–${ProdLines._fmtHour(wh[1])}` : Util.t('ui.off');
@@ -722,7 +717,7 @@ export const Plant = {
           const lineEsc = Util.escapeHtml(line);
           return `<tr style="border-bottom:1px solid var(--border,#f1f5f9);">
             <td style="padding:8px 12px;"><div class="line-label"><span class="line-dot" style="background:${color}"></span>${lineEsc}</div></td>
-            <td style="padding:8px 12px;">${botBadge}${exclBadge ? ' ' + exclBadge : ''}</td>
+            <td style="padding:8px 12px;">${botBadge}${exclBadge ? ' ' + exclBadge : ''}${customBadge ? ' ' + customBadge : ''}</td>
             <td style="padding:8px 12px;">
               <div style="display:flex;gap:6px;align-items:flex-start;">${schedCells}</div>
             </td>
@@ -2293,7 +2288,10 @@ export const ProdLines = {
     const gi = allLines.indexOf(line);
     const color = Config.COLORS[gi % Config.COLORS.length];
     const ls = Store.lineSettings[line] || {};
-    const cal = Store.calendars[line]?.workHours || {};
+    // Show the plant's week for a machine that follows it (effectiveLineHours), its own hours otherwise.
+    const isOverride = !!Store.calendars[line] && !Store.calendars[line].inherited;
+    const cal = Store.effectiveLineHours(line);
+    const limited = isOverride && ProdLines._exceedsPlantHours(line, cal);
     const dayLabels = ['day.sun','day.mon','day.tue','day.wed','day.thu','day.fri','day.sat'].map(k => Util.t(k));
 
     const hoursPills = [0,1,2,3,4,5,6].map(d => {
@@ -2345,11 +2343,19 @@ export const ProdLines = {
       </div>
       <div class="ld-section">
         <div class="ld-section-head">
-          <span class="ld-section-title">${Util.t('ui.working_hours_section')}</span>
-          <button class="btn btn-ghost sm" data-action="edit-calendar" data-line="${Util.escapeHtml(line)}">${Util.t('btn.edit_calendar')}</button>
+          <span class="ld-head-main">
+            <span class="ld-section-title">${Util.t('ui.working_hours_section')}</span>
+            ${isOverride ? `<span class="line-badge badge-info">${Util.escapeHtml(Util.t('ui.custom_hours'))}</span>` : ''}
+          </span>
+          <span class="ld-head-actions">
+            ${isOverride && Session.isAdmin() ? `<button class="btn btn-ghost sm" data-action="reset-calendar" data-line="${Util.escapeHtml(line)}">${Util.t('btn.reset_to_plant')}</button>` : ''}
+            <button class="btn btn-ghost sm" data-action="edit-calendar" data-line="${Util.escapeHtml(line)}">${Util.t('btn.edit_calendar')}</button>
+          </span>
         </div>
         <div class="ld-section-body">
           <div class="line-hours-pills">${hoursPills}</div>
+          ${isOverride ? '' : `<p class="panel-hint ld-hours-note">${Util.escapeHtml(Util.t('ui.follows_plant_calendar'))}</p>`}
+          ${limited ? `<p class="panel-hint ld-hours-note">${Util.escapeHtml(Util.t('ui.limited_by_plant_hours'))}</p>` : ''}
         </div>
       </div>
       <div class="ld-section">
@@ -2632,6 +2638,18 @@ export const ProdLines = {
         EditCalendar.open(action.dataset.line || '');
         return;
       }
+      if (action?.dataset.action === 'reset-calendar') {
+        // Admin-only (the line-hours endpoint is require_admin). No confirmation: re-entering the hours undoes it.
+        const line = action.dataset.line || '';
+        const plant = Store.getPlantForLine(line) || Store.selectedPlant;
+        if (!line || !plant || !Session.isAdmin()) return;
+        CalendarSync.resetLinesToPlant(plant, [line]);
+        ProdLines._renderDetail(ProdLines._activeNavLine);
+        // The Reset button is gone after the re-render; keep keyboard focus in the section.
+        body.querySelector<HTMLElement>('[data-action="edit-calendar"]')?.focus();
+        Toast.show(Util.t(Sandbox.active ? 'toast.calendar_whatif_local' : 'toast.calendar_changes_pending'), 'info');
+        return;
+      }
       if (action?.dataset.action === 'add-block') {
         ProdLines.openBlockModal(action.dataset.line || '');
         return;
@@ -2650,6 +2668,22 @@ export const ProdLines = {
       NIMBUS!.MasterData!.syncLineSettings!(line, { bufferUnit: unit });
       ProdLines._renderDetail(ProdLines._activeNavLine);
     });
+  },
+
+  /** True when a machine's own hours open longer than its plant ever does on some weekday (the plant's
+   *  default week united with every dated period), so the plant cuts them on those days. */
+  _exceedsPlantHours(line: string, hours: WorkHours): boolean {
+    const plant = Store.getPlantForLine(line);
+    const entry = plant ? Store.plants[plant] : undefined;
+    if (!entry) return false;
+    const union = globalThis.NimbusComputeCore!.unionWeeklyHours(entry.workHours, entry.periods);
+    for (let d = 0; d < 7; d++) {
+      const range = hours[d];
+      if (!range) continue;
+      const cap = union[d];
+      if (!cap || range[0] < cap[0] || range[1] > cap[1]) return true;
+    }
+    return false;
   },
 
   _fmtHour(h: number): string {

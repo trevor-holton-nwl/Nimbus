@@ -2890,7 +2890,9 @@ def set_line_work_hours(plant: str, lines: list, user_email: str | None = None) 
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
             " VALUES ('machine_calendar', 'upsert', %s, %s)",
-            (Jsonb({"plant": plant, "subnetwork": subnet, "lines": len(prepared)}), user_email),
+            (Jsonb({"plant": plant, "subnetwork": subnet, "lines": len(prepared),
+                    # Machines reset to follow the plant (hours cleared), so a Reset all is traceable.
+                    "cleared": [code for code, clean in prepared if clean is None]}), user_email),
         )
         conn.commit()
     return {"upserted": len(prepared)}

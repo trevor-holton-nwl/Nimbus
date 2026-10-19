@@ -117,7 +117,7 @@ declare global {
           renderDrawer?(): void;
         };
         Plant?: {
-          _persistPlantHours?(pName: string | null, changedLines?: Set<string> | string[]): void;
+          _persistPlantHours?(pName: string | null): void;
           render?(): void;
         };
         ProdLines?: {

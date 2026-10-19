@@ -307,13 +307,16 @@
     return result;
   }
 
-  function ensureCalendar(line, calendars) {
+  // A missing line calendar is an INHERITED one (no machine row = follows the plant). With `allDay` (the line's
+  // plant resolves) it is open all day, so workWindow's per-date plant intersection yields exactly the plant's
+  // hours; without it the DEFAULT_SHIFT seed keeps the line bounded, since no plant intersection will happen.
+  function ensureCalendar(line, calendars, allDay) {
     if (calendars[line]) return;
     const defaults = {};
     for (let d = 0; d < 7; d++) {
-      defaults[d] = (WEEKEND_OFF && (d === 0 || d === 6)) ? null : [...DEFAULT_SHIFT];
+      defaults[d] = allDay ? [0, 24] : ((WEEKEND_OFF && (d === 0 || d === 6)) ? null : [...DEFAULT_SHIFT]);
     }
-    calendars[line] = { workHours: defaults };
+    calendars[line] = { workHours: defaults, inherited: true };
   }
 
   function ensurePlant(name, plants) {
@@ -425,14 +428,14 @@
       if (_wwCache.has(key)) return _wwCache.get(key);
     }
 
-    ensureCalendar(line, calendars);
+    const plant = getPlantForLine(line, lineSettings, masterData);
+    ensureCalendar(line, calendars, !!plant);
     const lineWin = _dayWindow(calendars[line].workHours, date);
     if (!lineWin) {
       if (_wwCache) _wwCache.set(key, null);
       return null;
     }
 
-    const plant = getPlantForLine(line, lineSettings, masterData);
     let result;
     if (plant) {
       ensurePlant(plant, plants);

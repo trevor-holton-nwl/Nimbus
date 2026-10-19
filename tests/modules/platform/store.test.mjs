@@ -326,29 +326,57 @@ test('Store.setPlantPeriods seeds a default plant entry when the plant is unknow
   assert.equal(Store.getPlantPeriods('NEWP').length, 1);
 });
 
-test('Store.clampLinesToPlant clamps to the union of the default and every period', () => {
-  const sat = 6;
-  const priorLinesByPlant = Store._linesByPlant;
+test('Store has no clamp: plant hours are never copied into machine calendars (2026-10-19)', () => {
+  assert.equal(Store.clampLinesToPlant, undefined);
+});
+
+test('Store.ensureCalendar seeds an inherited line: all-day once its plant resolves, the default shift before', () => {
   const priorCalendars = Store.calendars;
+  const priorMasterData = structuredClone(Store.masterData);
   try {
-    Store._linesByPlant = { PP2: ['LX'] };
-    Store.replacePlants({ PP2: { workHours: { 6: null, 1: [8, 16] } } }, 'unit-test');
-    Store.replaceCalendars({ LX: { workHours: { 6: [6, 18], 1: [6, 18] } } }, 'unit-test');
-    // No period: Saturday is closed at plant level, so the line loses Saturday.
-    assert.deepEqual(Store.clampLinesToPlant('PP2', sat), ['LX']);
-    assert.equal(Store.calendars.LX.workHours[6], null);
-    // A period that opens Saturday keeps it (trimmed to the period's hours); Monday is bounded by the union.
-    Store.replaceCalendars({ LX: { workHours: { 6: [6, 18], 1: [6, 18] } } }, 'unit-test');
-    Store.setPlantPeriods('PP2', [_per('p', '2026-10-01', null, { 6: [8, 12], 1: [7, 17] })], 'plant-periods');
-    assert.deepEqual(Store.clampLinesToPlant('PP2', sat), ['LX']);
-    assert.deepEqual(Store.calendars.LX.workHours[6], [8, 12]);
-    assert.deepEqual(Store.clampLinesToPlant('PP2', 1), ['LX']);
-    assert.deepEqual(Store.calendars.LX.workHours[1], [7, 17]);   // union [min(8,7), max(16,17)]
-    // Already inside the union: nothing is rewritten or reported.
-    assert.deepEqual(Store.clampLinesToPlant('PP2', 1), []);
+    Store.replaceCalendars({}, 'unit-test');
+    Store.setMasterData({ plants: [{ plant: 'PI' }], lines: [{ machine: 'KNOWN', plant: 'PI' }] }, 'unit-test');
+    Store.ensureCalendar('KNOWN');
+    Store.ensureCalendar('ORPHAN');
+    assert.equal(Store.calendars.KNOWN.inherited, true);
+    assert.deepEqual(Store.calendars.KNOWN.workHours[1], [0, 24]);
+    assert.equal(Store.calendars.ORPHAN.inherited, true);
+    assert.deepEqual(Store.calendars.ORPHAN.workHours[1], [7, 19]);
+    // The plant resolves later: rebuildPlantIndex switches the seed to all-day.
+    Store.setMasterData({ plants: [{ plant: 'PI' }], lines: [{ machine: 'KNOWN', plant: 'PI' }, { machine: 'ORPHAN', plant: 'PI' }] }, 'unit-test');
+    Store.rebuildPlantIndex();
+    assert.deepEqual(Store.calendars.ORPHAN.workHours[1], [0, 24]);
   } finally {
-    Store._linesByPlant = priorLinesByPlant;
     Store.replaceCalendars(priorCalendars, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+  }
+});
+
+test('Store.setCalendar makes a line an override; inheritPlantHours and effectiveLineHours read the plant', () => {
+  const priorCalendars = Store.calendars;
+  const priorMasterData = structuredClone(Store.masterData);
+  try {
+    Store.replaceCalendars({}, 'unit-test');
+    Store.setMasterData({ plants: [{ plant: 'PI' }], lines: [{ machine: 'LI', plant: 'PI' }] }, 'unit-test');
+    Store.replacePlants({ PI: { workHours: { 1: [8, 16], 6: null } } }, 'unit-test');
+    Store.ensureCalendar('LI');
+    assert.deepEqual(Store.effectiveLineHours('LI')[1], [8, 16], 'an inherited line shows the plant week');
+    Store.setCalendar('LI', { 1: [6, 18] }, 'unit-test');
+    assert.equal(Store.calendars.LI.inherited, false);
+    assert.deepEqual(Store.effectiveLineHours('LI'), { 1: [6, 18] });
+    let emitted = 0;
+    const off = Store.subscribe(evt => { if (evt.type === 'calendar:change') emitted += 1; });
+    Store.inheritPlantHours('LI');
+    assert.equal(emitted, 0, 'no emit without a source');
+    Store.inheritPlantHours('LI', 'unit-test');
+    off();
+    assert.equal(emitted, 1);
+    assert.equal(Store.calendars.LI.inherited, true);
+    assert.deepEqual(Store.calendars.LI.workHours[1], [0, 24]);
+    assert.deepEqual(Store.effectiveLineHours('LI')[1], [8, 16]);
+  } finally {
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
     Store.replacePlants({}, 'unit-test');
   }
 });

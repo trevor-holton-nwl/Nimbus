@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { Plant, ProdLines, MasterData, WorkCenters } from '../../../frontend/master-data/admin-ui.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { EditCalendar } from '../../../frontend/calendar/edit-calendar.mjs';
@@ -1832,3 +1833,104 @@ test('the list x button routes through the confirming removePlantBlock (no direc
   const src = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
   assert.ok(src.includes('void Plant.removePlantBlock(rm.dataset.blockId!)'));
 });
+
+// ---------------------------------------------------------------------------
+// Machine calendar inheritance display + Reset to plant (2026-10-19)
+// ---------------------------------------------------------------------------
+globalThis.NimbusComputeCore ??= createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
+
+function withInheritEnv(fn) {
+  const week = (r) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, r ? [...r] : null]));
+  const prior = {
+    plant: Store.selectedPlant, md: Store.masterData, cals: Store.calendars, document: globalThis.document,
+    isAdmin: Session.isAdmin, t: Util.t, toast: Toast.show, save: CalendarSync.saveLineHours, delegated: ProdLines._delegated,
+    nav: ProdLines._activeNavLine,
+  };
+  const body = {
+    innerHTML: '', listeners: {}, focused: false,
+    addEventListener(type, fn2) { (this.listeners[type] ||= []).push(fn2); },
+    querySelector: () => ({ focus: () => { body.focused = true; } }),
+  };
+  const roster = { innerHTML: '', querySelectorAll: () => [] };
+  globalThis.document = {
+    getElementById: id => (id === 'lines-body' ? body : id === 'plant-lines-roster' ? roster : null),
+    querySelector: () => null, querySelectorAll: () => [],
+  };
+  Util.t = (k) => k;
+  const toasts = [], saves = [];
+  Toast.show = (...a) => toasts.push(a);
+  CalendarSync.saveLineHours = (...a) => saves.push(a);
+  Session.isAdmin = () => true;
+  ProdLines._delegated = false;
+  Store.setMasterData({ plants: [{ plant: 'PD' }], lines: [{ machine: 'A1', plant: 'PD' }, { machine: 'A2', plant: 'PD' }] }, 'test');
+  Store.setSelectedPlant('PD', 'test');
+  Store.replacePlants({ PD: { workHours: week([7, 19]) } }, 'test');
+  Store.replaceCalendars({}, 'test');
+  Store.ensureCalendar('A1');                               // inherited
+  Store.setCalendar('A2', week([6, 20]), 'test');           // override that opens longer than the plant
+  return Promise.resolve(fn({ body, roster, toasts, saves, week })).finally(() => {
+    Store.replaceCalendars(prior.cals, 'test');
+    Store.setMasterData(prior.md, 'test');
+    Store.replacePlants({}, 'test');
+    Store.setSelectedPlant(prior.plant, 'test');
+    if (prior.document === undefined) delete globalThis.document; else globalThis.document = prior.document;
+    Session.isAdmin = prior.isAdmin; Util.t = prior.t; Toast.show = prior.toast;
+    CalendarSync.saveLineHours = prior.save; ProdLines._delegated = prior.delegated; ProdLines._activeNavLine = prior.nav;
+  });
+}
+
+test('ProdLines detail: an inherited machine shows no badge, only "Follows plant calendar"; pills read the plant week', () => withInheritEnv(({ body }) => {
+  ProdLines._renderDetail('A1');
+  assert.ok(body.innerHTML.includes('ui.follows_plant_calendar'));
+  assert.ok(!body.innerHTML.includes('ui.custom_hours'), 'no Custom hours badge');
+  assert.ok(!body.innerHTML.includes('reset-calendar'), 'nothing to reset');
+  assert.ok(body.innerHTML.includes('7am–7pm'), 'the pills show the plant week, not the all-day seed');
+  assert.ok(!body.innerHTML.includes('12am–12am'));
+}));
+
+test('ProdLines detail: an override gets the Custom hours badge, a Reset button (admin only) and the limited-by-plant hint', () => withInheritEnv(({ body }) => {
+  ProdLines._renderDetail('A2');
+  assert.ok(body.innerHTML.includes('line-badge badge-info'));
+  assert.ok(body.innerHTML.includes('ui.custom_hours'));
+  assert.ok(body.innerHTML.includes('data-action="reset-calendar"'));
+  assert.ok(body.innerHTML.includes('ui.limited_by_plant_hours'), '6am-8pm exceeds the plant 7am-7pm');
+  assert.ok(!body.innerHTML.includes('ui.follows_plant_calendar'));
+  Session.isAdmin = () => false;
+  ProdLines._renderDetail('A2');
+  assert.ok(!body.innerHTML.includes('data-action="reset-calendar"'), 'a non-admin cannot reset');
+}));
+
+test('ProdLines detail: an override inside the plant hours has no limited hint', () => withInheritEnv(({ body, week }) => {
+  Store.setCalendar('A2', week([8, 17]), 'test');
+  ProdLines._renderDetail('A2');
+  assert.ok(!body.innerHTML.includes('ui.limited_by_plant_hours'));
+}));
+
+test('Reset to plant: queues a null write, goes back to inherited, focuses Edit Calendar and shows one toast', () => withInheritEnv(({ body, toasts, saves }) => {
+  ProdLines._activeNavLine = 'A2';
+  ProdLines._renderDetail('A2');
+  body.listeners.click[0]({ target: { closest: () => ({ dataset: { action: 'reset-calendar', line: 'A2' } }) } });
+  assert.equal(Store.calendars.A2.inherited, true);
+  assert.deepEqual(saves, [['PD', 'A2', null]]);
+  assert.equal(body.focused, true, 'focus moved to Edit Calendar after the re-render');
+  assert.ok(!body.innerHTML.includes('data-action="reset-calendar"'), 'the detail re-rendered as inherited');
+  assert.deepEqual(toasts.map(t => t[0]), ['toast.calendar_changes_pending']);
+}));
+
+test('Reset to plant does nothing for a non-admin', () => withInheritEnv(({ body, toasts, saves }) => {
+  ProdLines._renderDetail('A2');
+  Session.isAdmin = () => false;
+  body.listeners.click[0]({ target: { closest: () => ({ dataset: { action: 'reset-calendar', line: 'A2' } }) } });
+  assert.equal(Store.calendars.A2.inherited, false);
+  assert.equal(saves.length, 0);
+  assert.equal(toasts.length, 0);
+}));
+
+test('Plant roster flags cell marks only the machine with its own hours', () => withInheritEnv(({ roster }) => {
+  Plant._renderRoster();
+  const rows = roster.innerHTML.split('<tr style="border-bottom').slice(1);
+  assert.equal(rows.length, 2);
+  const a1 = rows.find(r => r.includes('A1')), a2 = rows.find(r => r.includes('A2'));
+  assert.ok(!a1.includes('ui.custom_hours'));
+  assert.ok(a2.includes('ui.custom_hours'));
+}));
