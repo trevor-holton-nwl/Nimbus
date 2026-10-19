@@ -46,6 +46,22 @@ export interface PeriodStrip {
 }
 export interface PeriodStripOpts { fmtMonth?: (date: Date) => string }
 
+/** One blackout reduced to inclusive local day keys (the caller derives them; this module stays Util-free). */
+export interface BlackoutItem { id: string; fromKey: string; toKey: string }
+/** A run of blackouts that touch or overlap, drawn as one marker on the timeline lane. */
+export interface BlackoutMark {
+  ids: string[];
+  /** Clipped to the axis, inclusive. */
+  fromKey: string;
+  toKey: string;
+  leftPct: number;
+  widthPct: number;
+}
+export interface BlackoutMarks { marks: BlackoutMark[]; truncated: number }
+
+/** Most markers the lane draws; beyond this the rest are counted, not drawn. */
+export const MAX_BLACKOUT_MARKS = 60;
+
 const MS_DAY = 86400000;
 const EN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -209,6 +225,43 @@ export function buildPeriodStrip(periods: PlantPeriod[], todayKey: string, opts:
     today: { leftPct: pct(todayIdx - startIdx) },
     ticks,
   };
+}
+
+/** Marker geometry for plant blackouts over the strip's axis. Each item is clipped to the axis
+ *  (dropped when wholly outside), then items that overlap or sit on adjacent days merge into one
+ *  cluster so dense holiday runs stay readable. Only the first MAX_BLACKOUT_MARKS clusters in time
+ *  order are returned; `truncated` counts the rest. Keys are inclusive 'YYYY-MM-DD' day keys. */
+export function buildBlackoutMarks(strip: Pick<PeriodStrip, 'axisStartKey' | 'axisEndKey'>, items: BlackoutItem[]): BlackoutMarks {
+  const startIdx = dayIndex(strip.axisStartKey);
+  const endIdx = dayIndex(strip.axisEndKey);
+  const total = endIdx - startIdx + 1;
+  const clipped: Array<{ id: string; from: number; to: number }> = [];
+  for (const it of items) {
+    if (!it.fromKey || !it.toKey) continue;
+    const from = Math.max(dayIndex(it.fromKey), startIdx);
+    const to = Math.min(dayIndex(it.toKey), endIdx);
+    if (to < from) continue;
+    clipped.push({ id: it.id, from, to });
+  }
+  clipped.sort((a, b) => a.from - b.from || a.to - b.to);
+  const clusters: Array<{ ids: string[]; from: number; to: number }> = [];
+  for (const c of clipped) {
+    const last = clusters[clusters.length - 1];
+    if (last && c.from - last.to <= 1) {
+      last.ids.push(c.id);
+      if (c.to > last.to) last.to = c.to;
+    } else {
+      clusters.push({ ids: [c.id], from: c.from, to: c.to });
+    }
+  }
+  const marks: BlackoutMark[] = clusters.slice(0, MAX_BLACKOUT_MARKS).map(c => ({
+    ids: c.ids,
+    fromKey: keyFromIndex(c.from),
+    toKey: keyFromIndex(c.to),
+    leftPct: ((c.from - startIdx) / total) * 100,
+    widthPct: ((c.to - c.from + 1) / total) * 100,
+  }));
+  return { marks, truncated: Math.max(0, clusters.length - MAX_BLACKOUT_MARKS) };
 }
 
 /** Defaults for "Add period": starts today, or the day after the latest existing end if that is

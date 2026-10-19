@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   periodStatus, summarizeWeek, validatePeriodDraft, periodWarnings,
-  buildPeriodStrip, nextPeriodDefaults, addDaysKey, dayIndex,
+  buildPeriodStrip, buildBlackoutMarks, nextPeriodDefaults, addDaysKey, dayIndex,
 } from '../../../frontend/calendar/calendar-periods.mjs';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -135,4 +135,75 @@ test('nextPeriodDefaults: today, or the day after the latest end; one week long'
   assert.deepEqual(nextPeriodDefaults(past, '2026-10-16'), { validFrom: '2026-10-16', validTo: '2026-10-22' });
   assert.deepEqual(nextPeriodDefaults([per('a', '2026-12-30', '2026-12-31')], '2026-10-16'),
     { validFrom: '2027-01-01', validTo: '2027-01-07' });
+});
+
+// Ten-day axis, 2026-01-01..2026-01-10, so each day is exactly 10%.
+const AXIS = { axisStartKey: '2026-01-01', axisEndKey: '2026-01-10' };
+const blk = (id, fromKey, toKey) => ({ id, fromKey, toKey });
+
+test('buildBlackoutMarks: geometry for one blackout inside the axis', () => {
+  const { marks, truncated } = buildBlackoutMarks(AXIS, [blk('a', '2026-01-03', '2026-01-04')]);
+  assert.equal(truncated, 0);
+  assert.equal(marks.length, 1);
+  assert.deepEqual(marks[0].ids, ['a']);
+  assert.equal(marks[0].leftPct, 20);
+  assert.equal(marks[0].widthPct, 20);
+});
+
+test('buildBlackoutMarks: clips at both edges and drops anything wholly outside', () => {
+  const { marks } = buildBlackoutMarks(AXIS, [
+    blk('left', '2025-12-20', '2026-01-02'),
+    blk('right', '2026-01-09', '2026-02-20'),
+    blk('before', '2025-12-01', '2025-12-31'),
+    blk('after', '2026-01-11', '2026-01-12'),
+  ]);
+  assert.deepEqual(marks.map(m => m.ids), [['left'], ['right']]);
+  assert.equal(marks[0].fromKey, '2026-01-01');
+  assert.equal(marks[0].leftPct, 0);
+  assert.equal(marks[0].widthPct, 20);
+  assert.equal(marks[1].toKey, '2026-01-10');
+  assert.equal(marks[1].leftPct, 80);
+  assert.equal(marks[1].widthPct, 20);
+});
+
+test('buildBlackoutMarks: a blackout ending at exclusive midnight covers only its last day (the caller passes the end-1ms day)', () => {
+  // 2026-01-03 00:00 -> 2026-01-05 00:00 is the 3rd and 4th, so the UI hands over toKey = 2026-01-04.
+  const { marks } = buildBlackoutMarks(AXIS, [blk('a', '2026-01-03', '2026-01-04')]);
+  assert.equal(marks[0].toKey, '2026-01-04');
+  assert.equal(marks[0].widthPct, 20);
+});
+
+test('buildBlackoutMarks: overlapping and touching blackouts merge; ids keep time order', () => {
+  const { marks } = buildBlackoutMarks(AXIS, [
+    blk('c', '2026-01-06', '2026-01-07'),   // touches b (b ends the 5th)
+    blk('a', '2026-01-02', '2026-01-04'),
+    blk('b', '2026-01-04', '2026-01-05'),   // overlaps a on the 4th
+  ]);
+  assert.equal(marks.length, 1);
+  assert.deepEqual(marks[0].ids, ['a', 'b', 'c']);
+  assert.equal(marks[0].fromKey, '2026-01-02');
+  assert.equal(marks[0].toKey, '2026-01-07');
+  assert.equal(marks[0].widthPct, 60);
+});
+
+test('buildBlackoutMarks: a blackout inside a longer one does not shrink the cluster', () => {
+  const { marks } = buildBlackoutMarks(AXIS, [blk('big', '2026-01-02', '2026-01-09'), blk('small', '2026-01-04', '2026-01-04')]);
+  assert.equal(marks.length, 1);
+  assert.equal(marks[0].toKey, '2026-01-09');
+});
+
+test('buildBlackoutMarks: a free day between two blackouts keeps them separate', () => {
+  const { marks } = buildBlackoutMarks(AXIS, [blk('a', '2026-01-02', '2026-01-03'), blk('b', '2026-01-05', '2026-01-06')]);
+  assert.deepEqual(marks.map(m => m.ids), [['a'], ['b']]);
+});
+
+test('buildBlackoutMarks: caps at 60 clusters and counts the rest', () => {
+  const axis = { axisStartKey: '2026-01-01', axisEndKey: '2026-12-31' };
+  const items = [];
+  for (let i = 0; i < 70; i++) { const k = addDaysKey('2026-01-01', i * 4); items.push(blk('b' + i, k, k)); }
+  const { marks, truncated } = buildBlackoutMarks(axis, items);
+  assert.equal(marks.length, 60);
+  assert.equal(truncated, 10);
+  assert.deepEqual(marks[0].ids, ['b0'], 'the earliest clusters are the ones kept');
+  assert.deepEqual(buildBlackoutMarks(axis, []), { marks: [], truncated: 0 });
 });
