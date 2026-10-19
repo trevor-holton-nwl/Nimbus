@@ -787,7 +787,7 @@ const SessionUIAdapter = {
       try { if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(now, tok); } catch {}
       return tok;
     };
-    const dfTokens = ['M j, Y', 'm/d/Y', 'd/m/Y', 'Y-m-d', 'j M Y'];
+    const dfTokens = ['m/d/Y', 'd/m/Y', 'Y-m-d', 'j M Y', 'M j, Y'];
     if (df && !dfTokens.includes(df)) dfTokens.unshift(df);   // keep a role/legacy value selectable
     const dfOpts = dfTokens.map(tok => SessionUIAdapter._optTag(tok, sample(tok), df)).join('');
     const fdow = Number(Session.pref('firstDayOfWeek'));

@@ -182,6 +182,28 @@ test('Toast.show dedupe: a later call with no action clears a previous one (late
   assert.equal(el.children.length, 0, 'omitting the action on the latest call removes the existing button');
 });
 
+test('_fmtTime12 zero-pads the hour and maps midnight/noon', () => {
+  assert.equal(Util._fmtTime12(new Date(2026, 0, 5, 0, 0)), '12:00 AM');
+  assert.equal(Util._fmtTime12(new Date(2026, 0, 5, 12, 0)), '12:00 PM');
+  assert.equal(Util._fmtTime12(new Date(2026, 0, 5, 13, 5)), '01:05 PM');
+});
+
+test('_fmtTimePref honors the 12h/24h pref; fmtBlockRange follows date+time prefs', () => {
+  const d1 = new Date(2026, 4, 15, 6, 0), d2 = new Date(2026, 4, 15, 19, 30), d3 = new Date(2026, 4, 17, 6, 0);
+  try {
+    Util.setPreferenceResolver(() => undefined);
+    assert.equal(Util._fmtTimePref(d2), '07:30 PM');
+    assert.equal(Util.fmtBlockRange(d1, d2), '05/15/2026 · 06:00 AM – 07:30 PM');
+    assert.equal(Util.fmtBlockRange(d1, d3), '05/15/2026 06:00 AM → 05/17/2026 06:00 AM');
+    Util.setPreferenceResolver(key => ({ timeFormat: '24h' }[key]));
+    assert.equal(Util._fmtTimePref(d2), '19:30');
+    assert.equal(Util.fmtBlockRange(d1, d2), '05/15/2026 · 06:00 – 19:30');
+    assert.equal(Util.fmtBlockRange(d1, d3), '05/15/2026 06:00 → 05/17/2026 06:00');
+  } finally {
+    Util.setPreferenceResolver(() => undefined);
+  }
+});
+
 test('Util.setPreferenceResolver changes what _timeFormatPref/_dateFormatPref read', () => {
   Util.setPreferenceResolver(key => ({ timeFormat: '24h', dateFormat: 'd/m/Y' }[key]));
   assert.equal(Util._timeFormatPref(), '24h');

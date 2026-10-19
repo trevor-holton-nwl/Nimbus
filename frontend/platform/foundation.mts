@@ -327,17 +327,16 @@ export const Util = {
     return `${Util._fmtDatePref(date)} · ${Util._fmtTimePref(date)}`;
   },
 
-  // Compact range for blackout rows. Same day: "05/15/2026 · 06:00 PM – 07:00 PM". Multi-day: "05/15/2026 06:00 PM → 05/17/2026 06:00 PM".
+  // Compact range for blackout rows, honoring the user's date/time display prefs.
+  // Same day: "05/15/2026 · 06:00 PM – 07:00 PM". Multi-day: "05/15/2026 06:00 PM → 05/17/2026 06:00 PM".
   fmtBlockRange(s: unknown, e: unknown): string {
     const ds = Util.parseDate(s), de = Util.parseDate(e);
     if (!ds || !de) return '';
-    const p = (n: number) => String(n).padStart(2, '0');
-    const dateStr = (d: Date) => `${p(d.getMonth()+1)}/${p(d.getDate())}/${d.getFullYear()}`;
     const sameDay = ds.getFullYear() === de.getFullYear()
                  && ds.getMonth()    === de.getMonth()
                  && ds.getDate()     === de.getDate();
-    if (sameDay) return `${dateStr(ds)} · ${Util._fmtTime12(ds)} – ${Util._fmtTime12(de)}`;
-    return `${dateStr(ds)} ${Util._fmtTime12(ds)} → ${dateStr(de)} ${Util._fmtTime12(de)}`;
+    if (sameDay) return `${Util._fmtDatePref(ds)} · ${Util._fmtTimePref(ds)} – ${Util._fmtTimePref(de)}`;
+    return `${Util._fmtDatePref(ds)} ${Util._fmtTimePref(ds)} → ${Util._fmtDatePref(de)} ${Util._fmtTimePref(de)}`;
   },
 
   /** Sum the hours of `intervals` ([{s:Date, e:Date}, …]) intersected with `win`
