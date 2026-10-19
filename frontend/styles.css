@@ -7224,10 +7224,10 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 }
 .lg-tl { position: relative; flex: 1; min-width: 0; height: 96px; }
 .lg-tl > * { position: absolute; }
-.lg-zone, .lg-cell, .lg-bar, .lg-setup, .lg-blackout, .lg-dep, .lg-gridline, .lg-now, .lg-vis {
+.lg-zone, .lg-cell, .lg-bar, .lg-setup, .lg-blackout, .lg-gridline, .lg-now, .lg-vis {
   left: calc(100% * var(--s) / var(--lg-hours));
 }
-.lg-zone, .lg-cell, .lg-bar, .lg-setup, .lg-blackout, .lg-dep {
+.lg-zone, .lg-cell, .lg-bar, .lg-setup, .lg-blackout {
   width: calc(100% * (var(--e) - var(--s)) / var(--lg-hours));
 }
 
@@ -7292,14 +7292,6 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
   color: var(--err); font-style: italic; font-size: 11px; font-weight: 600;
 }
 .lg-blackout { top: 0; bottom: 0; line-height: 16px; padding: 0 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-
-/* Dependency arrow (#dep-overlay .dep-arrow.highlight): the curve is an svg
-   stretched between the two endpoints (non-scaling stroke); the head is a
-   separate 8px svg so the stretch never distorts it. */
-.lg-dep { top: 16px; height: 32px; overflow: visible; pointer-events: none; }
-.lg-dep path { fill: none; stroke: var(--accent); stroke-width: 2.5; vector-effect: non-scaling-stroke; }
-.lg-dep-head { top: 16px; left: calc(100% * var(--e) / var(--lg-hours)); width: 8px; height: 8px; transform: translate(-100%, -50%); pointer-events: none; }
-.lg-dep-head polygon { fill: var(--accent); }
 
 /* Now line (.vis-current-time) and visibility-horizon marker
    (.vis-custom-time.visibility-horizon + its .vis-custom-time-marker tag) */
@@ -7417,11 +7409,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .lg-sw.edge > i  { inset: 0 4px 0 0; }
 .lg-sw.setup > i { inset: 2px; font-size: 7px; }
 .lg-sw.blackout > i { font-size: 8px; justify-content: flex-start; padding-left: 3px; }
-.lg-sw.whatif { background: var(--warn-soft); border-top: 3px solid var(--warn); }     /* .sandbox-mode .cmd-band */
 .lg-sw.nav { background: var(--bg-subtle); }
-.lg-sw.dots > i { gap: 3px; }
-.lg-sw .line-dot { width: 7px; height: 7px; }
-.lg-dot-a { background: var(--l1); } .lg-dot-b { background: var(--l2); } .lg-dot-c { background: var(--l4); }
 .lg-sw .p {
   position: absolute; box-sizing: border-box;
   left: calc(var(--l) * 1px); top: calc(var(--t) * 1px);
@@ -7443,16 +7431,6 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .lg-sw .p.g-day     { background: var(--line); }
 .lg-sw .p.g-month   { background: var(--line-strong); }
 .lg-sw .p.v-tag     { background: var(--accent); border-radius: 0 0 2px 0; }
-.lg-sw .p.m-box     { border: 1px dashed var(--nimbus-amber, var(--accent)); background: rgba(var(--accent-rgb), .10); border-radius: 2px; } /* .nimbus-marquee */
-.lg-sw.dep > svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
-.lg-sw.dep path { fill: none; stroke: currentColor; stroke-width: 1.5; }
-.lg-sw.dep polygon { fill: currentColor; }
-.lg-sw.dep.ok    { color: var(--ok); }
-.lg-sw.dep.tight { color: var(--warn); }
-.lg-sw.dep.gap   { color: var(--err); }
-.lg-sw.dep.hl    { color: var(--accent); }
-.lg-sw.dep.hl path, .lg-sw.dep.gap path { stroke-width: 2.5; }
-.lg-k .line-util { margin: 1px 0 0; }
 
 /* Narrow: the scene scrolls inside its box (never the page), the board stops
    sticking so phones scroll naturally, and the key collapses to one column. */

@@ -57,7 +57,7 @@ test('Gantt legend popup keys (btn.legend, tip.legend, legend.*) exist in all 5 
     'btn.legend', 'tip.legend',
     'legend.title', 'legend.intro', 'legend.scene_title', 'legend.day_yesterday', 'legend.day_today',
     'legend.day_tomorrow', 'legend.scene_blackout_reason', 'legend.group_orders', 'legend.group_setup',
-    'legend.group_shading', 'legend.group_markers', 'legend.group_nav', 'legend.group_machines', 'legend.standard_t',
+    'legend.group_shading', 'legend.group_markers', 'legend.group_nav', 'legend.standard_t',
     'legend.standard_d', 'legend.firmed_t', 'legend.firmed_d', 'legend.selected_t', 'legend.selected_d',
     'legend.conflict_t', 'legend.conflict_d', 'legend.dimmed_t', 'legend.dimmed_d', 'legend.split_t',
     'legend.split_d', 'legend.dist_t', 'legend.dist_d', 'legend.dist_sibling_t', 'legend.dist_sibling_d',
@@ -68,13 +68,10 @@ test('Gantt legend popup keys (btn.legend, tip.legend, legend.*) exist in all 5 
     'legend.alert_d', 'legend.alertcell_err_t', 'legend.alertcell_err_d', 'legend.alertcell_warn_t',
     'legend.alertcell_warn_d', 'legend.alertcell_cal_t', 'legend.alertcell_cal_d', 'legend.gridline_t',
     'legend.gridline_d', 'legend.now_t', 'legend.now_d', 'legend.visibility_t', 'legend.visibility_d',
-    'legend.dep_hl_t', 'legend.dep_hl_d', 'legend.dep_ok_t', 'legend.dep_ok_d', 'legend.dep_tight_t',
-    'legend.dep_tight_d', 'legend.dep_gap_t', 'legend.dep_gap_d', 'legend.marquee_t', 'legend.marquee_d',
-    'legend.whatif_t', 'legend.whatif_d', 'legend.nav_viewport_t', 'legend.nav_viewport_d', 'legend.nav_bars_t',
+    'legend.nav_viewport_t', 'legend.nav_viewport_d', 'legend.nav_bars_t',
     'legend.nav_bars_d', 'legend.nav_alert_t', 'legend.nav_alert_d', 'legend.nav_closed_t', 'legend.nav_closed_d',
     'legend.nav_blackout_t', 'legend.nav_blackout_d', 'legend.nav_hist_t', 'legend.nav_hist_d', 'legend.nav_now_t',
-    'legend.nav_now_d', 'legend.line_color_t', 'legend.line_color_d', 'legend.util_ok_t', 'legend.util_ok_d',
-    'legend.util_warn_t', 'legend.util_warn_d', 'legend.util_err_t', 'legend.util_err_d',
+    'legend.nav_now_d',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
   for (const key of REQUIRED) {
