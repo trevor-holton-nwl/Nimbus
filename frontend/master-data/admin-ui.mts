@@ -247,7 +247,7 @@ export const Plant = {
     document.getElementById('plant-blocks-list')?.addEventListener('click', e => {
       const target = e.target as HTMLElement | null;
       const rm = target?.closest<HTMLElement>('.plant-blk-remove');
-      if (rm) { Plant.removePlantBlock(rm.dataset.blockId!); return; }
+      if (rm) { void Plant.removePlantBlock(rm.dataset.blockId!); return; }
       const ed = target?.closest<HTMLElement>('.plant-blk-edit');
       if (ed) Plant.openBlockModal(ed.dataset.blockId!);
     });
@@ -856,12 +856,28 @@ export const Plant = {
     Toast.show(Util.t('toast.plant_blackout_added'), 'success');
   },
 
-  removePlantBlock(id: string): void {
+  async removePlantBlock(id: string): Promise<void> {
     // The rendered list is plant-scoped, but keep the write guard here too:
     // a stale DOM handler must never delete a blackout belonging to another plant.
     const plant = Store.selectedPlant;
-    const blk = Store.plantBlocks.find(b => b.id === id && b.plant === plant);
-    if (!blk || !plant) return;
+    const found = Store.plantBlocks.find(b => b.id === id && b.plant === plant);
+    if (!found || !plant) return;
+    // Same confirmation as deleting a calendar period (CalendarPeriodsUI.remove).
+    const confirmed = await Modal.confirm({
+      title: Util.t('confirm.delete_blackout_title'),
+      message: Util.t('confirm.delete_blackout', {
+        reason: found.reason || Util.t('ui.plant_blackout_default'),
+        range: Util.fmtBlockRange(found.start, found.end),
+      }),
+      confirmLabel: Util.t('btn.delete_blackout'),
+      tone: 'danger',
+    });
+    if (!confirmed) return;
+    // The dialog is async: another tab's refresh, a plant switch or a What-If change may have removed the
+    // block (or moved the selection) meanwhile. Look it up again and do nothing if it is gone.
+    const still = Store.selectedPlant;
+    const blk = Store.plantBlocks.find(b => b.id === id && b.plant === still);
+    if (!blk || !still || still !== plant) return;
     Store.removePlantBlock(id, 'plant');
     CalendarSync.savePlantBlackoutDelete(plant, id);
     Toast.show(Util.t('toast.plant_blackout_removed'), 'success');

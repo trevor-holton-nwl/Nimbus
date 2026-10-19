@@ -405,13 +405,16 @@ test('Plant blackout list renders only blocks for the selected plant', () => {
   }
 });
 
-test('Plant blackout delete ignores an ID that belongs to another plant', () => {
+test('Plant blackout delete ignores an ID that belongs to another plant', async () => {
   const priorWindow = globalThis.window;
   const priorDocument = globalThis.document;
   const priorPlant = Store.selectedPlant;
   const priorBlocks = Store.plantBlocks;
   const originalDelete = CalendarSync.savePlantBlackoutDelete;
+  const originalConfirm = Modal.confirm;
   let deleteCalls = 0;
+  let confirmCalls = 0;
+  Modal.confirm = async () => { confirmCalls += 1; return true; };
   CalendarSync.savePlantBlackoutDelete = () => {
     deleteCalls += 1;
     return Promise.resolve({ ok: true });
@@ -426,11 +429,13 @@ test('Plant blackout delete ignores an ID that belongs to another plant', () => 
   try {
     Store.setSelectedPlant('1006', 'test');
     Store.replacePlantBlocks([block], 'test');
-    Plant.removePlantBlock(block.id);
+    await Plant.removePlantBlock(block.id);
     assert.deepEqual(Store.plantBlocks, [block]);
     assert.equal(deleteCalls, 0);
+    assert.equal(confirmCalls, 0, 'a block of another plant never even prompts');
   } finally {
     CalendarSync.savePlantBlackoutDelete = originalDelete;
+    Modal.confirm = originalConfirm;
     if (priorWindow === undefined) delete globalThis.window;
     else globalThis.window = priorWindow;
     if (priorDocument === undefined) delete globalThis.document;
@@ -1709,4 +1714,92 @@ test('Plant._renderBlocks: a collapsed list that becomes empty shows its empty m
     assert.equal(h.els['plant-blocks-list'].style.display, '');
     assert.match(h.els['plant-blocks-list'].innerHTML, /empty-state/);
   } finally { h.restore(); }
+});
+
+// Plant blackout delete asks first (same dialog as deleting a calendar period).
+function _removeHarness(blocks, confirmImpl) {
+  const h = _blockModalHarness(blocks);
+  const saved = { confirm: Modal.confirm, del: CalendarSync.savePlantBlackoutDelete };
+  h.confirms = [];
+  h.deletes = [];
+  Modal.confirm = async (opts) => { h.confirms.push(opts); return confirmImpl ? confirmImpl(opts) : true; };
+  CalendarSync.savePlantBlackoutDelete = (plant, id) => { h.deletes.push([plant, id]); return Promise.resolve({ ok: true }); };
+  const base = h.restore;
+  h.restore = () => { Modal.confirm = saved.confirm; CalendarSync.savePlantBlackoutDelete = saved.del; base(); };
+  return h;
+}
+
+test('Plant.removePlantBlock asks a danger confirm naming the reason and range, then removes and posts the delete', async () => {
+  const h = _removeHarness([_blk('pb1', 'Summer shutdown')]);
+  try {
+    await Plant.removePlantBlock('pb1');
+    assert.equal(h.confirms.length, 1);
+    const c = h.confirms[0];
+    assert.equal(c.tone, 'danger');
+    assert.equal(c.title, 'confirm.delete_blackout_title');
+    assert.equal(c.confirmLabel, 'btn.delete_blackout');
+    assert.equal(typeof c.message, 'string');
+    assert.deepEqual(Store.plantBlocks, []);
+    assert.deepEqual(h.deletes, [['1006', 'pb1']]);
+    assert.equal(h.log.toasts.at(-1)[0], 'toast.plant_blackout_removed');
+  } finally { h.restore(); }
+});
+
+test('Plant.removePlantBlock passes the reason (or the default label) and the row range into the message', async () => {
+  const seen = [];
+  const prior = Util.t;
+  Util.t = (key, params) => { seen.push([key, params]); return prior.call(Util, key, params); };
+  const h = _removeHarness([_blk('pb1', 'Summer shutdown'), _blk('pb2', '')]);
+  try {
+    await Plant.removePlantBlock('pb1');
+    await Plant.removePlantBlock('pb2');
+    const msgs = seen.filter(([k]) => k === 'confirm.delete_blackout');
+    assert.equal(msgs.length, 2);
+    assert.equal(msgs[0][1].reason, 'Summer shutdown');
+    assert.equal(msgs[0][1].range, Util.fmtBlockRange(_blk('x').start, _blk('x').end));
+    assert.notEqual(msgs[1][1].reason, '', 'a blank reason falls back to the default label');
+  } finally { Util.t = prior; h.restore(); }
+});
+
+test('Plant.removePlantBlock: Cancel keeps the blackout and sends nothing', async () => {
+  const h = _removeHarness([_blk('pb1')], () => false);
+  try {
+    await Plant.removePlantBlock('pb1');
+    assert.equal(h.confirms.length, 1);
+    assert.deepEqual(Store.plantBlocks.map(b => b.id), ['pb1']);
+    assert.deepEqual(h.deletes, []);
+    assert.equal(h.log.toasts.length, 0);
+  } finally { h.restore(); }
+});
+
+test('Plant.removePlantBlock: a blackout that vanished while the dialog was open is a no-op (no second delete, no toast)', async () => {
+  const h = _removeHarness([_blk('pb1')], () => { Store.replacePlantBlocks([], 'other-tab'); return true; });
+  try {
+    await Plant.removePlantBlock('pb1');
+    assert.deepEqual(h.deletes, []);
+    assert.equal(h.log.toasts.length, 0);
+  } finally { h.restore(); }
+});
+
+test('Plant.removePlantBlock: switching plant while the dialog is open deletes nothing', async () => {
+  const h = _removeHarness([_blk('pb1')], () => { Store.setSelectedPlant('5512', 'test'); return true; });
+  try {
+    await Plant.removePlantBlock('pb1');
+    assert.deepEqual(h.deletes, []);
+    assert.deepEqual(Store.plantBlocks.map(b => b.id), ['pb1']);
+  } finally { h.restore(); }
+});
+
+test('Plant.removePlantBlock: an unknown id never prompts', async () => {
+  const h = _removeHarness([_blk('pb1')]);
+  try {
+    await Plant.removePlantBlock('nope');
+    assert.equal(h.confirms.length, 0);
+    assert.deepEqual(Store.plantBlocks.map(b => b.id), ['pb1']);
+  } finally { h.restore(); }
+});
+
+test('the list x button routes through the confirming removePlantBlock (no direct Store delete in the handler)', () => {
+  const src = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.ok(src.includes('void Plant.removePlantBlock(rm.dataset.blockId!)'));
 });
