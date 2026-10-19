@@ -27,7 +27,7 @@ import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
-import { Engine } from '../optimization/engine.mjs';
+import { Engine, predecessorOnMachine } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
@@ -2106,11 +2106,14 @@ export const Inspector = {
       ? resolveSetup({ definition, machine: task.MACHINE, predecessorState, successorState,
         predecessorOrderId: entry.predecessorOrderId ?? null, successorOrderId: id,
         plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides }) : null;
+    const scheduledPredecessor = predecessorOnMachine(task, Store.tasksArr);
     const predecessorStateText = hasObservedEntry
       ? (Inspector._formatSetupState(predecessorState ?? null, definition) || entry.predecessorState || null)
       : null;
     return {
-      predecessorOrderId: entry.predecessorOrderId ?? null,
+      // Naming the predecessor needs no setup definition, so it comes from the
+      // schedule rather than the observation entry (which still drives state/resolve above).
+      predecessorOrderId: scheduledPredecessor ? String(scheduledPredecessor.id) : null,
       predecessorState: predecessorStateText,
       successorOrderId: id,
       requiredMinutes: Number.isFinite(entry.requiredMinutes) ? entry.requiredMinutes : null,
@@ -2186,6 +2189,10 @@ export const Inspector = {
     const setupDetail = Inspector._setupDetailForTask(task);
     const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
     const missingSetupPlaceholder = '—';
+    const firstOnMachine = Util.t('ui.setup_first_on_machine');
+    const setupPredecessorText = setupDetail.predecessorOrderId
+      ? Util.orderNumber(Store.tasks[setupDetail.predecessorOrderId], setupDetail.predecessorOrderId)
+      : (firstOnMachine === 'ui.setup_first_on_machine' ? 'First on machine' : firstOnMachine);
     const setupPlant = Store.getPlantForLine(task.MACHINE) || task.PLANT || Store.selectedPlant || '';
     const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
     // Distribution card (aggregate_to_detail.md §8): only rendered for a
@@ -2322,7 +2329,7 @@ export const Inspector = {
 
       <div class="insp-card insp-setup-detail" aria-label="${Util.escapeHtml(Util.t('ui.setup_detail_title'))}">
         <h4>${Util.escapeHtml(Util.t('ui.setup_detail_title'))}</h4>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorOrderId || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${Util.escapeHtml(setupPredecessorText)}</div></div>
         <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
         <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
         <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>

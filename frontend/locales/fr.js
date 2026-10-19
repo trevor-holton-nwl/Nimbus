@@ -1717,7 +1717,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_status_ready_review':     'Prêt pour l’examen d’activation.',
   'toast.setup_saved': 'Administration de réglage enregistrée', 'toast.setup_copied': 'Lignes de réglage copiées',
   'ui.setup_import_csv': 'Importer CSV',
-  'ui.setup_detail_title': 'Détail de réglage dérivé', 'ui.setup_predecessor': 'Ordre prédécesseur',
+  'ui.setup_detail_title': 'Détail de réglage dérivé', 'ui.setup_predecessor': 'Ordre prédécesseur', 'ui.setup_first_on_machine': 'Premier sur la machine',
   'ui.setup_predecessor_state': 'État prédécesseur',
   'ui.setup_required': 'Réglage requis', 'ui.setup_effective': 'Réglage effectif', 'ui.setup_standard': 'Réglage standard',
   'ui.setup_override': 'Remplacement d’occurrence', 'ui.setup_missing': 'Données de matrice de réglage manquantes',

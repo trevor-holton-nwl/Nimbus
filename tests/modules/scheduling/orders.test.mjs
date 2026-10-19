@@ -145,8 +145,13 @@ if (typeof globalThis.document === 'undefined') {
 globalThis.window = globalThis.window || {};
 
 test('Inspector exposes keyboard-equivalent setup detail on the successor, including override and missing states', () => {
-  const task = { id: 'detail-successor', MACHINE: 'SETUP-L4', RUN_TIME: 1,
+  const task = { id: 'detail-successor', PLANT: 'P-SETUP', MACHINE: 'SETUP-L4', RUN_TIME: 1,
     start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T09:00:00') };
+  // The predecessor is read from the schedule, so it must sit earlier on the same machine.
+  const predecessorTask = { id: 'detail-predecessor', PLANT: 'P-SETUP', MACHINE: 'SETUP-L4', RUN_TIME: 1,
+    start_date: new Date('2026-08-14T06:00:00'), end_date: new Date('2026-08-14T07:00:00') };
+  const priorTasks = structuredClone(Store.tasksArr);
+  Store.setTasks([predecessorTask, task], 'unit-test');
   const detail = Inspector._setupDetailForTask(task, {
     intervals: [{ line: 'SETUP-L4', predecessorOrderId: 'detail-predecessor', successorOrderId: 'detail-successor',
       start: new Date('2026-08-14T07:30:00'), end: task.start_date, requiredMinutes: 30, availableMinutes: 15,
@@ -164,6 +169,7 @@ test('Inspector exposes keyboard-equivalent setup detail on the successor, inclu
   assert.equal(detail.shortMinutes, 15);
   assert.match(Inspector._setupCapacityConflictText(detail), /15.*30.*15/,
     'the successor detail must state available, required, and short capacity in text');
+  Store.setTasks(priorTasks, 'unit-test');
 });
 
 test('Inspector renders derived setup details for orders without setup observations and keeps notes last', () => {
@@ -408,7 +414,7 @@ test('Inspector shows a plain dash for unavailable setup values and names the mi
     Inspector._render({ id: 'missing-setup-inspector', ORDER: '100002', MACHINE: 'L1', RUN_TIME: 1 });
     const setupPanel = body.innerHTML.slice(body.innerHTML.indexOf('ui.setup_detail_title'));
     const dashCount = [...setupPanel.matchAll(/—/g)].length;
-    assert.equal(dashCount, 6, 'the six unavailable setup values (predecessor, state, required, effective, standard, override) render a plain dash');
+    assert.equal(dashCount, 5, 'the five unavailable setup values (state, required, effective, standard, override) render a plain dash; an absent predecessor reads First on machine');
     const missingTextCount = [...setupPanel.matchAll(/Missing setup matrix data/g)].length;
     assert.equal(missingTextCount, 1,
       'only the standalone explanatory warning paragraph names the missing matrix data — the per-value placeholders no longer do');
@@ -1787,5 +1793,90 @@ test('the override dialog takes its "Line" label from the locale layer, not hard
     globalThis.document.getElementById = priorGetElementById;
     Util.fpDatetime = priorFp; Modal.open = priorOpen; Table._fpOvrFinish = priorFpInst;
     Store.setTasks([], 'unit-test');
+  }
+});
+
+test('W2: Inspector names the predecessor order from the schedule, with or without a setup definition', () => {
+  const plant = 'W2-PRED-PLANT';
+  const line = 'W2-PRED-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorGetElementById = globalThis.document.getElementById;
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  const mk = (id, order, startHour, extra = {}) => ({ id, ORDER: order, PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED',
+    start_date: new Date(`2026-08-21T${String(startHour).padStart(2, '0')}:00:00`),
+    end_date: new Date(`2026-08-21T${String(startHour + 1).padStart(2, '0')}:00:00`), ...extra });
+  const first = mk('w2-first', '700001', 8);
+  const second = mk('w2-second', '700002', 10);
+  const other = { ...mk('w2-other-line', '700003', 9), MACHINE: 'W2-OTHER-LINE' };
+  Store.setTasks([first, second, other], 'unit-test');
+  const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+  try {
+    // No setup snapshot at all: the predecessor is still named, the state rows stay empty.
+    Store.replaceSetupSnapshot(null, 'unit-test');
+    let detail = Inspector._setupDetailForTask(second);
+    assert.equal(detail.predecessorOrderId, 'w2-first');
+    assert.equal(detail.predecessorState, null);
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._render(second);
+    const panel = body.innerHTML.slice(body.innerHTML.indexOf('ui.setup_detail_title'));
+    assert.match(panel, />700001</, 'the predecessor renders as its order number, not the raw task id');
+    assert.doesNotMatch(panel, /w2-first/);
+
+    // First on machine: no predecessor id, and the first-on-machine label instead of a dash.
+    detail = Inspector._setupDetailForTask(first);
+    assert.equal(detail.predecessorOrderId, null);
+    Inspector._render(first);
+    assert.match(body.innerHTML.slice(body.innerHTML.indexOf('ui.setup_detail_title')), /First on machine/);
+
+    // A zero-minute matrix transition yields no setup interval, but the predecessor is still shown.
+    Store.replaceSetupSnapshot({
+      plant,
+      definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+      plant_rows: [{ machine: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 0 }],
+      machine_rows: [], machine_states: [], overrides: [],
+    }, 'unit-test');
+    const blue = mk('w2-blue', '700004', 12, { COLOR: 'BLUE' });
+    Store.setTasks([first, second, other, blue], 'unit-test');
+    detail = Inspector._setupDetailForTask(blue);
+    assert.equal(detail.predecessorOrderId, 'w2-second');
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('W2: a split order is one span, so it is never its own predecessor', () => {
+  const plant = 'W2-SPLIT-PLANT';
+  const line = 'W2-SPLIT-LINE';
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  const at = (day, hour) => new Date(`2026-08-${day}T${String(hour).padStart(2, '0')}:00:00`);
+  const split = { id: 'w2-split', ORDER: '710001', PLANT: plant, MACHINE: line, RUN_TIME: 2,
+    start_date: at(21, 8), end_date: at(22, 10),
+    scheduleSegments: [
+      { sequence: 1, startDate: at(21, 8), endDate: at(21, 9) },
+      { sequence: 2, startDate: at(22, 9), endDate: at(22, 10) },
+    ] };
+  const after = { id: 'w2-after', ORDER: '710002', PLANT: plant, MACHINE: line, RUN_TIME: 1,
+    start_date: at(22, 12), end_date: at(22, 13) };
+  Store.setTasks([split, after], 'unit-test');
+  try {
+    assert.equal(Inspector._setupDetailForTask(split).predecessorOrderId, null);
+    assert.equal(Inspector._setupDetailForTask(after).predecessorOrderId, 'w2-split');
+  } finally {
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });

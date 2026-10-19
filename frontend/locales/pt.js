@@ -1716,7 +1716,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.setup_status_ready_review':     'Pronto para revisão de ativação.',
   'toast.setup_saved': 'Administração de preparação salva', 'toast.setup_copied': 'Linhas de preparação copiadas',
   'ui.setup_import_csv': 'Importar CSV',
-  'ui.setup_detail_title': 'Detalhe de preparação derivado', 'ui.setup_predecessor': 'Ordem predecessora',
+  'ui.setup_detail_title': 'Detalhe de preparação derivado', 'ui.setup_predecessor': 'Ordem predecessora', 'ui.setup_first_on_machine': 'Primeira na máquina',
   'ui.setup_predecessor_state': 'Estado predecessor',
   'ui.setup_required': 'Preparação necessária', 'ui.setup_effective': 'Preparação efetiva', 'ui.setup_standard': 'Preparação padrão',
   'ui.setup_override': 'Substituição da ocorrência', 'ui.setup_missing': 'Dados da matriz de preparação ausentes',

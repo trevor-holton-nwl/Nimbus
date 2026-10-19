@@ -461,6 +461,42 @@ function setupAvailabilityMinutes(
   return Math.max(0, (end.getTime() - lower) / (60 * 1000));
 }
 
+type SetupSpan = { task: NimbusTask; start: Date; end: Date };
+
+/** One chain order for deriveSetupObservation and predecessorOnMachine: first-interval start, then end, then id. */
+function compareSetupOrders(left: SetupSpan, right: SetupSpan): number {
+  return left.start.getTime() - right.start.getTime()
+    || left.end.getTime() - right.end.getTime()
+    || String(left.task.id).localeCompare(String(right.task.id));
+}
+
+/**
+ * The order scheduled immediately before `task` on its own plant/machine, or
+ * null when it is first. Independent of any setup definition or matrix, so the
+ * Inspector can name the predecessor even where no setup is derived. A split
+ * order is one span, so its own segments never make it its own predecessor.
+ */
+export function predecessorOnMachine(task: NimbusTask, tasks: ReadonlyArray<NimbusTask>): NimbusTask | null {
+  const plant = String(task.PLANT ?? task.plant ?? '');
+  const line = String(task.MACHINE ?? '');
+  if (!plant || !line) return null;
+  const spanOf = (candidate: NimbusTask): SetupSpan | null => {
+    const intervals = setupOrderIntervals(candidate);
+    return intervals.length ? { task: candidate, start: intervals[0].start, end: intervals.at(-1)!.end } : null;
+  };
+  const own = spanOf(task);
+  if (!own) return null;
+  let best: SetupSpan | null = null;
+  for (const candidate of tasks) {
+    if (String(candidate.id) === String(task.id)) continue;
+    if (String(candidate.PLANT ?? candidate.plant ?? '') !== plant || String(candidate.MACHINE ?? '') !== line) continue;
+    const span = spanOf(candidate);
+    if (!span || compareSetupOrders(span, own) >= 0) continue;
+    if (!best || compareSetupOrders(span, best) > 0) best = span;
+  }
+  return best?.task ?? null;
+}
+
 /**
  * Resolve scheduled setup occurrences exactly once, before either compute path
  * runs. This pure projection neither mutates Store nor invokes Engine; both
@@ -514,11 +550,7 @@ export function deriveSetupObservation(
   }
   for (const line of lines) {
     const orders = byLine.get(line) || [];
-    orders.sort((left, right) => (
-      left.start.getTime() - right.start.getTime()
-      || left.end.getTime() - right.end.getTime()
-      || String(left.task.id).localeCompare(String(right.task.id))
-    ));
+    orders.sort(compareSetupOrders);
     const scope = `${setup.plant}/${line}`;
     const lineIntervalIndex = availability ? buildLineIntervalIndex(orders) : { starts: [], prefixMaxEnd: [] };
     const resolvedEdges = new Set<string>();

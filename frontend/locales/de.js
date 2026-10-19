@@ -1719,7 +1719,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_status_ready_review':     'Bereit zur Aktivierungsprüfung.',
   'toast.setup_saved': 'Setup-Verwaltung gespeichert', 'toast.setup_copied': 'Setup-Zeilen kopiert',
   'ui.setup_import_csv': 'CSV importieren',
-  'ui.setup_detail_title': 'Abgeleitete Setup-Details', 'ui.setup_predecessor': 'Vorgängerauftrag',
+  'ui.setup_detail_title': 'Abgeleitete Setup-Details', 'ui.setup_predecessor': 'Vorgängerauftrag', 'ui.setup_first_on_machine': 'Erster Auftrag auf der Maschine',
   'ui.setup_predecessor_state': 'Vorgängerzustand',
   'ui.setup_required': 'Erforderliches Setup', 'ui.setup_effective': 'Effektives Setup', 'ui.setup_standard': 'Standard-Setup',
   'ui.setup_override': 'Vorgangsüberschreibung', 'ui.setup_missing': 'Setup-Matrixdaten fehlen',
