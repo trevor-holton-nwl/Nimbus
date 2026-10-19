@@ -5042,10 +5042,13 @@ body.dark .period-seg-active { color: var(--bg); }
    real periods. min-width:0 overrides .period-seg's 6px so a 1-2 day gap cannot spill over a neighbour; the
    title carries the detail. The button is its own size container so the label hides itself when the
    segment's content box is too narrow to show more than a stray ellipsis (works at any strip width). */
+/* Default-week fill: a faint cool slate wash (mute text colour into the track grey). Light 8% -> #e8ecf1, dark 14% -> #273342; the label is nudged toward --fg for >= 4.5:1. */
+:root { --period-default-fill: color-mix(in srgb, var(--fg-mute) 8%, var(--bg-subtle)); --period-default-fg: color-mix(in srgb, var(--fg-mute) 70%, var(--fg)); }
+body.dark { --period-default-fill: color-mix(in srgb, var(--fg-mute) 14%, var(--bg-subtle)); }
 .period-seg-default {
   z-index: 0; min-width: 0; padding: 0 4px;
   container-type: inline-size;
-  background: transparent; border: 1px dashed var(--line-strong); color: var(--fg-mute); font-weight: 500;
+  background: var(--period-default-fill); border: 1px dashed var(--line-strong); color: var(--period-default-fg); font-weight: 500;
 }
 @container (max-width: 44px) {
   .period-seg-default .period-seg-label { display: none; }
@@ -5089,7 +5092,7 @@ body.dark .period-seg-active { color: var(--bg); }
   border-radius: 1px; background: var(--err); vertical-align: middle;
 }
 .period-legend-sw-default {
-  box-sizing: border-box; width: 12px; height: 8px; background: transparent; border: 1px dashed var(--line-strong); border-radius: 2px;
+  box-sizing: border-box; width: 12px; height: 8px; background: var(--period-default-fill); border: 1px dashed var(--line-strong); border-radius: 2px;
 }
 #plant-periods-horizon:not(:empty)::before { content: " · "; white-space: pre; }
 /* A cluster click flashes its rows in the blackout list; the fade is skipped for reduced motion. */
