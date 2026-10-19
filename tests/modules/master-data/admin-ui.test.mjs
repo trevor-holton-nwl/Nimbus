@@ -1461,3 +1461,143 @@ test('Plant.render() also renders the Calendar periods, and static wiring initia
     Store.setSelectedPlant(priorPlant, 'test-restore');
   }
 });
+
+// Plant blackout edit flow (add/edit share #modal-plant-block).
+function _blockModalHarness(blocks) {
+  const els = {
+    'plant-blk-reason': { value: '' },
+    'plant-blk-start': { value: '' },
+    'plant-blk-end': { value: '' },
+    'modal-plant-block-title': { textContent: '' },
+    'modal-plant-block-save-btn': { textContent: '' },
+    'plant-blocks-list': { innerHTML: '', style: {} },
+    'plant-blocks-stats': { innerHTML: '' },
+  };
+  const picker = el => ({ setDate: d => { el.value = d instanceof Date ? d.toISOString() : String(d); } });
+  const saved = {
+    window: globalThis.window, document: globalThis.document, plant: Store.selectedPlant,
+    blocks: Store.plantBlocks, open: Modal.open, close: Modal.close, show: Toast.show,
+    upsert: CalendarSync.savePlantBlackoutUpsert, fpS: Plant._fpBlkStart, fpE: Plant._fpBlkEnd,
+    collapsed: Plant._blocksCollapsed,
+  };
+  const log = { posts: [], toasts: [], closed: [], opened: [] };
+  globalThis.window = {};
+  globalThis.document = { getElementById: id => els[id] || null };
+  Modal.open = id => log.opened.push(id);
+  Modal.close = id => log.closed.push(id);
+  Toast.show = (msg, kind) => log.toasts.push([msg, kind]);
+  CalendarSync.savePlantBlackoutUpsert = b => { log.posts.push(b); return Promise.resolve({ ok: true }); };
+  Plant._fpBlkStart = picker(els['plant-blk-start']);
+  Plant._fpBlkEnd = picker(els['plant-blk-end']);
+  Plant._blocksCollapsed = false;
+  Plant._editingBlockId = null;
+  Store.setSelectedPlant('1006', 'test');
+  Store.replacePlantBlocks(blocks, 'test');
+  const restore = () => {
+    if (saved.window === undefined) delete globalThis.window; else globalThis.window = saved.window;
+    if (saved.document === undefined) delete globalThis.document; else globalThis.document = saved.document;
+    Modal.open = saved.open; Modal.close = saved.close; Toast.show = saved.show;
+    CalendarSync.savePlantBlackoutUpsert = saved.upsert;
+    Plant._fpBlkStart = saved.fpS; Plant._fpBlkEnd = saved.fpE;
+    Plant._blocksCollapsed = saved.collapsed; Plant._editingBlockId = null;
+    Store.replacePlantBlocks(saved.blocks, 'test-restore');
+    Store.setSelectedPlant(saved.plant, 'test-restore');
+  };
+  return { els, log, restore };
+}
+
+const _blk = (id, reason = 'Holiday') => ({
+  id, plant: '1006', reason,
+  start: new Date('2026-12-24T00:00:00'), end: new Date('2026-12-26T00:00:00'),
+});
+
+test('Plant.openBlockModal(id) prefills the edit form; a later add open resets to add mode', () => {
+  const h = _blockModalHarness([_blk('pb1')]);
+  try {
+    Plant.openBlockModal('pb1');
+    assert.equal(Plant._editingBlockId, 'pb1');
+    assert.equal(h.els['plant-blk-reason'].value, 'Holiday');
+    assert.notEqual(h.els['plant-blk-start'].value, '');
+    assert.deepEqual(h.log.opened, ['modal-plant-block']);
+    // Cancel and the close button shut the modal with no Plant hook; the next plain open must be a clean add.
+    Plant.openBlockModal();
+    assert.equal(Plant._editingBlockId, null);
+    assert.equal(h.els['plant-blk-reason'].value, '');
+    // Add mode: saving creates a new block and never routes through the edit path.
+    h.els['plant-blk-reason'].value = 'Audit';
+    h.els['plant-blk-start'].value = '2027-01-10T08:00:00';
+    h.els['plant-blk-end'].value = '2027-01-10T12:00:00';
+    Plant.savePlantBlockFromModal();
+    assert.equal(Store.plantBlocks.length, 2);
+    assert.equal(h.log.posts.length, 1);
+    assert.equal(h.log.posts[0].reason, 'Audit');
+  } finally { h.restore(); }
+});
+
+test('Plant.savePlantBlockFromModal edit path updates in place and POSTs once; unchanged is a no-op', () => {
+  const h = _blockModalHarness([_blk('pb1')]);
+  try {
+    Plant.openBlockModal('pb1');
+    h.els['plant-blk-start'].value = '2026-12-24T00:00:00';
+    h.els['plant-blk-end'].value = '2026-12-26T00:00:00';
+    Plant.savePlantBlockFromModal();
+    assert.equal(h.log.posts.length, 0, 'nothing changed, so nothing is written');
+    assert.deepEqual(h.log.closed, ['modal-plant-block']);
+
+    Plant.openBlockModal('pb1');
+    h.els['plant-blk-start'].value = '2026-12-24T00:00:00';
+    h.els['plant-blk-end'].value = '2026-12-27T00:00:00';
+    h.els['plant-blk-reason'].value = 'Shutdown';
+    Plant.savePlantBlockFromModal();
+    assert.equal(Store.plantBlocks.length, 1);
+    assert.equal(Store.plantBlocks[0].id, 'pb1');
+    assert.equal(Store.plantBlocks[0].reason, 'Shutdown');
+    assert.equal(h.log.posts.length, 1);
+    assert.equal(h.log.posts[0].id, 'pb1');
+    assert.equal(h.log.toasts[h.log.toasts.length - 1][1], 'success');
+  } finally { h.restore(); }
+});
+
+test('Plant.savePlantBlockFromModal edit of a vanished block makes no POST and does not re-insert it', () => {
+  const h = _blockModalHarness([_blk('pb1')]);
+  try {
+    Plant.openBlockModal('pb1');
+    h.els['plant-blk-start'].value = '2026-12-24T00:00:00';
+    h.els['plant-blk-end'].value = '2026-12-28T00:00:00';
+    h.els['plant-blk-reason'].value = 'Changed';
+    Store.replacePlantBlocks([], 'test-hydrate');
+    Plant.savePlantBlockFromModal();
+    assert.equal(h.log.posts.length, 0);
+    assert.equal(Store.plantBlocks.length, 0);
+    assert.deepEqual(h.log.closed, ['modal-plant-block']);
+    assert.equal(h.log.toasts[h.log.toasts.length - 1][1], 'warn');
+    assert.equal(Plant._editingBlockId, null);
+  } finally { h.restore(); }
+});
+
+test('Plant._renderBlocks applies the collapse state before the empty-state return', () => {
+  const h = _blockModalHarness([]);
+  try {
+    Plant._blocksCollapsed = true;
+    Plant._renderBlocks();
+    assert.match(h.els['plant-blocks-list'].innerHTML, /empty-state/);
+    assert.equal(h.els['plant-blocks-list'].style.display, 'none');
+    Plant._blocksCollapsed = false;
+    Plant._renderBlocks();
+    assert.equal(h.els['plant-blocks-list'].style.display, '', 'expanding re-shows the empty-state message');
+    assert.match(h.els['plant-blocks-list'].innerHTML, /empty-state/);
+  } finally { h.restore(); }
+});
+
+test('Plant._renderBlocks renders each row as an edit button plus a remove button; panel and roster default to expanded', () => {
+  const h = _blockModalHarness([_blk('pb1')]);
+  try {
+    Plant._renderBlocks();
+    assert.match(h.els['plant-blocks-list'].innerHTML, /<button type="button" class="plant-blk-edit" data-block-id="pb1">/);
+    assert.match(h.els['plant-blocks-list'].innerHTML, /plant-blk-remove/);
+    assert.equal(h.els['plant-blocks-list'].style.display, '');
+  } finally { h.restore(); }
+  const src = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(src, /_blocksCollapsed: false,/);
+  assert.match(src, /_rosterCollapsed: false,/);
+});

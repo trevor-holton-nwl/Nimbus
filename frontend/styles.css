@@ -904,6 +904,14 @@ textarea { min-height: 60px; padding: 7px 10px; }
 #plant-blackouts-panel .block-row   { padding: 7px 14px; gap: 6px; }
 #plant-blackouts-panel .line-tag    { display: none; }
 #plant-blackouts-panel .blocks-list { max-height: 340px; }
+/* Editable row body: a real <button> (native Enter/Space) that reads like the old row text. */
+#plant-blackouts-panel .plant-blk-edit {
+  display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0;
+  margin: 0; padding: 0; border: 0; border-radius: 3px; background: none;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+#plant-blackouts-panel .plant-blk-edit:hover { background: var(--bg-hover); }
+#plant-blackouts-panel .plant-blk-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .plant-blk-stats {
   display: flex; align-items: center; gap: 16px;
   padding: 8px 14px 7px;
@@ -4923,7 +4931,6 @@ body.dark .cw-active-card {
   white-space: normal; text-align: center; font-size: 11px; line-height: 1.25;
 }
 #plant-tab-calendar .plant-no-sel { padding: 16px 18px; margin: 0; font-size: 12.5px; color: var(--fg-faint); }
-#plant-tab-calendar > .cal-container > p.panel-hint { margin: 0; }
 
 /* Status badge for an in-force period / a finished one (info reuses .badge-info). */
 .badge-ok { background: var(--ok-soft); color: var(--ok); }

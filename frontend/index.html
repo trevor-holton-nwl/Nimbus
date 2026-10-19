@@ -1693,16 +1693,6 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <!-- Inner pane: General -->
       <div id="plant-tab-general" class="cal-scroll" style="flex:1;overflow-y:auto;">
         <div class="cal-container">
-          <div class="panel" id="plant-blackouts-panel">
-            <header class="panel-head">
-              <h3 data-i18n="ui.plant_blackouts">Plant Blackouts</h3>
-              <button id="plant-add-block-btn" class="btn btn-ghost sm" data-i18n="btn.add_block">+ Add</button>
-            </header>
-            <div class="panel-body panel-body-flush">
-              <div id="plant-blocks-stats"></div>
-              <div id="plant-blocks-list" class="blocks-list"></div>
-            </div>
-          </div>
           <div class="panel">
             <header class="panel-head">
               <h3 data-i18n="ui.machine_panel">Production Lines</h3>
@@ -1744,7 +1734,16 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             </header>
             <div class="panel-body panel-body-flush" id="plant-periods-list"></div>
           </div>
-          <p class="panel-hint" data-i18n="ui.period_blackout_pointer">Holidays and one-off shutdowns are blackouts. Manage them under Plant Blackouts on the General tab.</p>
+          <div class="panel" id="plant-blackouts-panel">
+            <header class="panel-head">
+              <h3 data-i18n="ui.plant_blackouts">Plant Blackouts</h3>
+              <button id="plant-add-block-btn" class="btn btn-ghost sm" data-i18n="btn.add_block">+ Add</button>
+            </header>
+            <div class="panel-body panel-body-flush">
+              <div id="plant-blocks-stats"></div>
+              <div id="plant-blocks-list" class="blocks-list"></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -2447,28 +2446,28 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <div class="modal-backdrop" id="modal-plant-block" hidden>
   <div class="modal">
     <header class="modal-head">
-      <h3>Add plant blackout</h3>
+      <h3 id="modal-plant-block-title" data-i18n="modal.add_plant_blackout">Add plant blackout</h3>
       <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-plant-block')" aria-label="Close">✕</button>
     </header>
     <div class="modal-body">
       <div class="form-row form-row-2">
         <div>
-          <label>Start</label>
+          <label data-i18n="ui.blk_start">Start</label>
           <input type="text" id="plant-blk-start" readonly>
         </div>
         <div>
-          <label>End</label>
+          <label data-i18n="ui.blk_end">End</label>
           <input type="text" id="plant-blk-end" readonly>
         </div>
       </div>
       <div class="form-row">
-        <label>Reason</label>
+        <label data-i18n="ui.blk_reason">Reason</label>
         <input type="text" id="plant-blk-reason" data-autofocus placeholder="Holiday, shutdown, deep clean…" data-i18n-placeholder="ph.blackout_reason_plant">
       </div>
     </div>
     <footer class="modal-foot">
-      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-plant-block')">Cancel</button>
-      <button id="modal-plant-block-save-btn" class="btn btn-primary">Save block</button>
+      <button class="btn btn-ghost" data-i18n="btn.cancel" onclick="NIMBUS.Modal.close('modal-plant-block')">Cancel</button>
+      <button id="modal-plant-block-save-btn" class="btn btn-primary" data-i18n="btn.save_block">Save block</button>
     </footer>
   </div>
 </div>

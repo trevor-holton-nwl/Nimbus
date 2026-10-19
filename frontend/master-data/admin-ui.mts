@@ -180,8 +180,10 @@ const RULE_HELP: Record<string, { title: string; help: string[] }> = {
 };
 
 export const Plant = {
-  _blocksCollapsed: true,
-  _rosterCollapsed: true,
+  _blocksCollapsed: false,
+  _rosterCollapsed: false,
+  // Id of the plant blackout open in the add/edit modal; null = add mode. Reset on every open.
+  _editingBlockId: null as string | null,
   _priorityFields: [] as PriorityFieldMeta[],
   _priorityLists: {} as Record<string, PriorityListFieldSummary>,
   _missingMasterData: null as MissingMasterDataReport | null,
@@ -241,6 +243,14 @@ export const Plant = {
       btn.addEventListener('click', () => Plant.gotoTab(btn.dataset.plantTab));
     });
     document.getElementById('plant-add-block-btn')?.addEventListener('click', () => Plant.openBlockModal());
+    // One delegated listener for the re-rendered blackout rows: the row body edits, the × removes.
+    document.getElementById('plant-blocks-list')?.addEventListener('click', e => {
+      const target = e.target as HTMLElement | null;
+      const rm = target?.closest<HTMLElement>('.plant-blk-remove');
+      if (rm) { Plant.removePlantBlock(rm.dataset.blockId!); return; }
+      const ed = target?.closest<HTMLElement>('.plant-blk-edit');
+      if (ed) Plant.openBlockModal(ed.dataset.blockId!);
+    });
     // The guard matters: EditCalendar.openPlant('') would crash in _populate.
     document.getElementById('plant-edit-calendar-btn')?.addEventListener('click', () => {
       if (Store.selectedPlant) EditCalendar.openPlant(Store.selectedPlant);
@@ -612,23 +622,24 @@ export const Plant = {
       }
     }
 
+    // Applied before the empty-state return too, so the collapse state hides (or shows) it consistently.
+    list.style.display = Plant._blocksCollapsed ? 'none' : '';
     if (!blocks.length) {
       list.innerHTML = `<div class="empty-state">${Util.t('empty.no_plant_blackouts')}</div>`;
       return;
     }
 
+    // Clicks are handled by the delegated listener on #plant-blocks-list (_wireStaticHandlers).
     list.innerHTML = blocks.map(b => `
       <div class="block-row" style="padding-left:6px;padding-right:6px;">
-        <span class="ico">■</span>
-        <span class="reason">${Util.escapeHtml(b.reason) || Util.t('ui.blackouts_label', {plural: ''})}</span>
-        <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
+        <button type="button" class="plant-blk-edit" data-block-id="${Util.escapeHtml(b.id)}">
+          <span class="ico">■</span>
+          <span class="reason">${Util.escapeHtml(b.reason) || Util.t('ui.blackouts_label', {plural: ''})}</span>
+          <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
+        </button>
         <button class="btn btn-ghost sm plant-blk-remove" style="padding:2px 7px;font-size:14px;" title="${Util.t('tip.remove_block')}" data-block-id="${Util.escapeHtml(b.id)}">×</button>
       </div>
     `).join('');
-    list.querySelectorAll<HTMLElement>('.plant-blk-remove').forEach(btn => {
-      btn.addEventListener('click', () => Plant.removePlantBlock(btn.dataset.blockId!));
-    });
-    list.style.display = Plant._blocksCollapsed ? 'none' : '';
   },
 
   _renderRoster(): void {
@@ -722,19 +733,36 @@ export const Plant = {
     if (btn)  btn.textContent = Plant._rosterCollapsed ? '▼' : '▲';
   },
 
-  openBlockModal(): void {
+  /** Open the plant-blackout modal: add mode with no id, edit mode prefilled from the block `id`. */
+  openBlockModal(id?: string): void {
     const reasonEl = document.getElementById('plant-blk-reason') as HTMLInputElement | null;
     if (!reasonEl) { ErrorLog.error('ui', 'required DOM element missing: plant-blk-reason'); return; }
 
-    const now = new Date(); now.setMinutes(0, 0, 0);
-    const plus1 = new Date(now.getTime() + Config.MS_HOUR);
+    const editing = id ? Store.plantBlocks.find(b => b.id === id && b.plant === Store.selectedPlant) : undefined;
+    if (id && !editing) { Toast.show(Util.t('toast.plant_blackout_gone'), 'warn'); return; }
+    // Always (re)set: Cancel/✕ close the modal without any Plant hook, so stale edit state must not leak into the next add.
+    Plant._editingBlockId = editing ? editing.id : null;
+    // The data-i18n sweep runs once at boot, so the title follows the mode on every open.
+    const titleEl = document.getElementById('modal-plant-block-title');
+    if (titleEl) titleEl.textContent = Util.t(editing ? 'modal.edit_plant_blackout' : 'modal.add_plant_blackout');
+    const saveEl = document.getElementById('modal-plant-block-save-btn');
+    if (saveEl) saveEl.textContent = Util.t('btn.save_block');
+
     if (!Plant._fpBlkStart) {
       Plant._fpBlkStart = Util.fpDatetime('#plant-blk-start');
       Plant._fpBlkEnd   = Util.fpDatetime('#plant-blk-end');
     }
-    Plant._fpBlkStart!.setDate(now, false);
-    Plant._fpBlkEnd!.setDate(plus1, false);
-    reasonEl.value = '';
+    if (editing) {
+      Plant._fpBlkStart!.setDate(Util.parseDate(editing.start) as Date, false);
+      Plant._fpBlkEnd!.setDate(Util.parseDate(editing.end) as Date, false);
+      reasonEl.value = editing.reason || '';
+    } else {
+      const now = new Date(); now.setMinutes(0, 0, 0);
+      const plus1 = new Date(now.getTime() + Config.MS_HOUR);
+      Plant._fpBlkStart!.setDate(now, false);
+      Plant._fpBlkEnd!.setDate(plus1, false);
+      reasonEl.value = '';
+    }
     Modal.open('modal-plant-block');
   },
 
@@ -750,6 +778,29 @@ export const Plant = {
     if (!start || !end) { Toast.show(Util.t('toast.please_set_start_end'), 'error'); return; }
     if (end <= start)   { Toast.show(Util.t('toast.end_must_be_after_start'), 'error'); return; }
     if (!Store.selectedPlant) { Toast.show(Util.t('toast.select_plant_first'), 'warn'); return; }
+
+    const editId = Plant._editingBlockId;
+    if (editId) {
+      Plant._editingBlockId = null;
+      const plant = Store.selectedPlant;
+      const cur = Store.plantBlocks.find(b => b.id === editId && b.plant === plant);
+      // Deleted or re-hydrated away while the modal was open: the upsert would re-insert it, so write nothing.
+      if (!cur) {
+        Modal.close('modal-plant-block');
+        Toast.show(Util.t('toast.plant_blackout_gone'), 'warn');
+        return;
+      }
+      const unchanged = Util.parseDate(cur.start)?.getTime() === start.getTime() &&
+        Util.parseDate(cur.end)?.getTime() === end.getTime() && (cur.reason || '') === reason;
+      if (!unchanged && Store.updatePlantBlock(editId, plant, { start, end, reason }, 'plant')) {
+        const updated = Store.plantBlocks.find(b => b.id === editId && b.plant === plant);
+        if (updated) CalendarSync.savePlantBlackoutUpsert(updated);
+        Toast.show(Util.t('toast.plant_blackout_updated'), 'success');
+      }
+      Modal.close('modal-plant-block');
+      return;
+    }
+
     const before = Store.plantBlocks.length;
     Store.addPlantBlock({ plant: Store.selectedPlant, start, end, reason } as NimbusPlantBlock, 'plant');
     if (Store.plantBlocks.length > before) CalendarSync.savePlantBlackoutUpsert(Store.plantBlocks[Store.plantBlocks.length - 1]);
