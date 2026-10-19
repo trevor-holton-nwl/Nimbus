@@ -142,7 +142,7 @@ export const OptimizeDialog = (() => {
     _plant = Store.selectedPlant || null;
     const lbl = document.getElementById('opt-plant-label');
     if (lbl) {
-      const text = _plant ? Store.plantLabel(_plant) : '';
+      const text = _plant ? Store.plantLabel(_plant) : Util.t('ui.select_plant_label');
       lbl.textContent = text;
       lbl.title = text;
     }
