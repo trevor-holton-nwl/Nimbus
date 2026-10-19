@@ -165,6 +165,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.save_failed':                 'Save failed: {{msg}}',
   'toast.paste_result':                'Pasted: {{added}} added, {{updated}} updated',
   'toast.paste_result_skip':           'Pasted: {{added}} added, {{updated}} updated, {{skipped}} skipped',
+  'toast.machines_autolinked':         'Linked to the SAP work center with the same ID: {{machines}}',
   'toast.clipboard_denied':            'Clipboard access denied — grant clipboard permission and try again',
   'toast.clipboard_empty':             'Clipboard is empty',
   'toast.no_rows_paste':               'No rows found in pasted text',

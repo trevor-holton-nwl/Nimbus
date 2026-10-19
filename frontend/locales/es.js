@@ -143,6 +143,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.save_failed':                 'Error al guardar: {{msg}}',
   'toast.paste_result':                'Pegado: {{added}} añadidos, {{updated}} actualizados',
   'toast.paste_result_skip':           'Pegado: {{added}} añadidos, {{updated}} actualizados, {{skipped}} omitidos',
+  'toast.machines_autolinked':         'Vinculado al centro de trabajo SAP con el mismo ID: {{machines}}',
   'toast.clipboard_denied':            'Acceso al portapapeles denegado — conceda permiso e inténtelo de nuevo',
   'toast.clipboard_empty':             'El portapapeles está vacío',
   'toast.no_rows_paste':               'No se encontraron filas en el texto pegado',

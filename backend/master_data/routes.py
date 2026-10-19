@@ -536,9 +536,13 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
         # carried `routing_runtime_enabled` (D14) -- an unrelated plants
         # edit (timezone, horizon days, ...) must not trigger a plant-wide
         # resolve on every save.
-        if table in _ROUTING_RECOMPUTE_TABLES:
+        if table in _ROUTING_RECOMPUTE_TABLES or (table == "sap_workcenter" and result.get("linked")):
             affected_plants = {row.get("plant") for row in body.get("upserts", [])}
             affected_plants |= {row.get("plant") for row in body.get("deletes", [])}
+            # A work-center write that auto-linked machines changes those machines'
+            # routing mapping exactly like a machine write does (W8).
+            if table == "sap_workcenter":
+                affected_plants = {row["plant"] for row in result["linked"]}
             if affected_plants:
                 _recompute_routing_for_plants(affected_plants)
         elif table == "plants":

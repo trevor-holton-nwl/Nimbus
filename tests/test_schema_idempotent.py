@@ -194,6 +194,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-16-1-orders-placement-exception.sql",
         "2026-10-16-2-orders-original-finish-date-only.sql",
         "2026-10-16-3-plant-calendar-periods.sql",
+        "2026-10-19-1-machine-workcenter-autolink.sql",
         "2026-10-20-0-orders-precutover-snapshot.sql",
         "2026-10-20-1-backward-cutover.sql",
     }

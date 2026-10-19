@@ -39,7 +39,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Res
 
 import master_data as md
 import backend.distribution.data as distribution_data
-from backend.admin_ops.logbuffer import _set_admin_log_details
+from backend.admin_ops.logbuffer import _log_event, _set_admin_log_details
 from backend.csv_util import CSV_BOM, csv_row
 from backend.distribution.models import WorkCenterSaveResult
 from backend.security import auth
@@ -104,6 +104,14 @@ def save_workcenter(plant: str, wc: str, request: Request, body: dict = Body(def
         )
     except ValueError as exc:
         raise _distribution_error(exc) from exc
+    if result.get("auto_linked"):
+        # The save linked the same-named machine, which changes its routing mapping:
+        # recompute the plant like a machine write does (best-effort; the save committed).
+        try:
+            import backend.routing.resolver as routing_resolver  # deferred: cross-domain
+            routing_resolver.resolve_orders(plant)
+        except Exception as exc:  # noqa: BLE001
+            _log_event("warn", "routing", "Recompute after work-center auto-link failed", plant=plant, error=str(exc))
     return result
 
 

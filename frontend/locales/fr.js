@@ -143,6 +143,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.save_failed':                 'Échec de l\'enregistrement : {{msg}}',
   'toast.paste_result':                'Collé : {{added}} ajoutés, {{updated}} mis à jour',
   'toast.paste_result_skip':           'Collé : {{added}} ajoutés, {{updated}} mis à jour, {{skipped}} ignorés',
+  'toast.machines_autolinked':         'Lié au poste de travail SAP de même ID : {{machines}}',
   'toast.clipboard_denied':            'Accès au presse-papiers refusé — accordez la permission et réessayez',
   'toast.clipboard_empty':             'Le presse-papiers est vide',
   'toast.no_rows_paste':               'Aucune ligne trouvée dans le texte collé',

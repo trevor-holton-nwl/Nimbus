@@ -3782,10 +3782,41 @@ class TestOneToOneWorkcenterRules(_ReweightFixtureBase):
         assert result["distribution_mode"] == "single"
         assert result["default_machine"] is None
 
-    def test_unlinked_same_named_machine_is_shadowed(self, pg):
+    def _machine_link(self, pg, machine=None):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT sap_workcenter FROM machine WHERE plant = %s AND machine = %s",
+                        (self.PLANT, machine or self.WC))
+            return [r[0] for r in cur.fetchall()]
+
+    def test_unlinked_same_named_machine_is_auto_linked_on_save(self, pg):
+        # 2026-10-19 (reverses the explicit-link rule): an EMPTY link is filled in the same
+        # transaction instead of a wc_code_shadowed_by_machine 400.
+        result = self._save()
+        assert result["auto_linked"] is True
+        assert result["default_machine"] is None
+        assert self._machine_link(pg) == [self.WC]
+
+    def test_save_on_already_linked_machine_does_not_report_auto_link(self, pg):
+        self._link(pg, self.WC, self.WC)
+        assert "auto_linked" not in self._save()
+
+    def test_distribute_mode_save_does_not_auto_link_and_is_refused(self, pg):
+        with pytest.raises(ValueError, match="wc_code_shadowed_by_machine"):
+            self._save(mode="distribute")
+        # The refused save rolled back: no link, no work-center edit.
+        assert self._machine_link(pg) == [None]
+
+    def test_unlinked_same_named_machine_is_shadowed_when_wc_has_other_members(self, pg):
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) VALUES (%s,%s,%s,%s)",
+                (self.SUB, self.PLANT, self.L2, self.WC),
+            )
+            conn.commit()
         with pytest.raises(ValueError, match="wc_code_shadowed_by_machine") as ei:
             self._save()
         assert "set that machine's SAP work center" in str(ei.value)
+        assert self._machine_link(pg) == [None]
 
     def test_same_named_machine_linked_elsewhere_is_shadowed(self, pg):
         self._link(pg, self.WC, self.OTHER)

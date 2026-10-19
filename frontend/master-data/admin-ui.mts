@@ -2916,6 +2916,8 @@ interface MasterDataBulkResult {
   updated: number;
   deleted: number;
   warnings?: MasterDataBulkWarning[];
+  /** Machines the server auto-linked to the same-ID SAP work center (2026-10-19). */
+  linked?: { plant: string; machine: string }[];
 }
 
 /** A SCOPED_TABLES entry's scope filter (`_buildScopeFilterBar`/`_scopeFilter`).
@@ -4714,6 +4716,10 @@ export const MasterData = (() => {
         Util.t('toast.paste_result', { added: res.inserted, updated: res.updated }) + `, ${res.deleted} deleted`,
         'success'
       );
+      if (res.linked?.length) {
+        const names = res.linked.slice(0, 5).map((m) => m.machine).join(', ') + (res.linked.length > 5 ? ', …' : '');
+        Toast.show(Util.t('toast.machines_autolinked', { machines: names }), 'info');
+      }
       delete _cache[table];
       await _loadAndRender(table);
       // `_loadAndRender` → `_renderTable` rebuilds `#md-bulk-warnings` fresh

@@ -154,6 +154,12 @@ class DeleteFilteredResult(BaseModel):
     deleted: int
 
 
+class AutoLinkedMachine(BaseModel):
+    """A machine bulk_apply auto-linked to the SAP work center sharing its ID."""
+    plant: str
+    machine: str
+
+
 class BulkApplyResult(BaseModel):
     """master_data.bulk_apply()'s shape (POST /master-data/{table}/bulk),
     plus an optional `warnings` list a table-specific post-write hook can
@@ -163,6 +169,7 @@ class BulkApplyResult(BaseModel):
     updated: int
     deleted: int
     warnings: list[BulkWriteWarning] = []
+    linked: list[AutoLinkedMachine] = []
 
 
 class PlantConstraintsResult(BaseModel):

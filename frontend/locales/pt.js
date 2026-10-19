@@ -143,6 +143,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.save_failed':                 'Falha ao salvar: {{msg}}',
   'toast.paste_result':                'Colado: {{added}} adicionados, {{updated}} atualizados',
   'toast.paste_result_skip':           'Colado: {{added}} adicionados, {{updated}} atualizados, {{skipped}} ignorados',
+  'toast.machines_autolinked':         'Vinculado ao centro de trabalho SAP com o mesmo ID: {{machines}}',
   'toast.clipboard_denied':            'Acesso à área de transferência negado — conceda permissão e tente novamente',
   'toast.clipboard_empty':             'Área de transferência vazia',
   'toast.no_rows_paste':               'Nenhuma linha encontrada no texto colado',

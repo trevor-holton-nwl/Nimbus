@@ -143,6 +143,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.save_failed':                 'Speichern fehlgeschlagen: {{msg}}',
   'toast.paste_result':                'Eingefügt: {{added}} hinzugefügt, {{updated}} aktualisiert',
   'toast.paste_result_skip':           'Eingefügt: {{added}} hinzugefügt, {{updated}} aktualisiert, {{skipped}} übersprungen',
+  'toast.machines_autolinked':         'Mit dem SAP-Arbeitsplatz gleicher ID verknüpft: {{machines}}',
   'toast.clipboard_denied':            'Zugriff auf Zwischenablage verweigert — Berechtigung erteilen und erneut versuchen',
   'toast.clipboard_empty':             'Zwischenablage ist leer',
   'toast.no_rows_paste':               'Keine Zeilen im eingefügten Text gefunden',
