@@ -154,7 +154,7 @@ test('What-If: resetting a pinned machine then promoting sends a null write, and
   await settle();
   const lineWrite = calls.find(call => call.url.endsWith('/line-hours'));
   assert.deepEqual(lineWrite.body.lines, [{ machine: 'L1', work_hours: null }]);
-  assert.equal(CalendarSync.hasServerLineCalendar('P1', 'L1'), true, 'promote does not touch the server-line set');
+  assert.equal(CalendarSync.hasServerLineCalendar('P1', 'L1'), false, 'the acknowledged null write clears the server row from the set');
 });
 
 test('Reset to plant outside What-If sends one batched null POST and drops the machine from the server-line set', async t => {
@@ -182,12 +182,62 @@ test('a failed Reset POST retries with null, not the inherited all-day seed', as
   t.mock.timers.tick(600);
   await settle();
   assert.deepEqual(calls[0].body.lines, [{ machine: 'L1', work_hours: null }]);
+  calls.length = 0;                                                            // drop the resync GET of the failed reset
   const retry = toasts.find(a => a[3] && typeof a[3].run === 'function');
   assert.ok(retry, 'the failure toast offers Retry');
   fetchOk = true;
   retry[3].run();
   await settle();
-  assert.deepEqual(calls[1].body.lines, [{ machine: 'L1', work_hours: null }], 'null again, never [0,24]');
+  assert.deepEqual(calls.find(c => c.url.endsWith('/line-hours')).body.lines, [{ machine: 'L1', work_hours: null }], 'null again, never [0,24]');
+});
+
+test('What-If A creates an override and promotes; What-If B resets it and promotes a null (promote notes server lines)', async () => {
+  Store.ensureCalendar('L1');
+  CalendarSync._setHydration('P1', 'hydrated', []);                           // the server has no row for L1
+  assert.equal(Sandbox.enter('test'), true);
+  Store.setCalendar('L1', week([6, 18]), 'test');                              // What-If A: pin L1
+  Sandbox.exit(true, 'test');
+  CalendarSync.flushPlant('P1');
+  await settle();
+  assert.deepEqual(calls.find(c => c.url.endsWith('/line-hours')).body.lines, [{ machine: 'L1', work_hours: week([6, 18]) }]);
+  assert.equal(CalendarSync.hasServerLineCalendar('P1', 'L1'), true, 'the promoted row is a server row');
+  calls.length = 0;
+  assert.equal(Sandbox.enter('test'), true);
+  CalendarSync.resetLinesToPlant('P1', ['L1']);                                // What-If B: reset it
+  Sandbox.exit(true, 'test');
+  CalendarSync.flushPlant('P1');
+  await settle();
+  assert.deepEqual(calls.find(c => c.url.endsWith('/line-hours')).body.lines, [{ machine: 'L1', work_hours: null }]);
+  assert.equal(CalendarSync.hasServerLineCalendar('P1', 'L1'), false);
+});
+
+test('a failed Reset (403) re-reads the plant calendar so the UI shows the surviving server override', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  Store.setCalendar('L1', week([6, 18]), 'test');
+  CalendarSync._setHydration('P1', 'hydrated', ['L1']);
+  Util.fetchTraced.mock.mockImplementation(async (url, options) => {
+    calls.push({ url: String(url), body: options?.body ? JSON.parse(options.body) : null });
+    if (options?.method === 'POST') return { ok: false, status: 403, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => ({
+      plant_work_hours: week([7, 19]), line_work_hours: { L1: week([6, 18]) }, machine_blackouts: [], plant_blackouts: [] }) };
+  });
+  CalendarSync.resetLinesToPlant('P1', ['L1']);
+  assert.equal(Store.calendars.L1.inherited, true, 'optimistic local reset');
+  t.mock.timers.tick(600);
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.ok(calls.some(c => c.url.includes('/plant-calendar?plant=P1')), 'the plant config was re-fetched');
+  assert.equal(Store.calendars.L1.inherited, false, 'resynced to the server override');
+  assert.deepEqual(Store.calendars.L1.workHours[1], [6, 18]);
+  assert.equal(CalendarSync.hasServerLineCalendar('P1', 'L1'), true);
+});
+
+test('rebuildPlantIndex reseeds an all-day inherited line with the default shift when its plant stops resolving', () => {
+  Store.ensureCalendar('L1');
+  assert.deepEqual(Store.calendars.L1.workHours[1], [0, 24]);
+  Store.setMasterData({ plants: [{ plant: 'P1' }], lines: [{ machine: 'L3', plant: 'P1' }] }, 'test');   // L1 left the master data
+  Store.rebuildPlantIndex();
+  assert.equal(Store.calendars.L1.inherited, true);
+  assert.deepEqual(Store.calendars.L1.workHours[1], [7, 19], 'nothing would bound an all-day seed now');
 });
 
 test('_freshBody rebuilds an inherited line as null and an override as its hours', () => {

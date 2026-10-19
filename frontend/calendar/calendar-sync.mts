@@ -528,7 +528,20 @@ export const CalendarSync = {
     this._clearLineHoursQueue(plant);
     const lines = Object.entries(pending).map(([machine, work_hours]) => ({ machine, work_hours }));
     return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours')
-      .then(r => this._noteServerLines(plant, lines, r));
+      .then(r => this._noteServerLines(plant, lines, r))
+      .then(r => {
+        // A failed reset (null write) leaves Store showing "follows the plant" while the server row survives:
+        // release the lines' in-flight guard and re-read the server so the UI shows the truth (the Retry toast stays).
+        const nulls = lines.filter(l => l.work_hours === null);
+        if (!r.ok && nulls.length) {
+          for (const { machine } of nulls) {
+            const edit = this._hoursEdits[plant]?.[machine];
+            if (edit) edit.pending = false;
+          }
+          void this.fetchPlantConfig(plant);
+        }
+        return r;
+      });
   },
 
   _clearLineHoursQueue(plant: string): void {
@@ -587,7 +600,10 @@ export const CalendarSync = {
         if (!cal.inherited) return [{ machine: l, work_hours: cal.workHours as WorkHours | null }];
         return this.hasServerLineCalendar(plant, l) ? [{ machine: l, work_hours: null as WorkHours | null }] : [];
       });
-    if (lines.length) this._post('/plant-calendar/line-hours', { plant, lines }, 'promote-line-hours');
+    if (lines.length) {
+      void this._post('/plant-calendar/line-hours', { plant, lines }, 'promote-line-hours')
+        .then(r => this._noteServerLines(plant, lines, r));
+    }
     const lineBk = Store.blocks.filter(b => b.plant === plant);
     const lineDeletes = removed.line || [];
     if (lineBk.length || lineDeletes.length) {

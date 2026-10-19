@@ -229,6 +229,8 @@ export const CalendarPeriodsUI = {
     if (!now.length) return false;
     CalendarSync.resetLinesToPlant(plant, now);
     CalendarPeriodsUI.renderResetRow();
+    // The Reset button just hid itself (its row is hidden at zero overrides): keep focus in the panel.
+    document.getElementById('plant-add-period-btn')?.focus();
     Toast.show(Util.t(Sandbox.active ? 'toast.calendar_whatif_local' : 'toast.calendar_changes_pending'), 'info');
     return true;
   },

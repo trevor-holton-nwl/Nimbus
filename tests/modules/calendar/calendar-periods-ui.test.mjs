@@ -26,12 +26,14 @@ const per = (id, name, from, to) => ({ id, name, validFrom: from, validTo: to, w
 const IDS = ['plant-periods-list', 'plant-periods-timeline', 'plant-periods-horizon', 'plant-periods-count', 'plant-add-period-btn', 'plant-tab-calendar', 'cal-edit-save-btn',
   'plant-reset-machines', 'plant-reset-machines-hint', 'plant-reset-machines-btn'];
 const els = {};
+const focused = [];
 for (const id of IDS) {
   els[id] = {
     id, innerHTML: '', textContent: '', hidden: false, disabled: false, attrs: {}, listeners: {},
     addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
     setAttribute(k, v) { this.attrs[k] = v; },
     removeAttribute(k) { delete this.attrs[k]; },
+    focus() { focused.push(this.id); },
   };
 }
 globalThis.document = { getElementById: id => els[id] ?? null };
@@ -475,6 +477,7 @@ test('reset-all: confirms with the count (warn tone), then queues one null write
   assert.equal(Store.calendars.M1.inherited, true);
   assert.equal(Store.calendars.M2.inherited, true);
   assert.equal(toasts.length, 1);
+  assert.deepEqual(focused, ['plant-add-period-btn'], 'focus moves off the hidden Reset button');
 });
 
 test('reset-all: declining the confirm changes nothing', async t => {

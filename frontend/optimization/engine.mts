@@ -66,7 +66,7 @@
 import { Config, Util, ErrorLog, PerfMonitor, Toast, Modal } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
-import { Calendar, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
+import { Calendar, candidateAllDayWorkHours, candidateDefaultWorkHours } from '../calendar/calendar-engine.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { Alerts, scheduleAlertsForPatches, taskCarriesTool, taskCarriesDistribution } from '../insights/services.mjs';
@@ -356,6 +356,12 @@ function setupDefaultWorkHours(): WorkHours {
   return workHours;
 }
 
+/** A line missing from the snapshot's calendars follows its plant (compute-core ensureCalendar allDay): all-day when
+ *  the plant resolves, else the default shift week. */
+function setupLineFallbackHours(plantResolves: boolean): WorkHours {
+  return plantResolves ? candidateAllDayWorkHours() : setupDefaultWorkHours();
+}
+
 /** One line's order intervals, built once per line: starts ascending with a running
  *  maximum of the interval ends. setupAvailabilityMinutes used to rescan (and re-derive the
  *  intervals of) every order on the line for each setup bar, O(n^2) per recompute. */
@@ -399,7 +405,7 @@ function setupAvailabilityMinutes(
   // code may be reused at another plant, so master-data lookup is unsafe here.
   const mappedPlant = plant;
   const probe = new Date(end.getTime() - 1);
-  const lineHours = context.calendars[line]?.workHours ?? setupDefaultWorkHours();
+  const lineHours = context.calendars[line]?.workHours ?? setupLineFallbackHours(!!context.plants[mappedPlant]);
   const plantEntry = context.plants[mappedPlant];
   /** The line and plant working windows intersected for the day holding `day`, or null when closed.
    *  The plant pattern is resolved per day (a dated period replaces the default). */
@@ -894,7 +900,8 @@ export function sourceLineWorkHours(line: string): WorkHours {
     Store.ensureCalendar(line);
     return Store.calendars[line].workHours;
   }
-  return _candidateSnapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
+  return _candidateSnapshot.calendars[line]?.workHours
+    ?? (sourceGetPlantForLine(line) ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
 }
 
 /** The order's SAP due as an instant for the date-window bounds below: a date-only (exact

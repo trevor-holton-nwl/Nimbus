@@ -5961,3 +5961,16 @@ test('periods: plantHoursOn throws compute-core-stale when periods exist and the
     globalThis.NimbusComputeCore = core;
   }
 });
+
+test('detached free intervals: a line missing from the snapshot follows its plant (all-day) when the plant resolves', () => {
+  const week = range => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, [...range]]));
+  const from = new Date(2031, 2, 3, 0, 0, 0);       // a Monday
+  const through = new Date(2031, 2, 3, 23, 59, 0);
+  const hoursOf = intervals => intervals.map(i => [(i.start - from) / 3.6e6, (i.end - from) / 3.6e6]);
+  const withPlant = { ...setupSnapshot([]), calendars: {}, plants: { P1: { workHours: week([6, 18]) } } };
+  assert.deepEqual(hoursOf(SetupScheduler.freeIntervalsForTest(withPlant, 'LX', 'P1', from, through)), [[6, 18]],
+    'all-day line fallback: exactly the plant hours, matching compute-core ensureCalendar allDay');
+  const noPlant = { ...setupSnapshot([]), calendars: {}, plants: {} };
+  assert.deepEqual(hoursOf(SetupScheduler.freeIntervalsForTest(noPlant, 'LX', 'P1', from, through)), [[7, 19]],
+    'plant unresolved: the default shift week, as before');
+});

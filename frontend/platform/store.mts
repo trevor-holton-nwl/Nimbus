@@ -809,6 +809,8 @@ export const Store = {
       addName(plant, line);
       // An inherited line seeded before its plant resolved (DEFAULT_SHIFT) goes all-day once it does.
       if (plant && entry.inherited && !Store._isAllDay(entry.workHours)) entry.workHours = Store._inheritedSeed(line);
+      // ...and the reverse: a plant that stopped resolving must not leave an all-day seed with nothing to bound it.
+      else if (!plant && entry.inherited && Store._isAllDay(entry.workHours)) entry.workHours = Store._defaultShiftWeek();
     }
     for (const line of Object.keys(this._state.lineSettings)) addName(Store.getPlantForLine(line), line);
     for (const r of (Store._state.masterData?.lines ?? []))   addName(r.plant, r.machine);

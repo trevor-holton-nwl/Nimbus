@@ -5476,6 +5476,22 @@ describe('calendar periods: engine plant-hours readers', () => {
     assert.deepEqual(run(null), [240], 'default pattern opens 06:00: four free hours before the 10:00 end');
     assert.deepEqual(run(PERIODS), [120], 'the period that covers Thursday opens 08:00: two free hours');
   });
+
+  test('setupAvailabilityMinutes: a line missing from the snapshot is all-day when its plant resolves, default shift otherwise', () => {
+    const state = value => [{ fieldKey: 'colorWheel', value }];
+    const run = (plants) => deriveSetupObservation({
+      plant: 'P-AV',
+      definition: { plant: 'P-AV', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+      plant_rows: [{ machine: '', signature_version: 1, from_key: state('RED'), to_key: state('BLUE'), setup_min: 20 }],
+      machine_rows: [], machine_states: [], overrides: [],
+    }, [
+      { id: 'red', PLANT: 'P-AV', MACHINE: 'L-AV', COLOR: 'RED', RUN_TIME: 1, start_date: new Date('2026-10-21T15:00:00'), end_date: new Date('2026-10-21T17:00:00') },
+      { id: 'blue', PLANT: 'P-AV', MACHINE: 'L-AV', COLOR: 'BLUE', RUN_TIME: 1, start_date: new Date('2026-10-22T10:00:00'), end_date: new Date('2026-10-22T11:00:00') },
+    ], new Set(['L-AV']), { calendars: {}, plants, lineSettings: {}, masterData: null, blocks: [], plantBlocks: [] })
+      .intervals.map(i => i.availableMinutes);
+    assert.deepEqual(run({ 'P-AV': { workHours: weekdays(6, 18) } }), [240], 'all-day line fallback: the plant opens 06:00, so four free hours before 10:00');
+    assert.deepEqual(run({}), [180], 'plant unresolved: the default shift opens 07:00');
+  });
 });
 
 test('stale compute core: no periods never calls the core helper; periods without it throw compute-core-stale', async () => {

@@ -8,7 +8,7 @@
 
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES, capAwareSequence } from './scheduler-contract.mjs';
-import { candidateDefaultWorkHours, fitsMergedSpan } from '../calendar/calendar-engine.mjs';
+import { candidateAllDayWorkHours, candidateDefaultWorkHours, fitsMergedSpan } from '../calendar/calendar-engine.mjs';
 import { buildSetupResolutionIndex, normalizedValue, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
 import type {
@@ -2531,7 +2531,8 @@ function jointWindowForDay(
   // the single plant `ctx` was built for, so this is defense-in-depth.
   const key = `${plant}${CTX_KEY_SEP}${line}|${dayStart.getTime()}`;
   if (ctx._dayWindow.has(key)) return ctx._dayWindow.get(key)!;
-  const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
+  const lineHours = snapshot.calendars[line]?.workHours
+    ?? (snapshot.plants[plant] ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
   const plantHours = plantHoursOn(snapshot.plants[plant], dayStart) ?? candidateDefaultWorkHours();
   const result = intersectWindows(localWindow(lineHours, dayStart), localWindow(plantHours, dayStart));
   ctx._dayWindow.set(key, result);
@@ -2551,7 +2552,8 @@ function walkFreeIntervals(
   // when a line or plant calendar is missing. Without this, one plant with
   // no `Store.plants` entry silently placed nothing for every line in it,
   // while alerts kept computing as though hours existed.
-  const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
+  const lineHours = snapshot.calendars[line]?.workHours
+    ?? (snapshot.plants[plant] ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
   const plantEntry = snapshot.plants[plant];
   const result: PlacementInterval[] = [];
   const day = new Date(from);
@@ -2598,7 +2600,8 @@ function freeIndexFor(
   const withinDay = (hours: WorkHours): boolean => Object.values(hours).every(range => (
     !range || range.length !== 2 || (range[0] >= 0 && range[1] <= 24)
   ));
-  const lineHours = snapshot.calendars[line]?.workHours ?? candidateDefaultWorkHours();
+  const lineHours = snapshot.calendars[line]?.workHours
+    ?? (snapshot.plants[plant] ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
   const plantHours = snapshot.plants[plant]?.workHours ?? candidateDefaultWorkHours();
   // Every dated period's pattern can replace the default on some day, so each must stay within the day too.
   const periods = snapshot.plants[plant]?.periods ?? [];
