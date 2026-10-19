@@ -1436,7 +1436,7 @@ test('Plant.gotoTab("calendar") shows only the Calendar pane and renders the per
   }
 });
 
-test('Plant.render() also renders the Calendar periods, and static wiring initialises them once', () => {
+test('Plant.render() leaves the Calendar timeline to gotoTab, and static wiring initialises it once', () => {
   const priorDocument = globalThis.document;
   const priorPlant = Store.selectedPlant;
   const originalGoto = Plant.gotoTab;
@@ -1450,9 +1450,9 @@ test('Plant.render() also renders the Calendar periods, and static wiring initia
   try {
     Store.setSelectedPlant('1006', 'test');
     Plant.render();
-    assert.deepEqual(log, ['render']);
+    assert.deepEqual(log, [], 'no second render here: gotoTab renders the Calendar tab itself when it is showing');
     Plant._wireStaticHandlers();
-    assert.deepEqual(log, ['render', 'init']);
+    assert.deepEqual(log, ['init']);
   } finally {
     CalendarPeriodsUI.render = priorRender;
     CalendarPeriodsUI.init = priorInit;
@@ -1600,4 +1600,77 @@ test('Plant._renderBlocks renders each row as an edit button plus a remove butto
   const src = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
   assert.match(src, /_blocksCollapsed: false,/);
   assert.match(src, /_rosterCollapsed: false,/);
+});
+
+test('Plant.savePlantBlockFromModal: an edit that duplicates another blackout keeps the modal open and toasts an error', () => {
+  const other = { id: 'pb2', plant: '1006', reason: 'Audit', start: new Date('2027-01-05T00:00:00'), end: new Date('2027-01-06T00:00:00') };
+  const h = _blockModalHarness([_blk('pb1'), other]);
+  try {
+    Plant.openBlockModal('pb1');
+    h.els['plant-blk-start'].value = '2027-01-05T00:00:00';
+    h.els['plant-blk-end'].value = '2027-01-06T00:00:00';
+    h.els['plant-blk-reason'].value = 'Audit';
+    Plant.savePlantBlockFromModal();
+    assert.deepEqual(h.log.closed, [], 'the modal stays open so the user can fix it');
+    assert.equal(h.log.posts.length, 0);
+    assert.equal(Plant._editingBlockId, 'pb1', 'still editing the same block');
+    assert.equal(Store.plantBlocks.find(b => b.id === 'pb1').reason, 'Holiday', 'the Store is untouched');
+    const last = h.log.toasts[h.log.toasts.length - 1];
+    assert.equal(last[1], 'error');
+    assert.equal(last[0], "toast.plant_blackout_duplicate");
+    // Fixing the reason and saving again goes through.
+    h.els['plant-blk-reason'].value = 'Audit 2';
+    Plant.savePlantBlockFromModal();
+    assert.equal(h.log.posts.length, 1);
+    assert.deepEqual(h.log.closed, ['modal-plant-block']);
+  } finally { h.restore(); }
+});
+
+test('timeline delegated click: a single marker opens the blackout editor, a cluster reveals and flashes its list rows', () => {
+  const priorDocument = globalThis.document, priorWindow = globalThis.window;
+  const priorOpen = Plant.openBlockModal, priorInit = CalendarPeriodsUI.init, priorTimeout = globalThis.setTimeout;
+  const priorCollapsed = Plant._blocksCollapsed;
+  let handler = null;
+  const opened = [];
+  const flashed = new Set();
+  const mkRow = id => ({ id, classList: { add: () => flashed.add(id), remove: () => flashed.delete(id) }, scrollIntoView: () => {} });
+  const rows = { b1: mkRow('b1'), b2: mkRow('b2'), b3: mkRow('b3') };
+  const btns = Object.keys(rows).map(id => ({ dataset: { blockId: id }, closest: () => rows[id] }));
+  const panel = { scrolled: 0, scrollIntoView() { this.scrolled++; } };
+  const timeline = { addEventListener: (type, fn) => { if (type === 'click') handler = fn; } };
+  const timers = [];
+  globalThis.setTimeout = fn => { timers.push(fn); return 0; };
+  globalThis.window = {};
+  globalThis.document = {
+    getElementById: id => (id === 'plant-periods-timeline' ? timeline : id === 'plant-blackouts-panel' ? panel : null),
+    querySelector: () => null,
+    querySelectorAll: sel => (sel === '#plant-blocks-list .plant-blk-edit' ? btns : []),
+  };
+  Plant.openBlockModal = id => opened.push(id);
+  CalendarPeriodsUI.init = () => {};
+  try {
+    Plant._wireStaticHandlers();
+    assert.ok(handler, 'the timeline listener is registered');
+    const markEvt = dataset => ({ target: { closest: sel => (sel === '[data-action="edit-blackout"]' ? { dataset } : null) } });
+    handler({ target: { closest: () => null } });
+    assert.deepEqual(opened, [], 'clicks that are not on a blackout marker are ignored');
+    handler(markEvt({ action: 'edit-blackout', id: 'b1' }));
+    assert.deepEqual(opened, ['b1']);
+    assert.equal(panel.scrolled, 0);
+    Plant._blocksCollapsed = false;
+    handler(markEvt({ action: 'edit-blackout', ids: '["b1","b3"]' }));
+    assert.deepEqual(opened, ['b1'], 'a cluster does not open the editor');
+    assert.equal(panel.scrolled, 1);
+    assert.deepEqual([...flashed].sort(), ['b1', 'b3']);
+    timers.forEach(fn => fn());
+    assert.equal(flashed.size, 0, 'the highlight is transient');
+    handler(markEvt({ action: 'edit-blackout', ids: 'not json' }));
+    assert.equal(flashed.size, 0);
+  } finally {
+    globalThis.setTimeout = priorTimeout;
+    Plant.openBlockModal = priorOpen; CalendarPeriodsUI.init = priorInit;
+    Plant._blocksCollapsed = priorCollapsed;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    if (priorWindow === undefined) delete globalThis.window; else globalThis.window = priorWindow;
+  }
 });

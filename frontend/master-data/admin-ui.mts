@@ -251,6 +251,16 @@ export const Plant = {
       const ed = target?.closest<HTMLElement>('.plant-blk-edit');
       if (ed) Plant.openBlockModal(ed.dataset.blockId!);
     });
+    // Blackout markers on the period timeline. calendar-periods-ui ignores edit-blackout (it cannot import
+    // this module), so the seam lives here: one blackout opens its editor, a cluster points at its list rows.
+    document.getElementById('plant-periods-timeline')?.addEventListener('click', e => {
+      const mark = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-action="edit-blackout"]');
+      if (!mark) return;
+      if (mark.dataset.id) { Plant.openBlockModal(mark.dataset.id); return; }
+      let ids: unknown = [];
+      try { ids = JSON.parse(mark.dataset.ids || '[]'); } catch { /* malformed: highlight nothing */ }
+      if (Array.isArray(ids)) Plant._revealBlocks(ids.map(String));
+    });
     // The guard matters: EditCalendar.openPlant('') would crash in _populate.
     document.getElementById('plant-edit-calendar-btn')?.addEventListener('click', () => {
       if (Store.selectedPlant) EditCalendar.openPlant(Store.selectedPlant);
@@ -301,7 +311,8 @@ export const Plant = {
     Plant.gotoTab(Plant._currentPlantTab || 'general');
     Plant._renderHours();
     Plant._renderBlocks();
-    CalendarPeriodsUI.render();
+    // The Calendar tab's list and timeline render in gotoTab above whenever that tab is showing,
+    // and on every later switch to it, so a hidden tab never needs a render here.
     Plant._renderRoster();
   },
 
@@ -382,6 +393,24 @@ export const Plant = {
     if (t === 'calendar') CalendarPeriodsUI.render();
     else if (t === 'settings') Plant._renderSettingsPane();
     else if (t === 'optimization') Plant._fetchAndRenderOptimization(Store.selectedPlant);
+  },
+
+  /** Scroll the blackout list into view and briefly flash the rows for `ids` (a timeline cluster click). */
+  _revealBlocks(ids: string[]): void {
+    const panel = document.getElementById('plant-blackouts-panel');
+    if (!panel) return;
+    if (Plant._blocksCollapsed) Plant.toggleBlocksList();
+    const reduce = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    panel.scrollIntoView?.({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' });
+    const rows: HTMLElement[] = [];
+    document.querySelectorAll<HTMLElement>('#plant-blocks-list .plant-blk-edit').forEach(btn => {
+      const row = btn.closest<HTMLElement>('.block-row');
+      if (row && ids.includes(btn.dataset.blockId || '')) rows.push(row);
+    });
+    rows.forEach(r => r.classList.add('is-flash'));
+    // The first flashed row may sit below the list's own scroll fold.
+    rows[0]?.scrollIntoView?.({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' });
+    setTimeout(() => rows.forEach(r => r.classList.remove('is-flash')), 1800);
   },
 
   toggleBlocksList(): void {
@@ -781,22 +810,30 @@ export const Plant = {
 
     const editId = Plant._editingBlockId;
     if (editId) {
-      Plant._editingBlockId = null;
       const plant = Store.selectedPlant;
       const cur = Store.plantBlocks.find(b => b.id === editId && b.plant === plant);
       // Deleted or re-hydrated away while the modal was open: the upsert would re-insert it, so write nothing.
       if (!cur) {
+        Plant._editingBlockId = null;
         Modal.close('modal-plant-block');
         Toast.show(Util.t('toast.plant_blackout_gone'), 'warn');
         return;
       }
       const unchanged = Util.parseDate(cur.start)?.getTime() === start.getTime() &&
         Util.parseDate(cur.end)?.getTime() === end.getTime() && (cur.reason || '') === reason;
-      if (!unchanged && Store.updatePlantBlock(editId, plant, { start, end, reason }, 'plant')) {
-        const updated = Store.plantBlocks.find(b => b.id === editId && b.plant === plant);
-        if (updated) CalendarSync.savePlantBlackoutUpsert(updated);
-        Toast.show(Util.t('toast.plant_blackout_updated'), 'success');
+      if (!unchanged) {
+        // The Store refuses an edit that equals another blackout; say so and keep the form open for a fix.
+        const dup = Store.plantBlocks.some(b => b.id !== editId && b.plant === plant &&
+          Util.parseDate(b.start)?.getTime() === start.getTime() &&
+          Util.parseDate(b.end)?.getTime() === end.getTime() && (b.reason || '') === reason);
+        if (dup) { Toast.show(Util.t('toast.plant_blackout_duplicate'), 'error'); return; }
+        if (Store.updatePlantBlock(editId, plant, { start, end, reason }, 'plant')) {
+          const updated = Store.plantBlocks.find(b => b.id === editId && b.plant === plant);
+          if (updated) CalendarSync.savePlantBlackoutUpsert(updated);
+          Toast.show(Util.t('toast.plant_blackout_updated'), 'success');
+        }
       }
+      Plant._editingBlockId = null;
       Modal.close('modal-plant-block');
       return;
     }
