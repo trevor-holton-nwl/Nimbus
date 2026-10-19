@@ -301,6 +301,44 @@ test('Timeline._itemForTask: className reflects firming status (order-firmed for
   assert.doesNotMatch(firmedItem.className, /\border-standard\b/);
 });
 
+test('Timeline.flashTarget: goto-target rides _itemForTask/_itemsForTask for every segment, clears on expiry', async (t) => {
+  const task = {
+    id: 'goto-flash-1', MACHINE: 'L-GOTO', RUN_TIME: 14, plant: '5512',
+    start_date: new Date('2026-08-12T08:00:00'), end_date: new Date('2026-08-13T10:00:00'),
+    scheduleSegments: [
+      { sequence: 1, startDate: new Date('2026-08-12T08:00:00'), endDate: new Date('2026-08-12T20:00:00') },
+      { sequence: 2, startDate: new Date('2026-08-13T08:00:00'), endDate: new Date('2026-08-13T10:00:00') },
+    ],
+  };
+  const other = { ...task, id: 'goto-flash-2', scheduleSegments: undefined };
+  const rows = new Map();
+  const priorItems = Timeline._items;
+  Timeline._items = {
+    get: id => rows.get(id) || null,
+    update(arr) { for (const u of [].concat(arr)) rows.set(u.id, { ...(rows.get(u.id) || {}), ...u }); },
+  };
+  for (const it of Timeline._itemsForTask(task)) rows.set(it.id, it);
+  Store._state.tasks[task.id] = task;
+  t.after(() => { delete Store._state.tasks[task.id]; clearTimeout(Timeline._gotoFlashTimer); Timeline._gotoFlash = null; Timeline._items = priorItems; });
+
+  assert.ok(Timeline._itemsForTask(task).every(i => !/goto-target/.test(i.className)));
+  Timeline.flashTarget('goto-flash-1');
+  const ids = Timeline.itemIdsForTask('goto-flash-1');
+  assert.equal(ids.length, 2);
+  assert.ok(ids.every(id => /\bgoto-target\b/.test(rows.get(id).className)), 'every live segment gets the class');
+  // A rebuild builds items fresh; the flash state re-applies the class.
+  assert.ok(Timeline._itemsForTask(task).every(i => /\bgoto-target\b/.test(i.className)));
+  assert.doesNotMatch(Timeline._itemForTask(other).className, /goto-target/, 'other orders never get it');
+
+  // Expiry: the unexpired check stops adding, and the timer strips live items.
+  Timeline._gotoFlash.until = Date.now() - 1;
+  assert.doesNotMatch(Timeline._itemForTask(task).className, /goto-target/);
+  Timeline._gotoFlash.until = Date.now() + 1000;
+  await new Promise(r => setTimeout(r, Timeline.GOTO_FLASH_MS + 100));
+  assert.equal(Timeline._gotoFlash, null);
+  assert.ok(ids.every(id => !/goto-target/.test(rows.get(id).className)), 'timer strips the class');
+});
+
 test('G5: the live lock-band scan membership includes running orders, not only the frozen horizon', () => {
   const now = new Date('2026-09-09T10:00:00');
   const running = { id: 'lb-run', user_scheduled: true, start_date: new Date('2026-09-09T08:00:00'), end_date: new Date('2026-09-09T12:00:00') };

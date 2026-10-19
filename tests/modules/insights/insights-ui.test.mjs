@@ -5,7 +5,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Dashboard, AlertsUIAdapter } from '../../../frontend/insights/insights-ui.mjs';
-import { Table } from '../../../frontend/scheduling/orders.mjs';
+import { Table, Inspector } from '../../../frontend/scheduling/orders.mjs';
+import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
+import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Util } from '../../../frontend/platform/foundation.mjs';
@@ -259,6 +261,42 @@ test('alert drawer delegates fix and override actions without compiling IDs into
     Alerts.applyFix = priorApplyFix;
     AlertsUIAdapter.toggleDrawer = priorToggleDrawer;
     Table._openOverrideModalForId = priorOpenOverride;
+  }
+});
+
+test('AlertsUIAdapter.focus: Go To selects via Selection, flashes the target, and closes the drawer only if open', () => {
+  const prior = {
+    gotoLineDay: Timeline.gotoLineDay, flash: Timeline.flashTarget, tl: Timeline._tl,
+    show: Inspector.show, toggle: AlertsUIAdapter.toggleDrawer, doc: globalThis.document,
+    alerts: Store._state.alerts, ids: Selection.ids(),
+  };
+  const calls = [];
+  let drawerOpen = true;
+  try {
+    Timeline.gotoLineDay = (line, day, cb) => { calls.push('goto'); cb(); };
+    Timeline.flashTarget = id => calls.push(`flash:${id}`);
+    Timeline._tl = {};
+    Inspector.show = t => calls.push(`inspector:${t.id}`);
+    AlertsUIAdapter.toggleDrawer = () => { calls.push('toggle'); drawerOpen = !drawerOpen; };
+    globalThis.document = { getElementById: () => ({ classList: { contains: () => drawerOpen } }) };
+    Store._state.tasks.T1 = { id: 'T1' };
+    Store._state.alerts = [{ id: 'a1', taskId: 'T1', line: 'L1', time: new Date('2026-08-12T08:00:00') }];
+    Selection.clear();
+
+    AlertsUIAdapter.focus('a1');
+    assert.deepEqual(Selection.ids(), ['T1'], 'target is selected through Selection');
+    assert.ok(!calls.includes('inspector:T1'), 'Inspector is driven by the Selection listener, not called directly');
+    assert.deepEqual(calls.filter(c => c !== 'goto'), ['flash:T1', 'toggle']);
+
+    // Already the sole selection: Selection.set no-ops, so Inspector.show is called explicitly.
+    calls.length = 0; drawerOpen = false;
+    AlertsUIAdapter.focus('a1');
+    assert.ok(calls.includes('inspector:T1'));
+    assert.ok(!calls.includes('toggle'), 'closed drawer is not toggled (would reopen it)');
+  } finally {
+    Timeline.gotoLineDay = prior.gotoLineDay; Timeline.flashTarget = prior.flash; Timeline._tl = prior.tl;
+    Inspector.show = prior.show; AlertsUIAdapter.toggleDrawer = prior.toggle; globalThis.document = prior.doc;
+    Store._state.alerts = prior.alerts; delete Store._state.tasks.T1; Selection.set(prior.ids);
   }
 });
 

@@ -1244,6 +1244,20 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.dist-sibling {
   box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.55) !important;
 }
+/* "Go To" target (Timeline.flashTarget): dark ink ring (light in dark mode — --fg) with a
+   --bg-elev gap so it separates from the selection blue and from a red alert outline.
+   3px total outer reach (rows have ~4px margin). Must follow .dist-sibling to win. */
+.vis-item.goto-target {
+  box-shadow: 0 0 0 2px var(--bg-elev), 0 0 0 3px var(--fg) !important;
+  animation: goto-target-pulse 0.5s ease-in-out 5;
+}
+@keyframes goto-target-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--bg-elev), 0 0 0 3px var(--fg); }
+  50%      { box-shadow: 0 0 0 2px var(--bg-elev), 0 0 0 3px color-mix(in srgb, var(--fg) 30%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vis-item.goto-target { animation: none; }
+}
 
 /* Custom vis background areas for blackout blocks */
 .vis-item.blackout {

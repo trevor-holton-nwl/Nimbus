@@ -171,6 +171,8 @@ export const Timeline = {
   _nextColorIdx: 0,
   _unsubStore:   null as (() => void) | null,
   _suppressEvents: false,       // guard to prevent self-triggered loops
+  _gotoFlash: null as { taskId: string; until: number } | null,   // "Go To" pulse target; _itemForTask re-applies .goto-target while unexpired so a rebuild can't drop it
+  _gotoFlashTimer: null as ReturnType<typeof setTimeout> | null,
   _conflictSrc: null as NimbusAlert[] | null,           // alerts array reference — invalidates cache when it changes
   _conflictSet: null as Set<string> | null,           // Set<String(taskId)> built once per alerts array identity
   _visEl:       null as HTMLElement | null,           // cached #vis-timeline element (set in init)
@@ -772,6 +774,42 @@ export const Timeline = {
     });
   },
 
+  /** Add/strip `.goto-target` on every live item of one order (all split segments)
+   *  through the suppressed-update pattern of `_applyDistSiblingHighlight`. */
+  _setGotoClass(taskId: string, on: boolean): void {
+    if (!Timeline._items) return;
+    const updates: Array<{ id: string; className: string }> = [];
+    for (const itemId of Timeline.itemIdsForTask(taskId)) {
+      const item = Timeline._items.get(itemId) as TimelineVisItem | null;
+      if (!item) continue;
+      const parts = (item.className || '').split(' ').filter(Boolean);
+      const has = parts.includes('goto-target');
+      if (on === has) continue;
+      updates.push({ id: itemId, className: (on ? [...parts, 'goto-target'] : parts.filter(c => c !== 'goto-target')).join(' ') });
+    }
+    if (!updates.length) return;
+    Timeline._suppressEvents = true;
+    try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = false; }
+  },
+
+  /** "Go To" pulse: ring the order (every segment) for GOTO_FLASH_MS, then drop back to the
+   *  plain selection look. State lives in `_gotoFlash` so rebuilds re-apply it. */
+  flashTarget(taskId: string | number): void {
+    const id = String(taskId);
+    const prev = Timeline._gotoFlash;
+    if (Timeline._gotoFlashTimer) clearTimeout(Timeline._gotoFlashTimer);
+    Timeline._gotoFlash = { taskId: id, until: Date.now() + Timeline.GOTO_FLASH_MS };
+    if (prev && prev.taskId !== id) Timeline._setGotoClass(prev.taskId, false);
+    Timeline._setGotoClass(id, true);
+    Timeline._gotoFlashTimer = setTimeout(() => {
+      Timeline._gotoFlashTimer = null;
+      const cur = Timeline._gotoFlash;
+      Timeline._gotoFlash = null;
+      if (cur) Timeline._setGotoClass(cur.taskId, false);
+    }, Timeline.GOTO_FLASH_MS);
+  },
+  GOTO_FLASH_MS: 2500,
+
   /** Build an item object for a task. */
   _itemForTask(t: NimbusTask): TimelineVisItem {
     const line = t.MACHINE || 'Unknown';
@@ -780,6 +818,10 @@ export const Timeline = {
     const label = t.text || t.ORDER || String(t.id);
     const cls = [firmed ? 'order-firmed' : 'order-standard'];
     if (conflict) cls.push('conflict-order');
+    // "Go To" pulse (flashTarget): lives in className like the dimming below, so a rebuild
+    // or single-item patch that rebuilds the item keeps it until the flash expires.
+    const flash = Timeline._gotoFlash;
+    if (flash && flash.taskId === String(t.id) && Date.now() < flash.until) cls.push('goto-target');
     // Filter dimming lives in className, which this builder recomputes on every rebuild —
     // without re-applying it here a rebuild (plant/line change, bulk edit) silently un-dimmed
     // every bar until the next filter tweak.
