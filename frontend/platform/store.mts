@@ -646,6 +646,29 @@ export const Store = {
     this._state.plantBlocks.push(block);
     this.emit({ type: 'plantBlocks:change', source });
   },
+  /** Edit a plant blackout in place of the old one (same id/plant, new object so
+   *  value-based change detection sees it). False when the block is gone or the
+   *  edit would duplicate another block. */
+  updatePlantBlock(id: string, plant: string, patch: { start: Date | string; end: Date | string; reason: string }, source?: string): boolean {
+    const i = this._state.plantBlocks.findIndex(b => b.id === id && (b.plant || '') === (plant || ''));
+    if (i < 0) return false;
+    const newS = Util.parseDate(patch.start)?.getTime();
+    const newE = Util.parseDate(patch.end)?.getTime();
+    const dup = this._state.plantBlocks.find((b, j) =>
+      j !== i &&
+      (b.plant || '') === (plant || '') &&
+      Util.parseDate(b.start)?.getTime() === newS &&
+      Util.parseDate(b.end)?.getTime()   === newE &&
+      (b.reason || '') === (patch.reason || '')
+    );
+    if (dup) {
+      ErrorLog.warn?.('store', `Refused duplicate plant blackout edit (plant=${plant||'*'}, id=${id}) from source="${source}"`);
+      return false;
+    }
+    this._state.plantBlocks[i] = { ...this._state.plantBlocks[i], start: patch.start, end: patch.end, reason: patch.reason } as NimbusPlantBlock;
+    this.emit({ type: 'plantBlocks:change', source });
+    return true;
+  },
   removePlantBlock(id: string, source?: string): void {
     const i = this._state.plantBlocks.findIndex(b => b.id === id);
     if (i >= 0) {

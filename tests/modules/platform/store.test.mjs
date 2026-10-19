@@ -352,3 +352,67 @@ test('Store.clampLinesToPlant clamps to the union of the default and every perio
     Store.replacePlants({}, 'unit-test');
   }
 });
+
+test('Store.updatePlantBlock replaces the block in place, keeps id/plant, and emits plantBlocks:change', () => {
+  const prior = Store.plantBlocks.slice();
+  const mk = () => [
+    { id: 'pb1', plant: 'P1', start: '2026-12-24T00:00:00', end: '2026-12-26T00:00:00', reason: 'Holiday' },
+    { id: 'pb2', plant: 'P1', start: '2026-12-30T00:00:00', end: '2026-12-31T00:00:00', reason: 'Audit' },
+    { id: 'pb3', plant: 'P2', start: '2026-12-24T00:00:00', end: '2026-12-26T00:00:00', reason: 'Holiday' },
+  ];
+  Store.replacePlantBlocks(mk(), 'unit-test');
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'plantBlocks:change') events.push(evt); });
+  try {
+    const before = Store.plantBlocks[0];
+    const ok = Store.updatePlantBlock('pb1', 'P1', { start: '2026-12-24T08:15:00', end: '2026-12-27T00:00:00', reason: 'Shutdown' }, 'unit-test');
+    assert.equal(ok, true);
+    assert.equal(events.length, 1);
+    const after = Store.plantBlocks[0];
+    assert.notStrictEqual(after, before, 'a new object, not an in-place mutation');
+    assert.equal(before.reason, 'Holiday');
+    assert.equal(after.id, 'pb1');
+    assert.equal(after.plant, 'P1');
+    assert.equal(after.reason, 'Shutdown');
+    assert.equal(after.start, '2026-12-24T08:15:00');
+    assert.equal(Store.plantBlocks.length, 3);
+  } finally {
+    off();
+    Store.replacePlantBlocks(prior, 'unit-test');
+  }
+});
+
+test('Store.updatePlantBlock returns false for a missing block or a wrong plant, without emitting', () => {
+  const prior = Store.plantBlocks.slice();
+  Store.replacePlantBlocks([{ id: 'pb1', plant: 'P1', start: '2026-12-24T00:00:00', end: '2026-12-26T00:00:00', reason: 'Holiday' }], 'unit-test');
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'plantBlocks:change') events.push(evt); });
+  try {
+    const patch = { start: '2026-12-24T00:00:00', end: '2026-12-27T00:00:00', reason: 'X' };
+    assert.equal(Store.updatePlantBlock('nope', 'P1', patch, 'unit-test'), false);
+    assert.equal(Store.updatePlantBlock('pb1', 'P2', patch, 'unit-test'), false);
+    assert.equal(events.length, 0);
+    assert.equal(Store.plantBlocks[0].reason, 'Holiday');
+  } finally {
+    off();
+    Store.replacePlantBlocks(prior, 'unit-test');
+  }
+});
+
+test('Store.updatePlantBlock refuses an edit that duplicates another block of the same plant', () => {
+  const prior = Store.plantBlocks.slice();
+  Store.replacePlantBlocks([
+    { id: 'pb1', plant: 'P1', start: '2026-12-24T00:00:00', end: '2026-12-26T00:00:00', reason: 'Holiday' },
+    { id: 'pb2', plant: 'P1', start: '2026-12-30T00:00:00', end: '2026-12-31T00:00:00', reason: 'Audit' },
+  ], 'unit-test');
+  try {
+    assert.equal(Store.updatePlantBlock('pb2', 'P1',
+      { start: '2026-12-24T00:00:00', end: '2026-12-26T00:00:00', reason: 'Holiday' }, 'unit-test'), false);
+    assert.equal(Store.plantBlocks[1].reason, 'Audit');
+    // Saving a block over itself (unchanged values) is not a duplicate.
+    assert.equal(Store.updatePlantBlock('pb2', 'P1',
+      { start: '2026-12-30T00:00:00', end: '2026-12-31T00:00:00', reason: 'Audit' }, 'unit-test'), true);
+  } finally {
+    Store.replacePlantBlocks(prior, 'unit-test');
+  }
+});
