@@ -108,6 +108,25 @@ h1, h2, h3, h4 {
   --bar-standard: #1f5fbf;
   --bar-firmed:   #b02a20;
 
+  /* Board shading — the Gantt's background bands and day cells. Shared by the
+     timeline rules (.vis-item.past-zone etc.) and the board legend
+     (#modal-gantt-legend), so the legend's swatches can never drift from the
+     board. True-alpha rgba on purpose: these wash OVER colored order bars.
+     Values are byte-identical to the literals they replaced (2026-10-19). */
+  --zone-past:          rgba(150, 150, 160, 0.42);   /* elapsed time */
+  --zone-nonworking:    rgba(93, 113, 134, 0.35);    /* closed days / off-shift hours */
+  --zone-alert:         rgba(60, 200, 90, 0.12);     /* alert-horizon wash */
+  --zone-alert-edge:    #1a7a2e;
+  --zone-frozen:        rgba(20, 120, 40, 0.24);     /* frozen-horizon wash */
+  --zone-frozen-edge:   #0f5c1f;
+  --blackout-hatch:     rgba(110, 25, 10, 0.42);
+  --blackout-edge:      rgba(177, 54, 42, 0.45);
+  --alertcell-err-bg:   rgba(176, 42, 32, 0.22);     /* --err #b02a20 */
+  --alertcell-err-edge: rgba(176, 42, 32, 0.45);
+  --alertcell-warn-bg:  rgba(147, 97, 10, 0.14);     /* --warn #93610a */
+  --alertcell-cal-bg:   rgba(31, 95, 191, 0.18);     /* --info #1f5fbf */
+  --alertcell-cal-edge: rgba(31, 95, 191, 0.35);
+
   /* Radii + spacing */
   --r-sm: 4px; --r-md: 4px; --r-lg: 8px; --r-xl: 14px;
   --shadow-sm: 0 1px 2px rgba(12,28,48,0.06);
@@ -1230,10 +1249,10 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.blackout {
   background: repeating-linear-gradient(
     45deg,
-    rgba(110, 25, 10, 0.42) 0 8px,
-    transparent              8px 16px
+    var(--blackout-hatch) 0 8px,
+    transparent           8px 16px
   ) !important;
-  border-color: rgba(177, 54, 42, 0.45) !important;
+  border-color: var(--blackout-edge) !important;
   color: var(--err) !important;
   font-style: italic;
   font-size: 11px !important;
@@ -1244,34 +1263,32 @@ details.line-group > summary::-webkit-details-marker { display: none; }
    foreground order bars. Solid translucent tint, no border, severity-colored.
    Rgba (not var(--err-soft) etc.) is deliberate: these overlay ON TOP of the
    colored order blocks underneath, so they need true alpha transparency, not
-   an opaque soft-tint chip background — the rgb triplets below are simply the
-   new --err/--warn/--info hex values at the same alpha the old rule used.
-   Task 10: body.dark overrides for alertcell-err/warn now added below, next
-   to the pre-existing alertcell-calendar/blackout dark overrides. */
+   an opaque soft-tint chip background. The rgba values live in the
+   --alertcell-* tokens (:root + body.dark) so the board legend shares them. */
 .vis-item.alertcell-err {
-  background: rgba(176, 42, 32, 0.22) !important;   /* --err #b02a20 */
-  border: 1px solid rgba(176, 42, 32, 0.45) !important;
+  background: var(--alertcell-err-bg) !important;
+  border: 1px solid var(--alertcell-err-edge) !important;
 }
 .vis-item.alertcell-warn {
-  background: rgba(147, 97, 10, 0.14) !important;   /* --warn #93610a */
+  background: var(--alertcell-warn-bg) !important;
   border-color: transparent !important;
 }
 /* Calendar-restriction alert cells — blue tint signals "zone unavailable",
    distinct from red scheduling-conflict cells. */
 .vis-item.alertcell-calendar {
-  background: rgba(31, 95, 191, 0.18) !important;   /* --info #1f5fbf */
-  border: 1px solid rgba(31, 95, 191, 0.35) !important;
+  background: var(--alertcell-cal-bg) !important;
+  border: 1px solid var(--alertcell-cal-edge) !important;
 }
 /* Past-time zone shading — light gray wash behind orders for elapsed time */
 .vis-item.past-zone {
-  background: rgba(150, 150, 160, 0.42) !important;
+  background: var(--zone-past) !important;
   border-color: transparent !important;
 }
 /* Alert-horizon zone — light green wash from now to the plant's alert horizon */
 .vis-item.alert-horizon-zone {
-  background: rgba(60, 200, 90, 0.12) !important;
+  background: var(--zone-alert) !important;
   border-color: transparent !important;
-  border-right: 3px solid #1a7a2e !important;
+  border-right: 3px solid var(--zone-alert-edge) !important;
   pointer-events: none !important;
 }
 /* Frozen-horizon zone (Workstream C2, 2026-08-20) — darker green wash from now
@@ -1279,9 +1296,9 @@ details.line-group > summary::-webkit-details-marker { display: none; }
    (later in DOM/paint order — see Timeline.rebuild). The optimizer may not
    place or move anything into this band; a manual drag still can (OD-C2c). */
 .vis-item.frozen-horizon-zone {
-  background: rgba(20, 120, 40, 0.24) !important;
+  background: var(--zone-frozen) !important;
   border-color: transparent !important;
-  border-right: 3px solid #0f5c1f !important;
+  border-right: 3px solid var(--zone-frozen-edge) !important;
   pointer-events: none !important;
 }
 
@@ -1303,16 +1320,13 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 /* Non-working-time shading — ungrouped full-height background items
    ('nonworking-<dayKey>' from Timeline._nonWorkingDesired): closed days and
    off-shift hours of the plant pattern. About as dark as .past-zone
-   (rgba(150,150,160,.42)) but slate-tinted (35% light / 20% dark; the
-   dark step is lower so the wash does not swallow bar-adjacent text).
-   No position/top/height: vis owns the geometry. */
+   (--zone-past) but slate-tinted (35% light / 20% dark via the
+   --zone-nonworking token; the dark step is lower so the wash does not
+   swallow bar-adjacent text). No position/top/height: vis owns the geometry. */
 .vis-item.nonworking {
-  background: rgba(93, 113, 134, 0.35) !important;
+  background: var(--zone-nonworking) !important;
   border: none !important;
   pointer-events: none !important;
-}
-body.dark .vis-item.nonworking {
-  background: rgba(144, 162, 184, 0.20) !important;
 }
 
 /* Plant visibility-horizon marker (C1, 2026-08-21) — a thin labeled vertical
@@ -5606,6 +5620,18 @@ body.dark {
   --bar-standard: #4d9fff;
   --bar-firmed:   #d94a3a;
 
+  /* Board shading, dark counterparts (same values the per-rule body.dark
+     overrides carried before they were tokenized). Horizon/past washes had
+     no dark override and keep their :root values. */
+  --zone-nonworking:    rgba(144, 162, 184, 0.20);
+  --blackout-hatch:     rgba(210, 60, 40, 0.38);
+  --blackout-edge:      rgba(210, 60, 40, 0.50);
+  --alertcell-err-bg:   rgba(217, 74, 58, 0.26);     /* dark --err #d94a3a */
+  --alertcell-err-edge: rgba(217, 74, 58, 0.50);
+  --alertcell-warn-bg:  rgba(208, 144, 16, 0.18);    /* dark --warn #d09010 */
+  --alertcell-cal-bg:   rgba(74, 136, 200, 0.22);
+  --alertcell-cal-edge: rgba(74, 136, 200, 0.40);
+
   /* Undefined-token dark counterparts (Task 1 only defined these for light) */
   --border:          #263850;      /* same as --line */
   --border-subtle:   #101b28;      /* same as --bg-strong — faint dark divider */
@@ -5633,29 +5659,10 @@ body.dark .vis-labelset .vis-label,
 body.dark .vis-labelset .vis-label .vis-inner,
 body.dark .vis-labelset .vis-label * { color: #f5f2ea !important; }
 body.dark .vis-labelset .vis-label { background: var(--bg-elev) !important; }
-body.dark .vis-item.blackout {
-  background: repeating-linear-gradient(
-    45deg,
-    rgba(210, 60, 40, 0.38) 0 8px,
-    transparent              8px 16px
-  ) !important;
-  border-color: rgba(210, 60, 40, 0.50) !important;
-}
-body.dark .vis-item.alertcell-calendar {
-  background: rgba(74, 136, 200, 0.22) !important;
-  border: 1px solid rgba(74, 136, 200, 0.40) !important;
-}
-/* Task 10: dark counterparts for alertcell-err/warn, added to match the
-   calendar/blackout siblings above (same pattern: dark --err/--warn hex,
-   alpha nudged up slightly from the light-mode rule for dark visibility). */
-body.dark .vis-item.alertcell-err {
-  background: rgba(217, 74, 58, 0.26) !important;   /* dark --err #d94a3a */
-  border: 1px solid rgba(217, 74, 58, 0.50) !important;
-}
-body.dark .vis-item.alertcell-warn {
-  background: rgba(208, 144, 16, 0.18) !important;   /* dark --warn #d09010 */
-  border-color: transparent !important;
-}
+/* Blackout hatch, non-working shading and the alertcell-err/warn/calendar
+   day cells re-tune for dark mode through their tokens (--blackout-*,
+   --zone-nonworking, --alertcell-*) in the body.dark block above — the
+   per-rule overrides that used to sit here carried the same values. */
 
 /* Flatpickr calendar dark overrides */
 body.dark .flatpickr-calendar {
@@ -7105,3 +7112,355 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
   .dist-detail-pane { flex-basis: auto; }
 }
 .setup-mass-upload-reject-row:last-child { border-bottom: 0; }
+
+/* =============================================================================
+   GANTT BOARD LEGEND — #modal-gantt-legend (frontend/scheduling/gantt-legend.mts)
+   A miniature of the scheduling board drawn with the board's own tokens
+   (--bar-*, --zone-*, --blackout-*, --alertcell-*, --accent, --line…), so it
+   follows dark mode and can never drift from the live colors. Nothing here
+   touches .vis-item: every element is a plain div/span under .lg-* classes
+   that mirror the board rule they stand for (the comment on each names it).
+   Geometry comes from inline custom properties (--s/--e in hours, --d in
+   days, --x/--y for pins, --l/--t/--w/--h for swatch pieces) so the scene
+   scales with the modal width. Fixed vertical metrics match the board:
+   32px rows, 26px bars, 52px minimap, 40px two-row time axis.
+   The 3px horizon edges, the 2px dashed split keyline and the 2px setup
+   radius are deliberate copies of the board rules, not accents of their own.
+   ========================================================================== */
+.lg-modal { max-width: min(1160px, 94vw); }
+.lg-modal .modal-head { align-items: flex-start; }
+.lg-head-text { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.lg-intro { margin: 0; font-size: 12px; line-height: 1.4; color: var(--fg-mute); }
+.lg-modal .modal-body { padding: 0; }
+.lg-sr {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* --- Scene wrap: sticky above the key so hovering a row far down the list
+   still lights its element. Padding leaves room for pins that overhang the
+   board edge. --- */
+.lg-scene-wrap {
+  position: sticky; top: 0; z-index: 3;
+  padding: 14px 18px 12px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--line);
+}
+.lg-scene { --lg-hours: 32; --lg-days: 14; --lg-rail: 72px; position: relative; }
+.lg-board-scroll { overflow-x: auto; overflow-y: hidden; }
+.lg-board {
+  position: relative;
+  min-width: 600px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev);
+  overflow: hidden;
+  font-family: 'Public Sans', system-ui, sans-serif;
+  user-select: none;
+}
+
+/* Timeline viewer (minimap, #timeline-nav) — mirrors TimelineNav._paint step
+   for step: bg, closed days, alert bands, blackouts, bars, dividers, label
+   scrim, now marker, viewport scrim + outline. Opacities are the canvas
+   globalAlpha values. */
+.lg-nav {
+  position: relative; height: 52px;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
+.lg-nav > * { position: absolute; }
+.lg-nav-d { top: 0; bottom: 0; left: calc(100% * var(--s) / var(--lg-days)); width: calc(100% * (var(--e) - var(--s)) / var(--lg-days)); }
+.lg-nav-closed { height: 40px; bottom: auto; background: var(--fg-faint); opacity: .12; }
+.lg-nav-err    { height: 40px; bottom: auto; background: var(--err);  opacity: .38; }
+.lg-nav-warn   { height: 40px; bottom: auto; background: var(--warn); opacity: .28; }
+.lg-nav-blk    { height: 40px; bottom: auto; background: var(--err); opacity: .18; }
+/* Eight 5px machine rows (the strip projects every visible machine; the
+   three scene machines are rows 0-2). --r is the row index. */
+.lg-nav-bar, .lg-nav-blk.row { top: calc(var(--r) * 5px); height: 5px; bottom: auto; }
+.lg-nav-bar { background: var(--bar-standard); opacity: .9; min-width: 1px; }
+.lg-nav-bar.firmed { background: var(--bar-firmed); }
+.lg-nav-bar.conflict { box-shadow: inset 0 0 0 1px var(--err); opacity: 1; }
+.lg-nav-div { top: 0; bottom: 0; width: 1px; background: var(--line); opacity: .6; left: calc(100% * var(--s) / var(--lg-days)); }
+.lg-nav-scrim { left: 0; right: 0; bottom: 0; height: 12px; background: var(--bg-subtle); opacity: .85; }
+.lg-nav-lbl {
+  bottom: 2px; transform: translateX(-50%);
+  left: calc(100% * var(--s) / var(--lg-days));
+  font: 9px var(--font-mono); color: var(--fg-mute); line-height: 1;
+}
+.lg-nav-now { top: 0; bottom: 0; width: 1px; background: var(--accent); left: calc(100% * var(--s) / var(--lg-days)); }
+.lg-nav-shade { top: 0; bottom: 0; background: var(--fg); opacity: .12; }
+.lg-nav-shade.l { left: 0; width: calc(100% * var(--e) / var(--lg-days)); }
+.lg-nav-shade.r { right: 0; left: calc(100% * var(--s) / var(--lg-days)); }
+.lg-nav-view {
+  top: 0; bottom: 0; box-sizing: border-box;
+  border: 1.5px solid var(--fg); opacity: .8;
+  left: calc(100% * var(--s) / var(--lg-days)); width: calc(100% * (var(--e) - var(--s)) / var(--lg-days));
+}
+
+/* Time axis — day row + hour row (.vis-panel.vis-top / .vis-time-axis .vis-text) */
+.lg-axis { display: flex; height: 40px; background: var(--bg-subtle); border-bottom: 1px solid var(--line); }
+.lg-axis-corner { flex: none; width: var(--lg-rail); border-right: 1px solid var(--line); }
+.lg-axis-tl { position: relative; flex: 1; min-width: 0; }
+.lg-day, .lg-tick {
+  position: absolute; box-sizing: border-box;
+  left: calc(100% * var(--s) / var(--lg-hours));
+  font-size: 11px; color: var(--fg-mute); white-space: nowrap;
+  line-height: 20px; padding-left: 5px;
+}
+.lg-day  { top: 0; height: 20px; width: calc(100% * (var(--e) - var(--s)) / var(--lg-hours)); border-left: 1px solid var(--line-strong); overflow: hidden; text-overflow: ellipsis; }
+.lg-tick { top: 20px; height: 20px; border-left: 1px solid var(--line); }
+.lg-tick.major { border-left-color: var(--line-strong); }
+.lg-day:first-child { border-left-color: transparent; }
+
+/* Rail (.vis-labelset .vis-label) + body (.vis-panel.vis-center) */
+.lg-main { display: flex; }
+.lg-rail { flex: none; width: var(--lg-rail); background: var(--bg-subtle); border-right: 1px solid var(--line); }
+.lg-rail-row {
+  height: 32px; box-sizing: border-box; padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px; font-weight: 600; line-height: 31px; color: var(--fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lg-tl { position: relative; flex: 1; min-width: 0; height: 96px; }
+.lg-tl > * { position: absolute; }
+.lg-zone, .lg-cell, .lg-bar, .lg-setup, .lg-blackout, .lg-dep, .lg-gridline, .lg-now, .lg-vis {
+  left: calc(100% * var(--s) / var(--lg-hours));
+}
+.lg-zone, .lg-cell, .lg-bar, .lg-setup, .lg-blackout, .lg-dep {
+  width: calc(100% * (var(--e) - var(--s)) / var(--lg-hours));
+}
+
+/* Background washes (.vis-item.past-zone / .nonworking / .alert-horizon-zone /
+   .frozen-horizon-zone) and day gridlines (.vis-item.day-gridline) */
+.lg-zone { top: 0; bottom: 0; box-sizing: border-box; pointer-events: none; }
+.lg-past            { background: var(--zone-past); }
+.lg-nonworking      { background: var(--zone-nonworking); }
+.lg-alert-horizon   { background: var(--zone-alert);  border-right: 3px solid var(--zone-alert-edge); }
+.lg-frozen-horizon  { background: var(--zone-frozen); border-right: 3px solid var(--zone-frozen-edge); }
+.lg-gridline { top: 0; bottom: 0; width: 0; border-left: 1px solid var(--line); pointer-events: none; }
+.lg-gridline.month { border-left-color: var(--line-strong); }
+
+/* Rows (.vis-group) with their day cells (.vis-item.alertcell-*) */
+.lg-rows { left: 0; right: 0; top: 0; }
+.lg-row { position: relative; height: 32px; box-sizing: border-box; border-bottom: 1px solid var(--line); }
+.lg-row > * { position: absolute; box-sizing: border-box; }
+.lg-cell { top: 0; bottom: 0; }
+.lg-alertcell-err  { background: var(--alertcell-err-bg);  border: 1px solid var(--alertcell-err-edge); }
+.lg-alertcell-warn { background: var(--alertcell-warn-bg); }
+.lg-alertcell-cal  { background: var(--alertcell-cal-bg);  border: 1px solid var(--alertcell-cal-edge); }
+
+/* Order bars (.vis-item.vis-range + .order-standard / .order-firmed): 26px
+   tall centred in the 32px row, 600 11px white label, 4px radius. */
+.lg-bar {
+  top: 2px; height: 26px;
+  border-radius: 4px;
+  font-size: 11px; font-weight: 600; line-height: 26px;
+  overflow: hidden; white-space: nowrap;
+}
+.lg-bar > span { display: block; padding: 0 4px; overflow: hidden; text-overflow: ellipsis; }
+.lg-order-standard { background: var(--bar-standard); color: #fff; }
+.lg-order-firmed   { background: var(--bar-firmed);   color: #fff; }
+.lg-selected { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 2px var(--accent-wash); }   /* .vis-selected */
+.lg-conflict { outline: 2px solid var(--err); outline-offset: -2px; }                        /* .conflict-order */
+.lg-dimmed   { opacity: .12; filter: saturate(0); }                                          /* .dimmed */
+.lg-split    { box-shadow: inset 0 0 0 1px rgba(255,255,255,.62); border-left: 2px dashed rgba(255,255,255,.82); } /* .split-order-segment(-continuation) */
+.lg-dist     { box-shadow: inset 0 0 0 1px rgba(255,255,255,.62); }                          /* .dist-child */
+.lg-sibling  { box-shadow: 0 0 0 2px rgba(var(--accent-rgb), .55); }                         /* .dist-sibling */
+.lg-ghost    { opacity: .45; }                                                               /* .ghost */
+.lg-ghost-conflict { opacity: .55; outline: 2px solid var(--err); outline-offset: -2px; }    /* .ghost-conflict */
+
+/* Changeover (.vis-item.setup-item): neutral steel hatch, 2px radius, mono.
+   .lg-v-* carry the look (shared with the key swatches); .lg-setup the geometry. */
+.lg-v-setup {
+  background: repeating-linear-gradient(-45deg, var(--line-strong) 0 8px, transparent 8px 16px);
+  border: 1px solid var(--line-strong); border-radius: 2px;
+  color: var(--fg-mute); font: 700 10px/1 var(--font-mono);
+  text-align: center; overflow: hidden; white-space: nowrap;
+}
+.lg-v-setup-conflict {
+  background: repeating-linear-gradient(-45deg, var(--err-soft) 0 8px, transparent 8px 16px);
+  border-color: var(--err); color: var(--err);
+}
+.lg-v-setup-missing { background: var(--warn-vivid); border-color: var(--warn-vivid); color: var(--bg-elev); }
+.lg-setup { top: 2px; height: 26px; line-height: 24px; }
+
+/* Blackout (.vis-item.blackout): red diagonal hatch over the whole row */
+.lg-v-blackout {
+  background: repeating-linear-gradient(45deg, var(--blackout-hatch) 0 8px, transparent 8px 16px);
+  border: 1px solid var(--blackout-edge);
+  color: var(--err); font-style: italic; font-size: 11px; font-weight: 600;
+}
+.lg-blackout { top: 0; bottom: 0; line-height: 16px; padding: 0 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+/* Dependency arrow (#dep-overlay .dep-arrow.highlight): the curve is an svg
+   stretched between the two endpoints (non-scaling stroke); the head is a
+   separate 8px svg so the stretch never distorts it. */
+.lg-dep { top: 16px; height: 32px; overflow: visible; pointer-events: none; }
+.lg-dep path { fill: none; stroke: var(--accent); stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+.lg-dep-head { top: 16px; left: calc(100% * var(--e) / var(--lg-hours)); width: 8px; height: 8px; transform: translate(-100%, -50%); pointer-events: none; }
+.lg-dep-head polygon { fill: var(--accent); }
+
+/* Now line (.vis-current-time) and visibility-horizon marker
+   (.vis-custom-time.visibility-horizon + its .vis-custom-time-marker tag) */
+.lg-now { top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; }
+.lg-vis { top: 0; bottom: 0; right: 0; border-left: 2px solid var(--accent); pointer-events: none; }
+.lg-vis-tag {
+  display: inline-block; max-width: 100%; box-sizing: border-box;
+  background: var(--accent); color: var(--primary-fg, #fff);
+  font-size: 10.5px; font-weight: 600; line-height: 1.4; padding: 1px 6px;
+  border-radius: 0 0 var(--r-sm, 3px) 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Focus choreography: the hovered/active element stays, the rest of the
+   scene recedes. .is-on is set by GanttLegend on every element sharing the
+   active data-key; the scene root carries .lg-focus while anything is active. */
+.lg-el { transition: opacity var(--t-med); }
+.lg-scene.lg-focus .lg-el:not(.is-on) { opacity: .22; }
+
+/* Numbered pins — buttons in an overlay the size of the board, placed by
+   --x (hours, inside the timeline) or --d (days, across the full nav width)
+   and --y (px from the board top). Navy fill with a panel-colored ring so
+   they read on any wash; accent when active. */
+.lg-pins { position: absolute; inset: 0; pointer-events: none; }
+.lg-pin {
+  position: absolute; pointer-events: auto;
+  top: calc(var(--y) * 1px);
+  left: calc(var(--lg-rail) + (100% - var(--lg-rail)) * var(--x) / var(--lg-hours));
+  transform: translate(-50%, -50%);
+  width: 18px; height: 18px; padding: 0; margin: 0;
+  border-radius: 50%;
+  background: var(--primary); color: var(--primary-fg);
+  border: 2px solid var(--bg-elev);
+  box-shadow: var(--shadow-sm), 0 0 0 1px rgba(12,28,48,.18);
+  font: 600 9.5px/1 var(--font-mono);
+  cursor: pointer;
+  transition: background var(--t-fast), transform var(--t-fast), box-shadow var(--t-fast);
+}
+body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16); }
+.lg-pin.in-nav { left: calc(100% * var(--d) / var(--lg-days)); }
+.lg-pin:hover, .lg-pin.is-on {
+  background: var(--accent); color: #fff;
+  transform: translate(-50%, -50%) scale(1.15);
+  box-shadow: var(--shadow-md), 0 0 0 3px var(--accent-wash);
+}
+.lg-pin:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lg-pin.is-sticky { box-shadow: var(--shadow-md), 0 0 0 3px var(--accent-soft); }
+
+/* Callout beside the active pin (wide screens only; the key row carries the
+   same text everywhere). */
+.lg-callout {
+  position: absolute; z-index: 4;
+  width: 260px; max-width: calc(100% - 8px); box-sizing: border-box;
+  padding: 9px 11px 10px;
+  background: var(--bg-elev); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-md);
+  pointer-events: none;
+}
+.lg-callout[hidden] { display: none; }
+.lg-callout-h { display: flex; align-items: center; gap: 7px; margin-bottom: 3px; }
+.lg-callout-t { font-size: 12.5px; font-weight: 600; color: var(--fg); line-height: 1.3; }
+.lg-callout-d { margin: 0; font-size: 12px; line-height: 1.45; color: var(--fg-mute); }
+@media (max-width: 959px) { .lg-callout { display: none; } }
+
+/* --- Key list: grouped, up to three columns. Rows that have a pin carry the
+   same number badge; the swatch column keeps every row aligned. --- */
+.lg-key {
+  padding: 8px 18px 18px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  column-gap: 28px; row-gap: 4px;
+}
+.lg-group { min-width: 0; }
+.lg-group-h {
+  margin: 10px 0 2px; padding: 0 0 5px;
+  font: 600 10px/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase;
+  color: var(--fg-mute); border-bottom: 1px solid var(--line);
+}
+.lg-group ul { list-style: none; margin: 0; padding: 0; }
+.lg-k {
+  display: grid; grid-template-columns: 18px minmax(28px, max-content) minmax(0, 1fr);
+  align-items: start; column-gap: 8px;
+  padding: 6px 6px 6px 4px; margin: 0 -4px;
+  border-radius: var(--r-sm);
+  transition: background var(--t-fast);
+}
+.lg-k[data-key] { cursor: default; }
+.lg-k[data-key]:hover, .lg-k.is-on { background: var(--accent-wash); }
+.lg-k-num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; margin-top: 1px; border-radius: 50%;
+  background: var(--primary); color: var(--primary-fg);
+  font: 600 9px/1 var(--font-mono);
+}
+.lg-k-num:empty { background: transparent; }
+.lg-k.is-on .lg-k-num { background: var(--accent); color: #fff; }
+.lg-k-t { font-size: 12.5px; font-weight: 600; color: var(--fg); line-height: 1.35; }
+.lg-k-d { margin: 1px 0 0; font-size: 12px; line-height: 1.4; color: var(--fg-mute); }
+
+/* Swatches: 28x16 chips built from the same visual classes as the scene
+   elements, boxed on the panel color so washes and faded states stay
+   visible. Small pieces (.p) are placed with --l/--t/--w/--h in px inside
+   the 26x14 padding box. */
+.lg-sw {
+  position: relative; display: block; width: 28px; height: 16px; margin-top: 2px;
+  box-sizing: border-box; border: 1px solid var(--line); border-radius: 3px;
+  background: var(--bg-elev); overflow: hidden;
+}
+.lg-sw > i {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-style: normal; line-height: 1; box-sizing: border-box;
+}
+.lg-sw.bar > i   { inset: 2px; border-radius: 2px; font: 600 7px/1 var(--font-mono); }
+.lg-sw.bar > i.lg-order-firmed { font-size: 8px; }
+.lg-sw.band > i  { inset: 0; }
+.lg-sw.edge > i  { inset: 0 4px 0 0; }
+.lg-sw.setup > i { inset: 2px; font-size: 7px; }
+.lg-sw.blackout > i { font-size: 8px; justify-content: flex-start; padding-left: 3px; }
+.lg-sw.whatif { background: var(--warn-soft); border-top: 3px solid var(--warn); }     /* .sandbox-mode .cmd-band */
+.lg-sw.nav { background: var(--bg-subtle); }
+.lg-sw.dots > i { gap: 3px; }
+.lg-sw .line-dot { width: 7px; height: 7px; }
+.lg-dot-a { background: var(--l1); } .lg-dot-b { background: var(--l2); } .lg-dot-c { background: var(--l4); }
+.lg-sw .p {
+  position: absolute; box-sizing: border-box;
+  left: calc(var(--l) * 1px); top: calc(var(--t) * 1px);
+  width: calc(var(--w) * 1px); height: calc(var(--h) * 1px);
+}
+.lg-sw .p.c-closed  { background: var(--fg-faint); opacity: .12; }
+.lg-sw .p.c-err     { background: var(--err);  opacity: .38; }
+.lg-sw .p.c-warn    { background: var(--warn); opacity: .28; }
+.lg-sw .p.c-blk     { background: var(--err);  opacity: .18; }
+.lg-sw .p.b-std     { background: var(--bar-standard); opacity: .9; }
+.lg-sw .p.b-firmed  { background: var(--bar-firmed);   opacity: .9; }
+.lg-sw .p.b-conflict{ background: var(--bar-standard); box-shadow: inset 0 0 0 1px var(--err); }
+.lg-sw .p.b-dim     { background: var(--fg-faint); opacity: .35; }
+.lg-sw .p.h-all     { background: var(--fg-faint); opacity: .35; }
+.lg-sw .p.h-act     { background: var(--accent);   opacity: .7; }
+.lg-sw .p.v-box     { border: 1.5px solid var(--fg); opacity: .8; }
+.lg-sw .p.v-scrim   { background: var(--fg); opacity: .12; }
+.lg-sw .p.n-now     { background: var(--accent); }
+.lg-sw .p.g-day     { background: var(--line); }
+.lg-sw .p.g-month   { background: var(--line-strong); }
+.lg-sw .p.v-tag     { background: var(--accent); border-radius: 0 0 2px 0; }
+.lg-sw .p.m-box     { border: 1px dashed var(--nimbus-amber, var(--accent)); background: rgba(var(--accent-rgb), .10); border-radius: 2px; } /* .nimbus-marquee */
+.lg-sw.dep > svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.lg-sw.dep path { fill: none; stroke: currentColor; stroke-width: 1.5; }
+.lg-sw.dep polygon { fill: currentColor; }
+.lg-sw.dep.ok    { color: var(--ok); }
+.lg-sw.dep.tight { color: var(--warn); }
+.lg-sw.dep.gap   { color: var(--err); }
+.lg-sw.dep.hl    { color: var(--accent); }
+.lg-sw.dep.hl path, .lg-sw.dep.gap path { stroke-width: 2.5; }
+.lg-k .line-util { margin: 1px 0 0; }
+
+/* Narrow: the scene scrolls inside its box (never the page), the board stops
+   sticking so phones scroll naturally, and the key collapses to one column. */
+@media (max-width: 959px) {
+  .lg-scene-wrap { position: static; }
+  .lg-key { grid-template-columns: 1fr; }
+  .lg-intro { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lg-el, .lg-pin, .lg-k { transition: none; }
+}

@@ -2441,6 +2441,215 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
+     MODAL: Scheduling board legend (GanttLegend, scheduling/gantt-legend.mts)
+     A static miniature of the board drawn with the board's own tokens
+     (styles.css "GANTT BOARD LEGEND"). Geometry rides on custom properties:
+     --s/--e are hours from "yesterday 22:00" in a 32-hour scene, --d days in
+     the 14-day minimap, --x/--y place the pins, --l/--t/--w/--h the swatch
+     pieces. No inline handlers: GanttLegend.init() wires the ✕, Close, the
+     pins (hover/focus preview, click to stick) and the key rows.
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-gantt-legend" hidden>
+  <div class="modal lg-modal">
+    <header class="modal-head">
+      <div class="lg-head-text">
+        <h3 data-i18n="legend.title">Reading the scheduling board</h3>
+        <p class="lg-intro" data-i18n="legend.intro">Hover or tap a numbered pin to see what it marks. The key below lists every symbol.</p>
+      </div>
+      <button class="icon-btn sm" id="btn-gantt-legend-close" type="button" aria-label="Close">✕</button>
+    </header>
+    <div class="modal-body">
+      <section class="lg-scene-wrap">
+        <div class="lg-scene" role="group" aria-labelledby="lg-scene-title">
+          <h4 id="lg-scene-title" class="lg-sr" data-i18n="legend.scene_title">Sample planning view</h4>
+          <div class="lg-board-scroll">
+            <div class="lg-board" aria-hidden="true">
+              <!-- Timeline viewer (minimap): 14 days, today = day 3 -->
+              <div class="lg-nav">
+                <div class="lg-nav-d lg-nav-closed lg-el" data-key="nav_closed" style="--s:5;--e:7"></div>
+                <div class="lg-nav-d lg-nav-closed lg-el" data-key="nav_closed" style="--s:12;--e:14"></div>
+                <div class="lg-nav-d lg-nav-err lg-el" data-key="nav_alert" style="--s:3;--e:4"></div>
+                <div class="lg-nav-d lg-nav-warn lg-el" data-key="nav_alert" style="--s:8;--e:9"></div>
+                <div class="lg-nav-d lg-nav-err lg-el" data-key="nav_alert" style="--s:10;--e:11"></div>
+                <div class="lg-nav-d lg-nav-blk row lg-el" data-key="nav_blackout" style="--r:2;--s:3.52;--e:3.667"></div>
+                <div class="lg-nav-d lg-nav-blk lg-el" data-key="nav_blackout" style="--s:10.15;--e:10.5"></div>
+                <div class="lg-nav-d lg-nav-bar firmed lg-el" data-key="nav_bars" style="--r:0;--s:1.25;--e:1.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:1.55;--e:1.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:2.25;--e:2.45"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:2.5;--e:2.9"></div><div class="lg-nav-d lg-nav-bar firmed lg-el" data-key="nav_bars" style="--r:0;--s:3.25;--e:3.417"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:3.458;--e:3.69"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:3.708;--e:3.917"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:4.25;--e:4.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:4.6;--e:4.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:7.3;--e:7.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:8.25;--e:8.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:9.3;--e:9.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:9.55;--e:9.9"></div><div class="lg-nav-d lg-nav-bar conflict lg-el" data-key="nav_bars" style="--r:0;--s:10.3;--e:10.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:0;--s:11.25;--e:11.6"></div>
+                <div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:1.3;--e:1.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:2.3;--e:2.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:2.7;--e:2.95"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:3.23;--e:3.354"></div><div class="lg-nav-d lg-nav-bar conflict lg-el" data-key="nav_bars" style="--r:1;--s:3.52;--e:3.79"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:3.81;--e:3.917"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:4.3;--e:4.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:7.25;--e:7.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:8.3;--e:8.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:9.25;--e:9.6"></div><div class="lg-nav-d lg-nav-bar conflict lg-el" data-key="nav_bars" style="--r:1;--s:10.25;--e:10.45"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:1;--s:11.3;--e:11.8"></div>
+                <div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:1.25;--e:1.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:1.7;--e:1.95"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:2.25;--e:2.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:3.25;--e:3.375"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:3.396;--e:3.52"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:3.667;--e:3.854"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:4.25;--e:4.7"></div><div class="lg-nav-d lg-nav-bar firmed lg-el" data-key="nav_bars" style="--r:2;--s:7.3;--e:7.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:8.25;--e:8.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:9.3;--e:9.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:10.6;--e:10.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:2;--s:11.25;--e:11.5"></div>
+                <div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:1.3;--e:1.55"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:1.6;--e:1.95"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:2.3;--e:2.9"></div><div class="lg-nav-d lg-nav-bar firmed lg-el" data-key="nav_bars" style="--r:3;--s:3.3;--e:3.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:3.65;--e:3.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:4.3;--e:4.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:4.55;--e:4.85"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:7.3;--e:7.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:7.6;--e:7.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:8.3;--e:8.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:9.25;--e:9.45"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:9.5;--e:9.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:10.3;--e:10.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:3;--s:11.3;--e:11.7"></div>
+                <div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:1.25;--e:1.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:2.25;--e:2.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:2.6;--e:2.95"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:3.3;--e:3.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:3.55;--e:3.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:4.25;--e:4.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:7.25;--e:7.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:8.25;--e:8.45"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:8.5;--e:8.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:9.3;--e:9.8"></div><div class="lg-nav-d lg-nav-bar conflict lg-el" data-key="nav_bars" style="--r:4;--s:10.25;--e:10.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:10.55;--e:10.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:4;--s:11.25;--e:11.6"></div>
+                <div class="lg-nav-d lg-nav-bar firmed lg-el" data-key="nav_bars" style="--r:5;--s:1.3;--e:1.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:1.65;--e:1.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:2.3;--e:2.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:3.25;--e:3.45"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:3.5;--e:3.8"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:4.3;--e:4.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:7.3;--e:7.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:8.3;--e:8.8"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:9.3;--e:9.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:10.3;--e:10.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:5;--s:11.3;--e:11.5"></div>
+                <div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:1.25;--e:1.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:1.55;--e:1.95"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:2.25;--e:2.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:2.65;--e:2.95"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:3.3;--e:3.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:3.75;--e:3.95"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:4.25;--e:4.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:7.25;--e:7.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:8.25;--e:8.6"></div><div class="lg-nav-d lg-nav-bar firmed lg-el" data-key="nav_bars" style="--r:6;--s:9.25;--e:9.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:10.6;--e:10.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:6;--s:11.25;--e:11.8"></div>
+                <div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:1.3;--e:1.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:2.3;--e:2.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:3.25;--e:3.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:3.65;--e:3.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:4.3;--e:4.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:7.3;--e:7.5"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:7.55;--e:7.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:8.3;--e:8.7"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:9.3;--e:9.6"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:10.25;--e:10.45"></div><div class="lg-nav-d lg-nav-bar conflict lg-el" data-key="nav_bars" style="--r:7;--s:10.5;--e:10.9"></div><div class="lg-nav-d lg-nav-bar lg-el" data-key="nav_bars" style="--r:7;--s:11.3;--e:11.6"></div>
+                <div class="lg-nav-div" style="--s:1"></div><div class="lg-nav-div" style="--s:2"></div><div class="lg-nav-div" style="--s:3"></div><div class="lg-nav-div" style="--s:4"></div><div class="lg-nav-div" style="--s:5"></div><div class="lg-nav-div" style="--s:6"></div><div class="lg-nav-div" style="--s:7"></div><div class="lg-nav-div" style="--s:8"></div><div class="lg-nav-div" style="--s:9"></div><div class="lg-nav-div" style="--s:10"></div><div class="lg-nav-div" style="--s:11"></div><div class="lg-nav-div" style="--s:12"></div><div class="lg-nav-div" style="--s:13"></div>
+                <div class="lg-nav-scrim"></div>
+                <span class="lg-nav-lbl" style="--s:1">16</span><span class="lg-nav-lbl" style="--s:3">18</span><span class="lg-nav-lbl" style="--s:5">20</span><span class="lg-nav-lbl" style="--s:7">22</span><span class="lg-nav-lbl" style="--s:9">24</span><span class="lg-nav-lbl" style="--s:11">26</span><span class="lg-nav-lbl" style="--s:13">28</span>
+                <div class="lg-nav-now lg-el" data-key="nav_now" style="--s:3.396"></div>
+                <div class="lg-nav-shade l lg-el" data-key="nav_viewport" style="--e:2.917"></div>
+                <div class="lg-nav-shade r lg-el" data-key="nav_viewport" style="--s:4.25"></div>
+                <div class="lg-nav-view lg-el" data-key="nav_viewport" style="--s:2.917;--e:4.25"></div>
+              </div>
+              <!-- Time axis: yesterday 22:00 → tomorrow 06:00 -->
+              <div class="lg-axis">
+                <div class="lg-axis-corner"></div>
+                <div class="lg-axis-tl">
+                  <span class="lg-day" style="--s:0;--e:2" data-i18n="legend.day_yesterday">Yesterday</span>
+                  <span class="lg-day" style="--s:2;--e:26" data-i18n="legend.day_today">Today</span>
+                  <span class="lg-day" style="--s:26;--e:32" data-i18n="legend.day_tomorrow">Tomorrow</span>
+                  <span class="lg-tick major" style="--s:2">00:00</span>
+                  <span class="lg-tick" style="--s:6">04:00</span>
+                  <span class="lg-tick" style="--s:10">08:00</span>
+                  <span class="lg-tick" style="--s:14">12:00</span>
+                  <span class="lg-tick" style="--s:18">16:00</span>
+                  <span class="lg-tick" style="--s:22">20:00</span>
+                  <span class="lg-tick major" style="--s:26">00:00</span>
+                  <span class="lg-tick" style="--s:30">04:00</span>
+                </div>
+              </div>
+              <div class="lg-main">
+                <div class="lg-rail">
+                  <div class="lg-rail-row">M-01</div>
+                  <div class="lg-rail-row">M-02</div>
+                  <div class="lg-rail-row">M-03</div>
+                </div>
+                <div class="lg-tl">
+                  <div class="lg-gridline lg-el" data-key="gridline" style="--s:2"></div>
+                  <div class="lg-gridline lg-el" data-key="gridline" style="--s:26"></div>
+                  <div class="lg-zone lg-nonworking lg-el" data-key="nonworking" style="--s:0;--e:8"></div>
+                  <div class="lg-zone lg-nonworking lg-el" data-key="nonworking" style="--s:24;--e:32"></div>
+                  <div class="lg-zone lg-past lg-el" data-key="past" style="--s:0;--e:11.5"></div>
+                  <div class="lg-zone lg-alert-horizon lg-el" data-key="alert" style="--s:11.5;--e:25.5"></div>
+                  <div class="lg-zone lg-frozen-horizon lg-el" data-key="frozen" style="--s:11.5;--e:16"></div>
+                  <div class="lg-rows">
+                    <div class="lg-row">
+                      <div class="lg-bar lg-order-firmed lg-el" data-key="firmed" style="--s:8;--e:12"><span>🔒 PO 4482</span></div>
+                      <div class="lg-setup lg-v-setup lg-el" data-key="setup" style="--s:12;--e:13">60m</div>
+                      <div class="lg-bar lg-order-standard lg-selected lg-el" data-key="selected" style="--s:13;--e:18.5"><span>PO 4490</span></div>
+                      <div class="lg-bar lg-order-standard lg-el" data-key="standard" style="--s:19;--e:24"><span>PO 4496</span></div>
+                    </div>
+                    <div class="lg-row">
+                      <div class="lg-cell lg-alertcell-err lg-el" data-key="alertcell_err" style="--s:2;--e:26"></div>
+                      <div class="lg-bar lg-order-standard lg-el" data-key="standard" style="--s:7.5;--e:10.5"><span>PO 3310</span></div>
+                      <div class="lg-bar lg-order-standard lg-conflict lg-el" data-key="conflict" style="--s:14.5;--e:21"><span>PO 3327</span></div>
+                      <div class="lg-bar lg-order-standard lg-el" data-key="standard" style="--s:21.5;--e:24"><span>PO 3334</span></div>
+                    </div>
+                    <div class="lg-row">
+                      <div class="lg-bar lg-order-standard lg-el" data-key="standard" style="--s:8;--e:11"><span>PO 2198</span></div>
+                      <div class="lg-bar lg-order-standard lg-el" data-key="standard" style="--s:11.5;--e:14.5"><span>PO 2205</span></div>
+                      <div class="lg-blackout lg-v-blackout lg-el" data-key="blackout" style="--s:14.5;--e:18">✕ <span data-i18n="legend.scene_blackout_reason">Maintenance</span></div>
+                      <div class="lg-bar lg-order-standard lg-el" data-key="standard" style="--s:18;--e:22.5"><span>PO 2214</span></div>
+                    </div>
+                  </div>
+                  <svg class="lg-dep lg-el" data-key="dep_hl" style="--s:10.5;--e:13" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M0 100 C62 100, 38 0, 100 0"/></svg>
+                  <svg class="lg-dep-head lg-el" data-key="dep_hl" style="--e:13" viewBox="0 0 8 8"><polygon points="0,0 8,4 0,8"/></svg>
+                  <div class="lg-now lg-el" data-key="now" style="--s:11.5"></div>
+                  <div class="lg-vis lg-el" data-key="visibility" style="--s:27.75"><span class="lg-vis-tag" data-i18n="ui.visibility_horizon_title">Visibility Horizon</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Pins: numbered in key-list order; --x hours / --d days, --y px from the board top -->
+          <div class="lg-pins">
+            <button type="button" class="lg-pin" data-key="standard" style="--x:23.6;--y:97" aria-labelledby="lg-t-standard" aria-describedby="lg-d-standard">1</button>
+            <button type="button" class="lg-pin" data-key="firmed" style="--x:8.4;--y:97" aria-labelledby="lg-t-firmed" aria-describedby="lg-d-firmed">2</button>
+            <button type="button" class="lg-pin" data-key="selected" style="--x:18.1;--y:97" aria-labelledby="lg-t-selected" aria-describedby="lg-d-selected">3</button>
+            <button type="button" class="lg-pin" data-key="conflict" style="--x:14.9;--y:129" aria-labelledby="lg-t-conflict" aria-describedby="lg-d-conflict">4</button>
+            <button type="button" class="lg-pin" data-key="setup" style="--x:12.5;--y:97" aria-labelledby="lg-t-setup" aria-describedby="lg-d-setup">5</button>
+            <button type="button" class="lg-pin" data-key="past" style="--x:1.6;--y:104" aria-labelledby="lg-t-past" aria-describedby="lg-d-past">6</button>
+            <button type="button" class="lg-pin" data-key="nonworking" style="--x:30.3;--y:170" aria-labelledby="lg-t-nonworking" aria-describedby="lg-d-nonworking">7</button>
+            <button type="button" class="lg-pin" data-key="blackout" style="--x:17.4;--y:184" aria-labelledby="lg-t-blackout" aria-describedby="lg-d-blackout">8</button>
+            <button type="button" class="lg-pin" data-key="frozen" style="--x:16;--y:154" aria-labelledby="lg-t-frozen" aria-describedby="lg-d-frozen">9</button>
+            <button type="button" class="lg-pin" data-key="alert" style="--x:25.5;--y:149" aria-labelledby="lg-t-alert" aria-describedby="lg-d-alert">10</button>
+            <button type="button" class="lg-pin" data-key="alertcell_err" style="--x:2.6;--y:128" aria-labelledby="lg-t-alertcell_err" aria-describedby="lg-d-alertcell_err">11</button>
+            <button type="button" class="lg-pin" data-key="now" style="--x:11.5;--y:188" aria-labelledby="lg-t-now" aria-describedby="lg-d-now">12</button>
+            <button type="button" class="lg-pin" data-key="visibility" style="--x:27.75;--y:182" aria-labelledby="lg-t-visibility" aria-describedby="lg-d-visibility">13</button>
+            <button type="button" class="lg-pin" data-key="dep_hl" style="--x:10.6;--y:146" aria-labelledby="lg-t-dep_hl" aria-describedby="lg-d-dep_hl">14</button>
+            <button type="button" class="lg-pin in-nav" data-key="nav_viewport" style="--d:4.25;--y:4" aria-labelledby="lg-t-nav_viewport" aria-describedby="lg-d-nav_viewport">15</button>
+            <button type="button" class="lg-pin in-nav" data-key="nav_alert" style="--d:10.5;--y:47" aria-labelledby="lg-t-nav_alert" aria-describedby="lg-d-nav_alert">16</button>
+            <button type="button" class="lg-pin in-nav" data-key="nav_closed" style="--d:6;--y:47" aria-labelledby="lg-t-nav_closed" aria-describedby="lg-d-nav_closed">17</button>
+          </div>
+          <div class="lg-callout" id="lg-callout" role="tooltip" hidden>
+            <div class="lg-callout-h"><span class="lg-k-num lg-callout-num"></span><span class="lg-callout-t"></span></div>
+            <p class="lg-callout-d"></p>
+          </div>
+        </div>
+      </section>
+
+      <div class="lg-key">
+        <section class="lg-group">
+          <h4 class="lg-group-h" data-i18n="legend.group_orders">Orders</h4>
+          <ul>
+            <li class="lg-k" data-key="standard"><span class="lg-k-num" aria-hidden="true">1</span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard"></i></span><div><div class="lg-k-t" id="lg-t-standard" data-i18n="legend.standard_t">Scheduled order</div><p class="lg-k-d" id="lg-d-standard" data-i18n="legend.standard_d">A production order on its machine, from planned start to planned finish. Drag it to move its finish.</p></div></li>
+            <li class="lg-k" data-key="firmed"><span class="lg-k-num" aria-hidden="true">2</span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-firmed">🔒</i></span><div><div class="lg-k-t" id="lg-t-firmed" data-i18n="legend.firmed_t">Firmed order</div><p class="lg-k-d" id="lg-d-firmed" data-i18n="legend.firmed_d">Locked by a planner. Optimize leaves it where it is; the lock marks it.</p></div></li>
+            <li class="lg-k" data-key="selected"><span class="lg-k-num" aria-hidden="true">3</span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-selected"></i></span><div><div class="lg-k-t" id="lg-t-selected" data-i18n="legend.selected_t">Selected order</div><p class="lg-k-d" id="lg-d-selected" data-i18n="legend.selected_d">The order you clicked. Its details open in the inspector and its links turn blue.</p></div></li>
+            <li class="lg-k" data-key="conflict"><span class="lg-k-num" aria-hidden="true">4</span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-conflict"></i></span><div><div class="lg-k-t" id="lg-t-conflict" data-i18n="legend.conflict_t">Order with a conflict</div><p class="lg-k-d" id="lg-d-conflict" data-i18n="legend.conflict_d">Overlaps another order, runs in closed time or finishes late. Open the alert for the reason.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-dimmed"></i></span><div><div class="lg-k-t" data-i18n="legend.dimmed_t">Filtered out</div><p class="lg-k-d" data-i18n="legend.dimmed_d">Faded orders do not match the current filter or search. They are still scheduled.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-split">2/3</i></span><div><div class="lg-k-t" data-i18n="legend.split_t">Split order</div><p class="lg-k-d" data-i18n="legend.split_d">One order made in several pieces around closed time. The counter says which piece this is.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-dist">A·3</i></span><div><div class="lg-k-t" data-i18n="legend.dist_t">Distributed sub-order</div><p class="lg-k-d" data-i18n="legend.dist_d">One of several machine-level pieces of a single SAP order. The letter names the piece, the number counts them.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-dist lg-sibling"></i></span><div><div class="lg-k-t" data-i18n="legend.dist_sibling_t">Related sub-orders</div><p class="lg-k-d" data-i18n="legend.dist_sibling_d">Select one piece and the other pieces of the same SAP order get a blue halo.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-ghost"></i></span><div><div class="lg-k-t" data-i18n="legend.ghost_t">Drag preview</div><p class="lg-k-d" data-i18n="legend.ghost_d">While you drag, a faded copy shows where the order will land.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-ghost-conflict"></i></span><div><div class="lg-k-t" data-i18n="legend.ghost_conflict_t">Drag preview with conflict</div><p class="lg-k-d" data-i18n="legend.ghost_conflict_d">The preview gets a red edge when dropping there would create a conflict.</p></div></li>
+          </ul>
+          <h4 class="lg-group-h" data-i18n="legend.group_setup">Changeovers</h4>
+          <ul>
+            <li class="lg-k" data-key="setup"><span class="lg-k-num" aria-hidden="true">5</span><span class="lg-sw setup" aria-hidden="true"><i class="lg-v-setup">60m</i></span><div><div class="lg-k-t" id="lg-t-setup" data-i18n="legend.setup_t">Changeover</div><p class="lg-k-d" id="lg-d-setup" data-i18n="legend.setup_d">Time to switch the machine from the previous order to this one. The label is its length in minutes.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw setup" aria-hidden="true"><i class="lg-v-setup lg-v-setup-conflict">60m</i></span><div><div class="lg-k-t" data-i18n="legend.setup_conflict_t">Changeover does not fit</div><p class="lg-k-d" data-i18n="legend.setup_conflict_d">The gap before the order is shorter than the changeover needs. Move the order or free up time.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw setup" aria-hidden="true"><i class="lg-v-setup lg-v-setup-missing">!</i></span><div><div class="lg-k-t" data-i18n="legend.setup_missing_t">Changeover unknown</div><p class="lg-k-d" data-i18n="legend.setup_missing_d">No changeover time is defined for this switch, so the order was placed without one. Add the setup data.</p></div></li>
+          </ul>
+        </section>
+        <section class="lg-group">
+          <h4 class="lg-group-h" data-i18n="legend.group_shading">Background shading</h4>
+          <ul>
+            <li class="lg-k" data-key="past"><span class="lg-k-num" aria-hidden="true">6</span><span class="lg-sw band" aria-hidden="true"><i class="lg-past"></i></span><div><div class="lg-k-t" id="lg-t-past" data-i18n="legend.past_t">Elapsed time</div><p class="lg-k-d" id="lg-d-past" data-i18n="legend.past_d">Everything left of the Now line has already happened. Orders here are not rescheduled.</p></div></li>
+            <li class="lg-k" data-key="nonworking"><span class="lg-k-num" aria-hidden="true">7</span><span class="lg-sw band" aria-hidden="true"><i class="lg-nonworking"></i></span><div><div class="lg-k-t" id="lg-t-nonworking" data-i18n="legend.nonworking_t">Closed time</div><p class="lg-k-d" id="lg-d-nonworking" data-i18n="legend.nonworking_d">Hours the plant calendar is closed: nights, weekends, holidays. Orders are not placed here.</p></div></li>
+            <li class="lg-k" data-key="blackout"><span class="lg-k-num" aria-hidden="true">8</span><span class="lg-sw blackout" aria-hidden="true"><i class="lg-v-blackout">✕</i></span><div><div class="lg-k-t" id="lg-t-blackout" data-i18n="legend.blackout_t">Blackout</div><p class="lg-k-d" id="lg-d-blackout" data-i18n="legend.blackout_d">A planned stop on one machine or the whole plant, with its reason. Nothing runs here.</p></div></li>
+            <li class="lg-k" data-key="frozen"><span class="lg-k-num" aria-hidden="true">9</span><span class="lg-sw edge" aria-hidden="true"><i class="lg-frozen-horizon"></i></span><div><div class="lg-k-t" id="lg-t-frozen" data-i18n="legend.frozen_t">Frozen horizon</div><p class="lg-k-d" id="lg-d-frozen" data-i18n="legend.frozen_d">The near-term window Optimize never touches, ending at the dark green line. You can still drag orders here by hand.</p></div></li>
+            <li class="lg-k" data-key="alert"><span class="lg-k-num" aria-hidden="true">10</span><span class="lg-sw edge" aria-hidden="true"><i class="lg-alert-horizon"></i></span><div><div class="lg-k-t" id="lg-t-alert" data-i18n="legend.alert_t">Alert horizon</div><p class="lg-k-d" id="lg-d-alert" data-i18n="legend.alert_d">Alerts are raised only for orders up to this line. Beyond it the schedule is shown but not yet checked.</p></div></li>
+            <li class="lg-k" data-key="alertcell_err"><span class="lg-k-num" aria-hidden="true">11</span><span class="lg-sw band" aria-hidden="true"><i class="lg-alertcell-err"></i></span><div><div class="lg-k-t" id="lg-t-alertcell_err" data-i18n="legend.alertcell_err_t">Day with a conflict</div><p class="lg-k-d" id="lg-d-alertcell_err" data-i18n="legend.alertcell_err_d">A red day cell: at least one order on this machine has a conflict that day. Click the cell to see them.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw band" aria-hidden="true"><i class="lg-alertcell-warn"></i></span><div><div class="lg-k-t" data-i18n="legend.alertcell_warn_t">Day with a warning</div><p class="lg-k-d" data-i18n="legend.alertcell_warn_d">An amber day cell: something on this machine needs a look that day, but nothing is blocked.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw band" aria-hidden="true"><i class="lg-alertcell-cal"></i></span><div><div class="lg-k-t" data-i18n="legend.alertcell_cal_t">Day with a calendar issue</div><p class="lg-k-d" data-i18n="legend.alertcell_cal_d">A blue day cell: an order on this machine sits in time the calendar has closed.</p></div></li>
+            <li class="lg-k" data-key="gridline"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw" aria-hidden="true"><span class="p g-day" style="--l:8;--t:0;--w:1;--h:14"></span><span class="p g-month" style="--l:17;--t:0;--w:1;--h:14"></span></span><div><div class="lg-k-t" data-i18n="legend.gridline_t">Day and month lines</div><p class="lg-k-d" data-i18n="legend.gridline_d">A thin line starts each day; a darker one starts each month.</p></div></li>
+          </ul>
+          <h4 class="lg-group-h" data-i18n="legend.group_machines">Machine list</h4>
+          <ul>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw dots" aria-hidden="true"><i><span class="line-dot lg-dot-a"></span><span class="line-dot lg-dot-b"></span><span class="line-dot lg-dot-c"></span></i></span><div><div class="lg-k-t" data-i18n="legend.line_color_t">Machine color</div><p class="lg-k-d" data-i18n="legend.line_color_d">Each machine has its own color in the machine list, the utilization view and the dashboard. It only identifies the machine.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="line-util ok" aria-hidden="true">72%</span><div><div class="lg-k-t" data-i18n="legend.util_ok_t">Utilization — comfortable</div><p class="lg-k-d" data-i18n="legend.util_ok_d">The pill in the machine list shows how full the machine is over the coming days. Green: room to spare.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="line-util warn" aria-hidden="true">91%</span><div><div class="lg-k-t" data-i18n="legend.util_warn_t">Utilization — high</div><p class="lg-k-d" data-i18n="legend.util_warn_d">Amber: the machine is close to its capacity.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="line-util err" aria-hidden="true">118%</span><div><div class="lg-k-t" data-i18n="legend.util_err_t">Utilization — overloaded</div><p class="lg-k-d" data-i18n="legend.util_err_d">Red: more work is scheduled than the machine can run.</p></div></li>
+          </ul>
+        </section>
+        <section class="lg-group">
+          <h4 class="lg-group-h" data-i18n="legend.group_markers">Lines &amp; markers</h4>
+          <ul>
+            <li class="lg-k" data-key="now"><span class="lg-k-num" aria-hidden="true">12</span><span class="lg-sw" aria-hidden="true"><span class="p n-now" style="--l:12;--t:0;--w:2;--h:14"></span></span><div><div class="lg-k-t" id="lg-t-now" data-i18n="legend.now_t">Now</div><p class="lg-k-d" id="lg-d-now" data-i18n="legend.now_d">The current time at the plant. It moves as you work.</p></div></li>
+            <li class="lg-k" data-key="visibility"><span class="lg-k-num" aria-hidden="true">13</span><span class="lg-sw" aria-hidden="true"><span class="p n-now" style="--l:8;--t:0;--w:2;--h:14"></span><span class="p v-tag" style="--l:8;--t:0;--w:11;--h:5"></span></span><div><div class="lg-k-t" id="lg-t-visibility" data-i18n="legend.visibility_t">Visibility horizon</div><p class="lg-k-d" id="lg-d-visibility" data-i18n="legend.visibility_d">Orders due beyond this line are not loaded onto the board. Widen the plant’s visibility window to see further.</p></div></li>
+            <li class="lg-k" data-key="dep_hl"><span class="lg-k-num" aria-hidden="true">14</span><span class="lg-sw dep hl" aria-hidden="true"><svg viewBox="0 0 26 14"><path d="M2 12 C13 12, 10 2, 20 2"/><polygon points="19,-1 25,2 19,5"/></svg></span><div><div class="lg-k-t" id="lg-t-dep_hl" data-i18n="legend.dep_hl_t">Link of the selected order</div><p class="lg-k-d" id="lg-d-dep_hl" data-i18n="legend.dep_hl_d">Arrows join an order to the one that must finish first. Links of the selected order are blue and thicker.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw dep ok" aria-hidden="true"><svg viewBox="0 0 26 14"><path d="M2 12 C13 12, 10 2, 20 2"/><polygon points="19,-1 25,2 19,5"/></svg></span><div><div class="lg-k-t" data-i18n="legend.dep_ok_t">Link — no idle time</div><p class="lg-k-d" data-i18n="legend.dep_ok_d">Green: the next order starts as soon as the first one finishes, or earlier.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw dep tight" aria-hidden="true"><svg viewBox="0 0 26 14"><path d="M2 12 C13 12, 10 2, 20 2"/><polygon points="19,-1 25,2 19,5"/></svg></span><div><div class="lg-k-t" data-i18n="legend.dep_tight_t">Link — tight</div><p class="lg-k-d" data-i18n="legend.dep_tight_d">Amber: the next order starts within 15 minutes of the first one finishing. Any slip delays it.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw dep gap" aria-hidden="true"><svg viewBox="0 0 26 14"><path d="M2 12 C13 12, 10 2, 20 2"/><polygon points="19,-1 25,2 19,5"/></svg></span><div><div class="lg-k-t" data-i18n="legend.dep_gap_t">Link — idle time</div><p class="lg-k-d" data-i18n="legend.dep_gap_d">Red: the machine waits between the two orders. The thickest red arrow is the longest chain.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw" aria-hidden="true"><span class="p m-box" style="--l:3;--t:2;--w:20;--h:10"></span><span class="p b-std" style="--l:5;--t:5;--w:6;--h:4"></span><span class="p b-std" style="--l:13;--t:5;--w:7;--h:4"></span></span><div><div class="lg-k-t" data-i18n="legend.marquee_t">Box selection</div><p class="lg-k-d" data-i18n="legend.marquee_d">Hold Ctrl and drag on empty board space to select every order inside the box.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw whatif" aria-hidden="true"></span><div><div class="lg-k-t" data-i18n="legend.whatif_t">What-If mode</div><p class="lg-k-d" data-i18n="legend.whatif_d">An amber band across the top of the window means you are in a What-If sandbox. Nothing is saved until you apply it.</p></div></li>
+          </ul>
+          <h4 class="lg-group-h" data-i18n="legend.group_nav">Timeline viewer</h4>
+          <ul>
+            <li class="lg-k" data-key="nav_viewport"><span class="lg-k-num" aria-hidden="true">15</span><span class="lg-sw nav" aria-hidden="true"><span class="p b-std" style="--l:2;--t:3;--w:5;--h:2"></span><span class="p b-std" style="--l:9;--t:3;--w:6;--h:2"></span><span class="p b-std" style="--l:20;--t:8;--w:4;--h:2"></span><span class="p v-scrim" style="--l:0;--t:0;--w:6;--h:14"></span><span class="p v-scrim" style="--l:18;--t:0;--w:8;--h:14"></span><span class="p v-box" style="--l:6;--t:0;--w:12;--h:14"></span></span><div><div class="lg-k-t" id="lg-t-nav_viewport" data-i18n="legend.nav_viewport_t">Viewport box</div><p class="lg-k-d" id="lg-d-nav_viewport" data-i18n="legend.nav_viewport_d">The strip above the board shows the whole loaded schedule; the box is the part you see. Drag it to pan, click to jump.</p></div></li>
+            <li class="lg-k" data-key="nav_bars"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw nav" aria-hidden="true"><span class="p b-std" style="--l:2;--t:2;--w:8;--h:3"></span><span class="p b-firmed" style="--l:12;--t:2;--w:7;--h:3"></span><span class="p b-conflict" style="--l:3;--t:6;--w:9;--h:3"></span><span class="p b-dim" style="--l:15;--t:6;--w:8;--h:3"></span><span class="p b-std" style="--l:6;--t:10;--w:10;--h:3"></span></span><div><div class="lg-k-t" data-i18n="legend.nav_bars_t">Orders</div><p class="lg-k-d" data-i18n="legend.nav_bars_d">Each thin bar is one order on its machine’s row: blue scheduled, red firmed, red-edged in conflict, grey when filtered out.</p></div></li>
+            <li class="lg-k" data-key="nav_alert"><span class="lg-k-num" aria-hidden="true">16</span><span class="lg-sw nav" aria-hidden="true"><span class="p c-err" style="--l:4;--t:0;--w:7;--h:14"></span><span class="p c-warn" style="--l:16;--t:0;--w:7;--h:14"></span><span class="p b-std" style="--l:5;--t:4;--w:5;--h:2"></span><span class="p b-std" style="--l:17;--t:8;--w:5;--h:2"></span></span><div><div class="lg-k-t" id="lg-t-nav_alert" data-i18n="legend.nav_alert_t">Days with alerts</div><p class="lg-k-d" id="lg-d-nav_alert" data-i18n="legend.nav_alert_d">A red column is a day with a conflict, an amber one a day with a warning.</p></div></li>
+            <li class="lg-k" data-key="nav_closed"><span class="lg-k-num" aria-hidden="true">17</span><span class="lg-sw nav" aria-hidden="true"><span class="p c-closed" style="--l:9;--t:0;--w:9;--h:14"></span><span class="p b-std" style="--l:2;--t:4;--w:5;--h:2"></span><span class="p b-std" style="--l:20;--t:9;--w:4;--h:2"></span></span><div><div class="lg-k-t" id="lg-t-nav_closed" data-i18n="legend.nav_closed_t">Closed days</div><p class="lg-k-d" id="lg-d-nav_closed" data-i18n="legend.nav_closed_d">Grey columns are days the plant is closed.</p></div></li>
+            <li class="lg-k" data-key="nav_blackout"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw nav" aria-hidden="true"><span class="p c-blk" style="--l:5;--t:4;--w:6;--h:4"></span><span class="p c-blk" style="--l:17;--t:0;--w:5;--h:14"></span><span class="p b-std" style="--l:2;--t:9;--w:6;--h:2"></span></span><div><div class="lg-k-t" data-i18n="legend.nav_blackout_t">Blackouts</div><p class="lg-k-d" data-i18n="legend.nav_blackout_d">Light red blocks: on one machine’s row, or across every row for a plant-wide stop.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw nav" aria-hidden="true"><span class="p h-all" style="--l:3;--t:4;--w:5;--h:10"></span><span class="p h-act" style="--l:3;--t:8;--w:5;--h:6"></span><span class="p h-all" style="--l:10;--t:2;--w:5;--h:12"></span><span class="p h-act" style="--l:10;--t:7;--w:5;--h:7"></span><span class="p h-all" style="--l:17;--t:6;--w:5;--h:8"></span><span class="p h-act" style="--l:17;--t:10;--w:5;--h:4"></span></span><div><div class="lg-k-t" data-i18n="legend.nav_hist_t">Load histogram</div><p class="lg-k-d" data-i18n="legend.nav_hist_d">With many machines the rows become a histogram. Bar height is how many orders run that day; the blue part is the machines you filtered to.</p></div></li>
+            <li class="lg-k" data-key="nav_now"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw nav" aria-hidden="true"><span class="p n-now" style="--l:13;--t:0;--w:1;--h:14"></span><span class="p b-std" style="--l:2;--t:4;--w:6;--h:2"></span><span class="p b-std" style="--l:16;--t:9;--w:6;--h:2"></span></span><div><div class="lg-k-t" data-i18n="legend.nav_now_t">Now</div><p class="lg-k-d" data-i18n="legend.nav_now_d">The thin blue line is the current time.</p></div></li>
+          </ul>
+        </section>
+      </div>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn" id="btn-gantt-legend-done" type="button" data-i18n="btn.close">Close</button>
+    </footer>
+  </div>
+</div>
+
+<!-- =========================================================
      MODAL: Plant blackout block editor
      ========================================================= -->
 <div class="modal-backdrop" id="modal-plant-block" hidden>
