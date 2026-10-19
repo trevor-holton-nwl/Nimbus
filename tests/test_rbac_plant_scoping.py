@@ -1030,3 +1030,80 @@ def test_get_tasks_keeps_null_machine_orders_without_links(scoped_client, pg):
         with pg._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM orders WHERE id = ANY(%s)", (ids,))
             conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# POST /plant-calendar/plant-blackouts -- planner-writable (was admin-only);
+# plant-scoped via backend/calendars/routes.py's _calendar_plant_guard. Line
+# blackouts, hours and periods stay admin, so only this route is covered here.
+# ---------------------------------------------------------------------------
+
+_BLACKOUT_BODY = {"upserts": [{"id": "ZZTEST_BLK_1", "start": "2026-12-24T00:00:00",
+                               "end": "2026-12-26T00:00:00", "reason": "Holiday"}], "deletes": []}
+
+
+@pytest.fixture
+def blackout_planner_client():
+    """A signed-in NON-admin whose scope is {PLANT_A}; require_admin is
+    deliberately NOT overridden, so the route succeeding proves it is no
+    longer admin-gated."""
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [PLANT_A]
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "planner@example.com"
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    try:
+        yield TestClient(brain.api)
+    finally:
+        brain.api.dependency_overrides.clear()
+
+
+def test_plant_blackouts_write_allows_a_non_admin_in_scope_caller(blackout_planner_client, monkeypatch):
+    import master_data as md
+    captured = {}
+
+    def fake_save(plant, upserts, deletes, user_email=None):
+        captured.update(plant=plant, upserts=upserts, deletes=deletes)
+        return {"plant": plant, "upserted": len(upserts), "deleted": len(deletes)}
+
+    monkeypatch.setattr(md, "save_plant_blackouts", fake_save)
+    response = blackout_planner_client.post("/plant-calendar/plant-blackouts",
+                                            json={"plant": PLANT_A, **_BLACKOUT_BODY})
+    assert response.status_code == 200
+    assert captured["plant"] == PLANT_A and len(captured["upserts"]) == 1
+
+
+def test_plant_blackouts_write_rejects_an_out_of_scope_plant(blackout_planner_client, monkeypatch):
+    import master_data as md
+    calls = []
+    monkeypatch.setattr(md, "save_plant_blackouts", lambda *a, **k: calls.append(1))
+    response = blackout_planner_client.post("/plant-calendar/plant-blackouts",
+                                            json={"plant": PLANT_B, **_BLACKOUT_BODY})
+    assert response.status_code == 403
+    assert calls == []
+
+
+def test_plant_blackouts_write_maps_blank_plant_to_400_not_500(blackout_planner_client, monkeypatch):
+    import master_data as md
+    calls = []
+    monkeypatch.setattr(md, "save_plant_blackouts", lambda *a, **k: calls.append(1))
+    response = blackout_planner_client.post("/plant-calendar/plant-blackouts",
+                                            json={"plant": "  ", **_BLACKOUT_BODY})
+    assert response.status_code == 400
+    assert calls == []
+
+
+def test_plant_blackouts_write_requires_authentication(monkeypatch):
+    import master_data as md
+    calls = []
+    monkeypatch.setattr(md, "save_plant_blackouts", lambda *a, **k: calls.append(1))
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=401, detail="Not signed in")
+    )
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [PLANT_A]
+    brain.api.dependency_overrides[brain.require_api_key] = lambda: None
+    try:
+        response = TestClient(brain.api).post("/plant-calendar/plant-blackouts",
+                                              json={"plant": PLANT_A, **_BLACKOUT_BODY})
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert response.status_code == 401
+    assert calls == []

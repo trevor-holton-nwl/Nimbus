@@ -11,9 +11,25 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 import master_data as md
 from backend.admin_ops.logbuffer import _set_admin_log_details
+from backend.security import auth
 from backend.security.auth import require_admin, require_api_key, require_authenticated
 
 router = APIRouter()
+
+
+def _calendar_plant_guard(plant: str, allowed_plants: list[str] | None) -> None:
+    """Plant-scope choke point for the planner-writable plant-blackouts route --
+    same shape as backend/distribution/routes.py's `_distribution_plant_guard`
+    and backend/setup/routes.py's `_setup_plant_guard`. Catch order matters:
+    `md._assert_plant_allowed` raises `PlantNotAllowed` for an out-of-scope
+    plant and plain `ValueError` for a blank one (checked first), so both must
+    be caught or a blank plant escapes as an unhandled 500."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/plant-calendar", dependencies=[Depends(require_authenticated)])
@@ -82,10 +98,15 @@ def plant_calendar_line_blackouts_post(request: Request, body: dict = Body(defau
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/plant-calendar/plant-blackouts", dependencies=[Depends(require_api_key), Depends(require_admin)])
-def plant_calendar_plant_blackouts_post(request: Request, body: dict = Body(default={})):
+@router.post("/plant-calendar/plant-blackouts",
+             dependencies=[Depends(require_api_key), Depends(require_authenticated)])
+def plant_calendar_plant_blackouts_post(request: Request, body: dict = Body(default={}),
+                                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Delta write of plant-level blackouts. Payload:
-    { plant, upserts:[{id, start, end, reason?}], deletes?:[id] }."""
+    { plant, upserts:[{id, start, end, reason?}], deletes?:[id] }.
+    Planner-writable (any signed-in user whose role_plants scope covers the
+    plant); line blackouts, hours and periods stay admin-only."""
+    _calendar_plant_guard(body.get("plant", ""), allowed_plants)
     try:
         result = md.save_plant_blackouts(
             plant=body.get("plant", ""),
