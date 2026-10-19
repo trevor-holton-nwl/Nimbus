@@ -133,8 +133,9 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
       - wc_code_shadowed_by_machine -- if a machine in this plant is named
         exactly like the code, it must be linked to it
         (machine.sap_workcenter = code, a 1:1 work center). An EMPTY link is
-        auto-filled in this same transaction (master_data's
-        `_autolink_same_named_machines`, 2026-10-19); the rule fires only when
+        auto-filled in this same transaction when this save CREATES the work center (master_data's
+        `_autolink_same_named_machines`, 2026-10-19; later edits never re-link, so a deliberate
+        clear sticks); the rule fires only when
         that machine is linked to another work center, the work center is an
         aggregate (distribute mode or other members), or the name exists in
         several subnetworks.
@@ -195,11 +196,15 @@ def save_workcenter(plant: str, wc: str, description, distribution_mode, default
                 review_required   = EXCLUDED.review_required,
                 distribute_tooled = EXCLUDED.distribute_tooled,
                 updated_at        = now()
+            RETURNING (xmax = 0)
             """,
             (plant, wc_clean, description_clean, mode, default_machine_clean, separation,
              review_required_clean, distribute_tooled_clean),
         )
-        auto_linked = _autolink_same_named_machines(cur, None, only=[(plant, wc_clean)])
+        created = bool(cur.fetchone()[0])
+        # Auto-link only when this save CREATED the work center: a planner's explicit clear of
+        # a same-named machine's link must stick on later edits of an existing work center.
+        auto_linked = _autolink_same_named_machines(cur, None, only=[(plant, wc_clean)]) if created else []
 
         # M = the machine named exactly like this code (a 1:1 work center), if any.
         # wc_code_shadowed_by_machine: M must be linked to this code, or the
