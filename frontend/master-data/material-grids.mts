@@ -345,6 +345,9 @@ function _mkState(): GridState {
   };
 }
 
+/** Quick-filter text requested through MaterialGrids.setQuickFilter before the grid was ready (applied in onGridReady). */
+const _pendingQuick: Partial<Record<GridId, string>> = {};
+
 const _state: Record<GridId, GridState> = {
   material: _mkState(),
   'material-plant': _mkState(),
@@ -815,6 +818,12 @@ function _createGrid(spec: GridSpec): void {
         });
       }
       if (st.rows.length) st.api.setGridOption('rowData', st.rows);
+      const pendingQuick = _pendingQuick[spec.id];
+      if (pendingQuick != null) {
+        delete _pendingQuick[spec.id];
+        if (quick) quick.value = pendingQuick;
+        try { st.api.setGridOption('quickFilterText', pendingQuick); } catch {}
+      }
       _rebuildAllFilterBars(spec);
     },
   };
@@ -1045,6 +1054,22 @@ export const MaterialGrids = {
       });
       if (activePane) MaterialGrids.render(activePane.id);
     }, 'MaterialGrids');
+  },
+
+  /**
+   * Set a grid's quick-filter text from code (the Alert Monitor's routing-gap deep link, after
+   * `App.gotoMasterSub('routing-pv')`). The box listener attaches only in onGridReady, so a grid that is not
+   * built yet keeps the text and applies it there; a ready grid takes it at once. The box shows the text either way.
+   */
+  setQuickFilter(which: GridId, text: string): void {
+    const spec = SPECS[which];
+    if (!spec) return;
+    const quick = document.getElementById(spec.quickId) as HTMLInputElement | null;
+    if (quick) quick.value = text;
+    const api = _state[which].api;
+    if (!api) { _pendingQuick[which] = text; return; }
+    delete _pendingQuick[which];
+    try { api.setGridOption('quickFilterText', text); } catch {}
   },
 
   render(which: GridId): void {

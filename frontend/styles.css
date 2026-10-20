@@ -7554,6 +7554,50 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-empty-match { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 32px 18px; }
 .am-empty-title { font-size: 13px; font-weight: 600; color: var(--fg); }
 
+/* ---- High-leverage fixes (Task 13). Cards are panels with hairlines; the points are the headline, the score second.
+        Severity is not stripe-coloured: the only colour is the +/- delta. Tokens only. ---- */
+.am-lev-panel { margin: 8px 0 16px; }
+.am-lev-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 0 8px; }
+.am-lev-hint { font-size: 12px; color: var(--fg-mute); }
+.am-lev-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.am-lev-card {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-elev);
+}
+.am-lev-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.am-lev-fam {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-mute);
+}
+.am-lev-title { font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--fg); overflow-wrap: anywhere; }
+.am-lev-mono { font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute); }
+.am-lev-points { font-family: var(--font-mono); font-size: 18px; font-weight: 600; line-height: 1.2; color: var(--fg); }
+.am-lev-score { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--fg); }
+.am-lev-val { font-family: var(--font-mono); font-weight: 600; }
+.am-lev-note { font-size: 11.5px; color: var(--fg-mute); }
+.am-lev-delta { font-family: var(--font-mono); font-weight: 600; }
+.am-lev-up { color: var(--ok); }
+.am-lev-down { color: var(--err); }
+.am-lev-method { margin-left: auto; }
+.am-lev-room, .am-lev-remaining { font-size: 12px; color: var(--fg-mute); }
+.am-lev-room-none, .am-lev-remaining { color: var(--fg); font-weight: 600; }
+.am-lev-minutes { display: flex; }
+.am-lev-needs { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--fg); }
+.am-lev-min-input {
+  width: 120px; height: 28px; padding: 3px 8px; font-family: var(--font-mono); font-size: 12px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg); color: var(--fg);
+}
+.am-lev-min-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.am-lev-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 6px; }
+.am-lev-adm { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.8; }
+.am-lev-skeleton, .am-lev-empty {
+  padding: 14px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-elev);
+  font-size: 12.5px; color: var(--fg-mute);
+}
+.am-lev-skeleton { animation: am-lev-pulse 1.2s ease-in-out infinite; }
+@keyframes am-lev-pulse { 50% { opacity: 0.55; } }
+@media (prefers-reduced-motion: reduce) { .am-lev-skeleton { animation: none; } }
+
 /* ---- Alert groups, rows, diagnose (Task 12). Tokens only, hairlines, no side stripes. ---- */
 .am-group { margin: 0 0 12px; }
 .am-ghead {

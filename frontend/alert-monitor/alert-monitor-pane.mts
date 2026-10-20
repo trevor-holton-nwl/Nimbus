@@ -16,7 +16,7 @@
 
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
-import { Util, Config, Modal, Toast, VirtualList } from '../platform/foundation.mjs';
+import { Util, Config, Modal, Toast, VirtualList, ErrorLog } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
 import type { AlertAck, AlertProfile, NimbusTask } from '../platform/types.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
@@ -26,15 +26,18 @@ import {
   ALL_ALERTS_PROFILE_ID, resolveActiveProfileId, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
 } from '../insights/alert-profiles.mjs';
 import type { AlertGroup, GroupContext } from '../insights/alert-profiles.mjs';
-import { Alerts } from '../insights/services.mjs';
+import { Alerts, Compute, Utilization, buildPlantSnapshot } from '../insights/services.mjs';
+import { groupLeverage, analyzeLeverage, replayWithMinutes } from '../insights/alert-leverage.mjs';
+import type { LeverageItem, LeverageInput, LeverageRunner } from '../insights/alert-leverage.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import {
   MONITOR_GROUP_BYS, MONITOR_SORTS, MONITOR_CATEGORIES, GROUP_ROW_CAP, ROW_H, DIAG_H,
   kpiSummary, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowHtml, colsHtml, diagnoseHtml, groupHeadHtml, groupTotals, groupLabel,
   relativeDaysText, formatPairKey, fmtNum,
+  levSectionHtml, levTitle, levSummaryText, levPairsForReview,
 } from './alert-monitor-model.mjs';
-import type { MonitorView, EmptyKind, KpiSummary, RowView } from './alert-monitor-model.mjs';
+import type { MonitorView, EmptyKind, KpiSummary, RowView, LevCtx } from './alert-monitor-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -47,6 +50,8 @@ interface PaintState {
   view: MonitorView;
   defaultId: string;
   showAcked: boolean;
+  /** Every alert of the plant's lines (profile and acknowledgement ignored) — what the leverage panel works on (D10). */
+  scoped: NimbusAlert[];
   /** What the profile matched (acknowledged hidden unless asked) — the KPI strip counts these. */
   visible: NimbusAlert[];
   /** What the groups list: `visible`, or the focus set (which bypasses the profile). */
@@ -66,7 +71,9 @@ interface PaintState {
 interface AmNimbus {
   AlertsUIAdapter?: { focus?(id: string): void; showForCell?(line: string, dayKey: string): void; headlineFor?(type: string): string };
   Table?: { _openOverrideModalForId?(id: string): void; _onPoMatApply?(): void };
-  App?: { gotoGanttSub?(sub: string): void };
+  App?: { gotoGanttSub?(sub: string): void; goto?(tab: string): void; gotoMasterSub?(sub: string): void };
+  Timeline?: { gotoLineDay?(line: string, dateStr: string): void };
+  OptimizerPreview?: { active?: boolean };
   Inspector?: { _formatRuntimeBasis?(task: NimbusTask): string };
 }
 const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NIMBUS ?? {};
@@ -296,6 +303,8 @@ function _onClick(e: Event): void {
   const target = e.target as HTMLElement | null;
   const seg = target?.closest?.('[data-am-group]') as HTMLElement | null;
   if (seg?.dataset.amGroup) { _persistView({ groupBy: seg.dataset.amGroup as MonitorView['groupBy'] }); return; }
+  const lev = target?.closest?.('[data-lev-action]') as HTMLElement | null;
+  if (lev?.dataset.levAction) { _onLevAction(lev.dataset.levAction, lev.dataset.levKey ?? ''); return; }
   const btn = target?.closest?.('[data-am-action]') as HTMLElement | null;
   switch (btn?.dataset.amAction) {
     case 'make-default': _makeDefault(); break;
@@ -316,6 +325,7 @@ function _onClick(e: Event): void {
     case 'group-dismiss': _dismissGroup(btn!.dataset.groupKey ?? ''); break;
     case 'group-open-table': _openGroupInTable(btn!.dataset.groupKey ?? ''); break;
     case 'clear-focus': AlertMonitorPane.clearFocus(); break;
+    case 'lev-show-more': _levShowAll = true; _paint(); break;
     default: {
       const act = target?.closest?.('[data-alert-action]') as HTMLElement | null;
       if (act?.dataset.alertAction) _onAlertAction(act);
@@ -347,9 +357,13 @@ function _dismissGroup(key: string): void {
  */
 function _openGroupInTable(key: string): void {
   const g = _groupsByKey.get(key);
-  if (!g) return;
+  if (g) _openOrdersInTable(g.orderIds);
+}
+
+/** Shared by the group heads and the leverage cards: filter the Orders table to these order ids. */
+function _openOrdersInTable(orderIds: Iterable<string>): void {
   const nums: string[] = [];
-  for (const id of g.orderIds) {
+  for (const id of orderIds) {
     const task = Store.tasks[id];
     const no = task ? String(task.ORDER ?? task.PRODUCTION_ORDER ?? '').trim() : '';
     if (no && !nums.includes(no)) nums.push(no);
@@ -402,6 +416,8 @@ function _onAlertAction(trigger: HTMLElement): void {
 
 function _onChange(e: Event): void {
   const target = e.target as HTMLInputElement | null;
+  const mins = target?.closest?.('[data-lev-minutes]') as HTMLInputElement | null;
+  if (mins?.dataset.levMinutes) { void _levMinutesEntered(mins.dataset.levMinutes, String(mins.value ?? '')); return; }
   const tog = target?.closest?.('[data-am-toggle]') as HTMLInputElement | null;
   if (tog) {
     if (tog.dataset.amToggle === 'highlight') Session.setPref('alertProfileGanttHighlight', !!tog.checked);
@@ -445,7 +461,7 @@ function _gatherState(): PaintState {
   return {
     plant, m, profiles, profilesLoaded: profilesRaw != null, view,
     defaultId: plant ? _defaultProfileId(plant, profiles) : ALL_ALERTS_PROFILE_ID,
-    showAcked, visible, listed, focusOutside, scopedCount: scoped.length,
+    showAcked, scoped, visible, listed, focusOutside, scopedCount: scoped.length,
     kpi: kpiSummary(visible, inHorizon, hz, score, inConfWindow),
     // A focus set always lists something or says nothing is left; the profile empty states don't apply to it.
     empty: focus
@@ -539,8 +555,328 @@ function _emptyHtml(s: PaintState): string {
   }
 }
 
-// TODO(Task 13): paint the high-leverage fixes panel into #am-leverage.
-function _renderLeverage(_s: PaintState): void { /* filled by Task 13 */ }
+/* ---------------------------------------------------------------------------
+   High-leverage fixes (#am-leverage) — two phases, one in flight, stale results dropped.
+
+   Phase 1: `group` (sync) paints every card with its removal number at once. Phase 2: `analyze` replays the
+   setup-pair cards through the worker and the cards update in place. A result is kept only when the Store
+   revision it was computed against is still current; the replay is skipped while What-If or an optimizer
+   preview is open (their Store state is not the plan). Runs only while the tab is active.
+   ------------------------------------------------------------------------- */
+const _LEV_DEBOUNCE_MS = 400;
+const _LEV_MAX_STALE_RETRIES = 3;
+
+interface LevDeps {
+  buildInput(s: PaintState): LeverageInput;
+  group: typeof groupLeverage;
+  analyze: typeof analyzeLeverage;
+  replay: typeof replayWithMinutes;
+  /** True when the plant's alert penalty is at its cap (removing alerts then cannot move the score). */
+  capped(input: LeverageInput): boolean;
+}
+
+/** One place the engine's inputs are assembled. Tests replace these members; production never does. */
+function _levBuildInput(s: PaintState): LeverageInput {
+  const plant = s.plant as string;
+  const days = Math.max(1, Math.ceil(s.horizonMinutes / 1440));
+  return {
+    plant,
+    plantNow: s.horizonStart,
+    horizonMinutes: s.horizonMinutes,
+    alerts: s.scoped,
+    tasksById: Store.tasks,
+    lines: new Set(Store.linesForSelectedPlant()),
+    setupSnapshot: Store.setupSnapshot,
+    masterPlant: Store.masterPlant(plant),
+    snapshotBase: buildPlantSnapshot(plant),
+    // The replay scores over exactly this window: [start of the plant's day, +ceil(horizon/1440) days).
+    baselineMatrix: Utilization.computeMatrix(s.plantToday, days) as unknown as NimbusUtilizationMatrix,
+    dismissed: [...Alerts._dismissed],
+  };
+}
+
+function _levIsCapped(input: LeverageInput): boolean {
+  const core = globalThis.NimbusComputeCore;
+  if (!core) return false;
+  const r = core.scoreConfidence({
+    alerts: input.alerts as NimbusAlert[], matrix: input.baselineMatrix, horizonStart: input.plantNow, horizonMinutes: input.horizonMinutes,
+  });
+  return r.alertPenalty >= core.CONFIDENCE_WEIGHTS.alertCap;
+}
+
+const _levDeps: LevDeps = {
+  buildInput: _levBuildInput, group: groupLeverage, analyze: analyzeLeverage, replay: replayWithMinutes, capped: _levIsCapped,
+};
+
+const _levRunner: LeverageRunner = (base, variants) => Compute.leverageBatch(base, variants);
+
+let _levItems: LeverageItem[] = [];
+let _levInput: LeverageInput | null = null;
+let _levPlant: string | null = null;      // the plant the items belong to
+let _levHave = false;                     // a first pass has produced results for _levPlant
+let _levStale = false;                    // the tab was re-entered: refresh once
+let _levCapped = false;
+let _levShowAll = false;
+let _levInFlight = false;
+let _levRerun = false;
+let _levStaleDrops = 0;
+let _levFirstTimer: ReturnType<typeof setTimeout> | null = null;
+const _levTyped = new Map<string, number>();     // card key -> setup minutes the user entered
+const _levAttempted = new Set<string>();         // alert ids of cards whose fix was started from this page
+type SetupAdminLite = {
+  canReviewMissingPairs(plant: string): boolean;
+  missingPairsCsv(plant: string, pairs: ReturnType<typeof levPairsForReview>): string;
+  reviewMissingPairs(plant: string | null, pairs: ReturnType<typeof levPairsForReview>): Promise<boolean>;
+};
+let _setupAdmin: SetupAdminLite | null = null;
+let _setupAdminP: Promise<void> | null = null;
+
+function _levReset(plant: string | null): void {
+  _levItems = []; _levInput = null; _levPlant = plant; _levHave = false; _levShowAll = false;
+  _levCapped = false; _levStaleDrops = 0;
+  _levTyped.clear(); _levAttempted.clear();
+}
+
+/** SetupAdmin is imported lazily (no reverse edge exists, but it is a heavy module the pane rarely needs). */
+function _ensureSetupAdmin(): void {
+  if (_setupAdminP) return;
+  _setupAdminP = import('../setup/setup-admin.mjs').then(m => {
+    _setupAdmin = m.SetupAdmin as unknown as SetupAdminLite;
+    if (_active) _paint();
+  }, () => { /* the card falls back to "copy for the setup owner" */ });
+}
+
+function _levFieldLabel(fieldKey: string): string {
+  const key = `constraint.${fieldKey}`;
+  const v = t(key);
+  return v === key ? fieldKey : v;
+}
+
+function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
+  const remaining = _levAttempted.size ? item.alertIds.filter(id => _levAttempted.has(id)).length : 0;
+  return {
+    capped: _levCapped, remaining,
+    canReviewPairs: _setupAdmin?.canReviewMissingPairs(plant) === true,
+    isAdmin: Session.isAdmin(),
+    whatIf: Sandbox.active === true,
+    fieldLabel: _levFieldLabel,
+  };
+}
+
+function _renderLeverage(s: PaintState): void {
+  if (!s.plant || s.scopedCount === 0) {
+    _levReset(null);
+    _setHtml('am-leverage', '');
+    return;
+  }
+  if (_levPlant !== s.plant) _levReset(s.plant);
+  if (!_levHave || _levStale) { _levStale = false; _levScheduleFirst(); }
+  // A half-typed minutes box must survive an unrelated repaint.
+  if ((document.activeElement as HTMLElement | null)?.classList?.contains('am-lev-min-input')) return;
+  const plant = s.plant;
+  if (_levItems.some(i => i.family === 'setup-pair')) _ensureSetupAdmin();
+  _setHtml('am-leverage', levSectionHtml(_levItems, {
+    showAll: _levShowAll, computing: !_levHave, ctxFor: it => _levCtxFor(it, plant),
+  }, t));
+}
+
+function _levScheduleFirst(): void {
+  if (_levFirstTimer) return;
+  // Let the alert list paint first; grouping and the baseline matrix are the heavy part of this panel.
+  _levFirstTimer = setTimeout(() => { _levFirstTimer = null; void _levRun(); }, 0);
+}
+
+const _levDebounced = Util.debounce(() => { if (_active && _levHave) void _levRun(); }, _LEV_DEBOUNCE_MS);
+
+const _levSkipAnalysis = (): boolean => Sandbox.active === true || _nim().OptimizerPreview?.active === true;
+
+async function _levRun(): Promise<void> {
+  if (!_active) return;
+  if (_levInFlight) { _levRerun = true; return; }
+  const s = _gatherState();
+  if (!s.plant || s.scopedCount === 0 || s.m.plant !== s.plant) return;
+  const plant = s.plant;
+  const rev0 = Store.rev();
+  let input: LeverageInput | null = null;
+  let items: LeverageItem[] = [];
+  try {
+    input = _levDeps.buildInput(s);
+    items = _levDeps.group(input);
+    _levCapped = _levDeps.capped(input);
+  } catch (e) {
+    ErrorLog.warn('alert-monitor', 'leverage grouping failed', { error: String((e as Error)?.message || e) });
+    input = null; items = [];
+  }
+  if (!_active || Store.selectedPlant !== plant) return;
+  _levPlant = plant; _levInput = input; _levItems = items; _levHave = true;
+  const present = new Set(s.scoped.map(a => a.id));
+  for (const id of _levAttempted) if (!present.has(id)) _levAttempted.delete(id);
+  _paint();                                    // phase 1: removal numbers, at once
+  if (!input || _levSkipAnalysis()) return;
+  _levInFlight = true;
+  try {
+    let next = await _levDeps.analyze(input, _levRunner);
+    for (const [key, minutes] of _levTyped) {
+      const it = next.find(i => i.key === key);
+      if (it?.requiresMinutes) {
+        const done = await _levDeps.replay(input, it, minutes, _levRunner);
+        next = next.map(i => (i.key === key ? done : i));
+      }
+    }
+    if (!_active || Store.selectedPlant !== plant) return;
+    if (Store.rev() !== rev0) {                // the plan moved while this computed: drop it, look again
+      if (++_levStaleDrops <= _LEV_MAX_STALE_RETRIES) _levDebounced();
+      return;
+    }
+    _levStaleDrops = 0;
+    _levItems = next;
+    _paint();                                  // phase 2: setup-pair cards carry the replayed numbers
+  } catch (e) {
+    ErrorLog.warn('alert-monitor', 'leverage analysis failed', { error: String((e as Error)?.message || e) });
+  } finally {
+    _levInFlight = false;
+    if (_levRerun) { _levRerun = false; _levDebounced(); }
+  }
+}
+
+/** The minutes box of a `requiresMinutes` card: one replay for that card, shown as the exact score once it returns. */
+async function _levMinutesEntered(key: string, raw: string): Promise<void> {
+  const minutes = Number(raw);
+  if (raw.trim() === '' || !Number.isFinite(minutes) || minutes <= 0) return;
+  const item = _levItems.find(i => i.key === key);
+  const input = _levInput;
+  if (!item || !input) return;
+  _levTyped.set(key, minutes);
+  const rev0 = Store.rev();
+  try {
+    const next = await _levDeps.replay(input, item, minutes, _levRunner);
+    if (!_active || Store.rev() !== rev0) return;   // a newer analysis re-applies the typed minutes
+    _levItems = _levItems.map(i => (i.key === key ? next : i));
+    _paint();
+  } catch (e) {
+    ErrorLog.warn('alert-monitor', 'leverage replay failed', { error: String((e as Error)?.message || e) });
+  }
+}
+
+function _levShowAlerts(item: LeverageItem): void {
+  const plant = Store.selectedPlant ?? '';
+  const title = levTitle(item, _levCtxFor(item, plant), t);
+  const byId = new Map(Store.alerts.map(a => [a.id, a]));
+  const taskIds = new Set<string>();
+  for (const id of item.alertIds) {
+    const a = byId.get(id);
+    if (a?.taskId) taskIds.add(String(a.taskId));
+    if (a?.peerId) taskIds.add(String(a.peerId));
+  }
+  AlertMonitorPane.setFocus(item.alertIds, title);
+  AlertProfileMatches.setFocusTaskIds(taskIds);   // the Gantt follows the focused card, not the profile
+  _el('am-groups')?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+}
+
+async function _copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    Toast.show(t('am.lev_copied'), 'success');
+  } catch {
+    Toast.show(t('toast.clipboard_denied'), 'error');
+  }
+}
+
+/** The alert of a calendar / optimize card to show a day for: the heaviest overload, else the heaviest alert. */
+function _levWorstAlert(item: LeverageItem, s: PaintState): NimbusAlert | null {
+  const byId = new Map(Store.alerts.map(a => [a.id, a]));
+  let best: NimbusAlert | null = null;
+  let bestKey = -1;
+  for (const id of item.alertIds) {
+    const a = byId.get(id);
+    if (!a?.line || !a.time) continue;
+    const key = impactPoints(a, s.horizonStart, s.horizonMinutes) + (a.type === 'overload' ? 1000 : 0);
+    if (key > bestKey) { best = a; bestKey = key; }
+  }
+  return best;
+}
+
+/** Card actions. Cross-domain modules are imported inside the handlers (the engine <-> services loop, and these are rare paths). */
+function _onLevAction(act: string, key: string): void {
+  const item = _levItems.find(i => i.key === key);
+  const plant = Store.selectedPlant;
+  if (!item || !plant) return;
+  const nim = _nim();
+  const action = item.action;
+  switch (act) {
+    case 'show-alerts': _levShowAlerts(item); break;
+    case 'open-table': _openOrdersInTable(item.orderIds); break;
+    case 'copy-summary':
+      void _copyText(levSummaryText(item, levTitle(item, _levCtxFor(item, plant), t), t));
+      break;
+    case 'focus-first':
+    case 'goto': {
+      // AlertsUIAdapter.focus needs the alert's line and time; it reveals a filtered-out line, selects both orders of a pair
+      // and goes through Timeline.gotoLineDay, so every Go To here is the same call the drawer's row makes.
+      const first = item.alertIds.map(id => Store.alerts.find(a => a.id === id)).find(a => a && a.line && a.time);
+      if (first) nim.AlertsUIAdapter?.focus?.(first.id);
+      else if (action.kind === 'calendar-day') nim.Timeline?.gotoLineDay?.(action.line, action.dayKey);
+      break;
+    }
+    case 'diagnose-cell':
+      if (action.kind === 'calendar-day') nim.AlertsUIAdapter?.showForCell?.(action.line, action.dayKey);
+      break;
+    case 'diagnose-worst': {
+      const w = _levWorstAlert(item, _gatherState());
+      if (w?.line && w.time) nim.AlertsUIAdapter?.showForCell?.(w.line, Util.dayKey(w.time));
+      break;
+    }
+    case 'cal-fix':
+      if (Sandbox.active || action.kind !== 'calendar-day') return;
+      item.alertIds.forEach(id => _levAttempted.add(id));
+      for (const id of action.fixableAlertIds) Alerts.applyFix(id);
+      break;
+    case 'edit-calendar':
+      if (action.kind === 'calendar-day') {
+        void import('../calendar/edit-calendar.mjs').then(m => m.EditCalendar.open(action.line));
+      }
+      break;
+    case 'rg-workcenters':
+      nim.App?.goto?.('masterdata');
+      nim.App?.gotoMasterSub?.('work-centers');
+      break;
+    case 'rg-routing':
+      if (action.kind === 'routing-gap') {
+        nim.App?.goto?.('masterdata');
+        nim.App?.gotoMasterSub?.('routing-pv');
+        void import('../master-data/material-grids.mjs').then(m => m.MaterialGrids.setQuickFilter('routing-pv', action.material));
+      }
+      break;
+    case 'setup-review':
+    case 'setup-copy':
+      if (action.kind === 'open-setup-matrix') void _levSetupAction(act, action.plant, action.pairs);
+      break;
+    case 'optimize':
+      if (action.kind === 'optimize-window') _levOptimize(item, action.line, action.startDate, action.endDate, plant);
+      break;
+    default: break;
+  }
+}
+
+async function _levSetupAction(act: string, plant: string, pairs: Parameters<typeof levPairsForReview>[0]): Promise<void> {
+  const { SetupAdmin } = await import('../setup/setup-admin.mjs');
+  const rows = levPairsForReview(pairs, t('ui.setup_missing_remedy_row'));
+  if (act === 'setup-review' && SetupAdmin.canReviewMissingPairs(plant)) { await SetupAdmin.reviewMissingPairs(plant, rows); return; }
+  await _copyText(SetupAdmin.missingPairsCsv(plant, rows));
+}
+
+/** "Optimize this window": the dialog opens on this card's machine and its conflict days (never before the plant's now). */
+function _levOptimize(item: LeverageItem, line: string, startDay: string, endDay: string, plant: string): void {
+  const now = new Date(Util.plantClock(plant));
+  now.setSeconds(0, 0);
+  let start = new Date(`${startDay}T00:00:00`);
+  if (start < now) start = now;
+  let end = new Date(`${endDay}T00:00:00`);
+  end = new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1);   // through the end of the last conflict day
+  if (end <= start) end = new Date(start.getTime() + Config.MS_DAY);
+  item.alertIds.forEach(id => _levAttempted.add(id));
+  void import('../optimization/optimize-ui.mjs').then(m => { m.OptimizeDialog.open({ lines: [line], startDate: start, endDate: end }); });
+}
 
 /* ---------------------------------------------------------------------------
    Groups, rows, diagnose
@@ -745,13 +1081,17 @@ export const AlertMonitorPane = {
     Store.subscribe((evt: StoreEvent) => {
       if (!_active) return;
       switch (evt.type) {
-        case 'alerts:change': _debouncedPaint(); break;
+        case 'alerts:change': _debouncedPaint(); _levDebounced(); break;
         case 'plant:selected':
         case 'settings:change': _paint(); break;
         case 'sandbox:entered':
         case 'sandbox:exited':
         case 'sandbox:reverted': _paint(); break;   // row actions flip disabled with What-If (Task 12)
-        default: break;
+        default:
+          // Anything the leverage replay is computed from: orders, the setup snapshot, calendars and blackouts.
+          if (evt.type.startsWith('tasks:bulk') || evt.type === 'setup-snapshot:replace' || evt.type === 'calendar:change'
+            || evt.type === 'blocks:change' || evt.type === 'plantBlocks:change') _levDebounced();
+          break;
       }
     }, 'alert-monitor-pane');
     AlertProfileMatches.subscribe(() => { if (_active) _paint(); });
@@ -760,6 +1100,7 @@ export const AlertMonitorPane = {
   /** Called by the shell on every entry to the tab. */
   render(): void {
     _active = true;
+    _levStale = true;   // events were ignored while the tab was hidden: refresh the leverage cards once
     _paint();
   },
   /**
@@ -774,13 +1115,17 @@ export const AlertMonitorPane = {
   clearFocus(): void {
     _focusIds = null;
     _focusTitle = '';
+    AlertProfileMatches.setFocusTaskIds(null);   // the Gantt goes back to the profile
     _paint();
   },
   /** Forget folded groups, open diagnose panels, "Show all" and the focus set (plant change). Does not paint. */
   resetView(): void {
     _collapsed.clear(); _showAll.clear(); _diagOpen.clear();
     _focusIds = null; _focusTitle = '';
+    _levReset(null);
   },
+  /** The engine / input seams of the leverage panel; tests replace members, production never does. */
+  _levDeps,
   setActive(active: boolean): void { _active = active; },
   isActive(): boolean { return _active; },
 };

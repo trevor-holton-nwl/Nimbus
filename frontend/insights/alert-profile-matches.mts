@@ -44,6 +44,8 @@ const DEBOUNCE_MS = 120;
 let _inited = false;
 let _rev = 0;
 let _sessionProfile: string | null = null;
+/** "Show alerts" focus from the Alert Monitor: the Gantt follows these orders instead of the profile. */
+let _focusTaskIds: Set<string> | null = null;
 let _prefSnapshot = '';
 let _timer: ReturnType<typeof setTimeout> | null = null;
 const _subs = new Set<() => void>();
@@ -73,6 +75,28 @@ function _ensureLoaded(key: string, cached: unknown, load: () => Promise<unknown
   if (cached || _fetching.has(key)) return;
   _fetching.add(key);
   load().then(() => { _fetching.delete(key); recompute(); }, () => { _fetching.delete(key); });
+}
+
+/** Replace the highlighted orders with the focused ones: severity / category come from the alerts that name them
+ *  (as the order or as the peer of a pairwise alert). `alertIds` stays profile-based. */
+function _applyFocus(set: AlertProfileMatchSet, focus: ReadonlySet<string>): void {
+  set.taskIds = new Set(focus);
+  set.sevByTask = new Map();
+  set.categoryByTask = new Map();
+  const catSev = new Map<string, 'err' | 'warn'>();
+  for (const a of Store.alerts) {
+    const sev: 'err' | 'warn' = a.sev === 'err' ? 'err' : 'warn';
+    const cat = categoryOf(a.type);
+    for (const id of [a.taskId, a.peerId]) {
+      if (!id || !focus.has(id)) continue;
+      if (set.sevByTask.get(id) !== 'err') set.sevByTask.set(id, sev);
+      const prev = set.categoryByTask.get(id);
+      const prevSev = catSev.get(id);
+      const better = !prev || (sev === 'err' && prevSev !== 'err')
+        || (sev === prevSev && CATEGORY_ORDER.indexOf(cat) < CATEGORY_ORDER.indexOf(prev));
+      if (better) { set.categoryByTask.set(id, cat); catSev.set(id, sev); }
+    }
+  }
 }
 
 export function recompute(): void {
@@ -116,6 +140,7 @@ export function recompute(): void {
       if (better) { set.categoryByTask.set(a.taskId, cat); catSev.set(a.taskId, sev); }
     }
       }
+  if (_focusTaskIds) _applyFocus(set, _focusTaskIds);
   set.rev = ++_rev;
   _current = set;
   for (const fn of Array.from(_subs)) { try { fn(); } catch { /* isolate subscribers */ } }
@@ -129,6 +154,7 @@ function _onStoreEvent(evt: StoreEvent): void {
       break;
     case 'plant:selected':
       _sessionProfile = null;
+      _focusTaskIds = null;
       _prefSnapshot = _prefs();
       recompute();
       break;
@@ -162,4 +188,15 @@ export const AlertProfileMatches = {
     recompute();
   },
   sessionProfile(): string | null { return _sessionProfile; },
+  /**
+   * The Alert Monitor's "Show alerts" focus: while set, `taskIds` / `sevByTask` / `categoryByTask` describe these
+   * orders (task ids and peers of the focused alerts) rather than the profile, so the Gantt follows the focused card.
+   * null restores the profile. Fires the fanout; a plant change clears it.
+   */
+  setFocusTaskIds(ids: Iterable<string> | null): void {
+    const next = ids ? new Set(ids) : null;
+    if (!next && !_focusTaskIds) return;   // nothing to clear: no recompute, no fanout
+    _focusTaskIds = next;
+    recompute();
+  },
 };

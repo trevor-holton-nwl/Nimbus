@@ -7,6 +7,7 @@
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
 import { categoryOf as _catOf, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -410,4 +411,214 @@ export function groupLabel(by: MonitorGroupBy, key: string, d: GroupLabelDeps, t
     case 'none':
     default: return t('am.group_none');
   }
+}
+
+/* ---------------------------------------------------------------------------
+   High-leverage fixes (Task 13) — pure card / section builders.
+
+   The pane decides the context (plant cap, admin, What-If, remaining count) and hands it in as a
+   LevCtx; nothing here reads a global. Points lead (D12); a `requiresMinutes` card never shows a
+   predicted score — it asks for minutes and shows the exact number only after the replay returns.
+   ------------------------------------------------------------------------- */
+
+/** Cards shown before "Show all fixes". */
+export const LEV_TOP_N = 5;
+
+export interface LevCtx {
+  /** The plant's alert penalty is at the cap, so removing this card's alerts cannot move the score. */
+  capped: boolean;
+  /** This card's alerts that persist after a fix was attempted from the page (0 = none / not attempted). */
+  remaining: number;
+  /** The user may open the setup matrix review (else "copy for the setup owner"). */
+  canReviewPairs: boolean;
+  isAdmin: boolean;
+  /** What-If is active: Fix movable renders disabled. */
+  whatIf: boolean;
+  /** Localised label of a setup-definition field (`colorWheel` → "Color"). */
+  fieldLabel: (fieldKey: string) => string;
+}
+
+export interface LevAction {
+  act: string;
+  labelKey: string;
+  labelVars?: Record<string, string | number>;
+  primary: boolean;
+  disabled?: boolean;
+  /** The write behind this action needs an admin; the button says so. */
+  admin?: boolean;
+}
+
+/** The alert category whose swatch/label stands in for the family badge. */
+const _FAMILY_CAT: Record<LeverageItem['family'], AlertCategory> = {
+  'setup-pair': 'setup', 'calendar-day': 'calendar', 'routing-gap': 'exceptions',
+  tool: 'conflicts', 'machine-state': 'setup', 'optimize-window': 'capacity',
+};
+
+const _ROUTING_UPLOAD = new Set(['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter']);
+
+function _stateText(state: ReadonlyArray<{ fieldKey: string; value: string }>, fieldLabel: (k: string) => string): string {
+  return state.map(p => `${fieldLabel(p.fieldKey)}: ${p.value}`).join(', ');
+}
+
+/** The card title. Setup pairs are re-localised from the pair states (the engine's `titleVars` are English). */
+export function levTitle(item: LeverageItem, ctx: LevCtx, t: Translate): string {
+  let vars = item.titleVars;
+  if (item.action.kind === 'open-setup-matrix') {
+    const p = item.action.pairs[0];
+    if (p) {
+      const names = item.lines.slice(0, 3).join(', ') + (item.lines.length > 3 ? ` +${item.lines.length - 3}` : '');
+      vars = { ...vars, from: _stateText(p.fromState, ctx.fieldLabel), to: _stateText(p.toState, ctx.fieldLabel), lines: names || vars.lines };
+    }
+  }
+  return t(item.titleKey, vars);
+}
+
+/** Every action a card offers, primary first; the pane dispatches on `act`. */
+export function levActions(item: LeverageItem, ctx: LevCtx): LevAction[] {
+  const out: LevAction[] = [];
+  const add = (act: string, labelKey: string, primary = false, extra: Partial<LevAction> = {}) =>
+    { out.push({ act, labelKey, primary, ...extra }); };
+  const n = item.orderIds.length;
+  const a = item.action;
+  switch (a.kind) {
+    case 'open-setup-matrix':
+      if (ctx.canReviewPairs) add('setup-review', 'leverage.action.setup-pair', true);
+      else add('setup-copy', 'btn.setup_copy_missing', true);
+      break;
+    case 'calendar-day': {
+      const fixable = a.fixableAlertIds.length > 0;
+      if (fixable) add('cal-fix', 'leverage.action.calendar-day', true, { disabled: ctx.whatIf });
+      add('diagnose-cell', 'am.diagnose', !fixable);
+      if (ctx.isAdmin) add('edit-calendar', 'btn.edit_calendar', false, { admin: true });
+      add('goto', 'btn.go_to');
+      break;
+    }
+    case 'routing-gap':
+      if (a.step === 'workcenter_unmapped') add('rg-workcenters', 'leverage.action.routing-gap.workcenter_unmapped', true, { admin: true });
+      else if (_ROUTING_UPLOAD.has(a.step)) add('rg-routing', 'leverage.action.routing-gap', true, { admin: true });
+      else if (a.step === 'no_machine') add('open-table', 'am.open_in_table', true, { labelVars: { n } });
+      else add('copy-summary', 'am.lev_copy_summary', true);
+      break;
+    case 'tool':
+      add('focus-first', 'leverage.action.tool', true);
+      break;
+    case 'machine-state':
+      add('focus-first', 'leverage.action.machine-state', true);
+      break;
+    case 'optimize-window': {
+      const room = (item.headroomHours ?? 1) > 0;
+      if (room) { add('optimize', 'leverage.action.optimize-window', true); add('diagnose-worst', 'am.diagnose'); }
+      else { add('diagnose-worst', 'am.diagnose', true); add('optimize', 'leverage.action.optimize-window'); }
+      break;
+    }
+    default: break;
+  }
+  if (n > 0 && !out.some(x => x.act === 'open-table')) add('open-table', 'am.open_in_table', false, { labelVars: { n } });
+  add('show-alerts', 'am.lev_show_alerts');
+  if (item.adminOnly && !out.some(x => x.act === 'copy-summary')) add('copy-summary', 'am.lev_copy_summary');
+  return out;
+}
+
+function _levScoreHtml(item: LeverageItem, ctx: LevCtx, t: Translate): string {
+  if (item.requiresMinutes === true) {
+    const key = _esc(item.key);
+    const needs = _esc(t('am.lev_needs_minutes'));
+    return `<div class="am-lev-minutes"><label class="am-lev-needs"><span>${needs}</span>`
+      + `<input type="number" class="am-lev-min-input" min="1" step="1" inputmode="numeric" data-lev-minutes="${key}" `
+      + `placeholder="${_esc(t('am.lev_minutes_ph'))}" aria-label="${needs}"></label></div>`;
+  }
+  const after = item.confidenceAfter;
+  if (after == null) return '';
+  if (item.points <= 0) {
+    return `<div class="am-lev-score am-lev-na"><span class="am-lev-val">${_esc(t('am.lev_conf_na'))}</span>`
+      + `<span class="am-lev-note">${_esc(t('am.lev_outside_window'))}</span></div>`;
+  }
+  const method = item.method === 'replay' ? 'am.lev_method_exact' : item.method === 'removal' ? 'am.lev_method_estimate' : '';
+  const eyebrow = method ? `<span class="am-eyebrow am-lev-method">${_esc(t(method))}</span>` : '';
+  if (after === item.confidenceBefore && ctx.capped) {
+    return `<div class="am-lev-score"><span class="am-lev-note">${_esc(t('am.lev_score_capped'))}</span>${eyebrow}</div>`;
+  }
+  const d = after - item.confidenceBefore;
+  const delta = d === 0 ? '' : `<span class="am-lev-delta ${d > 0 ? 'am-lev-up' : 'am-lev-down'}">${d > 0 ? '+' : ''}${d}</span>`;
+  const partial = item.outsideConfidenceWindowCount > 0
+    ? `<span class="am-lev-note">${_esc(t('am.lev_partial_window', { n: item.outsideConfidenceWindowCount }))}</span>` : '';
+  return `<div class="am-lev-score"><span class="am-lev-val">${_esc(t('am.lev_score', { before: item.confidenceBefore, after }))}</span>${delta}${eyebrow}${partial}</div>`;
+}
+
+/** One leverage card. */
+export function levCardHtml(item: LeverageItem, ctx: LevCtx, t: Translate): string {
+  const key = _esc(item.key);
+  const title = levTitle(item, ctx, t);
+  const cat = _FAMILY_CAT[item.family];
+  const admin = item.adminOnly ? `<span class="badge badge-info am-lev-admin">${_esc(t('am.lev_admin_fix'))}</span>` : '';
+  let room = '';
+  if (item.family === 'optimize-window' && item.headroomHours != null) {
+    const h = item.headroomHours;
+    room = `<div class="am-lev-room${h > 0 ? '' : ' am-lev-room-none'}">${_esc(h > 0
+      ? t('am.lev_headroom', { h: fmtNum(h) }) : t('am.lev_no_headroom', { h: fmtNum(Math.abs(h)) }))}</div>`;
+  }
+  const remaining = ctx.remaining > 0
+    ? `<div class="am-lev-remaining">${_esc(t('am.lev_remaining', { n: ctx.remaining }))}</div>` : '';
+  const buttons = levActions(item, ctx).map(a => {
+    const label = t(a.labelKey, a.labelVars);
+    const tag = a.admin ? ` <span class="am-lev-adm">${_esc(t('am.lev_admin_fix'))}</span>` : '';
+    return `<button type="button" class="btn sm ${a.primary ? 'btn-primary' : 'btn-ghost'}" data-lev-action="${_esc(a.act)}" data-lev-key="${key}"`
+      + `${a.disabled ? ` disabled aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : ''}>${_esc(label)}${tag}</button>`;
+  }).join('');
+  return `<article class="am-lev-card panel" data-lev-key="${key}">`
+    + `<div class="am-lev-top"><span class="am-lev-fam"><span class="am-cat-swatch am-cat-${cat}" aria-hidden="true"></span>${_esc(t(`ape.cat_${cat}`))}</span>${admin}</div>`
+    + `<div class="am-lev-title" title="${_esc(title)}">${_esc(title)}</div>`
+    + `<div class="am-lev-mono">${_esc(t('am.lev_alerts', { n: item.alertIds.length, m: item.orderIds.length }))}</div>`
+    + `<div class="am-lev-points">${_esc(t('am.lev_points', { n: fmtNum(item.points) }))}</div>`
+    + _levScoreHtml(item, ctx, t) + room + remaining
+    + `<div class="am-lev-acts">${buttons}</div></article>`;
+}
+
+export interface LevSectionOpts {
+  showAll: boolean;
+  /** The first pass has not produced results yet. */
+  computing: boolean;
+  ctxFor: (item: LeverageItem) => LevCtx;
+}
+
+/** The whole panel: head, cards (top 5 or all), "Show all fixes", skeleton or the empty copy. */
+export function levSectionHtml(items: ReadonlyArray<LeverageItem>, o: LevSectionOpts, t: Translate): string {
+  const head = `<div class="am-lev-head"><span class="am-eyebrow">${_esc(t('am.leverage_title'))}</span>`
+    + `<span class="am-lev-hint">${_esc(t('am.leverage_hint'))}</span></div>`;
+  let body: string;
+  if (o.computing && !items.length) {
+    body = `<div class="am-lev-skeleton" aria-busy="true">${_esc(t('am.lev_computing'))}</div>`;
+  } else if (!items.length) {
+    body = `<div class="am-lev-empty">${_esc(t('am.lev_none'))}</div>`;
+  } else {
+    const shown = o.showAll ? items : items.slice(0, LEV_TOP_N);
+    body = `<div class="am-lev-list">${shown.map(it => levCardHtml(it, o.ctxFor(it), t)).join('')}</div>`
+      + (!o.showAll && items.length > LEV_TOP_N
+        ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="lev-show-more">${_esc(t('am.lev_show_more'))}</button></div>` : '');
+  }
+  return `<section class="am-lev-panel" aria-label="${_esc(t('am.leverage_title'))}">${head}${body}</section>`;
+}
+
+/** Plain text for the owner hand-off (clipboard): title, lines, orders, points. */
+export function levSummaryText(item: LeverageItem, title: string, t: Translate): string {
+  const orders = item.orderIds.length > 50 ? `${item.orderIds.slice(0, 50).join(', ')} …` : item.orderIds.join(', ');
+  return [
+    title,
+    t('am.lev_alerts', { n: item.alertIds.length, m: item.orderIds.length }),
+    `${t('am.group_line')}: ${item.lines.join(', ')}`,
+    `${t('am.col_orders')}: ${orders}`,
+    t('am.lev_points', { n: fmtNum(item.points) }),
+  ].join('\n');
+}
+
+/** Setup-pair action pairs in the shape `SetupAdmin.reviewMissingPairs` reads (`fieldKey=value | …` state text). */
+export function levPairsForReview(pairs: ReadonlyArray<LeveragePair>, remedy: string): Array<{
+  line: string; predecessorOrderId: string | null; successorOrderId: string | null;
+  fromState: string; toState: string; reason: string; remedy: string;
+}> {
+  const text = (s: ReadonlyArray<{ fieldKey: string; value: string }>) => s.map(p => `${p.fieldKey}=${p.value}`).join(' | ');
+  return pairs.map(p => ({
+    line: p.line, predecessorOrderId: p.predecessorOrderId ?? null, successorOrderId: p.successorOrderId ?? null,
+    fromState: text(p.fromState), toState: text(p.toState), reason: p.reason, remedy,
+  }));
 }
