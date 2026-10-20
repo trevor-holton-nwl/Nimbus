@@ -38,13 +38,13 @@ import { groupLeverage, analyzeLeverage, replayWithMinutes } from '../insights/a
 import type { LeverageItem, LeverageInput, LeverageRunner } from '../insights/alert-leverage.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import {
-  MONITOR_GROUP_BYS, MONITOR_SORTS, GROUP_ROW_CAP, ROW_H, DIAG_H,
+  MONITOR_GROUP_BYS, MONITOR_SORTS, GROUP_ROW_CAP, ROW_H, DIAG_H, GROUP_MOVE_CONFIRM_ABOVE,
   summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
-  rowActionsFor, rowHtml, colsHtml, diagnoseHtml, groupHeadHtml, groupTotals, groupLabel,
+  rowActionsFor, rowHtml, rowPrimaryActions, diagnoseHtml, groupHeadHtml, groupMenuItems, groupCounts, groupLabel,
   relativeDaysText, formatPairKey, fmtNum,
   fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
-import type { MonitorView, EmptyKind, RowView, LevCtx } from './alert-monitor-model.mjs';
+import type { MonitorView, EmptyKind, RowView, LevCtx, GroupHeadView, GroupCounts } from './alert-monitor-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -90,8 +90,6 @@ const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NI
 interface RowCtx {
   s: PaintState;
   ctx: GroupContext;
-  pointsOf: (a: NimbusAlert) => number;
-  lateOf: (taskId: string) => number;
 }
 
 const GROUP_LABEL_KEY: Record<string, string> = {
@@ -355,7 +353,11 @@ function _onClick(e: Event): void {
   if (lev?.dataset.levAction) { _onLevAction(lev.dataset.levAction, lev.dataset.levKey ?? ''); return; }
   const levMenu = target?.closest?.('[data-lev-menu]') as HTMLElement | null;
   if (levMenu?.dataset.levMenu) { _openFixMenu(levMenu, levMenu.dataset.levMenu); return; }
-  const btn = target?.closest?.('[data-am-action]') as HTMLElement | null;
+  const rowMenu = target?.closest?.('.am-row-menu') as HTMLElement | null;
+  if (rowMenu?.dataset.alertId) { _openRowMenu(rowMenu, rowMenu.dataset.alertId); return; }
+  const groupMenu = target?.closest?.('.am-group-menu') as HTMLElement | null;
+  if (groupMenu?.dataset.groupKey) { _openGroupMenu(groupMenu, groupMenu.dataset.groupKey); return; }
+  const btn =target?.closest?.('[data-am-action]') as HTMLElement | null;
   switch (btn?.dataset.amAction) {
     case 'make-default': _makeDefault(); break;
     case 'switch-all':   AlertProfileMatches.setSessionProfile(ALL_ALERTS_PROFILE_ID); break;
@@ -375,8 +377,7 @@ function _onClick(e: Event): void {
     case 'show-all':
       if (btn!.dataset.groupKey) { _showAll.add(btn!.dataset.groupKey); _paint(); }
       break;
-    case 'group-dismiss': _dismissGroup(btn!.dataset.groupKey ?? ''); break;
-    case 'group-open-table': _openGroupInTable(btn!.dataset.groupKey ?? ''); break;
+    case 'group-move': _moveGroup(btn!.dataset.groupKey ?? ''); break;
     case 'clear-focus': AlertMonitorPane.clearFocus(); break;
     case 'fixes-show-more': _showMoreFixes(); break;
     case 'fixes-admin-toggle':
@@ -397,15 +398,107 @@ function _toggleGroup(key: string): void {
   _paint();
 }
 
-/** Dismiss every alert of one group (confirm above 5, the way the drawer protects "dismiss all"). */
-function _dismissGroup(key: string): void {
+const _isAcked = (id: string): boolean => AlertProfileMatches.view().acked.has(id);
+
+/** Put keyboard focus back on a ⋯ trigger a repaint replaced: the new trigger carries the same data-ovf-key. */
+function _refocusKey(key: string): void {
+  const next = Array.from(document.querySelectorAll?.<HTMLElement>('[data-ovf-key]') ?? []).find(el => el.getAttribute('data-ovf-key') === key);
+  next?.focus?.();
+}
+
+function _focusGroupHead(key: string): void {
+  const heads = Array.from(document.querySelectorAll?.<HTMLElement>('[data-am-action="toggle-group"]') ?? []);
+  heads.find(el => el.dataset.groupKey === key)?.focus?.();
+}
+
+/** The ⋯ menu of a row: its items carry the same data-alert-action / data-alert-id as the buttons and run through the same dispatcher. */
+function _openRowMenu(anchor: HTMLElement, alertId: string): void {
+  const a = Store.alerts.find(x => x.id === alertId);
+  if (!a) return;
+  const taskId = a.taskId ? String(a.taskId) : undefined;
+  const p = rowPrimaryActions(a, taskId ? Store.tasks[taskId] : undefined, { whatIf: Sandbox.active === true, acked: _isAcked(alertId) });
+  const items: MenuItem[] = p.menu.map(m => ({
+    id: m.action,
+    label: t(m.labelKey),
+    disabled: m.disabled === true,
+    hint: m.hintKey ? t(m.hintKey) : undefined,
+    data: { alertAction: m.action, alertId, ...(taskId ? { taskId } : {}) },
+    onSelect: () => {
+      _runAlertAction(m.action, alertId, taskId);
+      if (m.action === 'diagnose') _refocusKey(alertId);   // the repaint replaced the trigger
+    },
+  }));
+  OverflowMenu.open(anchor, items, { align: 'end', key: alertId });
+}
+
+/** The ⋯ menu of a group head: Go to (first alert), Move N orders, Open these N orders in the table, Acknowledge N…. */
+function _openGroupMenu(anchor: HTMLElement, key: string): void {
   const g = _groupsByKey.get(key);
-  if (!g || !g.alerts.length) return;
-  const ids = g.alerts.map(a => a.id);
+  if (!g || !_rowCtx) return;
+  const head = _headView(g, _rowCtx, !_collapsed.has(key));
+  const items: MenuItem[] = groupMenuItems(head).map(m => ({
+    id: m.id,
+    label: t(m.labelKey, m.vars),
+    disabled: m.disabled === true,
+    hint: m.hintKey ? t(m.hintKey) : undefined,
+    data: (m.id === 'goto' ? { alertAction: 'focus', alertId: head.firstAlertId ?? '' } : { amAction: `group-${m.id}`, groupKey: key }) as Record<string, string>,
+    onSelect: () => {
+      switch (m.id) {
+        case 'goto': if (head.firstAlertId) _runAlertAction('focus', head.firstAlertId); break;
+        case 'move': _moveGroup(key); break;
+        case 'open-table': _openGroupInTable(key); break;
+        case 'ack': _ackGroup(key); break;
+      }
+    },
+  }));
+  OverflowMenu.open(anchor, items, { align: 'end', key });
+}
+
+/** "Acknowledge N…": one reason / end date for every not-yet-acknowledged alert of the whole group (not just the rendered rows). */
+function _ackGroup(key: string): void {
+  const g = _groupsByKey.get(key);
+  const plant = Store.selectedPlant;
+  if (!g || !plant) return;
+  const ids = groupCounts(g.alerts, _isAcked).unackedIds;
+  if (ids.length) AlertAckModal.open({ plant, alertIds: ids });
+}
+
+/**
+ * "Move N orders": confirms above GROUP_MOVE_CONFIRM_ABOVE, then runs the one-click fix on each movable alert of the
+ * whole group in turn. Not available in What-If (the plan is a sandbox there).
+ */
+function _moveGroup(key: string): void {
+  if (Sandbox.active) return;
+  const g = _groupsByKey.get(key);
+  if (!g) return;
+  const ids = groupCounts(g.alerts, () => false).movableIds;
   const n = ids.length;
-  if (n <= 5) { Alerts.dismissAll(ids); return; }
-  void Modal.confirm({ title: t('am.group_dismiss_n', { n }), message: t('am.group_dismiss_confirm', { n }), tone: 'danger' })
-    .then(ok => { if (ok) Alerts.dismissAll(ids); });
+  if (n === 0) return;
+  if (n <= GROUP_MOVE_CONFIRM_ABOVE) { _runBatchMove(key, ids); return; }
+  void Modal.confirm({ title: t('am.group_fix_n', { n }), message: t('am.group_fix_confirm', { n }) })
+    .then(ok => { if (ok) _runBatchMove(key, ids); });
+}
+
+/**
+ * Sequential batch: `Alerts.applyFix(id, { quiet: true })` is synchronous and dismisses the alert on success, so an id that
+ * has left Store.alerts afterwards means that order moved. The moved order's other alerts (and its peers' alerts) stay in
+ * Store.alerts until the debounced recompute, so any alert naming an already-moved order is skipped: it describes a
+ * position that no longer exists. One summary toast; focus returns to the group head.
+ */
+function _runBatchMove(key: string, ids: string[]): void {
+  if (Sandbox.active) return;
+  const movedOrders = new Set<string>();
+  let moved = 0;
+  for (const id of ids) {
+    const a = Store.alerts.find(x => x.id === id);
+    if (!a) continue;                                    // already gone (cleared by an earlier move or a recompute)
+    if ((a.taskId && movedOrders.has(String(a.taskId))) || (a.peerId && movedOrders.has(String(a.peerId)))) continue;
+    Alerts.applyFix(id, { quiet: true });
+    if (!Store.alerts.some(x => x.id === id)) { moved++; if (a.taskId) movedOrders.add(String(a.taskId)); }
+  }
+  Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
+  if (_active) _paint();
+  _focusGroupHead(key);
 }
 
 /**
@@ -437,11 +530,14 @@ function _openOrdersInTable(orderIds: Iterable<string>): void {
   nim.App?.gotoGanttSub?.('orders');
 }
 
-/** Row / group-head actions — the same vocabulary and calls as AlertsUIAdapter._handleAction (the drawer). */
+/** A row button was clicked: hand its data-* to the one dispatcher (the ⋯ menu items call `_runAlertAction` with the same values). */
 function _onAlertAction(trigger: HTMLElement): void {
-  const action = trigger.dataset.alertAction;
   const alertId = trigger.dataset.alertId;
-  if (!alertId) return;
+  if (alertId) _runAlertAction(trigger.dataset.alertAction, alertId, trigger.dataset.taskId);
+}
+
+/** Row actions — the same vocabulary and calls as AlertsUIAdapter._handleAction (the drawer), minus Dismiss (not on this page). */
+function _runAlertAction(action: string | undefined, alertId: string, taskId?: string): void {
   const nim = _nim();
   switch (action) {
     case 'focus': nim.AlertsUIAdapter?.focus?.(alertId); break;
@@ -451,11 +547,9 @@ function _onAlertAction(trigger: HTMLElement): void {
       break;
     case 'override': {
       if (Sandbox.active) return;
-      const taskId = trigger.dataset.taskId;
       if (taskId) nim.Table?._openOverrideModalForId?.(taskId);
       break;
     }
-    case 'dismiss': Alerts.dismiss(alertId); break;
     case 'diagnose': {
       const a = Store.alerts.find(x => x.id === alertId);
       if (!a) return;
@@ -986,11 +1080,7 @@ function _makeRowCtx(s: PaintState): RowCtx {
   const ctx: GroupContext = {
     tasksById: Store.tasks, horizonStart: s.horizonStart, horizonMinutes: s.horizonMinutes, plantToday: s.plantToday,
   };
-  return {
-    s, ctx,
-    pointsOf: a => impactPoints(a, s.horizonStart, s.horizonMinutes),
-    lateOf: id => { const task = Store.tasks[id]; return task ? Util.latenessHours(task) : 0; },
-  };
+  return { s, ctx };
 }
 
 function _headline(type: string): string {
@@ -1024,7 +1114,9 @@ function _diagnoseFor(a: NimbusAlert, task: NimbusTask | undefined): string {
   if (reason) {
     fields.push({ label: t('am.diag_reason'), value: [reason.code, reason.message, reason.step].filter(Boolean).join(' · ') });
   }
-  return diagnoseHtml(fields);
+  const helpKey = `alert.help.${a.type}`;
+  const help = t(helpKey);
+  return diagnoseHtml(fields, help === helpKey ? '' : help);
 }
 
 function _rowView(a: NimbusAlert, rc: RowCtx): RowView {
@@ -1036,18 +1128,21 @@ function _rowView(a: NimbusAlert, rc: RowCtx): RowView {
   const helpKey = `alert.help.${a.type}`;
   const help = t(helpKey);
   const no = task ? String(task.ORDER ?? task.PRODUCTION_ORDER ?? '') : String(a.msgVars?.order ?? '');
+  const offset = anchor ? alertDayOffset(anchor, rc.s.plantToday) : 0;
+  const msgLine = a.msgVars?.line;
   return {
     id: a.id, type: a.type, sev: a.sev, taskId: a.taskId, line: a.line, time: a.time,
     headline: _headline(a.type),
     message: Util.alertMessage(a),
     help: help === helpKey ? '' : help,
     orderNo: no,
-    dateText: anchor ? Util.fmtDT(anchor) : '',
-    relText: anchor ? relativeDaysText(alertDayOffset(anchor, rc.s.plantToday), t) : '',
-    anchorTip: t(fromDue ? 'am.anchor_due' : 'am.anchor_time'),
-    points: rc.pointsOf(a),
-    orders: 1 + (a.peerId ? 1 : 0),
-    lateH: a.taskId ? rc.lateOf(a.taskId) : 0,
+    msgLine: msgLine != null && msgLine !== '' ? String(msgLine) : undefined,
+    groupBy: rc.s.view.groupBy,
+    // The short day label fits the 240 px column; the exact date and time are in the tooltip next to the anchor's name.
+    dateText: anchor ? _fmtDay(anchor) : '',
+    relText: anchor ? relativeDaysText(offset, t) : '',
+    overdue: !!anchor && offset < 0,
+    anchorTip: anchor ? `${t(fromDue ? 'am.anchor_due' : 'am.anchor_time')}: ${Util.fmtDT(anchor)}` : t(fromDue ? 'am.anchor_due' : 'am.anchor_time'),
     whatIf: Sandbox.active === true,
     ackLabel: _ackLabel(rc.s.m.acked.get(a.id)),
     diagOpen: open,
@@ -1063,18 +1158,25 @@ function _groupLabel(by: MonitorView['groupBy'], key: string, rc: RowCtx): strin
       return task ? [task.ORDER ?? task.PRODUCTION_ORDER, task.MATERIAL_NUMBER].filter(Boolean).join(' · ') : '';
     },
     dayOffset: k => alertDayOffset(new Date(`${k}T12:00:00`), rc.s.plantToday),
-    fmtDay: k => new Date(`${k}T12:00:00`).toLocaleDateString(document.documentElement?.lang || 'en-US',
-      { weekday: 'short', day: 'numeric', month: 'short' }),
+    fmtDay: k => _fmtDay(new Date(`${k}T12:00:00`)),
   }, t);
 }
 
-function _headView(g: AlertGroup, rc: RowCtx, expanded: boolean) {
+/** "Thu 23 Oct" in the page language: the day label of group heads and of a row's when column. */
+function _fmtDay(d: Date): string {
+  return d.toLocaleDateString(document.documentElement?.lang || 'en-US', { weekday: 'short', day: 'numeric', month: 'short' });
+}
+
+function _headView(g: AlertGroup, rc: RowCtx, expanded: boolean): GroupHeadView {
   const first = g.alerts.find(a => rowActionsFor(a).goto) ?? null;
+  const counts: GroupCounts = groupCounts(g.alerts, _isAcked);
   return {
     key: g.key, expanded,
     label: _groupLabel(rc.s.view.groupBy, g.key, rc),
-    totals: groupTotals(g.alerts, rc.pointsOf, rc.lateOf),
+    errors: counts.errors, warnings: counts.warnings, orders: counts.orders,
+    movable: counts.movableIds.length, unacked: counts.unackedIds.length,
     firstAlertId: first?.id ?? null, firstGoto: !!first,
+    whatIf: Sandbox.active === true,
   };
 }
 
@@ -1084,7 +1186,7 @@ function _groupCardHtml(g: AlertGroup, rc: RowCtx): string {
   if (open) {
     const capped = !_showAll.has(g.key) && g.alerts.length > GROUP_ROW_CAP;
     const shown = capped ? g.alerts.slice(0, GROUP_ROW_CAP) : g.alerts;
-    body = `<div class="am-gbody" role="list">${colsHtml(t)}${shown.map(a => rowHtml(_rowView(a, rc), t)).join('')}</div>`
+    body = `<div class="am-gbody" role="list">${shown.map(a => rowHtml(_rowView(a, rc), t)).join('')}</div>`
       + (capped
         ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="show-all" data-group-key="${esc(g.key)}">${esc(t('am.show_all_n', { n: g.alerts.length }))}</button></div>`
         : '');
@@ -1092,11 +1194,11 @@ function _groupCardHtml(g: AlertGroup, rc: RowCtx): string {
   return `<section class="am-group panel" data-group-key="${esc(g.key)}">${groupHeadHtml(_headView(g, rc, open), t)}${body}</section>`;
 }
 
-/** Group-by none: one card whose rows live in a single VirtualList (fixed 56 px, taller under an open diagnose). */
+/** Group-by none: one card whose rows live in a single VirtualList (fixed ROW_H = 44 px, DIAG_H taller under an open diagnose). */
 function _renderNone(g: AlertGroup | undefined, rc: RowCtx): void {
   if (!g) { _teardownVl(); _setHtml('am-groups', ''); return; }
   const shell = `<section class="am-group panel" data-group-key="${esc(g.key)}"><div id="am-none-head"></div>`
-    + `<div id="am-none-body">${colsHtml(t)}<div class="am-vl-scroll" id="am-vl" role="list"></div></div></section>`;
+    + `<div id="am-none-body"><div class="am-vl-scroll" id="am-vl" role="list"></div></div></section>`;
   if (_setHtml('am-groups', shell)) { _teardownVl(); _lastHtml.delete('am-none-head'); }
   _setHtml('am-none-head', groupHeadHtml(_headView(g, rc, !_collapsed.has(g.key)), t));
   const body = _el('am-none-body');

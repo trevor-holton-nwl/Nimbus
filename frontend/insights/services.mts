@@ -478,18 +478,23 @@ export const Alerts = {
     return had;
   },
 
-  applyFix(alertId: string): void {
+  /**
+   * One-click fix. `quiet` suppresses the per-order toasts (moved / cannot fix) and nothing else: a caller that runs
+   * many fixes (the Alert Monitor's "Move N orders") reports one summary itself. The result is the alert id leaving `Store.alerts`.
+   */
+  applyFix(alertId: string, opts?: { quiet?: boolean }): void {
+    const quiet = opts?.quiet === true;
     const a = Store.alerts.find(x => x.id === alertId);
     if (!a) return;
 
     if (a.type === 'overlap' || a.type === 'blackout' || a.type === 'tool-conflict') {
       const task = Store.tasks[a.taskId!];
-      if (!task || !task.start_date) { Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
+      if (!task || !task.start_date) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
       // Firmed orders are immovable. firmingStatus is the EFFECTIVE set — frozen horizon,
       // the manual flag and running (in progress), all on this parent-level task — not just
       // Store.isFirmed. SAP's firm flag is display-only and does not block a fix. Optimizer runs and autoReflow already honor the same union.
       // G-0.25: a row carrying an approved placement exception ('overtime' / 'overlong') is fixed the same way.
-      if (task.placement_exception || Engine.firmingStatus(task).firmed) { Toast.show(Util.t('toast.cannot_fix_firmed'), 'warn', 5000); return; }
+      if (task.placement_exception || Engine.firmingStatus(task).firmed) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_firmed'), 'warn', 5000); return; }
       const line = task.MACHINE || 'Unknown';
       const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
       const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
@@ -510,7 +515,7 @@ export const Alerts = {
         const found = Calendar.nextAvailable(line, searchFrom, dur);
         if (!found) {
           // No slot (overlong order / closed line / nothing within 90 days): never move the order.
-          Toast.show(Util.t('toast.cannot_fix_task'), 'error');
+          if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error');
           return;
         }
         newStart = found;
@@ -526,7 +531,7 @@ export const Alerts = {
           Calendar._endRun();
         }
         if (!changes.start_date || !changes.end_date) {
-          Toast.show(Util.t('toast.cannot_fix_task'), 'error');
+          if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error');
           return;
         }
         newStart = changes.start_date;
@@ -535,7 +540,7 @@ export const Alerts = {
       try { Engine.autoReflow(task.id); } catch {}
       UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap), [task.id]);
       Alerts.dismiss(alertId);
-      Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(changes.end_date ?? newStart) }), 'success');
+      if (!quiet) Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(changes.end_date ?? newStart) }), 'success');
 
     } else if (a.type === 'overload') {
       // Scope the changeover optimizer to just this line+day so the optimize and the

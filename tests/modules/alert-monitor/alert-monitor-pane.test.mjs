@@ -465,7 +465,7 @@ test('every matched alert acknowledged shows the turn-on-Show-acknowledged hint;
   assert.match(els['am-groups'].innerHTML, /am-ack-badge[^>]*>am\.ack_by</);
 });
 
-test('group head sums: points, orders (taskId ∪ peerId) and late hours; rows carry the impact columns', () => {
+test('a group head carries counts and the ⋯ menu but no totals or column captions; a row is one line with no number columns', () => {
   Store.setTasks([task('1'), task('2'), task('3', { end_date: new Date('2026-10-21T07:00:00') })], 'test');
   seed([
     alert('a1', { type: 'overlap', taskId: '1', peerId: '2' }),
@@ -473,17 +473,57 @@ test('group head sums: points, orders (taskId ∪ peerId) and late hours; rows c
   ]);
   AlertMonitorPane.render();
   const html = els['am-groups'].innerHTML;
-  assert.match(html, /am-tot-v">15<\/span><span class="am-tot-k">am\.col_points/);
-  assert.match(html, /am-tot-v">3<\/span><span class="am-tot-k">am\.col_orders/);
-  // Order 1 and 2 finish a day after their 08:00 due; order 3 is on time: 24 + 24 late hours.
-  assert.match(html, /am-tot-v">48<\/span><span class="am-tot-k">am\.col_late/);
-  assert.match(html, /<span class="am-num">7\.5<\/span><span class="am-num">2<\/span><span class="am-num">24<\/span>/);
+  assert.match(html, /badge badge-err">2</);
+  assert.match(html, /class="btn sm am-group-move" data-am-action="group-move" data-group-key="conflicts"[^>]*>am\.group_fix_n</);
+  assert.match(html, /class="icon-btn sm am-group-menu" data-group-key="conflicts" data-ovf-key="conflicts"/);
+  assert.doesNotMatch(html, /am-tot|am-gtots|am-cols|am-imp|am-num|am-meta|am\.col_|points/);
+  assert.equal((html.match(/class="am-when/g) ?? []).length, 2, 'one when line per row');
 });
 
-test('an alert outside the confidence window renders "outside" instead of points', () => {
-  seed([alert('a1', { time: new Date('2027-03-01T08:00:00') })]);
+test('a row shows [line ·] [order ·] message, the day with its relative time, and goes red once overdue', () => {
+  // The plant's lines come from its tasks' MACHINE (alerts on other lines are not shown).
+  Store.setTasks([task('1', { MACHINE: 'L3', original_end_date: new Date('2026-10-17T08:00:00') }), task('2', { MACHINE: 'L4' })], 'test');
+  seed([
+    alert('a1', { type: 'late', taskId: '1', line: 'L3' }),
+    alert('a2', { type: 'late', taskId: '2', line: 'L4' }),
+    alert('tz', { type: 'plant_no_timezone', taskId: undefined, line: '', time: new Date('2026-10-23T08:00:00') }),
+  ]);
   AlertMonitorPane.render();
-  assert.match(els['am-groups'].innerHTML, /am-num-out[^>]*>am\.points_outside</);
+  const html = els['am-groups'].innerHTML;
+  const row = id => html.match(new RegExp(`<div class="am-rowwrap" role="listitem" data-alert-id="${id}">[\\s\\S]*?(?=<div class="am-rowwrap"|</div></section>|$)`))[0];
+  assert.match(row('a2'), /<span class="am-pfx">L4 · 472 ·<\/span>/);
+  assert.match(row('a2'), /class="am-when" title="am\.anchor_due: [^"]*">[^<]*· am\.rel_in_days</);
+  assert.match(row('a1'), /class="am-when am-when-overdue"[^>]*>[^<]*· am\.rel_overdue_days</);
+  assert.doesNotMatch(row('tz'), /am-pfx/, 'no prefix and no separator when nothing remains');
+  assert.doesNotMatch(row('tz'), /am-when-overdue/);
+});
+
+test('under Machine grouping the row prefix drops the line; under Order grouping it drops the order number', () => {
+  Store.setTasks([task('1', { MACHINE: 'L3' })], 'test');
+  seed([alert('a1', { type: 'late', taskId: '1', line: 'L3' })], { view: { groupBy: 'line' } });
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /<span class="am-pfx">471 ·<\/span>/);
+  assert.doesNotMatch(els['am-groups'].innerHTML, /<span class="am-pfx">L3/);
+  seed([alert('a1', { type: 'late', taskId: '1', line: 'L3' })], { view: { groupBy: 'order' } });
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /<span class="am-pfx">L3 ·<\/span>/);
+});
+
+test('the headline and the help sentence ride in the row tooltip; no ⓘ icon', () => {
+  const priorLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { ...priorLocales.en, 'alert.help.late': 'The order finishes after its due date.' } };
+  Store.setTasks([task('1')], 'test');
+  seed([alert('a1', { type: 'late', taskId: '1' })]);
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /<div class="am-row am-row-err" title="[^"]*— The order finishes after its due date\.">/);
+  assert.doesNotMatch(els['am-groups'].innerHTML, /ⓘ|am-help/);
+});
+
+test('nothing the page renders says points, pts, exact or estimate', () => {
+  Store.setTasks([task('1'), task('2')], 'test');
+  seed([alert('a1', { type: 'overlap', taskId: '1', peerId: '2' }), alert('a2', { type: 'closed', taskId: '2' }), alert('a3', { type: 'overload', taskId: undefined, line: 'L1' })]);
+  AlertMonitorPane.render();
+  assert.doesNotMatch(els['am-groups'].innerHTML + els['am-summary'].innerHTML, /points|pts|exact|estimate/i);
 });
 
 test('rows beyond the cap sit behind "Show all N"; clicking it renders the rest', () => {
@@ -546,7 +586,7 @@ test('the focus chip bypasses the profile and says how many focused alerts are o
   assert.doesNotMatch(els['am-groups'].innerHTML, /data-alert-id="a2"/);
 });
 
-test('row actions mirror the drawer: focus, fix, override, dismiss', () => {
+test('row actions mirror the drawer (focus, fix, override) and a stray "dismiss" is not an action here', () => {
   const log = [];
   globalThis.NIMBUS = {
     AlertsUIAdapter: { focus: id => log.push(['focus', id]) },
@@ -555,6 +595,7 @@ test('row actions mirror the drawer: focus, fix, override, dismiss', () => {
   const undo = [
     patched(Alerts, 'applyFix', id => log.push(['fix', id])),
     patched(Alerts, 'dismiss', id => log.push(['dismiss', id])),
+    patched(Alerts, 'dismissAll', id => log.push(['dismissAll', id])),
   ];
   try {
     seed([alert('a1', { type: 'overlap' })]);
@@ -563,7 +604,31 @@ test('row actions mirror the drawer: focus, fix, override, dismiss', () => {
     clickAlert('fix', 'a1');
     clickAlert('override', 'a1', { taskId: 'T9' });
     clickAlert('dismiss', 'a1');
-    assert.deepEqual(log, [['focus', 'a1'], ['fix', 'a1'], ['override', 'T9'], ['dismiss', 'a1']]);
+    assert.deepEqual(log, [['focus', 'a1'], ['fix', 'a1'], ['override', 'T9']]);
+  } finally { undo.forEach(u => u()); }
+});
+
+test('there is no Dismiss anywhere on the page: no row or group button, no menu item, no group-dismiss action', () => {
+  const seen = [];
+  const log = [];
+  const undo = [
+    patched(OverflowMenu, 'open', (anchor, items) => { seen.push(items); return { close() {} }; }),
+    patched(Alerts, 'dismiss', id => log.push(['dismiss', id])),
+    patched(Alerts, 'dismissAll', ids => log.push(['dismissAll', ids])),
+    patched(Modal, 'confirm', async () => { log.push('confirm'); return true; }),
+  ];
+  try {
+    Store.setTasks([task('1'), task('2')], 'test');
+    seed([alert('a1', { type: 'overlap', taskId: '1', peerId: '2', line: 'L1' }), alert('a2', { type: 'closed', taskId: '2', line: 'L1' })]);
+    AlertMonitorPane.render();
+    assert.doesNotMatch(els['am-groups'].innerHTML, /dismiss|am\.group_dismiss|btn\.dismiss/i);
+    clickAlert('dismiss', 'a1');
+    clickAm('group-dismiss', { groupKey: 'conflicts' });
+    clickMenu('.am-row-menu', { alertId: 'a1' });
+    clickMenu('.am-group-menu', { groupKey: 'conflicts' });
+    assert.equal(seen.length, 2);
+    for (const items of seen) assert.ok(items.every(i => !/dismiss/i.test(`${i.id} ${i.label} ${JSON.stringify(i.data)}`)));
+    assert.deepEqual(log, []);
   } finally { undo.forEach(u => u()); }
 });
 
@@ -612,41 +677,147 @@ test('Diagnose: a line/day alert opens the cell briefing, an order alert toggles
   assert.doesNotMatch(els['am-groups'].innerHTML, /class="am-diag"/);
 });
 
-test('group Dismiss asks for confirmation above five alerts and dismisses exactly that group', async () => {
-  const dismissed = [];
-  let confirms = 0;
+/* ---------------------------------------------------------------------------
+   Task 24 — ⋯ menus, group "Move N orders", bulk acknowledge, the group-by none list
+   ------------------------------------------------------------------------- */
+import { AlertAckModal } from '../../../frontend/alert-monitor/alert-ack-modal.mjs';
+import { AlertAcksClient } from '../../../frontend/insights/alert-acks-client.mjs';
+import { VirtualList } from '../../../frontend/platform/foundation.mjs';
+import { ROW_H, DIAG_H } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
+
+const clickMenu = (selector, dataset) => els['alerts-tab'].handlers.click({ target: { closest: sel => (sel === selector ? { dataset } : null) } });
+const section = key => els['am-groups'].innerHTML.match(new RegExp(`<section class="am-group panel" data-group-key="${key}">[\\s\\S]*?</section>`))[0];
+
+/** Click a ⋯ trigger through the delegated handler and return what OverflowMenu.open was called with. */
+function openMenu(selector, dataset) {
+  const seen = [];
+  const undo = patched(OverflowMenu, 'open', (anchor, items, opts) => { seen.push({ anchor, items, opts }); return { close() {} }; });
+  try { clickMenu(selector, dataset); } finally { undo(); }
+  return seen;
+}
+
+test('the row ⋯ menu lists Go to, Fix, Diagnose, Acknowledge with the buttons\' data attributes, keyed by the alert id', () => {
+  Store.setTasks([task('1')], 'test');
+  seed([alert('a1', { type: 'overlap', taskId: '1', line: 'L1' })]);
+  AlertMonitorPane.render();
+  const [m] = openMenu('.am-row-menu', { alertId: 'a1' });
+  assert.deepEqual(m.opts, { align: 'end', key: 'a1' });
+  assert.deepEqual(m.items.map(i => [i.id, i.label, !!i.disabled]), [
+    ['focus', 'btn.go_to', false], ['fix', 'btn.fix_it', false], ['diagnose', 'am.diagnose', false], ['ack', 'am.ack', false],
+  ]);
+  assert.ok(m.items.every(i => i.data.alertAction === i.id && i.data.alertId === 'a1' && i.data.taskId === '1'));
+});
+
+test('the row ⋯ menu offers Override for the closed family and Remove acknowledgement on an acknowledged row', () => {
+  const acked = new Map([['c1', { alert_id: 'c1', acknowledged_by: 'pat', until: null }]]);
+  Store.setTasks([task('1')], 'test');
+  seed([alert('c1', { type: 'closed', taskId: '1', line: 'L1' })], { acked, showAcked: true });
+  AlertMonitorPane.render();
+  const [m] = openMenu('.am-row-menu', { alertId: 'c1' });
+  assert.deepEqual(m.items.map(i => i.id), ['focus', 'override', 'diagnose', 'unack']);
+  assert.deepEqual(m.items.find(i => i.id === 'unack').label, 'am.unack');
+});
+
+test('menu items dispatch through the same handler as the buttons: focus, fix, override, diagnose, ack, unack', async () => {
+  const log = [];
+  globalThis.NIMBUS = {
+    AlertsUIAdapter: { focus: id => log.push(['focus', id]) },
+    Table: { _openOverrideModalForId: id => log.push(['override', id]) },
+  };
   const undo = [
-    patched(Alerts, 'dismissAll', ids => dismissed.push([...ids])),
-    patched(Modal, 'confirm', async () => { confirms++; return true; }),
+    patched(Alerts, 'applyFix', id => log.push(['fix', id])),
+    patched(AlertAckModal, 'open', o => log.push(['ack', o.plant, o.alertId])),
+    patched(AlertAcksClient, 'unacknowledge', async (plant, id) => { log.push(['unack', plant, id]); }),
   ];
   try {
-    const six = Array.from({ length: 6 }, (_, i) => alert(`s${i}`, { type: 'overload', taskId: undefined }));
-    seed([...six, alert('o1', { type: 'overlap' })]);
+    Store.setTasks([task('1'), task('2')], 'test');
+    const acked = new Map([['c1', { alert_id: 'c1', acknowledged_by: 'pat', until: null }]]);
+    seed([alert('a1', { type: 'late', taskId: '1', line: 'L1' }), alert('o1', { type: 'overlap', taskId: '2', line: 'L1' }),
+      alert('c1', { type: 'closed', taskId: '2', line: 'L1' })], { acked, showAcked: true });
     AlertMonitorPane.render();
-    clickAm('group-dismiss', { groupKey: 'capacity' });
-    await sleep(5);
-    assert.equal(confirms, 1);
-    assert.deepEqual(dismissed, [six.map(a => a.id)]);
-
-    clickAm('group-dismiss', { groupKey: 'conflicts' });   // one alert: no confirm
-    await sleep(5);
-    assert.equal(confirms, 1);
-    assert.deepEqual(dismissed.at(-1), ['o1']);
+    const pick = (id, action) => openMenu('.am-row-menu', { alertId: id })[0].items.find(i => i.id === action).onSelect({});
+    pick('o1', 'focus');
+    pick('o1', 'fix');
+    pick('c1', 'override');
+    pick('a1', 'ack');
+    pick('c1', 'unack');
+    await sleep(0);
+    assert.deepEqual(log, [['focus', 'o1'], ['fix', 'o1'], ['override', '2'], ['ack', 'P1', 'a1'], ['unack', 'P1', 'c1']]);
+    assert.doesNotMatch(els['am-groups'].innerHTML, /class="am-diag"/);
+    pick('a1', 'diagnose');
+    assert.match(els['am-groups'].innerHTML, /class="am-diag"/);
   } finally { undo.forEach(u => u()); }
 });
 
-test('Open in table fills the PO/Material filter, applies it and switches to the Orders sub-tab', () => {
+test('after Diagnose the ⋯ trigger the repaint replaced gets focus back (found by its data-ovf-key)', () => {
+  const focused = [];
+  Store.setTasks([task('1')], 'test');
+  seed([alert('a1', { type: 'late', taskId: '1', line: 'L1' })]);
+  AlertMonitorPane.render();
+  globalThis.document.querySelectorAll = sel => (sel === '[data-ovf-key]'
+    ? [{ getAttribute: () => 'a1', focus: () => focused.push('a1') }, { getAttribute: () => 'other', focus: () => focused.push('other') }] : []);
+  openMenu('.am-row-menu', { alertId: 'a1' })[0].items.find(i => i.id === 'diagnose').onSelect({});
+  assert.deepEqual(focused, ['a1']);
+});
+
+test('under What-If the ⋯ menu disables Fix and Override with the hint, and the handler blocks them anyway', () => {
+  const log = [];
+  globalThis.NIMBUS = { Table: { _openOverrideModalForId: id => log.push(['override', id]) } };
+  const undo = patched(Alerts, 'applyFix', id => log.push(['fix', id]));
+  Sandbox.active = true;
+  try {
+    Store.setTasks([task('1'), task('2')], 'test');
+    seed([alert('o1', { type: 'overlap', taskId: '1', line: 'L1' }), alert('c1', { type: 'closed', taskId: '2', line: 'L1' })]);
+    AlertMonitorPane.render();
+    for (const [id, action] of [['o1', 'fix'], ['c1', 'override']]) {
+      const item = openMenu('.am-row-menu', { alertId: id })[0].items.find(i => i.id === action);
+      assert.equal(item.disabled, true);
+      assert.equal(item.hint, 'am.whatif_blocked');
+      item.onSelect({});
+    }
+    assert.deepEqual(log, []);
+    const ack = openMenu('.am-row-menu', { alertId: 'o1' })[0].items.find(i => i.id === 'ack');
+    assert.equal(!!ack.disabled, false, 'acknowledging is server state: it stays available');
+  } finally { Sandbox.active = false; undo(); }
+});
+
+test('the group ⋯ menu lists Go to, Move N orders, Open these N orders, Acknowledge N… (N = the group\'s un-acknowledged alerts)', () => {
+  const acked = new Map([['a3', { alert_id: 'a3', acknowledged_by: 'pat', until: null }]]);
+  Store.setTasks([task('1'), task('2'), task('3')], 'test');
+  seed([
+    alert('a1', { type: 'overlap', taskId: '1', peerId: '2', line: 'L1' }),
+    alert('a2', { type: 'overlap', taskId: '2', peerId: '3', line: 'L1' }),
+    alert('a3', { type: 'tool-conflict', taskId: '3', peerId: '1', line: 'L1' }),
+    alert('o1', { type: 'overload', taskId: undefined, line: 'L1' }),
+  ], { acked, showAcked: true });
+  AlertMonitorPane.render();
+  const [m] = openMenu('.am-group-menu', { groupKey: 'conflicts' });
+  assert.deepEqual(m.opts, { align: 'end', key: 'conflicts' });
+  assert.deepEqual(m.items.map(i => i.id), ['goto', 'move', 'open-table', 'ack']);
+  assert.deepEqual(m.items.map(i => i.label), ['btn.go_to', 'am.group_fix_n', 'am.open_in_table', 'am.group_ack_n']);
+  assert.equal(m.items[0].data.alertAction, 'focus');
+  assert.equal(m.items[1].data.groupKey, 'conflicts');
+  // overload is not movable: its group offers no Move
+  const [cap] = openMenu('.am-group-menu', { groupKey: 'capacity' });
+  assert.ok(!cap.items.some(i => i.id === 'move'));
+  assert.match(section('conflicts'), /am-group-move[^>]*>am\.group_fix_n</);
+  assert.doesNotMatch(section('capacity'), /group-move/);
+});
+
+test('group menu → Go to focuses the first alert with a Go to; Open these N orders fills the table filter', () => {
   const log = [];
   globalThis.NIMBUS = {
+    AlertsUIAdapter: { focus: id => log.push(['focus', id]) },
     Table: { _onPoMatApply: () => log.push(['apply', els['tbl-flt-pomat-textarea'].value]) },
     App: { goto: tab => log.push(['goto', tab]), gotoGanttSub: sub => log.push(['sub', sub]) },
   };
   Store.setTasks([task('1'), task('2')], 'test');
-  seed([alert('a1', { type: 'overlap', taskId: '1', peerId: '2' })]);
+  seed([alert('a1', { type: 'overlap', taskId: '1', peerId: '2', line: 'L1' })]);
   AlertMonitorPane.render();
-  clickAm('group-open-table', { groupKey: 'conflicts' });
-  // leaves the Alert Monitor tab first, then lands on the Orders sub-tab
-  assert.deepEqual(log, [['apply', '471\n472'], ['goto', 'gantt'], ['sub', 'orders']]);
+  const items = openMenu('.am-group-menu', { groupKey: 'conflicts' })[0].items;
+  items.find(i => i.id === 'goto').onSelect({});
+  items.find(i => i.id === 'open-table').onSelect({});
+  assert.deepEqual(log, [['focus', 'a1'], ['apply', '471\n472'], ['goto', 'gantt'], ['sub', 'orders']]);
 });
 
 test('Open in table falls back to a toast when the table filter is unavailable', () => {
@@ -655,20 +826,166 @@ test('Open in table falls back to a toast when the table filter is unavailable',
   globalThis.NIMBUS = {};
   try {
     Store.setTasks([task('1')], 'test');
-    seed([alert('a1', { type: 'late', taskId: '1' })]);
+    seed([alert('a1', { type: 'late', taskId: '1', line: 'L1' })]);
     AlertMonitorPane.render();
-    clickAm('group-open-table', { groupKey: 'exceptions' });
+    openMenu('.am-group-menu', { groupKey: 'exceptions' })[0].items.find(i => i.id === 'open-table').onSelect({});
     assert.deepEqual(toasts, [['am.table_unavailable', 'warn']]);
   } finally { undo(); }
 });
 
-/* ---------------------------------------------------------------------------
-   Task 15 — Acknowledge / Remove acknowledgement row actions
-   ------------------------------------------------------------------------- */
-import { AlertAckModal } from '../../../frontend/alert-monitor/alert-ack-modal.mjs';
-import { AlertAcksClient } from '../../../frontend/insights/alert-acks-client.mjs';
+/** Seven movable alerts in one group (ids sort a1..a7 under the Date ranking, which breaks equal times by id). */
+function seedBatch() {
+  Store.setTasks([], 'test');
+  seed([
+    alert('a1', { type: 'overlap', taskId: '1', peerId: '2' }),
+    alert('a2', { type: 'overlap', taskId: '3', peerId: '1' }),        // its peer (1) moves first: skipped
+    alert('a3', { type: 'tool-conflict', taskId: '2', peerId: '4' }),
+    alert('a4', { type: 'overlap', taskId: '5', peerId: '6' }),        // applyFix refuses (firmed): not counted
+    alert('a5', { type: 'overlap', taskId: '4', peerId: '9' }),
+    alert('a6', { type: 'overlap', taskId: '7', peerId: '8' }),        // leaves Store.alerts while a1 is fixed: skipped
+    alert('a7', { type: 'overlap', taskId: '1', peerId: '8' }),        // the same order as a1: skipped
+  ], { view: { groupBy: 'category', sort: 'time' } });
+}
 
-test('row Acknowledge opens the modal; an acknowledged row offers Remove acknowledgement', async () => {
+function stubFix(fixes, { refuse = [], alsoGone = {} } = {}) {
+  return patched(Alerts, 'applyFix', (id, opts) => {
+    fixes.push([id, opts]);
+    if (refuse.includes(id)) return;
+    const gone = new Set([id, ...(alsoGone[id] ?? [])]);
+    Store.setAlerts(Store.alerts.filter(a => !gone.has(a.id)), 'test');
+  });
+}
+
+test('Move N orders confirms above five, then fixes sequentially and quietly, skipping stale alerts, and toasts once', async () => {
+  const fixes = [], toasts = [], focused = [];
+  const undo = [
+    stubFix(fixes, { refuse: ['a4'], alsoGone: { a1: ['a6'] } }),
+    patched(Toast, 'show', (m, k) => toasts.push([m, k])),
+    patched(Modal, 'confirm', async o => { toasts.push(['confirm', o.title, o.message]); return true; }),
+  ];
+  try {
+    seedBatch();
+    AlertMonitorPane.render();
+    globalThis.document.querySelectorAll = sel => (sel === '[data-am-action="toggle-group"]'
+      ? [{ dataset: { groupKey: 'other' }, focus: () => focused.push('other') }, { dataset: { groupKey: 'conflicts' }, focus: () => focused.push('conflicts') }] : []);
+    clickAm('group-move', { groupKey: 'conflicts' });
+    await sleep(5);
+    assert.deepEqual(toasts[0], ['confirm', 'am.group_fix_n', 'am.group_fix_confirm']);
+    assert.deepEqual(fixes, [['a1', { quiet: true }], ['a3', { quiet: true }], ['a4', { quiet: true }], ['a5', { quiet: true }]]);
+    assert.deepEqual(toasts.slice(1), [['am.group_fix_done', 'success']], 'one summary toast, nothing per order');
+    assert.deepEqual(focused, ['conflicts'], 'focus returns to the group head');
+  } finally { undo.forEach(u => u()); }
+});
+
+test('Move N orders: a declined confirmation moves nothing; five or fewer need no confirmation', async () => {
+  const fixes = [], toasts = [];
+  let ask = false, confirms = 0;
+  const undo = [
+    stubFix(fixes),
+    patched(Toast, 'show', (m, k) => toasts.push([m, k])),
+    patched(Modal, 'confirm', async () => { confirms++; return ask; }),
+  ];
+  try {
+    seedBatch();
+    AlertMonitorPane.render();
+    clickAm('group-move', { groupKey: 'conflicts' });
+    await sleep(5);
+    assert.deepEqual([confirms, fixes, toasts], [1, [], []]);
+
+    Store.setAlerts(Store.alerts.slice(0, 5), 'test');   // five alerts left: a1..a5
+    AlertMonitorPane.render();
+    clickAm('group-move', { groupKey: 'conflicts' });
+    await sleep(5);
+    assert.equal(confirms, 1, 'no confirmation at five');
+    assert.ok(fixes.length >= 1);
+    assert.equal(toasts.length, 1);
+  } finally { undo.forEach(u => u()); }
+});
+
+test('Move N orders reads "1 order moved" at exactly one, and reports nothing moved when every fix is refused', () => {
+  const fixes = [], toasts = [];
+  const undo = [stubFix(fixes, { refuse: ['b1', 'b2'] }), patched(Toast, 'show', (m, k) => toasts.push([m, k]))];
+  try {
+    Store.setTasks([], 'test');
+    seed([alert('b1', { type: 'overlap', taskId: '1', peerId: '2' }), alert('b2', { type: 'overlap', taskId: '3', peerId: '1' })]);
+    AlertMonitorPane.render();
+    clickAm('group-move', { groupKey: 'conflicts' });
+    assert.deepEqual(toasts, [['am.group_fix_done', 'warn']]);
+    toasts.length = 0;
+    undo[0]();
+    undo[0] = stubFix(fixes);
+    clickAm('group-move', { groupKey: 'conflicts' });
+    assert.deepEqual(toasts, [['am.group_fix_done_one', 'success']], 'the second alert names an order the first one moved');
+  } finally { undo.forEach(u => u()); }
+});
+
+test('Move N orders is blocked under What-If (aria-disabled markup and handler) and overload is never moved', () => {
+  const fixes = [];
+  const undo = stubFix(fixes);
+  try {
+    seed([alert('a1', { type: 'overlap', taskId: '1', peerId: '2' }), alert('a2', { type: 'overlap', taskId: '3', peerId: '4' }),
+      alert('o1', { type: 'overload', taskId: undefined }), alert('o2', { type: 'overload', taskId: undefined })]);
+    Sandbox.active = true;
+    AlertMonitorPane.render();
+    assert.match(els['am-groups'].innerHTML, /class="btn sm am-group-move"[^>]*aria-disabled="true" title="am\.whatif_blocked"/);
+    clickAm('group-move', { groupKey: 'conflicts' });
+    assert.deepEqual(fixes, []);
+    Sandbox.active = false;
+    AlertMonitorPane.render();
+    assert.doesNotMatch(els['am-groups'].innerHTML, /aria-disabled="true" title="am\.whatif_blocked"/);
+    assert.doesNotMatch(section('capacity'), /group-move/, 'two overloads: not movable');
+    clickAm('group-move', { groupKey: 'capacity' });
+    assert.deepEqual(fixes, []);
+  } finally { Sandbox.active = false; undo(); }
+});
+
+test('Acknowledge N… opens the ack modal in bulk mode with every un-acknowledged id of the whole group, past the row cap', () => {
+  const opened = [];
+  const undo = patched(AlertAckModal, 'open', o => opened.push(o));
+  try {
+    const many = Array.from({ length: 45 }, (_, i) => alert(`m${String(i).padStart(2, '0')}`, { type: 'overload', taskId: undefined }));
+    const acked = new Map([['m00', { alert_id: 'm00', acknowledged_by: 'pat', until: null }], ['m01', { alert_id: 'm01', acknowledged_by: 'pat', until: null }]]);
+    seed(many, { acked, showAcked: true });
+    AlertMonitorPane.render();
+    assert.equal((els['am-groups'].innerHTML.match(/class="am-rowwrap"/g) ?? []).length, 40, 'only 40 rows are rendered');
+    const item = openMenu('.am-group-menu', { groupKey: 'capacity' })[0].items.find(i => i.id === 'ack');
+    item.onSelect({});
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0].plant, 'P1');
+    assert.equal(opened[0].alertIds.length, 43);
+    assert.ok(!opened[0].alertIds.includes('m00') && !opened[0].alertIds.includes('m01'));
+    assert.ok(opened[0].alertIds.includes('m44'), 'an alert behind "Show all" is included');
+    assert.equal(openMenu('.am-group-menu', { groupKey: 'capacity' })[0].items.find(i => i.id === 'ack').label, 'am.group_ack_n');
+  } finally { undo(); }
+});
+
+test('group-by none uses ROW_H = 44 for the list and adds DIAG_H under an open diagnose', () => {
+  const rowHs = [];
+  const orig = VirtualList.prototype.update;
+  VirtualList.prototype.update = function (items) { rowHs.push(items.map(a => this._getRowH(a))); return orig.call(this, items); };
+  try {
+    Store.setTasks([task('1')], 'test');
+    seed([alert('a1', { type: 'late', taskId: '1' }), alert('a2', { type: 'overload', taskId: undefined })], { view: { groupBy: 'none', sort: 'time' } });
+    globalThis.document.createElement = () => makeEl('inner');
+    AlertMonitorPane.render();
+    assert.equal(ROW_H, 44);
+    assert.deepEqual(rowHs.at(-1), [44, 44]);
+    clickAlert('diagnose', 'a1');
+    assert.deepEqual(rowHs.at(-1), [44 + DIAG_H, 44]);
+  } finally { VirtualList.prototype.update = orig; }
+});
+
+test('the diagnose panel opens with the alert type\'s help sentence as its first full-width line', () => {
+  const priorLocales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { ...priorLocales.en, 'alert.help.late': 'The order finishes after its due date.' } };
+  Store.setTasks([task('1')], 'test');
+  seed([alert('a1', { type: 'late', taskId: '1' })]);
+  AlertMonitorPane.render();
+  clickAlert('diagnose', 'a1');
+  assert.match(els['am-groups'].innerHTML, /<div class="am-diag"><p class="am-diag-help"[^>]*>The order finishes after its due date\.<\/p><dl class="am-diag-grid">/);
+});
+
+test('row Acknowledge and Remove acknowledgement live in the ⋯ menu; the row has no Acknowledge button', async () => {
   const log = [];
   const undo = [
     patched(AlertAckModal, 'open', o => log.push(['open', o.plant, o.alertId])),
@@ -678,10 +995,7 @@ test('row Acknowledge opens the modal; an acknowledged row offers Remove acknowl
     const acked = new Map([['a2', { alert_id: 'a2', acknowledged_by: 'pat', until: null }]]);
     seed([alert('a1'), alert('a2')], { acked, showAcked: true });
     AlertMonitorPane.render();
-    const html = els['am-groups'].innerHTML;
-    assert.match(html, /<button[^>]*data-alert-action="ack"[^>]*data-alert-id="a1"(?![^>]*disabled)/);
-    assert.doesNotMatch(html, /data-alert-action="ack"[^>]*data-alert-id="a2"/);
-    assert.match(html, /data-alert-action="unack"[^>]*data-alert-id="a2"/);
+    assert.doesNotMatch(els['am-groups'].innerHTML, /data-alert-action="(ack|unack)"/);
     clickAlert('ack', 'a1');
     clickAlert('unack', 'a2');
     await new Promise(r => setTimeout(r, 0));

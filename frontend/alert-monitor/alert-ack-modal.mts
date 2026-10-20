@@ -45,7 +45,7 @@ export function defaultUntilDay(plant: string): string {
   return Util.dayKey(d);
 }
 
-interface AckState { plant: string; alertId: string; busy: boolean; }
+interface AckState { plant: string; alertIds: string[]; busy: boolean; }
 interface PickerLike { setDate(d: string, fire?: boolean): void; destroy(): void; altInput?: HTMLInputElement }
 
 let _s: AckState | null = null;
@@ -125,12 +125,14 @@ function _wire(): void {
 }
 
 export const AlertAckModal = {
-  open(opts: { plant: string; alertId: string }): void {
-    if (!opts.plant || !opts.alertId) return;
-    _s = { plant: opts.plant, alertId: opts.alertId, busy: false };
+  /** One alert (`alertId`) or several (`alertIds`, the group's bulk mode: one reason and end date for all). */
+  open(opts: { plant: string; alertId?: string; alertIds?: string[] }): void {
+    const alertIds = [...new Set((opts.alertIds ?? (opts.alertId ? [opts.alertId] : [])).filter(Boolean))];
+    if (!opts.plant || !alertIds.length) return;
+    _s = { plant: opts.plant, alertIds, busy: false };
     _wire();
     const title = _el('aak-title');
-    if (title) title.textContent = t('am.ack_title');
+    if (title) title.textContent = alertIds.length > 1 ? t('am.ack_title_n', { n: alertIds.length }) : t('am.ack_title');
     const body = _el('aak-body');
     if (body) body.innerHTML = _bodyHtml();
     const foot = _el('aak-foot');
@@ -155,7 +157,13 @@ export const AlertAckModal = {
     const save = _el<HTMLButtonElement>('aak-save');
     if (save) save.disabled = true;
     try {
-      await AlertAcksClient.acknowledge({ plant: s.plant, alert_id: s.alertId, reason: v.reason, until: v.until });
+      if (s.alertIds.length > 1) {
+        // One request, one refetch, one notify (the server is transactional); the lists repaint themselves.
+        const r = await AlertAcksClient.acknowledgeMany(s.plant, s.alertIds, v.reason, v.until);
+        Toast.show(r.failed > 0 ? t('am.ack_bulk_partial', { n: r.ok, k: r.failed }) : t('am.ack_bulk_done', { n: r.ok }), r.failed > 0 ? 'warn' : 'success');
+      } else {
+        await AlertAcksClient.acknowledge({ plant: s.plant, alert_id: s.alertIds[0]!, reason: v.reason, until: v.until });
+      }
       if (_s === s) AlertAckModal.close();
     } catch (err) {
       Toast.show((err as Error)?.message || String(err), 'error');

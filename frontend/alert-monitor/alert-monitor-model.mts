@@ -223,9 +223,16 @@ export function emptyStateFor(input: {
 /** Rows shown per group before "Show all N". */
 export const GROUP_ROW_CAP = 40;
 /** Fixed row height (px) — also the VirtualList rowH in group-by none. */
-export const ROW_H = 56;
-/** Height (px) of the inline diagnose panel under an order row. */
-export const DIAG_H = 96;
+export const ROW_H = 44;
+/**
+ * Height (px) of the inline diagnose panel under an order row: 20 padding + the help sentence (two 17 px
+ * lines at most, clamped) + 6 gap + two rows of the field grid (2 x 28 + 6) + slack. Keep `.am-diag` in styles.css in step.
+ */
+export const DIAG_H = 132;
+/** The alert types a group's "Move N orders" moves: `overload` is excluded, its fix runs the line-day changeover optimizer. */
+export const MOVABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'tool-conflict']);
+/** Above this many orders "Move N orders" asks first. */
+export const GROUP_MOVE_CONFIRM_ABOVE = 5;
 
 const _esc = (s: unknown): string => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -270,31 +277,33 @@ export function formatPairKey(pairKey: string | null | undefined): string {
   return `${state(pairKey.slice(0, split + 1))} → ${state(pairKey.slice(split + 3))}`;
 }
 
-export interface GroupTotals { count: number; errors: number; warnings: number; points: number; orders: number; lateH: number }
-
-/**
- * Group-head sums. Orders = distinct taskId ∪ peerId; late hours are summed once per distinct
- * order (an order carrying three alerts is not three times late).
- */
-export function groupTotals<A extends AlertLike>(
-  alerts: ReadonlyArray<A>,
-  pointsOf: (a: A) => number,
-  lateOf: (taskId: string) => number,
-): GroupTotals {
-  const orders = new Set<string>();
-  let errors = 0, warnings = 0, points = 0;
-  for (const a of alerts) {
-    if (a.sev === 'err') errors++; else warnings++;
-    points += pointsOf(a);
-    if (a.taskId) orders.add(String(a.taskId));
-    if (a.peerId) orders.add(String(a.peerId));
-  }
-  let lateH = 0;
-  for (const id of orders) lateH += lateOf(id) || 0;
-  return { count: alerts.length, errors, warnings, points, orders: orders.size, lateH };
+export interface GroupCounts {
+  errors: number;
+  warnings: number;
+  /** Distinct orders the group touches (taskId ∪ peerId). */
+  orders: number;
+  /** The whole group's alerts "Move N orders" would move, in list order. */
+  movableIds: string[];
+  /** The whole group's alerts that are not acknowledged yet (what "Acknowledge N…" covers). */
+  unackedIds: string[];
 }
 
-/** One decimal at most, no trailing ".0" (impact points are 5 / 2 times 1 / 1.25 / 1.5). */
+/** What a group head shows and offers. Counts only: a group head carries no totals. */
+export function groupCounts<A extends AlertLike>(alerts: ReadonlyArray<A>, isAcked: (id: string) => boolean): GroupCounts {
+  const orders = new Set<string>();
+  const out: GroupCounts = { errors: 0, warnings: 0, orders: 0, movableIds: [], unackedIds: [] };
+  for (const a of alerts) {
+    if (a.sev === 'err') out.errors++; else out.warnings++;
+    if (a.taskId) orders.add(String(a.taskId));
+    if (a.peerId) orders.add(String(a.peerId));
+    if (MOVABLE_ALERT_TYPES.has(a.type)) out.movableIds.push(a.id);
+    if (!isAcked(a.id)) out.unackedIds.push(a.id);
+  }
+  out.orders = orders.size;
+  return out;
+}
+
+/** One decimal at most, no trailing ".0". */
 export function fmtNum(n: number): string {
   const r = Math.round(n * 10) / 10;
   return Number.isInteger(r) ? String(r) : r.toFixed(1);
@@ -311,12 +320,17 @@ export interface RowView {
   message: string;
   help: string;
   orderNo: string;
+  /** `msgVars.line` of the alert: when the message already names the line the prefix does not repeat it. */
+  msgLine?: string;
+  /** The page's active grouping: the prefix part the group head already says is dropped. */
+  groupBy: MonitorGroupBy;
+  /** "Thu 23 Oct" and "in 3 days" (the when column joins them). */
   dateText: string;
   relText: string;
+  /** The anchor is in the past: the when column reads in the error colour. */
+  overdue: boolean;
+  /** Names the anchor and its exact time (title of the when column). */
   anchorTip: string;
-  points: number;
-  orders: number;
-  lateH: number;
   /** What-If is active: Fix / Override render disabled. */
   whatIf: boolean;
   /** Set when an acknowledged row is shown ("Acknowledged by …"). */
@@ -331,105 +345,182 @@ function _sevGlyph(type: string, sev: 'err' | 'warn'): string {
   return CALENDAR_ALERT_TYPES.has(type) ? '⊘' : _SEV_GLYPH[sev];
 }
 
-/** Label/value pairs as a compact definition grid (inside the fixed-height diagnose panel). */
-export function diagnoseHtml(fields: ReadonlyArray<{ label: string; value: string }>): string {
-  const cells = fields.filter(f => f.value !== '' && f.value != null)
-    .map(f => `<div class="am-diag-f"><dt>${_esc(f.label)}</dt><dd title="${_esc(f.value)}">${_esc(f.value)}</dd></div>`).join('');
-  return `<dl class="am-diag-grid">${cells}</dl>`;
+/**
+ * The mono prefix of a row: the non-empty parts of [line, order number] joined by " · ", minus the part the active
+ * grouping already says (line under Machine, order under Order) and minus the line when the message names it.
+ * Empty when nothing remains (the row then shows no prefix and no separator).
+ */
+export function rowPrefix(v: Pick<RowView, 'line' | 'orderNo' | 'message' | 'msgLine' | 'groupBy'>): string {
+  const parts: string[] = [];
+  const line = v.line ? String(v.line) : '';
+  const named = !!v.msgLine && v.message.includes(String(v.msgLine));
+  if (line && v.groupBy !== 'line' && !named) parts.push(line);
+  if (v.orderNo && v.groupBy !== 'order') parts.push(String(v.orderNo));
+  return parts.join(' · ');
 }
 
-/** One alert row (and, when open, its inline diagnose panel). */
+export type RowActionId = 'focus' | 'fix' | 'override' | 'diagnose' | 'ack' | 'unack';
+
+export interface RowMenuItem {
+  action: RowActionId;
+  labelKey: string;
+  /** Rendered disabled (aria-disabled) with `hintKey` as its hint. */
+  disabled?: boolean;
+  hintKey?: string;
+}
+
+export interface RowPrimary {
+  /** The row's [Go to] button. */
+  goto: boolean;
+  /** The row's second button, when the alert is eligible: Fix or Override (never both: the type sets are disjoint). */
+  second?: 'fix' | 'override';
+  /** The ⋯ menu, in order: Go to, Fix / Override, Diagnose, Acknowledge… / Remove acknowledgement. Never Dismiss. */
+  menu: RowMenuItem[];
+}
+
+/**
+ * What a row offers. Eligibility is `rowActionsFor` (the drawer's). `task` is the order the alert names (or null);
+ * it stands in for a missing `taskId` on the alert. Fix / Override are disabled in What-If.
+ */
+export function rowPrimaryActions(
+  a: { type: string; taskId?: string | null; line?: string; time?: Date | null },
+  task: { id?: unknown } | null | undefined,
+  ctx: { whatIf: boolean; acked: boolean },
+): RowPrimary {
+  const taskId = a.taskId != null && a.taskId !== '' ? a.taskId : (task?.id != null ? String(task.id) : a.taskId);
+  const acts = rowActionsFor({ ...a, taskId });
+  const second: RowPrimary['second'] = acts.fix ? 'fix' : acts.override ? 'override' : undefined;
+  const lock = (item: RowMenuItem): RowMenuItem => (ctx.whatIf ? { ...item, disabled: true, hintKey: 'am.whatif_blocked' } : item);
+  const menu: RowMenuItem[] = [];
+  if (acts.goto) menu.push({ action: 'focus', labelKey: 'btn.go_to' });
+  if (second === 'fix') menu.push(lock({ action: 'fix', labelKey: 'btn.fix_it' }));
+  if (second === 'override') menu.push(lock({ action: 'override', labelKey: 'btn.override' }));
+  if (acts.diagnose !== 'none') menu.push({ action: 'diagnose', labelKey: 'am.diagnose' });
+  menu.push(ctx.acked ? { action: 'unack', labelKey: 'am.unack' } : { action: 'ack', labelKey: 'am.ack' });
+  return { goto: acts.goto, second, menu };
+}
+
+/** Label/value pairs as a compact definition grid, headed by the alert type's help sentence (when there is one). */
+export function diagnoseHtml(fields: ReadonlyArray<{ label: string; value: string }>, help = ''): string {
+  const cells = fields.filter(f => f.value !== '' && f.value != null)
+    .map(f => `<div class="am-diag-f"><dt>${_esc(f.label)}</dt><dd title="${_esc(f.value)}">${_esc(f.value)}</dd></div>`).join('');
+  const lead = help ? `<p class="am-diag-help" title="${_esc(help)}">${_esc(help)}</p>` : '';
+  return `${lead}<dl class="am-diag-grid">${cells}</dl>`;
+}
+
+/** "⚙ Fix" -> glyph "⚙" + text "Fix"; a label with no leading glyph is all text. */
+function _splitGlyph(label: string): { glyph: string; text: string } {
+  const m = /^([^\p{L}\p{N}\s]+)\s+(.+)$/u.exec(label);
+  return m ? { glyph: m[1]!, text: m[2]! } : { glyph: '', text: label };
+}
+
+/** The glyph stays; the text sits in `.lbl`, which the stylesheet hides below 1,200 px (the button's aria-label / title keep it). */
+function _glyphBtnInner(label: string): string {
+  const { glyph, text } = _splitGlyph(label);
+  return (glyph ? `<span class="am-glyph" aria-hidden="true">${_esc(glyph)}</span>` : '') + `<span class="lbl">${_esc(text)}</span>`;
+}
+
+/** One alert row (and, when open, its inline diagnose panel): 44 px, one line. */
 export function rowHtml(v: RowView, t: Translate): string {
   const acts = rowActionsFor(v);
+  const p = rowPrimaryActions(v, null, { whatIf: v.whatIf, acked: !!v.ackLabel });
   const id = _esc(v.id);
   const lock = v.whatIf ? ` disabled aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : '';
   const buttons: string[] = [];
-  if (acts.goto) {
+  if (p.goto) {
     buttons.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${id}">${_esc(t('btn.go_to'))}</button>`);
   }
-  if (acts.fix) {
-    buttons.push(v.whatIf
-      ? `<button type="button" class="btn-fix" data-alert-action="fix" data-alert-id="${id}"${lock}>${_esc(t('btn.fix_it'))}</button>`
-      : `<button type="button" class="btn-fix" title="${_esc(t('tip.fix_alert'))}" data-alert-action="fix" data-alert-id="${id}">${_esc(t('btn.fix_it'))}</button>`);
+  if (p.second === 'fix') {
+    const label = t('btn.fix_it');
+    const text = _splitGlyph(label).text;
+    buttons.push(`<button type="button" class="btn sm btn-fix am-act-2" data-alert-action="fix" data-alert-id="${id}" aria-label="${_esc(text)}"`
+      + (v.whatIf ? lock : ` title="${_esc(`${text} · ${t('tip.fix_alert')}`)}"`) + `>${_glyphBtnInner(label)}</button>`);
+  } else if (p.second === 'override') {
+    const label = t('btn.override');
+    const text = _splitGlyph(label).text;
+    buttons.push(`<button type="button" class="btn btn-ghost sm am-act-2" data-alert-action="override" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}" aria-label="${_esc(text)}"`
+      + (v.whatIf ? lock : ` title="${_esc(text)}"`) + `>${_glyphBtnInner(label)}</button>`);
   }
-  if (acts.override) {
-    buttons.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="override" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}"${lock}>${_esc(t('btn.override'))}</button>`);
-  }
-  if (acts.diagnose === 'order') {
-    buttons.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="diagnose" data-alert-id="${id}" aria-expanded="${v.diagOpen}">${_esc(t('am.diagnose'))}</button>`);
-  } else if (acts.diagnose === 'cell') {
-    buttons.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="diagnose" data-alert-id="${id}">${_esc(t('am.diagnose'))}</button>`);
-  }
-  // An acknowledged row (shown when "Show acknowledged" is on) offers its removal instead; acks are server state, so What-If does not lock them.
-  buttons.push(v.ackLabel
-    ? `<button type="button" class="btn btn-ghost sm" data-alert-action="unack" data-alert-id="${id}">${_esc(t('am.unack'))}</button>`
-    : `<button type="button" class="btn btn-ghost sm" data-alert-action="ack" data-alert-id="${id}">${_esc(t('am.ack'))}</button>`);
-  buttons.push(`<button type="button" class="icon-btn sm" data-alert-action="dismiss" data-alert-id="${id}" title="${_esc(t('btn.dismiss'))}" aria-label="${_esc(t('btn.dismiss'))}">×</button>`);
+  buttons.push(`<button type="button" class="icon-btn sm am-row-menu" data-alert-id="${id}" data-ovf-key="${id}" aria-haspopup="menu" aria-expanded="false"`
+    + ` aria-label="${_esc(t('am.more_actions'))}" title="${_esc(t('am.more_actions'))}">⋯</button>`);
 
-  const pts = v.points > 0
-    ? `<span class="am-num">${_esc(fmtNum(v.points))}</span>`
-    : `<span class="am-num am-num-out" title="${_esc(t('am.points_outside_tip'))}">${_esc(t('am.points_outside'))}</span>`;
-  const late = v.lateH > 0 ? fmtNum(v.lateH) : '—';
-  const meta = _esc([v.orderNo, v.line].filter(Boolean).join(' · '));
-  const help = v.help
-    ? `<span class="am-help" tabindex="0" role="img" aria-label="${_esc(v.help)}" title="${_esc(v.help)}">ⓘ</span>` : '';
+  const prefix = rowPrefix(v);
+  const pfx = prefix ? `<span class="am-pfx">${_esc(prefix)} ·</span>` : '';
   const ack = v.ackLabel ? `<span class="badge badge-info am-ack-badge" title="${_esc(v.ackLabel)}">${_esc(v.ackLabel)}</span>` : '';
+  const when = [v.dateText, v.relText].filter(Boolean).join(' · ');
+  const tip = [v.headline, v.help].filter(Boolean).join(' — ');
 
   return `<div class="am-rowwrap" role="listitem" data-alert-id="${id}">`
-    + `<div class="am-row am-row-${v.sev}">`
+    + `<div class="am-row am-row-${v.sev}" title="${_esc(tip)}">`
     + `<span class="am-sev am-sev-${v.sev}" aria-hidden="true">${_sevGlyph(v.type, v.sev)}</span>`
-    + `<div class="am-main"><div class="am-hl"><span class="am-headline" title="${_esc(v.headline)}">${_esc(v.headline)}</span>${help}${ack}</div>`
-    + `<div class="am-msg" title="${_esc(v.message)}">${_esc(v.message)}</div></div>`
-    + `<div class="am-meta"><div class="am-meta-l" title="${meta}">${meta}</div>`
-    + `<div class="am-meta-l" title="${_esc(v.anchorTip)}">${_esc(v.dateText)}</div>`
-    + `<div class="am-meta-l am-meta-rel" title="${_esc(v.anchorTip)}">${_esc(v.relText)}</div></div>`
-    + `<div class="am-imp">${pts}<span class="am-num">${_esc(v.orders)}</span><span class="am-num">${_esc(late)}</span></div>`
+    + `<div class="am-main">${pfx}<span class="am-msg">${_esc(v.message)}</span>${ack}</div>`
+    + `<span class="am-when${v.overdue ? ' am-when-overdue' : ''}" title="${_esc(v.anchorTip)}">${_esc(when)}</span>`
     + `<div class="am-acts">${buttons.join('')}</div>`
     + `</div>`
     + (v.diagOpen && acts.diagnose === 'order' ? `<div class="am-diag">${v.diagHtml}</div>` : '')
     + `</div>`;
 }
 
-/** The column captions above a group's rows, aligned to the row grid. */
-export function colsHtml(t: Translate): string {
-  return `<div class="am-cols" aria-hidden="true"><span></span><span></span><span></span>`
-    + `<span class="am-imp"><span class="am-num">${_esc(t('am.col_points'))}</span><span class="am-num">${_esc(t('am.col_orders'))}</span><span class="am-num">${_esc(t('am.col_late'))}</span></span>`
-    + `<span></span></div>`;
-}
-
 export interface GroupHeadView {
   key: string;
   label: string;
   expanded: boolean;
-  totals: GroupTotals;
-  /** First alert of the group, for the head's Go To. */
+  errors: number;
+  warnings: number;
+  /** First alert of the group, for the head's Go to. */
   firstAlertId: string | null;
   firstGoto: boolean;
+  /** Distinct orders the group touches ("Open these N orders in the table"). */
+  orders: number;
+  /** The group's movable alerts ("Move N orders"). */
+  movable: number;
+  /** The group's not-yet-acknowledged alerts ("Acknowledge N…"). */
+  unacked: number;
+  /** What-If is active: Move N orders is disabled. */
+  whatIf: boolean;
 }
 
-/** The card head: toggle button (glyph, label, counts, totals, caret) plus its three actions. */
+export type GroupMenuId = 'goto' | 'move' | 'open-table' | 'ack';
+
+export interface GroupMenuItem {
+  id: GroupMenuId;
+  labelKey: string;
+  vars?: Record<string, string | number>;
+  disabled?: boolean;
+  hintKey?: string;
+}
+
+/** The group head's ⋯ menu, in order: Go to (first alert), Move N orders (also for a single movable order), Open these N orders, Acknowledge N…. */
+export function groupMenuItems(v: GroupHeadView): GroupMenuItem[] {
+  const out: GroupMenuItem[] = [];
+  if (v.firstAlertId && v.firstGoto) out.push({ id: 'goto', labelKey: 'btn.go_to' });
+  if (v.movable > 0) {
+    out.push({ id: 'move', labelKey: 'am.group_fix_n', vars: { n: v.movable }, ...(v.whatIf ? { disabled: true, hintKey: 'am.whatif_blocked' } : {}) });
+  }
+  if (v.orders > 0) out.push({ id: 'open-table', labelKey: 'am.open_in_table', vars: { n: v.orders } });
+  if (v.unacked > 0) out.push({ id: 'ack', labelKey: 'am.group_ack_n', vars: { n: v.unacked } });
+  return out;
+}
+
+/** The card head (36 px): toggle button (caret, glyph, label, counts), then "Move N orders" and the ⋯ menu. No totals. */
 export function groupHeadHtml(v: GroupHeadView, t: Translate): string {
-  const tot = v.totals;
   const key = _esc(v.key);
-  const worst: 'err' | 'warn' = tot.errors > 0 ? 'err' : 'warn';
-  const badges = (tot.errors ? `<span class="badge badge-err">${tot.errors}</span>` : '')
-    + (tot.warnings ? `<span class="badge badge-warn">${tot.warnings}</span>` : '');
-  const total = (val: string, label: string) =>
-    `<span class="am-tot"><span class="am-tot-v">${_esc(val)}</span><span class="am-tot-k">${_esc(label)}</span></span>`;
-  const goto = v.firstAlertId && v.firstGoto
-    ? `<button type="button" class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${_esc(v.firstAlertId)}">${_esc(t('btn.go_to'))}</button>` : '';
+  const worst: 'err' | 'warn' = v.errors > 0 ? 'err' : 'warn';
+  const badges = (v.errors ? `<span class="badge badge-err">${v.errors}</span>` : '')
+    + (v.warnings ? `<span class="badge badge-warn">${v.warnings}</span>` : '');
+  const lock = v.whatIf ? ` aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : '';
+  const move = v.movable >= 2
+    ? `<button type="button" class="btn sm am-group-move" data-am-action="group-move" data-group-key="${key}"${lock}>${_esc(t('am.group_fix_n', { n: v.movable }))}</button>` : '';
+  const more = groupMenuItems(v).length
+    ? `<button type="button" class="icon-btn sm am-group-menu" data-group-key="${key}" data-ovf-key="${key}" aria-haspopup="menu" aria-expanded="false"`
+      + ` aria-label="${_esc(t('am.more_actions'))}" title="${_esc(t('am.more_actions'))}">⋯</button>` : '';
   return `<div class="am-ghead">`
     + `<button type="button" class="am-gtoggle" aria-expanded="${v.expanded}" data-am-action="toggle-group" data-group-key="${key}">`
     + `<span class="am-caret" aria-hidden="true">${v.expanded ? '▾' : '▸'}</span>`
     + `<span class="am-sev am-sev-${worst}" aria-hidden="true">${_SEV_GLYPH[worst]}</span>`
     + `<span class="am-glabel" title="${_esc(v.label)}">${_esc(v.label)}</span>${badges}`
-    + `<span class="am-gtots">${total(fmtNum(tot.points), t('am.col_points'))}${total(String(tot.orders), t('am.col_orders'))}${total(tot.lateH > 0 ? fmtNum(tot.lateH) : '—', t('am.col_late'))}</span>`
     + `</button>`
-    + `<div class="am-gacts">${goto}`
-    + `<button type="button" class="btn btn-ghost sm" data-am-action="group-dismiss" data-group-key="${key}">${_esc(t('am.group_dismiss_n', { n: tot.count }))}</button>`
-    + (tot.orders > 0
-      ? `<button type="button" class="btn btn-ghost sm" data-am-action="group-open-table" data-group-key="${key}">${_esc(t('am.open_in_table', { n: tot.orders }))}</button>` : '')
-    + `</div></div>`;
+    + `<div class="am-gacts">${move}${more}</div></div>`;
 }
 
 export interface GroupLabelDeps {

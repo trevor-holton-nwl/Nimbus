@@ -315,6 +315,44 @@ test('gate 33: the auto-fix "order moved" toast reads the FINISH of the moved or
   }
 });
 
+test('Alerts.applyFix({ quiet: true }) still moves the order and dismisses the alert, but raises no per-order toast', () => {
+  const plant = '5512', line = 'QUIET-FIX-LINE';
+  const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts), priorShow = Toast.show;
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg: String(msg), type }); };
+  const start = new Date('2026-08-25T08:00:00'), end = new Date('2026-08-25T10:00:00');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: 'quiet-ok-task', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end },
+    { id: 'quiet-marked-task', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end, placement_exception: 'overtime' },
+  ], 'unit-test');
+  Store.setAlerts([
+    { id: 'quiet-ok', type: 'blackout', taskId: 'quiet-ok-task' },
+    { id: 'quiet-marked', type: 'blackout', taskId: 'quiet-marked-task' },
+    { id: 'loud-ok', type: 'blackout', taskId: 'quiet-ok-task' },
+  ], 'unit-test');
+  try {
+    const entries = UndoStack._entries.length;
+    Alerts.applyFix('quiet-ok', { quiet: true });
+    assert.deepEqual(toasts, [], 'the moved-order toast is suppressed');
+    assert.equal(UndoStack._entries.length, entries + 1, 'the order still moved: its undo entry was pushed');
+    assert.ok(!Store.alerts.some(a => a.id === 'quiet-ok'), 'and the alert left Store.alerts');
+
+    Alerts.applyFix('quiet-marked', { quiet: true });
+    assert.deepEqual(toasts, [], 'a refusal is silent too');
+    assert.ok(Store.alerts.some(a => a.id === 'quiet-marked'), 'a refused fix leaves its alert in place');
+
+    Alerts.applyFix('quiet-marked');
+    assert.deepEqual(toasts.map(t => t.type), ['warn'], 'without the flag the refusal still toasts');
+    Alerts.applyFix('loud-ok', {});
+    assert.equal(toasts.at(-1).type, 'success', 'an empty options object is not quiet');
+  } finally {
+    Toast.show = priorShow;
+    Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setTasks([], 'unit-test'); UndoStack._entries.length = 0;
+  }
+});
+
 test('G-0.25: Alerts.applyFix never moves a row carrying a placement exception (overtime / overlong); it toasts cannot_fix_firmed', () => {
   const plant = '5512', line = 'MARKED-FIX-LINE', taskId = 'marked-fix-task';
   const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts), priorShow = Toast.show;

@@ -137,3 +137,52 @@ test('a failed request keeps the modal open and toasts the error', async () => {
   assert.equal(calls.toast.length, 1);
   assert.equal(calls.toast[0][1], 'error');
 });
+
+test('bulk mode: the title counts the alerts and one submit calls acknowledgeMany once with every id', async () => {
+  const many = [];
+  const priorMany = AlertAcksClient.acknowledgeMany;
+  AlertAcksClient.acknowledgeMany = async (...args) => { many.push(args); return { ok: 3, failed: 0 }; };
+  try {
+    AlertAckModal.open({ plant: 'P1', alertIds: ['a1', 'a2', 'a3'] });
+    assert.match(els['aak-title'].textContent, /^am\.ack_title_n/);
+    els['aak-reason'].value = '  waiting for the mould  ';
+    await AlertAckModal.submit();
+    assert.deepEqual(many, [['P1', ['a1', 'a2', 'a3'], 'waiting for the mould', '2026-10-27T23:59:59']]);
+    assert.equal(calls.ack.length, 0, 'the single-alert endpoint is not used');
+    assert.deepEqual(calls.toast, [['am.ack_bulk_done', 'success']]);
+    assert.deepEqual(calls.closed, ['modal-alert-ack']);
+  } finally { AlertAcksClient.acknowledgeMany = priorMany; }
+});
+
+test('bulk mode: a partial result toasts the failures; No end date sends null; a failed request keeps the modal open', async () => {
+  const priorMany = AlertAcksClient.acknowledgeMany;
+  const sent = [];
+  AlertAcksClient.acknowledgeMany = async (...args) => { sent.push(args); return { ok: 2, failed: 1 }; };
+  try {
+    AlertAckModal.open({ plant: 'P1', alertIds: ['a1', 'a2', 'a3'] });
+    els['aak-reason'].value = 'known issue';
+    globalThis.document.getElementById('aak-noend').checked = true;
+    await AlertAckModal.submit();
+    assert.equal(sent[0][3], null);
+    assert.deepEqual(calls.toast, [['am.ack_bulk_partial', 'warn']]);
+
+    calls.toast = []; calls.closed = [];
+    AlertAcksClient.acknowledgeMany = async () => { throw new Error('boom'); };
+    AlertAckModal.open({ plant: 'P1', alertIds: ['a1', 'a2'] });
+    els['aak-reason'].value = 'x';
+    await AlertAckModal.submit();
+    assert.deepEqual(calls.closed, []);
+    assert.equal(calls.toast.length, 1);
+    assert.equal(calls.toast[0][1], 'error');
+  } finally { AlertAcksClient.acknowledgeMany = priorMany; }
+});
+
+test('one id (alertId or a one-element alertIds) keeps the single-alert title and request; an empty list does not open', async () => {
+  AlertAckModal.open({ plant: 'P1', alertIds: ['a9'] });
+  assert.equal(els['aak-title'].textContent, 'am.ack_title');
+  els['aak-reason'].value = 'x';
+  await AlertAckModal.submit();
+  assert.deepEqual(calls.ack.map(c => c.alert_id), ['a9']);
+  AlertAckModal.open({ plant: 'P1', alertIds: [] });
+  assert.equal(AlertAckModal.isOpenFor('P1'), false);
+});
