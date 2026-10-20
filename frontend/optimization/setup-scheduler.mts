@@ -856,7 +856,10 @@ const SCORE_UNCOVERED = 6;
  * no real matrix, coverage is effectively same-signature grouping, so the cap
  * must outrank it or a changeover saving could push an order arbitrarily far
  * past its cap. Null/absent `bounds.notAfter` means every candidate's
- * score[SCORE_OVER_CAP] is 0 — a provable no-op default. Mode-independent
+ * score[SCORE_OVER_CAP] is 0 — a provable no-op default. The ceiling is
+ * HARD (an order past it is queued, never placed), so this term is also 0 for
+ * every unprotected order; it can only count a protected/firmed order that
+ * already sits past its ceiling. Kept for score-vector arity. Mode-independent
  * except for `'due-date'`, where `compareDueDateCandidate` still compares this
  * tier second (right after hard feasibility) but ahead of `policyKey` — see
  * that function's own comment. */
@@ -1084,6 +1087,22 @@ function unfittableReason(
   return {
     code: 'segment_floor_unfittable',
     message: 'The productive segment floor is longer than any working period on this machine, so this order cannot be split into pieces that meet it. Lower the floor in the plant settings or change the machine.',
+  };
+}
+
+/** O6: the plant's push-forward limit is a HARD ceiling. When an order has one that ends before the horizon and
+ * the queue reason would otherwise be the generic `no_fit_found`, name the limit so the planner knows what to
+ * change. Only `no_fit_found` is rewritten: `search_incomplete`/`search_limit` (unproven) and the calendar-fact
+ * reasons (`overlong_never`, `segment_floor_unfittable`, `expired_window`) are never replaced. */
+function pushLimitAware(
+  bounds: Readonly<DueDateFirstBounds>, task: NimbusTask, reason: { code: string; message: string },
+): { code: string; message: string } {
+  if (reason.code !== 'no_fit_found') return reason;
+  const ceiling = notAfterFor(bounds, task);
+  if (!ceiling || !(+ceiling < +bounds.horizonEnd)) return reason;
+  return {
+    code: 'push_limit_unmet',
+    message: "No placement finishes within the plant’s due-date push-forward limit. Raise the limit in the plant settings or release the order.",
   };
 }
 
@@ -6217,24 +6236,16 @@ function scheduledEndMinutes(task: Readonly<NimbusTask>): number | null {
   return end ? Math.floor(end.getTime() / (60 * 1000)) : null;
 }
 
-/** `notAfter` is optional and, when supplied, mirrors `bounds.notAfter` (the
- * due-date push-forward limit ceiling) so a caller can compare before/after
- * over-cap counts the same way it already compares before/after lateness.
- * `selectThroughputCandidate` deliberately calls this WITHOUT `notAfter` —
- * the cap is a due-date-limit rule, not a throughput one — so
- * every entry's `overCap` there is simply `false`. */
+/** Per-order lateness facts. The push-forward limit is a hard ceiling now, so no over-cap fact is kept here. */
 function lateOrderFacts(
   tasks: ReadonlyArray<NimbusTask>,
   scope: DueScope,
-  notAfter?: (task: NimbusTask) => Date | null,
-): Map<string, { late: boolean; end: number | null; overCap: boolean }> {
-  const facts = new Map<string, { late: boolean; end: number | null; overCap: boolean }>();
+): Map<string, { late: boolean; end: number | null }> {
+  const facts = new Map<string, { late: boolean; end: number | null }>();
   for (const task of tasks) {
     const end = scheduledEndMinutes(task);
     const due = dueTimestamp(task, scope);
-    const ceiling = notAfter ? notAfter(task) ?? null : null;
-    const overCap = end !== null && ceiling !== null && end * 60 * 1000 > ceiling.getTime();
-    facts.set(taskId(task), { late: end !== null && Number.isFinite(due) && end * 60 * 1000 > due, end, overCap });
+    facts.set(taskId(task), { late: end !== null && Number.isFinite(due) && end * 60 * 1000 > due, end });
   }
   return facts;
 }
@@ -6244,8 +6255,9 @@ function withPolicyReason(result: CandidateResult, code: string, message: string
 }
 
 /** Min Changeover (D1, D8-D11): least setup inside the date limits. Due date is
- * not an objective; only the pull-forward floor (hard placement clamp) and the
- * push-forward limit (over-cap tier, last-resort placed-and-flagged) apply.
+ * not an objective; only the pull-forward floor and the push-forward limit apply,
+ * and both are hard placement bounds (an order that cannot finish inside its
+ * window is queued as Needs Planning, e.g. `push_limit_unmet`, never placed past it).
  * One search per run; `finalizeCandidate` keeps the current schedule only when
  * the new plan would schedule fewer orders (by count).
  */
@@ -6416,7 +6428,7 @@ export function attachDetachedValidationContext(
   const reasonFor = (task: NimbusTask): { code: string; message: string } => (
     planningDefect(snapshot, bounds, task)
       ?? unfittableReason(snapshot, bounds, task)
-      ?? { code: 'no_fit_found', message: 'The repair did not produce a valid scheduled interval.' }
+      ?? pushLimitAware(bounds, task, { code: 'no_fit_found', message: 'The repair did not produce a valid scheduled interval.' })
   );
   for (const task of eligibleTasks(snapshot, bounds)) {
     const id = String(task.id);
@@ -6873,6 +6885,7 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
     // down the line: reject only the earliest such order per line per pass and let the re-validation decide the rest.
     // Every other failure is rejected outright, as before.
     const startById = new Map(applyPatchesToSnapshot(snapshot.tasks, result.patches).map(task => [taskId(task), +(timestamp(task.start_date) ?? 0)]));
+    const patchedById = new Map(applyPatchesToSnapshot(snapshot.tasks, result.patches).map(task => [taskId(task), task]));
     const reasonBy = new Map<string, ValidationFinding>();
     const earliestUnrecorded = new Map<string, ValidationFinding>();
     for (const f of failures) {
@@ -6883,7 +6896,14 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
     for (const f of earliestUnrecorded.values()) if (!reasonBy.has(f.taskId!)) reasonBy.set(f.taskId!, f);
     const queueReason = (id: string): { code: string; message: string } => {
       const f = reasonBy.get(id);
-      return f?.code === 'setup_transition_unrecorded' ? { code: f.code, message: f.message } : { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' };
+      if (f?.code === 'setup_transition_unrecorded') return { code: f.code, message: f.message };
+      const generic = { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' };
+      // O6: a date_window error caused by the end passing the push-forward ceiling is the limit's doing.
+      if (f?.code !== 'date_window') return generic;
+      const task = patchedById.get(id);
+      const end = task ? timestamp(task.end_date) : null;
+      const ceiling = task ? notAfterFor(bounds, task) : null;
+      return task && end !== null && ceiling && +end > +ceiling ? pushLimitAware(bounds, task, generic) : generic;
     };
     const repairPatches = result.patches.map(patch => reasonBy.has(patch.id) ? { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning' as const, planning_reason: queueReason(patch.id) } } : patch);
     const repaired = (result.dispositions ?? []).map(d => reasonBy.has(d.id) && d.status !== 'protected' ? { ...d, status: 'needs_planning' as const, reason: queueReason(d.id) } : d);
@@ -7048,7 +7068,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
       patch = { ...patch, changes: { ...patch.changes, planning_status: 'scheduled', planning_reason: null } }; patches.set(id, patch);
       dispositions.push({ id, line, status: 'scheduled' });
     } else {
-      const reason = defect ?? bounds.runContext?._setupExclusions.get(id) ?? neverOverlongReason(snapshot, bounds, task) ?? unfittableReason(snapshot, bounds, task) ?? noFitReason(candidate);
+      const reason = defect ?? bounds.runContext?._setupExclusions.get(id) ?? neverOverlongReason(snapshot, bounds, task) ?? unfittableReason(snapshot, bounds, task) ?? pushLimitAware(bounds, task, noFitReason(candidate));
       patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
       dispositions.push({ id, line, status: 'needs_planning', reason });
     }
@@ -7068,7 +7088,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
     if (baselineWithinWindow(snapshot, bounds, original)) {
       return { id: patch.id, changes: { start_date: original.start_date, end_date: original.end_date, scheduleSegments: original.scheduleSegments ?? [], planning_status: 'scheduled', planning_reason: null } };
     }
-    const reason = planningDefect(snapshot, bounds, original) ?? neverOverlongReason(snapshot, bounds, original) ?? unfittableReason(snapshot, bounds, original) ?? noFitReason(candidate);
+    const reason = planningDefect(snapshot, bounds, original) ?? neverOverlongReason(snapshot, bounds, original) ?? unfittableReason(snapshot, bounds, original) ?? pushLimitAware(bounds, original, noFitReason(candidate));
     return { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } };
   });
   const baselineById = new Map(baselinePatches.map(patch => [patch.id, patch.changes]));
@@ -7354,7 +7374,7 @@ export function fillPlanningGaps(
     const reason = complete && prior?.code === 'setup_transition_unrecorded'
       ? prior
       : overlong ?? (complete
-      ? { code: 'no_fit_found', message: 'No slot found within the allowed window without moving scheduled orders.' }
+      ? pushLimitAware(bounds, task, { code: 'no_fit_found', message: 'No slot found within the allowed window without moving scheduled orders.' })
       : { code: 'search_limit', message: bounds.exhaustive === true
         ? 'Capacity check incomplete: time limit reached before all available gaps were checked.'
         : 'Capacity check incomplete: time limit reached before all available gaps were checked. Tick Run in background in the Optimize dialog to check every gap.' });

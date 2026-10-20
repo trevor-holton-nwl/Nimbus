@@ -42,6 +42,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.optimize_plant_no_timezone': 'Für Werk {{plant}} ist keine gültige Zeitzone hinterlegt, daher optimiert NIMBUS es nicht. Bitten Sie einen Administrator, die Zeitzone dieses Werks in den Stammdaten festzulegen.',
   'toast.select_lines_to_opt':         'Bitte mindestens eine Maschine auswählen oder auf Gesamtwerk wechseln.',
   'toast.opt_apply_running_skipped':  '{{count}} Auftrag/Aufträge wurden gestartet, während die Vorschau geöffnet war, und blieben unverändert.',
+  'toast.opt_apply_invalid_dropped': '{{count}} Auftrag/Aufträge aus der Vorschau passen nicht mehr zum aktuellen Plan und blieben unverändert.',
   'toast.plant_no_timezone':  'Für das Werk {{plant}} ist keine gültige Zeitzone hinterlegt, daher kann NIMBUS nicht erkennen, welche Aufträge dort laufen oder eingefroren sind. Bitte einen Administrator, die Zeitzone des Werks in den Stammdaten zu setzen.',
   'toast.finish_cannot_hold':  'Auftrag {{order}} kann auf {{machine}} nicht zu dieser Zeit enden: Es gibt keinen ausreichend langen Arbeitszeitraum, der dort endet. Er wurde an seinen vorherigen Platz zurückgesetzt.',
   'toast.running_finish_locked':  'Auftrag {{order}} hat bereits begonnen, daher kann sein Ende nicht gezogen oder eingegeben werden. Ändern Sie die Laufzeit, um das Ende zu verschieben.',
@@ -273,6 +274,7 @@ window.__NIMBUS_LOCALES.de = {
   'planning_reason.run_time_over_cap': 'Die Laufzeit von {{hours}} h überschreitet die Grenze von {{cap}} h. Laufzeit verkürzen oder den Auftrag aufteilen und dann einplanen.',
   'planning_reason.overlong_never': 'Länger als jeder einzelne Arbeitszeitraum dieser Maschine, und dieses Werk teilt Aufträge nicht auf. Ändern Sie Maschine oder Laufzeit, um ihn als einen durchgehenden Balken zu platzieren, der an seinem Fälligkeitsdatum endet.',
   'planning_reason.segment_floor_unfittable': 'The productive segment floor is longer than any working period on this machine, so this order cannot be split into pieces that meet it. Lower the floor in the plant settings or change the machine.',
+  'planning_reason.push_limit_unmet': 'Keine Platzierung endet innerhalb der Verschiebegrenze des Werks für das Fälligkeitsdatum. Erhöhen Sie die Grenze in den Werkseinstellungen oder geben Sie den Auftrag frei.',
   'col.planning_window':               'Zulässiges Fenster',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
@@ -2137,7 +2139,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.reject_run_time_over_cap': 'Laufzeit überschreitet die Längengrenze',
   'ui.reject_width_mismatch': 'die Balkenlänge passt nicht zur Laufzeit',
   'ui.reject_single_edge': 'Start und Ende müssen zusammen gespeichert werden',
-  'ui.max_push_forward_help': 'Leer lassen für keine Begrenzung. Der Optimierer behandelt dies als feste Grenze: Er plant einen terminierten Auftrag nicht so, dass er mehr als diese Anzahl Kalendertage nach dem Tag seines Fälligkeitsdatums endet. Fällt das Fälligkeitsdatum auf einen geschlossenen Tag (zum Beispiel einen Sonntag), beginnt die Zählung am letzten offenen Tag davor, sodass eine geschlossene Lücke einen Teil des Spielraums aufbraucht. Aufträge, die die Grenze nicht einhalten können, werden in der Vorschau und in einer Warnung nach dem Lauf gezählt. Rückstand entfernen ignoriert diese Grenze.',
+  'ui.max_push_forward_help': 'Leer lassen für keine Begrenzung. Der Optimierer behandelt dies als feste Grenze: Er plant einen terminierten Auftrag nicht so, dass er mehr als diese Anzahl Kalendertage nach dem Tag seines Fälligkeitsdatums endet. Fällt das Fälligkeitsdatum auf einen geschlossenen Tag (zum Beispiel einen Sonntag), beginnt die Zählung am letzten offenen Tag davor, sodass eine geschlossene Lücke einen Teil des Spielraums aufbraucht. Aufträge, die nicht innerhalb der Grenze enden können, kommen mit einer Begründung in die Planungsliste (Needs Planning). Rückstand entfernen ignoriert diese Grenze.',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',

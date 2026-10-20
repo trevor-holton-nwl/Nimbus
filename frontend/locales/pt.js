@@ -42,6 +42,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.optimize_plant_no_timezone': 'A planta {{plant}} não tem um fuso horário válido, então o NIMBUS não a otimizará. Peça a um administrador para definir o fuso horário desta planta em Dados mestres.',
   'toast.select_lines_to_opt':         'Selecione pelo menos uma máquina ou mude para Planta inteira.',
   'toast.opt_apply_running_skipped':  '{{count}} pedido(s) entraram em execução enquanto a prévia estava aberta e foram mantidos como estão.',
+  'toast.opt_apply_invalid_dropped': '{{count}} ordem(ns) da prévia não cabem mais na programação atual e foram mantidas como estão.',
   'toast.plant_no_timezone':  'A planta {{plant}} não tem um fuso horário válido, então o NIMBUS não consegue saber quais pedidos estão em execução ou congelados. Peça a um administrador que defina o fuso horário da planta em Dados mestres.',
   'toast.finish_cannot_hold':  'O pedido {{order}} não pode terminar nesse horário em {{machine}}: nenhum período de trabalho longo o bastante termina ali. Ele voltou para onde estava.',
   'toast.running_finish_locked':  'O pedido {{order}} já começou, por isso o término não pode ser arrastado nem digitado. Altere o tempo de execução para mover o término.',
@@ -273,6 +274,7 @@ window.__NIMBUS_LOCALES.pt = {
   'planning_reason.run_time_over_cap': 'A duração de {{hours}} h é maior que o limite de {{cap}} h. Reduza a duração ou divida a ordem e depois programe-a.',
   'planning_reason.overlong_never': 'Mais longo que qualquer período de trabalho desta máquina, e esta planta não divide pedidos. Altere a máquina ou o tempo de execução para colocá-lo como uma única barra contínua que termina na data de vencimento.',
   'planning_reason.segment_floor_unfittable': 'The productive segment floor is longer than any working period on this machine, so this order cannot be split into pieces that meet it. Lower the floor in the plant settings or change the machine.',
+  'planning_reason.push_limit_unmet': 'Nenhum posicionamento termina dentro do limite de adiamento da data de entrega da planta. Aumente o limite nas configurações da planta ou libere a ordem.',
   'col.planning_window':               'Janela permitida',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
@@ -2097,7 +2099,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.reject_run_time_over_cap': 'a duração está acima do limite de comprimento',
   'ui.reject_width_mismatch': 'o comprimento da barra não corresponde à duração',
   'ui.reject_single_edge': 'início e término devem ser salvos juntos',
-  'ui.max_push_forward_help': 'Deixe em branco para não ter limite. O otimizador trata isto como um limite rígido: ele não programa uma ordem com data para terminar mais do que este número de dias corridos após o dia da sua data de entrega. Quando a data de entrega cai em um dia fechado (por exemplo, um domingo), a contagem começa no último dia aberto anterior, então um intervalo fechado consome parte da margem permitida. As ordens que não conseguem cumprir o limite são contadas na prévia e em um aviso após a execução. Remover atrasos ignora este limite.',
+  'ui.max_push_forward_help': 'Deixe em branco para não ter limite. O otimizador trata isto como um limite rígido: ele não programa uma ordem com data para terminar mais do que este número de dias corridos após o dia da sua data de entrega. Quando a data de entrega cai em um dia fechado (por exemplo, um domingo), a contagem começa no último dia aberto anterior, então um intervalo fechado consome parte da margem permitida. As ordens que não conseguem terminar dentro do limite vão para Needs Planning, cada uma com seu motivo. Remover atrasos ignora este limite.',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',

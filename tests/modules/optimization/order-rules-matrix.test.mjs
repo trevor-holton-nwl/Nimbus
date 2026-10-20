@@ -241,8 +241,6 @@ const starts = rows => rows.filter(r => r.scheduled).map(r => r.pieces[0][0]);
 const scheduledCount = rows => rows.filter(r => r.scheduled).length;
 const pieceMinutes = row => row.pieces.map(([a, b]) => (b - a) / MIN);
 const allScheduled = rows => assert.equal(scheduledCount(rows), rows.length, 'every order is scheduled');
-// O6 renames no_fit_found to push_limit_unmet; SPT's detached search can also stop on search_incomplete before it proves the third order cannot fit.
-const PUSH_QUEUE_CODES = ['no_fit_found', 'push_limit_unmet', 'search_incomplete'];
 
 /** @type {Array<{name:string, spec:object, expect?:(rows:object[])=>void, todo?:Record<string,string>}>} */
 const CASES = [];
@@ -261,10 +259,12 @@ add('push-forward blank (no limit) places all three 4 h orders', { rules: { max_
 add('push-forward 2 days places all three 4 h orders', { rules: { max_push_forward_days: 2 }, tasks: PUSH_TASKS }, allScheduled);
 add('push-forward 0 days fits two 4 h orders on the due day and queues the third with a specific reason',
   { rules: { max_push_forward_days: 0 }, tasks: PUSH_TASKS },
-  rows => {
+  (rows, pass, mode) => {
     assert.equal(scheduledCount(rows), 2);
     const queued = rows.find(r => !r.scheduled);
-    assert.ok(PUSH_QUEUE_CODES.includes(queued.code), `queued reason ${queued.code}`);
+    // Only the detached SPT search is genuinely unproven (heuristic, never enumerates sequences); every other path proves the limit is the cause.
+    const expected = pass === 'direct' && mode === 'spt' ? ['push_limit_unmet', 'search_incomplete'] : ['push_limit_unmet'];
+    assert.ok(expected.includes(queued.code), `queued reason ${queued.code}`);
   });
 add('push-forward 0 days with no compliant sequence (due and ceiling already past) queues every order as expired_window',
   { now: '2035-08-09T08:00:00', rules: { max_push_forward_days: 0 }, tasks: [T('a', 2, 'GREEN', DUE_MON), T('b', 2, 'GREEN', DUE_MON)] },
@@ -408,9 +408,9 @@ const options = (testCase, pass, mode) => {
   return reason ? { todo: reason } : {};
 };
 
-function judge(testCase, rows) {
+function judge(testCase, rows, pass, mode) {
   checkInvariants(testCase.spec, rows);
-  testCase.expect?.(rows);
+  testCase.expect?.(rows, pass, mode);
 }
 
 function engineOptions(spec) {
@@ -427,7 +427,7 @@ for (const testCase of CASES) {
     test(`direct ${label}: ${testCase.name}`, options(testCase, 'direct', mode), () => {
       const result = direct(scenarioSnapshot(testCase.spec), scenarioBounds(testCase.spec));
       const rows = normalizeRows(normalizeScenario(testCase.spec), fromCandidate(testCase.spec, result));
-      judge(testCase, rows);
+      judge(testCase, rows, 'direct', mode);
     });
   }
 }
@@ -436,7 +436,7 @@ for (const testCase of CASES) {
   for (const { mode, label } of MODES) {
     test(`Engine.evaluateSchedule ${label}: ${testCase.name}`, options(testCase, 'engine', mode), () => {
       const result = Engine.evaluateSchedule(mode, engineOptions(testCase.spec), scenarioSnapshot(testCase.spec));
-      judge(testCase, normalizeRows(normalizeScenario(testCase.spec), fromCandidate(testCase.spec, result)));
+      judge(testCase, normalizeRows(normalizeScenario(testCase.spec), fromCandidate(testCase.spec, result)), 'engine', mode);
     });
   }
 }
@@ -458,7 +458,7 @@ for (const testCase of CASES) {
       const engineResult = Engine.evaluateSchedule(mode, engineOptions(spec), scenarioSnapshot(spec));
       const engineRows = normalizeRows(spec, fromCandidate(spec, engineResult));
       assert.deepEqual(workerRows, engineRows, 'the worker and the main-thread Engine must agree');
-      judge(testCase, workerRows);
+      judge(testCase, workerRows, 'worker', mode);
     });
   }
 }
@@ -519,7 +519,7 @@ CASES.forEach((testCase, index) => {
   for (const { mode, label } of MODES) {
     test(`live Engine.runAndApply ${label}: ${testCase.name}`, options(testCase, 'live', mode), () => {
       const spec = normalizeScenario(testCase.spec);
-      judge(testCase, normalizeRows(spec, fromStoreTasks(liveRun()[`${index}:${mode}`])));
+      judge(testCase, normalizeRows(spec, fromStoreTasks(liveRun()[`${index}:${mode}`])), 'live', mode);
     });
   }
 });

@@ -42,6 +42,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.optimize_plant_no_timezone': 'L’usine {{plant}} n’a pas de fuseau horaire valide ; NIMBUS ne l’optimisera donc pas. Demandez à un administrateur de définir le fuseau horaire de cette usine dans les Données de base.',
   'toast.select_lines_to_opt':         'Sélectionnez au moins une machine à optimiser, ou passez à Usine entière.',
   'toast.opt_apply_running_skipped':  '{{count}} ordre(s) ont démarré pendant que l’aperçu était ouvert et ont été laissés tels quels.',
+  'toast.opt_apply_invalid_dropped': '{{count}} commande(s) de l’aperçu ne correspondent plus au planning actuel et ont été laissées telles quelles.',
   'toast.plant_no_timezone':  'L’usine {{plant}} n’a pas de fuseau horaire valide ; NIMBUS ne peut donc pas savoir quelles commandes sont en cours ou gelées. Demandez à un administrateur de définir le fuseau horaire de l’usine dans les Données de base.',
   'toast.finish_cannot_hold':  'La commande {{order}} ne peut pas se terminer à cette heure sur {{machine}} : aucune période de travail assez longue ne s’y termine. Elle a été remise à sa place précédente.',
   'toast.running_finish_locked':  'La commande {{order}} a déjà commencé, donc sa fin ne peut pas être déplacée ni saisie. Modifiez sa durée d’exécution pour déplacer la fin.',
@@ -273,6 +274,7 @@ window.__NIMBUS_LOCALES.fr = {
   'planning_reason.run_time_over_cap': 'La durée de {{hours}} h dépasse la limite de {{cap}} h. Raccourcissez la durée ou scindez la commande, puis planifiez-la.',
   'planning_reason.overlong_never': 'Plus longue que n’importe quelle période de travail de cette machine, et cette usine ne fractionne pas les commandes. Changez la machine ou le temps de production pour la placer en une seule barre continue se terminant à sa date d’échéance.',
   'planning_reason.segment_floor_unfittable': 'The productive segment floor is longer than any working period on this machine, so this order cannot be split into pieces that meet it. Lower the floor in the plant settings or change the machine.',
+  'planning_reason.push_limit_unmet': 'Aucun placement ne se termine dans la limite de report de l’échéance de l’usine. Augmentez la limite dans les paramètres de l’usine ou libérez la commande.',
   'col.planning_window':               'Fenêtre autorisée',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
@@ -2098,7 +2100,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.reject_run_time_over_cap': 'la durée dépasse la limite de longueur',
   'ui.reject_width_mismatch': 'la longueur de la barre ne correspond pas à la durée',
   'ui.reject_single_edge': 'le début et la fin doivent être enregistrés ensemble',
-  'ui.max_push_forward_help': 'Laissez vide pour ne pas avoir de limite. L\'optimiseur la traite comme une limite stricte : il ne placera pas une commande datée de sorte qu\'elle se termine plus de ce nombre de jours calendaires après le jour de son échéance. Lorsque la date d’échéance tombe un jour fermé (par exemple un dimanche), le décompte part du dernier jour ouvert qui le précède, si bien qu’un écart fermé consomme une partie de la marge. Les commandes qui ne peuvent pas respecter la limite sont comptées dans l\'aperçu et dans un avertissement après l\'exécution. Supprimer le retard ignore cette limite.',
+  'ui.max_push_forward_help': 'Laissez vide pour ne pas avoir de limite. L’optimiseur la traite comme une limite stricte : il ne placera pas une commande datée de sorte qu’elle se termine plus de ce nombre de jours calendaires après le jour de son échéance. Lorsque la date d’échéance tombe un jour fermé (par exemple un dimanche), le décompte part du dernier jour ouvert qui le précède, si bien qu’un écart fermé consomme une partie de la marge. Les commandes qui ne peuvent pas se terminer dans la limite passent en Needs Planning, chacune avec son motif. Supprimer le retard ignore cette limite.',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',

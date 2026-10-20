@@ -1317,44 +1317,6 @@ export const Engine = {
     return ceiling;
   },
 
-  /** Post-hoc over-cap reporting for the due-date push-forward limit
-   *  (`plants.max_push_forward_days`). Walks the APPLIED patches (never the
-   *  evaluator's own score tally, which counts something slightly different
-   *  mid-search) and counts how many now finish after `latestAllowedEnd`.
-   *  Fast-exits with an all-zero/`days: null` result when the plant has no
-   *  configured limit, so a default (no-cap) plant never pays the per-patch
-   *  scan. `tasks` must be the pre-apply task list the patches were computed
-   *  against (a task's own due date is never itself patched, so the pre-apply
-   *  copy is equivalent to a post-apply one for this purpose, but MACHINE
-   *  lookups need a real object). */
-  _overCapSummary(
-    patches: ReadonlyArray<{ id: string; changes: Partial<NimbusTask> }>,
-    tasks: ReadonlyArray<NimbusTask>,
-    plant: string | null,
-    masterDataOverride?: NimbusMasterData | null,
-  ): { orders: number; lines: number; days: number | null } {
-    const masterData = masterDataOverride === undefined ? sourceMasterData() : masterDataOverride;
-    const value = masterData?.plants?.find(row => row.plant === plant)?.max_push_forward_days;
-    const days = Number.isInteger(value) && (value as number) >= 0 ? (value as number) : null;
-    if (days === null) return { orders: 0, lines: 0, days: null };
-    const byId = new Map(tasks.map(t => [String(t.id), t]));
-    const overCapLines = new Set<string>();
-    let orders = 0;
-    for (const patch of patches) {
-      const endDate = patch.changes.end_date;
-      if (!endDate) continue;
-      const task = byId.get(String(patch.id));
-      if (!task) continue;
-      const ceiling = Engine.latestAllowedEnd(task, plant, masterData);
-      if (!ceiling) continue;
-      if (new Date(endDate).getTime() > ceiling.getTime()) {
-        orders += 1;
-        overCapLines.add(task.MACHINE || 'Unknown');
-      }
-    }
-    return { orders, lines: overCapLines.size, days };
-  },
-
   /** Regenerate one logical order from its requested parent start. Segments
    * are never shifted independently; a one-piece result explicitly clears an
    * obsolete child aggregate. */
@@ -2954,22 +2916,6 @@ export const Engine = {
       Toast.show(Util.t('toast.optimize_missing_setup_summary', {
         orders: unknownSetupOrderIds.size,
         lines: unknownSetupLines.size,
-      }), 'warn');
-    }
-    // Due-date push-forward limit (plants.max_push_forward_days): report
-    // violations post-hoc from the applied patches, same as the missing-
-    // setup summary above, but NOT gated on `synthetic` — a plant with no
-    // active setup definition can still configure a push-forward cap, and
-    // the never-freeze "minimize violations, always place everything" rule
-    // applies regardless of the synthetic-snapshot mechanism.
-    const overCapSummary = Engine._overCapSummary(result.patches, snapshot.tasks, plant);
-    if (overCapSummary.orders) {
-      Toast.show(Util.t('toast.optimize_over_lateness_cap', {
-        orders: overCapSummary.orders,
-        lines: overCapSummary.lines,
-        // days is never null here: overCapSummary.orders > 0 only when the
-        // plant has a configured limit (see _overCapSummary's null fast-exit).
-        days: overCapSummary.days ?? 0,
       }), 'warn');
     }
     // Sub-order distribution separation (SAP aggregate work center -> per-
