@@ -599,6 +599,9 @@ export interface SetupRunContext {
    *  memo — plant is folded into the key for the same reuse-across-plants
    *  reason as `_lineBlocks`. */
   _dayWindow: Map<string, PlacementInterval | null>;
+  /** O5: lazy per-(line, floor minutes) memo of whether any merged working window can hold one productive
+   *  segment of that length (see `unfittableReason`). */
+  _floorFits: Map<string, boolean>;
   /** Lazy per-(plant, line, dayStartMs) work-window memo for reading a date-only SAP due date
    *  (see `dueWindowForDay`); distinct from `_dayWindow` because a missing calendar row means
    *  "no calendar" here, not default hours. */
@@ -681,6 +684,7 @@ export function buildRunContext(
     _staticDefect: new Map(),
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
+    _floorFits: new Map(),
     _dueWindow: new Map(),
     _dueInstant: new WeakMap(),
     _freeIndex: new Map(),
@@ -1043,6 +1047,39 @@ function neverOverlongReason(
   return {
     code: 'overlong_never',
     message: 'Longer than any single working period on this machine, and this plant does not split orders.',
+  };
+}
+
+/** O5: the productive segment floor can be longer than every merged working window on the line. Such an order
+ * can never be split into floor-sized pieces and does not fit one window either, so the generic no-fit reason
+ * hides a setting the planner can change. Emitted only when the order fits no single window (that case never
+ * needs a split), the line does have windows, and no window can hold one floor-sized segment. The minimum
+ * possible setup is taken as 0, so this never reports a floor that setup alone would make unfittable. Not for
+ * the `never` policy: a floor does not apply there, and `neverOverlongReason` already covers it. */
+function unfittableReason(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask,
+): { code: string; message: string } | null {
+  const plant = bounds.setup.plant;
+  if (splitOrderPolicyForSnapshot(snapshot, plant) === 'never') return null;
+  const minutes = Math.round(Number(task.RUN_TIME) * 60);
+  if (!Number.isFinite(minutes) || minutes <= 0) return null;
+  const floor = bounds.runContext?.minProductiveSegmentMinutes ?? minProductiveSegmentMinutesForSnapshot(snapshot, plant);
+  if (!Number.isFinite(floor) || floor <= 0) return null;
+  const line = String(task.MACHINE);
+  const from = bounds.placementStart ?? bounds.now;
+  if (hasNominalWindow(snapshot, line, plant, from, minutes, bounds.runContext)) return null;
+  const ctx = bounds.runContext;
+  const key = `${line}${CTX_KEY_SEP}${floor}`;
+  let floorFits = ctx?._floorFits.get(key);
+  if (floorFits === undefined) {
+    floorFits = hasNominalWindow(snapshot, line, plant, from, floor, ctx);
+    ctx?._floorFits.set(key, floorFits);
+  }
+  if (floorFits) return null;
+  if (!hasNominalWindow(snapshot, line, plant, from, 1, ctx)) return null;
+  return {
+    code: 'segment_floor_unfittable',
+    message: 'The productive segment floor is longer than any working period on this machine, so this order cannot be split into pieces that meet it. Lower the floor in the plant settings or change the machine.',
   };
 }
 
@@ -2784,9 +2821,13 @@ function hasNominalWindow(
   snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, from: Date, runtimeMinutes: number,
   ctx?: SetupRunContext,
 ): boolean {
-  const lineHours = snapshot.calendars[line]?.workHours;
+  // A line with no calendar row, or a plant with no hours, falls back to the same defaults as
+  // `walkFreeIntervals`/`jointWindowForDay` (all-day line when the plant exists, default plant hours), so
+  // the overlong decision agrees with where the order can actually be placed.
   const plantEntry = snapshot.plants[plant];
-  if (!lineHours || !plantEntry || !Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return false;
+  const lineHours = snapshot.calendars[line]?.workHours
+    ?? (plantEntry ? candidateAllDayWorkHours() : candidateDefaultWorkHours());
+  if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return false;
   const requiredMs = Math.round(runtimeMinutes) * 60 * 1000;
   const day = new Date(from);
   day.setHours(0, 0, 0, 0);
@@ -2796,12 +2837,11 @@ function hasNominalWindow(
     for (let offset = 0; offset < 90; offset += 1) {
       const date = new Date(day);
       date.setDate(day.getDate() + offset);
-      // `lineHours`/`plantEntry` are already confirmed present above, so the
-      // memo's own defaulting (for a missing calendar) never triggers here —
-      // safe to share with `freeIntervalsFor`'s per-(line,day) window cache.
+      // The memo defaults a missing calendar exactly as above, so it is safe to
+      // share with `freeIntervalsFor`'s per-(line,day) window cache.
       const joint = ctx
         ? jointWindowForDay(ctx, snapshot, line, plant, date)
-        : intersectWindows(localWindow(lineHours, date), localWindow(plantHoursOn(plantEntry, date)!, date));
+        : intersectWindows(localWindow(lineHours, date), localWindow(plantHoursOn(plantEntry, date) ?? candidateDefaultWorkHours(), date));
       yield joint ? { s: joint.start.getTime(), e: joint.end.getTime() } : null;
     }
   };
@@ -3171,11 +3211,17 @@ function candidateForSequence(
   // Only the final admitted predecessor owes the setup into fixed work.
   // A later bridge may reduce this transition, so do not reject intermediate
   // occurrences. Backtrack a conflicting suffix into the existing next-fragment retry.
-  while (fragment.nextFirmed?.state && predecessorState && checkpoints.length) {
+  while (fragment.nextFirmed && predecessorState && checkpoints.length) {
     const boundary = fragment.nextFirmed;
-    const outgoing = resolveSetup({ definition, machine: line, predecessorState, successorState: boundary.state!, predecessorOrderId, successorOrderId: taskId(boundary.task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined });
-    if (!outgoing.covered || !outgoing.effectiveMin) break;
-    const setupStart = new Date(+boundary.start - outgoing.effectiveMin * 60000);
+    const outgoing = boundary.state
+      ? resolveSetup({ definition, machine: line, predecessorState, successorState: boundary.state, predecessorOrderId, successorOrderId: taskId(boundary.task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined })
+      : null;
+    // Under plantDefaultMinutes an uncovered pair, or a boundary with no setup state, still reserves the plant
+    // default (same charge the boundary block below and `validateCandidate` make); zero/excludeFromSearch
+    // charge 0 here, so they break as before.
+    const outgoingMinutes = chargedSetupMinutes(bounds.runContext, outgoing, setupChargeableOnLine(bounds, snapshot, line));
+    if (!outgoingMinutes) break;
+    const setupStart = new Date(+boundary.start - outgoingMinutes * 60000);
     if (cursor <= setupStart && coversInterval(freeIntervalsFor(snapshot, line, bounds.setup.plant, setupStart, boundary.start, bounds.runContext), { start: setupStart, end: boundary.start })) break;
     const prior = checkpoints.pop()!;
     patches.pop(); unadmitted.push(prior.task);
@@ -3214,8 +3260,38 @@ function candidateForSequence(
     // surface it against the applied schedule instead of a fake bar here.
     // A null `firmed.state` (never-freeze widening) means the boundary's own
     // setup state is unresolvable — the same zero-minute skip applies.
+    // Under plantDefaultMinutes the null-state and uncovered edges still reserve the plant default before the
+    // firmed order (the charge `validateCandidate` makes), so the predecessor is not dropped at validation.
+    const boundaryChargeable = setupChargeableOnLine(bounds, snapshot, line);
+    const reserveBoundaryDefault = (): void => {
+      const minutes = chargedSetupMinutes(bounds.runContext, null, boundaryChargeable);
+      if (!minutes) return;
+      const setupStart = new Date(firmed.start.getTime() - minutes * 60 * 1000);
+      const fits = setupStart >= cursor && freeIntervalsFor(
+        snapshot, line, bounds.setup.plant, cursor, firmed.start, bounds.runContext,
+      ).some(interval => interval.start <= setupStart && interval.end >= firmed.start);
+      if (!fits) {
+        missingEdges.push({
+          line,
+          predecessorOrderId,
+          successorOrderId: taskId(firmed.task),
+          reason: 'incoming-firmed-setup-infeasible',
+        });
+        return;
+      }
+      setupMinutes += minutes;
+      if (!suppressExplanations) {
+        explanation.push({
+          code: 'firmed-incoming-setup',
+          message: `Reserved ${minutes} minutes of setup before firmed ${taskId(firmed.task)}.`,
+          line,
+          taskId: taskId(firmed.task),
+        });
+      }
+    };
     if (predecessorState === null || firmed.state === null) {
       missingEdges.push(unknownInitialStateEdge(line, firmed.task));
+      reserveBoundaryDefault();
     } else {
       const resolved = resolveSetup({
         definition,
@@ -3244,6 +3320,7 @@ function candidateForSequence(
           successorOrderId: taskId(firmed.task),
           reason: resolved.reason,
         });
+        reserveBoundaryDefault();
       } else {
         const setupStart = new Date(firmed.start.getTime() - resolved.effectiveMin * 60 * 1000);
         const fitsIncomingSetup = resolved.effectiveMin === 0
@@ -4806,6 +4883,7 @@ export function placeUnknownTail(
  * the firmed order's own incoming setup then also becomes a diagnostic
  * further downstream, and tail capacity simply runs to the boundary. */
 function tailCapacityEnd(
+  snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
   fragmentEnd: Date,
@@ -4813,10 +4891,14 @@ function tailCapacityEnd(
   finalState: SetupStateKey | null,
   finalPredecessorOrderId: string | null,
 ): Date {
-  // A null `nextFirmed.state` (never-freeze widening) means the boundary's
-  // own setup state is unresolvable — there is nothing to reserve minutes
-  // against, so tail capacity simply runs to the boundary's start.
-  if (!nextFirmed || finalState === null || nextFirmed.state === null) return fragmentEnd;
+  if (!nextFirmed) return fragmentEnd;
+  // Under plantDefaultMinutes an unresolvable edge (null state on either side, or an uncovered pair) still
+  // reserves the plant default, the same charge `validateCandidate` makes. Under zero/excludeFromSearch
+  // `chargedSetupMinutes` is 0, so tail capacity simply runs to the boundary's start as before.
+  const chargeable = setupChargeableOnLine(bounds, snapshot, line);
+  if (finalState === null || nextFirmed.state === null) {
+    return new Date(nextFirmed.start.getTime() - chargedSetupMinutes(bounds.runContext, null, chargeable) * 60 * 1000);
+  }
   const definition = bounds.setup.definition!;
   const resolved = resolveSetup({
     definition,
@@ -4830,7 +4912,7 @@ function tailCapacityEnd(
     overrides: bounds.setup.overrides,
     index: bounds.runContext?.resolutionIndex ?? undefined,
   });
-  const reserveMinutes = resolved.covered && resolved.effectiveMin !== null ? resolved.effectiveMin : 0;
+  const reserveMinutes = chargedSetupMinutes(bounds.runContext, resolved, chargeable);
   return new Date(nextFirmed.start.getTime() - reserveMinutes * 60 * 1000);
 }
 
@@ -5384,7 +5466,7 @@ function evaluateLineWithFirmedBoundaries(
           // stays visible. Override conflicts still fail closed (unaffected —
           // this branch is only reached when `supportsBoundaryFallback(run)`
           // already excluded 'override-inactive' edges).
-          const tailEnd = tailCapacityEnd(bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
+          const tailEnd = tailCapacityEnd(snapshot, bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
           const tailUnadmitted = applyUnknownTail(
             snapshot, bounds, line, mode, admitted, fragmentStart, tailEnd, patches, explanation, missingEdges,
             predecessorOrderId,
@@ -5430,7 +5512,7 @@ function evaluateLineWithFirmedBoundaries(
             snapshot, bounds, line, mode, selectedFallback.run.unknownTail,
             tailCursorFor(selectedFallback.run.winner, fragmentStart),
             tailCapacityEnd(
-              bounds, line, boundary.start, boundary,
+              snapshot, bounds, line, boundary.start, boundary,
               selectedFallback.run.winner!.finalState ?? predecessorState,
               selectedFallback.run.winner!.finalPredecessorOrderId ?? predecessorOrderId,
             ),
@@ -5509,7 +5591,7 @@ function evaluateLineWithFirmedBoundaries(
           // budget/deadline cutoff mid-enumeration, is not a reason to leave
           // the orders unscheduled. Tail-place and continue instead of
           // returning zero patches with `unchanged: true`.
-          const tailEnd = tailCapacityEnd(bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
+          const tailEnd = tailCapacityEnd(snapshot, bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
           const tailUnadmitted = applyUnknownTail(
             snapshot, bounds, line, mode, admitted, fragmentStart, tailEnd, patches, explanation, missingEdges,
             predecessorOrderId,
@@ -5577,7 +5659,7 @@ function evaluateLineWithFirmedBoundaries(
       // same `admitted` batch could not find anything `run` didn't already.
       // Place the whole admitted+later set as a tail up to this boundary's
       // reserved incoming setup instead.
-      const tailEnd = tailCapacityEnd(bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
+      const tailEnd = tailCapacityEnd(snapshot, bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
       const tailUnadmitted = applyUnknownTail(
         snapshot, bounds, line, mode, admitted, fragmentStart, tailEnd, patches, explanation, missingEdges,
         predecessorOrderId,
@@ -5590,7 +5672,7 @@ function evaluateLineWithFirmedBoundaries(
       continue;
     }
     const tailEnd = tailCapacityEnd(
-      bounds, line, boundary.start, boundary,
+      snapshot, bounds, line, boundary.start, boundary,
       winner.finalState ?? predecessorState, winner.finalPredecessorOrderId ?? predecessorOrderId,
     );
     const tailUnadmitted = applyUnknownTail(
@@ -6312,6 +6394,7 @@ export function attachDetachedValidationContext(
   const dispositions: PlanningDisposition[] = [];
   const reasonFor = (task: NimbusTask): { code: string; message: string } => (
     planningDefect(snapshot, bounds, task)
+      ?? unfittableReason(snapshot, bounds, task)
       ?? { code: 'no_fit_found', message: 'The repair did not produce a valid scheduled interval.' }
   );
   for (const task of eligibleTasks(snapshot, bounds)) {
@@ -6688,7 +6771,9 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     const minutes = intervals.reduce((sum, i) => sum + (+i.end - +i.start) / 60000, 0);
     if (Math.abs(minutes - Math.round(Number(task.RUN_TIME) * 60)) > 0.001) add('runtime', 'Productive duration does not match runtime.', task, protectedTask);
     const policy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
-    if (intervals.length > 1 && (policy === 'never' || (policy === 'overlong_only' && hasNominalWindow(snapshot, String(task.MACHINE), bounds.setup.plant, start, Math.round(Number(task.RUN_TIME) * 60), bounds.runContext)))) add('split_policy', 'Order splitting violates plant policy.', task, protectedTask);
+    // The overlong decision is made from the placement origin (as `neverOverlongReason` and the placement walk do),
+    // not from each order's own start, so a split placed under that decision is not flagged here.
+    if (intervals.length > 1 && (policy === 'never' || (policy === 'overlong_only' && hasNominalWindow(snapshot, String(task.MACHINE), bounds.setup.plant, bounds.placementStart ?? bounds.now, Math.round(Number(task.RUN_TIME) * 60), bounds.runContext)))) add('split_policy', 'Order splitting violates plant policy.', task, protectedTask);
     const minimum = minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
     for (let index = 0; index < intervals.length; index++) {
       const interval = intervals[index];
@@ -6920,7 +7005,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
       patch = { ...patch, changes: { ...patch.changes, planning_status: 'scheduled', planning_reason: null } }; patches.set(id, patch);
       dispositions.push({ id, line, status: 'scheduled' });
     } else {
-      const reason = defect ?? bounds.runContext?._setupExclusions.get(id) ?? neverOverlongReason(snapshot, bounds, task) ?? noFitReason(candidate);
+      const reason = defect ?? bounds.runContext?._setupExclusions.get(id) ?? neverOverlongReason(snapshot, bounds, task) ?? unfittableReason(snapshot, bounds, task) ?? noFitReason(candidate);
       patches.set(id, { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } });
       dispositions.push({ id, line, status: 'needs_planning', reason });
     }
@@ -6940,7 +7025,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
     if (baselineWithinWindow(snapshot, bounds, original)) {
       return { id: patch.id, changes: { start_date: original.start_date, end_date: original.end_date, scheduleSegments: original.scheduleSegments ?? [], planning_status: 'scheduled', planning_reason: null } };
     }
-    const reason = planningDefect(snapshot, bounds, original) ?? neverOverlongReason(snapshot, bounds, original) ?? noFitReason(candidate);
+    const reason = planningDefect(snapshot, bounds, original) ?? neverOverlongReason(snapshot, bounds, original) ?? unfittableReason(snapshot, bounds, original) ?? noFitReason(candidate);
     return { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } };
   });
   const baselineById = new Map(baselinePatches.map(patch => [patch.id, patch.changes]));
@@ -7220,7 +7305,9 @@ export function fillPlanningGaps(
     // excludeFromSearch) — keep that actionable reason instead of the generic "No slot found".
     const prior = dispositions.get(id)?.reason;
     // VI10: overlong is a calendar fact, not a search result; a budget expiry must not relabel it.
-    const overlong = prior?.code !== 'setup_transition_unrecorded' ? neverOverlongReason(snapshot, bounds, task) : null;
+    const overlong = prior?.code !== 'setup_transition_unrecorded'
+      ? neverOverlongReason(snapshot, bounds, task) ?? unfittableReason(snapshot, bounds, task)
+      : null;
     const reason = complete && prior?.code === 'setup_transition_unrecorded'
       ? prior
       : overlong ?? (complete

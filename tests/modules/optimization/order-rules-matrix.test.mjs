@@ -297,8 +297,7 @@ add('segment floor 150 min (larger than any 2 h window) cannot split a 3 h order
   rows => { assert.equal(scheduledCount(rows), 0); assert.ok(byId(rows, 'a').code); });
 add('O5: segment floor 150 min reports segment_floor_unfittable instead of a generic no-fit',
   { ...SPLIT_2H, rules: { split_order_policy: 'partial_allowed', min_productive_segment_minutes: 150 }, tasks: [T('a', 3, 'GREEN', DUE_FRI)] },
-  rows => { assert.equal(byId(rows, 'a').code, 'segment_floor_unfittable'); },
-  { '*': 'O5 — fixed in Phase 2' });
+  rows => { assert.equal(byId(rows, 'a').code, 'segment_floor_unfittable'); });
 add('segment floor 150 min still places a 1 h order shorter than the floor as one bar',
   { ...SPLIT_2H, rules: { split_order_policy: 'partial_allowed', min_productive_segment_minutes: 150 }, tasks: [T('a', 1, 'GREEN', DUE_FRI)] },
   rows => { allScheduled(rows); assert.deepEqual(pieceMinutes(byId(rows, 'a')), [60]); });
@@ -309,9 +308,7 @@ for (const lineRow of [true, false]) {
   const where = lineRow ? 'with a line calendar row' : 'with no line calendar row (plant hours apply)';
   add(`split never ${where}: a 12 h order longer than every 10 h window is queued as overlong_never`,
     { ...calendar, rules: { split_order_policy: 'never' }, tasks: [T('a', 12, 'GREEN', DUE_FRI)] },
-    rows => { assert.equal(scheduledCount(rows), 0); assert.equal(byId(rows, 'a').code, 'overlong_never'); },
-    // O3 root cause: hasNominalWindow ignores plant hours when the line has no calendar row, so the order reads no_fit_found.
-    lineRow ? undefined : { '*': 'O3 — fixed in Phase 2' });
+    rows => { assert.equal(scheduledCount(rows), 0); assert.equal(byId(rows, 'a').code, 'overlong_never'); });
   for (const value of ['overlong_only', 'partial_allowed']) {
     add(`split ${value} ${where}: a 12 h order is split 10 h + 2 h`,
       { ...calendar, rules: { split_order_policy: value }, tasks: [T('a', 12, 'GREEN', DUE_FRI)] },
@@ -333,8 +330,7 @@ add('split never with a blackout and no line calendar row keeps a 4 h order cont
   rows => { allScheduled(rows); assert.equal(byId(rows, 'a').pieces.length, 1); });
 add('O3: split overlong_only with a blackout and NO line calendar row keeps a 4 h order continuous (plant hours show it is not overlong)',
   { blocks: BLACKOUT, lineHours: null, rules: { split_order_policy: 'overlong_only' }, tasks: [T('a', 4, 'GREEN', DUE_WED)] },
-  rows => { allScheduled(rows); assert.equal(byId(rows, 'a').pieces.length, 1); },
-  { '*': 'O3 — fixed in Phase 2' });
+  rows => { allScheduled(rows); assert.equal(byId(rows, 'a').pieces.length, 1); });
 
 // unknown setup policy: zero / plantDefaultMinutes (0 and 45) / excludeFromSearch
 // DEFAULT_SETUP_ROWS: current line state GREEN; GREEN -> BLUE 5 min; nothing covers GREEN -> RED.
@@ -357,9 +353,7 @@ for (const [what, boundaryColor] of [['an uncovered', 'RED'], ['a blank-state', 
       rules: policy('plantDefaultMinutes', 45), firmed: ['F'],
       tasks: [T('F', 1, boundaryColor, DUE_WED, '2035-08-06T10:00:00', '2035-08-06T11:00:00'), T('M', 2, 'GREEN', DUE_WED)],
     },
-    rows => { assert.ok(byId(rows, 'M').scheduled, 'M is placed, not dropped'); },
-    // Only the detached evaluators drop M; Engine.evaluateSchedule recovers it in fillPlanningGaps.
-    { 'direct:spt': 'O1 — fixed in Phase 2', 'direct:changeover': 'O1 — fixed in Phase 2' });
+    rows => { assert.ok(byId(rows, 'M').scheduled, 'M is placed, not dropped'); });
 }
 add('unknown setup excludeFromSearch: a fresh uncovered order is queued setup_transition_unrecorded and the covered order is still placed',
   { rules: policy('excludeFromSearch'), tasks: [T('n8-red', 1, 'RED', DUE_WED), T('n8-zblue', 1, 'BLUE', DUE_WED)] },

@@ -272,6 +272,7 @@ window.__NIMBUS_LOCALES.pt = {
   'planning_reason.planner_unscheduled': 'Desprogramada pelo planejador',
   'planning_reason.run_time_over_cap': 'A duração de {{hours}} h é maior que o limite de {{cap}} h. Reduza a duração ou divida a ordem e depois programe-a.',
   'planning_reason.overlong_never': 'Mais longo que qualquer período de trabalho desta máquina, e esta planta não divide pedidos. Altere a máquina ou o tempo de execução para colocá-lo como uma única barra contínua que termina na data de vencimento.',
+  'planning_reason.segment_floor_unfittable': 'The productive segment floor is longer than any working period on this machine, so this order cannot be split into pieces that meet it. Lower the floor in the plant settings or change the machine.',
   'col.planning_window':               'Janela permitida',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */

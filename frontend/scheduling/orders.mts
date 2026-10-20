@@ -551,6 +551,7 @@ export const Table = {
             // the hours the server stored beside the message. Other codes keep their stored message.
             if (reason.code === 'planner_unscheduled') return Util.t('planning_reason.planner_unscheduled');
             if (reason.code === 'overlong_never') return Util.t('planning_reason.overlong_never');
+            if (reason.code === 'segment_floor_unfittable') return Util.t('planning_reason.segment_floor_unfittable');
             const extra = reason as { run_time?: number; cap_hours?: number };
             if (reason.code === 'run_time_over_cap' && typeof extra.run_time === 'number' && typeof extra.cap_hours === 'number') {
               return Util.t('planning_reason.run_time_over_cap', { hours: String(Math.round(extra.run_time * 10) / 10), cap: String(Math.round(extra.cap_hours * 10) / 10) });
