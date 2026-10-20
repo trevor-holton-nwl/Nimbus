@@ -63,6 +63,8 @@ declare global {
         };
         Timeline?: {
           rebuild?(): void;
+          _ganttActive?(): boolean;
+          _scheduleRebuild?(): void;
           focus?(id: string): void;
         };
         /** Reached by the Distribution pane's "Show on Gantt" action

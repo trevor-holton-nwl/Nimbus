@@ -42,6 +42,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.optimize_plant_no_timezone': 'La planta {{plant}} no tiene una zona horaria válida, por lo que NIMBUS no la optimizará. Pida a un administrador que establezca la zona horaria de esta planta en Datos maestros.',
   'toast.select_lines_to_opt':         'Seleccione al menos una máquina para optimizar, o cambie a Planta completa.',
   'toast.opt_apply_running_skipped':  '{{count}} pedido(s) entraron en ejecución mientras la vista previa estaba abierta y se dejaron sin cambios.',
+  'toast.opt_apply_invalid_dropped': '{{count}} pedido(s) de la vista previa ya no encajan en el plan actual y se dejaron como están.',
   'toast.plant_no_timezone':  'La planta {{plant}} no tiene una zona horaria válida, por lo que NIMBUS no puede saber qué pedidos están en ejecución o congelados. Pida a un administrador que configure la zona horaria de la planta en Datos maestros.',
   'toast.finish_cannot_hold':  'El pedido {{order}} no puede terminar a esa hora en {{machine}}: no hay un periodo de trabajo lo bastante largo que termine ahí. Se devolvió a su posición anterior.',
   'toast.running_finish_locked':  'El pedido {{order}} ya ha comenzado, así que su fin no se puede arrastrar ni escribir. Cambie su tiempo de ejecución para mover el fin.',
@@ -273,6 +274,8 @@ window.__NIMBUS_LOCALES.es = {
   'planning_reason.planner_unscheduled': 'Desprogramada por el planificador',
   'planning_reason.run_time_over_cap': 'La duración de {{hours}} h supera el límite de {{cap}} h. Acorte la duración o divida el pedido y luego prográmelo.',
   'planning_reason.overlong_never': 'Más largo que cualquier periodo de trabajo de esta máquina, y esta planta no divide los pedidos. Cambie la máquina o el tiempo de ejecución para colocarlo como una sola barra continua que termina en su fecha de vencimiento.',
+  'planning_reason.segment_floor_unfittable': 'The productive segment floor is longer than any working period on this machine, so this order cannot be split into pieces that meet it. Lower the floor in the plant settings or change the machine.',
+  'planning_reason.push_limit_unmet': 'Ninguna ubicación termina dentro del límite de aplazamiento de la fecha de entrega de la planta. Aumente el límite en la configuración de la planta o libere el pedido.',
   'col.planning_window':               'Ventana permitida',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
@@ -520,20 +523,24 @@ window.__NIMBUS_LOCALES.es = {
   'ui.split_order_opt_never':          'Nunca dividir pedidos',
   'ui.split_order_opt_overlong':       'Dividir solo pedidos inherentemente demasiado largos',
   'ui.split_order_opt_partial':        'Permitir pedidos parciales entre intervalos operativos',
-  'ui.split_order_policy_help':        'Los segmentos generados son visibles para el planificador, siguen siendo un único pedido lógico y nunca son más cortos de 30 minutos.',
+  'ui.split_order_policy_help':        'Los segmentos generados son visibles para el planificador, siguen siendo un único pedido lógico y nunca son más cortos que el mínimo de segmento productivo definido arriba (30 minutos por defecto).',
   'ui.split_policy_saved':             'Política de división de pedidos guardada para esta planta.',
   'ui.split_policy_save_failed':       'No se pudo guardar la política de división de pedidos: {{msg}}',
   'ui.unknown_setup_title':            'Setup data missing',                                        // MISSING TRANSLATION
-  'ui.unknown_setup_help':             'How the optimizer treats an order whose setup transition has no matrix row or whose line has no recorded state. The line is never frozen: orders are placed at zero minutes, placed with a plant-default setup time, or sent to the Needs Planning list.', // MISSING TRANSLATION
+  'ui.unknown_setup_help':             'Qué hace el optimizador cuando la transición de preparación de un pedido no tiene fila en la matriz. Con cero minutos no se suma tiempo de preparación. Con el tiempo de preparación predeterminado de la planta se cobra ese valor, pero solo en líneas que tienen una definición de preparación y son compatibles con la preparación. Enviar a Needs Planning rechaza solo una transición entre dos estados conocidos sin fila en la matriz; una línea sin estado registrado se admite con cero minutos. Con esta opción, en la siguiente ejecución del optimizador los pedidos ya programados y no protegidos cuya transición no tiene fila también pasan a Needs Planning.',
   'ui.unknown_setup_opt_zero':         'Place at zero setup minutes (default)',                      // MISSING TRANSLATION
   'ui.unknown_setup_opt_default':      'Place using a plant-default setup time',                     // MISSING TRANSLATION
   'ui.unknown_setup_opt_exclude':      'Send to Needs Planning until the matrix row exists',         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_label':    'Default setup time',                                         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_invalid':  'Enter a whole number of minutes, zero or greater.',           // MISSING TRANSLATION
+  'ui.unknown_setup_zero_hint':        '0 minutos se comporta como Cero: no se suma tiempo de preparación para una transición sin datos. Introduzca los minutos predeterminados.',
+  'ui.unknown_setup_inactive_note':    'Los tiempos de preparación están desactivados para esta planta, por lo que este ajuste no tiene efecto hasta que se active la optimización con preparación.',
+  'ui.order_rule_days_too_large':      'Introduzca {{max}} días como máximo.',
+  'ui.order_rule_minutes_too_large':   'Introduzca {{max}} minutos como máximo.',
   'ui.unknown_setup_saved':            'Setup-data policy saved for this plant.',                    // MISSING TRANSLATION
   'ui.unknown_setup_failed':           'Could not save setup-data policy',                            // MISSING TRANSLATION
   'ui.min_productive_segment_title':   'Mínimo de segmento productivo',
-  'ui.min_productive_segment_help':    'Controla la duración mínima de un fragmento productivo cuando arriba se permite la división parcial o solo para pedidos excesivamente largos. Se aplica tanto al planificador sin conocimiento de cambios como al que sí los considera.',
+  'ui.min_productive_segment_help':    'Controla la duración mínima de un fragmento productivo cuando abajo se permite la división parcial o solo para pedidos excesivamente largos. Se aplica tanto al planificador sin conocimiento de cambios como al que sí los considera.',
   'ui.min_productive_segment_label':   'Segmento productivo mínimo (minutos)',
   'ui.min_productive_segment_help_detail': 'Un fragmento nunca es más corto que este valor, salvo un pedido completo por debajo del mínimo, que se programa entero. El valor predeterminado es 30 minutos.',
   'ui.min_productive_segment_invalid': 'Introduzca un número entero de minutos mayor que cero.',
@@ -2097,7 +2104,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.reject_run_time_over_cap': 'la duración supera el límite de longitud',
   'ui.reject_width_mismatch': 'la longitud de la barra no coincide con la duración',
   'ui.reject_single_edge': 'el inicio y el fin deben guardarse juntos',
-  'ui.max_push_forward_help': 'Déjelo en blanco para no tener límite. El optimizador lo trata como un límite estricto: no programará un pedido con fecha para que termine más de este número de días naturales después del día de su fecha de entrega. Si la fecha de entrega cae en un día cerrado (por ejemplo, un domingo), el recuento empieza en el último día abierto anterior, así que un hueco cerrado consume parte del margen. Los pedidos que no puedan cumplir el límite se cuentan en la vista previa y en una advertencia tras la ejecución. Quitar atrasos ignora este límite.',
+  'ui.max_push_forward_help': 'Déjelo en blanco para no tener límite. El optimizador lo trata como un límite estricto: no programará un pedido con fecha para que termine más de este número de días naturales después del día de su fecha de entrega. Si la fecha de entrega cae en un día cerrado (por ejemplo, un domingo), el recuento empieza en el último día abierto anterior, así que un hueco cerrado consume parte del margen. Los pedidos que no puedan terminar dentro del límite pasan a Needs Planning, cada uno con su motivo. Quitar atrasos ignora este límite.',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',

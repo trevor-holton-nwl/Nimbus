@@ -6453,6 +6453,9 @@ body.dark .lp-hm-grad { background: linear-gradient(to right, #24334a, var(--war
   margin: 0;
 }
 .sched-rule-row select.form-input { width: min(100%, 50ch); min-width: 0; }
+/* Inline explanatory note under a rule row (e.g. "setup is off for this plant"):
+   a hidden-by-default .panel-hint that spans both grid columns. */
+.sched-rule-note { grid-column: 1 / -1; margin: 0; padding: 2px 0 6px; }
 .sched-rule-unit { font-size: 11.5px; color: var(--fg-mute); white-space: nowrap; }
 @media (max-width: 900px) {
   .sched-rules-grid { grid-template-columns: 1fr; }

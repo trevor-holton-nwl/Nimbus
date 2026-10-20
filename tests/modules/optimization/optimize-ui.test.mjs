@@ -307,8 +307,8 @@ test('OptimizerPreview retains only a bounded candidate explanation and drops it
     'missing-pair detail is derived separately while the candidate is in scope');
   assert.deepEqual(explanation.search, { candidateCount: 23, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 37, limitReached: false });
   assert.equal(Object.hasOwn(explanation, 'tasks'), false, 'the compact explanation never retains a schedule snapshot');
-  assert.deepEqual(explanation.overLatenessCap, { orders: 0, lines: 0, days: null },
-    'without input.tasks/input.plant supplied, the due-date push-forward cap tally falls back to the no-op shape rather than throwing');
+  assert.equal(Object.hasOwn(explanation, 'overLatenessCap'), false,
+    'the push-forward limit is hard, so the preview no longer carries an over-cap tally');
 
   OptimizerPreview._explanation = explanation;
   OptimizerPreview.active = true;
@@ -2499,6 +2499,34 @@ test('Background popup: a same-plant result keeps the Switch button hidden and n
     assert.ok(!String(switchBtn.textContent).includes('{{'), 'no raw {{plant}} placeholder');
     assert.ok(!String(fx.extra.get('opt-bg-done-body').innerHTML).includes('{{'));
   } finally {
+    fx.restore();
+  }
+});
+
+test('O9: Apply drops an order the proposal placed into a running order\'s old slot, instead of committing an overlap', async () => {
+  const fx = openBackgroundFixture('BX', boardTasks());
+  const priorIsInProgress = Engine.isInProgress;
+  try {
+    await OptimizerPreview.runInBackground('spt', fx.opts);
+    const { result } = OptimizerPreview._backgroundRun;
+    const x = patchById(result, 'bx-x'); const y = patchById(result, 'bx-y');
+    const xLive = { start: Store.tasks['bx-x'].start_date, end: Store.tasks['bx-x'].end_date };
+    assert.ok(overlaps({ start: y.changes.start_date, end: y.changes.end_date }, xLive),
+      'precondition: the optimizer puts Y into the slot X occupies now');
+    assert.notEqual(+x.changes.start_date, +xLive.start, 'precondition: the optimizer moves X out of that slot');
+    OptimizerPreview.present(result, { open: false });
+    // X started running while the preview was open: its patch is dropped, but Y still targets X's old slot.
+    Engine.isInProgress = (task, now) => (task.id === 'bx-x' ? true : priorIsInProgress.call(Engine, task, now));
+
+    await OptimizerPreview.apply();
+
+    assert.equal(+Store.tasks['bx-x'].start_date, +xLive.start, 'the running order keeps its slot');
+    assert.equal(Store.tasks['bx-y'].start_date, null, 'Y is not committed on top of the running order');
+    assert.ok(Store.tasks['bx-z'].start_date instanceof Date, 'the unrelated order still applies');
+    assert.ok(fx.toasts.some(t => t.type === 'warn' && /opt_apply_running_skipped|running/i.test(t.msg)), 'the running skip is still reported');
+    assert.ok(fx.toasts.some(t => t.type === 'warn' && /opt_apply_invalid_dropped|no longer fit/i.test(t.msg)), 'the validation drop is reported separately');
+  } finally {
+    Engine.isInProgress = priorIsInProgress;
     fx.restore();
   }
 });

@@ -27,7 +27,7 @@ import { stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
-import type { NimbusMasterData, NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
+import type { NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
 
 /* =============================================================================
    OPTIMIZE DIALOG — time-window & strategy picker for Engine.runAndApply
@@ -854,13 +854,6 @@ interface PreviewExplanation {
    *  B3 comment in schedule-services.mts for why: the worst drops produce no
    *  diagnostic object at all, so there is nothing else to collect from). */
   unplacedOrders: { orders: number; lines: number };
-  /** Due-date push-forward limit (`plants.max_push_forward_days`) tally for
-   *  this candidate — the same post-hoc reporting `Engine.runAndApply`'s live
-   *  path derives, computed here from `candidate.patches` against the
-   *  pre-apply task list so the preview banner and the live-run toast agree.
-   *  `days: null` (with `orders`/`lines` both 0) means the plant has no
-   *  configured limit — the default, no-op case. */
-  overLatenessCap: { orders: number; lines: number; days: number | null };
   search: { candidateCount: number; method: string; termination: string; runtimeMs: number; limitReached: boolean };
   /** Aggregate prune tally for the whole run (§4.3 docs/archive/OPTIMIZER-PREVIEW.md), bucketed
    *  from candidate.explanation's reason codes. Only genuinely exclusionary codes
@@ -880,15 +873,6 @@ interface PreviewExplanationInput {
   unplacedCandidates?: ReadonlyArray<{ id: string; line: string }>;
   /** Firmed/pinned ids — deliberately never moved, so never counted as unplaced. */
   firmedIds?: ReadonlySet<string> | ReadonlyArray<string>;
-  /** Full pre-apply task list for the candidate snapshot — resolves the
-   *  MACHINE/due-date lookups `Engine._overCapSummary` needs for
-   *  `overLatenessCap`. Omitted only by callers that don't want the tally. */
-  tasks?: ReadonlyArray<NimbusTask>;
-  /** Plant this candidate was evaluated for — read alongside `tasks` for
-   *  `overLatenessCap` (`plants.max_push_forward_days` is per-plant). */
-  plant?: string | null;
-  /** Captured master-data snapshot for detached explanation facts. */
-  masterData?: NimbusMasterData | null;
 }
 
 const PREVIEW_REASON_LIMIT = 8;
@@ -1193,9 +1177,6 @@ export const OptimizerPreview = {
       scheduledWithoutSetup: { orders: scheduledWithoutSetupOrders.size, lines: scheduledWithoutSetupLines.size },
       scheduledStateUnrecorded: { orders: stateUnrecordedOrders.size, lines: stateUnrecordedLines.size },
       unplacedOrders: { orders: unplacedOrderIds.size, lines: unplacedLines.size },
-      overLatenessCap: input.tasks
-        ? Engine._overCapSummary(candidate.patches, input.tasks, input.plant ?? null, input.masterData)
-        : { orders: 0, lines: 0, days: null },
       prunes: tallyPrunes(candidate.explanation),
       search: {
         candidateCount: candidate.diagnostics.candidateCount, method: candidate.diagnostics.method,
@@ -1588,9 +1569,6 @@ export const OptimizerPreview = {
       postKpis,
       unplacedCandidates,
       firmedIds: explanationFirmedIds,
-      tasks: capturedSnapshot.tasks,
-      plant,
-      masterData: capturedSnapshot.masterData,
     });
     const described = OptimizerPreview.describeMissingPairs(
       candidate,
@@ -2001,19 +1979,6 @@ export const OptimizerPreview = {
         }))}</div>`
       : '';
 
-    // Due-date push-forward limit banner — same tally as the live-run toast
-    // (toast.optimize_over_lateness_cap), rendered here so the preview
-    // surfaces the violation before the planner applies.
-    const overLatenessCapHtml = (explanation && explanation.overLatenessCap.orders > 0)
-      ? `<div class="opt-pv-backlog-warning">${Util.escapeHtml(Util.t('ui.opt_pv_over_lateness_cap', {
-          orders: explanation.overLatenessCap.orders,
-          lines: explanation.overLatenessCap.lines,
-          // days is never null here: overLatenessCap.orders > 0 only when the
-          // plant has a configured limit (see _overCapSummary's null fast-exit).
-          days: explanation.overLatenessCap.days ?? 0,
-        }))}</div>`
-      : '';
-
     // Per-card markup
     const cardsHtml = cards.map(c => {
       const preV  = pre[c.k]  ?? 0;
@@ -2149,7 +2114,6 @@ export const OptimizerPreview = {
 
         ${scheduledStateUnrecordedHtml}
 
-        ${overLatenessCapHtml}
 
         <div class="opt-pv-sections">
           ${whyHtml}
@@ -2206,12 +2170,35 @@ export const OptimizerPreview = {
     // A running order never moves, and the preview may have sat open while one started. Drop
     // those patches at apply time (Remove Backlog is the one run that moves running orders).
     // The running test at Apply uses each order's own plant clock (Store.plantNow via the default now).
-    const keptPatches = mode === 'backlog'
+    let keptPatches = mode === 'backlog'
       ? candidate.patches
       : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live)); });
     const runningSkippedIds = candidate.patches
       .filter(patch => !keptPatches.includes(patch)).map(patch => String(patch.id));
+    // O9: dropping a running order frees its old slot in the plan but not on the live board, so a kept order the
+    // proposal placed there would now overlap it. Re-validate the survivors against the live board, only when
+    // something was actually dropped and never for Backlog (which legitimately moves running orders).
+    let validationDroppedIds: string[] = [];
+    if (mode !== 'backlog' && runningSkippedIds.length && plant) {
+      const running = new Set(runningSkippedIds);
+      const pruned = OptimizerPreview._pruneAgainstLive({
+        plant, candidate, snapshot: snap,
+        shouldDrop: id => running.has(id),
+      });
+      if (!pruned) {
+        OptimizerPreview._render();
+        OptimizerPreview._syncApplyButton();
+        Toast.show('This proposal is no longer valid. Run optimization again before applying.', 'warn');
+        return;
+      }
+      const survivors = new Set(pruned.kept.map(patch => String(patch.id)));
+      keptPatches = candidate.patches.filter(patch => survivors.has(String(patch.id)));
+      validationDroppedIds = pruned.dropped.filter(id => !running.has(id));
+    }
     await OptimizerPreview._runGuardedCommit(OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }, snap));
+    if (validationDroppedIds.length) {
+      Toast.show(Util.t('toast.opt_apply_invalid_dropped', { count: validationDroppedIds.length }), 'warn', 7000);
+    }
   },
 
   /** Await an apply-tail promise and route a failure to ErrorLog, so it is never silent. */
@@ -2298,7 +2285,7 @@ export const OptimizerPreview = {
     Toast.show(Util.t('toast.opt_applied'), 'success');
     // Fire warning toasts — matching the live Engine.runAndApply patterns from schedule-services.mts
     if (OptimizerPreview._explanation) {
-      const { scheduledWithoutSetup, unplacedOrders, overLatenessCap } = OptimizerPreview._explanation;
+      const { scheduledWithoutSetup, unplacedOrders } = OptimizerPreview._explanation;
       if (scheduledWithoutSetup.orders && !OptimizerPreview._syntheticSetup) {
         Toast.show(Util.t('toast.optimize_missing_setup_summary', {
           orders: scheduledWithoutSetup.orders,
@@ -2312,15 +2299,6 @@ export const OptimizerPreview = {
         Toast.show(Util.t('toast.optimize_orders_left_in_place', {
           orders: unplacedOrders.orders,
           lines: unplacedOrders.lines,
-        }), 'warn');
-      }
-      if (overLatenessCap.orders) {
-        Toast.show(Util.t('toast.optimize_over_lateness_cap', {
-          orders: overLatenessCap.orders,
-          lines: overLatenessCap.lines,
-          // days is never null here: overLatenessCap.orders > 0 only when the
-          // plant has a configured limit (see _overCapSummary's null fast-exit).
-          days: overLatenessCap.days ?? 0,
         }), 'warn');
       }
     }
@@ -2635,26 +2613,28 @@ export const OptimizerPreview = {
     await OptimizerPreview._runGuardedCommit(OptimizerPreview.applyPartial(result));
   },
 
-  /** Apply the part of a result that still matches the live schedule. An order that was edited, deleted, started
-   *  running, or whose distributed sub-order siblings were dropped is skipped; everything else is committed as one
-   *  Undo entry through `_commitPatches`. */
-  async applyPartial(result: Pick<PreviewResult, 'plant' | 'candidate' | 'snapshot' | 'taskBaseline'>): Promise<void> {
-    const pv = OptimizerPreview;
-    if (Store.selectedPlant !== result.plant) {
-      Toast.show(Util.t('toast.opt_bg_other_plant', { plant: result.plant }), 'warn');
-      return;
-    }
-    if (pv._candidate !== result.candidate) pv.present(result as PreviewResult, { open: false });
-    const refuse = (): void => {
-      Toast.show(Util.t('ui.opt_preview_task_stale'), 'warn');
-      pv._clear();
-      Modal.close('modal-opt-preview');
-    };
-    const candidate = result.candidate;
+  /** UI-free: re-validate a preview candidate against the LIVE board and prune what no longer fits. `shouldDrop`
+   *  names the orders to drop up front (the caller's own reason: edited, deleted, running); this then drops their
+   *  distributed-sub-order families and any kept order whose placement the live board now rejects (a collision
+   *  with an order that is not being applied drops the colliding kept patches). Returns the surviving patches and
+   *  the dropped ids, or null when the apply cannot be made safe (no validation context, a finding with no
+   *  order, an unresolvable collision, or nothing left). Shows no toast and touches no preview state. */
+  _pruneAgainstLive(args: {
+    plant: string;
+    candidate: CandidateResult;
+    snapshot: ReadonlyArray<NimbusTask>;
+    shouldDrop: (id: string, live: NimbusTask | undefined) => boolean;
+  }): { kept: SchedulePatch[]; dropped: string[] } | null {
+    const { candidate, plant } = args;
     const patches = candidate.patches;
-    const plant = result.plant;
+    // Re-validate the kept subset against the LIVE board (live rows, calendars, blackouts), not the compute-time
+    // snapshot. Findings on a kept order drop it (and its family). A finding on an order we are not applying is a
+    // collision only when the same finding is absent from the live board validated with no patches at all (otherwise it
+    // is a pre-existing defect or disposition bookkeeping noise). A collision drops every kept patch on that line whose
+    // proposed interval meets the order's live interval or, failing that, the kept patch placed immediately before it
+    // (it changed that order's incoming setup); with neither, the result is null. A finding with no order yields null.
     const live = (id: string): NimbusTask | undefined => Store.tasks[id];
-    const atCompute = new Map(result.snapshot.map(task => [String(task.id), task]));
+    const atCompute = new Map(args.snapshot.map(task => [String(task.id), task]));
     // Distributed sub-orders (siblings sharing PARENT_ORDER, the field distribution_separation groups on) must
     // land together, so one dropped sibling drops its whole family.
     const parentKey = (task: NimbusTask | undefined): string | null =>
@@ -2673,17 +2653,10 @@ export const OptimizerPreview = {
     };
     for (const patch of patches) {
       const id = String(patch.id);
-      const task = live(id);
-      if (!task || Engine.isInProgress(task) || taskBaseline([task]).get(id) !== result.taskBaseline.get(id)) dropWithFamily(id);
+      if (args.shouldDrop(id, live(id))) dropWithFamily(id);
     }
-    // Re-validate the kept subset against the LIVE board (live rows, calendars, blackouts), not the compute-time
-    // snapshot. Findings on a kept order drop it (and its family). A finding on an order we are not applying is a
-    // collision only when the same finding is absent from the live board validated with no patches at all (otherwise it
-    // is a pre-existing defect or disposition bookkeeping noise). A collision drops every kept patch on that line whose
-    // proposed interval meets the order's live interval or, failing that, the kept patch placed immediately before it
-    // (it changed that order's incoming setup); with neither, the apply is refused. A finding with no order refuses.
     const context = candidate.validationContext;
-    if (!context) { refuse(); return; }
+    if (!context) return null;
     const live0 = snapshotSchedule(plant);
     const ms = (value: unknown): number | null => (value instanceof Date ? value.getTime() : null);
     // The message is part of the key: capacity_overlap names both orders, so a NEW overlap that lands on an order which
@@ -2702,7 +2675,7 @@ export const OptimizerPreview = {
       const keptIds = new Set(kept.map(patch => String(patch.id)));
       const findings = errorsFor(kept);
       if (!findings.length) break;
-      if (findings.some(finding => !finding.taskId)) { refuse(); return; }
+      if (findings.some(finding => !finding.taskId)) return null;
       let dropped = false;
       for (const finding of findings) {
         const id = String(finding.taskId);
@@ -2725,15 +2698,42 @@ export const OptimizerPreview = {
             .sort((a, b) => b.end - a.end)[0];
           if (before) hits = [before.patch];
         }
-        if (!hits.length) { refuse(); return; }
+        if (!hits.length) return null;
         for (const hit of hits) dropWithFamily(String(hit.id));
         dropped = true;
       }
       if (!dropped) break;
-      if (pass === 2) { refuse(); return; }
+      if (pass === 2) return null;
       kept = patches.filter(patch => !drop.has(String(patch.id)));
     }
-    if (!kept.length) { refuse(); return; }
+    if (!kept.length) return null;
+    return { kept, dropped: [...drop] };
+  },
+
+  /** Apply the part of a result that still matches the live schedule. An order that was edited, deleted, started
+   *  running, or whose distributed sub-order siblings were dropped is skipped; everything else is committed as one
+   *  Undo entry through `_commitPatches`. */
+  async applyPartial(result: Pick<PreviewResult, 'plant' | 'candidate' | 'snapshot' | 'taskBaseline'>): Promise<void> {
+    const pv = OptimizerPreview;
+    if (Store.selectedPlant !== result.plant) {
+      Toast.show(Util.t('toast.opt_bg_other_plant', { plant: result.plant }), 'warn');
+      return;
+    }
+    if (pv._candidate !== result.candidate) pv.present(result as PreviewResult, { open: false });
+    const refuse = (): void => {
+      Toast.show(Util.t('ui.opt_preview_task_stale'), 'warn');
+      pv._clear();
+      Modal.close('modal-opt-preview');
+    };
+    const candidate = result.candidate;
+    const plant = result.plant;
+    const pruned = pv._pruneAgainstLive({
+      plant, candidate, snapshot: result.snapshot,
+      shouldDrop: (id, task) => !task || Engine.isInProgress(task) || taskBaseline([task]).get(id) !== result.taskBaseline.get(id),
+    });
+    if (!pruned) { refuse(); return; }
+    const kept = pruned.kept;
+    const drop = new Set(pruned.dropped);
     const undoSnapshot = structuredClone(snapshotSchedule(plant).tasks
       .filter(task => resolveTaskPlant(task, { lineSettings: Store.lineSettings, masterData: Store.masterData }) === plant));
     pv._applying = true;

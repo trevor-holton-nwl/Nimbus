@@ -1,6 +1,8 @@
 """Regression coverage for setup-policy changes beside existing setup admin writes."""
 from contextlib import contextmanager
 
+import pytest
+
 import master_data as md
 
 
@@ -197,3 +199,188 @@ def test_unknown_setup_policy_rejects_invalid_values():
             assert "unknown_setup" in str(error)
         else:
             raise AssertionError(f"{policy!r}/{minutes!r} must be rejected")
+
+
+# ── Order Rules matrix (order-rules-hardening, Phase 1): setters beside the five settings ──
+
+@pytest.mark.parametrize("policy", ["never", "overlong_only", "partial_allowed"])
+def test_split_order_policy_write_persists_each_allowed_value_and_audits(monkeypatch, policy):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_split_order_policy("SN", "5512", policy, "owner@example.com")
+
+    assert result == {"status": "ok", "plant": "5512", "split_order_policy": policy}
+    update = next((item for item in cursor.executed if "UPDATE plants SET split_order_policy" in item[0]), None)
+    assert update is not None
+    assert update[1] == [policy, "5512", "SN"]
+    assert any("set_split_order_policy" in statement for statement, _ in cursor.executed)
+
+
+def test_split_order_policy_normalizes_case_and_whitespace(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_split_order_policy("SN", "5512", "  Overlong_Only ")
+
+    assert result["split_order_policy"] == "overlong_only"
+
+
+@pytest.mark.parametrize("policy", ["split", "always", "", None, "never,partial_allowed", 1])
+def test_split_order_policy_rejects_values_outside_the_allowlist(policy):
+    with pytest.raises(ValueError, match="split_order_policy"):
+        md.set_plant_split_order_policy("SN", "5512", policy)
+
+
+def test_split_order_policy_requires_a_plant():
+    with pytest.raises(ValueError, match="plant is required"):
+        md.set_plant_split_order_policy("SN", "", "never")
+
+
+@pytest.mark.parametrize("setter,column", [
+    (md.set_plant_max_pull_forward_days, "max_pull_forward_days"),
+    (md.set_plant_max_push_forward_days, "max_push_forward_days"),
+])
+def test_pull_and_push_limits_accept_null_to_clear_the_limit(monkeypatch, setter, column):
+    """Blank in the UI means no limit: a null must be written through, not rejected or coerced to 0."""
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = setter("SN", "5512", None, "owner@example.com")
+
+    assert result == {"status": "ok", "plant": "5512", column: None}
+    update = next((item for item in cursor.executed if f"UPDATE plants SET {column}" in item[0]), None)
+    assert update is not None
+    assert update[1] == [None, "5512", "SN"]
+
+
+@pytest.mark.parametrize("setter,column", [
+    (md.set_plant_max_pull_forward_days, "max_pull_forward_days"),
+    (md.set_plant_max_push_forward_days, "max_push_forward_days"),
+])
+def test_pull_and_push_limits_accept_zero_as_a_real_limit(monkeypatch, setter, column):
+    """Zero is a hard "due day only" limit, distinct from blank (no limit)."""
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = setter("SN", "5512", 0, "owner@example.com")
+
+    assert result == {"status": "ok", "plant": "5512", column: 0}
+    update = next((item for item in cursor.executed if f"UPDATE plants SET {column}" in item[0]), None)
+    assert update[1] == [0, "5512", "SN"]
+
+
+@pytest.mark.parametrize("setter", [md.set_plant_max_pull_forward_days, md.set_plant_max_push_forward_days])
+def test_pull_and_push_limits_without_a_subnetwork_scope_by_plant_only(monkeypatch, setter):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    setter("", "5512", 3)
+
+    update = next(item for item in cursor.executed if "UPDATE plants SET" in item[0])
+    assert update[1] == [3, "5512"]
+    assert "subnetwork" not in update[0]
+
+
+def test_unknown_setup_policy_zero_persists_zero_minutes(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_unknown_setup_policy("SN", "5512", "zero", 0, "owner@example.com")
+
+    assert result["setup_policy_config"] == {"unknownSetupPolicy": "zero", "unknownSetupDefaultMinutes": 0, "version": 2}
+
+
+def test_unknown_setup_policy_exclude_from_search_succeeds_and_null_minutes_become_zero(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_unknown_setup_policy("SN", "5512", "excludeFromSearch", None, "owner@example.com")
+
+    assert result["status"] == "ok"
+    assert result["setup_policy_config"] == {
+        "unknownSetupPolicy": "excludeFromSearch", "unknownSetupDefaultMinutes": 0, "version": 2,
+    }
+    assert any("set_unknown_setup_policy" in statement for statement, _ in cursor.executed)
+
+
+def test_unknown_setup_policy_plant_default_minutes_accepts_zero(monkeypatch):
+    """plantDefaultMinutes with 0 minutes is accepted (it behaves like zero; the panel hints at that)."""
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_unknown_setup_policy("SN", "5512", "plantDefaultMinutes", 0)
+
+    assert result["setup_policy_config"]["unknownSetupDefaultMinutes"] == 0
+    assert result["setup_policy_config"]["unknownSetupPolicy"] == "plantDefaultMinutes"
+
+
+def test_unknown_setup_policy_requires_a_plant():
+    with pytest.raises(ValueError, match="plant is required"):
+        md.set_plant_unknown_setup_policy("SN", "", "zero", 0)
+
+
+# ── S4 caps (order-rules-hardening Phase 3) ──
+
+@pytest.mark.parametrize("setter,column", [
+    (md.set_plant_max_pull_forward_days, "max_pull_forward_days"),
+    (md.set_plant_max_push_forward_days, "max_push_forward_days"),
+])
+def test_pull_and_push_limits_cap_at_365_days(monkeypatch, setter, column):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    assert setter("SN", "5512", 365)["status"] == "ok"
+    with pytest.raises(ValueError, match=column):
+        setter("SN", "5512", 366)
+    assert not any("set_" + column in statement for statement, _ in cursor.executed[2:])
+
+
+def test_min_productive_segment_minutes_caps_at_1440(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    assert md.set_plant_min_productive_segment_minutes("SN", "5512", 1440)["status"] == "ok"
+    with pytest.raises(ValueError, match="min_productive_segment_minutes"):
+        md.set_plant_min_productive_segment_minutes("SN", "5512", 1441)
+
+
+class _StoredMinutesCursor(_Cursor):
+    def __init__(self, stored):
+        super().__init__()
+        self._stored = stored
+
+    def fetchone(self):
+        return (self._stored,)
+
+
+def test_unknown_setup_minutes_over_cap_rejected_when_changed(monkeypatch):
+    cursor = _StoredMinutesCursor("30")
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    with pytest.raises(ValueError, match="unknown_setup_default_minutes"):
+        md.set_plant_unknown_setup_policy("SN", "5512", "plantDefaultMinutes", 1441)
+    assert not any("UPDATE plants" in statement for statement, _ in cursor.executed)
+
+
+def test_unknown_setup_minutes_at_cap_accepted_without_a_stored_read(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_unknown_setup_policy("SN", "5512", "plantDefaultMinutes", 1440)
+
+    assert result["setup_policy_config"]["unknownSetupDefaultMinutes"] == 1440
+
+
+def test_legacy_over_cap_row_does_not_block_an_unrelated_policy_save(monkeypatch):
+    """The stored value is already over the cap; re-sending it unchanged (a policy-only
+    change) must succeed, while changing it to another over-cap value still fails."""
+    cursor = _StoredMinutesCursor("5000")
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_unknown_setup_policy("SN", "5512", "excludeFromSearch", 5000)
+
+    assert result["setup_policy_config"]["unknownSetupDefaultMinutes"] == 5000
+    assert any("UPDATE plants SET setup_policy_config" in statement for statement, _ in cursor.executed)
+    with pytest.raises(ValueError, match="unknown_setup_default_minutes"):
+        md.set_plant_unknown_setup_policy("SN", "5512", "excludeFromSearch", 6000)

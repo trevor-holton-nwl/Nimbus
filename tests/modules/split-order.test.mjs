@@ -232,6 +232,48 @@ test('Calendar.placeWithSetup uses effective calendar fragments and keeps setup 
   }
 });
 
+test('Calendar.placeWithSetup honors the plant productive-segment floor when the caller names none (X1)', () => {
+  // The Alerts Fix reaches the adapter without a floor; the plant's Order Rules floor must still apply.
+  const plant = 'P-X1-FLOOR';
+  const line = 'L-X1-FLOOR';
+  const workHours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 10]]));
+  const place = (floor, explicit) => {
+    Store.replaceBlocks([{
+      id: 'x1-block', plant, line,
+      start: new Date('2026-08-12T08:45:00'), end: new Date('2026-08-12T10:00:00'), reason: 'test',
+    }], 'test');
+    Store.replacePlantBlocks([], 'test');
+    Store.replaceCalendars({}, 'test');
+    Store.replacePlants({}, 'test');
+    Store.setMasterData({
+      plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'partial_allowed',
+        ...(floor === null ? {} : { min_productive_segment_minutes: floor }) }],
+      lines: [{ machine: line, plant }],
+    }, 'test');
+    Store.setLineSetting(line, { plant, excludeFromOpt: false }, 'test');
+    Store.setCalendar(line, workHours, 'test');
+    for (const day of Object.keys(workHours).map(Number)) Store.setPlantWorkHours(plant, day, workHours[day], 'test');
+    Calendar._beginRun(plant);
+    try {
+      return Calendar.placeWithSetup(line, {
+        earliestStart: new Date('2026-08-12T08:00:00'), runtimeMinutes: 100,
+        setup: { kind: 'resolved', minutes: 0 }, policy: 'partial_allowed',
+        ...(explicit === undefined ? {} : { minProductiveSegmentMinutes: explicit }),
+      });
+    } finally { Calendar._endRun(); }
+  };
+  const lengths = result => result.productiveSegments.map(segment => (segment.end - segment.start) / 60000);
+  const low = place(15);
+  assert.equal(low.kind, 'placed');
+  assert.ok(lengths(low).some(minutes => minutes < 60), `a 15-minute floor admits the 45-minute morning fragment: ${lengths(low)}`);
+  const high = place(60);
+  assert.equal(high.kind, 'placed');
+  assert.ok(lengths(high).every(minutes => minutes >= 60), `a 60-minute plant floor leaves no piece under it: ${lengths(high)}`);
+  assert.deepEqual(lengths(place(null)).every(minutes => minutes >= 30), true, 'no plant value falls back to the default floor');
+  const explicitWins = place(60, 15);
+  assert.ok(lengths(explicitWins).some(minutes => minutes < 60), 'an explicit request floor still beats the plant value');
+});
+
 test('standard scheduling regenerates an in-window logical parent as one split aggregate', () => {
   const plant = 'P-STRATEGY-SPLIT';
   const line = 'L-STRATEGY-SPLIT';

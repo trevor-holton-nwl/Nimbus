@@ -52,6 +52,8 @@ export function serializeOptimizerValidation(
   const context = candidate.validationContext;
   if (!context) return undefined;
   const { bounds, snapshot } = context;
+  // `bounds.ignorePlantWindow` is intentionally NOT serialized: only Remove Backlog sets it and Backlog runs
+  // foreground-only, so no worker validation ever needs it. Add it here if Backlog ever moves to the worker.
   if (!Number.isFinite(bounds.now.getTime())
     || typeof bounds.respectCalendar !== 'boolean'
     || !bounds.planningStart || !Number.isFinite(bounds.planningStart.getTime())

@@ -794,6 +794,66 @@ test('Engine.autoReflow resolves equal-start successors by id before reserving s
 });
 
 
+// X2 (Order Rules hardening): the Fix path (autoReflow) reserves the plant's unknown-setup default for an uncovered
+// transition or an unrecorded state, the same minutes the optimizer's validator charges.
+function reflowDefaultChargeFixture(t, { policy, minutes, plantActive = true, blueColor = 'BLUE' }) {
+  if (!t.__x2ClockPinned) { t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-17T00:00:00') }); t.__x2ClockPinned = true; }
+  const line = 'X2-REFLOW-LINE';
+  const plant = 'X2-REFLOW-PLANT';
+  const prior = {
+    plant: Store.selectedPlant, tasks: structuredClone(Store.tasksArr), setup: Store.setupSnapshot,
+    calendar: Store.calendars[line], masterData: Store.masterData,
+  };
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setMasterData({
+    plants: [{ plant, timezone: LOCAL_TZ, setup_policy_config: { unknownSetupPolicy: policy, unknownSetupDefaultMinutes: minutes } }],
+    lines: [{ machine: line, plant }],
+  }, 'unit-test');
+  Store.setCalendar(line, { 1: [0, 24] }, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: plantActive,
+    plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
+  }, 'unit-test');
+  Store.setTasks([
+    { id: 'x2-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED', start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') },
+    { id: 'x2-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, ...(blueColor ? { COLOR: blueColor } : {}), start_date: new Date('2026-08-17T09:15:00'), end_date: new Date('2026-08-17T10:15:00') },
+  ], 'unit-test');
+  return () => {
+    Store.setTasks(prior.tasks, 'unit-test');
+    Store.replaceSetupSnapshot(prior.setup, 'unit-test');
+    Store.setMasterData(prior.masterData, 'unit-test');
+    if (prior.calendar) Store.setCalendar(line, prior.calendar.workHours, 'unit-test'); else delete Store.calendars[line];
+    Store.setSelectedPlant(prior.plant, 'unit-test');
+  };
+}
+const blueStartAfterReflow = () => { Engine.autoReflow('x2-red'); return Store.tasks['x2-blue'].start_date.getTime(); };
+
+test('X2: autoReflow charges the plant default for an uncovered transition and for an unrecorded state', t => {
+  let restore = reflowDefaultChargeFixture(t, { policy: 'plantDefaultMinutes', minutes: 30 });
+  try {
+    assert.equal(blueStartAfterReflow(), new Date('2026-08-17T09:30:00').getTime(), 'uncovered RED -> BLUE reserves the 30-minute default');
+  } finally { restore(); }
+  restore = reflowDefaultChargeFixture(t, { policy: 'plantDefaultMinutes', minutes: 30, blueColor: null });
+  try {
+    assert.equal(blueStartAfterReflow(), new Date('2026-08-17T09:30:00').getTime(), 'an unrecorded successor state reserves the default too');
+  } finally { restore(); }
+});
+
+test('X2: autoReflow keeps the legacy zero reserve under zero / excludeFromSearch policies and inactive plant setup', t => {
+  for (const [label, config] of [
+    ['zero', { policy: 'zero', minutes: 30 }],
+    ['excludeFromSearch', { policy: 'excludeFromSearch', minutes: 30 }],
+    ['plantDefaultMinutes with 0 minutes', { policy: 'plantDefaultMinutes', minutes: 0 }],
+    ['inactive plant setup', { policy: 'plantDefaultMinutes', minutes: 30, plantActive: false }],
+  ]) {
+    const restore = reflowDefaultChargeFixture(t, config);
+    try {
+      assert.equal(blueStartAfterReflow(), new Date('2026-08-17T09:15:00').getTime(), `${label}: the 09:15 start is already legal`);
+    } finally { restore(); }
+  }
+});
+
 test('Engine.evaluateSchedule snapshots the live read model without publishing a candidate', () => {
   Store.setTasks([
     { id: 'detached-long', MACHINE: 'L1', PLANT: 'DETACHED', RUN_TIME: '5', start_date: null, end_date: null },
@@ -4845,6 +4905,63 @@ describe('reconcile (finish-anchored)', () => {
       assert.equal(fx.toasts.length, 0, 'an undo announces itself; the re-derivation adds no "N moved" toast');
       assert.ok(fx.writes.some(w => w.source === REC_SOURCE && w.ids.includes('u')));
     } finally { Persistence._dirtyIds.delete('u'); fx.restore(); }
+  });
+
+  // X2: a stale-runtime reconcile reserves the plant's unknown-setup default ahead of the earliest piece (as the
+  // optimizer's validator charges it); an undo restores exact placements and keeps the covered-only reservation.
+  /** A partial-allowed plant on a 08:00-10:00 daily line. The stale RED -> BLUE row (3 h 50 min) ends 26th 10:00: it already
+   *  splits across two windows (2 h on the 26th, 1 h 50 on the 25th), so a reserved changeover clips the earlier piece
+   *  and the start moves back; with no reservation it starts 25th 08:10. */
+  function setupRecFixture(config) {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    Store.setMasterData({
+      plants: [{ plant: fx.plant, split_order_policy: 'partial_allowed', timezone: LOCAL_TZ, setup_policy_config: config }],
+      lines: fx.lines.map(machine => ({ machine, plant: fx.plant })),
+    }, 'unit-test');
+    const priorSetup = Store.setupSnapshot;
+    Store.setCalendar(fx.line, Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [8, 10]])), 'unit-test');
+    Store.replaceSetupSnapshot({
+      plant: fx.plant,
+      definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+      plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
+    }, 'unit-test');
+    const baseRestore = fx.restore;
+    fx.restore = () => { Persistence._dirtyIds.delete('x2-blue'); baseRestore(); Store.replaceSetupSnapshot(priorSetup, 'unit-test'); };
+    fx.load = () => Store.setTasks([
+      fx.task('x2-red', { RUN_TIME: '1', COLOR: 'RED', user_scheduled: true, runtime_schedule_mismatch: false, start_date: at(23, 8), end_date: at(23, 9) }),
+      fx.task('x2-blue', { RUN_TIME: '3.8333334', COLOR: 'BLUE', user_scheduled: true, runtime_schedule_mismatch: true, start_date: at(25, 8), end_date: at(26, 10) }),
+    ], 'unit-test');
+    return fx;
+  }
+  const blueSpan = () => [Store.tasks['x2-blue'].start_date.getTime(), Store.tasks['x2-blue'].end_date.getTime()];
+
+  test('X2: a stale-runtime reconcile reserves the plant default setup; zero policy keeps the default-free placement', () => {
+    const zero = setupRecFixture({ unknownSetupPolicy: 'zero', unknownSetupDefaultMinutes: 45 });
+    let baseline;
+    try { zero.load(); Engine.reconcileRuntimeSchedules(zero.plant); baseline = blueSpan(); } finally { zero.restore(); }
+    assert.equal(baseline[1], at(26, 10).getTime(), 'the finish holds');
+    const charged = setupRecFixture({ unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 45 });
+    try {
+      charged.load(); Engine.reconcileRuntimeSchedules(charged.plant);
+      assert.equal(blueSpan()[1], at(26, 10).getTime(), 'the finish still holds');
+      assert.notEqual(blueSpan()[0], baseline[0], 'the 45-minute default pushes the earliest piece start away from the default-free one');
+    } finally { charged.restore(); }
+  });
+
+  test('X2: reconcile after an undo ignores the plant default (placements restore exactly)', () => {
+    const zero = setupRecFixture({ unknownSetupPolicy: 'zero', unknownSetupDefaultMinutes: 45 });
+    let baseline;
+    try {
+      zero.load(); UndoStack.restoreTasks(UndoStack.snapshotTasks(['x2-blue']));
+      baseline = blueSpan();
+    } finally { zero.restore(); }
+    const charged = setupRecFixture({ unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 45 });
+    try {
+      charged.load();
+      Persistence._dirtyIds.add('x2-blue');
+      UndoStack.restoreTasks(UndoStack.snapshotTasks(['x2-blue']));
+      assert.deepEqual(blueSpan(), baseline, 'undo placement is byte-identical to the default-free derivation');
+    } finally { charged.restore(); }
   });
 
   test('group 15: Ctrl+Z of a task edit after a calendar edit re-derives against the CURRENT calendar and leaves the calendar edit alone', () => {

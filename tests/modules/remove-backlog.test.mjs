@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { Calendar } from '../../frontend/calendar/calendar-engine.mjs';
 import { Engine } from '../../frontend/optimization/engine.mjs';
 import { Store } from '../../frontend/platform/store.mjs';
+import { allowedPlanningWindow, validateCandidateForApply } from '../../frontend/optimization/setup-scheduler.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../frontend/nimbus-compute-core.js');
@@ -295,4 +296,39 @@ test('Engine.removeBacklog may still move a running (in-progress) order -- the o
   const moved = patch(result, 'running-backlog');
   assert.ok(moved, 'Remove Backlog repairs a running order');
   assert.equal(+moved.changes.start_date, +at('2026-08-12T08:00'));
+});
+
+// X3 (Order Rules hardening): Remove Backlog is exempt from the plant's pull/push planning window, at candidate
+// time and at Apply time. Due Date mode (the same bounds without the flag) still reports those defects.
+function seedWindowPlant(extraTasks = []) {
+  seed({ hours: allDays(0, 24), tasks: [
+    task('bk-nodue', '2026-08-12T06:00', 1),
+    task('bk-olddue', '2026-08-12T07:00', 1, { original_end_date: at('2026-08-05T12:00') }),
+    ...extraTasks,
+  ] });
+  Store.setMasterData({
+    plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'never',
+      max_pull_forward_days: 0, max_push_forward_days: 0 }],
+    lines: [{ machine: line, plant }],
+  }, 'test');
+}
+const WINDOW_CODES = ['date_window', 'missing_due_date', 'expired_window'];
+
+test('Remove Backlog ignores the plant pull/push window: candidate and Apply validation stay clean; Due Date still reports it (X3)', () => {
+  seedWindowPlant();
+  const candidate = Engine.evaluateSchedule('backlog', opts({ plant }));
+  const moved = candidate.patches.filter(p => p.id === 'bk-nodue' || p.id === 'bk-olddue');
+  assert.ok(moved.length >= 1, 'the past-start orders move forward to now (past their due ceiling)');
+  const { snapshot, bounds } = candidate.validationContext;
+  assert.equal(bounds.ignorePlantWindow, true, 'only the Backlog bounds carry the flag');
+  const codesOf = findings => findings.filter(f => WINDOW_CODES.includes(f.code)).map(f => f.code);
+  assert.deepEqual(codesOf(candidate.validationFindings ?? []), [], 'candidate-time validation is clean');
+  assert.deepEqual(codesOf(validateCandidateForApply(candidate, snapshot)), [], 'Apply-time validation is clean');
+  // The same candidate judged without the exemption (what Due Date mode does) reports the defects.
+  const strict = { ...candidate, validationContext: { snapshot, bounds: { ...bounds, ignorePlantWindow: false } } };
+  assert.ok(codesOf(validateCandidateForApply(strict, snapshot)).length >= 1,
+    'without the flag the plant window rejects the same placement');
+  assert.deepEqual(allowedPlanningWindow(snapshot, bounds, Store.tasks['bk-nodue']),
+    { floor: null, ceiling: null, missingDue: false });
+  assert.equal(allowedPlanningWindow(snapshot, { ...bounds, ignorePlantWindow: false }, Store.tasks['bk-nodue']).missingDue, true);
 });

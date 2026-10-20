@@ -5932,8 +5932,14 @@ test('periods: hasNominalWindow sees a longer window in a later epoch (ctx and n
     assert.equal(SetupScheduler.hasNominalWindowForTest(without, 'L1', 'P1', from, 8 * 60, ctxFor(without)), false, `no periods: 4 h only (ctx=${useCtx})`);
     assert.equal(SetupScheduler.hasNominalWindowForTest(withPeriods, 'L1', 'P1', from, 11 * 60, ctxFor(withPeriods)), false, `longer than every window (ctx=${useCtx})`);
   }
-  assert.equal(SetupScheduler.hasNominalWindowForTest({ ...withPeriods, plants: {} }, 'L1', 'P1', from, 60), false,
-    'a plant with no entry at all still reads as no nominal window');
+  // O3: a missing plant entry or a missing line calendar row falls back to the same defaults the walk uses
+  // (default plant hours / all-day line), instead of reading as "no nominal window".
+  assert.equal(SetupScheduler.hasNominalWindowForTest({ ...withPeriods, plants: {} }, 'L1', 'P1', from, 60), true,
+    'a plant with no entry at all falls back to the default plant hours');
+  assert.equal(SetupScheduler.hasNominalWindowForTest({ ...withPeriods, calendars: {} }, 'L1', 'P1', from, 8 * 60), true,
+    'a line with no calendar row follows its plant (all-day line)');
+  assert.equal(SetupScheduler.hasNominalWindowForTest({ ...withPeriods, calendars: {} }, 'L1', 'P1', from, 11 * 60), false,
+    'a line with no calendar row is still bounded by the plant windows');
 });
 
 test('periods: the due instant of a date-only due reads the period close on its date', () => {

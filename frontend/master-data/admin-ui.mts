@@ -215,6 +215,13 @@ export const Plant = {
   // dropdown settings are what a visitor sees first, not the Setup Matrix
   // console.
   _currentSettingsSubTab: 'rules' as 'rules' | 'setup',
+  /** Upper bounds for the Order Rules numbers; mirror master_data.MAX_ORDER_RULE_DAYS /
+   *  MAX_ORDER_RULE_MINUTES (pull/push in days; segment floor and default setup in minutes). */
+  _MAX_RULE_DAYS: 365,
+  _MAX_RULE_MINUTES: 1440,
+  /** Unsubscribe for the "setup is off" note's Store listener; replaced on every pane render
+   *  so re-renders never stack listeners. */
+  _setupNoteUnsub: null as (() => void) | null,
   _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpBlkEnd: null as NimbusVendor.FlatpickrInstance | null,
 
@@ -1420,19 +1427,19 @@ export const Plant = {
               <div class="sched-rules-grid">
                 <div class="sched-rule-row" data-rule-key="maxPullForward">
                   <label for="sys-max-pull-forward-days">${Util.t('ui.max_pull_forward_title')}</label>
-                  <input type="number" id="sys-max-pull-forward-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.max_pull_forward_none')}">
+                  <input type="number" id="sys-max-pull-forward-days" class="form-input" min="0" max="${Plant._MAX_RULE_DAYS}" step="1" inputmode="numeric" placeholder="${Util.t('ui.max_pull_forward_none')}">
                   <span class="sched-rule-unit">${Util.t('ui.days')}</span>
                 </div>
 
                 <div class="sched-rule-row" data-rule-key="maxPushForward">
                   <label for="sys-max-push-forward-days">${Util.t('ui.max_push_forward_title')}</label>
-                  <input type="number" id="sys-max-push-forward-days" class="form-input" min="0" step="1" inputmode="numeric" placeholder="${Util.t('ui.max_push_forward_none')}">
+                  <input type="number" id="sys-max-push-forward-days" class="form-input" min="0" max="${Plant._MAX_RULE_DAYS}" step="1" inputmode="numeric" placeholder="${Util.t('ui.max_push_forward_none')}">
                   <span class="sched-rule-unit">${Util.t('ui.days')}</span>
                 </div>
 
                 <div class="sched-rule-row" data-rule-key="minProductiveSegment">
                   <label for="sys-min-productive-segment-minutes">${Util.t('ui.min_productive_segment_title')}</label>
-                  <input type="number" id="sys-min-productive-segment-minutes" class="form-input" min="1" step="1" inputmode="numeric">
+                  <input type="number" id="sys-min-productive-segment-minutes" class="form-input" min="1" max="${Plant._MAX_RULE_MINUTES}" step="1" inputmode="numeric">
                   <span class="sched-rule-unit">${Util.t('ui.unit_minutes')}</span>
                 </div>
 
@@ -1467,9 +1474,13 @@ export const Plant = {
                 </div>
                 <div class="sched-rule-row" data-rule-key="unknownSetupPolicy" id="sys-unknown-setup-minutes-row" hidden>
                   <label for="sys-unknown-setup-minutes">${Util.t('ui.unknown_setup_minutes_label')}</label>
-                  <input type="number" id="sys-unknown-setup-minutes" class="form-input" min="0" step="1" inputmode="numeric">
+                  <input type="number" id="sys-unknown-setup-minutes" class="form-input" min="0" max="${Plant._MAX_RULE_MINUTES}" step="1" inputmode="numeric">
                   <span class="sched-rule-unit">${Util.t('ui.unit_minutes')}</span>
                 </div>
+                <p class="panel-hint sched-rule-note" id="sys-unknown-setup-zero-hint" hidden>${Util.t('ui.unknown_setup_zero_hint')}</p>
+                <!-- Shown only while the plant's setup flag is strictly false (O7): the
+                     policy above is saved either way but the optimizer ignores it then. -->
+                <p class="panel-hint sched-rule-note" id="sys-unknown-setup-inactive-note" hidden>${Util.t('ui.unknown_setup_inactive_note')}</p>
               </div>
             </div>
           </div>
@@ -1559,6 +1570,42 @@ export const Plant = {
     const unknownSetupSelect = pane.querySelector('#sys-unknown-setup-policy') as HTMLSelectElement;
     const unknownSetupMinutesRow = pane.querySelector('#sys-unknown-setup-minutes-row') as HTMLElement;
     const unknownSetupMinutesInp = pane.querySelector('#sys-unknown-setup-minutes') as HTMLInputElement;
+    const unknownSetupZeroHint = pane.querySelector('#sys-unknown-setup-zero-hint') as HTMLElement;
+    const setupInactiveNote = pane.querySelector('#sys-unknown-setup-inactive-note') as HTMLElement;
+
+    // --- Order Rules save plumbing (S1/S2) ---------------------------------
+    // `plantRow` was captured when this pane rendered; Store.masterData.plants can be
+    // replaced afterwards (a Manage Data refresh, a plant reload), leaving it a stale
+    // object. Each handler therefore captures {plant, subnetwork} at click time, and after
+    // the server confirms patches whatever row is LIVE in the Store now, in place. It does
+    // NOT call Store.setMasterData: that fires lineSettings:change -> Plant.render() and
+    // rebuilds this pane under the planner's cursor.
+    type RuleKey = { plant: string; subnetwork: string };
+    const captureRuleKey = (): RuleKey | null =>
+      plantRow ? { plant: plantRow.plant, subnetwork: plantRow.subnetwork } : null;
+    const liveRuleRow = (key: RuleKey): NimbusMasterPlant | null =>
+      Store._state.masterData?.plants?.find(p => p.plant === key.plant && p.subnetwork === key.subnetwork) ?? null;
+    /** The row to read "previous" values from: the live row, else this pane's own. */
+    const ruleRow = (key: RuleKey): NimbusMasterPlant | null => liveRuleRow(key) ?? plantRow;
+    function commitOrderRule(key: RuleKey, mutate: (row: NimbusMasterPlant) => void, opts: { frozen?: boolean } = {}): void {
+      const live = liveRuleRow(key);
+      if (live) mutate(live);
+      if (plantRow && plantRow !== live) mutate(plantRow);   // keep this pane's own readers consistent
+      if (Store.selectedPlant !== key.plant) return;
+      // Alerts and the Orders grid's planning-window labels read these values, and neither
+      // listens to master data: nudge both for the plant being looked at.
+      Alerts.scheduleRecompute();
+      const nimbus = typeof NIMBUS !== 'undefined' ? NIMBUS : undefined;
+      try { nimbus?.Table?._api?.refreshCells({ force: true }); } catch { /* grid not mounted */ }
+      if (opts.frozen) {
+        // The frozen band is built inside Timeline.rebuild; schedule one only when the
+        // Gantt is the visible tab (otherwise the next goto('gantt') rebuilds anyway).
+        try { if (nimbus?.Timeline?._ganttActive?.()) nimbus.Timeline._scheduleRebuild?.(); } catch { /* timeline not mounted */ }
+      }
+    }
+    /** An unreadable number input (`--`, `1e`, stray text) reports value '' with
+     *  validity.badInput set; without this it would read as "blank = no limit" and clear it. */
+    const hasBadInput = (inp: HTMLInputElement): boolean => inp.validity?.badInput === true;
 
     alertDaysInp.value = String(Math.max(1, Math.round(alertHz / 1440)));
     confDaysInp.value  = String(Math.max(1, Math.round(confHz  / 1440)));
@@ -1573,17 +1620,44 @@ export const Plant = {
       ? String(plantRow!.min_productive_segment_minutes) : '30';
     frozenHorizonDaysInp.value = Number.isInteger(plantRow?.frozen_horizon_days) && (plantRow!.frozen_horizon_days as number) >= 0
       ? String(plantRow!.frozen_horizon_days) : '';
-    const readUnknownPolicy = (): UnknownSetupPolicy => {
-      const v = plantRow?.setup_policy_config?.unknownSetupPolicy;
+    const readUnknownPolicy = (row: NimbusMasterPlant | null = plantRow): UnknownSetupPolicy => {
+      const v = row?.setup_policy_config?.unknownSetupPolicy;
       return v === 'plantDefaultMinutes' || v === 'excludeFromSearch' ? v : 'zero';
     };
-    const readUnknownMinutes = (): number => {
-      const v = plantRow?.setup_policy_config?.unknownSetupDefaultMinutes;
+    const readUnknownMinutes = (row: NimbusMasterPlant | null = plantRow): number => {
+      const v = row?.setup_policy_config?.unknownSetupDefaultMinutes;
       return Number.isInteger(v) && (v as number) >= 0 ? (v as number) : 0;
+    };
+    /** "0 minutes behaves like Zero" — shown only for plantDefaultMinutes with 0 minutes. */
+    const syncUnknownZeroHint = (): void => {
+      const raw = unknownSetupMinutesInp.value.trim();
+      unknownSetupZeroHint.hidden = !(unknownSetupSelect.value === 'plantDefaultMinutes'
+        && (raw === '' || Number(raw) === 0));
     };
     unknownSetupSelect.value = readUnknownPolicy();
     unknownSetupMinutesInp.value = String(readUnknownMinutes());
     unknownSetupMinutesRow.hidden = unknownSetupSelect.value !== 'plantDefaultMinutes';
+    syncUnknownZeroHint();
+
+    // O7: the unknown-setup policy only acts while the plant's setup flag is on. Strict
+    // `=== false` (matching compute-core), so a row that has not loaded the flag yet
+    // never shows the note. The note is toggled with `hidden`, never by re-rendering
+    // the pane, from master-data / setup-snapshot events; one subscription at a time.
+    const syncSetupInactiveNote = (): void => {
+      const key = captureRuleKey();
+      const row = key ? ruleRow(key) : null;
+      setupInactiveNote.hidden = row?.setup_active !== false;
+    };
+    syncSetupInactiveNote();
+    Plant._setupNoteUnsub?.();
+    Plant._setupNoteUnsub = Store.subscribe((evt) => {
+      if (!setupInactiveNote.isConnected) {       // the pane was re-rendered: drop this listener
+        Plant._setupNoteUnsub?.();
+        Plant._setupNoteUnsub = null;
+        return;
+      }
+      if (evt.type === 'master-data-changed' || evt.type === 'setup-snapshot:replace') syncSetupInactiveNote();
+    }, 'PlantSetupInactiveNote');
 
     async function _savePlantHorizon(patch: Record<string, number>): Promise<boolean> {
       if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return false; }
@@ -1642,9 +1716,11 @@ export const Plant = {
     confDaysInp.addEventListener('change', saveConf);
 
     splitPolicySelect.addEventListener('change', async () => {
-      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
-      const previous = plantRow.split_order_policy === 'overlong_only' || plantRow.split_order_policy === 'partial_allowed'
-        ? plantRow.split_order_policy : 'never';
+      const key = captureRuleKey();
+      if (!key) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const before = ruleRow(key);
+      const previous = before?.split_order_policy === 'overlong_only' || before?.split_order_policy === 'partial_allowed'
+        ? before.split_order_policy : 'never';
       const next = splitPolicySelect.value;
       if (!['never', 'overlong_only', 'partial_allowed'].includes(next)) {
         splitPolicySelect.value = previous;
@@ -1653,18 +1729,18 @@ export const Plant = {
       splitPolicySelect.disabled = true;
       try {
         const response = await Util.fetchTraced(
-          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/split-order-policy`,
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(key.plant)}/split-order-policy`,
           {
             method: 'POST',
             headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
-            body: JSON.stringify({ subnetwork: plantRow.subnetwork, split_order_policy: next }),
+            body: JSON.stringify({ subnetwork: key.subnetwork, split_order_policy: next }),
           },
         );
         if (!response.ok) {
           const body = await response.json().catch(() => ({}));
           throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`);
         }
-        plantRow.split_order_policy = next as 'never' | 'overlong_only' | 'partial_allowed';
+        commitOrderRule(key, row => { row.split_order_policy = next as 'never' | 'overlong_only' | 'partial_allowed'; });
         Toast.show(Util.t('ui.split_policy_saved'), 'success');
       } catch (error) {
         splitPolicySelect.value = previous;
@@ -1675,57 +1751,78 @@ export const Plant = {
     });
 
     async function saveUnknownSetupPolicy(): Promise<void> {
-      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
-      const previousPolicy = readUnknownPolicy(); const previousMinutes = readUnknownMinutes();
+      const key = captureRuleKey();
+      if (!key) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const before = ruleRow(key);
+      const previousPolicy = readUnknownPolicy(before); const previousMinutes = readUnknownMinutes(before);
       const policy = unknownSetupSelect.value;
       const raw = unknownSetupMinutesInp.value.trim();
       const minutes = raw === '' ? 0 : Number(raw);
-      if (!Number.isInteger(minutes) || minutes < 0) {
+      if (hasBadInput(unknownSetupMinutesInp) || !Number.isInteger(minutes) || minutes < 0) {
         unknownSetupMinutesInp.value = String(previousMinutes);
+        syncUnknownZeroHint();
         Toast.show(Util.t('ui.unknown_setup_minutes_invalid'), 'error');
         return;
       }
+      // Cap only a value that CHANGES (the server does the same): a legacy over-cap row
+      // must not block an unrelated policy save, which re-sends the stored minutes.
+      if (minutes > Plant._MAX_RULE_MINUTES && minutes !== previousMinutes) {
+        unknownSetupMinutesInp.value = String(previousMinutes);
+        syncUnknownZeroHint();
+        Toast.show(Util.t('ui.order_rule_minutes_too_large', { max: Plant._MAX_RULE_MINUTES }), 'error');
+        return;
+      }
       unknownSetupMinutesRow.hidden = policy !== 'plantDefaultMinutes';
+      syncUnknownZeroHint();
       unknownSetupSelect.disabled = true; unknownSetupMinutesInp.disabled = true;
       try {
         const response = await Util.fetchTraced(
-          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/unknown-setup-policy`,
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(key.plant)}/unknown-setup-policy`,
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
-            body: JSON.stringify({ subnetwork: plantRow.subnetwork, unknown_setup_policy: policy, unknown_setup_default_minutes: minutes }) },
+            body: JSON.stringify({ subnetwork: key.subnetwork, unknown_setup_policy: policy, unknown_setup_default_minutes: minutes }) },
         );
         if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
         const saved = await response.json();
-        plantRow.setup_policy_config = { ...(plantRow.setup_policy_config ?? {}), ...saved.setup_policy_config };
+        commitOrderRule(key, row => { row.setup_policy_config = { ...(row.setup_policy_config ?? {}), ...saved.setup_policy_config }; });
         Toast.show(Util.t('ui.unknown_setup_saved'), 'success');
       } catch (error) {
         unknownSetupSelect.value = previousPolicy; unknownSetupMinutesInp.value = String(previousMinutes);
         unknownSetupMinutesRow.hidden = previousPolicy !== 'plantDefaultMinutes';
+        syncUnknownZeroHint();
         Toast.show(`${Util.t('ui.unknown_setup_failed')}: ${(error as Error).message}`, 'error');
       } finally { unknownSetupSelect.disabled = false; unknownSetupMinutesInp.disabled = false; }
     }
     unknownSetupSelect.addEventListener('change', saveUnknownSetupPolicy);
     unknownSetupMinutesInp.addEventListener('change', saveUnknownSetupPolicy);
+    unknownSetupMinutesInp.addEventListener('input', syncUnknownZeroHint);
 
     maxPullForwardInp.addEventListener('change', async () => {
-      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
-      const previous = Number.isInteger(plantRow.max_pull_forward_days) && (plantRow.max_pull_forward_days as number) >= 0
-        ? plantRow.max_pull_forward_days : null;
+      const key = captureRuleKey();
+      if (!key) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const before = ruleRow(key);
+      const previous = Number.isInteger(before?.max_pull_forward_days) && (before!.max_pull_forward_days as number) >= 0
+        ? before!.max_pull_forward_days as number : null;
       const raw = maxPullForwardInp.value.trim();
       const next = raw === '' ? null : Number(raw);
-      if (next !== null && (!Number.isInteger(next) || next < 0)) {
+      if (hasBadInput(maxPullForwardInp) || (next !== null && (!Number.isInteger(next) || next < 0))) {
         maxPullForwardInp.value = previous === null ? '' : String(previous);
         Toast.show(Util.t('ui.max_pull_forward_invalid'), 'error');
+        return;
+      }
+      if (next !== null && next > Plant._MAX_RULE_DAYS) {
+        maxPullForwardInp.value = previous === null ? '' : String(previous);
+        Toast.show(Util.t('ui.order_rule_days_too_large', { max: Plant._MAX_RULE_DAYS }), 'error');
         return;
       }
       maxPullForwardInp.disabled = true;
       try {
         const response = await Util.fetchTraced(
-          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/max-pull-forward-days`,
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(key.plant)}/max-pull-forward-days`,
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
-            body: JSON.stringify({ subnetwork: plantRow.subnetwork, max_pull_forward_days: next }) },
+            body: JSON.stringify({ subnetwork: key.subnetwork, max_pull_forward_days: next }) },
         );
         if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
-        plantRow.max_pull_forward_days = next;
+        commitOrderRule(key, row => { row.max_pull_forward_days = next; });
         Toast.show(Util.t('ui.max_pull_forward_saved'), 'success');
       } catch (error) {
         maxPullForwardInp.value = previous === null ? '' : String(previous);
@@ -1734,25 +1831,32 @@ export const Plant = {
     });
 
     maxPushForwardInp.addEventListener('change', async () => {
-      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
-      const previous = Number.isInteger(plantRow.max_push_forward_days) && (plantRow.max_push_forward_days as number) >= 0
-        ? plantRow.max_push_forward_days : null;
+      const key = captureRuleKey();
+      if (!key) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const before = ruleRow(key);
+      const previous = Number.isInteger(before?.max_push_forward_days) && (before!.max_push_forward_days as number) >= 0
+        ? before!.max_push_forward_days as number : null;
       const raw = maxPushForwardInp.value.trim();
       const next = raw === '' ? null : Number(raw);
-      if (next !== null && (!Number.isInteger(next) || next < 0)) {
+      if (hasBadInput(maxPushForwardInp) || (next !== null && (!Number.isInteger(next) || next < 0))) {
         maxPushForwardInp.value = previous === null ? '' : String(previous);
         Toast.show(Util.t('ui.max_push_forward_invalid'), 'error');
+        return;
+      }
+      if (next !== null && next > Plant._MAX_RULE_DAYS) {
+        maxPushForwardInp.value = previous === null ? '' : String(previous);
+        Toast.show(Util.t('ui.order_rule_days_too_large', { max: Plant._MAX_RULE_DAYS }), 'error');
         return;
       }
       maxPushForwardInp.disabled = true;
       try {
         const response = await Util.fetchTraced(
-          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/max-push-forward-days`,
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(key.plant)}/max-push-forward-days`,
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
-            body: JSON.stringify({ subnetwork: plantRow.subnetwork, max_push_forward_days: next }) },
+            body: JSON.stringify({ subnetwork: key.subnetwork, max_push_forward_days: next }) },
         );
         if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
-        plantRow.max_push_forward_days = next;
+        commitOrderRule(key, row => { row.max_push_forward_days = next; });
         Toast.show(Util.t('ui.max_push_forward_saved'), 'success');
       } catch (error) {
         maxPushForwardInp.value = previous === null ? '' : String(previous);
@@ -1765,25 +1869,32 @@ export const Plant = {
     // NULL DEFAULT 30 (never null), so an empty/invalid entry reverts rather
     // than clearing to null.
     minProductiveSegmentInp.addEventListener('change', async () => {
-      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
-      const previous = Number.isInteger(plantRow.min_productive_segment_minutes) && (plantRow.min_productive_segment_minutes as number) > 0
-        ? (plantRow.min_productive_segment_minutes as number) : 30;
+      const key = captureRuleKey();
+      if (!key) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const before = ruleRow(key);
+      const previous = Number.isInteger(before?.min_productive_segment_minutes) && (before!.min_productive_segment_minutes as number) > 0
+        ? (before!.min_productive_segment_minutes as number) : 30;
       const raw = minProductiveSegmentInp.value.trim();
       const next = Number(raw);
-      if (raw === '' || !Number.isInteger(next) || next <= 0) {
+      if (hasBadInput(minProductiveSegmentInp) || raw === '' || !Number.isInteger(next) || next <= 0) {
         minProductiveSegmentInp.value = String(previous);
         Toast.show(Util.t('ui.min_productive_segment_invalid'), 'error');
+        return;
+      }
+      if (next > Plant._MAX_RULE_MINUTES) {
+        minProductiveSegmentInp.value = String(previous);
+        Toast.show(Util.t('ui.order_rule_minutes_too_large', { max: Plant._MAX_RULE_MINUTES }), 'error');
         return;
       }
       minProductiveSegmentInp.disabled = true;
       try {
         const response = await Util.fetchTraced(
-          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/min-productive-segment-minutes`,
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(key.plant)}/min-productive-segment-minutes`,
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
-            body: JSON.stringify({ subnetwork: plantRow.subnetwork, min_productive_segment_minutes: next }) },
+            body: JSON.stringify({ subnetwork: key.subnetwork, min_productive_segment_minutes: next }) },
         );
         if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
-        plantRow.min_productive_segment_minutes = next;
+        commitOrderRule(key, row => { row.min_productive_segment_minutes = next; });
         Toast.show(Util.t('ui.min_productive_segment_saved'), 'success');
       } catch (error) {
         minProductiveSegmentInp.value = String(previous);
@@ -1796,12 +1907,14 @@ export const Plant = {
     // visibility_horizon_days) — so an explicit "0" is a VALID, non-null save,
     // not normalized away here or server-side (master_data.set_plant_frozen_horizon_days).
     frozenHorizonDaysInp.addEventListener('change', async () => {
-      if (!plantRow) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
-      const previous = Number.isInteger(plantRow.frozen_horizon_days) && (plantRow.frozen_horizon_days as number) >= 0
-        ? plantRow.frozen_horizon_days : null;
+      const key = captureRuleKey();
+      if (!key) { Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+      const before = ruleRow(key);
+      const previous = Number.isInteger(before?.frozen_horizon_days) && (before!.frozen_horizon_days as number) >= 0
+        ? before!.frozen_horizon_days as number : null;
       const raw = frozenHorizonDaysInp.value.trim();
       const next = raw === '' ? null : Number(raw);
-      if (next !== null && (!Number.isInteger(next) || next < 0)) {
+      if (hasBadInput(frozenHorizonDaysInp) || (next !== null && (!Number.isInteger(next) || next < 0))) {
         frozenHorizonDaysInp.value = previous === null ? '' : String(previous);
         Toast.show(Util.t('ui.frozen_horizon_days_invalid'), 'error');
         return;
@@ -1809,12 +1922,12 @@ export const Plant = {
       frozenHorizonDaysInp.disabled = true;
       try {
         const response = await Util.fetchTraced(
-          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(plantRow.plant)}/frozen-horizon-days`,
+          `${Config.API_BASE}/master-data/plants/${encodeURIComponent(key.plant)}/frozen-horizon-days`,
           { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
-            body: JSON.stringify({ subnetwork: plantRow.subnetwork, frozen_horizon_days: next }) },
+            body: JSON.stringify({ subnetwork: key.subnetwork, frozen_horizon_days: next }) },
         );
         if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
-        plantRow.frozen_horizon_days = next;
+        commitOrderRule(key, row => { row.frozen_horizon_days = next; }, { frozen: true });
         Toast.show(Util.t('ui.frozen_horizon_days_saved'), 'success');
       } catch (error) {
         frozenHorizonDaysInp.value = previous === null ? '' : String(previous);

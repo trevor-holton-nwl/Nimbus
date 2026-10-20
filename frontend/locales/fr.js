@@ -42,6 +42,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.optimize_plant_no_timezone': 'L’usine {{plant}} n’a pas de fuseau horaire valide ; NIMBUS ne l’optimisera donc pas. Demandez à un administrateur de définir le fuseau horaire de cette usine dans les Données de base.',
   'toast.select_lines_to_opt':         'Sélectionnez au moins une machine à optimiser, ou passez à Usine entière.',
   'toast.opt_apply_running_skipped':  '{{count}} ordre(s) ont démarré pendant que l’aperçu était ouvert et ont été laissés tels quels.',
+  'toast.opt_apply_invalid_dropped': '{{count}} commande(s) de l’aperçu ne correspondent plus au planning actuel et ont été laissées telles quelles.',
   'toast.plant_no_timezone':  'L’usine {{plant}} n’a pas de fuseau horaire valide ; NIMBUS ne peut donc pas savoir quelles commandes sont en cours ou gelées. Demandez à un administrateur de définir le fuseau horaire de l’usine dans les Données de base.',
   'toast.finish_cannot_hold':  'La commande {{order}} ne peut pas se terminer à cette heure sur {{machine}} : aucune période de travail assez longue ne s’y termine. Elle a été remise à sa place précédente.',
   'toast.running_finish_locked':  'La commande {{order}} a déjà commencé, donc sa fin ne peut pas être déplacée ni saisie. Modifiez sa durée d’exécution pour déplacer la fin.',
@@ -272,6 +273,8 @@ window.__NIMBUS_LOCALES.fr = {
   'planning_reason.planner_unscheduled': 'Déprogrammé par le planificateur',
   'planning_reason.run_time_over_cap': 'La durée de {{hours}} h dépasse la limite de {{cap}} h. Raccourcissez la durée ou scindez la commande, puis planifiez-la.',
   'planning_reason.overlong_never': 'Plus longue que n’importe quelle période de travail de cette machine, et cette usine ne fractionne pas les commandes. Changez la machine ou le temps de production pour la placer en une seule barre continue se terminant à sa date d’échéance.',
+  'planning_reason.segment_floor_unfittable': 'The productive segment floor is longer than any working period on this machine, so this order cannot be split into pieces that meet it. Lower the floor in the plant settings or change the machine.',
+  'planning_reason.push_limit_unmet': 'Aucun placement ne se termine dans la limite de report de l’échéance de l’usine. Augmentez la limite dans les paramètres de l’usine ou libérez la commande.',
   'col.planning_window':               'Fenêtre autorisée',
 
   /* ── Button labels ───────────────────────────────────────────────────────── */
@@ -516,20 +519,24 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.split_order_opt_never':          'Ne jamais diviser les ordres',
   'ui.split_order_opt_overlong':       'Diviser uniquement les ordres intrinsèquement trop longs',
   'ui.split_order_opt_partial':        'Autoriser les ordres partiels entre intervalles d\'exploitation',
-  'ui.split_order_policy_help':        'Les segments générés sont visibles par le planificateur, restent un seul ordre logique et ne sont jamais plus courts que 30 minutes.',
+  'ui.split_order_policy_help':        'Les segments générés sont visibles par le planificateur, restent un seul ordre logique et ne sont jamais plus courts que le seuil de segment productif défini ci-dessus (30 minutes par défaut).',
   'ui.split_policy_saved':             'Politique de division des ordres enregistrée pour cette usine.',
   'ui.split_policy_save_failed':       'Impossible d\'enregistrer la politique de division des ordres : {{msg}}',
   'ui.unknown_setup_title':            'Setup data missing',                                        // MISSING TRANSLATION
-  'ui.unknown_setup_help':             'How the optimizer treats an order whose setup transition has no matrix row or whose line has no recorded state. The line is never frozen: orders are placed at zero minutes, placed with a plant-default setup time, or sent to the Needs Planning list.', // MISSING TRANSLATION
+  'ui.unknown_setup_help':             'Ce que fait l’optimiseur lorsque la transition de réglage d’un ordre n’a pas de ligne dans la matrice. Placer à zéro minute n’ajoute aucun temps de réglage. Utiliser le temps de réglage par défaut de l’usine facture cette valeur, mais seulement sur les lignes qui ont une définition de réglage et sont compatibles. Envoyer à Needs Planning refuse uniquement une transition entre deux états connus sans ligne de matrice ; une ligne dont l’état n’est pas enregistré est admise à zéro minute. Avec cette option, à la prochaine exécution de l’optimiseur, les ordres déjà planifiés et non protégés dont la transition n’a pas de ligne passent aussi en Needs Planning.',
   'ui.unknown_setup_opt_zero':         'Place at zero setup minutes (default)',                      // MISSING TRANSLATION
   'ui.unknown_setup_opt_default':      'Place using a plant-default setup time',                     // MISSING TRANSLATION
   'ui.unknown_setup_opt_exclude':      'Send to Needs Planning until the matrix row exists',         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_label':    'Default setup time',                                         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_invalid':  'Enter a whole number of minutes, zero or greater.',           // MISSING TRANSLATION
+  'ui.unknown_setup_zero_hint':        '0 minute se comporte comme Zéro : aucun temps de réglage n’est ajouté pour une transition manquante. Saisissez les minutes par défaut.',
+  'ui.unknown_setup_inactive_note':    'Les temps de réglage sont désactivés pour cette usine : ce paramètre n’a aucun effet tant que l’optimisation avec réglages n’est pas activée.',
+  'ui.order_rule_days_too_large':      'Saisissez {{max}} jours au maximum.',
+  'ui.order_rule_minutes_too_large':   'Saisissez {{max}} minutes au maximum.',
   'ui.unknown_setup_saved':            'Setup-data policy saved for this plant.',                    // MISSING TRANSLATION
   'ui.unknown_setup_failed':           'Could not save setup-data policy',                            // MISSING TRANSLATION
   'ui.min_productive_segment_title':   'Segment productif minimal',
-  'ui.min_productive_segment_help':    'Contrôle la durée minimale d\'un segment productif fractionné lorsque le fractionnement partiel ou réservé aux ordres excessivement longs est autorisé ci-dessus. S\'applique aussi bien au planificateur sans connaissance des changements qu\'à celui qui en tient compte.',
+  'ui.min_productive_segment_help':    'Contrôle la durée minimale d\'un segment productif fractionné lorsque le fractionnement partiel ou réservé aux ordres excessivement longs est autorisé ci-dessous. S\'applique aussi bien au planificateur sans connaissance des changements qu\'à celui qui en tient compte.',
   'ui.min_productive_segment_label':   'Segment productif minimal (minutes)',
   'ui.min_productive_segment_help_detail': 'Un segment fractionné n\'est jamais plus court que cette valeur, sauf un ordre complet sous ce seuil, placé en entier. Valeur par défaut : 30 minutes.',
   'ui.min_productive_segment_invalid': 'Saisissez un nombre entier de minutes supérieur à zéro.',
@@ -2097,7 +2104,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.reject_run_time_over_cap': 'la durée dépasse la limite de longueur',
   'ui.reject_width_mismatch': 'la longueur de la barre ne correspond pas à la durée',
   'ui.reject_single_edge': 'le début et la fin doivent être enregistrés ensemble',
-  'ui.max_push_forward_help': 'Laissez vide pour ne pas avoir de limite. L\'optimiseur la traite comme une limite stricte : il ne placera pas une commande datée de sorte qu\'elle se termine plus de ce nombre de jours calendaires après le jour de son échéance. Lorsque la date d’échéance tombe un jour fermé (par exemple un dimanche), le décompte part du dernier jour ouvert qui le précède, si bien qu’un écart fermé consomme une partie de la marge. Les commandes qui ne peuvent pas respecter la limite sont comptées dans l\'aperçu et dans un avertissement après l\'exécution. Supprimer le retard ignore cette limite.',
+  'ui.max_push_forward_help': 'Laissez vide pour ne pas avoir de limite. L’optimiseur la traite comme une limite stricte : il ne placera pas une commande datée de sorte qu’elle se termine plus de ce nombre de jours calendaires après le jour de son échéance. Lorsque la date d’échéance tombe un jour fermé (par exemple un dimanche), le décompte part du dernier jour ouvert qui le précède, si bien qu’un écart fermé consomme une partie de la marge. Les commandes qui ne peuvent pas se terminer dans la limite passent en Needs Planning, chacune avec son motif. Supprimer le retard ignore cette limite.',
   'toast.calendar_save_failed': 'Calendar change not saved to the server. It is only on this device, so other planners will not see it until you retry.',
   'toast.calendar_delete_pending': 'The server did not confirm that delete. It will be re-sent the next time this plant loads.',
   'toast.calendar_delete_dropped': 'The server permanently rejected a blackout delete, so it will not be re-sent. Reload the plant calendar to see the current state.',
