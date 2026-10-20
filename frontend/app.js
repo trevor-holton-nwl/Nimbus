@@ -308,7 +308,10 @@ const NIMBUS = (function () {
     const row = Store.calendars[line];
     if (!row) return null;
     const plant = Store.getPlantForLine(line);
-    return { lineHours: row.workHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plantPeriods: plant ? (Store.plants[plant]?.periods ?? null) : null, plant, rev: Store.rev() };
+    // An inherited line is open all day and relies on the plant's hours bounding it; this reader only intersects
+    // when the plant has a calendar entry, so without one fall back to the default week instead.
+    const lineHours = row.inherited && !(plant && Store.plants[plant]) ? Store.effectiveLineHours(line) : row.workHours;
+    return { lineHours, plantHours: plant ? (Store.plants[plant]?.workHours ?? null) : null, plantPeriods: plant ? (Store.plants[plant]?.periods ?? null) : null, plant, rev: Store.rev() };
   });
   ErrorLog.setPlantResolver(() => Store.selectedPlant);
   ErrorLog.setRouteResolver(() => ({ tab: App._currentTab, ganttSub: App._ganttSub }));
@@ -607,27 +610,7 @@ const NIMBUS = (function () {
       if (evt.type === 'master-data-changed') {
         let touched = 0;
         try {
-          const mdLines = Store.masterData?.lines;
-          if (mdLines?.length) {
-            mdLines.forEach(row => {
-              const line = row.machine;
-              if (!line) return;
-              Store.ensureLineSettings(line);
-              const ls = Store.lineSettings[line];
-              const before = JSON.stringify(ls);
-              ls.excludeFromOpt = row.excl_optimizer === 'X';
-              ls.bottleneck     = row.bottleneck === 'X';
-              if (row.buffer_type === '%')        ls.bufferUnit = 'pct';
-              else if (row.buffer_type === 'hrs') ls.bufferUnit = 'hours';
-              if (row.buffer_percent != null && row.buffer_percent !== '')
-                ls.bufferPct = parseFloat(row.buffer_percent) || 0;
-              if (row.buffer_hours != null && row.buffer_hours !== '')
-                ls.bufferHours = parseFloat(row.buffer_hours) || 0;
-              ls.plGroup = row.wc_group || '';
-              ls.plant   = row.plant    || null;
-              if (JSON.stringify(ls) !== before) touched++;
-            });
-          }
+          touched = Store.applyMasterLinesToSettings();
         } catch (e) { ErrorLog.error('boot', `master-data lineSettings sync: ${e.message}`); }
         if (touched) {
           // lineSettings[].plant was just rewritten in bulk above via direct writes

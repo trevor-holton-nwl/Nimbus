@@ -1027,6 +1027,9 @@ def _autolink_same_named_machines(cur, plants, only=None) -> list[dict]:
     """Auto-link a machine to the SAP work center sharing its ID (owner decision
     2026-10-19, reversing the 2026-10-12 explicit-link rule; aggregate_to_detail.md §3.1).
 
+    Callers invoke this only for rows they just CREATED (`bulk_apply`, `save_workcenter`):
+    a planner's explicit clear of a link on an existing machine must stick.
+
     Sets `machine.sap_workcenter = machine.machine` for the given plants when ALL hold:
       - a `sap_workcenter` row with the same plant and code exists (exact text match);
       - the machine's link is empty (an existing link is never re-pointed);
@@ -1145,6 +1148,13 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         # bulk_apply's existing all-or-nothing atomicity is unchanged.
         groups: dict[tuple, list[dict]] = {}
         group_order: list[tuple] = []
+        # (plant, name) of rows this call INSERTED (not updated) on machine/sap_workcenter:
+        # the auto-link below fires only for newly created rows, so a planner's explicit
+        # clear of a link sticks (2026-10-19). A NEW machine whose payload carries a NON-blank
+        # sap_workcenter is an explicit link decision and is never auto-linked; a blank/null
+        # value has nothing to clear on creation, so it still auto-links.
+        created_for_autolink: list[tuple] = []
+        autolink_name_col = {"machine": "machine", "sap_workcenter": "sap_workcenter"}.get(table)
         for row in upserts:
             # Only pass columns actually registered as editable for this table
             # (guards against stale clients AND against list_rows' sidecar fields).
@@ -1222,10 +1232,15 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
                 values_list.append(values)
             try:
                 cur.executemany(q, values_list, returning=True)
-                for _ in values_list:
+                for _idx in range(len(values_list)):
                     row_result = cur.fetchone()
                     if row_result is not None and row_result[0]:
                         inserted += 1
+                        if autolink_name_col and not (
+                                table == "machine"
+                                and str(group_rows[_idx].get("sap_workcenter") or "").strip()):
+                            created_for_autolink.append(
+                                (group_rows[_idx].get("plant"), group_rows[_idx].get(autolink_name_col)))
                     else:
                         updated += 1
                     cur.nextset()
@@ -1270,12 +1285,11 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         # write's own transaction, so every writer (grid, ProdLines, SAP sync, staging)
         # gets it whichever of the two rows arrives second.
         linked: list[dict] = []
-        if table in ("machine", "sap_workcenter") and upserts:
-            # Scoped to the rows just written: a machine write considers those machine
-            # names, a work-center write those codes (the match is machine == code).
-            name_col = "machine" if table == "machine" else "sap_workcenter"
-            linked = _autolink_same_named_machines(
-                cur, None, only=[(r.get("plant"), r.get(name_col)) for r in upserts])
+        if created_for_autolink:
+            # Scoped to the rows this call CREATED: a new machine considers its own name, a
+            # new work center its code (the match is machine == code). Updates never link,
+            # so a planner who cleared a link on a same-named machine is not overridden.
+            linked = _autolink_same_named_machines(cur, None, only=created_for_autolink)
 
         # Audit
         audit_details = {"inserted": inserted, "updated": updated, "deleted": deleted}
@@ -2890,7 +2904,9 @@ def set_line_work_hours(plant: str, lines: list, user_email: str | None = None) 
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
             " VALUES ('machine_calendar', 'upsert', %s, %s)",
-            (Jsonb({"plant": plant, "subnetwork": subnet, "lines": len(prepared)}), user_email),
+            (Jsonb({"plant": plant, "subnetwork": subnet, "lines": len(prepared),
+                    # Machines reset to follow the plant (hours cleared), so a Reset all is traceable.
+                    "cleared": [code for code, clean in prepared if clean is None]}), user_email),
         )
         conn.commit()
     return {"upserted": len(prepared)}

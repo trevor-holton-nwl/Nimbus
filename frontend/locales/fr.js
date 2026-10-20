@@ -2354,4 +2354,16 @@ window.__NIMBUS_LOCALES.fr = {
   'legend.nav_now_t':             'Maintenant',
   'legend.nav_now_d':             'Le fin trait bleu est l\'heure actuelle.',
 
+  // Machine calendar inheritance (a machine with no calendar row follows its plant)
+  'ui.custom_hours': 'Heures personnalisées',
+  'ui.follows_plant_calendar': 'Suit le calendrier de l\'usine',
+  'ui.limited_by_plant_hours': 'Limité par les heures de l\'usine certains jours',
+  'ui.machines_custom_hours': '{{count}} machines ont leurs propres heures',
+  'ui.machines_custom_hours_one': '1 machine a ses propres heures',
+  'btn.reset_to_plant': 'Rétablir celles de l\'usine',
+  'btn.reset_machines_to_plant': 'Rétablir toutes les machines sur l\'usine',
+  'btn.reset_machines': 'Rétablir les machines',
+  'confirm.reset_machines_title': 'Rétablir les machines sur le calendrier de l\'usine ?',
+  'confirm.reset_machines': '{{count}} machines de l\'usine {{plant}} ont leurs propres heures de travail. Elles suivront le calendrier de l\'usine et leurs heures personnalisées seront supprimées.',
+  'confirm.reset_machines_one': '1 machine de l\'usine {{plant}} a ses propres heures de travail. Elle suivra le calendrier de l\'usine et ses heures personnalisées seront supprimées.',
 };

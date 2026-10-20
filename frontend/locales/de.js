@@ -2393,4 +2393,16 @@ window.__NIMBUS_LOCALES.de = {
   'legend.nav_now_t':             'Jetzt',
   'legend.nav_now_d':             'Die dünne blaue Linie ist die aktuelle Uhrzeit.',
 
+  // Machine calendar inheritance (a machine with no calendar row follows its plant)
+  'ui.custom_hours': 'Eigene Zeiten',
+  'ui.follows_plant_calendar': 'Folgt dem Werkskalender',
+  'ui.limited_by_plant_hours': 'An einigen Tagen durch die Werkszeiten begrenzt',
+  'ui.machines_custom_hours': '{{count}} Maschinen haben eigene Arbeitszeiten',
+  'ui.machines_custom_hours_one': '1 Maschine hat eigene Arbeitszeiten',
+  'btn.reset_to_plant': 'Auf Werk zurücksetzen',
+  'btn.reset_machines_to_plant': 'Alle Maschinen auf Werk zurücksetzen',
+  'btn.reset_machines': 'Maschinen zurücksetzen',
+  'confirm.reset_machines_title': 'Maschinen auf den Werkskalender zurücksetzen?',
+  'confirm.reset_machines': '{{count}} Maschinen im Werk {{plant}} haben eigene Arbeitszeiten. Sie folgen stattdessen dem Werkskalender, ihre eigenen Zeiten werden verworfen.',
+  'confirm.reset_machines_one': '1 Maschine im Werk {{plant}} hat eigene Arbeitszeiten. Sie folgt stattdessen dem Werkskalender, ihre eigenen Zeiten werden verworfen.',
 };

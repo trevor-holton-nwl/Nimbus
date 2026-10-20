@@ -2601,4 +2601,16 @@ window.__NIMBUS_LOCALES.en = {
   'legend.nav_hist_d':            'With many machines the rows become a histogram. Bar height is how many orders run that day; the blue part is the machines you filtered to.',
   'legend.nav_now_t':             'Now',
   'legend.nav_now_d':             'The thin blue line is the current time.',
+  // Machine calendar inheritance (a machine with no calendar row follows its plant)
+  'ui.custom_hours': 'Custom hours',
+  'ui.follows_plant_calendar': 'Follows plant calendar',
+  'ui.limited_by_plant_hours': 'Limited by plant hours on some days',
+  'ui.machines_custom_hours': '{{count}} machines have their own hours',
+  'ui.machines_custom_hours_one': '1 machine has its own hours',
+  'btn.reset_to_plant': 'Reset to plant',
+  'btn.reset_machines_to_plant': 'Reset all machines to plant',
+  'btn.reset_machines': 'Reset machines',
+  'confirm.reset_machines_title': 'Reset machines to the plant calendar?',
+  'confirm.reset_machines': '{{count}} machines at plant {{plant}} have their own working hours. They will follow the plant calendar instead, and their custom hours are discarded.',
+  'confirm.reset_machines_one': '1 machine at plant {{plant}} has its own working hours. It will follow the plant calendar instead, and its custom hours are discarded.',
 };

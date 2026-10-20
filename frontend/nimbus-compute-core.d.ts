@@ -101,6 +101,8 @@ declare global {
 
   interface NimbusCalendarEntry {
     workHours: NimbusWorkHours;
+    /** Line calendars only: no machine row, follows the plant (hours are all-day when the plant resolves). */
+    inherited?: boolean;
   }
 
   /** Effective-dated override of a plant's default weekly hours (inclusive range, validTo null = open-ended). */
@@ -248,7 +250,7 @@ declare global {
 
     // calendar engine
     getPlantForLine(line: string, lineSettings: Record<string, NimbusLineSetting>, masterData: NimbusMasterData): string | null;
-    ensureCalendar(line: string, calendars: Record<string, NimbusCalendarEntry>): void;
+    ensureCalendar(line: string, calendars: Record<string, NimbusCalendarEntry>, allDay?: boolean): void;
     ensurePlant(name: string | null, plants: Record<string, NimbusPlantCalendarEntry>): void;
     /** Weekly hours in force on a date key ('YYYY-MM-DD'): the earliest-starting period covering it, else the default (same reference). */
     activeWorkHours(defaultWorkHours: NimbusWorkHours, periods: NimbusPlantPeriod[] | undefined | null, dateKey: string): NimbusWorkHours;

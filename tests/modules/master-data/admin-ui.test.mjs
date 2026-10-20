@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { Plant, ProdLines, MasterData, WorkCenters } from '../../../frontend/master-data/admin-ui.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { EditCalendar } from '../../../frontend/calendar/edit-calendar.mjs';
@@ -53,7 +54,7 @@ test('ProdLines.refresh re-fetches plants, the plant-scoped machines and the pla
   }
 });
 
-test('ProdLines.refresh resolves false, keeps the Store rows and still emits master-data-changed when both fetches fail', async () => {
+test('ProdLines.refresh resolves false, keeps the Store rows and does NOT emit master-data-changed when both fetches fail', async () => {
   const priorPlant = Store.selectedPlant;
   const priorMasterData = Store.masterData;
   const priorFetch = Util.fetchTraced;
@@ -74,8 +75,7 @@ test('ProdLines.refresh resolves false, keeps the Store rows and still emits mas
     unsubscribe();
     assert.equal(result, false, 'no fresh rows landed');
     assert.equal(Store.masterData, sentinel, 'a failed refresh never blanks the Store rows');
-    assert.equal(events.length, 1, 'the no-op branch still emits exactly one master-data-changed');
-    assert.equal(events[0].source, 'master-data-refresh');
+    assert.equal(events.length, 0, 'a failed refresh must not re-emit (it would re-apply stale lines)');
   } finally {
     Util.fetchTraced = priorFetch;
     if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
@@ -995,6 +995,26 @@ test('MasterData bulk-save for routing_rules also refreshes Runtime for plants w
   assert.match(source, /_refreshRuntimeFor\(\[\.\.\.upserts, \.\.\.deletes\]\.map\(\(row\) => row\.plant as string \| undefined\)\)/);
 });
 
+// syncLineSettings' per-plant machine cache is module-private; a successful refresh for the
+// plant is the only public path that drops it, so tests call this in their finally blocks.
+async function _dropLineSyncCache(plant) {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Util.fetchTraced = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+  try {
+    Store.setSelectedPlant(plant, 'test');
+    await ProdLines.refresh();
+  } finally {
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
+}
+
 test('syncLineSettings posts only the key columns and the changed column, not the whole cached row (#46)', async () => {
   const priorFetch = globalThis.fetch;
   const priorToast = Toast.show;
@@ -1021,6 +1041,7 @@ test('syncLineSettings posts only the key columns and the changed column, not th
     Store.getPlantForLine = priorGetPlant;
     globalThis.fetch = priorFetch;
     Toast.show = priorToast;
+    await _dropLineSyncCache('P46');
   }
 });
 
@@ -1059,7 +1080,7 @@ test('syncLineSettings drops its cache and refetches once when the line is absen
     assert.match(h.gets[1], /\/master-data\/machine\?plant=P-miss$/);
     assert.equal(h.posts.length, 2, 'the new machine\'s edit is saved, not silently dropped');
     assert.equal(h.posts[1].upserts[0].machine, 'M-B');
-  } finally { h.restore(); }
+  } finally { h.restore(); await _dropLineSyncCache('P-miss'); }
 });
 
 test('syncLineSettings refetches once and then gives up without posting when the line is still absent', async () => {
@@ -1069,7 +1090,7 @@ test('syncLineSettings refetches once and then gives up without posting when the
     await MasterData.syncLineSettings('M-Z', { bottleneck: true });
     assert.equal(h.gets.length, 2);
     assert.equal(h.posts.length, 1, 'no POST for a machine the server does not have');
-  } finally { h.restore(); }
+  } finally { h.restore(); await _dropLineSyncCache('P-gone'); }
 });
 
 test('a successful master-data refresh invalidates the line-sync machine cache for that plant', async () => {
@@ -1831,4 +1852,320 @@ test('Plant.removePlantBlock: an unknown id never prompts', async () => {
 test('the list x button routes through the confirming removePlantBlock (no direct Store delete in the handler)', () => {
   const src = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
   assert.ok(src.includes('void Plant.removePlantBlock(rm.dataset.blockId!)'));
+});
+
+// ---------------------------------------------------------------------------
+// Machine calendar inheritance display + Reset to plant (2026-10-19)
+// ---------------------------------------------------------------------------
+globalThis.NimbusComputeCore ??= createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
+
+function withInheritEnv(fn) {
+  const week = (r) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, r ? [...r] : null]));
+  const prior = {
+    plant: Store.selectedPlant, md: Store.masterData, cals: Store.calendars, document: globalThis.document,
+    isAdmin: Session.isAdmin, t: Util.t, toast: Toast.show, save: CalendarSync.saveLineHours, delegated: ProdLines._delegated,
+    nav: ProdLines._activeNavLine,
+  };
+  const body = {
+    innerHTML: '', listeners: {}, focused: false,
+    addEventListener(type, fn2) { (this.listeners[type] ||= []).push(fn2); },
+    querySelector: () => ({ focus: () => { body.focused = true; } }),
+  };
+  const roster = { innerHTML: '', querySelectorAll: () => [] };
+  globalThis.document = {
+    getElementById: id => (id === 'lines-body' ? body : id === 'plant-lines-roster' ? roster : null),
+    querySelector: () => null, querySelectorAll: () => [],
+  };
+  Util.t = (k) => k;
+  const toasts = [], saves = [];
+  Toast.show = (...a) => toasts.push(a);
+  CalendarSync.saveLineHours = (...a) => saves.push(a);
+  Session.isAdmin = () => true;
+  ProdLines._delegated = false;
+  Store.setMasterData({ plants: [{ plant: 'PD' }], lines: [{ machine: 'A1', plant: 'PD' }, { machine: 'A2', plant: 'PD' }] }, 'test');
+  Store.setSelectedPlant('PD', 'test');
+  Store.replacePlants({ PD: { workHours: week([7, 19]) } }, 'test');
+  Store.replaceCalendars({}, 'test');
+  Store.ensureCalendar('A1');                               // inherited
+  Store.setCalendar('A2', week([6, 20]), 'test');           // override that opens longer than the plant
+  return Promise.resolve(fn({ body, roster, toasts, saves, week })).finally(() => {
+    Store.replaceCalendars(prior.cals, 'test');
+    Store.setMasterData(prior.md, 'test');
+    Store.replacePlants({}, 'test');
+    Store.setSelectedPlant(prior.plant, 'test');
+    if (prior.document === undefined) delete globalThis.document; else globalThis.document = prior.document;
+    Session.isAdmin = prior.isAdmin; Util.t = prior.t; Toast.show = prior.toast;
+    CalendarSync.saveLineHours = prior.save; ProdLines._delegated = prior.delegated; ProdLines._activeNavLine = prior.nav;
+  });
+}
+
+test('ProdLines detail: an inherited machine shows no badge, only "Follows plant calendar"; pills read the plant week', () => withInheritEnv(({ body }) => {
+  ProdLines._renderDetail('A1');
+  assert.ok(body.innerHTML.includes('ui.follows_plant_calendar'));
+  assert.ok(!body.innerHTML.includes('ui.custom_hours'), 'no Custom hours badge');
+  assert.ok(!body.innerHTML.includes('reset-calendar'), 'nothing to reset');
+  assert.ok(body.innerHTML.includes('7am–7pm'), 'the pills show the plant week, not the all-day seed');
+  assert.ok(!body.innerHTML.includes('12am–12am'));
+}));
+
+test('ProdLines detail: an override gets the Custom hours badge, a Reset button (admin only) and the limited-by-plant hint', () => withInheritEnv(({ body }) => {
+  ProdLines._renderDetail('A2');
+  assert.ok(body.innerHTML.includes('line-badge badge-info'));
+  assert.ok(body.innerHTML.includes('ui.custom_hours'));
+  assert.ok(body.innerHTML.includes('data-action="reset-calendar"'));
+  assert.ok(body.innerHTML.includes('ui.limited_by_plant_hours'), '6am-8pm exceeds the plant 7am-7pm');
+  assert.ok(!body.innerHTML.includes('ui.follows_plant_calendar'));
+  Session.isAdmin = () => false;
+  ProdLines._renderDetail('A2');
+  assert.ok(!body.innerHTML.includes('data-action="reset-calendar"'), 'a non-admin cannot reset');
+}));
+
+test('ProdLines detail: an override inside the plant hours has no limited hint', () => withInheritEnv(({ body, week }) => {
+  Store.setCalendar('A2', week([8, 17]), 'test');
+  ProdLines._renderDetail('A2');
+  assert.ok(!body.innerHTML.includes('ui.limited_by_plant_hours'));
+}));
+
+test('Reset to plant: queues a null write, goes back to inherited, focuses Edit Calendar and shows one toast', () => withInheritEnv(({ body, toasts, saves }) => {
+  ProdLines._activeNavLine = 'A2';
+  ProdLines._renderDetail('A2');
+  body.listeners.click[0]({ target: { closest: () => ({ dataset: { action: 'reset-calendar', line: 'A2' } }) } });
+  assert.equal(Store.calendars.A2.inherited, true);
+  assert.deepEqual(saves, [['PD', 'A2', null]]);
+  assert.equal(body.focused, true, 'focus moved to Edit Calendar after the re-render');
+  assert.ok(!body.innerHTML.includes('data-action="reset-calendar"'), 'the detail re-rendered as inherited');
+  assert.deepEqual(toasts.map(t => t[0]), ['toast.calendar_changes_pending']);
+}));
+
+test('Reset to plant does nothing for a non-admin', () => withInheritEnv(({ body, toasts, saves }) => {
+  ProdLines._renderDetail('A2');
+  Session.isAdmin = () => false;
+  body.listeners.click[0]({ target: { closest: () => ({ dataset: { action: 'reset-calendar', line: 'A2' } }) } });
+  assert.equal(Store.calendars.A2.inherited, false);
+  assert.equal(saves.length, 0);
+  assert.equal(toasts.length, 0);
+}));
+
+test('Plant roster flags cell marks only the machine with its own hours', () => withInheritEnv(({ roster }) => {
+  Plant._renderRoster();
+  const rows = roster.innerHTML.split('<tr style="border-bottom').slice(1);
+  assert.equal(rows.length, 2);
+  const a1 = rows.find(r => r.includes('A1')), a2 = rows.find(r => r.includes('A2'));
+  assert.ok(!a1.includes('ui.custom_hours'));
+  assert.ok(a2.includes('ui.custom_hours'));
+}));
+
+// Part B (2026-10-19): Machines-pane SAP Work Center / weight sync.
+test('Store.applyMasterLinesToSettings copies sap_workcenter and distribution_weight (and clears them)', () => {
+  const priorMasterData = Store.masterData;
+  const prior = structuredClone(Store.lineSettings);
+  try {
+    Store.setMasterData({ plants: [], workcenters: [], lines: [
+      { machine: 'ZB1', plant: 'ZBP', sap_workcenter: 'ZB1', distribution_weight: 0.5, excl_optimizer: 'X' },
+      { machine: 'ZB2', plant: 'ZBP', sap_workcenter: null, distribution_weight: null },
+    ] }, 'test');
+    assert.equal(Store.applyMasterLinesToSettings(), 2);
+    assert.equal(Store.lineSettings.ZB1.sapWorkcenter, 'ZB1');
+    assert.equal(Store.lineSettings.ZB1.distributionWeight, 0.5);
+    assert.equal(Store.lineSettings.ZB1.excludeFromOpt, true);
+    assert.equal(Store.lineSettings.ZB2.sapWorkcenter, null);
+    assert.equal(Store.lineSettings.ZB2.distributionWeight, null);
+    Store.masterData.lines.push({ machine: 'ZB0', plant: 'ZBP', sap_workcenter: 'ZB1', distribution_weight: 0 });
+    Store.masterData.lines.push({ machine: 'ZBS', plant: 'ZBP', sap_workcenter: 'ZB1', distribution_weight: '2.5' });
+    Store.applyMasterLinesToSettings();
+    assert.equal(Store.lineSettings.ZB0.distributionWeight, 0, 'a zero weight is kept, not nulled');
+    assert.equal(Store.lineSettings.ZBS.distributionWeight, 2.5, 'a string NUMERIC is coerced to a number');
+    Store.masterData.lines.length = 2;
+    assert.equal(Store.applyMasterLinesToSettings(), 0, 'idempotent: nothing changed the second time');
+    Store.masterData.lines[1].sap_workcenter = '';
+    Store.masterData.lines[0].sap_workcenter = null;
+    Store.applyMasterLinesToSettings();
+    assert.equal(Store.lineSettings.ZB1.sapWorkcenter, null);
+  } finally {
+    for (const k of Object.keys(Store.lineSettings)) delete Store.lineSettings[k];
+    Object.assign(Store.lineSettings, prior);
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
+test('a Machines-pane write patches Store.masterData.lines so a following master-data-changed keeps the edit', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const prior = structuredClone(Store.lineSettings);
+  const priorFetch = Util.fetchTraced;
+  const priorToast = Toast.show;
+  const priorDocument = globalThis.document;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Toast.show = () => {};
+  const keyed = { subnetwork: 'S', plant: 'ZBP', machine: 'ZB3', sap_workcenter: null };
+  Util.fetchTraced = (url, opts) => {
+    if (opts?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({ inserted: 0, updated: 1, deleted: 0 }) });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ columns: [], rows: [{ ...keyed }] }) });
+  };
+  try {
+    Store.setSelectedPlant('ZBP', 'test');
+    Store.setMasterData({ plants: [], workcenters: [], lines: [{ ...keyed }] }, 'test');
+    Store.applyMasterLinesToSettings();
+    await MasterData.syncLineSettings('ZB3', { sapWorkcenter: 'WC-X' });
+    assert.equal(Store.masterData.lines[0].sap_workcenter, 'WC-X', 'cache row patched');
+    Store.setLineSetting('ZB3', { sapWorkcenter: 'WC-X' }, 'test');
+    Store.applyMasterLinesToSettings(); // what app.js does on master-data-changed
+    assert.equal(Store.lineSettings.ZB3.sapWorkcenter, 'WC-X');
+  } finally {
+    Util.fetchTraced = priorFetch;
+    Toast.show = priorToast;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    for (const k of Object.keys(Store.lineSettings)) delete Store.lineSettings[k];
+    Object.assign(Store.lineSettings, prior);
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
+});
+
+test('syncLineSettings with a linked response toasts and re-pulls the plant machine rows', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorToast = Toast.show;
+  const priorDocument = globalThis.document;
+  const priorGetPlant = Store.getPlantForLine;
+  const gets = [];
+  const toasts = [];
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Toast.show = (m, kind) => toasts.push({ m, kind });
+  const priorWindow = globalThis.window;
+  globalThis.window = { ...(priorWindow || {}), __NIMBUS_LOCALES: priorWindow?.__NIMBUS_LOCALES || { en: {} } }; // Util.t reads it
+  Store.getPlantForLine = (line) => (line === 'M-LK' ? 'P-lk' : priorGetPlant.call(Store, line));
+  Util.fetchTraced = (url, opts) => {
+    if (opts?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({ linked: [{ plant: 'P-lk', machine: 'M-LK' }] }) });
+    gets.push(String(url));
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ columns: [], rows: [{ subnetwork: 'S', plant: 'P-lk', machine: 'M-LK' }] }) });
+  };
+  try {
+    Store.setSelectedPlant('P-lk', 'test');
+    Store.setMasterData({ plants: [], workcenters: [], lines: [] }, 'test');
+    await MasterData.syncLineSettings('M-LK', { bottleneck: true });
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(gets.length, 3, `cache fill + plants + machine refresh: ${gets}`);
+    assert.ok(gets.filter((u) => u.endsWith('/master-data/machine?plant=P-lk')).length === 2);
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].kind, 'info');
+  } finally {
+    Util.fetchTraced = priorFetch;
+    Toast.show = priorToast;
+    Store.getPlantForLine = priorGetPlant;
+    if (priorWindow === undefined) delete globalThis.window; else globalThis.window = priorWindow;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    await _dropLineSyncCache('P-lk');
+  }
+});
+
+test('a refresh in flight while a Machines-pane write commits is discarded, so the pane edit is kept', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorToast = Toast.show;
+  const priorDocument = globalThis.document;
+  const priorGetPlant = Store.getPlantForLine;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  Toast.show = () => {};
+  Store.getPlantForLine = (line) => (line === 'M-RC' ? 'P-rc' : priorGetPlant.call(Store, line));
+  let releaseStale;
+  const stale = new Promise((r) => { releaseStale = r; });
+  Util.fetchTraced = (url, opts) => {
+    if (opts?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    if (String(url).includes('/master-data/machine?plant=P-rc')) {
+      if (opts?.signal) { // the refresh's GET (the only one with a timeout signal): held until after the write commits, returns the pre-edit row
+        return stale.then(() => ({ ok: true, json: () => Promise.resolve({ rows: [{ subnetwork: 'S', plant: 'P-rc', machine: 'M-RC', bottleneck: null }] }) }));
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ columns: [], rows: [{ subnetwork: 'S', plant: 'P-rc', machine: 'M-RC', bottleneck: null }] }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [] }) });
+  };
+  try {
+    Store.setSelectedPlant('P-rc', 'test');
+    Store.setMasterData({ plants: [], workcenters: [], lines: [{ subnetwork: 'S', plant: 'P-rc', machine: 'M-RC', bottleneck: null }] }, 'test');
+    const refreshing = ProdLines.refresh();
+    await MasterData.syncLineSettings('M-RC', { bottleneck: true });
+    releaseStale();
+    await refreshing;
+    assert.equal(Store.masterData.lines[0].bottleneck, 'X', 'the stale refresh did not revert the pane edit');
+  } finally {
+    releaseStale();
+    Util.fetchTraced = priorFetch;
+    Toast.show = priorToast;
+    Store.getPlantForLine = priorGetPlant;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    await _dropLineSyncCache('P-rc');
+  }
+});
+
+test('WorkCenters._write patches _machines (weights, auto_linked) and re-pulls the machine rows into the Store', async () => {
+  const priorPlant = Store.selectedPlant;
+  const priorMasterData = Store.masterData;
+  const priorFetch = Util.fetchTraced;
+  const priorIsAdmin = Session.isAdmin;
+  const priorRecompute = Alerts.scheduleRecompute;
+  const priorDocument = globalThis.document;
+  const priorCSS = globalThis.CSS;
+  const priorRows = WorkCenters._rows;
+  const priorMachines = WorkCenters._machines;
+  const priorSelected = WorkCenters._selected;
+  const priorLoadedPlant = WorkCenters._loadedPlant;
+  const priorWindow = globalThis.window;
+  globalThis.window = { ...(priorWindow || {}), __NIMBUS_LOCALES: priorWindow?.__NIMBUS_LOCALES || { en: {} } };
+  const priorToast = Toast.show;
+  const toasts = [];
+  Toast.show = (m, kind) => toasts.push({ m, kind });
+  const urls = [];
+  Session.isAdmin = () => true;
+  Alerts.scheduleRecompute = () => {};
+  globalThis.document = { querySelector: () => null, getElementById: () => null };
+  globalThis.CSS = { escape: (s) => s };
+  Util.fetchTraced = (url, opts) => {
+    urls.push(`${opts?.method || 'GET'} ${url}`);
+    if (opts?.method === 'PUT') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        description: null, distribution_mode: 'single', default_machine: null, max_separation: 'none',
+        review_required: true, distribute_tooled: false, weights: { "WC-N": 3 }, auto_linked: true,
+      }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [{ plant: 'ZBP', machine: 'WC-N', sap_workcenter: 'WC-N', distribution_weight: 3 }] }) });
+  };
+  try {
+    WorkCenters._rows = [];
+    WorkCenters._selected = null;
+    WorkCenters._loadedPlant = null;
+    WorkCenters._machines = [{ plant: 'ZBP', machine: 'WC-N', sap_workcenter: null, distribution_weight: null }];
+    Store.setSelectedPlant('ZBP', 'test');
+    Store.setMasterData({ plants: [], workcenters: [], lines: [] }, 'test');
+    await WorkCenters._write('ZBP', 'WC-N', {
+      description: null, distribution_mode: 'single', default_machine: null, max_separation: 'none',
+      review_required: true, distribute_tooled: false, weights: { 'WC-N': 3 },
+    }, ['WC-N'], WorkCenters._editSeq);
+    assert.equal(WorkCenters._machines[0].sap_workcenter, 'WC-N', 'auto_linked patches the pane machine');
+    assert.equal(WorkCenters._machines[0].distribution_weight, 3);
+    assert.deepEqual(toasts.map((t) => t.kind), ['info'], 'auto-link toasts once');
+    assert.ok(urls.some((u) => u.startsWith('GET') && u.includes('/master-data/machine?plant=ZBP')), `machine rows re-pulled: ${urls}`);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(Store.masterData.lines[0]?.distribution_weight, 3, 'the weight reaches Store.masterData.lines');
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window; else globalThis.window = priorWindow;
+    Toast.show = priorToast;
+    Session.isAdmin = priorIsAdmin;
+    Alerts.scheduleRecompute = priorRecompute;
+    Util.fetchTraced = priorFetch;
+    if (priorDocument === undefined) delete globalThis.document; else globalThis.document = priorDocument;
+    if (priorCSS === undefined) delete globalThis.CSS; else globalThis.CSS = priorCSS;
+    WorkCenters._rows = priorRows;
+    WorkCenters._machines = priorMachines;
+    WorkCenters._selected = priorSelected;
+    WorkCenters._loadedPlant = priorLoadedPlant;
+    Store.setMasterData(priorMasterData, 'test-restore');
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+  }
 });

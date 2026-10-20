@@ -31,6 +31,12 @@ type SettingsDefaultsResolver = () => Record<string, unknown>;
  *  redeclaring a structurally-identical shadow copy. */
 export interface CalendarEntry {
   workHours: WorkHours;
+  /** True = the machine has no calendar of its own and follows its plant. Its `workHours` is then "open all
+   *  day" (`[0,24]` every weekday) once the line's plant resolves, because every scheduling reader
+   *  intersects line hours with the plant's hours for the date; until the plant resolves it holds the
+   *  DEFAULT_SHIFT seed. Display and editing code reads `Store.effectiveLineHours`, never this raw value.
+   *  Absent/false = the machine has its own saved hours. Optional and additive: no SCHEMA_VERSION bump. */
+  inherited?: boolean;
 }
 
 /** The raw event object a mutator builds before Store.emit() enriches it with revision/mode. */
@@ -522,19 +528,51 @@ export const Store = {
   },
 
   /* ----- calendar & blocks ---------------------------------------------- */
+  /** An explicit machine edit: the line now has its own hours (never inherited). */
   setCalendar(line: string, workHours: WorkHours, source?: string): void {
     if (!this._state.calendars[line]) this._state.calendars[line] = { workHours: {} };
     this._state.calendars[line].workHours = workHours;
+    this._state.calendars[line].inherited = false;
     this.emit({ type: 'calendar:change', line, source });
+  },
+  /** The week a line holds while its plant is unknown: Config.DEFAULT_SHIFT (weekends off when configured). */
+  _defaultShiftWeek(): WorkHours {
+    const week: WorkHours = {};
+    for (let d = 0; d < 7; d++) {
+      week[d] = Config.WEEKEND_OFF && (d === 0 || d === 6) ? null : [...Config.DEFAULT_SHIFT] as [number, number];
+    }
+    return week;
+  },
+  _isAllDay(wh: WorkHours): boolean {
+    for (let d = 0; d < 7; d++) { const r = wh[d]; if (!r || r[0] !== 0 || r[1] !== 24) return false; }
+    return true;
+  },
+  /** The seed for an inherited line: open all day when the plant resolves (scheduling intersects it with the
+   *  plant's hours per date), else the DEFAULT_SHIFT week (nothing would bound it). */
+  _inheritedSeed(line: string): WorkHours {
+    if (!this.getPlantForLine(line)) return this._defaultShiftWeek();
+    const week: WorkHours = {};
+    for (let d = 0; d < 7; d++) week[d] = [0, 24];
+    return week;
   },
   ensureCalendar(line: string): void {
     if (this._state.calendars[line]) return;
-    const defaults: WorkHours = {};
-    for (let d = 0; d < 7; d++) {
-      if (Config.WEEKEND_OFF && (d === 0 || d === 6)) defaults[d] = null;
-      else defaults[d] = [...Config.DEFAULT_SHIFT] as [number, number];
-    }
-    this._state.calendars[line] = { workHours: defaults };
+    this._state.calendars[line] = { workHours: this._inheritedSeed(line), inherited: true };
+  },
+  /** Make a line follow its plant (no machine calendar of its own). Emits `calendar:change` only when a
+   *  `source` is given, so a bulk caller (hydration) can emit once itself. */
+  inheritPlantHours(line: string, source?: string): void {
+    this._state.calendars[line] = { workHours: this._inheritedSeed(line), inherited: true };
+    if (source) this.emit({ type: 'calendar:change', line, source });
+  },
+  /** The hours to SHOW or EDIT for a line: the plant's default week for an inherited line, the saved hours
+   *  otherwise. Never feed this to a scheduling reader: those intersect the raw `workHours` with the plant's
+   *  hours per date, and a default week would hide a dated period. The result may be the plant's own object. */
+  effectiveLineHours(line: string): WorkHours {
+    const entry = this._state.calendars[line];
+    if (entry && !entry.inherited) return entry.workHours;
+    const plant = this.getPlantForLine(line);
+    return (plant ? this._state.plants[plant]?.workHours : undefined) ?? this._defaultShiftWeek();
   },
   addBlock(block: NimbusBlock, source?: string): void {
     if (Config.DEBUG_BLOCKS) console.trace('[addBlock]', { source, block });
@@ -592,41 +630,6 @@ export const Store = {
     if (periods.length) entry.periods = [...periods].sort((a, b) => (a.validFrom < b.validFrom ? -1 : a.validFrom > b.validFrom ? 1 : 0));
     else delete entry.periods;
     this.emit({ type: 'calendar:change', source, plant });
-  },
-  clampLinesToPlant(plant: string, dow: number): string[] {
-    // D5: the bound is the UNION of the default and every period's hours for this weekday, so a line keeps
-    // hours a dated period opens. Period saves never call this.
-    const plantEntry = this._state.plants[plant];
-    const plantHours = plantEntry
-      ? globalThis.NimbusComputeCore!.unionWeeklyHours(plantEntry.workHours, plantEntry.periods)[dow]
-      : undefined;
-    const changed = [];  // line codes whose hours this call actually rewrote (F9)
-    const plantLineSet = new Set(Store._linesByPlant[plant] || []);
-    for (const line of Object.keys(this._state.calendars)) {
-      if (!plantLineSet.has(line)) continue;
-      const lineHours = this._state.calendars[line].workHours[dow];
-      if (!lineHours) continue;
-      let next: [number, number] | null;
-      if (!plantHours) {
-        next = null;
-      } else {
-        const ns = Math.max(lineHours[0], plantHours[0]);
-        const ne = Math.min(lineHours[1], plantHours[1]);
-        next = ns >= ne ? null : [ns, ne];
-      }
-      // Only write + report when the value actually changes, so a concurrent
-      // single-line edit that already fits the new plant window is not re-persisted
-      // (and therefore not clobbered) by the plant-hours batch. (F9)
-      const same = Array.isArray(next)
-        ? (Array.isArray(lineHours) && lineHours[0] === next[0] && lineHours[1] === next[1])
-        : (next === null && lineHours === null);
-      if (!same) {
-        this._state.calendars[line].workHours[dow] = next;
-        changed.push(line);
-      }
-    }
-    this.emit({ type: 'calendar:change', source: 'plant-clamp' });
-    return changed;
   },
   addPlantBlock(block: NimbusPlantBlock, source?: string): void {
     if (Config.DEBUG_BLOCKS) console.trace('[addPlantBlock]', { source, block });
@@ -691,6 +694,36 @@ export const Store = {
       sapWorkcenter: null,
       distributionWeight: null,
     };
+  },
+  /** Copy the master `machine` rows (`masterData.lines`) into `lineSettings` with direct writes
+   *  (no per-line emit — the caller coalesces one 'lineSettings:change' and rebuilds the plant
+   *  index when this returns > 0). Moved out of app.js's master-data-changed subscriber so it is
+   *  typechecked and testable; also carries sap_workcenter + distribution_weight, which the
+   *  Machines pane reads. Returns how many lines changed. */
+  applyMasterLinesToSettings(): number {
+    const mdLines = (this._state.masterData?.lines ?? []) as unknown as Array<Record<string, unknown>>;
+    let touched = 0;
+    for (const row of mdLines) {
+      const line = row.machine as string | undefined;
+      if (!line) continue;
+      this.ensureLineSettings(line);
+      const ls = this._state.lineSettings[line];
+      const before = JSON.stringify(ls);
+      ls.excludeFromOpt = row.excl_optimizer === 'X';
+      ls.bottleneck     = row.bottleneck === 'X';
+      if (row.buffer_type === '%')        ls.bufferUnit = 'pct';
+      else if (row.buffer_type === 'hrs') ls.bufferUnit = 'hours';
+      if (row.buffer_percent != null && row.buffer_percent !== '')
+        ls.bufferPct = parseFloat(String(row.buffer_percent)) || 0;
+      if (row.buffer_hours != null && row.buffer_hours !== '')
+        ls.bufferHours = parseFloat(String(row.buffer_hours)) || 0;
+      ls.plGroup = (row.wc_group as string) || '';
+      ls.plant   = (row.plant as string) || null;
+      ls.sapWorkcenter = (row.sap_workcenter as string) || null;
+      ls.distributionWeight = row.distribution_weight == null ? null : Number(row.distribution_weight);
+      if (JSON.stringify(ls) !== before) touched++;
+    }
+    return touched;
   },
   setLineSetting(line: string, patch: Partial<NimbusLineSetting>, source?: string): void {
     this.ensureLineSettings(line);
@@ -771,7 +804,14 @@ export const Store = {
     const namesByPlant: Record<string, Set<string>> = {};
     const addName = (plant: string | null, line: string): void => { if (plant && line) (namesByPlant[plant] ||= new Set()).add(line); };
     for (const t of Store.tasksArr) addName(t.PLANT || Store.getPlantForLine(t.MACHINE), t.MACHINE);
-    for (const line of Object.keys(this._state.calendars))    addName(Store.getPlantForLine(line), line);
+    for (const [line, entry] of Object.entries(this._state.calendars)) {
+      const plant = Store.getPlantForLine(line);
+      addName(plant, line);
+      // An inherited line seeded before its plant resolved (DEFAULT_SHIFT) goes all-day once it does.
+      if (plant && entry.inherited && !Store._isAllDay(entry.workHours)) entry.workHours = Store._inheritedSeed(line);
+      // ...and the reverse: a plant that stopped resolving must not leave an all-day seed with nothing to bound it.
+      else if (!plant && entry.inherited && Store._isAllDay(entry.workHours)) entry.workHours = Store._defaultShiftWeek();
+    }
     for (const line of Object.keys(this._state.lineSettings)) addName(Store.getPlantForLine(line), line);
     for (const r of (Store._state.masterData?.lines ?? []))   addName(r.plant, r.machine);
     const linesByPlant: Record<string, string[]> = {};

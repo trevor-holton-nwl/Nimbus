@@ -170,6 +170,14 @@ export function candidateDefaultWorkHours(): WorkHours {
   return workHours;
 }
 
+/** The all-day week a line with no calendar row follows (the plant bounds it): the detached evaluators' fallback
+ * for a line missing from the snapshot when its plant resolves, matching compute-core's `ensureCalendar(.., allDay)`. */
+export function candidateAllDayWorkHours(): WorkHours {
+  const workHours: WorkHours = {};
+  for (let day = 0; day < 7; day++) workHours[day] = [0, 24];
+  return workHours;
+}
+
 /** Senior review I9 (OQ47): the ONE definition of a contiguous operating span. Appends `span` (chronological) to
  * `out`, merging it into the tail when it touches or overlaps it, and returns the resulting tail. The backward
  * walk, the forward `hasNominalWindow` and the optimizer's overlong predicate all measure spans through this, so

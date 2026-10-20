@@ -160,15 +160,38 @@ class TestAutolinkRule:
         assert res["linked"] == [{"plant": PLANT, "machine": "ZZ-WX"}]
         assert dict(_links(seeded)) == {"ZZ-WX": "ZZ-WX", "ZZ-WY": None}
 
-    def test_a_cleared_link_is_refilled_when_that_machine_is_next_saved(self, seeded):
+    def test_a_cleared_link_stays_cleared_when_that_machine_is_next_saved(self, seeded):
+        # Auto-link fires on creation only (2026-10-19): a planner's explicit clear sticks.
         _apply("sap_workcenter", [_wc("ZZ-RF")])
         _apply("machine", [_machine("ZZ-RF")])
-        with seeded._pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("UPDATE machine SET sap_workcenter = NULL WHERE plant = %s", (PLANT,))
-            conn.commit()
-        assert _links(seeded) == [("ZZ-RF", None)]
-        _apply("machine", [_machine("ZZ-RF")])
         assert _links(seeded) == [("ZZ-RF", "ZZ-RF")]
+        res = _apply("machine", [_machine("ZZ-RF", wc="")])  # the Machines pane's clear
+        assert "linked" not in res
+        assert _links(seeded) == [("ZZ-RF", None)]
+        res = _apply("machine", [_machine("ZZ-RF")])  # a later save of the same machine
+        assert "linked" not in res
+        assert _links(seeded) == [("ZZ-RF", None)]
+
+    def test_a_cleared_link_stays_cleared_when_the_work_center_is_next_written(self, seeded):
+        _apply("sap_workcenter", [_wc("ZZ-RG")])
+        _apply("machine", [_machine("ZZ-RG")])
+        _apply("machine", [_machine("ZZ-RG", wc="")])
+        res = _apply("sap_workcenter", [_wc("ZZ-RG")])  # update of an existing work center
+        assert "linked" not in res
+        assert _links(seeded) == [("ZZ-RG", None)]
+
+    def test_a_new_machine_with_a_blank_link_key_is_still_auto_linked(self, seeded):
+        # Nothing to clear on creation: a blank/null sap_workcenter must not suppress the link.
+        _apply("sap_workcenter", [_wc("ZZ-RH")])
+        res = _apply("machine", [_machine("ZZ-RH", wc="")])
+        assert res["linked"] == [{"plant": PLANT, "machine": "ZZ-RH"}]
+        assert _links(seeded) == [("ZZ-RH", "ZZ-RH")]
+
+    def test_a_new_machine_with_an_explicit_other_link_keeps_it(self, seeded):
+        _apply("sap_workcenter", [_wc("ZZ-RH"), _wc("ZZ-RI")])
+        res = _apply("machine", [_machine("ZZ-RH", wc="ZZ-RI")])
+        assert "linked" not in res
+        assert _links(seeded) == [("ZZ-RH", "ZZ-RI")]
 
     def test_the_audit_row_records_the_auto_link(self, seeded):
         _apply("sap_workcenter", [_wc("ZZ-M9")])

@@ -8,6 +8,7 @@
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Engine } from '../optimization/engine.mjs';
+import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
@@ -15,7 +16,7 @@ import { Runtime } from '../routing/runtime-client.mjs';
 import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { PriorityListViewer } from '../priority-lists/viewers.mjs';
-import type { NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
+import type { WorkHours, NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
 // Cross-domain seams (see docs/architecture/domain-refactor-plan.md Phase P2
 // task brief / report for the full verified cross-reference list):
 //   - `SetupAdmin.render` is called from Plant's Settings pane. `SetupAdmin`
@@ -69,6 +70,12 @@ const PLANT_TOTAL_COVERAGE_KEY = '__plant_total__';
  *  `refreshStoreMasterData` can drop a plant's entry once fresh machine rows land. */
 const _lineSyncMachineCache: Record<string, MasterDataTableState<ProductionLineRow>> = {};
 
+/** Bumped by `MasterData.syncLineSettings` after it patches `Store.masterData.lines` with a
+ *  just-committed Machines-pane write. `refreshStoreMasterData` captures it at start and
+ *  discards its result when it moved: that GET may have read the row before the write
+ *  committed and would otherwise revert the pane to the pre-edit value. */
+let _lineWriteGen = 0;
+
 /** Re-pull `plants` + the selected plant's `machine` rows into `Store.masterData` so
  *  Hierarchy/ProdLines/Plant stay in sync with Postgres. Shared by `MasterData._save`
  *  (fire-and-forget, `source: 'master-data-save'`) and the Production Lines / Plant
@@ -84,6 +91,7 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
   const API = Config.API_BASE;
   const refreshPlant = Store.selectedPlant;
   const refreshLoadGen = Persistence._loadRequest;
+  const refreshWriteGen = _lineWriteGen;
   try {
     const [pData, lData] = await Promise.all([
       Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
@@ -94,6 +102,9 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
         : Promise.resolve(null),
     ]);
     if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return false;
+    // A Machines-pane write committed while these GETs were in flight: they may carry the
+    // pre-edit row, so drop them (the locally patched Store rows already hold the new value).
+    if (_lineWriteGen !== refreshWriteGen) return false;
     if (pData || lData) {
       // Public Store.setMasterData(...) equivalent of the former direct
       // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
@@ -127,10 +138,10 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
       // refresh reports success.
       return !!(pData && lData);
     }
-    Store.emit({ type: 'master-data-changed', table, source });
+    // Non-ok responses: nothing new landed, and re-emitting would re-apply stale lines.
     return false;
   } catch {
-    Store.emit({ type: 'master-data-changed', table, source });
+    // A failed fetch must not emit 'master-data-changed' (it re-applies the stale Store lines).
     return false;
   }
 }
@@ -471,20 +482,11 @@ export const Plant = {
     EditCalendar.openPlant(pName);
   },
 
-  /** Persist a plant's working hours + only the line hours the clamp actually rewrote
-   *  (changedLines, a Set/array). Narrowing to changed lines means a concurrent
-   *  single-line edit that still fits the new plant window is NOT re-POSTed and so not
-   *  clobbered by the plant-hours batch. (F9) Per-line saves are batched into one
-   *  /line-hours POST by CalendarSync. Falls back to all in-plant lines if no set given. */
-  _persistPlantHours(pName: string | null, changedLines?: Set<string> | string[]): void {
+  /** Persist a plant's working hours. Plant saves write the plant row only: machines follow the plant
+   *  (inherited) or are intersected with it per date, so no machine row is ever rewritten here. */
+  _persistPlantHours(pName: string | null): void {
     if (!pName) return;
     CalendarSync.savePlantHours(pName, Store.plants[pName]?.workHours);
-    const lines = changedLines
-      ? [...changedLines].filter(l => Store.calendars[l] && Store.getPlantForLine(l) === pName)
-      : Object.keys(Store.calendars).filter(l => Store.getPlantForLine(l) === pName);
-    for (const line of lines) {
-      CalendarSync.saveLineHours(pName, line, Store.calendars[line].workHours);
-    }
   },
 
   _pillRightClick(d: number, e: MouseEvent): void {
@@ -513,9 +515,7 @@ export const Plant = {
         Store.setPlantWorkHours(_pName, d, [8, 17], 'pill');
         Toast.show(Util.t('day.sun_enabled', { day: dayName }), 'success');
       }
-      const changed = new Set<string>();
-      for (let i = 0; i < 7; i++) for (const l of Store.clampLinesToPlant(_pName, i)) changed.add(l);
-      Plant._persistPlantHours(_pName, changed);
+      Plant._persistPlantHours(_pName);
       Plant._renderHours();
     };
 
@@ -708,7 +708,12 @@ export const Plant = {
           const exclBadge = ls.excludeFromOpt
             ? `<span style="background:#6366f1;color:#fff;font-size:11px;padding:2px 6px;border-radius:4px;">${Util.t('ui.excl_optimizer')}</span>`
             : '';
-          const cal = Store.calendars[line]?.workHours || {};
+          // Only the exception is marked: a machine with its own saved hours. Inherited machines show the plant's
+          // week (effectiveLineHours) with no badge.
+          const customBadge = Store.calendars[line] && !Store.calendars[line].inherited
+            ? `<span class="line-badge badge-info">${Util.escapeHtml(Util.t('ui.custom_hours'))}</span>`
+            : '';
+          const cal = Store.effectiveLineHours(line);
           const schedCells = [0,1,2,3,4,5,6].map(d => {
             const wh = cal[d];
             const timeStr = wh ? `${ProdLines._fmtHour(wh[0])}–${ProdLines._fmtHour(wh[1])}` : Util.t('ui.off');
@@ -722,7 +727,7 @@ export const Plant = {
           const lineEsc = Util.escapeHtml(line);
           return `<tr style="border-bottom:1px solid var(--border,#f1f5f9);">
             <td style="padding:8px 12px;"><div class="line-label"><span class="line-dot" style="background:${color}"></span>${lineEsc}</div></td>
-            <td style="padding:8px 12px;">${botBadge}${exclBadge ? ' ' + exclBadge : ''}</td>
+            <td style="padding:8px 12px;">${botBadge}${exclBadge ? ' ' + exclBadge : ''}${customBadge ? ' ' + customBadge : ''}</td>
             <td style="padding:8px 12px;">
               <div style="display:flex;gap:6px;align-items:flex-start;">${schedCells}</div>
             </td>
@@ -2293,7 +2298,10 @@ export const ProdLines = {
     const gi = allLines.indexOf(line);
     const color = Config.COLORS[gi % Config.COLORS.length];
     const ls = Store.lineSettings[line] || {};
-    const cal = Store.calendars[line]?.workHours || {};
+    // Show the plant's week for a machine that follows it (effectiveLineHours), its own hours otherwise.
+    const isOverride = !!Store.calendars[line] && !Store.calendars[line].inherited;
+    const cal = Store.effectiveLineHours(line);
+    const limited = isOverride && ProdLines._exceedsPlantHours(line, cal);
     const dayLabels = ['day.sun','day.mon','day.tue','day.wed','day.thu','day.fri','day.sat'].map(k => Util.t(k));
 
     const hoursPills = [0,1,2,3,4,5,6].map(d => {
@@ -2345,11 +2353,19 @@ export const ProdLines = {
       </div>
       <div class="ld-section">
         <div class="ld-section-head">
-          <span class="ld-section-title">${Util.t('ui.working_hours_section')}</span>
-          <button class="btn btn-ghost sm" data-action="edit-calendar" data-line="${Util.escapeHtml(line)}">${Util.t('btn.edit_calendar')}</button>
+          <span class="ld-head-main">
+            <span class="ld-section-title">${Util.t('ui.working_hours_section')}</span>
+            ${isOverride ? `<span class="line-badge badge-info">${Util.escapeHtml(Util.t('ui.custom_hours'))}</span>` : ''}
+          </span>
+          <span class="ld-head-actions">
+            ${isOverride && Session.isAdmin() ? `<button class="btn btn-ghost sm" data-action="reset-calendar" data-line="${Util.escapeHtml(line)}">${Util.t('btn.reset_to_plant')}</button>` : ''}
+            <button class="btn btn-ghost sm" data-action="edit-calendar" data-line="${Util.escapeHtml(line)}">${Util.t('btn.edit_calendar')}</button>
+          </span>
         </div>
         <div class="ld-section-body">
           <div class="line-hours-pills">${hoursPills}</div>
+          ${isOverride ? '' : `<p class="panel-hint ld-hours-note">${Util.escapeHtml(Util.t('ui.follows_plant_calendar'))}</p>`}
+          ${limited ? `<p class="panel-hint ld-hours-note">${Util.escapeHtml(Util.t('ui.limited_by_plant_hours'))}</p>` : ''}
         </div>
       </div>
       <div class="ld-section">
@@ -2632,6 +2648,18 @@ export const ProdLines = {
         EditCalendar.open(action.dataset.line || '');
         return;
       }
+      if (action?.dataset.action === 'reset-calendar') {
+        // Admin-only (the line-hours endpoint is require_admin). No confirmation: re-entering the hours undoes it.
+        const line = action.dataset.line || '';
+        const plant = Store.getPlantForLine(line) || Store.selectedPlant;
+        if (!line || !plant || !Session.isAdmin()) return;
+        CalendarSync.resetLinesToPlant(plant, [line]);
+        ProdLines._renderDetail(ProdLines._activeNavLine);
+        // The Reset button is gone after the re-render; keep keyboard focus in the section.
+        body.querySelector<HTMLElement>('[data-action="edit-calendar"]')?.focus();
+        Toast.show(Util.t(Sandbox.active ? 'toast.calendar_whatif_local' : 'toast.calendar_changes_pending'), 'info');
+        return;
+      }
       if (action?.dataset.action === 'add-block') {
         ProdLines.openBlockModal(action.dataset.line || '');
         return;
@@ -2650,6 +2678,22 @@ export const ProdLines = {
       NIMBUS!.MasterData!.syncLineSettings!(line, { bufferUnit: unit });
       ProdLines._renderDetail(ProdLines._activeNavLine);
     });
+  },
+
+  /** True when a machine's own hours open longer than its plant ever does on some weekday (the plant's
+   *  default week united with every dated period), so the plant cuts them on those days. */
+  _exceedsPlantHours(line: string, hours: WorkHours): boolean {
+    const plant = Store.getPlantForLine(line);
+    const entry = plant ? Store.plants[plant] : undefined;
+    if (!entry) return false;
+    const union = globalThis.NimbusComputeCore!.unionWeeklyHours(entry.workHours, entry.periods);
+    for (let d = 0; d < 7; d++) {
+      const range = hours[d];
+      if (!range) continue;
+      const cap = union[d];
+      if (!cap || range[0] < cap[0] || range[1] > cap[1]) return true;
+    }
+    return false;
   },
 
   _fmtHour(h: number): string {
@@ -2963,6 +3007,8 @@ interface WorkCenterSaveResult {
   review_required: boolean;
   distribute_tooled: boolean;
   weights: Record<string, number | null>;
+  /** True when this save auto-linked the same-named machine (creation only). */
+  auto_linked?: boolean;
 }
 
 /** The Work Centers tab's client-side staged-edit buffer for the currently
@@ -5003,14 +5049,25 @@ export const MasterData = (() => {
     state.dirty.delete(_rowKey('machine', updatedRow));
 
     try {
-      await Util.fetchTraced(`${API}/master-data/machine/bulk`, {
+      const res = await Util.fetchTraced(`${API}/master-data/machine/bulk`, {
         method:  'POST',
         headers: { 'content-type': 'application/json' },
         body:    JSON.stringify({ upserts: [upsertRow], deletes: [] }),
       }).then((r) => {
         if (!r.ok) return r.json().then((e) => { throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`); });
-        return r.json();
+        return r.json() as Promise<MasterDataBulkResult>;
       });
+      // Patch the Store cache with what was just written (no emit): a later
+      // 'master-data-changed' re-applies Store.masterData.lines onto lineSettings and
+      // would otherwise revert this edit from a stale row.
+      const cachedRow = (Store.masterData?.lines ?? []).find((r) => r.machine === line && r.plant === plant);
+      if (cachedRow) Object.assign(cachedRow, changed);
+      _lineWriteGen++;
+      if (res?.linked?.length) {
+        const names = res.linked.slice(0, 5).map((m) => m.machine).join(', ') + (res.linked.length > 5 ? ', …' : '');
+        Toast.show(Util.t('toast.machines_autolinked', { machines: names }), 'info');
+        void refreshStoreMasterData('line-settings', 'machine');
+      }
       if (_activeTable === 'machine') _renderTable('machine');
     } catch (e) {
       ErrorLog.error('prod-lines', `Failed to save line setting: ${(e as Error).message}`);
@@ -6020,6 +6077,29 @@ export const WorkCenters = {
       for (const m of members) {
         const mach = WorkCenters._machines.find((x) => x.machine === m);
         if (mach) mach.distribution_weight = res.weights[m] ?? null;
+      }
+      // A creating save may have auto-linked the same-named machine server-side: show it here
+      // and re-pull the Store's machine rows (the Machines pane reads them) — this also
+      // repairs stale weights, not only auto-links. Selected plant only, like every Store slice.
+      if (plant === Store.selectedPlant) {
+        // Patch the Store's machine rows and lineSettings directly so the Machines pane shows
+        // the new weights (and link) without waiting on a refresh GET.
+        const mdLines = (Store.masterData?.lines ?? []) as Array<NimbusMasterLine & { distribution_weight?: number | null }>;
+        for (const m of members) {
+          const w = res.weights[m] ?? null;
+          const row = mdLines.find((r) => r.plant === plant && r.machine === m);
+          if (row) row.distribution_weight = w;
+          Store.setLineSetting(m, { distributionWeight: w }, 'work-centers');
+        }
+        if (res.auto_linked) {
+          const linked = WorkCenters._machines.find((x) => x.machine === code);
+          if (linked) linked.sap_workcenter = code;
+          const row = mdLines.find((r) => r.plant === plant && r.machine === code);
+          if (row) row.sap_workcenter = code;
+          Store.setLineSetting(code, { sapWorkcenter: code }, 'work-centers');
+          Toast.show(Util.t('toast.machines_autolinked', { machines: code }), 'info');
+          void refreshStoreMasterData('work-centers', 'machine');
+        }
       }
       WorkCenters._refreshSidebarRow(code);
 

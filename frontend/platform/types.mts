@@ -563,7 +563,7 @@ export type IsoUtcTs = string;
 export interface LiveState {
   tasks: NimbusTask[];
   blocks: NimbusBlock[];
-  calendars: Record<string, { workHours: WorkHours }>;
+  calendars: Record<string, { workHours: WorkHours; inherited?: boolean }>;
   plants: Record<string, PlantCalendarEntry>;
   plantBlocks: NimbusPlantBlock[];
   lineSettings: Record<string, NimbusLineSetting>;
@@ -590,7 +590,7 @@ export interface StoredState {
   _savedAt: string;
   tasks: Array<Record<string, unknown>>;
   blocks: NimbusBlock[];
-  calendars: Record<string, { workHours: WorkHours }>;
+  calendars: Record<string, { workHours: WorkHours; inherited?: boolean }>;
   /** Legacy: never written and ignored on read. Manual firm is server state (`task.firmed`);
    *  firms found in an old cache are dropped ("start fresh"). */
   firmedIds?: string[];

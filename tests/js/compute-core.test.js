@@ -1213,3 +1213,28 @@ test('validatePlantPeriods: missing or duplicate id is period_invalid', () => {
   assert.equal(Core.validatePlantPeriods([{ ...p, id: '' }]).code, 'period_invalid');
   assert.equal(Core.validatePlantPeriods([{ ...p, id: 'a' }, { ...p, id: 'a', validFrom: '2027-01-01' }]).code, 'period_invalid');
 });
+
+test('Core.workWindow: a line with no calendar entry inherits the plant (all-day seed), or the default shift when its plant is unknown', () => {
+  const plants = { P: { workHours: allDays([6, 17]) } };
+  const calendars = {};
+  const withPlant = Core.workWindow('L', new Date(2026, 9, 19, 12), calendars, plants, { L: { plant: 'P' } }, {});
+  assert.equal(withPlant[0].getHours(), 6);
+  assert.equal(withPlant[1].getHours(), 17);
+  assert.equal(calendars.L.inherited, true, 'the seeded entry is flagged inherited');
+  assert.deepEqual(calendars.L.workHours[1], [0, 24]);
+  const orphanCals = {};
+  const orphan = Core.workWindow('O', new Date(2026, 9, 19, 12), orphanCals, {}, {}, { lines: [] });
+  assert.equal(orphan[0].getHours(), 7, 'no plant resolves: nothing would bound an all-day seed, so DEFAULT_SHIFT is used');
+  assert.equal(orphan[1].getHours(), 19);
+  assert.equal(orphanCals.O.inherited, true);
+});
+
+test('Core.workWindow: an inherited all-day line is bounded exactly by the plant (including a dated period)', () => {
+  const calendars = { L: { workHours: allDays([0, 24]), inherited: true } };
+  const plants = { P: { workHours: allDays([7, 19]), periods: [{ id: 'x', name: 'x', validFrom: '2026-10-20', validTo: null, workHours: allDays([5, 22]) }] } };
+  const ls = { L: { plant: 'P' } };
+  const before = Core.workWindow('L', new Date(2026, 9, 19, 12), calendars, plants, ls, {});
+  const after = Core.workWindow('L', new Date(2026, 9, 20, 12), calendars, plants, ls, {});
+  assert.deepEqual([before[0].getHours(), before[1].getHours()], [7, 19]);
+  assert.deepEqual([after[0].getHours(), after[1].getHours()], [5, 22]);
+});

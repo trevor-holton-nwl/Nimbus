@@ -100,7 +100,7 @@ export const CalendarSync = {
   // Successful revisions remain so GETs already in flight cannot reinstall an older snapshot.
   _hoursRevision: 0,
   _hoursEdits: {} as Record<string, Record<string, HoursEdit>>,
-  _pendingLineHours: {} as Record<string, Record<string, WorkHours>>,   // plant → { line → workHours } awaiting a batched flush
+  _pendingLineHours: {} as Record<string, Record<string, WorkHours | null>>,   // plant → { line → workHours|null } awaiting a batched flush (null = reset to follow the plant)
   _whDebounce: {} as Record<string, ReturnType<typeof setTimeout>>,         // plant → timeout id
   _lineHoursWait: {} as Record<string, () => void>,
   _deferredHydrationPlant: null as string | null,  // plant whose config GET resolved mid-What-If (re-hydrate on exit)
@@ -131,16 +131,19 @@ export const CalendarSync = {
   },
 
   /** A successful line-hours POST made these lines server rows (R-I7): add them to the hydration's server-line
-   *  set so `hasServerLineCalendar` is true and the reconcile unblocks without a reload. Emits `calendar:change`
-   *  only when a line was newly added. A skipped POST (hydrating / Sandbox) wrote nothing and adds nothing. */
-  _noteServerLines(plant: string, machines: Iterable<string>, result: CalendarSyncResult): CalendarSyncResult {
+   *  set so `hasServerLineCalendar` is true and the reconcile unblocks without a reload. A null write cleared the
+   *  row (the machine follows the plant again), so it leaves the set instead. Emits `calendar:change` only when
+   *  the set changed. A skipped POST (hydrating / Sandbox) wrote nothing and changes nothing. */
+  _noteServerLines(plant: string, lines: ReadonlyArray<{ machine: string; work_hours: WorkHours | null }>, result: CalendarSyncResult): CalendarSyncResult {
     const entry = this._hydration[plant];
     if (!result?.ok || result.skipped || !entry) return result;
-    let added = false;
-    for (const machine of machines) {
-      if (!entry.lines.has(machine)) { entry.lines.add(machine); added = true; }
+    let changed = false;
+    for (const { machine, work_hours } of lines) {
+      if (work_hours) {
+        if (!entry.lines.has(machine)) { entry.lines.add(machine); changed = true; }
+      } else if (entry.lines.delete(machine)) changed = true;
     }
-    if (added) Store.emit({ type: 'calendar:change', source: 'calendar-sync', plant });
+    if (changed) Store.emit({ type: 'calendar:change', source: 'calendar-sync', plant });
     return result;
   },
 
@@ -266,18 +269,19 @@ export const CalendarSync = {
         Store.ensurePlant(plant);
         Store.plants[plant].workHours = cfg.plant_work_hours!;
       }
-      if (has.lineHours) {
-        // Clear this plant's line calendars (backend line set ∪ getPlantForLine===plant), then apply.
-        const backendLines = new Set(Object.keys(cfg.line_work_hours!));
-        for (const line of Object.keys(Store.calendars)) {
-          if ((backendLines.has(line) || Store.getPlantForLine(line) === plant)
-              && !this._protectHours(plant, line, hoursRead)) delete Store.calendars[line];
-        }
-        for (const [line, wh] of Object.entries(cfg.line_work_hours!)) {
-          if (this._protectHours(plant, line, hoursRead)) continue;
-          Store.ensureCalendar(line);
-          Store.calendars[line].workHours = wh;
-        }
+      // Server truth for every line of this plant, whether or not the server returned any row: a line with a row
+      // holds its own hours, every other line follows the plant (a stale pinned local copy is dropped even when
+      // the server returned `{}`). An edit still in flight (_protectHours) is left alone.
+      const backendRows = cfg.line_work_hours || {};
+      for (const line of Object.keys(Store.calendars)) {
+        if ((line in backendRows || Store.getPlantForLine(line) === plant)
+            && !this._protectHours(plant, line, hoursRead)) Store.inheritPlantHours(line);
+      }
+      for (const [line, wh] of Object.entries(backendRows)) {
+        if (this._protectHours(plant, line, hoursRead)) continue;
+        Store.ensureCalendar(line);
+        Store.calendars[line].workHours = wh;
+        Store.calendars[line].inherited = false;
       }
       if (has.lineBlackouts) {
         // Clear by the block's OWN stored plant (never a runtime getPlantForLine
@@ -342,12 +346,13 @@ export const CalendarSync = {
     if (!has.lineHours) {
       const lines = Object.keys(Store.calendars)
         .filter(l => Store.getPlantForLine(l) === plant
+                  && !Store.calendars[l].inherited                         // an inherited line has no hours of its own to migrate
                   && !this._hoursEdits[plant]?.[l]?.pending
                   && !CalendarSync._isDefaultWorkHours(Store.calendars[l].workHours))  // F11
-        .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
+        .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours as WorkHours | null }));
       if (lines.length) {
         jobs.push(this._post('/plant-calendar/line-hours', { plant, lines }, 'migrate-line-hours')
-          .then(r => this._noteServerLines(plant, lines.map(l => l.machine), r)));
+          .then(r => this._noteServerLines(plant, lines, r)));
       }
     }
     if (!has.lineBlackouts) {
@@ -474,15 +479,33 @@ export const CalendarSync = {
     return true;
   },
 
-  // Enqueue one line's hours; a per-plant debounce coalesces the ~70-line clamp
-  // fan-out from a single plant-hours edit into ONE /line-hours request.
-  saveLineHours(plant: string | null, line: string, workHours: WorkHours): void {
+  // Enqueue one line's hours (`null` = reset the machine to follow the plant); a per-plant debounce coalesces a
+  // burst (Reset all machines) into ONE /line-hours request.
+  saveLineHours(plant: string | null, line: string, workHours: WorkHours | null): void {
     if (!plant || !line || this._hydrating || Sandbox.active) return;
     this._markHoursEdit(plant, line);
-    (this._pendingLineHours[plant] ||= {})[line] = Util.clone(workHours);
+    (this._pendingLineHours[plant] ||= {})[line] = workHours ? Util.clone(workHours) : null;
     clearTimeout(this._whDebounce[plant]);
     this._whDebounce[plant] = setTimeout(() => this._flushLineHours(plant), 600);
   },
+  /** The plant's machines that hold hours of their own (not inherited): what "Reset to plant" clears. */
+  overrideLines(plant: string | null): string[] {
+    if (!plant) return [];
+    return Object.keys(Store.calendars).filter(l => !Store.calendars[l].inherited && Store.getPlantForLine(l) === plant);
+  },
+
+  /** Reset machines to follow their plant: each goes back to inherited in Store and a null write is queued
+   *  (one batched POST through the saveLineHours debounce; in What-If only Store changes and `flushPlant`
+   *  promotes it). Emits one `calendar:change`. */
+  resetLinesToPlant(plant: string, lines: ReadonlyArray<string>): void {
+    if (!plant || !lines.length) return;
+    for (const line of lines) {
+      Store.inheritPlantHours(line);
+      this.saveLineHours(plant, line, null);
+    }
+    Store.emit({ type: 'calendar:change', source: 'calendar-reset', plant });
+  },
+
   _flushLineHours(plant: string): Promise<CalendarSyncResult> | undefined {
     const pending = this._pendingLineHours[plant];
     if (!pending || !Object.keys(pending).length) return;
@@ -496,7 +519,7 @@ export const CalendarSync = {
         if (event.applied && this._pendingLineHours[plant]) {
           this._pendingLineHours[plant] = Object.fromEntries(Object.keys(this._pendingLineHours[plant])
             .filter(line => Store.calendars[line])
-            .map(line => [line, Util.clone(Store.calendars[line].workHours)]));
+            .map(line => [line, Store.calendars[line].inherited ? null : Util.clone(Store.calendars[line].workHours)]));
         }
         void this._flushLineHours(plant);
       });
@@ -505,7 +528,20 @@ export const CalendarSync = {
     this._clearLineHoursQueue(plant);
     const lines = Object.entries(pending).map(([machine, work_hours]) => ({ machine, work_hours }));
     return this._post('/plant-calendar/line-hours', { plant, lines }, 'line-hours')
-      .then(r => this._noteServerLines(plant, lines.map(l => l.machine), r));
+      .then(r => this._noteServerLines(plant, lines, r))
+      .then(r => {
+        // A failed reset (null write) leaves Store showing "follows the plant" while the server row survives:
+        // release the lines' in-flight guard and re-read the server so the UI shows the truth (the Retry toast stays).
+        const nulls = lines.filter(l => l.work_hours === null);
+        if (!r.ok && nulls.length) {
+          for (const { machine } of nulls) {
+            const edit = this._hoursEdits[plant]?.[machine];
+            if (edit) edit.pending = false;
+          }
+          void this.fetchPlantConfig(plant);
+        }
+        return r;
+      });
   },
 
   _clearLineHoursQueue(plant: string): void {
@@ -555,10 +591,19 @@ export const CalendarSync = {
     this.savePlantHours(plant, Store.plants[plant]?.workHours);
     const lineOwner = (line: string): string | null =>
       Store.getPlantForLine(line) || capturedLinePlants?.get(line) || null;
+    // An override goes as its hours. An inherited line goes as null (clearing the row) only when the server
+    // had one (a What-If reset of a pinned machine); an inherited line with no row has nothing to send.
     const lines = Object.keys(Store.calendars)
       .filter(l => lineOwner(l) === plant)
-      .map(l => ({ machine: l, work_hours: Store.calendars[l].workHours }));
-    if (lines.length) this._post('/plant-calendar/line-hours', { plant, lines }, 'promote-line-hours');
+      .flatMap(l => {
+        const cal = Store.calendars[l];
+        if (!cal.inherited) return [{ machine: l, work_hours: cal.workHours as WorkHours | null }];
+        return this.hasServerLineCalendar(plant, l) ? [{ machine: l, work_hours: null as WorkHours | null }] : [];
+      });
+    if (lines.length) {
+      void this._post('/plant-calendar/line-hours', { plant, lines }, 'promote-line-hours')
+        .then(r => this._noteServerLines(plant, lines, r));
+    }
     const lineBk = Store.blocks.filter(b => b.plant === plant);
     const lineDeletes = removed.line || [];
     if (lineBk.length || lineDeletes.length) {
@@ -687,7 +732,8 @@ export const CalendarSync = {
     }
     if (path === '/plant-calendar/line-hours') {
       const names = ((body.lines as Array<{ machine: string }> | undefined) || []).map(l => l.machine);
-      const lines = names.filter(m => Store.calendars[m]).map(m => ({ machine: m, work_hours: Store.calendars[m].workHours }));
+      const lines = names.filter(m => Store.calendars[m])
+        .map(m => ({ machine: m, work_hours: (Store.calendars[m].inherited ? null : Store.calendars[m].workHours) as WorkHours | null }));
       return lines.length ? { plant, lines } : null;
     }
     const isLine = path === '/plant-calendar/line-blackouts';

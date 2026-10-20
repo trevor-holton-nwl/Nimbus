@@ -14,7 +14,7 @@ import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 import { Toast } from '../../../frontend/platform/foundation.mjs';
 import { createRequire } from 'node:module';
 
-// clampLinesToPlant reads the compute core from the global, exactly as the browser (classic script) provides it.
+// The plant-save path reads the compute core from the global, exactly as the browser (classic script) provides it.
 globalThis.NimbusComputeCore ??= createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 
 // EditCalendar caches its Flatpickr instances for the life of the module, so one shared fake factory (selector -> instance)
@@ -334,4 +334,63 @@ test('EditCalendar period mode: after a failed Save, toggles and time pickers re
   fakes['#cal-period-from'].element.value = '2030-01-20';
   fakes['#cal-edit-start-1'].cfg.onChange();
   assert.equal(pEls['cal-period-overlap-err'].hidden, false, 'time-picker onChange re-validated');
+}));
+
+// ---------------------------------------------------------------------------
+// Machine calendar inheritance (2026-10-19)
+// ---------------------------------------------------------------------------
+function withLineEnv(fn) {
+  const priorSave = CalendarSync.saveLineHours;
+  const priorMd = Store.masterData;
+  const priorCalendars = Store.calendars;
+  return withPeriodEnv(async (env) => {
+    const lineWrites = [];
+    CalendarSync.saveLineHours = (...a) => lineWrites.push(a);
+    Store.setMasterData({ plants: [{ plant: '1006' }], lines: [{ machine: 'LN1', plant: '1006' }, { machine: 'LN2', plant: '1006' }] }, 'test');
+    Store.replaceCalendars({}, 'test');
+    try { await fn({ ...env, lineWrites }); }
+    finally {
+      CalendarSync.saveLineHours = priorSave;
+      Store.replaceCalendars(priorCalendars, 'test');
+      Store.setMasterData(priorMd, 'test');
+    }
+  });
+}
+
+test('a plant save writes the plant row only: no machine row is queued and an override keeps its hours', () => withLineEnv(({ persisted, lineWrites }) => {
+  Store.setCalendar('LN1', { 1: [6, 19] }, 'test');           // an override
+  Store.ensureCalendar('LN2');                                // inherited
+  EditCalendar.openPlant('1006');
+  fakes['#cal-edit-end-2'].element.value = '17:00';           // narrow Tuesday 19:00 -> 17:00
+  fakes['#cal-edit-start-2'].element.value = '08:00';
+  EditCalendar.save();
+  assert.deepEqual(Store.plants['1006'].workHours[2], [8, 17]);
+  assert.deepEqual(persisted.filter(a => a[0] !== 'render'), [['1006']], 'plant hours persisted once, with no changed-lines argument');
+  assert.equal(lineWrites.length, 0, 'plant saves write no machine row');
+  assert.deepEqual(Store.calendars.LN1.workHours[1], [6, 19], 'the override is not rewritten');
+  assert.equal(Store.calendars.LN2.inherited, true);
+}));
+
+test('opening and saving the editor unchanged on an inherited machine makes no write and keeps it inherited', () => withLineEnv(({ lineWrites, toasts }) => {
+  Store.ensureCalendar('LN2');
+  EditCalendar.open('LN2');
+  // The grid opens on the plant's real hours (1006 Mon 12:00-24:00 in this env), not the all-day seed.
+  assert.equal(fakes['#cal-edit-start-1'].element.value, '12:00');
+  assert.equal(fakes['#cal-edit-end-1'].element.value, '00:00');
+  EditCalendar.save();
+  assert.equal(lineWrites.length, 0, 'no write');
+  assert.equal(Store.calendars.LN2.inherited, true, 'still inherited');
+  assert.deepEqual(Store.calendars.LN2.workHours[1], [0, 24]);
+  assert.equal(toasts.length, 0);
+}));
+
+test('changing an inherited machine in the editor makes it an override and writes its hours', () => withLineEnv(({ lineWrites }) => {
+  Store.ensureCalendar('LN2');
+  EditCalendar.open('LN2');
+  fakes['#cal-edit-start-1'].element.value = '13:00';
+  EditCalendar.save();
+  assert.equal(Store.calendars.LN2.inherited, false);
+  assert.deepEqual(Store.calendars.LN2.workHours[1], [13, 24]);
+  assert.equal(lineWrites.length, 1);
+  assert.deepEqual(lineWrites[0].slice(0, 2), ['1006', 'LN2']);
 }));

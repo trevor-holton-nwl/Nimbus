@@ -3788,9 +3788,26 @@ class TestOneToOneWorkcenterRules(_ReweightFixtureBase):
                         (self.PLANT, machine or self.WC))
             return [r[0] for r in cur.fetchall()]
 
+    def _drop_wc(self, pg):
+        # The fixture pre-creates the work center row; auto-link fires only when a save
+        # CREATES it, so the creation scenarios start from no row.
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                        (self.PLANT, self.WC))
+            conn.commit()
+
+    def test_editing_an_existing_work_center_never_relinks_a_cleared_machine(self, pg):
+        # Auto-link is creation-only: the work center row already exists (fixture), the
+        # same-named machine's link is empty (a planner cleared it) -> no link, shadow 400.
+        with pytest.raises(ValueError, match="wc_code_shadowed_by_machine"):
+            self._save()
+        assert self._machine_link(pg) == [None]
+
     def test_unlinked_same_named_machine_is_auto_linked_on_save(self, pg):
         # 2026-10-19 (reverses the explicit-link rule): an EMPTY link is filled in the same
-        # transaction instead of a wc_code_shadowed_by_machine 400.
+        # transaction instead of a wc_code_shadowed_by_machine 400 -- when the save CREATES
+        # the work center.
+        self._drop_wc(pg)
         result = self._save()
         assert result["auto_linked"] is True
         assert result["default_machine"] is None
@@ -3808,6 +3825,23 @@ class TestOneToOneWorkcenterRules(_ReweightFixtureBase):
         assert "set that machine's SAP work center" not in str(ei.value)
         # The refused save rolled back: no link, no work-center edit.
         assert self._machine_link(pg) == [None]
+
+    def test_creating_save_refused_for_cleared_machine_rolls_back_the_policy_row(self, pg):
+        # A creating save in distribute mode against a same-named unlinked machine is refused;
+        # the policy row it just upserted must roll back with it.
+        self._drop_wc(pg)
+        with pytest.raises(ValueError, match="wc_code_shadowed_by_machine"):
+            self._save(mode="distribute")
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                        (self.PLANT, self.WC))
+            assert cur.fetchone()[0] == 0
+        assert self._machine_link(pg) == [None]
+
+    def test_cleared_single_machine_with_no_members_gets_the_link_it_message(self, pg):
+        with pytest.raises(ValueError, match="wc_code_shadowed_by_machine") as ei:
+            self._save()
+        assert "exists with no work center link. Link it in the Machines pane" in str(ei.value)
 
     def test_unlinked_same_named_machine_is_shadowed_when_wc_has_other_members(self, pg):
         with pg._pool.connection() as conn, conn.cursor() as cur:
@@ -3831,6 +3865,7 @@ class TestOneToOneWorkcenterRules(_ReweightFixtureBase):
                         (self.SUB, self.PLANT, self.OTHER))
             conn.commit()
         try:
+            self._drop_wc(pg)
             result = self._save()
             assert result["auto_linked"] is True
             assert self._machine_link(pg) == [self.WC]
