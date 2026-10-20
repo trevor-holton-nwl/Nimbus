@@ -27,6 +27,7 @@ frontend/insights/alert-profile-client.mjs
 frontend/insights/alert-leverage.mjs
 frontend/insights/alert-acks-client.mjs
 frontend/insights/alert-profile-matches.mjs
+frontend/alert-monitor/alert-monitor-model.mjs
 frontend/alert-monitor/alert-monitor-pane.mjs
 frontend/insights/plant-lru.mjs
 frontend/scheduling/persistence.mjs
