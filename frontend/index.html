@@ -2380,6 +2380,20 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
+     MODAL: Acknowledge alert (body/foot rendered by AlertAckModal)
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-alert-ack" hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3 id="aak-title" data-i18n="am.ack_title">Acknowledge alert</h3>
+      <button class="icon-btn sm" id="aak-close" type="button" aria-label="Close" data-i18n-title="btn.close">✕</button>
+    </header>
+    <div class="modal-body" id="aak-body"></div>
+    <footer class="modal-foot" id="aak-foot"></footer>
+  </div>
+</div>
+
+<!-- =========================================================
      MODAL: Date Override
      ========================================================= -->
 <div class="modal-backdrop" id="modal-override" hidden>

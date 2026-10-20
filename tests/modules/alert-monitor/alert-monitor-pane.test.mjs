@@ -363,7 +363,6 @@ test('row actions mirror the drawer: focus, fix, override, dismiss', () => {
     clickAlert('fix', 'a1');
     clickAlert('override', 'a1', { taskId: 'T9' });
     clickAlert('dismiss', 'a1');
-    clickAlert('ack', 'a1');   // no handler until Task 15
     assert.deepEqual(log, [['focus', 'a1'], ['fix', 'a1'], ['override', 'T9'], ['dismiss', 'a1']]);
   } finally { undo.forEach(u => u()); }
 });
@@ -460,4 +459,31 @@ test('Open in table falls back to a toast when the table filter is unavailable',
     clickAm('group-open-table', { groupKey: 'exceptions' });
     assert.deepEqual(toasts, [['am.table_unavailable', 'warn']]);
   } finally { undo(); }
+});
+
+/* ---------------------------------------------------------------------------
+   Task 15 — Acknowledge / Remove acknowledgement row actions
+   ------------------------------------------------------------------------- */
+import { AlertAckModal } from '../../../frontend/alert-monitor/alert-ack-modal.mjs';
+import { AlertAcksClient } from '../../../frontend/insights/alert-acks-client.mjs';
+
+test('row Acknowledge opens the modal; an acknowledged row offers Remove acknowledgement', async () => {
+  const log = [];
+  const undo = [
+    patched(AlertAckModal, 'open', o => log.push(['open', o.plant, o.alertId])),
+    patched(AlertAcksClient, 'unacknowledge', async (plant, id) => { log.push(['unack', plant, id]); }),
+  ];
+  try {
+    const acked = new Map([['a2', { alert_id: 'a2', acknowledged_by: 'pat', until: null }]]);
+    seed([alert('a1'), alert('a2')], { acked, showAcked: true });
+    AlertMonitorPane.render();
+    const html = els['am-groups'].innerHTML;
+    assert.match(html, /<button[^>]*data-alert-action="ack"[^>]*data-alert-id="a1"(?![^>]*disabled)/);
+    assert.doesNotMatch(html, /data-alert-action="ack"[^>]*data-alert-id="a2"/);
+    assert.match(html, /data-alert-action="unack"[^>]*data-alert-id="a2"/);
+    clickAlert('ack', 'a1');
+    clickAlert('unack', 'a2');
+    await new Promise(r => setTimeout(r, 0));
+    assert.deepEqual(log, [['open', 'P1', 'a1'], ['unack', 'P1', 'a2']]);
+  } finally { undo.forEach(u => u()); }
 });

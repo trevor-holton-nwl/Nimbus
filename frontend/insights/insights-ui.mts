@@ -26,7 +26,8 @@ import { Engine } from '../optimization/engine.mjs';
 import { Timeline } from '../scheduling/gantt.mjs';
 import { Table, Inspector, notifyResidualFirming } from '../scheduling/orders.mjs';
 import { Selection } from '../scheduling/selection.mjs';
-import { categoryOf, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
+import { categoryOf, ackLabel, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
+import { AlertProfileMatches } from './alert-profile-matches.mjs';
 import type { NimbusTask, UtilSevBucket } from '../platform/types.mjs';
 
 // VirtualList row-height constant for Dashboard's Line Status list (moved
@@ -1572,9 +1573,13 @@ export const AlertsUIAdapter = {
     const fixable  = FIXABLE_ALERT_TYPES.has(a.type);
     const override = OVERRIDE_ALERT_TYPES.has(a.type) && a.taskId != null;
     const msg = a.msgKey ? Util.t(a.msgKey, a.msgVars ?? {}) : a.msg;
+    // An acknowledged alert is only listed when "Show acknowledged" is on; it says who hid it and until when.
+    const ack = ackLabel(AlertProfileMatches.current().acked.get(a.id), (k, v) => Util.t(k, v));
     return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${Util.escapeHtml(a.id)}">` +
       `<span class="alert-ico">${ico}</span>` +
-      `<span class="alert-msg">${Util.escapeHtml(msg)}</span>` +
+      `<span class="alert-msg">${Util.escapeHtml(msg)}` +
+        (ack ? ` <span class="badge badge-info am-ack-badge" title="${Util.escapeHtml(ack)}">${Util.escapeHtml(ack)}</span>` : '') +
+      `</span>` +
       `<div class="alert-actions">` +
         ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.go_to')}</button>` : '') +
         (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" data-alert-action="fix" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.fix_it')}</button>` : '') +
@@ -1583,15 +1588,48 @@ export const AlertsUIAdapter = {
       `</div></div>`;
   },
 
-  _visibleAlerts(): { alerts: NimbusAlert[]; hiddenCount: number; hz: number | null } {
+  /** Session-only "Show all" from the drawer footer: lists the alerts the active profile hides. Cleared on a plant change. */
+  _profileOverride: false,
+
+  /**
+   * What the bell, the drawer and the Dashboard summary list: the plant's alerts inside the alert horizon, minus
+   * acknowledged ones (unless "Show acknowledged" is on), narrowed to the active profile's matches (unless the
+   * profile is All alerts or the override is on). `hiddenCount` is the horizon's share of what is left out,
+   * `profileHidden` the profile's. Gantt outlines, day cells, `Store.alertsByTask()` consumers, the command
+   * palette and the confidence score deliberately do NOT go through here: they stay plant-wide.
+   */
+  _visibleAlerts(): { alerts: NimbusAlert[]; hiddenCount: number; hz: number | null; profileHidden: number; profileName: string } {
     const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant);
     const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
     const cutoff = typeof hz === 'number'
       ? new Date(Util.plantClock(Store.selectedPlant).getTime() + hz * Config.MS_MIN) : null;
     const plantLines = new Set(Store.linesForSelectedPlant());
     const scoped = Store.alerts.filter(a => !a.line || plantLines.has(a.line));
-    const alerts = cutoff ? scoped.filter(a => !a.time || a.time <= cutoff) : scoped;
-    return { alerts, hiddenCount: scoped.length - alerts.length, hz };
+    const inHorizon = cutoff ? scoped.filter(a => !a.time || a.time <= cutoff) : scoped;
+    const m = AlertProfileMatches.current();
+    const unacked = Store.pref('alertsShowAcknowledged') === true ? inHorizon : inHorizon.filter(a => !m.acked.has(a.id));
+    const filtering = m.profileId !== ALL_ALERTS_PROFILE_ID && !AlertsUIAdapter._profileOverride;
+    const alerts = filtering ? unacked.filter(a => m.alertIds.has(a.id)) : unacked;
+    return {
+      alerts, hiddenCount: scoped.length - inHorizon.length, hz,
+      profileHidden: unacked.length - alerts.length, profileName: m.profile.name,
+    };
+  },
+
+  /** Drawer footer links ("Show all" / "Back to profile"): flip the session override and repaint bell, drawer and summary. */
+  _handleFooterAction(e: { target: unknown }): void {
+    const target = e.target as Element | null;
+    const action = target?.closest?.<HTMLElement>('[data-alert-action]')?.dataset.alertAction;
+    if (action !== 'profile-show-all' && action !== 'profile-back') return;
+    AlertsUIAdapter._profileOverride = action === 'profile-show-all';
+    AlertsUIAdapter._renderFollowers();
+  },
+
+  /** Repaint everything that follows the profile and acknowledgements. */
+  _renderFollowers(): void {
+    AlertsUIAdapter.renderBell();
+    AlertsUIAdapter.renderDrawer();
+    Dashboard._renderAlertSummary();
   },
 
   dismissVisible(): void {
@@ -1602,13 +1640,26 @@ export const AlertsUIAdapter = {
     const body = document.getElementById('alert-drawer-body');
     if (!body) return;
     body.onclick = AlertsUIAdapter._handleAction;
-    const { alerts, hiddenCount, hz } = AlertsUIAdapter._visibleAlerts();
+    const { alerts, hiddenCount, hz, profileHidden, profileName } = AlertsUIAdapter._visibleAlerts();
     const footer = document.getElementById('alert-drawer-footer');
     if (footer) {
-      footer.hidden = hiddenCount === 0;
-      footer.textContent = hiddenCount ? Util.t('alert.horizon_hidden_duration', {
+      const horizonNote = hiddenCount ? Util.t('alert.horizon_hidden_duration', {
         count: hiddenCount, duration: Util.fmtHours((hz as number) / 60),
       }) : '';
+      const override = AlertsUIAdapter._profileOverride && AlertProfileMatches.current().profileId !== ALL_ALERTS_PROFILE_ID;
+      footer.hidden = !horizonNote && !profileHidden && !override;
+      footer.onclick = AlertsUIAdapter._handleFooterAction;
+      if (!profileHidden && !override) {
+        footer.textContent = horizonNote;
+      } else {
+        const esc = Util.escapeHtml;
+        const link = (action: string, label: string) =>
+          ` <button type="button" class="btn btn-ghost sm" data-alert-action="${action}">${esc(label)}</button>`;
+        footer.innerHTML = (horizonNote ? `<div>${esc(horizonNote)}</div>` : '')
+          + (override
+            ? `<div>${esc(Util.t('alert.profile_override_on'))}${link('profile-back', Util.t('alert.profile_back'))}</div>`
+            : `<div>${esc(Util.t('alert.profile_hidden', { n: profileHidden, name: profileName }))}${link('profile-show-all', Util.t('alert.profile_show_all'))}</div>`);
+      }
     }
 
     if (!alerts.length) {
@@ -1647,3 +1698,13 @@ export const AlertsUIAdapter = {
     }
   }
 };
+
+/* The bell, drawer and Dashboard summary follow the active profile and the acknowledgements. The producer fans out
+   on a profile, "view as", acknowledgement or alert change (never a Store event); `alerts:change` already repaints
+   the same three through the shell. A plant change drops the session-only "Show all" override. */
+AlertProfileMatches.subscribe(() => { AlertsUIAdapter._renderFollowers(); });
+Store.subscribe(evt => {
+  if (evt.type !== 'plant:selected' || !AlertsUIAdapter._profileOverride) return;
+  AlertsUIAdapter._profileOverride = false;
+  AlertsUIAdapter._renderFollowers();
+}, 'AlertsUIAdapter.profileOverrideReset');

@@ -373,3 +373,15 @@ export function resolveActiveProfileId(
   if (id === ALL_ALERTS_PROFILE_ID) return id;
   return available.some(p => p.id === id) ? id : ALL_ALERTS_PROFILE_ID;
 }
+
+// ---- Acknowledgement label --------------------------------------------------------------------
+
+/** "Acknowledged by X until D" / "Acknowledged by X" (shared by the Alert Monitor row and the drawer row). */
+export function ackLabel(
+  ack: { acknowledged_by?: string | null; until?: string | null } | undefined,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string | null {
+  if (!ack) return null;
+  const who = ack.acknowledged_by ?? '—';
+  return ack.until ? t('am.ack_by', { who, until: String(ack.until).slice(0, 10) }) : t('am.ack_by_noend', { who });
+}

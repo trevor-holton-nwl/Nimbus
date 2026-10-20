@@ -23,8 +23,10 @@ import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import type { AlertProfileMatchSet } from '../insights/alert-profile-matches.mjs';
 import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
 import { AlertProfileEditor } from './alert-profile-editor.mjs';
+import { AlertAckModal } from './alert-ack-modal.mjs';
+import { AlertAcksClient } from '../insights/alert-acks-client.mjs';
 import {
-  ALL_ALERTS_PROFILE_ID, resolveActiveProfileId, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
+  ALL_ALERTS_PROFILE_ID, resolveActiveProfileId, ackLabel, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
 } from '../insights/alert-profiles.mjs';
 import type { AlertGroup, GroupContext } from '../insights/alert-profiles.mjs';
 import { Alerts, Compute, Utilization, buildPlantSnapshot } from '../insights/services.mjs';
@@ -416,7 +418,19 @@ function _onAlertAction(trigger: HTMLElement): void {
       }
       break;
     }
-    default: break;   // 'ack' opens its modal in Task 15; the button renders disabled until then
+    case 'ack': {
+      const plant = Store.selectedPlant;
+      if (plant) AlertAckModal.open({ plant, alertId });
+      break;
+    }
+    case 'unack': {
+      const plant = Store.selectedPlant;
+      if (!plant) break;
+      // The client refetches and fans out on success, so the lists repaint themselves.
+      AlertAcksClient.unacknowledge(plant, alertId).catch(e => Toast.show((e as Error)?.message || String(e), 'error'));
+      break;
+    }
+    default: break;
   }
 }
 
@@ -913,9 +927,7 @@ function _headline(type: string): string {
 }
 
 function _ackLabel(ack: AlertAck | undefined): string | null {
-  if (!ack) return null;
-  const who = ack.acknowledged_by ?? '—';
-  return ack.until ? t('am.ack_by', { who, until: String(ack.until).slice(0, 10) }) : t('am.ack_by_noend', { who });
+  return ackLabel(ack, t);
 }
 
 /** The inline "why is this late / blocked" panel of an order alert: facts about the order, nothing computed anew. */

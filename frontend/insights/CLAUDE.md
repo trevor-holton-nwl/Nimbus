@@ -7,15 +7,17 @@
   - `Alerts` — plain object (patchable property, not a bound function): `recompute`, `_recomputeSync`, `_dismissed`, `dismiss`/`dismissAll`/`clearDismissed`, `applyFix`, `_lastMs`/`_timer`/`_pendingFull`/`_pendingLines`, `_fire`, `_armTimer`, `scheduleRecompute`, `scheduleRecomputeLines`.
   - `scheduleAlertsForPatches(patches, resolveLine)` — schedules an incremental recompute for the lines touched by a patch set.
   - `Utilization` — `_cache`, `computeMatrix`, `sev`, `minutesByDay` (the cell-briefing day-attribution rule, a wrapper over the core's `workingMinutesByDay`), `_prewarm`.
-- **`insights-ui.mts`** (1560 lines)
+- **`insights-ui.mts`** (~1710 lines)
   - `Dashboard` (line 81) — KPI/heatmap/line-status rendering; keeps its own `_matrix7Cache` field (line 89) in addition to `Utilization._cache`.
-  - `AlertsUIAdapter` (line 1156) — despite this file's own header comment (lines 6-8) claiming it "stays in app.js as a thin adapter," it is exported from here. That header line is stale; don't trust it.
+  - `AlertsUIAdapter` (line 1240) — despite this file's own header comment (lines 6-8) claiming it "stays in app.js as a thin adapter," it is exported from here. That header line is stale; don't trust it.
 
 ## Counterpart
 
 No `backend/` counterpart — Alerts/Utilization are pure frontend derived-state computation over Store data, not a persisted resource with its own endpoints.
 
 ## Key invariants & hazards
+
+- **What follows the alert profile and acknowledgements, and what stays plant-wide (Alert Monitor, D2/D17).** `AlertsUIAdapter._visibleAlerts()` is the one filter: plant lines, then the alert horizon, then acknowledged alerts (hidden unless `Store.pref('alertsShowAcknowledged')`), then — when the active profile is not All alerts and the session-only `AlertsUIAdapter._profileOverride` is off — only `AlertProfileMatches.current().alertIds`. Its consumers are the bell (`renderBell`), the drawer (`renderDrawer`, whose footer shows `alert.profile_hidden` with a "Show all" link, and "Back to profile" while the override is on; reset on `plant:selected`), `Dashboard._renderAlertSummary` and `dismissVisible`; they repaint through `AlertProfileMatches.subscribe` (profile / ack change) and the shell's `alerts:change` hook. These stay **plant-wide, never filtered**: the Gantt `conflict-order` outline (`Timeline._conflictIds()`), the alert day cells, every `Store.alertsByTask()` consumer (the Orders table's conflict / at-risk filters), `NeedsEngine` (command palette) and `Confidence` (acknowledged alerts still count toward the score).
 
 - **Incremental vs. full recompute.** `Alerts.recompute(opts)` (line 307): the worker path is used only when a plant is selected (`Store.selectedPlant`); with none selected it routes to the cheap sync path instead of cloning every line's inputs. When `opts.lines` is a non-empty `Set`, results are **merged** into the existing alert list (`retained.concat(alerts)`, line 322) rather than replacing it; a bare `recompute()` call (no `lines`) does a full-scan replace. `_recomputeSync` (the sync fallback, line 337) mirrors this exactly (`retained.concat(kept)`, line 366) — the scoping behavior must survive the worker/sync fork.
 - **`tool-conflict` alerts are emitted on the later order's line and can involve a different line than the edited one**; incremental callers therefore escalate to a full recompute whenever a moved order carries a PRT_01/PRT_02 tool id (`taskCarriesTool`, `scheduleAlertsForPatches`, and `Engine.autoReflow`'s two direct `scheduleRecomputeLines` call sites).

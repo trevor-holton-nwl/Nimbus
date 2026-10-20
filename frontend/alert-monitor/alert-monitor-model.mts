@@ -319,8 +319,10 @@ export function rowHtml(v: RowView, t: Translate): string {
   } else if (acts.diagnose === 'cell') {
     buttons.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="diagnose" data-alert-id="${id}">${_esc(t('am.diagnose'))}</button>`);
   }
-  // Acknowledge opens its modal in Task 15; until then it renders disabled with no handler.
-  buttons.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="ack" data-alert-id="${id}" disabled aria-disabled="true">${_esc(t('am.ack'))}</button>`);
+  // An acknowledged row (shown when "Show acknowledged" is on) offers its removal instead; acks are server state, so What-If does not lock them.
+  buttons.push(v.ackLabel
+    ? `<button type="button" class="btn btn-ghost sm" data-alert-action="unack" data-alert-id="${id}">${_esc(t('am.unack'))}</button>`
+    : `<button type="button" class="btn btn-ghost sm" data-alert-action="ack" data-alert-id="${id}">${_esc(t('am.ack'))}</button>`);
   buttons.push(`<button type="button" class="icon-btn sm" data-alert-action="dismiss" data-alert-id="${id}" title="${_esc(t('btn.dismiss'))}" aria-label="${_esc(t('btn.dismiss'))}">×</button>`);
 
   const pts = v.points > 0

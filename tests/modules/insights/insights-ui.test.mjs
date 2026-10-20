@@ -628,3 +628,116 @@ test('W6: plant:selected resets the Machine Status day to today', () => {
     globalThis.window = prior.win; Dashboard._refreshLineDropdown = prior.drop; Dashboard._refreshFilterBtns = prior.btns; Dashboard.render = prior.render;
   }
 });
+
+// ---- Alert Monitor (Task 15): the bell, drawer and Dashboard summary follow the profile and acknowledgements ----
+import { AlertProfileMatches } from '../../../frontend/insights/alert-profile-matches.mjs';
+
+const T15_NOW = new Date('2020-01-01T08:00:00');
+const t15 = (id, o = {}) => ({ id, line: 'T15-L', sev: 'warn', type: 'overlap', taskId: id, time: new Date('2020-01-01T09:00:00'), ...o });
+
+function withProfileFixture(fn, { alerts, matches, showAcked = false } = {}) {
+  const prior = { doc: globalThis.document, plant: Store.selectedPlant, alerts: Store.alerts, master: Store.masterData,
+    clock: Util.plantClock, vl: AlertsUIAdapter._drawerVL, vlPlant: AlertsUIAdapter._drawerVLPlant,
+    current: AlertProfileMatches.current, settings: Store.userSettings, override: AlertsUIAdapter._profileOverride };
+  const badge = { style: {}, textContent: '' }, bell = { style: {} }, footer = { hidden: true, textContent: '', innerHTML: '' };
+  const body = { innerHTML: '' };
+  const summaryList = { innerHTML: '', insertAdjacentHTML() {} }, summaryCount = { textContent: '' };
+  const state = { rows: [] };
+  try {
+    globalThis.document = { ...prior.doc, getElementById: id => ({ 'alert-badge': badge, 'alert-bell': bell, 'alert-drawer-body': body,
+      'alert-drawer-footer': footer, 'alert-summary-list': summaryList, 'alert-summary-count': summaryCount })[id] || null };
+    Store.setMasterData({ plants: [{ plant: 'T15-P' }], lines: [{ plant: 'T15-P', machine: 'T15-L' }] }, 'test');
+    Store.setSelectedPlant('T15-P', 'test');
+    Store.setUserSettings({ ...(prior.settings ?? {}), alertsShowAcknowledged: showAcked }, 'test');
+    Util.plantClock = () => T15_NOW;
+    Store.setAlerts(alerts, 'test');
+    AlertsUIAdapter._profileOverride = false;
+    AlertsUIAdapter._drawerVL = { update(next) { state.rows = next; }, destroy() {} };
+    AlertProfileMatches.current = () => matches;
+    fn({ badge, bell, footer, body, summaryList, summaryCount, state });
+  } finally {
+    globalThis.document = prior.doc; Util.plantClock = prior.clock; AlertProfileMatches.current = prior.current;
+    AlertsUIAdapter._drawerVL = prior.vl; AlertsUIAdapter._drawerVLPlant = prior.vlPlant; AlertsUIAdapter._profileOverride = prior.override;
+    Store.setUserSettings(prior.settings, 'test');
+    Store.setMasterData(prior.master, 'test'); Store.setSelectedPlant(prior.plant, 'test'); Store.setAlerts(prior.alerts, 'test');
+  }
+}
+
+const fakeSet = (profileId, ids, acked = new Map(), name = 'Overlaps') => ({
+  plant: 'T15-P', profileId, profile: { id: profileId, name }, alertIds: new Set(ids), taskIds: new Set(), sevByTask: new Map(),
+  categoryByTask: new Map(), acked, rev: 1,
+});
+const footerClick = action => ({ target: { closest: () => ({ dataset: { alertAction: action } }) } });
+
+test('T15: a profile hides non-matching alerts from bell, drawer and Dashboard summary; footer counts them', () => {
+  withProfileFixture(({ badge, footer, state, summaryCount }) => {
+    assert.deepEqual(AlertsUIAdapter._visibleAlerts().alerts.map(a => a.id), ['a1']);
+    assert.equal(AlertsUIAdapter._visibleAlerts().profileHidden, 2);
+    AlertsUIAdapter.renderBell();
+    assert.equal(badge.textContent, '1', 'bell count follows the profile');
+    AlertsUIAdapter.renderDrawer();
+    assert.deepEqual(state.rows.map(a => a.id), ['a1']);
+    assert.equal(footer.hidden, false);
+    assert.match(footer.innerHTML, /data-alert-action="profile-show-all"/);
+    assert.match(footer.innerHTML, new RegExp(Util.t('alert.profile_hidden', { n: 2, name: 'Overlaps' })));
+    Dashboard._renderAlertSummary();
+    assert.equal(summaryCount.textContent, Util.t('alert.summary_counts', { errors: 0, warnings: 1, count: 1 }), 'summary parity with the bell');
+  }, { alerts: [t15('a1'), t15('a2'), t15('a3')], matches: fakeSet('p1', ['a1']) });
+});
+
+test('T15: the All alerts profile leaves the list unchanged and shows no profile footer', () => {
+  withProfileFixture(({ footer }) => {
+    const v = AlertsUIAdapter._visibleAlerts();
+    assert.deepEqual(v.alerts.map(a => a.id), ['a1', 'a2']);
+    assert.equal(v.profileHidden, 0);
+    AlertsUIAdapter.renderDrawer();
+    assert.equal(footer.hidden, true);
+  }, { alerts: [t15('a1'), t15('a2')], matches: fakeSet('__all__', ['a1', 'a2'], new Map(), 'All') });
+});
+
+test('T15: the override restores every alert, shows the back link, and resets on plant:selected', () => {
+  withProfileFixture(({ footer, state }) => {
+    AlertsUIAdapter._handleFooterAction(footerClick('profile-show-all'));
+    assert.equal(AlertsUIAdapter._profileOverride, true);
+    assert.deepEqual(AlertsUIAdapter._visibleAlerts().alerts.map(a => a.id), ['a1', 'a2']);
+    assert.deepEqual(state.rows.map(a => a.id), ['a1', 'a2'], 'the click re-renders the drawer');
+    assert.equal(footer.hidden, false);
+    assert.match(footer.innerHTML, /data-alert-action="profile-back"/);
+    assert.ok(!/profile-show-all/.test(footer.innerHTML));
+    AlertsUIAdapter._handleFooterAction(footerClick('profile-back'));
+    assert.equal(AlertsUIAdapter._profileOverride, false);
+    assert.deepEqual(AlertsUIAdapter._visibleAlerts().alerts.map(a => a.id), ['a1']);
+    AlertsUIAdapter._profileOverride = true;
+    Store.setSelectedPlant('T15-OTHER', 'test');
+    assert.equal(AlertsUIAdapter._profileOverride, false, 'a plant change clears the session override');
+    Store.setSelectedPlant('T15-P', 'test');
+  }, { alerts: [t15('a1'), t15('a2')], matches: fakeSet('p1', ['a1']) });
+});
+
+test('T15: acknowledged alerts are hidden unless the pref is on; shown rows carry the ack badge; bell follows', () => {
+  const acked = new Map([['a2', { alert_id: 'a2', acknowledged_by: 'pat', until: '2020-01-08T23:59:59' }],
+    ['a3', { alert_id: 'a3', acknowledged_by: 'sam', until: null }]]);
+  const alerts = [t15('a1'), t15('a2'), t15('a3')];
+  withProfileFixture(({ badge }) => {
+    assert.deepEqual(AlertsUIAdapter._visibleAlerts().alerts.map(a => a.id), ['a1']);
+    AlertsUIAdapter.renderBell();
+    assert.equal(badge.textContent, '1');
+  }, { alerts, matches: fakeSet('__all__', ['a1', 'a2', 'a3'], acked, 'All') });
+  withProfileFixture(({ badge }) => {
+    assert.deepEqual(AlertsUIAdapter._visibleAlerts().alerts.map(a => a.id), ['a1', 'a2', 'a3']);
+    AlertsUIAdapter.renderBell();
+    assert.equal(badge.textContent, '3');
+    assert.ok(AlertsUIAdapter._renderAlertRow(alerts[1]).includes(Util.t('am.ack_by', { who: 'pat', until: '2020-01-08' })));
+    assert.ok(AlertsUIAdapter._renderAlertRow(alerts[2]).includes(Util.t('am.ack_by_noend', { who: 'sam' })));
+    assert.ok(!AlertsUIAdapter._renderAlertRow(alerts[0]).includes('am-ack-badge'));
+  }, { alerts, matches: fakeSet('__all__', ['a1', 'a2', 'a3'], acked, 'All'), showAcked: true });
+});
+
+test('T15: the Gantt conflict ids and Store.alertsByTask stay plant-wide (profile and acks do not filter them)', () => {
+  const acked = new Map([['a2', { alert_id: 'a2', acknowledged_by: 'pat', until: null }]]);
+  withProfileFixture(() => {
+    assert.deepEqual(AlertsUIAdapter._visibleAlerts().alerts.map(a => a.id), ['a1']);
+    assert.deepEqual([...Timeline._conflictIds()].sort(), ['a1', 'a2', 'a3']);
+    assert.deepEqual([...Store.alertsByTask().keys()].sort(), ['a1', 'a2', 'a3']);
+  }, { alerts: [t15('a1'), t15('a2'), t15('a3')], matches: fakeSet('p1', ['a1'], acked) });
+});

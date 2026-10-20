@@ -745,7 +745,7 @@ const ALERT_MONITOR_KEYS = [
   'am.show_all_n', 'am.day_rel', 'am.rel_in_days', 'am.rel_today', 'am.rel_overdue_days', 'am.whatif_blocked',
   'am.empty_no_plant', 'am.empty_no_match_title', 'am.empty_no_match_msg', 'am.empty_switch_all',
   'am.profile_missing', 'am.open_in_table', 'am.diagnose', 'am.ack', 'am.ack_by', 'am.ack_by_noend', 'am.ack_show',
-  'am.ack_title', 'am.ack_reason', 'am.ack_until', 'am.ack_noend', 'am.ack_note', 'am.unack', 'am.view_as',
+  'am.ack_title', 'am.ack_reason', 'am.ack_until', 'am.ack_noend', 'am.ack_note', 'am.unack', 'am.ack_err_reason', 'am.ack_err_long', 'am.ack_err_until', 'am.view_as',
   'am.make_default', 'am.is_default', 'am.col_points', 'am.col_orders', 'am.col_late', 'am.banner_no_timezone',
   'am.create_profile_prompt', 'am.empty_all_acked', 'am.anchor_due', 'am.anchor_time', 'am.points_outside', 'am.points_outside_tip',
   'am.diag_setup', 'am.diag_reason', 'am.diag_not_firmed', 'am.group_unassigned', 'am.table_unavailable', 'leverage.title.setup-pair', 'leverage.title.calendar-day', 'leverage.title.tool',

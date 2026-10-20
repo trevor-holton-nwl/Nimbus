@@ -41,10 +41,14 @@ test('Fix only appears on fixable types; Override only on the closed family with
   assert.doesNotMatch(rowHtml(view({ type: 'closed', taskId: undefined }), t), /data-alert-action="override"/);
 });
 
-test('Dismiss is an icon button, Acknowledge renders disabled, Go To and Diagnose are present', () => {
+test('Dismiss is an icon button, Acknowledge is live (Remove on an acknowledged row), Go To and Diagnose are present', () => {
   const html = rowHtml(view(), t);
   assert.match(html, /<button[^>]*class="icon-btn sm"[^>]*data-alert-action="dismiss"/);
-  assert.match(html, /<button[^>]*data-alert-action="ack"[^>]*disabled/);
+  assert.match(html, /<button[^>]*data-alert-action="ack"(?![^>]*disabled)/);
+  assert.doesNotMatch(html, /data-alert-action="unack"/);
+  const acked = rowHtml(view({ ackLabel: 'Acknowledged by Ana' }), t);
+  assert.match(acked, /data-alert-action="unack"/);
+  assert.doesNotMatch(acked, /data-alert-action="ack"/);
   assert.match(html, /data-alert-action="focus"/);
   assert.match(html, /data-alert-action="diagnose"[^>]*aria-expanded="false"/);
 });
