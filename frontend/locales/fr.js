@@ -662,6 +662,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.plant_time':                     '{{time}} heure de l\'usine',
   'ui.nav_drawer_plant_eyebrow':       'USINE',
   'ui.change_plant':                   'Changer',
+  'ui.gantt_row_expand':               'Afficher {{count}} ordres empilés sur {{line}}',
+  'ui.gantt_row_collapse':             'Réduire les ordres empilés sur {{line}}',
   'ui.util_heatmap':                   "Carte d'Utilisation — 7 prochains jours",
   'ui.active_alerts':                  'Alertes actives',
   'ui.firmed_orders':                  'Ordres fermes',

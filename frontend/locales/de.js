@@ -662,6 +662,8 @@ window.__NIMBUS_LOCALES.de = {
   'ui.plant_time':                     '{{time}} Werkszeit',
   'ui.nav_drawer_plant_eyebrow':       'WERK',
   'ui.change_plant':                   'Wechseln',
+  'ui.gantt_row_expand':               '{{count}} gestapelte Aufträge auf {{line}} anzeigen',
+  'ui.gantt_row_collapse':             'Gestapelte Aufträge auf {{line}} einklappen',
   'ui.util_heatmap':                   'Auslastungs-Heatmap — nächste 7 Tage',
   'ui.active_alerts':                  'Aktive Warnungen',
   'ui.firmed_orders':                  'Festgeschriebene Aufträge',

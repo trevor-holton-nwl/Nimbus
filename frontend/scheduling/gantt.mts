@@ -36,6 +36,8 @@ import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket
 import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import { buildNonWorkingSpans } from './nonworking-spans.mjs';
+import { computeLaneMap, laneId } from './gantt-lanes.mjs';
+import type { LaneInterval, LaneResult } from './gantt-lanes.mjs';
 
 // -- Local type declarations (CQ-1 Phase 6 Task 1 conversion; scoped to
 //    Timeline/TimelineNav/DependencyOverlay — later tasks add their own
@@ -71,6 +73,12 @@ interface TimelineVisItem {
   title?: string;
   setup?: SetupPresentationDetail;
   style?: string;
+  /** Expanded-row lane id ('lane-N'). Present only on order/segment/setup items of the ONE expanded
+   *  line, and ALWAYS written explicitly (undefined when not in a lane) by Timeline._decorateLanes.
+   *  Background items never get one. */
+  subgroup?: string;
+  /** Numeric lane index paired with `subgroup`; the group's subgroupOrder compares it. */
+  laneIndex?: number;
 }
 
 export interface SetupPresentationDetail {
@@ -119,7 +127,12 @@ export function setupSourceLabel(source: string | null | undefined): string {
 interface TimelineGroupData {
   id: string;
   order: number;
-  content: string;
+  /** A DOM Element (not an HTML string): the row label carries a real <button> toggle. */
+  content: string | HTMLElement;
+  subgroupOrder?: (a: TimelineVisItem, b: TimelineVisItem) => number;
+  stackSubgroups?: boolean;
+  /** 'row-expanded' on the expanded row (tints it through styles.css). */
+  className?: string;
 }
 
 /** Timeline._viewWindow / TimelineNav's drag-start range — epoch-ms bounds of
@@ -197,6 +210,19 @@ export const Timeline = {
   // cleared once the rAF at the end of rebuild() has actually re-applied it.
   _vScrollRestorePending: false,
   _itemIdsByTask: {} as Record<string, string[]>,
+
+  // Expandable rows. `_expandedLine` is the ONE line whose overlapping orders are drawn in stacked
+  // lanes (vis subgroups). Sticky: cleared only by an explicit collapse or a plant change. It survives
+  // a line-filter hide/show and never auto-collapses when the overlap resolves (the row just shrinks
+  // back to one lane). `_laneInfo`/`_depthByLine` are written by each rebuild for every visible line
+  // (the badge on a collapsed row is that line's maxDepth); `_subgroupsLive` says some item may still
+  // carry a subgroup, so the rebuild diff must check for lane changes (remove + add, never update).
+  _expandedLine: null as string | null,
+  _laneInfo: new Map<string, LaneResult>(),
+  _depthByLine: new Map<string, number>(),
+  _labelKeys: new Map<string, string>(),
+  _subgroupsLive: false,
+  _lanesWereLive: false,
 
   // True only once the Gantt pane has real layout (clientHeight > 0). A hidden
   // tab (display:none) or a not-yet-attached container reports 0 and would
@@ -280,6 +306,8 @@ export const Timeline = {
 
     const options: NimbusVendor.VisTimelineOptions = {
       stack: false,
+      // Lanes inside the expanded row only; subgroupOrder (on each group) orders them by laneIndex.
+      stackSubgroups: true,
       editable: { updateTime: true, updateGroup: true, remove: false, add: false },
       // Let an order be dragged directly, without first selecting it with a plain click.
       // That pre-select click is what fired CENTER_ON_CLICK → focus() → viewport pan →
@@ -291,6 +319,9 @@ export const Timeline = {
       // switch for it; this veto snaps a drag that changes the start but not the end back to the stored start, so the
       // left handle moves nothing (a left-edge change that still reaches the commit is reverted with a toast).
       onMoving: (item: TimelineVisItem, callback: (item: TimelineVisItem | null) => void) => {
+        // A lane bar dragged over another row must not carry its subgroup there: that row has no
+        // lanes, and a foreign subgroup would make it grow and jitter under the cursor.
+        if (item.subgroup !== undefined && item.group !== Timeline._expandedLine) item.subgroup = undefined;
         callback(lockLeftEdge(item, (Timeline._items?.get(String(item.id)) as TimelineVisItem | null) ?? null));
       },
       groupOrder: (a: TimelineGroupData, b: TimelineGroupData) => (a.order ?? 0) - (b.order ?? 0),
@@ -565,13 +596,16 @@ export const Timeline = {
       const ids = evt.type === 'tasks:bulkUpdate'
         ? ((evt.ids as Array<string | number> | undefined) ?? []).map(String)
         : evt.type === 'task:update' && evt.id != null ? [String(evt.id)] : [];
-      if (ids.some(id => Timeline.hasMultipleItemsForTask(id)) && Timeline._ganttActive()) {
+      // With a row expanded, a drop can change lanes (and the badge counts) — settle them right
+      // after the drop instead of waiting for the alert round-trip.
+      if ((ids.some(id => Timeline.hasMultipleItemsForTask(id)) || Timeline._expandedLine) && Timeline._ganttActive()) {
         Timeline._scheduleRebuild();
       }
       return;
     }
 
     if (evt.type === 'plant:selected') {
+      Timeline._expandedLine = null;
       // Mirrors App._scrollMemory.clear() on plant change — start the new
       // plant's Gantt at the top rather than wherever the old plant left off.
       Timeline.resetVScroll();
@@ -623,14 +657,7 @@ export const Timeline = {
           const patch = Timeline._itemPatchFor(sid);
           if (patch) patches.push(patch);
         }
-        if (patches.length) {
-          Timeline._suppressEvents = true;
-          try {
-            Timeline._items!.update(patches);
-          } finally {
-            Timeline._suppressEvents = false;
-          }
-        }
+        if (patches.length) Timeline._writePatches(patches);
         PerfMonitor.record('Timeline.patchLoop', performance.now() - _pmT0patch);
         // Keep the past-edge bound fresh: a drag/optimize patch here (no full
         // rebuild) can move the earliest order earlier, and _applyTimeBounds()
@@ -673,7 +700,7 @@ export const Timeline = {
         patch.className = cls ? `${cls} dist-sibling` : 'dist-sibling';
       }
     }
-    return patch;
+    return patch ? Timeline._decorateLane(patch) : patch;
   },
 
   _applyTaskPatch(id: string): void {
@@ -683,12 +710,86 @@ export const Timeline = {
     }
     const patch = Timeline._itemPatchFor(id);
     if (!patch) return;
+    // DataSet.update() upserts by id (adds if not present) — see the batched
+    // tasks:bulkUpdate path above for the multi-id equivalent. _writePatches routes a lane
+    // change through remove + add instead.
+    Timeline._writePatches([patch]);
+  },
+
+  /** Split item writes into plain updates and lane relocations. vis 7.7.3 leaves a dangling subgroup
+   *  reference when an item's `subgroup` goes from a lane to undefined (or to another lane) through
+   *  DataSet.update, so any item whose stored subgroup differs from the one being written is removed
+   *  and re-added instead. Only items that carry the explicit `subgroup` key (the lane decorator
+   *  always writes it) can relocate. */
+  _splitRelocations(items: TimelineVisItem[]): { update: TimelineVisItem[]; relocate: TimelineVisItem[] } {
+    const update: TimelineVisItem[] = [], relocate: TimelineVisItem[] = [];
+    for (const it of items) {
+      if ((Timeline._subgroupsLive || it.subgroup !== undefined) && 'subgroup' in it) {
+        const cur = Timeline._items!.get(String(it.id)) as TimelineVisItem | null;
+        if (cur && cur.subgroup !== it.subgroup) { relocate.push(it); continue; }
+      }
+      update.push(it);
+    }
+    return { update, relocate };
+  },
+
+  /** Write already-decorated items through DataSet.update, relocating lane changes (see above). */
+  _writePatches(patches: TimelineVisItem[]): void {
+    if (!patches.length || !Timeline._items) return;
+    const { update, relocate } = Timeline._splitRelocations(patches);
     Timeline._suppressEvents = true;
     try {
-      // DataSet.update() upserts by id (adds if not present) — see the batched
-      // tasks:bulkUpdate path above for the multi-id equivalent.
-      Timeline._items!.update(patch);
+      if (relocate.length) Timeline._items.remove(relocate.map(it => it.id));
+      if (update.length) Timeline._items.update(update);
+      if (relocate.length) Timeline._items.add(relocate);
     } finally { Timeline._suppressEvents = false; }
+  },
+
+  /** Lane assignment for every line of `tasks`: line -> { laneByParent, maxDepth }. Pure over the
+   *  tasks' dates (split orders contribute one interval per segment, all under one parent). */
+  _computeLaneInfo(tasks: ReadonlyArray<NimbusTask>): Map<string, LaneResult> {
+    const byLine = new Map<string, LaneInterval[]>();
+    for (const t of tasks) {
+      if (!t.start_date || !t.end_date) continue;
+      const line = t.MACHINE || 'Unknown';
+      let list = byLine.get(line);
+      if (!list) { list = []; byLine.set(line, list); }
+      const parentId = String(t.id);
+      if (Array.isArray(t.scheduleSegments) && t.scheduleSegments.length >= 2) {
+        for (const s of t.scheduleSegments) list.push({ parentId, startMs: s.startDate.getTime(), endMs: s.endDate.getTime() });
+      } else {
+        list.push({ parentId, startMs: t.start_date.getTime(), endMs: t.end_date.getTime() });
+      }
+    }
+    const out = new Map<string, LaneResult>();
+    for (const [line, list] of byLine) out.set(line, computeLaneMap(list));
+    return out;
+  },
+
+  /** The ONE lane decorator. Order, segment and setup items of the expanded line get
+   *  `subgroup: 'lane-N'` + numeric `laneIndex`; every other item gets `subgroup: undefined` + 0,
+   *  ALWAYS written explicitly (DataSet.update merges, so an omitted key would resurrect a stale
+   *  lane). A setup bar takes its successor's lane. Background items are never touched: a grouped
+   *  band with a subgroup would break _healBackgroundBands' full-height stretch. Reads the lane
+   *  info of the last rebuild; the rebuild that follows any drop settles it. */
+  _decorateLane<T extends TimelineVisItem>(item: T): T {
+    if (item.kind !== 'order' && item.kind !== 'order-segment' && item.kind !== 'setup') return item;
+    const line = item.group;
+    let lane: number | undefined;
+    if (line && line === Timeline._expandedLine) {
+      const info = Timeline._laneInfo.get(line);
+      const parentId = item.kind === 'setup' ? item.setup?.successorOrderId : (item.parentId ?? item.id);
+      lane = (parentId !== undefined ? info?.laneByParent.get(String(parentId)) : undefined) ?? 0;
+    }
+    if (lane === undefined) {
+      item.subgroup = undefined;
+      item.laneIndex = 0;
+    } else {
+      item.subgroup = laneId(lane);
+      item.laneIndex = lane;
+      Timeline._subgroupsLive = true;
+    }
+    return item;
   },
 
   // Returns a Set of String task IDs that have an active alert. Memoized on the
@@ -972,7 +1073,7 @@ export const Timeline = {
       lines.has(task.MACHINE || 'Unknown') && task.start_date && task.end_date
     ));
     const desired = new Map(Timeline._setupItemsForObservation(tasks, Timeline._setupObservation(tasks))
-      .map(item => [String(item.id), item] as const));
+      .map(item => [String(item.id), Timeline._decorateLane(item)] as const));
     PerfMonitor.record('Timeline.setup.derive', performance.now() - _deriveT0);
     const _diffT0 = performance.now();
     const current = Timeline._items.getIds().map(String).filter(id => {
@@ -983,12 +1084,15 @@ export const Timeline = {
     const add: TimelineVisItem[] = [], update: TimelineVisItem[] = [], remove: string[] = [];
     for (const [id, item] of desired) (currentIds.has(id) ? update : add).push(item);
     for (const id of current) if (!desired.has(id)) remove.push(id);
+    // A setup bar whose lane changed is removed and re-added, never updated (vis 7.7.3 subgroup residue).
+    const split = Timeline._splitRelocations(update);
+    for (const it of split.relocate) { remove.push(String(it.id)); add.push(it); }
     PerfMonitor.record('Timeline.setup.diff', performance.now() - _diffT0);
     const _redrawT0 = performance.now();
     Timeline._suppressEvents = true;
     try {
       if (remove.length) Timeline._items.remove(remove);
-      if (update.length) Timeline._items.update(update);
+      if (split.update.length) Timeline._items.update(split.update);
       if (add.length) Timeline._items.add(add);
     } finally { Timeline._suppressEvents = false; }
     Timeline._tl?.redraw();
@@ -1096,16 +1200,30 @@ export const Timeline = {
     const conflictIds = new Set<string>();
     for (const a of Store.alerts) if (a.taskId != null) conflictIds.add(String(a.taskId));
 
-    /* ---- groups ------------------------------------------------------------ */
+    /* ---- lanes + groups ---------------------------------------------------- */
+    // Lane assignment for EVERY visible line (cheap: one sort per line): the max depth is the badge
+    // on a collapsed row; the lane map itself is only applied to the expanded line.
+    Timeline._laneInfo = Timeline._computeLaneInfo(scopedTasks);
+    Timeline._depthByLine = new Map([...Timeline._laneInfo].map(([l, r]) => [l, r.maxDepth] as const));
+    Timeline._lanesWereLive = Timeline._lanesWereLive || Timeline._subgroupsLive; // patches since the last pass may have written lanes
+    Timeline._subgroupsLive = false;
+    const expandedLine = Timeline._expandedLine;
+    const subgroupOrder = (a: TimelineVisItem, b: TimelineVisItem): number => (a.laneIndex ?? 0) - (b.laneIndex ?? 0);
+    const newLabelKeys = new Map<string, string>();
     const groupData: TimelineGroupData[] = visibleLines.map((line, idx) => {
       const ci = Timeline._colorIndex(line);
+      const depth = Timeline._depthByLine.get(line) ?? 0;
+      const expanded = line === expandedLine && depth > 1; // a resolved overlap looks flat again; the state stays sticky
+      const color = Config.COLORS[ci % Config.COLORS.length];
+      const label = Timeline._groupLabel(line, color, depth, expanded);
+      newLabelKeys.set(line, label.key);
       return {
         id: line,
         order: idx,
-        content: `<div style="display:flex;align-items:center;gap:6px;">
-           <span style="width:8px;height:8px;border-radius:2px;background:${Config.COLORS[ci % Config.COLORS.length]};display:inline-block;"></span>
-           <span style="font-size:12px;font-weight:600;">${line}</span>
-         </div>`
+        content: label.el,
+        subgroupOrder,
+        stackSubgroups: true,
+        className: expanded ? 'row-expanded' : '',
       };
     });
 
@@ -1140,13 +1258,13 @@ export const Timeline = {
           if (!cls.includes('conflict-order')) cls.push('conflict-order');
           item.className = cls.join(' ');
         }
-        desired.set(String(item.id), item);
+        desired.set(String(item.id), Timeline._decorateLane(item));
       }
     }
     // Setup bars are a transient rendering of the current observation. They are
     // intentionally absent from itemIdsByTask so selection/focus stays on orders.
     for (const item of Timeline._setupItemsForObservation(scopedTasks, Timeline._setupObservation(scopedTasks))) {
-      desired.set(item.id, item);
+      desired.set(item.id, Timeline._decorateLane(item));
     }
     // Line blackout blocks — one per line for global blocks, one per assigned line otherwise.
     for (const b of Store.blocks) {
@@ -1395,13 +1513,22 @@ export const Timeline = {
     const _pmT0diff = performance.now();
     const existingIds = new Set<string>(Timeline._items.getIds().map(String));
     const toAdd: TimelineVisItem[] = [], toUpdate: TimelineVisItem[] = [], toRemove: string[] = [];
+    // Lane relocation check only when lanes are (or were) in play: an item whose stored subgroup
+    // differs from the desired one is removed + re-added, never updated (vis 7.7.3 leaves a
+    // dangling subgroup reference on a subgroup -> other/undefined update).
+    const lanesInPlay = Timeline._subgroupsLive || Timeline._lanesWereLive;
     for (const [id, data] of desired) {
-      if (existingIds.has(id)) toUpdate.push(data);
-      else                     toAdd.push(data);
+      if (!existingIds.has(id)) { toAdd.push(data); continue; }
+      if (lanesInPlay && 'subgroup' in data) {
+        const cur = Timeline._items.get(id) as TimelineVisItem | null;
+        if (cur && cur.subgroup !== data.subgroup) { toRemove.push(id); toAdd.push(data); continue; }
+      }
+      toUpdate.push(data);
     }
     for (const id of existingIds) {
       if (!desired.has(id)) toRemove.push(id);
     }
+    Timeline._lanesWereLive = Timeline._subgroupsLive;
 
     // Diff groups incrementally — never call groups.clear() because that drops
     // all rows from the DOM momentarily, which causes the browser to clamp
@@ -1410,7 +1537,16 @@ export const Timeline = {
     const newGroupIds      = new Set(groupData.map(g => String(g.id)));
     const groupsToRemove   = [...existingGroupIds].filter(id => !newGroupIds.has(id));
     const groupsToAdd      = groupData.filter(g => !existingGroupIds.has(String(g.id)));
-    const groupsToUpdate   = groupData.filter(g =>  existingGroupIds.has(String(g.id)));
+    // An unchanged label keeps its live DOM node: omit `content` so vis does not re-append it on every pass.
+    const groupsToUpdate: Array<Partial<TimelineGroupData> & { id: string }> = [];
+    for (const g of groupData) {
+      if (!existingGroupIds.has(String(g.id))) continue;
+      const patch: Partial<TimelineGroupData> & { id: string } = { ...g };
+      if (Timeline._labelKeys.get(String(g.id)) === newLabelKeys.get(String(g.id))) delete patch.content;
+      groupsToUpdate.push(patch);
+    }
+    for (const id of groupsToRemove) Timeline._labelKeys.delete(id);
+    for (const [id, key] of newLabelKeys) Timeline._labelKeys.set(id, key);
 
     PerfMonitor.record('Timeline.rebuild.diff', performance.now() - _pmT0diff);
 
@@ -1479,6 +1615,9 @@ export const Timeline = {
     // inside the rAF itself instead.
     requestAnimationFrame(() => {
       if (!Timeline._tl || !Timeline._vScrollLaidOut()) return; // hidden rebuild: don't apply, don't clear the flag, don't touch the mask
+      // An expanded row is taller than rows x _cachedRowH: size the timeline from the real group heights
+      // (also covers isolate + expand, where the pane is only a row or two high and would clip the lanes).
+      if (expandedLine && (Timeline._depthByLine.get(expandedLine) ?? 0) > 1) Timeline._fitHeightMeasured();
       if (visibleLines.length) Timeline._setVScroll(Timeline._vScrollTop);
       Timeline._vScrollRestorePending = false;
       if (!Persistence.isLoading()) Timeline.hideLoadingMask(); // a rebuild during an in-flight /tasks load leaves the mask up until the tasks:bulk rebuild that follows
@@ -1528,6 +1667,90 @@ export const Timeline = {
     Timeline._tl.setOptions({
       height: needed < containerH ? needed + 'px' : '100%'
     });
+  },
+
+  /** Like _fitHeight, but from the measured `.vis-group` heights (scrollToLine reads them the same
+   *  way) so an expanded row's extra lanes count. Falls back to leaving the height alone when the
+   *  groups are not laid out. */
+  _fitHeightMeasured(): void {
+    if (!Timeline._tl || !Timeline._visEl) return;
+    const containerH = Timeline._visEl.clientHeight;
+    const groups = Timeline._visEl.querySelectorAll('.vis-foreground .vis-group');
+    if (!groups.length) return;
+    let rowsH = 0;
+    groups.forEach(g => { rowsH += g.getBoundingClientRect().height; });
+    if (!(rowsH > 0)) return;
+    const needed = Math.ceil(rowsH + (Timeline._cachedAxisH || 40));
+    // containerH can be the stale (previously fitted) height; only a pane that is no larger than the
+    // content must grow, and a content height beyond the available area falls back to the scrolling '100%'.
+    const parentH = Timeline._visEl.parentElement?.clientHeight ?? 0;
+    const room = Math.max(containerH, parentH);
+    Timeline._tl.setOptions({ height: needed < room ? needed + 'px' : '100%' });
+  },
+
+  /** Row label for a Gantt group: a DOM Element (not an HTML string) so the toggle <button> and its
+   *  aria attributes survive vis's xss filter and the line name is set as text. `key` changes whenever
+   *  anything visible in the label changes (used to skip re-rendering unchanged labels). */
+  _groupLabel(line: string, color: string, depth: number, expanded: boolean): { el: HTMLElement; key: string } {
+    const wrap = document.createElement('div');
+    wrap.className = 'row-label';
+    const dot = document.createElement('span');
+    dot.className = 'row-label-dot';
+    dot.style.background = color;
+    const name = document.createElement('span');
+    name.className = 'row-label-name';
+    name.textContent = line;
+    wrap.append(dot, name);
+    let hint = '';
+    if (depth > 1) {
+      hint = Util.t(expanded ? 'ui.gantt_row_collapse' : 'ui.gantt_row_expand', { line, count: depth });
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'row-stack-toggle';
+      btn.dataset.line = line;
+      btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      btn.setAttribute('aria-label', hint);
+      btn.title = hint;
+      btn.textContent = String(depth);
+      wrap.append(btn);
+    }
+    return { el: wrap, key: `${line}|${color}|${depth}|${expanded ? 1 : 0}|${hint}` };
+  },
+
+  /** Expand `line` (collapsing any other) or collapse it when it already is the expanded row. */
+  toggleExpand(line: string): void {
+    const next = Timeline._expandedLine === line ? null : line;
+    const hadFocus = document.activeElement instanceof HTMLElement
+      && document.activeElement.classList.contains('row-stack-toggle');
+    Timeline._expandedLine = next;
+    Timeline.rebuild();
+    // The rebuild re-renders the label, which drops focus from a keyboard-activated toggle.
+    if (hadFocus && Timeline._visEl) {
+      const btn = Array.from(Timeline._visEl.querySelectorAll<HTMLElement>('.row-stack-toggle'))
+        .find(b => b.dataset.line === line);
+      btn?.focus();
+    }
+  },
+
+  /** Called after a planner drag/drop commits to the Store (never from optimizer runs or loads).
+   *  `touched` = source + destination lines, `dest` = destination lines. Refreshes the badge counts
+   *  of every touched row, and when a destination row just went from 1 lane to more than 1 (the drop
+   *  created an overlap) that row becomes the expanded row and any other expanded row collapses. */
+  noteDropLines(touched: ReadonlySet<string>, dest: ReadonlySet<string>): void {
+    if (!Timeline._items || !Timeline._ganttActive()) return;
+    const info = Timeline._computeLaneInfo(Store.tasksForSelectedPlant().filter(t => touched.has(t.MACHINE || 'Unknown')));
+    let changed = false;
+    for (const line of touched) {
+      const before = Timeline._depthByLine.get(line) ?? 0;
+      const after = info.get(line)?.maxDepth ?? 0;
+      if (before === after) continue;
+      Timeline._depthByLine.set(line, after);
+      changed = true;
+      if (dest.has(line) && before <= 1 && after > 1 && Timeline._expandedLine !== line) {
+        Timeline._expandedLine = line;
+      }
+    }
+    if (changed) Timeline._scheduleRebuild();
   },
 
   focus(id: string): void {
@@ -3855,6 +4078,7 @@ export const Interaction = {
 
     /* ----- Double-click a group label to isolate that line --------------- */
     Interaction._installLabelDblclick();
+    Interaction._installRowToggle();
 
     /* ----- 500ms hover-preview popover on Gantt items -------------------- */
     Interaction._installHoverPreview();
@@ -3919,6 +4143,7 @@ export const Interaction = {
 
     container.addEventListener('dblclick', (e) => {
       if (!Timeline._tl) return;
+      if (Interaction._isRowToggleTarget(e.target)) return; // a double-click on the stack badge must not isolate the line
       const p = Timeline._tl.getEventProperties(e);
       if (!p || p.what !== 'group-label' || p.group == null) return;
 
@@ -3942,6 +4167,34 @@ export const Interaction = {
       }
     }, true);
   },
+
+  /** True when `target` is (inside) a row's stack-count toggle button. */
+  _isRowToggleTarget(target: EventTarget | null | undefined): boolean {
+    return typeof Element !== 'undefined' && target instanceof Element && !!target.closest('.row-stack-toggle');
+  },
+
+  /**
+   * The red count badge on a row label is a real <button>: one delegated click listener toggles the
+   * row's expansion. Enter/Space arrive as a click with detail 0; a rapid second click of a double
+   * click (detail > 1) is ignored so a double-click toggles once. Capture phase, stopPropagation, so
+   * neither vis's label handling nor the dblclick isolate gesture sees it.
+   */
+  _installRowToggle(): void {
+    const container = document.getElementById('vis-timeline');
+    if (!container || Interaction._rowToggleDelegated) return;
+    Interaction._rowToggleDelegated = true;
+    container.addEventListener('click', (e) => {
+      if (!(e.target instanceof Element)) return;
+      const btn = e.target.closest<HTMLElement>('.row-stack-toggle');
+      if (!btn) return;
+      e.stopPropagation();
+      e.preventDefault();
+      if (e.detail > 1) return;
+      const line = btn.dataset.line;
+      if (line) Timeline.toggleExpand(line);
+    }, true);
+  },
+  _rowToggleDelegated: false,
 
   /**
    * Replaces vis-timeline's plain-text tooltip with a richer card that
@@ -4348,6 +4601,9 @@ export const Interaction = {
     if (this._panDuringGesture) return;
 
     const ev = props.event || {};
+    // A click on a row's stack badge toggles the row (own listener); it is not a click on empty canvas,
+    // so it must not clear the selection.
+    if (Interaction._isRowToggleTarget(ev.target) || Interaction._isRowToggleTarget(ev.srcEvent?.target)) return;
     const shift = !!(ev.shiftKey || ev.srcEvent?.shiftKey);
     const meta  = !!(ev.metaKey  || ev.ctrlKey || ev.srcEvent?.metaKey || ev.srcEvent?.ctrlKey);
 
@@ -4707,15 +4963,23 @@ export const Interaction = {
 
           // Every patch validated — commit atomically: dragged item, then
           // companions, then their Timeline item mirrors.
+          // Source lines are read BEFORE the commit (the Store write can move the task objects' MACHINE).
+          const dropSourceLines = [t.MACHINE || 'Unknown', ...selIds.map(sid => Store.tasks[sid]?.MACHINE || 'Unknown')];
           Store.updateTask(id, draggedPatch, 'timeline');
           if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
           for (const upd of companionItemUpdates) {
-            Timeline._suppressEvents = true;
-            try {
-              Timeline._items!.update({ id: upd.id, start: upd.start, end: upd.end, group: upd.group });
-            } finally { Timeline._suppressEvents = false; }
+            // Lane-decorated (a companion can leave or enter the expanded row); a lane change goes
+            // through remove + add inside _writePatches. Falls back to the plain partial when the item
+            // is not in the DataSet.
+            const cur = Timeline._items!.get(upd.id) as TimelineVisItem | null;
+            Timeline._writePatches([cur
+              ? Timeline._decorateLane({ ...cur, start: upd.start, end: upd.end, group: upd.group })
+              : { id: upd.id, start: upd.start, end: upd.end, group: upd.group } as TimelineVisItem]);
           }
           Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
+          Timeline.noteDropLines(
+            new Set([...dropSourceLines, newLine, ...companionItemUpdates.map(u => u.group)]),
+            new Set([newLine, ...companionItemUpdates.map(u => u.group)]));
 
           if (skippedFirmed.length) Toast.show(Util.t('toast.firmed_count_not_moved', { count: skippedFirmed.length }), 'warn');
 
@@ -4756,8 +5020,10 @@ export const Interaction = {
         Timeline._scheduleRebuild();
         continue;
       }
+      const fromLine = t.MACHINE || 'Unknown';
       Store.updateTask(id, patch, 'timeline');
-      Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
+      Timeline.finishSetupDrag(new Set([fromLine, newLine]));
+      Timeline.noteDropLines(new Set([fromLine, newLine]), new Set([newLine]));
 
       UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
                      () => UndoStack.restoreTasks(snap), [id]);

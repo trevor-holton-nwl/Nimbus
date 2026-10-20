@@ -662,6 +662,8 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.plant_time':                     '{{time}} hora da fábrica',
   'ui.nav_drawer_plant_eyebrow':       'FÁBRICA',
   'ui.change_plant':                   'Alterar',
+  'ui.gantt_row_expand':               'Mostrar {{count}} ordens empilhadas em {{line}}',
+  'ui.gantt_row_collapse':             'Recolher ordens empilhadas em {{line}}',
   'ui.util_heatmap':                   'Mapa de Utilização — próximos 7 dias',
   'ui.active_alerts':                  'Alertas ativos',
   'ui.firmed_orders':                  'Pedidos firmados',

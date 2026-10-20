@@ -666,6 +666,8 @@ window.__NIMBUS_LOCALES.es = {
   'ui.plant_time':                     '{{time}} hora de planta',
   'ui.nav_drawer_plant_eyebrow':       'PLANTA',
   'ui.change_plant':                   'Cambiar',
+  'ui.gantt_row_expand':               'Mostrar {{count}} órdenes apiladas en {{line}}',
+  'ui.gantt_row_collapse':             'Contraer órdenes apiladas en {{line}}',
   'ui.util_heatmap':                   'Mapa de Utilización — próximos 7 días',
   'ui.active_alerts':                  'Alertas activas',
   'ui.firmed_orders':                  'Pedidos en firme',

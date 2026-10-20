@@ -989,6 +989,8 @@ window.__NIMBUS_LOCALES.en = {
   'ui.plant_time':                     '{{time}} plant time',
   'ui.nav_drawer_plant_eyebrow':       'PLANT',
   'ui.change_plant':                   'Change',
+  'ui.gantt_row_expand':               'Show {{count}} stacked orders on {{line}}',
+  'ui.gantt_row_collapse':             'Collapse stacked orders on {{line}}',
   'ui.util_heatmap':                   'Utilization Heatmap — next 7 days',
   'ui.active_alerts':                  'Active alerts',
   'ui.firmed_orders':                  'Firmed orders',
