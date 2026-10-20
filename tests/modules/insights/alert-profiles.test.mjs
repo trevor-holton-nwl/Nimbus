@@ -263,6 +263,34 @@ test('validateProfile: identical rules are flagged on the later rule (type order
   assert.equal(validateProfile(draft({ rules: [a, rule({ types: ['late', 'overlap'], dayFrom: 1 })] }), existing).ok, true);
 });
 
+test('validateProfile: name length 60 ok, 61 rejected (trimmed)', () => {
+  assert.equal(validateProfile(draft({ name: 'x'.repeat(60) }), existing).ok, true);
+  assert.equal(validateProfile(draft({ name: ' ' + 'x'.repeat(60) + ' ' }), existing).ok, true);
+  assert.equal(validateProfile(draft({ name: 'x'.repeat(61) }), existing).errors.name, 'ape.err_name_long');
+});
+
+test('validateProfile: 20 rules ok, 21 rejected', () => {
+  const many = (n) => Array.from({ length: n }, (_, i) => rule({ dayFrom: i }));
+  assert.equal(validateProfile(draft({ rules: many(20) }), existing).ok, true);
+  assert.equal(validateProfile(draft({ rules: many(21) }), existing).errors.rules, 'ape.err_too_many_rules');
+});
+
+test('validateProfile: minSev must be null, warn or err', () => {
+  const err = (v) => validateProfile(draft({ rules: [rule({ minSev: v })] }), existing).errors['rules.0.minSev'];
+  assert.equal(err(null), undefined);
+  assert.equal(err('warn'), undefined);
+  assert.equal(err('err'), undefined);
+  for (const bad of ['error', 'info', '', 'WARN', 1, true]) assert.equal(err(bad), 'ape.err_min_sev', String(bad));
+});
+
+test('validateProfile: a non-object rule entry is a rule-level error, not a throw', () => {
+  for (const bad of [null, 'x', 5, [], undefined]) {
+    const r = validateProfile(draft({ rules: [bad] }), existing);
+    assert.equal(r.ok, false);
+    assert.equal(r.errors['rules.0.types'], 'ape.err_rule_no_types');
+  }
+});
+
 // ---- ranking --------------------------------------------------------------------------------
 
 const ctx = (extra = {}) => ({ tasksById: {}, horizonStart: at(0), horizonMinutes: 14 * 1440, plantToday: TODAY, deps, ...extra });

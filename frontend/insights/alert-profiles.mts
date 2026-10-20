@@ -302,6 +302,8 @@ export interface ProfileValidation {
 }
 
 const DAY_BOUND = 365;
+const MAX_NAME_LEN = 60;
+const MAX_RULES = 20;
 const _firing = new Set<string>(FIRING_ALERT_TYPES);
 
 function _dayOk(v: unknown): boolean {
@@ -314,16 +316,19 @@ export function validateProfile(draft: AlertProfileDraft, existing: AlertProfile
 
   const name = (draft.name ?? '').trim();
   if (!name) errors.name = 'ape.err_name_required';
+  else if (name.length > MAX_NAME_LEN) errors.name = 'ape.err_name_long';
   else if (existing.some(p => p.plant === draft.plant && p.id !== draft.id && p.name.trim().toLowerCase() === name.toLowerCase())) {
     errors.name = 'ape.err_name_dup';
   }
 
   const rules = draft.rules ?? [];
   if (!rules.length) errors.rules = 'ape.err_no_rules';
+  else if (rules.length > MAX_RULES) errors.rules = 'ape.err_too_many_rules';
 
   const seen = new Set<string>();
   rules.forEach((r, i) => {
     const at = (f: string) => `rules.${i}.${f}`;
+    if (r === null || typeof r !== 'object' || Array.isArray(r)) { errors[at('types')] = 'ape.err_rule_no_types'; return; }
     if (r.types != null && (!Array.isArray(r.types) || !r.types.length || r.types.some(t => !_firing.has(t)))) {
       errors[at('types')] = 'ape.err_rule_no_types';
     }
@@ -335,6 +340,7 @@ export function validateProfile(draft: AlertProfileDraft, existing: AlertProfile
     if (r.minLateHours != null && !(typeof r.minLateHours === 'number' && Number.isFinite(r.minLateHours) && r.minLateHours >= 0)) {
       errors[at('minLateHours')] = 'ape.err_late_hours';
     }
+    if (r.minSev != null && r.minSev !== 'warn' && r.minSev !== 'err') errors[at('minSev')] = 'ape.err_min_sev';
     const sig = JSON.stringify([
       Array.isArray(r.types) ? [...new Set(r.types)].sort() : null, r.dayFrom ?? null, r.dayTo ?? null, r.minSev ?? null, r.minLateHours ?? null,
     ]);
