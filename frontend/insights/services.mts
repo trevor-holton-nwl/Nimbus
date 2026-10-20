@@ -109,6 +109,109 @@ function _alertClockPayload(plants: Iterable<string>): { now: Record<string, Dat
   return { now, blockedPlants: list.filter(plant => Store._blockedPlants.has(plant)) };
 }
 
+/** Tool-conflict alerts consume PRT_01/PRT_02. Only production version is
+ *  unused after setup observation has been derived from the full source. */
+function _stripPriorityFields(t: NimbusTask): NimbusTask {
+  const { PRODUCTION_VERSION, ...rest } = t;
+  return rest as NimbusTask;
+}
+
+interface SnapshotOpts {
+  /** Use this setup observation instead of deriving one (the leverage engine's what-if hook). */
+  setupObservation?: NimbusSetupObservation;
+  /** Default true: drop PRODUCTION_VERSION from the transported tasks. */
+  stripPriorityFields?: boolean;
+}
+
+/** The plant-scoped worker payload body. Shared by Compute._snap (which must not touch the plant
+ *  clock registry) and the exported buildPlantSnapshot. */
+function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts = {}): { snap: WorkerSnapshotBase; lines: string[] | null } {
+  const strip = opts.stripPriorityFields !== false;
+  const override = opts.setupObservation as SetupObservation | undefined;
+  if (!plant) {
+    // Setup state must be resolved from the un-stripped source: stateForOrder
+    // reads PRODUCTION_VERSION, which is omitted from task transport.
+    // Deriving from the stripped copy would
+    // silently blank every state for any definition using those fields.
+    const src = Store.tasksArr;
+    const setup = override ?? deriveSetupObservation(Store.setupSnapshot, src, undefined, {
+      calendars: Store._state.calendars, plants: Store._state.plants, lineSettings: Store._state.lineSettings,
+      masterData: Store._state.masterData, blocks: Store._state.blocks, plantBlocks: Store._state.plantBlocks,
+    });
+    const tasks = strip ? src.map(_stripPriorityFields) : src;
+    // No plant selected — nothing is rendered; fall back to the global snapshot.
+    return { lines: null, snap: {
+      tasks,
+      blocks:       Store._state.blocks,
+      plantBlocks:  Store._state.plantBlocks,
+      calendars:    Store._state.calendars,
+      plants:       Store._state.plants,
+      lineSettings: Store._state.lineSettings,
+      masterData:   Store._state.masterData,
+      setup,
+    } };
+  }
+  // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
+  // on the main thread on every postMessage (the dominant main-thread cost of the
+  // Worker.* round trip), so we send only the selected plant's data. calendars and
+  // lineSettings MUST be scoped too: computeUtilization derives its line set from
+  // Object.keys(calendars), and those maps accumulate entries for every line visited
+  // this session — an unscoped map would make the worker compute (and clone back) a
+  // matrix for lines that aren't even on screen.
+  const lineList = Store._linesByPlant[plant] || [];
+  const lines = new Set(lineList);
+  const pick = <T,>(obj: Record<string, T>): Record<string, T> => {
+    const out: Record<string, T> = {};
+    for (const l of lines) if (obj[l] !== undefined) out[l] = obj[l];
+    return out;
+  };
+  // Same rule as the no-plant branch above: derive from the un-stripped
+  // source array so stateForOrder can still read PRT_01/PRT_02/PRODUCTION_VERSION.
+  const src = Store.tasksByPlant(plant);
+  const setup = override ?? deriveSetupObservation(Store.setupSnapshot, src, lines, {
+    calendars: pick(Store._state.calendars), plants: Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
+    lineSettings: pick(Store._state.lineSettings), masterData: Store._state.masterData,
+    blocks: Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
+    plantBlocks: Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
+  });
+  const tasks = strip ? src.map(_stripPriorityFields) : src;
+  return { lines: lineList, snap: {
+    tasks,
+    blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
+    plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
+    calendars:    pick(Store._state.calendars),
+    plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
+    lineSettings: pick(Store._state.lineSettings),
+    masterData:   Store._state.masterData,
+    setup,
+  } };
+}
+
+/** The full alert/utilization payload for one plant, plus its line set and wall-clock fields.
+ *  `opts.setupObservation` replaces the derived setup (what-if replay). */
+export function buildPlantSnapshot(plant: string | null, opts: SnapshotOpts = {}): WorkerSnapshotBase & {
+  lines: string[] | null; now: Record<string, Date>; blockedPlants: string[];
+} {
+  const { snap, lines } = _buildSnapshotBase(plant, opts);
+  return { ...snap, lines, ..._alertClockPayload(plant ? [plant] : []) };
+}
+
+export type LeverageBase = ComputeAlertsPayload & { startMs: number; days: number; lines?: string[] };
+export interface LeverageVariant { key: string; setup: NimbusSetupObservation }
+export interface LeverageResult { key: string; alerts: NimbusAlert[]; matrix: NimbusUtilizationMatrix }
+
+/** Main-thread equivalent of the worker's LEVERAGE_BATCH handler (used when the worker is dead or
+ *  absent). calendars/plants are cloned per core call: ensureCalendar/ensurePlant write into them. */
+export function runLeverageBatchSync(base: LeverageBase, variants: LeverageVariant[]): LeverageResult[] {
+  const Core = globalThis.NimbusComputeCore!;
+  const fresh = () => ({ calendars: structuredClone(base.calendars), plants: structuredClone(base.plants) });
+  return variants.map(({ key, setup }) => ({
+    key,
+    alerts: Core.computeAlerts({ ...base, ...fresh(), setup }).alerts,
+    matrix: Core.computeUtilization({ ...base, ...fresh(), setup }).matrix,
+  }));
+}
+
 /* =============================================================================
    COMPUTE — singleton Web Worker wrapper for off-main-thread computation.
    Alerts.recompute and Utilization pre-warming post through here.
@@ -178,7 +281,7 @@ export const Compute = (() => {
     return _worker;
   }
 
-  function _post(type: 'ALERTS' | 'UTILIZATION', payload: Record<string, unknown>): Promise<any> {
+  function _post(type: 'ALERTS' | 'UTILIZATION' | 'LEVERAGE_BATCH', payload: Record<string, unknown>): Promise<any> {
     const w = _init();
     if (!w) return Promise.reject(new Error('worker unavailable'));
     return new Promise((resolve, reject) => {
@@ -196,72 +299,7 @@ export const Compute = (() => {
     });
   }
 
-  // Tool-conflict alerts consume PRT_01/PRT_02. Only production version is
-  // unused after setup observation has been derived from the full source.
-  function _stripPriorityFields(t: NimbusTask): NimbusTask {
-    const { PRODUCTION_VERSION, ...rest } = t;
-    return rest as NimbusTask;
-  }
-
-  function _snap(): WorkerSnapshotBase {
-    const plant = Store.selectedPlant;
-    if (!plant) {
-      // Setup state must be resolved from the un-stripped source: stateForOrder
-      // reads PRODUCTION_VERSION, which is omitted from task transport.
-      // Deriving from the stripped copy would
-      // silently blank every state for any definition using those fields.
-      const src = Store.tasksArr;
-      const setup = deriveSetupObservation(Store.setupSnapshot, src, undefined, {
-        calendars: Store._state.calendars, plants: Store._state.plants, lineSettings: Store._state.lineSettings,
-        masterData: Store._state.masterData, blocks: Store._state.blocks, plantBlocks: Store._state.plantBlocks,
-      });
-      const tasks = src.map(_stripPriorityFields);
-      // No plant selected — nothing is rendered; fall back to the global snapshot.
-      return {
-        tasks,
-        blocks:       Store._state.blocks,
-        plantBlocks:  Store._state.plantBlocks,
-        calendars:    Store._state.calendars,
-        plants:       Store._state.plants,
-        lineSettings: Store._state.lineSettings,
-        masterData:   Store._state.masterData,
-        setup,
-      };
-    }
-    // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
-    // on the main thread on every postMessage (the dominant main-thread cost of the
-    // Worker.* round trip), so we send only the selected plant's data. calendars and
-    // lineSettings MUST be scoped too: computeUtilization derives its line set from
-    // Object.keys(calendars), and those maps accumulate entries for every line visited
-    // this session — an unscoped map would make the worker compute (and clone back) a
-    // matrix for lines that aren't even on screen.
-    const lines = new Set(Store.linesForSelectedPlant());
-    const pick = <T,>(obj: Record<string, T>): Record<string, T> => {
-      const out: Record<string, T> = {};
-      for (const l of lines) if (obj[l] !== undefined) out[l] = obj[l];
-      return out;
-    };
-    // Same rule as the no-plant branch above: derive from the un-stripped
-    // source array so stateForOrder can still read PRT_01/PRT_02/PRODUCTION_VERSION.
-    const src = Store.tasksByPlant(plant);
-    const setup = deriveSetupObservation(Store.setupSnapshot, src, lines, {
-      calendars: pick(Store._state.calendars), plants: Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
-      lineSettings: pick(Store._state.lineSettings), masterData: Store._state.masterData,
-      blocks: Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
-      plantBlocks: Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
-    });
-    const tasks = src.map(_stripPriorityFields);
-    return {
-      tasks,
-      blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
-      plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
-      calendars:    pick(Store._state.calendars),
-      plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
-      lineSettings: pick(Store._state.lineSettings),
-      masterData:   Store._state.masterData,
-      setup,
-    };
-  }
+  function _snap(): WorkerSnapshotBase { return _buildSnapshotBase(Store.selectedPlant).snap; }
 
   return {
     available(): boolean { return !_dead && typeof Worker !== 'undefined'; },
@@ -280,6 +318,20 @@ export const Compute = (() => {
       const _t0 = performance.now();
       return _post('UTILIZATION', { ..._snap(), startMs, days })
         .then(r => { PerfMonitor.record('Worker.utilization', performance.now() - _t0); return r; });
+    },
+
+    /** Replay alerts + utilization per hypothetical setup observation (one worker round trip). Falls back
+     *  to the synchronous core when the worker is dead or absent. */
+    async leverageBatch(base: LeverageBase, variants: LeverageVariant[]): Promise<LeverageResult[]> {
+      if (!_dead && typeof Worker !== 'undefined') {
+        try {
+          const r = await _post('LEVERAGE_BATCH', { base, variants });
+          return r.results as LeverageResult[];
+        } catch (e) {
+          ErrorLog.warn('worker', 'leverage batch fell back to main thread', { error: String((e as Error)?.message || e) });
+        }
+      }
+      return runLeverageBatchSync(base, variants);
     },
   };
 })();
