@@ -547,7 +547,7 @@ export type UtilSevBucket = 'err' | 'warn' | 'ok';
 
 export type BufferUnit = 'pct' | 'hours';
 
-export type TopLevelTab = 'home' | 'gantt' | 'masterdata' | 'labor' | 'admin';
+export type TopLevelTab = 'home' | 'gantt' | 'masterdata' | 'labor' | 'alerts' | 'admin';
 
 export type GanttSubTab = 'timeline' | 'orders' | 'distribution';
 

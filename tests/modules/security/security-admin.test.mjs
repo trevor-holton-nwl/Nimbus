@@ -172,3 +172,10 @@ test('role plant assignment searches both bounded lists and uses native named bu
   assert.equal(f.nodes.get('sec-plant-dropdown').querySelectorAll('[data-plant]').length, 10);
   assert.equal(globalThis.document.activeElement, rebuilt, 'keyboard workflow resumes at search after reload');
 });
+
+test('Page Access toggles list Alert Monitor after Labor Plan, on by default', async t => {
+  const f = await rolesFixture(t);
+  const order = f.nodes.get('sec-roles-detail').querySelectorAll('[data-page-toggle]').map(n => n.dataset.pageToggle);
+  assert.deepEqual(order, ['home', 'gantt', 'labor', 'alerts', 'masterdata', 'admin']);
+  assert.equal(f.checkbox('alerts').checked, true);
+});

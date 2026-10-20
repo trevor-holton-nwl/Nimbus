@@ -210,3 +210,7 @@ test('G2: clearExpired drops the session AND the local planner data (no confirm)
   assert.equal(ls.getItem('nimbus.theme'), 'dark');
   assert.equal(ls.getItem('nimbus.locale'), 'de');
 });
+
+test('DEFAULT_PAGE_ACCESS includes the Alert Monitor tab, on by default', () => {
+  assert.equal(Session.DEFAULT_PAGE_ACCESS.alerts, true);
+});

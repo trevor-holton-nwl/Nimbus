@@ -79,6 +79,8 @@ import { Plant, ProdLines, WorkCenters } from '../master-data/admin-ui.mjs';
 import { LaborPlanning } from '../labor/labor-planning.mjs';
 import { MaterialGrids } from '../master-data/material-grids.mjs';
 import { DistributionPane } from '../distribution/distribution-pane.mjs';
+import { AlertMonitorPane } from '../alert-monitor/alert-monitor-pane.mjs';
+import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab, PriorityFieldMeta } from '../platform/types.mjs';
 
 // -- Local type declarations (Phase 5 conversion; scoped to this file) ------
@@ -427,6 +429,7 @@ const SessionUIAdapter = {
       ['home',       Util.t('tab.home')],
       ['gantt',      Util.t('tab.gantt')],
       ['labor',      Util.t('us.tab_labor')],
+      ['alerts',     Util.t('tab.alerts')],
       ['masterdata', Util.t('tab.masterdata')],
       ['admin',      Util.t('tab.admin')],
     ];
@@ -1948,7 +1951,7 @@ const App = {
       });
       return;
     }
-    const KEY: Record<TopLevelTab, string> = { home: 'tab.home', gantt: 'tab.gantt', labor: 'tab.labor', masterdata: 'tab.masterdata', admin: 'tab.admin' };
+    const KEY: Record<TopLevelTab, string> = { home: 'tab.home', gantt: 'tab.gantt', labor: 'tab.labor', alerts: 'tab.alerts', masterdata: 'tab.masterdata', admin: 'tab.admin' };
     el.textContent = KEY[tab] ? Util.t(KEY[tab]) : '';
   },
 
@@ -2041,6 +2044,8 @@ const App = {
     }
     // Board legend: modal wiring + toolbar button (aria-label set inline, no aria sweep exists).
     GanttLegend.init();
+    // Always-on matched-alert set (Gantt highlight, bell/drawer filter, Alert Monitor) — not tab-scoped.
+    AlertProfileMatches.init();
     const ganttLegendBtn = document.getElementById('btn-gantt-legend');
     if (ganttLegendBtn) {
       ganttLegendBtn.setAttribute('aria-label', Util.t('tip.legend'));
@@ -2341,7 +2346,7 @@ const App = {
   // in practice (all-off would leave a user stranded), but this stays a hard
   // fallback rather than an assumption.
   _firstAccessibleTab(): TopLevelTab {
-    const order: TopLevelTab[] = ['home', 'gantt', 'labor', 'masterdata', 'admin'];
+    const order: TopLevelTab[] = ['home', 'gantt', 'labor', 'alerts', 'masterdata', 'admin'];
     return order.find(t => Session.canAccessTab(t)) ?? 'home';
   },
 
@@ -2383,6 +2388,10 @@ const App = {
       }
       case 'admin': {
         const el = document.querySelector<HTMLElement>('.admin-scroll');
+        return el ? [{ el }] : [];
+      }
+      case 'alerts': {
+        const el = document.getElementById('am-scroll');
         return el ? [{ el }] : [];
       }
       case 'masterdata:plant': {
@@ -2469,6 +2478,8 @@ const App = {
       // its debounced Store-event refresh from doing background network
       // work off-tab here too.
       if (App._currentTab === 'gantt' && App._ganttSub === 'distribution') DistributionPane.setActive(false);
+      // Same for the Alert Monitor: stop its Store-driven repaint while another tab is showing.
+      if (App._currentTab === 'alerts') AlertMonitorPane.setActive(false);
       App._prevTab = App._currentTab;
     }
     App._currentTab = tab;
@@ -2506,6 +2517,12 @@ const App = {
       }, 30);
     } else if (tab === 'labor') {
       setTimeout(() => App.gotoLaborSub(App._laborSub || 'aggregate'), 30);
+    } else if (tab === 'alerts') {
+      setTimeout(() => {
+        AlertMonitorPane.init();
+        AlertMonitorPane.render();
+        requestAnimationFrame(() => App._restoreScroll('alerts'));
+      }, 30);
     }
   },
 
@@ -2620,7 +2637,7 @@ const App = {
   _gotoLanding(): void {
     let lv: LandingViewPref | null = null;
     try { lv = (Store.pref('landingView') as LandingViewPref | undefined) ?? null; } catch {}
-    const validTabs: TopLevelTab[] = ['home', 'gantt', 'masterdata', 'labor', 'admin'];
+    const validTabs: TopLevelTab[] = ['home', 'gantt', 'masterdata', 'labor', 'alerts', 'admin'];
     let tab: TopLevelTab = (lv?.tab && (validTabs as string[]).includes(lv.tab)) ? (lv.tab as TopLevelTab) : 'home';
     if (!Session.canAccessTab(tab)) tab = App._firstAccessibleTab();
     App.goto(tab);

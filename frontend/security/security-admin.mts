@@ -642,6 +642,7 @@ export const Security = (() => {
       ['home',       Util.t('tab.home')],
       ['gantt',      Util.t('tab.gantt')],
       ['labor',      Util.t('us.tab_labor')],
+      ['alerts',     Util.t('tab.alerts')],
       ['masterdata', Util.t('tab.masterdata')],
       ['admin',      Util.t('tab.admin')],
     ];
@@ -653,7 +654,7 @@ export const Security = (() => {
   // default for real admin users, since it short-circuits on isAdmin(), but
   // the Roles tab shows explicit per-role state so 'admin' needs it directly).
   function _defaultPageAccess(role: string): Record<TopLevelTab, boolean> {
-    return { home: true, gantt: true, labor: true, masterdata: true, admin: role === 'admin' };
+    return { home: true, gantt: true, labor: true, alerts: true, masterdata: true, admin: role === 'admin' };
   }
 
   function _pageAccessRowHtml(role: string, tab: TopLevelTab, label: string, roleRow: SecurityRoleRow | undefined): string {

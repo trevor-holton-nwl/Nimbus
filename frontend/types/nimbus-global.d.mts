@@ -100,6 +100,8 @@ declare global {
           restore?(snap?: any): void;
           _recompute?(): void;
           _recomputeDebounced?(): void;
+          _score?: number;
+          showBreakdown?(): void;
         };
         /* Task 2 stopgap additions (schedule-workbench.mts Table-onward region)
            — these members are reached but not precisely typed here; args/return

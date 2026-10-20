@@ -5,6 +5,7 @@ import { Util, Config, Toast } from '../../frontend/platform/foundation.mjs';
 import { Store, UndoStack } from '../../frontend/platform/store.mjs';
 import { Sandbox } from '../../frontend/optimization/sandbox.mjs';
 import { Persistence } from '../../frontend/scheduling/persistence.mjs';
+import { Session } from '../../frontend/security/session.mjs';
 import { DistributionPane } from '../../frontend/distribution/distribution-pane.mjs';
 
 test('header Lines picker announces open state and Escape returns focus', () => {
@@ -479,3 +480,18 @@ test('a second refreshMasterSub call while the first is pending is a no-op', () 
   await first;
   assert.equal(calls, 1);
 }));
+
+test('Alert Monitor tab: nav order after Labor, landing defs, section label, first accessible tab', t => {
+  t.mock.method(Session, 'canAccessTab', () => true);
+  t.mock.method(Util, 't', (k) => k);
+  assert.deepEqual(SessionUIAdapter._landingTabDefs().map(([tab]) => tab), ['home', 'gantt', 'labor', 'alerts', 'masterdata', 'admin']);
+  assert.equal(SessionUIAdapter._landingTabDefs().find(([tab]) => tab === 'alerts')[1], 'tab.alerts');
+  const el = { textContent: '' };
+  const priorDoc = globalThis.document;
+  globalThis.document = { getElementById: id => (id === 'cmd-band-section-label' ? el : null) };
+  try { App._updateSectionLabel('alerts'); } finally { globalThis.document = priorDoc; }
+  assert.equal(el.textContent, 'tab.alerts');
+  t.mock.method(Session, 'canAccessTab', tab => tab === 'alerts' || tab === 'masterdata');
+  assert.equal(App._firstAccessibleTab(), 'alerts');
+  assert.equal(App._scrollKeyFor('alerts'), 'alerts');
+});
