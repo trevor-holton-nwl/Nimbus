@@ -519,20 +519,24 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.split_order_opt_never':          'Ne jamais diviser les ordres',
   'ui.split_order_opt_overlong':       'Diviser uniquement les ordres intrinsèquement trop longs',
   'ui.split_order_opt_partial':        'Autoriser les ordres partiels entre intervalles d\'exploitation',
-  'ui.split_order_policy_help':        'Les segments générés sont visibles par le planificateur, restent un seul ordre logique et ne sont jamais plus courts que 30 minutes.',
+  'ui.split_order_policy_help':        'Les segments générés sont visibles par le planificateur, restent un seul ordre logique et ne sont jamais plus courts que le seuil de segment productif défini ci-dessus (30 minutes par défaut).',
   'ui.split_policy_saved':             'Politique de division des ordres enregistrée pour cette usine.',
   'ui.split_policy_save_failed':       'Impossible d\'enregistrer la politique de division des ordres : {{msg}}',
   'ui.unknown_setup_title':            'Setup data missing',                                        // MISSING TRANSLATION
-  'ui.unknown_setup_help':             'How the optimizer treats an order whose setup transition has no matrix row or whose line has no recorded state. The line is never frozen: orders are placed at zero minutes, placed with a plant-default setup time, or sent to the Needs Planning list.', // MISSING TRANSLATION
+  'ui.unknown_setup_help':             'Ce que fait l’optimiseur lorsque la transition de réglage d’un ordre n’a pas de ligne dans la matrice. Placer à zéro minute n’ajoute aucun temps de réglage. Utiliser le temps de réglage par défaut de l’usine facture cette valeur, mais seulement sur les lignes qui ont une définition de réglage et sont compatibles. Envoyer à Needs Planning refuse uniquement une transition entre deux états connus sans ligne de matrice ; une ligne dont l’état n’est pas enregistré est admise à zéro minute. Avec cette option, à la prochaine exécution de l’optimiseur, les ordres déjà planifiés et non protégés dont la transition n’a pas de ligne passent aussi en Needs Planning.',
   'ui.unknown_setup_opt_zero':         'Place at zero setup minutes (default)',                      // MISSING TRANSLATION
   'ui.unknown_setup_opt_default':      'Place using a plant-default setup time',                     // MISSING TRANSLATION
   'ui.unknown_setup_opt_exclude':      'Send to Needs Planning until the matrix row exists',         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_label':    'Default setup time',                                         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_invalid':  'Enter a whole number of minutes, zero or greater.',           // MISSING TRANSLATION
+  'ui.unknown_setup_zero_hint':        '0 minute se comporte comme Zéro : aucun temps de réglage n’est ajouté pour une transition manquante. Saisissez les minutes par défaut.',
+  'ui.unknown_setup_inactive_note':    'Les temps de réglage sont désactivés pour cette usine : ce paramètre n’a aucun effet tant que l’optimisation avec réglages n’est pas activée.',
+  'ui.order_rule_days_too_large':      'Saisissez {{max}} jours au maximum.',
+  'ui.order_rule_minutes_too_large':   'Saisissez {{max}} minutes au maximum.',
   'ui.unknown_setup_saved':            'Setup-data policy saved for this plant.',                    // MISSING TRANSLATION
   'ui.unknown_setup_failed':           'Could not save setup-data policy',                            // MISSING TRANSLATION
   'ui.min_productive_segment_title':   'Segment productif minimal',
-  'ui.min_productive_segment_help':    'Contrôle la durée minimale d\'un segment productif fractionné lorsque le fractionnement partiel ou réservé aux ordres excessivement longs est autorisé ci-dessus. S\'applique aussi bien au planificateur sans connaissance des changements qu\'à celui qui en tient compte.',
+  'ui.min_productive_segment_help':    'Contrôle la durée minimale d\'un segment productif fractionné lorsque le fractionnement partiel ou réservé aux ordres excessivement longs est autorisé ci-dessous. S\'applique aussi bien au planificateur sans connaissance des changements qu\'à celui qui en tient compte.',
   'ui.min_productive_segment_label':   'Segment productif minimal (minutes)',
   'ui.min_productive_segment_help_detail': 'Un segment fractionné n\'est jamais plus court que cette valeur, sauf un ordre complet sous ce seuil, placé en entier. Valeur par défaut : 30 minutes.',
   'ui.min_productive_segment_invalid': 'Saisissez un nombre entier de minutes supérieur à zéro.',

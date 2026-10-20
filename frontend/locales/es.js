@@ -523,20 +523,24 @@ window.__NIMBUS_LOCALES.es = {
   'ui.split_order_opt_never':          'Nunca dividir pedidos',
   'ui.split_order_opt_overlong':       'Dividir solo pedidos inherentemente demasiado largos',
   'ui.split_order_opt_partial':        'Permitir pedidos parciales entre intervalos operativos',
-  'ui.split_order_policy_help':        'Los segmentos generados son visibles para el planificador, siguen siendo un único pedido lógico y nunca son más cortos de 30 minutos.',
+  'ui.split_order_policy_help':        'Los segmentos generados son visibles para el planificador, siguen siendo un único pedido lógico y nunca son más cortos que el mínimo de segmento productivo definido arriba (30 minutos por defecto).',
   'ui.split_policy_saved':             'Política de división de pedidos guardada para esta planta.',
   'ui.split_policy_save_failed':       'No se pudo guardar la política de división de pedidos: {{msg}}',
   'ui.unknown_setup_title':            'Setup data missing',                                        // MISSING TRANSLATION
-  'ui.unknown_setup_help':             'How the optimizer treats an order whose setup transition has no matrix row or whose line has no recorded state. The line is never frozen: orders are placed at zero minutes, placed with a plant-default setup time, or sent to the Needs Planning list.', // MISSING TRANSLATION
+  'ui.unknown_setup_help':             'Qué hace el optimizador cuando la transición de preparación de un pedido no tiene fila en la matriz. Con cero minutos no se suma tiempo de preparación. Con el tiempo de preparación predeterminado de la planta se cobra ese valor, pero solo en líneas que tienen una definición de preparación y son compatibles con la preparación. Enviar a Needs Planning rechaza solo una transición entre dos estados conocidos sin fila en la matriz; una línea sin estado registrado se admite con cero minutos. Con esta opción, en la siguiente ejecución del optimizador los pedidos ya programados y no protegidos cuya transición no tiene fila también pasan a Needs Planning.',
   'ui.unknown_setup_opt_zero':         'Place at zero setup minutes (default)',                      // MISSING TRANSLATION
   'ui.unknown_setup_opt_default':      'Place using a plant-default setup time',                     // MISSING TRANSLATION
   'ui.unknown_setup_opt_exclude':      'Send to Needs Planning until the matrix row exists',         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_label':    'Default setup time',                                         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_invalid':  'Enter a whole number of minutes, zero or greater.',           // MISSING TRANSLATION
+  'ui.unknown_setup_zero_hint':        '0 minutos se comporta como Cero: no se suma tiempo de preparación para una transición sin datos. Introduzca los minutos predeterminados.',
+  'ui.unknown_setup_inactive_note':    'Los tiempos de preparación están desactivados para esta planta, por lo que este ajuste no tiene efecto hasta que se active la optimización con preparación.',
+  'ui.order_rule_days_too_large':      'Introduzca {{max}} días como máximo.',
+  'ui.order_rule_minutes_too_large':   'Introduzca {{max}} minutos como máximo.',
   'ui.unknown_setup_saved':            'Setup-data policy saved for this plant.',                    // MISSING TRANSLATION
   'ui.unknown_setup_failed':           'Could not save setup-data policy',                            // MISSING TRANSLATION
   'ui.min_productive_segment_title':   'Mínimo de segmento productivo',
-  'ui.min_productive_segment_help':    'Controla la duración mínima de un fragmento productivo cuando arriba se permite la división parcial o solo para pedidos excesivamente largos. Se aplica tanto al planificador sin conocimiento de cambios como al que sí los considera.',
+  'ui.min_productive_segment_help':    'Controla la duración mínima de un fragmento productivo cuando abajo se permite la división parcial o solo para pedidos excesivamente largos. Se aplica tanto al planificador sin conocimiento de cambios como al que sí los considera.',
   'ui.min_productive_segment_label':   'Segmento productivo mínimo (minutos)',
   'ui.min_productive_segment_help_detail': 'Un fragmento nunca es más corto que este valor, salvo un pedido completo por debajo del mínimo, que se programa entero. El valor predeterminado es 30 minutos.',
   'ui.min_productive_segment_invalid': 'Introduzca un número entero de minutos mayor que cero.',

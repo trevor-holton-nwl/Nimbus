@@ -519,20 +519,24 @@ window.__NIMBUS_LOCALES.de = {
   'ui.split_order_opt_never':          'Aufträge nie teilen',
   'ui.split_order_opt_overlong':       'Nur von Natur aus zu lange Aufträge teilen',
   'ui.split_order_opt_partial':        'Teilaufträge über Betriebsintervalle hinweg zulassen',
-  'ui.split_order_policy_help':        'Erzeugte Segmente sind für Planer sichtbar, bleiben ein logischer Auftrag und sind nie kürzer als 30 Minuten.',
+  'ui.split_order_policy_help':        'Erzeugte Segmente sind für Planer sichtbar, bleiben ein logischer Auftrag und sind nie kürzer als die oben festgelegte Mindestlänge eines Produktivsegments (standardmäßig 30 Minuten).',
   'ui.split_policy_saved':             'Auftragsteilungsrichtlinie für dieses Werk gespeichert.',
   'ui.split_policy_save_failed':       'Auftragsteilungsrichtlinie konnte nicht gespeichert werden: {{msg}}',
   'ui.unknown_setup_title':            'Setup data missing',                                        // MISSING TRANSLATION
-  'ui.unknown_setup_help':             'How the optimizer treats an order whose setup transition has no matrix row or whose line has no recorded state. The line is never frozen: orders are placed at zero minutes, placed with a plant-default setup time, or sent to the Needs Planning list.', // MISSING TRANSLATION
+  'ui.unknown_setup_help':             'Was der Optimierer tut, wenn für den Rüstübergang eines Auftrags keine Matrixzeile existiert. „Null Minuten“ setzt keine Rüstzeit an. Die Standard-Rüstzeit des Werks berechnet diesen Wert, aber nur auf Linien mit Rüstdefinition, die rüstkompatibel sind. „Nach Needs Planning“ lehnt nur einen Übergang zwischen zwei bekannten Zuständen ohne Matrixzeile ab; eine Linie ohne erfassten Zustand wird mit null Minuten zugelassen. Bei dieser Option wandern beim nächsten Optimierungslauf auch bereits eingeplante, nicht geschützte Aufträge ohne Matrixzeile nach Needs Planning.',
   'ui.unknown_setup_opt_zero':         'Place at zero setup minutes (default)',                      // MISSING TRANSLATION
   'ui.unknown_setup_opt_default':      'Place using a plant-default setup time',                     // MISSING TRANSLATION
   'ui.unknown_setup_opt_exclude':      'Send to Needs Planning until the matrix row exists',         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_label':    'Default setup time',                                         // MISSING TRANSLATION
   'ui.unknown_setup_minutes_invalid':  'Enter a whole number of minutes, zero or greater.',           // MISSING TRANSLATION
+  'ui.unknown_setup_zero_hint':        '0 Minuten verhalten sich wie „Null“: Für einen fehlenden Übergang wird keine Rüstzeit angesetzt. Geben Sie die Standardminuten ein.',
+  'ui.unknown_setup_inactive_note':    'Rüstzeiten sind für dieses Werk ausgeschaltet. Diese Einstellung hat erst eine Wirkung, wenn die rüstzeitbewusste Optimierung für das Werk eingeschaltet ist.',
+  'ui.order_rule_days_too_large':      'Geben Sie höchstens {{max}} Tage ein.',
+  'ui.order_rule_minutes_too_large':   'Geben Sie höchstens {{max}} Minuten ein.',
   'ui.unknown_setup_saved':            'Setup-data policy saved for this plant.',                    // MISSING TRANSLATION
   'ui.unknown_setup_failed':           'Could not save setup-data policy',                            // MISSING TRANSLATION
   'ui.min_productive_segment_title':   'Mindest-Produktivsegment',
-  'ui.min_productive_segment_help':    'Legt die Mindestlänge eines geteilten Produktivstücks fest, wenn oben eine teilweise oder nur-übermäßig-lange Teilung zugelassen ist. Gilt für den setup-unabhängigen und den setup-bewussten Planer.',
+  'ui.min_productive_segment_help':    'Legt die Mindestlänge eines geteilten Produktivstücks fest, wenn unten eine teilweise oder nur-übermäßig-lange Teilung zugelassen ist. Gilt für den setup-unabhängigen und den setup-bewussten Planer.',
   'ui.min_productive_segment_label':   'Mindest-Produktivsegment (Minuten)',
   'ui.min_productive_segment_help_detail': 'Ein Teilstück ist nie kürzer als dieser Wert, außer ein vollständiger Auftrag unterhalb der Grenze wird als Ganzes eingeplant. Standardwert 30 Minuten.',
   'ui.min_productive_segment_invalid': 'Geben Sie eine ganze Minutenzahl größer als null ein.',

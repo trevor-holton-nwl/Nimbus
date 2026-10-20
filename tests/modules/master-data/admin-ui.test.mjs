@@ -2169,3 +2169,209 @@ test('WorkCenters._write patches _machines (weights, auto_linked) and re-pulls t
     Store.setSelectedPlant(priorPlant, 'test-restore');
   }
 });
+
+// ── Order Rules save handlers (order-rules-hardening, Phase 3: S1/S2, S3, S4, O7) ──
+// The pane has no jsdom here, so a minimal fake DOM captures each input's listeners.
+function mountOrderRulesPane(plants, { selectedPlant = '5512', nimbus } = {}) {
+  const els = new Map();
+  const mkEl = () => {
+    const el = {
+      value: '', disabled: false, hidden: false, isConnected: true, checked: false,
+      validity: { badInput: false }, dataset: {}, style: {}, children: [], handlers: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      addEventListener(type, fn) { (el.handlers[type] ??= []).push(fn); },
+      removeEventListener() {}, appendChild() {}, setAttribute() {}, focus() {}, closest: () => null,
+      querySelector: () => null, querySelectorAll: () => [],
+    };
+    return el;
+  };
+  const pane = {
+    innerHTML: '',
+    querySelector(sel) { if (!els.has(sel)) els.set(sel, mkEl()); return els.get(sel); },
+    querySelectorAll: () => [],
+    addEventListener() {},
+  };
+  globalThis.document = { getElementById: id => (id === 'plant-tab-settings' ? pane : null), querySelector: () => null, querySelectorAll: () => [] };
+  globalThis.window = {};
+  if (nimbus) globalThis.NIMBUS = nimbus;
+  Store.setSelectedPlant(selectedPlant, 'test');
+  Store.setMasterData({ plants, lines: [] }, 'test');
+  Plant._currentSettingsSubTab = 'rules';
+  try { Plant._renderSettingsPane(); } catch { /* the constraint-tree wiring after the Order Rules handlers needs a real DOM */ }
+  const el = id => pane.querySelector(`#${id}`);
+  const fire = async (id, type = 'change') => { for (const fn of el(id).handlers[type] ?? []) await fn(); };
+  return { el, fire, pane };
+}
+
+async function withOrderRulesHarness(body) {
+  const prior = {
+    document: globalThis.document, window: globalThis.window, nimbus: globalThis.NIMBUS,
+    fetch: Util.fetchTraced, t: Util.t, toast: Toast.show, recompute: Alerts.scheduleRecompute,
+    plant: Store.selectedPlant, md: Store.masterData, unsub: Plant._setupNoteUnsub,
+  };
+  const calls = []; const toasts = []; const recomputes = [];
+  Util.fetchTraced = (url, init) => {
+    // Only the Order Rules writes are recorded; the plant-select side loads are refused as before.
+    if (!String(url).includes('/master-data/plants/')) return Promise.reject(new Error('stubbed'));
+    calls.push({ url: String(url), body: JSON.parse(init.body) });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ setup_policy_config: {} }) });
+  };
+  Util.t = (key) => key;
+  Toast.show = (msg, type) => { toasts.push([msg, type]); };
+  Alerts.scheduleRecompute = () => { recomputes.push(1); };
+  try { await body({ calls, toasts, recomputes }); }
+  finally {
+    Plant._setupNoteUnsub?.(); Plant._setupNoteUnsub = prior.unsub;
+    Util.fetchTraced = prior.fetch; Util.t = prior.t; Toast.show = prior.toast; Alerts.scheduleRecompute = prior.recompute;
+    if (prior.document === undefined) delete globalThis.document; else globalThis.document = prior.document;
+    if (prior.window === undefined) delete globalThis.window; else globalThis.window = prior.window;
+    if (prior.nimbus === undefined) delete globalThis.NIMBUS; else globalThis.NIMBUS = prior.nimbus;
+    Store.setSelectedPlant(prior.plant, 'test-restore'); Store.setMasterData(prior.md, 'test-restore');
+  }
+}
+
+test('Order Rules save patches the LIVE plant row after Store.masterData.plants was replaced, and refreshes alerts', async () => {
+  await withOrderRulesHarness(async ({ calls, toasts, recomputes }) => {
+    const stale = { subnetwork: 'SN', plant: '5512', max_pull_forward_days: 1 };
+    const { el, fire } = mountOrderRulesPane([stale]);
+    // A Manage Data refresh replaces the rows after the pane rendered.
+    const live = { subnetwork: 'SN', plant: '5512', max_pull_forward_days: 1 };
+    Store.setMasterData({ plants: [live], lines: [] }, 'test-refresh');
+    el('sys-max-pull-forward-days').value = '5';
+    await fire('sys-max-pull-forward-days');
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].body, { subnetwork: 'SN', max_pull_forward_days: 5 });
+    assert.equal(live.max_pull_forward_days, 5, 'the row live in the Store is patched in place');
+    assert.equal(Store.masterData.plants[0], live, 'no Store.setMasterData swap (it would rebuild the pane)');
+    assert.equal(recomputes.length, 1, 'alerts recompute for the selected plant');
+    assert.ok(toasts.some(([m, t]) => m === 'ui.max_pull_forward_saved' && t === 'success'));
+  });
+});
+
+test('Order Rules save does not recompute alerts for a plant that is not selected', async () => {
+  await withOrderRulesHarness(async ({ recomputes }) => {
+    const row = { subnetwork: 'SN', plant: '5512', max_push_forward_days: null };
+    const { el, fire } = mountOrderRulesPane([row]);
+    Store.setSelectedPlant('1006', 'test-switch');
+    el('sys-max-push-forward-days').value = '2';
+    await fire('sys-max-push-forward-days');
+    assert.equal(row.max_push_forward_days, 2);
+    assert.equal(recomputes.length, 0);
+  });
+});
+
+test('Frozen-horizon save rebuilds the Gantt band only when the Gantt is the active tab', async () => {
+  for (const active of [true, false]) {
+    let rebuilds = 0;
+    await withOrderRulesHarness(async () => {
+      const row = { subnetwork: 'SN', plant: '5512', frozen_horizon_days: null };
+      const { el, fire } = mountOrderRulesPane([row], { nimbus: { Timeline: { _ganttActive: () => active, _scheduleRebuild: () => { rebuilds += 1; } } } });
+      el('sys-frozen-horizon-days').value = '3';
+      await fire('sys-frozen-horizon-days');
+      assert.equal(row.frozen_horizon_days, 3);
+    });
+    assert.equal(rebuilds, active ? 1 : 0);
+  }
+});
+
+test('Order Rules inputs revert and toast on unreadable input instead of clearing the limit (badInput)', async () => {
+  for (const [id, field, previous, toast] of [
+    ['sys-max-pull-forward-days', 'max_pull_forward_days', 3, 'ui.max_pull_forward_invalid'],
+    ['sys-max-push-forward-days', 'max_push_forward_days', 4, 'ui.max_push_forward_invalid'],
+    ['sys-frozen-horizon-days', 'frozen_horizon_days', 2, 'ui.frozen_horizon_days_invalid'],
+  ]) {
+    await withOrderRulesHarness(async ({ calls, toasts }) => {
+      const row = { subnetwork: 'SN', plant: '5512', [field]: previous };
+      const { el, fire } = mountOrderRulesPane([row]);
+      el(id).value = '';                       // what the browser reports for "--"
+      el(id).validity.badInput = true;
+      await fire(id);
+      assert.equal(calls.length, 0, `${id}: nothing is saved`);
+      assert.equal(el(id).value, String(previous), `${id}: reverted to the stored value`);
+      assert.equal(row[field], previous);
+      assert.ok(toasts.some(([m, t]) => m === toast && t === 'error'), `${id}: toasts`);
+    });
+  }
+  await withOrderRulesHarness(async ({ calls, toasts }) => {
+    const row = { subnetwork: 'SN', plant: '5512', setup_policy_config: { unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 30 } };
+    const { el, fire } = mountOrderRulesPane([row]);
+    el('sys-unknown-setup-minutes').value = '';
+    el('sys-unknown-setup-minutes').validity.badInput = true;
+    await fire('sys-unknown-setup-minutes');
+    assert.equal(calls.length, 0);
+    assert.equal(el('sys-unknown-setup-minutes').value, '30');
+    assert.ok(toasts.some(([m]) => m === 'ui.unknown_setup_minutes_invalid'));
+  });
+});
+
+test('Order Rules caps: pull/push 365 days, floor and default setup 1440 minutes, enforced before the request', async () => {
+  await withOrderRulesHarness(async ({ calls, toasts }) => {
+    const row = { subnetwork: 'SN', plant: '5512', max_pull_forward_days: 2, max_push_forward_days: 2, min_productive_segment_minutes: 30,
+      setup_policy_config: { unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 10 } };
+    const { el, fire } = mountOrderRulesPane([row]);
+    for (const [id, over, ok, field] of [
+      ['sys-max-pull-forward-days', '366', '365', 'max_pull_forward_days'],
+      ['sys-max-push-forward-days', '366', '365', 'max_push_forward_days'],
+      ['sys-min-productive-segment-minutes', '1441', '1440', 'min_productive_segment_minutes'],
+    ]) {
+      el(id).value = over;
+      await fire(id);
+      assert.equal(calls.length, 0, `${id}: ${over} is refused client-side`);
+      assert.equal(el(id).value, String(row[field]), `${id}: reverted`);
+      el(id).value = ok;
+      await fire(id);
+      assert.equal(row[field], Number(ok), `${id}: ${ok} saves`);
+      calls.length = 0;
+    }
+    assert.ok(toasts.some(([m]) => m === 'ui.order_rule_days_too_large'));
+    assert.ok(toasts.some(([m]) => m === 'ui.order_rule_minutes_too_large'));
+    el('sys-unknown-setup-minutes').value = '1441';
+    await fire('sys-unknown-setup-minutes');
+    assert.equal(calls.length, 0, 'a changed over-cap default setup is refused');
+    assert.equal(el('sys-unknown-setup-minutes').value, '10');
+  });
+});
+
+test('A legacy over-cap default setup value does not block an unrelated policy save', async () => {
+  await withOrderRulesHarness(async ({ calls }) => {
+    const row = { subnetwork: 'SN', plant: '5512', setup_policy_config: { unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 5000 } };
+    const { el, fire } = mountOrderRulesPane([row]);
+    el('sys-unknown-setup-policy').value = 'excludeFromSearch';
+    await fire('sys-unknown-setup-policy');
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].body, { subnetwork: 'SN', unknown_setup_policy: 'excludeFromSearch', unknown_setup_default_minutes: 5000 });
+  });
+});
+
+test('Zero-minutes hint shows only for plantDefaultMinutes with 0 minutes; the setup-off note is strict and live', async () => {
+  await withOrderRulesHarness(async () => {
+    const row = { subnetwork: 'SN', plant: '5512', setup_active: true, setup_policy_config: { unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 0 } };
+    const { el, fire } = mountOrderRulesPane([row]);
+    assert.equal(el('sys-unknown-setup-zero-hint').hidden, false);
+    el('sys-unknown-setup-minutes').value = '15';
+    await fire('sys-unknown-setup-minutes', 'input');
+    assert.equal(el('sys-unknown-setup-zero-hint').hidden, true);
+
+    // O7: hidden for true and for an unloaded (undefined) flag; shown only for a strict false.
+    assert.equal(el('sys-unknown-setup-inactive-note').hidden, true);
+    row.setup_active = undefined;
+    Store.setMasterData({ plants: [row], lines: [] }, 'test');
+    assert.equal(el('sys-unknown-setup-inactive-note').hidden, true);
+    row.setup_active = false;
+    Store.setMasterData({ plants: [row], lines: [] }, 'test');
+    assert.equal(el('sys-unknown-setup-inactive-note').hidden, false);
+    Store.emit({ type: 'setup-snapshot:replace', snapshot: null });
+    assert.equal(el('sys-unknown-setup-inactive-note').hidden, false);
+  });
+});
+
+test('Re-rendering the settings pane replaces the setup-off note subscription instead of stacking listeners', async () => {
+  await withOrderRulesHarness(async () => {
+    const row = { subnetwork: 'SN', plant: '5512', setup_active: false };
+    mountOrderRulesPane([row]);
+    const afterFirst = Store._listeners.size;
+    try { Plant._renderSettingsPane(); } catch { /* post-handler wiring */ }
+    try { Plant._renderSettingsPane(); } catch { /* post-handler wiring */ }
+    assert.equal(Store._listeners.size, afterFirst, 'repeated renders keep exactly one note listener');
+  });
+});
