@@ -565,7 +565,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.add_line_override':              'Maschinenüberschreibung hinzufügen',
   'ui.drop_replace_text':              'Neue Datei zum Ersetzen ablegen oder klicken zum Durchsuchen',
   'ui.drop_list_text':                 '{{field}}-Liste hierher ziehen oder klicken zum Durchsuchen',
-  'ui.drop_list_hint':                 '.xlsx · Wertespalte erforderlich, Rangspalte optional',
+  'ui.drop_list_hint':                 '.xlsx · Spalten {{column}} und RANK (1 = zuerst) · Vorlage oben herunterladen',
   'ui.missing_master_data_title':      'Fehlende Stammdaten',
   'ui.missing_master_data_sub':        '{{pairs}} Materialien ({{orders}} Aufträge) haben keine passende Material-Werk-Zeile — ihre Farb-/Werkzeugwerte bleiben leer, bis dies behoben ist.',
   'ui.mmd_reason_no_mp_row':           'Keine Material-Werk-Zeile',
@@ -617,6 +617,8 @@ window.__NIMBUS_LOCALES.de = {
   'day.set_to_off':   '{{day}} auf DEAKTIVIERT gesetzt',
 
   'btn.export_csv':                    'CSV exportieren',
+  'btn.download_template':              'Vorlage',
+  'tip.download_template':              'Vorlage mit den Werten dieses Werks herunterladen',
   'btn.copy_mode':                     'Kopiermodus',
   'toast.copied_range':                '{r}×{c} Zellen kopiert',
   'btn.firm_selected':                 'Auswahl festschreiben',

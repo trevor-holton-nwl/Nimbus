@@ -973,7 +973,7 @@ export const Plant = {
     const fields = Plant._priorityFields || [];
     const lists  = Plant._priorityLists  || {};
 
-    const fieldCardHtml = (f: { field_key: string; default_label: string }): string => {
+    const fieldCardHtml = (f: { field_key: string; default_label: string; mp_column?: string }): string => {
       const summary = lists[f.field_key] || { plant_wide: null, machine_overrides: [], coverage: {} };
       // Util.t(key, vars?) — no fallback-string param (confirmed at
       // frontend/application-foundation.mts:556-562): it already falls back
@@ -1027,7 +1027,7 @@ export const Plant = {
             <div class="cw-drop-inner">
               <span class="cw-drop-icon">📂</span>
               <span class="cw-drop-text">${Util.t('ui.drop_list_text', { field: label })}</span>
-              <div class="cw-drop-hint">${Util.t('ui.drop_list_hint')}</div>
+              <div class="cw-drop-hint">${Util.escapeHtml(Util.t('ui.drop_list_hint', { column: (f.mp_column || 'VALUE').toUpperCase() }))}</div>
               <input type="file" id="plant-pl-file-${f.field_key}" accept=".xlsx,.xls" style="display:none">
             </div>
           </div>`;
@@ -1056,6 +1056,7 @@ export const Plant = {
         <div class="pl-field-card" data-field="${f.field_key}">
           <div class="pl-field-card-head">
             <h4>${Util.escapeHtml(label)}</h4>
+            <button class="btn btn-ghost sm" data-action="template" data-field="${f.field_key}" title="${Util.escapeHtml(Util.t('tip.download_template'))}">⤓ ${Util.t('btn.download_template')}</button>
           </div>
           ${activeOrDrop}
           <div class="pl-overrides">${overridesHtml}</div>
@@ -1128,6 +1129,26 @@ export const Plant = {
     });
     body.querySelectorAll<HTMLElement>('[data-action="delete"]').forEach(btn => {
       btn.addEventListener('click', () => Plant._confirmDeletePriorityList(plantName!, btn.dataset.field!, btn.dataset.line || ''));
+    });
+
+    // Download the prefilled template. Same blob-download pattern as pl-mmd-export
+    // below: fetchTraced carries the identity header a bare <a href> would not.
+    body.querySelectorAll<HTMLElement>('[data-action="template"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const fk = btn.dataset.field!;
+        Util.fetchTraced(`${Config.API_BASE}/priority-list/${encodeURIComponent(plantName!)}/${encodeURIComponent(fk)}/template`)
+          .then(r => r.ok ? r.blob() : Promise.reject(new Error(`HTTP ${r.status}`)))
+          .then(blob => {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `${fk}-template-${plantName}.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+          })
+          .catch(e => Toast.show(Util.t('toast.export_failed', { msg: e.message }), 'error'));
+      });
     });
 
     // Wire "+ add line override" combobox per field (Store.masterData lines for this plant).

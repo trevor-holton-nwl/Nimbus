@@ -4115,6 +4115,7 @@ body.dark .cw-active-card {
 .pl-field-card-head h4 {
   margin: 0; font-size: 13px; font-weight: 600; color: var(--fg);
 }
+.pl-field-card-head .btn { margin-left: auto; white-space: nowrap; }
 /* `.pl-inert-badge` was removed in Stage 3 along with the "not yet used in
    sequencing" label it styled — all four registered priority fields now feed
    Engine._sortTerms, so the claim was false. See docs/scheduling_priority.md. */

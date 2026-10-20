@@ -1247,3 +1247,72 @@ def test_upload_color_wheel_rejects_oversized_file_with_413(monkeypatch):
         assert "exceeds maximum allowed size" in r.json()["detail"]
     finally:
         brain.api.dependency_overrides.pop(brain.require_admin, None)
+
+
+# --- GET /priority-list/{plant}/{field_key}/template ------------------------
+# DB-free: db.get_priority_list / db.distinct_order_values are monkeypatched, in
+# the same style as the color-wheel scope tests above.
+
+def _template_rows(content: bytes, sheet: str = "List"):
+    import io as _io
+    import pandas as pd
+    return pd.read_excel(_io.BytesIO(content), sheet_name=sheet)
+
+
+def _stub_template_db(monkeypatch, entries, order_values):
+    import db
+    monkeypatch.setattr(db, "get_priority_list", lambda plant, field_key, line="": (
+        None if entries is None else {"entries": entries, "uploaded_at": None, "uploaded_by": "t",
+                                      "filename": "w.xlsx", "row_count": len(entries)}))
+    monkeypatch.setattr(db, "distinct_order_values", lambda plant, column: list(order_values))
+
+
+def test_template_without_a_list_has_every_order_value_and_blank_ranks(client, monkeypatch):
+    _stub_template_db(monkeypatch, None, ["BLUE", "RED"])
+    r = client.get("/priority-list/5512/colorWheel/template")
+    assert r.status_code == 200
+    assert "spreadsheetml" in r.headers["content-type"]
+    assert 'filename="colorWheel-template-5512.xlsx"' in r.headers["content-disposition"]
+    df = _template_rows(r.content)
+    assert list(df.columns) == ["COLOR", "RANK"]
+    assert df["COLOR"].tolist() == ["BLUE", "RED"]
+    assert df["RANK"].isna().all()
+    assert "How to use" in _template_rows(r.content, "How to use").columns
+
+
+def test_template_with_a_list_puts_ranked_rows_first_then_unranked_alphabetical(client, monkeypatch):
+    _stub_template_db(monkeypatch, {"RED": 2.0, "BLUE": 1.0, "GONE": None}, ["ZINC", "RED", "AMBER"])
+    r = client.get("/priority-list/5512/prt01/template")
+    assert r.status_code == 200
+    df = _template_rows(r.content)
+    assert list(df.columns) == ["PRT_01", "RANK"]
+    assert df["PRT_01"].tolist() == ["BLUE", "RED", "AMBER", "GONE", "ZINC"]
+    assert df["RANK"].tolist()[:2] == [1, 2]
+    assert df["RANK"].iloc[2:].isna().all()
+
+
+@pytest.mark.pg
+def test_template_round_trips_through_upload_without_needs_mapping(client, pg, monkeypatch):
+    plant = "ZZTEST_TPL_PLANT"
+    _stub_template_db(monkeypatch, None, ["BLUE", "RED"])
+    t = client.get(f"/priority-list/{plant}/colorWheel/template")
+    assert t.status_code == 200
+    try:
+        r = client.post(f"/priority-list/{plant}/colorWheel", files={"file": ("t.xlsx", t.content)})
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+    finally:
+        pg.delete_priority_list(plant, "colorWheel", line="")
+
+
+def test_template_unknown_field_key_is_400(client, monkeypatch):
+    _stub_template_db(monkeypatch, None, [])
+    assert client.get("/priority-list/5512/nope/template").status_code == 400
+
+
+def test_template_rejects_a_plant_outside_the_users_scope(client, monkeypatch):
+    import backend.security.auth as auth
+    _stub_template_db(monkeypatch, {"RED": 1.0}, ["RED"])
+    monkeypatch.setattr(auth, "get_allowed_plants", lambda email: ["1006"])
+    r = client.get("/priority-list/5512/colorWheel/template", headers={"x-user-email": "scoped.user@example.com"})
+    assert r.status_code == 403

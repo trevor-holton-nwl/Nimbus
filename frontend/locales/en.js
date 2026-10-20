@@ -800,7 +800,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.add_line_override':              'Add machine override',
   'ui.drop_replace_text':              'Drop new file to replace, or click to browse',
   'ui.drop_list_text':                 'Drag a {{field}} list here, or click to browse',
-  'ui.drop_list_hint':                 '.xlsx · value column required, rank column optional',
+  'ui.drop_list_hint':                 '.xlsx · columns {{column}} and RANK (1 = first) · download the template above',
   'ui.missing_master_data_title':      'Missing Master Data',
   'ui.missing_master_data_sub':        '{{pairs}} materials ({{orders}} orders) have no matching Material Plant row — their color/tooling values are blank until this is fixed.',
   'ui.mmd_reason_no_mp_row':           'No Material Plant row',
@@ -943,6 +943,8 @@ window.__NIMBUS_LOCALES.en = {
 
   /* ── Additional button labels ────────────────────────────────────────────── */
   'btn.export_csv':                    'Export CSV',
+  'btn.download_template':              'Template',
+  'tip.download_template':              'Download a template prefilled with the values used by this plant',
   'btn.copy_mode':                     'Copy Mode',
   'toast.copied_range':                'Copied {r}×{c} cells',
   'btn.firm_selected':                 'Firm selected',

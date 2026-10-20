@@ -565,7 +565,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.add_line_override':              'Adicionar substituição de máquina',
   'ui.drop_replace_text':              'Solte o novo arquivo para substituir ou clique para navegar',
   'ui.drop_list_text':                 'Arraste uma lista de {{field}} aqui ou clique para navegar',
-  'ui.drop_list_hint':                 '.xlsx · coluna de valor obrigatória, coluna de classificação opcional',
+  'ui.drop_list_hint':                 '.xlsx · colunas {{column}} e RANK (1 = primeiro) · baixe o modelo acima',
   'ui.missing_master_data_title':      'Dados Mestre Faltantes',
   'ui.missing_master_data_sub':        '{{pairs}} materiais ({{orders}} ordens) não têm uma linha de Material-Planta correspondente — seus valores de cor/ferramenta ficam vazios até que isso seja corrigido.',
   'ui.mmd_reason_no_mp_row':           'Sem linha de Material-Planta',
@@ -617,6 +617,8 @@ window.__NIMBUS_LOCALES.pt = {
   'day.set_to_off':   '{{day}} definido como DESLIGADO',
 
   'btn.export_csv':                    'Exportar CSV',
+  'btn.download_template':              'Modelo',
+  'tip.download_template':              'Baixar um modelo preenchido com os valores desta planta',
   'btn.copy_mode':                     'Modo cópia',
   'toast.copied_range':                '{r}×{c} células copiadas',
   'btn.firm_selected':                 'Firmar selecionados',
