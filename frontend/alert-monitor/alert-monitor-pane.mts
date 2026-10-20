@@ -5,7 +5,8 @@
    render() on every entry and setActive(false) on leave. `_active` gates every Store /
    producer subscriber so a hidden pane does no work.
 
-   Task 11 scope: toolbar, KPI strip, pinned banner and the empty states. The leverage
+   Header (rev 2): title row (profile combobox, Edit / View rules, default, ⋯ page menu), a one-sentence
+   summary line and a controls row (Group by, Sort by); then the pinned banner and the empty states. The leverage
    panel (#am-leverage, Task 13) and the alert groups (#am-groups, Task 12) are filled by
    later tasks through the two hook functions at the bottom of the paint path.
 
@@ -23,7 +24,9 @@ import type { AlertAck, AlertProfile, NimbusTask } from '../platform/types.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import type { AlertProfileMatchSet } from '../insights/alert-profile-matches.mjs';
 import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
-import { AlertProfileEditor } from './alert-profile-editor.mjs';
+import { AlertProfileEditor, canDeleteProfile } from './alert-profile-editor.mjs';
+import { OverflowMenu } from '../platform/overflow-menu.mjs';
+import type { MenuItem } from '../platform/overflow-menu.mjs';
 import { AlertAckModal } from './alert-ack-modal.mjs';
 import { AlertAcksClient } from '../insights/alert-acks-client.mjs';
 import {
@@ -35,13 +38,13 @@ import { groupLeverage, analyzeLeverage, replayWithMinutes } from '../insights/a
 import type { LeverageItem, LeverageInput, LeverageRunner } from '../insights/alert-leverage.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import {
-  MONITOR_GROUP_BYS, MONITOR_SORTS, MONITOR_CATEGORIES, GROUP_ROW_CAP, ROW_H, DIAG_H,
-  kpiSummary, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  MONITOR_GROUP_BYS, MONITOR_SORTS, GROUP_ROW_CAP, ROW_H, DIAG_H,
+  summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowHtml, colsHtml, diagnoseHtml, groupHeadHtml, groupTotals, groupLabel,
   relativeDaysText, formatPairKey, fmtNum,
   levSectionHtml, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
-import type { MonitorView, EmptyKind, KpiSummary, RowView, LevCtx } from './alert-monitor-model.mjs';
+import type { MonitorView, EmptyKind, RowView, LevCtx } from './alert-monitor-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -56,13 +59,14 @@ interface PaintState {
   showAcked: boolean;
   /** Every alert of the plant's lines (profile and acknowledgement ignored) — what the leverage panel works on (D10). */
   scoped: NimbusAlert[];
-  /** What the profile matched (acknowledged hidden unless asked) — the KPI strip counts these. */
+  /** What the profile matched (acknowledged hidden unless asked). */
   visible: NimbusAlert[];
   /** What the groups list: `visible`, or the focus set (which bypasses the profile). */
   listed: NimbusAlert[];
   /** Focused alerts the profile did not match (the focus chip says so). */
   focusOutside: number;
-  kpi: KpiSummary;
+  /** The plant confidence score now (null until computed). */
+  confidence: number | null;
   empty: EmptyKind;
   scopedCount: number;
   /** The plant clock now — the start of the impact horizon. */
@@ -94,9 +98,10 @@ const GROUP_LABEL_KEY: Record<string, string> = {
   category: 'am.group_category', type: 'am.group_type', line: 'am.group_line',
   day: 'am.group_day', order: 'am.group_order', none: 'am.group_none',
 };
-const SORT_LABEL_KEY: Record<string, string> = {
-  impact: 'am.sort_impact', time: 'am.sort_time', severity: 'am.sort_severity', orders: 'am.sort_orders',
-};
+const SORT_LABEL_KEY: Record<string, string> = { impact: 'am.sort_impact', time: 'am.sort_time' };
+
+/** Sentinel option id of the picker's "+ New profile…" row; it never reaches setSessionProfile. */
+const NEW_PROFILE_ID = '__new__';
 
 let _wired = false;
 let _active = false;
@@ -143,40 +148,37 @@ function _setText(id: string, text: string): void {
    Shell — built once into #alerts-tab
    ------------------------------------------------------------------------- */
 function _shellHtml(): string {
-  const groupBtns = MONITOR_GROUP_BYS.map(g =>
-    `<button type="button" class="seg-btn" data-am-group="${g}" aria-pressed="false">${esc(t(GROUP_LABEL_KEY[g]))}</button>`).join('');
-  const sortOpts = MONITOR_SORTS.map(s => `<option value="${s}">${esc(t(SORT_LABEL_KEY[s]))}</option>`).join('');
-  const legend = MONITOR_CATEGORIES.map(c =>
-    `<span class="am-cat-item"><span class="am-cat-swatch am-cat-${c}" aria-hidden="true"></span>${esc(t(`ape.cat_${c}`))}</span>`).join('');
+  const groupOpts = MONITOR_GROUP_BYS.map(g => `<option value="${g}">${esc(t(GROUP_LABEL_KEY[g]))}</option>`).join('');
+  const sortBtns = MONITOR_SORTS.map(s =>
+    `<button type="button" class="seg-btn" data-am-sort="${s}" aria-pressed="false">${esc(t(SORT_LABEL_KEY[s]))}</button>`).join('');
   return `
-<div class="am-toolbar" id="am-toolbar">
-  <span class="am-eyebrow">${esc(t('am.profile_label'))}</span>
-  <div class="am-profile-wrap">
-    <div class="us-combo" id="am-profile-combo">
-      <input type="text" id="am-profile-input" class="us-combo-input" role="combobox" autocomplete="off"
-             aria-autocomplete="list" aria-expanded="false" aria-controls="am-profile-dropdown"
-             aria-label="${esc(t('am.view_as'))}" title="${esc(t('am.view_as'))}" placeholder="${esc(t('am.profile_ph'))}">
-      <div class="us-combo-dropdown" id="am-profile-dropdown" role="listbox" hidden></div>
-    </div>
-  </div>
-  <button type="button" class="btn sm" id="am-make-default" data-am-action="make-default" hidden>${esc(t('am.make_default'))}</button>
-  <span class="badge badge-info" id="am-is-default" hidden>${esc(t('am.is_default'))}</span>
-  <span class="am-window" id="am-window"></span>
-  <button type="button" class="btn sm btn-ghost" id="am-manage" data-am-action="manage">${esc(t('am.manage_profiles'))}</button>
-  <label class="am-toggle"><input type="checkbox" id="am-t-highlight" data-am-toggle="highlight"><span>${esc(t('am.gantt_highlight'))}</span></label>
-  <label class="am-toggle"><input type="checkbox" id="am-t-ack" data-am-toggle="ack"><span>${esc(t('am.ack_show'))}</span></label>
-  <span class="spacer"></span>
-  <span class="plant-badge" id="am-plant-badge" hidden></span>
-  <div class="am-toolbar-row">
-    <span class="am-eyebrow">${esc(t('am.group_by'))}</span>
-    <div class="am-seg" id="am-seg" role="group" aria-label="${esc(t('am.group_by'))}">${groupBtns}</div>
-    <span class="am-eyebrow">${esc(t('am.sort'))}</span>
-    <select class="am-sort" id="am-sort" data-am-sort aria-label="${esc(t('am.sort'))}">${sortOpts}</select>
+<div class="am-head" id="am-head">
+  <div class="am-head-row">
+    <h2 class="am-title">${esc(t('tab.alerts'))}</h2>
+    <span class="plant-badge" id="am-plant-badge" hidden></span>
     <span class="spacer"></span>
-    <div class="am-cat-legend" id="am-cat-legend" role="group" aria-label="${esc(t('legend.pm_capacity_t'))}">${legend}</div>
+    <div class="am-profile-wrap">
+      <div class="us-combo" id="am-profile-combo">
+        <input type="text" id="am-profile-input" class="us-combo-input" role="combobox" autocomplete="off"
+               aria-autocomplete="list" aria-expanded="false" aria-controls="am-profile-dropdown"
+               aria-label="${esc(t('am.view_as'))}" title="${esc(t('am.view_as'))}" placeholder="${esc(t('am.profile_ph'))}">
+        <div class="us-combo-dropdown" id="am-profile-dropdown" role="listbox" hidden></div>
+      </div>
+    </div>
+    <button type="button" class="btn btn-ghost" id="am-edit" data-am-action="edit-profile" hidden>${esc(t('am.edit_profile'))}</button>
+    <span class="am-default-note" id="am-is-default" hidden>${esc(t('am.is_default'))}</span>
+    <button type="button" class="btn btn-ghost" id="am-make-default" data-am-action="make-default" hidden>${esc(t('am.set_default'))}</button>
+    <button type="button" class="icon-btn" id="am-page-menu" data-am-action="page-menu" data-ovf-key="page"
+            aria-label="${esc(t('am.page_menu'))}" title="${esc(t('am.page_menu'))}" aria-haspopup="menu" aria-expanded="false">⋯</button>
+  </div>
+  <div class="am-summary" id="am-summary"></div>
+  <div class="am-head-row am-controls">
+    <label class="am-ctl-label" for="am-group-sel">${esc(t('am.group_by'))}</label>
+    <select class="input am-group-sel" id="am-group-sel" data-am-group-sel>${groupOpts}</select>
+    <span class="am-ctl-label" id="am-sort-label">${esc(t('am.sort_by'))}</span>
+    <div class="am-seg" id="am-seg" role="group" aria-labelledby="am-sort-label">${sortBtns}</div>
   </div>
 </div>
-<div class="am-kpi-strip" id="am-kpis"></div>
 <div class="am-scroll" id="am-scroll">
   <div id="am-banner"></div>
   <div id="am-prompt"></div>
@@ -221,6 +223,7 @@ function _defaultProfileId(plant: string, profiles: AlertProfile[]): string {
 function _chooseProfile(id: string): void {
   const plant = Store.selectedPlant;
   if (!plant) return;
+  if (!_comboOptions().some(o => o.id === id)) return;   // the "+ New profile…" sentinel and stale ids never become the view
   const profiles = AlertProfileClient.cached(plant) ?? [];
   AlertProfileMatches.setSessionProfile(id === _defaultProfileId(plant, profiles) ? null : id);
 }
@@ -239,25 +242,44 @@ function _wireCombo(): void {
     const a = items[_comboActive] as HTMLElement | undefined;
     if (a && a.scrollIntoView) a.scrollIntoView({ block: 'nearest' });
   };
-  const choose = (id: string) => { _chooseProfile(id); reflect(); close(); input.blur(); };
+  const choose = (id: string) => {
+    if (id === NEW_PROFILE_ID) {
+      // The sentinel never reaches _chooseProfile: it opens the editor on a blank draft, and a successful save hands back the view.
+      const plant = Store.selectedPlant;
+      if (plant) AlertProfileEditor.open({ plant, fromPicker: true });
+    } else {
+      _chooseProfile(id);
+    }
+    reflect(); close(); input.blur();
+  };
 
   const renderList = (query: string) => {
     const all = _comboOptions();
     const q = (query || '').trim().toLowerCase();
     const fq = q === _viewedLabel().toLowerCase() ? '' : q;
-    _comboFiltered = fq ? all.filter(o => o.label.toLowerCase().includes(fq)) : all.slice();
+    // "+ New profile…" is appended after filtering, always, so it is also what a search with no matches offers.
+    _comboFiltered = [...(fq ? all.filter(o => o.label.toLowerCase().includes(fq)) : all), { id: NEW_PROFILE_ID, label: t('ape.new_profile') }];
     const plant = Store.selectedPlant;
     const defId = plant ? _defaultProfileId(plant, (AlertProfileClient.cached(plant) ?? [])) : ALL_ALERTS_PROFILE_ID;
-    const viewed = AlertProfileMatches.view().profileId;
-    if (!_comboFiltered.length) {
-      dropdown.innerHTML = `<div class="us-combo-empty">${esc(t('us.no_matches'))}</div>`;
+    const vm = AlertProfileMatches.view();
+    const viewed = vm.profileId;
+    const viewedSub = windowSummary(vm.profile, t);
+    const newHtml = (i: number) =>
+      `<div class="us-combo-option am-opt-new" role="option" aria-selected="false" data-profile="${NEW_PROFILE_ID}" data-idx="${i}">`
+      + `<span>+ ${esc(t('ape.new_profile'))}…</span></div>`;
+    if (_comboFiltered.length === 1) {
+      dropdown.innerHTML = `<div class="us-combo-empty">${esc(t('us.no_matches'))}</div>${newHtml(0)}`;
       _comboActive = -1;
       return;
     }
     const hint = all.length === 1 && !fq ? `<div class="us-combo-empty">${esc(t('am.profile_none'))}</div>` : '';
-    dropdown.innerHTML = _comboFiltered.map((o, i) =>
-      `<div class="us-combo-option${o.id === viewed ? ' selected' : ''}" role="option" aria-selected="${o.id === viewed}" data-profile="${esc(o.id)}" data-idx="${i}">`
-      + `<span>${esc(o.label)}</span>${o.id === defId ? `<span class="us-combo-option-prefix">${esc(t('am.is_default'))}</span>` : ''}</div>`).join('') + hint;
+    const rows = _comboFiltered.slice(0, -1).map((o, i) => {
+      const sub = o.id === viewed && viewedSub ? `<span class="am-opt-sub">${esc(viewedSub)}</span>` : '';
+      return `<div class="us-combo-option${o.id === viewed ? ' selected' : ''}" role="option" aria-selected="${o.id === viewed}" data-profile="${esc(o.id)}" data-idx="${i}">`
+        + `<span class="am-opt-text"><span class="am-opt-name">${esc(o.label)}</span>${sub}</span>`
+        + `${o.id === defId ? `<span class="us-combo-option-prefix">${esc(t('am.is_default'))}</span>` : ''}</div>`;
+    }).join('');
+    dropdown.innerHTML = rows + hint + newHtml(_comboFiltered.length - 1);
     _comboActive = Math.max(0, _comboFiltered.findIndex(o => o.id === viewed));
     highlight();
   };
@@ -286,12 +308,33 @@ function _wireCombo(): void {
 /* ---------------------------------------------------------------------------
    Actions
    ------------------------------------------------------------------------- */
+/** Writes only the changed key: the other one keeps following its default (Machine / the profile's ranking) until the user sets it. */
 function _persistView(patch: Partial<MonitorView>): void {
   const m = AlertProfileMatches.view();
-  const stored = (Store.pref('alertMonitorView') as Record<string, unknown> | null | undefined) ?? {};
-  const cur = viewFor(m.profileId, stored as Parameters<typeof viewFor>[1], m.profile);
-  Session.setPref('alertMonitorView', { ...stored, [m.profileId]: { ...cur, ...patch } });
+  const stored = (Store.pref('alertMonitorView') as Record<string, Record<string, unknown> | undefined> | null | undefined) ?? {};
+  Session.setPref('alertMonitorView', { ...stored, [m.profileId]: { ...(stored[m.profileId] ?? {}), ...patch } });
   _paint();
+}
+
+function _openProfileEditor(): void {
+  const plant = Store.selectedPlant;
+  const id = AlertProfileMatches.view().profileId;
+  if (plant && id !== ALL_ALERTS_PROFILE_ID) AlertProfileEditor.open({ plant, profileId: id });
+}
+
+/** ⋯ page menu: the two page-level toggles, both persisted prefs. */
+function _openPageMenu(anchor: HTMLElement): void {
+  const items: MenuItem[] = [
+    {
+      id: 'highlight', label: t('am.gantt_highlight'), checked: Store.pref('alertProfileGanttHighlight') !== false,
+      onSelect: (next: boolean) => { Session.setPref('alertProfileGanttHighlight', next); },
+    },
+    {
+      id: 'ack', label: t('am.ack_show'), checked: Store.pref('alertsShowAcknowledged') === true,
+      onSelect: (next: boolean) => { Session.setPref('alertsShowAcknowledged', next); },
+    },
+  ];
+  OverflowMenu.open(anchor, items, { align: 'end', key: 'page' });
 }
 
 function _makeDefault(): void {
@@ -305,24 +348,23 @@ function _makeDefault(): void {
 
 function _onClick(e: Event): void {
   const target = e.target as HTMLElement | null;
-  const seg = target?.closest?.('[data-am-group]') as HTMLElement | null;
-  if (seg?.dataset.amGroup) { _persistView({ groupBy: seg.dataset.amGroup as MonitorView['groupBy'] }); return; }
+  const seg = target?.closest?.('[data-am-sort]') as HTMLElement | null;
+  const sortId = seg?.dataset.amSort as MonitorView['sort'] | undefined;
+  if (sortId && MONITOR_SORTS.includes(sortId)) { _persistView({ sort: sortId }); return; }
   const lev = target?.closest?.('[data-lev-action]') as HTMLElement | null;
   if (lev?.dataset.levAction) { _onLevAction(lev.dataset.levAction, lev.dataset.levKey ?? ''); return; }
   const btn = target?.closest?.('[data-am-action]') as HTMLElement | null;
   switch (btn?.dataset.amAction) {
     case 'make-default': _makeDefault(); break;
     case 'switch-all':   AlertProfileMatches.setSessionProfile(ALL_ALERTS_PROFILE_ID); break;
-    case 'manage':
+    case 'edit-profile': _openProfileEditor(); break;
     case 'create-profile': {
       const plant = Store.selectedPlant;
-      if (!plant) break;
-      // Manage opens on the profile being viewed (when it is a stored one); the prompt always starts a new draft.
-      const viewed = btn!.dataset.amAction === 'manage' ? AlertProfileMatches.view().profileId : undefined;
-      AlertProfileEditor.open({ plant, profileId: viewed && viewed !== ALL_ALERTS_PROFILE_ID ? viewed : undefined });
+      if (plant) AlertProfileEditor.open({ plant });   // the prompt always starts a new draft
       break;
     }
-    case 'kpi-confidence': {
+    case 'page-menu': if (btn) _openPageMenu(btn); break;
+    case 'summary-conf': {
       const conf = (globalThis as unknown as { NIMBUS?: { Confidence?: { showBreakdown?: () => void } } }).NIMBUS?.Confidence;
       conf?.showBreakdown?.();
       break;
@@ -440,14 +482,8 @@ function _onChange(e: Event): void {
   const target = e.target as HTMLInputElement | null;
   const mins = target?.closest?.('[data-lev-minutes]') as HTMLInputElement | null;
   if (mins?.dataset.levMinutes) { void _levMinutesEntered(mins.dataset.levMinutes, String(mins.value ?? '')); return; }
-  const tog = target?.closest?.('[data-am-toggle]') as HTMLInputElement | null;
-  if (tog) {
-    if (tog.dataset.amToggle === 'highlight') Session.setPref('alertProfileGanttHighlight', !!tog.checked);
-    else if (tog.dataset.amToggle === 'ack') Session.setPref('alertsShowAcknowledged', !!tog.checked);
-    return;
-  }
-  const sort = target?.closest?.('[data-am-sort]') as HTMLSelectElement | null;
-  if (sort && MONITOR_SORTS.includes(sort.value as MonitorView['sort'])) _persistView({ sort: sort.value as MonitorView['sort'] });
+  const group = target?.closest?.('[data-am-group-sel]') as HTMLSelectElement | null;
+  if (group && MONITOR_GROUP_BYS.includes(group.value as MonitorView['groupBy'])) _persistView({ groupBy: group.value as MonitorView['groupBy'] });
 }
 
 /* ---------------------------------------------------------------------------
@@ -464,7 +500,6 @@ function _gatherState(): PaintState {
 
   const plantRow = plant ? Store.masterPlant(plant) : null;
   const clock = plant ? Util.plantClock(plant) : new Date();
-  const hz = plantRow?.alt_flag_horizon ?? (Store.userSettings?.alertHorizonMinutes as number | undefined) ?? null;
   const lines = new Set(plant ? Store.linesForSelectedPlant() : []);
   const scoped = horizonAlerts(Store.alerts, lines, null);
   const visible = visibleAlertsFor(scoped, m.alertIds, m.acked, showAcked);
@@ -473,8 +508,6 @@ function _gatherState(): PaintState {
   const focusOutside = focus ? listed.filter(a => !m.alertIds.has(a.id)).length : 0;
 
   const confMin = plantRow?.conf_score_horizon ?? (Store.userSettings?.confidenceHorizonMinutes as number | undefined) ?? 20160;
-  const confCutoff = new Date(clock.getTime() + confMin * Config.MS_MIN);
-  const inConfWindow = scoped.filter(a => !a.time || a.time <= confCutoff).length;
   const score = (globalThis as unknown as { NIMBUS?: { Confidence?: { _score?: number } } }).NIMBUS?.Confidence?._score;
 
   const matchedCount = scoped.filter(a => m.alertIds.has(a.id)).length;
@@ -482,7 +515,7 @@ function _gatherState(): PaintState {
     plant, m, profiles, profilesLoaded: profilesRaw != null, view,
     defaultId: plant ? _defaultProfileId(plant, profiles) : ALL_ALERTS_PROFILE_ID,
     showAcked, scoped, visible, listed, focusOutside, scopedCount: scoped.length,
-    kpi: kpiSummary(visible, scoped, hz, score, inConfWindow),
+    confidence: typeof score === 'number' && isFinite(score) ? score : null,
     // A focus set always lists something or says nothing is left; the profile empty states don't apply to it.
     empty: focus
       ? (listed.length ? null : 'no-alerts')
@@ -495,56 +528,55 @@ function _gatherState(): PaintState {
   };
 }
 
-function _syncToolbar(s: PaintState): void {
+/** Header rows 1 and 3: the combobox, Edit / View rules, the default control, the plant badge and the two view controls. */
+function _syncHeader(s: PaintState): void {
   const input = _el<HTMLInputElement>('am-profile-input');
   if (input) {
     input.disabled = !s.plant;
     if (document.activeElement !== input) input.value = s.plant ? _viewedLabel() : '';
+    const win = s.plant ? windowSummary(s.m.profile, t) : '';
+    if (win) input.setAttribute('aria-description', win); else input.removeAttribute('aria-description');
+  }
+  const stored = s.plant && s.m.profileId !== ALL_ALERTS_PROFILE_ID;
+  const edit = _el('am-edit');
+  if (edit) {
+    edit.hidden = !stored;
+    // Same rule the editor applies: an admin or the creator edits, anyone else reads the rules.
+    const canEdit = !!stored && canDeleteProfile(s.m.profile, Session.currentUser(), Session.isAdmin());
+    _setText('am-edit', t(canEdit ? 'am.edit_profile' : 'am.view_profile'));
   }
   const isDefault = !!s.plant && s.m.profileId === s.defaultId;
   const mk = _el('am-make-default');
   if (mk) mk.hidden = !s.plant || isDefault;
-  const badge = _el('am-is-default');
-  if (badge) badge.hidden = !isDefault;
-
-  const summary = s.plant ? windowSummary(s.m.profile, t) : '';
-  _setText('am-window', summary);
-  const win = _el('am-window');
-  if (win) win.title = summary;
-
-  const hi = _el<HTMLInputElement>('am-t-highlight');
-  if (hi) hi.checked = Store.pref('alertProfileGanttHighlight') !== false;
-  const ak = _el<HTMLInputElement>('am-t-ack');
-  if (ak) ak.checked = s.showAcked;
+  const note = _el('am-is-default');
+  if (note) note.hidden = !isDefault;
 
   const pb = _el('am-plant-badge');
   if (pb) { pb.hidden = !s.plant; pb.textContent = s.plant ?? ''; }
 
-  document.querySelectorAll<HTMLElement>('[data-am-group]').forEach(b => {
-    const on = b.dataset.amGroup === s.view.groupBy;
+  const grp = _el<HTMLSelectElement>('am-group-sel');
+  if (grp) { grp.value = s.view.groupBy; grp.disabled = !s.plant; }
+  document.querySelectorAll<HTMLElement>('[data-am-sort]').forEach(b => {
+    const on = b.dataset.amSort === s.view.sort;
     b.classList.toggle('active', on);
     b.setAttribute('aria-pressed', String(on));
+    (b as HTMLButtonElement).disabled = !s.plant;
   });
-  const sort = _el<HTMLSelectElement>('am-sort');
-  if (sort) sort.value = s.view.sort;
 }
 
-function _kpiHtml(s: PaintState): string {
-  const k = s.kpi;
-  const dash = !s.plant;
-  const num = (n: number) => dash ? '—' : String(n);
-  const conf = k.confidence == null || dash ? '—' : String(Math.round(k.confidence));
-  const of = dash ? '' : t('am.kpi_matched_of', { total: k.total });
-  const tile = (cls: string, label: string, value: string, sub: string, attrs = '') =>
-    `<button type="button" class="kpi-tile ${cls}"${attrs}><div class="k">${esc(label)}</div><div class="v">${esc(value)}</div><div class="d">${esc(sub)}</div></button>`;
-  return [
-    tile('', t('am.kpi_matched'), num(k.matched), of, ' disabled'),
-    tile(!dash && k.errors > 0 ? 'err' : '', t('am.kpi_errors'), num(k.errors), '', ' disabled'),
-    tile(!dash && k.warnings > 0 ? 'warn' : '', t('am.kpi_warnings'), num(k.warnings), '', ' disabled'),
-    tile('', t('am.kpi_orders'), num(k.orders), '', ' disabled'),
-    tile('is-actionable', t('am.kpi_confidence'), conf,
-      dash ? '' : t('am.kpi_confidence_sub', { n: k.confidenceWindowAlerts }), ' data-am-action="kpi-confidence"'),
-  ].join('');
+/** Header row 2: one sentence over the alerts the list shows, ending in the plant-confidence link. */
+function _summaryHtml(s: PaintState): string {
+  const line = summaryLine({
+    hasPlant: !!s.plant, alerts: s.listed, profileId: s.m.profileId, profileName: s.m.profile.name, profile: s.m.profile,
+    focus: _focusIds ? { title: _focusTitle, outside: s.focusOutside } : null, confidence: s.confidence,
+  }, t);
+  let html = `<span>${esc(line.text)}</span>`;
+  if (line.conf) {
+    const { prefix, score, suffix } = line.conf;
+    html += ` · <button type="button" class="am-summary-conf" data-am-action="summary-conf">${esc(prefix)}`
+      + (score ? `<span class="am-summary-num">${esc(score)}</span>` : '') + `${esc(suffix)}</button>`;
+  }
+  return html;
 }
 
 function _bannerHtml(s: PaintState): string {
@@ -1081,14 +1113,16 @@ function _paint(): void {
   _ensureShell();
   if ((Store.selectedPlant ?? null) !== _lastPlant) { _lastPlant = Store.selectedPlant ?? null; AlertMonitorPane.resetView(); }
   const s = _gatherState();
-  _syncToolbar(s);
-  _setHtml('am-kpis', _kpiHtml(s));
+  _syncHeader(s);
+  _setHtml('am-summary', _summaryHtml(s));
   // The producer follows plant:selected itself; until it has caught up, leave the body alone.
-  if (s.plant && s.m.plant !== s.plant) return;
-  _setHtml('am-banner', _bannerHtml(s));
-  _setHtml('am-prompt', _promptHtml(s));
-  _renderLeverage(s);
-  _renderGroups(s);
+  if (!(s.plant && s.m.plant !== s.plant)) {
+    _setHtml('am-banner', _bannerHtml(s));
+    _setHtml('am-prompt', _promptHtml(s));
+    _renderLeverage(s);
+    _renderGroups(s);
+  }
+  OverflowMenu.reconcile();   // an open ⋯ menu whose trigger a repaint replaced closes (or follows its data-ovf-key)
 }
 
 const _debouncedPaint = Util.debounce(() => { if (_active) _paint(); }, 150);

@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -25,59 +25,97 @@ export interface AlertLike {
 
 export type MonitorGroupBy = 'category' | 'type' | 'line' | 'day' | 'order' | 'none';
 
-export const MONITOR_GROUP_BYS: MonitorGroupBy[] = ['category', 'type', 'line', 'day', 'order', 'none'];
-export const MONITOR_SORTS: AlertRanking[] = ['impact', 'time', 'severity', 'orders'];
+/** Machine first: it is the default grouping and the order the Group by select lists. */
+export const MONITOR_GROUP_BYS: MonitorGroupBy[] = ['line', 'day', 'type', 'category', 'order', 'none'];
+/** The two sorts the page offers (Priority / Date); the stored `severity` / `orders` of earlier builds read as `impact`. */
+export const MONITOR_SORTS: AlertRanking[] = ['impact', 'time'];
 export const MONITOR_CATEGORIES: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'exceptions'];
-export const DEFAULT_GROUP_BY: MonitorGroupBy = 'category';
+export const DEFAULT_GROUP_BY: MonitorGroupBy = 'line';
 
 export interface MonitorView { groupBy: MonitorGroupBy; sort: AlertRanking }
 
-export interface KpiSummary {
-  matched: number;
-  /** Every alert at the plant (all profiles, not horizon-limited), so `matched <= total` always. */
-  total: number;
-  /** The plant horizon in whole days (null when the plant has none). */
-  days: number | null;
-  errors: number;
-  warnings: number;
-  /** Distinct orders carrying at least one matched alert. */
-  orders: number;
+/** What the summary line says about the alerts the list shows. */
+export interface SummaryInput {
+  /** No plant selected: the line is just the select-a-plant message. */
+  hasPlant: boolean;
+  /** The alerts the list below shows (profile-filtered, acknowledged excluded unless asked; the focus set in focus mode). */
+  alerts: ReadonlyArray<AlertLike>;
+  profileId: string;
+  profileName: string;
+  profile: AlertProfile | null | undefined;
+  /** A leverage card's "Show alerts" is active: its chip text replaces the first clause. */
+  focus: { title: string; outside: number } | null;
   /** The plant confidence score now (null until computed). */
-  confidence: number | null;
-  /** Alerts inside the confidence window (the `.d` line of the confidence tile). */
-  confidenceWindowAlerts: number;
+  confidence: number | null | undefined;
 }
 
+export interface SummaryLine {
+  /** The sentence up to (not including) the confidence link. */
+  text: string;
+  /** "Plant confidence 71" split around the score so the pane can set the number in mono; null when there is no score. */
+  conf: { prefix: string; score: string; suffix: string } | null;
+}
+
+const _SCORE_MARK = '\u0002';
+
 /**
- * KPI strip numbers. `matched` is what the monitor lists (profile window, acknowledged
- * hidden); `all` is the plant-horizon set the "of N" caption quotes.
+ * The whole-day window a profile covers when every rule shares the same `dayFrom` and `dayTo` (both set),
+ * else null (an open bound, differing windows, no rules, or the built-in All alerts).
  */
-export function kpiSummary(
-  matched: ReadonlyArray<AlertLike>,
-  all: ReadonlyArray<AlertLike>,
-  plantHorizonMinutes: number | null | undefined,
-  confidence: number | null | undefined,
-  confidenceWindowAlerts = 0,
-): KpiSummary {
+export function profileWindow(profile: AlertProfile | null | undefined): { from: number; to: number } | null {
+  if (!profile || profile.builtIn || !profile.rules?.length) return null;
+  let win: { from: number; to: number } | null = null;
+  for (const rule of profile.rules) {
+    const from = rule.dayFrom, to = rule.dayTo;
+    if (typeof from !== 'number' || typeof to !== 'number') return null;
+    if (!win) win = { from, to };
+    else if (win.from !== from || win.to !== to) return null;
+  }
+  return win;
+}
+
+/** `_one` form at exactly 1 (Util.t has no plural support). */
+const _plural = (n: number, key: string, vars: Record<string, string | number>, t: Translate): string =>
+  t(n === 1 ? `${key}_one` : key, vars);
+
+/** The one-sentence page summary (row 2 of the header). Counts are over the alerts the list shows. */
+export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
+  if (!input.hasPlant) return { text: t('am.empty_no_plant'), conf: null };
   let errors = 0, warnings = 0;
   const orders = new Set<string>();
-  for (const a of matched) {
+  for (const a of input.alerts) {
     if (a.sev === 'err') errors++; else warnings++;
     if (a.taskId) orders.add(String(a.taskId));
     if (a.peerId) orders.add(String(a.peerId));   // an overlap / tool conflict affects both orders
   }
-  const days = typeof plantHorizonMinutes === 'number' && isFinite(plantHorizonMinutes) && plantHorizonMinutes > 0
-    ? Math.max(1, Math.round(plantHorizonMinutes / 1440)) : null;
-  return {
-    matched: matched.length,
-    total: all.length,
-    days,
-    errors,
-    warnings,
-    orders: orders.size,
-    confidence: typeof confidence === 'number' && isFinite(confidence) ? confidence : null,
-    confidenceWindowAlerts,
-  };
+  const n = input.alerts.length;
+  let lead: string;
+  if (input.focus) {
+    lead = input.focus.outside > 0
+      ? t('am.focus_chip_outside', { n, title: input.focus.title, k: input.focus.outside })
+      : t('am.focus_chip', { n, title: input.focus.title });
+  } else if (input.profileId === ALL_ALERTS_PROFILE_ID) {
+    lead = t('am.summary_all', { n });
+  } else {
+    const win = profileWindow(input.profile);
+    lead = win
+      ? t('am.summary_window', { n, from: win.from, to: win.to, name: input.profileName })
+      : t('am.summary_profile', { n, name: input.profileName });
+  }
+  const parts = [lead];
+  if (errors > 0) parts.push(_plural(errors, 'am.summary_errors', { e: errors }, t));
+  if (warnings > 0) parts.push(_plural(warnings, 'am.summary_warnings', { w: warnings }, t));
+  if (orders.size > 0) parts.push(_plural(orders.size, 'am.summary_orders', { o: orders.size }, t));
+  let conf: SummaryLine['conf'] = null;
+  const c = input.confidence;
+  if (typeof c === 'number' && isFinite(c)) {
+    const score = String(Math.round(c));
+    const [prefix, suffix] = t('am.summary_conf', { score: _SCORE_MARK }).split(_SCORE_MARK);
+    conf = prefix !== undefined && suffix !== undefined
+      ? { prefix, score, suffix }
+      : { prefix: t('am.summary_conf', { score }), score: '', suffix: '' };
+  }
+  return { text: parts.join(' · '), conf };
 }
 
 const _DAY_MARK = '\u0001';
@@ -118,8 +156,9 @@ export function windowSummary(profile: AlertProfile | null | undefined, t: Trans
 }
 
 /**
- * The group-by / sort for a profile: the user's stored choice (`alertMonitorView[profileId]`)
- * wins, else category grouping and the profile's own default ranking.
+ * The group-by / sort for a profile: the user's stored choice (`alertMonitorView[profileId]`) wins, else
+ * Machine grouping and the profile's own default ranking (`time` -> Date, anything else -> Priority).
+ * A stored `severity` / `orders` sort (earlier builds) reads as Priority.
  */
 export function viewFor(
   profileId: string,
@@ -129,8 +168,10 @@ export function viewFor(
   const stored = pref && typeof pref === 'object' ? pref[profileId] : undefined;
   const groupBy = MONITOR_GROUP_BYS.includes(stored?.groupBy as MonitorGroupBy)
     ? stored!.groupBy as MonitorGroupBy : DEFAULT_GROUP_BY;
-  const fallback: AlertRanking = MONITOR_SORTS.includes(profile?.ranking as AlertRanking) ? profile!.ranking : 'impact';
-  const sort = MONITOR_SORTS.includes(stored?.sort as AlertRanking) ? stored!.sort as AlertRanking : fallback;
+  const fallback: AlertRanking = profile?.ranking === 'time' ? 'time' : 'impact';
+  const raw = stored?.sort;
+  const sort: AlertRanking = raw === 'time' ? 'time'
+    : (raw === 'impact' || raw === 'severity' || raw === 'orders') ? 'impact' : fallback;
   return { groupBy, sort };
 }
 

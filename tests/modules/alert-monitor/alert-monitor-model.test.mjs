@@ -1,8 +1,9 @@
-// Tests for frontend/alert-monitor/alert-monitor-model.mts — the pure KPI / summary / view helpers.
+// Tests for frontend/alert-monitor/alert-monitor-model.mts — the pure summary-line / window / view helpers.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  kpiSummary, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  profileWindow, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  MONITOR_GROUP_BYS, MONITOR_SORTS,
 } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 import { ALL_ALERTS_PROFILE } from '../../../frontend/insights/alert-profiles.mjs';
 
@@ -23,32 +24,73 @@ const t = (k, v) => (EN[k] ?? k).replace(/\{\{(\w+)\}\}/g, (_, n) => String(v?.[
 const rule = (o = {}) => ({ types: null, dayFrom: null, dayTo: null, minSev: null, minLateHours: null, ...o });
 const prof = (rules, ranking = 'impact') => ({ id: 'p1', plant: 'P', name: 'N', description: '', rules, ranking, created_by: null, updated_at: null });
 
-test('kpiSummary counts severities, distinct orders and the horizon in days', () => {
-  const matched = [
-    { id: 'a', sev: 'err', type: 'overlap', taskId: '1' },
-    { id: 'b', sev: 'warn', type: 'overlap', taskId: '1' },
-    { id: 'c', sev: 'warn', type: 'late', taskId: '2' },
-    { id: 'd', sev: 'warn', type: 'overload' },
-  ];
-  const k = kpiSummary(matched, new Array(9).fill({ id: 'x', sev: 'warn', type: 'late' }), 4320, 71.5, 3);
-  assert.deepEqual(k, { matched: 4, total: 9, days: 3, errors: 1, warnings: 3, orders: 2, confidence: 71.5, confidenceWindowAlerts: 3 });
+test('profileWindow: a single rule, and several rules with the same window, give that window', () => {
+  assert.deepEqual(profileWindow(prof([rule({ dayFrom: 8, dayTo: 30 })])), { from: 8, to: 30 });
+  assert.deepEqual(profileWindow(prof([rule({ dayFrom: 8, dayTo: 30, types: ['overlap'] }), rule({ dayFrom: 8, dayTo: 30, minSev: 'err' })])), { from: 8, to: 30 });
+  assert.deepEqual(profileWindow(prof([rule({ dayFrom: -7, dayTo: 30 })])), { from: -7, to: 30 });
 });
 
-test('kpiSummary counts an overlap / tool conflict against both orders (taskId ∪ peerId)', () => {
-  const matched = [
-    { id: 'a', sev: 'err', type: 'overlap', taskId: '1', peerId: '2' },
-    { id: 'b', sev: 'err', type: 'tool-conflict', taskId: '2', peerId: '3' },
-    { id: 'c', sev: 'warn', type: 'late', taskId: '1' },
-  ];
-  assert.equal(kpiSummary(matched, matched, null, null).orders, 3);
+test('profileWindow: differing windows, an open bound, no rules and All alerts give null', () => {
+  assert.equal(profileWindow(prof([rule({ dayFrom: 0, dayTo: 7 }), rule({ dayFrom: 8, dayTo: 30 })])), null);
+  assert.equal(profileWindow(prof([rule({ dayFrom: 0, dayTo: 7 }), rule({ dayFrom: 0, dayTo: 8 })])), null);
+  assert.equal(profileWindow(prof([rule({ dayFrom: 8, dayTo: null })])), null);
+  assert.equal(profileWindow(prof([rule({ dayFrom: null, dayTo: 7 })])), null);
+  assert.equal(profileWindow(prof([rule({ dayFrom: 0, dayTo: 7 }), rule({})])), null);
+  assert.equal(profileWindow(prof([])), null);
+  assert.equal(profileWindow(null), null);
+  assert.equal(profileWindow(ALL_ALERTS_PROFILE), null);
 });
 
-test('kpiSummary tolerates a missing horizon and confidence', () => {
-  const k = kpiSummary([], [], null, undefined);
-  assert.equal(k.days, null);
-  assert.equal(k.confidence, null);
-  assert.equal(k.matched, 0);
-  assert.equal(kpiSummary([], [], 0, NaN).days, null);
+const SUM = {
+  'am.summary_window': '{{n}} alerts in D{{from}}–{{to}} match {{name}}',
+  'am.summary_profile': '{{n}} alerts match {{name}}',
+  'am.summary_all': '{{n}} alerts at this plant',
+  'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
+  'am.summary_warnings': '{{w}} warnings', 'am.summary_warnings_one': '1 warning',
+  'am.summary_orders': '{{o}} orders affected', 'am.summary_orders_one': '1 order affected',
+  'am.summary_conf': 'Plant confidence {{score}}',
+  'am.focus_chip': 'Showing {{n}} alerts for: {{title}}',
+  'am.focus_chip_outside': 'Showing {{n}} alerts for: {{title}} ({{k}} outside your profile)',
+  'am.empty_no_plant': 'Select a plant',
+};
+const ts = (k, v) => (SUM[k] ?? k).replace(/\{\{(\w+)\}\}/g, (_, n) => String(v?.[n] ?? ''));
+const al = (id, sev, taskId, peerId) => ({ id, sev, type: 'overlap', taskId, peerId });
+const sumIn = (o = {}) => ({
+  hasPlant: true, alerts: [], profileId: 'p1', profileName: 'Overlaps',
+  profile: prof([rule({ dayFrom: 8, dayTo: 30 })]), focus: null, confidence: 71, ...o,
+});
+
+test('summaryLine: the lead is the window, profile, all-alerts or focus variant', () => {
+  const alerts = [al('a', 'err', '1')];
+  assert.equal(summaryLine(sumIn({ alerts }), ts).text, '1 alerts in D8–30 match Overlaps · 1 error · 1 order affected');
+  assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: 8, dayTo: null })]) }), ts).text, /^1 alerts match Overlaps · /);
+  assert.match(summaryLine(sumIn({ alerts, profileId: '__all__', profile: ALL_ALERTS_PROFILE }), ts).text, /^1 alerts at this plant · /);
+  assert.match(summaryLine(sumIn({ alerts, focus: { title: 'Setup pair', outside: 0 } }), ts).text, /^Showing 1 alerts for: Setup pair · /);
+  assert.match(summaryLine(sumIn({ alerts, focus: { title: 'Setup pair', outside: 2 } }), ts).text, /^Showing 1 alerts for: Setup pair \(2 outside your profile\) · /);
+  assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: -7, dayTo: 30 })]) }), ts).text, /D-7–30/);
+});
+
+test('summaryLine: zero-valued clauses are omitted and _one forms apply at exactly 1', () => {
+  assert.equal(summaryLine(sumIn(), ts).text, '0 alerts in D8–30 match Overlaps');
+  const warnOnly = summaryLine(sumIn({ alerts: [al('a', 'warn', undefined)] }), ts).text;
+  assert.equal(warnOnly, '1 alerts in D8–30 match Overlaps · 1 warning');
+  const many = summaryLine(sumIn({ alerts: [al('a', 'err', '1', '2'), al('b', 'err', '3'), al('c', 'warn', '1')] }), ts).text;
+  assert.equal(many, '3 alerts in D8–30 match Overlaps · 2 errors · 1 warning · 3 orders affected');
+});
+
+test('summaryLine: the confidence link splits around the score; no score, no link', () => {
+  assert.deepEqual(summaryLine(sumIn({ confidence: 71.4 }), ts).conf, { prefix: 'Plant confidence ', score: '71', suffix: '' });
+  assert.equal(summaryLine(sumIn({ confidence: null }), ts).conf, null);
+  assert.equal(summaryLine(sumIn({ confidence: NaN }), ts).conf, null);
+});
+
+test('summaryLine: no plant says only the select-a-plant message', () => {
+  assert.deepEqual(summaryLine(sumIn({ hasPlant: false }), ts), { text: 'Select a plant', conf: null });
+});
+
+test('summaryLine never uses the words points, pts, exact or estimate', () => {
+  const s = summaryLine(sumIn({ alerts: [al('a', 'err', '1', '2'), al('b', 'warn', '3')] }), ts);
+  assert.doesNotMatch(`${s.text} ${s.conf?.prefix}`, /points|pts|exact|estimate/i);
 });
 
 test('windowSummary: All alerts and empty profiles read as the whole horizon', () => {
@@ -67,12 +109,27 @@ test('windowSummary: no day bounds reads "any day"; many types collapse to categ
   assert.equal(s, 'Capacity, Scheduling conflicts · any day · warnings and errors | Order overlap · D8–… · all severities');
 });
 
-test('viewFor: stored choice wins, else category + the profile ranking, junk is ignored', () => {
-  assert.deepEqual(viewFor('p1', null, prof([], 'time')), { groupBy: 'category', sort: 'time' });
-  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'line', sort: 'severity' } }, prof([], 'time')), { groupBy: 'line', sort: 'severity' });
-  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'bogus', sort: 7 } }, prof([], 'orders')), { groupBy: 'category', sort: 'orders' });
-  assert.deepEqual(viewFor('p2', { p1: { groupBy: 'line', sort: 'severity' } }, null), { groupBy: 'category', sort: 'impact' });
-  assert.deepEqual(viewFor('__all__', null, ALL_ALERTS_PROFILE), { groupBy: 'category', sort: 'impact' });
+test('viewFor: stored choice wins, else Machine + the profile ranking, junk is ignored', () => {
+  assert.deepEqual(viewFor('p1', null, prof([], 'time')), { groupBy: 'line', sort: 'time' });
+  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'day', sort: 'time' } }, prof([], 'impact')), { groupBy: 'day', sort: 'time' });
+  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'bogus', sort: 7 } }, prof([], 'orders')), { groupBy: 'line', sort: 'impact' });
+  assert.deepEqual(viewFor('p2', { p1: { groupBy: 'category', sort: 'time' } }, null), { groupBy: 'line', sort: 'impact' });
+  assert.deepEqual(viewFor('__all__', null, ALL_ALERTS_PROFILE), { groupBy: 'line', sort: 'impact' });
+});
+
+test('viewFor: a stored severity / orders sort reads as impact, even when the profile ranks by time', () => {
+  assert.equal(viewFor('p1', { p1: { sort: 'severity' } }, prof([], 'time')).sort, 'impact');
+  assert.equal(viewFor('p1', { p1: { sort: 'orders' } }, prof([], 'time')).sort, 'impact');
+});
+
+test('viewFor: a stored groupBy survives without a stored sort, and the profile ranking time gives Date', () => {
+  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'category' } }, prof([], 'time')), { groupBy: 'category', sort: 'time' });
+});
+
+test('MONITOR_GROUP_BYS lists Machine first and MONITOR_SORTS only Priority and Date', () => {
+  assert.equal(MONITOR_GROUP_BYS[0], 'line');
+  assert.deepEqual([...MONITOR_GROUP_BYS].sort(), ['category', 'day', 'line', 'none', 'order', 'type']);
+  assert.deepEqual(MONITOR_SORTS, ['impact', 'time']);
 });
 
 test('visibleAlertsFor keeps matched alerts and hides acknowledged ones unless asked', () => {

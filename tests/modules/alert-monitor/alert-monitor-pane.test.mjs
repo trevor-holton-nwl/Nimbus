@@ -11,6 +11,8 @@ import { Session } from '../../../frontend/security/session.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Util } from '../../../frontend/platform/foundation.mjs';
 import { makeEl } from '../helpers/dom-stub.mjs';
+import { AlertProfileEditor } from '../../../frontend/alert-monitor/alert-profile-editor.mjs';
+import { OverflowMenu } from '../../../frontend/platform/overflow-menu.mjs';
 
 globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 globalThis.window = globalThis.window || {};
@@ -56,6 +58,16 @@ beforeEach(() => {
     addEventListener() {}, removeEventListener() {},
     activeElement: null,
   };
+  // Only the summary-line sentences are translated (the rest of the page matches on raw keys).
+  prior.locales = globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: {
+    'am.summary_window': '{{n}} alerts in D{{from}}–{{to}} match {{name}}', 'am.summary_profile': '{{n}} alerts match {{name}}',
+    'am.summary_all': '{{n}} alerts at this plant', 'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
+    'am.summary_warnings': '{{w}} warnings', 'am.summary_warnings_one': '1 warning',
+    'am.summary_orders': '{{o}} orders affected', 'am.summary_orders_one': '1 order affected',
+    'am.summary_conf': 'Plant confidence {{score}}',
+    'am.edit_profile': 'Edit', 'am.view_profile': 'View rules',
+  } };
   calls.session = []; calls.prefs = [];
   AlertProfileMatches.setSessionProfile = id => { calls.session.push(id); };
   Session.setPref = (k, v) => { calls.prefs.push([k, v]); };
@@ -77,16 +89,19 @@ afterEach(() => {
   Session.setPref = prior.setPref;
   Util.plantClock = prior.clock;
   globalThis.NIMBUS = prior.nimbus;
+  globalThis.window.__NIMBUS_LOCALES = prior.locales;
 });
 
-test('no plant renders the select-a-plant empty state and dashes in the KPI strip', () => {
+test('no plant renders the select-a-plant empty state and the summary says only that', () => {
   Store.setSelectedPlant(null, 'test');
   AlertProfileMatches.view = () => ({ ...fakeMatches(), plant: null });
   AlertProfileClient.cached = () => null;
   AlertMonitorPane.render();
   assert.match(els['am-groups'].innerHTML, /am\.empty_no_plant/);
-  assert.match(els['am-kpis'].innerHTML, /—/);
+  assert.equal(els['am-summary'].innerHTML, '<span>am.empty_no_plant</span>');
   assert.equal(els['am-profile-input'].disabled, true);
+  assert.equal(els['am-edit'].hidden, true);
+  assert.equal(els['am-make-default'].hidden, true);
 });
 
 test('setActive(false) suppresses the render that alerts:change would trigger', async () => {
@@ -94,18 +109,228 @@ test('setActive(false) suppresses the render that alerts:change would trigger', 
   globalThis.NIMBUS = { Confidence: { _score: 10 } };
   Store.setAlerts([alert('a1')], 'test');
   AlertMonitorPane.render();
-  assert.match(els['am-kpis'].innerHTML, /<div class="v">10<\/div>/);
+  assert.match(els['am-summary'].innerHTML, /am-summary-num">10</);
 
   AlertMonitorPane.setActive(false);
   globalThis.NIMBUS.Confidence._score = 77;
   Store.setAlerts([alert('a1'), alert('a2')], 'test');
   await sleep(260);
-  assert.match(els['am-kpis'].innerHTML, /<div class="v">10<\/div>/, 'inactive pane must not repaint');
+  assert.match(els['am-summary'].innerHTML, /am-summary-num">10</, 'inactive pane must not repaint');
 
   AlertMonitorPane.setActive(true);
   Store.setAlerts([alert('a1')], 'test');
   await sleep(260);
-  assert.match(els['am-kpis'].innerHTML, /<div class="v">77<\/div>/);
+  assert.match(els['am-summary'].innerHTML, /am-summary-num">77</);
+});
+
+/* ---------------------------------------------------------------------------
+   Task 22 — page header: title, summary line, controls row
+   ------------------------------------------------------------------------- */
+const evt = map => ({ target: { closest: s => map[s] ?? null } });
+const fire = (type, map) => els['alerts-tab'].handlers[type](evt(map));
+
+test('the shell renders an h2 title, no KPI tiles, no category legend and no Manage profiles control', () => {
+  useProfiles([P1], fakeMatches());
+  AlertMonitorPane.render();
+  const shell = els['alerts-tab'].innerHTML;
+  assert.match(shell, /<h2 class="am-title">tab\.alerts<\/h2>/);
+  assert.doesNotMatch(shell, /kpi-tile|am-kpi|am-cat-legend|am-toolbar/);
+  assert.doesNotMatch(shell, /am\.manage_profiles|data-am-action="manage"/);
+  assert.match(shell, /data-am-action="page-menu" data-ovf-key="page"/);
+  assert.match(shell, /<select class="input am-group-sel" id="am-group-sel"/);
+  assert.match(shell, /data-am-sort="impact"[^>]*>am\.sort_impact</);
+  assert.match(shell, /data-am-sort="time"[^>]*>am\.sort_time</);
+});
+
+test('the summary line states the profile window, the counts and the confidence link', () => {
+  const rules = [{ types: ['overlap'], dayFrom: 8, dayTo: 30, minSev: null, minLateHours: null }];
+  const win = { ...P1, rules };
+  AlertProfileClient.cached = () => [win];
+  AlertProfileMatches.view = () => fakeMatches({ profileId: 'p1', profile: win, alertIds: new Set(['a1', 'a2']) });
+  globalThis.NIMBUS = { Confidence: { _score: 71 } };
+  Store.setAlerts([alert('a1', { taskId: '1', peerId: '2' }), alert('a2', { sev: 'warn', taskId: '3' })], 'test');
+  AlertMonitorPane.render();
+  const html = els['am-summary'].innerHTML;
+  assert.match(html, /2 alerts in D8–30 match Overlaps · 1 error · 1 warning · 3 orders affected/);
+  assert.match(html, /<button type="button" class="am-summary-conf" data-am-action="summary-conf">Plant confidence <span class="am-summary-num">71<\/span><\/button>/);
+  assert.doesNotMatch(html, /points|pts|exact|estimate/i);
+});
+
+test('the summary line reads "at this plant" under All alerts, and the focus text replaces the lead in focus mode', () => {
+  useProfiles([P1], fakeMatches({ alertIds: new Set(['a1']) }));
+  globalThis.NIMBUS = {};
+  Store.setAlerts([alert('a1')], 'test');
+  AlertMonitorPane.render();
+  assert.match(els['am-summary'].innerHTML, /1 alerts at this plant · 1 error · 1 order affected/);
+  assert.doesNotMatch(els['am-summary'].innerHTML, /am-summary-conf/, 'no score yet, no link');
+  AlertMonitorPane.setFocus(['a1'], 'Setup pair');
+  assert.match(els['am-summary'].innerHTML, /^<span>am.focus_chip · 1 error/);
+});
+
+test('the confidence link opens the breakdown; the old KPI action is gone', () => {
+  const log = [];
+  useProfiles([P1], fakeMatches());
+  globalThis.NIMBUS = { Confidence: { _score: 50, showBreakdown: () => log.push('breakdown') } };
+  AlertMonitorPane.render();
+  clickAm('summary-conf');
+  clickAm('kpi-confidence');
+  assert.deepEqual(log, ['breakdown']);
+});
+
+test('the profile picker offers "+ New profile…" last, also after filtering and when nothing matches', () => {
+  useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
+  AlertMonitorPane.render();
+  const input = els['am-profile-input'], dd = els['am-profile-dropdown'];
+  input.value = '';
+  input.handlers.input();
+  assert.match(dd.innerHTML, /data-profile="__all__"[\s\S]*data-profile="p1"[\s\S]*data-profile="p2"[\s\S]*class="us-combo-option am-opt-new"[^>]*data-profile="__new__"[^>]*><span>\+ ape\.new_profile…</);
+  input.value = 'late';
+  input.handlers.input();
+  assert.doesNotMatch(dd.innerHTML, /data-profile="p1"/);
+  assert.match(dd.innerHTML, /data-profile="p2"[\s\S]*am-opt-new/);
+  input.value = 'zzz';
+  input.handlers.input();
+  assert.match(dd.innerHTML, /us\.no_matches[\s\S]*am-opt-new/);
+  assert.doesNotMatch(dd.innerHTML, /data-profile="p[12]"/);
+});
+
+test('the viewed option carries the window summary as a second line, and the input as aria-description', () => {
+  useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
+  AlertMonitorPane.render();
+  assert.match(els['am-profile-input'].getAttribute('aria-description'), /Overlap|am\.window|D0/);
+  els['am-profile-input'].value = '';
+  els['am-profile-input'].handlers.input();
+  assert.match(els['am-profile-dropdown'].innerHTML, /data-profile="p1"[^>]*><span class="am-opt-text"><span class="am-opt-name">Overlaps<\/span><span class="am-opt-sub">/);
+  assert.doesNotMatch(els['am-profile-dropdown'].innerHTML, /data-profile="p2"[^>]*><span class="am-opt-text"><span class="am-opt-name">Late orders<\/span><span class="am-opt-sub">/);
+});
+
+test('ArrowDown then Enter on the New option opens the editor on a blank draft and never sets the view', () => {
+  const opened = [];
+  const undo = patched(AlertProfileEditor, 'open', o => opened.push(o));
+  try {
+    useProfiles([P1], fakeMatches({ profileId: 'p1', profile: P1 }));
+    AlertMonitorPane.render();
+    const input = els['am-profile-input'];
+    input.value = 'zzz';
+    input.handlers.input();                       // no matches: New is the only option
+    const key = k => input.handlers.keydown({ key: k, preventDefault() {} });
+    key('ArrowDown');
+    key('Enter');
+    assert.deepEqual(opened, [{ plant: 'P1', fromPicker: true }]);
+    assert.deepEqual(calls.session, []);
+    assert.equal(els['am-profile-dropdown'].hidden, true);
+  } finally { undo(); }
+});
+
+test('clicking the New option opens the editor; _chooseProfile ignores ids that are not options', () => {
+  const opened = [];
+  const undo = patched(AlertProfileEditor, 'open', o => opened.push(o));
+  try {
+    useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
+    AlertMonitorPane.render();
+    const pick = id => els['am-profile-dropdown'].handlers.mousedown({ preventDefault() {}, target: { closest: () => ({ dataset: { profile: id } }) } });
+    pick('__new__');
+    pick('bogus');
+    assert.deepEqual(opened, [{ plant: 'P1', fromPicker: true }]);
+    assert.deepEqual(calls.session, []);
+  } finally { undo(); }
+});
+
+test('Edit is hidden under All alerts; it reads View rules for a non-creator and Edit for the creator or an admin', () => {
+  const opened = [];
+  const undo = [
+    patched(AlertProfileEditor, 'open', o => opened.push(o)),
+    patched(Session, 'currentUser', () => ({ username: 'Pat' })),
+    patched(Session, 'isAdmin', () => false),
+  ];
+  try {
+    useProfiles([P1], fakeMatches());
+    AlertMonitorPane.render();
+    assert.equal(els['am-edit'].hidden, true);
+
+    const mine = { ...P1, created_by: 'pat' };
+    AlertProfileClient.cached = () => [mine];
+    AlertProfileMatches.view = () => fakeMatches({ profileId: 'p1', profile: mine });
+    AlertMonitorPane.render();
+    assert.equal(els['am-edit'].hidden, false);
+    assert.equal(els['am-edit'].textContent, 'Edit');
+    clickAm('edit-profile');
+    assert.deepEqual(opened, [{ plant: 'P1', profileId: 'p1' }]);
+
+    const theirs = { ...P1, created_by: 'sam' };
+    AlertProfileClient.cached = () => [theirs];
+    AlertProfileMatches.view = () => fakeMatches({ profileId: 'p1', profile: theirs });
+    AlertMonitorPane.render();
+    assert.equal(els['am-edit'].textContent, 'View rules');
+    Session.isAdmin = () => true;
+    AlertMonitorPane.render();
+    assert.equal(els['am-edit'].textContent, 'Edit');
+  } finally { undo.forEach(u => u()); }
+});
+
+test('the ⋯ page menu holds the two checkbox items and each writes its own pref', () => {
+  const seen = [];
+  const undo = patched(OverflowMenu, 'open', (anchor, items, opts) => { seen.push({ anchor, items, opts }); return { close() {} }; });
+  try {
+    useProfiles([P1], fakeMatches());
+    Store.setUserSettings({ alertProfileGanttHighlight: true, alertsShowAcknowledged: false }, 'test');
+    AlertMonitorPane.render();
+    clickAm('page-menu');
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].opts, { align: 'end', key: 'page' });
+    assert.deepEqual(seen[0].items.map(i => [i.id, i.checked]), [['highlight', true], ['ack', false]]);
+    seen[0].items[0].onSelect(false);
+    seen[0].items[1].onSelect(true);
+    assert.deepEqual(calls.prefs, [['alertProfileGanttHighlight', false], ['alertsShowAcknowledged', true]]);
+  } finally { undo(); }
+});
+
+test('a repaint ends with OverflowMenu.reconcile()', () => {
+  let n = 0;
+  const undo = patched(OverflowMenu, 'reconcile', () => { n++; });
+  try {
+    useProfiles([P1], fakeMatches());
+    AlertMonitorPane.render();
+    assert.equal(n, 1);
+  } finally { undo(); }
+});
+
+test('Group by is a select, Machine by default; a change writes only groupBy', () => {
+  useProfiles([P1], fakeMatches({ profileId: 'p1', profile: P1 }));
+  AlertMonitorPane.render();
+  assert.equal(els['am-group-sel'].value, 'line');
+  assert.match(els['alerts-tab'].innerHTML, /<option value="line">am\.group_line<\/option><option value="day">/);
+  fire('change', { '[data-am-group-sel]': { value: 'day' } });
+  assert.deepEqual(calls.prefs.at(-1), ['alertMonitorView', { p1: { groupBy: 'day' } }]);
+  fire('change', { '[data-am-group-sel]': { value: 'nonsense' } });
+  assert.equal(calls.prefs.length, 1);
+});
+
+test('the Sort by switch writes only sort, impact or time', () => {
+  useProfiles([P1], fakeMatches({ profileId: 'p1', profile: P1 }));
+  AlertMonitorPane.render();
+  fire('click', { '[data-am-sort]': { dataset: { amSort: 'time' } } });
+  assert.deepEqual(calls.prefs.at(-1), ['alertMonitorView', { p1: { sort: 'time' } }]);
+  fire('click', { '[data-am-sort]': { dataset: { amSort: 'impact' } } });
+  assert.deepEqual(calls.prefs.at(-1), ['alertMonitorView', { p1: { sort: 'impact' } }]);
+  fire('click', { '[data-am-sort]': { dataset: { amSort: 'severity' } } });
+  assert.equal(calls.prefs.length, 2);
+});
+
+test('the controls reflect a stored view; a stored severity sort reads as impact, a time-ranked profile defaults to Date', () => {
+  const timed = { ...P1, ranking: 'time' };
+  AlertProfileClient.cached = () => [timed];
+  AlertProfileMatches.view = () => fakeMatches({ profileId: 'p1', profile: timed });
+  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1' }, alertMonitorView: {} }, 'test');
+  const active = [];
+  globalThis.document.querySelectorAll = s => (s === '[data-am-sort]'
+    ? ['impact', 'time'].map(id => ({ dataset: { amSort: id }, classList: { toggle: (c, on) => on && active.push(id) }, setAttribute() {} })) : []);
+  AlertMonitorPane.render();
+  assert.deepEqual([...new Set(active)], ['time']);
+  active.length = 0;
+  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1' }, alertMonitorView: { p1: { sort: 'severity' } } }, 'test');
+  AlertMonitorPane.render();
+  assert.deepEqual([...new Set(active)], ['impact']);
 });
 
 test('picking a non-default profile in the combobox sets the session override and never the pref', () => {
@@ -120,38 +345,26 @@ test('picking a non-default profile in the combobox sets the session override an
   assert.deepEqual(calls.prefs, []);
 });
 
-test('Make default writes alertProfileByPlant read-modify-write; the badge shows when already default', () => {
+test('Set as default writes alertProfileByPlant read-modify-write; "Your default" shows when already default (also for All alerts)', () => {
   useProfiles([P1, P2], fakeMatches({ profileId: 'p2', profile: P2 }));
   AlertMonitorPane.render();
   assert.equal(els['am-make-default'].hidden, false);
   assert.equal(els['am-is-default'].hidden, true);
-  els['alerts-tab'].handlers.click({ target: { closest: sel => (sel === '[data-am-group]' ? null : { dataset: { amAction: 'make-default' } }) } });
+  clickAm('make-default');
   assert.deepEqual(calls.prefs, [['alertProfileByPlant', { P1: 'p2', P9: 'z' }]]);
   assert.deepEqual(calls.session, [null]);
 
   useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
-  AlertProfileMatches.view = () => fakeMatches({ profileId: 'p1', profile: P1 });
   AlertMonitorPane.render();
   assert.equal(els['am-make-default'].hidden, true);
   assert.equal(els['am-is-default'].hidden, false);
-});
 
-test('the Show acknowledged toggle writes alertsShowAcknowledged; the highlight toggle writes its own pref', () => {
-  useProfiles([P1], fakeMatches());
+  // All alerts is allowed as a default too (as in v1): it is not the user's default here, so the button shows.
+  useProfiles([P1, P2], fakeMatches());
   AlertMonitorPane.render();
-  const change = el => els['alerts-tab'].handlers.change({ target: { closest: sel => (sel === '[data-am-toggle]' ? el : null) } });
-  change({ dataset: { amToggle: 'ack' }, checked: true });
-  change({ dataset: { amToggle: 'highlight' }, checked: false });
-  assert.deepEqual(calls.prefs, [['alertsShowAcknowledged', true], ['alertProfileGanttHighlight', false]]);
-});
-
-test('group-by and sort persist per profile id under alertMonitorView', () => {
-  useProfiles([P1], fakeMatches({ profileId: 'p1', profile: P1 }));
-  AlertMonitorPane.render();
-  els['alerts-tab'].handlers.click({ target: { closest: sel => (sel === '[data-am-group]' ? { dataset: { amGroup: 'line' } } : null) } });
-  assert.deepEqual(calls.prefs.at(-1), ['alertMonitorView', { p1: { groupBy: 'line', sort: 'impact' } }]);
-  els['alerts-tab'].handlers.change({ target: { closest: sel => (sel === '[data-am-sort]' ? { value: 'time' } : null) } });
-  assert.equal(calls.prefs.at(-1)[1].p1.sort, 'time');
+  assert.equal(els['am-make-default'].hidden, false);
+  clickAm('make-default');
+  assert.deepEqual(calls.prefs.at(-1), ['alertProfileByPlant', { P1: '__all__', P9: 'z' }]);
 });
 
 test('a plant_no_timezone alert pins the banner', () => {
@@ -170,7 +383,7 @@ test('a profile that matches nothing shows the no-match state with a Show all al
   Store.setAlerts([alert('a1', { type: 'overload' })], 'test');
   AlertMonitorPane.render();
   assert.match(els['am-groups'].innerHTML, /am\.empty_no_match_title/);
-  els['alerts-tab'].handlers.click({ target: { closest: sel => (sel === '[data-am-group]' ? null : { dataset: { amAction: 'switch-all' } }) } });
+  clickAm('switch-all');
   assert.deepEqual(calls.session, [ALL_ALERTS_PROFILE_ID]);
 });
 
@@ -200,7 +413,8 @@ function seed(alerts, { matched, acked, view, showAcked } = {}) {
   Store.setAlerts(alerts, 'test');
   Store.setUserSettings({
     alertProfileByPlant: { P1: 'p1' }, alertsShowAcknowledged: !!showAcked,
-    alertMonitorView: view ? { __all__: view } : {},
+    // The page defaults to Machine grouping; the list tests below are about the category cards, so they store that.
+    alertMonitorView: { __all__: view ?? { groupBy: 'category' } },
   }, 'test');
   useProfiles([P1], fakeMatches({ alertIds: new Set(matched ?? alerts.map(a => a.id)), acked }));
 }
