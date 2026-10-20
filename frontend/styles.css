@@ -1289,18 +1289,28 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 /* Alert-profile match (Timeline._profileMatchClasses): category fill + severity inner ring. !important beats
    .order-standard/.order-firmed (equal specificity). Colour/box-shadow only: never position/top/height on .vis-item.
    Must follow .dist-sibling and precede .goto-target so the Go To ring still wins. */
-.vis-item.vis-range.profile-match-capacity   { background: var(--bar-pm-capacity)   !important; border-color: var(--bar-pm-capacity)   !important; color: var(--bar-pm-capacity-fg)   !important; }
-.vis-item.vis-range.profile-match-conflicts  { background: var(--bar-pm-conflicts)  !important; border-color: var(--bar-pm-conflicts)  !important; color: var(--bar-pm-conflicts-fg)  !important; }
-.vis-item.vis-range.profile-match-calendar   { background: var(--bar-pm-calendar)   !important; border-color: var(--bar-pm-calendar)   !important; color: var(--bar-pm-calendar-fg)   !important; }
-.vis-item.vis-range.profile-match-setup      { background: var(--bar-pm-setup)      !important; border-color: var(--bar-pm-setup)      !important; color: var(--bar-pm-setup-fg)      !important; }
-.vis-item.vis-range.profile-match-exceptions { background: var(--bar-pm-exceptions) !important; border-color: var(--bar-pm-exceptions) !important; color: var(--bar-pm-exceptions-fg) !important; }
-.vis-item.vis-range.profile-match-err  { --pm-ring: var(--err);       box-shadow: inset 0 0 0 2px var(--pm-ring), inset 0 0 0 3px rgba(255,255,255,0.7); }
-.vis-item.vis-range.profile-match-warn { --pm-ring: var(--warn-vivid); box-shadow: inset 0 0 0 2px var(--pm-ring), inset 0 0 0 3px rgba(255,255,255,0.7); }
+.vis-item.vis-range.profile-match-capacity   { background: var(--bar-pm-capacity)   !important; color: var(--bar-pm-capacity-fg)   !important; }
+.vis-item.vis-range.profile-match-conflicts  { background: var(--bar-pm-conflicts)  !important; color: var(--bar-pm-conflicts-fg)  !important; }
+.vis-item.vis-range.profile-match-calendar   { background: var(--bar-pm-calendar)   !important; color: var(--bar-pm-calendar-fg)   !important; }
+.vis-item.vis-range.profile-match-setup      { background: var(--bar-pm-setup)      !important; color: var(--bar-pm-setup-fg)      !important; }
+.vis-item.vis-range.profile-match-exceptions { background: var(--bar-pm-exceptions) !important; color: var(--bar-pm-exceptions-fg) !important; }
+/* Ring layers are custom properties so the selected / conflict / keyline variants below compose them.
+   No border-color here on purpose: vis items have no border, and .vis-selected's accent border must survive. */
+.vis-item.vis-range.profile-match-err  { --pm-ring: var(--err); }
+.vis-item.vis-range.profile-match-warn { --pm-ring: var(--warn-vivid); }
+/* Amber ring is invisible on the amber capacity fill: use the dark label ink there. */
+.vis-item.vis-range.profile-match-capacity.profile-match-warn { --pm-ring: var(--bar-pm-capacity-fg); }
+.vis-item.vis-range.profile-match { --pm-inner: inset 0 0 0 2px var(--pm-ring), inset 0 0 0 3px rgba(255,255,255,0.7); box-shadow: var(--pm-inner); }
 /* Split segments / distribution children keep their white keyline and add the ring inside it. */
 .vis-item.vis-range.profile-match.split-order-segment,
 .vis-item.vis-range.profile-match.dist-child {
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.62), inset 0 0 0 3px var(--pm-ring), inset 0 0 0 4px rgba(255,255,255,0.7);
+  --pm-inner: inset 0 0 0 1px rgba(255,255,255,0.62), inset 0 0 0 3px var(--pm-ring), inset 0 0 0 4px rgba(255,255,255,0.7);
+  box-shadow: var(--pm-inner);
 }
+/* Selected: keep the accent wash outside the ring (the accent border comes from .vis-selected). A conflict order
+   gets the solid accent ring instead, as .vis-selected.conflict-order does (its red outline still paints). */
+.vis-item.vis-range.vis-selected.profile-match { box-shadow: var(--pm-inner), 0 0 0 2px var(--accent-wash); }
+.vis-item.vis-range.vis-selected.profile-match.conflict-order { box-shadow: var(--pm-inner), 0 0 0 2px var(--accent); }
 /* "Go To" target (Timeline.markGotoTask / markGotoCell; stays until cleared): dark ink ring (light in dark mode — --fg) with a
    --bg-elev gap so it separates from the selection blue and from a red alert outline.
    3px total outer reach (rows have ~4px margin). Must follow .dist-sibling to win. */

@@ -3008,10 +3008,16 @@ export const TimelineNav = {
             ctx.fillRect(x1, y, w, h);
           }
         } else if (bar.style === 'profile') {
-          // Alert-profile match: one neutral alert tone (the per-category fills are the Gantt's job).
+          // Alert-profile match: accent fill with an ink keyline (per-category fills are the Gantt's job;
+          // the warn/err colours keep their own meaning here).
           ctx.globalAlpha = 1;
-          ctx.fillStyle = theme.warnFill;
+          ctx.fillStyle = theme.accent;
           ctx.fillRect(x1, y, w, h);
+          if (layout.rowH >= 4) {
+            ctx.strokeStyle = theme.fg;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x1 + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+          }
         } else {
           ctx.globalAlpha = 0.9;
           ctx.fillStyle = baseColor;
