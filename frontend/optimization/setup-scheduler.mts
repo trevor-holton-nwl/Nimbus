@@ -844,8 +844,9 @@ export const SETUP_AWARE_TAIL_OVERRUN_MS = 1000;
  * renumbering would corrupt the min-changeover accept/reject decision.
  * Compared explicitly in `compareCandidate` immediately after `policyKey` —
  * never folded into the mode-permuted `terms` list — so it stays mode-
- * independent: fewest uncovered edges always outranks every term except the
- * over-cap tier (SCORE_OVER_CAP), which is compared first. This ordering is
+ * independent: fewest uncovered edges outranks every term except the over-cap
+ * tier (SCORE_OVER_CAP), which sits just ahead of it (after `policyKey`) and is
+ * a no-op for unprotected orders now that the push limit is hard. This ordering is
  * mode-independent EXCEPT for `'due-date'` (2026-09-09), whose dedicated
  * `compareDueDateCandidate` puts lateness (score[2]/score[3]) and even
  * `policyKey` itself ahead of both this tier and SCORE_OVER_CAP — see that
@@ -6903,8 +6904,9 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
     // A queued order changes its successor's predecessor, so an unrecorded-transition error can clear itself
     // down the line: reject only the earliest such order per line per pass and let the re-validation decide the rest.
     // Every other failure is rejected outright, as before.
-    const startById = new Map(applyPatchesToSnapshot(snapshot.tasks, result.patches).map(task => [taskId(task), +(timestamp(task.start_date) ?? 0)]));
-    const patchedById = new Map(applyPatchesToSnapshot(snapshot.tasks, result.patches).map(task => [taskId(task), task]));
+    const patchedTasks = applyPatchesToSnapshot(snapshot.tasks, result.patches);
+    const startById = new Map(patchedTasks.map(task => [taskId(task), +(timestamp(task.start_date) ?? 0)]));
+    const patchedById = new Map(patchedTasks.map(task => [taskId(task), task]));
     const reasonBy = new Map<string, ValidationFinding>();
     const earliestUnrecorded = new Map<string, ValidationFinding>();
     for (const f of failures) {
