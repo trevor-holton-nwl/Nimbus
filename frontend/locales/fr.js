@@ -565,7 +565,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.add_line_override':              'Ajouter un remplacement de machine',
   'ui.drop_replace_text':              'Déposez le nouveau fichier pour remplacer ou cliquez pour parcourir',
   'ui.drop_list_text':                 'Faites glisser une liste de {{field}} ici, ou cliquez pour parcourir',
-  'ui.drop_list_hint':                 '.xlsx · colonne de valeur obligatoire, colonne de classement facultative',
+  'ui.drop_list_hint':                 '.xlsx · colonnes {{column}} et RANK (1 = premier) · téléchargez le modèle ci-dessus',
   'ui.missing_master_data_title':      'Données Maîtres Manquantes',
   'ui.missing_master_data_sub':        '{{pairs}} matériaux ({{orders}} ordres) n\'ont pas de ligne Matériau-Site correspondante — leurs valeurs de couleur/outillage restent vides jusqu\'à ce que cela soit corrigé.',
   'ui.mmd_reason_no_mp_row':           'Aucune ligne Matériau-Site',
@@ -617,6 +617,8 @@ window.__NIMBUS_LOCALES.fr = {
   'day.set_to_off':   '{{day}} mis en DÉSACTIVÉ',
 
   'btn.export_csv':                    'Exporter CSV',
+  'btn.download_template':              'Modèle',
+  'tip.download_template':              'Télécharger un modèle prérempli avec les valeurs de cette usine',
   'btn.copy_mode':                     'Mode copie',
   'toast.copied_range':                '{r}×{c} cellules copiées',
   'btn.firm_selected':                 'Passer la sélection en ferme',

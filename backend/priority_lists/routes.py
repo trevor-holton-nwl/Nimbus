@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response
 
 import db
 import master_data as md
@@ -397,6 +398,68 @@ def get_priority_list_generic(
             "uploaded_by": row["uploaded_by"], "filename": row["filename"], "row_count": row["row_count"],
         },
     }
+
+
+_TEMPLATE_HOW_TO = [
+    "How to use this priority-list template",
+    "",
+    "1. Sheet 'List' has one row per value your plant's orders use (plus any value already ranked).",
+    "2. Fill RANK: 1 runs first, 2 next, and so on. A blank RANK runs after every ranked value.",
+    "3. Delete rows you do not care about; values left out are treated like a blank RANK.",
+    "4. Values are matched case-insensitively. Do not rename the column headers.",
+    "5. Upload the file back on Master Data > Plant > Optimization. One file covers the whole plant;",
+    "   for a single machine use the card's '+ add line override'.",
+]
+
+
+def _build_priority_template(value_header: str, ranked: dict, order_values: list[str]) -> bytes:
+    """xlsx bytes for the template: sheet 'List' (<value_header>, RANK) and an
+    ignored English 'How to use' sheet. Ranked entries first in rank order, then
+    every other value alphabetical with a blank RANK. The headers are exactly
+    what _resolve_priority_list_columns auto-detects, so a re-upload never opens
+    the mapping modal."""
+    ranked_rows = sorted(((v, r) for v, r in ranked.items() if r is not None), key=lambda x: (x[1], x[0]))
+    ranked_keys = {v for v, _ in ranked_rows}
+    rest = sorted(({*order_values, *ranked.keys()}) - ranked_keys)
+    rows = [{value_header: v, "RANK": r} for v, r in ranked_rows] + [{value_header: v, "RANK": None} for v in rest]
+    df = pd.DataFrame(rows, columns=[value_header, "RANK"])
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        df.to_excel(xw, sheet_name="List", index=False)
+        pd.DataFrame({"How to use": _TEMPLATE_HOW_TO[2:]}).to_excel(xw, sheet_name="How to use", index=False)
+        xw.sheets["List"].column_dimensions["A"].width = 28
+        xw.sheets["How to use"].column_dimensions["A"].width = 100
+    return buf.getvalue()
+
+
+@router.get("/priority-list/{plant}/{field_key}/template")
+async def get_priority_list_template(
+        plant: str, field_key: str,
+        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Prefilled .xlsx for the field's upload: every value this plant's orders
+    use, with the current plant-wide rank filled in when a list exists. Not
+    admin-gated — it exposes nothing beyond GET /priority-list/{plant}/{field_key}."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    spec = md.CONFIGURABLE_PRIORITY_FIELDS.get(field_key)
+    if spec is None:
+        raise HTTPException(status_code=400, detail=f"Unknown field_key {field_key!r}")
+
+    def _build() -> bytes:
+        row = db.get_priority_list(plant, field_key, line="")
+        values = db.distinct_order_values(plant, spec["orders_column"])
+        return _build_priority_template(spec["mp_column"].upper(), row["entries"] if row else {}, values)
+
+    data = await run_in_threadpool(_build)
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{field_key}-template-{plant}.xlsx"'},
+    )
 
 
 @router.delete("/priority-list/{plant}/{field_key}", dependencies=[Depends(require_api_key), Depends(require_admin)])

@@ -569,7 +569,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.add_line_override':              'Añadir anulación de máquina',
   'ui.drop_replace_text':              'Suelte el nuevo archivo para reemplazar o haga clic para buscar',
   'ui.drop_list_text':                 'Arrastre una lista de {{field}} aquí o haga clic para buscar',
-  'ui.drop_list_hint':                 '.xlsx · columna de valor obligatoria, columna de clasificación opcional',
+  'ui.drop_list_hint':                 '.xlsx · columnas {{column}} y RANK (1 = primero) · descargue la plantilla de arriba',
   'ui.missing_master_data_title':      'Datos Maestros Faltantes',
   'ui.missing_master_data_sub':        '{{pairs}} materiales ({{orders}} órdenes) no tienen una fila de Material-Planta coincidente — sus valores de color/herramienta quedan vacíos hasta que esto se corrija.',
   'ui.mmd_reason_no_mp_row':           'Sin fila de Material-Planta',
@@ -621,6 +621,8 @@ window.__NIMBUS_LOCALES.es = {
   'day.set_to_off':   '{{day}} puesto en DESACTIVADO',
 
   'btn.export_csv':                    'Exportar CSV',
+  'btn.download_template':              'Plantilla',
+  'tip.download_template':              'Descargar una plantilla rellenada con los valores de esta planta',
   'btn.copy_mode':                     'Modo copia',
   'toast.copied_range':                '{r}×{c} celdas copiadas',
   'btn.firm_selected':                 'Poner seleccionados en firme',

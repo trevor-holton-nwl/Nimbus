@@ -5233,3 +5233,22 @@ def priority_list_coverage(plant: str, fields: dict[str, str]) -> dict:
         for field_key, line, dv, rv in cur.fetchall():
             result[field_key][line] = {"distinct_values": dv, "ranked_values": rv}
     return result
+
+
+def distinct_order_values(plant: str, column: str) -> list[str]:
+    """Every distinct non-blank value of `orders.<column>` at this plant,
+    upper-cased and trimmed (the same normalization priority_list_coverage and
+    the rank lookup use), alphabetical. Feeds the prefilled priority-list
+    template download. `column` must come from the rankable-field registry
+    (orders_column), never from the client — it is only quoted as an
+    identifier here, not validated."""
+    q = sql.SQL("""
+        SELECT DISTINCT UPPER(TRIM(o.{col}))
+          FROM orders o
+         WHERE o.plant = %s
+           AND o.{col} IS NOT NULL AND o.{col} <> ''
+         ORDER BY 1
+    """).format(col=sql.Identifier(column))
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(q, (plant,))
+        return [r[0] for r in cur.fetchall() if r[0]]

@@ -31,7 +31,7 @@ Deferred split: `RANKABLE_FIELDS` and `CONFIGURABLE_PRIORITY_FIELDS` — the sin
 
 **Imported by:** `backend/admin_ops/routes.py` (`from backend.priority_lists import cache as plcache`, for `POST /reload` and diagnostics color-merge stats), `backend/master_data/routes.py` (`from backend.priority_lists.audit_log import _cw_append_audit, _cw_audit_path`, for `GET/POST/POST-clear /audit/log`). `apply_priority_merge` is called once per `GET /tasks` request from `backend/scheduling/routes.py` (not vice versa — `scheduling` doesn't need a `cache` re-export, per the same-module-reader design above).
 
-**Endpoints:** `GET /priority-fields`, `GET /priority-rank-maps`, `GET /priority-lists`, `POST|GET|DELETE /priority-list/{plant}/{field_key}`, `POST|GET|DELETE /color-wheel/{plant}`.
+**Endpoints:** `GET /priority-fields`, `GET /priority-rank-maps`, `GET /priority-lists`, `POST|GET|DELETE /priority-list/{plant}/{field_key}`, `GET /priority-list/{plant}/{field_key}/template` (prefilled .xlsx: the plant's distinct order values, current ranks filled in; headers are the auto-detected `<MP_COLUMN>`/`RANK`), `POST|GET|DELETE /color-wheel/{plant}`.
 
 ## Tests
 
