@@ -754,6 +754,14 @@ export const Timeline = {
       if (update.length) Timeline._items.update(update);
       if (relocate.length) Timeline._items.add(relocate);
       Timeline._noteLaneWrites(patches);
+    } catch (e) {
+      // A vis throw mid-relocate would otherwise surface only as a console.error from Store.emit, leaving the
+      // bar missing and `_laneIds` stale. Heal the affected rows (the heal clears `_laneIds`) and rebuild.
+      Timeline._heal('write-patches', e, {
+        groupIds: [...new Set(patches.map(it => it.group).filter(g => g != null).map(String))],
+        itemIds: patches.map(it => String(it.id)),
+      });
+      return;
     } finally { Timeline._suppressEvents = false; }
     // vis's _removeItem drops a removed id from its selection: put the selection back after a relocation.
     if (relocate.length) Timeline._reapplySelection();
@@ -1990,6 +1998,45 @@ export const Timeline = {
     return true;
   },
 
+  /** Remove vis ItemSet "ghosts": Items still held in `itemSet.items` whose id is no longer in the DataSet.
+   *  DELIBERATELY touches vis PRIVATE ItemSet state (`_tl.itemSet.items` / `selection` / `_removeItem`).
+   *  Why: vis's `_removeItem` deletes the Item from `ItemSet.items` and THEN calls `group.remove`, which
+   *  throws (orderSubgroups meets a dangling subgroup entry). By then DataSet.remove has already deleted the
+   *  batch, so the heal's per-id `items.remove` finds nothing and the ghost stays; `_onAddGroups` later
+   *  re-attaches it with a stale subgroup lane and every following pass throws. Purging by id difference
+   *  is the only way to reach them. Every private access is null-guarded; a throwing `_removeItem` falls
+   *  back to deleting the entry, its selection slot and its DOM directly. */
+  _purgeItemSetGhosts(): void {
+    const live = Timeline._items;
+    const itemSet = (Timeline._tl as unknown as { itemSet?: {
+      items?: Record<string, unknown>; selection?: unknown[]; _removeItem?: (item: unknown) => void;
+    } } | null)?.itemSet;
+    if (!live || !itemSet || !itemSet.items || typeof itemSet.items !== 'object') return;
+    let liveIds: Set<string>;
+    try { liveIds = new Set(live.getIds().map(String)); } catch { return; }
+    for (const id of Object.keys(itemSet.items)) {
+      if (liveIds.has(id)) continue;
+      const item = itemSet.items[id] as { dom?: Record<string, unknown> } | undefined;
+      try {
+        if (item && typeof itemSet._removeItem === 'function') itemSet._removeItem(item);
+      } catch { /* fall through to the direct clean-up below */ }
+      try {
+        if (itemSet.items && id in itemSet.items) delete itemSet.items[id];
+        if (Array.isArray(itemSet.selection)) {
+          const at = itemSet.selection.findIndex(s => String(s) === id);
+          if (at >= 0) itemSet.selection.splice(at, 1);
+        }
+        const dom = item?.dom;
+        if (dom && typeof dom === 'object') {
+          for (const node of Object.values(dom)) {
+            const n = node as { parentNode?: { removeChild?: (c: unknown) => void } | null } | null;
+            if (n && n.parentNode && typeof n.parentNode.removeChild === 'function') n.parentNode.removeChild(n);
+          }
+        }
+      } catch { /* best effort */ }
+    }
+  },
+
   /** Self-heal ladder for a vis-timeline throw during a rebuild flush, the view refresh or a selection
    *  re-apply. A plain retry can throw again (group.remove -> orderSubgroups meets the same dangling
    *  subgroup entry) and vis's _onRemove forEach has no try/catch, so ghost items can be left behind.
@@ -2022,6 +2069,7 @@ export const Timeline = {
       try {
         for (const gid of groupIds) { try { groups.remove(gid); } catch { /* keep going */ } }
         for (const iid of itemIds) { try { items.remove(iid); } catch { /* keep going */ } }
+        Timeline._purgeItemSetGhosts();
         Timeline._laneIds.clear();
         Timeline._labelKeys.clear();
       } finally { Timeline._suppressEvents = prior; }

@@ -2773,3 +2773,52 @@ test('Timeline heal ladder: a flush throw removes groups then items one at a tim
     assert.equal(Timeline._healToastShown, false);
   } finally { Toast.show = priorToast; }
 }));
+
+test('Timeline._purgeItemSetGhosts (validator finding 1): removes ItemSet ids absent from _items, tolerates a throwing _removeItem, guards missing vis state', () => laneRebuildHarness(({ fake }) => {
+  fake.records.set('live-1', { id: 'live-1' });
+  const parent = { removed: [], removeChild(n) { this.removed.push(n); } };
+  const dom = { box: { parentNode: parent } };
+  const removedViaVis = [];
+  const itemSet = {
+    items: { 'live-1': { id: 'live-1' }, ghost1: { id: 'ghost1' }, ghost2: { id: 'ghost2', dom } },
+    selection: ['ghost2', 'live-1'],
+    _removeItem(item) {
+      if (item.id === 'ghost2') throw new Error('group.remove: orderSubgroups');
+      removedViaVis.push(item.id); delete this.items[item.id];
+    },
+  };
+  Timeline._tl.itemSet = itemSet;
+  Timeline._purgeItemSetGhosts();
+  assert.deepEqual(Object.keys(itemSet.items), ['live-1'], 'only the live item survives');
+  assert.deepEqual(removedViaVis, ['ghost1']);
+  assert.deepEqual(itemSet.selection, ['live-1'], 'ghost dropped from the selection');
+  assert.equal(parent.removed.length, 1, 'the throwing ghost had its DOM detached');
+  // Missing vis private state is a no-op.
+  Timeline._tl.itemSet = undefined; Timeline._purgeItemSetGhosts();
+  Timeline._tl.itemSet = {}; Timeline._purgeItemSetGhosts();
+  // The heal calls the purge.
+  Timeline._tl.itemSet = { items: { stale: { id: 'stale' } }, selection: [], _removeItem(i) { delete this.items[i.id]; } };
+  Timeline._scheduleRebuild = () => {};
+  Timeline._heal('unit', new Error('x'));
+  assert.deepEqual(Object.keys(Timeline._tl.itemSet.items), []);
+}));
+
+test('Timeline._writePatches (validator finding 2): a vis throw during relocate routes to _heal with the affected scope and clears _laneIds', () => laneRebuildHarness(({ fake }) => {
+  Timeline._laneIds.add('lane-a');
+  fake.records.set('lane-a', { id: 'lane-a', group: 'L-A', subgroup: 'lane-1' });
+  const origRemove = fake.remove;
+  fake.remove = () => { throw new Error('vis: orderSubgroups'); };
+  const calls = [];
+  const origHeal = Timeline._heal;
+  Timeline._heal = (stage, err, scope) => { calls.push({ stage, err, scope }); origHeal.call(Timeline, stage, err, scope); };
+  Timeline._scheduleRebuild = () => {};
+  try {
+    assert.doesNotThrow(() => Timeline._writePatches([{ id: 'lane-a', group: 'L-A', subgroup: undefined }]));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].stage, 'write-patches');
+    assert.deepEqual(calls[0].scope.groupIds, ['L-A']);
+    assert.deepEqual(calls[0].scope.itemIds, ['lane-a']);
+    assert.equal(Timeline._laneIds.size, 0, 'heal cleared the stale lane bookkeeping');
+    assert.equal(Timeline._suppressEvents, false);
+  } finally { Timeline._heal = origHeal; fake.remove = origRemove; }
+}));
