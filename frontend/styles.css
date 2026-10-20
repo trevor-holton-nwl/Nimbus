@@ -1188,12 +1188,38 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-panel.vis-top,
 .vis-panel.vis-bottom { background: var(--bg-subtle); }
 .vis-label { background: var(--bg-subtle); }
+/* Row label content is vertically centred, so an expanded (taller) row keeps its name and
+   count badge mid-row. vis gives .vis-inner the label's height. */
+.vis-labelset .vis-label { display: flex; align-items: center; }
+.vis-labelset .vis-label .vis-inner { width: 100%; }
+.row-label { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.row-label-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
+.row-label-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Stack-count badge: shown on a collapsed row hiding overlapping orders; clicking it expands the row.
+   -soft tint with the matching signal text (DESIGN.md badges). */
+/* .row-stack-slot is the invisible placeholder on rows without a badge; both share a min-width that fits two
+   digits (9 -> 10 does not shift the axis), so the label column keeps one width as badges come and go. */
+.row-stack-slot { margin-left: auto; flex: none; display: inline-block; min-width: 28px; box-sizing: border-box; visibility: hidden; }
+.row-stack-toggle {
+  margin-left: auto; flex: none; cursor: pointer; min-width: 28px; box-sizing: border-box; text-align: center;
+  font: inherit; font-size: 11px; font-weight: 700; line-height: 1;
+  padding: 2px 7px; border: 0; border-radius: 10px;
+  background: var(--err-soft); color: var(--err);
+}
+.row-stack-toggle:hover { filter: brightness(0.95); }
+.row-stack-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row-stack-toggle[aria-expanded="true"] { background: var(--err); color: var(--bg-elev); }
+/* The expanded row: a faint wash (translucent, so the grouped shading bands underneath stay visible). */
+.vis-label.row-expanded { background: var(--accent-wash); }
+.vis-foreground .vis-group.row-expanded { background: rgba(var(--accent-rgb), 0.06); }
 .vis-group { border-bottom: 1px solid var(--line); }
 .vis-foreground .vis-group { border-bottom: 1px solid var(--line); }
 /* vis-timeline's own internal "background vertical" panel hosts two unrelated
    things: the "now" line (.vis-current-time, appended directly onto this
    panel by CurrentTime.redraw()) and a nested-group indentation scaffold (a
-   feature this app never uses; every row is flat, level-0) one level deeper,
+   feature this app never uses: every row is a flat, level-0 group; the
+   expandable-row lanes are vis SUBgroups inside one group, not nested groups,
+   and do not use this scaffold) one level deeper,
    inside a .vis-axis child. The scaffold's ".vis-group" divs are fully
    transparent with no colored descendants, but were still producing a
    floating grey-bar render artifact near the Gantt's first row — newly
@@ -5650,8 +5676,9 @@ body.dark .vis-time-axis { background: var(--bg-strong) !important; }
 /* library's default color wins on .vis-inner, so target it explicitly */
 body.dark .vis-labelset .vis-label,
 body.dark .vis-labelset .vis-label .vis-inner,
-body.dark .vis-labelset .vis-label * { color: #f5f2ea !important; }
+body.dark .vis-labelset .vis-label *:not(.row-stack-toggle) { color: #f5f2ea !important; }
 body.dark .vis-labelset .vis-label { background: var(--bg-elev) !important; }
+body.dark .vis-labelset .vis-label.row-expanded { background: var(--accent-wash) !important; }
 /* Blackout hatch, non-working shading and the alertcell-err/warn/calendar
    day cells re-tune for dark mode through their tokens (--blackout-*,
    --zone-nonworking, --alertcell-*) in the body.dark block above — the

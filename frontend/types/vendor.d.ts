@@ -67,7 +67,8 @@ declare global {
         shiftKey?: boolean;
         metaKey?: boolean;
         ctrlKey?: boolean;
-        srcEvent?: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean };
+        target?: EventTarget | null;
+        srcEvent?: { shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean; target?: EventTarget | null };
       };
       item?: string | number | null;
       group?: string | number | null;

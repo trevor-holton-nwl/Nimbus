@@ -7,7 +7,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -2582,4 +2582,243 @@ test('Timeline._syncNonWorking: zooming in from a coarse (>90d) range rebuilds f
   Timeline._syncNonWorking(false);
   assert.ok(partial().length > 0, 'off-shift hours appear after the zoom-in');
   assert.ok(Timeline._nwRange.toMs - Timeline._nwRange.fromMs <= 90 * NW_DAY);
+}));
+/* ---- Expandable rows fix wave (blockers, heal ladder, lane bookkeeping) ---- */
+
+// Runs fn with a stubbed vis surface around Timeline._rebuildPass: fake item/group DataSets that record every
+// write, two overlapping orders on one line, and the DOM-only collaborators stubbed out.
+function laneRebuildHarness(fn) {
+  return nwWithPlant(() => {
+    const fake = nwFakeItems(); Timeline._items = fake;
+    const gcalls = { add: [], update: [], remove: [] };
+    const gids = new Set();
+    const groups = {
+      getIds: () => [...gids],
+      add: gs => { gcalls.add.push(gs); for (const g of gs) gids.add(String(g.id)); },
+      update: gs => { gcalls.update.push(gs); },
+      remove: ids => { gcalls.remove.push([ids].flat()); for (const id of [ids].flat()) gids.delete(String(id)); },
+    };
+    const prior = {
+      groups: Timeline._groups, render: Timeline._renderEmptyOverlay, fit: Timeline._fitHeight, refresh: Timeline._refreshViewNow,
+      label: Timeline._groupLabel, expanded: Timeline._expandedLine, laneIds: Timeline._laneIds, heal: Timeline._healCount,
+      toast: Timeline._healToastShown, sched: Timeline._scheduleRebuild, raf: globalThis.requestAnimationFrame, nimbus: globalThis.NIMBUS,
+      tasks: structuredClone(Store.tasksArr), labelKeys: Timeline._labelKeys,
+    };
+    const win = { start: new Date(2026, 7, 10), end: new Date(2026, 7, 12) };
+    Timeline._tl = { getWindow: () => win, setSelection() {}, setWindow() {}, setOptions() {}, redraw() {}, addCustomTime() {}, removeCustomTime() {}, setCustomTime() {}, setCustomTimeMarker() {} };
+    Timeline._groups = groups; Timeline._renderEmptyOverlay = () => {}; Timeline._fitHeight = () => {}; Timeline._refreshViewNow = () => true;
+    Timeline._groupLabel = (line, _c, depth, expanded) => ({ el: {}, key: `${line}|${depth}|${expanded}` });
+    Timeline._laneIds = new Set(); Timeline._labelKeys = new Map(); Timeline._healCount = 0; Timeline._healToastShown = false;
+    Timeline._nwRange = null; Timeline._nwIds = new Set(); Timeline._expandedLine = null;
+    globalThis.requestAnimationFrame = () => 0;
+    globalThis.NIMBUS = prior.nimbus ?? {};
+    const at = (h, m = 0) => new Date(2026, 7, 10, h, m);
+    Store.setTasks([
+      { id: 'lane-a', PRODUCTION_ORDER: 'LA', MATERIAL_NUMBER: 'M', MACHINE: 'L-A', PLANT: NW_PLANT, plant: NW_PLANT, start_date: at(7), end_date: at(11), RUN_TIME: 4, COLOR: 'RED' },
+      { id: 'lane-b', PRODUCTION_ORDER: 'LB', MATERIAL_NUMBER: 'M', MACHINE: 'L-A', PLANT: NW_PLANT, plant: NW_PLANT, start_date: at(9), end_date: at(13), RUN_TIME: 4, COLOR: 'RED' },
+    ], 'unit-test');
+    try { return fn({ fake, groups, gcalls }); } finally {
+      globalThis.requestAnimationFrame = prior.raf;
+      if (prior.nimbus === undefined) delete globalThis.NIMBUS;
+      Timeline._groups = prior.groups; Timeline._renderEmptyOverlay = prior.render; Timeline._fitHeight = prior.fit; Timeline._refreshViewNow = prior.refresh;
+      Timeline._groupLabel = prior.label; Timeline._expandedLine = prior.expanded; Timeline._laneIds = prior.laneIds; Timeline._healCount = prior.heal;
+      Timeline._healToastShown = prior.toast; Timeline._scheduleRebuild = prior.sched; Timeline._labelKeys = prior.labelKeys;
+      Store.setTasks(prior.tasks, 'unit-test');
+    }
+  });
+}
+
+test('Timeline._rebuildPass: a group className is never falsy (vis nulls "" and addClassName(null) throws on the collapse)', () => laneRebuildHarness(({ gcalls }) => {
+  Timeline._rebuildPass(); // collapsed: depth 2 but not expanded
+  Timeline._expandedLine = 'L-A';
+  Timeline._rebuildPass(); // expanded
+  Timeline._expandedLine = null;
+  Timeline._rebuildPass(); // collapsed again (the toggle that used to throw)
+  const classes = [...gcalls.add.flat(), ...gcalls.update.flat()].map(g => g.className);
+  assert.ok(classes.length >= 3);
+  for (const c of classes) assert.ok(typeof c === 'string' && c.length > 0, `className "${c}" must be a non-empty string`);
+  assert.ok(classes.includes('row-expanded') && classes.includes('row-flat'));
+}));
+
+test('Timeline lane bookkeeping: _laneIds follows lane writes and laned items are relocated by remove + add on collapse', () => laneRebuildHarness(({ fake }) => {
+  Timeline._expandedLine = 'L-A';
+  Timeline._rebuildPass();
+  const laned = [...fake.records.values()].filter(i => i.subgroup !== undefined).map(i => String(i.id));
+  assert.ok(laned.length >= 2, 'both overlapping orders were added with a lane');
+  for (const id of laned) assert.ok(Timeline._laneIds.has(id), `${id} tracked in _laneIds`);
+
+  // Collapse: every laned item must be removed + re-added (never updated), and _laneIds empties.
+  Timeline._expandedLine = null;
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  Timeline._rebuildPass();
+  const removed = fake.calls.remove.flat(), updated = fake.calls.update.flat();
+  for (const id of laned) {
+    assert.ok(removed.includes(id), `${id} relocated by remove`);
+    assert.ok(!updated.includes(id), `${id} never updated across a subgroup change`);
+  }
+  assert.equal([...Timeline._laneIds].filter(id => laned.includes(id)).length, 0, '_laneIds cleared for relocated items');
+}));
+
+test('Timeline lane bookkeeping: a straggler left in a NON-expanded row with a lane is still relocated', () => laneRebuildHarness(({ fake }) => {
+  Timeline._expandedLine = 'L-A';
+  Timeline._rebuildPass();
+  const id = [...fake.records.values()].find(i => i.subgroup !== undefined).id;
+  // vis moved the bar to another row on a drag and left its subgroup behind; the page then collapses.
+  fake.records.set(String(id), { ...fake.records.get(String(id)), group: 'L-B' });
+  Timeline._expandedLine = null;
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  Timeline._rebuildPass();
+  assert.ok(fake.calls.remove.flat().includes(String(id)), 'straggler removed (then re-added) by the rebuild diff');
+  assert.ok(fake.calls.add.flat().includes(String(id)));
+  assert.equal(fake.records.get(String(id)).subgroup, undefined);
+  assert.ok(!Timeline._laneIds.has(String(id)));
+}));
+
+test('Timeline._splitRelocations: an item never stored with a lane does no DataSet read (the scale guard)', () => {
+  const prior = { items: Timeline._items, ids: Timeline._laneIds };
+  let reads = 0;
+  Timeline._items = { get: () => { reads++; return { subgroup: undefined }; } };
+  Timeline._laneIds = new Set(['laned']);
+  try {
+    const out = Timeline._splitRelocations([{ id: 'plain', subgroup: undefined }, { id: 'laned', subgroup: undefined }]);
+    assert.equal(reads, 1, 'only the id in _laneIds is compared against the stored item');
+    assert.equal(out.update.length, 2);
+  } finally { Timeline._items = prior.items; Timeline._laneIds = prior.ids; }
+});
+
+test('bulkTouchesExpandedLine: an old or new line equal to the expanded line forces a rebuild; no expanded line never does', () => {
+  const old = { a: 'L-1', b: 'L-2', c: 'L-3' }, next = { a: 'L-1', b: 'L-9', c: 'L-2' };
+  const o = id => old[id], n = id => next[id];
+  assert.equal(bulkTouchesExpandedLine(['a'], null, o, n), false, 'nothing expanded');
+  assert.equal(bulkTouchesExpandedLine(['b'], 'L-2', o, n), true, 'left the expanded line');
+  assert.equal(bulkTouchesExpandedLine(['c'], 'L-2', o, n), true, 'entered the expanded line');
+  assert.equal(bulkTouchesExpandedLine(['a'], 'L-2', o, n), false, 'unrelated lines');
+});
+
+test('Timeline._onStore tasks:bulkUpdate: a batch touching the expanded line schedules a rebuild instead of patching', () => laneRebuildHarness(() => {
+  const priorActive = Timeline._ganttActive, priorWrite = Timeline._writePatches;
+  let scheduled = 0, patched = 0;
+  Timeline._ganttActive = () => true;
+  Timeline._scheduleRebuild = () => { scheduled++; };
+  Timeline._writePatches = () => { patched++; };
+  try {
+    Timeline._expandedLine = 'L-A';
+    Timeline._onStore({ type: 'tasks:bulkUpdate', ids: ['lane-a'], source: 'optimizer' });
+    assert.equal(scheduled, 1, 'rebuild scheduled for an id on the expanded line');
+    assert.equal(patched, 0);
+  } finally { Timeline._ganttActive = priorActive; Timeline._writePatches = priorWrite; }
+}));
+
+test('Timeline._reapplySelection: a null _tl is a no-op; a live one re-applies the selected items inside _suppressEvents', () => {
+  const prior = { tl: Timeline._tl, items: Timeline._items, fn: Timeline.itemIdsForTask };
+  const priorIds = Selection.ids();
+  try {
+    Timeline._tl = null;
+    assert.doesNotThrow(() => Timeline._reapplySelection());
+    let seen = null, suppressed = null;
+    Timeline._items = { get: id => ({ id }) };
+    Timeline._tl = { setSelection: ids => { seen = ids; suppressed = Timeline._suppressEvents; } };
+    Selection.set(['sel-1']);
+    Timeline.itemIdsForTask = id => [`${id}#a`, `${id}#b`];
+    Timeline._reapplySelection();
+    assert.deepEqual(seen, ['sel-1#a', 'sel-1#b']);
+    assert.equal(suppressed, true);
+    assert.equal(Timeline._suppressEvents, false, 'flag restored');
+  } finally { Timeline._tl = prior.tl; Timeline._items = prior.items; Timeline.itemIdsForTask = prior.fn; Selection.set(priorIds); }
+});
+
+test('companionWritesDeferred: skipped only while a row is expanded', () => {
+  assert.equal(companionWritesDeferred(null), false);
+  assert.equal(companionWritesDeferred('L-A'), true);
+});
+
+test('Timeline heal ladder: a flush throw removes groups then items one at a time, schedules one rebuild, then clears the expanded row, then asks for a reload', () => laneRebuildHarness(({ fake, groups }) => {
+  Timeline._expandedLine = 'L-A';
+  Timeline._rebuildPass(); // populate items
+  assert.ok(fake.records.size > 0);
+  const order = [];
+  const origGroupsRemove = groups.remove;
+  groups.remove = ids => { order.push('groups'); origGroupsRemove(ids); };
+  const origRemove = fake.remove;
+  fake.remove = ids => { order.push(`item:${[ids].flat().join(',')}`); origRemove(ids); };
+  let scheduled = 0;
+  Timeline._scheduleRebuild = () => { scheduled++; };
+  const toasts = [];
+  const priorToast = Toast.show; Toast.show = (m, t) => { toasts.push([m, t]); };
+  const origUpdate = groups.update;
+  const origAdd = groups.add; groups.update = () => { throw new Error('vis: className'); }; groups.add = () => { throw new Error('vis: className'); };
+  try {
+    Timeline._rebuildPass();
+    assert.equal(Timeline._healCount, 1);
+    assert.equal(scheduled, 1, 'exactly one rebuild scheduled');
+    assert.equal(order[0], 'groups', 'groups are removed before any item');
+    assert.ok(order.length > 1 && order.slice(1).every(s => s.startsWith('item:') && !s.includes(',')), 'items removed one at a time');
+    assert.equal(Timeline._expandedLine, 'L-A', 'first failure keeps the expanded row');
+    assert.equal(Timeline._laneIds.size, 0);
+
+    Timeline._rebuildPass(); // second consecutive failure
+    assert.equal(Timeline._healCount, 2);
+    assert.equal(Timeline._expandedLine, null, 'second failure clears the sticky expanded row');
+    assert.equal(scheduled, 2);
+
+    Timeline._rebuildPass(); // third: stop retrying, ask for a reload (once)
+    Timeline._rebuildPass();
+    assert.equal(scheduled, 2, 'no further automatic retry');
+    assert.equal(toasts.length, 1, 'the reload toast shows once');
+    assert.equal(toasts[0][1], 'error');
+
+    groups.update = origUpdate; groups.add = origAdd; // recovery: a clean pass resets the ladder
+    Timeline._rebuildPass();
+    assert.equal(Timeline._healCount, 0);
+    assert.equal(Timeline._healToastShown, false);
+  } finally { Toast.show = priorToast; }
+}));
+
+test('Timeline._purgeItemSetGhosts (validator finding 1): removes ItemSet ids absent from _items, tolerates a throwing _removeItem, guards missing vis state', () => laneRebuildHarness(({ fake }) => {
+  fake.records.set('live-1', { id: 'live-1' });
+  const parent = { removed: [], removeChild(n) { this.removed.push(n); } };
+  const dom = { box: { parentNode: parent } };
+  const removedViaVis = [];
+  const itemSet = {
+    items: { 'live-1': { id: 'live-1' }, ghost1: { id: 'ghost1' }, ghost2: { id: 'ghost2', dom } },
+    selection: ['ghost2', 'live-1'],
+    _removeItem(item) {
+      if (item.id === 'ghost2') throw new Error('group.remove: orderSubgroups');
+      removedViaVis.push(item.id); delete this.items[item.id];
+    },
+  };
+  Timeline._tl.itemSet = itemSet;
+  Timeline._purgeItemSetGhosts();
+  assert.deepEqual(Object.keys(itemSet.items), ['live-1'], 'only the live item survives');
+  assert.deepEqual(removedViaVis, ['ghost1']);
+  assert.deepEqual(itemSet.selection, ['live-1'], 'ghost dropped from the selection');
+  assert.equal(parent.removed.length, 1, 'the throwing ghost had its DOM detached');
+  // Missing vis private state is a no-op.
+  Timeline._tl.itemSet = undefined; Timeline._purgeItemSetGhosts();
+  Timeline._tl.itemSet = {}; Timeline._purgeItemSetGhosts();
+  // The heal calls the purge.
+  Timeline._tl.itemSet = { items: { stale: { id: 'stale' } }, selection: [], _removeItem(i) { delete this.items[i.id]; } };
+  Timeline._scheduleRebuild = () => {};
+  Timeline._heal('unit', new Error('x'));
+  assert.deepEqual(Object.keys(Timeline._tl.itemSet.items), []);
+}));
+
+test('Timeline._writePatches (validator finding 2): a vis throw during relocate routes to _heal with the affected scope and clears _laneIds', () => laneRebuildHarness(({ fake }) => {
+  Timeline._laneIds.add('lane-a');
+  fake.records.set('lane-a', { id: 'lane-a', group: 'L-A', subgroup: 'lane-1' });
+  const origRemove = fake.remove;
+  fake.remove = () => { throw new Error('vis: orderSubgroups'); };
+  const calls = [];
+  const origHeal = Timeline._heal;
+  Timeline._heal = (stage, err, scope) => { calls.push({ stage, err, scope }); origHeal.call(Timeline, stage, err, scope); };
+  Timeline._scheduleRebuild = () => {};
+  try {
+    assert.doesNotThrow(() => Timeline._writePatches([{ id: 'lane-a', group: 'L-A', subgroup: undefined }]));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].stage, 'write-patches');
+    assert.deepEqual(calls[0].scope.groupIds, ['L-A']);
+    assert.deepEqual(calls[0].scope.itemIds, ['lane-a']);
+    assert.equal(Timeline._laneIds.size, 0, 'heal cleared the stale lane bookkeeping');
+    assert.equal(Timeline._suppressEvents, false);
+  } finally { Timeline._heal = origHeal; fake.remove = origRemove; }
 }));
