@@ -432,6 +432,8 @@ export interface LevCtx {
   /** The user may open the setup matrix review (else "copy for the setup owner"). */
   canReviewPairs: boolean;
   isAdmin: boolean;
+  /** The plant's setup tracking is on (`plants.setup_active`); when off a setup pair only clears a warning. */
+  setupActive: boolean;
   /** What-If is active: Fix movable renders disabled. */
   whatIf: boolean;
   /** Localised label of a setup-definition field (`colorWheel` → "Color"). */
@@ -556,6 +558,9 @@ export function levCardHtml(item: LeverageItem, ctx: LevCtx, t: Translate): stri
     const h = item.headroomHours;
     room = `<div class="am-lev-room${h > 0 ? '' : ' am-lev-room-none'}">${_esc(h > 0
       ? t('am.lev_headroom', { h: fmtNum(h) }) : t('am.lev_no_headroom', { h: fmtNum(Math.abs(h)) }))}</div>`;
+  }
+  if (item.family === 'setup-pair' && !ctx.setupActive) {
+    room = `<div class="am-lev-room am-lev-room-none">${_esc(t('am.lev_setup_inactive'))}</div>`;
   }
   const remaining = ctx.remaining > 0
     ? `<div class="am-lev-remaining">${_esc(t('am.lev_remaining', { n: ctx.remaining }))}</div>` : '';

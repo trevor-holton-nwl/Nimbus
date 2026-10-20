@@ -2474,6 +2474,7 @@ window.__NIMBUS_LOCALES.de = {
   'am.lev_admin_fix': 'Admin-Korrektur',
   'am.lev_copy_summary': 'Zusammenfassung für den Verantwortlichen kopieren',
   'am.lev_copied': 'Zusammenfassung kopiert',
+  'am.lev_setup_inactive': 'Die Rüstzeiterfassung ist für dieses Werk ausgeschaltet — dieses Paar beseitigt nur eine Warnung, bis die Rüstzeiten aktiviert werden.',
   'am.focus_chip': '{{n}} Warnungen werden angezeigt für: {{title}}',
   'am.focus_chip_outside': '{{n}} Warnungen werden angezeigt für: {{title}} ({{k}} außerhalb Ihres Profils)',
   'am.focus_clear': 'Alle anzeigen',

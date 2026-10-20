@@ -2434,6 +2434,7 @@ window.__NIMBUS_LOCALES.pt = {
   'am.lev_admin_fix': 'correção do administrador',
   'am.lev_copy_summary': 'Copiar resumo para o responsável',
   'am.lev_copied': 'Resumo copiado',
+  'am.lev_setup_inactive': 'O acompanhamento de setup está desativado nesta planta: este par apenas elimina um aviso até que o setup seja ativado.',
   'am.focus_chip': 'Mostrando {{n}} alertas de: {{title}}',
   'am.focus_chip_outside': 'Mostrando {{n}} alertas de: {{title}} ({{k}} fora do seu perfil)',
   'am.focus_clear': 'Mostrar todos',

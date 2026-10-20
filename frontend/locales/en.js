@@ -2680,6 +2680,7 @@ window.__NIMBUS_LOCALES.en = {
   'am.lev_admin_fix': 'admin fix',
   'am.lev_copy_summary': 'Copy summary for owner',
   'am.lev_copied': 'Summary copied',
+  'am.lev_setup_inactive': 'Setup tracking is off for this plant — this pair only clears a warning until setup is activated.',
   'am.focus_chip': 'Showing {{n}} alerts for: {{title}}',
   'am.focus_chip_outside': 'Showing {{n}} alerts for: {{title}} ({{k}} outside your profile)',
   'am.focus_clear': 'Show all',

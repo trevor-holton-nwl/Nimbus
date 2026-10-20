@@ -2435,6 +2435,7 @@ window.__NIMBUS_LOCALES.fr = {
   'am.lev_admin_fix': 'correction administrateur',
   'am.lev_copy_summary': 'Copier le résumé pour le responsable',
   'am.lev_copied': 'Résumé copié',
+  'am.lev_setup_inactive': 'Le suivi des réglages est désactivé pour cette usine : cette paire ne supprime qu’un avertissement tant que les réglages ne sont pas activés.',
   'am.focus_chip': 'Affichage de {{n}} alertes pour : {{title}}',
   'am.focus_chip_outside': 'Affichage de {{n}} alertes pour : {{title}} ({{k}} hors de votre profil)',
   'am.focus_clear': 'Tout afficher',

@@ -210,9 +210,10 @@ test('a result that finishes after the Store moved on is dropped', async () => {
   };
   AlertMonitorPane.render();
   await sleep(40);
-  assert.doesNotMatch(els['am-leverage'].innerHTML, /"after":99/, 'the stale replay never reaches the page');
+  // The test's Util.t returns bare keys, so look for the rendered delta (99 - 70 = +29) instead of the vars.
+  assert.doesNotMatch(els['am-leverage'].innerHTML, />\+29</, 'the stale replay never reaches the page');
   await sleep(500);
-  assert.doesNotMatch(els['am-leverage'].innerHTML, /"after":99/);
+  assert.doesNotMatch(els['am-leverage'].innerHTML, />\+29</);
   assert.ok(counts.analyze >= 2, 'a fresh analysis was scheduled for the new revision');
 });
 
@@ -254,6 +255,33 @@ test('entering minutes replays that one card and shows the exact score only afte
   assert.deepEqual(counts.replay, [12]);
   assert.match(els['am-leverage'].innerHTML, />\+10</, '70 -> 80');
   assert.match(els['am-leverage'].innerHTML, /am\.lev_method_exact/);
+});
+
+test('Enter leaves focus in the minutes box, yet the replay result still paints', async () => {
+  seed([alert('a1')]);
+  groupItems = [setupItem({ requiresMinutes: true, assumedMinutes: null, minutesSource: null })];
+  AlertMonitorPane.render();
+  await sleep(40);
+  globalThis.document.activeElement = { classList: { contains: c => c === 'am-lev-min-input' } };
+  els['alerts-tab'].handlers.change({ target: { closest: sel => (sel === '[data-lev-minutes]' ? { dataset: { levMinutes: 'setup-pair:x' }, value: '12' } : null) } });
+  await sleep(20);
+  assert.match(els['am-leverage'].innerHTML, />\+10</, 'the exact score is visible without a blur');
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /am\.lev_needs_minutes/);
+});
+
+test('no minutes replay while What-If is active or an optimizer preview is open', async () => {
+  seed([alert('a1')]);
+  groupItems = [setupItem({ requiresMinutes: true, assumedMinutes: null, minutesSource: null })];
+  AlertMonitorPane.render();
+  await sleep(40);
+  const enter = () => els['alerts-tab'].handlers.change({ target: { closest: sel => (sel === '[data-lev-minutes]' ? { dataset: { levMinutes: 'setup-pair:x' }, value: '12' } : null) } });
+  Sandbox.active = true;
+  enter();
+  Sandbox.active = false;
+  globalThis.NIMBUS = { OptimizerPreview: { active: true } };
+  enter();
+  await sleep(20);
+  assert.deepEqual(counts.replay, []);
 });
 
 test('a non-positive or non-numeric minutes entry runs nothing', async () => {

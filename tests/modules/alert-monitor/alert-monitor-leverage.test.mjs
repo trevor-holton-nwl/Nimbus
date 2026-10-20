@@ -13,7 +13,7 @@ const levSectionHtml = (...a) => unq(M.levSectionHtml(...a));
 
 const t = (k, v) => (v ? `${k}|${JSON.stringify(v)}` : k);
 const ctx = (o = {}) => ({
-  capped: false, remaining: 0, canReviewPairs: false, isAdmin: false, whatIf: false,
+  capped: false, remaining: 0, canReviewPairs: false, isAdmin: false, setupActive: true, whatIf: false,
   fieldLabel: k => `L:${k}`, ...o,
 });
 const item = (o = {}) => ({
@@ -141,6 +141,12 @@ test('setup-pair titles are re-localised from the pair states, not the engine En
   assert.match(title, /"from":"L:colorWheel: A"/);
   assert.match(title, /"to":"L:colorWheel: B"/);
   assert.doesNotMatch(title, /Color A/);
+});
+
+test('a setup-pair card says so when the plant has setup tracking off (the pair only clears a warning)', () => {
+  assert.match(levCardHtml(setupItem(), ctx({ setupActive: false }), t), /am\.lev_setup_inactive/);
+  assert.doesNotMatch(levCardHtml(setupItem(), ctx({ setupActive: true }), t), /am\.lev_setup_inactive/);
+  assert.doesNotMatch(levCardHtml(item(), ctx({ setupActive: false }), t), /am\.lev_setup_inactive/, 'other families are unaffected');
 });
 
 test('setup-pair action: review when allowed, copy-for-owner otherwise', () => {

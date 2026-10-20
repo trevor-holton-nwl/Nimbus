@@ -2435,6 +2435,7 @@ window.__NIMBUS_LOCALES.es = {
   'am.lev_admin_fix': 'corrección de administrador',
   'am.lev_copy_summary': 'Copiar resumen para el responsable',
   'am.lev_copied': 'Resumen copiado',
+  'am.lev_setup_inactive': 'El seguimiento de preparación está desactivado en esta planta: este par solo elimina una advertencia hasta que se active la preparación.',
   'am.focus_chip': 'Mostrando {{n}} alertas de: {{title}}',
   'am.focus_chip_outside': 'Mostrando {{n}} alertas de: {{title}} ({{k}} fuera de su perfil)',
   'am.focus_clear': 'Mostrar todo',

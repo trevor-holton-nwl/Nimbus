@@ -617,6 +617,7 @@ let _levHave = false;                     // a first pass has produced results f
 let _levStale = false;                    // the tab was re-entered: refresh once
 let _levCapped = false;
 let _levShowAll = false;
+let _levForcePaint = false;               // bypass the "half-typed minutes box" guard for one repaint
 let _levInFlight = false;
 let _levRerun = false;
 let _levStaleDrops = 0;
@@ -658,6 +659,7 @@ function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
     capped: _levCapped, remaining,
     canReviewPairs: _setupAdmin?.canReviewMissingPairs(plant) === true,
     isAdmin: Session.isAdmin(),
+    setupActive: Store.masterPlant(plant)?.setup_active !== false,
     whatIf: Sandbox.active === true,
     fieldLabel: _levFieldLabel,
   };
@@ -672,7 +674,8 @@ function _renderLeverage(s: PaintState): void {
   if (_levPlant !== s.plant) _levReset(s.plant);
   if (!_levHave || _levStale) { _levStale = false; _levScheduleFirst(); }
   // A half-typed minutes box must survive an unrelated repaint.
-  if ((document.activeElement as HTMLElement | null)?.classList?.contains('am-lev-min-input')) return;
+  // (Except for the repaint that shows that very box's replay result: Enter leaves focus in the box.)
+  if (!_levForcePaint && (document.activeElement as HTMLElement | null)?.classList?.contains('am-lev-min-input')) return;
   const plant = s.plant;
   if (_levItems.some(i => i.family === 'setup-pair')) _ensureSetupAdmin();
   _setHtml('am-leverage', levSectionHtml(_levItems, {
@@ -746,13 +749,15 @@ async function _levMinutesEntered(key: string, raw: string): Promise<void> {
   const item = _levItems.find(i => i.key === key);
   const input = _levInput;
   if (!item || !input) return;
-  _levTyped.set(key, minutes);
+  _levTyped.set(key, minutes);   // kept even when skipped below: the next analysis applies it
+  if (_levSkipAnalysis()) return;   // no replay during What-If or an optimizer preview
   const rev0 = Store.rev();
   try {
     const next = await _levDeps.replay(input, item, minutes, _levRunner);
     if (!_active || Store.rev() !== rev0) return;   // a newer analysis re-applies the typed minutes
     _levItems = _levItems.map(i => (i.key === key ? next : i));
-    _paint();
+    _levForcePaint = true;
+    try { _paint(); } finally { _levForcePaint = false; }
   } catch (e) {
     ErrorLog.warn('alert-monitor', 'leverage replay failed', { error: String((e as Error)?.message || e) });
   }

@@ -739,7 +739,7 @@ const ALERT_MONITOR_KEYS = [
   'am.lev_conf', 'am.lev_conf_na', 'am.lev_outside_window', 'am.lev_partial_window', 'am.lev_method_exact',
   'am.lev_method_estimate', 'am.lev_needs_minutes', 'am.lev_minutes_ph', 'am.lev_show_alerts', 'am.lev_computing',
   'am.lev_none', 'am.lev_show_more', 'am.lev_points', 'am.lev_score', 'am.lev_score_capped', 'am.lev_headroom',
-  'am.lev_no_headroom', 'am.lev_remaining', 'am.lev_admin_fix', 'am.lev_copy_summary', 'am.lev_copied',
+  'am.lev_no_headroom', 'am.lev_remaining', 'am.lev_admin_fix', 'am.lev_copy_summary', 'am.lev_copied', 'am.lev_setup_inactive',
   'am.focus_chip', 'am.focus_chip_outside', 'am.focus_clear', 'alert.profile_hidden', 'alert.profile_show_all',
   'alert.profile_override_on', 'alert.profile_back', 'am.group_dismiss_n', 'am.group_dismiss_confirm',
   'am.show_all_n', 'am.day_rel', 'am.rel_in_days', 'am.rel_today', 'am.rel_overdue_days', 'am.whatif_blocked',
