@@ -2366,6 +2366,20 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
+     MODAL: Alert profile editor (body/foot rendered by AlertProfileEditor)
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-alert-profile" hidden>
+  <div class="modal ape-modal">
+    <header class="modal-head">
+      <h3 id="ape-title" data-i18n="ape.title_new">New alert profile</h3>
+      <button class="icon-btn sm" id="ape-close" type="button" aria-label="Close">✕</button>
+    </header>
+    <div class="modal-body" id="ape-body"></div>
+    <footer class="modal-foot" id="ape-foot"></footer>
+  </div>
+</div>
+
+<!-- =========================================================
      MODAL: Date Override
      ========================================================= -->
 <div class="modal-backdrop" id="modal-override" hidden>

@@ -761,7 +761,7 @@ const ALERT_MONITOR_KEYS = [
   'ape.late_hours', 'ape.err_late_hours', 'ape.live_range', 'ape.live_matches', 'ape.err_name_required',
   'ape.err_name_dup', 'ape.err_name_long', 'ape.err_no_rules', 'ape.err_too_many_rules', 'ape.err_rule_no_types',
   'ape.err_days_range', 'ape.err_days_order', 'ape.err_min_sev', 'ape.err_rule_dup', 'ape.err_stale',
-  'ape.delete_confirm_title', 'ape.delete_confirm_msg', 'toast.alert_profile_saved', 'toast.alert_profile_deleted',
+  'ape.delete_confirm_title', 'ape.delete_confirm_msg', 'ape.delete', 'ape.copy_go', 'ape.copy_selected', 'ape.not_editable', 'toast.alert_profile_saved', 'toast.alert_profile_deleted',
   'toast.alert_profiles_load_failed', 'us.alert_profile_for', 'us.alert_profile_no_plant', 'us.alert_profile_hint',
   'us.alert_profile_manage', 'us.alert_gantt_highlight', 'us.alert_gantt_highlight_hint', 'legend.pm_capacity_t',
   'legend.pm_capacity_d', 'legend.pm_conflicts_t', 'legend.pm_conflicts_d', 'legend.pm_calendar_t',

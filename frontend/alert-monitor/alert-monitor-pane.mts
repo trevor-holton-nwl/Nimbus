@@ -22,6 +22,7 @@ import type { AlertAck, AlertProfile, NimbusTask } from '../platform/types.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import type { AlertProfileMatchSet } from '../insights/alert-profile-matches.mjs';
 import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
+import { AlertProfileEditor } from './alert-profile-editor.mjs';
 import {
   ALL_ALERTS_PROFILE_ID, resolveActiveProfileId, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
 } from '../insights/alert-profiles.mjs';
@@ -310,9 +311,14 @@ function _onClick(e: Event): void {
     case 'make-default': _makeDefault(); break;
     case 'switch-all':   AlertProfileMatches.setSessionProfile(ALL_ALERTS_PROFILE_ID); break;
     case 'manage':
-    case 'create-profile':
-      // TODO(Task 14): open the alert-profile editor modal.
+    case 'create-profile': {
+      const plant = Store.selectedPlant;
+      if (!plant) break;
+      // Manage opens on the profile being viewed (when it is a stored one); the prompt always starts a new draft.
+      const viewed = btn!.dataset.amAction === 'manage' ? AlertProfileMatches.current().profileId : undefined;
+      AlertProfileEditor.open({ plant, profileId: viewed && viewed !== ALL_ALERTS_PROFILE_ID ? viewed : undefined });
       break;
+    }
     case 'kpi-confidence': {
       const conf = (globalThis as unknown as { NIMBUS?: { Confidence?: { showBreakdown?: () => void } } }).NIMBUS?.Confidence;
       conf?.showBreakdown?.();

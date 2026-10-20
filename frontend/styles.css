@@ -7658,3 +7658,42 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-diag-f dd { margin: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .am-vl-scroll { min-height: 240px; max-height: calc(100vh - 380px); overflow-y: auto; }
+
+/* ---- Alert profile editor (#modal-alert-profile) ---------------------------------------------- */
+.ape-modal { max-width: 860px; }
+.ape-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 18px; align-items: start; }
+.ape-rail { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding-right: 14px; border-right: 1px solid var(--line); }
+.ape-plist { display: flex; flex-direction: column; gap: 6px; }
+.ape-prow { border: 1px solid var(--line); border-radius: var(--r-md); padding: 6px 8px; background: var(--bg-elev); }
+.ape-prow-sel { border-color: var(--accent); background: var(--accent-wash); }
+.ape-pname {
+  display: block; width: 100%; text-align: left; padding: 2px 0; background: none; border: 0; cursor: pointer;
+  font: inherit; font-size: 12.5px; font-weight: 600; color: var(--fg); overflow-wrap: anywhere;
+}
+.ape-pacts { display: flex; flex-wrap: wrap; gap: 2px 4px; margin-top: 2px; }
+.ape-new-sel { border-color: var(--accent); color: var(--accent); }
+.ape-form { min-width: 0; }
+.ape-eyebrow { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-mute); }
+.ape-rules-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 4px 0 8px; }
+.ape-live { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-mute); }
+.ape-rule { border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px; margin-bottom: 10px; background: var(--bg-elev); }
+.ape-rule-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.ape-types-label { font-size: 11px; font-weight: 600; color: var(--fg-mute); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+.ape-cat { margin-bottom: 6px; }
+.ape-cat-head { font-weight: 600; }
+.ape-cat-types { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 2px 0 0 20px; }
+.ape-days { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.ape-days .form-row { margin-bottom: 4px; }
+.ape-range { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg); min-height: 1em; }
+.ape-hint { font-size: 11.5px; color: var(--fg-mute); margin: 2px 0 4px; }
+.ape-err { font-size: 11.5px; color: var(--err); margin-top: 4px; }
+.ape-ranking { margin-top: 12px; max-width: 280px; }
+.ape-mine { margin-top: 4px; }
+.ape-copy-list { max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--r-md); margin-top: 8px; background: var(--bg-elev); }
+.ape-copy-opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.ape-copy-opt input[type="checkbox"] { width: 14px; height: 14px; margin: 0; flex: none; accent-color: var(--accent); }
+@media (max-width: 640px) {
+  .ape-layout { grid-template-columns: minmax(0, 1fr); }
+  .ape-rail { padding-right: 0; border-right: 0; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
+  .ape-days { grid-template-columns: minmax(0, 1fr); }
+}
