@@ -1310,18 +1310,22 @@ export const AlertsUIAdapter = {
     // Task selection/Inspector piggyback on its "window is set" callback
     // rather than re-centering the window a second time.
     Timeline.gotoLineDay(a.line, Util.dayKey(a.time), () => {
-      if (!a.taskId) return;
-      const taskId = String(a.taskId);
-      const t = Store.tasks[taskId];
-      if (!t || !Timeline._tl) return;
+      const taskId = a.taskId ? String(a.taskId) : '';
+      const t = taskId ? Store.tasks[taskId] : undefined;
+      // Line/day alerts (no order) and orders with no dates (not drawn) ring the alert's day cell.
+      if (!t || !t.start_date || !t.end_date || !Timeline._tl) {
+        Timeline.markGotoCell(a.line, Util.dayKey(a.time));
+        return;
+      }
       // Select through Selection (not vis directly) so every segment of a split order is
       // selected and the choice survives the next rebuild; its listener (Interaction.install,
       // wired at boot) shows the Inspector. Selection.set no-ops when the order is already the
-      // sole selection, so show the Inspector ourselves in that one case.
+      // sole selection, so show the Inspector ourselves in that one case. Select BEFORE marking:
+      // the listener clears a marker whose order is not selected and must only see the old one.
       const cur = Selection.ids();
       if (cur.length === 1 && cur[0] === taskId) Inspector.show(t);
       else Selection.set([taskId]);
-      Timeline.flashTarget(taskId);
+      Timeline.markGotoTask(taskId);
     });
     // Close the alert drawer if it is open (the drawer would otherwise cover the Gantt).
     if (document.getElementById('alert-drawer')?.classList.contains('open')) AlertsUIAdapter.toggleDrawer();

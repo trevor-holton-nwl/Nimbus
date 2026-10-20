@@ -301,7 +301,7 @@ test('Timeline._itemForTask: className reflects firming status (order-firmed for
   assert.doesNotMatch(firmedItem.className, /\border-standard\b/);
 });
 
-test('Timeline.flashTarget: goto-target rides _itemForTask/_itemsForTask for every segment, clears on expiry', async (t) => {
+function _gotoHarness(t) {
   const task = {
     id: 'goto-flash-1', MACHINE: 'L-GOTO', RUN_TIME: 14, plant: '5512',
     start_date: new Date('2026-08-12T08:00:00'), end_date: new Date('2026-08-13T10:00:00'),
@@ -314,29 +314,95 @@ test('Timeline.flashTarget: goto-target rides _itemForTask/_itemsForTask for eve
   const rows = new Map();
   const priorItems = Timeline._items;
   Timeline._items = {
-    get: id => rows.get(id) || null,
+    on() {}, get: id => rows.get(id) || null,
     update(arr) { for (const u of [].concat(arr)) rows.set(u.id, { ...(rows.get(u.id) || {}), ...u }); },
   };
   for (const it of Timeline._itemsForTask(task)) rows.set(it.id, it);
+  rows.set('alertcell-L-GOTO-2026-08-12', { id: 'alertcell-L-GOTO-2026-08-12', className: 'alertcell-err' });
   Store._state.tasks[task.id] = task;
-  t.after(() => { delete Store._state.tasks[task.id]; clearTimeout(Timeline._gotoFlashTimer); Timeline._gotoFlash = null; Timeline._items = priorItems; });
+  Store._state.tasks[other.id] = other;
+  t.after(() => {
+    delete Store._state.tasks[task.id]; delete Store._state.tasks[other.id];
+    Timeline._gotoTarget = null; Timeline._items = priorItems;
+  });
+  return { task, other, rows };
+}
 
+test('Timeline.markGotoTask: goto-target rides _itemForTask/_itemsForTask for every segment and persists (no expiry)', (t) => {
+  const { task, other, rows } = _gotoHarness(t);
   assert.ok(Timeline._itemsForTask(task).every(i => !/goto-target/.test(i.className)));
-  Timeline.flashTarget('goto-flash-1');
+  Timeline.markGotoTask('goto-flash-1');
   const ids = Timeline.itemIdsForTask('goto-flash-1');
   assert.equal(ids.length, 2);
   assert.ok(ids.every(id => /\bgoto-target\b/.test(rows.get(id).className)), 'every live segment gets the class');
-  // A rebuild builds items fresh; the flash state re-applies the class.
+  // A rebuild builds items fresh; the target state re-applies the class, however long ago it was set.
   assert.ok(Timeline._itemsForTask(task).every(i => /\bgoto-target\b/.test(i.className)));
   assert.doesNotMatch(Timeline._itemForTask(other).className, /goto-target/, 'other orders never get it');
+  assert.ok(Timeline._gotoTarget, 'no timer clears it');
 
-  // Expiry: the unexpired check stops adding, and the timer strips live items.
-  Timeline._gotoFlash.until = Date.now() - 1;
+  Timeline.clearGotoTarget();
+  assert.equal(Timeline._gotoTarget, null);
+  assert.ok(ids.every(id => !/goto-target/.test(rows.get(id).className)), 'clear strips the class');
   assert.doesNotMatch(Timeline._itemForTask(task).className, /goto-target/);
-  Timeline._gotoFlash.until = Date.now() + 1000;
-  await new Promise(r => setTimeout(r, Timeline.GOTO_FLASH_MS + 300));
-  assert.equal(Timeline._gotoFlash, null);
-  assert.ok(ids.every(id => !/goto-target/.test(rows.get(id).className)), 'timer strips the class');
+});
+
+test('Timeline.markGotoTask: marking B clears A', (t) => {
+  const { task, other, rows } = _gotoHarness(t);
+  for (const it of Timeline._itemsForTask(other)) rows.set(it.id, it);
+  Timeline.markGotoTask(task.id);
+  Timeline.markGotoTask(other.id);
+  assert.ok(Timeline.itemIdsForTask(task.id).every(id => !/goto-target/.test(rows.get(id).className)));
+  assert.ok(Timeline.itemIdsForTask(other.id).every(id => /goto-target/.test(rows.get(id).className)));
+});
+
+test('Timeline.markGotoCell: lands on the alertcell item, replaces a task target, and clears cleanly', (t) => {
+  const { task, rows } = _gotoHarness(t);
+  const cellId = 'alertcell-L-GOTO-2026-08-12';
+  Timeline.markGotoTask(task.id);
+  Timeline.markGotoCell('L-GOTO', '2026-08-12');
+  assert.match(rows.get(cellId).className, /alertcell-err goto-target/);
+  assert.ok(Timeline.itemIdsForTask(task.id).every(id => !/goto-target/.test(rows.get(id).className)), 'task ring dropped');
+  assert.deepEqual(Timeline._gotoTarget, { kind: 'cell', itemId: cellId });
+  Timeline.clearGotoTarget();
+  assert.equal(rows.get(cellId).className, 'alertcell-err');
+});
+
+test('Go To marker clears on empty-canvas click and Escape even with an empty selection', (t) => {
+  _gotoHarness(t);
+  Selection.clear();
+  Timeline.markGotoCell('L-GOTO', '2026-08-12');
+  Interaction._onClick({ what: 'background', item: null, event: {} });
+  assert.equal(Timeline._gotoTarget, null, 'empty-canvas click clears a cell target');
+
+  Timeline.markGotoCell('L-GOTO', '2026-08-12');
+  Interaction._onKeyDown({ key: 'Escape', target: null, defaultPrevented: false, preventDefault() {} });
+  assert.equal(Timeline._gotoTarget, null, 'Escape clears a cell target');
+
+  // A modified click (shift/ctrl) is a selection gesture, not "moving on".
+  Timeline.markGotoCell('L-GOTO', '2026-08-12');
+  Interaction._onClick({ what: 'background', item: null, event: { shiftKey: true } });
+  assert.ok(Timeline._gotoTarget);
+});
+
+test('Go To marker follows the selection: cleared when the target leaves it, kept while it stays', (t) => {
+  const { task, other } = _gotoHarness(t);
+  const priorTl = Timeline._tl;
+  Timeline._tl = { on() {}, setSelection() {} };
+  Selection.clear();
+  Interaction.install();
+  t.after(() => { Interaction.uninstall(); Timeline._tl = priorTl; Selection.clear(); });
+  Selection.set([task.id]);
+  Timeline.markGotoTask(task.id);
+  Selection.set([task.id, other.id]);
+  assert.ok(Timeline._gotoTarget, 'target still selected, marker stays');
+  Selection.set([other.id]);
+  assert.equal(Timeline._gotoTarget, null, 'target left the selection');
+
+  Timeline.markGotoCell('L-GOTO', '2026-08-12');
+  Selection.clear();
+  assert.ok(Timeline._gotoTarget, 'an empty selection does not clear a cell target');
+  Selection.set([task.id]);
+  assert.equal(Timeline._gotoTarget, null, 'selecting an order moves on from a cell target');
 });
 
 test('G5: the live lock-band scan membership includes running orders, not only the frozen horizon', () => {

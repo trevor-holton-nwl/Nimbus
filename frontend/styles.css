@@ -1171,6 +1171,11 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   outline: 2px solid var(--err) !important;
   outline-offset: -2px;
 }
+/* The red outline paints over the selection border, so a selected red order would look
+   unselected; a solid ring outside the outline shows both. Not !important: .goto-target wins. */
+.vis-item.vis-selected.conflict-order {
+  box-shadow: 0 0 0 2px var(--accent);
+}
 .vis-label { font-size: 12px; font-weight: 600; padding: 0 10px; color: var(--fg); }
 .vis-time-axis .vis-text { font-size: 11px; color: var(--fg-mute); }
 .vis-time-axis .vis-grid.vis-minor { border-color: var(--line); }
@@ -1245,7 +1250,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.dist-sibling {
   box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.55) !important;
 }
-/* "Go To" target (Timeline.flashTarget): dark ink ring (light in dark mode — --fg) with a
+/* "Go To" target (Timeline.markGotoTask / markGotoCell; stays until cleared): dark ink ring (light in dark mode — --fg) with a
    --bg-elev gap so it separates from the selection blue and from a red alert outline.
    3px total outer reach (rows have ~4px margin). Must follow .dist-sibling to win. */
 /* The pulse animates the registered --goto-a (ring opacity) rather than box-shadow itself:
@@ -1254,14 +1259,19 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 @property --goto-a { syntax: '<percentage>'; inherits: false; initial-value: 100%; }
 .vis-item.goto-target {
   box-shadow: 0 0 0 1px var(--bg-elev), 0 0 0 3px color-mix(in srgb, var(--fg) var(--goto-a), transparent) !important;
-  animation: goto-target-pulse 0.5s ease-in-out 5;
+  animation: goto-target-pulse 0.5s ease-in-out 0.4s 5;   /* delay: pulse after the pan settles */
+}
+/* Day-cell marker for line/day alerts: inset shadow only (never position/top/height on vis items). */
+.vis-item.vis-background.goto-target {
+  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--fg) var(--goto-a), transparent) !important;
 }
 @keyframes goto-target-pulse {
   0%, 100% { --goto-a: 100%; }
   50%      { --goto-a: 30%; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .vis-item.goto-target { animation: none; }
+  .vis-item.goto-target,
+  .vis-item.vis-background.goto-target { animation: none; }
 }
 
 /* Custom vis background areas for blackout blocks */
