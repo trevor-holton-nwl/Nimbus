@@ -1098,6 +1098,10 @@ export const Calendar = {
       && !Calendar.hasNominalWindow(line, request.earliestStart, durationMs, null);
     return placeWithSetupPure({
       ...request,
+      // The plant's productive segment floor (Order Rules) applies unless the caller names one; resolved lazily
+      // here (Engine is a circular import) so the Alerts Fix honors the same floor as the optimizer.
+      minProductiveSegmentMinutes: request.minProductiveSegmentMinutes
+        ?? Engine.minProductiveSegmentMinutesFor(sourceGetPlantForLine(line)),
       freeIntervals: Calendar._freeIntervals(line, request.earliestStart),
       isInherentlyOverlong,
     });

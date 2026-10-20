@@ -759,7 +759,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.max_pull_forward_title':         'Due-date pull-forward limit',
   'ui.max_pull_forward_label':         'Maximum pull-forward (days)',
   'ui.max_pull_forward_none':          'No limit',
-  'ui.max_pull_forward_help':          'Leave blank for no limit. The optimizer will not start a dated order earlier than this many calendar days before its due-date day; manual moves are not limited. When the due date falls on a closed day (for example a Sunday), the count starts from the last open day before it, so a closed gap uses up part of the allowance.',
+  'ui.max_pull_forward_help':          'Leave blank for no limit. The optimizer will not start a dated order earlier than this many calendar days before its due-date day; manual moves are not limited. When the due date falls on a closed day (for example a Sunday), the count starts from the last open day before it, so a closed gap uses up part of the allowance. Remove Backlog ignores this limit.',
   'ui.max_pull_forward_invalid':       'Enter a whole number of days, zero or greater.',
   'ui.max_pull_forward_saved':         'Maximum pull-forward saved for this plant.',
   'ui.max_pull_forward_failed':        'Could not save maximum pull-forward',

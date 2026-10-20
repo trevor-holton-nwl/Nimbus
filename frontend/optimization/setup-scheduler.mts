@@ -480,6 +480,10 @@ export interface DueDateFirstBounds {
   boundaryTaskIds?: readonly string[] | ReadonlySet<string>;
   strategy?: FragmentMode;
   exactSearchThreshold: number;
+  /** Remove Backlog only: skip the plant's pull/push planning window (no floor, no ceiling, no missing-due
+   * defect). Backlog pulls orders off the schedule on purpose, so the window that governs scheduling
+   * does not apply to it. Set only in Engine's backlogBounds literal; never serialized (foreground-only). */
+  ignorePlantWindow?: boolean;
   /** True for the planner's Exhaustive run: the capacity-check limit message then omits the "choose Exhaustive" advice. */
   exhaustive?: boolean;
   /** Optional ceiling on the number of distinct orderings an exact search may
@@ -2833,8 +2837,22 @@ function chargedSetupMinutes(
   resolved: { covered: boolean; effectiveMin: number | null } | null,
   chargeable: boolean,
 ): number {
-  if (resolved?.covered && resolved.effectiveMin !== null) return resolved.effectiveMin;
-  return chargeable && ctx?.unknownSetupPolicy === 'plantDefaultMinutes' ? ctx.unknownSetupDefaultMinutes : 0;
+  return chargedSetupMinutesFor(
+    ctx?.unknownSetupPolicy, ctx?.unknownSetupDefaultMinutes ?? 0,
+    !!resolved?.covered, resolved ? resolved.effectiveMin : null, chargeable,
+  );
+}
+/** The pure rule behind `chargedSetupMinutes`, exported so the Store-backed reconcile / Fix paths in
+ * engine.mts charge the plant default the same way the optimizer does (no behavior of its own). */
+export function chargedSetupMinutesFor(
+  policy: UnknownSetupPolicy | undefined,
+  defaultMin: number,
+  covered: boolean,
+  effectiveMin: number | null,
+  chargeable: boolean,
+): number {
+  if (covered && effectiveMin !== null) return effectiveMin;
+  return chargeable && policy === 'plantDefaultMinutes' ? defaultMin : 0;
 }
 
 /** Display form of a setup state for exclusion / unrecorded-transition messages. */
@@ -6480,6 +6498,7 @@ export function attachDetachedValidationContext(
 
 /** SAP-only local calendar-day bounds; scheduled finish is never a due-date fallback. */
 export function allowedPlanningWindow(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): { floor: Date | null; ceiling: Date | null; missingDue: boolean } {
+  if (bounds.ignorePlantWindow) return { floor: null, ceiling: null, missingDue: false };
   const plant = snapshot.masterData?.plants?.find(row => row.plant === bounds.setup.plant);
   const pull = plant?.max_pull_forward_days;
   const push = plant?.max_push_forward_days;

@@ -71,6 +71,7 @@ import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { Alerts, scheduleAlertsForPatches, taskCarriesTool, taskCarriesDistribution } from '../insights/services.mjs';
 import {
+  chargedSetupMinutesFor,
   placeWithSetup as placeWithSetupPure,
   evaluateDueDateFirst as evaluateDueDateFirstPure,
   evaluateMinChangeover as evaluateMinChangeoverPure,
@@ -168,6 +169,23 @@ export interface ReconcileOptions {
   /** Restrict the pass to these task ids and bypass the unsaved-edit skip for them. The undo path passes the
    *  rows it just restored: they are dirty by construction, and their start must still follow the run time. */
   ids?: ReadonlySet<string>;
+}
+
+/** Setup minutes a Store-backed pass (autoReflow, reconcile) reserves for a transition: a covered row keeps its own
+ *  minutes; an uncovered row or an unrecorded state is charged the plant's unknown-setup default under
+ *  plantDefaultMinutes, exactly as the optimizer's `chargedSetupMinutes` does (same eligibility as
+ *  `setupChargeableOnLine`: the plant has a setup definition and the line is setup-compatible). Callers gate on
+ *  `setupSnapshot.plant_active`; `resolved` is null when a state is unrecorded. */
+function storeChargedSetupMinutes(plant: string, line: string,
+  resolved: { covered: boolean; effectiveMin: number | null } | null): number {
+  const config = Store.masterData?.plants?.find(row => row.plant === plant)?.setup_policy_config;
+  const policy = config?.unknownSetupPolicy;
+  const stored = config?.unknownSetupDefaultMinutes;
+  const defaultMin = Number.isInteger(stored) && (stored as number) >= 0 ? (stored as number) : 0;
+  const chargeable = !!Store.setupSnapshot?.definition
+    && Store.masterData?.lines?.find(row => row.plant === plant && row.machine === line)?.setup_compatible !== false;
+  return chargedSetupMinutesFor(policy === 'plantDefaultMinutes' || policy === 'excludeFromSearch' ? policy : 'zero',
+    defaultMin, !!resolved?.covered, resolved ? resolved.effectiveMin : null, chargeable);
 }
 
 /** Options for a manual (planner) placement. */
@@ -1773,11 +1791,18 @@ export const Engine = {
           && state.signature_version === setupDefinition.signature_version)?.state_key ?? null;
       }
       const successorState = stateForOrder(task, setupDefinition);
-      if (!predecessorState || !successorState) return { minutes: 0, orphaned };
+      // X2: an undo restores exact placements, so it keeps the legacy covered-only reservation; every other pass
+      // (stale runtime, cutover, server refresh, distribution) also reserves the plant default for an unrecorded
+      // or uncovered transition, the same minutes the optimizer's validator charges.
+      const chargeDefault = opts.reason !== 'undo';
+      if (!predecessorState || !successorState) {
+        return { minutes: chargeDefault ? storeChargedSetupMinutes(plant, line, null) : 0, orphaned };
+      }
       const resolved = resolveSetup({
         definition: setupDefinition, machine: line, predecessorState, successorState, predecessorOrderId: predecessorId,
         successorOrderId: String(task.id), plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
       });
+      if (chargeDefault) return { minutes: storeChargedSetupMinutes(plant, line, resolved), orphaned };
       return { minutes: resolved.covered && resolved.effectiveMin != null ? resolved.effectiveMin : 0, orphaned };
     };
 
@@ -2612,6 +2637,8 @@ export const Engine = {
           respectCalendar: true,
           notBefore: () => null,
           notAfter: () => null,
+          // X3: Backlog removal is exempt from the plant's pull/push window (candidate time and Apply time).
+          ignorePlantWindow: true,
         };
         return attachDetachedValidationContext(
           detachedCandidateResult(result.patches, _pmT0e, 'completed', result),
@@ -2992,13 +3019,14 @@ export const Engine = {
       if (!setupActive || !setup || !definition) return 0;
       const predecessorState = stateForOrder(predecessor, definition);
       const successorState = stateForOrder(successor, definition);
-      if (!predecessorState || !successorState) return 0;
+      const plantOfLine = String(setup.plant);   // setupActive pinned setup.plant to the order's plant
+      if (!predecessorState || !successorState) return storeChargedSetupMinutes(plantOfLine, line, null);
       const resolved = resolveSetup({
         definition, machine: line, predecessorState, successorState,
         predecessorOrderId: String(predecessor.id), successorOrderId: String(successor.id),
         plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
       });
-      return resolved.covered && resolved.effectiveMin != null ? resolved.effectiveMin : 0;
+      return storeChargedSetupMinutes(plantOfLine, line, resolved);
     };
 
     const peers = Store.tasksByPlant(Store.selectedPlant)
