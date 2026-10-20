@@ -1513,3 +1513,5 @@ Tip 261d9cb on `feature/backward-scheduling`, still unmerged and undeployed. Ful
 - SAP echo test against a real SAP system (A9): confirms how SAP returns seconds before the echo compare (kept truncated to the minute, D11) is revisited.
 - External callers of the bulk task update route (`/tasks/bulk_update`): the owner must list them, because the route now requires both edges and carries start-derived reasons.
 - Two stale `.git/worktrees` admin directories (`bisect-wt`, `merged`) need `git worktree prune`, to be run outside OneDrive.
+
+- Alert Monitor: deferred and still-open items (per-rule colours, role-default profile UI, persisted dismissals, calendar line+day deep link, one-click define-pair, reviewer minors) are listed in `docs/superpowers/specs/2026-10-20-alert-monitor-design.md`, section "Shipped vs deferred (2026-10-20)".
