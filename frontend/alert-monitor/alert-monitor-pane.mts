@@ -16,18 +16,25 @@
 
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
-import { Util, Config } from '../platform/foundation.mjs';
+import { Util, Config, Modal, Toast, VirtualList } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
-import type { AlertProfile } from '../platform/types.mjs';
+import type { AlertAck, AlertProfile, NimbusTask } from '../platform/types.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import type { AlertProfileMatchSet } from '../insights/alert-profile-matches.mjs';
 import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
-import { ALL_ALERTS_PROFILE_ID, resolveActiveProfileId } from '../insights/alert-profiles.mjs';
 import {
-  MONITOR_GROUP_BYS, MONITOR_SORTS, MONITOR_CATEGORIES,
+  ALL_ALERTS_PROFILE_ID, resolveActiveProfileId, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
+} from '../insights/alert-profiles.mjs';
+import type { AlertGroup, GroupContext } from '../insights/alert-profiles.mjs';
+import { Alerts } from '../insights/services.mjs';
+import { Sandbox } from '../optimization/sandbox.mjs';
+import {
+  MONITOR_GROUP_BYS, MONITOR_SORTS, MONITOR_CATEGORIES, GROUP_ROW_CAP, ROW_H, DIAG_H,
   kpiSummary, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  rowActionsFor, rowHtml, colsHtml, diagnoseHtml, groupHeadHtml, groupTotals, groupLabel,
+  relativeDaysText, formatPairKey, fmtNum,
 } from './alert-monitor-model.mjs';
-import type { MonitorView, EmptyKind, KpiSummary } from './alert-monitor-model.mjs';
+import type { MonitorView, EmptyKind, KpiSummary, RowView } from './alert-monitor-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -40,10 +47,36 @@ interface PaintState {
   view: MonitorView;
   defaultId: string;
   showAcked: boolean;
+  /** What the profile matched (acknowledged hidden unless asked) — the KPI strip counts these. */
   visible: NimbusAlert[];
+  /** What the groups list: `visible`, or the focus set (which bypasses the profile). */
+  listed: NimbusAlert[];
+  /** Focused alerts the profile did not match (the focus chip says so). */
+  focusOutside: number;
   kpi: KpiSummary;
   empty: EmptyKind;
   scopedCount: number;
+  /** The plant clock now — the start of the impact horizon. */
+  horizonStart: Date;
+  horizonMinutes: number;
+  plantToday: Date;
+}
+
+/** The ambient `NIMBUS` members this pane reaches (the classic-script bridge; never a real import). */
+interface AmNimbus {
+  AlertsUIAdapter?: { focus?(id: string): void; showForCell?(line: string, dayKey: string): void; headlineFor?(type: string): string };
+  Table?: { _openOverrideModalForId?(id: string): void; _onPoMatApply?(): void };
+  App?: { gotoGanttSub?(sub: string): void };
+  Inspector?: { _formatRuntimeBasis?(task: NimbusTask): string };
+}
+const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NIMBUS ?? {};
+
+/** Everything a row / group card needs that is derived once per paint. */
+interface RowCtx {
+  s: PaintState;
+  ctx: GroupContext;
+  pointsOf: (a: NimbusAlert) => number;
+  lateOf: (taskId: string) => number;
 }
 
 const GROUP_LABEL_KEY: Record<string, string> = {
@@ -61,6 +94,18 @@ const _lastHtml = new Map<string, string>();
 let _comboFiltered: Array<{ id: string; label: string }> = [];
 let _comboActive = -1;
 
+// Transient view state — reset on plant change (and by resetView()).
+const _collapsed = new Set<string>();     // group keys the user folded
+const _showAll = new Set<string>();       // group keys expanded past the row cap
+const _diagOpen = new Set<string>();      // alert ids whose inline diagnose panel is open
+let _focusIds: Set<string> | null = null; // "Show alerts" focus: list only these, bypassing the profile
+let _focusTitle = '';
+let _lastPlant: string | null | undefined;
+let _groupsByKey = new Map<string, AlertGroup>();
+let _vl: VirtualList<NimbusAlert> | null = null;   // group-by none only
+let _vlEl: HTMLElement | null = null;
+let _rowCtx: RowCtx | null = null;
+
 /* ---------------------------------------------------------------------------
    DOM helpers
    ------------------------------------------------------------------------- */
@@ -69,11 +114,12 @@ function _el<E extends HTMLElement = HTMLElement>(id: string): E | null {
 }
 
 /** innerHTML only when it changed — avoids re-parsing identical markup on every producer tick. */
-function _setHtml(id: string, html: string): void {
+function _setHtml(id: string, html: string): boolean {
   const el = _el(id);
-  if (!el || _lastHtml.get(id) === html) return;
+  if (!el || _lastHtml.get(id) === html) return false;
   _lastHtml.set(id, html);
   el.innerHTML = html;
+  return true;
 }
 
 function _setText(id: string, text: string): void {
@@ -263,7 +309,94 @@ function _onClick(e: Event): void {
       conf?.showBreakdown?.();
       break;
     }
-    default: break;
+    case 'toggle-group': _toggleGroup(btn!.dataset.groupKey ?? ''); break;
+    case 'show-all':
+      if (btn!.dataset.groupKey) { _showAll.add(btn!.dataset.groupKey); _paint(); }
+      break;
+    case 'group-dismiss': _dismissGroup(btn!.dataset.groupKey ?? ''); break;
+    case 'group-open-table': _openGroupInTable(btn!.dataset.groupKey ?? ''); break;
+    case 'clear-focus': AlertMonitorPane.clearFocus(); break;
+    default: {
+      const act = target?.closest?.('[data-alert-action]') as HTMLElement | null;
+      if (act?.dataset.alertAction) _onAlertAction(act);
+      break;
+    }
+  }
+}
+
+function _toggleGroup(key: string): void {
+  if (!key) return;
+  if (_collapsed.has(key)) _collapsed.delete(key); else _collapsed.add(key);
+  _paint();
+}
+
+/** Dismiss every alert of one group (confirm above 5, the way the drawer protects "dismiss all"). */
+function _dismissGroup(key: string): void {
+  const g = _groupsByKey.get(key);
+  if (!g || !g.alerts.length) return;
+  const ids = g.alerts.map(a => a.id);
+  const n = ids.length;
+  if (n <= 5) { Alerts.dismissAll(ids); return; }
+  void Modal.confirm({ title: t('am.group_dismiss_n', { n }), message: t('am.group_dismiss_confirm', { n }), tone: 'danger' })
+    .then(ok => { if (ok) Alerts.dismissAll(ids); });
+}
+
+/**
+ * "Open these N orders in the table": there is no scroll-to-row API, so the PO/Material paste
+ * filter stands in — fill it with the order numbers, apply it, then show the Orders sub-tab.
+ */
+function _openGroupInTable(key: string): void {
+  const g = _groupsByKey.get(key);
+  if (!g) return;
+  const nums: string[] = [];
+  for (const id of g.orderIds) {
+    const task = Store.tasks[id];
+    const no = task ? String(task.ORDER ?? task.PRODUCTION_ORDER ?? '').trim() : '';
+    if (no && !nums.includes(no)) nums.push(no);
+  }
+  const nim = _nim();
+  const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
+  if (!nums.length || !ta || typeof nim.Table?._onPoMatApply !== 'function') {
+    Toast.show(t('am.table_unavailable'), 'warn');
+    return;
+  }
+  ta.value = nums.join('\n');
+  nim.Table._onPoMatApply();
+  nim.App?.gotoGanttSub?.('orders');
+}
+
+/** Row / group-head actions — the same vocabulary and calls as AlertsUIAdapter._handleAction (the drawer). */
+function _onAlertAction(trigger: HTMLElement): void {
+  const action = trigger.dataset.alertAction;
+  const alertId = trigger.dataset.alertId;
+  if (!alertId) return;
+  const nim = _nim();
+  switch (action) {
+    case 'focus': nim.AlertsUIAdapter?.focus?.(alertId); break;
+    case 'fix':
+      if (Sandbox.active) return;
+      Alerts.applyFix(alertId);
+      break;
+    case 'override': {
+      if (Sandbox.active) return;
+      const taskId = trigger.dataset.taskId;
+      if (taskId) nim.Table?._openOverrideModalForId?.(taskId);
+      break;
+    }
+    case 'dismiss': Alerts.dismiss(alertId); break;
+    case 'diagnose': {
+      const a = Store.alerts.find(x => x.id === alertId);
+      if (!a) return;
+      const kind = rowActionsFor(a).diagnose;
+      if (kind === 'cell' && a.line && a.time) {
+        nim.AlertsUIAdapter?.showForCell?.(a.line, Util.dayKey(a.time));
+      } else if (kind === 'order') {
+        if (_diagOpen.has(alertId)) _diagOpen.delete(alertId); else _diagOpen.add(alertId);
+        _paint();
+      }
+      break;
+    }
+    default: break;   // 'ack' opens its modal in Task 15; the button renders disabled until then
   }
 }
 
@@ -299,6 +432,9 @@ function _gatherState(): PaintState {
   const scoped = horizonAlerts(Store.alerts, lines, null);
   const inHorizon = horizonAlerts(Store.alerts, lines, cutoff);
   const visible = visibleAlertsFor(scoped, m.alertIds, m.acked, showAcked);
+  const focus = _focusIds;
+  const listed = focus ? scoped.filter(a => focus.has(a.id) && (showAcked || !m.acked.has(a.id))) : visible;
+  const focusOutside = focus ? listed.filter(a => !m.alertIds.has(a.id)).length : 0;
 
   const confMin = plantRow?.conf_score_horizon ?? (Store.userSettings?.confidenceHorizonMinutes as number | undefined) ?? 20160;
   const confCutoff = new Date(clock.getTime() + confMin * Config.MS_MIN);
@@ -309,12 +445,17 @@ function _gatherState(): PaintState {
   return {
     plant, m, profiles, profilesLoaded: profilesRaw != null, view,
     defaultId: plant ? _defaultProfileId(plant, profiles) : ALL_ALERTS_PROFILE_ID,
-    showAcked, visible, scopedCount: scoped.length,
+    showAcked, visible, listed, focusOutside, scopedCount: scoped.length,
     kpi: kpiSummary(visible, inHorizon, hz, score, inConfWindow),
-    empty: emptyStateFor({
-      plant, scopedCount: scoped.length, matchedCount, visibleCount: visible.length,
-      isAllAlerts: m.profileId === ALL_ALERTS_PROFILE_ID,
-    }),
+    // A focus set always lists something or says nothing is left; the profile empty states don't apply to it.
+    empty: focus
+      ? (listed.length ? null : 'no-alerts')
+      : emptyStateFor({
+        plant, scopedCount: scoped.length, matchedCount, visibleCount: visible.length,
+        isAllAlerts: m.profileId === ALL_ALERTS_PROFILE_ID,
+      }),
+    horizonStart: clock, horizonMinutes: confMin,
+    plantToday: plant ? Util.plantToday(plant) : (Util.startOfDay(clock) as Date),
   };
 }
 
@@ -387,6 +528,8 @@ function _emptyHtml(s: PaintState): string {
       return `<div class="empty-state">${esc(t('am.empty_no_plant'))}</div>`;
     case 'no-alerts':
       return `<div class="empty-state">${esc(t('empty.no_active_alerts'))}</div>`;
+    case 'all-acked':
+      return `<div class="empty-state">${esc(t('am.empty_all_acked'))}</div>`;
     case 'no-match':
       return `<div class="empty-state am-empty-match"><div class="am-empty-title">${esc(t('am.empty_no_match_title'))}</div>`
         + `<div>${esc(t('am.empty_no_match_msg', { total: s.scopedCount, name: s.m.profile.name }))}</div>`
@@ -399,14 +542,185 @@ function _emptyHtml(s: PaintState): string {
 // TODO(Task 13): paint the high-leverage fixes panel into #am-leverage.
 function _renderLeverage(_s: PaintState): void { /* filled by Task 13 */ }
 
-// TODO(Task 12): paint the grouped alert cards into #am-groups when `s.empty === null`.
+/* ---------------------------------------------------------------------------
+   Groups, rows, diagnose
+   ------------------------------------------------------------------------- */
+function _teardownVl(): void {
+  if (_vl) { _vl.destroy(); _vl = null; }
+  _vlEl = null;
+}
+
+function _makeRowCtx(s: PaintState): RowCtx {
+  const ctx: GroupContext = {
+    tasksById: Store.tasks, horizonStart: s.horizonStart, horizonMinutes: s.horizonMinutes, plantToday: s.plantToday,
+  };
+  return {
+    s, ctx,
+    pointsOf: a => impactPoints(a, s.horizonStart, s.horizonMinutes),
+    lateOf: id => { const task = Store.tasks[id]; return task ? Util.latenessHours(task) : 0; },
+  };
+}
+
+function _headline(type: string): string {
+  return _nim().AlertsUIAdapter?.headlineFor?.(type) ?? t(`alert.type.${type}`);
+}
+
+function _ackLabel(ack: AlertAck | undefined): string | null {
+  if (!ack) return null;
+  const who = ack.acknowledged_by ?? '—';
+  return ack.until ? t('am.ack_by', { who, until: String(ack.until).slice(0, 10) }) : t('am.ack_by_noend', { who });
+}
+
+/** The inline "why is this late / blocked" panel of an order alert: facts about the order, nothing computed anew. */
+function _diagnoseFor(a: NimbusAlert, task: NimbusTask | undefined): string {
+  const fields: Array<{ label: string; value: string }> = [];
+  if (task) {
+    const due = Util.dueInstant(task);
+    if (due) fields.push({ label: t('ui.insp_due_date'), value: Util.fmtDT(due) });
+    const end = Util.scheduledEnd(task);
+    if (end) fields.push({ label: t('ui.insp_planned_finish'), value: Util.fmtDT(end) });
+    const late = Util.latenessHours(task);
+    fields.push({ label: t('ui.late'), value: late > 0 ? `${fmtNum(late)} h` : '—' });
+    const run = Number(task.RUN_TIME);
+    if (task.RUN_TIME != null && task.RUN_TIME !== '' && isFinite(run)) {
+      const basis = _nim().Inspector?._formatRuntimeBasis?.(task) ?? '';
+      fields.push({ label: t('ui.insp_run_time'), value: `${fmtNum(run)} h${basis ? ` · ${basis}` : ''}` });
+    }
+    fields.push({ label: t('ui.insp_firming'), value: task.firmed || task.ecc_firmed ? t('ui.firmed') : t('am.diag_not_firmed') });
+  }
+  const pair = formatPairKey(a.pairKey);
+  if (pair) fields.push({ label: t('am.diag_setup'), value: pair });
+  const reason = task?.planning_reason;
+  if (reason) {
+    fields.push({ label: t('am.diag_reason'), value: [reason.code, reason.message, reason.step].filter(Boolean).join(' · ') });
+  }
+  return diagnoseHtml(fields);
+}
+
+function _rowView(a: NimbusAlert, rc: RowCtx): RowView {
+  const task = a.taskId ? Store.tasks[a.taskId] : undefined;
+  const anchor = anchorTime(a, task);
+  // anchorTime hands back the alert's own time object when the order has no usable due date.
+  const fromDue = !!anchor && anchor !== a.time;
+  const open = _diagOpen.has(a.id);
+  const helpKey = `alert.help.${a.type}`;
+  const help = t(helpKey);
+  const no = task ? String(task.ORDER ?? task.PRODUCTION_ORDER ?? '') : String(a.msgVars?.order ?? '');
+  return {
+    id: a.id, type: a.type, sev: a.sev, taskId: a.taskId, line: a.line, time: a.time,
+    headline: _headline(a.type),
+    message: Util.alertMessage(a),
+    help: help === helpKey ? '' : help,
+    orderNo: no,
+    dateText: anchor ? Util.fmtDT(anchor) : '',
+    relText: anchor ? relativeDaysText(alertDayOffset(anchor, rc.s.plantToday), t) : '',
+    anchorTip: t(fromDue ? 'am.anchor_due' : 'am.anchor_time'),
+    points: rc.pointsOf(a),
+    orders: 1 + (a.peerId ? 1 : 0),
+    lateH: a.taskId ? rc.lateOf(a.taskId) : 0,
+    whatIf: Sandbox.active === true,
+    ackLabel: _ackLabel(rc.s.m.acked.get(a.id)),
+    diagOpen: open,
+    diagHtml: open ? _diagnoseFor(a, task) : '',
+  };
+}
+
+function _groupLabel(by: MonitorView['groupBy'], key: string, rc: RowCtx): string {
+  return groupLabel(by, key, {
+    headlineFor: _headline,
+    orderLabel: id => {
+      const task = Store.tasks[id];
+      return task ? [task.ORDER ?? task.PRODUCTION_ORDER, task.MATERIAL_NUMBER].filter(Boolean).join(' · ') : '';
+    },
+    dayOffset: k => alertDayOffset(new Date(`${k}T12:00:00`), rc.s.plantToday),
+    fmtDay: k => new Date(`${k}T12:00:00`).toLocaleDateString(document.documentElement?.lang || 'en-US',
+      { weekday: 'short', day: 'numeric', month: 'short' }),
+  }, t);
+}
+
+function _headView(g: AlertGroup, rc: RowCtx, expanded: boolean) {
+  const first = g.alerts.find(a => rowActionsFor(a).goto) ?? null;
+  return {
+    key: g.key, expanded,
+    label: _groupLabel(rc.s.view.groupBy, g.key, rc),
+    totals: groupTotals(g.alerts, rc.pointsOf, rc.lateOf),
+    firstAlertId: first?.id ?? null, firstGoto: !!first,
+  };
+}
+
+function _groupCardHtml(g: AlertGroup, rc: RowCtx): string {
+  const open = !_collapsed.has(g.key);
+  let body = '';
+  if (open) {
+    const capped = !_showAll.has(g.key) && g.alerts.length > GROUP_ROW_CAP;
+    const shown = capped ? g.alerts.slice(0, GROUP_ROW_CAP) : g.alerts;
+    body = `<div class="am-gbody" role="list">${colsHtml(t)}${shown.map(a => rowHtml(_rowView(a, rc), t)).join('')}</div>`
+      + (capped
+        ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="show-all" data-group-key="${esc(g.key)}">${esc(t('am.show_all_n', { n: g.alerts.length }))}</button></div>`
+        : '');
+  }
+  return `<section class="am-group panel" data-group-key="${esc(g.key)}">${groupHeadHtml(_headView(g, rc, open), t)}${body}</section>`;
+}
+
+/** Group-by none: one card whose rows live in a single VirtualList (fixed 56 px, taller under an open diagnose). */
+function _renderNone(g: AlertGroup | undefined, rc: RowCtx): void {
+  if (!g) { _teardownVl(); _setHtml('am-groups', ''); return; }
+  const shell = `<section class="am-group panel" data-group-key="${esc(g.key)}"><div id="am-none-head"></div>`
+    + `<div id="am-none-body">${colsHtml(t)}<div class="am-vl-scroll" id="am-vl" role="list"></div></div></section>`;
+  if (_setHtml('am-groups', shell)) { _teardownVl(); _lastHtml.delete('am-none-head'); }
+  _setHtml('am-none-head', groupHeadHtml(_headView(g, rc, !_collapsed.has(g.key)), t));
+  const body = _el('am-none-body');
+  if (body) body.hidden = _collapsed.has(g.key);
+  const mount = _el('am-vl');
+  if (!mount) return;
+  if (!_vl || _vlEl !== mount) {
+    _teardownVl();
+    _vlEl = mount;
+    _vl = new VirtualList<NimbusAlert>(mount, {
+      getRowH: a => ROW_H + (_diagOpen.has(a.id) && rowActionsFor(a).diagnose === 'order' ? DIAG_H : 0),
+      renderFn: a => rowHtml(_rowView(a, _rowCtx!), t),
+      mountEl: mount,
+    });
+  }
+  _vl.update(g.alerts);
+}
+
+function _renderFocusChip(s: PaintState): void {
+  const el = _el('am-focus-chip');
+  if (!el) return;
+  if (!_focusIds) { _setHtml('am-focus-chip', ''); el.hidden = true; return; }
+  const n = s.listed.length;
+  const text = s.focusOutside > 0
+    ? t('am.focus_chip_outside', { n, title: _focusTitle, k: s.focusOutside })
+    : t('am.focus_chip', { n, title: _focusTitle });
+  _setHtml('am-focus-chip', `<span>${esc(text)}</span>`
+    + `<button type="button" class="btn sm btn-ghost" data-am-action="clear-focus">${esc(t('am.focus_clear'))}</button>`);
+  el.hidden = false;
+}
+
 function _renderGroups(s: PaintState): void {
-  if (s.empty !== null) _setHtml('am-groups', _emptyHtml(s));
+  _renderFocusChip(s);
+  if (s.empty !== null || !s.plant) {
+    _teardownVl();
+    _groupsByKey = new Map();
+    _rowCtx = null;
+    _setHtml('am-groups', _emptyHtml(s));
+    return;
+  }
+  const rc = _makeRowCtx(s);
+  _rowCtx = rc;
+  const sorted = [...s.listed].sort(compareAlerts(s.view.sort, rc.ctx));
+  const groups = groupAlerts(sorted, s.view.groupBy, rc.ctx);
+  _groupsByKey = new Map(groups.map(g => [g.key, g]));
+  if (s.view.groupBy === 'none') { _renderNone(groups[0], rc); return; }
+  _teardownVl();
+  _setHtml('am-groups', groups.map(g => _groupCardHtml(g, rc)).join(''));
 }
 
 function _paint(): void {
   if (!_active) return;
   _ensureShell();
+  if ((Store.selectedPlant ?? null) !== _lastPlant) { _lastPlant = Store.selectedPlant ?? null; AlertMonitorPane.resetView(); }
   const s = _gatherState();
   _syncToolbar(s);
   _setHtml('am-kpis', _kpiHtml(s));
@@ -447,6 +761,25 @@ export const AlertMonitorPane = {
   render(): void {
     _active = true;
     _paint();
+  },
+  /**
+   * List only these alerts (they bypass the profile) under a "Showing N alerts for: title" chip —
+   * the entry point for the leverage cards' "Show alerts" (Task 13).
+   */
+  setFocus(alertIds: Iterable<string>, title: string): void {
+    _focusIds = new Set(alertIds);
+    _focusTitle = title;
+    _paint();
+  },
+  clearFocus(): void {
+    _focusIds = null;
+    _focusTitle = '';
+    _paint();
+  },
+  /** Forget folded groups, open diagnose panels, "Show all" and the focus set (plant change). Does not paint. */
+  resetView(): void {
+    _collapsed.clear(); _showAll.clear(); _diagOpen.clear();
+    _focusIds = null; _focusTitle = '';
   },
   setActive(active: boolean): void { _active = active; },
   isActive(): boolean { return _active; },

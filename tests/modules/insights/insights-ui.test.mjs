@@ -296,6 +296,19 @@ test('AlertsUIAdapter.focus: Go To selects via Selection, marks the target, and 
     assert.ok(calls.includes('inspector:T1'));
     assert.ok(!calls.includes('toggle'), 'closed drawer is not toggled (would reopen it)');
 
+    // Pairwise alert (tool-conflict / overlap) with a peer in the store: both orders are selected.
+    calls.length = 0; Selection.clear();
+    Store._state.tasks.T3 = { id: 'T3', start_date: new Date('2026-08-12T09:00:00'), end_date: new Date('2026-08-12T11:00:00') };
+    Store._state.alerts = [{ id: 'ap', type: 'tool-conflict', taskId: 'T1', peerId: 'T3', line: 'L1', time: new Date('2026-08-12T08:00:00') }];
+    AlertsUIAdapter.focus('ap');
+    assert.deepEqual([...Selection.ids()].sort(), ['T1', 'T3']);
+    // A peer that is not in the store is ignored (only the alert's own order is selected).
+    calls.length = 0; Selection.clear();
+    Store._state.alerts = [{ id: 'aq', type: 'overlap', taskId: 'T1', peerId: 'GONE', line: 'L1', time: new Date('2026-08-12T08:00:00') }];
+    AlertsUIAdapter.focus('aq');
+    assert.deepEqual(Selection.ids(), ['T1']);
+    delete Store._state.tasks.T3;
+
     // Line/day alert (no taskId): rings the day cell, never selects.
     calls.length = 0; Selection.clear();
     Store._state.alerts = [{ id: 'a2', type: 'overload', line: 'L1', time: new Date('2026-08-12T08:00:00') }];

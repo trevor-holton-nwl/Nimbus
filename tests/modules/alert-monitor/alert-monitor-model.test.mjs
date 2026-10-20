@@ -34,6 +34,15 @@ test('kpiSummary counts severities, distinct orders and the horizon in days', ()
   assert.deepEqual(k, { matched: 4, total: 9, days: 3, errors: 1, warnings: 3, orders: 2, confidence: 71.5, confidenceWindowAlerts: 3 });
 });
 
+test('kpiSummary counts an overlap / tool conflict against both orders (taskId ∪ peerId)', () => {
+  const matched = [
+    { id: 'a', sev: 'err', type: 'overlap', taskId: '1', peerId: '2' },
+    { id: 'b', sev: 'err', type: 'tool-conflict', taskId: '2', peerId: '3' },
+    { id: 'c', sev: 'warn', type: 'late', taskId: '1' },
+  ];
+  assert.equal(kpiSummary(matched, matched, null, null).orders, 3);
+});
+
 test('kpiSummary tolerates a missing horizon and confidence', () => {
   const k = kpiSummary([], [], null, undefined);
   assert.equal(k.days, null);
@@ -94,5 +103,6 @@ test('emptyStateFor picks the right empty state', () => {
   assert.equal(emptyStateFor(base), null);
   assert.equal(emptyStateFor({ ...base, matchedCount: 0, visibleCount: 0 }), 'no-match');
   assert.equal(emptyStateFor({ ...base, matchedCount: 0, visibleCount: 0, isAllAlerts: true }), 'no-alerts');
-  assert.equal(emptyStateFor({ ...base, visibleCount: 0 }), 'no-alerts');   // matches exist but all acknowledged
+  assert.equal(emptyStateFor({ ...base, visibleCount: 0 }), 'all-acked');   // matches exist but all acknowledged
+  assert.equal(emptyStateFor({ ...base, visibleCount: 0, isAllAlerts: true }), 'all-acked');
 });

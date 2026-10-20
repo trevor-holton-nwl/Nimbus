@@ -26,6 +26,8 @@ function makeEl(id) {
     setAttribute() {}, addEventListener(type, fn) { handlers[type] = fn; },
     querySelectorAll() { return []; }, querySelector() { return null; },
     scrollIntoView() {}, blur() {}, focus() {}, closest() { return null; },
+    // VirtualList mounts an inner div into the scroll element (group-by none).
+    appendChild() {}, remove() {}, removeEventListener() {}, style: {}, clientHeight: 600, scrollTop: 0,
   };
 }
 
@@ -63,6 +65,7 @@ beforeEach(() => {
   prior.nimbus = globalThis.NIMBUS;
   globalThis.document = {
     getElementById(id) { return (els[id] ??= makeEl(id)); },
+    createElement() { return makeEl('created'); },
     querySelectorAll() { return []; },
     addEventListener() {}, removeEventListener() {},
     activeElement: null,
@@ -74,6 +77,8 @@ beforeEach(() => {
   Store.setUserSettings({ alertProfileByPlant: { P1: 'p1', P9: 'z' }, alertsShowAcknowledged: false }, 'test');
   Store.setSelectedPlant('P1', 'test');
   Store.setAlerts([], 'test');
+  Store.setTasks([], 'test');
+  AlertMonitorPane.resetView();
   AlertMonitorPane.init();
 });
 
@@ -191,4 +196,268 @@ test('no alerts at all shows the all-clear state; no profiles adds the create-pr
   useProfiles([P1], fakeMatches());
   AlertMonitorPane.render();
   assert.equal(els['am-prompt'].innerHTML, '');
+});
+
+/* ---------------------------------------------------------------------------
+   Task 12 — grouped alert list, row actions, focus chip, diagnose, open in table
+   ------------------------------------------------------------------------- */
+import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
+import { Modal, Toast } from '../../../frontend/platform/foundation.mjs';
+
+const task = (id, o = {}) => ({
+  id, ORDER: `47${id}`, PLANT: 'P1', MACHINE: 'L1', MATERIAL_NUMBER: `M${id}`,
+  original_end_date: new Date('2026-10-21T08:00:00'), end_date: new Date('2026-10-22T08:00:00'), ...o,
+});
+
+function seed(alerts, { matched, acked, view, showAcked } = {}) {
+  Store.setAlerts(alerts, 'test');
+  Store.setUserSettings({
+    alertProfileByPlant: { P1: 'p1' }, alertsShowAcknowledged: !!showAcked,
+    alertMonitorView: view ? { __all__: view } : {},
+  }, 'test');
+  useProfiles([P1], fakeMatches({ alertIds: new Set(matched ?? alerts.map(a => a.id)), acked }));
+}
+
+const clickAlert = (action, id, extra = {}) => els['alerts-tab'].handlers.click({
+  target: { closest: sel => (sel === '[data-alert-action]' ? { dataset: { alertAction: action, alertId: id, ...extra } } : null) },
+});
+const clickAm = (action, extra = {}) => els['alerts-tab'].handlers.click({
+  target: { closest: sel => (sel === '[data-am-action]' ? { dataset: { amAction: action, ...extra } } : null) },
+});
+
+function patched(obj, key, fn) {
+  const prev = obj[key];
+  obj[key] = fn;
+  return () => { obj[key] = prev; };
+}
+
+test('alerts render as category cards, and the stale empty state is cleared (and restored)', () => {
+  seed([alert('a1', { type: 'overload' }), alert('a2', { type: 'overlap', peerId: 'z' })], { matched: ['a1', 'a2'] });
+  Store.setAlerts([], 'test');
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /empty-state/);
+
+  seed([alert('a1', { type: 'overload' }), alert('a2', { type: 'overlap', peerId: 'z' })]);
+  AlertMonitorPane.render();
+  const html = els['am-groups'].innerHTML;
+  assert.doesNotMatch(html, /empty-state/);
+  assert.match(html, /class="am-group panel" data-group-key="capacity"/);
+  assert.match(html, /data-group-key="conflicts"/);
+  assert.match(html, /ape\.cat_capacity/);
+
+  Store.setAlerts([], 'test');
+  AlertMonitorPane.render();
+  assert.doesNotMatch(els['am-groups'].innerHTML, /am-group/);
+  assert.match(els['am-groups'].innerHTML, /empty-state/);
+});
+
+test('every matched alert acknowledged shows the turn-on-Show-acknowledged hint; the toggle reveals the rows with a badge', () => {
+  const acked = new Map([['a1', { plant: 'P1', alert_id: 'a1', acknowledged_by: 'Ana', reason: 'ok', until: '2026-11-01T00:00:00Z', created_at: null }]]);
+  seed([alert('a1')], { acked });
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /am\.empty_all_acked/);
+  assert.doesNotMatch(els['am-groups'].innerHTML, /data-alert-id="a1"/);
+
+  seed([alert('a1')], { acked, showAcked: true });
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /data-alert-id="a1"/);
+  assert.match(els['am-groups'].innerHTML, /am-ack-badge[^>]*>am\.ack_by</);
+});
+
+test('group head sums: points, orders (taskId ∪ peerId) and late hours; rows carry the impact columns', () => {
+  Store.setTasks([task('1'), task('2'), task('3', { end_date: new Date('2026-10-21T07:00:00') })], 'test');
+  seed([
+    alert('a1', { type: 'overlap', taskId: '1', peerId: '2' }),
+    alert('a2', { type: 'tool-conflict', taskId: '2', peerId: '3' }),
+  ]);
+  AlertMonitorPane.render();
+  const html = els['am-groups'].innerHTML;
+  assert.match(html, /am-tot-v">15<\/span><span class="am-tot-k">am\.col_points/);
+  assert.match(html, /am-tot-v">3<\/span><span class="am-tot-k">am\.col_orders/);
+  // Order 1 and 2 finish a day after their 08:00 due; order 3 is on time: 24 + 24 late hours.
+  assert.match(html, /am-tot-v">48<\/span><span class="am-tot-k">am\.col_late/);
+  assert.match(html, /<span class="am-num">7\.5<\/span><span class="am-num">2<\/span><span class="am-num">24<\/span>/);
+});
+
+test('an alert outside the confidence window renders "outside" instead of points', () => {
+  seed([alert('a1', { time: new Date('2027-03-01T08:00:00') })]);
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /am-num-out[^>]*>am\.points_outside</);
+});
+
+test('rows beyond the cap sit behind "Show all N"; clicking it renders the rest', () => {
+  const many = Array.from({ length: 45 }, (_, i) => alert(`m${String(i).padStart(2, '0')}`, { type: 'overload', taskId: undefined, line: '' }));
+  seed(many);
+  AlertMonitorPane.render();
+  const count = () => (els['am-groups'].innerHTML.match(/class="am-rowwrap"/g) ?? []).length;
+  assert.equal(count(), 40);
+  assert.match(els['am-groups'].innerHTML, /data-am-action="show-all"[^>]*>am\.show_all_n</);
+  clickAm('show-all', { groupKey: 'capacity' });
+  assert.equal(count(), 45);
+  assert.doesNotMatch(els['am-groups'].innerHTML, /data-am-action="show-all"/);
+});
+
+test('group-by none mounts a single VirtualList instead of per-group row markup', () => {
+  const created = [];
+  globalThis.document.createElement = () => { const e = makeEl('inner'); created.push(e); return e; };
+  seed([alert('a1'), alert('a2', { type: 'overload' }), alert('a3', { type: 'late' })],
+    { view: { groupBy: 'none', sort: 'impact' } });
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /id="am-vl"/);
+  assert.doesNotMatch(els['am-groups'].innerHTML, /class="am-rowwrap"/);
+  assert.equal(created.length, 1);
+  assert.equal((created[0].innerHTML.match(/class="am-rowwrap"/g) ?? []).length, 3);
+  AlertMonitorPane.render();   // a repaint reuses the same list
+  assert.equal(created.length, 1);
+});
+
+test('the group toggle collapses a card; collapse state resets when the plant changes', () => {
+  seed([alert('a1', { type: 'overload' })]);
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /aria-expanded="true"[^>]*data-am-action="toggle-group"/);
+  clickAm('toggle-group', { groupKey: 'capacity' });
+  assert.match(els['am-groups'].innerHTML, /aria-expanded="false"/);
+  assert.doesNotMatch(els['am-groups'].innerHTML, /class="am-rowwrap"/);
+  Store.setSelectedPlant('P2', 'test');
+  AlertMonitorPane.render();
+  Store.setSelectedPlant('P1', 'test');
+  AlertMonitorPane.render();
+  assert.match(els['am-groups'].innerHTML, /aria-expanded="true"/);
+});
+
+test('the focus chip bypasses the profile and says how many focused alerts are outside it', () => {
+  seed([alert('a1', { type: 'overload' }), alert('a2', { type: 'overlap' })], { matched: ['a1'] });
+  AlertMonitorPane.render();
+  assert.doesNotMatch(els['am-groups'].innerHTML, /data-alert-id="a2"/);
+  assert.equal(els['am-focus-chip'].hidden, true);
+
+  AlertMonitorPane.setFocus(['a1', 'a2'], 'Setup pair');
+  assert.match(els['am-groups'].innerHTML, /data-alert-id="a2"/, 'a2 is outside the profile but focused');
+  assert.equal(els['am-focus-chip'].hidden, false);
+  assert.match(els['am-focus-chip'].innerHTML, /am\.focus_chip_outside/);
+
+  AlertMonitorPane.setFocus(['a1'], 'Setup pair');
+  assert.match(els['am-focus-chip'].innerHTML, /am\.focus_chip(?!_)/);
+  assert.doesNotMatch(els['am-focus-chip'].innerHTML, /outside/);
+
+  clickAm('clear-focus');
+  assert.equal(els['am-focus-chip'].hidden, true);
+  assert.doesNotMatch(els['am-groups'].innerHTML, /data-alert-id="a2"/);
+});
+
+test('row actions mirror the drawer: focus, fix, override, dismiss', () => {
+  const log = [];
+  globalThis.NIMBUS = {
+    AlertsUIAdapter: { focus: id => log.push(['focus', id]) },
+    Table: { _openOverrideModalForId: id => log.push(['override', id]) },
+  };
+  const undo = [
+    patched(Alerts, 'applyFix', id => log.push(['fix', id])),
+    patched(Alerts, 'dismiss', id => log.push(['dismiss', id])),
+  ];
+  try {
+    seed([alert('a1', { type: 'overlap' })]);
+    AlertMonitorPane.render();
+    clickAlert('focus', 'a1');
+    clickAlert('fix', 'a1');
+    clickAlert('override', 'a1', { taskId: 'T9' });
+    clickAlert('dismiss', 'a1');
+    clickAlert('ack', 'a1');   // no handler until Task 15
+    assert.deepEqual(log, [['focus', 'a1'], ['fix', 'a1'], ['override', 'T9'], ['dismiss', 'a1']]);
+  } finally { undo.forEach(u => u()); }
+});
+
+test('What-If disables Fix / Override in the markup and blocks them in the handler', () => {
+  const log = [];
+  globalThis.NIMBUS = { Table: { _openOverrideModalForId: id => log.push(['override', id]) } };
+  const undo = patched(Alerts, 'applyFix', id => log.push(['fix', id]));
+  Sandbox.active = true;
+  try {
+    seed([alert('a1', { type: 'overlap' })]);
+    AlertMonitorPane.render();
+    assert.match(els['am-groups'].innerHTML, /data-alert-action="fix"[^>]*disabled/);
+    clickAlert('fix', 'a1');
+    clickAlert('override', 'a1', { taskId: 'T9' });
+    assert.deepEqual(log, []);
+  } finally { Sandbox.active = false; undo(); }
+});
+
+test('Diagnose: a line/day alert opens the cell briefing, an order alert toggles the inline panel', () => {
+  const cells = [];
+  globalThis.NIMBUS = {
+    AlertsUIAdapter: { showForCell: (line, day) => cells.push([line, day]) },
+    Inspector: { _formatRuntimeBasis: () => 'Routing · PV 1' },
+  };
+  Store.setTasks([task('1', { RUN_TIME: 6.5, run_time_source: 'routing', firmed: true, planning_reason: { code: 'X', message: 'held for runtime', step: 'resolve' } })], 'test');
+  seed([
+    alert('c1', { type: 'overload', taskId: undefined, line: 'L1' }),
+    alert('o1', { type: 'setup-violated', taskId: '1', pairKey: '[["colorWheel","RED"]]->[["colorWheel","BLUE"]]' }),
+  ]);
+  AlertMonitorPane.render();
+  clickAlert('diagnose', 'c1');
+  assert.deepEqual(cells, [['L1', '2026-10-21']]);
+
+  assert.doesNotMatch(els['am-groups'].innerHTML, /class="am-diag"/);
+  clickAlert('diagnose', 'o1');
+  const html = els['am-groups'].innerHTML;
+  assert.match(html, /class="am-diag"/);
+  assert.match(html, /<dt>ui\.insp_due_date<\/dt><dd[^>]*>2026-10-21 08:00</);
+  assert.match(html, /<dt>ui\.insp_planned_finish<\/dt><dd[^>]*>2026-10-22 08:00</);
+  assert.match(html, /<dt>ui\.late<\/dt><dd[^>]*>24 h</);
+  assert.match(html, /<dt>ui\.insp_run_time<\/dt><dd[^>]*>6\.5 h · Routing · PV 1</);
+  assert.match(html, /<dt>ui\.insp_firming<\/dt><dd[^>]*>ui\.firmed</);
+  assert.match(html, /<dt>am\.diag_setup<\/dt><dd[^>]*>colorWheel RED → colorWheel BLUE</);
+  assert.match(html, /<dt>am\.diag_reason<\/dt><dd[^>]*>X · held for runtime · resolve</);
+  clickAlert('diagnose', 'o1');
+  assert.doesNotMatch(els['am-groups'].innerHTML, /class="am-diag"/);
+});
+
+test('group Dismiss asks for confirmation above five alerts and dismisses exactly that group', async () => {
+  const dismissed = [];
+  let confirms = 0;
+  const undo = [
+    patched(Alerts, 'dismissAll', ids => dismissed.push([...ids])),
+    patched(Modal, 'confirm', async () => { confirms++; return true; }),
+  ];
+  try {
+    const six = Array.from({ length: 6 }, (_, i) => alert(`s${i}`, { type: 'overload', taskId: undefined }));
+    seed([...six, alert('o1', { type: 'overlap' })]);
+    AlertMonitorPane.render();
+    clickAm('group-dismiss', { groupKey: 'capacity' });
+    await sleep(5);
+    assert.equal(confirms, 1);
+    assert.deepEqual(dismissed, [six.map(a => a.id)]);
+
+    clickAm('group-dismiss', { groupKey: 'conflicts' });   // one alert: no confirm
+    await sleep(5);
+    assert.equal(confirms, 1);
+    assert.deepEqual(dismissed.at(-1), ['o1']);
+  } finally { undo.forEach(u => u()); }
+});
+
+test('Open in table fills the PO/Material filter, applies it and switches to the Orders sub-tab', () => {
+  const log = [];
+  globalThis.NIMBUS = {
+    Table: { _onPoMatApply: () => log.push(['apply', els['tbl-flt-pomat-textarea'].value]) },
+    App: { gotoGanttSub: sub => log.push(['sub', sub]) },
+  };
+  Store.setTasks([task('1'), task('2')], 'test');
+  seed([alert('a1', { type: 'overlap', taskId: '1', peerId: '2' })]);
+  AlertMonitorPane.render();
+  clickAm('group-open-table', { groupKey: 'conflicts' });
+  assert.deepEqual(log, [['apply', '471\n472'], ['sub', 'orders']]);
+});
+
+test('Open in table falls back to a toast when the table filter is unavailable', () => {
+  const toasts = [];
+  const undo = patched(Toast, 'show', (m, k) => toasts.push([m, k]));
+  globalThis.NIMBUS = {};
+  try {
+    Store.setTasks([task('1')], 'test');
+    seed([alert('a1', { type: 'late', taskId: '1' })]);
+    AlertMonitorPane.render();
+    clickAm('group-open-table', { groupKey: 'exceptions' });
+    assert.deepEqual(toasts, [['am.table_unavailable', 'warn']]);
+  } finally { undo(); }
 });

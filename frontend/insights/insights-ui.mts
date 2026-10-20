@@ -1323,9 +1323,11 @@ export const AlertsUIAdapter = {
       // wired at boot) shows the Inspector. Selection.set no-ops when the order is already the
       // sole selection, so show the Inspector ourselves in that one case. Select BEFORE marking:
       // the listener clears a marker whose order is not selected and must only see the old one.
+      // A pairwise alert (overlap, tool-conflict) selects both orders when the peer exists in the store.
+      const peerId = a.peerId && Store.tasks[String(a.peerId)] ? String(a.peerId) : '';
       const cur = Selection.ids();
-      if (cur.length === 1 && cur[0] === taskId) Inspector.show(t);
-      else Selection.set([taskId]);
+      if (!peerId && cur.length === 1 && cur[0] === taskId) Inspector.show(t);
+      else Selection.set(peerId ? [taskId, peerId] : [taskId]);
       Timeline.markGotoTask(taskId);
     });
     // Close the alert drawer if it is open (the drawer would otherwise cover the Gantt).
