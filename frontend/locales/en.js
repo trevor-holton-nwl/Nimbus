@@ -91,6 +91,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.cannot_fix_task':             'Cannot fix: task not found',
   'toast.cannot_fix_firmed': 'Cannot auto-fix: this order is firmed (frozen horizon or manual) or running. Unfirm it first to move it.',
   'toast.commit_failed':               'Could not hold the finish there. The order stays where it was.',
+  'toast.gantt_reload_needed':         'The Gantt hit a display error it could not recover from. Please reload the page.',
   'toast.dist_machine_locked':         '{{order}} runs on {{machine}} because of its distribution. Adjust shares to move it.',
   'toast.no_routing_at_workcenter':    '{{order}} has no routing operation at {{machine}} — move blocked.',
   'toast.production_version_runtime_unresolved': '{{order}} — runtime could not be resolved for production version {{pv}}; held for planning.',

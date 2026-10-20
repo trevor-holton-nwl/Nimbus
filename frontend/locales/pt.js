@@ -91,6 +91,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.cannot_fix_task':             'Não é possível fixar: tarefa não encontrada',
   'toast.cannot_fix_firmed': 'Não é possível corrigir automaticamente: esta ordem está firme (horizonte congelado ou manual) ou em execução. Remova primeiro o status firme.',
   'toast.commit_failed':               'Não foi possível manter o término ali. A ordem permanece onde estava.',
+  'toast.gantt_reload_needed':         'O Gantt teve um erro de exibição que não pôde ser recuperado. Recarregue a página.',
   'toast.save_rejected':               'Salvamento rejeitado: {{msg}}',
   'toast.saved_locally':               'Salvo localmente (servidor inacessível)',
   'toast.save_timeout': 'Tempo esgotado ao salvar. Suas alterações ainda não foram salvas aqui - verifique a conexão e salve novamente.',

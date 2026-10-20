@@ -91,6 +91,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.cannot_fix_task':             'No se puede fijar: tarea no encontrada',
   'toast.cannot_fix_firmed': 'No se puede corregir automáticamente: esta orden está firme (horizonte congelado o manual) o en curso. Quite primero el estado firme.',
   'toast.commit_failed':               'No se pudo mantener el fin allí. El pedido sigue donde estaba.',
+  'toast.gantt_reload_needed':         'El Gantt tuvo un error de visualización que no pudo recuperar. Recargue la página.',
   'toast.save_rejected':               'Guardado rechazado: {{msg}}',
   'toast.saved_locally':               'Guardado localmente (backend no disponible)',
   'toast.save_timeout': 'Se agotó el tiempo al guardar. Sus cambios siguen sin guardar aquí - revise la conexión y guarde de nuevo.',

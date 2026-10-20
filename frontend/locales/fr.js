@@ -91,6 +91,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.cannot_fix_task':             'Impossible de fixer : tâche introuvable',
   'toast.cannot_fix_firmed': 'Correction automatique impossible : cet ordre est ferme (horizon gelé ou manuel) ou en cours. Retirez d\'abord le statut ferme.',
   'toast.commit_failed':               'Impossible de maintenir la fin à cet endroit. La commande reste où elle était.',
+  'toast.gantt_reload_needed':         'Le Gantt a rencontré une erreur d\'affichage irrécupérable. Veuillez recharger la page.',
   'toast.save_rejected':               'Sauvegarde refusée : {{msg}}',
   'toast.saved_locally':               'Enregistré localement (serveur inaccessible)',
   'toast.save_timeout': 'Délai d\'enregistrement dépassé. Vos modifications ne sont toujours pas enregistrées ici - vérifiez la connexion, puis réessayez.',

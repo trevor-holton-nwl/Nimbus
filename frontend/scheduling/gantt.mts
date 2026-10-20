@@ -215,14 +215,17 @@ export const Timeline = {
   // lanes (vis subgroups). Sticky: cleared only by an explicit collapse or a plant change. It survives
   // a line-filter hide/show and never auto-collapses when the overlap resolves (the row just shrinks
   // back to one lane). `_laneInfo`/`_depthByLine` are written by each rebuild for every visible line
-  // (the badge on a collapsed row is that line's maxDepth); `_subgroupsLive` says some item may still
-  // carry a subgroup, so the rebuild diff must check for lane changes (remove + add, never update).
+  // (the badge on a collapsed row is that line's maxDepth); `_laneIds` holds the ids of items currently
+  // stored in the DataSet with a subgroup, so only those (and the expanded line's items) need the
+  // lane-change check (remove + add, never update) instead of a per-item DataSet read for all of them.
   _expandedLine: null as string | null,
   _laneInfo: new Map<string, LaneResult>(),
   _depthByLine: new Map<string, number>(),
   _labelKeys: new Map<string, string>(),
-  _subgroupsLive: false,
-  _lanesWereLive: false,
+  _laneIds: new Set<string>(),
+  // Self-heal ladder state (see _heal): consecutive failed passes, and whether the reload toast was shown.
+  _healCount: 0,
+  _healToastShown: false,
 
   // True only once the Gantt pane has real layout (clientHeight > 0). A hidden
   // tab (display:none) or a not-yet-attached container reports 0 and would
@@ -319,9 +322,8 @@ export const Timeline = {
       // switch for it; this veto snaps a drag that changes the start but not the end back to the stored start, so the
       // left handle moves nothing (a left-edge change that still reaches the commit is reverted with a toast).
       onMoving: (item: TimelineVisItem, callback: (item: TimelineVisItem | null) => void) => {
-        // A lane bar dragged over another row must not carry its subgroup there: that row has no
-        // lanes, and a foreign subgroup would make it grow and jitter under the cursor.
-        if (item.subgroup !== undefined && item.group !== Timeline._expandedLine) item.subgroup = undefined;
+        // Never strip `subgroup` here: vis runs _moveToGroup BEFORE it assigns the new data, so the
+        // hovered row would register the old lane and a later orderSubgroups throws on the dangling entry.
         callback(lockLeftEdge(item, (Timeline._items?.get(String(item.id)) as TimelineVisItem | null) ?? null));
       },
       groupOrder: (a: TimelineGroupData, b: TimelineGroupData) => (a.order ?? 0) - (b.order ?? 0),
@@ -606,6 +608,7 @@ export const Timeline = {
 
     if (evt.type === 'plant:selected') {
       Timeline._expandedLine = null;
+      Timeline._laneIds.clear();
       // Mirrors App._scrollMemory.clear() on plant change — start the new
       // plant's Gantt at the top rather than wherever the old plant left off.
       Timeline.resetVScroll();
@@ -645,6 +648,14 @@ export const Timeline = {
         const patches: TimelineVisItem[] = [];
         const ids = (evt.ids as Array<string | number> | undefined) ?? [];
         if (ids.some(id => Timeline.hasMultipleItemsForTask(id))) {
+          Timeline._scheduleRebuild();
+          return;
+        }
+        // An optimizer apply can move an order into or out of the expanded row: its lanes (and the
+        // badge counts) are only settled by a rebuild, never by a plain patch.
+        if (bulkTouchesExpandedLine(ids.map(String), Timeline._expandedLine,
+          sid => (Timeline._items?.get(sid) as TimelineVisItem | null)?.group,
+          sid => (Store.tasks[sid] ? (Store.tasks[sid].MACHINE || 'Unknown') : undefined))) {
           Timeline._scheduleRebuild();
           return;
         }
@@ -724,7 +735,7 @@ export const Timeline = {
   _splitRelocations(items: TimelineVisItem[]): { update: TimelineVisItem[]; relocate: TimelineVisItem[] } {
     const update: TimelineVisItem[] = [], relocate: TimelineVisItem[] = [];
     for (const it of items) {
-      if ((Timeline._subgroupsLive || it.subgroup !== undefined) && 'subgroup' in it) {
+      if ((Timeline._laneIds.has(String(it.id)) || it.subgroup !== undefined) && 'subgroup' in it) {
         const cur = Timeline._items!.get(String(it.id)) as TimelineVisItem | null;
         if (cur && cur.subgroup !== it.subgroup) { relocate.push(it); continue; }
       }
@@ -742,7 +753,32 @@ export const Timeline = {
       if (relocate.length) Timeline._items.remove(relocate.map(it => it.id));
       if (update.length) Timeline._items.update(update);
       if (relocate.length) Timeline._items.add(relocate);
+      Timeline._noteLaneWrites(patches);
     } finally { Timeline._suppressEvents = false; }
+    // vis's _removeItem drops a removed id from its selection: put the selection back after a relocation.
+    if (relocate.length) Timeline._reapplySelection();
+  },
+
+  /** Keep `_laneIds` (ids stored with a subgroup) in step with items just written to the DataSet. */
+  _noteLaneWrites(written: ReadonlyArray<TimelineVisItem>): void {
+    for (const it of written) {
+      if (!('subgroup' in it)) continue; // a partial write that never touches the lane leaves the stored one
+      if (it.subgroup !== undefined) Timeline._laneIds.add(String(it.id));
+      else Timeline._laneIds.delete(String(it.id));
+    }
+  },
+
+  /** Re-apply the Selection to vis after items were removed + re-added (vis drops removed ids from its
+   *  selection). No-op without a live timeline or Selection (unit tests run with `_tl = null`). */
+  _reapplySelection(): void {
+    if (!Timeline._tl || typeof Selection === 'undefined') return;
+    const ids = Selection.ids().flatMap(id => Timeline.itemIdsForTask(id))
+      .filter(itemId => !!Timeline._items?.get(itemId));
+    const prior = Timeline._suppressEvents;
+    Timeline._suppressEvents = true;
+    try { Timeline._tl.setSelection(ids); }
+    catch (e) { Timeline._heal('setSelection', e); }
+    finally { Timeline._suppressEvents = prior; }
   },
 
   /** Lane assignment for every line of `tasks`: line -> { laneByParent, maxDepth }. Pure over the
@@ -787,7 +823,6 @@ export const Timeline = {
     } else {
       item.subgroup = laneId(lane);
       item.laneIndex = lane;
-      Timeline._subgroupsLive = true;
     }
     return item;
   },
@@ -1094,7 +1129,11 @@ export const Timeline = {
       if (remove.length) Timeline._items.remove(remove);
       if (split.update.length) Timeline._items.update(split.update);
       if (add.length) Timeline._items.add(add);
+      for (const id of remove) Timeline._laneIds.delete(id);
+      Timeline._noteLaneWrites(split.update);
+      Timeline._noteLaneWrites(add);
     } finally { Timeline._suppressEvents = false; }
+    if (split.relocate.length) Timeline._reapplySelection();
     Timeline._tl?.redraw();
     PerfMonitor.record('Timeline.setup.redraw', performance.now() - _redrawT0);
   },
@@ -1205,8 +1244,6 @@ export const Timeline = {
     // on a collapsed row; the lane map itself is only applied to the expanded line.
     Timeline._laneInfo = Timeline._computeLaneInfo(scopedTasks);
     Timeline._depthByLine = new Map([...Timeline._laneInfo].map(([l, r]) => [l, r.maxDepth] as const));
-    Timeline._lanesWereLive = Timeline._lanesWereLive || Timeline._subgroupsLive; // patches since the last pass may have written lanes
-    Timeline._subgroupsLive = false;
     const expandedLine = Timeline._expandedLine;
     const subgroupOrder = (a: TimelineVisItem, b: TimelineVisItem): number => (a.laneIndex ?? 0) - (b.laneIndex ?? 0);
     const newLabelKeys = new Map<string, string>();
@@ -1223,7 +1260,8 @@ export const Timeline = {
         content: label.el,
         subgroupOrder,
         stackSubgroups: true,
-        className: expanded ? 'row-expanded' : '',
+        // Never falsy: vis turns '' into null and addClassName(null) throws on the collapse (and on every retry).
+        className: expanded ? 'row-expanded' : 'row-flat',
       };
     });
 
@@ -1513,13 +1551,13 @@ export const Timeline = {
     const _pmT0diff = performance.now();
     const existingIds = new Set<string>(Timeline._items.getIds().map(String));
     const toAdd: TimelineVisItem[] = [], toUpdate: TimelineVisItem[] = [], toRemove: string[] = [];
-    // Lane relocation check only when lanes are (or were) in play: an item whose stored subgroup
-    // differs from the desired one is removed + re-added, never updated (vis 7.7.3 leaves a
-    // dangling subgroup reference on a subgroup -> other/undefined update).
-    const lanesInPlay = Timeline._subgroupsLive || Timeline._lanesWereLive;
+    // Lane relocation check only for items that can differ: those stored with a subgroup (`_laneIds`, which
+    // keeps stragglers such as a lane bar dropped in another row) and those on the expanded line (they may
+    // be entering a lane). An item whose stored subgroup differs from the desired one is removed + re-added,
+    // never updated (vis 7.7.3 leaves a dangling subgroup reference on a subgroup -> other/undefined update).
     for (const [id, data] of desired) {
       if (!existingIds.has(id)) { toAdd.push(data); continue; }
-      if (lanesInPlay && 'subgroup' in data) {
+      if ('subgroup' in data && (Timeline._laneIds.has(id) || (!!expandedLine && data.group === expandedLine))) {
         const cur = Timeline._items.get(id) as TimelineVisItem | null;
         if (cur && cur.subgroup !== data.subgroup) { toRemove.push(id); toAdd.push(data); continue; }
       }
@@ -1528,7 +1566,6 @@ export const Timeline = {
     for (const id of existingIds) {
       if (!desired.has(id)) toRemove.push(id);
     }
-    Timeline._lanesWereLive = Timeline._subgroupsLive;
 
     // Diff groups incrementally — never call groups.clear() because that drops
     // all rows from the DOM momentarily, which causes the browser to clamp
@@ -1537,7 +1574,10 @@ export const Timeline = {
     const newGroupIds      = new Set(groupData.map(g => String(g.id)));
     const groupsToRemove   = [...existingGroupIds].filter(id => !newGroupIds.has(id));
     const groupsToAdd      = groupData.filter(g => !existingGroupIds.has(String(g.id)));
-    // An unchanged label keeps its live DOM node: omit `content` so vis does not re-append it on every pass.
+    // An unchanged label omits `content` so vis is not handed a new Element on every pass. (vis still
+    // re-appends the label Element on every group update, which is why a focused toggle loses focus and
+    // _restoreToggleFocus puts it back below.)
+    const focusedToggleLine = Timeline._focusedToggleLine();
     const groupsToUpdate: Array<Partial<TimelineGroupData> & { id: string }> = [];
     for (const g of groupData) {
       if (!existingGroupIds.has(String(g.id))) continue;
@@ -1552,6 +1592,7 @@ export const Timeline = {
 
     const _pmT0flush = performance.now();
     Timeline._suppressEvents = true;
+    let passClean = true;
     try {
       if (groupsToRemove.length) Timeline._groups.remove(groupsToRemove);
       if (groupsToUpdate.length) Timeline._groups.update(groupsToUpdate);
@@ -1559,6 +1600,17 @@ export const Timeline = {
       if (toRemove.length) Timeline._items.remove(toRemove);
       if (toUpdate.length) Timeline._items.update(toUpdate);
       if (toAdd.length)    Timeline._items.add(toAdd);
+      for (const id of toRemove) Timeline._laneIds.delete(id);
+      Timeline._noteLaneWrites(toUpdate);
+      Timeline._noteLaneWrites(toAdd);
+    } catch (e) {
+      // vis threw mid-flush (a dangling subgroup / group className). Heal instead of leaving ghost items
+      // and a half-applied diff; the heal schedules the next pass (see _heal).
+      Timeline._heal('rebuild-flush', e, {
+        groupIds: [...groupsToRemove, ...groupData.map(g => String(g.id))],
+        itemIds: toRemove,
+      });
+      return;
     } finally {
       Timeline._suppressEvents = false;
     }
@@ -1570,7 +1622,12 @@ export const Timeline = {
     if (typeof Selection !== 'undefined') {
       const keep = Selection.ids().filter(id => Timeline.itemIdsForTask(id).some(itemId => desired.has(itemId)));
       if (keep.length !== Selection.size()) Selection.set(keep);
-      Timeline._tl!.setSelection(keep.flatMap(id => Timeline.itemIdsForTask(id)).filter(itemId => desired.has(itemId)));
+      try {
+        Timeline._tl!.setSelection(keep.flatMap(id => Timeline.itemIdsForTask(id)).filter(itemId => desired.has(itemId)));
+      } catch (e) {
+        passClean = false;
+        Timeline._heal('rebuild-setSelection', e);
+      }
       if (NIMBUS!.Interaction && NIMBUS!.Interaction!.DEBUG) {
         ErrorLog.info('timeline',
           `diff-rebuild: +${toAdd.length} ~${toUpdate.length} -${toRemove.length} (kept sel: ${keep.length})`);
@@ -1587,7 +1644,11 @@ export const Timeline = {
     // Uses explicit pixels (not 'auto') so the timeline doesn't collapse
     // inside its flex parent. Falls back to '100%' for many-group cases so
     // verticalScroll still works as before.
-    Timeline._fitHeight(visibleLines.length);
+    // An expanded row with more than one lane is taller than rows x ROW_H: skip the row-count fit so the
+    // height is never first shrunk to that and then grown again; the previous height holds until
+    // _fitHeightMeasured (in the rAF below) sets the measured one.
+    const expandedMulti = !!expandedLine && (Timeline._depthByLine.get(expandedLine) ?? 0) > 1;
+    if (!expandedMulti) Timeline._fitHeight(visibleLines.length);
     // Restore horizontal viewport in case group or item changes caused vis-timeline
     // to auto-fit.
     if (savedWindow && Timeline._tl) {
@@ -1599,7 +1660,8 @@ export const Timeline = {
     // silently the same way — and the setWindow restore is a same-range no-op
     // event-wise). Resync + full refresh + redraw here, or freshly-added bars stay
     // culled until the user's next zoom/pan.
-    Timeline._refreshViewNow();
+    if (Timeline._refreshViewNow() === false) passClean = false;
+    if (passClean) { Timeline._healCount = 0; Timeline._healToastShown = false; }
     // Re-apply the remembered vertical offset AFTER _fitHeight() has set the
     // new height — must be rAF-deferred because setOptions({height}) doesn't
     // take effect (and thus doesn't clamp scrollTop to the new max) until
@@ -1615,6 +1677,9 @@ export const Timeline = {
     // inside the rAF itself instead.
     requestAnimationFrame(() => {
       if (!Timeline._tl || !Timeline._vScrollLaidOut()) return; // hidden rebuild: don't apply, don't clear the flag, don't touch the mask
+      // vis's redraw (rAF-throttled, so it ran before this callback) re-appended the row labels: give a
+      // keyboard-focused toggle its focus back.
+      if (focusedToggleLine) Timeline._restoreToggleFocus(focusedToggleLine);
       // An expanded row is taller than rows x _cachedRowH: size the timeline from the real group heights
       // (also covers isolate + expand, where the pane is only a row or two high and would clip the lanes).
       if (expandedLine && (Timeline._depthByLine.get(expandedLine) ?? 0) > 1) Timeline._fitHeightMeasured();
@@ -1713,6 +1778,13 @@ export const Timeline = {
       btn.title = hint;
       btn.textContent = String(depth);
       wrap.append(btn);
+    } else {
+      // A hidden slot as wide as the badge, so a badge appearing or disappearing never shifts the label
+      // column. NOT the row-stack-toggle class: the click / double-click guards match that one.
+      const slot = document.createElement('span');
+      slot.className = 'row-stack-slot';
+      slot.setAttribute('aria-hidden', 'true');
+      wrap.append(slot);
     }
     return { el: wrap, key: `${line}|${color}|${depth}|${expanded ? 1 : 0}|${hint}` };
   },
@@ -1720,16 +1792,10 @@ export const Timeline = {
   /** Expand `line` (collapsing any other) or collapse it when it already is the expanded row. */
   toggleExpand(line: string): void {
     const next = Timeline._expandedLine === line ? null : line;
-    const hadFocus = document.activeElement instanceof HTMLElement
-      && document.activeElement.classList.contains('row-stack-toggle');
     Timeline._expandedLine = next;
+    // The rebuild itself records a focused toggle before the group update and restores it afterwards
+    // (_rebuildPass -> _restoreToggleFocus), so a keyboard-activated toggle keeps focus.
     Timeline.rebuild();
-    // The rebuild re-renders the label, which drops focus from a keyboard-activated toggle.
-    if (hadFocus && Timeline._visEl) {
-      const btn = Array.from(Timeline._visEl.querySelectorAll<HTMLElement>('.row-stack-toggle'))
-        .find(b => b.dataset.line === line);
-      btn?.focus();
-    }
   },
 
   /** Called after a planner drag/drop commits to the Store (never from optimizer runs or loads).
@@ -1907,14 +1973,83 @@ export const Timeline = {
   // window to the timeline's actual range, fully re-evaluate the filter (an item
   // excluded while _viewWindow was stale stays excluded until a refresh — vis-data
   // DataViews filter incrementally at add/update time), and force a relayout.
-  _refreshViewNow(): void {
-    if (!Timeline._tl || !Timeline._visItems) return;
+  // Returns false when vis threw (the heal ladder has then been entered), true otherwise.
+  _refreshViewNow(): boolean {
+    if (!Timeline._tl || !Timeline._visItems) return true;
     const _pmT0 = performance.now();
-    const w = Timeline._tl.getWindow();
-    Timeline._viewWindow = { start: w.start.getTime(), end: w.end.getTime() };
-    Timeline._visItems.refresh();
-    Timeline._tl.redraw();
+    try {
+      const w = Timeline._tl.getWindow();
+      Timeline._viewWindow = { start: w.start.getTime(), end: w.end.getTime() };
+      Timeline._visItems.refresh();
+      Timeline._tl.redraw();
+    } catch (e) {
+      Timeline._heal('refresh-view', e);
+      return false;
+    }
     PerfMonitor.record('Timeline.refreshView', performance.now() - _pmT0);
+    return true;
+  },
+
+  /** Self-heal ladder for a vis-timeline throw during a rebuild flush, the view refresh or a selection
+   *  re-apply. A plain retry can throw again (group.remove -> orderSubgroups meets the same dangling
+   *  subgroup entry) and vis's _onRemove forEach has no try/catch, so ghost items can be left behind.
+   *    1. log once (ErrorLog.error);
+   *    2. remove the affected GROUPS first (vis disposes the Group and its subgroups), then their item ids
+   *       ONE AT A TIME, each in its own try/catch, all inside _suppressEvents;
+   *    3. schedule one rebuild, which re-adds the rows clean;
+   *    4. a 2nd consecutive failed pass also clears the sticky `_expandedLine`; a 3rd stops retrying and
+   *       toasts the planner to reload. (Re-initialising the vis Timeline in place is NOT safe: init() starts
+   *       an un-handled setInterval ticker and the Interaction / TimelineNav modules hold listeners and
+   *       DataSet subscriptions on the current instance, so a second init() would duplicate them.)
+   *  `_healCount` counts consecutive failed passes and is reset by the first clean rebuild pass. */
+  _heal(stage: string, err: unknown, scope?: { groupIds: string[]; itemIds: string[] }): void {
+    Timeline._healCount++;
+    const n = Timeline._healCount;
+    ErrorLog.error('timeline', `Gantt ${stage} threw (heal #${n}): ${err instanceof Error ? err.message : String(err)}`,
+      err instanceof Error ? { stack: err.stack } : err);
+    const groups = Timeline._groups, items = Timeline._items;
+    if (groups && items) {
+      const groupIds = new Set((scope?.groupIds ?? groups.getIds().map(String)).map(String));
+      const itemIds = new Set((scope?.itemIds ?? []).map(String));
+      try {
+        for (const id of items.getIds().map(String)) {
+          const g = (items.get(id) as TimelineVisItem | null)?.group;
+          if (g != null && groupIds.has(String(g))) itemIds.add(id);
+        }
+      } catch { /* best effort: the explicit ids below still go */ }
+      const prior = Timeline._suppressEvents;
+      Timeline._suppressEvents = true;
+      try {
+        for (const gid of groupIds) { try { groups.remove(gid); } catch { /* keep going */ } }
+        for (const iid of itemIds) { try { items.remove(iid); } catch { /* keep going */ } }
+        Timeline._laneIds.clear();
+        Timeline._labelKeys.clear();
+      } finally { Timeline._suppressEvents = prior; }
+    }
+    if (n >= 2) Timeline._expandedLine = null;
+    if (n >= 3) {
+      if (!Timeline._healToastShown) {
+        Timeline._healToastShown = true;
+        Toast.show(Util.t('toast.gantt_reload_needed'), 'error');
+      }
+      return; // no further automatic retry: the next external event starts a fresh pass
+    }
+    Timeline._scheduleRebuild();
+  },
+
+  /** The line of the row-expand toggle that currently holds keyboard focus, or null. */
+  _focusedToggleLine(): string | null {
+    if (typeof HTMLElement === 'undefined' || typeof document === 'undefined') return null;
+    const ae = document.activeElement;
+    return ae instanceof HTMLElement && ae.classList.contains('row-stack-toggle') ? (ae.dataset.line ?? null) : null;
+  },
+
+  /** Put keyboard focus back on `line`'s row-expand toggle (a group update re-renders the label). */
+  _restoreToggleFocus(line: string): void {
+    if (!Timeline._visEl) return;
+    const btn = Array.from(Timeline._visEl.querySelectorAll<HTMLElement>('.row-stack-toggle'))
+      .find(b => b.dataset.line === line);
+    btn?.focus({ preventScroll: true });
   },
 
   setView(mode: string): void {
@@ -2163,6 +2298,25 @@ export function lockLeftEdge(item: TimelineVisItem, stored: TimelineVisItem | nu
   const sameEnd = new Date(item.end).getTime() === new Date(stored.end).getTime();
   const movedStart = new Date(item.start).getTime() !== new Date(stored.start).getTime();
   return sameEnd && movedStart ? { ...item, start: stored.start } : item;
+}
+
+/** Expandable rows: true when a bulk Store update touches the expanded line, i.e. some id's stored item
+ *  sits on it (old line) or its task now belongs to it (new line). Such a batch must settle through a
+ *  full rebuild (lanes + badge counts), never a plain patch. */
+export function bulkTouchesExpandedLine(
+  ids: ReadonlyArray<string>, expandedLine: string | null,
+  oldLineOf: (id: string) => string | null | undefined,
+  newLineOf: (id: string) => string | null | undefined,
+): boolean {
+  if (!expandedLine) return false;
+  return ids.some(id => oldLineOf(id) === expandedLine || newLineOf(id) === expandedLine);
+}
+
+/** Expandable rows: with a row expanded, a multi-drag's per-companion DataSet write is skipped. vis's own
+ *  drag-end writes each companion's raw data AFTER ours (overwriting it), and the rebuild that the Store
+ *  write schedules (Timeline._onStore, source 'timeline') relocates the companions anyway. */
+export function companionWritesDeferred(expandedLine: string | null): boolean {
+  return !!expandedLine;
 }
 
 export interface TickerPushInput { nowMs: number; lastPushedMs: number; windowMs: number; centerPx: number; minPx?: number }
@@ -4967,7 +5121,9 @@ export const Interaction = {
           const dropSourceLines = [t.MACHINE || 'Unknown', ...selIds.map(sid => Store.tasks[sid]?.MACHINE || 'Unknown')];
           Store.updateTask(id, draggedPatch, 'timeline');
           if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
-          for (const upd of companionItemUpdates) {
+          // With a row expanded the write is skipped (companionWritesDeferred): vis's drag-end overwrites it
+          // and the rebuild scheduled by the 'timeline' Store write above relocates the companions.
+          for (const upd of companionWritesDeferred(Timeline._expandedLine) ? [] : companionItemUpdates) {
             // Lane-decorated (a companion can leave or enter the expanded row); a lane change goes
             // through remove + add inside _writePatches. Falls back to the plain partial when the item
             // is not in the DataSet.

@@ -91,6 +91,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.cannot_fix_task':             'Fixieren nicht möglich: Aufgabe nicht gefunden',
   'toast.cannot_fix_firmed': 'Automatische Korrektur nicht möglich: Dieser Auftrag ist fixiert (eingefrorener Horizont oder manuell) oder läuft gerade. Zuerst die Fixierung aufheben.',
   'toast.commit_failed':               'Das Ende konnte dort nicht gehalten werden. Der Auftrag bleibt, wo er war.',
+  'toast.gantt_reload_needed':         'Im Gantt-Diagramm ist ein Anzeigefehler aufgetreten, der sich nicht beheben ließ. Bitte laden Sie die Seite neu.',
   'toast.save_rejected':               'Speichern abgelehnt: {{msg}}',
   'toast.saved_locally':               'Lokal gespeichert (Server nicht erreichbar)',
   'toast.save_timeout': 'Zeitüberschreitung beim Speichern. Ihre Änderungen sind hier weiterhin ungespeichert - Verbindung prüfen und erneut speichern.',
