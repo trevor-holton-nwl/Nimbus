@@ -284,6 +284,8 @@ export interface GroupCounts {
   orders: number;
   /** The whole group's alerts "Move N orders" would move, in list order. */
   movableIds: string[];
+  /** Distinct orders (taskId) those movable alerts sit on: the N of "Move N orders". */
+  movableOrders: number;
   /** The whole group's alerts that are not acknowledged yet (what "Acknowledge N…" covers). */
   unackedIds: string[];
 }
@@ -291,15 +293,17 @@ export interface GroupCounts {
 /** What a group head shows and offers. Counts only: a group head carries no totals. */
 export function groupCounts<A extends AlertLike>(alerts: ReadonlyArray<A>, isAcked: (id: string) => boolean): GroupCounts {
   const orders = new Set<string>();
-  const out: GroupCounts = { errors: 0, warnings: 0, orders: 0, movableIds: [], unackedIds: [] };
+  const movable = new Set<string>();
+  const out: GroupCounts = { errors: 0, warnings: 0, orders: 0, movableIds: [], movableOrders: 0, unackedIds: [] };
   for (const a of alerts) {
     if (a.sev === 'err') out.errors++; else out.warnings++;
     if (a.taskId) orders.add(String(a.taskId));
     if (a.peerId) orders.add(String(a.peerId));
-    if (MOVABLE_ALERT_TYPES.has(a.type)) out.movableIds.push(a.id);
+    if (MOVABLE_ALERT_TYPES.has(a.type)) { out.movableIds.push(a.id); movable.add(String(a.taskId ?? a.id)); }
     if (!isAcked(a.id)) out.unackedIds.push(a.id);
   }
   out.orders = orders.size;
+  out.movableOrders = movable.size;
   return out;
 }
 
@@ -453,7 +457,7 @@ export function rowHtml(v: RowView, t: Translate): string {
   return `<div class="am-rowwrap" role="listitem" data-alert-id="${id}">`
     + `<div class="am-row am-row-${v.sev}" title="${_esc(tip)}">`
     + `<span class="am-sev am-sev-${v.sev}" aria-hidden="true">${_sevGlyph(v.type, v.sev)}</span>`
-    + `<div class="am-main">${pfx}<span class="am-msg">${_esc(v.message)}</span>${ack}</div>`
+    + `<div class="am-main">${pfx}<span class="am-msg" title="${_esc(v.message)}">${_esc(v.message)}</span>${ack}</div>`
     + `<span class="am-when${v.overdue ? ' am-when-overdue' : ''}" title="${_esc(v.anchorTip)}">${_esc(when)}</span>`
     + `<div class="am-acts">${buttons.join('')}</div>`
     + `</div>`
@@ -472,7 +476,7 @@ export interface GroupHeadView {
   firstGoto: boolean;
   /** Distinct orders the group touches ("Open these N orders in the table"). */
   orders: number;
-  /** The group's movable alerts ("Move N orders"). */
+  /** Distinct orders the group's movable alerts sit on ("Move N orders"). */
   movable: number;
   /** The group's not-yet-acknowledged alerts ("Acknowledge N…"). */
   unacked: number;

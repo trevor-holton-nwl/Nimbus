@@ -847,6 +847,9 @@ function seedBatch() {
   ], { view: { groupBy: 'category', sort: 'time' } });
 }
 
+/** Util.t that keeps the {{n}} count visible ("key|n=3"), so toast and confirm counts can be asserted. */
+const nT = () => patched(Util, 't', (k, v) => (v && v.n !== undefined ? `${k}|n=${v.n}` : k));
+
 function stubFix(fixes, { refuse = [], alsoGone = {} } = {}) {
   return patched(Alerts, 'applyFix', (id, opts) => {
     fixes.push([id, opts]);
@@ -862,6 +865,7 @@ test('Move N orders confirms above five, then fixes sequentially and quietly, sk
     stubFix(fixes, { refuse: ['a4'], alsoGone: { a1: ['a6'] } }),
     patched(Toast, 'show', (m, k) => toasts.push([m, k])),
     patched(Modal, 'confirm', async o => { toasts.push(['confirm', o.title, o.message]); return true; }),
+    nT(),
   ];
   try {
     seedBatch();
@@ -870,9 +874,9 @@ test('Move N orders confirms above five, then fixes sequentially and quietly, sk
       ? [{ dataset: { groupKey: 'other' }, focus: () => focused.push('other') }, { dataset: { groupKey: 'conflicts' }, focus: () => focused.push('conflicts') }] : []);
     clickAm('group-move', { groupKey: 'conflicts' });
     await sleep(5);
-    assert.deepEqual(toasts[0], ['confirm', 'am.group_fix_n', 'am.group_fix_confirm']);
+    assert.deepEqual(toasts[0], ['confirm', 'am.group_fix_n|n=6', 'am.group_fix_confirm|n=6']);   // six distinct orders (7 alerts)
     assert.deepEqual(fixes, [['a1', { quiet: true }], ['a3', { quiet: true }], ['a4', { quiet: true }], ['a5', { quiet: true }]]);
-    assert.deepEqual(toasts.slice(1), [['am.group_fix_done', 'success']], 'one summary toast, nothing per order');
+    assert.deepEqual(toasts.slice(1), [['am.group_fix_done|n=3', 'success']], 'one summary toast naming the 3 distinct orders moved (orders 1, 2, 4)');
     assert.deepEqual(focused, ['conflicts'], 'focus returns to the group head');
   } finally { undo.forEach(u => u()); }
 });
@@ -884,6 +888,7 @@ test('Move N orders: a declined confirmation moves nothing; five or fewer need n
     stubFix(fixes),
     patched(Toast, 'show', (m, k) => toasts.push([m, k])),
     patched(Modal, 'confirm', async () => { confirms++; return ask; }),
+    nT(),
   ];
   try {
     seedBatch();
@@ -897,26 +902,117 @@ test('Move N orders: a declined confirmation moves nothing; five or fewer need n
     clickAm('group-move', { groupKey: 'conflicts' });
     await sleep(5);
     assert.equal(confirms, 1, 'no confirmation at five');
-    assert.ok(fixes.length >= 1);
-    assert.equal(toasts.length, 1);
+    assert.deepEqual(fixes, [['a1', { quiet: true }], ['a3', { quiet: true }], ['a4', { quiet: true }], ['a5', { quiet: true }]]);
+    assert.deepEqual(toasts, [['am.group_fix_done|n=4', 'success']]);
   } finally { undo.forEach(u => u()); }
 });
 
 test('Move N orders reads "1 order moved" at exactly one, and reports nothing moved when every fix is refused', () => {
   const fixes = [], toasts = [];
-  const undo = [stubFix(fixes, { refuse: ['b1', 'b2'] }), patched(Toast, 'show', (m, k) => toasts.push([m, k]))];
+  const undo = [stubFix(fixes, { refuse: ['b1', 'b2'] }), patched(Toast, 'show', (m, k) => toasts.push([m, k])), nT()];
   try {
     Store.setTasks([], 'test');
     seed([alert('b1', { type: 'overlap', taskId: '1', peerId: '2' }), alert('b2', { type: 'overlap', taskId: '3', peerId: '1' })]);
     AlertMonitorPane.render();
     clickAm('group-move', { groupKey: 'conflicts' });
-    assert.deepEqual(toasts, [['am.group_fix_done', 'warn']]);
+    assert.deepEqual(toasts, [['am.group_fix_done|n=0', 'warn']]);
     toasts.length = 0;
     undo[0]();
     undo[0] = stubFix(fixes);
     clickAm('group-move', { groupKey: 'conflicts' });
-    assert.deepEqual(toasts, [['am.group_fix_done_one', 'success']], 'the second alert names an order the first one moved');
+    assert.deepEqual(toasts, [['am.group_fix_done_one|n=1', 'success']], 'the second alert names an order the first one moved');
   } finally { undo.forEach(u => u()); }
+});
+
+test('"Move N orders" counts distinct orders: two alerts on one order do not make two', () => {
+  Store.setTasks([], 'test');
+  seed([alert('d1', { type: 'overlap', taskId: '1', peerId: '2' }), alert('d2', { type: 'tool-conflict', taskId: '1', peerId: '3' })]);
+  AlertMonitorPane.render();
+  assert.doesNotMatch(section('conflicts'), /group-move/, 'one order: no batch button');
+  const move = openMenu('.am-group-menu', { groupKey: 'conflicts' })[0].items.find(i => i.id === 'move');
+  assert.ok(move, 'the menu still offers it for a single order');
+});
+
+test('a throw mid-batch is reported once; what moved is still summarised, the page repaints and focus returns to the head', async () => {
+  const toasts = [], focused = [];
+  let n = 0;
+  const undo = [
+    patched(Alerts, 'applyFix', id => {
+      if (++n === 2) throw new Error('calendar blew up');
+      Store.setAlerts(Store.alerts.filter(a => a.id !== id), 'test');
+    }),
+    patched(Toast, 'show', (m, k) => toasts.push([m, k])),
+    nT(),
+  ];
+  try {
+    Store.setTasks([], 'test');
+    seed([alert('e1', { type: 'overlap', taskId: '1', peerId: '2' }), alert('e2', { type: 'overlap', taskId: '3', peerId: '4' }),
+      alert('e3', { type: 'overlap', taskId: '5', peerId: '6' })]);
+    AlertMonitorPane.render();
+    globalThis.document.querySelectorAll = sel => (sel === '[data-am-action="toggle-group"]'
+      ? [{ dataset: { groupKey: 'conflicts' }, focus: () => focused.push('conflicts') }] : []);
+    clickAm('group-move', { groupKey: 'conflicts' });
+    assert.deepEqual(toasts, [['calendar blew up', 'error'], ['am.group_fix_done_one|n=1', 'success']]);
+    assert.doesNotMatch(els['am-groups'].innerHTML, /data-alert-id="e1"/, 'repainted without the moved alert');
+    assert.deepEqual(focused, ['conflicts']);
+  } finally { undo.forEach(u => u()); }
+});
+
+/** A document whose ⋯ triggers are the given ids (focus calls are logged), plus the group head. */
+function focusDoc(ids, log) {
+  globalThis.document.querySelectorAll = sel => {
+    if (sel === '[data-ovf-key]') return ids.map(id => ({ getAttribute: () => id, focus: () => log.push(id) }));
+    if (sel === '[data-am-action="toggle-group"]') return [{ dataset: { groupKey: 'conflicts' }, focus: () => log.push('head') }];
+    return [];
+  };
+}
+
+test('after Fix from the ⋯ menu the row is gone: focus goes to the next row\'s trigger', () => {
+  const log = [];
+  const undo = patched(Alerts, 'applyFix', id => { Store.setAlerts(Store.alerts.filter(a => a.id !== id), 'test'); });
+  try {
+    Store.setTasks([], 'test');
+    seed([alert('f1', { type: 'overlap', taskId: '1', peerId: '2' }), alert('f2', { type: 'overlap', taskId: '3', peerId: '4' })], { view: { groupBy: 'category', sort: 'time' } });
+    AlertMonitorPane.render();
+    focusDoc(['f2'], log);   // f1's trigger no longer exists after the repaint
+    openMenu('.am-row-menu', { alertId: 'f1' })[0].items.find(i => i.id === 'fix').onSelect({});
+    assert.deepEqual(log, ['f2']);
+    log.length = 0;
+    focusDoc([], log);       // the whole group emptied: fall back to the head
+    openMenu('.am-row-menu', { alertId: 'f2' })[0].items.find(i => i.id === 'fix').onSelect({});
+    assert.deepEqual(log, ['head']);
+  } finally { undo(); }
+});
+
+test('after Remove acknowledgement the row\'s trigger gets focus back once the refetch has repainted', async () => {
+  const log = [];
+  const undo = patched(AlertAcksClient, 'unacknowledge', async () => {});
+  try {
+    Store.setTasks([], 'test');
+    const acked = new Map([['g1', { alert_id: 'g1', acknowledged_by: 'pat', until: null }]]);
+    seed([alert('g1', { type: 'overlap', taskId: '1', peerId: '2' })], { acked, showAcked: true });
+    AlertMonitorPane.render();
+    focusDoc(['g1'], log);
+    openMenu('.am-row-menu', { alertId: 'g1' })[0].items.find(i => i.id === 'unack').onSelect({});
+    assert.deepEqual(log, [], 'not before the request settles');
+    await sleep(0);
+    assert.deepEqual(log, ['g1']);
+  } finally { undo(); }
+});
+
+test('Override and Acknowledge make the live trigger the focus owner BEFORE the modal opens (the modal then returns focus to it)', () => {
+  const log = [];
+  globalThis.NIMBUS = { Table: { _openOverrideModalForId: () => log.push('override-open') } };
+  const undo = patched(AlertAckModal, 'open', () => log.push('ack-open'));
+  try {
+    Store.setTasks([task('1')], 'test');
+    seed([alert('h1', { type: 'closed', taskId: '1' })]);
+    AlertMonitorPane.render();
+    focusDoc(['h1'], log);
+    openMenu('.am-row-menu', { alertId: 'h1' })[0].items.find(i => i.id === 'override').onSelect({});
+    openMenu('.am-row-menu', { alertId: 'h1' })[0].items.find(i => i.id === 'ack').onSelect({});
+    assert.deepEqual(log, ['h1', 'override-open', 'h1', 'ack-open']);
+  } finally { undo(); }
 });
 
 test('Move N orders is blocked under What-If (aria-disabled markup and handler) and overload is never moved', () => {

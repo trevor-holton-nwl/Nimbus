@@ -357,7 +357,7 @@ function _onClick(e: Event): void {
   if (rowMenu?.dataset.alertId) { _openRowMenu(rowMenu, rowMenu.dataset.alertId); return; }
   const groupMenu = target?.closest?.('.am-group-menu') as HTMLElement | null;
   if (groupMenu?.dataset.groupKey) { _openGroupMenu(groupMenu, groupMenu.dataset.groupKey); return; }
-  const btn =target?.closest?.('[data-am-action]') as HTMLElement | null;
+  const btn = target?.closest?.('[data-am-action]') as HTMLElement | null;
   switch (btn?.dataset.amAction) {
     case 'make-default': _makeDefault(); break;
     case 'switch-all':   AlertProfileMatches.setSessionProfile(ALL_ALERTS_PROFILE_ID); break;
@@ -401,9 +401,27 @@ function _toggleGroup(key: string): void {
 const _isAcked = (id: string): boolean => AlertProfileMatches.view().acked.has(id);
 
 /** Put keyboard focus back on a ⋯ trigger a repaint replaced: the new trigger carries the same data-ovf-key. */
-function _refocusKey(key: string): void {
+function _refocusKey(key: string): boolean {
   const next = Array.from(document.querySelectorAll?.<HTMLElement>('[data-ovf-key]') ?? []).find(el => el.getAttribute('data-ovf-key') === key);
-  next?.focus?.();
+  if (!next) return false;
+  next.focus?.();
+  return true;
+}
+
+/** Where focus goes when a row's own trigger is gone after an action: the next (else previous) row of its group, else the group head. */
+function _rowNeighbours(alertId: string): { groupKey: string | null; near: string[] } {
+  for (const g of _groupsByKey.values()) {
+    const i = g.alerts.findIndex(a => a.id === alertId);
+    if (i < 0) continue;
+    return { groupKey: g.key, near: [g.alerts[i + 1]?.id, g.alerts[i - 1]?.id].filter((x): x is string => !!x) };
+  }
+  return { groupKey: null, near: [] };
+}
+
+function _restoreRowFocus(alertId: string, nav: { groupKey: string | null; near: string[] }): void {
+  if (_refocusKey(alertId)) return;
+  for (const id of nav.near) if (_refocusKey(id)) return;
+  if (nav.groupKey) _focusGroupHead(nav.groupKey);
 }
 
 function _focusGroupHead(key: string): void {
@@ -424,8 +442,18 @@ function _openRowMenu(anchor: HTMLElement, alertId: string): void {
     hint: m.hintKey ? t(m.hintKey) : undefined,
     data: { alertAction: m.action, alertId, ...(taskId ? { taskId } : {}) },
     onSelect: () => {
-      _runAlertAction(m.action, alertId, taskId);
-      if (m.action === 'diagnose') _refocusKey(alertId);   // the repaint replaced the trigger
+      if (m.action === 'focus') { _runAlertAction(m.action, alertId, taskId); return; }
+      if (m.action === 'ack' || m.action === 'override') {
+        // These open a modal that takes focus and hands it back to the opener: make the live trigger the opener first.
+        _refocusKey(alertId);
+        _runAlertAction(m.action, alertId, taskId);
+        return;
+      }
+      // fix / diagnose / unack change what the list shows: repaint now, then put focus on this row's new trigger (or its neighbour).
+      const nav = _rowNeighbours(alertId);
+      const done = (): void => { if (_active) _paint(); _restoreRowFocus(alertId, nav); };
+      const pending = _runAlertAction(m.action, alertId, taskId);
+      if (pending) void pending.then(done); else done();
     },
   }));
   OverflowMenu.open(anchor, items, { align: 'end', key: alertId });
@@ -471,8 +499,9 @@ function _moveGroup(key: string): void {
   if (Sandbox.active) return;
   const g = _groupsByKey.get(key);
   if (!g) return;
-  const ids = groupCounts(g.alerts, () => false).movableIds;
-  const n = ids.length;
+  const counts = groupCounts(g.alerts, () => false);
+  const ids = counts.movableIds;
+  const n = counts.movableOrders;   // distinct orders, as the button says
   if (n === 0) return;
   if (n <= GROUP_MOVE_CONFIRM_ABOVE) { _runBatchMove(key, ids); return; }
   void Modal.confirm({ title: t('am.group_fix_n', { n }), message: t('am.group_fix_confirm', { n }) })
@@ -488,17 +517,22 @@ function _moveGroup(key: string): void {
 function _runBatchMove(key: string, ids: string[]): void {
   if (Sandbox.active) return;
   const movedOrders = new Set<string>();
-  let moved = 0;
-  for (const id of ids) {
-    const a = Store.alerts.find(x => x.id === id);
-    if (!a) continue;                                    // already gone (cleared by an earlier move or a recompute)
-    if ((a.taskId && movedOrders.has(String(a.taskId))) || (a.peerId && movedOrders.has(String(a.peerId)))) continue;
-    Alerts.applyFix(id, { quiet: true });
-    if (!Store.alerts.some(x => x.id === id)) { moved++; if (a.taskId) movedOrders.add(String(a.taskId)); }
+  try {
+    for (const id of ids) {
+      const a = Store.alerts.find(x => x.id === id);
+      if (!a) continue;                                    // already gone (cleared by an earlier move or a recompute)
+      if ((a.taskId && movedOrders.has(String(a.taskId))) || (a.peerId && movedOrders.has(String(a.peerId)))) continue;
+      Alerts.applyFix(id, { quiet: true });
+      if (!Store.alerts.some(x => x.id === id)) movedOrders.add(String(a.taskId ?? id));
+    }
+  } catch (e) {
+    Toast.show((e as Error)?.message || String(e), 'error');   // reported once; what moved before the throw is still summarised below
+  } finally {
+    const moved = movedOrders.size;
+    Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
+    if (_active) _paint();
+    _focusGroupHead(key);
   }
-  Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
-  if (_active) _paint();
-  _focusGroupHead(key);
 }
 
 /**
@@ -537,7 +571,7 @@ function _onAlertAction(trigger: HTMLElement): void {
 }
 
 /** Row actions — the same vocabulary and calls as AlertsUIAdapter._handleAction (the drawer), minus Dismiss (not on this page). */
-function _runAlertAction(action: string | undefined, alertId: string, taskId?: string): void {
+function _runAlertAction(action: string | undefined, alertId: string, taskId?: string): Promise<void> | void {
   const nim = _nim();
   switch (action) {
     case 'focus': nim.AlertsUIAdapter?.focus?.(alertId); break;
@@ -571,8 +605,7 @@ function _runAlertAction(action: string | undefined, alertId: string, taskId?: s
       const plant = Store.selectedPlant;
       if (!plant) break;
       // The client refetches and fans out on success, so the lists repaint themselves.
-      AlertAcksClient.unacknowledge(plant, alertId).catch(e => Toast.show((e as Error)?.message || String(e), 'error'));
-      break;
+      return AlertAcksClient.unacknowledge(plant, alertId).catch(e => { Toast.show((e as Error)?.message || String(e), 'error'); });
     }
     default: break;
   }
@@ -1174,7 +1207,7 @@ function _headView(g: AlertGroup, rc: RowCtx, expanded: boolean): GroupHeadView 
     key: g.key, expanded,
     label: _groupLabel(rc.s.view.groupBy, g.key, rc),
     errors: counts.errors, warnings: counts.warnings, orders: counts.orders,
-    movable: counts.movableIds.length, unacked: counts.unackedIds.length,
+    movable: counts.movableOrders, unacked: counts.unackedIds.length,
     firstAlertId: first?.id ?? null, firstGoto: !!first,
     whatIf: Sandbox.active === true,
   };

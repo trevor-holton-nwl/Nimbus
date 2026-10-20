@@ -7705,15 +7705,18 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-ack-badge { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .am-when { font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .am-when-overdue { color: var(--err); }
-.am-acts { display: flex; justify-content: flex-end; align-items: center; gap: 4px; min-width: 0; max-width: 240px; }
+/* Fixed width: every row is its own grid, so an auto track would differ per row and zig-zag the when column. 240 px holds the widest measured case (de: Go to + Override + ⋯ = 212 px). */
+.am-acts { display: flex; justify-content: flex-end; align-items: center; gap: 4px; min-width: 0; width: 240px; }
 .am-acts .btn[disabled], .am-acts .btn-fix[disabled] { opacity: .5; cursor: not-allowed; }
 .am-glyph { flex: 0 0 auto; }
 /* Below the 1,200 px breakpoint the second button keeps its glyph and loses its text (its aria-label and title carry it). */
 @media (max-width: 1199px) {
   .am-act-2 .lbl { display: none; }
+  .am-acts { width: 136px; }   /* label-less widest case (de) = 127 px */
 }
 @media (max-width: 720px) {
   .am-row { grid-template-columns: 14px minmax(0, 1fr) auto; }
+  .am-acts { width: auto; }
   .am-when { display: none; }
 }
 

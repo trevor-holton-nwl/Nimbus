@@ -1,6 +1,7 @@
 // Tests for the pure row / group-head / diagnose builders in frontend/alert-monitor/alert-monitor-model.mts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   rowActionsFor, rowHtml, rowPrefix, rowPrimaryActions, groupHeadHtml, groupMenuItems, groupCounts, groupLabel, diagnoseHtml,
   relativeDaysText, formatPairKey, fmtNum, GROUP_ROW_CAP, ROW_H, DIAG_H, MOVABLE_ALERT_TYPES,
@@ -35,7 +36,7 @@ test('a row is one line: a single .am-when, the prefix and message, and no numbe
   assert.equal((html.match(/class="am-when/g) ?? []).length, 1);
   assert.match(html, /<span class="am-when" title="am\.anchor_time: 2026-10-21 08:00">Wed 21 Oct · in 1 days<\/span>/);
   assert.doesNotMatch(html, /am-imp|am-num|am-meta|am-help|am-headline|am-hl\b|ⓘ/);
-  assert.match(html, /<div class="am-main"><span class="am-pfx">L1 · 4711 ·<\/span><span class="am-msg">Overlaps 4500118 by 2 h<\/span><\/div>/);
+  assert.match(html, /<div class="am-main"><span class="am-pfx">L1 · 4711 ·<\/span><span class="am-msg" title="Overlaps 4500118 by 2 h">Overlaps 4500118 by 2 h<\/span><\/div>/);
   assert.equal(ROW_H, 44);
 });
 
@@ -54,7 +55,7 @@ test('prefix: line + order, line only (overload), neither (no stray separator)',
   const tz = rowHtml(view({ type: 'plant_no_timezone', line: '', orderNo: '', taskId: undefined, message: 'Plant has no time zone' }), t);
   assert.doesNotMatch(tz, /am-pfx/);
   assert.doesNotMatch(tz, /·\s*<\/span><span class="am-msg"/);
-  assert.match(tz, /<div class="am-main"><span class="am-msg">Plant has no time zone<\/span><\/div>/);
+  assert.match(tz, /<div class="am-main"><span class="am-msg" title="Plant has no time zone">Plant has no time zone<\/span><\/div>/);
   assert.match(rowHtml(view({ orderNo: '', taskId: undefined, type: 'overload' }), t), /<span class="am-pfx">L1 ·<\/span>/);
 });
 
@@ -194,7 +195,7 @@ test('groupCounts: severity counts, distinct orders (taskId ∪ peerId), the who
     { id: 'e', sev: 'err', type: 'blackout', taskId: '4' },
   ];
   const c = groupCounts(alerts, id => id === 'c' || id === 'e');
-  assert.deepEqual(c, { errors: 2, warnings: 3, orders: 4, movableIds: ['a', 'b', 'e'], unackedIds: ['a', 'b', 'd'] });
+  assert.deepEqual(c, { errors: 2, warnings: 3, orders: 4, movableIds: ["a", "b", "e"], movableOrders: 3, unackedIds: ['a', 'b', 'd'] });
   assert.deepEqual([...MOVABLE_ALERT_TYPES].sort(), ['blackout', 'overlap', 'tool-conflict'], 'overload is not movable');
 });
 
@@ -233,6 +234,28 @@ test('group menu: Go to, Move N orders (also for one), Open these N orders, Ackn
   const locked = groupMenuItems(head({ whatIf: true })).find(m => m.id === 'move');
   assert.deepEqual([locked.disabled, locked.hintKey], [true, 'am.whatif_blocked']);
   assert.ok(groupMenuItems(head({ whatIf: true })).filter(m => m.id !== 'move').every(m => !m.disabled), 'ack stays live under What-If');
+});
+
+test('"Move N orders" counts distinct orders, not alerts', () => {
+  const alerts = [
+    { id: 'a', sev: 'err', type: 'overlap', taskId: '1', peerId: '2' },
+    { id: 'b', sev: 'err', type: 'tool-conflict', taskId: '1', peerId: '3' },
+    { id: 'c', sev: 'warn', type: 'blackout', taskId: '5' },
+  ];
+  const c = groupCounts(alerts, () => false);
+  assert.equal(c.movableIds.length, 3);
+  assert.equal(c.movableOrders, 2);
+});
+
+test('rows align: every row uses one grid with a fixed-width actions track, whatever buttons it has', () => {
+  const css = readFileSync(new URL('../../../frontend/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.am-row \{[^}]*grid-template-columns: 14px minmax\(0, 1fr\) 240px auto;/);
+  assert.match(css, /\.am-acts \{[^}]*justify-content: flex-end;[^}]*width: 240px;/);
+  assert.match(css, /@media \(max-width: 1199px\) \{[^}]*\.am-act-2 \.lbl \{ display: none; \}[^}]*\.am-acts \{ width: 136px; \}/);
+  const cls = html => html.match(/<div class="(am-row [^"]*)"/)[1].replace(/am-row-\w+/, '');
+  assert.equal(cls(rowHtml(view(), t)), cls(rowHtml(view({ type: 'late' }), t)), 'Go to + Fix and Go to alone share one template');
+  assert.match(rowHtml(view({ type: 'late' }), t), /<div class="am-acts">/);
+  assert.match(rowHtml(view(), t), /<div class="am-acts">/);
 });
 
 test('group labels per mode and the helpers behind the rows', () => {
