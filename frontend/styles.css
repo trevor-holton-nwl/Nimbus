@@ -1197,8 +1197,11 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .row-label-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Stack-count badge: shown on a collapsed row hiding overlapping orders; clicking it expands the row.
    -soft tint with the matching signal text (DESIGN.md badges). */
+/* .row-stack-slot is the invisible placeholder on rows without a badge; both share a min-width that fits two
+   digits (9 -> 10 does not shift the axis), so the label column keeps one width as badges come and go. */
+.row-stack-slot { margin-left: auto; flex: none; display: inline-block; min-width: 28px; box-sizing: border-box; visibility: hidden; }
 .row-stack-toggle {
-  margin-left: auto; flex: none; cursor: pointer;
+  margin-left: auto; flex: none; cursor: pointer; min-width: 28px; box-sizing: border-box; text-align: center;
   font: inherit; font-size: 11px; font-weight: 700; line-height: 1;
   padding: 2px 7px; border: 0; border-radius: 10px;
   background: var(--err-soft); color: var(--err);
