@@ -459,12 +459,12 @@ def _validate_schedule_segments(
 def _horizon_boundary_core(now_utc: datetime, timezone_name: str | None,
                             horizon_roll_hour_utc: int, days: int) -> datetime:
     """The one anchor-day/roll-hour clock implementation shared by the plant
-    visibility horizon (C1) and the plant frozen horizon (C2, 2026-08-20) —
-    see the controller ruling in that workstream's task brief: reuse this
-    exact math, parameterized by day-count, rather than inventing a second
-    clock. Callers (compute_visibility_horizon_end / compute_frozen_horizon_end)
-    own their own "what does an absent/zero day-count mean" convention and
-    call this only once they've already decided the horizon is active.
+    visibility horizon (C1). It also served the frozen horizon (C2) until
+    2026-10-19, when that horizon became a continuously rolling window
+    (`compute_frozen_horizon_end` now computes plant-local now + N days itself);
+    this daily-roll clock is now used by the visibility horizon only. The caller
+    (compute_visibility_horizon_end) owns its own "what does an absent day-count
+    mean" convention and calls this only once the horizon is active.
 
     anchor_day is "today" in the plant's timezone, advanced one calendar day
     once `now_utc`'s UTC hour reaches `horizon_roll_hour_utc` — a deliberate
@@ -507,23 +507,36 @@ def compute_visibility_horizon_end(now_utc: datetime, timezone_name: str | None,
 def compute_frozen_horizon_end(now_utc: datetime, timezone_name: str | None,
                                 horizon_roll_hour_utc: int,
                                 frozen_horizon_days: int | None) -> datetime | None:
-    """Workstream C2 (2026-08-20) — the plant-local-midnight instant through
-    which the optimizer may not place or move any order (the "frozen
-    window" is [now, this instant)); an order whose own start already falls
-    inside it is treated as implicitly pinned rather than moved.
+    """Plant frozen horizon far edge (workstream C2, 2026-08-20; made rolling
+    2026-10-19): the instant through which the optimizer may not place or move
+    any order. The frozen window is `[now, this instant)`, and BOTH edges
+    advance continuously with the clock, exactly like the alert horizon: the
+    result is plant-local now plus `frozen_horizon_days` wall-clock days. An
+    order whose own start already falls inside it is treated as implicitly
+    pinned rather than moved.
 
-    Reuses the EXACT SAME anchor-day/roll-hour clock as
-    compute_visibility_horizon_end (`_horizon_boundary_core`) — one clock
-    implementation, not two. The only difference is the null convention:
-    unlike visibility_horizon_days (NULL alone means unlimited),
-    frozen_horizon_days treats BOTH NULL and 0 as "off" (per this
-    workstream's controller ruling and docs/multi_change_spec_08.20.26.md's
-    C2 section) — a 0-day frozen window is meaningless and must disable the
-    feature outright rather than resolve to some same-instant boundary.
+    This no longer uses `_horizon_boundary_core`'s once-a-day anchor-day/
+    roll-hour clock (that stays in force for the VISIBILITY horizon only), so
+    `horizon_roll_hour_utc` has no effect here; the parameter is kept so the
+    signature and every caller are unchanged.
+
+    The result is a naive plant-local wall-clock datetime (same convention as
+    `_horizon_boundary_core`: directly comparable to scheduled_start/
+    basic_start_date). An unresolvable/missing timezone falls back to treating
+    `now_utc` as the local clock (UTC), never raising on bad master data.
+
+    Null convention: BOTH NULL and 0 mean "off" and return None (a 0-day
+    frozen window is meaningless and must disable the feature outright).
     """
     if not frozen_horizon_days:
         return None
-    return _horizon_boundary_core(now_utc, timezone_name, horizon_roll_hour_utc, frozen_horizon_days)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    try:
+        local_now = now_utc.astimezone(ZoneInfo(timezone_name)) if timezone_name else now_utc
+    except (ZoneInfoNotFoundError, ValueError):
+        local_now = now_utc
+    return local_now.replace(tzinfo=None) + timedelta(days=int(frozen_horizon_days))
 
 
 def _horizon_bounds_for_plant(cur, plant: str) -> tuple[datetime | None, datetime | None]:

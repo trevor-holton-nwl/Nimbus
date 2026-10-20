@@ -424,11 +424,11 @@ export const Persistence = {
         // Store.visibilityHorizonEnd.
         const horizonEndIso = (payload?.meta?.visibility_horizon_end as string | null | undefined) ?? null;
         Store.setVisibilityHorizonEnd(horizonEndIso ? new Date(horizonEndIso) : null, 'persistence');
-        // C2 (2026-08-20): same reasoning, for the plant's frozen-horizon
-        // boundary (db.compute_frozen_horizon_end) — Engine.earliestAllowedStart/
-        // isFrozenHorizon (optimization/engine.mts) and Timeline's
-        // .frozen-horizon-zone band both read Store.frozenHorizonEnd rather
-        // than each carrying their own copy of the clock math.
+        // C2 (2026-08-20): the plant's frozen-horizon boundary
+        // (db.compute_frozen_horizon_end). Since 2026-10-19 the horizon rolls with
+        // the clock, so the Store.frozenHorizonEnd getter computes it live from the
+        // plant clock + master data; this server instant is cached only as the
+        // fallback for when the plant's master-data row is not available.
         const frozenEndIso = (payload?.meta?.frozen_horizon_end as string | null | undefined) ?? null;
         Store.setFrozenHorizonEnd(frozenEndIso ? new Date(frozenEndIso) : null, 'persistence');
         ErrorLog.info('persistence',

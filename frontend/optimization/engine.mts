@@ -242,7 +242,9 @@ export function snapshotSchedule(plant?: string): ScheduleSnapshot {
       masterData,
       priorityRankMaps: structuredClone(Store.priorityRankMaps),
       setupSnapshot: structuredClone(Store.setupSnapshot),
-      frozenHorizonEnd: Store.frozenHorizonEnd ? new Date(Store.frozenHorizonEnd) : null,
+      // One concrete instant captured NOW (the live getter rolls with the clock); the worker realm
+      // has an empty Store, so it must only ever read this captured Date, never recompute it.
+      frozenHorizonEnd: (() => { const end = Store.frozenHorizonEnd; return end ? new Date(end) : null; })(),
       readModelVersion: String(Store.rev()),
     };
   } finally {
@@ -1137,12 +1139,13 @@ export const Engine = {
     return Number.isInteger(value) && (value as number) > 0 ? (value as number) : MIN_PRODUCTIVE_SEGMENT_MINUTES;
   },
 
-  /** C2 (2026-08-20): the plant's frozen-horizon boundary, as computed
-   *  server-side (db.compute_frozen_horizon_end, the SAME anchor-day/
-   *  roll-hour clock C1's visibility horizon uses) and cached in
-   *  Store.frozenHorizonEnd — the frontend deliberately carries no copy of
-   *  that clock math, same reasoning as Store.visibilityHorizonEnd. null
-   *  when the plant has no frozen window (frozen_horizon_days NULL/0). */
+  /** C2 (2026-08-20; rolling since 2026-10-19): the plant's frozen-horizon far
+   *  edge, plant-local now + frozen_horizon_days days. Both edges of the frozen
+   *  window advance with the clock (like the alert horizon); the value is
+   *  computed live by the `Store.frozenHorizonEnd` getter from the plant clock
+   *  and master data (mirrors db.compute_frozen_horizon_end), so every call
+   *  can return a later instant than the last. null when the plant has no
+   *  frozen window (frozen_horizon_days NULL/0) or no valid plant clock. */
   frozenHorizonEnd(): Date | null {
     return Store.frozenHorizonEnd;
   },
@@ -1152,7 +1155,7 @@ export const Engine = {
    *  visibility gate (a legitimate from-the-beginning-of-time cutoff — the
    *  past is always visible), C2's frozen window is a near-term protection
    *  BAND, not a from-time-zero cutoff: it's drawn on the Gantt as
-   *  `[now, Store.frozenHorizonEnd]` (Timeline's `.frozen-horizon-zone`,
+   *  `[now, now + frozen days]` (Timeline's `.frozen-horizon-zone`, BOTH edges
    *  advancing every second, same shape as the alert-horizon band it layers
    *  above) — bounded on BOTH sides. This check must agree with that visual
    *  band: `[now, end)`, not `(-infinity, end)`. An earlier version checked

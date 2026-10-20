@@ -4512,6 +4512,9 @@ test('hard bounds preserve a valid incumbent on timeout and reject stale or tamp
   const revisionStale = structuredClone(snapshot); revisionStale.readModelVersion = 'revision-v2';
   assert.equal(SetupScheduler.validateCandidateForApply(result, revisionStale).some(f => f.severity === 'error'), false,
     'a read-model revision change alone (Store.rev() moves on every Store event) must not reject an otherwise identical snapshot');
+  const frozenRolled = structuredClone(snapshot); frozenRolled.frozenHorizonEnd = new Date(Date.now() + 5 * 86_400_000);
+  assert.equal(SetupScheduler.validateCandidateForApply(result, frozenRolled).some(f => f.code === 'stale_candidate'), false,
+    'the rolling frozen-horizon instant moves every moment and must not stale a candidate (its input, frozen_horizon_days, is in masterData)');
   const stale = structuredClone(snapshot); stale.tasks[0].RUN_TIME = 4;
   assert.ok(SetupScheduler.validateCandidateForApply(result, stale).some(f => f.code === 'stale_candidate'));
   const bad = { ...result, patches: [{ id: 'current', changes: { start_date: at('2026-08-04T08:00:00'), end_date: at('2026-08-04T11:00:00'), planning_status: 'scheduled' } }] };
