@@ -2563,6 +2563,7 @@ window.__NIMBUS_LOCALES.pt = {
   'us.alert_gantt_highlight': 'Destacar no Gantt as correspondências do perfil',
   'us.alert_gantt_highlight_hint': 'As barras são coloridas por categoria de alerta, com um anel interno vermelho ou âmbar para a gravidade. Desativado, usa as cores padrão.',
   'tbl.status_profile': 'Corresponde ao meu perfil de alertas',
+  'tbl.status_profile_desc': 'Pedidos com um alerta acompanhado pelo seu perfil ativo. Escolha um perfil nas configurações do usuário para usar isto.',
   'legend.pm_capacity_t': 'Alerta de capacidade',
   'legend.pm_capacity_d': 'Este pedido tem um alerta de capacidade que o seu perfil ativo está acompanhando.',
   'legend.pm_conflicts_t': 'Alerta de conflito de programação',

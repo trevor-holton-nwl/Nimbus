@@ -2564,6 +2564,7 @@ window.__NIMBUS_LOCALES.fr = {
   'us.alert_gantt_highlight': 'Mettre en évidence dans le Gantt les correspondances du profil',
   'us.alert_gantt_highlight_hint': 'Les barres sont colorées selon la catégorie d’alerte, avec un anneau intérieur rouge ou ambre pour la gravité. Désactivé, les couleurs standard s’appliquent.',
   'tbl.status_profile': 'Correspond à mon profil d’alertes',
+  'tbl.status_profile_desc': 'Commandes portant une alerte suivie par votre profil actif. Choisissez un profil dans les paramètres utilisateur pour l’utiliser.',
   'legend.pm_capacity_t': 'Alerte de capacité',
   'legend.pm_capacity_d': 'Cette commande a une alerte de capacité suivie par votre profil actif.',
   'legend.pm_conflicts_t': 'Alerte de conflit de planification',

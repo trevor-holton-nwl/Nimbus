@@ -536,8 +536,10 @@ test('User Settings alert-profile rows: selecting a profile writes alertProfileB
     assert.deepEqual(closed, ['modal-user-settings']);
     assert.deepEqual(gotos, ['alerts']);
     pane.els['#us-ap-input'].isConnected = false;   // pane torn down before the list resolves
+    pane.els['#us-ap-input'].value = 'untouched';
     resolveList([]);
     await new Promise(r => setImmediate(r));
+    assert.equal(pane.els['#us-ap-input'].value, 'untouched', 'a disconnected pane is not repainted');
   } finally { /* mocks restore with the test context */ }
 });
 

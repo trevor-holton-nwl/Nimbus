@@ -29,6 +29,7 @@ import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
+import { ALL_ALERTS_PROFILE_ID } from '../insights/alert-profiles.mjs';
 import { Engine, predecessorOnMachine } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
@@ -886,24 +887,25 @@ export const Table = {
   },
 
   _buildStatusChipDropdown(): void {
+    if (typeof document === 'undefined') return;
     const drop = document.getElementById('tbl-flt-status-dropdown');
     if (!drop) return;
     const cur = Table._chipFilters.status;
-    const items: Array<{ v: TableStatusFilter; k: string; d: string }> = [
+    const items: Array<{ v: TableStatusFilter; k: string; d: string; off?: boolean }> = [
       { v: 'needs_planning', k: Util.t('ui.needs_planning'), d: Util.t('ui.status_desc_needs_planning') },
       { v: 'late',     k: Util.t('ui.late'),        d: Util.t('ui.status_desc_late') },
       { v: 'conflict', k: Util.t('ui.conflicting'),  d: Util.t('ui.status_desc_conflict') },
       { v: 'atrisk',   k: Util.t('ui.at_risk'),      d: Util.t('ui.status_desc_atrisk') },
       { v: 'firmed',   k: Util.t('ui.firmed'),       d: Util.t('ui.status_desc_firmed') },
-      { v: 'profile',  k: Util.t('tbl.status_profile'), d: '' },
+      { v: 'profile',  k: Util.t('tbl.status_profile'), d: Util.t('tbl.status_profile_desc'), off: Table._profileFilterOff() },
     ];
     drop.innerHTML = items.map(i =>
-      `<label style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px;">
+      `<label style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px;${i.off ? 'opacity:.55;' : ''}">
          <span style="display:flex;align-items:center;gap:8px;">
-           <input type="radio" name="tbl-flt-status" value="${i.v}"${cur === i.v ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('status', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
+           <input type="radio" name="tbl-flt-status" value="${i.v}"${cur === i.v ? ' checked' : ''}${i.off ? ' disabled' : ''} onchange="NIMBUS.Table._onChipChange('status', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
            <strong>${i.k}</strong>
          </span>
-         ${i.d ? `<span style="font-size:10.5px;color:var(--fg-mute);margin-left:21px;">${i.d}</span>` : ''}
+         <span style="font-size:10.5px;color:var(--fg-mute);margin-left:21px;">${i.d}</span>
        </label>`).join('')
       + `<div style="border-top:1px solid var(--line);margin:4px 0;"></div>
          <label style="display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:6px 14px;">
@@ -1104,11 +1106,18 @@ export const Table = {
   _wireProfileMatches(): void {
     if (Table._profileUnsub) return;
     Table._profileUnsub = AlertProfileMatches.subscribe(() => {
-      if (Table._chipFilters.status !== 'profile' || !Table._api) return;
+      if (!Table._api) return;
+      // Under All alerts the filter could only ever show an empty grid: fall back to no status filter.
+      if (Table._chipFilters.status === 'profile' && Table._profileFilterOff()) Table._chipFilters.status = null;
+      else if (Table._chipFilters.status !== 'profile') { Table._buildStatusChipDropdown(); return; }
+      Table._buildStatusChipDropdown();
       Table._api.onFilterChanged();
       Table._refreshChipButtons();
     });
   },
+  _unwireProfileMatches(): void { Table._profileUnsub?.(); Table._profileUnsub = null; },
+  /** True when the active profile is All alerts: the profile filter would match nothing, so it is offered disabled. */
+  _profileFilterOff(): boolean { return AlertProfileMatches.current().profileId === ALL_ALERTS_PROFILE_ID; },
 
   _onStore(evt: StoreEvent): void {
     if (evt.source === 'table' && evt.type !== 'firmed:change') return;

@@ -2603,6 +2603,7 @@ window.__NIMBUS_LOCALES.de = {
   'us.alert_gantt_highlight': 'Profiltreffer im Gantt hervorheben',
   'us.alert_gantt_highlight_hint': 'Balken werden nach Warnungskategorie gefärbt, mit rotem oder gelbem Innenring für den Schweregrad. Ausgeschaltet gelten die Standardfarben.',
   'tbl.status_profile': 'Entspricht meinem Warnungsprofil',
+  'tbl.status_profile_desc': 'Aufträge mit einer Warnung, die Ihr aktives Profil verfolgt. Wählen Sie dafür ein Profil in den Benutzereinstellungen.',
   'legend.pm_capacity_t': 'Kapazitätswarnung',
   'legend.pm_capacity_d': 'Dieser Auftrag hat eine Kapazitätswarnung, die Ihr aktives Profil verfolgt.',
   'legend.pm_conflicts_t': 'Planungskonflikt-Warnung',

@@ -74,7 +74,7 @@ test('Gantt legend popup keys (btn.legend, tip.legend, legend.*) exist in all 5 
     'legend.nav_now_d',
     'legend.pm_capacity_t', 'legend.pm_capacity_d', 'legend.pm_conflicts_t', 'legend.pm_conflicts_d',
     'legend.pm_calendar_t', 'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d',
-    'legend.pm_exceptions_t', 'legend.pm_exceptions_d', 'legend.pm_ring_d', 'tbl.status_profile',
+    'legend.pm_exceptions_t', 'legend.pm_exceptions_d', 'legend.pm_ring_d', 'tbl.status_profile', 'tbl.status_profile_desc',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
   for (const key of REQUIRED) {

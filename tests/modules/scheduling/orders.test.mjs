@@ -1929,5 +1929,32 @@ test('profile status filter keeps only orders in the active profile match set an
     Table._chipFilters.status = 'late';
     AlertProfileMatches.recompute();
     assert.equal(calls, 1, 'no re-filter while another status is active');
-  } finally { Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent; }
+  } finally { Table._unwireProfileMatches(); Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent; }
+});
+
+test('profile status option is disabled with its description under All alerts, enabled under a real profile; All alerts drops an active profile filter', () => {
+  const prior = Table._chipFilters, priorApi = Table._api, priorCurrent = AlertProfileMatches.current;
+  const drop = { innerHTML: '' };
+  const priorDoc = globalThis.document;
+  globalThis.document = { getElementById: id => (id === 'tbl-flt-status-dropdown' ? drop : null) };
+  try {
+    Table._chipFilters = { lines: new Set(), colors: new Set(), status: null, dateKey: null, poMat: new Set() };
+    AlertProfileMatches.current = () => ({ profileId: '__all__', taskIds: new Set() });
+    Table._buildStatusChipDropdown();
+    const row = h => h.split('</label>').find(r => r.includes('value="profile"'));
+    assert.match(row(drop.innerHTML), /value="profile"[^>]*disabled/);
+    assert.match(row(drop.innerHTML), /tbl\.status_profile_desc|Orders carrying an alert/);
+    AlertProfileMatches.current = () => ({ profileId: 'p1', taskIds: new Set() });
+    Table._buildStatusChipDropdown();
+    assert.doesNotMatch(row(drop.innerHTML), /disabled/);
+    // active 'profile' filter, then the profile switches to All alerts
+    Table._chipFilters.status = 'profile';
+    let calls = 0;
+    Table._api = { onFilterChanged: () => { calls += 1; }, getFilterModel: () => ({}), getDisplayedRowCount: () => 0 };
+    Table._wireProfileMatches();
+    AlertProfileMatches.current = () => ({ profileId: '__all__', taskIds: new Set() });
+    AlertProfileMatches.recompute();
+    assert.equal(Table._chipFilters.status, null);
+    assert.equal(calls, 1);
+  } finally { Table._unwireProfileMatches(); Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent; globalThis.document = priorDoc; }
 });
