@@ -1,5 +1,6 @@
-// The "High-leverage fixes" panel inside AlertMonitorPane: two-phase paint, gating (inactive / What-If /
-// optimizer preview), stale-revision drop, "Show alerts" focus, top-5 + show-all, the minutes entry.
+// The "Top fixes" panel inside AlertMonitorPane: two-phase paint, gating (inactive / What-If /
+// optimizer preview), stale-revision drop, "Show alerts" focus, top-5 + show-more, the minutes entry,
+// the admin disclosure, the ⋯ menu, and visibility under the no-match empty state.
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -11,6 +12,7 @@ import { Session } from '../../../frontend/security/session.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
+import { OverflowMenu } from '../../../frontend/platform/overflow-menu.mjs';
 
 globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 globalThis.window = globalThis.window || {};
@@ -125,13 +127,14 @@ const clickAm = (action) => els['alerts-tab'].handlers.click({
   target: { closest: sel => (sel === '[data-am-action]' ? { dataset: { amAction: action } } : null) },
 });
 
-test('first paint is a skeleton; the cards follow on the next tick and analysis runs once', async () => {
+test('first paint is a skeleton; the rows follow on the next tick and analysis runs once', async () => {
   seed([alert('a1')]);
   AlertMonitorPane.render();
   assert.match(els['am-leverage'].innerHTML, /am\.lev_computing/);
   await sleep(30);
-  assert.match(els['am-leverage'].innerHTML, /class="am-lev-card/);
-  assert.match(els['am-leverage'].innerHTML, /am\.lev_points/);
+  assert.match(els['am-leverage'].innerHTML, /class="am-fix"/);
+  assert.match(els['am-leverage'].innerHTML, /am\.fix_clears/);
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /point/i);
   assert.equal(counts.group, 1);
   assert.equal(counts.analyze, 1);
 });
@@ -144,18 +147,18 @@ test('no alerts for the plant: no panel at all and nothing computed', async () =
   assert.equal(counts.group, 0);
 });
 
-test('two-phase: removal numbers paint at once, the replay then updates the setup-pair card', async () => {
+test('two-phase: counts paint at once, the replay then adds the confidence clause to the setup-pair row', async () => {
   seed([alert('a1')]);
   groupItems = [setupItem()];
   analyzeImpl = async () => [setupItem({ method: 'replay', confidenceAfter: 78 })];
-  let sawEstimate = false;
+  let phase1 = '';
   const orig = deps.analyze;
-  deps.analyze = async (...a) => { sawEstimate = /am\.lev_method_estimate/.test(els['am-leverage'].innerHTML); return orig(...a); };
+  deps.analyze = async (...a) => { phase1 = els['am-leverage'].innerHTML; return orig(...a); };
   AlertMonitorPane.render();
   await sleep(40);
-  assert.ok(sawEstimate, 'phase 1 painted the estimate before the replay returned');
-  assert.match(els['am-leverage'].innerHTML, /am\.lev_method_exact/);
-  assert.match(els['am-leverage'].innerHTML, />\+8</, '70 -> 78');
+  assert.match(phase1, /am\.fix_clears/, 'phase 1 painted the counts before the replay returned');
+  assert.doesNotMatch(phase1, /am\.fix_conf/);
+  assert.match(els['am-leverage'].innerHTML, /am\.fix_conf/);
 });
 
 test('an inactive pane computes nothing, even when alerts change', async () => {
@@ -182,12 +185,12 @@ test('alerts:change re-evaluates after the 400 ms debounce, not before', async (
   assert.equal(counts.analyze, a + 1);
 });
 
-test('while What-If is active the replay analysis is skipped but the cards still paint', async () => {
+test('while What-If is active the replay analysis is skipped but the rows still paint', async () => {
   Sandbox.active = true;
   seed([alert('a1')]);
   AlertMonitorPane.render();
   await sleep(40);
-  assert.match(els['am-leverage'].innerHTML, /class="am-lev-card/);
+  assert.match(els['am-leverage'].innerHTML, /class="am-fix"/);
   assert.equal(counts.analyze, 0);
 });
 
@@ -197,7 +200,7 @@ test('while an optimizer preview is open the replay analysis is skipped', async 
   AlertMonitorPane.render();
   await sleep(40);
   assert.equal(counts.analyze, 0);
-  assert.match(els['am-leverage'].innerHTML, /class="am-lev-card/);
+  assert.match(els['am-leverage'].innerHTML, /class="am-fix"/);
 });
 
 test('a result that finishes after the Store moved on is dropped', async () => {
@@ -210,10 +213,9 @@ test('a result that finishes after the Store moved on is dropped', async () => {
   };
   AlertMonitorPane.render();
   await sleep(40);
-  // The test's Util.t returns bare keys, so look for the rendered delta (99 - 70 = +29) instead of the vars.
-  assert.doesNotMatch(els['am-leverage'].innerHTML, />\+29</, 'the stale replay never reaches the page');
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /am\.fix_conf/, 'the stale replay never reaches the page');
   await sleep(500);
-  assert.doesNotMatch(els['am-leverage'].innerHTML, />\+29</);
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /am\.fix_conf/);
   assert.ok(counts.analyze >= 2, 'a fresh analysis was scheduled for the new revision');
 });
 
@@ -231,46 +233,61 @@ test('Show alerts focuses the list, points the Gantt at the same orders, and scr
   assert.equal(els['am-focus-chip'].hidden, true);
 });
 
-test('only the top 5 cards show until "show all fixes"', async () => {
+test('only the top 5 rows show until "Show 10 more"', async () => {
   seed([alert('a1')]);
   groupItems = Array.from({ length: 8 }, (_, i) => item(`k${i}`));
   AlertMonitorPane.render();
   await sleep(40);
-  const cards = () => (els['am-leverage'].innerHTML.match(/class="am-lev-card/g) || []).length;
+  const cards = () => (els['am-leverage'].innerHTML.match(/class="am-fix"/g) || []).length;
   assert.equal(cards(), 5);
-  clickAm('lev-show-more');
+  clickAm('fixes-show-more');
   assert.equal(cards(), 8);
 });
 
-test('"show all fixes" reveals 20 more per click and stops at 100 cards', async () => {
+test('"Show 10 more" reveals 10 per click and stops at 50 rows', async () => {
   seed([alert('a1')]);
   groupItems = Array.from({ length: 300 }, (_, i) => item(`k${i}`));
   AlertMonitorPane.render();
   await sleep(40);
-  const cards = () => (els['am-leverage'].innerHTML.match(/class="am-lev-card/g) || []).length;
+  const cards = () => (els['am-leverage'].innerHTML.match(/class="am-fix"/g) || []).length;
   assert.equal(cards(), 5);
-  clickAm('lev-show-more');
+  clickAm('fixes-show-more');
+  assert.equal(cards(), 15);
+  clickAm('fixes-show-more');
   assert.equal(cards(), 25);
-  clickAm('lev-show-more');
-  assert.equal(cards(), 45);
-  for (let i = 0; i < 6; i++) clickAm('lev-show-more');
-  assert.equal(cards(), 100, 'hard cap');
-  assert.doesNotMatch(els['am-leverage'].innerHTML, /lev-show-more/);
+  for (let i = 0; i < 6; i++) clickAm('fixes-show-more');
+  assert.equal(cards(), 50, 'hard cap');
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /fixes-show-more/);
 });
 
-test('entering minutes replays that one card and shows the exact score only afterwards', async () => {
+test('entering minutes replays that one row and shows the confidence clause only afterwards', async () => {
   seed([alert('a1')]);
   groupItems = [setupItem({ requiresMinutes: true, assumedMinutes: null, minutesSource: null })];
   analyzeImpl = async () => groupItems.map(i => ({ ...i }));
   AlertMonitorPane.render();
   await sleep(40);
-  assert.match(els['am-leverage'].innerHTML, /am\.lev_needs_minutes/);
-  assert.doesNotMatch(els['am-leverage'].innerHTML, /am\.lev_score/, 'no prediction before minutes are entered');
+  assert.match(els['am-leverage'].innerHTML, /data-lev-minutes="setup-pair:x"/);
+  assert.match(els['am-leverage'].innerHTML, /am\.fix_replay/);
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /am\.fix_conf/, 'no confidence clause before minutes are entered');
   els['alerts-tab'].handlers.change({ target: { closest: sel => (sel === '[data-lev-minutes]' ? { dataset: { levMinutes: 'setup-pair:x' }, value: '12' } : null) } });
   await sleep(20);
   assert.deepEqual(counts.replay, [12]);
-  assert.match(els['am-leverage'].innerHTML, />\+10</, '70 -> 80');
-  assert.match(els['am-leverage'].innerHTML, /am\.lev_method_exact/);
+  assert.match(els['am-leverage'].innerHTML, /am\.fix_conf/);
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /data-lev-minutes/);
+});
+
+test('the inline Replay button reads that row\'s box; Enter plus Replay does not double-run', async () => {
+  seed([alert('a1')]);
+  groupItems = [setupItem({ requiresMinutes: true, assumedMinutes: null, minutesSource: null })];
+  analyzeImpl = async () => groupItems.map(i => ({ ...i }));
+  AlertMonitorPane.render();
+  await sleep(40);
+  const box = { dataset: { levMinutes: 'setup-pair:x' }, value: '9' };
+  globalThis.document.querySelectorAll = sel => (sel === '[data-lev-minutes]' ? [box] : []);
+  clickLev('replay-minutes', 'setup-pair:x');
+  clickLev('replay-minutes', 'setup-pair:x');
+  await sleep(20);
+  assert.deepEqual(counts.replay, [9], 'the second click during the in-flight replay is ignored');
 });
 
 test('Enter leaves focus in the minutes box, yet the replay result still paints', async () => {
@@ -278,11 +295,11 @@ test('Enter leaves focus in the minutes box, yet the replay result still paints'
   groupItems = [setupItem({ requiresMinutes: true, assumedMinutes: null, minutesSource: null })];
   AlertMonitorPane.render();
   await sleep(40);
-  globalThis.document.activeElement = { classList: { contains: c => c === 'am-lev-min-input' } };
+  globalThis.document.activeElement = { classList: { contains: c => c === 'am-fix-min-input' } };
   els['alerts-tab'].handlers.change({ target: { closest: sel => (sel === '[data-lev-minutes]' ? { dataset: { levMinutes: 'setup-pair:x' }, value: '12' } : null) } });
   await sleep(20);
-  assert.match(els['am-leverage'].innerHTML, />\+10</, 'the exact score is visible without a blur');
-  assert.doesNotMatch(els['am-leverage'].innerHTML, /am\.lev_needs_minutes/);
+  assert.match(els['am-leverage'].innerHTML, /am\.fix_conf/, 'the replayed clause is visible without a blur');
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /data-lev-minutes/);
 });
 
 test('no minutes replay while What-If is active or an optimizer preview is open', async () => {
@@ -312,7 +329,7 @@ test('a non-positive or non-numeric minutes entry runs nothing', async () => {
   assert.deepEqual(counts.replay, []);
 });
 
-test('a card whose alerts persist after "Fix movable" shows the remaining count', async () => {
+test('a row whose alerts persist after "Fix movable" shows the remaining count', async () => {
   seed([alert('a1', { type: 'blackout' })]);
   groupItems = [item('k1', { action: { kind: 'calendar-day', line: 'L1', dayKey: '2026-10-21', fixableAlertIds: ['a1'] } })];
   const { Alerts } = await import('../../../frontend/insights/services.mjs');
@@ -329,7 +346,7 @@ test('a card whose alerts persist after "Fix movable" shows the remaining count'
   } finally { Alerts.applyFix = priorFix; }
 });
 
-test('copy summary puts the card text on the clipboard and says so', async () => {
+test('copy summary puts the row text on the clipboard and says so', async () => {
   seed([alert('a1')]);
   groupItems = [item('k1', { adminOnly: true, family: 'routing-gap', action: { kind: 'routing-gap', step: 'pv_missing', material: 'M1', pv: '', machine: '' }, titleKey: 'leverage.title.routing-gap.pv_missing' })];
   AlertMonitorPane.render();
@@ -339,4 +356,61 @@ test('copy summary puts the card text on the clipboard and says so', async () =>
   assert.equal(calls.copied.length, 1);
   assert.match(calls.copied[0], /leverage\.title\.routing-gap\.pv_missing/);
   assert.ok(calls.toasts.some(([m]) => m === 'am.lev_copied'));
+  assert.doesNotMatch(calls.copied[0], /point/i);
+  assert.match(calls.copied[0], /am\.copy_orders/);
+});
+
+test('the panel also renders under the "nothing matches this profile" empty state', async () => {
+  const alerts = [alert('a1')];
+  Store.setAlerts(alerts, 'test');
+  AlertProfileMatches.view = () => ({
+    plant: 'P1', profileId: ALL_ALERTS_PROFILE_ID, profile: ALL_ALERTS_PROFILE,
+    alertIds: new Set(), taskIds: new Set(), sevByTask: new Map(), categoryByTask: new Map(), acked: new Map(), rev: 1,
+  });
+  AlertMonitorPane.render();
+  await sleep(40);
+  assert.match(els['am-leverage'].innerHTML, /class="panel am-fixes"/);
+  assert.match(els['am-leverage'].innerHTML, /class="am-fix"/);
+});
+
+test('a non-admin sees admin-only fixes under a collapsed disclosure that toggles and resets with the view', async () => {
+  seed([alert('a1')]);
+  groupItems = [item('main1'), item('adm1', { adminOnly: true, family: 'routing-gap', action: { kind: 'routing-gap', step: 'pv_missing', material: 'M1', pv: '', machine: '' } })];
+  AlertMonitorPane.render();
+  await sleep(40);
+  const html = () => els['am-leverage'].innerHTML;
+  assert.match(html(), /am\.fixes_admin_divider/);
+  assert.doesNotMatch(html(), /data-lev-key="adm1"/);
+  clickAm('fixes-admin-toggle');
+  assert.match(html(), /aria-expanded="true"/);
+  assert.match(html(), /data-lev-key="adm1"/);
+  AlertMonitorPane.resetView();
+  AlertMonitorPane.render();
+  await sleep(40);
+  assert.match(html(), /aria-expanded="false"/);
+  assert.doesNotMatch(html(), /data-lev-key="adm1"/);
+});
+
+test('the ⋯ trigger opens the overflow menu with the non-primary actions, dispatching through the card handler', async () => {
+  seed([alert('a1')]);
+  groupItems = [item('k1')];
+  AlertMonitorPane.render();
+  await sleep(40);
+  const priorOpen = OverflowMenu.open;
+  let opened = null;
+  OverflowMenu.open = (anchor, items, opts) => { opened = { anchor, items, opts }; return { close() {} }; };
+  try {
+    const anchor = { dataset: { levMenu: 'k1' } };
+    els['alerts-tab'].handlers.click({ target: { closest: sel => (sel === '[data-lev-menu]' ? anchor : null) } });
+    assert.ok(opened, 'menu opened');
+    assert.equal(opened.anchor, anchor);
+    assert.deepEqual(opened.opts, { align: 'end', key: 'k1' });
+    const ids = opened.items.map(i => i.id);
+    assert.ok(ids.includes('show-alerts') && ids.includes('open-table'));
+    assert.ok(ids.includes('goto'), 'Go to is in the menu');
+    assert.ok(!ids.includes('diagnose-cell'), 'diagnose is this row\'s primary, so it is not repeated in the menu');
+    assert.deepEqual(opened.items.find(i => i.id === 'show-alerts').data, { levAction: 'show-alerts', levKey: 'k1' });
+    opened.items.find(i => i.id === 'show-alerts').onSelect();
+    assert.equal(els['am-focus-chip'].hidden, false, 'Show alerts keeps the focus-chip behaviour');
+  } finally { OverflowMenu.open = priorOpen; }
 });

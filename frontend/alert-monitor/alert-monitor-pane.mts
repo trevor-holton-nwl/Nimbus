@@ -42,7 +42,7 @@ import {
   summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowHtml, colsHtml, diagnoseHtml, groupHeadHtml, groupTotals, groupLabel,
   relativeDaysText, formatPairKey, fmtNum,
-  levSectionHtml, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
+  fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
 import type { MonitorView, EmptyKind, RowView, LevCtx } from './alert-monitor-model.mjs';
 
@@ -353,6 +353,8 @@ function _onClick(e: Event): void {
   if (sortId && MONITOR_SORTS.includes(sortId)) { _persistView({ sort: sortId }); return; }
   const lev = target?.closest?.('[data-lev-action]') as HTMLElement | null;
   if (lev?.dataset.levAction) { _onLevAction(lev.dataset.levAction, lev.dataset.levKey ?? ''); return; }
+  const levMenu = target?.closest?.('[data-lev-menu]') as HTMLElement | null;
+  if (levMenu?.dataset.levMenu) { _openFixMenu(levMenu, levMenu.dataset.levMenu); return; }
   const btn = target?.closest?.('[data-am-action]') as HTMLElement | null;
   switch (btn?.dataset.amAction) {
     case 'make-default': _makeDefault(); break;
@@ -376,7 +378,8 @@ function _onClick(e: Event): void {
     case 'group-dismiss': _dismissGroup(btn!.dataset.groupKey ?? ''); break;
     case 'group-open-table': _openGroupInTable(btn!.dataset.groupKey ?? ''); break;
     case 'clear-focus': AlertMonitorPane.clearFocus(); break;
-    case 'lev-show-more': _levShown = Math.min(_levShown + LEV_STEP, LEV_MAX_RENDER); _paint(); break;
+    case 'fixes-show-more': _levShown = Math.min(_levShown + LEV_STEP, LEV_MAX_RENDER); _paint(); break;
+    case 'fixes-admin-toggle': _levAdminOpen = !_levAdminOpen; _paint(); break;
     default: {
       const act = target?.closest?.('[data-alert-action]') as HTMLElement | null;
       if (act?.dataset.alertAction) _onAlertAction(act);
@@ -669,6 +672,8 @@ let _levHave = false;                     // a first pass has produced results f
 let _levStale = false;                    // the tab was re-entered: refresh once
 let _levCapped = false;
 let _levShown = LEV_TOP_N;
+let _levAdminOpen = false;                // the "Needs an admin" disclosure; resets with the plant
+const _levReplaying = new Set<string>();  // fix keys with a minutes replay in flight (Enter + Replay must not double-run)
 let _levForcePaint = false;               // bypass the "half-typed minutes box" guard for one repaint
 let _levInFlight = false;
 let _levRerun = false;
@@ -685,7 +690,7 @@ let _setupAdmin: SetupAdminLite | null = null;
 let _setupAdminP: Promise<void> | null = null;
 
 function _levReset(plant: string | null): void {
-  _levItems = []; _levInput = null; _levPlant = plant; _levHave = false; _levShown = LEV_TOP_N;
+  _levItems = []; _levInput = null; _levPlant = plant; _levHave = false; _levShown = LEV_TOP_N; _levAdminOpen = false;
   _levCapped = false; _levStaleDrops = 0;
   _levTyped.clear(); _levAttempted.clear();
 }
@@ -727,11 +732,11 @@ function _renderLeverage(s: PaintState): void {
   if (!_levHave || _levStale) { _levStale = false; _levScheduleFirst(); }
   // A half-typed minutes box must survive an unrelated repaint.
   // (Except for the repaint that shows that very box's replay result: Enter leaves focus in the box.)
-  if (!_levForcePaint && (document.activeElement as HTMLElement | null)?.classList?.contains('am-lev-min-input')) return;
+  if (!_levForcePaint && (document.activeElement as HTMLElement | null)?.classList?.contains('am-fix-min-input')) return;
   const plant = s.plant;
   if (_levItems.some(i => i.family === 'setup-pair')) _ensureSetupAdmin();
-  _setHtml('am-leverage', levSectionHtml(_levItems, {
-    shown: _levShown, computing: !_levHave, ctxFor: it => _levCtxFor(it, plant),
+  _setHtml('am-leverage', fixesSectionHtml(_levItems, {
+    isAdmin: Session.isAdmin(), adminOpen: _levAdminOpen, limit: _levShown, computing: !_levHave, ctxFor: it => _levCtxFor(it, plant),
   }, t));
 }
 
@@ -803,6 +808,8 @@ async function _levMinutesEntered(key: string, raw: string): Promise<void> {
   if (!item || !input) return;
   _levTyped.set(key, minutes);   // kept even when skipped below: the next analysis applies it
   if (_levSkipAnalysis()) return;   // no replay during What-If or an optimizer preview
+  if (_levReplaying.has(key)) return;
+  _levReplaying.add(key);
   const rev0 = Store.rev();
   try {
     const next = await _levDeps.replay(input, item, minutes, _levRunner);
@@ -812,7 +819,32 @@ async function _levMinutesEntered(key: string, raw: string): Promise<void> {
     try { _paint(); } finally { _levForcePaint = false; }
   } catch (e) {
     ErrorLog.warn('alert-monitor', 'leverage replay failed', { error: String((e as Error)?.message || e) });
+  } finally {
+    _levReplaying.delete(key);
   }
+}
+
+/** The inline "Replay" button: read that row's minutes box and run the same replay the box's own change event runs. */
+function _levReplayClicked(key: string): void {
+  const boxes = Array.from(document.querySelectorAll?.('[data-lev-minutes]') ?? []) as HTMLInputElement[];
+  const box = boxes.find(b => b.dataset.levMinutes === key);
+  if (box) void _levMinutesEntered(key, String(box.value ?? ''));
+}
+
+/** The ⋯ menu of a fix row: every action except the row's primary, dispatched through the same handler as the buttons. */
+function _openFixMenu(anchor: HTMLElement, key: string): void {
+  const item = _levItems.find(i => i.key === key);
+  const plant = Store.selectedPlant;
+  if (!item || !plant) return;
+  const items: MenuItem[] = levActions(item, _levCtxFor(item, plant)).menu.map(a => ({
+    id: a.act,
+    label: t(a.labelKey, a.labelVars) + (a.admin ? ` (${t('am.lev_admin_fix')})` : ''),
+    disabled: a.disabled === true,
+    hint: a.disabled ? t('am.whatif_blocked') : undefined,
+    data: { levAction: a.act, levKey: key },
+    onSelect: () => { _onLevAction(a.act, key); },
+  }));
+  OverflowMenu.open(anchor, items, { align: 'end', key });
 }
 
 function _levShowAlerts(item: LeverageItem): void {
@@ -862,6 +894,7 @@ function _onLevAction(act: string, key: string): void {
   const action = item.action;
   switch (act) {
     case 'show-alerts': _levShowAlerts(item); break;
+    case 'replay-minutes': _levReplayClicked(key); break;
     case 'open-table': _openOrdersInTable(item.orderIds); break;
     case 'copy-summary':
       void _copyText(levSummaryText(item, levTitle(item, _levCtxFor(item, plant), t), t));

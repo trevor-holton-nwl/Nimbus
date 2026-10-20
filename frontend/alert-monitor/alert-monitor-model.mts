@@ -457,24 +457,25 @@ export function groupLabel(by: MonitorGroupBy, key: string, d: GroupLabelDeps, t
 }
 
 /* ---------------------------------------------------------------------------
-   High-leverage fixes (Task 13) — pure card / section builders.
+   Top fixes (Task 13, reworked as a ranked list in Task 23) — pure row / section builders.
 
    The pane decides the context (plant cap, admin, What-If, remaining count) and hands it in as a
-   LevCtx; nothing here reads a global. Points lead (D12); a `requiresMinutes` card never shows a
-   predicted score — it asks for minutes and shows the exact number only after the replay returns.
+   LevCtx; nothing here reads a global. The fix engine's `points` only ORDER the list; they are never
+   rendered (spec §1). A `requiresMinutes` row never shows a confidence clause: it asks for minutes and
+   shows the replayed score only after the replay returns.
    ------------------------------------------------------------------------- */
 
-/** Cards shown before "Show all fixes". */
+/** Rows shown before "Show 10 more". */
 export const LEV_TOP_N = 5;
-/** "Show all fixes" reveals this many more cards per click ... */
-export const LEV_STEP = 20;
-/** ... and never renders more than this many (a 636-card DOM froze the page for 30+ s). */
-export const LEV_MAX_RENDER = 100;
+/** "Show 10 more" reveals this many more rows per click ... */
+export const LEV_STEP = 10;
+/** ... and never renders more than this many (a 636-row DOM froze the page for 30+ s). */
+export const LEV_MAX_RENDER = 50;
 
 export interface LevCtx {
-  /** The plant's alert penalty is at the cap, so removing this card's alerts cannot move the score. */
+  /** The plant's alert penalty is at the cap (kept for the pane's context; rows no longer print it). */
   capped: boolean;
-  /** This card's alerts that persist after a fix was attempted from the page (0 = none / not attempted). */
+  /** This row's alerts that persist after a fix was attempted from the page (0 = none / not attempted). */
   remaining: number;
   /** The user may open the setup matrix review (else "copy for the setup owner"). */
   canReviewPairs: boolean;
@@ -497,19 +498,13 @@ export interface LevAction {
   admin?: boolean;
 }
 
-/** The alert category whose swatch/label stands in for the family badge. */
-const _FAMILY_CAT: Record<LeverageItem['family'], AlertCategory> = {
-  'setup-pair': 'setup', 'calendar-day': 'calendar', 'routing-gap': 'exceptions',
-  tool: 'conflicts', 'machine-state': 'setup', 'optimize-window': 'capacity',
-};
-
 const _ROUTING_UPLOAD = new Set(['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter']);
 
 function _stateText(state: ReadonlyArray<{ fieldKey: string; value: string }>, fieldLabel: (k: string) => string): string {
   return state.map(p => `${fieldLabel(p.fieldKey)}: ${p.value}`).join(', ');
 }
 
-/** The card title. Setup pairs are re-localised from the pair states (the engine's `titleVars` are English). */
+/** The row title. Setup pairs are re-localised from the pair states (the engine's `titleVars` are English). */
 export function levTitle(item: LeverageItem, ctx: LevCtx, t: Translate): string {
   let vars = item.titleVars;
   if (item.action.kind === 'open-setup-matrix') {
@@ -522,8 +517,12 @@ export function levTitle(item: LeverageItem, ctx: LevCtx, t: Translate): string 
   return t(item.titleKey, vars);
 }
 
-/** Every action a card offers, primary first; the pane dispatches on `act`. */
-export function levActions(item: LeverageItem, ctx: LevCtx): LevAction[] {
+/**
+ * What a row offers: ONE primary button and the rest for the ⋯ menu; the pane dispatches on `act`.
+ * For an `adminOnly` item viewed by a non-admin the primary is "Copy summary for owner" and the admin deep link
+ * (with its admin tag) moves to the head of the menu.
+ */
+export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevAction | null; menu: LevAction[] } {
   const out: LevAction[] = [];
   const add = (act: string, labelKey: string, primary = false, extra: Partial<LevAction> = {}) =>
     { out.push({ act, labelKey, primary, ...extra }); };
@@ -565,103 +564,141 @@ export function levActions(item: LeverageItem, ctx: LevCtx): LevAction[] {
   if (n > 0 && !out.some(x => x.act === 'open-table')) add('open-table', 'am.open_in_table', false, { labelVars: { n } });
   add('show-alerts', 'am.lev_show_alerts');
   if (item.adminOnly && !out.some(x => x.act === 'copy-summary')) add('copy-summary', 'am.lev_copy_summary');
-  return out;
+
+  if (item.adminOnly && !ctx.isAdmin) {
+    // Someone else owns this fix: the row's button hands it over; the admin deep link stays reachable in the menu.
+    const copy = out.find(x => x.act === 'copy-summary')!;
+    const rest = out.filter(x => x !== copy).map(x => ({ ...x, primary: false }));
+    return { primary: { ...copy, primary: true }, menu: rest };
+  }
+  const primary = out.find(x => x.primary) ?? null;
+  return { primary, menu: out.filter(x => x !== primary) };
 }
 
-function _levScoreHtml(item: LeverageItem, ctx: LevCtx, t: Translate): string {
-  if (item.requiresMinutes === true) {
-    const key = _esc(item.key);
-    const needs = _esc(t('am.lev_needs_minutes'));
-    return `<div class="am-lev-minutes"><label class="am-lev-needs"><span>${needs}</span>`
-      + `<input type="number" class="am-lev-min-input" min="1" step="1" inputmode="numeric" data-lev-minutes="${key}" `
-      + `placeholder="${_esc(t('am.lev_minutes_ph'))}" aria-label="${needs}"></label></div>`;
-  }
+/** "Clears 6 alerts on 4 orders", in the plural form the counts call for. */
+export function fixClearsText(item: LeverageItem, t: Translate): string {
+  const n = item.alertIds.length;
+  const m = item.orderIds.length;
+  if (n === 1 && m === 1) return t('am.fix_clears_one');
+  if (n === 1) return t('am.fix_clears_one_alert', { m });
+  if (m === 1) return t('am.fix_clears_one_order', { n });
+  return t('am.fix_clears', { n, m });
+}
+
+/**
+ * The muted second line, as already-escaped HTML fragments the caller joins with " · ":
+ * the counts, the confidence clause (replayed rows only, and only when the score changes; a lower
+ * after-score is shown with its delta in the error colour), the no-headroom note, what remains after a fix.
+ */
+export function fixLineParts(item: LeverageItem, ctx: LevCtx, t: Translate): string[] {
+  const parts: string[] = [_esc(fixClearsText(item, t))];
   const after = item.confidenceAfter;
-  if (after == null) return '';
-  if (item.points <= 0) {
-    return `<div class="am-lev-score am-lev-na"><span class="am-lev-val">${_esc(t('am.lev_conf_na'))}</span>`
-      + `<span class="am-lev-note">${_esc(t('am.lev_outside_window'))}</span></div>`;
+  if (item.method === 'replay' && item.requiresMinutes !== true && after != null && after !== item.confidenceBefore) {
+    const d = after - item.confidenceBefore;
+    const delta = d < 0 ? ` <span class="am-fix-down">${_esc(`−${Math.abs(d)}`)}</span>` : '';
+    parts.push(`<span class="am-fix-conf">${_esc(t('am.fix_conf', { before: item.confidenceBefore, after }))}</span>${delta}`);
   }
-  const method = item.method === 'replay' ? 'am.lev_method_exact' : item.method === 'removal' ? 'am.lev_method_estimate' : '';
-  const eyebrow = method ? `<span class="am-eyebrow am-lev-method">${_esc(t(method))}</span>` : '';
-  if (after === item.confidenceBefore && ctx.capped) {
-    return `<div class="am-lev-score"><span class="am-lev-note">${_esc(t('am.lev_score_capped'))}</span>${eyebrow}</div>`;
+  if (item.family === 'optimize-window' && item.headroomHours != null && item.headroomHours <= 0) {
+    parts.push(_esc(t('am.lev_no_headroom', { h: fmtNum(Math.abs(item.headroomHours)) })));
   }
-  const d = after - item.confidenceBefore;
-  const delta = d === 0 ? '' : `<span class="am-lev-delta ${d > 0 ? 'am-lev-up' : 'am-lev-down'}">${d > 0 ? '+' : ''}${d}</span>`;
-  const partial = item.outsideConfidenceWindowCount > 0
-    ? `<span class="am-lev-note">${_esc(t('am.lev_partial_window', { n: item.outsideConfidenceWindowCount }))}</span>` : '';
-  return `<div class="am-lev-score"><span class="am-lev-val">${_esc(t('am.lev_score', { before: item.confidenceBefore, after }))}</span>${delta}${eyebrow}${partial}</div>`;
+  if (ctx.remaining > 0) parts.push(`<span class="am-fix-left">${_esc(t('am.lev_remaining', { n: ctx.remaining }))}</span>`);
+  return parts;
 }
 
-/** One leverage card. */
-export function levCardHtml(item: LeverageItem, ctx: LevCtx, t: Translate): string {
+/** The row tooltip: free hours in an optimize window, and the setup-tracking-off note. */
+function _fixTip(item: LeverageItem, ctx: LevCtx, t: Translate): string {
+  const tips: string[] = [];
+  if (item.family === 'optimize-window' && item.headroomHours != null && item.headroomHours > 0) {
+    tips.push(t('am.lev_headroom', { h: fmtNum(item.headroomHours) }));
+  }
+  if (item.family === 'setup-pair' && !ctx.setupActive) tips.push(t('am.lev_setup_inactive'));
+  return tips.join(' · ');
+}
+
+/** One ranked fix row. `rank` is null for the admin list (no number). */
+export function fixRowHtml(item: LeverageItem, rank: number | null, ctx: LevCtx, t: Translate): string {
   const key = _esc(item.key);
   const title = levTitle(item, ctx, t);
-  const cat = _FAMILY_CAT[item.family];
-  const admin = item.adminOnly ? `<span class="badge badge-info am-lev-admin">${_esc(t('am.lev_admin_fix'))}</span>` : '';
-  let room = '';
-  if (item.family === 'optimize-window' && item.headroomHours != null) {
-    const h = item.headroomHours;
-    room = `<div class="am-lev-room${h > 0 ? '' : ' am-lev-room-none'}">${_esc(h > 0
-      ? t('am.lev_headroom', { h: fmtNum(h) }) : t('am.lev_no_headroom', { h: fmtNum(Math.abs(h)) }))}</div>`;
+  const tip = _fixTip(item, ctx, t);
+  const admin = item.adminOnly ? ` <span class="badge badge-info am-lev-admin">${_esc(t('am.lev_admin_fix'))}</span>` : '';
+  const { primary } = levActions(item, ctx);
+  const btn = primary ? (() => {
+    const tag = primary.admin ? ` <span class="am-lev-adm">${_esc(t('am.lev_admin_fix'))}</span>` : '';
+    return `<button type="button" class="btn sm btn-primary" data-lev-action="${_esc(primary.act)}" data-lev-key="${key}"`
+      + `${primary.disabled ? ` disabled aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : ''}>${_esc(t(primary.labelKey, primary.labelVars))}${tag}</button>`;
+  })() : '';
+  const more = `<button type="button" class="icon-btn sm" data-lev-menu="${key}" data-ovf-key="${key}" aria-haspopup="menu" aria-label="${_esc(t('am.more_actions'))}">⋯</button>`;
+  let minutes = '';
+  if (item.requiresMinutes === true) {
+    const label = _esc(t('am.fix_minutes'));
+    minutes = `<span class="am-fix-minutes"><label>${label} <input type="number" class="am-fix-min-input" min="1" step="1" inputmode="numeric" `
+      + `data-lev-minutes="${key}" aria-label="${label}"></label> `
+      + `<button type="button" class="btn sm" data-lev-action="replay-minutes" data-lev-key="${key}">${_esc(t('am.fix_replay'))}</button></span>`;
   }
-  if (item.family === 'setup-pair' && !ctx.setupActive) {
-    room = `<div class="am-lev-room am-lev-room-none">${_esc(t('am.lev_setup_inactive'))}</div>`;
-  }
-  const remaining = ctx.remaining > 0
-    ? `<div class="am-lev-remaining">${_esc(t('am.lev_remaining', { n: ctx.remaining }))}</div>` : '';
-  const buttons = levActions(item, ctx).map(a => {
-    const label = t(a.labelKey, a.labelVars);
-    const tag = a.admin ? ` <span class="am-lev-adm">${_esc(t('am.lev_admin_fix'))}</span>` : '';
-    return `<button type="button" class="btn sm ${a.primary ? 'btn-primary' : 'btn-ghost'}" data-lev-action="${_esc(a.act)}" data-lev-key="${key}"`
-      + `${a.disabled ? ` disabled aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : ''}>${_esc(label)}${tag}</button>`;
-  }).join('');
-  return `<article class="am-lev-card panel" data-lev-key="${key}">`
-    + `<div class="am-lev-top"><span class="am-lev-fam"><span class="am-cat-swatch am-cat-${cat}" aria-hidden="true"></span>${_esc(t(`ape.cat_${cat}`))}</span>${admin}</div>`
-    + `<div class="am-lev-title" title="${_esc(title)}">${_esc(title)}</div>`
-    + `<div class="am-lev-mono">${_esc(t('am.lev_alerts', { n: item.alertIds.length, m: item.orderIds.length }))}</div>`
-    + `<div class="am-lev-points">${_esc(t('am.lev_points', { n: fmtNum(item.points) }))}</div>`
-    + _levScoreHtml(item, ctx, t) + room + remaining
-    + `<div class="am-lev-acts">${buttons}</div></article>`;
+  const rankHtml = rank == null
+    ? `<span class="am-fix-rank" aria-hidden="true"></span>`
+    : `<span class="am-fix-rank" aria-label="${_esc(t('am.rank_n', { n: rank }))}">${rank}</span>`;
+  return `<div class="am-fix" role="listitem" data-lev-key="${key}"${tip ? ` title="${_esc(tip)}"` : ''}>`
+    + rankHtml
+    + `<div class="am-fix-main"><div class="am-fix-title" title="${_esc(title)}">${_esc(title)}${admin}</div>`
+    + `<div class="am-fix-line">${fixLineParts(item, ctx, t).join(' · ')}${minutes ? ` · ${minutes}` : ''}</div></div>`
+    + `<div class="am-fix-acts">${btn}${more}</div></div>`;
 }
 
-export interface LevSectionOpts {
-  /** How many cards to render (LEV_TOP_N first; +LEV_STEP per click; capped at LEV_MAX_RENDER). */
-  shown: number;
+export interface FixesSectionOpts {
+  /** Admins see one list; everyone else gets the actionable list plus a collapsed "Needs an admin" list. */
+  isAdmin: boolean;
+  /** The "Needs an admin" disclosure is expanded. */
+  adminOpen: boolean;
+  /** How many main-list rows to render (LEV_TOP_N first; +LEV_STEP per click; capped at LEV_MAX_RENDER). */
+  limit: number;
   /** The first pass has not produced results yet. */
   computing: boolean;
   ctxFor: (item: LeverageItem) => LevCtx;
 }
 
-/** The whole panel: head, cards (top 5 or all), "Show all fixes", skeleton or the empty copy. */
-export function levSectionHtml(items: ReadonlyArray<LeverageItem>, o: LevSectionOpts, t: Translate): string {
-  const head = `<div class="am-lev-head"><span class="am-eyebrow">${_esc(t('am.leverage_title'))}</span>`
-    + `<span class="am-lev-hint">${_esc(t('am.leverage_hint'))}</span></div>`;
+/**
+ * The whole panel: head, ranked list (partition first, then slice), "Show 10 more", the collapsed admin list,
+ * skeleton or the empty copy.
+ */
+export function fixesSectionHtml(items: ReadonlyArray<LeverageItem>, o: FixesSectionOpts, t: Translate): string {
+  const head = `<header class="panel-head"><h3>${_esc(t('am.fixes_title'))}</h3>`
+    + `<span class="panel-hint">${_esc(t('am.fixes_hint'))}</span></header>`;
+  const main = o.isAdmin ? items : items.filter(i => !i.adminOnly);
+  const adminList = o.isAdmin ? [] : items.filter(i => i.adminOnly);
   let body: string;
   if (o.computing && !items.length) {
     body = `<div class="am-lev-skeleton" aria-busy="true">${_esc(t('am.lev_computing'))}</div>`;
   } else if (!items.length) {
     body = `<div class="am-lev-empty">${_esc(t('am.lev_none'))}</div>`;
   } else {
-    const limit = Math.min(Math.max(o.shown, LEV_TOP_N), LEV_MAX_RENDER);
-    const shown = items.slice(0, limit);
-    body = `<div class="am-lev-list">${shown.map(it => levCardHtml(it, o.ctxFor(it), t)).join('')}</div>`
-      + (items.length > limit && limit < LEV_MAX_RENDER
-        ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="lev-show-more">${_esc(t('am.lev_show_more'))}</button></div>` : '');
+    const limit = Math.min(Math.max(o.limit, LEV_TOP_N), LEV_MAX_RENDER);
+    const shown = main.slice(0, limit);
+    const list = shown.length
+      ? `<div class="am-fix-list" role="list">${shown.map((it, i) => fixRowHtml(it, i + 1, o.ctxFor(it), t)).join('')}</div>` : '';
+    const more = main.length > limit && limit < LEV_MAX_RENDER
+      ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="fixes-show-more">${_esc(t('am.fixes_more'))}</button></div>` : '';
+    let adminHtml = '';
+    if (adminList.length) {
+      adminHtml = `<button type="button" class="am-fix-divider" aria-expanded="${o.adminOpen}" data-am-action="fixes-admin-toggle">`
+        + `<span class="am-caret" aria-hidden="true">${o.adminOpen ? '▾' : '▸'}</span>${_esc(t('am.fixes_admin_divider', { n: adminList.length }))}</button>`
+        + (o.adminOpen
+          ? `<div class="am-fix-list" role="list">${adminList.slice(0, LEV_MAX_RENDER).map(it => fixRowHtml(it, null, o.ctxFor(it), t)).join('')}</div>` : '');
+    }
+    body = list + more + adminHtml;
+    if (!body) body = `<div class="am-lev-empty">${_esc(t('am.lev_none'))}</div>`;
   }
-  return `<section class="am-lev-panel" aria-label="${_esc(t('am.leverage_title'))}">${head}${body}</section>`;
+  return `<section class="panel am-fixes" aria-label="${_esc(t('am.fixes_title'))}">${head}${body}</section>`;
 }
 
-/** Plain text for the owner hand-off (clipboard): title, lines, orders, points. */
+/** Plain text for the owner hand-off (clipboard): title, what it clears, lines, orders. */
 export function levSummaryText(item: LeverageItem, title: string, t: Translate): string {
   const orders = item.orderIds.length > 50 ? `${item.orderIds.slice(0, 50).join(', ')} …` : item.orderIds.join(', ');
   return [
     title,
-    t('am.lev_alerts', { n: item.alertIds.length, m: item.orderIds.length }),
-    `${t('am.group_line')}: ${item.lines.join(', ')}`,
-    `${t('am.col_orders')}: ${orders}`,
-    t('am.lev_points', { n: fmtNum(item.points) }),
+    fixClearsText(item, t),
+    `${t('am.copy_lines')}: ${item.lines.join(', ')}`,
+    `${t('am.copy_orders')}: ${orders}`,
   ].join('\n');
 }
 
