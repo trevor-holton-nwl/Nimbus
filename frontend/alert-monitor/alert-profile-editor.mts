@@ -176,6 +176,8 @@ interface EditorState {
   plant: string;
   profiles: AlertProfile[];
   draft: EditorDraft;
+  /** JSON of `profileFromDraft(draft)` as loaded: the unsaved-edits check compares against it. */
+  baseline: string;
   errors: Record<string, string>;
   serverError: string | null;
   showErrors: boolean;
@@ -185,6 +187,21 @@ interface EditorState {
 }
 
 let _s: EditorState | null = null;
+
+const _snap = (d: EditorDraft): string => JSON.stringify(profileFromDraft(d));
+function _setDraft(s: EditorState, d: EditorDraft): void { s.draft = d; s.baseline = _snap(d); }
+function _dirty(s: EditorState): boolean { return _snap(s.draft) !== s.baseline; }
+
+/** Run `go` now when nothing is unsaved; otherwise only after the planner confirms discarding the edits. */
+function _guardDiscard(s: EditorState, go: () => void): void {
+  if (!_dirty(s)) { go(); return; }
+  void Modal.confirm({
+    tone: 'warn',
+    title: t('ape.discard_title'),
+    message: t('ape.discard_confirm'),
+    confirmLabel: t('btn.discard'),
+  }).then(ok => { if (ok && _s === s) go(); });
+}
 
 type Nim = { AlertsUIAdapter?: { headlineFor?(type: string): string } };
 function _headline(type: string): string {
@@ -407,7 +424,7 @@ async function _save(): Promise<void> {
     const code = err instanceof AlertApiError ? err.code : null;
     if (code === 'name_taken') s.errors = { ...s.errors, name: 'ape.err_name_dup' };
     else if (code === 'stale') s.serverError = 'ape.err_stale';
-    else Toast.show((err as Error)?.message || t('ape.err_stale'), 'error');
+    else Toast.show((err as Error)?.message || t('ape.err_save_failed'), 'error');
     _render();
   }
 }
@@ -427,7 +444,7 @@ async function _delete(): Promise<void> {
     Toast.show(t('toast.alert_profile_deleted'), 'success');
     AlertProfileEditor.close();
   } catch (err) {
-    Toast.show((err as Error)?.message || t('ape.err_stale'), 'error');
+    Toast.show((err as Error)?.message || t('ape.err_save_failed'), 'error');
   }
 }
 
@@ -448,7 +465,7 @@ async function _copyGo(): Promise<void> {
       ok.push(target);
     } catch (err) {
       const code = err instanceof AlertApiError ? err.code : null;
-      failed.push(`${target}: ${code === 'name_taken' ? t('ape.err_name_dup') : ((err as Error)?.message || t('ape.err_stale'))}`);
+      failed.push(`${target}: ${code === 'name_taken' ? t('ape.err_name_dup') : ((err as Error)?.message || t('ape.err_save_failed'))}`);
     }
   }
   if (ok.length) Toast.show(t('toast.alert_profile_saved', { name: `${src.name} → ${ok.join(', ')}` }), 'success');
@@ -462,7 +479,7 @@ function _selectProfile(id: string): void {
   const s = _s;
   const p = s?.profiles.find(x => x.id === id);
   if (!s || !p) return;
-  s.draft = draftFromProfile(p);
+  _setDraft(s, draftFromProfile(p));
   s.errors = {}; s.serverError = null; s.showErrors = false; s.copy = null; s.setMine = false;
   _render();
 }
@@ -470,7 +487,7 @@ function _selectProfile(id: string): void {
 function _newDraft(): void {
   const s = _s;
   if (!s) return;
-  s.draft = blankDraft(s.plant);
+  _setDraft(s, blankDraft(s.plant));
   s.errors = {}; s.serverError = null; s.showErrors = false; s.copy = null; s.setMine = false;
   _render();
 }
@@ -483,8 +500,16 @@ function _duplicate(id: string): void {
   delete d.id;
   d.updated_at = null;
   d.name = uniqueCopyName(p.name, s.profiles.map(x => x.name));
-  s.draft = d;
+  _setDraft(s, d);
   s.errors = {}; s.serverError = null; s.showErrors = false; s.copy = null; s.setMine = false;
+  _render();
+}
+
+/** Copy to plants… swaps the form for the plant list; any unsaved edits were confirmed away, so revert to the saved profile. */
+function _startCopy(s: EditorState, srcId: string): void {
+  const saved = s.draft.id ? s.profiles.find(x => x.id === s.draft.id) : undefined;
+  _setDraft(s, saved ? draftFromProfile(saved) : blankDraft(s.plant));
+  s.copy = { srcId, sel: new Set(), query: '', busy: false };
   _render();
 }
 
@@ -509,13 +534,10 @@ function _onClick(e: Event): void {
   if (!s || !btn) return;
   const ds = btn.dataset;
   switch (ds.apeAct) {
-    case 'select': _selectProfile(ds.apeId ?? ''); break;
-    case 'new': _newDraft(); break;
-    case 'dup': _duplicate(ds.apeId ?? ''); break;
-    case 'copy':
-      s.copy = { srcId: ds.apeId ?? '', sel: new Set(), query: '', busy: false };
-      _render();
-      break;
+    case 'select': _guardDiscard(s, () => _selectProfile(ds.apeId ?? '')); break;
+    case 'new': _guardDiscard(s, _newDraft); break;
+    case 'dup': _guardDiscard(s, () => _duplicate(ds.apeId ?? '')); break;
+    case 'copy': _guardDiscard(s, () => _startCopy(s, ds.apeId ?? '')); break;
     case 'copy-cancel': s.copy = null; _render(); break;
     case 'copy-go': void _copyGo(); break;
     case 'add-rule':
@@ -615,9 +637,10 @@ export const AlertProfileEditor = {
     if (!plant) return;
     const profiles = AlertProfileClient.cached(plant) ?? [];
     const found = opts.profileId ? profiles.find(p => p.id === opts.profileId) : undefined;
+    const draft = found ? draftFromProfile(found) : blankDraft(plant);
     const s: EditorState = {
       plant, profiles,
-      draft: found ? draftFromProfile(found) : blankDraft(plant),
+      draft, baseline: _snap(draft),
       errors: {}, serverError: null, showErrors: false, saving: false, setMine: false, copy: null,
     };
     _s = s;
@@ -629,7 +652,7 @@ export const AlertProfileEditor = {
       if (_s !== s) return;
       s.profiles = list;
       if (opts.profileId && !s.draft.id && !s.draft.name && list.some(p => p.id === opts.profileId)) {
-        s.draft = draftFromProfile(list.find(p => p.id === opts.profileId)!);
+        _setDraft(s, draftFromProfile(list.find(p => p.id === opts.profileId)!));
       }
       _render();
     }).catch(() => { /* the cached rail stays; the load failure is toasted by the pane */ });

@@ -53,7 +53,7 @@ let deps, counts, groupItems, analyzeImpl;
 
 function seed(alerts) {
   Store.setAlerts(alerts, 'test');
-  AlertProfileMatches.current = () => ({
+  AlertProfileMatches.view = () => ({
     plant: 'P1', profileId: ALL_ALERTS_PROFILE_ID, profile: ALL_ALERTS_PROFILE,
     alertIds: new Set(alerts.map(a => a.id)), taskIds: new Set(), sevByTask: new Map(), categoryByTask: new Map(), acked: new Map(), rev: 1,
   });
@@ -63,7 +63,7 @@ beforeEach(() => {
   els = {};
   calls = { focusTasks: [], toasts: [], copied: [] };
   prior.doc = globalThis.document;
-  prior.current = AlertProfileMatches.current;
+  prior.view = AlertProfileMatches.view;
   prior.setSession = AlertProfileMatches.setSessionProfile;
   prior.setFocusTaskIds = AlertProfileMatches.setFocusTaskIds;
   prior.cached = AlertProfileClient.cached;
@@ -106,7 +106,7 @@ afterEach(() => {
   AlertMonitorPane.setActive(false);
   Object.assign(AlertMonitorPane._levDeps, prior.deps);
   globalThis.document = prior.doc;
-  AlertProfileMatches.current = prior.current;
+  AlertProfileMatches.view = prior.view;
   AlertProfileMatches.setSessionProfile = prior.setSession;
   AlertProfileMatches.setFocusTaskIds = prior.setFocusTaskIds;
   AlertProfileClient.cached = prior.cached;
@@ -240,6 +240,22 @@ test('only the top 5 cards show until "show all fixes"', async () => {
   assert.equal(cards(), 5);
   clickAm('lev-show-more');
   assert.equal(cards(), 8);
+});
+
+test('"show all fixes" reveals 20 more per click and stops at 100 cards', async () => {
+  seed([alert('a1')]);
+  groupItems = Array.from({ length: 300 }, (_, i) => item(`k${i}`));
+  AlertMonitorPane.render();
+  await sleep(40);
+  const cards = () => (els['am-leverage'].innerHTML.match(/class="am-lev-card/g) || []).length;
+  assert.equal(cards(), 5);
+  clickAm('lev-show-more');
+  assert.equal(cards(), 25);
+  clickAm('lev-show-more');
+  assert.equal(cards(), 45);
+  for (let i = 0; i < 6; i++) clickAm('lev-show-more');
+  assert.equal(cards(), 100, 'hard cap');
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /lev-show-more/);
 });
 
 test('entering minutes replays that one card and shows the exact score only afterwards', async () => {

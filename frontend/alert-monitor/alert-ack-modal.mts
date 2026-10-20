@@ -82,7 +82,7 @@ function _showError(field: 'reason' | 'until', key: string | null): void {
   err.hidden = !key;
 }
 
-function _initPicker(day: string): void {
+function _initPicker(day: string, plant: string): void {
   const input = _el<HTMLInputElement>('aak-until');
   if (!input) return;
   input.value = day;
@@ -91,7 +91,7 @@ function _initPicker(day: string): void {
     if (typeof flatpickr !== 'undefined') {
       _fp = flatpickr(input, {
         dateFormat: 'Y-m-d', altInput: true, altFormat: Util._dateFormatPref(), altInputClass: 'input',
-        defaultDate: day, minDate: 'today',
+        defaultDate: day, minDate: Util.dayKey(Util.plantToday(plant)),   // the plant's today, not the browser's
       }) as unknown as PickerLike;
       _fp.altInput?.setAttribute?.('aria-label', t('am.ack_until'));
     }
@@ -135,7 +135,7 @@ export const AlertAckModal = {
     if (body) body.innerHTML = _bodyHtml();
     const foot = _el('aak-foot');
     if (foot) foot.innerHTML = _footHtml();
-    _initPicker(defaultUntilDay(opts.plant));
+    _initPicker(defaultUntilDay(opts.plant), opts.plant);
     Modal.open('modal-alert-ack');
     _el('aak-reason')?.focus();
   },

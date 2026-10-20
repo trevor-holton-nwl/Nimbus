@@ -34,7 +34,7 @@ export interface MonitorView { groupBy: MonitorGroupBy; sort: AlertRanking }
 
 export interface KpiSummary {
   matched: number;
-  /** Alerts inside the plant's alert horizon (all profiles). */
+  /** Every alert at the plant (all profiles, not horizon-limited), so `matched <= total` always. */
   total: number;
   /** The plant horizon in whole days (null when the plant has none). */
   days: number | null;
@@ -425,6 +425,10 @@ export function groupLabel(by: MonitorGroupBy, key: string, d: GroupLabelDeps, t
 
 /** Cards shown before "Show all fixes". */
 export const LEV_TOP_N = 5;
+/** "Show all fixes" reveals this many more cards per click ... */
+export const LEV_STEP = 20;
+/** ... and never renders more than this many (a 636-card DOM froze the page for 30+ s). */
+export const LEV_MAX_RENDER = 100;
 
 export interface LevCtx {
   /** The plant's alert penalty is at the cap, so removing this card's alerts cannot move the score. */
@@ -582,7 +586,8 @@ export function levCardHtml(item: LeverageItem, ctx: LevCtx, t: Translate): stri
 }
 
 export interface LevSectionOpts {
-  showAll: boolean;
+  /** How many cards to render (LEV_TOP_N first; +LEV_STEP per click; capped at LEV_MAX_RENDER). */
+  shown: number;
   /** The first pass has not produced results yet. */
   computing: boolean;
   ctxFor: (item: LeverageItem) => LevCtx;
@@ -598,9 +603,10 @@ export function levSectionHtml(items: ReadonlyArray<LeverageItem>, o: LevSection
   } else if (!items.length) {
     body = `<div class="am-lev-empty">${_esc(t('am.lev_none'))}</div>`;
   } else {
-    const shown = o.showAll ? items : items.slice(0, LEV_TOP_N);
+    const limit = Math.min(Math.max(o.shown, LEV_TOP_N), LEV_MAX_RENDER);
+    const shown = items.slice(0, limit);
     body = `<div class="am-lev-list">${shown.map(it => levCardHtml(it, o.ctxFor(it), t)).join('')}</div>`
-      + (!o.showAll && items.length > LEV_TOP_N
+      + (items.length > limit && limit < LEV_MAX_RENDER
         ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="lev-show-more">${_esc(t('am.lev_show_more'))}</button></div>` : '');
   }
   return `<section class="am-lev-panel" aria-label="${_esc(t('am.leverage_title'))}">${head}${body}</section>`;

@@ -87,19 +87,38 @@ test('settings:change recomputes only when a relevant pref changed', () => {
   off();
 });
 
-test('session override beats the pref and clears on plant change', () => {
+test('the session override changes view() only; current() keeps following the saved default', () => {
   Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
   profiles = [prof('p1', ['overload']), prof('p2', ['late'])];
   M.recompute();
   assert.equal(M.current().profileId, 'p1');
+  assert.equal(M.view().profileId, 'p1', 'no override: the view is the default');
+  assert.deepEqual([...M.view().taskIds].sort(), [...M.current().taskIds].sort());
   M.setSessionProfile('p2');
-  assert.equal(M.current().profileId, 'p2');
-  assert.deepEqual([...M.current().taskIds], ['t2']);
+  assert.equal(M.current().profileId, 'p1', 'Gantt / bell / drawer / orders are unaffected');
+  assert.deepEqual([...M.current().taskIds].sort(), ['t1', 't3']);
+  assert.equal(M.view().profileId, 'p2');
+  assert.deepEqual([...M.view().taskIds], ['t2']);
+  assert.equal(M.view().rev, M.current().rev);
   M.setSessionProfile('__all__');
-  assert.equal(M.current().profileId, '__all__');
+  assert.equal(M.current().profileId, 'p1');
+  assert.equal(M.view().profileId, '__all__');
+  assert.equal(M.view().taskIds.size, 0);
+  assert.equal(M.view().alertIds.size, 6);
   M.setSessionProfile('p2');
   Store.emit({ type: 'plant:selected', plant: 'P1' });
   assert.equal(M.current().profileId, 'p1');
+  assert.equal(M.view().profileId, 'p1', 'a plant change clears the override');
+});
+
+test('the focus set overrides current() but not view()', () => {
+  Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
+  profiles = [prof('p1', ['overload'])];
+  M.recompute();
+  M.setFocusTaskIds(['t2']);
+  assert.deepEqual([...M.current().taskIds], ['t2']);
+  assert.deepEqual([...M.view().taskIds].sort(), ['t1', 't3']);
+  M.setFocusTaskIds(null);
 });
 
 test('acked map is exposed from AlertAcksClient.cached', () => {
@@ -124,4 +143,22 @@ test('an uncached plant triggers a profile list fetch', () => {
   M.recompute();
   assert.ok(listCalls >= 1);
   assert.equal(M.current().profileId, '__all__');
+});
+
+test('a failed profile fetch is not retried on every recompute: 30 s backoff, reset by a plant change', async t => {
+  Store.emit({ type: 'plant:selected', plant: 'P1' });   // clears any earlier failure record
+  await new Promise(r => setTimeout(r, 5));
+  profiles = null;
+  t.mock.method(AlertProfileClient, 'list', async () => { listCalls++; throw new Error('403'); });
+  const before = listCalls;
+  M.recompute();                                         // starts the fetch (it rejects)
+  await new Promise(r => setTimeout(r, 5));
+  assert.equal(listCalls, before + 1);
+  M.recompute(); M.recompute(); M.recompute();           // alerts changing again and again
+  await new Promise(r => setTimeout(r, 5));
+  assert.equal(listCalls, before + 1, 'no request while backing off');
+  Store.emit({ type: 'plant:selected', plant: 'P1' });   // plant change resets the backoff
+  await new Promise(r => setTimeout(r, 5));
+  assert.equal(listCalls, before + 2, 'retried after the plant change');
+  Store.emit({ type: 'plant:selected', plant: 'P1' });   // leave a clean slate for later tests
 });

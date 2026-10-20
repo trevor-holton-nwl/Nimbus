@@ -645,7 +645,8 @@ function withProfileFixture(fn, { alerts, matches, showAcked = false } = {}) {
   const state = { rows: [] };
   try {
     globalThis.document = { ...prior.doc, getElementById: id => ({ 'alert-badge': badge, 'alert-bell': bell, 'alert-drawer-body': body,
-      'alert-drawer-footer': footer, 'alert-summary-list': summaryList, 'alert-summary-count': summaryCount })[id] || null };
+      'alert-drawer-footer': footer, 'alert-summary-list': summaryList, 'alert-summary-count': summaryCount,
+      'alert-drawer': { classList: { contains: c => c === 'open' } } })[id] || null };   // the drawer is open in these fixtures
     Store.setMasterData({ plants: [{ plant: 'T15-P' }], lines: [{ plant: 'T15-P', machine: 'T15-L' }] }, 'test');
     Store.setSelectedPlant('T15-P', 'test');
     Store.setUserSettings({ ...(prior.settings ?? {}), alertsShowAcknowledged: showAcked }, 'test');
@@ -740,4 +741,24 @@ test('T15: the Gantt conflict ids and Store.alertsByTask stay plant-wide (profil
     assert.deepEqual([...Timeline._conflictIds()].sort(), ['a1', 'a2', 'a3']);
     assert.deepEqual([...Store.alertsByTask().keys()].sort(), ['a1', 'a2', 'a3']);
   }, { alerts: [t15('a1'), t15('a2'), t15('a3')], matches: fakeSet('p1', ['a1'], acked) });
+});
+
+
+test('_renderFollowers repaints the drawer only while it is open (bell and summary always)', () => {
+  const prior = { doc: globalThis.document, bell: AlertsUIAdapter.renderBell, drawer: AlertsUIAdapter.renderDrawer, sum: Dashboard._renderAlertSummary };
+  const log = [];
+  let open = false;
+  try {
+    globalThis.document = { ...prior.doc, getElementById: id => (id === 'alert-drawer' ? { classList: { contains: c => c === 'open' && open } } : null) };
+    AlertsUIAdapter.renderBell = () => log.push('bell');
+    AlertsUIAdapter.renderDrawer = () => log.push('drawer');
+    Dashboard._renderAlertSummary = () => log.push('summary');
+    AlertsUIAdapter._renderFollowers();
+    assert.deepEqual(log, ['bell', 'summary'], 'closed drawer is not rebuilt');
+    open = true; log.length = 0;
+    AlertsUIAdapter._renderFollowers();
+    assert.deepEqual(log, ['bell', 'drawer', 'summary']);
+  } finally {
+    globalThis.document = prior.doc; AlertsUIAdapter.renderBell = prior.bell; AlertsUIAdapter.renderDrawer = prior.drawer; Dashboard._renderAlertSummary = prior.sum;
+  }
 });

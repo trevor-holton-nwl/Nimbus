@@ -9,8 +9,9 @@
    panel (#am-leverage, Task 13) and the alert groups (#am-groups, Task 12) are filled by
    later tasks through the two hook functions at the bottom of the paint path.
 
-   Reads the always-on producer (AlertProfileMatches.current()); never emits a Store
-   event. "View as" is session-only (setSessionProfile); "Make my default" is the one
+   Reads the always-on producer through AlertProfileMatches.view() (the session "View as"
+   override applied; the rest of the app follows current(), the saved default); never emits a
+   Store event. "View as" is session-only (setSessionProfile); "Make my default" is the one
    control that writes the persisted pref.
    ========================================================================== */
 
@@ -38,7 +39,7 @@ import {
   kpiSummary, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowHtml, colsHtml, diagnoseHtml, groupHeadHtml, groupTotals, groupLabel,
   relativeDaysText, formatPairKey, fmtNum,
-  levSectionHtml, levTitle, levSummaryText, levPairsForReview,
+  levSectionHtml, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
 import type { MonitorView, EmptyKind, KpiSummary, RowView, LevCtx } from './alert-monitor-model.mjs';
 
@@ -207,7 +208,7 @@ function _comboOptions(): Array<{ id: string; label: string }> {
 }
 
 function _viewedLabel(): string {
-  const m = AlertProfileMatches.current();
+  const m = AlertProfileMatches.view();
   return m.profileId === ALL_ALERTS_PROFILE_ID ? t('am.profile_all') : m.profile.name;
 }
 
@@ -247,7 +248,7 @@ function _wireCombo(): void {
     _comboFiltered = fq ? all.filter(o => o.label.toLowerCase().includes(fq)) : all.slice();
     const plant = Store.selectedPlant;
     const defId = plant ? _defaultProfileId(plant, (AlertProfileClient.cached(plant) ?? [])) : ALL_ALERTS_PROFILE_ID;
-    const viewed = AlertProfileMatches.current().profileId;
+    const viewed = AlertProfileMatches.view().profileId;
     if (!_comboFiltered.length) {
       dropdown.innerHTML = `<div class="us-combo-empty">${esc(t('us.no_matches'))}</div>`;
       _comboActive = -1;
@@ -286,7 +287,7 @@ function _wireCombo(): void {
    Actions
    ------------------------------------------------------------------------- */
 function _persistView(patch: Partial<MonitorView>): void {
-  const m = AlertProfileMatches.current();
+  const m = AlertProfileMatches.view();
   const stored = (Store.pref('alertMonitorView') as Record<string, unknown> | null | undefined) ?? {};
   const cur = viewFor(m.profileId, stored as Parameters<typeof viewFor>[1], m.profile);
   Session.setPref('alertMonitorView', { ...stored, [m.profileId]: { ...cur, ...patch } });
@@ -296,7 +297,7 @@ function _persistView(patch: Partial<MonitorView>): void {
 function _makeDefault(): void {
   const plant = Store.selectedPlant;
   if (!plant) return;
-  const m = AlertProfileMatches.current();
+  const m = AlertProfileMatches.view();
   const existing = (Store.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
   Session.setPref('alertProfileByPlant', { ...existing, [plant]: m.profileId });
   AlertProfileMatches.setSessionProfile(null);   // the pref now says the same thing
@@ -317,7 +318,7 @@ function _onClick(e: Event): void {
       const plant = Store.selectedPlant;
       if (!plant) break;
       // Manage opens on the profile being viewed (when it is a stored one); the prompt always starts a new draft.
-      const viewed = btn!.dataset.amAction === 'manage' ? AlertProfileMatches.current().profileId : undefined;
+      const viewed = btn!.dataset.amAction === 'manage' ? AlertProfileMatches.view().profileId : undefined;
       AlertProfileEditor.open({ plant, profileId: viewed && viewed !== ALL_ALERTS_PROFILE_ID ? viewed : undefined });
       break;
     }
@@ -333,7 +334,7 @@ function _onClick(e: Event): void {
     case 'group-dismiss': _dismissGroup(btn!.dataset.groupKey ?? ''); break;
     case 'group-open-table': _openGroupInTable(btn!.dataset.groupKey ?? ''); break;
     case 'clear-focus': AlertMonitorPane.clearFocus(); break;
-    case 'lev-show-more': _levShowAll = true; _paint(); break;
+    case 'lev-show-more': _levShown = Math.min(_levShown + LEV_STEP, LEV_MAX_RENDER); _paint(); break;
     default: {
       const act = target?.closest?.('[data-alert-action]') as HTMLElement | null;
       if (act?.dataset.alertAction) _onAlertAction(act);
@@ -384,6 +385,7 @@ function _openOrdersInTable(orderIds: Iterable<string>): void {
   }
   ta.value = nums.join('\n');
   nim.Table._onPoMatApply();
+  nim.App?.goto?.('gantt');
   nim.App?.gotoGanttSub?.('orders');
 }
 
@@ -453,7 +455,7 @@ function _onChange(e: Event): void {
    ------------------------------------------------------------------------- */
 function _gatherState(): PaintState {
   const plant = Store.selectedPlant ?? null;
-  const m = AlertProfileMatches.current();
+  const m = AlertProfileMatches.view();
   const profilesRaw = plant ? AlertProfileClient.cached(plant) : null;
   const profiles = profilesRaw ?? [];
   const stored = Store.pref('alertMonitorView') as Parameters<typeof viewFor>[1];
@@ -463,10 +465,8 @@ function _gatherState(): PaintState {
   const plantRow = plant ? Store.masterPlant(plant) : null;
   const clock = plant ? Util.plantClock(plant) : new Date();
   const hz = plantRow?.alt_flag_horizon ?? (Store.userSettings?.alertHorizonMinutes as number | undefined) ?? null;
-  const cutoff = typeof hz === 'number' ? new Date(clock.getTime() + hz * Config.MS_MIN) : null;
   const lines = new Set(plant ? Store.linesForSelectedPlant() : []);
   const scoped = horizonAlerts(Store.alerts, lines, null);
-  const inHorizon = horizonAlerts(Store.alerts, lines, cutoff);
   const visible = visibleAlertsFor(scoped, m.alertIds, m.acked, showAcked);
   const focus = _focusIds;
   const listed = focus ? scoped.filter(a => focus.has(a.id) && (showAcked || !m.acked.has(a.id))) : visible;
@@ -482,7 +482,7 @@ function _gatherState(): PaintState {
     plant, m, profiles, profilesLoaded: profilesRaw != null, view,
     defaultId: plant ? _defaultProfileId(plant, profiles) : ALL_ALERTS_PROFILE_ID,
     showAcked, scoped, visible, listed, focusOutside, scopedCount: scoped.length,
-    kpi: kpiSummary(visible, inHorizon, hz, score, inConfWindow),
+    kpi: kpiSummary(visible, scoped, hz, score, inConfWindow),
     // A focus set always lists something or says nothing is left; the profile empty states don't apply to it.
     empty: focus
       ? (listed.length ? null : 'no-alerts')
@@ -534,7 +534,7 @@ function _kpiHtml(s: PaintState): string {
   const dash = !s.plant;
   const num = (n: number) => dash ? '—' : String(n);
   const conf = k.confidence == null || dash ? '—' : String(Math.round(k.confidence));
-  const of = dash ? '' : t('am.kpi_matched_of', { total: k.total, days: k.days ?? '∞' });
+  const of = dash ? '' : t('am.kpi_matched_of', { total: k.total });
   const tile = (cls: string, label: string, value: string, sub: string, attrs = '') =>
     `<button type="button" class="kpi-tile ${cls}"${attrs}><div class="k">${esc(label)}</div><div class="v">${esc(value)}</div><div class="d">${esc(sub)}</div></button>`;
   return [
@@ -548,7 +548,7 @@ function _kpiHtml(s: PaintState): string {
 }
 
 function _bannerHtml(s: PaintState): string {
-  if (!s.plant || !Store.alerts.some(a => a.type === 'plant_no_timezone')) return '';
+  if (!s.plant || !s.scoped.some(a => a.type === 'plant_no_timezone')) return '';
   return `<div class="am-banner" role="alert">${esc(t('am.banner_no_timezone', { plant: s.plant }))}</div>`;
 }
 
@@ -636,7 +636,7 @@ let _levPlant: string | null = null;      // the plant the items belong to
 let _levHave = false;                     // a first pass has produced results for _levPlant
 let _levStale = false;                    // the tab was re-entered: refresh once
 let _levCapped = false;
-let _levShowAll = false;
+let _levShown = LEV_TOP_N;
 let _levForcePaint = false;               // bypass the "half-typed minutes box" guard for one repaint
 let _levInFlight = false;
 let _levRerun = false;
@@ -653,7 +653,7 @@ let _setupAdmin: SetupAdminLite | null = null;
 let _setupAdminP: Promise<void> | null = null;
 
 function _levReset(plant: string | null): void {
-  _levItems = []; _levInput = null; _levPlant = plant; _levHave = false; _levShowAll = false;
+  _levItems = []; _levInput = null; _levPlant = plant; _levHave = false; _levShown = LEV_TOP_N;
   _levCapped = false; _levStaleDrops = 0;
   _levTyped.clear(); _levAttempted.clear();
 }
@@ -699,7 +699,7 @@ function _renderLeverage(s: PaintState): void {
   const plant = s.plant;
   if (_levItems.some(i => i.family === 'setup-pair')) _ensureSetupAdmin();
   _setHtml('am-leverage', levSectionHtml(_levItems, {
-    showAll: _levShowAll, computing: !_levHave, ctxFor: it => _levCtxFor(it, plant),
+    shown: _levShown, computing: !_levHave, ctxFor: it => _levCtxFor(it, plant),
   }, t));
 }
 

@@ -1958,3 +1958,28 @@ test('profile status option is disabled with its description under All alerts, e
     assert.equal(calls, 1);
   } finally { Table._unwireProfileMatches(); Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent; globalThis.document = priorDoc; }
 });
+
+test('the status dropdown is rebuilt only when the profile filter flips between disabled and enabled', () => {
+  const prior = Table._chipFilters, priorApi = Table._api, priorCurrent = AlertProfileMatches.current, priorBuild = Table._buildStatusChipDropdown;
+  let builds = 0;
+  try {
+    Table._chipFilters = { lines: new Set(), colors: new Set(), status: 'late', dateKey: null, poMat: new Set() };
+    Table._api = { onFilterChanged() {}, getFilterModel: () => ({}), getDisplayedRowCount: () => 0 };
+    Table._buildStatusChipDropdown = () => { builds += 1; };
+    Table._profileOffSeen = null;
+    AlertProfileMatches.current = () => ({ profileId: 'p1', taskIds: new Set() });
+    Table._wireProfileMatches();
+    AlertProfileMatches.recompute();
+    assert.equal(builds, 1, 'first fanout builds once');
+    AlertProfileMatches.recompute(); AlertProfileMatches.recompute();
+    assert.equal(builds, 1, 'nothing flipped: no rebuild on later fanouts');
+    AlertProfileMatches.current = () => ({ profileId: '__all__', taskIds: new Set() });
+    AlertProfileMatches.recompute();
+    assert.equal(builds, 2, 'the disabled state flipped: rebuild');
+    AlertProfileMatches.recompute();
+    assert.equal(builds, 2);
+  } finally {
+    Table._unwireProfileMatches(); Table._buildStatusChipDropdown = priorBuild; Table._profileOffSeen = null;
+    Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent;
+  }
+});

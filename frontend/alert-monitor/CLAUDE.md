@@ -24,7 +24,7 @@ Row and group-head actions are `focus | fix | override | diagnose | ack | unack 
 
 ## "View as" vs "Make default"
 
-"View as" calls `AlertProfileMatches.setSessionProfile(id)` — session-only, beats the pref until cleared or the plant changes, writes nothing. "Make my default" is the one control that writes the persisted pref (`alertProfileByPlant`: one key holding the whole `{plant: profileId}` map, then clears the session override). Group-by / sort per profile persist in `alertMonitorView`; the Gantt highlight toggle and "Show acknowledged" persist as `alertProfileGanttHighlight` / `alertsShowAcknowledged`.
+"View as" calls `AlertProfileMatches.setSessionProfile(id)` — session-only, beats the pref **for this page only** (the pane reads `AlertProfileMatches.view()`; the Gantt, bell, drawer and Orders read `current()`, which ignores the override), until cleared or the plant changes, writes nothing. "Make my default" is the one control that writes the persisted pref (`alertProfileByPlant`: one key holding the whole `{plant: profileId}` map, then clears the session override). Group-by / sort per profile persist in `alertMonitorView`; the Gantt highlight toggle and "Show acknowledged" persist as `alertProfileGanttHighlight` / `alertsShowAcknowledged`.
 
 ## Import edges (read before adding an import)
 
@@ -46,6 +46,8 @@ Everything is plant-scoped (profiles, acks, matches, the leverage input); never 
 
 ## Gotchas
 
-- Flatpickr `minDate: 'today'` in the ack modal is the **browser's** today, not the plant's (deferred fix: `Util.dayKey(Util.plantToday(plant))`).
+- The ack modal's Flatpickr `minDate` is the plant's today (`Util.dayKey(Util.plantToday(plant))`), not the browser's.
+- `app.js` assigns `globalThis.NIMBUS = NIMBUS` after building the namespace: `const NIMBUS` is a script-scope binding, not a `window` property, so without that line every `_nim()` read here would be `undefined` (Go To, Override, Confidence, open-in-table all silently do nothing). `tests/modules/legacy-nimbus-global.test.mjs` pins it.
 - `DistributionPane.openParent` exists for a distribution deep link, but nothing in this folder calls it yet.
-- Rail switch / New / Duplicate / Copy in the editor silently discard unsaved edits, and a non-409 save failure shows the stale-edit text (deferred).
+- The editor compares `profileFromDraft(draft)` with the snapshot taken when the draft was loaded (`baseline`); rail switch / New / Duplicate / Copy ask `Modal.confirm` (`ape.discard_*`) when they differ. A non-409 save or delete failure shows the server message or `ape.err_save_failed`, never `ape.err_stale`.
+- "Show all fixes" reveals `LEV_STEP` (20) more cards per click up to `LEV_MAX_RENDER` (100); the KPI "of N" is every alert at the plant (not horizon-limited).

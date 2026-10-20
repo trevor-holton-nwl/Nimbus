@@ -1103,13 +1103,18 @@ export const Table = {
   // The 'profile' status filter reads AlertProfileMatches (own fanout, never a Store event),
   // so the grid re-filters from this subscription — once, and only while that status is active.
   _profileUnsub: null as (() => void) | null,
+  /** Last `_profileFilterOff()` the status dropdown was (re)built for; only a flip changes what it shows. */
+  _profileOffSeen: null as boolean | null,
   _wireProfileMatches(): void {
     if (Table._profileUnsub) return;
     Table._profileUnsub = AlertProfileMatches.subscribe(() => {
       if (!Table._api) return;
+      const off = Table._profileFilterOff();
+      const flipped = off !== Table._profileOffSeen;
+      Table._profileOffSeen = off;
       // Under All alerts the filter could only ever show an empty grid: fall back to no status filter.
-      if (Table._chipFilters.status === 'profile' && Table._profileFilterOff()) Table._chipFilters.status = null;
-      else if (Table._chipFilters.status !== 'profile') { Table._buildStatusChipDropdown(); return; }
+      if (Table._chipFilters.status === 'profile' && off) Table._chipFilters.status = null;
+      else if (Table._chipFilters.status !== 'profile') { if (flipped) Table._buildStatusChipDropdown(); return; }
       Table._buildStatusChipDropdown();
       Table._api.onFilterChanged();
       Table._refreshChipButtons();

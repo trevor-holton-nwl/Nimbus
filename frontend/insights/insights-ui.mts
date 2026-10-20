@@ -1628,7 +1628,8 @@ export const AlertsUIAdapter = {
   /** Repaint everything that follows the profile and acknowledgements. */
   _renderFollowers(): void {
     AlertsUIAdapter.renderBell();
-    AlertsUIAdapter.renderDrawer();
+    // Same guard as the shell's own repaint: a closed drawer is rebuilt when it opens, not on every producer fanout.
+    if (document.getElementById('alert-drawer')?.classList.contains('open')) AlertsUIAdapter.renderDrawer();
     Dashboard._renderAlertSummary();
   },
 

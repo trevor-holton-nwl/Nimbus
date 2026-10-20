@@ -89,6 +89,18 @@ test('open renders the form with the default end date and the confidence note', 
   assert.match(els['aak-foot'].innerHTML, /btn\.save/);
 });
 
+test('the date picker starts at the plant today, not the browser today', () => {
+  const seen = [];
+  globalThis.flatpickr = (el, opts) => { seen.push(opts); return { altInput: null, destroy() {} }; };
+  try {
+    Util.plantToday = () => new Date(2026, 11, 28);   // far from the browser's real today
+    AlertAckModal.open({ plant: 'P1', alertId: 'a1' });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].minDate, '2026-12-28');
+    assert.notEqual(seen[0].minDate, 'today');
+  } finally { delete globalThis.flatpickr; }
+});
+
 test('submit sends plant, alert id, trimmed reason and the end-of-day until, then closes', async () => {
   AlertAckModal.open({ plant: 'P1', alertId: 'a1' });
   els['aak-reason'].value = '  waiting for the mould  ';

@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as M from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 
-const { levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N } = M;
+const { levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER } = M;
 // The stub `t` serialises its vars as JSON; the builders escape quotes, so undo that before matching.
 const unq = s => s.replace(/&quot;/g, '"');
 const levCardHtml = (...a) => unq(M.levCardHtml(...a));
@@ -205,26 +205,38 @@ test('dynamic text is escaped', () => {
   assert.match(h, /&lt;img/);
 });
 
-test('the section shows the top 5, then everything after "show all fixes"', () => {
-  const items = Array.from({ length: 8 }, (_, i) => item({ key: `calendar-day:L${i}|d`, titleVars: { n: 1, line: `L${i}`, day: 'd' } }));
+test('the section shows the top 5, then 20 more per "show all fixes" click, never more than 100', () => {
+  const mk = n => Array.from({ length: n }, (_, i) => item({ key: `calendar-day:L${i}|d`, titleVars: { n: 1, line: `L${i}`, day: 'd' } }));
+  const items = mk(8);
   assert.equal(LEV_TOP_N, 5);
+  assert.equal(LEV_STEP, 20);
+  assert.equal(LEV_MAX_RENDER, 100);
   const cards = h => (h.match(/class="am-lev-card/g) || []).length;
-  const top = levSectionHtml(items, { showAll: false, computing: false, ctxFor: () => ctx() }, t);
+  const at = (list, shown) => levSectionHtml(list, { shown, computing: false, ctxFor: () => ctx() }, t);
+  const top = at(items, LEV_TOP_N);
   assert.equal(cards(top), 5);
   assert.match(top, /data-am-action="lev-show-more"/);
   assert.match(top, /am\.lev_show_more/);
-  const all = levSectionHtml(items, { showAll: true, computing: false, ctxFor: () => ctx() }, t);
+  const all = at(items, LEV_TOP_N + LEV_STEP);
   assert.equal(cards(all), 8);
   assert.doesNotMatch(all, /lev-show-more/);
-  const few = levSectionHtml(items.slice(0, 3), { showAll: false, computing: false, ctxFor: () => ctx() }, t);
-  assert.doesNotMatch(few, /lev-show-more/);
+  assert.doesNotMatch(at(items.slice(0, 3), LEV_TOP_N), /lev-show-more/);
+  // 636 cards (the QA dataset): increments of 20, hard cap 100, then no more button
+  const many = mk(636);
+  assert.equal(cards(at(many, 25)), 25);
+  assert.match(at(many, 25), /lev-show-more/);
+  assert.equal(cards(at(many, 85)), 85);
+  const capped = at(many, 105);
+  assert.equal(cards(capped), LEV_MAX_RENDER);
+  assert.doesNotMatch(capped, /lev-show-more/);
+  assert.equal(cards(at(many, 10_000)), LEV_MAX_RENDER, 'an oversized request is clamped');
 });
 
 test('the section shows a skeleton while computing and the empty copy when nothing qualifies', () => {
-  const sk = levSectionHtml([], { showAll: false, computing: true, ctxFor: () => ctx() }, t);
+  const sk = levSectionHtml([], { shown: LEV_TOP_N, computing: true, ctxFor: () => ctx() }, t);
   assert.match(sk, /am\.lev_computing/);
   assert.match(sk, /aria-busy="true"/);
-  const empty = levSectionHtml([], { showAll: false, computing: false, ctxFor: () => ctx() }, t);
+  const empty = levSectionHtml([], { shown: LEV_TOP_N, computing: false, ctxFor: () => ctx() }, t);
   assert.match(empty, /am\.lev_none/);
   assert.match(empty, /am\.leverage_title/);
 });

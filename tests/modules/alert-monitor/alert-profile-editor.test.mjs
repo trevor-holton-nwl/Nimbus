@@ -310,6 +310,53 @@ test('Delete confirms with the danger tone and then removes the profile', async 
   assert.deepEqual(calls.closed, ['modal-alert-profile']);
 });
 
+test('a non-409 save failure shows the real error, never the stale-edit text', async () => {
+  AlertProfileClient.create = async () => { throw new Error(''); };
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Fresh' }));
+  fire('ape-body', 'change', tgt({ apeType: 'late', apeRule: '0' }, { checked: true }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.toast.at(-1)[0], 'ape.err_save_failed');
+  assert.doesNotMatch(els['ape-body'].innerHTML + els['ape-foot'].innerHTML, /ape\.err_stale/);
+  assert.equal(calls.closed.length, 0);
+
+  AlertProfileClient.remove = async () => { throw new Error(''); };
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-foot', { apeAct: 'delete' });
+  await flush();
+  assert.equal(calls.toast.at(-1)[0], 'ape.err_save_failed');
+});
+
+test('switching, New, Duplicate and Copy confirm first when edits are unsaved; a clean form switches silently', async () => {
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-body', { apeAct: 'select', apeId: 'p2' });
+  assert.equal(calls.confirm.length, 0, 'no edits: no prompt');
+  assert.match(els['ape-body'].innerHTML, /value="Late orders"/);
+
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Edited name' }));
+  Modal.confirm = async o => { calls.confirm.push(o); return false; };   // the planner says no
+  click('ape-body', { apeAct: 'select', apeId: 'p1' });
+  click('ape-body', { apeAct: 'new' });
+  click('ape-body', { apeAct: 'dup', apeId: 'p1' });
+  click('ape-body', { apeAct: 'copy', apeId: 'p1' });
+  await flush();
+  assert.equal(calls.confirm.length, 4, 'one confirm per action');
+  assert.match(calls.confirm[0].title, /ape\.discard_title/);
+  assert.match(calls.confirm[0].message, /ape\.discard_confirm/);
+  assert.equal(calls.confirm[0].tone, 'warn');
+  assert.doesNotMatch(els['ape-body'].innerHTML, /data-ape-copy-plant/, 'declined: still on the edited form');
+  assert.match(els['ape-body'].innerHTML, /value="Edited name"/, 'the edits survive a declined discard');
+
+  Modal.confirm = async o => { calls.confirm.push(o); return true; };   // now yes
+  click('ape-body', { apeAct: 'select', apeId: 'p1' });
+  await flush();
+  assert.match(els['ape-body'].innerHTML, /value="Overlaps"/);
+  assert.doesNotMatch(els['ape-body'].innerHTML, /Edited name/);
+  click('ape-body', { apeAct: 'new' });   // clean again after the switch
+  assert.equal(calls.confirm.length, 5, 'a clean form after the discard does not ask again');
+});
+
 test('Duplicate opens a new unsaved draft named "<name> (copy)"', async () => {
   AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
   click('ape-body', { apeAct: 'dup', apeId: 'p1' });

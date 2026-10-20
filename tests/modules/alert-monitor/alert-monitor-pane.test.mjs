@@ -51,13 +51,13 @@ function fakeMatches(o = {}) {
 
 function useProfiles(list, matches) {
   AlertProfileClient.cached = () => list;
-  AlertProfileMatches.current = () => matches;
+  AlertProfileMatches.view = () => matches;
 }
 
 beforeEach(() => {
   els = {};
   prior.doc = globalThis.document;
-  prior.current = AlertProfileMatches.current;
+  prior.view = AlertProfileMatches.view;
   prior.setSession = AlertProfileMatches.setSessionProfile;
   prior.cached = AlertProfileClient.cached;
   prior.setPref = Session.setPref;
@@ -85,7 +85,7 @@ beforeEach(() => {
 afterEach(() => {
   AlertMonitorPane.setActive(false);
   globalThis.document = prior.doc;
-  AlertProfileMatches.current = prior.current;
+  AlertProfileMatches.view = prior.view;
   AlertProfileMatches.setSessionProfile = prior.setSession;
   AlertProfileClient.cached = prior.cached;
   Session.setPref = prior.setPref;
@@ -95,7 +95,7 @@ afterEach(() => {
 
 test('no plant renders the select-a-plant empty state and dashes in the KPI strip', () => {
   Store.setSelectedPlant(null, 'test');
-  AlertProfileMatches.current = () => ({ ...fakeMatches(), plant: null });
+  AlertProfileMatches.view = () => ({ ...fakeMatches(), plant: null });
   AlertProfileClient.cached = () => null;
   AlertMonitorPane.render();
   assert.match(els['am-groups'].innerHTML, /am\.empty_no_plant/);
@@ -144,7 +144,7 @@ test('Make default writes alertProfileByPlant read-modify-write; the badge shows
   assert.deepEqual(calls.session, [null]);
 
   useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
-  AlertProfileMatches.current = () => fakeMatches({ profileId: 'p1', profile: P1 });
+  AlertProfileMatches.view = () => fakeMatches({ profileId: 'p1', profile: P1 });
   AlertMonitorPane.render();
   assert.equal(els['am-make-default'].hidden, true);
   assert.equal(els['am-is-default'].hidden, false);
@@ -439,13 +439,14 @@ test('Open in table fills the PO/Material filter, applies it and switches to the
   const log = [];
   globalThis.NIMBUS = {
     Table: { _onPoMatApply: () => log.push(['apply', els['tbl-flt-pomat-textarea'].value]) },
-    App: { gotoGanttSub: sub => log.push(['sub', sub]) },
+    App: { goto: tab => log.push(['goto', tab]), gotoGanttSub: sub => log.push(['sub', sub]) },
   };
   Store.setTasks([task('1'), task('2')], 'test');
   seed([alert('a1', { type: 'overlap', taskId: '1', peerId: '2' })]);
   AlertMonitorPane.render();
   clickAm('group-open-table', { groupKey: 'conflicts' });
-  assert.deepEqual(log, [['apply', '471\n472'], ['sub', 'orders']]);
+  // leaves the Alert Monitor tab first, then lands on the Orders sub-tab
+  assert.deepEqual(log, [['apply', '471\n472'], ['goto', 'gantt'], ['sub', 'orders']]);
 });
 
 test('Open in table falls back to a toast when the table filter is unavailable', () => {
