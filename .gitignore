@@ -24,6 +24,7 @@ frontend/calendar/calendar-engine.mjs
 frontend/insights/services.mjs
 frontend/insights/alert-profiles.mjs
 frontend/insights/alert-profile-client.mjs
+frontend/insights/alert-leverage.mjs
 frontend/insights/alert-acks-client.mjs
 frontend/insights/plant-lru.mjs
 frontend/scheduling/persistence.mjs
