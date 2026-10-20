@@ -414,3 +414,83 @@ test('the ⋯ trigger opens the overflow menu with the non-primary actions, disp
     assert.equal(els['am-focus-chip'].hidden, false, 'Show alerts keeps the focus-chip behaviour');
   } finally { OverflowMenu.open = priorOpen; }
 });
+
+test('a non-admin\'s menu for an adminOnly row holds the admin deep link; the primary is Copy summary', async () => {
+  seed([alert('a1')]);
+  groupItems = [item('adm1', { adminOnly: true, family: 'routing-gap', action: { kind: 'routing-gap', step: 'workcenter_unmapped', material: 'M1', pv: '', machine: '' } })];
+  AlertMonitorPane.render();
+  await sleep(40);
+  clickAm('fixes-admin-toggle');
+  assert.match(els['am-leverage'].innerHTML, /data-lev-action="copy-summary"/);
+  const priorOpen = OverflowMenu.open;
+  let opened = null;
+  OverflowMenu.open = (anchor, items) => { opened = items; return { close() {} }; };
+  try {
+    els['alerts-tab'].handlers.click({ target: { closest: sel => (sel === '[data-lev-menu]' ? { dataset: { levMenu: 'adm1' } } : null) } });
+    const ids = opened.map(i => i.id);
+    assert.ok(ids.includes('rg-workcenters'), 'admin link is in the menu');
+    assert.ok(!ids.includes('copy-summary'));
+    assert.match(opened.find(i => i.id === 'rg-workcenters').label, /am\.lev_admin_fix/);
+  } finally { OverflowMenu.open = priorOpen; }
+});
+
+test('Replay during What-If runs nothing', async () => {
+  seed([alert('a1')]);
+  groupItems = [setupItem({ requiresMinutes: true, assumedMinutes: null, minutesSource: null })];
+  AlertMonitorPane.render();
+  await sleep(40);
+  globalThis.document.querySelectorAll = sel => (sel === '[data-lev-minutes]' ? [{ dataset: { levMinutes: 'setup-pair:x' }, value: '9' }] : []);
+  Sandbox.active = true;
+  clickLev('replay-minutes', 'setup-pair:x');
+  await sleep(20);
+  assert.deepEqual(counts.replay, []);
+});
+
+test('a minutes entry made while a replay is in flight is ignored, not remembered', async () => {
+  seed([alert('a1')]);
+  groupItems = [setupItem({ requiresMinutes: true, assumedMinutes: null, minutesSource: null })];
+  analyzeImpl = async () => groupItems.map(i => ({ ...i }));
+  AlertMonitorPane.render();
+  await sleep(40);
+  const box = { dataset: { levMinutes: 'setup-pair:x' }, value: '9' };
+  globalThis.document.querySelectorAll = sel => (sel === '[data-lev-minutes]' ? [box] : []);
+  clickLev('replay-minutes', 'setup-pair:x');
+  box.value = '7';
+  clickLev('replay-minutes', 'setup-pair:x');
+  await sleep(20);
+  Store.setAlerts([alert('a1'), alert('a2')], 'test');   // a fresh analysis re-applies what was remembered
+  await sleep(600);
+  assert.deepEqual(counts.replay, [9, 9], 'only the first entry was recorded');
+});
+
+test('keyboard focus follows the admin disclosure and "Show 10 more" across their repaint', async () => {
+  seed([alert('a1')]);
+  const adm = item('adm1', { adminOnly: true, family: 'routing-gap', action: { kind: 'routing-gap', step: 'pv_missing', material: 'M1', pv: '', machine: '' } });
+  groupItems = [...Array.from({ length: 8 }, (_, i) => item(`k${i}`)), adm];
+  AlertMonitorPane.render();
+  await sleep(40);
+  let focused = null;
+  const el = name => ({ name, dataset: {}, classList: { contains: () => false }, focus() { focused = name; } });
+  globalThis.document.querySelector = sel => (sel === '[data-am-action="fixes-admin-toggle"]' ? el('toggle')
+    : sel === '[data-am-action="fixes-show-more"]' ? (/fixes-show-more/.test(els['am-leverage'].innerHTML) ? el('more') : null) : null);
+  clickAm('fixes-admin-toggle');
+  assert.equal(focused, 'toggle');
+  // 8 main rows: one click reveals the rest and removes the button, so focus goes to the first new row's primary button
+  const newRow = { dataset: { levAction: 'diagnose-cell', levKey: 'k5' }, classList: { contains: c => c === 'btn-primary' }, focus() { focused = 'row-k5'; } };
+  const other = { dataset: { levAction: 'show-alerts', levKey: 'k5' }, classList: { contains: () => false }, focus() { focused = 'wrong'; } };
+  globalThis.document.querySelectorAll = sel => (sel === '[data-lev-action]' ? [other, newRow] : []);
+  clickAm('fixes-show-more');
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /fixes-show-more/);
+  assert.equal(focused, 'row-k5');
+});
+
+test('when "Show 10 more" survives the repaint, focus goes back to it', async () => {
+  seed([alert('a1')]);
+  groupItems = Array.from({ length: 30 }, (_, i) => item(`k${i}`));
+  AlertMonitorPane.render();
+  await sleep(40);
+  let focused = null;
+  globalThis.document.querySelector = sel => (sel === '[data-am-action="fixes-show-more"]' ? { focus() { focused = 'more'; } } : null);
+  clickAm('fixes-show-more');
+  assert.equal(focused, 'more');
+});

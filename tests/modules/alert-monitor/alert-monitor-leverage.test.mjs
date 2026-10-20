@@ -13,7 +13,7 @@ const fixesSectionHtml = (...a) => unq(M.fixesSectionHtml(...a));
 
 const t = (k, v) => (v ? `${k}|${JSON.stringify(v)}` : k);
 const ctx = (o = {}) => ({
-  capped: false, remaining: 0, canReviewPairs: false, isAdmin: false, setupActive: true, whatIf: false,
+  remaining: 0, canReviewPairs: false, isAdmin: false, setupActive: true, whatIf: false,
   fieldLabel: k => `L:${k}`, ...o,
 });
 const item = (o = {}) => ({
@@ -55,7 +55,7 @@ test('constants: top 5, step 10, render cap 50', () => {
 test('a row is a ranked list item: rank, title, counts line, one primary button and the ⋯ trigger', () => {
   const h = fixRowHtml(item(), 1, ctx(), t);
   assert.match(h, /class="am-fix"/);
-  assert.match(h, /class="am-fix-rank" aria-label="am\.rank_n\|\{"n":1\}">1</);
+  assert.match(h, /class="am-fix-rank" role="img" aria-label="am\.rank_n\|\{"n":1\}">1</);
   assert.match(h, /class="am-fix-title"[^>]*>leverage\.title\.calendar-day\|/);
   assert.match(h, /am\.fix_clears\|\{"n":3,"m":2\}/);
   assert.equal((h.match(/class="btn sm btn-primary"/g) || []).length, 1);
@@ -252,7 +252,7 @@ test('show more: top 5, then 10 per click, never more than 50, then no button', 
 
 test('rows are ranked 1..n in list order', () => {
   const h = sec(mk(3));
-  assert.deepEqual([...h.matchAll(/class="am-fix-rank" aria-label="[^"]*\{"n":(\d)\}">(\d)</g)].map(m => [m[1], m[2]]), [['1', '1'], ['2', '2'], ['3', '3']]);
+  assert.deepEqual([...h.matchAll(/class="am-fix-rank" role="img" aria-label="[^"]*\{"n":(\d)\}">(\d)</g)].map(m => [m[1], m[2]]), [['1', '1'], ['2', '2'], ['3', '3']]);
 });
 
 test('non-admin: partition first, so the top 5 come from the actionable list even when admin items lead the raw order', () => {
@@ -266,6 +266,8 @@ test('non-admin: partition first, so the top 5 come from the actionable list eve
   // disclosure row: count, collapsed
   assert.match(h, /<button[^>]*class="am-fix-divider"[^>]*aria-expanded="false"[^>]*data-am-action="fixes-admin-toggle"/);
   assert.match(h, /am\.fixes_admin_divider\|\{"n":3\}/);
+  assert.match(h, /aria-controls="am-fix-admin-list"/);
+  assert.match(sec([...adminItems, ...main], { isAdmin: false, adminOpen: true }), /id="am-fix-admin-list"/);
 });
 
 test('non-admin: the admin disclosure expands to unranked rows whose primary is Copy summary', () => {

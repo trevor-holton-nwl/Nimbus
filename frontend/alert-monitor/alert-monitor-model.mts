@@ -473,8 +473,6 @@ export const LEV_STEP = 10;
 export const LEV_MAX_RENDER = 50;
 
 export interface LevCtx {
-  /** The plant's alert penalty is at the cap (kept for the pane's context; rows no longer print it). */
-  capped: boolean;
   /** This row's alerts that persist after a fix was attempted from the page (0 = none / not attempted). */
   remaining: number;
   /** The user may open the setup matrix review (else "copy for the setup owner"). */
@@ -637,7 +635,7 @@ export function fixRowHtml(item: LeverageItem, rank: number | null, ctx: LevCtx,
   }
   const rankHtml = rank == null
     ? `<span class="am-fix-rank" aria-hidden="true"></span>`
-    : `<span class="am-fix-rank" aria-label="${_esc(t('am.rank_n', { n: rank }))}">${rank}</span>`;
+    : `<span class="am-fix-rank" role="img" aria-label="${_esc(t('am.rank_n', { n: rank }))}">${rank}</span>`;
   return `<div class="am-fix" role="listitem" data-lev-key="${key}"${tip ? ` title="${_esc(tip)}"` : ''}>`
     + rankHtml
     + `<div class="am-fix-main"><div class="am-fix-title" title="${_esc(title)}">${_esc(title)}${admin}</div>`
@@ -680,10 +678,10 @@ export function fixesSectionHtml(items: ReadonlyArray<LeverageItem>, o: FixesSec
       ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="fixes-show-more">${_esc(t('am.fixes_more'))}</button></div>` : '';
     let adminHtml = '';
     if (adminList.length) {
-      adminHtml = `<button type="button" class="am-fix-divider" aria-expanded="${o.adminOpen}" data-am-action="fixes-admin-toggle">`
+      adminHtml = `<button type="button" class="am-fix-divider" aria-expanded="${o.adminOpen}" aria-controls="am-fix-admin-list" data-am-action="fixes-admin-toggle">`
         + `<span class="am-caret" aria-hidden="true">${o.adminOpen ? '▾' : '▸'}</span>${_esc(t('am.fixes_admin_divider', { n: adminList.length }))}</button>`
         + (o.adminOpen
-          ? `<div class="am-fix-list" role="list">${adminList.slice(0, LEV_MAX_RENDER).map(it => fixRowHtml(it, null, o.ctxFor(it), t)).join('')}</div>` : '');
+          ? `<div class="am-fix-list" id="am-fix-admin-list" role="list">${adminList.slice(0, LEV_MAX_RENDER).map(it => fixRowHtml(it, null, o.ctxFor(it), t)).join('')}</div>` : '');
     }
     body = list + more + adminHtml;
     if (!body) body = `<div class="am-lev-empty">${_esc(t('am.lev_none'))}</div>`;

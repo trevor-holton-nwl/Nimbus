@@ -378,8 +378,11 @@ function _onClick(e: Event): void {
     case 'group-dismiss': _dismissGroup(btn!.dataset.groupKey ?? ''); break;
     case 'group-open-table': _openGroupInTable(btn!.dataset.groupKey ?? ''); break;
     case 'clear-focus': AlertMonitorPane.clearFocus(); break;
-    case 'fixes-show-more': _levShown = Math.min(_levShown + LEV_STEP, LEV_MAX_RENDER); _paint(); break;
-    case 'fixes-admin-toggle': _levAdminOpen = !_levAdminOpen; _paint(); break;
+    case 'fixes-show-more': _showMoreFixes(); break;
+    case 'fixes-admin-toggle':
+      _levAdminOpen = !_levAdminOpen; _paint();
+      document.querySelector?.<HTMLElement>('[data-am-action="fixes-admin-toggle"]')?.focus?.();   // the repaint replaced the button
+      break;
     default: {
       const act = target?.closest?.('[data-alert-action]') as HTMLElement | null;
       if (act?.dataset.alertAction) _onAlertAction(act);
@@ -626,8 +629,6 @@ interface LevDeps {
   group: typeof groupLeverage;
   analyze: typeof analyzeLeverage;
   replay: typeof replayWithMinutes;
-  /** True when the plant's alert penalty is at its cap (removing alerts then cannot move the score). */
-  capped(input: LeverageInput): boolean;
 }
 
 /** One place the engine's inputs are assembled. Tests replace these members; production never does. */
@@ -650,17 +651,8 @@ function _levBuildInput(s: PaintState): LeverageInput {
   };
 }
 
-function _levIsCapped(input: LeverageInput): boolean {
-  const core = globalThis.NimbusComputeCore;
-  if (!core) return false;
-  const r = core.scoreConfidence({
-    alerts: input.alerts as NimbusAlert[], matrix: input.baselineMatrix, horizonStart: input.plantNow, horizonMinutes: input.horizonMinutes,
-  });
-  return r.alertPenalty >= core.CONFIDENCE_WEIGHTS.alertCap;
-}
-
 const _levDeps: LevDeps = {
-  buildInput: _levBuildInput, group: groupLeverage, analyze: analyzeLeverage, replay: replayWithMinutes, capped: _levIsCapped,
+  buildInput: _levBuildInput, group: groupLeverage, analyze: analyzeLeverage, replay: replayWithMinutes,
 };
 
 const _levRunner: LeverageRunner = (base, variants) => Compute.leverageBatch(base, variants);
@@ -670,7 +662,6 @@ let _levInput: LeverageInput | null = null;
 let _levPlant: string | null = null;      // the plant the items belong to
 let _levHave = false;                     // a first pass has produced results for _levPlant
 let _levStale = false;                    // the tab was re-entered: refresh once
-let _levCapped = false;
 let _levShown = LEV_TOP_N;
 let _levAdminOpen = false;                // the "Needs an admin" disclosure; resets with the plant
 const _levReplaying = new Set<string>();  // fix keys with a minutes replay in flight (Enter + Replay must not double-run)
@@ -691,7 +682,7 @@ let _setupAdminP: Promise<void> | null = null;
 
 function _levReset(plant: string | null): void {
   _levItems = []; _levInput = null; _levPlant = plant; _levHave = false; _levShown = LEV_TOP_N; _levAdminOpen = false;
-  _levCapped = false; _levStaleDrops = 0;
+  _levStaleDrops = 0;
   _levTyped.clear(); _levAttempted.clear();
 }
 
@@ -713,7 +704,7 @@ function _levFieldLabel(fieldKey: string): string {
 function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
   const remaining = _levAttempted.size ? item.alertIds.filter(id => _levAttempted.has(id)).length : 0;
   return {
-    capped: _levCapped, remaining,
+    remaining,
     canReviewPairs: _setupAdmin?.canReviewMissingPairs(plant) === true,
     isAdmin: Session.isAdmin(),
     setupActive: Store.masterPlant(plant)?.setup_active !== false,
@@ -762,7 +753,6 @@ async function _levRun(): Promise<void> {
   try {
     input = _levDeps.buildInput(s);
     items = _levDeps.group(input);
-    _levCapped = _levDeps.capped(input);
   } catch (e) {
     ErrorLog.warn('alert-monitor', 'leverage grouping failed', { error: String((e as Error)?.message || e) });
     input = null; items = [];
@@ -806,9 +796,9 @@ async function _levMinutesEntered(key: string, raw: string): Promise<void> {
   const item = _levItems.find(i => i.key === key);
   const input = _levInput;
   if (!item || !input) return;
+  if (_levReplaying.has(key)) return;   // a replay for this row is in flight: ignore (and do not record) this entry
   _levTyped.set(key, minutes);   // kept even when skipped below: the next analysis applies it
   if (_levSkipAnalysis()) return;   // no replay during What-If or an optimizer preview
-  if (_levReplaying.has(key)) return;
   _levReplaying.add(key);
   const rev0 = Store.rev();
   try {
@@ -822,6 +812,22 @@ async function _levMinutesEntered(key: string, raw: string): Promise<void> {
   } finally {
     _levReplaying.delete(key);
   }
+}
+
+/**
+ * "Show 10 more": the repaint replaces the button, so put keyboard focus back — on the re-rendered button, or, when it
+ * is gone (the cap or the end of the list), on the primary button of the first newly revealed row.
+ */
+function _showMoreFixes(): void {
+  const main = Session.isAdmin() ? _levItems : _levItems.filter(i => !i.adminOnly);
+  const firstNew = main[Math.min(Math.max(_levShown, LEV_TOP_N), LEV_MAX_RENDER)];
+  _levShown = Math.min(_levShown + LEV_STEP, LEV_MAX_RENDER);
+  _paint();
+  const more = document.querySelector?.<HTMLElement>('[data-am-action="fixes-show-more"]');
+  if (more) { more.focus?.(); return; }
+  if (!firstNew) return;
+  const hits = Array.from(document.querySelectorAll?.<HTMLElement>('[data-lev-action]') ?? []).filter(b => b.dataset.levKey === firstNew.key);
+  (hits.find(b => b.classList?.contains('btn-primary')) ?? hits[0])?.focus?.();
 }
 
 /** The inline "Replay" button: read that row's minutes box and run the same replay the box's own change event runs. */

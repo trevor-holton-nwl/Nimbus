@@ -7630,7 +7630,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 /* ---- Top fixes (Task 23): a ranked list inside a standard panel. Hairline-separated rows, no card grid, no side
         stripes; the only colour is the lowered-confidence delta. Tokens only. ---- */
 .am-fixes { margin: 8px 0 16px; }
-.am-fix-list { display: block; }
+.am-fixes .am-more { padding: 8px 18px; }
 .am-fix {
   display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: start; column-gap: 12px;
   padding: 10px 18px; border-top: 1px solid var(--line);
