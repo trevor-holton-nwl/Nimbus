@@ -82,6 +82,7 @@ from backend.priority_lists import cache as plcache
 # anything they import) ever imports `brain`, so there is no ordering hazard;
 # `api.include_router(...)` for each happens later, once `api` exists.
 import backend.admin_ops.routes as admin_ops_routes
+import backend.alert_profiles.routes as alert_profiles_routes
 import backend.calendars.routes as calendars_routes
 import backend.distribution.routes as distribution_routes
 import backend.integration.routes as integration_routes
@@ -809,6 +810,7 @@ api.include_router(security_routes.router)
 api.include_router(labor_routes.router)
 api.include_router(calendars_routes.router)
 api.include_router(admin_ops_routes.router)
+api.include_router(alert_profiles_routes.router)
 
 
 # =========================
