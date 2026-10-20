@@ -318,3 +318,69 @@ def test_unknown_setup_policy_plant_default_minutes_accepts_zero(monkeypatch):
 def test_unknown_setup_policy_requires_a_plant():
     with pytest.raises(ValueError, match="plant is required"):
         md.set_plant_unknown_setup_policy("SN", "", "zero", 0)
+
+
+# ── S4 caps (order-rules-hardening Phase 3) ──
+
+@pytest.mark.parametrize("setter,column", [
+    (md.set_plant_max_pull_forward_days, "max_pull_forward_days"),
+    (md.set_plant_max_push_forward_days, "max_push_forward_days"),
+])
+def test_pull_and_push_limits_cap_at_365_days(monkeypatch, setter, column):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    assert setter("SN", "5512", 365)["status"] == "ok"
+    with pytest.raises(ValueError, match=column):
+        setter("SN", "5512", 366)
+    assert not any("set_" + column in statement for statement, _ in cursor.executed[2:])
+
+
+def test_min_productive_segment_minutes_caps_at_1440(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    assert md.set_plant_min_productive_segment_minutes("SN", "5512", 1440)["status"] == "ok"
+    with pytest.raises(ValueError, match="min_productive_segment_minutes"):
+        md.set_plant_min_productive_segment_minutes("SN", "5512", 1441)
+
+
+class _StoredMinutesCursor(_Cursor):
+    def __init__(self, stored):
+        super().__init__()
+        self._stored = stored
+
+    def fetchone(self):
+        return (self._stored,)
+
+
+def test_unknown_setup_minutes_over_cap_rejected_when_changed(monkeypatch):
+    cursor = _StoredMinutesCursor("30")
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    with pytest.raises(ValueError, match="unknown_setup_default_minutes"):
+        md.set_plant_unknown_setup_policy("SN", "5512", "plantDefaultMinutes", 1441)
+    assert not any("UPDATE plants" in statement for statement, _ in cursor.executed)
+
+
+def test_unknown_setup_minutes_at_cap_accepted_without_a_stored_read(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_unknown_setup_policy("SN", "5512", "plantDefaultMinutes", 1440)
+
+    assert result["setup_policy_config"]["unknownSetupDefaultMinutes"] == 1440
+
+
+def test_legacy_over_cap_row_does_not_block_an_unrelated_policy_save(monkeypatch):
+    """The stored value is already over the cap; re-sending it unchanged (a policy-only
+    change) must succeed, while changing it to another over-cap value still fails."""
+    cursor = _StoredMinutesCursor("5000")
+    monkeypatch.setattr(md, "_pool", _Pool(cursor))
+
+    result = md.set_plant_unknown_setup_policy("SN", "5512", "excludeFromSearch", 5000)
+
+    assert result["setup_policy_config"]["unknownSetupDefaultMinutes"] == 5000
+    assert any("UPDATE plants SET setup_policy_config" in statement for statement, _ in cursor.executed)
+    with pytest.raises(ValueError, match="unknown_setup_default_minutes"):
+        md.set_plant_unknown_setup_policy("SN", "5512", "excludeFromSearch", 6000)

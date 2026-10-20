@@ -1834,6 +1834,13 @@ def set_plant_split_order_policy(subnetwork: str, plant: str, policy: str,
     return {"status": "ok", "plant": plant, "split_order_policy": clean}
 
 
+# Upper bounds for the Order Rules numbers (order-rules-hardening S4). Pull/push
+# are whole days; the segment floor and the unknown-setup default are minutes.
+# Enforced here and in the panel; deliberately no DB CHECK and no engine clamp.
+MAX_ORDER_RULE_DAYS = 365
+MAX_ORDER_RULE_MINUTES = 1440
+
+
 def set_plant_max_pull_forward_days(subnetwork: str, plant: str, value: int | None,
                                     user_email: str | None = None) -> dict:
     """Persist a nullable whole-calendar-day pull-forward limit for one plant."""
@@ -1841,6 +1848,8 @@ def set_plant_max_pull_forward_days(subnetwork: str, plant: str, value: int | No
         raise ValueError("plant is required")
     if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
         raise ValueError("max_pull_forward_days must be a non-negative integer or null")
+    if value is not None and value > MAX_ORDER_RULE_DAYS:
+        raise ValueError(f"max_pull_forward_days must be at most {MAX_ORDER_RULE_DAYS} days")
 
     params: list = [value, plant]
     where = "plant = %s"
@@ -1869,6 +1878,8 @@ def set_plant_max_push_forward_days(subnetwork: str, plant: str, value: int | No
         raise ValueError("plant is required")
     if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
         raise ValueError("max_push_forward_days must be a non-negative integer or null")
+    if value is not None and value > MAX_ORDER_RULE_DAYS:
+        raise ValueError(f"max_push_forward_days must be at most {MAX_ORDER_RULE_DAYS} days")
 
     params: list = [value, plant]
     where = "plant = %s"
@@ -1901,6 +1912,8 @@ def set_plant_min_productive_segment_minutes(subnetwork: str, plant: str, value:
         raise ValueError("plant is required")
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("min_productive_segment_minutes must be a positive integer")
+    if value > MAX_ORDER_RULE_MINUTES:
+        raise ValueError(f"min_productive_segment_minutes must be at most {MAX_ORDER_RULE_MINUTES} minutes")
 
     params: list = [value, plant]
     where = "plant = %s"
@@ -1983,6 +1996,28 @@ def set_plant_unknown_setup_policy(subnetwork: str, plant: str, policy: str, def
         where += " AND subnetwork = %s"
         params.append(subnetwork)
     with _pool.connection() as conn, conn.cursor() as cur:
+        if minutes > MAX_ORDER_RULE_MINUTES:
+            # Cap only a value that CHANGES: a legacy over-cap row must not block an
+            # unrelated policy save, which re-sends the stored minutes unchanged.
+            read_params: list = [plant]
+            read_where = "plant = %s"
+            if subnetwork:
+                read_where += " AND subnetwork = %s"
+                read_params.append(subnetwork)
+            cur.execute(
+                f"SELECT setup_policy_config->>'unknownSetupDefaultMinutes' FROM plants WHERE {read_where}",
+                read_params,
+            )
+            stored_row = cur.fetchone()
+            stored_raw = stored_row[0] if stored_row else None
+            try:
+                stored_minutes = int(stored_raw) if stored_raw is not None else None
+            except (TypeError, ValueError):
+                stored_minutes = None
+            if stored_minutes != minutes:
+                raise ValueError(
+                    f"unknown_setup_default_minutes must be at most {MAX_ORDER_RULE_MINUTES} minutes"
+                )
         cur.execute(
             f"UPDATE plants SET setup_policy_config = setup_policy_config || %s, updated_at = NOW() WHERE {where}",
             params,
