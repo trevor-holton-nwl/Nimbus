@@ -196,6 +196,9 @@ export function buildPlantSnapshot(plant: string | null, opts: SnapshotOpts = {}
   return { ...snap, lines, ..._alertClockPayload(plant ? [plant] : []) };
 }
 
+/** Upper bound on one worker leverage batch before Compute.leverageBatch falls back to the main thread. */
+const LEVERAGE_BATCH_TIMEOUT_MS = 30000;
+
 export type LeverageBase = ComputeAlertsPayload & { startMs: number; days: number; lines?: string[] };
 export interface LeverageVariant { key: string; setup: NimbusSetupObservation }
 export interface LeverageResult { key: string; alerts: NimbusAlert[]; matrix: NimbusUtilizationMatrix }
@@ -325,8 +328,16 @@ export const Compute = (() => {
     async leverageBatch(base: LeverageBase, variants: LeverageVariant[]): Promise<LeverageResult[]> {
       if (!_dead && typeof Worker !== 'undefined') {
         try {
-          const r = await _post('LEVERAGE_BATCH', { base, variants });
-          return r.results as LeverageResult[];
+          // The existing alerts/utilization paths have no timeout; a batch is long-running, so guard it
+          // here: an unanswered message rejects and drops to the synchronous core instead of hanging.
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const guard = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('leverage batch timed out')), LEVERAGE_BATCH_TIMEOUT_MS);
+          });
+          try {
+            const r = await Promise.race([_post('LEVERAGE_BATCH', { base, variants }), guard]);
+            return r.results as LeverageResult[];
+          } finally { clearTimeout(timer); }
         } catch (e) {
           ErrorLog.warn('worker', 'leverage batch fell back to main thread', { error: String((e as Error)?.message || e) });
         }

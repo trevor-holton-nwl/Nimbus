@@ -64,6 +64,16 @@ self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
     } else if (type === 'UTILIZATION') {
       const { matrix } = Core.computeUtilization(payload);
       self.postMessage({ type: 'UTILIZATION_RESULT', id, matrix });
+    } else if (type === 'LEVERAGE_BATCH') {
+      const { base, variants } = payload;
+      // ensureCalendar/ensurePlant mutate calendars/plants: every core call gets its own copy.
+      const fresh = () => ({ calendars: structuredClone(base.calendars), plants: structuredClone(base.plants) });
+      const results = variants.map(({ key, setup }) => ({
+        key,
+        alerts: Core.computeAlerts({ ...base, ...fresh(), setup }).alerts,
+        matrix: Core.computeUtilization({ ...base, ...fresh(), setup }).matrix,
+      }));
+      self.postMessage({ type: 'LEVERAGE_BATCH_RESULT', id, results });
     }
   } catch (err) {
     const e = err as Error;

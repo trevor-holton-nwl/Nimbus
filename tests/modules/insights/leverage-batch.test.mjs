@@ -89,3 +89,46 @@ test('Compute.leverageBatch falls back to the synchronous core when no Worker ex
     if (prior) Object.defineProperty(globalThis, 'Worker', prior);
   }
 });
+
+test('compiled worker handles LEVERAGE_BATCH and matches runLeverageBatchSync', async () => {
+  const { default: vm } = await import('node:vm');
+  const { readFileSync } = await import('node:fs');
+  const posted = [];
+  const self = { NimbusComputeCore: globalThis.NimbusComputeCore, location: { search: '' }, postMessage: m => posted.push(m) };
+  const ctx = vm.createContext({ self, importScripts() {}, structuredClone });
+  vm.runInContext(readFileSync(new URL('../../../frontend/nimbus-worker.js', import.meta.url), 'utf8'), ctx);
+  seed();
+  const snap = buildPlantSnapshot('LP');
+  const base = {
+    ...snap, dismissed: [], opts: { lines: null }, startMs: new Date().setHours(0, 0, 0, 0), days: 4,
+  };
+  const variants = [{ key: 'v1', setup: EMPTY }, { key: 'v2', setup: MARKER }];
+  self.onmessage({ data: { type: 'LEVERAGE_BATCH', id: 7, payload: { base, variants } } });
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].type, 'LEVERAGE_BATCH_RESULT');
+  assert.equal(posted[0].id, 7);
+  const sync = runLeverageBatchSync(base, variants);
+  assert.deepEqual(posted[0].results.map(r => r.key), ['v1', 'v2']);
+  assert.equal(JSON.stringify(posted[0].results), JSON.stringify(sync));
+  assert.equal(Object.keys(posted[0].results[0].matrix.LL1).length, 4, 'days and lines reach computeUtilization');
+});
+
+test('Compute.leverageBatch falls back when the worker never answers', async t => {
+  seed();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const prior = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+  globalThis.Worker = class { postMessage() {} };
+  try {
+    const { Compute: C } = await import('../../../frontend/insights/services.mjs?silentworker=1');
+    const snap = buildPlantSnapshot('LP');
+    const p = C.leverageBatch({ ...snap, dismissed: [], opts: { lines: null }, startMs: Date.now(), days: 2 },
+      [{ key: 'k', setup: EMPTY }]);
+    await Promise.resolve();
+    t.mock.timers.tick(31000);
+    const out = await p;
+    assert.equal(out[0].key, 'k');
+    assert.ok(out[0].matrix.LL1);
+  } finally {
+    if (prior) Object.defineProperty(globalThis, 'Worker', prior); else delete globalThis.Worker;
+  }
+});
