@@ -949,6 +949,10 @@ interface DueDateCandidate {
    * re-deriving it from the fragment's original predecessor. */
   finalState?: SetupStateKey | null;
   finalPredecessorOrderId?: string | null;
+  /** Orders this sequence refused to admit under the 'excludeFromSearch' unknown-setup policy (both states known,
+   * no matrix row), with the reason to show if they end the run unplaced. Carried on the candidate rather than
+   * written to the run context so only the ACCEPTED sequence's exclusions are merged (see `applyCandidate`). */
+  setupExclusions?: Map<string, { code: string; message: string }>;
 }
 
 interface SearchRun {
@@ -2814,6 +2818,11 @@ function chargedSetupMinutes(
   return chargeable && ctx?.unknownSetupPolicy === 'plantDefaultMinutes' ? ctx.unknownSetupDefaultMinutes : 0;
 }
 
+/** Display form of a setup state for exclusion / unrecorded-transition messages. */
+function setupStateLabel(state: SetupStateKey | null): string {
+  return state?.map(part => part.value).join(' · ') || '?';
+}
+
 /** The Task 2 overlong decision is based on nominal line/plant operating
  * windows, not dated blackouts. Keep that same 90-day bounded definition in
  * the detached snapshot evaluator so policy routing remains Store-free. */
@@ -2980,6 +2989,7 @@ function candidateForSequence(
   const patches: SchedulePatch[] = [];
   const explanation: CandidateReason[] = [];
   const missingEdges: MissingSetupEdge[] = [];
+  const setupExclusions = new Map<string, { code: string; message: string }>();
   let setupMinutes = 0;
   let lateCount = 0;
   let latenessMinutes = 0;
@@ -3095,10 +3105,10 @@ function candidateForSequence(
           // N8: refuse to admit here; the order stays eligible for later
           // fragments/sequences where its predecessor may be covered. Only if
           // it is never placed does this reason surface (finalizeCandidate).
-          const label = (state: SetupStateKey | null) => state?.map(part => part.value).join(' · ') || '?';
-          ctx._setupExclusions.set(taskId(task), {
+          // Recorded on THIS candidate only: a losing permutation must not leave an exclusion behind.
+          setupExclusions.set(taskId(task), {
             code: 'setup_transition_unrecorded',
-            message: `No setup transition is recorded from ${label(predecessorState)} to ${label(successorState)} on ${line}; this plant excludes such orders from automatic placement.`,
+            message: `No setup transition is recorded from ${setupStateLabel(predecessorState)} to ${setupStateLabel(successorState)} on ${line}; this plant excludes such orders from automatic placement.`,
           });
           unadmitted.push(task);
           cursor = priorCursor;
@@ -3374,6 +3384,7 @@ function candidateForSequence(
     instabilityMinutes,
     finalState: predecessorState,
     finalPredecessorOrderId: predecessorOrderId,
+    ...(setupExclusions.size ? { setupExclusions } : {}),
   };
 }
 
@@ -4662,6 +4673,9 @@ function completeFinalBoundaryCandidate(
     productiveRuntimeMinutes: productiveRuntimeTotal(orderedTasks),
     maxLatenessMinutes: Math.max(preFirmed.maxLatenessMinutes ?? 0, continuation.maxLatenessMinutes ?? 0),
     instabilityMinutes: (preFirmed.instabilityMinutes ?? 0) + (continuation.instabilityMinutes ?? 0),
+    ...(preFirmed.setupExclusions || continuation.setupExclusions
+      ? { setupExclusions: new Map([...(preFirmed.setupExclusions ?? []), ...(continuation.setupExclusions ?? [])]) }
+      : {}),
   };
 }
 
@@ -5152,6 +5166,13 @@ function evaluateLineWithFirmedBoundaries(
     termination = worseTermination(termination, run.termination);
   };
   const applyCandidate = (candidate: Readonly<DueDateCandidate>): DueDateCandidate => {
+    // Winner-only exclusions: only an accepted sequence's refusals reach the run context, and an order a winner
+    // places is no longer excluded.
+    const exclusions = bounds.runContext?._setupExclusions;
+    if (exclusions) {
+      for (const [id, entry] of candidate.setupExclusions ?? []) exclusions.set(id, entry);
+      for (const patch of candidate.patches) exclusions.delete(patch.id);
+    }
     patches.push(...candidate.patches);
     explanation.push(...candidate.explanation);
     for (let index = 0; index < score.length; index += 1) score[index] += candidate.score[index] ?? 0;
@@ -6811,6 +6832,13 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       const resolution = chargeable && state && successor
         ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined })
         : null;
+      // excludeFromSearch (O2): the search refuses an unprotected order whose transition has no matrix row, so an incumbent
+      // sitting behind one is an error too (repairCandidate queues it). Both states are known (resolution exists only then) and the
+      // line is chargeable. Not flagged setupRelated, so it stays an error on setup-inactive plants; synthetic snapshots
+      // (Remove Backlog, setup-inactive plants) force the policy to zero and never reach it.
+      if (bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch' && resolution && !resolution.covered && !protectedTask) {
+        add('setup_transition_unrecorded', `No setup transition is recorded from ${setupStateLabel(state)} to ${setupStateLabel(successor)} on ${line}; this plant excludes such orders from automatic placement.`, task, protectedTask, false);
+      }
       if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: "A missing setup transition uses the plant's configured default (zero unless plantDefaultMinutes is set).", severity: 'warning', taskId: taskId(task), line });
       const minutes = chargedSetupMinutes(bounds.runContext, resolution, chargeable);
       if (minutes > 0) {
@@ -6841,9 +6869,24 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
   for (let attempt = 0; attempt < (result.dispositions?.length ?? 0); attempt++) {
     const failures = (result.validationFindings ?? []).filter(f => f.severity === 'error' && f.taskId);
     if (!failures.length) break;
-    const reject = new Set(failures.map(f => f.taskId!));
-    const repairPatches = result.patches.map(patch => reject.has(patch.id) ? { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning' as const, planning_reason: { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' } } } : patch);
-    const repaired = (result.dispositions ?? []).map(d => reject.has(d.id) && d.status !== 'protected' ? { ...d, status: 'needs_planning' as const, reason: { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' } } : d);
+    // A queued order changes its successor's predecessor, so an unrecorded-transition error can clear itself
+    // down the line: reject only the earliest such order per line per pass and let the re-validation decide the rest.
+    // Every other failure is rejected outright, as before.
+    const startById = new Map(applyPatchesToSnapshot(snapshot.tasks, result.patches).map(task => [taskId(task), +(timestamp(task.start_date) ?? 0)]));
+    const reasonBy = new Map<string, ValidationFinding>();
+    const earliestUnrecorded = new Map<string, ValidationFinding>();
+    for (const f of failures) {
+      if (f.code !== 'setup_transition_unrecorded') { reasonBy.set(f.taskId!, f); continue; }
+      const held = earliestUnrecorded.get(f.line ?? '');
+      if (!held || (startById.get(f.taskId!) ?? 0) < (startById.get(held.taskId!) ?? 0)) earliestUnrecorded.set(f.line ?? '', f);
+    }
+    for (const f of earliestUnrecorded.values()) if (!reasonBy.has(f.taskId!)) reasonBy.set(f.taskId!, f);
+    const queueReason = (id: string): { code: string; message: string } => {
+      const f = reasonBy.get(id);
+      return f?.code === 'setup_transition_unrecorded' ? { code: f.code, message: f.message } : { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' };
+    };
+    const repairPatches = result.patches.map(patch => reasonBy.has(patch.id) ? { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning' as const, planning_reason: queueReason(patch.id) } } : patch);
+    const repaired = (result.dispositions ?? []).map(d => reasonBy.has(d.id) && d.status !== 'protected' ? { ...d, status: 'needs_planning' as const, reason: queueReason(d.id) } : d);
     result = { ...result, patches: repairPatches, dispositions: repaired };
     result = { ...result, validationFindings: validateCandidate(snapshot, bounds, result) };
   }

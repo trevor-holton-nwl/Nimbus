@@ -366,8 +366,18 @@ add('unknown setup excludeFromSearch: a blank-state order is not excluded (start
   { rules: policy('excludeFromSearch'), tasks: [T('blank', 1, '', DUE_WED)] }, rows => { allScheduled(rows); assert.equal(starts(rows)[0], L('2035-08-06T08:00:00')); });
 add('O2: unknown setup excludeFromSearch also pulls an already-scheduled order behind an unrecorded transition',
   { rules: policy('excludeFromSearch'), tasks: [T('A', 1, 'RED', DUE_WED, '2035-08-06T08:00:00', '2035-08-06T09:00:00')] },
-  rows => { assert.equal(byId(rows, 'A').scheduled, false); assert.equal(byId(rows, 'A').code, 'setup_transition_unrecorded'); },
-  { '*': 'O2 — fixed in Phase 2' });
+  rows => { assert.equal(byId(rows, 'A').scheduled, false); assert.equal(byId(rows, 'A').code, 'setup_transition_unrecorded'); });
+
+// O2 (continued): incumbents behind an unrecorded edge, and the cascade rule. DEFAULT_SETUP_ROWS cover GREEN -> BLUE and nothing into RED.
+add('O2: excludeFromSearch queues an incumbent whose uncovered edge does not overlap its predecessor (BLUE -> RED, 3 h gap)',
+  { rules: policy('excludeFromSearch'), tasks: [T('B', 1, 'BLUE', DUE_WED, '2035-08-06T09:00:00', '2035-08-06T10:00:00'), T('A', 1, 'RED', DUE_WED, '2035-08-06T13:00:00', '2035-08-06T14:00:00')] },
+  rows => { assert.ok(byId(rows, 'B').scheduled); assert.equal(byId(rows, 'A').scheduled, false); assert.equal(byId(rows, 'A').code, 'setup_transition_unrecorded'); });
+add('O2: excludeFromSearch does not cascade - queuing X (GREEN -> RED) leaves Y (RED -> BLUE as an incumbent, GREEN -> BLUE once X is gone) scheduled',
+  { rules: policy('excludeFromSearch'), tasks: [T('X', 1, 'RED', DUE_WED, '2035-08-06T09:00:00', '2035-08-06T10:00:00'), T('Y', 1, 'BLUE', DUE_WED, '2035-08-06T11:00:00', '2035-08-06T12:00:00')] },
+  rows => { assert.equal(byId(rows, 'X').scheduled, false); assert.equal(byId(rows, 'X').code, 'setup_transition_unrecorded'); assert.ok(byId(rows, 'Y').scheduled, 'Y keeps a slot'); });
+add('unknown setup zero and plantDefaultMinutes keep an incumbent behind an uncovered edge scheduled (warning only)',
+  { rules: policy('zero'), tasks: [T('A', 1, 'RED', DUE_WED, '2035-08-06T09:00:00', '2035-08-06T10:00:00')] },
+  rows => { assert.ok(byId(rows, 'A').scheduled); });
 
 add('O8 (suspected): unknown setup excludeFromSearch still places two RED orders that are reachable through YELLOW (GREEN -> YELLOW -> RED)',
   {
@@ -376,10 +386,11 @@ add('O8 (suspected): unknown setup excludeFromSearch still places two RED orders
     tasks: [T('t0', 1, 'RED', DUE_WED), T('t1', 1, 'RED', DUE_WED), T('t2', 3, 'YELLOW', DUE_WED)],
   },
   rows => { allScheduled(rows); },
-  // Found by fuzzing: the detached SPT run queues t0/t1 as setup_transition_unrecorded because a losing
-  // permutation's exclusion survives; Engine.evaluateSchedule recovers them in fillPlanningGaps. Not yet
-  // confirmed as the O8 mechanism: if Phase 2's winner-only exclusions do not flip this, re-diagnose it.
-  { 'direct:spt': 'O8 (suspected, unconfirmed) — fixed in Phase 2' });
+  // Found by fuzzing. NOT an O8 leak (winner-only exclusions do not change it): detached SPT evaluates ONE sequence
+  // (runtime-first: t0, t1, t2), so t0/t1 follow GREEN directly, an uncovered pair, and are refused at that position even
+  // though GREEN -> YELLOW -> RED is covered. SPT never reorders for coverage by design, so only the Engine pass
+  // (fillPlanningGaps places them after t2) recovers them. Left as a todo: fixing it means making SPT coverage-aware.
+  { 'direct:spt': 'SPT keeps its runtime-first order, so RED is refused behind GREEN; recovered by gap-fill (not O8)' });
 
 // all five settings together
 add('all five Order Rules together: pull 1, push 1, floor 60, overlong_only, plantDefaultMinutes 30',
@@ -511,4 +522,64 @@ CASES.forEach((testCase, index) => {
       judge(testCase, normalizeRows(spec, fromStoreTasks(liveRun()[`${index}:${mode}`])));
     });
   }
+});
+
+// ── O2 / O8: validator and repair, called directly ─────────────────────────
+// A hand-built candidate that leaves every order in place, so the validator alone judges the incumbent schedule.
+function unrecordedFindings(spec, { queue = [], boundsPatch } = {}) {
+  const snapshot = scenarioSnapshot(spec);
+  const bounds = boundsPatch ? boundsPatch(scenarioBounds(spec)) : scenarioBounds(spec);
+  const firmed = new Set(normalizeScenario(spec).firmed);
+  const patches = queue.map(id => ({ id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: { code: 'no_fit_found', message: 'x' } } }));
+  const dispositions = snapshot.tasks.map(t => ({
+    id: t.id, line: 'L1', status: firmed.has(t.id) ? 'protected' : queue.includes(t.id) ? 'needs_planning' : 'scheduled',
+    ...(queue.includes(t.id) ? { reason: { code: 'no_fit_found', message: 'x' } } : {}),
+  }));
+  const findings = SetupScheduler.validateCandidate(snapshot, bounds, { patches, dispositions });
+  return { findings, unrecorded: findings.filter(f => f.code === 'setup_transition_unrecorded') };
+}
+const CHAIN = [T('X', 1, 'RED', DUE_WED, '2035-08-06T09:00:00', '2035-08-06T10:00:00'), T('Y', 1, 'BLUE', DUE_WED, '2035-08-06T11:00:00', '2035-08-06T12:00:00')];
+
+test('O2 validator: excludeFromSearch reports an error per unrecorded incoming edge, naming both states and the line', () => {
+  const { unrecorded } = unrecordedFindings({ rules: policy('excludeFromSearch'), tasks: CHAIN });
+  assert.deepEqual(unrecorded.map(f => [f.taskId, f.severity, f.line]), [['X', 'error', 'L1'], ['Y', 'error', 'L1']]);
+  assert.match(unrecorded[0].message, /GREEN to RED on L1/);
+  assert.match(unrecorded[1].message, /RED to BLUE on L1/);
+});
+
+test('O2 validator: once X is queued Y\'s new predecessor (GREEN) is covered, so Y raises nothing (the cascade repairCandidate relies on)', () => {
+  const { unrecorded } = unrecordedFindings({ rules: policy('excludeFromSearch'), tasks: CHAIN }, { queue: ['X'] });
+  assert.deepEqual(unrecorded, []);
+});
+
+test('O2 validator: a protected (firmed) order behind an unrecorded edge stays a warning, its unprotected successor is an error', () => {
+  const { findings, unrecorded } = unrecordedFindings({ rules: policy('excludeFromSearch'), firmed: ['X'], tasks: CHAIN });
+  assert.deepEqual(unrecorded.map(f => f.taskId), ['Y']);
+  assert.ok(findings.some(f => f.code === 'missing_setup' && f.taskId === 'X' && f.severity === 'warning'));
+});
+
+for (const [name, rules] of [['zero', policy('zero')], ['plantDefaultMinutes 30', policy('plantDefaultMinutes', 30)]]) {
+  test(`O2 validator: ${name} never raises setup_transition_unrecorded (missing_setup stays a warning)`, () => {
+    const { findings, unrecorded } = unrecordedFindings({ rules, tasks: [T('X', 1, 'RED', DUE_WED, '2035-08-06T09:00:00', '2035-08-06T10:00:00')] });
+    assert.deepEqual(unrecorded, []);
+    assert.ok(findings.some(f => f.code === 'missing_setup' && f.severity === 'warning'));
+  });
+}
+
+test('O2 validator: a synthetic zero-cost snapshot (Remove Backlog, setup-inactive plants) forces the policy to zero and is unaffected', () => {
+  const { findings, unrecorded } = unrecordedFindings({ rules: policy('excludeFromSearch'), tasks: CHAIN }, {
+    boundsPatch: bounds => ({ ...bounds, setup: { ...bounds.setup, synthetic: true } }),
+  });
+  assert.deepEqual(unrecorded, []);
+  assert.equal(findings.some(f => f.code === 'missing_setup'), false, 'the synthetic snapshot reports no missing-setup warning either');
+});
+
+test('O2: gap-fill is not disabled after finalize (the repaired candidate is internally valid, so fillPlanningGaps still runs its check)', () => {
+  const spec = { rules: policy('excludeFromSearch'), tasks: [T('A', 1, 'RED', DUE_WED, '2035-08-06T08:00:00', '2035-08-06T09:00:00')] };
+  const snapshot = scenarioSnapshot(spec); const bounds = scenarioBounds(spec);
+  const result = SetupScheduler.evaluateSptWithSetup(snapshot, bounds);
+  assert.equal(result.validationFindings.some(f => f.severity === 'error'), false, 'the finalized candidate carries no error finding');
+  const filled = SetupScheduler.fillPlanningGaps(snapshot, bounds, result);
+  assert.equal(filled.gapFill.complete, true, 'an invalid candidate would have skipped the gap check and reported it incomplete');
+  assert.equal(filled.dispositions.find(d => d.id === 'A').reason.code, 'setup_transition_unrecorded');
 });
