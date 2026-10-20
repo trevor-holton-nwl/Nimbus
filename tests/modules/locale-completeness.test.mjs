@@ -730,38 +730,43 @@ test('U33: the new es rows use "pedido" and the new fr rows "commande" (no ordre
 // Alert Monitor (feature/alert-monitor): every user-facing string of the page, the profile editor, the leverage cards,
 // the profile toasts / User Settings rows and the Gantt-legend profile-match rows, with identical {{placeholders}}.
 const ALERT_MONITOR_KEYS = [
-  'tab.alerts', 'am.profile_label', 'am.profile_all', 'am.manage_profiles', 'am.profile_ph', 'am.profile_none',
-  'am.window_rule', 'am.window_any_days', 'am.window_sev_any', 'am.window_sev_warn', 'am.window_sev_err',
-  'am.window_all', 'am.gantt_highlight', 'am.group_by', 'am.group_type', 'am.group_category', 'am.group_line',
-  'am.group_day', 'am.group_order', 'am.group_none', 'am.sort', 'am.sort_impact', 'am.sort_time', 'am.sort_severity',
-  'am.sort_orders', 'am.kpi_matched', 'am.kpi_matched_of', 'am.kpi_errors', 'am.kpi_warnings', 'am.kpi_orders',
-  'am.kpi_confidence', 'am.kpi_confidence_sub', 'am.leverage_title', 'am.leverage_hint', 'am.lev_alerts',
-  'am.lev_conf', 'am.lev_conf_na', 'am.lev_outside_window', 'am.lev_partial_window', 'am.lev_method_exact',
-  'am.lev_method_estimate', 'am.lev_needs_minutes', 'am.lev_minutes_ph', 'am.lev_show_alerts', 'am.lev_computing',
-  'am.lev_none', 'am.lev_show_more', 'am.lev_points', 'am.lev_score', 'am.lev_score_capped', 'am.lev_headroom',
-  'am.lev_no_headroom', 'am.lev_remaining', 'am.lev_admin_fix', 'am.lev_copy_summary', 'am.lev_copied', 'am.lev_setup_inactive',
-  'am.focus_chip', 'am.focus_chip_outside', 'am.focus_clear', 'alert.profile_hidden', 'alert.profile_show_all',
-  'alert.profile_override_on', 'alert.profile_back', 'am.group_dismiss_n', 'am.group_dismiss_confirm',
-  'am.show_all_n', 'am.day_rel', 'am.rel_in_days', 'am.rel_today', 'am.rel_overdue_days', 'am.whatif_blocked',
-  'am.empty_no_plant', 'am.empty_no_match_title', 'am.empty_no_match_msg', 'am.empty_switch_all',
-  'am.profile_missing', 'am.open_in_table', 'am.diagnose', 'am.ack', 'am.ack_by', 'am.ack_by_noend', 'am.ack_show',
-  'am.ack_title', 'am.ack_reason', 'am.ack_until', 'am.ack_noend', 'am.ack_note', 'am.unack', 'am.ack_err_reason', 'am.ack_err_long', 'am.ack_err_until', 'am.view_as',
-  'am.make_default', 'am.is_default', 'am.col_points', 'am.col_orders', 'am.col_late', 'am.banner_no_timezone',
-  'am.create_profile_prompt', 'am.empty_all_acked', 'am.anchor_due', 'am.anchor_time', 'am.points_outside', 'am.points_outside_tip',
-  'am.diag_setup', 'am.diag_reason', 'am.diag_not_firmed', 'am.group_unassigned', 'am.table_unavailable', 'am.set_default', 'am.edit_profile', 'am.view_profile', 'am.page_menu', 'am.summary_window', 'am.summary_profile', 'am.summary_all', 'am.summary_errors', 'am.summary_errors_one', 'am.summary_warnings', 'am.summary_warnings_one', 'am.summary_orders', 'am.summary_orders_one', 'am.summary_conf', 'am.sort_by', 'am.fixes_title', 'am.fixes_hint', 'am.fixes_admin_divider', 'am.fix_clears', 'am.fix_clears_one', 'am.fix_clears_one_alert', 'am.fix_clears_one_order', 'am.fix_conf', 'am.fix_minutes', 'am.fix_replay', 'am.fixes_more', 'am.more_actions', 'am.rank_n', 'am.group_fix_n', 'am.group_fix_confirm', 'am.group_fix_done', 'am.group_fix_done_one', 'am.group_ack_n', 'am.ack_title_n', 'am.ack_bulk_done', 'am.ack_bulk_partial', 'am.copy_lines', 'am.copy_orders', 'leverage.title.setup-pair', 'leverage.title.calendar-day', 'leverage.title.tool',
-  'leverage.title.machine-state', 'leverage.title.optimize-window', 'leverage.title.routing-gap.workcenter_unmapped',
-  'leverage.title.routing-gap.pv_missing', 'leverage.title.routing-gap.routing_upload',
-  'leverage.title.routing-gap.no_machine', 'leverage.title.routing-gap.unknown', 'leverage.action.setup-pair',
-  'leverage.action.calendar-day', 'leverage.action.routing-gap', 'leverage.action.routing-gap.workcenter_unmapped',
-  'leverage.action.tool', 'leverage.action.machine-state', 'leverage.action.optimize-window', 'ape.title_new',
-  'ape.title_edit', 'ape.name', 'ape.name_ph', 'ape.rules', 'ape.rule_n', 'ape.add_rule', 'ape.remove_rule',
-  'ape.types', 'ape.cat_capacity', 'ape.cat_conflicts', 'ape.cat_calendar', 'ape.cat_setup', 'ape.cat_exceptions',
-  'ape.select_category', 'ape.day_from', 'ape.day_to', 'ape.days_hint', 'ape.min_sev', 'ape.sev_any', 'ape.sev_warn',
-  'ape.sev_err', 'ape.ranking', 'ape.set_mine', 'ape.new_profile', 'ape.duplicate', 'ape.copy_to_plants',
-  'ape.late_hours', 'ape.err_late_hours', 'ape.live_range', 'ape.live_matches', 'ape.err_name_required',
-  'ape.err_name_dup', 'ape.err_name_long', 'ape.err_no_rules', 'ape.err_too_many_rules', 'ape.err_rule_no_types',
-  'ape.err_days_range', 'ape.err_days_order', 'ape.err_min_sev', 'ape.err_rule_dup', 'ape.err_stale', 'ape.discard_title', 'ape.discard_confirm', 'ape.err_save_failed',
-  'ape.delete_confirm_title', 'ape.delete_confirm_msg', 'ape.delete', 'ape.copy_go', 'ape.copy_selected', 'ape.not_editable', 'toast.alert_profile_saved', 'toast.alert_profile_deleted',
+  'tab.alerts', 'am.profile_all', 'am.profile_ph', 'am.profile_none', 'am.window_rule', 'am.window_any_days',
+  'am.window_sev_any', 'am.window_sev_warn', 'am.window_sev_err', 'am.window_all', 'am.gantt_highlight',
+  'am.group_by', 'am.group_type', 'am.group_category', 'am.group_line', 'am.group_day', 'am.group_order',
+  'am.group_none', 'am.sort_impact', 'am.sort_time', 'am.lev_show_alerts', 'am.lev_computing', 'am.lev_none',
+  'am.lev_headroom', 'am.lev_no_headroom', 'am.lev_remaining', 'am.lev_admin_fix', 'am.lev_copy_summary',
+  'am.lev_copied', 'am.lev_setup_inactive', 'am.focus_chip', 'am.focus_chip_outside', 'am.focus_clear',
+  'alert.profile_hidden', 'alert.profile_show_all', 'alert.profile_override_on', 'alert.profile_back',
+  'am.show_all_n', 'am.rel_in_days', 'am.rel_today', 'am.rel_overdue_days', 'am.whatif_blocked', 'am.empty_no_plant',
+  'am.empty_no_match_title', 'am.empty_no_match_msg', 'am.empty_switch_all', 'am.profile_missing', 'am.open_in_table',
+  'am.diagnose', 'am.ack', 'am.ack_by', 'am.ack_by_noend', 'am.ack_show', 'am.ack_title', 'am.ack_reason',
+  'am.ack_until', 'am.ack_noend', 'am.ack_note', 'am.unack', 'am.ack_err_reason', 'am.ack_err_long',
+  'am.ack_err_until', 'am.view_as', 'am.is_default', 'am.banner_no_timezone', 'am.create_profile_prompt',
+  'am.empty_all_acked', 'am.anchor_due', 'am.anchor_time', 'am.diag_setup', 'am.diag_reason', 'am.diag_not_firmed',
+  'am.group_unassigned', 'am.table_unavailable', 'am.set_default', 'am.edit_profile', 'am.view_profile',
+  'am.page_menu', 'am.summary_window', 'am.summary_profile', 'am.summary_all', 'am.summary_window_one',
+  'am.summary_profile_one', 'am.summary_all_one', 'am.summary_errors', 'am.summary_errors_one', 'am.summary_warnings',
+  'am.summary_warnings_one', 'am.summary_orders', 'am.summary_orders_one', 'am.summary_conf', 'am.sort_by',
+  'am.fixes_title', 'am.fixes_hint', 'am.fixes_admin_divider', 'am.fix_clears', 'am.fix_clears_one',
+  'am.fix_clears_one_alert', 'am.fix_clears_one_order', 'am.fix_conf', 'am.fix_minutes', 'am.fix_replay',
+  'am.fixes_more', 'am.more_actions', 'am.rank_n', 'am.group_fix_n', 'am.group_fix_confirm', 'am.group_fix_done',
+  'am.group_fix_done_one', 'am.group_ack_n', 'am.ack_title_n', 'am.ack_bulk_done', 'am.ack_bulk_partial',
+  'am.copy_lines', 'am.copy_orders', 'leverage.title.setup-pair', 'leverage.title.calendar-day',
+  'leverage.title.tool', 'leverage.title.machine-state', 'leverage.title.optimize-window',
+  'leverage.title.routing-gap.workcenter_unmapped', 'leverage.title.routing-gap.pv_missing',
+  'leverage.title.routing-gap.routing_upload', 'leverage.title.routing-gap.no_machine',
+  'leverage.title.routing-gap.unknown', 'leverage.action.setup-pair', 'leverage.action.calendar-day',
+  'leverage.action.routing-gap', 'leverage.action.routing-gap.workcenter_unmapped', 'leverage.action.tool',
+  'leverage.action.machine-state', 'leverage.action.optimize-window', 'ape.title_new', 'ape.title_edit', 'ape.name',
+  'ape.name_ph', 'ape.rules', 'ape.rule_n', 'ape.add_rule', 'ape.remove_rule', 'ape.types', 'ape.cat_capacity',
+  'ape.cat_conflicts', 'ape.cat_calendar', 'ape.cat_setup', 'ape.cat_exceptions', 'ape.select_category',
+  'ape.day_from', 'ape.day_to', 'ape.days_hint', 'ape.min_sev', 'ape.sev_any', 'ape.sev_warn', 'ape.sev_err',
+  'ape.set_mine', 'ape.new_profile', 'ape.duplicate', 'ape.copy_to_plants', 'ape.late_hours', 'ape.err_late_hours',
+  'ape.live_range', 'ape.live_matches', 'ape.err_name_required', 'ape.err_name_dup', 'ape.err_name_long',
+  'ape.err_no_rules', 'ape.err_too_many_rules', 'ape.err_rule_no_types', 'ape.err_days_range', 'ape.err_days_order',
+  'ape.err_min_sev', 'ape.err_rule_dup', 'ape.err_stale', 'ape.discard_title', 'ape.discard_confirm',
+  'ape.err_save_failed', 'ape.delete_confirm_title', 'ape.delete_confirm_msg', 'ape.delete', 'ape.copy_go',
+  'ape.copy_selected', 'ape.not_editable', 'toast.alert_profile_saved', 'toast.alert_profile_deleted',
   'toast.alert_profiles_load_failed', 'us.alert_profile_for', 'us.alert_profile_no_plant', 'us.alert_profile_hint',
   'us.alert_profile_manage', 'us.alert_gantt_highlight', 'us.alert_gantt_highlight_hint', 'legend.pm_capacity_t',
   'legend.pm_capacity_d', 'legend.pm_conflicts_t', 'legend.pm_conflicts_d', 'legend.pm_calendar_t',
@@ -778,6 +783,16 @@ test('Alert Monitor keys exist in all five locales, non-empty, with the same {{p
       assert.ok(typeof v === 'string' && v.trim(), `${locale}.js is missing or empty for "${key}"`);
       assert.equal(placeholdersOf(v), placeholdersOf(dicts.en[key]), `${locale}.js "${key}" must carry the same {{placeholders}} as en.js`);
     }
+  }
+});
+
+test('Alert Monitor vocabulary gate: no English am.* / leverage.* value says point, pts, exact or estimate', () => {
+  const en = localeDict('en');
+  const keys = Object.keys(en).filter(k => k.startsWith('am.') || k.startsWith('leverage.'));
+  assert.ok(keys.length > 50, 'the am.* / leverage.* keys were found');
+  const banned = /\b(points?|pts|exact(ly)?|estimates?|estimated)\b/i;
+  for (const key of keys) {
+    assert.doesNotMatch(en[key], banned, `en "${key}" must not use points / pts / exact / estimate vocabulary`);
   }
 });
 
