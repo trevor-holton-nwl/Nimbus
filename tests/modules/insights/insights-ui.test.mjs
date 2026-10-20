@@ -264,9 +264,9 @@ test('alert drawer delegates fix and override actions without compiling IDs into
   }
 });
 
-test('AlertsUIAdapter.focus: Go To selects via Selection, flashes the target, and closes the drawer only if open', () => {
+test('AlertsUIAdapter.focus: Go To selects via Selection, marks the target, and closes the drawer only if open', () => {
   const prior = {
-    gotoLineDay: Timeline.gotoLineDay, flash: Timeline.flashTarget, tl: Timeline._tl,
+    gotoLineDay: Timeline.gotoLineDay, markTask: Timeline.markGotoTask, markCell: Timeline.markGotoCell, tl: Timeline._tl,
     show: Inspector.show, toggle: AlertsUIAdapter.toggleDrawer, doc: globalThis.document,
     alerts: Store._state.alerts, ids: Selection.ids(),
   };
@@ -274,29 +274,46 @@ test('AlertsUIAdapter.focus: Go To selects via Selection, flashes the target, an
   let drawerOpen = true;
   try {
     Timeline.gotoLineDay = (line, day, cb) => { calls.push('goto'); cb(); };
-    Timeline.flashTarget = id => calls.push(`flash:${id}`);
+    Timeline.markGotoTask = id => calls.push(`task:${id}`);
+    Timeline.markGotoCell = (line, day) => calls.push(`cell:${line}:${day}`);
     Timeline._tl = {};
     Inspector.show = t => calls.push(`inspector:${t.id}`);
     AlertsUIAdapter.toggleDrawer = () => { calls.push('toggle'); drawerOpen = !drawerOpen; };
     globalThis.document = { getElementById: () => ({ classList: { contains: () => drawerOpen } }) };
-    Store._state.tasks.T1 = { id: 'T1' };
+    Store._state.tasks.T1 = { id: 'T1', start_date: new Date('2026-08-12T08:00:00'), end_date: new Date('2026-08-12T10:00:00') };
+    Store._state.tasks.T2 = { id: 'T2', start_date: null, end_date: null };
     Store._state.alerts = [{ id: 'a1', taskId: 'T1', line: 'L1', time: new Date('2026-08-12T08:00:00') }];
     Selection.clear();
 
     AlertsUIAdapter.focus('a1');
     assert.deepEqual(Selection.ids(), ['T1'], 'target is selected through Selection');
     assert.ok(!calls.includes('inspector:T1'), 'Inspector is driven by the Selection listener, not called directly');
-    assert.deepEqual(calls.filter(c => c !== 'goto'), ['flash:T1', 'toggle']);
+    assert.deepEqual(calls.filter(c => c !== 'goto'), ['task:T1', 'toggle']);
 
     // Already the sole selection: Selection.set no-ops, so Inspector.show is called explicitly.
     calls.length = 0; drawerOpen = false;
     AlertsUIAdapter.focus('a1');
     assert.ok(calls.includes('inspector:T1'));
     assert.ok(!calls.includes('toggle'), 'closed drawer is not toggled (would reopen it)');
+
+    // Line/day alert (no taskId): rings the day cell, never selects.
+    calls.length = 0; Selection.clear();
+    Store._state.alerts = [{ id: 'a2', type: 'overload', line: 'L1', time: new Date('2026-08-12T08:00:00') }];
+    AlertsUIAdapter.focus('a2');
+    assert.ok(calls.includes('cell:L1:2026-08-12'));
+    assert.ok(!calls.some(c => c.startsWith('task:')));
+    assert.deepEqual(Selection.ids(), []);
+
+    // Undated order (not drawn): falls back to the day cell.
+    calls.length = 0;
+    Store._state.alerts = [{ id: 'a3', taskId: 'T2', line: 'L1', time: new Date('2026-08-12T08:00:00') }];
+    AlertsUIAdapter.focus('a3');
+    assert.ok(calls.includes('cell:L1:2026-08-12'));
+    assert.deepEqual(Selection.ids(), []);
   } finally {
-    Timeline.gotoLineDay = prior.gotoLineDay; Timeline.flashTarget = prior.flash; Timeline._tl = prior.tl;
+    Timeline.gotoLineDay = prior.gotoLineDay; Timeline.markGotoTask = prior.markTask; Timeline.markGotoCell = prior.markCell; Timeline._tl = prior.tl;
     Inspector.show = prior.show; AlertsUIAdapter.toggleDrawer = prior.toggle; globalThis.document = prior.doc;
-    Store._state.alerts = prior.alerts; delete Store._state.tasks.T1; Selection.set(prior.ids);
+    Store._state.alerts = prior.alerts; delete Store._state.tasks.T1; delete Store._state.tasks.T2; Selection.set(prior.ids);
   }
 });
 

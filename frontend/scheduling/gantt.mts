@@ -172,8 +172,7 @@ export const Timeline = {
   _nextColorIdx: 0,
   _unsubStore:   null as (() => void) | null,
   _suppressEvents: false,       // guard to prevent self-triggered loops
-  _gotoFlash: null as { taskId: string; until: number } | null,   // "Go To" pulse target; _itemForTask re-applies .goto-target while unexpired so a rebuild can't drop it
-  _gotoFlashTimer: null as ReturnType<typeof setTimeout> | null,
+  _gotoTarget: null as { kind: 'task'; taskId: string } | { kind: 'cell'; itemId: string } | null,   // "Go To" marker; stays until the planner moves on (clearGotoTarget). Builders re-apply .goto-target so a rebuild can't drop it
   _conflictSrc: null as NimbusAlert[] | null,           // alerts array reference — invalidates cache when it changes
   _conflictSet: null as Set<string> | null,           // Set<String(taskId)> built once per alerts array identity
   _visEl:       null as HTMLElement | null,           // cached #vis-timeline element (set in init)
@@ -775,12 +774,12 @@ export const Timeline = {
     });
   },
 
-  /** Add/strip `.goto-target` on every live item of one order (all split segments)
-   *  through the suppressed-update pattern of `_applyDistSiblingHighlight`. */
-  _setGotoClass(taskId: string, on: boolean): void {
+  /** Add/strip `.goto-target` on the given live items through the suppressed-update
+   *  pattern of `_applyDistSiblingHighlight`. */
+  _setGotoClassIds(itemIds: Iterable<string>, on: boolean): void {
     if (!Timeline._items) return;
     const updates: Array<{ id: string; className: string }> = [];
-    for (const itemId of Timeline.itemIdsForTask(taskId)) {
+    for (const itemId of itemIds) {
       const item = Timeline._items.get(itemId) as TimelineVisItem | null;
       if (!item) continue;
       const parts = (item.className || '').split(' ').filter(Boolean);
@@ -792,24 +791,33 @@ export const Timeline = {
     Timeline._suppressEvents = true;
     try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = false; }
   },
-
-  /** "Go To" pulse: ring the order (every segment) for GOTO_FLASH_MS, then drop back to the
-   *  plain selection look. State lives in `_gotoFlash` so rebuilds re-apply it. */
-  flashTarget(taskId: string | number): void {
-    const id = String(taskId);
-    const prev = Timeline._gotoFlash;
-    if (Timeline._gotoFlashTimer) clearTimeout(Timeline._gotoFlashTimer);
-    Timeline._gotoFlash = { taskId: id, until: Date.now() + Timeline.GOTO_FLASH_MS };
-    if (prev && prev.taskId !== id) Timeline._setGotoClass(prev.taskId, false);
-    Timeline._setGotoClass(id, true);
-    Timeline._gotoFlashTimer = setTimeout(() => {
-      Timeline._gotoFlashTimer = null;
-      const cur = Timeline._gotoFlash;
-      Timeline._gotoFlash = null;
-      if (cur) Timeline._setGotoClass(cur.taskId, false);
-    }, Timeline.GOTO_FLASH_MS + 100);   // +100ms so the last pulse completes before the class is stripped
+  /** Every segment of one order. */
+  _setGotoClass(taskId: string, on: boolean): void {
+    Timeline._setGotoClassIds(Timeline.itemIdsForTask(taskId), on);
   },
-  GOTO_FLASH_MS: 2500,
+
+  /** "Go To" marker on an order (every segment). Persists until `clearGotoTarget`; state lives
+   *  in `_gotoTarget` so rebuilds re-apply it. */
+  markGotoTask(taskId: string | number): void {
+    const id = String(taskId);
+    Timeline.clearGotoTarget();
+    Timeline._gotoTarget = { kind: 'task', taskId: id };
+    Timeline._setGotoClass(id, true);
+  },
+  /** "Go To" marker on a line/day alert cell (no order to ring). Same lifetime as `markGotoTask`. */
+  markGotoCell(line: string, dayKey: string): void {
+    const itemId = `alertcell-${line}-${dayKey}`;
+    Timeline.clearGotoTarget();
+    Timeline._gotoTarget = { kind: 'cell', itemId };
+    Timeline._setGotoClassIds([itemId], true);
+  },
+  clearGotoTarget(): void {
+    const cur = Timeline._gotoTarget;
+    if (!cur) return;
+    Timeline._gotoTarget = null;
+    if (cur.kind === 'task') Timeline._setGotoClass(cur.taskId, false);
+    else Timeline._setGotoClassIds([cur.itemId], false);
+  },
 
   /** Build an item object for a task. */
   _itemForTask(t: NimbusTask): TimelineVisItem {
@@ -819,10 +827,10 @@ export const Timeline = {
     const label = t.text || t.ORDER || String(t.id);
     const cls = [firmed ? 'order-firmed' : 'order-standard'];
     if (conflict) cls.push('conflict-order');
-    // "Go To" pulse (flashTarget): lives in className like the dimming below, so a rebuild
-    // or single-item patch that rebuilds the item keeps it until the flash expires.
-    const flash = Timeline._gotoFlash;
-    if (flash && flash.taskId === String(t.id) && Date.now() < flash.until) cls.push('goto-target');
+    // "Go To" marker (markGotoTask): lives in className like the dimming below, so a rebuild
+    // or single-item patch that rebuilds the item keeps it until the planner moves on.
+    const goto = Timeline._gotoTarget;
+    if (goto && goto.kind === 'task' && goto.taskId === String(t.id)) cls.push('goto-target');
     // Filter dimming lives in className, which this builder recomputes on every rebuild —
     // without re-applying it here a rebuild (plant/line change, bulk edit) silently un-dimmed
     // every bar until the next filter tweak.
@@ -1311,14 +1319,16 @@ export const Timeline = {
       const cls  = cell.sev !== 'err'  ? 'alertcell-warn'
                  : cell.hasConflictErr ? 'alertcell-err'
                  :                       'alertcell-calendar';
+      const cellId = `alertcell-${cell.line}-${cell.dayKey}`;
+      const gt = Timeline._gotoTarget;
       const item: TimelineVisItem = {
-        id:    `alertcell-${cell.line}-${cell.dayKey}`,
+        id:    cellId,
         group: cell.line,
         kind:  'zone',
         start: new Date(cell.dayKey + 'T00:00:00'),
         end:   new Date(cell.dayKey + 'T23:59:59'),
         type:  'background',
-        className: cls,
+        className: gt && gt.kind === 'cell' && gt.itemId === cellId ? `${cls} goto-target` : cls,
         editable: false,
       };
       desired.set(String(item.id), item);
@@ -3796,6 +3806,11 @@ export const Interaction = {
 
     /* ----- Selection → vis-timeline + Inspector sync (one-way, write) --- */
     Selection.on(evt => {
+      // The Go To marker stays until the planner moves on: a task target clears once its order
+      // leaves the selection, a cell target on any selection of orders.
+      const gt = Timeline._gotoTarget;
+      if (gt && (gt.kind === 'task' ? !evt.ids.includes(gt.taskId) : evt.ids.length > 0)) Timeline.clearGotoTarget();
+
       Timeline._suppressEvents = true;
       try { Timeline._tl!.setSelection(evt.ids.flatMap(id => Timeline.itemIdsForTask(id))); }
       finally { Timeline._suppressEvents = false; }
@@ -4340,7 +4355,7 @@ export const Interaction = {
 
     if (props.what !== 'item' || props.item == null) {
       // Click on empty canvas — clear unless modifier held.
-      if (!shift && !meta) Selection.clear();
+      if (!shift && !meta) { Selection.clear(); Timeline.clearGotoTarget(); }   // a cell target has no selection to clear
       return;
     }
 
@@ -4947,6 +4962,7 @@ export const Interaction = {
 
     // Escape → clear
     if (e.key === 'Escape') {
+      if (Timeline._gotoTarget) Timeline.clearGotoTarget();
       if (Selection.size()) { e.preventDefault(); Selection.clear(); }
       return;
     }
