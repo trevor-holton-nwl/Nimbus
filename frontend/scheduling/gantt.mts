@@ -392,7 +392,10 @@ export const Timeline = {
         hz = typeof hzRaw === 'number' ? hzRaw : null;
       }
       const frozenEnd = (Timeline._frozenHorizonIds.length && Store.frozenHorizonEnd) ? Store.frozenHorizonEnd : null;
-      const edgeKey = `${typeof hz === 'number' ? hz : ''}|${frozenEnd ? frozenEnd.getTime() : ''}`;
+      // The frozen far edge rolls with the clock, so its instant can't be an "edge input changed"
+      // key (it would differ every tick and defeat the 0.5 px gate); its window length in whole
+      // days is the input that actually changes (Scheduling Rules edit, plant switch).
+      const edgeKey = `${typeof hz === 'number' ? hz : ''}|${frozenEnd ? Math.round((frozenEnd.getTime() - now.getTime()) / 86_400_000) : ''}`;
       const zonesVisible = Timeline._ganttActive() && Timeline._vScrollLaidOut();
       if (zonesVisible && (edgeKey !== Timeline._zoneEdgeKey || tickerShouldPush({
         nowMs: now.getTime(), lastPushedMs: Timeline._zonePushedMs,
@@ -407,9 +410,8 @@ export const Timeline = {
             if (Timeline._items!.get(id)) updates.push({ id, start: now, end: hzEnd });
           }
         }
-        // C2: only the near edge tracks "now" — the far edge (Store.frozenHorizonEnd)
-        // is a fixed absolute instant recomputed server-side on the next /tasks
-        // load, not a rolling duration, so it is deliberately left alone here.
+        // C2 (rolling since 2026-10-19): BOTH edges track "now", like the alert band above —
+        // Store.frozenHorizonEnd is plant-local now + frozen_horizon_days, recomputed live.
         if (frozenEnd) {
           for (const id of Timeline._frozenHorizonIds) {
             if (Timeline._items!.get(id)) updates.push({ id, start: now, end: frozenEnd });
@@ -424,11 +426,12 @@ export const Timeline = {
 
       // P2: coarse 30s scan for orders crossing the frozen-horizon band —
       // symmetric diff against the last-known membership set. Orders leave
-      // the band as "now" advances past them; new members appear when the
-      // server recomputes frozen_horizon_end on the next /tasks refetch.
+      // the band as "now" advances past them; new members appear as the
+      // rolling far edge (now + frozen days, read live through
+      // Engine.isFrozenHorizon) advances over their start.
       // Also self-heals if the horizon changes mid-session. Cache-only boots
-      // have frozenHorizonEnd null until the first /tasks fetch, matching
-      // the band's own absence in that state.
+      // have frozenHorizonEnd null until the plant's master data (or the
+      // first /tasks fetch) is in, matching the band's own absence then.
       if (Date.now() - Timeline._lastFirmScanTs > 30_000) {
         Timeline._lastFirmScanTs = Date.now();
         const next = new Set<string>();
@@ -1208,14 +1211,13 @@ export const Timeline = {
       }
     }
 
-    // C2 (2026-08-20): frozen-horizon zone — darker green band from now through
-    // the plant's frozen-horizon end (Store.frozenHorizonEnd, already computed
-    // server-side by db.compute_frozen_horizon_end — see schedule-data.mts),
-    // one per visible line, inserted AFTER (so painted above, DOM order = paint
-    // order) the alert-horizon zone above. Unlike that band, the far edge here
-    // is a fixed absolute instant, not a rolling now+duration window — only the
-    // near edge tracks "now" (see the ticker below). Absent when the plant has
-    // no frozen window (frozen_horizon_days NULL/0 -> Store.frozenHorizonEnd null).
+    // C2 (2026-08-20; rolling since 2026-10-19): frozen-horizon zone — darker green
+    // band from now through now + frozen_horizon_days (Store.frozenHorizonEnd,
+    // computed live from the plant clock and master data, mirroring
+    // db.compute_frozen_horizon_end), one per visible line, inserted AFTER (so
+    // painted above, DOM order = paint order) the alert-horizon zone above. Like
+    // that band, BOTH edges track "now" (see the ticker above). Absent when the
+    // plant has no frozen window (frozen_horizon_days NULL/0 -> Store.frozenHorizonEnd null).
     {
       const frozenEnd = Store.frozenHorizonEnd;
       if (frozenEnd) {

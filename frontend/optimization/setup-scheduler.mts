@@ -6612,8 +6612,12 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     // on the pilot. The structural comparison below covers the complete
     // scheduling read model, so identical state means the candidate is
     // exactly as valid as when it was evaluated.
-    const { readModelVersion: _baselineRevision, ...baselineState } = baselineSnapshot;
-    const { readModelVersion: _currentRevision, ...currentState } = currentSnapshot;
+    // `frozenHorizonEnd` is excluded for the same reason: the frozen horizon rolls with the
+    // clock (now + N days, 2026-10-19), so the instant captured at snapshot time is always
+    // behind a later snapshot. The horizon's actual input, the plant's `frozen_horizon_days`,
+    // lives in `masterData.plants[]` and stays inside the comparison.
+    const { readModelVersion: _baselineRevision, frozenHorizonEnd: _baselineFrozenEnd, ...baselineState } = baselineSnapshot;
+    const { readModelVersion: _currentRevision, frozenHorizonEnd: _currentFrozenEnd, ...currentState } = currentSnapshot;
     const baseline = JSON.stringify({ ...baselineState, alerts: [], firmedIds: [...baselineSnapshot.firmedIds].sort() });
     const current = JSON.stringify({ ...currentState, alerts: [], firmedIds: [...currentSnapshot.firmedIds].sort() });
     if (baseline !== current) add('stale_candidate', 'The schedule or scheduling inputs changed after this proposal was evaluated.');

@@ -97,10 +97,11 @@ interface StoreState {
   /** C2 (2026-08-20): the currently-selected plant's frozen-horizon end
    *  instant, as computed server-side and echoed in GET /tasks' `meta.
    *  frozen_horizon_end` — null when off (frozen_horizon_days NULL/0) or
-   *  before any load. Same reasoning as visibilityHorizonEnd above: read by
-   *  Engine.frozenHorizonEnd/isFrozenHorizon (optimization/engine.mts) and
-   *  Timeline's `.frozen-horizon-zone` band (scheduling/gantt.mts) instead
-   *  of either carrying its own copy of the anchor-day/roll-hour clock math. */
+   *  before any load. FALLBACK ONLY since the frozen horizon became a rolling
+   *  now + N days window (2026-10-19): the `Store.frozenHorizonEnd` getter
+   *  computes the live value from the plant clock and master data, and
+   *  returns this cached instant only when the plant's master-data row is
+   *  unknown or lacks `frozen_horizon_days`. */
   frozenHorizonEnd: Date | null;
 }
 
@@ -213,7 +214,28 @@ export const Store = {
   get dependencies(): Record<string, string[]>  { return this._state.dependencies; },
   get orderFieldVisibility(): StoreState['orderFieldVisibility'] { return this._state.orderFieldVisibility; },
   get visibilityHorizonEnd(): Date | null { return this._state.visibilityHorizonEnd; },
-  get frozenHorizonEnd(): Date | null { return this._state.frozenHorizonEnd; },
+  /** Rolling frozen-horizon far edge (2026-10-19): plant-local NOW + `frozen_horizon_days` wall-clock
+   *  days, computed live on every read from the selected plant's clock (`plantNow`) and its master-data
+   *  row, so both edges of the frozen window advance with the clock like the alert horizon. This is the
+   *  one source every reader sees (Engine helpers, the optimizer snapshot, Gantt band/ticker/lock scan).
+   *  Row present with NULL/0 days -> null (off); row present with no usable plant clock -> null (never
+   *  throws). Only when the plant's master-data row is unknown, or does not carry the
+   *  `frozen_horizon_days` key at all (master data not loaded yet; cache-only boot), does it fall back
+   *  to the server-resolved instant cached from /tasks `meta` (`setFrozenHorizonEnd`). */
+  get frozenHorizonEnd(): Date | null {
+    const plant = this._state.selectedPlant;
+    const row = plant ? this._state.masterData?.plants?.find(p => p.plant === plant) : undefined;
+    if (row && row.frozen_horizon_days !== undefined) {
+      const days = row.frozen_horizon_days;
+      if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0) return null;
+      const now = this.plantNow(plant);
+      if (!now) return null;
+      const end = new Date(now.getTime());
+      end.setDate(end.getDate() + Math.trunc(days));   // wall-clock days, same as the server's timedelta on the plant-local clock
+      return end;
+    }
+    return this._state.frozenHorizonEnd;
+  },
   /** Read the timestamp of the most recent optimizer run. Return a detached
    * Date so callers cannot mutate Store's metadata without going through the
    * setter. */

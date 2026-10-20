@@ -21,7 +21,7 @@ Frontend half: `frontend/scheduling/CLAUDE.md` (`gantt.mts`, `orders.mts`, `sele
 
 **`db.py`/`master_data.py` are not split** (deferred, see `docs/MIGRATION.md`) — this domain's route file imports both whole at repo root (`import db`, `import master_data as md`) and calls into them for all actual data work. Current line ranges this domain's logic depends on (grepped fresh against `db.py` on `feature/backward-scheduling` at 3ba27bf as of 2026-10-15, 5,235 lines total):
 - `db.make_id()` — line 123 (the MD5 task-id scheme; not called directly by these routes but its stability is why ids can key `/tasks/refresh` and drag/edit operations across reloads).
-- `db._horizon_bounds_for_plant()` — line 529 (visibility/frozen horizon bounds `get_tasks` rides along on, per its own C1/C2 comments).
+- `db._horizon_bounds_for_plant()` — line 529 (visibility/frozen horizon bounds `get_tasks` rides along on, per its own C1/C2 comments). The visibility horizon is a plant-local midnight that rolls once a day at `horizon_roll_hour_utc`; the frozen horizon (`db.compute_frozen_horizon_end`) is NOT — since 2026-10-19 it is a continuously rolling plant-local now + `frozen_horizon_days` (naive datetime), and `horizon_roll_hour_utc` no longer affects it.
 - `db.query_orders()` — line 640 (the `GET /tasks` data source).
 - `db.count_orders()` — line 711 (paging total).
 - `db.get_task_versions()` — line 868 (backs `/tasks/refresh`; `TaskVersionRow`'s docstring cites `db.py:437-445` for its shape, which is stale — re-grep before trusting either number).
