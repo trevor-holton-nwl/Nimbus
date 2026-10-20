@@ -22,6 +22,7 @@ frontend/optimization/scheduler-contract.mjs
 frontend/optimization/engine.mjs
 frontend/calendar/calendar-engine.mjs
 frontend/insights/services.mjs
+frontend/insights/alert-profiles.mjs
 frontend/scheduling/persistence.mjs
 frontend/calendar/calendar-sync.mjs
 frontend/security/session.mjs

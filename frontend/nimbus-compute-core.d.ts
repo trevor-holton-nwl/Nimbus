@@ -69,7 +69,7 @@ declare global {
     planning_status?: string;
     /** {code, step, message} per ROUTING_RUNTIME_DESIGN.md §4 item 2; message is
      *  already i18n'd server-side. */
-    planning_reason?: { code?: string; step?: string; message?: string } | null;
+    planning_reason?: { code?: string; step?: string | null; message?: string } | null;
     /** §5.2/§8.6: carries lot_size_warning (bool) among other resolver-written fields. */
     run_time_basis?: { lot_size_warning?: boolean } | null;
     PRT_01?: string;

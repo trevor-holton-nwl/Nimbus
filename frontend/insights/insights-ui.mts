@@ -26,7 +26,8 @@ import { Engine } from '../optimization/engine.mjs';
 import { Timeline } from '../scheduling/gantt.mjs';
 import { Table, Inspector, notifyResidualFirming } from '../scheduling/orders.mjs';
 import { Selection } from '../scheduling/selection.mjs';
-import type { NimbusTask, AlertType, UtilSevBucket } from '../platform/types.mjs';
+import { categoryOf } from './alert-profiles.mjs';
+import type { NimbusTask, UtilSevBucket } from '../platform/types.mjs';
 
 // VirtualList row-height constant for Dashboard's Line Status list (moved
 // from app.js's top-of-file const group alongside VL_HIER_LINE_H/
@@ -1377,34 +1378,13 @@ export const AlertsUIAdapter = {
 
     // -------- Categorize alerts
     const CALENDAR_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
-    // Partial: AlertType also carries the setup-diagnostic types, which
-    // intentionally have no UI category yet (see comment below) and fall
-    // through to 'exceptions' at the lookup site. tool-conflict files with
-    // 'conflicts' (same bucket as overlap), not the exceptions fallback.
-    const CAT_MAP: Partial<Record<AlertType, string>> = {
-      overload:             'capacity',
-      'near-capacity':      'capacity',
-      overlap:              'conflicts',
-      'tool-conflict':      'conflicts',
-      'distribution-separation': 'conflicts',
-      blackout:             'calendar',
-      closed:               'calendar',
-      'firmed-closed':       'calendar',
-      'firmed-out-of-hours': 'calendar',
-      'runtime-schedule-mismatch': 'exceptions',
-      'runtime-unknown':     'exceptions',
-      'pv-lot-size':         'exceptions',
-      // D20/VM13: the alert types added by the backward-scheduling work file explicitly, not by the fallback.
-      late: 'exceptions', reversal_forward: 'exceptions', placement_exception: 'exceptions',
-      frozen_window_crossed: 'exceptions', pull_floor_crossed: 'exceptions', setup_override_orphaned: 'exceptions',
-      no_anchor: 'exceptions', derivation_issue: 'exceptions',
-      finish_moved_earlier: 'calendar', plant_no_timezone: 'calendar', line_no_calendar: 'calendar',
-      run_time_zero: 'exceptions', no_operating_window: 'calendar',
-    };
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
-    // Setup diagnostics are intentionally not given a UI category in this
-    // Stage-1 task; they retain the existing exceptions fallback.
-    for (const a of matches) byCat[CAT_MAP[a.type as AlertType] || 'exceptions'].push(a);
+    // The shared ALERT_CATEGORIES (./alert-profiles) carries a fifth 'setup' group, but this briefing renders
+    // four fixed sections: setup diagnostics keep filing under 'exceptions' ("Other"), exactly as before.
+    for (const a of matches) {
+      const cat = categoryOf(a.type);
+      byCat[cat === 'setup' ? 'exceptions' : cat].push(a);
+    }
 
     const errCt  = matches.filter(a => a.sev === 'err').length;
     const warnCt = matches.filter(a => a.sev === 'warn').length;
