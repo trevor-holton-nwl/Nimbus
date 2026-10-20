@@ -113,6 +113,13 @@ export function categoryOf(type: string): AlertCategory {
   return _categoryByType.get(type) ?? 'exceptions';
 }
 
+/** Types the drawer and the Alert Monitor offer a one-click Fix for. */
+export const FIXABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'overload', 'tool-conflict']);
+/** Types offered Override (when the alert carries a taskId). */
+export const OVERRIDE_ALERT_TYPES: ReadonlySet<string> = new Set(['closed', 'firmed-closed', 'firmed-out-of-hours']);
+/** Calendar-family types: drawn with the ⊘ glyph / calendar styling. */
+export const CALENDAR_ALERT_TYPES: ReadonlySet<string> = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
+
 /** Alert types that can actually fire: every type except `near-capacity` and `line_no_calendar` (mirrors the server's ALERT_TYPES). */
 export const FIRING_ALERT_TYPES: AlertType[] =
   Object.values(ALERT_CATEGORIES).flat().filter(t => t !== 'near-capacity' && t !== 'line_no_calendar');

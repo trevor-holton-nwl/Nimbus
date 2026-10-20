@@ -26,7 +26,7 @@ import { Engine } from '../optimization/engine.mjs';
 import { Timeline } from '../scheduling/gantt.mjs';
 import { Table, Inspector, notifyResidualFirming } from '../scheduling/orders.mjs';
 import { Selection } from '../scheduling/selection.mjs';
-import { categoryOf } from './alert-profiles.mjs';
+import { categoryOf, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
 import type { NimbusTask, UtilSevBucket } from '../platform/types.mjs';
 
 // VirtualList row-height constant for Dashboard's Line Status list (moved
@@ -1379,7 +1379,6 @@ export const AlertsUIAdapter = {
     }
 
     // -------- Categorize alerts
-    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
     // The shared ALERT_CATEGORIES (./alert-profiles) carries a fifth 'setup' group, but this briefing renders
     // four fixed sections: setup diagnostics keep filing under 'exceptions' ("Other"), exactly as before.
@@ -1452,7 +1451,7 @@ export const AlertsUIAdapter = {
         ? `<button class="btn sm" data-act="goto" data-id="${Util.escapeHtml(a.id)}">Go to</button>` : '';
 
       return `
-        <div class="ac-card ${CALENDAR_TYPES.has(a.type) ? 'ac-card-calendar' : `ac-card-${a.sev}`}">
+        <div class="ac-card ${CALENDAR_ALERT_TYPES.has(a.type) ? 'ac-card-calendar' : `ac-card-${a.sev}`}">
           <div class="ac-card-headline">
             <span class="ac-card-sev">${sevIcon[a.sev] || '•'}</span>
             <span>${headline}</span>
@@ -1567,12 +1566,11 @@ export const AlertsUIAdapter = {
   },
 
   _renderAlertRow(a: NimbusAlert): string {
-    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
     const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
-    const isCalendar = CALENDAR_TYPES.has(a.type);
+    const isCalendar = CALENDAR_ALERT_TYPES.has(a.type);
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
-    const fixable  = ['overlap', 'blackout', 'overload', 'tool-conflict'].includes(a.type);
-    const override = (a.type === 'closed' || a.type === 'firmed-closed' || a.type === 'firmed-out-of-hours') && a.taskId != null;
+    const fixable  = FIXABLE_ALERT_TYPES.has(a.type);
+    const override = OVERRIDE_ALERT_TYPES.has(a.type) && a.taskId != null;
     const msg = a.msgKey ? Util.t(a.msgKey, a.msgVars ?? {}) : a.msg;
     return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${Util.escapeHtml(a.id)}">` +
       `<span class="alert-ico">${ico}</span>` +

@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -178,13 +178,6 @@ export function emptyStateFor(input: {
    computes a RowView (Store / Util / NIMBUS reads) and hands it in, so these stay DOM-free.
    ------------------------------------------------------------------------- */
 
-/** Types the drawer offers a one-click Fix for (mirrors AlertsUIAdapter._renderAlertRow). */
-export const FIXABLE_TYPES: readonly string[] = ['overlap', 'blackout', 'overload', 'tool-conflict'];
-/** Types the drawer offers Override for (when the alert carries a taskId). */
-export const OVERRIDE_TYPES: readonly string[] = ['closed', 'firmed-closed', 'firmed-out-of-hours'];
-/** Calendar-family types: drawn with the ⊘ glyph. */
-export const CALENDAR_TYPES: readonly string[] = ['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours'];
-
 /** Rows shown per group before "Show all N". */
 export const GROUP_ROW_CAP = 40;
 /** Fixed row height (px) — also the VirtualList rowH in group-by none. */
@@ -204,8 +197,8 @@ export function rowActionsFor(a: { type: string; taskId?: string | null; line?: 
   const hasTask = a.taskId != null && a.taskId !== '';
   return {
     goto: hasTask || !!(a.line && a.time),
-    fix: FIXABLE_TYPES.includes(a.type),
-    override: OVERRIDE_TYPES.includes(a.type) && hasTask,
+    fix: FIXABLE_ALERT_TYPES.has(a.type),
+    override: OVERRIDE_ALERT_TYPES.has(a.type) && hasTask,
     diagnose: hasTask ? 'order' : (a.line && a.time ? 'cell' : 'none'),
   };
 }
@@ -293,7 +286,7 @@ export interface RowView {
 const _SEV_GLYPH = { err: '✖', warn: '⚠' } as const;
 
 function _sevGlyph(type: string, sev: 'err' | 'warn'): string {
-  return CALENDAR_TYPES.includes(type) ? '⊘' : _SEV_GLYPH[sev];
+  return CALENDAR_ALERT_TYPES.has(type) ? '⊘' : _SEV_GLYPH[sev];
 }
 
 /** Label/value pairs as a compact definition grid (inside the fixed-height diagnose panel). */
@@ -333,7 +326,7 @@ export function rowHtml(v: RowView, t: Translate): string {
     ? `<span class="am-num">${_esc(fmtNum(v.points))}</span>`
     : `<span class="am-num am-num-out" title="${_esc(t('am.points_outside_tip'))}">${_esc(t('am.points_outside'))}</span>`;
   const late = v.lateH > 0 ? fmtNum(v.lateH) : '—';
-  const meta = [v.orderNo, v.line].filter(Boolean).map(_esc).join(' · ');
+  const meta = _esc([v.orderNo, v.line].filter(Boolean).join(' · '));
   const help = v.help
     ? `<span class="am-help" tabindex="0" role="img" aria-label="${_esc(v.help)}" title="${_esc(v.help)}">ⓘ</span>` : '';
   const ack = v.ackLabel ? `<span class="badge badge-info am-ack-badge" title="${_esc(v.ackLabel)}">${_esc(v.ackLabel)}</span>` : '';
@@ -343,7 +336,7 @@ export function rowHtml(v: RowView, t: Translate): string {
     + `<span class="am-sev am-sev-${v.sev}" aria-hidden="true">${_sevGlyph(v.type, v.sev)}</span>`
     + `<div class="am-main"><div class="am-hl"><span class="am-headline" title="${_esc(v.headline)}">${_esc(v.headline)}</span>${help}${ack}</div>`
     + `<div class="am-msg" title="${_esc(v.message)}">${_esc(v.message)}</div></div>`
-    + `<div class="am-meta"><div class="am-meta-l" title="${_esc(meta)}">${meta}</div>`
+    + `<div class="am-meta"><div class="am-meta-l" title="${meta}">${meta}</div>`
     + `<div class="am-meta-l" title="${_esc(v.anchorTip)}">${_esc(v.dateText)}</div>`
     + `<div class="am-meta-l am-meta-rel" title="${_esc(v.anchorTip)}">${_esc(v.relText)}</div></div>`
     + `<div class="am-imp">${pts}<span class="am-num">${_esc(v.orders)}</span><span class="am-num">${_esc(late)}</span></div>`
