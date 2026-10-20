@@ -2209,7 +2209,7 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   border-radius: var(--r-md);
   box-shadow: var(--shadow-md);
   padding: 4px;
-  z-index: 1000;
+  z-index: 1500;
   min-width: 180px;
   max-width: calc(100vw - 16px);
   max-height: calc(100vh - 16px);

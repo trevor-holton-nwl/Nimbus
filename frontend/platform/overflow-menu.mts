@@ -3,24 +3,27 @@
 // keyboard logic are exported separately (menuPosition / menuKeyNav) so they test without a DOM.
 // Emits no Store events and imports nothing from Store: it is pure UI chrome.
 
-export interface MenuItem {
+interface MenuItemBase {
   id: string;
   label: string;
-  /** Called with the item for plain items, or with the new checked state for checkbox items. */
-  onSelect: (arg: MenuItem | boolean) => void;
   disabled?: boolean;
-  /** Present (true/false) = a checkbox item (role=menuitemcheckbox with a check column). */
-  checked?: boolean | undefined;
   danger?: boolean;
   /** Muted second line inside the item (e.g. why it is disabled). */
   hint?: string;
   /** Rendered as data-* attributes (camelCase keys become kebab-case) so delegated page handlers can reuse them. */
   data?: Record<string, string>;
 }
+/** A plain item (onSelect gets the item) or a checkbox item (`checked` present; onSelect gets the new state). */
+export type MenuItem = MenuItemBase & (
+  | { checked?: undefined; onSelect: (item: MenuItem) => void }
+  | { checked: boolean; onSelect: (next: boolean, item: MenuItem) => void }
+);
 
 export interface MenuOpts {
   align?: 'end';
-  /** Stable identity of the trigger across page repaints; mirrored as data-ovf-key on the trigger. */
+  /** Stable identity of the trigger across page repaints. open() writes it as data-ovf-key on the trigger and
+   *  leaves it there after close. Pages that replace innerHTML must ALSO render data-ovf-key in their own
+   *  trigger templates: reconcile() and post-action focus restore find the new trigger by that attribute. */
   key?: string;
 }
 
@@ -82,7 +85,6 @@ interface OpenState {
   anchor: HTMLElement;
   menu: HTMLElement;
   key: string | undefined;
-  prevKeyAttr: string | null;
   items: MenuItem[];
   els: HTMLElement[];
   active: number;
@@ -97,10 +99,6 @@ function teardown(st: OpenState): void {
   st.cleanup();
   st.menu.remove();
   st.anchor.setAttribute('aria-expanded', 'false');
-  if (st.key !== undefined) {
-    if (st.prevKeyAttr === null) st.anchor.removeAttribute('data-ovf-key');
-    else st.anchor.setAttribute('data-ovf-key', st.prevKeyAttr);
-  }
 }
 
 function closeState(st: OpenState, refocus: boolean): void {
@@ -125,7 +123,7 @@ function activate(st: OpenState, idx: number): void {
     el.setAttribute('aria-checked', String(item.checked));
     const mark = el.querySelector('.ovf-item-check');
     if (mark) mark.textContent = item.checked ? '✓' : '';
-    item.onSelect(item.checked);
+    item.onSelect(item.checked, item);
     return;
   }
   closeState(st, true);
@@ -170,6 +168,7 @@ function build(st: OpenState, items: MenuItem[]): void {
   });
 }
 
+/** Opens the menu for `anchor`. See MenuOpts.key for the data-ovf-key contract on repainting pages. */
 function open(anchor: HTMLElement, items: MenuItem[], opts: MenuOpts = {}): { close(): void } {
   if (_open && _open.anchor === anchor) { closeState(_open, false); return { close() {} }; }   // toggle
   if (_open) closeState(_open, false);
@@ -177,11 +176,12 @@ function open(anchor: HTMLElement, items: MenuItem[], opts: MenuOpts = {}): { cl
   const menu = document.createElement('div');
   menu.className = 'ovf-menu';
   menu.setAttribute('role', 'menu');
+  menu.setAttribute('tabindex', '-1');   // focus target when no item is enabled, so keys still work
   menu.style.position = 'fixed';
   menu.style.visibility = 'hidden';
   const st: OpenState = {
-    anchor, menu, key: opts.key, prevKeyAttr: anchor.getAttribute('data-ovf-key'),
-    items: items.map(i => ({ ...i })), els: [], active: -1, cleanup: () => {},
+    anchor, menu, key: opts.key,
+    items: items.map(i => ({ ...i }) as MenuItem), els: [], active: -1, cleanup: () => {},
   };
   build(st, st.items);
   document.body.appendChild(menu);
@@ -200,6 +200,8 @@ function open(anchor: HTMLElement, items: MenuItem[], opts: MenuOpts = {}): { cl
 
   const mask = () => st.items.map(i => !i.disabled);
   const onKey = (e: KeyboardEvent): void => {
+    const focused = st.els.indexOf(document.activeElement as HTMLElement);
+    if (focused >= 0) st.active = focused;   // a disabled item can hold focus via mouse/Tab
     const r = menuKeyNav(st.active, e.key, mask());
     if (r === 'close') { e.preventDefault(); closeState(st, true); }
     else if (r === 'select') { e.preventDefault(); activate(st, st.active); }
@@ -232,6 +234,7 @@ function open(anchor: HTMLElement, items: MenuItem[], opts: MenuOpts = {}): { cl
   _open = st;
   const first = mask().indexOf(true);
   if (first >= 0) setActive(st, first);
+  else menu.focus();
   return { close() { closeState(st, true); } };
 }
 

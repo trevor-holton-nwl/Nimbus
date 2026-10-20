@@ -222,3 +222,105 @@ test('reconcile() with no replacement trigger just closes', () => {
   OverflowMenu.reconcile();
   assert.equal(OverflowMenu.isOpen(), false);
 });
+
+// ---- fix round 1 -----------------------------------------------------------------------------------------
+
+const listenerCount = () => {
+  const n = o => Object.values(o.listeners).reduce((a, l) => a + l.length, 0);
+  return n(dom.doc) + n(dom.win);
+};
+
+test('an all-disabled menu focuses the container so Escape still closes it', () => {
+  OverflowMenu.open(anchor, [{ id: 'a', label: 'A', onSelect() {}, disabled: true, hint: 'nope' }]);
+  const m = menuEl();
+  assert.equal(m.getAttribute('tabindex'), '-1');
+  assert.equal(dom.doc.activeElement, m);
+  m.dispatch('keydown', { key: 'ArrowDown' });
+  assert.equal(OverflowMenu.isOpen(), true);
+  m.dispatch('keydown', { key: 'Escape' });
+  assert.equal(OverflowMenu.isOpen(), false);
+  assert.equal(dom.doc.activeElement, anchor);
+});
+
+test('close removes the document and window listeners it added', () => {
+  const before = listenerCount();
+  OverflowMenu.open(anchor, mkItems());
+  assert.ok(listenerCount() > before);
+  OverflowMenu.closeAll();
+  assert.equal(listenerCount(), before);
+});
+
+test('data-ovf-key stays on the trigger after close', () => {
+  OverflowMenu.open(anchor, mkItems(), { key: 'k1' });
+  OverflowMenu.closeAll();
+  assert.equal(anchor.getAttribute('data-ovf-key'), 'k1');
+});
+
+test('onSelect of a plain item can re-find the trigger by key after the menu closed', () => {
+  let found = null;
+  OverflowMenu.open(anchor, [{ id: 'x', label: 'X', onSelect: () => { found = dom.doc.querySelector('[data-ovf-key="k2"]'); } }], { key: 'k2' });
+  itemEls()[0].dispatch('click');
+  assert.equal(found, anchor);
+});
+
+test('reconcile() with no open menu is a no-op and keeps focus where it is', () => {
+  const other = dom.doc.createElement('input');
+  dom.doc.body.appendChild(other);
+  other.focus();
+  OverflowMenu.reconcile();
+  assert.equal(dom.doc.activeElement, other);
+});
+
+test('reconcile() does not steal focus when focus is elsewhere', () => {
+  OverflowMenu.open(anchor, mkItems(), { key: 'k3' });
+  const other = dom.doc.createElement('input');
+  dom.doc.body.appendChild(other);
+  other.focus();
+  anchor.remove();
+  const fresh = dom.doc.createElement('button');
+  fresh.setAttribute('data-ovf-key', 'k3');
+  dom.doc.body.appendChild(fresh);
+  OverflowMenu.reconcile();
+  assert.equal(OverflowMenu.isOpen(), false);
+  assert.equal(dom.doc.activeElement, other);
+});
+
+test('clicking the anchor while its menu is open closes it (toggle) and opens no second menu', () => {
+  const trigger = () => OverflowMenu.open(anchor, mkItems());
+  anchor.addEventListener('click', trigger);
+  trigger();
+  anchor.dispatch('mousedown');
+  assert.equal(OverflowMenu.isOpen(), true, 'mousedown on the anchor does not dismiss');
+  anchor.dispatch('click');
+  assert.equal(OverflowMenu.isOpen(), false);
+  assert.equal(dom.doc.body.querySelectorAll('.ovf-menu').length, 0);
+});
+
+test('keyboard: End and Home move focus; Space selects', () => {
+  const calls = [];
+  OverflowMenu.open(anchor, mkItems(calls));
+  const m = menuEl();
+  m.dispatch('keydown', { key: 'End' });
+  assert.equal(dom.doc.activeElement, itemEls()[3]);
+  m.dispatch('keydown', { key: 'Home' });
+  assert.equal(dom.doc.activeElement, itemEls()[0]);
+  m.dispatch('keydown', { key: ' ' });
+  assert.deepEqual(calls, [['fix', 'fix']]);
+  assert.equal(OverflowMenu.isOpen(), false);
+});
+
+test('Enter on a focused aria-disabled item does nothing and keeps the menu open', () => {
+  const calls = [];
+  OverflowMenu.open(anchor, mkItems(calls));
+  itemEls()[1].focus();
+  menuEl().dispatch('keydown', { key: 'Enter' });
+  assert.deepEqual(calls, []);
+  assert.equal(OverflowMenu.isOpen(), true);
+});
+
+test('stylesheet puts .ovf-menu above the modal layers', async () => {
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../../../frontend/styles.css', import.meta.url), 'utf8');
+  const block = /\.ovf-menu \{[^}]*\}/.exec(css)[0];
+  assert.ok(Number(/z-index:\s*(\d+)/.exec(block)[1]) >= 1500);
+});
