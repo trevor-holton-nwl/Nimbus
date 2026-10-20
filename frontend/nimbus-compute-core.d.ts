@@ -40,6 +40,9 @@ declare global {
     taskId?: string;
     /** The other order in a pairwise alert (overlap, tool-conflict). Prefer this over parsing `id`. */
     peerId?: string;
+    /** Setup diagnostics only: the from->to state pair and the plant/line scope (null when absent). */
+    pairKey?: string | null;
+    scope?: string | null;
     line: string;
     time: Date;
     requiredMinutes?: number;
@@ -225,8 +228,31 @@ declare global {
     setup?: NimbusSetupObservation;
   }
 
+  interface NimbusConfidenceWeights {
+    err: number; warn: number; tw3: number; tw7: number; alertCap: number; utilCap: number; perOverload: number;
+  }
+
+  interface NimbusConfidenceInput {
+    alerts: Array<Pick<NimbusAlert, 'sev'> & { time?: Date | null }>;
+    /** Utilization matrix; used to count overloaded line-days when `overloadedLineDays` is not given. */
+    matrix?: NimbusUtilizationMatrix | null;
+    overloadedLineDays?: number;
+    horizonStart: Date;
+    horizonMinutes: number;
+  }
+
+  interface NimbusConfidenceResult {
+    score: number;
+    alertPenalty: number;
+    utilPenalty: number;
+    /** Unrounded, uncapped sum of alert points. */
+    rawAlertPoints: number;
+    overloadedLineDays: number;
+  }
+
   interface NimbusComputeCoreApi {
     // constants
+    CONFIDENCE_WEIGHTS: Readonly<NimbusConfidenceWeights>;
     MS_DAY: number;
     MS_HOUR: number;
     OVERLOAD_THRESHOLD: number;
@@ -299,6 +325,14 @@ declare global {
     // top-level compute
     computeAlerts(payload: ComputeAlertsPayload): { alerts: NimbusAlert[]; elapsed: number };
     computeUtilization(payload: ComputeUtilizationPayload): { matrix: NimbusUtilizationMatrix };
+
+    // confidence scoring (shared by the badge and the Alert Monitor)
+    /** Days-out multiplier: <=3 days 1.5, <=7 days 1.25, else 1.0. */
+    timeWeight(time: Date | null | undefined, horizonStart: Date): number;
+    /** Uncapped impact points of one alert; 0 outside [horizonStart, horizonEnd) or without a time. */
+    alertPoints(alert: { sev: string; time?: Date | null }, horizonStart: Date, horizonEnd: Date): number;
+    countOverloadedLineDays(matrix: NimbusUtilizationMatrix | null | undefined): number;
+    scoreConfidence(input: NimbusConfidenceInput): NimbusConfidenceResult;
   }
 
   var NimbusComputeCore: NimbusComputeCoreApi | undefined;

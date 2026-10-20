@@ -1292,6 +1292,7 @@
         id: `${diagnostic.type}-${key}`, sev, type: diagnostic.type,
         msg: diagnostic.message || (defaultMsg ? defaultMsg(diagnostic, pair) : `Setup ${diagnostic.type.replaceAll('-', ' ')}${pair} on ${diagnostic.line}.`),
         taskId: diagnostic.successorOrderId, line: diagnostic.line, time,
+        pairKey: diagnostic.pairKey ?? null, scope: diagnostic.scope ?? null,
       });
     }
 
@@ -1400,8 +1401,47 @@
     return { matrix };
   }
 
+  // ── Schedule Confidence formula (single source for the badge and the Alert Monitor) ──
+  const CONFIDENCE_WEIGHTS = Object.freeze({ err: 5, warn: 2, tw3: 1.5, tw7: 1.25, alertCap: 50, utilCap: 20, perOverload: 1.5 });
+
+  // Days-out from the horizon start -> multiplier (imminent = more costly).
+  function timeWeight(time, horizonStart) {
+    if (!time) return 1.0;
+    const d = (time - horizonStart) / 86400000;
+    return d <= 3 ? CONFIDENCE_WEIGHTS.tw3 : d <= 7 ? CONFIDENCE_WEIGHTS.tw7 : 1.0;
+  }
+
+  // Uncapped impact points of one alert (0 outside [horizonStart, horizonEnd)).
+  function alertPoints(alert, horizonStart, horizonEnd) {
+    if (!alert.time || alert.time < horizonStart || alert.time >= horizonEnd) return 0;
+    const base = alert.sev === 'err' ? CONFIDENCE_WEIGHTS.err : alert.sev === 'warn' ? CONFIDENCE_WEIGHTS.warn : 0;
+    return base * timeWeight(alert.time, horizonStart);
+  }
+
+  function countOverloadedLineDays(matrix) {
+    let n = 0;
+    Object.values(matrix || {}).forEach(lineData => {
+      Object.values(lineData).forEach(row => {
+        if (row.effectiveCapacity > 0 && row.scheduled > row.effectiveCapacity) n++;
+      });
+    });
+    return n;
+  }
+
+  function scoreConfidence({ alerts, matrix, overloadedLineDays, horizonStart, horizonMinutes }) {
+    const horizonEnd = new Date(horizonStart.getTime() + horizonMinutes * 60000);
+    let rawAlertPoints = 0;
+    (alerts || []).forEach(a => { rawAlertPoints += alertPoints(a, horizonStart, horizonEnd); });
+    const alertPenalty = Math.min(CONFIDENCE_WEIGHTS.alertCap, Math.round(rawAlertPoints));
+    const lineDays = overloadedLineDays != null ? overloadedLineDays : countOverloadedLineDays(matrix);
+    const utilPenalty = Math.min(CONFIDENCE_WEIGHTS.utilCap, Math.round(CONFIDENCE_WEIGHTS.perOverload * lineDays));
+    const score = Math.max(0, Math.min(100, 100 - alertPenalty - utilPenalty));
+    return { score, alertPenalty, utilPenalty, rawAlertPoints, overloadedLineDays: lineDays };
+  }
+
   return {
     // constants
+    CONFIDENCE_WEIGHTS,
     MS_DAY, MS_HOUR, OVERLOAD_THRESHOLD, WARN_THRESHOLD, SHOW_NEAR_CAPACITY_ALERTS, DEFAULT_SHIFT, WEEKEND_OFF,
     // date/time helpers
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
@@ -1411,5 +1451,7 @@
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute
     computeAlerts, computeUtilization,
+    // confidence scoring
+    timeWeight, alertPoints, countOverloadedLineDays, scoreConfidence,
   };
 });
