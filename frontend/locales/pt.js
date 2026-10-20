@@ -265,7 +265,7 @@ window.__NIMBUS_LOCALES.pt = {
   'col.subnetwork':                    'Sub-rede',
   'col.default_production_version':   'Versão de Produção Padrão',
   'col.min_lot_size':                  'Tamanho de Lote Mínimo',
-  'col.incremental_lot_size':          'Tamanho de Lote Incremental',
+  'col.incremental_lot_size':          'Valor de Arredondamento',
   'col.default_machine':               'Máquina Padrão',
   'col.planning_status':               'Status de planejamento',
   'col.planning_reason':               'Motivo de planejamento',

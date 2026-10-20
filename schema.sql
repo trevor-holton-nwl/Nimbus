@@ -1222,7 +1222,7 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('material_plants',  'status_pl',                  'Status PL',                    FALSE, 4),
     ('material_plants',  'default_production_version', 'Default Production Version',   FALSE, 5),
     ('material_plants',  'min_lot_size',               'Minimum Lot Size',             FALSE, 6),
-    ('material_plants',  'incremental_lot_size',       'Incremental Lot Size',         FALSE, 7),
+    ('material_plants',  'incremental_lot_size',       'Rounding Value',               FALSE, 7),
     ('bom_items',        'material_id',                'Material',                     TRUE,  1),
     ('bom_items',        'plant',                      'Plant',                        TRUE,  2),
     ('bom_items',        'alternative_bom',            'Alternative BOM',              TRUE,  3),
@@ -2155,3 +2155,11 @@ BEGIN
   END IF;
 END
 $mig$;
+
+-- Display-label rename "Incremental Lot Size" -> "Rounding Value" (mirrors migrations/2026-10-19-2-rounding-value-label.sql).
+-- Idempotent; leaves an admin-customized label alone.
+UPDATE column_metadata
+   SET display_label = 'Rounding Value'
+ WHERE table_name = 'material_plants'
+   AND column_name = 'incremental_lot_size'
+   AND display_label = 'Incremental Lot Size';

@@ -294,7 +294,7 @@ window.__NIMBUS_LOCALES.en = {
   'col.subnetwork':                    'Subnetwork',
   'col.default_production_version':   'Default Production Version',
   'col.min_lot_size':                  'Minimum Lot Size',
-  'col.incremental_lot_size':          'Incremental Lot Size',
+  'col.incremental_lot_size':          'Rounding Value',
   'col.default_machine':               'Default Machine',
   'col.default_machine_hint':          'Distribution default when this machine belongs to the order\'s work center (decision G)',
   // Work Centers tab (§4.3) — column headers for the detail panel/membership table.

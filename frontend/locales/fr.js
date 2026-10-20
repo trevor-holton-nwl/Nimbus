@@ -265,7 +265,7 @@ window.__NIMBUS_LOCALES.fr = {
   'col.subnetwork':                    'Sous-réseau',
   'col.default_production_version':   'Version de Production par Défaut',
   'col.min_lot_size':                  'Taille de Lot Minimale',
-  'col.incremental_lot_size':          'Taille de Lot Incrémentale',
+  'col.incremental_lot_size':          "Valeur d'arrondi",
   'col.default_machine':               'Machine par Défaut',
   'col.planning_status':               'Statut de planification',
   'col.planning_reason':               'Motif de planification',

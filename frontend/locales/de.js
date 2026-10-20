@@ -265,7 +265,7 @@ window.__NIMBUS_LOCALES.de = {
   'col.subnetwork':                    'Subnetzwerk',
   'col.default_production_version':   'Standard-Fertigungsversion',
   'col.min_lot_size':                  'Mindestlosgröße',
-  'col.incremental_lot_size':          'Losgrößenzuschlag',
+  'col.incremental_lot_size':          'Rundungswert',
   'col.default_machine':               'Standardmaschine',
   'col.planning_status':               'Planungsstatus',
   'col.planning_reason':               'Planungsgrund',

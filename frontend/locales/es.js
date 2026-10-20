@@ -266,7 +266,7 @@ window.__NIMBUS_LOCALES.es = {
   'col.subnetwork':                    'Subred',
   'col.default_production_version':   'Versión de Producción Predet.',
   'col.min_lot_size':                  'Tamaño de Lote Mínimo',
-  'col.incremental_lot_size':          'Tamaño de Lote Incremental',
+  'col.incremental_lot_size':          'Valor de Redondeo',
   'col.default_machine':               'Máquina Predeterminada',
   'col.planning_status':               'Estado de planificación',
   'col.planning_reason':               'Motivo de planificación',
