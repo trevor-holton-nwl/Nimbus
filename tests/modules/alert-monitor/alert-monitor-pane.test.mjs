@@ -10,26 +10,12 @@ import { ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID } from '../../../frontend/ins
 import { Session } from '../../../frontend/security/session.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Util } from '../../../frontend/platform/foundation.mjs';
+import { makeEl } from '../helpers/dom-stub.mjs';
 
 globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 globalThis.window = globalThis.window || {};
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-function makeEl(id) {
-  const handlers = {};
-  return {
-    id, _html: '', writes: 0, handlers, textContent: '', hidden: false, value: '', checked: false, title: '', disabled: false, dataset: {},
-    get innerHTML() { return this._html; },
-    set innerHTML(v) { this._html = v; this.writes++; },
-    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
-    setAttribute() {}, addEventListener(type, fn) { handlers[type] = fn; },
-    querySelectorAll() { return []; }, querySelector() { return null; },
-    scrollIntoView() {}, blur() {}, focus() {}, closest() { return null; },
-    // VirtualList mounts an inner div into the scroll element (group-by none).
-    appendChild() {}, remove() {}, removeEventListener() {}, style: {}, clientHeight: 600, scrollTop: 0,
-  };
-}
 
 const prior = {};
 let els;
