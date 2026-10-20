@@ -2563,6 +2563,7 @@ window.__NIMBUS_LOCALES.fr = {
   'us.alert_profile_manage': 'Ouvrir le Moniteur d’alertes',
   'us.alert_gantt_highlight': 'Mettre en évidence dans le Gantt les correspondances du profil',
   'us.alert_gantt_highlight_hint': 'Les barres sont colorées selon la catégorie d’alerte, avec un anneau intérieur rouge ou ambre pour la gravité. Désactivé, les couleurs standard s’appliquent.',
+  'tbl.status_profile': 'Correspond à mon profil d’alertes',
   'legend.pm_capacity_t': 'Alerte de capacité',
   'legend.pm_capacity_d': 'Cette commande a une alerte de capacité suivie par votre profil actif.',
   'legend.pm_conflicts_t': 'Alerte de conflit de planification',

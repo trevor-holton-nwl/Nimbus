@@ -81,6 +81,8 @@ import { MaterialGrids } from '../master-data/material-grids.mjs';
 import { DistributionPane } from '../distribution/distribution-pane.mjs';
 import { AlertMonitorPane } from '../alert-monitor/alert-monitor-pane.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
+import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
+import { ALL_ALERTS_PROFILE_ID } from '../insights/alert-profiles.mjs';
 import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab, PriorityFieldMeta } from '../platform/types.mjs';
 
 // -- Local type declarations (Phase 5 conversion; scoped to this file) ------
@@ -843,7 +845,7 @@ const SessionUIAdapter = {
         </label>
         <button type="button" class="btn btn-ghost sm" id="us-opt-clear" style="margin-top:8px"${od ? '' : ' hidden'}>${Util.t('us.opt_defaults_clear')}</button>
         <p class="us-field-hint">${Util.t('us.opt_defaults_hint')}</p>
-      </div>`;
+      </div>${SessionUIAdapter._alertProfileRowsHtml()}`;
 
     const tfSel = pane.querySelector<HTMLSelectElement>('#us-pref-timeformat')!;
     tfSel.addEventListener('change', () => { Session.setPref('timeFormat', tfSel.value); SessionUIAdapter._repaintDisplayFormat(); });
@@ -881,6 +883,85 @@ const SessionUIAdapter = {
       Session.setPref('optimizerDefaults', null);
       SessionUIAdapter._renderWorkflowPane();
     });
+    SessionUIAdapter._initAlertProfileRows(pane);
+  },
+
+  // Alert Monitor defaults: the plant's default alert profile (a searchable single-select, never chips),
+  // a shortcut to the Alert Monitor page (the editor is never opened from here) and the Gantt highlight toggle.
+  _alertProfileRowsHtml(): string {
+    const plant = Store.selectedPlant ?? null;
+    const label = Util.t('us.alert_profile_for', { plant: plant ?? '' });
+    const picker = plant
+      ? `<div class="us-combo" id="us-ap-combo">
+           <input type="text" id="us-ap-input" class="us-combo-input" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="us-ap-dropdown">
+           <div class="us-combo-dropdown" id="us-ap-dropdown" role="listbox" hidden></div>
+         </div>`
+      : `<input type="text" class="us-combo-input" readonly value="${Util.escapeHtml(Util.t('us.alert_profile_no_plant'))}">`;
+    return `
+      <div class="form-row">
+        <label>${Util.escapeHtml(label)}</label>
+        ${picker}
+        <button type="button" class="btn btn-ghost sm" id="us-ap-manage" style="margin-top:8px">${Util.t('us.alert_profile_manage')}</button>
+        <p class="us-field-hint">${Util.t('us.alert_profile_hint')}</p>
+        <label class="us-toggle-row" style="margin-top:8px">
+          <input type="checkbox" id="us-ap-highlight"${Session.pref('alertProfileGanttHighlight') !== false ? ' checked' : ''}>
+          <span>${Util.t('us.alert_gantt_highlight')}</span>
+        </label>
+        <p class="us-field-hint">${Util.t('us.alert_gantt_highlight_hint')}</p>
+      </div>`;
+  },
+
+  _initAlertProfileRows(pane: Pick<HTMLElement, 'querySelector'>): void {
+    const manage = pane.querySelector<HTMLElement>('#us-ap-manage');
+    if (manage) manage.addEventListener('click', () => { Modal.close('modal-user-settings'); App.goto('alerts'); });
+    const hl = pane.querySelector<HTMLInputElement>('#us-ap-highlight');
+    if (hl) hl.addEventListener('change', () => { Session.setPref('alertProfileGanttHighlight', hl.checked); });
+
+    const plant = Store.selectedPlant ?? null;
+    const input    = pane.querySelector<HTMLInputElement>('#us-ap-input');
+    const dropdown = pane.querySelector<HTMLElement>('#us-ap-dropdown');
+    if (!plant || !input || !dropdown) return;
+
+    const byPlant = () => (Session.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
+    const profiles = () => AlertProfileClient.cached(plant) ?? [];
+    const options = () => [{ id: ALL_ALERTS_PROFILE_ID, name: Util.t('am.profile_all') }, ...profiles().map(p => ({ id: p.id, name: p.name }))];
+    const currentId = (): string => {
+      const id = byPlant()[plant] ?? ALL_ALERTS_PROFILE_ID;
+      return options().some(o => o.id === id) ? id : ALL_ALERTS_PROFILE_ID;   // a deleted profile reads as All alerts
+    };
+    const reflect = () => { input.value = options().find(o => o.id === currentId())?.name ?? ''; };
+    const open  = () => { dropdown.hidden = false; input.setAttribute('aria-expanded', 'true'); };
+    const close = () => { dropdown.hidden = true; input.setAttribute('aria-expanded', 'false'); };
+    const renderList = (query: string) => {
+      const q = (query || '').trim().toLowerCase();
+      const sel = currentId();
+      const looksLikeLabel = q === (options().find(o => o.id === sel)?.name ?? '').toLowerCase();
+      const shown = options().filter(o => !q || looksLikeLabel || o.name.toLowerCase().includes(q));
+      dropdown.innerHTML = shown.length
+        ? shown.map(o => `<div class="us-combo-option${o.id === sel ? ' selected' : ''}" role="option" data-profile="${Util.escapeHtml(o.id)}"><span>${Util.escapeHtml(o.name)}</span></div>`).join('')
+        : `<div class="us-combo-empty">${Util.t('us.no_matches')}</div>`;
+    };
+    // One key, one PATCH: read the whole map, change this plant's entry, write it back. This IS the default.
+    const choose = (id: string) => {
+      Session.setPref('alertProfileByPlant', { ...byPlant(), [plant]: id });
+      reflect(); close(); input.blur();
+    };
+
+    dropdown.addEventListener('mousedown', (e: Event) => {
+      const opt = (e.target as HTMLElement | null)?.closest?.('[data-profile]') as HTMLElement | null;
+      if (!opt) return;
+      e.preventDefault();
+      choose(opt.dataset.profile ?? ALL_ALERTS_PROFILE_ID);
+    });
+    input.addEventListener('focus', () => { renderList(input.value); open(); });
+    input.addEventListener('input', () => { renderList(input.value); open(); });
+    input.addEventListener('keydown', (e: Event) => {
+      if ((e as KeyboardEvent).key === 'Escape') { close(); reflect(); input.blur(); }
+    });
+    input.addEventListener('blur', () => setTimeout(() => { close(); reflect(); }, 120));
+    reflect();
+    // The pane renders synchronously from the cache; the fetch only fills in names. Skip if the pane was rebuilt/closed.
+    AlertProfileClient.list(plant).then(() => { if (input.isConnected !== false) reflect(); }, () => { /* keep the cached list */ });
   },
 
   // Self-service: PATCH /security/me with just this user's own name fields.

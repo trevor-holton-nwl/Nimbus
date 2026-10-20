@@ -28,6 +28,7 @@ import type { PasteMatcher } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
+import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import { Engine, predecessorOnMachine } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
@@ -50,7 +51,7 @@ import type { NimbusTask, SetupStateKey, SetupOccurrenceOverride } from '../plat
  *  the union via Engine.firmingStatus. Also the shape Table._applyChipFilter's `patch.status` and
  *  the Dashboard KPI-tile-click callers (still stopgap-typed, reached only via
  *  the loose NIMBUS.Table ambient shim) pass in. */
-type TableStatusFilter = 'late' | 'conflict' | 'atrisk' | 'firmed' | 'needs_planning';
+type TableStatusFilter = 'late' | 'conflict' | 'atrisk' | 'firmed' | 'needs_planning' | 'profile';
 
 /** Table._chipFilters — the Orders-tab filter-chip bar's live selection state. */
 interface TableChipFilters {
@@ -691,6 +692,7 @@ export const Table = {
 
     // Re-render rows whenever relevant store slices change.
     Store.subscribe(evt => Table._onStore(evt), 'Table');
+    Table._wireProfileMatches();
 
     // Live-apply an admin's System Configuration field-visibility change with
     // no page reload. Also covers the boot-time race where this grid paints
@@ -791,6 +793,7 @@ export const Table = {
     if (f.status) {
       if (f.status === 'needs_planning' && data.planning_status !== 'needs_planning') return false;
       if (f.status === 'late' && !(Util.latenessHours(data) > 0)) return false;
+      if (f.status === 'profile' && !AlertProfileMatches.current().taskIds.has(String(data.id))) return false;
       if (f.status === 'firmed' && !Engine.firmingStatus(data).firmed) return false;
       if (f.status === 'atrisk' || f.status === 'conflict') {
         const rel = Store.alertsByTask().get(String(data.id)) || [];
@@ -892,6 +895,7 @@ export const Table = {
       { v: 'conflict', k: Util.t('ui.conflicting'),  d: Util.t('ui.status_desc_conflict') },
       { v: 'atrisk',   k: Util.t('ui.at_risk'),      d: Util.t('ui.status_desc_atrisk') },
       { v: 'firmed',   k: Util.t('ui.firmed'),       d: Util.t('ui.status_desc_firmed') },
+      { v: 'profile',  k: Util.t('tbl.status_profile'), d: '' },
     ];
     drop.innerHTML = items.map(i =>
       `<label style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px;">
@@ -899,7 +903,7 @@ export const Table = {
            <input type="radio" name="tbl-flt-status" value="${i.v}"${cur === i.v ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('status', this)" style="accent-color:var(--accent);width:13px;height:13px;cursor:pointer;">
            <strong>${i.k}</strong>
          </span>
-         <span style="font-size:10.5px;color:var(--fg-mute);margin-left:21px;">${i.d}</span>
+         ${i.d ? `<span style="font-size:10.5px;color:var(--fg-mute);margin-left:21px;">${i.d}</span>` : ''}
        </label>`).join('')
       + `<div style="border-top:1px solid var(--line);margin:4px 0;"></div>
          <label style="display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:6px 14px;">
@@ -1055,7 +1059,7 @@ export const Table = {
         : Util.t('ui.n_colors_filter', { count: f.colors.size }),
       f.colors.size > 0);
 
-    const STATUS_LABEL: Record<TableStatusFilter, string> = { needs_planning: Util.t('ui.needs_planning'), late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), firmed: Util.t('ui.firmed') };
+    const STATUS_LABEL: Record<TableStatusFilter, string> = { needs_planning: Util.t('ui.needs_planning'), late: Util.t('ui.late'), conflict: Util.t('ui.conflicting'), atrisk: Util.t('ui.at_risk'), firmed: Util.t('ui.firmed'), profile: Util.t('tbl.status_profile') };
     set('tbl-flt-status-btn', 'tbl-flt-status-label',
       f.status ? STATUS_LABEL[f.status] || f.status : Util.t('ui.all_statuses'),
       !!f.status);
@@ -1092,6 +1096,18 @@ export const Table = {
       if (plant && hasNative) txt += ' ' + Util.t('ui.column_filters_active');
       hint.textContent = txt;
     }
+  },
+
+  // The 'profile' status filter reads AlertProfileMatches (own fanout, never a Store event),
+  // so the grid re-filters from this subscription — once, and only while that status is active.
+  _profileUnsub: null as (() => void) | null,
+  _wireProfileMatches(): void {
+    if (Table._profileUnsub) return;
+    Table._profileUnsub = AlertProfileMatches.subscribe(() => {
+      if (Table._chipFilters.status !== 'profile' || !Table._api) return;
+      Table._api.onFilterChanged();
+      Table._refreshChipButtons();
+    });
   },
 
   _onStore(evt: StoreEvent): void {

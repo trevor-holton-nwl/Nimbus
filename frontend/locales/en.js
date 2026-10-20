@@ -2808,6 +2808,7 @@ window.__NIMBUS_LOCALES.en = {
   'us.alert_profile_manage': 'Open Alert Monitor',
   'us.alert_gantt_highlight': 'Highlight profile matches on the Gantt',
   'us.alert_gantt_highlight_hint': 'Bars are coloured by alert category with a red or amber inner ring for severity. Off shows the standard colors.',
+  'tbl.status_profile': 'Matches my alert profile',
   'legend.pm_capacity_t': 'Capacity alert',
   'legend.pm_capacity_d': 'This order has a capacity alert your active profile is tracking.',
   'legend.pm_conflicts_t': 'Scheduling conflict alert',

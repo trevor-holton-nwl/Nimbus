@@ -13,6 +13,7 @@ import { ORDER_FIELD_CATALOG } from '../../../frontend/scheduling/order-field-ca
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
+import { AlertProfileMatches } from '../../../frontend/insights/alert-profile-matches.mjs';
 
 const require = createRequire(import.meta.url);
 // Engine.isInProgress/isFrozenHorizon default to Store.plantNow, which projects through the compute core's
@@ -1909,4 +1910,24 @@ test('W2: a split order is one span, so it is never its own predecessor', () => 
     Store.setTasks(priorTasks, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
+});
+
+test('profile status filter keeps only orders in the active profile match set and re-applies when the producer fires', () => {
+  const prior = Table._chipFilters, priorApi = Table._api;
+  const priorCurrent = AlertProfileMatches.current;
+  try {
+    Table._chipFilters = { lines: new Set(), colors: new Set(), status: 'profile', dateKey: null, poMat: new Set() };
+    AlertProfileMatches.current = () => ({ taskIds: new Set(['a']) });
+    assert.equal(Table._taskPassesChipFilters({ id: 'a', MACHINE: 'L1' }), true);
+    assert.equal(Table._taskPassesChipFilters({ id: 'b', MACHINE: 'L1' }), false);
+    let calls = 0;
+    Table._api = { onFilterChanged: () => { calls += 1; }, getFilterModel: () => ({}), getDisplayedRowCount: () => 0 };
+    Table._wireProfileMatches();
+    Table._wireProfileMatches();   // idempotent
+    AlertProfileMatches.recompute();
+    assert.equal(calls, 1, 'one subscription, one re-filter');
+    Table._chipFilters.status = 'late';
+    AlertProfileMatches.recompute();
+    assert.equal(calls, 1, 'no re-filter while another status is active');
+  } finally { Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent; }
 });

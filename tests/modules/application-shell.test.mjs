@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { App, PlantSelector, EmptyState, SessionUIAdapter, showLoginScreen, Settings } from '../../frontend/shell/application-shell.mjs';
-import { Util, Config, Toast } from '../../frontend/platform/foundation.mjs';
+import { Util, Config, Toast, Modal } from '../../frontend/platform/foundation.mjs';
 import { Store, UndoStack } from '../../frontend/platform/store.mjs';
 import { Sandbox } from '../../frontend/optimization/sandbox.mjs';
 import { Persistence } from '../../frontend/scheduling/persistence.mjs';
 import { Session } from '../../frontend/security/session.mjs';
+import { AlertProfileClient } from '../../frontend/insights/alert-profile-client.mjs';
 import { DistributionPane } from '../../frontend/distribution/distribution-pane.mjs';
 
 test('header Lines picker announces open state and Escape returns focus', () => {
@@ -494,4 +495,63 @@ test('Alert Monitor tab: nav order after Labor, landing defs, section label, fir
   t.mock.method(Session, 'canAccessTab', tab => tab === 'alerts' || tab === 'masterdata');
   assert.equal(App._firstAccessibleTab(), 'alerts');
   assert.equal(App._scrollKeyFor('alerts'), 'alerts');
+});
+
+function fakeEl(extra = {}) {
+  const handlers = {};
+  return { handlers, value: '', checked: false, hidden: true, innerHTML: '', dataset: {}, isConnected: true,
+    classList: { toggle() {}, add() {}, remove() {} }, setAttribute() {}, focus() {}, blur() {},
+    addEventListener(type, fn) { (handlers[type] ||= []).push(fn); },
+    fire(type, evt = {}) { for (const fn of handlers[type] || []) fn(evt); }, ...extra };
+}
+function fakeAlertPane() {
+  const els = { '#us-ap-input': fakeEl(), '#us-ap-dropdown': fakeEl(), '#us-ap-combo': fakeEl(),
+    '#us-ap-manage': fakeEl(), '#us-ap-highlight': fakeEl({ checked: true }) };
+  return { els, querySelector: sel => els[sel] || null };
+}
+
+test('User Settings alert-profile rows: selecting a profile writes alertProfileByPlant read-modify-write; toggle and Manage wire up', async t => {
+  t.mock.method(Util, 't', k => k);
+  t.mock.getter(Store, 'selectedPlant', () => 'P1');
+  t.mock.method(Session, 'pref', k => (k === 'alertProfileByPlant' ? { P2: 'keep-me' } : undefined));
+  t.mock.method(AlertProfileClient, 'cached', () => [{ id: 'prof-1', name: 'Night shift' }]);
+  let resolveList; t.mock.method(AlertProfileClient, 'list', () => new Promise(r => { resolveList = r; }));
+  const writes = [];
+  t.mock.method(Session, 'setPref', (k, v) => { writes.push([k, v]); });
+  const closed = []; t.mock.method(Modal, 'close', id => { closed.push(id); });
+  const gotos = []; t.mock.method(App, 'goto', tab => { gotos.push(tab); });
+  try {
+    const pane = fakeAlertPane();
+    SessionUIAdapter._initAlertProfileRows(pane);
+    pane.els['#us-ap-input'].fire('focus');
+    const dd = pane.els['#us-ap-dropdown'];
+    assert.match(dd.innerHTML, /am.profile_all/);
+    assert.match(dd.innerHTML, /Night shift/);
+    dd.fire('mousedown', { preventDefault() {}, target: { closest: () => ({ dataset: { profile: 'prof-1' } }) } });
+    assert.deepEqual(writes, [['alertProfileByPlant', { P2: 'keep-me', P1: 'prof-1' }]]);
+    pane.els['#us-ap-highlight'].checked = false;
+    pane.els['#us-ap-highlight'].fire('change');
+    assert.deepEqual(writes[1], ['alertProfileGanttHighlight', false]);
+    pane.els['#us-ap-manage'].fire('click');
+    assert.deepEqual(closed, ['modal-user-settings']);
+    assert.deepEqual(gotos, ['alerts']);
+    pane.els['#us-ap-input'].isConnected = false;   // pane torn down before the list resolves
+    resolveList([]);
+    await new Promise(r => setImmediate(r));
+  } finally { /* mocks restore with the test context */ }
+});
+
+test('User Settings alert-profile rows: no plant renders the readonly note and no combobox wiring', t => {
+  t.mock.method(Util, 't', k => k);
+  t.mock.getter(Store, 'selectedPlant', () => null);
+  t.mock.method(Session, 'pref', () => undefined);
+  {
+    const pane = fakeAlertPane();
+    const html = SessionUIAdapter._alertProfileRowsHtml();
+    assert.match(html, /us.alert_profile_no_plant/);
+    assert.doesNotMatch(html, /us-ap-combo/);
+    SessionUIAdapter._initAlertProfileRows(pane);
+    assert.equal((pane.els['#us-ap-input'].handlers.focus || []).length, 0);
+    assert.equal((pane.els['#us-ap-manage'].handlers.click || []).length, 1);
+  }
 });
