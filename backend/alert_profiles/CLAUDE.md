@@ -9,9 +9,9 @@ Backend half of the Alert Monitor (spec: `docs/superpowers/specs/2026-10-20-aler
 
 ## Tables (both per-plant; mirrored in `migrations/2026-10-20-2-alert-profiles.sql` and `schema.sql`)
 
-- `alert_profile(id, plant, name, description, rules JSONB array, ranking, created_by, updated_by, created_at, updated_at)`, `UNIQUE (plant, name)`. `ranking` is one of `impact|time|severity|orders`.
+- `alert_profile(id, plant, name, description, rules JSONB array, ranking, created_by, updated_by, created_at, updated_at)`, `UNIQUE (plant, name)`. `ranking` is one of `impact|time|severity|orders`; the Alert Monitor editor no longer shows it (it sends `impact` for new profiles and passes an existing value through unchanged), so the column and the API field are kept and the page reads `time` as its default Date sort.
 - `alert_ack(plant, alert_id, acknowledged_by, reason, until, created_at)`, PK `(plant, alert_id)`.
-- Writes append `admin_audit` rows (`alert_profile` create/update/delete, `alert_ack` ack/unack) in the same transaction.
+- Writes append `admin_audit` rows (`alert_profile` create/update/delete, `alert_ack` ack/unack) in the same transaction; a bulk acknowledge (`upsert_alert_acks`, `POST /alert-acks/bulk`) writes one `ack` row for the whole batch (the de-duplicated count and the first 50 ids).
 
 ## Routes and auth
 
