@@ -20,6 +20,7 @@ from psycopg import errors as pg_errors
 os.environ.setdefault("NIMBUS_PG_POOL_MIN", "0")
 
 import brain  # noqa: E402
+from backend.scheduling.models import PlanningReason  # noqa: E402
 import backend.routing.resolver as routing_resolver  # noqa: E402
 from backend.scheduling import routes as scheduling_routes  # noqa: E402
 
@@ -988,3 +989,8 @@ def test_tasks_meta_carries_server_now_as_iso_utc_on_the_empty_envelope(monkeypa
     assert "server_now" not in brain.TaskDTO.model_fields  # envelope meta, not a DTO field
     assert scheduling_routes._server_now_iso().endswith("Z")
 
+
+
+def test_planning_reason_carries_step():
+    assert PlanningReason(code="c", message="m", step="pv_missing").model_dump()["step"] == "pv_missing"
+    assert PlanningReason(code="c", message="m").step is None

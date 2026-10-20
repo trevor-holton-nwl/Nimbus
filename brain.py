@@ -62,6 +62,7 @@ import master_data as md
 import backend.integration.sap_staging as sap_staging
 import backend.integration.sap_sync as sap_sync
 import backend.security.auth as auth
+from backend.alert_profiles.data import ensure_alert_profile_tables
 import backend.setup.data as setup_data  # noqa: F401 — back-compat (brain.setup_data), see below
 from backend.priority_lists.audit_log import COLOR_WHEEL_DIR, _migrate_audit_log
 from backend.security.auth import require_admin, require_api_key  # noqa: F401 — back-compat, see below
@@ -283,6 +284,7 @@ async def lifespan(app: FastAPI):
     _migrate_audit_log()
     db.ensure_color_wheel_table()
     db.ensure_priority_list_table()
+    ensure_alert_profile_tables()
     db.ensure_order_schedule_segments_table()
     db.ensure_order_distribution_tables()
     if CW_BACKFILL_FROM_DISK:
