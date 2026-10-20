@@ -244,6 +244,13 @@ def delete_alert_profile(profile_id, *, actor) -> dict | None:
 
 _ACK_COLS = "plant, alert_id, acknowledged_by, reason, until, created_at"
 
+# `until` is a naive plant-local wall-clock end-of-day (the client sends `YYYY-MM-DDT23:59:59`), so expiry is judged
+# against the plant's local "now", not the DB session zone (UTC on Azure). The plant's IANA zone comes from
+# `plants.timezone` (one value per plant; blank or unset falls back to UTC, the same convention as the SAP views).
+# One bind parameter: the plant.
+_PLANT_NOW_SQL = ("(NOW() AT TIME ZONE COALESCE("
+                  "NULLIF((SELECT MIN(timezone) FROM plants WHERE plant = %s), ''), 'UTC'))")
+
 
 def _ack_row(r) -> dict:
     return {"plant": r[0], "alert_id": r[1], "acknowledged_by": r[2], "reason": r[3],
@@ -254,8 +261,8 @@ def list_alert_acks(plant: str) -> list[dict]:
     """Active acknowledgements only (no expiry, or expiry in the future)."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            f"SELECT {_ACK_COLS} FROM alert_ack WHERE plant = %s AND (until IS NULL OR until > NOW())"
-            " ORDER BY alert_id", (plant,))
+            f"SELECT {_ACK_COLS} FROM alert_ack WHERE plant = %s AND (until IS NULL OR until > {_PLANT_NOW_SQL})"
+            " ORDER BY alert_id", (plant, plant))
         return [_ack_row(r) for r in cur.fetchall()]
 
 
@@ -277,7 +284,9 @@ def upsert_alert_ack(*, plant, alert_id, reason="", until=None, actor) -> dict:
     until = _parse_until(until)
     reason = reason or ""
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM alert_ack WHERE plant = %s AND until IS NOT NULL AND until <= NOW()", (plant,))
+        cur.execute(
+            f"DELETE FROM alert_ack WHERE plant = %s AND until IS NOT NULL AND until <= {_PLANT_NOW_SQL}",
+            (plant, plant))
         cur.execute(
             "INSERT INTO alert_ack (plant, alert_id, acknowledged_by, reason, until)"
             " VALUES (%s, %s, %s, %s, %s)"

@@ -27,7 +27,7 @@ is no more global fallback wheel — COLOR_FILE/GLOBAL_CW are retired.
 P5 (docs/architecture/domain-refactor-plan.md) reorganized this file from
 ~4,074 lines holding all 103 routes down to this thin app-assembly file: app
 construction, middleware, exception handlers, lifespan bootstrap,
-`include_router` calls for the nine domain routers, and the StaticFiles mount
+`include_router` calls for the twelve domain routers, and the StaticFiles mount
 (kept last). Routes themselves now live in `backend/<domain>/routes.py`; four
 whole modules moved to `backend/`: `auth.py` -> `backend/security/auth.py`,
 `setup_data.py` -> `backend/setup/data.py`, `admin_tables.py` ->
@@ -795,7 +795,7 @@ def _admin_route_details(request: Request) -> tuple[str | None, dict]:
 
 
 # =========================
-# ROUTERS — ten domain-scoped routers (nine from docs/architecture/domain-refactor-plan.md
+# ROUTERS — twelve domain-scoped routers (nine from docs/architecture/domain-refactor-plan.md
 # §4, plus backend/distribution/ added 2026-09-17 per aggregate_to_detail.md; imported at
 # the top of this file — the module objects are already bound here)
 # =========================

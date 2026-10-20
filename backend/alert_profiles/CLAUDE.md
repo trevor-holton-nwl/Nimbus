@@ -39,7 +39,7 @@ Profiles are shared across a plant; any authenticated user with plant access can
 
 ## Conventions and hazards
 
-- **Naive local time.** `alert_ack.until` and all `*_at` columns are `TIMESTAMP` (no zone). `until` crosses the API as a naive ISO string (or null = no expiry) interpreted as plant-local server time; never send an offset or `Z`.
+- **Naive local time.** `alert_ack.until` and all `*_at` columns are `TIMESTAMP` (no zone). `until` crosses the API as a naive ISO string (or null = no expiry) interpreted as the **plant's own local wall clock**: `list_alert_acks` and the purge in `upsert_alert_ack` compare it with `NOW() AT TIME ZONE <plants.timezone>` (blank or unset zone falls back to UTC), not the DB session zone. Never send an offset or `Z`.
 - Ack `reason` is required, trimmed, at most 200 characters (enforced in the route).
 - Never fetch profiles/acks for more than one plant per request.
 
