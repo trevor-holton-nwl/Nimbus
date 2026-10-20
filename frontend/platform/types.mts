@@ -532,6 +532,16 @@ export interface AlertProfile {
   builtIn?: boolean;
 }
 
+/** One active alert acknowledgement (GET /alert-acks). `until` null = until the alert clears. */
+export interface AlertAck {
+  plant: string;
+  alert_id: string;
+  acknowledged_by: string | null;
+  reason: string;
+  until: string | null;
+  created_at: string | null;
+}
+
 /** NOT the same set as AlertSev — 'ok' is a valid utilization bucket but never a valid alert sev. */
 export type UtilSevBucket = 'err' | 'warn' | 'ok';
 
