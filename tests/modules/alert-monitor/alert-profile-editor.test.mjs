@@ -61,7 +61,7 @@ test('draftFromProfile / profileFromDraft round trip keeps every rule field incl
   const back = profileFromDraft(draft);
   assert.deepEqual(back.rules, profile.rules);
   assert.equal(back.name, 'Mine');
-  assert.equal(back.ranking, 'time');
+  assert.equal(profileFromDraft(draft, profile).ranking, 'time');
   assert.equal(back.expected_updated_at, '2026-10-20T10:00:00Z');
 });
 
@@ -199,7 +199,6 @@ test('picker lists only firing types, grouped, with a category checkbox each', (
   for (const cat of ['capacity', 'conflicts', 'calendar', 'setup', 'exceptions']) assert.match(body, new RegExp(`data-ape-cat="${cat}"`));
   assert.match(body, /type="number" min="-365" max="365" step="1"/);
   assert.match(body, /ape\.late_hours/);
-  assert.match(body, /value="orders"/);
   assert.equal(els['modal-alert-profile'].hidden, false);
 });
 
@@ -298,6 +297,67 @@ test('without the toggle no pref is written', async () => {
   click('ape-foot', { apeAct: 'save' });
   await flush();
   assert.equal(calls.prefs.length, 0);
+});
+
+test('the draft has no ranking field; profileFromDraft defaults to impact and passes an existing ranking through', () => {
+  const stored = { id: 'p1', plant: 'P1', name: 'Mine', description: '', ranking: 'time', created_by: 'me', updated_at: 'T',
+    rules: [{ types: ['late'], dayFrom: null, dayTo: null, minSev: null, minLateHours: null }] };
+  const d = draftFromProfile(stored);
+  assert.equal('ranking' in d, false);
+  assert.equal(profileFromDraft(d).ranking, 'impact');
+  assert.equal(profileFromDraft(d, stored).ranking, 'time');
+});
+
+test('the rendered editor body has no ranking label or select', () => {
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  const html = els['ape-body'].innerHTML;
+  assert.equal(html.includes('ape.ranking'), false);
+  assert.equal(html.includes('data-ape-field="ranking"'), false);
+});
+
+test('saving an existing profile keeps its stored ranking', async () => {
+  const stored = [{ ...mine, ranking: 'time' }, theirs];
+  AlertProfileClient.cached = () => stored;
+  AlertProfileClient.list = async () => stored;
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.update[0][1].ranking, 'time');
+});
+
+test('fromPicker: a successful create makes the page view the new profile; a plain create does not', async () => {
+  AlertProfileEditor.open({ plant: 'P1', fromPicker: true });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Fresh' }));
+  fire('ape-body', 'change', tgt({ apeType: 'late', apeRule: '0' }, { checked: true }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.session, ['new1']);
+
+  calls.session.length = 0;
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Fresh two' }));
+  fire('ape-body', 'change', tgt({ apeType: 'late', apeRule: '0' }, { checked: true }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.session, []);
+});
+
+test('fromPicker: editing the profile the page is viewing re-selects it; editing another does not', async () => {
+  const priorView = AlertProfileMatches.view;
+  try {
+    AlertProfileMatches.view = () => ({ profileId: 'p1' });
+    AlertProfileEditor.open({ plant: 'P1', profileId: 'p1', fromPicker: true });
+    click('ape-foot', { apeAct: 'save' });
+    await flush();
+    assert.deepEqual(calls.session, ['p1']);
+
+    calls.session.length = 0;
+    AlertProfileMatches.view = () => ({ profileId: 'p2' });
+    AlertProfileEditor.open({ plant: 'P1', profileId: 'p1', fromPicker: true });
+    click('ape-foot', { apeAct: 'save' });
+    await flush();
+    assert.deepEqual(calls.session, []);
+  } finally { AlertProfileMatches.view = priorView; }
 });
 
 test('Delete confirms with the danger tone and then removes the profile', async () => {

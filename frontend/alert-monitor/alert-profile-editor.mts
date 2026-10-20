@@ -8,7 +8,7 @@
    inside the User Settings modal.
 
    Layout: left rail = the plant's profiles (+ New profile, Duplicate, Copy to plants…),
-   right = the form for the draft (name, rules, ranking, "use for me") or, while copying,
+   right = the form for the draft (name, rules, "use for me") or, while copying,
    a searchable multi-select of the plants the user may access.
 
    Validation is NOT re-implemented here: `validateProfile` (insights/alert-profiles)
@@ -33,7 +33,6 @@ const t = (key: string, vars?: Record<string, string | number>): string => Util.
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
 
 const MAX_NAME = 60;
-const RANKINGS: AlertRanking[] = ['impact', 'time', 'severity', 'orders'];
 const CATEGORIES = Object.keys(ALERT_CATEGORIES) as AlertCategory[];
 const FIRING: ReadonlySet<string> = new Set<string>(FIRING_ALERT_TYPES);
 
@@ -53,7 +52,6 @@ export interface EditorDraft {
   plant: string;
   name: string;
   description: string;
-  ranking: AlertRanking;
   /** The row's updated_at when it was loaded: the optimistic-concurrency token for update. */
   updated_at: string | null;
   rules: RuleDraft[];
@@ -72,7 +70,7 @@ export interface ProfileFromDraft {
 const blankRule = (): RuleDraft => ({ types: [], dayFrom: null, dayTo: null, minSev: null, minLateHours: null });
 
 function blankDraft(plant: string): EditorDraft {
-  return { plant, name: '', description: '', ranking: 'impact', updated_at: null, rules: [blankRule()] };
+  return { plant, name: '', description: '', updated_at: null, rules: [blankRule()] };
 }
 
 /** Tri-state of one category header checkbox over the ticked types. */
@@ -98,7 +96,6 @@ export function draftFromProfile(p: AlertProfile): EditorDraft {
     plant: p.plant,
     name: p.name,
     description: p.description ?? '',
-    ranking: p.ranking,
     updated_at: p.updated_at,
     rules: (p.rules ?? []).map(r => ({
       types: r.types == null ? [...FIRING_ALERT_TYPES] : (r.types as string[]).filter(x => FIRING.has(x)),
@@ -110,13 +107,14 @@ export function draftFromProfile(p: AlertProfile): EditorDraft {
   };
 }
 
-export function profileFromDraft(d: EditorDraft): ProfileFromDraft {
+/** `existing` (the stored profile being edited) carries its ranking through unchanged; new profiles get 'impact'. */
+export function profileFromDraft(d: EditorDraft, existing?: { ranking?: AlertRanking } | null): ProfileFromDraft {
   return {
     ...(d.id ? { id: d.id } : {}),
     plant: d.plant,
     name: (d.name ?? '').trim(),
     description: d.description ?? '',
-    ranking: d.ranking,
+    ranking: existing?.ranking ?? 'impact',
     rules: d.rules.map(r => ({
       // Every firing type ticked is the same thing as "any type": store null so new types are included later.
       types: FIRING_ALERT_TYPES.every(x => r.types.includes(x)) ? null : [...r.types] as AlertType[],
@@ -159,7 +157,7 @@ export function liveMatchCount(
   alerts: NimbusAlert[], tasksById: Record<string, NimbusTask | undefined>, plantToday: Date,
 ): number {
   const profile = profileFromDraft({
-    plant: draft.plant, name: draft.name ?? '', description: '', ranking: 'impact', updated_at: null,
+    plant: draft.plant, name: draft.name ?? '', description: '', updated_at: null,
     rules: (draft.rules as Array<RuleDraft | AlertProfileRule>).map(r => ({
       types: r.types == null ? [...FIRING_ALERT_TYPES] : [...(r.types as string[])],
       dayFrom: r.dayFrom ?? null, dayTo: r.dayTo ?? null, minSev: r.minSev ?? null, minLateHours: r.minLateHours ?? null,
@@ -183,6 +181,8 @@ interface EditorState {
   showErrors: boolean;
   saving: boolean;
   setMine: boolean;
+  /** Opened from the Alert Monitor's profile picker: a save then makes the page view the saved profile. */
+  fromPicker: boolean;
   copy: CopyState | null;
 }
 
@@ -309,10 +309,6 @@ function _formHtml(s: EditorState): string {
     + _err(e.rules)
     + d.rules.map((r, i) => _ruleHtml(s, r, i, editable)).join('')
     + (editable ? `<button type="button" class="btn sm" data-ape-act="add-rule">${esc(t('ape.add_rule'))}</button>` : '')
-    + `<div class="form-row ape-ranking"><label>${esc(t('ape.ranking'))}</label>`
-    + `<select class="input" data-ape-field="ranking"${dis}>`
-    + RANKINGS.map(k => `<option value="${k}"${d.ranking === k ? ' selected' : ''}>${esc(t(`am.sort_${k}`))}</option>`).join('')
-    + `</select></div>`
     + `<label class="chk-inline ape-mine"><input type="checkbox" data-ape-field="setMine"${s.setMine ? ' checked' : ''}><span>${esc(t('ape.set_mine', { plant: s.plant }))}</span></label>`
     + `</section>`;
 }
@@ -400,7 +396,8 @@ async function _save(): Promise<void> {
   if (!_revalidate(s)) { _render(); return; }
   s.saving = true;
   _render();
-  const p = profileFromDraft(s.draft);
+  const stored = s.draft.id ? s.profiles.find(x => x.id === s.draft.id) : undefined;
+  const p = profileFromDraft(s.draft, stored);
   try {
     const saved = s.draft.id
       ? await AlertProfileClient.update(s.draft.id, {
@@ -416,6 +413,10 @@ async function _save(): Promise<void> {
         Session.setPref('alertProfileByPlant', { ...existing, [s.plant]: id });
         AlertProfileMatches.setSessionProfile(null);   // the pref now says the same thing
       }
+    } else if (s.fromPicker) {
+      // Opened from the page's picker: show what was just made, or what the page was already viewing and just changed.
+      const savedId = saved?.id ?? s.draft.id;
+      if (savedId && (!s.draft.id || savedId === AlertProfileMatches.view()?.profileId)) AlertProfileMatches.setSessionProfile(savedId);
     }
     AlertProfileEditor.close();
   } catch (err) {
@@ -600,7 +601,6 @@ function _onField(e: Event, kind: 'input' | 'change'): void {
     case 'dayTo': { const r = _rule(s, ds); if (r) { r.dayTo = _parseNum(el.value); _afterEdit(s); _refreshLive(); } break; }
     case 'minLateHours': { const r = _rule(s, ds); if (r) { r.minLateHours = _parseNum(el.value); _afterEdit(s); _refreshLive(); } break; }
     case 'minSev': { const r = _rule(s, ds); if (r) { r.minSev = el.value === 'warn' || el.value === 'err' ? el.value : null; _afterEdit(s); _refreshLive(); } break; }
-    case 'ranking': if (RANKINGS.includes(el.value as AlertRanking)) s.draft.ranking = el.value as AlertRanking; break;
     case 'setMine': if (kind === 'change') s.setMine = !!el.checked; break;
     case 'copyQuery': {
       if (!s.copy) break;
@@ -632,7 +632,7 @@ function _wire(): void {
 
 export const AlertProfileEditor = {
   /** Open the editor for `plant`: an existing profile when `profileId` matches, else a blank draft. */
-  open(opts: { plant: string; profileId?: string }): void {
+  open(opts: { plant: string; profileId?: string; fromPicker?: boolean }): void {
     const plant = opts.plant;
     if (!plant) return;
     const profiles = AlertProfileClient.cached(plant) ?? [];
@@ -641,7 +641,7 @@ export const AlertProfileEditor = {
     const s: EditorState = {
       plant, profiles,
       draft, baseline: _snap(draft),
-      errors: {}, serverError: null, showErrors: false, saving: false, setMine: false, copy: null,
+      errors: {}, serverError: null, showErrors: false, saving: false, setMine: false, fromPicker: !!opts.fromPicker, copy: null,
     };
     _s = s;
     _wire();
