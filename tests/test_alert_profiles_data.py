@@ -112,3 +112,34 @@ def test_ack_upsert_list_expire_delete():
         with ap._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM alert_ack WHERE plant=%s", (plant,))
             cur.execute("DELETE FROM admin_audit WHERE details->>'plant' = %s", (plant,))
+
+
+@pytest.mark.pg
+def test_ack_bulk_upsert_round_trip():
+    plant = "AB_" + uuid.uuid4().hex[:10]
+    try:
+        ap.ensure_alert_profile_tables()
+        out = ap.upsert_alert_acks(plant=plant, alert_ids=["a1", "a2", "a3"], reason="first", until=None, actor="a@x.com")
+        assert sorted(a["alert_id"] for a in out) == ["a1", "a2", "a3"]
+        out2 = ap.upsert_alert_acks(plant=plant, alert_ids=["a1", "a2"], reason="second",
+                                    until="2099-01-01T23:59:59", actor="b@x.com")
+        assert sorted(a["alert_id"] for a in out2) == ["a1", "a2"] and all(a["reason"] == "second" for a in out2)
+        listed = {a["alert_id"]: a["reason"] for a in ap.list_alert_acks(plant)}
+        assert listed == {"a1": "second", "a2": "second", "a3": "first"}
+        with ap._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT details FROM admin_audit WHERE table_name='alert_ack' AND details->>'plant'=%s"
+                        " AND (details->>'count')::int = 3", (plant,))
+            assert len(cur.fetchall()) == 1
+    finally:
+        with ap._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM alert_ack WHERE plant=%s", (plant,))
+            cur.execute("DELETE FROM admin_audit WHERE details->>'plant' = %s", (plant,))
+
+
+def test_ack_bulk_validation_pure():
+    with pytest.raises(ValueError):
+        ap.upsert_alert_acks(plant="P", alert_ids=[], reason="r", until=None, actor="a")
+    with pytest.raises(ValueError):
+        ap.upsert_alert_acks(plant="P", alert_ids=["a", 3], reason="r", until=None, actor="a")
+    with pytest.raises(ValueError):
+        ap.upsert_alert_acks(plant="P", alert_ids=["a"], reason="r", until="nope", actor="a")

@@ -34,7 +34,8 @@ def ctx(monkeypatch):
     for name, ret in (("list_alert_profiles", [PROFILE]), ("get_alert_profile", PROFILE),
                       ("create_alert_profile", PROFILE), ("update_alert_profile", PROFILE),
                       ("delete_alert_profile", PROFILE), ("list_alert_acks", [ACK]),
-                      ("upsert_alert_ack", ACK), ("delete_alert_ack", True)):
+                      ("upsert_alert_ack", ACK), ("delete_alert_ack", True),
+                      ("upsert_alert_acks", [ACK])):
         monkeypatch.setattr(data, name, rec(name, ret))
     return TestClient(app), state
 
@@ -202,3 +203,46 @@ def test_delete_ack_permissions(ctx):
     assert c.delete("/alert-acks/P1/a1").status_code == 200
     s["monkeypatch"].setattr(data, "list_alert_acks", lambda p: [])
     assert c.delete("/alert-acks/P1/a1").json() == {"deleted": False}
+
+
+# ---- bulk acknowledgements -----------------------------------------------
+def test_bulk_ack_happy(ctx):
+    c, s = ctx
+    r = c.post("/alert-acks/bulk", json={"plant": "P1", "alert_ids": ["a1", "a2"], "reason": "  because ",
+                                         "until": "2026-10-25T23:59:59"})
+    assert r.status_code == 200 and r.json() == {"acks": [ACK], "count": 1}
+    name, _, kw = s["calls"][-1]
+    assert name == "upsert_alert_acks"
+    assert kw == {"plant": "P1", "alert_ids": ["a1", "a2"], "reason": "because",
+                  "until": "2026-10-25T23:59:59", "actor": "owner@example.com"}
+    assert c.post("/alert-acks/bulk", json={"plant": "P1", "alert_ids": ["a1"], "reason": "x"}).status_code == 200
+    assert s["calls"][-1][2]["until"] is None
+
+
+def test_bulk_ack_validation_400(ctx):
+    c, s = ctx
+    ok = {"plant": "P1", "alert_ids": ["a1"], "reason": "x"}
+    for bad in ({"alert_ids": []}, {"alert_ids": ["a"] * 501}, {"alert_ids": "a1"}, {"alert_ids": ["a", 5]},
+                {"alert_ids": ["a", ""]}, {"reason": ""}, {"reason": "x" * 201}, {"reason": 5}):
+        assert c.post("/alert-acks/bulk", json={**ok, **bad}).status_code == 400, bad
+    assert c.post("/alert-acks/bulk", json={"plant": "P1", "alert_ids": ["a1"]}).status_code == 400
+    assert c.post("/alert-acks/bulk", json={"plant": "", "alert_ids": ["a1"], "reason": "x"}).status_code == 400
+    assert "upsert_alert_acks" not in _names(s)
+    assert c.post("/alert-acks/bulk", json={**ok, "alert_ids": ["a"] * 500}).status_code == 200
+
+
+def test_bulk_ack_bad_until_400(ctx):
+    c, s = ctx
+
+    def bad(**kw):
+        raise ValueError("until must be an ISO datetime or null")
+    s["monkeypatch"].setattr(data, "upsert_alert_acks", bad)
+    r = c.post("/alert-acks/bulk", json={"plant": "P1", "alert_ids": ["a"], "reason": "x", "until": "nope"})
+    assert r.status_code == 400
+
+
+def test_bulk_ack_other_plant_403(ctx):
+    c, s = ctx
+    r = c.post("/alert-acks/bulk", json={"plant": "P2", "alert_ids": ["a"], "reason": "x"})
+    assert r.status_code == 403
+    assert "upsert_alert_acks" not in _names(s)

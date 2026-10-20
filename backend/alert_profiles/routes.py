@@ -141,6 +141,39 @@ def alert_acks_upsert(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+MAX_BULK_ACK_IDS = 500
+
+
+@router.post("/alert-acks/bulk")
+def alert_acks_bulk(
+    body: dict = Body(default={}),
+    actor: str = Depends(auth.require_authenticated),
+    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+):
+    """Acknowledge up to 500 alerts of one plant with one reason/until, in one transaction."""
+    plant = body.get("plant")
+    _check_plant(plant, allowed_plants)
+    alert_ids = body.get("alert_ids")
+    if not isinstance(alert_ids, list) or not alert_ids:
+        raise HTTPException(status_code=400, detail="alert_ids must be a non-empty list")
+    if len(alert_ids) > MAX_BULK_ACK_IDS:
+        raise HTTPException(status_code=400, detail=f"alert_ids must have at most {MAX_BULK_ACK_IDS} entries")
+    if any(not isinstance(a, str) or not a.strip() for a in alert_ids):
+        raise HTTPException(status_code=400, detail="alert_ids must be non-empty strings")
+    reason = body.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise HTTPException(status_code=400, detail="reason is required")
+    reason = reason.strip()
+    if len(reason) > MAX_REASON_LEN:
+        raise HTTPException(status_code=400, detail=f"reason must be at most {MAX_REASON_LEN} characters")
+    try:
+        acks = data.upsert_alert_acks(plant=plant, alert_ids=alert_ids, reason=reason,
+                                      until=body.get("until"), actor=actor)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"acks": acks, "count": len(acks)}
+
+
 @router.delete("/alert-acks/{plant}/{alert_id}")
 def alert_acks_delete(
     plant: str,

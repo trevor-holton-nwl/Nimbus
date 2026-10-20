@@ -64,6 +64,15 @@ export const AlertAcksClient = {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p),
     })) as AlertAck;
   },
+  /** One bulk POST, one forced refetch, one notify. Throws AlertApiError on a non-2xx (the server is transactional). */
+  async acknowledgeMany(plant: string, alertIds: string[], reason: string,
+                        until: string | null): Promise<{ ok: number; failed: number }> {
+    const body = await _write(plant, () => Util.fetchTraced(`${Config.API_BASE}/alert-acks/bulk`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plant, alert_ids: alertIds, reason, until }),
+    })) as { count?: number } | null;
+    return { ok: typeof body?.count === 'number' ? body.count : alertIds.length, failed: 0 };
+  },
   async unacknowledge(plant: string, alertId: string): Promise<void> {
     await _write(plant, () => Util.fetchTraced(
       `${Config.API_BASE}/alert-acks/${encodeURIComponent(plant)}/${encodeURIComponent(alertId)}`, { method: 'DELETE' }));

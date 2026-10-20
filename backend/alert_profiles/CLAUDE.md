@@ -4,7 +4,7 @@ Backend half of the Alert Monitor (spec: `docs/superpowers/specs/2026-10-20-aler
 
 ## What lives here
 
-- `data.py` — persistence + validation (no FastAPI imports): `list/get/create/update/delete_alert_profile`, `list_alert_acks`, `upsert_alert_ack`, `delete_alert_ack`, `validate_rules`, `validate_ranking`, `ensure_alert_profile_tables()` (called from the `brain.py` lifespan). `DuplicateName` subclasses `ValueError` — catch it first.
+- `data.py` — persistence + validation (no FastAPI imports): `list/get/create/update/delete_alert_profile`, `list_alert_acks`, `upsert_alert_ack`, `upsert_alert_acks` (bulk, one transaction), `delete_alert_ack`, `validate_rules`, `validate_ranking`, `ensure_alert_profile_tables()` (called from the `brain.py` lifespan). `DuplicateName` subclasses `ValueError` — catch it first.
 - `routes.py` — HTTP only: plant scope, auth, creator/admin checks, status-code mapping. No SQL.
 
 ## Tables (both per-plant; mirrored in `migrations/2026-10-20-2-alert-profiles.sql` and `schema.sql`)
@@ -25,6 +25,7 @@ Every route does the plant check (`md._assert_plant_allowed`; `PlantNotAllowed` 
 | `DELETE /alert-profiles/{id}?plant=` | `{deleted: true, id}`; 404; 403 |
 | `GET /alert-acks?plant=` | `{plant, acks}` (active only) |
 | `POST /alert-acks` `{plant, alert_id, reason, until?}` | the ack (upsert, so re-acking replaces the previous one) |
+| `POST /alert-acks/bulk` `{plant, alert_ids (1-500 strings), reason, until?}` | `{acks, count}` (active acks written; one transaction, one audit row); 400 empty / >500 / non-string ids / bad reason / bad `until` |
 | `DELETE /alert-acks/{plant}/{alert_id}` | `{deleted: bool}`; 403 |
 
 PUT/DELETE check the plant of the **stored** row (the `plant` query param on DELETE is not trusted). Optimistic concurrency: send `expected_updated_at` from the last read; a mismatch is 409 `stale`.
