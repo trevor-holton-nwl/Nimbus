@@ -326,6 +326,9 @@ Written at the end of the build (18 reviewed tasks on `feature/alert-monitor`). 
 - **Flatpickr `minDate: 'today'` in the ack modal is the browser's today**, not the plant's; recorded below as open.
 - **`validateProfile` enforces the server's limits** (name length, rule count, `minSev`, rule shape) with `ape.err_name_long`, `ape.err_too_many_rules`, `ape.err_min_sev`.
 - **The drawer's `dismissVisible` dismisses only what the drawer lists**, and the Dismiss-N confirm says dismissals are session-only and distort the confidence score.
+- **The `--bar-pm-*` tokens are defined once, by the Gantt task.** The page task did not define them; its category legend swatches stayed unstyled until the Gantt task landed, which also owns the palette validation (one definition, one place).
+- **`NimbusTask.planning_reason` gained `step?: string | null`** in `types.mts` (and `compute-core.d.ts`), so the client type is honest before the leverage engine reads it; the server side is `PlanningReason.step`.
+- **The "Amber" ruling:** `us.alert_gantt_highlight_hint` was reworded to describe category colours plus the severity ring, the `legend.profile_match_*` pair was dropped in favour of `legend.pm_*`, and this spec's appendix was aligned.
 - Process notes: `SetupAdmin` is imported lazily by the pane (not on the `NIMBUS` global); the shared type sets moved into `alert-profiles.mts` after the drawer and monitor models were found declaring the same lists twice.
 
 ### Deferred (from the design, verbatim)
