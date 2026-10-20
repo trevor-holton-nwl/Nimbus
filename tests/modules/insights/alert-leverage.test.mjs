@@ -289,6 +289,43 @@ test('replayWithMinutes replays one pair with user minutes', async () => {
   assert.ok(up.confidenceAfter > up.confidenceBefore);
 });
 
+test('fractional minutes are rounded up: plant default 7.5 places an 8 min row that resolves covered', async () => {
+  const f = fixture({ tasks: [orderTask('t1', 'A', 8, 9), orderTask('t2', 'B', 10, 11)], masterPlant: policy(7.5) });
+  const [grouped] = byFamily(groupLeverage(f.input), 'setup-pair');
+  assert.equal(grouped.assumedMinutes, 8);
+  const runner = fakeRunner();
+  const [item] = byFamily(await analyzeLeverage(f.input, runner), 'setup-pair');
+  assert.equal(item.assumedMinutes, 8);
+  assert.ok(!runner.calls[0].variants[0].setup.diagnostics.some(d => d.type === 'setup-uncovered'), 'the pair resolved covered');
+  const real = byFamily(await analyzeLeverage(f.input, f.runner), 'setup-pair')[0];
+  assert.ok(real.confidenceAfter > real.confidenceBefore, 'replay is not a no-op');
+});
+
+test('replayWithMinutes rounds up and rejects non-positive / non-finite minutes', async () => {
+  const f = fixture({ tasks: [orderTask('t1', 'A', 8, 9), orderTask('t2', 'B', 10, 11)], masterPlant: null });
+  const [item] = byFamily(groupLeverage(f.input), 'setup-pair');
+  const up = await replayWithMinutes(f.input, item, 7.5, f.runner);
+  assert.equal(up.assumedMinutes, 8);
+  assert.equal(up.method, 'replay');
+  assert.ok(up.confidenceAfter > up.confidenceBefore);
+  for (const bad of [0, -3, NaN, Infinity]) {
+    const runner = fakeRunner();
+    const out = await replayWithMinutes(f.input, item, bad, runner);
+    assert.equal(out.requiresMinutes, true);
+    assert.equal(out.method, 'removal');
+    assert.equal(runner.calls.length, 0);
+  }
+});
+
+test('parsePairKey survives a value containing "]->" and skips malformed keys', () => {
+  const key = '[["colorWheel","A]->X"]]->[["colorWheel","B"]]';
+  const p = parsePairKey(key);
+  assert.deepEqual(p.from, [{ fieldKey: 'colorWheel', value: 'A]->X' }]);
+  assert.deepEqual(p.to, [{ fieldKey: 'colorWheel', value: 'B' }]);
+  assert.equal(parsePairKey('[["colorWheel","A"]]->[["colorWheel","B]->'), null);
+  assert.equal(parsePairKey(']->]->'), null);
+});
+
 // ---- calendar days -------------------------------------------------------------------------------
 
 test('calendar-day groups closed/blackout/firmed-closed by line+day; orders come from the matrix for closed', () => {

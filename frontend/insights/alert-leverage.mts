@@ -125,16 +125,17 @@ function _toState(raw: unknown): SetupStateKey | null {
 
 /** Splits a setup pairKey (`<from-json>-><to-json>`) into its two states; null when either half is `unknown` or malformed. */
 export function parsePairKey(pairKey: string): { from: SetupStateKey; to: SetupStateKey } | null {
-  // Both halves are JSON arrays ending in ']', so the boundary is the first ']->' (inner arrays close with ']]' or '],').
-  const split = pairKey.indexOf(']->');
-  if (split < 0) return null;
-  try {
-    const from = _toState(JSON.parse(pairKey.slice(0, split + 1)));
-    const to = _toState(JSON.parse(pairKey.slice(split + 3)));
-    return from && to ? { from, to } : null;
-  } catch {
-    return null;
+  // A value may itself contain ']->', so try every occurrence until both halves parse as states.
+  let split = pairKey.indexOf(']->');
+  while (split >= 0) {
+    try {
+      const from = _toState(JSON.parse(pairKey.slice(0, split + 1)));
+      const to = _toState(JSON.parse(pairKey.slice(split + 3)));
+      if (from && to) return { from, to };
+    } catch { /* not the boundary; try the next occurrence */ }
+    split = pairKey.indexOf(']->', split + 1);
   }
+  return null;
 }
 
 function formatState(state: SetupStateKey): string {
@@ -264,8 +265,10 @@ function _setupPairItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
   }
 
   const cfg = input.masterPlant?.setup_policy_config;
-  const defMin = Number(cfg?.unknownSetupDefaultMinutes);
-  const usePlantDefault = cfg?.unknownSetupPolicy === 'plantDefaultMinutes' && Number.isFinite(defMin) && defMin > 0;
+  const rawDef = Number(cfg?.unknownSetupDefaultMinutes);
+  const usePlantDefault = cfg?.unknownSetupPolicy === 'plantDefaultMinutes' && Number.isFinite(rawDef) && rawDef > 0;
+  // Matrix rows only match integer minutes (setup-domain validMinutes); round up so setup time is never under-charged.
+  const defMin = Math.ceil(rawDef);
 
   const items: LeverageItem[] = [];
   for (const [pairKey, b] of byPair) {
@@ -526,11 +529,13 @@ export async function analyzeLeverage(input: LeverageInput, runner: LeverageRunn
 export async function replayWithMinutes(
   input: LeverageInput, item: LeverageItem, minutes: number, runner: LeverageRunner,
 ): Promise<LeverageItem> {
-  const v = await _variantFor(input, item, minutes);
-  if (!v || !(minutes > 0)) return item;
+  if (!Number.isFinite(minutes) || minutes <= 0) return { ...item, requiresMinutes: true };
+  const used = Math.ceil(minutes);   // integer minutes only (see plant-default rounding above)
+  const v = await _variantFor(input, item, used);
+  if (!v) return item;
   const [r] = await runner(_replayBase(input), [v]);
   if (!r) return item;
-  const next: LeverageItem = { ...item, requiresMinutes: false, assumedMinutes: minutes, minutesSource: 'user' };
+  const next: LeverageItem = { ...item, requiresMinutes: false, assumedMinutes: used, minutesSource: 'user' };
   _applyReplay(input, next, r);
   return next;
 }
