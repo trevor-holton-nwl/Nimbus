@@ -293,9 +293,14 @@ export const Runtime = {
     return pairs;
   },
 
+  /** True when a rate map is loaded for `plant` (an unloaded map makes `eligiblePairs` empty for every order). */
+  hasMapFor(plant: string | null | undefined): boolean {
+    return !!Runtime._rateMap && (!plant || plant === Runtime._rateMapPlant);
+  },
+
   /** `dropDecision` over this order's own pairs and current PV, for a drop onto `machine`. */
   dropDecision(task: NimbusTask, machine: string): DropDecision {
-    return dropDecision(Runtime.eligiblePairs(task), task.PRODUCTION_VERSION, machine);
+    return dropDecision(Runtime.eligiblePairs(task, { requireOps: true }), task.PRODUCTION_VERSION, machine);
   },
 
   /** `resolve(...).ok` — the boolean a drop/edit guard needs. */

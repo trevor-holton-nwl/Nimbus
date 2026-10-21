@@ -358,6 +358,7 @@ test('routing-gap groups by planning_reason.step: machine, material, material|pv
     task('w1', 'workcenter_unmapped', 'M1', '0001', 'L1'), task('w2', 'workcenter_unmapped', 'M2', '0002', 'L1'), task('w3', 'workcenter_unmapped', 'M3', '0003', 'L2'),
     task('p1', 'pv_missing', 'M5', ''), task('p2', 'pv_missing', 'M5', ''), task('p3', 'pv_missing', 'M6', ''),
     task('r1', 'no_routing', 'M7', '0001'), task('r2', 'no_routing', 'M7', '0001'), task('r3', 'pv_expired', 'M7', '0001'), task('r4', 'no_routing', 'M7', '0002'),
+    task('m1', 'pv_workcenter_mismatch', 'M11', '0001'), task('m2', 'pv_workcenter_mismatch', 'M11', '0001'),
     task('n1', 'no_machine', 'M8', '0001'), task('n2', 'no_machine', 'M9', '0001'),
     task('u1', undefined, 'M10', '0001'), task('u2', 'something_new', 'M10', '0002'),
   ].map(t => [t.id, t]));
@@ -374,6 +375,7 @@ test('routing-gap groups by planning_reason.step: machine, material, material|pv
   assert.deepEqual(noRoutingPv1.orderIds.sort(), ['r1', 'r2']);
   assert.equal(noRoutingPv1.action.material, 'M7');
   assert.equal(items.filter(i => i.action.material === 'M7').length, 3, 'step is part of the key: no_routing 0001, pv_expired 0001, no_routing 0002');
+  assert.deepEqual(find(i => i.action.step === 'pv_workcenter_mismatch' && i.action.material === 'M11').orderIds.sort(), ['m1', 'm2'], 'a PV work-center mismatch groups like a routing upload gap');
   const noMachine = items.filter(i => i.action.step === 'no_machine');
   assert.equal(noMachine.length, 1);
   assert.deepEqual(noMachine[0].orderIds.sort(), ['n1', 'n2']);

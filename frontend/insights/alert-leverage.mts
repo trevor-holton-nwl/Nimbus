@@ -105,7 +105,7 @@ const DAY_MS = 86400000;
 const OPTIMIZE_TYPES = new Set(['overlap', 'late', 'overload', 'setup-violated']);
 const CALENDAR_TYPES = new Set(['closed', 'blackout', 'firmed-closed']);
 const MACHINE_STATE_TYPES = new Set(['initial-state-unknown', 'current-state-diverged']);
-const ROUTING_UPLOAD_STEPS = new Set(['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter']);
+const ROUTING_UPLOAD_STEPS = new Set(['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter', 'pv_workcenter_mismatch']);
 
 const SETUP_FIELD_LABELS: Record<string, string> = { colorWheel: 'Color', prt01: 'PRT01', prt02: 'PRT02', productionVersion: 'Production Version' };
 

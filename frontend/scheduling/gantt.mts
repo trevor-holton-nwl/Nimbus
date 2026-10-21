@@ -1261,7 +1261,14 @@ export const Timeline = {
     if (!t || t.PARENT_ORDER) return;
     if (Selection.ids().some(sid => String(sid) !== String(id))) return;   // a multi-drag never changes line
     if (!Interaction._routingRuntimeEnabled(t.PLANT)) return;
-    Timeline.dimRowsForDrag(new Set(Runtime.eligiblePairs(t, { requireOps: true }).map(p => p.machine)));
+    // No loaded rate map for this plant means `eligiblePairs` is empty and every row would dim: skip instead.
+    if (!Runtime.hasMapFor(t.PLANT)) return;
+    // Dimming also happens on right-edge resizes and same-line time drags (vis `onMoving` cannot tell them apart
+    // from a row change on its first frame); acceptable, the planner may still cross rows mid-gesture. The
+    // order's own current row is never dimmed.
+    const eligible = new Set(Runtime.eligiblePairs(t, { requireOps: true }).map(p => p.machine));
+    if (t.MACHINE) eligible.add(t.MACHINE);
+    Timeline.dimRowsForDrag(eligible);
   },
 
   _dragSetupLines: new Set<string>(),
@@ -5040,11 +5047,24 @@ export const Interaction = {
   /** A manual placement returned null for the dragged item. A firmed order dropped outside working hours asks
    *  the planner to confirm overtime first (OQ63) and re-runs the drop with the approval; anything else is
    *  explained (the engine already toasted `finish_cannot_hold`) and the bar is put back. */
-  _rejectManualPlacement(t: NimbusTask, itemId: string, opts: ManualPlacementOptions = {}): void {
+  _rejectManualPlacement(t: NimbusTask, itemId: string, opts: ManualPlacementOptions = {}, capture?: PvDropCapture): void {
     if (Engine.lastManualRefusal === 'needs_overtime_confirm') {
       void Engine.confirmOvertimePlacement(t).then(ok => {
-        if (ok) Interaction._onDataSetUpdate({ items: [itemId] }, { ...opts, confirmedOvertime: true });
-        else Timeline._scheduleRebuild();
+        if (!ok) { Timeline._scheduleRebuild(); return; }
+        if (capture) {
+          // Re-enter from the values captured at drop time: a rebuild while the modal was open resets the vis
+          // item, and re-reading it would lose the planner's drop.
+          const cur = Store.tasks[capture.id];
+          if (!cur || Interaction._dropTaskKey(cur) !== capture.taskKey) {
+            Toast.show(Util.t('toast.pv_drop_stale', { order: Util.orderNumber(cur ?? t) }), 'error');
+            Timeline._scheduleRebuild();
+            return;
+          }
+          Interaction._commitSingleDrop(cur, capture.id, capture.itemId, capture.newLine, capture.requestedFinish,
+            { ...capture.opts, ...opts, confirmedOvertime: true });
+          return;
+        }
+        Interaction._onDataSetUpdate({ items: [itemId] }, { ...opts, confirmedOvertime: true });
       });
       return;
     }
@@ -5405,7 +5425,9 @@ export const Interaction = {
     }
     const patch = Engine.manualRoutingSchedulePatchFor(t, newLine, requestedFinish, placeOpts);
     if (!patch?.start_date || !patch.end_date) {
-      Interaction._rejectManualPlacement(t, itemId, placeOpts);
+      Interaction._rejectManualPlacement(t, itemId, placeOpts, {
+        id, itemId, newLine, requestedFinish, opts: placeOpts, taskKey: Interaction._dropTaskKey(t),
+      });
       return;
     }
     // A resize or drop that resolves back onto the bar the order already is changes nothing: no Store write
@@ -5453,7 +5475,7 @@ export const Interaction = {
       if (pv == null) { Timeline._scheduleRebuild(); return; }
       const cur = Store.tasks[capture.id];
       if (!cur || Interaction._dropTaskKey(cur) !== capture.taskKey) {
-        Toast.show(Util.t('toast.commit_failed'), 'error');
+        Toast.show(Util.t('toast.pv_drop_stale', { order: Util.orderNumber(cur ?? t ?? ({ id: capture.id } as NimbusTask)) }), 'error');
         Timeline._scheduleRebuild();
         return;
       }

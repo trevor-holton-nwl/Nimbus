@@ -591,7 +591,7 @@ export interface LevAction {
   admin?: boolean;
 }
 
-const _ROUTING_UPLOAD = new Set(['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter']);
+const _ROUTING_UPLOAD = new Set(['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter', 'pv_workcenter_mismatch']);
 
 function _stateText(state: ReadonlyArray<{ fieldKey: string; value: string }>, fieldLabel: (k: string) => string): string {
   return state.map(p => `${fieldLabel(p.fieldKey)}: ${p.value}`).join(', ');

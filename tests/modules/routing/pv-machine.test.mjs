@@ -104,3 +104,19 @@ test('Runtime.resolve: with no start date at all validity is judged today', () =
   assert.deepEqual(Runtime.resolve({ id: 't', PLANT: 'P', MATERIAL_NUMBER: 'MAT', PRODUCTION_VERSION: '0001',
     MACHINE: 'M1', 'ORDER_QUANTITY_(GMEIN)': 60 }), { ok: false, step: 'pv_expired' });
 });
+
+test('Runtime.dropDecision judges pairs with requireOps: a PV with no operation at the target work center is not offered', () => {
+  const m = map();
+  delete m.ops['MAT|N|G|02|WC2'];   // PV 0002 covers M3 by header work center but has no operation there
+  Runtime._rateMap = m; Runtime._rateMapPlant = 'P';
+  const task = { id: 't', PLANT: 'P', MATERIAL_NUMBER: 'MAT', PRODUCTION_VERSION: '0001', MACHINE: 'M1', BASIC_START_DATE: new Date(2026, 8, 1) };
+  assert.deepEqual(Runtime.dropDecision(task, 'M3'), { kind: 'reject' }, 'resolve would fail no_operation_at_workcenter');
+});
+
+test('Runtime.hasMapFor: false without a map or for another plant, true for the loaded plant', () => {
+  Runtime._rateMap = null; Runtime._rateMapPlant = null;
+  assert.equal(Runtime.hasMapFor('P'), false);
+  Runtime._rateMap = map(); Runtime._rateMapPlant = 'P';
+  assert.equal(Runtime.hasMapFor('P'), true);
+  assert.equal(Runtime.hasMapFor('OTHER'), false);
+});

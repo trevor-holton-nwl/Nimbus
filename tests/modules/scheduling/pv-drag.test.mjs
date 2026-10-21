@@ -47,6 +47,7 @@ function harness({ plant, routing = true, items }) {
     'toast.multi_drag_line_locked': 'multi-drag cannot change line',
     'toast.no_routing_at_workcenter': '{{order}} has no routing at {{machine}}.',
     'toast.commit_failed': 'commit failed',
+    'toast.pv_drop_stale': 'stale {{order}}',
     'ui.pv_machine_option': '{{pv}} - {{machine}}',
   } };
   const prior = enablePlant(plant, routing);
@@ -205,8 +206,40 @@ test('decision choose, the task changed while the chooser was open: abort with a
     assert.equal(rec.patchCalls.length, 0);
     assert.equal(rec.rebuilds, 1);
     assert.equal(rec.toasts.length, 1);
+    assert.match(rec.toasts[0].msg, /^stale A-1/);
     assert.equal(Store.tasks.o1.MACHINE, 'L1');
   } finally { restore(); }
+});
+
+test('chooser pick -> overtime confirm -> vis item reset mid-modal: the commit still applies from the capture', async () => {
+  const items = { o1: { start: T0, end: T1, group: 'L2' } };
+  const { rec, restore } = harness({ plant: 'P-PVD-OT', items });
+  const savedConfirm = Engine.confirmOvertimePlacement;
+  try {
+    oneOrder('P-PVD-OT');
+    Runtime.dropDecision = () => ({ kind: 'choose', pvs: ['0002', '0003'] });
+    const calls = deferredChoose();
+    let confirmResolve;
+    Engine.confirmOvertimePlacement = () => new Promise(r => { confirmResolve = r; });
+    const inner = Engine.manualRoutingSchedulePatchFor;
+    Engine.manualRoutingSchedulePatchFor = (task, line, finish, opts) => {
+      if (!opts?.confirmedOvertime) { Engine.lastManualRefusal = 'needs_overtime_confirm'; rec.patchCalls.push({ refused: true }); return null; }
+      return inner(task, line, finish, opts);
+    };
+    Interaction._onDataSetUpdate({ items: ['o1'] });
+    calls[0].resolve('0003');
+    await tick();
+    assert.equal(rec.patchCalls.length, 1, 'first attempt refused pending overtime confirmation');
+    items.o1 = { start: T0, end: T1, group: 'L1' };   // a rebuild resets the vis item while the confirm modal is open
+    confirmResolve(true);
+    await tick();
+    assert.equal(rec.patchCalls.length, 2);
+    assert.equal(rec.patchCalls[1].line, 'L2', 'captured target line, not the reset vis item');
+    assert.equal(rec.patchCalls[1].opts.chosenPv, '0003');
+    assert.equal(rec.patchCalls[1].opts.confirmedOvertime, true);
+    assert.equal(Store.tasks.o1.MACHINE, 'L2');
+    assert.equal(Store.tasks.o1.PRODUCTION_VERSION, '0003');
+  } finally { Engine.confirmOvertimePlacement = savedConfirm; Engine.lastManualRefusal = null; restore(); }
 });
 
 /* ---- multi-drag line lock ------------------------------------------------------------------------------------ */
@@ -303,7 +336,8 @@ test('dimRowsForDrag writes ONE className-only update for the ineligible rows; u
 });
 
 function dimHarness(plant, routing, taskExtra = {}) {
-  const saved = { groups: Timeline._groups, pairs: Runtime.eligiblePairs };
+  const saved = { groups: Timeline._groups, pairs: Runtime.eligiblePairs, hasMap: Runtime.hasMapFor };
+  Runtime.hasMapFor = () => true;
   const prior = enablePlant(plant, routing);
   const g = fakeGroups(['L1', 'L2', 'L3']);
   Timeline._groups = g;
@@ -314,7 +348,7 @@ function dimHarness(plant, routing, taskExtra = {}) {
   return {
     g, stats: () => ({ pairCalls, pairOpts }),
     restore: () => {
-      Timeline._groups = saved.groups; Runtime.eligiblePairs = saved.pairs;
+      Timeline._groups = saved.groups; Runtime.eligiblePairs = saved.pairs; Runtime.hasMapFor = saved.hasMap;
       Timeline._dragIneligibleLines = null; Timeline._dragDimFor = null;
       Selection.clear(); Store.setTasks([], 'test'); Store.setMasterData(prior, 'test');
     },
@@ -346,6 +380,21 @@ test('onMoving does not dim for a multi-selection, a distribution sub-order or a
     Selection.set(['o1', 'o2']);
     Timeline.onItemMoving('o1');
     assert.equal(h.g.calls.length, 0);
+  } finally { h.restore(); }
+});
+
+test('onMoving: no loaded rate map for the plant skips the dim; the order own row is never dimmed', () => {
+  let h = dimHarness('P-PVD-DIM-NM', true);
+  try {
+    Runtime.hasMapFor = () => false;
+    Timeline.onItemMoving('o1');
+    assert.equal(h.g.calls.length, 0, 'an unloaded map would dim every row');
+  } finally { h.restore(); }
+  h = dimHarness('P-PVD-DIM-OWN', true);
+  try {
+    Runtime.eligiblePairs = () => [{ pv: '0002', machine: 'L2', workcenter: 'W' }];   // L1 (current) not in the set
+    Timeline.onItemMoving('o1');
+    assert.deepEqual(h.g.calls[0].map(p => p.id), ['L3'], 'L1 is the order own row and stays lit');
   } finally { h.restore(); }
 });
 
