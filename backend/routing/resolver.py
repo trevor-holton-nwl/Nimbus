@@ -228,6 +228,11 @@ def _fallback(order: dict, reason_code: str) -> dict:
     return {"status": "held", "reason_code": "runtime_unknown", "detail_step": reason_code}
 
 
+# PV-Machine recompute fallback (D7/D12): the pair failures a PV switch can repair. `pv_missing` keeps
+# today's path (a blank PV always holds, no guess); no_machine/workcenter_unmapped are machine problems.
+_PV_REPAIR_STEPS = frozenset({"pv_not_found", "pv_expired", "pv_workcenter_mismatch"})
+
+
 def _pair_step(order: dict, pv_lookup: dict, machine_workcenter: dict) -> str | None:
     """The (production version, machine) head of §5.2: the first failing step among pv_missing,
     pv_not_found, pv_expired, no_machine, workcenter_unmapped and `pv_workcenter_mismatch` (the PV
@@ -579,6 +584,22 @@ def _load_machine_workcenter(cur, plant: str) -> dict:
     return dict(cur.fetchall())
 
 
+def _load_default_pv(cur, plant: str) -> dict:
+    """{material_id: default production version} from `material_plants.default_production_version`
+    for one plant. A blank default ('' -- the column is NOT NULL DEFAULT '', and SAP staging does not
+    feed it) is skipped; a stored value is zero-padded to 4 like `production_version.production_version`."""
+    cur.execute(
+        "SELECT material_id, default_production_version FROM material_plants WHERE plant = %s",
+        (plant,),
+    )
+    out: dict = {}
+    for material_id, default_pv in cur.fetchall():
+        normalized = db._norm_pv(default_pv)
+        if normalized:
+            out[material_id] = normalized
+    return out
+
+
 def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
                  full: bool = False, ids: list[str] | None = None) -> list[dict]:
     """The set of orders one resolve run considers (§4 item 4's "resolve
@@ -613,7 +634,8 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
             "SELECT id, plant, material_number, production_version, machine, order_quantity,"
             " basic_start_date, original_start_received, original_finish_received, basic_finish_date,"
             " run_time, run_time_source, run_time_basis,"
-            " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
+            " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end,"
+            " sap_production_version, parent_production_order"
             " FROM orders WHERE plant = %s AND run_time_source IS DISTINCT FROM 'manual'",
             (plant,),
         )
@@ -623,7 +645,8 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
         "SELECT id, plant, material_number, production_version, machine, order_quantity,"
         " basic_start_date, original_start_received, original_finish_received, basic_finish_date,"
             " run_time, run_time_source, run_time_basis,"
-        " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
+        " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end,"
+        " sap_production_version, parent_production_order"
         " FROM orders"
         " WHERE plant = %s"
         "   AND run_time_source IS DISTINCT FROM 'manual'"
@@ -706,7 +729,7 @@ def _build_held_row(order: dict, step: str):
     return (order["id"], Jsonb(reason))
 
 
-def _build_write_row(order: dict, result: dict):
+def _build_write_row(order: dict, result: dict, new_pv: str | None = None):
     """One row for the non-held outcomes' VALUES-joined UPDATE, or None when
     this outcome must leave the order genuinely untouched (judgment call #5,
     module docstring: an already-labeled fallback_legacy order)."""
@@ -738,10 +761,12 @@ def _build_write_row(order: dict, result: dict):
     set_mismatch = (placed and db._canonical_runtime_minutes(order.get("run_time"))
                     != db._canonical_runtime_minutes(run_time))
 
-    return (order["id"], run_time, run_time_source, Jsonb(basis), release_hold, set_mismatch)
+    # `new_pv` (the recompute fallback switched this order's production version) is the 7th and LAST
+    # column: the over-cap slice in `_resolve_orders_on_conn` edits index 4 (`release_hold`).
+    return (order["id"], run_time, run_time_source, Jsonb(basis), release_hold, set_mismatch, new_pv)
 
 
-# psycopg caps a statement at 65,535 bind parameters; _write_outcomes binds 6
+# psycopg caps a statement at 65,535 bind parameters; _write_outcomes binds 7
 # per order, so one unchunked statement failed past ~10,900 orders. Chunks stay
 # inside the caller's single transaction (no partial-failure window).
 _WRITE_CHUNK = 5000
@@ -765,7 +790,7 @@ def _write_outcomes(cur, rows: list[tuple]) -> None:
 
 def _write_outcomes_chunk(cur, rows: list[tuple]) -> None:
     placeholders = ", ".join(
-        ["(%s::text, %s::numeric, %s::text, %s::jsonb, %s::boolean, %s::boolean)"] * len(rows)
+        ["(%s::text, %s::numeric, %s::text, %s::jsonb, %s::boolean, %s::boolean, %s::text)"] * len(rows)
     )
     params = [v for row in rows for v in row]
     query = (
@@ -773,15 +798,17 @@ def _write_outcomes_chunk(cur, rows: list[tuple]) -> None:
         " run_time = v.run_time,"
         " run_time_source = v.run_time_source,"
         " run_time_basis = v.run_time_basis,"
+        " production_version = COALESCE(v.production_version, o.production_version),"
         " planning_status = CASE WHEN v.release_hold THEN 'scheduled' ELSE o.planning_status END,"
         " planning_reason = CASE WHEN v.release_hold THEN NULL ELSE o.planning_reason END,"
         " runtime_schedule_mismatch = CASE WHEN v.set_mismatch THEN TRUE ELSE o.runtime_schedule_mismatch END,"
         " updated_at = NOW()"
-        f" FROM (VALUES {placeholders}) AS v(id, run_time, run_time_source, run_time_basis, release_hold, set_mismatch)"
+        f" FROM (VALUES {placeholders}) AS v(id, run_time, run_time_source, run_time_basis, release_hold, set_mismatch, production_version)"
         " WHERE o.id = v.id"
         "   AND (o.run_time IS DISTINCT FROM v.run_time"
         "        OR o.run_time_source IS DISTINCT FROM v.run_time_source"
         "        OR o.run_time_basis IS DISTINCT FROM v.run_time_basis"
+        "        OR o.production_version IS DISTINCT FROM COALESCE(v.production_version, o.production_version)"
         "        OR (v.release_hold AND o.planning_status = 'needs_planning')"
         "        OR (v.set_mismatch AND o.runtime_schedule_mismatch IS DISTINCT FROM TRUE))"
     )
@@ -854,6 +881,8 @@ def _new_report(is_cutover: bool) -> dict:
         "skipped_other_category": 0,
         "unmapped_workcenters": [],
         "lot_size_warnings": 0,
+        "pv_sap_restored": 0,
+        "pv_defaulted": 0,
     }
     return report
 
@@ -912,9 +941,45 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
         # The run-time cap (OQ28, U5): a flat 336 h on every plant (db.cap_hours).
         plant_cap = db.cap_hours()
 
+        default_pv = _load_default_pv(cur, plant)
+
+        # PV-Machine recompute fallback (D7/D12/D13): an order whose (PV, machine) pair no longer holds
+        # together is repaired by switching its PV -- SAP's own last-sent PV first, then the material's
+        # default -- else it is held (never rescued by `_fallback`). Distribution children (they inherit
+        # the parent's PV) and running orders are never PV-switched; a child with a failing step holds,
+        # a running order is held too and so stays protected below (nothing written for it).
+        repair_steps = {o["id"]: step for o in orders
+                        if (step := _pair_step(o, pv_lookup, machine_workcenter)) in _PV_REPAIR_STEPS}
+        running_now = _running_ids(
+            cur, plant,
+            [o["id"] for o in orders
+             if o["id"] in repair_steps and o.get("parent_production_order") is None
+             and o.get("planning_status") != "needs_planning"])
+
         for order in orders:
-            result = resolve_one(order, pv_lookup=pv_lookup, op_lookup=op_lookup,
-                                 machine_workcenter=machine_workcenter, rules=rules)
+            new_pv = None
+            pair_step = repair_steps.get(order["id"])
+            if pair_step is None:
+                result = resolve_one(order, pv_lookup=pv_lookup, op_lookup=op_lookup,
+                                     machine_workcenter=machine_workcenter, rules=rules)
+            else:
+                result = {"status": "held", "reason_code": "runtime_unknown", "detail_step": pair_step}
+                if order.get("parent_production_order") is None and order["id"] not in running_now:
+                    candidates = (("pv_sap_restored", db._norm_pv(order.get("sap_production_version"))),
+                                  ("pv_defaulted", default_pv.get(order.get("material_number"))))
+                    for counter, candidate in candidates:
+                        if not candidate or candidate == order.get("production_version"):
+                            continue
+                        trial = {**order, "production_version": candidate}
+                        if _pair_step(trial, pv_lookup, machine_workcenter) is not None:
+                            continue
+                        trial_result = resolve_one(trial, pv_lookup=pv_lookup, op_lookup=op_lookup,
+                                                   machine_workcenter=machine_workcenter, rules=rules)
+                        if trial_result["status"] != "resolved":
+                            continue   # a coherent pair whose routing cannot resolve is no repair
+                        order, result, new_pv = trial, trial_result, candidate
+                        report[counter] += 1
+                        break
             status = result["status"]
 
             if status == "held":
@@ -933,7 +998,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
             elif status == "fallback_legacy":
                 report["legacy_retained"] += 1
 
-            write_row = _build_write_row(order, result)
+            write_row = _build_write_row(order, result, new_pv)
             if result.get("run_time") is not None and float(result["run_time"]) > plant_cap:
                 # Over the cap: the order is queued with reason run_time_over_cap (below), never
                 # released by this outcome. A run time past the database's representation bound

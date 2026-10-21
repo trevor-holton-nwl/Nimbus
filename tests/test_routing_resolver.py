@@ -613,19 +613,30 @@ class _CapConn:
         return self.cursor_obj
 
 
-def _run_cap_resolve(monkeypatch, orders, results, horizon_days=None):
+def _run_cap_resolve(monkeypatch, orders, results, horizon_days=None, *, pv_lookup=None,
+                     machine_workcenter=None, default_pv=None, running=()):
     from backend.routing import resolver as r
 
     writes: list = []
     holds: list = []
     monkeypatch.setattr(r, "_load_orders", lambda *a, **k: orders)
-    for loader in ("_load_pv_lookup", "_load_op_lookup", "_load_machine_workcenter", "_load_rules"):
+    for loader in ("_load_op_lookup", "_load_rules"):
         monkeypatch.setattr(r, loader, lambda *a, **k: {})
-    monkeypatch.setattr(r, "resolve_one", lambda order, **k: results[order["id"]])
-    monkeypatch.setattr(r, "_running_ids", lambda *a, **k: set())
+    monkeypatch.setattr(r, "_load_pv_lookup", lambda *a, **k: pv_lookup or {})
+    monkeypatch.setattr(r, "_load_machine_workcenter", lambda *a, **k: machine_workcenter or {})
+    monkeypatch.setattr(r, "_load_default_pv", lambda *a, **k: default_pv or {})
+    resolved_with: list = []
+
+    def fake_resolve_one(order, **k):
+        resolved_with.append((order["id"], order.get("production_version")))
+        return results[order["id"]]
+
+    monkeypatch.setattr(r, "resolve_one", fake_resolve_one)
+    monkeypatch.setattr(r, "_running_ids", lambda cur, plant, ids: set(ids) & set(running))
     monkeypatch.setattr(r, "_write_outcomes", lambda cur, rows: writes.extend(rows))
     monkeypatch.setattr(r, "_write_holds", lambda cur, rows: holds.extend(rows))
     report = r._resolve_orders_on_conn("P1", _CapConn(horizon_days))
+    _run_cap_resolve.resolved_with = resolved_with
     return report, writes, holds
 
 
@@ -684,6 +695,147 @@ class TestRunTimeCap:
                     planning_reason={"code": "planner_unscheduled", "message": "x"})
         report, _, holds = _run_cap_resolve(monkeypatch, [held], {"o1": _resolved(400.0)})
         assert holds == [] and "over_cap" not in report
+
+
+# ---------------------------------------------------------------------------
+# PV - Machine recompute fallback (D7/D12/D13): a failing (PV, machine) pair is repaired by switching to
+# SAP's own last-sent PV, then the material default, else held; children and running orders never switch.
+# ---------------------------------------------------------------------------
+def _pv_row(pv, workcenter="WC1", valid_from=None, valid_to=None):
+    return {"plant": "P1", "material_id": "MAT1", "production_version": pv, "sap_workcenter": workcenter,
+            "valid_from": valid_from, "valid_to": valid_to}
+
+
+class TestPvRecomputeFallback:
+    ORDER = {"id": "o1", "plant": "P1", "material_number": "MAT1", "production_version": "0001",
+             "machine": "M1", "planning_status": "scheduled", "planning_reason": None,
+             "scheduled_start": None, "scheduled_end": None, "run_time_source": "routing",
+             "sap_production_version": None, "parent_production_order": None,
+             "basic_start_date": dt.datetime(2026, 6, 1)}
+    MACHINES = {"M1": "WC1"}
+
+    def _lookup(self, **pvs):
+        return {("P1", "MAT1", pv): row for pv, row in pvs.items()}
+
+    def _run(self, monkeypatch, order_overrides=None, pvs=None, default_pv=None, running=(), hours=3.0):
+        order = dict(self.ORDER, **(order_overrides or {}))
+        return _run_cap_resolve(
+            monkeypatch, [order], {"o1": _resolved(hours)}, pv_lookup=pvs, machine_workcenter=self.MACHINES,
+            default_pv=default_pv, running=running)
+
+    def test_sap_pv_is_restored_when_the_current_pv_does_not_cover_the_machine(self, monkeypatch):
+        pvs = self._lookup(**{"0001": _pv_row("0001", "WC9"), "0002": _pv_row("0002", "WC1")})
+        report, writes, holds = self._run(monkeypatch, {"sap_production_version": "2"}, pvs,
+                                          default_pv={"MAT1": "0003"})
+        assert holds == [] and len(writes) == 1
+        assert writes[0][6] == "0002"                       # 7th column: the switched production version
+        assert report["pv_sap_restored"] == 1 and report["pv_defaulted"] == 0
+        assert _run_cap_resolve.resolved_with == [("o1", "0002")]
+
+    def test_material_default_pv_is_used_when_the_sap_pv_is_invalid(self, monkeypatch):
+        pvs = self._lookup(**{"0001": _pv_row("0001", "WC9"), "0002": _pv_row("0002", "WC8"),
+                              "0003": _pv_row("0003", "WC1")})
+        report, writes, holds = self._run(monkeypatch, {"sap_production_version": "0002"}, pvs,
+                                          default_pv={"MAT1": "0003"})
+        assert holds == [] and writes[0][6] == "0003"
+        assert report["pv_defaulted"] == 1 and report["pv_sap_restored"] == 0
+
+    def test_order_is_held_when_neither_candidate_covers_the_machine(self, monkeypatch):
+        pvs = self._lookup(**{"0001": _pv_row("0001", "WC9"), "0002": _pv_row("0002", "WC8")})
+        report, writes, holds = self._run(monkeypatch, {"sap_production_version": "0002"}, pvs,
+                                          default_pv={"MAT1": "0004"})
+        assert writes == [] and [h[0] for h in holds] == ["o1"]
+        assert holds[0][1].obj["step"] == "pv_workcenter_mismatch"
+        assert report["unknown_by_step"] == {"pv_workcenter_mismatch": 1}
+        assert report["pv_sap_restored"] == 0 and report["pv_defaulted"] == 0
+        assert _run_cap_resolve.resolved_with == []
+
+    def test_an_expired_pv_holds_instead_of_falling_back_to_file_machine_hours(self, monkeypatch):
+        pvs = self._lookup(**{"0001": _pv_row("0001", "WC1", valid_to=dt.date(2026, 1, 1))})
+        report, writes, holds = self._run(monkeypatch, {"machine_hours": 5}, pvs)
+        assert writes == [] and holds[0][1].obj["step"] == "pv_expired"
+        assert _run_cap_resolve.resolved_with == []         # resolve_one (and so _fallback) never ran
+
+    def test_a_distribution_child_is_never_switched(self, monkeypatch):
+        pvs = self._lookup(**{"0001": _pv_row("0001", "WC9"), "0002": _pv_row("0002", "WC1")})
+        report, writes, holds = self._run(monkeypatch, {"sap_production_version": "0002",
+                                                        "parent_production_order": "P-1"}, pvs)
+        assert writes == [] and [h[0] for h in holds] == ["o1"]
+        assert report["pv_sap_restored"] == 0
+
+    def test_a_running_order_is_never_switched_and_stays_protected(self, monkeypatch):
+        pvs = self._lookup(**{"0001": _pv_row("0001", "WC9"), "0002": _pv_row("0002", "WC1")})
+        report, writes, holds = self._run(monkeypatch, {"sap_production_version": "0002"}, pvs, running=("o1",))
+        assert writes == [] and holds == []
+        assert report["running_kept"] == 1 and report["pv_sap_restored"] == 0
+
+    def test_a_coherent_pair_is_resolved_untouched(self, monkeypatch):
+        pvs = self._lookup(**{"0001": _pv_row("0001", "WC1")})
+        report, writes, holds = self._run(monkeypatch, {"sap_production_version": "0002"}, pvs)
+        assert holds == [] and writes[0][6] is None
+        assert report["pv_sap_restored"] == 0 and report["pv_defaulted"] == 0
+
+    def test_pv_missing_keeps_todays_path(self, monkeypatch):
+        report, writes, holds = self._run(monkeypatch, {"production_version": ""}, self._lookup(),
+                                          default_pv={"MAT1": "0003"})
+        assert _run_cap_resolve.resolved_with == [("o1", "")] and writes[0][6] is None
+
+    def test_a_candidate_whose_routing_does_not_resolve_is_no_repair(self, monkeypatch):
+        pvs = self._lookup(**{"0001": _pv_row("0001", "WC9"), "0002": _pv_row("0002", "WC1")})
+        order = dict(self.ORDER, sap_production_version="0002")
+        report, writes, holds = _run_cap_resolve(
+            monkeypatch, [order], {"o1": {"status": "held", "reason_code": "runtime_unknown",
+                                          "detail_step": "no_routing"}},
+            pv_lookup=pvs, machine_workcenter=self.MACHINES)
+        assert writes == [] and holds[0][1].obj["step"] == "pv_workcenter_mismatch"
+        assert report["pv_sap_restored"] == 0
+
+
+class TestWriteOutcomesProductionVersionColumn:
+    class _Cur:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params=None):
+            self.calls.append((sql, params))
+
+    def test_write_row_is_seven_columns_with_the_pv_last(self):
+        from backend.routing import resolver as r
+        order = {"id": "o1", "planning_status": "scheduled", "planning_reason": None,
+                 "scheduled_start": None, "scheduled_end": None, "run_time": None}
+        assert len(r._build_write_row(order, _resolved(2.0))) == 7
+        assert r._build_write_row(order, _resolved(2.0))[6] is None
+        assert r._build_write_row(order, _resolved(2.0), new_pv="0002")[6] == "0002"
+
+    def test_write_outcomes_sets_the_pv_and_detects_a_pv_only_change(self):
+        from backend.routing import resolver as r
+        cur = self._Cur()
+        rows = [("o1", 2.0, "routing", {}, False, False, "0002"), ("o2", 2.0, "routing", {}, False, False, None)]
+        r._write_outcomes(cur, rows)
+        sql, params = cur.calls[0]
+        assert "production_version = COALESCE(v.production_version, o.production_version)" in sql
+        assert ("OR o.production_version IS DISTINCT FROM COALESCE(v.production_version, o.production_version)"
+                in sql)
+        assert "release_hold, set_mismatch, production_version)" in sql
+        assert sql.count("%s::text, %s::numeric, %s::text, %s::jsonb, %s::boolean, %s::boolean, %s::text") == 2
+        assert len(params) == 14
+
+    def test_new_report_carries_the_two_pv_counters(self):
+        from backend.routing import resolver as r
+        report = r._new_report(False)
+        assert report["pv_sap_restored"] == 0 and report["pv_defaulted"] == 0
+
+    def test_load_default_pv_skips_blank_and_zero_pads(self):
+        from backend.routing import resolver as r
+
+        class Cur:
+            def execute(self, sql, params=None):
+                assert "material_plants" in sql
+
+            def fetchall(self):
+                return [("M1", ""), ("M2", "3"), ("M3", "0004"), ("M4", None)]
+
+        assert r._load_default_pv(Cur(), "P1") == {"M2": "0003", "M3": "0004"}
 
 
 # ---------------------------------------------------------------------------

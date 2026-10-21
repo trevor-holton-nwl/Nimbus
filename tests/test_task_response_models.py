@@ -719,17 +719,66 @@ def test_update_task_dates_bulk_never_gates_a_disabled_plant(monkeypatch):
     assert result["persisted"] == 1
 
 
-def test_update_task_dates_bulk_never_gates_a_non_routing_sourced_order(monkeypatch):
+def test_update_task_dates_bulk_gates_a_manual_sourced_machine_only_move(monkeypatch):
+    """PV-Machine D9: a machine-only move of a hand-timed (manual) order on a routing plant is
+    gated like any other: the pair is checked, `resolved_runtime` is set and the row is written
+    run_time_source='routing' (it no longer keeps the manual run time)."""
     eff_rows = [_routing_eff_row("r-manual", run_time_source="manual", run_time=5.0)]
     cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])
     monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
 
-    monkeypatch.setattr(routing_resolver, "check_eligibility",
-                        lambda *a, **k: pytest.fail("check_eligibility must not run for a manual run_time_source"))
+    calls = []
+
+    def fake_check(plant, material, pv, machine, qty, start, *, conn=None, cache=None):
+        calls.append((pv, machine))
+        return {"ok": True, "hours": 3.0, "basis": {"b": 1}}
+
+    monkeypatch.setattr(routing_resolver, "check_eligibility", fake_check)
     monkeypatch.setattr(routing_resolver, "resolve_orders", lambda plant: None)
 
-    result = brain.db.update_task_dates_bulk([{"id": "r-manual", "MACHINE": "M2"}])
+    result = brain.db.update_task_dates_bulk(
+        [{"id": "r-manual", "MACHINE": "M2", "RUN_TIME": 3.0, "base_version": 100}])
 
+    assert calls == [("0001", "M2")]
+    assert result["invalid_ids"] == []
+    assert result["persisted"] == 1
+    update_sql = next(sql for sql, _p in cursor.executed
+                      if sql.strip().startswith("UPDATE orders o SET") and "RETURNING" in sql)
+    assert "run_time_source = 'routing'" in update_sql
+
+
+def test_update_task_dates_bulk_rejects_an_ineligible_manual_sourced_machine_move(monkeypatch):
+    eff_rows = [_routing_eff_row("r-manual", run_time_source="manual", run_time=5.0)]
+    cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+    monkeypatch.setattr(routing_resolver, "check_eligibility",
+                        lambda *a, **k: {"ok": False, "step": "pv_workcenter_mismatch"})
+    monkeypatch.setattr(routing_resolver, "resolve_orders", lambda plant: None)
+
+    result = brain.db.update_task_dates_bulk([{"id": "r-manual", "MACHINE": "M2", "base_version": 100}])
+
+    assert result["invalid_ids"] == ["r-manual"]
+    assert result["rejection_reasons"] == {"r-manual": "pv_workcenter_mismatch"}
+
+
+def test_update_task_dates_bulk_accepts_pv_and_machine_in_one_item(monkeypatch):
+    """The PV - Machine pair arrives as one item: both candidate values reach check_eligibility."""
+    eff_rows = [_routing_eff_row("r-pair", run_time_source="manual", run_time=5.0)]
+    cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+    calls = []
+
+    def fake_check(plant, material, pv, machine, qty, start, *, conn=None, cache=None):
+        calls.append((pv, machine))
+        return {"ok": True, "hours": 3.0, "basis": {}}
+
+    monkeypatch.setattr(routing_resolver, "check_eligibility", fake_check)
+    monkeypatch.setattr(routing_resolver, "resolve_orders", lambda plant: None)
+
+    result = brain.db.update_task_dates_bulk(
+        [{"id": "r-pair", "PRODUCTION_VERSION": "0002", "MACHINE": "M2", "RUN_TIME": 3.0, "base_version": 100}])
+
+    assert calls == [("0002", "M2")]
     assert result["invalid_ids"] == []
     assert result["persisted"] == 1
 

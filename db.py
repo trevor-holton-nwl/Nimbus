@@ -1562,14 +1562,16 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             resolved_runtime = None
 
             # Routing runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.5): a
-            # MACHINE or PRODUCTION_VERSION edit on an order whose run_time is
-            # routing-derived (or not yet known at all) must re-check §5.2
-            # steps 1-8 for the CANDIDATE combination before the edit is
-            # accepted -- otherwise the order could land on a machine/version
-            # its routing can't resolve, silently keeping a stale run_time
-            # until the next plant-wide recompute. Only gated when the
-            # plant's switch is on. Explicit PV changes opt into routing;
-            # machine-only moves preserve manual/distributed/SAP runtimes.
+            # MACHINE or PRODUCTION_VERSION edit on an order of a routing-enabled
+            # plant must re-check §5.2 steps 1-8 for the CANDIDATE combination
+            # before the edit is accepted -- otherwise the order could land on a
+            # machine/version its routing can't resolve. Only gated when the
+            # plant's switch is on. PV-Machine rule (D9): ANY changed MACHINE or
+            # PRODUCTION_VERSION is gated whatever the run-time source (manual,
+            # sap_order, legacy, routing, unknown): the pair is checked, the run
+            # time resets to the routing value and the row is written
+            # run_time_source='routing' (a hand-timed order that is moved loses its
+            # manual run time; the browser sends the routing-derived RUN_TIME).
             # Material, quantity, and start
             # date are never edited by this endpoint, so they always come
             # from the row's own current values; machine/production version
@@ -1577,9 +1579,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # current value. Read within THIS SAME open transaction/
             # connection -- never a second connection mid-write.
             if (("MACHINE" in attrs or "PRODUCTION_VERSION" in attrs)
-                    and current["routing_runtime_enabled"]
-                    and ("PRODUCTION_VERSION" in attrs
-                         or current["run_time_source"] == "routing" or current["run_time"] is None)):
+                    and current["routing_runtime_enabled"]):
                 candidate_machine = attrs.get("MACHINE", current["machine"])
                 candidate_pv = attrs.get("PRODUCTION_VERSION", current["production_version"])
                 eligibility = routing_resolver.check_eligibility(
