@@ -981,7 +981,7 @@ export const Dashboard = {
       <div class="alert-row sev-${a.sev}" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">
         <span class="sev" data-sev="${a.sev}" aria-label="${a.sev === 'err' ? 'Error' : a.sev === 'warn' ? 'Warning' : 'Info'}"></span>
         <button type="button" class="msg alert-summary-focus" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.escapeHtml(Util.alertMessage(a))}</button>
-        <span class="meta">${a.time ? Util.fmtDT(a.time).slice(5, 16) : ''}</span>
+        <span class="meta">${a.time ? Util.fmtDTShort(a.time) : ''}</span>
         <button type="button" class="dismiss" aria-label="${Util.t('btn.dismiss')}" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">×</button>
       </div>
     `).join('');
@@ -1002,7 +1002,7 @@ export const Dashboard = {
         <span class="pin">🔒</span>
         <span class="id">${Util.escapeHtml(t.MACHINE || '')}</span>
         <span class="name">${Util.escapeHtml(t.text || t.ORDER || t.id)}</span>
-        <span class="when">${Util.fmtDT(t.start_date).slice(5, 16)}</span>
+        <span class="when">${Util.fmtDTShort(t.start_date)}</span>
         <button class="btn btn-ghost sm" data-order-id="${Util.escapeHtml(String(t.id))}">${Util.t('btn.unfirm_dashboard')}</button>
       </div>
     `).join('');
@@ -1181,8 +1181,8 @@ export const Dashboard = {
         return `<div class="lh-drill-row" role="button" tabindex="0" data-order-id="${Util.escapeHtml(String(t.id))}">
           <span class="lh-drill-id">${Util.escapeHtml(t.id).slice(0, 10)}</span>
           <span class="lh-drill-name">${Util.escapeHtml(t.text || t.ORDER || t.MATERIAL_DESCRIPTION || t.id)}</span>
-          <span class="lh-drill-due">due ${due ? Util.fmtDT(due).slice(5, 16) : '—'}</span>
-          <span class="lh-drill-sched">→ ${sched ? Util.fmtDT(sched).slice(5, 16) : '—'}</span>
+          <span class="lh-drill-due">due ${due ? Util.fmtDTShort(due) : '—'}</span>
+          <span class="lh-drill-sched">→ ${sched ? Util.fmtDTShort(sched) : '—'}</span>
           <span class="lh-drill-late">${lateLbl}</span>
         </div>`;
       }).join('');

@@ -205,6 +205,12 @@ function _fmtMachinesList(p: { value: unknown }): string {
   return Array.isArray(p.value) ? p.value.join(', ') : '';
 }
 
+// Valid-from / valid-to dates are stored and served as YYYY-MM-DD; users see MM/DD/YYYY.
+// The CSV export runs through this same formatter (Util.csvProcessCell applies formatValue).
+function _fmtDate(p: { value: unknown }): string {
+  return p.value == null ? '' : Util.fmtIsoDate(String(p.value));
+}
+
 // Formats a boolean as translated Yes/No text (routing_pv's
 // counts_toward_runtime badge column, ROUTING_RUNTIME_DESIGN.md §7.3).
 function _fmtYesNo(p: { value: unknown }): string {
@@ -297,8 +303,8 @@ const SPECS: Record<GridId, GridSpec> = {
     cols: [
       { field: 'material_id',           i18n: 'col.material_id' },
       { field: 'production_version',    i18n: 'col.routing_pv_production_version' },
-      { field: 'valid_from',            i18n: 'col.routing_pv_valid_from' },
-      { field: 'valid_to',              i18n: 'col.routing_pv_valid_to' },
+      { field: 'valid_from',            i18n: 'col.routing_pv_valid_from', valueFormatter: _fmtDate },
+      { field: 'valid_to',              i18n: 'col.routing_pv_valid_to', valueFormatter: _fmtDate },
       { field: 'task_list_type',        i18n: 'col.routing_pv_task_list_type' },
       { field: 'routing_group',         i18n: 'col.routing_pv_group' },
       { field: 'group_counter',         i18n: 'col.routing_pv_group_counter' },

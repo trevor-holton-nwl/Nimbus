@@ -1878,22 +1878,30 @@ export const Table = {
     }
   },
 
-  /** A minimal inline datetime-local editor for AG Grid. */
+  /** A minimal inline date-time text editor for AG Grid. Typed as MM/DD/YYYY HH:mm (24h) so it
+   *  never follows the browser locale (a native datetime-local input does). */
   _DateTimeEditor: class {
     _input!: HTMLInputElement;
     init(params: { value: unknown }): void {
       this._input = document.createElement('input');
-      this._input.type = 'datetime-local';
+      this._input.type = 'text';
+      this._input.placeholder = 'MM/DD/YYYY HH:mm';
       this._input.style.width = '100%';
       this._input.style.height = '30px';
       this._input.style.border = '1px solid var(--accent)';
       this._input.style.padding = '0 6px';
       this._input.style.fontSize = '12px';
-      this._input.value = Util.toLocalInput(params.value);
+      this._input.value = Util.fmtDT(params.value);
     }
     getGui(): HTMLInputElement { return this._input; }
     afterGuiAttached(): void { this._input.focus(); this._input.select(); }
-    getValue(): Date | null { return Util.parseDate(this._input.value); }
+    getValue(): Date | null {
+      const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ T]+(\d{1,2}):(\d{2}))?$/.exec(this._input.value.trim());
+      if (!m) return null;
+      const [mo, da, yr, hh, mi] = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4] ?? 0), Number(m[5] ?? 0)];
+      const d = new Date(yr, mo - 1, da, hh, mi);
+      return d.getMonth() === mo - 1 && d.getDate() === da && hh < 24 && mi < 60 ? d : null;
+    }
     destroy(): void {}
   },
 

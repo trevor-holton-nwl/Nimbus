@@ -5709,4 +5709,4 @@ def test_aggregate_csv_is_bom_prefixed_and_formula_guarded(monkeypatch):
         again = TestClient(brain.api).get("/distribution/ZZPLANT/aggregate", params={"format": "csv"})
     finally:
         brain.api.dependency_overrides.clear()
-    assert list(_csv.reader(_io.StringIO(again.content.decode("utf-8-sig"))))[1][-1] == "2026-10-09 16:00:00"
+    assert list(_csv.reader(_io.StringIO(again.content.decode("utf-8-sig"))))[1][-1] == "10/09/2026 16:00"

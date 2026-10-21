@@ -17,7 +17,9 @@ are intentionally NOT split into backend/<domain>/" note) -- a shared home
 for this one padding helper isn't worth breaking that one-way-import
 convention for.
 """
+import datetime
 import io
+import re
 
 import pandas as pd
 
@@ -128,6 +130,34 @@ def _clean_str(value) -> str:
         return ""
     s = str(value).strip()
     return "" if s.lower() == "nan" else s
+
+
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$")
+_US_DATE_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+
+
+def normalize_date_cell(value) -> str | None:
+    """A pasted date cell -> 'YYYY-MM-DD' (None for a blank cell). Accepts ISO
+    (a trailing time part is dropped), M/D/YYYY and MM/DD/YYYY, and date/
+    datetime objects; raises ValueError for anything else or an impossible
+    calendar date (02/30/2026). Pure calendar arithmetic, no timezone."""
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.strftime("%Y-%m-%d")
+    s = _clean_str(value)
+    if not s:
+        return None
+    m = _ISO_DATE_RE.match(s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = _US_DATE_RE.match(s)
+        if not m:
+            raise ValueError(f"{s!r} is not a valid date (use MM/DD/YYYY)")
+        mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        return datetime.date(y, mo, d).isoformat()
+    except ValueError:
+        raise ValueError(f"{s!r} is not a valid date (use MM/DD/YYYY)") from None
 
 
 def _to_bool(value) -> bool:

@@ -684,8 +684,8 @@ test('Diagnose: a line/day alert opens the cell briefing, an order alert toggles
   clickAlert('diagnose', 'o1');
   const html = els['am-groups'].innerHTML;
   assert.match(html, /class="am-diag"/);
-  assert.match(html, /<dt>ui\.insp_due_date<\/dt><dd[^>]*>2026-10-21 08:00</);
-  assert.match(html, /<dt>ui\.insp_planned_finish<\/dt><dd[^>]*>2026-10-22 08:00</);
+  assert.match(html, /<dt>ui\.insp_due_date<\/dt><dd[^>]*>10\/21\/2026 08:00</);
+  assert.match(html, /<dt>ui\.insp_planned_finish<\/dt><dd[^>]*>10\/22\/2026 08:00</);
   assert.match(html, /<dt>ui\.late<\/dt><dd[^>]*>24 h</);
   assert.match(html, /<dt>ui\.insp_run_time<\/dt><dd[^>]*>6\.5 h · Routing · PV 1</);
   assert.match(html, /<dt>ui\.insp_firming<\/dt><dd[^>]*>ui\.firmed</);

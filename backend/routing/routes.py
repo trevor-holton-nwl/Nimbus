@@ -197,13 +197,58 @@ def _do_validate(table: str, rows: list[dict]) -> tuple[list[dict], list[dict]]:
     in group order, then row order."""
     if table == "production_version":
         mapped, prefix = ingest.map_row_keys(rows, ingest.PRODUCTION_VERSION_HEADERS)
+        mapped, prefix = _check_dates(mapped, prefix, ("valid_from", "valid_to"))
         ops, warnings = ingest.parse_production_versions_rows(
-            mapped, first_row=1, prefix_warnings=prefix)
-        return ops["upserts"], warnings
+            mapped.rows, first_row=1, prefix_warnings=prefix)
+        return ops["upserts"], mapped.remap(warnings)
     mapped, prefix = ingest.map_row_keys(rows, ingest.ROUTING_OPERATION_HEADERS)
+    mapped, prefix = _check_dates(mapped, prefix, ("header_valid_from", "header_valid_to"))
     groups, warnings = ingest.parse_routing_operations_rows(
-        mapped, first_row=1, prefix_warnings=prefix)
-    return [row for group_rows in groups.values() for row in group_rows], warnings
+        mapped.rows, first_row=1, prefix_warnings=prefix)
+    return [row for group_rows in groups.values() for row in group_rows], mapped.remap(warnings)
+
+
+class _DateChecked:
+    """Rows that passed the date check, plus the pasted-line number of each so
+    the parser's per-row warnings (numbered over the kept rows) can be mapped
+    back to the line the user pasted."""
+
+    def __init__(self, rows: list[dict], line_numbers: list[int], bad: list[dict]):
+        self.rows = rows
+        self.line_numbers = line_numbers
+        self.bad = bad
+
+    def remap(self, warnings: list[dict]) -> list[dict]:
+        out = []
+        for w in warnings:
+            r = w.get("row")
+            if isinstance(r, int) and 1 <= r <= len(self.line_numbers):
+                w = {**w, "row": self.line_numbers[r - 1]}
+            out.append(w)
+        return out + self.bad
+
+
+def _check_dates(mapped: list[dict], prefix: list[dict], date_cols: tuple[str, ...]):
+    """Normalise the date columns of pasted rows to ISO (accepts ISO and
+    MM/DD/YYYY). A row with an unreadable or impossible date is dropped from
+    the parse and reported as a `reject` warning (`invalid_date`) rather than
+    reaching Postgres as a DATE cast error. Returns (_DateChecked, prefix);
+    the date warnings ride on the _DateChecked and are appended by `remap`."""
+    kept: list[dict] = []
+    lines: list[int] = []
+    bad: list[dict] = []
+    for i, record in enumerate(mapped, start=1):
+        row = dict(record)
+        try:
+            for col in date_cols:
+                if col in row:
+                    row[col] = ingest.normalize_date_cell(row[col]) or ""
+        except ValueError as exc:
+            bad.append({"level": "reject", "msg": f"invalid_date: {col}: {exc}", "row": i})
+            continue
+        kept.append(row)
+        lines.append(i)
+    return _DateChecked(kept, lines, bad), prefix
 
 
 @router.post("/routing/validate/{table}", response_model=RoutingValidateResult,

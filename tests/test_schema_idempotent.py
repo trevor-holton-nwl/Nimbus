@@ -157,6 +157,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
     expected_replayable = {
         "2026-10-19-2-rounding-value-label.sql",
         "2026-10-20-2-alert-profiles.sql",
+        "2026-10-20-3-reset-date-format.sql",
         "2026-07-07-color-wheel-table.sql",
         "2026-07-07-security-tables.sql",
         "2026-07-08-username-ci-index.sql",

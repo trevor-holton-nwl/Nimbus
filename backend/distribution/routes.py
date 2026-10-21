@@ -40,7 +40,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Res
 import master_data as md
 import backend.distribution.data as distribution_data
 from backend.admin_ops.logbuffer import _log_event, _set_admin_log_details
-from backend.csv_util import CSV_BOM, csv_row
+from backend.csv_util import CSV_BOM, csv_row, us_date_any
 from backend.distribution.models import WorkCenterSaveResult
 from backend.security import auth
 from backend.security.auth import require_api_key
@@ -228,13 +228,14 @@ def get_distribution_aggregate(
                          "due_date"])
         for r in rows:
             children_summary = "; ".join(
-                f"{c['production_order']}|{c['machine']}|{c['quantity']}|{c['start'] or ''}|{c['end'] or ''}"
+                f"{c['production_order']}|{c['machine']}|{c['quantity']}|{us_date_any(c['start']) or ''}|{us_date_any(c['end']) or ''}"
                 for c in r["children"]
             )
             writer.writerow(csv_row([r["production_order"], r["material_number"], r["machine"], r["quantity"],
-                                     r["sum_child_quantity"], r["start"] or "", r["finish"] or "", r["child_count"],
+                                     r["sum_child_quantity"], us_date_any(r["start"]) or "", us_date_any(r["finish"]) or "",
+                                     r["child_count"],
                                      r["queued_children"], r["all_scheduled"], r["firming_indicator"], r["reviewed"],
-                                     children_summary, r.get("due_date") or ""]))
+                                     children_summary, us_date_any(r.get("due_date")) or ""]))
         headers = {"Content-Disposition": f'attachment; filename="distribution-aggregate-{plant}.csv"',
                   "Cache-Control": "no-store"}
         return Response(content=buf.getvalue(), media_type="text/csv", headers=headers)

@@ -274,13 +274,31 @@ export const Util = {
     return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
   },
 
-  // Pretty date for display (e.g. "2026-04-22 09:15").
+  // Pretty date for display (e.g. "04/22/2026 09:15", 24h). Display only; use
+  // dayKey/toLocalInput for keys and payloads.
   fmtDT(d: unknown): string {
     const date = Util.parseDate(d);
     if (!date) return '';
     const p = (n: number) => String(n).padStart(2, '0');
-    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} `
+    return `${p(date.getMonth() + 1)}/${p(date.getDate())}/${date.getFullYear()} `
          + `${p(date.getHours())}:${p(date.getMinutes())}`;
+  },
+
+  // Compact "MM/DD HH:mm" (24h) for tight list rows.
+  fmtDTShort(d: unknown): string {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${p(date.getMonth() + 1)}/${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}`;
+  },
+
+  // ISO "YYYY-MM-DD[...]" string -> "MM/DD/YYYY" from string parts (no Date parsing,
+  // no timezone shift). Any time part is dropped; non-matching input is returned
+  // unchanged (null/undefined -> ''). Fixed format, not preference-driven.
+  fmtIsoDate(s: string | null | undefined): string {
+    if (s == null) return '';
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s));
+    return m ? `${m[2]}/${m[3]}/${m[1]}` : String(s);
   },
 
   // ── DISPLAY-ONLY format prefs (was Store.pref, now the injected resolver) ──

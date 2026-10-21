@@ -819,3 +819,21 @@ test('countPasteMatches counts wildcard tokens against known ids', () => {
   assert.deepEqual(Util.countPasteMatches('204*\n999*\n204\nzzz', known), { matched: 2, total: 4 });
   assert.deepEqual(Util.countPasteMatches('*', known), { matched: 0, total: 0 });
 });
+
+test('fmtIsoDate renders MM/DD/YYYY from string parts with no timezone shift', () => {
+  assert.equal(Util.fmtIsoDate('2026-01-01'), '01/01/2026');
+  assert.equal(Util.fmtIsoDate('9999-12-31'), '12/31/9999');
+  assert.equal(Util.fmtIsoDate('2026-01-31T10:00:00'), '01/31/2026');
+  assert.equal(Util.fmtIsoDate(''), '');
+  assert.equal(Util.fmtIsoDate(null), '');
+  assert.equal(Util.fmtIsoDate(undefined), '');
+  assert.equal(Util.fmtIsoDate('not a date'), 'not a date');
+});
+
+test('fmtDT and fmtDTShort render numeric dates as MM/DD (24h)', () => {
+  const d = new Date(2026, 3, 22, 9, 5);
+  assert.equal(Util.fmtDT(d), '04/22/2026 09:05');
+  assert.equal(Util.fmtDTShort(d), '04/22 09:05');
+  assert.equal(Util.fmtDT(null), '');
+  assert.equal(Util.fmtDTShort('garbage'), '');
+});

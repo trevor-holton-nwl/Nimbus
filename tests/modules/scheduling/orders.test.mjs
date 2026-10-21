@@ -1333,8 +1333,8 @@ test('#35 Printer.exportCsv writes plant-local wall-clock times, not UTC', async
     Printer._rows = [{ MACHINE: 'L1', ORDER: '1', MATERIAL_NUMBER: 'M', MATERIAL_DESCRIPTION: 'd', start_date: start, end_date: end }];
     Printer.exportCsv();
     const row = (await blob.text()).split('\r\n')[1];
-    assert.ok(row.includes('2026-08-14 23:30'), `start must be local wall clock: ${row}`);
-    assert.ok(row.includes('2026-08-15 01:45'), `end must be local wall clock: ${row}`);
+    assert.ok(row.includes('08/14/2026 23:30'), `start must be local wall clock: ${row}`);
+    assert.ok(row.includes('08/15/2026 01:45'), `end must be local wall clock: ${row}`);
   } finally {
     globalThis.document = priorDoc;
     globalThis.URL.createObjectURL = priorURL;

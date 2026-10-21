@@ -12,7 +12,7 @@ const t = (k, v) => `${k}${v ? '|' + Object.entries(v).map(([a, b]) => `${a}=${b
 const view = (o = {}) => ({
   id: 'a1', type: 'overlap', sev: 'err', taskId: '10', line: 'L1', time: new Date('2026-10-21T08:00:00'),
   headline: 'Order overlap', message: 'Overlaps 4500118 by 2 h', help: 'help text', orderNo: '4711', groupBy: 'category',
-  dateText: 'Wed 21 Oct', relText: 'in 1 days', overdue: false, anchorTip: 'am.anchor_time: 2026-10-21 08:00',
+  dateText: 'Wed 21 Oct', relText: 'in 1 days', overdue: false, anchorTip: 'am.anchor_time: 10/21/2026 08:00',
   whatIf: false, ackLabel: null, diagOpen: false, diagHtml: '', ...o,
 });
 
@@ -34,7 +34,7 @@ test('row builder escapes every dynamic string', () => {
 test('a row is one line: a single .am-when, the prefix and message, and no number columns or meta block', () => {
   const html = rowHtml(view(), t);
   assert.equal((html.match(/class="am-when/g) ?? []).length, 1);
-  assert.match(html, /<span class="am-when" title="am\.anchor_time: 2026-10-21 08:00">Wed 21 Oct · in 1 days<\/span>/);
+  assert.match(html, /<span class="am-when" title="am\.anchor_time: 10\/21\/2026 08:00">Wed 21 Oct · in 1 days<\/span>/);
   assert.doesNotMatch(html, /am-imp|am-num|am-meta|am-help|am-headline|am-hl\b|ⓘ/);
   assert.match(html, /<div class="am-main"><span class="am-pfx">L1 · 4711 ·<\/span><span class="am-msg" title="Overlaps 4500118 by 2 h">Overlaps 4500118 by 2 h<\/span><\/div>/);
   assert.equal(ROW_H, 44);

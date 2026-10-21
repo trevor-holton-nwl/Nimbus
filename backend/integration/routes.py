@@ -33,7 +33,7 @@ import backend.integration.sap_staging as sap_staging
 import backend.integration.sap_sync as sap_sync
 import backend.setup.data as setup_data
 from backend.admin_ops.logbuffer import _log_event, _set_admin_log_details
-from backend.csv_util import CSV_BOM, csv_cell
+from backend.csv_util import CSV_BOM, csv_cell, us_date_any
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
 
@@ -685,8 +685,10 @@ def _stage_conflict(exc: "sap_staging.BatchNotApplicable") -> HTTPException:
     return HTTPException(status_code=409, detail={"error": code, **detail})
 
 
-def _csv_response(rows: list[dict], filename: str) -> Response:
-    """Rows -> a BOM-prefixed, formula-guarded CSV download (columns = first-seen key order)."""
+def _csv_response(rows: list[dict], filename: str, *, us_dates: bool = False) -> Response:
+    """Rows -> a BOM-prefixed, formula-guarded CSV download (columns = first-seen key order).
+    `us_dates` renders ISO date/time values as MM/DD/YYYY[ HH:MM] -- only for a download nobody
+    re-uploads (see the rejected-rows route, which keeps ISO)."""
     fields: list[str] = []
     for r in rows:
         for k in r:
@@ -697,7 +699,7 @@ def _csv_response(rows: list[dict], filename: str) -> Response:
     writer = csv.DictWriter(buf, fieldnames=fields)
     writer.writeheader()
     for r in rows:
-        writer.writerow({k: csv_cell(r.get(k)) for k in fields})
+        writer.writerow({k: csv_cell(us_date_any(r.get(k)) if us_dates else r.get(k)) for k in fields})
     return Response(content=buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
@@ -911,5 +913,5 @@ def sap_stage_send_rows(plant: str, status: str | None = Query(default=None),
         raise HTTPException(status_code=400, detail=f"Unknown status: {status!r}")
     rows = sap_staging.outbound_rows(plant, status=status, limit=limit)
     if format == "csv":
-        return _csv_response(rows, f"sap-send-{plant}{'-' + status if status else ''}.csv")
+        return _csv_response(rows, f"sap-send-{plant}{'-' + status if status else ''}.csv", us_dates=True)
     return {"rows": rows}

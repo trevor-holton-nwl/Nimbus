@@ -7,6 +7,7 @@
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
+import { isDateColumn, displayDate, normalizeDateCell, normalizeDateColumns } from './date-input.mjs';
 import { Engine } from '../optimization/engine.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
@@ -4099,10 +4100,20 @@ export const MasterData = (() => {
         const cell = document.createElement('div');
         cell.contentEditable = isDeleted ? 'false' : 'true';
         cell.className = 'md-cell';
-        cell.textContent = String(rowView[col.column_name] ?? '');
+        const isDate = isDateColumn(col.column_name);
+        // Date cells show MM/DD/YYYY; the staged/posted value stays ISO (a typed or pasted
+        // date is normalised, an unreadable one is kept as typed and rejected at Save).
+        cell.textContent = isDate
+          ? displayDate(rowView[col.column_name], Util.fmtIsoDate)
+          : String(rowView[col.column_name] ?? '');
         cell.dataset.col = col.column_name;
         cell.dataset.rowKey = key;
-        cell.oninput = () => _markDirty(table, key, col.column_name, cell.textContent);
+        cell.oninput = isDate
+          ? () => {
+              const r = normalizeDateCell(cell.textContent);
+              _markDirty(table, key, col.column_name, r.value);
+            }
+          : () => _markDirty(table, key, col.column_name, cell.textContent);
         td.appendChild(cell);
       }
       tr.appendChild(td);
@@ -4454,7 +4465,25 @@ export const MasterData = (() => {
     // admin sees them in the confirm below before anything is staged.
     let rejectsHtml = '';
     let validated: RoutingValidateResponse | null = null;
-    if (table === 'production_version' || table === 'routing_operation') {
+    const isRoutingTable = table === 'production_version' || table === 'routing_operation';
+
+    // Pasted dates (MM/DD/YYYY or ISO) become ISO before anything is posted or staged. A cell that is
+    // not a real date is never sent as typed: the routing validator below reports it as a rejected
+    // row; on the other tables the row is dropped here and listed in the confirm.
+    const dateBad = normalizeDateColumns(rows, (n) => isDateColumn(n.toLowerCase()));
+    if (dateBad.length && !isRoutingTable) {
+      const badRows = new Set(dateBad.map((b) => b.row));
+      const items = dateBad.slice(0, 20).map((b) =>
+        `<li>${Util.t('ui.paste_reject_row', { row: b.row })}: ${Util.escapeHtml(`${b.column}: "${b.value}" is not a valid date (use MM/DD/YYYY)`)}</li>`);
+      if (dateBad.length > 20) items.push(`<li>${Util.t('ui.paste_rejects_more', { count: dateBad.length - 20 })}</li>`);
+      rejectsHtml = `<div class="md-paste-rejects"><strong>${Util.t('ui.paste_rejects_heading', { count: badRows.size })}</strong><ul>${items.join('')}</ul></div>`;
+      rows = rows.filter((_, i) => !badRows.has(i + 1));
+      if (!rows.length) {
+        Toast.show(`${dateBad[0].column}: "${dateBad[0].value}" is not a valid date (use MM/DD/YYYY)`, 'error');
+        return;
+      }
+    }
+    if (isRoutingTable) {
       try {
         const resp = await Util.fetchTraced(`${API}/routing/validate/${table}`, {
           method:  'POST',
@@ -4820,6 +4849,19 @@ export const MasterData = (() => {
     state.deleted.forEach((snap) => { deletes.push({ ...snap }); });
 
     if (!upserts.length && !deletes.length) return;
+
+    // Date cells are posted as ISO only (never the MM/DD/YYYY display text); an unreadable date
+    // stops the save with a clear message instead of reaching Postgres as a cast error. Copies,
+    // so the staged rows keep exactly what the user typed.
+    for (let i = 0; i < upserts.length; i++) {
+      const copy: MasterDataRow = { ...upserts[i] };
+      const bad = normalizeDateColumns([copy]);
+      if (bad.length) {
+        Toast.show(`${bad[0].column}: "${bad[0].value}" is not a valid date (use MM/DD/YYYY)`, 'error');
+        return;
+      }
+      upserts[i] = copy;
+    }
 
     // Cascade confirmation for deletes that weren't already confirmed.
     if (deletes.length && (table === 'subnetworks' || table === 'plants' || table === 'material_plants' || table === 'sap_workcenter')) {

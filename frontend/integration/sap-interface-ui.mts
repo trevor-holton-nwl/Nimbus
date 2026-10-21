@@ -1633,7 +1633,7 @@ export const Interface = (() => {
     try {
       const d = new Date(ts);
       if (isNaN(d.getTime())) return String(ts);
-      return Util.fmtDTReadable ? Util.fmtDTReadable(d) : d.toLocaleString();
+      return Util.fmtDTReadable ? Util.fmtDTReadable(d) : Util.fmtDT(d);
     } catch { return String(ts); }
   }
 

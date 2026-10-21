@@ -384,6 +384,12 @@ export function resolveActiveProfileId(
 
 // ---- Acknowledgement label --------------------------------------------------------------------
 
+/** "YYYY-MM-DD[...]" -> "MM/DD/YYYY" from string parts (mirrors Util.fmtIsoDate; this module stays Util-free). */
+const _isoToMdy = (s: string): string => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  return m ? `${m[2]}/${m[3]}/${m[1]}` : s;
+};
+
 /** "Acknowledged by X until D" / "Acknowledged by X" (shared by the Alert Monitor row and the drawer row). */
 export function ackLabel(
   ack: { acknowledged_by?: string | null; until?: string | null } | undefined,
@@ -391,5 +397,5 @@ export function ackLabel(
 ): string | null {
   if (!ack) return null;
   const who = ack.acknowledged_by ?? '—';
-  return ack.until ? t('am.ack_by', { who, until: String(ack.until).slice(0, 10) }) : t('am.ack_by_noend', { who });
+  return ack.until ? t('am.ack_by', { who, until: _isoToMdy(String(ack.until)) }) : t('am.ack_by_noend', { who });
 }

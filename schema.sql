@@ -2164,6 +2164,22 @@ UPDATE column_metadata
    AND column_name = 'incremental_lot_size'
    AND display_label = 'Incremental Lot Size';
 
+-- Reset every stored `dateFormat` preference (user_settings, roles.settings) to 'm/d/Y' (mirrors
+-- migrations/2026-10-20-3-reset-date-format.sql). Ledger-guarded, so it never overwrites a later choice.
+DO $mig$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE id = 'reset_date_format_mdy') THEN
+    UPDATE user_settings
+       SET settings = jsonb_set(settings, '{dateFormat}', '"m/d/Y"'::jsonb), updated_at = NOW()
+     WHERE settings->'dateFormat' IS NOT NULL AND settings->'dateFormat' <> '"m/d/Y"'::jsonb;
+    UPDATE roles
+       SET settings = jsonb_set(settings, '{dateFormat}', '"m/d/Y"'::jsonb), updated_at = NOW()
+     WHERE settings->'dateFormat' IS NOT NULL AND settings->'dateFormat' <> '"m/d/Y"'::jsonb;
+    INSERT INTO schema_migrations (id) VALUES ('reset_date_format_mdy');
+  END IF;
+END
+$mig$;
+
 -- Alert Monitor: alert_profile + alert_ack (mirrors migrations/2026-10-20-2-alert-profiles.sql). Idempotent.
 CREATE TABLE IF NOT EXISTS alert_profile (
     id TEXT PRIMARY KEY, plant TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
