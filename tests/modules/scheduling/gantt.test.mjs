@@ -1802,7 +1802,9 @@ test('Interaction._onDataSetUpdate rejects a single-item drag when Runtime.eligi
   let scheduleRebuildCalled = false;
   Timeline._scheduleRebuild = () => { scheduleRebuildCalled = true; };
   let eligibleCalls = [];
-  Runtime.eligible = (task, machine) => { eligibleCalls.push(machine); return false; };
+  // A line move is judged by the drop rule (D4): no PV covers the target row -> reject.
+  const priorDropDecision = Runtime.dropDecision;
+  Runtime.dropDecision = (task, machine) => { eligibleCalls.push(machine); return { kind: 'reject' }; };
 
   const id = 'routing-drag-single';
   const line = 'ROUTING-DRAG-L1';
@@ -1831,6 +1833,7 @@ test('Interaction._onDataSetUpdate rejects a single-item drag when Runtime.eligi
     Timeline._scheduleRebuild = priorScheduleRebuild;
     Toast.show = priorToastShow;
     Runtime.eligible = priorEligible;
+    Runtime.dropDecision = priorDropDecision;
     globalThis.window.__NIMBUS_LOCALES = priorLocales;
     Store.setTasks([], 'test');
     Store.setMasterData(priorMasterData, 'test');
@@ -1891,7 +1894,6 @@ test('Interaction._onDataSetUpdate: a multi-drag whose DRAGGED item is routing-i
   const plant = 'P-ROUTING-MULTI';
   const priorMasterData = _enableRoutingForPlant(plant);
   const line = 'ROUTING-MULTI-L1';
-  const otherLine = 'ROUTING-MULTI-L2';
   const anchorId = 'routing-multi-anchor';
   const companionId = 'routing-multi-companion';
   const anchorStart = new Date('2026-09-21T08:00:00');
@@ -1907,8 +1909,9 @@ test('Interaction._onDataSetUpdate: a multi-drag whose DRAGGED item is routing-i
   // Only the dragged item (anchorId) is ineligible; the companion never gets asked.
   Runtime.eligible = (task) => task.id !== anchorId;
   let itemsUpdateCalled = false;
+  // A time-only multi-drag (D5: a multi-drag never changes line): the dragged bar slides 1h on its own row.
   Timeline._items = {
-    get: (i) => (i === anchorId ? { start: anchorStart, end: anchorEnd, group: otherLine } : undefined),
+    get: (i) => (i === anchorId ? { start: new Date(anchorStart.getTime() + 3600000), end: new Date(anchorEnd.getTime() + 3600000), group: line } : undefined),
     update: () => { itemsUpdateCalled = true; },
   };
 
@@ -1951,7 +1954,6 @@ test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is routing-inel
   const plant = 'P-ROUTING-MULTI-2';
   const priorMasterData = _enableRoutingForPlant(plant);
   const line = 'ROUTING-MULTI-L3';
-  const otherLine = 'ROUTING-MULTI-L4';
   const anchorId = 'routing-multi-anchor2';
   const companionId = 'routing-multi-companion2';
   const anchorStart = new Date('2026-09-21T08:00:00');
@@ -1966,9 +1968,12 @@ test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is routing-inel
   Selection.set([anchorId, companionId]);
   // The dragged anchor is eligible; only the companion is not.
   Runtime.eligible = (task) => task.id !== companionId;
+  // A line change now always re-resolves the run time from routing (D9), so the anchor needs a resolvable pair too.
+  const priorResolve = Runtime.resolve;
+  Runtime.resolve = () => ({ ok: true, hours: 2, basis: { source: 'routing' } });
   let itemsUpdateCalled = false;
   Timeline._items = {
-    get: (i) => (i === anchorId ? { start: anchorStart, end: anchorEnd, group: otherLine } : undefined),
+    get: (i) => (i === anchorId ? { start: new Date(anchorStart.getTime() + 3600000), end: new Date(anchorEnd.getTime() + 3600000), group: line } : undefined),
     update: () => { itemsUpdateCalled = true; },
   };
 
@@ -1983,6 +1988,7 @@ test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is routing-inel
     Timeline._items = undefined;
     Timeline._scheduleRebuild = priorScheduleRebuild;
     Runtime.eligible = priorEligible;
+    Runtime.resolve = priorResolve;
     Selection.clear();
     Store.setTasks([], 'test');
     Alerts.scheduleRecompute = priorScheduleRecompute;

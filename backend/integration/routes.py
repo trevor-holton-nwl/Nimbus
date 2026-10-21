@@ -287,10 +287,10 @@ def get_missing_master_data(batch_id: str, format: str | None = Query(default=No
     if format == "csv":
         buf = io.StringIO()
         buf.write(CSV_BOM)
-        writer = csv.DictWriter(buf, fieldnames=["plant", "material_number", "order_count", "reason"])
+        writer = csv.DictWriter(buf, fieldnames=["plant", "material_number", "production_version", "order_count", "reason"])
         writer.writeheader()
         for e in exceptions:
-            writer.writerow({k: csv_cell(e.get(k)) for k in ["plant", "material_number", "order_count", "reason"]})
+            writer.writerow({k: csv_cell(e.get(k)) for k in ["plant", "material_number", "production_version", "order_count", "reason"]})
         return Response(
             content=buf.getvalue(), media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="missing-master-data-{batch_id}.csv"'},
@@ -320,10 +320,10 @@ def get_live_missing_master_data(
     if format == "csv":
         buf = io.StringIO()
         buf.write(CSV_BOM)
-        writer = csv.DictWriter(buf, fieldnames=["plant", "material_number", "order_count", "reason"])
+        writer = csv.DictWriter(buf, fieldnames=["plant", "material_number", "production_version", "order_count", "reason"])
         writer.writeheader()
         for e in result["exceptions"]:
-            writer.writerow({k: csv_cell(e.get(k)) for k in ["plant", "material_number", "order_count", "reason"]})
+            writer.writerow({k: csv_cell(e.get(k)) for k in ["plant", "material_number", "production_version", "order_count", "reason"]})
         return Response(
             content=buf.getvalue(), media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="missing-master-data-{plant}.csv"'},

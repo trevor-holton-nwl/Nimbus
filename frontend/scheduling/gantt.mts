@@ -21,7 +21,7 @@
 // after both modules have finished initializing (a "lazy" ESM cycle, same
 // precedent as setup-admin.mts's Plant cycle from Phase P2).
 /* global NIMBUS */
-import { Config, Util, PerfMonitor, ErrorLog, Toast, VirtualList } from '../platform/foundation.mjs';
+import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from '../platform/foundation.mjs';
 import type { PasteMatcher } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Selection } from './selection.mjs';
@@ -37,6 +37,7 @@ import type { AgGridRowNode } from './orders.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
+import type { DropDecision } from '../routing/runtime-client.mjs';
 import { buildNonWorkingSpans } from './nonworking-spans.mjs';
 import { computeLaneMap, laneId } from './gantt-lanes.mjs';
 import type { LaneInterval, LaneResult } from './gantt-lanes.mjs';
@@ -332,6 +333,8 @@ export const Timeline = {
       // switch for it; this veto snaps a drag that changes the start but not the end back to the stored start, so the
       // left handle moves nothing (a left-edge change that still reaches the commit is reverted with a toast).
       onMoving: (item: TimelineVisItem, callback: (item: TimelineVisItem | null) => void) => {
+        // Drag-time row dim hangs here (a per-frame vis callback), NOT on `timechange` (custom-time-bar events only).
+        try { Timeline.onItemMoving(String(item.id)); } catch (e) { ErrorLog.warn('timeline', 'row dim failed: ' + String(e)); }
         // Never strip `subgroup` here: vis runs _moveToGroup BEFORE it assigns the new data, so the
         // hovered row would register the old lane and a later orderSubgroups throws on the dangling entry.
         callback(lockLeftEdge(item, (Timeline._items?.get(String(item.id)) as TimelineVisItem | null) ?? null));
@@ -622,6 +625,7 @@ export const Timeline = {
     }
 
     if (evt.type === 'plant:selected') {
+      Timeline.undimRowsForDrag();
       Timeline._expandedLine = null;
       Timeline._laneIds.clear();
       // Mirrors App._scrollMemory.clear() on plant change — start the new
@@ -1238,6 +1242,73 @@ export const Timeline = {
     PerfMonitor.record('Timeline.setup.redraw', performance.now() - _redrawT0);
   },
 
+  /** Rows an in-progress single-order drag may NOT land on (routing plants): they get `row-drag-ineligible`. Null
+   *  outside a drag. `_groupClassName` reads it, so a rebuild mid-drag keeps the dim. */
+  _dragIneligibleLines: null as Set<string> | null,
+  /** Item id the row dim was last computed for (computed once per drag, never per frame); null = none yet. */
+  _dragDimFor: null as string | null,
+
+  /** The ONE composer of a group's className: 'row-expanded' | 'row-flat', plus ' row-drag-ineligible' while the
+   *  line is dimmed for a drag. Never falsy: vis turns '' into null and addClassName(null) throws. */
+  _groupClassName(line: string): string {
+    const expanded = line === Timeline._expandedLine && (Timeline._depthByLine.get(line) ?? 0) > 1;
+    return (expanded ? 'row-expanded' : 'row-flat')
+      + (Timeline._dragIneligibleLines?.has(line) ? ' row-drag-ineligible' : '');
+  },
+
+  /** Writes the composed className of `lines` (className only: no `content`, no subgroup data) in ONE group update. */
+  _writeGroupClasses(lines: Iterable<string>): void {
+    if (!Timeline._groups) return;
+    const updates: Array<{ id: string; className: string }> = [];
+    for (const line of lines) {
+      if (!Timeline._groups.get(line)) continue;   // an update of an unknown id would ADD a bare group
+      updates.push({ id: line, className: Timeline._groupClassName(line) });
+    }
+    if (!updates.length) return;
+    const prior = Timeline._suppressEvents;
+    Timeline._suppressEvents = true;
+    try { Timeline._groups.update(updates); } finally { Timeline._suppressEvents = prior; }
+  },
+
+  /** Dim every row that is not in `eligibleMachines` (presentation only; one group update). */
+  dimRowsForDrag(eligibleMachines: ReadonlySet<string>): void {
+    if (!Timeline._groups) return;
+    const ids = (typeof Timeline._groups.getIds === 'function' ? Timeline._groups.getIds() : Timeline._visibleLines()).map(String);
+    const ineligible = new Set(ids.filter(id => !eligibleMachines.has(id)));
+    Timeline._dragIneligibleLines = ineligible;
+    Timeline._writeGroupClasses(ineligible);
+  },
+
+  /** Reverse of `dimRowsForDrag`; idempotent and cheap when nothing is dimmed. */
+  undimRowsForDrag(): void {
+    Timeline._dragDimFor = null;
+    const prev = Timeline._dragIneligibleLines;
+    if (!prev) return;
+    Timeline._dragIneligibleLines = null;
+    Timeline._writeGroupClasses(prev);
+  },
+
+  /** vis `onMoving` (per dragged item, per frame): on the FIRST frame of a single, non-sub-order drag on a routing
+   *  plant, dim the rows the order cannot run on. */
+  onItemMoving(itemId: string): void {
+    if (Timeline._dragDimFor === itemId) return;
+    Timeline._dragDimFor = itemId;
+    const id = Interaction._businessOrderIdForItem(itemId);
+    if (!id) return;
+    const t = Store.tasks[id];
+    if (!t || t.PARENT_ORDER) return;
+    if (Selection.ids().some(sid => String(sid) !== String(id))) return;   // a multi-drag never changes line
+    if (!Interaction._routingRuntimeEnabled(t.PLANT)) return;
+    // No loaded rate map for this plant means `eligiblePairs` is empty and every row would dim: skip instead.
+    if (!Runtime.hasMapFor(t.PLANT)) return;
+    // Dimming also happens on right-edge resizes and same-line time drags (vis `onMoving` cannot tell them apart
+    // from a row change on its first frame); acceptable, the planner may still cross rows mid-gesture. The
+    // order's own current row is never dimmed.
+    const eligible = new Set(Runtime.eligiblePairs(t, { requireOps: true }).map(p => p.machine));
+    if (t.MACHINE) eligible.add(t.MACHINE);
+    Timeline.dimRowsForDrag(eligible);
+  },
+
   _dragSetupLines: new Set<string>(),
   /** Presentation-only: called from vis' per-frame drag callback. */
   dimSetupForDrag(lines: ReadonlySet<string>): void {
@@ -1281,6 +1352,10 @@ export const Timeline = {
   rebuild(): void {
     // U26: every order of this pass reads its plant's clock; resolve each plant once, not once per order.
     Timeline._clockMemo = new Map();
+    // A rebuild ends the gesture the multi-drag line-lock toast latch belongs to. The row dim is NOT cleared
+    // here: a rebuild mid-drag must keep it (the group className composer reads it); drop, pointerup and a
+    // plant switch clear it.
+    Interaction._multiLockToast = null;
     try { Timeline._rebuildPass(); } finally { Timeline._clockMemo = null; }
   },
 
@@ -1360,8 +1435,8 @@ export const Timeline = {
         content: label.el,
         subgroupOrder,
         stackSubgroups: true,
-        // Never falsy: vis turns '' into null and addClassName(null) throws on the collapse (and on every retry).
-        className: expanded ? 'row-expanded' : 'row-flat',
+        // Never falsy (see _groupClassName): vis turns '' into null and addClassName(null) throws on the collapse.
+        className: Timeline._groupClassName(line),
       };
     });
 
@@ -4125,6 +4200,18 @@ interface VisTimeChangeProps {
  *  in types/vendor.d.ts for the raw (nullable) contract this narrows. */
 type InteractionDataSetUpdateProps = { items: Array<string | number>; data?: TimelineVisItem[] };
 
+/** A single-order drop captured at drop time, so a production-version choice can finish it after the (async)
+ *  chooser without reading a vis item that a rebuild may have reset. */
+interface PvDropCapture {
+  id: string;
+  itemId: string;
+  newLine: string;
+  requestedFinish: Date;
+  opts: ManualPlacementOptions;
+  /** `Interaction._dropTaskKey` of the task at drop time; a mismatch on pick aborts the drop. */
+  taskKey: string;
+}
+
 /** vis-timeline's Timeline instance also exposes internal, UNDOCUMENTED
  *  members Interaction's marquee reaches for (on-screen item DOM boxes for
  *  hit-testing, and the scrollable-content vertical-scroll accessors) — kept
@@ -4238,6 +4325,9 @@ export const Interaction = {
   _justDoubleClicked: false,
   _alertcellDelegated: false,
   _edgeScrollTrackBound: null as ((e: MouseEvent) => void) | null,
+  _dimPointerEndBound: null as (() => void) | null,
+  /** Multi-drag line-lock toast latch: every selected item fires its own DataSet update for one gesture. */
+  _multiLockToast: null as { key: string; ts: number } | null,
   _hideTooltipBound: null as (() => void) | null,
   _onKeyDownBound: null as ((e: KeyboardEvent) => void) | null,
   _hoverDismissBound: null as (() => void) | null,
@@ -4443,6 +4533,11 @@ export const Interaction = {
     };
     document.addEventListener('mousemove', this._edgeScrollTrackBound);
 
+    /* ----- End of any pointer gesture: clear the drag-time row dim (vis has no cancel event for item drags) ---- */
+    this._dimPointerEndBound = () => Timeline.undimRowsForDrag();
+    document.addEventListener('pointerup', this._dimPointerEndBound);
+    document.addEventListener('pointercancel', this._dimPointerEndBound);
+
     /* ----- Hide tooltip when mouse leaves the browser window ------------- */
     // Named + stored (not an inline arrow) so uninstall() can remove it.
     this._hideTooltipBound = () => {
@@ -4547,6 +4642,11 @@ export const Interaction = {
     document.removeEventListener('keydown', this._onKeyDownBound!);
     document.removeEventListener('keydown', this._hoverDismissBound!);
     document.removeEventListener('mousemove', this._edgeScrollTrackBound!);
+    if (this._dimPointerEndBound) {
+      document.removeEventListener('pointerup', this._dimPointerEndBound);
+      document.removeEventListener('pointercancel', this._dimPointerEndBound);
+      this._dimPointerEndBound = null;
+    }
     document.removeEventListener('mouseleave', this._hideTooltipBound!);
     if (this._marqueeRAF) { cancelAnimationFrame(this._marqueeRAF); this._marqueeRAF = null; }
     if (this._edgeScrollRAF) { cancelAnimationFrame(this._edgeScrollRAF); this._edgeScrollRAF = null; }
@@ -5107,11 +5207,24 @@ export const Interaction = {
   /** A manual placement returned null for the dragged item. A firmed order dropped outside working hours asks
    *  the planner to confirm overtime first (OQ63) and re-runs the drop with the approval; anything else is
    *  explained (the engine already toasted `finish_cannot_hold`) and the bar is put back. */
-  _rejectManualPlacement(t: NimbusTask, itemId: string): void {
+  _rejectManualPlacement(t: NimbusTask, itemId: string, opts: ManualPlacementOptions = {}, capture?: PvDropCapture): void {
     if (Engine.lastManualRefusal === 'needs_overtime_confirm') {
       void Engine.confirmOvertimePlacement(t).then(ok => {
-        if (ok) Interaction._onDataSetUpdate({ items: [itemId] }, { confirmedOvertime: true });
-        else Timeline._scheduleRebuild();
+        if (!ok) { Timeline._scheduleRebuild(); return; }
+        if (capture) {
+          // Re-enter from the values captured at drop time: a rebuild while the modal was open resets the vis
+          // item, and re-reading it would lose the planner's drop.
+          const cur = Store.tasks[capture.id];
+          if (!cur || Interaction._dropTaskKey(cur) !== capture.taskKey) {
+            Toast.show(Util.t('toast.pv_drop_stale', { order: Util.orderNumber(cur ?? t) }), 'error');
+            Timeline._scheduleRebuild();
+            return;
+          }
+          Interaction._commitSingleDrop(cur, capture.id, capture.itemId, capture.newLine, capture.requestedFinish,
+            { ...capture.opts, ...opts, confirmedOvertime: true });
+          return;
+        }
+        Interaction._onDataSetUpdate({ items: [itemId] }, { ...opts, confirmedOvertime: true });
       });
       return;
     }
@@ -5199,6 +5312,8 @@ export const Interaction = {
    *  a genuine drag on a firmed order still commits (see the corrected header
    *  comment above; CQ-1 Phase 3 Task 5). */
   _onDataSetUpdate(props: InteractionDataSetUpdateProps, opts: ManualPlacementOptions = {}): void {
+    // The drop ends the drag: clear the row dim before any branch (and every `continue`) below.
+    Timeline.undimRowsForDrag();
     for (const rawId of props.items) {
       const itemId = String(rawId);
       const id = Interaction._businessOrderIdForItem(itemId);
@@ -5296,6 +5411,14 @@ export const Interaction = {
       const selIds = Selection.ids().filter(sid => sid !== id && !Store.isFirmed(sid));
 
       if (selIds.length > 0 && (Math.abs(deltaMs) > 0 || lineMoved)) {
+        // D5/D14 (all plants): a multi-drag shifts time and may span lines but never changes any order's line.
+        // A drag that lands the dragged item on another row is rejected whole, with one toast per gesture
+        // (every selected item fires its own DataSet update).
+        if (lineMoved) {
+          Interaction._noteMultiDragLineLocked(id, selIds);
+          Timeline._scheduleRebuild();
+          continue;
+        }
         // Snapshot all affected tasks for undo
         const allIds = [id, ...selIds];
         const snap = UndoStack.snapshotTasks(allIds);
@@ -5353,7 +5476,7 @@ export const Interaction = {
           for (const sid of selIds) {
             const st = Store.tasks[sid];
             if (!st || !st.start_date) continue;
-            const sNewLine  = lineMoved ? newLine : (st.MACHINE || 'Unknown');
+            const sNewLine  = st.MACHINE || 'Unknown';   // a multi-drag never changes a line (lineMoved was rejected above)
             // Machine lock (decision C): a locked companion fails the whole
             // multi-drag atomically — nothing has been committed to Store or
             // Timeline for this drag yet, so breaking here reverts cleanly.
@@ -5423,40 +5546,113 @@ export const Interaction = {
       // manualSchedulePatchFor so an already-split order (>=2
       // scheduleSegments) is shifted by the drag delta rather than
       // collapsed or re-derived (OD-B1a).
-      const snap = UndoStack.snapshotTasks([id]);
-
-      // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): checked
-      // ahead of manualSchedulePatchFor, same revert mechanism (Timeline.
-      // _scheduleRebuild + continue) as every other rejected drag above.
-      // Gated by _routingRuntimeEnabled (see its comment).
-      if (Interaction._routingRuntimeEnabled(t.PLANT) && !Runtime.eligible(t, newLine)) {
-        Interaction._rejectRuntimeMove(t, newLine);
-        Timeline._scheduleRebuild();
-        continue;
-      }
-      const patch = Engine.manualRoutingSchedulePatchFor(t, newLine, requestedFinish, opts);
-      if (!patch?.start_date || !patch.end_date) {
-        Interaction._rejectManualPlacement(t, itemId);
-        continue;
-      }
-      // A resize or drop that resolves back onto the bar the order already is changes nothing: no Store write
-      // (so nothing is dirtied), no undo entry. The bar springs back to its stored place.
-      if (patch.start_date.getTime() === t.start_date.getTime() && patch.end_date.getTime() === t.end_date.getTime()
-        && (patch.MACHINE ?? t.MACHINE) === t.MACHINE
-        && (patch.placement_exception ?? null) === (t.placement_exception ?? null)
-        && (patch.planning_status ?? t.planning_status) === t.planning_status) {
-        this._log('update:ignored', { id, reason: 'derived bar unchanged' });
-        Timeline._scheduleRebuild();
-        continue;
-      }
-      const fromLine = t.MACHINE || 'Unknown';
-      Store.updateTask(id, patch, 'timeline');
-      Timeline.finishSetupDrag(new Set([fromLine, newLine]));
-      Timeline.noteDropLines(new Set([fromLine, newLine]), new Set([newLine]));
-
-      UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
-                     () => UndoStack.restoreTasks(snap), [id]);
+      Interaction._commitSingleDrop(t, id, itemId, newLine, requestedFinish, opts);
     }
+  },
+
+  /** The single-order drop, from the values captured at drop time (so the production-version chooser can finish
+   *  it later without reading a vis item a rebuild may have reset). Routing plants (D4): a same-line drag keeps
+   *  the plain eligibility guard; a line move asks `Runtime.dropDecision` (keep the PV / switch to the one other
+   *  covering PV / choose among several / reject). */
+  _commitSingleDrop(t: NimbusTask, id: string, itemId: string, newLine: string, requestedFinish: Date,
+                    opts: ManualPlacementOptions): void {
+    const snap = UndoStack.snapshotTasks([id]);
+    let placeOpts = opts;
+    if (Interaction._routingRuntimeEnabled(t.PLANT)) {
+      if (newLine === t.MACHINE) {
+        // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): a time-only drag of an order whose
+        // current pair is ineligible stays blocked (dropDecision must not loosen it).
+        if (!Runtime.eligible(t, newLine)) {
+          Interaction._rejectRuntimeMove(t, newLine);
+          Timeline._scheduleRebuild();
+          return;
+        }
+      } else {
+        const decision: DropDecision = opts.chosenPv ? { kind: 'switch', pv: opts.chosenPv } : Runtime.dropDecision(t, newLine);
+        if (decision.kind === 'reject') {
+          Interaction._rejectRuntimeMove(t, newLine);
+          Timeline._scheduleRebuild();
+          return;
+        }
+        if (decision.kind === 'choose') {
+          Interaction._choosePvForDrop({
+            id, itemId, newLine, requestedFinish, opts, taskKey: Interaction._dropTaskKey(t),
+          }, decision.pvs);
+          return;
+        }
+        if (decision.kind === 'switch') placeOpts = { ...opts, chosenPv: decision.pv };
+      }
+    }
+    const patch = Engine.manualRoutingSchedulePatchFor(t, newLine, requestedFinish, placeOpts);
+    if (!patch?.start_date || !patch.end_date) {
+      Interaction._rejectManualPlacement(t, itemId, placeOpts, {
+        id, itemId, newLine, requestedFinish, opts: placeOpts, taskKey: Interaction._dropTaskKey(t),
+      });
+      return;
+    }
+    // A resize or drop that resolves back onto the bar the order already is changes nothing: no Store write
+    // (so nothing is dirtied), no undo entry. The bar springs back to its stored place.
+    if (patch.start_date.getTime() === t.start_date!.getTime() && patch.end_date.getTime() === t.end_date!.getTime()
+      && (patch.MACHINE ?? t.MACHINE) === t.MACHINE
+      && (patch.PRODUCTION_VERSION ?? t.PRODUCTION_VERSION) === t.PRODUCTION_VERSION
+      && (patch.RUN_TIME ?? t.RUN_TIME) === t.RUN_TIME
+      && (patch.placement_exception ?? null) === (t.placement_exception ?? null)
+      && (patch.planning_status ?? t.planning_status) === t.planning_status) {
+      this._log('update:ignored', { id, reason: 'derived bar unchanged' });
+      Timeline._scheduleRebuild();
+      return;
+    }
+    const fromLine = t.MACHINE || 'Unknown';
+    const fromPv = t.PRODUCTION_VERSION;
+    Store.updateTask(id, patch, 'timeline');
+    Timeline.finishSetupDrag(new Set([fromLine, newLine]));
+    Timeline.noteDropLines(new Set([fromLine, newLine]), new Set([newLine]));
+
+    UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
+                   () => UndoStack.restoreTasks(snap), [id]);
+    if (patch.PRODUCTION_VERSION != null && patch.PRODUCTION_VERSION !== fromPv) {
+      Toast.show(Util.t('toast.pv_switched', { order: Util.orderNumber(t), pv: patch.PRODUCTION_VERSION, machine: newLine }), 'info', 4000);
+    }
+  },
+
+  /** Fingerprint of the task fields a pending production-version choice depends on. */
+  _dropTaskKey(t: NimbusTask): string {
+    return JSON.stringify([t.MACHINE, t.PRODUCTION_VERSION, t.RUN_TIME, t.start_date?.getTime() ?? null,
+      t.end_date?.getTime() ?? null, t.planning_status ?? null, t.MATERIAL_NUMBER ?? null]);
+  },
+
+  /** More than one production version covers the target machine: ask which one. The drop's values are captured
+   *  up front (the modal is async and any rebuild resets the vis item), and the pick re-applies the drop from
+   *  them. Cancel springs the bar back; a task that changed meanwhile aborts with a toast. */
+  _choosePvForDrop(capture: PvDropCapture, pvs: string[]): void {
+    const t = Store.tasks[capture.id];
+    void Modal.choose({
+      title: Util.t('modal.pv_choose_title'),
+      message: Util.t('modal.pv_choose_msg', { order: t ? Util.orderNumber(t) : capture.id, machine: capture.newLine }),
+      options: pvs.map(pv => ({ value: pv, label: Util.t('ui.pv_machine_option', { pv, machine: capture.newLine }) })),
+      confirmLabel: Util.t('btn.pv_choose_confirm'),
+    }).then(pv => {
+      if (pv == null) { Timeline._scheduleRebuild(); return; }
+      const cur = Store.tasks[capture.id];
+      if (!cur || Interaction._dropTaskKey(cur) !== capture.taskKey) {
+        Toast.show(Util.t('toast.pv_drop_stale', { order: Util.orderNumber(cur ?? t ?? ({ id: capture.id } as NimbusTask)) }), 'error');
+        Timeline._scheduleRebuild();
+        return;
+      }
+      Interaction._commitSingleDrop(cur, capture.id, capture.itemId, capture.newLine, capture.requestedFinish,
+        { ...capture.opts, chosenPv: pv });
+    });
+  },
+
+  /** One toast per multi-drag gesture: each selected item fires its own DataSet update, so latch on the
+   *  gesture's item set within a short window (a rebuild also clears the latch). */
+  _noteMultiDragLineLocked(id: string, selIds: string[]): void {
+    const key = [id, ...selIds].sort().join('|');
+    const now = Date.now();
+    const last = Interaction._multiLockToast;
+    if (last && last.key === key && now - last.ts < 2000) return;
+    Interaction._multiLockToast = { key, ts: now };
+    Toast.show(Util.t('toast.multi_drag_line_locked'), 'warn', 4000);
   },
 
   _ghostDragId: null as string | null,
@@ -5554,7 +5750,6 @@ export const Interaction = {
     }
 
     const ghostPlant = t.PLANT || Store.getPlantForLine(t.MACHINE || 'Unknown') || Store.selectedPlant;
-    const ghostLineMoved = props.group != null && String(props.group) !== (t.MACHINE || 'Unknown');
     Calendar._beginRun(ghostPlant);   // one calendar cache for every companion's derivation this frame
     try {
     for (const sid of selIds) {
@@ -5566,7 +5761,8 @@ export const Interaction = {
       let ghostStart = new Date(st.start_date.getTime() + deltaMs);
       let ghostEnd   = st.end_date ? new Date(st.end_date.getTime() + deltaMs) : ghostStart;
       if (st.end_date) {
-        const derived = Engine.manualRoutingSchedulePatchFor(st, ghostLineMoved ? String(props.group) : (st.MACHINE || 'Unknown'),
+        // A multi-drag never changes a line (D5): every companion previews on its OWN line.
+        const derived = Engine.manualRoutingSchedulePatchFor(st, st.MACHINE || 'Unknown',
           new Date(st.end_date.getTime() + deltaMs), { quiet: true });
         if (derived?.start_date && derived.end_date) { ghostStart = derived.start_date; ghostEnd = derived.end_date; }
       }

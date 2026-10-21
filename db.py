@@ -1562,14 +1562,16 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             resolved_runtime = None
 
             # Routing runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.5): a
-            # MACHINE or PRODUCTION_VERSION edit on an order whose run_time is
-            # routing-derived (or not yet known at all) must re-check §5.2
-            # steps 1-8 for the CANDIDATE combination before the edit is
-            # accepted -- otherwise the order could land on a machine/version
-            # its routing can't resolve, silently keeping a stale run_time
-            # until the next plant-wide recompute. Only gated when the
-            # plant's switch is on. Explicit PV changes opt into routing;
-            # machine-only moves preserve manual/distributed/SAP runtimes.
+            # MACHINE or PRODUCTION_VERSION edit on an order of a routing-enabled
+            # plant must re-check §5.2 steps 1-8 for the CANDIDATE combination
+            # before the edit is accepted -- otherwise the order could land on a
+            # machine/version its routing can't resolve. Only gated when the
+            # plant's switch is on. PV-Machine rule (D9): ANY changed MACHINE or
+            # PRODUCTION_VERSION is gated whatever the run-time source (manual,
+            # sap_order, legacy, routing, unknown): the pair is checked, the run
+            # time resets to the routing value and the row is written
+            # run_time_source='routing' (a hand-timed order that is moved loses its
+            # manual run time; the browser sends the routing-derived RUN_TIME).
             # Material, quantity, and start
             # date are never edited by this endpoint, so they always come
             # from the row's own current values; machine/production version
@@ -1577,9 +1579,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # current value. Read within THIS SAME open transaction/
             # connection -- never a second connection mid-write.
             if (("MACHINE" in attrs or "PRODUCTION_VERSION" in attrs)
-                    and current["routing_runtime_enabled"]
-                    and ("PRODUCTION_VERSION" in attrs
-                         or current["run_time_source"] == "routing" or current["run_time"] is None)):
+                    and current["routing_runtime_enabled"]):
                 candidate_machine = attrs.get("MACHINE", current["machine"])
                 candidate_pv = attrs.get("PRODUCTION_VERSION", current["production_version"])
                 eligibility = routing_resolver.check_eligibility(
@@ -3302,9 +3302,53 @@ def missing_master_data_for_plant(plant: str) -> dict:
             (plant,),
         )
         rows = cur.fetchall()
+        # PV - Machine (routing-enabled plants only): a production version whose header work center is
+        # blank offers no machine (`pv_workcenter_missing`), and one whose header work center has no
+        # non-deleted routing operation in the PV's own routing offers no run time
+        # (`pv_workcenter_no_operation`). One row per (material, PV) with the orders currently carrying
+        # that PV, so the panel counts and displays them like a missing material-plant row.
+        cur.execute("SELECT routing_runtime_enabled FROM plants WHERE plant = %s", (plant,))
+        plant_row = cur.fetchone()
+        pv_rows: list = []
+        if plant_row is not None and plant_row[0]:
+            cur.execute(
+                """
+                SELECT plant, material_number, production_version, reason, COUNT(*)
+                  FROM (
+                        SELECT o.plant, o.material_number, o.production_version,
+                               CASE WHEN COALESCE(btrim(pv.sap_workcenter), '') = ''
+                                    THEN 'pv_workcenter_missing'
+                                    ELSE 'pv_workcenter_no_operation' END AS reason
+                          FROM orders o
+                          JOIN production_version pv
+                            ON pv.plant = o.plant
+                           AND pv.material_id = o.material_number
+                           AND pv.production_version = o.production_version
+                         WHERE o.plant = %s
+                           AND (COALESCE(btrim(pv.sap_workcenter), '') = ''
+                                OR NOT EXISTS (
+                                    SELECT 1 FROM routing_operation ro
+                                     WHERE ro.plant = pv.plant
+                                       AND ro.material_id = pv.material_id
+                                       AND ro.task_list_type = pv.task_list_type
+                                       AND ro.routing_group = pv.routing_group
+                                       AND ro.group_counter = pv.group_counter
+                                       AND ro.sap_workcenter = pv.sap_workcenter
+                                       AND NOT ro.deleted))
+                       ) x
+                 GROUP BY plant, material_number, production_version, reason
+                 ORDER BY material_number, production_version
+                """,
+                (plant,),
+            )
+            pv_rows = cur.fetchall()
     exceptions = [
         {"plant": r[0], "material_number": r[1], "order_count": r[2], "reason": r[3]}
         for r in rows
+    ] + [
+        {"plant": r[0], "material_number": r[1], "production_version": r[2], "reason": r[3],
+         "order_count": r[4]}
+        for r in pv_rows
     ]
     return {
         "unmatched_pairs": len(exceptions),

@@ -1097,9 +1097,9 @@ export const Plant = {
         </div>
         <p class="pl-mmd-sub">${Util.t('ui.missing_master_data_sub', { pairs: Plant._missingMasterData.unmatched_pairs, orders: Plant._missingMasterData.unmatched_orders })}</p>
         <div class="pl-mmd-list">
-          ${Plant._missingMasterData.exceptions.slice(0, 20).map((e: { material_number: string; order_count: number; reason: string }) => `
+          ${Plant._missingMasterData.exceptions.slice(0, 20).map((e: { material_number: string; production_version?: string; order_count: number; reason: string }) => `
             <div class="pl-mmd-row">
-              <span class="pl-mmd-material">${Util.escapeHtml(e.material_number)}</span>
+              <span class="pl-mmd-material">${Util.escapeHtml(e.material_number)}${e.production_version ? ` / ${Util.escapeHtml(e.production_version)}` : ''}</span>
               <span class="pl-mmd-count">${e.order_count} ${Util.t('ui.orders')}</span>
               <span class="pl-mmd-reason">${Util.t(`ui.mmd_reason_${e.reason}`)}</span>
             </div>`).join('')}

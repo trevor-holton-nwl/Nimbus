@@ -25,7 +25,7 @@
 /* global NIMBUS */
 import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs';
 import type { PasteMatcher } from '../platform/foundation.mjs';
-import { Store } from '../platform/store.mjs';
+import { Store, UndoStack } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
@@ -189,9 +189,14 @@ interface TableGridReadyEvent {
  *  start time. */
 interface TableLineEditorParams {
   value: string | null;
-  values: string[] | (() => string[]);
+  values: Array<string | TableLineOption> | (() => Array<string | TableLineOption>);
   api: NimbusVendor.AgGridApi;
+  data?: NimbusTask;
 }
+
+/** One MACHINE-editor choice: `value` is what the editor returns, `label` is what the planner reads and filters on.
+ *  Plain machine lists use value === label; a routing plant's "PV - Machine" list uses value `pv|machine`. */
+interface TableLineOption { value: string; label: string }
 
 /* =============================================================================
    TABLE — AG Grid integration with rich inline editing, filtering, and full
@@ -415,7 +420,9 @@ export const Table = {
         hide: Table._fieldHidden('PRT_01') },
       { headerName: Util.t('col.prt_02'), field: 'PRT_02', width: 130, flex: 0, editable: true,
         hide: Table._fieldHidden('PRT_02') },
-      { headerName: Util.t('col.prod_version'), field: 'PRODUCTION_VERSION', width: 140, flex: 0, editable: true,
+      { headerName: Util.t('col.prod_version'), field: 'PRODUCTION_VERSION', width: 140, flex: 0,
+        // D11: on a routing plant the production version is chosen only together with the machine (PV - Machine).
+        editable: (p: { data: NimbusTask }) => !Table._routingEnabledForTask(p.data),
         hide: Table._fieldHidden('PRODUCTION_VERSION') },
     ];
   },
@@ -530,7 +537,7 @@ export const Table = {
         { headerName: Util.t('col.line'), field: 'MACHINE', minWidth: 130, editable: true,
           cellEditor: Table._SearchableLineEditor,
           cellEditorPopup: true,
-          cellEditorParams: (p: { data: NimbusTask }) => ({ values: Table._getLineOptions(p.data) }),
+          cellEditorParams: (p: { data: NimbusTask }) => ({ values: Table._getPairOptions(p.data), data: p.data }),
           cellRenderer: (p: { value: unknown }) => {
             if (!p.value) return '';
             const ci = Timeline._colorIndex(String(p.value));
@@ -1354,11 +1361,23 @@ export const Table = {
     }
   },
 
-  _unplacedMachineRuntime(task: NimbusTask, machine: string): Partial<NimbusTask> {
-    if (!Table._routingEnabledForTask(task) || machine === task.MACHINE ||
-        (task.run_time_source !== 'routing' && task.RUN_TIME != null)) return {};
-    const result = Runtime.resolve(task, machine);
+  /** A (production version, machine) pair that does not resolve on a routing plant (`pv` null = a bare machine
+   *  edit, which keeps the older machine-only wording). Shared by the grid, Inspector and Override dialog. */
+  _toastPairIneligible(task: NimbusTask, pv: string | null, machine: string): void {
+    if (pv == null) { Table._toastMachineIneligible(task, machine); return; }
+    Toast.show(Util.t('toast.pv_machine_ineligible', { order: Util.orderNumber(task), pv: pv || '—', machine }), 'warn', 4000);
+  },
+
+  /** Run time (and, for a pair, the production version) for an UNPLACED order's machine / pair edit: a held order
+   *  has no bar to derive, so the routing value is written straight onto the row. A move always resets the run
+   *  time from routing (D9); an unchanged pair writes nothing. */
+  _unplacedMachineRuntime(task: NimbusTask, machine: string, pv?: string): Partial<NimbusTask> {
+    const currentPv = String(task.PRODUCTION_VERSION ?? '');
+    const targetPv = pv ?? currentPv;
+    if (!Table._routingEnabledForTask(task) || (machine === task.MACHINE && targetPv === currentPv)) return {};
+    const result = Runtime.resolve({ ...task, PRODUCTION_VERSION: targetPv }, machine);
     return result.ok ? {
+      PRODUCTION_VERSION: targetPv,
       RUN_TIME: result.hours,
       run_time_source: result.basis.source,
       run_time_basis: result.basis as unknown as Record<string, unknown>,
@@ -1373,6 +1392,7 @@ export const Table = {
     let requestedFinish: Date | null = null;
     let requestedLine: string | null = null;
     let scheduleTask = p.data;
+    let pairPv: string | null = null;   // set when a routing-plant (PV, machine) pair is being written
 
     if (field === 'end_date') {
       // The typed End is the finish the planner wants; the start is derived from it (OQ1).
@@ -1395,61 +1415,49 @@ export const Table = {
       scheduleTask = { ...p.data, RUN_TIME: h };
       requestedFinish = Table._runtimeEditAnchor(p.data);
     } else if (field === 'MACHINE') {
-      const newMachine = String(p.newValue || 'Unknown');
-      // AG Grid's default valueSetter already wrote p.newValue onto
-      // p.data.MACHINE before this handler runs, so the pre-edit machine
-      // for the lock comparison (decision C, aggregate_to_detail.md §8) has
-      // to come from p.oldValue, not p.data.MACHINE.
+      // AG Grid's default valueSetter already wrote the raw editor value onto p.data.MACHINE before this handler
+      // runs; on a routing plant that is the pair string 'pv|machine'. Put the parsed machine back first so no
+      // path below can leave a pair string in the row.
+      const parsed = Table._parsePairValue(String(p.newValue || 'Unknown'));
+      const newMachine = parsed.machine || 'Unknown';
+      p.data.MACHINE = newMachine;
+      // The pre-edit machine for the lock comparison (decision C, aggregate_to_detail.md §8) has to come from
+      // p.oldValue, not p.data.MACHINE.
       const priorMachine = p.oldValue != null ? String(p.oldValue) : String(p.data.MACHINE ?? 'Unknown');
+      const routing = Table._routingEnabledForTask(p.data);
+      const priorPv = String(p.data.PRODUCTION_VERSION ?? '');
+      const newPv = parsed.pv ?? priorPv;
+      const pairChanged = newMachine !== priorMachine || newPv !== priorPv;
       if (p.data.PARENT_ORDER && newMachine !== priorMachine) {
         p.data.MACHINE = priorMachine;
         Table._api!.refreshCells({ rowNodes: [p.node], force: true });
         Table._rejectDistMachineMove(p.data);
         return;
       }
-      // Routing eligibility guard (§8.2): a move to a machine with no
-      // routing operation for this order is rejected outright, but only on
-      // a plant that has opted into the feature (see _routingEnabledForTask).
-      if (newMachine !== priorMachine && Table._routingEnabledForTask(p.data) && !Runtime.eligible(p.data, newMachine)) {
+      // Re-picking the pair the order already has changes nothing.
+      if (routing && parsed.pv !== null && !pairChanged) {
         p.data.MACHINE = priorMachine;
         Table._api!.refreshCells({ rowNodes: [p.node], force: true });
-        Table._toastMachineIneligible(p.data, newMachine);
         return;
       }
+      // Routing eligibility guard (§8.2): a (PV, machine) pair the PV's routing does not cover is rejected
+      // outright, but only on a plant that has opted into the feature (see _routingEnabledForTask).
+      if (routing && pairChanged && !Runtime.eligible({ ...p.data, PRODUCTION_VERSION: newPv }, newMachine)) {
+        p.data.MACHINE = priorMachine;
+        Table._api!.refreshCells({ rowNodes: [p.node], force: true });
+        Table._toastPairIneligible(p.data, parsed.pv, newMachine);
+        return;
+      }
+      // The row object IS the Store task, so AG Grid's write is already visible to the undo snapshot and the
+      // line index: put the pre-edit machine back; the single Store.updateTask below applies the new one.
+      p.data.MACHINE = priorMachine;
       changes.MACHINE = newMachine;
+      if (routing && newPv !== priorPv) changes.PRODUCTION_VERSION = newPv;
+      if (routing && pairChanged) pairPv = newPv;
       scheduleTask = { ...p.data, MACHINE: priorMachine };
       requestedLine = changes.MACHINE;
       requestedFinish = Table._runtimeEditAnchor(p.data);
-      if (!requestedFinish) Object.assign(changes, Table._unplacedMachineRuntime(scheduleTask, newMachine));
-    } else if (field === 'PRODUCTION_VERSION' && Table._routingEnabledForTask(p.data)) {
-      const pv = String(p.newValue ?? '');
-      changes.PRODUCTION_VERSION = pv;
-      const result = Runtime.resolve({ ...p.data, PRODUCTION_VERSION: pv });
-      if (result.ok) {
-        changes.RUN_TIME = result.hours;
-        changes.run_time_source = result.basis.source;
-        changes.run_time_basis = result.basis as unknown as Record<string, unknown>;
-        scheduleTask = { ...p.data, PRODUCTION_VERSION: pv, RUN_TIME: result.hours };
-        requestedFinish = Table._runtimeEditAnchor(p.data);
-      } else {
-        // Same "held, no fallback" shape setup-scheduler.mts uses for a
-        // needs_planning disposition — null committed dates/segments so the
-        // Needs Planning queue and optimizer treat this exactly like any
-        // other hold (§8.2/§8.4).
-        changes.start_date = null;
-        changes.end_date = null;
-        changes.scheduleSegments = [];
-        changes.planning_status = 'needs_planning';
-        changes.planning_reason = {
-          code: 'runtime_unknown',
-          message: `Runtime could not be resolved from routing (step: ${result.step}).`,
-        };
-        Store.updateTask(id, changes, 'table');
-        Table._api!.applyTransaction({ update: [Store.tasks[id]] });
-        Alerts.scheduleRecompute();
-        Toast.show(Util.t('toast.production_version_runtime_unresolved', { order: Util.orderNumber(p.data), pv: String(pv) }), 'warn', 4000);
-        return;
-      }
+      if (!requestedFinish) Object.assign(changes, Table._unplacedMachineRuntime(scheduleTask, newMachine, newPv));
     } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
       // Unreachable today — this column is editable:false, and ORDER_QUANTITY
       // isn't in Persistence._taskEditSnapshot's payload either (§13.1: no
@@ -1471,8 +1479,10 @@ export const Table = {
       const targetLine = requestedLine || p.data.MACHINE || 'Unknown';
       // A run-time, machine or version edit holds the finish — except on a RUNNING order, which holds its start
       // (OQ3); a typed End is a placement, not a run-time edit.
-      const schedule = Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedFinish,
-        { ...opts, holdStartIfRunning: field !== 'end_date' });
+      const placeOpts = { ...opts, holdStartIfRunning: field !== 'end_date' };
+      const schedule = pairPv !== null
+        ? Engine.pairSchedulePatchFor(scheduleTask, pairPv, targetLine, requestedFinish, placeOpts)
+        : Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedFinish, placeOpts);
       if (!schedule?.start_date || !schedule.end_date) {
         // AG Grid has already applied the edited cell to the Store object.
         // Restore it when allocating the candidate duration fails.
@@ -1492,10 +1502,20 @@ export const Table = {
       }
     }
 
+    // A (PV, machine) pair write is one undo step (snapshot before the single Store write, push after).
+    const undoSnap = pairPv !== null ? UndoStack.snapshotTasks([id]) : null;
     Store.updateTask(id, changes, 'table');
+    if (undoSnap) Table._pushPairUndo(id, undoSnap);
     Table._api!.applyTransaction({ update: [Store.tasks[id]] });
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.row_updated'), 'success', 1200);
+  },
+
+  /** One undo entry for a (PV, machine) pair write, mirroring the Gantt drop's "Move ..." entry. */
+  _pushPairUndo(id: string, snap: NimbusTask[]): void {
+    const task = Store.tasks[id];
+    UndoStack.push(`Change production version / machine "${(task && (task.text || task.ORDER)) || id}"`,
+                   () => UndoStack.restoreTasks(snap), [id]);
   },
 
   _onSelectionChanged(): void {
@@ -1538,6 +1558,35 @@ export const Table = {
     return [...set].sort();
   },
 
+  /** The "PV - Machine" choices shared by the grid editor, the Inspector and the Override dialog. On a routing
+   *  plant (and never for a distribution sub-order, which keeps its locked machine) every eligible pair of the
+   *  order's material is offered as `{value: 'pv|machine', label}`; a current pair that is not in the set is
+   *  prepended with the "not eligible" label so the select still shows the truth. Anywhere else this is today's
+   *  line list mapped to `{value: line, label: line}`. */
+  _getPairOptions(task: NimbusTask): TableLineOption[] {
+    if (task.PARENT_ORDER || !Table._routingEnabledForTask(task)) {
+      return Table._getLineOptions(task).map(l => ({ value: l, label: l }));
+    }
+    const options: TableLineOption[] = Runtime.eligiblePairs(task, { requireOps: true }).map(pair => ({
+      value: `${pair.pv}|${pair.machine}`,
+      label: Util.t('ui.pv_machine_option', { pv: pair.pv, machine: pair.machine }),
+    }));
+    const pv = String(task.PRODUCTION_VERSION ?? '');
+    const machine = task.MACHINE || 'Unknown';
+    const current = `${pv}|${machine}`;
+    if (!options.some(o => o.value === current)) {
+      options.unshift({ value: current, label: Util.t('ui.pv_machine_current_ineligible', { pv: pv || '—', machine }) });
+    }
+    return options;
+  },
+
+  /** Split an option value at the FIRST `|`: `pv|machine` gives both, a bare machine (non-routing plants, or an
+   *  older caller) gives `pv: null` meaning "keep the order's own production version". */
+  _parsePairValue(value: string): { pv: string | null; machine: string } {
+    const i = value.indexOf('|');
+    return i < 0 ? { pv: null, machine: value } : { pv: value.slice(0, i), machine: value.slice(i + 1) };
+  },
+
   _wireQuickFilter(): void {
     const inp = document.getElementById('quick-filter') as HTMLInputElement | null;
     if (!inp || !Table._api) return;
@@ -1577,8 +1626,10 @@ export const Table = {
       Table._fpOvrFinish = Util.fpDatetime('#ovr-finish');
     }
     Table._fpOvrFinish.setDate(t.end_date!, false);
-    const lines = Table._getLineOptions(t);
-    lineEl.innerHTML = lines.map(l => `<option value="${Util.escapeHtml(l)}" ${l === t.MACHINE ? 'selected' : ''}>${Util.escapeHtml(l)}</option>`).join('');
+    const routingPairs = Table._routingEnabledForTask(t) && !t.PARENT_ORDER;
+    const selectedValue = routingPairs ? `${t.PRODUCTION_VERSION ?? ''}|${t.MACHINE || 'Unknown'}` : t.MACHINE;
+    lineEl.innerHTML = Table._getPairOptions(t).map(o =>
+      `<option value="${Util.escapeHtml(o.value)}" ${o.value === selectedValue ? 'selected' : ''}>${Util.escapeHtml(o.label)}</option>`).join('');
     firmEl.checked = !!t.firmed;
     Modal.open('modal-override');
   },
@@ -1594,7 +1645,8 @@ export const Table = {
     if (!finishEl || !lineEl || !firmEl) { ErrorLog.error('ui', 'required DOM elements missing for override modal'); return; }
 
     const newFinish = Util.parseDate(finishEl.value);
-    const newLine  = lineEl.value;
+    const parsedLine = Table._parsePairValue(lineEl.value);
+    const newLine  = parsedLine.machine;
     const alsoFirm = firmEl.checked;
     if (!newFinish) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
 
@@ -1607,21 +1659,29 @@ export const Table = {
     }
 
     // Routing eligibility guard (§8.3): the Override dialog can move an
-    // order to a different machine, so it must be checked the same as the
-    // grid/Inspector edit paths before re-placing (only on a plant that has
-    // opted into the feature — see _routingEnabledForTask).
-    if (Table._routingEnabledForTask(t) && !Runtime.eligible(t, newLine)) {
-      Table._toastMachineIneligible(t, newLine);
+    // order to a different machine or production version, so the PAIR is judged (not the machine alone) the same
+    // as the grid/Inspector edit paths before re-placing (only on a plant that has opted into the feature, see
+    // _routingEnabledForTask). A finish-only override of an ineligible current pair is blocked as before.
+    const routing = Table._routingEnabledForTask(t);
+    const currentPv = String(t.PRODUCTION_VERSION ?? '');
+    const newPv = parsedLine.pv ?? currentPv;
+    if (routing && !Runtime.eligible({ ...t, PRODUCTION_VERSION: newPv }, newLine)) {
+      Table._toastPairIneligible(t, parsedLine.pv, newLine);
       return;
     }
+    const pairChanged = routing && (newLine !== (t.MACHINE || 'Unknown') || newPv !== currentPv);
 
-    const schedule = Engine.manualRoutingSchedulePatchFor(t, newLine, newFinish, opts);
+    const schedule = pairChanged
+      ? Engine.pairSchedulePatchFor(t, newPv, newLine, newFinish, opts)
+      : Engine.manualRoutingSchedulePatchFor(t, newLine, newFinish, opts);
     if (!schedule?.start_date || !schedule.end_date) {
       Table._explainManualRefusal(t, () => Table.applyOverride({ confirmedOvertime: true }));
       return;
     }
 
+    const undoSnap = pairChanged ? UndoStack.snapshotTasks([id]) : null;
     Store.updateTask(id, schedule, 'table');
+    if (undoSnap) Table._pushPairUndo(id, undoSnap);
     if (Table._api) Table._api.applyTransaction({ update: [Store.tasks[id]] });
     if (alsoFirm !== Store.isFirmed(id)) Store.setFirmed([id], alsoFirm, 'table');
 
@@ -1912,17 +1972,21 @@ export const Table = {
   // is a small hand-rolled popup editor: text input + filtered option list.
   _SearchableLineEditor: class {
     _params!: TableLineEditorParams;
-    _values!: string[];
+    _values!: TableLineOption[];
+    _pairMode = false;
     _chosen: string | null = null;
     _activeIdx = 0;
     _eGui!: HTMLDivElement;
     _input!: HTMLInputElement;
     _list!: HTMLDivElement;
-    _filtered!: string[];
+    _filtered!: TableLineOption[];
 
     init(params: TableLineEditorParams): void {
       this._params = params;
-      this._values = (typeof params.values === 'function' ? params.values() : params.values) || [];
+      const raw = (typeof params.values === 'function' ? params.values() : params.values) || [];
+      // Plain strings (non-routing plants) and {value,label} options (a routing plant's "PV - Machine" pairs).
+      this._values = raw.map(v => typeof v === 'string' ? { value: v, label: v } : v);
+      this._pairMode = this._values.some(o => o.value.includes('|'));
       this._chosen = null;
       this._activeIdx = 0;
 
@@ -1938,20 +2002,20 @@ export const Table = {
     }
     _renderList(q: string): void {
       const query = q.toLowerCase().trim();
-      this._filtered = query ? this._values.filter(v => v.toLowerCase().includes(query)) : this._values;
+      this._filtered = query ? this._values.filter(o => o.label.toLowerCase().includes(query)) : this._values;
       this._activeIdx = 0;
       this._list.innerHTML = this._filtered.length
-        ? this._filtered.map((v, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${Util.escapeHtml(v)}</div>`).join('')
+        ? this._filtered.map((o, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${Util.escapeHtml(o.label)}</div>`).join('')
         : `<div class="nse-empty">${Util.t('ui.no_matches')}</div>`;
       this._list.querySelectorAll('.nse-opt').forEach((el) => {
         el.addEventListener('mousedown', (e: Event) => { e.preventDefault(); this._choose(Number((el as HTMLElement).dataset.i)); });
       });
     }
     _choose(i: number): void {
-      const v = this._filtered[i];
-      if (v == null) return;
-      this._chosen = v;
-      this._input.value = v;
+      const o = this._filtered[i];
+      if (o == null) return;
+      this._chosen = o.value;
+      this._input.value = o.label;
       this._params.api.stopEditing();
     }
     _onKeyDown(e: KeyboardEvent): void {
@@ -1969,9 +2033,16 @@ export const Table = {
     afterGuiAttached(): void { this._input.focus(); this._input.select(); }
     getValue(): string | null {
       if (this._chosen != null) return this._chosen;
-      const typed = this._input.value.trim();
-      const exact = this._values.find(v => v.toLowerCase() === typed.toLowerCase());
-      return exact != null ? exact : this._params.value;
+      const typed = this._input.value.trim().toLowerCase();
+      const exact = this._values.find(o => o.label.toLowerCase() === typed || o.value.toLowerCase() === typed);
+      if (exact != null) return exact.value;
+      if (this._pairMode) {
+        // Nothing chosen from a pair list: answer with the row's own pair, never a bare machine (the cell handler
+        // treats an unchanged pair as a no-op).
+        const data = this._params.data;
+        return `${data?.PRODUCTION_VERSION ?? ''}|${data?.MACHINE ?? this._params.value ?? ''}`;
+      }
+      return this._params.value;
     }
     isPopup(): boolean { return true; }
     destroy(): void {}
@@ -2228,6 +2299,11 @@ export const Inspector = {
     const firmedUnion = firmStatus.firmed;  // frozen-horizon OR manual OR running — drives the one banner below
     const sapFirmed = Engine.isSapFirmed(task);  // display-only info row; never locks
     const lineOptions = Table._getLineOptions();
+    // Routing plants pick the production version and machine together ("PV - Machine"); a distribution sub-order
+    // keeps its locked machine select.
+    const pairSelect = Table._routingEnabledForTask(task) && !task.PARENT_ORDER;
+    const pairOptions = pairSelect ? Table._getPairOptions(task) : [];
+    const pairCurrent = `${task.PRODUCTION_VERSION ?? ''}|${task.MACHINE || 'Unknown'}`;
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
     const scheduleSegments = Array.isArray(task.scheduleSegments) && task.scheduleSegments.length >= 2
       ? task.scheduleSegments : [];
@@ -2293,13 +2369,21 @@ export const Inspector = {
           const field = ORDER_FIELD_CATALOG.find(c => c.key === key);
           if (!field) return '';
           const value = (task as unknown as Record<string, unknown>)[key] ?? '';
+          // D11: on a routing plant the production version is read-only; it changes only through PV - Machine.
+          if (key === 'PRODUCTION_VERSION' && pairSelect) {
+            return `<div class="insp-row"><label>${Util.t(field.i18nInspectorKey)}</label>
+            <div class="insp-val">${Util.escapeHtml(String(value) || '—')}</div></div>`;
+          }
           return `<div class="insp-row"><label>${Util.t(field.i18nInspectorKey)}</label>
             <div class="insp-val"><input type="text" data-field="${key}" value="${Util.escapeHtml(value)}"></div></div>`;
         }).join('')}
-        <div class="insp-row"><label>${Util.t('ui.insp_line')}</label>
+        ${pairSelect ? `<div class="insp-row"><label>${Util.t('ui.insp_pv_machine')}</label>
+          <div class="insp-val"><select data-field="PV_MACHINE">
+            ${pairOptions.map(o => `<option value="${Util.escapeHtml(o.value)}" ${o.value === pairCurrent ? 'selected' : ''}>${Util.escapeHtml(o.label)}</option>`).join('')}
+          </select></div></div>` : `<div class="insp-row"><label>${Util.t('ui.insp_line')}</label>
           <div class="insp-val"><select data-field="MACHINE" ${task.PARENT_ORDER ? `disabled title="${Util.escapeHtml(Util.t('ui.insp_machine_locked_title'))}"` : ''}>
             ${lineOptions.map(l => `<option value="${Util.escapeHtml(l)}" ${l === task.MACHINE ? 'selected' : ''}>${Util.escapeHtml(l)}</option>`).join('')}
-          </select></div></div>
+          </select></div></div>`}
       </div>
 
       ${task.PARENT_ORDER ? `<div class="insp-card">
@@ -2541,6 +2625,7 @@ export const Inspector = {
     let requestedFinish: Date | null = null;
     let requestedLine: string | null = null;
     let scheduleTask = t;
+    let pairPv: string | null = null;   // set when a (PV, machine) pair is being written
     if (field === 'end_date') {
       // The typed End is the finish the planner wants; the start is derived from it (OQ1).
       const d = Util.parseDate(value);
@@ -2557,33 +2642,24 @@ export const Inspector = {
       changes.run_time_source = 'manual';
       scheduleTask = { ...t, RUN_TIME: h };
       requestedFinish = Table._runtimeEditAnchor(t);
-    } else if (field === 'PRODUCTION_VERSION' && Table._routingEnabledForTask(t)) {
-      const result = Runtime.resolve({ ...t, PRODUCTION_VERSION: value });
-      changes.PRODUCTION_VERSION = value;
-      if (result.ok) {
-        changes.RUN_TIME = result.hours;
-        changes.run_time_source = result.basis.source;
-        changes.run_time_basis = result.basis as unknown as Record<string, unknown>;
-        scheduleTask = { ...t, PRODUCTION_VERSION: value, RUN_TIME: result.hours };
-        requestedFinish = Table._runtimeEditAnchor(t);
-      } else {
-        // Same "held, no fallback" shape setup-scheduler.mts uses for a
-        // needs_planning disposition — null committed dates/segments so the
-        // Needs Planning queue and optimizer treat this exactly like any
-        // other hold (§8.2/§8.4).
-        changes.start_date = null;
-        changes.end_date = null;
-        changes.scheduleSegments = [];
-        changes.planning_status = 'needs_planning';
-        changes.planning_reason = {
-          code: 'runtime_unknown',
-          message: `Runtime could not be resolved from routing (step: ${result.step}).`,
-        };
-        Store.updateTask(id, changes, 'inspector');
-        Alerts.scheduleRecompute();
-        Toast.show(Util.t('toast.production_version_runtime_unresolved', { order: Util.orderNumber(t), pv: String(value) }), 'warn', 4000);
+    } else if (field === 'PV_MACHINE') {
+      // The routing plant's one writer of the production version: the pair is written together.
+      const parsed = Table._parsePairValue(value);
+      const newMachine = parsed.machine || 'Unknown';
+      const currentPv = String(t.PRODUCTION_VERSION ?? '');
+      const newPv = parsed.pv ?? currentPv;
+      if (newMachine === (t.MACHINE || 'Unknown') && newPv === currentPv) { Inspector._render(t); return; }
+      if (!Runtime.eligible({ ...t, PRODUCTION_VERSION: newPv }, newMachine)) {
+        Table._toastPairIneligible(t, newPv, newMachine);
+        Inspector._render(t);
         return;
       }
+      changes.MACHINE = newMachine;
+      changes.PRODUCTION_VERSION = newPv;
+      pairPv = newPv;
+      requestedLine = newMachine;
+      requestedFinish = Table._runtimeEditAnchor(t);
+      if (!requestedFinish) Object.assign(changes, Table._unplacedMachineRuntime(t, newMachine, newPv));
     } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
       changes[field] = parseFloat(value) || 0;
     } else if (field === 'notes') {
@@ -2612,8 +2688,10 @@ export const Inspector = {
       const targetLine = requestedLine || t.MACHINE || 'Unknown';
       // Same rule as the grid: run-time, machine and version edits hold the finish (a RUNNING order holds its
       // start instead, OQ3); a typed End is a placement.
-      const schedule = Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedFinish,
-        { ...opts, holdStartIfRunning: field !== 'end_date' });
+      const placeOpts = { ...opts, holdStartIfRunning: field !== 'end_date' };
+      const schedule = pairPv !== null
+        ? Engine.pairSchedulePatchFor(scheduleTask, pairPv, targetLine, requestedFinish, placeOpts)
+        : Engine.manualRoutingSchedulePatchFor(scheduleTask, targetLine, requestedFinish, placeOpts);
       if (!schedule?.start_date || !schedule.end_date) {
         Inspector._render(t);
         Table._explainManualRefusal(t, () => Inspector._onFieldChange(field, value, { confirmedOvertime: true }));
@@ -2626,7 +2704,9 @@ export const Inspector = {
         changes.planning_reason = null;
       }
     }
+    const undoSnap = pairPv !== null ? UndoStack.snapshotTasks([id]) : null;
     Store.updateTask(id, changes, 'inspector');
+    if (undoSnap) Table._pushPairUndo(id, undoSnap);
     Alerts.scheduleRecompute();
   },
 

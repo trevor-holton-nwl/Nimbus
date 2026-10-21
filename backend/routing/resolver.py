@@ -87,7 +87,7 @@ _SECOND_UNITS = frozenset({"S", "SEC", "SECS", "SECOND", "SECONDS"})
 ROUTING_HOLD_STEPS = frozenset({
     "pv_missing", "pv_not_found", "pv_expired", "no_machine",
     "workcenter_unmapped", "no_routing", "no_operation_at_workcenter",
-    "zero_runtime",
+    "zero_runtime", "pv_workcenter_mismatch",
 })
 
 
@@ -228,6 +228,54 @@ def _fallback(order: dict, reason_code: str) -> dict:
     return {"status": "held", "reason_code": "runtime_unknown", "detail_step": reason_code}
 
 
+# PV-Machine recompute fallback (D7/D12): the pair failures a PV switch can repair. `pv_missing` keeps
+# today's path (a blank PV always holds, no guess); no_machine/workcenter_unmapped are machine problems.
+_PV_REPAIR_STEPS = frozenset({"pv_not_found", "pv_expired", "pv_workcenter_mismatch"})
+
+
+def _pair_step(order: dict, pv_lookup: dict, machine_workcenter: dict) -> str | None:
+    """The (production version, machine) head of §5.2: the first failing step among pv_missing,
+    pv_not_found, pv_expired, no_machine, workcenter_unmapped and `pv_workcenter_mismatch` (the PV
+    row's own `sap_workcenter` is blank or differs from the machine's work center -- bad master
+    data, fail closed), or None when the pair is coherent. No routing/operation lookup."""
+    pv_value = order.get("production_version")
+    if not pv_value:
+        # Step 1: caller decides what "no fallback" means for it -- D4: a
+        # missing production version always holds/fails, no guess.
+        return "pv_missing"
+
+    plant = order.get("plant")
+    material = order.get("material_number")
+    pv_row = pv_lookup.get((plant, material, pv_value))
+    if pv_row is None:
+        return "pv_not_found"
+
+    # Validity is judged on the SAP start as first received (locked; backward scheduling OQ26), never on
+    # `basic_start_date`, which an echo of NIMBUS's own send can move. A row dict without the locked value
+    # (a caller that predates it) falls back to `basic_start_date`.
+    # U13: an order with no start at all (an Excel upload without BASIC_START_DATE) is judged on its locked
+    # finish, then the planning finish, then today -- never on None, which `_within_validity` reads as valid.
+    validity_start = next((order.get(k) for k in ("original_start_received", "basic_start_date",
+                                                  "original_finish_received", "basic_finish_date")
+                           if order.get(k) is not None), None)
+    if validity_start is None:
+        validity_start = datetime.now().date()
+    if not _within_validity(validity_start, pv_row.get("valid_from"), pv_row.get("valid_to")):
+        return "pv_expired"
+
+    machine = order.get("machine")
+    if not machine:
+        return "no_machine"
+    workcenter = machine_workcenter.get(machine)
+    if not workcenter:
+        return "workcenter_unmapped"
+
+    pv_workcenter = pv_row.get("sap_workcenter")
+    if not pv_workcenter or pv_workcenter != workcenter:
+        return "pv_workcenter_mismatch"
+    return None
+
+
 def _resolve_steps(order: dict, *, pv_lookup: dict, op_lookup: dict,
                    machine_workcenter: dict, rules: dict) -> dict:
     """§5.2 steps 1-8 + §5.4's formula + the lot-size warning, over one
@@ -257,37 +305,16 @@ def _resolve_steps(order: dict, *, pv_lookup: dict, op_lookup: dict,
       {"ok": True, "run_time": Decimal, "run_time_basis": {...},
        "lot_size_warning": bool}
     """
-    pv_value = order.get("production_version")
-    if not pv_value:
-        # Step 1: caller decides what "no fallback" means for it -- D4: a
-        # missing production version always holds/fails, no guess.
-        return {"ok": False, "step": "pv_missing"}
+    step = _pair_step(order, pv_lookup, machine_workcenter)
+    if step is not None:
+        return {"ok": False, "step": step}
 
+    pv_value = order.get("production_version")
     plant = order.get("plant")
     material = order.get("material_number")
-    pv_row = pv_lookup.get((plant, material, pv_value))
-    if pv_row is None:
-        return {"ok": False, "step": "pv_not_found"}
-
-    # Validity is judged on the SAP start as first received (locked; backward scheduling OQ26), never on
-    # `basic_start_date`, which an echo of NIMBUS's own send can move. A row dict without the locked value
-    # (a caller that predates it) falls back to `basic_start_date`.
-    # U13: an order with no start at all (an Excel upload without BASIC_START_DATE) is judged on its locked
-    # finish, then the planning finish, then today -- never on None, which `_within_validity` reads as valid.
-    validity_start = next((order.get(k) for k in ("original_start_received", "basic_start_date",
-                                                  "original_finish_received", "basic_finish_date")
-                           if order.get(k) is not None), None)
-    if validity_start is None:
-        validity_start = datetime.now().date()
-    if not _within_validity(validity_start, pv_row.get("valid_from"), pv_row.get("valid_to")):
-        return {"ok": False, "step": "pv_expired"}
-
+    pv_row = pv_lookup[(plant, material, pv_value)]
     machine = order.get("machine")
-    if not machine:
-        return {"ok": False, "step": "no_machine"}
-    workcenter = machine_workcenter.get(machine)
-    if not workcenter:
-        return {"ok": False, "step": "workcenter_unmapped"}
+    workcenter = machine_workcenter[machine]
 
     routing_key = (plant, material, pv_row.get("task_list_type"),
                    pv_row.get("routing_group"), pv_row.get("group_counter"))
@@ -383,6 +410,10 @@ def resolve_one(order: dict, *, pv_lookup: dict, op_lookup: dict,
             # Step 1: skip the fallback chain entirely -- D4: a missing
             # production version always holds, no guess.
             return {"status": "held", "reason_code": "pv_missing"}
+        if step == "pv_workcenter_mismatch":
+            # Bad master data (the PV header work center disagrees with the machine's): hold
+            # directly, never rescued by the order file's machine hours or a stored run time.
+            return {"status": "held", "reason_code": "runtime_unknown", "detail_step": step}
         return _fallback(order, step)
 
     return {
@@ -465,6 +496,32 @@ def check_eligibility(plant: str, material_id: str, production_version, machine,
                                           machine, order_quantity, original_start_date, new_conn)
 
 
+def check_pair(plant: str, material_id: str, production_version, machine,
+               original_start_date, *, conn=None, cache: dict | None = None) -> dict:
+    """Pair-only eligibility (no quantity, no routing/operation lookup): runs just `_pair_step` for one
+    hypothetical (production version, machine) combination. Returns {"ok": True} or
+    {"ok": False, "step": <failure code>}. Same `conn`/`cache` conventions as `check_eligibility`."""
+    def _run(c):
+        loaded = cache.get(plant) if cache is not None else None
+        if loaded is None:
+            with c.cursor() as cur:
+                loaded = (_load_pv_lookup(cur, plant), _load_op_lookup(cur, plant),
+                          _load_machine_workcenter(cur, plant), _load_rules(cur, plant))
+            if cache is not None:
+                cache[plant] = loaded
+        pv_lookup, _op_lookup, machine_workcenter, _rules = loaded
+        order = {"plant": plant, "material_number": material_id,
+                 "production_version": production_version, "machine": machine,
+                 "original_start_received": original_start_date}
+        step = _pair_step(order, pv_lookup, machine_workcenter)
+        return {"ok": True} if step is None else {"ok": False, "step": step}
+
+    if conn is not None:
+        return _run(conn)
+    with _pool.connection() as new_conn:
+        return _run(new_conn)
+
+
 # ===========================================================================
 # DB wrapper (§5.5-§5.6)
 # ===========================================================================
@@ -527,6 +584,22 @@ def _load_machine_workcenter(cur, plant: str) -> dict:
     return dict(cur.fetchall())
 
 
+def _load_default_pv(cur, plant: str) -> dict:
+    """{material_id: default production version} from `material_plants.default_production_version`
+    for one plant. A blank default ('' -- the column is NOT NULL DEFAULT '', and SAP staging does not
+    feed it) is skipped; a stored value is zero-padded to 4 like `production_version.production_version`."""
+    cur.execute(
+        "SELECT material_id, default_production_version FROM material_plants WHERE plant = %s",
+        (plant,),
+    )
+    out: dict = {}
+    for material_id, default_pv in cur.fetchall():
+        normalized = db._norm_pv(default_pv)
+        if normalized:
+            out[material_id] = normalized
+    return out
+
+
 def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
                  full: bool = False, ids: list[str] | None = None) -> list[dict]:
     """The set of orders one resolve run considers (§4 item 4's "resolve
@@ -561,7 +634,8 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
             "SELECT id, plant, material_number, production_version, machine, order_quantity,"
             " basic_start_date, original_start_received, original_finish_received, basic_finish_date,"
             " run_time, run_time_source, run_time_basis,"
-            " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
+            " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end,"
+            " sap_production_version, parent_production_order"
             " FROM orders WHERE plant = %s AND run_time_source IS DISTINCT FROM 'manual'",
             (plant,),
         )
@@ -571,7 +645,8 @@ def _load_orders(cur, plant: str, is_cutover: bool, batch_id: str | None = None,
         "SELECT id, plant, material_number, production_version, machine, order_quantity,"
         " basic_start_date, original_start_received, original_finish_received, basic_finish_date,"
             " run_time, run_time_source, run_time_basis,"
-        " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end"
+        " machine_hours, planning_status, planning_reason, firming_indicator, scheduled_start, scheduled_end,"
+        " sap_production_version, parent_production_order"
         " FROM orders"
         " WHERE plant = %s"
         "   AND run_time_source IS DISTINCT FROM 'manual'"
@@ -654,7 +729,7 @@ def _build_held_row(order: dict, step: str):
     return (order["id"], Jsonb(reason))
 
 
-def _build_write_row(order: dict, result: dict):
+def _build_write_row(order: dict, result: dict, new_pv: str | None = None):
     """One row for the non-held outcomes' VALUES-joined UPDATE, or None when
     this outcome must leave the order genuinely untouched (judgment call #5,
     module docstring: an already-labeled fallback_legacy order)."""
@@ -686,10 +761,12 @@ def _build_write_row(order: dict, result: dict):
     set_mismatch = (placed and db._canonical_runtime_minutes(order.get("run_time"))
                     != db._canonical_runtime_minutes(run_time))
 
-    return (order["id"], run_time, run_time_source, Jsonb(basis), release_hold, set_mismatch)
+    # `new_pv` (the recompute fallback switched this order's production version) is the 7th and LAST
+    # column: the over-cap slice in `_resolve_orders_on_conn` edits index 4 (`release_hold`).
+    return (order["id"], run_time, run_time_source, Jsonb(basis), release_hold, set_mismatch, new_pv)
 
 
-# psycopg caps a statement at 65,535 bind parameters; _write_outcomes binds 6
+# psycopg caps a statement at 65,535 bind parameters; _write_outcomes binds 7
 # per order, so one unchunked statement failed past ~10,900 orders. Chunks stay
 # inside the caller's single transaction (no partial-failure window).
 _WRITE_CHUNK = 5000
@@ -713,7 +790,7 @@ def _write_outcomes(cur, rows: list[tuple]) -> None:
 
 def _write_outcomes_chunk(cur, rows: list[tuple]) -> None:
     placeholders = ", ".join(
-        ["(%s::text, %s::numeric, %s::text, %s::jsonb, %s::boolean, %s::boolean)"] * len(rows)
+        ["(%s::text, %s::numeric, %s::text, %s::jsonb, %s::boolean, %s::boolean, %s::text)"] * len(rows)
     )
     params = [v for row in rows for v in row]
     query = (
@@ -721,15 +798,17 @@ def _write_outcomes_chunk(cur, rows: list[tuple]) -> None:
         " run_time = v.run_time,"
         " run_time_source = v.run_time_source,"
         " run_time_basis = v.run_time_basis,"
+        " production_version = COALESCE(v.production_version, o.production_version),"
         " planning_status = CASE WHEN v.release_hold THEN 'scheduled' ELSE o.planning_status END,"
         " planning_reason = CASE WHEN v.release_hold THEN NULL ELSE o.planning_reason END,"
         " runtime_schedule_mismatch = CASE WHEN v.set_mismatch THEN TRUE ELSE o.runtime_schedule_mismatch END,"
         " updated_at = NOW()"
-        f" FROM (VALUES {placeholders}) AS v(id, run_time, run_time_source, run_time_basis, release_hold, set_mismatch)"
+        f" FROM (VALUES {placeholders}) AS v(id, run_time, run_time_source, run_time_basis, release_hold, set_mismatch, production_version)"
         " WHERE o.id = v.id"
         "   AND (o.run_time IS DISTINCT FROM v.run_time"
         "        OR o.run_time_source IS DISTINCT FROM v.run_time_source"
         "        OR o.run_time_basis IS DISTINCT FROM v.run_time_basis"
+        "        OR o.production_version IS DISTINCT FROM COALESCE(v.production_version, o.production_version)"
         "        OR (v.release_hold AND o.planning_status = 'needs_planning')"
         "        OR (v.set_mismatch AND o.runtime_schedule_mismatch IS DISTINCT FROM TRUE))"
     )
@@ -802,6 +881,8 @@ def _new_report(is_cutover: bool) -> dict:
         "skipped_other_category": 0,
         "unmapped_workcenters": [],
         "lot_size_warnings": 0,
+        "pv_sap_restored": 0,
+        "pv_defaulted": 0,
     }
     return report
 
@@ -860,9 +941,45 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
         # The run-time cap (OQ28, U5): a flat 336 h on every plant (db.cap_hours).
         plant_cap = db.cap_hours()
 
+        default_pv = _load_default_pv(cur, plant)
+
+        # PV-Machine recompute fallback (D7/D12/D13): an order whose (PV, machine) pair no longer holds
+        # together is repaired by switching its PV -- SAP's own last-sent PV first, then the material's
+        # default -- else it is held (never rescued by `_fallback`). Distribution children (they inherit
+        # the parent's PV) and running orders are never PV-switched; a child with a failing step holds,
+        # a running order is held too and so stays protected below (nothing written for it).
+        repair_steps = {o["id"]: step for o in orders
+                        if (step := _pair_step(o, pv_lookup, machine_workcenter)) in _PV_REPAIR_STEPS}
+        running_now = _running_ids(
+            cur, plant,
+            [o["id"] for o in orders
+             if o["id"] in repair_steps and o.get("parent_production_order") is None
+             and o.get("planning_status") != "needs_planning"])
+
         for order in orders:
-            result = resolve_one(order, pv_lookup=pv_lookup, op_lookup=op_lookup,
-                                 machine_workcenter=machine_workcenter, rules=rules)
+            new_pv = None
+            pair_step = repair_steps.get(order["id"])
+            if pair_step is None:
+                result = resolve_one(order, pv_lookup=pv_lookup, op_lookup=op_lookup,
+                                     machine_workcenter=machine_workcenter, rules=rules)
+            else:
+                result = {"status": "held", "reason_code": "runtime_unknown", "detail_step": pair_step}
+                if order.get("parent_production_order") is None and order["id"] not in running_now:
+                    candidates = (("pv_sap_restored", db._norm_pv(order.get("sap_production_version"))),
+                                  ("pv_defaulted", default_pv.get(order.get("material_number"))))
+                    for counter, candidate in candidates:
+                        if not candidate or candidate == order.get("production_version"):
+                            continue
+                        trial = {**order, "production_version": candidate}
+                        if _pair_step(trial, pv_lookup, machine_workcenter) is not None:
+                            continue
+                        trial_result = resolve_one(trial, pv_lookup=pv_lookup, op_lookup=op_lookup,
+                                                   machine_workcenter=machine_workcenter, rules=rules)
+                        if trial_result["status"] != "resolved":
+                            continue   # a coherent pair whose routing cannot resolve is no repair
+                        order, result, new_pv = trial, trial_result, candidate
+                        report[counter] += 1
+                        break
             status = result["status"]
 
             if status == "held":
@@ -881,7 +998,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
             elif status == "fallback_legacy":
                 report["legacy_retained"] += 1
 
-            write_row = _build_write_row(order, result)
+            write_row = _build_write_row(order, result, new_pv)
             if result.get("run_time") is not None and float(result["run_time"]) > plant_cap:
                 # Over the cap: the order is queued with reason run_time_over_cap (below), never
                 # released by this outcome. A run time past the database's representation bound
@@ -1008,6 +1125,7 @@ def _build_pv_map(pv_lookup: dict) -> dict:
             "lot_from": _numeric_or_none(row.get("lot_size_from")),
             "lot_to": _numeric_or_none(row.get("lot_size_to")),
             "key": f"{material_id}|{row.get('task_list_type')}|{row.get('routing_group')}|{row.get('group_counter')}",
+            "workcenter": row.get("sap_workcenter") or None,
         }
     return pv
 

@@ -78,7 +78,7 @@ test('refresh updates routing quantity, material and raw validity date before th
     original_start_date: '2026-11-01T08:00:00', end_date: '2026-10-01T14:00:00' });
   Runtime._rateMapPlant = 'P';
   Runtime._rateMap = { plant: 'P', machines: { M1: 'W1', M2: 'W2' },
-    pv: { 'NEW|0001': { key: 'NEW|N|G|01', valid_from: '2026-11-01', valid_to: '2026-11-30' } },
+    pv: { 'NEW|0001': { key: 'NEW|N|G|01', valid_from: '2026-11-01', valid_to: '2026-11-30', workcenter: 'W2' } },
     ops: { 'NEW|N|G|01|W1': { minutes_per_unit: 3 }, 'NEW|N|G|01|W2': { minutes_per_unit: 6 } } };
   t.mock.method(Util, 'fetchTraced', async () => ({ ok: true, json: async () => ({ data: [server], missing: [] }) }));
   Persistence._refreshTasks(['A']); await tick();

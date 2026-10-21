@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Table, Inspector, ContextMenu, Printer } from '../../../frontend/scheduling/orders.mjs';
 import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
-import { Store } from '../../../frontend/platform/store.mjs';
+import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { ORDER_FIELD_CATALOG } from '../../../frontend/scheduling/order-field-catalog.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
@@ -466,7 +466,15 @@ test('Table/Inspector/ContextMenu expose the documented public API', () => {
 test('Orders grid exposes editable priority fields instead of Form Size', () => {
   const columns = Table._priorityColumns();
   assert.deepEqual(columns.map(c => c.field), ['PRT_01', 'PRT_02', 'PRODUCTION_VERSION']);
-  assert.ok(columns.every(c => c.editable === true), 'priority fields must be inline-editable');
+  const [prt1, prt2, pvColumn] = columns;
+  assert.ok(prt1.editable === true && prt2.editable === true, 'PRT fields must be inline-editable');
+  // D11: the production version is editable only where it is not chosen together with the machine.
+  assert.equal(typeof pvColumn.editable, 'function');
+  const priorMaster = _enableRoutingForPlant('P-PV-COLUMN');
+  try {
+    assert.equal(pvColumn.editable({ data: { PLANT: 'P-PV-COLUMN', MACHINE: 'L1' } }), false, 'read-only on a routing plant');
+    assert.equal(pvColumn.editable({ data: { PLANT: 'P-OTHER', MACHINE: 'L1' } }), true, 'free edit elsewhere');
+  } finally { Store.setMasterData(priorMaster, 'test'); }
   assert.ok(!columns.some(c => c.field === 'FORM_SIZE'), 'Form Size must be removed from the Orders view');
 });
 
@@ -1118,7 +1126,16 @@ test('Inspector._onFieldChange rejects a MACHINE edit when Runtime.eligible is f
   }
 });
 
-test('Table._onCellChanged: an eligible PRODUCTION_VERSION edit updates RUN_TIME/run_time_source/run_time_basis locally and re-places the order', () => {
+function _pairEditFixture(id, plant) {
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'A-9104', ORDER: 'A-9104', PLANT: plant, MACHINE: 'L1', MATERIAL_NUMBER: 'MAT',
+    PRODUCTION_VERSION: '0001', RUN_TIME: 1, run_time_source: 'sap_order',
+    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
+  }], 'test');
+  return Store.tasks[id];
+}
+
+test('Table._onCellChanged: a PV - Machine pair edit writes PV, machine and run time in one patch, re-places the order and is one undo step', () => {
   const priorTableApi = Table._api;
   const priorResolve = Runtime.resolve;
   const priorManualSchedule = Engine.manualSchedulePatchFor;
@@ -1133,77 +1150,223 @@ test('Table._onCellChanged: an eligible PRODUCTION_VERSION edit updates RUN_TIME
     : { ok: false, step: 'pv_not_found' });
   Engine.manualSchedulePatchFor = () => ({ start_date: newStart, end_date: newEnd, scheduleSegments: [] });
   Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
-
-  Store.setTasks([{
-    id: 'routing-pv-ok', PRODUCTION_ORDER: 'A-9104', ORDER: 'A-9104', PLANT: plant, MACHINE: 'L1',
-    PRODUCTION_VERSION: '0001', RUN_TIME: 1, run_time_source: 'sap_order',
-    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
-  }], 'test');
+  const undoBefore = UndoStack._entries.length;
+  const row = _pairEditFixture('routing-pv-ok', plant);
 
   try {
-    Table._onCellChanged({
-      colDef: { field: 'PRODUCTION_VERSION' },
-      data: Store.tasks['routing-pv-ok'],
-      newValue: '0002',
-      node: { refreshCells: () => {} },
-    });
+    row.MACHINE = '0002|L2';   // AG Grid's default setter writes the raw editor value first
+    Table._onCellChanged({ colDef: { field: 'MACHINE' }, data: row, newValue: '0002|L2', oldValue: 'L1', node: { refreshCells: () => {} } });
     const task = Store.tasks['routing-pv-ok'];
+    assert.equal(task.MACHINE, 'L2', 'the pair string never stays in MACHINE');
     assert.equal(task.PRODUCTION_VERSION, '0002');
     assert.equal(task.RUN_TIME, 5.9);
     assert.equal(task.run_time_source, 'routing');
     assert.equal(task.run_time_basis.workcenter, 'MOLD01');
     assert.equal(task.start_date.getTime(), newStart.getTime(), 'the order must be re-placed through Engine.manualSchedulePatchFor');
     assert.notEqual(task.planning_status, 'needs_planning');
+    assert.equal(UndoStack._entries.length, undoBefore + 1, 'one undo step for the whole pair');
   } finally {
     Table._api = priorTableApi;
     Runtime.resolve = priorResolve;
     Engine.manualSchedulePatchFor = priorManualSchedule;
     Alerts.scheduleRecompute = priorScheduleRecompute;
+    UndoStack._entries.length = undoBefore;
     Store.setTasks([], 'test');
     Store.setMasterData(priorMasterData, 'test');
   }
 });
 
-test('Table._onCellChanged: an ineligible PRODUCTION_VERSION edit holds the task locally (needs_planning/runtime_unknown) with null dates', () => {
+test('Table._onCellChanged: an ineligible PV - Machine pair is rejected whole: row restored, one pair toast, nothing written', () => {
   const priorTableApi = Table._api;
   const priorResolve = Runtime.resolve;
   const priorScheduleRecompute = Alerts.scheduleRecompute;
   const priorToastShow = Toast.show;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'toast.pv_machine_ineligible': '{{order}} cannot run on {{machine}} with {{pv}}.' } };
   const plant = 'P-ROUTING-PV-HELD';
   const priorMasterData = _enableRoutingForPlant(plant);
   Alerts.scheduleRecompute = () => {};
   const toastCalls = [];
   Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
-  Runtime.resolve = () => ({ ok: false, step: 'workcenter_unmapped' });
-  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
-
-  Store.setTasks([{
-    id: 'routing-pv-held', PRODUCTION_ORDER: 'A-9105', ORDER: 'A-9105', PLANT: plant, MACHINE: 'L1',
-    PRODUCTION_VERSION: '0001', RUN_TIME: 1,
-    start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
-  }], 'test');
+  Runtime.resolve = () => ({ ok: false, step: 'pv_workcenter_mismatch' });
+  let refreshed = false;
+  Table._api = { applyTransaction: () => {}, refreshCells: () => { refreshed = true; } };
+  const row = _pairEditFixture('routing-pv-held', plant);
 
   try {
-    Table._onCellChanged({
-      colDef: { field: 'PRODUCTION_VERSION' },
-      data: Store.tasks['routing-pv-held'],
-      newValue: '0003',
-      node: { refreshCells: () => {} },
-    });
+    row.MACHINE = '0003|L2';
+    Table._onCellChanged({ colDef: { field: 'MACHINE' }, data: row, newValue: '0003|L2', oldValue: 'L1', node: { refreshCells: () => {} } });
     const task = Store.tasks['routing-pv-held'];
-    assert.equal(task.PRODUCTION_VERSION, '0003');
-    assert.equal(task.planning_status, 'needs_planning');
-    assert.equal(task.planning_reason.code, 'runtime_unknown');
-    assert.match(task.planning_reason.message, /workcenter_unmapped/);
-    assert.equal(task.start_date, null);
-    assert.equal(task.end_date, null);
+    assert.equal(task.MACHINE, 'L1');
+    assert.equal(task.PRODUCTION_VERSION, '0001');
+    assert.equal(task.RUN_TIME, 1);
     assert.equal(toastCalls.length, 1);
     assert.equal(toastCalls[0].type, 'warn');
+    assert.match(toastCalls[0].msg, /A-9104.*L2.*0003/);
+    assert.equal(refreshed, true);
   } finally {
     Table._api = priorTableApi;
     Runtime.resolve = priorResolve;
     Alerts.scheduleRecompute = priorScheduleRecompute;
     Toast.show = priorToastShow;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Table._onCellChanged: re-picking the order\'s own pair is a no-op (no write, no undo entry, no toast)', () => {
+  const priorTableApi = Table._api;
+  const priorToastShow = Toast.show;
+  const plant = 'P-ROUTING-PV-SAME';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  const toastCalls = [];
+  Toast.show = (msg) => { toastCalls.push(msg); };
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+  const undoBefore = UndoStack._entries.length;
+  const row = _pairEditFixture('routing-pv-same', plant);
+  try {
+    row.MACHINE = '0001|L1';
+    Table._onCellChanged({ colDef: { field: 'MACHINE' }, data: row, newValue: '0001|L1', oldValue: 'L1', node: {} });
+    assert.equal(Store.tasks['routing-pv-same'].MACHINE, 'L1');
+    assert.equal(UndoStack._entries.length, undoBefore);
+    assert.equal(toastCalls.length, 0);
+  } finally {
+    Table._api = priorTableApi;
+    Toast.show = priorToastShow;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Table._parsePairValue splits at the first pipe and treats a bare machine as "keep the PV"', () => {
+  assert.deepEqual(Table._parsePairValue('0002|L2'), { pv: '0002', machine: 'L2' });
+  assert.deepEqual(Table._parsePairValue('|L2'), { pv: '', machine: 'L2' });
+  assert.deepEqual(Table._parsePairValue('0002|L|2'), { pv: '0002', machine: 'L|2' });
+  assert.deepEqual(Table._parsePairValue('L2'), { pv: null, machine: 'L2' });
+});
+
+test('Table._getPairOptions: routing plants list eligible pairs, prefix a current pair that is not eligible; others get the line list', () => {
+  const priorEligiblePairs = Runtime.eligiblePairs;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: {
+    'ui.pv_machine_option': '{{pv}} - {{machine}}',
+    'ui.pv_machine_current_ineligible': '{{pv}} - {{machine}} (current, not eligible)',
+  } };
+  const plant = 'P-PAIR-OPTIONS';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  let seenOpts = null;
+  Runtime.eligiblePairs = (task, opts) => { seenOpts = opts; return [
+    { pv: '0001', machine: 'L1', workcenter: 'WC1' }, { pv: '0002', machine: 'L2', workcenter: 'WC2' }]; };
+  try {
+    const eligibleCurrent = Table._getPairOptions({ PLANT: plant, MACHINE: 'L1', PRODUCTION_VERSION: '0001' });
+    assert.deepEqual(eligibleCurrent, [
+      { value: '0001|L1', label: '0001 - L1' }, { value: '0002|L2', label: '0002 - L2' }]);
+    assert.deepEqual(seenOpts, { requireOps: true }, 'pairs whose routing has no operation at the work center are not offered');
+
+    const ineligibleCurrent = Table._getPairOptions({ PLANT: plant, MACHINE: 'L9', PRODUCTION_VERSION: '0007' });
+    assert.deepEqual(ineligibleCurrent[0], { value: '0007|L9', label: '0007 - L9 (current, not eligible)' });
+    assert.equal(ineligibleCurrent.length, 3);
+
+    // A distribution sub-order keeps only its locked machine, exactly like _getLineOptions.
+    assert.deepEqual(Table._getPairOptions({ PLANT: plant, MACHINE: 'L7', PARENT_ORDER: '9002' }), [{ value: 'L7', label: 'L7' }]);
+
+    // Non-routing plant: today's line list as {value:l,label:l}.
+    Store.setMasterData({ ...priorMasterData, plants: [{ plant: 'P-PLAIN', timezone: LOCAL_TZ }] }, 'test');
+    const lineList = Table._getLineOptions({ PLANT: 'P-PLAIN', MACHINE: 'L1' });
+    assert.deepEqual(Table._getPairOptions({ PLANT: 'P-PLAIN', MACHINE: 'L1' }), lineList.map(l => ({ value: l, label: l })));
+  } finally {
+    Runtime.eligiblePairs = priorEligiblePairs;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('Table._SearchableLineEditor filters pair options on their label and returns the pair value', () => {
+  const priorDocument = globalThis.document;
+  const input = { value: '', addEventListener() {}, focus() {}, select() {} };
+  const list = { innerHTML: '', querySelectorAll: () => [] };
+  const gui = { className: '', innerHTML: '', querySelector: sel => (sel === '.nse-input' ? input : list) };
+  globalThis.document = { ...priorDocument, createElement: () => gui };
+  try {
+    const row = { PRODUCTION_VERSION: '0001', MACHINE: 'L1' };
+    let stopped = 0;
+    const editor = new Table._SearchableLineEditor();
+    editor.init({
+      value: 'L1', data: row, api: { stopEditing: () => { stopped++; } },
+      values: [{ value: '0001|L1', label: '0001 - L1' }, { value: '0002|L2', label: '0002 - L2' }],
+    });
+    assert.equal(editor._filtered.length, 2);
+    editor._renderList('0002');
+    assert.deepEqual(editor._filtered.map(o => o.value), ['0002|L2'], 'filters on the label text');
+    editor._renderList('zzz');
+    assert.equal(editor._filtered.length, 0);
+    // Nothing chosen and nothing typed that matches: the row's own pair comes back, never a bare machine.
+    assert.equal(editor.getValue(), '0001|L1');
+    editor._renderList('0002');
+    editor._choose(0);
+    assert.equal(stopped, 1);
+    assert.equal(editor.getValue(), '0002|L2');
+
+    // Plain string options (non-routing plants) behave as before.
+    const plain = new Table._SearchableLineEditor();
+    plain.init({ value: 'L1', api: { stopEditing() {} }, values: ['L1', 'L2'] });
+    plain._renderList('l2');
+    assert.deepEqual(plain._filtered, [{ value: 'L2', label: 'L2' }]);
+    assert.equal(plain.getValue(), 'L1', 'unchanged selection falls back to the cell value');
+    plain._choose(0);
+    assert.equal(plain.getValue(), 'L2');
+  } finally {
+    globalThis.document = priorDocument;
+  }
+});
+
+test('Inspector: a routing plant renders PV read-only and a PV - Machine select; PV_MACHINE writes the pair in one undo step', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const priorResolve = Runtime.resolve;
+  const priorPairs = Runtime.eligiblePairs;
+  const priorManualSchedule = Engine.manualSchedulePatchFor;
+  const priorRecompute = Alerts.scheduleRecompute;
+  const priorCurrentId = Inspector._currentId;
+  const plant = 'P-INSP-PAIR';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+  globalThis.document.getElementById = id => (id === 'inspector-body' ? body : null);
+  Alerts.scheduleRecompute = () => {};
+  Runtime.eligiblePairs = () => [{ pv: '0001', machine: 'L1', workcenter: 'WC1' }, { pv: '0002', machine: 'L2', workcenter: 'WC2' }];
+  Runtime.resolve = (task) => (task.PRODUCTION_VERSION === '0002'
+    ? { ok: true, hours: 4, basis: { workcenter: 'WC2', source: 'routing' } } : { ok: false, step: 'pv_not_found' });
+  const newEnd = new Date('2026-09-20T10:00:00');
+  Engine.manualSchedulePatchFor = () => ({ start_date: new Date('2026-09-20T06:00:00'), end_date: newEnd, scheduleSegments: [] });
+  const undoBefore = UndoStack._entries.length;
+  const row = _pairEditFixture('insp-pair', plant);
+  try {
+    Inspector._render(row);
+    assert.match(body.innerHTML, /data-field="PV_MACHINE"/);
+    assert.doesNotMatch(body.innerHTML, /data-field="PRODUCTION_VERSION"/, 'PV is not an input on a routing plant');
+    assert.doesNotMatch(body.innerHTML, /data-field="MACHINE"/);
+    Inspector._currentId = 'insp-pair';
+    Inspector._onFieldChange('PV_MACHINE', '0002|L2');
+    const task = Store.tasks['insp-pair'];
+    assert.equal(task.PRODUCTION_VERSION, '0002');
+    assert.equal(task.MACHINE, 'L2');
+    assert.equal(task.RUN_TIME, 4);
+    assert.equal(UndoStack._entries.length, undoBefore + 1);
+    UndoStack.pop();
+    const restored = Store.tasks['insp-pair'];
+    assert.equal(restored.PRODUCTION_VERSION, '0001');
+    assert.equal(restored.MACHINE, 'L1');
+    assert.equal(restored.RUN_TIME, 1);
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    Runtime.resolve = priorResolve;
+    Runtime.eligiblePairs = priorPairs;
+    Engine.manualSchedulePatchFor = priorManualSchedule;
+    Alerts.scheduleRecompute = priorRecompute;
+    Inspector._currentId = priorCurrentId;
+    UndoStack._entries.length = undoBefore;
     Store.setTasks([], 'test');
     Store.setMasterData(priorMasterData, 'test');
   }
@@ -1981,5 +2144,95 @@ test('the status dropdown is rebuilt only when the profile filter flips between 
   } finally {
     Table._unwireProfileMatches(); Table._buildStatusChipDropdown = priorBuild; Table._profileOffSeen = null;
     Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent;
+  }
+});
+
+function _overrideFixture(lineValue) {
+  const elements = {
+    'ovr-finish': { value: '2026-09-21 10:00' },
+    'ovr-line': { value: lineValue },
+    'ovr-firm': { checked: false },
+  };
+  const prior = globalThis.document.getElementById;
+  globalThis.document.getElementById = id => elements[id] || null;
+  return () => { globalThis.document.getElementById = prior; };
+}
+
+test('Table.applyOverride with a PV - Machine pair: writes the pair, pushes one undo entry; an ineligible pair is rejected with the pair toast; the PARENT_ORDER lock still rejects', () => {
+  const priorTableApi = Table._api;
+  const priorEligible = Runtime.eligible;
+  const priorPair = Engine.pairSchedulePatchFor;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorToastShow = Toast.show;
+  const priorSelectedId = Table._selectedId;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: {
+    'toast.pv_machine_ineligible': '{{order}} cannot run on {{machine}} with {{pv}}.',
+    'toast.dist_machine_locked': '{{order}} runs on {{machine}} because of its distribution.',
+  } };
+  const plant = 'P-ROUTING-OVR-PAIR';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  Alerts.scheduleRecompute = () => {};
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+  const undoBefore = UndoStack._entries.length;
+  const newStart = new Date('2026-09-21T08:00:00');
+  const newEnd = new Date('2026-09-21T10:00:00');
+  Runtime.eligible = (task, machine) => task.PRODUCTION_VERSION === '0002' && machine === 'L2';
+  let pairArgs = null;
+  Engine.pairSchedulePatchFor = (task, pv, line) => {
+    pairArgs = { pv, line };
+    return { start_date: newStart, end_date: newEnd, PRODUCTION_VERSION: pv, MACHINE: line, RUN_TIME: 2, run_time_source: 'routing' };
+  };
+  _pairEditFixture('ovr-pair', plant);
+  Table._selectedId = 'ovr-pair';
+
+  try {
+    // 1. ineligible pair: toast, nothing written, no undo entry
+    let restore = _overrideFixture('0003|L2');
+    try { Table.applyOverride(); } finally { restore(); }
+    assert.equal(Store.tasks['ovr-pair'].MACHINE, 'L1');
+    assert.equal(Store.tasks['ovr-pair'].PRODUCTION_VERSION, '0001');
+    assert.equal(pairArgs, null);
+    assert.equal(toastCalls.length, 1);
+    assert.match(toastCalls[0].msg, /A-9104.*L2.*0003/);
+    assert.equal(UndoStack._entries.length, undoBefore);
+
+    // 2. eligible pair: one patch, one undo entry
+    toastCalls.length = 0;
+    restore = _overrideFixture('0002|L2');
+    try { Table.applyOverride(); } finally { restore(); }
+    assert.deepEqual(pairArgs, { pv: '0002', line: 'L2' });
+    assert.equal(Store.tasks['ovr-pair'].MACHINE, 'L2');
+    assert.equal(Store.tasks['ovr-pair'].PRODUCTION_VERSION, '0002');
+    assert.equal(UndoStack._entries.length, undoBefore + 1, 'the pair override is one undo step');
+
+    // 3. sub-order lock still wins over a pair
+    Store.setTasks([{
+      id: 'ovr-child', PRODUCTION_ORDER: 'A-9301', ORDER: 'A-9301', PLANT: plant, PARENT_ORDER: '9301', MACHINE: 'L1',
+      PRODUCTION_VERSION: '0002', start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
+    }], 'test');
+    Table._selectedId = 'ovr-child';
+    toastCalls.length = 0;
+    pairArgs = null;
+    restore = _overrideFixture('0002|L2');
+    try { Table.applyOverride(); } finally { restore(); }
+    assert.equal(Store.tasks['ovr-child'].MACHINE, 'L1');
+    assert.equal(pairArgs, null);
+    assert.equal(toastCalls.length, 1);
+    assert.match(toastCalls[0].msg, /A-9301/);
+  } finally {
+    Table._api = priorTableApi;
+    Runtime.eligible = priorEligible;
+    Engine.pairSchedulePatchFor = priorPair;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Toast.show = priorToastShow;
+    Table._selectedId = priorSelectedId;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    UndoStack._entries.length = undoBefore;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
   }
 });

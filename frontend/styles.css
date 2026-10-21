@@ -1222,6 +1222,10 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 /* The expanded row: a faint wash (translucent, so the grouped shading bands underneath stay visible). */
 .vis-label.row-expanded { background: var(--accent-wash); }
 .vis-foreground .vis-group.row-expanded { background: rgba(var(--accent-rgb), 0.06); }
+/* Drag-time dim: rows the dragged order cannot run on (routing plants). Composes with row-expanded. */
+.vis-labelset .vis-label.row-drag-ineligible, .vis-foreground .vis-group.row-drag-ineligible { opacity: .35; }
+/* Production-version chooser (Modal.choose) in the confirm dialog's detail slot. */
+.confirm-choose-select { width: 100%; }
 .vis-group { border-bottom: 1px solid var(--line); }
 .vis-foreground .vis-group { border-bottom: 1px solid var(--line); }
 /* vis-timeline's own internal "background vertical" panel hosts two unrelated
@@ -5766,6 +5770,7 @@ body.dark .vis-labelset .vis-label .vis-inner,
 body.dark .vis-labelset .vis-label *:not(.row-stack-toggle) { color: #f5f2ea !important; }
 body.dark .vis-labelset .vis-label { background: var(--bg-elev) !important; }
 body.dark .vis-labelset .vis-label.row-expanded { background: var(--accent-wash) !important; }
+body.dark .vis-labelset .vis-label.row-drag-ineligible { opacity: .35; }
 body.dark .vis-labelset .vis-label.goto-row { background: rgba(var(--accent-rgb), 0.16) !important; }
 /* Blackout hatch, non-working shading and the alertcell-err/warn/calendar
    day cells re-tune for dark mode through their tokens (--blackout-*,

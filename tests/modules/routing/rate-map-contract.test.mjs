@@ -33,7 +33,7 @@ function withTimeZone(zone, fn) {
 for (const zone of ['America/New_York', 'America/Los_Angeles']) test(`#36 date-only validity bounds are LOCAL calendar days in ${zone} (valid_to is inclusive, valid_from is not a day early)`, () => withTimeZone(zone, () => {
   const map = {
     plant: 'P', generated_at: '', machines: { M: 'WC' },
-    pv: { 'MAT|0001': { valid_from: '2026-08-10', valid_to: '2026-08-20', lot_from: null, lot_to: null, key: 'K' } },
+    pv: { 'MAT|0001': { valid_from: '2026-08-10', valid_to: '2026-08-20', lot_from: null, lot_to: null, key: 'K', workcenter: 'WC' } },
     ops: { 'K|WC': { minutes_per_unit: 1 } },
   };
   const priorMap = Runtime._rateMap, priorPlant = Runtime._rateMapPlant;

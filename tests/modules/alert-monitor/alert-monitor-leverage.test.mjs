@@ -211,7 +211,7 @@ test('menu items: everything but the primary (show alerts, open table, go to, di
 test('routing-gap primaries follow the failure step', () => {
   const adm = ctx({ isAdmin: true });
   assert.equal(primaryOf(routing('workcenter_unmapped'), adm).act, 'rg-workcenters');
-  for (const step of ['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter']) {
+  for (const step of ['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter', 'pv_workcenter_mismatch']) {
     assert.equal(primaryOf(routing(step), adm).act, 'rg-routing', step);
   }
   assert.equal(primaryOf(routing('unknown'), adm).act, 'copy-summary');

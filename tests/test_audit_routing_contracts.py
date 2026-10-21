@@ -15,7 +15,7 @@ def test_rate_map_keeps_material_in_operation_identity():
     versions = {}
     for material, minutes in [("MAT-A", 1), ("MAT-B", 3)]:
         versions[("P", material, "0001")] = {
-            "task_list_type": "N", "routing_group": "GROUP", "group_counter": "01",
+            "task_list_type": "N", "routing_group": "GROUP", "group_counter": "01", "sap_workcenter": "WC",
         }
         operations[("P", material, "N", "GROUP", "01")] = [{
             "sap_workcenter": "WC", "workcenter_category": "0001", "base_quantity": 1,
