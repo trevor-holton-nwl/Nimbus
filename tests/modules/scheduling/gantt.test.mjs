@@ -2913,3 +2913,187 @@ test('Timeline._writePatches (validator finding 2): a vis throw during relocate 
     assert.equal(Timeline._suppressEvents, false);
   } finally { Timeline._heal = origHeal; fake.remove = origRemove; }
 }));
+
+/* ---- Go To centering (scrollToLine vertical, _gotoWindowFor horizontal) and the spotlight ---- */
+
+// 20 rows of 30 px in a 300 px viewport; `rowH` overrides a row's height, `boxes` maps a vis item id to a
+// {row, top, height} box (top measured relative to the top of its row). Returns the recorded _setScrollTop writes.
+function _scrollRig(t, { rowH = {}, boxes = {} } = {}) {
+  const priorTl = Timeline._tl;
+  const priorLines = Timeline._visibleLines;
+  const priorVScrollTop = Timeline._vScrollTop;
+  const priorQSA = globalThis.document.querySelectorAll;
+  const lines = Array.from({ length: 20 }, (_, i) => `L${i + 1}`);
+  const tops = [];
+  let y = 0;
+  const groups = lines.map((l) => {
+    const h = rowH[l] ?? 30;
+    const top = y; y += h; tops.push(top);
+    return { getBoundingClientRect: () => ({ top, height: h }) };
+  });
+  const writes = [];
+  const items = {};
+  for (const [id, { row, top, height }] of Object.entries(boxes)) {
+    items[id] = { dom: { box: { getBoundingClientRect: () => ({ top: tops[lines.indexOf(row)] + top, height }) } } };
+  }
+  Timeline._tl = { props: { centerContainer: { height: 300 } }, itemSet: { items }, _setScrollTop(v) { writes.push(v); }, _getScrollTop() { return 0; } };
+  Timeline._visibleLines = () => lines;
+  globalThis.document.querySelectorAll = () => groups;
+  t.after(() => {
+    Timeline._tl = priorTl; Timeline._visibleLines = priorLines; Timeline._vScrollTop = priorVScrollTop;
+    delete globalThis.document.querySelectorAll;
+    if (priorQSA) globalThis.document.querySelectorAll = priorQSA;
+  });
+  return writes;
+}
+
+test('Timeline.scrollToLine centers the row and clamps the top and bottom rows', (t) => {
+  const writes = _scrollRig(t);
+  assert.equal(Timeline.scrollToLine('L10'), true);
+  assert.equal(writes.at(-1), -135, 'L10: row center (285) minus half the viewport');
+  assert.equal(Timeline._vScrollTop, -135);
+  Timeline.scrollToLine('L1');
+  assert.ok(Object.is(writes.at(-1), 0), 'L1 clamps to the top (+0, never -0)');
+  Timeline.scrollToLine('L20');
+  assert.equal(writes.at(-1), -300, 'L20 clamps to the bottom (content 600 - viewport 300)');
+});
+
+test('Timeline.scrollToLine refuses while fewer groups are rendered than visible lines', (t) => {
+  const writes = _scrollRig(t);
+  globalThis.document.querySelectorAll = () => [{ getBoundingClientRect: () => ({ top: 0, height: 30 }) }];
+  assert.equal(Timeline.scrollToLine('L10'), false);
+  assert.deepEqual(writes, []);
+});
+
+test('Timeline.scrollToLine centers the target lane inside an expanded row', (t) => {
+  // L5 is expanded to 4 lanes of 30 px (row 120 px); the target bar sits in lane 3 (top 60).
+  const writes = _scrollRig(t, { rowH: { L5: 120 }, boxes: { 'task-a': { row: 'L5', top: 60, height: 30 } } });
+  Timeline.scrollToLine('L5', { itemIds: ['task-a'] });
+  // rowTop 120 + lane 60 + half lane 15 = 195; minus 150
+  assert.equal(writes.at(-1), -45);
+  Timeline.scrollToLine('L5');
+  assert.equal(writes.at(-1), -30, 'without an item the whole row (center 180) is centered');
+});
+
+test('Timeline.scrollToLine centers the midpoint of a pairwise alert\'s two rows when both fit', (t) => {
+  const writes = _scrollRig(t);
+  Timeline.scrollToLine('L10', { peerLine: 'L12' });
+  // rows span 270..360 -> midpoint 315 - 150
+  assert.equal(writes.at(-1), -165);
+  Timeline.scrollToLine('L10', { peerLine: 'L20' });
+  assert.equal(writes.at(-1), -135, 'rows too far apart to fit: the alert\'s own row is centered');
+});
+
+function _spanHarness(t, defs) {
+  for (const d of defs) Store._state.tasks[d.id] = d;
+  t.after(() => { for (const d of defs) delete Store._state.tasks[d.id]; });
+}
+
+test('Timeline._gotoWindowFor centers the order and keeps all of it in view', (t) => {
+  _spanHarness(t, [{ id: 'gw-1', MACHINE: 'L1', start_date: new Date('2026-08-11T12:00:00'), end_date: new Date('2026-08-13T12:00:00') }]);
+  const w = Timeline._gotoWindowFor('2026-08-12', ['gw-1']);
+  const mid = (w.start + w.end) / 2;
+  assert.ok(Math.abs(mid - new Date('2026-08-12T12:00:00').getTime()) <= 60000, 'window midpoint is the order midpoint');
+  assert.ok(w.start <= new Date('2026-08-11T12:00:00').getTime() && w.end >= new Date('2026-08-13T12:00:00').getTime());
+  assert.equal(w.end - w.start, 3 * 24 * 3600 * 1000, 'a short order keeps the 3-day floor');
+});
+
+test('Timeline._gotoWindowFor widens for a long order and spans split segments', (t) => {
+  _spanHarness(t, [
+    { id: 'gw-2', MACHINE: 'L1', start_date: new Date('2026-08-10T00:00:00'), end_date: new Date('2026-08-16T00:00:00') },
+    { id: 'gw-3', MACHINE: 'L1', start_date: new Date('2026-08-12T00:00:00'), end_date: new Date('2026-08-20T00:00:00'),
+      scheduleSegments: [
+        { sequence: 1, startDate: new Date('2026-08-12T00:00:00'), endDate: new Date('2026-08-12T08:00:00') },
+        { sequence: 2, startDate: new Date('2026-08-19T00:00:00'), endDate: new Date('2026-08-20T00:00:00') },
+      ] },
+  ]);
+  const six = Timeline._gotoWindowFor('2026-08-12', ['gw-2']);
+  assert.ok(six.end - six.start >= 7.2 * 24 * 3600 * 1000 - 1000, '6-day order gets >= 7.2 days');
+  const split = Timeline._gotoWindowFor('2026-08-12', ['gw-3']);
+  assert.ok(split.start <= new Date('2026-08-12T00:00:00').getTime() && split.end >= new Date('2026-08-20T00:00:00').getTime(), 'every segment is inside');
+});
+
+test('Timeline._gotoWindowFor contains both orders of a pairwise alert and the alert day', (t) => {
+  _spanHarness(t, [
+    { id: 'gw-a', MACHINE: 'L1', start_date: new Date('2026-08-10T08:00:00'), end_date: new Date('2026-08-10T20:00:00') },
+    { id: 'gw-b', MACHINE: 'L2', start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T20:00:00') },
+  ]);
+  const w = Timeline._gotoWindowFor('2026-08-14', ['gw-a', 'gw-b']);
+  assert.ok(w.start <= new Date('2026-08-10T08:00:00').getTime() && w.end >= new Date('2026-08-14T20:00:00').getTime());
+  const day = new Date('2026-08-14T00:00:00').getTime();
+  assert.ok(w.start <= day && w.end >= day + 24 * 3600 * 1000, 'alert day inside');
+});
+
+test('Timeline._gotoWindowFor with no dated order centers the alert day (not the left third)', () => {
+  const w = Timeline._gotoWindowFor('2026-08-12');
+  assert.equal((w.start + w.end) / 2, new Date('2026-08-12T12:00:00').getTime());
+  assert.deepEqual(Timeline._gotoWindowFor('2026-08-12', ['no-such-order']), w);
+});
+
+test('Go To spotlight: markGotoTask adds goto-spotlight + goto-row, clearGotoTarget removes them', (t) => {
+  const { task } = _gotoHarness(t);
+  const mk = () => { const s = new Set(); return { s, classList: { add: c => s.add(c), remove: c => s.delete(c), contains: c => s.has(c) } }; };
+  const container = mk();
+  const groupRow = mk(); const labelRow = mk(); const otherGroup = mk();
+  const priorVisEl = Timeline._visEl;
+  const priorLines = Timeline._visibleLines;
+  Timeline._visibleLines = () => ['L-A', 'L-GOTO'];
+  Timeline._visEl = {
+    classList: container.classList,
+    querySelectorAll(sel) {
+      if (sel === '.vis-foreground .vis-group') return [otherGroup, groupRow];
+      if (sel === '.vis-labelset .vis-label') return [mk(), labelRow];
+      if (sel === '.goto-row') return [otherGroup, groupRow, labelRow].filter(n => n.s.has('goto-row'));
+      return [];
+    },
+  };
+  t.after(() => { Timeline.clearGotoTarget(); Timeline._visEl = priorVisEl; Timeline._visibleLines = priorLines; });
+  Timeline.markGotoTask(task.id);
+  assert.ok(container.s.has('goto-spotlight'));
+  assert.ok(groupRow.s.has('goto-row') && labelRow.s.has('goto-row'), 'the target line row and label are tinted');
+  assert.ok(!otherGroup.s.has('goto-row'));
+  assert.notEqual(Timeline._spotlightTimer, null);
+  Timeline.clearGotoTarget();
+  assert.ok(!container.s.has('goto-spotlight'));
+  assert.ok(!groupRow.s.has('goto-row') && !labelRow.s.has('goto-row'));
+  assert.equal(Timeline._spotlightTimer, null);
+  Timeline._endSpotlight(); // idempotent
+});
+
+test('Go To spotlight is a no-op without a timeline element and held while gotoLineDay is settling', (t) => {
+  const { task } = _gotoHarness(t);
+  assert.equal(Timeline._visEl, null);
+  Timeline.markGotoTask(task.id);   // must not throw
+  assert.equal(Timeline._spotlightTimer, null);
+  const spy = [];
+  const priorSpot = Timeline._spotlight;
+  Timeline._spotlight = (l) => spy.push(l);
+  Timeline._gotoSettling = true;
+  t.after(() => { Timeline._spotlight = priorSpot; Timeline._gotoSettling = false; Timeline.clearGotoTarget(); });
+  Timeline.markGotoTask(task.id);
+  assert.deepEqual(spy, [], 'held until the final scroll');
+  Timeline._gotoSettling = false;
+  Timeline.markGotoCell('L-GOTO', '2026-08-12');
+  assert.deepEqual(spy, ['L-GOTO']);
+});
+
+test('Timeline._gotoWindowFor: an alert early in a day does not drag the window off the order midpoint', (t) => {
+  // Order spans Aug 10 08:00 -> Aug 12 02:00; alert day Aug 12 only overlaps its last 2 hours.
+  _spanHarness(t, [{ id: 'gw-e', MACHINE: 'L1', start_date: new Date('2026-08-10T08:00:00'), end_date: new Date('2026-08-12T02:00:00') }]);
+  const w = Timeline._gotoWindowFor('2026-08-12', ['gw-e']);
+  const mid = (new Date('2026-08-10T08:00:00').getTime() + new Date('2026-08-12T02:00:00').getTime()) / 2;
+  assert.ok(Math.abs((w.start + w.end) / 2 - mid) <= 60000, 'stays centered on the order midpoint');
+  assert.ok(w.end >= new Date('2026-08-12T02:00:00').getTime(), 'the alert-day overlap is inside');
+});
+
+test('Go To marks record the Go To generation so a later Go To does not spotlight a stale target', (t) => {
+  const { task } = _gotoHarness(t);
+  t.after(() => { Timeline._gotoSettling = false; Timeline.clearGotoTarget(); });
+  Timeline._gotoSeq += 1;
+  Timeline.markGotoTask(task.id);
+  assert.equal(Timeline._gotoMarkSeq, Timeline._gotoSeq, 'marking records the generation');
+  Timeline._gotoSeq += 1;                       // a newer Go To that marked nothing: finish() must not spotlight
+  assert.notEqual(Timeline._gotoMarkSeq, Timeline._gotoSeq);
+  Timeline.markGotoCell('L-GOTO', '2026-08-12');
+  assert.equal(Timeline._gotoMarkSeq, Timeline._gotoSeq, 'markGotoCell records it too');
+});
