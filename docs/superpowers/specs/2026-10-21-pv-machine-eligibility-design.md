@@ -64,10 +64,11 @@ Confirmed as written: PV header work center is populated by both Excel and SAP-s
 ## Progress ledger
 
 - 2026-10-21 branch feature/pv-machine-eligibility created from main 7f4d058 in worktree alert-monitor; spec written.
+- 2026-10-21 wave 1 (plan Steps 1-3) done: resolver `pv_workcenter_mismatch` + `_pair_step` + `check_pair`; rate-map pv `workcenter` (fixtures and seeds updated); client `resolve()` mismatch step and server-aligned validity chain; `computeEligiblePairs`/`dropDecision` helpers and `Runtime.eligiblePairs`/`dropDecision`; tests `tests/modules/routing/pv-machine.test.mjs` and new resolver cases.
 
 ## Context appendix — things learned along the way
 
-- vis `timechange`/`timechanged` fire only for the custom-time bar in 7.7.3 (Chrome probe pending: pilot login expired), so the row-dim must use `onMoving`.
+- vis `timechange`/`timechanged` fire only for the custom-time bar in 7.7.3 (owner declined browser testing; row-dim built on onMoving and unit-tested), so the row-dim must use `onMoving`.
 - The material default PV is not fed by SAP staging and is never zero-padded.
 - Only firmed orders reach SAP, which gets dates + PV only.
 - The recompute pre-pass runs plant-wide on every resolve pass.
