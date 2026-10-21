@@ -192,11 +192,12 @@ const Settings = (() => {
     { key: 'firstDayOfWeek',    category: 'workflow', type: 'enum',     default: 0,                  tier: 'user', region: true  },
     { key: 'optimizerDefaults', category: 'workflow', type: 'object',   default: null,               tier: 'user', region: false },
     { key: 'distributionFilters', category: 'workflow', type: 'object',  default: null,               tier: 'user', region: false },
-    // Alert Monitor: active profile id per plant ({ [plant]: id }), Gantt highlight toggle, saved monitor view, show-acknowledged toggle.
+    // Alert Monitor: active profile id per plant ({ [plant]: id }), Gantt highlight toggle, saved monitor view, show-acknowledged toggle, Overview band collapse state.
     { key: 'alertProfileByPlant',       category: 'workflow', type: 'object',  default: null,  tier: 'user', region: false },
     { key: 'alertProfileGanttHighlight', category: 'workflow', type: 'boolean', default: true,  tier: 'user', region: false },
     { key: 'alertMonitorView',          category: 'workflow', type: 'object',  default: null,  tier: 'user', region: false },
     { key: 'alertsShowAcknowledged',    category: 'workflow', type: 'boolean', default: false, tier: 'user', region: false },
+    { key: 'alertMonitorOverview',      category: 'workflow', type: 'enum',    default: 'open', tier: 'user', region: false },
   ];
 
   // { key: default } map derived from CATALOG (last link in Store.pref precedence).

@@ -507,3 +507,161 @@ test('confidence ghost: phase 2 of the leverage run adds the ghost without a man
   await sleep(40);
   assert.ok(confHtml().includes('am.ov_conf_after|n=78'), 'after phase 2');
 });
+
+// ---- rev-3 fix wave (code half) ---------------------------------------------------------------------------------
+
+test('I1: refocus skips a match under an aria-hidden ancestor (the What strip) and lands on the legend row', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const strip = makeEl('strip', globalThis.document);
+  strip.setAttribute('aria-hidden', 'true');
+  const segment = bar('category:conflicts');
+  strip.appendChild(segment);
+  const legendRow = bar('category:conflicts');
+  globalThis.document.getElementById('am-overview').querySelectorAll = sel => (sel === '[data-am-narrow]' ? [segment, legendRow] : []);
+  clickBar('category:conflicts');
+  assert.equal(globalThis.document.activeElement, legendRow);
+});
+
+test('I2: a persistent #am-narrow-status live region carries "Showing n of total"; empty when the narrow clears', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const shell = els['alerts-tab'].innerHTML;
+  assert.match(shell, /<div class="am-sr-only" id="am-narrow-status" role="status" aria-live="polite" aria-atomic="true"><\/div>/);
+  assert.doesNotMatch(shell, /id="am-narrow-status"[^>]*hidden/);
+  assert.equal(els['am-narrow-status'].textContent ?? '', '');
+  clickBar('day:2026-10-23');
+  assert.equal(els['am-narrow-status'].textContent, 'am.ov_showing|n=2,total=4');
+  clickBar('line:L1');
+  assert.equal(els['am-narrow-status'].textContent, 'am.ov_showing|n=1,total=4');
+  clickAm('clear-narrow');
+  assert.equal(els['am-narrow-status'].textContent, '');
+  assert.doesNotMatch(els['am-narrow-chip'].innerHTML, /aria-live/);
+});
+
+test('I3: every narrow control in the painted band carries aria-pressed (false until selected)', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const ctl = els['am-overview'].innerHTML.match(/<button[^>]*data-am-narrow="[^"]*"[^>]*>/g) || [];
+  assert.ok(ctl.length > 6);
+  for (const b of ctl) assert.match(b, /aria-pressed="false"/);
+  clickBar('line:L1');
+  const sel = (els['am-overview'].innerHTML.match(/<button[^>]*data-am-narrow="line:L1"[^>]*>/) || [''])[0];
+  assert.match(sel, /aria-pressed="true"/);
+});
+
+test('M2: a focus set drops the profile window shading (the focus list ignores the profile)', () => {
+  seedOv(ALERTS(), { profileId: 'p1', profile: P1 });
+  AlertMonitorPane.render();
+  assert.match(els['am-overview'].innerHTML, /class="am-ov-win"/, 'the profile window is shaded');
+  AlertMonitorPane.setFocus(['a2', 'a4'], 'Fix');
+  assert.doesNotMatch(els['am-overview'].innerHTML, /am-ov-win"/);
+  assert.doesNotMatch(els['am-overview'].innerHTML, /am\.ov_window/);
+  AlertMonitorPane.clearFocus();
+  assert.match(els['am-overview'].innerHTML, /class="am-ov-win"/);
+});
+
+test('M5: a repaint that changes the band keeps focus on the same control (and on a toggle action)', () => {
+  globalThis.NIMBUS = { Confidence: { _score: 71 } };
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const was = bar('day:2026-10-23');
+  els['am-overview'].appendChild(was);
+  globalThis.document.activeElement = was;
+  const fresh = bar('day:2026-10-23');
+  els['am-overview'].querySelectorAll = sel => (sel === '[data-am-narrow]' ? [fresh] : []);
+  globalThis.NIMBUS = { Confidence: { _score: 50 } };
+  const before = els['am-overview'].innerHTML;
+  AlertMonitorPane.render();
+  assert.notEqual(els['am-overview'].innerHTML, before, 'the band really repainted');
+  assert.equal(globalThis.document.activeElement, fresh);
+
+  const act = makeEl('', globalThis.document, 'button');
+  act.setAttribute('data-am-action', 'ov-lines-more');
+  els['am-overview'].appendChild(act);
+  globalThis.document.activeElement = act;
+  const freshAct = makeEl('', globalThis.document, 'button');
+  freshAct.setAttribute('data-am-action', 'ov-lines-more');
+  els['am-overview'].querySelectorAll = sel => (sel === '[data-am-action]' ? [freshAct] : []);
+  globalThis.NIMBUS = { Confidence: { _score: 30 } };
+  AlertMonitorPane.render();
+  assert.equal(globalThis.document.activeElement, freshAct);
+});
+
+test('M5: focus outside the band is left alone by a band repaint', () => {
+  globalThis.NIMBUS = { Confidence: { _score: 71 } };
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const elsewhere = makeEl('x', globalThis.document, 'button');
+  globalThis.document.activeElement = elsewhere;
+  els['am-overview'].querySelectorAll = () => { throw new Error('must not look for a control to refocus'); };
+  globalThis.NIMBUS = { Confidence: { _score: 50 } };
+  AlertMonitorPane.render();
+  assert.equal(globalThis.document.activeElement, elsewhere);
+});
+
+test('M11: a collapsed band with an active narrow keeps the chip row, and its x still removes the narrow', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  clickBar('day:2026-10-23');
+  Store.setUserSettings({ ...Store.userSettings, alertMonitorOverview: 'collapsed' }, 'test');
+  AlertMonitorPane.render();
+  assert.match(els['am-overview'].innerHTML, /class="am-overview is-collapsed"/);
+  assert.equal(els['am-narrow-chip'].hidden, false);
+  assert.match(els['am-narrow-chip'].innerHTML, /data-am-narrow-clear="day"/);
+  assert.deepEqual(ids(els['am-groups'].innerHTML), ['a3', 'a4']);
+  clickClear('day');
+  assert.equal(els['am-narrow-chip'].hidden, true);
+  assert.equal(ids(els['am-groups'].innerHTML).length, 4);
+});
+
+test('M11: What-If paints the band, the narrow still filters, and the band carries no extra disabled state', async () => {
+  const { Sandbox } = await import('../../../frontend/optimization/sandbox.mjs');
+  Sandbox.active = true;
+  try {
+    seedOv(ALERTS());
+    AlertMonitorPane.render();
+    assert.equal(els['am-overview'].hidden, false);
+    assert.match(els['am-overview'].innerHTML, /data-am-narrow="day:2026-10-21"/);
+    clickBar('line:L1');
+    assert.deepEqual(ids(els['am-groups'].innerHTML), ['a1', 'a3']);
+    assert.doesNotMatch(els['am-overview'].innerHTML, /aria-disabled/);
+  } finally { Sandbox.active = false; }
+});
+
+test('M11: a day narrow with Group by Day yields exactly one group', () => {
+  seedOv(ALERTS(), { settings: { alertMonitorView: { __all__: { groupBy: 'day' }, p1: { groupBy: 'day' } } } });
+  AlertMonitorPane.render();
+  assert.equal((els['am-groups'].innerHTML.match(/<section class="am-group/g) || []).length, 2, 'two days before the narrow');
+  clickBar('day:2026-10-23');
+  assert.equal((els['am-groups'].innerHTML.match(/<section class="am-group/g) || []).length, 1);
+  assert.deepEqual(ids(els['am-groups'].innerHTML), ['a3', 'a4']);
+});
+
+test('M11: an acknowledgement that empties a selected line prunes the narrow and the whole list returns', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  clickBar('line:L2');
+  assert.deepEqual(ids(els['am-groups'].innerHTML), ['a2', 'a4']);
+  seedOv(ALERTS(), { acked: new Map([['a2', {}], ['a4', {}]]) });
+  assert.doesNotThrow(() => AlertMonitorPane.render());
+  assert.equal(els['am-narrow-chip'].hidden, true);
+  assert.deepEqual(ids(els['am-groups'].innerHTML), ['a1', 'a3']);
+});
+
+test('M11: a profile window ending past day 60 clamps the band to 60 day columns (plus Overdue and Later)', () => {
+  const wide = { ...P1, rules: [{ types: ['overlap'], dayFrom: 0, dayTo: 80, minSev: null, minLateHours: null }] };
+  seedOv(ALERTS(), { profileId: 'p1', profile: wide });
+  AlertMonitorPane.render();
+  const html = els['am-overview'].innerHTML;
+  assert.equal((html.match(/class="am-ov-col[ "]/g) || []).length, 62);
+  assert.match(html, /--cols:62/);
+});
+
+test('ghost predicate: a fractional 70.6 to 71.4 fix draws no ghost; 70.6 to 72.4 draws 72', async () => {
+  await withLev([lev('k1', { confidenceBefore: 70.6, confidenceAfter: 71.4 })]);
+  assert.doesNotMatch(confHtml(), /am-ov-conf-after|am-ov-conf-tick/);
+  await withLev([lev('k1', { confidenceBefore: 70.6, confidenceAfter: 72.4 })]);
+  assert.ok(confHtml().includes('am.ov_conf_after|n=72'));
+  assert.ok(confHtml().includes('am.ov_conf_after_aria|n=72'), 'the after-fix value is in the accessible name');
+});

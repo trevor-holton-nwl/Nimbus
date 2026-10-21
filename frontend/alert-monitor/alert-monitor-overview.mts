@@ -57,6 +57,27 @@ export interface OverviewData {
 
 const MAX_DAYS = 60;
 
+/**
+ * `anchorTime` with the order's due instant memoised per task for one call: about five alerts share an order, and the
+ * production due path (date-only due -> calendar window walk) costs microseconds per call. Same result as `anchorTime`:
+ * the due when the order carries one and it resolves, else the alert's own time.
+ */
+function _memoAnchor(d: OverviewDeps): (a: NimbusAlert, task: NimbusTask | undefined) => Date | null {
+  const dueBy = new Map<NimbusTask, Date | null>();
+  const valid = (x: unknown): x is Date => x instanceof Date && !isNaN(x.getTime());
+  return (a, task) => {
+    if (a.taskId && task && task.original_end_date) {
+      let due = dueBy.get(task);
+      if (due === undefined) {
+        due = anchorTime({ id: '', taskId: a.taskId, time: null } as unknown as NimbusAlert, task, d.deps);   // an invalid own time: only the due can answer
+        dueBy.set(task, due);
+      }
+      if (due) return due;
+    }
+    return valid(a.time) ? a.time : null;
+  };
+}
+
 // ---- Data -----------------------------------------------------------------------------------
 
 /** Columns shown: the alert horizon in days, widened to cover the profile window, clamped 1..60. */
@@ -87,11 +108,12 @@ export function overviewData(listed: ReadonlyArray<NimbusAlert>, d: OverviewDeps
   const lineMap = new Map<string, { line: string; err: number; warn: number; overload: boolean }>();
   const catCount = new Map<AlertCategory, number>();
   let undated = 0;
+  const anchorOf = _memoAnchor(d);
 
   for (const a of listed) {
     const isErr = a.sev === 'err';
     const task = a.taskId ? d.tasksById?.[a.taskId] : undefined;
-    const anchor = anchorTime(a, task, d.deps);
+    const anchor = anchorOf(a, task);
     if (!anchor) undated++;
     else {
       const off = alertDayOffset(anchor, d.plantToday);
@@ -127,12 +149,13 @@ export function narrowActive(n: Narrow | null | undefined): boolean {
 export function applyNarrow<A extends NimbusAlert>(listed: ReadonlyArray<A>, n: Narrow, d: OverviewDeps): A[] {
   if (!narrowActive(n)) return listed as A[];
   const horizon = n.day ? horizonDays(d.horizonMinutes, d.window) : 0;
+  const anchorOf = _memoAnchor(d);
   return listed.filter(a => {
     if (n.line && (a.line || NONE_KEY) !== n.line) return false;
     if (n.category && categoryOf(a.type) !== n.category) return false;
     if (n.day) {
       const task = a.taskId ? d.tasksById?.[a.taskId] : undefined;
-      const anchor = anchorTime(a, task, d.deps);
+      const anchor = anchorOf(a, task);
       if (!anchor) return false;   // undated alerts never match a day
       if (n.day === 'overdue') return alertDayOffset(anchor, d.plantToday) < 0;
       if (n.day === 'later') return alertDayOffset(anchor, d.plantToday) >= horizon;
@@ -257,7 +280,8 @@ const _escHtml = (s: unknown): string => String(s ?? '')
 export const OV_LINES_TOP = 8;
 export const OV_LINES_MAX = 24;
 
-const _pressed = (sel: boolean): string => (sel ? ' aria-pressed="true"' : '');
+/** Every narrow control is a toggle button, so aria-pressed is always present ("true" / "false"). */
+const _pressed = (sel: boolean): string => ` aria-pressed="${sel ? 'true' : 'false'}"`;
 
 function _barHtml(
   key: string, count: { err: number; warn: number }, label: string, selected: boolean, maxDay: number,
@@ -395,12 +419,15 @@ export function confidenceHtml(c: ConfidenceInput, v: OverviewViewDeps): string 
   const val = arcPath(score, g.cx, g.cy, g.r);
   let ghost = '';
   let after = '';
+  let name = t('am.ov_conf_aria', { score });
   if (c.ghost != null && isFinite(c.ghost)) {
-    const afterAria = esc(t('am.ov_conf_after_aria', { n: c.ghost }));
+    const afterText = t('am.ov_conf_after_aria', { n: c.ghost });
+    name = `${name} ${afterText}`;
+    const afterAria = esc(afterText);
     ghost = `<path class="am-ov-conf-tick" d="${arcTick(c.ghost, g.cx, g.cy, g.r - 6, g.r + 6)}"><title>${afterAria}</title></path>`;
     after = `<text class="am-ov-conf-after" x="${g.cx}" y="${g.cy + 20}" text-anchor="middle"><title>${afterAria}</title>${esc(t('am.ov_conf_after', { n: c.ghost }))}</text>`;
   }
-  const svg = `<svg class="am-ov-gauge" viewBox="0 0 ${g.w} ${g.h}" width="${g.w}" height="${g.h}" role="img" aria-label="${esc(t('am.ov_conf_aria', { score }))}">`
+  const svg = `<svg class="am-ov-gauge" viewBox="0 0 ${g.w} ${g.h}" width="${g.w}" height="${g.h}" role="img" aria-label="${esc(name)}">`
     + `<path class="am-ov-conf-track" d="${arcPath(100, g.cx, g.cy, g.r)}" fill="none"></path>`
     + (val ? `<path class="am-ov-conf-val ${confTier(score)}" d="${val}" fill="none"></path>` : '')
     + ghost
@@ -408,7 +435,7 @@ export function confidenceHtml(c: ConfidenceInput, v: OverviewViewDeps): string 
   const sp = sparkPath(c.history, _SPARK.w, _SPARK.h);
   const spark = sp
     ? `<svg class="am-ov-spark" viewBox="0 0 ${_SPARK.w} ${_SPARK.h}" width="${_SPARK.w}" height="${_SPARK.h}" aria-hidden="true"><path class="am-ov-spark-line" d="${sp}" fill="none"></path></svg>` : '';
-  const label = esc(t('am.ov_conf_aria', { score }));
+  const label = esc(name);
   return `<div class="am-ov-panel am-ov-conf">`
     + `<div class="am-ov-eyebrow">${esc(t('am.ov_conf'))}</div>`
     + `<button type="button" class="am-ov-confbtn" data-am-action="ov-conf" title="${label}">${svg}${spark}</button></div>`;
@@ -459,7 +486,7 @@ export function narrowChipHtml(i: NarrowChipInput, t: Translate): string {
     return `<button type="button" class="am-narrow-x" data-am-narrow-clear="${d}" aria-label="${aria}" title="${aria}">`
       + `<span class="am-narrow-lbl">${label}</span><span class="am-narrow-glyph" aria-hidden="true">×</span></button>`;
   }).join('');
-  return `<div class="am-narrow" aria-live="polite">`
+  return `<div class="am-narrow">`
     + `<span class="am-narrow-n">${_escHtml(t('am.ov_showing', { n: i.shown, total: i.total }))}</span>${buttons}`
     + `<button type="button" class="btn sm btn-ghost" data-am-action="clear-narrow">${_escHtml(t('am.ov_clear'))}</button></div>`;
 }

@@ -41,7 +41,7 @@ import {
   MONITOR_GROUP_BYS, MONITOR_SORTS, GROUP_ROW_CAP, ROW_H, DIAG_H, GROUP_MOVE_CONFIRM_ABOVE,
   summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowHtml, rowPrimaryActions, diagnoseHtml, groupHeadHtml, groupMenuItems, groupCounts, groupLabel,
-  relativeDaysText, formatPairKey, fmtNum, profileWindow,
+  relativeDaysText, formatPairKey, fmtNum, profileWindow, fixConfidenceChanged,
   fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
 import type { MonitorView, EmptyKind, RowView, LevCtx, GroupHeadView, GroupCounts } from './alert-monitor-model.mjs';
@@ -191,6 +191,7 @@ function _shellHtml(): string {
   <div id="am-overview" hidden></div>
   <div id="am-leverage"></div>
   <div class="am-focus-chip" id="am-focus-chip" hidden></div>
+  <div class="am-sr-only" id="am-narrow-status" role="status" aria-live="polite" aria-atomic="true"></div>
   <div class="am-focus-chip am-narrow-chip" id="am-narrow-chip" hidden></div>
   <div id="am-groups"></div>
 </div>`;
@@ -363,18 +364,23 @@ function _setNarrow(next: Narrow, refocusAttr: string): void {
   _refocusNarrow(refocusAttr);
 }
 
-/** Not inside a `hidden` ancestor (the collapsed band body) and, where layout exists, not display:none. Stub-safe. */
+/** Not inside a `hidden` ancestor (the collapsed band body) or an `aria-hidden="true"` one (the What strip) and, where layout exists, not display:none. Stub-safe. */
 function _isVisible(el: HTMLElement): boolean {
   for (let n: HTMLElement | null = el; n; n = n.parentElement ?? (n.parentNode as HTMLElement | null)) {
     if (n.nodeType === 1 && (n.hidden === true || n.hasAttribute?.('hidden'))) return false;
+    if (n.getAttribute?.('aria-hidden') === 'true') return false;
   }
   return !('offsetParent' in el) || (el as HTMLElement).offsetParent !== null || el.getClientRects?.().length > 0;
 }
 
 /** Match by attribute value, never by building a selector from it (line names may hold spaces or quotes). */
-function _refocusNarrow(attr: string): void {
+function _findNarrowBar(attr: string): HTMLElement | undefined {
   const bars = Array.from(_el('am-overview')?.querySelectorAll?.<HTMLElement>('[data-am-narrow]') ?? []);
-  const next = bars.find(el => el.getAttribute('data-am-narrow') === attr && _isVisible(el));
+  return bars.find(el => el.getAttribute('data-am-narrow') === attr && _isVisible(el));
+}
+
+function _refocusNarrow(attr: string): void {
+  const next = _findNarrowBar(attr);
   if (next) { next.focus?.(); return; }
   const chip = _el('am-narrow-chip');
   const clear = chip?.querySelector?.<HTMLElement>('[data-am-action="clear-narrow"]');
@@ -1311,7 +1317,7 @@ const _bandHidden = (s: PaintState): boolean => s.empty !== null || !s.plant || 
 function _overviewState(s: PaintState): OverviewState | null {
   if (_bandHidden(s)) return null;   // _narrow stays; the next non-empty paint re-prunes it
   const deps: OverviewDeps = {
-    tasksById: Store.tasks, plantToday: s.plantToday, horizonMinutes: s.horizonMinutes, window: profileWindow(s.m.profile),
+    tasksById: Store.tasks, plantToday: s.plantToday, horizonMinutes: s.horizonMinutes, window: _focusIds ? null : profileWindow(s.m.profile),
   };
   const data = overviewData(s.listed, deps);
   _narrow = pruneNarrow(_narrow, data);
@@ -1325,22 +1331,27 @@ function _overviewState(s: PaintState): OverviewState | null {
  */
 function _confGhost(): number | null {
   const first = (Session.isAdmin() ? _levItems : _levItems.filter(i => !i.adminOnly))[0];
-  if (!first || first.method !== 'replay' || first.requiresMinutes === true) return null;
-  const after = first.confidenceAfter;
-  if (after == null || Math.round(after) === Math.round(first.confidenceBefore)) return null;
-  return Math.round(after);
+  if (!first || !fixConfidenceChanged(first) || first.confidenceAfter == null) return null;
+  return Math.round(first.confidenceAfter);
 }
 
 function _renderOverview(s: PaintState, ov: OverviewState | null): void {
   const el = _el('am-overview');
   if (!el) return;
   if (!ov) { _setHtml('am-overview', ''); el.hidden = true; return; }
+  // Remember which control inside the band has focus: a repaint replaces the nodes and would drop it to body.
+  const active = (globalThis.document?.activeElement ?? null) as HTMLElement | null;
+  const inBand = !!active && el.contains?.(active) === true;
+  const heldNarrow = inBand ? active.getAttribute?.('data-am-narrow') ?? null : null;
+  const heldAction = inBand && heldNarrow == null ? active.getAttribute?.('data-am-action') ?? null : null;
   _setHtml('am-overview', overviewHtml({
     data: ov.data, narrow: ov.narrow, showAll: _ovLinesAll,
     conf: { score: s.confidence, history: _nim().Confidence?._history ?? [], ghost: _confGhost() },
     collapsed: Store.pref('alertMonitorOverview') === 'collapsed',
   }, _ovViewDeps()));
   el.hidden = false;
+  if (heldNarrow != null) _findNarrowBar(heldNarrow)?.focus?.();
+  else if (heldAction != null) _refocusAction(heldAction);
 }
 
 function _narrowLabel(dim: NarrowDim, value: string): string {
@@ -1352,7 +1363,14 @@ function _narrowLabel(dim: NarrowDim, value: string): string {
 function _renderNarrowChip(s: PaintState, ov: OverviewState | null): void {
   const el = _el('am-narrow-chip');
   if (!el) return;
-  if (!ov || !narrowActive(ov.narrow)) { _setHtml('am-narrow-chip', ''); el.hidden = true; return; }
+  // The persistent live region: a node that already exists announces its text change; a freshly inserted one does not.
+  const status = _el('am-narrow-status');
+  if (!ov || !narrowActive(ov.narrow)) {
+    _setHtml('am-narrow-chip', ''); el.hidden = true;
+    if (status) status.textContent = '';
+    return;
+  }
+  if (status) status.textContent = t('am.ov_showing', { n: ov.shown.length, total: s.listed.length });
   _setHtml('am-narrow-chip', narrowChipHtml({ shown: ov.shown.length, total: s.listed.length, narrow: ov.narrow, labelOf: _narrowLabel }, t));
   el.hidden = false;
 }

@@ -679,6 +679,16 @@ export function fixClearsText(item: LeverageItem, t: Translate): string {
 }
 
 /**
+ * Whether a fix's confidence clause ("71 → 78", the dial's ghost) is shown: a replayed, minutes-free fix whose
+ * rounded after-score differs from its rounded before-score. The one predicate for the fix row and the Overview dial.
+ */
+export function fixConfidenceChanged(item: LeverageItem): boolean {
+  const after = item.confidenceAfter;
+  return item.method === 'replay' && item.requiresMinutes !== true && after != null
+    && Math.round(after) !== Math.round(item.confidenceBefore);
+}
+
+/**
  * The muted second line, as already-escaped HTML fragments the caller joins with " · ":
  * the counts, the confidence clause (replayed rows only, and only when the score changes; a lower
  * after-score is shown with its delta in the error colour), the no-headroom note, what remains after a fix.
@@ -686,7 +696,7 @@ export function fixClearsText(item: LeverageItem, t: Translate): string {
 export function fixLineParts(item: LeverageItem, ctx: LevCtx, t: Translate): string[] {
   const parts: string[] = [_esc(fixClearsText(item, t))];
   const after = item.confidenceAfter;
-  if (item.method === 'replay' && item.requiresMinutes !== true && after != null && after !== item.confidenceBefore) {
+  if (after != null && fixConfidenceChanged(item)) {
     const d = after - item.confidenceBefore;
     const delta = d < 0 ? ` <span class="am-fix-down">${_esc(`−${Math.abs(d)}`)}</span>` : '';
     parts.push(`<span class="am-fix-conf">${_esc(t('am.fix_conf', { before: item.confidenceBefore, after }))}</span>${delta}`);

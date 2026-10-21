@@ -237,10 +237,12 @@ function sample() {
   return overviewData(alerts, base({ window: { from: 0, to: 7 } }));
 }
 
-test('whenHtml: every bar has data-am-narrow except zero stubs; aria-pressed and .has-sel only with a selection', () => {
+test('whenHtml: every bar has data-am-narrow except zero stubs; aria-pressed always present (false/true), .has-sel only with a selection', () => {
   const d = sample();
   const none = whenHtml(d, {}, v);
-  assert.doesNotMatch(none, /aria-pressed/);
+  assert.doesNotMatch(none, /aria-pressed="true"/);
+  for (const b of none.match(/<button[^>]*data-am-narrow="[^"]*"[^>]*>/g) || []) assert.match(b, /aria-pressed="false"/);
+  for (const b of none.match(/<button[^>]*am-ov-stub[^>]*>/g) || []) assert.doesNotMatch(b, /aria-pressed/, 'zero stubs are not toggles');
   assert.doesNotMatch(none, /has-sel/);
   assert.doesNotMatch(none, /is-sel/);
   const bars = none.match(/<button[^>]*class="am-ov-bar[^"]*"[^>]*>/g) || [];
@@ -258,7 +260,7 @@ test('whenHtml: every bar has data-am-narrow except zero stubs; aria-pressed and
   assert.match(sel, /has-sel/);
   assert.equal((sel.match(/aria-pressed="true"/g) || []).length, 1);
   assert.equal((sel.match(/is-sel/g) || []).length, 1);
-  assert.equal((sel.match(/aria-pressed/g) || []).length, 1);
+  assert.equal((sel.match(/aria-pressed="false"/g) || []).length, (none.match(/aria-pressed="false"/g) || []).length - 1);
   assert.match(none, /--h:100/);
   assert.match(none, /Today/);
   assert.doesNotMatch(none, BANNED);
@@ -327,7 +329,10 @@ test('confidenceHtml: gauge, ghost, sparkline; null score omits the panel', () =
   assert.match(h, /am-ov-conf-val ok/);
   assert.match(h, /→ 78/);
   assert.match(h, /am-ov-spark/);
+  assert.match(h, /<button[^>]*title="Plant confidence 72\. Open the breakdown\. After the top fix: 78"/, 'the ghost is in the button name');
+  assert.match(h, /<svg[^>]*role="img" aria-label="Plant confidence 72\. Open the breakdown\. After the top fix: 78"/);
   const bare = confidenceHtml({ score: 30, history: [{ ts: 1, score: 30 }], ghost: null }, v);
+  assert.doesNotMatch(bare, /After the top fix/);
   assert.match(bare, /am-ov-conf-val err/);
   assert.doesNotMatch(bare, /am-ov-spark/);
   assert.doesNotMatch(bare, /→/);
@@ -357,7 +362,7 @@ test('narrowChipHtml: empty when inactive; one remove button per dimension in or
   assert.equal(narrowChipHtml({ shown: 3, total: 9, narrow: {}, labelOf }, t), '');
   const h = narrowChipHtml({ shown: 3, total: 9, narrow: { category: 'setup', day: '2026-10-23', line: '<i>' }, labelOf }, t);
   assert.match(h, /Showing 3 of 9/);
-  assert.match(h, /aria-live="polite"/);
+  assert.doesNotMatch(h, /aria-live/, 'the live region is the pane\'s persistent #am-narrow-status, not this row');
   assert.ok(h.indexOf('data-am-narrow-clear="day"') < h.indexOf('data-am-narrow-clear="line"'));
   assert.ok(h.indexOf('data-am-narrow-clear="line"') < h.indexOf('data-am-narrow-clear="category"'));
   assert.match(h, /Remove filter: line=&lt;i&gt;/);
@@ -412,4 +417,44 @@ test('fix round 1: confidenceHtml uses one rounded score for tier, arc and label
   const h = confidenceHtml({ score: 59.6, history: [], ghost: null }, v);
   assert.match(h, /am-ov-conf-val ok/);
   assert.match(h, />60</);
+});
+
+// ---- rev-3 fix wave ---------------------------------------------------------------------------
+
+test('parity: for every day bar, applyNarrow({day}).length equals err + warn (DST fall-back inside the 40-day span, hours 0 and 23)', () => {
+  const alerts = [];
+  const tasksById = {};
+  for (let i = 0; i < 160; i++) {
+    const off = (i * 7) % 40 - 2;
+    const hasTask = i % 3 === 0;
+    const id = `t${i}`;
+    if (hasTask) tasksById[id] = { id, original_end_date: at(off + (i % 5 - 2), i % 2 ? 0 : 23) };
+    alerts.push(alert({ sev: i % 4 === 0 ? 'err' : 'warn', line: `L${i % 5}`, time: at(off, i % 2 ? 0 : 23), taskId: hasTask ? id : undefined }));
+  }
+  const d = base({ tasksById, horizonMinutes: 40 * 1440 });
+  const data = overviewData(alerts, d);
+  assert.equal(data.days.length, 40);
+  for (const b of data.days) assert.equal(applyNarrow(alerts, { day: b.key }, d).length, b.err + b.warn, b.key);
+  assert.equal(applyNarrow(alerts, { day: 'overdue' }, d).length, data.overdue.err + data.overdue.warn);
+  assert.equal(applyNarrow(alerts, { day: 'later' }, d).length, data.later.err + data.later.warn);
+});
+
+test('the per-call due memo: one dueInstant call per task, same bins as the unmemoised anchor, an unresolvable due falls back to the alert time', () => {
+  const calls = new Map();
+  const deps = { dueInstant: task => { calls.set(task.id, (calls.get(task.id) ?? 0) + 1); return task.id === 'bad' ? null : new Date(task.original_end_date); }, latenessHours: () => 0 };
+  const tasksById = { t1: { id: 't1', original_end_date: at(3) }, bad: { id: 'bad', original_end_date: at(9) } };
+  const alerts = [
+    alert({ taskId: 't1', time: at(0) }), alert({ taskId: 't1', time: at(1) }), alert({ taskId: 't1', time: at(2) }),
+    alert({ taskId: 'bad', time: at(1) }), alert({ taskId: 'bad', time: at(5) }),
+  ];
+  const d = base({ tasksById, deps });
+  const data = overviewData(alerts, d);
+  assert.equal(calls.get('t1'), 1);
+  assert.equal(calls.get('bad'), 1);
+  assert.equal(data.days[3].warn, 3, 'the three t1 alerts sit on their due day');
+  assert.equal(data.days[1].warn, 1);
+  assert.equal(data.days[5].warn, 1, 'a due that does not resolve anchors on the alert time');
+  calls.clear();
+  assert.equal(applyNarrow(alerts, { day: data.days[3].key }, d).length, 3);
+  assert.equal(calls.get('t1'), 1, 'applyNarrow memoises per call too');
 });

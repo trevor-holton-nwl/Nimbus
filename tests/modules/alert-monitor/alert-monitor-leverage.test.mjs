@@ -100,6 +100,20 @@ test('confidence clause: only for replay rows whose score changed', () => {
   assert.doesNotMatch(p, /am-fix-down/, 'a higher score has no error-coloured delta');
 });
 
+test('fixConfidenceChanged: one predicate on rounded scores, used by the fix row (a 70.6 to 71.4 fix shows no clause)', () => {
+  const { fixConfidenceChanged } = M;
+  const clause = it => fixLineParts(it, ctx(), t).some(p => /am\.fix_conf/.test(unq(p)));
+  const frac = item({ method: 'replay', confidenceBefore: 70.6, confidenceAfter: 71.4 });
+  assert.equal(fixConfidenceChanged(frac), false, 'both round to 71');
+  assert.equal(clause(frac), false, 'the row agrees with the predicate');
+  const moved = item({ method: 'replay', confidenceBefore: 70.6, confidenceAfter: 72.4 });
+  assert.equal(fixConfidenceChanged(moved), true);
+  assert.equal(clause(moved), true);
+  assert.equal(fixConfidenceChanged(item({ method: 'removal', confidenceAfter: 90 })), false);
+  assert.equal(fixConfidenceChanged(item({ method: 'replay', confidenceAfter: 90, requiresMinutes: true })), false);
+  assert.equal(fixConfidenceChanged(item({ method: 'replay', confidenceAfter: null })), false);
+});
+
 test('a lower after-score is shown, with the delta in the error colour (D9)', () => {
   const p = unq(fixLineParts(item({ method: 'replay', confidenceAfter: 68 }), ctx(), t).join(' · '));
   assert.match(p, /am\.fix_conf\|\{"before":71,"after":68\}/);

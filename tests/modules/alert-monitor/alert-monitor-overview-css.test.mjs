@@ -28,6 +28,55 @@ test('the block is LF only (styles.css is an LF file)', () => {
   assert.ok(!CSS.includes('\r'), 'no carriage return anywhere in styles.css');
 });
 
+/**
+ * The same CSS with every `@container` / `@media` wrapper replaced by its contents, so a nested rule is parsed as a
+ * rule of its own (the flat `([^{}]+)\{([^}]*)\}` scan otherwise reads the wrapper as one selector).
+ */
+function flatten(css) {
+  let out = '';
+  let i = 0;
+  while (i < css.length) {
+    const at = css.indexOf('@', i);
+    if (at < 0) { out += css.slice(i); break; }
+    const open = css.indexOf('{', at);
+    if (open < 0) { out += css.slice(i); break; }
+    if (!/^@(container|media)\b/.test(css.slice(at, open))) { out += css.slice(i, open + 1); i = open + 1; continue; }
+    out += css.slice(i, at);
+    let depth = 1, j = open + 1;
+    while (j < css.length && depth > 0) { if (css[j] === '{') depth++; else if (css[j] === '}') depth--; j++; }
+    out += flatten(css.slice(open + 1, j - 1));
+    i = j;
+  }
+  return out;
+}
+const rulesOf = (css) => [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].map(m => ({ sel: m[1].trim(), body: m[2] }));
+
+test('flatten: nested @container / @media rules become rules of their own', () => {
+  const f = flatten('.a { x: 1 } @container am-ov (max-width: 9px) { .b { grid-column: 1 / -1; } .c { y: 2 } } @media (prefers-reduced-motion: reduce) { .d { transition: none; } } .e { z: 3 }');
+  assert.deepEqual(rulesOf(f).map(r => r.sel), ['.a', '.b', '.c', '.d', '.e']);
+  assert.ok(rulesOf(f).find(r => r.sel === '.b').body.includes('grid-column'));
+  assert.ok(rulesOf(flatten(CODE)).some(r => r.sel.includes('.am-ov-when') && /grid-column/.test(r.body)), 'the real block: .am-ov-when spans inside @container');
+});
+
+test('every var(--x) used in the block is defined in :root and in body.dark, or is an inline per-element property or an explicit root-only token', () => {
+  // Set per element by the builders' inline style="--h:..", never in a token block.
+  const inline = new Set(['--h', '--g', '--w', '--cols', '--c1', '--c2']);
+  // Theme-independent tokens (a typeface, a radius, a duration): defined once in :root, intentionally not redefined in body.dark.
+  const rootOnly = new Set(['--font-mono', '--r-sm', '--t-fast']);
+  const blocks = (head) => [...CSS.matchAll(new RegExp(`(?:^|\\n)${head.replace(/[.]/g, '\\.')}\\s*\\{([^}]*)\\}`, 'g'))].map(m => m[1]).join('\n');
+  const root = blocks(':root');
+  const dark = blocks('body.dark');
+  assert.ok(root.length > 500 && dark.length > 200, 'token blocks found');
+  const used = [...new Set([...CODE.matchAll(/var\((--[a-z0-9-]+)/g)].map(m => m[1]))].filter(x => !inline.has(x));
+  assert.ok(used.length >= 20, `the block uses many tokens (got ${used.length})`);
+  const defined = (src, tok) => new RegExp(`${tok}\\s*:`).test(src);
+  for (const tok of used) {
+    assert.ok(defined(root, tok), `${tok} is defined in :root`);
+    if (!rootOnly.has(tok)) assert.ok(defined(dark, tok), `${tok} is defined in body.dark (or add it to the root-only list with a reason)`);
+  }
+  for (const tok of rootOnly) assert.ok(used.includes(tok), `${tok} is still used (drop it from the root-only list otherwise)`);
+});
+
 test('no gradients, side stripes, glass or hard-coded colours', () => {
   assert.ok(!/gradient\(/i.test(CODE), 'no gradient()');
   assert.ok(!/border-(left|right)\s*:/i.test(CODE), 'no border-left / border-right accents');
@@ -66,7 +115,7 @@ test('every selector that declares a transition is in the reduced-motion list', 
   const guardRe = /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\}\s*\}/;
   const guard = CODE.match(guardRe)[0];
   const listed = new Set(guard.slice(guard.indexOf('{') + 1).split('{')[0].split(',').map(x => x.trim()));
-  const outside = CODE.replace(guardRe, '');
+  const outside = flatten(CODE.replace(guardRe, ''));   // flattened: a transition inside an @container block is seen too
   const animated = [];
   for (const m of outside.matchAll(/([^{}]+)\{([^}]*transition\s*:\s*(?!none)[^}]*)\}/g)) {
     for (const sel of m[1].split(',')) animated.push(sel.trim());
@@ -125,7 +174,7 @@ test('structural rules the markup relies on', () => {
   assert.ok(/@container\s*\(max-width:\s*21px\)\s*\{[^}]*\.am-ov-cat-n\s*\{[^}]*display\s*:\s*none/.test(CODE), 'count hidden when narrow');
   // Selection is never colour-only, and inset outlines keep edge bars inside the overflow:hidden panel.
   assert.ok(/\.is-sel\b[^{]*\{[^}]*outline\s*:\s*2px solid var\(--fg\)[^}]*outline-offset\s*:\s*-2px/.test(CODE), 'is-sel: 2px --fg inset outline');
-  const ruleFor = (sel) => [...CODE.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter(m => m[1].split(',').some(x => x.trim() === sel)).map(m => m[2]);
+  const ruleFor = (sel) => [...flatten(CODE).matchAll(/([^{}]+)\{([^}]*)\}/g)].filter(m => m[1].split(',').some(x => x.trim() === sel)).map(m => m[2]);
   for (const base of ['.am-ov-bar', '.am-ov-row', '.am-ov-cat', '.am-ov-catrow']) {
     assert.ok(ruleFor(base + '.is-sel').some(b => /outline-offset\s*:\s*-2px/.test(b)), base + '.is-sel inset outline');
     assert.ok(ruleFor(base + ':focus-visible').some(b => /outline-offset\s*:\s*-2px/.test(b)), base + ':focus-visible inset outline');
