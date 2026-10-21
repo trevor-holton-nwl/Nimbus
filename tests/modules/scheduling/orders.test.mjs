@@ -1284,6 +1284,87 @@ test('Table._getPairOptions: routing plants list eligible pairs, prefix a curren
   }
 });
 
+test('F1 S1: _getPairOptions on an order holding the unpadded PV "1" selects 0001|M1 and never prefixes a "current" option', () => {
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: {
+    'ui.pv_machine_option': '{{pv}} - {{machine}}',
+    'ui.pv_machine_current_ineligible': '{{pv}} - {{machine}} (current, not eligible{{step}})',
+  } };
+  const plant = 'P-PAIR-UNPADDED';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  const priorMap = Runtime._rateMap, priorMapPlant = Runtime._rateMapPlant;
+  Runtime._rateMap = { plant, generated_at: '', machines: { M1: 'WC1', M2: 'WC1' },
+    pv: { 'MAT|0001': { key: 'MAT|N|G|01', valid_from: null, valid_to: null, workcenter: 'WC1' } },
+    ops: { 'MAT|N|G|01|WC1': { minutes_per_unit: 1 } } };
+  Runtime._rateMapPlant = plant;
+  try {
+    const task = { PLANT: plant, MATERIAL_NUMBER: 'MAT', MACHINE: 'M1', PRODUCTION_VERSION: '1', 'ORDER_QUANTITY_(GMEIN)': 60 };
+    const options = Table._getPairOptions(task);
+    assert.deepEqual(options.map(o => o.value), ['0001|M1', '0001|M2'], 'no unpadded "1|M1" prefix');
+    assert.ok(options.every(o => !/not eligible/.test(o.label)));
+    // The failing step is named when the current pair really is out.
+    const zero = Table._getPairOptions({ ...task, 'ORDER_QUANTITY_(GMEIN)': 0 });
+    assert.equal(zero.length, 1);
+    assert.match(zero[0].label, /not eligible: zero_runtime/);
+    assert.deepEqual(Table._parsePairValue('1|M2'), { pv: '0001', machine: 'M2' }, 'parse output carries the padded PV');
+    assert.deepEqual(Table._parsePairValue('|M2'), { pv: '', machine: 'M2' });
+  } finally {
+    Runtime._rateMap = priorMap; Runtime._rateMapPlant = priorMapPlant;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
+test('F1 S1: re-picking the pair with "0001" on an order storing "1" is a no-op; an Inspector pick of 0004 writes "0004" and keeps the finish', () => {
+  const priorTableApi = Table._api;
+  const priorToastShow = Toast.show;
+  const priorResolve = Runtime.resolve;
+  const priorManualSchedule = Engine.manualSchedulePatchFor;
+  const priorRecompute = Alerts.scheduleRecompute;
+  const priorCurrentId = Inspector._currentId;
+  const priorGetElementById = globalThis.document.getElementById;
+  const plant = 'P-PV-UNPADDED-EDIT';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  const toastCalls = [];
+  Toast.show = (msg) => { toastCalls.push(msg); };
+  Alerts.scheduleRecompute = () => {};
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+  const undoBefore = UndoStack._entries.length;
+  const row = _pairEditFixture('pv-unpadded', plant);
+  row.PRODUCTION_VERSION = '1';
+  const finish = row.end_date.getTime();
+  try {
+    row.MACHINE = '0001|L1';
+    Table._onCellChanged({ colDef: { field: 'MACHINE' }, data: row, newValue: '0001|L1', oldValue: 'L1', node: {} });
+    assert.equal(Store.tasks['pv-unpadded'].MACHINE, 'L1');
+    assert.equal(UndoStack._entries.length, undoBefore, 'same pair: no undo entry');
+    assert.equal(toastCalls.length, 0, 'same pair: no toast');
+    assert.equal(Store.tasks['pv-unpadded'].PRODUCTION_VERSION, '1', 'same pair: nothing written');
+
+    Runtime.resolve = (task) => (task.PRODUCTION_VERSION === '0004'
+      ? { ok: true, hours: 1, basis: { workcenter: 'WC1', source: 'routing' } } : { ok: false, step: 'pv_not_found' });
+    Engine.manualSchedulePatchFor = (t) => ({ start_date: t.start_date, end_date: new Date(finish), scheduleSegments: [] });
+    globalThis.document.getElementById = () => null;
+    Inspector._currentId = 'pv-unpadded';
+    Inspector._onFieldChange('PV_MACHINE', '0004|L1');
+    const task = Store.tasks['pv-unpadded'];
+    assert.equal(task.PRODUCTION_VERSION, '0004');
+    assert.equal(task.end_date.getTime(), finish, 'the finish is held');
+  } finally {
+    Table._api = priorTableApi;
+    Toast.show = priorToastShow;
+    Runtime.resolve = priorResolve;
+    Engine.manualSchedulePatchFor = priorManualSchedule;
+    Alerts.scheduleRecompute = priorRecompute;
+    Inspector._currentId = priorCurrentId;
+    globalThis.document.getElementById = priorGetElementById;
+    UndoStack._entries.length = undoBefore;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});
+
 test('Table._SearchableLineEditor filters pair options on their label and returns the pair value', () => {
   const priorDocument = globalThis.document;
   const input = { value: '', addEventListener() {}, focus() {}, select() {} };

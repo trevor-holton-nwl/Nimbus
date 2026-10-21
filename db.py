@@ -1520,8 +1520,10 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             # routing eligibility/runtime gates below.
             if "MACHINE" in attrs and attrs["MACHINE"] == _canonical_nullable_attribute(current["machine"]):
                 attrs.pop("MACHINE", None)
+            # Compared padding-insensitively: "0001" against a stored "1" is the same version, not an edit.
             if ("PRODUCTION_VERSION" in attrs
-                    and attrs["PRODUCTION_VERSION"] == _canonical_nullable_attribute(current["production_version"])):
+                    and _norm_pv(attrs["PRODUCTION_VERSION"]) == _norm_pv(
+                        _canonical_nullable_attribute(current["production_version"]))):
                 attrs.pop("PRODUCTION_VERSION", None)
             if has_runtime and (_canonical_runtime_minutes(it.get("RUN_TIME"))
                                 == _canonical_runtime_minutes(current["run_time"])):
@@ -2669,6 +2671,15 @@ def _norm_pv_sql(expr: str) -> str:
             f"ELSE lpad(upper(btrim({expr})), 4, '0') END)")
 
 
+# The material default PV fill used by `_stamp_order_attributes`: padded to the 4-char master form on a
+# routing-enabled plant (same expression as the upload padding), left as stored elsewhere. Without this a
+# stamped default lands as '1' and never matches the padded `production_version` row.
+_DEFAULT_PV_FILL_SQL = (
+    "(CASE WHEN EXISTS (SELECT 1 FROM plants pl WHERE pl.plant = o.plant AND pl.routing_runtime_enabled = TRUE) "
+    f"THEN {_norm_pv_sql('mp.default_production_version')} ELSE mp.default_production_version END)"
+)
+
+
 def _naive_dt(value):
     """Normalise an incoming date to a naive datetime (the shape the DB returns and
     change detection compares against): ISO strings (the SAP-sync path), pandas
@@ -3171,12 +3182,12 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
             ids = sorted(set(ids))
             if ids:
                 cur.execute(
-                    """
+                    f"""
                     UPDATE orders o
                        SET color              = mp.color,
                            prt_01             = mp.prt_01,
                            prt_02             = mp.prt_02,
-                           production_version = COALESCE(NULLIF(o.production_version, ''), mp.default_production_version),
+                           production_version = COALESCE(NULLIF(o.production_version, ''), {_DEFAULT_PV_FILL_SQL}),
                            updated_at         = NOW()
                       FROM material_plants mp
                      WHERE mp.plant = o.plant
@@ -3201,12 +3212,12 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
             )
         elif batch_id is not None:
             cur.execute(
-                """
+                f"""
                 UPDATE orders o
                    SET color              = mp.color,
                        prt_01             = mp.prt_01,
                        prt_02             = mp.prt_02,
-                       production_version = COALESCE(NULLIF(o.production_version, ''), mp.default_production_version),
+                       production_version = COALESCE(NULLIF(o.production_version, ''), {_DEFAULT_PV_FILL_SQL}),
                        updated_at         = NOW()
                   FROM material_plants mp
                  WHERE mp.plant = o.plant
@@ -3230,12 +3241,12 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
             )
         else:
             cur.execute(
-                """
+                f"""
                 UPDATE orders o
                    SET color              = mp.color,
                        prt_01             = mp.prt_01,
                        prt_02             = mp.prt_02,
-                       production_version = COALESCE(NULLIF(o.production_version, ''), mp.default_production_version),
+                       production_version = COALESCE(NULLIF(o.production_version, ''), {_DEFAULT_PV_FILL_SQL}),
                        updated_at         = NOW()
                   FROM material_plants mp
                  WHERE mp.plant = o.plant

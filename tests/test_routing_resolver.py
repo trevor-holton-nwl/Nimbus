@@ -26,7 +26,9 @@ from backend.routing.resolver import (
     _select_operations,
     _to_hours,
     _within_validity,
+    _pair_step,
     check_eligibility,
+    check_pair,
     resolve_one,
     resolve_orders,
 )
@@ -395,6 +397,32 @@ def test_check_eligibility_reuses_the_caller_supplied_conn_without_opening_a_new
         conn=conn,
     )
     assert result["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Fix wave F1: an unpadded order PV ('1') must find the padded master row ('0001') on every pair lookup.
+# ---------------------------------------------------------------------------
+def test_pair_step_finds_the_padded_master_row_for_an_unpadded_order_pv():
+    pv_lookup = {("P1", "MAT1", "0001"): {"sap_workcenter": "WC1", "valid_from": None, "valid_to": None}}
+    order = {"plant": "P1", "material_number": "MAT1", "production_version": "1", "machine": "M1",
+             "basic_start_date": dt.datetime(2026, 6, 1)}
+    assert _pair_step(order, pv_lookup, {"M1": "WC1"}) is None
+    assert _pair_step({**order, "production_version": "0001"}, pv_lookup, {"M1": "WC1"}) is None
+    assert _pair_step({**order, "production_version": "2"}, pv_lookup, {"M1": "WC1"}) == "pv_not_found"
+    assert _pair_step({**order, "production_version": ""}, pv_lookup, {"M1": "WC1"}) == "pv_missing"
+
+
+def test_check_eligibility_and_check_pair_accept_an_unpadded_pv():
+    case = _ELIGIBILITY_CASES["category_0001_uses_machine_value"]
+    order = case["order"]
+    assert order["production_version"] == "0001"
+    start = _parse_date(order.get("basic_start_date"))
+    eligible = check_eligibility(order["plant"], order["material_number"], "1", order["machine"],
+                                 order["order_quantity"], start, conn=_FakeEligibilityConnection(case))
+    assert eligible["ok"] is True
+    pair = check_pair(order["plant"], order["material_number"], "1", order["machine"], start,
+                      conn=_FakeEligibilityConnection(case))
+    assert pair == {"ok": True}
 
 
 # ---------------------------------------------------------------------------
