@@ -132,6 +132,8 @@ export function computeEligiblePairs(map: RoutingRateMap, material: string, vali
     if (!workcenter) continue;
     if (!_withinValidity(validityDate, row.valid_from, row.valid_to)) continue;
     const pv = key.slice(prefix.length);
+    // requireOps: the routing must have an operation at this work center (otherwise `resolve` would fail).
+    if (opts.requireOps && !map.ops[`${row.key}|${workcenter}`]) continue;
     for (const [machine, machineWc] of Object.entries(map.machines)) {
       if (machineWc === workcenter) pairs.push({ pv, machine, workcenter });
     }

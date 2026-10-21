@@ -2146,3 +2146,93 @@ test('the status dropdown is rebuilt only when the profile filter flips between 
     Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent;
   }
 });
+
+function _overrideFixture(lineValue) {
+  const elements = {
+    'ovr-finish': { value: '2026-09-21 10:00' },
+    'ovr-line': { value: lineValue },
+    'ovr-firm': { checked: false },
+  };
+  const prior = globalThis.document.getElementById;
+  globalThis.document.getElementById = id => elements[id] || null;
+  return () => { globalThis.document.getElementById = prior; };
+}
+
+test('Table.applyOverride with a PV - Machine pair: writes the pair, pushes one undo entry; an ineligible pair is rejected with the pair toast; the PARENT_ORDER lock still rejects', () => {
+  const priorTableApi = Table._api;
+  const priorEligible = Runtime.eligible;
+  const priorPair = Engine.pairSchedulePatchFor;
+  const priorScheduleRecompute = Alerts.scheduleRecompute;
+  const priorToastShow = Toast.show;
+  const priorSelectedId = Table._selectedId;
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = { en: {
+    'toast.pv_machine_ineligible': '{{order}} cannot run on {{machine}} with {{pv}}.',
+    'toast.dist_machine_locked': '{{order}} runs on {{machine}} because of its distribution.',
+  } };
+  const plant = 'P-ROUTING-OVR-PAIR';
+  const priorMasterData = _enableRoutingForPlant(plant);
+  Alerts.scheduleRecompute = () => {};
+  const toastCalls = [];
+  Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+  const undoBefore = UndoStack._entries.length;
+  const newStart = new Date('2026-09-21T08:00:00');
+  const newEnd = new Date('2026-09-21T10:00:00');
+  Runtime.eligible = (task, machine) => task.PRODUCTION_VERSION === '0002' && machine === 'L2';
+  let pairArgs = null;
+  Engine.pairSchedulePatchFor = (task, pv, line) => {
+    pairArgs = { pv, line };
+    return { start_date: newStart, end_date: newEnd, PRODUCTION_VERSION: pv, MACHINE: line, RUN_TIME: 2, run_time_source: 'routing' };
+  };
+  _pairEditFixture('ovr-pair', plant);
+  Table._selectedId = 'ovr-pair';
+
+  try {
+    // 1. ineligible pair: toast, nothing written, no undo entry
+    let restore = _overrideFixture('0003|L2');
+    try { Table.applyOverride(); } finally { restore(); }
+    assert.equal(Store.tasks['ovr-pair'].MACHINE, 'L1');
+    assert.equal(Store.tasks['ovr-pair'].PRODUCTION_VERSION, '0001');
+    assert.equal(pairArgs, null);
+    assert.equal(toastCalls.length, 1);
+    assert.match(toastCalls[0].msg, /A-9104.*L2.*0003/);
+    assert.equal(UndoStack._entries.length, undoBefore);
+
+    // 2. eligible pair: one patch, one undo entry
+    toastCalls.length = 0;
+    restore = _overrideFixture('0002|L2');
+    try { Table.applyOverride(); } finally { restore(); }
+    assert.deepEqual(pairArgs, { pv: '0002', line: 'L2' });
+    assert.equal(Store.tasks['ovr-pair'].MACHINE, 'L2');
+    assert.equal(Store.tasks['ovr-pair'].PRODUCTION_VERSION, '0002');
+    assert.equal(UndoStack._entries.length, undoBefore + 1, 'the pair override is one undo step');
+
+    // 3. sub-order lock still wins over a pair
+    Store.setTasks([{
+      id: 'ovr-child', PRODUCTION_ORDER: 'A-9301', ORDER: 'A-9301', PLANT: plant, PARENT_ORDER: '9301', MACHINE: 'L1',
+      PRODUCTION_VERSION: '0002', start_date: new Date('2026-09-20T08:00:00'), end_date: new Date('2026-09-20T09:00:00'),
+    }], 'test');
+    Table._selectedId = 'ovr-child';
+    toastCalls.length = 0;
+    pairArgs = null;
+    restore = _overrideFixture('0002|L2');
+    try { Table.applyOverride(); } finally { restore(); }
+    assert.equal(Store.tasks['ovr-child'].MACHINE, 'L1');
+    assert.equal(pairArgs, null);
+    assert.equal(toastCalls.length, 1);
+    assert.match(toastCalls[0].msg, /A-9301/);
+  } finally {
+    Table._api = priorTableApi;
+    Runtime.eligible = priorEligible;
+    Engine.pairSchedulePatchFor = priorPair;
+    Alerts.scheduleRecompute = priorScheduleRecompute;
+    Toast.show = priorToastShow;
+    Table._selectedId = priorSelectedId;
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    UndoStack._entries.length = undoBefore;
+    Store.setTasks([], 'test');
+    Store.setMasterData(priorMasterData, 'test');
+  }
+});

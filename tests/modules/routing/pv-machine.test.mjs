@@ -49,6 +49,16 @@ test('computeEligiblePairs: the validity window decides which PVs are options (i
   assert.ok(!before.some(p => p.pv === '0005'), 'not yet valid');
 });
 
+test('computeEligiblePairs: requireOps drops a pair whose routing has no operation at the work center; without it the pair stays', () => {
+  const m = map();
+  delete m.ops['MAT|N|G|02|WC2'];   // PV 0002 (WC2 -> M3) now has no operation
+  const without = computeEligiblePairs(m, 'MAT', D('2026-09-01T00:00:00'));
+  assert.ok(pairKeys(without).includes('0002|M3'));
+  const withOps = computeEligiblePairs(m, 'MAT', D('2026-09-01T00:00:00'), { requireOps: true });
+  assert.ok(!pairKeys(withOps).includes('0002|M3'));
+  assert.ok(pairKeys(withOps).includes('0001|M1'), 'pairs that do have operations stay');
+});
+
 test('computeEligiblePairs: unknown material is empty', () => {
   assert.deepEqual(computeEligiblePairs(map(), 'NOPE', D('2026-03-01T00:00:00')), []);
 });
