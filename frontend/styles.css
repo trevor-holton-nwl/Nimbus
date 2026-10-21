@@ -7659,8 +7659,8 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 
 /* ---- Alert Monitor Overview band (Task 31): When / Where / What / Confidence. Tokens only, 1px hairlines, no
         gradients, no side stripes, no glass. Inline styles from the markup are custom properties only: --h (bar
-        height %), --cols, --c1 / --c2 (window band), --g (flex-grow), --w (track %). The panels sit inside
-        overflow:hidden, so every selection / focus outline is inset (offset -2px). Layout wraps on the width of
+        height %), --cols, --c1 / --c2 (window band), --g (flex-grow), --w (track %). No ancestor of the
+        bars clips, but selection / focus outlines stay inset (offset -2px) so they never bleed past the bar edges. Layout wraps on the width of
         the band itself (a size container), not the viewport: the four-column grid needs 936px
         (300 + 230 + 220 + 150 + 3 x 12) and the page content is 976px at a 1,024px viewport. ---- */
 .am-overview { margin: 0 0 12px; container: am-ov / inline-size; }
