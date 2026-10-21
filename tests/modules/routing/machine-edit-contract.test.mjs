@@ -28,7 +28,7 @@ function seed() {
     start_date:new Date('2026-09-30T13:00:00'), end_date:new Date('2026-09-30T16:00:00')}], 'test');
   Runtime._rateMapPlant='P';
   Runtime._rateMap={plant:'P',generated_at:'',machines:{M1:'WC1',M2:'WC2'},
-    pv:{'MAT|0001':{key:'MAT|N|G|01',valid_from:null,valid_to:null}},
+    pv:{'MAT|0001':{key:'MAT|N|G|01',valid_from:null,valid_to:null,workcenter:'WC2'}},
     ops:{'MAT|N|G|01|WC1':{minutes_per_unit:3},'MAT|N|G|01|WC2':{minutes_per_unit:6}}};
 }
 
@@ -113,7 +113,7 @@ function heldEditFixture(t, { anchor = new Date('2026-09-30T17:00:00'), reason =
     original_end_date: anchor instanceof Date && Number.isFinite(anchor.getTime()) ? '2026-09-30T17:00:00' : null,
     RUN_TIME: null, run_time_source: null, planning_status: 'needs_planning',
     planning_reason: { code: reason, message: 'Awaiting routing' }, schedule_segments: [] }));
-  Runtime._rateMap.pv['MAT|0002'] = { key: 'MAT|N|G|01', valid_from: null, valid_to: null };
+  Runtime._rateMap.pv['MAT|0002'] = { key: 'MAT|N|G|01', valid_from: null, valid_to: null, workcenter: 'WC1' };
   t.mock.method(Toast, 'show', () => {});
   t.mock.method(Alerts, 'scheduleRecompute', () => {});
   t.mock.method(Inspector, '_render', () => {});

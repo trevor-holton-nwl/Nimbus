@@ -27,7 +27,9 @@ export interface RoutingRateMap {
   plant: string;
   generated_at: string;
   machines: Record<string, string>;
-  pv: Record<string, { valid_from: string | null; valid_to: string | null; lot_from: number | null; lot_to: number | null; key: string }>;
+  /** `workcenter` is the PV header's own SAP work center ("the scheduling operation"); null/blank
+   *  means the PV offers no machines (fail closed -> `pv_workcenter_mismatch`). */
+  pv: Record<string, { valid_from: string | null; valid_to: string | null; lot_from: number | null; lot_to: number | null; key: string; workcenter?: string | null }>;
   ops: Record<string, { minutes_per_unit: number }>;
 }
 
@@ -41,7 +43,7 @@ export interface RoutingRateMap {
  *  directly — only the already-collapsed `ops` map). */
 export type RuntimeResolveStep =
   | 'pv_missing' | 'pv_not_found' | 'pv_expired' | 'no_machine'
-  | 'workcenter_unmapped' | 'no_operation_at_workcenter' | 'zero_runtime';
+  | 'workcenter_unmapped' | 'pv_workcenter_mismatch' | 'no_operation_at_workcenter' | 'zero_runtime';
 
 /** Lightweight local echo for an instant Inspector-line update — NOT an
  *  exhaustive mirror of the server's own `run_time_basis` shape (§8.1: the
@@ -94,9 +96,57 @@ function _asDate(value: unknown): Date | null {
   return null;
 }
 
+/** The date a production version's validity window is judged on: the server save-gate rule
+ *  (`COALESCE(original_start_received, basic_start_date)`, no finish fallback), else today.
+ *  BASIC_START_DATE is the raw, un-snapped copy of the wire `original_start_date` (the locked
+ *  value), never the placed `start_date` nor the calendar-snapped display baseline. */
+function _validityDateFor(task: NimbusTask): Date {
+  return _asDate(task.BASIC_START_DATE) ?? _asDate(task.original_start_date) ?? new Date();
+}
+
 function _asQuantity(value: unknown): number {
   const num = typeof value === 'number' ? value : Number(value ?? 0);
   return Number.isFinite(num) ? num : 0;
+}
+
+/** One selectable (production version, machine) pair for an order. */
+export interface EligiblePair { pv: string; machine: string; workcenter: string }
+
+/** What a drop onto `targetMachine` should do about the production version. */
+export type DropDecision =
+  | { kind: 'keep' }
+  | { kind: 'switch'; pv: string }
+  | { kind: 'choose'; pvs: string[] }
+  | { kind: 'reject' };
+
+/** Pure: every (PV, machine) pair the material offers on `validityDate` -- each PV row valid that day
+ *  with a non-blank header work center, crossed with every machine at that work center. A machine may
+ *  appear under several PVs; expired and blank-work-center PVs offer nothing. Sorted pv, then machine. */
+export function computeEligiblePairs(map: RoutingRateMap, material: string, validityDate: Date): EligiblePair[] {
+  const prefix = `${material}|`;
+  const pairs: EligiblePair[] = [];
+  for (const [key, row] of Object.entries(map.pv)) {
+    if (!key.startsWith(prefix)) continue;
+    const workcenter = row.workcenter;
+    if (!workcenter) continue;
+    if (!_withinValidity(validityDate, row.valid_from, row.valid_to)) continue;
+    const pv = key.slice(prefix.length);
+    for (const [machine, machineWc] of Object.entries(map.machines)) {
+      if (machineWc === workcenter) pairs.push({ pv, machine, workcenter });
+    }
+  }
+  pairs.sort((a, b) => (a.pv < b.pv ? -1 : a.pv > b.pv ? 1 : a.machine < b.machine ? -1 : a.machine > b.machine ? 1 : 0));
+  return pairs;
+}
+
+/** Pure drop rule: keep the current PV when it covers the target machine; else switch when exactly one
+ *  other PV covers it, choose when two or more do, reject when none does. */
+export function dropDecision(pairs: EligiblePair[], currentPv: string | null | undefined, targetMachine: string): DropDecision {
+  const covering = [...new Set(pairs.filter(p => p.machine === targetMachine).map(p => p.pv))].sort();
+  if (covering.length === 0) return { kind: 'reject' };
+  if (currentPv && covering.includes(currentPv)) return { kind: 'keep' };
+  if (covering.length === 1) return { kind: 'switch', pv: covering[0] };
+  return { kind: 'choose', pvs: covering };
 }
 
 export const Runtime = {
@@ -190,11 +240,8 @@ export const Runtime = {
     if (!pvRow) return { ok: false, step: 'pv_not_found' };
 
     // Validity is judged on the SAP start as first received (backward scheduling OQ26), the same
-    // date the server's check reads: BASIC_START_DATE is the raw, un-snapped copy of the wire
-    // `original_start_date` (the locked value), never the placed `start_date` and never the
-    // calendar-snapped `original_start_date` display baseline.
-    const startDate = _asDate(task.BASIC_START_DATE === undefined ? task.original_start_date : task.BASIC_START_DATE);
-    if (startDate && !_withinValidity(startDate, pvRow.valid_from, pvRow.valid_to)) {
+    // date the server's save gate reads (see `_validityDateFor`), falling back to today.
+    if (!_withinValidity(_validityDateFor(task), pvRow.valid_from, pvRow.valid_to)) {
       return { ok: false, step: 'pv_expired' };
     }
 
@@ -202,6 +249,7 @@ export const Runtime = {
     if (!targetMachine) return { ok: false, step: 'no_machine' };
     const workcenter = map.machines[targetMachine];
     if (!workcenter) return { ok: false, step: 'workcenter_unmapped' };
+    if (!pvRow.workcenter || pvRow.workcenter !== workcenter) return { ok: false, step: 'pv_workcenter_mismatch' };
 
     const opRow = map.ops[`${pvRow.key}|${workcenter}`];
     if (!opRow) return { ok: false, step: 'no_operation_at_workcenter' };
@@ -220,6 +268,19 @@ export const Runtime = {
       hours,
       basis: { workcenter, routingKey: pvRow.key, source: 'routing' },
     };
+  },
+
+  /** Every (PV, machine) pair the order's material offers, judged on the order's validity date. Same
+   *  cross-plant cache guard as `resolve()`: a stale/other-plant map offers nothing. */
+  eligiblePairs(task: NimbusTask): EligiblePair[] {
+    if (task.PLANT && task.PLANT !== Runtime._rateMapPlant) return [];
+    const map = Runtime._rateMap ?? _EMPTY_MAP;
+    return computeEligiblePairs(map, task.MATERIAL_NUMBER ?? '', _validityDateFor(task));
+  },
+
+  /** `dropDecision` over this order's own pairs and current PV, for a drop onto `machine`. */
+  dropDecision(task: NimbusTask, machine: string): DropDecision {
+    return dropDecision(Runtime.eligiblePairs(task), task.PRODUCTION_VERSION, machine);
   },
 
   /** `resolve(...).ok` — the boolean a drop/edit guard needs. */

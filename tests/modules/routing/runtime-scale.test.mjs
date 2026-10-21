@@ -11,7 +11,7 @@ function rateMap(plant, factor = 1) {
   for (let i = 0; i < 70; i++) machines[`M${i}`] = `WC${i}`;
   for (let i = 0; i < 2100; i++) {
     const key = `MAT${i}|N|GROUP${i % 7}|1`;
-    pv[`MAT${i}|0001`] = { key, valid_from: '2026-01-01', valid_to: '2026-12-31', lot_from: null, lot_to: null };
+    pv[`MAT${i}|0001`] = { key, valid_from: '2026-01-01', valid_to: '2026-12-31', lot_from: null, lot_to: null, workcenter: `WC${i % 70}` };
     ops[`${key}|WC${i % 70}`] = { minutes_per_unit: factor * (1 + i % 11) };
   }
   return { plant, generated_at: '2026-10-13T08:00:00', machines, pv, ops };

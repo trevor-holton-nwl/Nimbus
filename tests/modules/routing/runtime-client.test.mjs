@@ -87,6 +87,7 @@ function buildRateMapForCase(caseDef) {
       lot_from: pvRow.lot_size_from,
       lot_to: pvRow.lot_size_to,
       key: routingKey,
+      workcenter: pvRow.sap_workcenter,
     },
   };
 
@@ -372,7 +373,7 @@ test('runtime-client.load: an older load that returns a non-ok response after a 
 
 test('runtime-client.resolve: validity is judged on the locked SAP start, so an echo that moves the placed start changes nothing', () => {
   Runtime._rateMap = { plant: 'P1', generated_at: '', machines: { M1: 'WC1' },
-    pv: { 'MAT|0001': { key: 'MAT|N|G|01', valid_from: '2026-01-01', valid_to: '2026-12-31' } },
+    pv: { 'MAT|0001': { key: 'MAT|N|G|01', valid_from: '2026-01-01', valid_to: '2026-12-31', workcenter: 'WC1' } },
     ops: { 'MAT|N|G|01|WC1': { minutes_per_unit: 60 } } };
   Runtime._rateMapPlant = 'P1';
   const base = { id: 'v', PLANT: 'P1', MACHINE: 'M1', PRODUCTION_VERSION: '0001', MATERIAL_NUMBER: 'MAT',
