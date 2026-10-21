@@ -65,6 +65,7 @@ Confirmed as written: PV header work center is populated by both Excel and SAP-s
 
 - 2026-10-21 branch feature/pv-machine-eligibility created from main 7f4d058 in worktree alert-monitor; spec written.
 - 2026-10-21 wave 1 (plan Steps 1-3) done: resolver `pv_workcenter_mismatch` + `_pair_step` + `check_pair`; rate-map pv `workcenter` (fixtures and seeds updated); client `resolve()` mismatch step and server-aligned validity chain; `computeEligiblePairs`/`dropDecision` helpers and `Runtime.eligiblePairs`/`dropDecision`; tests `tests/modules/routing/pv-machine.test.mjs` and new resolver cases.
+- 2026-10-21 wave 2 (plan Steps 4-5) done: `Engine.pairSchedulePatchFor` + `ManualPlacementOptions.chosenPv` (D9: a line change on a routing plant always re-resolves run time); `Table._getPairOptions`/`_parsePairValue`, grid pair editor (`_SearchableLineEditor` accepts `{value,label}`), Inspector `PV_MACHINE` select, Override pair list, D11 read-only PV on routing plants, one undo step per pair write; `Runtime.eligiblePairs(task, {requireOps})` memoised per rate map (review items 1-2); locale keys `ui.insp_pv_machine`, `ui.pv_machine_option`, `ui.pv_machine_current_ineligible`, `toast.pv_machine_ineligible` in all five locales; tests in `machine-edit-contract.test.mjs` (two-WC reseed, D9 rule), `orders.test.mjs`. Not touched: gantt.mts (wave 3), backend.
 
 ## Context appendix — things learned along the way
 

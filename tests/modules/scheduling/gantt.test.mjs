@@ -1966,6 +1966,9 @@ test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is routing-inel
   Selection.set([anchorId, companionId]);
   // The dragged anchor is eligible; only the companion is not.
   Runtime.eligible = (task) => task.id !== companionId;
+  // A line change now always re-resolves the run time from routing (D9), so the anchor needs a resolvable pair too.
+  const priorResolve = Runtime.resolve;
+  Runtime.resolve = () => ({ ok: true, hours: 2, basis: { source: 'routing' } });
   let itemsUpdateCalled = false;
   Timeline._items = {
     get: (i) => (i === anchorId ? { start: anchorStart, end: anchorEnd, group: otherLine } : undefined),
@@ -1983,6 +1986,7 @@ test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is routing-inel
     Timeline._items = undefined;
     Timeline._scheduleRebuild = priorScheduleRebuild;
     Runtime.eligible = priorEligible;
+    Runtime.resolve = priorResolve;
     Selection.clear();
     Store.setTasks([], 'test');
     Alerts.scheduleRecompute = priorScheduleRecompute;
