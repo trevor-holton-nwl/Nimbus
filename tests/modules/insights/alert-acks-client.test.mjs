@@ -85,6 +85,35 @@ test('acknowledgeMany: one POST, one GET, one notify, result {ok, failed}', asyn
   assert.equal(C.cached('A').size, 3);
 });
 
+test('acknowledgeMany: 1,200 ids go as three POSTs of at most 500, one refetch, one notify', async () => {
+  const ids = Array.from({ length: 1200 }, (_, i) => 'id' + i);
+  handler = (url, init) => init?.method === 'POST' ? res(200, { acks: [], count: JSON.parse(init.body).alert_ids.length }) : res(200, { acks: [] });
+  let n = 0; const off = C.subscribe(() => { n++; });
+  const out = await C.acknowledgeMany('A', ids, 'why', null);
+  off();
+  const posts = calls.filter(c => c.init?.method === 'POST');
+  assert.deepEqual(posts.map(p => JSON.parse(p.init.body).alert_ids.length), [500, 500, 200]);
+  assert.deepEqual(out, { ok: 1200, failed: 0 });
+  assert.equal(calls.length, 4);
+  assert.equal(n, 1);
+});
+
+test('acknowledgeMany: a failing middle chunk counts its ids as failed and the rest still run', async () => {
+  const ids = Array.from({ length: 1200 }, (_, i) => 'id' + i);
+  let post = 0;
+  handler = (url, init) => {
+    if (init?.method !== 'POST') return res(200, { acks: [] });
+    post++;
+    return post === 2 ? res(500, { status: 500, message: 'boom', detail: 'boom' }) : res(200, { acks: [], count: JSON.parse(init.body).alert_ids.length });
+  };
+  let n = 0; const off = C.subscribe(() => { n++; });
+  const out = await C.acknowledgeMany('A', ids, 'why', null);
+  off();
+  assert.deepEqual(out, { ok: 700, failed: 500 });
+  assert.equal(calls.filter(c => c.init?.method === 'POST').length, 3);
+  assert.equal(n, 1);
+});
+
 test('acknowledgeMany: a failed request throws AlertApiError and does not notify', async () => {
   let n = 0; const off = C.subscribe(() => { n++; });
   handler = () => res(400, { status: 400, message: 'reason is required', detail: 'reason is required' });

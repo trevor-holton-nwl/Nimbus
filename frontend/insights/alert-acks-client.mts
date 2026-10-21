@@ -16,6 +16,9 @@ export interface AcknowledgeInput {
 
 export type AckMap = Map<string, AlertAck>;
 
+/** Matches the server's MAX_BULK_ACK_IDS (backend/alert_profiles/routes.py). */
+const BULK_ACK_CHUNK = 500;
+
 const _cache = createPlantLru<AckMap>();
 const _subs = new Set<() => void>();
 let _lastPlant: string | null = Store.selectedPlant ?? null;
@@ -64,14 +67,31 @@ export const AlertAcksClient = {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p),
     })) as AlertAck;
   },
-  /** One bulk POST, one forced refetch, one notify. Throws AlertApiError on a non-2xx (the server is transactional). */
+  /** Chunks the ids into sequential POSTs of at most BULK_ACK_CHUNK (the server cap), then ONE forced refetch and
+   *  ONE notify. Each chunk is transactional on the server; a failed chunk counts its ids as `failed` and the next chunk
+   *  still runs. Throws the first AlertApiError only when every chunk failed (nothing was written, nothing notified). */
   async acknowledgeMany(plant: string, alertIds: string[], reason: string,
                         until: string | null): Promise<{ ok: number; failed: number }> {
-    const body = await _write(plant, () => Util.fetchTraced(`${Config.API_BASE}/alert-acks/bulk`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plant, alert_ids: alertIds, reason, until }),
-    })) as { count?: number } | null;
-    return { ok: typeof body?.count === 'number' ? body.count : alertIds.length, failed: 0 };
+    let ok = 0, failed = 0, firstErr: unknown = null;
+    for (let i = 0; i < alertIds.length || i === 0; i += BULK_ACK_CHUNK) {
+      const chunk = alertIds.slice(i, i + BULK_ACK_CHUNK);
+      try {
+        const resp = await Util.fetchTraced(`${Config.API_BASE}/alert-acks/bulk`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plant, alert_ids: chunk, reason, until }),
+        });
+        if (!resp.ok) await _fail(resp);
+        const body = await resp.json() as { count?: number } | null;
+        ok += typeof body?.count === 'number' ? body.count : chunk.length;
+      } catch (e) {
+        failed += chunk.length;
+        if (firstErr === null) firstErr = e;
+      }
+    }
+    if (ok === 0 && failed > 0) throw firstErr;
+    try { await load(plant, { force: true }); } catch { _cache.invalidate(plant); }
+    _notify();
+    return { ok, failed };
   },
   async unacknowledge(plant: string, alertId: string): Promise<void> {
     await _write(plant, () => Util.fetchTraced(
