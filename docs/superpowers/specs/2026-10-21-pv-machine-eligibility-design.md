@@ -69,6 +69,25 @@ Confirmed as written: PV header work center is populated by both Excel and SAP-s
 
 - 2026-10-21 wave 3 (plan Steps 6-7) done: Gantt drop rule in `_onDataSetUpdate` single path via `_commitSingleDrop` (same-line keeps `Runtime.eligible`; line move = `chosenPv` or `Runtime.dropDecision` keep/switch/choose/reject; `toast.pv_switched`; bar-unchanged check compares PV and run time); `Modal.choose` chooser with drop values captured at drop time (`PvDropCapture`, task fingerprint, cancel springs back); multi-drag line lock on ALL plants (D14, one `toast.multi_drag_line_locked` per gesture, companion ghosts stay on their own line); drag-time row dim on vis `onMoving` (`_groupClassName`, `dimRowsForDrag`/`undimRowsForDrag`, cleared on drop, pointerup/pointercancel, plant switch; kept across a mid-drag rebuild); locale keys `toast.pv_switched`, `toast.multi_drag_line_locked`, `modal.pv_choose_title`, `modal.pv_choose_msg`, `btn.pv_choose_confirm` in five locales; wave-2 review fixes (`requireOps` now applied, pair toast wording, orphan key removed, override pair test). Tests: `tests/modules/scheduling/pv-drag.test.mjs`, `foundation.test.mjs`, `gantt.test.mjs` (multi-drag ineligible cases now time-only). Not browser-verified (owner instruction).
 - 2026-10-21 wave 4 (plan Steps 8-10) done: save gate (`db.update_task_dates_bulk`) now runs `check_eligibility` for ANY changed MACHINE/PRODUCTION_VERSION on a routing plant whatever the run-time source (D9), writing `run_time_source='routing'`; recompute fallback in `resolver._resolve_orders_on_conn` (SAP PV, then material default, else hold bypassing `_fallback`; children and running orders never switched; `pv_sap_restored`/`pv_defaulted` counters; `_write_outcomes` 7th column and PV distinct predicate); missing-master-data PV rows `pv_workcenter_missing`/`pv_workcenter_no_operation` (routing plants only) with `production_version` in both CSVs, types, admin panel and five-locale keys `ui.reject_pv_workcenter_mismatch`, `ui.mmd_reason_pv_workcenter_missing`, `ui.mmd_reason_pv_workcenter_no_operation`. Found: `db.resync_order_attributes` and `distribution.resolve` scopes `wc_codes`/`machines` stamp blank PVs with no following `resolve_orders` (documented in `backend/routing/CLAUDE.md`, not changed).
+- 2026-10-21 wave 5 (final) done: wave 3 review fixes (`Runtime.dropDecision` judges with `requireOps`; overtime-confirm re-entry after a chooser pick re-applies from the drop capture; row dim skipped when no rate map is loaded for the plant and never dims the order's own row; `toast.pv_drop_stale`; reworded `toast.pv_machine_ineligible`); `ui.missing_master_data_sub` mentions PV work-center rows; `pv_workcenter_mismatch` added to the routing-upload step sets of the Alert Monitor model and the leverage grouper (the fix lives in the routing/PV master data tab that `rg-routing` already opens); root CLAUDE.md rows, ROUTING_RUNTIME_DESIGN.md section 8.1 pointer, domain CLAUDE.md sweep; full verification.
+
+## Follow-ups
+
+- (a) `db.resync_order_attributes` and `distribution.resolve` scopes `wc_codes`/`machines` are not followed by a resolve pass, so blank-PV fills there are repaired only on the next resolve pass. Adding `resolve_orders(plant)` after them is trivial but changes their behaviour (owner call).
+- (b) `_onTimeChange` is likely dead on real item drags (vis 7.7.3 `timechange` is a custom-time-bar event); unverified in a browser.
+- (c) pg-marked tests were not run locally (no Postgres).
+- (d) A pg-backed test for the missing-master-data PV SQL.
+- (e) A plant-wide PV master-data listing (the report shows only PVs carried by an order).
+- (f) Deploy: never promote wave 1 alone; run the missing-master-data report on the pilot plant before enabling; expect plant-wide holds and repairs on the first resolve pass after deploy (D13).
+
+## Release notes (behaviour changes for the pilot)
+
+1. On routing plants any machine or PV change now runs the eligibility gate regardless of run-time source, so hand-timed (manual) or SAP-timed orders can no longer be moved to a machine outside their PV's work center, and a move always re-derives run time from routing.
+2. Running orders and distribution children with a failing PV step (`pv_not_found` / `pv_expired` / `pv_workcenter_mismatch`) are now held rather than rescued by file machine-hours; running orders are then dropped as `running_kept` (nothing written).
+3. A repaired parent's new PV does not propagate to its distribution children until `reweight_shares`/`reapply_defaults`.
+4. The first resolve pass after deploy sweeps the whole plant (D13) and may unschedule orders plant-wide.
+5. The missing-master-data PV rows list only PVs carried by at least one order (narrower than the plan; PVs no order carries are not shown).
+6. A PV switch can change changeover with neighbours (setup signatures may include the PV); the alerts recompute catches it. Only firmed orders reach SAP.
 
 ## Context appendix — things learned along the way
 

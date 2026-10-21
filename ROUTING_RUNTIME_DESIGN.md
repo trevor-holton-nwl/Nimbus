@@ -309,6 +309,8 @@ Runtime.resolve(task, machine?)        → { ok:true, hours, basis } | { ok:fals
 Runtime.eligible(task, machine)        → boolean (resolve(...).ok)
 Runtime.hoursFor(task, machine?)       → number | null
 ```
+> Note (2026-10-21): the rate-map `pv` entries now also carry `workcenter` (the PV header work center), and `Runtime` gained `eligiblePairs`/`dropDecision`; the real shape is in `frontend/routing/CLAUDE.md` and `docs/superpowers/specs/2026-10-21-pv-machine-eligibility-design.md`. The payload below is the original, partly stale.
+
 Rate-map payload: `{ plant, generated_at, machines: { [machine]: workcenter }, pv: { "<material>|<pv>": { valid_from, valid_to, lot_from, lot_to, key:"<type>|<group>|<counter>" } }, ops: { "<type>|<group>|<counter>|<workcenter>": { minutes_per_unit } } }`. The map ships **minutes** per unit; the client multiplies by quantity and rounds to the nearest minute, matching the server's own rounding (§5.4). Sized by the plant's production versions × work centers with operations; fetched only for the selected, enabled plant. `RUN_TIME` on the task DTO stays the materialized truth for every existing consumer (`Util.runHours`, `nimbus-compute-core.js`, worker); the rate map only serves local edits and eligibility.
 
 ### 8.2 Edit hooks (`frontend/scheduling/orders.mts`, grid + Inspector)
