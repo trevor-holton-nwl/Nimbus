@@ -122,7 +122,8 @@ export type DropDecision =
 /** Pure: every (PV, machine) pair the material offers on `validityDate` -- each PV row valid that day
  *  with a non-blank header work center, crossed with every machine at that work center. A machine may
  *  appear under several PVs; expired and blank-work-center PVs offer nothing. Sorted pv, then machine. */
-export function computeEligiblePairs(map: RoutingRateMap, material: string, validityDate: Date): EligiblePair[] {
+export function computeEligiblePairs(map: RoutingRateMap, material: string, validityDate: Date,
+                                     opts: { requireOps?: boolean } = {}): EligiblePair[] {
   const prefix = `${material}|`;
   const pairs: EligiblePair[] = [];
   for (const [key, row] of Object.entries(map.pv)) {
@@ -270,12 +271,24 @@ export const Runtime = {
     };
   },
 
+  /** Memo for `eligiblePairs`: per rate-map object (a reload, or a test swapping `_rateMap`, invalidates it for
+   *  free), keyed by material, validity day and the requireOps flag. Callers must not mutate the result. */
+  _pairCache: new WeakMap<RoutingRateMap, Map<string, EligiblePair[]>>(),
+
   /** Every (PV, machine) pair the order's material offers, judged on the order's validity date. Same
-   *  cross-plant cache guard as `resolve()`: a stale/other-plant map offers nothing. */
-  eligiblePairs(task: NimbusTask): EligiblePair[] {
+   *  cross-plant cache guard as `resolve()`: a stale/other-plant map offers nothing. `requireOps` also drops
+   *  pairs whose routing has no operation at the work center (those would fail `resolve`). */
+  eligiblePairs(task: NimbusTask, opts: { requireOps?: boolean } = {}): EligiblePair[] {
     if (task.PLANT && task.PLANT !== Runtime._rateMapPlant) return [];
     const map = Runtime._rateMap ?? _EMPTY_MAP;
-    return computeEligiblePairs(map, task.MATERIAL_NUMBER ?? '', _validityDateFor(task));
+    const material = task.MATERIAL_NUMBER ?? '';
+    const date = _validityDateFor(task);
+    const key = `${material}|${_dateOnlyMs(date)}|${opts.requireOps ? 1 : 0}`;
+    let byKey = Runtime._pairCache.get(map);
+    if (!byKey) { byKey = new Map(); Runtime._pairCache.set(map, byKey); }
+    let pairs = byKey.get(key);
+    if (!pairs) { pairs = computeEligiblePairs(map, material, date, opts); byKey.set(key, pairs); }
+    return pairs;
   },
 
   /** `dropDecision` over this order's own pairs and current PV, for a drop onto `machine`. */

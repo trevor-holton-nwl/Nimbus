@@ -197,6 +197,9 @@ export interface ManualPlacementOptions {
   holdStartIfRunning?: boolean;
   /** Batch callers (Push +1 hour): do not toast a finish that cannot be held; the caller reports one summary. */
   quiet?: boolean;
+  /** Routing plants: the production version chosen together with the line (a drop that picked one of several
+   *  covering versions). `manualRoutingSchedulePatchFor` hands it to `pairSchedulePatchFor`. */
+  chosenPv?: string;
 }
 
 /** Why the last manual placement returned null (read by callers right after the call). */
@@ -1447,14 +1450,19 @@ export const Engine = {
   },
 
   /** Resolve a moved routing-derived order before constructing its schedule.
-   * Manual/order-file runtimes keep their existing authority on machine moves. The held FINISH is the
-   * anchor (the third argument); the start follows from the resolved run time. */
+   * On a routing plant a LINE change always re-resolves the run time from routing (D9: a hand-timed or SAP-timed
+   * order's run time resets to the new routing value when the planner moves it); a same-line call keeps the
+   * existing run time. The held FINISH is the anchor (the third argument); the start follows from the run time.
+   * `opts.chosenPv` (a drop that picked a covering production version) routes through `pairSchedulePatchFor`. */
   manualRoutingSchedulePatchFor(task: NimbusTask, line: string, requestedFinish: Date,
                                 opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
     Engine.lastManualRefusal = null;
     const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant;
     const enabled = Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
-    if (!enabled || line === task.MACHINE || (task.run_time_source !== 'routing' && task.RUN_TIME != null)) {
+    if (enabled && opts.chosenPv != null) {
+      return Engine.pairSchedulePatchFor(task, opts.chosenPv, line, requestedFinish, opts);
+    }
+    if (!enabled || line === task.MACHINE) {
       return Engine.manualSchedulePatchFor(task, line, requestedFinish, undefined, opts);
     }
     const resolved = Runtime.resolve(task, line);
@@ -1462,6 +1470,32 @@ export const Engine = {
     const changes = Engine.manualSchedulePatchFor({ ...task, RUN_TIME: resolved.hours }, line, requestedFinish, undefined, opts);
     return changes ? {
       ...changes, RUN_TIME: resolved.hours, run_time_source: 'routing',
+      run_time_basis: resolved.basis as unknown as Record<string, unknown>,
+    } : null;
+  },
+
+  /** One placement for a (production version, machine) pair. Resolves the run time from `pv`'s routing at
+   * `line` whenever it is called (a PV-only change keeps the machine, so the same-line shortcut above must not
+   * apply) and returns PRODUCTION_VERSION, MACHINE, RUN_TIME, run_time_source, run_time_basis and the dates in ONE
+   * patch (one Store write, one undo step). Null when the pair does not resolve (no refusal is recorded: the
+   * caller explains it with `toast.pv_machine_ineligible`) or when the placement itself is refused, in which case
+   * `Engine.lastManualRefusal` says why exactly as for `manualSchedulePatchFor`. On a plant without routing the
+   * pair is just written beside an ordinary placement. */
+  pairSchedulePatchFor(task: NimbusTask, pv: string, line: string, requestedFinish: Date,
+                       opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
+    Engine.lastManualRefusal = null;
+    const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant;
+    const enabled = Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
+    const pairTask = { ...task, PRODUCTION_VERSION: pv };
+    if (!enabled) {
+      const plain = Engine.manualSchedulePatchFor(pairTask, line, requestedFinish, undefined, opts);
+      return plain ? { ...plain, PRODUCTION_VERSION: pv, MACHINE: line } : null;
+    }
+    const resolved = Runtime.resolve(pairTask, line);
+    if (!resolved.ok) return null;
+    const changes = Engine.manualSchedulePatchFor({ ...pairTask, RUN_TIME: resolved.hours }, line, requestedFinish, undefined, opts);
+    return changes ? {
+      ...changes, PRODUCTION_VERSION: pv, MACHINE: line, RUN_TIME: resolved.hours, run_time_source: 'routing',
       run_time_basis: resolved.basis as unknown as Record<string, unknown>,
     } : null;
   },
