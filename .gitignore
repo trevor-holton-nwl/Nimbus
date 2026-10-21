@@ -65,6 +65,7 @@ frontend/calendar/calendar-admin.mjs
 frontend/calendar/calendar-periods.mjs
 frontend/calendar/calendar-periods-ui.mjs
 frontend/master-data/admin-ui.mjs
+frontend/master-data/date-input.mjs
 frontend/priority-lists/mapping.mjs
 frontend/labor/labor-planning.mjs
 frontend/admin-ops/admin-ui.mjs
