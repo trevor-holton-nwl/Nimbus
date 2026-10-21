@@ -1311,29 +1311,30 @@ details.line-group > summary::-webkit-details-marker { display: none; }
    gets the solid accent ring instead, as .vis-selected.conflict-order does (its red outline still paints). */
 .vis-item.vis-range.vis-selected.profile-match { box-shadow: var(--pm-inner), 0 0 0 2px var(--accent-wash); }
 .vis-item.vis-range.vis-selected.profile-match.conflict-order { box-shadow: var(--pm-inner), 0 0 0 2px var(--accent); }
-/* "Go To" target (Timeline.markGotoTask / markGotoCell; stays until cleared): dark ink ring (light in dark mode — --fg) with a
-   --bg-elev gap so it separates from the selection blue and from a red alert outline.
-   3px total outer reach (rows have ~4px margin). Must follow .dist-sibling to win. */
-/* The pulse animates the registered --goto-a (ring opacity) rather than box-shadow itself:
-   a declaration marked !important beats keyframe values, so animating box-shadow would be
-   blocked. 1px gap + 2px ring keeps the 3px reach. */
-@property --goto-a { syntax: '<percentage>'; inherits: false; initial-value: 100%; }
+/* "Go To" target (Timeline.markGotoTask / markGotoCell). Three layers:
+   1. Two-tone ring that stays until the planner moves on: a white inner keyline plus the ink ring (--fg, light in dark mode),
+      so it reads on dark/saturated bars and on pale ones. A --bg-elev gap separates it from the selection blue and a red alert
+      outline. Red was rejected on purpose: red already means firmed bars, conflicts and error alerts, so a red ring would
+      vanish on exactly the orders alerts lead to. 3px outer reach (rows have ~4px margin). Must follow .dist-sibling to win.
+   2. Spotlight (.goto-spotlight on the timeline container, ~2.5 s, toggled by Timeline._spotlight): every other order bar fades,
+      so the target is the only thing at full strength. A pairwise alert selects both orders, so the peer stays lit.
+      Opacity only: never position/top/height on .vis-item. Background items (zones, alert cells) do not fade.
+   3. Row tint (.goto-row on the target's .vis-group and label, same lifetime): an accent wash so the eye finds the lane first.
+      Placed after .row-expanded so it wins over that row's 6% wash. */
 .vis-item.goto-target {
-  box-shadow: 0 0 0 1px var(--bg-elev), 0 0 0 3px color-mix(in srgb, var(--fg) var(--goto-a), transparent) !important;
-  animation: goto-target-pulse 0.5s ease-in-out 0.4s 5;   /* delay: pulse after the pan settles */
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,0.95), 0 0 0 1px var(--bg-elev), 0 0 0 3px var(--fg) !important;
 }
-/* Day-cell marker for line/day alerts: inset shadow only (never position/top/height on vis items). */
+/* Day-cell marker for line/day alerts: inset shadows only (never position/top/height on vis items). */
 .vis-item.vis-background.goto-target {
-  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--fg) var(--goto-a), transparent) !important;
+  box-shadow: inset 0 0 0 3px var(--fg), inset 0 0 0 5px rgba(255,255,255,0.9) !important;
 }
-@keyframes goto-target-pulse {
-  0%, 100% { --goto-a: 100%; }
-  50%      { --goto-a: 30%; }
+.goto-spotlight .vis-item.vis-range:not(.goto-target):not(.vis-selected) { opacity: .25; }
+@media (prefers-reduced-motion: no-preference) {
+  .vis-item.vis-range { transition: opacity .25s; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .vis-item.goto-target,
-  .vis-item.vis-background.goto-target { animation: none; }
-}
+.vis-foreground .vis-group.goto-row,
+.vis-labelset .vis-label.goto-row { background: rgba(var(--accent-rgb), 0.16); }
+.vis-labelset .vis-label.goto-row { box-shadow: inset 3px 0 0 var(--accent); }
 
 /* Custom vis background areas for blackout blocks */
 .vis-item.blackout {
@@ -5764,6 +5765,7 @@ body.dark .vis-labelset .vis-label .vis-inner,
 body.dark .vis-labelset .vis-label *:not(.row-stack-toggle) { color: #f5f2ea !important; }
 body.dark .vis-labelset .vis-label { background: var(--bg-elev) !important; }
 body.dark .vis-labelset .vis-label.row-expanded { background: var(--accent-wash) !important; }
+body.dark .vis-labelset .vis-label.goto-row { background: rgba(var(--accent-rgb), 0.16) !important; }
 /* Blackout hatch, non-working shading and the alertcell-err/warn/calendar
    day cells re-tune for dark mode through their tokens (--blackout-*,
    --zone-nonworking, --alertcell-*) in the body.dark block above — the

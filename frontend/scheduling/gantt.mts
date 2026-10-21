@@ -162,6 +162,9 @@ interface TimelineAlertCellInfo {
      • double-click → open in Inspector
    ========================================================================== */
 const _ZONE_MIN_PX = 0.5;
+const ZOOM_MIN_MS = 15 * 60 * 1000;            // vis zoomMin (init) — also the floor for a Go To window
+const ZOOM_MAX_MS = 30 * 24 * 3600 * 1000;     // vis zoomMax (init) — also the ceiling for a Go To window
+const GOTO_SPOTLIGHT_MS = 2500;                // how long the Go To spotlight + row tint last
 export const Timeline = {
   _tl: null as NimbusVendor.VisTimelineInstance | null,
   _items:     null as NimbusVendor.VisDataSet<TimelineVisItem> | null,
@@ -189,6 +192,9 @@ export const Timeline = {
   _suppressEvents: false,       // guard to prevent self-triggered loops
   _unsubProfileMatches: null as (() => void) | null,   // AlertProfileMatches.subscribe handle (init)
   _gotoTarget: null as { kind: 'task'; taskId: string } | { kind: 'cell'; itemId: string } | null,   // "Go To" marker; stays until the planner moves on (clearGotoTarget). Builders re-apply .goto-target so a rebuild can't drop it
+  _spotlightTimer: null as ReturnType<typeof setTimeout> | null,   // ends the Go To spotlight (_spotlight/_endSpotlight)
+  _gotoSeq: 0,                  // gotoLineDay generation: a newer Go To aborts the older one's pending scroll steps
+  _gotoSettling: false,         // true from gotoLineDay until its final scroll: markGoto* hold the spotlight until then
   _conflictSrc: null as NimbusAlert[] | null,           // alerts array reference — invalidates cache when it changes
   _conflictSet: null as Set<string> | null,           // Set<String(taskId)> built once per alerts array identity
   _visEl:       null as HTMLElement | null,           // cached #vis-timeline element (set in init)
@@ -335,8 +341,8 @@ export const Timeline = {
       // redraw), which is what threw the Gantt to the bottom on tab re-entry and on
       // first load. item:'top' makes scrollTop a stable "px from top of content".
       orientation: { axis: 'top', item: 'top' },
-      zoomMin: 15 * 60 * 1000,           // 15 min
-      zoomMax: 30 * 24 * 3600 * 1000,    // 30 days
+      zoomMin: ZOOM_MIN_MS,              // 15 min
+      zoomMax: ZOOM_MAX_MS,              // 30 days
       zoomKey: 'ctrlKey',
       margin: { item: { horizontal: 2, vertical: 4 } },
       height: '100%',
@@ -958,6 +964,7 @@ export const Timeline = {
     Timeline.clearGotoTarget();
     Timeline._gotoTarget = { kind: 'task', taskId: id };
     Timeline._setGotoClass(id, true);
+    if (!Timeline._gotoSettling) Timeline._spotlight(Store.tasks[id]?.MACHINE ?? null);
   },
   /** "Go To" marker on a line/day alert cell (no order to ring). Same lifetime as `markGotoTask`. */
   markGotoCell(line: string, dayKey: string): void {
@@ -965,13 +972,41 @@ export const Timeline = {
     Timeline.clearGotoTarget();
     Timeline._gotoTarget = { kind: 'cell', itemId };
     Timeline._setGotoClassIds([itemId], true);
+    if (!Timeline._gotoSettling) Timeline._spotlight(line);
   },
   clearGotoTarget(): void {
+    Timeline._endSpotlight();
     const cur = Timeline._gotoTarget;
     if (!cur) return;
     Timeline._gotoTarget = null;
     if (cur.kind === 'task') Timeline._setGotoClass(cur.taskId, false);
     else Timeline._setGotoClassIds([cur.itemId], false);
+  },
+
+  /** Go To spotlight (~2.5 s): the timeline container gets `goto-spotlight` (every other order bar fades) and the
+   *  target line's group + label get `goto-row` (accent wash). Classes go straight onto the DOM, never through a vis
+   *  group className update (vis 7.7.3 group/subgroup hazards); it is short-lived, so a rebuild dropping it early is
+   *  harmless. Restarts if already running; `_endSpotlight` (timer or clearGotoTarget) strips it. */
+  _spotlight(line: string | null): void {
+    Timeline._endSpotlight();
+    const el = Timeline._visEl;
+    if (!el) return;
+    el.classList.add('goto-spotlight');
+    if (line) {
+      const idx = Timeline._visibleLines().indexOf(line);
+      if (idx >= 0) {
+        el.querySelectorAll('.vis-foreground .vis-group')[idx]?.classList.add('goto-row');
+        el.querySelectorAll('.vis-labelset .vis-label')[idx]?.classList.add('goto-row');
+      }
+    }
+    Timeline._spotlightTimer = setTimeout(() => Timeline._endSpotlight(), GOTO_SPOTLIGHT_MS);
+  },
+  _endSpotlight(): void {
+    if (Timeline._spotlightTimer !== null) { clearTimeout(Timeline._spotlightTimer); Timeline._spotlightTimer = null; }
+    const el = Timeline._visEl;
+    if (!el) return;
+    el.classList.remove('goto-spotlight');
+    el.querySelectorAll('.goto-row').forEach(n => n.classList.remove('goto-row'));
   },
 
   /** `profile-match profile-match-<category> profile-match-<sev>` for an order the active alert profile
@@ -2245,19 +2280,44 @@ export const Timeline = {
       : sortedLines;
   },
 
-  // Scroll the vis-timeline vertical scroller so the group row for `line`
-  // is at the top of the visible viewport. Returns false (no-op, no crash)
-  // if the line isn't currently rendered — e.g. hidden by an active
-  // GanttFilter line filter, or the Gantt hasn't rendered any groups yet.
-  scrollToLine(line: string): boolean {
+  // Scroll the vis-timeline vertical scroller so the group row for `line` is CENTERED in the viewport
+  // (clamped at the top and bottom rows, which cannot center: accepted). Returns false (no-op, no crash)
+  // if the line isn't currently rendered — e.g. hidden by an active GanttFilter line filter, or the Gantt
+  // hasn't rendered a group for every visible line yet (summing a partly painted rebuild's heights would
+  // land on the wrong offset, so that counts as "not rendered").
+  //   opts.itemIds  the target order's vis item ids: inside an expanded row the target LANE is centered
+  //                 (its box offset inside the row) instead of the whole row.
+  //   opts.peerLine the other order's line for a pairwise alert: when both rows fit on screen, center the
+  //                 midpoint of the two rows; otherwise center `line` alone.
+  // Viewport height unknown (not laid out): falls back to the row-at-top behaviour.
+  scrollToLine(line: string, opts?: { itemIds?: string[]; peerLine?: string }): boolean {
     const visibleLines = Timeline._visibleLines();
     const lineIdx = visibleLines.indexOf(line);
     if (lineIdx < 0) return false;
     const groups = document.querySelectorAll('.vis-foreground .vis-group');
-    if (!groups.length) return false;
-    let targetY = 0;
-    for (let i = 0; i < lineIdx && i < groups.length; i++) {
-      targetY += groups[i].getBoundingClientRect().height;
+    if (!groups.length || groups.length < visibleLines.length) return false;
+    const heights = Array.from(groups, g => g.getBoundingClientRect().height);
+    const rowTop = (i: number): number => { let y = 0; for (let k = 0; k < i && k < heights.length; k++) y += heights[k]; return y; };
+    const tl = Timeline._tl as unknown as VisInternalTimeline | null;
+    const viewportH = tl?.props?.centerContainer?.height || document.querySelector('.vis-center')?.clientHeight || 0;
+    let targetY = rowTop(lineIdx);
+    if (viewportH > 0) {
+      const contentH = rowTop(heights.length);
+      let centerY = targetY + (heights[lineIdx] ?? 0) / 2;
+      const groupTop = groups[lineIdx].getBoundingClientRect().top;
+      for (const id of opts?.itemIds ?? []) {
+        const box = tl?.itemSet?.items?.[id]?.dom?.box;
+        if (!box) continue;
+        const r = box.getBoundingClientRect();
+        if (r.height > 0 && Number.isFinite(r.top - groupTop)) { centerY = targetY + (r.top - groupTop) + r.height / 2; break; }
+      }
+      const peerIdx = opts?.peerLine ? visibleLines.indexOf(opts.peerLine) : -1;
+      if (peerIdx >= 0 && peerIdx !== lineIdx) {
+        const top = Math.min(rowTop(lineIdx), rowTop(peerIdx));
+        const bottom = Math.max(rowTop(lineIdx) + heights[lineIdx], rowTop(peerIdx) + (heights[peerIdx] ?? 0));
+        if (bottom - top <= viewportH) centerY = (top + bottom) / 2;
+      }
+      targetY = Math.min(Math.max(centerY - viewportH / 2, 0), Math.max(0, contentH - viewportH));
     }
     // Explicit navigation wins over whatever rebuild() would otherwise
     // restore — set _vScrollTop directly (not just the DOM/internal write)
@@ -2267,10 +2327,43 @@ export const Timeline = {
     // vis's _setScrollTop convention is NEGATIVE (0 = top; any positive value
     // is clamped straight to the top), so targetY — a positive "px down from
     // top" — must be negated, or this always lands on the top row regardless
-    // of lineIdx.
-    Timeline._vScrollTop = -targetY;
-    Timeline._setVScroll(-targetY);
+    // of lineIdx. (0 stays +0, never -0.)
+    const scroll = targetY > 0 ? -targetY : 0;
+    Timeline._vScrollTop = scroll;
+    Timeline._setVScroll(scroll);
     return true;
+  },
+
+  /** Time span [start, end] (ms) covering every segment of the given orders, or null when none has dates. */
+  _taskSpan(taskIds: string[]): { start: number; end: number } | null {
+    let start = Infinity;
+    let end = -Infinity;
+    for (const id of taskIds) {
+      const t = Store.tasks[id];
+      if (!t) continue;
+      const segs = t.scheduleSegments?.length ? t.scheduleSegments.map(s => [s.startDate, s.endDate] as const) : [[t.start_date, t.end_date] as const];
+      for (const [s, e] of segs) {
+        if (!s || !e) continue;
+        start = Math.min(start, new Date(s).getTime());
+        end = Math.max(end, new Date(e).getTime());
+      }
+    }
+    return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+  },
+
+  /** Go To window: width max(3 days, span x 1.2) clamped to the zoom limits, centered on the midpoint of the
+   *  order(s)' span (every segment, the peer order too); with no dated order, centered on the alert's day. The alert
+   *  day is always kept inside (the window slides the minimum needed). */
+  _gotoWindowFor(dateStr: string, taskIds: string[] = []): { start: number; end: number } {
+    const dayStart = new Date(dateStr + 'T00:00:00').getTime();
+    const dayEnd = dayStart + 24 * Config.MS_HOUR;
+    const span = Timeline._taskSpan(taskIds);
+    const mid = span ? (span.start + span.end) / 2 : dayStart + 12 * Config.MS_HOUR;
+    const width = Math.min(Math.max(3 * 24 * Config.MS_HOUR, span ? (span.end - span.start) * 1.2 : 0), ZOOM_MAX_MS);
+    let start = mid - width / 2;
+    if (start > dayStart) start = dayStart;
+    else if (start + width < dayEnd) start = dayEnd - width;
+    return { start, end: start + width };
   },
 
   // Shared "pan to a day + scroll to a line row" navigation, used by
@@ -2285,19 +2378,29 @@ export const Timeline = {
   // scroll-to-line retry below — AlertsUIAdapter.focus uses it to layer
   // task selection/Inspector on top without re-centering the window a
   // second time.
-  gotoLineDay(line: string, dateStr: string, onWindowSet?: () => void): void {
+  //
+  // `anchor` (optional) centers the view on the order (and the pairwise peer) instead of the alert's day:
+  // see _gotoWindowFor / scrollToLine. Without it the alert's day is centered.
+  //
+  // Sequence: window animation -> (after its `rangechanged`, or a 700 ms fallback when the window did not
+  // move) bounded retry until the rows are laid out -> scroll -> re-measure an expanded row and scroll again
+  // (a lane row above the target growing or shrinking would otherwise push it off-center) -> spotlight.
+  // markGoto* called from `onWindowSet` hold the spotlight until that last step so the planner sees it
+  // once the view has stopped moving; a newer Go To (`_gotoSeq`) aborts the older one's pending steps.
+  gotoLineDay(line: string, dateStr: string, onWindowSet?: () => void, anchor?: { taskId?: string; peerId?: string }): void {
+    const seq = ++Timeline._gotoSeq;
+    Timeline._gotoSettling = true;
     NIMBUS!.App!.gotoGanttTimeline!();
     setTimeout(() => {
-      if (Timeline._tl) {
-        const dayStart    = new Date(dateStr + 'T00:00:00');
-        const dayLevelEnd = new Date(dayStart.getTime() + 3 * 24 * Config.MS_HOUR);
-        Timeline._syncViewWindow(dayStart.getTime(), dayLevelEnd.getTime());
-        Timeline._tl.setWindow(dayStart, dayLevelEnd, { animation: { duration: 300 } });
-        document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(b => {
-          b.classList.toggle('active', b.dataset.view === 'day');
-        });
-      }
-      onWindowSet?.();
+      if (seq !== Timeline._gotoSeq) return;
+      const taskIds = [anchor?.taskId, anchor?.peerId].filter((x): x is string => !!x);
+      const peerLine = anchor?.peerId ? Store.tasks[anchor.peerId]?.MACHINE : undefined;
+      const scrollOpts = () => ({ itemIds: anchor?.taskId ? Timeline.itemIdsForTask(anchor.taskId) : [], peerLine });
+      const finish = () => {
+        if (seq !== Timeline._gotoSeq) return;
+        Timeline._gotoSettling = false;
+        if (Timeline._gotoTarget) Timeline._spotlight(line);
+      };
       // B2: scrollToLine can legitimately fail on the first frame(s) here —
       // AlertsUIAdapter.focus's reveal (Store.setSelectedLines, just before
       // this call) triggers a 'lines:selected' → Timeline.rebuild() chain
@@ -2307,13 +2410,48 @@ export const Timeline = {
       // (bad data, an unanticipated race) can't spin forever, and it stops
       // the instant scrollToLine succeeds so it never fights a user's own
       // scroll that happens afterward.
-      let attempts = 0;
-      const MAX_SCROLL_ATTEMPTS = 20; // a handful of rebuild/render cycles' worth
-      const tryScroll = () => {
-        if (Timeline.scrollToLine(line)) return;
-        if (++attempts < MAX_SCROLL_ATTEMPTS) requestAnimationFrame(tryScroll);
+      const startScroll = () => {
+        let attempts = 0;
+        const MAX_SCROLL_ATTEMPTS = 20; // a handful of rebuild/render cycles' worth
+        const tryScroll = () => {
+          if (seq !== Timeline._gotoSeq) return;
+          if (Timeline.scrollToLine(line, scrollOpts())) {
+            const expanded = Timeline._expandedLine;
+            if (expanded && (Timeline._depthByLine.get(expanded) ?? 0) > 1) Timeline._fitHeightMeasured();
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              if (seq !== Timeline._gotoSeq) return;
+              Timeline.scrollToLine(line, scrollOpts());
+              finish();
+            }));
+            return;
+          }
+          if (++attempts < MAX_SCROLL_ATTEMPTS) requestAnimationFrame(tryScroll);
+          else finish();
+        };
+        requestAnimationFrame(tryScroll);
       };
-      requestAnimationFrame(tryScroll);
+      const tl = Timeline._tl;
+      if (tl) {
+        const win = Timeline._gotoWindowFor(dateStr, taskIds);
+        Timeline._syncViewWindow(win.start, win.end);
+        tl.setWindow(new Date(win.start), new Date(win.end), { animation: { duration: 300 } });
+        document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(b => {
+          b.classList.toggle('active', b.dataset.view === 'day');
+        });
+      }
+      onWindowSet?.();
+      if (!tl) { startScroll(); return; }
+      let started = false;
+      let fallback: ReturnType<typeof setTimeout> | null = null;
+      const go = () => {
+        if (started) return;
+        started = true;
+        if (fallback !== null) clearTimeout(fallback);
+        tl.off('rangechanged', go);
+        startScroll();
+      };
+      tl.on('rangechanged', go);
+      fallback = setTimeout(go, 700);
     }, 250);
   }
 };
@@ -3974,6 +4112,7 @@ type InteractionDataSetUpdateProps = { items: Array<string | number>; data?: Tim
  *  could change on any vis-timeline upgrade without a version bump signal. */
 interface VisInternalTimeline {
   body?: { domProps?: { center?: { width?: number } } };
+  props?: { centerContainer?: { height?: number } };
   itemSet?: {
     items?: Record<string, {
       dom?: { box?: HTMLElement };
