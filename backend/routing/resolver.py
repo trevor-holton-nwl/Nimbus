@@ -87,7 +87,7 @@ _SECOND_UNITS = frozenset({"S", "SEC", "SECS", "SECOND", "SECONDS"})
 ROUTING_HOLD_STEPS = frozenset({
     "pv_missing", "pv_not_found", "pv_expired", "no_machine",
     "workcenter_unmapped", "no_routing", "no_operation_at_workcenter",
-    "zero_runtime",
+    "zero_runtime", "pv_workcenter_mismatch",
 })
 
 
@@ -228,6 +228,49 @@ def _fallback(order: dict, reason_code: str) -> dict:
     return {"status": "held", "reason_code": "runtime_unknown", "detail_step": reason_code}
 
 
+def _pair_step(order: dict, pv_lookup: dict, machine_workcenter: dict) -> str | None:
+    """The (production version, machine) head of §5.2: the first failing step among pv_missing,
+    pv_not_found, pv_expired, no_machine, workcenter_unmapped and `pv_workcenter_mismatch` (the PV
+    row's own `sap_workcenter` is blank or differs from the machine's work center -- bad master
+    data, fail closed), or None when the pair is coherent. No routing/operation lookup."""
+    pv_value = order.get("production_version")
+    if not pv_value:
+        # Step 1: caller decides what "no fallback" means for it -- D4: a
+        # missing production version always holds/fails, no guess.
+        return "pv_missing"
+
+    plant = order.get("plant")
+    material = order.get("material_number")
+    pv_row = pv_lookup.get((plant, material, pv_value))
+    if pv_row is None:
+        return "pv_not_found"
+
+    # Validity is judged on the SAP start as first received (locked; backward scheduling OQ26), never on
+    # `basic_start_date`, which an echo of NIMBUS's own send can move. A row dict without the locked value
+    # (a caller that predates it) falls back to `basic_start_date`.
+    # U13: an order with no start at all (an Excel upload without BASIC_START_DATE) is judged on its locked
+    # finish, then the planning finish, then today -- never on None, which `_within_validity` reads as valid.
+    validity_start = next((order.get(k) for k in ("original_start_received", "basic_start_date",
+                                                  "original_finish_received", "basic_finish_date")
+                           if order.get(k) is not None), None)
+    if validity_start is None:
+        validity_start = datetime.now().date()
+    if not _within_validity(validity_start, pv_row.get("valid_from"), pv_row.get("valid_to")):
+        return "pv_expired"
+
+    machine = order.get("machine")
+    if not machine:
+        return "no_machine"
+    workcenter = machine_workcenter.get(machine)
+    if not workcenter:
+        return "workcenter_unmapped"
+
+    pv_workcenter = pv_row.get("sap_workcenter")
+    if not pv_workcenter or pv_workcenter != workcenter:
+        return "pv_workcenter_mismatch"
+    return None
+
+
 def _resolve_steps(order: dict, *, pv_lookup: dict, op_lookup: dict,
                    machine_workcenter: dict, rules: dict) -> dict:
     """§5.2 steps 1-8 + §5.4's formula + the lot-size warning, over one
@@ -257,37 +300,16 @@ def _resolve_steps(order: dict, *, pv_lookup: dict, op_lookup: dict,
       {"ok": True, "run_time": Decimal, "run_time_basis": {...},
        "lot_size_warning": bool}
     """
-    pv_value = order.get("production_version")
-    if not pv_value:
-        # Step 1: caller decides what "no fallback" means for it -- D4: a
-        # missing production version always holds/fails, no guess.
-        return {"ok": False, "step": "pv_missing"}
+    step = _pair_step(order, pv_lookup, machine_workcenter)
+    if step is not None:
+        return {"ok": False, "step": step}
 
+    pv_value = order.get("production_version")
     plant = order.get("plant")
     material = order.get("material_number")
-    pv_row = pv_lookup.get((plant, material, pv_value))
-    if pv_row is None:
-        return {"ok": False, "step": "pv_not_found"}
-
-    # Validity is judged on the SAP start as first received (locked; backward scheduling OQ26), never on
-    # `basic_start_date`, which an echo of NIMBUS's own send can move. A row dict without the locked value
-    # (a caller that predates it) falls back to `basic_start_date`.
-    # U13: an order with no start at all (an Excel upload without BASIC_START_DATE) is judged on its locked
-    # finish, then the planning finish, then today -- never on None, which `_within_validity` reads as valid.
-    validity_start = next((order.get(k) for k in ("original_start_received", "basic_start_date",
-                                                  "original_finish_received", "basic_finish_date")
-                           if order.get(k) is not None), None)
-    if validity_start is None:
-        validity_start = datetime.now().date()
-    if not _within_validity(validity_start, pv_row.get("valid_from"), pv_row.get("valid_to")):
-        return {"ok": False, "step": "pv_expired"}
-
+    pv_row = pv_lookup[(plant, material, pv_value)]
     machine = order.get("machine")
-    if not machine:
-        return {"ok": False, "step": "no_machine"}
-    workcenter = machine_workcenter.get(machine)
-    if not workcenter:
-        return {"ok": False, "step": "workcenter_unmapped"}
+    workcenter = machine_workcenter[machine]
 
     routing_key = (plant, material, pv_row.get("task_list_type"),
                    pv_row.get("routing_group"), pv_row.get("group_counter"))
@@ -383,6 +405,10 @@ def resolve_one(order: dict, *, pv_lookup: dict, op_lookup: dict,
             # Step 1: skip the fallback chain entirely -- D4: a missing
             # production version always holds, no guess.
             return {"status": "held", "reason_code": "pv_missing"}
+        if step == "pv_workcenter_mismatch":
+            # Bad master data (the PV header work center disagrees with the machine's): hold
+            # directly, never rescued by the order file's machine hours or a stored run time.
+            return {"status": "held", "reason_code": "runtime_unknown", "detail_step": step}
         return _fallback(order, step)
 
     return {
@@ -463,6 +489,32 @@ def check_eligibility(plant: str, material_id: str, production_version, machine,
     with _pool.connection() as new_conn:
         return _check_eligibility_on_conn(plant, material_id, production_version,
                                           machine, order_quantity, original_start_date, new_conn)
+
+
+def check_pair(plant: str, material_id: str, production_version, machine,
+               original_start_date, *, conn=None, cache: dict | None = None) -> dict:
+    """Pair-only eligibility (no quantity, no routing/operation lookup): runs just `_pair_step` for one
+    hypothetical (production version, machine) combination. Returns {"ok": True} or
+    {"ok": False, "step": <failure code>}. Same `conn`/`cache` conventions as `check_eligibility`."""
+    def _run(c):
+        loaded = cache.get(plant) if cache is not None else None
+        if loaded is None:
+            with c.cursor() as cur:
+                loaded = (_load_pv_lookup(cur, plant), _load_op_lookup(cur, plant),
+                          _load_machine_workcenter(cur, plant), _load_rules(cur, plant))
+            if cache is not None:
+                cache[plant] = loaded
+        pv_lookup, _op_lookup, machine_workcenter, _rules = loaded
+        order = {"plant": plant, "material_number": material_id,
+                 "production_version": production_version, "machine": machine,
+                 "original_start_received": original_start_date}
+        step = _pair_step(order, pv_lookup, machine_workcenter)
+        return {"ok": True} if step is None else {"ok": False, "step": step}
+
+    if conn is not None:
+        return _run(conn)
+    with _pool.connection() as new_conn:
+        return _run(new_conn)
 
 
 # ===========================================================================
@@ -1008,6 +1060,7 @@ def _build_pv_map(pv_lookup: dict) -> dict:
             "lot_from": _numeric_or_none(row.get("lot_size_from")),
             "lot_to": _numeric_or_none(row.get("lot_size_to")),
             "key": f"{material_id}|{row.get('task_list_type')}|{row.get('routing_group')}|{row.get('group_counter')}",
+            "workcenter": row.get("sap_workcenter") or None,
         }
     return pv
 

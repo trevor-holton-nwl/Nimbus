@@ -793,3 +793,94 @@ class TestValidityIsJudgedOnTheLockedSapStart:
             cur = Cur()
             _load_orders(cur, "P", False, **kwargs)
             assert "original_start_received" in cur.sql[0]
+
+
+# ---------------------------------------------------------------------------
+# PV - Machine eligibility: `pv_workcenter_mismatch` step + `check_pair`
+# ---------------------------------------------------------------------------
+class TestPvWorkcenterMismatch:
+    def _case(self, pv_workcenter, **order_extra):
+        case = dict(_ELIGIBILITY_CASES["category_0001_uses_machine_value"])
+        case["production_versions"] = [dict(case["production_versions"][0], sap_workcenter=pv_workcenter)]
+        case["order"] = dict(case["order"], **order_extra)
+        return case
+
+    def _resolve(self, case):
+        return resolve_one(
+            _build_order(case["order"]),
+            pv_lookup=_build_pv_lookup(case["production_versions"]),
+            op_lookup=_build_op_lookup(case["operations"]),
+            machine_workcenter=dict(case["machine_workcenter"]),
+            rules=_build_rules(case.get("rules") or {}),
+        )
+
+    def test_the_vocabulary_lists_the_new_step(self):
+        from backend.routing.resolver import ROUTING_HOLD_STEPS
+        assert "pv_workcenter_mismatch" in ROUTING_HOLD_STEPS
+
+    @pytest.mark.parametrize("pv_workcenter", ["OTHER_WC", "", None])
+    def test_differing_or_blank_pv_workcenter_holds(self, pv_workcenter):
+        result = self._resolve(self._case(pv_workcenter))
+        assert result == {"status": "held", "reason_code": "runtime_unknown",
+                          "detail_step": "pv_workcenter_mismatch"}
+
+    def test_the_hold_bypasses_the_machine_hours_fallback(self):
+        result = self._resolve(self._case("OTHER_WC", machine_hours=12, run_time=5, run_time_source="manual"))
+        assert result["status"] == "held"
+        assert result["detail_step"] == "pv_workcenter_mismatch"
+        assert "run_time" not in result
+
+    def test_a_matching_pv_workcenter_still_resolves(self):
+        case = self._case(None)
+        wc = case["machine_workcenter"][case["order"]["machine"]]
+        case = self._case(wc)
+        assert self._resolve(case)["status"] == "resolved"
+
+    def test_check_eligibility_reports_the_step(self):
+        case = self._case("OTHER_WC")
+        order = case["order"]
+        result = check_eligibility(order["plant"], order["material_number"], order["production_version"],
+                                   order["machine"], order["order_quantity"], None,
+                                   conn=_FakeEligibilityConnection(case))
+        assert result == {"ok": False, "step": "pv_workcenter_mismatch"}
+
+
+class TestCheckPair:
+    def _case(self):
+        return _ELIGIBILITY_CASES["category_0001_uses_machine_value"]
+
+    def test_a_coherent_pair_is_ok(self):
+        from backend.routing.resolver import check_pair
+        case = self._case()
+        order = case["order"]
+        result = check_pair(order["plant"], order["material_number"], order["production_version"],
+                            order["machine"], None, conn=_FakeEligibilityConnection(case))
+        assert result == {"ok": True}
+
+    def test_a_machine_at_another_workcenter_fails_closed(self):
+        from backend.routing.resolver import check_pair
+        case = dict(self._case())
+        case["machine_workcenter"] = {**case["machine_workcenter"], "M_OTHER": "ELSEWHERE"}
+        order = case["order"]
+        result = check_pair(order["plant"], order["material_number"], order["production_version"],
+                            "M_OTHER", None, conn=_FakeEligibilityConnection(case))
+        assert result == {"ok": False, "step": "pv_workcenter_mismatch"}
+
+    def test_an_unknown_pv_reports_pv_not_found_and_the_cache_loads_once(self):
+        from backend.routing.resolver import check_pair
+        case = self._case()
+        order = case["order"]
+        loads = []
+
+        class Conn(_FakeEligibilityConnection):
+            def cursor(self):
+                loads.append(1)
+                return super().cursor()
+
+        cache: dict = {}
+        conn = Conn(case)
+        for _ in range(3):
+            result = check_pair(order["plant"], order["material_number"], "9999", order["machine"], None,
+                                conn=conn, cache=cache)
+            assert result == {"ok": False, "step": "pv_not_found"}
+        assert len(loads) == 1
