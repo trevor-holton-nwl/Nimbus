@@ -250,7 +250,9 @@ export interface MissingMasterDataException {
   plant: string | null;
   material_number: string;
   order_count: number;
-  reason: 'no_mp_row' | 'no_plant_derived';
+  /** Present on the PV - Machine rows (routing-enabled plants only). */
+  production_version?: string;
+  reason: 'no_mp_row' | 'no_plant_derived' | 'pv_workcenter_missing' | 'pv_workcenter_no_operation';
 }
 export interface MissingMasterDataReport {
   unmatched_pairs: number;

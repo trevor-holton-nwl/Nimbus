@@ -473,7 +473,9 @@ def test_upload_bom_rejects_oversized_file_with_413(monkeypatch):
 
 
 _FORMULA_EXCEPTIONS = [{"plant": "=PLANT", "material_number": "+MAT", "order_count": 3, "reason": "-no_mp_row"},
-                       {"plant": "@P2", "material_number": "MAT2", "order_count": 1, "reason": "no_mp_row"}]
+                       {"plant": "@P2", "material_number": "MAT2", "order_count": 1, "reason": "no_mp_row"},
+                       {"plant": "P3", "material_number": "MAT3", "production_version": "=0002", "order_count": 2,
+                        "reason": "pv_workcenter_missing"}]
 
 
 def _assert_formula_guarded_csv(response):
@@ -482,9 +484,10 @@ def _assert_formula_guarded_csv(response):
     assert response.status_code == 200
     assert response.content.startswith(b"\xef\xbb\xbf")
     rows = list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"))))
-    assert rows[0] == ["plant", "material_number", "order_count", "reason"]
-    assert rows[1] == ["'=PLANT", "'+MAT", "3", "'-no_mp_row"]
-    assert rows[2] == ["'@P2", "MAT2", "1", "no_mp_row"]
+    assert rows[0] == ["plant", "material_number", "production_version", "order_count", "reason"]
+    assert rows[1] == ["'=PLANT", "'+MAT", "", "3", "'-no_mp_row"]
+    assert rows[2] == ["'@P2", "MAT2", "", "1", "no_mp_row"]
+    assert rows[3] == ["P3", "MAT3", "'=0002", "2", "pv_workcenter_missing"]
 
 
 def test_batch_missing_master_data_csv_is_bom_prefixed_and_formula_guarded(admin_client, monkeypatch):

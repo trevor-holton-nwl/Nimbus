@@ -19,7 +19,7 @@ def _operation(activity="0010", **overrides):
 def routing_case():
     order = {"plant": "P1", "material_number": "MAT1", "production_version": "V1", "machine": "M1",
              "basic_start_date": date(2026, 10, 13), "order_quantity": Decimal("20")}
-    pv = {"task_list_type": "N", "routing_group": "R1", "group_counter": "1",
+    pv = {"task_list_type": "N", "routing_group": "R1", "group_counter": "1", "sap_workcenter": "WC1",
           "valid_from": date(2026, 1, 1), "valid_to": date(2026, 12, 31),
           "lot_size_from": Decimal("10"), "lot_size_to": Decimal("30")}
     context = {"pv_lookup": {("P1", "MAT1", "V1"): pv},

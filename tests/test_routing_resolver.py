@@ -1036,3 +1036,90 @@ class TestCheckPair:
                                 conn=conn, cache=cache)
             assert result == {"ok": False, "step": "pv_not_found"}
         assert len(loads) == 1
+
+
+# ---------------------------------------------------------------------------
+# Missing-master-data report: PV header work-center rows (routing-enabled plants only).
+# ---------------------------------------------------------------------------
+class _MmdCursor:
+    def __init__(self, routing_enabled, pv_rows):
+        self.routing_enabled = routing_enabled
+        self.pv_rows = pv_rows
+        self.executed = []
+        self._rows = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.executed.append(sql)
+        if "FROM plants" in sql:
+            self._rows = [(self.routing_enabled,)]
+        elif "JOIN production_version pv" in sql:
+            self._rows = list(self.pv_rows)
+        else:
+            self._rows = [("P1", "MAT-NO-MP", 2, "no_mp_row")]
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _MmdConn:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return _MmdCursorCtx(self.cur)
+
+
+class _MmdCursorCtx:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def __enter__(self):
+        return self.cur
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _MmdPool:
+    def __init__(self, cur):
+        self.cur = cur
+
+    def connection(self):
+        return _MmdConn(self.cur)
+
+
+def test_missing_master_data_adds_pv_workcenter_rows_on_a_routing_plant(monkeypatch):
+    import db as db_module
+    pv_rows = [("P1", "MAT1", "0001", "pv_workcenter_missing", 3),
+               ("P1", "MAT2", "0002", "pv_workcenter_no_operation", 1)]
+    cur = _MmdCursor(True, pv_rows)
+    monkeypatch.setattr(db_module, "_pool", _MmdPool(cur))
+    result = db_module.missing_master_data_for_plant("P1")
+    assert result["exceptions"][1:] == [
+        {"plant": "P1", "material_number": "MAT1", "production_version": "0001",
+         "reason": "pv_workcenter_missing", "order_count": 3},
+        {"plant": "P1", "material_number": "MAT2", "production_version": "0002",
+         "reason": "pv_workcenter_no_operation", "order_count": 1},
+    ]
+    assert result["unmatched_pairs"] == 3 and result["unmatched_orders"] == 6
+    pv_sql = next(sql for sql in cur.executed if "JOIN production_version pv" in sql)
+    assert "NOT ro.deleted" in pv_sql and "COALESCE(btrim(pv.sap_workcenter), '') = ''" in pv_sql
+
+
+def test_missing_master_data_skips_pv_rows_on_a_non_routing_plant(monkeypatch):
+    import db as db_module
+    cur = _MmdCursor(False, [("P1", "MAT1", "0001", "pv_workcenter_missing", 3)])
+    monkeypatch.setattr(db_module, "_pool", _MmdPool(cur))
+    result = db_module.missing_master_data_for_plant("P1")
+    assert result["unmatched_pairs"] == 1 and result["unmatched_orders"] == 2
+    assert not any("JOIN production_version pv" in sql for sql in cur.executed)

@@ -3302,9 +3302,53 @@ def missing_master_data_for_plant(plant: str) -> dict:
             (plant,),
         )
         rows = cur.fetchall()
+        # PV - Machine (routing-enabled plants only): a production version whose header work center is
+        # blank offers no machine (`pv_workcenter_missing`), and one whose header work center has no
+        # non-deleted routing operation in the PV's own routing offers no run time
+        # (`pv_workcenter_no_operation`). One row per (material, PV) with the orders currently carrying
+        # that PV, so the panel counts and displays them like a missing material-plant row.
+        cur.execute("SELECT routing_runtime_enabled FROM plants WHERE plant = %s", (plant,))
+        plant_row = cur.fetchone()
+        pv_rows: list = []
+        if plant_row is not None and plant_row[0]:
+            cur.execute(
+                """
+                SELECT plant, material_number, production_version, reason, COUNT(*)
+                  FROM (
+                        SELECT o.plant, o.material_number, o.production_version,
+                               CASE WHEN COALESCE(btrim(pv.sap_workcenter), '') = ''
+                                    THEN 'pv_workcenter_missing'
+                                    ELSE 'pv_workcenter_no_operation' END AS reason
+                          FROM orders o
+                          JOIN production_version pv
+                            ON pv.plant = o.plant
+                           AND pv.material_id = o.material_number
+                           AND pv.production_version = o.production_version
+                         WHERE o.plant = %s
+                           AND (COALESCE(btrim(pv.sap_workcenter), '') = ''
+                                OR NOT EXISTS (
+                                    SELECT 1 FROM routing_operation ro
+                                     WHERE ro.plant = pv.plant
+                                       AND ro.material_id = pv.material_id
+                                       AND ro.task_list_type = pv.task_list_type
+                                       AND ro.routing_group = pv.routing_group
+                                       AND ro.group_counter = pv.group_counter
+                                       AND ro.sap_workcenter = pv.sap_workcenter
+                                       AND NOT ro.deleted))
+                       ) x
+                 GROUP BY plant, material_number, production_version, reason
+                 ORDER BY material_number, production_version
+                """,
+                (plant,),
+            )
+            pv_rows = cur.fetchall()
     exceptions = [
         {"plant": r[0], "material_number": r[1], "order_count": r[2], "reason": r[3]}
         for r in rows
+    ] + [
+        {"plant": r[0], "material_number": r[1], "production_version": r[2], "reason": r[3],
+         "order_count": r[4]}
+        for r in pv_rows
     ]
     return {
         "unmatched_pairs": len(exceptions),
