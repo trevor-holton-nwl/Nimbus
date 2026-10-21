@@ -119,7 +119,7 @@ def test_ack_bulk_upsert_round_trip():
     plant = "AB_" + uuid.uuid4().hex[:10]
     try:
         ap.ensure_alert_profile_tables()
-        out = ap.upsert_alert_acks(plant=plant, alert_ids=["a1", "a2", "a3"], reason="first", until=None, actor="a@x.com")
+        out = ap.upsert_alert_acks(plant=plant, alert_ids=["a3", "a1", "a2", "a1"], reason="first", until=None, actor="a@x.com")
         assert sorted(a["alert_id"] for a in out) == ["a1", "a2", "a3"]
         out2 = ap.upsert_alert_acks(plant=plant, alert_ids=["a1", "a2"], reason="second",
                                     until="2099-01-01T23:59:59", actor="b@x.com")
@@ -129,7 +129,9 @@ def test_ack_bulk_upsert_round_trip():
         with ap._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT details FROM admin_audit WHERE table_name='alert_ack' AND details->>'plant'=%s"
                         " AND (details->>'count')::int = 3", (plant,))
-            assert len(cur.fetchall()) == 1
+            rows = cur.fetchall()
+            assert len(rows) == 1
+            assert rows[0][0]["alert_ids"] == ["a1", "a2", "a3"]   # de-duplicated and sorted
     finally:
         with ap._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM alert_ack WHERE plant=%s", (plant,))

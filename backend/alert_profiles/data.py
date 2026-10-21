@@ -303,14 +303,15 @@ def upsert_alert_ack(*, plant, alert_id, reason="", until=None, actor) -> dict:
 
 def upsert_alert_acks(*, plant, alert_ids, reason="", until=None, actor) -> list[dict]:
     """Acknowledge many alerts of one plant in a single transaction (one purge, one multi-row upsert, one audit
-    row). Duplicate ids collapse. Returns the active acks for those ids, ordered by alert_id (the
+    row). Duplicate ids collapse and ids are written in sorted order. Returns the active acks for those ids, ordered by alert_id (the
     `list_alert_acks` shape)."""
     plant = _require_plant(plant)
     if not isinstance(alert_ids, (list, tuple)) or not alert_ids:
         raise ValueError("alert_ids must be a non-empty list")
     if any(not isinstance(a, str) or not a.strip() for a in alert_ids):
         raise ValueError("alert_ids must be non-empty strings")
-    ids = list(dict.fromkeys(alert_ids))
+    # Sorted (and de-duplicated) so concurrent overlapping bulk acks take row locks in one global order (no deadlock).
+    ids = sorted(set(alert_ids))
     until = _parse_until(until)
     reason = reason or ""
     with _pool.connection() as conn, conn.cursor() as cur:

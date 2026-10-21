@@ -263,6 +263,7 @@ function _dayKey(d: Date): string {
 
 export function groupAlerts(alerts: NimbusAlert[], by: AlertGroupBy, ctx: GroupContext): AlertGroup[] {
   const groups = new Map<string, AlertGroup>();
+  const orderSets = new Map<string, Set<string>>();   // O(1) de-dup while grouping; flattened to `orderIds` at the end
   const keyOf = (a: NimbusAlert): string => {
     switch (by) {
       case 'category': return categoryOf(a.type);
@@ -284,11 +285,15 @@ export function groupAlerts(alerts: NimbusAlert[], by: AlertGroupBy, ctx: GroupC
     if (!g) {
       g = { key, vars: by === 'none' ? {} : { [by]: key }, alerts: [], points: 0, orderIds: [] };
       groups.set(key, g);
+      orderSets.set(key, new Set());
     }
     g.alerts.push(a);
     g.points += impactPoints(a, ctx.horizonStart, ctx.horizonMinutes);
-    for (const id of [a.taskId, a.peerId]) if (id && !g.orderIds.includes(id)) g.orderIds.push(id);
+    const ids = orderSets.get(key)!;
+    if (a.taskId) ids.add(a.taskId);
+    if (a.peerId) ids.add(a.peerId);
   }
+  for (const [key, g] of groups) g.orderIds = [...orderSets.get(key)!];
   return [...groups.values()].sort((x, y) =>
     _cmpNum(y.points, x.points) || _cmpNum(y.alerts.length, x.alerts.length) || (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
 }
