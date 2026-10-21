@@ -27,6 +27,13 @@ All six re-place call sites guard with `Runtime.eligible` before calling `Engine
 
 On a routing plant the grid MACHINE editor, the Inspector `PV_MACHINE` select and the Override dialog all list the same `{value: 'pv|machine', label}` pairs (`Table._getPairOptions`; a current pair that is not eligible is prepended with the "not eligible" label; a distribution sub-order keeps its locked machine). A pick is written by `Engine.pairSchedulePatchFor` as ONE patch (PRODUCTION_VERSION, MACHINE, RUN_TIME, `run_time_source`, `run_time_basis`, dates) and is one undo step (`UndoStack.snapshotTasks` before, `push` after the single `Store.updateTask`). D11: the PV column and Inspector field are read-only on routing plants; the pair is the only writer, including for unplaced orders. Run-time rule (D9): on a routing plant any line change re-resolves the run time from routing and resets a manual or SAP run time; only a same-line, same-PV edit keeps it. This replaces the older "machine-only moves preserve manual/SAP runtimes" rule for routing plants (non-routing plants are unchanged).
 
+## Fix wave F1 (2026-10-21): one PV form, and the list is the gate
+
+- `Runtime.normPv(v)` (also exported) is the one client normaliser: null/undefined -> null; trim + uppercase; a 1-3 digit numeric is left-padded to 4; anything else unchanged. Pilot orders still store the unpadded "1" while master rows and the rate map are "0001", so `resolve`, `eligiblePairs`/`dropDecision` and every `orders.mts` PV read/compare (current-pair key, selected-option compares, same-pair no-ops, `_parsePairValue` output) go through it; pair `value` strings always carry the padded form.
+- `eligiblePairs(task, {requireOps:true})` keeps a candidate only if `resolve({...task, PRODUCTION_VERSION: pv}, machine).ok` (`computeEligiblePairs` takes an `accept(pv, machine)` predicate for this), so a zero-rate (`zero_runtime`), zero-quantity or expired pair is never offered and an offered pair always passes the gate. The memo key includes the order quantity under `requireOps`.
+- `Runtime.load(plant)` keeps the old map until the new one arrives (swap on success; non-ok/throw keeps the old and logs); only a plant change, or a missing/disabled plant, clears it, so a pick during a reload never resolves against nothing.
+- The grid/Inspector/Override "current pair" label `ui.pv_machine_current_ineligible` ends with the failing step (`{{step}}`).
+
 ## Gotchas
 
 - Rate-map routing keys include material: `material|type|group|counter`, with `|workcenter` appended in `ops`. Both producer and consumer share a tested wire fixture; groups reused across materials must remain distinct.
