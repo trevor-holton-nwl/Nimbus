@@ -62,6 +62,20 @@ test('a prefers-reduced-motion rule names .am-ov-bar and switches the transition
   assert.ok(/transition\s*:\s*none/.test(m[1]), 'turns transitions off');
 });
 
+test('every selector that declares a transition is in the reduced-motion list', () => {
+  const guardRe = /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\}\s*\}/;
+  const guard = CODE.match(guardRe)[0];
+  const listed = new Set(guard.slice(guard.indexOf('{') + 1).split('{')[0].split(',').map(x => x.trim()));
+  const outside = CODE.replace(guardRe, '');
+  const animated = [];
+  for (const m of outside.matchAll(/([^{}]+)\{([^}]*transition\s*:\s*(?!none)[^}]*)\}/g)) {
+    for (const sel of m[1].split(',')) animated.push(sel.trim());
+  }
+  assert.ok(animated.length >= 8, 'transitions found');
+  const missing = animated.filter(x => !listed.has(x.replace(/:hover.*$/, '')));
+  assert.deepEqual(missing, [], 'transition selectors missing from the reduced-motion list');
+});
+
 test('every --bar-pm-* token used exists in both :root and body.dark', () => {
   const used = [...new Set(BLOCK.match(/--bar-pm-[a-z]+(?:-fg)?/g) ?? [])];
   assert.ok(used.length >= 10, `five fills and five -fg labels are used (got ${used.length})`);
@@ -93,8 +107,16 @@ test('structural rules the markup relies on', () => {
   assert.ok(!/column-reverse/.test(CODE), 'never column-reverse');
   assert.ok(/height\s*:\s*calc\(var\(--h\)\s*\*\s*1%\)/.test(bar[1]), 'height from --h');
   assert.ok(/grid-row\s*:\s*1\b/.test(CODE.match(/\.am-ov-col\s*\{([^}]*)\}/)?.[1] ?? ''), 'columns pinned to row 1');
-  assert.ok(/grid-row\s*:\s*1\b/.test(CODE.match(/\.am-ov-win\s*\{([^}]*)\}/)?.[1] ?? ''), 'window band pinned to row 1');
-  assert.ok(/grid-column\s*:\s*var\(--c1\)\s*\/\s*var\(--c2\)/.test(CODE), 'window band uses --c1 / --c2');
+  // The band is out of grid flow (a grid-placed band makes the auto-placed columns skip its cells).
+  const win = CODE.match(/\.am-ov-win\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.ok(/position\s*:\s*absolute/.test(win), 'window band is absolutely positioned');
+  assert.ok(!/grid-(row|column)\s*:/.test(win), 'window band has no grid placement');
+  assert.ok(/left\s*:\s*calc\(\(var\(--c1\)\s*-\s*1\)\s*\/\s*var\(--cols\)\s*\*\s*100%\)/.test(win), 'left from --c1 and --cols');
+  assert.ok(/width\s*:\s*calc\(\(var\(--c2\)\s*-\s*var\(--c1\)\)\s*\/\s*var\(--cols\)\s*\*\s*100%\)/.test(win), 'width from --c1, --c2 and --cols');
+  assert.ok(/position\s*:\s*relative/.test(CODE.match(/\.am-ov-chart\s*\{([^}]*)\}/)?.[1] ?? ''), 'chart is the positioning context');
+  assert.ok(/\.am-ov-ticks:has\(>\s*:nth-child\(21\)\)\s+\.am-ov-tick-bucket:last-child\s*\{[^}]*visibility\s*:\s*hidden/.test(CODE), 'Later tick hidden from 21 columns');
+  const rows = CODE.match(/\.am-ov-where\.is-all\s+\.am-ov-rows\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.ok(/max-height\s*:\s*216px/.test(rows) && /overflow-y\s*:\s*auto/.test(rows), 'expanded Where list capped at 216px and scrolls');
   assert.ok(/flex-grow\s*:\s*var\(--g\)/.test(CODE), 'segments grow by --g');
   assert.ok(/calc\(var\(--w\)\s*\*\s*1%\)/.test(CODE), 'track spans use --w');
   assert.ok(/repeat\(var\(--cols\)/.test(CODE), 'chart and ticks use --cols');
@@ -103,7 +125,11 @@ test('structural rules the markup relies on', () => {
   assert.ok(/@container\s*\(max-width:\s*21px\)\s*\{[^}]*\.am-ov-cat-n\s*\{[^}]*display\s*:\s*none/.test(CODE), 'count hidden when narrow');
   // Selection is never colour-only, and inset outlines keep edge bars inside the overflow:hidden panel.
   assert.ok(/\.is-sel\b[^{]*\{[^}]*outline\s*:\s*2px solid var\(--fg\)[^}]*outline-offset\s*:\s*-2px/.test(CODE), 'is-sel: 2px --fg inset outline');
-  assert.ok(/:focus-visible[^{]*\{[^}]*outline-offset\s*:\s*-2px/.test(CODE), 'focus-visible outline inset');
+  const ruleFor = (sel) => [...CODE.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter(m => m[1].split(',').some(x => x.trim() === sel)).map(m => m[2]);
+  for (const base of ['.am-ov-bar', '.am-ov-row', '.am-ov-cat', '.am-ov-catrow']) {
+    assert.ok(ruleFor(base + '.is-sel').some(b => /outline-offset\s*:\s*-2px/.test(b)), base + '.is-sel inset outline');
+    assert.ok(ruleFor(base + ':focus-visible').some(b => /outline-offset\s*:\s*-2px/.test(b)), base + ':focus-visible inset outline');
+  }
   assert.ok(/\.has-sel[^{]*:not\(\.is-sel\)[^{]*\{[^}]*opacity\s*:\s*\.4/.test(CODE), 'unselected siblings dim to .4');
 });
 

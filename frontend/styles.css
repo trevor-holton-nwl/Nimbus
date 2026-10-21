@@ -7711,7 +7711,10 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
   grid-template-rows: 84px; padding-top: 14px;
 }
 .am-ov-win {
-  grid-row: 1; grid-column: var(--c1) / var(--c2);
+  /* Out of grid flow: a grid-placed band would make the auto-placed columns skip the cells it occupies. --c1 is the
+     first covered 1-based grid line, --c2 the exclusive end line, over --cols equal columns. */
+  position: absolute; top: 14px; bottom: 0;
+  left: calc((var(--c1) - 1) / var(--cols) * 100%); width: calc((var(--c2) - var(--c1)) / var(--cols) * 100%);
   background: var(--accent-wash); border: 1px solid var(--accent-soft); border-radius: var(--r-sm); pointer-events: none;
 }
 .am-ov-col { grid-row: 1; position: relative; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; padding: 0 1px; }
@@ -7737,6 +7740,8 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 }
 .am-ov-tick-bucket { text-transform: uppercase; }
 .am-ov-tick-bucket:last-child { display: flex; justify-content: flex-end; }
+/* From 21 columns on the right-aligned Later label would run into the last day tick; the Later bar keeps its title / aria-label. */
+.am-ov-ticks:has(> :nth-child(21)) .am-ov-tick-bucket:last-child { visibility: hidden; }
 .am-ov-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; line-height: 14px; color: var(--fg-mute); }
 .am-ov-lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 
