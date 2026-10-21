@@ -118,6 +118,62 @@ test('confirm backdrop cancels the active prompt and advances the queued prompt'
   }
 });
 
+function _chooseHarness() {
+  const ids = ['confirm-modal', 'confirm-title', 'confirm-message', 'confirm-detail',
+    'confirm-ok-btn', 'confirm-cancel-btn', 'confirm-close-btn'];
+  const elements = Object.fromEntries(ids.map(id => [id, _fakeElement('div')]));
+  elements['confirm-close-btn'].setAttribute = () => {};
+  const previousDocument = globalThis.document;
+  const previousWindow = globalThis.window;
+  globalThis.document = { getElementById: id => elements[id] ?? null, createElement: tag => _fakeElement(tag) };
+  globalThis.window = { __NIMBUS_LOCALES: { en: { 'btn.cancel': 'Cancel', 'btn.close': 'Close' } } };
+  Util.setLocale('en');
+  return {
+    elements,
+    restore() {
+      globalThis.document = previousDocument;
+      if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow;
+    },
+  };
+}
+
+test('Modal.choose renders a <select> (labels as text) in the detail slot and resolves the picked value', async () => {
+  const h = _chooseHarness();
+  try {
+    const p = Modal.choose({ title: 'T', message: 'M', confirmLabel: 'Go', options: [{ value: 'a', label: '<b>A</b>' }, { value: 'b', label: 'B' }] });
+    const slot = h.elements['confirm-detail'];
+    assert.equal(slot.hidden, false);
+    const select = slot.children[0];
+    assert.equal(select.tagName, 'select');
+    assert.deepEqual(select.children.map(o => [o.value, o.textContent]), [['a', '<b>A</b>'], ['b', 'B']], 'labels are textContent, never markup');
+    assert.equal(h.elements['confirm-ok-btn'].textContent, 'Go');
+    select.value = 'b';
+    h.elements['confirm-ok-btn'].click();
+    assert.equal(await p, 'b');
+    assert.equal(slot.hidden, true, 'the slot is restored after the chooser closes');
+    assert.equal(h.elements['confirm-ok-btn'].className, 'btn btn-danger');
+  } finally { h.restore(); }
+});
+
+test('Modal.choose resolves null on cancel, close and backdrop, and queues behind a pending confirm', async () => {
+  const h = _chooseHarness();
+  try {
+    const first = Modal.confirm({ message: 'First' });
+    const choose = Modal.choose({ options: [{ value: 'a', label: 'A' }] });
+    h.elements['confirm-ok-btn'].click();
+    assert.equal(await first, true);
+    assert.equal(h.elements['confirm-detail'].children.length >= 1, true, 'the queued chooser opened after the confirm');
+    h.elements['confirm-cancel-btn'].click();
+    assert.equal(await choose, null);
+    const viaClose = Modal.choose({ options: [{ value: 'a', label: 'A' }] });
+    h.elements['confirm-close-btn'].click();
+    assert.equal(await viaClose, null);
+    const viaBackdrop = Modal.choose({ options: [{ value: 'a', label: 'A' }] });
+    h.elements['confirm-modal']._listeners.click({ target: h.elements['confirm-modal'] });
+    assert.equal(await viaBackdrop, null);
+  } finally { h.restore(); }
+});
+
 test('Toast.show without an action behaves exactly as before: textContent only, no button', () => {
   const doc = _fakeDocument();
   globalThis.document = doc;

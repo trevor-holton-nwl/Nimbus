@@ -130,6 +130,13 @@ interface ModalConfirmOpts {
   tone?: 'danger' | 'warn';
 }
 
+interface ModalChooseOpts {
+  title?: string;
+  message?: string;
+  options: Array<{ value: string; label: string }>;
+  confirmLabel?: string;
+}
+
 type PasteWiredInput = HTMLInputElement & { _pasteWired?: boolean };
 
 /* =============================================================================
@@ -1827,17 +1834,39 @@ export const Toast = (function() {
 // pending must queue rather than stack a second set of listeners onto the
 // same buttons (which would double-fire both promises' resolve on either click).
 let _confirmBusy = false;
-const _confirmQueue: Array<{ opts: ModalConfirmOpts; resolve: (ok: boolean) => void }> = [];
+// A queued entry is a plain confirm (resolve gets a boolean) or a chooser (`choices` set; resolve gets the picked
+// value or null).
+interface ConfirmQueueEntry {
+  opts: ModalConfirmOpts;
+  resolve: (v: any) => void;
+  choices?: Array<{ value: string; label: string }>;
+}
+const _confirmQueue: ConfirmQueueEntry[] = [];
 
-function _runConfirm(opts: ModalConfirmOpts, resolve: (ok: boolean) => void): void {
+function _runConfirm(opts: ModalConfirmOpts, resolve: (v: any) => void, choices?: Array<{ value: string; label: string }>): void {
   document.getElementById('confirm-title')!.textContent   = opts.title   || 'Confirm';
   document.getElementById('confirm-message')!.textContent = opts.message || '';
   const det = document.getElementById('confirm-detail')!;
-  if (opts.detail) { det.innerHTML = opts.detail; det.hidden = false; }
+  let select: HTMLSelectElement | null = null;
+  if (choices) {
+    // Chooser variant: a <select> in the detail slot. Labels go in as textContent, never markup.
+    det.textContent = '';
+    select = document.createElement('select');
+    select.className = 'confirm-choose-select';
+    for (const c of choices) {
+      const o = document.createElement('option');
+      o.value = c.value;
+      o.textContent = c.label;
+      select.appendChild(o);
+    }
+    det.appendChild(select);
+    det.hidden = false;
+  }
+  else if (opts.detail) { det.innerHTML = opts.detail; det.hidden = false; }
   else             { det.textContent = ''; det.hidden = true; }
   const okBtn = document.getElementById('confirm-ok-btn')!;
   okBtn.textContent  = opts.confirmLabel || 'Confirm';
-  okBtn.className    = `btn btn-${opts.tone === 'warn' ? 'warn' : 'danger'}`;
+  okBtn.className    = choices ? 'btn btn-primary' : `btn btn-${opts.tone === 'warn' ? 'warn' : 'danger'}`;
   const closeBtn = document.getElementById('confirm-close-btn')!;
   // The shell's static markup is English-only; localize the two fixed controls each time the dialog opens.
   if (typeof window !== 'undefined') {
@@ -1845,15 +1874,26 @@ function _runConfirm(opts: ModalConfirmOpts, resolve: (ok: boolean) => void): vo
     closeBtn.setAttribute('aria-label', Util.t('btn.close'));
   }
   const backdrop = document.getElementById('confirm-modal')!;
-  const done =(ok: boolean): void => { cleanup(); resolve(ok); };
+  const done =(ok: boolean): void => {
+    const picked = select ? select.value : null;
+    cleanup();
+    if (choices) resolve(ok && picked != null && picked !== '' ? picked : null);
+    else resolve(ok);
+  };
   const cleanup = (): void => {
     okBtn.removeEventListener('click', onOk);
     document.getElementById('confirm-cancel-btn')!.removeEventListener('click', onCancel);
     closeBtn.removeEventListener('click', onCancel);
     backdrop.removeEventListener('click', onBackdrop);
     Modal.close('confirm-modal');
+    if (choices) {
+      // Restore the shared slot and button styling for whatever opens next.
+      det.textContent = '';
+      det.hidden = true;
+      okBtn.className = 'btn btn-danger';
+    }
     const next = _confirmQueue.shift();
-    if (next) { _runConfirm(next.opts, next.resolve); }
+    if (next) { _runConfirm(next.opts, next.resolve, next.choices); }
     else      { _confirmBusy = false; }
   };
   const onOk     = (): void => done(true);
@@ -2003,6 +2043,17 @@ export const Modal = {
       if (_confirmBusy) { _confirmQueue.push({ opts, resolve }); return; }
       _confirmBusy = true;
       _runConfirm(opts, resolve);
+    });
+  },
+
+  // Promise-based chooser: the confirm dialog with a <select> of options. Resolves the picked value, or null on
+  // cancel / close / Escape / backdrop. Shares the confirm dialog's busy flag and queue.
+  choose(opts: ModalChooseOpts): Promise<string | null> {
+    return new Promise(resolve => {
+      const base: ModalConfirmOpts = { title: opts.title, message: opts.message, confirmLabel: opts.confirmLabel };
+      if (_confirmBusy) { _confirmQueue.push({ opts: base, resolve, choices: opts.options }); return; }
+      _confirmBusy = true;
+      _runConfirm(base, resolve, opts.options);
     });
   }
 };
