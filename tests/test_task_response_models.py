@@ -598,6 +598,30 @@ def test_full_browser_save_payload_accepts_unchanged_machine_and_runtime(monkeyp
     assert result["versions"] == {row[0]: 999}
 
 
+def test_save_with_padded_pv_against_stored_unpadded_pv_is_not_a_pv_edit(monkeypatch):
+    """Fix wave F1: the browser sends "0001" for an order whose stored PV is still "1"; that is the same
+    version, not an edit, so no eligibility recheck and no resolve run."""
+    row = _routing_eff_row("padded-vs-stored", production_version="1")
+    cursor = _FakeSegmentCursor([row], plant_rows=[])
+    monkeypatch.setattr(brain.db, "_pool", _FakeSegmentPool(cursor))
+    monkeypatch.setattr(routing_resolver, "check_eligibility",
+                        lambda *a, **k: pytest.fail("a padding-only difference must not recheck eligibility"))
+    monkeypatch.setattr(routing_resolver, "resolve_orders",
+                        lambda *a, **k: pytest.fail("a padding-only difference must not trigger resolve"))
+    payload = brain.TaskDateUpdate.model_validate({
+        "id": row[0], "start_date": "2026-06-02T08:00:00", "end_date": "2026-06-02T10:00:00",
+        "planning_status": "scheduled", "planning_reason": None,
+        "PRT_01": None, "PRT_02": None, "PRODUCTION_VERSION": "0001",
+        "RUN_TIME": 2.0, "MACHINE": "M1", "schedule_segments": [],
+        "base_version": 100, "force": False,
+    })
+
+    result = brain._apply_task_date_updates([payload])
+
+    assert result["invalid_ids"] == []
+    assert result["persisted"] == 1
+
+
 def test_update_task_dates_bulk_rejects_an_ineligible_machine_change(monkeypatch):
     eff_rows = [_routing_eff_row("r-bad")]
     cursor = _FakeSegmentCursor(eff_rows, plant_rows=[])

@@ -186,6 +186,24 @@ def test_run_time_forced_null_on_enabled_plant_unchanged_on_disabled(monkeypatch
 # ---------------------------------------------------------------------------
 # 2. PRODUCTION_VERSION COALESCE behavior (_stamp_order_attributes).
 # ---------------------------------------------------------------------------
+# Fix wave F1: the default-PV fill is padded to the 4-char master form on a routing-enabled plant only
+# (the SQL twin of db._norm_pv), so a stamped default ('1') still matches the padded production_version row.
+_PADS_DEFAULT_ON_ROUTING_PLANTS = (
+    "pl.plant = o.plant AND pl.routing_runtime_enabled = TRUE) THEN "
+    + db._norm_pv_sql("mp.default_production_version")
+    + " ELSE mp.default_production_version END)"
+)
+
+
+def test_stamp_order_attributes_pads_the_default_pv_fill_on_routing_plants_for_every_scope():
+    for kwargs in ({"ids": ["o1"]}, {"batch_id": "b"}, {"plant": "5501"}):
+        cursor = _Cursor()
+        db._stamp_order_attributes(_Connection(cursor), **kwargs)
+        update_stmt, _params = cursor.executed[0]
+        assert _PADS_DEFAULT_ON_ROUTING_PLANTS in update_stmt, kwargs
+        assert "lpad(upper(btrim(mp.default_production_version)), 4, '0')" in update_stmt
+
+
 def test_stamp_order_attributes_pins_the_coalesce_nullif_fix_batch_scoped():
     """batch_id-scoped path: the UPDATE's production_version assignment must
     read COALESCE(NULLIF(o.production_version, ''), mp.default_production_version)
@@ -200,7 +218,8 @@ def test_stamp_order_attributes_pins_the_coalesce_nullif_fix_batch_scoped():
     db._stamp_order_attributes(conn, batch_id="batch-1")
 
     update_stmt, params = cursor.executed[0]
-    assert "COALESCE(NULLIF(o.production_version, ''), mp.default_production_version)" in update_stmt
+    assert "COALESCE(NULLIF(o.production_version, ''), (CASE WHEN EXISTS" in update_stmt
+    assert _PADS_DEFAULT_ON_ROUTING_PLANTS in update_stmt
     assert params == ("batch-1",)
 
 
@@ -212,7 +231,8 @@ def test_stamp_order_attributes_pins_the_coalesce_nullif_fix_plant_scoped():
     db._stamp_order_attributes(conn, plant="5501")
 
     update_stmt, params = cursor.executed[0]
-    assert "COALESCE(NULLIF(o.production_version, ''), mp.default_production_version)" in update_stmt
+    assert "COALESCE(NULLIF(o.production_version, ''), (CASE WHEN EXISTS" in update_stmt
+    assert _PADS_DEFAULT_ON_ROUTING_PLANTS in update_stmt
     assert params == ("5501",)
 
 

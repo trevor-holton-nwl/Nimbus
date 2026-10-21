@@ -233,12 +233,20 @@ def _fallback(order: dict, reason_code: str) -> dict:
 _PV_REPAIR_STEPS = frozenset({"pv_not_found", "pv_expired", "pv_workcenter_mismatch"})
 
 
+def _order_pv(order: dict):
+    """The order's production version in the padded master form (`db._norm_pv`), so an unpadded stored value
+    ('1') still finds the padded `production_version` row ('0001'). Blank/None stays falsy (pv_missing).
+    The single place every pair lookup (`_pair_step`, `_resolve_steps`, hence `check_pair` and
+    `check_eligibility`) reads the order's PV."""
+    return db._norm_pv(order.get("production_version"))
+
+
 def _pair_step(order: dict, pv_lookup: dict, machine_workcenter: dict) -> str | None:
     """The (production version, machine) head of §5.2: the first failing step among pv_missing,
     pv_not_found, pv_expired, no_machine, workcenter_unmapped and `pv_workcenter_mismatch` (the PV
     row's own `sap_workcenter` is blank or differs from the machine's work center -- bad master
     data, fail closed), or None when the pair is coherent. No routing/operation lookup."""
-    pv_value = order.get("production_version")
+    pv_value = _order_pv(order)
     if not pv_value:
         # Step 1: caller decides what "no fallback" means for it -- D4: a
         # missing production version always holds/fails, no guess.
@@ -309,7 +317,7 @@ def _resolve_steps(order: dict, *, pv_lookup: dict, op_lookup: dict,
     if step is not None:
         return {"ok": False, "step": step}
 
-    pv_value = order.get("production_version")
+    pv_value = _order_pv(order)
     plant = order.get("plant")
     material = order.get("material_number")
     pv_row = pv_lookup[(plant, material, pv_value)]
@@ -968,7 +976,7 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
                     candidates = (("pv_sap_restored", db._norm_pv(order.get("sap_production_version"))),
                                   ("pv_defaulted", default_pv.get(order.get("material_number"))))
                     for counter, candidate in candidates:
-                        if not candidate or candidate == order.get("production_version"):
+                        if not candidate or candidate == _order_pv(order):
                             continue
                         trial = {**order, "production_version": candidate}
                         if _pair_step(trial, pv_lookup, machine_workcenter) is not None:
