@@ -7657,12 +7657,14 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
   .am-fix-acts { grid-column: 2; padding-top: 6px; }
 }
 
-/* ---- Alert Monitor Overview band (Task 31): When / Where / What / Confidence. Tokens only, 1px hairlines, no
+/* ---- Alert Monitor Overview band (Task 31): When / Where / What. Tokens only, 1px hairlines, no
         gradients, no side stripes, no glass. Inline styles from the markup are custom properties only: --h (bar
-        height %), --cols, --c1 / --c2 (window band), --g (flex-grow), --w (track %). No ancestor of the
+        height %), --cols, --s (tick stride), --c1 / --c2 (window band), --g (flex-grow), --w (track %). No ancestor of the
         bars clips, but selection / focus outlines stay inset (offset -2px) so they never bleed past the bar edges. Layout wraps on the width of
-        the band itself (a size container), not the viewport: the four-column grid needs 936px
-        (300 + 230 + 220 + 150 + 3 x 12) and the page content is 976px at a 1,024px viewport. ---- */
+        the band itself (a size container), not the viewport: the three-column grid is When (minmax(300px, 1fr)) + 230 + 220 +
+        2 x 12 and is used from 936px, where the When chart is at least 436px wide (936 - 230 - 220 - 24 - 26 of padding and
+        border), which is what the day-label stride assumes; the page content is 976px at a 1,024px viewport. Below 936px When
+        takes a full row (so its chart is 500px or wider again) and Where / What share the next one. ---- */
 .am-overview { margin: 0 0 12px; container: am-ov / inline-size; }
 .am-overview > .panel-head {
   justify-content: flex-start; align-items: center; flex-wrap: nowrap; gap: 4px 8px;
@@ -7671,13 +7673,12 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-overview > .panel-head .panel-hint { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .am-overview.is-collapsed > .panel-head { padding-bottom: 0; }
 .am-ov-body {
-  display: grid; grid-template-columns: minmax(300px, 1fr) 230px 220px 150px; gap: 12px; align-items: stretch;
+  display: grid; grid-template-columns: minmax(300px, 1fr) 230px 220px; gap: 12px; align-items: stretch;
 }
-.am-ov-body:not(:has(.am-ov-conf)) { grid-template-columns: minmax(300px, 1fr) 230px 220px; }
 .am-ov-body[hidden] { display: none; }
 
 /* Shared button reset for every pressable piece of the band. */
-.am-ov-toggle, .am-ov-bar, .am-ov-row, .am-ov-cat, .am-ov-catrow, .am-ov-more, .am-ov-confbtn {
+.am-ov-toggle, .am-ov-bar, .am-ov-row, .am-ov-cat, .am-ov-catrow, .am-ov-more {
   font: inherit; color: inherit; background: transparent; border: 0; margin: 0; padding: 0;
   text-align: left; cursor: pointer; border-radius: var(--r-sm);
 }
@@ -7707,8 +7708,9 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 
 /* When: a continuous day grid (Overdue, one column per day, Later), bars over a window band. */
 .am-ov-chart {
+  /* The bars grow to the card's height (the band is as tall as the Where panel): a flexible row, 84px at the least. */
   position: relative; display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
-  grid-template-rows: 84px; padding-top: 14px;
+  flex: 1 1 auto; grid-template-rows: minmax(0, 1fr); min-height: 98px; padding-top: 14px;
 }
 .am-ov-win {
   /* Out of grid flow: a grid-placed band would make the auto-placed columns skip the cells it occupies. --c1 is the
@@ -7733,15 +7735,24 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-ov-seg-err { background: var(--err); }
 .am-ov-seg-warn { background: var(--warn); }
 .am-ov-bar:hover:not(:disabled) .am-ov-seg { opacity: .8; }
-.am-ov-ticks { display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); margin-top: -4px; }
+/* Under each bar: a four-row tick. Rows 1-3 are a day's weekday / day number / month; row 4 is only ever used by the Overdue and
+   Later bucket labels, so they can run past their narrow cell without touching any day label. The ticks row is the size container
+   whose width the weekday's font-size reads (cqw), so --s (label stride) and --cols give the slot width of one label. */
+.am-ov-ticks { display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); margin-top: -4px; container-type: inline-size; }
 .am-ov-tick {
-  min-width: 0; white-space: nowrap; font-family: var(--font-mono); font-size: 10px; line-height: 14px;
-  letter-spacing: 0.04em; color: var(--fg-mute);
+  min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 11px 13px 11px 12px; justify-items: unsafe center; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.04em; color: var(--fg-mute);
 }
-.am-ov-tick-bucket { text-transform: uppercase; }
-.am-ov-tick-bucket:last-child { display: flex; justify-content: flex-end; }
-/* From 21 columns on the right-aligned Later label would run into the last day tick; the Later bar keeps its title / aria-label. */
-.am-ov-ticks:has(> :nth-child(21)) .am-ov-tick-bucket:last-child { visibility: hidden; }
+.am-ov-wd {
+  grid-row: 1; line-height: 11px; letter-spacing: 0;
+  /* Hidden (font-size 0) when one label's slot is under 26px (a four-character French / Portuguese weekday measures 24px at 10px mono). */
+  font-size: clamp(0px, calc((100cqw * var(--s) / var(--cols) - 26px) * 1000), 10px);
+}
+.am-ov-dn { grid-row: 2; line-height: 13px; }
+.am-ov-mo { grid-row: 3; line-height: 11px; letter-spacing: 0; }
+.am-ov-tick.is-today .am-ov-dn, .am-ov-tick.is-today .am-ov-wd { color: var(--fg); font-weight: 600; }
+.am-ov-bl { grid-row: 4; justify-self: start; line-height: 12px; text-transform: uppercase; }
+.am-ov-tick-bucket:last-child .am-ov-bl { justify-self: unsafe end; }
 .am-ov-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; line-height: 14px; color: var(--fg-mute); }
 .am-ov-lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 
@@ -7785,28 +7796,12 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-ov-catrow .am-ov-count { min-width: 22px; }
 .am-ov-catrow.is-zero { opacity: .5; }
 
-/* Confidence: one button wrapping the gauge (and the optional sparkline). */
-.am-ov-conf { align-items: center; }
-.am-ov-conf .am-ov-eyebrow { align-self: flex-start; }
-.am-ov-confbtn { display: flex; flex-direction: column; align-items: center; gap: 4px; max-width: 100%; padding: 2px; transition: background var(--t-fast); }
-.am-ov-confbtn:hover { background: var(--bg-subtle); }
-.am-ov-gauge, .am-ov-spark { display: block; max-width: 100%; height: auto; }
-.am-ov-conf-track, .am-ov-conf-val { stroke-width: 8; stroke-linecap: round; }
-.am-ov-conf-track { stroke: var(--line); }
-.am-ov-conf-val.ok { stroke: var(--ok); }
-.am-ov-conf-val.warn { stroke: var(--warn); }
-.am-ov-conf-val.err { stroke: var(--err); }
-.am-ov-conf-tick { stroke: var(--fg); stroke-width: 2; stroke-linecap: butt; fill: none; }
-.am-ov-conf-n { font-family: var(--font-mono); font-size: 22px; font-weight: 600; fill: var(--fg); }
-.am-ov-conf-after { font-family: var(--font-mono); font-size: 11px; fill: var(--fg-mute); }
-.am-ov-spark-line { stroke: var(--fg-mute); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
-
 /* Selection (never colour-only: a 2px --fg outline), dimming of the other values, focus. */
 .am-ov-bar.is-sel, .am-ov-row.is-sel, .am-ov-cat.is-sel, .am-ov-catrow.is-sel { outline: 2px solid var(--fg); outline-offset: -2px; }
 .has-sel .am-ov-bar:not(.is-sel):not(.am-ov-stub), .has-sel .am-ov-row:not(.is-sel),
 .has-sel .am-ov-cat:not(.is-sel), .has-sel .am-ov-catrow:not(.is-sel) { opacity: .4; }
 .am-ov-toggle:focus-visible, .am-ov-bar:focus-visible, .am-ov-row:focus-visible, .am-ov-cat:focus-visible,
-.am-ov-catrow:focus-visible, .am-ov-more:focus-visible, .am-ov-confbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.am-ov-catrow:focus-visible, .am-ov-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* The "Showing N of M" chip row. */
 .am-narrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 8px; font-size: 12px; }
@@ -7830,14 +7825,14 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 
 /* Wrap with the band's own width: two columns below the 936px grid minimum, one below 560px. */
 @container am-ov (max-width: 935.98px) {
-  .am-ov-body, .am-ov-body:not(:has(.am-ov-conf)) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .am-ov-when, .am-ov-conf { grid-column: 1 / -1; }
+  .am-ov-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .am-ov-when { grid-column: 1 / -1; }
 }
 @container am-ov (max-width: 559.98px) {
-  .am-ov-body, .am-ov-body:not(:has(.am-ov-conf)) { grid-template-columns: minmax(0, 1fr); }
+  .am-ov-body { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .am-ov-toggle, .am-ov-bar, .am-ov-seg, .am-ov-row, .am-ov-cat, .am-ov-catrow, .am-ov-confbtn, .am-narrow-x { transition: none; }
+  .am-ov-toggle, .am-ov-bar, .am-ov-seg, .am-ov-row, .am-ov-cat, .am-ov-catrow, .am-narrow-x { transition: none; }
 }
 
 /* ---- Alert groups, rows, diagnose (Task 12; head and rows rebuilt in Task 24). Tokens only, hairlines, no side stripes. ---- */

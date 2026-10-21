@@ -1,6 +1,6 @@
 /* =============================================================================
    ALERT MONITOR OVERVIEW — pure data, narrowing, SVG math and HTML builders for
-   the four-panel Overview band (When / Where / What / Confidence).
+   the three-panel Overview band (When / Where / What).
 
    No Store, no DOM, no globals: every input is passed in, every string comes
    through an injected `t`, and every interpolated value goes through the injected
@@ -40,7 +40,6 @@ export interface DayBar {
   warn: number;
   inWindow: boolean;
   isToday: boolean;
-  labelTick: boolean;
 }
 
 export interface OverviewData {
@@ -92,7 +91,6 @@ export function overviewData(listed: ReadonlyArray<NimbusAlert>, d: OverviewDeps
   const win = d.window;
   const n = horizonDays(d.horizonMinutes, win);
   const y = d.plantToday.getFullYear(), m = d.plantToday.getMonth(), day = d.plantToday.getDate();
-  const stride = n <= 28 ? 7 : 14;
   const days: DayBar[] = [];
   for (let i = 0; i < n; i++) {
     days.push({
@@ -100,7 +98,6 @@ export function overviewData(listed: ReadonlyArray<NimbusAlert>, d: OverviewDeps
       offset: i, err: 0, warn: 0,
       inWindow: !!win && i >= win.from && i <= win.to,
       isToday: i === 0,
-      labelTick: i % stride === 0 && i > 0,
     });
   }
   const overdue = { err: 0, warn: 0, inWindow: !!win && win.from < 0 };
@@ -204,60 +201,21 @@ export function parseNarrowAttr(attr: string | null | undefined): { dim: NarrowD
   return { dim, value };
 }
 
-// ---- SVG math -------------------------------------------------------------------------------
-
-const _r2 = (x: number): number => Math.round(x * 100) / 100;
-const _clampScore = (s: number): number => (typeof s === 'number' && isFinite(s) ? Math.min(100, Math.max(0, s)) : 0);
-const GAUGE_START = 135;   // degrees, SVG coordinates (y down): lower-left
-const GAUGE_SWEEP = 270;   // clockwise on screen, ending at 45 degrees (lower-right)
-
-/** Point on the gauge ring for a score (0 at the lower-left, 100 at the lower-right, clockwise). */
-export function arcPoint(score: number, cx: number, cy: number, r: number): { x: number; y: number } {
-  const ang = (GAUGE_START + GAUGE_SWEEP * _clampScore(score) / 100) * Math.PI / 180;
-  return { x: _r2(cx + r * Math.cos(ang)), y: _r2(cy + r * Math.sin(ang)) };
-}
-
-/** SVG path `d` of the value arc from 0 to `score`; '' for a score of 0 or less. */
-export function arcPath(score: number, cx: number, cy: number, r: number): string {
-  const s = _clampScore(score);
-  if (s <= 0) return '';
-  const a = arcPoint(0, cx, cy, r), b = arcPoint(s, cx, cy, r);
-  const large = GAUGE_SWEEP * s / 100 > 180 ? 1 : 0;
-  return `M ${a.x} ${a.y} A ${r} ${r} 0 ${large} 1 ${b.x} ${b.y}`;
-}
-
-/** SVG path `d` of a short radial tick across the ring at `score` (the ghost / after-fix marker). */
-export function arcTick(score: number, cx: number, cy: number, r1: number, r2: number): string {
-  const a = arcPoint(score, cx, cy, r1), b = arcPoint(score, cx, cy, r2);
-  return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
-}
-
-export function confTier(score: number): 'ok' | 'warn' | 'err' {
-  return score >= 60 ? 'ok' : score >= 40 ? 'warn' : 'err';
-}
-
-/** Sparkline path over a fixed 0..100 y range; '' under 2 points; bucket-averaged to at most `maxPts` points. */
-export function sparkPath(history: ReadonlyArray<{ ts: number; score: number }>, w: number, h: number, maxPts = 40): string {
-  const n = history?.length ?? 0;
-  if (n < 2) return '';
-  const cap = Math.max(2, Math.floor(maxPts));
-  let ys: number[];
-  if (n <= cap) ys = history.map(p => _clampScore(p.score));
-  else {
-    ys = [];
-    for (let i = 0; i < cap; i++) {
-      const lo = Math.floor(i * n / cap), hi = Math.max(lo + 1, Math.floor((i + 1) * n / cap));
-      let sum = 0;
-      for (let k = lo; k < hi; k++) sum += _clampScore(history[k].score);
-      ys.push(sum / (hi - lo));
-    }
-  }
-  const last = ys.length - 1;
-  const r1 = (x: number): number => Math.round(x * 10) / 10;
-  return ys.map((s, i) => `${i === 0 ? 'M' : 'L'} ${r1(i / last * w)} ${r1(h - s / 100 * h)}`).join(' ');
-}
-
 // ---- HTML builders --------------------------------------------------------------------------
+
+/** The three stacked pieces of a day tick; the pane fills them from one per-language Intl formatter each. */
+export interface TickParts { wd: string; day: string; mo: string }
+
+/**
+ * Tick thinning. A label needs about 15 px of slot (a two-digit day measures 12.8 px at 10 px mono) and the narrowest
+ * When card the band ever has beside the other panels is about 436 px of chart width, so stride = ceil(15 x columns / 436):
+ * 1 up to 29 columns (27 days), 2 up to 58, 3 beyond. Measured in the Overview task (see the spec's rev-3 follow-up).
+ */
+export const TICK_SLOT_PX = 15;
+export const TICK_MIN_CHART_PX = 436;
+export function tickStride(cols: number): number {
+  return Math.max(1, Math.ceil(TICK_SLOT_PX * cols / TICK_MIN_CHART_PX));
+}
 
 /** The injected view dependencies of every HTML builder (except `narrowChipHtml`, which takes `t` alone). */
 export interface OverviewViewDeps {
@@ -266,8 +224,8 @@ export interface OverviewViewDeps {
   esc: (s: unknown) => string;
   /** "Thu 23 Oct" for a `YYYY-MM-DD` key. */
   fmtDay: (dayKey: string) => string;
-  /** The short axis label for a tick column ("Oct 27" or "+7"). */
-  fmtTick: (dayKey: string) => string;
+  /** The day-axis parts of a tick column: short weekday ("Mon"), day of month ("27") and short month ("Oct"). */
+  fmtTick: (dayKey: string) => TickParts;
   /** The "Unassigned" label for the `none` line. */
   unassigned: string;
 }
@@ -304,18 +262,30 @@ export function whenHtml(data: OverviewData, narrow: Narrow, v: OverviewViewDeps
   const { t, esc } = v;
   const cols: string[] = [];
   const ticks: string[] = [];
+  const stride = tickStride(data.days.length + 2);
+  let prevMonth = '';
   const overdueLabel = t('am.ov_overdue');
   cols.push(`<div class="am-ov-col am-ov-col-overdue">${_barHtml('overdue', data.overdue, overdueLabel, narrow.day === 'overdue', data.maxDay, ' am-ov-bucket', v)}</div>`);
-  ticks.push(`<span class="am-ov-tick am-ov-tick-bucket">${esc(overdueLabel)}</span>`);
+  ticks.push(`<span class="am-ov-tick am-ov-tick-bucket"><span class="am-ov-bl">${esc(overdueLabel)}</span></span>`);
   for (const b of data.days) {
     const sel = narrow.day === b.key;
     const today = b.isToday ? `<span class="am-ov-today" aria-hidden="true"><span class="am-ov-today-lbl">${esc(t('am.ov_today'))}</span></span>` : '';
     cols.push(`<div class="am-ov-col${b.isToday ? ' is-today' : ''}">${today}${_barHtml(b.key, b, v.fmtDay(b.key), sel, data.maxDay, '', v)}</div>`);
-    ticks.push(`<span class="am-ov-tick">${b.labelTick ? esc(v.fmtTick(b.key)) : ''}</span>`);
+    if (b.offset % stride !== 0) { ticks.push('<span class="am-ov-tick"></span>'); continue; }
+    const p = v.fmtTick(b.key);
+    const month = b.key.slice(5, 7);
+    // The month shows on the first label and where it changes. A first-column month is dropped when the next label is itself a
+    // month change, so two month names never touch.
+    const nextShown = data.days[b.offset + stride];
+    const showMo = b.offset === 0 ? !(nextShown && nextShown.key.slice(5, 7) !== month) : month !== prevMonth;
+    prevMonth = month;
+    ticks.push(`<span class="am-ov-tick am-ov-tick-day${b.isToday ? ' is-today' : ''}">`
+      + `<span class="am-ov-wd">${esc(p.wd)}</span><span class="am-ov-dn">${esc(p.day)}</span>`
+      + `<span class="am-ov-mo">${showMo ? esc(p.mo) : ''}</span></span>`);
   }
   const laterLabel = t('am.ov_later');
   cols.push(`<div class="am-ov-col am-ov-col-later">${_barHtml('later', data.later, laterLabel, narrow.day === 'later', data.maxDay, ' am-ov-bucket', v)}</div>`);
-  ticks.push(`<span class="am-ov-tick am-ov-tick-bucket">${esc(laterLabel)}</span>`);
+  ticks.push(`<span class="am-ov-tick am-ov-tick-bucket"><span class="am-ov-bl">${esc(laterLabel)}</span></span>`);
 
   // Window band: the contiguous grid columns whose bars are inside the profile window (col 1 = Overdue, offset o = col o + 2).
   let first = -1, last = -1;
@@ -333,7 +303,7 @@ export function whenHtml(data: OverviewData, narrow: Narrow, v: OverviewViewDeps
   return `<div class="am-ov-panel am-ov-when${narrow.day ? ' has-sel' : ''}">`
     + `<div class="am-ov-eyebrow">${esc(t('am.ov_when'))}</div>`
     + `<div class="am-ov-chart" style="--cols:${nCols}">${band}${cols.join('')}</div>`
-    + `<div class="am-ov-ticks" style="--cols:${nCols}">${ticks.join('')}</div>`
+    + `<div class="am-ov-ticks" style="--cols:${nCols};--s:${stride}">${ticks.join('')}</div>`
     + legend + `</div>`;
 }
 
@@ -399,58 +369,15 @@ export function whatHtml(data: OverviewData, narrow: Narrow, v: OverviewViewDeps
     + `<div class="am-ov-catlist">${[...live, ...dead].map(row).join('')}</div></div>`;
 }
 
-export interface ConfidenceInput {
-  /** The plant confidence (0-100); null omits the panel. */
-  score: number | null;
-  history: ReadonlyArray<{ ts: number; score: number }>;
-  /** The already-rounded score after the top fix; null draws no marker. */
-  ghost: number | null;
-}
-
-const _GAUGE = { w: 126, h: 92, cx: 63, cy: 50, r: 38 };
-const _SPARK = { w: 126, h: 22 };
-
-/** The Confidence panel: one button (opens the breakdown) wrapping the gauge, the optional after-fix marker and a sparkline. */
-export function confidenceHtml(c: ConfidenceInput, v: OverviewViewDeps): string {
-  const { t, esc } = v;
-  if (c.score == null || !isFinite(c.score)) return '';
-  const g = _GAUGE;
-  const score = Math.round(c.score);
-  const val = arcPath(score, g.cx, g.cy, g.r);
-  let ghost = '';
-  let after = '';
-  let name = t('am.ov_conf_aria', { score });
-  if (c.ghost != null && isFinite(c.ghost)) {
-    const afterText = t('am.ov_conf_after_aria', { n: c.ghost });
-    name = `${name} ${afterText}`;
-    const afterAria = esc(afterText);
-    ghost = `<path class="am-ov-conf-tick" d="${arcTick(c.ghost, g.cx, g.cy, g.r - 6, g.r + 6)}"><title>${afterAria}</title></path>`;
-    after = `<text class="am-ov-conf-after" x="${g.cx}" y="${g.cy + 20}" text-anchor="middle"><title>${afterAria}</title>${esc(t('am.ov_conf_after', { n: c.ghost }))}</text>`;
-  }
-  const svg = `<svg class="am-ov-gauge" viewBox="0 0 ${g.w} ${g.h}" width="${g.w}" height="${g.h}" role="img" aria-label="${esc(name)}">`
-    + `<path class="am-ov-conf-track" d="${arcPath(100, g.cx, g.cy, g.r)}" fill="none"></path>`
-    + (val ? `<path class="am-ov-conf-val ${confTier(score)}" d="${val}" fill="none"></path>` : '')
-    + ghost
-    + `<text class="am-ov-conf-n" x="${g.cx}" y="${g.cy + 6}" text-anchor="middle">${score}</text>${after}</svg>`;
-  const sp = sparkPath(c.history, _SPARK.w, _SPARK.h);
-  const spark = sp
-    ? `<svg class="am-ov-spark" viewBox="0 0 ${_SPARK.w} ${_SPARK.h}" width="${_SPARK.w}" height="${_SPARK.h}" aria-hidden="true"><path class="am-ov-spark-line" d="${sp}" fill="none"></path></svg>` : '';
-  const label = esc(name);
-  return `<div class="am-ov-panel am-ov-conf">`
-    + `<div class="am-ov-eyebrow">${esc(t('am.ov_conf'))}</div>`
-    + `<button type="button" class="am-ov-confbtn" data-am-action="ov-conf" title="${label}">${svg}${spark}</button></div>`;
-}
-
 export interface OverviewInput {
   data: OverviewData;
   narrow: Narrow;
   /** The Where panel is expanded past the top 8. */
   showAll: boolean;
-  conf: ConfidenceInput;
   collapsed: boolean;
 }
 
-/** The whole `section.am-overview`: a head with the collapse toggle (and the strip text when collapsed) over the four panels. */
+/** The whole `section.am-overview`: a head with the collapse toggle (and the strip text when collapsed) over the three panels. */
 export function overviewHtml(i: OverviewInput, v: OverviewViewDeps): string {
   const { t, esc } = v;
   const toggleLabel = esc(t(i.collapsed ? 'am.ov_expand' : 'am.ov_collapse'));
@@ -464,7 +391,7 @@ export function overviewHtml(i: OverviewInput, v: OverviewViewDeps): string {
     + `<h3>${esc(t('am.ov_title'))}</h3>${hint}</header>`
     + `<div id="am-ov-body" class="am-ov-body"${i.collapsed ? ' hidden' : ''}>`
     + whenHtml(i.data, i.narrow, v) + whereHtml(i.data, i.narrow, i.showAll, v) + whatHtml(i.data, i.narrow, v)
-    + confidenceHtml(i.conf, v) + `</div></section>`;
+    + `</div></section>`;
 }
 
 export interface NarrowChipInput {

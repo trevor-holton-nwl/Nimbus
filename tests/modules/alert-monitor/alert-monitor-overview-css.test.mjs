@@ -60,7 +60,7 @@ test('flatten: nested @container / @media rules become rules of their own', () =
 
 test('every var(--x) used in the block is defined in :root and in body.dark, or is an inline per-element property or an explicit root-only token', () => {
   // Set per element by the builders' inline style="--h:..", never in a token block.
-  const inline = new Set(['--h', '--g', '--w', '--cols', '--c1', '--c2']);
+  const inline = new Set(['--h', '--g', '--w', '--cols', '--s', '--c1', '--c2']);
   // Theme-independent tokens (a typeface, a radius, a duration): defined once in :root, intentionally not redefined in body.dark.
   const rootOnly = new Set(['--font-mono', '--r-sm', '--t-fast']);
   const blocks = (head) => [...CSS.matchAll(new RegExp(`(?:^|\\n)${head.replace(/[.]/g, '\\.')}\\s*\\{([^}]*)\\}`, 'g'))].map(m => m[1]).join('\n');
@@ -120,7 +120,7 @@ test('every selector that declares a transition is in the reduced-motion list', 
   for (const m of outside.matchAll(/([^{}]+)\{([^}]*transition\s*:\s*(?!none)[^}]*)\}/g)) {
     for (const sel of m[1].split(',')) animated.push(sel.trim());
   }
-  assert.ok(animated.length >= 8, 'transitions found');
+  assert.ok(animated.length >= 7, 'transitions found');
   const missing = animated.filter(x => !listed.has(x.replace(/:hover.*$/, '')));
   assert.deepEqual(missing, [], 'transition selectors missing from the reduced-motion list');
 });
@@ -148,7 +148,8 @@ test('every --bar-pm-* token used exists in both :root and body.dark', () => {
 test('structural rules the markup relies on', () => {
   // The body is a grid, so the [hidden] attribute needs an explicit display:none.
   assert.ok(/\.am-ov-body\[hidden\]\s*\{[^}]*display\s*:\s*none/.test(CODE), 'collapsed body hidden');
-  assert.ok(/\.am-ov-body\s*\{[^}]*grid-template-columns\s*:\s*minmax\(300px,\s*1fr\)\s+230px\s+220px\s+150px/.test(CODE), 'plan section 6 grid');
+  assert.ok(/\.am-ov-body\s*\{[^}]*grid-template-columns\s*:\s*minmax\(300px,\s*1fr\)\s+230px\s+220px\s*;/.test(CODE), 'three-column grid (the Confidence card is gone)');
+  assert.ok(!/\.am-ov-conf|confbtn|am-ov-gauge|am-ov-spark/.test(CODE), 'no Confidence card rules remain');
   // Stacking: warn is first in the DOM and err sits at the base, so a plain column, never column-reverse.
   const bar = CODE.match(/(?:^|\})\s*\.am-ov-bar\s*\{([^}]*)\}/);
   assert.ok(bar, '.am-ov-bar base rule');
@@ -163,7 +164,19 @@ test('structural rules the markup relies on', () => {
   assert.ok(/left\s*:\s*calc\(\(var\(--c1\)\s*-\s*1\)\s*\/\s*var\(--cols\)\s*\*\s*100%\)/.test(win), 'left from --c1 and --cols');
   assert.ok(/width\s*:\s*calc\(\(var\(--c2\)\s*-\s*var\(--c1\)\)\s*\/\s*var\(--cols\)\s*\*\s*100%\)/.test(win), 'width from --c1, --c2 and --cols');
   assert.ok(/position\s*:\s*relative/.test(CODE.match(/\.am-ov-chart\s*\{([^}]*)\}/)?.[1] ?? ''), 'chart is the positioning context');
-  assert.ok(/\.am-ov-ticks:has\(>\s*:nth-child\(21\)\)\s+\.am-ov-tick-bucket:last-child\s*\{[^}]*visibility\s*:\s*hidden/.test(CODE), 'Later tick hidden from 21 columns');
+  // The When chart fills the card: a flexible row (not a fixed 84px) in a chart that grows, with a floor.
+  const chart = CODE.match(/\.am-ov-chart\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.ok(/grid-template-rows\s*:\s*minmax\(0,\s*1fr\)/.test(chart), 'chart row is flexible');
+  assert.ok(!/grid-template-rows\s*:\s*84px/.test(CODE), 'no fixed 84px row');
+  assert.ok(/flex\s*:\s*1\s+1\s+auto/.test(chart) && /min-height\s*:\s*98px/.test(chart), 'chart grows, never under 84px of bars');
+  // Day labels: a four-row tick whose last row is reserved for the Overdue / Later labels so they never touch a day label.
+  const tick = CODE.match(/\.am-ov-tick\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.ok(/display\s*:\s*grid/.test(tick) && /grid-template-columns\s*:\s*minmax\(0,\s*1fr\)/.test(tick), 'tick is a one-cell-wide grid (labels centre on the column)');
+  assert.ok(/grid-template-rows\s*:\s*11px 13px 11px 12px/.test(tick), 'weekday, day, month, bucket rows');
+  assert.ok(/grid-row\s*:\s*4/.test(CODE.match(/\.am-ov-bl\s*\{([^}]*)\}/)?.[1] ?? ''), 'bucket labels sit on their own row');
+  assert.ok(/container-type\s*:\s*inline-size/.test(CODE.match(/\.am-ov-ticks\s*\{([^}]*)\}/)?.[1] ?? ''), 'ticks row is the size container the weekday reads');
+  assert.ok(/font-size\s*:\s*clamp\(0px,[^;]*100cqw[^;]*var\(--s\)[^;]*var\(--cols\)/.test(CODE.match(/\.am-ov-wd\s*\{([^}]*)\}/)?.[1] ?? ''), 'weekday hides when its slot is narrow');
+  assert.ok(!/nth-child\(21\)/.test(CODE), 'the old Later-hiding column-count rule is gone');
   const rows = CODE.match(/\.am-ov-where\.is-all\s+\.am-ov-rows\s*\{([^}]*)\}/)?.[1] ?? '';
   assert.ok(/max-height\s*:\s*216px/.test(rows) && /overflow-y\s*:\s*auto/.test(rows), 'expanded Where list capped at 216px and scrolls');
   assert.ok(/flex-grow\s*:\s*var\(--g\)/.test(CODE), 'segments grow by --g');
@@ -185,7 +198,7 @@ test('structural rules the markup relies on', () => {
 test('responsive: wraps below the grid minimum (2 columns) and again at 560 (1 column), inside a container query', () => {
   assert.ok(/container(?:-type)?\s*:[^;]*inline-size/.test(CODE.match(/\.am-overview\s*\{[^}]*\}/)?.[0] ?? ''), '.am-overview is a size container');
   const q = [...CODE.matchAll(/@container\s+am-ov\s*\(max-width:\s*(\d+(?:\.\d+)?)px\)/g)].map(m => Number(m[1]));
-  assert.ok(q.some(w => w >= 899 && w <= 936), `a two-column step at the grid minimum (got ${q})`);
+  assert.ok(q.some(w => w >= 899 && w <= 936), `a two-column step at the three-column grid minimum (got ${q})`);
   assert.ok(q.some(w => w >= 559 && w < 560), `a one-column step below 560 (got ${q})`);
   assert.ok(/repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(CODE), 'two equal columns');
 });
@@ -193,7 +206,7 @@ test('responsive: wraps below the grid minimum (2 columns) and again at 560 (1 c
 test('every class the builders emit is styled (or deliberately owned by an existing rule)', () => {
   const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const t = (k, v) => (v ? `${k}|${Object.values(v).join(',')}` : k);
-  const v = { t, esc, fmtDay: k => k, fmtTick: k => k, unassigned: 'Unassigned' };
+  const v = { t, esc, fmtDay: k => k, fmtTick: k => ({ wd: 'Mon', day: k.slice(8), mo: 'Oct' }), unassigned: 'Unassigned' };
   const today = new Date(2026, 9, 20);
   const at = off => new Date(2026, 9, 20 + off, 9);
   const types = ['overload', 'overlap', 'blackout', 'setup-violated', 'late'];
@@ -205,13 +218,12 @@ test('every class the builders emit is styled (or deliberately owned by an exist
   listed.push({ id: `a${++n}`, sev: 'warn', type: 'overlap', line: 'L1', time: at(90) });
   const deps = { dueInstant: task => new Date(task.original_end_date), latenessHours: () => 0 };
   const data = overviewData(listed, { tasksById: {}, plantToday: today, horizonMinutes: 14 * 1440, window: { from: -1, to: 3 }, deps });
-  const conf = { score: 71, history: [{ ts: 1, score: 60 }, { ts: 2, score: 71 }], ghost: 78 };
   const narrow = { day: data.days[0].key, line: 'L1', category: 'conflicts' };
   const only = overviewData([listed[1]], { tasksById: {}, plantToday: today, horizonMinutes: 1440, window: null, deps });
   const html = [
-    overviewHtml({ data, narrow, showAll: true, conf, collapsed: false }, v),
-    overviewHtml({ data, narrow: {}, showAll: false, conf, collapsed: false }, v),
-    overviewHtml({ data: only, narrow: {}, showAll: false, conf: { score: 30, history: [], ghost: null }, collapsed: true }, v),
+    overviewHtml({ data, narrow, showAll: true, collapsed: false }, v),
+    overviewHtml({ data, narrow: {}, showAll: false, collapsed: false }, v),
+    overviewHtml({ data: only, narrow: {}, showAll: false, collapsed: true }, v),
     narrowChipHtml({ shown: 2, total: 9, narrow, labelOf: (d, x) => x }, t),
   ].join('\n');
   const classes = new Set();
@@ -222,7 +234,7 @@ test('every class the builders emit is styled (or deliberately owned by an exist
   // Pure state / identity hooks with no rule of their own (the base class already carries the style):
   // am-ov-what (the panel's identity; .am-ov-panel styles it), am-ov-col-overdue / am-ov-col-later / am-ov-bucket (the
   // bucket columns look like day columns), is-today (the Today hairline is its own .am-ov-today child).
-  const hooks = new Set(['am-ov-what', 'am-ov-col-overdue', 'am-ov-col-later', 'am-ov-bucket', 'is-today']);
+  const hooks = new Set(['am-ov-what', 'am-ov-col-overdue', 'am-ov-col-later', 'am-ov-bucket', 'is-today', 'am-ov-tick-day']);
   const missing = [...classes].filter(c => !external.has(c) && !hooks.has(c) && !new RegExp(`\\.${c.replace(/[-]/g, '\\-')}(?![\\w-])`).test(CODE));
   assert.deepEqual(missing, [], `unstyled emitted classes: ${missing.join(', ')}`);
   for (const c of external) assert.ok(new RegExp(`\\.${c}(?![\\w-])`).test(CSS), `${c} is styled somewhere in styles.css`);

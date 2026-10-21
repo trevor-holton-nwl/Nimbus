@@ -41,14 +41,14 @@ import {
   MONITOR_GROUP_BYS, MONITOR_SORTS, GROUP_ROW_CAP, ROW_H, DIAG_H, GROUP_MOVE_CONFIRM_ABOVE,
   summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowHtml, rowPrimaryActions, diagnoseHtml, groupHeadHtml, groupMenuItems, groupCounts, groupLabel,
-  relativeDaysText, formatPairKey, fmtNum, profileWindow, fixConfidenceChanged,
+  relativeDaysText, formatPairKey, fmtNum, profileWindow,
   fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
 import type { MonitorView, EmptyKind, RowView, LevCtx, GroupHeadView, GroupCounts } from './alert-monitor-model.mjs';
 import {
   overviewData, applyNarrow, narrowActive, toggleNarrow, pruneNarrow, parseNarrowAttr, overviewHtml, narrowChipHtml,
 } from './alert-monitor-overview.mjs';
-import type { Narrow, NarrowDim, OverviewData, OverviewDeps, OverviewViewDeps } from './alert-monitor-overview.mjs';
+import type { Narrow, NarrowDim, OverviewData, OverviewDeps, OverviewViewDeps, TickParts } from './alert-monitor-overview.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -87,7 +87,7 @@ interface AmNimbus {
   Timeline?: { gotoLineDay?(line: string, dateStr: string): void };
   OptimizerPreview?: { active?: boolean };
   Inspector?: { _formatRuntimeBasis?(task: NimbusTask): string };
-  Confidence?: { _score?: number; _history?: Array<{ ts: number; score: number }>; showBreakdown?: () => void };
+  Confidence?: { _score?: number; showBreakdown?: () => void };
 }
 const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NIMBUS ?? {};
 
@@ -451,7 +451,6 @@ function _onClick(e: Event): void {
     }
     case 'page-menu': if (btn) _openPageMenu(btn); break;
     case 'summary-conf':
-    case 'ov-conf':
       _nim().Confidence?.showBreakdown?.();
       break;
     case 'ov-toggle': {
@@ -1298,18 +1297,20 @@ function _fmtDay(d: Date): string {
 /** One formatter per page language: constructing an Intl.DateTimeFormat per row dominated the row-building cost. */
 const _dayFmt = new Map<string, Intl.DateTimeFormat>();
 
-/** "23 Oct" / "23. Okt." in the page language: the tick row of the Overview's When chart. */
-function _fmtTick(d: Date): string {
+/** Short weekday / day number / short month in the page language: the stacked day label under each When bar. */
+function _fmtTick(d: Date): TickParts {
   const lang = document.documentElement?.lang || 'en-US';
   let f = _tickFmt.get(lang);
   if (!f) {
-    try { f = new Intl.DateTimeFormat(lang, { day: 'numeric', month: 'short' }); }
-    catch { f = new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short' }); }
+    const mk = (o: Intl.DateTimeFormatOptions): Intl.DateTimeFormat => {
+      try { return new Intl.DateTimeFormat(lang, o); } catch { return new Intl.DateTimeFormat('en-US', o); }
+    };
+    f = { wd: mk({ weekday: 'short' }), day: mk({ day: 'numeric' }), mo: mk({ month: 'short' }) };
     _tickFmt.set(lang, f);
   }
-  return f.format(d);
+  return { wd: f.wd.format(d), day: f.day.format(d), mo: f.mo.format(d) };
 }
-const _tickFmt = new Map<string, Intl.DateTimeFormat>();
+const _tickFmt = new Map<string, { wd: Intl.DateTimeFormat; day: Intl.DateTimeFormat; mo: Intl.DateTimeFormat }>();
 
 /* ---------------------------------------------------------------------------
    Overview band (#am-overview) and the narrow chip (#am-narrow-chip)
@@ -1339,17 +1340,7 @@ function _overviewState(s: PaintState): OverviewState | null {
   return { data, narrow: _narrow, shown, deps };
 }
 
-/**
- * The Confidence panel's ghost: the rounded after-score of the first fix in the viewer's main list, only for a replayed,
- * minutes-free fix whose score changes (a lower one is shown too). Same eligibility as `fixLineParts`.
- */
-function _confGhost(): number | null {
-  const first = (Session.isAdmin() ? _levItems : _levItems.filter(i => !i.adminOnly))[0];
-  if (!first || !fixConfidenceChanged(first) || first.confidenceAfter == null) return null;
-  return Math.round(first.confidenceAfter);
-}
-
-function _renderOverview(s: PaintState, ov: OverviewState | null): void {
+function _renderOverview(ov: OverviewState | null): void {
   const el = _el('am-overview');
   if (!el) return;
   if (!ov) { _setHtml('am-overview', ''); el.hidden = true; return; }
@@ -1361,7 +1352,6 @@ function _renderOverview(s: PaintState, ov: OverviewState | null): void {
   const heldAction = inBand && heldNarrow == null ? active.getAttribute?.('data-am-action') ?? null : null;
   _setHtml('am-overview', overviewHtml({
     data: ov.data, narrow: ov.narrow, showAll: _ovLinesAll,
-    conf: { score: s.confidence, history: _nim().Confidence?._history ?? [], ghost: _confGhost() },
     collapsed: Store.pref('alertMonitorOverview') === 'collapsed',
   }, _ovViewDeps()));
   el.hidden = false;
@@ -1494,7 +1484,7 @@ function _paint(): void {
     _setHtml('am-prompt', _promptHtml(s));
     _renderLeverage(s);
     const ov = _overviewState(s);
-    _renderOverview(s, ov);
+    _renderOverview(ov);
     _renderNarrowChip(s, ov);
     _renderGroups(s, ov ? ov.shown : s.listed);
   }

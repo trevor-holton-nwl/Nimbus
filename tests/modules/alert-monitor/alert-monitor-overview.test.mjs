@@ -1,12 +1,11 @@
-// Tests for frontend/alert-monitor/alert-monitor-overview.mts — the pure data / narrow / HTML / SVG half of the Overview band.
+// Tests for frontend/alert-monitor/alert-monitor-overview.mts — the pure data / narrow / HTML half of the Overview band.
 // A DST zone, so the spring-forward / fall-back cases below really cross a DST change (Node reads TZ lazily).
 process.env.TZ = 'America/New_York';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   horizonDays, overviewData, applyNarrow, narrowActive, toggleNarrow, pruneNarrow, parseNarrowAttr,
-  arcPoint, arcPath, arcTick, confTier, sparkPath,
-  whenHtml, whereHtml, whatHtml, confidenceHtml, overviewHtml, narrowChipHtml,
+  tickStride, whenHtml, whereHtml, whatHtml, overviewHtml, narrowChipHtml,
 } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
 import { groupAlerts, dayKeyOf } from '../../../frontend/insights/alert-profiles.mjs';
 
@@ -70,7 +69,7 @@ test('overviewData: an undated alert counts toward total and undated only (no da
   assert.ok(d.days.every(x => x.err + x.warn === 0));
 });
 
-test('overviewData: inWindow for {0,7} and {-2,3}; tick labels and today', () => {
+test('overviewData: inWindow for {0,7} and {-2,3}; today', () => {
   const w1 = overviewData([], base({ window: { from: 0, to: 7 } }));
   assert.deepEqual(w1.days.map(x => x.inWindow).slice(0, 10), [true, true, true, true, true, true, true, true, false, false]);
   assert.equal(w1.overdue.inWindow, false);
@@ -80,10 +79,6 @@ test('overviewData: inWindow for {0,7} and {-2,3}; tick labels and today', () =>
   assert.equal(w2.days[4].inWindow, false);
   assert.equal(w2.days[0].isToday, true);
   assert.equal(w2.days[1].isToday, false);
-  const ticks = w2.days.filter(x => x.labelTick).map(x => x.offset);
-  assert.deepEqual(ticks, [7]);
-  const wide = overviewData([], base({ horizonMinutes: 40 * 1440 }));
-  assert.deepEqual(wide.days.filter(x => x.labelTick).map(x => x.offset), [14, 28]);
 });
 
 test('overviewData: err/warn split, overload flag, line sort, category order with zeros', () => {
@@ -175,40 +170,6 @@ test('parseNarrowAttr splits at the first colon; an unknown dimension is null', 
   assert.equal(parseNarrowAttr(null), null);
 });
 
-// ---- SVG ------------------------------------------------------------------------------------
-
-test('arcPath: 0 is empty, 50 ends at 270 deg small arc, 100 ends at 45 deg large arc, NaN / 120 clamp', () => {
-  assert.equal(arcPath(0, 50, 50, 40), '');
-  assert.equal(arcPath(NaN, 50, 50, 40), '');
-  assert.equal(arcPath(-5, 50, 50, 40), '');
-  const p50 = arcPath(50, 50, 50, 40);
-  assert.match(p50, /A 40 40 0 0 1 50 10$/);
-  const p100 = arcPath(100, 50, 50, 40);
-  assert.match(p100, /A 40 40 0 1 1 78\.28 78\.28$/);
-  assert.equal(arcPath(120, 50, 50, 40), p100);
-  const s = arcPoint(0, 50, 50, 40);
-  assert.ok(Math.abs(s.x - 21.72) < 0.01 && Math.abs(s.y - 78.28) < 0.01);
-  assert.match(arcTick(50, 50, 50, 30, 44), /^M 50 20 L 50 6$/);
-});
-
-test('confTier: 80 / 60 ok, 59 / 40 warn, 39 err', () => {
-  assert.equal(confTier(80), 'ok');
-  assert.equal(confTier(60), 'ok');
-  assert.equal(confTier(59), 'warn');
-  assert.equal(confTier(40), 'warn');
-  assert.equal(confTier(39), 'err');
-});
-
-test('sparkPath: under 2 points is empty, 500 points downsample to 40, y is fixed 0..100', () => {
-  assert.equal(sparkPath([], 100, 20), '');
-  assert.equal(sparkPath([{ ts: 1, score: 50 }], 100, 20), '');
-  assert.equal(sparkPath([{ ts: 1, score: 0 }, { ts: 2, score: 100 }], 100, 20), 'M 0 20 L 100 0');
-  const many = Array.from({ length: 500 }, (_, i) => ({ ts: i, score: i % 101 }));
-  const d = sparkPath(many, 126, 22);
-  assert.equal((d.match(/[ML]/g) || []).length, 40);
-  assert.match(d, /^M 0 /);
-});
-
 // ---- HTML -----------------------------------------------------------------------------------
 
 const EN = {
@@ -226,7 +187,7 @@ const EN = {
 };
 const t = (k, v) => (EN[k] ?? k).replace(/\{\{(\w+)\}\}/g, (_, n) => String(v?.[n] ?? ''));
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-const v = { t, esc, fmtDay: (k) => `D ${k}`, fmtTick: (k) => `T ${k}`, unassigned: 'Unassigned' };
+const v = { t, esc, fmtDay: (k) => `D ${k}`, fmtTick: (k) => ({ wd: `W${k.slice(8)}`, day: String(Number(k.slice(8))), mo: `M${k.slice(5, 7)}` }), unassigned: 'Unassigned' };
 const BANNED = /points|pts|exact|estimate/i;
 
 function sample() {
@@ -321,42 +282,24 @@ test('whatHtml: strip omits zero categories, legend lists all five with zeros di
   assert.doesNotMatch(h, BANNED);
 });
 
-test('confidenceHtml: gauge, ghost, sparkline; null score omits the panel', () => {
-  assert.equal(confidenceHtml({ score: null, history: [], ghost: null }, v), '');
-  const hist = [{ ts: 1, score: 60 }, { ts: 2, score: 70 }, { ts: 3, score: 72 }];
-  const h = confidenceHtml({ score: 72, history: hist, ghost: 78 }, v);
-  assert.match(h, /data-am-action="ov-conf"/);
-  assert.match(h, /role="img"/);
-  assert.match(h, /Plant confidence 72/);
-  assert.match(h, /am-ov-conf-val ok/);
-  assert.match(h, /→ 78/);
-  assert.match(h, /am-ov-spark/);
-  assert.match(h, /<button[^>]*title="Plant confidence 72\. Open the breakdown\. After the top fix: 78"/, 'the ghost is in the button name');
-  assert.match(h, /<svg[^>]*role="img" aria-label="Plant confidence 72\. Open the breakdown\. After the top fix: 78"/);
-  const bare = confidenceHtml({ score: 30, history: [{ ts: 1, score: 30 }], ghost: null }, v);
-  assert.doesNotMatch(bare, /After the top fix/);
-  assert.match(bare, /am-ov-conf-val err/);
-  assert.doesNotMatch(bare, /am-ov-spark/);
-  assert.doesNotMatch(bare, /→/);
-  assert.doesNotMatch(h, BANNED);
-});
-
 test('overviewHtml: expanded and collapsed variants', () => {
   const d = sample();
-  const conf = { score: 72, history: [], ghost: null };
-  const open = overviewHtml({ data: d, narrow: {}, showAll: false, conf, collapsed: false }, v);
+  const open = overviewHtml({ data: d, narrow: {}, showAll: false, collapsed: false }, v);
   assert.match(open, /^<section class="am-overview/);
   assert.match(open, /aria-expanded="true"/);
   assert.match(open, /aria-controls="am-ov-body"/);
   assert.match(open, /id="am-ov-body"(?![^>]*hidden)/);
   assert.match(open, /data-am-action="ov-toggle"/);
   assert.doesNotMatch(open, /Alerts \d+ · Overdue/);
-  const shut = overviewHtml({ data: d, narrow: {}, showAll: false, conf, collapsed: true }, v);
+  const shut = overviewHtml({ data: d, narrow: {}, showAll: false, collapsed: true }, v);
   assert.match(shut, /aria-expanded="false"/);
   assert.match(shut, /id="am-ov-body"[^>]*hidden/);
   assert.match(shut, /Alerts 6 · Overdue 1/);
   assert.match(shut, /class="panel-hint"/);
   assert.doesNotMatch(open + shut, BANNED);
+  // The Confidence card is gone: three panels, no confidence control, no gauge.
+  assert.equal((open.match(/class="am-ov-panel /g) || []).length, 3);
+  assert.doesNotMatch(open, /am-ov-conf|ov-conf|am-ov-gauge|am-ov-spark/);
 });
 
 test('narrowChipHtml: empty when inactive; one remove button per dimension in order day, line, category', () => {
@@ -404,21 +347,74 @@ test('fix round 1: err/warn stacking order, custom-property-only inline styles, 
   assert.equal(empty.maxDay, 0);
 });
 
-test('fix round 1: pruneNarrow keeps object identity when nothing drops; a downsampled sparkline keeps y inside 0..h', () => {
+test('fix round 1: pruneNarrow keeps object identity when nothing drops', () => {
   const d = overviewData([alert({ line: 'L1', time: at(2) })], base());
   const n = { line: 'L1' };
   assert.equal(pruneNarrow(n, d), n);
   assert.notEqual(pruneNarrow({ line: 'ZZ' }, d), { line: 'ZZ' });
-  const many = Array.from({ length: 500 }, (_, i) => ({ ts: i, score: i % 2 ? 100 : 0 }));
-  const ys = [...sparkPath(many, 126, 22).matchAll(/ (-?[\d.]+)(?= L|$)/g)].map(m => Number(m[1]));
-  assert.equal(ys.length, 40);
-  assert.ok(ys.every(y => y >= 0 && y <= 22));
 });
 
-test('fix round 1: confidenceHtml uses one rounded score for tier, arc and label', () => {
-  const h = confidenceHtml({ score: 59.6, history: [], ghost: null }, v);
-  assert.match(h, /am-ov-conf-val ok/);
-  assert.match(h, />60</);
+// ---- day labels under the bars ----------------------------------------------------------------
+
+const tickRow = (html) => html.slice(html.indexOf('class="am-ov-ticks"'), html.indexOf('class="am-ov-legend"'));
+const dayTicks = (html) => tickRow(html).match(/<span class="am-ov-tick am-ov-tick-day[^"]*">.*?<\/span><\/span>/g) || [];
+
+test('tickStride: 1 up to 29 columns, 2 up to 58, 3 beyond (15 px slot over a 436 px chart)', () => {
+  assert.equal(tickStride(18), 1);
+  assert.equal(tickStride(23), 1);
+  assert.equal(tickStride(29), 1);
+  assert.equal(tickStride(30), 2);
+  assert.equal(tickStride(58), 2);
+  assert.equal(tickStride(59), 3);
+  assert.equal(tickStride(62), 3);
+  assert.equal(tickStride(0), 1);
+});
+
+test('whenHtml ticks: every day column is labelled (weekday over day number), Overdue and Later keep bucket labels only', () => {
+  const h = whenHtml(overviewData([alert()], base()), {}, v);   // 14 days = 16 columns
+  const row = tickRow(h);
+  assert.equal((row.match(/class="am-ov-tick[ "]/g) || []).length, 16, 'one tick per column');
+  assert.equal(dayTicks(h).length, 14, 'every day column has a day label');
+  assert.match(row, /<span class="am-ov-tick am-ov-tick-bucket"><span class="am-ov-bl">Overdue<\/span><\/span>/);
+  assert.match(row, /<span class="am-ov-tick am-ov-tick-bucket"><span class="am-ov-bl">Later<\/span><\/span>/);
+  assert.doesNotMatch(row, /am-ov-tick-day[^>]*>(?:(?!<\/span><\/span>).)*Later/, 'Later has no day label');
+  const first = dayTicks(h)[0];
+  assert.match(first, /class="am-ov-tick am-ov-tick-day is-today"/);
+  assert.match(first, /<span class="am-ov-wd">W20<\/span><span class="am-ov-dn">20<\/span>/);
+  assert.equal((row.match(/is-today/g) || []).length, 1, 'only today is emphasised');
+  assert.match(row, /--cols:16;--s:1/);
+});
+
+test('whenHtml ticks: the month shows on the first column and where it changes, never on two adjacent labels', () => {
+  // Today is 2026-10-20: day 12 is 2026-11-01 (a change); the first column carries Oct.
+  const h = whenHtml(overviewData([alert()], base({ horizonMinutes: 16 * 1440 })), {}, v);
+  const months = dayTicks(h).map(x => /<span class="am-ov-mo">([^<]*)<\/span>/.exec(x)[1]);
+  assert.equal(months[0], 'M10');
+  assert.equal(months[12], 'M11');
+  assert.equal(months.filter(Boolean).length, 2);
+  // Today is the 31st: the next column is a month change, so the first column drops its month (no 'Oct' next to 'Nov').
+  const edge = whenHtml(overviewData([alert({ time: new Date(2026, 9, 31, 9) })], base({ plantToday: new Date(2026, 9, 31), horizonMinutes: 10 * 1440 })), {}, v);
+  const em = dayTicks(edge).map(x => /<span class="am-ov-mo">([^<]*)<\/span>/.exec(x)[1]);
+  assert.deepEqual(em.slice(0, 2), ['', 'M11']);
+  assert.ok(em.slice(1).filter(Boolean).length === 1);
+});
+
+test('whenHtml ticks: a long horizon thins the labels by the stride and keeps one tick per column', () => {
+  const h = whenHtml(overviewData([alert()], base({ horizonMinutes: 60 * 1440 })), {}, v);   // 62 columns, stride 3
+  const row = tickRow(h);
+  assert.match(row, /--cols:62;--s:3/);
+  assert.equal((row.match(/class="am-ov-tick[ "]/g) || []).length, 62);
+  assert.equal(dayTicks(h).length, 20, 'days 0, 3, 6 ... 57');
+  const days = dayTicks(h).map(x => /am-ov-dn">(\d+)</.exec(x)[1]);
+  assert.equal(days[0], '20');
+  assert.equal(days[1], '23');
+});
+
+test('whenHtml ticks: tick parts are escaped once', () => {
+  const evil = { ...v, fmtTick: () => ({ wd: '<b>', day: '1', mo: '&' }) };
+  const h = whenHtml(overviewData([alert()], base()), {}, evil);
+  assert.doesNotMatch(tickRow(h), /<b>/);
+  assert.match(tickRow(h), /&lt;b&gt;/);
 });
 
 // ---- rev-3 fix wave ---------------------------------------------------------------------------

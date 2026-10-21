@@ -145,10 +145,27 @@ test('the band renders over the listed alerts with day / line / category narrow 
   assert.equal(els['am-narrow-chip'].hidden, true);
 });
 
-test('_fmtTick output appears on the tick columns', () => {
+test('_fmtTick output appears on the tick columns: weekday, day number and (first column) month, today emphasised', () => {
   seedOv(ALERTS());
   AlertMonitorPane.render();
-  assert.match(els['am-overview'].innerHTML, /<span class="am-ov-tick">Oct 27<\/span>/);
+  const html = els['am-overview'].innerHTML;
+  assert.match(html, /<span class="am-ov-tick am-ov-tick-day is-today"><span class="am-ov-wd">Tue<\/span><span class="am-ov-dn">20<\/span><span class="am-ov-mo">Oct<\/span><\/span>/);
+  assert.match(html, /<span class="am-ov-tick am-ov-tick-day"><span class="am-ov-wd">Wed<\/span><span class="am-ov-dn">21<\/span><span class="am-ov-mo"><\/span><\/span>/);
+  assert.match(html, /<span class="am-ov-bl">am\.ov_overdue<\/span>/);
+});
+
+test('the Confidence card is gone: three panels, no ov-conf control; the summary link still opens the breakdown', () => {
+  const log = [];
+  globalThis.NIMBUS = { Confidence: { _score: 50, showBreakdown: () => log.push('b') } };
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const html = els['am-overview'].innerHTML;
+  assert.equal((html.match(/class="am-ov-panel /g) || []).length, 3);
+  assert.doesNotMatch(html, /am-ov-conf|ov-conf|am-ov-gauge|am-ov-spark/);
+  clickAm('ov-conf');
+  assert.deepEqual(log, [], 'ov-conf is no longer an action');
+  clickAm('summary-conf');
+  assert.deepEqual(log, ['b']);   // exactly once
 });
 
 test('clicking a day bar narrows the list to that day, the chip counts it, the summary is unchanged; re-click clears', () => {
@@ -382,132 +399,6 @@ test('focus returns to the new bar carrying the same data-am-narrow (attribute m
   assert.equal(globalThis.document.activeElement, x[0]);
 });
 
-test('ov-conf opens the confidence breakdown like the summary link does', () => {
-  const log = [];
-  globalThis.NIMBUS = { Confidence: { _score: 50, showBreakdown: () => log.push('b') } };
-  seedOv(ALERTS());
-  AlertMonitorPane.render();
-  clickAm('ov-conf');
-  assert.deepEqual(log, ['b']);   // exactly once
-});
-
-// ---- Task 30: Confidence panel inputs (score, history sparkline, ghost) ------------------------------------------
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const lev = (key, o = {}) => ({
-  family: 'calendar-day', key, titleKey: 'leverage.title.calendar-day', titleVars: { n: 1, line: 'L1', day: key },
-  alertIds: ['a1'], orderIds: ['a1'], lines: ['L1'], points: 10, confidenceBefore: 71, confidenceAfter: 78, method: 'replay',
-  outsideConfidenceWindowCount: 0, action: { kind: 'calendar-day', line: 'L1', dayKey: '2026-10-21', fixableAlertIds: [] }, ...o,
-});
-const confHtml = () => els['am-overview'].innerHTML;
-const hist = n => Array.from({ length: n }, (_, i) => ({ ts: 1000 + i, score: 60 + i }));
-const levInput = () => ({ plant: 'P1', plantNow: new Date('2026-10-20T08:00:00'), horizonMinutes: 20160, alerts: [], baselineMatrix: {} });
-let levPrior = null, adminPrior = null;
-
-/** Seed, stub the leverage deps with `items` (both phases return them), render and wait for the run. */
-async function withLev(items, { score = 71, admin = true } = {}) {
-  levPrior ??= { ...AlertMonitorPane._levDeps };
-  adminPrior ??= Session.isAdmin;
-  Session.isAdmin = () => admin;
-  Object.assign(AlertMonitorPane._levDeps, {
-    buildInput: levInput, group: () => items.map(i => ({ ...i })), analyze: async () => items.map(i => ({ ...i })),
-  });
-  globalThis.NIMBUS = { Confidence: { _score: score } };
-  seedOv(ALERTS());
-  AlertMonitorPane.render();
-  await sleep(40);
-}
-afterEach(() => {
-  if (levPrior) { Object.assign(AlertMonitorPane._levDeps, levPrior); levPrior = null; }
-  if (adminPrior) { Session.isAdmin = adminPrior; adminPrior = null; }
-});
-
-test('confidence: the dial tier follows the score (71 ok, 55 warn, 30 err) and shows the number', () => {
-  for (const [score, tier] of [[71, 'ok'], [55, 'warn'], [30, 'err']]) {
-    globalThis.NIMBUS = { Confidence: { _score: score } };
-    seedOv(ALERTS());
-    AlertMonitorPane.render();
-    assert.match(confHtml(), new RegExp(`am-ov-conf-val ${tier}"`), `score ${score}`);
-    assert.match(confHtml(), new RegExp(`am-ov-conf-n[^>]*>${score}<`));
-  }
-});
-
-test('confidence: a 2-point history draws the sparkline, 1 point and none do not; no NIMBUS.Confidence does not throw', () => {
-  globalThis.NIMBUS = { Confidence: { _score: 71, _history: hist(2) } };
-  seedOv(ALERTS());
-  AlertMonitorPane.render();
-  assert.match(confHtml(), /am-ov-spark-line/);
-  globalThis.NIMBUS = { Confidence: { _score: 71, _history: hist(1) } };
-  AlertMonitorPane.render();
-  assert.doesNotMatch(confHtml(), /am-ov-spark/);
-  globalThis.NIMBUS = { Confidence: { _score: 71 } };
-  AlertMonitorPane.render();
-  assert.doesNotMatch(confHtml(), /am-ov-spark/);
-  globalThis.NIMBUS = {};
-  assert.doesNotThrow(() => AlertMonitorPane.render());
-  assert.ok(confHtml().includes('am-ov-where'), 'the band still renders without Confidence');
-  assert.doesNotMatch(confHtml(), /am-ov-conf-tick|am-ov-spark/);
-});
-
-test('confidence: history is read fresh on every paint', () => {
-  const h = hist(1);
-  globalThis.NIMBUS = { Confidence: { _score: 71, _history: h } };
-  seedOv(ALERTS());
-  AlertMonitorPane.render();
-  assert.doesNotMatch(confHtml(), /am-ov-spark/);
-  h.push({ ts: 2000, score: 70 });
-  AlertMonitorPane.render();
-  assert.match(confHtml(), /am-ov-spark-line/);
-});
-
-test('confidence ghost: a replayed 71 to 78 fix renders the after-score and the tick', async () => {
-  await withLev([lev('k1')]);
-  assert.ok(confHtml().includes('am.ov_conf_after|n=78'));
-  assert.match(confHtml(), /am-ov-conf-tick/);
-});
-
-test('confidence ghost: none for removal, none when the rounded scores are equal, none while requiresMinutes, none without an after-score', async () => {
-  for (const o of [{ method: 'removal' }, { confidenceBefore: 71.2, confidenceAfter: 70.6 }, { requiresMinutes: true }, { confidenceAfter: null }]) {
-    await withLev([lev('k1', o)]);
-    assert.doesNotMatch(confHtml(), /am-ov-conf-after/, JSON.stringify(o));
-    assert.doesNotMatch(confHtml(), /am-ov-conf-tick/, JSON.stringify(o));
-  }
-});
-
-test('confidence ghost: a lower after-score is shown too, and the ghost is the rounded after-score', async () => {
-  await withLev([lev('k1', { confidenceAfter: 64 })]);
-  assert.ok(confHtml().includes('am.ov_conf_after|n=64'));
-  await withLev([lev('k1', { confidenceAfter: 77.6 })]);
-  assert.ok(confHtml().includes('am.ov_conf_after|n=78'));
-});
-
-test('confidence ghost: a non-admin skips an adminOnly first item; an admin sees it', async () => {
-  const items = [lev('k1', { adminOnly: true, confidenceAfter: 90 }), lev('k2', { confidenceAfter: 75 })];
-  await withLev(items, { admin: false });
-  assert.ok(confHtml().includes('am.ov_conf_after|n=75'));
-  assert.ok(!confHtml().includes('n=90'));
-  await withLev(items, { admin: true });
-  assert.ok(confHtml().includes('am.ov_conf_after|n=90'));
-});
-
-test('confidence ghost: only the first main fix counts', async () => {
-  await withLev([lev('k1', { method: 'removal' }), lev('k2', { confidenceAfter: 90 })]);
-  assert.doesNotMatch(confHtml(), /am-ov-conf-after/);
-});
-
-test('confidence ghost: phase 2 of the leverage run adds the ghost without a manual repaint', async () => {
-  levPrior ??= { ...AlertMonitorPane._levDeps };
-  Object.assign(AlertMonitorPane._levDeps, {
-    buildInput: levInput, group: () => [lev('k1', { method: 'removal', confidenceAfter: null })], analyze: async () => [lev('k1')],
-  });
-  globalThis.NIMBUS = { Confidence: { _score: 71 } };
-  seedOv(ALERTS());
-  AlertMonitorPane.render();
-  assert.doesNotMatch(confHtml(), /am-ov-conf-after/, 'before the leverage run');
-  await sleep(40);
-  assert.ok(confHtml().includes('am.ov_conf_after|n=78'), 'after phase 2');
-});
-
 // ---- rev-3 fix wave (code half) ---------------------------------------------------------------------------------
 
 test('I1: refocus skips a match under an aria-hidden ancestor (the What strip) and lands on the legend row', () => {
@@ -562,7 +453,6 @@ test('M2: a focus set drops the profile window shading (the focus list ignores t
 });
 
 test('M5: a repaint that changes the band keeps focus on the same control (and on a toggle action)', () => {
-  globalThis.NIMBUS = { Confidence: { _score: 71 } };
   seedOv(ALERTS());
   AlertMonitorPane.render();
   const was = bar('day:2026-10-23');
@@ -570,8 +460,8 @@ test('M5: a repaint that changes the band keeps focus on the same control (and o
   globalThis.document.activeElement = was;
   const fresh = bar('day:2026-10-23');
   els['am-overview'].querySelectorAll = sel => (sel === '[data-am-narrow]' ? [fresh] : []);
-  globalThis.NIMBUS = { Confidence: { _score: 50 } };
   const before = els['am-overview'].innerHTML;
+  seedOv([...ALERTS(), alert('a5', { line: 'L2', time: D23 })]);
   AlertMonitorPane.render();
   assert.notEqual(els['am-overview'].innerHTML, before, 'the band really repainted');
   assert.equal(globalThis.document.activeElement, fresh);
@@ -583,19 +473,18 @@ test('M5: a repaint that changes the band keeps focus on the same control (and o
   const freshAct = makeEl('', globalThis.document, 'button');
   freshAct.setAttribute('data-am-action', 'ov-lines-more');
   els['am-overview'].querySelectorAll = sel => (sel === '[data-am-action]' ? [freshAct] : []);
-  globalThis.NIMBUS = { Confidence: { _score: 30 } };
+  seedOv([...ALERTS(), alert('a5', { line: 'L2', time: D23 }), alert('a6', { line: 'L1', time: D21 })]);
   AlertMonitorPane.render();
   assert.equal(globalThis.document.activeElement, freshAct);
 });
 
 test('M5: focus outside the band is left alone by a band repaint', () => {
-  globalThis.NIMBUS = { Confidence: { _score: 71 } };
   seedOv(ALERTS());
   AlertMonitorPane.render();
   const elsewhere = makeEl('x', globalThis.document, 'button');
   globalThis.document.activeElement = elsewhere;
   els['am-overview'].querySelectorAll = () => { throw new Error('must not look for a control to refocus'); };
-  globalThis.NIMBUS = { Confidence: { _score: 50 } };
+  seedOv([...ALERTS(), alert('a5', { line: 'L2', time: D23 })]);
   AlertMonitorPane.render();
   assert.equal(globalThis.document.activeElement, elsewhere);
 });
@@ -656,14 +545,6 @@ test('M11: a profile window ending past day 60 clamps the band to 60 day columns
   const html = els['am-overview'].innerHTML;
   assert.equal((html.match(/class="am-ov-col[ "]/g) || []).length, 62);
   assert.match(html, /--cols:62/);
-});
-
-test('ghost predicate: a fractional 70.6 to 71.4 fix draws no ghost; 70.6 to 72.4 draws 72', async () => {
-  await withLev([lev('k1', { confidenceBefore: 70.6, confidenceAfter: 71.4 })]);
-  assert.doesNotMatch(confHtml(), /am-ov-conf-after|am-ov-conf-tick/);
-  await withLev([lev('k1', { confidenceBefore: 70.6, confidenceAfter: 72.4 })]);
-  assert.ok(confHtml().includes('am.ov_conf_after|n=72'));
-  assert.ok(confHtml().includes('am.ov_conf_after_aria|n=72'), 'the after-fix value is in the accessible name');
 });
 
 // ---- visible chip, scroll-to-list, clickable What strip ----------------------------------------------------------

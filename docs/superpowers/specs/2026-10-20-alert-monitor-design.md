@@ -443,7 +443,7 @@ Written after the band shipped on `feature/alert-monitor` (Tasks 28-31, commits 
 
 | # | Decision | Answer |
 |---|---|---|
-| V1 | Visuals | **All four**: When (horizon bars), Where (machine bars), What (category strip and legend), Confidence (dial, session trend, top-fix marker). |
+| V1 | Visuals | **All four**: When (horizon bars), Where (machine bars), What (category strip and legend), Confidence (dial, session trend, top-fix marker). **Superseded (2026-10-20, see "Overview band - rev-3 follow-up" at the end): the Confidence card is removed; three panels remain.** |
 | V2 | Placement | A **collapsible band** under the controls row, above Top fixes; the collapse state is remembered per user (`alertMonitorOverview`: `'collapsed'`, anything else open). |
 | V3 | Click | **Narrows the list with a chip** ("Showing 9 of 42", one removable chip per dimension, plus Clear); AND across the three dimensions; clicking the selected bar again clears it; group-by is untouched; non-selected bars dim. |
 | V4 | Data scope | **The alerts the page lists** (viewed profile, minus acknowledged unless shown; the focus set in focus mode), counted **before** narrowing so the other bars stay clickable. The summary line is unchanged and Top fixes stay plant-wide (D10). |
@@ -514,3 +514,39 @@ Review-deferred minors still open:
 - The Confidence panel does not repaint itself when `_history` grows between paints; it picks the new points up on the next paint.
 - Five emitted hook classes have no rule of their own (`am-ov-what`, `am-ov-col-overdue`, `am-ov-col-later`, `am-ov-bucket`, `is-today`); the gate test lists them.
 - **No browser pass was run by the agents** (owner-owed, as in rev 2): tick collision on long horizons, `container-type` on a `<button>`, band/bar alignment, Today label clearance, the 936 and 560 px wraps, de/es/fr/pt widths at 1,024 px, dark mode.
+
+## Overview band - rev-3 follow-up (2026-10-20): drop the Confidence card, fill the When chart, label every day
+
+Owner screenshots showed the When bars using about 45 percent of the card height and the Confidence card mostly empty. The card repeated the plant confidence already shown by the header "Plant confidence N" link and the top-bar chip (all three opened the same breakdown); its only extras were a session sparkline (a flat line while the score is unchanged) and the top-fix "ghost" marker.
+
+### Owner decisions (settled; don't re-ask)
+
+| # | Decision | Answer |
+|---|---|---|
+| F1 | Confidence card | **Removed. Supersedes V1.** The header "Plant confidence N" link (`am-summary-conf`) and the top-bar chip stay; `NIMBUS.Confidence._history` stays (the top bar uses it). |
+| F2 | Top-fix ghost marker | **Dropped with the card** (`_confGhost`, `am.ov_conf_after*`). The Top fixes section remains the place for "Confidence 71 -> 78". |
+| F3 | When bars | **Grow to fill the card height** (a flexible chart row, 84 px of bar at the least; the card is as tall as the Where panel). |
+| F4 | Day labels | **Every day bar except Later is labelled**: short weekday over day-of-month number, the month on the first label and where it changes; today emphasised; Overdue and Later keep their bucket labels. |
+
+### What changed
+
+- Grid: `minmax(300px, 1fr) 230px 220px`, two columns below 936 px of band width and one below 560 px (unchanged breakpoints, re-derived: 936 is where the When chart is 436 px wide, 936 - 230 - 220 - 24 - 26; below it When takes a full row, so its chart is 500 px or wider again). The 774 px three-column minimum was rejected: it would leave a 274 px chart.
+- `confidenceHtml`, the arc / sparkline math (`arcPoint`, `arcPath`, `arcTick`, `confTier`, `sparkPath`), the `ov-conf` action and `DayBar.labelTick` are deleted; `OverviewViewDeps.fmtTick` now returns `{wd, day, mo}`.
+- Tick markup: `span.am-ov-tick.am-ov-tick-day` holds `.am-ov-wd`, `.am-ov-dn`, `.am-ov-mo`; a bucket tick holds `.am-ov-bl` on a fourth grid row that no day label ever uses, so Overdue (left-aligned, running right) and Later (right-aligned, running left) cannot collide with a day label whatever the language.
+- Thinning: `tickStride(cols) = ceil(15 x cols / 436)` (1 up to 29 columns, 2 up to 58, 3 beyond), exported with its two constants; skipped columns keep an empty tick so the grid stays aligned. The first label drops its month when the next label is a month change (no "Oct" touching "Nov").
+- The weekday hides itself by CSS when one label's slot is under 26 px (`font-size: clamp(0px, calc((100cqw * var(--s) / var(--cols) - 26px) * 1000), 10px)` on a `container-type: inline-size` ticks row), leaving the day number.
+
+### Measurements the label format rests on (JetBrains Mono, 10 px, 0.6 em advance; a live-DOM prototype of the real markup and `styles.css` over 5 languages, 58 cases)
+
+- Day number, two digits: 12.8 px. Weekday at 10 px: 18 px for a 3-character name (en, es "mié"), 12 px for de, **24 px for the fr / pt 4-character names ("lun.", "seg.")**. Month ("janv." the widest): 30 px, shown on at most two labels that are never adjacent.
+- Bucket labels at 10 px uppercase with letter-spacing: Overdue 44.8 (en), 64 (de "Überfällig"), 51.2 (es), 57.6 (fr and pt); Later 32 (en), 38.4 (de, pt), 44.8 (es), 57.6 (fr). A cell is 37.6 px at 16 days in a 677 px chart, so every bucket label overflows its cell; the fourth row is what makes that safe. Overdue plus Later together (at most about 120 px) fit any chart of 436 px or more.
+- Chart width and cell width: 1,176 px band (1,280 viewport) chart 677 px: 16 days 37.6 px, 21 days 29.4 px, 60 days 10.9 px (stride 3, so 32.7 px of slot). 936 px band: chart 437 px, 16 days 24.3 px (weekday hidden, day numbers only). 1,000 px band: 501 px, 21 days 21.8 px (weekday hidden), fr 16 days 27.8 px (weekday shown). 560 px band: chart 535 px, 16 days 29.7 px, 21 days 23.3 px (weekday hidden), 30 days stride 2.
+- Bars: at a 1,176 px band with the Where panel at 8 rows the chart is 147 px tall and the tallest bar 133 px (was fixed at 84 px); percentage bar heights resolve against the flex-sized grid track in Chrome. In the 560-935 px two-column layout the When card is not stretched by Where, so the chart keeps its 98 px floor (84 px of bar).
+- Collision / overflow check in the prototype (every visible label's text range against every other, and against the chart edges): zero overlaps and zero labels outside the chart in all 58 cases, including Today on the 31st (month names Oct / Nov adjacent) and a 30 Jan / 30 Dec start.
+
+### Deferred / not done
+
+- `am.ov_conf`, `am.ov_conf_aria`, `am.ov_conf_after`, `am.ov_conf_after_aria` stay in the five locale files (and in the locale-completeness required list) as unused keys; removing them is a mechanical follow-up.
+- The weekday visibility threshold is language-agnostic (26 px covers the 24 px fr / pt names); an en / de / es-only threshold of about 20 px would keep weekdays on at the 936-1,000 px widths.
+- Browser checks owed on the real page (the prototype used synthetic alerts and the real CSS): the band in the live app at 1,280 / 1,024 / 900 px, dark mode, and the header "Plant confidence" link and top-bar chip still opening the breakdown (their code is untouched).
+- The stride assumes a 436 px chart; between 560 and 935 px band width a 62-column chart (535 px at the narrowest) is always wider than that, so only the three-column band sets the floor.
