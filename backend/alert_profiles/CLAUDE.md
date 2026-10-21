@@ -25,7 +25,7 @@ Every route does the plant check (`md._assert_plant_allowed`; `PlantNotAllowed` 
 | `DELETE /alert-profiles/{id}?plant=` | `{deleted: true, id}`; 404; 403 |
 | `GET /alert-acks?plant=` | `{plant, acks}` (active only) |
 | `POST /alert-acks` `{plant, alert_id, reason, until?}` | the ack (upsert, so re-acking replaces the previous one) |
-| `POST /alert-acks/bulk` `{plant, alert_ids (1-500 strings), reason, until?}` | `{acks, count}` (active acks written; one transaction, one audit row); 400 empty / >500 / non-string ids / bad reason / bad `until` |
+| `POST /alert-acks/bulk` `{plant, alert_ids (1-500 strings), reason, until?}` | `{acks, count}` (active acks written; one transaction, one audit row; ids de-duplicated and written sorted; the client chunks groups above 500); 400 empty / >500 / non-string ids / bad reason / bad `until` |
 | `DELETE /alert-acks/{plant}/{alert_id}` | `{deleted: bool}`; 403 |
 
 PUT/DELETE check the plant of the **stored** row (the `plant` query param on DELETE is not trusted). Optimistic concurrency: send `expected_updated_at` from the last read; a mismatch is 409 `stale`.
