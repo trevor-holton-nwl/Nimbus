@@ -101,3 +101,5 @@ Confirmed as written: PV header work center is populated by both Excel and SAP-s
 - Setup signatures may include the PV.
 - `_write_outcomes` lacked a PV distinct predicate.
 - Grid/inspector/override had no undo.
+
+- 2026-10-21: merged to local main (merge commit recorded in git log), not pushed/deployed.
