@@ -77,7 +77,7 @@ test('dropDecision: keep / switch / choose / reject', () => {
 test('Runtime.eligiblePairs / dropDecision read the cache, judge validity on BASIC_START_DATE then original_start_date', () => {
   Runtime._rateMap = map(); Runtime._rateMapPlant = 'P';
   const task = { id: 't', PLANT: 'P', MATERIAL_NUMBER: 'MAT', PRODUCTION_VERSION: '0001', MACHINE: 'M1',
-    BASIC_START_DATE: new Date(2026, 2, 1), original_start_date: new Date(2027, 0, 1) };
+    'ORDER_QUANTITY_(GMEIN)': 60, BASIC_START_DATE: new Date(2026, 2, 1), original_start_date: new Date(2027, 0, 1) };
   assert.ok(Runtime.eligiblePairs(task).some(p => p.pv === '0005'), 'BASIC_START_DATE wins');
   const snapped = { ...task, BASIC_START_DATE: null };
   assert.ok(!Runtime.eligiblePairs(snapped).some(p => p.pv === '0005'), 'falls back to original_start_date (2027: expired)');
@@ -119,4 +119,76 @@ test('Runtime.hasMapFor: false without a map or for another plant, true for the 
   Runtime._rateMap = map(); Runtime._rateMapPlant = 'P';
   assert.equal(Runtime.hasMapFor('P'), true);
   assert.equal(Runtime.hasMapFor('OTHER'), false);
+});
+
+// ---- Fix wave F1 -------------------------------------------------------------------------------------------
+
+test('F1 normPv: pads 1-3 digit numerics to 4, trims, uppercases, leaves the rest alone, null stays null', () => {
+  assert.equal(Runtime.normPv('1'), '0001');
+  assert.equal(Runtime.normPv('0001'), '0001');
+  assert.equal(Runtime.normPv('A1'), 'A1');
+  assert.equal(Runtime.normPv(' 12 '), '0012');
+  assert.equal(Runtime.normPv('a1'), 'A1');
+  assert.equal(Runtime.normPv('12345'), '12345');
+  assert.equal(Runtime.normPv(null), null);
+  assert.equal(Runtime.normPv(undefined), null);
+});
+
+test('F1 S1: an order holding the unpadded PV "1" resolves against the padded map row, offers no prefixed option and keeps on drop', () => {
+  Runtime._rateMap = map(); Runtime._rateMapPlant = 'P';
+  const task = { id: 't', PLANT: 'P', MATERIAL_NUMBER: 'MAT', PRODUCTION_VERSION: '1', MACHINE: 'M1',
+    'ORDER_QUANTITY_(GMEIN)': 60, BASIC_START_DATE: new Date(2026, 8, 1) };
+  assert.equal(Runtime.resolve(task).ok, true, 'padded lookup finds MAT|0001');
+  assert.deepEqual(Runtime.dropDecision(task, 'M2'), { kind: 'keep' }, 'current PV "1" is the padded 0001, which covers M2');
+  assert.ok(Runtime.eligiblePairs(task).every(p => /^\d{4}$/.test(p.pv)), 'pair pvs are padded');
+});
+
+test('F1 S2: the list is the gate: a zero-rate pair is not offered, quantity 0 empties the list, a positive rate and quantity is offered and resolves', () => {
+  const m = map();
+  m.ops['MAT|N|G|03|WC1'] = { minutes_per_unit: 0 };   // PV 0003 published with a zero rate
+  Runtime._rateMap = m; Runtime._rateMapPlant = 'P';
+  const task = { id: 't', PLANT: 'P', MATERIAL_NUMBER: 'MAT', PRODUCTION_VERSION: '0001', MACHINE: 'M1',
+    'ORDER_QUANTITY_(GMEIN)': 60, BASIC_START_DATE: new Date(2026, 8, 1) };
+  const offered = pairKeys(Runtime.eligiblePairs(task, { requireOps: true }));
+  assert.ok(!offered.some(k => k.startsWith('0003|')), 'zero_runtime pair dropped');
+  assert.ok(offered.includes('0001|M1'));
+  for (const pair of Runtime.eligiblePairs(task, { requireOps: true })) {
+    assert.equal(Runtime.resolve({ ...task, PRODUCTION_VERSION: pair.pv }, pair.machine).ok, true, `${pair.pv}|${pair.machine} resolves`);
+  }
+  assert.deepEqual(Runtime.eligiblePairs({ ...task, 'ORDER_QUANTITY_(GMEIN)': 0 }, { requireOps: true }), [], 'zero quantity: nothing resolves');
+  assert.ok(pairKeys(Runtime.eligiblePairs(task)).some(k => k.startsWith('0003|')), 'without requireOps the structural list is unchanged');
+});
+
+test('F1 computeEligiblePairs takes a predicate that decides each candidate under requireOps', () => {
+  const seen = [];
+  const pairs = computeEligiblePairs(map(), 'MAT', D('2026-09-01'), { requireOps: true, accept: (pv, machine) => { seen.push(`${pv}|${machine}`); return machine === 'M2'; } });
+  assert.deepEqual(pairKeys(pairs), ['0001|M2', '0003|M2']);
+  assert.ok(seen.includes('0001|M1'));
+});
+
+test('F1 reload race: load() keeps the old map until the new one lands, and clears it on a plant change', async () => {
+  const { Store } = await import('../../../frontend/platform/store.mjs');
+  const { Util } = await import('../../../frontend/platform/foundation.mjs');
+  const priorMd = Store.masterData, priorFetch = Util.fetchTraced;
+  Store.setMasterData({ ...(priorMd || {}), plants: [{ plant: 'P', routing_runtime_enabled: true }, { plant: 'Q', routing_runtime_enabled: true }] }, 'test');
+  const old = map();
+  Runtime._rateMap = old; Runtime._rateMapPlant = 'P';
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const fresh = { ...map(), generated_at: 'new' };
+  Util.fetchTraced = async () => { await gate; return { ok: true, json: async () => fresh }; };
+  try {
+    const p = Runtime.load('P');
+    assert.equal(Runtime._rateMap, old, 'old map still served mid-reload');
+    release(); await p;
+    assert.equal(Runtime._rateMap, fresh);
+    Util.fetchTraced = async () => ({ ok: false });
+    await Runtime.load('P');
+    assert.equal(Runtime._rateMap, fresh, 'non-ok keeps the old map');
+    Util.fetchTraced = async () => new Promise(() => {});
+    Runtime.load('Q');
+    assert.equal(Runtime._rateMap, null, 'plant changed: cleared');
+  } finally {
+    Util.fetchTraced = priorFetch; Store.setMasterData(priorMd, 'test');
+  }
 });

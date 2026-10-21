@@ -1372,7 +1372,7 @@ export const Table = {
    *  has no bar to derive, so the routing value is written straight onto the row. A move always resets the run
    *  time from routing (D9); an unchanged pair writes nothing. */
   _unplacedMachineRuntime(task: NimbusTask, machine: string, pv?: string): Partial<NimbusTask> {
-    const currentPv = String(task.PRODUCTION_VERSION ?? '');
+    const currentPv = Runtime.normPv(task.PRODUCTION_VERSION) ?? '';
     const targetPv = pv ?? currentPv;
     if (!Table._routingEnabledForTask(task) || (machine === task.MACHINE && targetPv === currentPv)) return {};
     const result = Runtime.resolve({ ...task, PRODUCTION_VERSION: targetPv }, machine);
@@ -1425,7 +1425,7 @@ export const Table = {
       // p.oldValue, not p.data.MACHINE.
       const priorMachine = p.oldValue != null ? String(p.oldValue) : String(p.data.MACHINE ?? 'Unknown');
       const routing = Table._routingEnabledForTask(p.data);
-      const priorPv = String(p.data.PRODUCTION_VERSION ?? '');
+      const priorPv = Runtime.normPv(p.data.PRODUCTION_VERSION) ?? '';
       const newPv = parsed.pv ?? priorPv;
       const pairChanged = newMachine !== priorMachine || newPv !== priorPv;
       if (p.data.PARENT_ORDER && newMachine !== priorMachine) {
@@ -1571,11 +1571,14 @@ export const Table = {
       value: `${pair.pv}|${pair.machine}`,
       label: Util.t('ui.pv_machine_option', { pv: pair.pv, machine: pair.machine }),
     }));
-    const pv = String(task.PRODUCTION_VERSION ?? '');
+    const pv = Runtime.normPv(task.PRODUCTION_VERSION) ?? '';
     const machine = task.MACHINE || 'Unknown';
     const current = `${pv}|${machine}`;
     if (!options.some(o => o.value === current)) {
-      options.unshift({ value: current, label: Util.t('ui.pv_machine_current_ineligible', { pv: pv || '—', machine }) });
+      // Say WHY the current pair is out: the step the real gate fails on (zero_runtime, pv_expired, ...).
+      const verdict = Runtime.resolve({ ...task, PRODUCTION_VERSION: pv }, task.MACHINE || undefined);
+      const step = verdict.ok ? '' : verdict.step;
+      options.unshift({ value: current, label: Util.t('ui.pv_machine_current_ineligible', { pv: pv || '—', machine, step }) });
     }
     return options;
   },
@@ -1584,7 +1587,8 @@ export const Table = {
    *  older caller) gives `pv: null` meaning "keep the order's own production version". */
   _parsePairValue(value: string): { pv: string | null; machine: string } {
     const i = value.indexOf('|');
-    return i < 0 ? { pv: null, machine: value } : { pv: value.slice(0, i), machine: value.slice(i + 1) };
+    // The PV half always comes back in the padded form (an empty half stays '').
+    return i < 0 ? { pv: null, machine: value } : { pv: Runtime.normPv(value.slice(0, i)) ?? '', machine: value.slice(i + 1) };
   },
 
   _wireQuickFilter(): void {
@@ -1627,7 +1631,7 @@ export const Table = {
     }
     Table._fpOvrFinish.setDate(t.end_date!, false);
     const routingPairs = Table._routingEnabledForTask(t) && !t.PARENT_ORDER;
-    const selectedValue = routingPairs ? `${t.PRODUCTION_VERSION ?? ''}|${t.MACHINE || 'Unknown'}` : t.MACHINE;
+    const selectedValue = routingPairs ? `${Runtime.normPv(t.PRODUCTION_VERSION) ?? ''}|${t.MACHINE || 'Unknown'}` : t.MACHINE;
     lineEl.innerHTML = Table._getPairOptions(t).map(o =>
       `<option value="${Util.escapeHtml(o.value)}" ${o.value === selectedValue ? 'selected' : ''}>${Util.escapeHtml(o.label)}</option>`).join('');
     firmEl.checked = !!t.firmed;
@@ -1663,7 +1667,7 @@ export const Table = {
     // as the grid/Inspector edit paths before re-placing (only on a plant that has opted into the feature, see
     // _routingEnabledForTask). A finish-only override of an ineligible current pair is blocked as before.
     const routing = Table._routingEnabledForTask(t);
-    const currentPv = String(t.PRODUCTION_VERSION ?? '');
+    const currentPv = Runtime.normPv(t.PRODUCTION_VERSION) ?? '';
     const newPv = parsedLine.pv ?? currentPv;
     if (routing && !Runtime.eligible({ ...t, PRODUCTION_VERSION: newPv }, newLine)) {
       Table._toastPairIneligible(t, parsedLine.pv, newLine);
@@ -2040,7 +2044,7 @@ export const Table = {
         // Nothing chosen from a pair list: answer with the row's own pair, never a bare machine (the cell handler
         // treats an unchanged pair as a no-op).
         const data = this._params.data;
-        return `${data?.PRODUCTION_VERSION ?? ''}|${data?.MACHINE ?? this._params.value ?? ''}`;
+        return `${Runtime.normPv(data?.PRODUCTION_VERSION) ?? ''}|${data?.MACHINE ?? this._params.value ?? ''}`;
       }
       return this._params.value;
     }
@@ -2303,7 +2307,7 @@ export const Inspector = {
     // keeps its locked machine select.
     const pairSelect = Table._routingEnabledForTask(task) && !task.PARENT_ORDER;
     const pairOptions = pairSelect ? Table._getPairOptions(task) : [];
-    const pairCurrent = `${task.PRODUCTION_VERSION ?? ''}|${task.MACHINE || 'Unknown'}`;
+    const pairCurrent = `${Runtime.normPv(task.PRODUCTION_VERSION) ?? ''}|${task.MACHINE || 'Unknown'}`;
     const relAlerts = Store.alertsByTask().get(String(task.id)) || [];
     const scheduleSegments = Array.isArray(task.scheduleSegments) && task.scheduleSegments.length >= 2
       ? task.scheduleSegments : [];
@@ -2646,7 +2650,7 @@ export const Inspector = {
       // The routing plant's one writer of the production version: the pair is written together.
       const parsed = Table._parsePairValue(value);
       const newMachine = parsed.machine || 'Unknown';
-      const currentPv = String(t.PRODUCTION_VERSION ?? '');
+      const currentPv = Runtime.normPv(t.PRODUCTION_VERSION) ?? '';
       const newPv = parsed.pv ?? currentPv;
       if (newMachine === (t.MACHINE || 'Unknown') && newPv === currentPv) { Inspector._render(t); return; }
       if (!Runtime.eligible({ ...t, PRODUCTION_VERSION: newPv }, newMachine)) {

@@ -112,6 +112,15 @@ function _asQuantity(value: unknown): number {
 /** One selectable (production version, machine) pair for an order. */
 export interface EligiblePair { pv: string; machine: string; workcenter: string }
 
+/** The one production-version normaliser for the client: null/undefined -> null; trimmed and uppercased; a 1-3
+ *  digit numeric is left-padded to 4 (SAP's VERID form); anything else is returned as cleaned. Mirrors the
+ *  server's `db._norm_pv`, so an unpadded stored order PV ('1') still finds the padded master row ('0001'). */
+export function normPv(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const cleaned = String(value).trim().toUpperCase();
+  return /^\d{1,3}$/.test(cleaned) ? cleaned.padStart(4, '0') : cleaned;
+}
+
 /** What a drop onto `targetMachine` should do about the production version. */
 export type DropDecision =
   | { kind: 'keep' }
@@ -123,7 +132,7 @@ export type DropDecision =
  *  with a non-blank header work center, crossed with every machine at that work center. A machine may
  *  appear under several PVs; expired and blank-work-center PVs offer nothing. Sorted pv, then machine. */
 export function computeEligiblePairs(map: RoutingRateMap, material: string, validityDate: Date,
-                                     opts: { requireOps?: boolean } = {}): EligiblePair[] {
+                                     opts: { requireOps?: boolean; accept?: (pv: string, machine: string) => boolean } = {}): EligiblePair[] {
   const prefix = `${material}|`;
   const pairs: EligiblePair[] = [];
   for (const [key, row] of Object.entries(map.pv)) {
@@ -135,7 +144,11 @@ export function computeEligiblePairs(map: RoutingRateMap, material: string, vali
     // requireOps: the routing must have an operation at this work center (otherwise `resolve` would fail).
     if (opts.requireOps && !map.ops[`${row.key}|${workcenter}`]) continue;
     for (const [machine, machineWc] of Object.entries(map.machines)) {
-      if (machineWc === workcenter) pairs.push({ pv, machine, workcenter });
+      if (machineWc !== workcenter) continue;
+      // requireOps + accept: the caller's own gate (`Runtime.resolve`) has the last word, so the list can never
+      // offer a pair the gate then refuses (zero rate, zero quantity, any future step).
+      if (opts.requireOps && opts.accept && !opts.accept(pv, machine)) continue;
+      pairs.push({ pv, machine, workcenter });
     }
   }
   pairs.sort((a, b) => (a.pv < b.pv ? -1 : a.pv > b.pv ? 1 : a.machine < b.machine ? -1 : a.machine > b.machine ? 1 : 0));
@@ -165,6 +178,9 @@ export const Runtime = {
    *  longer land plant A's rate map (and A's _rateMapPlant) after B's load began. */
   _loadSeq: 0,
 
+  /** The client's one production-version normaliser (see the exported `normPv`). */
+  normPv,
+
   /** Fetches `GET /routing/{plant}/rate-map` and caches it, but only for a
    *  plant whose `routing_runtime_enabled` switch is on (per
    *  `Store.masterData.plants[].routing_runtime_enabled` —
@@ -181,15 +197,19 @@ export const Runtime = {
     // evaluated against A's `machines`/`pv`/`ops`. `_rateMapPlant`'s own
     // assignments below are untouched — see its docstring for why it must
     // stay stale (not nulled) on a network failure/non-ok response.
-    Runtime._rateMap = null;
+    // A reload for the SAME plant keeps the old map until the new one lands (a pick mid-reload must not resolve
+    // against nothing); only a plant change, or no/disabled plant, clears it.
+    if (plant !== Runtime._rateMapPlant) Runtime._rateMap = null;
     const seq = ++Runtime._loadSeq;
 
     if (!plant) {
+      Runtime._rateMap = null;
       Runtime._rateMapPlant = null;
       return;
     }
     const row = Store.masterData?.plants?.find(p => p.plant === plant);
     if (!row?.routing_runtime_enabled) {
+      Runtime._rateMap = null;
       Runtime._rateMapPlant = null;
       return;
     }
@@ -203,15 +223,13 @@ export const Runtime = {
         Runtime._rateMapPlant = plant;
       } else {
         // Non-ok (transient 5xx, corp-proxy pre-roll response) — treated the
-        // same as a thrown fetch below: drop the map, leave _rateMapPlant
-        // stale so a later `_rateMapPlant !== plant` check retries rather
-        // than wrongly trusting an empty cache as fresh.
-        Runtime._rateMap = null;
+        // same as a thrown fetch below: keep the old same-plant map (already
+        // cleared above on a plant change) and leave _rateMapPlant as is.
+        ErrorLog.warn('routing', `Rate map fetch for ${plant} returned ${r.status}; keeping the previous map`);
       }
     } catch (e) {
       if (seq !== Runtime._loadSeq) return;
       ErrorLog.warn('routing', `Rate map fetch failed for ${plant}: ${(e as Error).message}`);
-      Runtime._rateMap = null;
     }
   },
 
@@ -235,7 +253,7 @@ export const Runtime = {
     const mapMatchesPlant = !task.PLANT || task.PLANT === Runtime._rateMapPlant;
     const map = mapMatchesPlant ? (Runtime._rateMap ?? _EMPTY_MAP) : _EMPTY_MAP;
 
-    const pvValue = task.PRODUCTION_VERSION;
+    const pvValue = normPv(task.PRODUCTION_VERSION);
     if (!pvValue) return { ok: false, step: 'pv_missing' };
 
     const material = task.MATERIAL_NUMBER ?? '';
@@ -285,11 +303,19 @@ export const Runtime = {
     const map = Runtime._rateMap ?? _EMPTY_MAP;
     const material = task.MATERIAL_NUMBER ?? '';
     const date = _validityDateFor(task);
-    const key = `${material}|${_dateOnlyMs(date)}|${opts.requireOps ? 1 : 0}`;
+    const key = `${material}|${_dateOnlyMs(date)}|${opts.requireOps ? `1|${_asQuantity(task['ORDER_QUANTITY_(GMEIN)'])}` : 0}`;
     let byKey = Runtime._pairCache.get(map);
     if (!byKey) { byKey = new Map(); Runtime._pairCache.set(map, byKey); }
     let pairs = byKey.get(key);
-    if (!pairs) { pairs = computeEligiblePairs(map, material, date, opts); byKey.set(key, pairs); }
+    if (!pairs) {
+      // requireOps: the real gate decides each candidate (zero rate, zero quantity, expiry, mismatch...), so an
+      // offered pair always resolves. The quantity is part of the verdict, so it joins the memo key below.
+      const accept = opts.requireOps
+        ? (pv: string, machine: string) => Runtime.resolve({ ...task, PRODUCTION_VERSION: pv }, machine).ok
+        : undefined;
+      pairs = computeEligiblePairs(map, material, date, { ...opts, accept });
+      byKey.set(key, pairs);
+    }
     return pairs;
   },
 
@@ -300,7 +326,7 @@ export const Runtime = {
 
   /** `dropDecision` over this order's own pairs and current PV, for a drop onto `machine`. */
   dropDecision(task: NimbusTask, machine: string): DropDecision {
-    return dropDecision(Runtime.eligiblePairs(task, { requireOps: true }), task.PRODUCTION_VERSION, machine);
+    return dropDecision(Runtime.eligiblePairs(task, { requireOps: true }), normPv(task.PRODUCTION_VERSION), machine);
   },
 
   /** `resolve(...).ok` — the boolean a drop/edit guard needs. */
