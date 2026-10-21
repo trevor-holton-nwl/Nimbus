@@ -45,6 +45,9 @@ const SUM = {
   'am.summary_window': '{{n}} alerts in D{{from}}–{{to}} match {{name}}',
   'am.summary_profile': '{{n}} alerts match {{name}}',
   'am.summary_all': '{{n}} alerts at this plant',
+  'am.summary_window_one': '1 alert in D{{from}}–{{to}} matches {{name}}',
+  'am.summary_profile_one': '1 alert matches {{name}}',
+  'am.summary_all_one': '1 alert at this plant',
   'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
   'am.summary_warnings': '{{w}} warnings', 'am.summary_warnings_one': '1 warning',
   'am.summary_orders': '{{o}} orders affected', 'am.summary_orders_one': '1 order affected',
@@ -62,9 +65,9 @@ const sumIn = (o = {}) => ({
 
 test('summaryLine: the lead is the window, profile, all-alerts or focus variant', () => {
   const alerts = [al('a', 'err', '1')];
-  assert.equal(summaryLine(sumIn({ alerts }), ts).text, '1 alerts in D8–30 match Overlaps · 1 error · 1 order affected');
-  assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: 8, dayTo: null })]) }), ts).text, /^1 alerts match Overlaps · /);
-  assert.match(summaryLine(sumIn({ alerts, profileId: '__all__', profile: ALL_ALERTS_PROFILE }), ts).text, /^1 alerts at this plant · /);
+  assert.equal(summaryLine(sumIn({ alerts }), ts).text, '1 alert in D8–30 matches Overlaps · 1 error · 1 order affected');
+  assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: 8, dayTo: null })]) }), ts).text, /^1 alert matches Overlaps · /);
+  assert.match(summaryLine(sumIn({ alerts, profileId: '__all__', profile: ALL_ALERTS_PROFILE }), ts).text, /^1 alert at this plant · /);
   assert.match(summaryLine(sumIn({ alerts, focus: { title: 'Setup pair', outside: 0 } }), ts).text, /^Showing 1 alerts for: Setup pair · /);
   assert.match(summaryLine(sumIn({ alerts, focus: { title: 'Setup pair', outside: 2 } }), ts).text, /^Showing 1 alerts for: Setup pair \(2 outside your profile\) · /);
   assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: -7, dayTo: 30 })]) }), ts).text, /D-7–30/);
@@ -73,9 +76,21 @@ test('summaryLine: the lead is the window, profile, all-alerts or focus variant'
 test('summaryLine: zero-valued clauses are omitted and _one forms apply at exactly 1', () => {
   assert.equal(summaryLine(sumIn(), ts).text, '0 alerts in D8–30 match Overlaps');
   const warnOnly = summaryLine(sumIn({ alerts: [al('a', 'warn', undefined)] }), ts).text;
-  assert.equal(warnOnly, '1 alerts in D8–30 match Overlaps · 1 warning');
+  assert.equal(warnOnly, '1 alert in D8–30 matches Overlaps · 1 warning');
   const many = summaryLine(sumIn({ alerts: [al('a', 'err', '1', '2'), al('b', 'err', '3'), al('c', 'warn', '1')] }), ts).text;
   assert.equal(many, '3 alerts in D8–30 match Overlaps · 2 errors · 1 warning · 3 orders affected');
+});
+
+test('summaryLine: the lead uses the singular _one key at exactly 1 and the plural key otherwise (window, profile, all)', () => {
+  const one = [al('a', 'err', '1')], two = [al('a', 'err', '1'), al('b', 'warn', '2')];
+  const profileOnly = prof([rule({ dayFrom: 8, dayTo: null })]);
+  const lead = o => summaryLine(sumIn(o), ts).text.split(' · ')[0];
+  assert.equal(lead({ alerts: one }), '1 alert in D8–30 matches Overlaps');
+  assert.equal(lead({ alerts: two }), '2 alerts in D8–30 match Overlaps');
+  assert.equal(lead({ alerts: one, profile: profileOnly }), '1 alert matches Overlaps');
+  assert.equal(lead({ alerts: two, profile: profileOnly }), '2 alerts match Overlaps');
+  assert.equal(lead({ alerts: one, profileId: '__all__', profile: ALL_ALERTS_PROFILE }), '1 alert at this plant');
+  assert.equal(lead({ alerts: two, profileId: '__all__', profile: ALL_ALERTS_PROFILE }), '2 alerts at this plant');
 });
 
 test('summaryLine: the confidence link splits around the score; no score, no link', () => {

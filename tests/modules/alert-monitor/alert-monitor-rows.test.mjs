@@ -230,6 +230,8 @@ test('group menu: Go to, Move N orders (also for one), Open these N orders, Ackn
     ['goto', 'btn.go_to', undefined], ['move', 'am.group_fix_n', 3], ['open-table', 'am.open_in_table', 4], ['ack', 'am.group_ack_n', 6],
   ]);
   assert.deepEqual(groupMenuItems(head({ movable: 1, unacked: 0, firstGoto: false })).map(m => m.id), ['move', 'open-table']);
+  assert.equal(groupMenuItems(head({ movable: 1 })).find(m => m.id === 'move').labelKey, 'am.group_fix_n_one', 'a single movable order says "Move 1 order"');
+  assert.equal(groupMenuItems(head({ movable: 2 })).find(m => m.id === 'move').labelKey, 'am.group_fix_n');
   assert.deepEqual(groupMenuItems(head({ movable: 0, orders: 0, unacked: 2, firstAlertId: null })).map(m => m.id), ['ack']);
   const locked = groupMenuItems(head({ whatIf: true })).find(m => m.id === 'move');
   assert.deepEqual([locked.disabled, locked.hintKey], [true, 'am.whatif_blocked']);

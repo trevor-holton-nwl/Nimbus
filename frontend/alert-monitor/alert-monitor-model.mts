@@ -95,12 +95,12 @@ export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
       ? t('am.focus_chip_outside', { n, title: input.focus.title, k: input.focus.outside })
       : t('am.focus_chip', { n, title: input.focus.title });
   } else if (input.profileId === ALL_ALERTS_PROFILE_ID) {
-    lead = t('am.summary_all', { n });
+    lead = _plural(n, 'am.summary_all', { n }, t);
   } else {
     const win = profileWindow(input.profile);
     lead = win
-      ? t('am.summary_window', { n, from: win.from, to: win.to, name: input.profileName })
-      : t('am.summary_profile', { n, name: input.profileName });
+      ? _plural(n, 'am.summary_window', { n, from: win.from, to: win.to, name: input.profileName }, t)
+      : _plural(n, 'am.summary_profile', { n, name: input.profileName }, t);
   }
   const parts = [lead];
   if (errors > 0) parts.push(_plural(errors, 'am.summary_errors', { e: errors }, t));
@@ -499,7 +499,7 @@ export function groupMenuItems(v: GroupHeadView): GroupMenuItem[] {
   const out: GroupMenuItem[] = [];
   if (v.firstAlertId && v.firstGoto) out.push({ id: 'goto', labelKey: 'btn.go_to' });
   if (v.movable > 0) {
-    out.push({ id: 'move', labelKey: 'am.group_fix_n', vars: { n: v.movable }, ...(v.whatIf ? { disabled: true, hintKey: 'am.whatif_blocked' } : {}) });
+    out.push({ id: 'move', labelKey: v.movable === 1 ? 'am.group_fix_n_one' : 'am.group_fix_n', vars: { n: v.movable }, ...(v.whatIf ? { disabled: true, hintKey: 'am.whatif_blocked' } : {}) });
   }
   if (v.orders > 0) out.push({ id: 'open-table', labelKey: 'am.open_in_table', vars: { n: v.orders } });
   if (v.unacked > 0) out.push({ id: 'ack', labelKey: 'am.group_ack_n', vars: { n: v.unacked } });
@@ -694,7 +694,7 @@ export function fixLineParts(item: LeverageItem, ctx: LevCtx, t: Translate): str
   if (item.family === 'optimize-window' && item.headroomHours != null && item.headroomHours <= 0) {
     parts.push(_esc(t('am.lev_no_headroom', { h: fmtNum(Math.abs(item.headroomHours)) })));
   }
-  if (ctx.remaining > 0) parts.push(`<span class="am-fix-left">${_esc(t('am.lev_remaining', { n: ctx.remaining }))}</span>`);
+  if (ctx.remaining > 0) parts.push(`<span class="am-fix-left">${_esc(_plural(ctx.remaining, 'am.lev_remaining', { n: ctx.remaining }, t))}</span>`);
   return parts;
 }
 

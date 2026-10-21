@@ -62,7 +62,7 @@ beforeEach(() => {
   prior.locales = globalThis.window.__NIMBUS_LOCALES;
   globalThis.window.__NIMBUS_LOCALES = { en: {
     'am.summary_window': '{{n}} alerts in D{{from}}–{{to}} match {{name}}', 'am.summary_profile': '{{n}} alerts match {{name}}',
-    'am.summary_all': '{{n}} alerts at this plant', 'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
+    'am.summary_all': '{{n}} alerts at this plant', 'am.summary_all_one': '1 alert at this plant', 'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
     'am.summary_warnings': '{{w}} warnings', 'am.summary_warnings_one': '1 warning',
     'am.summary_orders': '{{o}} orders affected', 'am.summary_orders_one': '1 order affected',
     'am.summary_conf': 'Plant confidence {{score}}',
@@ -161,7 +161,7 @@ test('the summary line reads "at this plant" under All alerts, and the focus tex
   globalThis.NIMBUS = {};
   Store.setAlerts([alert('a1')], 'test');
   AlertMonitorPane.render();
-  assert.match(els['am-summary'].innerHTML, /1 alerts at this plant · 1 error · 1 order affected/);
+  assert.match(els['am-summary'].innerHTML, /1 alert at this plant · 1 error · 1 order affected/);
   assert.doesNotMatch(els['am-summary'].innerHTML, /am-summary-conf/, 'no score yet, no link');
   AlertMonitorPane.setFocus(['a1'], 'Setup pair');
   assert.match(els['am-summary'].innerHTML, /^<span>am.focus_chip · 1 error/);
@@ -192,6 +192,22 @@ test('the profile picker offers "+ New profile…" last, also after filtering an
   input.handlers.input();
   assert.match(dd.innerHTML, /us\.no_matches[\s\S]*am-opt-new/);
   assert.doesNotMatch(dd.innerHTML, /data-profile="p[12]"/);
+});
+
+test('"+ New profile…" is a pinned footer outside the scrolling option list', () => {
+  useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
+  AlertMonitorPane.render();
+  const input = els['am-profile-input'], dd = els['am-profile-dropdown'];
+  for (const q of ['', 'zzz']) {
+    input.value = q;
+    input.handlers.input();
+    const html = dd.innerHTML;
+    const cut = html.lastIndexOf('</div><div class="us-combo-option am-opt-new"');
+    assert.ok(cut > 0, 'the new-profile row follows the closing of the list region');
+    assert.ok(html.startsWith('<div class="am-opt-scroll">'));
+    assert.doesNotMatch(html.slice(0, cut), /am-opt-new/, 'and is not inside the scrolling region');
+    assert.equal((html.match(/am-opt-new/g) || []).length, 1);
+  }
 });
 
 test('the viewed option carries the window summary as a second line, and the input as aria-description', () => {
@@ -279,6 +295,8 @@ test('the ⋯ page menu holds the two checkbox items and each writes its own pre
     assert.equal(seen.length, 1);
     assert.deepEqual(seen[0].opts, { align: 'end', key: 'page' });
     assert.deepEqual(seen[0].items.map(i => [i.id, i.checked]), [['highlight', true], ['ack', false]]);
+    assert.ok(seen[0].items[0].hint && /alert_gantt_highlight_hint/.test(seen[0].items[0].hint) || seen[0].items[0].hint?.length > 10, 'the highlight item explains the category fills');
+    assert.equal(seen[0].items[1].hint, undefined);
     seen[0].items[0].onSelect(false);
     seen[0].items[1].onSelect(true);
     assert.deepEqual(calls.prefs, [['alertProfileGanttHighlight', false], ['alertsShowAcknowledged', true]]);

@@ -128,6 +128,7 @@ test('optimize-window with no headroom: Diagnose is primary and the clause says 
 test('remaining count shows after a fix attempt', () => {
   assert.match(fixRowHtml(item(), 1, ctx({ remaining: 2 }), t), /am\.lev_remaining\|\{"n":2\}/);
   assert.doesNotMatch(fixRowHtml(item(), 1, ctx(), t), /am\.lev_remaining/);
+  assert.match(fixRowHtml(item(), 1, ctx({ remaining: 1 }), t), /am\.lev_remaining_one\|/, 'exactly 1 uses the singular key');
 });
 
 test('minutes input and Replay button only for requiresMinutes rows; the clause appears after the replay', () => {

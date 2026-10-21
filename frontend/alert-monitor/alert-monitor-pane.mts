@@ -266,7 +266,7 @@ function _wireCombo(): void {
       `<div class="us-combo-option am-opt-new" role="option" aria-selected="false" data-profile="${NEW_PROFILE_ID}" data-idx="${i}">`
       + `<span>+ ${esc(t('ape.new_profile'))}…</span></div>`;
     if (_comboFiltered.length === 1) {
-      dropdown.innerHTML = `<div class="us-combo-empty">${esc(t('us.no_matches'))}</div>${newHtml(0)}`;
+      dropdown.innerHTML = `<div class="am-opt-scroll"><div class="us-combo-empty">${esc(t('us.no_matches'))}</div></div>${newHtml(0)}`;
       _comboActive = -1;
       return;
     }
@@ -277,7 +277,8 @@ function _wireCombo(): void {
         + `<span class="am-opt-text"><span class="am-opt-name">${esc(o.label)}</span>${sub}</span>`
         + `${o.id === defId ? `<span class="us-combo-option-prefix">${esc(t('am.is_default'))}</span>` : ''}</div>`;
     }).join('');
-    dropdown.innerHTML = rows + hint + newHtml(_comboFiltered.length - 1);
+    // The option list scrolls inside .am-opt-scroll; "+ New profile…" sits outside it as a pinned footer, so it stays visible past the fold.
+    dropdown.innerHTML = `<div class="am-opt-scroll">${rows}${hint}</div>${newHtml(_comboFiltered.length - 1)}`;
     _comboActive = Math.max(0, _comboFiltered.findIndex(o => o.id === viewed));
     highlight();
   };
@@ -324,7 +325,8 @@ function _openProfileEditor(): void {
 function _openPageMenu(anchor: HTMLElement): void {
   const items: MenuItem[] = [
     {
-      id: 'highlight', label: t('am.gantt_highlight'), checked: Store.pref('alertProfileGanttHighlight') !== false,
+      id: 'highlight', label: t('am.gantt_highlight'), hint: t('us.alert_gantt_highlight_hint'),
+      checked: Store.pref('alertProfileGanttHighlight') !== false,
       onSelect: (next: boolean) => { Session.setPref('alertProfileGanttHighlight', next); },
     },
     {
@@ -1197,8 +1199,17 @@ function _groupLabel(by: MonitorView['groupBy'], key: string, rc: RowCtx): strin
 
 /** "Thu 23 Oct" in the page language: the day label of group heads and of a row's when column. */
 function _fmtDay(d: Date): string {
-  return d.toLocaleDateString(document.documentElement?.lang || 'en-US', { weekday: 'short', day: 'numeric', month: 'short' });
+  const lang = document.documentElement?.lang || 'en-US';
+  let f = _dayFmt.get(lang);
+  if (!f) {
+    try { f = new Intl.DateTimeFormat(lang, { weekday: 'short', day: 'numeric', month: 'short' }); }
+    catch { f = new Intl.DateTimeFormat('en-US', { weekday: 'short', day: 'numeric', month: 'short' }); }
+    _dayFmt.set(lang, f);
+  }
+  return f.format(d);
 }
+/** One formatter per page language: constructing an Intl.DateTimeFormat per row dominated the row-building cost. */
+const _dayFmt = new Map<string, Intl.DateTimeFormat>();
 
 function _headView(g: AlertGroup, rc: RowCtx, expanded: boolean): GroupHeadView {
   const first = g.alerts.find(a => rowActionsFor(a).goto) ?? null;

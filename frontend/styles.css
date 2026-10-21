@@ -7560,8 +7560,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 /* =============================================================================
    ALERT MONITOR — #alerts-tab (frontend/alert-monitor/alert-monitor-pane.mts)
    Tokens only. The page header (rev 2) is three rows under one hairline: title row (30 px controls),
-   a one-sentence summary, a controls row (28 px controls). The category swatches read the
-   --bar-pm-* tokens (defined with the Gantt profile-match fills). Min viewport 1,024 px; the rows
+   a one-sentence summary, a controls row (28 px controls). Min viewport 1,024 px; the rows
    wrap only below that.
    ========================================================================== */
 .am-head {
@@ -7581,28 +7580,17 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-ctl-label { font-size: 12px; color: var(--fg-mute); white-space: nowrap; }
 .am-group-sel { height: 28px; padding: 3px 8px; font-size: 12px; cursor: pointer; }
 .am-default-note { font-size: 12px; color: var(--fg-mute); white-space: nowrap; }
-.am-eyebrow {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--fg-mute); white-space: nowrap;
-}
 .am-profile-wrap { flex: 0 0 220px; width: 220px; }
 /* The viewed option's rule summary is a second muted line, so the list is wider than the 220 px input. */
 .am-profile-wrap .us-combo-dropdown { right: auto; width: 340px; max-width: calc(100vw - 48px); }
 .am-opt-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .am-opt-name, .am-opt-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .am-opt-sub { font-size: 11px; font-weight: 400; color: var(--fg-mute); }
-.am-opt-new { border-top: 1px solid var(--line); color: var(--accent-hot); font-weight: 600; }
+/* The picker list scrolls (.am-opt-scroll) while "+ New profile…" stays pinned below it, visible past the 240 px fold. */
+.am-profile-wrap .us-combo-dropdown:not([hidden]) { display: flex; flex-direction: column; overflow: hidden; }
+.am-opt-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.am-opt-new { flex: 0 0 auto; border-top: 1px solid var(--line); color: var(--accent-hot); font-weight: 600; }
 .am-seg { display: inline-flex; flex-wrap: wrap; gap: 4px; }
-.am-cat-swatch {
-  width: 10px; height: 10px; flex-shrink: 0; border-radius: var(--r-sm);
-  border: 1px solid var(--line);
-}
-.am-cat-swatch.am-cat-capacity   { background: var(--bar-pm-capacity); }
-.am-cat-swatch.am-cat-conflicts  { background: var(--bar-pm-conflicts); }
-.am-cat-swatch.am-cat-calendar   { background: var(--bar-pm-calendar); }
-.am-cat-swatch.am-cat-setup      { background: var(--bar-pm-setup); }
-.am-cat-swatch.am-cat-exceptions { background: var(--bar-pm-exceptions); }
 
 .am-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 24px; }
 .am-banner {

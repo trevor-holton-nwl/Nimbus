@@ -749,7 +749,7 @@ const ALERT_MONITOR_KEYS = [
   'am.summary_warnings_one', 'am.summary_orders', 'am.summary_orders_one', 'am.summary_conf', 'am.sort_by',
   'am.fixes_title', 'am.fixes_hint', 'am.fixes_admin_divider', 'am.fix_clears', 'am.fix_clears_one',
   'am.fix_clears_one_alert', 'am.fix_clears_one_order', 'am.fix_conf', 'am.fix_minutes', 'am.fix_replay',
-  'am.fixes_more', 'am.more_actions', 'am.rank_n', 'am.group_fix_n', 'am.group_fix_confirm', 'am.group_fix_done',
+  'am.fixes_more', 'am.more_actions', 'am.rank_n', 'am.group_fix_n', 'am.group_fix_n_one', 'am.lev_remaining_one', 'am.group_fix_confirm', 'am.group_fix_done',
   'am.group_fix_done_one', 'am.group_ack_n', 'am.ack_title_n', 'am.ack_bulk_done', 'am.ack_bulk_partial',
   'am.copy_lines', 'am.copy_orders', 'leverage.title.setup-pair', 'leverage.title.calendar-day',
   'leverage.title.tool', 'leverage.title.machine-state', 'leverage.title.optimize-window',
