@@ -204,16 +204,16 @@ test('ov-toggle persists alertMonitorOverview and the band repaints collapsed; d
   seedOv(ALERTS());
   AlertMonitorPane.render();
   assert.doesNotMatch(els['am-overview'].innerHTML, /is-collapsed/);
+  Session.setPref = (k, v) => { calls.prefs.push([k, v]); Store.setUserSettings({ ...Store.userSettings, [k]: v }, 'test'); };
   clickAm('ov-toggle');
   assert.deepEqual(calls.prefs.at(-1), ['alertMonitorOverview', 'collapsed']);
-  seedOv(ALERTS(), { settings: { alertMonitorOverview: 'collapsed' } });
-  AlertMonitorPane.render();
   const html = els['am-overview'].innerHTML;
   assert.match(html, /class="am-overview is-collapsed"/);
   assert.match(html, /id="am-ov-body" class="am-ov-body" hidden/);
   assert.match(html, /am\.ov_strip\|n=4,o=0/);
   clickAm('ov-toggle');
   assert.deepEqual(calls.prefs.at(-1), ['alertMonitorOverview', 'open']);
+  assert.doesNotMatch(els['am-overview'].innerHTML, /is-collapsed/, 'reopened right after the click');
 });
 
 test('a profile change resets the narrow but keeps folded groups; a plant change resets it too', () => {
@@ -308,9 +308,39 @@ test('the band is hidden under every empty state', () => {
   seedOv(ALERTS(), { acked: new Map(ALERTS().map(a => [a.id, {}])) });       // everything acknowledged
   AlertMonitorPane.render();
   assert.equal(els['am-overview'].hidden, true);
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  AlertMonitorPane.setFocus(['zz-gone'], 'Fix');   // a focus set with nothing left (no-alerts)
+  assert.equal(els['am-overview'].hidden, true);
+  assert.equal(els['am-overview'].innerHTML, '');
+  AlertMonitorPane.clearFocus();
   Store.setSelectedPlant(null, 'test');
   AlertMonitorPane.render();
   assert.equal(els['am-overview'].hidden, true);
+});
+
+test('a hidden band keeps the narrow; the next non-empty paint restores it', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  clickBar('line:L2');
+  Store.setAlerts([], 'test');
+  AlertMonitorPane.render();
+  assert.equal(els['am-overview'].hidden, true);
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  assert.deepEqual(ids(els['am-groups'].innerHTML), ['a2', 'a4']);
+});
+
+test('refocus skips bars inside a hidden ancestor', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const body = makeEl('am-ov-body', globalThis.document);
+  body.hidden = true;
+  const hiddenBar = bar('line:L1');
+  body.appendChild(hiddenBar);
+  globalThis.document.getElementById('am-overview').querySelectorAll = sel => (sel === '[data-am-narrow]' ? [hiddenBar] : []);
+  clickBar('line:L1');
+  assert.notEqual(globalThis.document.activeElement, hiddenBar);
 });
 
 test('the leverage run (_gatherState) neither recomputes the band nor touches the narrow', async () => {
@@ -318,7 +348,15 @@ test('the leverage run (_gatherState) neither recomputes the band nor touches th
   AlertMonitorPane.render();
   clickBar('line:L2');
   const html = els['am-overview'].innerHTML;
-  await new Promise(r => setTimeout(r, 40));   // the deferred first leverage run
+  const seen = [];
+  const prev = AlertMonitorPane._levDeps.buildInput;
+  // buildInput runs right after _levRun's _gatherState and before its first _paint: band and chip must still be as before.
+  AlertMonitorPane._levDeps.buildInput = st => { seen.push([els['am-overview'].innerHTML, els['am-narrow-chip'].hidden]); return prev(st); };
+  try {
+    await new Promise(r => setTimeout(r, 40));   // the deferred first leverage run
+  } finally { AlertMonitorPane._levDeps.buildInput = prev; }
+  assert.ok(seen.length >= 1, 'the leverage run really executed');
+  assert.deepEqual(seen[0], [html, false]);
   assert.equal(els['am-overview'].innerHTML, html);
   assert.equal(els['am-narrow-chip'].hidden, false, 'the narrow survived');
   assert.deepEqual(ids(els['am-groups'].innerHTML), ['a2', 'a4']);

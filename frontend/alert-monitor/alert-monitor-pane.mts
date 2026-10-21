@@ -363,10 +363,18 @@ function _setNarrow(next: Narrow, refocusAttr: string): void {
   _refocusNarrow(refocusAttr);
 }
 
+/** Not inside a `hidden` ancestor (the collapsed band body) and, where layout exists, not display:none. Stub-safe. */
+function _isVisible(el: HTMLElement): boolean {
+  for (let n: HTMLElement | null = el; n; n = n.parentElement ?? (n.parentNode as HTMLElement | null)) {
+    if (n.nodeType === 1 && (n.hidden === true || n.hasAttribute?.('hidden'))) return false;
+  }
+  return !('offsetParent' in el) || (el as HTMLElement).offsetParent !== null || el.getClientRects?.().length > 0;
+}
+
 /** Match by attribute value, never by building a selector from it (line names may hold spaces or quotes). */
 function _refocusNarrow(attr: string): void {
   const bars = Array.from(_el('am-overview')?.querySelectorAll?.<HTMLElement>('[data-am-narrow]') ?? []);
-  const next = bars.find(el => el.getAttribute('data-am-narrow') === attr);
+  const next = bars.find(el => el.getAttribute('data-am-narrow') === attr && _isVisible(el));
   if (next) { next.focus?.(); return; }
   const chip = _el('am-narrow-chip');
   const clear = chip?.querySelector?.<HTMLElement>('[data-am-action="clear-narrow"]');
@@ -1301,7 +1309,7 @@ const _bandHidden = (s: PaintState): boolean => s.empty !== null || !s.plant || 
 
 /** Paint-only (never from `_gatherState`): one O(n) pass for the band data, then the narrowed list. Prunes `_narrow`. */
 function _overviewState(s: PaintState): OverviewState | null {
-  if (_bandHidden(s)) { _narrow = {}; return null; }
+  if (_bandHidden(s)) return null;   // _narrow stays; the next non-empty paint re-prunes it
   const deps: OverviewDeps = {
     tasksById: Store.tasks, plantToday: s.plantToday, horizonMinutes: s.horizonMinutes, window: profileWindow(s.m.profile),
   };
