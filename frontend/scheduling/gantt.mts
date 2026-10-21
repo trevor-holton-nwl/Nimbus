@@ -194,7 +194,8 @@ export const Timeline = {
   _gotoTarget: null as { kind: 'task'; taskId: string } | { kind: 'cell'; itemId: string } | null,   // "Go To" marker; stays until the planner moves on (clearGotoTarget). Builders re-apply .goto-target so a rebuild can't drop it
   _spotlightTimer: null as ReturnType<typeof setTimeout> | null,   // ends the Go To spotlight (_spotlight/_endSpotlight)
   _gotoSeq: 0,                  // gotoLineDay generation: a newer Go To aborts the older one's pending scroll steps
-  _gotoSettling: false,         // true from gotoLineDay until its final scroll: markGoto* hold the spotlight until then
+  _gotoMarkSeq: 0,              // _gotoSeq value when the current Go To target was marked (a stale target is never spotlit)
+  _gotoSettling: false,        // true from gotoLineDay until its final scroll: markGoto* hold the spotlight until then
   _conflictSrc: null as NimbusAlert[] | null,           // alerts array reference — invalidates cache when it changes
   _conflictSet: null as Set<string> | null,           // Set<String(taskId)> built once per alerts array identity
   _visEl:       null as HTMLElement | null,           // cached #vis-timeline element (set in init)
@@ -963,6 +964,7 @@ export const Timeline = {
     const id = String(taskId);
     Timeline.clearGotoTarget();
     Timeline._gotoTarget = { kind: 'task', taskId: id };
+    Timeline._gotoMarkSeq = Timeline._gotoSeq;
     Timeline._setGotoClass(id, true);
     if (!Timeline._gotoSettling) Timeline._spotlight(Store.tasks[id]?.MACHINE ?? null);
   },
@@ -971,6 +973,7 @@ export const Timeline = {
     const itemId = `alertcell-${line}-${dayKey}`;
     Timeline.clearGotoTarget();
     Timeline._gotoTarget = { kind: 'cell', itemId };
+    Timeline._gotoMarkSeq = Timeline._gotoSeq;
     Timeline._setGotoClassIds([itemId], true);
     if (!Timeline._gotoSettling) Timeline._spotlight(line);
   },
@@ -2361,8 +2364,17 @@ export const Timeline = {
     const mid = span ? (span.start + span.end) / 2 : dayStart + 12 * Config.MS_HOUR;
     const width = Math.min(Math.max(3 * 24 * Config.MS_HOUR, span ? (span.end - span.start) * 1.2 : 0), ZOOM_MAX_MS);
     let start = mid - width / 2;
-    if (start > dayStart) start = dayStart;
-    else if (start + width < dayEnd) start = dayEnd - width;
+    // Keep only the part of the alert day that overlaps the order inside the window (the whole day would drag a
+    // window off-center for an alert early in a day when the order's midpoint is far away).
+    let lo = dayStart;
+    let hi = dayEnd;
+    if (span) {
+      const sLo = Math.max(dayStart, span.start);
+      const sHi = Math.min(dayEnd, span.end);
+      if (sLo <= sHi) { lo = sLo; hi = sHi; }
+    }
+    if (start > lo) start = lo;
+    else if (start + width < hi) start = hi - width;
     return { start, end: start + width };
   },
 
@@ -2390,8 +2402,10 @@ export const Timeline = {
   gotoLineDay(line: string, dateStr: string, onWindowSet?: () => void, anchor?: { taskId?: string; peerId?: string }): void {
     const seq = ++Timeline._gotoSeq;
     Timeline._gotoSettling = true;
-    NIMBUS!.App!.gotoGanttTimeline!();
-    setTimeout(() => {
+    // A throw before `finish` is scheduled must not leave _gotoSettling stuck (markGoto* would never spotlight again).
+    const release = () => { if (seq === Timeline._gotoSeq) Timeline._gotoSettling = false; };
+    try { NIMBUS!.App!.gotoGanttTimeline!(); } catch (e) { release(); throw e; }
+    const step = () => {
       if (seq !== Timeline._gotoSeq) return;
       const taskIds = [anchor?.taskId, anchor?.peerId].filter((x): x is string => !!x);
       const peerLine = anchor?.peerId ? Store.tasks[anchor.peerId]?.MACHINE : undefined;
@@ -2399,7 +2413,7 @@ export const Timeline = {
       const finish = () => {
         if (seq !== Timeline._gotoSeq) return;
         Timeline._gotoSettling = false;
-        if (Timeline._gotoTarget) Timeline._spotlight(line);
+        if (Timeline._gotoTarget && Timeline._gotoMarkSeq === seq) Timeline._spotlight(line);
       };
       // B2: scrollToLine can legitimately fail on the first frame(s) here —
       // AlertsUIAdapter.focus's reveal (Store.setSelectedLines, just before
@@ -2452,6 +2466,13 @@ export const Timeline = {
       };
       tl.on('rangechanged', go);
       fallback = setTimeout(go, 700);
+    };
+    setTimeout(() => {
+      try { step(); }
+      catch (e) {
+        release();
+        ErrorLog.error('timeline', `Go To threw: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }, 250);
   }
 };

@@ -3076,3 +3076,24 @@ test('Go To spotlight is a no-op without a timeline element and held while gotoL
   Timeline.markGotoCell('L-GOTO', '2026-08-12');
   assert.deepEqual(spy, ['L-GOTO']);
 });
+
+test('Timeline._gotoWindowFor: an alert early in a day does not drag the window off the order midpoint', (t) => {
+  // Order spans Aug 10 08:00 -> Aug 12 02:00; alert day Aug 12 only overlaps its last 2 hours.
+  _spanHarness(t, [{ id: 'gw-e', MACHINE: 'L1', start_date: new Date('2026-08-10T08:00:00'), end_date: new Date('2026-08-12T02:00:00') }]);
+  const w = Timeline._gotoWindowFor('2026-08-12', ['gw-e']);
+  const mid = (new Date('2026-08-10T08:00:00').getTime() + new Date('2026-08-12T02:00:00').getTime()) / 2;
+  assert.ok(Math.abs((w.start + w.end) / 2 - mid) <= 60000, 'stays centered on the order midpoint');
+  assert.ok(w.end >= new Date('2026-08-12T02:00:00').getTime(), 'the alert-day overlap is inside');
+});
+
+test('Go To marks record the Go To generation so a later Go To does not spotlight a stale target', (t) => {
+  const { task } = _gotoHarness(t);
+  t.after(() => { Timeline._gotoSettling = false; Timeline.clearGotoTarget(); });
+  Timeline._gotoSeq += 1;
+  Timeline.markGotoTask(task.id);
+  assert.equal(Timeline._gotoMarkSeq, Timeline._gotoSeq, 'marking records the generation');
+  Timeline._gotoSeq += 1;                       // a newer Go To that marked nothing: finish() must not spotlight
+  assert.notEqual(Timeline._gotoMarkSeq, Timeline._gotoSeq);
+  Timeline.markGotoCell('L-GOTO', '2026-08-12');
+  assert.equal(Timeline._gotoMarkSeq, Timeline._gotoSeq, 'markGotoCell records it too');
+});

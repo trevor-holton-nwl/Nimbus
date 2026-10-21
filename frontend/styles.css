@@ -1330,7 +1330,8 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 }
 .goto-spotlight .vis-item.vis-range:not(.goto-target):not(.vis-selected) { opacity: .25; }
 @media (prefers-reduced-motion: no-preference) {
-  .vis-item.vis-range { transition: opacity .25s; }
+  /* Scoped to the spotlight so GanttFilter's .dimmed never animates; the fade is in only, the bars snap back when it ends. */
+  .goto-spotlight .vis-item.vis-range { transition: opacity .25s; }
 }
 .vis-foreground .vis-group.goto-row,
 .vis-labelset .vis-label.goto-row { background: rgba(var(--accent-rgb), 0.16); }
