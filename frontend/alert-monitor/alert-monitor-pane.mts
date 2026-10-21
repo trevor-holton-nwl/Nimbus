@@ -161,7 +161,6 @@ function _shellHtml(): string {
 <div class="am-head" id="am-head">
   <div class="am-head-row">
     <h2 class="am-title">${esc(t('tab.alerts'))}</h2>
-    <span class="plant-badge" id="am-plant-badge" hidden></span>
     <span class="spacer"></span>
     <div class="am-profile-wrap">
       <div class="us-combo" id="am-profile-combo">
@@ -771,9 +770,6 @@ function _syncHeader(s: PaintState): void {
   if (mk) mk.hidden = !s.plant || isDefault;
   const note = _el('am-is-default');
   if (note) note.hidden = !isDefault;
-
-  const pb = _el('am-plant-badge');
-  if (pb) { pb.hidden = !s.plant; pb.textContent = s.plant ?? ''; }
 
   const grp = _el<HTMLSelectElement>('am-group-sel');
   if (grp) { grp.value = s.view.groupBy; grp.disabled = !s.plant; }
