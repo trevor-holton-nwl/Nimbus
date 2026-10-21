@@ -2029,6 +2029,10 @@ window.__NIMBUS_LOCALES.de = {
 
   // Distribution toasts
   'toast.dist_machine_locked':          '{{order}} läuft auf {{machine}}, da es verteilt ist. Passen Sie die Anteile an, um es zu verschieben.',
+  'ui.insp_pv_machine':                'PV - Maschine',
+  'ui.pv_machine_option':              '{{pv}} - {{machine}}',
+  'ui.pv_machine_current_ineligible':  '{{pv}} - {{machine}} (aktuell, nicht zulässig)',
+  'toast.pv_machine_ineligible':       '{{order}} kann mit Produktionsversion {{pv}} nicht auf {{machine}} laufen — diese Version hat keinen Routingvorgang am Arbeitsplatz der Maschine. Änderung blockiert.',
   'toast.no_routing_at_workcenter':     '{{order}} hat keinen Routingvorgang auf {{machine}} — Verschiebung blockiert.',
   'toast.production_version_runtime_unresolved': '{{order}} — Laufzeit konnte für Produktionsversion {{pv}} nicht aufgelöst werden; zur Planung reserviert.',
   'toast.dist_load_failed':             'Auftragsverteilungsdaten konnten nicht geladen werden.',
