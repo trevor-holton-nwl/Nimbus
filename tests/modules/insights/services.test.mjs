@@ -51,7 +51,7 @@ test('Compute has no underscore-prefixed properties reachable on the export (clo
   // unambiguously the module under test.
   const keys = Object.keys(Compute);
   assert.ok(keys.every(k => !k.startsWith('_')), 'Compute must stay fully encapsulated, as before the move');
-  assert.deepEqual(keys.sort(), ['alerts', 'available', 'utilization']);
+  assert.deepEqual(keys.sort(), ['alerts', 'available', 'leverageBatch', 'utilization']);
 });
 
 
@@ -310,6 +310,44 @@ test('gate 33: the auto-fix "order moved" toast reads the FINISH of the moved or
     assert.notEqual(shown[0].date, Util.fmtDT(moved.start_date), 'and not its start');
   } finally {
     Toast.show = priorShow; Util.t = priorT;
+    Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test');
+    Store.setTasks([], 'unit-test'); UndoStack._entries.length = 0;
+  }
+});
+
+test('Alerts.applyFix({ quiet: true }) still moves the order and dismisses the alert, but raises no per-order toast', () => {
+  const plant = '5512', line = 'QUIET-FIX-LINE';
+  const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts), priorShow = Toast.show;
+  const toasts = [];
+  Toast.show = (msg, type) => { toasts.push({ msg: String(msg), type }); };
+  const start = new Date('2026-08-25T08:00:00'), end = new Date('2026-08-25T10:00:00');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([
+    { id: 'quiet-ok-task', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end },
+    { id: 'quiet-marked-task', PLANT: plant, MACHINE: line, RUN_TIME: '2', start_date: start, end_date: end, placement_exception: 'overtime' },
+  ], 'unit-test');
+  Store.setAlerts([
+    { id: 'quiet-ok', type: 'blackout', taskId: 'quiet-ok-task' },
+    { id: 'quiet-marked', type: 'blackout', taskId: 'quiet-marked-task' },
+    { id: 'loud-ok', type: 'blackout', taskId: 'quiet-ok-task' },
+  ], 'unit-test');
+  try {
+    const entries = UndoStack._entries.length;
+    Alerts.applyFix('quiet-ok', { quiet: true });
+    assert.deepEqual(toasts, [], 'the moved-order toast is suppressed');
+    assert.equal(UndoStack._entries.length, entries + 1, 'the order still moved: its undo entry was pushed');
+    assert.ok(!Store.alerts.some(a => a.id === 'quiet-ok'), 'and the alert left Store.alerts');
+
+    Alerts.applyFix('quiet-marked', { quiet: true });
+    assert.deepEqual(toasts, [], 'a refusal is silent too');
+    assert.ok(Store.alerts.some(a => a.id === 'quiet-marked'), 'a refused fix leaves its alert in place');
+
+    Alerts.applyFix('quiet-marked');
+    assert.deepEqual(toasts.map(t => t.type), ['warn'], 'without the flag the refusal still toasts');
+    Alerts.applyFix('loud-ok', {});
+    assert.equal(toasts.at(-1).type, 'success', 'an empty options object is not quiet');
+  } finally {
+    Toast.show = priorShow;
     Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test');
     Store.setTasks([], 'unit-test'); UndoStack._entries.length = 0;
   }
@@ -693,5 +731,45 @@ test('I13: the worker prewarm starts the matrix on the plant clock and writes th
     Compute.utilization = priorUtilization;
     Utilization._cache = priorCache;
     Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+// Golden pin for the worker payload Compute assembles (_snap). Captured against the pre-refactor
+// code: the plant-scoped fields, the priority-field strip and the derived setup must not drift.
+test('Compute payload (_snap) is plant-scoped and strips PRODUCTION_VERSION', async () => {
+  const sent = [];
+  const prior = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+  globalThis.Worker = class {
+    postMessage(m) { sent.push(structuredClone(m)); }
+  };
+  const { Compute: C } = await import('../../../frontend/insights/services.mjs?snapgolden=1');
+  try {
+    Store.setMasterData({ plants: [{ plant: 'GP' }, { plant: 'OP' }], lines: [
+      { plant: 'GP', line: 'GL1' }, { plant: 'OP', line: 'OL1' }] }, 'unit-test');
+    Store.setTasks([
+      { id: 'g1', MACHINE: 'GL1', PLANT: 'GP', PRODUCTION_VERSION: 'PV1', PRT_01: 'T1', RUN_TIME: 1 },
+      { id: 'o1', MACHINE: 'OL1', PLANT: 'OP', PRODUCTION_VERSION: 'PV2', RUN_TIME: 1 },
+    ], 'unit-test');
+    Store.replaceBlocks([{ id: 'b1', plant: 'GP', line: 'GL1' }, { id: 'b2', plant: 'OP', line: 'OL1' }], 'unit-test');
+    Store.replacePlantBlocks([{ id: 'pb1', plant: 'GP' }, { id: 'pb2', plant: 'OP' }], 'unit-test');
+    Store.replaceCalendars({ GL1: { workHours: { 1: [6, 14] } }, OL1: { workHours: { 1: [0, 24] } } }, 'unit-test');
+    Store.replacePlants({ GP: { workHours: { 1: [6, 14] } }, OP: { workHours: { 1: [0, 24] } } }, 'unit-test');
+    Store.setSelectedPlant('GP', 'unit-test');
+    void C.utilization(0, 7);
+    const p = sent[0].payload;
+    assert.deepEqual(p.tasks.map(t => t.id), ['g1']);
+    assert.equal('PRODUCTION_VERSION' in p.tasks[0], false);
+    assert.equal(p.tasks[0].PRT_01, 'T1');
+    assert.deepEqual(p.blocks.map(b => b.id), ['b1']);
+    assert.deepEqual(p.plantBlocks.map(b => b.id), ['pb1']);
+    assert.deepEqual(Object.keys(p.calendars), ['GL1']);
+    assert.deepEqual(Object.keys(p.plants), ['GP']);
+    assert.deepEqual(Object.keys(p).sort(),
+      ['blocks', 'calendars', 'days', 'lineSettings', 'masterData', 'plantBlocks', 'plants', 'setup', 'startMs', 'tasks']);
+    assert.deepEqual(p.setup, { intervals: [], diagnostics: [] });
+  } finally {
+    if (prior) Object.defineProperty(globalThis, 'Worker', prior); else delete globalThis.Worker;
+    Store.setSelectedPlant(null, 'unit-test');
+    Store.setTasks([], 'unit-test');
   }
 });

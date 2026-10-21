@@ -33,6 +33,7 @@ class ScheduleSegmentDTO(BaseModel):
 class PlanningReason(BaseModel):
     code: str
     message: str
+    step: str | None = None
 
 
 class TaskDTO(BaseModel):

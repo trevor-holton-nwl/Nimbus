@@ -79,6 +79,10 @@ import { Plant, ProdLines, WorkCenters } from '../master-data/admin-ui.mjs';
 import { LaborPlanning } from '../labor/labor-planning.mjs';
 import { MaterialGrids } from '../master-data/material-grids.mjs';
 import { DistributionPane } from '../distribution/distribution-pane.mjs';
+import { AlertMonitorPane } from '../alert-monitor/alert-monitor-pane.mjs';
+import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
+import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
+import { ALL_ALERTS_PROFILE_ID } from '../insights/alert-profiles.mjs';
 import type { TopLevelTab, GanttSubTab, MasterSubTab, LaborSubTab, PriorityFieldMeta } from '../platform/types.mjs';
 
 // -- Local type declarations (Phase 5 conversion; scoped to this file) ------
@@ -188,6 +192,12 @@ const Settings = (() => {
     { key: 'firstDayOfWeek',    category: 'workflow', type: 'enum',     default: 0,                  tier: 'user', region: true  },
     { key: 'optimizerDefaults', category: 'workflow', type: 'object',   default: null,               tier: 'user', region: false },
     { key: 'distributionFilters', category: 'workflow', type: 'object',  default: null,               tier: 'user', region: false },
+    // Alert Monitor: active profile id per plant ({ [plant]: id }), Gantt highlight toggle, saved monitor view, show-acknowledged toggle, Overview band collapse state.
+    { key: 'alertProfileByPlant',       category: 'workflow', type: 'object',  default: null,  tier: 'user', region: false },
+    { key: 'alertProfileGanttHighlight', category: 'workflow', type: 'boolean', default: true,  tier: 'user', region: false },
+    { key: 'alertMonitorView',          category: 'workflow', type: 'object',  default: null,  tier: 'user', region: false },
+    { key: 'alertsShowAcknowledged',    category: 'workflow', type: 'boolean', default: false, tier: 'user', region: false },
+    { key: 'alertMonitorOverview',      category: 'workflow', type: 'enum',    default: 'open', tier: 'user', region: false },
   ];
 
   // { key: default } map derived from CATALOG (last link in Store.pref precedence).
@@ -422,6 +432,7 @@ const SessionUIAdapter = {
       ['home',       Util.t('tab.home')],
       ['gantt',      Util.t('tab.gantt')],
       ['labor',      Util.t('us.tab_labor')],
+      ['alerts',     Util.t('tab.alerts')],
       ['masterdata', Util.t('tab.masterdata')],
       ['admin',      Util.t('tab.admin')],
     ];
@@ -835,7 +846,7 @@ const SessionUIAdapter = {
         </label>
         <button type="button" class="btn btn-ghost sm" id="us-opt-clear" style="margin-top:8px"${od ? '' : ' hidden'}>${Util.t('us.opt_defaults_clear')}</button>
         <p class="us-field-hint">${Util.t('us.opt_defaults_hint')}</p>
-      </div>`;
+      </div>${SessionUIAdapter._alertProfileRowsHtml()}`;
 
     const tfSel = pane.querySelector<HTMLSelectElement>('#us-pref-timeformat')!;
     tfSel.addEventListener('change', () => { Session.setPref('timeFormat', tfSel.value); SessionUIAdapter._repaintDisplayFormat(); });
@@ -873,6 +884,85 @@ const SessionUIAdapter = {
       Session.setPref('optimizerDefaults', null);
       SessionUIAdapter._renderWorkflowPane();
     });
+    SessionUIAdapter._initAlertProfileRows(pane);
+  },
+
+  // Alert Monitor defaults: the plant's default alert profile (a searchable single-select, never chips),
+  // a shortcut to the Alert Monitor page (the editor is never opened from here) and the Gantt highlight toggle.
+  _alertProfileRowsHtml(): string {
+    const plant = Store.selectedPlant ?? null;
+    const label = Util.t('us.alert_profile_for', { plant: plant ?? '' });
+    const picker = plant
+      ? `<div class="us-combo" id="us-ap-combo">
+           <input type="text" id="us-ap-input" class="us-combo-input" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="us-ap-dropdown">
+           <div class="us-combo-dropdown" id="us-ap-dropdown" role="listbox" hidden></div>
+         </div>`
+      : `<input type="text" class="us-combo-input" readonly value="${Util.escapeHtml(Util.t('us.alert_profile_no_plant'))}">`;
+    return `
+      <div class="form-row">
+        <label>${Util.escapeHtml(label)}</label>
+        ${picker}
+        <button type="button" class="btn btn-ghost sm" id="us-ap-manage" style="margin-top:8px">${Util.t('us.alert_profile_manage')}</button>
+        <p class="us-field-hint">${Util.t('us.alert_profile_hint')}</p>
+        <label class="us-toggle-row" style="margin-top:8px">
+          <input type="checkbox" id="us-ap-highlight"${Session.pref('alertProfileGanttHighlight') !== false ? ' checked' : ''}>
+          <span>${Util.t('us.alert_gantt_highlight')}</span>
+        </label>
+        <p class="us-field-hint">${Util.t('us.alert_gantt_highlight_hint')}</p>
+      </div>`;
+  },
+
+  _initAlertProfileRows(pane: Pick<HTMLElement, 'querySelector'>): void {
+    const manage = pane.querySelector<HTMLElement>('#us-ap-manage');
+    if (manage) manage.addEventListener('click', () => { Modal.close('modal-user-settings'); App.goto('alerts'); });
+    const hl = pane.querySelector<HTMLInputElement>('#us-ap-highlight');
+    if (hl) hl.addEventListener('change', () => { Session.setPref('alertProfileGanttHighlight', hl.checked); });
+
+    const plant = Store.selectedPlant ?? null;
+    const input    = pane.querySelector<HTMLInputElement>('#us-ap-input');
+    const dropdown = pane.querySelector<HTMLElement>('#us-ap-dropdown');
+    if (!plant || !input || !dropdown) return;
+
+    const byPlant = () => (Session.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
+    const profiles = () => AlertProfileClient.cached(plant) ?? [];
+    const options = () => [{ id: ALL_ALERTS_PROFILE_ID, name: Util.t('am.profile_all') }, ...profiles().map(p => ({ id: p.id, name: p.name }))];
+    const currentId = (): string => {
+      const id = byPlant()[plant] ?? ALL_ALERTS_PROFILE_ID;
+      return options().some(o => o.id === id) ? id : ALL_ALERTS_PROFILE_ID;   // a deleted profile reads as All alerts
+    };
+    const reflect = () => { input.value = options().find(o => o.id === currentId())?.name ?? ''; };
+    const open  = () => { dropdown.hidden = false; input.setAttribute('aria-expanded', 'true'); };
+    const close = () => { dropdown.hidden = true; input.setAttribute('aria-expanded', 'false'); };
+    const renderList = (query: string) => {
+      const q = (query || '').trim().toLowerCase();
+      const sel = currentId();
+      const looksLikeLabel = q === (options().find(o => o.id === sel)?.name ?? '').toLowerCase();
+      const shown = options().filter(o => !q || looksLikeLabel || o.name.toLowerCase().includes(q));
+      dropdown.innerHTML = shown.length
+        ? shown.map(o => `<div class="us-combo-option${o.id === sel ? ' selected' : ''}" role="option" data-profile="${Util.escapeHtml(o.id)}"><span>${Util.escapeHtml(o.name)}</span></div>`).join('')
+        : `<div class="us-combo-empty">${Util.t('us.no_matches')}</div>`;
+    };
+    // One key, one PATCH: read the whole map, change this plant's entry, write it back. This IS the default.
+    const choose = (id: string) => {
+      Session.setPref('alertProfileByPlant', { ...byPlant(), [plant]: id });
+      reflect(); close(); input.blur();
+    };
+
+    dropdown.addEventListener('mousedown', (e: Event) => {
+      const opt = (e.target as HTMLElement | null)?.closest?.('[data-profile]') as HTMLElement | null;
+      if (!opt) return;
+      e.preventDefault();
+      choose(opt.dataset.profile ?? ALL_ALERTS_PROFILE_ID);
+    });
+    input.addEventListener('focus', () => { renderList(input.value); open(); });
+    input.addEventListener('input', () => { renderList(input.value); open(); });
+    input.addEventListener('keydown', (e: Event) => {
+      if ((e as KeyboardEvent).key === 'Escape') { close(); reflect(); input.blur(); }
+    });
+    input.addEventListener('blur', () => setTimeout(() => { close(); reflect(); }, 120));
+    reflect();
+    // The pane renders synchronously from the cache; the fetch only fills in names. Skip if the pane was rebuilt/closed.
+    AlertProfileClient.list(plant).then(() => { if (input.isConnected !== false) reflect(); }, () => { /* keep the cached list */ });
   },
 
   // Self-service: PATCH /security/me with just this user's own name fields.
@@ -1943,7 +2033,7 @@ const App = {
       });
       return;
     }
-    const KEY: Record<TopLevelTab, string> = { home: 'tab.home', gantt: 'tab.gantt', labor: 'tab.labor', masterdata: 'tab.masterdata', admin: 'tab.admin' };
+    const KEY: Record<TopLevelTab, string> = { home: 'tab.home', gantt: 'tab.gantt', labor: 'tab.labor', alerts: 'tab.alerts', masterdata: 'tab.masterdata', admin: 'tab.admin' };
     el.textContent = KEY[tab] ? Util.t(KEY[tab]) : '';
   },
 
@@ -2036,6 +2126,8 @@ const App = {
     }
     // Board legend: modal wiring + toolbar button (aria-label set inline, no aria sweep exists).
     GanttLegend.init();
+    // Always-on matched-alert set (Gantt highlight, bell/drawer filter, Alert Monitor) — not tab-scoped.
+    AlertProfileMatches.init();
     const ganttLegendBtn = document.getElementById('btn-gantt-legend');
     if (ganttLegendBtn) {
       ganttLegendBtn.setAttribute('aria-label', Util.t('tip.legend'));
@@ -2336,7 +2428,7 @@ const App = {
   // in practice (all-off would leave a user stranded), but this stays a hard
   // fallback rather than an assumption.
   _firstAccessibleTab(): TopLevelTab {
-    const order: TopLevelTab[] = ['home', 'gantt', 'labor', 'masterdata', 'admin'];
+    const order: TopLevelTab[] = ['home', 'gantt', 'labor', 'alerts', 'masterdata', 'admin'];
     return order.find(t => Session.canAccessTab(t)) ?? 'home';
   },
 
@@ -2378,6 +2470,10 @@ const App = {
       }
       case 'admin': {
         const el = document.querySelector<HTMLElement>('.admin-scroll');
+        return el ? [{ el }] : [];
+      }
+      case 'alerts': {
+        const el = document.getElementById('am-scroll');
         return el ? [{ el }] : [];
       }
       case 'masterdata:plant': {
@@ -2464,6 +2560,8 @@ const App = {
       // its debounced Store-event refresh from doing background network
       // work off-tab here too.
       if (App._currentTab === 'gantt' && App._ganttSub === 'distribution') DistributionPane.setActive(false);
+      // Same for the Alert Monitor: stop its Store-driven repaint while another tab is showing.
+      if (App._currentTab === 'alerts') AlertMonitorPane.setActive(false);
       App._prevTab = App._currentTab;
     }
     App._currentTab = tab;
@@ -2501,6 +2599,12 @@ const App = {
       }, 30);
     } else if (tab === 'labor') {
       setTimeout(() => App.gotoLaborSub(App._laborSub || 'aggregate'), 30);
+    } else if (tab === 'alerts') {
+      setTimeout(() => {
+        AlertMonitorPane.init();
+        AlertMonitorPane.render();
+        requestAnimationFrame(() => App._restoreScroll('alerts'));
+      }, 30);
     }
   },
 
@@ -2615,7 +2719,7 @@ const App = {
   _gotoLanding(): void {
     let lv: LandingViewPref | null = null;
     try { lv = (Store.pref('landingView') as LandingViewPref | undefined) ?? null; } catch {}
-    const validTabs: TopLevelTab[] = ['home', 'gantt', 'masterdata', 'labor', 'admin'];
+    const validTabs: TopLevelTab[] = ['home', 'gantt', 'masterdata', 'labor', 'alerts', 'admin'];
     let tab: TopLevelTab = (lv?.tab && (validTabs as string[]).includes(lv.tab)) ? (lv.tab as TopLevelTab) : 'home';
     if (!Session.canAccessTab(tab)) tab = App._firstAccessibleTab();
     App.goto(tab);

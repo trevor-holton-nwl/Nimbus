@@ -1648,26 +1648,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       const hMinutes = _confHorizonMinutes();
       const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
-      const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
 
-      // Days-out from now → time-weight multiplier (imminent = more costly)
-      const tw = date => {
-        if (!date) return 1.0;
-        const d = (date - horizonStart) / 86400000;
-        return d <= 3 ? 1.5 : d <= 7 ? 1.25 : 1.0;
-      };
-
-      // Factor 1: alert penalty — horizon-scoped, time-weighted, cap 50
-      let alertPenalty = 0;
-      alerts.forEach(a => {
-        if (!a.time || a.time < horizonStart || a.time >= horizonEnd) return;
-        const base = a.sev === 'err' ? 5 : a.sev === 'warn' ? 2 : 0;
-        alertPenalty += base * tw(a.time);
-      });
-      alertPenalty = Math.min(50, Math.round(alertPenalty));
-
-      // Factor 2: utilization overload across horizon, cap 20 — use worker when available
-      let utilPenalty = 0;
+      // Factors (alert penalty cap 50, utilization overload cap 20) are computed by the
+      // shared formula in nimbus-compute-core.js so the Alert Monitor can never disagree.
+      // Utilization overload across horizon — use worker when available
       let matrix = null;
       const days = Math.ceil(hMinutes / 1440);
       const plant = Store.selectedPlant;
@@ -1699,14 +1683,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       if (!Confidence._canApply(generation, rev)) return;
 
-      Object.values(matrix).forEach(lineData => {
-        Object.values(lineData).forEach(row => {
-          if (row.effectiveCapacity > 0 && row.scheduled > row.effectiveCapacity) utilPenalty += 1.5;
-        });
-      });
-      utilPenalty = Math.min(20, Math.round(utilPenalty));
-
-      Confidence._apply(Math.max(0, Math.min(100, 100 - alertPenalty - utilPenalty)));
+      Confidence._apply(NimbusComputeCore.scoreConfidence({ alerts, matrix, horizonStart, horizonMinutes: hMinutes }).score);
     },
 
     _apply(score) {
@@ -1799,14 +1776,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const hDays    = Math.ceil(hMinutes / 1440);
       const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
-      const tw = date => { if (!date) return 1.0; const d = (date - horizonStart) / 86400000; return d <= 3 ? 1.5 : d <= 7 ? 1.25 : 1.0; };
 
       const horizonAlerts = alerts.filter(a => a.time && a.time >= horizonStart && a.time < horizonEnd);
       const errCt  = horizonAlerts.filter(a => a.sev === 'err').length;
       const warnCt = horizonAlerts.filter(a => a.sev === 'warn').length;
-      let alertPts = 0;
-      horizonAlerts.forEach(a => { alertPts += (a.sev === 'err' ? 5 : a.sev === 'warn' ? 2 : 0) * tw(a.time); });
-      alertPts = Math.min(50, Math.round(alertPts));
 
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
@@ -1834,7 +1807,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
       const overloadedCount = Object.keys(overloadedLines).length;
       const overloadedLineDays = Object.values(overloadedLines).reduce((s, d) => s + d, 0);
-      const utilPts = Math.min(20, Math.round(overloadedLineDays * 1.5));
+      const { alertPenalty: alertPts, utilPenalty: utilPts } = NimbusComputeCore.scoreConfidence({
+        alerts, overloadedLineDays, horizonStart, horizonMinutes: hMinutes,
+      });
 
       const horizonEndLabel = horizonEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 

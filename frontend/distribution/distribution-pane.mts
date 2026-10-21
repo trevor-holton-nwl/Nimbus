@@ -441,6 +441,19 @@ function _rowKey(header: Pick<DistHeader, 'production_order' | 'material_number'
   return `${header.production_order}|${header.material_number}`;
 }
 
+/** The list-row key of a parent order's header (`production_order|material_number`); `material` narrows a parent
+ *  that has several headers. null when the parent is not among the rows. */
+export function headerKeyForParent(
+  rows: ReadonlyArray<{ header: Pick<DistHeader, 'production_order' | 'material_number'> }>,
+  parentId: string,
+  material?: string,
+): string | null {
+  if (!parentId) return null;
+  const hit = rows.find(r => String(r.header.production_order) === parentId
+    && (!material || String(r.header.material_number) === material));
+  return hit ? _rowKey(hit.header) : null;
+}
+
 /* ============================================================================
    DistributionPane — DOM/Store-facing shell around the pure logic above.
    ========================================================================== */
@@ -725,6 +738,7 @@ export const DistributionPane = (() => {
       _truncated = false; // fix round 1: a failed fetch must not leave a stale truncated-notice showing
     }
     _loading = false;
+    if (_pendingParent) queueMicrotask(() => { void _consumePendingParent(); });   // after the _renderList() below
     _renderList();
   }
 
@@ -738,6 +752,34 @@ export const DistributionPane = (() => {
     for (const key of _checkedKeys) {
       if (!present.has(key)) _checkedKeys.delete(key);
     }
+  }
+
+  /** A parent asked for through `openParent` before its list row was loaded; opened when a list fetch lands. */
+  let _pendingParent: { parentId: string; material?: string } | null = null;
+
+  async function _consumePendingParent(): Promise<void> {
+    const want = _pendingParent;
+    if (!want) return;
+    const key = headerKeyForParent(_rows, want.parentId, want.material);
+    if (!key) return;   // keep waiting: a later fetch (filter change, next page) may bring it
+    _pendingParent = null;
+    await _openDetail(key);
+  }
+
+  /**
+   * Open one parent order's detail (the Alert Monitor's distribution-separation deep link). The caller switches
+   * to the Distribution tab first (`App.goto('gantt'); App.gotoGanttSub('distribution')`). Resolves true when the
+   * detail opened; false when the parent is not in the loaded list yet, in which case it opens as soon as a list
+   * fetch brings it in.
+   */
+  async function openParent(parentId: string, material?: string): Promise<boolean> {
+    const id = String(parentId ?? '');
+    if (!id) return false;
+    const key = headerKeyForParent(_rows, id, material);
+    if (!key) { _pendingParent = { parentId: id, material }; return false; }
+    _pendingParent = null;
+    await _openDetail(key);
+    return true;
   }
 
   async function _openDetail(key: string): Promise<void> {
@@ -2602,5 +2644,5 @@ export const DistributionPane = (() => {
     btn.textContent = Util.t(state.labelKey, { n: String(state.removedCount) });
   }
 
-  return { init, render, setActive };
+  return { init, render, setActive, openParent };
 })();

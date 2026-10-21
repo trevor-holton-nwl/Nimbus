@@ -14,6 +14,7 @@ import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
+import { AlertProfileMatches } from '../../../frontend/insights/alert-profile-matches.mjs';
 
 const require = createRequire(import.meta.url);
 // Engine.isInProgress/isFrozenHorizon default to Store.plantNow, which projects through the compute core's
@@ -913,6 +914,96 @@ test('navLayout: rows while they fit, histogram beyond 30 lines', () => {
   assert.equal(result0.mode, 'rows', 'navLayout(0) should return rows mode');
   assert.equal(result0.stripH, 42, 'navLayout(0) stripH should be 42');
   assert.equal(result0.rowH, 0, 'navLayout(0) rowH should be 0');
+});
+
+// ---------------------------------------------------------------------------
+// Alert Monitor Task 17: profile-match fill (category) + severity ring.
+// ---------------------------------------------------------------------------
+function _pmHarness(t, { highlight = true, showAcked = false } = {}) {
+  const m = AlertProfileMatches.current();
+  const prior = { cat: m.categoryByTask, sev: m.sevByTask, ids: m.taskIds, acked: m.acked };
+  const priorSettings = Store._state.userSettings;
+  const priorAlerts = Store._state.alerts;
+  const mk = (id) => ({ id, PRODUCTION_ORDER: id, MATERIAL_NUMBER: 'M', MACHINE: 'L-PM', plant: '5512',
+    start_date: new Date('2026-07-01T08:00:00'), end_date: new Date('2026-07-01T12:00:00'), RUN_TIME: 4 });
+  Store.setTasks([mk('pm-a'), mk('pm-b'), mk('pm-c')], 'test');
+  m.categoryByTask = new Map([['pm-a', 'capacity'], ['pm-b', 'setup']]);
+  m.sevByTask = new Map([['pm-a', 'err'], ['pm-b', 'warn']]);
+  m.taskIds = new Set(['pm-a', 'pm-b']);
+  m.acked = new Map();
+  Store._state.userSettings = { ...(priorSettings || {}), alertProfileGanttHighlight: highlight, alertsShowAcknowledged: showAcked };
+  Store._state.alerts = [];
+  t.after(() => {
+    m.categoryByTask = prior.cat; m.sevByTask = prior.sev; m.taskIds = prior.ids; m.acked = prior.acked;
+    Store._state.userSettings = priorSettings; Store._state.alerts = priorAlerts;
+    Store.setTasks([], 'test');
+  });
+  return m;
+}
+
+test('Timeline._itemForTask: a profile-matched order gets profile-match + category + severity classes', (t) => {
+  _pmHarness(t);
+  const a = Timeline._itemForTask(Store.tasks['pm-a']).className;
+  assert.match(a, /\bprofile-match\b/);
+  assert.match(a, /\bprofile-match-capacity\b/);
+  assert.match(a, /\bprofile-match-err\b/);
+  const b = Timeline._itemForTask(Store.tasks['pm-b']).className;
+  assert.match(b, /\bprofile-match-setup\b/);
+  assert.match(b, /\bprofile-match-warn\b/);
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-c']).className, /profile-match/, 'unmatched order is untouched');
+});
+
+test('Timeline._itemForTask: nothing when the highlight pref is off', (t) => {
+  _pmHarness(t, { highlight: false });
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /profile-match/);
+});
+
+test('Timeline._itemForTask: a fully acknowledged order is not highlighted unless alertsShowAcknowledged', (t) => {
+  const m = _pmHarness(t);
+  Store._state.alerts = [{ id: 'al-1', taskId: 'pm-a', type: 'overload', sev: 'err' }, { id: 'al-2', taskId: 'pm-b', type: 'setup-conflict', sev: 'warn' }];
+  m.acked = new Map([['al-1', { alertId: 'al-1' }]]);
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /profile-match/, 'every alert acked: hidden');
+  assert.match(Timeline._itemForTask(Store.tasks['pm-b']).className, /profile-match-setup/, 'an unacked alert keeps it');
+  Store._state.userSettings = { ...Store._state.userSettings, alertsShowAcknowledged: true };
+  assert.match(Timeline._itemForTask(Store.tasks['pm-a']).className, /profile-match-capacity/, 'show-acknowledged restores it');
+});
+
+test('Timeline._applyProfileMatchClasses: updates only changed items, inside _suppressEvents, and strips on unmatch', (t) => {
+  const m = _pmHarness(t);
+  const priorItems = Timeline._items;
+  const priorPlantState = Store._state.selectedPlant;
+  const priorScoped = Store.tasksForSelectedPlant;
+  Store._state.selectedPlant = '5512';   // no emit: the plant index keys on master-data lines this fixture lacks
+  Store.tasksForSelectedPlant = () => ['pm-a', 'pm-b', 'pm-c'].map(id => Store.tasks[id]);
+  const rows = new Map();
+  for (const id of ['pm-a', 'pm-b', 'pm-c']) rows.set(id, { id, className: 'order-standard' });
+  rows.get('pm-b').className = 'order-standard profile-match profile-match-setup profile-match-warn';   // already correct
+  const calls = [];
+  Timeline._items = {
+    get: id => rows.get(id) || null,
+    update(arr) { calls.push({ suppressed: Timeline._suppressEvents, ids: [].concat(arr).map(u => u.id) }); for (const u of [].concat(arr)) rows.set(u.id, { ...rows.get(u.id), ...u }); },
+  };
+  t.after(() => { Timeline._items = priorItems; Store._state.selectedPlant = priorPlantState; Store.tasksForSelectedPlant = priorScoped; });
+  Timeline._applyProfileMatchClasses();
+  assert.equal(calls.length, 1, 'one batched update');
+  assert.deepEqual(calls[0].ids, ['pm-a'], 'only the changed item is written');
+  assert.equal(calls[0].suppressed, true, 'written inside _suppressEvents');
+  assert.equal(Timeline._suppressEvents, false, 'flag restored');
+  assert.match(rows.get('pm-a').className, /order-standard profile-match profile-match-capacity profile-match-err/);
+  m.categoryByTask = new Map(); m.sevByTask = new Map();
+  Timeline._applyProfileMatchClasses();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].ids.sort(), ['pm-a', 'pm-b']);
+  assert.equal(rows.get('pm-a').className, 'order-standard');
+  Timeline._applyProfileMatchClasses();
+  assert.equal(calls.length, 2, 'no-op when nothing changed');
+});
+
+test('navBarStyle: profile-match sits between conflict and firmed', () => {
+  assert.equal(navBarStyle('order-standard profile-match profile-match-setup'), 'profile');
+  assert.equal(navBarStyle('order-firmed profile-match'), 'profile');
+  assert.equal(navBarStyle('order-standard profile-match conflict-order'), 'conflict');
+  assert.equal(navBarStyle('order-standard profile-match dimmed'), 'dimmed');
 });
 
 test('navBarStyle precedence: dimmed > conflict > firmed > standard', () => {

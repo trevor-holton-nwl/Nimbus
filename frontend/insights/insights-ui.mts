@@ -26,7 +26,9 @@ import { Engine } from '../optimization/engine.mjs';
 import { Timeline } from '../scheduling/gantt.mjs';
 import { Table, Inspector, notifyResidualFirming } from '../scheduling/orders.mjs';
 import { Selection } from '../scheduling/selection.mjs';
-import type { NimbusTask, AlertType, UtilSevBucket } from '../platform/types.mjs';
+import { categoryOf, ackLabel, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
+import { AlertProfileMatches } from './alert-profile-matches.mjs';
+import type { NimbusTask, UtilSevBucket } from '../platform/types.mjs';
 
 // VirtualList row-height constant for Dashboard's Line Status list (moved
 // from app.js's top-of-file const group alongside VL_HIER_LINE_H/
@@ -1322,9 +1324,11 @@ export const AlertsUIAdapter = {
       // wired at boot) shows the Inspector. Selection.set no-ops when the order is already the
       // sole selection, so show the Inspector ourselves in that one case. Select BEFORE marking:
       // the listener clears a marker whose order is not selected and must only see the old one.
+      // A pairwise alert (overlap, tool-conflict) selects both orders when the peer exists in the store.
+      const peerId = a.peerId && Store.tasks[String(a.peerId)] ? String(a.peerId) : '';
       const cur = Selection.ids();
-      if (cur.length === 1 && cur[0] === taskId) Inspector.show(t);
-      else Selection.set([taskId]);
+      if (!peerId && cur.length === 1 && cur[0] === taskId) Inspector.show(t);
+      else Selection.set(peerId ? [taskId, peerId] : [taskId]);
       Timeline.markGotoTask(taskId);
     });
     // Close the alert drawer if it is open (the drawer would otherwise cover the Gantt).
@@ -1376,35 +1380,13 @@ export const AlertsUIAdapter = {
     }
 
     // -------- Categorize alerts
-    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
-    // Partial: AlertType also carries the setup-diagnostic types, which
-    // intentionally have no UI category yet (see comment below) and fall
-    // through to 'exceptions' at the lookup site. tool-conflict files with
-    // 'conflicts' (same bucket as overlap), not the exceptions fallback.
-    const CAT_MAP: Partial<Record<AlertType, string>> = {
-      overload:             'capacity',
-      'near-capacity':      'capacity',
-      overlap:              'conflicts',
-      'tool-conflict':      'conflicts',
-      'distribution-separation': 'conflicts',
-      blackout:             'calendar',
-      closed:               'calendar',
-      'firmed-closed':       'calendar',
-      'firmed-out-of-hours': 'calendar',
-      'runtime-schedule-mismatch': 'exceptions',
-      'runtime-unknown':     'exceptions',
-      'pv-lot-size':         'exceptions',
-      // D20/VM13: the alert types added by the backward-scheduling work file explicitly, not by the fallback.
-      late: 'exceptions', reversal_forward: 'exceptions', placement_exception: 'exceptions',
-      frozen_window_crossed: 'exceptions', pull_floor_crossed: 'exceptions', setup_override_orphaned: 'exceptions',
-      no_anchor: 'exceptions', derivation_issue: 'exceptions',
-      finish_moved_earlier: 'calendar', plant_no_timezone: 'calendar', line_no_calendar: 'calendar',
-      run_time_zero: 'exceptions', no_operating_window: 'calendar',
-    };
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
-    // Setup diagnostics are intentionally not given a UI category in this
-    // Stage-1 task; they retain the existing exceptions fallback.
-    for (const a of matches) byCat[CAT_MAP[a.type as AlertType] || 'exceptions'].push(a);
+    // The shared ALERT_CATEGORIES (./alert-profiles) carries a fifth 'setup' group, but this briefing renders
+    // four fixed sections: setup diagnostics keep filing under 'exceptions' ("Other"), exactly as before.
+    for (const a of matches) {
+      const cat = categoryOf(a.type);
+      byCat[cat === 'setup' ? 'exceptions' : cat].push(a);
+    }
 
     const errCt  = matches.filter(a => a.sev === 'err').length;
     const warnCt = matches.filter(a => a.sev === 'warn').length;
@@ -1470,7 +1452,7 @@ export const AlertsUIAdapter = {
         ? `<button class="btn sm" data-act="goto" data-id="${Util.escapeHtml(a.id)}">Go to</button>` : '';
 
       return `
-        <div class="ac-card ${CALENDAR_TYPES.has(a.type) ? 'ac-card-calendar' : `ac-card-${a.sev}`}">
+        <div class="ac-card ${CALENDAR_ALERT_TYPES.has(a.type) ? 'ac-card-calendar' : `ac-card-${a.sev}`}">
           <div class="ac-card-headline">
             <span class="ac-card-sev">${sevIcon[a.sev] || '•'}</span>
             <span>${headline}</span>
@@ -1585,16 +1567,19 @@ export const AlertsUIAdapter = {
   },
 
   _renderAlertRow(a: NimbusAlert): string {
-    const CALENDAR_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
     const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
-    const isCalendar = CALENDAR_TYPES.has(a.type);
+    const isCalendar = CALENDAR_ALERT_TYPES.has(a.type);
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
-    const fixable  = ['overlap', 'blackout', 'overload', 'tool-conflict'].includes(a.type);
-    const override = (a.type === 'closed' || a.type === 'firmed-closed' || a.type === 'firmed-out-of-hours') && a.taskId != null;
+    const fixable  = FIXABLE_ALERT_TYPES.has(a.type);
+    const override = OVERRIDE_ALERT_TYPES.has(a.type) && a.taskId != null;
     const msg = a.msgKey ? Util.t(a.msgKey, a.msgVars ?? {}) : a.msg;
+    // An acknowledged alert is only listed when "Show acknowledged" is on; it says who hid it and until when.
+    const ack = ackLabel(AlertProfileMatches.current().acked.get(a.id), (k, v) => Util.t(k, v));
     return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${Util.escapeHtml(a.id)}">` +
       `<span class="alert-ico">${ico}</span>` +
-      `<span class="alert-msg">${Util.escapeHtml(msg)}</span>` +
+      `<span class="alert-msg">${Util.escapeHtml(msg)}` +
+        (ack ? ` <span class="badge badge-info am-ack-badge" title="${Util.escapeHtml(ack)}">${Util.escapeHtml(ack)}</span>` : '') +
+      `</span>` +
       `<div class="alert-actions">` +
         ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.go_to')}</button>` : '') +
         (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" data-alert-action="fix" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.fix_it')}</button>` : '') +
@@ -1603,15 +1588,49 @@ export const AlertsUIAdapter = {
       `</div></div>`;
   },
 
-  _visibleAlerts(): { alerts: NimbusAlert[]; hiddenCount: number; hz: number | null } {
+  /** Session-only "Show all" from the drawer footer: lists the alerts the active profile hides. Cleared on a plant change. */
+  _profileOverride: false,
+
+  /**
+   * What the bell, the drawer and the Dashboard summary list: the plant's alerts inside the alert horizon, minus
+   * acknowledged ones (unless "Show acknowledged" is on), narrowed to the active profile's matches (unless the
+   * profile is All alerts or the override is on). `hiddenCount` is the horizon's share of what is left out,
+   * `profileHidden` the profile's. Gantt outlines, day cells, `Store.alertsByTask()` consumers, the command
+   * palette and the confidence score deliberately do NOT go through here: they stay plant-wide.
+   */
+  _visibleAlerts(): { alerts: NimbusAlert[]; hiddenCount: number; hz: number | null; profileHidden: number; profileName: string } {
     const plantRow = Store.masterData?.plants?.find(p => p.plant === Store.selectedPlant);
     const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
     const cutoff = typeof hz === 'number'
       ? new Date(Util.plantClock(Store.selectedPlant).getTime() + hz * Config.MS_MIN) : null;
     const plantLines = new Set(Store.linesForSelectedPlant());
     const scoped = Store.alerts.filter(a => !a.line || plantLines.has(a.line));
-    const alerts = cutoff ? scoped.filter(a => !a.time || a.time <= cutoff) : scoped;
-    return { alerts, hiddenCount: scoped.length - alerts.length, hz };
+    const inHorizon = cutoff ? scoped.filter(a => !a.time || a.time <= cutoff) : scoped;
+    const m = AlertProfileMatches.current();
+    const unacked = Store.pref('alertsShowAcknowledged') === true ? inHorizon : inHorizon.filter(a => !m.acked.has(a.id));
+    const filtering = m.profileId !== ALL_ALERTS_PROFILE_ID && !AlertsUIAdapter._profileOverride;
+    const alerts = filtering ? unacked.filter(a => m.alertIds.has(a.id)) : unacked;
+    return {
+      alerts, hiddenCount: scoped.length - inHorizon.length, hz,
+      profileHidden: unacked.length - alerts.length, profileName: m.profile.name,
+    };
+  },
+
+  /** Drawer footer links ("Show all" / "Back to profile"): flip the session override and repaint bell, drawer and summary. */
+  _handleFooterAction(e: { target: unknown }): void {
+    const target = e.target as Element | null;
+    const action = target?.closest?.<HTMLElement>('[data-alert-action]')?.dataset.alertAction;
+    if (action !== 'profile-show-all' && action !== 'profile-back') return;
+    AlertsUIAdapter._profileOverride = action === 'profile-show-all';
+    AlertsUIAdapter._renderFollowers();
+  },
+
+  /** Repaint everything that follows the profile and acknowledgements. */
+  _renderFollowers(): void {
+    AlertsUIAdapter.renderBell();
+    // Same guard as the shell's own repaint: a closed drawer is rebuilt when it opens, not on every producer fanout.
+    if (document.getElementById('alert-drawer')?.classList.contains('open')) AlertsUIAdapter.renderDrawer();
+    Dashboard._renderAlertSummary();
   },
 
   dismissVisible(): void {
@@ -1622,13 +1641,26 @@ export const AlertsUIAdapter = {
     const body = document.getElementById('alert-drawer-body');
     if (!body) return;
     body.onclick = AlertsUIAdapter._handleAction;
-    const { alerts, hiddenCount, hz } = AlertsUIAdapter._visibleAlerts();
+    const { alerts, hiddenCount, hz, profileHidden, profileName } = AlertsUIAdapter._visibleAlerts();
     const footer = document.getElementById('alert-drawer-footer');
     if (footer) {
-      footer.hidden = hiddenCount === 0;
-      footer.textContent = hiddenCount ? Util.t('alert.horizon_hidden_duration', {
+      const horizonNote = hiddenCount ? Util.t('alert.horizon_hidden_duration', {
         count: hiddenCount, duration: Util.fmtHours((hz as number) / 60),
       }) : '';
+      const override = AlertsUIAdapter._profileOverride && AlertProfileMatches.current().profileId !== ALL_ALERTS_PROFILE_ID;
+      footer.hidden = !horizonNote && !profileHidden && !override;
+      footer.onclick = AlertsUIAdapter._handleFooterAction;
+      if (!profileHidden && !override) {
+        footer.textContent = horizonNote;
+      } else {
+        const esc = Util.escapeHtml;
+        const link = (action: string, label: string) =>
+          ` <button type="button" class="btn btn-ghost sm" data-alert-action="${action}">${esc(label)}</button>`;
+        footer.innerHTML = (horizonNote ? `<div>${esc(horizonNote)}</div>` : '')
+          + (override
+            ? `<div>${esc(Util.t('alert.profile_override_on'))}${link('profile-back', Util.t('alert.profile_back'))}</div>`
+            : `<div>${esc(Util.t('alert.profile_hidden', { n: profileHidden, name: profileName }))}${link('profile-show-all', Util.t('alert.profile_show_all'))}</div>`);
+      }
     }
 
     if (!alerts.length) {
@@ -1667,3 +1699,13 @@ export const AlertsUIAdapter = {
     }
   }
 };
+
+/* The bell, drawer and Dashboard summary follow the active profile and the acknowledgements. The producer fans out
+   on a profile, "view as", acknowledgement or alert change (never a Store event); `alerts:change` already repaints
+   the same three through the shell. A plant change drops the session-only "Show all" override. */
+AlertProfileMatches.subscribe(() => { AlertsUIAdapter._renderFollowers(); });
+Store.subscribe(evt => {
+  if (evt.type !== 'plant:selected' || !AlertsUIAdapter._profileOverride) return;
+  AlertsUIAdapter._profileOverride = false;
+  AlertsUIAdapter._renderFollowers();
+}, 'AlertsUIAdapter.profileOverrideReset');

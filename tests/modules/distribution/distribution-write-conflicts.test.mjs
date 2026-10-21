@@ -19,7 +19,7 @@ import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 let imports = 0;
 async function pane(realDetail = false, realList = false) {
   const url = new URL('../../../frontend/distribution/distribution-pane.mts', import.meta.url);
-  let source = fs.readFileSync(url, 'utf8').replace('return { init, render, setActive };', `
+  let source = fs.readFileSync(url, 'utf8').replace('return { init, render, setActive, openParent };', `
     ${realList ? '' : '_fetchAndRenderList = async () => {};'}
     ${realDetail ? '' : '_openDetail = async () => {};'}
     _renderDetail = () => {};

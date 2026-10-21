@@ -27,6 +27,8 @@ import { Store, UndoStack } from '../platform/store.mjs';
 import { Selection } from './selection.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Utilization, Alerts } from '../insights/services.mjs';
+import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
+import { CALENDAR_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { Persistence } from './persistence.mjs';
@@ -185,6 +187,7 @@ export const Timeline = {
   _nextColorIdx: 0,
   _unsubStore:   null as (() => void) | null,
   _suppressEvents: false,       // guard to prevent self-triggered loops
+  _unsubProfileMatches: null as (() => void) | null,   // AlertProfileMatches.subscribe handle (init)
   _gotoTarget: null as { kind: 'task'; taskId: string } | { kind: 'cell'; itemId: string } | null,   // "Go To" marker; stays until the planner moves on (clearGotoTarget). Builders re-apply .goto-target so a rebuild can't drop it
   _conflictSrc: null as NimbusAlert[] | null,           // alerts array reference — invalidates cache when it changes
   _conflictSet: null as Set<string> | null,           // Set<String(taskId)> built once per alerts array identity
@@ -356,6 +359,11 @@ export const Timeline = {
     // refresh below sees the final item set.
     const _refreshView = Util.debounce(() => { Timeline._syncNonWorking(false); Timeline._refreshViewNow(); }, 120);
     Timeline._tl.on('rangechanged', _refreshView);
+
+    // Alert-profile highlight: re-apply the className diff on every AlertProfileMatches fanout (profile,
+    // acknowledgement, pref, focused card). Initial/rebuild state comes from _itemForTask. Never emits a Store event.
+    Timeline._unsubProfileMatches?.();
+    Timeline._unsubProfileMatches = AlertProfileMatches.subscribe(() => Timeline._applyProfileMatchClasses());
 
     // One-shot screen calibration: measure real row + axis after first render
     // with content so _fitHeight uses screen-specific values from then on.
@@ -966,6 +974,49 @@ export const Timeline = {
     else Timeline._setGotoClassIds([cur.itemId], false);
   },
 
+  /** `profile-match profile-match-<category> profile-match-<sev>` for an order the active alert profile
+   *  matches (AlertProfileMatches follows the Alert Monitor's focused card too), else []. Off when the
+   *  `alertProfileGanttHighlight` pref is false; an order whose every alert is acknowledged stays plain
+   *  unless `alertsShowAcknowledged`. */
+  _profileMatchClasses(taskId: string): string[] {
+    if (Store.pref('alertProfileGanttHighlight') === false) return [];
+    const m = AlertProfileMatches.current();
+    const cat = m.categoryByTask.get(taskId);
+    if (!cat) return [];
+    if (Store.pref('alertsShowAcknowledged') !== true && m.acked.size) {
+      const own = Store.alertsByTask().get(taskId);
+      if (own && own.length && own.every(a => m.acked.has(a.id))) return [];
+    }
+    return ['profile-match', `profile-match-${cat}`, `profile-match-${m.sevByTask.get(taskId) === 'err' ? 'err' : 'warn'}`];
+  },
+
+  /** className-only diff of the profile-match classes over the plant's live items (GanttFilter._doApply
+   *  pattern): only items whose classes changed are written, in one batch inside _suppressEvents. */
+  _applyProfileMatchClasses(): void {
+    if (!Timeline._items) return;
+    const updates: Array<{ id: string; className: string }> = [];
+    const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
+    for (const task of scoped) {
+      if (!task.start_date || !task.end_date) continue;
+      const id = String(task.id);
+      const want = Timeline._profileMatchClasses(id);
+      for (const itemId of Timeline.itemIdsForTask(id)) {
+        const item = Timeline._items.get(itemId) as TimelineVisItem | null;
+        if (!item) continue;
+        const parts = (item.className || '').split(' ').filter(Boolean);
+        const base = parts.filter(c => c !== 'profile-match' && !c.startsWith('profile-match-'));
+        const had = parts.length - base.length;
+        if (!had && !want.length) continue;
+        const next = [...base, ...want].join(' ');
+        if (next !== item.className) updates.push({ id: itemId, className: next });
+      }
+    }
+    if (!updates.length) return;
+    const prior = Timeline._suppressEvents;
+    Timeline._suppressEvents = true;
+    try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = prior; }
+  },
+
   /** Build an item object for a task. */
   _itemForTask(t: NimbusTask): TimelineVisItem {
     const line = t.MACHINE || 'Unknown';
@@ -982,6 +1033,9 @@ export const Timeline = {
     // without re-applying it here a rebuild (plant/line change, bulk edit) silently un-dimmed
     // every bar until the next filter tweak.
     if (GanttFilter.isActive() && !GanttFilter.matches(t)) cls.push('dimmed');
+    // Alert-profile highlight (Alert Monitor): category fill + severity ring. Derived here, like
+    // goto-target and dimmed, so a rebuild or single-item patch keeps it.
+    cls.push(...Timeline._profileMatchClasses(String(t.id)));
     // Distribution marker (decision M, aggregate_to_detail.md §8): every child
     // of a distributed SAP order (bare 100% child included) gets the inset
     // keyline via dist-child; a lettered child additionally gets the
@@ -1467,7 +1521,6 @@ export const Timeline = {
     // Alert-cell background items — inserted last so they sit on top of the horizon
     // and past-zone shading within .vis-background (DOM order = paint order).
     // Err severity wins over warn on the same cell.
-    const CALENDAR_ALERT_TYPES = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
     const alertCellMap: Record<string, TimelineAlertCellInfo> = {};
     for (const a of Store.alerts) {
       if (!a.line || !a.time) continue;
@@ -2280,7 +2333,7 @@ export interface NavRangeInput {
   windowStartMs: number; windowEndMs: number;
   nowMs: number; horizonEndMs: number | null;
 }
-export type NavBarStyle = 'standard' | 'firmed' | 'conflict' | 'dimmed';
+export type NavBarStyle = 'standard' | 'firmed' | 'conflict' | 'dimmed' | 'profile';
 export interface NavLayout { mode: 'rows' | 'histogram'; stripH: number; bodyH: number; rowH: number }
 
 function _navLocalMidnight(ms: number): number {
@@ -2394,6 +2447,7 @@ export function navBarStyle(className: string | undefined): NavBarStyle {
   const cls = (className || '').split(/\s+/);
   if (cls.includes('dimmed')) return 'dimmed';
   if (cls.includes('conflict-order')) return 'conflict';
+  if (cls.includes('profile-match')) return 'profile';
   if (cls.includes('order-firmed')) return 'firmed';
   return 'standard';
 }
@@ -2952,6 +3006,17 @@ export const TimelineNav = {
             ctx.globalAlpha = 1;
             ctx.fillStyle = theme.errFill;
             ctx.fillRect(x1, y, w, h);
+          }
+        } else if (bar.style === 'profile') {
+          // Alert-profile match: accent fill with an ink keyline (per-category fills are the Gantt's job;
+          // the warn/err colours keep their own meaning here).
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = theme.accent;
+          ctx.fillRect(x1, y, w, h);
+          if (layout.rowH >= 4) {
+            ctx.strokeStyle = theme.fg;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x1 + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
           }
         } else {
           ctx.globalAlpha = 0.9;

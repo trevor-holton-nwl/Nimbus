@@ -778,3 +778,7 @@ const NIMBUS = (function () {
     Session, SessionUIAdapter, showLoginScreen, MaterialGrids
   };
 })();
+
+// Expose the namespace for ES modules (Alert Monitor pane reads globalThis.NIMBUS);
+// `const NIMBUS` is a script-scope lexical binding and is NOT a window property.
+globalThis.NIMBUS = NIMBUS;

@@ -482,7 +482,35 @@ export const OptimizeDialog = (() => {
     });
   }
 
-  function open() {
+  /** Optional preselection from a deep link (the Alert Monitor's "Optimize this window"): the machines and a custom window. */
+  interface OpenPrefill { lines?: string[]; startDate?: Date; endDate?: Date }
+
+  /** Apply a prefill on top of the freshly seeded dialog. Unknown lines are ignored; a window needs both ends. */
+  function _applyPrefill(prefill: OpenPrefill) {
+    const known = new Set(_linesForPlant());
+    const wanted = (prefill.lines ?? []).filter(l => known.has(l));
+    if (wanted.length) {
+      _selectedLines = new Set(wanted);
+      setScope('lines');
+    }
+    const s = prefill.startDate, e = prefill.endDate;
+    if (s instanceof Date && e instanceof Date && e.getTime() > s.getTime()) {
+      applyPreset('custom');
+      _start = new Date(s);
+      _end = new Date(e);
+      _startDirty = true;
+      _endDirty = true;
+      _fpStart?.setDate(_start, false);
+      _fpEnd?.setDate(_end, false);
+      const sb = document.getElementById('opt-start-btn');
+      const eb = document.getElementById('opt-end-btn');
+      if (sb) sb.textContent = _displayDate(_start);
+      if (eb) eb.textContent = _displayDate(_end);
+      _updateSummary();
+    }
+  }
+
+  function open(prefill?: OpenPrefill) {
     // Plant scope is owned by the header selector. The dialog will not open
     // without a plant set there, because the optimizer needs a concrete scope.
     if (!Store.selectedPlant) {
@@ -550,6 +578,7 @@ export const OptimizeDialog = (() => {
     const lineSrch = document.getElementById('opt-line-search') as HTMLInputElement | null;
     if (lineSrch) lineSrch.value = '';
     setScope('plant');
+    if (prefill) _applyPrefill(prefill);
     requestAnimationFrame(() => el.querySelector('.opt-modal')?.classList.add('visible'));
   }
 

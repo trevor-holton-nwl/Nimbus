@@ -15,6 +15,7 @@ node_modules/
 frontend/nimbus-worker.js
 frontend/platform/types.mjs
 frontend/platform/foundation.mjs
+frontend/platform/overflow-menu.mjs
 frontend/platform/store.mjs
 frontend/scheduling/selection.mjs
 frontend/optimization/sandbox.mjs
@@ -22,6 +23,17 @@ frontend/optimization/scheduler-contract.mjs
 frontend/optimization/engine.mjs
 frontend/calendar/calendar-engine.mjs
 frontend/insights/services.mjs
+frontend/insights/alert-profiles.mjs
+frontend/insights/alert-profile-client.mjs
+frontend/insights/alert-leverage.mjs
+frontend/insights/alert-acks-client.mjs
+frontend/insights/alert-profile-matches.mjs
+frontend/alert-monitor/alert-monitor-model.mjs
+frontend/alert-monitor/alert-monitor-pane.mjs
+frontend/alert-monitor/alert-ack-modal.mjs
+frontend/alert-monitor/alert-profile-editor.mjs
+frontend/alert-monitor/alert-monitor-overview.mjs
+frontend/insights/plant-lru.mjs
 frontend/scheduling/persistence.mjs
 frontend/calendar/calendar-sync.mjs
 frontend/security/session.mjs

@@ -24,8 +24,14 @@
  *  IN  { type:'UTILIZATION', id, payload:{ tasks, lineSettings, calendars, plants,
  *                                          blocks, plantBlocks, masterData,
  *                                          startMs, days, setup:{intervals,diagnostics} } }
+ *  IN  { type:'LEVERAGE_BATCH', id, payload:{ base:{ ...ALERTS payload, startMs, days, lines? },
+ *                                             variants:[{ key, setup:{intervals,diagnostics} }] } }
+ *      Replays computeAlerts + computeUtilization once per variant on the shared base with that
+ *      variant's hypothetical setup observation; calendars/plants are cloned per variant because
+ *      the core's ensureCalendar/ensurePlant write defaults into them.
  *  OUT { type:'ALERTS_RESULT',      id, alerts, elapsed }
  *  OUT { type:'UTILIZATION_RESULT', id, matrix }
+ *  OUT { type:'LEVERAGE_BATCH_RESULT', id, results:[{ key, alerts, matrix }] }
  *  OUT { type:'ERROR',              id, error }
  */
 'use strict';
@@ -43,7 +49,11 @@ const Core = self.NimbusComputeCore!;
 
 type IncomingMessage =
   | { type: 'ALERTS'; id: unknown; payload: ComputeAlertsPayload }
-  | { type: 'UTILIZATION'; id: unknown; payload: ComputeUtilizationPayload };
+  | { type: 'UTILIZATION'; id: unknown; payload: ComputeUtilizationPayload }
+  | { type: 'LEVERAGE_BATCH'; id: unknown; payload: {
+      base: ComputeAlertsPayload & { startMs: number; days: number; lines?: string[] };
+      variants: Array<{ key: string; setup: NimbusSetupObservation }>;
+    } };
 
 self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
   const { type, id, payload } = data;
@@ -54,6 +64,16 @@ self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
     } else if (type === 'UTILIZATION') {
       const { matrix } = Core.computeUtilization(payload);
       self.postMessage({ type: 'UTILIZATION_RESULT', id, matrix });
+    } else if (type === 'LEVERAGE_BATCH') {
+      const { base, variants } = payload;
+      // ensureCalendar/ensurePlant mutate calendars/plants: every core call gets its own copy.
+      const fresh = () => ({ calendars: structuredClone(base.calendars), plants: structuredClone(base.plants) });
+      const results = variants.map(({ key, setup }) => ({
+        key,
+        alerts: Core.computeAlerts({ ...base, ...fresh(), setup }).alerts,
+        matrix: Core.computeUtilization({ ...base, ...fresh(), setup }).matrix,
+      }));
+      self.postMessage({ type: 'LEVERAGE_BATCH_RESULT', id, results });
     }
   } catch (err) {
     const e = err as Error;

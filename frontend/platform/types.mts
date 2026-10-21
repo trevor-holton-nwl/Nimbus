@@ -34,7 +34,7 @@
 export interface NimbusTask {
   id: string;
   planning_status?: 'scheduled' | 'needs_planning';
-  planning_reason?: { code: string; message: string } | null;
+  planning_reason?: { code: string; step?: string | null; message: string } | null;
   text?: string;
   MACHINE: string;
   PLANT?: string;
@@ -504,12 +504,50 @@ export type AlertType =
 
 export type AlertSev = 'err' | 'warn';
 
+/** UI grouping of alert types (cell briefing, Alert Monitor). */
+export type AlertCategory = 'capacity' | 'conflicts' | 'calendar' | 'setup' | 'exceptions';
+
+/** One rule of an alert profile; null means "no restriction". Mirrors backend/alert_profiles/data.py validate_rules. */
+export interface AlertProfileRule {
+  types: AlertType[] | null;
+  dayFrom: number | null;
+  dayTo: number | null;
+  minSev: 'warn' | 'err' | null;
+  minLateHours: number | null;
+}
+
+export type AlertRanking = 'impact' | 'time' | 'severity' | 'orders';
+
+/** A per-plant shared alert profile: an alert is in the profile when it matches any rule. */
+export interface AlertProfile {
+  id: string;
+  plant: string;
+  name: string;
+  description: string;
+  rules: AlertProfileRule[];
+  ranking: AlertRanking;
+  created_by: string | null;
+  updated_at: string | null;
+  /** True only for the client-side "All alerts" pseudo-profile (never a stored row). */
+  builtIn?: boolean;
+}
+
+/** One active alert acknowledgement (GET /alert-acks). `until` null = until the alert clears. */
+export interface AlertAck {
+  plant: string;
+  alert_id: string;
+  acknowledged_by: string | null;
+  reason: string;
+  until: string | null;
+  created_at: string | null;
+}
+
 /** NOT the same set as AlertSev — 'ok' is a valid utilization bucket but never a valid alert sev. */
 export type UtilSevBucket = 'err' | 'warn' | 'ok';
 
 export type BufferUnit = 'pct' | 'hours';
 
-export type TopLevelTab = 'home' | 'gantt' | 'masterdata' | 'labor' | 'admin';
+export type TopLevelTab = 'home' | 'gantt' | 'masterdata' | 'labor' | 'alerts' | 'admin';
 
 export type GanttSubTab = 'timeline' | 'orders' | 'distribution';
 

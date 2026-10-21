@@ -13,6 +13,7 @@ import { ORDER_FIELD_CATALOG } from '../../../frontend/scheduling/order-field-ca
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
+import { AlertProfileMatches } from '../../../frontend/insights/alert-profile-matches.mjs';
 
 const require = createRequire(import.meta.url);
 // Engine.isInProgress/isFrozenHorizon default to Store.plantNow, which projects through the compute core's
@@ -1908,5 +1909,77 @@ test('W2: a split order is one span, so it is never its own predecessor', () => 
     globalThis.NimbusComputeCore = priorCore;
     Store.setTasks(priorTasks, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('profile status filter keeps only orders in the active profile match set and re-applies when the producer fires', () => {
+  const prior = Table._chipFilters, priorApi = Table._api;
+  const priorCurrent = AlertProfileMatches.current;
+  try {
+    Table._chipFilters = { lines: new Set(), colors: new Set(), status: 'profile', dateKey: null, poMat: new Set() };
+    AlertProfileMatches.current = () => ({ taskIds: new Set(['a']) });
+    assert.equal(Table._taskPassesChipFilters({ id: 'a', MACHINE: 'L1' }), true);
+    assert.equal(Table._taskPassesChipFilters({ id: 'b', MACHINE: 'L1' }), false);
+    let calls = 0;
+    Table._api = { onFilterChanged: () => { calls += 1; }, getFilterModel: () => ({}), getDisplayedRowCount: () => 0 };
+    Table._wireProfileMatches();
+    Table._wireProfileMatches();   // idempotent
+    AlertProfileMatches.recompute();
+    assert.equal(calls, 1, 'one subscription, one re-filter');
+    Table._chipFilters.status = 'late';
+    AlertProfileMatches.recompute();
+    assert.equal(calls, 1, 'no re-filter while another status is active');
+  } finally { Table._unwireProfileMatches(); Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent; }
+});
+
+test('profile status option is disabled with its description under All alerts, enabled under a real profile; All alerts drops an active profile filter', () => {
+  const prior = Table._chipFilters, priorApi = Table._api, priorCurrent = AlertProfileMatches.current;
+  const drop = { innerHTML: '' };
+  const priorDoc = globalThis.document;
+  globalThis.document = { getElementById: id => (id === 'tbl-flt-status-dropdown' ? drop : null) };
+  try {
+    Table._chipFilters = { lines: new Set(), colors: new Set(), status: null, dateKey: null, poMat: new Set() };
+    AlertProfileMatches.current = () => ({ profileId: '__all__', taskIds: new Set() });
+    Table._buildStatusChipDropdown();
+    const row = h => h.split('</label>').find(r => r.includes('value="profile"'));
+    assert.match(row(drop.innerHTML), /value="profile"[^>]*disabled/);
+    assert.match(row(drop.innerHTML), /tbl\.status_profile_desc|Orders carrying an alert/);
+    AlertProfileMatches.current = () => ({ profileId: 'p1', taskIds: new Set() });
+    Table._buildStatusChipDropdown();
+    assert.doesNotMatch(row(drop.innerHTML), /disabled/);
+    // active 'profile' filter, then the profile switches to All alerts
+    Table._chipFilters.status = 'profile';
+    let calls = 0;
+    Table._api = { onFilterChanged: () => { calls += 1; }, getFilterModel: () => ({}), getDisplayedRowCount: () => 0 };
+    Table._wireProfileMatches();
+    AlertProfileMatches.current = () => ({ profileId: '__all__', taskIds: new Set() });
+    AlertProfileMatches.recompute();
+    assert.equal(Table._chipFilters.status, null);
+    assert.equal(calls, 1);
+  } finally { Table._unwireProfileMatches(); Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent; globalThis.document = priorDoc; }
+});
+
+test('the status dropdown is rebuilt only when the profile filter flips between disabled and enabled', () => {
+  const prior = Table._chipFilters, priorApi = Table._api, priorCurrent = AlertProfileMatches.current, priorBuild = Table._buildStatusChipDropdown;
+  let builds = 0;
+  try {
+    Table._chipFilters = { lines: new Set(), colors: new Set(), status: 'late', dateKey: null, poMat: new Set() };
+    Table._api = { onFilterChanged() {}, getFilterModel: () => ({}), getDisplayedRowCount: () => 0 };
+    Table._buildStatusChipDropdown = () => { builds += 1; };
+    Table._profileOffSeen = null;
+    AlertProfileMatches.current = () => ({ profileId: 'p1', taskIds: new Set() });
+    Table._wireProfileMatches();
+    AlertProfileMatches.recompute();
+    assert.equal(builds, 1, 'first fanout builds once');
+    AlertProfileMatches.recompute(); AlertProfileMatches.recompute();
+    assert.equal(builds, 1, 'nothing flipped: no rebuild on later fanouts');
+    AlertProfileMatches.current = () => ({ profileId: '__all__', taskIds: new Set() });
+    AlertProfileMatches.recompute();
+    assert.equal(builds, 2, 'the disabled state flipped: rebuild');
+    AlertProfileMatches.recompute();
+    assert.equal(builds, 2);
+  } finally {
+    Table._unwireProfileMatches(); Table._buildStatusChipDropdown = priorBuild; Table._profileOffSeen = null;
+    Table._chipFilters = prior; Table._api = priorApi; AlertProfileMatches.current = priorCurrent;
   }
 });

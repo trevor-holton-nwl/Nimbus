@@ -1660,6 +1660,11 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   </section>
 
   <!-- =========================================================
+       TAB: ALERT MONITOR (filled by AlertMonitorPane)
+       ========================================================= -->
+  <section class="tab-panel" id="alerts-tab" role="tabpanel"></section>
+
+  <!-- =========================================================
        TAB: MANAGE MASTER DATA — wraps Production Lines + Plant
        ========================================================= -->
   <section class="tab-panel" id="masterdata-tab" role="tabpanel">
@@ -2211,6 +2216,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <button class="tab-btn" data-tab="labor" role="tab">
       <span data-i18n="tab.labor">Labor Plan</span>
     </button>
+    <button class="tab-btn" data-tab="alerts" role="tab">
+      <span data-i18n="tab.alerts">Alert Monitor</span>
+    </button>
     <button class="tab-btn" data-tab="masterdata" role="tab">
       <span data-i18n="tab.masterdata">Master Data</span>
     </button>
@@ -2354,6 +2362,34 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button class="btn btn-ghost" id="us-signout-btn" data-i18n="sec.sign_out">Sign out</button>
       <button class="btn btn-primary" id="us-save-btn" data-i18n="btn.save">Save</button>
     </footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Alert profile editor (body/foot rendered by AlertProfileEditor)
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-alert-profile" hidden>
+  <div class="modal ape-modal">
+    <header class="modal-head">
+      <h3 id="ape-title" data-i18n="ape.title_new">New alert profile</h3>
+      <button class="icon-btn sm" id="ape-close" type="button" aria-label="Close">✕</button>
+    </header>
+    <div class="modal-body" id="ape-body"></div>
+    <footer class="modal-foot" id="ape-foot"></footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Acknowledge alert (body/foot rendered by AlertAckModal)
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-alert-ack" hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3 id="aak-title" data-i18n="am.ack_title">Acknowledge alert</h3>
+      <button class="icon-btn sm" id="aak-close" type="button" aria-label="Close" data-i18n-title="btn.close">✕</button>
+    </header>
+    <div class="modal-body" id="aak-body"></div>
+    <footer class="modal-foot" id="aak-foot"></footer>
   </div>
 </div>
 
@@ -2608,6 +2644,12 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-split">2/3</i></span><div><div class="lg-k-t" data-i18n="legend.split_t">Split order</div><p class="lg-k-d" data-i18n="legend.split_d">One order made in several pieces around closed time. The counter says which piece this is.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-dist">A·3</i></span><div><div class="lg-k-t" data-i18n="legend.dist_t">Distributed sub-order</div><p class="lg-k-d" data-i18n="legend.dist_d">One of several machine-level pieces of a single SAP order. The letter names the piece, the number counts them.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-dist lg-sibling"></i></span><div><div class="lg-k-t" data-i18n="legend.dist_sibling_t">Related sub-orders</div><p class="lg-k-d" data-i18n="legend.dist_sibling_d">Select one piece and the other pieces of the same SAP order get a blue halo.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-capacity"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_capacity_t">Capacity alert</div><p class="lg-k-d" data-i18n="legend.pm_capacity_d">This order has a capacity alert your active profile is tracking.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-conflicts"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_conflicts_t">Scheduling conflict alert</div><p class="lg-k-d" data-i18n="legend.pm_conflicts_d">This order has a scheduling conflict alert your active profile is tracking.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-calendar"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_calendar_t">Calendar alert</div><p class="lg-k-d" data-i18n="legend.pm_calendar_d">This order has a calendar alert your active profile is tracking.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-setup"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_setup_t">Setup alert</div><p class="lg-k-d" data-i18n="legend.pm_setup_d">This order has a setup alert your active profile is tracking.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-exceptions"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_exceptions_t">Other alert</div><p class="lg-k-d" data-i18n="legend.pm_exceptions_d">This order has another kind of alert your active profile is tracking.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-setup lg-pm-ring-err"></i></span><div><p class="lg-k-d" data-i18n="legend.pm_ring_d">Inner ring: red = error, amber = warning.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-ghost"></i></span><div><div class="lg-k-t" data-i18n="legend.ghost_t">Drag preview</div><p class="lg-k-d" data-i18n="legend.ghost_d">While you drag, a faded copy shows where the order will land.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-ghost-conflict"></i></span><div><div class="lg-k-t" data-i18n="legend.ghost_conflict_t">Drag preview with conflict</div><p class="lg-k-d" data-i18n="legend.ghost_conflict_d">The preview gets a red edge when dropping there would create a conflict.</p></div></li>
           </ul>

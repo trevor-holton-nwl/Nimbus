@@ -129,7 +129,7 @@ export const Session = (() => {
   // and the Security > Roles tab's own copy in plant-and-administration.mts —
   // keep all three in sync.
   const DEFAULT_PAGE_ACCESS: Record<TopLevelTab, boolean> = {
-    home: true, gantt: true, labor: true, masterdata: true, admin: false,
+    home: true, gantt: true, labor: true, alerts: true, masterdata: true, admin: false,
   };
 
   // Per-role top-level page visibility. Admins always pass (super-admin escape

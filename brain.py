@@ -27,7 +27,7 @@ is no more global fallback wheel — COLOR_FILE/GLOBAL_CW are retired.
 P5 (docs/architecture/domain-refactor-plan.md) reorganized this file from
 ~4,074 lines holding all 103 routes down to this thin app-assembly file: app
 construction, middleware, exception handlers, lifespan bootstrap,
-`include_router` calls for the nine domain routers, and the StaticFiles mount
+`include_router` calls for the twelve domain routers, and the StaticFiles mount
 (kept last). Routes themselves now live in `backend/<domain>/routes.py`; four
 whole modules moved to `backend/`: `auth.py` -> `backend/security/auth.py`,
 `setup_data.py` -> `backend/setup/data.py`, `admin_tables.py` ->
@@ -62,6 +62,7 @@ import master_data as md
 import backend.integration.sap_staging as sap_staging
 import backend.integration.sap_sync as sap_sync
 import backend.security.auth as auth
+from backend.alert_profiles.data import ensure_alert_profile_tables
 import backend.setup.data as setup_data  # noqa: F401 — back-compat (brain.setup_data), see below
 from backend.priority_lists.audit_log import COLOR_WHEEL_DIR, _migrate_audit_log
 from backend.security.auth import require_admin, require_api_key  # noqa: F401 — back-compat, see below
@@ -81,6 +82,7 @@ from backend.priority_lists import cache as plcache
 # anything they import) ever imports `brain`, so there is no ordering hazard;
 # `api.include_router(...)` for each happens later, once `api` exists.
 import backend.admin_ops.routes as admin_ops_routes
+import backend.alert_profiles.routes as alert_profiles_routes
 import backend.calendars.routes as calendars_routes
 import backend.distribution.routes as distribution_routes
 import backend.integration.routes as integration_routes
@@ -283,6 +285,7 @@ async def lifespan(app: FastAPI):
     _migrate_audit_log()
     db.ensure_color_wheel_table()
     db.ensure_priority_list_table()
+    ensure_alert_profile_tables()
     db.ensure_order_schedule_segments_table()
     db.ensure_order_distribution_tables()
     if CW_BACKFILL_FROM_DISK:
@@ -792,7 +795,7 @@ def _admin_route_details(request: Request) -> tuple[str | None, dict]:
 
 
 # =========================
-# ROUTERS — ten domain-scoped routers (nine from docs/architecture/domain-refactor-plan.md
+# ROUTERS — twelve domain-scoped routers (nine from docs/architecture/domain-refactor-plan.md
 # §4, plus backend/distribution/ added 2026-09-17 per aggregate_to_detail.md; imported at
 # the top of this file — the module objects are already bound here)
 # =========================
@@ -807,6 +810,7 @@ api.include_router(security_routes.router)
 api.include_router(labor_routes.router)
 api.include_router(calendars_routes.router)
 api.include_router(admin_ops_routes.router)
+api.include_router(alert_profiles_routes.router)
 
 
 # =========================
