@@ -256,10 +256,12 @@ export interface GroupContext extends RankContext {
 
 const NONE_KEY = 'none';
 
-function _dayKey(d: Date): string {
+/** `YYYY-MM-DD` of a local date: the one day key shared by `groupAlerts('day')` and the Alert Monitor Overview bars. */
+export function dayKeyOf(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
+const _dayKey = dayKeyOf;
 
 export function groupAlerts(alerts: NimbusAlert[], by: AlertGroupBy, ctx: GroupContext): AlertGroup[] {
   const groups = new Map<string, AlertGroup>();
