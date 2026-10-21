@@ -1,4 +1,6 @@
 // Tests for frontend/alert-monitor/alert-monitor-overview.mts — the pure data / narrow / HTML / SVG half of the Overview band.
+// A DST zone, so the spring-forward / fall-back cases below really cross a DST change (Node reads TZ lazily).
+process.env.TZ = 'America/New_York';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -361,4 +363,45 @@ test('narrowChipHtml: empty when inactive; one remove button per dimension in or
   assert.match(h, /Remove filter: line=&lt;i&gt;/);
   assert.match(h, /data-am-action="clear-narrow"/);
   assert.doesNotMatch(h, /<i>/);
+});
+
+test('fix round 1: err/warn stacking order, custom-property-only inline styles, 24-row cap, +N more, maxDay 0', () => {
+  const d = sample();
+  const when = whenHtml(d, {}, v);
+  assert.ok(when.indexOf('am-ov-seg-warn') < when.indexOf('am-ov-seg-err'), 'DOM order warn then err (CSS column puts err at the base)');
+  const win = when.match(/class="am-ov-win"[^>]*style="([^"]*)"/)[1];
+  assert.match(win, /^--c1:\d+;--c2:\d+$/);
+  for (const html of [when, whereHtml(d, {}, false, v), whatHtml(d, {}, v)]) {
+    for (const m of html.matchAll(/style="([^"]*)"/g)) {
+      for (const decl of m[1].split(';')) assert.match(decl, /^--[a-z0-9]+:[-\d.]+$/, 'inline style is a custom property: ' + decl);
+    }
+  }
+  const alerts = [];
+  for (let i = 0; i < 40; i++) alerts.push(alert({ line: 'Line' + String(i).padStart(2, '0'), time: at(1) }));
+  const big = overviewData(alerts, base());
+  const expanded = whereHtml(big, {}, true, v);
+  assert.equal((expanded.match(/class="am-ov-row[ "]/g) || []).length, 24);
+  assert.match(whereHtml(big, {}, false, v), /\+16 more/);
+  const empty = overviewData([], base());
+  const wh = whenHtml(empty, {}, v);
+  assert.doesNotMatch(wh, /data-am-narrow/);
+  assert.doesNotMatch(wh, /NaN|Infinity/);
+  assert.equal(empty.maxDay, 0);
+});
+
+test('fix round 1: pruneNarrow keeps object identity when nothing drops; a downsampled sparkline keeps y inside 0..h', () => {
+  const d = overviewData([alert({ line: 'L1', time: at(2) })], base());
+  const n = { line: 'L1' };
+  assert.equal(pruneNarrow(n, d), n);
+  assert.notEqual(pruneNarrow({ line: 'ZZ' }, d), { line: 'ZZ' });
+  const many = Array.from({ length: 500 }, (_, i) => ({ ts: i, score: i % 2 ? 100 : 0 }));
+  const ys = [...sparkPath(many, 126, 22).matchAll(/ (-?[\d.]+)(?= L|$)/g)].map(m => Number(m[1]));
+  assert.equal(ys.length, 40);
+  assert.ok(ys.every(y => y >= 0 && y <= 22));
+});
+
+test('fix round 1: confidenceHtml uses one rounded score for tier, arc and label', () => {
+  const h = confidenceHtml({ score: 59.6, history: [], ghost: null }, v);
+  assert.match(h, /am-ov-conf-val ok/);
+  assert.match(h, />60</);
 });

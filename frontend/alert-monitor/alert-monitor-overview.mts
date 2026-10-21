@@ -13,7 +13,7 @@
 
 import type { AlertCategory, NimbusTask } from '../platform/types.mjs';
 import { MONITOR_CATEGORIES } from './alert-monitor-model.mjs';
-import { anchorTime, alertDayOffset, categoryOf, dayKeyOf } from '../insights/alert-profiles.mjs';
+import { anchorTime, alertDayOffset, categoryOf, dayKeyOf, NONE_KEY } from '../insights/alert-profiles.mjs';
 import type { ProfileDeps } from '../insights/alert-profiles.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -55,7 +55,6 @@ export interface OverviewData {
   categories: Array<{ cat: AlertCategory; count: number }>;
 }
 
-const NONE_KEY = 'none';
 const MAX_DAYS = 60;
 
 // ---- Data -----------------------------------------------------------------------------------
@@ -270,8 +269,8 @@ function _barHtml(
     return `<button type="button" class="am-ov-bar am-ov-stub${extraClass}" disabled tabindex="-1" aria-label="${aria}"></button>`;
   }
   const h = Math.min(100, Math.round(total / Math.max(1, maxDay) * 100));
-  const err = count.err ? `<span class="am-ov-seg am-ov-seg-err" style="flex-grow:${count.err}"></span>` : '';
-  const warn = count.warn ? `<span class="am-ov-seg am-ov-seg-warn" style="flex-grow:${count.warn}"></span>` : '';
+  const err = count.err ? `<span class="am-ov-seg am-ov-seg-err" style="--g:${count.err}"></span>` : '';
+  const warn = count.warn ? `<span class="am-ov-seg am-ov-seg-warn" style="--g:${count.warn}"></span>` : '';
   return `<button type="button" class="am-ov-bar${selected ? ' is-sel' : ''}${extraClass}" data-am-narrow="day:${v.esc(key)}"${_pressed(selected)}`
     + ` aria-label="${aria}" title="${aria}" style="--h:${h}">${warn}${err}</button>`;
 }
@@ -299,7 +298,7 @@ export function whenHtml(data: OverviewData, narrow: Narrow, v: OverviewViewDeps
   if (data.overdue.inWindow) { first = 1; last = 1; }
   for (const b of data.days) if (b.inWindow) { if (first < 0) first = b.offset + 2; last = b.offset + 2; }
   const hasWin = first > 0;
-  const band = hasWin ? `<div class="am-ov-win" aria-hidden="true" style="grid-column:${first} / ${last + 1}"></div>` : '';
+  const band = hasWin ? `<div class="am-ov-win" aria-hidden="true" style="--c1:${first};--c2:${last + 1}"></div>` : '';
 
   const legend = `<div class="am-ov-legend">`
     + `<span class="am-ov-lg"><i class="am-ov-sw am-ov-sw-err" aria-hidden="true"></i>${esc(t('am.ov_err'))}</span>`
@@ -335,12 +334,12 @@ export function whereHtml(data: OverviewData, narrow: Narrow, showAll: boolean, 
       ? `<span class="am-ov-dot" role="img" aria-label="${esc(t('am.ov_overload'))}" title="${esc(t('am.ov_overload'))}"></span>` : '';
     return `<button type="button" class="am-ov-row${sel ? ' is-sel' : ''}" data-am-narrow="line:${esc(l.line)}"${_pressed(sel)} aria-label="${aria}" title="${aria}">`
       + `<span class="am-ov-name">${esc(label)}</span>`
-      + `<span class="am-ov-track" aria-hidden="true"><span class="am-ov-trk am-ov-trk-err" style="width:${pct(l.err)}%"></span><span class="am-ov-trk am-ov-trk-warn" style="width:${pct(l.warn)}%"></span></span>`
+      + `<span class="am-ov-track" aria-hidden="true"><span class="am-ov-trk am-ov-trk-err" style="--w:${pct(l.err)}"></span><span class="am-ov-trk am-ov-trk-warn" style="--w:${pct(l.warn)}"></span></span>`
       + `<span class="am-ov-count">${l.err + l.warn}</span>${dot}</button>`;
   }).join('');
   let more = '';
   if (all.length > OV_LINES_TOP) {
-    const hidden = Math.max(0, all.length - OV_LINES_TOP);
+    const hidden = Math.max(0, Math.min(all.length, OV_LINES_MAX) - OV_LINES_TOP);
     more = `<button type="button" class="am-ov-more" data-am-action="ov-lines-more" aria-expanded="${showAll}">`
       + `${esc(showAll ? t('am.ov_fewer') : t('am.ov_more', { n: hidden }))}</button>`;
   }
@@ -359,7 +358,7 @@ export function whatHtml(data: OverviewData, narrow: Narrow, v: OverviewViewDeps
     const sel = narrow.category === c.cat;
     const aria = esc(t('am.ov_cat_aria', { name: name(c.cat), n: c.count }));
     return `<button type="button" class="am-ov-cat am-ov-cat-${c.cat}${sel ? ' is-sel' : ''}" tabindex="-1" data-am-narrow="category:${c.cat}"${_pressed(sel)}`
-      + ` aria-label="${aria}" title="${aria}" style="flex-grow:${c.count}"><span class="am-ov-cat-n">${c.count}</span></button>`;
+      + ` aria-label="${aria}" title="${aria}" style="--g:${c.count}"><span class="am-ov-cat-n">${c.count}</span></button>`;
   }).join('');
   const row = (c: { cat: AlertCategory; count: number }): string => {
     const sel = narrow.category === c.cat;
@@ -393,7 +392,7 @@ export function confidenceHtml(c: ConfidenceInput, v: OverviewViewDeps): string 
   if (c.score == null || !isFinite(c.score)) return '';
   const g = _GAUGE;
   const score = Math.round(c.score);
-  const val = arcPath(c.score, g.cx, g.cy, g.r);
+  const val = arcPath(score, g.cx, g.cy, g.r);
   let ghost = '';
   let after = '';
   if (c.ghost != null && isFinite(c.ghost)) {
@@ -403,7 +402,7 @@ export function confidenceHtml(c: ConfidenceInput, v: OverviewViewDeps): string 
   }
   const svg = `<svg class="am-ov-gauge" viewBox="0 0 ${g.w} ${g.h}" width="${g.w}" height="${g.h}" role="img" aria-label="${esc(t('am.ov_conf_aria', { score }))}">`
     + `<path class="am-ov-conf-track" d="${arcPath(100, g.cx, g.cy, g.r)}" fill="none"></path>`
-    + (val ? `<path class="am-ov-conf-val ${confTier(c.score)}" d="${val}" fill="none"></path>` : '')
+    + (val ? `<path class="am-ov-conf-val ${confTier(score)}" d="${val}" fill="none"></path>` : '')
     + ghost
     + `<text class="am-ov-conf-n" x="${g.cx}" y="${g.cy + 6}" text-anchor="middle">${score}</text>${after}</svg>`;
   const sp = sparkPath(c.history, _SPARK.w, _SPARK.h);

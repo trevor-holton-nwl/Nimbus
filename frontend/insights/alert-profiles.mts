@@ -254,7 +254,8 @@ export interface GroupContext extends RankContext {
   plantToday: Date;
 }
 
-const NONE_KEY = 'none';
+/** Group / narrow key of an alert with no line (or no order, or no anchor day). */
+export const NONE_KEY = 'none';
 
 /** `YYYY-MM-DD` of a local date: the one day key shared by `groupAlerts('day')` and the Alert Monitor Overview bars. */
 export function dayKeyOf(d: Date): string {
