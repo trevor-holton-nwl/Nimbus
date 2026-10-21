@@ -3103,3 +3103,90 @@ test('Go To marks record the Go To generation so a later Go To does not spotligh
   Timeline.markGotoCell('L-GOTO', '2026-08-12');
   assert.equal(Timeline._gotoMarkSeq, Timeline._gotoSeq, 'markGotoCell records it too');
 });
+
+test('Timeline._rebuildPass restores a Go To\'s target window, not getWindow() (a mid-animation frame)', () => laneRebuildHarness(() => {
+  const A = new Date(2026, 7, 10).getTime(), B = new Date(2026, 7, 12).getTime();
+  const X = new Date(2026, 9, 26).getTime(), Y = new Date(2026, 9, 28).getTime();
+  const writes = [];
+  Object.assign(Timeline._tl, {
+    getWindow: () => ({ start: new Date(A), end: new Date(B) }),
+    setWindow(s, e, o) { writes.push([s.getTime(), e.getTime(), o]); },
+  });
+  const priorGw = Timeline._gotoWin;
+  try {
+    Timeline._gotoWin = { start: X, end: Y };
+    Timeline._rebuildPass();
+    assert.deepEqual(writes, [[X, Y, { animation: false }]], 'the Go To target is restored');
+    writes.length = 0;
+    Timeline._gotoWin = null;
+    Timeline._rebuildPass();
+    assert.deepEqual(writes, [[A, B, { animation: false }]], 'without a Go To the live window is restored');
+  } finally { Timeline._gotoWin = priorGw; }
+}));
+
+function _gotoLineDayRig(t) {
+  const prior = {
+    tl: Timeline._tl, nimbus: globalThis.NIMBUS, scrollToLine: Timeline.scrollToLine, sync: Timeline._syncViewWindow,
+    raf: globalThis.requestAnimationFrame, qsa: globalThis.document.querySelectorAll, seq: Timeline._gotoSeq,
+  };
+  const rig = { listeners: {}, writes: [], live: null, rafQueue: [], scrolls: 0, order: [] };
+  Timeline._tl = {
+    on(ev, fn) { rig.listeners[ev] = fn; }, off() {},
+    setWindow(s, e, o) { rig.writes.push([s.getTime(), e.getTime(), o]); rig.order.push('setWindow'); },
+    getWindow: () => rig.live,
+    props: { centerContainer: { height: 300 } },
+  };
+  globalThis.NIMBUS = { ...(prior.nimbus || {}), App: { ...(prior.nimbus?.App || {}), gotoGanttTimeline: () => {} } };
+  Timeline.scrollToLine = () => { rig.scrolls += 1; rig.order.push('scroll'); return true; };
+  Timeline._syncViewWindow = () => {};
+  globalThis.requestAnimationFrame = cb => { rig.rafQueue.push(cb); return rig.rafQueue.length; };
+  globalThis.document.querySelectorAll = () => [];
+  rig.flushRaf = () => { for (let i = 0; i < 20 && rig.rafQueue.length; i++) rig.rafQueue.shift()(0); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => {
+    Timeline._tl = prior.tl; Timeline.scrollToLine = prior.scrollToLine; Timeline._syncViewWindow = prior.sync;
+    if (prior.nimbus === undefined) delete globalThis.NIMBUS; else globalThis.NIMBUS = prior.nimbus;
+    globalThis.requestAnimationFrame = prior.raf;
+    delete globalThis.document.querySelectorAll;
+    if (prior.qsa) globalThis.document.querySelectorAll = prior.qsa;
+    Timeline._gotoSeq = prior.seq + 1; Timeline._gotoSettling = false; Timeline._gotoWin = null; Timeline._gotoTarget = null;
+  });
+  return rig;
+}
+
+test('Timeline.gotoLineDay holds its target window while in flight and the 700 ms fallback re-asserts it when the live window is off', (t) => {
+  const rig = _gotoLineDayRig(t);
+  const day = '2026-10-27';
+  const win = Timeline._gotoWindowFor(day, []);
+  rig.live = { start: new Date(win.start + 4 * 3600000), end: new Date(win.end + 4 * 3600000) };   // stuck 4 h off, no rangechanged
+  Timeline.gotoLineDay('L-GOTO', day);
+  t.mock.timers.tick(250);
+  assert.deepEqual(Timeline._gotoWin, win, 'the target is held for _rebuildPass');
+  assert.deepEqual(rig.writes[0], [win.start, win.end, { animation: { duration: 300 } }]);
+  assert.equal(Timeline._gotoSettling, true);
+  t.mock.timers.tick(700);
+  assert.equal(rig.writes.length, 2, 'exactly one more write');
+  assert.deepEqual(rig.writes[1], [win.start, win.end, { animation: false }], 'the fallback re-asserts the target');
+  rig.flushRaf();
+  assert.ok(rig.scrolls >= 1, 'the scroll ran');
+  assert.ok(rig.order.indexOf('scroll') > rig.order.lastIndexOf('setWindow'), 're-assert precedes the scroll');
+  assert.equal(Timeline._gotoWin, null);
+  assert.equal(Timeline._gotoSettling, false);
+});
+
+test('Timeline.gotoLineDay: when rangechanged fires with the window at the target there is no re-assert write', (t) => {
+  const rig = _gotoLineDayRig(t);
+  const day = '2026-10-27';
+  const win = Timeline._gotoWindowFor(day, []);
+  rig.live = { start: new Date(win.start), end: new Date(win.end) };
+  Timeline.gotoLineDay('L-GOTO', day);
+  t.mock.timers.tick(250);
+  t.mock.timers.tick(300);
+  rig.listeners.rangechanged({ byUser: false });
+  t.mock.timers.tick(700);
+  rig.flushRaf();
+  assert.ok(rig.writes.every(w => w[2].animation !== false), 'no { animation: false } write');
+  assert.equal(rig.writes.length, 1);
+  assert.ok(rig.scrolls >= 1);
+  assert.equal(Timeline._gotoWin, null);
+});

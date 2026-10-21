@@ -197,6 +197,7 @@ export const Timeline = {
   _gotoSeq: 0,                  // gotoLineDay generation: a newer Go To aborts the older one's pending scroll steps
   _gotoMarkSeq: 0,              // _gotoSeq value when the current Go To target was marked (a stale target is never spotlit)
   _gotoSettling: false,        // true from gotoLineDay until its final scroll: markGoto* hold the spotlight until then
+  _gotoWin: null as { start: number; end: number } | null, // the window a running Go To is animating to; _rebuildPass restores this instead of getWindow() while set, because a rebuild's saved-window restore cancels the vis animation and would otherwise pin a half-way frame
   _conflictSrc: null as NimbusAlert[] | null,           // alerts array reference — invalidates cache when it changes
   _conflictSet: null as Set<string> | null,           // Set<String(taskId)> built once per alerts array identity
   _visEl:       null as HTMLElement | null,           // cached #vis-timeline element (set in init)
@@ -1364,7 +1365,11 @@ export const Timeline = {
     const _pmT0t = performance.now();
     Timeline._renderEmptyOverlay();
     // Save the current viewport so groups.clear() + re-add doesn't auto-fit.
-    const savedWindow = Timeline._tl ? Timeline._tl.getWindow() : null;
+    // A Go To in flight owns the window: restore ITS target, not the half-way animation frame getWindow()
+    // would return (the animation:false restore below cancels the vis animation; see gotoLineDay).
+    const gw = Timeline._gotoWin;
+    const savedWindow = gw ? { start: new Date(gw.start), end: new Date(gw.end) }
+      : (Timeline._tl ? Timeline._tl.getWindow() : null);
     // Capture whatever vertical position the user is actually at right now
     // (before the group/item diff below can shrink content and clamp it) —
     // this is what _vScrollTop gets re-applied to at the end of rebuild(),
@@ -2478,7 +2483,7 @@ export const Timeline = {
     const seq = ++Timeline._gotoSeq;
     Timeline._gotoSettling = true;
     // A throw before `finish` is scheduled must not leave _gotoSettling stuck (markGoto* would never spotlight again).
-    const release = () => { if (seq === Timeline._gotoSeq) Timeline._gotoSettling = false; };
+    const release = () => { if (seq === Timeline._gotoSeq) { Timeline._gotoSettling = false; Timeline._gotoWin = null; } };
     try { NIMBUS!.App!.gotoGanttTimeline!(); } catch (e) { release(); throw e; }
     const step = () => {
       if (seq !== Timeline._gotoSeq) return;
@@ -2488,6 +2493,7 @@ export const Timeline = {
       const finish = () => {
         if (seq !== Timeline._gotoSeq) return;
         Timeline._gotoSettling = false;
+        Timeline._gotoWin = null;
         if (Timeline._gotoTarget && Timeline._gotoMarkSeq === seq) Timeline._spotlight(line);
       };
       // B2: scrollToLine can legitimately fail on the first frame(s) here —
@@ -2520,9 +2526,10 @@ export const Timeline = {
         requestAnimationFrame(tryScroll);
       };
       const tl = Timeline._tl;
+      const win = Timeline._gotoWindowFor(dateStr, taskIds);
       if (tl) {
-        const win = Timeline._gotoWindowFor(dateStr, taskIds);
         Timeline._syncViewWindow(win.start, win.end);
+        Timeline._gotoWin = win;
         tl.setWindow(new Date(win.start), new Date(win.end), { animation: { duration: 300 } });
         document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(b => {
           b.classList.toggle('active', b.dataset.view === 'day');
@@ -2532,15 +2539,22 @@ export const Timeline = {
       if (!tl) { startScroll(); return; }
       let started = false;
       let fallback: ReturnType<typeof setTimeout> | null = null;
-      const go = () => {
+      const go = (fromFallback: unknown = false) => {
         if (started) return;
         started = true;
         if (fallback !== null) clearTimeout(fallback);
         tl.off('rangechanged', go);
+        // No rangechanged by 700 ms: assert the target window if something else moved it (vis passes an event object, hence === true).
+        if (fromFallback === true) {
+          const cur = tl.getWindow();
+          if (Math.abs(cur.start.getTime() - win.start) > 1000 || Math.abs(cur.end.getTime() - win.end) > 1000) {
+            tl.setWindow(new Date(win.start), new Date(win.end), { animation: false });
+          }
+        }
         startScroll();
       };
       tl.on('rangechanged', go);
-      fallback = setTimeout(go, 700);
+      fallback = setTimeout(() => go(true), 700);
     };
     setTimeout(() => {
       try { step(); }
