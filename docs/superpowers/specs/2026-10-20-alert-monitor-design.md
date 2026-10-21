@@ -377,7 +377,7 @@ Never user-visible on this page: "points", "pts", "exact", "estimate", "outside 
 2. **Summary line** (`.am-summary`). One sentence built by the model's `summaryLine`: the first clause is the profile-window sentence (`am.summary_window`, used when every rule of the viewed profile has the same set `dayFrom` and `dayTo`, found by `profileWindow`), else `am.summary_profile`, `am.summary_all` under All alerts, or the focus-chip text while a fix's "Show alerts" focus is active. Then the error, warning and orders-affected clauses (a zero count is omitted; exactly 1 uses the `_one` key, including the singular leads `am.summary_*_one`), then a `button.am-summary-conf` "Plant confidence N" that opens the Confidence breakdown. Counts are over the alerts the list shows (profile-filtered, acknowledged excluded unless asked; the focus set in focus mode); "orders affected" is the distinct `taskId ∪ peerId` set.
 3. **Controls row.** A "Group by" `<select class="input">` (Machine, Day, Type, Category, Order, None; `MONITOR_GROUP_BYS`, default `DEFAULT_GROUP_BY = 'line'`) and a "Sort by" switch of two `seg-btn`s, Priority and Date (`MONITOR_SORTS = ['impact', 'time']`).
 
-Persistence: `alertMonitorView[profileId] = { groupBy?, sort? }`. `_persistView` writes only the key the user changed, so the other keeps following its default. `viewFor` reads a stored `groupBy` as-is when it is a known value (saved views keep theirs), else Machine; the sort is the stored `time` or `impact`, with stored `severity` / `orders` (earlier builds) coerced to `impact`, and with nothing stored `profile.ranking === 'time'` gives `time`, anything else `impact`. The profile banner and the zero-profiles "Create a profile" prompt stay under the header. The five-swatch category legend is gone from the page (the Gantt legend carries the colours).
+Persistence: `alertMonitorView[profileId] = { groupBy?, sort? }`. `_persistView` writes only the key the user changed, so the other keeps following its default. `viewFor` reads a stored `groupBy` as-is when it is a known value (saved views keep theirs), else Machine; the sort is the stored `time` or `impact`, with stored `severity` / `orders` (earlier builds) coerced to `impact`, and with nothing stored `profile.ranking === 'time'` gives `time`, anything else `impact`. The profile banner and the zero-profiles "Create a profile" prompt stay under the header. The five-swatch category legend is gone from the page header (the Gantt legend carries the colours). *Superseded by rev 3 (2026-10-20) — see below.* (The Overview band's What panel carries a five-category legend of counts.)
 
 ### Top fixes (replaces the card grid)
 
@@ -389,7 +389,7 @@ Persistence: `alertMonitorView[profileId] = { groupBy?, sort? }`. `_persistView`
 
 ### Groups and rows
 
-- **Group head** (`.am-ghead`, 36 px): the caret and severity glyph with the label and the error/warning count badges (one toggle button), then **Move N orders** and a ⋯ menu. No totals block and no column-caption row any more. "Move N orders" shows at 2 or more movable orders; the movable types are `overlap`, `blackout`, `tool-conflict` (`MOVABLE_ALERT_TYPES`) and N counts **distinct orders**, not alerts (`groupCounts.movableOrders`). The ⋯ menu offers Go to (the first alert that can), Move N orders (also for a single order), "Open these N orders in the table", and "Acknowledge N…" (the group's not-yet-acknowledged alerts, the whole group and not only the rendered rows).
+- **Group head** (`.am-ghead`, 36 px): the caret and severity glyph with the label and the error/warning count badges (one toggle button), then **Move N orders** and a ⋯ menu. No totals block and no column-caption row any more. "Move N orders" shows at 2 or more movable orders; the movable types are `overlap`, `blackout`, `tool-conflict` (`MOVABLE_ALERT_TYPES`) and N counts **distinct orders**, not alerts (`groupCounts.movableOrders`). The ⋯ menu offers Go to (the first alert that can), Move N orders (also for a single order), "Open these N orders in the table", and "Acknowledge N…" (the group's not-yet-acknowledged alerts, the whole group and not only the rendered rows). *Superseded by rev 3 (2026-10-20) — see below.* ("The whole group" is now the whole group of the narrowed set: every group action acts on what the Overview band's narrow leaves.)
 - **Move N orders algorithm.** Blocked under What-If. Above 5 orders (`GROUP_MOVE_CONFIRM_ABOVE`) it asks first. It then runs `Alerts.applyFix(id, { quiet: true })` on each movable alert of the whole group in list order, skipping an alert that has left `Store.alerts` and any alert whose `taskId` or `peerId` names an order already moved (that alert describes a position that no longer exists). An order counts as moved when its alert id has left `Store.alerts` after the fix. The loop runs in try/catch/finally: an error shows one error toast, and the finally always shows one summary toast ("N orders moved", a warning when 0), repaints and focuses the group head. Undo is one entry per order and `UndoStack.MAX = 10` keeps only the last 10, so the confirm text (`am.group_fix_confirm`) says "Undo keeps the last 10 moves" rather than promising every move can be undone (see Deferred).
 - **Bulk acknowledge.** `AlertAckModal.open({ plant, alertIds })` (title "Acknowledge N alerts", `am.ack_title_n`) calls `AlertAcksClient.acknowledgeMany(plant, ids, reason, until)`, which splits the ids into sequential `/alert-acks/bulk` POSTs of at most 500 (the route's cap), then does one forced refetch and one `_notify`. Each chunk is one transaction with one `admin_audit` row; a failed chunk counts its ids as `failed` and the next chunk still runs (so `am.ack_bulk_partial` is reachable only through chunk failures), and the call throws only when every chunk failed. The ids are sorted before the INSERT so overlapping bulk acks lock rows in one order. A single alert keeps the old one-id path.
 - **No Dismiss on this page.** The row dispatcher's vocabulary is `focus | fix | override | diagnose | ack | unack`; `Alerts.dismiss` and the drawer are untouched.
@@ -434,3 +434,74 @@ Review-deferred minors still open after the rev-2 fix wave (none changes a settl
 - "Move N orders": per-id `Store.alerts` scans, one synchronous `alerts:change` and `Engine.autoReflow` per order, silent refusals (firmed, no slot) so "0 orders moved" gives no cause, and `_moveGroup` is re-entrant while its confirm is pending (no `_moving` guard).
 - Row-menu Diagnose on a line or day alert moves focus back to the ⋯ trigger after opening the cell briefing; three copies of "find the trigger by key and focus it" (`_refocusKey`, `OverflowMenu.reconcile`, the head/show-more focus helpers) may drift.
 - Browser checks owed to the owner (the browser QA pass was skipped by ruling): the new header at 1,024 px in fr/pt, the 1,200 px breakpoint, dark mode, ⋯ menu placement, and the pinned "+ New profile…" footer inside the picker. Browser checks of the new header, 44 px rows and ⋯ menu placement (fr/pt at 1,024 px, the 1,200 px breakpoint, dark mode) are still owed to the manual QA pass.
+
+## Overview band — rev 3 (2026-10-20)
+
+Written after the band shipped on `feature/alert-monitor` (Tasks 28-31, commits bcad30f through 63dd623). The owner liked rev 2 and asked for "interactive cards or visuals or charts ... a pop of display and charting". Rev 2 removed KPI number tiles (U1), so the visuals are **filters you can see**: every bar is a button that narrows the list below it. No chart library is loaded; the band is DOM bars, CSS grid and two small SVGs (the gauge and the sparkline). Backend, profile matching, the leverage engine, acknowledgements, the Gantt, the bell/drawer/Dashboard, the summary line, Top fixes content and ranking, and the groups/rows markup are unchanged; the pref is one more settings-blob key, so there is no route or migration.
+
+### Owner decisions (settled; don't re-ask)
+
+| # | Decision | Answer |
+|---|---|---|
+| V1 | Visuals | **All four**: When (horizon bars), Where (machine bars), What (category strip and legend), Confidence (dial, session trend, top-fix marker). |
+| V2 | Placement | A **collapsible band** under the controls row, above Top fixes; the collapse state is remembered per user (`alertMonitorOverview`: `'collapsed'`, anything else open). |
+| V3 | Click | **Narrows the list with a chip** ("Showing 9 of 42", one removable chip per dimension, plus Clear); AND across the three dimensions; clicking the selected bar again clears it; group-by is untouched; non-selected bars dim. |
+| V4 | Data scope | **The alerts the page lists** (viewed profile, minus acknowledged unless shown; the focus set in focus mode), counted **before** narrowing so the other bars stay clickable. The summary line is unchanged and Top fixes stay plant-wide (D10). |
+
+The Confidence dial is a gauge sitting next to filters, not a KPI tile, so U1 stands.
+
+### The four visuals
+
+Built by the pure module `frontend/alert-monitor/alert-monitor-overview.mts` (no DOM, no Store; translation and date formatting are injected through `OverviewViewDeps`); the pane wires it.
+
+- **When.** One column per plant day from today, between an Overdue bucket and a Later bucket. The column count is the alert horizon in days widened to cover the profile window, clamped to 1-60 (`horizonDays`); day keys come from `plantToday + offset` (local-date construction, so daylight-saving safe) via the exported `dayKeyOf`. A bar stacks warnings on top of errors, its height is relative to the tallest day (the buckets use `min(100, ...)` of it), and a day with none is a disabled 2 px stub. The profile's day window is a shaded band behind the columns, clamped to the rendered columns (nothing is shaded for an empty window). Tick labels sit every 7 columns up to 28 columns and every 14 above; the date is also in each bar's `title` / `aria-label`. A Today line and label mark column 0.
+- **Where.** One row per line (key `a.line || 'none'`, shown as "Unassigned"), sorted by alert count then name, an error/warning two-colour track, the count and an overload dot when the line has an `overload` alert. The top 8 show; "+N more" expands to at most 24 (`OV_LINES_TOP`, `OV_LINES_MAX`); a selected line outside the shown rows stays pinned so it is never hidden.
+- **What.** A proportional strip of the five alert categories (`categoryOf`: capacity, conflicts, calendar, setup, exceptions; fills `--bar-pm-*`) and a legend of all five, zeros shown but disabled. The strip is `aria-hidden` and out of the tab order; the legend rows are the accessible path.
+- **Confidence.** A gauge of the plant confidence (tier colours at 60 and 40, the same tiers as the breakdown), a **ghost marker** for the first fix in the viewer's main Top fixes list (`ghost: number | null`, the already-rounded after-score; only for a replayed fix that is not `requiresMinutes` and whose rounded score differs; a lower score is shown too), and a sparkline of the session history (`NIMBUS.Confidence._history`, bucket-averaged to at most 40 points, nothing under two points). The whole panel is one button that opens the Confidence breakdown. A null score omits the panel (no "not computed" key); the grid then drops to three columns.
+
+When the band is collapsed the header shows one strip line ("Alerts N · Overdue M") and the body is `hidden`.
+
+### Narrowing semantics
+
+- `Narrow = { day?, line?, category? }` is **transient pane state** (`_narrow`): never persisted, never a Store event, never in `_gatherState` (the band is paint-only). It resets on a plant change, on a change of viewed profile, and on `setFocus` / `clearFocus`. It **survives a paint where the band is hidden** (any empty state) and is re-pruned on the next non-empty paint, so a transient empty list does not lose it; `pruneNarrow` drops any dimension whose value has no alerts in the unnarrowed set.
+- The visuals count the **unnarrowed** listed set (V4). Top fixes ignore the narrow. The summary line, banner and focus chip keep `s.listed`.
+- A day narrow takes a day key, `overdue` or `later`. **Undated alerts** (no due date and no time) count in the total, Where and What, never in When, and any day narrow excludes them.
+- **Group actions act on the narrowed set.** `_renderGroups` sorts and groups the narrowed list, so a group head's "Move N orders", "Acknowledge N...", Go to, "Open these N orders in the table" and the ⋯ menus all work on what the rows show; a narrow that leaves nothing tears down the VirtualList, clears the group map and writes `am.ov_narrow_empty` into `#am-groups` (the chip row carries Clear). With a day narrow and Group by Day the result is one group; no special case.
+- Controls: `data-am-narrow="dim:value"` (split at the first colon, a line name may contain colons) on every bar and legend row; chip removal `data-am-narrow-clear`; actions `ov-toggle`, `ov-lines-more`, `ov-conf`, `clear-narrow`. After a click the pane repaints and refocuses the control that took its place, found by attribute match over the live nodes (never an attribute selector; a line name may contain spaces or quotes): the same bar, else the chip's Clear, else the band toggle; a bar inside a hidden ancestor is skipped.
+
+### Rulings (orchestrator, 2026-10-20)
+
+1. Undated alerts: counted in the total, Where and What; absent from When; excluded by any day narrow. No hint.
+2. **No memo** for `overviewData`. Bench (`NIMBUS_BENCH=1`, 15,000 alerts over 70 lines, 3,000 tasks with due dates): `overviewData` 6.2 ms, `applyNarrow` 0.8 ms (day + line + category) and 11.2 ms (day only, which resolves an anchor per alert); under the 20 ms threshold, and `_setHtml` already skips unchanged HTML.
+3. The visuals follow the viewed profile (V4); Overdue and Later may look large under All alerts and that is accepted.
+4. Odd windows (`from` at or beyond the column count, or `to` below 0): the shading clamps to the rendered columns; nothing is shaded if empty.
+5. Up to 60 day columns (about 5 px bars at 1,024 px) are accepted.
+6. **Wrap is a container query on the band, not the viewport.** `.am-overview` is `container: am-ov / inline-size`; the band drops to two columns under 936 px of band width (When and Confidence span both, Confidence centred) and one column under 560 px. The 936 px figure is the four-column grid (`minmax(300px, 1fr) 230px 220px 150px` plus three 12 px gaps); a 900 px viewport has about 852 px of content, so the planned 900 px viewport breakpoint would have overflowed. The When columns are equal width (CSS cannot give the two buckets a fixed 64 px because the markup emits only `--cols`).
+7. The category strip is `aria-hidden` and out of the tab order; the legend is the accessible path.
+8. Group actions follow the narrowed set (above).
+
+### Width budget (content 976 px at a 1,024 px viewport)
+
+Measured by character-count estimate only (10 px mono caps with tracking about 6.4 px per character, 11 px sans about 6 px per character); no browser was available. At 1,024 the grid is When 340, Where 230, What 220, Confidence 150 (When inner 314; a 14-day chart column about 19.6 px). Every longest string fits except Spanish "Conflictos de programación" in the What legend (about 156 px against the 152 px name column, ellipsized by a character or two; the `title` carries the full name). Width-critical translations: de Overdue "Überfällig" (64 px of the 64 budget), fr Today "Aujourd’hui", fr Later "Plus tard", de "+N weitere", eyebrows of 9 characters in de/es/fr/pt.
+
+### Styling and accessibility
+
+Tokens only (`--err`, `--warn`, `--bar-pm-*` with `-fg`, `--accent-wash`, `--bg-elev`, `--line`); hairline borders; no gradients, side stripes or glass; transitions only `var(--t-fast)` on opacity/background, none under reduced motion. The four panels are separate bordered cards, not a `.panel`, and sit inside `overflow: hidden`, so every selection and focus outline is inset. Stacking is `.am-ov-bar { display: flex; flex-direction: column }` (the markup emits warn before err, so errors sit at the base; never `column-reverse`). The in-segment category count hides under 22 px by a container query on the segment. Contrast of each `-fg` on its fill in dark mode is 4.73:1 or better, so no token changed.
+
+### Tests
+
+`tests/modules/alert-monitor/`: `alert-monitor-overview.test.mjs` (data, narrowing, SVG math, builders), `alert-monitor-overview-pane.test.mjs` (wiring, chip, focus, group actions on the narrowed set, ghost and history), `alert-monitor-overview-css.test.mjs` (a static gate over the `.am-ov*` block of `styles.css`: tokens only, every emitted class styled, container breakpoints), and the `[bench]` line in `alert-monitor-bench.test.mjs`. 27 `am.ov_*` keys in all five locales.
+
+### Deferred (rev 3, with the rev-2 list standing)
+
+Weekly aggregation above 28 day columns; a memo for `overviewData` if a later bench demands it (not needed at 15k); narrowing by order; persisted narrow state; a Where split by category colour instead of severity; the rev-2 deferred list.
+
+Review-deferred minors still open:
+
+- The ghost eligibility predicate is duplicated from `fixLineParts` (the pane compares rounded scores, the model raw): one shared exported predicate in the model is owed.
+- The `_levRun` test proves "no repaint", not "`overviewData` uncalled" (a structural guarantee is deferred).
+- fr "Plus tard" (right-aligned, overflows leftwards) may collide with the last day tick label at about 21 day columns or more; a fallback is to hide the Later tick text under about 21 columns. Pending a browser look.
+- es category names may ellipsize by one or two characters (the `title` carries the full name).
+- The Confidence panel does not repaint itself when `_history` grows between paints; it picks the new points up on the next paint.
+- Five emitted hook classes have no rule of their own (`am-ov-what`, `am-ov-col-overdue`, `am-ov-col-later`, `am-ov-bucket`, `is-today`); the gate test lists them.
+- **No browser pass was run by the agents** (owner-owed, as in rev 2): tick collision on long horizons, `container-type` on a `<button>`, band/bar alignment, Today label clearance, the 936 and 560 px wraps, de/es/fr/pt widths at 1,024 px, dark mode.
