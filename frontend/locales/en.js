@@ -95,7 +95,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.dist_machine_locked':         '{{order}} runs on {{machine}} because of its distribution. Adjust shares to move it.',
   'ui.insp_pv_machine':                'PV - Machine',
   'ui.pv_machine_option':              '{{pv}} - {{machine}}',
-  'ui.pv_machine_current_ineligible':  '{{pv}} - {{machine}} (current, not eligible: {{step}})',
+  'ui.pv_machine_current_ineligible':  '{{pv}} - {{machine}} (current, not eligible{{step}})',
   'toast.pv_machine_ineligible':       '{{order}} cannot run on {{machine}} with production version {{pv}}. Change blocked.',
   'toast.pv_drop_stale': '{{order}} changed while the production version chooser was open. Nothing was moved.',
   'toast.pv_switched': '{{order}} now uses production version {{pv}} to run on {{machine}}.',

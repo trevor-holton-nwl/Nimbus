@@ -2001,7 +2001,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.dist_machine_locked':         '{{order}} é executado em {{machine}} por causa de sua distribuição. Ajuste as partes para movê-lo.',
   'ui.insp_pv_machine':                'VP - Máquina',
   'ui.pv_machine_option':              '{{pv}} - {{machine}}',
-  'ui.pv_machine_current_ineligible':  '{{pv}} - {{machine}} (atual, não elegível: {{step}})',
+  'ui.pv_machine_current_ineligible':  '{{pv}} - {{machine}} (atual, não elegível{{step}})',
   'toast.pv_machine_ineligible':       '{{order}} não pode ser executada em {{machine}} com a versão de produção {{pv}}. Alteração bloqueada.',
   'toast.pv_drop_stale': '{{order}} foi alterada enquanto o seletor de versão de produção estava aberto. Nada foi movido.',
   'toast.pv_switched': '{{order}} agora usa a versão de produção {{pv}} para rodar em {{machine}}.',

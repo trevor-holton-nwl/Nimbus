@@ -1577,7 +1577,7 @@ export const Table = {
     if (!options.some(o => o.value === current)) {
       // Say WHY the current pair is out: the step the real gate fails on (zero_runtime, pv_expired, ...).
       const verdict = Runtime.resolve({ ...task, PRODUCTION_VERSION: pv }, task.MACHINE || undefined);
-      const step = verdict.ok ? '' : verdict.step;
+      const step = verdict.ok ? '' : `: ${verdict.step}`;
       options.unshift({ value: current, label: Util.t('ui.pv_machine_current_ineligible', { pv: pv || '—', machine, step }) });
     }
     return options;

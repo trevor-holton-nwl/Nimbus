@@ -112,13 +112,13 @@ function _asQuantity(value: unknown): number {
 /** One selectable (production version, machine) pair for an order. */
 export interface EligiblePair { pv: string; machine: string; workcenter: string }
 
-/** The one production-version normaliser for the client: null/undefined -> null; trimmed and uppercased; a 1-3
- *  digit numeric is left-padded to 4 (SAP's VERID form); anything else is returned as cleaned. Mirrors the
- *  server's `db._norm_pv`, so an unpadded stored order PV ('1') still finds the padded master row ('0001'). */
+/** The one production-version normaliser for the client: null/undefined -> null; trimmed and uppercased; any
+ *  non-blank value shorter than 4 characters is left-padded with zeros to 4 (blank stays ''). Mirrors the server's
+ *  `db._norm_pv` exactly, so an unpadded stored order PV ('1', 'A1') still finds the padded master row ('0001', '00A1'). */
 export function normPv(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   const cleaned = String(value).trim().toUpperCase();
-  return /^\d{1,3}$/.test(cleaned) ? cleaned.padStart(4, '0') : cleaned;
+  return cleaned && cleaned.length < 4 ? cleaned.padStart(4, '0') : cleaned;
 }
 
 /** What a drop onto `targetMachine` should do about the production version. */

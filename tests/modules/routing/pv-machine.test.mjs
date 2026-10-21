@@ -126,10 +126,12 @@ test('Runtime.hasMapFor: false without a map or for another plant, true for the 
 test('F1 normPv: pads 1-3 digit numerics to 4, trims, uppercases, leaves the rest alone, null stays null', () => {
   assert.equal(Runtime.normPv('1'), '0001');
   assert.equal(Runtime.normPv('0001'), '0001');
-  assert.equal(Runtime.normPv('A1'), 'A1');
+  assert.equal(Runtime.normPv('A1'), '00A1');
   assert.equal(Runtime.normPv(' 12 '), '0012');
-  assert.equal(Runtime.normPv('a1'), 'A1');
+  assert.equal(Runtime.normPv('a1'), '00A1');
   assert.equal(Runtime.normPv('12345'), '12345');
+  assert.equal(Runtime.normPv(''), '');
+  assert.equal(Runtime.normPv('  '), '');
   assert.equal(Runtime.normPv(null), null);
   assert.equal(Runtime.normPv(undefined), null);
 });
@@ -141,6 +143,16 @@ test('F1 S1: an order holding the unpadded PV "1" resolves against the padded ma
   assert.equal(Runtime.resolve(task).ok, true, 'padded lookup finds MAT|0001');
   assert.deepEqual(Runtime.dropDecision(task, 'M2'), { kind: 'keep' }, 'current PV "1" is the padded 0001, which covers M2');
   assert.ok(Runtime.eligiblePairs(task).every(p => /^\d{4}$/.test(p.pv)), 'pair pvs are padded');
+});
+
+test('F1 S1b: an order holding the alphanumeric PV "A1" resolves against the padded "MAT|00A1" row and its pair is offered', () => {
+  const m = map();
+  m.pv['MAT|00A1'] = { key: 'MAT|N|G|01', valid_from: null, valid_to: null, workcenter: 'WC1' };
+  Runtime._rateMap = m; Runtime._rateMapPlant = 'P';
+  const task = { id: 't', PLANT: 'P', MATERIAL_NUMBER: 'MAT', PRODUCTION_VERSION: 'A1', MACHINE: 'M1',
+    'ORDER_QUANTITY_(GMEIN)': 60, BASIC_START_DATE: new Date(2026, 8, 1) };
+  assert.equal(Runtime.resolve(task).ok, true, 'A1 -> 00A1 finds MAT|00A1');
+  assert.ok(pairKeys(Runtime.eligiblePairs(task, { requireOps: true })).includes('00A1|M1'), 'the 00A1|M1 pair is offered');
 });
 
 test('F1 S2: the list is the gate: a zero-rate pair is not offered, quantity 0 empties the list, a positive rate and quantity is offered and resolves', () => {

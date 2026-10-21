@@ -108,3 +108,5 @@ Confirmed as written: PV header work center is populated by both Excel and SAP-s
 - Grid/inspector/override had no undo.
 
 - 2026-10-21: merged to local main (merge commit recorded in git log), not pushed/deployed.
+
+- 2026-10-21: F1 review fix: client normPv mirrors db._norm_pv (any non-blank padded to 4, uppercased); the current-pair label's `{{step}}` now carries its own `: ` and is empty when the pair resolves ok.

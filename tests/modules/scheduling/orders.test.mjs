@@ -1289,7 +1289,7 @@ test('F1 S1: _getPairOptions on an order holding the unpadded PV "1" selects 000
   globalThis.window = globalThis.window || {};
   globalThis.window.__NIMBUS_LOCALES = { en: {
     'ui.pv_machine_option': '{{pv}} - {{machine}}',
-    'ui.pv_machine_current_ineligible': '{{pv}} - {{machine}} (current, not eligible: {{step}})',
+    'ui.pv_machine_current_ineligible': '{{pv}} - {{machine}} (current, not eligible{{step}})',
   } };
   const plant = 'P-PAIR-UNPADDED';
   const priorMasterData = _enableRoutingForPlant(plant);

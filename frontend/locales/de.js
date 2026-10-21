@@ -2033,7 +2033,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.dist_machine_locked':          '{{order}} läuft auf {{machine}}, da es verteilt ist. Passen Sie die Anteile an, um es zu verschieben.',
   'ui.insp_pv_machine':                'PV - Maschine',
   'ui.pv_machine_option':              '{{pv}} - {{machine}}',
-  'ui.pv_machine_current_ineligible':  '{{pv}} - {{machine}} (aktuell, nicht zulässig: {{step}})',
+  'ui.pv_machine_current_ineligible':  '{{pv}} - {{machine}} (aktuell, nicht zulässig{{step}})',
   'toast.pv_machine_ineligible':       '{{order}} kann auf {{machine}} mit der Produktionsversion {{pv}} nicht laufen. Änderung blockiert.',
   'toast.pv_drop_stale': '{{order}} wurde geändert, während die Auswahl der Produktionsversion geöffnet war. Nichts wurde verschoben.',
   'toast.pv_switched': '{{order}} nutzt jetzt die Produktionsversion {{pv}}, um auf {{machine}} zu laufen.',
