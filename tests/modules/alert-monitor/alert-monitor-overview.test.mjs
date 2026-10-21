@@ -306,11 +306,13 @@ test('whereHtml: unassigned label, overload dot, every row carries data-am-narro
 test('whatHtml: strip omits zero categories, legend lists all five with zeros disabled at the foot', () => {
   const d = sample();
   const h = whatHtml(d, {}, v);
-  assert.match(h, /class="am-ov-strip" aria-hidden="true"/);
+  assert.match(h, /class="am-ov-strip" role="group"/);
+  assert.doesNotMatch(h, /class="am-ov-strip"[^>]*aria-hidden/);
   assert.match(h, /data-am-narrow="category:capacity"/);
   const strip = h.slice(h.indexOf('am-ov-strip'), h.indexOf('am-ov-catlist'));
   assert.doesNotMatch(strip, /category:exceptions/);
-  assert.match(strip, /tabindex="-1"/);
+  assert.doesNotMatch(strip, /tabindex="-1"/);
+  assert.match(strip, /<button type="button" class="am-ov-cat am-ov-cat-capacity"[^>]*data-am-narrow="category:capacity" aria-pressed="false" aria-label=/);
   assert.equal((h.match(/class="am-ov-catrow/g) || []).length, 5);
   assert.match(h, /class="am-ov-catrow[^"]*"[^>]*disabled/);
   const sel = whatHtml(d, { category: 'setup' }, v);

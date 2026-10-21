@@ -492,6 +492,10 @@ Tokens only (`--err`, `--warn`, `--bar-pm-*` with `-fg`, `--accent-wash`, `--bg-
 
 `tests/modules/alert-monitor/`: `alert-monitor-overview.test.mjs` (data, narrowing, SVG math, builders), `alert-monitor-overview-pane.test.mjs` (wiring, chip, focus, group actions on the narrowed set, ghost and history), `alert-monitor-overview-css.test.mjs` (a static gate over the `.am-ov*` block of `styles.css`: tokens only, every emitted class styled, container breakpoints), and the `[bench]` line in `alert-monitor-bench.test.mjs`. 27 `am.ov_*` keys in all five locales.
 
+### Narrow visibility fix (2026-10-20)
+
+A browser check showed a chart click narrowed the list but the chip and list sat about 400 px below the fold, so nothing appeared to happen. Fixed: `#am-narrow-chip` moved into the sticky `.am-head` controls row beside Group by / Sort by (`.am-controls .am-narrow-chip`, flex, wraps, pills still truncate at 240 px); a click that activates a narrow (not one that clears) calls `#am-groups.scrollIntoView({block: 'nearest'})`, `behavior: 'auto'` under `prefers-reduced-motion`, with `preventScroll` on the refocus so focus is not stolen; the What stripe segments are now keyboard-operable buttons (no `tabindex=-1`, strip no longer `aria-hidden`, `role=group` labelled "What"), refocus lands on the same kind of control (segment or legend row) that took the click. Top fixes stays plant-wide. Browser check still owed: chip fit at 1,024 px in de/es/fr/pt, scroll feel, duplicate tab stops (strip plus legend) for category.
+
 ### Deferred (rev 3, with the rev-2 list standing)
 
 Weekly aggregation above 28 day columns; narrowing by order; persisted narrow state; a Where split by category colour instead of severity; the rev-2 deferred list.

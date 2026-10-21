@@ -183,6 +183,7 @@ function _shellHtml(): string {
     <select class="input am-group-sel" id="am-group-sel" data-am-group-sel>${groupOpts}</select>
     <span class="am-ctl-label" id="am-sort-label">${esc(t('am.sort_by'))}</span>
     <div class="am-seg" id="am-seg" role="group" aria-labelledby="am-sort-label">${sortBtns}</div>
+    <div class="am-narrow-chip" id="am-narrow-chip" hidden></div>
   </div>
 </div>
 <div class="am-scroll" id="am-scroll">
@@ -192,7 +193,6 @@ function _shellHtml(): string {
   <div id="am-leverage"></div>
   <div class="am-focus-chip" id="am-focus-chip" hidden></div>
   <div class="am-sr-only" id="am-narrow-status" role="status" aria-live="polite" aria-atomic="true"></div>
-  <div class="am-focus-chip am-narrow-chip" id="am-narrow-chip" hidden></div>
   <div id="am-groups"></div>
 </div>`;
 }
@@ -358,10 +358,19 @@ function _makeDefault(): void {
 }
 
 /** Click a band bar / a chip's ×: change the narrow, repaint, then put focus on the control that took the click's place. */
-function _setNarrow(next: Narrow, refocusAttr: string): void {
+function _setNarrow(next: Narrow, refocusAttr: string, opts: { scroll?: boolean; fromStrip?: boolean } = {}): void {
   _narrow = next;
   _paint();
-  _refocusNarrow(refocusAttr);
+  _refocusNarrow(refocusAttr, opts.fromStrip === true);
+  if (opts.scroll) _scrollListIntoView();
+}
+
+/** After a chart click activates a narrow the list sits below the band: bring it into view (never smooth under reduced motion). */
+function _scrollListIntoView(): void {
+  const list = _el('am-groups');
+  if (!list?.scrollIntoView) return;
+  const reduce = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+  list.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
 }
 
 /** Not inside a `hidden` ancestor (the collapsed band body) or an `aria-hidden="true"` one (the What strip) and, where layout exists, not display:none. Stub-safe. */
@@ -374,14 +383,16 @@ function _isVisible(el: HTMLElement): boolean {
 }
 
 /** Match by attribute value, never by building a selector from it (line names may hold spaces or quotes). */
-function _findNarrowBar(attr: string): HTMLElement | undefined {
+function _findNarrowBar(attr: string, fromStrip = false): HTMLElement | undefined {
   const bars = Array.from(_el('am-overview')?.querySelectorAll?.<HTMLElement>('[data-am-narrow]') ?? []);
-  return bars.find(el => el.getAttribute('data-am-narrow') === attr && _isVisible(el));
+  const hits = bars.filter(el => el.getAttribute('data-am-narrow') === attr && _isVisible(el));
+  // A category has two controls (strip segment, legend row): land on the kind that took the click.
+  return hits.find(el => (el.classList?.contains?.('am-ov-cat') === true) === fromStrip) ?? hits[0];
 }
 
-function _refocusNarrow(attr: string): void {
-  const next = _findNarrowBar(attr);
-  if (next) { next.focus?.(); return; }
+function _refocusNarrow(attr: string, fromStrip = false): void {
+  const next = _findNarrowBar(attr, fromStrip);
+  if (next) { next.focus?.({ preventScroll: true }); return; }
   const chip = _el('am-narrow-chip');
   const clear = chip?.querySelector?.<HTMLElement>('[data-am-action="clear-narrow"]');
   if (clear) { clear.focus?.(); return; }
@@ -400,7 +411,10 @@ function _onClick(e: Event): void {
   if (bar) {
     const attr = bar.getAttribute?.('data-am-narrow') ?? '';
     const p = parseNarrowAttr(attr);
-    if (p) _setNarrow(toggleNarrow(_narrow, p.dim, p.value), attr);
+    if (p) {
+      const next = toggleNarrow(_narrow, p.dim, p.value);
+      _setNarrow(next, attr, { scroll: next[p.dim] === p.value, fromStrip: bar.classList?.contains?.('am-ov-cat') === true });
+    }
     return;
   }
   const x = target?.closest?.('[data-am-narrow-clear]') as HTMLElement | null;
@@ -1343,6 +1357,7 @@ function _renderOverview(s: PaintState, ov: OverviewState | null): void {
   const active = (globalThis.document?.activeElement ?? null) as HTMLElement | null;
   const inBand = !!active && el.contains?.(active) === true;
   const heldNarrow = inBand ? active.getAttribute?.('data-am-narrow') ?? null : null;
+  const heldStrip = inBand && active.classList?.contains?.('am-ov-cat') === true;
   const heldAction = inBand && heldNarrow == null ? active.getAttribute?.('data-am-action') ?? null : null;
   _setHtml('am-overview', overviewHtml({
     data: ov.data, narrow: ov.narrow, showAll: _ovLinesAll,
@@ -1350,7 +1365,7 @@ function _renderOverview(s: PaintState, ov: OverviewState | null): void {
     collapsed: Store.pref('alertMonitorOverview') === 'collapsed',
   }, _ovViewDeps()));
   el.hidden = false;
-  if (heldNarrow != null) _findNarrowBar(heldNarrow)?.focus?.();
+  if (heldNarrow != null) _findNarrowBar(heldNarrow, heldStrip)?.focus?.();
   else if (heldAction != null) _refocusAction(heldAction);
 }
 

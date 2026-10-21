@@ -381,7 +381,7 @@ export function whatHtml(data: OverviewData, narrow: Narrow, v: OverviewViewDeps
   const strip = live.map(c => {
     const sel = narrow.category === c.cat;
     const aria = esc(t('am.ov_cat_aria', { name: name(c.cat), n: c.count }));
-    return `<button type="button" class="am-ov-cat am-ov-cat-${c.cat}${sel ? ' is-sel' : ''}" tabindex="-1" data-am-narrow="category:${c.cat}"${_pressed(sel)}`
+    return `<button type="button" class="am-ov-cat am-ov-cat-${c.cat}${sel ? ' is-sel' : ''}" data-am-narrow="category:${c.cat}"${_pressed(sel)}`
       + ` aria-label="${aria}" title="${aria}" style="--g:${c.count}"><span class="am-ov-cat-n">${c.count}</span></button>`;
   }).join('');
   const row = (c: { cat: AlertCategory; count: number }): string => {
@@ -395,7 +395,7 @@ export function whatHtml(data: OverviewData, narrow: Narrow, v: OverviewViewDeps
   };
   return `<div class="am-ov-panel am-ov-what${narrow.category ? ' has-sel' : ''}">`
     + `<div class="am-ov-eyebrow">${esc(t('am.ov_what'))}</div>`
-    + `<div class="am-ov-strip" aria-hidden="true">${strip}</div>`
+    + `<div class="am-ov-strip" role="group" aria-label="${esc(t('am.ov_what'))}">${strip}</div>`
     + `<div class="am-ov-catlist">${[...live, ...dead].map(row).join('')}</div></div>`;
 }
 

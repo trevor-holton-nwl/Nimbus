@@ -127,9 +127,9 @@ test('shell order: the band sits between the prompt and the leverage panel, the 
   const shell = els['alerts-tab'].innerHTML;
   const at = id => shell.indexOf(`id="${id}"`);
   assert.ok(at('am-prompt') < at('am-overview') && at('am-overview') < at('am-leverage'));
-  assert.ok(at('am-focus-chip') < at('am-narrow-chip') && at('am-narrow-chip') < at('am-groups'));
+  assert.ok(at('am-narrow-chip') < at('am-overview'), 'the narrow chip moved into the sticky header, above the scroll area');
   assert.match(shell, /<div id="am-overview" hidden><\/div>/);
-  assert.match(shell, /class="am-focus-chip am-narrow-chip" id="am-narrow-chip" hidden/);
+  assert.match(shell, /class="am-narrow-chip" id="am-narrow-chip" hidden/);
 });
 
 test('the band renders over the listed alerts with day / line / category narrow attributes and is shown', () => {
@@ -664,4 +664,86 @@ test('ghost predicate: a fractional 70.6 to 71.4 fix draws no ghost; 70.6 to 72.
   await withLev([lev('k1', { confidenceBefore: 70.6, confidenceAfter: 72.4 })]);
   assert.ok(confHtml().includes('am.ov_conf_after|n=72'));
   assert.ok(confHtml().includes('am.ov_conf_after_aria|n=72'), 'the after-fix value is in the accessible name');
+});
+
+// ---- visible chip, scroll-to-list, clickable What strip ----------------------------------------------------------
+
+test('V1: the narrow chip lives in the sticky header (.am-head), in the controls row, not in the scroll area', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const shell = els['alerts-tab'].innerHTML;
+  const at = id => shell.indexOf(`id="${id}"`);
+  const scrollAt = shell.indexOf('id="am-scroll"');
+  assert.ok(at('am-head') < at('am-narrow-chip') && at('am-narrow-chip') < scrollAt, 'chip is inside the header, before #am-scroll');
+  assert.ok(at('am-seg') < at('am-narrow-chip'), 'beside the Group by / Sort by controls');
+  assert.match(shell, /<div class="am-narrow-chip" id="am-narrow-chip" hidden><\/div>/);
+  assert.equal(shell.indexOf('id="am-narrow-chip"', scrollAt), -1, 'no copy below the band');
+});
+
+test('V2: activating a narrow scrolls #am-groups into view (nearest, smooth); clearing does not', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const scrolls = [];
+  els['am-groups'].scrollIntoView = opts => scrolls.push(opts);
+  clickBar('day:2026-10-23');
+  assert.deepEqual(scrolls, [{ block: 'nearest', behavior: 'smooth' }]);
+  clickBar('line:L1');
+  assert.equal(scrolls.length, 2, 'a second dimension activates and scrolls');
+  clickBar('line:L1');   // toggles off: a clear
+  assert.equal(scrolls.length, 2, 're-click that clears does not scroll');
+  clickClear('day');
+  clickAm('clear-narrow');
+  assert.equal(scrolls.length, 2, 'chip x / Clear never scroll');
+});
+
+test('V3: prefers-reduced-motion scrolls without smooth behaviour', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const prev = globalThis.matchMedia;
+  globalThis.matchMedia = q => ({ matches: /reduced-motion/.test(q) });
+  try {
+    const scrolls = [];
+    els['am-groups'].scrollIntoView = opts => scrolls.push(opts);
+    clickBar('category:capacity');
+    assert.deepEqual(scrolls, [{ block: 'nearest', behavior: 'auto' }]);
+  } finally { globalThis.matchMedia = prev; }
+});
+
+test('V4: the scroll does not steal focus: the clicked bar keeps it', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const [b] = bandBars('day:2026-10-23');
+  els['am-groups'].scrollIntoView = () => {};
+  clickBar('day:2026-10-23');
+  assert.equal(globalThis.document.activeElement, b);
+});
+
+test('V5: What strip segments are real buttons with data-am-narrow, aria-label and aria-pressed; zero categories have none', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  const html = els['am-overview'].innerHTML;
+  const strip = html.slice(html.indexOf('am-ov-strip'), html.indexOf('am-ov-catlist'));
+  assert.doesNotMatch(strip, /tabindex="-1"/);
+  const segs = strip.match(/<button[^>]*>/g) || [];
+  assert.ok(segs.length >= 2);
+  for (const s of segs) {
+    assert.match(s, /type="button"/);
+    assert.match(s, /data-am-narrow="category:[a-z]+"/);
+    assert.match(s, /aria-pressed="false"/);
+    assert.match(s, /aria-label="[^"]+"/);
+  }
+});
+
+test('V6: a strip segment toggles the category narrow like the legend row, and refocus lands on the strip segment', () => {
+  seedOv(ALERTS());
+  AlertMonitorPane.render();
+  els['am-groups'].scrollIntoView = () => {};
+  const seg = bar('category:capacity'); seg.classList.add('am-ov-cat');
+  const row = bar('category:capacity');
+  globalThis.document.getElementById('am-overview').querySelectorAll = sel => (sel === '[data-am-narrow]' ? [seg, row] : []);
+  click(seg);
+  assert.deepEqual(ids(els['am-groups'].innerHTML), ['a3']);
+  assert.equal(globalThis.document.activeElement, seg);
+  click(row);
+  assert.equal(ids(els['am-groups'].innerHTML).length, 4, 'the legend row toggles it off');
 });

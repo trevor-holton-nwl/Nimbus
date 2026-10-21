@@ -7811,6 +7811,10 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 /* The "Showing N of M" chip row. */
 .am-narrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 8px; font-size: 12px; }
 .am-narrow-chip .am-narrow { margin: 0; }
+/* The chip lives in the sticky header's controls row, so it stays on screen while the page scrolls; it wraps, never overflows. */
+.am-controls .am-narrow-chip { flex: 1 1 260px; min-width: 0; display: flex; justify-content: flex-end; }
+.am-narrow-chip[hidden] { display: none; }
+.am-ov-cat:hover:not(.is-sel) { opacity: .8; }
 /* Visually hidden, still read by assistive tech: the narrow chip's persistent live region. */
 .am-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .am-narrow-n { color: var(--fg-mute); }
