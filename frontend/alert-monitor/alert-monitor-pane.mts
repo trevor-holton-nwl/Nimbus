@@ -41,10 +41,14 @@ import {
   MONITOR_GROUP_BYS, MONITOR_SORTS, GROUP_ROW_CAP, ROW_H, DIAG_H, GROUP_MOVE_CONFIRM_ABOVE,
   summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowHtml, rowPrimaryActions, diagnoseHtml, groupHeadHtml, groupMenuItems, groupCounts, groupLabel,
-  relativeDaysText, formatPairKey, fmtNum,
+  relativeDaysText, formatPairKey, fmtNum, profileWindow,
   fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
 import type { MonitorView, EmptyKind, RowView, LevCtx, GroupHeadView, GroupCounts } from './alert-monitor-model.mjs';
+import {
+  overviewData, applyNarrow, narrowActive, toggleNarrow, pruneNarrow, parseNarrowAttr, overviewHtml, narrowChipHtml,
+} from './alert-monitor-overview.mjs';
+import type { Narrow, NarrowDim, OverviewData, OverviewDeps, OverviewViewDeps } from './alert-monitor-overview.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -83,6 +87,7 @@ interface AmNimbus {
   Timeline?: { gotoLineDay?(line: string, dateStr: string): void };
   OptimizerPreview?: { active?: boolean };
   Inspector?: { _formatRuntimeBasis?(task: NimbusTask): string };
+  Confidence?: { _score?: number; _history?: Array<{ ts: number; score: number }>; showBreakdown?: () => void };
 }
 const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NIMBUS ?? {};
 
@@ -114,6 +119,9 @@ const _showAll = new Set<string>();       // group keys expanded past the row ca
 const _diagOpen = new Set<string>();      // alert ids whose inline diagnose panel is open
 let _focusIds: Set<string> | null = null; // "Show alerts" focus: list only these, bypassing the profile
 let _focusTitle = '';
+let _narrow: Narrow = {};                 // Overview band click-to-narrow (view-only AND filter; never persisted)
+let _ovLinesAll = false;                  // the Where panel's "+N more" expansion
+let _lastProfileId: string | undefined;
 let _lastPlant: string | null | undefined;
 let _groupsByKey = new Map<string, AlertGroup>();
 let _vl: VirtualList<NimbusAlert> | null = null;   // group-by none only
@@ -180,8 +188,10 @@ function _shellHtml(): string {
 <div class="am-scroll" id="am-scroll">
   <div id="am-banner"></div>
   <div id="am-prompt"></div>
+  <div id="am-overview" hidden></div>
   <div id="am-leverage"></div>
   <div class="am-focus-chip" id="am-focus-chip" hidden></div>
+  <div class="am-focus-chip am-narrow-chip" id="am-narrow-chip" hidden></div>
   <div id="am-groups"></div>
 </div>`;
 }
@@ -346,8 +356,50 @@ function _makeDefault(): void {
   AlertProfileMatches.setSessionProfile(null);   // the pref now says the same thing
 }
 
+/** Click a band bar / a chip's ×: change the narrow, repaint, then put focus on the control that took the click's place. */
+function _setNarrow(next: Narrow, refocusAttr: string): void {
+  _narrow = next;
+  _paint();
+  _refocusNarrow(refocusAttr);
+}
+
+/** Match by attribute value, never by building a selector from it (line names may hold spaces or quotes). */
+function _refocusNarrow(attr: string): void {
+  const bars = Array.from(_el('am-overview')?.querySelectorAll?.<HTMLElement>('[data-am-narrow]') ?? []);
+  const next = bars.find(el => el.getAttribute('data-am-narrow') === attr);
+  if (next) { next.focus?.(); return; }
+  const chip = _el('am-narrow-chip');
+  const clear = chip?.querySelector?.<HTMLElement>('[data-am-action="clear-narrow"]');
+  if (clear) { clear.focus?.(); return; }
+  const toggle = _el('am-overview')?.querySelector?.<HTMLElement>('[data-am-action="ov-toggle"]');
+  toggle?.focus?.();
+}
+
+function _refocusAction(action: string): void {
+  const els = Array.from(_el('am-overview')?.querySelectorAll?.<HTMLElement>('[data-am-action]') ?? []);
+  els.find(el => el.getAttribute('data-am-action') === action)?.focus?.();
+}
+
 function _onClick(e: Event): void {
   const target = e.target as HTMLElement | null;
+  const bar = target?.closest?.('[data-am-narrow]') as HTMLElement | null;
+  if (bar) {
+    const attr = bar.getAttribute?.('data-am-narrow') ?? '';
+    const p = parseNarrowAttr(attr);
+    if (p) _setNarrow(toggleNarrow(_narrow, p.dim, p.value), attr);
+    return;
+  }
+  const x = target?.closest?.('[data-am-narrow-clear]') as HTMLElement | null;
+  if (x) {
+    const dim = (x.getAttribute?.('data-am-narrow-clear') ?? x.dataset?.amNarrowClear) as NarrowDim | undefined;
+    if (dim === 'day' || dim === 'line' || dim === 'category') {
+      const was = _narrow[dim];
+      const next = { ..._narrow };
+      delete next[dim];
+      _setNarrow(next, was ? `${dim}:${was}` : '');
+    }
+    return;
+  }
   const seg = target?.closest?.('[data-am-sort]') as HTMLElement | null;
   const sortId = seg?.dataset.amSort as MonitorView['sort'] | undefined;
   if (sortId && MONITOR_SORTS.includes(sortId)) { _persistView({ sort: sortId }); return; }
@@ -370,11 +422,18 @@ function _onClick(e: Event): void {
       break;
     }
     case 'page-menu': if (btn) _openPageMenu(btn); break;
-    case 'summary-conf': {
-      const conf = (globalThis as unknown as { NIMBUS?: { Confidence?: { showBreakdown?: () => void } } }).NIMBUS?.Confidence;
-      conf?.showBreakdown?.();
+    case 'summary-conf':
+    case 'ov-conf':
+      _nim().Confidence?.showBreakdown?.();
+      break;
+    case 'ov-toggle': {
+      Session.setPref('alertMonitorOverview', Store.pref('alertMonitorOverview') === 'collapsed' ? 'open' : 'collapsed');
+      _paint();
+      _refocusAction('ov-toggle');
       break;
     }
+    case 'ov-lines-more': _ovLinesAll = !_ovLinesAll; _paint(); _refocusAction('ov-lines-more'); break;
+    case 'clear-narrow': _setNarrow({}, ''); break;
     case 'toggle-group': _toggleGroup(btn!.dataset.groupKey ?? ''); break;
     case 'show-all':
       if (btn!.dataset.groupKey) { _showAll.add(btn!.dataset.groupKey); _paint(); }
@@ -643,7 +702,7 @@ function _gatherState(): PaintState {
   const focusOutside = focus ? listed.filter(a => !m.alertIds.has(a.id)).length : 0;
 
   const confMin = plantRow?.conf_score_horizon ?? (Store.userSettings?.confidenceHorizonMinutes as number | undefined) ?? 20160;
-  const score = (globalThis as unknown as { NIMBUS?: { Confidence?: { _score?: number } } }).NIMBUS?.Confidence?._score;
+  const score = _nim().Confidence?._score;
 
   const matchedCount = scoped.filter(a => m.alertIds.has(a.id)).length;
   return {
@@ -1211,6 +1270,73 @@ function _fmtDay(d: Date): string {
 /** One formatter per page language: constructing an Intl.DateTimeFormat per row dominated the row-building cost. */
 const _dayFmt = new Map<string, Intl.DateTimeFormat>();
 
+/** "23 Oct" / "23. Okt." in the page language: the tick row of the Overview's When chart. */
+function _fmtTick(d: Date): string {
+  const lang = document.documentElement?.lang || 'en-US';
+  let f = _tickFmt.get(lang);
+  if (!f) {
+    try { f = new Intl.DateTimeFormat(lang, { day: 'numeric', month: 'short' }); }
+    catch { f = new Intl.DateTimeFormat('en-US', { day: 'numeric', month: 'short' }); }
+    _tickFmt.set(lang, f);
+  }
+  return f.format(d);
+}
+const _tickFmt = new Map<string, Intl.DateTimeFormat>();
+
+/* ---------------------------------------------------------------------------
+   Overview band (#am-overview) and the narrow chip (#am-narrow-chip)
+   ------------------------------------------------------------------------- */
+interface OverviewState { data: OverviewData; narrow: Narrow; shown: NimbusAlert[]; deps: OverviewDeps }
+
+const _noonOf = (k: string): Date => new Date(`${k}T12:00:00`);
+
+function _ovViewDeps(): OverviewViewDeps {
+  return {
+    t, esc, fmtDay: k => _fmtDay(_noonOf(k)), fmtTick: k => _fmtTick(_noonOf(k)), unassigned: t('am.group_unassigned'),
+  };
+}
+
+/** The band is shown only over a non-empty list; under any empty state it (and the narrow) is gone. */
+const _bandHidden = (s: PaintState): boolean => s.empty !== null || !s.plant || s.listed.length === 0;
+
+/** Paint-only (never from `_gatherState`): one O(n) pass for the band data, then the narrowed list. Prunes `_narrow`. */
+function _overviewState(s: PaintState): OverviewState | null {
+  if (_bandHidden(s)) { _narrow = {}; return null; }
+  const deps: OverviewDeps = {
+    tasksById: Store.tasks, plantToday: s.plantToday, horizonMinutes: s.horizonMinutes, window: profileWindow(s.m.profile),
+  };
+  const data = overviewData(s.listed, deps);
+  _narrow = pruneNarrow(_narrow, data);
+  const shown = narrowActive(_narrow) ? applyNarrow(s.listed, _narrow, deps) : s.listed;
+  return { data, narrow: _narrow, shown, deps };
+}
+
+function _renderOverview(s: PaintState, ov: OverviewState | null): void {
+  const el = _el('am-overview');
+  if (!el) return;
+  if (!ov) { _setHtml('am-overview', ''); el.hidden = true; return; }
+  _setHtml('am-overview', overviewHtml({
+    data: ov.data, narrow: ov.narrow, showAll: _ovLinesAll,
+    conf: { score: s.confidence, history: [], ghost: null },
+    collapsed: Store.pref('alertMonitorOverview') === 'collapsed',
+  }, _ovViewDeps()));
+  el.hidden = false;
+}
+
+function _narrowLabel(dim: NarrowDim, value: string): string {
+  if (dim === 'day') return value === 'overdue' ? t('am.ov_overdue') : value === 'later' ? t('am.ov_later') : _fmtDay(_noonOf(value));
+  if (dim === 'line') return value === 'none' ? t('am.group_unassigned') : value;
+  return t(`ape.cat_${value}`);
+}
+
+function _renderNarrowChip(s: PaintState, ov: OverviewState | null): void {
+  const el = _el('am-narrow-chip');
+  if (!el) return;
+  if (!ov || !narrowActive(ov.narrow)) { _setHtml('am-narrow-chip', ''); el.hidden = true; return; }
+  _setHtml('am-narrow-chip', narrowChipHtml({ shown: ov.shown.length, total: s.listed.length, narrow: ov.narrow, labelOf: _narrowLabel }, t));
+  el.hidden = false;
+}
+
 function _headView(g: AlertGroup, rc: RowCtx, expanded: boolean): GroupHeadView {
   const first = g.alerts.find(a => rowActionsFor(a).goto) ?? null;
   const counts: GroupCounts = groupCounts(g.alerts, _isAcked);
@@ -1274,7 +1400,7 @@ function _renderFocusChip(s: PaintState): void {
   el.hidden = false;
 }
 
-function _renderGroups(s: PaintState): void {
+function _renderGroups(s: PaintState, shown: NimbusAlert[]): void {
   _renderFocusChip(s);
   if (s.empty !== null || !s.plant) {
     _teardownVl();
@@ -1283,9 +1409,16 @@ function _renderGroups(s: PaintState): void {
     _setHtml('am-groups', _emptyHtml(s));
     return;
   }
+  if (shown.length === 0) {   // the narrow matches nothing: the chip row carries Clear
+    _teardownVl();
+    _groupsByKey = new Map();
+    _rowCtx = null;
+    _setHtml('am-groups', `<div class="empty-state">${esc(t('am.ov_narrow_empty'))}</div>`);
+    return;
+  }
   const rc = _makeRowCtx(s);
   _rowCtx = rc;
-  const sorted = [...s.listed].sort(compareAlerts(s.view.sort, rc.ctx));
+  const sorted = [...shown].sort(compareAlerts(s.view.sort, rc.ctx));
   const groups = groupAlerts(sorted, s.view.groupBy, rc.ctx);
   _groupsByKey = new Map(groups.map(g => [g.key, g]));
   if (s.view.groupBy === 'none') { _renderNone(groups[0], rc); return; }
@@ -1297,6 +1430,8 @@ function _paint(): void {
   if (!_active) return;
   _ensureShell();
   if ((Store.selectedPlant ?? null) !== _lastPlant) { _lastPlant = Store.selectedPlant ?? null; AlertMonitorPane.resetView(); }
+  const pid = AlertProfileMatches.view().profileId;
+  if (pid !== _lastProfileId) { _lastProfileId = pid; _narrow = {}; _ovLinesAll = false; }   // a narrow belongs to one profile's list
   const s = _gatherState();
   _syncHeader(s);
   _setHtml('am-summary', _summaryHtml(s));
@@ -1305,7 +1440,10 @@ function _paint(): void {
     _setHtml('am-banner', _bannerHtml(s));
     _setHtml('am-prompt', _promptHtml(s));
     _renderLeverage(s);
-    _renderGroups(s);
+    const ov = _overviewState(s);
+    _renderOverview(s, ov);
+    _renderNarrowChip(s, ov);
+    _renderGroups(s, ov ? ov.shown : s.listed);
   }
   OverflowMenu.reconcile();   // an open ⋯ menu whose trigger a repaint replaced closes (or follows its data-ovf-key)
 }
@@ -1352,11 +1490,13 @@ export const AlertMonitorPane = {
   setFocus(alertIds: Iterable<string>, title: string): void {
     _focusIds = new Set(alertIds);
     _focusTitle = title;
+    _narrow = {};
     _paint();
   },
   clearFocus(): void {
     _focusIds = null;
     _focusTitle = '';
+    _narrow = {};
     AlertProfileMatches.setFocusTaskIds(null);   // the Gantt goes back to the profile
     _paint();
   },
@@ -1364,6 +1504,7 @@ export const AlertMonitorPane = {
   resetView(): void {
     _collapsed.clear(); _showAll.clear(); _diagOpen.clear();
     _focusIds = null; _focusTitle = '';
+    _narrow = {}; _ovLinesAll = false;
     _levReset(null);
   },
   /** The engine / input seams of the leverage panel; tests replace members, production never does. */
