@@ -1311,6 +1311,11 @@ export const AlertsUIAdapter = {
     // row — see gotoLineDay for why the reveal above needs that retry.
     // Task selection/Inspector piggyback on its "window is set" callback
     // rather than re-centering the window a second time.
+    // The anchor (the order, plus the pairwise peer when it exists in the store) centers the view on the
+    // order(s) rather than the alert's day; a task-less alert passes none and the alert's day is centered.
+    const anchorTaskId = a.taskId && Store.tasks[String(a.taskId)] ? String(a.taskId) : '';
+    const anchorPeerId = anchorTaskId && a.peerId && Store.tasks[String(a.peerId)] ? String(a.peerId) : '';
+    const anchor = anchorTaskId ? { taskId: anchorTaskId, ...(anchorPeerId ? { peerId: anchorPeerId } : {}) } : undefined;
     Timeline.gotoLineDay(a.line, Util.dayKey(a.time), () => {
       const taskId = a.taskId ? String(a.taskId) : '';
       const t = taskId ? Store.tasks[taskId] : undefined;
@@ -1330,7 +1335,7 @@ export const AlertsUIAdapter = {
       if (!peerId && cur.length === 1 && cur[0] === taskId) Inspector.show(t);
       else Selection.set(peerId ? [taskId, peerId] : [taskId]);
       Timeline.markGotoTask(taskId);
-    });
+    }, anchor);
     // Close the alert drawer if it is open (the drawer would otherwise cover the Gantt).
     if (document.getElementById('alert-drawer')?.classList.contains('open')) AlertsUIAdapter.toggleDrawer();
   },
