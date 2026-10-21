@@ -368,7 +368,15 @@ test('narrowChipHtml: empty when inactive; one remove button per dimension in or
 test('fix round 1: err/warn stacking order, custom-property-only inline styles, 24-row cap, +N more, maxDay 0', () => {
   const d = sample();
   const when = whenHtml(d, {}, v);
-  assert.ok(when.indexOf('am-ov-seg-warn') < when.indexOf('am-ov-seg-err'), 'DOM order warn then err (CSS column puts err at the base)');
+  // One day holding BOTH severities: compare the segments inside that one bar's own <button>.
+  const mixed = whenHtml(overviewData([
+    alert({ sev: 'err', time: at(1) }), alert({ sev: 'warn', time: at(1) }),
+  ], base({ window: { from: 0, to: 7 } })), {}, v);
+  const barBtn = new RegExp(`<button[^>]*data-am-narrow="day:${keyFor(1)}"[^>]*>[\\s\\S]*?</button>`).exec(mixed)?.[0];
+  assert.ok(barBtn, 'the mixed day bar exists');
+  const wi = barBtn.indexOf('am-ov-seg-warn'), ei = barBtn.indexOf('am-ov-seg-err');
+  assert.ok(wi >= 0 && ei >= 0, 'both segments sit in that one bar');
+  assert.ok(wi < ei, 'DOM order warn then err (CSS column puts err at the base)');
   const win = when.match(/class="am-ov-win"[^>]*style="([^"]*)"/)[1];
   assert.match(win, /^--c1:\d+;--c2:\d+$/);
   for (const html of [when, whereHtml(d, {}, false, v), whatHtml(d, {}, v)]) {

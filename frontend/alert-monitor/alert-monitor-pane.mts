@@ -1319,13 +1319,25 @@ function _overviewState(s: PaintState): OverviewState | null {
   return { data, narrow: _narrow, shown, deps };
 }
 
+/**
+ * The Confidence panel's ghost: the rounded after-score of the first fix in the viewer's main list, only for a replayed,
+ * minutes-free fix whose score changes (a lower one is shown too). Same eligibility as `fixLineParts`.
+ */
+function _confGhost(): number | null {
+  const first = (Session.isAdmin() ? _levItems : _levItems.filter(i => !i.adminOnly))[0];
+  if (!first || first.method !== 'replay' || first.requiresMinutes === true) return null;
+  const after = first.confidenceAfter;
+  if (after == null || Math.round(after) === Math.round(first.confidenceBefore)) return null;
+  return Math.round(after);
+}
+
 function _renderOverview(s: PaintState, ov: OverviewState | null): void {
   const el = _el('am-overview');
   if (!el) return;
   if (!ov) { _setHtml('am-overview', ''); el.hidden = true; return; }
   _setHtml('am-overview', overviewHtml({
     data: ov.data, narrow: ov.narrow, showAll: _ovLinesAll,
-    conf: { score: s.confidence, history: [], ghost: null },
+    conf: { score: s.confidence, history: _nim().Confidence?._history ?? [], ghost: _confGhost() },
     collapsed: Store.pref('alertMonitorOverview') === 'collapsed',
   }, _ovViewDeps()));
   el.hidden = false;
