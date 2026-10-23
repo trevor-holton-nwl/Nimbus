@@ -794,3 +794,48 @@ test('U34: Push +1 hour reports moved and skipped counts and the undo label carr
     globalThis.NIMBUS = priorNimbus;
   }
 });
+
+// ---- Workload relief 6c: the shared utilization cache must never hold raw worker task ids ------------------------
+test('6c: after Confidence._recompute a later computeMatrix returns rows whose tasks are task objects, not ids', async () => {
+  const { Util } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorAvailable = Compute.available;
+  const priorUtilization = Compute.utilization;
+  const priorNimbus = globalThis.NIMBUS;
+  globalThis.NIMBUS = nimbus;
+  Compute.available = () => true;
+  // The worker contract: row.tasks are ids.
+  Compute.utilization = (startMs, days) => {
+    const rows = {};
+    for (let i = 0; i < days; i++) {
+      const d = new Date(startMs); d.setDate(d.getDate() + i);
+      rows[Util.dayKey(d)] = { date: d, scheduled: 1, capacity: 8, effectiveCapacity: 8, pct: 0.125, tasks: ['6c-1'] };
+    }
+    return Promise.resolve({ matrix: { '6C-L': rows } });
+  };
+  try {
+    Confidence._invalidatePending(true);
+    Store.setTasks([{ id: '6c-1', PLANT: '6C-P', MACHINE: '6C-L', RUN_TIME: 1 }], 'test');
+    Store.setSelectedPlant('6C-P', 'test');
+    nimbus.Utilization._cacheClear();
+    await Confidence._recompute();
+    const entry = nimbus.Utilization._cacheEntries().find(e => e.plant === '6C-P');
+    assert.ok(entry, 'the recompute filled the shared cache');
+    const today = Util.plantToday('6C-P');
+    const rows = nimbus.Utilization.computeMatrix(today, entry.days)['6C-L'];
+    for (const row of Object.values(rows)) {
+      assert.equal(row.tasks.length, 1);
+      assert.equal(typeof row.tasks[0], 'object', 'a task object, not the worker id');
+      assert.equal(row.tasks[0].id, '6c-1');
+    }
+  } finally {
+    Confidence._invalidatePending(true);
+    nimbus.Utilization._cacheClear();
+    Compute.available = priorAvailable;
+    Compute.utilization = priorUtilization;
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});

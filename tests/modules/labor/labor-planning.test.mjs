@@ -109,3 +109,90 @@ test('group 8 (labor downstream): the KPI strip reads the proportionally re-buck
     for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete globalThis[k]; else globalThis[k] = v; }
   }
 });
+
+// ---- Workload relief: Labor reads the utilization matrix off the main thread -------------------------------------
+async function laborAsyncHarness() {
+  const saved = { window: globalThis.window, CSS: globalThis.CSS, document: globalThis.document, fetch: globalThis.fetch, flatpickr: globalThis.flatpickr,
+    NimbusComputeCore: globalThis.NimbusComputeCore };
+  globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || (await import('node:module')).createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
+  globalThis.window ||= {};
+  globalThis.flatpickr = () => ({ setDate() {} });
+  globalThis.CSS = { escape: (s) => String(s) };
+  const html = { grid: '', kpi: '' };
+  const grid = {
+    set innerHTML(v) { html.grid = v; }, get innerHTML() { return html.grid; },
+    querySelector: () => null, querySelectorAll: () => [], addEventListener() {},
+  };
+  const kpi = { set innerHTML(v) { html.kpi = v; }, get innerHTML() { return html.kpi; } };
+  const noop = () => {};
+  globalThis.document = {
+    getElementById: (id) => (id === 'labor-grid' ? grid : id === 'labor-kpi-strip' ? kpi : null),
+    addEventListener: noop, querySelector: () => null, querySelectorAll: () => [],
+  };
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ rows: [] }) });
+  const { Store } = await import('../../../frontend/platform/store.mjs');
+  const { Util } = await import('../../../frontend/platform/foundation.mjs');
+  const { Compute, Utilization } = await import('../../../frontend/insights/services.mjs');
+  const prior = { master: Store.masterData, plant: Store.selectedPlant, tasks: structuredClone(Store.tasksArr),
+    available: Compute.available, utilization: Compute.utilization };
+  Store.setMasterData({ plants: [{ plant: 'LB-AS', subnetwork: 'S' }], lines: [{ plant: 'LB-AS', machine: 'LB-AS-L1', wc_group: 'G1' }] }, 'unit-test');
+  Store.setTasks([], 'unit-test');
+  Store.setSelectedPlant('LB-AS', 'unit-test');
+  Utilization._cacheClear();
+  const calls = [];
+  Compute.available = () => true;
+  return {
+    html, Store, Util, Compute, calls,
+    stub(handler) { Compute.utilization = (...a) => { calls.push(a); return handler(...a); }; },
+    async waitForCall() { for (let i = 0; i < 200 && !calls.length; i++) await new Promise((r) => setImmediate(r)); assert.ok(calls.length, 'Labor asked the worker for a matrix'); },
+    restore() {
+      Compute.available = prior.available; Compute.utilization = prior.utilization;
+      Utilization._cacheClear();
+      Store.setTasks(prior.tasks, 'unit-test'); Store.setSelectedPlant(prior.plant, 'unit-test'); Store.setMasterData(prior.master, 'unit-test');
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete globalThis[k]; else globalThis[k] = v; }
+    },
+  };
+}
+
+test('Labor render shows the loading text while the matrix is computed off-thread, then paints', async () => {
+  const h = await laborAsyncHarness();
+  let release;
+  h.stub(() => new Promise((resolve) => { release = () => resolve({ matrix: {} }); }));
+  try {
+    const p = LaborPlanning.render();
+    await h.waitForCall();
+    assert.ok(h.html.grid.includes(h.Util.t('labor.loading')), 'the loading placeholder is up while the worker runs');
+    release();
+    await p;
+    assert.ok(!h.html.grid.includes(h.Util.t('labor.loading')), 'the grid replaced the placeholder');
+    assert.ok(h.html.kpi.length > 0, 'the KPI strip painted');
+  } finally { h.restore(); }
+});
+
+test('Labor render discards a stale pass: a plant switch while the matrix computes never paints the old plant', async () => {
+  const h = await laborAsyncHarness();
+  let release;
+  h.stub(() => new Promise((resolve) => { release = () => resolve({ matrix: {} }); }));
+  try {
+    const first = LaborPlanning.render();
+    await h.waitForCall();
+    h.Store.setSelectedPlant(null, 'unit-test');
+    await LaborPlanning.render();   // the no-plant render bumps the generation
+    const emptyGrid = h.html.grid;
+    assert.ok(emptyGrid.includes(h.Util.t('ui.select_plant_labor')));
+    release();
+    await first;
+    assert.equal(h.html.grid, emptyGrid, 'the superseded render left the grid alone');
+  } finally { h.restore(); }
+});
+
+test('Labor render falls back to the synchronous matrix when the worker rejects', async () => {
+  const h = await laborAsyncHarness();
+  h.stub(() => Promise.reject(new Error('worker error')));
+  try {
+    await LaborPlanning.render();
+    assert.ok(h.calls.length >= 1);
+    assert.ok(!h.html.grid.includes(h.Util.t('labor.loading')));
+    assert.ok(h.html.kpi.length > 0, 'the KPI strip still painted from the synchronous compute');
+  } finally { h.restore(); }
+});

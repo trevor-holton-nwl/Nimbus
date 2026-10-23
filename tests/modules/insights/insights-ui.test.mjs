@@ -762,3 +762,50 @@ test('_renderFollowers repaints the drawer only while it is open (bell and summa
     globalThis.document = prior.doc; AlertsUIAdapter.renderBell = prior.bell; AlertsUIAdapter.renderDrawer = prior.drawer; Dashboard._renderAlertSummary = prior.sum;
   }
 });
+
+// ---- Workload relief: Dashboard computes the full-plant matrix once and filters rows after --------------------------
+test('Dashboard.render: toggling the line filter or an alert refresh never recomputes the 7-day matrix', () => {
+  const prior = {
+    doc: globalThis.document, nimbus: globalThis.NIMBUS, plant: Store.selectedPlant, tasks: structuredClone(Store.tasksArr),
+    filter: Dashboard._filterLines, core: globalThis.NimbusComputeCore.computeUtilization,
+    parts: ['_renderEmptyState', '_renderKPIs', '_renderHeatmap', '_renderLineStatus', '_renderAlertSummary', '_renderFirmedList',
+      '_renderLatenessHeatmap', '_syncLineStatusHeight'].map(k => [k, Dashboard[k]]),
+  };
+  const seen = { heat: [], kpi: [] };
+  let computes = 0;
+  try {
+    globalThis.document = { ...prior.doc, getElementById: id => (id === 'home-tab' ? { classList: { contains: () => true } } : null) };
+    globalThis.NIMBUS = { AlertsUIAdapter: { renderBell() {} } };
+    for (const [k] of prior.parts) Dashboard[k] = () => {};
+    Dashboard._renderHeatmap = m => { seen.heat.push(Dashboard._visibleLines(m)); };
+    Dashboard._renderKPIs = (m, tasks) => { seen.kpi.push([m, tasks.length]); };
+    globalThis.NimbusComputeCore.computeUtilization = (...a) => { computes++; return prior.core(...a); };
+    Store.setMasterData({ plants: [{ plant: 'DF-P' }], lines: [{ plant: 'DF-P', machine: 'DF-L1' }, { plant: 'DF-P', machine: 'DF-L2' }] }, 'unit-test');
+    const d = (h) => new Date(2026, 9, 19, h);
+    Store.setTasks([
+      { id: 'df1', PLANT: 'DF-P', MACHINE: 'DF-L1', RUN_TIME: 2, start_date: d(8), end_date: d(10) },
+      { id: 'df2', PLANT: 'DF-P', MACHINE: 'DF-L2', RUN_TIME: 2, start_date: d(8), end_date: d(10) },
+    ], 'unit-test');
+    Store.setSelectedPlant('DF-P', 'unit-test');
+    Dashboard._filterLines = new Set();
+    Dashboard.render();
+    assert.equal(computes, 1);
+    assert.deepEqual(seen.heat.at(-1).sort(), ['DF-L1', 'DF-L2']);
+    Dashboard._filterLines = new Set(['DF-L1']);   // a filter toggle
+    Dashboard.render();
+    Store.emit({ type: 'alerts:change' });
+    Dashboard.render();
+    Store.emit({ type: 'lines:selected', lines: [] });
+    Dashboard.render();
+    assert.equal(computes, 1, 'the full-plant matrix is computed once; filter toggles and alert refreshes reuse it');
+    assert.deepEqual(seen.heat.at(-1), ['DF-L1'], 'rows are narrowed to the filter after the fact');
+    assert.equal(seen.kpi.at(-1)[1], 1, 'order counts still follow the filter');
+    assert.equal(seen.kpi.at(-1)[0], seen.kpi[0][0], 'the very same cached matrix object');
+  } finally {
+    for (const [k, fn] of prior.parts) Dashboard[k] = fn;
+    globalThis.NimbusComputeCore.computeUtilization = prior.core;
+    Dashboard._filterLines = prior.filter;
+    globalThis.document = prior.doc; globalThis.NIMBUS = prior.nimbus;
+    Store.setTasks(prior.tasks, 'unit-test'); Store.setSelectedPlant(prior.plant, 'unit-test');
+  }
+});

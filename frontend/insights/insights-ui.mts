@@ -323,10 +323,8 @@ export const Dashboard = {
     Dashboard._renderEmptyState();
     if (!Store.selectedPlant) return;
 
-    // Build the shared filtered task set + 7-day utilization matrix ONCE and hand it
-    // to both _renderKPIs and _renderHeatmap (each otherwise rebuilds an identical
-    // filtered-subset matrix — three full computeMatrix passes per render, two of them
-    // duplicate 7-day work). The 1-day line-status matrix stays its own call.
+    // Build the 7-day utilization matrix ONCE and hand it to _renderKPIs, _renderHeatmap and
+    // _renderLineStatus (the card's day reads the same matrix as the heatmap column).
     const _now7    = Util.plantClock(Store.selectedPlant);   // the plant clock (OQ52), not the viewer's
     const _filtered = Dashboard._filteredTasks();
     // Compute once, filter after: the FULL-plant 7-day matrix (no task subset) is served by the shared
