@@ -3539,9 +3539,11 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
     parent_stub["_touched_ids"] = touched_child_ids
     ev = sched_events.EventCtx(source="distribution", actor=ev_actor or actor,
                                action_id=sched_events.as_action_id(upload_batch_id))
-    # schedule_event before-image: the same locked rows, DB-typed, read before any child is written
+    # schedule_event before-image: the same rows, DB-typed, read BEFORE any child is written and locked
+    # (id order, the order `_apply_children` and a /tasks save take) so a concurrent planner save cannot
+    # slip a change between this read and the write -- the diff stays against the true prior state.
     before_ev = _ev_read(cur, previous_child_ids | intended_child_ids
-                         | ({collapse["old_child_id"]} if collapse else set()))
+                         | ({collapse["old_child_id"]} if collapse else set()), lock=True)
     # R-I12: the stored run time of every child this write may change, read BEFORE the upsert, so the
     # run-time cap below can tell a changed (or brand-new) child from an unchanged released one.
     prior_run_times: dict[str, object] = {cid: None for cid in intended_child_ids}
