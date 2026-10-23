@@ -9,6 +9,8 @@ Connection string is hardcoded for the POC, mirroring how INPUT_FILE /
 COLOR_FILE are hardcoded in brain.py.  Swap to env vars / Azure managed
 identity at the migration step.
 """
+import dataclasses
+import functools
 import hashlib
 import io
 import logging
@@ -3283,11 +3285,13 @@ _UPSERT_ROW_COLS = (
 _STAMP_PV_SQL = f"COALESCE(NULLIF(o.production_version, ''), {_DEFAULT_PV_FILL_SQL})"
 
 
-def _stamp_run(cur, scope_sql: str, params: tuple, ev) -> int:
+def _stamp_run(cur, scope_sql: str, params: tuple, ev, skip_event_ids=None) -> int:
     """The Seam 2 UPDATE for one scope. Only rows whose color / PRT / production version would actually
     change are written (IS DISTINCT FROM guard: an unchanged row keeps its xmin and writes no history).
     With `ev`, the changed rows' tracked before/after (self-join `b` = the pre-update image, PG16-safe) go to
-    schedule_event as `master_data_stamp` modify rows."""
+    schedule_event as `master_data_stamp` modify rows. `skip_event_ids` (orders that received a `create` row in
+    this same batch) are still stamped but get no event row: the defaults are master-data derived, and the
+    `create` row already records the order."""
     cur.execute(
         f"""
         UPDATE orders o
@@ -3315,7 +3319,10 @@ def _stamp_run(cur, scope_sql: str, params: tuple, ev) -> int:
         return 0
     returned = cur.fetchall()
     rows = []
+    skip = set(skip_event_ids or ())
     for r in returned:
+        if r[0] in skip:
+            continue
         changes = sched_events.diff_tracked(
             {"prt_01": r[4], "prt_02": r[5], "production_version": r[6]},
             {"prt_01": r[7], "prt_02": r[8], "production_version": r[9]})
@@ -3328,7 +3335,7 @@ def _stamp_run(cur, scope_sql: str, params: tuple, ev) -> int:
 
 def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | None = None,
                             ids: list[str] | None = None,
-                            report_ids: list[str] | None = None, ev=None) -> dict:
+                            report_ids: list[str] | None = None, ev=None, skip_event_ids=None) -> dict:
     """Seam 2 (docs/scheduling_priority.md): the ONE place attribute provenance
     lives for color/prt_01/prt_02/production_version. One UPDATE orders ... FROM
     material_plants keyed (plant, material_number = material_id), scoped either
@@ -3369,7 +3376,7 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
         if ids is not None:
             ids = sorted(set(ids))
             if ids:
-                _stamp_run(cur, "o.id = ANY(%s)", (ids,), ev)
+                _stamp_run(cur, "o.id = ANY(%s)", (ids,), ev, skip_event_ids)
             report = sorted(set(report_ids)) if report_ids is not None else ids
             cur.execute(
                 """
@@ -3704,7 +3711,7 @@ _MASTER_FILL_CANDIDATES_SQL = """
 
 
 def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | None = None,
-                        heal_ids: list[str] | None = None, ev=None) -> dict:
+                        heal_ids: list[str] | None = None, ev=None, skip_event_ids=None) -> dict:
     """Post-upsert steps scoped to `ids` (the orders an upload actually wrote):
     lock them in id order, derive a missing plant from the machine, derive
     machine_key, then stamp color/PRT/production version from material_plants
@@ -3776,7 +3783,8 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
     healed -= set(ids)
     # Seam 2 -- strictly downstream of the plant backfill above (it reads o.plant).
     # The upload ALWAYS succeeds regardless of how much is unmatched (N5/N6/N7).
-    result = _stamp_order_attributes(conn, ids=sorted(set(ids) | healed), report_ids=report_ids, ev=ev)
+    result = _stamp_order_attributes(conn, ids=sorted(set(ids) | healed), report_ids=report_ids, ev=ev,
+                                       skip_event_ids=skip_event_ids)
     result["healed_ids"] = sorted(healed)
     conn.commit()
     return result
@@ -4318,7 +4326,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         (all_ids,))
             heal_ids = [r[0] for r in cur.fetchall()]
             attr_result = _backfill_and_stamp(cur, conn, touched_ids, report_ids=all_ids, heal_ids=heal_ids,
-                                              ev=ev_ctx)
+                                              ev=ev_ctx, skip_event_ids=set(inserted_ids))
             touched.update(attr_result["healed_ids"])
             touched_ids = sorted(touched)
             missing_master_data = attr_result["exceptions"]
@@ -4435,7 +4443,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 if apply_touched:
                     touched.update(apply_touched)
                     touched_ids = sorted(touched)
-                    _backfill_and_stamp(cur, conn, apply_touched, ev=ev_ctx)
+                    _backfill_and_stamp(cur, conn, apply_touched, ev=ev_ctx, skip_event_ids=set(inserted_ids))
             elif (distribution_plan.get("warnings_entry")
                   and any(v for k, v in distribution_ingest_warnings.items() if k != "single_rewrites")):
                 # D04: no parent was planned this batch (apply_fn never ran,
@@ -4450,9 +4458,9 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             # ---------- Run-time cap (OQ28): over-cap orders wait in Needs Planning ----------
             # After the last write (plant fully resolved, distribution children written) and before
             # the routing resolve (which owns run time on routing plants and applies the same cap).
-            # TODO(Task 6 integration): pass ev= (the upsert's EventCtx) to _apply_run_time_cap.
             over_cap_result = _apply_run_time_cap(cur, conn, touched_ids, running_changed_ids,
-                                                  prior_run_times=prior_run_times)
+                                                  prior_run_times=prior_run_times,
+                                                  ev=dataclasses.replace(ev_ctx, source="routing_hold"))
             if over_cap_result["queued"] or over_cap_result["released"] or over_cap_result["running_kept"]:
                 parts = []
                 if over_cap_result["queued"]:
@@ -5014,7 +5022,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
         warnings=warnings,
         plan_fn=distribution_data.plan,
         apply_fn=distribution_data.apply,
-        resolve_fn=routing_resolver.resolve_orders,
+        resolve_fn=functools.partial(routing_resolver.resolve_orders, actor=actor or filename or "system"),
         actor=actor,
     )
     if result.get("status") != "ok":

@@ -26,6 +26,7 @@ name is kept in `counts["step"]`, and on failure the batch becomes `error` and a
 second Apply resumes. Vanish deletion only ever runs after every upsert chunk
 succeeded.
 """
+import functools
 import io
 import logging
 import os
@@ -1798,7 +1799,8 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
         result = db.upsert_orders(rows, source="sap", batch_id=upsert_batch, raw_row_count=len(stage),
                                   warnings=warnings,
                                   plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
-                                  resolve_fn=routing_resolver.resolve_orders, sap_tz=SAP_SYSTEM_TZ,
+                                  resolve_fn=functools.partial(routing_resolver.resolve_orders, actor=actor),
+                                  sap_tz=SAP_SYSTEM_TZ,
                                   actor=actor)
     else:
         result = {"status": "ok", "inserted": 0, "updated": 0, "unchanged": 0}

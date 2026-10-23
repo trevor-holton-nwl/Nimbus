@@ -661,8 +661,8 @@ def _run_cap_resolve(monkeypatch, orders, results, horizon_days=None, *, pv_look
 
     monkeypatch.setattr(r, "resolve_one", fake_resolve_one)
     monkeypatch.setattr(r, "_running_ids", lambda cur, plant, ids: set(ids) & set(running))
-    monkeypatch.setattr(r, "_write_outcomes", lambda cur, rows: writes.extend(rows))
-    monkeypatch.setattr(r, "_write_holds", lambda cur, rows: holds.extend(rows))
+    monkeypatch.setattr(r, "_write_outcomes", lambda cur, rows, **k: writes.extend(rows))
+    monkeypatch.setattr(r, "_write_holds", lambda cur, rows, **k: holds.extend(rows))
     report = r._resolve_orders_on_conn("P1", _CapConn(horizon_days))
     _run_cap_resolve.resolved_with = resolved_with
     return report, writes, holds

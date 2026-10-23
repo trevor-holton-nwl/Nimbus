@@ -961,3 +961,40 @@ class TestRoutingResolverEvents:
             self.resolver._write_holds(cur, [(self.ids[0], Jsonb(reason))], ev=ev)
             conn.commit()
         assert self._events() == []
+
+
+@pytest.mark.pg
+def test_fresh_upload_with_existing_master_data_writes_exactly_one_create_row_per_order(ing):
+    with ing.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO materials (material_id) VALUES (%s) ON CONFLICT DO NOTHING", (ing.material,))
+        cur.execute("INSERT INTO material_plants (material_id, plant, color, prt_01, prt_02) VALUES"
+                    " (%s, %s, 'RED', 'PA', 'PB')", (ing.material, ing.plant))
+        conn.commit()
+    _ing_upload(ing, [_ing_row(ing, n) for n in (1, 2)])
+    evs = _ing_events(ing)
+    assert len(evs) == 2
+    assert {e[1] for e in evs} == {"create"} and not any(e[2] == "master_data_stamp" for e in evs)
+    with ing.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT prt_01 FROM orders WHERE plant = %s", (ing.plant,))
+        assert {r[0] for r in cur.fetchall()} == {"PA"}      # still stamped, just not double-recorded
+
+
+def test_stamp_run_skips_event_rows_for_skip_event_ids():
+    class Cur:
+        def execute(self, *a, **k):
+            pass
+
+        def fetchall(self):
+            return [("o1", "P", "PO1", "M", None, None, None, "PA", "PB", "PV"),
+                    ("o2", "P", "PO2", "M", None, None, None, "PA", "PB", "PV")]
+
+    captured = []
+    orig = events.record
+    events.record = lambda cur, ev, rows: captured.extend(rows) or len(rows)
+    try:
+        import db as _db
+        n = _db._stamp_run(Cur(), "o.id = ANY(%s)", ([],), EventCtx("master_data_stamp", "a", str(uuid.uuid4())),
+                           {"o1"})
+    finally:
+        events.record = orig
+    assert n == 1 and [r.order_id for r in captured] == ["o2"]
