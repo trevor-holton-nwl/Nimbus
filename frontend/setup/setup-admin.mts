@@ -916,6 +916,16 @@ export const SetupAdmin = (() => {
     }
   }
 
+  // A machine added/removed/edited in Master Data must show up in the matrix scope without a
+  // reload: the per-plant caches above never expire on their own. Cache-clear only: the Setup
+  // Matrix pane is not on screen while Manage Data is, and a repaint would drop unsaved grid
+  // edits, so the next render() simply refetches. Plant-scoped, matching invalidatePlant.
+  Store.subscribe((evt) => {
+    if (evt.type !== 'master-data-changed') return;
+    const plant = Store.selectedPlant;
+    if (plant) invalidatePlant(plant);
+  }, 'SetupAdmin.cacheReset');
+
   function renderSnapshot(target: HTMLElement, snapshot: SetupSnapshot): void {
     const definition = snapshot.definition;
     const version = definition?.signature_version ?? null;

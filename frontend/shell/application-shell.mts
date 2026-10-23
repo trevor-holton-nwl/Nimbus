@@ -2278,7 +2278,9 @@ const App = {
       if (evt.type === 'task:update' || evt.type === 'tasks:bulk'
           || evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change'
           || evt.type === 'calendar:change' || evt.type === 'blocks:change'
-          || evt.type === 'plantBlocks:change') {
+          || evt.type === 'plantBlocks:change'
+          || evt.type === 'setup-snapshot:replace' || evt.type === 'lineSettings:change'
+          || evt.type === 'master-data-changed') {
           Alerts.scheduleRecompute();
       }
       // Alert drawer always reflects current state if open

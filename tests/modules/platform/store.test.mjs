@@ -444,3 +444,20 @@ test('Store.updatePlantBlock refuses an edit that duplicates another block of th
     Store.replacePlantBlocks(prior, 'unit-test');
   }
 });
+
+test('Store.setMasterData forwards an optional table on master-data-changed and omits it otherwise', () => {
+  const priorMasterData = structuredClone(Store.masterData);
+  const seen = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'master-data-changed') seen.push(evt); });
+  try {
+    Store.setMasterData({ plants: [], lines: [] }, 'unit-test', 'plants');
+    Store.setMasterData({ plants: [], lines: [] }, 'unit-test');
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0].table, 'plants');
+    assert.equal(seen[0].source, 'unit-test');
+    assert.equal('table' in seen[1], false, 'boot/Refresh callers pass no table');
+  } finally {
+    off();
+    Store.setMasterData(priorMasterData, 'unit-test');
+  }
+});

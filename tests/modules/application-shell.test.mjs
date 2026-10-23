@@ -557,3 +557,17 @@ test('User Settings alert-profile rows: no plant renders the readonly note and n
     assert.equal((pane.els['#us-ap-manage'].handlers.click || []).length, 1);
   }
 });
+
+test('App.sync recompute branch lists setup-snapshot:replace, lineSettings:change and master-data-changed', async () => {
+  // App.init wires dozens of DOM nodes, so the shared "Keep alerts + dashboard in sync" subscriber
+  // cannot run under node; pin the event list from source (the branch calls Alerts.scheduleRecompute()).
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../../frontend/shell/application-shell.mjs', import.meta.url), 'utf8');
+  const start = src.indexOf("Keep alerts + dashboard in sync");
+  assert.ok(start > 0, 'sync subscriber present');
+  const branch = src.slice(start, src.indexOf('Alerts.scheduleRecompute()', start));
+  for (const type of ['task:update', 'tasks:bulk', 'calendar:change', 'plantBlocks:change',
+    'setup-snapshot:replace', 'lineSettings:change', 'master-data-changed']) {
+    assert.ok(branch.includes(`'${type}'`), `${type} must schedule an alert recompute`);
+  }
+});

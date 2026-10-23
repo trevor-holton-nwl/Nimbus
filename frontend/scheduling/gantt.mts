@@ -647,7 +647,7 @@ export const Timeline = {
 
     if (evt.type === 'tasks:bulk' || evt.type === 'blocks:change'
         || evt.type === 'calendar:change' || evt.type === 'plantBlocks:change'
-        || evt.type === 'setup-snapshot:replace') {
+        || evt.type === 'setup-snapshot:replace' || evt.type === 'master-data-changed') {
       // Only do a full rebuild when the gantt tab is active; otherwise
       // the next goto('gantt') will call rebuild() anyway. Coalesced to one rAF so
       // back-to-back data events don't each run the full diff inside Store.emit.

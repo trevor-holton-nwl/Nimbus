@@ -484,3 +484,42 @@ test('compatibility can be restored, retries preserve the draft, and each save u
   assert.deepEqual(requests[1].data, { setup_compatible: true, reason: '' });
   assert.equal(save.disabled, true, 'saved baseline is clean');
 });
+
+test('master-data-changed clears the selected plant\'s SetupAdmin scope caches so a new machine appears without a reload', async () => {
+  const plant = 'P-MDC';
+  const priorFetch = Util.fetchTraced, priorPlant = Store.selectedPlant;
+  const priorSnapshot = Store.setupSnapshot, priorMasterData = Store.masterData;
+  const urls = [];
+  Util.fetchTraced = (url) => {
+    urls.push(String(url));
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ rows: [{ machine: 'M1' }], meta: { total: 1 } }) });
+  };
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  const lineFetches = () => urls.filter(u => u.includes(`/master-data/machine?plant=${plant}`)).length;
+  try {
+    // Selected plant != render plant keeps the post-load repaint a no-op (no DOM needed).
+    Store.setSelectedPlant(null, 'test');
+    Store.replaceSetupSnapshot({ plant }, 'test');
+    const target = { innerHTML: '' };
+    SetupAdmin.render(target, plant);
+    await settle();
+    assert.equal(lineFetches(), 1);
+
+    Store.setMasterData({ plants: [], lines: [] }, 'master-data-save', 'machine');
+    SetupAdmin.render(target, plant);
+    await settle();
+    assert.equal(lineFetches(), 1, 'no selected plant: caches untouched');
+
+    Store.setSelectedPlant(plant, 'test');
+    Store.setMasterData({ plants: [], lines: [] }, 'master-data-save', 'machine');
+    Store.setSelectedPlant(null, 'test');
+    SetupAdmin.render(target, plant);
+    await settle();
+    assert.equal(lineFetches(), 2, 'master-data-changed for the selected plant dropped its cached lines');
+  } finally {
+    Util.fetchTraced = priorFetch;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.replaceSetupSnapshot(priorSnapshot, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});

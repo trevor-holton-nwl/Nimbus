@@ -3190,3 +3190,17 @@ test('Timeline.gotoLineDay: when rangechanged fires with the window at the targe
   assert.ok(rig.scrolls >= 1);
   assert.equal(Timeline._gotoWin, null);
 });
+
+test('Timeline._onStore schedules one coalesced rebuild on master-data-changed only while the Gantt is active', () => {
+  const priorRebuild = Timeline._scheduleRebuild, priorActive = Timeline._ganttActive;
+  let rebuilds = 0;
+  try {
+    Timeline._scheduleRebuild = () => { rebuilds++; };
+    Timeline._ganttActive = () => true;
+    Timeline._onStore({ type: 'master-data-changed', source: 'master-data-save', table: 'plants', revision: 1, mode: 'live' });
+    assert.equal(rebuilds, 1, 'plant row saved: frozen band / zones must repaint');
+    Timeline._ganttActive = () => false;
+    Timeline._onStore({ type: 'master-data-changed', source: 'master-data-save', revision: 2, mode: 'live' });
+    assert.equal(rebuilds, 1, 'inactive Gantt: the next goto(gantt) rebuilds anyway');
+  } finally { Timeline._scheduleRebuild = priorRebuild; Timeline._ganttActive = priorActive; }
+});
