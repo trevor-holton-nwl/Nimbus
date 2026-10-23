@@ -90,6 +90,8 @@ An Opus deep-dive (plan `are-there-any-new-generic-cook.md`) found that no new w
 
 ## Autonomous run: final log
 
+**Deployed 2026-10-23:** feature/workload-relief-on-main (21dc58e) merged into main as 9ea5bde (--no-ff), pushed, and rolled to Azure as `nimbus:v135` (rollback target `nimbus:v134`). No pending migrations. Local gate: only the known styles.css LF test failed.
+
 Integration branch `feature/workload-relief`, based on main `4c37368`, built from four finished branches by real merges (no rebase, no squash). Nothing pushed or deployed.
 
 ### The four pieces
