@@ -3975,10 +3975,20 @@ def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None
         cur.execute(
             "UPDATE orders SET planning_status = 'scheduled', planning_reason = NULL, updated_at = NOW()"
             " WHERE id = ANY(%s) AND planning_status = 'needs_planning'"
-            " AND planning_reason->>'code' = %s",
+            " AND planning_reason->>'code' = %s"
+            " RETURNING id, plant, production_order, material_number",
             (to_release, RUN_TIME_OVER_CAP_CODE),
         )
+        released_rows = cur.fetchall()
         out["released"] = len(to_release)
+        if ev is not None and released_rows:
+            # the WHERE above proves the prior state: queued for exactly this reason
+            sched_events.record(cur, ev, [
+                sched_events.EventRow(
+                    plant=r[1] or "", order_id=r[0], production_order=r[2], material_number=r[3], op="modify",
+                    changes={"planning_status": [f"needs_planning:{RUN_TIME_OVER_CAP_CODE}", "scheduled"]},
+                    source="routing_hold")
+                for r in released_rows])
     if (to_queue or to_release) and commit:
         conn.commit()
     return out

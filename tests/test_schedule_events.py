@@ -1187,3 +1187,36 @@ def test_sap_production_version_change_records_one_net_row(ing):
     assert pv_rows[0][2] == "sap_ingest"
     assert not any(e[2] == "master_data_stamp" for e in evs)
     assert not any(k.startswith("prt_") for e in evs for k in e[5])
+
+
+def test_run_time_cap_release_records_status_change_row():
+    """P1-3: the over-cap release UPDATE records a routing_hold modify row (queued -> scheduled)."""
+    import db
+
+    class Cur:
+        def __init__(self):
+            self.calls = []
+            self._last = ""
+
+        def execute(self, sql, params=None):
+            self.calls.append((sql.strip(), params))
+            self._last = sql
+
+        def fetchall(self):
+            if "FROM orders o LEFT JOIN plants" in self._last:   # one queued order, now within the cap
+                return [("o1", 1.0, "needs_planning", db.RUN_TIME_OVER_CAP_CODE, "P1", None, None,
+                         None, None, None, None, None, None)]
+            if "RETURNING id, plant" in self._last:
+                return [("o1", "P1", "PO1", "M1")]
+            return []
+
+    class Conn:
+        def commit(self):
+            pass
+
+    cur = Cur()
+    out = db._apply_run_time_cap(cur, Conn(), ["o1"], ev=_ctx(source="routing_hold"))
+    assert out["released"] == 1
+    (insert,) = [c for c in cur.calls if c[0].startswith("INSERT INTO schedule_event")]
+    assert insert[1]["changes"] == ['{"planning_status":["needs_planning:run_time_over_cap","scheduled"]}']
+    assert insert[1]["sources"] == ["routing_hold"] and insert[1]["order_ids"] == ["o1"]
