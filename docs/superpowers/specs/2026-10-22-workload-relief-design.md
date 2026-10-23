@@ -86,3 +86,44 @@ An Opus deep-dive (plan `are-there-any-new-generic-cook.md`) found that no new w
 - F9/F10 docs: calendar CLAUDE.md/AGENTS.md, CALENDAR_PERIODS_DESIGN.md, the store.mts comment and insights CLAUDE.md corrected (cache keyed on `dataRev()`; slice and parity claims).
 - F11 Labor `_renderKPIs` on the save path has a `.catch` (clears the strip, logs).
 - F12 `Dashboard._lsStep` now calls `Utilization.computeMatrix(plantClock, 7)` (a cache hit); `Dashboard._matrix7Cache` and the stale-cache W6 test are removed (the stepping test stubs `computeMatrix`).
+
+
+## Autonomous run: final log
+
+Integration branch `feature/workload-relief`, based on main `4c37368`, built from four finished branches by real merges (no rebase, no squash). Nothing pushed or deployed.
+
+### The four pieces
+| Piece | Branch | Tip | Notes |
+|---|---|---|---|
+| Frontend Wave A (items 1-3, 6a/6d/6e, leverage trivia) | `feature/workload-relief-fe-agent` | `7818855` | from `4c37368`; Opus validator verdict SHIP AFTER FIXES, fixes in 6c777c0, cb32c0d, 4108ffa, 963e98f, 80d8226 |
+| Leverage worker (items 4 + 6b) | `feature/workload-relief-fe-b` | `ffc9dcf` | from `f97048c` (a Wave A docs commit); Opus validator fix wave c0ac895 (crash latch, strict reply check, timeout logging) then ffc9dcf (tests); the verdict word is not recorded in the ledger |
+| Utilization cache, Dashboard filter-after, Labor async (items 5 + 6c) | `feature/workload-relief-fe-c` | `9ae4bae` | merged fe-b itself; Opus validator fix wave F0-F12 (7fecfe3, 2890792, 9ae4bae); the verdict word is not recorded in the ledger |
+| Backend `GET /tasks` | `worktree-agent-a31525a1a839c0b9b` | `7075dda` | from `4c37368`; Opus validator verdict SHIP AFTER FIXES, fix wave F1-F10 (86e26eb, 7075dda) |
+
+Merge order on this branch: fe-agent (7818855), fe-c (9ae4bae, contains fe-b), backend (7075dda). The only conflicts were documentation: this file (the Wave A ledger lines and the Wave B/C ledgers, all kept) and `frontend/insights/CLAUDE.md` (the "Leverage transport" paragraph: the fe-c text was kept and Wave A's `deriveSetupObservation` edge note was re-added to it). `tests/contracts/cq1-legacy-surface.json`, `services.mts` and the alert-monitor docs merged without conflict; `check:legacy-surface` passes on the merged tree. fe-b's fix commits c0ac895 and ffc9dcf are in the result.
+
+### Integration gate (merged tree)
+build, typecheck, check:static-assets, check:legacy-surface green; lint 0 errors, 35 warnings (34 before the merge); `npm run test`: legacy 105/105, modules 3,079 tests, 3,075 pass, 1 fail (the known `alert-monitor-overview-css.test.mjs` styles.css line-ending test), 2 skipped; `python -m pytest tests/ -q`: 1,464 passed, 626 skipped (no usable local Postgres), 13 xfailed, 2 failed (`test_integration_routes.py::test_lifespan_*`, DB authentication; known). `generate:api-types`: the only `/tasks` line that differs from main is the one docstring line (`query_orders_rows`); the other regenerated differences are pre-existing staleness of the committed file and were not committed. Cross-branch checks: the leverage worker's crash latch (`_leverageCrashes`, a dedicated worker per call) is separate from the shared worker's `_crashCount`/`_dead` that `computeMatrixAsync` uses; the memoised setup resolution index lives in `engine.mts` and the leverage replay reaches it only through `buildPlantSnapshot` (`opts.setupObservation`), so fe-c does not touch it; the `/tasks` response shape is unchanged for the frontend (no change to the `/tasks` types beyond that docstring).
+
+### Minor deviations and additions versus the plan (collected from the ledgers)
+- Branch names differ from the plan: `feature/workload-relief-fe` and `-be` were already checked out in other worktrees, so the work is on `feature/workload-relief-fe-agent` and `worktree-agent-a31525a1a839c0b9b`; those two plan branches (and their worktrees) are unused, still at `4c37368`.
+- Backend: `gzip;q=0` handling skipped (the starlette middleware would compress regardless; fixing it means replacing the middleware); the timing log goes to `nimbus.perf` and enters the `_BACKEND_LOG` ring only above 1,500 ms; `/tasks` handler gzip skip below 1,000 bytes and `mtime=0`; pandas-3 null behaviour pinned (a null `MATERIAL_DESCRIPTION` still yields the text "None", flagged for a product decision); `build_tasks_payload`/`encode_tasks_response` public helpers; `query_orders` delegates to `_fetch_orders`; the benchmark "before" whole-path figure is a reconstruction. Backend owed items: the DB-backed pytest set, real-row parity of the golden test against live rows, and a cache-busted `GET /tasks` with and without gzip (see "Owner-owed checks").
+- Wave A: `deriveSetupObservationUnindexed` exported as the parity oracle; staleness guard on the memoised index; the plant-scale reconcile test cut from 2,000 to 400 candidates (about 1.1 s alone, verified to fail without the index); the `orphanedAt` miss-path test could not be forced and is not covered; the engine node-probe `spawnSync` timeout raised from 1,500 to 10,000 ms (a pre-existing load flake); the mass-upload modal has no DOM harness, so the Stage/Download-after-debounce fix is pinned by a source-shape test.
+- Wave B: timeout feedback is log-only; one sync-core fallback on a worker crash or `ERROR` reply; the identity parity test was skipped (not cheap in the fixtures); the scores-only worker reply and folding typed-minutes keys into one batch are deferred.
+- Wave C: a newer queued utilization request is merged rather than dropping the older one (later refined to merge only overlapping or adjacent windows, max 4 queued jobs); the Gantt strip is not gated on tab visibility; the Alert Monitor baseline stays on sync `computeMatrix` (now a cache hit); `Dashboard._matrix7Cache` was removed in the fix wave (F12); the legacy-surface contract was regenerated with `--allow-growth` for the new `Utilization.computeMatrixAsync`; the I13 test asserts `days >= 7`.
+
+### Deferred
+Optimizer worker KPIs (item 3); a shared derivation cache; the 6f crash-count decay; leverage delta variants; ETag on `/tasks`; the scores-only leverage reply with typed-minutes batch folding.
+
+### OPEN go-live question
+Is a single replica acceptable for go-live? If not, the in-process state must move to Postgres first: the color-wheel cache, `_BACKEND_LOG`, the login throttle, the lifespan scheduler jobs and `PLANT_LISTS`. This run did not change any of it.
+
+### Owner-owed checks (browser and database)
+1. Setup mass-upload debounce, including Stage and Download right after clearing the text, and Escape during the debounce.
+2. Alert Monitor Top fixes: worker count before and after a forced timeout, and leaving the tab or switching plants mid-run.
+3. Labor sub-tabs and horizons.
+4. Dashboard filter toggles (no recompute).
+5. Gantt hierarchy strip numbers versus the Dashboard today column.
+6. Gantt setup bars, and the reconcile `setup_override_orphaned` notes on a setup-active plant.
+7. `GET /tasks` against the real DB: parity of the pandas-free builder with the legacy one, and the gzip checks (`Content-Encoding`, a single `Vary`, identical decoded JSON, a `tasks.timing` event), plus the DB-backed pytest set listed in the backend log.
+8. PerfMonitor: the new keys visible and the `Worker.setupClone:*` keys gone.
