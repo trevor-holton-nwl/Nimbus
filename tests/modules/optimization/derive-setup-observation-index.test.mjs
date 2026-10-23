@@ -178,3 +178,31 @@ test('counted: derivation reads each row array a bounded number of times, not on
   // One build pass (each row once) plus the staleness guard's length reads; the old path read ~rows per order.
   assert.ok(reads.plant <= plantRows.length * 2, `plant row reads ${reads.plant} must stay O(rows), not O(rows x orders)`);
 });
+
+test('override build-time filters (status, signature version, minutes, initial state, bucket order) match the linear path', () => {
+  const ov = (id, extra = {}) => ({
+    id, machine: LINE, signature_version: 1, predecessor_order_id: 'o0', successor_order_id: 'o1',
+    predecessor_state_key: state('RED'), successor_state_key: state('BLUE'), standard_min: 30, remaining_min: 10,
+    status: 'active', reason: 'r', ...extra,
+  });
+  const base = {
+    plantRows: [row('RED', 'BLUE', 30)],
+    machineStates: [{ machine: LINE, state_key: state('RED'), signature_version: 1, source: 'manual', reason: 't' }],
+  };
+  const minutesOf = observation => observation.intervals.find(i => i.successorOrderId === 'o1')?.requiredMinutes;
+  // Each invalid override is ignored, so the plant row (30) resolves.
+  for (const bad of [{ status: 'inactive' }, { status: 'cancelled' }, { signature_version: 2 }, { standard_min: -1 },
+    { remaining_min: 2.5 }, { remaining_min: Number.NaN }]) {
+    const observation = assertParity(snapshot({ ...base, overrides: [ov('bad', bad)] }), chain('RED', 'BLUE'));
+    assert.equal(minutesOf(observation), 30, JSON.stringify(bad));
+  }
+  // Initial-state override: predecessor_order_id null, successor is the line's first order.
+  const initial = ov('init', { predecessor_order_id: null, successor_order_id: 'o0', predecessor_state_key: state('RED'), successor_state_key: state('RED'), remaining_min: 7 });
+  const initialObs = assertParity(snapshot({ ...base, overrides: [initial] }), chain('RED', 'BLUE'));
+  assert.equal(initialObs.intervals.find(i => i.successorOrderId === 'o0')?.requiredMinutes, 7);
+  // Two overrides in one bucket: the first valid one wins, on both paths.
+  const first = assertParity(snapshot({ ...base, overrides: [ov('first', { remaining_min: 11 }), ov('second', { remaining_min: 22 })] }), chain('RED', 'BLUE'));
+  assert.equal(minutesOf(first), 11);
+  const skipped = assertParity(snapshot({ ...base, overrides: [ov('bad-first', { status: 'inactive' }), ov('good', { remaining_min: 22 })] }), chain('RED', 'BLUE'));
+  assert.equal(minutesOf(skipped), 22, 'an invalid first override is skipped, the next one in the bucket wins');
+});
