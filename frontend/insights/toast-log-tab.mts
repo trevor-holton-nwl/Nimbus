@@ -7,17 +7,20 @@ import { Util, ErrorLog, Toast } from '../platform/foundation.mjs';
 type LogEntry = ReturnType<typeof ErrorLog.entries>[number];
 
 const ICONS: Record<string, string> = { error: '✖', warn: '⚠', info: 'ℹ', success: '✓' };
-const SEV: Record<string, string> = { error: 'err', warn: 'warn', info: 'info' };
+const SEV: Record<string, string> = { error: 'err', warn: 'warn', info: 'info', success: 'ok' };
 const DEBOUNCE_MS = 100;
 
 let _tab: 'alerts' | 'toasts' = 'alerts';
 let _timer: ReturnType<typeof setTimeout> | null = null;
-let _footerWasHidden = true;
+let _boundTo: HTMLElement | null = null;   // idempotent init: a second Dashboard.init() must not rebind
 
 const $ = (id: string): HTMLElement | null => document.getElementById(id);
 
 export const ToastLogTab = {
   init(): void {
+    const nav = $('alert-drawer-tabs');
+    if (nav && _boundTo === nav) return;
+    _boundTo = nav;
     $('alert-drawer-tabs')?.addEventListener('click', (e: Event) => {
       const btn = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-drawer-tab]');
       const tab = btn?.dataset.drawerTab;
@@ -27,19 +30,27 @@ export const ToastLogTab = {
       ErrorLog.exportJson();
       Toast.show(Util.t('toast.log_exported'), 'success');
     });
+    $('alert-drawer-tabs')?.addEventListener('keydown', (e: Event) => {
+      const k = (e as KeyboardEvent).key;
+      if (k !== 'ArrowLeft' && k !== 'ArrowRight') return;
+      e.preventDefault();
+      const next = _tab === 'alerts' ? 'toasts' : 'alerts';
+      ToastLogTab.activate(next);
+      $('alert-tab-' + next)?.focus();
+    });
     ErrorLog.subscribe(ToastLogTab._onLog);
   },
 
   activate(tab: 'alerts' | 'toasts'): void {
     const toasts = tab === 'toasts';
-    const footer = $('alert-drawer-footer');
-    if (toasts && _tab !== 'toasts' && footer) _footerWasHidden = footer.hidden;
+    // The alerts footer is hidden under the Toast Log tab by the [data-drawer-tab] CSS rule, never by JS state,
+    // so renderDrawer's own footer.hidden stays authoritative across tab switches.
+    ToastLogTab._clearTimer();
     _tab = tab;
     const body = $('alert-drawer-body');
     const dismiss = $('alert-dismiss-visible');
     if (body) body.hidden = toasts;
     if (dismiss) dismiss.hidden = toasts;
-    if (footer) footer.hidden = toasts ? true : _footerWasHidden;
     const tb = $('toast-log-body');
     const tf = $('toast-log-footer');
     if (tb) tb.hidden = !toasts;
@@ -49,6 +60,7 @@ export const ToastLogTab = {
       const on = b.dataset.drawerTab === tab;
       b.classList.toggle('active', on);
       b.setAttribute('aria-selected', String(on));
+      b.setAttribute('tabindex', on ? '0' : '-1');
     });
     if (toasts) ToastLogTab.render();
   },
@@ -63,7 +75,7 @@ export const ToastLogTab = {
     }
     el.innerHTML = rows.map((e: LogEntry) => {
       const type = String((e.ctx as { type?: string } | undefined)?.type || 'info');
-      return `<div class="alert-row alert-${SEV[type] || 'info'}">` +
+      return `<div class="alert-row toast-row toast-${SEV[type] || 'info'}">` +
         `<span class="alert-ico">${ICONS[type] || 'ℹ'}</span>` +
         `<span class="alert-msg">${Util.escapeHtml(e.msg)}</span>` +
         `<span class="alert-time">${Util.escapeHtml(Util.fmtDTReadable(e.ts))}</span></div>`;
@@ -71,9 +83,14 @@ export const ToastLogTab = {
   },
 
   /** ErrorLog subscriber: re-render (debounced) only while the drawer is open on the Toast Log tab. */
+  _clearTimer(): void { if (_timer) { clearTimeout(_timer); _timer = null; } },
+
   _onLog(): void {
-    if (_tab !== 'toasts' || !$('alert-drawer')?.classList.contains('open')) return;
+    if (_tab !== 'toasts' || !$('alert-drawer')?.classList.contains('open')) { ToastLogTab._clearTimer(); return; }
     if (_timer) clearTimeout(_timer);
-    _timer = setTimeout(() => { _timer = null; ToastLogTab.render(); }, DEBOUNCE_MS);
+    _timer = setTimeout(() => {
+      _timer = null;
+      if (_tab === 'toasts' && $('alert-drawer')?.classList.contains('open')) ToastLogTab.render();   // drawer may have closed meanwhile
+    }, DEBOUNCE_MS);
   },
 };
