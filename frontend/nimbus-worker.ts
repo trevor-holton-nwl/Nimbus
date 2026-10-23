@@ -83,3 +83,23 @@ self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
     self.postMessage(out);
   }
 };
+
+// Worker-global failures (outside the onmessage try/catch): report to the main thread with
+// id null so Compute's client logs them via ErrorLog without touching any pending job.
+self.onerror = function (ev: any) {
+  try {
+    const e = ev && ev.error;
+    self.postMessage({ type: 'ERROR', id: null, failingType: 'uncaught',
+      error: (e && e.message) || (ev && ev.message) || String(ev), stack: e && e.stack,
+      filename: ev && ev.filename, lineno: ev && ev.lineno });
+  } catch {}
+};
+if (typeof self.addEventListener === 'function') {
+  self.addEventListener('unhandledrejection', function (ev: PromiseRejectionEvent) {
+    try {
+      const r = ev.reason;
+      self.postMessage({ type: 'ERROR', id: null, failingType: 'unhandledrejection',
+        error: (r && r.message) || String(r), stack: r && r.stack });
+    } catch {}
+  });
+}

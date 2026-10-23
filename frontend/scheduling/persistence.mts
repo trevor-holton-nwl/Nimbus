@@ -241,7 +241,7 @@ export const Persistence = {
       const raw = localStorage.getItem('nimbus.calendar.pendingDeletes');
       const parsed = raw ? JSON.parse(raw) : null;
       if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) return true;
-    } catch { /* unreadable storage: nothing detectable */ }
+    } catch (e) { ErrorLog.warn('persistence', 'pending-deletes storage unreadable', undefined, { stack: (e as Error)?.stack }); }
     return false;
   },
   _lastQuarantineKey: null as string | null,
@@ -447,7 +447,7 @@ export const Persistence = {
           try {
             const rawCache = localStorage.getItem(Config.LS_KEY);
             if (rawCache) Persistence._restoreNonTaskState(JSON.parse(rawCache));
-          } catch {}
+          } catch (e) { ErrorLog.warn('persistence', 'cached non-task state restore failed (zero-task path)', undefined, { stack: (e as Error)?.stack }); }
           // Fetch master-data so orderless plants/lines appear in Master Data tabs,
           // THEN hydrate calendars/blackouts from the backend (authoritative).
           Promise.all([
@@ -532,7 +532,7 @@ export const Persistence = {
               Persistence._restoreNonTaskState(cacheData);
             }
           }
-        } catch {}
+        } catch (e) { ErrorLog.warn('persistence', 'cached non-task state restore failed', undefined, { stack: (e as Error)?.stack }); }
 
         // Sync plant from backend task data BEFORE setTasks so Timeline.rebuild()
         // called synchronously by the tasks:bulk subscriber sees correct plant assignments
@@ -1344,7 +1344,10 @@ export const Persistence = {
           // else: leave dirty — the next saveAll() will pick up the newer edit.
         }
         if (stale.length) {
-          ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`, stale);
+          const base_versions: Record<string, number | null> = {};
+          for (const id of stale) base_versions[String(id)] = Store.tasks[String(id)]?.row_version ?? null;
+          ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`,
+            { ids: stale, base_versions }, { errorCode: 'tasks.conflict', reqId });
           // U25: a stale row whose server copy already holds this client's exact placement is reconciled silently;
           // the conflict toast counts only the real conflicts (known once the refresh answers).
           Persistence._refreshTasks(stale, refreshBaselines, { sent: sentSnapshot, onConflicts: count => {
@@ -1461,6 +1464,9 @@ export const Persistence = {
           if (!tk) continue;
           if (!unchanged(String(row.id))) { retained = true; continue; }
           if (Persistence._sameAsSent(row as unknown as Record<string, unknown>, opts.sent?.get(String(row.id)))) silent++;
+          else ErrorLog.info('persistence', 'conflict confirmed',
+            { id: String(row.id), base_version: tk.row_version ?? null, server_version: row.row_version ?? null },
+            { errorCode: 'tasks.conflict' });
           tk.MACHINE = row.MACHINE ?? '';
           tk.PRT_01 = row.PRT_01 ?? '';
           tk.PRT_02 = row.PRT_02 ?? '';
@@ -1735,7 +1741,7 @@ export const Persistence = {
       const key = `${Config.LS_KEY}.quarantine.${Date.now()}`;
       localStorage.setItem(key, raw.slice(0, 200_000));
       Persistence._lastQuarantineKey = key;
-    } catch {}
+    } catch (e) { ErrorLog.warn('persistence', 'cache quarantine write failed', undefined, { stack: (e as Error)?.stack }); }
   },
 
   storageInventory(): { totalBytes: number; count: number; items: Array<{ key: string; bytes: number }>; degraded: boolean; lastBytes: number; lastSavedAt: number; autosaveDisabled: boolean } {
@@ -1785,3 +1791,11 @@ Store.subscribe(evt => {
   for (const id of ids) taskEditGenerations.set(id, (taskEditGenerations.get(id) ?? 0) + 1);
 }, 'Persistence.conflictGenerations');
 
+// State snapshot attached to error-level log entries (cheap: sizes only; may run during a drag).
+ErrorLog.registerStateProvider('persistence', () => ({
+  dirty: Persistence._dirtyIds.size,
+  force: Persistence._forceIds.size,
+  conflicted: Persistence._conflictedIds.size,
+  firmDirty: Persistence._firmDirtyIds.size,
+  autosaveDisabled: Persistence._autosaveDisabled,
+}));

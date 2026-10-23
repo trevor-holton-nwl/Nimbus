@@ -2076,6 +2076,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
                   <button class="btn btn-ghost sm" id="admin-log-reload" data-i18n="btn.reload_data">↻ Reload data</button>
                   <button class="btn btn-ghost sm" id="admin-log-cache" data-i18n="btn.clear_cache">⊘ Clear cache</button>
                   <button class="btn btn-ghost sm" id="admin-log-copy" data-i18n="btn.copy_all">⎘ Copy all</button>
+                  <button class="btn btn-ghost sm" id="admin-log-export-json" data-i18n="btn.export_json">Export JSON</button>
                   <button class="btn btn-ghost sm" id="admin-log-copy-filtered" data-i18n="btn.copy_filtered">⎘ Copy filtered</button>
                   <button class="btn btn-ghost sm" id="admin-log-clear" data-i18n="btn.clear">✕ Clear</button>
                 </header>
@@ -2091,6 +2092,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
                       <option value="all" data-i18n="ui.all_scopes">All scopes</option>
                     </select>
                     <input type="search" id="admin-log-search" class="admin-log-search" placeholder="Search messages…" data-i18n-placeholder="ph.search_messages">
+                    <input type="search" id="admin-log-user" class="admin-log-search" placeholder="Filter by user…" data-i18n-placeholder="ph.filter_user">
                   </div>
                   <div id="admin-log-list" class="admin-log-list"></div>
                 </div>
@@ -2258,8 +2260,16 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button class="icon-btn sm" onclick="NIMBUS.AlertsUIAdapter.toggleDrawer()" aria-label="Close">✕</button>
     </div>
   </header>
-  <div class="drawer-body" id="alert-drawer-body"></div>
+  <nav class="us-tabs" id="alert-drawer-tabs" role="tablist">
+    <button class="seg-btn active" id="alert-tab-alerts" data-drawer-tab="alerts" role="tab" aria-selected="true" aria-controls="alert-drawer-body" tabindex="0" data-i18n="ui.drawer_tab_alerts">Alerts</button>
+    <button class="seg-btn" id="alert-tab-toasts" data-drawer-tab="toasts" role="tab" aria-selected="false" aria-controls="toast-log-body" tabindex="-1" data-i18n="ui.drawer_tab_toasts">Toast Log</button>
+  </nav>
+  <div class="drawer-body" id="alert-drawer-body" role="tabpanel" aria-labelledby="alert-tab-alerts"></div>
   <div class="drawer-footer" id="alert-drawer-footer" hidden></div>
+  <div class="drawer-body" id="toast-log-body" role="tabpanel" aria-labelledby="alert-tab-toasts" hidden></div>
+  <div class="drawer-footer" id="toast-log-footer" hidden>
+    <button class="btn btn-ghost sm" id="toast-log-export" data-i18n="btn.export_json">Download JSON</button>
+  </div>
 </aside>
 
 <!-- =========================================================

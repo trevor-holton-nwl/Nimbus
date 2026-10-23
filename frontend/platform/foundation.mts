@@ -94,6 +94,16 @@ interface LogEntry {
   sessionId: string;
   plant?: string;
   route?: string;
+  user?: string;
+  seq?: number;
+}
+
+type StateProvider = () => unknown;
+
+interface ToastShowOpts {
+  err?: unknown;
+  reqId?: string;
+  ctx?: Record<string, unknown>;
 }
 
 interface Breadcrumb {
@@ -618,7 +628,7 @@ export const Util = {
           const tail = backendMessage ? `: ${backendMessage}` : '';
           ErrorLog.warn('http', `${method} ${url} → ${r.status} (${ms}ms)${tail}`,
             { reqId, status: r.status, url, method, ms, backendMessage },
-            { reqId, errorCode: 'http.status' });
+            { reqId, errorCode: r.status === 409 ? 'http.conflict' : 'http.status' });
         });
       } else if (ms > 2000) {
         ErrorLog.info('http', `slow: ${method} ${url} ${ms}ms`, { reqId, url, method, ms });
@@ -1436,9 +1446,15 @@ let _plantResolver: () => string | null = () => null;
 let _routeResolver: () => { tab: string; ganttSub?: string } | null = () => null; // returns { tab, ganttSub } or null
 let _adminGate: () => boolean = () => false;
 let _badgeClick: () => void = () => {};
+// Console capture: originals saved by installGlobalHandlers (before wrapping) so ErrorLog's own
+// mirror never goes through the wrapper; _capturing is true while a push is in progress so the
+// wrapper (and state providers that log) cannot recurse back into _push.
+let _console: { error: (...a: unknown[]) => void; warn: (...a: unknown[]) => void } | null = null;
+let _capturing = false;
+let _pushSeq = 0; // per-push monotonic id: keeps same-millisecond entries distinct in the ship dedupe key
 
 export const ErrorLog = {
-  MAX: 500,
+  MAX: 800,
   _entries: [] as LogEntry[],
   _listeners: new Set<(e: LogEntry | { cleared: true }) => void>(),
   _recent: [] as RecentEntry[],            // rolling 60s window of {ts, level} for rate alarms
@@ -1512,9 +1528,17 @@ export const ErrorLog = {
     e.sessionId = ErrorLog.SESSION_ID;
     const plant = ErrorLog._plant(); if (plant) e.plant = plant;
     const route = ErrorLog._route(); if (route) e.route = route;
-    // Attach breadcrumbs to error-level entries for postmortem context.
-    if (level === 'error' && ErrorLog._breadcrumbs.length) {
-      e.ctx = ErrorLog._safeCtx({ ...(e.ctx && typeof e.ctx === 'object' ? e.ctx : (e.ctx != null ? { _ctx: e.ctx } : {})), breadcrumbs: ErrorLog._breadcrumbs.slice() });
+    try { const u = _actorResolver(); if (u) e.user = u; } catch {}
+    e.seq = ++_pushSeq;
+    // Attach breadcrumbs and registered state snapshots to error-level entries for postmortem context.
+    // State providers are skipped on a re-entrant push (a provider/listener that logs).
+    const state = (level === 'error' && !_capturing) ? ErrorLog._collectState() : null;
+    if (level === 'error' && (ErrorLog._breadcrumbs.length || state)) {
+      e.ctx = ErrorLog._safeCtx({
+        ...(e.ctx && typeof e.ctx === 'object' ? e.ctx : (e.ctx != null ? { _ctx: e.ctx } : {})),
+        ...(ErrorLog._breadcrumbs.length ? { breadcrumbs: ErrorLog._breadcrumbs.slice() } : {}),
+        ...(state ? { state } : {}),
+      });
     }
 
     ErrorLog._entries.push(e as LogEntry);
@@ -1524,13 +1548,49 @@ export const ErrorLog = {
       ErrorLog._droppedCount += drop;
     }
     ErrorLog._pushRecent(level);
-    // mirror to console so power users see it
-    const fn = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
-    console[fn](`[${scope}]`, msg, ctx ?? '');
-    for (const l of ErrorLog._listeners) { try { l(e as LogEntry); } catch {} }
-    ErrorLog.renderBadge();
-    ErrorLog._scheduleSave();
-    if (level === 'error') ErrorLog._scheduleShip(e as LogEntry);
+    // mirror to console so power users see it (console-scope entries already came from console)
+    const prevCapturing = _capturing;
+    _capturing = true;
+    try {
+      if (scope !== 'console') {
+        const fn = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log';
+        const out = (fn === 'error' || fn === 'warn') && _console ? _console[fn] : console[fn];
+        out(`[${scope}]`, msg, ctx ?? '');
+      }
+      for (const l of ErrorLog._listeners) { try { l(e as LogEntry); } catch {} }
+      ErrorLog.renderBadge();
+      ErrorLog._scheduleSave();
+      if (level === 'error') ErrorLog._scheduleShip(e as LogEntry);
+    } finally { _capturing = prevCapturing; }
+  },
+
+  /* -- State providers: modules register a snapshot function; error-level entries embed the
+        results under ctx.state. Each provider is guarded, its JSON capped at 2 KB, and the whole
+        loop at 20 ms, so a log push can never get slow or throw. -- */
+  _stateProviders: new Map<string, StateProvider>(),
+  registerStateProvider(name: string, fn: StateProvider): () => void {
+    ErrorLog._stateProviders.set(name, fn);
+    return () => { if (ErrorLog._stateProviders.get(name) === fn) ErrorLog._stateProviders.delete(name); };
+  },
+  _collectState(): Record<string, unknown> | null {
+    if (!ErrorLog._stateProviders.size) return null;
+    const out: Record<string, unknown> = {};
+    const t0 = Date.now();
+    const prev = _capturing;
+    _capturing = true;
+    try {
+      for (const [name, fn] of ErrorLog._stateProviders) {
+        if (Date.now() - t0 > 20) break;
+        try {
+          const v = fn();
+          if (v === undefined) continue;
+          const json = JSON.stringify(v);
+          if (json !== undefined && json.length > 2048) out[name] = { _truncated: true, bytes: json.length };
+          else out[name] = JSON.parse(json); // snapshot, so later mutation cannot change a logged entry
+        } catch {}
+      }
+    } finally { _capturing = prev; }
+    return Object.keys(out).length ? out : null;
   },
   // Optional 4th arg `opts` carries structured {reqId, errorCode, stack}. Callers that
   // pass only (scope, msg, ctx) keep working unchanged.
@@ -1549,6 +1609,7 @@ export const ErrorLog = {
   installGlobalHandlers(): void {
     if (ErrorLog._globalsInstalled) return;
     ErrorLog._globalsInstalled = true;
+    ErrorLog._installConsoleCapture();
     window.addEventListener('error', e => {
       const loc = e.filename ? `${e.filename}:${e.lineno || '?'}:${e.colno || '?'}` : '';
       ErrorLog.error('uncaught', `${e.message || 'Unknown error'}${loc ? ' @ ' + loc : ''}`, e.error?.stack);
@@ -1559,6 +1620,40 @@ export const ErrorLog = {
         : String(e.reason);
       ErrorLog.error('promise', reason);
     });
+  },
+
+  // Wrap console.error / console.warn so vis-timeline, AG Grid and worker-client noise lands in the
+  // ring (scope 'console'). Originals are saved first; ErrorLog's own mirror uses them, and the
+  // wrapper only records when no push is in progress, so there is no recursion.
+  _installConsoleCapture(): void {
+    if (_console || typeof console === 'undefined') return;
+    _console = { error: console.error.bind(console), warn: console.warn.bind(console) };
+    const orig = _console;
+    const fmt = (a: unknown): string => {
+      if (a instanceof Error) return a.message;
+      if (typeof a === 'string') return a;
+      try { const j = JSON.stringify(a); return j === undefined ? String(a) : j; } catch { return String(a); }
+    };
+    const wrap = (kind: 'error' | 'warn') => (...args: unknown[]): void => {
+      orig[kind](...args);
+      if (_capturing) return;
+      try {
+        const msg = args.map(fmt).join(' ').slice(0, 2048);
+        const firstErr = args.find(a => a instanceof Error) as Error | undefined;
+        ErrorLog._push(kind, 'console', msg, undefined,
+          { stack: firstErr?.stack, errorCode: `console.${kind}` });
+      } catch {}
+    };
+    console.error = wrap('error');
+    console.warn = wrap('warn');
+  },
+
+  // Test/teardown hook: put the saved console methods back and forget them.
+  _uninstallConsoleCapture(): void {
+    if (!_console) return;
+    console.error = _console.error as typeof console.error;
+    console.warn = _console.warn as typeof console.warn;
+    _console = null;
   },
 
   entries(): LogEntry[] { return ErrorLog._entries.slice(); },
@@ -1599,6 +1694,13 @@ export const ErrorLog = {
     }).catch(() => null);
     return ErrorLog._dbPromise;
   },
+  // Per-login ring key. Sign-out reloads the page and sign-in goes through _bootMain (which calls
+  // restore()), so the actor is fixed for the life of a page load; no session-change subscription.
+  _ringKey(): string {
+    let a: string | undefined;
+    try { a = _actorResolver(); } catch {}
+    return `entries:${a || 'system'}`;
+  },
   _scheduleSave: Util.debounce(function () { ErrorLog._saveNow(); }, 800),
   _saveNow(): void {
     ErrorLog._openDb().then(db => {
@@ -1606,7 +1708,7 @@ export const ErrorLog = {
       try {
         const tx = db.transaction(ErrorLog._DB_STORE, 'readwrite');
         // Snapshot the tail (entries are already capped at MAX).
-        tx.objectStore(ErrorLog._DB_STORE).put(ErrorLog._entries.slice(-ErrorLog.MAX), 'entries');
+        tx.objectStore(ErrorLog._DB_STORE).put(ErrorLog._entries.slice(-ErrorLog.MAX), ErrorLog._ringKey());
       } catch {}
     }).catch(() => {});
   },
@@ -1616,15 +1718,30 @@ export const ErrorLog = {
       if (!db) return;
       return new Promise<void>(resolve => {
         try {
-          const tx  = db.transaction(ErrorLog._DB_STORE, 'readonly');
-          const req = tx.objectStore(ErrorLog._DB_STORE).get('entries');
-          req.onsuccess = () => {
-            const prev = Array.isArray(req.result) ? req.result : [];
+          const tx  = db.transaction(ErrorLog._DB_STORE, 'readwrite'); // readwrite: the legacy key is deleted after migration
+          const store = tx.objectStore(ErrorLog._DB_STORE);
+          const apply = (v: unknown): void => {
+            const prev = Array.isArray(v) ? v : [];
             if (prev.length) {
               ErrorLog._entries = prev.concat(ErrorLog._entries).slice(-ErrorLog.MAX);
               ErrorLog.renderBadge();
             }
             resolve();
+          };
+          const req = store.get(ErrorLog._ringKey());
+          req.onsuccess = () => {
+            if (Array.isArray(req.result) && req.result.length) { apply(req.result); return; }
+            // One-time fallback to the pre-per-user shared key.
+            const legacy = store.get('entries');
+            legacy.onsuccess = () => {
+              // Migrate-and-remove: the legacy shared ring is adopted by the first login, then deleted
+              // so later logins on this browser do not inherit it.
+              if (Array.isArray(legacy.result) && legacy.result.length) {
+                try { store.delete('entries'); } catch {}
+              }
+              apply(legacy.result);
+            };
+            legacy.onerror = () => resolve();
           };
           req.onerror = () => resolve();
         } catch { resolve(); }
@@ -1643,7 +1760,7 @@ export const ErrorLog = {
   // Enqueue synchronously (dedupe), then debounce the actual network flush.
   _scheduleShip(e: LogEntry): void { ErrorLog._enqueueShip(e); ErrorLog._flushShip(); },
   _enqueueShip(e: LogEntry): void {
-    const key = `${e.sessionId || ''}|${e.reqId || ''}|${e.ts}`;
+    const key = `${e.sessionId || ''}|${e.reqId || ''}|${e.ts}|${e.seq ?? ''}`;
     if (ErrorLog._shipSeen.has(key)) return;
     ErrorLog._shipSeen.add(key);
     if (ErrorLog._shipSeen.size > 2000) ErrorLog._shipSeen.clear(); // bound the dedupe set
@@ -1651,7 +1768,7 @@ export const ErrorLog = {
       ts: e.ts, level: e.level, scope: e.scope, msg: e.msg,
       errorCode: e.errorCode, reqId: e.reqId, stack: e.stack,
       buildId: e.buildId, sessionId: e.sessionId, plant: e.plant, route: e.route,
-      ctx: e.ctx,
+      user: e.user, ctx: e.ctx,
     });
   },
   _shipNow(): void {
@@ -1665,7 +1782,11 @@ export const ErrorLog = {
       if (typeof fetch === 'function') {
         fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: (() => {
+            const h: Record<string, string> = { 'Content-Type': 'application/json' };
+            try { const u = _actorResolver(); if (u) h['x-user-email'] = u; } catch {}
+            return h;
+          })(),
           body: JSON.stringify({ entries: batch }),
           keepalive: true,
         }).catch(() => {});
@@ -1714,6 +1835,38 @@ export const ErrorLog = {
     badge.textContent = String(total);
     badge.classList.toggle('warn', !errs && !!warns);
   }, 80),
+
+  // Pure payload for the JSON export (what the owner hands to Claude). Keeps ctx.state whole.
+  exportJsonPayload(): Record<string, unknown> {
+    let user: string | null = null;
+    try { user = _actorResolver() || null; } catch {}
+    return {
+      buildId: ErrorLog._buildId(),
+      sessionId: ErrorLog.SESSION_ID,
+      user,
+      plant: ErrorLog._plant(),
+      route: ErrorLog._route(),
+      exportedAt: new Date().toISOString(),
+      dropped: ErrorLog._droppedCount,
+      entries: ErrorLog._entries.slice(),
+    };
+  },
+  exportJson(): void {
+    if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return;
+    try {
+      const p = ErrorLog.exportJsonPayload();
+      const who = String(p.user || 'system').replace(/[^A-Za-z0-9._-]/g, '_');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const url = URL.createObjectURL(new Blob([JSON.stringify(p, null, 2)], { type: 'application/json' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nimbus-log-${who}-${ts}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {}
+  },
 
   copy(): void {      const txt = ErrorLog._entries.map(e =>
       `${e.ts} [${e.level.toUpperCase()}] ${e.scope}: ${e.msg}${e.ctx ? ' :: ' + JSON.stringify(e.ctx) : ''}`
@@ -1793,7 +1946,16 @@ export const Toast = (function() {
   }
 
   return {
-    show(msg: string, type: string = 'info', msArg?: number, action?: ToastAction): void {
+    show(msg: string, type: string = 'info', msArg?: number, action?: ToastAction, opts?: ToastShowOpts): void {
+      // Log first (before the DOM early-return) so headless callers and every deduped repeat still record.
+      try {
+        const lvl = type === 'error' ? 'error' : type === 'warn' ? 'warn' : 'info';
+        const errStack = (opts?.err as { stack?: string } | undefined)?.stack;
+        ErrorLog._push(lvl, 'toast', msg,
+          { type, ms: msArg, hasAction: !!action, ...(opts?.ctx || {}) },
+          { reqId: opts?.reqId, stack: errStack, errorCode: 'toast.' + type });
+      } catch {}
+      if (typeof document === 'undefined') return;
       const stack = document.getElementById('toast-stack');
       if (!stack) return;
       // Per-type default: a 1.5 s error vanishes before it can be read. Explicit durations win.

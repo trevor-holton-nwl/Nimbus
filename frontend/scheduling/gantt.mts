@@ -2190,7 +2190,7 @@ export const Timeline = {
       const item = itemSet.items[id] as { dom?: Record<string, unknown> } | undefined;
       try {
         if (item && typeof itemSet._removeItem === 'function') itemSet._removeItem(item);
-      } catch { /* fall through to the direct clean-up below */ }
+      } catch (e) { ErrorLog.warn('gantt', 'vis _removeItem failed; falling back to direct clean-up', { id }, { stack: (e as Error)?.stack }); }
       try {
         if (itemSet.items && id in itemSet.items) delete itemSet.items[id];
         if (Array.isArray(itemSet.selection)) {
@@ -2204,7 +2204,7 @@ export const Timeline = {
             if (n && n.parentNode && typeof n.parentNode.removeChild === 'function') n.parentNode.removeChild(n);
           }
         }
-      } catch { /* best effort */ }
+      } catch (e) { ErrorLog.warn('gantt', 'vis ghost item direct clean-up failed', { id }, { stack: (e as Error)?.stack }); }
     }
   },
 
@@ -2234,12 +2234,12 @@ export const Timeline = {
           const g = (items.get(id) as TimelineVisItem | null)?.group;
           if (g != null && groupIds.has(String(g))) itemIds.add(id);
         }
-      } catch { /* best effort: the explicit ids below still go */ }
+      } catch (e) { ErrorLog.warn('gantt', 'heal: collecting group item ids failed', { groupIds: [...groupIds] }, { stack: (e as Error)?.stack }); }
       const prior = Timeline._suppressEvents;
       Timeline._suppressEvents = true;
       try {
-        for (const gid of groupIds) { try { groups.remove(gid); } catch { /* keep going */ } }
-        for (const iid of itemIds) { try { items.remove(iid); } catch { /* keep going */ } }
+        for (const gid of groupIds) { try { groups.remove(gid); } catch (e) { ErrorLog.warn('gantt', 'heal: group remove failed', { id: gid }, { stack: (e as Error)?.stack }); } }
+        for (const iid of itemIds) { try { items.remove(iid); } catch (e) { ErrorLog.warn('gantt', 'heal: item remove failed', { id: iid }, { stack: (e as Error)?.stack }); } }
         Timeline._purgeItemSetGhosts();
         Timeline._laneIds.clear();
         Timeline._labelKeys.clear();
@@ -5648,6 +5648,8 @@ export const Interaction = {
       }
       Interaction._commitSingleDrop(cur, capture.id, capture.itemId, capture.newLine, capture.requestedFinish,
         { ...capture.opts, chosenPv: pv });
+    }).catch((e: unknown) => {
+      ErrorLog.warn('interaction', 'PV drop choice failed', { id: capture.id }, { stack: (e as Error)?.stack });
     });
   },
 
@@ -6024,3 +6026,19 @@ export const Interaction = {
     }
   }
 };
+
+// State snapshot attached to error-level log entries (cheap reads only; may run during a drag).
+ErrorLog.registerStateProvider('scheduling', () => {
+  let win: { start: string; end: string } | null = null;
+  try {
+    const w = Timeline._tl ? Timeline._tl.getWindow() : null;
+    if (w) win = { start: new Date(w.start).toISOString(), end: new Date(w.end).toISOString() };
+  } catch { win = null; }
+  return {
+    window: win,
+    selected: Selection.ids().slice(0, 50),
+    selectedCount: Selection.size(),
+    dragging: !!Interaction._isDragging,
+    expandedLine: Timeline._expandedLine ?? null,
+  };
+});

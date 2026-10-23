@@ -158,3 +158,24 @@ test('purge preview sends the whole-day range (T00:00:00 start, T23:59:59 end), 
     AdminCockpit._purgePlant = priorPlant; AdminCockpit._fpPurgeStart = priorStart; AdminCockpit._fpPurgeEnd = priorEnd;
   }
 });
+
+test('_getFilteredEntries applies the exact-match user filter', async () => {
+  const { ErrorLog } = await import('../../../frontend/platform/foundation.mjs');
+  ErrorLog.clear?.();
+  ErrorLog.info('t', 'from alice');
+  ErrorLog.info('t', 'from bob');
+  const all = ErrorLog.entries();
+  all[0].user = 'alice@x.com';
+  all[1].user = 'bob@x.com';
+  const prior = { ...AdminCockpit._logFilter };
+  try {
+    AdminCockpit._logFilter = { ...prior, level: 'all', scope: 'all', search: '', errorCode: 'all', reqId: '', user: 'alice@x.com' };
+    const out = AdminCockpit._getFilteredEntries();
+    assert.equal(out.length, 1);
+    assert.equal(out[0].user, 'alice@x.com');
+    AdminCockpit._logFilter.user = '';
+    assert.equal(AdminCockpit._getFilteredEntries().length, 2);
+  } finally {
+    AdminCockpit._logFilter = prior;
+  }
+});
