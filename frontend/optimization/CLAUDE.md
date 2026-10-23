@@ -110,3 +110,5 @@ Historical placement tests use `scheduledPatches` to inspect admitted production
 - **Known, deliberate gap.** Detached SPT does not reorder for setup coverage. An uncovered-first order is refused at that position and placed later by `fillPlanningGaps`. This is the `todo` case in `tests/modules/optimization/order-rules-matrix.test.mjs`.
 
 - **ErrorLog state provider (2026-10-23).** `optimize-ui.mts` registers an `optimization` provider at its foot: `{bgRun: !!OptimizerPreview._backgroundRun, plant: OptimizerPreview._backgroundRun?.plant ?? null}`. It runs only on error-level log pushes; keep it to plain reads.
+
+- **Queued `overlong_never` rows after a calendar widening (2026-10-23).** The reconcile still skips queued rows and D6 stands (a calendar save moves no bar). The planner is told instead: `Alerts.queuedNowFits` raises `queued_now_fits` for such a row and the Planning reason cell reads "Now fits the calendar"; Optimize or a manual placement (`manualSchedulePatchFor`, which clears the reason) releases it. See `frontend/insights/CLAUDE.md`.

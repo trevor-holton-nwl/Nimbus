@@ -32,7 +32,7 @@ declare global {
       | 'runtime-unknown' | 'pv-lot-size' | 'distribution-separation'
       | 'late' | 'finish_moved_earlier' | 'reversal_forward' | 'plant_no_timezone' | 'line_no_calendar'
       | 'placement_exception' | 'setup_override_orphaned' | 'pull_floor_crossed' | 'frozen_window_crossed'
-      | 'run_time_zero' | 'no_operating_window' | 'no_anchor' | 'derivation_issue';
+      | 'run_time_zero' | 'no_operating_window' | 'no_anchor' | 'derivation_issue' | 'queued_now_fits';
     msg: string;
     /** Optional localized form; the drawer prefers Util.t(msgKey, msgVars) when present. */
     msgKey?: string;

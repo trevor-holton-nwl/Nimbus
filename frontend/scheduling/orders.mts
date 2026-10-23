@@ -385,6 +385,28 @@ export const Table = {
    *  typed value. Due Date shows the due instant (a date-only SAP finish reads as the close of that day), not the
    *  raw midnight. `field` stays alongside `valueGetter` so AG Grid's date inference still drives the column's sort
    *  and agDateColumnFilter. Extracted (like `_runTimeEditable`) so it is testable without a live AG Grid. */
+  /** The Planning reason cell's text. A planner Delete carries a fixed code; resolve it through the locale so the
+   *  label follows the user's language. The run-time-over-cap reason does the same, filling in the hours the server
+   *  stored beside the message. Other codes keep their stored message. An `overlong_never` row the calendar change
+   *  has since made fit (a `queued_now_fits` alert exists for it) reads "Now fits the calendar" instead; display
+   *  only, nothing is persisted and Optimize or a placement still clears the real reason. */
+  _planningReasonText(task: NimbusTask | undefined): string {
+    const reason = task?.planning_reason;
+    if (!task || !reason) return '';
+    if (reason.code === 'planner_unscheduled') return Util.t('planning_reason.planner_unscheduled');
+    if (reason.code === 'overlong_never') {
+      const fits = (Store.alertsByTask().get(String(task.id)) || []).some(a => a.type === 'queued_now_fits');
+      return Util.t(fits ? 'planning_reason.overlong_released_pending' : 'planning_reason.overlong_never');
+    }
+    if (reason.code === 'segment_floor_unfittable') return Util.t('planning_reason.segment_floor_unfittable');
+    if (reason.code === 'push_limit_unmet') return Util.t('planning_reason.push_limit_unmet');
+    const extra = reason as { run_time?: number; cap_hours?: number };
+    if (reason.code === 'run_time_over_cap' && typeof extra.run_time === 'number' && typeof extra.cap_hours === 'number') {
+      return Util.t('planning_reason.run_time_over_cap', { hours: String(Math.round(extra.run_time * 10) / 10), cap: String(Math.round(extra.cap_hours * 10) / 10) });
+    }
+    return reason.message ?? '';
+  },
+
   _scheduleDateColumns(): TableColDef[] {
     return [
       { headerName: Util.t('col.due_date'), field: 'original_end_date', minWidth: 160,
@@ -552,22 +574,7 @@ export const Table = {
           valueGetter: (p: { data: NimbusTask }) => p.data?.planning_status === 'needs_planning'
             ? Util.t('ui.needs_planning') : Util.t('ui.planning_status_scheduled') },
         { headerName: Util.t('col.planning_reason'), colId: 'planning_reason', minWidth: 240, editable: false,
-          valueGetter: (p: { data: NimbusTask }) => {
-            const reason = p.data?.planning_reason;
-            if (!reason) return '';
-            // A planner Delete carries a fixed code; resolve it through the locale so the
-            // label follows the user's language. The run-time-over-cap reason does the same, filling in
-            // the hours the server stored beside the message. Other codes keep their stored message.
-            if (reason.code === 'planner_unscheduled') return Util.t('planning_reason.planner_unscheduled');
-            if (reason.code === 'overlong_never') return Util.t('planning_reason.overlong_never');
-            if (reason.code === 'segment_floor_unfittable') return Util.t('planning_reason.segment_floor_unfittable');
-            if (reason.code === 'push_limit_unmet') return Util.t('planning_reason.push_limit_unmet');
-            const extra = reason as { run_time?: number; cap_hours?: number };
-            if (reason.code === 'run_time_over_cap' && typeof extra.run_time === 'number' && typeof extra.cap_hours === 'number') {
-              return Util.t('planning_reason.run_time_over_cap', { hours: String(Math.round(extra.run_time * 10) / 10), cap: String(Math.round(extra.cap_hours * 10) / 10) });
-            }
-            return reason.message ?? '';
-          } },
+          valueGetter: (p: { data: NimbusTask }) => Table._planningReasonText(p.data) },
         { headerName: Util.t('col.planning_window'), colId: 'planning_window', minWidth: 260, editable: false,
           valueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data),
           tooltipValueGetter: (p: { data: NimbusTask }) => Table._planningWindowLabel(p.data) },

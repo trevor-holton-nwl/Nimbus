@@ -47,3 +47,5 @@ Profiles are shared across a plant; any authenticated user with plant access can
 ## Tests
 
 `tests/test_alert_profiles.py` (routes, no DB: standalone app + `dependency_overrides` + monkeypatched data functions) and `tests/test_alert_profiles_data.py` (data layer; `pg` tests need `NIMBUS_TEST_DB=1` and a local Postgres).
+
+**`queued_now_fits` (2026-10-23).** `ALERT_TYPES` gained `queued_now_fits` (a frontend-produced exceptions-category alert, see `frontend/insights/CLAUDE.md`); keep it in step with the `AlertType` union and `ALERT_CATEGORIES`.

@@ -101,6 +101,7 @@ export const ALERT_CATEGORIES: Record<AlertCategory, AlertType[]> = {
     'runtime-schedule-mismatch', 'runtime-unknown', 'pv-lot-size',
     'late', 'reversal_forward', 'placement_exception', 'frozen_window_crossed',
     'pull_floor_crossed', 'setup_override_orphaned', 'no_anchor', 'derivation_issue', 'run_time_zero',
+    'queued_now_fits',
   ],
 };
 

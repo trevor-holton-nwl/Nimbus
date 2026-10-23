@@ -2317,3 +2317,18 @@ test('Table.applyOverride with a PV - Machine pair: writes the pair, pushes one 
     Store.setMasterData(priorMasterData, 'test');
   }
 });
+
+test('Table._planningReasonText: an overlong_never row reads "now fits" only while a queued_now_fits alert exists for it (display only)', () => {
+  const task = { id: 'pr-1', planning_status: 'needs_planning', planning_reason: { code: 'overlong_never', message: 'stored' } };
+  const priorAlerts = structuredClone(Store.alerts), priorT = Util.t;
+  Util.t = (k) => k;
+  try {
+    Store.setAlerts([], 'unit-test');
+    assert.equal(Table._planningReasonText(task), 'planning_reason.overlong_never');
+    Store.setAlerts([{ id: 'queued-now-fits-pr-1', type: 'queued_now_fits', sev: 'warn', taskId: 'pr-1', line: 'L', time: new Date() }], 'unit-test');
+    assert.equal(Table._planningReasonText(task), 'planning_reason.overlong_released_pending');
+    assert.equal(task.planning_reason.code, 'overlong_never', 'the stored reason is untouched');
+    assert.equal(Table._planningReasonText({ id: 'x', planning_reason: { code: 'no_fit_found', message: 'stored' } }), 'stored');
+    assert.equal(Table._planningReasonText({ id: 'x', planning_reason: null }), '');
+  } finally { Util.t = priorT; Store.setAlerts(priorAlerts, 'unit-test'); }
+});

@@ -812,3 +812,63 @@ test('Compute logs id-less worker ERROR messages and messageerror without touchi
     Store.setSelectedPlant(null, 'unit-test');
   }
 });
+
+// Gap A (2026-10-23): a queued overlong_never row is re-checked when the calendar widens (frontend Alerts layer).
+function withQueuedFixture(fn) {
+  const plant = 'QNF', line = 'QNF-L1';
+  const prior = { plant: Store.selectedPlant, md: Store.masterData, alerts: structuredClone(Store.alerts), cals: Store.calendars };
+  const week = (r) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, r ? [...r] : null]));
+  Store.setMasterData({ plants: [{ plant, timezone: 'America/Chicago' }], lines: [{ machine: line, plant }] }, 'unit-test');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceCalendars({}, 'unit-test');
+  Store.replacePlants({ [plant]: { workHours: week([7, 19]) } }, 'unit-test');
+  Store.ensureCalendar(line);
+  const queued = (over = {}) => ({ id: 'qnf-1', PRODUCTION_ORDER: '4001', PLANT: plant, MACHINE: line, RUN_TIME: '15',
+    planning_status: 'needs_planning', planning_reason: { code: 'overlong_never', message: 'x' }, ...over });
+  Store.setTasks([queued()], 'unit-test');
+  try { return fn({ plant, line, week, queued }); }
+  finally {
+    Store.setTasks([], 'unit-test'); Store.replacePlants({}, 'unit-test'); Store.replaceCalendars(prior.cals, 'unit-test');
+    Store.setMasterData(prior.md, 'unit-test'); Store.setSelectedPlant(prior.plant, 'unit-test'); Store.setAlerts(prior.alerts, 'unit-test');
+    Alerts._dismissed.clear();
+  }
+}
+
+test('queued_now_fits: a 15 h queued row raises it once a period opens the plant all day, and clears when the period goes', () => withQueuedFixture(({ plant, week }) => {
+  assert.deepEqual(Alerts.queuedNowFits(), [], 'a 12 h window cannot hold 15 h: still overlong, no alert');
+  Store.setPlantPeriods(plant, [{ id: 'p1', name: '24x4', validFrom: '2000-01-01', validTo: null, workHours: week([0, 24]) }], 'plant-periods');
+  const out = Alerts.queuedNowFits();
+  assert.equal(out.length, 1);
+  assert.equal(out[0].type, 'queued_now_fits');
+  assert.equal(out[0].sev, 'warn');
+  assert.equal(out[0].taskId, 'qnf-1');
+  assert.equal(out[0].line, 'QNF-L1');
+  assert.equal(out[0].msgKey, 'alert.queued_now_fits');
+  Alerts._recomputeSync();
+  assert.ok(Store.alerts.some(a => a.type === 'queued_now_fits' && a.taskId === 'qnf-1'), 'the sync recompute publishes it');
+  Store.setPlantPeriods(plant, [], 'plant-periods');
+  Alerts._recomputeSync();
+  assert.ok(!Store.alerts.some(a => a.type === 'queued_now_fits'), 'cleared when it no longer fits');
+}));
+
+test('queued_now_fits: only needs_planning overlong_never rows, honours scoped lines and dismissal, clears when placed', () => withQueuedFixture(({ plant, week, queued }) => {
+  Store.setPlantPeriods(plant, [{ id: 'p1', name: '24x4', validFrom: '2000-01-01', validTo: null, workHours: week([0, 24]) }], 'plant-periods');
+  assert.equal(Alerts.queuedNowFits().length, 1);
+  assert.equal(Alerts.queuedNowFits(new Set(['OTHER-LINE'])).length, 0, 'an incremental pass for another line leaves it alone');
+  assert.equal(Alerts.queuedNowFits(new Set(['QNF-L1'])).length, 1);
+  Store.setTasks([queued({ planning_reason: { code: 'no_fit_found', message: 'x' } })], 'unit-test');
+  assert.equal(Alerts.queuedNowFits().length, 0, 'other queue reasons are untouched');
+  Store.setTasks([queued({ planning_status: 'scheduled', planning_reason: null,
+    start_date: new Date('2026-10-26T00:00:00'), end_date: new Date('2026-10-26T15:00:00') })], 'unit-test');
+  assert.equal(Alerts.queuedNowFits().length, 0, 'a placed row no longer qualifies');
+  Store.setTasks([queued()], 'unit-test');
+  Alerts._dismissed.add('queued-now-fits-qnf-1');
+  assert.equal(Alerts.queuedNowFits().length, 0, 'a dismissed alert stays dismissed');
+}));
+
+test('queued_now_fits is registered as a firing exceptions-category alert type', async () => {
+  const { ALERT_CATEGORIES, FIRING_ALERT_TYPES, categoryOf } = await import('../../../frontend/insights/alert-profiles.mjs');
+  assert.equal(categoryOf('queued_now_fits'), 'exceptions');
+  assert.ok(ALERT_CATEGORIES.exceptions.includes('queued_now_fits'));
+  assert.ok(FIRING_ALERT_TYPES.includes('queued_now_fits'));
+});
