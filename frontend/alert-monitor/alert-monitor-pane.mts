@@ -852,6 +852,7 @@ function _levBuildInput(s: PaintState): LeverageInput {
     horizonMinutes: s.horizonMinutes,
     alerts: s.scoped,
     tasksById: Store.tasks,
+    setupTasks: Store.tasksByPlant(plant),
     lines: new Set(Store.linesForSelectedPlant()),
     setupSnapshot: Store.setupSnapshot,
     masterPlant: Store.masterPlant(plant),
@@ -976,7 +977,7 @@ async function _levRun(): Promise<void> {
   if (!input || _levSkipAnalysis()) return;
   _levInFlight = true;
   try {
-    let next = await _levDeps.analyze(input, _levRunner);
+    let next = await _levDeps.analyze(input, _levRunner, items);   // reuse the grouping phase 1 already painted
     for (const [key, minutes] of _levTyped) {
       const it = next.find(i => i.key === key);
       if (it?.requiresMinutes) {

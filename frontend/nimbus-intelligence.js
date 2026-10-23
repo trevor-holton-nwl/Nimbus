@@ -1669,16 +1669,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           matrix = Utilization.computeMatrix(horizonStart, days);
         }
       } else {
-        // Worker not available; use sync compute and post for background refresh
+        // No worker (or no plant selected): compute synchronously. The old "post for background refresh" branch
+        // here repeated the outer condition and could never run.
         matrix = Utilization.computeMatrix(horizonStart, days);
-        if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
-          NIMBUS.Compute.utilization(startMs, days)
-            .then(({ matrix: m }) => {
-              if (!Confidence._canApply(generation, rev)) return; // stale
-              Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix: m };
-            })
-            .catch(() => {});
-        }
       }
 
       if (!Confidence._canApply(generation, rev)) return;

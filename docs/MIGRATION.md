@@ -1173,7 +1173,7 @@ plant/version). Treat this section as the follow-up ticket's scope.
 
 3. **`resolveFromKey` rebuilds the full cartesian state list on every call, and the mass-upload
    validator revalidates on every keystroke with no debounce.** `resolveFromKey`
-   (`web/plant-and-administration.mts`) calls `fieldValueSet` per definition field and then
+   (`frontend/setup/setup-admin.mts`) calls `fieldValueSet` per definition field and then
    `cartesianStates` over the product, unmemoized — and it is called once per List-view render, once
    per "Add pair" draft-row status refresh, and **twice per pasted row** in
    `parseMassUploadText`. The mass-upload modal's `revalidate()` is bound to the textarea's `input`
@@ -1183,6 +1183,11 @@ plant/version). Treat this section as the follow-up ticket's scope.
    `(definition.fields, _lineScope, Store.priorityRankMaps revision)` and build a `sig → key` map
    once per validation pass instead of scanning candidates per row; debounce `revalidate()`
    (~150 ms) and/or move validation off the paste path onto an explicit "Validate" step.
+   **Done 2026-10-22 (workload relief, Wave A):** `resolveFromKey` now reads a single-entry cache of
+   two first-wins lookup maps (display text and signature) keyed on the rank-maps reference, the
+   fields and the line scope; the textarea revalidates on a 150 ms trailing debounce (the checkbox
+   stays immediate; Stage and Download-rejected flush first). See
+   `docs/superpowers/specs/2026-10-22-workload-relief-design.md`.
 
 Not deferred, and already fixed in the same review wave (recorded here so the follow-up does not
 re-litigate them): the Optimizer-Preview → "Fill these in the Setup Matrix" hand-off now forces the
