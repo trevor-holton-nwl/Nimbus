@@ -494,3 +494,84 @@ test('when "Show 10 more" survives the repaint, focus goes back to it', async ()
   clickAm('fixes-show-more');
   assert.equal(focused, 'more');
 });
+
+// Dedicated leverage worker (workload relief B): the pane aborts the run it started.
+function pendingAnalyze() {
+  const seen = { signals: [] };
+  deps.analyze = async (input, runner, items, opts) => {
+    counts.analyze++;
+    seen.signals.push(opts?.signal);
+    return new Promise((resolve, reject) => {
+      opts?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      seen.release = () => resolve(items);
+    });
+  };
+  return seen;
+}
+
+test('leaving the tab aborts the in-flight leverage run and keeps the phase-1 cards', async () => {
+  seed([alert('a1')]);
+  const seen = pendingAnalyze();
+  AlertMonitorPane.render();
+  await sleep(40);
+  assert.equal(seen.signals.length, 1);
+  assert.equal(seen.signals[0].aborted, false);
+  AlertMonitorPane.setActive(false);
+  assert.equal(seen.signals[0].aborted, true);
+  await sleep(10);
+  assert.match(els['am-leverage'].innerHTML, /class="am-fix"/, 'removal-only cards stay');
+});
+
+test('a plan move (Store.rev) aborts the in-flight run, then a fresh run starts after the debounce', async () => {
+  seed([alert('a1')]);
+  const seen = pendingAnalyze();
+  AlertMonitorPane.render();
+  await sleep(40);
+  Store.setTasks([{ id: 'ZZ' }], 'test');
+  assert.equal(seen.signals[0].aborted, true);
+  await sleep(520);
+  assert.equal(seen.signals.length, 2, 'the debounce re-ran the analysis');
+  assert.equal(seen.signals[1].aborted, false);
+});
+
+test('a plant change aborts the in-flight run', async () => {
+  seed([alert('a1')]);
+  const seen = pendingAnalyze();
+  AlertMonitorPane.render();
+  await sleep(40);
+  AlertMonitorPane.resetView();
+  assert.equal(seen.signals[0].aborted, true);
+});
+
+test('a plant change aborts the old run AND starts the new plant\'s run', async () => {
+  seed([alert('a1')]);
+  const seen = pendingAnalyze();
+  AlertMonitorPane.render();
+  await sleep(40);
+  AlertMonitorPane.resetView();
+  assert.equal(seen.signals[0].aborted, true);
+  AlertMonitorPane.render();
+  await sleep(520);
+  assert.ok(seen.signals.length >= 2, 'a fresh run started after the reset');
+  assert.equal(seen.signals.at(-1).aborted, false);
+});
+
+test('alerts:change aborts the in-flight run', async () => {
+  seed([alert('a1')]);
+  const seen = pendingAnalyze();
+  AlertMonitorPane.render();
+  await sleep(40);
+  Store.setAlerts([alert('a1'), alert('a2')], 'test');
+  assert.equal(seen.signals[0].aborted, true);
+});
+
+test('a leverage timeout keeps the phase-1 removal-only cards and is not painted as a replay', async () => {
+  seed([alert('a1')]);
+  groupItems = [setupItem()];
+  deps.analyze = async () => { counts.analyze++; throw new DOMException('leverage batch timed out', 'TimeoutError'); };
+  AlertMonitorPane.render();
+  await sleep(40);
+  assert.match(els['am-leverage'].innerHTML, /class="am-fix"/);
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /am\.fix_conf/);
+  assert.equal(counts.analyze, 1, 'no retry loop after a timeout');
+});

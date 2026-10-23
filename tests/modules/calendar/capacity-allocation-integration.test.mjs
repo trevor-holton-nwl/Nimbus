@@ -27,7 +27,7 @@ beforeEach(t => {
   Store.replaceBlocks([], 'test');
   Store.replacePlantBlocks([], 'test');
   Store.setSelectedPlant('P1', 'test');
-  Utilization._cache = null;
+  Utilization._cacheClear();
 });
 afterEach(() => Calendar._endRun());
 

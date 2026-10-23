@@ -192,22 +192,96 @@ function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts
 export function buildPlantSnapshot(plant: string | null, opts: SnapshotOpts = {}): WorkerSnapshotBase & {
   lines: string[] | null; now: Record<string, Date>; blockedPlants: string[];
 } {
-  const { snap, lines } = _buildSnapshotBase(plant, opts);
-  return { ...snap, lines, ..._alertClockPayload(plant ? [plant] : []) };
+  const _pmT0 = performance.now();
+  try {
+    const { snap, lines } = _buildSnapshotBase(plant, opts);
+    return { ...snap, lines, ..._alertClockPayload(plant ? [plant] : []) };
+  } finally {
+    PerfMonitor.record('Leverage.buildPlantSnapshot', performance.now() - _pmT0);
+  }
 }
 
-/** Upper bound on one worker leverage batch before Compute.leverageBatch falls back to the main thread. */
+/** Upper bound on one dedicated-worker leverage batch. On expiry the worker is terminated and the call
+ *  rejects with a TimeoutError (the caller keeps its quick ranking; nothing reruns on the main thread). */
 const LEVERAGE_BATCH_TIMEOUT_MS = 30000;
+
+function _leverageAbort(name: 'TimeoutError' | 'AbortError', message: string): Error {
+  return new DOMException(message, name);
+}
+
+let _leverageSeq = 0;
+/** Leverage-worker crashes this page load (separate from Compute._crashCount/_dead). After 2, batches skip worker
+ *  creation and use the main-thread path directly; reset only by a page reload. */
+let _leverageCrashes = 0;
+const LEVERAGE_MAX_CRASHES = 2;
+/** One short-lived worker per batch, so a slow replay never blocks the shared alerts/utilization worker
+ *  and can be cancelled outright with terminate(). Settles exactly once; the worker is terminated on
+ *  every exit (result, error, timeout, abort). A constructor throw or worker crash rejects with a plain
+ *  Error (the caller then uses the synchronous core); timeout/abort reject with TimeoutError/AbortError
+ *  and never touch the shared Compute worker state (_crashCount/_dead). */
+function _leverageViaDedicatedWorker(base: LeverageBase, variants: LeverageVariant[], signal?: AbortSignal): Promise<LeverageResult[]> {
+  return new Promise<LeverageResult[]>((resolve, reject) => {
+    let w: Worker;
+    try {
+      w = new Worker('../nimbus-worker.js?v=' + Config.BUILD_ID);
+    } catch (e) {
+      reject(e instanceof Error ? e : new Error('worker unavailable'));
+      return;
+    }
+    const id = ++_leverageSeq;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => finish(() => reject(_leverageAbort('AbortError', 'leverage batch aborted')));
+    function finish(settle: () => void): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      w.onmessage = null;
+      w.onerror = null;
+      try { w.terminate(); } catch {}
+      settle();
+    }
+    w.onmessage = ({ data }) => {
+      if (!data || data.id !== id) return;
+      if (data.type === 'ERROR') {
+        const wMsg = `worker compute error${data.failingType ? ' (' + data.failingType + ')' : ''}: ${data.error || 'unknown'}`;
+        try { ErrorLog.error('worker', wMsg, { failingType: data.failingType }, { errorCode: 'worker.compute', stack: data.stack }); } catch {}
+        finish(() => reject(new Error(data.error || 'worker compute error')));
+      } else if (data.type === 'LEVERAGE_BATCH_RESULT' && Array.isArray(data.results)) {
+        finish(() => resolve(data.results as LeverageResult[]));
+      } else {
+        finish(() => reject(new Error('malformed leverage worker reply')));
+      }
+    };
+    w.onerror = (ev) => {
+      _leverageCrashes++;
+      try { ErrorLog.warn('worker', `leverage worker crashed: ${ev?.message || 'worker error'}`, { filename: ev?.filename || '', lineno: ev?.lineno ?? null }, { errorCode: 'worker.compute' }); } catch {}
+      finish(() => reject(new Error('worker error')));
+    };
+    timer = setTimeout(() => finish(() => reject(_leverageAbort('TimeoutError', 'leverage batch timed out'))), LEVERAGE_BATCH_TIMEOUT_MS);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const _cloneT0 = performance.now();
+      w.postMessage({ type: 'LEVERAGE_BATCH', id, payload: { base, variants } });
+      PerfMonitor.record('Worker.postClone:LEVERAGE_BATCH', performance.now() - _cloneT0);
+    } catch (e) {
+      finish(() => reject(e instanceof Error ? e : new Error('postMessage failed')));
+    }
+  });
+}
 
 export type LeverageBase = ComputeAlertsPayload & { startMs: number; days: number; lines?: string[] };
 export interface LeverageVariant { key: string; setup: NimbusSetupObservation }
 export interface LeverageResult { key: string; alerts: NimbusAlert[]; matrix: NimbusUtilizationMatrix }
 
 /** Main-thread equivalent of the worker's LEVERAGE_BATCH handler (used when the worker is dead or
- *  absent). calendars/plants are cloned per core call: ensureCalendar/ensurePlant write into them. */
+ *  absent). calendars/plants get a shallow copy per core call: ensureCalendar/ensurePlant only ADD missing
+ *  top-level keys (they never edit an existing entry), so a fresh top-level map keeps `base` (and the live
+ *  Store maps it can alias) untouched without cloning every entry. */
 export function runLeverageBatchSync(base: LeverageBase, variants: LeverageVariant[]): LeverageResult[] {
   const Core = globalThis.NimbusComputeCore!;
-  const fresh = () => ({ calendars: structuredClone(base.calendars), plants: structuredClone(base.plants) });
+  const fresh = () => ({ calendars: { ...base.calendars }, plants: { ...base.plants } });
   return variants.map(({ key, setup }) => ({
     key,
     alerts: Core.computeAlerts({ ...base, ...fresh(), setup }).alerts,
@@ -295,18 +369,12 @@ export const Compute = (() => {
     return _worker;
   }
 
-  function _post(type: 'ALERTS' | 'UTILIZATION' | 'LEVERAGE_BATCH', payload: Record<string, unknown>): Promise<any> {
+  function _post(type: 'ALERTS' | 'UTILIZATION', payload: Record<string, unknown>): Promise<any> {
     const w = _init();
     if (!w) return Promise.reject(new Error('worker unavailable'));
     return new Promise((resolve, reject) => {
       const id = ++_seq;
       _pending.set(id, { resolve, reject });
-      // Diagnostic-only measurement: setup stays scoped and has no activation gate.
-      if (payload.setup) {
-        const _setupCloneT0 = performance.now();
-        structuredClone(payload.setup);
-        PerfMonitor.record('Worker.setupClone:' + type, performance.now() - _setupCloneT0);
-      }
       const _cloneT0 = performance.now();
       w.postMessage({ type, id, payload });
       PerfMonitor.record('Worker.postClone:' + type, performance.now() - _cloneT0);
@@ -330,29 +398,35 @@ export const Compute = (() => {
 
     utilization(startMs: number, days: number): Promise<{ matrix: NimbusUtilizationMatrix }> {
       const _t0 = performance.now();
-      return _post('UTILIZATION', { ..._snap(), startMs, days })
+      const { snap, lines: plantLines } = _buildSnapshotBase(Store.selectedPlant);
+      // With a plant, give the core the SAME line set Utilization.computeMatrix uses (task lines plus every plant line),
+      // so an idle line with no orders and no calendar entry is present whichever producer filled the shared cache.
+      const lines = plantLines ? [...new Set([...snap.tasks.map(t => t.MACHINE || 'Unknown'), ...plantLines])] : undefined;
+      return _post('UTILIZATION', { ...snap, ...(lines ? { lines } : {}), startMs, days })
         .then(r => { PerfMonitor.record('Worker.utilization', performance.now() - _t0); return r; });
     },
 
-    /** Replay alerts + utilization per hypothetical setup observation (one worker round trip). Falls back
-     *  to the synchronous core when the worker is dead or absent. */
-    async leverageBatch(base: LeverageBase, variants: LeverageVariant[]): Promise<LeverageResult[]> {
-      if (!_dead && typeof Worker !== 'undefined') {
+    /** Replay alerts + utilization per hypothetical setup observation on a dedicated short-lived worker (one
+     *  round trip). Timeout (30 s) and abort reject with TimeoutError/AbortError and never rerun on the main
+     *  thread. The synchronous core runs only when there is no Worker, the constructor throws, the leverage
+     *  worker crashed (or has crashed twice already this page load), it replied ERROR / a malformed reply, or
+     *  postMessage threw. */
+    async leverageBatch(base: LeverageBase, variants: LeverageVariant[], opts: { signal?: AbortSignal } = {}): Promise<LeverageResult[]> {
+      const signal = opts?.signal;
+      if (signal?.aborted) throw _leverageAbort('AbortError', 'leverage batch aborted');
+      if (typeof Worker !== 'undefined' && _leverageCrashes < LEVERAGE_MAX_CRASHES) {
         try {
-          // The existing alerts/utilization paths have no timeout; a batch is long-running, so guard it
-          // here: an unanswered message rejects and drops to the synchronous core instead of hanging.
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          const guard = new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('leverage batch timed out')), LEVERAGE_BATCH_TIMEOUT_MS);
-          });
-          try {
-            const r = await Promise.race([_post('LEVERAGE_BATCH', { base, variants }), guard]);
-            return r.results as LeverageResult[];
-          } finally { clearTimeout(timer); }
+          return await _leverageViaDedicatedWorker(base, variants, signal);
         } catch (e) {
+          // Timeout/abort are decided outcomes: the caller keeps its quick ranking. Never redo the heavy
+          // batch on the main thread for them. Anything else (constructor throw, worker crash, compute
+          // error) drops to the synchronous core as before.
+          const name = (e as Error)?.name;
+          if (name === 'TimeoutError' || name === 'AbortError') throw e;
           ErrorLog.warn('worker', 'leverage batch fell back to main thread', { error: String((e as Error)?.message || e) });
         }
       }
+      if (signal?.aborted) throw _leverageAbort('AbortError', 'leverage batch aborted');
       return runLeverageBatchSync(base, variants);
     },
   };
@@ -804,16 +878,213 @@ interface UtilizationSnapshotClones {
 }
 const _utilizationSnapshotCloneCache = new WeakMap<Readonly<ScheduleSnapshot>, UtilizationSnapshotClones>();
 
+/* ----- shared utilization cache (private to this module) ------------------------------------------------
+   Bounded LRU of resolved (task OBJECTS in row.tasks) full-plant matrices. An entry is valid only while
+   Store.dataRev() equals its dataRev (dataRev ignores alerts:change / lines:selected / ...; see store.mts),
+   and a request hits when plant and dataRev match and the requested day window lies inside the cached one
+   on identical day timestamps (cells are independent per line and per day; where the cached walk and a fresh
+   walk would land on different instants, e.g. a DST change at midnight, the request misses instead). */
+interface UtilCacheEntry { plant: string; startMs: number; days: number; dataRev: number; matrix: UtilizationMatrixResolved; }
+const UTIL_CACHE_MAX = 6;
+const UTIL_ASYNC_TIMEOUT_MS = 20000;   // the shared worker is serial behind ALERTS jobs; a late reply is still cached
+const UTIL_QUEUE_MAX = 4;
+const UTIL_MAX_REPOSTS = 1;
+let _utilCache: UtilCacheEntry[] = [];   // most recently used last
+
+/** Local-midnight Dates for `days` consecutive calendar days from `startMs` (setDate walk, the same as the core). */
+function _utilWindowDates(startMs: number, days: number): Date[] {
+  const start = new Date(startMs);
+  const out: Date[] = [];
+  for (let i = 0; i < days; i++) { const d = new Date(start); d.setDate(start.getDate() + i); out.push(d); }
+  return out;
+}
+
+/** Index of the requested window's first day inside the cached window, or -1 when it does not lie inside it or when
+ *  any of its day instants differs from the cached walk's (so a slice is always identical to a fresh compute). */
+function _utilFirstIndex(entryStartMs: number, entryDays: number, startMs: number, days: number): number {
+  if (startMs < entryStartMs || days > entryDays) return -1;
+  const cached = _utilWindowDates(entryStartMs, entryDays);
+  const first = cached.findIndex(d => d.getTime() === startMs);
+  if (first < 0 || first + days > entryDays) return -1;
+  const wanted = _utilWindowDates(startMs, days);
+  for (let i = 0; i < days; i++) if (cached[first + i].getTime() !== wanted[i].getTime()) return -1;
+  return first;
+}
+
+/** The requested window cut out of `entry`, or null when it cannot be served exactly. An exact window returns the
+ *  cached matrix itself; a sub-window builds a new object sharing the (read-only) rows. */
+function _utilSlice(entry: { startMs: number; days: number; matrix: UtilizationMatrixResolved }, startMs: number, days: number): UtilizationMatrixResolved | null {
+  if (entry.startMs === startMs && entry.days === days) return entry.matrix;
+  if (_utilFirstIndex(entry.startMs, entry.days, startMs, days) < 0) return null;
+  const keys = _utilWindowDates(startMs, days).map(d => Util.dayKey(d));
+  const out: UtilizationMatrixResolved = {};
+  for (const line of Object.keys(entry.matrix)) {
+    const rows = entry.matrix[line];
+    const cut: Record<string, UtilizationRowResolved> = {};
+    for (const k of keys) {
+      if (!rows[k]) return null;   // defensive: a cached window missing a day column is never served
+      cut[k] = rows[k];
+    }
+    out[line] = cut;
+  }
+  return out;
+}
+
+function _utilCacheGet(plant: string, startMs: number, days: number): UtilizationMatrixResolved | null {
+  const dataRev = Store.dataRev();
+  for (let i = _utilCache.length - 1; i >= 0; i--) {
+    const e = _utilCache[i];
+    if (e.plant !== plant || e.dataRev !== dataRev) continue;
+    const m = _utilSlice(e, startMs, days);
+    if (m) { _utilCache.splice(i, 1); _utilCache.push(e); return m; }
+  }
+  return null;
+}
+
+function _utilCachePut(plant: string, startMs: number, days: number, dataRev: number, matrix: UtilizationMatrixResolved): void {
+  // Entries from an older data revision can never hit again; drop them, then the oldest beyond the bound.
+  _utilCache = _utilCache.filter(e => e.dataRev === dataRev && !(e.plant === plant && e.startMs === startMs && e.days === days));
+  _utilCache.push({ plant, startMs, days, dataRev, matrix });
+  while (_utilCache.length > UTIL_CACHE_MAX) _utilCache.shift();
+}
+
+/** Replace worker task ids with the live task OBJECTS (the shape computeMatrix returns), in place. */
+function _utilHydrate(matrix: NimbusUtilizationMatrix): UtilizationMatrixResolved {
+  for (const line of Object.keys(matrix)) {
+    const rows = matrix[line];
+    for (const k of Object.keys(rows)) {
+      const row = rows[k];
+      row.tasks = row.tasks.map(id => Store.tasks[id]).filter(Boolean) as unknown as string[];
+    }
+  }
+  return matrix as unknown as UtilizationMatrixResolved;
+}
+
+/** Async path state: at most ONE request posted to the worker and a short FIFO of queued jobs (UTIL_QUEUE_MAX). A
+ *  request overlapping or adjacent to a queued job is merged into it (window = union, waiters shared); a disjoint
+ *  window becomes its own job, so a far-away Labor horizon never inflates a near-term request. A queued job reads
+ *  plant and dataRev when it is actually posted. A waiter either accepts a synchronous fallback (`fallback`, callers
+ *  that must paint) or is rejected with a recognisable error (name UtilizationStale / UtilizationTimeout /
+ *  UtilizationWorkerError / UtilizationMalformed) and just drops its work (prewarm, Confidence). */
+interface UtilWaiter { startMs: number; days: number; fallback: boolean; resolve: (m: UtilizationMatrixResolved) => void; reject: (e: unknown) => void; }
+interface UtilJob { startMs: number; days: number; reposts: number; waiters: UtilWaiter[]; }
+let _utilInflight: { plant: string; dataRev: number; startMs: number; days: number; promise: Promise<void> } | null = null;
+let _utilPending: UtilJob[] = [];
+
+function _utilErr(name: string, message: string): Error { const e = new Error(message); e.name = name; return e; }
+
+function _utilWindowEndMs(startMs: number, days: number): number {
+  const d = new Date(startMs); d.setDate(d.getDate() + days); return d.getTime();
+}
+
+/** Days from `startMs` up to (excluding) `endMs`, counted by walking so DST cannot skew it. */
+function _utilCountDays(startMs: number, endMs: number): number {
+  let n = 0;
+  const cur = new Date(startMs);
+  while (cur.getTime() < endMs && n < 2000) { n++; cur.setDate(cur.getDate() + 1); }
+  return n;
+}
+
+/** Settle one waiter that the worker could not serve: synchronous compute when it asked for that, else a named rejection. */
+function _utilSettleOne(w: UtilWaiter, name: string, message: string): void {
+  if (!w.fallback) { w.reject(_utilErr(name, message)); return; }
+  try { w.resolve(Utilization.computeMatrix(new Date(w.startMs), w.days)); } catch (e) { w.reject(e); }
+}
+
+function _utilEnqueue(startMs: number, days: number, fallback: boolean): Promise<UtilizationMatrixResolved> {
+  return new Promise((resolve, reject) => {
+    const waiter: UtilWaiter = { startMs, days, fallback, resolve, reject };
+    const endMs = _utilWindowEndMs(startMs, days);
+    const mate = _utilPending.find(p => startMs <= _utilWindowEndMs(p.startMs, p.days) && p.startMs <= endMs);
+    if (mate) {
+      const newStart = Math.min(mate.startMs, startMs);
+      const newEnd = Math.max(_utilWindowEndMs(mate.startMs, mate.days), endMs);
+      mate.startMs = newStart;
+      mate.days = _utilCountDays(newStart, newEnd);
+      mate.waiters.push(waiter);
+    } else if (_utilPending.length >= UTIL_QUEUE_MAX) {
+      _utilSettleOne(waiter, 'UtilizationStale', 'utilization queue is full');
+      return;
+    } else {
+      _utilPending.push({ startMs, days, reposts: 0, waiters: [waiter] });
+    }
+    _utilPump();
+  });
+}
+
+function _utilPump(): void {
+  if (_utilInflight || !_utilPending.length) return;
+  const job = _utilPending.shift()!;
+  const plant = Store.selectedPlant;
+  // Largest window first so the rest of the fallback waiters are served by slicing the cache that compute just filled.
+  const settleAll = (name: string, message: string): void => {
+    for (const w of [...job.waiters].sort((a, b) => b.days - a.days)) _utilSettleOne(w, name, message);
+  };
+  if (!plant || !Compute.available()) { settleAll('UtilizationStale', 'no plant or no worker'); _utilPump(); return; }
+  const dataRev = Store.dataRev();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+  let timedOut = false;
+  let resolveDone!: () => void;
+  const promise = new Promise<void>(r => { resolveDone = r; });
+  const finish = (fn: () => void): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    _utilInflight = null;
+    try { fn(); } catch (e) { for (const w of job.waiters) w.reject(e); }   // never leave a waiter or a joiner hanging
+    finally { resolveDone(); _utilPump(); }
+  };
+  const isFresh = (): boolean => Store.dataRev() === dataRev && Store.selectedPlant === plant;
+  const t0 = performance.now();
+  _utilInflight = { plant, dataRev, startMs: job.startMs, days: job.days, promise };
+  timer = setTimeout(() => { timedOut = true; finish(() => settleAll('UtilizationTimeout', 'utilization worker timed out')); }, UTIL_ASYNC_TIMEOUT_MS);
+  let request: Promise<{ matrix: NimbusUtilizationMatrix }>;
+  try { request = Compute.utilization(job.startMs, job.days); } catch (e) { request = Promise.reject(e); }
+  request.then(({ matrix }) => {
+    if (settled) {   // a reply after the timeout is still worth caching while the data it was computed from is current
+      if (timedOut && isFresh()) { try { _utilCachePut(plant, job.startMs, job.days, dataRev, _utilHydrate(matrix)); } catch { /* malformed late reply: ignore */ } }
+      return;
+    }
+    finish(() => {
+      if (!isFresh()) {
+        // The data moved while the worker ran. Same plant: re-post once (worker time only, no main-thread compute);
+        // after that, or on a plant change, hand the waiters to their fallback / a stale rejection.
+        if (Store.selectedPlant === plant && job.reposts < UTIL_MAX_REPOSTS) { job.reposts++; _utilPending.unshift(job); return; }
+        settleAll('UtilizationStale', 'data changed while the worker ran');
+        return;
+      }
+      let resolved: UtilizationMatrixResolved;
+      try { resolved = _utilHydrate(matrix); } catch { settleAll('UtilizationMalformed', 'malformed worker reply'); return; }
+      _utilCachePut(plant, job.startMs, job.days, dataRev, resolved);
+      PerfMonitor.record('Utilization.computeMatrixAsync', performance.now() - t0);
+      for (const w of job.waiters) {
+        const cut = _utilSlice({ startMs: job.startMs, days: job.days, matrix: resolved }, w.startMs, w.days);
+        if (cut) w.resolve(cut); else _utilSettleOne(w, 'UtilizationStale', 'window not sliceable');
+      }
+    });
+  }, () => { if (!settled) finish(() => settleAll('UtilizationWorkerError', 'utilization worker failed')); });
+}
+
+/** A caller asking for a window already in flight (same plant and data revision) waits for that request; if the
+ *  cache still cannot serve it afterwards (a stale or failed pass) it enqueues like any other caller. */
+function _utilJoinExisting(plant: string, startMs: number, days: number, fallback: boolean): Promise<UtilizationMatrixResolved> | null {
+  const inf = _utilInflight;
+  if (inf && inf.plant === plant && inf.dataRev === Store.dataRev() && _utilFirstIndex(inf.startMs, inf.days, startMs, days) >= 0) {
+    return inf.promise.then(() => _utilCacheGet(plant, startMs, days) ?? _utilEnqueue(startMs, days, fallback));
+  }
+  return null;
+}
+
 /* =============================================================================
    UTILIZATION — scheduled vs. available hours per line per day.
    ========================================================================== */
 export const Utilization = {
-  _cache: null as { key: string; matrix: UtilizationMatrixResolved } | null,  // memoized result of the Store-backed compute path
   /** Returns { [line]: { [dayKey]: { scheduled, capacity, pct, tasks } } }.
    *  Pass `srcTasks` to scope the result to a filtered task subset.
-   *  The srcTasks===null path is memoized on (startMs, days, Store.rev()); rev() bumps on
-   *  every Store mutation, so a cache hit always reflects current data. Subset calls
-   *  (srcTasks provided) skip the cache. Treat the returned matrix as read-only. */
+   *  The srcTasks===null path is memoized in a small per-plant LRU keyed on Store.dataRev() (see the cache block
+   *  above) and a sub-window of a cached window is served by slicing; subset calls (srcTasks provided) skip the
+   *  cache. Treat the returned matrix as read-only. */
   computeMatrix(
     startDate: Date,
     days: number = 7,
@@ -828,13 +1099,16 @@ export const Utilization = {
     // consumer can receive the wrong plant's matrix. 'all' = no plant selected.
     const selectedPlant = utilizationSnapshot ? utilizationSnapshot.selectedPlant : Store.selectedPlant;
     const scope = selectedPlant || 'all';
-    const revision = utilizationSnapshot ? 'detached' : Store.rev();
-    const cacheKey = `${start.getTime()}|${days}|${revision}|${scope}`;
-    if (cacheable && Utilization._cache && Utilization._cache.key === cacheKey) {
-      return Utilization._cache.matrix;
+    if (cacheable) {
+      const hit = _utilCacheGet(scope, start.getTime(), days);
+      if (hit) return hit;
     }
+    const dataRevAtStart = Store.dataRev();
     const _pmT0u = performance.now();
-    const taskList = srcTasks !== null ? srcTasks : (utilizationSnapshot?.tasks ?? Store.tasksArr);
+    // With a plant selected use the plant's task index, exactly the set the worker computes from, so the sync and
+    // async paths (which share one cache) always agree on the line set.
+    const taskList = srcTasks !== null ? srcTasks
+      : (utilizationSnapshot?.tasks ?? (selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr));
     // NimbusComputeCore fills omitted calendar/plant entries with defaults. For
     // a preview, give it clones of the detached candidate context so that
     // convenience normalization cannot mutate Store (or the candidate itself).
@@ -925,10 +1199,34 @@ export const Utilization = {
       }
     }
 
-    if (cacheable) Utilization._cache = { key: cacheKey, matrix: matrix as unknown as UtilizationMatrixResolved };
+    if (cacheable) _utilCachePut(scope, start.getTime(), days, dataRevAtStart, matrix as unknown as UtilizationMatrixResolved);
     PerfMonitor.record('Utilization.computeMatrix', performance.now() - _pmT0u);
     return matrix as unknown as UtilizationMatrixResolved;
   },
+
+  /** Same matrix as computeMatrix(start, days) (full plant, no task subset) but computed off the main thread when a
+   *  plant is selected and the worker is up. Cache hits and sub-windows of cached/in-flight windows resolve without
+   *  any work; identical concurrent requests share one worker call; at most one request is queued behind the one in
+   *  flight (a newer one is merged into it). A stale result (data revision or plant moved), a rejection or a ~3 s
+   *  timeout answers from the synchronous computeMatrix instead, so the promise always resolves with current data. */
+  async computeMatrixAsync(startDate: Date, days: number = 7, opts: { syncFallback?: boolean } = {}): Promise<UtilizationMatrixResolved> {
+    const start = Util.startOfDay(startDate)!;
+    const startMs = start.getTime();
+    const plant = Store.selectedPlant;
+    if (!plant || !Compute.available()) return Utilization.computeMatrix(start, days);
+    const hit = _utilCacheGet(plant, startMs, days);
+    if (hit) return hit;
+    // syncFallback: false = a caller that only fills/uses the cache opportunistically (prewarm, Confidence): when the
+    // worker cannot answer (stale, timeout, failure) it is rejected with a named error instead of paying a main-thread compute.
+    const fallback = opts.syncFallback !== false;
+    const shared = _utilJoinExisting(plant, startMs, days, fallback);
+    if (shared) return shared;
+    return _utilEnqueue(startMs, days, fallback);
+  },
+
+  /** Test hooks: the cache is module-private; these read and reset it. */
+  _cacheEntries(): ReadonlyArray<Readonly<UtilCacheEntry>> { return _utilCache.slice(); },
+  _cacheClear(): void { _utilCache = []; _utilPending = []; _utilInflight = null; },
 
   /** Severity bucket from a utilisation ratio.
    *  overloadAt defaults to OVERLOAD_THRESHOLD but callers should pass
@@ -949,7 +1247,7 @@ export const Utilization = {
     });
   },
 
-  // Pre-warm Utilization._cache in the worker so the next synchronous computeMatrix
+  // Pre-warm the shared utilization cache in the worker so the next synchronous computeMatrix
   // call returns instantly from cache. Declared as a literal method (rather than a
   // post-hoc `Utilization._prewarm = ...` assignment, as in the pre-TS version) so
   // TypeScript's object-literal type inference includes it on Utilization's own type
@@ -958,21 +1256,8 @@ export const Utilization = {
     // Skip when no plant is selected — _snap would otherwise post the global all-line
     // snapshot to the worker for a matrix nothing on screen consumes.
     if (!Compute.available() || !Store.selectedPlant) return;
-    const plant   = Store.selectedPlant; // scope key so a global / other-plant consumer never reads this entry
-    const startMs = Util.plantToday(plant).getTime();   // the plant clock (I13), the same start the Dashboard matrix uses
-    const rev     = Store.rev();
-    Compute.utilization(startMs, 7)
-      .then(({ matrix }) => {
-        if (Store.rev() !== rev) return; // stale — a newer mutation arrived
-        for (const line of Object.keys(matrix)) {
-          for (const k of Object.keys(matrix[line])) {
-            const row = matrix[line][k];
-            row.tasks = row.tasks.map(id => Store.tasks[id]).filter(Boolean) as unknown as string[];
-          }
-        }
-        Utilization._cache = { key: `${startMs}|7|${rev}|${plant}`, matrix: matrix as unknown as UtilizationMatrixResolved };
-      })
-      .catch(() => {});
+    const start = Util.plantToday(Store.selectedPlant);   // the plant clock (I13), the same start the Dashboard matrix uses
+    Utilization.computeMatrixAsync(start, 7, { syncFallback: false }).catch(() => {});   // fills the shared cache; same path as Confidence/Needs/Labor
   },
 };
 // Debounced so a drag-storm / autoReflow burst (many task:update/bulkUpdate events in

@@ -3552,7 +3552,7 @@ type HierarchyUtilMatrix = ReturnType<typeof Utilization.computeMatrix>;
 
 /** Hierarchy._lineItems — one VirtualList row per production line, rebuilt
  *  fresh on every render() from Store.tasksForSelectedPlant() plus the
- *  today-scoped utilization matrix (memoized on Hierarchy._todayCache). */
+ *  today-scoped utilization matrix (the shared Utilization cache). */
 interface HierarchyLineItem {
   name: string;
   tasks: NimbusTask[];
@@ -3576,7 +3576,6 @@ export const Hierarchy = {
   // re-applied against an entirely different set of rows.
   _vlIdentity: null as string | null,
   _wired:     false,
-  _todayCache: null as { key: string; matrix: HierarchyUtilMatrix } | null,   // { key, matrix } — local memo of the 1-day plant-scoped util matrix
 
   _renderPending: false,
 
@@ -3669,18 +3668,12 @@ export const Hierarchy = {
     const _todayDayKey = Util.dayKey(todayStart);
 
     // Utilization chip reads the SAME proportional daily-load matrix the Dashboard
-    // heatmap + Line Status use, so all three agree for today (fixes R197). Plant-scoped
-    // srcTasks matches Dashboard._filteredTasks() and is non-cacheable, so it never
-    // thrashes the shared Utilization._cache (TimelineNav's multi-day entry). Memoize locally.
+    // heatmap + Line Status use, so all three agree for today (fixes R197). The full-plant matrix
+    // (no task subset) comes from the shared per-plant Utilization cache: a day-0 slice of a cached
+    // 7/14-day window when one exists (the prewarm and Confidence fill them), else one cheap 1-day
+    // compute that is then reused until Store.dataRev() moves (alert refreshes no longer evict it).
     const _todayKey = Util.dayKey(Util.startOfDay(todayStart));
-    const _utilMKey = `${todayStart.getTime()}|1|${Store.rev()}|${Store.selectedPlant || 'all'}`;
-    let _utilToday: HierarchyUtilMatrix;
-    if (Hierarchy._todayCache && Hierarchy._todayCache.key === _utilMKey) {
-      _utilToday = Hierarchy._todayCache.matrix;
-    } else {
-      _utilToday = Utilization.computeMatrix(todayStart, 1, Store.tasksForSelectedPlant());
-      Hierarchy._todayCache = { key: _utilMKey, matrix: _utilToday };
-    }
+    const _utilToday: HierarchyUtilMatrix = Utilization.computeMatrix(todayStart, 1);
 
     Hierarchy._lineItems = visibleNames.map((name): HierarchyLineItem => {
       const ci    = Timeline._colorIndex(name);

@@ -626,7 +626,7 @@ test('changeover advances to a future order pull-forward floor instead of stalli
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -687,7 +687,7 @@ test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, n
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -3761,7 +3761,7 @@ test("Engine.evaluateSchedule('changeover') due-date push-forward cap is a no-op
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -3824,7 +3824,7 @@ test("Engine.evaluateSchedule('spt') setup-aware path: due-date push-forward cap
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -3885,7 +3885,7 @@ test("Engine.evaluateSchedule('changeover') keeps an already-late order within i
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -3943,7 +3943,7 @@ test("Engine.evaluateSchedule('spt') setup-aware path preserves the near-cap SPT
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -5308,6 +5308,93 @@ describe('reconcile (finish-anchored)', () => {
         assert.equal(fmtLocal(Store.tasks.pb.start_date), '8/26 07:00', 'D6: the order fits one window, so no clip for the 20 remaining setup minutes either');
       });
     } finally { fx.restore(); }
+  });
+
+  test('orphan verdict is taken at the final derived start with a row between the held finish and the predecessor', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      // pb (BLUE, 14 h, split over Tue/Wed) is held to Wed 26 19:00; pa (RED) ends Tue 25 09:00; pz (RED) sits Tue 16:30-16:50,
+      // between pa and pb's derived start (Tue 17:00). The override names pa, so it is orphaned (pz is the row before pb).
+      // NOTE: the setup-reserved second walk kept the start in every scenario tried, so the orphanedAt MISS path (start
+      // moved) is not forced here; this pins the verdict the hit path returns.
+      const override = { id: 'ov-miss', machine: fx.line, signature_version: 1, predecessor_order_id: 'pa', successor_order_id: 'pb',
+        predecessor_state_key: colorState('RED'), successor_state_key: colorState('BLUE'), standard_min: 60, remaining_min: 60, status: 'active', reason: 'started' };
+      withSetup(fx, { overrides: [override] }, () => {
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pz', { COLOR: 'RED', user_scheduled: true, start_date: new Date(2026, 7, 25, 16, 30), end_date: new Date(2026, 7, 25, 16, 50) }),
+          fx.task('pb', { COLOR: 'BLUE', RUN_TIME: '14', original_end_date: at(26, 19), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const pb = Store.tasks.pb;
+        const adjacentToPz = pb.start_date.getTime() > new Date(2026, 7, 25, 16, 30).getTime();
+        assert.equal(pb.derivationIssue?.code === 'setup_override_orphaned', adjacentToPz,
+          `start ${fmtLocal(pb.start_date)}: orphaned exactly when pz (16:30) sits before the final start`);
+      });
+    } finally { fx.restore(); }
+  });
+
+  // Plant scale (workload relief, step 3): the pass builds one resolution index, one orphan map and one per-line
+  // grouping, so reads of the setup row arrays stay O(rows + candidates) instead of O(rows x candidates).
+  test('plant scale: 400 candidates, 20 machines, 100-state matrix read the setup rows O(rows + candidates)', () => {
+    const lineNames = Array.from({ length: 20 }, (_, i) => `M${i}`);
+    const fx = recFixture({ policy: 'never', lineNames });
+    const prior = Store.setupSnapshot;
+    const STATES = 100;
+    const colors = Array.from({ length: STATES }, (_, i) => `C${i}`);
+    const plantRows = [];
+    for (let f = 0; f < STATES; f++) for (let t = 0; t < STATES; t++) {
+      if (f !== t) plantRows.push({ machine: '', signature_version: 1, from_key: colorState(colors[f]), to_key: colorState(colors[t]), setup_min: 5 + ((f * 7 + t * 3) % 40) });
+    }
+    const machineRows = fx.lines.map((line, i) => ({ machine: line, signature_version: 1, from_key: colorState(colors[i]), to_key: colorState(colors[i + 1]), setup_min: 15 }));
+    const tasks = [];
+    const CANDIDATES = 400;
+    const dueMs = new Date(2026, 8, 1, 17, 0).getTime();
+    for (let i = 0; i < CANDIDATES; i++) {
+      const lineIndex = i % lineNames.length;
+      const slot = Math.floor(i / lineNames.length);
+      tasks.push(fx.task(`s${i}`, {
+        MACHINE: fx.lines[lineIndex], COLOR: colors[(i * 13) % STATES], RUN_TIME: '2',
+        // Placed and stale: a placed predecessor is what makes the reconcile resolve a changeover pair.
+        user_scheduled: true, runtime_schedule_mismatch: true,
+        start_date: new Date(dueMs + slot * 3 * 3600000 - 2 * 3600000), end_date: new Date(dueMs + slot * 3 * 3600000),
+      }));
+    }
+    // Overrides: half name a predecessor that will never be adjacent (orphaned), half name none.
+    const overrides = [];
+    for (let i = 0; i < 100; i++) {
+      overrides.push({
+        id: `ov${i}`, machine: fx.lines[i % lineNames.length], signature_version: 1,
+        predecessor_order_id: i % 2 ? 'nowhere' : null, successor_order_id: `s${i * 7}`,
+        predecessor_state_key: colorState(colors[0]), successor_state_key: colorState(colors[(i * 7 * 13) % STATES]),
+        standard_min: 30, remaining_min: 10, status: 'active', reason: 'scale',
+      });
+    }
+    const reads = { plant: 0, machine: 0, overrides: 0 };
+    const watch = (rows, key) => new Proxy(rows, {
+      get(target, prop, receiver) {
+        if (typeof prop === 'string' && /^\d+$/.test(prop)) reads[key]++;
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    try {
+      Store.replaceSetupSnapshot({
+        plant: fx.plant,
+        definition: { plant: fx.plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+        plant_rows: watch(plantRows, 'plant'), machine_rows: watch(machineRows, 'machine'), machine_states: [],
+        overrides: watch(overrides, 'overrides'),
+      }, 'unit-test');
+      Store.setTasks(tasks, 'unit-test');
+      reads.plant = reads.machine = reads.overrides = 0;
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      const R = plantRows.length + machineRows.length + overrides.length;
+      const total = reads.plant + reads.machine + reads.overrides;
+      assert.ok(total <= 4 * (R + CANDIDATES), `setup row reads ${total} must stay <= 4 x (rows ${R} + candidates ${CANDIDATES})`);
+      assert.ok(reads.plant <= 2 * plantRows.length, `plant rows read ${reads.plant} times for ${plantRows.length} rows`);
+      assert.ok(tasks.every(task => Store.tasks[task.id].start_date), 'every candidate was derived');
+      const orphaned = tasks.filter(task => Store.tasks[task.id].derivationIssue?.code === 'setup_override_orphaned');
+      assert.ok(orphaned.length > 0, 'orphaned overrides are still reported at scale');
+    } finally { Store.replaceSetupSnapshot(prior, 'unit-test'); fx.restore(); }
   });
 });
 

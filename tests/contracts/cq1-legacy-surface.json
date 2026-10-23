@@ -577,8 +577,6 @@
     "App.goto",
     "App.gotoGanttSub",
     "App.gotoGanttTimeline",
-    "Compute.available",
-    "Compute.utilization",
     "Engine.firmingStatus",
     "ErrorLog.warn",
     "GanttFilter.isolateLine",
@@ -619,8 +617,8 @@
     "Util.scheduleIntervals",
     "Util.startOfDay",
     "Util.t",
-    "Utilization._cache",
-    "Utilization.computeMatrix"
+    "Utilization.computeMatrix",
+    "Utilization.computeMatrixAsync"
   ],
   "privateConsumers": [
     "App._renderChangePlantList",
@@ -704,7 +702,6 @@
     "TimeMachine._relTime",
     "TimeMachine._renderPanel",
     "TimeMachine._snapshotAuto",
-    "TimeMachine._snapshots",
-    "Utilization._cache"
+    "TimeMachine._snapshots"
   ]
 }

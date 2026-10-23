@@ -448,7 +448,10 @@ api.add_middleware(
 # wire-size win for the static frontend: app.js (~717 KB) + the active locale +
 # styles.css + JSON payloads all ship compressed (~75% smaller) through the same
 # StaticFiles mount and API. Cheap, transparent, and safe behind Container Apps.
-api.add_middleware(GZipMiddleware, minimum_size=1000)
+# compresslevel=6 (zlib's default): the starlette default of 9 costs noticeably more CPU
+# on the event loop for a few percent smaller output. GET /tasks gzips its own body in the
+# threadpool and sets Content-Encoding, which this middleware passes through untouched.
+api.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=6)
 
 # Master kill-switch for the SAP background sync scheduler. DISABLED by default —
 # the SAP interface endpoints (config/mappings/test/manual-sync) always work, but

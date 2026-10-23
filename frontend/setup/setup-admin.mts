@@ -742,14 +742,58 @@ export const SetupAdmin = (() => {
    *  state (by rendered text or by signature) — otherwise returns `null` so
    *  the caller fetches unfiltered and narrows the displayed page by
    *  substring instead, same fallback as the grid's own filters. */
-  function resolveFromKey(definitionFields: ReadonlyArray<string>, filterText: string): SetupStateKey | null {
+  function resolveFromKey(definitionFields: ReadonlyArray<string>, filterText: string, lineScope: string = _lineScope): SetupStateKey | null {
     const q = filterText.trim();
     if (!q) return null;
+    const { byText, bySig } = resolveLookupFor(definitionFields, lineScope);
+    const text = byText.get(q.toLowerCase());
+    const sig = bySig.get(q);
+    // The old linear `find` returned the FIRST state matching either test, i.e. the smaller candidate index.
+    const hit = text && sig ? (text.i <= sig.i ? text : sig) : (text ?? sig);
+    return hit ? hit.key : null;
+  }
+
+  /** Single-entry cache for `resolveFromKey`'s lookup maps, keyed on the rank-maps object reference
+   *  (`Store.setPriorityRankMaps` replaces it wholesale, never edits in place), the signature fields and the
+   *  line scope. Both maps are built in ONE pass over the cartesian states and keep the FIRST state per key, so the
+   *  result equals the old per-call `candidates.find` (first match wins, display text matched case-insensitively). */
+  let _resolveLookup: {
+    rankMaps: PriorityRankMaps; fieldsKey: string; lineScope: string;
+    byText: Map<string, { i: number; key: SetupStateKey }>; bySig: Map<string, { i: number; key: SetupStateKey }>;
+  } | null = null;
+  function resolveLookupFor(definitionFields: ReadonlyArray<string>, lineScope: string): NonNullable<typeof _resolveLookup> {
+    const rankMaps = Store.priorityRankMaps;
+    const fieldsKey = definitionFields.join('\0');
+    const cached = _resolveLookup;
+    if (cached && cached.rankMaps === rankMaps && cached.fieldsKey === fieldsKey && cached.lineScope === lineScope) return cached;
     const valuesByField: Record<string, string[]> = {};
-    definitionFields.forEach(field => { valuesByField[field] = fieldValueSet(Store.priorityRankMaps, field, _lineScope); });
-    const candidates = cartesianStates(definitionFields, valuesByField);
-    const match = candidates.find(state => state.parts.join(' · ').toLowerCase() === q.toLowerCase() || state.sig === q);
-    return match ? match.key : null;
+    definitionFields.forEach(field => { valuesByField[field] = fieldValueSet(rankMaps, field, lineScope); });
+    const byText = new Map<string, { i: number; key: SetupStateKey }>();
+    const bySig = new Map<string, { i: number; key: SetupStateKey }>();
+    cartesianStates(definitionFields, valuesByField).forEach((state, i) => {
+      const text = state.parts.join(' · ').toLowerCase();
+      if (!byText.has(text)) byText.set(text, { i, key: state.key });
+      if (!bySig.has(state.sig)) bySig.set(state.sig, { i, key: state.key });
+    });
+    return _resolveLookup = { rankMaps, fieldsKey, lineScope, byText, bySig };
+  }
+
+  /** Trailing debounce with an explicit flush, so an action that reads the validation result (Stage, Download
+   *  rejected) can run the pending pass first. Timers are injectable for tests. */
+  function createDebouncedValidator(
+    run: () => void, delayMs: number,
+    timers: { set: (fn: () => void, ms: number) => unknown; clear: (handle: unknown) => void } = {
+      set: (fn, ms) => setTimeout(fn, ms), clear: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    },
+  ): { schedule(): void; flush(): void; cancel(): void } {
+    let handle: unknown = null;
+    let pending = false;
+    const clear = (): void => { if (pending) { timers.clear(handle); handle = null; pending = false; } };
+    return {
+      schedule(): void { clear(); pending = true; handle = timers.set(() => { pending = false; handle = null; run(); }, delayMs); },
+      flush(): void { if (!pending) return; clear(); run(); },
+      cancel(): void { clear(); },
+    };
   }
 
   interface MassUploadOutcome {
@@ -761,8 +805,11 @@ export const SetupAdmin = (() => {
   /** Positional pipe-joined state text ("BLUE|T1"), one value per definition
    *  field in order — same convention as the mockup's textarea. Header row is
    *  optional and detected by "doesn't parse as a valid row" on line 1. */
-  function parseMassUploadText(text: string, definition: SetupDefinition, existing: EffectiveSetupRow[], clearOnBlank: boolean): MassUploadOutcome {
-    const lookup = buildCellLookup(existing);
+  function parseMassUploadText(
+    text: string, definition: SetupDefinition, existing: EffectiveSetupRow[], clearOnBlank: boolean,
+    lookup: Map<string, Map<string, EffectiveSetupRow>> = buildCellLookup(existing),
+    lineScope: string = _lineScope,
+  ): MassUploadOutcome {
     const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     const outcome: MassUploadOutcome = { ready: [], rejected: [], overwrites: 0 };
     lines.forEach((raw, index) => {
@@ -774,8 +821,8 @@ export const SetupAdmin = (() => {
         return;
       }
       const [fromText, toText, minutesText] = cols.map(c => c.trim());
-      const fromKey = resolveFromKey(definition.fields, fromText.replace(/\|/g, ' · '));
-      const toKey = resolveFromKey(definition.fields, toText.replace(/\|/g, ' · '));
+      const fromKey = resolveFromKey(definition.fields, fromText.replace(/\|/g, ' · '), lineScope);
+      const toKey = resolveFromKey(definition.fields, toText.replace(/\|/g, ' · '), lineScope);
       if (!fromKey || !toKey) {
         outcome.rejected.push({ line: lineNo, message: Util.t('ui.setup_mass_upload_reject_bad_state', { line: lineNo, value: !fromKey ? fromText : toText }) });
         return;
@@ -817,10 +864,11 @@ export const SetupAdmin = (() => {
       </footer>
     </div>`;
     let lastOutcome: MassUploadOutcome = { ready: [], rejected: [], overwrites: 0 };
+    const cellLookup = buildCellLookup(rows);   // the existing matrix does not change while the modal is open
     const revalidate = (): void => {
       const text = backdrop.querySelector<HTMLTextAreaElement>('[data-setup-mass-upload-text]')!.value;
       const clearOnBlank = backdrop.querySelector<HTMLInputElement>('[data-setup-mass-upload-clear-blank]')!.checked;
-      lastOutcome = parseMassUploadText(text, definition, rows, clearOnBlank);
+      lastOutcome = parseMassUploadText(text, definition, rows, clearOnBlank, cellLookup);
       backdrop.querySelector('[data-setup-mass-upload-kpis]')!.innerHTML = `
         <div class="setup-mass-upload-kpi ok"><span>${Util.escapeHtml(Util.t('ui.setup_mass_upload_ready'))}</span><strong>${lastOutcome.ready.length}</strong></div>
         <div class="setup-mass-upload-kpi err"><span>${Util.escapeHtml(Util.t('ui.setup_mass_upload_rejected'))}</span><strong>${lastOutcome.rejected.length}</strong></div>
@@ -833,13 +881,18 @@ export const SetupAdmin = (() => {
       backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-stage]')!.textContent = Util.t('btn.setup_mass_upload_stage', { count: lastOutcome.ready.length });
       backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-download]')!.disabled = lastOutcome.rejected.length === 0;
     };
-    backdrop.querySelector<HTMLTextAreaElement>('[data-setup-mass-upload-text]')!.addEventListener('input', revalidate);
-    backdrop.querySelector<HTMLInputElement>('[data-setup-mass-upload-clear-blank]')!.addEventListener('change', revalidate);
-    const close = (): void => { backdrop.remove(); document.removeEventListener('keydown', onKey); };
+    // Typing/pasting revalidates after a 150 ms pause; the checkbox is a discrete click and stays immediate.
+    // Stage and Download-rejected flush a pending pass first so they never act on a stale outcome.
+    const debounced = createDebouncedValidator(revalidate, 150);
+    backdrop.querySelector<HTMLTextAreaElement>('[data-setup-mass-upload-text]')!.addEventListener('input', () => debounced.schedule());
+    backdrop.querySelector<HTMLInputElement>('[data-setup-mass-upload-clear-blank]')!.addEventListener('change', () => { debounced.cancel(); revalidate(); });
+    const close = (): void => { debounced.cancel(); backdrop.remove(); document.removeEventListener('keydown', onKey); };
     const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') close(); };
     backdrop.addEventListener('click', event => { if (event.target === backdrop) close(); });
     backdrop.querySelectorAll<HTMLButtonElement>('[data-setup-mass-upload-close]').forEach(button => button.addEventListener('click', close));
     backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-download]')!.addEventListener('click', () => {
+      debounced.flush();
+      if (!lastOutcome.rejected.length) return;   // nothing to download (the text was cleared inside the debounce window)
       // Reason text is built from user-pasted values, so a message beginning
       // `=`/`+`/`-`/`@` (or a tab/CR that Excel strips before re-reading the
       // leading character) would be evaluated as a formula on open — prefix a
@@ -856,6 +909,8 @@ export const SetupAdmin = (() => {
       const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'setup-mass-upload-rejected.csv'; link.click(); URL.revokeObjectURL(url);
     });
     backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-stage]')!.addEventListener('click', () => {
+      debounced.flush();
+      if (!lastOutcome.ready.length) return;   // nothing staged (the text was cleared inside the debounce window)
       lastOutcome.ready.forEach(entry => {
         const key = `${stateSig(entry.from)} ${stateSig(entry.to)}`;
         _gridDirty.set(key, { row: { key: entry.from, sig: stateSig(entry.from), parts: entry.from.map(p => p.value) },
@@ -2097,7 +2152,7 @@ export const SetupAdmin = (() => {
     }, permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, deleteAllConfirmationMatches, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render, invalidatePlant, setSetupActive,
     // Grid helpers — exported for direct unit testing, matching this file's
     // existing pattern of testing pure logic without a DOM harness.
-    stateSig, fieldValueSet, cartesianStates, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText,
+    stateSig, fieldValueSet, cartesianStates, resolveFromKey, parseMassUploadText, createDebouncedValidator, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText,
     // Exported for direct unit testing of the "delete all rows in scope"
     // and List-view-page request shapes (mock Util.fetchTraced's underlying
     // fetch and assert on the URL) — same rationale as the grid helpers

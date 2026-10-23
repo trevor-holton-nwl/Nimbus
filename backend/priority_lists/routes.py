@@ -342,7 +342,10 @@ async def upload_priority_list(
     if df.empty:
         raise HTTPException(status_code=400, detail="Uploaded file has no rows")
 
-    resolved = _resolve_priority_list_columns(
+    # Threadpool: the resolver makes a blocking DB call (known_line_codes_for_plant);
+    # HTTPException(400) it raises propagates unchanged through run_in_threadpool.
+    resolved = await run_in_threadpool(
+        _resolve_priority_list_columns,
         df, plant, spec, explicit_machine=machine, explicit_value_col=value_column, explicit_rank_col=rank_column,
     )
     if resolved["status"] == "needs_mapping":
@@ -548,7 +551,9 @@ async def upload_color_wheel(plant: str, request: Request, file: UploadFile = Fi
             detail="Could not parse the uploaded color-wheel file — check it is a valid .xlsx with a COLOR column",
         ) from e
 
-    resolved = _resolve_priority_list_columns(df, plant, spec, reject_conflicts=False)
+    resolved = await run_in_threadpool(
+        _resolve_priority_list_columns, df, plant, spec, reject_conflicts=False,
+    )
     if resolved["status"] == "needs_mapping":
         raise HTTPException(status_code=400, detail="Missing required columns: ['COLOR']")
 

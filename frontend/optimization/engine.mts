@@ -83,7 +83,8 @@ import {
   resolveTaskPlant,
   dueInstant,
 } from './setup-scheduler.mjs';
-import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
+import { buildSetupResolutionIndex, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
+import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
 import type {
   CandidateDiagnostic,
   CandidateResult,
@@ -95,7 +96,7 @@ import type {
   ScheduleSnapshot,
   EvaluationRequest,
 } from './setup-scheduler.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupDefinition, SetupStateKey, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
@@ -527,6 +528,34 @@ export function predecessorOnMachine(task: NimbusTask, tasks: ReadonlyArray<Nimb
   return best?.task ?? null;
 }
 
+/** One resolution index per setup snapshot object (WeakMap, so a replaced snapshot is collected with its index).
+ *  The entry also remembers the definition, the three row arrays and their lengths it was built from; an entry
+ *  whose inputs no longer match (an in-place edit or a swapped array) is rebuilt, never reused. */
+const _setupIndexBySnapshot = new WeakMap<object, {
+  definition: SetupDefinition; machineRows: ReadonlyArray<unknown>; plantRows: ReadonlyArray<unknown>;
+  overrides: ReadonlyArray<unknown>; machineLen: number; plantLen: number; overridesLen: number;
+  index: SetupResolutionIndex;
+}>();
+
+/** The memoised `buildSetupResolutionIndex` for a snapshot with a definition. Resolving through it returns exactly
+ *  what the unindexed linear scan returns (first matching row wins; see setup-resolution-index.test.mjs). */
+export function setupResolutionIndexFor(setup: SetupSnapshot & { definition: SetupDefinition }): SetupResolutionIndex {
+  const cached = _setupIndexBySnapshot.get(setup);
+  if (cached
+    && cached.definition === setup.definition
+    && cached.machineRows === setup.machine_rows && cached.machineLen === setup.machine_rows.length
+    && cached.plantRows === setup.plant_rows && cached.plantLen === setup.plant_rows.length
+    && cached.overrides === setup.overrides && cached.overridesLen === setup.overrides.length) return cached.index;
+  const index = buildSetupResolutionIndex({
+    definition: setup.definition, machineRows: setup.machine_rows, plantRows: setup.plant_rows, overrides: setup.overrides,
+  });
+  _setupIndexBySnapshot.set(setup, {
+    definition: setup.definition, machineRows: setup.machine_rows, plantRows: setup.plant_rows, overrides: setup.overrides,
+    machineLen: setup.machine_rows.length, plantLen: setup.plant_rows.length, overridesLen: setup.overrides.length, index,
+  });
+  return index;
+}
+
 /**
  * Resolve scheduled setup occurrences exactly once, before either compute path
  * runs. This pure projection neither mutates Store nor invokes Engine; both
@@ -537,6 +566,31 @@ export function deriveSetupObservation(
   tasks: ReadonlyArray<NimbusTask>,
   scopedLines?: ReadonlySet<string>,
   availability?: SetupAvailabilityContext,
+): SetupObservation {
+  const _pmT0 = performance.now();
+  try {
+    return deriveSetupObservationUntimed(setup, tasks, scopedLines, availability);
+  } finally {
+    PerfMonitor.record('Setup.deriveObservation', performance.now() - _pmT0);
+  }
+}
+
+/** @internal Test-only reference path for parity tests: the same derivation resolving every pair through the linear scans. */
+export function deriveSetupObservationUnindexed(
+  setup: SetupSnapshot | null | undefined,
+  tasks: ReadonlyArray<NimbusTask>,
+  scopedLines?: ReadonlySet<string>,
+  availability?: SetupAvailabilityContext,
+): SetupObservation {
+  return deriveSetupObservationUntimed(setup, tasks, scopedLines, availability, false);
+}
+
+function deriveSetupObservationUntimed(
+  setup: SetupSnapshot | null | undefined,
+  tasks: ReadonlyArray<NimbusTask>,
+  scopedLines?: ReadonlySet<string>,
+  availability?: SetupAvailabilityContext,
+  indexed = true,
 ): SetupObservation {
   const observation: SetupObservation = { intervals: [], diagnostics: [] };
   const definition = setup?.definition;
@@ -569,6 +623,8 @@ export function deriveSetupObservation(
     byLine.set(line, list);
   }
 
+  // Built on the first covered-pair resolution (many passes never reach one); shared across lines.
+  let resolutionIndex: SetupResolutionIndex | null = null;
   const lines = new Set(byLine.keys());
   for (const override of setup.overrides) {
     // Only add an override's line when it's either explicitly in scope, or it
@@ -623,9 +679,10 @@ export function deriveSetupObservation(
           message: `The setup attributes needed to determine the state of order ${Util.orderNumber(order.task)} on ${line} are missing.`,
         });
       } else {
+        if (indexed) resolutionIndex ??= setupResolutionIndexFor(setup as SetupSnapshot & { definition: SetupDefinition });
         const resolved = resolveSetup({
           definition, machine: line, predecessorState, successorState, predecessorOrderId, successorOrderId: String(order.task.id),
-          plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
+          plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides, index: resolutionIndex ?? undefined,
         });
         if (!resolved.covered || resolved.effectiveMin == null) {
           observation.diagnostics.push({
@@ -1702,6 +1759,16 @@ export const Engine = {
    * whose walk reaches "now" are collected per line and placed forward in finish order from now (OQ53 b).
    * No undo entry (OQ57); one Toast counts the dirty patches. `opts.reason === 'cutover'` tags the reversals. */
   reconcileRuntimeSchedules(plant: string | null, opts: ReconcileOptions = {}): void {
+    const _pmT0 = performance.now();
+    try {
+      Engine._reconcileRuntimeSchedulesPass(plant, opts);
+    } finally {
+      PerfMonitor.record('Engine.reconcileRuntimeSchedules', performance.now() - _pmT0);
+    }
+  },
+
+  /** The untimed body of `reconcileRuntimeSchedules` (split only so the public entry point carries the timing key). */
+  _reconcileRuntimeSchedulesPass(plant: string | null, opts: ReconcileOptions = {}): void {
     if (!plant) return;
     const candidates = Store.tasksByPlant(plant).filter(task =>
       (task.runtime_schedule_mismatch || !task.user_scheduled)
@@ -1792,30 +1859,63 @@ export const Engine = {
     const setup = Store.setupSnapshot;
     const setupDefinition = setup?.definition;
     const setupLive = !!(setup && setupDefinition && setup.plant_active && setup.plant === plant);
-    const lineSchedule = new Map<string, NimbusTask[]>();
+    // One grouping pass over the plant's rows (was one filter per machine), each line sorted on first use.
+    let lineGroups: Map<string, NimbusTask[]> | null = null;
+    const sortedLines = new Set<string>();
     const scheduleOf = (line: string): NimbusTask[] => {
-      let rows = lineSchedule.get(line);
-      if (!rows) {
-        rows = Store.tasksByPlant(plant).filter(row => row.MACHINE === line && row.planning_status !== 'needs_planning'
-          && row.start_date && row.end_date);
+      if (!lineGroups) {
+        lineGroups = new Map();
+        for (const row of Store.tasksByPlant(plant)) {
+          if (!row.MACHINE || row.planning_status === 'needs_planning' || !row.start_date || !row.end_date) continue;
+          const group = lineGroups.get(row.MACHINE);
+          if (group) group.push(row); else lineGroups.set(row.MACHINE, [row]);
+        }
+      }
+      const rows = lineGroups.get(line) ?? [];
+      if (!sortedLines.has(line)) {
         rows.sort((a, b) => a.start_date!.getTime() - b.start_date!.getTime() || String(a.id).localeCompare(String(b.id)));
-        lineSchedule.set(line, rows);
+        sortedLines.add(line);
       }
       return rows;
     };
+    // The resolution index is built once per pass (and memoised per snapshot), so each changeover lookup is O(1).
+    let setupIndex: SetupResolutionIndex | null = null;
+    // Active overrides by line + successor order, built once per pass: the orphan test no longer scans every override.
+    let orphanMap: Map<string, Array<string | null>> | null = null;
+    const isOrphaned = (task: NimbusTask, line: string, predecessorId: string | null): boolean => {
+      if (!orphanMap) {
+        orphanMap = new Map();
+        for (const override of setup?.overrides ?? []) {
+          if (override.status !== 'active') continue;
+          const key = `${override.machine}\0${String(override.successor_order_id)}`;
+          const entry = override.predecessor_order_id == null ? null : String(override.predecessor_order_id);
+          const list = orphanMap.get(key);
+          if (list) list.push(entry); else orphanMap.set(key, [entry]);
+        }
+      }
+      const named = orphanMap.get(`${line}\0${String(task.id)}`);
+      return !!named && named.some(entry => entry !== predecessorId);
+    };
+    /** The latest-starting scheduled row on `line` that starts before `start`, other than `task` itself. */
+    const predecessorAt = (task: NimbusTask, line: string, start: Date): NimbusTask | null => {
+      const rows = scheduleOf(line);
+      let lo = 0, hi = rows.length;
+      while (lo < hi) { const mid = (lo + hi) >>> 1; if (rows[mid].start_date!.getTime() < start.getTime()) lo = mid + 1; else hi = mid; }
+      for (let i = lo - 1; i >= 0; i--) { if (String(rows[i].id) !== String(task.id)) return rows[i]; }
+      return null;
+    };
+    // The orphan verdict the first (zero-setup) walk's setupBefore call reached, by task id and the start it was asked
+    // about; the second call site reuses it when the final start is unchanged instead of resolving again.
+    const orphanMemo = new Map<string, { startMs: number; orphaned: boolean }>();
     /** The changeover minutes to reserve before `task` starting at `start` (0 when it is unknown: the predecessor
      *  is not placed, the pair has no rule or an attribute is missing; the unknown-setup alert covers those), and
      *  whether an active override of this order no longer names the row that now sits before it. */
     const setupBefore = (task: NimbusTask, line: string, start: Date): { minutes: number; orphaned: boolean } => {
       if (!setupLive || !setup || !setupDefinition) return { minutes: 0, orphaned: false };
-      const rows = scheduleOf(line);
-      let lo = 0, hi = rows.length;
-      while (lo < hi) { const mid = (lo + hi) >>> 1; if (rows[mid].start_date!.getTime() < start.getTime()) lo = mid + 1; else hi = mid; }
-      let predecessor: NimbusTask | null = null;
-      for (let i = lo - 1; i >= 0; i--) { if (String(rows[i].id) !== String(task.id)) { predecessor = rows[i]; break; } }
+      const predecessor = predecessorAt(task, line, start);
       const predecessorId = predecessor ? String(predecessor.id) : null;
-      const orphaned = setup.overrides.some(override => override.status === 'active' && override.machine === line
-        && String(override.successor_order_id) === String(task.id) && (override.predecessor_order_id == null ? null : String(override.predecessor_order_id)) !== predecessorId);
+      const orphaned = isOrphaned(task, line, predecessorId);
+      orphanMemo.set(String(task.id), { startMs: start.getTime(), orphaned });
       let predecessorState: SetupStateKey | null = null;
       if (predecessor) {
         if (!predecessor.user_scheduled) return { minutes: 0, orphaned };   // not placed: the required changeover is unknown
@@ -1832,12 +1932,22 @@ export const Engine = {
       if (!predecessorState || !successorState) {
         return { minutes: chargeDefault ? storeChargedSetupMinutes(plant, line, null) : 0, orphaned };
       }
+      setupIndex ??= setupResolutionIndexFor(setup as SetupSnapshot & { definition: SetupDefinition });
       const resolved = resolveSetup({
         definition: setupDefinition, machine: line, predecessorState, successorState, predecessorOrderId: predecessorId,
         successorOrderId: String(task.id), plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
+        index: setupIndex,
       });
       if (chargeDefault) return { minutes: storeChargedSetupMinutes(plant, line, resolved), orphaned };
       return { minutes: resolved.covered && resolved.effectiveMin != null ? resolved.effectiveMin : 0, orphaned };
+    };
+    /** Only the orphan verdict for `task` starting at `start`: no changeover resolution. */
+    const orphanedAt = (task: NimbusTask, line: string, start: Date): boolean => {
+      if (!setupLive || !setup || !setupDefinition) return false;
+      const memo = orphanMemo.get(String(task.id));
+      if (memo && memo.startMs === start.getTime()) return memo.orphaned;
+      const predecessor = predecessorAt(task, line, start);
+      return isOrphaned(task, line, predecessor ? String(predecessor.id) : null);
     };
 
     interface Reversal { task: NimbusTask; anchor: Date; stale: boolean }
@@ -1904,7 +2014,7 @@ export const Engine = {
         // Placed. Several findings can apply to one row; the most important one is recorded.
         const derivedStart = result.changes.start_date!;
         let issue: Issue | null = null;
-        const orphaned = setupLive && setupBefore(task, line, derivedStart).orphaned;
+        const orphaned = setupLive && orphanedAt(task, line, derivedStart);
         // D9c (VP1): a date-only due that lands on a blackout day is read as that day's close and the walk
         // moves it before the blackout; that is the due date resolving, not a finish the planner lost. Silent.
         const dueOnBlackout = !placed && result.moveReason === 'blackout' && Util.isDateOnlyDue(task);

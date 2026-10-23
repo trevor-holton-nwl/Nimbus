@@ -108,7 +108,7 @@ The optimizer worker imports `../nimbus-compute-core.js` without a `?v=` cache-b
 
 ### 4.3 Cache hazard
 
-`Utilization._cache` and `Dashboard._matrix7Cache` key on `Store.rev()`. Period writes must therefore go through `Store.setPlantPeriods` (which emits) and never assign `plants[plant].periods` directly outside `_applyConfig`.
+the shared per-plant utilization cache (`services.mts`, used by the Dashboard, Labor, Gantt strip and intelligence panels) keys on `Store.dataRev()`, which bumps on every event except `alerts:change`, `lines:selected`, `distribution:summary`, `undo:pushed` and `settings:change`. Period writes must therefore go through `Store.setPlantPeriods` (which emits) and never assign `plants[plant].periods` directly outside `_applyConfig`.
 
 ### 4.4 Line clamping (D5): superseded 2026-10-19 by machine calendar inheritance
 
@@ -358,7 +358,7 @@ Start of the list: the findings of the adversarial review run on 2026-10-16 agai
 **Engine and optimizer**
 
 - Every weekday-keyed read of plant hours was found by searching for `getDay()`: it appears only in `Core._dayWindow` and `setup-scheduler.localWindow`. Searching for the call is a cheap way to prove a reader list complete.
-- Caches that look dangerous were safe because they are per-date or per-run (`_wwCache`, the `workWindow` memo, `rc.nominal` with its own lo/hi, `freeIndexFor`, `_dueWindowForLine` by rev). The ones that are not date-keyed (`Utilization._cache`, `Dashboard._matrix7Cache`) key on `Store.rev()`, so a write that does not emit a store change is invisible to them. Period writes must go through `Store.setPlantPeriods`.
+- Caches that look dangerous were safe because they are per-date or per-run (`_wwCache`, the `workWindow` memo, `rc.nominal` with its own lo/hi, `freeIndexFor`, `_dueWindowForLine` by rev). The ones that are not date-keyed (the shared per-plant utilization cache) key on `Store.dataRev()`, so a write that does not emit a store change is invisible to them. Period writes must go through `Store.setPlantPeriods`.
 - `snapshotSchedule` deep-copies `plants` and `validateCandidate` diffs whole snapshots, so a period edit during an open preview shows up as `stale_candidate`. Unknown keys such as `periods` survive `Util.clone`, `replacePlants`, the local cache and `_sameSnapshotValue`, which is why putting periods on the plant entry costs no plumbing.
 - Both worker realms expose `globalThis.NimbusComputeCore`, but the optimizer worker's import has no cache-bust query. A proxy-cached stale Core would fail only for plants that have periods, so the reader must throw `compute-core-stale` rather than fall back to the default pattern silently.
 - Core has no `Util`; a date-key helper it needs must be private to it.
