@@ -892,6 +892,7 @@ export const SetupAdmin = (() => {
     backdrop.querySelectorAll<HTMLButtonElement>('[data-setup-mass-upload-close]').forEach(button => button.addEventListener('click', close));
     backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-download]')!.addEventListener('click', () => {
       debounced.flush();
+      if (!lastOutcome.rejected.length) return;   // nothing to download (the text was cleared inside the debounce window)
       // Reason text is built from user-pasted values, so a message beginning
       // `=`/`+`/`-`/`@` (or a tab/CR that Excel strips before re-reading the
       // leading character) would be evaluated as a formula on open — prefix a
@@ -909,6 +910,7 @@ export const SetupAdmin = (() => {
     });
     backdrop.querySelector<HTMLButtonElement>('[data-setup-mass-upload-stage]')!.addEventListener('click', () => {
       debounced.flush();
+      if (!lastOutcome.ready.length) return;   // nothing staged (the text was cleared inside the debounce window)
       lastOutcome.ready.forEach(entry => {
         const key = `${stateSig(entry.from)} ${stateSig(entry.to)}`;
         _gridDirty.set(key, { row: { key: entry.from, sig: stateSig(entry.from), parts: entry.from.map(p => p.value) },

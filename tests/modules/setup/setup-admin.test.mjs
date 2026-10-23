@@ -648,3 +648,11 @@ test('createDebouncedValidator: trailing run after the delay, flush runs a pendi
   v.schedule(); v.cancel(); advance(500);
   assert.equal(runs, 2, 'cancel drops a pending pass (modal closed)');
 });
+
+test('mass-upload Stage and Download-rejected re-check the outcome after flushing a pending validation', () => {
+  // The modal is not exported and there is no DOM harness, so pin the handler shape: after `debounced.flush()` an empty
+  // outcome (text cleared inside the 150 ms window) must return before staging / saving a header-only CSV.
+  const source = readFileSync(new URL('../../../frontend/setup/setup-admin.mts', import.meta.url), 'utf8');
+  assert.match(source, /data-setup-mass-upload-download\]'\)!\.addEventListener\('click', \(\) => \{\s*debounced\.flush\(\);\s*if \(!lastOutcome\.rejected\.length\) return;/);
+  assert.match(source, /data-setup-mass-upload-stage\]'\)!\.addEventListener\('click', \(\) => \{\s*debounced\.flush\(\);\s*if \(!lastOutcome\.ready\.length\) return;/);
+});
