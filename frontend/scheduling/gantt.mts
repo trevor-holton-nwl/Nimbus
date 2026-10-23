@@ -1955,7 +1955,7 @@ export const Timeline = {
       btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
       btn.setAttribute('aria-label', hint);
       btn.title = hint;
-      btn.textContent = String(depth);
+      btn.textContent = expanded ? '−' : '+';
       wrap.append(btn);
     } else {
       // A hidden slot as wide as the badge, so a badge appearing or disappearing never shifts the label
