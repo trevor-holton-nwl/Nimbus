@@ -21,6 +21,28 @@ Branch: `worktree-agent-a31525a1a839c0b9b` (see Deviations 1). Base `4c37368`.
 - [x] 7. Synthetic benchmark (below).
 - [x] 8. Full gate run; `backend/scheduling/CLAUDE.md` updated.
 
+- [x] 9. Fix wave (Opus validator, SHIP AFTER FIXES): see "Fix wave" below.
+
+## Fix wave (post-validation)
+
+- F1 (required): pydantic `ValidationError` is a `ValueError`, which `brain._value_error_handler` maps to HTTP 400 echoing row values. `encode_tasks_response` now raises `fastapi.exceptions.ResponseValidationError(errors=exc.errors(include_input=False))` (500, no input values). Test: FORM_SIZE=5 row -> 500, no `FORM_SIZE`/`input_value`/row id in the body.
+- F2: `tasks.timing` goes to the `nimbus.perf` logger only; it enters the `_BACKEND_LOG` ring (as `warn`) only when total > 1500 ms (`_SLOW_TASKS_MS`, same as the slow-request rule). Chosen as the simplest option that keeps every timing in the container JSON log while protecting the 2000-entry ring.
+- F3: `_timings["sql"]` is recorded before the no-rows early return.
+- F4: the golden test now freezes the old `_to_pydt`-based segments-to-wire (`legacy_segments_to_wire`), so segment parity is pinned against legacy code, not the live `fromisoformat` version.
+- F5: `backend/scheduling/CLAUDE.md` line ~25 now names `query_orders_rows` (~db.py:696) and `query_orders` (~:653); `AGENTS.md` mirrored (the new section and the line; the two files already differed at base, only this content was synced).
+- F6: `Vary: Accept-Encoding` is set once: by the handler when it gzips or the body is under 1000 bytes; for an uncompressed body at or over the floor the middleware's IdentityResponder adds it. Tested for gzip, identity, and small bodies.
+- F7: stale "(db.query_orders)" docstrings fixed. The `get_tasks` one is the OpenAPI description, so the one-line change was applied to `frontend/types/api-generated.d.mts` by hand; regenerating shows no other `/tasks` drift (other unrelated drift in that file is pre-existing and uncommitted).
+- F8: unused `db.query_orders` patch and frame removed from `live_build`.
+- F9 (optional) skipped: parsing `Accept-Encoding: gzip;q=0` in the handler would not help, because starlette's middleware tests `"gzip" in accept_encoding` and would compress the body itself regardless. Fixing it properly means replacing the middleware; out of scope.
+- F10: `_rank_value` coerces a non-numeric rank to unlisted (999999) and counts it in `color_merge_misses`, same as the old `to_numeric(errors="coerce")` path; no change needed.
+
+## Owed DB verification (needs a local Postgres with working credentials, schema applied)
+
+1. `python -m pytest tests/test_task_concurrency.py -q -k row_version_round_trips`
+2. DB-backed set with `NIMBUS_TEST_DB=1 PG_HOST=localhost PG_DB=nimbus_test`: `tests/test_task_concurrency.py tests/test_task_response_models.py tests/test_rbac_plant_scoping.py tests/test_priority_lists.py tests/test_planning_exceptions.py tests/test_visibility_horizon.py tests/test_frozen_horizon.py tests/test_audit_routing_db.py tests/test_integration_routes.py`
+3. Real-row parity: on a seeded plant with `order_schedule_segments` and priority lists, compare `legacy_build_tasks` (tests/test_tasks_builder_golden.py) against `build_tasks_payload`, including each row's `schedule_segments` against the old `_to_pydt` conversion of the raw `SCHEDULE_SEGMENTS`.
+4. One cache-busted `GET /tasks?plant=<P>` with and without `Accept-Encoding: gzip`: check `Content-Encoding`, a single `Vary`, identical decoded JSON, and a `tasks.timing` event in the container log.
+
 ## Results
 
 Test gate (`PG_HOST=localhost NIMBUS_TEST_DB=1`, but the local Postgres refuses the available credentials, so every DB-marked test skipped): `1460 passed, 626 skipped, 13 xfailed, 2 failed`. The 2 failures are `tests/test_integration_routes.py::test_lifespan_*`: the app lifespan opens the DB pool and times out on password auth in this environment (not touched by this work). **DB tests are owed**, notably the new pg test in `tests/test_task_concurrency.py` and the other `/tasks`-adjacent pg tests.
