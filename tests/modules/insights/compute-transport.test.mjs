@@ -225,7 +225,7 @@ test('an ALERTS request posted while a batch is pending goes to the shared worke
   workers[1].reply(0, { alerts: [], elapsed: 1 });
   await alerts;
   assert.equal(workers[0].terminated, undefined, 'the pending batch is untouched');
-  workers[0].reply(0, { results: [] });
+  workers[0].reply(0, { type: 'LEVERAGE_BATCH_RESULT', results: [] });
   await batch;
 });
 
@@ -273,6 +273,74 @@ test('a leverage worker crash falls back to the synchronous core once and leaves
   const a = Compute.alerts();
   assert.equal(workers.length, 2);
   workers[1].reply(0, { alerts: [] });
+  await a;
+});
+
+test('an ERROR reply is logged, terminates the worker and falls back to the synchronous core', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  const p = Compute.leverageBatch(levBase(mod), []);
+  workers[0].reply(0, { type: 'ERROR', error: 'boom', failingType: 'LEVERAGE_BATCH', stack: 's' });
+  assert.deepEqual(await p, []);
+  assert.equal(workers[0].terminated, true);
+  assert.equal(ErrorLog.error.mock.calls.length, 1);
+});
+
+test('a malformed reply rejects the worker path (then the sync core) instead of resolving garbage', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  const p = Compute.leverageBatch(levBase(mod), [{ key: 'x', setup: { intervals: [], diagnostics: [] } }]);
+  workers[0].reply(0, { type: 'LEVERAGE_BATCH_RESULT' });   // no results array
+  const out = await p;
+  assert.equal(workers[0].terminated, true);
+  assert.equal(out[0].key, 'x', 'sync core produced the result');
+});
+
+test('a postMessage throw terminates the worker and falls back to the synchronous core', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  globalThis.Worker.prototype.postMessage = function () { this.terminated = this.terminated; throw new DOMException('uncloneable', 'DataCloneError'); };
+  const p = Compute.leverageBatch(levBase(mod), []);
+  assert.deepEqual(await p, []);
+  assert.equal(workers.length, 1);
+  assert.equal(workers[0].terminated, true, 'no leaked worker');
+});
+
+test('after a successful reply neither the timer nor a later abort has any effect', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const ctl = new AbortController();
+  const p = Compute.leverageBatch(levBase(mod), [], { signal: ctl.signal });
+  workers[0].reply(0, { type: 'LEVERAGE_BATCH_RESULT', results: [{ key: 'ok' }] });
+  assert.deepEqual(await p, [{ key: 'ok' }]);
+  t.mock.timers.tick(31000);
+  ctl.abort();
+  assert.equal(workers[0].terminated, true);
+  assert.equal(workers.length, 1);
+});
+
+test('a reply arriving after the timeout is ignored', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const p = Compute.leverageBatch(levBase(mod), []);
+  const rejection = assert.rejects(p, { name: 'TimeoutError' });
+  t.mock.timers.tick(31000);
+  await rejection;
+  assert.equal(workers[0].onmessage, null);
+  assert.equal(workers[0].terminated, true);
+});
+
+test('two leverage-worker crashes latch the main-thread path; the shared worker state is untouched', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  for (let i = 0; i < 2; i++) {
+    const p = Compute.leverageBatch(levBase(mod), []);
+    workers[i].crash();
+    assert.deepEqual(await p, []);
+  }
+  assert.equal(workers.length, 2);
+  assert.deepEqual(await Compute.leverageBatch(levBase(mod), []), []);
+  assert.equal(workers.length, 2, 'third batch never creates a worker');
+  assert.equal(Compute.available(), true);
+  const a = Compute.alerts();
+  assert.equal(workers.length, 3, 'shared worker still creatable');
+  workers[2].reply(0, { alerts: [] });
   await a;
 });
 

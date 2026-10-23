@@ -210,7 +210,10 @@ function _leverageAbort(name: 'TimeoutError' | 'AbortError', message: string): E
 }
 
 let _leverageSeq = 0;
-
+/** Leverage-worker crashes this page load (separate from Compute._crashCount/_dead). After 2, batches skip worker
+ *  creation and use the main-thread path directly; reset only by a page reload. */
+let _leverageCrashes = 0;
+const LEVERAGE_MAX_CRASHES = 2;
 /** One short-lived worker per batch, so a slow replay never blocks the shared alerts/utilization worker
  *  and can be cancelled outright with terminate(). Settles exactly once; the worker is terminated on
  *  every exit (result, error, timeout, abort). A constructor throw or worker crash rejects with a plain
@@ -243,13 +246,16 @@ function _leverageViaDedicatedWorker(base: LeverageBase, variants: LeverageVaria
       if (!data || data.id !== id) return;
       if (data.type === 'ERROR') {
         const wMsg = `worker compute error${data.failingType ? ' (' + data.failingType + ')' : ''}: ${data.error || 'unknown'}`;
-        try { ErrorLog.error('worker', wMsg, { failingType: data.failingType, jobId: data.jobId }, { errorCode: 'worker.compute', stack: data.stack }); } catch {}
+        try { ErrorLog.error('worker', wMsg, { failingType: data.failingType }, { errorCode: 'worker.compute', stack: data.stack }); } catch {}
         finish(() => reject(new Error(data.error || 'worker compute error')));
-      } else {
+      } else if (data.type === 'LEVERAGE_BATCH_RESULT' && Array.isArray(data.results)) {
         finish(() => resolve(data.results as LeverageResult[]));
+      } else {
+        finish(() => reject(new Error('malformed leverage worker reply')));
       }
     };
     w.onerror = (ev) => {
+      _leverageCrashes++;
       try { ErrorLog.warn('worker', `leverage worker crashed: ${ev?.message || 'worker error'}`, { filename: ev?.filename || '', lineno: ev?.lineno ?? null }, { errorCode: 'worker.compute' }); } catch {}
       finish(() => reject(new Error('worker error')));
     };
@@ -352,7 +358,7 @@ export const Compute = (() => {
     return _worker;
   }
 
-  function _post(type: 'ALERTS' | 'UTILIZATION' | 'LEVERAGE_BATCH', payload: Record<string, unknown>): Promise<any> {
+  function _post(type: 'ALERTS' | 'UTILIZATION', payload: Record<string, unknown>): Promise<any> {
     const w = _init();
     if (!w) return Promise.reject(new Error('worker unavailable'));
     return new Promise((resolve, reject) => {
@@ -385,12 +391,15 @@ export const Compute = (() => {
         .then(r => { PerfMonitor.record('Worker.utilization', performance.now() - _t0); return r; });
     },
 
-    /** Replay alerts + utilization per hypothetical setup observation (one worker round trip). Falls back
-     *  to the synchronous core when the worker is dead or absent. */
+    /** Replay alerts + utilization per hypothetical setup observation on a dedicated short-lived worker (one
+     *  round trip). Timeout (30 s) and abort reject with TimeoutError/AbortError and never rerun on the main
+     *  thread. The synchronous core runs only when there is no Worker, the constructor throws, the leverage
+     *  worker crashed (or has crashed twice already this page load), it replied ERROR / a malformed reply, or
+     *  postMessage threw. */
     async leverageBatch(base: LeverageBase, variants: LeverageVariant[], opts: { signal?: AbortSignal } = {}): Promise<LeverageResult[]> {
       const signal = opts?.signal;
       if (signal?.aborted) throw _leverageAbort('AbortError', 'leverage batch aborted');
-      if (typeof Worker !== 'undefined') {
+      if (typeof Worker !== 'undefined' && _leverageCrashes < LEVERAGE_MAX_CRASHES) {
         try {
           return await _leverageViaDedicatedWorker(base, variants, signal);
         } catch (e) {

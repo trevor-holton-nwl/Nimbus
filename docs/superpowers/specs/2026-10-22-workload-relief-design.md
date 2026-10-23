@@ -64,3 +64,10 @@ An Opus deep-dive (plan `are-there-any-new-generic-cook.md`) found that no new w
 - `Utilization._cache` was a legacy-surface "private consumer" of `nimbus-intelligence.js`; the contract was regenerated with `--write --allow-growth` because `Utilization.computeMatrixAsync` is a deliberate new intelligence command (net: 3 entries removed, 1 added).
 - Existing tests changed: `services.test.mjs` (I13 prewarm test checks `_cacheEntries()`), `confidence-lifecycle.test.mjs` (I13 test: NeedsEngine no longer posts to the worker, so only Confidence is expected to), `capacity-allocation-integration.test.mjs` (`_cacheClear()`).
 - `computeMatrixAsync` rounds the start with `Util.startOfDay` and sends that to the worker; before, Confidence sent `_plantToday()` to the worker but `horizonStart` to the sync fallback (identical in practice: `plantToday = startOfDay(plantClock)`).
+
+### Wave B fix wave (Opus validator)
+- Typed-minutes replay timeout is logged (`leverage replay timed out`); only `AbortError` is silent.
+- Leverage-worker crash latch: after 2 crashes (`_leverageCrashes`, separate from `Compute._crashCount`/`_dead`) batches skip worker creation and use the main-thread path until reload.
+- The leverage reply is accepted only as `LEVERAGE_BATCH_RESULT` with an array `results`; anything else rejects (then sync fallback). Removed `'LEVERAGE_BATCH'` from `_post`'s union and the always-undefined `jobId` log field; doc comment lists the real fallback cases.
+- Tests added: ERROR reply, postMessage throw, late reply after timeout, abort/timeout after success are no-ops, crash latch, malformed reply (compute-transport); plant change starts the new run, `alerts:change` aborts, signal passes through `analyzeLeverage`/`replayWithMinutes` (pane/leverage tests).
+- Deferred follow-up: each typed-minutes key starts its own worker (a replay per key); fold into one batch together with the deferred scores-only reply.
