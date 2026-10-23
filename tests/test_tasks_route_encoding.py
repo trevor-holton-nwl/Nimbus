@@ -86,6 +86,51 @@ def test_out_of_scope_plant_still_403(tasks_client):
     assert tasks_client.get("/tasks").status_code == 400
 
 
+def test_response_validation_failure_is_a_500_that_leaks_no_row_values(tasks_client, monkeypatch):
+    """pydantic's ValidationError is a ValueError, which brain's `_value_error_handler`
+    would turn into a 400 echoing the offending value; the handler must raise FastAPI's
+    ResponseValidationError (500) instead, with input values stripped."""
+    bad = [dict(r, FORM_SIZE=5) for r in mixed_rows() if r["PLANT"] == "P1"]
+    monkeypatch.setattr(routes.db, "query_orders_rows", lambda **kw: (copy.deepcopy(bad), None, None))
+    client = TestClient(brain.api, raise_server_exceptions=False)
+    resp = client.get("/tasks?plant=P1")
+    assert resp.status_code == 500
+    assert "FORM_SIZE" not in resp.text and "input_value" not in resp.text and "o001" not in resp.text
+    with pytest.raises(routes.ResponseValidationError) as info:
+        routes.encode_tasks_response(routes.build_tasks_payload("P1", None, None, None, None))
+    assert all("input" not in e for e in info.value.errors())
+
+
+def test_vary_accept_encoding_appears_exactly_once(tasks_client, monkeypatch):
+    for enc in ("gzip", "identity"):
+        resp = tasks_client.get("/tasks?plant=P1", headers={"Accept-Encoding": enc})
+        values = [v for k, v in resp.headers.multi_items() if k.lower() == "vary"]
+        assert values == ["Accept-Encoding"], (enc, values)
+    monkeypatch.setattr(routes.db, "query_orders_rows", lambda **kw: ([], None, None))
+    for enc in ("gzip", "identity"):                      # small body: under the middleware floor
+        resp = tasks_client.get("/tasks?plant=P1", headers={"Accept-Encoding": enc})
+        values = [v for k, v in resp.headers.multi_items() if k.lower() == "vary"]
+        assert values == ["Accept-Encoding"], (enc, "small", values)
+        assert "content-encoding" not in resp.headers
+
+
+def test_routine_timing_stays_out_of_the_backend_log_ring(tasks_client):
+    from backend.admin_ops.logbuffer import _BACKEND_LOG
+    _BACKEND_LOG.clear()
+    assert tasks_client.get("/tasks?plant=P1").status_code == 200
+    assert not [e for e in _BACKEND_LOG if e.get("event") == "tasks.timing"]
+    routes._log_tasks_timing("P1", 3, sql=2.0, build=0.1)      # slow (> 1500 ms): enters the ring as warn
+    slow = [e for e in _BACKEND_LOG if e.get("event") == "tasks.timing"]
+    assert len(slow) == 1 and slow[0]["level"] == "warn" and slow[0]["ctx"]["sql_ms"] == 2000.0
+
+
+def test_timing_records_sql_before_the_empty_early_return(monkeypatch):
+    monkeypatch.setattr(routes.db, "query_orders_rows", lambda **kw: ([], None, None))
+    timings = {}
+    routes.build_tasks_payload("P1", None, None, None, None, _timings=timings)
+    assert "sql" in timings
+
+
 def test_empty_result_carries_fresh_server_now(tasks_client, monkeypatch):
     monkeypatch.setattr(routes.db, "query_orders_rows", lambda **kw: ([], None, None))
     body = tasks_client.get("/tasks?plant=P1", headers={"Accept-Encoding": "identity"}).json()

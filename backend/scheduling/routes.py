@@ -11,6 +11,7 @@ only the file that owns them changed. `_clean_id`, `_to_pydt`,
 helpers used only within this domain and moved along with their callers.
 """
 import gzip
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -18,7 +19,8 @@ import pandas as pd
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
-from pydantic import TypeAdapter
+from fastapi.exceptions import ResponseValidationError
+from pydantic import TypeAdapter, ValidationError
 
 import db
 import master_data as md
@@ -303,14 +305,24 @@ def _build_task_rows(raw_rows: list[dict], plant: str | None) -> tuple[list[dict
     return data, links, stats, pre_merge_count
 
 
+_perf_log = logging.getLogger("nimbus.perf")   # child of brain.py's `nimbus` JSON handler
+_SLOW_TASKS_MS = 1500
+
+
 def _log_tasks_timing(plant, row_count: int, **stages_s: float) -> None:
-    """One structured `tasks.timing` event per GET /tasks (ring buffer + JSON log
-    line). Deliberately NOT a DIAGNOSTICS key: `meta` is built from DIAGNOSTICS and
-    would leak it into the response. Stage values are ms (rounded); read-only."""
+    """One structured `tasks.timing` event per GET /tasks. Deliberately NOT a DIAGNOSTICS
+    key: `meta` is built from DIAGNOSTICS and would leak it into the response. Stage values
+    are ms (rounded). Every request goes to the JSON logger only (`nimbus.perf`); it enters
+    the 2000-entry `_BACKEND_LOG` ring (as a `warn`) only when slower than
+    `_SLOW_TASKS_MS`, so routine timings never push real warnings out of the ring."""
     ms = {f"{k}_ms": round(v * 1000, 1) for k, v in stages_s.items()}
     ms["total_ms"] = round(sum(stages_s.values()) * 1000, 1)
-    _log_event("info", "perf", f"GET /tasks timing plant={plant} rows={row_count}",
-               event="tasks.timing", plant=plant, rows=row_count, **ms)
+    msg = f"GET /tasks timing plant={plant} rows={row_count}"
+    if ms["total_ms"] > _SLOW_TASKS_MS:
+        _log_event("warn", "perf", msg + " (slow)", event="tasks.timing", plant=plant, rows=row_count, **ms)
+        return
+    _perf_log.info(msg, extra={"category": "perf", "event": "tasks.timing",
+                               "ctx": {"plant": plant, "rows": row_count, **ms}, "rid": _current_rid()})
 
 
 @router.get("/tasks", response_model=TasksResponse)
@@ -324,7 +336,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     """
     Return tasks as JSON with finish-to-start links and pipeline metadata.
 
-    Stateless: queries Postgres per request (db.query_orders) rather than
+    Stateless: queries Postgres per request (db.query_orders_rows) rather than
     copying an in-memory frame. ?plant= is the scaling unit (bounds the result
     to one plant); ?machine= narrows further; ?limit/?offset= are a coarse guard
     rail for unscoped tooling (links are only coherent within a plant/machine scope).
@@ -361,16 +373,29 @@ def encode_tasks_response(payload: dict, accept_encoding: str = "", *, _timings:
     names; pydantic writes NaN/Infinity as null) -> gzip level 6 when the caller accepts
     it. `Content-Encoding` is set here, so the app-wide GZipMiddleware passes the body
     through untouched (starlette's responder skips a response that already has one).
-    `Vary: Accept-Encoding` is always set, mirroring what the middleware would add."""
+    `Vary: Accept-Encoding` is set exactly once: by us when we gzip (the middleware then
+    passes the body through) or when the body is under the middleware's 1000-byte floor
+    (it leaves such a response alone); for an uncompressed body at or over the floor the
+    middleware's IdentityResponder appends it, so we must not (it would be duplicated).
+
+    A validation failure is re-raised as FastAPI's `ResponseValidationError` (a 500), NOT
+    left as pydantic's `ValidationError`: that is a ValueError, which brain.py's
+    `_value_error_handler` would turn into a 400 echoing the offending row values."""
     t0 = time.perf_counter()
-    model = _TASKS_ADAPTER.validate_python(payload)
+    try:
+        model = _TASKS_ADAPTER.validate_python(payload)
+    except ValidationError as exc:
+        raise ResponseValidationError(errors=exc.errors(include_input=False)) from exc
     t1 = time.perf_counter()
     body = _TASKS_ADAPTER.dump_json(model, by_alias=True)
     t2 = time.perf_counter()
-    headers = {"Vary": "Accept-Encoding"}
+    headers: dict[str, str] = {}
     if "gzip" in accept_encoding.lower() and len(body) >= _GZIP_MIN_BYTES:
         body = gzip.compress(body, compresslevel=_GZIP_LEVEL, mtime=0)
         headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+    elif len(body) < _GZIP_MIN_BYTES:
+        headers["Vary"] = "Accept-Encoding"
     t3 = time.perf_counter()
     if _timings is not None:
         _timings.update(validate=t1 - t0, encode=t2 - t1, gzip=t3 - t2)
@@ -383,7 +408,7 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
     """
     Return tasks as JSON with finish-to-start links and pipeline metadata.
 
-    Stateless: queries Postgres per request (db.query_orders) rather than
+    Stateless: queries Postgres per request (db.query_orders_rows) rather than
     copying an in-memory frame. ?plant= is the scaling unit (bounds the result
     to one plant); ?machine= narrows further; ?limit/?offset= are a coarse guard
     rail for unscoped tooling (links are only coherent within a plant/machine scope).
@@ -430,6 +455,8 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
     t_start = time.perf_counter()
     rows, visibility_horizon_end, frozen_horizon_end = db.query_orders_rows(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
     t_sql = time.perf_counter()
+    if _timings is not None:
+        _timings["sql"] = t_sql - t_start
     if not rows:
         empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
                       "machine_filter_active": machine, "pre_color_merge_count": 0,

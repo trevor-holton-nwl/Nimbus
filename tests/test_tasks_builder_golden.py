@@ -58,6 +58,31 @@ def mk(oid, machine, start, end, **over):
     return row
 
 
+def legacy_segments_to_wire(raw):
+    """FROZEN copy of the pre-rewrite `_schedule_segments_to_wire`: every datetime goes
+    through pandas-based `_to_pydt` (the live version uses `fromisoformat` first)."""
+    if not isinstance(raw, list):
+        return []
+    clean = []
+    for index, segment in enumerate(raw, start=1):
+        if not isinstance(segment, dict):
+            continue
+        start = routes._to_pydt(segment.get("start_date"))
+        end = routes._to_pydt(segment.get("end_date"))
+        if start is None or end is None or end <= start:
+            continue
+        try:
+            sequence = int(segment.get("sequence", index))
+        except (TypeError, ValueError):
+            sequence = index
+        clean.append({
+            "sequence": sequence,
+            "start_date": start.strftime("%Y-%m-%dT%H:%M:%S"),
+            "end_date": end.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+    return clean
+
+
 def legacy_build_tasks(rows, plant, machine=None, paging=False, total=0):
     """Frozen pre-rewrite builder (verbatim logic). Returns the response dict."""
     df = pd.DataFrame(rows, columns=COLS)
@@ -116,7 +141,7 @@ def legacy_build_tasks(rows, plant, machine=None, paging=False, total=0):
                 "PARENT_ORDER": row.get("PARENT_ORDER"),
                 "DISTRIBUTION_LETTER": row.get("DISTRIBUTION_LETTER"),
                 "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,
-                "schedule_segments": routes._schedule_segments_to_wire(row.get("SCHEDULE_SEGMENTS")),
+                "schedule_segments": legacy_segments_to_wire(row.get("SCHEDULE_SEGMENTS")),
                 "runtime_schedule_mismatch": bool(row.get("RUNTIME_SCHEDULE_MISMATCH")),
                 "placement_exception": row.get("PLACEMENT_EXCEPTION") or None,
                 "planning_status": row.get("PLANNING_STATUS") or "scheduled",
@@ -150,10 +175,7 @@ VOLATILE_META = {"server_now", "color_merge_ms"}
 def live_build(monkeypatch, rows, plant, machine=None, limit=None):
     """Drive the real builder with a patched DB reader (works for both the
     DataFrame reader and the rewrite's row-dict reader)."""
-    frame = pd.DataFrame(rows, columns=COLS) if rows else None
-    monkeypatch.setattr(routes.db, "query_orders", lambda **kw: (frame, None, None))
-    monkeypatch.setattr(routes.db, "query_orders_rows",
-                        lambda **kw: (copy.deepcopy(rows), None, None), raising=False)
+    monkeypatch.setattr(routes.db, "query_orders_rows", lambda **kw: (copy.deepcopy(rows), None, None))
     monkeypatch.setattr(routes.db, "count_orders", lambda **kw: 0)
     return routes.build_tasks_payload(plant, machine, limit, None, None)
 
