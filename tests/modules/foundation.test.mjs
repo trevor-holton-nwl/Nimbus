@@ -482,6 +482,8 @@ test('#30 Toast defaults: errors and warnings stay longer than 1.5 s; explicit d
   const realSetTimeout = globalThis.setTimeout;
   const delays = [];
   globalThis.setTimeout = (fn, ms) => { delays.push(ms); return realSetTimeout(() => {}, 0); };
+  const realPush = ErrorLog._push;
+  ErrorLog._push = () => {}; // Toast now logs; keep ErrorLog debounce timers out of the delay capture
   try {
     Toast.show('e-default', 'error');
     Toast.show('w-default', 'warn');
@@ -489,6 +491,7 @@ test('#30 Toast defaults: errors and warnings stay longer than 1.5 s; explicit d
     Toast.show('e-explicit', 'error', 20);
   } finally {
     globalThis.setTimeout = realSetTimeout;
+    ErrorLog._push = realPush;
   }
   assert.deepEqual(delays.filter(d => d !== Config.ANIM_MS), [6000, 4000, 1500, 20]);
 });
@@ -892,4 +895,145 @@ test('fmtDT and fmtDTShort render numeric dates as MM/DD (24h)', () => {
   assert.equal(Util.fmtDTShort(d), '04/22 09:05');
   assert.equal(Util.fmtDT(null), '');
   assert.equal(Util.fmtDTShort('garbage'), '');
+});
+
+/* ---- ErrorLog hardening (Wave 1) ---- */
+function _withFakeToastDom(fn) {
+  const prevDoc = globalThis.document;
+  globalThis.document = _fakeDocument();
+  try { return fn(); } finally { if (prevDoc === undefined) delete globalThis.document; else globalThis.document = prevDoc; }
+}
+
+test('Toast.show logs every call (even deduped, even headless) with level/scope mapping', () => {
+  ErrorLog.clear();
+  Toast.show('headless one', 'error'); // no document at all in Node
+  Toast.show('w', 'warn');
+  Toast.show('i', 'info');
+  Toast.show('s', 'success');
+  const es = ErrorLog.entries();
+  assert.deepEqual(es.map(e => e.level), ['error', 'warn', 'info', 'info']);
+  assert.ok(es.every(e => e.scope === 'toast'));
+  assert.equal(es[0].errorCode, 'toast.error');
+  assert.equal(es[3].errorCode, 'toast.success');
+  assert.equal(es[0].ctx.type, 'error');
+  assert.equal(es[0].ctx.hasAction, false);
+  _withFakeToastDom(() => {
+    ErrorLog.clear();
+    Toast.show('dup log', 'warn', 20);
+    Toast.show('dup log', 'warn', 20);
+    assert.equal(ErrorLog.entries().length, 2);
+  });
+});
+
+test('Toast.show opts: err.stack, reqId and ctx flow into the entry', () => {
+  ErrorLog.clear();
+  const err = new Error('kaboom');
+  Toast.show('with opts', 'error', 20, { label: 'x', run() {} }, { err, reqId: 'r-1', ctx: { foo: 1 } });
+  const e = ErrorLog.entries()[0];
+  assert.equal(e.reqId, 'r-1');
+  assert.equal(e.stack, err.stack);
+  assert.equal(e.ctx.foo, 1);
+  assert.equal(e.ctx.hasAction, true);
+});
+
+test('console.error/warn are captured as scope console, originals still called, no recursion', () => {
+  const prevErr = console.error, prevWarn = console.warn;
+  const seen = [];
+  console.error = (...a) => seen.push(['e', ...a]);
+  console.warn = (...a) => seen.push(['w', ...a]);
+  const prevWindow = globalThis.window;
+  globalThis.window = { addEventListener() {} };
+  const prevInstalled = ErrorLog._globalsInstalled;
+  ErrorLog._globalsInstalled = false;
+  try {
+    ErrorLog.installGlobalHandlers();
+    ErrorLog.clear();
+    seen.length = 0;
+    console.error('boom', { a: 1 }, new Error('inner'));
+    console.warn('careful');
+    const es = ErrorLog.entries().filter(e => e.scope === 'console');
+    assert.equal(es.length, 2);
+    assert.equal(es[0].level, 'error');
+    assert.equal(es[0].errorCode, 'console.error');
+    assert.match(es[0].msg, /boom \{"a":1\} inner/);
+    assert.ok(es[0].stack.includes('inner'));
+    assert.equal(es[1].errorCode, 'console.warn');
+    // originals called exactly once each (no mirror duplicate for console-scope entries)
+    assert.equal(seen.length, 2);
+    // an ErrorLog push mirrors via the saved original, and is not re-captured
+    ErrorLog.clear(); seen.length = 0;
+    ErrorLog.error('unit-test', 'direct');
+    assert.equal(ErrorLog.entries().length, 1);
+    assert.equal(seen.length, 1);
+  } finally {
+    console.error = prevErr; console.warn = prevWarn;
+    if (prevWindow === undefined) delete globalThis.window; else globalThis.window = prevWindow;
+    ErrorLog._globalsInstalled = prevInstalled;
+  }
+});
+
+test('state providers run on error level only, throwing ones are ignored, JSON capped at 2 KB', () => {
+  ErrorLog.clear();
+  const off1 = ErrorLog.registerStateProvider('good', () => ({ n: 1 }));
+  const off2 = ErrorLog.registerStateProvider('bad', () => { throw new Error('x'); });
+  const off3 = ErrorLog.registerStateProvider('huge', () => ({ s: 'x'.repeat(5000) }));
+  try {
+    ErrorLog.warn('unit-test', 'no state');
+    ErrorLog.error('unit-test', 'with state', { k: 1 });
+    const [w, e] = ErrorLog.entries();
+    assert.ok(!w.ctx || w.ctx.state === undefined);
+    assert.deepEqual(e.ctx.state.good, { n: 1 });
+    assert.equal(e.ctx.state.bad, undefined);
+    assert.equal(e.ctx.state.huge._truncated, true);
+    assert.ok(e.ctx.state.huge.bytes > 2048);
+    assert.equal(e.ctx.k, 1);
+  } finally { off1(); off2(); off3(); }
+  ErrorLog.clear();
+  ErrorLog.error('unit-test', 'after unregister');
+  assert.equal(ErrorLog.entries()[0].ctx?.state, undefined);
+});
+
+test('entries carry user from the actor resolver; ship payload copies it; _ringKey is per actor', () => {
+  ErrorLog.clear();
+  Util.setActorResolver(() => 'a@b.com');
+  try {
+    assert.equal(ErrorLog._ringKey(), 'entries:a@b.com');
+    ErrorLog._shipQueue.length = 0;
+    ErrorLog.error('unit-test', 'who');
+    const e = ErrorLog.entries()[0];
+    assert.equal(e.user, 'a@b.com');
+    assert.equal(ErrorLog._shipQueue[ErrorLog._shipQueue.length - 1].user, 'a@b.com');
+    ErrorLog._shipQueue.length = 0;
+    Util.setActorResolver(() => undefined);
+    assert.equal(ErrorLog._ringKey(), 'entries:system');
+  } finally { Util.setActorResolver(() => undefined); }
+});
+
+test('ErrorLog.MAX is 800 and exportJsonPayload has the documented shape', () => {
+  assert.equal(ErrorLog.MAX, 800);
+  ErrorLog.clear();
+  Util.setActorResolver(() => 'u@x.com');
+  try {
+    ErrorLog.warn('unit-test', 'one');
+    const p = ErrorLog.exportJsonPayload();
+    assert.deepEqual(Object.keys(p).sort(),
+      ['buildId', 'dropped', 'entries', 'exportedAt', 'plant', 'route', 'sessionId', 'user']);
+    assert.equal(p.user, 'u@x.com');
+    assert.equal(p.sessionId, ErrorLog.SESSION_ID);
+    assert.equal(p.dropped, 0);
+    assert.equal(p.entries.length, 1);
+    assert.ok(!Number.isNaN(Date.parse(p.exportedAt)));
+    JSON.stringify(p);
+  } finally { Util.setActorResolver(() => undefined); }
+});
+
+test('fetchTraced maps a real 409 to errorCode http.conflict', async () => {
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('{"detail":"x"}', { status: 409 });
+  try {
+    ErrorLog.clear();
+    await Util.fetchTraced('http://x/y');
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(ErrorLog.entries()[0].errorCode, 'http.conflict');
+  } finally { globalThis.fetch = prevFetch; }
 });
