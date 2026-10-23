@@ -17,7 +17,7 @@ def schedule_events_for_order(
     order_id: str,
     response: Response,
     limit: int = Query(50, ge=1, le=200),
-    before_id: int | None = Query(None, ge=1),
+    before_id: int | None = Query(None, ge=1, le=9223372036854775807),
     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
 ):
     try:

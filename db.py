@@ -2220,7 +2220,7 @@ def purge_orders_by_ids(plant: str, ids: list[str], *, user_email: str | None = 
                 cur.execute(
                     "SELECT order_id, row_to_json(s) FROM order_schedule_segments s"
                     " WHERE order_id = ANY(%s)", (locked,))
-                segs: dict = {}
+                segs = {}
                 for oid, js in cur.fetchall():
                     segs.setdefault(oid, []).append(js)
                 cur.execute(
@@ -2442,15 +2442,19 @@ def get_db_deep_stats() -> dict:
 
 
 def get_schedule_event_stats() -> dict:
-    """Row count and oldest/newest `at` of schedule_event; nulls when the table is missing or unreachable."""
+    """Estimated row count (`pg_class.reltuples`, a catalog read: an exact `count(*)` would scan millions of
+    rows on every diagnostics call) and oldest/newest `at` (both served by the `(at)` index) of schedule_event.
+    `rows_estimate` is null before the first ANALYZE and when the table is missing or unreachable."""
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT count(*), min(at), max(at) FROM schedule_event")
+            cur.execute("SELECT c.reltuples::bigint, (SELECT min(at) FROM schedule_event),"
+                        " (SELECT max(at) FROM schedule_event) FROM pg_class c WHERE c.oid = 'schedule_event'::regclass")
             n, lo, hi = cur.fetchone()
-        return {"rows": int(n), "oldest_at": lo.isoformat() if lo else None,
+        return {"rows_estimate": int(n) if n is not None and n >= 0 else None,
+                "oldest_at": lo.isoformat() if lo else None,
                 "newest_at": hi.isoformat() if hi else None}
     except Exception:
-        return {"rows": None, "oldest_at": None, "newest_at": None}
+        return {"rows_estimate": None, "oldest_at": None, "newest_at": None}
 
 
 def get_pool_stats() -> dict:

@@ -27,7 +27,7 @@ is no more global fallback wheel — COLOR_FILE/GLOBAL_CW are retired.
 P5 (docs/architecture/domain-refactor-plan.md) reorganized this file from
 ~4,074 lines holding all 103 routes down to this thin app-assembly file: app
 construction, middleware, exception handlers, lifespan bootstrap,
-`include_router` calls for the twelve domain routers, and the StaticFiles mount
+`include_router` calls for the thirteen domain routers, and the StaticFiles mount
 (kept last). Routes themselves now live in `backend/<domain>/routes.py`; four
 whole modules moved to `backend/`: `auth.py` -> `backend/security/auth.py`,
 `setup_data.py` -> `backend/setup/data.py`, `admin_tables.py` ->
@@ -409,6 +409,7 @@ async def lifespan(app: FastAPI):
                    interval_hours=24, first_run_seconds=60)
     except Exception as e:
         _log_event("error", "startup", "Background scheduler failed to start", exc=e)
+        DIAGNOSTICS["schedule_event_last_sweep"] = {"error": "scheduler not started"}
     if SAP_STAGING_POLL_SECONDS <= 0:
         _log_event("info", "sap_staging", "SAP staging poll disabled (NIMBUS_SAP_STAGING_POLL_SECONDS not set)")
 
@@ -830,8 +831,9 @@ def _admin_route_details(request: Request) -> tuple[str | None, dict]:
 
 
 # =========================
-# ROUTERS — twelve domain-scoped routers (nine from docs/architecture/domain-refactor-plan.md
-# §4, plus backend/distribution/ added 2026-09-17 per aggregate_to_detail.md; imported at
+# ROUTERS — thirteen domain-scoped routers (nine from docs/architecture/domain-refactor-plan.md
+# §4, plus backend/distribution/ added 2026-09-17 per aggregate_to_detail.md, backend/alert_profiles/ and
+# backend/schedule_events/; imported at
 # the top of this file — the module objects are already bound here)
 # =========================
 api.include_router(scheduling_routes.router)

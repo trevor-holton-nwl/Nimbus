@@ -389,7 +389,9 @@ def test_sweep_removes_only_rows_older_than_retention(se):
                 " now() - make_interval(days => %s))",
                 (se.plant, oid, str(uuid.uuid4()), se.actor, days))
         conn.commit()
-    result = data.sweep_schedule_events(retention_days=14, chunk=1, pause_s=0)
+    # the sweep is global (other rows older than 14 days may exist): give it enough chunks to reach all of
+    # this test's rows, and assert only on this test's plant below
+    result = data.sweep_schedule_events(retention_days=14, chunk=1, max_chunks=1_000_000, pause_s=0)
     assert result["error"] is None and result["locked"] is False and result["retention_days"] == 14
     assert result["deleted"] >= 3 and result["chunks"] >= 3
     with se.db._pool.connection() as conn, conn.cursor() as cur:

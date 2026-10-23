@@ -239,7 +239,7 @@ def test_deep_diagnostics_normalizes_distinct_colors_and_uses_plant_wide_lists(o
 
 def test_deep_diagnostics_retains_db_results_when_color_query_fails(ops, monkeypatch):
     monkeypatch.setattr(db, "get_db_deep_stats", lambda: {"orders": 42})
-    monkeypatch.setattr(db, "get_schedule_event_stats", lambda: {"rows": None})
+    monkeypatch.setattr(db, "get_schedule_event_stats", lambda: {"rows_estimate": None})
     monkeypatch.setattr(db, "distinct_order_colors", MagicMock(side_effect=RuntimeError("color query failed")))
     response = ops.get("/diagnostics/deep", headers=ADMIN)
     assert response.status_code == 200
@@ -300,12 +300,12 @@ def test_schedule_event_sweep_route_forwards_override(ops, monkeypatch, body, ex
 def test_diagnostics_deep_includes_schedule_event_block(ops, monkeypatch):
     monkeypatch.setattr(db, "get_db_deep_stats", lambda: {"total": 0, "by_line": {}})
     monkeypatch.setattr(db, "get_schedule_event_stats",
-                        lambda: {"rows": 5, "oldest_at": "2026-10-01T00:00:00+00:00", "newest_at": "2026-10-23T00:00:00+00:00"})
+                        lambda: {"rows_estimate": 5, "oldest_at": "2026-10-01T00:00:00+00:00", "newest_at": "2026-10-23T00:00:00+00:00"})
     monkeypatch.setattr(db, "distinct_order_colors", lambda: [])
     routes.DIAGNOSTICS["schedule_event_last_sweep"] = {"deleted": 2}
     routes.DIAGNOSTICS["schedule_event_write_failures"] = 4
     response = ops.get("/diagnostics/deep", headers=ADMIN)
     assert response.status_code == 200
     block = response.json()["db_stats"]["schedule_event"]
-    assert block == {"rows": 5, "oldest_at": "2026-10-01T00:00:00+00:00", "newest_at": "2026-10-23T00:00:00+00:00",
+    assert block == {"rows_estimate": 5, "oldest_at": "2026-10-01T00:00:00+00:00", "newest_at": "2026-10-23T00:00:00+00:00",
                      "last_sweep": {"deleted": 2}, "write_failures": 4}
