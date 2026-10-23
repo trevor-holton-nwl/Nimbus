@@ -523,3 +523,128 @@ test('master-data-changed clears the selected plant\'s SetupAdmin scope caches s
     Store.setMasterData(priorMasterData, 'test-restore');
   }
 });
+
+// ── Mass-upload validation: resolveFromKey cache, counted reads, debounce (workload relief step 4) ──────────────
+
+/** The pre-cache implementation, kept verbatim as the parity oracle: rebuild the cartesian states and `find` the first match. */
+function legacyResolveFromKey(fields, filterText, rankMaps, lineScope) {
+  const q = filterText.trim();
+  if (!q) return null;
+  const valuesByField = {};
+  fields.forEach(field => { valuesByField[field] = SetupAdmin.fieldValueSet(rankMaps, field, lineScope); });
+  const candidates = SetupAdmin.cartesianStates(fields, valuesByField);
+  const match = candidates.find(state => state.parts.join(' · ').toLowerCase() === q.toLowerCase() || state.sig === q);
+  return match ? match.key : null;
+}
+
+function withRankMaps(maps, fn) {
+  const prior = Store.priorityRankMaps;
+  Store.setPriorityRankMaps(maps, 'unit-test');
+  try { return fn(); } finally { Store.setPriorityRankMaps(prior, 'unit-test'); }
+}
+
+const rankMapsFor = (colors, tools, lineColors = []) => ({
+  '': { colorWheel: Object.fromEntries(colors.map((c, i) => [c, i + 1])), prt01: Object.fromEntries(tools.map((t, i) => [t, i + 1])) },
+  ...(lineColors.length ? { 'L-9': { colorWheel: Object.fromEntries(lineColors.map((c, i) => [c, i + 1])) } } : {}),
+});
+
+test('resolveFromKey matches the old linear find: display text (case-insensitive), signature, misses and blanks', () => {
+  const fields = ['colorWheel', 'prt01'];
+  const maps = rankMapsFor(['Blue', 'Red', 'green'], ['T1', 'T2']);
+  withRankMaps(maps, () => {
+    const probes = ['Blue · T1', 'blue · t1', 'RED · T2', 'green · T2', 'colorWheel=Red|prt01=T1', 'prt01=T1|colorWheel=Red',
+      'Red', 'Blue · T9', '', '   ', 'Blue · T1 '];
+    for (const probe of probes) {
+      assert.deepEqual(SetupAdmin.resolveFromKey(fields, probe, ''), legacyResolveFromKey(fields, probe, maps, ''), `probe "${probe}"`);
+    }
+  });
+});
+
+test('resolveFromKey keeps the FIRST state when two values collide case-insensitively', () => {
+  const fields = ['colorWheel'];
+  const maps = rankMapsFor(['Blue', 'BLUE', 'blue'], []);
+  maps[''].prt01 = {};
+  withRankMaps(maps, () => {
+    for (const probe of ['blue', 'BLUE', 'Blue']) {
+      assert.deepEqual(SetupAdmin.resolveFromKey(fields, probe, ''), legacyResolveFromKey(fields, probe, maps, ''), probe);
+    }
+    // A display-text hit at a later index must lose to a signature hit at an earlier one (smaller index wins).
+    const sigProbe = 'colorWheel=BLUE';
+    assert.deepEqual(SetupAdmin.resolveFromKey(fields, sigProbe, ''), legacyResolveFromKey(fields, sigProbe, maps, ''));
+  });
+});
+
+test('resolveFromKey cache invalidates on new rank maps, a different line scope and different fields', () => {
+  const fields = ['colorWheel'];
+  const first = rankMapsFor(['Blue'], []);
+  withRankMaps(first, () => {
+    assert.ok(SetupAdmin.resolveFromKey(fields, 'Blue', ''));
+    assert.equal(SetupAdmin.resolveFromKey(fields, 'Violet', ''), null);
+    // New rank-maps object: a value that only exists in the new maps must resolve.
+    const second = rankMapsFor(['Blue', 'Violet'], []);
+    Store.setPriorityRankMaps(second, 'unit-test');
+    assert.ok(SetupAdmin.resolveFromKey(fields, 'Violet', ''));
+    // Line scope: 'Teal' exists only in line L-9's override map.
+    const third = rankMapsFor(['Blue'], [], ['Teal']);
+    Store.setPriorityRankMaps(third, 'unit-test');
+    assert.equal(SetupAdmin.resolveFromKey(fields, 'Teal', ''), null, 'plant scope does not see the line-only value');
+    assert.ok(SetupAdmin.resolveFromKey(fields, 'Teal', 'L-9'), 'line scope does');
+    assert.equal(SetupAdmin.resolveFromKey(fields, 'Teal', ''), null, 'and switching back is not served from the line-scope entry');
+    // Fields: a two-field signature changes the state shape.
+    const key = SetupAdmin.resolveFromKey(['colorWheel', 'prt01'], 'Blue · T1', '');
+    assert.equal(key, null, 'no prt01 values in these maps');
+    const fourth = rankMapsFor(['Blue'], ['T1']);
+    Store.setPriorityRankMaps(fourth, 'unit-test');
+    assert.equal(SetupAdmin.resolveFromKey(['colorWheel', 'prt01'], 'Blue · T1', '').length, 2);
+    assert.equal(SetupAdmin.resolveFromKey(['colorWheel'], 'Blue · T1', ''), null);
+  });
+});
+
+test('counted: validating 2,000 pasted rows reads the rank maps the same number of times as validating 20', () => {
+  const fields = ['colorWheel', 'prt01'];
+  const colors = Array.from({ length: 30 }, (_, i) => `COLOR${i}`);
+  const tools = Array.from({ length: 10 }, (_, i) => `TOOL${i}`);
+  const plain = rankMapsFor(colors, tools);
+  const definition = { plant: 'P', fields, signature_version: 1, strict_blanks: true, active: true };
+  const lines = n => Array.from({ length: n }, (_, i) =>
+    `${colors[i % 30]}|${tools[i % 10]}\t${colors[(i + 1) % 30]}|${tools[(i + 3) % 10]}\t${10 + (i % 50)}`).join('\n');
+  const count = n => {
+    let reads = 0;
+    // Count every read of the maps, including the nested per-field maps.
+    const deep = new Proxy({}, { get(_t, key) { reads++; const v = plain[key]; return v && new Proxy(v, { get(t2, k2, r2) { reads++; return Reflect.get(t2, k2, r2); } }); },
+      ownKeys: () => Reflect.ownKeys(plain), getOwnPropertyDescriptor: (_t, key) => ({ ...Reflect.getOwnPropertyDescriptor(plain, key), configurable: true }), has: (_t, key) => key in plain });
+    return withRankMaps(deep, () => {
+      const outcome = SetupAdmin.parseMassUploadText(lines(n), definition, [], false, undefined, '');
+      assert.equal(outcome.ready.length, n);
+      return reads;
+    });
+  };
+  const small = count(20);
+  const large = count(2000);
+  assert.ok(small > 0, 'the rank maps were consulted');
+  assert.equal(large, small, 'rank-map reads must not grow with the row count');
+});
+
+test('createDebouncedValidator: trailing run after the delay, flush runs a pending pass once, cancel drops it', () => {
+  const timers = [];
+  let now = 0;
+  const fake = {
+    set: (fn, ms) => { const t = { fn, at: now + ms, live: true }; timers.push(t); return t; },
+    clear: t => { t.live = false; },
+  };
+  const advance = ms => { now += ms; timers.filter(t => t.live && t.at <= now).forEach(t => { t.live = false; t.fn(); }); };
+  let runs = 0;
+  const v = SetupAdmin.createDebouncedValidator(() => { runs++; }, 150, fake);
+  v.schedule(); advance(100); v.schedule(); advance(100);
+  assert.equal(runs, 0, 'each keystroke restarts the 150 ms window');
+  advance(60);
+  assert.equal(runs, 1, 'runs once, trailing');
+  v.schedule(); v.flush();
+  assert.equal(runs, 2, 'flush runs the pending pass immediately');
+  advance(500);
+  assert.equal(runs, 2, 'and the flushed timer does not fire again');
+  v.flush();
+  assert.equal(runs, 2, 'flush with nothing pending is a no-op');
+  v.schedule(); v.cancel(); advance(500);
+  assert.equal(runs, 2, 'cancel drops a pending pass (modal closed)');
+});
