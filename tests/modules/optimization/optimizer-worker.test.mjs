@@ -249,6 +249,42 @@ test('real optimizer worker boundary localizes its deadline and round-trips effe
     'plant-scoped worker metadata must rehydrate on the main thread');
 });
 
+test('worker round-trip carries user_scheduled and holds a window-end straddler (windowEndHeldIds is clone-safe)', () => {
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const workerSnapshot = {
+    ...snapshot,
+    selectedPlant: 'P',
+    tasks: [
+      { id: 'worker-straddle', PLANT: 'P', MACHINE: 'L1', COLOR: 'GREEN', RUN_TIME: 8, user_scheduled: true,
+        planning_status: 'scheduled',
+        start_date: new Date('2035-08-10T20:00:00'), end_date: new Date('2035-08-11T04:00:00') },
+      { id: 'worker-free', PLANT: 'P', MACHINE: 'L1', COLOR: 'GREEN', RUN_TIME: 2,
+        original_end_date: new Date('2035-08-10T12:00:00') },
+    ],
+    calendars: { L1: { workHours: hours } }, plants: { P: { workHours: hours } },
+    masterData: { plants: [{ plant: 'P' }], lines: [{ plant: 'P', machine: 'L1' }] },
+    setupSnapshot: {
+      plant: 'P', plant_active: true,
+      definition: { plant: 'P', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true },
+      plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
+    },
+    frozenHorizonEnd: new Date('2035-08-07T00:00:00'),
+  };
+  const request = {
+    runId: 'worker-straddle', mode: 'changeover', snapshot: workerSnapshot, deadlineDurationMs: 2000,
+    request: {
+      mode: 'changeover', plant: 'P', respectFirmed: true, respectCalendar: false,
+      planningStart: new Date('2035-08-06T08:00:00'), runNow: new Date('2035-08-06T08:00:00'),
+      endDate: new Date('2035-08-11T00:00:00'),
+    },
+  };
+  const response = buildOptimizerWorkerResponse(structuredClone(request), () => 5000);
+  assert.deepEqual([...response.candidate.windowEndHeldIds], ['worker-straddle']);
+  assert.equal(response.candidate.patches.some(p => p.id === 'worker-straddle'), false);
+  const rehydrated = rehydrateOptimizerCandidate(response.candidate, workerSnapshot, response.validation);
+  assert.deepEqual(validateCandidateForApply(rehydrated, workerSnapshot).filter(f => f.severity === 'error'), []);
+});
+
 test('real optimizer worker preserves validation metadata on the legacy fallback path', () => {
   const legacySnapshot = {
     ...snapshot,
