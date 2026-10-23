@@ -70,6 +70,7 @@ from psycopg.types.json import Jsonb
 
 import db
 from db import _pool
+from backend.schedule_events import events as sched_events
 
 # ---------------------------------------------------------------------------
 # §5.3 units -- hour-equivalent units convert at x1, minutes at 1/60, seconds
@@ -780,7 +781,16 @@ def _build_write_row(order: dict, result: dict, new_pv: str | None = None):
 _WRITE_CHUNK = 5000
 
 
-def _write_outcomes(cur, rows: list[tuple]) -> None:
+def _status_code(status, reason) -> str | None:
+    """`planning_status` as the schedule_event history spells it: a hold carries its reason code
+    ('needs_planning:runtime_unknown'); any other status is returned as-is."""
+    if status == "needs_planning":
+        code = reason.get("code") if isinstance(reason, dict) else None
+        return f"needs_planning:{code}" if code else "needs_planning"
+    return status
+
+
+def _write_outcomes(cur, rows: list[tuple], *, ev=None, before_by_id: dict | None = None) -> None:
     """ONE set-based UPDATE ... FROM (VALUES ...) for every non-held outcome
     (resolved / fallback_sap_order / fallback_legacy) in this resolve run --
     run_time/source/basis vary per row (inherent to the data), but this is
@@ -793,10 +803,10 @@ def _write_outcomes(cur, rows: list[tuple]) -> None:
     # every other multi-row writer of orders locks in id order.
     rows = sorted(rows, key=lambda r: r[0])
     for i in range(0, len(rows), _WRITE_CHUNK):
-        _write_outcomes_chunk(cur, rows[i:i + _WRITE_CHUNK])
+        _write_outcomes_chunk(cur, rows[i:i + _WRITE_CHUNK], ev=ev, before_by_id=before_by_id)
 
 
-def _write_outcomes_chunk(cur, rows: list[tuple]) -> None:
+def _write_outcomes_chunk(cur, rows: list[tuple], *, ev=None, before_by_id: dict | None = None) -> None:
     placeholders = ", ".join(
         ["(%s::text, %s::numeric, %s::text, %s::jsonb, %s::boolean, %s::boolean, %s::text)"] * len(rows)
     )
@@ -820,10 +830,27 @@ def _write_outcomes_chunk(cur, rows: list[tuple]) -> None:
         "        OR (v.release_hold AND o.planning_status = 'needs_planning')"
         "        OR (v.set_mismatch AND o.runtime_schedule_mismatch IS DISTINCT FROM TRUE))"
     )
-    cur.execute(query, params)
+    if ev is None:
+        cur.execute(query, params)
+        return
+    # The change-only WHERE already limits the rows to real changes, so RETURNING is exactly the set to
+    # record. Before-image = the in-memory `_load_orders` row (same transaction, nothing wrote since).
+    cur.execute(query + " RETURNING o.id, o.plant, o.production_order, o.material_number, o.run_time,"
+                " o.production_version, o.planning_status, o.planning_reason", params)
+    events = []
+    for oid, plant, po, mat, run_time, pv, status, reason in cur.fetchall():
+        prior = (before_by_id or {}).get(oid) or {}
+        before = {"run_time": prior.get("run_time"), "production_version": prior.get("production_version"),
+                  "planning_status": _status_code(prior.get("planning_status"), prior.get("planning_reason"))}
+        after = {"run_time": run_time, "production_version": pv,
+                 "planning_status": _status_code(status, reason)}
+        events.append(sched_events.EventRow(
+            plant=plant, order_id=oid, production_order=po, material_number=mat, op="modify",
+            changes=sched_events.diff_tracked(before, after) or {}, source="routing_recompute"))
+    sched_events.record(cur, ev, events)
 
 
-def _write_holds(cur, rows: list[tuple]) -> None:
+def _write_holds(cur, rows: list[tuple], *, ev=None) -> None:
     """ONE set-based UPDATE ... FROM (VALUES ...) for every held outcome.
     Clears scheduled_start/scheduled_end alongside planning_status/
     planning_reason (judgment call #6, module docstring) -- required by the
@@ -832,10 +859,10 @@ def _write_holds(cur, rows: list[tuple]) -> None:
     already held has them NULL already, so this is a no-op for it."""
     rows = sorted(rows, key=lambda r: r[0])   # id order, like every other multi-row orders writer
     for i in range(0, len(rows), _WRITE_CHUNK):
-        _write_holds_chunk(cur, rows[i:i + _WRITE_CHUNK])
+        _write_holds_chunk(cur, rows[i:i + _WRITE_CHUNK], ev=ev)
 
 
-def _write_holds_chunk(cur, rows: list[tuple]) -> None:
+def _write_holds_chunk(cur, rows: list[tuple], *, ev=None) -> None:
     placeholders = ", ".join(["(%s::text, %s::jsonb)"] * len(rows))
     params = [v for row in rows for v in row]
     # Only rows that actually transition into (or change within) the hold are locked,
@@ -852,12 +879,18 @@ def _write_holds_chunk(cur, rows: list[tuple]) -> None:
         "        OR o.placement_exception IS NOT NULL"
         "        OR o.manual_firmed IS TRUE)"
     )
+    # The pre-lock SELECT selects exactly the rows the CTE UPDATE below changes (same predicate, same
+    # transaction), so its values are the before-images for schedule_event history.
     cur.execute(
-        "SELECT o.id FROM orders o"
+        "SELECT o.id, o.plant, o.production_order, o.material_number, o.planning_status, o.planning_reason,"
+        " o.scheduled_start, o.scheduled_end, o.manual_firmed,"
+        " (SELECT COUNT(*) FROM order_schedule_segments s WHERE s.order_id = o.id) AS segment_count"
+        " FROM orders o"
         f" JOIN (VALUES {placeholders}) AS v(id, reason) ON o.id = v.id"
         " WHERE TRUE" + changed + " ORDER BY o.id FOR UPDATE OF o",
         params,
     )
+    locked = cur.fetchall() if ev is not None else []
     query = (
         "WITH upd AS (UPDATE orders o SET"
         " planning_status = 'needs_planning',"
@@ -878,6 +911,18 @@ def _write_holds_chunk(cur, rows: list[tuple]) -> None:
         " DELETE FROM order_schedule_segments WHERE order_id IN (SELECT id FROM upd)"
     )
     cur.execute(query, params)
+    if ev is not None and locked:
+        written = {r[0]: (r[1].obj if isinstance(r[1], Jsonb) else r[1]) for r in rows}
+        events = []
+        for oid, plant, po, mat, status, reason, s_start, s_end, firmed, seg_n in locked:
+            before = {"planning_status": _status_code(status, reason), "scheduled_start": s_start,
+                      "scheduled_end": s_end, "manual_firmed": firmed, "segments": int(seg_n or 0)}
+            after = {"planning_status": _status_code("needs_planning", written.get(oid)),
+                     "scheduled_start": None, "scheduled_end": None, "manual_firmed": False, "segments": 0}
+            events.append(sched_events.EventRow(
+                plant=plant, order_id=oid, production_order=po, material_number=mat, op="modify",
+                changes=sched_events.diff_tracked(before, after) or {}, source="routing_hold"))
+        sched_events.record(cur, ev, events)
 
 
 def _new_report(is_cutover: bool) -> dict:
@@ -896,7 +941,8 @@ def _new_report(is_cutover: bool) -> dict:
 
 
 def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full: bool = False,
-                            ids: list[str] | None = None, protect_ids: list[str] | None = None) -> dict:
+                            ids: list[str] | None = None, protect_ids: list[str] | None = None,
+                            ev=None) -> dict:
     """Does the real work of `resolve_orders` on an already-open connection;
     never commits (that's `resolve_orders`' job -- either its own, for a
     connection it opened itself, or the caller's, for one it was given)."""
@@ -1056,15 +1102,16 @@ def _resolve_orders_on_conn(plant: str, conn, batch_id: str | None = None, full:
             report["over_cap"] = report.get("over_cap", 0) + 1
             held_rows.append((order["id"], Jsonb(db.run_time_over_cap_reason(run_time, plant_cap))))
 
-        _write_outcomes(cur, write_rows)
-        _write_holds(cur, held_rows)
+        _write_outcomes(cur, write_rows, ev=ev, before_by_id={o["id"]: o for o in orders})
+        _write_holds(cur, held_rows, ev=ev)
 
     report["unmapped_workcenters"] = sorted(unmapped_workcenters)
     return report
 
 
 def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: bool = False,
-                   ids: list[str] | None = None, protect_ids: list[str] | None = None) -> dict:
+                   ids: list[str] | None = None, protect_ids: list[str] | None = None,
+                   actor: str | None = None, ev=None) -> dict:
     """§5's thin DB wrapper -- the shape a later task wires into
     `db.upsert_orders`'s `resolve_fn` seam.
 
@@ -1082,16 +1129,23 @@ def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: 
     `protect_ids` (db.upsert_orders passes the orders it just kept in place because
     they are running) are never held; a RUNNING order is never held on any path,
     whether or not the caller lists it.
+
+    Schedule-event history is ON by default here (the resolver runs post-commit with no user action, so
+    it would otherwise be invisible to planners): `ev` wins; else `actor` mints a 'routing_recompute'
+    context; else the actor is 'system'.
     """
+    if ev is None:
+        ev = sched_events.EventCtx(source="routing_recompute", actor=actor or "system",
+                                   action_id=sched_events.new_action_id())
     if conn is not None:
-        return _resolve_orders_on_conn(plant, conn, batch_id, full, ids, protect_ids)
+        return _resolve_orders_on_conn(plant, conn, batch_id, full, ids, protect_ids, ev)
     with _pool.connection() as new_conn:
-        report = _resolve_orders_on_conn(plant, new_conn, batch_id, full, ids, protect_ids)
+        report = _resolve_orders_on_conn(plant, new_conn, batch_id, full, ids, protect_ids, ev)
         new_conn.commit()
         return report
 
 
-def recompute_plants(plants: Iterable[str]) -> None:
+def recompute_plants(plants: Iterable[str], *, actor: str | None = None) -> None:
     """§6.4's recompute hook: after a committed write to `production_version`/
     `routing_operation` touches one or more plants, resolve each of them
     (blank plants ignored, each plant once, in sorted order). Best-effort per
@@ -1101,7 +1155,7 @@ def recompute_plants(plants: Iterable[str]) -> None:
     from backend.admin_ops.logbuffer import _log_event
     for plant in sorted({p for p in plants if p}):
         try:
-            resolve_orders(plant)
+            resolve_orders(plant, actor=actor)
         except Exception as e:
             _log_event("warn", "routing", "Recompute after routing upload failed", plant=plant, error=str(e))
 

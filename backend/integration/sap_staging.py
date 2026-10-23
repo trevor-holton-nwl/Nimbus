@@ -1681,7 +1681,7 @@ def _apply_production_versions(conn, hdr, actor: str, step) -> dict:
                                   [f"{d['material_id']}/{d['production_version']}" for d in done], flagged)
 
     step("recompute")
-    resolver.recompute_plants([plant])
+    resolver.recompute_plants([plant], actor=actor)
     return {"inserted": int(res.get("inserted", 0)), "updated": int(res.get("updated", 0)),
             "deleted": deleted, "flagged": flagged, "rejected_at_apply": len(rejected_now)}
 
@@ -1735,7 +1735,7 @@ def _apply_routing_operations(conn, hdr, actor: str, step) -> dict:
     conn.commit()
 
     step("recompute")
-    resolver.recompute_plants([plant])
+    resolver.recompute_plants([plant], actor=actor)
     return {"inserted": inserted, "deleted": deleted, "rejected_at_apply": len(rejected_now)}
 
 
