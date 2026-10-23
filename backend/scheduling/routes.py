@@ -10,12 +10,15 @@ only the file that owns them changed. `_clean_id`, `_to_pydt`,
 `_schedule_segments_to_wire`, and `_apply_task_date_updates` are private
 helpers used only within this domain and moved along with their callers.
 """
+import gzip
 import time
 from datetime import datetime, timezone
 
 import pandas as pd
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
+from pydantic import TypeAdapter
 
 import db
 import master_data as md
@@ -316,14 +319,67 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
                   description="Max rows to return. Omit for the full plant-scoped list."),
               offset: int | None = Query(default=None, ge=0,
                   description="Rows to skip before returning (for paging)."),
-              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Thin route wrapper: the payload builder is `build_tasks_payload` (kept
-    callable without FastAPI so tests and benchmarks can drive it directly)."""
-    return build_tasks_payload(plant, machine, limit, offset, allowed_plants)
+              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+              request: Request = None):
+    """
+    Return tasks as JSON with finish-to-start links and pipeline metadata.
+
+    Stateless: queries Postgres per request (db.query_orders) rather than
+    copying an in-memory frame. ?plant= is the scaling unit (bounds the result
+    to one plant); ?machine= narrows further; ?limit/?offset= are a coarse guard
+    rail for unscoped tooling (links are only coherent within a plant/machine scope).
+    Color merge still runs per-request from the in-process color-wheel cache.
+    Response: { data: Task[], links: Link[], meta: DiagnosticsDict }
+    When ?limit/?offset= are supplied, meta.total carries the full filtered
+    row count (ignoring limit/offset) so callers can paginate.
+
+    Per-user plant scope (role_plants, via auth.get_allowed_plants) is
+    enforced here: an explicit ?plant= (or the plant a ?machine= resolves to)
+    outside the caller's allowed set 403s; an unscoped (?limit=-only) pull
+    is silently bounded to the allowed set rather than rejected.
+    """
+    # NOTE (kept out of the docstring: it is the OpenAPI description). This is a sync `def`, so
+    # FastAPI runs it in the threadpool and EVERYTHING heavy happens off the event loop: build the
+    # payload, validate it with the same `TasksResponse` model the decorator advertises (returning
+    # a Response skips FastAPI's own response_model pass, so validation is explicit here), encode
+    # to JSON bytes and gzip them. `response_model=` stays on the decorator so OpenAPI is unchanged.
+    timings: dict = {}
+    payload = build_tasks_payload(plant, machine, limit, offset, allowed_plants, _timings=timings)
+    accept = request.headers.get("accept-encoding", "") if request is not None else ""
+    response = encode_tasks_response(payload, accept, _timings=timings)
+    _log_tasks_timing(plant, len(payload["data"]), **timings)
+    return response
+
+
+_TASKS_ADAPTER = TypeAdapter(TasksResponse)
+_GZIP_MIN_BYTES = 1000      # same floor as the app-wide GZipMiddleware
+_GZIP_LEVEL = 6
+
+
+def encode_tasks_response(payload: dict, accept_encoding: str = "", *, _timings: dict | None = None) -> Response:
+    """Validate -> JSON bytes (by_alias, so `ORDER_QUANTITY_(GMEIN)` etc. keep their wire
+    names; pydantic writes NaN/Infinity as null) -> gzip level 6 when the caller accepts
+    it. `Content-Encoding` is set here, so the app-wide GZipMiddleware passes the body
+    through untouched (starlette's responder skips a response that already has one).
+    `Vary: Accept-Encoding` is always set, mirroring what the middleware would add."""
+    t0 = time.perf_counter()
+    model = _TASKS_ADAPTER.validate_python(payload)
+    t1 = time.perf_counter()
+    body = _TASKS_ADAPTER.dump_json(model, by_alias=True)
+    t2 = time.perf_counter()
+    headers = {"Vary": "Accept-Encoding"}
+    if "gzip" in accept_encoding.lower() and len(body) >= _GZIP_MIN_BYTES:
+        body = gzip.compress(body, compresslevel=_GZIP_LEVEL, mtime=0)
+        headers["Content-Encoding"] = "gzip"
+    t3 = time.perf_counter()
+    if _timings is not None:
+        _timings.update(validate=t1 - t0, encode=t2 - t1, gzip=t3 - t2)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 def build_tasks_payload(plant: str | None, machine: str | None, limit: int | None,
-                        offset: int | None, allowed_plants: list[str] | None) -> dict:
+                        offset: int | None, allowed_plants: list[str] | None,
+                        *, _timings: dict | None = None) -> dict:
     """
     Return tasks as JSON with finish-to-start links and pipeline metadata.
 
@@ -405,7 +461,8 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
     meta["visibility_horizon_end"] = visibility_horizon_end.isoformat() if visibility_horizon_end else None
     meta["frozen_horizon_end"] = frozen_horizon_end.isoformat() if frozen_horizon_end else None
     meta["server_now"] = _server_now_iso()
-    _log_tasks_timing(plant, len(data), sql=t_sql - t_start, build=t_build - t_sql)
+    if _timings is not None:
+        _timings.update(sql=t_sql - t_start, build=t_build - t_sql)
     return {"data": data, "links": links, "meta": meta}
 
 
