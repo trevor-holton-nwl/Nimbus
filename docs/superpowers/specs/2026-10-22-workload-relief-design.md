@@ -127,3 +127,12 @@ Is a single replica acceptable for go-live? If not, the in-process state must mo
 6. Gantt setup bars, and the reconcile `setup_override_orphaned` notes on a setup-active plant.
 7. `GET /tasks` against the real DB: parity of the pandas-free builder with the legacy one, and the gzip checks (`Content-Encoding`, a single `Vary`, identical decoded JSON, a `tasks.timing` event), plus the DB-backed pytest set listed in the backend log.
 8. PerfMonitor: the new keys visible and the `Worker.setupClone:*` keys gone.
+
+### Merge onto main 21ba680 (2026-10-23)
+
+Branch `feature/workload-relief-on-main` = `feature/workload-relief` (ea6fa10) plus a real `git merge main` (21ba680).
+
+- Conflicts (3, all keep-both): `frontend/platform/store.mts` (`_dataRev` and `_lastEvent` fields side by side), `tests/modules/platform/store.test.mjs` (the `dataRev` test and main's two ErrorLog tests, both kept), `frontend/insights/CLAUDE.md` (utilization-cache bullets and main's worker-error / memoization bullets, both kept). `frontend/insights/services.mts` and `frontend/nimbus-worker.ts` auto-merged (main's worker-global error handling and the leverage per-call worker, `computeMatrixAsync` and crash latch coexist); no contract regeneration was needed.
+- New Store events: main added none (no new `type:` strings under `frontend/` since 4c37368). Main's `emit()` change (per-subscriber try/catch, `_lastEvent`) is orthogonal; `dataRev` bumps before listeners run and still excludes the same five events, so the exclusion list is unchanged.
+- Line endings: the committed blob of this doc is already LF only (index `i/lf`); the "mixed" state was the CRLF working copy under `core.autocrlf`, so no normalisation commit was needed.
+- Gate: build, typecheck, check:static-assets, check:legacy-surface clean; lint 0 errors (35 pre-existing warnings); `test:legacy` 105/105; `test:modules` 3102 tests, 3098 pass, 2 skipped, 1 fail (the known styles.css LF test in alert-monitor-overview-css); pytest 1471 passed, 626 skipped (no local Postgres, DB-backed tests skip), 13 xfailed, 2 failed (the known `test_lifespan_*` pair). No new failures.
