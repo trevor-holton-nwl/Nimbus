@@ -1515,3 +1515,7 @@ Tip 261d9cb on `feature/backward-scheduling`, still unmerged and undeployed. Ful
 - Two stale `.git/worktrees` admin directories (`bisect-wt`, `merged`) need `git worktree prune`, to be run outside OneDrive.
 
 - Alert Monitor: deferred and still-open items (per-rule colours, role-default profile UI, persisted dismissals, calendar line+day deep link, one-click define-pair, reviewer minors) are listed in `docs/superpowers/specs/2026-10-20-alert-monitor-design.md`, section "Shipped vs deferred (2026-10-20)".
+
+## Deferred: cross-user change poll (2026-10-22)
+
+Apart from `Persistence.refreshHorizons` (Gantt tab entry, 10 s throttle), nothing polls or pushes: another planner's master-data, calendar, setup, priority-list or schedule change reaches an open tab only on plant switch, reload, manual Refresh, or a rejected save. A per-plant fingerprint endpoint plus a 30 s poller calling the existing reload functions was designed and removed from scope (owner decision 2026-10-22) because of real risks: a background `tasks:bulkUpdate` rebuilding the Gantt mid-drag or under an open modal, undo entries going stale against another user's rows, and surprise full reloads. If revisited it needs (1) a drag/modal defer guard, (2) `UndoStack.invalidate(ids)` on remotely changed rows, and (3) no auto-load of tasks.

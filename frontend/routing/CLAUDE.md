@@ -46,3 +46,4 @@ On a routing plant the grid MACHINE editor, the Inspector `PV_MACHINE` select an
 ## Counterpart
 
 Backend half: `backend/routing/CLAUDE.md`.
+- **Rate map reloads on plants/machine saves (2026-10-22).** `MasterData.runtimeSync` (a `Store.subscribe` in `frontend/master-data/admin-ui.mts`) reloads `Runtime` for the selected plant when `master-data-changed` carries `table` `plants` or `machine` (flipping `routing_runtime_enabled`, or moving a machine to another work center). A `plants` save also reloads the setup snapshot (`plant_active` gates the optimizer).

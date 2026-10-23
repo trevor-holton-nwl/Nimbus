@@ -2375,3 +2375,43 @@ test('Re-rendering the settings pane replaces the setup-off note subscription in
     assert.equal(Store._listeners.size, afterFirst, 'repeated renders keep exactly one note listener');
   });
 });
+
+// Same-tab subscribers (2026-10-22): a plants/machine save reloads the rate map, a plants save
+// also reloads the setup snapshot (Engine gates on setupSnapshot.plant_active), nothing else does.
+test('master-data-changed with table plants reloads the rate map and the setup snapshot for the selected plant', async () => {
+  const { Runtime } = await import('../../../frontend/routing/runtime-client.mjs');
+  const priorPlant = Store.selectedPlant, priorMasterData = Store.masterData;
+  const priorLoad = Runtime.load, priorSnap = Persistence.loadSetupSnapshot;
+  const runtime = [], snaps = [];
+  Runtime.load = (p) => { runtime.push(p); return Promise.resolve(); };
+  Persistence.loadSetupSnapshot = (p) => { snaps.push(p); return Promise.resolve(null); };
+  try {
+    Store.setSelectedPlant('1006', 'test');
+    const md = { plants: [], lines: [], workcenters: [] };
+    Store.setMasterData(md, 'master-data-save', 'plants');
+    assert.deepEqual(runtime, ['1006']);
+    assert.deepEqual(snaps, ['1006']);
+    Store.setMasterData(md, 'master-data-save', 'machine');
+    assert.deepEqual(runtime, ['1006', '1006'], 'machine save reloads the rate map');
+    assert.deepEqual(snaps, ['1006'], 'machine save does not reload the setup snapshot');
+    Store.setMasterData(md, 'master-data-save', 'sap_workcenter');
+    Store.setMasterData(md, 'persistence');
+    assert.equal(runtime.length, 2, 'other tables and table-less emits (boot, Refresh) never reload');
+    assert.equal(snaps.length, 1);
+    Store.setSelectedPlant(null, 'test');
+    Store.setMasterData(md, 'master-data-save', 'plants');
+    assert.equal(runtime.length, 2, 'no selected plant: nothing to reload');
+  } finally {
+    Runtime.load = priorLoad; Persistence.loadSetupSnapshot = priorSnap;
+    Store.setSelectedPlant(priorPlant, 'test-restore');
+    Store.setMasterData(priorMasterData, 'test-restore');
+  }
+});
+
+test('refreshStoreMasterData refetches the selected plant\'s sap_workcenter rows only for a sap_workcenter save and forwards the table', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(source, /const refetchWc = table === 'sap_workcenter' && !!Store\.selectedPlant;/);
+  assert.match(source, /master-data\/sap_workcenter\?\$\{new URLSearchParams\(\{ plant: Store\.selectedPlant as string \}\)/);
+  assert.match(source, /workcenters: wcData\?\.rows \?\? \(Store\.masterData\?\.workcenters \?\? \[\]\)/);
+  assert.match(source, /\}, source, table\);/);
+});

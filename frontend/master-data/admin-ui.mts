@@ -17,7 +17,7 @@ import { Runtime } from '../routing/runtime-client.mjs';
 import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { PriorityListViewer } from '../priority-lists/viewers.mjs';
-import type { WorkHours, NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
+import type { WorkHours, NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusMasterWorkcenter, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
 // Cross-domain seams (see docs/architecture/domain-refactor-plan.md Phase P2
 // task brief / report for the full verified cross-reference list):
 //   - `SetupAdmin.render` is called from Plant's Settings pane. `SetupAdmin`
@@ -94,44 +94,42 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
   const refreshLoadGen = Persistence._loadRequest;
   const refreshWriteGen = _lineWriteGen;
   try {
-    const [pData, lData] = await Promise.all([
+    // A sap_workcenter save must reach Store.masterData.workcenters (distribution alerts and the
+    // optimizer's distribution validation read it), so refetch that plant's work centers; every
+    // other table keeps the in-memory copy.
+    const refetchWc = table === 'sap_workcenter' && !!Store.selectedPlant;
+    const [pData, lData, wcData] = await Promise.all([
       Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
       // Plant-scoped (#25): never refetch every plant's machines. With no
       // selected plant, keep whatever lines are already in the Store.
       Store.selectedPlant
         ? Util.fetchTraced(`${API}/master-data/machine?${new URLSearchParams({ plant: Store.selectedPlant }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterLine> | null>
         : Promise.resolve(null),
+      refetchWc
+        ? Util.fetchTraced(`${API}/master-data/sap_workcenter?${new URLSearchParams({ plant: Store.selectedPlant as string }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterWorkcenter> | null>
+        : Promise.resolve(null),
     ]);
     if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return false;
     // A Machines-pane write committed while these GETs were in flight: they may carry the
     // pre-edit row, so drop them (the locally patched Store rows already hold the new value).
     if (_lineWriteGen !== refreshWriteGen) return false;
-    if (pData || lData) {
+    if (pData || lData || wcData) {
       // Public Store.setMasterData(...) equivalent of the former direct
       // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
       // (CQ-1 Phase 4 Task 2 — closes MasterData's tracked §6 exception).
-      // It fires its own 'master-data-changed' emit (without the `table`
-      // field the manual emit below carries — unused by any subscriber,
-      // confirmed by inspection), so the `table`-carrying emit only needs to
-      // fire on the no-op (neither fetch returned rows) branch to preserve
-      // the original single-emit-per-call shape.
+      // It fires the single 'master-data-changed' emit; `table` rides on it so the
+      // runtime/setup/work-center subscribers can react to just the table that was saved.
       Store.setMasterData({
         // A failed plants fetch keeps the plants already in the Store (never blank them).
         plants: pData?.rows ?? (Store.masterData?.plants ?? []),
         // A failed machine fetch keeps the lines already in the Store (never blank them).
         lines:  lData?.rows ?? (Store.masterData?.lines ?? []),
-        // This re-fetches only plants/machine (the two tables the
-        // Hierarchy/ProdLines consumers actually need); it is not
-        // work-center-specific and has no sap_workcenter rows in scope
-        // even when `table === 'sap_workcenter'`. setMasterData replaces
-        // the whole object (Store.setMasterData in store.mts), so
-        // omitting this field — or passing [] — would silently wipe
-        // whatever work-center data persistence.mts's boot-time fetch
-        // already populated. Preserve the current in-memory value
-        // instead of firing a redundant new /master-data/sap_workcenter
-        // request here.
-        workcenters: Store.masterData?.workcenters ?? [],
-      }, source);
+        // setMasterData replaces the whole object, so omitting this field — or passing [] —
+        // would wipe the work centers persistence.mts's boot fetch populated. Keep the
+        // in-memory copy unless this refresh is for a sap_workcenter save, which refetched
+        // them above (a failed refetch also keeps the copy).
+        workcenters: wcData?.rows ?? (Store.masterData?.workcenters ?? []),
+      }, source, table);
       // Fresh machine rows landed: the line-sync cache (filled on the first line edit, never
       // expiring) may predate a machine a colleague just added.
       if (lData && refreshPlant) delete _lineSyncMachineCache[refreshPlant];
@@ -4335,6 +4333,26 @@ export const MasterData = (() => {
     if (!selected) return;
     for (const p of plants) { if (p === selected) { Runtime.load(selected); return; } }
   }
+
+  // Same-tab freshness for state that is cached outside Store.masterData. A plants row flips
+  // routing_runtime_enabled / setup_active, and a machine row can move a line to another work
+  // center; the rate map (Runtime) and the setup snapshot (Engine's plant_active gate) are
+  // separate copies that no save path reloads on its own. Wired once at module load so it also
+  // covers the Machines pane and Work Centers auto-link, which never render MasterData. Only
+  // events carrying `table` (refreshStoreMasterData from a save) qualify: the boot fetch and
+  // Plant Refresh omit it, so this never double-loads. Neither reload emits master-data-changed.
+  Store.subscribe((evt) => {
+    if (evt.type !== 'master-data-changed') return;
+    const table = evt.table;
+    if (table !== 'plants' && table !== 'machine') return;
+    const plant = Store.selectedPlant;
+    if (!plant) return;
+    _refreshRuntimeFor([plant]);
+    // plant_active gates the setup-aware optimizer from the snapshot, not from masterData. Unlike
+    // Plant Refresh this is not limited to the Settings tab: the optimizer reads the snapshot
+    // wherever the user is.
+    if (table === 'plants') void Persistence.loadSetupSnapshot(plant);
+  }, 'MasterData.runtimeSync');
 
   // Generalized from the former bom_items-only _uploadBom: same FormData/
   // POST/Toast/ErrorLog/cache-refresh sequence, parameterized by

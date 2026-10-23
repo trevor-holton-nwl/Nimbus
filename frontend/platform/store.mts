@@ -270,10 +270,12 @@ export const Store = {
    *  every call site used to repeat verbatim. Public equivalent of the former direct
    *  `Store._state.masterData = {...}` write (CQ-1 Phase 2 Task 4 — closes Persistence's
    *  `_state` touch, one of the tracked §6 exceptions). */
-  setMasterData(masterData: NimbusMasterData | null, source?: string): void {
+  setMasterData(masterData: NimbusMasterData | null, source?: string, table?: string): void {
     this._state.masterData = masterData;
     this.rebuildPlantIndex();
-    this.emit({ type: 'master-data-changed', source });
+    // `table` (optional) names the master-data table whose save triggered this write, so a
+    // subscriber can react to just 'plants'/'machine'/'sap_workcenter'. Boot and Refresh omit it.
+    this.emit(table ? { type: 'master-data-changed', source, table } : { type: 'master-data-changed', source });
   },
 
   /** Replace the admin-configured global Orders field-visibility default

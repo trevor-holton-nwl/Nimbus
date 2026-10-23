@@ -520,3 +520,10 @@ test('banner Save schedule (a user click) calls Persistence.saveAll without sile
   assert.match(body, /Persistence\.saveAll\(\)/);
   assert.doesNotMatch(body, /saveAll\(\{[^)]*silent/, 'silent is reserved for programmatic callers');
 });
+
+test('DistributionPane drops its cached work-center options on master-data-changed (not only plant:selected)', async () => {
+  // The cache is private to the init() closure; pin the subscriber branch from source.
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../../../frontend/distribution/distribution-pane.mjs', import.meta.url), 'utf8');
+  assert.match(src, /evt\.type === 'master-data-changed'\) \{[\s\S]{0,400}?_workcentersPlant = null;/);
+});

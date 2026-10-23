@@ -597,6 +597,13 @@ export const DistributionPane = (() => {
         if (_active) render();
         return;
       }
+      if (evt.type === 'master-data-changed') {
+        // A Work Centers / Machines save can change a work center's distribution_mode or the
+        // machine list; drop the cached options so the next load re-fetches. No render here:
+        // the save already refreshes Store.masterData and the pane re-reads on its next paint.
+        _workcentersPlant = null;
+        return;
+      }
       if (evt.type === 'lines:selected') {
         if (_active) { _page = 0; void _fetchAndRenderList(); }
         return;
