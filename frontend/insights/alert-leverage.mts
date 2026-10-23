@@ -82,6 +82,9 @@ export interface LeverageInput {
   alerts: readonly NimbusAlert[];
   /** Live Store tasks keyed by id (the snapshot's tasks drop PRODUCTION_VERSION). */
   tasksById: Record<string, NimbusTask>;
+  /** The selected plant's live tasks (`Store.tasksByPlant(plant)`), the rows the replay's setup derivation reads.
+   *  Optional: absent, the replay falls back to every task in `tasksById`. */
+  setupTasks?: readonly NimbusTask[];
   lines: ReadonlySet<string>;
   setupSnapshot: SetupSnapshot | null;
   masterPlant: NimbusMasterPlant | null;
@@ -479,7 +482,8 @@ async function _variantFor(input: LeverageInput, item: LeverageItem, minutes: nu
   const { deriveSetupObservation } = await import('../optimization/engine.mjs');
   const snap = input.snapshotBase;
   const setup = deriveSetupObservation(
-    hypotheticalSetupSnapshot(ss, pair, minutes), Object.values(input.tasksById), input.lines,
+    // The plant's own rows when the caller supplies them (deriveSetupObservation keeps only this plant's rows anyway).
+    hypotheticalSetupSnapshot(ss, pair, minutes), input.setupTasks ?? Object.values(input.tasksById), input.lines,
     {
       calendars: snap.calendars, plants: snap.plants, lineSettings: snap.lineSettings, masterData: snap.masterData,
       blocks: snap.blocks, plantBlocks: snap.plantBlocks,
@@ -500,8 +504,13 @@ const _replayable = (item: LeverageItem): boolean =>
 
 /** `groupLeverage` plus a replay of each setup-pair that has minutes (plant default). One runner batch, capped at
  *  `replayCap` pairs by alert count then orders; the rest keep their removal delta and are flagged `capped`. */
-export async function analyzeLeverage(input: LeverageInput, runner: LeverageRunner): Promise<LeverageItem[]> {
-  const items = groupLeverage(input);
+export async function analyzeLeverage(
+  input: LeverageInput, runner: LeverageRunner, groups?: readonly LeverageItem[],
+): Promise<LeverageItem[]> {
+  // A caller that already ran `groupLeverage(input)` (the Alert Monitor paints those removal numbers first) passes
+  // them in so the grouping is not repeated. They are copied, because the replay below mutates its items and the
+  // caller's list may be on screen.
+  const items = groups ? groups.map(item => ({ ...item })) : groupLeverage(input);
   const eligible = items.filter(_replayable).sort((a, b) =>
     b.alertIds.length - a.alertIds.length || b.orderIds.length - a.orderIds.length || (a.key < b.key ? -1 : 1));
   const cap = Math.max(0, input.replayCap ?? DEFAULT_REPLAY_CAP);

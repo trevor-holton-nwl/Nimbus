@@ -507,3 +507,25 @@ test('groupLeverage does not mutate its input and is fast on a large plant', () 
   }
   assert.equal(JSON.stringify(input.alerts.length), frozen);
 });
+
+test('analyzeLeverage with caller-supplied groups equals the default path and leaves those groups unmutated', async () => {
+  const tasks = [orderTask('t1', 'A', 8, 9), orderTask('t2', 'B', 10, 11)];
+  const f = fixture({ tasks, masterPlant: policy(15) });
+  const groups = groupLeverage(f.input);
+  const frozen = JSON.stringify(groups);
+  const viaGroups = await analyzeLeverage(f.input, f.runner, groups);
+  const plain = await analyzeLeverage(f.input, f.runner);
+  assert.equal(JSON.stringify(viaGroups), JSON.stringify(plain));
+  assert.equal(byFamily(viaGroups, 'setup-pair')[0].method, 'replay');
+  assert.equal(JSON.stringify(groups), frozen, 'the painted removal-phase items are not mutated by the replay');
+});
+
+test('setupTasks (the plant rows) replays identically to the all-tasks fallback', async () => {
+  const tasks = [orderTask('t1', 'A', 8, 9), orderTask('t2', 'B', 10, 11)];
+  const other = { ...orderTask('x1', 'A', 8, 9), PLANT: 'OTHER', plant: 'OTHER', MACHINE: 'L-OTHER' };
+  const f = fixture({ tasks, masterPlant: policy(15) });
+  const withOther = { ...f.input, tasksById: { ...f.input.tasksById, x1: other } };
+  const fallback = await analyzeLeverage(withOther, f.runner);
+  const scoped = await analyzeLeverage({ ...withOther, setupTasks: tasks }, f.runner);
+  assert.equal(JSON.stringify(scoped), JSON.stringify(fallback));
+});
