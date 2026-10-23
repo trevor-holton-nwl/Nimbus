@@ -1109,6 +1109,11 @@ entry only — see the spec for the full architecture.
   in the same transaction as task/order/calendar writes; `GET /changes?plant=&since=&client=` cursor-polled
   every ~3 s by a new frontend `Sync` module, applied via `Store.applyRemote` without dirty-marking
   (skips locally-dirty ids to avoid yanking a mid-drag edit).
+  **Note (2026-10-23): the `schedule_events` sketch above is superseded by the shipped `schedule_event` table**
+  (`backend/schedule_events/CLAUDE.md`): per-order rows with field-level diffs, written in the same
+  transaction as each planner-visible order write, 14-day retention. It keeps an `id` cursor and a
+  `client_id` column so a future `/changes` feed can read it, but no feed, poller or presence ships with it
+  (cross-user polling stays removed, see "Deferred: cross-user change poll").
 - **Phase 3 — presence & attribution.** Heartbeat-based who's-here presence (piggybacked on the poll),
   "moved by X" flash on remote-applied changes, and an attribution banner on remote optimizer runs.
 - **Future (not yet planned):** swap cursor polling for an SSE transport if proxy constraints ease
@@ -1524,3 +1529,19 @@ Tip 261d9cb on `feature/backward-scheduling`, still unmerged and undeployed. Ful
 ## Deferred: cross-user change poll (2026-10-22)
 
 Apart from `Persistence.refreshHorizons` (Gantt tab entry, 10 s throttle), nothing polls or pushes: another planner's master-data, calendar, setup, priority-list or schedule change reaches an open tab only on plant switch, reload, manual Refresh, or a rejected save. A per-plant fingerprint endpoint plus a 30 s poller calling the existing reload functions was designed and removed from scope (owner decision 2026-10-22) because of real risks: a background `tasks:bulkUpdate` rebuilding the Gantt mid-drag or under an open modal, undo entries going stale against another user's rows, and surprise full reloads. If revisited it needs (1) a drag/modal defer guard, (2) `UndoStack.invalidate(ids)` on remotely changed rows, and (3) no auto-load of tasks.
+
+
+## Schedule event history — deferred items (2026-10-23)
+
+`schedule_event` (per-order change history, branch `feature/schedule-event`) shipped v1: planner save, note, Excel/SAP ingest (incl. SAP-change reset and staging zero-open), routing holds and recompute outcomes, purge and SAP vanish, distribution apply/re-weight/reset/repair. Domain doc: `backend/schedule_events/CLAUDE.md`; plan and task ledger: `docs/superpowers/specs/2026-10-23-schedule-event-progress.md`. Deferred:
+
+- P2 hooks, each a one-line `record(...)`: `restore_vanished_order` (the `restore` source exists in the vocabulary but has no writer), the distribution resolve `wc_codes`/`machines` paths, and the resolve-repair actor (`_repair_one_header` now passes `ev_actor` to the history row, but its `admin_audit` actor is still the hard-coded `"system"`); `resync_order_attributes` records `master_data_stamp` rows already.
+- A plant-level listing `GET /schedule-events/{plant}?since_id=` and the multi-user `/changes` feed (the `id` cursor and `client_id` are reserved for it; no polling is implied, see "Deferred: cross-user change poll").
+- Schedule-adherence baselines (one compact row per order at the frozen-horizon boundary, long retention): deliberately NOT this table.
+- Partitioning, only if the sweep exceeds ~5 minutes or the order index passes ~1 GB (roughly >1M rows/day): `schedule_event_v2 PARTITION BY RANGE (at)` plus DEFAULT partition and daily pre-creation, then a deliberate `-AllowDestructive` migration to remove the old table. Upgrade path in `backend/schedule_events/CLAUDE.md`.
+- A `(plant, id)` index, added (additively) when the plant-level listing or the feed ships.
+- Offline-cache edits restore without a per-task `source`, so history records them as `planner` (the source map is deliberately not persisted offline).
+- Identity: `actor` is `x-user-email` (spoofable until Entra); the duplicate-id `_1/_2` suffix swap in ingest can attach history to the wrong slot (pre-existing hazard, documented only).
+- Browser checks owed (owner): drag an order and save, open the Inspector, expect one History row with the machine/finish diff and your name; change a note, expect a `note` row; run Optimize, expect `optimizer` rows sharing one `action_id`; resend an unchanged save, expect no new row; `POST /maintenance/schedule-event-sweep` on fresh data returns `deleted: 0`; the retention input in System Configuration saves 1-60 and rejects 0 or 61.
+- The `@pytest.mark.pg` suite (every new SQL path and the migration itself) has NOT been executed locally: the local Postgres rejected the available passwords. Run `NIMBUS_TEST_DB=1 python -m pytest tests/test_schedule_events.py tests/test_schema_idempotent.py` against a local database before merging to `main`.
+- Deploy: `migrations/2026-10-23-1-schedule-event.sql` is additive (`CREATE TABLE/INDEX IF NOT EXISTS` only; no `-AllowDestructive`). `ensure_schedule_event_table()` also runs at boot, so image-first or migration-first both work; history writes are fail-open, so a missing table only bumps `write_failures`. After the first pilot apply, check `/diagnostics/deep` -> `db_stats.schedule_event` (row count, oldest `at`, `last_sweep`, `write_failures`) and `/diagnostics/db` for the table size (expect about 0.5 KB per order change; ~80 MB for two plants at 14 days).
