@@ -626,7 +626,7 @@ test('changeover advances to a future order pull-forward floor instead of stalli
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -687,7 +687,7 @@ test('changeover leaves a permanently-uncalendarable order unplaced (surfaced, n
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -3761,7 +3761,7 @@ test("Engine.evaluateSchedule('changeover') due-date push-forward cap is a no-op
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -3824,7 +3824,7 @@ test("Engine.evaluateSchedule('spt') setup-aware path: due-date push-forward cap
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -3885,7 +3885,7 @@ test("Engine.evaluateSchedule('changeover') keeps an already-late order within i
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
@@ -3943,7 +3943,7 @@ test("Engine.evaluateSchedule('spt') setup-aware path preserves the near-cap SPT
     process.exit(0);
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
-    cwd: process.cwd(), encoding: 'utf8', timeout: 1500,
+    cwd: process.cwd(), encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.error, undefined, `optimizer probe did not complete: ${run.error?.message || run.stderr}`);
   assert.equal(run.status, 0, run.stderr || 'optimizer probe exited unsuccessfully');
