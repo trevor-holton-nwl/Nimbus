@@ -42,6 +42,7 @@ from psycopg.types.json import Jsonb
 import db
 import master_data as md
 from backend.integration import sap_sync
+from backend.schedule_events import events as sched_events
 from db import _pool
 from db import finish_echoes  # noqa: F401 -- the one echo rule lives in db.py beside sap_changed_fields
 
@@ -1738,6 +1739,28 @@ def _apply_routing_operations(conn, hdr, actor: str, step) -> dict:
     return {"inserted": inserted, "deleted": deleted, "rejected_at_apply": len(rejected_now)}
 
 
+def _record_zero_open_events(cur, befores: dict, actor: str, bid) -> int:
+    """schedule_event `sap_reset` rows for the zero-open reset: before = the locked pre-reset read, after = the
+    constants the UPDATE wrote. An order already unscheduled and unfirmed has an empty diff and writes nothing."""
+    reason_code = _ZERO_OPEN_REASON["code"]
+    after = {"planning_status": f"needs_planning:{reason_code}", "scheduled_start": None,
+             "scheduled_end": None, "manual_firmed": False, "segments": 0}
+    rows = []
+    for oid, b in befores.items():
+        old = b.get("planning_status")
+        old_reason = b.get("planning_reason")
+        old_code = old_reason.get("code") if isinstance(old_reason, dict) else None
+        before = {"planning_status": f"{old}:{old_code}" if old == "needs_planning" and old_code else old,
+                  "scheduled_start": b.get("scheduled_start"), "scheduled_end": b.get("scheduled_end"),
+                  "manual_firmed": b.get("manual_firmed"), "segments": b.get("segment_count") or 0}
+        rows.append(sched_events.EventRow(
+            plant=b["plant"], order_id=oid, production_order=b.get("production_order"),
+            material_number=b.get("material_number"), op="modify",
+            changes=sched_events.diff_tracked(before, after) or {}))
+    ev = sched_events.EventCtx(source="sap_reset", actor=actor, action_id=sched_events.as_action_id(str(bid)))
+    return sched_events.record(cur, ev, rows)
+
+
 def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
     import backend.distribution.data as distribution_data
     import backend.routing.resolver as routing_resolver
@@ -1790,7 +1813,8 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
             # re-slot of a zero-open order alone -- and never an order that is running right now.
             cur.execute(
                 "SELECT o.id, o.plant, o.planning_status, o.scheduled_start, o.scheduled_end,"
-                " o.basic_start_date, o.basic_finish_date, o.run_time, seg.first_start, seg.last_end,"
+                " o.production_order, o.material_number, o.manual_firmed, o.planning_reason,"
+                " COALESCE(seg.segment_count, 0) AS segment_count, o.basic_start_date, o.basic_finish_date, o.run_time, seg.first_start, seg.last_end,"
                 " (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz"
                 " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL +
                 " WHERE o.plant = %s AND (o.production_order = ANY(%s)"
@@ -1800,10 +1824,12 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
                 (plant, zero_keys, zero_keys, sorted({str(bid), str(upsert_batch)})))
             names = [d.name for d in cur.description]
             ids = []
+            befores: dict = {}
             for rec in cur.fetchall():
                 b = dict(zip(names, rec, strict=True))
                 if not db._order_is_running(b, db._plant_local_now(b["tz"])):
                     ids.append(b["id"])
+                    befores[b["id"]] = b
             if ids:
                 cur.execute("DELETE FROM order_schedule_segments WHERE order_id = ANY(%s)", (ids,))
                 cur.execute(
@@ -1812,6 +1838,7 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
                     " runtime_schedule_mismatch = FALSE, placement_exception = NULL, updated_at = NOW()"
                     " WHERE id = ANY(%s)", (Jsonb(_ZERO_OPEN_REASON), ids))
                 flagged = len(ids)
+                _record_zero_open_events(cur, befores, actor, bid)
         conn.commit()
 
     step("vanish")
@@ -1847,6 +1874,7 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
         pct = round(len(ids) / info["in_horizon_live"], 4) if info["in_horizon_live"] else 0.0
         purge = db.purge_orders_by_ids(
             plant, ids, user_email=actor, reason="sap_snapshot_vanish", archive_batch_id=bid,
+            event_source="sap_vanish",
             extra_details={"candidates": len(ids), "in_horizon": info["in_horizon_live"], "pct": pct})
         deleted, archived = int(purge.get("deleted", 0)), int(purge.get("archived", 0))
     with conn.cursor() as cur:

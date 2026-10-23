@@ -240,7 +240,7 @@ def purge_orders(request: Request, body: dict = Body(default={}),
         plants=[plant],
     )
     result = db.purge_orders_by_date(plant, start, end, machines or None,
-                                      user_email=request.headers.get("x-user-email"))
+                                      user_email=auth._actor_email(request))
     _set_admin_log_details(request, deleted=result.get("deleted", 0))
     _log_event("info", "purge", "Orders purged by date range",
                plant=plant, deleted=result.get("deleted", 0), start=str(start), end=str(end))

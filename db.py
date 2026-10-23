@@ -27,6 +27,8 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from backend.schedule_events import events as sched_events
+
 # Pinned to this file's own directory (repo root) rather than a bare
 # load_dotenv()'s upward search — from inside a git worktree (no local .env
 # of its own), an unscoped search walks up and silently loads the MAIN
@@ -1948,8 +1950,39 @@ def preview_purge_orders(plant, start, end, machines=None) -> dict:
             "planner_overridden": int(planner_overridden)}
 
 
+_PURGE_RETURNING = ("id, plant, production_order, material_number, machine, scheduled_start, scheduled_end,"
+                    " planning_status, planning_reason, manual_firmed")
+_PURGE_RETURNING_COLS = tuple(c.strip() for c in _PURGE_RETURNING.split(","))
+
+
+def _purge_deleted_rows(cur) -> list[dict]:
+    """Rows of the last `DELETE ... RETURNING {_PURGE_RETURNING}` as dicts (bounded last-state snapshot)."""
+    return [dict(zip(_PURGE_RETURNING_COLS, r, strict=True)) for r in cur.fetchall()]
+
+
+def _purge_event_rows(plant: str, deleted_rows: list[dict], segs_by_id: dict | None = None) -> list:
+    """One `remove` EventRow per purged order: a bounded last-state snapshot (machine, scheduled_*,
+    planning_status as `needs_planning:<code>`, manual_firmed, and `segments` when the archive counted them)."""
+    out = []
+    for r in deleted_rows:
+        snap = {k: r.get(k) for k in ("machine", "scheduled_start", "scheduled_end", "manual_firmed")}
+        status = r.get("planning_status")
+        reason = r.get("planning_reason")
+        code = reason.get("code") if isinstance(reason, dict) else None
+        snap["planning_status"] = f"{status}:{code}" if status == "needs_planning" and code else status
+        if segs_by_id is not None:
+            snap["segments"] = len(segs_by_id.get(r["id"], []))
+        out.append(sched_events.EventRow(
+            plant=r.get("plant") or plant, order_id=r["id"], production_order=r.get("production_order"),
+            material_number=r.get("material_number"), op="remove",
+            changes=sched_events.snapshot_changes(snap, op="remove")))
+    return out
+
+
 def _purge_order_ids_on_cursor(cur, plant: str, ids: list[str], *, action: str,
-                               user_email: str | None, extra_details: dict | None = None) -> dict:
+                               user_email: str | None, extra_details: dict | None = None,
+                               deleted_rows: list[dict] | None = None, ev=None,
+                               segs_by_id: dict | None = None) -> dict:
     """Shared tail of every order purge. `ids` were already deleted by the
     caller (DELETE ... RETURNING id) on `cur`'s transaction: retire the
     distribution shares that pointed at them, delete headers left with no live
@@ -2004,6 +2037,8 @@ def _purge_order_ids_on_cursor(cur, plant: str, ids: list[str], *, action: str,
         " VALUES ('orders', %s, %s, %s)",
         (action, Jsonb(audit_details), user_email),
     )
+    if ev is not None and deleted_rows:
+        sched_events.record(cur, ev, _purge_event_rows(plant, deleted_rows, segs_by_id))
     return {"deleted": deleted, "shares_purged": shares_purged, "headers_deleted": headers_deleted}
 
 
@@ -2037,13 +2072,16 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
     unchanged for every caller that never touches distribution.
     """
     where, params = _purge_scope_sql_params(plant, start, end, machines)
-    sql = f"DELETE FROM orders WHERE {where} RETURNING id"
+    sql = f"DELETE FROM orders WHERE {where} RETURNING {_PURGE_RETURNING}"
+    ev = sched_events.EventCtx(source="purge", actor=user_email, action_id=sched_events.new_action_id())
     with _pool.connection() as conn, conn.cursor() as cur:
         try:
             cur.execute(sql, params)
-            ids = [row[0] for row in cur.fetchall()]
+            deleted_rows = _purge_deleted_rows(cur)
+            ids = [r["id"] for r in deleted_rows]
             core = _purge_order_ids_on_cursor(
                 cur, plant, ids, action="purge_by_date_range", user_email=user_email,
+                deleted_rows=deleted_rows, ev=ev,
                 extra_details={
                     "machines": list(machines or []),
                     "start": start.isoformat() if hasattr(start, "isoformat") else str(start),
@@ -2063,7 +2101,8 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
 
 def purge_orders_by_ids(plant: str, ids: list[str], *, user_email: str | None = None,
                         reason: str = "sap_snapshot_vanish", archive_batch_id: str | None = None,
-                        extra_details: dict | None = None, conn=None) -> dict:
+                        extra_details: dict | None = None, conn=None,
+                        event_source: str = "purge", ev=None) -> dict:
     """DELETE the given orders in one plant through the shared purge core
     (share retirement, orphan-header cleanup, admin_audit row with
     action=`reason`). Rows are locked FOR UPDATE first. When `archive_batch_id`
@@ -2089,6 +2128,7 @@ def purge_orders_by_ids(plant: str, ids: list[str], *, user_email: str | None = 
             if not locked:
                 return empty
             archived = 0
+            segs: dict | None = None
             if archive_batch_id is not None:
                 cur.execute("SELECT row_to_json(o) FROM orders o WHERE o.id = ANY(%s) ORDER BY o.id", (locked,))
                 rows = {r[0]["id"]: r[0] for r in cur.fetchall()}
@@ -2113,11 +2153,16 @@ def purge_orders_by_ids(plant: str, ids: list[str], *, user_email: str | None = 
                          Jsonb(segs.get(oid, [])), Jsonb(shs.get(oid, [])), user_email),
                     )
                     archived += 1
-            cur.execute("DELETE FROM orders WHERE plant = %s AND id = ANY(%s) RETURNING id", (plant, locked))
-            deleted_ids = [r[0] for r in cur.fetchall()]
+            cur.execute(f"DELETE FROM orders WHERE plant = %s AND id = ANY(%s) RETURNING {_PURGE_RETURNING}",
+                        (plant, locked))
+            deleted_rows = _purge_deleted_rows(cur)
+            deleted_ids = [r["id"] for r in deleted_rows]
             details = {"archive_batch_id": archive_batch_id, **(extra_details or {})}
+            run_ev = ev or sched_events.EventCtx(
+                source=event_source, actor=user_email, action_id=sched_events.as_action_id(archive_batch_id))
             core = _purge_order_ids_on_cursor(
-                cur, plant, deleted_ids, action=reason, user_email=user_email, extra_details=details)
+                cur, plant, deleted_ids, action=reason, user_email=user_email, extra_details=details,
+                deleted_rows=deleted_rows, ev=run_ev, segs_by_id=segs)
             return {"status": "ok", "deleted": core["deleted"], "archived": archived,
                     "shares_purged": core["shares_purged"], "headers_deleted": core["headers_deleted"]}
 
