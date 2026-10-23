@@ -31,6 +31,7 @@ from backend.scheduling.models import (
     TasksUpdatePayload,
     TaskUpdateResult,
 )
+from backend.schedule_events.events import PLANNER_SOURCES, EventCtx, new_action_id
 from backend.security import auth
 
 router = APIRouter()
@@ -296,7 +297,8 @@ def get_task_horizons(plant: str,
 
 def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[str] | None = None,
                              *, atomic_optimizer: bool = False,
-                             strict_conflicts: bool = False) -> dict:
+                             strict_conflicts: bool = False,
+                             actor: str | None = None, client_id: str | None = None) -> dict:
     """
     Normalize schedule/attribute edits and persist them write-through to Postgres
     in a single transaction (db.update_task_dates_bulk). No in-memory frame to
@@ -397,6 +399,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
             item["schedule_segments"] = segments
         if has_exception:
             item["placement_exception"] = it.placement_exception   # None = clear the marker
+        if it.source in PLANNER_SOURCES:
+            item["source"] = it.source    # unknown/absent -> not forwarded (recorded as 'planner')
         if "trust_start" in supplied and not it.trust_start:
             item["trust_start"] = False      # only a caller that distrusts its start sends it (True = default)
         norm.append(item)
@@ -418,11 +422,13 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 "not_found": 0, "invalid_ids": [], "not_found_ids": [],
                 "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {}}
 
+    ev = EventCtx(source="planner", actor=actor, action_id=new_action_id(), client_id=client_id)
     try:
         res = db.update_task_dates_bulk(
             norm, allowed_plants=allowed_plants,
             **({"atomic_optimizer": True} if atomic_optimizer else {}),
-            **({"strict_conflicts": True} if (atomic_optimizer and strict_conflicts) else {}))
+            **({"strict_conflicts": True} if (atomic_optimizer and strict_conflicts) else {}),
+            actor=actor, client_id=client_id, ev=ev)
     except Exception as e:
         error_code = (db.translate_db_error(e).get("error_code")
                       if isinstance(e, psycopg.Error) else "db.error")
@@ -443,9 +449,9 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
     return res
 
 
-@router.post("/task/update", response_model=TaskUpdateResult,
-             dependencies=[Depends(auth.require_authenticated)])
+@router.post("/task/update", response_model=TaskUpdateResult)
 def update_task(task: TaskDateUpdate,
+                 actor: str = Depends(auth.require_authenticated),
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Update a single task's schedule/priority attributes and persist to DB.
@@ -456,7 +462,7 @@ def update_task(task: TaskDateUpdate,
     A version conflict is NOT a 4xx — it returns 200 with the id in `stale` so the
     client can refetch and warn uniformly with the bulk path.
     """
-    res = _apply_task_date_updates([task], allowed_plants=allowed_plants)
+    res = _apply_task_date_updates([task], allowed_plants=allowed_plants, actor=actor)
     if res.get("not_found"):
         raise HTTPException(status_code=404, detail="Task not found")
     if res.get("invalid"):
@@ -469,8 +475,9 @@ def update_task(task: TaskDateUpdate,
             "start_derived": res.get("start_derived", {})}
 
 
-@router.post("/task/note", dependencies=[Depends(auth.require_authenticated)])
+@router.post("/task/note")
 def update_task_note(payload: dict,
+                      actor: str = Depends(auth.require_authenticated),
                       allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Persist a free-text note for a single task (max 500 chars).
@@ -486,7 +493,8 @@ def update_task_note(payload: dict,
     if plant is None or (allowed_plants is not None and plant not in allowed_plants):
         raise HTTPException(status_code=404, detail="Task not found")
     try:
-        return db.update_task_note(task_id, notes)
+        return db.update_task_note(task_id, notes,
+                                   ev=EventCtx(source="note", actor=actor, action_id=new_action_id()))
     except Exception as e:
         _log_event("error", "db", "Note persist failed", exc=e, task_id=task_id)
         raise HTTPException(status_code=500,
@@ -496,9 +504,9 @@ def update_task_note(payload: dict,
 # Frontend calls /tasks/update (plural) with {tasks, blocks, calendars}; keep
 # /tasks/bulk_update as a flat-list alias for external tooling. Both are
 # best-effort and report per-row counts in the body (no whole-batch 4xx).
-@router.post("/tasks/update", response_model=BulkUpdateResult,
-             dependencies=[Depends(auth.require_authenticated)])
+@router.post("/tasks/update", response_model=BulkUpdateResult)
 def tasks_update(payload: TasksUpdatePayload,
+                  actor: str = Depends(auth.require_authenticated),
                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Bulk-update task dates/priority attributes and persist to DB (one transaction).
@@ -511,7 +519,8 @@ def tasks_update(payload: TasksUpdatePayload,
     """
     res = _apply_task_date_updates(payload.tasks, allowed_plants=allowed_plants,
                                    atomic_optimizer=payload.atomic_optimizer,
-                                   strict_conflicts=payload.strict_conflicts)
+                                   strict_conflicts=payload.strict_conflicts,
+                                   actor=actor, client_id=payload.client_id)
     total = len(payload.tasks)
     stale = res.get("stale", [])
     if res["persisted"] < total:
@@ -552,9 +561,9 @@ def tasks_update(payload: TasksUpdatePayload,
     return out
 
 
-@router.post("/tasks/bulk_update", response_model=BulkUpdateResult,
-             dependencies=[Depends(auth.require_authenticated)])
+@router.post("/tasks/bulk_update", response_model=BulkUpdateResult)
 def bulk_update(tasks: list[TaskDateUpdate],
+                 actor: str = Depends(auth.require_authenticated),
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Alias for /tasks/update with a flat list payload (used by external tooling/Postman).
@@ -576,7 +585,7 @@ def bulk_update(tasks: list[TaskDateUpdate],
     reported in `stale`, never overwritten.
     """
     stripped = [it.model_copy(update={"force": False}) if it.force else it for it in tasks]
-    res = _apply_task_date_updates(stripped, allowed_plants=allowed_plants)
+    res = _apply_task_date_updates(stripped, allowed_plants=allowed_plants, actor=actor)
     total = len(tasks)
     stale = res.get("stale", [])
     if res["persisted"] < total:

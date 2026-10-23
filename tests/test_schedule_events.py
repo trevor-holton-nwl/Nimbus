@@ -430,3 +430,147 @@ def test_read_route_returns_events_with_actor_name_and_no_store(se, api_client):
     # limit bounds are enforced by the route
     assert client.get(f"/schedule-events/{se.plant}/order/ord-1?limit=0").status_code == 422
     assert client.get(f"/schedule-events/{se.plant}/order/ord-1?limit=201").status_code == 422
+
+
+# --------------------------------------------------------------------------- planner save + note hooks (Task 2)
+
+def _se_events(ctx, plant=None):
+    with ctx.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT order_id, source, op, actor, action_id::text, client_id, changes FROM schedule_event "
+                    "WHERE plant = %s ORDER BY id", (plant or ctx.plant,))
+        return cur.fetchall()
+
+
+class TestPlannerSaveEvents:
+    @pytest.fixture
+    def seeded(self, planning_pg):
+        ctx = planning_pg
+        ctx.t0 = dt.datetime(2026, 11, 2, 8, 0, 0)
+        ctx.end0 = dt.datetime(2026, 11, 2, 12, 0, 0)
+        ctx.a = ctx.db.make_id("ZZTEST_SE_PO_A", "ZZTEST_SE_MAT")
+        ctx.b = ctx.db.make_id("ZZTEST_SE_PO_B", "ZZTEST_SE_MAT")
+        import backend.schedule_events.data as data
+        data.ensure_schedule_event_table()
+        with ctx.db._pool.connection() as conn, conn.cursor() as cur:
+            for oid, po in ((ctx.a, "ZZTEST_SE_PO_A"), (ctx.b, "ZZTEST_SE_PO_B")):
+                cur.execute(
+                    "INSERT INTO orders (id, production_order, material_number, machine, plant, basic_start_date,"
+                    " basic_finish_date, scheduled_start, scheduled_end) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (oid, po, "ZZTEST_SE_MAT", ctx.machine, ctx.plant, ctx.t0, ctx.end0, ctx.t0, ctx.end0))
+            conn.commit()
+        try:
+            yield ctx
+        finally:
+            with ctx.db._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM orders WHERE id = ANY(%s)", ([ctx.a, ctx.b],))
+                conn.commit()
+
+    def _ev(self, ctx, client_id="zz-client"):
+        return EventCtx(source="planner", actor=ctx.actor, action_id=str(uuid.uuid4()), client_id=client_id)
+
+    @pytest.mark.pg
+    def test_save_writes_one_row_per_changed_order_sharing_an_action_id(self, seeded):
+        ctx = seeded
+        new_end = ctx.end0 + dt.timedelta(hours=1)
+        ev = self._ev(ctx)
+        res = ctx.db.update_task_dates_bulk(
+            [{"id": ctx.a, "start": ctx.t0, "end": new_end, "MACHINE": "PACK_LINE", "source": "drag"},
+             {"id": ctx.b, "FIRMED": True}], ev=ev)
+        assert res["persisted"] == 2
+        rows = _se_events(ctx)
+        assert len(rows) == 2
+        by_order = {r[0]: r for r in rows}
+        a, b = by_order[ctx.a], by_order[ctx.b]
+        assert a[1] == "drag" and a[2] == "modify" and a[3] == ctx.actor and a[5] == "zz-client"
+        assert a[6] == {"machine": [ctx.machine, "PACK_LINE"],
+                        "scheduled_end": ["2026-11-02T12:00:00", "2026-11-02T13:00:00"]}
+        assert b[1] == "planner" and b[6] == {"manual_firmed": [False, True]}
+        assert a[4] == b[4] == ev.action_id
+
+    @pytest.mark.pg
+    def test_unchanged_resend_writes_no_rows_but_still_bumps_xmin(self, seeded):
+        ctx = seeded
+        item = {"id": ctx.a, "start": ctx.t0, "end": ctx.end0, "source": "drag"}
+        v0 = ctx.db.get_task_versions([ctx.a])[0]["row_version"]
+        res = ctx.db.update_task_dates_bulk([item], ev=self._ev(ctx))
+        assert res["persisted"] == 1
+        assert res["versions"][ctx.a] != v0
+        assert _se_events(ctx) == []
+
+    @pytest.mark.pg
+    def test_save_without_an_event_context_records_nothing(self, seeded):
+        ctx = seeded
+        res = ctx.db.update_task_dates_bulk(
+            [{"id": ctx.a, "start": ctx.t0, "end": ctx.end0 + dt.timedelta(hours=2)}])
+        assert res["persisted"] == 1
+        assert _se_events(ctx) == []
+
+    @pytest.mark.pg
+    def test_note_change_records_old_and_new_and_same_note_records_nothing(self, seeded):
+        ctx = seeded
+        ctx.db.update_task_note(ctx.a, "first", ev=EventCtx(source="note", actor=ctx.actor,
+                                                             action_id=str(uuid.uuid4())))
+        ctx.db.update_task_note(ctx.a, "first", ev=EventCtx(source="note", actor=ctx.actor,
+                                                             action_id=str(uuid.uuid4())))
+        rows = _se_events(ctx)
+        assert len(rows) == 1
+        assert rows[0][1] == "note" and rows[0][2] == "modify" and rows[0][6] == {"notes": [None, "first"]}
+        ctx.db.update_task_note(ctx.a, "second", ev=EventCtx(source="note", actor=ctx.actor,
+                                                              action_id=str(uuid.uuid4())))
+        assert _se_events(ctx)[-1][6] == {"notes": ["first", "second"]}
+
+
+# --- DB-free route tests: actor plumbing and the `source` / `client_id` wire fields
+
+@pytest.fixture
+def save_client(monkeypatch):
+    import brain
+    import db
+    from fastapi.testclient import TestClient
+    from backend.security import auth
+    calls = []
+
+    def fake_bulk(items, allowed_plants=None, **kw):
+        calls.append((items, kw))
+        return {"applied": 0, "persisted": 0, "failed": 0, "invalid": 0, "not_found": 0, "invalid_ids": [],
+                "not_found_ids": [], "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {},
+                "start_derived": {}}
+    monkeypatch.setattr(db, "update_task_dates_bulk", fake_bulk)
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "zz.planner@example.com"
+    try:
+        yield TestClient(brain.api), calls
+    finally:
+        brain.api.dependency_overrides.clear()
+
+
+def test_task_date_update_accepts_source_and_unknown_value_is_ignored_server_side(save_client):
+    from backend.scheduling.models import TaskDateUpdate
+    assert TaskDateUpdate(id="x", source="drag").source == "drag"
+    assert TaskDateUpdate(id="x").source is None
+    client, calls = save_client
+    body = {"client_id": "tab-1", "tasks": [
+        {"id": "o1", "start_date": "2026-11-02T08:00:00", "end_date": "2026-11-02T12:00:00", "source": "drag"},
+        {"id": "o2", "start_date": "2026-11-02T08:00:00", "end_date": "2026-11-02T12:00:00", "source": "bogus"}]}
+    response = client.post("/tasks/update", json=body)
+    assert response.status_code == 200
+    items, kw = calls[0]
+    assert items[0]["source"] == "drag" and "source" not in items[1]
+    ev = kw["ev"]
+    assert ev.source == "planner" and ev.actor == "zz.planner@example.com" and ev.client_id == "tab-1"
+    assert kw["actor"] == "zz.planner@example.com" and kw["client_id"] == "tab-1"
+    assert as_action_id(ev.action_id) == ev.action_id
+
+
+def test_tasks_update_still_requires_authentication(save_client):
+    import brain
+    from fastapi.testclient import TestClient
+    from backend.security import auth
+    _client, calls = save_client
+
+    def deny():
+        raise brain.HTTPException(status_code=401, detail="Not signed in")
+    brain.api.dependency_overrides[auth.require_authenticated] = deny
+    response = TestClient(brain.api).post("/tasks/update", json={"tasks": [], "client_id": "t"})
+    assert response.status_code == 401
+    assert calls == []

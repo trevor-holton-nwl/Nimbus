@@ -103,7 +103,7 @@ def test_bulk_update_result_round_trips_db_shape():
 def test_task_attribute_updates_are_forwarded_to_the_bulk_db_writer(monkeypatch):
     captured = {}
 
-    def fake_update(items, allowed_plants=None):
+    def fake_update(items, allowed_plants=None, **_kw):
         captured["items"] = items
         return {
             "applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
@@ -138,7 +138,7 @@ def test_task_attribute_updates_are_forwarded_to_the_bulk_db_writer(monkeypatch)
 def test_firmed_is_forwarded_only_when_the_planner_sent_it(monkeypatch):
     captured = {}
 
-    def fake_update(items, allowed_plants=None):
+    def fake_update(items, allowed_plants=None, **_kw):
         captured["items"] = items
         return {
             "applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
@@ -174,7 +174,7 @@ def test_placement_exception_is_the_one_new_wire_field_and_only_two_values_are_a
 def test_placement_exception_is_forwarded_only_when_sent_and_an_explicit_null_clears(monkeypatch):
     captured = {}
 
-    def fake_update(items, allowed_plants=None):
+    def fake_update(items, allowed_plants=None, **_kw):
         captured["items"] = items
         return {"applied": 1, "persisted": 1, "failed": 0, "invalid": 0, "not_found": 0, "invalid_ids": [],
                 "not_found_ids": [], "stale": [], "versions": {"abc123": 43}}
@@ -198,7 +198,7 @@ def test_trust_start_is_forwarded_only_when_a_caller_distrusts_the_start(monkeyp
     existing item shape stays byte-identical; the bulk result's `start_derived` is forwarded as received."""
     captured = {}
 
-    def fake_update(items, allowed_plants=None):
+    def fake_update(items, allowed_plants=None, **_kw):
         captured["items"] = items
         return {"applied": 1, "persisted": 1, "failed": 0, "invalid": 0, "not_found": 0, "invalid_ids": [],
                 "not_found_ids": [], "stale": [], "versions": {"abc123": 43}, "start_derived": {"abc123": True}}
@@ -230,7 +230,7 @@ def test_task_version_row_carries_firmed():
 def test_split_schedule_update_is_forwarded_as_an_explicit_aggregate(monkeypatch):
     captured = {}
 
-    def fake_update(items, allowed_plants=None):
+    def fake_update(items, allowed_plants=None, **_kw):
         captured["items"] = items
         return {
             "applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
@@ -307,7 +307,8 @@ class _FakeSegmentCursor:
             # [id, <its parameterised columns>], same stride for the whole group.
             n_rows = sql.count("(%s::text")
             stride = len(params) // n_rows
-            self._pending = ("all", [(params[i * stride], 999) for i in range(n_rows)])
+            extra = (None,) * 10 if "o.prt_02" in sql else ()   # schedule_event after-image columns
+            self._pending = ("all", [(params[i * stride], 999) + extra for i in range(n_rows)])
         else:
             self._pending = ("all", [])
 
@@ -356,7 +357,8 @@ def _eff_row(order_id, start, end, run_time, row_version, segment_count, plant, 
              planning_status="scheduled", reason_code=None, routing_runtime_enabled=False,
              parent_order=None, run_time_source=None, material_number=None,
              order_quantity=None, basic_start_date=None, production_version=None,
-             placement_exception=None, timezone=None, stored_start=None, stored_end=None):
+             placement_exception=None, timezone=None, stored_start=None, stored_end=None,
+             manual_firmed=False, prt_01=None, prt_02=None, production_order=None):
     """One row of update_task_dates_bulk's `FOR UPDATE OF o` eff-lookup SELECT,
     in its current 21-column order (id, eff_start, eff_end, run_time,
     row_version, segment_count, plant, machine, planning_status, reason_code,
@@ -377,7 +379,8 @@ def _eff_row(order_id, start, end, run_time, row_version, segment_count, plant, 
     return (order_id, start, end, run_time, row_version, segment_count, plant, machine,
             planning_status, reason_code, routing_runtime_enabled, parent_order,
             run_time_source, material_number, order_quantity, basic_start_date,
-            production_version, placement_exception, timezone, stored_start, stored_end)
+            production_version, placement_exception, timezone, stored_start, stored_end,
+            manual_firmed, prt_01, prt_02, production_order)
 
 
 def _segment_batch_item(order_id):
@@ -837,7 +840,7 @@ def test_bulk_update_alias_strips_a_caller_supplied_force_flag(monkeypatch):
     layer as force=False regardless of the payload."""
     captured = {}
 
-    def fake_update(items, allowed_plants=None):
+    def fake_update(items, allowed_plants=None, **_kw):
         captured["items"] = items
         return {"applied": 1, "persisted": 1, "failed": 0, "invalid": 0,
                 "not_found": 0, "invalid_ids": [], "not_found_ids": [],

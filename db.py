@@ -27,6 +27,8 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+import backend.schedule_events.events as sched_events
+
 # Pinned to this file's own directory (repo root) rather than a bare
 # load_dotenv()'s upward search — from inside a git worktree (no local .env
 # of its own), an unscoped search walks up and silently loads the MAIN
@@ -1249,13 +1251,15 @@ def _order_update_shape(row: dict) -> tuple[tuple, tuple, list]:
     return tuple(lits), tuple(pars), vals
 
 
-def _apply_order_updates_batched(cur, update_rows: list[dict], versions: dict) -> None:
+def _apply_order_updates_batched(cur, update_rows: list[dict], versions: dict, after_out: dict | None = None) -> None:
     """P6: persist `update_rows` (already validated, stale-checked and
     FOR UPDATE-locked by the caller) with one `UPDATE ... FROM (VALUES ...)`
     per distinct SET-shape instead of one UPDATE per row. Per-row
     `RETURNING xmin` goes into `versions`; segment replacement for rows that
     carry segments is one DELETE + one executemany. Any error propagates (the
-    caller rolls the whole transaction back, exactly as the per-row loop did)."""
+    caller rolls the whole transaction back, exactly as the per-row loop did).
+    `after_out` (schedule_event history): when a dict is passed it receives, per id, the DB-typed AFTER
+    image of the tracked columns from the same RETURNING (plus the segment count)."""
     groups: dict[tuple, list[tuple]] = {}
     for row in update_rows:
         lits, pars, vals = _order_update_shape(row)
@@ -1275,11 +1279,20 @@ def _apply_order_updates_batched(cur, update_rows: list[dict], versions: dict) -
                 params.extend(vals)
             cur.execute(
                 f"UPDATE orders o SET {set_sql} FROM (VALUES {', '.join([row_ph] * len(chunk))}) AS v({col_names})"
-                " WHERE o.id = v.id RETURNING o.id, o.xmin::text::bigint AS new_version",
+                " WHERE o.id = v.id RETURNING o.id, o.xmin::text::bigint AS new_version"
+                + (", o.machine, o.scheduled_start, o.scheduled_end, o.run_time, o.production_version,"
+                   " o.manual_firmed, o.planning_status, o.planning_reason->>'code', o.prt_01, o.prt_02"
+                   if after_out is not None else ""),
                 params,
             )
-            for rid, rver in cur.fetchall():
-                versions[rid] = int(rver)
+            for rrow in cur.fetchall():
+                versions[rrow[0]] = int(rrow[1])
+                if after_out is not None:
+                    after_out[rrow[0]] = {
+                        "machine": rrow[2], "scheduled_start": rrow[3], "scheduled_end": rrow[4],
+                        "run_time": rrow[5], "production_version": rrow[6], "manual_firmed": rrow[7],
+                        "planning_status": _event_status(rrow[8], rrow[9]), "prt_01": rrow[10], "prt_02": rrow[11],
+                    }
     seg_rows = [row for row in update_rows if row["segments"] is not None]
     if seg_rows:
         cur.execute("DELETE FROM order_schedule_segments WHERE order_id = ANY(%s)", ([r["id"] for r in seg_rows],))
@@ -1290,11 +1303,24 @@ def _apply_order_updates_batched(cur, update_rows: list[dict], versions: dict) -
                 " VALUES (%s, %s, %s, %s)",
                 inserts,
             )
+    if after_out is not None:
+        for r in update_rows:
+            if r["id"] in after_out and r["segments"] is not None:
+                after_out[r["id"]]["segments"] = len(r["segments"])
+
+
+def _event_status(status, reason_code) -> str | None:
+    """schedule_event encoding of planning_status: 'needs_planning:<reason code>' when a code exists."""
+    if status == "needs_planning" and reason_code:
+        return f"needs_planning:{reason_code}"
+    return status
 
 
 def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None = None,
                            *, atomic_optimizer: bool = False,
-                           strict_conflicts: bool = False) -> dict:
+                           strict_conflicts: bool = False,
+                           actor: str | None = None, client_id: str | None = None,
+                           ev: "sched_events.EventCtx | None" = None) -> dict:
     """
     Persist parent schedule aggregates and allowlisted order attributes in one
     transaction.  A schedule_segments field is an all-or-nothing replacement
@@ -1421,7 +1447,11 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                    o.placement_exception,
                    p.timezone,
                    o.scheduled_start,
-                   o.scheduled_end
+                   o.scheduled_end,
+                   o.manual_firmed,
+                   o.prt_01,
+                   o.prt_02,
+                   o.production_order
             FROM orders o
             {_SCHEDULE_SEGMENTS_LATERAL_SQL}
             LEFT JOIN plants p ON p.plant = o.plant
@@ -1457,6 +1487,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                 # "unmoved" below means equal to what a planner stored.
                 "stored_start": r[19],
                 "stored_end": r[20],
+                "manual_firmed": r[21], "prt_01": r[22], "prt_02": r[23], "production_order": r[24],
             }
             for r in cur.fetchall()
         }
@@ -1781,6 +1812,7 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                               and (start is not None or end is not None or bool(segment_rows)))
             update_rows.append({
                 "id": tid,
+                "event_source": it.get("source") if it.get("source") in sched_events.PLANNER_SOURCES else None,
                 "force_mismatch": force_mismatch,
                 # D13 (VM2): a run time changed with no edges leaves the stored bar wrong; flag it so the browser re-derives
                 "stale_runtime": (runtime_changed and not queued and start is None and end is None
@@ -1823,7 +1855,8 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
 
         if update_rows:
             try:
-                _apply_order_updates_batched(cur, update_rows, versions)
+                after_out: dict | None = {} if ev is not None else None
+                _apply_order_updates_batched(cur, update_rows, versions, after_out)
                 cur.execute("SAVEPOINT conflict_scan")
                 try:
                     conflicts = _scan_conflicts_for_rows(cur, update_rows, eff)
@@ -1859,6 +1892,30 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
                             "status": "error", "error_code": "schedule.conflicts",
                             "cause": f"{len(conflicts)} schedule conflict(s) on the written machines (strict mode)",
                             "rejection_reasons": rejection_reasons, "start_derived": {}}
+                if ev is not None and after_out:
+                    ev_rows = []
+                    src_by_id = {r["id"]: r["event_source"] for r in update_rows}
+                    for oid, aft in after_out.items():
+                        cur_row = eff[oid]
+                        before = {
+                            "machine": cur_row["machine"], "scheduled_start": cur_row["stored_start"],
+                            "scheduled_end": cur_row["stored_end"], "run_time": cur_row["run_time"],
+                            "production_version": cur_row["production_version"],
+                            "manual_firmed": cur_row["manual_firmed"],
+                            "planning_status": _event_status(cur_row["planning_status"], cur_row["reason_code"]),
+                            "prt_01": cur_row["prt_01"], "prt_02": cur_row["prt_02"],
+                            "segments": cur_row["segment_count"],
+                        }
+                        aft = dict(aft)
+                        aft.setdefault("segments", cur_row["segment_count"])
+                        changes = sched_events.diff_tracked(before, aft)
+                        if changes:
+                            ev_rows.append(sched_events.EventRow(
+                                plant=cur_row["plant"], order_id=oid,
+                                production_order=cur_row["production_order"],
+                                material_number=cur_row["material_number"],
+                                op="modify", changes=changes, source=src_by_id.get(oid)))
+                    sched_events.record(cur, ev, ev_rows)
                 conn.commit()
                 persisted = applied = len(versions)
             except Exception:
@@ -1888,7 +1945,7 @@ def get_order_plant(task_id: str) -> str | None:
     return row[0] if row else None
 
 
-def update_task_note(task_id: str, notes) -> dict:
+def update_task_note(task_id: str, notes, *, ev: "sched_events.EventCtx | None" = None) -> dict:
     """Persist a user-written note for an order. Pass None to clear.
 
     RETURNING the post-write xmin (B1 fix, 2026-09-01): this UPDATE bumps
@@ -1897,12 +1954,20 @@ def update_task_note(task_id: str, notes) -> dict:
     spuriously lands in `stale` — same versions-map shape as
     update_task_dates_bulk so the frontend can re-stamp uniformly.
     """
-    sql = ("UPDATE orders SET notes = %s, updated_at = NOW() WHERE id = %s "
-           "RETURNING id, xmin::text::bigint AS new_version")
+    # Self-join (PG16-safe, no RETURNING OLD): `b` reads the pre-write notes for the history diff.
+    sql = ("UPDATE orders o SET notes = %s, updated_at = NOW() FROM orders b WHERE o.id = %s AND b.id = o.id "
+           "RETURNING o.id, o.xmin::text::bigint AS new_version, b.notes, o.plant, o.production_order, o.material_number")
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(sql, (notes or None, task_id))
+        new_notes = notes or None
+        cur.execute(sql, (new_notes, task_id))
         row = cur.fetchone()
         updated = cur.rowcount
+        if ev is not None and row:
+            changes = sched_events.diff_tracked({"notes": row[2]}, {"notes": new_notes})
+            if changes:
+                sched_events.record(cur, ev, [sched_events.EventRow(
+                    plant=row[3], order_id=row[0], production_order=row[4], material_number=row[5],
+                    op="modify", changes=changes)])
         conn.commit()
     versions = {row[0]: int(row[1])} if row else {}
     return {"status": "ok", "updated": updated, "versions": versions}
