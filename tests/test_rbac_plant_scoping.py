@@ -91,6 +91,30 @@ def test_get_tasks_allows_an_in_scope_plant_through_to_the_data_layer(scoped_cli
     assert calls == [{"plant": PLANT_A, "allowed_plants": [PLANT_A]}]
 
 
+def test_get_tasks_unscoped_limit_pull_is_bounded_to_the_allowed_plants(scoped_client, monkeypatch):
+    """The pandas-free /tasks path still hands the caller's role_plants scope to the
+    reader on an unscoped (?limit=) pull, and a served row set round-trips through the
+    encode/gzip handler."""
+    calls = []
+    row = {c: None for c in (
+        "id", "MACHINE", "PLANT", "BASIC_START_DATE", "BASIC_FINISH_DATE", "ROW_VERSION", "COLOR",
+        "PRT_01", "PRT_02", "PRODUCTION_VERSION", "MATERIAL_DESCRIPTION")}
+    row.update(id="rbac-1", MACHINE="M1", PLANT=PLANT_A, BASIC_START_DATE=datetime(2026, 10, 22, 8),
+               BASIC_FINISH_DATE=datetime(2026, 10, 22, 12), ROW_VERSION=7, MATERIAL_DESCRIPTION="x")
+
+    def fake_rows(plant=None, line=None, limit=None, offset=None, allowed_plants=None):
+        calls.append({"plant": plant, "limit": limit, "allowed_plants": allowed_plants})
+        return [dict(row)], None, None
+
+    monkeypatch.setattr(db, "query_orders_rows", fake_rows)
+    monkeypatch.setattr(db, "count_orders", lambda **kw: 1)
+    response = scoped_client.get("/tasks?limit=5")
+    assert response.status_code == 200
+    assert calls == [{"plant": None, "limit": 5, "allowed_plants": [PLANT_A]}]
+    assert [t["id"] for t in response.json()["data"]] == ["rbac-1"]
+    assert response.json()["data"][0]["row_version"] == 7
+
+
 # ---------------------------------------------------------------------------
 # POST /task/update
 # ---------------------------------------------------------------------------

@@ -1064,6 +1064,23 @@ def test_tasks_meta_carries_server_now_as_iso_utc_on_the_empty_envelope(monkeypa
 
 
 
+def test_pandas_free_builder_emits_exactly_the_taskdto_wire_fields():
+    """The row dict `_build_task_rows` builds must carry exactly TaskDTO's wire keys
+    (alias when one exists) -- a key the builder drops or adds would be silently lost or
+    leak past the response model."""
+    from datetime import datetime
+
+    cols = ("id", "MACHINE", "PLANT", "BASIC_START_DATE", "BASIC_FINISH_DATE")
+    row = {c: None for c in cols}
+    row.update(id="fs-1", MACHINE="M1", PLANT="P1", BASIC_START_DATE=datetime(2026, 10, 22, 8),
+               BASIC_FINISH_DATE=datetime(2026, 10, 22, 12))
+    data, links, stats, pre = scheduling_routes._build_task_rows([row], "P1")
+    expected = {(f.alias or name) for name, f in brain.TaskDTO.model_fields.items()}
+    assert set(data[0]) == expected
+    assert (links, pre) == ([], 1) and stats["emitted_task_count"] == 1
+    brain.TaskDTO.model_validate(data[0])      # and it validates
+
+
 def test_planning_reason_carries_step():
     assert PlanningReason(code="c", message="m", step="pv_missing").model_dump()["step"] == "pv_missing"
     assert PlanningReason(code="c", message="m").step is None

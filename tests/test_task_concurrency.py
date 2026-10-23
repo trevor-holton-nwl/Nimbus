@@ -103,6 +103,36 @@ class TestUpdateTaskDatesBulkXminConflict:
         assert persisted_rows[0]["start_date"] == new_start_1.strftime("%Y-%m-%dT%H:%M:%S")
         assert persisted_rows[0]["end_date"] == new_end_1.strftime("%Y-%m-%dT%H:%M:%S")
 
+    def test_tasks_builder_row_version_round_trips_into_a_save_and_a_stale_one_is_rejected(self, pg):
+        """Workload-relief rewrite: the pandas-free /tasks read (db.query_orders_rows ->
+        routes._build_task_rows) must hand out the live xmin as `row_version`; echoing it as
+        `base_version` saves, an older one is rejected as stale, and the read itself never
+        writes to `orders` (reading twice leaves xmin unchanged)."""
+        from backend.scheduling import routes
+        db_ = pg
+
+        def served_version():
+            rows, _, _ = db_.query_orders_rows(plant=self.PLANT)
+            data, _links, _stats, _n = routes._build_task_rows(rows, self.PLANT)
+            return {t["id"]: t["row_version"] for t in data}
+
+        v1 = served_version()
+        assert served_version() == v1, "a read must never bump xmin"
+        assert v1[self.oid] == self._current_version(db_) and isinstance(v1[self.oid], int)
+        frame = db_.query_orders(plant=self.PLANT)[0]
+        frame_versions = dict(zip(frame["id"], frame["ROW_VERSION"], strict=True))
+        assert {k: int(v) for k, v in frame_versions.items()} == v1   # same SQL as the DataFrame reader
+
+        ok = db_.update_task_dates_bulk([
+            {"id": self.oid, "start": self.start + dt.timedelta(hours=1), "end": self.end + dt.timedelta(hours=1),
+             "base_version": v1[self.oid]}])
+        assert ok["persisted"] == 1 and ok["stale"] == []
+        stale = db_.update_task_dates_bulk([
+            {"id": self.oid, "start": self.start + dt.timedelta(hours=2), "end": self.end + dt.timedelta(hours=2),
+             "base_version": v1[self.oid]}])
+        assert stale["persisted"] == 0 and stale["stale"] == [self.oid]
+        assert served_version()[self.oid] == ok["versions"][self.oid] != v1[self.oid]
+
     def _manual_firmed(self, db_, oid):
         with db_._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT manual_firmed FROM orders WHERE id = %s", (oid,))
