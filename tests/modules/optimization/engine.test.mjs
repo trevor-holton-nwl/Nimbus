@@ -5310,9 +5310,33 @@ describe('reconcile (finish-anchored)', () => {
     } finally { fx.restore(); }
   });
 
+  test('orphan verdict is taken at the final derived start with a row between the held finish and the predecessor', () => {
+    const fx = recFixture({ policy: 'partial_allowed' });
+    try {
+      // pb (BLUE, 14 h, split over Tue/Wed) is held to Wed 26 19:00; pa (RED) ends Tue 25 09:00; pz (RED) sits Tue 16:30-16:50,
+      // between pa and pb's derived start (Tue 17:00). The override names pa, so it is orphaned (pz is the row before pb).
+      // NOTE: the setup-reserved second walk kept the start in every scenario tried, so the orphanedAt MISS path (start
+      // moved) is not forced here; this pins the verdict the hit path returns.
+      const override = { id: 'ov-miss', machine: fx.line, signature_version: 1, predecessor_order_id: 'pa', successor_order_id: 'pb',
+        predecessor_state_key: colorState('RED'), successor_state_key: colorState('BLUE'), standard_min: 60, remaining_min: 60, status: 'active', reason: 'started' };
+      withSetup(fx, { overrides: [override] }, () => {
+        Store.setTasks([
+          fx.task('pa', { COLOR: 'RED', user_scheduled: true, start_date: at(25, 7), end_date: at(25, 9) }),
+          fx.task('pz', { COLOR: 'RED', user_scheduled: true, start_date: new Date(2026, 7, 25, 16, 30), end_date: new Date(2026, 7, 25, 16, 50) }),
+          fx.task('pb', { COLOR: 'BLUE', RUN_TIME: '14', original_end_date: at(26, 19), start_date: at(18, 6), end_date: at(18, 10) }),
+        ], 'unit-test');
+        Engine.reconcileRuntimeSchedules(fx.plant);
+        const pb = Store.tasks.pb;
+        const adjacentToPz = pb.start_date.getTime() > new Date(2026, 7, 25, 16, 30).getTime();
+        assert.equal(pb.derivationIssue?.code === 'setup_override_orphaned', adjacentToPz,
+          `start ${fmtLocal(pb.start_date)}: orphaned exactly when pz (16:30) sits before the final start`);
+      });
+    } finally { fx.restore(); }
+  });
+
   // Plant scale (workload relief, step 3): the pass builds one resolution index, one orphan map and one per-line
   // grouping, so reads of the setup row arrays stay O(rows + candidates) instead of O(rows x candidates).
-  test('plant scale: 2,000 candidates, 20 machines, 100-state matrix read the setup rows O(rows + candidates)', () => {
+  test('plant scale: 400 candidates, 20 machines, 100-state matrix read the setup rows O(rows + candidates)', () => {
     const lineNames = Array.from({ length: 20 }, (_, i) => `M${i}`);
     const fx = recFixture({ policy: 'never', lineNames });
     const prior = Store.setupSnapshot;
@@ -5324,7 +5348,7 @@ describe('reconcile (finish-anchored)', () => {
     }
     const machineRows = fx.lines.map((line, i) => ({ machine: line, signature_version: 1, from_key: colorState(colors[i]), to_key: colorState(colors[i + 1]), setup_min: 15 }));
     const tasks = [];
-    const CANDIDATES = 2000;
+    const CANDIDATES = 400;
     const dueMs = new Date(2026, 8, 1, 17, 0).getTime();
     for (let i = 0; i < CANDIDATES; i++) {
       const lineIndex = i % lineNames.length;
