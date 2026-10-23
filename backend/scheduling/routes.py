@@ -98,14 +98,14 @@ def _server_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _log_tasks_timing(plant, rows: int, **stages_s: float) -> None:
+def _log_tasks_timing(plant, row_count: int, **stages_s: float) -> None:
     """One structured `tasks.timing` event per GET /tasks (ring buffer + JSON log
     line). Deliberately NOT a DIAGNOSTICS key: `meta` is built from DIAGNOSTICS and
     would leak it into the response. Stage values are ms (rounded); read-only."""
     ms = {f"{k}_ms": round(v * 1000, 1) for k, v in stages_s.items()}
     ms["total_ms"] = round(sum(stages_s.values()) * 1000, 1)
-    _log_event("info", "perf", f"GET /tasks timing plant={plant} rows={rows}",
-               event="tasks.timing", plant=plant, rows=rows, **ms)
+    _log_event("info", "perf", f"GET /tasks timing plant={plant} rows={row_count}",
+               event="tasks.timing", plant=plant, rows=row_count, **ms)
 
 
 @router.get("/tasks", response_model=TasksResponse)
@@ -293,7 +293,7 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
     meta["frozen_horizon_end"] = frozen_horizon_end.isoformat() if frozen_horizon_end else None
     meta["server_now"] = _server_now_iso()
     t_rows = time.perf_counter()
-    _log_tasks_timing(plant, len(data), sql=t_sql - t_start, frame=t_frame - t_sql, rows=t_rows - t_frame)
+    _log_tasks_timing(plant, len(data), sql=t_sql - t_start, frame=t_frame - t_sql, build=t_rows - t_frame)
     return {"data": data, "links": links, "meta": meta}
 
 
