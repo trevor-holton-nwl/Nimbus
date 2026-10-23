@@ -30,3 +30,19 @@ An Opus deep-dive (plan `are-there-any-new-generic-cook.md`) found that no new w
 - Step 5 (6d): the dead branch was verified dead (it repeated the outer `available() && plant` test inside its own else) before deletion.
 - Hook noise: the post-edit design hook reported ~99 findings on `frontend/nimbus-intelligence.js` (CSS-in-JS strings, bounce easing, side-tab borders), all pre-existing and unrelated to the deleted dead branch; left unchanged.
 - Final gate (Wave A): build, typecheck, lint (0 errors), check:static-assets and check:legacy-surface green. `npm run test`: 3,023 of 3,031 passed; the failures were the known styles.css CRLF test plus four `engine.test.mjs` cases that shell out to a node probe (`spawnSync ... ETIMEDOUT`, load-sensitive when the whole suite runs in parallel). `engine.test.mjs` re-run alone: 196/196 on the second run (first run 3 probe timeouts), so treat the probe timeouts as a load flake, not a regression. The new 2,000-candidate plant-scale test takes about 4 s.
+
+## Wave B ledger (dedicated leverage worker, items 4 + 6b; branch `feature/workload-relief-fe-b`, from f97048c)
+- B1 (38028f4): `Compute.leverageBatch(base, variants, {signal?})` uses a per-call short-lived worker; timeout/abort terminate it and reject `TimeoutError`/`AbortError`; no main-thread rerun after either; sync core only for no `Worker`, constructor throw, worker crash or `ERROR` reply.
+- B2 (e28edf4): optional `{signal}` threaded through `LeverageRunner`/`analyzeLeverage`/`replayWithMinutes`; the pane holds one `AbortController` per run (and per minutes replay), aborted on plant change, `setActive(false)` and plan-move events (abort, then the existing 400 ms debounce re-queue).
+- B3 (a29f750): tests in `compute-transport.test.mjs` (own worker, shared worker unaffected, timeout, abort, crash fallback, ctor failure / no Worker), `leverage-batch.test.mjs` (timeout test now expects `TimeoutError`; vm parity test untouched) and `alert-monitor-leverage-pane.test.mjs` (abort on tab leave / plan move / plant change; timeout keeps phase-1 cards).
+- B4: docs in frontend/insights/CLAUDE.md, frontend/alert-monitor/CLAUDE.md and the 2026-10-20 alert-monitor design.
+
+### Wave B deviations
+- Timeout feedback is log-only (`ErrorLog.warn`), with no inline status string: the vocabulary rule and a 5-locale addition were not worth a status line for a rare 30 s case; the removal-only cards already read as the quick ranking.
+- Worker `onerror` / `ERROR` reply on the leverage worker: one sync-core fallback (a crash, not a timeout), logged with `ErrorLog.warn`. A `postMessage` failure (e.g. DataCloneError) is handled the same way.
+- The leverage path does not consult the shared `_dead` flag: if the shared worker is dead because workers are blocked, the dedicated constructor throws and the sync fallback applies; if only the shared worker crashed twice, leverage can still use a dedicated worker.
+- Small robustness addition in `_levRun`'s `finally`: a queued `_levRerun` calls `_levRun()` directly when `_levHave` is false (a plant-change reset), because the debounced re-run is gated on `_levHave` and would drop it.
+- Pane aborts also cover plant change through `_levReset` (called by `resetView` and by `_renderLeverage` on a plant mismatch), so no separate listener was added.
+- The leverage-batch timeout constant keeps its name `LEVERAGE_BATCH_TIMEOUT_MS`.
+- Identity parity test (replaying the baseline setup reproduces the baseline score): skipped, not cheap in the existing fixtures; the vm parity test against `runLeverageBatchSync` stays green.
+- Deferred as instructed: the scores-only worker reply, 6c/6f, the utilization cache.
