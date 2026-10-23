@@ -181,3 +181,30 @@ for (const identical of [true, false]) {
     } finally { Toast.show = priorShow; }
   });
 }
+
+test('a stale reply logs a tasks.conflict warn with ids, base versions and reqId, then an info once the server row confirms it', async () => {
+  const logs = [];
+  const priorWarn = ErrorLog.warn, priorInfo = ErrorLog.info;
+  ErrorLog.warn = (scope, msg, ctx, opts) => logs.push({ level: 'warn', scope, msg, ctx, opts });
+  ErrorLog.info = (scope, msg, ctx, opts) => logs.push({ level: 'info', scope, msg, ctx, opts });
+  try {
+    const requests = [];
+    Util.fetchTraced = (url, options) => new Promise(resolve => requests.push({ url, options, resolve }));
+    edit('10');
+    Persistence.saveAll();
+    requests[0].resolve(response({ stale: ['A'], versions: {}, updated: 1, persisted: 0 }));
+    await tick();
+    const warn = logs.find(l => l.opts?.errorCode === 'tasks.conflict' && l.level === 'warn');
+    assert.ok(warn, 'stale branch logs a tasks.conflict warn');
+    assert.equal(warn.scope, 'persistence');
+    assert.deepEqual(warn.ctx.ids, ['A']);
+    assert.deepEqual(warn.ctx.base_versions, { A: 1 });
+    assert.ok(warn.opts.reqId, 'reqId correlates with the backend');
+    const refresh = requests.find(request => request.url.endsWith('/tasks/refresh'));
+    refresh.resolve(response({ data: [{ ...row(), MACHINE: 'L1', row_version: 5, start_date: '2026-10-01T12:00:00', end_date: '2026-10-01T13:00:00' }], missing: [] }));
+    await tick(); await tick();
+    const info = logs.find(l => l.level === 'info' && l.opts?.errorCode === 'tasks.conflict');
+    assert.ok(info, 'a confirmed conflict logs an info');
+    assert.deepEqual(info.ctx, { id: 'A', base_version: 1, server_version: 5 });
+  } finally { ErrorLog.warn = priorWarn; ErrorLog.info = priorInfo; }
+});
