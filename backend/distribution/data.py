@@ -3688,7 +3688,7 @@ def reweight_shares(plant: str, order: str, material: str, shares_input, base_ve
         # import cycle, matching this codebase's established convention
         # (e.g. backend/routing/routes.py, backend/master_data/routes.py).
         import backend.routing.resolver as routing_resolver
-        routing_resolver.resolve_orders(plant)
+        routing_resolver.resolve_orders(plant, actor=actor)
         _refresh_write_children(result)
     return result
 
@@ -3774,7 +3774,7 @@ def reset_one_header(plant: str, order: str, material: str, base_version, *,
     if not dry_run:
         # See reweight_shares' identical call -- same gap, same fix.
         import backend.routing.resolver as routing_resolver
-        routing_resolver.resolve_orders(plant)
+        routing_resolver.resolve_orders(plant, actor=actor)
         _refresh_write_children(result)
     return result
 
@@ -4264,7 +4264,7 @@ def _resolve_repair(plant: str, dry_run: bool, actor: str = "system") -> dict:
     # Reached only on the real (non-dry-run) path -- the dry_run branch
     # above returns before any commit. See reweight_shares' identical call.
     import backend.routing.resolver as routing_resolver
-    routing_resolver.resolve_orders(plant)
+    routing_resolver.resolve_orders(plant, actor=actor)
     return {"headers_created": 0, "children_upserted": children_upserted, "single_rewrites": 0,
             "repaired": repaired, "skipped": len(incomplete) - repaired}
 

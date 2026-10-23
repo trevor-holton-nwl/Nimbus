@@ -4296,7 +4296,7 @@ class TestResolverCallSitesAfterRealDistributionWrites(_ReweightFixtureBase):
                 self.PLANT, self.ORD, self.MAT, new_shares, base_version=header["xmin"],
                 dry_run=False, actor="tester",
             )
-            fake_resolve.assert_called_once_with(self.PLANT)
+            fake_resolve.assert_called_once_with(self.PLANT, actor="tester")
 
     def test_reset_one_header_calls_resolver_once_after_real_write_never_on_dry_run(self, pg):
         header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
@@ -4312,7 +4312,7 @@ class TestResolverCallSitesAfterRealDistributionWrites(_ReweightFixtureBase):
                 self.PLANT, self.ORD, self.MAT, base_version=header["xmin"],
                 dry_run=False, actor="tester",
             )
-            fake_resolve.assert_called_once_with(self.PLANT)
+            fake_resolve.assert_called_once_with(self.PLANT, actor="tester")
 
     def test_resolve_repair_calls_resolver_once_after_real_write_never_on_dry_run(self, pg):
         # Force the header into `incomplete` so `_resolve_repair` has
@@ -4331,7 +4331,7 @@ class TestResolverCallSitesAfterRealDistributionWrites(_ReweightFixtureBase):
 
             real_result = distribution_data.resolve(self.PLANT, "repair", dry_run=False)
             assert real_result["repaired"] >= 1
-            fake_resolve.assert_called_once_with(self.PLANT)
+            fake_resolve.assert_called_once_with(self.PLANT, actor="system")
 
 
 @pytest.mark.pg
@@ -4410,7 +4410,7 @@ class TestDistributionCanonicalWriteResponse(_ReweightFixtureBase):
 
     @pytest.mark.parametrize("operation", ["shares", "reset"])
     def test_response_reads_runtime_attributes_and_version_after_resolver_commit(self, pg, operation):
-        def resolve_after_commit(plant):
+        def resolve_after_commit(plant, **kwargs):
             with pg._pool.connection() as conn, conn.cursor() as cur:
                 cur.execute(
                     "UPDATE orders SET run_time=1.5, run_time_source='routing',"

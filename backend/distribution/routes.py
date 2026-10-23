@@ -109,7 +109,7 @@ def save_workcenter(plant: str, wc: str, request: Request, body: dict = Body(def
         # recompute the plant like a machine write does (best-effort; the save committed).
         try:
             import backend.routing.resolver as routing_resolver  # deferred: cross-domain
-            routing_resolver.resolve_orders(plant)
+            routing_resolver.resolve_orders(plant, actor=actor)
         except Exception as exc:  # noqa: BLE001
             _log_event("warn", "routing", "Recompute after work-center auto-link failed", plant=plant, error=str(exc))
     return result

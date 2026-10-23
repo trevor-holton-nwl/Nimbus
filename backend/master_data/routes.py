@@ -63,7 +63,7 @@ router = APIRouter()
 _ROUTING_RECOMPUTE_TABLES = frozenset({"production_version", "routing_operation", "routing_rules", "machine"})
 
 
-def _recompute_routing_for_plants(plants) -> None:
+def _recompute_routing_for_plants(plants, actor: str | None = None) -> None:
     """§6.4's recompute hook, generic-grid half (the upload-route half lives
     in backend/routing/routes.py's `_recompute_after_write`). DEFERRED
     import -- matches the existing `backend.distribution.data` convention
@@ -76,7 +76,7 @@ def _recompute_routing_for_plants(plants) -> None:
     import backend.routing.resolver as routing_resolver
     for plant in sorted({p for p in plants if p}):
         try:
-            routing_resolver.resolve_orders(plant)
+            routing_resolver.resolve_orders(plant, actor=actor)
         except Exception as e:
             _log_event("warn", "routing", "Recompute after master-data write failed", plant=plant, error=str(e))
 
@@ -544,14 +544,14 @@ def md_bulk(table: str, request: Request, body: dict = Body(default={})):
             if table == "sap_workcenter":
                 affected_plants = {row["plant"] for row in result["linked"]}
             if affected_plants:
-                _recompute_routing_for_plants(affected_plants)
+                _recompute_routing_for_plants(affected_plants, request.headers.get("x-user-email"))
         elif table == "plants":
             flipped_plants = {
                 row.get("plant") for row in body.get("upserts", [])
                 if "routing_runtime_enabled" in row
             }
             if flipped_plants:
-                _recompute_routing_for_plants(flipped_plants)
+                _recompute_routing_for_plants(flipped_plants, request.headers.get("x-user-email"))
         return result
     except ValueError as e:
         if table == "machine" and getattr(e, "constraint_name", None) == "fk_machine_sap_workcenter":
@@ -599,7 +599,7 @@ def md_delete_filtered(table: str, request: Request, body: dict = Body(default={
     # tables, so a successful filtered delete always recomputes `plant`
     # (best-effort -- see `_recompute_routing_for_plants`).
     if result.get("deleted"):
-        _recompute_routing_for_plants([plant])
+        _recompute_routing_for_plants([plant], request.headers.get("x-user-email"))
     return result
 
 
