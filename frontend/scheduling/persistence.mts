@@ -37,6 +37,14 @@ import { Runtime } from '../routing/runtime-client.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, StoredState, NaiveLocalTs, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment, NimbusMasterWorkcenter } from '../platform/types.mjs';
 import type { components } from '../types/api-generated.mjs';
 
+/** Store event source tag -> the per-task `source` the server records in schedule_event (PLANNER_SOURCES in
+ *  backend/schedule_events/events.py). Tags absent here (distribution, refresh, note, engine-runtime-reconcile)
+ *  never reach the wire; the server defaults those saves to 'planner'. */
+export const SOURCE_WIRE: Readonly<Record<string, string>> = {
+  timeline: 'drag', interaction: 'keyboard', table: 'grid', inspector: 'inspector',
+  alerts: 'alert_fix', engine: 'optimizer', 'engine-backlog': 'optimizer', undo: 'undo',
+};
+
 // -- Backend DTOs generated from brain.py's Pydantic response_model=s (Task 1/2
 //    of this phase) — see docs/archive/typescript_migration.md §F. Endpoints brain.py
 //    does not yet model (/health, /master-data/*) get hand-written local
@@ -194,6 +202,30 @@ export const Persistence = {
   // an ordinary date edit must not write this client's possibly stale firm copy back over
   // another planner's firm. Never an optimizer (atomic) marker; see App._trackDirty.
   _firmDirtyIds: new Set<string>(),
+  // Per-task wire `source` for the schedule_event history (id -> 'drag' | 'keyboard' | ...). Last writer wins;
+  // set by App._trackDirty from the Store event source via SOURCE_WIRE. Deliberately NOT persisted in the offline
+  // cache: ids restored from the cache save without a source and the server records them as 'planner'.
+  _dirtySource: new Map<string, string>(),
+  /** Stable per-tab id sent as `client_id` on every save (reserved for a future change feed). */
+  get clientId(): string {
+    const fresh = (): string => (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    try {
+      const k = 'nimbus.client_id';
+      const have = sessionStorage.getItem(k);
+      if (have) return have;
+      const id = fresh();
+      sessionStorage.setItem(k, id);
+      return id;
+    } catch {
+      if (!Persistence._clientIdFallback) Persistence._clientIdFallback = fresh();
+      return Persistence._clientIdFallback;
+    }
+  },
+  _clientIdFallback: '' as string,
+  /** schedule_event retention window (days), from the system-settings blob the boot fetch loads. Default 14. */
+  scheduleEventRetentionDays: 14,
   async confirmPlantSwitch(plant: string | null): Promise<boolean> {
     if (plant === Store.selectedPlant || Persistence._dirtyIds.size === 0) return true;
     const discard = await Modal.confirm({
@@ -207,6 +239,7 @@ export const Persistence = {
     Persistence._forceIds.clear();
     Persistence._conflictedIds.clear();
     Persistence._firmDirtyIds.clear();
+    Persistence._dirtySource.clear();
     // A later re-selection of the outgoing plant must fetch its saved state,
     // including when the user cleared the selector before re-selecting it.
     Persistence._currentLoadedPlant = null;
@@ -300,6 +333,7 @@ export const Persistence = {
       Persistence._forceIds.clear();
       Persistence._conflictedIds.clear();
       Persistence._firmDirtyIds.clear();
+      Persistence._dirtySource.clear();
       for (const key of Object.keys(Store.dependencies)) delete Store.dependencies[key];
     };
     // Captured before any async work starts; every continuation below that would
@@ -598,7 +632,7 @@ export const Persistence = {
         Promise.all([
           Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
           Util.fetchTraced(`${Config.API_BASE}/master-data/machine?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
-          Util.fetchTraced(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> }> : null),
+          Util.fetchTraced(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }>; schedule_event_retention_days?: number }> : null),
           Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
         ]).then(([pData, lData, ssData, wcData]) => {
           // A newer load() (e.g. the user switched plants again) may have
@@ -613,6 +647,8 @@ export const Persistence = {
             }, 'persistence');
           }
           Store.setOrderFieldVisibility(ssData?.orderFields ?? {}, 'persistence');
+          const retention = Number(ssData?.schedule_event_retention_days);
+          Persistence.scheduleEventRetentionDays = Number.isFinite(retention) && retention >= 1 ? Math.min(60, Math.round(retention)) : 14;
         }).catch(e => {
           ErrorLog.warn('persistence', `Master-data fetch failed: ${e.message}`);
           Toast.show(Util.t('toast.master_data_unavail'), 'warn', 5000);
@@ -1110,6 +1146,8 @@ export const Persistence = {
     return {
       // Manual firm: sent only for rows whose firm the planner changed (see _firmDirtyIds).
       ...(Persistence._firmDirtyIds.has(String(t.id)) ? { FIRMED: !!t.firmed } : {}),
+      // Schedule-event history: what kind of edit last touched this row (see SOURCE_WIRE). Absent => server 'planner'.
+      ...(Persistence._dirtySource.has(String(t.id)) ? { source: Persistence._dirtySource.get(String(t.id)) } : {}),
       // VC1: a display-only row has no placement to describe; sending a status with no edges is rejected by the
       // server (single_edge). Its save carries attributes only; the stored status is already 'scheduled'.
       ...(displayOnly ? {} : {
@@ -1229,7 +1267,7 @@ export const Persistence = {
     const sentSnapshot = new Map<string, string>(
       dirtyTasks.map(t => [String(t.id), JSON.stringify(Persistence._taskEditSnapshot(t))])
     );
-    const body = JSON.stringify({ tasks: taskPayload, atomic_optimizer: atomicOptimizer, blocks: Store.blocks, calendars: Store.calendars });
+    const body = JSON.stringify({ tasks: taskPayload, client_id: Persistence.clientId, atomic_optimizer: atomicOptimizer, blocks: Store.blocks, calendars: Store.calendars });
 
     // Stable reqId for this save attempt so the rejection log correlates to the
     // backend (fetchTraced reuses an x-request-id we already set).
@@ -1324,6 +1362,7 @@ export const Persistence = {
           ...(result.invalid_ids || []),
           ...(result.not_found_ids || []),
         ].map(String));
+        const savedIds: string[] = [];
         for (const id of accounted) {
           // R8: an id being "accounted for" by this response is necessary but not
           // sufficient to clear its dirty flag. If the user edited this task AGAIN
@@ -1340,9 +1379,13 @@ export const Persistence = {
             Persistence._dirtyIds.delete(id);
             Persistence._forceIds.delete(id);
             Persistence._firmDirtyIds.delete(id);
+            Persistence._dirtySource.delete(id);
+            savedIds.push(id);
           }
           // else: leave dirty — the next saveAll() will pick up the newer edit.
         }
+        // Inspector History refetches the saved orders' events (the server wrote them in the save transaction).
+        if (savedIds.length) Store.emit({ type: 'tasks:saved', ids: savedIds, source: 'persistence' });
         if (stale.length) {
           const base_versions: Record<string, number | null> = {};
           for (const id of stale) base_versions[String(id)] = Store.tasks[String(id)]?.row_version ?? null;
@@ -1413,6 +1456,7 @@ export const Persistence = {
       Persistence._dirtyIds.delete(id);
       Persistence._forceIds.delete(id);
       Persistence._conflictedIds.delete(id);
+      Persistence._dirtySource.delete(id);
       if (Store.removeTask(id, 'persistence')) removed++;
     }
     return removed;
@@ -1503,6 +1547,7 @@ export const Persistence = {
           Persistence._forceIds.delete(String(row.id));
           Persistence._conflictedIds.delete(String(row.id));
           Persistence._firmDirtyIds.delete(String(row.id));
+          Persistence._dirtySource.delete(String(row.id));
           applied.push(String(row.id));
         }
         if (applied.length) {

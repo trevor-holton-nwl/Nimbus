@@ -104,6 +104,7 @@ export function makeEl(id, doc = activeDoc, tagName = 'div') {
       ch.parentNode = this; this.children.push(ch); if (!ch._doc) ch._doc = this._doc; return ch;
     },
     append(...chs) { chs.forEach(c => this.appendChild(c)); },
+    replaceChildren(...chs) { this.children.slice().forEach(c => this.removeChild(c)); this.textContent = ''; chs.forEach(c => this.appendChild(c)); },
     removeChild(ch) { const i = this.children.indexOf(ch); if (i >= 0) { this.children.splice(i, 1); ch.parentNode = null; } return ch; },
     remove() { if (this.parentNode) this.parentNode.removeChild(this); },
     contains(other) { for (let n = other; n; n = n.parentNode) if (n === this) return true; return false; },

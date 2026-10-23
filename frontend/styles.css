@@ -1683,6 +1683,12 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
 }
 .insp-row .insp-val input:hover, .insp-row .insp-val select:hover { border-color: var(--line); background: var(--bg-elev); }
 .insp-row .insp-val input:focus, .insp-row .insp-val select:focus { background: var(--bg-elev); }
+/* Order history (schedule_event) card in the Inspector. Long values wrap; nothing forces width at 320 px. */
+.insp-history-note { font-size: 12px; color: var(--fg-mute); }
+.insp-history-group { padding: 6px 0; border-bottom: 1px dashed var(--line); min-width: 0; }
+.insp-history-group:last-child { border-bottom: none; }
+.insp-history-head { font-size: 11px; font-weight: 500; color: var(--fg-mute); overflow-wrap: anywhere; }
+.insp-history-line { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--fg); overflow-wrap: anywhere; word-break: break-word; }
 .insp-split-summary-note { color: var(--fg-mute); font-size: 11px; line-height: 1.4; margin: -2px 0 8px; }
 .insp-split-segments { border-top: 1px dashed var(--line); }
 .insp-split-segment {

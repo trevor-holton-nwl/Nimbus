@@ -571,3 +571,33 @@ test('App.sync recompute branch lists setup-snapshot:replace, lineSettings:chang
     assert.ok(branch.includes(`'${type}'`), `${type} must schedule an alert recompute`);
   }
 });
+
+// schedule_event history: _trackDirty records the per-task wire source (SOURCE_WIRE) next to the dirty id.
+test('App._trackDirty records the wire source per task: timeline->drag, engine->optimizer, last writer wins, bulk clears, distribution/refresh never populate', () => {
+  const priorDirtyIds = new Set(Persistence._dirtyIds);
+  const priorForceIds = new Set(Persistence._forceIds);
+  const priorSource = new Map(Persistence._dirtySource);
+  Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._dirtySource.clear();
+  const evt = (type, source, extra) => ({ type, source, revision: 1, mode: 'live', ...extra });
+  try {
+    App._trackDirty(evt('task:update', 'timeline', { id: 'a' }));
+    assert.equal(Persistence._dirtySource.get('a'), 'drag');
+    App._trackDirty(evt('tasks:bulkUpdate', 'engine', { ids: ['b', 'c'] }));
+    assert.equal(Persistence._dirtySource.get('b'), 'optimizer');
+    assert.equal(Persistence._dirtySource.get('c'), 'optimizer');
+    App._trackDirty(evt('task:update', 'table', { id: 'a' }));
+    assert.equal(Persistence._dirtySource.get('a'), 'grid', 'the last writer wins');
+    App._trackDirty(evt('tasks:bulkUpdate', 'distribution', { ids: ['d'] }));
+    App._trackDirty(evt('tasks:bulkUpdate', 'refresh', { ids: ['e'] }));
+    App._trackDirty(evt('tasks:bulkUpdate', 'engine-runtime-reconcile', { ids: ['f'] }));
+    assert.ok(!Persistence._dirtySource.has('d') && !Persistence._dirtySource.has('e'), 'distribution/refresh never populate');
+    assert.ok(Persistence._dirtyIds.has('f') && !Persistence._dirtySource.has('f'), 'an unmapped source dirties the id but sends no source');
+    App._trackDirty(evt('tasks:bulk', 'persistence'));
+    assert.equal(Persistence._dirtySource.size, 0, 'tasks:bulk clears the map');
+  } finally {
+    Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._dirtySource.clear();
+    priorDirtyIds.forEach(id => Persistence._dirtyIds.add(id));
+    priorForceIds.forEach(id => Persistence._forceIds.add(id));
+    priorSource.forEach((v, k) => Persistence._dirtySource.set(k, v));
+  }
+});
