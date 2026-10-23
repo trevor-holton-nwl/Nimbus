@@ -83,7 +83,8 @@ import {
   resolveTaskPlant,
   dueInstant,
 } from './setup-scheduler.mjs';
-import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
+import { buildSetupResolutionIndex, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
+import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
 import type {
   CandidateDiagnostic,
   CandidateResult,
@@ -95,7 +96,7 @@ import type {
   ScheduleSnapshot,
   EvaluationRequest,
 } from './setup-scheduler.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupStateKey, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupDefinition, SetupStateKey, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
@@ -527,6 +528,34 @@ export function predecessorOnMachine(task: NimbusTask, tasks: ReadonlyArray<Nimb
   return best?.task ?? null;
 }
 
+/** One resolution index per setup snapshot object (WeakMap, so a replaced snapshot is collected with its index).
+ *  The entry also remembers the definition, the three row arrays and their lengths it was built from; an entry
+ *  whose inputs no longer match (an in-place edit or a swapped array) is rebuilt, never reused. */
+const _setupIndexBySnapshot = new WeakMap<object, {
+  definition: SetupDefinition; machineRows: ReadonlyArray<unknown>; plantRows: ReadonlyArray<unknown>;
+  overrides: ReadonlyArray<unknown>; machineLen: number; plantLen: number; overridesLen: number;
+  index: SetupResolutionIndex;
+}>();
+
+/** The memoised `buildSetupResolutionIndex` for a snapshot with a definition. Resolving through it returns exactly
+ *  what the unindexed linear scan returns (first matching row wins; see setup-resolution-index.test.mjs). */
+export function setupResolutionIndexFor(setup: SetupSnapshot & { definition: SetupDefinition }): SetupResolutionIndex {
+  const cached = _setupIndexBySnapshot.get(setup);
+  if (cached
+    && cached.definition === setup.definition
+    && cached.machineRows === setup.machine_rows && cached.machineLen === setup.machine_rows.length
+    && cached.plantRows === setup.plant_rows && cached.plantLen === setup.plant_rows.length
+    && cached.overrides === setup.overrides && cached.overridesLen === setup.overrides.length) return cached.index;
+  const index = buildSetupResolutionIndex({
+    definition: setup.definition, machineRows: setup.machine_rows, plantRows: setup.plant_rows, overrides: setup.overrides,
+  });
+  _setupIndexBySnapshot.set(setup, {
+    definition: setup.definition, machineRows: setup.machine_rows, plantRows: setup.plant_rows, overrides: setup.overrides,
+    machineLen: setup.machine_rows.length, plantLen: setup.plant_rows.length, overridesLen: setup.overrides.length, index,
+  });
+  return index;
+}
+
 /**
  * Resolve scheduled setup occurrences exactly once, before either compute path
  * runs. This pure projection neither mutates Store nor invokes Engine; both
@@ -546,11 +575,22 @@ export function deriveSetupObservation(
   }
 }
 
+/** Reference path for parity tests: the same derivation resolving every pair through the linear scans. */
+export function deriveSetupObservationUnindexed(
+  setup: SetupSnapshot | null | undefined,
+  tasks: ReadonlyArray<NimbusTask>,
+  scopedLines?: ReadonlySet<string>,
+  availability?: SetupAvailabilityContext,
+): SetupObservation {
+  return deriveSetupObservationUntimed(setup, tasks, scopedLines, availability, false);
+}
+
 function deriveSetupObservationUntimed(
   setup: SetupSnapshot | null | undefined,
   tasks: ReadonlyArray<NimbusTask>,
   scopedLines?: ReadonlySet<string>,
   availability?: SetupAvailabilityContext,
+  indexed = true,
 ): SetupObservation {
   const observation: SetupObservation = { intervals: [], diagnostics: [] };
   const definition = setup?.definition;
@@ -583,6 +623,8 @@ function deriveSetupObservationUntimed(
     byLine.set(line, list);
   }
 
+  // Built on the first covered-pair resolution (many passes never reach one); shared across lines.
+  let resolutionIndex: SetupResolutionIndex | null = null;
   const lines = new Set(byLine.keys());
   for (const override of setup.overrides) {
     // Only add an override's line when it's either explicitly in scope, or it
@@ -637,9 +679,10 @@ function deriveSetupObservationUntimed(
           message: `The setup attributes needed to determine the state of order ${Util.orderNumber(order.task)} on ${line} are missing.`,
         });
       } else {
+        if (indexed) resolutionIndex ??= setupResolutionIndexFor(setup as SetupSnapshot & { definition: SetupDefinition });
         const resolved = resolveSetup({
           definition, machine: line, predecessorState, successorState, predecessorOrderId, successorOrderId: String(order.task.id),
-          plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
+          plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides, index: resolutionIndex ?? undefined,
         });
         if (!resolved.covered || resolved.effectiveMin == null) {
           observation.diagnostics.push({
