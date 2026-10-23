@@ -201,8 +201,69 @@ export function buildPlantSnapshot(plant: string | null, opts: SnapshotOpts = {}
   }
 }
 
-/** Upper bound on one worker leverage batch before Compute.leverageBatch falls back to the main thread. */
+/** Upper bound on one dedicated-worker leverage batch. On expiry the worker is terminated and the call
+ *  rejects with a TimeoutError (the caller keeps its quick ranking; nothing reruns on the main thread). */
 const LEVERAGE_BATCH_TIMEOUT_MS = 30000;
+
+function _leverageAbort(name: 'TimeoutError' | 'AbortError', message: string): Error {
+  return new DOMException(message, name);
+}
+
+let _leverageSeq = 0;
+
+/** One short-lived worker per batch, so a slow replay never blocks the shared alerts/utilization worker
+ *  and can be cancelled outright with terminate(). Settles exactly once; the worker is terminated on
+ *  every exit (result, error, timeout, abort). A constructor throw or worker crash rejects with a plain
+ *  Error (the caller then uses the synchronous core); timeout/abort reject with TimeoutError/AbortError
+ *  and never touch the shared Compute worker state (_crashCount/_dead). */
+function _leverageViaDedicatedWorker(base: LeverageBase, variants: LeverageVariant[], signal?: AbortSignal): Promise<LeverageResult[]> {
+  return new Promise<LeverageResult[]>((resolve, reject) => {
+    let w: Worker;
+    try {
+      w = new Worker('../nimbus-worker.js?v=' + Config.BUILD_ID);
+    } catch (e) {
+      reject(e instanceof Error ? e : new Error('worker unavailable'));
+      return;
+    }
+    const id = ++_leverageSeq;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => finish(() => reject(_leverageAbort('AbortError', 'leverage batch aborted')));
+    function finish(settle: () => void): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      w.onmessage = null;
+      w.onerror = null;
+      try { w.terminate(); } catch {}
+      settle();
+    }
+    w.onmessage = ({ data }) => {
+      if (!data || data.id !== id) return;
+      if (data.type === 'ERROR') {
+        const wMsg = `worker compute error${data.failingType ? ' (' + data.failingType + ')' : ''}: ${data.error || 'unknown'}`;
+        try { ErrorLog.error('worker', wMsg, { failingType: data.failingType, jobId: data.jobId }, { errorCode: 'worker.compute', stack: data.stack }); } catch {}
+        finish(() => reject(new Error(data.error || 'worker compute error')));
+      } else {
+        finish(() => resolve(data.results as LeverageResult[]));
+      }
+    };
+    w.onerror = (ev) => {
+      try { ErrorLog.warn('worker', `leverage worker crashed: ${ev?.message || 'worker error'}`, { filename: ev?.filename || '', lineno: ev?.lineno ?? null }, { errorCode: 'worker.compute' }); } catch {}
+      finish(() => reject(new Error('worker error')));
+    };
+    timer = setTimeout(() => finish(() => reject(_leverageAbort('TimeoutError', 'leverage batch timed out'))), LEVERAGE_BATCH_TIMEOUT_MS);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const _cloneT0 = performance.now();
+      w.postMessage({ type: 'LEVERAGE_BATCH', id, payload: { base, variants } });
+      PerfMonitor.record('Worker.postClone:LEVERAGE_BATCH', performance.now() - _cloneT0);
+    } catch (e) {
+      finish(() => reject(e instanceof Error ? e : new Error('postMessage failed')));
+    }
+  });
+}
 
 export type LeverageBase = ComputeAlertsPayload & { startMs: number; days: number; lines?: string[] };
 export interface LeverageVariant { key: string; setup: NimbusSetupObservation }
@@ -326,23 +387,22 @@ export const Compute = (() => {
 
     /** Replay alerts + utilization per hypothetical setup observation (one worker round trip). Falls back
      *  to the synchronous core when the worker is dead or absent. */
-    async leverageBatch(base: LeverageBase, variants: LeverageVariant[]): Promise<LeverageResult[]> {
-      if (!_dead && typeof Worker !== 'undefined') {
+    async leverageBatch(base: LeverageBase, variants: LeverageVariant[], opts: { signal?: AbortSignal } = {}): Promise<LeverageResult[]> {
+      const signal = opts?.signal;
+      if (signal?.aborted) throw _leverageAbort('AbortError', 'leverage batch aborted');
+      if (typeof Worker !== 'undefined') {
         try {
-          // The existing alerts/utilization paths have no timeout; a batch is long-running, so guard it
-          // here: an unanswered message rejects and drops to the synchronous core instead of hanging.
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          const guard = new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('leverage batch timed out')), LEVERAGE_BATCH_TIMEOUT_MS);
-          });
-          try {
-            const r = await Promise.race([_post('LEVERAGE_BATCH', { base, variants }), guard]);
-            return r.results as LeverageResult[];
-          } finally { clearTimeout(timer); }
+          return await _leverageViaDedicatedWorker(base, variants, signal);
         } catch (e) {
+          // Timeout/abort are decided outcomes: the caller keeps its quick ranking. Never redo the heavy
+          // batch on the main thread for them. Anything else (constructor throw, worker crash, compute
+          // error) drops to the synchronous core as before.
+          const name = (e as Error)?.name;
+          if (name === 'TimeoutError' || name === 'AbortError') throw e;
           ErrorLog.warn('worker', 'leverage batch fell back to main thread', { error: String((e as Error)?.message || e) });
         }
       }
+      if (signal?.aborted) throw _leverageAbort('AbortError', 'leverage batch aborted');
       return runLeverageBatchSync(base, variants);
     },
   };
