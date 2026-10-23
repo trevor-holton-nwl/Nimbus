@@ -98,7 +98,7 @@ export interface LeverageInput {
   dismissed?: readonly string[];
 }
 
-export type LeverageRunner = (base: LeverageBase, variants: LeverageVariant[]) => Promise<LeverageResult[]>;
+export type LeverageRunner = (base: LeverageBase, variants: LeverageVariant[], opts?: { signal?: AbortSignal }) => Promise<LeverageResult[]>;
 
 export const DEFAULT_REPLAY_CAP = 20;
 const MAX_WINDOW_DAYS = 14;
@@ -505,7 +505,7 @@ const _replayable = (item: LeverageItem): boolean =>
 /** `groupLeverage` plus a replay of each setup-pair that has minutes (plant default). One runner batch, capped at
  *  `replayCap` pairs by alert count then orders; the rest keep their removal delta and are flagged `capped`. */
 export async function analyzeLeverage(
-  input: LeverageInput, runner: LeverageRunner, groups?: readonly LeverageItem[],
+  input: LeverageInput, runner: LeverageRunner, groups?: readonly LeverageItem[], opts?: { signal?: AbortSignal },
 ): Promise<LeverageItem[]> {
   // A caller that already ran `groupLeverage(input)` (the Alert Monitor paints those removal numbers first) passes
   // them in so the grouping is not repeated. They are copied, because the replay below mutates its items and the
@@ -525,7 +525,7 @@ export async function analyzeLeverage(
     if (v) { variants.push(v); replayed.push(item); }
   }
   if (!variants.length) return items;
-  const results = await runner(_replayBase(input), variants);
+  const results = await (opts?.signal ? runner(_replayBase(input), variants, { signal: opts.signal }) : runner(_replayBase(input), variants));
   const byKey = new Map(results.map(r => [r.key, r]));
   for (const item of replayed) {
     const r = byKey.get(item.key);
@@ -536,13 +536,13 @@ export async function analyzeLeverage(
 
 /** Replays one setup-pair item with minutes the user typed (the `requiresMinutes` card's input). Returns a new item. */
 export async function replayWithMinutes(
-  input: LeverageInput, item: LeverageItem, minutes: number, runner: LeverageRunner,
+  input: LeverageInput, item: LeverageItem, minutes: number, runner: LeverageRunner, opts?: { signal?: AbortSignal },
 ): Promise<LeverageItem> {
   if (!Number.isFinite(minutes) || minutes <= 0) return { ...item, requiresMinutes: true };
   const used = Math.ceil(minutes);   // integer minutes only (see plant-default rounding above)
   const v = await _variantFor(input, item, used);
   if (!v) return item;
-  const [r] = await runner(_replayBase(input), [v]);
+  const [r] = await (opts?.signal ? runner(_replayBase(input), [v], { signal: opts.signal }) : runner(_replayBase(input), [v]));
   if (!r) return item;
   const next: LeverageItem = { ...item, requiresMinutes: false, assumedMinutes: used, minutesSource: 'user' };
   _applyReplay(input, next, r);

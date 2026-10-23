@@ -867,7 +867,21 @@ const _levDeps: LevDeps = {
   buildInput: _levBuildInput, group: groupLeverage, analyze: analyzeLeverage, replay: replayWithMinutes,
 };
 
-const _levRunner: LeverageRunner = (base, variants) => Compute.leverageBatch(base, variants);
+const _levRunner: LeverageRunner = (base, variants, opts) => Compute.leverageBatch(base, variants, opts);
+
+/** One AbortController per leverage run (and per minutes replay). Aborted on plant change, tab leave and when the
+ *  plan moves, which terminates the dedicated worker instead of waiting the batch out. */
+const _levControllers = new Set<AbortController>();
+function _levAbortAll(): void {
+  for (const c of _levControllers) c.abort();
+  _levControllers.clear();
+}
+const _isAbortOrTimeout = (e: unknown): 'abort' | 'timeout' | null => {
+  const n = (e as Error | null)?.name;
+  return n === 'AbortError' ? 'abort' : n === 'TimeoutError' ? 'timeout' : null;
+};
+/** The plan moved: cancel what is computing against the old plan, then look again after the debounce. */
+function _levPlanMoved(): void { _levAbortAll(); _levDebounced(); }
 
 let _levItems: LeverageItem[] = [];
 let _levInput: LeverageInput | null = null;
@@ -893,6 +907,7 @@ let _setupAdmin: SetupAdminLite | null = null;
 let _setupAdminP: Promise<void> | null = null;
 
 function _levReset(plant: string | null): void {
+  _levAbortAll();
   _levItems = []; _levInput = null; _levPlant = plant; _levHave = false; _levShown = LEV_TOP_N; _levAdminOpen = false;
   _levStaleDrops = 0;
   _levTyped.clear(); _levAttempted.clear();
@@ -976,12 +991,14 @@ async function _levRun(): Promise<void> {
   _paint();                                    // phase 1: removal numbers, at once
   if (!input || _levSkipAnalysis()) return;
   _levInFlight = true;
+  const ctl = new AbortController();
+  _levControllers.add(ctl);
   try {
-    let next = await _levDeps.analyze(input, _levRunner, items);   // reuse the grouping phase 1 already painted
+    let next = await _levDeps.analyze(input, _levRunner, items, { signal: ctl.signal });   // reuse the grouping phase 1 already painted
     for (const [key, minutes] of _levTyped) {
       const it = next.find(i => i.key === key);
       if (it?.requiresMinutes) {
-        const done = await _levDeps.replay(input, it, minutes, _levRunner);
+        const done = await _levDeps.replay(input, it, minutes, _levRunner, { signal: ctl.signal });
         next = next.map(i => (i.key === key ? done : i));
       }
     }
@@ -994,10 +1011,17 @@ async function _levRun(): Promise<void> {
     _levItems = next;
     _paint();                                  // phase 2: setup-pair cards carry the replayed numbers
   } catch (e) {
-    ErrorLog.warn('alert-monitor', 'leverage analysis failed', { error: String((e as Error)?.message || e) });
+    const why = _isAbortOrTimeout(e);
+    if (why === 'timeout') {
+      // The worker was stopped: keep the phase-1 removal-only cards already painted. No UI string (quiet by design).
+      ErrorLog.warn('alert-monitor', 'leverage analysis timed out; showing the quick ranking', { error: String((e as Error)?.message || e) });
+    } else if (why !== 'abort') {
+      ErrorLog.warn('alert-monitor', 'leverage analysis failed', { error: String((e as Error)?.message || e) });
+    }
   } finally {
+    _levControllers.delete(ctl);
     _levInFlight = false;
-    if (_levRerun) { _levRerun = false; _levDebounced(); }
+    if (_levRerun) { _levRerun = false; if (_levHave) _levDebounced(); else void _levRun(); }
   }
 }
 
@@ -1013,15 +1037,18 @@ async function _levMinutesEntered(key: string, raw: string): Promise<void> {
   if (_levSkipAnalysis()) return;   // no replay during What-If or an optimizer preview
   _levReplaying.add(key);
   const rev0 = Store.rev();
+  const ctl = new AbortController();
+  _levControllers.add(ctl);
   try {
-    const next = await _levDeps.replay(input, item, minutes, _levRunner);
+    const next = await _levDeps.replay(input, item, minutes, _levRunner, { signal: ctl.signal });
     if (!_active || Store.rev() !== rev0) return;   // a newer analysis re-applies the typed minutes
     _levItems = _levItems.map(i => (i.key === key ? next : i));
     _levForcePaint = true;
     try { _paint(); } finally { _levForcePaint = false; }
   } catch (e) {
-    ErrorLog.warn('alert-monitor', 'leverage replay failed', { error: String((e as Error)?.message || e) });
+    if (!_isAbortOrTimeout(e)) ErrorLog.warn('alert-monitor', 'leverage replay failed', { error: String((e as Error)?.message || e) });
   } finally {
+    _levControllers.delete(ctl);
     _levReplaying.delete(key);
   }
 }
@@ -1501,7 +1528,7 @@ export const AlertMonitorPane = {
     Store.subscribe((evt: StoreEvent) => {
       if (!_active) return;
       switch (evt.type) {
-        case 'alerts:change': _debouncedPaint(); _levDebounced(); break;
+        case 'alerts:change': _debouncedPaint(); _levPlanMoved(); break;
         case 'plant:selected':
         case 'settings:change': _paint(); break;
         case 'sandbox:entered':
@@ -1510,7 +1537,7 @@ export const AlertMonitorPane = {
         default:
           // Anything the leverage replay is computed from: orders, the setup snapshot, calendars and blackouts.
           if (evt.type.startsWith('tasks:bulk') || evt.type === 'setup-snapshot:replace' || evt.type === 'calendar:change'
-            || evt.type === 'blocks:change' || evt.type === 'plantBlocks:change') _levDebounced();
+            || evt.type === 'blocks:change' || evt.type === 'plantBlocks:change') _levPlanMoved();
           break;
       }
     }, 'alert-monitor-pane');
@@ -1549,6 +1576,6 @@ export const AlertMonitorPane = {
   },
   /** The engine / input seams of the leverage panel; tests replace members, production never does. */
   _levDeps,
-  setActive(active: boolean): void { _active = active; },
+  setActive(active: boolean): void { _active = active; if (!active) _levAbortAll(); },
   isActive(): boolean { return _active; },
 };
