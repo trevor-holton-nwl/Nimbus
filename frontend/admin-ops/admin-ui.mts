@@ -3052,6 +3052,9 @@ export const SystemConfig = (() => {
   // Order-history (schedule_event) retention window, days. Server clamps 1-60 and rejects anything else with a 400.
   let _retBaseline = 14;
   let _retDraft = 14;
+  // The raw text in the input. _retDraft only follows it while it is an integer 1-60; anything else
+  // leaves Save disabled (the server's 400 stays the backstop) instead of being silently clamped mid-typing.
+  let _retInvalid = false;
   let _loaded = false;
   let _saving = false;
   let _loadGeneration = 0;
@@ -3069,6 +3072,13 @@ export const SystemConfig = (() => {
     return Number.isFinite(n) && n >= 1 ? Math.min(60, n) : 14;
   }
 
+  function _retentionParse(raw: string): number | null {
+    const text = raw.trim();
+    if (!/^\d+$/.test(text)) return null;
+    const n = Number(text);
+    return n >= 1 && n <= 60 ? n : null;
+  }
+
   function _dirty(): boolean {
     return _loaded && (_retDraft !== _retBaseline || ORDER_FIELD_CATALOG.some(field =>
       _draft[field.key].grid !== _baseline[field.key].grid || _draft[field.key].inspector !== _baseline[field.key].inspector));
@@ -3077,9 +3087,15 @@ export const SystemConfig = (() => {
   function _sync(): void {
     const host = document.getElementById('system-config-host');
     const save = host?.querySelector<HTMLButtonElement>('#sc-save-btn');
-    if (save) save.disabled = _saving || !_dirty();
+    if (save) save.disabled = _saving || _retInvalid || !_dirty();
+    const retInput = host?.querySelector<HTMLInputElement>('#sc-retention-days');
+    if (retInput) {
+      if (_retInvalid) retInput.setAttribute('aria-invalid', 'true'); else retInput.removeAttribute('aria-invalid');
+    }
+    const retHint = host?.querySelector<HTMLElement>('#sc-retention-invalid');
+    if (retHint) retHint.hidden = !_retInvalid;
     const state = host?.querySelector<HTMLElement>('#sc-save-state');
-    if (state) state.textContent = _saving ? Util.t('ui.system_config_saving') : _dirty() ? Util.t('ui.system_config_unsaved') : '';
+    if (state) state.textContent = _saving ? Util.t('ui.system_config_saving') : _retInvalid ? '' : _dirty() ? Util.t('ui.system_config_unsaved') : '';
   }
 
   function _writeHeaders(): Record<string, string> {
@@ -3107,6 +3123,7 @@ export const SystemConfig = (() => {
       _draft = _normalize(_baseline);
       _retBaseline = _retentionValue(data.schedule_event_retention_days);
       _retDraft = _retBaseline;
+      _retInvalid = false;
       _loaded = true;
       _paint();
     } catch (e) {
@@ -3119,6 +3136,7 @@ export const SystemConfig = (() => {
   function _paint(): void {
     const host = document.getElementById('system-config-host');
     if (!host) return;
+    _retInvalid = false; // the repaint shows _retDraft, which is always valid
     const rows = ORDER_FIELD_CATALOG.map((f) => {
       const cfg = _draft[f.key] || {};
       const gridChecked = cfg.grid ?? f.gridDefault;
@@ -3146,8 +3164,9 @@ export const SystemConfig = (() => {
         </div>
         <div class="form-row" style="margin-top:14px;max-width:320px;">
           <label for="sc-retention-days">${Util.escapeHtml(Util.t('ui.system_config_history_retention'))}</label>
-          <input type="number" id="sc-retention-days" min="1" max="60" step="1" value="${_retDraft}">
-          <p class="muted" style="margin-top:4px;">${Util.escapeHtml(Util.t('ui.system_config_history_retention_hint'))}</p>
+          <input type="number" id="sc-retention-days" min="1" max="60" step="1" value="${_retDraft}" aria-describedby="sc-retention-hint sc-retention-invalid">
+          <p class="muted" id="sc-retention-hint" style="margin-top:4px;">${Util.escapeHtml(Util.t('ui.system_config_history_retention_hint'))}</p>
+          <p class="muted" id="sc-retention-invalid" role="alert" style="margin-top:4px;color:var(--err);" hidden>${Util.escapeHtml(Util.t('ui.system_config_history_retention_invalid'))}</p>
         </div>
         <div style="margin-top:12px;display:flex;align-items:center;gap:10px;">
           <button class="btn btn-primary" id="sc-save-btn" disabled>${Util.escapeHtml(Util.t('btn.save'))}</button>
@@ -3158,7 +3177,23 @@ export const SystemConfig = (() => {
 
     host.querySelector('#sc-save-btn')?.addEventListener('click', _save);
     host.querySelector<HTMLInputElement>('#sc-retention-days')?.addEventListener('input', (e) => {
-      _retDraft = _retentionValue((e.target as HTMLInputElement).value);
+      const parsed = _retentionParse(String((e.target as HTMLInputElement).value));
+      _retInvalid = parsed === null;
+      if (parsed !== null) _retDraft = parsed;
+      ++_revision;
+      _sync();
+    });
+    // Clamp / write back only once the planner leaves the field (change fires on blur or Enter).
+    host.querySelector<HTMLInputElement>('#sc-retention-days')?.addEventListener('change', (e) => {
+      const input = e.target as HTMLInputElement;
+      if (_retentionParse(String(input.value)) === null) {
+        const text = String(input.value).trim();
+        const numeric = Number(text);
+        // Empty or non-numeric restores the last valid draft; a number outside 1-60 clamps to the bound.
+        _retDraft = text !== '' && Number.isFinite(numeric) ? Math.min(60, Math.max(1, Math.round(numeric))) : _retDraft;
+      }
+      _retInvalid = false;
+      input.value = String(_retDraft);
       ++_revision;
       _sync();
     });
@@ -3175,7 +3210,7 @@ export const SystemConfig = (() => {
   }
 
   async function _save(): Promise<void> {
-    if (_saving || !_dirty()) return;
+    if (_saving || _retInvalid || !_dirty()) return;
     const next = _normalize(_draft);
     const nextRetention = _retDraft;
     _saving = true;
@@ -3197,6 +3232,7 @@ export const SystemConfig = (() => {
       _baseline = _normalize(saved.orderFields ?? next);
       _retBaseline = _retentionValue(saved.schedule_event_retention_days ?? nextRetention);
       _retDraft = _retBaseline;
+      _retInvalid = false;
       Persistence.scheduleEventRetentionDays = _retBaseline;
       Store.setOrderFieldVisibility(_baseline, 'system-config');
       Toast.show(Util.t('toast.system_config_saved'), 'success');
