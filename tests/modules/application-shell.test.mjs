@@ -601,3 +601,29 @@ test('App._trackDirty records the wire source per task: timeline->drag, engine->
     priorSource.forEach((v, k) => Persistence._dirtySource.set(k, v));
   }
 });
+
+test('App._trackDirty: an unmapped planner source after a mapped one drops the earlier source; ctx firm maps to inspector', () => {
+  const priorDirtyIds = new Set(Persistence._dirtyIds);
+  const priorSource = new Map(Persistence._dirtySource);
+  Persistence._dirtyIds.clear(); Persistence._dirtySource.clear();
+  const evt = (type, source, extra) => ({ type, source, revision: 1, mode: 'live', ...extra });
+  try {
+    App._trackDirty(evt('task:update', 'timeline', { id: 'a' }));
+    App._trackDirty(evt('task:update', 'dashboard', { id: 'a' }));
+    assert.ok(!Persistence._dirtySource.has('a'), 'a later unmapped writer removes the stale drag source');
+    Persistence._dirtySource.set('b', 'drag');
+    App._trackDirty(evt('tasks:bulkUpdate', 'engine-runtime-reconcile', { ids: ['b'] }));
+    assert.ok(!Persistence._dirtySource.has('b'));
+    Persistence._dirtySource.set('c', 'drag');
+    App._trackDirty(evt('tasks:bulkUpdate', 'refresh', { ids: ['c'] }));
+    assert.equal(Persistence._dirtySource.get('c'), 'drag', 'a skipped source (refresh) leaves the source alone');
+    Store.tasks.cx = { id: 'cx' };
+    App._trackDirty(evt('firmed:change', 'ctx', { ids: ['cx'] }));
+    assert.equal(Persistence._dirtySource.get('cx'), 'inspector', 'context-menu firm records the inspector source');
+    delete Store.tasks.cx;
+  } finally {
+    Persistence._dirtyIds.clear(); Persistence._dirtySource.clear(); Persistence._firmDirtyIds.delete('cx');
+    priorDirtyIds.forEach(id => Persistence._dirtyIds.add(id));
+    priorSource.forEach((v, k) => Persistence._dirtySource.set(k, v));
+  }
+});

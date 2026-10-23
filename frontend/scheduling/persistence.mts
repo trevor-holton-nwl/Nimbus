@@ -41,7 +41,7 @@ import type { components } from '../types/api-generated.mjs';
  *  backend/schedule_events/events.py). Tags absent here (distribution, refresh, note, engine-runtime-reconcile)
  *  never reach the wire; the server defaults those saves to 'planner'. */
 export const SOURCE_WIRE: Readonly<Record<string, string>> = {
-  timeline: 'drag', interaction: 'keyboard', table: 'grid', inspector: 'inspector',
+  timeline: 'drag', interaction: 'keyboard', table: 'grid', inspector: 'inspector', ctx: 'inspector',
   alerts: 'alert_fix', engine: 'optimizer', 'engine-backlog': 'optimizer', undo: 'undo',
 };
 
@@ -1380,7 +1380,9 @@ export const Persistence = {
             Persistence._forceIds.delete(id);
             Persistence._firmDirtyIds.delete(id);
             Persistence._dirtySource.delete(id);
-            savedIds.push(id);
+            // Only rows the server persisted (a version came back) gained history events; invalid/not_found
+            // ids clear their dirty flag but wrote nothing.
+            if (Object.prototype.hasOwnProperty.call(versions, id)) savedIds.push(id);
           }
           // else: leave dirty — the next saveAll() will pick up the newer edit.
         }

@@ -2401,12 +2401,12 @@ const App = {
     if (evt.type === 'task:update') {
       Persistence._dirtyIds.add(String(evt.id));
       if (force) Persistence._forceIds.add(String(evt.id));
-      if (wire) Persistence._dirtySource.set(String(evt.id), wire);
+      if (wire) Persistence._dirtySource.set(String(evt.id), wire); else Persistence._dirtySource.delete(String(evt.id));
     }
     if (evt.type === 'tasks:bulkUpdate') (evt.ids as Array<string | number>).forEach(id => {
       Persistence._dirtyIds.add(String(id));
       if (force) Persistence._forceIds.add(String(id));
-      if (wire) Persistence._dirtySource.set(String(id), wire);
+      if (wire) Persistence._dirtySource.set(String(id), wire); else Persistence._dirtySource.delete(String(id));
     });
     // A manual firm is server state saved through the same explicit Save: a toggle dirties
     // exactly the ids it touched. 'sandbox' (What-If discard replays the snapshot) is not a
@@ -2417,7 +2417,7 @@ const App = {
         if (!Store.tasks[String(id)]) continue;
         Persistence._dirtyIds.add(String(id));
         Persistence._firmDirtyIds.add(String(id));
-        if (wire) Persistence._dirtySource.set(String(id), wire);
+        if (wire) Persistence._dirtySource.set(String(id), wire); else Persistence._dirtySource.delete(String(id));
         touched = true;
       }
       if (touched && evt.source !== 'undo' && !App._firmHintShown) {
