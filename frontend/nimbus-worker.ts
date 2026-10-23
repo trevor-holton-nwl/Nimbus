@@ -93,10 +93,12 @@ self.onerror = function (ev: any) {
       filename: ev && ev.filename, lineno: ev && ev.lineno });
   } catch {}
 };
-self.addEventListener('unhandledrejection', function (ev: PromiseRejectionEvent) {
-  try {
-    const r = ev.reason;
-    self.postMessage({ type: 'ERROR', id: null, failingType: 'unhandledrejection',
-      error: (r && r.message) || String(r), stack: r && r.stack });
-  } catch {}
-});
+if (typeof self.addEventListener === 'function') {
+  self.addEventListener('unhandledrejection', function (ev: PromiseRejectionEvent) {
+    try {
+      const r = ev.reason;
+      self.postMessage({ type: 'ERROR', id: null, failingType: 'unhandledrejection',
+        error: (r && r.message) || String(r), stack: r && r.stack });
+    } catch {}
+  });
+}

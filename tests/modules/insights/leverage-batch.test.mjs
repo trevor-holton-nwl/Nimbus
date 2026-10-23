@@ -94,7 +94,7 @@ test('compiled worker handles LEVERAGE_BATCH and matches runLeverageBatchSync', 
   const { default: vm } = await import('node:vm');
   const { readFileSync } = await import('node:fs');
   const posted = [];
-  const self = { NimbusComputeCore: globalThis.NimbusComputeCore, location: { search: '' }, postMessage: m => posted.push(m) };
+  const self = { NimbusComputeCore: globalThis.NimbusComputeCore, location: { search: '' }, addEventListener() {}, postMessage: m => posted.push(m) };
   const ctx = vm.createContext({ self, importScripts() {}, structuredClone });
   vm.runInContext(readFileSync(new URL('../../../frontend/nimbus-worker.js', import.meta.url), 'utf8'), ctx);
   seed();
