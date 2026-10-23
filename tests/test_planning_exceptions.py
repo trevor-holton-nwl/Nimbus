@@ -35,7 +35,7 @@ def test_atomic_db_validation_writes_nothing(monkeypatch, rejection):
             assert not sql.lstrip().startswith(('UPDATE', 'DELETE', 'INSERT'))
         def fetchall(self):
             return [(i, datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 0, 'p', 'L1', 'scheduled', None, False, None,
-                      None, None, None, None, None, None, None, None, None) for i in ['a','b']]
+                      None, None, None, None, None, None, None, None, None, False, None, None, None) for i in ['a','b']]
     class Connection:
         def cursor(self): return Cursor()
         def rollback(self): pass
@@ -68,9 +68,9 @@ def test_queue_write_clears_parent_and_children_without_baseline_mutation(monkey
         def execute(self, sql, params=None): statements.append((sql, params))  # batched UPDATE ... RETURNING (#26) yields (id, xmin) pairs
         def fetchall(self):
             if statements and statements[-1][0].startswith('UPDATE'):
-                return [('q', 43)]
+                return [('q', 43) + (None,) * 10]   # + the schedule_event after-image columns
             return [('q', datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 2, 'p', 'L1', 'scheduled', None, False, None,
-                                      None, None, None, None, None, None, None, None, None)]
+                                      None, None, None, None, None, None, None, None, None, False, None, None, None)]
         def fetchone(self): return ('q', 43)
     class Connection:
         def cursor(self): return Cursor()
@@ -105,7 +105,7 @@ def test_queue_write_ignores_a_marker_sent_with_it(monkeypatch):
             if statements and statements[-1][0].startswith('UPDATE'):
                 return [('q', 43)]
             return [('q', datetime(2026,9,9,8), datetime(2026,9,9,12), 4, 42, 0, 'p', 'L1', 'scheduled', None, False, None,
-                     None, None, None, None, None, 'overtime', None, None, None)]
+                     None, None, None, None, None, 'overtime', None, None, None, False, None, None, None)]
         def fetchone(self): return ('q', 43)
     class Connection:
         def cursor(self): return Cursor()

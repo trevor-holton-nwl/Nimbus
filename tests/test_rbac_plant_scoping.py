@@ -97,7 +97,7 @@ def test_get_tasks_allows_an_in_scope_plant_through_to_the_data_layer(scoped_cli
 def test_task_update_on_an_out_of_scope_order_is_masked_as_not_found(scoped_client, monkeypatch):
     captured = {}
 
-    def fake_update_task_dates_bulk(items, allowed_plants=None):
+    def fake_update_task_dates_bulk(items, allowed_plants=None, **_kw):
         captured["allowed_plants"] = allowed_plants
         captured["items"] = items
         # Mirrors db.update_task_dates_bulk's real behavior (db.py:949-951)
@@ -153,7 +153,7 @@ def test_task_note_on_an_out_of_scope_order_is_masked_as_not_found(scoped_client
 
 def test_task_note_on_an_in_scope_order_persists(scoped_client, monkeypatch):
     monkeypatch.setattr(db, "get_order_plant", lambda task_id: PLANT_A)
-    monkeypatch.setattr(db, "update_task_note", lambda task_id, notes: {"status": "ok"})
+    monkeypatch.setattr(db, "update_task_note", lambda task_id, notes, **_kw: {"status": "ok"})
     response = scoped_client.post("/task/note", json={"id": "ZZTEST_ORDER_ON_PLANT_A", "notes": "hello"})
     assert response.status_code == 200
 

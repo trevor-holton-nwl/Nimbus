@@ -277,6 +277,9 @@ class TaskDateUpdate(BaseModel):
     trust_start: bool = True
     planning_status: str | None = None
     planning_reason: dict[str, Any] | None = None
+    # schedule_event history: the UI surface that produced this edit (drag, keyboard, grid, ...).
+    # Advisory only: an unknown value is ignored server-side (never a 400) and recorded as 'planner'.
+    source: str | None = Field(default=None, max_length=32)
 
     @field_validator("RUN_TIME")
     @classmethod
@@ -305,6 +308,8 @@ class TasksUpdatePayload(BaseModel):
     here are ignored (legacy ride-along, harmless)."""
     tasks: list[TaskDateUpdate] = []
     atomic_optimizer: bool = False
+    # schedule_event history: the browser tab's id, stored on each history row (reserved for a change feed).
+    client_id: str | None = Field(default=None, max_length=64)
     # N3: roll back when the written machines end up with overlaps. Honored only
     # together with atomic_optimizer; manual saves are never blocked.
     strict_conflicts: bool = False

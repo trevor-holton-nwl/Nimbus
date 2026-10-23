@@ -815,7 +815,7 @@ def _bulk_eff_row(oid="O1"):
     # run_time_source, material_number, order_quantity, basic_start_date, production_version
     return (oid, _d(2026, 10, 1, 6), _d(2026, 10, 1, 14), 8.0, 7, 0, "P1", "M1",
             "scheduled", None, False, None, None, "MAT", 100,
-            _d(2026, 10, 1, 6), "0001", None, None, None, None)
+            _d(2026, 10, 1, 6), "0001", None, None, None, None, False, None, None, None)
 
 
 def _run_bulk(monkeypatch, item):
