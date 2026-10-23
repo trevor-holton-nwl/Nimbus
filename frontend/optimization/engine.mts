@@ -538,6 +538,20 @@ export function deriveSetupObservation(
   scopedLines?: ReadonlySet<string>,
   availability?: SetupAvailabilityContext,
 ): SetupObservation {
+  const _pmT0 = performance.now();
+  try {
+    return deriveSetupObservationUntimed(setup, tasks, scopedLines, availability);
+  } finally {
+    PerfMonitor.record('Setup.deriveObservation', performance.now() - _pmT0);
+  }
+}
+
+function deriveSetupObservationUntimed(
+  setup: SetupSnapshot | null | undefined,
+  tasks: ReadonlyArray<NimbusTask>,
+  scopedLines?: ReadonlySet<string>,
+  availability?: SetupAvailabilityContext,
+): SetupObservation {
   const observation: SetupObservation = { intervals: [], diagnostics: [] };
   const definition = setup?.definition;
   // Activation controls setup-aware placement only.  The existing schedule
@@ -1702,6 +1716,16 @@ export const Engine = {
    * whose walk reaches "now" are collected per line and placed forward in finish order from now (OQ53 b).
    * No undo entry (OQ57); one Toast counts the dirty patches. `opts.reason === 'cutover'` tags the reversals. */
   reconcileRuntimeSchedules(plant: string | null, opts: ReconcileOptions = {}): void {
+    const _pmT0 = performance.now();
+    try {
+      Engine._reconcileRuntimeSchedulesPass(plant, opts);
+    } finally {
+      PerfMonitor.record('Engine.reconcileRuntimeSchedules', performance.now() - _pmT0);
+    }
+  },
+
+  /** The untimed body of `reconcileRuntimeSchedules` (split only so the public entry point carries the timing key). */
+  _reconcileRuntimeSchedulesPass(plant: string | null, opts: ReconcileOptions = {}): void {
     if (!plant) return;
     const candidates = Store.tasksByPlant(plant).filter(task =>
       (task.runtime_schedule_mismatch || !task.user_scheduled)

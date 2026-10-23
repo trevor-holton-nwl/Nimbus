@@ -192,8 +192,13 @@ function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts
 export function buildPlantSnapshot(plant: string | null, opts: SnapshotOpts = {}): WorkerSnapshotBase & {
   lines: string[] | null; now: Record<string, Date>; blockedPlants: string[];
 } {
-  const { snap, lines } = _buildSnapshotBase(plant, opts);
-  return { ...snap, lines, ..._alertClockPayload(plant ? [plant] : []) };
+  const _pmT0 = performance.now();
+  try {
+    const { snap, lines } = _buildSnapshotBase(plant, opts);
+    return { ...snap, lines, ..._alertClockPayload(plant ? [plant] : []) };
+  } finally {
+    PerfMonitor.record('Leverage.buildPlantSnapshot', performance.now() - _pmT0);
+  }
 }
 
 /** Upper bound on one worker leverage batch before Compute.leverageBatch falls back to the main thread. */
