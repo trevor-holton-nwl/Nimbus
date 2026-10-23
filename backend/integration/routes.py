@@ -43,8 +43,8 @@ router = APIRouter()
 NIMBUS_MAX_UPLOAD_BYTES = int(os.environ.get("NIMBUS_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 
 
-@router.post("/upload", dependencies=[Depends(require_api_key), Depends(require_admin)])
-async def upload_orders(request: Request, file: UploadFile = File(...)):
+@router.post("/upload", dependencies=[Depends(require_api_key)])
+async def upload_orders(request: Request, file: UploadFile = File(...), actor: str = Depends(require_admin)):
     """
     Receive an xlsx file (sequence_testing-shaped) and upsert into the orders
     table. Stateless: there is no in-memory frame to refresh — the next /tasks
@@ -84,7 +84,7 @@ async def upload_orders(request: Request, file: UploadFile = File(...)):
             plants=upload_plants,
         )
         result = await run_in_threadpool(db.ingest_orders_from_excel, raw,
-                                         file.filename or "upload.xlsx", diag)
+                                         file.filename or "upload.xlsx", diag, actor=actor)
     except Exception as e:
         _log_event("error", "upload", "Orders upload failed", exc=e, **_diag_ctx())
         _set_admin_log_details(request, **_diag_ctx())
@@ -419,7 +419,7 @@ def resync_order_attributes(
     # Note: this writes orders.* columns only — it never touches priority_list,
     # so no PLANT_LISTS cache refresh is needed (unlike the /color-wheel/*
     # upload path, which writes priority_list rows directly).
-    result = db.resync_order_attributes(plant)
+    result = db.resync_order_attributes(plant, actor=auth._actor_email(request))
     _set_admin_log_details(request, plant=plant,
                            unmatched_pairs=result["unmatched_pairs"],
                            unmatched_orders=result["unmatched_orders"])
