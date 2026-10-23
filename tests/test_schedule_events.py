@@ -8,6 +8,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from backend.schedule_events import events
 from backend.schedule_events.events import (
@@ -330,16 +331,17 @@ def datetime_is_aware(text):
 
 @pytest.mark.pg
 def test_record_db_failure_is_fail_open_and_caller_transaction_survives(se):
-    """A real DB error in the history INSERT (an int actor cannot bind to the TEXT column) rolls back only the
-    savepoint: the caller's earlier history row and later statements still commit."""
+    """A real error inside the savepointed history INSERT rolls back only the savepoint: the caller's earlier
+    history row and later statements still commit. The failure is made unambiguous with a dict `client_id`,
+    which psycopg cannot adapt (an int actor would be assignment-cast to TEXT by Postgres and succeed)."""
     import backend.schedule_events.data as data
     before = events.write_failures()
     good = EventRow(plant=se.plant, order_id="ord-ok", production_order=None, material_number=None,
                     op="modify", changes={"machine": ["a", "b"]})
     with se.db._pool.connection() as conn, conn.cursor() as cur:
         assert record(cur, EventCtx("drag", se.actor, str(uuid.uuid4())), [good]) == 1
-        assert record(cur, EventCtx("drag", 12345, str(uuid.uuid4())), [good]) == 0
-        cur.execute("SELECT 2")
+        assert record(cur, EventCtx("drag", se.actor, str(uuid.uuid4()), client_id={"x": 1}), [good]) == 0
+        cur.execute("SELECT 2")                       # the transaction survived the failed INSERT
         assert cur.fetchone()[0] == 2
         conn.commit()
     assert events.write_failures() == before + 1
@@ -735,15 +737,22 @@ def test_zero_open_event_rows_skip_already_reset_orders():
     assert st._record_zero_open_events(cur, befores, "tester", str(uuid.uuid4())) == 1
 
 
-def _mk_order(cur, plant, tag, i, *, machine="SHARED_LINE", status="scheduled", firmed=False, end=True):
+def _mk_order(cur, plant, tag, i, *, machine="SHARED_LINE", status="scheduled", firmed=False, end=True,
+              planning_reason=None):
+    """Seed one order. `orders_planning_state_check`: 'scheduled' needs a NULL reason; 'needs_planning' needs a
+    {code, message} reason object and NULL dates, so a held seed gets a default reason and no placement."""
     oid = f"zz-{tag}-{i}"
+    held = status == "needs_planning"
+    if held:
+        end = False
+        planning_reason = planning_reason or {"code": "zero_open_quantity", "message": "x"}
     cur.execute(
         "INSERT INTO orders (id, production_order, material_number, plant, machine, basic_start_date,"
-        " basic_finish_date, scheduled_start, scheduled_end, planning_status, manual_firmed)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " basic_finish_date, scheduled_start, scheduled_end, planning_status, planning_reason, manual_firmed)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (oid, f"PO{tag}{i}", f"M{tag}", plant, machine, dt.datetime(2031, 3, 1, 6), dt.datetime(2031, 3, 2, 6),
          dt.datetime(2031, 3, 1, 6) if end else None, dt.datetime(2031, 3, 2, 6) if end else None,
-         status, firmed))
+         status, Jsonb(planning_reason) if planning_reason else None, firmed))
     return oid
 
 
