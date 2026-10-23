@@ -430,3 +430,133 @@ def test_read_route_returns_events_with_actor_name_and_no_store(se, api_client):
     # limit bounds are enforced by the route
     assert client.get(f"/schedule-events/{se.plant}/order/ord-1?limit=0").status_code == 422
     assert client.get(f"/schedule-events/{se.plant}/order/ord-1?limit=201").status_code == 422
+
+
+# --------------------------------------------------------------------------- Task 5: routing resolver hooks
+
+@pytest.mark.pg
+class TestRoutingResolverEvents:
+    SUB, PLANT, MATERIAL = "ZZTEST_SE5_S", "ZZTEST_SE5P", "ZZTEST_SE5_M"
+    M1, W1 = "ZZTEST_SE5_L1", "ZZTEST_SE5_W1"
+    START = dt.datetime(2026, 10, 5, 8)
+
+    def _cleanup(self, cur):
+        cleanup_schedule_events(cur, plants=[self.PLANT])
+        cur.execute("DELETE FROM order_schedule_segments WHERE order_id IN (SELECT id FROM orders WHERE plant=%s)",
+                    (self.PLANT,))
+        for table in ("orders", "routing_operation", "production_version", "routing_rules", "machine",
+                      "sap_workcenter", "material_plants"):
+            cur.execute(f"DELETE FROM {table} WHERE plant=%s", (self.PLANT,))
+        cur.execute("DELETE FROM materials WHERE material_id=%s", (self.MATERIAL,))
+        cur.execute("DELETE FROM plants WHERE plant=%s AND subnetwork=%s", (self.PLANT, self.SUB))
+        cur.execute("DELETE FROM subnetworks WHERE code=%s", (self.SUB,))
+
+    @pytest.fixture(autouse=True)
+    def seed(self, pg):
+        import backend.schedule_events.data as data
+        from backend.routing import resolver
+        data.ensure_schedule_event_table()
+        self.pg, self.resolver = pg, resolver
+        self.ids = [pg.make_id(f"ZZTEST_SE5_O{i}", self.MATERIAL) for i in (1, 2)]
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            self._cleanup(cur)
+            cur.execute("INSERT INTO subnetworks (code,name) VALUES (%s,'SE5 test')", (self.SUB,))
+            cur.execute("INSERT INTO plants (subnetwork,plant,routing_runtime_enabled,split_order_policy,timezone)"
+                        " VALUES (%s,%s,TRUE,'partial_allowed','America/New_York')", (self.SUB, self.PLANT))
+            cur.execute("INSERT INTO materials (material_id) VALUES (%s)", (self.MATERIAL,))
+            cur.execute("INSERT INTO material_plants (material_id,plant) VALUES (%s,%s)", (self.MATERIAL, self.PLANT))
+            cur.execute("INSERT INTO sap_workcenter (plant,sap_workcenter) VALUES (%s,%s)", (self.PLANT, self.W1))
+            cur.execute("INSERT INTO machine (subnetwork,plant,machine,sap_workcenter) VALUES (%s,%s,%s,%s)",
+                        (self.SUB, self.PLANT, self.M1, self.W1))
+            cur.execute(
+                "INSERT INTO production_version (plant,material_id,production_version,task_list_type,"
+                " routing_group,group_counter,valid_from,valid_to,sap_workcenter)"
+                " VALUES (%s,%s,'0001','N','SE500001','01','2026-01-01','2027-12-31',%s)",
+                (self.PLANT, self.MATERIAL, self.W1))
+            cur.execute(
+                "INSERT INTO routing_operation (plant,material_id,task_list_type,routing_group,group_counter,"
+                " sequence_no,activity,sap_workcenter,workcenter_category,base_quantity,std_value_machine,"
+                " std_value_unit_machine) VALUES (%s,%s,'N','SE500001','01','000000','0010',%s,'0001',10,3,'H')",
+                (self.PLANT, self.MATERIAL, self.W1))
+            for i, oid in enumerate(self.ids, start=1):
+                start = self.START + dt.timedelta(days=i - 1)
+                cur.execute(
+                    "INSERT INTO orders (id,production_order,material_number,plant,machine,production_version,"
+                    " order_quantity,basic_start_date,basic_finish_date,scheduled_start,scheduled_end,"
+                    " run_time,run_time_source,planning_status)"
+                    " VALUES (%s,%s,%s,%s,%s,'0001',10,%s,%s,%s,%s,3,'routing','scheduled')",
+                    (oid, f"ZZTEST_SE5_O{i}", self.MATERIAL, self.PLANT, self.M1, start,
+                     start + dt.timedelta(days=2), start, start + dt.timedelta(hours=3)))
+            conn.commit()
+        try:
+            self.resolver.resolve_orders(self.PLANT)          # settle both orders on the resolved run time
+            self._clear_events()
+            yield
+        finally:
+            with pg._pool.connection() as conn, conn.cursor() as cur:
+                self._cleanup(cur)
+                conn.commit()
+
+    def _clear_events(self):
+        self._sql("DELETE FROM schedule_event WHERE plant=%s", (self.PLANT,))
+
+    def _events(self):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT order_id, source, actor, op, changes FROM schedule_event"
+                        " WHERE plant=%s ORDER BY id", (self.PLANT,))
+            return cur.fetchall()
+
+    def _sql(self, query, params=()):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(query, params)
+            out = cur.fetchone() if cur.description else None
+            conn.commit()
+            return out
+
+    def test_recompute_records_only_the_order_whose_run_time_changed(self):
+        self._sql("UPDATE orders SET run_time = 99 WHERE id = %s", (self.ids[0],))
+        self.resolver.resolve_orders(self.PLANT, full=True)
+        rows = self._events()
+        assert len(rows) == 1
+        order_id, source, actor, op, changes = rows[0]
+        assert (order_id, source, actor, op) == (self.ids[0], "routing_recompute", "system", "modify")
+        new = self._sql("SELECT run_time FROM orders WHERE id = %s", (self.ids[0],))[0]
+        assert changes == {"run_time": [99, events._ev_scalar(new)]}
+
+    def test_resolve_orders_stamps_the_given_actor(self):
+        self._sql("UPDATE orders SET run_time = 99 WHERE id = %s", (self.ids[1],))
+        self.resolver.resolve_orders(self.PLANT, full=True, actor="x@y")
+        rows = self._events()
+        assert [r[2] for r in rows] == ["x@y"] and rows[0][0] == self.ids[1]
+
+    def test_hold_on_a_scheduled_firmed_order_records_routing_hold(self):
+        from psycopg.types.json import Jsonb
+        oid = self.ids[0]
+        self._sql("UPDATE orders SET manual_firmed = TRUE WHERE id = %s", (oid,))
+        self._sql("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                  " VALUES (%s, 1, %s, %s)", (oid, self.START, self.START + dt.timedelta(hours=3)))
+        reason = {"code": "runtime_unknown", "step": "pv_missing", "message": "x"}
+        ev = EventCtx(source="routing_recompute", actor="hold@test", action_id=str(uuid.uuid4()))
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            self.resolver._write_holds(cur, [(oid, Jsonb(reason))], ev=ev)
+            conn.commit()
+        rows = self._events()
+        assert len(rows) == 1 and rows[0][1] == "routing_hold" and rows[0][2] == "hold@test"
+        changes = rows[0][4]
+        assert changes["scheduled_end"][1] is None
+        assert changes["manual_firmed"] == [True, False]
+        assert changes["segments"] == [1, 0]
+        assert changes["planning_status"] == ["scheduled", "needs_planning:runtime_unknown"]
+
+    def test_hold_on_an_already_held_unscheduled_order_records_nothing(self):
+        from psycopg.types.json import Jsonb
+        reason = {"code": "runtime_unknown", "step": "pv_missing", "message": "x"}
+        ev = EventCtx(source="routing_recompute", actor="hold@test", action_id=str(uuid.uuid4()))
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            self.resolver._write_holds(cur, [(self.ids[0], Jsonb(reason))], ev=ev)
+            conn.commit()
+        self._clear_events()
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            self.resolver._write_holds(cur, [(self.ids[0], Jsonb(reason))], ev=ev)
+            conn.commit()
+        assert self._events() == []

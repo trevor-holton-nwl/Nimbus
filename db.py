@@ -3627,7 +3627,7 @@ def cap_requeue_decision(placed: bool, prior_run_time, run_time, *, prior_known:
 
 
 def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None = None, *,
-                        prior_run_times: dict | None = None, commit: bool = True) -> dict:
+                        prior_run_times: dict | None = None, commit: bool = True, ev=None) -> dict:
     """The ingest side of the run-time cap (OQ28), over the orders an upload just wrote.
 
     An order whose stored run time is over its plant's `cap_hours` is queued exactly like a routing
@@ -3681,7 +3681,7 @@ def _apply_run_time_cap(cur, conn, ids: list[str], protect_ids: list[str] | None
     if to_queue:
         # Deferred import: backend.routing.resolver imports db (never the reverse at module scope).
         import backend.routing.resolver as routing_resolver
-        routing_resolver._write_holds(cur, to_queue)
+        routing_resolver._write_holds(cur, to_queue, ev=ev)
         out["queued"] = len(to_queue)
     if to_release:
         cur.execute(
@@ -4193,6 +4193,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             # ---------- Run-time cap (OQ28): over-cap orders wait in Needs Planning ----------
             # After the last write (plant fully resolved, distribution children written) and before
             # the routing resolve (which owns run time on routing plants and applies the same cap).
+            # TODO(Task 6 integration): pass ev= (the upsert's EventCtx) to _apply_run_time_cap.
             over_cap_result = _apply_run_time_cap(cur, conn, touched_ids, running_changed_ids,
                                                   prior_run_times=prior_run_times)
             if over_cap_result["queued"] or over_cap_result["released"] or over_cap_result["running_kept"]:

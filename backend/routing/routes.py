@@ -37,12 +37,21 @@ from backend.security.auth import require_admin, require_api_key
 router = APIRouter()
 
 
-def _recompute_after_write(plants: list[str]) -> None:
+def _recompute_after_write(plants: list[str], actor: str | None = None) -> None:
     """Thin alias for `resolver.recompute_plants` (§6.4's recompute hook,
     upload-route half), kept so existing references keep working. DEFERRED
     import, matching the `backend.distribution.data` convention."""
     import backend.routing.resolver as routing_resolver
-    routing_resolver.recompute_plants(plants)
+    routing_resolver.recompute_plants(plants, actor=actor)
+
+def _recompute_for_upload(plants: list[str], user_email: str | None) -> None:
+    """Stamp the uploading admin on the recompute's schedule history. Without an identity the hook is
+    called exactly as before (callers/tests that stub `_recompute_after_write(plants)` keep working)."""
+    if user_email:
+        _recompute_after_write(plants, actor=user_email)
+    else:
+        _recompute_after_write(plants)
+
 
 # Same cap/env-var shape as backend/integration/routes.py's upload routes.
 NIMBUS_MAX_UPLOAD_BYTES = int(os.environ.get("NIMBUS_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
@@ -59,7 +68,7 @@ def _do_upload_production_versions(file_bytes: bytes, user_email: str | None) ->
     rejected = _rejected_count(warnings)
     result = write_production_versions(ops, user_email)
     upsert_plants = [row.get("plant") for row in ops.get("upserts", [])]
-    _recompute_after_write(upsert_plants)
+    _recompute_for_upload(upsert_plants, user_email)
     if len(warnings) > 200:
         warnings = warnings[:200]
     return {
@@ -88,7 +97,7 @@ def _do_upload_operations(file_bytes: bytes, user_email: str | None) -> dict:
 
     plants = sorted({key[0] for key in groups})
     inserted = write_operation_groups(groups, user_email)
-    _recompute_after_write(plants)
+    _recompute_for_upload(plants, user_email)
     return {"inserted": inserted, "updated": 0, "rejected": rejected, "warnings": warnings,
             "plants": plants}
 
@@ -273,7 +282,8 @@ async def validate_rows(table: str, body: RoutingValidateRequest, request: Reque
 @router.post("/routing/{plant}/recompute",
             dependencies=[Depends(require_api_key), Depends(auth.require_authenticated), Depends(require_admin)])
 def recompute_plant(plant: str, request: Request,
-                    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+                    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                    admin_email: str = Depends(require_admin)):
     """§6/§6.4: run resolver.py's §5 logic over every in-scope order in
     `plant` and return the §5.6 recompute report. Also the hook TARGET
     called (best-effort, deferred-imported) after any bulk save/upload/
@@ -294,7 +304,7 @@ def recompute_plant(plant: str, request: Request,
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     import backend.routing.resolver as routing_resolver
-    result = routing_resolver.resolve_orders(plant, full=True)
+    result = routing_resolver.resolve_orders(plant, full=True, actor=admin_email)
     _set_admin_log_details(request, plant=plant, **{
         k: v for k, v in result.items() if k not in ("unknown_by_step", "unmapped_workcenters")
     })
