@@ -63,6 +63,7 @@ import backend.integration.sap_staging as sap_staging
 import backend.integration.sap_sync as sap_sync
 import backend.security.auth as auth
 from backend.alert_profiles.data import ensure_alert_profile_tables
+import backend.schedule_events.data as schedule_events_data
 import backend.setup.data as setup_data  # noqa: F401 — back-compat (brain.setup_data), see below
 from backend.priority_lists.audit_log import COLOR_WHEEL_DIR, _migrate_audit_log
 from backend.security.auth import require_admin, require_api_key  # noqa: F401 — back-compat, see below
@@ -90,6 +91,7 @@ import backend.labor.routes as labor_routes
 import backend.master_data.routes as master_data_routes
 import backend.priority_lists.routes as priority_lists_routes
 import backend.routing.routes as routing_routes
+import backend.schedule_events.routes as schedule_events_routes
 import backend.scheduling.routes as scheduling_routes
 import backend.security.routes as security_routes
 import backend.setup.routes as setup_routes
@@ -316,6 +318,7 @@ async def lifespan(app: FastAPI):
     auth.ensure_role_settings_column()
     auth.ensure_user_settings_table()
     md.ensure_system_settings_table()
+    schedule_events_data.ensure_schedule_event_table()
     _log_event("info", "startup", "Priority lists loaded",
                plants_with_lists=len(plcache.PLANT_LISTS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
@@ -811,6 +814,7 @@ api.include_router(labor_routes.router)
 api.include_router(calendars_routes.router)
 api.include_router(admin_ops_routes.router)
 api.include_router(alert_profiles_routes.router)
+api.include_router(schedule_events_routes.router)
 
 
 # =========================

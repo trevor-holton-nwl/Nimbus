@@ -10,6 +10,23 @@ from uuid import uuid4
 import pytest
 
 
+def cleanup_schedule_events(cur, *, actor=None, plants=()):
+    """Remove schedule_event rows written by a test (by actor and/or plant). Tolerates a database that
+    predates the table: the statement runs under a savepoint so a missing table never aborts teardown."""
+    plants = list(plants or ())
+    if actor is None and not plants:
+        return
+    try:
+        cur.execute("SAVEPOINT cleanup_sched_ev")
+        cur.execute("DELETE FROM schedule_event WHERE actor = %s OR plant = ANY(%s)", (actor, plants))
+        cur.execute("RELEASE SAVEPOINT cleanup_sched_ev")
+    except Exception:  # noqa: BLE001 - e.g. UndefinedTable on an older DB
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT cleanup_sched_ev")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @pytest.fixture
 def planning_pg(pg):
     token = uuid4().hex[:10]
@@ -41,6 +58,7 @@ def planning_pg(pg):
             cur.execute("DELETE FROM labor_plan_machine WHERE subnetwork = %s", (context.subnet,))
             cur.execute("DELETE FROM admin_audit WHERE user_email = %s", (context.actor,))
             cur.execute("DELETE FROM subnetworks WHERE code = %s", (context.subnet,))
+            cleanup_schedule_events(cur, actor=context.actor, plants=plants)
 
 
 def audit_rows(context, table):

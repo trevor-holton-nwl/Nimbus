@@ -158,6 +158,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-19-2-rounding-value-label.sql",
         "2026-10-20-2-alert-profiles.sql",
         "2026-10-20-3-reset-date-format.sql",
+        "2026-10-23-1-schedule-event.sql",
         "2026-07-07-color-wheel-table.sql",
         "2026-07-07-security-tables.sql",
         "2026-07-08-username-ci-index.sql",
@@ -883,3 +884,56 @@ def test_schema_reapply_has_no_data_effect_without_the_cutover_ledger_rows(pg):
         cur.execute("SELECT count(*) FROM orders WHERE id = 'zzi14'")
         assert cur.fetchone()[0] == 0
         conn.rollback()
+
+
+# --- schedule_event (per-order change history) -----------------------------------------------------------
+SCHEDULE_EVENT_MIGRATION = "2026-10-23-1-schedule-event.sql"
+SCHEDULE_EVENT_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS schedule_event (",
+    "CREATE INDEX IF NOT EXISTS idx_schedule_event_order ON schedule_event (plant, order_id, id DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_schedule_event_at    ON schedule_event (at);",
+)
+DEPLOY_DESTRUCTIVE_RE = re.compile(r"(ALTER|DROP|DELETE|UPDATE|TRUNCATE|RENAME|GRANT|REVOKE)", re.IGNORECASE)
+
+
+def _schedule_event_migration_text() -> str:
+    with open(os.path.join(ROOT, "migrations", SCHEDULE_EVENT_MIGRATION), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_schedule_event_ddl_in_schema_and_migration():
+    """Both deployment paths carry the identical table and index statements verbatim."""
+    schema_text, migration_text = _schema_text(), _schedule_event_migration_text()
+    for stmt in SCHEDULE_EVENT_STATEMENTS:
+        assert stmt in schema_text, stmt
+        assert stmt in migration_text, stmt
+    assert "CHECK (op IN ('create','modify','remove'))" in schema_text
+    assert "at               TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()" in migration_text
+    assert "autovacuum_vacuum_scale_factor = 0.02" in migration_text
+
+
+def test_schedule_event_migration_has_no_deploy_destructive_words():
+    """The deploy runner scans the whole file (comments included) for these words and demands -AllowDestructive."""
+    match = DEPLOY_DESTRUCTIVE_RE.search(_schedule_event_migration_text())
+    assert match is None, f"destructive word in migration: {match.group(0)!r}"
+
+
+@pytest.mark.pg
+def test_schedule_event_migration_is_idempotent_and_creates_every_object(pg):
+    sql_text = _schedule_event_migration_text()
+    with pg._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(sql_text)                       # first apply (a no-op where schema.sql / boot hook built it)
+        conn.commit()
+        before = _schema_fingerprint(cur)
+        cur.execute(sql_text)                       # second apply: must be a structural no-op
+        conn.commit()
+        after = _schema_fingerprint(cur)
+        assert after == before, "re-applying the schedule_event migration changed the schema"
+        have_cols = {r[1] for r in before["columns"] if r[0] == "schedule_event"}
+        assert {"id", "plant", "order_id", "production_order", "material_number", "action_id", "source", "actor",
+                "client_id", "op", "changes", "at"} <= have_cols
+        have_idx = {r[1] for r in before["indexes"] if r[0] == "schedule_event"}
+        assert {"idx_schedule_event_order", "idx_schedule_event_at"} <= have_idx
+        assert any(r[0] == "schedule_event" and "create" in r[2] and "modify" in r[2] and "remove" in r[2]
+                   for r in before["constraints"])
+

@@ -186,6 +186,10 @@ def post_system_settings(request: Request, body: dict = Body(default={})):
     The 'orderFields' key is replaced wholesale by whatever is sent — callers
     must POST the complete map, not a per-field diff. Response body is the
     full post-merge settings blob, same unwrapped shape as the GET above."""
+    if "schedule_event_retention_days" in body:
+        v = body["schedule_event_retention_days"]
+        if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 60:
+            raise HTTPException(status_code=400, detail="schedule_event_retention_days must be an integer from 1 to 60")
     try:
         return md.upsert_system_settings(body, user_email=request.headers.get("x-user-email"))
     except ValueError as e:

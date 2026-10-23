@@ -171,6 +171,16 @@ def test_system_settings_validation_error_is_400(ops, monkeypatch):
     assert response.json() == {"status": "error", "message": "Invalid settings patch", "detail": "Invalid settings patch"}
 
 
+@pytest.mark.parametrize("value,ok", [(14, True), (1, True), (60, True), (0, False), (61, False), (-3, False),
+                                      ("14", False), (14.5, False), (True, False), (None, False)])
+def test_system_settings_schedule_event_retention_is_validated(ops, monkeypatch, value, ok):
+    write = MagicMock(return_value={"schedule_event_retention_days": value})
+    monkeypatch.setattr(md, "upsert_system_settings", write)
+    response = ops.post("/system-settings", headers=ADMIN, json={"schedule_event_retention_days": value})
+    assert response.status_code == (200 if ok else 400)
+    assert write.called is ok
+
+
 def test_reload_uses_new_cache_and_live_counts(ops, monkeypatch):
     load = MagicMock()
     monkeypatch.setattr(cache, "load_priority_lists", load)

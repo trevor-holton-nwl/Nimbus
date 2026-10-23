@@ -2169,6 +2169,36 @@ def get_system_settings() -> dict:
         return dict(row[0]) if row and row[0] else {}
 
 
+SCHEDULE_EVENT_RETENTION_KEY = "schedule_event_retention_days"
+SCHEDULE_EVENT_RETENTION_DEFAULT = 14
+SCHEDULE_EVENT_RETENTION_MIN, SCHEDULE_EVENT_RETENTION_MAX = 1, 60
+_retention_bad_logged = False
+
+
+def get_schedule_event_retention_days() -> int:
+    """Typed getter for system_settings.schedule_event_retention_days: int-coerced, clamped 1-60,
+    default 14. Never raises; a bad stored value is logged once and falls back to the default."""
+    global _retention_bad_logged
+    try:
+        raw = get_system_settings().get(SCHEDULE_EVENT_RETENTION_KEY)
+    except Exception:  # noqa: BLE001 - a settings read must never break the sweep
+        return SCHEDULE_EVENT_RETENTION_DEFAULT
+    if raw is None:
+        return SCHEDULE_EVENT_RETENTION_DEFAULT
+    try:
+        if isinstance(raw, bool):
+            raise ValueError("bool")
+        value = int(float(raw)) if isinstance(raw, (int, float)) else int(str(raw).strip())
+    except (ValueError, TypeError, OverflowError):
+        if not _retention_bad_logged:
+            _retention_bad_logged = True
+            log.warning(
+                "system_settings.%s=%r is not an integer; using %d",
+                SCHEDULE_EVENT_RETENTION_KEY, raw, SCHEDULE_EVENT_RETENTION_DEFAULT)
+        return SCHEDULE_EVENT_RETENTION_DEFAULT
+    return max(SCHEDULE_EVENT_RETENTION_MIN, min(SCHEDULE_EVENT_RETENTION_MAX, value))
+
+
 def upsert_system_settings(patch: dict, user_email: str | None = None) -> dict:
     """Shallow-merge `patch`'s top-level keys into the global settings blob
     (e.g. patch={"orderFields": {...}} replaces just the 'orderFields' key,
