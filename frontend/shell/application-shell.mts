@@ -68,7 +68,7 @@ import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { Engine } from '../optimization/engine.mjs';
-import { Persistence } from '../scheduling/persistence.mjs';
+import { Persistence, SOURCE_WIRE } from '../scheduling/persistence.mjs';
 import { Session } from '../security/session.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter } from '../scheduling/gantt.mjs';
 import { Table } from '../scheduling/orders.mjs';
@@ -2395,13 +2395,18 @@ const App = {
     if (evt.source === 'refresh' || evt.source === 'note' || evt.source === 'distribution'
       || evt.source === 'engine-runtime-reconcile-display') return;
     const force = evt.source === 'engine' || evt.source === 'undo';
+    // Last writer wins: the wire source of the most recent edit that dirtied the id (schedule_event history).
+    const evtSource = String(evt.source ?? '');
+    const wire = Object.prototype.hasOwnProperty.call(SOURCE_WIRE, evtSource) ? SOURCE_WIRE[evtSource] : undefined;
     if (evt.type === 'task:update') {
       Persistence._dirtyIds.add(String(evt.id));
       if (force) Persistence._forceIds.add(String(evt.id));
+      if (wire) Persistence._dirtySource.set(String(evt.id), wire);
     }
     if (evt.type === 'tasks:bulkUpdate') (evt.ids as Array<string | number>).forEach(id => {
       Persistence._dirtyIds.add(String(id));
       if (force) Persistence._forceIds.add(String(id));
+      if (wire) Persistence._dirtySource.set(String(id), wire);
     });
     // A manual firm is server state saved through the same explicit Save: a toggle dirties
     // exactly the ids it touched. 'sandbox' (What-If discard replays the snapshot) is not a
@@ -2412,6 +2417,7 @@ const App = {
         if (!Store.tasks[String(id)]) continue;
         Persistence._dirtyIds.add(String(id));
         Persistence._firmDirtyIds.add(String(id));
+        if (wire) Persistence._dirtySource.set(String(id), wire);
         touched = true;
       }
       if (touched && evt.source !== 'undo' && !App._firmHintShown) {
@@ -2419,7 +2425,7 @@ const App = {
         Toast.show(Util.t('toast.firm_needs_save'), 'info', 6000);
       }
     }
-    if (evt.type === 'tasks:bulk') { Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._firmDirtyIds.clear(); }
+    if (evt.type === 'tasks:bulk') { Persistence._dirtyIds.clear(); Persistence._forceIds.clear(); Persistence._firmDirtyIds.clear(); Persistence._dirtySource.clear(); }
     Persistence._syncUnsaved();
   },
   // First firm toggle of the session explains that a firm is shared only after Save.

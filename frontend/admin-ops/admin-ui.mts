@@ -3049,6 +3049,9 @@ export const SystemConfig = (() => {
   type Fields = Record<string, { grid: boolean; inspector: boolean }>;
   let _baseline: Fields = {};
   let _draft: Fields = {};
+  // Order-history (schedule_event) retention window, days. Server clamps 1-60 and rejects anything else with a 400.
+  let _retBaseline = 14;
+  let _retDraft = 14;
   let _loaded = false;
   let _saving = false;
   let _loadGeneration = 0;
@@ -3061,9 +3064,14 @@ export const SystemConfig = (() => {
     }]));
   }
 
+  function _retentionValue(raw: unknown): number {
+    const n = Math.round(Number(raw));
+    return Number.isFinite(n) && n >= 1 ? Math.min(60, n) : 14;
+  }
+
   function _dirty(): boolean {
-    return _loaded && ORDER_FIELD_CATALOG.some(field =>
-      _draft[field.key].grid !== _baseline[field.key].grid || _draft[field.key].inspector !== _baseline[field.key].inspector);
+    return _loaded && (_retDraft !== _retBaseline || ORDER_FIELD_CATALOG.some(field =>
+      _draft[field.key].grid !== _baseline[field.key].grid || _draft[field.key].inspector !== _baseline[field.key].inspector));
   }
 
   function _sync(): void {
@@ -3089,7 +3097,7 @@ export const SystemConfig = (() => {
     try {
       // Response body IS the settings content directly ({"orderFields": {...}}),
       // no wrapper envelope — see master_data.get_system_settings() in brain.py.
-      const data: { orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> } =
+      const data: { orderFields?: Record<string, { grid?: boolean; inspector?: boolean }>; schedule_event_retention_days?: number } =
         await Util.fetchTraced(`${API}/system-settings`).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
@@ -3097,6 +3105,8 @@ export const SystemConfig = (() => {
       if (!current()) return;
       _baseline = _normalize(data.orderFields ?? {});
       _draft = _normalize(_baseline);
+      _retBaseline = _retentionValue(data.schedule_event_retention_days);
+      _retDraft = _retBaseline;
       _loaded = true;
       _paint();
     } catch (e) {
@@ -3134,6 +3144,11 @@ export const SystemConfig = (() => {
             <tbody>${rows}</tbody>
           </table>
         </div>
+        <div class="form-row" style="margin-top:14px;max-width:320px;">
+          <label for="sc-retention-days">${Util.escapeHtml(Util.t('ui.system_config_history_retention'))}</label>
+          <input type="number" id="sc-retention-days" min="1" max="60" step="1" value="${_retDraft}">
+          <p class="muted" style="margin-top:4px;">${Util.escapeHtml(Util.t('ui.system_config_history_retention_hint'))}</p>
+        </div>
         <div style="margin-top:12px;display:flex;align-items:center;gap:10px;">
           <button class="btn btn-primary" id="sc-save-btn" disabled>${Util.escapeHtml(Util.t('btn.save'))}</button>
           <span id="sc-save-state" role="status" aria-live="polite"></span>
@@ -3142,6 +3157,11 @@ export const SystemConfig = (() => {
     `;
 
     host.querySelector('#sc-save-btn')?.addEventListener('click', _save);
+    host.querySelector<HTMLInputElement>('#sc-retention-days')?.addEventListener('input', (e) => {
+      _retDraft = _retentionValue((e.target as HTMLInputElement).value);
+      ++_revision;
+      _sync();
+    });
     host.querySelectorAll<HTMLInputElement>('input[data-sc-field]').forEach(input => {
       input.addEventListener('change', () => {
         const key = input.dataset.scField!;
@@ -3157,6 +3177,7 @@ export const SystemConfig = (() => {
   async function _save(): Promise<void> {
     if (_saving || !_dirty()) return;
     const next = _normalize(_draft);
+    const nextRetention = _retDraft;
     _saving = true;
     ++_revision; // Any earlier GET is obsolete once a write starts.
     _sync();
@@ -3164,16 +3185,19 @@ export const SystemConfig = (() => {
       // POST body and response are both the unwrapped { orderFields: {...} }
       // shape (same contract as the GET above) — the whole map is always sent,
       // never a per-field diff (the backend merge replaces 'orderFields' wholesale).
-      const saved: { orderFields?: Record<string, { grid?: boolean; inspector?: boolean }> } =
+      const saved: { orderFields?: Record<string, { grid?: boolean; inspector?: boolean }>; schedule_event_retention_days?: number } =
         await Util.fetchTraced(`${API}/system-settings`, {
           method: 'POST',
           headers: _writeHeaders(),
-          body: JSON.stringify({ orderFields: next }),
+          body: JSON.stringify({ orderFields: next, schedule_event_retention_days: nextRetention }),
         }).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         });
       _baseline = _normalize(saved.orderFields ?? next);
+      _retBaseline = _retentionValue(saved.schedule_event_retention_days ?? nextRetention);
+      _retDraft = _retBaseline;
+      Persistence.scheduleEventRetentionDays = _retBaseline;
       Store.setOrderFieldVisibility(_baseline, 'system-config');
       Toast.show(Util.t('toast.system_config_saved'), 'success');
     } catch (e) {

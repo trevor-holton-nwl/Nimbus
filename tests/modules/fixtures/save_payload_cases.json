@@ -43,6 +43,7 @@
             "force": false
           }
         ],
+        "client_id": "<client-id>",
         "atomic_optimizer": false,
         "blocks": [],
         "calendars": {}
@@ -79,6 +80,7 @@
             "force": false
           }
         ],
+        "client_id": "<client-id>",
         "atomic_optimizer": false,
         "blocks": [],
         "calendars": {}

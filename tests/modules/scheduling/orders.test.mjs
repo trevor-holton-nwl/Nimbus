@@ -5,7 +5,8 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { Table, Inspector, ContextMenu, Printer } from '../../../frontend/scheduling/orders.mjs';
+import { Table, Inspector, ContextMenu, Printer, historyRowView, groupHistoryEvents } from '../../../frontend/scheduling/orders.mjs';
+import { makeDocument, makeEl } from '../helpers/dom-stub.mjs';
 import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
@@ -2316,4 +2317,139 @@ test('Table.applyOverride with a PV - Machine pair: writes the pair, pushes one 
     Store.setTasks([], 'test');
     Store.setMasterData(priorMasterData, 'test');
   }
+});
+
+// ---- Inspector History (schedule_event) -------------------------------------------------------------
+const histT = (key, vars) => {
+  const en = { 'ui.history_yes': 'Yes', 'ui.history_no': 'No', 'ui.history_op_create': 'Created', 'ui.history_op_remove': 'Removed',
+    'ui.history_carried_from': 'Carried from {{id}}', 'ui.history_field_machine': 'Machine', 'ui.history_field_manual_firmed': 'Firmed',
+    'ui.history_field_planning_status': 'Planning status', 'ui.history_field_scheduled_end': 'Planned finish', 'ui.history_source_drag': 'Drag',
+    'ui.needs_planning': 'Needs Planning', 'ui.planning_status_scheduled': 'Scheduled', 'ui.history_actor_system': 'System' };
+  let out = en[key] ?? key;
+  if (vars) out = out.replace(/\{\{(\w+)\}\}/g, (_, k) => String(vars[k] ?? ''));
+  return out;
+};
+const histFmt = d => (d ? `FMT(${d})` : '');
+
+test('historyRowView formats modify, create and remove rows (dates, booleans, nulls, needs_planning code, carried_from)', () => {
+  const modify = historyRowView({ id: 2, at: '2026-10-22T10:00:00+00:00', actor: 'pat@x.com', actor_name: 'Pat Planner', source: 'drag', op: 'modify', action_id: 'a1',
+    changes: { machine: ['L1', 'L2'], scheduled_end: ['2026-10-22T08:00:00', null], manual_firmed: [false, true],
+      planning_status: ['scheduled', 'needs_planning:runtime_unknown'], mystery: [1, 2] } }, histT, histFmt);
+  assert.equal(modify.who, 'Pat Planner');
+  assert.equal(modify.source, 'Drag');
+  assert.equal(modify.when, 'FMT(2026-10-22T10:00:00+00:00)');
+  const text = modify.lines.map(l => l.text);
+  assert.ok(text.includes('Machine: L1 → L2'));
+  assert.ok(text.includes('Planned finish: FMT(2026-10-22T08:00:00) → —'), 'a date is formatted and null is a dash');
+  assert.ok(text.includes('Firmed: No → Yes'), 'booleans are localized yes/no');
+  assert.ok(text.includes('Planning status: Scheduled → Needs Planning (runtime_unknown)'), 'the reason code rides in parentheses');
+  assert.ok(text.includes('mystery: 1 → 2'), 'an unknown field falls back to the raw name');
+  const create = historyRowView({ id: 1, at: 'x', actor: null, actor_name: null, source: 'weird_source', op: 'create', action_id: 'a2',
+    changes: { machine: [null, 'L1'], carried_from: [null, 'old-id'] } }, histT, histFmt);
+  assert.equal(create.who, 'System');
+  assert.equal(create.source, 'weird_source', 'an unknown source falls back to the raw string');
+  assert.equal(create.lines[0].text, 'Created');
+  assert.ok(create.lines.some(l => l.text === 'Machine: L1'));
+  assert.ok(create.lines.some(l => l.text === 'Carried from old-id'));
+  const remove = historyRowView({ id: 3, at: 'x', actor: 'sap-scheduler', source: 'purge', op: 'remove', action_id: 'a3', changes: { machine: ['L1', null] } }, histT, histFmt);
+  assert.equal(remove.who, 'sap-scheduler');
+  assert.deepEqual(remove.lines.map(l => l.text), ['Removed', 'Machine: L1']);
+  const grouped = groupHistoryEvents([{ action_id: 'g1' }, { action_id: 'g1' }, { action_id: 'g2' }]);
+  assert.deepEqual(grouped.map(g => g.length), [2, 1]);
+});
+
+function historyHarness(id) {
+  const doc = makeDocument();
+  const prior = { document: globalThis.document, fetchTraced: Util.fetchTraced, current: Inspector._currentId, task: Store.tasks[id] };
+  globalThis.document = doc;
+  const root = makeEl('inspector-body', doc);
+  doc.body.appendChild(root);
+  const mount = () => {
+    root.replaceChildren();
+    const card = makeEl('', doc); card.className = 'insp-card insp-history'; card.setAttribute('data-history-for', id);
+    const body = makeEl('', doc); body.className = 'insp-history-body';
+    card.appendChild(body); root.appendChild(card);
+    return body;
+  };
+  Inspector._history.clear(); Inspector._historyInflight.clear(); Inspector._historyError.clear();
+  Inspector._currentId = id;
+  Store.tasks[id] = { id, MACHINE: 'L1', PLANT: 'P1' };
+  const urls = [];
+  let events = [];
+  Util.fetchTraced = async url => { urls.push(String(url)); return { ok: true, json: async () => ({ events }) }; };
+  return {
+    mount, urls, setEvents(e) { events = e; },
+    restore() {
+      globalThis.document = prior.document; Util.fetchTraced = prior.fetchTraced; Inspector._currentId = prior.current;
+      if (prior.task) Store.tasks[id] = prior.task; else delete Store.tasks[id];
+      Inspector._history.clear(); Inspector._historyInflight.clear(); Inspector._historyError.clear();
+    },
+  };
+}
+const flushHistory = () => new Promise(resolve => setImmediate(resolve));
+
+test('Inspector history renders from cache without a second fetch across two renders; invalidateHistory refetches once', async () => {
+  const h = historyHarness('hist-1');
+  try {
+    h.setEvents([{ id: 5, at: '2026-10-22T10:00:00+00:00', actor: 'a@x.com', actor_name: null, source: 'drag', op: 'modify', action_id: 'g', client_id: null, changes: { machine: ['L1', 'L2'] } }]);
+    let body = h.mount();
+    Inspector._fillHistory('hist-1');
+    assert.equal(h.urls.length, 1, 'first render fetches');
+    assert.match(h.urls[0], /\/schedule-events\/P1\/order\/hist-1\?limit=20$/);
+    assert.equal(body.children.length, 1, 'a loading line is shown meanwhile');
+    Inspector._fillHistory('hist-1');
+    assert.equal(h.urls.length, 1, 'an in-flight load is deduplicated');
+    await flushHistory();
+    assert.equal(body.children[0].className, 'insp-history-group');
+    body = h.mount();                                   // a second _render rebuilds the card
+    Inspector._fillHistory('hist-1');
+    assert.equal(h.urls.length, 1, 'cached: no second fetch');
+    assert.equal(body.children[0].className, 'insp-history-group', 'cached history renders synchronously');
+    Inspector.invalidateHistory(['hist-1']);
+    assert.equal(h.urls.length, 2, 'invalidate triggers exactly one refetch');
+    await flushHistory();
+    assert.equal(h.urls.length, 2);
+    Inspector.invalidateHistory(['some-other-order']);
+    assert.equal(h.urls.length, 2, 'invalidating an order that is not shown does not fetch');
+  } finally { h.restore(); }
+});
+
+test('Inspector history: a response for an order no longer shown is not painted; an error is shown and not retried by a re-render', async () => {
+  const h = historyHarness('hist-2');
+  try {
+    h.setEvents([]);
+    const body = h.mount();
+    Inspector._fillHistory('hist-2');
+    Inspector._currentId = 'someone-else';
+    await flushHistory();
+    assert.equal(body.children[0].textContent, 'ui.insp_history_loading', 'the stale body is left alone');
+    Inspector._history.clear(); Inspector._currentId = 'hist-2';
+    Util.fetchTraced = async () => ({ ok: false, status: 500 });
+    const body2 = h.mount();
+    Inspector._fillHistory('hist-2');
+    await flushHistory();
+    assert.equal(body2.children[0].textContent, 'ui.insp_history_error');
+    const before = h.urls.length;
+    Inspector._fillHistory('hist-2');
+    assert.equal(h.urls.length, before, 're-rendering does not hammer a failing endpoint');
+  } finally { h.restore(); }
+});
+
+test('Inspector history renders hostile actor/notes as text, never markup', async () => {
+  const h = historyHarness('hist-3');
+  try {
+    const evil = '<script>alert(1)</script>';
+    h.setEvents([{ id: 9, at: '2026-10-22T10:00:00+00:00', actor: evil, actor_name: null, source: 'note', op: 'modify', action_id: 'n', client_id: null,
+      changes: { notes: [evil, '<img src=x onerror=alert(1)>'] } }]);
+    const body = h.mount();
+    Inspector._fillHistory('hist-3');
+    await flushHistory();
+    const group = body.children[0];
+    assert.match(group.children[0].textContent, /<script>alert\(1\)<\/script>/, 'the actor shows as literal text');
+    assert.match(group.children[1].textContent, /<img src=x onerror=alert\(1\)>/);
+    for (const el of [group, ...group.children]) {
+      assert.equal(el.tagName, 'DIV');
+      assert.equal(el.innerHTML, '', 'no HTML was ever assigned');
+    }
+  } finally { h.restore(); }
 });

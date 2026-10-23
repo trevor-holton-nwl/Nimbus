@@ -2074,12 +2074,106 @@ export function notifyResidualFirming(ids: string[]): void {
 }
 
 /* =============================================================================
+   ORDER HISTORY — pure view-model for the Inspector History card (schedule_event rows from
+   GET /schedule-events/{plant}/order/{order_id}). DOM-free so tests can pin the formatting.
+   ========================================================================== */
+export interface HistoryEvent {
+  id: number;
+  at: string;
+  actor: string | null;
+  actor_name?: string | null;
+  source: string;
+  op: string;
+  action_id: string;
+  client_id?: string | null;
+  changes: Record<string, [unknown, unknown] | unknown[]>;
+}
+export interface HistoryLine { field: string; before: string; after: string; text: string }
+export interface HistoryRowView { when: string; who: string; source: string; op: string; lines: HistoryLine[] }
+type HistoryT = (key: string, vars?: Record<string, string | number>) => string;
+
+const HISTORY_DATE_FIELDS = new Set(['scheduled_start', 'scheduled_end', 'basic_finish_date']);
+const HISTORY_PSEUDO_FIELDS = new Set(['carried_from', 'superseded_by']);
+
+/** A translation, or the English fallback when the key is not in the catalog (Util.t echoes the key). */
+function historyLabel(t: HistoryT, key: string, fallback: string, vars?: Record<string, string | number>): string {
+  const out = t(key, vars);
+  return !out || out === key ? fallback : out;
+}
+
+function historyValue(field: string, v: unknown, t: HistoryT, fmt: (d: unknown) => string): string {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'boolean') return v ? historyLabel(t, 'ui.history_yes', 'Yes') : historyLabel(t, 'ui.history_no', 'No');
+  if (field === 'planning_status' && typeof v === 'string') {
+    const [status, code] = v.split(':', 2);
+    const label = status === 'needs_planning' ? historyLabel(t, 'ui.needs_planning', 'Needs Planning')
+      : status === 'scheduled' ? historyLabel(t, 'ui.planning_status_scheduled', 'Scheduled') : status;
+    return code ? `${label} (${code})` : label;
+  }
+  if (HISTORY_DATE_FIELDS.has(field) && typeof v === 'string') return fmt(v) || v;
+  return String(v);
+}
+
+/** One event as display strings: `modify` -> "field: before -> after" per changed field; `create` / `remove`
+ *  -> a Created / Removed line then the snapshot; carried_from / superseded_by -> one short line each. */
+export function historyRowView(event: HistoryEvent, t: HistoryT, fmt: (d: unknown) => string): HistoryRowView {
+  const lines: HistoryLine[] = [];
+  const op = event.op;
+  if (op === 'create' || op === 'remove') {
+    const head = op === 'create' ? historyLabel(t, 'ui.history_op_create', 'Created') : historyLabel(t, 'ui.history_op_remove', 'Removed');
+    lines.push({ field: '', before: '', after: '', text: head });
+  }
+  for (const [field, pair] of Object.entries(event.changes || {})) {
+    const before = Array.isArray(pair) ? pair[0] : undefined;
+    const after = Array.isArray(pair) ? pair[1] : undefined;
+    if (HISTORY_PSEUDO_FIELDS.has(field)) {
+      const other = String(field === 'carried_from' ? before ?? after ?? '' : after ?? before ?? '');
+      const key = field === 'carried_from' ? 'ui.history_carried_from' : 'ui.history_superseded_by';
+      const fallback = field === 'carried_from' ? `Carried from ${other}` : `Superseded by ${other}`;
+      lines.push({ field, before: '', after: other, text: historyLabel(t, key, fallback, { id: other }) });
+      continue;
+    }
+    const label = historyLabel(t, `ui.history_field_${field}`, field);
+    const b = historyValue(field, before, t, fmt);
+    const a = historyValue(field, after, t, fmt);
+    if (op === 'create') lines.push({ field: label, before: '', after: a, text: `${label}: ${a}` });
+    else if (op === 'remove') lines.push({ field: label, before: b, after: '', text: `${label}: ${b}` });
+    else lines.push({ field: label, before: b, after: a, text: `${label}: ${b} → ${a}` });
+  }
+  return {
+    when: fmt(event.at) || String(event.at ?? ''),
+    who: event.actor_name || event.actor || historyLabel(t, 'ui.history_actor_system', 'System'),
+    source: historyLabel(t, `ui.history_source_${event.source}`, String(event.source ?? '')),
+    op,
+    lines,
+  };
+}
+
+/** Consecutive events sharing an action_id (events arrive newest-first) -> one group each. */
+export function groupHistoryEvents(events: HistoryEvent[]): HistoryEvent[][] {
+  const groups: HistoryEvent[][] = [];
+  for (const e of events) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].action_id === e.action_id) last.push(e); else groups.push([e]);
+  }
+  return groups;
+}
+
+const HISTORY_CACHE_CAP = 200;
+
+/* =============================================================================
    INSPECTOR — right-side detail panel shown on the Timeline tab.
    Edits here write through the Store (source: 'inspector').
    ========================================================================== */
 export const Inspector = {
   _currentId: null as string | null,
   _unsubStore: null as (() => void) | null,
+  // Order history (schedule_event) per order id, newest first. FIFO-capped; dropped by invalidateHistory().
+  _history: new Map<string, HistoryEvent[]>(),
+  _historyInflight: new Set<string>(),
+  _historyError: new Set<string>(),
+  // Bumped by invalidateHistory(); a fetch that started under an older value is discarded and re-run.
+  _historyGen: new Map<string, number>(),
   // The Planned Finish Flatpickr is built on an <input> that every _render() replaces, so the
   // previous instance (and its calendar popup appended to <body>) must be destroyed first —
   // otherwise one picker + one popup DOM tree leaks per render.
@@ -2104,6 +2198,7 @@ export const Inspector = {
 
   init(): void {
     Inspector._unsubStore = Store.subscribe(evt => {
+    if (evt.type === 'tasks:saved') { Inspector.invalidateHistory((evt.ids ?? []) as Array<string | number>); return; }
     // Allow firmed:change through even from 'inspector' so the Firm/Unfirm
     // button re-renders after toggleFirm() — otherwise it never flips.
     if (evt.source === 'inspector' && evt.type !== 'firmed:change') return;
@@ -2138,7 +2233,112 @@ export const Inspector = {
       return;
     }
     Inspector._currentId = String(task.id);
+    // An explicit selection retries a history load that failed earlier (re-renders do not).
+    Inspector._historyError.delete(String(task.id));
     Inspector._render(task);
+  },
+
+  /** Drop cached history for these orders (their events changed server-side); refetch if one is on screen. */
+  invalidateHistory(ids: Array<string | number>): void {
+    let touchesCurrent = false;
+    for (const raw of ids) {
+      const id = String(raw);
+      Inspector._history.delete(id);
+      Inspector._historyError.delete(id);
+      Inspector._historyGen.set(id, (Inspector._historyGen.get(id) ?? 0) + 1);
+      if (id === Inspector._currentId) touchesCurrent = true;
+    }
+    if (touchesCurrent && Inspector._currentId) Inspector._fillHistory(Inspector._currentId);
+  },
+
+  /** The History card body for this order, or null when the panel shows another order (or nothing). */
+  _historyBodyFor(id: string): HTMLElement | null {
+    const card = document.getElementById('inspector-body')?.querySelector<HTMLElement>('.insp-history');
+    if (!card || card.getAttribute('data-history-for') !== id) return null;
+    return card.querySelector<HTMLElement>('.insp-history-body');
+  },
+
+  _historyNote(body: HTMLElement, text: string): void {
+    body.replaceChildren();
+    const note = document.createElement('div');
+    note.className = 'insp-history-note';
+    note.textContent = text;
+    body.appendChild(note);
+  },
+
+  /** Cached -> render now; otherwise show a loading line and fetch (deduplicated). */
+  _fillHistory(id: string): void {
+    const body = Inspector._historyBodyFor(id);
+    if (!body) return;
+    const cached = Inspector._history.get(id);
+    if (cached) { Inspector._renderHistory(body, cached); return; }
+    if (Inspector._historyError.has(id)) { Inspector._historyNote(body, Util.t('ui.insp_history_error')); return; }
+    Inspector._historyNote(body, Util.t('ui.insp_history_loading'));
+    void Inspector._loadHistory(id);
+  },
+
+  async _loadHistory(id: string): Promise<void> {
+    if (Inspector._historyInflight.has(id)) return;
+    Inspector._historyInflight.add(id);
+    const gen = Inspector._historyGen.get(id) ?? 0;
+    let events: HistoryEvent[] | null = null;
+    try {
+      const task = Store.tasks[id];
+      const plant = (task && (Store.getPlantForLine(task.MACHINE) || task.PLANT)) || Store.selectedPlant || '';
+      if (!plant) throw new Error('no plant for order');
+      const r = await Util.fetchTraced(
+        `${Config.API_BASE}/schedule-events/${encodeURIComponent(plant)}/order/${encodeURIComponent(id)}?limit=20`,
+        { signal: AbortSignal.timeout(5000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json() as { events?: HistoryEvent[] };
+      events = Array.isArray(data.events) ? data.events : [];
+    } catch (e) {
+      ErrorLog.warn('inspector', `Order history load failed: ${(e as Error).message}`, { id });
+    } finally {
+      Inspector._historyInflight.delete(id);
+    }
+    if ((Inspector._historyGen.get(id) ?? 0) !== gen) {
+      // The order was saved while this request was in flight: the answer may predate the save.
+      if (id === Inspector._currentId) Inspector._fillHistory(id);
+      return;
+    }
+    if (events) {
+      Inspector._history.set(id, events);
+      while (Inspector._history.size > HISTORY_CACHE_CAP) {
+        const oldest = Inspector._history.keys().next().value;
+        if (oldest === undefined) break;
+        Inspector._history.delete(oldest);
+      }
+    } else {
+      Inspector._historyError.add(id);
+    }
+    if (id === Inspector._currentId) Inspector._fillHistory(id);
+  },
+
+  _renderHistory(body: HTMLElement, events: HistoryEvent[]): void {
+    if (!events.length) {
+      Inspector._historyNote(body, Util.t('ui.insp_history_empty', { days: Persistence.scheduleEventRetentionDays }));
+      return;
+    }
+    body.replaceChildren();
+    for (const group of groupHistoryEvents(events)) {
+      const views = group.map(e => historyRowView(e, (k, v) => Util.t(k, v), d => Util.fmtDTReadable(d)));
+      const wrap = document.createElement('div');
+      wrap.className = 'insp-history-group';
+      const head = document.createElement('div');
+      head.className = 'insp-history-head';
+      head.textContent = `${views[0].when} · ${views[0].who} · ${views[0].source}`;
+      wrap.appendChild(head);
+      for (const view of views) {
+        for (const line of view.lines) {
+          const row = document.createElement('div');
+          row.className = 'insp-history-line';
+          row.textContent = line.text;
+          wrap.appendChild(row);
+        }
+      }
+      body.appendChild(wrap);
+    }
   },
   clear(): void {
     Inspector._currentId = null;
@@ -2487,6 +2687,11 @@ export const Inspector = {
         </div>
       </div>
 
+      <div class="insp-card insp-history" data-history-for="${Util.escapeHtml(String(task.id))}">
+        <h4 data-i18n="ui.insp_history_title">${Util.t('ui.insp_history_title')}</h4>
+        <div class="insp-history-body"></div>
+      </div>
+
       <div class="insp-actions">
         ${firmed
           ? `<button class="btn" onclick="NIMBUS.Inspector.toggleFirm(false)">${Util.t('btn.unfirm')}</button>`
@@ -2538,6 +2743,7 @@ export const Inspector = {
         onChange() { Inspector._onFieldChange('end_date', _dtEl.value); }
       });
     }
+    Inspector._fillHistory(_id);
   },
 
   async _refreshSetupTruth(plant: string): Promise<void> {
@@ -2747,6 +2953,7 @@ export const Inspector = {
             if (version && (Store.tasks[id]?.notes || null) === (notes || null)) {
               Store.tasks[id].row_version = version;
             }
+            Inspector.invalidateHistory([id]);
           }
         })
         .catch(e => ErrorLog.warn('inspector', `Note persist failed: ${e.message}`,

@@ -1163,7 +1163,9 @@ async function captureSavePayload(raw, edit) {
     // frontend/scheduling/CLAUDE.md) and carry demo-seeded, random-id Store state;
     // pin them to empty so the fixture is deterministic.
     assert.ok(Array.isArray(body.blocks) && 'calendars' in body, 'saveAll must still send blocks + calendars');
-    return { ...body, blocks: [], calendars: {} };
+    // client_id is a per-tab random UUID: pin a placeholder so the shared fixture stays deterministic.
+    assert.equal(typeof body.client_id, 'string', 'saveAll must send client_id');
+    return { ...body, client_id: '<client-id>', blocks: [], calendars: {} };
   } finally {
     globalThis.fetch = origFetch;
     Persistence._dirtyIds.clear();
@@ -1593,4 +1595,48 @@ test('Persistence.load captures the server clock offset from /tasks meta.server_
     Store.setMasterData(priorMasterData, 'unit-test');
     Persistence._loadsInFlight = priorLoadsInFlight;
   }
+});
+
+// schedule_event history: per-task source and client_id on the wire; tasks:saved after a successful save.
+test('saveAll sends source only for mapped ids and client_id, then clears the map and emits tasks:saved', async () => {
+  Store.setTasks([
+    { id: 'src1', MACHINE: 'L1', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '1' },
+    { id: 'src2', MACHINE: 'L1', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-03T09:00:00'), end_date: new Date('2026-08-03T10:00:00'), row_version: '1' },
+  ], 'unit-test');
+  Persistence._dirtyIds.add('src1'); Persistence._dirtyIds.add('src2');
+  Persistence._dirtySource.set('src1', 'drag');
+  const saved = [];
+  const unsubscribe = Store.subscribe(e => { if (e.type === 'tasks:saved') saved.push(e); });
+  const calls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts) => {
+    calls.push({ url: String(url), opts });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ versions: { src1: 2, src2: 2 }, stale: [], persisted: 2, updated: 2 }) });
+  };
+  try {
+    Persistence.saveAll();
+    const body = JSON.parse(calls.find(c => c.url.includes('/tasks/update')).opts.body);
+    assert.equal(body.tasks.find(t => t.id === 'src1').source, 'drag');
+    assert.ok(!('source' in body.tasks.find(t => t.id === 'src2')), 'an unmapped id carries no source');
+    assert.equal(typeof body.client_id, 'string');
+    assert.ok(body.client_id.length > 8);
+    assert.equal(body.client_id, Persistence.clientId, 'the client id is stable across reads');
+    await new Promise(res => setTimeout(res, 0));
+    assert.equal(Persistence._dirtySource.size, 0, 'a saved id leaves the source map');
+    assert.equal(saved.length, 1);
+    assert.deepEqual([...saved[0].ids].sort(), ['src1', 'src2']);
+  } finally {
+    unsubscribe();
+    globalThis.fetch = origFetch;
+    Persistence._dirtyIds.clear(); Persistence._dirtySource.clear();
+  }
+});
+
+test('_taskEditSnapshot adds source only when the id has one; _removeMissingTasks drops it', () => {
+  const t = { id: 'snap1', MACHINE: 'L1', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00') };
+  assert.ok(!('source' in Persistence._taskEditSnapshot(t)));
+  Persistence._dirtySource.set('snap1', 'keyboard');
+  assert.equal(Persistence._taskEditSnapshot(t).source, 'keyboard');
+  Persistence._removeMissingTasks(['snap1']);
+  assert.ok(!Persistence._dirtySource.has('snap1'));
 });
