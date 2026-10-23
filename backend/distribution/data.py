@@ -2160,6 +2160,7 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str
             local["_events"] = []
             if _run_savepointed(f"dist_chunk_{ci}", chunk, local):
                 applied_ids.extend(local.pop("_ids"))
+                local.pop("_events", None)
                 for name, n_ in local.items():
                     counters[name] += n_
                 continue
@@ -2169,6 +2170,7 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str
                 local["_events"] = []
                 if _run_savepointed(f"dist_parent_{ci}", [k], local):
                     applied_ids.extend(local.pop("_ids"))
+                    local.pop("_events", None)
                     for name, n_ in local.items():
                         counters[name] += n_
                 else:

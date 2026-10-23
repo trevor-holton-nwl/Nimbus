@@ -5710,3 +5710,57 @@ def test_aggregate_csv_is_bom_prefixed_and_formula_guarded(monkeypatch):
     finally:
         brain.api.dependency_overrides.clear()
     assert list(_csv.reader(_io.StringIO(again.content.decode("utf-8-sig"))))[1][-1] == "10/09/2026 16:00"
+
+
+class TestApplyCounterLoopNoDb:
+    """P0-1 regression (no DB): after a successful chunk the per-chunk dict's
+    private keys (`_ids`, `_events`) must be gone before the counter loop, or
+    `counters[name] += n_` raises KeyError('_events') on every apply."""
+
+    def test_apply_counter_loop_survives_private_keys(self):
+        parent = {
+            "plant": "1006", "production_order": "P1", "material_number": "M1",
+            "is_new_header": True, "child_rows": [], "child_ids": {},
+            "previous_child_ids": set(),
+        }
+        plan = {"parents": {("1006", "P1", "M1"): parent}}
+
+        class _Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, *a, **k):
+                return None
+
+            def fetchall(self):
+                return []
+
+        class _Conn:
+            committed = False
+
+            def cursor(self):
+                return _Cur()
+
+            def commit(self):
+                self.committed = True
+
+        def _children(cur, parent, events):
+            parent["_touched_ids"].append("child-1")
+            return 1
+
+        conn = _Conn()
+        with mock.patch.object(distribution_data.setup_data,
+                               "capture_setup_states_before_schedule_mutation"), \
+                mock.patch.object(distribution_data, "_insert_new_header", return_value=True), \
+                mock.patch.object(distribution_data, "_write_shares"), \
+                mock.patch.object(distribution_data, "_apply_children", side_effect=_children), \
+                mock.patch.object(distribution_data, "_delete_superseded_children", return_value=0), \
+                mock.patch.object(distribution_data, "_update_share_child_ids"):
+            result = distribution_data.apply(plan, str(uuid.uuid4()), conn)
+        assert conn.committed
+        assert result["parents_distributed"] == 1
+        assert result["children_upserted"] == 1
+        assert result["touched_ids"] == ["child-1"]
