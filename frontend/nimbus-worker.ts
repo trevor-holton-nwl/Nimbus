@@ -66,8 +66,9 @@ self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
       self.postMessage({ type: 'UTILIZATION_RESULT', id, matrix });
     } else if (type === 'LEVERAGE_BATCH') {
       const { base, variants } = payload;
-      // ensureCalendar/ensurePlant mutate calendars/plants: every core call gets its own copy.
-      const fresh = () => ({ calendars: structuredClone(base.calendars), plants: structuredClone(base.plants) });
+      // ensureCalendar/ensurePlant only ADD missing top-level keys to calendars/plants (never edit an existing
+      // entry), so every core call gets its own shallow copy of the two maps instead of a deep clone.
+      const fresh = () => ({ calendars: { ...base.calendars }, plants: { ...base.plants } });
       const results = variants.map(({ key, setup }) => ({
         key,
         alerts: Core.computeAlerts({ ...base, ...fresh(), setup }).alerts,

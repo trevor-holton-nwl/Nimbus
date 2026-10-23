@@ -132,3 +132,21 @@ test('Compute.leverageBatch falls back when the worker never answers', async t =
     if (prior) Object.defineProperty(globalThis, 'Worker', prior); else delete globalThis.Worker;
   }
 });
+
+test('no-plant snapshot aliases the live Store maps, yet runLeverageBatchSync adds no keys to them (shallow per-call copies)', () => {
+  seed();
+  Store.setSelectedPlant(null, 'test');
+  try {
+    const snap = buildPlantSnapshot(null);
+    assert.equal(snap.calendars, Store.calendars, 'the no-plant payload aliases the live calendars map');
+    assert.equal(snap.plants, Store.plants, 'and the live plants map');
+    const calendarKeys = Object.keys(Store.calendars).sort();
+    const plantKeys = Object.keys(Store.plants).sort();
+    const base = { ...snap, dismissed: [], opts: { lines: null }, startMs: new Date().setHours(0, 0, 0, 0), days: 3, lines: undefined };
+    const out = runLeverageBatchSync(base, [{ key: 'v1', setup: EMPTY }, { key: 'v2', setup: MARKER }]);
+    assert.equal(out.length, 2);
+    assert.deepEqual(Object.keys(Store.calendars).sort(), calendarKeys, 'Store.calendars gained no keys');
+    assert.deepEqual(Object.keys(Store.plants).sort(), plantKeys, 'Store.plants gained no keys');
+    assert.deepEqual(Object.keys(base.calendars).sort(), calendarKeys, 'neither did the base the caller passed');
+  } finally { Store.setSelectedPlant('LP', 'test'); }
+});

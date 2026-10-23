@@ -209,10 +209,12 @@ export interface LeverageVariant { key: string; setup: NimbusSetupObservation }
 export interface LeverageResult { key: string; alerts: NimbusAlert[]; matrix: NimbusUtilizationMatrix }
 
 /** Main-thread equivalent of the worker's LEVERAGE_BATCH handler (used when the worker is dead or
- *  absent). calendars/plants are cloned per core call: ensureCalendar/ensurePlant write into them. */
+ *  absent). calendars/plants get a shallow copy per core call: ensureCalendar/ensurePlant only ADD missing
+ *  top-level keys (they never edit an existing entry), so a fresh top-level map keeps `base` (and the live
+ *  Store maps it can alias) untouched without cloning every entry. */
 export function runLeverageBatchSync(base: LeverageBase, variants: LeverageVariant[]): LeverageResult[] {
   const Core = globalThis.NimbusComputeCore!;
-  const fresh = () => ({ calendars: structuredClone(base.calendars), plants: structuredClone(base.plants) });
+  const fresh = () => ({ calendars: { ...base.calendars }, plants: { ...base.plants } });
   return variants.map(({ key, setup }) => ({
     key,
     alerts: Core.computeAlerts({ ...base, ...fresh(), setup }).alerts,
@@ -295,12 +297,6 @@ export const Compute = (() => {
     return new Promise((resolve, reject) => {
       const id = ++_seq;
       _pending.set(id, { resolve, reject });
-      // Diagnostic-only measurement: setup stays scoped and has no activation gate.
-      if (payload.setup) {
-        const _setupCloneT0 = performance.now();
-        structuredClone(payload.setup);
-        PerfMonitor.record('Worker.setupClone:' + type, performance.now() - _setupCloneT0);
-      }
       const _cloneT0 = performance.now();
       w.postMessage({ type, id, payload });
       PerfMonitor.record('Worker.postClone:' + type, performance.now() - _cloneT0);
