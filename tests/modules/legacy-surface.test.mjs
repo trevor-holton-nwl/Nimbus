@@ -56,8 +56,8 @@ test('intelligenceCommands includes Store.tasksArr', () => {
   assert.ok(surface.intelligenceCommands.includes('Store.tasksArr'), surface.intelligenceCommands.join(', '));
 });
 
-test('intelligenceCommands includes Compute.utilization', () => {
-  assert.ok(surface.intelligenceCommands.includes('Compute.utilization'), surface.intelligenceCommands.join(', '));
+test('intelligenceCommands includes Utilization.computeMatrixAsync', () => {
+  assert.ok(surface.intelligenceCommands.includes('Utilization.computeMatrixAsync'), surface.intelligenceCommands.join(', '));
 });
 
 test('privateConsumers includes GanttFilter._toggleLineDropdown', () => {

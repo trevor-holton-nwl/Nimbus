@@ -277,3 +277,13 @@ test('at most one request is queued behind the one in flight: newer requests mer
     assert.ok(Object.keys(mc['UC-L1'])[0] === Util.dayKey(new Date(2026, 7, 6)));
   } finally { stub.undo(); restore(); }
 });
+
+test('a malformed worker reply (no matrix) falls back to the synchronous matrix instead of an unhandled rejection', async () => {
+  fixture();
+  const stub = stubCompute(() => Promise.resolve({ alerts: [] }));
+  try {
+    const m = await Utilization.computeMatrixAsync(DAY, 7);
+    Utilization._cacheClear();
+    assert.deepEqual(m, Utilization.computeMatrix(DAY, 7));
+  } finally { stub.undo(); restore(); }
+});

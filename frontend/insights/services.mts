@@ -927,7 +927,7 @@ function _utilHydrate(matrix: NimbusUtilizationMatrix): UtilizationMatrixResolve
 /** Async path state: at most ONE request posted to the worker and ONE queued behind it. A request arriving while
  *  one is queued is merged into it (window = union, waiters shared), so the queue never exceeds one and nobody waits
  *  on a request that was dropped. The queued job reads plant and dataRev when it is actually posted. */
-interface UtilWaiter { startMs: number; days: number; resolve: (m: UtilizationMatrixResolved) => void; }
+interface UtilWaiter { startMs: number; days: number; resolve: (m: UtilizationMatrixResolved) => void; reject: (e: unknown) => void; }
 interface UtilJob { startMs: number; days: number; waiters: UtilWaiter[]; }
 let _utilInflight: { plant: string; dataRev: number; startMs: number; days: number; promise: Promise<void> } | null = null;
 let _utilPending: UtilJob | null = null;
@@ -937,8 +937,8 @@ function _utilWindowEndMs(startMs: number, days: number): number {
 }
 
 function _utilEnqueue(startMs: number, days: number): Promise<UtilizationMatrixResolved> {
-  return new Promise(resolve => {
-    const waiter: UtilWaiter = { startMs, days, resolve };
+  return new Promise((resolve, reject) => {
+    const waiter: UtilWaiter = { startMs, days, resolve, reject };
     if (_utilPending) {
       const p = _utilPending;
       const newStart = Math.min(p.startMs, startMs);
@@ -963,8 +963,10 @@ function _utilPump(): void {
   const plant = Store.selectedPlant;
   const settleSync = (): void => {
     // Largest window first so the rest are served by slicing the cache that compute just filled.
+    // A synchronous compute that throws (e.g. no master data yet) rejects that waiter only; it must never escape
+    // into the worker promise chain as an unhandled rejection.
     for (const w of [...job.waiters].sort((a, b) => b.days - a.days)) {
-      w.resolve(Utilization.computeMatrix(new Date(w.startMs), w.days));
+      try { w.resolve(Utilization.computeMatrix(new Date(w.startMs), w.days)); } catch (e) { w.reject(e); }
     }
   };
   if (!plant || !Compute.available()) { settleSync(); _utilPump(); return; }
@@ -985,7 +987,8 @@ function _utilPump(): void {
     try { request = Compute.utilization(job.startMs, job.days); } catch (e) { request = Promise.reject(e); }
     request.then(({ matrix }) => finish(() => {
       if (Store.dataRev() !== dataRev || Store.selectedPlant !== plant) { settleSync(); done(); return; }   // stale: drop it, answer from current data
-      const resolved = _utilHydrate(matrix);
+      let resolved: UtilizationMatrixResolved;
+      try { resolved = _utilHydrate(matrix); } catch { settleSync(); done(); return; }   // malformed reply: answer synchronously
       _utilCachePut(plant, job.startMs, job.days, dataRev, resolved);
       PerfMonitor.record('Utilization.computeMatrixAsync', performance.now() - t0);
       for (const w of job.waiters) w.resolve(_utilSlice({ startMs: job.startMs, days: job.days, matrix: resolved }, w.startMs, w.days) ?? resolved);
