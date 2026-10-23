@@ -92,6 +92,21 @@ def set_failure_hook(hook: Callable[[int], None] | None) -> None:
     _failure_hook = hook
 
 
+_rows_skipped = 0
+_skip_hook: Callable[[int], None] | None = None
+
+
+def rows_skipped() -> int:
+    """Process-lifetime count of rows with real changes dropped for a missing plant or order id."""
+    return _rows_skipped
+
+
+def set_skip_hook(hook: Callable[[int], None] | None) -> None:
+    """Same injection as `set_failure_hook`, for the skipped-row counter."""
+    global _skip_hook
+    _skip_hook = hook
+
+
 # --------------------------------------------------------------------------- ids and scalars
 
 def new_action_id() -> str:
@@ -99,12 +114,14 @@ def new_action_id() -> str:
 
 
 def as_action_id(value: Any) -> str:
-    """A valid UUID text is kept (lets ingest reuse its batch_id); anything else gets a fresh id."""
-    if value is not None:
+    """A valid UUID text is kept (lets ingest reuse its batch_id). Any other non-empty value maps to a
+    deterministic uuid5 of its text, so two paths deriving an action id from the same batch id (ingest and
+    its in-ingest resolver) agree; None / empty gets a fresh id."""
+    if value is not None and str(value) != "":
         try:
             return str(uuid.UUID(str(value)))
         except (ValueError, AttributeError, TypeError):
-            pass
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, str(value)))
     return new_action_id()
 
 
@@ -169,8 +186,21 @@ def diff_tracked(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> 
     return changes or None
 
 
+def _is_default_value(key: str, v: Any) -> bool:
+    """The column default a freshly created order carries (scheduled, not firmed, no segments)."""
+    if key == "planning_status":
+        return v == "scheduled"
+    if key == "manual_firmed":
+        return v is False
+    if key == "segments":
+        return not isinstance(v, bool) and v == 0
+    return False
+
+
 def snapshot_changes(row: Mapping[str, Any], *, op: str) -> dict:
-    """create -> ``{k: [None, v]}``; remove -> ``{k: [v, None]}``, for the non-null tracked keys of `row`."""
+    """create -> ``{k: [None, v]}``; remove -> ``{k: [v, None]}``, for the non-null tracked keys of `row`.
+    A create row also skips the default values (planning_status 'scheduled', manual_firmed False,
+    segments 0); a remove row keeps them (it is the order's last known state)."""
     if op not in ("create", "remove"):
         raise ValueError("snapshot_changes op must be 'create' or 'remove'")
     out: dict[str, list] = {}
@@ -180,6 +210,8 @@ def snapshot_changes(row: Mapping[str, Any], *, op: str) -> dict:
         v = _cmp_value(row[key])
         if v is None:
             continue
+        if op == "create" and _is_default_value(key, v):
+            continue            # a new order's defaults say nothing; saves ~70 B per create row
         out[key] = [None, v] if op == "create" else [v, None]
     return out
 
@@ -216,6 +248,18 @@ def _count_failure() -> None:
             pass
 
 
+def _count_skipped(n: int) -> None:
+    global _rows_skipped
+    _rows_skipped += n
+    log.debug("schedule_event: %d row(s) dropped for a missing plant or order id", n)
+    hook = _skip_hook
+    if hook is not None:
+        try:
+            hook(_rows_skipped)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def record(cur, ev: EventCtx | None, rows: Iterable[EventRow]) -> int:
     """Insert one schedule_event row per EventRow that has changes, via ONE unnest INSERT, and return the count.
 
@@ -228,7 +272,10 @@ def record(cur, ev: EventCtx | None, rows: Iterable[EventRow]) -> int:
     """
     if ev is None:
         return 0
-    kept = [r for r in rows if r is not None and r.changes and r.order_id and r.plant]
+    with_changes = [r for r in rows if r is not None and r.changes]
+    kept = [r for r in with_changes if r.order_id and r.plant]
+    if len(kept) != len(with_changes):
+        _count_skipped(len(with_changes) - len(kept))
     if not kept:
         return 0
     action_id = as_action_id(ev.action_id)

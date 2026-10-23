@@ -109,6 +109,17 @@ def test_snapshot_create_and_remove():
                                                   "segments": [2, None]}
 
 
+def test_snapshot_create_skips_default_values_but_remove_keeps_them():
+    row = {"machine": "L1", "planning_status": "scheduled", "manual_firmed": False, "segments": 0,
+           "order_quantity": 0}
+    assert snapshot_changes(row, op="create") == {"machine": [None, "L1"], "order_quantity": [None, 0]}
+    assert snapshot_changes(row, op="remove") == {
+        "machine": ["L1", None], "planning_status": ["scheduled", None], "manual_firmed": [False, None],
+        "segments": [0, None], "order_quantity": [0, None]}
+    held = {"planning_status": "needs_planning:runtime_unknown", "manual_firmed": True, "segments": 3}
+    assert set(snapshot_changes(held, op="create")) == {"planning_status", "manual_firmed", "segments"}
+
+
 def test_snapshot_rejects_modify():
     with pytest.raises(ValueError):
         snapshot_changes({"machine": "L1"}, op="modify")
@@ -123,6 +134,9 @@ def test_as_action_id_keeps_valid_uuid_and_replaces_garbage():
     for bad in ("not-a-uuid", "", None, 123):
         out = as_action_id(bad)
         assert str(uuid.UUID(out)) == out and out != bad
+    # a non-UUID batch id maps to the SAME action id every time; empty / None get a fresh one each call
+    assert as_action_id("batch-7") == as_action_id("batch-7") != as_action_id("batch-8")
+    assert as_action_id(None) != as_action_id(None) and as_action_id("") != as_action_id("")
 
 
 def test_op_vocabulary_avoids_destructive_words():
@@ -181,6 +195,22 @@ def test_record_savepoint_sequence_and_unknown_source_coerced():
     assert params["sources"] == ["unknown", "note"]
     assert params["changes"] == ['{"machine":["L1","L2"]}'] * 2
     assert params["actor"] == "a@example.com" and params["client_id"] == "c1"
+
+
+def test_record_counts_rows_dropped_for_missing_plant():
+    cur = FakeCur()
+    seen = []
+    events.set_skip_hook(seen.append)
+    before = events.rows_skipped()
+    try:
+        orphan = EventRow(plant="", order_id="o9", production_order=None, material_number=None,
+                          op="modify", changes={"machine": ["a", "b"]})
+        empty = EventRow(plant="", order_id="o8", production_order=None, material_number=None,
+                         op="modify", changes={})
+        assert record(cur, _ctx(), [orphan, empty, _row("o1")]) == 1
+    finally:
+        events.set_skip_hook(None)
+    assert events.rows_skipped() == before + 1 and seen == [before + 1]
 
 
 def test_record_swallows_insert_failure_rolls_back_savepoint_and_counts():

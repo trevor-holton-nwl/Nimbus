@@ -19,6 +19,8 @@ log = logging.getLogger("nimbus.schedule_events")
 # Mirror the history write-failure counter into DIAGNOSTICS (events.py is a leaf and cannot import it).
 DIAGNOSTICS.setdefault("schedule_event_write_failures", 0)
 events.set_failure_hook(lambda total: DIAGNOSTICS.__setitem__("schedule_event_write_failures", int(total)))
+DIAGNOSTICS.setdefault("schedule_event_rows_skipped", 0)
+events.set_skip_hook(lambda total: DIAGNOSTICS.__setitem__("schedule_event_rows_skipped", int(total)))
 
 # Identical text lives in migrations/2026-10-23-1-schedule-event.sql and the schema.sql mirror block;
 # tests/test_schedule_events.py pins the CREATE TABLE statement verbatim in all three places.
