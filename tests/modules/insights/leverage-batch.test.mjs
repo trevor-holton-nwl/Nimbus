@@ -113,21 +113,22 @@ test('compiled worker handles LEVERAGE_BATCH and matches runLeverageBatchSync', 
   assert.equal(Object.keys(posted[0].results[0].matrix.LL1).length, 4, 'days and lines reach computeUtilization');
 });
 
-test('Compute.leverageBatch falls back when the worker never answers', async t => {
+test('Compute.leverageBatch stops the worker and rejects with TimeoutError when it never answers (no main-thread rerun)', async t => {
   seed();
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const prior = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
-  globalThis.Worker = class { postMessage() {} };
+  const made = [];
+  globalThis.Worker = class { constructor() { made.push(this); } postMessage() {} terminate() { this.terminated = true; } };
   try {
     const { Compute: C } = await import('../../../frontend/insights/services.mjs?silentworker=1');
     const snap = buildPlantSnapshot('LP');
     const p = C.leverageBatch({ ...snap, dismissed: [], opts: { lines: null }, startMs: Date.now(), days: 2 },
       [{ key: 'k', setup: EMPTY }]);
-    await Promise.resolve();
+    const rejection = assert.rejects(p, { name: 'TimeoutError' });
     t.mock.timers.tick(31000);
-    const out = await p;
-    assert.equal(out[0].key, 'k');
-    assert.ok(out[0].matrix.LL1);
+    await rejection;
+    assert.equal(made.length, 1);
+    assert.equal(made[0].terminated, true);
   } finally {
     if (prior) Object.defineProperty(globalThis, 'Worker', prior); else delete globalThis.Worker;
   }

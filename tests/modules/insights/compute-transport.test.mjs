@@ -25,6 +25,7 @@ async function transport(t, constructorError = false) {
     postMessage(message) { this.sent.push(structuredClone(message)); }
     reply(index, data) { this.onmessage({ data: { id: this.sent[index].id, ...data } }); }
     crash() { this.onerror({ message: 'crash', filename: 'worker.js', lineno: 2 }); }
+    terminate() { this.terminated = true; }
   };
   t.after(() => {
     if (prior) Object.defineProperty(globalThis, 'Worker', prior);
@@ -38,8 +39,8 @@ async function transport(t, constructorError = false) {
   Store.replacePlants({}, 'test');
   for (const line of Object.keys(Store.lineSettings)) delete Store.lineSettings[line];
   Store.setMasterData({ plants: [], lines: [] }, 'test');
-  const { Compute } = await import(`../../../frontend/insights/services.mjs?transport=${++moduleId}`);
-  return { Compute, workers };
+  const mod = await import(`../../../frontend/insights/services.mjs?transport=${++moduleId}`);
+  return { Compute: mod.Compute, workers, mod };
 }
 
 test('worker is created lazily and reused by concurrent request types', async t => {
@@ -195,4 +196,92 @@ test('request snapshot remains detached from edits made while computation is in 
   assert.equal(workers[0].sent[0].payload.days, 3);
   workers[0].reply(0, { matrix: {} });
   await result;
+});
+
+// ---- Dedicated leverage worker (workload relief B) ----
+const levBase = mod => ({ ...mod.buildPlantSnapshot(null), dismissed: [], opts: { lines: null }, startMs: 0, days: 1 });
+
+test('a leverage batch gets its own worker, replies by its own id and terminates the worker', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  const p = Compute.leverageBatch(levBase(mod), []);
+  assert.equal(workers.length, 1);
+  assert.equal(workers[0].sent[0].type, 'LEVERAGE_BATCH');
+  assert.match(workers[0].url, /nimbus-worker\.js\?v=/);
+  workers[0].onmessage({ data: { id: workers[0].sent[0].id + 99, results: ['wrong'] } });   // someone else's id: ignored
+  assert.equal(workers[0].terminated, undefined);
+  workers[0].reply(0, { type: 'LEVERAGE_BATCH_RESULT', results: [{ key: 'k' }] });
+  assert.deepEqual(await p, [{ key: 'k' }]);
+  assert.equal(workers[0].terminated, true);
+  assert.equal(workers[0].onmessage, null);
+});
+
+test('an ALERTS request posted while a batch is pending goes to the shared worker and resolves', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  const batch = Compute.leverageBatch(levBase(mod), []);
+  const alerts = Compute.alerts();
+  assert.equal(workers.length, 2, 'leverage worker plus the shared worker');
+  assert.deepEqual(workers[0].sent.map(m => m.type), ['LEVERAGE_BATCH']);
+  assert.deepEqual(workers[1].sent.map(m => m.type), ['ALERTS']);
+  workers[1].reply(0, { alerts: [], elapsed: 1 });
+  await alerts;
+  assert.equal(workers[0].terminated, undefined, 'the pending batch is untouched');
+  workers[0].reply(0, { results: [] });
+  await batch;
+});
+
+test('timeout terminates only the leverage worker, rejects with TimeoutError and never reruns on the main thread', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  const shared = Compute.alerts();           // creates the shared worker first
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const batch = Compute.leverageBatch(levBase(mod), []);
+  const rejection = assert.rejects(batch, { name: 'TimeoutError' });   // a sync fallback would resolve []
+  t.mock.timers.tick(31000);
+  await rejection;
+  assert.equal(workers[1].terminated, true);
+  assert.equal(workers[0].terminated, undefined, 'shared worker survives');
+  assert.equal(Compute.available(), true);
+  workers[0].reply(0, { alerts: [], elapsed: 1 });
+  await shared;
+  const again = Compute.alerts();
+  assert.equal(workers.length, 2, 'no new shared worker: the shared worker slot was never touched');
+  workers[0].reply(1, { alerts: [] });
+  await again;
+  assert.equal(workers[1].onmessage, null, 'detached handler: a late reply from the terminated worker is a no-op');
+});
+
+test('an abort signal terminates the leverage worker and rejects with AbortError', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  const ctl = new AbortController();
+  const p = Compute.leverageBatch(levBase(mod), [], { signal: ctl.signal });
+  const rejection = assert.rejects(p, { name: 'AbortError' });
+  ctl.abort();
+  await rejection;
+  assert.equal(workers[0].terminated, true);
+  assert.equal(Compute.available(), true);
+  const pre = new AbortController(); pre.abort();
+  await assert.rejects(Compute.leverageBatch(levBase(mod), [], { signal: pre.signal }), { name: 'AbortError' });
+  assert.equal(workers.length, 1, 'an already-aborted signal never spawns a worker');
+});
+
+test('a leverage worker crash falls back to the synchronous core once and leaves the shared counters alone', async t => {
+  const { Compute, workers, mod } = await transport(t);
+  const p = Compute.leverageBatch(levBase(mod), []);
+  workers[0].crash();
+  assert.deepEqual(await p, [], 'sync core ran (empty variant list)');
+  assert.equal(workers[0].terminated, true);
+  assert.equal(Compute.available(), true, 'a leverage crash is not a shared-worker crash');
+  const a = Compute.alerts();
+  assert.equal(workers.length, 2);
+  workers[1].reply(0, { alerts: [] });
+  await a;
+});
+
+test('worker constructor failure and a missing Worker both use the synchronous core', async t => {
+  const failing = await transport(t, true);
+  assert.deepEqual(await failing.Compute.leverageBatch(levBase(failing.mod), []), []);
+  delete globalThis.Worker;
+  const none = await transport(t);
+  delete globalThis.Worker;
+  assert.deepEqual(await none.Compute.leverageBatch(levBase(none.mod), []), []);
+  assert.equal(none.workers.length, 0);
 });
