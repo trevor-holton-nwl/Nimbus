@@ -793,6 +793,8 @@ def _run_lifespan(monkeypatch, *, poll_seconds, sync_enabled=False):
         for name in dir(mod):
             if name.startswith("ensure_"):
                 monkeypatch.setattr(mod, name, lambda *a, **k: None)
+    monkeypatch.setattr(brain.schedule_events_data, "ensure_schedule_event_table", lambda: None)
+    monkeypatch.setattr(brain, "ensure_alert_profile_tables", lambda: None)
     monkeypatch.setattr(brain, "_migrate_audit_log", lambda: None)
     monkeypatch.setattr(brain.plcache, "load_priority_lists", lambda: None)
     monkeypatch.setattr(brain.db, "get_health_stats", lambda: {"total_orders": 0, "connected": True})
@@ -812,15 +814,34 @@ def _run_lifespan(monkeypatch, *, poll_seconds, sync_enabled=False):
     return seen["jobs"], seen["created"]
 
 
-def test_lifespan_registers_staging_poll_job_when_interval_set(monkeypatch):
-    pytest.importorskip("apscheduler")      # pinned in requirements.txt; absent from some dev venvs
-    jobs, created = _run_lifespan(monkeypatch, poll_seconds=30)
-    assert created and jobs == ["sap:staging-poll"]
-
-
-def test_lifespan_has_no_scheduler_when_poll_and_sync_are_off(monkeypatch):
+def test_lifespan_always_builds_scheduler_with_sweep_jobs(monkeypatch):
+    pytest.importorskip("apscheduler")
     jobs, created = _run_lifespan(monkeypatch, poll_seconds=0)
-    assert not created and jobs == []
+    assert created
+    assert "nimbus:schedule-event-sweep" in jobs and "nimbus:schedule-event-sweep:boot" in jobs
+    assert "sap:staging-poll" not in jobs
+
+
+def test_lifespan_registers_staging_poll_and_sweep_when_interval_set(monkeypatch):
+    pytest.importorskip("apscheduler")      # pinned in requirements.txt; absent from some dev venvs
+    jobs, created = _run_lifespan(monkeypatch, poll_seconds=5)
+    assert created
+    assert {"sap:staging-poll", "nimbus:schedule-event-sweep"} <= set(jobs)
+
+
+def test_run_schedule_event_sweep_offloads_and_never_raises(monkeypatch):
+    import asyncio
+    calls = []
+    monkeypatch.setattr(brain.schedule_events_data, "sweep_schedule_events",
+                        lambda: calls.append(1) or {"deleted": 0, "chunks": 1, "retention_days": 14,
+                                                    "locked": False, "error": None})
+    asyncio.run(brain._run_schedule_event_sweep())
+    assert calls == [1]
+
+    def boom():
+        raise RuntimeError("x")
+    monkeypatch.setattr(brain.schedule_events_data, "sweep_schedule_events", boom)
+    asyncio.run(brain._run_schedule_event_sweep())  # must not raise
 
 
 @pytest.mark.parametrize("result", [

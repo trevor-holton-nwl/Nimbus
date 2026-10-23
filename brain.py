@@ -281,6 +281,17 @@ async def _run_sap_staging_poll() -> None:
         _log_event("error", "sap_staging", "Scheduled staging poll raised", exc=e)
 
 
+async def _run_schedule_event_sweep() -> None:
+    """APScheduler job body for the daily schedule_event retention sweep. `sweep_schedule_events` is
+    blocking and never raises; offloaded to the threadpool. This wrapper also never raises."""
+    from fastapi.concurrency import run_in_threadpool
+    try:
+        result = await run_in_threadpool(schedule_events_data.sweep_schedule_events)
+        _log_event("warn" if result.get("error") else "info", "schedule_events", "sweep finished", **result)
+    except Exception as e:
+        _log_event("error", "schedule_events", "sweep raised", exc=e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs(COLOR_WHEEL_DIR, exist_ok=True)
@@ -335,52 +346,69 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         _log_event("error", "startup", "DB probe failed at startup", error=str(e))
 
-    # SAP background sync scheduler — DISABLED by default (see SAP_SYNC_ENABLED).
-    # When enabled, register one cron job per enabled+scheduled SAP object. APScheduler
-    # is imported lazily so it is only a hard dependency when the feature is on.
+    # Background scheduler: ALWAYS built (the schedule_event retention sweep needs it). The SAP per-object
+    # cron jobs stay behind SAP_SYNC_ENABLED and the staging poll behind SAP_STAGING_POLL_SECONDS > 0.
+    # The attribute name sap_scheduler is kept: integration/routes.py looks up "sap:<key>" jobs on it.
     app.state.sap_scheduler = None
-    # The scheduler object also exists when only the staging poll is on
-    # (NIMBUS_SAP_STAGING_POLL_SECONDS > 0); the per-object cron jobs stay under SAP_SYNC_ENABLED.
-    if SAP_SYNC_ENABLED or SAP_STAGING_POLL_SECONDS > 0:
-        try:
-            from apscheduler.schedulers.asyncio import AsyncIOScheduler
-            from apscheduler.triggers.cron import CronTrigger
-            from apscheduler.triggers.interval import IntervalTrigger
-            scheduler = AsyncIOScheduler()
-            jobs = sap_sync.list_enabled_jobs() if SAP_SYNC_ENABLED else []
-            for job in jobs:
-                object_key = job["object_key"]
-                scheduler.add_job(
-                    _run_sap_job,
-                    CronTrigger.from_crontab(job["schedule_cron"]),
-                    args=[object_key],
-                    id="sap:" + object_key,
-                    max_instances=1,
-                    coalesce=True,
-                    replace_existing=True,
-                )
-            if SAP_STAGING_POLL_SECONDS > 0:
-                scheduler.add_job(
-                    _run_sap_staging_poll,
-                    IntervalTrigger(seconds=SAP_STAGING_POLL_SECONDS),
-                    id="sap:staging-poll",
-                    max_instances=1,
-                    coalesce=True,
-                    replace_existing=True,
-                )
-            scheduler.start()
-            app.state.sap_scheduler = scheduler
-            if SAP_SYNC_ENABLED:
-                _log_event("info", "sap_sync", "SAP sync scheduler started", jobs=len(jobs))
-            else:
-                _log_event("info", "sap_sync", "SAP sync scheduler disabled (NIMBUS_SAP_SYNC_ENABLED not set)")
-            if SAP_STAGING_POLL_SECONDS > 0:
-                _log_event("info", "sap_staging", "SAP staging poll started",
-                           interval_seconds=SAP_STAGING_POLL_SECONDS)
-        except Exception as e:
-            _log_event("error", "sap_sync", "SAP scheduler failed to start", exc=e)
-    else:
-        _log_event("info", "sap_sync", "SAP sync scheduler disabled (NIMBUS_SAP_SYNC_ENABLED not set)")
+    try:
+        from datetime import datetime, timedelta, timezone
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.date import DateTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
+        scheduler = AsyncIOScheduler()
+        jobs = sap_sync.list_enabled_jobs() if SAP_SYNC_ENABLED else []
+        for job in jobs:
+            object_key = job["object_key"]
+            scheduler.add_job(
+                _run_sap_job,
+                CronTrigger.from_crontab(job["schedule_cron"]),
+                args=[object_key],
+                id="sap:" + object_key,
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
+        if SAP_STAGING_POLL_SECONDS > 0:
+            scheduler.add_job(
+                _run_sap_staging_poll,
+                IntervalTrigger(seconds=SAP_STAGING_POLL_SECONDS),
+                id="sap:staging-poll",
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
+        # Daily schedule_event retention sweep + a one-shot run 60 s after boot (never inline: a
+        # backlog must not delay readiness).
+        scheduler.add_job(
+            _run_schedule_event_sweep,
+            IntervalTrigger(hours=24),
+            id="nimbus:schedule-event-sweep",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            _run_schedule_event_sweep,
+            DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=60)),
+            id="nimbus:schedule-event-sweep:boot",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+        scheduler.start()
+        app.state.sap_scheduler = scheduler
+        if SAP_SYNC_ENABLED:
+            _log_event("info", "sap_sync", "SAP sync scheduler started", jobs=len(jobs))
+        else:
+            _log_event("info", "sap_sync", "SAP sync scheduler disabled (NIMBUS_SAP_SYNC_ENABLED not set)")
+        if SAP_STAGING_POLL_SECONDS > 0:
+            _log_event("info", "sap_staging", "SAP staging poll started",
+                       interval_seconds=SAP_STAGING_POLL_SECONDS)
+        _log_event("info", "schedule_events", "schedule_event retention sweep scheduled",
+                   interval_hours=24, first_run_seconds=60)
+    except Exception as e:
+        _log_event("error", "startup", "Background scheduler failed to start", exc=e)
     if SAP_STAGING_POLL_SECONDS <= 0:
         _log_event("info", "sap_staging", "SAP staging poll disabled (NIMBUS_SAP_STAGING_POLL_SECONDS not set)")
 
@@ -780,6 +808,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/{table}/delete-filtered": "master_data.delete_filtered",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
+    "/maintenance/schedule-event-sweep": "maintenance.schedule_event_sweep",
 }
 
 _ADMIN_TARGET_PARAMS = frozenset({"plant", "machine", "override_id", "table", "column", "object", "username", "batch_id", "archive_id"})
