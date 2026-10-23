@@ -82,3 +82,5 @@ Run: `node --test tests/modules/calendar/*.test.mjs`
 
 
 **Deferred hydration race (review R-PLN-001):** Hours edits carry per-plant/per-machine revisions (`''` is the plant-hours key). A calendar GET captures its start revision and pending keys. Hydration leaves queued, in-flight, failed, and subsequently edited hours intact, including when the POST acknowledges before the older GET body arrives. A successful POST clears only its own revision; failed edits remain protected and use the existing Retry action. Unrelated lines/plants still hydrate. Migration does not silently resubmit failed/pending hour edits. `calendar-hydration-races.test.mjs` exercises real SandboxAdapter-before-queue subscription ordering on discard/promotion.
+
+- **`activePeriodOn(periods, dayKey)` (2026-10-23)** in `calendar-periods.mts`: the period covering a day key (inclusive bounds, null validTo open-ended, earliest validFrom wins), the same rule as compute-core `activeWorkHours`. Leaf helper (no Store, no DOM); `Store.activeLineHoursOn` and the Machines pane use it.

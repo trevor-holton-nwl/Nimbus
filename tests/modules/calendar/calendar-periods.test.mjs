@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   periodStatus, summarizeWeek, validatePeriodDraft, periodWarnings,
-  buildPeriodStrip, buildBlackoutMarks, buildDefaultSegments, nextPeriodDefaults, addDaysKey, dayIndex,
+  buildPeriodStrip, buildBlackoutMarks, buildDefaultSegments, nextPeriodDefaults, addDaysKey, dayIndex, activePeriodOn,
 } from '../../../frontend/calendar/calendar-periods.mjs';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -286,4 +286,17 @@ test('buildDefaultSegments: a period wholly older than the clipped axis is drawn
   const strip = buildPeriodStrip([per('old', '2020-01-01', '2020-06-30'), per('x', '2026-11-01', '2026-11-05')], '2026-10-16');
   const sum = [...strip.segments, ...buildDefaultSegments(strip)].reduce((n, s) => n + s.widthPct, 0);
   assert.ok(Math.abs(sum - 100) < 1e-6);
+});
+
+test('activePeriodOn: inclusive bounds, open-ended, earliest validFrom wins, null for none', () => {
+  const a = per('a', '2026-10-10', '2026-10-20');
+  const b = per('b', '2026-10-21', null);
+  assert.equal(activePeriodOn([a, b], '2026-10-09'), null);
+  assert.equal(activePeriodOn([a, b], '2026-10-10').id, 'a');
+  assert.equal(activePeriodOn([a, b], '2026-10-20').id, 'a');
+  assert.equal(activePeriodOn([a, b], '2026-10-21').id, 'b');
+  assert.equal(activePeriodOn([a, b], '2099-01-01').id, 'b');
+  assert.equal(activePeriodOn([b, per('c', '2026-10-01', null)], '2026-10-22').id, 'c', 'earliest validFrom wins on overlap');
+  assert.equal(activePeriodOn(undefined, '2026-10-22'), null);
+  assert.equal(activePeriodOn([], '2026-10-22'), null);
 });

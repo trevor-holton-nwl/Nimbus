@@ -1901,11 +1901,34 @@ function withInheritEnv(fn) {
 
 test('ProdLines detail: an inherited machine shows no badge, only "Follows plant calendar"; pills read the plant week', () => withInheritEnv(({ body }) => {
   ProdLines._renderDetail('A1');
-  assert.ok(body.innerHTML.includes('ui.follows_plant_calendar'));
+  assert.ok(body.innerHTML.includes('ui.follows_plant_default'));
   assert.ok(!body.innerHTML.includes('ui.custom_hours'), 'no Custom hours badge');
   assert.ok(!body.innerHTML.includes('reset-calendar'), 'nothing to reset');
   assert.ok(body.innerHTML.includes('7am–7pm'), 'the pills show the plant week, not the all-day seed');
   assert.ok(!body.innerHTML.includes('12am–12am'));
+}));
+
+test('ProdLines detail: an inherited machine under an active period shows the period pattern and names it', () => withInheritEnv(({ body, week }) => {
+  Store.setPlantPeriods('PD', [{ id: 'p1', name: '24x4', validFrom: '2020-01-01', validTo: null, workHours: week([0, 24]) }], 'test');
+  ProdLines._renderDetail('A1');
+  assert.ok(body.innerHTML.includes('ui.follows_plant_period'), 'the note names the period');
+  assert.ok(!body.innerHTML.includes('ui.follows_plant_default'));
+  assert.ok(body.innerHTML.includes('12am–12am'), 'pills show the period pattern');
+  assert.ok(!body.innerHTML.includes('7am–7pm'));
+}));
+
+test('ProdLines detail: an inherited machine with no period active says Default calendar', () => withInheritEnv(({ body, week }) => {
+  Store.setPlantPeriods('PD', [{ id: 'p1', name: 'Later', validFrom: '2099-01-01', validTo: null, workHours: week([0, 24]) }], 'test');
+  ProdLines._renderDetail('A1');
+  assert.ok(body.innerHTML.includes('ui.follows_plant_default'));
+  assert.ok(body.innerHTML.includes('7am–7pm'));
+}));
+
+test('ProdLines detail: an override narrowed by the active period reads Capped by (period name)', () => withInheritEnv(({ body, week }) => {
+  Store.setPlantPeriods('PD', [{ id: 'p1', name: 'Short', validFrom: '2020-01-01', validTo: null, workHours: week([8, 12]) }], 'test');
+  ProdLines._renderDetail('A2');
+  assert.ok(body.innerHTML.includes('ui.capped_by_plant_period'));
+  assert.ok(body.innerHTML.includes('8am–12pm'), 'pills show the intersection');
 }));
 
 test('ProdLines detail: an override gets the Custom hours badge, a Reset button (admin only) and the limited-by-plant hint', () => withInheritEnv(({ body }) => {
@@ -1944,6 +1967,15 @@ test('Reset to plant does nothing for a non-admin', () => withInheritEnv(({ body
   assert.equal(Store.calendars.A2.inherited, false);
   assert.equal(saves.length, 0);
   assert.equal(toasts.length, 0);
+}));
+
+test('Plant roster pills read the active period pattern for an inherited machine', () => withInheritEnv(({ roster, week }) => {
+  Store.setPlantPeriods('PD', [{ id: 'p1', name: '24x4', validFrom: '2020-01-01', validTo: null, workHours: week([0, 24]) }], 'test');
+  Plant._renderRoster();
+  const rows = roster.innerHTML.split('<tr style="border-bottom').slice(1);
+  const a1 = rows.find(r => r.includes('A1'));
+  assert.ok(a1.includes('12am–12am'));
+  assert.ok(!a1.includes('7am–7pm'));
 }));
 
 test('Plant roster flags cell marks only the machine with its own hours', () => withInheritEnv(({ roster }) => {

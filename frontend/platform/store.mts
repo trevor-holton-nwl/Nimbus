@@ -20,6 +20,7 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast } from './foundation.mjs';
 import { Selection } from '../scheduling/selection.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
+import { activePeriodOn } from '../calendar/calendar-periods.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, SetupSnapshot, StoreEventType, StoreMode, OrderScheduleSegment, PlantCalendarEntry, PlantPeriod } from './types.mjs';
 
 // -- Local type declarations (Phase 2 conversion; scoped to this file) ------
@@ -141,6 +142,13 @@ Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Stor
 /** Events that cannot change any input of Utilization.computeMatrix (tasks, line settings, calendars, plants,
  *  blocks, plant blocks, master data, setup snapshot, selected plant). They bump rev() but not dataRev(). */
 const DATA_REV_EXCLUDED: ReadonlySet<string> = new Set(['alerts:change', 'lines:selected', 'distribution:summary', 'undo:pushed', 'settings:change']);
+
+export interface ActiveLineHours {
+  workHours: WorkHours;
+  /** 'period' = a dated plant period covers the day; 'default' = the plant's default week; 'none' = no plant resolves. */
+  source: 'period' | 'default' | 'none';
+  period: PlantPeriod | null;
+}
 
 export const Store = {
   /** ONE clock (backward scheduling OQ52): the server's instant minus this browser's `Date.now()`,
@@ -616,6 +624,31 @@ export const Store = {
     if (entry && !entry.inherited) return entry.workHours;
     const plant = this.getPlantForLine(line);
     return (plant ? this._state.plants[plant]?.workHours : undefined) ?? this._defaultShiftWeek();
+  },
+  /** The hours a line actually works on `date` (default: today on the plant clock), with where they come from.
+   *  An inherited line shows the plant pattern active that day (the dated period when one covers it, else the
+   *  default week); an override is intersected with that pattern per weekday, the same math as the compute
+   *  core's workWindow. For DISPLAY (Machines pane); scheduling readers keep using the raw `calendars`. */
+  activeLineHoursOn(line: string, date?: Date): ActiveLineHours {
+    const own = this._state.calendars[line];
+    const override = own && !own.inherited ? own.workHours : null;
+    const plant = this.getPlantForLine(line);
+    if (!plant) return { workHours: override ?? this._defaultShiftWeek(), source: 'none', period: null };
+    const entry = this._state.plants[plant];
+    const d = date ?? this.plantNow(plant) ?? new Date();
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const period = activePeriodOn(entry?.periods, key);
+    const pattern = period ? period.workHours : (entry?.workHours ?? this._defaultShiftWeek());
+    const source = period ? 'period' : 'default';
+    if (!override) return { workHours: pattern, source, period };
+    const week: WorkHours = {};
+    for (let dow = 0; dow < 7; dow++) {
+      const a = override[dow], b = pattern[dow];
+      if (!a || !b) { week[dow] = null; continue; }
+      const s = Math.max(a[0], b[0]), e = Math.min(a[1], b[1]);
+      week[dow] = s < e ? [s, e] : null;
+    }
+    return { workHours: week, source, period };
   },
   addBlock(block: NimbusBlock, source?: string): void {
     if (Config.DEBUG_BLOCKS) console.trace('[addBlock]', { source, block });

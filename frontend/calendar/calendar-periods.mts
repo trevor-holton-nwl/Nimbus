@@ -91,6 +91,16 @@ export function keyToDate(key: string): Date {
   return new Date(y, m - 1, d);
 }
 
+/** The dated period covering `dayKey` (YYYY-MM-DD), or null. Same rule as the compute core's activeWorkHours:
+ *  validFrom <= key <= validTo (null = open-ended); the earliest validFrom wins. */
+export function activePeriodOn(periods: PlantPeriod[] | undefined | null, dayKey: string): PlantPeriod | null {
+  let best: PlantPeriod | null = null;
+  for (const p of periods ?? []) {
+    if (p.validFrom <= dayKey && (p.validTo == null || dayKey <= p.validTo) && (!best || p.validFrom < best.validFrom)) best = p;
+  }
+  return best;
+}
+
 /** Where a period sits relative to today: not started yet, finished, or covering today. */
 export function periodStatus(p: { validFrom: string; validTo: string | null }, todayKey: string): PeriodStatus {
   if (p.validFrom > todayKey) return 'upcoming';
