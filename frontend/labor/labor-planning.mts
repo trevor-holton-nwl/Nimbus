@@ -262,7 +262,7 @@ export const LaborPlanning = (() => {
       inp.dataset.savedValue = savedValue;
     });
     if (grid) _updateAggrTotals(grid);
-    _renderKPIs(plant);
+    void _renderKPIs(plant);
   }
 
   function _edit(plant: string, cells: LaborAggrCellPayload[], lineCells: LaborLineCellPayload[], label: string, submission?: LaborInputSubmission): Promise<boolean> {
@@ -392,14 +392,18 @@ export const LaborPlanning = (() => {
       (!Store.selectedLines.size || Store.selectedLines.has(l.machine)));
   }
 
-  function _renderKPIs(plant: string | null): void {
+  let _kpiGen = 0;
+  async function _renderKPIs(plant: string | null): Promise<void> {
+    const gen = ++_kpiGen;
     const strip = document.getElementById('labor-kpi-strip');
     if (!strip || !plant) { if (strip) strip.innerHTML = ''; return; }
 
     let totalAvail = 0;
     const horizonStart = _weeks[0]?.monday || new Date();
     const horizonDays  = _horizonSpan * 7;
-    const matrix: LaborUtilMatrix = Utilization.computeMatrix(horizonStart, horizonDays);
+    // Off the main thread (cached after the first call). A newer KPI pass or a plant switch while it ran wins.
+    const matrix: LaborUtilMatrix = await Utilization.computeMatrixAsync(horizonStart, horizonDays);
+    if (gen !== _kpiGen || Store.selectedPlant !== plant) return;
     const plantLines = _visibleLines(plant).map(r => r.machine);
     let totalRequired = 0;
     plantLines.forEach((line) => {
@@ -673,7 +677,8 @@ export const LaborPlanning = (() => {
     });
 
     const horizonStart = _weeks[0].monday;
-    const utilMatrix: LaborUtilMatrix = Utilization.computeMatrix(horizonStart, _horizonSpan * 7);
+    const utilMatrix: LaborUtilMatrix = await Utilization.computeMatrixAsync(horizonStart, _horizonSpan * 7);
+    if (renderGen !== _plantSwitchGeneration) return;   // a newer render started while the matrix computed
     const isDark = document.body.classList.contains('dark');
     function lerpRGB(a: string, b: string, t: number): string {
       const p = (h: string) => [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
@@ -830,7 +835,8 @@ export const LaborPlanning = (() => {
     if (!lines.length) { container.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.t('empty.no_machine_plant')}</div>`; return; }
 
     const horizonStart = _weeks[0].monday;
-    const utilMatrix: LaborUtilMatrix = Utilization.computeMatrix(horizonStart, _horizonSpan * 7);
+    const utilMatrix: LaborUtilMatrix = await Utilization.computeMatrixAsync(horizonStart, _horizonSpan * 7);
+    if (renderGen !== _plantSwitchGeneration) return;   // a newer render started while the matrix computed
     const displayDays  = _horizonSpan * 7;
     const days: Array<{ date: Date; dayKey: string }> = [];
     for (let i = 0; i < displayDays; i++) {
@@ -893,7 +899,8 @@ export const LaborPlanning = (() => {
     const lines = _visibleLines(plant)
       .map((l) => l.machine);
     const horizonStart = _weeks[0].monday;
-    const utilMatrix: LaborUtilMatrix = Utilization.computeMatrix(horizonStart, _horizonSpan * 7);
+    const utilMatrix: LaborUtilMatrix = await Utilization.computeMatrixAsync(horizonStart, _horizonSpan * 7);
+    if (renderGen !== _plantSwitchGeneration) return;   // a newer render started while the matrix computed
     const exceptions: LaborException[] = [];
     lines.forEach((line) => {
       const lm = utilMatrix[line]; if (!lm) return;
@@ -1085,7 +1092,8 @@ export const LaborPlanning = (() => {
       if (_refreshPlants.delete(plant)) delete _aggrData[plant];
       await Promise.all([_fetchAggregate(plant), _fetchLines(plant, null)]);
       if (renderGen !== _plantSwitchGeneration) return;
-      _renderKPIs(plant);
+      await _renderKPIs(plant);
+      if (renderGen !== _plantSwitchGeneration) return;
       if (sub === 'aggregate') await _renderAggregate(plant, renderGen);
       else if (sub === 'line-plan') await _renderLinePlan(plant, renderGen);
       else if (sub === 'capacity') await _renderCapacity(plant, renderGen);
