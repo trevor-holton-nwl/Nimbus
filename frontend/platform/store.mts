@@ -186,6 +186,8 @@ export const Store = {
   _siblingsByParent: new Map<string, NimbusTask[]>(),
   // Set by emit() on first mutation; read by rev(). Same reasoning as above.
   _rev: 0,
+  // Last emitted event, for the ErrorLog 'platform' state provider (tail of this module).
+  _lastEvent: null as { type: string; source?: string; revision: number; ts: number } | null,
 
   setAllowedPlantsResolver(fn: AllowedPlantsResolver): void { _allowedPlantsResolver = typeof fn === 'function' ? fn : () => null; },
   setSettingsDefaultsResolver(fn: SettingsDefaultsResolver): void { _settingsDefaultsResolver = typeof fn === 'function' ? fn : () => ({}); },
@@ -394,9 +396,14 @@ export const Store = {
     // revision/mode are additive — existing listeners that only read
     // evt.type/evt.source/etc. are unaffected.
     const enriched: StoreEvent = { ...event, revision: this._rev, mode: this.mode() };
+    this._lastEvent = { type: enriched.type, source: typeof enriched.source === 'string' ? enriched.source : undefined, revision: this._rev, ts: Date.now() };
     for (const l of this._listeners) {
       const _t = performance.now();
-      try { l(enriched); } catch (e) { console.error('[Store] listener error:', e); }
+      try { l(enriched); } catch (e) {
+        ErrorLog.error('store', 'listener error: ' + (e instanceof Error ? e.message : String(e)),
+          { event: enriched.type, source: enriched.source, listener: l._pmLabel || l.name || '?' },
+          { stack: e instanceof Error ? e.stack : undefined, errorCode: 'store.listener' });
+      }
       finally { PerfMonitor.record('store:' + (l._pmLabel || l.name || '?'), performance.now() - _t); }
     }
   },
@@ -1218,3 +1225,14 @@ export const UndoStack = {
     }
   },
 };
+
+// Snapshot attached to error-level ErrorLog entries (ctx.state.platform).
+try {
+  ErrorLog.registerStateProvider('platform', () => ({
+    plant: Store.selectedPlant,
+    selectedLines: Store.selectedLines.size,
+    lastEvent: Store._lastEvent,
+    rev: Store.rev(),
+    mode: Store.mode()
+  }));
+} catch { /* ErrorLog unavailable: skip the provider */ }

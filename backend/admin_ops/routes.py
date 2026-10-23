@@ -261,7 +261,7 @@ def get_backend_logs(level: str | None = None, limit: int = 200,
                      category: str | None = None, since: str | None = None,
                      q: str | None = None, offset: int = 0,
                      rid: str | None = None, outcome: str | None = None,
-                     event: str | None = None):
+                     event: str | None = None, user: str | None = None):
     """
     Return recent backend events from the in-memory ring buffer, newest first.
 
@@ -273,6 +273,7 @@ def get_backend_logs(level: str | None = None, limit: int = 200,
       ?rid=       exact request ID correlation match
       ?outcome=   exact terminal outcome (success|rejected|failure)
       ?event=     exact structured event name (for example, orders.upload)
+      ?user=      exact user: frontend entries' `user` OR admin-action `ctx.actor`
     Paging: ?offset= (rows to skip) + ?limit= (cap). `total` is the full filtered
     count (pre-paging) so the viewer can show "showing N of total".
     """
@@ -297,6 +298,13 @@ def get_backend_logs(level: str | None = None, limit: int = 200,
         entries = [e for e in entries if e.get("outcome") == outcome]
     if event:
         entries = [e for e in entries if e.get("event") == event]
+    if user:
+        # Frontend entries carry a top-level `user`; admin-action events carry
+        # the acting user in ctx["actor"] (see _log_admin_action).
+        entries = [e for e in entries
+                   if e.get("user") == user
+                   or e.get("actor") == user
+                   or (e.get("ctx") or {}).get("actor") == user]
     total = len(entries)
     if offset:
         entries = entries[offset:]
@@ -407,7 +415,7 @@ async def ingest_csp_report(request: Request):
 
 
 @router.post("/logs/frontend")
-def ingest_frontend_logs(payload: dict = Body(default={})):
+def ingest_frontend_logs(request: Request, payload: dict = Body(default={})):
     """
     Best-effort sink for browser-side ErrorLog entries. No auth (it is a log
     sink), but size-bounded: at most 50 entries per batch, stack ≤ 8 KB, msg ≤
@@ -416,7 +424,8 @@ def ingest_frontend_logs(payload: dict = Body(default={})):
     rid/error_code/stack/level.
 
     Body: { entries: [ { ts, level, scope, msg, errorCode?, reqId?, stack?,
-            buildId?, sessionId?, plant?, route?, ctx? } ] }
+            buildId?, sessionId?, plant?, route?, user?, ctx? } ] }
+    `user` falls back to the `x-user-email` request header when absent.
     Returns: { status:'ok', accepted: N }
     """
     raw_entries = payload.get("entries") or []
@@ -439,6 +448,9 @@ def ingest_frontend_logs(payload: dict = Body(default={})):
             "msg":      _truncate(raw.get("msg"), _FE_MAX_MSG) or "",
             "source":   "frontend",
         }
+        user = raw.get("user") or request.headers.get("x-user-email")
+        if user:
+            entry["user"] = str(user)[:128]
         rid = raw.get("reqId") or raw.get("rid")
         if rid:
             entry["rid"] = str(rid)

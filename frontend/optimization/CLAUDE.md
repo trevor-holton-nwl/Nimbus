@@ -108,3 +108,5 @@ Historical placement tests use `scheduledPatches` to inspect admitted production
 - **Alerts Fix (`autoReflow`) uses the plant segment floor and the plant default setup minutes.**
 - **Runtime reconcile charges plant default setup minutes**, except for Undo (reason `'undo'`), which stays exact.
 - **Known, deliberate gap.** Detached SPT does not reorder for setup coverage. An uncovered-first order is refused at that position and placed later by `fillPlanningGaps`. This is the `todo` case in `tests/modules/optimization/order-rules-matrix.test.mjs`.
+
+- **ErrorLog state provider (2026-10-23).** `optimize-ui.mts` registers an `optimization` provider at its foot: `{bgRun: !!OptimizerPreview._backgroundRun, plant: OptimizerPreview._backgroundRun?.plant ?? null}`. It runs only on error-level log pushes; keep it to plain reads.

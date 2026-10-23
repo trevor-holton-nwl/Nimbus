@@ -28,6 +28,7 @@ import { Table, Inspector, notifyResidualFirming } from '../scheduling/orders.mj
 import { Selection } from '../scheduling/selection.mjs';
 import { categoryOf, ackLabel, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
 import { AlertProfileMatches } from './alert-profile-matches.mjs';
+import { ToastLogTab } from './toast-log-tab.mjs';
 import type { NimbusTask, UtilSevBucket } from '../platform/types.mjs';
 
 // VirtualList row-height constant for Dashboard's Line Status list (moved
@@ -110,6 +111,7 @@ export const Dashboard = {
 
   _renderDebounced: null as ReturnType<typeof setTimeout> | null,
   init(): void {
+    ToastLogTab.init();
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected') {
         Dashboard._lsDayKey = null;
@@ -1563,6 +1565,7 @@ export const AlertsUIAdapter = {
     if (!d) return;
     const isOpen = d.classList.toggle('open');
     if (isOpen) {
+      ToastLogTab.activate('alerts');
       AlertsUIAdapter.renderDrawer();
       d.querySelector<HTMLElement>('.drawer-head button')?.focus();
       d.onkeydown = e => {
