@@ -71,3 +71,16 @@ An Opus deep-dive (plan `are-there-any-new-generic-cook.md`) found that no new w
 - The leverage reply is accepted only as `LEVERAGE_BATCH_RESULT` with an array `results`; anything else rejects (then sync fallback). Removed `'LEVERAGE_BATCH'` from `_post`'s union and the always-undefined `jobId` log field; doc comment lists the real fallback cases.
 - Tests added: ERROR reply, postMessage throw, late reply after timeout, abort/timeout after success are no-ops, crash latch, malformed reply (compute-transport); plant change starts the new run, `alerts:change` aborts, signal passes through `analyzeLeverage`/`replayWithMinutes` (pane/leverage tests).
 - Deferred follow-up: each typed-minutes key starts its own worker (a replay per key); fold into one batch together with the deferred scores-only reply.
+
+### Wave C fix wave (Opus validator, 2026-10-23; same branch, after merging `feature/workload-relief-fe-b`)
+- F0: merged `feature/workload-relief-fe-b` (merge commit; both ledgers kept, gate re-run green on the merged tree).
+- F1 stale replies: a reply the data moved under is re-posted once (no main-thread compute); `computeMatrixAsync(start, days, { syncFallback })`: `false` (used by `_prewarm` and Confidence; the breakdown tries it and then computes synchronously because a user clicked) rejects with a named error (`UtilizationStale`, `UtilizationTimeout`, `UtilizationWorkerError`, `UtilizationMalformed`) instead of computing; default `true` keeps the sync fallback for Labor. Confidence resets `_lastRev` on a non-stale failure so the next call retries.
+- F2 timeout budget 3 s -> 20 s; a late reply is cached if dataRev and plant still match.
+- F3 worker line set: the UTILIZATION payload carries `lines` = task lines + plant lines (the sync set); real-core parity test (worker vs sync, idle line with no orders and no calendar entry). The golden `_snap` payload test now lists `lines`.
+- F4 slicing requires the cached day instants to equal a fresh walk (DST at midnight => clean miss); subprocess test under TZ=America/Santiago (`tests/modules/helpers/utilization-dst-probe.mjs`).
+- F5 queue: merge only overlapping or adjacent windows; separate FIFO jobs otherwise (max 4; a full queue settles the new waiter like a stale one).
+- F6 `finish` catches: an exception while settling rejects the waiters, always resolves the in-flight promise and pumps the queue; joiners re-enqueue instead of hanging; test with a throwing `PerfMonitor.record`.
+- F7 I13 test now asserts a cache entry starting at plant-today exists after `NeedsEngine._readState()`. Deviation: `days >= 7`, not `=== 7`: after Confidence fills the 14-day window the 7-day read is a slice of it and (correctly) creates no new entry.
+- F9/F10 docs: calendar CLAUDE.md/AGENTS.md, CALENDAR_PERIODS_DESIGN.md, the store.mts comment and insights CLAUDE.md corrected (cache keyed on `dataRev()`; slice and parity claims).
+- F11 Labor `_renderKPIs` on the save path has a `.catch` (clears the strip, logs).
+- F12 `Dashboard._lsStep` now calls `Utilization.computeMatrix(plantClock, 7)` (a cache hit); `Dashboard._matrix7Cache` and the stale-cache W6 test are removed (the stepping test stubs `computeMatrix`).

@@ -308,8 +308,8 @@ export const Store = {
    *  as `setLastOptimize` above. `Store.subscribe` has one subscriber with no
    *  event-type filter (`Persistence.autosave`, application-shell.mts), so any
    *  emit here would schedule a full localStorage cache write and bump
-   *  `Store._rev` (invalidating `Utilization._cache`, whose memo key includes
-   *  `rev()`) on every rank load — including one per Optimize-dialog open and
+   *  `Store._rev` and `dataRev()` (a non-excluded event would evict the shared
+   *  utilization cache, which is keyed on `dataRev()`) on every rank load — including one per Optimize-dialog open and
    *  one per Scheduling Constraints render, neither of which changes any
    *  schedule data. Nothing subscribes to rank-map changes: every reader
    *  (`Engine._sortTerms`' terms, `hasPriorityRanks`, `unrankedActiveFields`)
