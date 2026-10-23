@@ -2258,8 +2258,16 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button class="icon-btn sm" onclick="NIMBUS.AlertsUIAdapter.toggleDrawer()" aria-label="Close">✕</button>
     </div>
   </header>
+  <nav class="us-tabs" id="alert-drawer-tabs" role="tablist">
+    <button class="seg-btn active" data-drawer-tab="alerts" role="tab" aria-selected="true" data-i18n="ui.drawer_tab_alerts">Alerts</button>
+    <button class="seg-btn" data-drawer-tab="toasts" role="tab" aria-selected="false" data-i18n="ui.drawer_tab_toasts">Toast Log</button>
+  </nav>
   <div class="drawer-body" id="alert-drawer-body"></div>
   <div class="drawer-footer" id="alert-drawer-footer" hidden></div>
+  <div class="drawer-body" id="toast-log-body" hidden></div>
+  <div class="drawer-footer" id="toast-log-footer" hidden>
+    <button class="btn btn-ghost sm" id="toast-log-export" data-i18n="btn.export_json">Download JSON</button>
+  </div>
 </aside>
 
 <!-- =========================================================

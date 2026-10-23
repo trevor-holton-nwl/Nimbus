@@ -23,6 +23,7 @@ frontend/optimization/scheduler-contract.mjs
 frontend/optimization/engine.mjs
 frontend/calendar/calendar-engine.mjs
 frontend/insights/services.mjs
+frontend/insights/toast-log-tab.mjs
 frontend/insights/alert-profiles.mjs
 frontend/insights/alert-profile-client.mjs
 frontend/insights/alert-leverage.mjs
