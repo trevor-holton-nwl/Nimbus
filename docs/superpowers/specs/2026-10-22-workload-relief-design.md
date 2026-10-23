@@ -46,3 +46,10 @@ An Opus deep-dive (plan `are-there-any-new-generic-cook.md`) found that no new w
 - The leverage-batch timeout constant keeps its name `LEVERAGE_BATCH_TIMEOUT_MS`.
 - Identity parity test (replaying the baseline setup reproduces the baseline score): skipped, not cheap in the existing fixtures; the vm parity test against `runLeverageBatchSync` stays green.
 - Deferred as instructed: the scores-only worker reply, 6c/6f, the utilization cache.
+
+### Wave B fix wave (Opus validator)
+- Typed-minutes replay timeout is logged (`leverage replay timed out`); only `AbortError` is silent.
+- Leverage-worker crash latch: after 2 crashes (`_leverageCrashes`, separate from `Compute._crashCount`/`_dead`) batches skip worker creation and use the main-thread path until reload.
+- The leverage reply is accepted only as `LEVERAGE_BATCH_RESULT` with an array `results`; anything else rejects (then sync fallback). Removed `'LEVERAGE_BATCH'` from `_post`'s union and the always-undefined `jobId` log field; doc comment lists the real fallback cases.
+- Tests added: ERROR reply, postMessage throw, late reply after timeout, abort/timeout after success are no-ops, crash latch, malformed reply (compute-transport); plant change starts the new run, `alerts:change` aborts, signal passes through `analyzeLeverage`/`replayWithMinutes` (pane/leverage tests).
+- Deferred follow-up: each typed-minutes key starts its own worker (a replay per key); fold into one batch together with the deferred scores-only reply.
