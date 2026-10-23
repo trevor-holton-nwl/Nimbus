@@ -4,6 +4,7 @@ window.__NIMBUS_LOCALES.es = {
   /* ── Calendar sync ── */
   'toast.calendar_saved_locally':      'Guardado localmente: se sincronizará cuando el servidor esté disponible',
   'toast.calendar_offline_cache':      'Mostrando calendarios en caché: servidor no disponible',
+  'toast.calendar_refreshed_remote': 'Calendario de la planta actualizado en otra sesión; sombreado del programa actualizado',
   'toast.calendar_migrated':           'Calendarios y bloqueos guardados en el servidor',
   'toast.plant_not_mastered':          'Esta planta no está en los Datos Maestros; agréguela allí antes de guardar su calendario',
 

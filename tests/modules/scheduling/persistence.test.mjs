@@ -17,6 +17,8 @@ import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Config, Toast, Util, Modal } from '../../../frontend/platform/foundation.mjs';
 import { UndoStack } from '../../../frontend/platform/store.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
+import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 
 test('plant switch guard keeps dirty edits on cancel and clears them on discard', async () => {
   const priorConfirm = Modal.confirm;
@@ -1593,4 +1595,112 @@ test('Persistence.load captures the server clock offset from /tasks meta.server_
     Store.setMasterData(priorMasterData, 'unit-test');
     Persistence._loadsInFlight = priorLoadsInFlight;
   }
+});
+
+// Part 2 (2026-10-23): calendar re-hydration through the horizons probe.
+function horizonsEnv(version) {
+  const prior = { fetch: globalThis.fetch, plant: Store.selectedPlant, md: Store.masterData, fpc: CalendarSync.fetchPlantConfig,
+    toast: Toast.show, guard: Persistence._calendarRefreshBlocked, version: { ...Persistence._calendarVersion }, doc: globalThis.document };
+  const state = { version, fetches: 0, hydrations: [], toasts: [] };
+  Store.setSelectedPlant('PH', 'unit-test');
+  Store.setMasterData({ plants: [{ plant: 'PH', alt_flag_horizon: 100 }], lines: [] }, 'unit-test');
+  Store.replacePlants({ PH: { workHours: { 1: [8, 16] } } }, 'unit-test');
+  globalThis.fetch = async () => { state.fetches++; return { ok: true, json: async () => ({
+    visibility_horizon_end: null, frozen_horizon_end: null, alert_horizon_minutes: 100, calendar_version: state.version }) }; };
+  CalendarSync.fetchPlantConfig = async (plant) => {
+    state.hydrations.push(plant);
+    if (state.mutate) Store.setPlantPeriods(plant, [{ id: 'p', name: '24x4', validFrom: '2026-10-20', validTo: null, workHours: { 1: [0, 24] } }], 'calendar-sync');
+  };
+  Toast.show = (...a) => state.toasts.push(a);
+  Persistence._calendarRefreshBlocked = null;
+  delete Persistence._calendarVersion.PH;
+  delete Persistence._horizonsFetchedAt.PH;
+  const probe = async () => { delete Persistence._horizonsFetchedAt.PH; return Persistence.refreshHorizons('PH'); };
+  const restore = () => {
+    globalThis.fetch = prior.fetch; CalendarSync.fetchPlantConfig = prior.fpc; Toast.show = prior.toast;
+    Persistence._calendarRefreshBlocked = prior.guard; Persistence._calendarVersion = prior.version;
+    if (prior.doc === undefined) delete globalThis.document; else globalThis.document = prior.doc;
+    Store.replacePlants({}, 'unit-test'); Store.setMasterData(prior.md, 'unit-test'); Store.setSelectedPlant(prior.plant, 'unit-test');
+    delete Persistence._horizonsFetchedAt.PH;
+  };
+  return { state, probe, restore };
+}
+
+test('refreshHorizons re-hydrates the plant calendar only when calendar_version changes, never on first sight', async () => {
+  const { state, probe, restore } = horizonsEnv('v1');
+  try {
+    await probe();
+    assert.equal(state.hydrations.length, 0, 'first sight is only a baseline');
+    await probe();
+    assert.equal(state.hydrations.length, 0, 'same version: nothing to do');
+    state.version = 'v2'; state.mutate = true;
+    await probe();
+    await new Promise(r => setTimeout(r, 0));
+    assert.deepEqual(state.hydrations, ['PH'], 'a changed version re-fetches the plant calendar');
+    assert.equal(Persistence._calendarVersion.PH, 'v2');
+    assert.deepEqual(state.toasts.map(t => t[0]).filter(k => k === 'toast.calendar_refreshed_remote'), ['toast.calendar_refreshed_remote'], 'one toast, because the periods really changed');
+    await probe();
+    assert.equal(state.hydrations.length, 1, 'v2 is now the baseline');
+  } finally { restore(); }
+});
+
+test('refreshHorizons re-hydration stays quiet when the refetched calendar is identical, and skips an older backend', async () => {
+  const { state, probe, restore } = horizonsEnv('v1');
+  try {
+    await probe();
+    state.version = 'v2';                       // fingerprint moved but the hydrated data is the same (e.g. our own save)
+    await probe();
+    await new Promise(r => setTimeout(r, 0));
+    assert.equal(state.hydrations.length, 1);
+    assert.equal(state.toasts.filter(t => t[0] === 'toast.calendar_refreshed_remote').length, 0, 'no toast when nothing visible changed');
+    state.version = undefined;                  // an older backend without the field
+    await probe();
+    assert.equal(state.hydrations.length, 1);
+    assert.equal(Persistence._calendarVersion.PH, 'v2');
+  } finally { restore(); }
+});
+
+test('refreshHorizons does not re-hydrate during a drag or with a dialog open, and retries on the next entry', async () => {
+  const { state, probe, restore } = horizonsEnv('v1');
+  try {
+    await probe();
+    state.version = 'v2';
+    let dragging = true;
+    Persistence._calendarRefreshBlocked = () => dragging;
+    await probe();
+    assert.equal(state.hydrations.length, 0, 'a drag in flight blocks the re-fetch');
+    assert.equal(Persistence._horizonsFetchedAt.PH, 0, 'the throttle is released so the next entry retries at once');
+    assert.equal(Persistence._calendarVersion.PH, 'v1', 'the baseline is not advanced');
+    dragging = false;
+    await probe();
+    await new Promise(r => setTimeout(r, 0));
+    assert.equal(state.hydrations.length, 1, 'next entry picks it up');
+  } finally { restore(); }
+});
+
+test('refreshHorizons does not re-hydrate while What-If is active', async () => {
+  const { state, probe, restore } = horizonsEnv('v1');
+  const priorActive = Sandbox.active;
+  try {
+    await probe();
+    state.version = 'v2';
+    Sandbox.active = true;
+    await probe();
+    assert.equal(state.hydrations.length, 0);
+  } finally { Sandbox.active = priorActive; restore(); }
+});
+
+test('refreshHorizonsOnReturn probes only when the tab is visible and is throttled like a Gantt entry', async () => {
+  const { state, restore } = horizonsEnv('v1');
+  try {
+    globalThis.document = { hidden: true };
+    delete Persistence._horizonsFetchedAt.PH;
+    assert.equal(await Persistence.refreshHorizonsOnReturn(), false);
+    assert.equal(state.fetches, 0, 'hidden: no request');
+    globalThis.document = { hidden: false };
+    await Persistence.refreshHorizonsOnReturn();
+    assert.equal(state.fetches, 1);
+    await Persistence.refreshHorizonsOnReturn();
+    assert.equal(state.fetches, 1, 'inside the 10 s throttle');
+  } finally { restore(); }
 });

@@ -187,6 +187,13 @@ export const Persistence = {
   // Throttle for refreshHorizons() below, keyed by plant: last Date.now() a
   // /tasks/horizons fetch for that plant actually resolved (success or not).
   _horizonsFetchedAt: {} as Record<string, number>,
+  // The plant calendar fingerprint (`calendar_version` on /tasks/horizons) this tab last hydrated, per plant. The
+  // first value seen is the baseline (the boot hydration already loaded that calendar); a later different value
+  // means another session changed the calendar, so the plant config is re-fetched (see _noteCalendarVersion).
+  _calendarVersion: {} as Record<string, string>,
+  _calendarRefreshing: new Set<string>(),
+  // Seam wired by the shell: true while a Gantt drag is in flight (persistence cannot import gantt).
+  _calendarRefreshBlocked: null as null | (() => boolean),
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // historical name: dependent optimizer/undo edits require atomic version checks
   _conflictedIds: new Set<string>(),  // retained local edits cannot adopt a server version without reconciliation
@@ -716,6 +723,7 @@ export const Persistence = {
           visibility_horizon_end: string | null;
           frozen_horizon_end: string | null;
           alert_horizon_minutes: number | null;
+          calendar_version?: string | null;
         }>).then(json => {
           // The user has since switched plants, or a newer load() has since
           // started (its own /tasks meta will win) — discard this response.
@@ -745,6 +753,8 @@ export const Persistence = {
             changed = true;
           }
 
+          Persistence._noteCalendarVersion(plant, json.calendar_version);
+
           return changed;
         });
       })
@@ -752,6 +762,50 @@ export const Persistence = {
         ErrorLog.warn('persistence', `Horizons refresh failed (plant=${plant}): ${(e as Error).message}`);
         return false;
       });
+  },
+
+  /** The plant's calendar fingerprint came back on /tasks/horizons. First sight is only recorded. A different
+   *  value re-fetches the plant calendar (CalendarSync.fetchPlantConfig emits `calendar:change`, which re-shades
+   *  the Gantt, recomputes alerts and re-renders the Machines pane; it never moves a placed bar or touches a dirty
+   *  row) and toasts once if the hours, periods or blackouts really changed. Skipped, and retried on the next
+   *  entry, while a drag is in flight, a dialog is open or What-If is active. Nothing task-shaped is loaded, so
+   *  there is no undo invalidation and no unsaved-edit hazard. */
+  _noteCalendarVersion(plant: string, version: string | null | undefined): void {
+    if (!version) return;                                       // older backend, or an unknown plant
+    const known = Persistence._calendarVersion[plant];
+    if (known === undefined) { Persistence._calendarVersion[plant] = version; return; }
+    if (known === version || Persistence._calendarRefreshing.has(plant)) return;
+    if (Sandbox.active || Modal.anyOpen() || Persistence._calendarRefreshBlocked?.()) {
+      Persistence._horizonsFetchedAt[plant] = 0;                // not a real fetch: let the next entry retry at once
+      return;
+    }
+    const before = Persistence._calendarFingerprint(plant);
+    Persistence._calendarRefreshing.add(plant);
+    void CalendarSync.fetchPlantConfig(plant).then(() => {
+      Persistence._calendarVersion[plant] = version;
+      if (Persistence._calendarFingerprint(plant) !== before) Toast.show(Util.t('toast.calendar_refreshed_remote'), 'info');
+    }).finally(() => { Persistence._calendarRefreshing.delete(plant); });
+  },
+
+  /** What the browser holds of a plant's calendar, for "did the re-hydration change anything". */
+  _calendarFingerprint(plant: string): string {
+    const lineCalendars: Record<string, unknown> = {};
+    for (const [line, cal] of Object.entries(Store.calendars)) {
+      if (Store.getPlantForLine(line) === plant) lineCalendars[line] = cal;
+    }
+    return JSON.stringify([
+      Store.plants[plant] ?? null,
+      lineCalendars,
+      Store.blocks.filter(b => b.plant === plant),
+      Store.plantBlocks.filter(b => b.plant === plant),
+    ]);
+  },
+
+  /** Tab came back to the foreground: run the same throttled horizons probe a Gantt entry runs, so a calendar
+   *  another session changed while this tab sat in the background is picked up. Resolves like refreshHorizons. */
+  refreshHorizonsOnReturn(): Promise<boolean> {
+    if (typeof document !== 'undefined' && document.hidden) return Promise.resolve(false);
+    return Persistence.refreshHorizons(Store.selectedPlant);
   },
 
   // Reconnect watcher: polls /health with exponential backoff (1s, 2s, 4s, ..., capped 30s)

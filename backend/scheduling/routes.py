@@ -510,6 +510,7 @@ def get_task_horizons(plant: str,
         "visibility_horizon_end": h["visibility_horizon_end"].isoformat() if h["visibility_horizon_end"] else None,
         "frozen_horizon_end": h["frozen_horizon_end"].isoformat() if h["frozen_horizon_end"] else None,
         "alert_horizon_minutes": h["alert_horizon_minutes"],
+        "calendar_version": h.get("calendar_version"),
     }
 
 

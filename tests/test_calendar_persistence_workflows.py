@@ -323,3 +323,41 @@ def test_http_calendar_save_hydrate_delete_round_trip_uses_real_database(plannin
         config = client.get("/plant-calendar", headers=headers, params={"plant": c.plant}).json()
         assert config["plant_blackouts"] == []
         assert config["machine_blackouts"] == [block(machine=c.machine)]
+
+
+# Part 2 (2026-10-23): /tasks/horizons carries a plant-scoped calendar fingerprint so another tab can notice a change.
+def test_horizons_calendar_version_changes_on_every_calendar_write_and_is_plant_scoped(planning_pg):
+    import db
+    from backend.scheduling import routes as scheduling_routes
+
+    c = planning_pg
+    v0 = db.plant_horizons(c.plant)["calendar_version"]
+    assert isinstance(v0, str) and len(v0) == 32
+    assert db.plant_horizons(c.plant)["calendar_version"] == v0, "stable while nothing changes"
+    other0 = db.plant_horizons(c.other)["calendar_version"]
+
+    seen = {v0}
+
+    def changed():
+        v = db.plant_horizons(c.plant)["calendar_version"]
+        assert v not in seen, "the fingerprint must move on this write"
+        seen.add(v)
+
+    md.save_plant_periods(c.plant, [period("a")], user_email=c.actor)
+    changed()                                                             # a period save
+    md.set_plant_work_hours(c.plant, {"1": [8, 16]}, c.actor)
+    changed()                                                             # the plant default week
+    md.set_line_work_hours(c.plant, [{"machine": c.machine, "work_hours": {"1": [9, 15]}}], c.actor)
+    changed()                                                             # a machine row
+    md.save_plant_blackouts(c.plant, [block()], user_email=c.actor)
+    changed()                                                             # a plant blackout
+    md.save_machine_blackouts(c.plant, [block("m1", machine=c.machine)], user_email=c.actor)
+    changed()                                                             # a machine blackout
+    md.save_plant_periods(c.plant, [], deletes=["a"], user_email=c.actor)
+    changed()                                                             # a delete moves it too
+
+    assert db.plant_horizons(c.other)["calendar_version"] == other0, "another plant's writes never move it"
+    assert db.plant_horizons("NO_SUCH_PLANT_X")["calendar_version"] is None
+
+    body = scheduling_routes.get_task_horizons(plant=c.plant, allowed_plants=None)
+    assert body["calendar_version"] == db.plant_horizons(c.plant)["calendar_version"]

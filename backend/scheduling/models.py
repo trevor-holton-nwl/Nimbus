@@ -118,6 +118,9 @@ class HorizonsResponse(BaseModel):
     visibility_horizon_end: str | None
     frozen_horizon_end: str | None
     alert_horizon_minutes: int | None
+    # Opaque fingerprint of the plant's calendar (hours, periods, blackouts); the Gantt re-fetches the plant
+    # calendar when it differs from the last one it hydrated. Optional and additive: None for an unknown plant.
+    calendar_version: str | None = None
 
 
 class ScheduleConflict(BaseModel):

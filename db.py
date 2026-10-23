@@ -563,6 +563,41 @@ def _horizon_bounds_for_plant(cur, plant: str) -> tuple[datetime | None, datetim
     return visibility_end, frozen_end
 
 
+# One-query fingerprint of everything a plant's calendar is made of: the plant's default week and timezone, the
+# per-machine hours rows, the dated periods and both blackout tables. md5 over the canonical row text (jsonb::text is
+# canonical) rather than count + max(updated_at): a deleted row, or a write path that forgets to bump updated_at,
+# still changes it. Plant-scoped, one round trip, a few hundred rows at most (70 machines + blackouts).
+_PLANT_CALENDAR_VERSION_SQL = """
+    SELECT md5(concat_ws('#',
+        COALESCE((SELECT string_agg(subnetwork || '=' || COALESCE(work_hours::text, '') || '@' || COALESCE(timezone, ''),
+                                    ',' ORDER BY subnetwork)
+                    FROM plants WHERE plant = %(p)s), ''),
+        COALESCE((SELECT string_agg(machine || '=' || COALESCE(work_hours::text, ''), ',' ORDER BY subnetwork, machine)
+                    FROM machine_calendar WHERE plant = %(p)s), ''),
+        COALESCE((SELECT string_agg(period_id || '|' || name || '|' || valid_from::text || '|' || COALESCE(valid_to::text, '')
+                                    || '|' || work_hours::text, ',' ORDER BY subnetwork, period_id)
+                    FROM plant_calendar_period WHERE plant = %(p)s), ''),
+        COALESCE((SELECT string_agg(block_id || '|' || COALESCE(machine, '') || '|' || start_ts::text || '|' || end_ts::text
+                                    || '|' || COALESCE(reason, ''), ',' ORDER BY subnetwork, block_id)
+                    FROM machine_blackout WHERE plant = %(p)s), ''),
+        COALESCE((SELECT string_agg(block_id || '|' || start_ts::text || '|' || end_ts::text || '|' || COALESCE(reason, ''),
+                                    ',' ORDER BY subnetwork, block_id)
+                    FROM plant_blackout WHERE plant = %(p)s), '')
+    ))
+"""
+
+
+def plant_calendar_version(plant: str, cur=None) -> str | None:
+    """Opaque fingerprint of one plant's calendar (hours, periods, blackouts); changes whenever any of
+    them is written. None when the plant does not exist. Pass `cur` to reuse a caller's cursor."""
+    if cur is not None:
+        cur.execute(_PLANT_CALENDAR_VERSION_SQL, {"p": plant})
+        row = cur.fetchone()
+        return row[0] if row else None
+    with _pool.connection() as conn, conn.cursor() as c:
+        return plant_calendar_version(plant, c)
+
+
 def plant_horizons(plant: str) -> dict:
     """Meta-only horizon probe for one plant (GET /tasks/horizons) — the same
     resolved instants GET /tasks ships in `meta`, without the task payload.
@@ -578,11 +613,14 @@ def plant_horizons(plant: str) -> dict:
             (plant,),
         )
         row = cur.fetchone()
-    if row is None:
-        return {"visibility_horizon_end": None, "frozen_horizon_end": None, "alert_horizon_minutes": None}
+        if row is None:
+            return {"visibility_horizon_end": None, "frozen_horizon_end": None, "alert_horizon_minutes": None,
+                    "calendar_version": None}
+        calendar_version = plant_calendar_version(plant, cur)
     visibility_horizon_days, horizon_roll_hour_utc, timezone_name, frozen_horizon_days, alt_flag_horizon = row
     now_utc = datetime.now(timezone.utc)
     return {
+        "calendar_version": calendar_version,
         "visibility_horizon_end": compute_visibility_horizon_end(now_utc, timezone_name, horizon_roll_hour_utc, visibility_horizon_days),
         "frozen_horizon_end": compute_frozen_horizon_end(now_utc, timezone_name, horizon_roll_hour_utc, frozen_horizon_days),
         "alert_horizon_minutes": int(alt_flag_horizon) if alt_flag_horizon is not None else None,

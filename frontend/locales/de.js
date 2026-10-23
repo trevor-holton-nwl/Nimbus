@@ -4,6 +4,7 @@ window.__NIMBUS_LOCALES.de = {
   /* ── Calendar sync ── */
   'toast.calendar_saved_locally':      'Lokal gespeichert – wird synchronisiert, sobald der Server erreichbar ist',
   'toast.calendar_offline_cache':      'Zwischengespeicherte Kalender – Server nicht erreichbar',
+  'toast.calendar_refreshed_remote': 'Werkskalender in einer anderen Sitzung geändert; Schichtdarstellung aktualisiert',
   'toast.calendar_migrated':           'Kalender & Sperrungen auf dem Server gespeichert',
   'toast.plant_not_mastered':          'Dieses Werk ist nicht in den Stammdaten – bitte dort anlegen, bevor der Kalender gespeichert werden kann',
 
