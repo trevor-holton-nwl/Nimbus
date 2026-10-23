@@ -3132,3 +3132,8 @@ export const SandboxAdapter = {
   },
 };
 
+// State snapshot attached to error-level log entries.
+ErrorLog.registerStateProvider('optimization', () => ({
+  bgRun: !!OptimizerPreview._backgroundRun,
+  plant: OptimizerPreview._backgroundRun?.plant ?? null,
+}));
