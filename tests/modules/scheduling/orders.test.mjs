@@ -2376,9 +2376,10 @@ function historyHarness(id) {
   Store.tasks[id] = { id, MACHINE: 'L1', PLANT: 'P1' };
   const urls = [];
   let events = [];
-  Util.fetchTraced = async url => { urls.push(String(url)); return { ok: true, json: async () => ({ events }) }; };
+  let nextBefore = null;
+  Util.fetchTraced = async url => { urls.push(String(url)); return { ok: true, json: async () => ({ events, next_before_id: nextBefore }) }; };
   return {
-    mount, urls, setEvents(e) { events = e; },
+    mount, urls, setEvents(e) { events = e; }, setNextBefore(v) { nextBefore = v; },
     restore() {
       globalThis.document = prior.document; Util.fetchTraced = prior.fetchTraced; Inspector._currentId = prior.current;
       if (prior.task) Store.tasks[id] = prior.task; else delete Store.tasks[id];
@@ -2451,5 +2452,166 @@ test('Inspector history renders hostile actor/notes as text, never markup', asyn
       assert.equal(el.tagName, 'DIV');
       assert.equal(el.innerHTML, '', 'no HTML was ever assigned');
     }
+  } finally { h.restore(); }
+});
+
+// An #inspector-body whose innerHTML setter mounts the real History card (the stub DOM does not parse markup).
+function historyRenderBody(doc) {
+  let html = ''; let card = null;
+  return {
+    get innerHTML() { return html; },
+    set innerHTML(v) {
+      html = v;
+      const m = /data-history-for="([^"]*)"/.exec(v);
+      if (!m) { card = null; return; }
+      card = makeEl('', doc); card.className = 'insp-card insp-history'; card.setAttribute('data-history-for', m[1]);
+      const hb = makeEl('', doc); hb.className = 'insp-history-body'; card.appendChild(hb);
+    },
+    querySelectorAll() { return []; },
+    querySelector(sel) { return sel === '.insp-history' ? card : null; },
+    get card() { return card; },
+  };
+}
+
+test('Inspector._render twice for one order fetches History once and emits the real data-history-for markup', async () => {
+  const h = historyHarness('hist-a');
+  try {
+    const doc = globalThis.document;
+    const rb = historyRenderBody(doc);
+    doc.getElementById = id => id === 'inspector-body' ? rb : null;
+    h.setEvents([{ id: 5, at: '2026-10-22T10:00:00+00:00', actor: 'a@x.com', actor_name: null, source: 'drag', op: 'modify', action_id: 'g', client_id: null, changes: { machine: ['L1', 'L2'] } }]);
+    const task = Store.tasks['hist-a'];
+    Inspector._render(task);
+    Inspector._render(task);
+    assert.match(rb.innerHTML, /data-history-for="hist-a"/);
+    assert.equal(h.urls.length, 1, 'two renders, one fetch');
+    await flushHistory();
+    assert.equal(rb.card.querySelector('.insp-history-body').children[0].className, 'insp-history-group', 'the latest card is painted');
+  } finally { h.restore(); }
+});
+
+test('Inspector history: invalidate while a fetch is pending gives exactly two fetches and a single paint', async () => {
+  const h = historyHarness('hist-b');
+  const paints = []; const priorRender = Inspector._renderHistory;
+  try {
+    Inspector._renderHistory = (body, events, more) => { paints.push(events.length); return priorRender.call(Inspector, body, events, more); };
+    h.setEvents([{ id: 1, at: '2026-10-22T10:00:00+00:00', actor: 'a@x.com', actor_name: null, source: 'drag', op: 'modify', action_id: 'g', client_id: null, changes: { machine: ['L1', 'L2'] } }]);
+    h.mount();
+    Inspector._fillHistory('hist-b');
+    Inspector.invalidateHistory(['hist-b']);
+    await flushHistory(); await flushHistory();
+    assert.equal(h.urls.length, 2, 'the answer that may predate the save is discarded and re-fetched');
+    assert.equal(paints.length, 1, 'only the fresh answer is painted');
+  } finally { Inspector._renderHistory = priorRender; h.restore(); }
+});
+
+test('Inspector history cache evicts the oldest entry past 200 ids', async () => {
+  const h = historyHarness('hist-c0');
+  const made = [];
+  try {
+    Inspector._currentId = 'nobody';                       // nothing is painted; only the cache is exercised
+    for (let i = 0; i < 205; i++) {
+      const id = `hist-c${i}`; made.push(id);
+      Store.tasks[id] = { id, MACHINE: 'L1', PLANT: 'P1' };
+      await Inspector._loadHistory(id);
+    }
+    assert.equal(Inspector._history.size, 200);
+    assert.ok(!Inspector._history.has('hist-c0') && !Inspector._history.has('hist-c4'), 'the five oldest are gone');
+    assert.ok(Inspector._history.has('hist-c5') && Inspector._history.has('hist-c204'));
+  } finally { made.slice(1).forEach(id => delete Store.tasks[id]); h.restore(); }
+});
+
+test('Inspector history: a card swapped to another order before the response is not painted', async () => {
+  const h = historyHarness('hist-d');
+  try {
+    h.setEvents([{ id: 1, at: '2026-10-22T10:00:00+00:00', actor: 'a@x.com', actor_name: null, source: 'drag', op: 'modify', action_id: 'g', client_id: null, changes: { machine: ['L1', 'L2'] } }]);
+    const body = h.mount();
+    Inspector._fillHistory('hist-d');
+    body.parentNode.setAttribute('data-history-for', 'another-order');
+    await flushHistory();
+    assert.equal(body.children[0].textContent, 'ui.insp_history_loading', 'the other order\'s card is left alone');
+    assert.ok(Inspector._history.has('hist-d'), 'the answer is still cached for its own order');
+  } finally { h.restore(); }
+});
+
+test('Inspector.clear() before the History response arrives does not throw', async () => {
+  const h = historyHarness('hist-e');
+  try {
+    h.mount();
+    Inspector._fillHistory('hist-e');
+    Inspector.clear();
+    await flushHistory();
+    assert.equal(Inspector._currentId, null);
+    assert.ok(Inspector._history.has('hist-e'));
+  } finally { h.restore(); }
+});
+
+test('Inspector.init: tasks:saved refetches the shown order once; tasks:bulk and plant:selected drop every cached history', async () => {
+  const h = historyHarness('hist-f');
+  const priorUnsub = Inspector._unsubStore;
+  try {
+    Inspector.init();
+    h.setEvents([{ id: 1, at: '2026-10-22T10:00:00+00:00', actor: 'a@x.com', actor_name: null, source: 'drag', op: 'modify', action_id: 'g', client_id: null, changes: { machine: ['L1', 'L2'] } }]);
+    h.mount();
+    Inspector._fillHistory('hist-f');
+    await flushHistory();
+    assert.equal(h.urls.length, 1);
+    Store.emit({ type: 'tasks:saved', ids: ['hist-f'], source: 'persistence' });
+    assert.equal(h.urls.length, 2, 'one refetch');
+    await flushHistory();
+    for (const type of ['tasks:bulk', 'plant:selected']) {
+      Inspector._history.set('other', { events: [], more: false, at: Date.now() });
+      Inspector._historyError.add('err');
+      const epoch = Inspector._historyEpoch;
+      Store.emit({ type, source: 'unit-test' });
+      assert.equal(Inspector._history.size, 0, `${type} clears the cache`);
+      assert.equal(Inspector._historyError.size, 0, `${type} clears recorded errors`);
+      assert.equal(Inspector._historyEpoch, epoch + 1, `${type} bumps the generation`);
+    }
+  } finally { Inspector._unsubStore?.(); Inspector._unsubStore = priorUnsub; h.restore(); }
+});
+
+test('Inspector history: a reset during a pending fetch discards its answer and refetches', async () => {
+  const h = historyHarness('hist-g');
+  try {
+    h.mount();
+    Inspector._fillHistory('hist-g');
+    Inspector.resetHistory();
+    await flushHistory(); await flushHistory();
+    assert.equal(h.urls.length, 2);
+  } finally { h.restore(); }
+});
+
+test('Inspector history: an entry older than 60 s is refetched on show; a fresh one is not', async () => {
+  const h = historyHarness('hist-h');
+  try {
+    Inspector._history.set('hist-h', { events: [], more: false, at: Date.now() - 61_000 });
+    h.mount();
+    Inspector._fillHistory('hist-h');
+    assert.equal(h.urls.length, 1, 'stale entry refetched');
+    await flushHistory();
+    h.mount();
+    Inspector._fillHistory('hist-h');
+    assert.equal(h.urls.length, 1, 'the fresh entry is served from cache');
+  } finally { h.restore(); }
+});
+
+test('Inspector history shows a muted "older changes not shown" line when the server has more', async () => {
+  const h = historyHarness('hist-i');
+  try {
+    h.setEvents([{ id: 3, at: '2026-10-22T10:00:00+00:00', actor: 'a@x.com', actor_name: null, source: 'drag', op: 'modify', action_id: 'g', client_id: null, changes: { machine: ['L1', 'L2'] } }]);
+    h.setNextBefore(3);
+    const body = h.mount();
+    Inspector._fillHistory('hist-i');
+    await flushHistory();
+    const last = body.children[body.children.length - 1];
+    assert.equal(last.className, 'insp-history-note insp-history-more');
+    assert.equal(last.textContent, 'ui.insp_history_more');
+    h.setNextBefore(null);
+    Inspector._history.clear();
+    const body2 = h.mount();
+    Inspector._fillHistory('hist-i');
+    await flushHistory();
+    assert.ok(!body2.children.some(c => /insp-history-more/.test(c.className)), 'no extra line when the page is complete');
   } finally { h.restore(); }
 });
