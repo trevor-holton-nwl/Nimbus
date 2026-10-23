@@ -516,3 +516,62 @@ def test_diagnostics_deep_route_requires_api_key_and_admin(monkeypatch):
     # Admin actor but wrong/missing key -> 401 from require_api_key.
     monkeypatch.setattr(auth, "get_user_role", lambda email: "admin")
     assert client.get("/diagnostics/deep", headers={"x-user-email": "a@example.com"}).status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# user attribution (payload / header fallback / ?user= filter)                #
+# --------------------------------------------------------------------------- #
+def test_frontend_sink_stores_payload_user(tc):
+    payload = {"entries": [{"level": "error", "scope": "ui", "msg": "x",
+                            "user": "alice@newellco.com"}]}
+    assert tc.post("/logs/frontend", json=payload).status_code == 200
+    assert brain._BACKEND_LOG[-1]["user"] == "alice@newellco.com"
+
+
+def test_frontend_sink_user_truncated_to_128(tc):
+    payload = {"entries": [{"level": "error", "msg": "x", "user": "u" * 300}]}
+    tc.post("/logs/frontend", json=payload)
+    assert len(brain._BACKEND_LOG[-1]["user"]) == 128
+
+
+def test_frontend_sink_user_header_fallback(tc):
+    payload = {"entries": [{"level": "error", "msg": "x"}]}
+    tc.post("/logs/frontend", json=payload, headers={"x-user-email": "bob@newellco.com"})
+    assert brain._BACKEND_LOG[-1]["user"] == "bob@newellco.com"
+
+
+def test_frontend_sink_payload_user_wins_over_header(tc):
+    payload = {"entries": [{"level": "error", "msg": "x", "user": "alice@newellco.com"}]}
+    tc.post("/logs/frontend", json=payload, headers={"x-user-email": "bob@newellco.com"})
+    assert brain._BACKEND_LOG[-1]["user"] == "alice@newellco.com"
+
+
+def test_frontend_sink_no_user_leaves_key_absent(tc):
+    tc.post("/logs/frontend", json={"entries": [{"level": "error", "msg": "x"}]})
+    assert "user" not in brain._BACKEND_LOG[-1]
+
+
+def test_backend_logs_user_filter_narrows(tc):
+    _seed([
+        {"ts": "2026-06-25T10:00:00", "level": "error", "category": "ui", "msg": "a",
+         "user": "alice@newellco.com"},
+        {"ts": "2026-06-25T11:00:00", "level": "error", "category": "ui", "msg": "b",
+         "user": "bob@newellco.com"},
+        {"ts": "2026-06-25T12:00:00", "level": "error", "category": "ui", "msg": "c"},
+    ])
+    body = tc.get("/logs/backend", params={"user": "alice@newellco.com"}).json()
+    assert body["total"] == 1
+    assert body["entries"][0]["msg"] == "a"
+
+
+def test_backend_logs_user_filter_matches_admin_action_actor(tc):
+    # _log_admin_action stores actor inside ctx (not top level).
+    from backend.admin_ops.logbuffer import _log_admin_action
+    _log_admin_action("users.update", "success", actor="carol@newellco.com")
+    _log_admin_action("users.update", "success", actor="dave@newellco.com")
+    _seed([{"ts": "2026-06-25T10:00:00", "level": "error", "category": "ui",
+            "msg": "fe", "user": "carol@newellco.com"}])
+    body = tc.get("/logs/backend", params={"user": "carol@newellco.com"}).json()
+    assert body["total"] == 2
+    assert all("carol@newellco.com" in (e.get("user"), (e.get("ctx") or {}).get("actor"))
+               for e in body["entries"])
