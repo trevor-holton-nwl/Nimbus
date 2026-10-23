@@ -9,7 +9,7 @@ import { Table, Inspector } from '../../../frontend/scheduling/orders.mjs';
 import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
 import { Util } from '../../../frontend/platform/foundation.mjs';
 import { createRequire } from 'node:module';
 
@@ -542,12 +542,12 @@ test('W6: card rows for day N equal the heatmap matrix column for that day; Next
 
 test('W6: stepping moves the day key, clamps at both ends, and re-renders only the card', () => {
   const { now, keys, matrix } = lsFixture();
-  const prior = { key: Dashboard._lsDayKey, clock: Util.plantClock, plant: Store.selectedPlant, cache: Dashboard._matrix7Cache,
+  const prior = { key: Dashboard._lsDayKey, clock: Util.plantClock, plant: Store.selectedPlant, compute: Utilization.computeMatrix,
     render: Dashboard._renderLineStatus, sync: Dashboard._syncLineStatusHeight, full: Dashboard.render };
   const seen = []; let full = 0;
   try {
     Util.plantClock = () => now;
-    Dashboard._matrix7Cache = { key: `${Util.startOfDay(now).getTime()}|7|1|`, matrix };
+    Utilization.computeMatrix = () => matrix;   // the shared-cache hit the stepper reads
     Dashboard._renderLineStatus = m => { seen.push([Dashboard._lsDayKey, m]); };
     Dashboard._syncLineStatusHeight = () => {};
     Dashboard.render = () => { full++; };
@@ -563,29 +563,7 @@ test('W6: stepping moves the day key, clamps at both ends, and re-renders only t
     assert.ok(seen.every(([, m]) => m === matrix), 'card reads the cached 7-day matrix');
     assert.equal(full, 0, 'stepping never triggers a full dashboard render');
   } finally {
-    Dashboard._lsDayKey = prior.key; Util.plantClock = prior.clock; Dashboard._matrix7Cache = prior.cache;
-    Dashboard._renderLineStatus = prior.render; Dashboard._syncLineStatusHeight = prior.sync; Dashboard.render = prior.full;
-  }
-});
-
-test('W6: a stale cached matrix (day 0 is no longer today) triggers a full render instead of the cache', () => {
-  const { now, matrix } = lsFixture();
-  const prior = { key: Dashboard._lsDayKey, clock: Util.plantClock, cache: Dashboard._matrix7Cache,
-    render: Dashboard._renderLineStatus, sync: Dashboard._syncLineStatusHeight, full: Dashboard.render };
-  let cardRenders = 0, full = 0;
-  try {
-    Util.plantClock = () => now;
-    const yesterday = new Date(Util.startOfDay(now)); yesterday.setDate(yesterday.getDate() - 1);
-    Dashboard._matrix7Cache = { key: `${yesterday.getTime()}|7|1|`, matrix };
-    Dashboard._renderLineStatus = () => { cardRenders++; };
-    Dashboard._syncLineStatusHeight = () => {};
-    Dashboard.render = () => { full++; };
-    Dashboard._lsDayKey = null;
-    Dashboard._lsStep(1);
-    assert.equal(full, 1, 'stale cache falls back to a full render');
-    assert.equal(cardRenders, 0, 'card never paints from the stale matrix');
-  } finally {
-    Dashboard._lsDayKey = prior.key; Util.plantClock = prior.clock; Dashboard._matrix7Cache = prior.cache;
+    Dashboard._lsDayKey = prior.key; Util.plantClock = prior.clock; Utilization.computeMatrix = prior.compute;
     Dashboard._renderLineStatus = prior.render; Dashboard._syncLineStatusHeight = prior.sync; Dashboard.render = prior.full;
   }
 });
@@ -760,5 +738,52 @@ test('_renderFollowers repaints the drawer only while it is open (bell and summa
     assert.deepEqual(log, ['bell', 'drawer', 'summary']);
   } finally {
     globalThis.document = prior.doc; AlertsUIAdapter.renderBell = prior.bell; AlertsUIAdapter.renderDrawer = prior.drawer; Dashboard._renderAlertSummary = prior.sum;
+  }
+});
+
+// ---- Workload relief: Dashboard computes the full-plant matrix once and filters rows after --------------------------
+test('Dashboard.render: toggling the line filter or an alert refresh never recomputes the 7-day matrix', () => {
+  const prior = {
+    doc: globalThis.document, nimbus: globalThis.NIMBUS, plant: Store.selectedPlant, tasks: structuredClone(Store.tasksArr),
+    filter: Dashboard._filterLines, core: globalThis.NimbusComputeCore.computeUtilization,
+    parts: ['_renderEmptyState', '_renderKPIs', '_renderHeatmap', '_renderLineStatus', '_renderAlertSummary', '_renderFirmedList',
+      '_renderLatenessHeatmap', '_syncLineStatusHeight'].map(k => [k, Dashboard[k]]),
+  };
+  const seen = { heat: [], kpi: [] };
+  let computes = 0;
+  try {
+    globalThis.document = { ...prior.doc, getElementById: id => (id === 'home-tab' ? { classList: { contains: () => true } } : null) };
+    globalThis.NIMBUS = { AlertsUIAdapter: { renderBell() {} } };
+    for (const [k] of prior.parts) Dashboard[k] = () => {};
+    Dashboard._renderHeatmap = m => { seen.heat.push(Dashboard._visibleLines(m)); };
+    Dashboard._renderKPIs = (m, tasks) => { seen.kpi.push([m, tasks.length]); };
+    globalThis.NimbusComputeCore.computeUtilization = (...a) => { computes++; return prior.core(...a); };
+    Store.setMasterData({ plants: [{ plant: 'DF-P' }], lines: [{ plant: 'DF-P', machine: 'DF-L1' }, { plant: 'DF-P', machine: 'DF-L2' }] }, 'unit-test');
+    const d = (h) => new Date(2026, 9, 19, h);
+    Store.setTasks([
+      { id: 'df1', PLANT: 'DF-P', MACHINE: 'DF-L1', RUN_TIME: 2, start_date: d(8), end_date: d(10) },
+      { id: 'df2', PLANT: 'DF-P', MACHINE: 'DF-L2', RUN_TIME: 2, start_date: d(8), end_date: d(10) },
+    ], 'unit-test');
+    Store.setSelectedPlant('DF-P', 'unit-test');
+    Dashboard._filterLines = new Set();
+    Dashboard.render();
+    assert.equal(computes, 1);
+    assert.deepEqual(seen.heat.at(-1).sort(), ['DF-L1', 'DF-L2']);
+    Dashboard._filterLines = new Set(['DF-L1']);   // a filter toggle
+    Dashboard.render();
+    Store.emit({ type: 'alerts:change' });
+    Dashboard.render();
+    Store.emit({ type: 'lines:selected', lines: [] });
+    Dashboard.render();
+    assert.equal(computes, 1, 'the full-plant matrix is computed once; filter toggles and alert refreshes reuse it');
+    assert.deepEqual(seen.heat.at(-1), ['DF-L1'], 'rows are narrowed to the filter after the fact');
+    assert.equal(seen.kpi.at(-1)[1], 1, 'order counts still follow the filter');
+    assert.equal(seen.kpi.at(-1)[0], seen.kpi[0][0], 'the very same cached matrix object');
+  } finally {
+    for (const [k, fn] of prior.parts) Dashboard[k] = fn;
+    globalThis.NimbusComputeCore.computeUtilization = prior.core;
+    Dashboard._filterLines = prior.filter;
+    globalThis.document = prior.doc; globalThis.NIMBUS = prior.nimbus;
+    Store.setTasks(prior.tasks, 'unit-test'); Store.setSelectedPlant(prior.plant, 'unit-test');
   }
 });

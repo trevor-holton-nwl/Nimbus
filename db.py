@@ -689,6 +689,23 @@ def query_orders(plant: str | None = None, line: str | None = None,
     this query's WHERE clause; the frozen window constrains the client-side
     optimizer's placement, not which rows /tasks returns.
     """
+    cols, rows, horizon_end, frozen_end = _fetch_orders(plant, line, limit, offset, allowed_plants, dict_rows=False)
+    return pd.DataFrame(rows, columns=cols), horizon_end, frozen_end
+
+
+def query_orders_rows(plant: str | None = None, line: str | None = None,
+                      limit: int | None = None, offset: int | None = None,
+                      allowed_plants: list[str] | None = None) -> tuple[list[dict], datetime | None, datetime | None]:
+    """Pandas-free sibling of `query_orders` for the GET /tasks hot path: the SAME
+    SQL, scope, horizon filter and ORDER BY, but rows come back as a list of dicts
+    keyed by the `_ORDERS_SELECT` aliases, in SQL order. Empty
+    result -> `([], horizon_end, frozen_end)`. Read-only; never touches `orders`."""
+    _, rows, horizon_end, frozen_end = _fetch_orders(plant, line, limit, offset, allowed_plants, dict_rows=True)
+    return rows, horizon_end, frozen_end
+
+
+def _fetch_orders(plant, line, limit, offset, allowed_plants, *, dict_rows: bool):
+    """Shared body of `query_orders` / `query_orders_rows` -> (cols, rows, horizon_end, frozen_end)."""
     sql = _ORDERS_SELECT
     where, params = [], []
     if plant:
@@ -718,7 +735,10 @@ def query_orders(plant: str | None = None, line: str | None = None,
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
-    return pd.DataFrame(rows, columns=cols), horizon_end, frozen_end
+    if dict_rows:
+        # zip, not a dict_row cursor: the horizon lookup above unpacks tuple rows on this cursor.
+        rows = [dict(zip(cols, r, strict=True)) for r in rows]
+    return cols, rows, horizon_end, frozen_end
 
 
 def count_orders(plant: str | None = None, line: str | None = None,

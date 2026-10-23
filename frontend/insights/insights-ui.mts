@@ -90,7 +90,6 @@ export const Dashboard = {
   _filterLines:  Store.selectedLines,
   _allLines:     null as string[] | null,
   _resizeDebounced: null as ReturnType<typeof setTimeout> | null,
-  _matrix7Cache: null as { key: string; matrix: DashboardUtilMatrix } | null,
   _lsVL:         null as VirtualList<DashboardLineStatusRow> | null,
   // Day the Machine Status card shows (a dayKey, not an index, so midnight can't
   // silently shift it). null = plant-today; clamped to the 7-day matrix's keys.
@@ -325,26 +324,15 @@ export const Dashboard = {
     Dashboard._renderEmptyState();
     if (!Store.selectedPlant) return;
 
-    // Build the shared filtered task set + 7-day utilization matrix ONCE and hand it
-    // to both _renderKPIs and _renderHeatmap (each otherwise rebuilds an identical
-    // filtered-subset matrix — three full computeMatrix passes per render, two of them
-    // duplicate 7-day work). The 1-day line-status matrix stays its own call.
+    // Build the 7-day utilization matrix ONCE and hand it to _renderKPIs, _renderHeatmap and
+    // _renderLineStatus (the card's day reads the same matrix as the heatmap column).
     const _now7    = Util.plantClock(Store.selectedPlant);   // the plant clock (OQ52), not the viewer's
     const _filtered = Dashboard._filteredTasks();
-    // Memoize the 7-day matrix across renders (R14). _filteredTasks scopes by selected
-    // plant + line filter, so the matrix is a pure function of (plant, filterLines,
-    // _rev, today). computeMatrix bypasses its own memo for filtered subsets, so without
-    // this every render (plant change, filter toggle, 300ms-debounced Store events)
-    // rebuilt the whole O(lines×days) matrix from scratch.
-    const _scope = (Store.selectedPlant || '') + '|' + [...Dashboard._filterLines].sort().join(',');
-    const _mkey  = `${Util.startOfDay(_now7)!.getTime()}|7|${Store.rev()}|${_scope}`;
-    let _matrix7: DashboardUtilMatrix;
-    if (Dashboard._matrix7Cache && Dashboard._matrix7Cache.key === _mkey) {
-      _matrix7 = Dashboard._matrix7Cache.matrix;
-    } else {
-      _matrix7 = Utilization.computeMatrix(_now7, 7, _filtered);
-      Dashboard._matrix7Cache = { key: _mkey, matrix: _matrix7 };
-    }
+    // Compute once, filter after: the FULL-plant 7-day matrix (no task subset) is served by the shared
+    // Utilization cache (keyed on plant + Store.dataRev(), so a line-filter toggle, an alert refresh or a
+    // line checkbox never recomputes it); _visibleLines re-narrows the rows to the Dashboard's line filter
+    // and every consumer below iterates only those lines.
+    const _matrix7: DashboardUtilMatrix = Utilization.computeMatrix(_now7, 7);
 
     Dashboard._renderKPIs(_matrix7, _filtered);
     Dashboard._renderHeatmap(_matrix7);
@@ -421,7 +409,7 @@ export const Dashboard = {
 
     // Capacity Headroom Next 7D: 1 - average utilization across all line-day cells with capacity.
     // Reuse the matrix built once in render() when provided; recompute standalone otherwise.
-    if (matrix7 === undefined) matrix7 = Utilization.computeMatrix(today, 7, tasks);
+    if (matrix7 === undefined) matrix7 = Utilization.computeMatrix(today, 7);
     let pctSum = 0, pctN = 0;
     for (const ln of Dashboard._visibleLines(matrix7)) {
       for (const d of Object.keys(matrix7[ln])) {
@@ -684,7 +672,7 @@ export const Dashboard = {
     if (!container) return;
 
     // Reuse the 7-day matrix built once in render() when provided; recompute standalone otherwise.
-    if (matrix === undefined) matrix = Utilization.computeMatrix(Util.plantClock(Store.selectedPlant), 7, Dashboard._filteredTasks());
+    if (matrix === undefined) matrix = Utilization.computeMatrix(Util.plantClock(Store.selectedPlant), 7);
     const lines = Dashboard._visibleLines(matrix).sort();
 
     if (!lines.length) {
@@ -830,12 +818,9 @@ export const Dashboard = {
     const keys = Dashboard._lsDayKeys(Util.plantClock(Store.selectedPlant));
     const idx = Math.max(0, Math.min(keys.length - 1, keys.indexOf(Dashboard._lsActiveKey(keys)) + (dir < 0 ? -1 : 1)));
     Dashboard._lsDayKey = keys[idx];
-    // The cached matrix is only valid while its day 0 is still plant-today (its key leads
-    // with that day's start); after midnight rolls over, rebuild via a full render.
-    const cache = Dashboard._matrix7Cache;
-    const cacheFresh = !!cache && cache.key.split('|')[0] === String(Util.startOfDay(Util.plantClock(Store.selectedPlant))!.getTime());
-    if (cache && cacheFresh) Dashboard._renderLineStatus(cache.matrix);
-    else Dashboard.render();
+    // computeMatrix is a shared-cache hit here (same plant, window and data revision as the last render), so the card
+    // always reads current data; after midnight rolls over it simply computes the new window.
+    Dashboard._renderLineStatus(Utilization.computeMatrix(Util.plantClock(Store.selectedPlant), 7));
     Dashboard._syncLineStatusHeight();
   },
 
@@ -916,7 +901,7 @@ export const Dashboard = {
 
     // Same cached 7-day matrix the heatmap reads (built in render()), so the card's
     // day matches the heatmap column exactly; standalone callers get a fresh one.
-    const matrix = matrix7 ?? Utilization.computeMatrix(now, 7, tasks);
+    const matrix = matrix7 ?? Utilization.computeMatrix(now, 7);
 
     // Pre-compute row data so renderFn is a pure template with no heavy closures.
     const rowData = Dashboard._lsRowData(lines, byLine, matrix, activeKey, activeKey === dayKeys[0], now);

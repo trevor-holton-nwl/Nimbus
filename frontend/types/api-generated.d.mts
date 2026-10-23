@@ -15,7 +15,7 @@ export interface paths {
          * Get Tasks
          * @description Return tasks as JSON with finish-to-start links and pipeline metadata.
          *
-         *     Stateless: queries Postgres per request (db.query_orders) rather than
+         *     Stateless: queries Postgres per request (db.query_orders_rows) rather than
          *     copying an in-memory frame. ?plant= is the scaling unit (bounds the result
          *     to one plant); ?machine= narrows further; ?limit/?offset= are a coarse guard
          *     rail for unscoped tooling (links are only coherent within a plant/machine scope).
