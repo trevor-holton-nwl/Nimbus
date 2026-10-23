@@ -1130,3 +1130,51 @@ class TestDistributionHooks:
         assert new, "a reset back to the 50/50 default changes the children"
         assert all(r[3] == self.actor and r[2] == "distribution" for r in new)
         assert len({r[4] for r in new}) == 1
+
+
+def _seed_master_prt(ing, **extra):
+    cols = ", ".join(["material_id", "plant", "color", "prt_01", "prt_02", *extra])
+    marks = ", ".join(["%s"] * (5 + len(extra)))
+    with ing.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO materials (material_id) VALUES (%s) ON CONFLICT DO NOTHING", (ing.material,))
+        cur.execute(f"INSERT INTO material_plants ({cols}) VALUES ({marks})",
+                    (ing.material, ing.plant, "RED", "PA", "PB", *extra.values()))
+        conn.commit()
+
+
+@pytest.mark.pg
+def test_reupload_quantity_change_with_prt_master_data_has_no_phantom_prt_rows(ing):
+    """R1: a SAP-changed existing order whose PRT comes from master data records only its real change: no
+    `prt_*` key in any row and no `master_data_stamp` row (the ingest net pass is the one writer)."""
+    _seed_master_prt(ing)
+    _ing_upload(ing, [_ing_row(ing, 1, quantity=10)])
+    oid = _ing_order_id(ing, 1)
+    with ing.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT prt_01 FROM orders WHERE id = %s", (oid,))
+        assert cur.fetchone()[0] == "PA"                       # stamped from master data
+        cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s WHERE id = %s",
+                    (ing.start + dt.timedelta(days=29), ing.start + dt.timedelta(days=30), oid))
+        conn.commit()
+    _ing_upload(ing, [_ing_row(ing, 1, quantity=25)])
+    evs = _ing_events(ing, order_id=oid)
+    assert [e[1] for e in evs] == ["create", "modify"]
+    assert not any(e[2] == "master_data_stamp" for e in evs)
+    assert not any(k.startswith("prt_") for e in evs for k in e[5])
+    assert evs[1][5]["order_quantity"] == [10, 25]
+
+
+@pytest.mark.pg
+def test_sap_production_version_change_records_one_net_row(ing):
+    _seed_master_prt(ing)
+    first = {**_ing_row(ing, 1), "production_version": "0001", "sap_production_version": "0001"}
+    _ing_upload(ing, [first], source="sap")
+    oid = _ing_order_id(ing, 1)
+    second = {**first, "production_version": "0002", "sap_production_version": "0002"}
+    _ing_upload(ing, [second], source="sap")
+    evs = _ing_events(ing, order_id=oid)
+    pv_rows = [e for e in evs if "production_version" in e[5]]
+    assert len(pv_rows) == 1
+    assert pv_rows[0][5]["production_version"] == ["0001", "0002"]
+    assert pv_rows[0][2] == "sap_ingest"
+    assert not any(e[2] == "master_data_stamp" for e in evs)
+    assert not any(k.startswith("prt_") for e in evs for k in e[5])

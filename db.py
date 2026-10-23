@@ -3596,6 +3596,20 @@ def _ev_tracked(rec: dict) -> dict:
     return out
 
 
+# Master-data-derived fields: the chunk read-back sees them BEFORE the stamp (uploads never carry PRT, and the
+# upsert blanks them), so a chunk-level diff would record phantom [x, null] changes. They are recorded ONCE,
+# as a net change, by `_record_ingest_attr_net` after the stamp has run.
+_EV_NET_FIELDS = ("prt_01", "prt_02", "production_version")
+
+
+def _ev_ingest_tracked(rec: dict) -> dict:
+    """`_ev_tracked` minus the master-data-derived `_EV_NET_FIELDS` (the ingest/sap_reset diff basis)."""
+    out = _ev_tracked(rec)
+    for k in _EV_NET_FIELDS:
+        out.pop(k, None)
+    return out
+
+
 # plant falls back to the same single-plant machine derivation _backfill_and_stamp applies, so a create
 # row for an Excel row that arrived without a PLANT column is not dropped for want of a plant.
 _EV_READBACK_SQL = f"""
@@ -3639,7 +3653,7 @@ def _record_ingest_events(cur, ev, *, before: dict, inserted_ids, written_existi
                 b = before.get(rid)
                 if b is None:
                     continue
-                changes = sched_events.diff_tracked(_ev_tracked(b), _ev_tracked(a)) or {}
+                changes = sched_events.diff_tracked(_ev_ingest_tracked(b), _ev_ingest_tracked(a)) or {}
                 # 'sap_reset' only when a planner placement was really taken back (slot, firm, segments, status);
                 # an unplaced order whose quantity changed is a plain ingest change.
                 op = "modify"
@@ -3653,6 +3667,40 @@ def _record_ingest_events(cur, ev, *, before: dict, inserted_ids, written_existi
         try:
             cur.execute("ROLLBACK TO SAVEPOINT sched_ev_rb")
             cur.execute("RELEASE SAVEPOINT sched_ev_rb")
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+    return sched_events.record(cur, ev, rows)
+
+
+def _record_ingest_attr_net(cur, ev, *, pre_attrs: dict, written_ids) -> int:
+    """The single writer of PRT / production-version history during ingest. After the batch's stamp has run,
+    read the three master-data-derived fields for every id in `pre_attrs` (their value BEFORE the upload wrote
+    anything) and record ONE `modify` row per order with the NET change (a PRT the upsert blanked and the stamp
+    restored is no change). Orders the upload actually wrote carry the ingest source; orders it only filled
+    from master data are `master_data_stamp`. Inserted orders have no pre-image (their `create` row stands).
+    Runs in its own savepoint and transaction, after the stamp: fail-open, same batch action_id."""
+    if ev is None or not pre_attrs:
+        return 0
+    written = set(written_ids)
+    rows: list = []
+    try:
+        cur.execute("SAVEPOINT sched_ev_net")
+        cur.execute("SELECT id, plant, production_order, material_number, prt_01, prt_02, production_version"
+                    " FROM orders WHERE id = ANY(%s)", (sorted(pre_attrs),))
+        for r in cur.fetchall():
+            changes = sched_events.diff_tracked(
+                pre_attrs[r[0]], {"prt_01": r[4], "prt_02": r[5], "production_version": r[6]})
+            if changes:
+                rows.append(sched_events.EventRow(
+                    plant=r[1] or "", order_id=r[0], production_order=r[2], material_number=r[3], op="modify",
+                    changes=changes, source=None if r[0] in written else "master_data_stamp"))
+        cur.execute("RELEASE SAVEPOINT sched_ev_net")
+    except Exception as exc:  # noqa: BLE001 - history is derived; never fail the ingest
+        log.warning("schedule_event attribute net pass failed (action_id=%s): %s", ev.action_id, exc)
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT sched_ev_net")
+            cur.execute("RELEASE SAVEPOINT sched_ev_net")
         except Exception:  # noqa: BLE001
             pass
         return 0
@@ -4213,6 +4261,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
     unfirmed_n = 0
     running_changed_ids: list[str] = []
     prior_run_times: dict[str, object] = {}   # stored run_time before this upload (R-I5: cap re-queue judges change)
+    # PRT / production version before the upload touched them, for every existing order in the batch (no
+    # pre-image for inserted ids); `_record_ingest_attr_net` diffs them against the post-stamp values.
+    pre_attrs: dict[str, dict] = {}
+    written_all: set[str] = set()
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             for i in range(0, len(tuples), _UPSERT_CHUNK):
@@ -4222,6 +4274,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 cur.execute(_CHUNK_READ_SQL, {"ids": chunk_ids})
                 before = {rec[0]: dict(zip(_CHUNK_READ_COLS, rec, strict=True)) for rec in cur.fetchall()}
                 prior_run_times.update({rid: b["run_time"] for rid, b in before.items()})
+                for rid in chunk_ids:
+                    b = before.get(rid)
+                    if b is not None:
+                        pre_attrs.setdefault(rid, {k: b.get(k) for k in _EV_NET_FIELDS})
                 # (a') the locked original_*_received per row, from the stored originals + the sent finish
                 chunk, flag_pairs = _patch_locked_originals(chunk, before, row_by_id, sap_tz)
                 # (b) upsert (rows SAP did not change return nothing)
@@ -4312,6 +4368,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         touched.update(reset_returned)
                         sap_changed_n += len(reset_returned)
                         unfirmed_n += sum(1 for rid in reset_returned if before[rid]["manual_firmed"])
+                written_all.update(written_existing)
+                written_all.update(reset_returned)
                 # schedule_event: last statement before the chunk commit (same locked rows, same transaction)
                 _record_ingest_events(cur, ev_ctx, before=before, inserted_ids=chunk_inserted,
                                       written_existing=written_existing, reset_ids=reset_returned)
@@ -4325,8 +4383,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             cur.execute("SELECT id FROM orders WHERE id = ANY(%s) AND (plant IS NULL OR machine_key IS NULL)",
                         (all_ids,))
             heal_ids = [r[0] for r in cur.fetchall()]
-            attr_result = _backfill_and_stamp(cur, conn, touched_ids, report_ids=all_ids, heal_ids=heal_ids,
-                                              ev=ev_ctx, skip_event_ids=set(inserted_ids))
+            # ev=None: the stamp records nothing during ingest; `_record_ingest_attr_net` below is the one writer
+            attr_result = _backfill_and_stamp(cur, conn, touched_ids, report_ids=all_ids, heal_ids=heal_ids)
+            _record_ingest_attr_net(cur, ev_ctx, pre_attrs=pre_attrs, written_ids=written_all)
+            conn.commit()
             touched.update(attr_result["healed_ids"])
             touched_ids = sorted(touched)
             missing_master_data = attr_result["exceptions"]
@@ -4395,28 +4455,17 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 routing_enabled_plants |= backfilled_enabled
                 resolve_plants |= backfilled_enabled
             if inserted_ids and routing_enabled_plants:
+                # No history row: every id here was inserted this batch and already has its `create` row, so the
+                # runtime_pending placeholder is transient (the resolver's outcome row, same action id, follows).
                 cur.execute(
                     """
                     UPDATE orders o
                        SET planning_status = 'needs_planning',
                            planning_reason = '{"code":"runtime_pending","message":"Runtime pending resolution."}'::jsonb
-                      FROM orders b
-                     WHERE o.id = ANY(%s) AND o.plant = ANY(%s) AND b.id = o.id
-                    RETURNING o.id, o.plant, o.production_order, o.material_number,
-                              b.planning_status, b.planning_reason->>'code'
+                     WHERE o.id = ANY(%s) AND o.plant = ANY(%s)
                     """,
                     (inserted_ids, sorted(routing_enabled_plants)),
                 )
-                hold_rows = []
-                for r in cur.fetchall():
-                    hold_changes = sched_events.diff_tracked(
-                        {"planning_status": _ev_status(r[4], r[5])},
-                        {"planning_status": "needs_planning:runtime_pending"})
-                    if hold_changes:
-                        hold_rows.append(sched_events.EventRow(
-                            plant=r[1] or "", order_id=r[0], production_order=r[2], material_number=r[3],
-                            op="modify", changes=hold_changes))
-                sched_events.record(cur, ev_ctx, hold_rows)
                 conn.commit()
             # ---------- Order Distribution: apply() seam (aggregate_to_detail.md §5) ----------
             # Runs after the last upsert chunk AND every backfill above has
@@ -4443,7 +4492,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 if apply_touched:
                     touched.update(apply_touched)
                     touched_ids = sorted(touched)
-                    _backfill_and_stamp(cur, conn, apply_touched, ev=ev_ctx, skip_event_ids=set(inserted_ids))
+                    _backfill_and_stamp(cur, conn, apply_touched)
             elif (distribution_plan.get("warnings_entry")
                   and any(v for k, v in distribution_ingest_warnings.items() if k != "single_rewrites")):
                 # D04: no parent was planned this batch (apply_fn never ran,
