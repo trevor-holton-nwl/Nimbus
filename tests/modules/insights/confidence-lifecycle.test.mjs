@@ -671,7 +671,6 @@ test('I13: the Confidence and peak-briefing matrix requests start on the plant c
   const priorAvailable = Compute.available;
   const priorUtilization = Compute.utilization;
   const priorNimbus = globalThis.NIMBUS;
-  const priorCache = nimbus.Utilization._cache;
   const starts = [];
   globalThis.NIMBUS = nimbus;
   // The plant is a day ahead of the viewer: its wall clock reads Thu 15 Oct 00:30 whatever the machine's clock says.
@@ -682,16 +681,19 @@ test('I13: the Confidence and peak-briefing matrix requests start on the plant c
     Confidence._invalidatePending(true);
     Store.setTasks([{ id: 'i13-1', PLANT: 'I13-P', MACHINE: 'I13-L', RUN_TIME: 1 }], 'test');
     Store.setSelectedPlant('I13-P', 'test');
-    nimbus.Utilization._cache = null;
+    nimbus.Utilization._cacheClear();
     await Confidence._recompute();
-    NeedsEngine._readState();
+    NeedsEngine._readState();   // sync computeMatrix on the plant clock: no worker post of its own any more
     const plantToday = new Date(2026, 9, 15).getTime();
-    assert.ok(starts.length >= 2, 'both panels asked the worker for a matrix');
+    assert.ok(starts.length >= 1, 'Confidence asked the worker for a matrix');
+    // NeedsEngine's 7-day read runs on the plant clock and fills the shared cache entry the Dashboard reads
+    assert.ok(nimbus.Utilization._cacheEntries().some(e => e.startMs === plantToday && e.days >= 7),
+      'a cache entry (the 14-day Confidence window, which the 7-day read slices) starting at the plant today exists after NeedsEngine._readState()');
     for (const startMs of starts) assert.equal(startMs, plantToday, 'the matrix window starts on the plant\'s today');
   } finally {
     Confidence._invalidatePending(true);
     Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
-    nimbus.Utilization._cache = priorCache;
+    nimbus.Utilization._cacheClear();
     Compute.available = priorAvailable;
     Compute.utilization = priorUtilization;
     Store.setTasks(priorTasks, 'test');
@@ -792,6 +794,51 @@ test('U34: Push +1 hour reports moved and skipped counts and the undo label carr
     Store.setTasks(priorTasks, 'test');
     Store.setSelectedPlant(priorPlant, 'test');
     globalThis.window.__NIMBUS_LOCALES = priorLocales;
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+// ---- Workload relief 6c: the shared utilization cache must never hold raw worker task ids ------------------------
+test('6c: after Confidence._recompute a later computeMatrix returns rows whose tasks are task objects, not ids', async () => {
+  const { Util } = nimbus;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorAvailable = Compute.available;
+  const priorUtilization = Compute.utilization;
+  const priorNimbus = globalThis.NIMBUS;
+  globalThis.NIMBUS = nimbus;
+  Compute.available = () => true;
+  // The worker contract: row.tasks are ids.
+  Compute.utilization = (startMs, days) => {
+    const rows = {};
+    for (let i = 0; i < days; i++) {
+      const d = new Date(startMs); d.setDate(d.getDate() + i);
+      rows[Util.dayKey(d)] = { date: d, scheduled: 1, capacity: 8, effectiveCapacity: 8, pct: 0.125, tasks: ['6c-1'] };
+    }
+    return Promise.resolve({ matrix: { '6C-L': rows } });
+  };
+  try {
+    Confidence._invalidatePending(true);
+    Store.setTasks([{ id: '6c-1', PLANT: '6C-P', MACHINE: '6C-L', RUN_TIME: 1 }], 'test');
+    Store.setSelectedPlant('6C-P', 'test');
+    nimbus.Utilization._cacheClear();
+    await Confidence._recompute();
+    const entry = nimbus.Utilization._cacheEntries().find(e => e.plant === '6C-P');
+    assert.ok(entry, 'the recompute filled the shared cache');
+    const today = Util.plantToday('6C-P');
+    const rows = nimbus.Utilization.computeMatrix(today, entry.days)['6C-L'];
+    for (const row of Object.values(rows)) {
+      assert.equal(row.tasks.length, 1);
+      assert.equal(typeof row.tasks[0], 'object', 'a task object, not the worker id');
+      assert.equal(row.tasks[0].id, '6c-1');
+    }
+  } finally {
+    Confidence._invalidatePending(true);
+    nimbus.Utilization._cacheClear();
+    Compute.available = priorAvailable;
+    Compute.utilization = priorUtilization;
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
     globalThis.NIMBUS = priorNimbus;
   }
 });

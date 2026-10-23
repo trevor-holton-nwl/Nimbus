@@ -461,3 +461,22 @@ test('Store.setMasterData forwards an optional table on master-data-changed and 
     Store.setMasterData(priorMasterData, 'unit-test');
   }
 });
+
+test('Store.dataRev() bumps before listeners run and is not bumped by events that cannot change utilization', () => {
+  const seenInside = [];
+  const off = Store.subscribe(evt => { seenInside.push([evt.type, Store.dataRev()]); });
+  try {
+    const before = Store.dataRev();
+    Store.emit({ type: 'calendar:change' });
+    assert.equal(Store.dataRev(), before + 1);
+    assert.deepEqual(seenInside.at(-1), ['calendar:change', before + 1], 'a subscriber sees the new value inside the same emit');
+    const rev = Store.rev();
+    for (const type of ['alerts:change', 'lines:selected', 'distribution:summary', 'undo:pushed', 'settings:change']) {
+      Store.emit({ type });
+      assert.equal(Store.dataRev(), before + 1, `${type} leaves dataRev alone`);
+      assert.equal(Store.rev(), rev + (['alerts:change', 'lines:selected', 'distribution:summary', 'undo:pushed', 'settings:change'].indexOf(type) + 1), `${type} still bumps rev()`);
+    }
+    Store.emit({ type: 'a-new-event-nobody-listed' });
+    assert.equal(Store.dataRev(), before + 2, 'an unlisted event bumps dataRev (exclusion list)');
+  } finally { off(); }
+});
