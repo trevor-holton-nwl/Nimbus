@@ -1046,7 +1046,9 @@ async function _levMinutesEntered(key: string, raw: string): Promise<void> {
     _levForcePaint = true;
     try { _paint(); } finally { _levForcePaint = false; }
   } catch (e) {
-    if (!_isAbortOrTimeout(e)) ErrorLog.warn('alert-monitor', 'leverage replay failed', { error: String((e as Error)?.message || e) });
+    if (_isAbortOrTimeout(e) !== 'abort') {
+      ErrorLog.warn('alert-monitor', _isAbortOrTimeout(e) === 'timeout' ? 'leverage replay timed out' : 'leverage replay failed', { error: String((e as Error)?.message || e) });
+    }
   } finally {
     _levControllers.delete(ctl);
     _levReplaying.delete(key);
