@@ -236,6 +236,14 @@ export const Compute = (() => {
       // NIMBUS_BUILD_ID, kept in sync with APP_VERSION on every deploy.)
       _worker = new Worker('../nimbus-worker.js?v=' + Config.BUILD_ID);
       _worker.onmessage = ({ data }) => {
+        // Worker-global failure (self.onerror / unhandledrejection): no job id, so it must
+        // be handled before the _pending lookup below drops it. Pending jobs are untouched.
+        if (data.type === 'ERROR' && data.id == null) {
+          ErrorLog.error('worker', `worker ${data.failingType || 'error'}: ${data.error || 'unknown'}`,
+            { failingType: data.failingType, filename: data.filename, lineno: data.lineno },
+            { errorCode: 'worker.uncaught', stack: data.stack });
+          return;
+        }
         const p = _pending.get(data.id);
         if (!p) return;
         _pending.delete(data.id);
@@ -251,6 +259,9 @@ export const Compute = (() => {
         } else {
           p.resolve(data);
         }
+      };
+      _worker.onmessageerror = () => {
+        ErrorLog.error('worker', 'messageerror: structured clone failed', {}, { errorCode: 'worker.messageerror' });
       };
       _worker.onerror = (ev) => {
         // Build {message, filename, lineno, colno} from the ErrorEvent and log

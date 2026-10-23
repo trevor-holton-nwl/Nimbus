@@ -773,3 +773,41 @@ test('Compute payload (_snap) is plant-scoped and strips PRODUCTION_VERSION', as
     Store.setTasks([], 'unit-test');
   }
 });
+
+// Worker-global errors (self.onerror / unhandledrejection) arrive as ERROR messages with id null;
+// they must be logged before the _pending lookup drops them, and must not touch pending jobs.
+test('Compute logs id-less worker ERROR messages and messageerror without touching pending jobs', async () => {
+  const { ErrorLog } = await import('../../../frontend/platform/foundation.mjs');
+  const prior = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+  let w;
+  globalThis.Worker = class { constructor() { w = this; } postMessage() {} };
+  const { Compute: C } = await import('../../../frontend/insights/services.mjs?workerglobal=1');
+  try {
+    ErrorLog.clear();
+    Store.setMasterData({ plants: [{ plant: 'GP' }], lines: [{ plant: 'GP', line: 'GL1' }] }, 'unit-test');
+    Store.setSelectedPlant('GP', 'unit-test');
+    let settled = false;
+    const job = C.utilization(0, 7);
+    job.then(() => { settled = true; }, () => { settled = true; });
+    w.onmessage({ data: { type: 'ERROR', id: null, failingType: 'uncaught', error: 'boom', stack: 'S', filename: 'f.js', lineno: 7 } });
+    w.onmessage({ data: { type: 'ERROR', id: null, failingType: 'unhandledrejection', error: 'rej' } });
+    w.onmessageerror({});
+    await new Promise(r => setImmediate(r));
+    assert.equal(settled, false, 'pending job is not rejected by a worker-global error');
+    const es = ErrorLog.entries().filter(e => e.scope === 'worker');
+    assert.equal(es.length, 3);
+    assert.equal(es[0].level, 'error');
+    assert.equal(es[0].errorCode, 'worker.uncaught');
+    assert.match(es[0].msg, /boom/);
+    assert.equal(es[0].stack, 'S');
+    assert.equal(es[0].ctx.failingType, 'uncaught');
+    assert.equal(es[0].ctx.filename, 'f.js');
+    assert.equal(es[0].ctx.lineno, 7);
+    assert.equal(es[1].ctx.failingType, 'unhandledrejection');
+    assert.equal(es[2].errorCode, 'worker.messageerror');
+    assert.equal(es[2].msg, 'messageerror: structured clone failed');
+  } finally {
+    if (prior) Object.defineProperty(globalThis, 'Worker', prior); else delete globalThis.Worker;
+    Store.setSelectedPlant(null, 'unit-test');
+  }
+});
