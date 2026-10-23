@@ -2955,4 +2955,6 @@ window.__NIMBUS_LOCALES.en = {
   'ui.history_field_segments': 'Segments',
   'ui.system_config_history_retention': 'Order history retention (days)',
   'ui.system_config_history_retention_hint': 'How long order change history is kept. 1 to 60 days; the default is 14. Older entries are removed nightly.',
+  'ui.insp_history_more': 'Older changes not shown',
+  'ui.system_config_history_retention_invalid': 'Enter a whole number from 1 to 60.',
 };
