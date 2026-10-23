@@ -705,3 +705,131 @@ def test_stamp_order_attributes_unchanged_row_writes_nothing_changed_prt_writes_
     stamp()
     rows = [e for e in _ing_events(ing, order_id=oid) if e[2] == "master_data_stamp"]
     assert len(rows) == 2 and rows[1][5] == {"prt_01": ["PA", "PX"]}
+# --------------------------------------------------------------------------- Task 4: purge / vanish / zero_open
+
+def test_purge_event_rows_snapshot_is_bounded_and_encodes_reason():
+    import db
+    rows = [{"id": "o1", "plant": "P1", "production_order": "PO1", "material_number": "M1", "machine": "L1",
+             "scheduled_start": dt.datetime(2026, 10, 1, 8), "scheduled_end": dt.datetime(2026, 10, 2, 8),
+             "planning_status": "needs_planning", "planning_reason": {"code": "runtime_unknown"},
+             "manual_firmed": False}]
+    (out,) = db._purge_event_rows("P1", rows)
+    assert out.op == "remove" and out.order_id == "o1"
+    assert out.changes["planning_status"] == ["needs_planning:runtime_unknown", None]
+    assert out.changes["machine"] == ["L1", None] and out.changes["scheduled_end"][0] == "2026-10-02T08:00:00"
+    assert "segments" not in out.changes and "notes" not in out.changes
+    (with_segs,) = db._purge_event_rows("P1", rows, {"o1": [{}, {}]})
+    assert with_segs.changes["segments"] == [2, None]
+
+
+def test_zero_open_event_rows_skip_already_reset_orders():
+    import backend.integration.sap_staging as st
+    cur = FakeCur()
+    base = {"plant": "P1", "production_order": "PO", "material_number": "M", "planning_reason": None}
+    befores = {
+        "a": {**base, "planning_status": "scheduled", "scheduled_start": dt.datetime(2026, 1, 1),
+              "scheduled_end": dt.datetime(2026, 1, 2), "manual_firmed": True, "segment_count": 2},
+        "b": {**base, "planning_status": "needs_planning", "planning_reason": {"code": "zero_open_quantity"},
+              "scheduled_start": None, "scheduled_end": None, "manual_firmed": False, "segment_count": 0},
+    }
+    assert st._record_zero_open_events(cur, befores, "tester", str(uuid.uuid4())) == 1
+
+
+def _mk_order(cur, plant, tag, i, *, machine="SHARED_LINE", status="scheduled", firmed=False, end=True):
+    oid = f"zz-{tag}-{i}"
+    cur.execute(
+        "INSERT INTO orders (id, production_order, material_number, plant, machine, basic_start_date,"
+        " basic_finish_date, scheduled_start, scheduled_end, planning_status, manual_firmed)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (oid, f"PO{tag}{i}", f"M{tag}", plant, machine, dt.datetime(2031, 3, 1, 6), dt.datetime(2031, 3, 2, 6),
+         dt.datetime(2031, 3, 1, 6) if end else None, dt.datetime(2031, 3, 2, 6) if end else None,
+         status, firmed))
+    return oid
+
+
+def _events(db, plant, source=None):
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT order_id, source, op, actor, action_id::text, changes FROM schedule_event"
+                    " WHERE plant = %s AND (%s::text IS NULL OR source = %s) ORDER BY id", (plant, source, source))
+        return cur.fetchall()
+
+
+@pytest.fixture
+def pe(planning_pg):
+    import backend.schedule_events.data as data
+    data.ensure_schedule_event_table()
+    planning_pg.tag = uuid.uuid4().hex[:8]
+    try:
+        yield planning_pg
+    finally:
+        with planning_pg.db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM sap_stage_vanished_order WHERE plant = %s", (planning_pg.plant,))
+            cur.execute("DELETE FROM orders WHERE plant = %s", (planning_pg.plant,))
+
+
+@pytest.mark.pg
+def test_purge_by_date_writes_one_remove_row_per_order_and_keeps_admin_audit(pe):
+    db = pe.db
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        ids = [_mk_order(cur, pe.plant, pe.tag, i) for i in range(3)]
+        conn.commit()
+    res = db.purge_orders_by_date(pe.plant, dt.datetime(2031, 3, 1), dt.datetime(2031, 3, 3), user_email=pe.actor)
+    assert res["deleted"] == 3
+    rows = _events(db, pe.plant)
+    assert sorted(r[0] for r in rows) == sorted(ids)
+    assert {r[1] for r in rows} == {"purge"} and {r[2] for r in rows} == {"remove"}
+    assert {r[3] for r in rows} == {pe.actor} and len({r[4] for r in rows}) == 1
+    ch = rows[0][5]
+    assert ch["machine"] == ["SHARED_LINE", None] and "scheduled_end" in ch and ch["planning_status"][0] == "scheduled"
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM admin_audit WHERE user_email = %s AND action = 'purge_by_date_range'",
+                    (pe.actor,))
+        assert cur.fetchone()[0] == 1
+
+
+@pytest.mark.pg
+def test_purge_by_ids_sap_vanish_records_source_and_segment_count(pe):
+    db = pe.db
+    batch = str(uuid.uuid4())
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        a = _mk_order(cur, pe.plant, pe.tag, 0)
+        b = _mk_order(cur, pe.plant, pe.tag, 1)
+        cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                    " VALUES (%s, 1, %s, %s), (%s, 2, %s, %s)",
+                    (a, dt.datetime(2031, 3, 1, 6), dt.datetime(2031, 3, 1, 12),
+                     a, dt.datetime(2031, 3, 2, 6), dt.datetime(2031, 3, 2, 12)))
+        conn.commit()
+    out = db.purge_orders_by_ids(pe.plant, [a, b], user_email=pe.actor, archive_batch_id=batch,
+                                 event_source="sap_vanish")
+    assert out["deleted"] == 2 and out["archived"] == 2
+    rows = {r[0]: r for r in _events(db, pe.plant)}
+    assert set(rows) == {a, b} and {r[1] for r in rows.values()} == {"sap_vanish"}
+    assert rows[a][4] == batch
+    assert rows[a][5]["segments"] == [2, None]
+
+
+@pytest.mark.pg
+def test_zero_open_reset_records_only_orders_that_actually_changed(pe):
+    import backend.integration.sap_staging as st
+    db = pe.db
+    bid = str(uuid.uuid4())
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        a = _mk_order(cur, pe.plant, pe.tag, 0, firmed=True)
+        _mk_order(cur, pe.plant, pe.tag, 1, status="needs_planning", end=False)
+        cur.execute("INSERT INTO order_schedule_segments (order_id, segment_no, scheduled_start, scheduled_end)"
+                    " VALUES (%s, 1, %s, %s)", (a, dt.datetime(2031, 3, 1, 6), dt.datetime(2031, 3, 1, 12)))
+        cur.execute(
+            "SELECT o.id, o.plant, o.planning_status, o.scheduled_start, o.scheduled_end, o.production_order,"
+            " o.material_number, o.manual_firmed, o.planning_reason, COALESCE(seg.segment_count, 0) AS segment_count"
+            " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE o.plant = %s ORDER BY o.id FOR UPDATE OF o",
+            (pe.plant,))
+        names = [d.name for d in cur.description]
+        befores = {r[0]: dict(zip(names, r, strict=True)) for r in cur.fetchall()}
+        assert st._record_zero_open_events(cur, befores, pe.actor, bid) == 1
+        conn.commit()
+    rows = _events(db, pe.plant, "sap_reset")
+    assert len(rows) == 1 and rows[0][0] == a and rows[0][4] == bid and rows[0][3] == pe.actor
+    ch = rows[0][5]
+    assert ch["manual_firmed"] == [True, False] and ch["segments"] == [1, 0]
+    assert ch["planning_status"] == ["scheduled", "needs_planning:zero_open_quantity"]
+    assert ch["scheduled_end"][1] is None
