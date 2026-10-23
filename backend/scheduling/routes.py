@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 import db
 import master_data as md
-from backend.admin_ops.diagnostics_state import DIAGNOSTICS
+from backend.admin_ops.diagnostics_state import DIAGNOSTICS, _warn
 from backend.admin_ops.logbuffer import _current_rid, _log_event
 from backend.priority_lists import cache as plcache
 from backend.scheduling.models import (
@@ -65,6 +65,20 @@ def _to_pydt(val):
     return ts.to_pydatetime().replace(tzinfo=None)
 
 
+def _fast_pydt(val):
+    """`_to_pydt` without pandas for the overwhelmingly common inputs (naive datetime or
+    ISO string, which is what the JSONB aggregate holds); anything else (or any parse
+    failure) falls back to `_to_pydt`, so results never differ for a value pandas accepts."""
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=None)
+    if isinstance(val, str) and val:
+        try:
+            return datetime.fromisoformat(val).replace(tzinfo=None)
+        except ValueError:
+            pass
+    return _to_pydt(val)
+
+
 def _schedule_segments_to_wire(raw) -> list[dict]:
     """Normalize the JSONB child aggregate into the API's naive-local date
     contract. Bad legacy data is skipped rather than allowed through a strict
@@ -75,8 +89,8 @@ def _schedule_segments_to_wire(raw) -> list[dict]:
     for index, segment in enumerate(raw, start=1):
         if not isinstance(segment, dict):
             continue
-        start = _to_pydt(segment.get("start_date"))
-        end = _to_pydt(segment.get("end_date"))
+        start = _fast_pydt(segment.get("start_date"))
+        end = _fast_pydt(segment.get("end_date"))
         if start is None or end is None or end <= start:
             continue
         try:
@@ -96,6 +110,194 @@ def _server_now_iso() -> str:
     derives ONE plant-zone clock (Store.plantNow) from the server instead of each viewer's own clock
     (backward scheduling OQ52). Never a DTO field."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+_DT_MIN = datetime.min
+_UNSET = object()
+_ISO_FMT = "%Y-%m-%dT%H:%M:%S"
+_DEFAULT_RANK = 999999
+_NORMALISED_ATTRS = ("COLOR", "PRT_01", "PRT_02", "PRODUCTION_VERSION")
+
+
+def _nn(v):
+    """NaN-like -> None (float NaN, Decimal NaN); everything else unchanged."""
+    return None if v != v else v
+
+
+def _iso(dt):
+    return dt.strftime(_ISO_FMT) if dt is not None else None
+
+
+def _norm_attr(v):
+    """Mirror of apply_priority_merge's `astype(str).str.upper().str.strip()` under
+    pandas 3: a null stays null (it does NOT become "NONE"/"nan")."""
+    return None if v is None else str(v).upper().strip()
+
+
+def _rank_value(v):
+    """Rank as `pd.to_numeric(errors='coerce')` would see it: a number, or None."""
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return None if v != v else v
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f
+
+
+def _stamp_order_y(rows: list[dict], plant: str | None) -> None:
+    """Set row["ORDER_Y"] (rank or None = unlisted) in place — the plain-Python twin of
+    plcache.apply_priority_merge's scope stamping. Plant-wide colorWheel list first;
+    a machine-specific list then REPLACES it for that machine's rows (a colour absent
+    from it is None -> unlisted, even if the plant-wide list has it)."""
+    for r in rows:
+        r["ORDER_Y"] = None
+
+    def _stamp(by_machine: dict, subset: list[dict]) -> None:
+        plantwide = (by_machine.get("") or {}).get("colorWheel")
+        if plantwide:
+            for r in subset:
+                r["ORDER_Y"] = _rank_value(plantwide.get(r["COLOR"]))
+        for scope_key, fields in by_machine.items():
+            if scope_key == "":
+                continue
+            machine_map = fields.get("colorWheel")
+            if machine_map:
+                for r in subset:
+                    if r["MACHINE"] == scope_key:
+                        r["ORDER_Y"] = _rank_value(machine_map.get(r["COLOR"]))
+
+    if plant:
+        by_machine = plcache.PLANT_LISTS.get(plant)
+        if by_machine:
+            _stamp(by_machine, rows)
+    else:
+        for plant_key, by_machine in plcache.PLANT_LISTS.items():
+            subset = [r for r in rows if r["PLANT"] == plant_key]
+            if subset:
+                _stamp(by_machine, subset)
+
+
+def _build_task_rows(raw_rows: list[dict], plant: str | None) -> tuple[list[dict], list[dict], dict, int]:
+    """Pandas-free builder behind GET /tasks: raw `db.query_orders_rows` dicts ->
+    (data, links, color-merge stats, pre-merge row count). Same wire rows as the former
+    DataFrame path (pinned by tests/test_tasks_builder_golden.py).
+
+    ORDER: machines ascending ('' first, NULL machine last), then within a machine
+    BASIC_START_DATE ascending with nulls last, then ORDER_Y, then original SQL row
+    order (a STABLE sort; the old per-machine quicksort left start-time ties in an
+    unspecified order). Rows are copied before ORDER_Y/COLOR stamping, so the caller's
+    dicts are never mutated. Read-only: nothing here touches `orders`."""
+    stats: dict = {"color_merge_misses": 0, "missed_colors": [], "emitted_task_count": 0, "color_merge_ms": 0}
+    # Start is optional (backward scheduling OQ24/OQ25): a never-placed order has a finish and no start and
+    # is still served. Only a row with neither edge and no queue state has nothing to draw.
+    kept = [dict(r) for r in raw_rows
+            if r["BASIC_START_DATE"] is not None or r["BASIC_FINISH_DATE"] is not None
+            or r.get("PLANNING_STATUS") == "needs_planning"]
+    pre_merge_count = len(kept)
+    if not kept:
+        return [], [], stats, pre_merge_count
+
+    t_color = time.monotonic()
+    try:
+        for r in kept:
+            for col in _NORMALISED_ATTRS:
+                r[col] = _norm_attr(r.get(col))
+        _stamp_order_y(kept, plant)
+        missed = [r for r in kept if r["ORDER_Y"] is None]
+        if missed:
+            stats["color_merge_misses"] = len(missed)
+            stats["missed_colors"] = sorted({r["COLOR"] for r in missed if r["COLOR"] is not None})
+        for r in missed:
+            r["ORDER_Y"] = _DEFAULT_RANK
+    except Exception as e:
+        _warn("error", f"Priority-list merge failed: {e}; all rows get priority 999999")
+        stats.update(color_merge_misses=0, missed_colors=[])
+        for r in kept:
+            r["ORDER_Y"] = _DEFAULT_RANK
+    stats["emitted_task_count"] = len(kept)
+    stats["color_merge_ms"] = round((time.monotonic() - t_color) * 1000)
+
+    # Stable sort: python's sort is stable, so equal keys keep SQL order.
+    kept.sort(key=lambda r: (
+        r["MACHINE"] is None, r["MACHINE"] or "",
+        r["BASIC_START_DATE"] is None, r["BASIC_START_DATE"] or _DT_MIN,
+        r["ORDER_Y"],
+    ))
+
+    data: list[dict] = []
+    links: list[dict] = []
+    link_id = 1
+    prev_machine = _UNSET
+    prev_task_id = None
+    for r in kept:
+        # TaskRow.MACHINE is a required str; the UI shows '' as 'Unknown'.
+        prod_line = r["MACHINE"] or ""
+        if r["MACHINE"] != prev_machine:
+            prev_machine = r["MACHINE"]
+            prev_task_id = None
+        task_id = r["id"]
+        task_text = str(_nn(r.get("MATERIAL_DESCRIPTION"))).strip()
+        if not task_text or task_text == "nan":
+            task_text = f"Order {task_id[:8]}"
+        status = r.get("PLANNING_STATUS")
+        rv = r.get("ROW_VERSION")
+        data.append({
+            "id": task_id,
+            "text": task_text,
+            "start_date": _iso(r["BASIC_START_DATE"]),
+            "end_date": _iso(r["BASIC_FINISH_DATE"]),
+            "original_start_date": _iso(r.get("ORIGINAL_START_DATE")),
+            "original_end_date": _iso(r.get("ORIGINAL_END_DATE")),
+            "user_scheduled": bool(r.get("USER_SCHEDULED")),
+            "MACHINE": prod_line,
+            "MATERIAL_DESCRIPTION": task_text,
+            "MATERIAL_NUMBER": _clean_id(r.get("MATERIAL_NUMBER")),
+            "ORDER_QUANTITY_(GMEIN)": _nn(r.get("ORDER_QUANTITY_(GMEIN)")),
+            "COLOR": r["COLOR"],
+            "PRT_01": r["PRT_01"],
+            "PRT_02": r["PRT_02"],
+            "PRODUCTION_VERSION": r["PRODUCTION_VERSION"],
+            "PLANT": r.get("PLANT"),
+            "ORDER": _clean_id(r.get("PRODUCTION_ORDER")),
+            "ORDER_Y": r["ORDER_Y"],
+            "RUN_TIME": _nn(r.get("RUN_TIME")),
+            "FORM_SIZE": r.get("FORM_SIZE"),
+            "notes": r.get("NOTES"),
+            "ecc_firmed": r.get("FIRMING_INDICATOR") == "X",
+            "firmed": bool(r.get("FIRMED")),
+            "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)": _nn(r.get("PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)")),
+            "REDUCED_QUANTITY_(GMEIN)": _nn(r.get("REDUCED_QUANTITY_(GMEIN)")),
+            "ORDER_CATEGORY": r.get("ORDER_CATEGORY"),
+            "ORDER_TYPE": r.get("ORDER_TYPE"),
+            "BOM_ALTERNATIVE": _nn(r.get("BOM_ALTERNATIVE")),
+            "BOM_USAGE": _nn(r.get("BOM_USAGE")),
+            "LABOR_HOURS_(MEINH)": _nn(r.get("LABOR_HOURS_(MEINH)")),
+            "MACHINE_HOURS_(MEINH)": _nn(r.get("MACHINE_HOURS_(MEINH)")),
+            "NO_OF_FTE_(MEINH)": _nn(r.get("NO_OF_FTE_(MEINH)")),
+            "PARENT_ORDER": r.get("PARENT_ORDER"),
+            "DISTRIBUTION_LETTER": r.get("DISTRIBUTION_LETTER"),
+            # Optimistic-concurrency token (Postgres xmin). The client echoes it
+            # back on edit so the server can reject writes computed from stale data.
+            "row_version": int(rv) if rv is not None else None,
+            "schedule_segments": _schedule_segments_to_wire(r.get("SCHEDULE_SEGMENTS")),
+            "runtime_schedule_mismatch": bool(r.get("RUNTIME_SCHEDULE_MISMATCH")),
+            "placement_exception": r.get("PLACEMENT_EXCEPTION") or None,
+            "planning_status": status or "scheduled",
+            "planning_reason": r.get("PLANNING_REASON"),
+            "run_time_source": r.get("run_time_source"),
+            "run_time_basis": r.get("run_time_basis"),
+        })
+        # No links for queued rows or rows with no machine (chaining unrelated unassigned orders is meaningless).
+        if status == "needs_planning" or not prod_line:
+            continue
+        if prev_task_id:
+            links.append({"id": link_id, "source": prev_task_id, "target": task_id, "type": "0"})
+            link_id += 1
+        prev_task_id = task_id
+    return data, links, stats, pre_merge_count
 
 
 def _log_tasks_timing(plant, row_count: int, **stages_s: float) -> None:
@@ -170,9 +372,9 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
     # Timeline band and the optimizer's placement-floor helper without a
     # second copy of the clock math on either side.
     t_start = time.perf_counter()
-    df, visibility_horizon_end, frozen_horizon_end = db.query_orders(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
+    rows, visibility_horizon_end, frozen_horizon_end = db.query_orders_rows(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
     t_sql = time.perf_counter()
-    if df is None or df.empty:
+    if not rows:
         empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
                       "machine_filter_active": machine, "pre_color_merge_count": 0,
                       "raw_row_count": 0, "unique_id_count": 0,
@@ -186,97 +388,8 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
                       "server_now": _server_now_iso()}
         return {"data": [], "links": [], "meta": empty_meta}
 
-    # Drop rows with no usable start date (query can't enforce this without
-    # losing the NULL diagnostic), then color-merge the scoped subset.
-    # The start is optional at ingest (backward scheduling OQ24/OQ25), so a never-placed order can have a
-    # finish and no start: it is still served (the browser derives the start). Only a row with neither edge
-    # and no queue state has nothing to draw.
-    df = df[df["BASIC_START_DATE"].notna() | df["BASIC_FINISH_DATE"].notna() |
-            (df.get("PLANNING_STATUS", pd.Series("scheduled", index=df.index)) == "needs_planning")].reset_index(drop=True)
-    pre_merge_count = len(df)
-
-    df, cm_stats = plcache.apply_priority_merge(df, plant=plant)
-    df = df.astype(object).where(pd.notna(df), other=None)
-    t_frame = time.perf_counter()
-    data = []
-    link_id_counter = 1
-    links = []
-
-    # dropna=False: an order with no machine yet must still be emitted (it was
-    # silently dropped before). Such rows get no finish-to-start links below --
-    # chaining unrelated unassigned orders would be meaningless.
-    for machine_key, group_raw in df.groupby("MACHINE", dropna=False):
-        # TaskRow.MACHINE is a required str; the UI shows '' as 'Unknown'
-        prod_line = "" if pd.isna(machine_key) else machine_key
-        group = group_raw.sort_values("BASIC_START_DATE")
-        prev_task_id = None
-
-        for _, row in group.iterrows():
-            task_id = row["id"]
-            task_text = str(row.get("MATERIAL_DESCRIPTION", "")).strip()
-            if not task_text or task_text == "nan":
-                task_text = f"Order {task_id[:8]}"
-
-            orig_start = row.get("ORIGINAL_START_DATE")
-            orig_end   = row.get("ORIGINAL_END_DATE")
-            data.append({
-                "id": task_id,
-                "text": task_text,
-                "start_date": row["BASIC_START_DATE"].strftime("%Y-%m-%dT%H:%M:%S") if pd.notna(row["BASIC_START_DATE"]) else None,
-                "end_date": row["BASIC_FINISH_DATE"].strftime("%Y-%m-%dT%H:%M:%S") if pd.notna(row["BASIC_FINISH_DATE"]) else None,
-                "original_start_date": orig_start.strftime("%Y-%m-%dT%H:%M:%S") if pd.notna(orig_start) else None,
-                "original_end_date":   orig_end.strftime("%Y-%m-%dT%H:%M:%S")   if pd.notna(orig_end)   else None,
-                "user_scheduled": bool(row.get("USER_SCHEDULED")),
-                "MACHINE": prod_line,
-                "MATERIAL_DESCRIPTION": task_text,
-                "MATERIAL_NUMBER": _clean_id(row.get("MATERIAL_NUMBER")),
-                "ORDER_QUANTITY_(GMEIN)": row.get("ORDER_QUANTITY_(GMEIN)"),
-                "COLOR": row.get("COLOR"),
-                "PRT_01": row.get("PRT_01"),
-                "PRT_02": row.get("PRT_02"),
-                "PRODUCTION_VERSION": row.get("PRODUCTION_VERSION"),
-                "PLANT": row.get("PLANT"),
-                "ORDER": _clean_id(row.get("PRODUCTION_ORDER")),
-                "ORDER_Y": row.get("ORDER_Y"),
-                "RUN_TIME": row.get("RUN_TIME"),
-                "FORM_SIZE": row.get("FORM_SIZE"),
-                "notes": row.get("NOTES"),
-                "ecc_firmed": row.get("FIRMING_INDICATOR") == "X",
-                "firmed": bool(row.get("FIRMED")),
-                "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)": row.get("PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)"),
-                "REDUCED_QUANTITY_(GMEIN)": row.get("REDUCED_QUANTITY_(GMEIN)"),
-                "ORDER_CATEGORY": row.get("ORDER_CATEGORY"),
-                "ORDER_TYPE": row.get("ORDER_TYPE"),
-                "BOM_ALTERNATIVE": row.get("BOM_ALTERNATIVE"),
-                "BOM_USAGE": row.get("BOM_USAGE"),
-                "LABOR_HOURS_(MEINH)": row.get("LABOR_HOURS_(MEINH)"),
-                "MACHINE_HOURS_(MEINH)": row.get("MACHINE_HOURS_(MEINH)"),
-                "NO_OF_FTE_(MEINH)": row.get("NO_OF_FTE_(MEINH)"),
-                "PARENT_ORDER": row.get("PARENT_ORDER"),
-                "DISTRIBUTION_LETTER": row.get("DISTRIBUTION_LETTER"),
-                # Optimistic-concurrency token (Postgres xmin). The client echoes it
-                # back on edit so the server can reject writes computed from stale data.
-                "row_version": int(row["ROW_VERSION"]) if pd.notna(row.get("ROW_VERSION")) else None,
-                "schedule_segments": _schedule_segments_to_wire(row.get("SCHEDULE_SEGMENTS")),
-                "runtime_schedule_mismatch": bool(row.get("RUNTIME_SCHEDULE_MISMATCH")),
-                "placement_exception": row.get("PLACEMENT_EXCEPTION") or None,
-                "planning_status": row.get("PLANNING_STATUS") or "scheduled",
-                "planning_reason": row.get("PLANNING_REASON"),
-                "run_time_source": row.get("run_time_source"),
-                "run_time_basis": row.get("run_time_basis"),
-            })
-
-            if row.get("PLANNING_STATUS") == "needs_planning" or not prod_line:
-                continue
-            if prev_task_id:
-                links.append({
-                    "id": link_id_counter,
-                    "source": prev_task_id,
-                    "target": task_id,
-                    "type": "0"
-                })
-                link_id_counter += 1
-            prev_task_id = task_id
+    data, links, cm_stats, pre_merge_count = _build_task_rows(rows, plant)
+    t_build = time.perf_counter()
 
     # Merge base diagnostics with this request's color stats so the pipeline UI
     # sees plant-scoped color_merge_misses / missed_colors / emitted_task_count.
@@ -292,8 +405,7 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
     meta["visibility_horizon_end"] = visibility_horizon_end.isoformat() if visibility_horizon_end else None
     meta["frozen_horizon_end"] = frozen_horizon_end.isoformat() if frozen_horizon_end else None
     meta["server_now"] = _server_now_iso()
-    t_rows = time.perf_counter()
-    _log_tasks_timing(plant, len(data), sql=t_sql - t_start, frame=t_frame - t_sql, build=t_rows - t_frame)
+    _log_tasks_timing(plant, len(data), sql=t_sql - t_start, build=t_build - t_sql)
     return {"data": data, "links": links, "meta": meta}
 
 

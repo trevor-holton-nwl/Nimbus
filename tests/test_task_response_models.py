@@ -1053,8 +1053,8 @@ def test_tasks_meta_carries_server_now_as_iso_utc_on_the_empty_envelope(monkeypa
     envelope (no DB rows needed) and on the helper the full path shares."""
     from datetime import datetime, timezone
 
-    monkeypatch.setattr(scheduling_routes.db, "query_orders", lambda **kw: (None, None, None))
-    body = scheduling_routes.get_tasks(plant="5512", machine=None, limit=None, offset=None, allowed_plants=None)
+    monkeypatch.setattr(scheduling_routes.db, "query_orders_rows", lambda **kw: ([], None, None))
+    body = scheduling_routes.build_tasks_payload("5512", None, None, None, None)
     stamp = body["meta"]["server_now"]
     parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     assert stamp.endswith("Z") and parsed.tzinfo is not None

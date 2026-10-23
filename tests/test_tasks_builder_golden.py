@@ -322,3 +322,21 @@ def test_tie_order_is_stable_by_order_y_then_input_order(monkeypatch):
     assert sorted(live["data"], key=key) == sorted(legacy["data"], key=key)
     assert len(live["links"]) == len(legacy["links"]) == 5
     assert strip_volatile(live["meta"]) == strip_volatile(legacy["meta"])
+
+
+@pytest.mark.parametrize("val", [
+    "2026-10-22T08:00:00", "2026-10-22 08:00:00", "2026-10-22T08:00:00.123456", "2026-10-22T08:00:00Z",
+    "2026-10-22T08:00:00+02:00", "2026-10-22", datetime(2026, 10, 22, 8), "10/22/2026 08:00", "garbage", "", None,
+])
+def test_fast_pydt_matches_to_pydt(val):
+    assert routes._fast_pydt(val) == routes._to_pydt(val)
+
+
+def test_builder_does_not_mutate_input_rows(monkeypatch):
+    rows = [r for r in mixed_rows() if r["PLANT"] == "P1"]
+    before = copy.deepcopy(rows)
+    live_build(monkeypatch, rows, "P1")
+    assert rows == before
+    out = routes._build_task_rows(rows, "P1")
+    assert out[3] == len([r for r in rows if r["BASIC_START_DATE"] or r["BASIC_FINISH_DATE"] or r["PLANNING_STATUS"] == "needs_planning"])
+    assert rows == before

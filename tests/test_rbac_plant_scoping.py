@@ -83,9 +83,9 @@ def test_get_tasks_allows_an_in_scope_plant_through_to_the_data_layer(scoped_cli
 
     def fake_query_orders(plant=None, line=None, limit=None, offset=None, allowed_plants=None):
         calls.append({"plant": plant, "allowed_plants": allowed_plants})
-        return None, None, None
+        return [], None, None
 
-    monkeypatch.setattr(db, "query_orders", fake_query_orders)
+    monkeypatch.setattr(db, "query_orders_rows", fake_query_orders)
     response = scoped_client.get(f"/tasks?plant={PLANT_A}")
     assert response.status_code == 200
     assert calls == [{"plant": PLANT_A, "allowed_plants": [PLANT_A]}]
