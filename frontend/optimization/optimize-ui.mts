@@ -876,6 +876,9 @@ interface PreviewExplanation {
    *  successor was actually patched — orders admitted as a line's first order
    *  with no recorded line state. */
   scheduledStateUnrecorded: { orders: number; lines: number };
+  /** Placed, user-scheduled orders crossing the window end, held in place
+   *  (`CandidateResult.windowEndHeldIds`). They drop out of the scoring. */
+  windowEndHeld: { orders: number };
   /** B3: orders in scope for this run (plant + line filter + excludeFromOpt)
    *  that ended up with neither a patch nor a firmed/pinned exemption — i.e.
    *  "not scheduled". Derived by set difference against `candidate.patches`,
@@ -1205,6 +1208,7 @@ export const OptimizerPreview = {
       unchangedLines: [...new Set(candidate.unchangedLines)].slice(0, PREVIEW_REASON_LIMIT),
       scheduledWithoutSetup: { orders: scheduledWithoutSetupOrders.size, lines: scheduledWithoutSetupLines.size },
       scheduledStateUnrecorded: { orders: stateUnrecordedOrders.size, lines: stateUnrecordedLines.size },
+      windowEndHeld: { orders: new Set(candidate.windowEndHeldIds ?? []).size },
       unplacedOrders: { orders: unplacedOrderIds.size, lines: unplacedLines.size },
       prunes: tallyPrunes(candidate.explanation),
       search: {
@@ -2008,6 +2012,14 @@ export const OptimizerPreview = {
         }))}</div>`
       : '';
 
+    // Orders crossing the window end are fixed, not optimized; say so, since
+    // they drop out of lateness/instability scoring and Needs Planning.
+    const windowEndHeldHtml = (explanation && explanation.windowEndHeld.orders > 0)
+      ? `<div class="opt-pv-backlog-warning">${Util.escapeHtml(Util.t('ui.opt_pv_window_end_held', {
+          orders: explanation.windowEndHeld.orders,
+        }))}</div>`
+      : '';
+
     // Per-card markup
     const cardsHtml = cards.map(c => {
       const preV  = pre[c.k]  ?? 0;
@@ -2142,6 +2154,8 @@ export const OptimizerPreview = {
         ${scheduledWithoutSetupHtml}
 
         ${scheduledStateUnrecordedHtml}
+
+        ${windowEndHeldHtml}
 
 
         <div class="opt-pv-sections">

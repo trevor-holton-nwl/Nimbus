@@ -5983,3 +5983,79 @@ test('detached free intervals: a line missing from the snapshot follows its plan
   assert.deepEqual(hoursOf(SetupScheduler.freeIntervalsForTest(noPlant, 'LX', 'P1', from, through)), [[7, 19]],
     'plant unresolved: the default shift week, as before');
 });
+
+// ---- Window-end boundary: a placed, user-scheduled order crossing horizonEnd is held ----
+function straddler(id = 'straddle', overrides = {}) {
+  return {
+    ...scheduledTask(id, 5, 'GREEN', '2026-08-04T18:00:00', '2026-08-03T15:00:00', '2026-08-03T20:00:00'),
+    user_scheduled: true, planning_status: 'scheduled', ...overrides,
+  };
+}
+
+test('window-end boundary: a placed straddler is held in all three modes and the early capacity is reserved around it', () => {
+  for (const mode of ['due-date', 'spt', 'min-changeover']) {
+    const early = scheduledTask('early', 2, 'GREEN', '2026-08-03T18:00:00');
+    const snapshot = setupSnapshot([straddler(), early]);
+    const bounds = dueDateBounds({ ...setupTruth(), plant_active: true });
+    const result = Engine.evaluateSetupAware(mode, bounds, snapshot);
+    assert.equal(result.patches.some(p => p.id === 'straddle'), false, `${mode}: no patch for the held order`);
+    assert.equal(result.dispositions.some(d => d.id === 'straddle'), false, `${mode}: not mutable demand`);
+    assert.deepEqual([...result.windowEndHeldIds], ['straddle'], mode);
+    const placed = patchFor(result, 'early');
+    assert.ok(placed, `${mode}: early order placed`);
+    assert.ok(placed.changes.end_date.getTime() <= at('2026-08-03T15:00:00').getTime(), `${mode}: before the held order`);
+    assert.equal(result.validationFindings.some(f => f.code === 'scope'), false, `${mode}: no scope finding`);
+    assert.deepEqual(SetupScheduler.validateCandidateForApply(result, snapshot).filter(f => f.severity === 'error'), [], mode);
+  }
+});
+
+test('window-end boundary: the no-setup-definition whole-line path also leaves the straddler alone', () => {
+  const snapshot = setupSnapshot([straddler(), scheduledTask('early', 2, 'GREEN', '2026-08-03T18:00:00')]);
+  const bounds = dueDateBounds(setupTruth({ current: null, definition: null }));
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+  assert.equal(result.patches.some(p => p.id === 'straddle'), false);
+  assert.equal(result.validationFindings.some(f => f.code === 'scope'), false);
+});
+
+test('window-end boundary: a setup conflict is blamed on the mutable predecessor, not the held order', () => {
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'RED', 600), setupRow('RED', 'GREEN', 0)] });
+  const held = straddler('straddle', { COLOR: 'GREEN' });
+  const early = scheduledTask('early-red', 2, 'RED', '2026-08-03T18:00:00');
+  const snapshot = setupSnapshot([held, early]);
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup));
+  assert.equal(result.validationFindings.some(f => f.taskId === 'straddle' && f.severity === 'error'), false,
+    'no error is attributed to the held boundary');
+  assert.equal(result.patches.some(p => p.id === 'straddle'), false);
+});
+
+test('window-end boundary: user_scheduled false straddler is still re-placed', () => {
+  const snapshot = setupSnapshot([straddler('free', { user_scheduled: false })]);
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth()));
+  assert.ok(result.dispositions.some(d => d.id === 'free'), 'mutable');
+  assert.equal(result.windowEndHeldIds.length, 0);
+});
+
+test('window-end boundary: fully-inside and start-edge orders are unchanged', () => {
+  const inside = { ...scheduledTask('inside', 2, 'GREEN', '2026-08-03T18:00:00', '2026-08-03T10:00:00', '2026-08-03T12:00:00'), user_scheduled: true };
+  const atEdge = { ...scheduledTask('edge', 2, 'GREEN', '2026-08-04T18:00:00', '2026-08-03T18:00:00', '2026-08-03T20:00:00'), user_scheduled: true };
+  const endsAtEdge = { ...scheduledTask('ends-edge', 1, 'GREEN', '2026-08-03T18:00:00', '2026-08-03T17:00:00', '2026-08-03T18:00:00'), user_scheduled: true };
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([inside, atEdge, endsAtEdge]), dueDateBounds(setupTruth()));
+  assert.equal(result.windowEndHeldIds.length, 0);
+  assert.ok(result.dispositions.some(d => d.id === 'inside'));
+});
+
+test('window-end boundary: running/frozen/firmed crossing orders keep the protected disposition', () => {
+  const snapshot = setupSnapshot([straddler('fixed-cross')], { firmedIds: ['fixed-cross'] });
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth()));
+  assert.equal(result.dispositions.find(d => d.id === 'fixed-cross')?.status, 'protected');
+  assert.equal(result.windowEndHeldIds.length, 0);
+});
+
+test('window-end boundary: explicit scope (Remove Backlog) exempts the order and respectFirmed:false still holds it', () => {
+  const snapshot = setupSnapshot([straddler()]);
+  const scoped = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth(), { scopeTaskIds: ['straddle'] }));
+  assert.ok(scoped.dispositions.some(d => d.id === 'straddle'), 'selected order stays in scope');
+  assert.equal(scoped.windowEndHeldIds.length, 0);
+  const noFirm = Engine.evaluateSetupAware('due-date', dueDateBounds({ ...setupTruth(), plant_active: true }), { ...snapshot, firmedIds: [] });
+  assert.deepEqual([...noFirm.windowEndHeldIds], ['straddle']);
+});

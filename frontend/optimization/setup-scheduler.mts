@@ -921,6 +921,9 @@ export interface CandidateResult {
   missingEdges: readonly MissingSetupEdge[];
   /** Compatibility detail consumed only by the existing backlog-preview UI. */
   backlogResult?: RemoveBacklogResult;
+  /** Ids of placed, user-scheduled orders that straddle the window end and are
+   * held in place (see `isWindowEndBoundary`). Preview-only tally. */
+  windowEndHeldIds?: readonly string[];
 }
 
 interface DueDateGroup {
@@ -6645,6 +6648,24 @@ function normalizedQueuedTask(task: NimbusTask): NimbusTask {
   };
 }
 
+/** A placed, user-scheduled order that starts inside the window and finishes
+ * past `horizonEnd` is held in place (SAP fixes partly-inside activities).
+ * Mirrors `engine.mts` user_scheduled semantics without importing engine
+ * (import cycle). Protected rows keep their own path; explicit-scope callers
+ * (Remove Backlog) are exempt. */
+function isWindowEndBoundary(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): boolean {
+  if (task.user_scheduled !== true) return false;
+  if (bounds.scopeTaskIds) return false;
+  const horizonEnd = timestamp(bounds.horizonEnd)?.getTime();
+  if (horizonEnd === undefined) return false;
+  const start = timestamp(task.start_date);
+  const end = timestamp(task.end_date);
+  if (!start || !end || !(end > start)) return false;
+  if (task.planning_status === 'needs_planning') return false;
+  if (!(end.getTime() > horizonEnd) || !(start.getTime() < horizonEnd)) return false;
+  return !taskIsFirmed(snapshot, task);
+}
+
 function buildTaskScope(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): TaskScope {
   const scopedTaskIds = idSet(bounds.scopeTaskIds);
   const boundaryTaskIds = idSet(bounds.boundaryTaskIds);
@@ -6689,6 +6710,11 @@ function buildTaskScope(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<D
       mutable.push(normalizedQueuedTask(task));
       continue;
     }
+    // A placed order crossing the window end is fixed occupancy, not demand.
+    if (isWindowEndBoundary(snapshot, bounds, task)) {
+      boundaries.push(task);
+      continue;
+    }
     // A protected interval remains a physical obstacle even when a caller
     // supplies only the mutable ids. This keeps an omitted boundary list from
     // allowing a selected repair to overlap firmed/ECC/frozen work.
@@ -6725,7 +6751,8 @@ function evaluationTasks(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
 }
 
 function taskIsEvaluationProtected(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): boolean {
-  return taskIsFirmed(snapshot, task) || (idSet(bounds.boundaryTaskIds)?.has(taskId(task)) ?? false);
+  return taskIsFirmed(snapshot, task) || (idSet(bounds.boundaryTaskIds)?.has(taskId(task)) ?? false)
+    || isWindowEndBoundary(snapshot, bounds, task);
 }
 
 function productiveIntervals(task: NimbusTask): PlacementInterval[] {
@@ -7100,6 +7127,8 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
     dispositions,
     searchComplete: candidate.diagnostics.exhaustive === true && candidate.diagnostics.termination === 'completed',
     validationContext: { snapshot, bounds },
+    windowEndHeldIds: buildTaskScope(snapshot, bounds).boundaries
+      .filter(task => isWindowEndBoundary(snapshot, bounds, task)).map(taskId),
   };
   // Build the incumbent solely from original intervals. Mixing new candidate
   // placements with restored originals can create artificial overlaps and

@@ -90,6 +90,12 @@ The primary setup-aware deadline and iteration cap are one shared `SearchBudget`
 
 Historical placement tests use `scheduledPatches` to inspect admitted production independently of new queue patches. The hard-bounds acceptance cases in `tests/modules/setup-scheduler.test.mjs` inspect complete dispositions and queue aggregates, including DST, missing SAP aliases, setup/split overflow, protected reservations, selected/excluded lines, and expiration before and after a search winner.
 
+## Window-end boundary (2026-10-22)
+
+- **A placed order that crosses the window end is held, not re-placed.** `isWindowEndBoundary(snapshot, bounds, task)` in `setup-scheduler.mts` is true for a task with `user_scheduled === true` (same meaning as `engine.mts`; do not import engine, it adds a cycle edge), a valid interval, `start < horizonEnd < end`, not queued, not already firmed/running/frozen (`taskIsFirmed`), and with `bounds.scopeTaskIds` unset (Remove Backlog is exempt). `buildTaskScope` routes it to `boundaries` after the queued branch, and `taskIsEvaluationProtected` also returns true for it; the second step is the critical one, because the search, gap fill, validator overlap checks and setup checks key on that predicate, not on scope membership (otherwise the order is re-placed and Apply fails on an unclearable `scope` finding). Running, frozen and firmed crossers keep the `protected` disposition. `CandidateResult.windowEndHeldIds` carries the ids to the preview (`explanation.windowEndHeld`, locale key `ui.opt_pv_window_end_held`); the held orders drop out of lateness/instability scoring and out of Needs Planning.
+- **SAP basis.** SAP fixes activities lying only partly inside the optimization range; NIMBUS adopts that default. Orders that start at or after `horizonEnd` are unchanged (not in scope).
+- **Consequence for the Alert Monitor.** "Optimize this window" opens a 1-to-few-day window, so any order crossing that short window end, including the conflicting order itself, stays put; the planner widens the window to move it. The owner chose no exemption (2026-10-22); the preview line makes the hold visible.
+
 ## Order Rules hardening (2026-10-20)
 
 - **The push-forward limit is hard.** The preview's over-cap tally and the post-run over-cap toast were removed. An order whose only placements finish past `max_push_forward_days` goes to Needs Planning (`push_limit_unmet`). `SCORE_OVER_CAP` stays in the score vector for arity only.
