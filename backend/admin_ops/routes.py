@@ -25,6 +25,7 @@ import master_data as md
 from backend.admin_ops.diagnostics_state import DIAGNOSTICS
 from backend.admin_ops.logbuffer import _BACKEND_LOG, _current_rid, _log_event
 from backend.priority_lists import cache as plcache
+import backend.schedule_events.data as schedule_events_data
 from backend.security.auth import require_admin, require_api_key
 
 router = APIRouter()
@@ -80,6 +81,11 @@ def livez():
 def get_diagnostics_deep():
     """Full pipeline breakdown: DB stats + color-wheel analysis + current DIAGNOSTICS."""
     db_deep = db.get_db_deep_stats()
+    db_deep["schedule_event"] = {
+        **db.get_schedule_event_stats(),
+        "last_sweep": DIAGNOSTICS.get("schedule_event_last_sweep"),
+        "write_failures": DIAGNOSTICS.get("schedule_event_write_failures", 0),
+    }
 
     # Color wheel analysis against the colors currently in the orders table.
     # Source distinct colors from the DB (color column only — no full-table load)
@@ -254,6 +260,16 @@ def maintenance_analyze(body: dict = Body(default={})):
                    exc=e, error_code=error_code, table=table)
         return {"ok": False, "status": "error", "error_code": error_code,
                 "error": str(e)}
+
+
+@router.post("/maintenance/schedule-event-sweep", dependencies=[Depends(require_api_key), Depends(require_admin)])
+def maintenance_schedule_event_sweep(body: dict = Body(default={})):
+    """Run the schedule_event retention sweep now. Optional {retention_days: int 1-60} overrides the setting."""
+    days = body.get("retention_days")
+    if days is not None and (isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 60):
+        raise HTTPException(status_code=400, detail="retention_days must be an integer from 1 to 60")
+    _log_event("info", "maintenance", "schedule_event sweep requested", retention_days=days)
+    return {"ok": True, **schedule_events_data.sweep_schedule_events(retention_days=days)}
 
 
 # =============================================================================

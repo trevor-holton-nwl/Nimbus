@@ -2419,6 +2419,18 @@ def get_db_deep_stats() -> dict:
         return {"error": str(e), "total": 0, "by_line": {}}
 
 
+def get_schedule_event_stats() -> dict:
+    """Row count and oldest/newest `at` of schedule_event; nulls when the table is missing or unreachable."""
+    try:
+        with _pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*), min(at), max(at) FROM schedule_event")
+            n, lo, hi = cur.fetchone()
+        return {"rows": int(n), "oldest_at": lo.isoformat() if lo else None,
+                "newest_at": hi.isoformat() if hi else None}
+    except Exception:
+        return {"rows": None, "oldest_at": None, "newest_at": None}
+
+
 def get_pool_stats() -> dict:
     """Connection pool metrics from psycopg_pool."""
     try:

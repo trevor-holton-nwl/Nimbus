@@ -239,10 +239,11 @@ def test_deep_diagnostics_normalizes_distinct_colors_and_uses_plant_wide_lists(o
 
 def test_deep_diagnostics_retains_db_results_when_color_query_fails(ops, monkeypatch):
     monkeypatch.setattr(db, "get_db_deep_stats", lambda: {"orders": 42})
+    monkeypatch.setattr(db, "get_schedule_event_stats", lambda: {"rows": None})
     monkeypatch.setattr(db, "distinct_order_colors", MagicMock(side_effect=RuntimeError("color query failed")))
     response = ops.get("/diagnostics/deep", headers=ADMIN)
     assert response.status_code == 200
-    assert response.json()["db_stats"] == {"orders": 42}
+    assert response.json()["db_stats"]["orders"] == 42
     assert response.json()["color_wheel"]["error"] == "color query failed"
 
 
@@ -263,3 +264,48 @@ def test_db_diagnostics_assembles_all_sections_including_degraded_section(ops, m
     assert result == expected
     for function in functions.values():
         getattr(db, function).assert_called_once_with()
+
+
+SWEEP = "/maintenance/schedule-event-sweep"
+
+
+@pytest.mark.parametrize("headers,status", [({"x-user-email": "admin"}, 401),
+                                            ({"x-user-email": "planner", "x-api-key": "ops-test-key"}, 403)])
+def test_schedule_event_sweep_route_requires_both_guards(ops, monkeypatch, headers, status):
+    sweep = MagicMock()
+    monkeypatch.setattr(routes.schedule_events_data, "sweep_schedule_events", sweep)
+    assert ops.post(SWEEP, headers=headers, json={}).status_code == status
+    sweep.assert_not_called()
+
+
+@pytest.mark.parametrize("days", [0, 61, "7", True, 1.5])
+def test_schedule_event_sweep_route_rejects_bad_retention_days(ops, monkeypatch, days):
+    sweep = MagicMock()
+    monkeypatch.setattr(routes.schedule_events_data, "sweep_schedule_events", sweep)
+    assert ops.post(SWEEP, headers=ADMIN, json={"retention_days": days}).status_code == 400
+    sweep.assert_not_called()
+
+
+@pytest.mark.parametrize("body,expected", [({}, None), ({"retention_days": 7}, 7)])
+def test_schedule_event_sweep_route_forwards_override(ops, monkeypatch, body, expected):
+    canned = {"deleted": 3, "chunks": 1, "retention_days": expected or 14, "locked": False, "error": None}
+    sweep = MagicMock(return_value=canned)
+    monkeypatch.setattr(routes.schedule_events_data, "sweep_schedule_events", sweep)
+    response = ops.post(SWEEP, headers=ADMIN, json=body)
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, **canned}
+    sweep.assert_called_once_with(retention_days=expected)
+
+
+def test_diagnostics_deep_includes_schedule_event_block(ops, monkeypatch):
+    monkeypatch.setattr(db, "get_db_deep_stats", lambda: {"total": 0, "by_line": {}})
+    monkeypatch.setattr(db, "get_schedule_event_stats",
+                        lambda: {"rows": 5, "oldest_at": "2026-10-01T00:00:00+00:00", "newest_at": "2026-10-23T00:00:00+00:00"})
+    monkeypatch.setattr(db, "distinct_order_colors", lambda: [])
+    routes.DIAGNOSTICS["schedule_event_last_sweep"] = {"deleted": 2}
+    routes.DIAGNOSTICS["schedule_event_write_failures"] = 4
+    response = ops.get("/diagnostics/deep", headers=ADMIN)
+    assert response.status_code == 200
+    block = response.json()["db_stats"]["schedule_event"]
+    assert block == {"rows": 5, "oldest_at": "2026-10-01T00:00:00+00:00", "newest_at": "2026-10-23T00:00:00+00:00",
+                     "last_sweep": {"deleted": 2}, "write_failures": 4}
