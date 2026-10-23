@@ -450,8 +450,8 @@ interface AdminPipelineStep {
 export const AdminCockpit = {
   _initialized: false,
   _pendingFile: null as File | null,
-  _logFilter: { level: 'all', scope: 'all', search: '', errorCode: 'all', reqId: '' },
-  _backendLogFilter: { level: 'all', category: 'all', since: '', q: '', reqId: '' },
+  _logFilter: { level: 'all', scope: 'all', search: '', errorCode: 'all', reqId: '', user: '' },
+  _backendLogFilter: { level: 'all', category: 'all', since: '', q: '', reqId: '', user: '' },
   _healthData: null as AdminHealthResponse | null,
   _deepData: null as AdminDiagnosticsDeepResponse | null,
   _healthTimer: null as ReturnType<typeof setInterval> | null,
@@ -537,6 +537,7 @@ export const AdminCockpit = {
     document.getElementById('admin-log-reload')?.addEventListener('click', () => Persistence.reload());
     document.getElementById('admin-log-cache')?.addEventListener('click', () => Persistence.clearCache());
     document.getElementById('admin-log-copy')?.addEventListener('click', () => ErrorLog.copy());
+    document.getElementById('admin-log-export-json')?.addEventListener('click', () => ErrorLog.exportJson());
     document.getElementById('admin-log-copy-filtered')?.addEventListener('click', () => AdminCockpit._copyFiltered());
     document.getElementById('admin-log-clear')?.addEventListener('click', () => {
       ErrorLog.clear();
@@ -579,6 +580,10 @@ export const AdminCockpit = {
     });
     document.getElementById('admin-log-search')?.addEventListener('input', (e: Event) => {
       AdminCockpit._logFilter.search = (e.target as HTMLInputElement).value.toLowerCase();
+      AdminCockpit._renderLogs();
+    });
+    document.getElementById('admin-log-user')?.addEventListener('input', (e: Event) => {
+      AdminCockpit._logFilter.user = (e.target as HTMLInputElement).value.trim();
       AdminCockpit._renderLogs();
     });
 
@@ -1617,12 +1622,13 @@ export const AdminCockpit = {
   },
 
   _getFilteredEntries(): AdminFrontendLogEntry[] {
-    const { level, scope, search, errorCode, reqId } = AdminCockpit._logFilter;
+    const { level, scope, search, errorCode, reqId, user } = AdminCockpit._logFilter;
     return ErrorLog.entries().filter(e => {
       if (level !== 'all' && e.level !== level) return false;
       if (scope !== 'all' && e.scope !== scope) return false;
       if (errorCode && errorCode !== 'all' && e.errorCode !== errorCode) return false;
       if (reqId && e.reqId !== reqId) return false;
+      if (user && e.user !== user) return false;
       if (search) {
         const haystack = `${e.scope} ${e.msg} ${e.ts} ${e.errorCode || ''} ${e.reqId || ''}`.toLowerCase();
         if (!haystack.includes(search)) return false;
@@ -2236,12 +2242,25 @@ export const AdminCockpit = {
       }, 350));
       lvlSel.insertAdjacentElement('afterend', qIn);
     }
+    if (lvlSel && lvlSel.parentElement && !document.getElementById('admin-backend-log-user')) {
+      const uIn = document.createElement('input');
+      uIn.id = 'admin-backend-log-user';
+      uIn.type = 'search';
+      uIn.className = 'input';
+      uIn.placeholder = Util.t('ph.filter_user');
+      uIn.addEventListener('input', Util.debounce((ev: Event) => {
+        AdminCockpit._backendLogFilter.user = (ev.target as HTMLInputElement).value.trim();
+        AdminCockpit._renderBackendLog();
+      }, 350));
+      (document.getElementById('admin-backend-log-q') || lvlSel).insertAdjacentElement('afterend', uIn);
+    }
     const lvl = bf.level || 'all';
     const qp = [`limit=200`];
     if (lvl !== 'all')                  qp.push('level='    + encodeURIComponent(lvl));
     if (bf.category && bf.category !== 'all') qp.push('category=' + encodeURIComponent(bf.category));
     if (bf.since)                       qp.push('since='    + encodeURIComponent(bf.since));
     if (bf.q)                           qp.push('q='        + encodeURIComponent(bf.q));
+    if (bf.user)                        qp.push('user='     + encodeURIComponent(bf.user));
     const params = `?${qp.join('&')}`;
     const reqIdFilter = bf.reqId || '';
 
@@ -2411,7 +2430,7 @@ export const AdminCockpit = {
   _copyFiltered(): void {
     const entries = AdminCockpit._getFilteredEntries();
     const txt = entries.map((e) =>
-      `${e.ts} [${e.level.toUpperCase()}] ${e.scope}: ${e.msg}${e.ctx ? ' :: ' + JSON.stringify(e.ctx) : ''}`
+      `${e.ts} [${e.level.toUpperCase()}]${e.user ? ' <' + e.user + '>' : ''} ${e.scope}: ${e.msg}${e.ctx ? ' :: ' + JSON.stringify(e.ctx) : ''}`
     ).join('\n');
     navigator.clipboard?.writeText(txt).then(
       () => Toast.show(Util.t('toast.copied_filtered', { count: entries.length }), 'success'),
