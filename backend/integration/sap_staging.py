@@ -1775,7 +1775,8 @@ def _apply_planned_orders(conn, hdr, actor: str, step) -> dict:
         result = db.upsert_orders(rows, source="sap", batch_id=upsert_batch, raw_row_count=len(stage),
                                   warnings=warnings,
                                   plan_fn=distribution_data.plan, apply_fn=distribution_data.apply,
-                                  resolve_fn=routing_resolver.resolve_orders, sap_tz=SAP_SYSTEM_TZ)
+                                  resolve_fn=routing_resolver.resolve_orders, sap_tz=SAP_SYSTEM_TZ,
+                                  actor=actor)
     else:
         result = {"status": "ok", "inserted": 0, "updated": 0, "unchanged": 0}
     if result.get("status") not in (None, "ok"):

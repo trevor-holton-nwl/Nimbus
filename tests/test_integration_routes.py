@@ -99,7 +99,7 @@ def test_upload_orders_captures_uploaded_plants_before_ingest(admin_client, monk
     def fake_capture(**kwargs):
         events.append(("capture", kwargs))
 
-    def fake_ingest(raw, filename, diag=None):
+    def fake_ingest(raw, filename, diag=None, actor=None):
         events.append(("ingest", {"raw": raw, "filename": filename}))
         return {
             "status": "ok",
@@ -145,7 +145,7 @@ def test_upload_orders_malformed_file_still_captures_before_ingest_error(admin_c
     def fake_capture(**kwargs):
         events.append(("capture", kwargs))
 
-    def fake_ingest(file_bytes, filename, diag=None):
+    def fake_ingest(file_bytes, filename, diag=None, actor=None):
         events.append(("ingest", {"raw": file_bytes, "filename": filename}))
         return {
             "status": "error",
@@ -182,7 +182,7 @@ def test_upload_orders_malformed_file_still_captures_before_ingest_error(admin_c
 def test_upload_orders_unexpected_failure_logs_traceback_and_stage(admin_client, monkeypatch):
     """An unexpected ingest crash must leave the exception (traceback) and the
     diagnostic context (stage, size, rows) on the backend log entry."""
-    def fake_ingest(raw, filename, diag=None):
+    def fake_ingest(raw, filename, diag=None, actor=None):
         diag["stage"] = "upsert_orders"
         diag["rows"] = 7
         raise RuntimeError("boom")

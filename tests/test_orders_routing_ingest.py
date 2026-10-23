@@ -77,7 +77,7 @@ class _Cursor:
     def execute(self, statement, params=None):
         stmt = str(statement)
         self.executed.append((stmt, params))
-        if "routing_runtime_enabled = TRUE" in stmt:
+        if "routing_runtime_enabled = TRUE" in stmt and "RETURNING" not in stmt:
             self._fetchall_result = [(p,) for p in sorted(self._enabled_plants)]
         elif "COALESCE(production_version, '') <> ''" in stmt:
             self._pending, self._idx = [(0,)], 0   # pv_kept_on_blank count: nothing kept

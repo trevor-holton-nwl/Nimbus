@@ -775,7 +775,8 @@ def sync_object(object_key: str, *, user_email: str | None = None,
                                          filename=None, raw_row_count=rows_read,
                                          plan_fn=distribution_data.plan,
                                          apply_fn=distribution_data.apply,
-                                         resolve_fn=routing_resolver.resolve_orders)
+                                         resolve_fn=routing_resolver.resolve_orders,
+                                         actor="sap-scheduler")
             result["rows_inserted"] = int(apply_res.get("inserted", 0))
             result["rows_updated"] = int(apply_res.get("updated", 0))
             result["rows_failed"] = int(apply_res.get("failed", 0))

@@ -574,3 +574,134 @@ def test_tasks_update_still_requires_authentication(save_client):
     response = TestClient(brain.api).post("/tasks/update", json={"tasks": [], "client_id": "t"})
     assert response.status_code == 401
     assert calls == []
+
+# --------------------------------------------------------------------------- ingest hooks (Task 3)
+
+@pytest.fixture
+def ing(se):
+    """`se` plus a short plant (material_plants.plant is VARCHAR(10)) and order/master-data cleanup."""
+    ing = type("Ing", (), {})()
+    ing.se, ing.db, ing.actor = se, se.db, se.actor
+    ing.plant = "ZE" + se.token[:7]
+    ing.material = "ZZSE" + se.token
+    ing.batches = []
+    ing.start = dt.datetime(2030, 3, 4, 6, 0)
+    yield ing
+    with se.db._pool.connection() as conn, conn.cursor() as cur:
+        cleanup_schedule_events(cur, actor=se.actor, plants=[ing.plant])
+        cur.execute("DELETE FROM orders WHERE plant = %s", (ing.plant,))
+        cur.execute("DELETE FROM material_plants WHERE plant = %s", (ing.plant,))
+        cur.execute("DELETE FROM materials WHERE material_id = %s", (ing.material,))
+        if ing.batches:
+            cur.execute("DELETE FROM upload_audit WHERE batch_id = ANY(%s)", (ing.batches,))
+        conn.commit()
+
+
+def _ing_row(ing, n, *, quantity=10, finish_days=2):
+    return {
+        "production_order": f"ZZSE{ing.se.token}{n}", "material_number": ing.material,
+        "machine": "ZZM1", "plant": ing.plant, "basic_start_date": ing.start,
+        "basic_finish_date": ing.start + dt.timedelta(days=finish_days), "run_time": 4.0,
+        "order_quantity": quantity,
+    }
+
+
+def _ing_upload(ing, rows, *, source="excel", batch_id=None):
+    batch_id = batch_id or str(uuid.uuid4())
+    ing.batches.append(batch_id)
+    res = ing.db.upsert_orders(rows, batch_id=batch_id, source=source, filename="zz.xlsx",
+                               raw_row_count=len(rows), actor=ing.actor)
+    assert res["status"] == "ok"
+    return batch_id, res
+
+
+def _ing_events(ing, *, order_id=None):
+    with ing.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT order_id, op, source, actor, action_id::text, changes FROM schedule_event"
+            " WHERE plant = %s AND (%s::text IS NULL OR order_id = %s) ORDER BY id",
+            (ing.plant, order_id, order_id))
+        return cur.fetchall()
+
+
+def _ing_order_id(ing, n):
+    return ing.db.make_id(f"ZZSE{ing.se.token}{n}", ing.material)
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("source,expected", [("excel", "excel_upload"), ("sap", "sap_ingest")])
+def test_first_upload_writes_one_create_row_per_order_and_identical_reupload_none(ing, source, expected):
+    rows = [_ing_row(ing, n) for n in (1, 2, 3)]
+    batch_id, res = _ing_upload(ing, rows, source=source)
+    assert res["inserted"] == 3
+    evs = _ing_events(ing)
+    assert len(evs) == 3
+    assert {e[1] for e in evs} == {"create"} and {e[2] for e in evs} == {expected}
+    assert {e[3] for e in evs} == {ing.actor} and {e[4] for e in evs} == {batch_id}
+    assert all(e[5]["order_quantity"] == [None, 10] for e in evs)
+    _ing_upload(ing, rows, source=source)           # identical re-upload
+    assert len(_ing_events(ing)) == 3
+
+
+@pytest.mark.pg
+def test_sap_finish_change_on_placed_order_is_one_sap_reset_row(ing):
+    _ing_upload(ing, [_ing_row(ing, 1)])
+    oid = _ing_order_id(ing, 1)
+    placed_end = ing.start + dt.timedelta(days=30)
+    with ing.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE orders SET scheduled_start = %s, scheduled_end = %s, manual_firmed = TRUE"
+                    " WHERE id = %s", (ing.start + dt.timedelta(days=29), placed_end, oid))
+        conn.commit()
+    _ing_upload(ing, [_ing_row(ing, 1, finish_days=5)])
+    evs = _ing_events(ing, order_id=oid)
+    assert [e[1] for e in evs] == ["create", "modify"]
+    reset = evs[1]
+    assert reset[2] == "sap_reset"
+    ch = reset[5]
+    assert "basic_finish_date" in ch and ch["scheduled_end"][1] is None and ch["manual_firmed"] == [True, False]
+    assert ch["scheduled_start"][1] is None
+
+
+@pytest.mark.pg
+def test_quantity_only_sap_change_is_one_modify_row_with_ingest_source(ing):
+    _ing_upload(ing, [_ing_row(ing, 1, quantity=10)], source="sap")
+    oid = _ing_order_id(ing, 1)
+    _ing_upload(ing, [_ing_row(ing, 1, quantity=25)], source="sap")
+    evs = _ing_events(ing, order_id=oid)
+    assert [e[1] for e in evs] == ["create", "modify"]
+    assert evs[1][2] == "sap_ingest" and evs[1][5] == {"order_quantity": [10, 25]}
+
+
+@pytest.mark.pg
+def test_stamp_order_attributes_unchanged_row_writes_nothing_changed_prt_writes_one_row(ing):
+    _ing_upload(ing, [_ing_row(ing, 1)])
+    oid = _ing_order_id(ing, 1)
+    with ing.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO materials (material_id) VALUES (%s) ON CONFLICT DO NOTHING", (ing.material,))
+        cur.execute("INSERT INTO material_plants (material_id, plant, color, prt_01, prt_02) VALUES"
+                    " (%s, %s, 'RED', 'PA', 'PB')", (ing.material, ing.plant))
+        conn.commit()
+
+    def stamp():
+        ev = EventCtx("master_data_stamp", ing.actor, str(uuid.uuid4()))
+        with ing.db._pool.connection() as conn:
+            ing.db._stamp_order_attributes(conn, ids=[oid], ev=ev)
+            conn.commit()
+
+    stamp()
+    first = [e for e in _ing_events(ing, order_id=oid) if e[2] == "master_data_stamp"]
+    assert len(first) == 1 and first[0][5]["prt_01"] == [None, "PA"] and first[0][5]["prt_02"] == [None, "PB"]
+    with ing.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT xmin::text FROM orders WHERE id = %s", (oid,))
+        xmin = cur.fetchone()[0]
+    stamp()                                           # nothing differs: no row, no rewrite
+    assert len([e for e in _ing_events(ing, order_id=oid) if e[2] == "master_data_stamp"]) == 1
+    with ing.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT xmin::text FROM orders WHERE id = %s", (oid,))
+        assert cur.fetchone()[0] == xmin
+        cur.execute("UPDATE material_plants SET prt_01 = 'PX' WHERE material_id = %s AND plant = %s",
+                    (ing.material, ing.plant))
+        conn.commit()
+    stamp()
+    rows = [e for e in _ing_events(ing, order_id=oid) if e[2] == "master_data_stamp"]
+    assert len(rows) == 2 and rows[1][5] == {"prt_01": ["PA", "PX"]}

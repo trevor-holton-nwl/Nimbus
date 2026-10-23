@@ -3205,9 +3205,55 @@ _UPSERT_ROW_COLS = (
 )
 
 
+_STAMP_PV_SQL = f"COALESCE(NULLIF(o.production_version, ''), {_DEFAULT_PV_FILL_SQL})"
+
+
+def _stamp_run(cur, scope_sql: str, params: tuple, ev) -> int:
+    """The Seam 2 UPDATE for one scope. Only rows whose color / PRT / production version would actually
+    change are written (IS DISTINCT FROM guard: an unchanged row keeps its xmin and writes no history).
+    With `ev`, the changed rows' tracked before/after (self-join `b` = the pre-update image, PG16-safe) go to
+    schedule_event as `master_data_stamp` modify rows."""
+    cur.execute(
+        f"""
+        UPDATE orders o
+           SET color              = mp.color,
+               prt_01             = mp.prt_01,
+               prt_02             = mp.prt_02,
+               production_version = {_STAMP_PV_SQL},
+               updated_at         = NOW()
+          FROM material_plants mp, orders b
+         WHERE mp.plant = o.plant
+           AND mp.material_id = o.material_number
+           AND b.id = o.id
+           AND {scope_sql}
+           AND (o.color IS DISTINCT FROM mp.color
+                OR o.prt_01 IS DISTINCT FROM mp.prt_01
+                OR o.prt_02 IS DISTINCT FROM mp.prt_02
+                OR o.production_version IS DISTINCT FROM {_STAMP_PV_SQL})
+        RETURNING o.id, o.plant, o.production_order, o.material_number,
+                  b.prt_01, b.prt_02, b.production_version,
+                  o.prt_01, o.prt_02, o.production_version
+        """,
+        params,
+    )
+    if ev is None:
+        return 0
+    returned = cur.fetchall()
+    rows = []
+    for r in returned:
+        changes = sched_events.diff_tracked(
+            {"prt_01": r[4], "prt_02": r[5], "production_version": r[6]},
+            {"prt_01": r[7], "prt_02": r[8], "production_version": r[9]})
+        if changes:
+            rows.append(sched_events.EventRow(
+                plant=r[1] or "", order_id=r[0], production_order=r[2], material_number=r[3],
+                op="modify", changes=changes, source="master_data_stamp"))
+    return sched_events.record(cur, ev, rows)
+
+
 def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | None = None,
                             ids: list[str] | None = None,
-                            report_ids: list[str] | None = None) -> dict:
+                            report_ids: list[str] | None = None, ev=None) -> dict:
     """Seam 2 (docs/scheduling_priority.md): the ONE place attribute provenance
     lives for color/prt_01/prt_02/production_version. One UPDATE orders ... FROM
     material_plants keyed (plant, material_number = material_id), scoped either
@@ -3225,7 +3271,9 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
     moves from a single TEXT value to a production-version-keyed table, this
     query is the only thing that changes.
 
-    Does not commit — the caller controls the transaction boundary.
+    Does not commit — the caller controls the transaction boundary. `ev` (a schedule_event EventCtx, default
+    None = record nothing) logs each row whose PRT / production version really changed as a
+    `master_data_stamp` modify row.
 
     Returns the missing-master-data exception summary (never used to block
     anything — see docs/scheduling_priority.md's "Unmatched MP rows" decision):
@@ -3246,21 +3294,7 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
         if ids is not None:
             ids = sorted(set(ids))
             if ids:
-                cur.execute(
-                    f"""
-                    UPDATE orders o
-                       SET color              = mp.color,
-                           prt_01             = mp.prt_01,
-                           prt_02             = mp.prt_02,
-                           production_version = COALESCE(NULLIF(o.production_version, ''), {_DEFAULT_PV_FILL_SQL}),
-                           updated_at         = NOW()
-                      FROM material_plants mp
-                     WHERE mp.plant = o.plant
-                       AND mp.material_id = o.material_number
-                       AND o.id = ANY(%s)
-                    """,
-                    (ids,),
-                )
+                _stamp_run(cur, "o.id = ANY(%s)", (ids,), ev)
             report = sorted(set(report_ids)) if report_ids is not None else ids
             cur.execute(
                 """
@@ -3276,21 +3310,7 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
                 (report,),
             )
         elif batch_id is not None:
-            cur.execute(
-                f"""
-                UPDATE orders o
-                   SET color              = mp.color,
-                       prt_01             = mp.prt_01,
-                       prt_02             = mp.prt_02,
-                       production_version = COALESCE(NULLIF(o.production_version, ''), {_DEFAULT_PV_FILL_SQL}),
-                       updated_at         = NOW()
-                  FROM material_plants mp
-                 WHERE mp.plant = o.plant
-                   AND mp.material_id = o.material_number
-                   AND o.upload_batch_id = %s
-                """,
-                (batch_id,),
-            )
+            _stamp_run(cur, "o.upload_batch_id = %s", (batch_id,), ev)
             cur.execute(
                 """
                 SELECT o.plant, o.material_number, COUNT(*),
@@ -3305,21 +3325,7 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
                 (batch_id,),
             )
         else:
-            cur.execute(
-                f"""
-                UPDATE orders o
-                   SET color              = mp.color,
-                       prt_01             = mp.prt_01,
-                       prt_02             = mp.prt_02,
-                       production_version = COALESCE(NULLIF(o.production_version, ''), {_DEFAULT_PV_FILL_SQL}),
-                       updated_at         = NOW()
-                  FROM material_plants mp
-                 WHERE mp.plant = o.plant
-                   AND mp.material_id = o.material_number
-                   AND o.plant = %s
-                """,
-                (plant,),
-            )
+            _stamp_run(cur, "o.plant = %s", (plant,), ev)
             cur.execute(
                 """
                 SELECT o.plant, o.material_number, COUNT(*), 'no_mp_row'
@@ -3345,13 +3351,15 @@ def _stamp_order_attributes(conn, *, batch_id: str | None = None, plant: str | N
     }
 
 
-def resync_order_attributes(plant: str) -> dict:
+def resync_order_attributes(plant: str, *, actor: str | None = None) -> dict:
     """Public entry point for POST /master-data/resync-order-attributes — the
     real mechanism the ingest-time stamp is convenience for (R3). Opens its
     own connection/commit so brain.py never has to reach into the private
     connection pool directly, matching every other db.py public function."""
+    ev = sched_events.EventCtx(source="master_data_stamp", actor=actor or "system",
+                               action_id=sched_events.new_action_id())
     with _pool.connection() as conn:
-        result = _stamp_order_attributes(conn, plant=plant)
+        result = _stamp_order_attributes(conn, plant=plant, ev=ev)
         conn.commit()
     return result
 
@@ -3453,6 +3461,8 @@ _CHUNK_READ_COLS = (
     "machine_wc", "first_start", "last_end", "tz", "sap_sent_finish", "sap_sent_version",
     "planned_order_initial_quantity", "original_start_received", "original_finish_received",
     "original_finish_date_only",
+    # schedule_event BEFORE image (tracked fields not read above)
+    "prt_01", "prt_02", "distribution_letter", "notes", "segment_count", "planning_code",
 )
 _CHUNK_READ_SQL = f"""
     SELECT o.id, o.plant, o.parent_production_order, o.material_number, o.manual_firmed, o.machine,
@@ -3465,7 +3475,9 @@ _CHUNK_READ_SQL = f"""
            (SELECT MIN(p.timezone) FROM plants p WHERE p.plant = o.plant) AS tz,
            ss.sent_finish AS sap_sent_finish, ss.sent_version AS sap_sent_version,
            o.planned_order_initial_quantity, o.original_start_received, o.original_finish_received,
-           o.original_finish_date_only
+           o.original_finish_date_only,
+           o.prt_01, o.prt_02, o.distribution_letter, o.notes, seg.segment_count,
+           o.planning_reason->>'code'
       FROM orders o
       LEFT JOIN order_sap_sent ss ON ss.order_id = o.id
       {_SCHEDULE_SEGMENTS_LATERAL_SQL}
@@ -3483,6 +3495,86 @@ _CHUNK_READ_SQL = f"""
      ORDER BY o.id
        FOR UPDATE OF o
 """
+
+
+# ---- schedule_event (per-order change history) helpers for the ingest path ----
+_EV_RESET_FIELDS = frozenset({"scheduled_start", "scheduled_end", "manual_firmed", "segments", "planning_status"})
+
+
+def _ev_status(status, code):
+    """planning_status as the history stores it: a held order carries its reason code."""
+    return f"needs_planning:{code}" if status == "needs_planning" and code else status
+
+
+def _ev_tracked(rec: dict) -> dict:
+    """Tracked-field view (DB-typed values) of a chunk-read `before` dict or an `_EV_READBACK_SQL` row."""
+    out = {k: rec.get(k) for k in sched_events.TRACKED_FIELDS if k not in ("segments", "planning_status")}
+    out["planning_status"] = _ev_status(rec.get("planning_status"), rec.get("planning_code"))
+    out["segments"] = int(rec.get("segments", rec.get("segment_count")) or 0)
+    return out
+
+
+# plant falls back to the same single-plant machine derivation _backfill_and_stamp applies, so a create
+# row for an Excel row that arrived without a PLANT column is not dropped for want of a plant.
+_EV_READBACK_SQL = f"""
+    SELECT o.id,
+           COALESCE(o.plant, (SELECT MIN(m.plant) FROM machine m
+                               WHERE m.machine = o.machine
+                                 AND (SELECT COUNT(DISTINCT m2.plant) FROM machine m2
+                                       WHERE m2.machine = o.machine) = 1)) AS plant,
+           o.production_order, o.material_number, {sched_events.TRACKED_COLS_SQL},
+           o.planning_reason->>'code' AS planning_code, seg.segment_count AS segments
+      FROM orders o
+      {_SCHEDULE_SEGMENTS_LATERAL_SQL}
+     WHERE o.id = ANY(%s)
+"""
+
+
+def _record_ingest_events(cur, ev, *, before: dict, inserted_ids, written_existing, reset_ids) -> int:
+    """One read-back over the chunk's locked rows, then ONE schedule_event INSERT. inserted -> create;
+    written/reset existing -> modify (a reset order is ONE row, source 'sap_reset', spanning the pre-upsert
+    before to the post-reset after). Fail-open: the read-back runs under its own savepoint."""
+    if ev is None:
+        return 0
+    ids = list(dict.fromkeys([*inserted_ids, *written_existing, *reset_ids]))
+    if not ids:
+        return 0
+    created, reset = set(inserted_ids), set(reset_ids)
+    rows: list = []
+    try:
+        cur.execute("SAVEPOINT sched_ev_rb")
+        cur.execute(_EV_READBACK_SQL, (ids,))
+        cols = [d.name for d in cur.description]
+        after = {r[0]: dict(zip(cols, r, strict=True)) for r in cur.fetchall()}
+        for rid in ids:
+            a = after.get(rid)
+            if a is None:
+                continue
+            if rid in created:
+                op, src = "create", None
+                changes = sched_events.snapshot_changes(_ev_tracked(a), op="create")
+            else:
+                b = before.get(rid)
+                if b is None:
+                    continue
+                changes = sched_events.diff_tracked(_ev_tracked(b), _ev_tracked(a)) or {}
+                # 'sap_reset' only when a planner placement was really taken back (slot, firm, segments, status);
+                # an unplaced order whose quantity changed is a plain ingest change.
+                op = "modify"
+                src = "sap_reset" if rid in reset and set(changes) & _EV_RESET_FIELDS else None
+            rows.append(sched_events.EventRow(
+                plant=a["plant"] or "", order_id=rid, production_order=a["production_order"],
+                material_number=a["material_number"], op=op, changes=changes, source=src))
+        cur.execute("RELEASE SAVEPOINT sched_ev_rb")
+    except Exception as exc:  # noqa: BLE001 - history is derived; never fail the ingest
+        log.warning("schedule_event read-back failed (action_id=%s): %s", ev.action_id, exc)
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT sched_ev_rb")
+            cur.execute("RELEASE SAVEPOINT sched_ev_rb")
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+    return sched_events.record(cur, ev, rows)
 
 
 def _duplicate_id_sort_key(row: dict) -> tuple:
@@ -3537,7 +3629,7 @@ _MASTER_FILL_CANDIDATES_SQL = """
 
 
 def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | None = None,
-                        heal_ids: list[str] | None = None) -> dict:
+                        heal_ids: list[str] | None = None, ev=None) -> dict:
     """Post-upsert steps scoped to `ids` (the orders an upload actually wrote):
     lock them in id order, derive a missing plant from the machine, derive
     machine_key, then stamp color/PRT/production version from material_plants
@@ -3609,7 +3701,7 @@ def _backfill_and_stamp(cur, conn, ids: list[str], *, report_ids: list[str] | No
     healed -= set(ids)
     # Seam 2 -- strictly downstream of the plant backfill above (it reads o.plant).
     # The upload ALWAYS succeeds regardless of how much is unmatched (N5/N6/N7).
-    result = _stamp_order_attributes(conn, ids=sorted(set(ids) | healed), report_ids=report_ids)
+    result = _stamp_order_attributes(conn, ids=sorted(set(ids) | healed), report_ids=report_ids, ev=ev)
     result["healed_ids"] = sorted(healed)
     conn.commit()
     return result
@@ -3765,7 +3857,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                   filename: str | None = None, raw_row_count: int | None = None,
                   warnings: list[dict] | None = None,
                   plan_fn: Callable | None = None, apply_fn: Callable | None = None,
-                  resolve_fn: Callable | None = None, sap_tz: str | None = None) -> dict:
+                  resolve_fn: Callable | None = None, sap_tz: str | None = None,
+                  actor: str | None = None) -> dict:
     """Shared orders upsert for both the Excel and SAP ingest paths.
 
     `sap_tz` is the SAP system zone the finish echo rule (`finish_echoes`) judges in; the SAP staging
@@ -4029,6 +4122,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             parent_quantity_judged.add(tuple(pkey))
             if Decimal(str(old_q)).quantize(Decimal("0.001")) != Decimal(str(new_q)).quantize(Decimal("0.001")):
                 parent_quantity_changed.add(tuple(pkey))
+    # schedule_event: one action per upload (the batch id), actor = the caller, else the filename, else 'system'
+    actor_eff = actor or filename or "system"
+    ev_ctx = sched_events.EventCtx(source="sap_ingest" if source == "sap" else "excel_upload",
+                                   actor=actor_eff, action_id=sched_events.as_action_id(batch_id))
     sap_changed_n = 0
     unfirmed_n = 0
     running_changed_ids: list[str] = []
@@ -4048,6 +4145,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 cur.executemany(_UPSERT_SQL_SAP if source == "sap" else _UPSERT_SQL,
                                 chunk, returning=True)
                 written_existing: list[str] = []
+                chunk_inserted: list[str] = []
+                reset_returned: list[str] = []
                 while True:
                     rec = cur.fetchone()
                     if rec is not None:
@@ -4056,6 +4155,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         if was_inserted:
                             inserted += 1
                             inserted_ids.append(row_id)
+                            chunk_inserted.append(row_id)
                         else:
                             updated += 1
                             written_existing.append(row_id)
@@ -4129,6 +4229,9 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                         touched.update(reset_returned)
                         sap_changed_n += len(reset_returned)
                         unfirmed_n += sum(1 for rid in reset_returned if before[rid]["manual_firmed"])
+                # schedule_event: last statement before the chunk commit (same locked rows, same transaction)
+                _record_ingest_events(cur, ev_ctx, before=before, inserted_ids=chunk_inserted,
+                                      written_existing=written_existing, reset_ids=reset_returned)
                 conn.commit()
 
             # Post-upload steps are scoped to the ids this upload wrote (never to
@@ -4139,7 +4242,8 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             cur.execute("SELECT id FROM orders WHERE id = ANY(%s) AND (plant IS NULL OR machine_key IS NULL)",
                         (all_ids,))
             heal_ids = [r[0] for r in cur.fetchall()]
-            attr_result = _backfill_and_stamp(cur, conn, touched_ids, report_ids=all_ids, heal_ids=heal_ids)
+            attr_result = _backfill_and_stamp(cur, conn, touched_ids, report_ids=all_ids, heal_ids=heal_ids,
+                                              ev=ev_ctx)
             touched.update(attr_result["healed_ids"])
             touched_ids = sorted(touched)
             missing_master_data = attr_result["exceptions"]
@@ -4210,13 +4314,26 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             if inserted_ids and routing_enabled_plants:
                 cur.execute(
                     """
-                    UPDATE orders
+                    UPDATE orders o
                        SET planning_status = 'needs_planning',
                            planning_reason = '{"code":"runtime_pending","message":"Runtime pending resolution."}'::jsonb
-                     WHERE id = ANY(%s) AND plant = ANY(%s)
+                      FROM orders b
+                     WHERE o.id = ANY(%s) AND o.plant = ANY(%s) AND b.id = o.id
+                    RETURNING o.id, o.plant, o.production_order, o.material_number,
+                              b.planning_status, b.planning_reason->>'code'
                     """,
                     (inserted_ids, sorted(routing_enabled_plants)),
                 )
+                hold_rows = []
+                for r in cur.fetchall():
+                    hold_changes = sched_events.diff_tracked(
+                        {"planning_status": _ev_status(r[4], r[5])},
+                        {"planning_status": "needs_planning:runtime_pending"})
+                    if hold_changes:
+                        hold_rows.append(sched_events.EventRow(
+                            plant=r[1] or "", order_id=r[0], production_order=r[2], material_number=r[3],
+                            op="modify", changes=hold_changes))
+                sched_events.record(cur, ev_ctx, hold_rows)
                 conn.commit()
             # ---------- Order Distribution: apply() seam (aggregate_to_detail.md §5) ----------
             # Runs after the last upsert chunk AND every backfill above has
@@ -4231,7 +4348,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             if apply_fn is not None and distribution_plan.get("parents"):
                 # apply() judges the distribution header's echo in the SAP frame the chunks used (the Excel path
                 # has none: its apply_fn call stays exactly as before)
-                apply_res = apply_fn(distribution_plan, batch_id, conn, actor=filename or "system",
+                apply_res = apply_fn(distribution_plan, batch_id, conn, actor=actor_eff,
                                      **({"sap_tz": sap_tz} if sap_tz else {}))
                 # Same insertion style as the missing_master_data entry above —
                 # one dict, `level`/`msg` are the two fields the cockpit's
@@ -4243,7 +4360,7 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 if apply_touched:
                     touched.update(apply_touched)
                     touched_ids = sorted(touched)
-                    _backfill_and_stamp(cur, conn, apply_touched)
+                    _backfill_and_stamp(cur, conn, apply_touched, ev=ev_ctx)
             elif (distribution_plan.get("warnings_entry")
                   and any(v for k, v in distribution_ingest_warnings.items() if k != "single_rewrites")):
                 # D04: no parent was planned this batch (apply_fn never ran,
@@ -4575,7 +4692,8 @@ def apply_order_date_hygiene_rows(rows: list[dict], warnings: list) -> list[dict
     return out
 
 
-def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None = None) -> dict:
+def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None = None, *,
+                             actor: str | None = None) -> dict:
     """
     Parse an uploaded sequence_testing-shaped xlsx, normalize/clean,
     upsert into orders, and write an upload_audit row.
@@ -4821,6 +4939,7 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
         plan_fn=distribution_data.plan,
         apply_fn=distribution_data.apply,
         resolve_fn=routing_resolver.resolve_orders,
+        actor=actor,
     )
     if result.get("status") != "ok":
         # upsert_orders already wrote a failed-audit trail and re-raised on a
