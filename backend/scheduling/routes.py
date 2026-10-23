@@ -10,6 +10,7 @@ only the file that owns them changed. `_clean_id`, `_to_pydt`,
 `_schedule_segments_to_wire`, and `_apply_task_date_updates` are private
 helpers used only within this domain and moved along with their callers.
 """
+import time
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -97,6 +98,16 @@ def _server_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _log_tasks_timing(plant, rows: int, **stages_s: float) -> None:
+    """One structured `tasks.timing` event per GET /tasks (ring buffer + JSON log
+    line). Deliberately NOT a DIAGNOSTICS key: `meta` is built from DIAGNOSTICS and
+    would leak it into the response. Stage values are ms (rounded); read-only."""
+    ms = {f"{k}_ms": round(v * 1000, 1) for k, v in stages_s.items()}
+    ms["total_ms"] = round(sum(stages_s.values()) * 1000, 1)
+    _log_event("info", "perf", f"GET /tasks timing plant={plant} rows={rows}",
+               event="tasks.timing", plant=plant, rows=rows, **ms)
+
+
 @router.get("/tasks", response_model=TasksResponse)
 def get_tasks(plant: str | None = None, machine: str | None = None,
               limit: int | None = Query(default=None, ge=1, le=10000,
@@ -104,6 +115,13 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
               offset: int | None = Query(default=None, ge=0,
                   description="Rows to skip before returning (for paging)."),
               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Thin route wrapper: the payload builder is `build_tasks_payload` (kept
+    callable without FastAPI so tests and benchmarks can drive it directly)."""
+    return build_tasks_payload(plant, machine, limit, offset, allowed_plants)
+
+
+def build_tasks_payload(plant: str | None, machine: str | None, limit: int | None,
+                        offset: int | None, allowed_plants: list[str] | None) -> dict:
     """
     Return tasks as JSON with finish-to-start links and pipeline metadata.
 
@@ -151,7 +169,9 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     # `meta.frozen_horizon_end` reaches Store.frozenHorizonEnd for the
     # Timeline band and the optimizer's placement-floor helper without a
     # second copy of the clock math on either side.
+    t_start = time.perf_counter()
     df, visibility_horizon_end, frozen_horizon_end = db.query_orders(plant=plant, line=machine, limit=limit, offset=offset, allowed_plants=allowed_plants)
+    t_sql = time.perf_counter()
     if df is None or df.empty:
         empty_meta = {"rendered": 0, "link_count": 0, "plant_filter_active": plant,
                       "machine_filter_active": machine, "pre_color_merge_count": 0,
@@ -177,6 +197,7 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
 
     df, cm_stats = plcache.apply_priority_merge(df, plant=plant)
     df = df.astype(object).where(pd.notna(df), other=None)
+    t_frame = time.perf_counter()
     data = []
     link_id_counter = 1
     links = []
@@ -271,6 +292,8 @@ def get_tasks(plant: str | None = None, machine: str | None = None,
     meta["visibility_horizon_end"] = visibility_horizon_end.isoformat() if visibility_horizon_end else None
     meta["frozen_horizon_end"] = frozen_horizon_end.isoformat() if frozen_horizon_end else None
     meta["server_now"] = _server_now_iso()
+    t_rows = time.perf_counter()
+    _log_tasks_timing(plant, len(data), sql=t_sql - t_start, frame=t_frame - t_sql, rows=t_rows - t_frame)
     return {"data": data, "links": links, "meta": meta}
 
 
