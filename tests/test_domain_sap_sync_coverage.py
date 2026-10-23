@@ -173,7 +173,9 @@ def test_order_sync_preserves_failed_count_and_wires_domain_seams(sync_boundary)
     assert kwargs["raw_row_count"] == 1
     assert kwargs["plan_fn"] is distribution.plan
     assert kwargs["apply_fn"] is distribution.apply
-    assert kwargs["resolve_fn"] is resolver.resolve_orders
+    assert kwargs["resolve_fn"].func is resolver.resolve_orders
+    assert kwargs["resolve_fn"].keywords == {"actor": "sap-operator"}
+    assert kwargs["actor"] == "sap-operator"
     b.capture.assert_called_once_with(actor="sap-operator", reason="SAP order replacement", plants=None)
 
 

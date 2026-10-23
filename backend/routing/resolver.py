@@ -1132,11 +1132,14 @@ def resolve_orders(plant: str, *, conn=None, batch_id: str | None = None, full: 
 
     Schedule-event history is ON by default here (the resolver runs post-commit with no user action, so
     it would otherwise be invisible to planners): `ev` wins; else `actor` mints a 'routing_recompute'
-    context; else the actor is 'system'.
+    context; else the actor is 'system'. A call that carries the ingest `batch_id` (the in-ingest resolve seam)
+    reuses the batch's action id (`as_action_id(batch_id)`, the same derivation `db.upsert_orders` uses), so a
+    new order's create and its resolver outcome share one action; every other call mints a fresh id.
     """
     if ev is None:
         ev = sched_events.EventCtx(source="routing_recompute", actor=actor or "system",
-                                   action_id=sched_events.new_action_id())
+                                   action_id=(sched_events.as_action_id(batch_id) if batch_id
+                                              else sched_events.new_action_id()))
     if conn is not None:
         return _resolve_orders_on_conn(plant, conn, batch_id, full, ids, protect_ids, ev)
     with _pool.connection() as new_conn:

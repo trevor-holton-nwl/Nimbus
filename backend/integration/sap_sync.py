@@ -25,6 +25,7 @@ NEVER logged. The error path records the exception class/message but the
 connector implementations must not echo credentials into it.
 """
 import contextlib
+import functools
 import logging
 from typing import Callable
 
@@ -775,8 +776,9 @@ def sync_object(object_key: str, *, user_email: str | None = None,
                                          filename=None, raw_row_count=rows_read,
                                          plan_fn=distribution_data.plan,
                                          apply_fn=distribution_data.apply,
-                                         resolve_fn=routing_resolver.resolve_orders,
-                                         actor="sap-scheduler")
+                                         resolve_fn=functools.partial(routing_resolver.resolve_orders,
+                                                                      actor=user_email or "sap-scheduler"),
+                                         actor=user_email or "sap-scheduler")
             result["rows_inserted"] = int(apply_res.get("inserted", 0))
             result["rows_updated"] = int(apply_res.get("updated", 0))
             result["rows_failed"] = int(apply_res.get("failed", 0))
