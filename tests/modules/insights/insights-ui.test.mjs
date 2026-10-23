@@ -9,7 +9,7 @@ import { Table, Inspector } from '../../../frontend/scheduling/orders.mjs';
 import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
 import { Util } from '../../../frontend/platform/foundation.mjs';
 import { createRequire } from 'node:module';
 
@@ -542,12 +542,12 @@ test('W6: card rows for day N equal the heatmap matrix column for that day; Next
 
 test('W6: stepping moves the day key, clamps at both ends, and re-renders only the card', () => {
   const { now, keys, matrix } = lsFixture();
-  const prior = { key: Dashboard._lsDayKey, clock: Util.plantClock, plant: Store.selectedPlant, cache: Dashboard._matrix7Cache,
+  const prior = { key: Dashboard._lsDayKey, clock: Util.plantClock, plant: Store.selectedPlant, compute: Utilization.computeMatrix,
     render: Dashboard._renderLineStatus, sync: Dashboard._syncLineStatusHeight, full: Dashboard.render };
   const seen = []; let full = 0;
   try {
     Util.plantClock = () => now;
-    Dashboard._matrix7Cache = { key: `${Util.startOfDay(now).getTime()}|7|1|`, matrix };
+    Utilization.computeMatrix = () => matrix;   // the shared-cache hit the stepper reads
     Dashboard._renderLineStatus = m => { seen.push([Dashboard._lsDayKey, m]); };
     Dashboard._syncLineStatusHeight = () => {};
     Dashboard.render = () => { full++; };
@@ -563,29 +563,7 @@ test('W6: stepping moves the day key, clamps at both ends, and re-renders only t
     assert.ok(seen.every(([, m]) => m === matrix), 'card reads the cached 7-day matrix');
     assert.equal(full, 0, 'stepping never triggers a full dashboard render');
   } finally {
-    Dashboard._lsDayKey = prior.key; Util.plantClock = prior.clock; Dashboard._matrix7Cache = prior.cache;
-    Dashboard._renderLineStatus = prior.render; Dashboard._syncLineStatusHeight = prior.sync; Dashboard.render = prior.full;
-  }
-});
-
-test('W6: a stale cached matrix (day 0 is no longer today) triggers a full render instead of the cache', () => {
-  const { now, matrix } = lsFixture();
-  const prior = { key: Dashboard._lsDayKey, clock: Util.plantClock, cache: Dashboard._matrix7Cache,
-    render: Dashboard._renderLineStatus, sync: Dashboard._syncLineStatusHeight, full: Dashboard.render };
-  let cardRenders = 0, full = 0;
-  try {
-    Util.plantClock = () => now;
-    const yesterday = new Date(Util.startOfDay(now)); yesterday.setDate(yesterday.getDate() - 1);
-    Dashboard._matrix7Cache = { key: `${yesterday.getTime()}|7|1|`, matrix };
-    Dashboard._renderLineStatus = () => { cardRenders++; };
-    Dashboard._syncLineStatusHeight = () => {};
-    Dashboard.render = () => { full++; };
-    Dashboard._lsDayKey = null;
-    Dashboard._lsStep(1);
-    assert.equal(full, 1, 'stale cache falls back to a full render');
-    assert.equal(cardRenders, 0, 'card never paints from the stale matrix');
-  } finally {
-    Dashboard._lsDayKey = prior.key; Util.plantClock = prior.clock; Dashboard._matrix7Cache = prior.cache;
+    Dashboard._lsDayKey = prior.key; Util.plantClock = prior.clock; Utilization.computeMatrix = prior.compute;
     Dashboard._renderLineStatus = prior.render; Dashboard._syncLineStatusHeight = prior.sync; Dashboard.render = prior.full;
   }
 });

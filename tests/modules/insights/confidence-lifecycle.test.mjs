@@ -686,6 +686,9 @@ test('I13: the Confidence and peak-briefing matrix requests start on the plant c
     NeedsEngine._readState();   // sync computeMatrix on the plant clock: no worker post of its own any more
     const plantToday = new Date(2026, 9, 15).getTime();
     assert.ok(starts.length >= 1, 'Confidence asked the worker for a matrix');
+    // NeedsEngine's 7-day read runs on the plant clock and fills the shared cache entry the Dashboard reads
+    assert.ok(nimbus.Utilization._cacheEntries().some(e => e.startMs === plantToday && e.days >= 7),
+      'a cache entry (the 14-day Confidence window, which the 7-day read slices) starting at the plant today exists after NeedsEngine._readState()');
     for (const startMs of starts) assert.equal(startMs, plantToday, 'the matrix window starts on the plant\'s today');
   } finally {
     Confidence._invalidatePending(true);

@@ -1637,10 +1637,13 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const days = Math.ceil(hMinutes / 1440);
       try {
         // Off-thread when a plant is selected and the worker is up; shares the cache with computeMatrix, and
-        // resolves task ids to task objects (the old direct cache write stored raw ids). Falls back to sync inside.
-        matrix = await Utilization.computeMatrixAsync(_plantToday(), days);
-      } catch {
-        matrix = Utilization.computeMatrix(horizonStart, days);
+        // resolves task ids to task objects (the old direct cache write stored raw ids). syncFallback:false: when the
+        // worker cannot answer (data moved, timeout, failure) this pass is simply dropped, never recomputed on the
+        // main thread; a data change schedules the next _recompute anyway.
+        matrix = await Utilization.computeMatrixAsync(_plantToday(), days, { syncFallback: false });
+      } catch (e) {
+        if (e && e.name !== 'UtilizationStale') Confidence._lastRev = null;   // a worker problem, not new data: let the next call retry
+        return;
       }
 
       if (!Confidence._canApply(generation, rev)) return;
@@ -1746,9 +1749,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
       try {
-        matrix = await Utilization.computeMatrixAsync(_plantToday(), hDays);
+        matrix = await Utilization.computeMatrixAsync(_plantToday(), hDays, { syncFallback: false });
       } catch {
-        matrix = Utilization.computeMatrix(horizonStart, hDays);
+        matrix = Utilization.computeMatrix(horizonStart, hDays);   // a user clicked the badge: paint, even if it costs a sync compute
       }
       const overloadedLines = {};
       Object.entries(matrix).forEach(([line, lineData]) => {

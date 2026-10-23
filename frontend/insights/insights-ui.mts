@@ -89,7 +89,6 @@ export const Dashboard = {
   _filterLines:  Store.selectedLines,
   _allLines:     null as string[] | null,
   _resizeDebounced: null as ReturnType<typeof setTimeout> | null,
-  _matrix7Cache: null as { key: string; matrix: DashboardUtilMatrix } | null,
   _lsVL:         null as VirtualList<DashboardLineStatusRow> | null,
   // Day the Machine Status card shows (a dayKey, not an index, so midnight can't
   // silently shift it). null = plant-today; clamped to the 7-day matrix's keys.
@@ -330,10 +329,8 @@ export const Dashboard = {
     // Compute once, filter after: the FULL-plant 7-day matrix (no task subset) is served by the shared
     // Utilization cache (keyed on plant + Store.dataRev(), so a line-filter toggle, an alert refresh or a
     // line checkbox never recomputes it); _visibleLines re-narrows the rows to the Dashboard's line filter
-    // and every consumer below iterates only those lines. _matrix7Cache just remembers the last matrix for
-    // the day-stepper (_lsStep), keyed by its start day.
+    // and every consumer below iterates only those lines.
     const _matrix7: DashboardUtilMatrix = Utilization.computeMatrix(_now7, 7);
-    Dashboard._matrix7Cache = { key: `${Util.startOfDay(_now7)!.getTime()}|7|${Store.dataRev()}|${Store.selectedPlant || ''}`, matrix: _matrix7 };
 
     Dashboard._renderKPIs(_matrix7, _filtered);
     Dashboard._renderHeatmap(_matrix7);
@@ -819,12 +816,9 @@ export const Dashboard = {
     const keys = Dashboard._lsDayKeys(Util.plantClock(Store.selectedPlant));
     const idx = Math.max(0, Math.min(keys.length - 1, keys.indexOf(Dashboard._lsActiveKey(keys)) + (dir < 0 ? -1 : 1)));
     Dashboard._lsDayKey = keys[idx];
-    // The cached matrix is only valid while its day 0 is still plant-today (its key leads
-    // with that day's start); after midnight rolls over, rebuild via a full render.
-    const cache = Dashboard._matrix7Cache;
-    const cacheFresh = !!cache && cache.key.split('|')[0] === String(Util.startOfDay(Util.plantClock(Store.selectedPlant))!.getTime());
-    if (cache && cacheFresh) Dashboard._renderLineStatus(cache.matrix);
-    else Dashboard.render();
+    // computeMatrix is a shared-cache hit here (same plant, window and data revision as the last render), so the card
+    // always reads current data; after midnight rolls over it simply computes the new window.
+    Dashboard._renderLineStatus(Utilization.computeMatrix(Util.plantClock(Store.selectedPlant), 7));
     Dashboard._syncLineStatusHeight();
   },
 

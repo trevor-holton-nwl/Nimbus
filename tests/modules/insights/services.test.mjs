@@ -765,7 +765,8 @@ test('Compute payload (_snap) is plant-scoped and strips PRODUCTION_VERSION', as
     assert.deepEqual(Object.keys(p.calendars), ['GL1']);
     assert.deepEqual(Object.keys(p.plants), ['GP']);
     assert.deepEqual(Object.keys(p).sort(),
-      ['blocks', 'calendars', 'days', 'lineSettings', 'masterData', 'plantBlocks', 'plants', 'setup', 'startMs', 'tasks']);
+      ['blocks', 'calendars', 'days', 'lineSettings', 'lines', 'masterData', 'plantBlocks', 'plants', 'setup', 'startMs', 'tasks']);
+    assert.deepEqual([...p.lines].sort(), ['GL1'], 'the worker gets the same line set the synchronous path uses (task lines plus plant lines)');
     assert.deepEqual(p.setup, { intervals: [], diagnostics: [] });
   } finally {
     if (prior) Object.defineProperty(globalThis, 'Worker', prior); else delete globalThis.Worker;

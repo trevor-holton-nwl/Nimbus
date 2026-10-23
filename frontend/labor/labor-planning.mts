@@ -262,7 +262,10 @@ export const LaborPlanning = (() => {
       inp.dataset.savedValue = savedValue;
     });
     if (grid) _updateAggrTotals(grid);
-    void _renderKPIs(plant);
+    _renderKPIs(plant).catch((e: unknown) => {   // a throwing synchronous fallback must not become an unhandled rejection
+      const strip = document.getElementById('labor-kpi-strip'); if (strip) strip.innerHTML = '';
+      ErrorLog.warn('labor', `KPI strip failed: ${(e as Error).message}`);
+    });
   }
 
   function _edit(plant: string, cells: LaborAggrCellPayload[], lineCells: LaborLineCellPayload[], label: string, submission?: LaborInputSubmission): Promise<boolean> {
