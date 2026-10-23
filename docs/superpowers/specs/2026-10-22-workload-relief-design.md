@@ -11,7 +11,21 @@ An Opus deep-dive (plan `are-there-any-new-generic-cook.md`) found that no new w
 
 ## Status ledger
 (one line per completed step; append below)
+- Wave A step 1 (c3a9644): PerfMonitor keys `Setup.deriveObservation`, `Engine.reconcileRuntimeSchedules`, `Leverage.buildPlantSnapshot`.
+- Wave A step 2 (2ea55d8): `deriveSetupObservation` resolves through a `WeakMap`-memoised `buildSetupResolutionIndex` (`setupResolutionIndexFor`); parity + counted tests in `tests/modules/optimization/derive-setup-observation-index.test.mjs`.
+- Wave A step 3 (ace1b01): `reconcileRuntimeSchedules` builds one index, one orphan map, one line grouping per pass; `orphanedAt` reuses the first `setupBefore` verdict; plant-scale counted test in `engine.test.mjs` (fails without the index, passes with).
+- Wave A step 4 (f96febd): setup mass-upload `resolveFromKey` cache, 150 ms debounce with flush, cell lookup once per modal; docs/MIGRATION.md path fixed and item marked done.
+- Wave A step 5 (d493bba): worker hygiene 6a (setup clone removed), 6d (dead Confidence branch removed), 6e (shallow per-variant copies in worker and `runLeverageBatchSync`) with a no-plant guard test.
+- Wave A step 6 (e8885c4): `analyzeLeverage(input, runner, groups?)` and `LeverageInput.setupTasks`; two additive tests.
+- Wave A step 7: CLAUDE.md updates in frontend/optimization, frontend/setup, frontend/insights.
 
 ## Deviations / additions
 (append below)
 - Branch name: `feature/workload-relief-fe` already exists and is checked out in the separate worktree `.claude/worktrees/workload-relief-fe` (same base 4c37368), so it could not be switched to from this worktree. Work was done on `feature/workload-relief-fe-agent` (from 4c37368); the caller should fast-forward `feature/workload-relief-fe` to it.
+- Parity oracle: added exported `deriveSetupObservationUnindexed` (engine.mts) so the indexed and linear paths can be compared by JSON equality; the staleness guard on the memoised index (definition, row arrays and their lengths) is an addition beyond the plan, so an in-place edit can never serve a stale index.
+- Test placement: the step-2 parity/counted tests live in a new file `tests/modules/optimization/derive-setup-observation-index.test.mjs` (engine.test.mjs is 5.5k lines); the step-3 plant-scale test lives inside `describe('reconcile (finish-anchored)')` in engine.test.mjs rather than scheduler-plant-scale.test.mjs, because it needs that describe's Store/clock fixtures (recFixture, withSetup). Existing reconcile fixtures pass unchanged as the parity check.
+- Timing: `Engine.reconcileRuntimeSchedules` is now a thin timed wrapper over `Engine._reconcileRuntimeSchedulesPass` (the former body). No per-variant timing key in alert-leverage.mts (it is a pure module with no PerfMonitor import); each variant already records `Setup.deriveObservation`.
+- Step 4: `resolveFromKey` and `parseMassUploadText` gained an optional trailing `lineScope` parameter (default the module's `_lineScope`) so tests can exercise scope invalidation without a DOM; `parseMassUploadText` also takes an optional prebuilt cell lookup. The debounce is the exported pure `createDebouncedValidator` with injectable timers.
+- Step 6: `analyzeLeverage` copies caller-supplied groups (`{...item}`) because the replay mutates items (`confidenceAfter`, `method`, `capped`) and the Alert Monitor has painted the same objects. `setupTasks` is optional and falls back to `Object.values(tasksById)`.
+- Step 5 (6d): the dead branch was verified dead (it repeated the outer `available() && plant` test inside its own else) before deletion.
+- Hook noise: the post-edit design hook reported ~99 findings on `frontend/nimbus-intelligence.js` (CSS-in-JS strings, bounce easing, side-tab borders), all pre-existing and unrelated to the deleted dead branch; left unchanged.
