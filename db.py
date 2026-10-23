@@ -737,7 +737,7 @@ def _fetch_orders(plant, line, limit, offset, allowed_plants, *, dict_rows: bool
         rows = cur.fetchall()
     if dict_rows:
         # zip, not a dict_row cursor: the horizon lookup above unpacks tuple rows on this cursor.
-        rows = [dict(zip(cols, r)) for r in rows]
+        rows = [dict(zip(cols, r, strict=True)) for r in rows]
     return cols, rows, horizon_end, frozen_end
 
 

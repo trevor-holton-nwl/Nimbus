@@ -284,7 +284,7 @@ def test_golden_row_version_and_links_contract(monkeypatch):
     by_id = {t["id"]: t for t in live["data"]}
     assert by_id["o001"]["row_version"] == 1001 and isinstance(by_id["o001"]["row_version"], int)
     assert by_id["o004"]["row_version"] is None
-    ids_in_links = {l["source"] for l in live["links"]} | {l["target"] for l in live["links"]}
+    ids_in_links = {k["source"] for k in live["links"]} | {k["target"] for k in live["links"]}
     assert not ids_in_links & {"o020", "o030", "o031", "o032", "o033", "o040"}
     assert "o021" in ids_in_links
     assert "o040" not in by_id
