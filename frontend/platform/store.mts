@@ -138,6 +138,10 @@ let _settingsDefaultsResolver: SettingsDefaultsResolver = () => ({});
 Util.setServerNowResolver(() => Store.serverNow());
 Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
 
+/** Events that cannot change any input of Utilization.computeMatrix (tasks, line settings, calendars, plants,
+ *  blocks, plant blocks, master data, setup snapshot, selected plant). They bump rev() but not dataRev(). */
+const DATA_REV_EXCLUDED: ReadonlySet<string> = new Set(['alerts:change', 'lines:selected', 'distribution:summary', 'undo:pushed', 'settings:change']);
+
 export const Store = {
   /** ONE clock (backward scheduling OQ52): the server's instant minus this browser's `Date.now()`,
    *  captured on every /tasks load (`setServerNow`, called from Persistence.load). 0 until the first
@@ -186,10 +190,17 @@ export const Store = {
   _siblingsByParent: new Map<string, NimbusTask[]>(),
   // Set by emit() on first mutation; read by rev(). Same reasoning as above.
   _rev: 0,
+  // Data revision: bumped by emit() for every event EXCEPT DATA_REV_EXCLUDED. Read by dataRev().
+  _dataRev: 0,
 
   setAllowedPlantsResolver(fn: AllowedPlantsResolver): void { _allowedPlantsResolver = typeof fn === 'function' ? fn : () => null; },
   setSettingsDefaultsResolver(fn: SettingsDefaultsResolver): void { _settingsDefaultsResolver = typeof fn === 'function' ? fn : () => ({}); },
   rev(): number { return this._rev || 0; },
+  /** Revision of the data utilization (and similar read-models) is computed from. Unlike rev() it does NOT
+   *  bump for events that cannot change tasks/calendars/blocks/setup (alerts:change, lines:selected, ...), so a
+   *  read-model keyed on it survives them. Bumped BEFORE listeners run. An exclusion list on purpose: an event
+   *  missing from it only costs one extra recompute, never stale data. */
+  dataRev(): number { return this._dataRev || 0; },
   // 'draft' once What-If mode is active. `Sandbox` is a real cross-file import
   // (optimization/sandbox.mjs, see this file's header comment) forming a
   // two-way ESM cycle with this module — safe because mode() is never
@@ -391,6 +402,7 @@ export const Store = {
     // Monotonic revision — any state change bumps it. Used as a cheap, always-correct
     // cache key by memoized read-models (e.g. Utilization.computeMatrix).
     this._rev = (this._rev || 0) + 1;
+    if (!DATA_REV_EXCLUDED.has(event.type)) this._dataRev = (this._dataRev || 0) + 1;
     // revision/mode are additive — existing listeners that only read
     // evt.type/evt.source/etc. are unaffected.
     const enriched: StoreEvent = { ...event, revision: this._rev, mode: this.mode() };

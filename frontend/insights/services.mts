@@ -854,16 +854,170 @@ interface UtilizationSnapshotClones {
 }
 const _utilizationSnapshotCloneCache = new WeakMap<Readonly<ScheduleSnapshot>, UtilizationSnapshotClones>();
 
+/* ----- shared utilization cache (private to this module) ------------------------------------------------
+   Bounded LRU of resolved (task OBJECTS in row.tasks) full-plant matrices. An entry is valid only while
+   Store.dataRev() equals its dataRev (dataRev ignores alerts:change / lines:selected / ...; see store.mts),
+   and a request hits when plant and dataRev match and the requested day window lies inside the cached one
+   (cells are independent per line and per day, so a slice equals a fresh compute). */
+interface UtilCacheEntry { plant: string; startMs: number; days: number; dataRev: number; matrix: UtilizationMatrixResolved; }
+const UTIL_CACHE_MAX = 6;
+const UTIL_ASYNC_TIMEOUT_MS = 3000;
+let _utilCache: UtilCacheEntry[] = [];   // most recently used last
+
+/** Local-midnight Dates for `days` consecutive calendar days from `startMs` (setDate walk, DST-safe, same as the core). */
+function _utilWindowDates(startMs: number, days: number): Date[] {
+  const start = new Date(startMs);
+  const out: Date[] = [];
+  for (let i = 0; i < days; i++) { const d = new Date(start); d.setDate(start.getDate() + i); out.push(d); }
+  return out;
+}
+
+/** The requested window cut out of `entry`, or null when it does not lie inside the cached window on a day boundary.
+ *  An exact window returns the cached matrix itself; a sub-window builds a new object sharing the (read-only) rows. */
+function _utilSlice(entry: { startMs: number; days: number; matrix: UtilizationMatrixResolved }, startMs: number, days: number): UtilizationMatrixResolved | null {
+  if (entry.startMs === startMs && entry.days === days) return entry.matrix;
+  if (startMs < entry.startMs || days > entry.days) return null;
+  const cached = _utilWindowDates(entry.startMs, entry.days);
+  const first = cached.findIndex(d => d.getTime() === startMs);
+  if (first < 0 || first + days > entry.days) return null;
+  const keys = cached.slice(first, first + days).map(d => Util.dayKey(d));
+  const out: UtilizationMatrixResolved = {};
+  for (const line of Object.keys(entry.matrix)) {
+    const rows = entry.matrix[line];
+    const cut: Record<string, UtilizationRowResolved> = {};
+    for (const k of keys) {
+      if (!rows[k]) return null;   // defensive: a cached window missing a day column is never served
+      cut[k] = rows[k];
+    }
+    out[line] = cut;
+  }
+  return out;
+}
+
+function _utilCacheGet(plant: string, startMs: number, days: number): UtilizationMatrixResolved | null {
+  const dataRev = Store.dataRev();
+  for (let i = _utilCache.length - 1; i >= 0; i--) {
+    const e = _utilCache[i];
+    if (e.plant !== plant || e.dataRev !== dataRev) continue;
+    const m = _utilSlice(e, startMs, days);
+    if (m) { _utilCache.splice(i, 1); _utilCache.push(e); return m; }
+  }
+  return null;
+}
+
+function _utilCachePut(plant: string, startMs: number, days: number, dataRev: number, matrix: UtilizationMatrixResolved): void {
+  // Entries from an older data revision can never hit again; drop them, then the oldest beyond the bound.
+  _utilCache = _utilCache.filter(e => e.dataRev === dataRev && !(e.plant === plant && e.startMs === startMs && e.days === days));
+  _utilCache.push({ plant, startMs, days, dataRev, matrix });
+  while (_utilCache.length > UTIL_CACHE_MAX) _utilCache.shift();
+}
+
+/** Replace worker task ids with the live task OBJECTS (the shape computeMatrix returns), in place. */
+function _utilHydrate(matrix: NimbusUtilizationMatrix): UtilizationMatrixResolved {
+  for (const line of Object.keys(matrix)) {
+    const rows = matrix[line];
+    for (const k of Object.keys(rows)) {
+      const row = rows[k];
+      row.tasks = row.tasks.map(id => Store.tasks[id]).filter(Boolean) as unknown as string[];
+    }
+  }
+  return matrix as unknown as UtilizationMatrixResolved;
+}
+
+/** Async path state: at most ONE request posted to the worker and ONE queued behind it. A request arriving while
+ *  one is queued is merged into it (window = union, waiters shared), so the queue never exceeds one and nobody waits
+ *  on a request that was dropped. The queued job reads plant and dataRev when it is actually posted. */
+interface UtilWaiter { startMs: number; days: number; resolve: (m: UtilizationMatrixResolved) => void; }
+interface UtilJob { startMs: number; days: number; waiters: UtilWaiter[]; }
+let _utilInflight: { plant: string; dataRev: number; startMs: number; days: number; promise: Promise<void> } | null = null;
+let _utilPending: UtilJob | null = null;
+
+function _utilWindowEndMs(startMs: number, days: number): number {
+  const d = new Date(startMs); d.setDate(d.getDate() + days); return d.getTime();
+}
+
+function _utilEnqueue(startMs: number, days: number): Promise<UtilizationMatrixResolved> {
+  return new Promise(resolve => {
+    const waiter: UtilWaiter = { startMs, days, resolve };
+    if (_utilPending) {
+      const p = _utilPending;
+      const newStart = Math.min(p.startMs, startMs);
+      const endMs = Math.max(_utilWindowEndMs(p.startMs, p.days), _utilWindowEndMs(startMs, days));
+      // Day count of the union (both starts are day boundaries; count by walking so DST cannot skew it).
+      let n = 0;
+      const cur = new Date(newStart);
+      while (cur.getTime() < endMs && n < 2000) { n++; cur.setDate(cur.getDate() + 1); }
+      p.startMs = newStart; p.days = Math.max(n, p.days, days);
+      p.waiters.push(waiter);
+    } else {
+      _utilPending = { startMs, days, waiters: [waiter] };
+    }
+    _utilPump();
+  });
+}
+
+function _utilPump(): void {
+  if (_utilInflight || !_utilPending) return;
+  const job = _utilPending;
+  _utilPending = null;
+  const plant = Store.selectedPlant;
+  const settleSync = (): void => {
+    // Largest window first so the rest are served by slicing the cache that compute just filled.
+    for (const w of [...job.waiters].sort((a, b) => b.days - a.days)) {
+      w.resolve(Utilization.computeMatrix(new Date(w.startMs), w.days));
+    }
+  };
+  if (!plant || !Compute.available()) { settleSync(); _utilPump(); return; }
+  const dataRev = Store.dataRev();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+  const finish = (fn: () => void): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    _utilInflight = null;
+    try { fn(); } finally { _utilPump(); }
+  };
+  const t0 = performance.now();
+  const promise = new Promise<void>(done => {
+    timer = setTimeout(() => finish(() => { settleSync(); done(); }), UTIL_ASYNC_TIMEOUT_MS);
+    let request: Promise<{ matrix: NimbusUtilizationMatrix }>;
+    try { request = Compute.utilization(job.startMs, job.days); } catch (e) { request = Promise.reject(e); }
+    request.then(({ matrix }) => finish(() => {
+      if (Store.dataRev() !== dataRev || Store.selectedPlant !== plant) { settleSync(); done(); return; }   // stale: drop it, answer from current data
+      const resolved = _utilHydrate(matrix);
+      _utilCachePut(plant, job.startMs, job.days, dataRev, resolved);
+      PerfMonitor.record('Utilization.computeMatrixAsync', performance.now() - t0);
+      for (const w of job.waiters) w.resolve(_utilSlice({ startMs: job.startMs, days: job.days, matrix: resolved }, w.startMs, w.days) ?? resolved);
+      done();
+    }), () => finish(() => { settleSync(); done(); }));
+  });
+  _utilInflight = { plant, dataRev, startMs: job.startMs, days: job.days, promise };
+}
+
+/** A caller asking for a window already queued or in flight (same plant and data revision) shares that request. */
+function _utilJoinExisting(plant: string, startMs: number, days: number): Promise<UtilizationMatrixResolved> | null {
+  const dataRev = Store.dataRev();
+  const inf = _utilInflight;
+  if (inf && inf.plant === plant && inf.dataRev === dataRev) {
+    const cached = _utilWindowDates(inf.startMs, inf.days);
+    const first = cached.findIndex(d => d.getTime() === startMs);
+    if (first >= 0 && first + days <= inf.days) {
+      return inf.promise.then(() => _utilCacheGet(plant, startMs, days) ?? Utilization.computeMatrix(new Date(startMs), days));
+    }
+  }
+  return null;
+}
+
 /* =============================================================================
    UTILIZATION — scheduled vs. available hours per line per day.
    ========================================================================== */
 export const Utilization = {
-  _cache: null as { key: string; matrix: UtilizationMatrixResolved } | null,  // memoized result of the Store-backed compute path
   /** Returns { [line]: { [dayKey]: { scheduled, capacity, pct, tasks } } }.
    *  Pass `srcTasks` to scope the result to a filtered task subset.
-   *  The srcTasks===null path is memoized on (startMs, days, Store.rev()); rev() bumps on
-   *  every Store mutation, so a cache hit always reflects current data. Subset calls
-   *  (srcTasks provided) skip the cache. Treat the returned matrix as read-only. */
+   *  The srcTasks===null path is memoized in a small per-plant LRU keyed on Store.dataRev() (see the cache block
+   *  above) and a sub-window of a cached window is served by slicing; subset calls (srcTasks provided) skip the
+   *  cache. Treat the returned matrix as read-only. */
   computeMatrix(
     startDate: Date,
     days: number = 7,
@@ -878,13 +1032,16 @@ export const Utilization = {
     // consumer can receive the wrong plant's matrix. 'all' = no plant selected.
     const selectedPlant = utilizationSnapshot ? utilizationSnapshot.selectedPlant : Store.selectedPlant;
     const scope = selectedPlant || 'all';
-    const revision = utilizationSnapshot ? 'detached' : Store.rev();
-    const cacheKey = `${start.getTime()}|${days}|${revision}|${scope}`;
-    if (cacheable && Utilization._cache && Utilization._cache.key === cacheKey) {
-      return Utilization._cache.matrix;
+    if (cacheable) {
+      const hit = _utilCacheGet(scope, start.getTime(), days);
+      if (hit) return hit;
     }
+    const dataRevAtStart = Store.dataRev();
     const _pmT0u = performance.now();
-    const taskList = srcTasks !== null ? srcTasks : (utilizationSnapshot?.tasks ?? Store.tasksArr);
+    // With a plant selected use the plant's task index, exactly the set the worker computes from, so the sync and
+    // async paths (which share one cache) always agree on the line set.
+    const taskList = srcTasks !== null ? srcTasks
+      : (utilizationSnapshot?.tasks ?? (selectedPlant ? Store.tasksForSelectedPlant() : Store.tasksArr));
     // NimbusComputeCore fills omitted calendar/plant entries with defaults. For
     // a preview, give it clones of the detached candidate context so that
     // convenience normalization cannot mutate Store (or the candidate itself).
@@ -975,10 +1132,31 @@ export const Utilization = {
       }
     }
 
-    if (cacheable) Utilization._cache = { key: cacheKey, matrix: matrix as unknown as UtilizationMatrixResolved };
+    if (cacheable) _utilCachePut(scope, start.getTime(), days, dataRevAtStart, matrix as unknown as UtilizationMatrixResolved);
     PerfMonitor.record('Utilization.computeMatrix', performance.now() - _pmT0u);
     return matrix as unknown as UtilizationMatrixResolved;
   },
+
+  /** Same matrix as computeMatrix(start, days) (full plant, no task subset) but computed off the main thread when a
+   *  plant is selected and the worker is up. Cache hits and sub-windows of cached/in-flight windows resolve without
+   *  any work; identical concurrent requests share one worker call; at most one request is queued behind the one in
+   *  flight (a newer one is merged into it). A stale result (data revision or plant moved), a rejection or a ~3 s
+   *  timeout answers from the synchronous computeMatrix instead, so the promise always resolves with current data. */
+  async computeMatrixAsync(startDate: Date, days: number = 7): Promise<UtilizationMatrixResolved> {
+    const start = Util.startOfDay(startDate)!;
+    const startMs = start.getTime();
+    const plant = Store.selectedPlant;
+    if (!plant || !Compute.available()) return Utilization.computeMatrix(start, days);
+    const hit = _utilCacheGet(plant, startMs, days);
+    if (hit) return hit;
+    const shared = _utilJoinExisting(plant, startMs, days);
+    if (shared) return shared;
+    return _utilEnqueue(startMs, days);
+  },
+
+  /** Test hooks: the cache is module-private; these read and reset it. */
+  _cacheEntries(): ReadonlyArray<Readonly<UtilCacheEntry>> { return _utilCache.slice(); },
+  _cacheClear(): void { _utilCache = []; _utilPending = null; _utilInflight = null; },
 
   /** Severity bucket from a utilisation ratio.
    *  overloadAt defaults to OVERLOAD_THRESHOLD but callers should pass
@@ -999,7 +1177,7 @@ export const Utilization = {
     });
   },
 
-  // Pre-warm Utilization._cache in the worker so the next synchronous computeMatrix
+  // Pre-warm the shared utilization cache in the worker so the next synchronous computeMatrix
   // call returns instantly from cache. Declared as a literal method (rather than a
   // post-hoc `Utilization._prewarm = ...` assignment, as in the pre-TS version) so
   // TypeScript's object-literal type inference includes it on Utilization's own type
@@ -1008,21 +1186,8 @@ export const Utilization = {
     // Skip when no plant is selected — _snap would otherwise post the global all-line
     // snapshot to the worker for a matrix nothing on screen consumes.
     if (!Compute.available() || !Store.selectedPlant) return;
-    const plant   = Store.selectedPlant; // scope key so a global / other-plant consumer never reads this entry
-    const startMs = Util.plantToday(plant).getTime();   // the plant clock (I13), the same start the Dashboard matrix uses
-    const rev     = Store.rev();
-    Compute.utilization(startMs, 7)
-      .then(({ matrix }) => {
-        if (Store.rev() !== rev) return; // stale — a newer mutation arrived
-        for (const line of Object.keys(matrix)) {
-          for (const k of Object.keys(matrix[line])) {
-            const row = matrix[line][k];
-            row.tasks = row.tasks.map(id => Store.tasks[id]).filter(Boolean) as unknown as string[];
-          }
-        }
-        Utilization._cache = { key: `${startMs}|7|${rev}|${plant}`, matrix: matrix as unknown as UtilizationMatrixResolved };
-      })
-      .catch(() => {});
+    const start = Util.plantToday(Store.selectedPlant);   // the plant clock (I13), the same start the Dashboard matrix uses
+    Utilization.computeMatrixAsync(start, 7).catch(() => {});   // fills the shared cache; same path as Confidence/Needs/Labor
   },
 };
 // Debounced so a drag-storm / autoReflow burst (many task:update/bulkUpdate events in

@@ -707,29 +707,29 @@ test('I13: the worker prewarm starts the matrix on the plant clock and writes th
   const priorPlant = Store.selectedPlant;
   const priorAvailable = Compute.available;
   const priorUtilization = Compute.utilization;
-  const priorCache = Utilization._cache;
   let askedStart = null;
   Util.setPlantClockResolver(plant => (plant === 'PW-P' ? new Date(2026, 9, 15, 0, 30) : null));   // plant a day ahead of the viewer
   Compute.available = () => true;
   Compute.utilization = (startMs) => { askedStart = startMs; return Promise.resolve({ matrix: {} }); };
   try {
     Store.setSelectedPlant('PW-P', 'unit-test');
-    Utilization._cache = null;
-    // A debounced alert recompute left by an earlier test can bump the store revision while the prewarm is in flight,
-    // and the prewarm (correctly) drops a stale reply: retry until one lands.
-    for (let attempt = 0; attempt < 5 && !Utilization._cache; attempt++) {
+    Utilization._cacheClear();
+    // A debounced alert recompute left by an earlier test can bump the data revision while the prewarm is in flight,
+    // and the async path (correctly) drops a stale reply: retry until one lands in the cache.
+    const landed = () => Utilization._cacheEntries().some(e => e.plant === 'PW-P' && e.days === 7);
+    for (let attempt = 0; attempt < 5 && !landed(); attempt++) {
       Utilization._prewarm();
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     const plantToday = new Date(2026, 9, 15).getTime();
     assert.equal(askedStart, plantToday, 'the prewarm asks for the plant\'s today, not the viewer\'s');
-    assert.match(Utilization._cache?.key ?? '', new RegExp(String.raw`^${plantToday}\|7\|\d+\|PW-P$`),
-      'the cache key carries the plant-today start, so a Dashboard computeMatrix(plantClock) call hits it');
+    assert.ok(Utilization._cacheEntries().some(e => e.plant === 'PW-P' && e.startMs === plantToday && e.days === 7),
+      'the cache entry carries the plant-today start, so a Dashboard computeMatrix(plantClock) call hits it');
   } finally {
     Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
     Compute.available = priorAvailable;
     Compute.utilization = priorUtilization;
-    Utilization._cache = priorCache;
+    Utilization._cacheClear();
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
 });

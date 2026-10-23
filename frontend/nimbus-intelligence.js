@@ -516,28 +516,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       try {
         // One clock (OQ52 / I13): the plant's today, the same start the Dashboard matrix and the prewarm use.
         const now = _plantToday();
-        const startMs = now.getTime();
-        const days = 7;
-        const rev = Store.rev();
-        const plant = Store.selectedPlant;
-
-        let matrix = null;
-        // Try cached worker result first, fall back to sync
-        if (Utilization._cache && Utilization._cache.key === `${startMs}|${days}|${rev}|${plant}`) {
-          matrix = Utilization._cache.matrix;
-        } else {
-          // Compute synchronously
-          matrix = Utilization.computeMatrix(now, days);
-          // Post async refresh to worker if available
-          if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
-            NIMBUS.Compute.utilization(startMs, days)
-              .then(({ matrix: m }) => {
-                if (Store.rev() !== rev) return; // stale
-                Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix: m };
-              })
-              .catch(() => {});
-          }
-        }
+        // computeMatrix serves the shared cache (the async prewarm fills it) and fills it itself on a miss;
+        // the old extra worker post here only repeated that work and wrote an unresolved matrix.
+        const matrix = Utilization.computeMatrix(now, 7);
 
         for (const [line, lineData] of Object.entries(matrix)) {
           for (const row of Object.values(lineData)) {
@@ -1654,23 +1635,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Utilization overload across horizon — use worker when available
       let matrix = null;
       const days = Math.ceil(hMinutes / 1440);
-      const plant = Store.selectedPlant;
-      const startMs = _plantToday().getTime();   // same start (and cache key) as computeMatrix / the prewarm
-
-      if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
-        try {
-          const result = await NIMBUS.Compute.utilization(startMs, days);
-          if (!Confidence._canApply(generation, rev)) return;
-          matrix = result.matrix;
-          // Update the shared cache so subsequent sync calls can reuse it
-          Utilization._cache = { key: `${startMs}|${days}|${rev}|${plant}`, matrix };
-        } catch {
-          // Fallback to synchronous compute
-          matrix = Utilization.computeMatrix(horizonStart, days);
-        }
-      } else {
-        // No worker (or no plant selected): compute synchronously. The old "post for background refresh" branch
-        // here repeated the outer condition and could never run.
+      try {
+        // Off-thread when a plant is selected and the worker is up; shares the cache with computeMatrix, and
+        // resolves task ids to task objects (the old direct cache write stored raw ids). Falls back to sync inside.
+        matrix = await Utilization.computeMatrixAsync(_plantToday(), days);
+      } catch {
         matrix = Utilization.computeMatrix(horizonStart, days);
       }
 
@@ -1776,20 +1745,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
-      const startMs = _plantToday().getTime();   // same start (and cache key) as computeMatrix / the prewarm
-      const rev = Store.rev();
-      const plant = Store.selectedPlant;
-
-      if (NIMBUS.Compute && NIMBUS.Compute.available() && plant) {
-        try {
-          const result = await NIMBUS.Compute.utilization(startMs, hDays);
-          matrix = result.matrix;
-          Utilization._cache = { key: `${startMs}|${hDays}|${rev}|${plant}`, matrix };
-        } catch {
-          // Fallback to sync
-          matrix = Utilization.computeMatrix(horizonStart, hDays);
-        }
-      } else {
+      try {
+        matrix = await Utilization.computeMatrixAsync(_plantToday(), hDays);
+      } catch {
         matrix = Utilization.computeMatrix(horizonStart, hDays);
       }
       const overloadedLines = {};

@@ -671,7 +671,6 @@ test('I13: the Confidence and peak-briefing matrix requests start on the plant c
   const priorAvailable = Compute.available;
   const priorUtilization = Compute.utilization;
   const priorNimbus = globalThis.NIMBUS;
-  const priorCache = nimbus.Utilization._cache;
   const starts = [];
   globalThis.NIMBUS = nimbus;
   // The plant is a day ahead of the viewer: its wall clock reads Thu 15 Oct 00:30 whatever the machine's clock says.
@@ -682,16 +681,16 @@ test('I13: the Confidence and peak-briefing matrix requests start on the plant c
     Confidence._invalidatePending(true);
     Store.setTasks([{ id: 'i13-1', PLANT: 'I13-P', MACHINE: 'I13-L', RUN_TIME: 1 }], 'test');
     Store.setSelectedPlant('I13-P', 'test');
-    nimbus.Utilization._cache = null;
+    nimbus.Utilization._cacheClear();
     await Confidence._recompute();
-    NeedsEngine._readState();
+    NeedsEngine._readState();   // sync computeMatrix on the plant clock: no worker post of its own any more
     const plantToday = new Date(2026, 9, 15).getTime();
-    assert.ok(starts.length >= 2, 'both panels asked the worker for a matrix');
+    assert.ok(starts.length >= 1, 'Confidence asked the worker for a matrix');
     for (const startMs of starts) assert.equal(startMs, plantToday, 'the matrix window starts on the plant\'s today');
   } finally {
     Confidence._invalidatePending(true);
     Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
-    nimbus.Utilization._cache = priorCache;
+    nimbus.Utilization._cacheClear();
     Compute.available = priorAvailable;
     Compute.utilization = priorUtilization;
     Store.setTasks(priorTasks, 'test');
