@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
+import { ErrorLog } from '../../../frontend/platform/foundation.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 
 test('Store.rev() starts at 0 and increments on every mutation', () => {
@@ -460,4 +461,35 @@ test('Store.setMasterData forwards an optional table on master-data-changed and 
     off();
     Store.setMasterData(priorMasterData, 'unit-test');
   }
+});
+
+test('a throwing subscriber logs one store entry with its label and later subscribers still run', () => {
+  const before = ErrorLog.entries().length;
+  let ran = false;
+  const bad = () => { throw new Error('boom'); };
+  const offBad = Store.subscribe(bad, 'unit-bad-listener');
+  const offGood = Store.subscribe(() => { ran = true; }, 'unit-good-listener');
+  try {
+    Store.setTasks([], 'unit-test');
+  } finally { offBad(); offGood(); }
+  assert.equal(ran, true);
+  const added = ErrorLog.entries().slice(before).filter(e => e.scope === 'store' && /listener error/.test(e.msg));
+  assert.equal(added.length, 1);
+  assert.equal(added[0].level, 'error');
+  assert.equal(added[0].msg, 'listener error: boom');
+  assert.equal(added[0].ctx.listener, 'unit-bad-listener');
+  assert.equal(added[0].ctx.event, 'tasks:bulk');
+  assert.equal(added[0].ctx.source, 'unit-test');
+  assert.equal(added[0].errorCode, 'store.listener');
+});
+
+test('platform state provider snapshot rides on error entries', () => {
+  ErrorLog.error('unit', 'probe');
+  const e = ErrorLog.entries().at(-1);
+  const p = e.ctx?.state?.platform;
+  assert.ok(p, 'platform state attached');
+  assert.equal(p.mode, 'live');
+  assert.equal(p.rev, Store.rev());
+  assert.equal(typeof p.selectedLines, 'number');
+  assert.equal(typeof p.lastEvent.type, 'string');
 });
