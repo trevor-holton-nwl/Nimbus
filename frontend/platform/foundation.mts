@@ -95,6 +95,7 @@ interface LogEntry {
   plant?: string;
   route?: string;
   user?: string;
+  seq?: number;
 }
 
 type StateProvider = () => unknown;
@@ -1450,6 +1451,7 @@ let _badgeClick: () => void = () => {};
 // wrapper (and state providers that log) cannot recurse back into _push.
 let _console: { error: (...a: unknown[]) => void; warn: (...a: unknown[]) => void } | null = null;
 let _capturing = false;
+let _pushSeq = 0; // per-push monotonic id: keeps same-millisecond entries distinct in the ship dedupe key
 
 export const ErrorLog = {
   MAX: 800,
@@ -1527,6 +1529,7 @@ export const ErrorLog = {
     const plant = ErrorLog._plant(); if (plant) e.plant = plant;
     const route = ErrorLog._route(); if (route) e.route = route;
     try { const u = _actorResolver(); if (u) e.user = u; } catch {}
+    e.seq = ++_pushSeq;
     // Attach breadcrumbs and registered state snapshots to error-level entries for postmortem context.
     // State providers are skipped on a re-entrant push (a provider/listener that logs).
     const state = (level === 'error' && !_capturing) ? ErrorLog._collectState() : null;
@@ -1583,7 +1586,7 @@ export const ErrorLog = {
           if (v === undefined) continue;
           const json = JSON.stringify(v);
           if (json !== undefined && json.length > 2048) out[name] = { _truncated: true, bytes: json.length };
-          else out[name] = v;
+          else out[name] = JSON.parse(json); // snapshot, so later mutation cannot change a logged entry
         } catch {}
       }
     } finally { _capturing = prev; }
@@ -1643,6 +1646,14 @@ export const ErrorLog = {
     };
     console.error = wrap('error');
     console.warn = wrap('warn');
+  },
+
+  // Test/teardown hook: put the saved console methods back and forget them.
+  _uninstallConsoleCapture(): void {
+    if (!_console) return;
+    console.error = _console.error as typeof console.error;
+    console.warn = _console.warn as typeof console.warn;
+    _console = null;
   },
 
   entries(): LogEntry[] { return ErrorLog._entries.slice(); },
@@ -1707,7 +1718,7 @@ export const ErrorLog = {
       if (!db) return;
       return new Promise<void>(resolve => {
         try {
-          const tx  = db.transaction(ErrorLog._DB_STORE, 'readonly');
+          const tx  = db.transaction(ErrorLog._DB_STORE, 'readwrite'); // readwrite: the legacy key is deleted after migration
           const store = tx.objectStore(ErrorLog._DB_STORE);
           const apply = (v: unknown): void => {
             const prev = Array.isArray(v) ? v : [];
@@ -1722,7 +1733,14 @@ export const ErrorLog = {
             if (Array.isArray(req.result) && req.result.length) { apply(req.result); return; }
             // One-time fallback to the pre-per-user shared key.
             const legacy = store.get('entries');
-            legacy.onsuccess = () => apply(legacy.result);
+            legacy.onsuccess = () => {
+              // Migrate-and-remove: the legacy shared ring is adopted by the first login, then deleted
+              // so later logins on this browser do not inherit it.
+              if (Array.isArray(legacy.result) && legacy.result.length) {
+                try { store.delete('entries'); } catch {}
+              }
+              apply(legacy.result);
+            };
             legacy.onerror = () => resolve();
           };
           req.onerror = () => resolve();
@@ -1742,7 +1760,7 @@ export const ErrorLog = {
   // Enqueue synchronously (dedupe), then debounce the actual network flush.
   _scheduleShip(e: LogEntry): void { ErrorLog._enqueueShip(e); ErrorLog._flushShip(); },
   _enqueueShip(e: LogEntry): void {
-    const key = `${e.sessionId || ''}|${e.reqId || ''}|${e.ts}`;
+    const key = `${e.sessionId || ''}|${e.reqId || ''}|${e.ts}|${e.seq ?? ''}`;
     if (ErrorLog._shipSeen.has(key)) return;
     ErrorLog._shipSeen.add(key);
     if (ErrorLog._shipSeen.size > 2000) ErrorLog._shipSeen.clear(); // bound the dedupe set

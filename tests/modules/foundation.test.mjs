@@ -966,6 +966,7 @@ test('console.error/warn are captured as scope console, originals still called, 
     assert.equal(ErrorLog.entries().length, 1);
     assert.equal(seen.length, 1);
   } finally {
+    ErrorLog._uninstallConsoleCapture();
     console.error = prevErr; console.warn = prevWarn;
     if (prevWindow === undefined) delete globalThis.window; else globalThis.window = prevWindow;
     ErrorLog._globalsInstalled = prevInstalled;
@@ -1007,6 +1008,30 @@ test('entries carry user from the actor resolver; ship payload copies it; _ringK
     Util.setActorResolver(() => undefined);
     assert.equal(ErrorLog._ringKey(), 'entries:system');
   } finally { Util.setActorResolver(() => undefined); }
+});
+
+test('two error pushes in the same millisecond both reach the ship queue', () => {
+  ErrorLog.clear();
+  ErrorLog._shipQueue.length = 0;
+  const realNow = Date.prototype.toISOString;
+  Date.prototype.toISOString = () => '2026-01-01T00:00:00.000Z';
+  try {
+    ErrorLog.error('unit-test', 'first');
+    ErrorLog.error('unit-test', 'second');
+  } finally { Date.prototype.toISOString = realNow; }
+  assert.deepEqual(ErrorLog._shipQueue.map(x => x.msg), ['first', 'second']);
+  ErrorLog._shipQueue.length = 0;
+});
+
+test('state provider output is a snapshot, not the live object', () => {
+  ErrorLog.clear();
+  const live = { n: 1 };
+  const off = ErrorLog.registerStateProvider('live', () => live);
+  try {
+    ErrorLog.error('unit-test', 'snap');
+    live.n = 2;
+    assert.equal(ErrorLog.entries()[0].ctx.state.live.n, 1);
+  } finally { off(); }
 });
 
 test('ErrorLog.MAX is 800 and exportJsonPayload has the documented shape', () => {
