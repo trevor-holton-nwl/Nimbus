@@ -1173,18 +1173,10 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   color: #fff;
   overflow: hidden;
 }
-.vis-item.vis-selected {
-  border: 2px solid var(--accent) !important;
-  box-shadow: 0 0 0 2px var(--accent-wash);
-}
+/* Selection ring: see the .vis-item.vis-selected rule after .dist-sibling (it must follow that !important rule). */
 .vis-item.conflict-order {
   outline: 2px solid var(--err) !important;
   outline-offset: -2px;
-}
-/* The red outline paints over the selection border, so a selected red order would look
-   unselected; a solid ring outside the outline shows both. Not !important: .goto-target wins. */
-.vis-item.vis-selected.conflict-order {
-  box-shadow: 0 0 0 2px var(--accent);
 }
 .vis-label { font-size: 12px; font-weight: 600; padding: 0 10px; color: var(--fg); }
 .vis-time-axis .vis-text { font-size: 11px; color: var(--fg-mute); }
@@ -1290,6 +1282,12 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.dist-sibling {
   box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.55) !important;
 }
+/* Selected (click, shift/ctrl-click, Ctrl+drag marquee): the same two-tone ring as the Go To target, easier to see than
+   the old blue border. Box-shadow only (never position/top/height or a border on .vis-item). !important and placed after
+   .dist-sibling so a selected sibling still shows it; .goto-target below is later and wins. */
+.vis-item.vis-selected {
+  box-shadow: inset 0 0 0 2px rgba(255,255,255,0.95), 0 0 0 1px var(--bg-elev), 0 0 0 3px var(--fg) !important;
+}
 /* Alert-profile match (Timeline._profileMatchClasses): category fill + severity inner ring. !important beats
    .order-standard/.order-firmed (equal specificity). Colour/box-shadow only: never position/top/height on .vis-item.
    Must follow .dist-sibling and precede .goto-target so the Go To ring still wins. */
@@ -1299,7 +1297,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.vis-range.profile-match-setup      { background: var(--bar-pm-setup)      !important; color: var(--bar-pm-setup-fg)      !important; }
 .vis-item.vis-range.profile-match-exceptions { background: var(--bar-pm-exceptions) !important; color: var(--bar-pm-exceptions-fg) !important; }
 /* Ring layers are custom properties so the selected / conflict / keyline variants below compose them.
-   No border-color here on purpose: vis items have no border, and .vis-selected's accent border must survive. */
+   No border-color here on purpose: vis items have no border. */
 .vis-item.vis-range.profile-match-err  { --pm-ring: var(--err); }
 .vis-item.vis-range.profile-match-warn { --pm-ring: var(--warn-vivid); }
 /* Amber ring is invisible on the amber capacity fill: use the dark label ink there. */
@@ -1311,10 +1309,9 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   --pm-inner: inset 0 0 0 1px rgba(255,255,255,0.62), inset 0 0 0 3px var(--pm-ring), inset 0 0 0 4px rgba(255,255,255,0.7);
   box-shadow: var(--pm-inner);
 }
-/* Selected: keep the accent wash outside the ring (the accent border comes from .vis-selected). A conflict order
-   gets the solid accent ring instead, as .vis-selected.conflict-order does (its red outline still paints). */
-.vis-item.vis-range.vis-selected.profile-match { box-shadow: var(--pm-inner), 0 0 0 2px var(--accent-wash); }
-.vis-item.vis-range.vis-selected.profile-match.conflict-order { box-shadow: var(--pm-inner), 0 0 0 2px var(--accent); }
+/* Selected: the profile ring stays inside, the same two-tone selection ring as .vis-selected goes outside it.
+   !important so it beats .profile-match's own box-shadow; .goto-target below still wins by coming later. */
+.vis-item.vis-range.vis-selected.profile-match { box-shadow: var(--pm-inner), 0 0 0 1px var(--bg-elev), 0 0 0 3px var(--fg) !important; }
 /* "Go To" target (Timeline.markGotoTask / markGotoCell). Three layers:
    1. Two-tone ring that stays until the planner moves on: a white inner keyline plus the ink ring (--fg, light in dark mode),
       so it reads on dark/saturated bars and on pale ones. A --bg-elev gap separates it from the selection blue and a red alert
@@ -7377,7 +7374,7 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 .lg-bar > span { display: block; padding: 0 4px; overflow: hidden; text-overflow: ellipsis; }
 .lg-order-standard { background: var(--bar-standard); color: #fff; }
 .lg-order-firmed   { background: var(--bar-firmed);   color: #fff; }
-.lg-selected { box-shadow: inset 0 0 0 2px var(--accent), 0 0 0 2px var(--accent-wash); }   /* .vis-selected */
+.lg-selected { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.95), 0 0 0 1px var(--bg-elev), 0 0 0 3px var(--fg); }   /* .vis-selected */
 .lg-conflict { outline: 2px solid var(--err); outline-offset: -2px; }                        /* .conflict-order */
 .lg-dimmed   { opacity: .12; filter: saturate(0); }                                          /* .dimmed */
 .lg-split    { box-shadow: inset 0 0 0 1px rgba(255,255,255,.62); border-left: 2px dashed rgba(255,255,255,.82); } /* .split-order-segment(-continuation) */
