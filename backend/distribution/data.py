@@ -49,6 +49,7 @@ from psycopg.types.json import Jsonb
 
 import db
 import backend.distribution.service as service
+import backend.schedule_events.events as sched_events
 import backend.setup.data as setup_data
 from db import _pool
 from master_data import _autolink_same_named_machines
@@ -1568,6 +1569,68 @@ _CHILD_UPSERT_SQL_PLANNER = _child_upsert_sql(ingest=False)
 # via _carry_anchor_onto_new_child below, never through this statement.
 
 
+# ---- schedule_event (per-order change history) helpers --------------------------------------------
+# Read-backs return DB-typed values (D9): the same locked rows before and after, never the wire payload.
+_EV_CHILD_SQL = f"""
+    SELECT o.id, o.plant, o.production_order, o.material_number, {sched_events.TRACKED_COLS_SQL},
+           o.planning_reason->>'code' AS planning_code, seg.segment_count AS segments
+      FROM orders o
+      {db._SCHEDULE_SEGMENTS_LATERAL_SQL}
+     WHERE o.id = ANY(%s)
+     ORDER BY o.id
+"""
+# a removed child's bounded last-state snapshot (the row is gone, so this is its only durable record)
+_EV_REMOVE_KEYS = ("machine", "scheduled_start", "scheduled_end", "planning_status", "manual_firmed")
+
+
+def _ev_read(cur, ids, *, lock: bool = False) -> dict[str, dict]:
+    """Tracked-column view of `ids` keyed by id. `lock=True` adds `FOR UPDATE OF o` (id order, the same
+    order a /tasks save locks in)."""
+    ids = sorted(set(ids))
+    if not ids:
+        return {}
+    sql = _EV_CHILD_SQL + ("    FOR UPDATE OF o\n" if lock else "")
+    cur.execute(sql, (ids,))
+    cols = [d.name for d in cur.description]
+    return {r[0]: dict(zip(cols, r, strict=True)) for r in cur.fetchall()}
+
+
+def _ev_child_row(child_id: str, before_by_id: dict, after_by_id: dict, *, carried_from: str | None = None):
+    """create when the id did not exist before, else modify (diff). None when the row is gone."""
+    a = after_by_id.get(child_id)
+    if a is None:
+        return None
+    b = before_by_id.get(child_id)
+    if b is None:
+        op = "create"
+        changes = sched_events.snapshot_changes(db._ev_tracked(a), op="create")
+        if carried_from:
+            changes["carried_from"] = [None, carried_from]
+    else:
+        op = "modify"
+        changes = sched_events.diff_tracked(db._ev_tracked(b), db._ev_tracked(a)) or {}
+    return sched_events.EventRow(
+        plant=a["plant"] or "", order_id=child_id, production_order=a["production_order"],
+        material_number=a["material_number"], op=op, changes=changes)
+
+
+def _ev_remove_row(rec: dict, *, superseded_by: str | None = None):
+    """`remove` row from a read-back/before record, bounded to the last-state keys."""
+    t = db._ev_tracked(rec)
+    changes = sched_events.snapshot_changes({k: t[k] for k in _EV_REMOVE_KEYS}, op="remove")
+    if superseded_by:
+        changes["superseded_by"] = [None, superseded_by]
+    return sched_events.EventRow(
+        plant=rec.get("plant") or "", order_id=rec["id"], production_order=rec.get("production_order"),
+        material_number=rec.get("material_number"), op="remove", changes=changes)
+
+
+def _ev_sole_new_id(new_ids) -> str | None:
+    """The one id a superseded child was replaced by, when that is unambiguous."""
+    new_ids = list(new_ids)
+    return new_ids[0] if len(new_ids) == 1 else None
+
+
 def _carry_anchor_onto_new_child(cur, child_id: str, anchor: dict | None) -> None:
     """§5.4 step 5: carry the anchor onto a BRAND-NEW child only. `anchor`
     is None for an ordinary new header with no prior plain order (children
@@ -1644,7 +1707,7 @@ def _ingest_originals(cur, child_ids: list[str]) -> dict[str, dict]:
             for r in cur.fetchall()}
 
 
-def _apply_children(cur, parent: dict) -> int:
+def _apply_children(cur, parent: dict, events_out: list | None = None) -> int:
     """Idempotently create/correct every child row this parent's current
     shares call for (§5.3 materialization + §5.4 steps 3 and 5). Any child
     NOT in `previous_child_ids` is brand-new and gets the anchor carry;
@@ -1658,7 +1721,11 @@ def _apply_children(cur, parent: dict) -> int:
     locked originals follow the incoming row, judged per child by the one echo rule, in the SAP frame
     `parent["_sap_tz"]`). Every planner write (re-weight / reset / repair, whose parent stub carries no such
     mark) uses the planner variant, which never touches a date, an SAP baseline or a locked original of an
-    existing child, and gives a child it creates the header's dates and originals but no SAP baseline."""
+    existing child, and gives a child it creates the header's dates and originals but no SAP baseline.
+
+    `events_out` (schedule_event, apply() only): when a list, the lock read is widened to the tracked columns,
+    a read-back follows the loop (so `_carry_anchor_onto_new_child` is covered) and one create/modify
+    EventRow per child that really changed is appended. The caller records them."""
     previous_ids = parent["previous_child_ids"]
     anchor = parent.get("anchor")
     touched_ids = parent.get("_touched_ids")
@@ -1671,8 +1738,12 @@ def _apply_children(cur, parent: dict) -> int:
     # writers can never hold the pair in opposite order.
     lock_ids = sorted({db.make_id(r["production_order"], r["material_number"])
                        for r in parent["child_rows"]} | set(previous_ids))
+    before_by_id: dict[str, dict] = {}
     if lock_ids:
-        cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (lock_ids,))
+        if events_out is not None:
+            before_by_id = _ev_read(cur, lock_ids, lock=True)
+        else:
+            cur.execute("SELECT id FROM orders WHERE id = ANY(%s) ORDER BY id FOR UPDATE", (lock_ids,))
     before = _ingest_originals(cur, lock_ids) if ingest else {}
     for child_row in parent["child_rows"]:
         child_id = db.make_id(child_row["production_order"], child_row["material_number"])
@@ -1722,10 +1793,21 @@ def _apply_children(cur, parent: dict) -> int:
                         (bool(date_only_flag), child_id))
         if is_new:
             _carry_anchor_onto_new_child(cur, child_id, anchor)
+    if events_out is not None:
+        child_ids = sorted({db.make_id(r["production_order"], r["material_number"]) for r in parent["child_rows"]})
+        after_by_id = _ev_read(cur, child_ids)
+        # a 1->N conversion carries the one prior order's state onto each new child
+        carried = next(iter(previous_ids)) if anchor and len(previous_ids) == 1 else None
+        for cid in child_ids:
+            row = _ev_child_row(cid, before_by_id, after_by_id,
+                                carried_from=carried if cid not in previous_ids else None)
+            if row is not None:
+                events_out.append(row)
     return touched
 
 
-def _delete_superseded_children(cur, ids: set[str]) -> int:
+def _delete_superseded_children(cur, ids: set[str], events_out: list | None = None,
+                                superseded_by: str | None = None) -> int:
     """§5.4 step 6: delete every `orders` row whose id is superseded (in the
     previous child set but not the new intended one). `order_schedule_segments`
     cascades via its FK. Any ACTIVE `setup_occurrence_override` naming a
@@ -1747,8 +1829,20 @@ def _delete_superseded_children(cur, ids: set[str]) -> int:
         """,
         (id_list, id_list),
     )
-    cur.execute("DELETE FROM orders WHERE id = ANY(%s)", (id_list,))
-    return cur.rowcount
+    cur.execute(
+        "DELETE FROM orders WHERE id = ANY(%s) RETURNING id, plant, production_order, material_number, "
+        "machine, scheduled_start, scheduled_end, planning_status, planning_reason, manual_firmed",
+        (id_list,))
+    gone = cur.fetchall()
+    if events_out is not None:
+        for (oid, plant, po, mat, machine, start, end, status, reason, firmed) in gone:
+            code = reason.get("code") if isinstance(reason, dict) else None
+            events_out.append(_ev_remove_row({
+                "id": oid, "plant": plant, "production_order": po, "material_number": mat,
+                "machine": machine, "scheduled_start": start, "scheduled_end": end,
+                "planning_status": status, "planning_code": code, "manual_firmed": firmed,
+                "segments": 0}, superseded_by=superseded_by))
+    return len(gone)
 
 
 def _unscheduled_ids(cur, ids: set[str]) -> set[str]:
@@ -1888,7 +1982,8 @@ def _apply_chunk_size(n_parents: int) -> int:
     return max(_APPLY_CHUNK_PARENTS, -(-n_parents // _APPLY_MAX_CHUNKS))
 
 
-def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str | None = None) -> dict:
+def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str | None = None,
+          ev: "sched_events.EventCtx | None" = None) -> dict:
     """§5.4: the post-hook transaction, run AFTER the caller's normal upsert
     chunks and backfills have committed, as ONE transaction on `conn` (the
     caller commits/rolls back -- this function does call `conn.commit()`
@@ -1916,6 +2011,9 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str
     parents: dict = plan.get("parents", {})
     if not parents:
         return _empty_apply_result()
+    if ev is None:
+        ev = sched_events.EventCtx(source="distribution", actor=actor,
+                                   action_id=sched_events.as_action_id(batch_id))
 
     plants = sorted({p["plant"] for p in parents.values()})
     setup_data.capture_setup_states_before_schedule_mutation(
@@ -2012,13 +2110,15 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str
                     _write_shares(cur, parent)
 
             parent["_touched_ids"] = local["_ids"]
-            local["children_upserted"] += _apply_children(cur, parent)
+            local["children_upserted"] += _apply_children(cur, parent, local["_events"])
             local["children_total"] += len(parent["child_rows"])
             local["parents_distributed"] += 1
 
             intended = set(parent["child_ids"].values())
             superseded = parent["previous_child_ids"] - intended
-            local["children_deleted"] += _delete_superseded_children(cur, superseded)
+            new_ids = set(parent["child_ids"].values()) - parent["previous_child_ids"]
+            local["children_deleted"] += _delete_superseded_children(
+                cur, superseded, local["_events"], _ev_sole_new_id(new_ids))
             # D06: plan-time-only ids (replan path). Scheduled-removal safeguard:
             # these are not on any current share, so they are upload-created
             # orphans -- delete only the unscheduled ones; a scheduled one is
@@ -2027,7 +2127,7 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str
             stale = parent.get("plan_time_child_ids", set()) - parent["previous_child_ids"] - intended
             if stale:
                 local["children_deleted"] += _delete_superseded_children(
-                    cur, _unscheduled_ids(cur, stale))
+                    cur, _unscheduled_ids(cur, stale), local["_events"])
 
             _update_share_child_ids(cur, parent)
 
@@ -2043,6 +2143,8 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str
             try:
                 for k in chunk_keys:
                     _apply_one_parent(k, local)
+                # history rows join the chunk's savepoint: a rolled-back chunk drops them with its writes
+                sched_events.record(cur, ev, local["_events"])
             except Exception:
                 cur.execute(f"ROLLBACK TO SAVEPOINT {sp}")
                 cur.execute(f"RELEASE SAVEPOINT {sp}")
@@ -2055,6 +2157,7 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str
             chunk = keys[ci:ci + chunk_size]
             local = {name: 0 for name in counters}
             local["_ids"] = []
+            local["_events"] = []
             if _run_savepointed(f"dist_chunk_{ci}", chunk, local):
                 applied_ids.extend(local.pop("_ids"))
                 for name, n_ in local.items():
@@ -2063,6 +2166,7 @@ def apply(plan: dict, batch_id: str, conn, *, actor: str = "system", sap_tz: str
             for k in chunk:
                 local = {name: 0 for name in counters}
                 local["_ids"] = []
+                local["_events"] = []
                 if _run_savepointed(f"dist_parent_{ci}", [k], local):
                     applied_ids.extend(local.pop("_ids"))
                     for name, n_ in local.items():
@@ -3293,12 +3397,16 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
                           existing_shares: dict[str, dict], mat_attrs: dict,
                           desired_weights: dict[str, Decimal], letters: dict[str, str], *,
                           source: str, default_basis: str, reviewed, confirm_remove_scheduled: bool,
-                          dry_run: bool, actor: str, audit_action: str) -> dict:
+                          dry_run: bool, actor: str, audit_action: str, ev_actor: str | None = None) -> dict:
     """The ONE shared internal function behind `POST .../shares`, `POST
     .../reset`, and `resolve`'s `repair` scope. `dry_run` is the only branch:
     every line of materialization above it runs identically either way, so a
     dry run's `plan` can never disagree with what the following real call
     writes (SS5.5 step 8's parity requirement).
+
+    schedule_event: a real write records one create/modify/remove row per child that really changed (source
+    'distribution', actor `ev_actor` or `actor`, action_id = the write's upload batch uuid) on this cursor,
+    just before the caller commits. A dry run returns before any of that and records nothing.
 
     `desired_weights`/`letters` are the CALLER's full target share set
     (already validated) -- this function only diffs it against what's
@@ -3427,6 +3535,11 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
     }
     touched_child_ids: list[str] = []
     parent_stub["_touched_ids"] = touched_child_ids
+    ev = sched_events.EventCtx(source="distribution", actor=ev_actor or actor,
+                               action_id=sched_events.as_action_id(upload_batch_id))
+    # schedule_event before-image: the same locked rows, DB-typed, read before any child is written
+    before_ev = _ev_read(cur, previous_child_ids | intended_child_ids
+                         | ({collapse["old_child_id"]} if collapse else set()))
     # R-I12: the stored run time of every child this write may change, read BEFORE the upsert, so the
     # run-time cap below can tell a changed (or brand-new) child from an unchanged released one.
     prior_run_times: dict[str, object] = {cid: None for cid in intended_child_ids}
@@ -3473,6 +3586,24 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
             "collapse": collapse is not None,
         }), actor),
     )
+
+    # schedule_event: the after read-back already includes the run-time cap's holds and the stamped attributes
+    after_ev = _ev_read(cur, intended_child_ids)
+    new_ev_ids = intended_child_ids - previous_child_ids
+    sole_new = _ev_sole_new_id(new_ev_ids)
+    ev_rows = []
+    for cid in sorted(intended_child_ids):
+        row = _ev_child_row(
+            cid, before_ev, after_ev,
+            carried_from=collapse["old_child_id"] if collapse and cid == collapse["new_child_id"] else None)
+        if row is not None:
+            ev_rows.append(row)
+    for sid in sorted(superseded):
+        rec = before_ev.get(sid)
+        if rec is not None:
+            by = collapse["new_child_id"] if collapse and sid == collapse["old_child_id"] else sole_new
+            ev_rows.append(_ev_remove_row(rec, superseded_by=by))
+    sched_events.record(cur, ev, ev_rows)
 
     children_out = _read_write_children(cur, intended_child_ids)
     versions = {c["id"]: c["base_version"] for c in children_out}
@@ -4070,7 +4201,8 @@ def _resolve_machines(plant: str, workcenter: str, actor: str, dry_run: bool) ->
             "single_rewrites": 0, "repaired": 0, "skipped": len(candidates) - headers_created}
 
 
-def _repair_one_header(cur, plant: str, order: str, material: str, header: dict) -> dict:
+def _repair_one_header(cur, plant: str, order: str, material: str, header: dict,
+                       ev_actor: str = "system") -> dict:
     """`resolve` scope `repair`'s per-header core (SS5.6 bullet 3 / SS5's
     crash-window recovery): re-materialize from the header's CURRENT,
     non-purged shares and facts -- explicitly excluding purged shares from
@@ -4090,11 +4222,12 @@ def _repair_one_header(cur, plant: str, order: str, material: str, header: dict)
         cur, plant, order, material, header, all_shares, mat_attrs, desired_weights, letters,
         source=header["source"], default_basis=header["default_basis"], reviewed=None,
         confirm_remove_scheduled=True, dry_run=False, actor="system", audit_action="resolve_repair",
+        ev_actor=ev_actor,
     )
     return {"children_upserted": len(result.get("children", [])), "children_deleted": len(result.get("removed", []))}
 
 
-def _resolve_repair(plant: str, dry_run: bool) -> dict:
+def _resolve_repair(plant: str, dry_run: bool, actor: str = "system") -> dict:
     """`resolve` scope `repair`: every header currently classified
     `incomplete` (SS5.7) gets re-materialized via `_repair_one_header`."""
     with _pool.connection() as conn, conn.cursor() as cur:
@@ -4122,7 +4255,7 @@ def _resolve_repair(plant: str, dry_run: bool) -> dict:
             po, mat = h["production_order"], h["material_number"]
             current = _lock_one_header(cur, plant, po, mat)
             if current is not None:
-                result = _repair_one_header(cur, plant, po, mat, current)
+                result = _repair_one_header(cur, plant, po, mat, current, ev_actor=actor)
                 children_upserted += result["children_upserted"]
                 repaired += 1
             conn.commit()
@@ -4147,5 +4280,5 @@ def resolve(plant: str, scope: str, *, workcenter: str | None = None, dry_run: b
             raise ValueError("workcenter is required for the 'machines' resolve scope")
         return _resolve_machines(plant, workcenter, actor, dry_run)
     if scope == "repair":
-        return _resolve_repair(plant, dry_run)
+        return _resolve_repair(plant, dry_run, actor)
     raise ValueError("scope must be one of 'wc_codes', 'machines', 'repair'")

@@ -998,3 +998,135 @@ def test_stamp_run_skips_event_rows_for_skip_event_ids():
     finally:
         events.record = orig
     assert n == 1 and [r.order_id for r in captured] == ["o2"]
+
+
+
+# --------------------------------------------------------------------------- distribution hooks (Task 6)
+
+@pytest.mark.pg
+class TestDistributionHooks:
+    """apply() / re-weight / reset record per-child create/modify/remove rows (source 'distribution');
+    a dry run records nothing."""
+    SUB, PLANT = "WTG", "1006"
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, planning_pg):
+        pg = planning_pg.db
+        t = uuid.uuid4().hex[:8].upper()
+        self.pg = pg
+        self.actor = planning_pg.actor
+        self.WC, self.L1, self.L2 = f"ZZTEST_WC_SE{t}", f"ZZTEST_L1_SE{t}", f"ZZTEST_L2_SE{t}"
+        self.ORD, self.MAT = f"ZZTEST_ORD_SE{t}", f"ZZTEST_MAT_SE{t}"
+        import backend.schedule_events.data as se_data
+        se_data.ensure_schedule_event_table()
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO sap_workcenter (plant, sap_workcenter, distribution_mode) "
+                        "VALUES (%s, %s, 'distribute')", (self.PLANT, self.WC))
+            cur.execute("INSERT INTO machine (subnetwork, plant, machine, sap_workcenter) "
+                        "VALUES (%s,%s,%s,%s),(%s,%s,%s,%s)",
+                        (self.SUB, self.PLANT, self.L1, self.WC, self.SUB, self.PLANT, self.L2, self.WC))
+            cur.execute("INSERT INTO materials (material_id) VALUES (%s) ON CONFLICT DO NOTHING", (self.MAT,))
+            cur.execute("INSERT INTO material_plants (material_id, plant) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (self.MAT, self.PLANT))
+            conn.commit()
+        yield
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM schedule_event WHERE actor = %s OR production_order = ANY(%s)",
+                        (self.actor, [self.ORD]))
+            cur.execute("DELETE FROM orders WHERE parent_production_order = %s OR production_order = %s",
+                        (self.ORD, self.ORD))
+            cur.execute("DELETE FROM order_distribution WHERE plant = %s AND production_order = %s",
+                        (self.PLANT, self.ORD))
+            cur.execute("DELETE FROM machine WHERE plant = %s AND machine IN (%s, %s)",
+                        (self.PLANT, self.L1, self.L2))
+            cur.execute("DELETE FROM sap_workcenter WHERE plant = %s AND sap_workcenter = %s",
+                        (self.PLANT, self.WC))
+            cur.execute("DELETE FROM material_plants WHERE plant = %s AND material_id = %s",
+                        (self.PLANT, self.MAT))
+            cur.execute("DELETE FROM materials WHERE material_id = %s", (self.MAT,))
+            conn.commit()
+
+    def _row(self):
+        return {
+            "production_order": self.ORD, "material_number": self.MAT, "machine": self.WC, "plant": self.PLANT,
+            "basic_start_date": dt.datetime(2026, 10, 1, 8, 0), "basic_finish_date": dt.datetime(2026, 10, 1, 18, 0),
+            "order_quantity": 100.0, "run_time": 10.0,
+        }
+
+    def _events(self):
+        sql = ("SELECT order_id, op, source, actor, action_id::text, changes FROM schedule_event "
+               "WHERE actor = %s ORDER BY id")
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(sql, (self.actor,))
+            return cur.fetchall()
+
+    def _header_xmin(self):
+        with self.pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT xmin::text::bigint FROM order_distribution WHERE plant=%s AND "
+                        "production_order=%s AND material_number=%s", (self.PLANT, self.ORD, self.MAT))
+            return cur.fetchone()[0]
+
+    def _ingest(self):
+        import backend.distribution.data as dd
+        batch_id = str(uuid.uuid4())
+        _rows, plan, _w = dd.plan([self._row()], batch_id)
+        with self.pg._pool.connection() as conn:
+            dd.apply(plan, batch_id, conn, actor=self.actor)
+        return batch_id, plan
+
+    def test_apply_records_two_creates_and_an_identical_reapply_records_nothing(self):
+        import backend.distribution.data as dd
+        batch_id, plan = self._ingest()
+        rows = self._events()
+        creates = [r for r in rows if r[1] == "create"]
+        assert len(creates) == 2
+        assert all(r[2] == "distribution" and r[3] == self.actor and r[4] == batch_id for r in rows)
+        assert {r[5]["machine"][1] for r in creates} == {self.L1, self.L2}
+        with self.pg._pool.connection() as conn:
+            dd.apply(plan, batch_id, conn, actor=self.actor)
+        assert len(self._events()) == len(rows), "an identical re-apply changes nothing, so records nothing"
+
+    def test_reweight_to_single_machine_records_removes_with_superseded_by(self):
+        import backend.distribution.data as dd
+        self._ingest()
+        before = len(self._events())
+        result = dd.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=self._header_xmin(), confirm_remove_scheduled=True, actor=self.actor)
+        new = self._events()[before:]
+        assert len({r[4] for r in new}) == 1, "one action_id for the whole re-weight"
+        removes = [r for r in new if r[1] == "remove"]
+        assert {r[0] for r in removes} == set(result["removed"])
+        creates = [r for r in new if r[1] == "create"]
+        for r in removes:
+            if creates:
+                assert r[5]["superseded_by"] == [None, creates[0][0]]
+        for r in creates:
+            assert "carried_from" in r[5]
+        assert all(r[3] == self.actor and r[2] == "distribution" for r in new)
+
+    def test_dry_run_records_nothing(self):
+        import backend.distribution.data as dd
+        self._ingest()
+        before = len(self._events())
+        dd.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=self._header_xmin(), dry_run=True, actor=self.actor)
+        assert len(self._events()) == before
+
+    def test_reset_after_manual_reweight_records_rows_for_the_planner(self):
+        import backend.distribution.data as dd
+        self._ingest()
+        dd.reweight_shares(
+            self.PLANT, self.ORD, self.MAT,
+            [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+            base_version=self._header_xmin(), confirm_remove_scheduled=True, actor=self.actor)
+        before = len(self._events())
+        dd.reset_one_header(self.PLANT, self.ORD, self.MAT, self._header_xmin(),
+                            confirm_remove_scheduled=True, actor=self.actor)
+        new = self._events()[before:]
+        assert new, "a reset back to the 50/50 default changes the children"
+        assert all(r[3] == self.actor and r[2] == "distribution" for r in new)
+        assert len({r[4] for r in new}) == 1
