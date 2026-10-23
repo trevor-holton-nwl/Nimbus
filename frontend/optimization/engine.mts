@@ -575,7 +575,7 @@ export function deriveSetupObservation(
   }
 }
 
-/** Reference path for parity tests: the same derivation resolving every pair through the linear scans. */
+/** @internal Test-only reference path for parity tests: the same derivation resolving every pair through the linear scans. */
 export function deriveSetupObservationUnindexed(
   setup: SetupSnapshot | null | undefined,
   tasks: ReadonlyArray<NimbusTask>,
