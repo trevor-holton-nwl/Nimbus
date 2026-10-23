@@ -1640,3 +1640,27 @@ test('_taskEditSnapshot adds source only when the id has one; _removeMissingTask
   Persistence._removeMissingTasks(['snap1']);
   assert.ok(!Persistence._dirtySource.has('snap1'));
 });
+
+test('tasks:saved lists only persisted ids (a version came back), not invalid or not-found ones, yet still clears their dirty state', async () => {
+  Store.setTasks([
+    { id: 'ok1', MACHINE: 'L1', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'), row_version: '1' },
+    { id: 'bad1', MACHINE: 'L1', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-03T09:00:00'), end_date: new Date('2026-08-03T10:00:00'), row_version: '1' },
+    { id: 'gone1', MACHINE: 'L1', RUN_TIME: '1', user_scheduled: true, start_date: new Date('2026-08-03T10:00:00'), end_date: new Date('2026-08-03T11:00:00'), row_version: '1' },
+  ], 'unit-test');
+  for (const id of ['ok1', 'bad1', 'gone1']) Persistence._dirtyIds.add(id);
+  const saved = [];
+  const unsubscribe = Store.subscribe(e => { if (e.type === 'tasks:saved') saved.push(e); });
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ versions: { ok1: 2 }, invalid_ids: ['bad1'], not_found_ids: ['gone1'], stale: [], persisted: 1, updated: 1 }) });
+  try {
+    Persistence.saveAll();
+    await new Promise(res => setTimeout(res, 0));
+    assert.equal(saved.length, 1);
+    assert.deepEqual([...saved[0].ids], ['ok1']);
+    assert.ok(!Persistence._dirtyIds.has('bad1') && !Persistence._dirtyIds.has('gone1'), 'dirty-clearing is unchanged for rejected ids');
+  } finally {
+    unsubscribe();
+    globalThis.fetch = origFetch;
+    Persistence._dirtyIds.clear(); Persistence._dirtySource.clear();
+  }
+});

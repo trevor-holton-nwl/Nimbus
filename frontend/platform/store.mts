@@ -140,7 +140,7 @@ Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Stor
 
 /** Events that cannot change any input of Utilization.computeMatrix (tasks, line settings, calendars, plants,
  *  blocks, plant blocks, master data, setup snapshot, selected plant). They bump rev() but not dataRev(). */
-const DATA_REV_EXCLUDED: ReadonlySet<string> = new Set(['alerts:change', 'lines:selected', 'distribution:summary', 'undo:pushed', 'settings:change']);
+const DATA_REV_EXCLUDED: ReadonlySet<string> = new Set(['alerts:change', 'lines:selected', 'distribution:summary', 'undo:pushed', 'settings:change', 'tasks:saved']);
 
 export const Store = {
   /** ONE clock (backward scheduling OQ52): the server's instant minus this browser's `Date.now()`,

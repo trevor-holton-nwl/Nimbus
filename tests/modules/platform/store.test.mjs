@@ -512,3 +512,11 @@ test('platform state provider snapshot rides on error entries', () => {
   assert.equal(typeof p.selectedLines, 'number');
   assert.equal(typeof p.lastEvent.type, 'string');
 });
+
+test('tasks:saved is excluded from dataRev(): a save must not evict the utilization cache', () => {
+  const before = Store.dataRev();
+  const rev = Store.rev();
+  Store.emit({ type: 'tasks:saved', ids: ['x'], source: 'persistence' });
+  assert.equal(Store.dataRev(), before, 'dataRev unchanged');
+  assert.equal(Store.rev(), rev + 1, 'rev() still bumps');
+});

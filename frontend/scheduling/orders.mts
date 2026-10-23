@@ -2160,6 +2160,8 @@ export function groupHistoryEvents(events: HistoryEvent[]): HistoryEvent[][] {
 }
 
 const HISTORY_CACHE_CAP = 200;
+/** A cached History entry older than this is refetched on the next show: another user or SAP may have written since. */
+const HISTORY_MAX_AGE_MS = 60_000;
 
 /* =============================================================================
    INSPECTOR — right-side detail panel shown on the Timeline tab.
@@ -2169,11 +2171,13 @@ export const Inspector = {
   _currentId: null as string | null,
   _unsubStore: null as (() => void) | null,
   // Order history (schedule_event) per order id, newest first. FIFO-capped; dropped by invalidateHistory().
-  _history: new Map<string, HistoryEvent[]>(),
+  _history: new Map<string, { events: HistoryEvent[]; more: boolean; at: number }>(),
   _historyInflight: new Set<string>(),
   _historyError: new Set<string>(),
   // Bumped by invalidateHistory(); a fetch that started under an older value is discarded and re-run.
   _historyGen: new Map<string, number>(),
+  // Bumped by resetHistory() (plant load / plant switch): invalidates every in-flight fetch at once.
+  _historyEpoch: 0,
   // The Planned Finish Flatpickr is built on an <input> that every _render() replaces, so the
   // previous instance (and its calendar popup appended to <body>) must be destroyed first —
   // otherwise one picker + one popup DOM tree leaks per render.
@@ -2198,6 +2202,9 @@ export const Inspector = {
 
   init(): void {
     Inspector._unsubStore = Store.subscribe(evt => {
+    // A plant load/reload or a plant switch replaces the rows wholesale: another user's or SAP's edits may sit
+    // behind any cached history, so drop all of it (the card refetches when it is next painted).
+    if (evt.type === 'tasks:bulk' || evt.type === 'plant:selected') Inspector.resetHistory();
     if (evt.type === 'tasks:saved') { Inspector.invalidateHistory((evt.ids ?? []) as Array<string | number>); return; }
     // Allow firmed:change through even from 'inspector' so the Firm/Unfirm
     // button re-renders after toggleFirm() — otherwise it never flips.
@@ -2238,6 +2245,14 @@ export const Inspector = {
     Inspector._render(task);
   },
 
+  /** Drop every cached history (and error) and invalidate all in-flight fetches. */
+  resetHistory(): void {
+    Inspector._history.clear();
+    Inspector._historyError.clear();
+    Inspector._historyGen.clear();
+    Inspector._historyEpoch++;
+  },
+
   /** Drop cached history for these orders (their events changed server-side); refetch if one is on screen. */
   invalidateHistory(ids: Array<string | number>): void {
     let touchesCurrent = false;
@@ -2270,8 +2285,9 @@ export const Inspector = {
   _fillHistory(id: string): void {
     const body = Inspector._historyBodyFor(id);
     if (!body) return;
-    const cached = Inspector._history.get(id);
-    if (cached) { Inspector._renderHistory(body, cached); return; }
+    let cached = Inspector._history.get(id);
+    if (cached && Date.now() - cached.at > HISTORY_MAX_AGE_MS) { Inspector._history.delete(id); cached = undefined; }
+    if (cached) { Inspector._renderHistory(body, cached.events, cached.more); return; }
     if (Inspector._historyError.has(id)) { Inspector._historyNote(body, Util.t('ui.insp_history_error')); return; }
     Inspector._historyNote(body, Util.t('ui.insp_history_loading'));
     void Inspector._loadHistory(id);
@@ -2281,7 +2297,9 @@ export const Inspector = {
     if (Inspector._historyInflight.has(id)) return;
     Inspector._historyInflight.add(id);
     const gen = Inspector._historyGen.get(id) ?? 0;
+    const epoch = Inspector._historyEpoch;
     let events: HistoryEvent[] | null = null;
+    let more = false;
     try {
       const task = Store.tasks[id];
       const plant = (task && (Store.getPlantForLine(task.MACHINE) || task.PLANT)) || Store.selectedPlant || '';
@@ -2290,20 +2308,21 @@ export const Inspector = {
         `${Config.API_BASE}/schedule-events/${encodeURIComponent(plant)}/order/${encodeURIComponent(id)}?limit=20`,
         { signal: AbortSignal.timeout(5000) });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json() as { events?: HistoryEvent[] };
+      const data = await r.json() as { events?: HistoryEvent[]; next_before_id?: number | null };
       events = Array.isArray(data.events) ? data.events : [];
+      more = data.next_before_id != null;
     } catch (e) {
       ErrorLog.warn('inspector', `Order history load failed: ${(e as Error).message}`, { id });
     } finally {
       Inspector._historyInflight.delete(id);
     }
-    if ((Inspector._historyGen.get(id) ?? 0) !== gen) {
+    if ((Inspector._historyGen.get(id) ?? 0) !== gen || Inspector._historyEpoch !== epoch) {
       // The order was saved while this request was in flight: the answer may predate the save.
       if (id === Inspector._currentId) Inspector._fillHistory(id);
       return;
     }
     if (events) {
-      Inspector._history.set(id, events);
+      Inspector._history.set(id, { events, more, at: Date.now() });
       while (Inspector._history.size > HISTORY_CACHE_CAP) {
         const oldest = Inspector._history.keys().next().value;
         if (oldest === undefined) break;
@@ -2315,7 +2334,7 @@ export const Inspector = {
     if (id === Inspector._currentId) Inspector._fillHistory(id);
   },
 
-  _renderHistory(body: HTMLElement, events: HistoryEvent[]): void {
+  _renderHistory(body: HTMLElement, events: HistoryEvent[], more = false): void {
     if (!events.length) {
       Inspector._historyNote(body, Util.t('ui.insp_history_empty', { days: Persistence.scheduleEventRetentionDays }));
       return;
@@ -2338,6 +2357,12 @@ export const Inspector = {
         }
       }
       body.appendChild(wrap);
+    }
+    if (more) {
+      const tail = document.createElement('div');
+      tail.className = 'insp-history-note insp-history-more';
+      tail.textContent = Util.t('ui.insp_history_more');
+      body.appendChild(tail);
     }
   },
   clear(): void {
