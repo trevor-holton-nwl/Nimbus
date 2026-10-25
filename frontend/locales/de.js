@@ -5,6 +5,9 @@ window.__NIMBUS_LOCALES.de = {
   'toast.calendar_saved_locally':      'Lokal gespeichert – wird synchronisiert, sobald der Server erreichbar ist',
   'toast.calendar_offline_cache':      'Zwischengespeicherte Kalender – Server nicht erreichbar',
   'toast.calendar_refreshed_remote': 'Werkskalender in einer anderen Sitzung geändert; Schichtdarstellung aktualisiert',
+  'modal.opt_calendar_not_loaded_title': 'Werkskalender nicht geladen',
+  'modal.opt_calendar_not_loaded_msg': 'Der Kalender für das Werk {{plant}} wurde nicht vom Server geladen (möglicherweise nicht erreichbar). Der Lauf würde den zwischengespeicherten Kalender verwenden, der veraltet sein kann. Trotzdem ausführen?',
+  'btn.opt_run_anyway': 'Trotzdem ausführen',
   'toast.calendar_migrated':           'Kalender & Sperrungen auf dem Server gespeichert',
   'toast.plant_not_mastered':          'Dieses Werk ist nicht in den Stammdaten – bitte dort anlegen, bevor der Kalender gespeichert werden kann',
 

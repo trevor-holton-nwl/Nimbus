@@ -5,6 +5,9 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.calendar_saved_locally':      'Enregistré localement — synchronisation dès que le serveur est joignable',
   'toast.calendar_offline_cache':      'Calendriers en cache — serveur injoignable',
   'toast.calendar_refreshed_remote': 'Calendrier de l\'usine modifié dans une autre session ; affichage du planning actualisé',
+  'modal.opt_calendar_not_loaded_title': 'Calendrier de l’usine non chargé',
+  'modal.opt_calendar_not_loaded_msg': 'Le calendrier de l’usine {{plant}} n’a pas été chargé depuis le serveur (il est peut-être injoignable). L’exécution utiliserait le calendrier en cache, qui peut être obsolète. Exécuter quand même ?',
+  'btn.opt_run_anyway': 'Exécuter quand même',
   'toast.calendar_migrated':           'Calendriers et blocages enregistrés sur le serveur',
   'toast.plant_not_mastered':          'Cette usine n’est pas dans les Données de base — ajoutez-la avant d’enregistrer son calendrier',
 

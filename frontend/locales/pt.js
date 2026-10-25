@@ -5,6 +5,9 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.calendar_saved_locally':      'Salvo localmente — será sincronizado quando o servidor estiver acessível',
   'toast.calendar_offline_cache':      'Exibindo calendários em cache — servidor inacessível',
   'toast.calendar_refreshed_remote': 'Calendário da planta atualizado em outra sessão; sombreado da programação atualizado',
+  'modal.opt_calendar_not_loaded_title': 'Calendário da planta não carregado',
+  'modal.opt_calendar_not_loaded_msg': 'O calendário da planta {{plant}} não foi carregado do servidor (ele pode estar inacessível). A execução usaria o calendário em cache, que pode estar desatualizado. Executar mesmo assim?',
+  'btn.opt_run_anyway': 'Executar mesmo assim',
   'toast.calendar_migrated':           'Calendários e bloqueios salvos no servidor',
   'toast.plant_not_mastered':          'Esta planta não está nos Dados Mestres — adicione-a lá antes de salvar seu calendário',
 

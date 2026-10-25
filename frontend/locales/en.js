@@ -5,6 +5,9 @@ window.__NIMBUS_LOCALES.en = {
   'toast.calendar_saved_locally':      'Saved locally — will sync when the server is reachable',
   'toast.calendar_offline_cache':      'Showing cached calendars — server unreachable',
   'toast.calendar_refreshed_remote': 'Plant calendar updated by another session; schedule shading refreshed',
+  'modal.opt_calendar_not_loaded_title': 'Plant calendar not loaded',
+  'modal.opt_calendar_not_loaded_msg': 'The calendar for plant {{plant}} has not been loaded from the server (it may be unreachable). The run would use the cached calendar, which can be out of date. Run anyway?',
+  'btn.opt_run_anyway': 'Run anyway',
   'toast.calendar_migrated':           'Calendars & blackouts saved to the server',
   'toast.plant_not_mastered':          'This plant isn’t in Master Data — add it there before its calendar can be saved',
 
