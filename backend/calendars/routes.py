@@ -11,7 +11,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 import db
 import master_data as md
-from backend.admin_ops.logbuffer import _set_admin_log_details
+from backend.admin_ops.logbuffer import _log_event, _set_admin_log_details
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key, require_authenticated
 
@@ -47,7 +47,11 @@ def plant_calendar_get(plant: str):
         cfg = md.load_plant_calendar(plant)
         # Read after the config so a write landing in between makes the next probe differ (a spurious
         # re-fetch is harmless; a missed change is not).
-        cfg["calendar_version"] = db.plant_calendar_version(plant)
+        try:
+            cfg["calendar_version"] = db.plant_calendar_version(plant)
+        except Exception as exc:  # noqa: BLE001 - this GET never 500s; None means "no baseline", the browser then skips the probe
+            _log_event("warn", "calendar", "plant calendar_version unavailable", exc=exc, plant=plant)
+            cfg["calendar_version"] = None
         return cfg
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
