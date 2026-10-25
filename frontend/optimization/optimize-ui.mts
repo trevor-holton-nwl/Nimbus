@@ -736,6 +736,21 @@ export const OptimizeDialog = (() => {
       if (!ok) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
     }
 
+    // Gap C (2026-10-23): Optimize reads Store.plants/calendars, which fall back to the localStorage copy when the
+    // plant calendar GET never landed. The reconcile already refuses to derive from an unhydrated calendar
+    // (engine.mts, CalendarSync.calendarState); a run that would silently place against stale hours asks first.
+    // This is the single entry for both the foreground and the background (exhaustive) run: run() is the only
+    // caller of runInBackground. Cancel is the default and leaves the dialog state as it was.
+    if (CalendarSync.calendarState(plant) !== 'hydrated') {
+      const proceed = await Modal.confirm({
+        title: Util.t('modal.opt_calendar_not_loaded_title'),
+        message: Util.t('modal.opt_calendar_not_loaded_msg', { plant }),
+        confirmLabel: Util.t('btn.opt_run_anyway'),
+        tone: 'warn',
+      });
+      if (!proceed) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
+    }
+
     const linesScope = (_scope === 'lines' && _selectedLines.size) ? Array.from(_selectedLines) : null;
     const optsForEngine: OptimizerRunOptions = {
       plant,

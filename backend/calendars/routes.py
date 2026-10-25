@@ -9,8 +9,9 @@ paths and payload/response shapes are byte-identical to before.
 """
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+import db
 import master_data as md
-from backend.admin_ops.logbuffer import _set_admin_log_details
+from backend.admin_ops.logbuffer import _log_event, _set_admin_log_details
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key, require_authenticated
 
@@ -37,11 +38,21 @@ def plant_calendar_get(plant: str):
     """Return a plant's full calendar/blackout config for Store hydration:
     { plant, subnetwork, plant_work_hours, line_work_hours:{line:{0..6}},
       machine_blackouts:[{id, machine, start, end, reason}], plant_blackouts:[...],
-      plant_periods:[{id, name, valid_from, valid_to, work_hours}] }."""
+      plant_periods:[{id, name, valid_from, valid_to, work_hours}],
+      calendar_version: opaque fingerprint of the above (same value GET /tasks/horizons carries) }.
+    The browser records calendar_version at hydration as the baseline it later compares with the horizons probe."""
     if not plant:
         raise HTTPException(status_code=400, detail="plant query param is required")
     try:
-        return md.load_plant_calendar(plant)
+        cfg = md.load_plant_calendar(plant)
+        # Read after the config so a write landing in between makes the next probe differ (a spurious
+        # re-fetch is harmless; a missed change is not).
+        try:
+            cfg["calendar_version"] = db.plant_calendar_version(plant)
+        except Exception as exc:  # noqa: BLE001 - this GET never 500s; None means "no baseline", the browser then skips the probe
+            _log_event("warn", "calendar", "plant calendar_version unavailable", exc=exc, plant=plant)
+            cfg["calendar_version"] = None
+        return cfg
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

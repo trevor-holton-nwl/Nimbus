@@ -31,6 +31,7 @@ import { SetupAdmin } from '../setup/setup-admin.mjs';
 import { CalendarUI } from '../calendar/calendar-admin.mjs';
 import { EditCalendar } from '../calendar/edit-calendar.mjs';
 import { CalendarPeriodsUI } from '../calendar/calendar-periods-ui.mjs';
+import { keyToDate } from '../calendar/calendar-periods.mjs';
 //   - `PriorityListMapping` is used only by Plant's priority-list upload flow.
 import { PriorityListMapping } from '../priority-lists/mapping.mjs';
 //   - the injected "am I the visible tab?" getter seam Plant needs (see
@@ -719,7 +720,7 @@ export const Plant = {
           const customBadge = Store.calendars[line] && !Store.calendars[line].inherited
             ? `<span class="line-badge badge-info">${Util.escapeHtml(Util.t('ui.custom_hours'))}</span>`
             : '';
-          const cal = Store.effectiveLineHours(line);
+          const cal = Store.activeLineHoursOn(line).workHours;   // the pattern in force today, not the default week
           const schedCells = [0,1,2,3,4,5,6].map(d => {
             const wh = cal[d];
             const timeStr = wh ? `${ProdLines._fmtHour(wh[0])}–${ProdLines._fmtHour(wh[1])}` : Util.t('ui.off');
@@ -2433,8 +2434,24 @@ export const ProdLines = {
     const ls = Store.lineSettings[line] || {};
     // Show the plant's week for a machine that follows it (effectiveLineHours), its own hours otherwise.
     const isOverride = !!Store.calendars[line] && !Store.calendars[line].inherited;
-    const cal = Store.effectiveLineHours(line);
-    const limited = isOverride && ProdLines._exceedsPlantHours(line, cal);
+    // Pills show what the machine works today: the plant's active period (or default week) for an inherited
+    // machine, its own hours intersected with that pattern for an override. The editor still opens on the
+    // default week (effectiveLineHours), so the raw override is read from there.
+    const active = Store.activeLineHoursOn(line);
+    const cal = active.workHours;
+    const raw = isOverride ? Store.effectiveLineHours(line) : null;
+    // The note is driven by what the pills show: any weekday where the active pattern (period or default week)
+    // narrows the machine's own hours. A period names itself; the default week reads "Limited by plant hours".
+    const narrowed = !!raw && ProdLines._hoursDiffer(raw, cal);
+    const cappedByPeriod = narrowed && active.source === 'period';
+    const limited = narrowed && !cappedByPeriod;
+    const followsNote = active.source === 'period' && active.period
+      ? Util.t('ui.follows_plant_period', {
+          name: active.period.name,
+          from: Util._fmtDatePref(keyToDate(active.period.validFrom)),
+          to: active.period.validTo ? Util._fmtDatePref(keyToDate(active.period.validTo)) : Util.t('ui.no_end_date'),
+        })
+      : Util.t(active.source === 'default' ? 'ui.follows_plant_default' : 'ui.follows_plant_calendar');
     const dayLabels = ['day.sun','day.mon','day.tue','day.wed','day.thu','day.fri','day.sat'].map(k => Util.t(k));
 
     const hoursPills = [0,1,2,3,4,5,6].map(d => {
@@ -2497,8 +2514,8 @@ export const ProdLines = {
         </div>
         <div class="ld-section-body">
           <div class="line-hours-pills">${hoursPills}</div>
-          ${isOverride ? '' : `<p class="panel-hint ld-hours-note">${Util.escapeHtml(Util.t('ui.follows_plant_calendar'))}</p>`}
-          ${limited ? `<p class="panel-hint ld-hours-note">${Util.escapeHtml(Util.t('ui.limited_by_plant_hours'))}</p>` : ''}
+          ${isOverride ? '' : `<p class="panel-hint ld-hours-note">${Util.escapeHtml(followsNote)}</p>`}
+          ${cappedByPeriod ? `<p class="panel-hint ld-hours-note">${Util.escapeHtml(Util.t('ui.capped_by_plant_period', { name: active.period!.name }))}</p>` : (limited ? `<p class="panel-hint ld-hours-note">${Util.escapeHtml(Util.t('ui.limited_by_plant_hours'))}</p>` : '')}
         </div>
       </div>
       <div class="ld-section">
@@ -2813,18 +2830,12 @@ export const ProdLines = {
     });
   },
 
-  /** True when a machine's own hours open longer than its plant ever does on some weekday (the plant's
-   *  default week united with every dated period), so the plant cuts them on those days. */
-  _exceedsPlantHours(line: string, hours: WorkHours): boolean {
-    const plant = Store.getPlantForLine(line);
-    const entry = plant ? Store.plants[plant] : undefined;
-    if (!entry) return false;
-    const union = globalThis.NimbusComputeCore!.unionWeeklyHours(entry.workHours, entry.periods);
+  /** True when two weeks differ on any weekday (null vs range, or different bounds). */
+  _hoursDiffer(a: WorkHours, b: WorkHours): boolean {
     for (let d = 0; d < 7; d++) {
-      const range = hours[d];
-      if (!range) continue;
-      const cap = union[d];
-      if (!cap || range[0] < cap[0] || range[1] > cap[1]) return true;
+      const x = a[d], y = b[d];
+      if (!x !== !y) return true;
+      if (x && y && (x[0] !== y[0] || x[1] !== y[1])) return true;
     }
     return false;
   },

@@ -20,6 +20,7 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast } from './foundation.mjs';
 import { Selection } from '../scheduling/selection.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
+import { activePeriodOn } from '../calendar/calendar-periods.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, NimbusMasterPlant, PriorityRankMaps, SetupSnapshot, StoreEventType, StoreMode, OrderScheduleSegment, PlantCalendarEntry, PlantPeriod } from './types.mjs';
 
 // -- Local type declarations (Phase 2 conversion; scoped to this file) ------
@@ -141,6 +142,13 @@ Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Stor
 /** Events that cannot change any input of Utilization.computeMatrix (tasks, line settings, calendars, plants,
  *  blocks, plant blocks, master data, setup snapshot, selected plant). They bump rev() but not dataRev(). */
 const DATA_REV_EXCLUDED: ReadonlySet<string> = new Set(['alerts:change', 'lines:selected', 'distribution:summary', 'undo:pushed', 'settings:change']);
+
+export interface ActiveLineHours {
+  workHours: WorkHours;
+  /** 'period' = a dated plant period covers the day; 'default' = the plant's default week; 'none' = no plant resolves. */
+  source: 'period' | 'default' | 'none';
+  period: PlantPeriod | null;
+}
 
 export const Store = {
   /** ONE clock (backward scheduling OQ52): the server's instant minus this browser's `Date.now()`,
@@ -617,6 +625,31 @@ export const Store = {
     const plant = this.getPlantForLine(line);
     return (plant ? this._state.plants[plant]?.workHours : undefined) ?? this._defaultShiftWeek();
   },
+  /** The hours a line actually works on `date` (default: today on the plant clock), with where they come from.
+   *  An inherited line shows the plant pattern active that day (the dated period when one covers it, else the
+   *  default week); an override is intersected with that pattern per weekday, the same math as the compute
+   *  core's workWindow. For DISPLAY (Machines pane); scheduling readers keep using the raw `calendars`. */
+  activeLineHoursOn(line: string, date?: Date): ActiveLineHours {
+    const own = this._state.calendars[line];
+    const override = own && !own.inherited ? own.workHours : null;
+    const plant = this.getPlantForLine(line);
+    if (!plant) return { workHours: override ?? this._defaultShiftWeek(), source: 'none', period: null };
+    const entry = this._state.plants[plant];
+    const d = date ?? this.plantNow(plant) ?? new Date();
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const period = activePeriodOn(entry?.periods, key);
+    const pattern = period ? period.workHours : (entry?.workHours ?? this._defaultShiftWeek());
+    const source = period ? 'period' : 'default';
+    if (!override) return { workHours: pattern, source, period };
+    const week: WorkHours = {};
+    for (let dow = 0; dow < 7; dow++) {
+      const a = override[dow], b = pattern[dow];
+      if (!a || !b) { week[dow] = null; continue; }
+      const s = Math.max(a[0], b[0]), e = Math.min(a[1], b[1]);
+      week[dow] = s < e ? [s, e] : null;
+    }
+    return { workHours: week, source, period };
+  },
   addBlock(block: NimbusBlock, source?: string): void {
     if (Config.DEBUG_BLOCKS) console.trace('[addBlock]', { source, block });
     const newS = Util.parseDate(block.start)?.getTime();
@@ -994,16 +1027,27 @@ export const Store = {
   setAlerts(alerts: NimbusAlert[], source?: string): void {
     // Compute which task IDs changed alert membership for incremental table updates.
     const oldAlerts = this._state.alerts || [];
-    const oldTaskIds = new Set(oldAlerts.map(a => a.taskId).filter(id => id != null));
-    const newTaskIds = new Set(alerts.map(a => a.taskId).filter(id => id != null));
+    // A task's alert membership is its set of alert types: gaining or losing ANY type (a queued row that already
+    // had another alert and now gains queued_now_fits) changes what its grid row and flags show, not only going
+    // from none to some or back.
+    const typesByTask = (list: NimbusAlert[]): Map<string, string> => {
+      const m = new Map<string, string[]>();
+      for (const a of list) {
+        if (a.taskId == null) continue;
+        const k = String(a.taskId);
+        const arr = m.get(k);
+        if (arr) arr.push(a.type); else m.set(k, [a.type]);
+      }
+      return new Map([...m].map(([k, v]) => [k, [...new Set(v)].sort().join('|')]));
+    };
+    const oldTypes = typesByTask(oldAlerts);
+    const newTypes = typesByTask(alerts);
     const changedIds: string[] = [];
-    // Tasks that had alerts before but don't now
-    for (const id of oldTaskIds) {
-      if (!newTaskIds.has(id)) changedIds.push(id);
+    for (const [id, sig] of oldTypes) {
+      if (newTypes.get(id) !== sig) changedIds.push(id);
     }
-    // Tasks that have alerts now but didn't before
-    for (const id of newTaskIds) {
-      if (!oldTaskIds.has(id)) changedIds.push(id);
+    for (const id of newTypes.keys()) {
+      if (!oldTypes.has(id)) changedIds.push(id);
     }
     this._state.alerts = alerts;
     this.emit({ type: 'alerts:change', source, changedIds: changedIds.length ? changedIds : undefined });

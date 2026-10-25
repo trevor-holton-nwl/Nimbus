@@ -512,3 +512,65 @@ test('platform state provider snapshot rides on error entries', () => {
   assert.equal(typeof p.selectedLines, 'number');
   assert.equal(typeof p.lastEvent.type, 'string');
 });
+
+test('Store.activeLineHoursOn: inherited line, period vs default, override intersection, no plant', () => {
+  const priorCalendars = Store.calendars;
+  const priorMasterData = structuredClone(Store.masterData);
+  const week = (r) => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, r ? [...r] : null]));
+  try {
+    Store.replaceCalendars({}, 'unit-test');
+    Store.setMasterData({ plants: [{ plant: 'PA' }], lines: [{ machine: 'LA', plant: 'PA' }, { machine: 'LB', plant: 'PA' }] }, 'unit-test');
+    Store.replacePlants({ PA: { workHours: week([7, 19]) } }, 'unit-test');
+    Store.ensureCalendar('LA');
+    const mon = new Date(2026, 9, 26, 12);                       // inside the period below
+    const before = new Date(2026, 9, 1, 12);
+    let r = Store.activeLineHoursOn('LA', mon);
+    assert.equal(r.source, 'default');
+    assert.equal(r.period, null);
+    assert.deepEqual(r.workHours[1], [7, 19]);
+
+    Store.setPlantPeriods('PA', [{ id: 'p1', name: '24x4', validFrom: '2026-10-20', validTo: null, workHours: week([0, 24]) }], 'unit-test');
+    r = Store.activeLineHoursOn('LA', mon);
+    assert.equal(r.source, 'period');
+    assert.equal(r.period.name, '24x4');
+    assert.deepEqual(r.workHours[1], [0, 24], 'an inherited line shows the period pattern, not the default week');
+    assert.equal(Store.activeLineHoursOn('LA', before).source, 'default', 'before the period starts the default week applies');
+    assert.deepEqual(Store.effectiveLineHours('LA')[1], [7, 19], 'the editor view is unchanged');
+
+    Store.setCalendar('LB', week([6, 20]), 'unit-test');
+    r = Store.activeLineHoursOn('LB', mon);
+    assert.equal(r.source, 'period');
+    assert.deepEqual(r.workHours[1], [6, 20], 'override inside the period keeps its own hours');
+    Store.setCalendar('LB', week([8, 17]), 'unit-test');
+    Store.replacePlants({ PA: { workHours: week([9, 15]) } }, 'unit-test');
+    assert.deepEqual(Store.activeLineHoursOn('LB', mon).workHours[1], [9, 15], 'override is capped by the plant default week');
+    Store.setPlantPeriods('PA', [{ id: 'p2', name: 'Closed', validFrom: '2026-10-20', validTo: null, workHours: week(null) }], 'unit-test');
+    assert.equal(Store.activeLineHoursOn('LB', mon).workHours[1], null, 'a closed period closes the override too');
+
+    const none = Store.activeLineHoursOn('NOPLANT', mon);
+    assert.equal(none.source, 'none');
+    assert.equal(none.period, null);
+    assert.ok(none.workHours[1], 'no plant: the default shift week');
+  } finally {
+    Store.replaceCalendars(priorCalendars, 'unit-test');
+    Store.setMasterData(priorMasterData, 'unit-test');
+    Store.replacePlants({}, 'unit-test');
+  }
+});
+
+test('Store.setAlerts changedIds marks a task whose alert-type set changed, not only one gaining or losing all alerts', () => {
+  const priorAlerts = Store.alerts;
+  const mk = (id, type, taskId) => ({ id, type, taskId, sev: 'warn', line: 'L', msg: 'x', time: new Date() });
+  const seen = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'alerts:change') seen.push(evt.changedIds); });
+  try {
+    Store.setAlerts([mk('a1', 'late', 't1'), mk('a2', 'late', 't2')], 'unit-test');
+    seen.length = 0;
+    Store.setAlerts([mk('a1', 'late', 't1'), mk('n1', 'queued_now_fits', 't1'), mk('a2', 'late', 't2')], 'unit-test');
+    assert.deepEqual(seen.at(-1), ['t1'], 'a task that already had an alert and gained another type is marked');
+    Store.setAlerts([mk('a1', 'late', 't1'), mk('n1', 'queued_now_fits', 't1'), mk('a2', 'late', 't2')], 'unit-test');
+    assert.equal(seen.at(-1), undefined, 'an identical set marks nothing');
+    Store.setAlerts([mk('a1', 'late', 't1'), mk('a2', 'late', 't2'), mk('a3', 'late', 't3')], 'unit-test');
+    assert.deepEqual([...seen.at(-1)].sort(), ['t1', 't3'], 'a lost type and a brand-new task are both marked');
+  } finally { off(); Store.setAlerts(priorAlerts, 'unit-test'); }
+});

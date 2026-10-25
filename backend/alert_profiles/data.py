@@ -24,7 +24,7 @@ ALERT_TYPES: frozenset[str] = frozenset({
     "late", "finish_moved_earlier", "reversal_forward", "plant_no_timezone",
     "placement_exception", "setup_override_orphaned", "pull_floor_crossed",
     "frozen_window_crossed", "run_time_zero", "no_operating_window", "no_anchor",
-    "derivation_issue",
+    "derivation_issue", "queued_now_fits",
 })
 RANKINGS: frozenset[str] = frozenset({"impact", "time", "severity", "orders"})
 MAX_RULES = 20
