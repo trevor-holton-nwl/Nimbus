@@ -415,4 +415,6 @@ Audit of how a calendar change reaches the planner, and what each part of the wo
 | Backend placements | SAP ingest resolves hours with the period list; no other backend path reads hours | OK | none |
 | Period hours 00:00-23:59 | Days do not touch at midnight, so a >24 h order is overlong | Owner action | Enter an end of 00:00 (24:00) |
 
+Fix wave (same day): the probe's baseline is recorded by hydration (`GET /plant-calendar` carries `calendar_version`), not by the first probe, so a change missed before the first Gantt entry is still caught; a failed re-fetch keeps the old baseline and retries on the next entry.
+
 Decisions: the fingerprint is an md5 over canonical row text (not count + max(updated_at)) so deletes and writers that skip `updated_at` still move it; the remote-refresh toast key is `toast.calendar_refreshed_remote` because `toast.calendar_updated` already means "saved".

@@ -764,16 +764,20 @@ export const Persistence = {
       });
   },
 
-  /** The plant's calendar fingerprint came back on /tasks/horizons. First sight is only recorded. A different
-   *  value re-fetches the plant calendar (CalendarSync.fetchPlantConfig emits `calendar:change`, which re-shades
-   *  the Gantt, recomputes alerts and re-renders the Machines pane; it never moves a placed bar or touches a dirty
-   *  row) and toasts once if the hours, periods or blackouts really changed. Skipped, and retried on the next
-   *  entry, while a drag is in flight, a dialog is open or What-If is active. Nothing task-shaped is loaded, so
-   *  there is no undo invalidation and no unsaved-edit hazard. */
+  /** The plant's calendar fingerprint came back on /tasks/horizons. The baseline is whatever the last successful
+   *  hydration recorded (`CalendarSync._applyConfig`, from `calendar_version` on GET /plant-calendar); with no
+   *  baseline (not hydrated yet, or an older backend) there is nothing to compare and this does nothing. A different
+   *  value re-fetches the plant calendar (`fetchPlantConfig` emits `calendar:change`, which re-shades the Gantt,
+   *  recomputes alerts and re-renders the Machines pane; it never moves a placed bar or touches a dirty row) and
+   *  toasts once if the hours, periods or blackouts really changed. The baseline moves only when that fetch really
+   *  applied (it is set by the hydration itself); a failed fetch keeps the old baseline and zeroes the throttle so
+   *  the next entry retries. Skipped, and retried on the next entry, while a drag is in flight, a dialog is open
+   *  or What-If is active. Nothing task-shaped is loaded, so there is no undo invalidation and no unsaved-edit
+   *  hazard. */
   _noteCalendarVersion(plant: string, version: string | null | undefined): void {
     if (!version) return;                                       // older backend, or an unknown plant
     const known = Persistence._calendarVersion[plant];
-    if (known === undefined) { Persistence._calendarVersion[plant] = version; return; }
+    if (known === undefined) return;                            // no hydration baseline to compare with
     if (known === version || Persistence._calendarRefreshing.has(plant)) return;
     if (Sandbox.active || Modal.anyOpen() || Persistence._calendarRefreshBlocked?.()) {
       Persistence._horizonsFetchedAt[plant] = 0;                // not a real fetch: let the next entry retry at once
@@ -781,8 +785,9 @@ export const Persistence = {
     }
     const before = Persistence._calendarFingerprint(plant);
     Persistence._calendarRefreshing.add(plant);
-    void CalendarSync.fetchPlantConfig(plant).then(() => {
-      Persistence._calendarVersion[plant] = version;
+    void CalendarSync.fetchPlantConfig(plant).then(applied => {
+      if (!applied) { Persistence._horizonsFetchedAt[plant] = 0; return; }   // failed or What-If-deferred: keep the baseline, retry next entry
+      if (Persistence._calendarVersion[plant] === known) Persistence._calendarVersion[plant] = version;   // a backend whose GET lacks the field
       if (Persistence._calendarFingerprint(plant) !== before) Toast.show(Util.t('toast.calendar_refreshed_remote'), 'info');
     }).finally(() => { Persistence._calendarRefreshing.delete(plant); });
   },

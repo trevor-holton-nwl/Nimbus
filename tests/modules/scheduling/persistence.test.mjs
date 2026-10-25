@@ -1597,11 +1597,13 @@ test('Persistence.load captures the server clock offset from /tasks meta.server_
   }
 });
 
-// Part 2 (2026-10-23): calendar re-hydration through the horizons probe.
-function horizonsEnv(version) {
+// Part 2 (2026-10-23): calendar re-hydration through the horizons probe. The baseline is recorded by the
+// hydration itself (CalendarSync._applyConfig, from GET /plant-calendar calendar_version); the mock below does the same.
+function horizonsEnv(serverVersion) {
   const prior = { fetch: globalThis.fetch, plant: Store.selectedPlant, md: Store.masterData, fpc: CalendarSync.fetchPlantConfig,
-    toast: Toast.show, guard: Persistence._calendarRefreshBlocked, version: { ...Persistence._calendarVersion }, doc: globalThis.document };
-  const state = { version, fetches: 0, hydrations: [], toasts: [] };
+    toast: Toast.show, guard: Persistence._calendarRefreshBlocked, version: { ...Persistence._calendarVersion }, doc: globalThis.document,
+    anyOpen: Modal.anyOpen };
+  const state = { version: serverVersion, fetches: 0, hydrations: [], toasts: [], fail: false, mutate: false };
   Store.setSelectedPlant('PH', 'unit-test');
   Store.setMasterData({ plants: [{ plant: 'PH', alt_flag_horizon: 100 }], lines: [] }, 'unit-test');
   Store.replacePlants({ PH: { workHours: { 1: [8, 16] } } }, 'unit-test');
@@ -1609,62 +1611,90 @@ function horizonsEnv(version) {
     visibility_horizon_end: null, frozen_horizon_end: null, alert_horizon_minutes: 100, calendar_version: state.version }) }; };
   CalendarSync.fetchPlantConfig = async (plant) => {
     state.hydrations.push(plant);
+    if (state.fail) return false;                                   // the real one catches, marks failed and resolves false
+    Persistence._calendarVersion[plant] = state.version;            // what _applyConfig records
     if (state.mutate) Store.setPlantPeriods(plant, [{ id: 'p', name: '24x4', validFrom: '2026-10-20', validTo: null, workHours: { 1: [0, 24] } }], 'calendar-sync');
+    return true;
   };
   Toast.show = (...a) => state.toasts.push(a);
   Persistence._calendarRefreshBlocked = null;
   delete Persistence._calendarVersion.PH;
   delete Persistence._horizonsFetchedAt.PH;
-  const probe = async () => { delete Persistence._horizonsFetchedAt.PH; return Persistence.refreshHorizons('PH'); };
+  const remoteToasts = () => state.toasts.filter(t => t[0] === 'toast.calendar_refreshed_remote').length;
+  const settle = () => new Promise(r => setTimeout(r, 0));
+  const probe = async () => { delete Persistence._horizonsFetchedAt.PH; const r = await Persistence.refreshHorizons('PH'); await settle(); return r; };
   const restore = () => {
-    globalThis.fetch = prior.fetch; CalendarSync.fetchPlantConfig = prior.fpc; Toast.show = prior.toast;
+    globalThis.fetch = prior.fetch; CalendarSync.fetchPlantConfig = prior.fpc; Toast.show = prior.toast; Modal.anyOpen = prior.anyOpen;
     Persistence._calendarRefreshBlocked = prior.guard; Persistence._calendarVersion = prior.version;
     if (prior.doc === undefined) delete globalThis.document; else globalThis.document = prior.doc;
     Store.replacePlants({}, 'unit-test'); Store.setMasterData(prior.md, 'unit-test'); Store.setSelectedPlant(prior.plant, 'unit-test');
     delete Persistence._horizonsFetchedAt.PH;
   };
-  return { state, probe, restore };
+  return { state, probe, restore, remoteToasts };
 }
 
-test('refreshHorizons re-hydrates the plant calendar only when calendar_version changes, never on first sight', async () => {
+test('refreshHorizons: no hydration baseline means nothing to compare, so no re-fetch (and nothing is recorded)', async () => {
   const { state, probe, restore } = horizonsEnv('v1');
   try {
     await probe();
-    assert.equal(state.hydrations.length, 0, 'first sight is only a baseline');
+    assert.equal(state.hydrations.length, 0);
+    assert.equal(Persistence._calendarVersion.PH, undefined, 'the probe never invents a baseline');
+  } finally { restore(); }
+});
+
+test('refreshHorizons re-hydrates when calendar_version differs from the hydration baseline, even on the first probe (a missed change)', async () => {
+  const { state, probe, restore, remoteToasts } = horizonsEnv('v2');
+  try {
+    Persistence._calendarVersion.PH = 'v1';                         // hydrated at boot, then another session changed the calendar
+    state.mutate = true;
     await probe();
-    assert.equal(state.hydrations.length, 0, 'same version: nothing to do');
-    state.version = 'v2'; state.mutate = true;
-    await probe();
-    await new Promise(r => setTimeout(r, 0));
-    assert.deepEqual(state.hydrations, ['PH'], 'a changed version re-fetches the plant calendar');
+    assert.deepEqual(state.hydrations, ['PH'], 'the first Gantt-entry probe already catches it');
     assert.equal(Persistence._calendarVersion.PH, 'v2');
-    assert.deepEqual(state.toasts.map(t => t[0]).filter(k => k === 'toast.calendar_refreshed_remote'), ['toast.calendar_refreshed_remote'], 'one toast, because the periods really changed');
+    assert.equal(remoteToasts(), 1, 'one toast, because the periods really changed');
     await probe();
     assert.equal(state.hydrations.length, 1, 'v2 is now the baseline');
   } finally { restore(); }
 });
 
-test('refreshHorizons re-hydration stays quiet when the refetched calendar is identical, and skips an older backend', async () => {
-  const { state, probe, restore } = horizonsEnv('v1');
+test('refreshHorizons: same version does nothing; identical refetched data does not toast; an older backend (no field) is a no-op', async () => {
+  const { state, probe, restore, remoteToasts } = horizonsEnv('v1');
   try {
+    Persistence._calendarVersion.PH = 'v1';
     await probe();
-    state.version = 'v2';                       // fingerprint moved but the hydrated data is the same (e.g. our own save)
+    assert.equal(state.hydrations.length, 0);
+    state.version = 'v2';                                            // fingerprint moved but the data is the same (our own save)
     await probe();
-    await new Promise(r => setTimeout(r, 0));
     assert.equal(state.hydrations.length, 1);
-    assert.equal(state.toasts.filter(t => t[0] === 'toast.calendar_refreshed_remote').length, 0, 'no toast when nothing visible changed');
-    state.version = undefined;                  // an older backend without the field
+    assert.equal(remoteToasts(), 0, 'no toast when nothing visible changed');
+    state.version = undefined;
     await probe();
     assert.equal(state.hydrations.length, 1);
     assert.equal(Persistence._calendarVersion.PH, 'v2');
   } finally { restore(); }
 });
 
-test('refreshHorizons does not re-hydrate during a drag or with a dialog open, and retries on the next entry', async () => {
-  const { state, probe, restore } = horizonsEnv('v1');
+test('refreshHorizons: a failed re-fetch keeps the old baseline, releases the throttle and is retried on the next entry', async () => {
+  const { state, probe, restore, remoteToasts } = horizonsEnv('v2');
   try {
+    Persistence._calendarVersion.PH = 'v1';
+    state.fail = true;
     await probe();
-    state.version = 'v2';
+    assert.equal(state.hydrations.length, 1);
+    assert.equal(Persistence._calendarVersion.PH, 'v1', 'the baseline did not advance on a failed fetch');
+    assert.equal(Persistence._horizonsFetchedAt.PH, 0, 'the throttle is released');
+    assert.equal(remoteToasts(), 0);
+    state.fail = false; state.mutate = true;
+    await probe();
+    assert.equal(state.hydrations.length, 2, 'the next entry retries');
+    assert.equal(Persistence._calendarVersion.PH, 'v2');
+    assert.equal(remoteToasts(), 1);
+  } finally { restore(); }
+});
+
+test('refreshHorizons does not re-hydrate during a drag, and retries on the next entry', async () => {
+  const { state, probe, restore } = horizonsEnv('v2');
+  try {
+    Persistence._calendarVersion.PH = 'v1';
     let dragging = true;
     Persistence._calendarRefreshBlocked = () => dragging;
     await probe();
@@ -1673,17 +1703,30 @@ test('refreshHorizons does not re-hydrate during a drag or with a dialog open, a
     assert.equal(Persistence._calendarVersion.PH, 'v1', 'the baseline is not advanced');
     dragging = false;
     await probe();
-    await new Promise(r => setTimeout(r, 0));
     assert.equal(state.hydrations.length, 1, 'next entry picks it up');
   } finally { restore(); }
 });
 
+test('refreshHorizons does not re-hydrate while a dialog is open, and retries once it closes', async () => {
+  const { state, probe, restore } = horizonsEnv('v2');
+  try {
+    Persistence._calendarVersion.PH = 'v1';
+    let open = true;
+    Modal.anyOpen = () => open;
+    await probe();
+    assert.equal(state.hydrations.length, 0);
+    assert.equal(Persistence._horizonsFetchedAt.PH, 0);
+    open = false;
+    await probe();
+    assert.equal(state.hydrations.length, 1);
+  } finally { restore(); }
+});
+
 test('refreshHorizons does not re-hydrate while What-If is active', async () => {
-  const { state, probe, restore } = horizonsEnv('v1');
+  const { state, probe, restore } = horizonsEnv('v2');
   const priorActive = Sandbox.active;
   try {
-    await probe();
-    state.version = 'v2';
+    Persistence._calendarVersion.PH = 'v1';
     Sandbox.active = true;
     await probe();
     assert.equal(state.hydrations.length, 0);

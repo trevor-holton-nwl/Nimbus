@@ -7,6 +7,7 @@ import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Toast, ErrorLog } from '../../../frontend/platform/foundation.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 
 globalThis.NimbusComputeCore ??= createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 globalThis.window = globalThis.window || {};
@@ -215,4 +216,28 @@ test('a GET that started while a period write is pending is protected from the s
   releases.forEach(r => r());
   await saving;
   assert.deepEqual(Store.getPlantPeriods('P1').map(p => p.id), ['new']);
+});
+
+// Propagation baseline (2026-10-23): hydration records the server's calendar_version; success is reported as a boolean.
+test('_applyConfig records calendar_version as the horizons baseline and reports applied; What-If defers without recording', () => {
+  delete Persistence._calendarVersion.P1;
+  assert.equal(CalendarSync._applyConfig('P1', { plant_work_hours: wh(8, 16), calendar_version: 'abc' }), true);
+  assert.equal(Persistence._calendarVersion.P1, 'abc');
+  assert.equal(CalendarSync._applyConfig('P1', { plant_work_hours: wh(8, 16) }), true, 'an older backend: still applied');
+  assert.equal(Persistence._calendarVersion.P1, 'abc', 'a missing field leaves the baseline alone');
+  Sandbox.active = true;
+  assert.equal(CalendarSync._applyConfig('P1', { calendar_version: 'zzz' }), false);
+  assert.equal(Persistence._calendarVersion.P1, 'abc', 'a deferred apply never moves the baseline');
+  delete Persistence._calendarVersion.P1;
+});
+
+test('fetchPlantConfig resolves true when applied and false (never rejects) when the GET fails', async () => {
+  delete Persistence._calendarVersion.P1;
+  respond = () => ({ ok: true, status: 200, json: () => Promise.resolve({ plant_work_hours: wh(8, 16), calendar_version: 'v9' }) });
+  assert.equal(await CalendarSync.fetchPlantConfig('P1'), true);
+  assert.equal(Persistence._calendarVersion.P1, 'v9');
+  respond = () => ({ ok: false, status: 500, json: () => Promise.resolve({}) });
+  assert.equal(await CalendarSync.fetchPlantConfig('P1'), false);
+  assert.equal(Persistence._calendarVersion.P1, 'v9', 'a failed fetch keeps the baseline');
+  delete Persistence._calendarVersion.P1;
 });

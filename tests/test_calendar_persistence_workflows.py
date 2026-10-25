@@ -361,3 +361,10 @@ def test_horizons_calendar_version_changes_on_every_calendar_write_and_is_plant_
 
     body = scheduling_routes.get_task_horizons(plant=c.plant, allowed_plants=None)
     assert body["calendar_version"] == db.plant_horizons(c.plant)["calendar_version"]
+
+    # GET /plant-calendar carries the same fingerprint: hydration records it as the baseline the probe compares with.
+    from backend.calendars import routes as calendar_routes
+    cfg = calendar_routes.plant_calendar_get(c.plant)
+    assert cfg["calendar_version"] == body["calendar_version"]
+    md.save_plant_periods(c.plant, [period("z", "2027-06-01", None)], user_email=c.actor)
+    assert calendar_routes.plant_calendar_get(c.plant)["calendar_version"] != cfg["calendar_version"]

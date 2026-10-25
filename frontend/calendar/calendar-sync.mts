@@ -32,6 +32,8 @@ const PERIODS_PATH = '/plant-calendar/plant-periods';
 
 /** GET /plant-calendar (brain.py) response envelope. */
 interface PlantCalendarConfig {
+  /** Fingerprint of the plant's calendar at read time; the baseline `Persistence.refreshHorizons` compares against. */
+  calendar_version?: string | null;
   plant_periods?: PlantPeriodWire[];
   plant_work_hours?: WorkHours;
   line_work_hours?: Record<string, WorkHours>;
@@ -148,8 +150,10 @@ export const CalendarSync = {
   },
 
   /* ----- load / hydration ----------------------------------------------- */
-  fetchPlantConfig(plant: string | null): Promise<void> {
-    if (!plant) return Promise.resolve();
+  /** Resolves true only when the server's config was applied to Store (never rejects: a failed GET resolves false
+   *  after marking the plant `failed` and toasting; a What-If-deferred apply also resolves false). */
+  fetchPlantConfig(plant: string | null): Promise<boolean> {
+    if (!plant) return Promise.resolve(false);
     // Ensure the line→plant index is current before _applyConfig so getPlantForLine
     // resolves reliably even when the master-data fetch REJECTED (the .finally still
     // runs us). Otherwise the migration/clear filters misfire on a stale/empty index. (F4)
@@ -168,6 +172,7 @@ export const CalendarSync = {
         ErrorLog.warn('calendar-sync', `Fetch plant-calendar failed for ${plant}: ${e.message}`);
         if (CalendarSync._hydration[plant]?.state !== 'hydrated') CalendarSync._setHydration(plant, 'failed');
         Toast.show(Util.t('toast.calendar_offline_cache'), 'info');
+        return false;
       });
   },
 
@@ -237,7 +242,7 @@ export const CalendarSync = {
     return read.pending.has(line) || !!edit && (edit.pending || edit.revision > read.revision);
   },
 
-  _applyConfig(plant: string, cfg: PlantCalendarConfig, hoursRead: HoursReadGuard = CalendarSync._captureHoursRead(plant)): void {
+  _applyConfig(plant: string, cfg: PlantCalendarConfig, hoursRead: HoursReadGuard = CalendarSync._captureHoursRead(plant)): boolean {
     // Never overwrite live What-If state — mirror the _post guard. A plant switch or a
     // late in-flight fetch during What-If must not clobber sandbox edits (the write path
     // already no-ops under Sandbox.active; the hydration write path must too). (F2)
@@ -245,7 +250,7 @@ export const CalendarSync = {
     // resolves mid-What-If is dropped and the plant shows stale cached state all session.
     if (typeof Sandbox !== 'undefined' && Sandbox.active) {
       CalendarSync._deferredHydrationPlant = plant;
-      return;
+      return false;
     }
     cfg = cfg || {};
     // Evaluate emptiness PER SLICE. Backend is authoritative only for the slices it
@@ -316,6 +321,9 @@ export const CalendarSync = {
       // The server's calendar is now in Store: mark it before the emits below, because the backward-scheduling
       // reconcile subscribes to `calendar:change` and asks `calendarState` synchronously.
       this._setHydration(plant, 'hydrated', Object.keys(cfg.line_work_hours || {}));
+      // Hydration is the true baseline for the horizons probe's calendar_version comparison (a tab that missed a
+      // change before its first Gantt entry still differs from the server's current value on that probe).
+      if (typeof cfg.calendar_version === 'string') Persistence._calendarVersion[plant] = cfg.calendar_version;
       // Notify subscribers + refresh the offline cache with backend truth. These
       // emits fire while _hydrating=true, so no POST-back to the backend.
       Store.emit({ type: 'calendar:change',    source: 'calendar-sync', plant });
@@ -331,6 +339,7 @@ export const CalendarSync = {
     // (all-or-nothing); a failed slice stays un-migrated and retries next load.
     // Idempotent via client-supplied ids + ON CONFLICT, so re-sending is harmless.
     this._migrateMissingSlices(plant, has);
+    return true;
   },
 
   _migrateMissingSlices(plant: string, has: { plantHours: boolean; lineHours: boolean; lineBlackouts: boolean; plantBlackouts: boolean }): void {
