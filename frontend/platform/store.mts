@@ -1027,16 +1027,27 @@ export const Store = {
   setAlerts(alerts: NimbusAlert[], source?: string): void {
     // Compute which task IDs changed alert membership for incremental table updates.
     const oldAlerts = this._state.alerts || [];
-    const oldTaskIds = new Set(oldAlerts.map(a => a.taskId).filter(id => id != null));
-    const newTaskIds = new Set(alerts.map(a => a.taskId).filter(id => id != null));
+    // A task's alert membership is its set of alert types: gaining or losing ANY type (a queued row that already
+    // had another alert and now gains queued_now_fits) changes what its grid row and flags show, not only going
+    // from none to some or back.
+    const typesByTask = (list: NimbusAlert[]): Map<string, string> => {
+      const m = new Map<string, string[]>();
+      for (const a of list) {
+        if (a.taskId == null) continue;
+        const k = String(a.taskId);
+        const arr = m.get(k);
+        if (arr) arr.push(a.type); else m.set(k, [a.type]);
+      }
+      return new Map([...m].map(([k, v]) => [k, [...new Set(v)].sort().join('|')]));
+    };
+    const oldTypes = typesByTask(oldAlerts);
+    const newTypes = typesByTask(alerts);
     const changedIds: string[] = [];
-    // Tasks that had alerts before but don't now
-    for (const id of oldTaskIds) {
-      if (!newTaskIds.has(id)) changedIds.push(id);
+    for (const [id, sig] of oldTypes) {
+      if (newTypes.get(id) !== sig) changedIds.push(id);
     }
-    // Tasks that have alerts now but didn't before
-    for (const id of newTaskIds) {
-      if (!oldTaskIds.has(id)) changedIds.push(id);
+    for (const id of newTypes.keys()) {
+      if (!oldTypes.has(id)) changedIds.push(id);
     }
     this._state.alerts = alerts;
     this.emit({ type: 'alerts:change', source, changedIds: changedIds.length ? changedIds : undefined });

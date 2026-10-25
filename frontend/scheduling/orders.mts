@@ -380,11 +380,6 @@ export const Table = {
     return true;
   },
 
-  /** Due Date / Planned Start / Planned Finish columns (backward scheduling OQ1, OQ16). The FINISH is the input
-   *  and the start is derived from it, so Planned Start and Due Date are read-only and Planned Finish takes the
-   *  typed value. Due Date shows the due instant (a date-only SAP finish reads as the close of that day), not the
-   *  raw midnight. `field` stays alongside `valueGetter` so AG Grid's date inference still drives the column's sort
-   *  and agDateColumnFilter. Extracted (like `_runTimeEditable`) so it is testable without a live AG Grid. */
   /** The Planning reason cell's text. A planner Delete carries a fixed code; resolve it through the locale so the
    *  label follows the user's language. The run-time-over-cap reason does the same, filling in the hours the server
    *  stored beside the message. Other codes keep their stored message. An `overlong_never` row the calendar change
@@ -407,6 +402,11 @@ export const Table = {
     return reason.message ?? '';
   },
 
+  /** Due Date / Planned Start / Planned Finish columns (backward scheduling OQ1, OQ16). The FINISH is the input
+   *  and the start is derived from it, so Planned Start and Due Date are read-only and Planned Finish takes the
+   *  typed value. Due Date shows the due instant (a date-only SAP finish reads as the close of that day), not the
+   *  raw midnight. `field` stays alongside `valueGetter` so AG Grid's date inference still drives the column's sort
+   *  and agDateColumnFilter. Extracted (like `_runTimeEditable`) so it is testable without a live AG Grid. */
   _scheduleDateColumns(): TableColDef[] {
     return [
       { headerName: Util.t('col.due_date'), field: 'original_end_date', minWidth: 160,

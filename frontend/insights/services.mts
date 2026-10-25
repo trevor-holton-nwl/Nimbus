@@ -454,8 +454,11 @@ const _ALERTS_MAX_DEBOUNCE_MS = 500;
 export const Alerts = {
   /** Gap A (2026-10-23): queued `overlong_never` rows that now fit one working period after the calendar widened.
    *  Frontend-only and display-only: no bar moves and nothing is persisted (D6); Optimize or a manual placement
-   *  releases the row. The check is the engine's own predicate (`Calendar.hasNominalWindow`, the one
-   *  `overlong_never` was queued with), so the alert cannot disagree with the placement. Recomputed with every
+   *  releases the row. The check uses the engine's own predicate (`Calendar.hasNominalWindow`) but only
+   *  approximates the queueing decision: it measures the run time alone and from the plant's now, while the engine's
+   *  walk anchors at the row's finish and may include setup minutes, so a row flagged here can still be refused (or
+   *  one not flagged could still place) when the planner places it; the alert says "run Optimize or place it",
+   *  never that it is guaranteed to fit. Recomputed with every
    *  alert pass (`calendar:change` already schedules one), so it clears itself when the row stops fitting, is
    *  placed or is dismissed. `onlyLines` scopes it like the core's incremental pass. */
   queuedNowFits(onlyLines: Set<string> | null = null): NimbusAlert[] {

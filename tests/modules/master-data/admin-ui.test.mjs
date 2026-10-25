@@ -1943,6 +1943,15 @@ test('ProdLines detail: an override gets the Custom hours badge, a Reset button 
   assert.ok(!body.innerHTML.includes('data-action="reset-calendar"'), 'a non-admin cannot reset');
 }));
 
+test('ProdLines detail: an override narrowed by the DEFAULT week shows the limited note even when another period is wider', () => withInheritEnv(({ body, week }) => {
+  // plant default 7am-7pm; a period far in the future opens all day (the old union check saw "not exceeded")
+  Store.setPlantPeriods('PD', [{ id: 'p1', name: 'Later', validFrom: '2099-01-01', validTo: null, workHours: week([0, 24]) }], 'test');
+  ProdLines._renderDetail('A2');                                   // A2 is 6am-8pm, narrowed by 7am-7pm today
+  assert.ok(body.innerHTML.includes('ui.limited_by_plant_hours'));
+  assert.ok(!body.innerHTML.includes('ui.capped_by_plant_period'));
+  assert.ok(body.innerHTML.includes('7am–7pm'), 'the pills show the capped hours');
+}));
+
 test('ProdLines detail: an override inside the plant hours has no limited hint', () => withInheritEnv(({ body, week }) => {
   Store.setCalendar('A2', week([8, 17]), 'test');
   ProdLines._renderDetail('A2');

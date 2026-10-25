@@ -2440,8 +2440,11 @@ export const ProdLines = {
     const active = Store.activeLineHoursOn(line);
     const cal = active.workHours;
     const raw = isOverride ? Store.effectiveLineHours(line) : null;
-    const limited = !!raw && ProdLines._exceedsPlantHours(line, raw);
-    const cappedByPeriod = !!raw && active.source === 'period' && ProdLines._hoursDiffer(raw, cal);
+    // The note is driven by what the pills show: any weekday where the active pattern (period or default week)
+    // narrows the machine's own hours. A period names itself; the default week reads "Limited by plant hours".
+    const narrowed = !!raw && ProdLines._hoursDiffer(raw, cal);
+    const cappedByPeriod = narrowed && active.source === 'period';
+    const limited = narrowed && !cappedByPeriod;
     const followsNote = active.source === 'period' && active.period
       ? Util.t('ui.follows_plant_period', {
           name: active.period.name,
@@ -2825,22 +2828,6 @@ export const ProdLines = {
       NIMBUS!.MasterData!.syncLineSettings!(line, { bufferUnit: unit });
       ProdLines._renderDetail(ProdLines._activeNavLine);
     });
-  },
-
-  /** True when a machine's own hours open longer than its plant ever does on some weekday (the plant's
-   *  default week united with every dated period), so the plant cuts them on those days. */
-  _exceedsPlantHours(line: string, hours: WorkHours): boolean {
-    const plant = Store.getPlantForLine(line);
-    const entry = plant ? Store.plants[plant] : undefined;
-    if (!entry) return false;
-    const union = globalThis.NimbusComputeCore!.unionWeeklyHours(entry.workHours, entry.periods);
-    for (let d = 0; d < 7; d++) {
-      const range = hours[d];
-      if (!range) continue;
-      const cap = union[d];
-      if (!cap || range[0] < cap[0] || range[1] > cap[1]) return true;
-    }
-    return false;
   },
 
   /** True when two weeks differ on any weekday (null vs range, or different bounds). */

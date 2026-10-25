@@ -557,3 +557,20 @@ test('Store.activeLineHoursOn: inherited line, period vs default, override inter
     Store.replacePlants({}, 'unit-test');
   }
 });
+
+test('Store.setAlerts changedIds marks a task whose alert-type set changed, not only one gaining or losing all alerts', () => {
+  const priorAlerts = Store.alerts;
+  const mk = (id, type, taskId) => ({ id, type, taskId, sev: 'warn', line: 'L', msg: 'x', time: new Date() });
+  const seen = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'alerts:change') seen.push(evt.changedIds); });
+  try {
+    Store.setAlerts([mk('a1', 'late', 't1'), mk('a2', 'late', 't2')], 'unit-test');
+    seen.length = 0;
+    Store.setAlerts([mk('a1', 'late', 't1'), mk('n1', 'queued_now_fits', 't1'), mk('a2', 'late', 't2')], 'unit-test');
+    assert.deepEqual(seen.at(-1), ['t1'], 'a task that already had an alert and gained another type is marked');
+    Store.setAlerts([mk('a1', 'late', 't1'), mk('n1', 'queued_now_fits', 't1'), mk('a2', 'late', 't2')], 'unit-test');
+    assert.equal(seen.at(-1), undefined, 'an identical set marks nothing');
+    Store.setAlerts([mk('a1', 'late', 't1'), mk('a2', 'late', 't2'), mk('a3', 'late', 't3')], 'unit-test');
+    assert.deepEqual([...seen.at(-1)].sort(), ['t1', 't3'], 'a lost type and a brand-new task are both marked');
+  } finally { off(); Store.setAlerts(priorAlerts, 'unit-test'); }
+});
