@@ -21,14 +21,14 @@ The owner wants two things:
 
 **Non-goals (v1)**
 - A capacity warning on a Gantt drag, Inspector integration, a server-side recommendation, an OptimizerPreview-active guard (Fix has the same gap).
-- Changing what the optimizer does with machines.
-- Any new table, migration, or backend route. The only backend change is the alert-type whitelist.
+- (controller) Changing what the optimizer does with machines.
+- (controller) Any new table, migration, or backend route. The only backend change is the alert-type whitelist.
 
 **Anti-goals**
-- No immediate save on place. No auto-placing of orders without a planner click.
-- No confidence-score promise on the card (the score would move the wrong way when a slot adds load).
-- No bar fill promised on the Gantt for the Planning colour: queued rows draw no bar, so the legend copy must not imply one.
-- No new top-level tab or page.
+- No immediate save on place (owner, D3). (controller) No auto-placing of orders without a planner click.
+- (controller) No confidence-score promise on the card (the score would move the wrong way when a slot adds load); see C7.
+- (controller) No bar fill promised on the Gantt for the Planning colour: queued rows draw no bar, so the legend copy must not imply one.
+- (controller) No new top-level tab or page.
 
 ## Owner decisions (settled 2026-10-26, do not re-open)
 
@@ -57,7 +57,20 @@ The owner wants two things:
 
 ## Execution model
 
-The orchestrator dispatches and rules; Sonnet subagents implement every task (subagent-driven development), one task per agent in dependency order. Each agent runs its own scoped tests and appends its own ledger line. Task 0 is this document. Task list and dependency order live in the plan file `C:\Users\PJ29587\.claude\plans\pasted-content-id-44d6-can-we-glowing-pearl.md`; the spec's design sections below are what the tasks implement.
+The orchestrator dispatches and rules; Sonnet subagents implement every task (subagent-driven development), one task per agent in dependency order. Each agent runs its own scoped tests and appends its own ledger line. Tasks, in dependency order:
+
+0. This spec document; commit.
+1. Leaf helper `frontend/scheduling/planning-reason.mts`; `Table._planningReasonText` delegates; `.gitignore` twin; test `tests/modules/scheduling/planning-reason.test.mjs`.
+2. Register the type and the `planning` category (all of A2), including the four `alert.*` locale keys in five locales and the locale gates (`FIRING_ALERT_TYPES` 31 to 32, `BRANCH_KEYS` with both message keys), plus `tests/test_alert_profiles_data.py::test_alert_types_exclude_never_firing` asserting both queued types are present.
+2b. Top fixes family (all of A3): `alert-leverage.mts`, `levActions`, two leverage locale keys in five locales, the tests listed in A3.
+3. Producer `Alerts.needsPlanning` plus `queuedAlerts` and the four call sites.
+5. Row model: the `slot` action in `alert-monitor-model.mts`.
+6. Dialog module `alert-slot-modal.mts`, the `index.html` shell, `.gitignore` twin, and the `am.slot_*` locale keys in five locales with `ALERT_MONITOR_KEYS`.
+7. Pane wiring: `_runAlertAction`, `_openRowMenu`, `_diagnoseFor`, `AmNimbus`, `DIAG_H`.
+9. Docs: the CLAUDE.md files listed under Docs below, then ledger and memory (delegated).
+10. Review wave: one reviewer per area (producer/registration, dialog/place flow, locales/tests), a fix wave, then merge to local `main` via the finishing-a-development-branch flow.
+
+The design sections below are what these tasks implement.
 
 ## Design
 
@@ -107,6 +120,8 @@ Insert `'planning'` between `setup` and `exceptions` in every ordered list, so "
 - The pane needs no change: `_onLevAction` leads to `_levShowAlerts(item)`, which sets `AlertMonitorPane.setFocus(item.alertIds, title)` and `AlertProfileMatches.setFocusTaskIds`. That lists exactly those ids (profile bypassed) with the focus chip, and the Orders table profile filter follows the task ids.
 - Locales (five): `leverage.title.needs-planning` = "{{n}} orders need a slot · {{h}} h of unplaced demand" (reusing each locale's `kpi.needs_planning_demand` phrasing), `leverage.action.needs-planning` = "Show these".
 
+**Tests.** `tests/modules/insights/alert-leverage.test.mjs`: "one plant-wide item; hours sum RUN_TIME, unknown counts 0, one decimal"; "method none, confidenceAfter null, never replayed"; "overdue scores as if due now; beyond-window scores 0"; "absent when no needs_planning alert"; extend the sort test. `tests/modules/alert-monitor/alert-monitor-leverage.test.mjs`: an `npItem` fixture; primary action is Show these and the menu does not repeat it; the title carries n and h; add the family to the never-prints-points loop. `tests/modules/alert-monitor/alert-monitor-leverage-pane.test.mjs`: "Show these focuses exactly its alert ids". **Docs:** `frontend/insights/CLAUDE.md` (the families list, about line 20) and `frontend/alert-monitor/CLAUDE.md` (about lines 28 and 55).
+
 **Alert locale keys** (five locales, identical placeholders): `alert.needs_planning` = `Order "{{order}}" has no slot yet: {{reason}}`, `alert.needs_planning_no_reason`, `alert.type.needs_planning` = "Needs Planning" (mirroring each locale's `ui.needs_planning`), `alert.help.needs_planning`.
 
 ### B. "Slot..." action and dialog (Alert Monitor)
@@ -127,7 +142,7 @@ export interface SlotDeps { pairOptions(task); hoursFor(task, pv, machine); dayC
 export function parsePairValue(value): { pv, machine }                       // orders.mts ~1595 logic, Runtime.normPv
 export function rankSlotCandidates(task, day, deps): SlotCandidate[]        // fits first; freeHours desc (null last); needHours null last; machine, pv asc
 export function slotFinishFor(machine, day, workWindow): { finish, day, movedBack } | null   // latest open window end within SLOT_LOOKBACK_DAYS=30
-export function slotTaskKey(t): string      // copy of Interaction._dropTaskKey (gantt.mts ~5626) + planning_reason.code, firmed, row_version, ORDER_QUANTITY_(GMEIN)
+export function slotTaskKey(t): string      // copy of Interaction._dropTaskKey (gantt.mts ~5626) + planning_reason.code, firmed, row_version, the order quantity (and its unit)
 export function defaultSlotDay(task, plantToday): string
 export function formatSlotOption(c, t): string
 export function canPlaceSlot(): boolean     // signed in && !Sandbox.active
@@ -146,6 +161,10 @@ export function canPlaceSlot(): boolean     // signed in && !Sandbox.active
 **Wire.** Source `'alerts'` maps through `SOURCE_WIRE.alerts = 'alert_fix'` (`persistence.mts`, about line 43), already accepted by the backend `PLANNER_SOURCES` (`backend/schedule_events/events.py`, about line 40). `App._trackDirty` dirties both `task:update` and `firmed:change`, and Save sends `FIRMED` for `_firmDirtyIds`. The Inspector History therefore reads "Alert fix".
 
 **Alert Monitor locale keys** (five locales plus `ALERT_MONITOR_KEYS` in the locale test; no "points", "pts", "exact" or "estimate" in `am.*`): `am.slot` (`◫ Slot…`), `am.slot_title`, `am.slot_day`, `am.slot_pair`, `am.slot_hint`, `am.slot_option` (`{{pair}} — {{free}} of {{cap}} h free · needs {{need}} h`), `am.slot_option_short` (adds `· {{short}} h short`), `am.slot_option_closed`, `am.slot_option_unknown`, `am.slot_none`, `am.slot_suggested`, `am.slot_place`, `am.slot_confirm_title`, `am.slot_confirm_short`, `am.slot_confirm_closed`, `am.slot_confirm_place`, `am.slot_placed`, `am.slot_stale`, `am.slot_no_window`, `am.slot_undo`. Fit: an option line is about 45-60 characters in de/fr/pt inside a full-width select in a standard modal; acceptable at 1,024 px (the `.lbl` text of the row button already hides below 1,200 px).
+
+**Tests (B).** `tests/modules/alert-monitor/alert-monitor-rows.test.mjs`: Slot appears only on needs_planning rows with a task id, never alongside Fix or Override, carries `data-task-id`, is locked in What-If, menu order is Go to, Slot..., Diagnose, Acknowledge. `tests/modules/alert-monitor/alert-slot-modal.test.mjs` (harness: `alert-ack-modal.test.mjs` plus a `globalThis.NIMBUS` stub): rank order; `slotFinishFor` open day, closed day, and 31 closed days returning null; `slotTaskKey` and `defaultSlotDay`; `formatSlotOption` key choice; open renders and Place is hidden when `canPlaceSlot` is false; re-rank on day change; place happy path (one patch with source alerts, firm with source alerts, one undo entry that restores and unfirms, recompute, toast, close, `gotoLineDay` arguments); short-day confirm and cancel writes nothing; closed day confirms and places at the previous window end; engine refusal stays open; stale task aborts (also after the confirm); plant change closes. `tests/modules/alert-monitor/alert-monitor-pane.test.mjs`: slot dispatches `AlertSlotModal.open` from the button and the menu and is a no-op in What-If; Diagnose shows `am.slot_suggested` from a stubbed `suggest`. **Docs:** `frontend/insights/CLAUDE.md` (producer paragraph beside `queued_now_fits`, about line 170), `frontend/alert-monitor/CLAUDE.md` (module, action vocabulary, import edges, gotchas: closed-day walk-back and no role gate), `backend/alert_profiles/CLAUDE.md` (about line 222), `frontend/scheduling/CLAUDE.md` (about line 127, the delegation to the leaf helper).
+
+**Tests (A).** `tests/modules/scheduling/planning-reason.test.mjs`: fixed codes, overlong with now-fits, run-time-over-cap numbers and fallback, unknown code, null reason (`orders.test.mjs` about line 2619 stays green). `tests/modules/insights/services.test.mjs` (extend `withQueuedFixture`, about line 816): one warn alert per queued row with the due instant as time and `err` when overdue; skips the three excluded codes, rows with no machine and dismissed rows; honours `onlyLines`; clears once placed; `queuedAlerts` publishes both types through `_recomputeSync` with the "now fits" reason; a registration test copied from about lines 869-874. `tests/modules/insights/alert-profiles.test.mjs`: Slot set disjoint from Fix and Override. `tests/test_alert_profiles_data.py::test_alert_types_exclude_never_firing` asserts both queued types are present. `tests/modules/locale-completeness.test.mjs`: firing-type count 31 to 32 (about line 858) and `BRANCH_KEYS` (about line 648) gain both message keys.
 
 ## Hazards verified (two independent agents, spot-checked by the controller)
 
@@ -176,7 +195,7 @@ python -m pytest tests/test_alert_profiles_data.py tests/test_alert_profiles.py 
 Compare against base before calling the gate red (known pre-existing: the `styles.css` CRLF test and the leverage timing flake).
 
 **Manual browser script** (`uvicorn brain:api --port 8000`, a plant with queued rows):
-1. The Alert Monitor lists one "Needs Planning" row per queued order except runtime-unknown and zero-quantity ones; overdue rows are `err`; Diagnose shows "Suggested slot". Top fixes shows the "N orders need a slot · X h" card near the top; "Show these" lists only those rows with the focus chip. The Overview What panel shows a "Planning" bar in the new orange; clicking narrows the list. In dark theme the bar and legend swatch are readable. The profile editor shows a Planning group with both queued types.
+1. The Alert Monitor lists one "Needs Planning" row per queued order except runtime-unknown and zero-quantity ones; overdue rows are `err`; Diagnose shows "Suggested slot". Top fixes shows the "N orders need a slot · X h" card near the top (an overdue queue outranks single-line cards); "Show these" lists only those rows with the focus chip. The Overview What panel shows a "Planning" bar in the new orange; clicking narrows the list. In dark theme the bar and legend swatch are readable. The profile editor shows a Planning group with both queued types.
 2. "Slot..." opens the dialog: order, reason, day = due day (or today if overdue), a ranked select with the top pair preselected; changing the day re-ranks the numbers.
 3. Place a fitting candidate: the bar lands at the machine's close on the Gantt (Go To centres it), the firmed badge shows, the row leaves the Needs Planning filter, the unsaved badge increments, Ctrl+Z removes the bar and the firm, Save persists, Inspector History reads "Alert fix".
 4. Place on a short or closed day: warn confirm; Cancel keeps the dialog; Confirm places (closed goes to the previous open day's close).
@@ -188,13 +207,13 @@ Deploy needs only the image; there is no migration. Not pushed or deployed unles
 
 ## Context appendix
 
-**What prompted it (2026-10-26).** The owner asked whether queued (Needs Planning) orders could be shown on the Alert Monitor and whether NIMBUS could recommend a machine for them by free capacity on a chosen day, with a confirm when the day cannot absorb the order. Four explorer agents were sent to check what exists before the design was fixed.
+**What prompted it (2026-10-26).** The owner asked whether queued (Needs Planning) orders could be shown on the Alert Monitor and whether NIMBUS could recommend a machine for them by free capacity on a chosen day, with a confirm when the day cannot absorb the order. Before the design was fixed, three read-only explorer agents (Alert Monitor domain, the Needs Planning definition, capacity plus the Gantt drop flow) and three planning/verification agents checked what exists.
 
 **Explorer findings that shaped the design.**
 - No machine-picking logic existed anywhere. The optimizer never changes `MACHINE`, so the recommendation is new code built from existing parts: eligible pairs from the routing layer, per-pair hours from `Runtime.resolve`, free hours from the utilisation matrix.
-- A Gantt drop has no capacity check at all. This is why a capacity warning on drag is out of scope but the Slot dialog carries its own confirm, rather than relying on a downstream guard.
-- Queued rows are absent from the Gantt (no bar is drawn). The Planning colour is therefore only visible on the Alert Monitor Overview, the legend, and the profile-match ring for scheduled orders of that category; the legend copy must not promise a bar.
-- Only two reason codes alerted before (`runtime_unknown` as `runtime-unknown`, and `overlong_never` that now fits as `queued_now_fits`). Every other reason (no eligible pair, run time over cap, missing quantity and so on) was silent on the Monitor, which is the gap the new kind closes.
+- A Gantt drop has no capacity check at all (verified: the drop path, `_commitSingleDrop`, only checks PV-machine eligibility). This is why a capacity warning on drag is out of scope but the Slot dialog carries its own confirm, rather than relying on a downstream guard.
+- Queued rows are absent from the Gantt (no bar is drawn). The Gantt fill and the legend row for the Planning colour exist for parity with the other five categories only; the colour is really seen on the Alert Monitor Overview, and the legend copy must not promise a bar.
+- Only two reason codes alerted before (`runtime_unknown` as `runtime-unknown`, and `overlong_never` that now fits as `queued_now_fits`). Every other reason was silent on the Monitor, which is the gap the new kind closes; for example no eligible pair, run time over cap, or a missing quantity (examples, not an exhaustive list).
 
 **Things learned along the way.**
 - A closed-day finish is refused by the engine (`finish_cannot_hold`), so the dialog must pick the open window itself (walk back up to 30 days) and ask the planner to confirm the move.
