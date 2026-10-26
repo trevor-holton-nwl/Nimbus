@@ -7,7 +7,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -3203,4 +3203,18 @@ test('Timeline._onStore schedules one coalesced rebuild on master-data-changed o
     Timeline._onStore({ type: 'master-data-changed', source: 'master-data-save', revision: 2, mode: 'live' });
     assert.equal(rebuilds, 1, 'inactive Gantt: the next goto(gantt) rebuilds anyway');
   } finally { Timeline._scheduleRebuild = priorRebuild; Timeline._ganttActive = priorActive; }
+});
+
+test('alertCellMapFor: a needs_planning alert paints no Gantt day cell (no bar to anchor, red cells would read as conflicts)', () => {
+  const day = new Date(2026, 9, 28, 9);
+  const alerts = [
+    { id: 'np-1', type: 'needs_planning', sev: 'err', line: 'L1', time: day },
+    { id: 'np-2', type: 'needs_planning', sev: 'warn', line: 'L2', time: day },
+    { id: 'ov-1', type: 'overlap', sev: 'err', line: 'L3', time: day },
+  ];
+  const map = alertCellMapFor(alerts, () => true);
+  assert.deepEqual(Object.keys(map), ['L3|2026-10-28'], 'only the overlap paints a cell');
+  assert.equal(map['L3|2026-10-28'].hasConflictErr, true);
+  const hidden = alertCellMapFor(alerts, line => line !== 'L3');
+  assert.deepEqual(Object.keys(hidden), [], 'a hidden line paints nothing');
 });

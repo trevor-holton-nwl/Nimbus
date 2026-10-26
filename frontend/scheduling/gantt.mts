@@ -154,6 +154,29 @@ interface TimelineAlertCellInfo {
   hasConflictErr: boolean;
 }
 
+/** The per-{line, day} alert-cell aggregation behind Timeline.rebuild()'s background cells. A `needs_planning`
+ *  alert paints no cell: the queued order has no bar to anchor to, and a red cell on its machine and due day would
+ *  read as a conflict on work that is not placed (same stance as `runtime-unknown` and `queued_now_fits`, which
+ *  stay in the bell, the drawer and the Orders grid only). Err severity wins over warn on the same cell. */
+export function alertCellMapFor(
+  alerts: ReadonlyArray<NimbusAlert>, lineVisible: (line: string) => boolean,
+): Record<string, TimelineAlertCellInfo> {
+  const map: Record<string, TimelineAlertCellInfo> = {};
+  for (const a of alerts) {
+    if (!a.line || !a.time) continue;
+    if (a.type === 'needs_planning') continue;
+    if (!lineVisible(a.line)) continue;
+    const dk  = Util.dayKey(a.time);
+    const key = `${a.line}|${dk}`;
+    if (!map[key]) map[key] = { line: a.line, dayKey: dk, sev: a.sev, hasConflictErr: false };
+    if (a.sev === 'err') {
+      map[key].sev = 'err';
+      if (!CALENDAR_ALERT_TYPES.has(a.type)) map[key].hasConflictErr = true;
+    }
+  }
+  return map;
+}
+
 /* =============================================================================
    TIMELINE — vis-timeline integration.
      • builds groups (production lines) and items (orders + blackout blocks)
@@ -1639,18 +1662,7 @@ export const Timeline = {
     // Alert-cell background items — inserted last so they sit on top of the horizon
     // and past-zone shading within .vis-background (DOM order = paint order).
     // Err severity wins over warn on the same cell.
-    const alertCellMap: Record<string, TimelineAlertCellInfo> = {};
-    for (const a of Store.alerts) {
-      if (!a.line || !a.time) continue;
-      if (lineFilterActive && !visibleSet.has(a.line)) continue;
-      const dk  = Util.dayKey(a.time);
-      const key = `${a.line}|${dk}`;
-      if (!alertCellMap[key]) alertCellMap[key] = { line: a.line, dayKey: dk, sev: a.sev, hasConflictErr: false };
-      if (a.sev === 'err') {
-        alertCellMap[key].sev = 'err';
-        if (!CALENDAR_ALERT_TYPES.has(a.type)) alertCellMap[key].hasConflictErr = true;
-      }
-    }
+    const alertCellMap = alertCellMapFor(Store.alerts, line => !lineFilterActive || visibleSet.has(line));
     for (const key of Object.keys(alertCellMap)) {
       const cell = alertCellMap[key];
       const cls  = cell.sev !== 'err'  ? 'alertcell-warn'
