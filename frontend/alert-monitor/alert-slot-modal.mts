@@ -173,6 +173,11 @@ export const slotSeams = {
   nim: (): SlotNimbus => (globalThis as unknown as { NIMBUS?: SlotNimbus }).NIMBUS ?? {},
   signedIn: (): boolean => !!Session.currentUser(),
   workWindow: (line: string, date: Date): [Date, Date] | null => Calendar.workWindow(line, date),
+  /** Whether routing-runtime is on for the order's plant (the same test as `Table._routingEnabledForTask`). */
+  routingPlant: (task: NimbusTask): boolean => {
+    const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant || '';
+    return !!plant && !!Store.masterData?.plants?.find(p => p.plant === plant)?.routing_runtime_enabled;
+  },
 };
 
 /** One placement write is allowed for any signed-in user (there is no viewer role; `/tasks/update` needs only a
@@ -192,8 +197,15 @@ export const liveSlotDeps: SlotDeps = {
   /** The Orders grid's own pair list (`Table._getPairOptions`: eligible (PV, machine) pairs on a routing plant,
    *  the plant's lines elsewhere); without the bridge, the plant's lines. */
   pairOptions(task) {
-    return slotSeams.nim().Table?._getPairOptions?.(task)
+    const options = slotSeams.nim().Table?._getPairOptions?.(task)
       ?? Store.linesForSelectedPlant().map(l => ({ value: l, label: l }));
+    // On a routing plant the grid prepends the order's CURRENT pair when it is not eligible (so its select shows the
+    // truth). A slot must never offer or suggest a pair the gate rejects: keep a `pv|machine` option only when it resolves.
+    return options.filter(o => {
+      if (!o.value.includes('|')) return true;
+      const { pv, machine } = parsePairValue(o.value);
+      return Runtime.resolve({ ...task, PRODUCTION_VERSION: pv ?? '' }, machine).ok;
+    });
   },
   /** On a routing plant (a `pv|machine` option) the run time that pair resolves to, else the order's own. */
   hoursFor(task, pv, machine) {
@@ -353,8 +365,12 @@ function _explainRefusal(task: NimbusTask, pv: string | null, machine: string): 
   const order = _orderLabel(task);
   const reason = Engine.lastManualRefusal;
   if (reason === 'finish_cannot_hold') Toast.show(t('toast.finish_cannot_hold', { order, machine }), 'warn', 5000);
-  else if (!reason && pv !== null) Toast.show(t('toast.pv_machine_ineligible', { order, pv: pv || '—', machine }), 'warn', 4000);
-  else Toast.show(t('toast.manual_refusal_generic'), 'error');
+  else if (!reason && slotSeams.routingPlant(task)) {
+    // A null return with no recorded refusal on a routing plant means the pair (or bare machine) did not resolve.
+    // An empty production version is "no pair" (the machine-only wording), like a bare machine.
+    if (pv) Toast.show(t('toast.pv_machine_ineligible', { order, pv, machine }), 'warn', 4000);
+    else Toast.show(t('toast.no_routing_at_workcenter', { order, machine }), 'warn', 4000);
+  } else Toast.show(t('toast.manual_refusal_generic'), 'error');
 }
 
 export const AlertSlotModal = {
@@ -422,7 +438,8 @@ export const AlertSlotModal = {
             : t('am.slot_confirm_short', { order: _orderLabel(first), machine, day: s.day }),
           confirmLabel: t('am.slot_confirm_place'),
         });
-        if (_s !== s || !ok || !canPlaceSlot()) return;   // closed meanwhile (a plant change), cancelled, or What-If began
+        if (_s !== s || !ok) return;   // closed meanwhile (a plant change) or cancelled
+        if (!canPlaceSlot()) { Toast.show(t('am.whatif_blocked'), 'warn'); return; }   // What-If began during the confirm
       }
       const cur = _freshTask(s);   // the confirm is async: the row may have moved under it
       if (!cur) return;

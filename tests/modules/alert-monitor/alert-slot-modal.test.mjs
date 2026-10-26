@@ -12,7 +12,8 @@ import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, Modal, Toast } from '../../../frontend/platform/foundation.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
-import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
+import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 
 globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
 globalThis.window = globalThis.window || {};
@@ -252,6 +253,7 @@ beforeEach(() => {
   Engine.pairSchedulePatchFor = (cur, pv, machine, finish, opts) => { calls.patch.push(['pair', cur.id, pv, machine, finish, opts]); return patchFor(cur, machine, finish); };
   Engine.lastManualRefusal = null;
   slotSeams.signedIn = () => true;
+  slotSeams.routingPlant = () => false;
   slotSeams.workWindow = (_line, date) => {
     const key = Util.dayKey(date);
     return openDays.has(key) ? [new Date(date.getFullYear(), date.getMonth(), date.getDate(), 6), new Date(date.getFullYear(), date.getMonth(), date.getDate(), 22)] : null;
@@ -507,12 +509,133 @@ test('an engine refusal explains itself and stays open with nothing written', as
   await AlertSlotModal.place();
   assert.deepEqual(calls.toast.at(-1), ['toast.manual_refusal_generic', 'error']);
 
-  liveSlotDeps.pairOptions = () => [{ value: '0002|M2', label: '0002 - M2' }];
-  AlertSlotModal.close(); openIt();
+  // No recorded refusal and a non-routing plant: the generic wording, never a pair message.
   patchFor = () => { Engine.lastManualRefusal = null; return null; };
+  await AlertSlotModal.place();
+  assert.deepEqual(calls.toast.at(-1), ['toast.manual_refusal_generic', 'error']);
+  assert.equal(AlertSlotModal.isOpenFor('P1'), true);
+});
+
+test('a null return with no recorded refusal on a routing plant says why: pair, or machine only for a bare machine or an empty PV', async () => {
+  slotSeams.routingPlant = () => true;
+  patchFor = () => { Engine.lastManualRefusal = null; return null; };
+  liveSlotDeps.pairOptions = () => [{ value: '0002|M2', label: '0002 - M2' }];
+  openIt();
   await AlertSlotModal.place();
   assert.deepEqual(calls.toast.at(-1), ['toast.pv_machine_ineligible', 'warn'], 'a routing pair that no longer resolves');
   assert.equal(AlertSlotModal.isOpenFor('P1'), true);
+
+  // A routing-plant sub-order offers a bare machine: still a routing failure, machine-only wording.
+  liveSlotDeps.pairOptions = () => [{ value: 'M2', label: 'M2' }];
+  AlertSlotModal.close(); openIt();
+  await AlertSlotModal.place();
+  assert.deepEqual(calls.toast.at(-1), ['toast.no_routing_at_workcenter', 'warn']);
+
+  // An empty PV half goes down the manual path (like null) and is worded like a bare machine, not as pair "—".
+  liveSlotDeps.pairOptions = () => [{ value: '|M2', label: '- M2' }];
+  AlertSlotModal.close(); openIt();
+  await AlertSlotModal.place();
+  assert.deepEqual(calls.patch.at(-1).slice(0, 3), ['manual', 't1', 'M2']);
+  assert.deepEqual(calls.toast.at(-1), ['toast.no_routing_at_workcenter', 'warn']);
+});
+
+test('What-If starting while the confirm is open toasts the blocked hint, writes nothing and keeps the dialog open', async () => {
+  openIt();
+  pick('M1');   // short: asks first
+  beforeConfirm = () => { Sandbox.active = true; };
+  await AlertSlotModal.place();
+  assert.equal(calls.confirm.length, 1);
+  assert.deepEqual(calls.toast.at(-1), ['am.whatif_blocked', 'warn']);
+  assert.equal(calls.patch.length, 0);
+  assert.equal(writesOf().length, 0);
+  assert.equal(AlertSlotModal.isOpenFor('P1'), true);
+});
+
+/* ---------------------------------------------------------------- live deps */
+
+test('liveSlotDeps.dayCapacity reads the 1-day matrix cell: free = max(0, effective - scheduled), closed = capacity <= 0, a missing row is null', () => {
+  const real = Utilization.computeMatrix;
+  const seen = [];
+  Utilization.computeMatrix = (start, days) => {
+    seen.push([start, days]);
+    return {
+      M1: { '2026-10-28': { scheduled: 3, capacity: 8, effectiveCapacity: 7 }, '2026-10-29': { scheduled: 9, capacity: 8, effectiveCapacity: 7 } },
+      M2: { '2026-10-28': { scheduled: 0, capacity: 0, effectiveCapacity: 0 } },
+    };
+  };
+  try {
+    const dayCapacity = prior.deps.dayCapacity;
+    assert.deepEqual(dayCapacity('M1', '2026-10-28'), { free: 4, cap: 7, closed: false });
+    assert.deepEqual(dayCapacity('M1', '2026-10-29'), { free: 0, cap: 7, closed: false }, 'over-booked: free never goes negative');
+    assert.deepEqual(dayCapacity('M2', '2026-10-28'), { free: 0, cap: 0, closed: true });
+    assert.equal(dayCapacity('M3', '2026-10-28'), null, 'a machine absent from the matrix');
+    assert.equal(dayCapacity('M1', '2026-11-30'), null, 'a day absent from the matrix');
+    assert.equal(dayCapacity('M1', 'not-a-day'), null);
+    assert.equal(seen[0][1], 1, 'a 1-day window');
+    assert.equal(seen[0][0].getTime(), new Date(2026, 9, 28).getTime(), 'local midnight of the day');
+    const firstDay = seen.filter(s => s[0].getTime() === new Date(2026, 9, 28).getTime()).length;
+    assert.equal(firstDay, 1, 'one compute per (plant, data revision, day): the memo serves the other machines');
+  } finally { Utilization.computeMatrix = real; }
+});
+
+test('liveSlotDeps.pairOptions: the Orders grid list when bridged, the plant lines without it, and never an ineligible routing pair', () => {
+  const realLines = Store.linesForSelectedPlant;
+  const realResolve = Runtime.resolve;
+  Store.linesForSelectedPlant = () => ['L1', 'L2'];
+  Runtime.resolve = (row, machine) => (row.PRODUCTION_VERSION === '0001' && machine === 'M1' ? { ok: true, hours: 2 } : { ok: false, step: 'pv_expired' });
+  try {
+    const pairOptions = prior.deps.pairOptions;
+    slotSeams.nim = () => ({});
+    assert.deepEqual(pairOptions(Store.tasks.t1), [{ value: 'L1', label: 'L1' }, { value: 'L2', label: 'L2' }], 'no bridge: the plant line list');
+    slotSeams.nim = () => ({ Table: { _getPairOptions: () => [{ value: 'A', label: 'A' }, { value: 'B', label: 'B' }] } });
+    assert.deepEqual(pairOptions(Store.tasks.t1).map(o => o.value), ['A', 'B'], 'the grid list, bare machines kept as they are');
+    slotSeams.nim = () => ({ Table: { _getPairOptions: () => [
+      { value: '0009|M9', label: 'current, not eligible' },   // what _getPairOptions prepends for an ineligible current pair
+      { value: '0001|M1', label: '0001 - M1' },
+    ] } });
+    assert.deepEqual(pairOptions(Store.tasks.t1).map(o => o.value), ['0001|M1'], 'the ineligible current pair is dropped from a mixed list');
+  } finally { Store.linesForSelectedPlant = realLines; Runtime.resolve = realResolve; }
+});
+
+test('suggest: an ineligible current pair never leads, and with no eligible pair the suggestion is null', () => {
+  const realResolve = Runtime.resolve;
+  Runtime.resolve = (row, machine) => (row.PRODUCTION_VERSION === '0001' && machine === 'M1' ? { ok: true, hours: 2 } : { ok: false, step: 'pv_expired' });
+  try {
+    liveSlotDeps.pairOptions = prior.deps.pairOptions;
+    capByDay['2026-10-28'] = { M1: { free: 1, cap: 8, closed: false }, M9: { free: 9, cap: 10, closed: false } };   // M9 has the most free hours
+    slotSeams.nim = () => ({ Table: { _getPairOptions: () => [{ value: '0009|M9', label: 'current, not eligible' }] } });
+    assert.equal(AlertSlotModal.suggest(Store.tasks.t1, 'P1'), null, 'the only option is the ineligible current pair');
+    Store.updateTask('t1', { text: 'x' }, 'test');   // new data revision: no memo hit
+    slotSeams.nim = () => ({ Table: { _getPairOptions: () => [
+      { value: '0009|M9', label: 'current, not eligible' }, { value: '0001|M1', label: '0001 - M1' },
+    ] } });
+    const top = AlertSlotModal.suggest(Store.tasks.t1, 'P1');
+    assert.equal(top.value, '0001|M1', 'the eligible pair wins even though M9 has more free hours');
+    openIt();
+    assert.deepEqual(optionOrder(), ['0001|M1'], 'and the dialog does not list the ineligible pair either');
+  } finally { Runtime.resolve = realResolve; }
+});
+
+test('liveSlotDeps.hoursFor: Runtime.resolve for a routing pair, the order run time for a bare machine; resolveStep names the failing step', () => {
+  const realResolve = Runtime.resolve;
+  const asked = [];
+  Runtime.resolve = (row, machine) => {
+    asked.push([row.PRODUCTION_VERSION, machine]);
+    return row.PRODUCTION_VERSION === '0001' ? { ok: true, hours: 2.5 } : { ok: false, step: 'pv_expired' };
+  };
+  try {
+    const { hoursFor, resolveStep } = prior.deps;
+    const live = Store.tasks.t1;   // RUN_TIME 4
+    assert.equal(hoursFor(live, null, 'M1'), 4, 'no pair: the order own run time');
+    assert.equal(asked.length, 0, 'and the rate map is not consulted');
+    assert.equal(hoursFor({ ...live, RUN_TIME: 0 }, null, 'M1'), null, 'no run time is unknown');
+    assert.equal(hoursFor(live, '0001', 'M2'), 2.5, 'a routing pair: what it resolves to, not RUN_TIME');
+    assert.deepEqual(asked.at(-1), ['0001', 'M2']);
+    assert.equal(hoursFor(live, '0002', 'M2'), null);
+    assert.equal(resolveStep(live, '0002', 'M2'), 'pv_expired');
+    assert.equal(resolveStep(live, '0001', 'M2'), undefined);
+    assert.equal(resolveStep(live, null, 'M2'), undefined);
+  } finally { Runtime.resolve = realResolve; }
 });
 
 test('a patch without both dates is a refusal, not a write', async () => {
