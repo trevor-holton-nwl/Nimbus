@@ -1140,6 +1140,10 @@ window.__NIMBUS_LOCALES.es = {
   /* ── Títulos de la barra de herramientas Gantt ───────────────────────────── */
   'tip.fit_view':                      'Ajustar todos los pedidos en la vista',
   'tip.center_now':                    'Centrar en ahora',
+  'tip.timeline_nav_collapse':          'Ocultar visor de cronología',
+  'tip.timeline_nav_expand':            'Mostrar visor de cronología',
+  'tip.machines_collapse':              'Ocultar máquinas',
+  'tip.machines_expand':                'Mostrar máquinas',
   'tip.smart_optimize':                'Optimización inteligente',
   'tip.what_if':                       'Probar cambios en un entorno aislado',
   'tip.print_export':                  'Imprimir o exportar plan',

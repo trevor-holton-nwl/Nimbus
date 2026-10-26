@@ -2210,6 +2210,9 @@ const App = {
       btn.onclick = () => Timeline.setView(btn.dataset.view as string);
     });
 
+    /* Timeline viewer (minimap) collapse caret, right of Now */
+    document.getElementById('timeline-nav-toggle')?.addEventListener('click', () => App.toggleTimelineNav());
+
     /* Gantt sub-view children in the nav drawer (Timeline vs Orders) — same
        combinator as gotoGanttTimeline; goto() closes the drawer and applies
        the Session gate. */
@@ -2852,9 +2855,42 @@ const App = {
     if (el) {
       el.classList.toggle('collapsed');
       if (which === 'left') {
+        const collapsed = el.classList.contains('collapsed');
         const btn = el.querySelector<HTMLElement>('.side-head .icon-btn');
-        if (btn) btn.textContent = el.classList.contains('collapsed') ? '▶' : '◀';
+        if (btn) {
+          const label = Util.t(collapsed ? 'tip.machines_expand' : 'tip.machines_collapse');
+          btn.textContent = collapsed ? '▶' : '◀';
+          btn.title = label;
+          btn.setAttribute('aria-label', label);
+          btn.setAttribute('aria-expanded', String(!collapsed));
+        }
+        /* An inline width (from a drag-resize) beats .side.collapsed { width:34px }: park it while collapsed. */
+        if (collapsed) {
+          if (el.style.width) { el.dataset.prevWidth = el.style.width; el.style.width = ''; }
+        } else if (el.dataset.prevWidth) {
+          el.style.width = el.dataset.prevWidth; delete el.dataset.prevWidth;
+        }
       }
+    }
+    setTimeout(() => {
+      Timeline.redraw(); TimelineNav.render();
+      /* #hierarchy was built while hidden (VirtualList measured its 600px fallback): repaint on expand. */
+      if (which === 'left' && el && !el.classList.contains('collapsed')) Hierarchy.render();
+    }, Config.ANIM_MS);
+  },
+
+  toggleTimelineNav(): void {
+    const nav = document.getElementById('timeline-nav');
+    const btn = document.getElementById('timeline-nav-toggle');
+    if (!nav) return;
+    const collapsed = nav.classList.toggle('nav-collapsed');
+    if (btn) {
+      const label = Util.t(collapsed ? 'tip.timeline_nav_expand' : 'tip.timeline_nav_collapse');
+      const glyph = btn.querySelector('span');
+      if (glyph) glyph.textContent = collapsed ? '▾' : '▴';
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+      btn.setAttribute('aria-expanded', String(!collapsed));
     }
     setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS);
   },
@@ -2864,6 +2900,7 @@ const App = {
     if (!handle) return;
     let dragging = false;
     handle.addEventListener('mousedown', e => {
+      if (el.classList.contains('collapsed')) return;
       dragging = true; document.body.style.cursor = 'ew-resize'; e.preventDefault();
     });
     window.addEventListener('mousemove', e => {

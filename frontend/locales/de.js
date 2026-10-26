@@ -1136,6 +1136,10 @@ window.__NIMBUS_LOCALES.de = {
   /* ── Gantt-Toolbar-Titel ─────────────────────────────────────────────────── */
   'tip.fit_view':                      'Alle Aufträge in der Ansicht anzeigen',
   'tip.center_now':                    'Auf Jetzt zentrieren',
+  'tip.timeline_nav_collapse':          'Zeitleisten-Übersicht ausblenden',
+  'tip.timeline_nav_expand':            'Zeitleisten-Übersicht einblenden',
+  'tip.machines_collapse':              'Maschinen ausblenden',
+  'tip.machines_expand':                'Maschinen einblenden',
   'tip.smart_optimize':                'Intelligente Optimierung',
   'tip.what_if':                       'Änderungen in einer isolierten Sandbox ausprobieren',
   'tip.print_export':                  'Plan drucken oder exportieren',

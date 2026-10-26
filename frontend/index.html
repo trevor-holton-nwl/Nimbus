@@ -1447,14 +1447,15 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div class="group" id="gantt-fit-controls">
         <button class="seg-btn" onclick="NIMBUS.Timeline.zoomToFit()" data-i18n-title="tip.fit_view" title="Fit all orders in view"><span aria-hidden="true">⊡</span><span data-i18n="btn.fit">Fit</span></button>
         <button class="seg-btn" onclick="NIMBUS.Timeline.gotoNow()" data-i18n-title="tip.center_now" title="Center on now"><span aria-hidden="true">⊙</span><span data-i18n="btn.now">Now</span></button>
+        <button type="button" class="seg-btn" id="timeline-nav-toggle" aria-expanded="true" aria-controls="timeline-nav" data-i18n-title="tip.timeline_nav_collapse" title="Hide timeline viewer"><span aria-hidden="true">▴</span></button>
       </div>
     </div>
 
     <div class="main-row">
-      <aside class="side side-left" id="left-sidebar">
+      <aside class="side side-left collapsed" id="left-sidebar">
         <header class="side-head">
           <h4 data-i18n="ui.sidebar_lines">Production Lines</h4>
-          <button class="icon-btn sm" id="left-sidebar-toggle-btn">◀</button>
+          <button class="icon-btn sm" id="left-sidebar-toggle-btn" aria-expanded="false" aria-controls="hierarchy" data-i18n-title="tip.machines_expand" title="Show machines">▶</button>
         </header>
         <div id="hierarchy"></div>
         <div class="resize-handle rh-right" data-side="left"></div>

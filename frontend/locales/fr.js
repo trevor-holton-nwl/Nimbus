@@ -1136,6 +1136,10 @@ window.__NIMBUS_LOCALES.fr = {
   /* ── Titres de la barre d\'outils Gantt ──────────────────────────────────── */
   'tip.fit_view':                      'Ajuster toutes les commandes à la vue',
   'tip.center_now':                    'Centrer sur maintenant',
+  'tip.timeline_nav_collapse':          'Masquer l\'aperçu de la chronologie',
+  'tip.timeline_nav_expand':            'Afficher l\'aperçu de la chronologie',
+  'tip.machines_collapse':              'Masquer les machines',
+  'tip.machines_expand':                'Afficher les machines',
   'tip.smart_optimize':                'Optimisation intelligente',
   'tip.what_if':                       'Essayer des modifications dans un bac à sable isolé',
   'tip.print_export':                  'Imprimer ou exporter le plan',

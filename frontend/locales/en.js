@@ -1355,6 +1355,10 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Gantt toolbar titles ─────────────────────────────────────────────────── */
   'tip.fit_view':                      'Fit all orders in view',
   'tip.center_now':                    'Center on now',
+  'tip.timeline_nav_collapse':          'Hide timeline viewer',
+  'tip.timeline_nav_expand':            'Show timeline viewer',
+  'tip.machines_collapse':              'Hide machines',
+  'tip.machines_expand':                'Show machines',
   'tip.smart_optimize':                'Smart optimize',
   'tip.what_if':                       'Try changes in an isolated sandbox',
   'tip.print_export':                  'Print or export schedule',

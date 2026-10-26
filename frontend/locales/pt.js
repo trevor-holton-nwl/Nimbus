@@ -1136,6 +1136,10 @@ window.__NIMBUS_LOCALES.pt = {
   /* ── Títulos da barra de ferramentas Gantt ───────────────────────────────── */
   'tip.fit_view':                      'Ajustar todos os pedidos na visualização',
   'tip.center_now':                    'Centralizar no agora',
+  'tip.timeline_nav_collapse':          'Ocultar visor da linha do tempo',
+  'tip.timeline_nav_expand':            'Mostrar visor da linha do tempo',
+  'tip.machines_collapse':              'Ocultar máquinas',
+  'tip.machines_expand':                'Mostrar máquinas',
   'tip.smart_optimize':                'Otimização inteligente',
   'tip.what_if':                       'Experimentar alterações em um sandbox isolado',
   'tip.print_export':                  'Imprimir ou exportar o plano',

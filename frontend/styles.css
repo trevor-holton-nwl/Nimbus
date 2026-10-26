@@ -1065,7 +1065,8 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .side.collapsed { width: 34px; }
 .side.collapsed .side-head h4,
 .side.collapsed #hierarchy,
-.side.collapsed .inspector-body { display: none; }
+.side.collapsed .inspector-body,
+.side-left.collapsed .resize-handle { display: none; }
 /* Right inspector: absolutely positioned so transform runs GPU-only (no flex reflow) */
 .side-right {
   position: absolute;
@@ -1085,6 +1086,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
 }
+.side.collapsed .side-head { padding-left: 0; padding-right: 0; justify-content: center; }
 .side-head h4 {
   font-size: 11px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.08em;
@@ -2603,6 +2605,7 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
   overflow: hidden;
   position: relative;
 }
+#timeline-nav.nav-collapsed { display: none !important; }  /* display:none, not height 0: TimelineNav._frame writes an inline height */
 #timeline-nav canvas {
   display: block;
   width: 100%;
