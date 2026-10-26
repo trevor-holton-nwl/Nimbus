@@ -1,2 +1,4 @@
 # This source was historically committed with CRLF; keep its bytes stable.
 frontend/optimization/setup-scheduler.mts -text
+# styles.css is committed LF and a test pins it (no CR anywhere); keep checkouts LF under core.autocrlf.
+frontend/styles.css text eol=lf
