@@ -398,3 +398,23 @@ Start of the list: the findings of the adversarial review run on 2026-10-16 agai
 - **Derive a flag from the state it describes when you can.** The shading hysteresis needed to know whether the stored range was built coarse. A separate `_nwCoarse` flag was considered; the shipped fix derives it from the stored range's span under the same > 90 day rule, so it cannot drift from the range.
 - **A test fixture's defaults can hide a rule.** The shared vectors file had `validate` entries with empty work hours, which the writer correctly rejects; the Python twin test substitutes valid hours so only dates are exercised.
 - **Overlap checks must compare every pair.** The first writer compared only sorted neighbours, which misses a short period nested inside a long one. It now compares every pair, limited to pairs that involve an upserted id so pre-existing bad data never blocks a delete, and the writer and the twin test share one helper.
+
+## Propagation (2026-10-23)
+
+Audit of how a calendar change reaches the planner, and what each part of the work changed (branch `feature/calendar-active-hours`).
+
+| Seam | Finding | Verdict | Change |
+|---|---|---|---|
+| Same tab, period saved | `Store.setPlantPeriods` emits `calendar:change`; alerts, shading, Machines pane update; next Optimize reads Store; an open preview goes stale | OK | none |
+| Same tab, bars already placed | D6: a calendar save moves no bar; reconcile reacts only to `calendar-sync` and skips queued rows | OK, intended | none |
+| Machines pane display | Pills showed the plant default week and never named the period | Gap | Part 1: `Store.activeLineHoursOn`, `activePeriodOn`, pills and note read the pattern active today and name its source |
+| Queued `overlong_never` rows | Never re-evaluated after the calendar widened | Gap A | Part 3: `Alerts.queuedNowFits` raises `queued_now_fits` (display only, nothing persisted), the Planning reason reads "Now fits the calendar" |
+| Another tab or user | Periods arrived only at boot, plant switch and Refresh buttons; the cross-user poll was removed | Gap B | Part 2: `/tasks/horizons` returns `calendar_version`; `Persistence.refreshHorizons` re-fetches the plant calendar when it changes (also on return to the tab), guarded against drag, open dialogs and What-If, one toast |
+| Offline cache | A failed calendar GET leaves cached periods and Optimize was not gated | Gap C | Part 4: Optimize confirms when `calendarState !== 'hydrated'` |
+| Optimize worker | Snapshot carries periods; stale core throws `compute-core-stale` to the main-thread fallback | OK | none |
+| Backend placements | SAP ingest resolves hours with the period list; no other backend path reads hours | OK | none |
+| Period hours 00:00-23:59 | Days do not touch at midnight, so a >24 h order is overlong | Owner action | Enter an end of 00:00 (24:00) |
+
+Fix wave (same day): the probe's baseline is recorded by hydration (`GET /plant-calendar` carries `calendar_version`), not by the first probe, so a change missed before the first Gantt entry is still caught; a failed re-fetch keeps the old baseline and retries on the next entry.
+
+Decisions: the fingerprint is an md5 over canonical row text (not count + max(updated_at)) so deletes and writers that skip `updated_at` still move it; the remote-refresh toast key is `toast.calendar_refreshed_remote` because `toast.calendar_updated` already means "saved".

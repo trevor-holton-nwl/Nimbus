@@ -452,6 +452,42 @@ export const Compute = (() => {
 const _ALERTS_MIN_DEBOUNCE_MS = 90;
 const _ALERTS_MAX_DEBOUNCE_MS = 500;
 export const Alerts = {
+  /** Gap A (2026-10-23): queued `overlong_never` rows that now fit one working period after the calendar widened.
+   *  Frontend-only and display-only: no bar moves and nothing is persisted (D6); Optimize or a manual placement
+   *  releases the row. The check uses the engine's own predicate (`Calendar.hasNominalWindow`) but only
+   *  approximates the queueing decision: it measures the run time alone and from the plant's now, while the engine's
+   *  walk anchors at the row's finish and may include setup minutes, so a row flagged here can still be refused (or
+   *  one not flagged could still place) when the planner places it; the alert says "run Optimize or place it",
+   *  never that it is guaranteed to fit. Recomputed with every
+   *  alert pass (`calendar:change` already schedules one), so it clears itself when the row stops fitting, is
+   *  placed or is dismissed. `onlyLines` scopes it like the core's incremental pass. */
+  queuedNowFits(onlyLines: Set<string> | null = null): NimbusAlert[] {
+    const out: NimbusAlert[] = [];
+    for (const t of Store.tasksArr) {
+      if (t.planning_status !== 'needs_planning' || t.planning_reason?.code !== 'overlong_never') continue;
+      const line = t.MACHINE;
+      if (!line || (onlyLines && !onlyLines.has(line))) continue;
+      const plant = t.PLANT || Store.getPlantForLine(line);
+      if (!plant) continue;
+      const minutes = Math.round(Util.runHours(t) * 60);
+      if (!Number.isFinite(minutes) || minutes <= 0) continue;
+      const now = Store.plantNow(plant);
+      if (!now) continue;                                          // no valid plant zone: nothing to judge against
+      const tz = Store.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null;
+      if (!Calendar.hasNominalWindow(line, now, minutes * Config.MS_MIN, tz)) continue;
+      const id = `queued-now-fits-${t.id}`;
+      if (Alerts._dismissed.has(id)) continue;
+      const order = String(t.PRODUCTION_ORDER ?? t.id);
+      out.push({
+        id, sev: 'warn', type: 'queued_now_fits',
+        msg: `Order "${order}" now fits the working calendar; run Optimize or place it to release it.`,
+        msgKey: 'alert.queued_now_fits', msgVars: { order },
+        taskId: t.id, line, time: now,
+      });
+    }
+    return out;
+  },
+
   recompute(opts: { lines?: Set<string> } = {}): void {
     // Never post the global (all-line) snapshot to the worker: when no plant is
     // selected nothing is rendered, so route to the cheap sync path instead of
@@ -467,9 +503,9 @@ export const Alerts = {
           const onlyLines = opts.lines instanceof Set && opts.lines.size ? opts.lines : null;
           if (onlyLines) {
             const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
-            Store.setAlerts(retained.concat(alerts), 'alerts');
+            Store.setAlerts(retained.concat(alerts, Alerts.queuedNowFits(onlyLines)), 'alerts');
           } else {
-            Store.setAlerts(alerts, 'alerts');
+            Store.setAlerts(alerts.concat(Alerts.queuedNowFits()), 'alerts');
           }
           Alerts._lastMs = elapsed;
         })
@@ -511,9 +547,9 @@ export const Alerts = {
       // Incremental merge: retain alerts on untouched lines, replace only the affected
       // ones. Callers of the scoped path never move a task across lines.
       const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
-      Store.setAlerts(retained.concat(kept), 'alerts');
+      Store.setAlerts(retained.concat(kept, Alerts.queuedNowFits(onlyLines)), 'alerts');
     } else {
-      Store.setAlerts(kept, 'alerts');
+      Store.setAlerts(kept.concat(Alerts.queuedNowFits()), 'alerts');
     }
     Alerts._lastMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - _t0;
     PerfMonitor.record('Alerts.syncFallback', Alerts._lastMs);

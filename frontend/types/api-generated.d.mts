@@ -3311,6 +3311,8 @@ export interface components {
             frozen_horizon_end: string | null;
             /** Alert Horizon Minutes */
             alert_horizon_minutes: number | null;
+            /** Calendar Version */
+            calendar_version?: string | null;
         };
         /**
          * LinkDTO

@@ -2189,6 +2189,10 @@ export const Modal = {
     el.hidden = false;
     if (wasHidden) _modalOpened(el, id);
   },
+  /** True while any dialog opened through `Modal.open` (or a confirm/choose) is showing. */
+  anyOpen(): boolean {
+    return _modalStack.some(m => !m.hidden);
+  },
   close(id: string): void {
     const el = document.getElementById(id);
     if (!el) return;

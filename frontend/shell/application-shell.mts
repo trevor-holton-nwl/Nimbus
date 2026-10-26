@@ -70,7 +70,7 @@ import { Alerts } from '../insights/services.mjs';
 import { Engine } from '../optimization/engine.mjs';
 import { Persistence, SOURCE_WIRE } from '../scheduling/persistence.mjs';
 import { Session } from '../security/session.mjs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter } from '../scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../scheduling/gantt.mjs';
 import { Table } from '../scheduling/orders.mjs';
 import { GanttLegend } from '../scheduling/gantt-legend.mjs';
 import { Dashboard, AlertsUIAdapter } from '../insights/insights-ui.mjs';
@@ -2332,10 +2332,17 @@ const App = {
       });
       if (hidden) {
         try { AdminCockpit._stopHealthPolling?.(); } catch {}
-      } else if (App._currentTab === 'admin') {
-        try { AdminCockpit._startHealthPolling?.(); } catch {}
+      } else {
+        if (App._currentTab === 'admin') { try { AdminCockpit._startHealthPolling?.(); } catch {} }
+        // Back in the foreground: pick up a plant-calendar change another session made while this tab sat idle
+        // (same throttled probe a Gantt entry runs; re-hydrates only when the server's calendar fingerprint moved).
+        void Persistence.refreshHorizonsOnReturn().then(changed => {
+          if (changed && App._currentTab === 'gantt' && App._ganttSub === 'timeline') Timeline._scheduleRebuild();
+        });
       }
     });
+    // A drag in flight must never see the calendar re-hydrate under it (Persistence cannot import the Gantt).
+    Persistence._calendarRefreshBlocked = () => !!Interaction._isDragging;
 
     // Priority-field registry (Stage 3) — load once at boot, independent of
     // plant selection, so Engine's scheduling-constraint catalog

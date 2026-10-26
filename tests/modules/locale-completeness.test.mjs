@@ -645,7 +645,8 @@ const BRANCH_KEYS = [
   'alert.start_may_be_stale', 'alert.late', 'alert.late_beyond_cap', 'alert.finish_moved_earlier', 'alert.reversal_forward',
   'alert.reversal_forward_run_time_grew', 'alert.reversal_forward_due_date_past', 'alert.reversal_forward_cutover',
   'alert.plant_no_timezone', 'alert.line_no_calendar', 'alert.no_anchor', 'alert.no_operating_window', 'alert.run_time_zero',
-  'alert.setup_override_orphaned', 'alert.pull_floor_crossed', 'alert.frozen_window_crossed',
+  'alert.setup_override_orphaned', 'alert.pull_floor_crossed', 'alert.frozen_window_crossed', 'alert.queued_now_fits',
+  'planning_reason.overlong_released_pending',
   'alert.placement_exception_overtime', 'alert.placement_exception_overlong', 'alert.derivation_issue',
   'ui.diag_unreadable_start', 'ui.diag_dropped_no_finish', 'ui.sap_send_confirm', 'toast.sap_sent_queued',
   'toast.sap_sent_skipped_unfirmed', 'ui.preview_stale', 'ui.opt_backlog_runtime_grew',
@@ -854,7 +855,7 @@ test('Alert Monitor vocabulary gate: no English am.* / leverage.* value says poi
 
 test('Alert Monitor: every firing alert type has an alert.help.<type> sentence in all five locales (same placeholders)', async () => {
   const { FIRING_ALERT_TYPES } = await import('../../frontend/insights/alert-profiles.mjs');
-  assert.equal(FIRING_ALERT_TYPES.length, 30, 'the firing type list was loaded');
+  assert.equal(FIRING_ALERT_TYPES.length, 31, 'the firing type list was loaded');
   const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
   for (const type of FIRING_ALERT_TYPES) {
     for (const locale of LOCALES) {

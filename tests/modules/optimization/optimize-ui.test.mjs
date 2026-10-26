@@ -2429,7 +2429,9 @@ test('Run in background: ticked run() goes to runInBackground with exhaustive:tr
   const priorLoading = OptimizerPreview.showLoading;
   const priorRankPlant = Persistence._rankMapsPlant;
   const priorPlantNow = Store.plantNow;
+  const priorHydration = CalendarSync._hydration.SR;
   try {
+    CalendarSync._setHydration('SR', 'hydrated');   // Gap C: an unhydrated calendar asks before a run
     Store.plantNow = () => new Date('2026-08-03T08:00:00');
     globalThis.requestAnimationFrame = fn => { fn(); return 1; };
     globalThis.flatpickr = () => new Proxy({ selectedDates: [] }, { get: (target, key) => (key in target ? target[key] : () => {}) });
@@ -2464,11 +2466,91 @@ test('Run in background: ticked run() goes to runInBackground with exhaustive:tr
     OptimizerPreview.showLoading = priorLoading;
     Persistence._rankMapsPlant = priorRankPlant;
     Store.plantNow = priorPlantNow;
+    if (priorHydration) CalendarSync._hydration.SR = priorHydration; else delete CalendarSync._hydration.SR;
     delete globalThis.flatpickr;
     globalThis.requestAnimationFrame = priorRaf;
     fx.restore();
   }
 });
+
+// Gap C (2026-10-23): Optimize asks before running against a plant calendar that never hydrated.
+async function withCalendarGate(state, answer, fn) {
+  const fx = openBackgroundFixture();
+  const priorRaf = globalThis.requestAnimationFrame;
+  const priorBg = OptimizerPreview.runInBackground;
+  const priorFg = OptimizerPreview.runWithPreview;
+  const priorLoading = OptimizerPreview.showLoading;
+  const priorRankPlant = Persistence._rankMapsPlant;
+  const priorPlantNow = Store.plantNow;
+  const priorConfirm = Modal.confirm;
+  const priorHydration = CalendarSync._hydration.SR;
+  try {
+    Store.plantNow = () => new Date('2026-08-03T08:00:00');
+    globalThis.requestAnimationFrame = f => { f(); return 1; };
+    globalThis.flatpickr = () => new Proxy({ selectedDates: [] }, { get: (target, key) => (key in target ? target[key] : () => {}) });
+    const modal = makeSandboxElement('modal-optimize');
+    const baseGet = globalThis.document.getElementById;
+    globalThis.document.getElementById = id => (id === 'modal-optimize' ? modal : baseGet(id));
+    const calls = { bg: 0, fg: 0, confirms: [] };
+    OptimizerPreview.runInBackground = async () => { calls.bg++; };
+    OptimizerPreview.runWithPreview = async () => { calls.fg++; };
+    OptimizerPreview.showLoading = () => {};
+    Modal.confirm = async (opts) => { calls.confirms.push(opts); return answer; };
+    if (state) CalendarSync._setHydration('SR', state); else delete CalendarSync._hydration.SR;
+    OptimizeDialog.open();
+    OptimizeDialog.selectMode('spt');
+    Persistence._rankMapsPlant = 'SR';
+    await fn(calls, fx.extra.get('opt-chk-background'));
+  } finally {
+    OptimizerPreview.runInBackground = priorBg;
+    OptimizerPreview.runWithPreview = priorFg;
+    OptimizerPreview.showLoading = priorLoading;
+    Persistence._rankMapsPlant = priorRankPlant;
+    Store.plantNow = priorPlantNow;
+    Modal.confirm = priorConfirm;
+    if (priorHydration) CalendarSync._hydration.SR = priorHydration; else delete CalendarSync._hydration.SR;
+    delete globalThis.flatpickr;
+    globalThis.requestAnimationFrame = priorRaf;
+    fx.restore();
+  }
+}
+
+test('Gap C: an unhydrated plant calendar asks first; Cancel starts neither the foreground nor the background run', () =>
+  withCalendarGate('failed', false, async (calls, chk) => {
+    chk.checked = true;
+    await OptimizeDialog.run();
+    chk.checked = false;
+    await OptimizeDialog.run();
+    await wait(20);
+    assert.equal(calls.confirms.length, 2, 'asked once per run attempt, in both paths');
+    assert.equal(calls.confirms[0].title, Util.t('modal.opt_calendar_not_loaded_title'));
+    assert.equal(calls.confirms[0].tone, 'warn');
+    assert.equal(calls.bg + calls.fg, 0, 'declining runs nothing');
+  }));
+
+test('Gap C: a pending calendar also asks, and "Run anyway" proceeds in both the background and foreground paths', () =>
+  withCalendarGate('pending', true, async (calls, chk) => {
+    chk.checked = true;
+    await OptimizeDialog.run();
+    chk.checked = false;
+    await OptimizeDialog.run();
+    await wait(20);
+    assert.equal(calls.confirms.length, 2);
+    assert.equal(calls.bg, 1);
+    assert.equal(calls.fg, 1);
+  }));
+
+test('Gap C: a hydrated plant calendar runs without any extra confirmation', () =>
+  withCalendarGate('hydrated', false, async (calls, chk) => {
+    chk.checked = true;
+    await OptimizeDialog.run();
+    chk.checked = false;
+    await OptimizeDialog.run();
+    await wait(20);
+    assert.equal(calls.confirms.length, 0);
+    assert.equal(calls.bg, 1);
+    assert.equal(calls.fg, 1);
+  }));
 
 test('Run in background: selectMode(backlog) disables and unchecks the box; other strategies re-enable it', () => {
   const fx = openBackgroundFixture();
