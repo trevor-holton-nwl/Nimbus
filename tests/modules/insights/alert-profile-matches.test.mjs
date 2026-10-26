@@ -50,6 +50,23 @@ test('recompute yields worst severity and most severe category per task', () => 
   assert.equal(c.categoryByTask.get('t3'), 'capacity');    // err tie: capacity > conflicts
 });
 
+test('categoryByTask ranks planning ahead of exceptions at equal severity', () => {
+  profiles = [prof('p1', ['late', 'needs_planning'])];
+  Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
+  Store._state.alerts = [
+    alert('a1', 'late', 'warn', 't1'),
+    alert('a2', 'needs_planning', 'warn', 't1'),
+    alert('a3', 'late', 'warn', 't2'),
+    alert('a4', 'needs_planning', 'err', 't3'),
+    alert('a5', 'late', 'err', 't3'),
+  ];
+  M.recompute();
+  const c = M.current();
+  assert.equal(c.categoryByTask.get('t1'), 'planning', 'warn tie: planning beats exceptions');
+  assert.equal(c.categoryByTask.get('t2'), 'exceptions');
+  assert.equal(c.categoryByTask.get('t3'), 'planning', 'err tie: planning beats exceptions');
+});
+
 test("'__all__' keeps every alert id but highlights nothing", () => {
   M.recompute();
   const c = M.current();

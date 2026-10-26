@@ -342,7 +342,7 @@ export function whereHtml(data: OverviewData, narrow: Narrow, showAll: boolean, 
     + `<div class="am-ov-rows">${rows}</div>${more}</div>`;
 }
 
-/** The What panel: a proportional category strip (zero categories omitted) over a five-row legend (zeros last, disabled). */
+/** The What panel: a proportional category strip (zero categories omitted) over a six-row legend (zeros last, disabled). */
 export function whatHtml(data: OverviewData, narrow: Narrow, v: OverviewViewDeps): string {
   const { t, esc } = v;
   const live = data.categories.filter(c => c.count > 0);

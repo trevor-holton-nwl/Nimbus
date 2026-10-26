@@ -196,7 +196,7 @@ test('picker lists only firing types, grouped, with a category checkbox each', (
   assert.match(body, /data-ape-type="overlap"/);
   assert.doesNotMatch(body, /data-ape-type="near-capacity"/);
   assert.doesNotMatch(body, /data-ape-type="line_no_calendar"/);
-  for (const cat of ['capacity', 'conflicts', 'calendar', 'setup', 'exceptions']) assert.match(body, new RegExp(`data-ape-cat="${cat}"`));
+  for (const cat of ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions']) assert.match(body, new RegExp(`data-ape-cat="${cat}"`));
   assert.match(body, /type="number" min="-365" max="365" step="1"/);
   assert.match(body, /ape\.late_hours/);
   assert.equal(els['modal-alert-profile'].hidden, false);

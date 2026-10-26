@@ -349,6 +349,32 @@ test('drawer and Alert Monitor rows agree on Fix / Override / calendar glyph for
   }
 });
 
+test('showForCell files a planning alert under Other and does not throw', () => {
+  const prior = { doc: globalThis.document, alerts: Store.alerts };
+  let html = '';
+  const dlg = {
+    className: '', open: false,
+    set innerHTML(v) { html = v; }, get innerHTML() { return html; },
+    showModal() {}, close() {}, addEventListener() {}, querySelectorAll() { return []; },
+  };
+  try {
+    globalThis.document = { ...prior.doc, createElement: () => dlg, body: { appendChild() {} } };
+    const time = new Date(2026, 9, 21, 9);
+    Store._state.alerts = [
+      { id: 'queued-now-fits-q1', sev: 'warn', type: 'queued_now_fits', line: 'L1', time, msg: 'Order q1 now fits' },
+      { id: 'needs-planning-q2', sev: 'warn', type: 'needs_planning', line: 'L1', time, msg: 'Order q2 has no slot yet' },
+    ];
+    assert.doesNotThrow(() => AlertsUIAdapter.showForCell('L1', Util.dayKey(time)));
+    assert.match(html, /data-cat="exceptions"/, 'both planning alerts file under Other');
+    assert.doesNotMatch(html, /data-cat="planning"/, 'the briefing has no fifth section');
+    assert.match(html, /Order q1 now fits/);
+    assert.match(html, /Order q2 has no slot yet/);
+    assert.match(html, /\(2\)/, 'one Other section holding both alerts');
+  } finally {
+    globalThis.document = prior.doc; Store._state.alerts = prior.alerts;
+  }
+});
+
 test('alert drawer renders tool-conflict alerts with localized text and a fix button', () => {
   const row = AlertsUIAdapter._renderAlertRow({
     id: 'tool-conflict|task-b|task-a', type: 'tool-conflict', sev: 'err',

@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import {
   ALL_ALERTS_PROFILE_ID, ALL_ALERTS_PROFILE, ALERT_CATEGORIES, categoryOf, FIRING_ALERT_TYPES,
+  FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES,
   anchorTime, alertDayOffset, ruleMatches, profileMatches, filterByProfile,
   impactPoints, compareAlerts, groupAlerts, validateProfile, resolveActiveProfileId,
 } from '../../../frontend/insights/alert-profiles.mjs';
@@ -26,8 +27,11 @@ const alert = (o = {}) => ({ id: 'a1', sev: 'warn', type: 'overlap', line: 'L1',
 
 // ---- categories -----------------------------------------------------------------------------
 
-test('ALERT_CATEGORIES keeps the four legacy groups and adds setup', () => {
-  assert.deepEqual(Object.keys(ALERT_CATEGORIES).sort(), ['calendar', 'capacity', 'conflicts', 'exceptions', 'setup']);
+test('ALERT_CATEGORIES keeps the four legacy groups and adds setup and planning', () => {
+  assert.deepEqual(Object.keys(ALERT_CATEGORIES).sort(), ['calendar', 'capacity', 'conflicts', 'exceptions', 'planning', 'setup']);
+  assert.deepEqual(Object.keys(ALERT_CATEGORIES), ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions'], 'planning sits between setup and exceptions');
+  assert.deepEqual(ALERT_CATEGORIES.planning, ['queued_now_fits', 'needs_planning']);
+  assert.ok(!ALERT_CATEGORIES.exceptions.includes('queued_now_fits'), 'queued_now_fits moved to planning');
   assert.deepEqual(ALERT_CATEGORIES.capacity, ['overload', 'near-capacity']);
   assert.deepEqual(ALERT_CATEGORIES.conflicts, ['overlap', 'tool-conflict', 'distribution-separation']);
   assert.ok(ALERT_CATEGORIES.calendar.includes('finish_moved_earlier'));
@@ -44,7 +48,17 @@ test('categoryOf maps every listed type and falls back to exceptions', () => {
   assert.equal(categoryOf('blackout'), 'calendar');
   assert.equal(categoryOf('setup-uncovered'), 'setup');
   assert.equal(categoryOf('late'), 'exceptions');
+  assert.equal(categoryOf('needs_planning'), 'planning');
+  assert.equal(categoryOf('queued_now_fits'), 'planning');
   assert.equal(categoryOf('not-a-type'), 'exceptions');
+});
+
+test('needs_planning fires, and the Slot set is disjoint from the Fix / Override / Calendar sets', () => {
+  assert.ok(FIRING_ALERT_TYPES.includes('needs_planning'));
+  assert.deepEqual([...SLOT_ALERT_TYPES], ['needs_planning']);
+  for (const other of [FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES]) {
+    for (const type of SLOT_ALERT_TYPES) assert.ok(!other.has(type), `${type} must not be in another action set`);
+  }
 });
 
 test('every alert type is in exactly one category; FIRING excludes the two never-firing types', () => {

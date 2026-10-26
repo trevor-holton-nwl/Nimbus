@@ -74,6 +74,7 @@ test('Gantt legend popup keys (btn.legend, tip.legend, legend.*) exist in all 5 
     'legend.nav_now_d',
     'legend.pm_capacity_t', 'legend.pm_capacity_d', 'legend.pm_conflicts_t', 'legend.pm_conflicts_d',
     'legend.pm_calendar_t', 'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d',
+    'legend.pm_planning_t', 'legend.pm_planning_d',
     'legend.pm_exceptions_t', 'legend.pm_exceptions_d', 'legend.pm_ring_d', 'tbl.status_profile', 'tbl.status_profile_desc',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
@@ -646,6 +647,7 @@ const BRANCH_KEYS = [
   'alert.reversal_forward_run_time_grew', 'alert.reversal_forward_due_date_past', 'alert.reversal_forward_cutover',
   'alert.plant_no_timezone', 'alert.line_no_calendar', 'alert.no_anchor', 'alert.no_operating_window', 'alert.run_time_zero',
   'alert.setup_override_orphaned', 'alert.pull_floor_crossed', 'alert.frozen_window_crossed', 'alert.queued_now_fits',
+  'alert.needs_planning', 'alert.needs_planning_no_reason',
   'planning_reason.overlong_released_pending',
   'alert.placement_exception_overtime', 'alert.placement_exception_overlong', 'alert.derivation_issue',
   'ui.diag_unreadable_start', 'ui.diag_dropped_no_finish', 'ui.sap_send_confirm', 'toast.sap_sent_queued',
@@ -810,7 +812,7 @@ const ALERT_MONITOR_KEYS = [
   'leverage.action.routing-gap', 'leverage.action.routing-gap.workcenter_unmapped', 'leverage.action.tool',
   'leverage.action.machine-state', 'leverage.action.optimize-window', 'ape.title_new', 'ape.title_edit', 'ape.name',
   'ape.name_ph', 'ape.rules', 'ape.rule_n', 'ape.add_rule', 'ape.remove_rule', 'ape.types', 'ape.cat_capacity',
-  'ape.cat_conflicts', 'ape.cat_calendar', 'ape.cat_setup', 'ape.cat_exceptions', 'ape.select_category',
+  'ape.cat_conflicts', 'ape.cat_calendar', 'ape.cat_setup', 'ape.cat_planning', 'ape.cat_exceptions', 'ape.select_category',
   'ape.day_from', 'ape.day_to', 'ape.days_hint', 'ape.min_sev', 'ape.sev_any', 'ape.sev_warn', 'ape.sev_err',
   'ape.set_mine', 'ape.new_profile', 'ape.duplicate', 'ape.copy_to_plants', 'ape.late_hours', 'ape.err_late_hours',
   'ape.live_range', 'ape.live_matches', 'ape.err_name_required', 'ape.err_name_dup', 'ape.err_name_long',
@@ -821,7 +823,8 @@ const ALERT_MONITOR_KEYS = [
   'toast.alert_profiles_load_failed', 'us.alert_profile_for', 'us.alert_profile_no_plant', 'us.alert_profile_hint',
   'us.alert_profile_manage', 'us.alert_gantt_highlight', 'us.alert_gantt_highlight_hint', 'legend.pm_capacity_t',
   'legend.pm_capacity_d', 'legend.pm_conflicts_t', 'legend.pm_conflicts_d', 'legend.pm_calendar_t',
-  'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d', 'legend.pm_exceptions_t',
+  'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d', 'legend.pm_planning_t',
+  'legend.pm_planning_d', 'legend.pm_exceptions_t',
   'legend.pm_exceptions_d', 'legend.pm_ring_d',
   'am.ov_title', 'am.ov_expand', 'am.ov_collapse', 'am.ov_strip', 'am.ov_when',
   'am.ov_where', 'am.ov_what', 'am.ov_conf', 'am.ov_overdue', 'am.ov_today',
@@ -855,7 +858,7 @@ test('Alert Monitor vocabulary gate: no English am.* / leverage.* value says poi
 
 test('Alert Monitor: every firing alert type has an alert.help.<type> sentence in all five locales (same placeholders)', async () => {
   const { FIRING_ALERT_TYPES } = await import('../../frontend/insights/alert-profiles.mjs');
-  assert.equal(FIRING_ALERT_TYPES.length, 31, 'the firing type list was loaded');
+  assert.equal(FIRING_ALERT_TYPES.length, 32, 'the firing type list was loaded');
   const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
   for (const type of FIRING_ALERT_TYPES) {
     for (const locale of LOCALES) {

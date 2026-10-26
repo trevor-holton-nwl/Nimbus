@@ -18,7 +18,7 @@ const EN = {
   'alert.type.overlap': 'Order overlap',
   'alert.type.overload': 'Overload',
   'ape.cat_capacity': 'Capacity', 'ape.cat_conflicts': 'Scheduling conflicts', 'ape.cat_calendar': 'Calendar',
-  'ape.cat_setup': 'Setup', 'ape.cat_exceptions': 'Other',
+  'ape.cat_setup': 'Setup', 'ape.cat_planning': 'Planning', 'ape.cat_exceptions': 'Other',
 };
 const t = (k, v) => (EN[k] ?? k).replace(/\{\{(\w+)\}\}/g, (_, n) => String(v?.[n] ?? ''));
 const rule = (o = {}) => ({ types: null, dayFrom: null, dayTo: null, minSev: null, minLateHours: null, ...o });
@@ -122,6 +122,11 @@ test('windowSummary: no day bounds reads "any day"; many types collapse to categ
   const many = rule({ types: ['overlap', 'tool-conflict', 'overload'], minSev: 'warn' });
   const s = windowSummary(prof([many, rule({ types: ['overlap'], dayFrom: 8, dayTo: null })]), t);
   assert.equal(s, 'Capacity, Scheduling conflicts · any day · warnings and errors | Order overlap · D8–… · all severities');
+});
+
+test('windowSummary names Planning when a rule spans the planning types', () => {
+  const s = windowSummary(prof([rule({ types: ['overlap', 'needs_planning', 'queued_now_fits'] })]), t);
+  assert.equal(s, 'Scheduling conflicts, Planning · any day · all severities');
 });
 
 test('viewFor: stored choice wins, else Machine + the profile ranking, junk is ignored', () => {

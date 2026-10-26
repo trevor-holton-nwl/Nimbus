@@ -29,7 +29,7 @@ export type MonitorGroupBy = 'category' | 'type' | 'line' | 'day' | 'order' | 'n
 export const MONITOR_GROUP_BYS: MonitorGroupBy[] = ['line', 'day', 'type', 'category', 'order', 'none'];
 /** The two sorts the page offers (Priority / Date); the stored `severity` / `orders` of earlier builds read as `impact`. */
 export const MONITOR_SORTS: AlertRanking[] = ['impact', 'time'];
-export const MONITOR_CATEGORIES: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'exceptions'];
+export const MONITOR_CATEGORIES: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions'];
 export const DEFAULT_GROUP_BY: MonitorGroupBy = 'line';
 
 export interface MonitorView { groupBy: MonitorGroupBy; sort: AlertRanking }

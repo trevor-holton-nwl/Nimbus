@@ -97,11 +97,11 @@ export const ALERT_CATEGORIES: Record<AlertCategory, AlertType[]> = {
     'setup-violated', 'setup-uncovered', 'initial-state-unknown', 'current-state-diverged',
     'override-inactive', 'predecessor-state-unknown', 'successor-state-unknown',
   ],
+  planning: ['queued_now_fits', 'needs_planning'],
   exceptions: [
     'runtime-schedule-mismatch', 'runtime-unknown', 'pv-lot-size',
     'late', 'reversal_forward', 'placement_exception', 'frozen_window_crossed',
     'pull_floor_crossed', 'setup_override_orphaned', 'no_anchor', 'derivation_issue', 'run_time_zero',
-    'queued_now_fits',
   ],
 };
 
@@ -120,6 +120,9 @@ export const FIXABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'bla
 export const OVERRIDE_ALERT_TYPES: ReadonlySet<string> = new Set(['closed', 'firmed-closed', 'firmed-out-of-hours']);
 /** Calendar-family types: drawn with the ⊘ glyph / calendar styling. */
 export const CALENDAR_ALERT_TYPES: ReadonlySet<string> = new Set(['blackout', 'closed', 'firmed-closed', 'firmed-out-of-hours']);
+
+/** Queued-order types offered the Slot recommendation (Task 5 onward); disjoint from Fix / Override / Calendar. */
+export const SLOT_ALERT_TYPES: ReadonlySet<string> = new Set(['needs_planning']);
 
 /** Alert types that can actually fire: every type except `near-capacity` and `line_no_calendar` (mirrors the server's ALERT_TYPES). */
 export const FIRING_ALERT_TYPES: AlertType[] =

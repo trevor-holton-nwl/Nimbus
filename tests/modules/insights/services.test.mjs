@@ -866,9 +866,9 @@ test('queued_now_fits: only needs_planning overlong_never rows, honours scoped l
   assert.equal(Alerts.queuedNowFits().length, 0, 'a dismissed alert stays dismissed');
 }));
 
-test('queued_now_fits is registered as a firing exceptions-category alert type', async () => {
+test('queued_now_fits is registered as a firing planning-category alert type', async () => {
   const { ALERT_CATEGORIES, FIRING_ALERT_TYPES, categoryOf } = await import('../../../frontend/insights/alert-profiles.mjs');
-  assert.equal(categoryOf('queued_now_fits'), 'exceptions');
-  assert.ok(ALERT_CATEGORIES.exceptions.includes('queued_now_fits'));
+  assert.equal(categoryOf('queued_now_fits'), 'planning');
+  assert.ok(ALERT_CATEGORIES.planning.includes('queued_now_fits'));
   assert.ok(FIRING_ALERT_TYPES.includes('queued_now_fits'));
 });
