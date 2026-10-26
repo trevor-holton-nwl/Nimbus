@@ -652,10 +652,13 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
       else { add('diagnose-worst', 'am.diagnose', true); add('optimize', 'leverage.action.optimize-window'); }
       break;
     }
+    case 'needs-planning':
+      add('show-alerts', 'leverage.action.needs-planning', true);
+      break;
     default: break;
   }
   if (n > 0 && !out.some(x => x.act === 'open-table')) add('open-table', 'am.open_in_table', false, { labelVars: { n } });
-  add('show-alerts', 'am.lev_show_alerts');
+  if (!out.some(x => x.act === 'show-alerts')) add('show-alerts', 'am.lev_show_alerts');
   if (item.adminOnly && !out.some(x => x.act === 'copy-summary')) add('copy-summary', 'am.lev_copy_summary');
 
   if (item.adminOnly && !ctx.isAdmin) {
@@ -694,7 +697,8 @@ export function fixConfidenceChanged(item: LeverageItem): boolean {
  * after-score is shown with its delta in the error colour), the no-headroom note, what remains after a fix.
  */
 export function fixLineParts(item: LeverageItem, ctx: LevCtx, t: Translate): string[] {
-  const parts: string[] = [_esc(fixClearsText(item, t))];
+  // needs-planning: one alert per order, so "Clears N alerts on N orders" would only repeat the title's count.
+  const parts: string[] = item.family === 'needs-planning' ? [] : [_esc(fixClearsText(item, t))];
   const after = item.confidenceAfter;
   if (after != null && fixConfidenceChanged(item)) {
     const d = after - item.confidenceBefore;
@@ -738,13 +742,16 @@ export function fixRowHtml(item: LeverageItem, rank: number | null, ctx: LevCtx,
       + `data-lev-minutes="${key}" aria-label="${label}"></label> `
       + `<button type="button" class="btn sm" data-lev-action="replay-minutes" data-lev-key="${key}">${_esc(t('am.fix_replay'))}</button></span>`;
   }
+  const lineParts = fixLineParts(item, ctx, t);
   const rankHtml = rank == null
     ? `<span class="am-fix-rank" aria-hidden="true"></span>`
     : `<span class="am-fix-rank" role="img" aria-label="${_esc(t('am.rank_n', { n: rank }))}">${rank}</span>`;
   return `<div class="am-fix" role="listitem" data-lev-key="${key}"${tip ? ` title="${_esc(tip)}"` : ''}>`
     + rankHtml
     + `<div class="am-fix-main"><div class="am-fix-title" title="${_esc(title)}">${_esc(title)}${admin}</div>`
-    + `<div class="am-fix-line">${fixLineParts(item, ctx, t).join(' · ')}${minutes ? ` · ${minutes}` : ''}</div></div>`
+    + (lineParts.length || minutes
+      ? `<div class="am-fix-line">${lineParts.join(' · ')}${minutes ? `${lineParts.length ? ' · ' : ''}${minutes}` : ''}</div>` : '')
+    + `</div>`
     + `<div class="am-fix-acts">${btn}${more}</div></div>`;
 }
 

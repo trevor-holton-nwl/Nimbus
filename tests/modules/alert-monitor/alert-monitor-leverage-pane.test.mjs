@@ -233,6 +233,25 @@ test('Show alerts focuses the list, points the Gantt at the same orders, and scr
   assert.equal(els['am-focus-chip'].hidden, true);
 });
 
+test('needs-planning: Show these focuses exactly its alert ids, bypassing the profile, and the Gantt follows the same orders', async () => {
+  seed([alert('n1', { type: 'needs_planning', sev: 'warn', taskId: 'Q1' }), alert('n2', { type: 'needs_planning', sev: 'warn', taskId: 'Q2' }), alert('a9')]);
+  groupItems = [item('needs-planning', {
+    family: 'needs-planning', titleKey: 'leverage.title.needs-planning', titleVars: { n: 2, h: 3.5 },
+    alertIds: ['n1', 'n2'], orderIds: ['Q1', 'Q2'], confidenceAfter: null, method: 'none', unplacedHours: 3.5,
+    action: { kind: 'needs-planning', alertIds: ['n1', 'n2'] },
+  })];
+  AlertMonitorPane.render();
+  await sleep(40);
+  assert.match(els['am-leverage'].innerHTML, /data-lev-action="show-alerts"[^>]*data-lev-key="needs-planning"/, 'Show these is the row button');
+  clickLev('show-alerts', 'needs-planning');
+  assert.equal(els['am-focus-chip'].hidden, false);
+  assert.deepEqual(calls.focusTasks.at(-1), ['Q1', 'Q2'], 'only the family\'s own orders, not a9\'s');
+  assert.doesNotMatch(els['am-groups'].innerHTML, /T-a9/, 'the unrelated alert is not listed under the focus');
+  assert.ok(els['am-groups'].scrolled > 0);
+  clickAm('clear-focus');
+  assert.equal(calls.focusTasks.at(-1), null);
+});
+
 test('only the top 5 rows show until "Show 10 more"', async () => {
   seed([alert('a1')]);
   groupItems = Array.from({ length: 8 }, (_, i) => item(`k${i}`));

@@ -489,6 +489,8 @@ test('items sort by points desc, then orders desc', () => {
     al('few', 'tool-conflict', 'err', 1, { msgVars: { tool: 'FEW' }, taskId: 'c', peerId: 'd' }),
     al('tie-many', 'initial-state-unknown', 'err', 1, { taskId: 'e' }),
     al('tie-two', 'tool-conflict', 'err', 1, { msgVars: { tool: 'TWO' }, taskId: 'g' }),
+    al('np1', 'needs_planning', 'warn', 1, { taskId: 'q1' }),
+    al('np2', 'needs_planning', 'warn', 2, { taskId: 'q2' }),
   ];
   const items = groupLeverage(mkInput({ alerts }));
   for (let i = 1; i < items.length; i++) {
@@ -498,6 +500,89 @@ test('items sort by points desc, then orders desc', () => {
   assert.equal(items[0].action.tool, 'BIG');
   const equalPoints = items.filter(i => i.points === items[1].points);
   assert.ok(equalPoints.length >= 2);
+  assert.equal(byFamily(items, 'needs-planning').length, 1, 'the needs-planning card is ranked among the others');
+});
+
+// ---- needs-planning family ------------------------------------------------------------------------
+
+const npTasks = {
+  q1: { id: 'q1', RUN_TIME: 1.04 }, q2: { id: 'q2', RUN_TIME: '2.3' }, q3: { id: 'q3', RUN_TIME: 'abc' },
+  q4: { id: 'q4', RUN_TIME: -5 }, q5: { id: 'q5' },
+};
+
+test('needs-planning: one plant-wide item; hours sum RUN_TIME, unknown counts 0, one decimal', () => {
+  const alerts = [
+    al('n1', 'needs_planning', 'warn', 1, { taskId: 'q1', line: 'L1' }),
+    al('n2', 'needs_planning', 'warn', 2, { taskId: 'q2', line: 'L2' }),
+    al('n3', 'needs_planning', 'warn', 3, { taskId: 'q3', line: '' }),
+    al('n4', 'needs_planning', 'warn', 3, { taskId: 'q4' }),
+    al('n5', 'needs_planning', 'warn', 3, { taskId: 'q5' }),
+    al('n6', 'needs_planning', 'warn', 3, { taskId: 'gone' }),
+  ];
+  const items = byFamily(groupLeverage(mkInput({ alerts, tasksById: npTasks })), 'needs-planning');
+  assert.equal(items.length, 1, 'one bucket across lines');
+  const [it] = items;
+  assert.equal(it.key, 'needs-planning');
+  assert.equal(it.titleKey, 'leverage.title.needs-planning');
+  assert.deepEqual(it.titleVars, { n: 6, h: 3.3 }, '1.04 + 2.3 + 0 for unknown, negative and missing, to one decimal');
+  assert.deepEqual(it.alertIds, ['n1', 'n2', 'n3', 'n4', 'n5', 'n6']);
+  assert.deepEqual(it.orderIds.sort(), ['gone', 'q1', 'q2', 'q3', 'q4', 'q5']);
+  assert.deepEqual(it.action, { kind: 'needs-planning', alertIds: ['n1', 'n2', 'n3', 'n4', 'n5', 'n6'] });
+  assert.equal(it.unplacedHours, 3.3);
+});
+
+test('needs-planning: method none, confidenceAfter null, never replayed', async () => {
+  const alerts = [al('n1', 'needs_planning', 'warn', 1, { taskId: 'q1' })];
+  const input = mkInput({ alerts, tasksById: npTasks });
+  const [it] = byFamily(groupLeverage(input), 'needs-planning');
+  assert.equal(it.method, 'none');
+  assert.equal(it.confidenceAfter, null);
+  assert.equal(it.confidenceBefore, score(alerts, {}));
+  const runner = fakeRunner();
+  const out = await analyzeLeverage(input, runner);
+  assert.equal(runner.calls.length, 0, 'no replay batch when the only card is needs-planning');
+  const [after] = byFamily(out, 'needs-planning');
+  assert.equal(after.method, 'none');
+  assert.equal(after.confidenceAfter, null);
+  assert.equal(after.capped, undefined);
+  // Alongside a replayable setup pair, the batch carries only the pair.
+  const ss = setupSnapshot();
+  const withPair = mkInput({
+    alerts: [...alerts, al('s1', 'setup-uncovered', 'warn', 1, { pairKey: PAIR_AB, taskId: 'x' })], tasksById: npTasks,
+    setupSnapshot: ss, masterPlant: policy(10),
+  });
+  const runner2 = fakeRunner();
+  await analyzeLeverage(withPair, runner2);
+  for (const c of runner2.calls) for (const v of c.variants) assert.ok(v.key.startsWith('setup-pair:'), v.key);
+});
+
+test('needs-planning: overdue scores as if due now; beyond-window scores 0', () => {
+  const overdue = al('o1', 'needs_planning', 'err', -2, { taskId: 'q1' });
+  const beyond = al('b1', 'needs_planning', 'err', 30, { taskId: 'q2' });
+  const soon = al('s1', 'needs_planning', 'warn', 1, { taskId: 'q3' });
+  const end = new Date(plantNow.getTime() + HM * 60000);
+  assert.equal(Core.alertPoints(overdue, plantNow, end), 0, 'the core scores a past alert 0 (the reason for the override)');
+  const asNow = Core.alertPoints({ ...overdue, time: plantNow }, plantNow, end);
+  assert.ok(asNow > 0);
+
+  const [only] = byFamily(groupLeverage(mkInput({ alerts: [overdue], tasksById: npTasks })), 'needs-planning');
+  assert.equal(only.points, asNow);
+  assert.equal(only.outsideConfidenceWindowCount, 0, 'an overdue alert is inside the window');
+
+  const [far] = byFamily(groupLeverage(mkInput({ alerts: [beyond], tasksById: npTasks })), 'needs-planning');
+  assert.equal(far.points, 0);
+  assert.equal(far.outsideConfidenceWindowCount, 1);
+
+  const [mix] = byFamily(groupLeverage(mkInput({ alerts: [overdue, beyond, soon], tasksById: npTasks })), 'needs-planning');
+  assert.equal(mix.points, asNow + Core.alertPoints(soon, plantNow, end));
+  assert.equal(mix.outsideConfidenceWindowCount, 1);
+  assert.ok(overdue.time < plantNow, 'the input alert is not mutated');
+});
+
+test('needs-planning: absent when no needs_planning alert', () => {
+  const alerts = [al('t1', 'tool-conflict', 'err', 1, { msgVars: { tool: 'T9' }, taskId: 'a', peerId: 'b' })];
+  assert.equal(byFamily(groupLeverage(mkInput({ alerts, tasksById: npTasks })), 'needs-planning').length, 0);
+  assert.equal(groupLeverage(mkInput({ alerts: [], tasksById: npTasks })).length, 0);
 });
 
 test('groupLeverage does not mutate its input and is fast on a large plant', () => {

@@ -29,7 +29,7 @@ import { impactPoints } from './alert-profiles.mjs';
 
 // ---- Contract -----------------------------------------------------------------------------------
 
-export type LeverageFamily = 'setup-pair' | 'calendar-day' | 'routing-gap' | 'tool' | 'machine-state' | 'optimize-window';
+export type LeverageFamily = 'setup-pair' | 'calendar-day' | 'routing-gap' | 'tool' | 'machine-state' | 'optimize-window' | 'needs-planning';
 
 export interface LeveragePair {
   line: string;
@@ -46,7 +46,8 @@ export type LeverageAction =
   | { kind: 'routing-gap'; step: string; material: string; pv: string; machine: string }
   | { kind: 'tool'; tool: string; alertIds: string[] }
   | { kind: 'machine-state'; line: string }
-  | { kind: 'optimize-window'; line: string; startDate: string; endDate: string };
+  | { kind: 'optimize-window'; line: string; startDate: string; endDate: string }
+  | { kind: 'needs-planning'; alertIds: string[] };
 
 export interface LeverageItem {
   family: LeverageFamily;
@@ -59,7 +60,7 @@ export interface LeverageItem {
   /** Uncapped impact points of the alerts cleared (the headline metric and the sort key, D12). */
   points: number;
   confidenceBefore: number;
-  /** Score after the fix; null for optimize-window (no prediction, D16). */
+  /** Score after the fix; null for optimize-window and needs-planning (no prediction, D16). */
   confidenceAfter: number | null;
   method: 'replay' | 'removal' | 'none';
   /** Alerts in this item that carry 0 points because they sit outside the confidence window. */
@@ -71,6 +72,8 @@ export interface LeverageItem {
   adminOnly?: boolean;
   /** optimize-window only: sum of (effective capacity - scheduled) hours over the window; <= 0 means optimizing cannot help. */
   headroomHours?: number;
+  /** needs-planning only: the run-time hours of the queued orders still needing a slot (one decimal). */
+  unplacedHours?: number;
   action: LeverageAction;
 }
 
@@ -222,7 +225,7 @@ function _finish(
     points += p;
     if (p === 0) outside++;
   }
-  const noScore = family === 'optimize-window';
+  const noScore = family === 'optimize-window' || family === 'needs-planning';
   return {
     family, key, titleKey, titleVars,
     alertIds: b.alerts.map(a => a.id), orderIds: [...b.orders], lines: [...b.lines],
@@ -442,6 +445,37 @@ function _optimizeItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
   return items;
 }
 
+/** One plant-wide bucket over every `needs_planning` alert (a queued order with no slot). No confidence delta
+ *  (`method: 'none'`: slotting adds load, so a removal delta would over-promise), and an overdue alert is scored as if
+ *  due now: the core gives 0 points to anything before the horizon start, which would bury the most urgent orders.
+ *  The hours are a 2-line local mirror of `Util.runHours` (this module imports nothing from foundation by design). */
+function _needsPlanningItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
+  const { input } = ctx;
+  const b = _bucket();
+  for (const a of alerts) if (a.type === 'needs_planning') _push(b, a, _alertOrders(a));
+  if (!b.alerts.length) return [];
+
+  const nowMs = input.plantNow.getTime();
+  let points = 0;
+  let outside = 0;
+  for (const a of b.alerts) {
+    const t = a.time instanceof Date ? a.time.getTime() : NaN;
+    const p = Number.isFinite(t) && t < nowMs
+      ? impactPoints({ ...a, time: input.plantNow }, input.plantNow, input.horizonMinutes)
+      : ctx.pointsById.get(a.id) ?? 0;
+    points += p;
+    if (p === 0) outside++;
+  }
+
+  let hours = 0;
+  for (const id of b.orders) hours += Math.max(0, parseFloat(String(input.tasksById[id]?.RUN_TIME)) || 0);
+  hours = Math.round(hours * 10) / 10;
+
+  const alertIds = b.alerts.map(a => a.id);
+  return [_finish(ctx, 'needs-planning', 'needs-planning', 'leverage.title.needs-planning', { n: alertIds.length, h: hours }, b,
+    { kind: 'needs-planning', alertIds }, { points, outsideConfidenceWindowCount: outside, unplacedHours: hours })];
+}
+
 // ---- Public: grouping ---------------------------------------------------------------------------
 
 function _sortItems(items: LeverageItem[]): LeverageItem[] {
@@ -460,6 +494,7 @@ export function groupLeverage(input: LeverageInput): LeverageItem[] {
     ..._toolItems(ctx, alerts),
     ..._machineStateItems(ctx, alerts),
     ..._optimizeItems(ctx, alerts),
+    ..._needsPlanningItems(ctx, alerts),
   ]);
 }
 
