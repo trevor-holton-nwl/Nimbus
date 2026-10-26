@@ -156,8 +156,9 @@ interface TimelineAlertCellInfo {
 
 /** The per-{line, day} alert-cell aggregation behind Timeline.rebuild()'s background cells. A `needs_planning`
  *  alert paints no cell: the queued order has no bar to anchor to, and a red cell on its machine and due day would
- *  read as a conflict on work that is not placed (same stance as `runtime-unknown` and `queued_now_fits`, which
- *  stay in the bell, the drawer and the Orders grid only). Err severity wins over warn on the same cell. */
+ *  read as a conflict on work that is not placed. The older queued alerts `runtime-unknown` (red) and
+ *  `queued_now_fits` still paint cells today (pre-existing, unchanged; excluding `queued_now_fits` too is an open
+ *  owner call). Err severity wins over warn on the same cell. */
 export function alertCellMapFor(
   alerts: ReadonlyArray<NimbusAlert>, lineVisible: (line: string) => boolean,
 ): Record<string, TimelineAlertCellInfo> {
