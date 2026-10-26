@@ -835,8 +835,24 @@ const ALERT_MONITOR_KEYS = [
   'am.slot_title', 'am.slot_day', 'am.slot_pair', 'am.slot_hint', 'am.slot_option', 'am.slot_option_short',
   'am.slot_option_closed', 'am.slot_option_unknown', 'am.slot_none', 'am.slot_suggested', 'am.slot_place',
   'am.slot_confirm_title', 'am.slot_confirm_short', 'am.slot_confirm_closed', 'am.slot_confirm_place',
-  'am.slot_placed', 'am.slot_stale', 'am.slot_no_window', 'am.slot_undo',
+  'am.slot_placed', 'am.slot_stale', 'am.slot_no_window', 'am.slot_undo', 'am.slot_suggested_on',
 ];
+
+test('Slot wording (final fix wave): the toast carries the landing day, the confirm names the overlap, the help points at Slot', () => {
+  const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
+  for (const locale of LOCALES) {
+    assert.match(dicts[locale]['am.slot_placed'], /\{\{when\}\}/, `${locale} am.slot_placed carries {{when}}`);
+    assert.equal(dicts[locale]['am.slot_suggested_on'], '{{day}} · {{option}}', `${locale} am.slot_suggested_on`);
+    assert.doesNotMatch(dicts[locale]['alert.help.needs_planning'], /Gantt/i, `${locale} help sends the planner to Slot, not the Gantt`);
+  }
+  assert.match(dicts.en['am.slot_confirm_short'], /overlap other orders/);
+  assert.match(dicts.en['alert.help.needs_planning'], /Slot…/);
+  assert.doesNotMatch(dicts.en['alert.help.needs_planning'], /no legal placement/);
+  for (const [locale, slot] of [['de', 'Platz…'], ['es', 'Hueco…'], ['fr', 'Créneau…'], ['pt', 'Espaço…']]) {
+    assert.ok(dicts[locale]['alert.help.needs_planning'].includes(slot), `${locale} help names the ${slot} action`);
+    assert.ok(dicts[locale]['am.slot'].includes(slot), `${locale} help matches the row button label`);
+  }
+});
 
 test('Alert Monitor keys exist in all five locales, non-empty, with the same {{placeholder}} set as en.js', () => {
   const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));

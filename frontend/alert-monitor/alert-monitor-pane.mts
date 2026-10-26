@@ -1272,7 +1272,13 @@ function _diagnoseFor(a: NimbusAlert, task: NimbusTask | undefined, plant: strin
   // A queued order's best (machine, day) for the Slot dialog. `suggest` is synchronous and memoised per order and data revision,
   // and only an open panel gets here, so a paint never ranks more than the few orders being looked at.
   if (task && plant && SLOT_ALERT_TYPES.has(a.type)) {
-    fields.push({ label: t('am.slot_suggested'), value: formatSlotOption(AlertSlotModal.suggest(task, plant), t) });
+    // The suggestion is for the dialog's default day, so the line names it: "Oct 28 · M2 — 9 of 10 h free ...".
+    const top = AlertSlotModal.suggest(task, plant);
+    const option = formatSlotOption(top, t);
+    fields.push({
+      label: t('am.slot_suggested'),
+      value: top ? t('am.slot_suggested_on', { day: _fmtDay(_noonOf(AlertSlotModal.suggestedDay(task, plant))), option }) : option,
+    });
   }
   const helpKey = `alert.help.${a.type}`;
   const help = t(helpKey);

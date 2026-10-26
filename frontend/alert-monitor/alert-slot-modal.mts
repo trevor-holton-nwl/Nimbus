@@ -7,10 +7,12 @@
    stacks on top of it (the Override dialog and Engine.confirmOvertimePlacement do the same).
 
    Ranking (owner decision): the machine with the MOST FREE HOURS on the chosen day first, fits before
-   non-fits. The day defaults to max(due day, plant today) and the planner can change it. Placing is
-   finish-anchored: the finish is the end of the day's working window (a closed day is never handed to the
-   engine, which refuses it: the dialog walks back up to SLOT_LOOKBACK_DAYS to the latest open window and
-   confirms the move), the order is then firmed. Save stays explicit (dirty until Save; Undo works).
+   non-fits. The day defaults to max(due day, plant today) (tomorrow when nothing is left today) and the
+   planner can change it. Placing is finish-anchored: the finish is the end of the latest free gap that holds
+   the order on the day's working window (else the window end, after a confirm that it may overlap other
+   orders; a closed or blacked-out day is never handed to the engine, which refuses it: the dialog walks back
+   up to SLOT_LOOKBACK_DAYS, never into the past, to the latest open window and confirms the move), the order
+   is then firmed. Save stays explicit (dirty until Save; Undo works).
 
    The pure exports (ranking, finish walk-back, fingerprint, default day, option text) take their inputs as
    arguments and are Node-testable; the live reads of the classic-script globals (Table pair options, Timeline
@@ -56,12 +58,15 @@ export interface SlotCandidate {
   fits: boolean;
 }
 
-/** The three reads the ranking needs, injected so the ranking is pure. */
+/** The reads the ranking and the placement need, injected so the logic is pure. */
 export interface SlotDeps {
   pairOptions(task: NimbusTask): Array<{ value: string; label: string }>;
   hoursFor(task: NimbusTask, pv: string | null, machine: string): number | null;
   dayCapacity(machine: string, day: string): { free: number; cap: number; closed: boolean } | null;
   resolveStep?(task: NimbusTask, pv: string | null, machine: string): string | undefined;
+  /** The placed bars on `machine` that touch `day` (YYYY-MM-DD), as `[start, end]` pairs; the gap search keeps a
+   *  "fitting" slot off them. */
+  busyIntervals?(machine: string, day: string): Array<[Date, Date]>;
 }
 
 /** Split an option value at the FIRST `|`: `pv|machine` gives both (the PV in its padded form), a bare machine
@@ -106,20 +111,102 @@ export function rankSlotCandidates(task: NimbusTask, day: string, deps: SlotDeps
     || ((a.pv ?? '') < (b.pv ?? '') ? -1 : (a.pv ?? '') > (b.pv ?? '') ? 1 : 0));
 }
 
-/** The finish to hand the engine for `machine` on `day` (YYYY-MM-DD): the END of that day's working window. The
- *  engine refuses a finish on a closed day (`finish_cannot_hold`), so a closed day walks back to the latest open
- *  window within SLOT_LOOKBACK_DAYS (`movedBack` counts the days walked). Null when no window is open in the
- *  window of days. `workWindow` is `Calendar.workWindow` (line hours intersected with the plant's). */
+const _MS_H = 3600e3;
+const _dateFromKey = (day: string): Date | null => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;   // local midnight built from parts
+};
+
+/** The finish for a `need`-hour order on `day` that sits in a REAL gap: inside the day's working window
+ *  (`[open, close]`, shortened to start at `now` when `now` falls on that day) the busy intervals are subtracted
+ *  and the END of the LATEST free gap that holds `needHours` is returned (`viaGap: true`). Gap length is plain
+ *  clock time inside the window, which is working time by construction. When no gap is large enough, or the need
+ *  is unknown, the finish is the window close with `viaGap: false` and `gapHours` is the largest gap (the caller
+ *  confirms, since the order may then overlap other work). Null when the day has no (remaining) window. The
+ *  engine's backward walk avoids blackouts but not other orders, hence this search. Setup time before a busy bar
+ *  is not modelled: a gap is measured to the bar's own start. */
+export function slotGapFinishFor(
+  machine: string, day: string, needHours: number | null | undefined,
+  workWindow: (line: string, date: Date) => [Date, Date] | null,
+  busyIntervals: ReadonlyArray<readonly [Date, Date]> | (() => ReadonlyArray<readonly [Date, Date]>),
+  now?: Date | null,
+): { finish: Date; gapHours: number; viaGap: boolean } | null {
+  const date = _dateFromKey(day);
+  if (!date) return null;
+  const win = workWindow(machine, date);
+  if (!win) return null;
+  let lo = win[0].getTime();
+  const hi = win[1].getTime();
+  if (now && Util.dayKey(now) === day) lo = Math.max(lo, now.getTime());   // time already gone is not free
+  if (hi <= lo) return null;
+  // A function is read only now that the day is known to have a window (a closed day costs no scan of the tasks).
+  const busy = typeof busyIntervals === 'function' ? busyIntervals() : busyIntervals;
+  const clipped = busy
+    .map(([s, e]) => [Math.max(lo, s.getTime()), Math.min(hi, e.getTime())] as [number, number])
+    .filter(([s, e]) => e > s)
+    .sort((a, b) => a[0] - b[0]);
+  const gaps: Array<[number, number]> = [];
+  let cursor = lo;
+  for (const [s, e] of clipped) {
+    if (s > cursor) gaps.push([cursor, s]);
+    cursor = Math.max(cursor, e);
+  }
+  if (cursor < hi) gaps.push([cursor, hi]);
+  const largest = gaps.reduce((best, [s, e]) => Math.max(best, (e - s) / _MS_H), 0);
+  const need = typeof needHours === 'number' && Number.isFinite(needHours) && needHours > 0 ? needHours : null;
+  if (need !== null) {
+    for (let i = gaps.length - 1; i >= 0; i--) {
+      const [s, e] = gaps[i]!;
+      if ((e - s) / _MS_H >= need - 1e-9) return { finish: new Date(e), gapHours: (e - s) / _MS_H, viaGap: true };
+    }
+  }
+  return { finish: new Date(hi), gapHours: largest, viaGap: false };
+}
+
+/** What `slotFinishFor` needs beyond the calendar to keep a slot off other work and out of the past. */
+export interface SlotFinishOpts {
+  /** The order's run time on this pair; null/absent means unknown (never a fit, finish at the window close). */
+  needHours?: number | null;
+  /** The placed bars on a machine and day; absent means "nothing else on the machine". */
+  busy?: (machine: string, day: string) => Array<[Date, Date]>;
+  /** The plant's now: on its own day the window starts here. */
+  now?: Date | null;
+  /** The earliest day the walk-back may land on (the plant's today): it never goes back into the past. */
+  floorDay?: string;
+}
+
+export interface SlotFinish {
+  finish: Date;
+  day: string;
+  movedBack: number;
+  /** The finish sits at the end of a free gap that holds the need (so the order does not overlap other work). */
+  viaGap: boolean;
+  /** The largest free gap in that day's window, hours (the gap itself when `viaGap`). */
+  gapHours: number;
+}
+
+/** The finish to hand the engine for `machine` on `day` (YYYY-MM-DD): the end of the latest free gap that holds
+ *  the need on that day, else the END of its working window (see `slotGapFinishFor`). The engine refuses a finish
+ *  on a closed day (`finish_cannot_hold`), so a closed day, or one `isClosed` calls fully blacked out, walks back
+ *  to the latest open window within SLOT_LOOKBACK_DAYS (`movedBack` counts the days walked; never before
+ *  `opts.floorDay`). Null when no window is open in the window of days. `workWindow` is `Calendar.workWindow` (line
+ *  hours intersected with the plant's). */
 export function slotFinishFor(
   machine: string, day: string, workWindow: (line: string, date: Date) => [Date, Date] | null,
-): { finish: Date; day: string; movedBack: number } | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
-  if (!m) return null;
-  const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
+  isClosed?: (machine: string, day: string) => boolean, opts: SlotFinishOpts = {},
+): SlotFinish | null {
+  const origin = _dateFromKey(day);
+  if (!origin) return null;
+  const y = origin.getFullYear(), mo = origin.getMonth(), d = origin.getDate();
+  const needKnown = typeof opts.needHours === 'number' && opts.needHours > 0;
   for (let back = 0; back <= SLOT_LOOKBACK_DAYS; back++) {
-    const date = new Date(y, mo, d - back);   // local midnight built from parts, so a DST change cannot skip a day
-    const win = workWindow(machine, date);
-    if (win && win[1].getTime() > win[0].getTime()) return { finish: win[1], day: Util.dayKey(date), movedBack: back };
+    const date = new Date(y, mo, d - back);   // a DST change cannot skip a day
+    const key = Util.dayKey(date);
+    if (opts.floorDay && key < opts.floorDay) break;
+    if (isClosed?.(machine, key)) continue;
+    const busy = needKnown && opts.busy ? () => opts.busy!(machine, key) : [];
+    const g = slotGapFinishFor(machine, key, opts.needHours, workWindow, busy, opts.now);
+    if (g) return { finish: g.finish, day: key, movedBack: back, viaGap: g.viaGap, gapHours: g.gapHours };
   }
   return null;
 }
@@ -136,13 +223,21 @@ export function slotTaskKey(task: NimbusTask): string {
 const _DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** The day the dialog opens on: the due day, but never before the plant's today (a past due day has no
- *  meaningful capacity, and the engine would place forward from now anyway). `plantToday` is a YYYY-MM-DD key. */
-export function defaultSlotDay(task: NimbusTask, plantToday: string | Date): string {
+ *  meaningful capacity, and the engine would place forward from now anyway). `plantToday` is a YYYY-MM-DD key.
+ *  When nothing is left today (`nowLeftToday` false: the time has gone or the machines are closed) the floor is
+ *  tomorrow, so the dialog never opens on a day it cannot use. */
+export function defaultSlotDay(task: NimbusTask, plantToday: string | Date, nowLeftToday = true): string {
   const today = typeof plantToday === 'string' && _DAY_RE.test(plantToday) ? plantToday : Util.dayKey(plantToday);
+  const floor = nowLeftToday ? today : _addDays(today, 1);
   const due = Util.dueDisplayDate(task);
   const dueDay = due ? Util.dayKey(due) : '';
-  return dueDay && dueDay > today ? dueDay : today;
+  return dueDay && dueDay > floor ? dueDay : floor;
 }
+
+const _addDays = (day: string, n: number): string => {
+  const d = _dateFromKey(day);
+  return d ? Util.dayKey(new Date(d.getFullYear(), d.getMonth(), d.getDate() + n)) : day;
+};
 
 /** One decimal, no trailing zero (6 -> "6", 4.25 -> "4.3"). */
 const _fmtH = (n: number): string => String(Math.round(n * 10) / 10);
@@ -173,6 +268,14 @@ export const slotSeams = {
   nim: (): SlotNimbus => (globalThis as unknown as { NIMBUS?: SlotNimbus }).NIMBUS ?? {},
   signedIn: (): boolean => !!Session.currentUser(),
   workWindow: (line: string, date: Date): [Date, Date] | null => Calendar.workWindow(line, date),
+  /** The plant's now (the naive wall clock `Store.plantNow` returns); null when the plant has no valid timezone. */
+  plantNow: (plant: string): Date | null => Store.plantNow(plant),
+  /** `day` (YYYY-MM-DD) has no capacity on `machine` at all (closed, or fully blacked out): the nominal working
+   *  window of such a day is not usable, so the walk-back skips it. */
+  dayClosed: (machine: string, day: string): boolean => {
+    const date = _dateFromKey(day);
+    return !!date && Calendar.effectiveCapacityHours(machine, date) <= 0;
+  },
   /** Whether routing-runtime is on for the order's plant (the same test as `Table._routingEnabledForTask`). */
   routingPlant: (task: NimbusTask): boolean => {
     const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant || '';
@@ -232,11 +335,58 @@ export const liveSlotDeps: SlotDeps = {
     }
     const row = matrix[machine]?.[day];
     if (!row) return null;
-    return { free: Math.max(0, row.effectiveCapacity - row.scheduled), cap: row.effectiveCapacity, closed: row.capacity <= 0 };
+    let free = Math.max(0, row.effectiveCapacity - row.scheduled);
+    let cap = row.effectiveCapacity;
+    let closed = row.capacity <= 0;
+    // On the plant's today the hours already gone are not free: shorten the capacity by the part of the working
+    // window before now, cap the free hours by what is left, and call an exhausted day closed.
+    const plant = Store.selectedPlant ?? '';
+    const now = plant ? slotSeams.plantNow(plant) : null;
+    if (now && Util.dayKey(now) === day && !closed) {
+      const win = slotSeams.workWindow(machine, start);
+      if (win) {
+        const goneH = Math.max(0, Math.min(now.getTime(), win[1].getTime()) - win[0].getTime()) / _MS_H;
+        cap = Math.max(0, cap - goneH);
+        free = Math.min(free, cap);
+        closed = cap <= 0;
+      }
+    }
+    return { free, cap, closed };
+  },
+  /** The placed bars of `machine` that touch `day`: split orders by piece (`Util.scheduleIntervals`), a plain bar
+   *  by its start and end; a row without both dates (a queued order) is not busy. */
+  busyIntervals(machine, day) {
+    const dayStart = _dateFromKey(day);
+    if (!dayStart) return [];
+    const dayEnd = new Date(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate() + 1);
+    const out: Array<[Date, Date]> = [];
+    for (const row of Store.tasksForSelectedPlant()) {
+      if (row.MACHINE !== machine) continue;
+      const start = Util.parseDate(row.start_date), end = Util.parseDate(row.end_date);
+      if (!start || !end) continue;
+      const pieces = Util.scheduleIntervals(row);
+      const spans: Array<[Date, Date]> = pieces.length ? pieces.map(p => [p.start, p.end]) : [[start, end]];
+      for (const [s, e] of spans) if (s < dayEnd && e > dayStart) out.push([s, e]);
+    }
+    return out;
   },
 };
 
 const _todayKey = (plant: string): string => Util.dayKey(Util.plantToday(plant));
+
+/** The day a slot for `task` starts from: `defaultSlotDay`, moved to tomorrow when the due day is already past and
+ *  every eligible machine is closed or used up today (an unreadable capacity does not count as used up). Only asks
+ *  when the default would be today, so a future due day costs nothing extra. */
+function _defaultDay(task: NimbusTask, plant: string): string {
+  const today = _todayKey(plant);
+  if (defaultSlotDay(task, today) !== today) return defaultSlotDay(task, today);
+  const options = liveSlotDeps.pairOptions(task);
+  const nowLeft = options.length === 0 || options.some(o => {
+    const cap = liveSlotDeps.dayCapacity(parsePairValue(o.value).machine, today);
+    return !cap || !cap.closed;
+  });
+  return defaultSlotDay(task, today, nowLeft);
+}
 
 /** Memo of `suggest`: `${taskId}|${Store.dataRev()}` -> top candidate (or null). Cleared on `plant:selected`. */
 const _suggestMemo = new Map<string, SlotCandidate | null>();
@@ -378,7 +528,7 @@ export const AlertSlotModal = {
   open(opts: { plant: string; taskId: string; alertId?: string }): void {
     const task = opts.plant && opts.taskId ? Store.tasks[opts.taskId] : undefined;
     if (!task) return;
-    const day = defaultSlotDay(task, _todayKey(opts.plant));
+    const day = _defaultDay(task, opts.plant);
     const s: SlotState = {
       plant: opts.plant, taskId: String(opts.taskId), alertId: opts.alertId, taskKey: slotTaskKey(task), day,
       candidates: rankSlotCandidates(task, day, liveSlotDeps), picked: null, busy: false,
@@ -425,11 +575,15 @@ export const AlertSlotModal = {
     const first = _freshTask(s);
     if (!first) return;
     const { pv, machine } = parsePairValue(cand.value);
-    const fin = slotFinishFor(machine, s.day, slotSeams.workWindow);
+    const fin = slotFinishFor(machine, s.day, slotSeams.workWindow, slotSeams.dayClosed, {
+      needHours: cand.needHours, busy: (m, d) => liveSlotDeps.busyIntervals?.(m, d) ?? [],
+      now: slotSeams.plantNow(s.plant), floorDay: _todayKey(s.plant),
+    });
     if (!fin) { Toast.show(t('am.slot_no_window', { machine, day: s.day, days: SLOT_LOOKBACK_DAYS }), 'warn'); return; }
     s.busy = true;
     try {
-      const short = cand.needHours === null || cand.freeHours === null || cand.needHours > cand.freeHours;
+      // "Fits" must mean a real gap: the totals can fit while the free time is cut up by other orders (not viaGap).
+      const short = cand.needHours === null || cand.freeHours === null || cand.needHours > cand.freeHours || !fin.viaGap;
       if (fin.movedBack > 0 || short) {
         const ok = await Modal.confirm({
           tone: 'warn', title: t('am.slot_confirm_title'),
@@ -441,11 +595,23 @@ export const AlertSlotModal = {
         if (_s !== s || !ok) return;   // closed meanwhile (a plant change) or cancelled
         if (!canPlaceSlot()) { Toast.show(t('am.whatif_blocked'), 'warn'); return; }   // What-If began during the confirm
       }
-      const cur = _freshTask(s);   // the confirm is async: the row may have moved under it
+      let cur = _freshTask(s);   // the confirm is async: the row may have moved under it
       if (!cur) return;
-      const patch = pv
-        ? Engine.pairSchedulePatchFor(cur, pv, machine, fin.finish, { quiet: true })
-        : Engine.manualRoutingSchedulePatchFor(cur, machine, fin.finish, { quiet: true });
+      const build = (row: NimbusTask, extra: { confirmedOvertime?: boolean }) => (pv
+        ? Engine.pairSchedulePatchFor(row, pv, machine, fin.finish, { quiet: true, ...extra })
+        : Engine.manualRoutingSchedulePatchFor(row, machine, fin.finish, { quiet: true, ...extra }));
+      let patch = build(cur, {});
+      // An already-firmed queued order placed outside working time: ask for the overtime approval like the grid
+      // (`Table._explainManualRefusal`), then retry once with it. The row can move under the await.
+      if ((!patch || !patch.start_date || !patch.end_date) && Engine.lastManualRefusal === 'needs_overtime_confirm') {
+        const approved = await Engine.confirmOvertimePlacement(cur);
+        if (_s !== s || !approved) return;
+        if (!canPlaceSlot()) { Toast.show(t('am.whatif_blocked'), 'warn'); return; }
+        const again = _freshTask(s);
+        if (!again) return;
+        cur = again;
+        patch = build(cur, { confirmedOvertime: true });
+      }
       if (!patch || !patch.start_date || !patch.end_date) { _explainRefusal(cur, pv, machine); return; }
       const id = s.taskId;
       const wasFirmed = Store.isFirmed(id);
@@ -458,10 +624,13 @@ export const AlertSlotModal = {
       }, [id]);
       Alerts.scheduleRecompute();
       const placedOn = patch.MACHINE ?? machine;
-      Toast.show(t('am.slot_placed', { order: _orderLabel(cur), machine: placedOn }), 'success');
+      // The landing day is the day the bar ENDS on: a 24:00 close is the exclusive next-day midnight, so step back
+      // 1 ms (as `dueDisplayDate` does) or the toast and Go To would name the day after.
+      const landed = new Date(patch.end_date.getTime() - 1);
+      Toast.show(t('am.slot_placed', { order: _orderLabel(cur), machine: placedOn, when: Util._fmtDatePref(landed) }), 'success');
       AlertSlotModal.close();
       // Not AlertsUIAdapter.focus: the alert vanishes on the recompute and carries the old line and day.
-      slotSeams.nim().Timeline?.gotoLineDay?.(placedOn, Util.dayKey(patch.end_date), undefined, { taskId: id });
+      slotSeams.nim().Timeline?.gotoLineDay?.(placedOn, Util.dayKey(landed), undefined, { taskId: id });
     } finally { s.busy = false; }
   },
 
@@ -480,10 +649,15 @@ export const AlertSlotModal = {
   suggest(task: NimbusTask, plant: string): SlotCandidate | null {
     const key = `${task.id}|${Store.dataRev()}`;
     if (_suggestMemo.has(key)) return _suggestMemo.get(key) ?? null;
-    const top = rankSlotCandidates(task, defaultSlotDay(task, _todayKey(plant)), liveSlotDeps)[0] ?? null;
+    const top = rankSlotCandidates(task, _defaultDay(task, plant), liveSlotDeps)[0] ?? null;
     if (_suggestMemo.size >= _SUGGEST_MEMO_MAX) _suggestMemo.clear();
     _suggestMemo.set(key, top);
     return top;
+  },
+
+  /** The day `suggest` ranked for (the dialog's default day): the pane's Diagnose line names it. */
+  suggestedDay(task: NimbusTask, plant: string): string {
+    return _defaultDay(task, plant);
   },
 };
 

@@ -1173,16 +1173,49 @@ test('Slot is a no-op in What-If (button and menu), with the menu item disabled 
 
 test('Diagnose on a needs_planning row shows the suggested slot from suggest(), synchronously', () => {
   const asked = [];
-  const undo = patched(AlertSlotModal, 'suggest', (tk, plant) => { asked.push([tk.id, plant]); return cand(); });
+  const undoDay = patched(AlertSlotModal, 'suggestedDay', () => '2026-10-28');
+  const undoBase = patched(AlertSlotModal, 'suggest', (tk, plant) => { asked.push([tk.id, plant]); return cand(); });
+  const undo = () => { undoBase(); undoDay(); };
   try {
     Store.setTasks([npTask('7')], 'test');
     seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
     AlertMonitorPane.render();
     assert.deepEqual(asked, [], 'a closed panel never asks for a suggestion');
     clickAlert('diagnose', 'n1');
-    assert.match(els['am-groups'].innerHTML, /<dt>am\.slot_suggested<\/dt><dd[^>]*>am\.slot_option<\/dd>/);
+    assert.match(els['am-groups'].innerHTML, /<dt>am\.slot_suggested<\/dt><dd[^>]*>am\.slot_suggested_on<\/dd>/);
     assert.deepEqual(asked[0], ['7', 'P1']);
   } finally { undo(); }
+});
+
+test('Diagnose names the day the suggestion is for: the default day, then the option text', () => {
+  const undoSuggest = patched(AlertSlotModal, 'suggest', () => cand());
+  const undoDay = patched(AlertSlotModal, 'suggestedDay', (tk, plant) => { assert.deepEqual([tk.id, plant], ['7', 'P1']); return '2026-10-28'; });
+  const priorT = Util.t;
+  Util.t = (key, vars) => (vars ? `${key}${JSON.stringify(vars)}` : key);
+  try {
+    Store.setTasks([npTask('7')], 'test');
+    seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
+    AlertMonitorPane.render();
+    clickAlert('diagnose', 'n1');
+    const html = els['am-groups'].innerHTML;
+    const m = /<dt>am\.slot_suggested<\/dt><dd[^>]*>am\.slot_suggested_on(\{.*?\})<\/dd>/.exec(html.replace(/&quot;/g, '"'));
+    assert.ok(m, 'the suggested line uses am.slot_suggested_on');
+    const vars = JSON.parse(m[1]);
+    assert.match(vars.day, /28/, 'the day label names the 28th');
+    assert.match(vars.option, /^am\.slot_option/, 'the option text is formatSlotOption output');
+  } finally { Util.t = priorT; undoDay(); undoSuggest(); }
+});
+
+test('Diagnose with no eligible pair shows the none text without a day prefix', () => {
+  const undoSuggest = patched(AlertSlotModal, 'suggest', () => null);
+  const undoDay = patched(AlertSlotModal, 'suggestedDay', () => { throw new Error('no day for no suggestion'); });
+  try {
+    Store.setTasks([npTask('7')], 'test');
+    seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
+    AlertMonitorPane.render();
+    clickAlert('diagnose', 'n1');
+    assert.match(els['am-groups'].innerHTML, /<dt>am\.slot_suggested<\/dt><dd[^>]*>am\.slot_none<\/dd>/);
+  } finally { undoDay(); undoSuggest(); }
 });
 
 test('Diagnose shows the "no eligible machine" line when suggest() finds nothing', () => {

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import {
   AlertSlotModal, slotSeams, liveSlotDeps, canPlaceSlot,
-  parsePairValue, rankSlotCandidates, slotFinishFor, slotTaskKey, defaultSlotDay, formatSlotOption, SLOT_LOOKBACK_DAYS,
+  parsePairValue, rankSlotCandidates, slotFinishFor, slotGapFinishFor, slotTaskKey, defaultSlotDay, formatSlotOption, SLOT_LOOKBACK_DAYS,
 } from '../../../frontend/alert-monitor/alert-slot-modal.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, Modal, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -137,6 +137,101 @@ test('slotFinishFor: the walk-back crosses a month and a DST change by calendar 
   assert.equal(slotFinishFor('M1', '2026-03-09', spring).day, '2026-03-07', 'across the US spring-forward weekend');
 });
 
+/* ---- F1: a "fitting" slot is a real gap between the day's other orders */
+
+const at = (h, m = 0, day = 28) => new Date(2026, 9, day, h, m);
+const win28 = () => windowsFor(new Set(['2026-10-28']));   // 06:00 - 22:00
+
+test('slotGapFinishFor: an empty day ends at the window close and counts as a gap', () => {
+  const r = slotGapFinishFor('M1', '2026-10-28', 4, win28(), []);
+  assert.deepEqual([r.finish.getTime(), r.gapHours, r.viaGap], [at(22).getTime(), 16, true]);
+});
+
+test('slotGapFinishFor: the finish is the END of the LATEST free gap that holds the need', () => {
+  // gaps: 06-10 (4 h), 11-14 (3 h), 15-18 (3 h); a 4 h need only fits the first, a 3 h need takes the last that fits
+  const busy = [[at(10), at(11)], [at(14), at(15)], [at(18), at(22)]];
+  const four = slotGapFinishFor('M1', '2026-10-28', 4, win28(), busy);
+  assert.deepEqual([four.finish.getTime(), four.gapHours, four.viaGap], [at(10).getTime(), 4, true]);
+  const three = slotGapFinishFor('M1', '2026-10-28', 3, win28(), busy);
+  assert.deepEqual([three.finish.getTime(), three.gapHours, three.viaGap], [at(18).getTime(), 3, true]);
+});
+
+test('slotGapFinishFor: an order is placed before a late bar, not on top of it', () => {
+  const r = slotGapFinishFor('M1', '2026-10-28', 4, win28(), [[at(18), at(22)]]);
+  assert.deepEqual([r.finish.getTime(), r.gapHours, r.viaGap], [at(18).getTime(), 12, true]);
+});
+
+test('slotGapFinishFor: no gap large enough falls back to the window close, not a fit, with the largest gap', () => {
+  const r = slotGapFinishFor('M1', '2026-10-28', 4, win28(), [[at(8), at(22)]]);   // only 06-08 (2 h) is free
+  assert.deepEqual([r.finish.getTime(), r.gapHours, r.viaGap], [at(22).getTime(), 2, false]);
+});
+
+test('slotGapFinishFor: busy intervals outside the window are ignored; a straddling one is clipped', () => {
+  const outside = [[at(0), at(5)], [at(23), at(2, 0, 29)], [at(1, 0, 27), at(23, 0, 27)]];
+  const a = slotGapFinishFor('M1', '2026-10-28', 4, win28(), outside);
+  assert.deepEqual([a.finish.getTime(), a.gapHours, a.viaGap], [at(22).getTime(), 16, true]);
+  const b = slotGapFinishFor('M1', '2026-10-28', 4, win28(), [[at(4), at(8)]]);   // clipped to 06-08: gap 08-22
+  assert.deepEqual([b.finish.getTime(), b.gapHours, b.viaGap], [at(22).getTime(), 14, true]);
+});
+
+test('slotGapFinishFor: overlapping busy intervals merge; a bar spanning the whole window leaves no gap', () => {
+  const merged = slotGapFinishFor('M1', '2026-10-28', 4, win28(), [[at(10), at(15)], [at(12), at(18)], [at(9), at(10)]]);
+  assert.deepEqual([merged.finish.getTime(), merged.viaGap], [at(22).getTime(), true], 'gap 18-22 is exactly 4 h');
+  const whole = slotGapFinishFor('M1', '2026-10-28', 4, win28(), [[at(5), at(23)]]);
+  assert.deepEqual([whole.finish.getTime(), whole.gapHours, whole.viaGap], [at(22).getTime(), 0, false]);
+});
+
+test('slotGapFinishFor: an unknown need is never a fit; a closed day or an empty window is null', () => {
+  const r = slotGapFinishFor('M1', '2026-10-28', null, win28(), []);
+  assert.deepEqual([r.finish.getTime(), r.viaGap], [at(22).getTime(), false]);
+  assert.equal(slotGapFinishFor('M1', '2026-10-28', 4, windowsFor(new Set()), []), null);
+});
+
+test('slotGapFinishFor: on the plant today the window starts at now, so time already gone is not free', () => {
+  const r = slotGapFinishFor('M1', '2026-10-28', 10, win28(), [], at(14));   // 14-22 = 8 h, short of 10
+  assert.deepEqual([r.finish.getTime(), r.gapHours, r.viaGap], [at(22).getTime(), 8, false]);
+  const ok = slotGapFinishFor('M1', '2026-10-28', 8, win28(), [], at(14));
+  assert.deepEqual([ok.gapHours, ok.viaGap], [8, true]);
+  assert.equal(slotGapFinishFor('M1', '2026-10-28', 1, win28(), [], at(22, 30)), null, 'nothing left today');
+  const before = slotGapFinishFor('M1', '2026-10-28', 4, win28(), [], at(3));
+  assert.equal(before.gapHours, 16, 'now before the window opens clamps nothing');
+  const otherDay = slotGapFinishFor('M1', '2026-10-28', 4, win28(), [], at(14, 0, 27));
+  assert.equal(otherDay.gapHours, 16, 'now on a different day clamps nothing');
+});
+
+test('slotFinishFor: with a need and busy intervals it lands on the gap of the day it ends up on', () => {
+  const r = slotFinishFor('M1', '2026-10-28', win28(), undefined, { needHours: 4, busy: () => [[at(18), at(22)]] });
+  assert.deepEqual([r.finish.getTime(), r.day, r.movedBack, r.viaGap, r.gapHours], [at(18).getTime(), '2026-10-28', 0, true, 12]);
+  // walk-back: the 28th is closed, the gap search runs on the 27th (asked for that day only)
+  const asked = [];
+  const ww = windowsFor(new Set(['2026-10-27']));
+  const back = slotFinishFor('M1', '2026-10-28', ww, undefined, { needHours: 4, busy: (_m, day) => { asked.push(day); return [[at(16, 0, 27), at(22, 0, 27)]]; } });
+  assert.deepEqual([back.finish.getTime(), back.day, back.movedBack], [at(16, 0, 27).getTime(), '2026-10-27', 1]);
+  assert.deepEqual(asked, ['2026-10-27']);
+  const noNeed = slotFinishFor('M1', '2026-10-28', win28(), undefined, { needHours: null, busy: () => [[at(18), at(22)]] });
+  assert.deepEqual([noNeed.finish.getTime(), noNeed.viaGap], [at(22).getTime(), false]);
+});
+
+/* ---- F4: a fully blacked-out day is skipped like a closed day; F2: never walk back into the past */
+
+test('slotFinishFor: isClosed skips a blacked-out day even when it has a nominal window', () => {
+  const ww = windowsFor(new Set(['2026-10-28', '2026-10-27']));
+  const seen = [];
+  const r = slotFinishFor('M1', '2026-10-28', ww, (machine, day) => { seen.push([machine, day]); return day === '2026-10-28'; });
+  assert.deepEqual([r.day, r.movedBack, r.finish.getTime()], ['2026-10-27', 1, at(22, 0, 27).getTime()]);
+  assert.deepEqual(seen, [['M1', '2026-10-28'], ['M1', '2026-10-27']]);
+  assert.equal(slotFinishFor('M1', '2026-10-28', ww, () => true), null, 'every day blacked out');
+});
+
+test('slotFinishFor: floorDay stops the walk-back at the plant today, and now empties today', () => {
+  const ww = windowsFor(new Set(['2026-10-27']));
+  assert.equal(slotFinishFor('M1', '2026-10-28', ww, undefined, { floorDay: '2026-10-28' }), null, 'yesterday is in the past');
+  assert.equal(slotFinishFor('M1', '2026-10-28', windowsFor(new Set(['2026-10-28', '2026-10-27'])), undefined, { floorDay: '2026-10-28', now: at(23) }), null,
+    'today has nothing left and the walk-back must not go earlier');
+  const r = slotFinishFor('M1', '2026-10-28', windowsFor(new Set(['2026-10-28', '2026-10-27'])), undefined, { floorDay: '2026-10-27', now: at(23) });
+  assert.equal(r.day, '2026-10-27', 'a floor one day earlier allows it');
+});
+
 function task(over = {}) {
   return {
     id: 't1', MACHINE: 'M1', PRODUCTION_VERSION: '0001', RUN_TIME: 4, start_date: null, end_date: null,
@@ -235,7 +330,7 @@ beforeEach(() => {
   patchFor = (cur, machine, finish) => ({ start_date: new Date(finish.getTime() - 4 * 3600e3), end_date: finish, MACHINE: machine, RUN_TIME: 4 });
   prior.doc = globalThis.document; prior.today = Util.plantToday;
   prior.open = Modal.open; prior.close = Modal.close; prior.confirm = Modal.confirm; prior.toast = Toast.show;
-  prior.manual = Engine.manualRoutingSchedulePatchFor; prior.pair = Engine.pairSchedulePatchFor;
+  prior.manual = Engine.manualRoutingSchedulePatchFor; prior.pair = Engine.pairSchedulePatchFor; prior.overtime = Engine.confirmOvertimePlacement;
   prior.recompute = Alerts.scheduleRecompute; prior.restore = UndoStack.restoreTasks;
   prior.seams = { ...slotSeams }; prior.deps = { ...liveSlotDeps }; prior.active = Sandbox.active;
   globalThis.document = {
@@ -249,8 +344,8 @@ beforeEach(() => {
   Toast.show = (msg, type) => { calls.toast.push([msg, type]); };
   Alerts.scheduleRecompute = () => { calls.recompute++; };
   UndoStack.restoreTasks = snap => { calls.restored.push(snap); };
-  Engine.manualRoutingSchedulePatchFor = (cur, machine, finish, opts) => { calls.patch.push(['manual', cur.id, machine, finish, opts]); return patchFor(cur, machine, finish); };
-  Engine.pairSchedulePatchFor = (cur, pv, machine, finish, opts) => { calls.patch.push(['pair', cur.id, pv, machine, finish, opts]); return patchFor(cur, machine, finish); };
+  Engine.manualRoutingSchedulePatchFor = (cur, machine, finish, opts) => { calls.patch.push(['manual', cur.id, machine, finish, opts]); return patchFor(cur, machine, finish, opts); };
+  Engine.pairSchedulePatchFor = (cur, pv, machine, finish, opts) => { calls.patch.push(['pair', cur.id, pv, machine, finish, opts]); return patchFor(cur, machine, finish, opts); };
   Engine.lastManualRefusal = null;
   slotSeams.signedIn = () => true;
   slotSeams.routingPlant = () => false;
@@ -259,6 +354,9 @@ beforeEach(() => {
     return openDays.has(key) ? [new Date(date.getFullYear(), date.getMonth(), date.getDate(), 6), new Date(date.getFullYear(), date.getMonth(), date.getDate(), 22)] : null;
   };
   slotSeams.nim = () => ({ Timeline: { gotoLineDay: (...a) => calls.goto.push(a) } });
+  slotSeams.plantNow = () => null;
+  slotSeams.dayClosed = () => false;
+  liveSlotDeps.busyIntervals = () => [];
   liveSlotDeps.pairOptions = () => ['M1', 'M2', 'M3'].map(m => ({ value: m, label: m }));
   liveSlotDeps.hoursFor = () => 4;
   liveSlotDeps.dayCapacity = (machine, day) => capByDay[day]?.[machine] ?? null;
@@ -276,7 +374,7 @@ afterEach(() => {
   Store._listeners.delete(calls.sub);
   globalThis.document = prior.doc; Util.plantToday = prior.today;
   Modal.open = prior.open; Modal.close = prior.close; Modal.confirm = prior.confirm; Toast.show = prior.toast;
-  Engine.manualRoutingSchedulePatchFor = prior.manual; Engine.pairSchedulePatchFor = prior.pair;
+  Engine.manualRoutingSchedulePatchFor = prior.manual; Engine.pairSchedulePatchFor = prior.pair; Engine.confirmOvertimePlacement = prior.overtime;
   Alerts.scheduleRecompute = prior.recompute; UndoStack.restoreTasks = prior.restore;
   Object.assign(slotSeams, prior.seams); Object.assign(liveSlotDeps, prior.deps); Sandbox.active = prior.active;
   delete globalThis.flatpickr;
@@ -790,4 +888,213 @@ test('suggest uses the due day when it is ahead of today and today when the due 
   days.length = 0;
   AlertSlotModal.suggest(Store.tasks.t1, 'P1');
   assert.ok(days.length && days.every(d => d === '2026-10-26'), 'a past due day falls back to the plant today');
+});
+
+/* ---------------------------------------------------------------- final fix wave (F1, F2, F4, F6, F7) */
+
+test('F1: place lands on the latest real gap before a late bar, with no confirm', async () => {
+  liveSlotDeps.busyIntervals = (machine, day) => (machine === 'M2' && day === '2026-10-28' ? [[at(18), at(22)]] : []);
+  openIt();
+  await AlertSlotModal.place();   // M2 is preselected (most free hours)
+  assert.equal(calls.confirm.length, 0, 'a real gap needs no confirm');
+  assert.equal(calls.patch[0][3].getTime(), at(18).getTime(), 'the finish is the start of the late bar, not the window close');
+  assert.deepEqual(calls.goto[0].slice(0, 2), ['M2', '2026-10-28']);
+});
+
+test('F1: a day whose gaps are all too small asks first, naming the overlap, then places at the window close', async () => {
+  liveSlotDeps.busyIntervals = () => [[at(8), at(22)]];
+  openIt();
+  await AlertSlotModal.place();   // M2 "fits" by free hours (9), but no 4 h gap exists
+  assert.equal(calls.confirm.length, 1);
+  assert.equal(calls.confirm[0].message, 'am.slot_confirm_short');
+  assert.equal(calls.patch.length, 1);
+  assert.equal(calls.patch[0][3].getTime(), at(22).getTime());
+});
+
+test('F1: the walk-back confirm is unchanged and the gap search runs on the day it lands on', async () => {
+  openDays.delete('2026-10-28');
+  capByDay['2026-10-28'].M2 = { free: 0, cap: 0, closed: true };
+  liveSlotDeps.pairOptions = () => [{ value: 'M2', label: 'M2' }];
+  const asked = [];
+  liveSlotDeps.busyIntervals = (_m, day) => { asked.push(day); return [[at(19, 0, 27), at(22, 0, 27)]]; };
+  openIt();
+  await AlertSlotModal.place();
+  assert.equal(calls.confirm[0].message, 'am.slot_confirm_closed');
+  assert.deepEqual(asked, ['2026-10-27']);
+  assert.equal(calls.patch[0][3].getTime(), at(19, 0, 27).getTime());
+});
+
+test('F1: liveSlotDeps.busyIntervals reads the placed bars of that machine that touch the day', () => {
+  seedTask();
+  Store.setTasks([
+    { ...Store.tasks.t1 },
+    { id: 'b1', ORDER: '1', MACHINE: 'M2', PLANT: 'P1', start_date: at(10), end_date: at(14), planning_status: 'scheduled' },
+    { id: 'b2', ORDER: '2', MACHINE: 'M2', PLANT: 'P1', start_date: at(22), end_date: at(3, 0, 29), planning_status: 'scheduled' },   // crosses midnight
+    { id: 'b3', ORDER: '3', MACHINE: 'M2', PLANT: 'P1', start_date: at(10, 0, 30), end_date: at(14, 0, 30), planning_status: 'scheduled' },
+    { id: 'b4', ORDER: '4', MACHINE: 'M3', PLANT: 'P1', start_date: at(10), end_date: at(14), planning_status: 'scheduled' },
+    { id: 'b5', ORDER: '5', MACHINE: 'M2', PLANT: 'P1', start_date: null, end_date: null, planning_status: 'needs_planning' },
+  ], 'test');
+  const busy = prior.deps.busyIntervals;
+  const span = list => list.map(([s, e]) => [s.getTime(), e.getTime()]);
+  assert.deepEqual(span(busy('M2', '2026-10-28')), [[at(10).getTime(), at(14).getTime()], [at(22).getTime(), at(3, 0, 29).getTime()]]);
+  assert.deepEqual(span(busy('M2', '2026-10-29')), [[at(22).getTime(), at(3, 0, 29).getTime()]], 'the midnight-crossing bar also counts on the next day');
+  assert.deepEqual(busy('M2', '2026-10-27'), []);
+  assert.deepEqual(busy('M9', '2026-10-28'), [], 'another machine');
+  assert.deepEqual(busy('M2', 'not-a-day'), []);
+});
+
+test('F2: defaultSlotDay moves to tomorrow when nothing is left today, and keeps a later due day', () => {
+  const dueIn = (d) => task({ original_end_date: new Date(2026, 9, d, 14) });
+  assert.equal(defaultSlotDay(dueIn(20), '2026-10-26', false), '2026-10-27');
+  assert.equal(defaultSlotDay(dueIn(26), '2026-10-26', false), '2026-10-27', 'due today, today is used up');
+  assert.equal(defaultSlotDay(dueIn(30), '2026-10-26', false), '2026-10-30');
+  assert.equal(defaultSlotDay(dueIn(20), '2026-10-26', true), '2026-10-26');
+  assert.equal(defaultSlotDay(dueIn(20), '2026-10-26'), '2026-10-26', 'the flag defaults to "time is left"');
+  assert.equal(defaultSlotDay(task({ original_end_date: null }), '2026-10-31', false), '2026-11-01', 'across a month end');
+});
+
+test('F2: with nothing left today on any eligible machine the dialog and the suggestion open on tomorrow', () => {
+  seedTask({ original_end_date: new Date(2026, 9, 20, 14) });   // a past due day: would default to today
+  capByDay['2026-10-26'] = { M1: { free: 0, cap: 0, closed: true }, M2: { free: 0, cap: 0, closed: true }, M3: { free: 0, cap: 0, closed: true } };
+  capByDay['2026-10-27'] = { M1: { free: 5, cap: 8, closed: false }, M2: { free: 9, cap: 10, closed: false }, M3: { free: 6, cap: 8, closed: false } };
+  openIt();
+  assert.equal(els['asl-day'].value, '2026-10-27');
+  assert.equal(AlertSlotModal.suggestedDay(Store.tasks.t1, 'P1'), '2026-10-27');
+  assert.equal(AlertSlotModal.suggest(Store.tasks.t1, 'P1').machine, 'M2');
+  // one machine with time left keeps today
+  AlertSlotModal.close();
+  capByDay['2026-10-26'].M3 = { free: 3, cap: 4, closed: false };
+  Store.updateTask('t1', { text: 'x' }, 'test');
+  openIt();
+  assert.equal(els['asl-day'].value, '2026-10-26');
+  assert.equal(AlertSlotModal.suggestedDay(Store.tasks.t1, 'P1'), '2026-10-26');
+  // unreadable capacity does not hide today
+  AlertSlotModal.close();
+  delete capByDay['2026-10-26'];
+  Store.updateTask('t1', { text: 'y' }, 'test');
+  openIt();
+  assert.equal(els['asl-day'].value, '2026-10-26');
+});
+
+test('F2: place never walks back into the past, and a day with nothing left toasts the no-window warning', async () => {
+  const realNow = new Date(2026, 9, 26, 23, 0);
+  slotSeams.plantNow = () => realNow;
+  openDays.add('2026-10-26'); openDays.add('2026-10-25');
+  seedTask({ original_end_date: new Date(2026, 9, 26, 14) });
+  capByDay['2026-10-26'] = { M1: { free: 5, cap: 8, closed: false }, M2: { free: 9, cap: 10, closed: false }, M3: { free: 6, cap: 8, closed: false } };
+  openIt();
+  els['asl-day'].value = '2026-10-26';   // the planner insists on today, which is over
+  AlertSlotModal.rerank();
+  await AlertSlotModal.place();
+  assert.deepEqual(calls.toast.at(-1), ['am.slot_no_window', 'warn']);
+  assert.equal(calls.patch.length, 0);
+});
+
+test('F2: liveSlotDeps.dayCapacity on the plant today counts only the time still ahead', () => {
+  const real = Utilization.computeMatrix;
+  Utilization.computeMatrix = () => ({
+    M1: { '2026-10-26': { scheduled: 1, capacity: 16, effectiveCapacity: 16 }, '2026-10-27': { scheduled: 1, capacity: 16, effectiveCapacity: 16 } },
+  });
+  try {
+    const dayCapacity = prior.deps.dayCapacity;
+    slotSeams.plantNow = () => new Date(2026, 9, 26, 14, 0);   // window 06-22: 8 h gone
+    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 8, cap: 8, closed: false }, 'free is capped by the time left');
+    assert.deepEqual(dayCapacity('M1', '2026-10-27'), { free: 15, cap: 16, closed: false }, 'another day is untouched');
+    slotSeams.plantNow = () => new Date(2026, 9, 26, 3, 0);
+    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 15, cap: 16, closed: false }, 'now before the window opens');
+    slotSeams.plantNow = () => new Date(2026, 9, 26, 22, 30);
+    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 0, cap: 0, closed: true }, 'nothing left: treated as closed');
+    slotSeams.plantNow = () => null;
+    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 15, cap: 16, closed: false }, 'no plant clock: no clamp');
+  } finally { Utilization.computeMatrix = real; }
+});
+
+test('F2: the success toast names the landing day', async () => {
+  const seen = [];
+  const priorT = Util.t;
+  Util.t = (key, vars) => { seen.push([key, vars]); return key; };
+  try {
+    openIt();
+    await AlertSlotModal.place();
+  } finally { Util.t = priorT; }
+  const placed = seen.find(([k]) => k === 'am.slot_placed');
+  assert.equal(placed[1].order, '1001');
+  assert.equal(placed[1].machine, 'M2');
+  assert.equal(placed[1].when, Util._fmtDatePref(new Date(2026, 9, 28)), 'the landing day in the user date format');
+});
+
+test('F2/F6: a walk-back toast and Go To use the day the bar really ends on, also when the window closes at 24:00', async () => {
+  slotSeams.workWindow = (_line, date) => (Util.dayKey(date) === '2026-10-28'
+    ? [new Date(date.getFullYear(), date.getMonth(), date.getDate(), 6), new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1, 0)]
+    : null);
+  const seen = [];
+  const priorT = Util.t;
+  Util.t = (key, vars) => { seen.push([key, vars]); return key; };
+  try {
+    openIt();
+    await AlertSlotModal.place();
+  } finally { Util.t = priorT; }
+  assert.equal(calls.patch[0][3].getTime(), new Date(2026, 9, 29, 0).getTime(), 'a 24:00 close is next-day midnight');
+  assert.deepEqual(calls.goto[0].slice(0, 2), ['M2', '2026-10-28'], 'Go To centres on the 28th, not the 29th');
+  assert.equal(seen.find(([k]) => k === 'am.slot_placed')[1].when, Util._fmtDatePref(new Date(2026, 9, 28)));
+});
+
+test('F4: place skips a blacked-out day like a closed one and confirms the move', async () => {
+  slotSeams.dayClosed = (_machine, day) => day === '2026-10-28';   // a nominal window, but fully blacked out
+  openIt();
+  await AlertSlotModal.place();
+  assert.equal(calls.confirm[0].message, 'am.slot_confirm_closed');
+  assert.deepEqual(calls.goto[0].slice(0, 2), ['M2', '2026-10-27']);
+});
+
+test('F7: a refusal that needs an overtime confirm asks, then retries once with confirmedOvertime', async () => {
+  const asked = [];
+  Engine.confirmOvertimePlacement = async (tk) => { asked.push(tk.id); return true; };
+  patchFor = (cur, machine, finish, opts) => {
+    if (opts?.confirmedOvertime) return { start_date: new Date(finish.getTime() - 4 * 3600e3), end_date: finish, MACHINE: machine, RUN_TIME: 4 };
+    Engine.lastManualRefusal = 'needs_overtime_confirm';
+    return null;
+  };
+  openIt();
+  await AlertSlotModal.place();
+  assert.deepEqual(asked, ['t1']);
+  assert.equal(calls.patch.length, 2);
+  assert.deepEqual(calls.patch[0][4], { quiet: true });
+  assert.deepEqual(calls.patch[1][4], { quiet: true, confirmedOvertime: true });
+  assert.equal(Store.tasks.t1.MACHINE, 'M2');
+  assert.equal(Store.isFirmed('t1'), true);
+  assert.equal(calls.toast.some(([m]) => m === 'toast.manual_refusal_generic'), false, 'no generic refusal toast');
+  assert.deepEqual(calls.toast.at(-1), ['am.slot_placed', 'success']);
+});
+
+test('F7: declining the overtime confirm writes nothing and keeps the dialog open', async () => {
+  Engine.confirmOvertimePlacement = async () => false;
+  patchFor = () => { Engine.lastManualRefusal = 'needs_overtime_confirm'; return null; };
+  openIt();
+  await AlertSlotModal.place();
+  assert.equal(calls.patch.length, 1, 'no retry');
+  assert.equal(UndoStack._entries.length, 0);
+  assert.equal(Store.tasks.t1.planning_status, 'needs_planning');
+  assert.equal(AlertSlotModal.isOpenFor('P1'), true);
+});
+
+test('F7: the staleness check runs again after the overtime confirm', async () => {
+  Engine.confirmOvertimePlacement = async () => { Store.updateTask('t1', { RUN_TIME: 9 }, 'test'); return true; };
+  patchFor = () => { Engine.lastManualRefusal = 'needs_overtime_confirm'; return null; };
+  openIt();
+  await AlertSlotModal.place();
+  assert.equal(calls.patch.length, 1, 'the retry never ran');
+  assert.deepEqual(calls.toast.at(-1), ['am.slot_stale', 'warn']);
+  assert.equal(AlertSlotModal.isOpenFor('P1'), false);
+  assert.equal(UndoStack._entries.length, 0);
+});
+
+test('F7: a retry that is refused again is explained, not looped', async () => {
+  Engine.confirmOvertimePlacement = async () => true;
+  patchFor = () => { Engine.lastManualRefusal = 'needs_overtime_confirm'; return null; };
+  openIt();
+  await AlertSlotModal.place();
+  assert.equal(calls.patch.length, 2, 'one retry only');
+  assert.deepEqual(calls.toast.at(-1), ['toast.manual_refusal_generic', 'error']);
+  assert.equal(AlertSlotModal.isOpenFor('P1'), true);
 });
