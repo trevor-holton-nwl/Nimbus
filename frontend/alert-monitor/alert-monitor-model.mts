@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -29,7 +29,7 @@ export type MonitorGroupBy = 'category' | 'type' | 'line' | 'day' | 'order' | 'n
 export const MONITOR_GROUP_BYS: MonitorGroupBy[] = ['line', 'day', 'type', 'category', 'order', 'none'];
 /** The two sorts the page offers (Priority / Date); the stored `severity` / `orders` of earlier builds read as `impact`. */
 export const MONITOR_SORTS: AlertRanking[] = ['impact', 'time'];
-export const MONITOR_CATEGORIES: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'exceptions'];
+export const MONITOR_CATEGORIES: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions'];
 export const DEFAULT_GROUP_BY: MonitorGroupBy = 'line';
 
 export interface MonitorView { groupBy: MonitorGroupBy; sort: AlertRanking }
@@ -226,9 +226,10 @@ export const GROUP_ROW_CAP = 40;
 export const ROW_H = 44;
 /**
  * Height (px) of the inline diagnose panel under an order row: 20 padding + the help sentence (two 17 px
- * lines at most, clamped) + 6 gap + two rows of the field grid (2 x 28 + 6) + slack. Keep `.am-diag` in styles.css in step.
+ * lines at most, clamped) + 6 gap + three rows of the field grid (3 x 28 + 2 x 6; a queued order's Suggested slot
+ * field makes the third) + slack. Keep `.am-diag` in styles.css in step.
  */
-export const DIAG_H = 132;
+export const DIAG_H = 166;
 /** The alert types a group's "Move N orders" moves: `overload` is excluded, its fix runs the line-day changeover optimizer. */
 export const MOVABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'tool-conflict']);
 /** Above this many orders "Move N orders" asks first. */
@@ -239,7 +240,7 @@ const _esc = (s: unknown): string => String(s ?? '')
 
 export type DiagnoseKind = 'cell' | 'order' | 'none';
 
-export interface RowActions { goto: boolean; fix: boolean; override: boolean; diagnose: DiagnoseKind }
+export interface RowActions { goto: boolean; fix: boolean; override: boolean; slot: boolean; diagnose: DiagnoseKind }
 
 /** Which actions an alert row offers — the same eligibility the drawer uses, plus Diagnose. */
 export function rowActionsFor(a: { type: string; taskId?: string | null; line?: string; time?: Date | null }): RowActions {
@@ -248,6 +249,7 @@ export function rowActionsFor(a: { type: string; taskId?: string | null; line?: 
     goto: hasTask || !!(a.line && a.time),
     fix: FIXABLE_ALERT_TYPES.has(a.type),
     override: OVERRIDE_ALERT_TYPES.has(a.type) && hasTask,
+    slot: SLOT_ALERT_TYPES.has(a.type) && hasTask,
     diagnose: hasTask ? 'order' : (a.line && a.time ? 'cell' : 'none'),
   };
 }
@@ -363,7 +365,7 @@ export function rowPrefix(v: Pick<RowView, 'line' | 'orderNo' | 'message' | 'msg
   return parts.join(' · ');
 }
 
-export type RowActionId = 'focus' | 'fix' | 'override' | 'diagnose' | 'ack' | 'unack';
+export type RowActionId = 'focus' | 'fix' | 'override' | 'slot' | 'diagnose' | 'ack' | 'unack';
 
 export interface RowMenuItem {
   action: RowActionId;
@@ -376,15 +378,15 @@ export interface RowMenuItem {
 export interface RowPrimary {
   /** The row's [Go to] button. */
   goto: boolean;
-  /** The row's second button, when the alert is eligible: Fix or Override (never both: the type sets are disjoint). */
-  second?: 'fix' | 'override';
-  /** The ⋯ menu, in order: Go to, Fix / Override, Diagnose, Acknowledge… / Remove acknowledgement. Never Dismiss. */
+  /** The row's second button, when the alert is eligible: Fix, Override or Slot (never two: the type sets are disjoint). */
+  second?: 'fix' | 'override' | 'slot';
+  /** The ⋯ menu, in order: Go to, Fix / Override / Slot…, Diagnose, Acknowledge… / Remove acknowledgement. Never Dismiss. */
   menu: RowMenuItem[];
 }
 
 /**
  * What a row offers. Eligibility is `rowActionsFor` (the drawer's). `task` is the order the alert names (or null);
- * it stands in for a missing `taskId` on the alert. Fix / Override are disabled in What-If.
+ * it stands in for a missing `taskId` on the alert. Fix / Override / Slot are disabled in What-If.
  */
 export function rowPrimaryActions(
   a: { type: string; taskId?: string | null; line?: string; time?: Date | null },
@@ -393,12 +395,13 @@ export function rowPrimaryActions(
 ): RowPrimary {
   const taskId = a.taskId != null && a.taskId !== '' ? a.taskId : (task?.id != null ? String(task.id) : a.taskId);
   const acts = rowActionsFor({ ...a, taskId });
-  const second: RowPrimary['second'] = acts.fix ? 'fix' : acts.override ? 'override' : undefined;
+  const second: RowPrimary['second'] = acts.fix ? 'fix' : acts.override ? 'override' : acts.slot ? 'slot' : undefined;
   const lock = (item: RowMenuItem): RowMenuItem => (ctx.whatIf ? { ...item, disabled: true, hintKey: 'am.whatif_blocked' } : item);
   const menu: RowMenuItem[] = [];
   if (acts.goto) menu.push({ action: 'focus', labelKey: 'btn.go_to' });
   if (second === 'fix') menu.push(lock({ action: 'fix', labelKey: 'btn.fix_it' }));
   if (second === 'override') menu.push(lock({ action: 'override', labelKey: 'btn.override' }));
+  if (second === 'slot') menu.push(lock({ action: 'slot', labelKey: 'am.slot' }));
   if (acts.diagnose !== 'none') menu.push({ action: 'diagnose', labelKey: 'am.diagnose' });
   menu.push(ctx.acked ? { action: 'unack', labelKey: 'am.unack' } : { action: 'ack', labelKey: 'am.ack' });
   return { goto: acts.goto, second, menu };
@@ -443,6 +446,11 @@ export function rowHtml(v: RowView, t: Translate): string {
     const label = t('btn.override');
     const text = _splitGlyph(label).text;
     buttons.push(`<button type="button" class="btn btn-ghost sm am-act-2" data-alert-action="override" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}" aria-label="${_esc(text)}"`
+      + (v.whatIf ? lock : ` title="${_esc(text)}"`) + `>${_glyphBtnInner(label)}</button>`);
+  } else if (p.second === 'slot') {
+    const label = t('am.slot');
+    const text = _splitGlyph(label).text;
+    buttons.push(`<button type="button" class="btn btn-ghost sm am-act-2" data-alert-action="slot" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}" aria-label="${_esc(text)}"`
       + (v.whatIf ? lock : ` title="${_esc(text)}"`) + `>${_glyphBtnInner(label)}</button>`);
   }
   buttons.push(`<button type="button" class="icon-btn sm am-row-menu" data-alert-id="${id}" data-ovf-key="${id}" aria-haspopup="menu" aria-expanded="false"`
@@ -652,10 +660,13 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
       else { add('diagnose-worst', 'am.diagnose', true); add('optimize', 'leverage.action.optimize-window'); }
       break;
     }
+    case 'needs-planning':
+      add('show-alerts', 'leverage.action.needs-planning', true);
+      break;
     default: break;
   }
   if (n > 0 && !out.some(x => x.act === 'open-table')) add('open-table', 'am.open_in_table', false, { labelVars: { n } });
-  add('show-alerts', 'am.lev_show_alerts');
+  if (!out.some(x => x.act === 'show-alerts')) add('show-alerts', 'am.lev_show_alerts');
   if (item.adminOnly && !out.some(x => x.act === 'copy-summary')) add('copy-summary', 'am.lev_copy_summary');
 
   if (item.adminOnly && !ctx.isAdmin) {
@@ -694,7 +705,8 @@ export function fixConfidenceChanged(item: LeverageItem): boolean {
  * after-score is shown with its delta in the error colour), the no-headroom note, what remains after a fix.
  */
 export function fixLineParts(item: LeverageItem, ctx: LevCtx, t: Translate): string[] {
-  const parts: string[] = [_esc(fixClearsText(item, t))];
+  // needs-planning: one alert per order, so "Clears N alerts on N orders" would only repeat the title's count.
+  const parts: string[] = item.family === 'needs-planning' ? [] : [_esc(fixClearsText(item, t))];
   const after = item.confidenceAfter;
   if (after != null && fixConfidenceChanged(item)) {
     const d = after - item.confidenceBefore;
@@ -738,13 +750,16 @@ export function fixRowHtml(item: LeverageItem, rank: number | null, ctx: LevCtx,
       + `data-lev-minutes="${key}" aria-label="${label}"></label> `
       + `<button type="button" class="btn sm" data-lev-action="replay-minutes" data-lev-key="${key}">${_esc(t('am.fix_replay'))}</button></span>`;
   }
+  const lineParts = fixLineParts(item, ctx, t);
   const rankHtml = rank == null
     ? `<span class="am-fix-rank" aria-hidden="true"></span>`
     : `<span class="am-fix-rank" role="img" aria-label="${_esc(t('am.rank_n', { n: rank }))}">${rank}</span>`;
   return `<div class="am-fix" role="listitem" data-lev-key="${key}"${tip ? ` title="${_esc(tip)}"` : ''}>`
     + rankHtml
     + `<div class="am-fix-main"><div class="am-fix-title" title="${_esc(title)}">${_esc(title)}${admin}</div>`
-    + `<div class="am-fix-line">${fixLineParts(item, ctx, t).join(' · ')}${minutes ? ` · ${minutes}` : ''}</div></div>`
+    + (lineParts.length || minutes
+      ? `<div class="am-fix-line">${lineParts.join(' · ')}${minutes ? `${lineParts.length ? ' · ' : ''}${minutes}` : ''}</div>` : '')
+    + `</div>`
     + `<div class="am-fix-acts">${btn}${more}</div></div>`;
 }
 

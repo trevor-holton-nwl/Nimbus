@@ -127,7 +127,7 @@ test('every selector that declares a transition is in the reduced-motion list', 
 
 test('every --bar-pm-* token used exists in both :root and body.dark', () => {
   const used = [...new Set(BLOCK.match(/--bar-pm-[a-z]+(?:-fg)?/g) ?? [])];
-  assert.ok(used.length >= 10, `five fills and five -fg labels are used (got ${used.length})`);
+  assert.ok(used.length >= 12, `six fills and six -fg labels are used (got ${used.length})`);
   // The token blocks: the `:root {` and `body.dark {` blocks that carry the --bar-pm-capacity definition.
   const blockWith = (head) => {
     for (let at = CSS.indexOf(head); at >= 0; at = CSS.indexOf(head, at + 1)) {
@@ -209,7 +209,7 @@ test('every class the builders emit is styled (or deliberately owned by an exist
   const v = { t, esc, fmtDay: k => k, fmtTick: k => ({ wd: 'Mon', day: k.slice(8), mo: 'Oct' }), unassigned: 'Unassigned' };
   const today = new Date(2026, 9, 20);
   const at = off => new Date(2026, 9, 20 + off, 9);
-  const types = ['overload', 'overlap', 'blackout', 'setup-violated', 'late'];
+  const types = ['overload', 'overlap', 'blackout', 'setup-violated', 'needs_planning', 'late'];
   const listed = [];
   let n = 0;
   for (let i = 0; i < 12; i++) {
@@ -238,7 +238,7 @@ test('every class the builders emit is styled (or deliberately owned by an exist
   const missing = [...classes].filter(c => !external.has(c) && !hooks.has(c) && !new RegExp(`\\.${c.replace(/[-]/g, '\\-')}(?![\\w-])`).test(CODE));
   assert.deepEqual(missing, [], `unstyled emitted classes: ${missing.join(', ')}`);
   for (const c of external) assert.ok(new RegExp(`\\.${c}(?![\\w-])`).test(CSS), `${c} is styled somewhere in styles.css`);
-  for (const cat of ['capacity', 'conflicts', 'calendar', 'setup', 'exceptions']) {
+  for (const cat of ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions']) {
     assert.ok(classes.has(`am-ov-cat-${cat}`) && classes.has(`am-ov-sw-${cat}`), `fixture emits ${cat}`);
   }
 });

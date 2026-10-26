@@ -2405,6 +2405,21 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
+     MODAL: Slot a Needs Planning order (body/foot rendered by AlertSlotModal).
+     data-no-backdrop-close: the module's own close() must run (it destroys the picker and clears its state).
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-alert-slot" data-no-backdrop-close hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3 id="asl-title" data-i18n="am.slot_title">Slot order</h3>
+      <button class="icon-btn sm" id="asl-close" type="button" aria-label="Close" data-i18n-title="btn.close">✕</button>
+    </header>
+    <div class="modal-body" id="asl-body"></div>
+    <footer class="modal-foot" id="asl-foot"></footer>
+  </div>
+</div>
+
+<!-- =========================================================
      MODAL: Date Override
      ========================================================= -->
 <div class="modal-backdrop" id="modal-override" hidden>
@@ -2659,6 +2674,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-conflicts"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_conflicts_t">Scheduling conflict alert</div><p class="lg-k-d" data-i18n="legend.pm_conflicts_d">This order has a scheduling conflict alert your active profile is tracking.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-calendar"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_calendar_t">Calendar alert</div><p class="lg-k-d" data-i18n="legend.pm_calendar_d">This order has a calendar alert your active profile is tracking.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-setup"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_setup_t">Setup alert</div><p class="lg-k-d" data-i18n="legend.pm_setup_d">This order has a setup alert your active profile is tracking.</p></div></li>
+            <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-planning"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_planning_t">Planning alert</div><p class="lg-k-d" data-i18n="legend.pm_planning_d">Orders waiting for a slot draw no bar on the Gantt; this colour marks them in the Alert Monitor.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-exceptions"></i></span><div><div class="lg-k-t" data-i18n="legend.pm_exceptions_t">Other alert</div><p class="lg-k-d" data-i18n="legend.pm_exceptions_d">This order has another kind of alert your active profile is tracking.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-pm lg-pm-setup lg-pm-ring-err"></i></span><div><p class="lg-k-d" data-i18n="legend.pm_ring_d">Inner ring: red = error, amber = warning.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw bar" aria-hidden="true"><i class="lg-order-standard lg-ghost"></i></span><div><div class="lg-k-t" data-i18n="legend.ghost_t">Drag preview</div><p class="lg-k-d" data-i18n="legend.ghost_d">While you drag, a faded copy shows where the order will land.</p></div></li>

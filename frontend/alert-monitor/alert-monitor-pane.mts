@@ -28,9 +28,10 @@ import { AlertProfileEditor, canDeleteProfile } from './alert-profile-editor.mjs
 import { OverflowMenu } from '../platform/overflow-menu.mjs';
 import type { MenuItem } from '../platform/overflow-menu.mjs';
 import { AlertAckModal } from './alert-ack-modal.mjs';
+import { AlertSlotModal, formatSlotOption } from './alert-slot-modal.mjs';
 import { AlertAcksClient } from '../insights/alert-acks-client.mjs';
 import {
-  ALL_ALERTS_PROFILE_ID, resolveActiveProfileId, ackLabel, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
+  ALL_ALERTS_PROFILE_ID, SLOT_ALERT_TYPES, resolveActiveProfileId, ackLabel, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
 } from '../insights/alert-profiles.mjs';
 import type { AlertGroup, GroupContext } from '../insights/alert-profiles.mjs';
 import { Alerts, Compute, Utilization, buildPlantSnapshot } from '../insights/services.mjs';
@@ -530,7 +531,7 @@ function _openRowMenu(anchor: HTMLElement, alertId: string): void {
     data: { alertAction: m.action, alertId, ...(taskId ? { taskId } : {}) },
     onSelect: () => {
       if (m.action === 'focus') { _runAlertAction(m.action, alertId, taskId); return; }
-      if (m.action === 'ack' || m.action === 'override') {
+      if (m.action === 'ack' || m.action === 'override' || m.action === 'slot') {
         // These open a modal that takes focus and hands it back to the opener: make the live trigger the opener first.
         _refocusKey(alertId);
         _runAlertAction(m.action, alertId, taskId);
@@ -681,6 +682,13 @@ function _runAlertAction(action: string | undefined, alertId: string, taskId?: s
         if (_diagOpen.has(alertId)) _diagOpen.delete(alertId); else _diagOpen.add(alertId);
         _paint();
       }
+      break;
+    }
+    case 'slot': {
+      // Like Fix / Override this writes the plan, so it is blocked in What-If; the dialog confirms and places the order itself.
+      if (Sandbox.active) return;
+      const plant = Store.selectedPlant;
+      if (plant && taskId) AlertSlotModal.open({ plant, taskId, alertId });
       break;
     }
     case 'ack': {
@@ -1239,7 +1247,7 @@ function _ackLabel(ack: AlertAck | undefined): string | null {
 }
 
 /** The inline "why is this late / blocked" panel of an order alert: facts about the order, nothing computed anew. */
-function _diagnoseFor(a: NimbusAlert, task: NimbusTask | undefined): string {
+function _diagnoseFor(a: NimbusAlert, task: NimbusTask | undefined, plant: string | null): string {
   const fields: Array<{ label: string; value: string }> = [];
   if (task) {
     const due = Util.dueInstant(task);
@@ -1260,6 +1268,17 @@ function _diagnoseFor(a: NimbusAlert, task: NimbusTask | undefined): string {
   const reason = task?.planning_reason;
   if (reason) {
     fields.push({ label: t('am.diag_reason'), value: [reason.code, reason.message, reason.step].filter(Boolean).join(' · ') });
+  }
+  // A queued order's best (machine, day) for the Slot dialog. `suggest` is synchronous and memoised per order and data revision,
+  // and only an open panel gets here, so a paint never ranks more than the few orders being looked at.
+  if (task && plant && SLOT_ALERT_TYPES.has(a.type)) {
+    // The suggestion is for the dialog's default day, so the line names it: "Oct 28 · M2 — 9 of 10 h free ...".
+    const top = AlertSlotModal.suggest(task, plant);
+    const option = formatSlotOption(top, t);
+    fields.push({
+      label: t('am.slot_suggested'),
+      value: top ? t('am.slot_suggested_on', { day: _fmtDay(_noonOf(AlertSlotModal.suggestedDay(task, plant))), option }) : option,
+    });
   }
   const helpKey = `alert.help.${a.type}`;
   const help = t(helpKey);
@@ -1293,7 +1312,7 @@ function _rowView(a: NimbusAlert, rc: RowCtx): RowView {
     whatIf: Sandbox.active === true,
     ackLabel: _ackLabel(rc.s.m.acked.get(a.id)),
     diagOpen: open,
-    diagHtml: open ? _diagnoseFor(a, task) : '',
+    diagHtml: open ? _diagnoseFor(a, task, Store.selectedPlant ?? null) : '',
   };
 }
 

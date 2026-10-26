@@ -502,12 +502,12 @@ export type AlertType =
   | 'runtime-unknown' | 'pv-lot-size'
   | 'late' | 'finish_moved_earlier' | 'reversal_forward' | 'plant_no_timezone' | 'line_no_calendar'
   | 'placement_exception' | 'setup_override_orphaned' | 'pull_floor_crossed' | 'frozen_window_crossed'
-  | 'run_time_zero' | 'no_operating_window' | 'no_anchor' | 'derivation_issue' | 'queued_now_fits';
+  | 'run_time_zero' | 'no_operating_window' | 'no_anchor' | 'derivation_issue' | 'queued_now_fits' | 'needs_planning';
 
 export type AlertSev = 'err' | 'warn';
 
 /** UI grouping of alert types (cell briefing, Alert Monitor). */
-export type AlertCategory = 'capacity' | 'conflicts' | 'calendar' | 'setup' | 'exceptions';
+export type AlertCategory = 'capacity' | 'conflicts' | 'calendar' | 'setup' | 'planning' | 'exceptions';
 
 /** One rule of an alert profile; null means "no restriction". Mirrors backend/alert_profiles/data.py validate_rules. */
 export interface AlertProfileRule {

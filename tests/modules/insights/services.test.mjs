@@ -866,9 +866,112 @@ test('queued_now_fits: only needs_planning overlong_never rows, honours scoped l
   assert.equal(Alerts.queuedNowFits().length, 0, 'a dismissed alert stays dismissed');
 }));
 
-test('queued_now_fits is registered as a firing exceptions-category alert type', async () => {
+test('queued_now_fits is registered as a firing planning-category alert type', async () => {
   const { ALERT_CATEGORIES, FIRING_ALERT_TYPES, categoryOf } = await import('../../../frontend/insights/alert-profiles.mjs');
-  assert.equal(categoryOf('queued_now_fits'), 'exceptions');
-  assert.ok(ALERT_CATEGORIES.exceptions.includes('queued_now_fits'));
+  assert.equal(categoryOf('queued_now_fits'), 'planning');
+  assert.ok(ALERT_CATEGORIES.planning.includes('queued_now_fits'));
   assert.ok(FIRING_ALERT_TYPES.includes('queued_now_fits'));
+});
+
+// Needs Planning on the Alert Monitor (2026-10-26): one alert per queued row, produced in the frontend Alerts layer.
+const _npDue = (days) => { const d = new Date(Date.now() + days * 86400000); d.setHours(10, 17, 5, 123); return d; };
+
+test('needs_planning: one warn alert per queued row with the due instant as time, err when overdue', () => withQueuedFixture(({ queued }) => {
+  const future = _npDue(5), past = _npDue(-5);
+  Store.setTasks([
+    queued({ id: 'np-1', PRODUCTION_ORDER: '5001', planning_reason: { code: 'no_fit_found', message: 'No legal slot' }, original_end_date: future }),
+    queued({ id: 'np-2', PRODUCTION_ORDER: '5002', planning_reason: { code: 'no_fit_found', message: 'No legal slot' }, original_end_date: past }),
+  ], 'unit-test');
+  const out = Alerts.needsPlanning();
+  assert.equal(out.length, 2);
+  const a1 = out.find(a => a.taskId === 'np-1'), a2 = out.find(a => a.taskId === 'np-2');
+  assert.equal(a1.type, 'needs_planning');
+  assert.equal(a1.sev, 'warn');
+  assert.equal(a1.id, 'needs-planning-np-1', 'stable id: it is the acknowledgement key');
+  assert.equal(a1.line, 'QNF-L1');
+  assert.equal(a1.time.getTime(), future.getTime(), 'time is the due instant');
+  assert.equal(a1.msgKey, 'alert.needs_planning');
+  assert.equal(a1.msgVars.order, '5001');
+  assert.equal(a1.msgVars.reason, 'No legal slot');
+  assert.equal(a2.sev, 'err', 'a due instant already before the plant now is an error');
+  assert.equal(a2.time.getTime(), past.getTime());
+}));
+
+test('needs_planning: exactly one alert per queued order and never a peerId', () => withQueuedFixture(({ queued }) => {
+  Store.setTasks([
+    queued({ id: 'np-1', original_end_date: _npDue(2) }),
+    queued({ id: 'np-2', PRODUCTION_ORDER: '4002', original_end_date: _npDue(3) }),
+  ], 'unit-test');
+  const out = Alerts.needsPlanning();
+  assert.equal(out.length, 2);
+  assert.equal(new Set(out.map(a => a.taskId)).size, 2, 'one alert per order');
+  assert.equal(new Set(out.map(a => a.id)).size, 2, 'distinct ids');
+  for (const a of out) assert.ok(!('peerId' in a) || a.peerId == null, 'a peerId would double-count the order in the Top fixes card');
+}));
+
+test('needs_planning: no due date falls back to the plant now; no reason uses the no_reason key', () => withQueuedFixture(({ plant, queued }) => {
+  Store.setTasks([
+    queued({ id: 'np-1', planning_reason: { code: 'missing_due_date', message: 'No due date' } }),
+    queued({ id: 'np-2', planning_reason: null }),
+  ], 'unit-test');
+  const out = Alerts.needsPlanning();
+  const a1 = out.find(a => a.taskId === 'np-1'), a2 = out.find(a => a.taskId === 'np-2');
+  const now = Store.plantNow(plant);
+  assert.ok(Math.abs(a1.time.getTime() - now.getTime()) < 5000, 'time is the plant now');
+  assert.equal(a1.sev, 'warn', 'no due date is not overdue');
+  assert.equal(a1.msgKey, 'alert.needs_planning');
+  assert.equal(a2.msgKey, 'alert.needs_planning_no_reason');
+  assert.equal(a2.msgVars.reason, '');
+}));
+
+test('needs_planning: skips runtime_unknown, runtime_pending, zero_open_quantity, no machine and dismissed; honours onlyLines; clears when placed', () => withQueuedFixture(({ queued }) => {
+  const reason = (code) => ({ code, message: 'x' });
+  Store.setTasks([queued({ planning_reason: reason('no_fit_found') })], 'unit-test');
+  assert.equal(Alerts.needsPlanning().length, 1);
+  for (const code of ['runtime_unknown', 'runtime_pending', 'zero_open_quantity']) {
+    Store.setTasks([queued({ planning_reason: reason(code) })], 'unit-test');
+    assert.equal(Alerts.needsPlanning().length, 0, `${code} is excluded`);
+  }
+  Store.setTasks([queued({ MACHINE: '', planning_reason: reason('no_fit_found') })], 'unit-test');
+  assert.equal(Alerts.needsPlanning().length, 0, 'no machine, no alert');
+  Store.setTasks([queued({ planning_reason: reason('no_fit_found') })], 'unit-test');
+  assert.equal(Alerts.needsPlanning(new Set(['OTHER-LINE'])).length, 0, 'an incremental pass for another line leaves it alone');
+  assert.equal(Alerts.needsPlanning(new Set(['QNF-L1'])).length, 1);
+  Alerts._dismissed.add('needs-planning-qnf-1');
+  assert.equal(Alerts.needsPlanning().length, 0, 'a dismissed alert stays dismissed');
+  Alerts._dismissed.clear();
+  Store.setTasks([queued({ planning_status: 'scheduled', planning_reason: null,
+    start_date: new Date('2026-10-26T00:00:00'), end_date: new Date('2026-10-26T15:00:00') })], 'unit-test');
+  assert.equal(Alerts.needsPlanning().length, 0, 'a placed row clears');
+}));
+
+test('needs_planning: queuedAlerts publishes both types through _recomputeSync, with the "now fits" reason', () => withQueuedFixture(({ plant, week }) => {
+  Store.setPlantPeriods(plant, [{ id: 'p1', name: '24x4', validFrom: '2000-01-01', validTo: null, workHours: week([0, 24]) }], 'plant-periods');
+  assert.equal(Alerts.queuedAlerts().length, 2, 'an overlong_never row that now fits raises both alerts');
+  Alerts._recomputeSync();
+  const np = Store.alerts.filter(a => a.type === 'needs_planning');
+  assert.equal(np.length, 1);
+  assert.ok(Store.alerts.some(a => a.type === 'queued_now_fits'));
+  assert.equal(np[0].msgVars.reason, Util.t('planning_reason.overlong_released_pending'), 'the reason text reads "now fits"');
+  Store.setPlantPeriods(plant, [], 'plant-periods');
+  Alerts._recomputeSync();
+  const after = Store.alerts.filter(a => a.type === 'needs_planning');
+  assert.equal(after.length, 1, 'still queued, so still needs planning');
+  assert.equal(after[0].msgVars.reason, Util.t('planning_reason.overlong_never'), 'no longer fits: the plain reason');
+  assert.ok(!Store.alerts.some(a => a.type === 'queued_now_fits'));
+}));
+
+test('needs_planning: an incremental _recomputeSync keeps the other line\'s alert and does not duplicate the scoped one', () => withQueuedFixture(({ queued }) => {
+  Store.setTasks([queued({ id: 'np-1' }), queued({ id: 'np-2', PRODUCTION_ORDER: '4002', MACHINE: 'QNF-L2' })], 'unit-test');
+  Alerts._recomputeSync();
+  assert.equal(Store.alerts.filter(a => a.type === 'needs_planning').length, 2);
+  Alerts._recomputeSync({ lines: new Set(['QNF-L1']) });
+  assert.equal(Store.alerts.filter(a => a.type === 'needs_planning').length, 2);
+}));
+
+test('needs_planning is registered as a firing planning-category alert type', async () => {
+  const { ALERT_CATEGORIES, FIRING_ALERT_TYPES, categoryOf } = await import('../../../frontend/insights/alert-profiles.mjs');
+  assert.equal(categoryOf('needs_planning'), 'planning');
+  assert.ok(ALERT_CATEGORIES.planning.includes('needs_planning'));
+  assert.ok(FIRING_ALERT_TYPES.includes('needs_planning'));
 });

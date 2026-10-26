@@ -111,11 +111,15 @@ h1, h2, h3, h4 {
   /* Alert Monitor: fill of an order the active alert profile matches, one per alert category (with the
      -fg label colour). Validated with the dataviz checker against --bar-standard and --bar-firmed
      (worst CVD pair dE 6.3, the floor band: the severity ring, legend and bar label are the secondary
-     encoding); every fill/fg pair is >= 4.5:1. */
+     encoding); every fill/fg pair is >= 4.5:1. Planning (#e8602a) was re-checked as a sixth fill: worst
+     normal-vision pair against the other five fills dE 16.9 (>= 15). It is not compared with the bar blue/red:
+     a queued (Needs Planning) row draws no Gantt bar, so the fill shows only in the legend and the Overview;
+     revisit if a planning-coloured bar is ever drawn. */
   --bar-pm-capacity:   #e0a800;  --bar-pm-capacity-fg:   #0c1c30;
   --bar-pm-conflicts:  #8750f0;  --bar-pm-conflicts-fg:  #ffffff;
   --bar-pm-calendar:   #14b8a6;  --bar-pm-calendar-fg:   #0c1c30;
   --bar-pm-setup:      #c8359a;  --bar-pm-setup-fg:      #ffffff;
+  --bar-pm-planning:   #e8602a;  --bar-pm-planning-fg:   #0c1c30;
   --bar-pm-exceptions: #78716c;  --bar-pm-exceptions-fg: #ffffff;
 
   /* Board shading — the Gantt's background bands and day cells. Shared by the
@@ -1297,6 +1301,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.vis-range.profile-match-conflicts  { background: var(--bar-pm-conflicts)  !important; color: var(--bar-pm-conflicts-fg)  !important; }
 .vis-item.vis-range.profile-match-calendar   { background: var(--bar-pm-calendar)   !important; color: var(--bar-pm-calendar-fg)   !important; }
 .vis-item.vis-range.profile-match-setup      { background: var(--bar-pm-setup)      !important; color: var(--bar-pm-setup-fg)      !important; }
+.vis-item.vis-range.profile-match-planning   { background: var(--bar-pm-planning)   !important; color: var(--bar-pm-planning-fg)   !important; }
 .vis-item.vis-range.profile-match-exceptions { background: var(--bar-pm-exceptions) !important; color: var(--bar-pm-exceptions-fg) !important; }
 /* Ring layers are custom properties so the selected / conflict / keyline variants below compose them.
    No border-color here on purpose: vis items have no border. */
@@ -1304,6 +1309,8 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.vis-range.profile-match-warn { --pm-ring: var(--warn-vivid); }
 /* Amber ring is invisible on the amber capacity fill: use the dark label ink there. */
 .vis-item.vis-range.profile-match-capacity.profile-match-warn { --pm-ring: var(--bar-pm-capacity-fg); }
+/* The amber ring is 1.4:1 on the orange planning fill: same dark ink as the capacity rule. */
+.vis-item.vis-range.profile-match-planning.profile-match-warn { --pm-ring: var(--bar-pm-planning-fg); }
 .vis-item.vis-range.profile-match { --pm-inner: inset 0 0 0 2px var(--pm-ring), inset 0 0 0 3px rgba(255,255,255,0.7); box-shadow: var(--pm-inner); }
 /* Split segments / distribution children keep their white keyline and add the ring inside it. */
 .vis-item.vis-range.profile-match.split-order-segment,
@@ -5742,6 +5749,7 @@ body.dark {
   --bar-pm-conflicts:  #8750f0;  --bar-pm-conflicts-fg:  #ffffff;
   --bar-pm-calendar:   #14b8a6;  --bar-pm-calendar-fg:   #0c1c30;
   --bar-pm-setup:      #c8359a;  --bar-pm-setup-fg:      #ffffff;
+  --bar-pm-planning:   #e8602a;  --bar-pm-planning-fg:   #0c1c30;
   --bar-pm-exceptions: #78716c;  --bar-pm-exceptions-fg: #ffffff;
 
   /* Board shading, dark counterparts (same values the per-rule body.dark
@@ -7401,6 +7409,7 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 .lg-pm-conflicts  { background: var(--bar-pm-conflicts); }
 .lg-pm-calendar   { background: var(--bar-pm-calendar); }
 .lg-pm-setup      { background: var(--bar-pm-setup); }
+.lg-pm-planning   { background: var(--bar-pm-planning); }
 .lg-pm-exceptions { background: var(--bar-pm-exceptions); }
 .lg-pm-ring-err   { box-shadow: inset 0 0 0 2px var(--err), inset 0 0 0 3px rgba(255,255,255,.7); }  /* .profile-match-err ring */
 .lg-ghost    { opacity: .45; }                                                             /* .ghost */
@@ -7726,6 +7735,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-ov-sw-conflicts { background: var(--bar-pm-conflicts); }
 .am-ov-sw-calendar { background: var(--bar-pm-calendar); }
 .am-ov-sw-setup { background: var(--bar-pm-setup); }
+.am-ov-sw-planning { background: var(--bar-pm-planning); }
 .am-ov-sw-exceptions { background: var(--bar-pm-exceptions); }
 
 /* When: a continuous day grid (Overdue, one column per day, Later), bars over a window band. */
@@ -7795,7 +7805,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-ov-more { align-self: flex-start; padding: 2px 4px; font-size: 11px; line-height: 16px; color: var(--accent); }
 .am-ov-more:hover { text-decoration: underline; }
 
-/* What: a proportional category strip over a five-row legend. Fill and label come from the shared --bar-pm tokens. */
+/* What: a proportional category strip over a six-row legend. Fill and label come from the shared --bar-pm tokens. */
 .am-ov-strip { display: flex; gap: 1px; height: 22px; border-radius: var(--r-sm); overflow: hidden; }
 .am-ov-cat {
   flex-basis: 0; flex-grow: var(--g); flex-shrink: 1; min-width: 0; border-radius: 0; container-type: inline-size;
@@ -7807,6 +7817,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-ov-cat-conflicts { background: var(--bar-pm-conflicts); color: var(--bar-pm-conflicts-fg); }
 .am-ov-cat-calendar { background: var(--bar-pm-calendar); color: var(--bar-pm-calendar-fg); }
 .am-ov-cat-setup { background: var(--bar-pm-setup); color: var(--bar-pm-setup-fg); }
+.am-ov-cat-planning { background: var(--bar-pm-planning); color: var(--bar-pm-planning-fg); }
 .am-ov-cat-exceptions { background: var(--bar-pm-exceptions); color: var(--bar-pm-exceptions-fg); }
 .am-ov-catlist { display: flex; flex-direction: column; }
 .am-ov-catrow {
@@ -7909,7 +7920,8 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 }
 
 .am-diag {
-  height: 132px; box-sizing: border-box; overflow: auto; padding: 10px 12px 10px 38px;
+  /* Keep in step with DIAG_H in alert-monitor-model.mts (VirtualList row height under group-by None). */
+  height: 166px; box-sizing: border-box; overflow: auto; padding: 10px 12px 10px 38px;
   background: var(--bg-subtle); box-shadow: inset 0 -1px 0 var(--line);
 }
 .am-diag-help {

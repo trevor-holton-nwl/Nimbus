@@ -38,7 +38,7 @@ export interface AlertProfileMatchSet {
 
 type ProfileSettingsArg = Parameters<typeof resolveActiveProfileId>[1];
 
-const CATEGORY_ORDER: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'exceptions'];
+const CATEGORY_ORDER: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions'];
 const RELEVANT_PREFS = ['alertProfileByPlant', 'alertProfileGanttHighlight', 'alertsShowAcknowledged'] as const;
 const DEBOUNCE_MS = 120;
 

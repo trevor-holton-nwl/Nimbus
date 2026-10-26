@@ -1116,3 +1116,133 @@ test('row Acknowledge and Remove acknowledgement live in the ⋯ menu; the row h
     assert.deepEqual(log, [['open', 'P1', 'a1'], ['unack', 'P1', 'a2']]);
   } finally { undo.forEach(u => u()); }
 });
+
+/* ---------------------------------------------------------------------------
+   Slot (needs_planning): row button + ⋯ menu open the dialog; Diagnose shows the suggested slot
+   ------------------------------------------------------------------------- */
+import { AlertSlotModal } from '../../../frontend/alert-monitor/alert-slot-modal.mjs';
+
+const npTask = id => task(id, { planning_status: 'needs_planning' });
+const cand = (o = {}) => ({ label: '1001|L1', closed: false, needHours: 2, freeHours: 5, capHours: 8, fits: true, ...o });
+
+test('Slot from the row button opens the dialog with the plant, the order and the alert id', () => {
+  const opened = [];
+  const undo = patched(AlertSlotModal, 'open', o => opened.push(o));
+  try {
+    Store.setTasks([npTask('7')], 'test');
+    seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
+    AlertMonitorPane.render();
+    assert.match(els['am-groups'].innerHTML, /data-alert-action="slot" data-alert-id="n1"/);
+    clickAlert('slot', 'n1', { taskId: '7' });
+    assert.deepEqual(opened, [{ plant: 'P1', taskId: '7', alertId: 'n1' }]);
+  } finally { undo(); }
+});
+
+test('Slot from the ⋯ menu refocuses the live trigger BEFORE the dialog opens, and opens with the same values', () => {
+  const log = [];
+  const undo = patched(AlertSlotModal, 'open', o => log.push(['open', o.plant, o.taskId, o.alertId]));
+  try {
+    Store.setTasks([npTask('7')], 'test');
+    seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
+    AlertMonitorPane.render();
+    focusDoc(['n1'], log);
+    const item = openMenu('.am-row-menu', { alertId: 'n1' })[0].items.find(i => i.id === 'slot');
+    assert.ok(item, 'the menu offers Slot');
+    assert.equal(item.data.alertAction, 'slot');
+    item.onSelect({});
+    assert.deepEqual(log, ['n1', ['open', 'P1', '7', 'n1']]);
+  } finally { undo(); }
+});
+
+test('Slot is a no-op in What-If (button and menu), with the menu item disabled and hinted', () => {
+  const opened = [];
+  const undo = patched(AlertSlotModal, 'open', o => opened.push(o));
+  Sandbox.active = true;
+  try {
+    Store.setTasks([npTask('7')], 'test');
+    seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
+    AlertMonitorPane.render();
+    clickAlert('slot', 'n1', { taskId: '7' });
+    const item = openMenu('.am-row-menu', { alertId: 'n1' })[0].items.find(i => i.id === 'slot');
+    assert.equal(item.disabled, true);
+    assert.equal(item.hint, 'am.whatif_blocked');
+    item.onSelect({});
+    assert.deepEqual(opened, []);
+  } finally { Sandbox.active = false; undo(); }
+});
+
+test('Diagnose on a needs_planning row shows the suggested slot from suggest(), synchronously', () => {
+  const asked = [];
+  const undoDay = patched(AlertSlotModal, 'suggestedDay', () => '2026-10-28');
+  const undoBase = patched(AlertSlotModal, 'suggest', (tk, plant) => { asked.push([tk.id, plant]); return cand(); });
+  const undo = () => { undoBase(); undoDay(); };
+  try {
+    Store.setTasks([npTask('7')], 'test');
+    seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
+    AlertMonitorPane.render();
+    assert.deepEqual(asked, [], 'a closed panel never asks for a suggestion');
+    clickAlert('diagnose', 'n1');
+    assert.match(els['am-groups'].innerHTML, /<dt>am\.slot_suggested<\/dt><dd[^>]*>am\.slot_suggested_on<\/dd>/);
+    assert.deepEqual(asked[0], ['7', 'P1']);
+  } finally { undo(); }
+});
+
+test('Diagnose names the day the suggestion is for: the default day, then the option text', () => {
+  const undoSuggest = patched(AlertSlotModal, 'suggest', () => cand());
+  const undoDay = patched(AlertSlotModal, 'suggestedDay', (tk, plant) => { assert.deepEqual([tk.id, plant], ['7', 'P1']); return '2026-10-28'; });
+  const priorT = Util.t;
+  Util.t = (key, vars) => (vars ? `${key}${JSON.stringify(vars)}` : key);
+  try {
+    Store.setTasks([npTask('7')], 'test');
+    seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
+    AlertMonitorPane.render();
+    clickAlert('diagnose', 'n1');
+    const html = els['am-groups'].innerHTML;
+    const m = /<dt>am\.slot_suggested<\/dt><dd[^>]*>am\.slot_suggested_on(\{.*?\})<\/dd>/.exec(html.replace(/&quot;/g, '"'));
+    assert.ok(m, 'the suggested line uses am.slot_suggested_on');
+    const vars = JSON.parse(m[1]);
+    assert.match(vars.day, /28/, 'the day label names the 28th');
+    assert.match(vars.option, /^am\.slot_option/, 'the option text is formatSlotOption output');
+  } finally { Util.t = priorT; undoDay(); undoSuggest(); }
+});
+
+test('Diagnose with no eligible pair shows the none text without a day prefix', () => {
+  const undoSuggest = patched(AlertSlotModal, 'suggest', () => null);
+  const undoDay = patched(AlertSlotModal, 'suggestedDay', () => { throw new Error('no day for no suggestion'); });
+  try {
+    Store.setTasks([npTask('7')], 'test');
+    seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
+    AlertMonitorPane.render();
+    clickAlert('diagnose', 'n1');
+    assert.match(els['am-groups'].innerHTML, /<dt>am\.slot_suggested<\/dt><dd[^>]*>am\.slot_none<\/dd>/);
+  } finally { undoDay(); undoSuggest(); }
+});
+
+test('Diagnose shows the "no eligible machine" line when suggest() finds nothing', () => {
+  const undo = patched(AlertSlotModal, 'suggest', () => null);
+  try {
+    Store.setTasks([npTask('7')], 'test');
+    seed([alert('n1', { type: 'needs_planning', taskId: '7' })]);
+    AlertMonitorPane.render();
+    clickAlert('diagnose', 'n1');
+    assert.match(els['am-groups'].innerHTML, /<dt>am\.slot_suggested<\/dt><dd[^>]*>am\.slot_none<\/dd>/);
+  } finally { undo(); }
+});
+
+test('Diagnose on other order alerts has no suggested-slot line and never asked suggest()', () => {
+  const asked = [];
+  const undo = patched(AlertSlotModal, 'suggest', tk => { asked.push(tk.id); return cand(); });
+  try {
+    Store.setTasks([task('1')], 'test');
+    seed([alert('a1', { type: 'late', taskId: '1' })]);
+    AlertMonitorPane.render();
+    clickAlert('diagnose', 'a1');
+    assert.match(els['am-groups'].innerHTML, /class="am-diag"/);
+    assert.doesNotMatch(els['am-groups'].innerHTML, /am\.slot_suggested/);
+    assert.deepEqual(asked, []);
+  } finally { undo(); }
+});
+
+test('DIAG_H grew to 166 for the extra grid row', () => {
+  assert.equal(DIAG_H, 166);
+});

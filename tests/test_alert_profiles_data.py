@@ -57,6 +57,8 @@ def test_rankings():
 
 def test_alert_types_exclude_never_firing():
     assert "late" in ap.ALERT_TYPES
+    assert "queued_now_fits" in ap.ALERT_TYPES
+    assert "needs_planning" in ap.ALERT_TYPES
     assert "near-capacity" not in ap.ALERT_TYPES
     assert "line_no_calendar" not in ap.ALERT_TYPES
 

@@ -32,6 +32,7 @@ frontend/insights/alert-profile-matches.mjs
 frontend/alert-monitor/alert-monitor-model.mjs
 frontend/alert-monitor/alert-monitor-pane.mjs
 frontend/alert-monitor/alert-ack-modal.mjs
+frontend/alert-monitor/alert-slot-modal.mjs
 frontend/alert-monitor/alert-profile-editor.mjs
 frontend/alert-monitor/alert-monitor-overview.mjs
 frontend/insights/plant-lru.mjs
@@ -43,6 +44,7 @@ frontend/scheduling/gantt-legend.mjs
 frontend/scheduling/gantt-lanes.mjs
 frontend/scheduling/nonworking-spans.mjs
 frontend/scheduling/orders.mjs
+frontend/scheduling/planning-reason.mjs
 frontend/optimization/optimize-ui.mjs
 frontend/optimization/optimizer-worker-client.mjs
 frontend/optimization/optimizer-worker-contract.mjs

@@ -48,6 +48,7 @@ import { Store, UndoStack } from '../platform/store.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
+import { planningReasonText } from '../scheduling/planning-reason.mjs';
 import type { SetupObservation } from '../optimization/engine.mjs';
 import type { ScheduleSnapshot } from '../optimization/setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, PlantCalendarEntry } from '../platform/types.mjs';
@@ -488,6 +489,48 @@ export const Alerts = {
     return out;
   },
 
+  /** Needs Planning (2026-10-26): one warn alert per queued order, so the rows are never buried in machine groups.
+   *  Frontend-only (the reason text is localised, which the worker core cannot do) and display-only, like
+   *  `queuedNowFits`. Two invariants the Top fixes card relies on: EXACTLY ONE alert per queued order (stable id
+   *  `needs-planning-<taskId>`, which is also the acknowledgement key) and NO `peerId`. Skips the reasons that are
+   *  already alerted or have nothing to place (`runtime_unknown`, `runtime_pending`, `zero_open_quantity`), rows with
+   *  no machine, rows outside `onlyLines` and dismissed alerts. `time` is the due instant (the plant's now when the
+   *  order has no due date); `err` once that instant is already before the plant's now. `nowFitsIds` are the order
+   *  ids `queuedNowFits` just flagged, so an `overlong_never` row that now fits reads "now fits". */
+  needsPlanning(onlyLines: Set<string> | null = null, nowFitsIds: ReadonlySet<string> = new Set()): NimbusAlert[] {
+    const out: NimbusAlert[] = [];
+    for (const t of Store.tasksArr) {
+      if (t.planning_status !== 'needs_planning') continue;
+      const code = t.planning_reason?.code;
+      if (code === 'runtime_unknown' || code === 'runtime_pending' || code === 'zero_open_quantity') continue;
+      const line = t.MACHINE;
+      if (!line || (onlyLines && !onlyLines.has(line))) continue;
+      const id = `needs-planning-${t.id}`;
+      if (Alerts._dismissed.has(id)) continue;
+      const plant = t.PLANT || Store.getPlantForLine(line);
+      const now = plant ? Store.plantNow(plant) : null;
+      const due = Util.dueInstant(t);
+      const time = due ?? now;
+      if (!time) continue;                                         // no due date and no valid plant clock: nothing to anchor on
+      const order = Util.orderNumber(t, String(t.id));
+      const reason = planningReasonText(t.planning_reason, (k, v) => Util.t(k, v), { nowFits: nowFitsIds.has(String(t.id)) });
+      out.push({
+        id, sev: due && now && due.getTime() < now.getTime() ? 'err' : 'warn', type: 'needs_planning',
+        msg: reason ? `Order "${order}" has no slot yet: ${reason}` : `Order "${order}" has no slot yet.`,
+        msgKey: reason ? 'alert.needs_planning' : 'alert.needs_planning_no_reason', msgVars: { order, reason },
+        taskId: t.id, line, time,
+      });
+    }
+    return out;
+  },
+
+  /** Both queue-alert producers in one call (the four publish sites use this): "now fits" first, then Needs Planning
+   *  with the now-fits ids so its reason text agrees with the sibling alert. */
+  queuedAlerts(onlyLines: Set<string> | null = null): NimbusAlert[] {
+    const fits = Alerts.queuedNowFits(onlyLines);
+    return fits.concat(Alerts.needsPlanning(onlyLines, new Set(fits.map(a => String(a.taskId)))));
+  },
+
   recompute(opts: { lines?: Set<string> } = {}): void {
     // Never post the global (all-line) snapshot to the worker: when no plant is
     // selected nothing is rendered, so route to the cheap sync path instead of
@@ -503,9 +546,9 @@ export const Alerts = {
           const onlyLines = opts.lines instanceof Set && opts.lines.size ? opts.lines : null;
           if (onlyLines) {
             const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
-            Store.setAlerts(retained.concat(alerts, Alerts.queuedNowFits(onlyLines)), 'alerts');
+            Store.setAlerts(retained.concat(alerts, Alerts.queuedAlerts(onlyLines)), 'alerts');
           } else {
-            Store.setAlerts(alerts.concat(Alerts.queuedNowFits()), 'alerts');
+            Store.setAlerts(alerts.concat(Alerts.queuedAlerts()), 'alerts');
           }
           Alerts._lastMs = elapsed;
         })
@@ -547,9 +590,9 @@ export const Alerts = {
       // Incremental merge: retain alerts on untouched lines, replace only the affected
       // ones. Callers of the scoped path never move a task across lines.
       const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
-      Store.setAlerts(retained.concat(kept, Alerts.queuedNowFits(onlyLines)), 'alerts');
+      Store.setAlerts(retained.concat(kept, Alerts.queuedAlerts(onlyLines)), 'alerts');
     } else {
-      Store.setAlerts(kept.concat(Alerts.queuedNowFits()), 'alerts');
+      Store.setAlerts(kept.concat(Alerts.queuedAlerts()), 'alerts');
     }
     Alerts._lastMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - _t0;
     PerfMonitor.record('Alerts.syncFallback', Alerts._lastMs);

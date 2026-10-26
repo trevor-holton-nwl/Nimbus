@@ -36,6 +36,11 @@ const optItem = (o = {}) => item({
   titleVars: { line: 'L1', from: '2026-10-21', to: '2026-10-23', n: 3 }, confidenceAfter: null, method: 'none', headroomHours: 6.5,
   action: { kind: 'optimize-window', line: 'L1', startDate: '2026-10-21', endDate: '2026-10-23' }, ...o,
 });
+const npItem = (o = {}) => item({
+  family: 'needs-planning', key: 'needs-planning', titleKey: 'leverage.title.needs-planning',
+  titleVars: { n: 4, h: 12.5 }, alertIds: ['n1', 'n2', 'n3', 'n4'], orderIds: ['o1', 'o2', 'o3', 'o4'], lines: ['L1'],
+  confidenceAfter: null, method: 'none', unplacedHours: 12.5, action: { kind: 'needs-planning', alertIds: ['n1', 'n2', 'n3', 'n4'] }, ...o,
+});
 const routing = (step, extra = {}) => item({
   family: 'routing-gap', key: `routing-gap:${step}`, titleKey: 'leverage.title.routing-gap.routing_upload',
   titleVars: { n: 2, step, material: 'M1', pv: 'PV1', machine: 'L1' }, adminOnly: step !== 'no_machine',
@@ -66,7 +71,7 @@ test('a row is a ranked list item: rank, title, counts line, one primary button 
 test('builders never print points, estimate or exact wording', () => {
   const variants = [
     item(), item({ method: 'replay', confidenceAfter: 75 }), item({ points: 0, confidenceAfter: 71 }), optItem(),
-    optItem({ headroomHours: -2 }), setupItem({ requiresMinutes: true }), item({ adminOnly: true, remaining: 1 }),
+    optItem({ headroomHours: -2 }), npItem(), setupItem({ requiresMinutes: true }), item({ adminOnly: true, remaining: 1 }),
   ];
   for (const it of variants) {
     for (const c of [ctx(), ctx({ remaining: 2, isAdmin: true, setupActive: false })]) {
@@ -341,4 +346,27 @@ test('setup pairs map to the review shape SetupAdmin reads (fieldKey=value | …
     line: 'L1', predecessorOrderId: 'o0', successorOrderId: 'o1',
     fromState: 'colorWheel=A | prt01=X', toState: 'colorWheel=B', reason: 'setup-uncovered', remedy: 'remedy text',
   }]);
+});
+
+test('needs-planning: the primary is Show these and the menu does not repeat it', () => {
+  const it = npItem();
+  const a = levActions(it, ctx());
+  assert.equal(a.primary.act, 'show-alerts');
+  assert.equal(a.primary.labelKey, 'leverage.action.needs-planning');
+  assert.equal(a.primary.primary, true);
+  assert.equal(acts(it).filter(x => x === 'show-alerts').length, 1, 'show-alerts appears once, in the primary');
+  assert.deepEqual(a.menu.map(x => x.act), ['open-table']);
+  assert.equal(acts(it, ctx({ isAdmin: true })).filter(x => x === 'show-alerts').length, 1);
+});
+
+test('needs-planning: the title carries n and h, and the row has no "Clears N alerts" line', () => {
+  const it = npItem();
+  assert.equal(levTitle(it, ctx(), t), 'leverage.title.needs-planning|{"n":4,"h":12.5}');
+  assert.doesNotMatch(unq(fixLineParts(it, ctx(), t).join(' · ')), /am.fix_clears/);
+  const h = fixRowHtml(it, 1, ctx(), t);
+  assert.doesNotMatch(h, /am.fix_clears/);
+  assert.match(h, /data-lev-action="show-alerts"/);
+  assert.match(h, /leverage.action.needs-planning/);
+  // Other families keep the clears line.
+  assert.match(unq(fixLineParts(item(), ctx(), t).join(' · ')), /am.fix_clears/);
 });
