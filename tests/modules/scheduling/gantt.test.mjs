@@ -7,10 +7,10 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor, frameMeterSummary, installFrameMeter } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
-import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Util, Toast, PerfMonitor } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
@@ -3217,4 +3217,237 @@ test('alertCellMapFor: a needs_planning alert paints no Gantt day cell (no bar t
   assert.equal(map['L3|2026-10-28'].hasConflictErr, true);
   const hidden = alertCellMapFor(alerts, line => line !== 'L3');
   assert.deepEqual(Object.keys(hidden), [], 'a hidden line paints nothing');
+});
+
+// ---- Gantt pan instrumentation (Timeline.frame / Timeline.pan / _panActive / _bench) ----
+
+function _frameRig(t) {
+  const prior = { raf: globalThis.requestAnimationFrame };
+  const rig = { rafQueue: [] };
+  globalThis.requestAnimationFrame = cb => { rig.rafQueue.push(cb); return rig.rafQueue.length; };
+  rig.flushRaf = () => { for (let i = 0; i < 20 && rig.rafQueue.length; i++) rig.rafQueue.shift()(0); };
+  rig.fakeCore = () => ({ calls: 0, _origRedraw() { this.calls += 1; }, _redraw() {} });
+  PerfMonitor.clear();
+  t.after(() => {
+    globalThis.requestAnimationFrame = prior.raf;
+    Timeline._endPanGesture();
+    PerfMonitor.clear();
+  });
+  return rig;
+}
+
+test('frameMeterSummary: duration, redraw count and max gap', () => {
+  assert.deepEqual(frameMeterSummary(100, 400, [120, 130, 190, 200]), { ms: 300, redraws: 4, maxGapMs: 60 });
+  assert.deepEqual(frameMeterSummary(100, 400, []), { ms: 300, redraws: 0, maxGapMs: 0 }, 'no redraws still summarises');
+  assert.deepEqual(frameMeterSummary(100, 400, [150]), { ms: 300, redraws: 1, maxGapMs: 0 }, 'one stamp has no gap');
+  assert.equal(frameMeterSummary(400, 100, [150, 160]).ms, 0, 'end before start clamps to 0');
+});
+
+test('installFrameMeter: a timed _origRedraw records one Timeline.frame sample per call and calls the original once', (t) => {
+  const rig = _frameRig(t);
+  const core = rig.fakeCore();
+  assert.equal(installFrameMeter(core), true);
+  core._origRedraw();
+  assert.equal(core.calls, 1, 'the original ran once, with this preserved');
+  assert.equal(PerfMonitor.stats('Timeline.frame').count, 1);
+  core._origRedraw();
+  assert.equal(PerfMonitor.stats('Timeline.frame').count, 2);
+  assert.equal(core.calls, 2);
+});
+
+test('installFrameMeter: a throwing redraw still records its sample and the error propagates', (t) => {
+  const rig = _frameRig(t);
+  const core = { _origRedraw() { throw new Error('boom'); }, _redraw() {} };
+  installFrameMeter(core);
+  assert.throws(() => core._origRedraw(), /boom/);
+  assert.equal(PerfMonitor.stats('Timeline.frame').count, 1);
+  assert.equal(rig.rafQueue.length, 0);
+});
+
+test('installFrameMeter: the re-created _redraw coalesces many calls in one frame into one _origRedraw and never runs it synchronously', (t) => {
+  const rig = _frameRig(t);
+  const core = rig.fakeCore();
+  installFrameMeter(core);
+  core._redraw(); core._redraw(); core._redraw();
+  assert.equal(core.calls, 0, 'never synchronous');
+  assert.equal(rig.rafQueue.length, 1, 'exactly one requestAnimationFrame for the burst');
+  rig.flushRaf();
+  assert.equal(core.calls, 1, 'one redraw for the whole burst');
+  assert.equal(PerfMonitor.stats('Timeline.frame').count, 1, 'the throttled redraw goes through the timed function');
+  core._redraw();
+  assert.equal(rig.rafQueue.length, 1, 'a later call schedules a new frame');
+  rig.flushRaf();
+  assert.equal(core.calls, 2);
+});
+
+test('installFrameMeter: a second install is a no-op (no double wrapping)', (t) => {
+  const rig = _frameRig(t);
+  const core = rig.fakeCore();
+  assert.equal(installFrameMeter(core), true);
+  const timed = core._origRedraw, throttle = core._redraw;
+  assert.equal(installFrameMeter(core), false);
+  assert.equal(core._origRedraw, timed, 'not wrapped again');
+  assert.equal(core._redraw, throttle, 'throttle not re-created');
+  core._origRedraw();
+  assert.equal(PerfMonitor.stats('Timeline.frame').count, 1, 'one sample per call');
+});
+
+test('installFrameMeter: missing or non-function _origRedraw/_redraw self-disables without throwing and leaves the object untouched', (t) => {
+  _frameRig(t);
+  const noop = () => {};
+  const cases = {
+    missingOrig: { _redraw: noop },
+    missingRedraw: { _origRedraw: noop },
+    nonFunction: { _origRedraw: 1, _redraw: noop },
+    frozen: Object.freeze({ _origRedraw: noop, _redraw: noop }),
+  };
+  for (const [name, core] of Object.entries(cases)) {
+    const before = { ...core };
+    assert.equal(installFrameMeter(core), false, name);
+    assert.deepEqual({ ...core }, before, `${name}: untouched`);
+  }
+  assert.equal(installFrameMeter(null), false, 'null core');
+  const nonWritable = {};
+  Object.defineProperty(nonWritable, '_origRedraw', { value: noop, writable: false, enumerable: true });
+  Object.defineProperty(nonWritable, '_redraw', { value: noop, writable: true, enumerable: true });
+  assert.equal(installFrameMeter(nonWritable), false, 'non-writable');
+  assert.equal(nonWritable._origRedraw, noop);
+  assert.equal(nonWritable._redraw, noop, 'no half install');
+});
+
+test('pan gesture: a panmove rangechange sets _panActive; a wheel rangechange does not; rangechanged(panend) clears it first and records Timeline.pan', (t) => {
+  const rig = _frameRig(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const core = rig.fakeCore();
+  installFrameMeter(core);
+  const activeAtRecord = [];
+  const realRecord = PerfMonitor.record;
+  t.mock.method(PerfMonitor, 'record', (name, ms) => { if (name === 'Timeline.pan') activeAtRecord.push(Timeline._panActive); return realRecord(name, ms); });
+
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'wheel' } });
+  Timeline._onVisRangeChange({ byUser: false, event: { type: 'panmove' } });
+  Timeline._onVisRangeChange({ byUser: true });
+  assert.equal(Timeline._panActive, false, 'only a user panmove counts');
+
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'panmove' } });
+  assert.equal(Timeline._panActive, true);
+  core._origRedraw(); core._origRedraw();
+  Timeline._onVisRangeChanged({ byUser: true, event: { type: 'panend' } });
+  assert.equal(Timeline._panActive, false);
+  assert.deepEqual(activeAtRecord, [false], 'the flag is cleared before the mark is recorded');
+  assert.equal(PerfMonitor.stats('Timeline.pan').count, 1);
+  assert.equal(Timeline._lastPan.redraws, 2, 'the redraws inside the gesture are counted');
+  assert.ok(Timeline._lastPan.ms >= 0 && Number.isFinite(Timeline._lastPan.maxGapMs));
+
+  Timeline._onVisRangeChanged({ byUser: true, event: { type: 'panend' } });
+  assert.equal(PerfMonitor.stats('Timeline.pan').count, 1, 'a rangechanged with no gesture records nothing');
+});
+
+test('pan gesture: the 300 ms watchdog ends a gesture whose rangechanged never arrives', (t) => {
+  _frameRig(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'panmove' } });
+  t.mock.timers.tick(299);
+  assert.equal(Timeline._panActive, true, 'not yet');
+  t.mock.timers.tick(1);
+  assert.equal(Timeline._panActive, false, 'watchdog cleared the flag');
+  assert.equal(PerfMonitor.stats('Timeline.pan').count, 1, 'and recorded the gesture');
+
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'panmove' } });
+  t.mock.timers.tick(200);
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'panmove' } });
+  t.mock.timers.tick(200);
+  assert.equal(Timeline._panActive, true, 'a further panmove re-arms the watchdog');
+  t.mock.timers.tick(100);
+  assert.equal(Timeline._panActive, false);
+  assert.equal(PerfMonitor.stats('Timeline.pan').count, 2);
+});
+
+test('pan gesture: pointerup/pointercancel ends it and double end is harmless', (t) => {
+  _frameRig(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const priorTl = Timeline._tl, priorWired = Timeline._panDocWired, priorAdd = globalThis.document.addEventListener;
+  const docHandlers = {}, tlHandlers = {};
+  let docAdds = 0;
+  globalThis.document.addEventListener = (type, fn) => { docAdds += 1; docHandlers[type] = fn; };
+  Timeline._panDocWired = false;
+  const fakeTl = () => ({ on(ev, fn) { tlHandlers[ev] = fn; }, off() {}, _origRedraw() {}, _redraw() {} });
+  t.after(() => { Timeline._tl = priorTl; Timeline._panDocWired = priorWired; globalThis.document.addEventListener = priorAdd; });
+
+  Timeline._tl = fakeTl();
+  Timeline._wirePanTracking();
+  Timeline._tl = fakeTl();
+  Timeline._wirePanTracking();
+  assert.equal(docAdds, 2, 'pointerup and pointercancel are registered once across two wirings');
+  assert.equal(typeof docHandlers.pointerup, 'function');
+  assert.equal(typeof docHandlers.pointercancel, 'function');
+
+  tlHandlers.rangechange({ byUser: true, event: { type: 'panmove' } });
+  assert.equal(Timeline._panActive, true);
+  docHandlers.pointerup({ type: 'pointerup' });
+  assert.equal(Timeline._panActive, false);
+  assert.equal(PerfMonitor.stats('Timeline.pan').count, 1);
+
+  tlHandlers.rangechange({ byUser: true, event: { type: 'panmove' } });
+  docHandlers.pointercancel({ type: 'pointercancel' });
+  assert.equal(Timeline._panActive, false);
+  assert.equal(PerfMonitor.stats('Timeline.pan').count, 2);
+
+  docHandlers.pointerup({ type: 'pointerup' });
+  Timeline._endPanGesture();
+  tlHandlers.rangechanged({ byUser: true, event: { type: 'panend' } });
+  assert.equal(PerfMonitor.stats('Timeline.pan').count, 2, 'ending twice records nothing more');
+});
+
+test('Timeline.pan records a duration only (no count recorded as an ms mark)', (t) => {
+  const rig = _frameRig(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const core = rig.fakeCore();
+  installFrameMeter(core);
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'panmove' } });
+  core._origRedraw(); core._origRedraw(); core._origRedraw();
+  Timeline._onVisRangeChanged({ byUser: true, event: { type: 'panend' } });
+  const names = PerfMonitor.all().map(r => r.name).filter(n => n.startsWith('Timeline.pan')).sort();
+  assert.deepEqual(names, ['Timeline.pan', 'Timeline.pan.maxGap'], 'only duration marks exist');
+  assert.equal(Timeline._lastPan.redraws, 3, 'the count lives on _lastPan, not in PerfMonitor');
+  assert.ok(PerfMonitor.stats('Timeline.pan').last < 1000, 'the mark is a duration in ms, not the count');
+});
+
+test('Timeline._bench is callable and returns p50/p95/max/items against a fake timeline', async (t) => {
+  const rig = _frameRig(t);
+  const priorTl = Timeline._tl, priorQsa = globalThis.document.querySelectorAll, priorTable = console.table;
+  let win = { start: 1_000_000_000_000, end: 1_000_000_000_000 + 6 * 3600_000 };
+  const sets = [];
+  const spin = () => { const t0 = performance.now(); while (performance.now() - t0 < 0.5) { /* a measurable frame */ } };
+  const tl = {
+    body: { domProps: { center: { width: 1000 } } },
+    getWindow: () => ({ start: new Date(win.start), end: new Date(win.end) }),
+    setWindow(s, e) { win = { start: s.getTime(), end: e.getTime() }; sets.push({ ...win }); this._origRedraw(); },
+    on() {}, off() {}, _origRedraw: spin, _redraw() {},
+  };
+  const original = { ...win };
+  installFrameMeter(tl);
+  Timeline._tl = tl;
+  globalThis.requestAnimationFrame = cb => { cb(0); return 1; };
+  globalThis.document.querySelectorAll = () => new Array(7);
+  let tabled = null;
+  console.table = (x) => { tabled = x; };
+  t.after(() => {
+    Timeline._tl = priorTl; console.table = priorTable;
+    delete globalThis.document.querySelectorAll;
+    if (priorQsa) globalThis.document.querySelectorAll = priorQsa;
+  });
+  const r = await Timeline._bench({ days: 3, steps: 5, stepPx: 40 });
+  assert.equal(r.days, 3);
+  assert.equal(r.steps, 5);
+  assert.equal(r.items, 7);
+  assert.ok(r.p50 > 0 && r.p95 >= r.p50 && r.max >= r.p95, `percentiles ordered: ${JSON.stringify(r)}`);
+  assert.equal(r.longTasks, 0);
+  assert.equal(tabled, r, 'console.table received the result');
+  const step = (3 * 86400_000) / 1000 * 40;
+  assert.equal(sets[2].start - sets[1].start, step, 'each step shifts by stepPx converted to ms');
+  assert.equal(sets[sets.length - 1].start, original.start, 'the original window is restored');
+  assert.equal(sets[sets.length - 1].end, original.end);
+  assert.equal(Timeline._frameSamples, null, 'the sample sink is released');
+  assert.equal(rig.rafQueue.length, 0);
 });

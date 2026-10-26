@@ -190,6 +190,7 @@ const _ZONE_MIN_PX = 0.5;
 const ZOOM_MIN_MS = 15 * 60 * 1000;            // vis zoomMin (init) — also the floor for a Go To window
 const ZOOM_MAX_MS = 30 * 24 * 3600 * 1000;     // vis zoomMax (init) — also the ceiling for a Go To window
 const GOTO_SPOTLIGHT_MS = 2500;                // how long the Go To spotlight + row tint last
+const PAN_WATCHDOG_MS = 300;                   // no further panmove for this long ends a pan gesture (a cancelled pan never emits rangechanged)
 export const Timeline = {
   _tl: null as NimbusVendor.VisTimelineInstance | null,
   _items:     null as NimbusVendor.VisDataSet<TimelineVisItem> | null,
@@ -230,6 +231,14 @@ export const Timeline = {
   _cachedAxisH: null as number | null,
   _rebuildRaf:  null as number | null,
   _healScheduled: false,
+  // Pan instrumentation (see _wirePanTracking). _panActive is read by the alert-rebuild deferral; it is
+  // cleared FIRST on every gesture end so a stuck flag can never hold work back past the next gesture.
+  _panActive: false,
+  _panGesture: null as { startedAt: number; lastMoveAt: number; redraws: number[] } | null,
+  _panWatchdog: null as ReturnType<typeof setTimeout> | null,
+  _panDocWired: false,
+  _lastPan: null as FrameMeterSummary | null,
+  _frameSamples: null as number[] | null,   // set only while _bench runs: per-redraw ms, unbounded by the PerfMonitor ring
   // Remembered vertical scroll offset (vis-timeline's internal scrollTop
   // convention — see _setVScroll/_getVScroll). Replaces the old one-shot
   // _initialVerticalScrollPending guard: "start at the top" is simply the
@@ -386,6 +395,15 @@ export const Timeline = {
     const _initW = Timeline._tl.getWindow();
     Timeline._viewWindow = { start: _initW.start.getTime(), end: _initW.end.getTime() };
     Timeline._nwRange ??= Timeline._nwRangeAround(_initW.start.getTime(), _initW.end.getTime());
+
+    // Pan instrumentation (installed before the handlers below so their order is unchanged). Marks, all ms:
+    //   Timeline.frame        one vis redraw (the synchronous layout+paint of every visible bar)
+    //   Timeline.pan          one pan gesture, first panmove to the end; Timeline.pan.maxGap = longest gap
+    //                         between two redraw completions inside it (redraw count is on Timeline._lastPan)
+    // Timeline._panActive is true while a user pan is in flight. In the console, tl._origRedraw() is the
+    // synchronous call to time (tl.redraw() only marks dirty). Timeline._bench({days, steps, stepPx}) pans
+    // programmatically and prints p50/p95/max; it awaits requestAnimationFrame, which stalls in an occluded window.
+    Timeline._wirePanTracking();
 
     // Refresh the DataView after the user finishes panning/zooming. Debounced so it
     // never fires per-frame during active drag — items already in the window stay
@@ -567,6 +585,99 @@ export const Timeline = {
     const w = (Timeline._tl as unknown as VisInternalTimeline | null)?.body?.domProps?.center?.width;
     if (typeof w === 'number' && w > 0) return w;
     return Timeline._visEl?.querySelector<HTMLElement>('.vis-panel.vis-center')?.clientWidth ?? 0;
+  },
+
+  /** Frame meter on the live vis timeline plus the pan-gesture listeners. The document pointer listeners
+   *  are registered once per page (the handlers read Timeline state, so a re-init needs no second copy). */
+  _wirePanTracking(): void {
+    const tl = Timeline._tl;
+    if (!tl) return;
+    installFrameMeter(tl as unknown as FrameMeterCore);
+    tl.on('rangechange',  p => Timeline._onVisRangeChange(p as VisRangeProps));
+    tl.on('rangechanged', p => Timeline._onVisRangeChanged(p as VisRangeProps));
+    if (!Timeline._panDocWired) {
+      Timeline._panDocWired = true;
+      const end = (): void => Timeline._endPanGesture();
+      document.addEventListener('pointerup', end);
+      document.addEventListener('pointercancel', end);
+    }
+  },
+
+  /** A user pan is `byUser` AND `panmove`: wheel/pinch zoom also report byUser, and a click with hand jitter can
+   *  still emit one panmove, which the watchdog (and the pointerup listener) end. */
+  _onVisRangeChange(props: VisRangeProps | null | undefined): void {
+    if (!(props?.byUser && props.event?.type === 'panmove')) return;
+    const now = performance.now();
+    const g = Timeline._panGesture ?? (Timeline._panGesture = { startedAt: now, lastMoveAt: now, redraws: [] });
+    g.lastMoveAt = now;
+    Timeline._panActive = true;
+    if (Timeline._panWatchdog !== null) clearTimeout(Timeline._panWatchdog);
+    // A cancelled pan never emits rangechanged; with no further panmove for 300 ms the gesture is over.
+    Timeline._panWatchdog = setTimeout(() => Timeline._endPanGesture(g.lastMoveAt), PAN_WATCHDOG_MS);
+  },
+
+  /** vis emits rangechanged at the end of every pan and zoom; with no gesture in flight this only clears. */
+  _onVisRangeChanged(_props?: VisRangeProps | null): void { Timeline._endPanGesture(); },
+
+  /** Ends the gesture: flag first, then the watchdog, then the mark. Safe to call any number of times. */
+  _endPanGesture(endMs?: number): void {
+    Timeline._panActive = false;
+    if (Timeline._panWatchdog !== null) { clearTimeout(Timeline._panWatchdog); Timeline._panWatchdog = null; }
+    const g = Timeline._panGesture;
+    if (!g) return;
+    Timeline._panGesture = null;
+    const s = frameMeterSummary(g.startedAt, endMs ?? performance.now(), g.redraws);
+    Timeline._lastPan = s;
+    PerfMonitor.record('Timeline.pan', s.ms);
+    if (s.redraws >= 2) PerfMonitor.record('Timeline.pan.maxGap', s.maxGapMs);   // durations only: never a count
+  },
+
+  /** Dev console only: pans the window `stepPx` per animation frame for `steps` frames at a `days`-day zoom and
+   *  reports the per-redraw cost. Restores the window afterwards. Never called by the app. */
+  async _bench(opts: { days?: number; steps?: number; stepPx?: number } = {}): Promise<{
+    days: number; steps: number; p50: number; p95: number; max: number; items: number; longTasks: number;
+  } | null> {
+    const tl = Timeline._tl;
+    if (!tl) return null;
+    const days = opts.days ?? 3, steps = opts.steps ?? 60, stepPx = opts.stepPx ?? 40;
+    const raf = (): Promise<void> => new Promise(res => requestAnimationFrame(() => res()));
+    const orig = tl.getWindow();
+    const origStart = orig.start.getTime(), origEnd = orig.end.getTime();
+    const centre = (origStart + origEnd) / 2, span = days * 86_400_000;
+    const samples: number[] = [];
+    let longTasks = 0;
+    let observer: PerformanceObserver | null = null;
+    try {
+      if (typeof PerformanceObserver !== 'undefined' && PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
+        observer = new PerformanceObserver(list => { longTasks += list.getEntries().length; });
+        observer.observe({ type: 'longtask' });
+      }
+    } catch { observer = null; }
+    try {
+      tl.setWindow(new Date(centre - span / 2), new Date(centre + span / 2), { animation: false });
+      await raf();
+      const pxMs = Timeline._centerWidthPx() > 0 ? (Timeline._windowSpanMs() / Timeline._centerWidthPx()) * stepPx : 0;
+      Timeline._frameSamples = samples;
+      let w = tl.getWindow();
+      for (let i = 0; i < steps; i++) {
+        await raf();
+        tl.setWindow(new Date(w.start.getTime() + pxMs), new Date(w.end.getTime() + pxMs), { animation: false });
+        w = tl.getWindow();
+      }
+      await raf();   // let the last queued redraw land
+    } finally {
+      Timeline._frameSamples = null;
+      tl.setWindow(new Date(origStart), new Date(origEnd), { animation: false });
+      if (observer) { longTasks += observer.takeRecords().length; observer.disconnect(); }
+    }
+    const sorted = samples.slice().sort((a, b) => a - b);
+    const pick = (q: number): number => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))] ?? 0;
+    const result = {
+      days, steps, p50: pick(0.5), p95: pick(0.95), max: sorted[sorted.length - 1] ?? 0,
+      items: document.querySelectorAll('.vis-item').length, longTasks,
+    };
+    console.table(result);
+    return result;
   },
 
   /** Self-heal grouped background-item geometry after every vis 'changed'
@@ -2688,6 +2799,72 @@ export function tickerShouldPush(i: TickerPushInput): boolean {
   if (!(i.lastPushedMs > 0) || i.nowMs < i.lastPushedMs) return true;
   if (!(i.windowMs > 0) || !(i.centerPx > 0)) return true;
   return (i.nowMs - i.lastPushedMs) * i.centerPx / i.windowMs >= (i.minPx ?? _ZONE_MIN_PX);
+}
+
+/** vis `rangechange`/`rangechanged` payload, the part the pan tracker reads. */
+interface VisRangeProps { byUser?: boolean; event?: { type?: string } | null }
+
+/** The vis Timeline's own redraw pair (undocumented, own writable properties on the instance in 7.7.3):
+ *  `_origRedraw` is the bound synchronous redraw, `_redraw` the rAF throttle over it. */
+export interface FrameMeterCore { _origRedraw?: unknown; _redraw?: unknown; _nimbusFrameMeter?: boolean }
+export interface FrameMeterSummary { ms: number; redraws: number; maxGapMs: number }
+
+/** Pan gesture summary: duration (never negative), redraw count and the longest gap between consecutive
+ *  redraw completions (0 with fewer than two). Only `ms` and `maxGapMs` are ever recorded as PerfMonitor marks. */
+export function frameMeterSummary(startMs: number, endMs: number, redrawStamps: ReadonlyArray<number>): FrameMeterSummary {
+  let maxGapMs = 0;
+  for (let i = 1; i < redrawStamps.length; i++) maxGapMs = Math.max(maxGapMs, redrawStamps[i] - redrawStamps[i - 1]);
+  return { ms: Math.max(0, endMs - startMs), redraws: redrawStamps.length, maxGapMs };
+}
+
+/** vis's own throttle semantics, re-created so it can call a replaced `_origRedraw` dynamically: any number of
+ *  calls inside one frame schedule exactly one rAF; the callback runs `fn` once; never synchronous. */
+function _ownRafThrottle(fn: () => void): () => void {
+  let scheduled = false;
+  return () => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => { scheduled = false; fn(); });
+  };
+}
+
+let _frameMeterWarned = false;
+
+/** Times every real vis redraw into `Timeline.frame`. Replaces BOTH `_origRedraw` (timed) and `_redraw` (a fresh
+ *  rAF throttle that calls `core._origRedraw()` dynamically): replacing only `_origRedraw` leaves vis's throttle
+ *  calling the old function (measures nothing), and a synchronous `_redraw` would destroy the rAF coalescing.
+ *  Returns false, leaving the object untouched, on a second install or when the private surface is not as expected. */
+export function installFrameMeter(core: FrameMeterCore | null | undefined): boolean {
+  if (!core || core._nimbusFrameMeter) return false;
+  const writable = (k: '_origRedraw' | '_redraw'): boolean => {
+    const d = Object.getOwnPropertyDescriptor(core, k);
+    return typeof core[k] === 'function' && (!d || d.writable === true);
+  };
+  if (!writable('_origRedraw') || !writable('_redraw') || !Object.isExtensible(core)) {
+    if (!_frameMeterWarned) { _frameMeterWarned = true; ErrorLog.warn('timeline', 'frame meter disabled: vis redraw internals not as expected'); }
+    return false;
+  }
+  const origRedraw = core._origRedraw, origThrottle = core._redraw;
+  try {
+    const orig = origRedraw as (...a: unknown[]) => unknown;
+    core._origRedraw = function (this: unknown, ...args: unknown[]): unknown {
+      const t0 = performance.now();
+      try { return orig.apply(this, args); }
+      finally {
+        const t1 = performance.now();
+        PerfMonitor.record('Timeline.frame', t1 - t0);
+        Timeline._frameSamples?.push(t1 - t0);
+        Timeline._panGesture?.redraws.push(t1);
+      }
+    };
+    core._redraw = _ownRafThrottle(() => (core._origRedraw as () => void)());
+    core._nimbusFrameMeter = true;
+    return true;
+  } catch (e) {
+    core._origRedraw = origRedraw; core._redraw = origThrottle;   // never leave vis half-patched
+    if (!_frameMeterWarned) { _frameMeterWarned = true; ErrorLog.warn('timeline', 'frame meter install failed: ' + String(e)); }
+    return false;
+  }
 }
 
 export function navLayout(lineCount: number): NavLayout {
