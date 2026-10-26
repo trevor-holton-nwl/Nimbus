@@ -43,6 +43,7 @@ frontend/scheduling/gantt-legend.mjs
 frontend/scheduling/gantt-lanes.mjs
 frontend/scheduling/nonworking-spans.mjs
 frontend/scheduling/orders.mjs
+frontend/scheduling/planning-reason.mjs
 frontend/optimization/optimize-ui.mjs
 frontend/optimization/optimizer-worker-client.mjs
 frontend/optimization/optimizer-worker-contract.mjs

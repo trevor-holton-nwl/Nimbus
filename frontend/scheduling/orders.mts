@@ -38,6 +38,7 @@ import { Runtime } from '../routing/runtime-client.mjs';
 import { Persistence } from './persistence.mjs';
 import { SetupAdmin } from '../setup/setup-admin.mjs';
 import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
+import { planningReasonText } from './planning-reason.mjs';
 import { Timeline, TimelineNav, setupDiagnosticLabel, setupSourceLabel } from './gantt.mjs';
 import type { SetupPresentationDetail } from './gantt.mjs';
 import type { NimbusTask, SetupStateKey, SetupOccurrenceOverride } from '../platform/types.mjs';
@@ -386,20 +387,11 @@ export const Table = {
    *  has since made fit (a `queued_now_fits` alert exists for it) reads "Now fits the calendar" instead; display
    *  only, nothing is persisted and Optimize or a placement still clears the real reason. */
   _planningReasonText(task: NimbusTask | undefined): string {
-    const reason = task?.planning_reason;
-    if (!task || !reason) return '';
-    if (reason.code === 'planner_unscheduled') return Util.t('planning_reason.planner_unscheduled');
-    if (reason.code === 'overlong_never') {
-      const fits = (Store.alertsByTask().get(String(task.id)) || []).some(a => a.type === 'queued_now_fits');
-      return Util.t(fits ? 'planning_reason.overlong_released_pending' : 'planning_reason.overlong_never');
-    }
-    if (reason.code === 'segment_floor_unfittable') return Util.t('planning_reason.segment_floor_unfittable');
-    if (reason.code === 'push_limit_unmet') return Util.t('planning_reason.push_limit_unmet');
-    const extra = reason as { run_time?: number; cap_hours?: number };
-    if (reason.code === 'run_time_over_cap' && typeof extra.run_time === 'number' && typeof extra.cap_hours === 'number') {
-      return Util.t('planning_reason.run_time_over_cap', { hours: String(Math.round(extra.run_time * 10) / 10), cap: String(Math.round(extra.cap_hours * 10) / 10) });
-    }
-    return reason.message ?? '';
+    if (!task?.planning_reason) return '';
+    // The alert lookup is only needed for an overlong_never reason (it is the one text that reads it).
+    const nowFits = task.planning_reason.code === 'overlong_never'
+      && (Store.alertsByTask().get(String(task.id)) || []).some(a => a.type === 'queued_now_fits');
+    return planningReasonText(task.planning_reason, (k, v) => Util.t(k, v), { nowFits });
   },
 
   /** Due Date / Planned Start / Planned Finish columns (backward scheduling OQ1, OQ16). The FINISH is the input
