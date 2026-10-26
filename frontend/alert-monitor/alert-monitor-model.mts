@@ -226,9 +226,10 @@ export const GROUP_ROW_CAP = 40;
 export const ROW_H = 44;
 /**
  * Height (px) of the inline diagnose panel under an order row: 20 padding + the help sentence (two 17 px
- * lines at most, clamped) + 6 gap + two rows of the field grid (2 x 28 + 6) + slack. Keep `.am-diag` in styles.css in step.
+ * lines at most, clamped) + 6 gap + three rows of the field grid (3 x 28 + 2 x 6; a queued order's Suggested slot
+ * field makes the third) + slack. Keep `.am-diag` in styles.css in step.
  */
-export const DIAG_H = 132;
+export const DIAG_H = 166;
 /** The alert types a group's "Move N orders" moves: `overload` is excluded, its fix runs the line-day changeover optimizer. */
 export const MOVABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'tool-conflict']);
 /** Above this many orders "Move N orders" asks first. */
