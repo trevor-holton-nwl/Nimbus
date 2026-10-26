@@ -48,4 +48,6 @@ Profiles are shared across a plant; any authenticated user with plant access can
 
 `tests/test_alert_profiles.py` (routes, no DB: standalone app + `dependency_overrides` + monkeypatched data functions) and `tests/test_alert_profiles_data.py` (data layer; `pg` tests need `NIMBUS_TEST_DB=1` and a local Postgres).
 
-**`queued_now_fits` (2026-10-23).** `ALERT_TYPES` gained `queued_now_fits` (a frontend-produced exceptions-category alert, see `frontend/insights/CLAUDE.md`); keep it in step with the `AlertType` union and `ALERT_CATEGORIES`.
+**`queued_now_fits` (2026-10-23).** `ALERT_TYPES` gained `queued_now_fits` (a frontend-produced alert, in the `planning` category since 2026-10-26 and in `exceptions` before that, see `frontend/insights/CLAUDE.md`); keep it in step with the `AlertType` union and `ALERT_CATEGORIES`.
+
+**`needs_planning` (2026-10-26).** `ALERT_TYPES` gained `needs_planning` (one frontend-produced alert per queued order, category `planning`, see `frontend/insights/CLAUDE.md`; the Alert Monitor's "Slot…" action in `frontend/alert-monitor/CLAUDE.md`). No migration and no new route: the whitelist is all this domain needed, so an explicit-type rule that ticks it now validates. The tests are `tests/test_alert_profiles_data.py::test_alert_types_exclude_never_firing`, which asserts both queued types are present.

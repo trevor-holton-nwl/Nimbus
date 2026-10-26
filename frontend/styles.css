@@ -113,7 +113,8 @@ h1, h2, h3, h4 {
      (worst CVD pair dE 6.3, the floor band: the severity ring, legend and bar label are the secondary
      encoding); every fill/fg pair is >= 4.5:1. Planning (#e8602a) was re-checked as a sixth fill: worst
      normal-vision pair against the other five fills dE 16.9 (>= 15). It is not compared with the bar blue/red:
-     a queued (Needs Planning) row draws no Gantt bar, so the fill shows only in the legend and the Overview. */
+     a queued (Needs Planning) row draws no Gantt bar, so the fill shows only in the legend and the Overview;
+     revisit if a planning-coloured bar is ever drawn. */
   --bar-pm-capacity:   #e0a800;  --bar-pm-capacity-fg:   #0c1c30;
   --bar-pm-conflicts:  #8750f0;  --bar-pm-conflicts-fg:  #ffffff;
   --bar-pm-calendar:   #14b8a6;  --bar-pm-calendar-fg:   #0c1c30;
