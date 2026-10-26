@@ -831,7 +831,7 @@ const ALERT_MONITOR_KEYS = [
   'am.ov_later', 'am.ov_err', 'am.ov_warn', 'am.ov_window', 'am.ov_day_aria',
   'am.ov_line_aria', 'am.ov_overload', 'am.ov_more', 'am.ov_fewer', 'am.ov_cat_aria',
   'am.ov_conf_aria', 'am.ov_conf_after', 'am.ov_conf_after_aria', 'am.ov_showing', 'am.ov_clear',
-  'am.ov_remove', 'am.ov_narrow_empty',
+  'am.ov_remove', 'am.ov_narrow_empty', 'am.slot',
 ];
 
 test('Alert Monitor keys exist in all five locales, non-empty, with the same {{placeholder}} set as en.js', () => {

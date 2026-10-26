@@ -159,6 +159,56 @@ test('What-If disables the Fix and Override buttons with the explanatory title; 
   assert.match(ov, /data-alert-action="focus"/, 'Go To stays live');
 });
 
+test('Slot only appears on needs_planning rows with a taskId, never alongside Fix or Override', () => {
+  assert.equal(rowActionsFor({ type: 'needs_planning', taskId: '10' }).slot, true);
+  assert.equal(rowActionsFor({ type: 'needs_planning' }).slot, false, 'no taskId, no slot');
+  assert.equal(rowActionsFor({ type: 'needs_planning', taskId: '' }).slot, false);
+  for (const type of ['overlap', 'blackout', 'overload', 'tool-conflict', 'closed', 'firmed-closed', 'late']) {
+    assert.equal(rowActionsFor({ type, taskId: '10' }).slot, false, type);
+    assert.doesNotMatch(rowHtml(view({ type }), t), /data-alert-action="slot"/, type);
+  }
+  const acts = rowActionsFor({ type: 'needs_planning', taskId: '10' });
+  assert.deepEqual([acts.fix, acts.override, acts.slot], [false, false, true], 'the sets are disjoint');
+  const html = rowHtml(view({ type: 'needs_planning' }), t);
+  assert.match(html, /<button[^>]*class="btn btn-ghost sm am-act-2"[^>]*data-alert-action="slot" data-alert-id="a1" data-task-id="10"/);
+  assert.doesNotMatch(html, /data-alert-action="(fix|override)"/);
+  assert.equal((html.match(/<button/g) ?? []).length, 3, 'Go to + Slot + the menu trigger');
+  assert.doesNotMatch(rowHtml(view({ type: 'needs_planning', taskId: undefined }), t), /data-alert-action="slot"/);
+  assert.equal(rowPrimaryActions({ type: 'needs_planning', taskId: '10' }, null, { whatIf: false, acked: false }).second, 'slot');
+  assert.equal(rowPrimaryActions({ type: 'needs_planning' }, { id: 7 }, { whatIf: false, acked: false }).second, 'slot', 'the order handed in stands in for a missing taskId');
+});
+
+test('the Slot button splits its glyph from the label; aria-label and title carry the text', () => {
+  const real = (k, v) => ({ 'am.slot': '◫ Slot…' }[k] ?? t(k, v));
+  const html = rowHtml(view({ type: 'needs_planning' }), real);
+  assert.match(html, /<button[^>]*class="btn btn-ghost sm am-act-2"[^>]*aria-label="Slot…"[^>]*title="Slot…"[^>]*><span class="am-glyph" aria-hidden="true">◫<\/span><span class="lbl">Slot…<\/span><\/button>/);
+});
+
+test('the Slot button escapes the task id', () => {
+  const html = rowHtml(view({ type: 'needs_planning', taskId: '1"><u>' }), t);
+  assert.doesNotMatch(html, /<u>/);
+  assert.match(html, /data-task-id="1&quot;&gt;&lt;u&gt;"/);
+});
+
+test('the ⋯ menu for a needs_planning row: Go to, Slot…, Diagnose, Acknowledge; Slot is locked in What-If', () => {
+  const a = { type: 'needs_planning', taskId: '10', line: 'L1', time: new Date() };
+  const p = rowPrimaryActions(a, null, { whatIf: false, acked: false });
+  assert.deepEqual(p.menu.map(m => [m.action, m.labelKey, !!m.disabled]), [
+    ['focus', 'btn.go_to', false], ['slot', 'am.slot', false], ['diagnose', 'am.diagnose', false], ['ack', 'am.ack', false],
+  ]);
+  const locked = rowPrimaryActions(a, null, { whatIf: true, acked: false });
+  const s = locked.menu.find(m => m.action === 'slot');
+  assert.deepEqual([s.disabled, s.hintKey], [true, 'am.whatif_blocked']);
+  assert.ok(locked.menu.filter(m => m.action !== 'slot').every(m => !m.disabled));
+  assert.deepEqual(rowPrimaryActions({ type: 'needs_planning', line: 'L1', time: new Date() }, null, { whatIf: false, acked: false }).menu.map(m => m.action), ['focus', 'diagnose', 'ack'], 'no taskId, no Slot');
+});
+
+test('What-If disables the Slot button with the explanatory title; Go to stays live', () => {
+  const html = rowHtml(view({ type: 'needs_planning', whatIf: true }), t);
+  assert.match(html, /<button[^>]*data-alert-action="slot"[^>]*disabled aria-disabled="true" title="am\.whatif_blocked"/);
+  assert.match(html, /data-alert-action="focus"/);
+});
+
 test('diagnose: order alerts expand inline (help sentence first), line/day alerts open the cell briefing', () => {
   assert.equal(rowActionsFor({ type: 'overload', line: 'L1', time: new Date() }).diagnose, 'cell');
   assert.equal(rowActionsFor({ type: 'late', taskId: '1', line: 'L1', time: new Date() }).diagnose, 'order');

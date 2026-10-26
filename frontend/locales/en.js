@@ -2706,6 +2706,7 @@ window.__NIMBUS_LOCALES.en = {
   'am.profile_missing': 'Your saved alert profile for this plant no longer exists; showing all alerts',
   'am.open_in_table': 'Open these {{n}} orders in the table',
   'am.diagnose': 'Diagnose',
+  'am.slot': '◫ Slot…',
   'am.ack': 'Acknowledge…',
   'am.ack_by': 'Acknowledged by {{who}} until {{until}}',
   'am.ack_by_noend': 'Acknowledged by {{who}}',

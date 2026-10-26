@@ -2460,6 +2460,7 @@ window.__NIMBUS_LOCALES.pt = {
   'am.profile_missing': 'O seu perfil de alertas salvo para esta planta não existe mais; mostrando todos os alertas',
   'am.open_in_table': 'Abrir estes {{n}} pedidos na tabela',
   'am.diagnose': 'Diagnosticar',
+  'am.slot': '◫ Espaço…',
   'am.ack': 'Reconhecer…',
   'am.ack_by': 'Reconhecido por {{who}} até {{until}}',
   'am.ack_by_noend': 'Reconhecido por {{who}}',

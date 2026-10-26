@@ -2500,6 +2500,7 @@ window.__NIMBUS_LOCALES.de = {
   'am.profile_missing': 'Ihr gespeichertes Warnungsprofil für dieses Werk existiert nicht mehr; alle Warnungen werden angezeigt',
   'am.open_in_table': 'Diese {{n}} Aufträge in der Tabelle öffnen',
   'am.diagnose': 'Analysieren',
+  'am.slot': '◫ Platz…',
   'am.ack': 'Quittieren…',
   'am.ack_by': 'Quittiert von {{who}} bis {{until}}',
   'am.ack_by_noend': 'Quittiert von {{who}}',

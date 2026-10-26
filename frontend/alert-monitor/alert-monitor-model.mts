@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -239,7 +239,7 @@ const _esc = (s: unknown): string => String(s ?? '')
 
 export type DiagnoseKind = 'cell' | 'order' | 'none';
 
-export interface RowActions { goto: boolean; fix: boolean; override: boolean; diagnose: DiagnoseKind }
+export interface RowActions { goto: boolean; fix: boolean; override: boolean; slot: boolean; diagnose: DiagnoseKind }
 
 /** Which actions an alert row offers — the same eligibility the drawer uses, plus Diagnose. */
 export function rowActionsFor(a: { type: string; taskId?: string | null; line?: string; time?: Date | null }): RowActions {
@@ -248,6 +248,7 @@ export function rowActionsFor(a: { type: string; taskId?: string | null; line?: 
     goto: hasTask || !!(a.line && a.time),
     fix: FIXABLE_ALERT_TYPES.has(a.type),
     override: OVERRIDE_ALERT_TYPES.has(a.type) && hasTask,
+    slot: SLOT_ALERT_TYPES.has(a.type) && hasTask,
     diagnose: hasTask ? 'order' : (a.line && a.time ? 'cell' : 'none'),
   };
 }
@@ -363,7 +364,7 @@ export function rowPrefix(v: Pick<RowView, 'line' | 'orderNo' | 'message' | 'msg
   return parts.join(' · ');
 }
 
-export type RowActionId = 'focus' | 'fix' | 'override' | 'diagnose' | 'ack' | 'unack';
+export type RowActionId = 'focus' | 'fix' | 'override' | 'slot' | 'diagnose' | 'ack' | 'unack';
 
 export interface RowMenuItem {
   action: RowActionId;
@@ -376,15 +377,15 @@ export interface RowMenuItem {
 export interface RowPrimary {
   /** The row's [Go to] button. */
   goto: boolean;
-  /** The row's second button, when the alert is eligible: Fix or Override (never both: the type sets are disjoint). */
-  second?: 'fix' | 'override';
-  /** The ⋯ menu, in order: Go to, Fix / Override, Diagnose, Acknowledge… / Remove acknowledgement. Never Dismiss. */
+  /** The row's second button, when the alert is eligible: Fix, Override or Slot (never two: the type sets are disjoint). */
+  second?: 'fix' | 'override' | 'slot';
+  /** The ⋯ menu, in order: Go to, Fix / Override / Slot…, Diagnose, Acknowledge… / Remove acknowledgement. Never Dismiss. */
   menu: RowMenuItem[];
 }
 
 /**
  * What a row offers. Eligibility is `rowActionsFor` (the drawer's). `task` is the order the alert names (or null);
- * it stands in for a missing `taskId` on the alert. Fix / Override are disabled in What-If.
+ * it stands in for a missing `taskId` on the alert. Fix / Override / Slot are disabled in What-If.
  */
 export function rowPrimaryActions(
   a: { type: string; taskId?: string | null; line?: string; time?: Date | null },
@@ -393,12 +394,13 @@ export function rowPrimaryActions(
 ): RowPrimary {
   const taskId = a.taskId != null && a.taskId !== '' ? a.taskId : (task?.id != null ? String(task.id) : a.taskId);
   const acts = rowActionsFor({ ...a, taskId });
-  const second: RowPrimary['second'] = acts.fix ? 'fix' : acts.override ? 'override' : undefined;
+  const second: RowPrimary['second'] = acts.fix ? 'fix' : acts.override ? 'override' : acts.slot ? 'slot' : undefined;
   const lock = (item: RowMenuItem): RowMenuItem => (ctx.whatIf ? { ...item, disabled: true, hintKey: 'am.whatif_blocked' } : item);
   const menu: RowMenuItem[] = [];
   if (acts.goto) menu.push({ action: 'focus', labelKey: 'btn.go_to' });
   if (second === 'fix') menu.push(lock({ action: 'fix', labelKey: 'btn.fix_it' }));
   if (second === 'override') menu.push(lock({ action: 'override', labelKey: 'btn.override' }));
+  if (second === 'slot') menu.push(lock({ action: 'slot', labelKey: 'am.slot' }));
   if (acts.diagnose !== 'none') menu.push({ action: 'diagnose', labelKey: 'am.diagnose' });
   menu.push(ctx.acked ? { action: 'unack', labelKey: 'am.unack' } : { action: 'ack', labelKey: 'am.ack' });
   return { goto: acts.goto, second, menu };
@@ -443,6 +445,11 @@ export function rowHtml(v: RowView, t: Translate): string {
     const label = t('btn.override');
     const text = _splitGlyph(label).text;
     buttons.push(`<button type="button" class="btn btn-ghost sm am-act-2" data-alert-action="override" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}" aria-label="${_esc(text)}"`
+      + (v.whatIf ? lock : ` title="${_esc(text)}"`) + `>${_glyphBtnInner(label)}</button>`);
+  } else if (p.second === 'slot') {
+    const label = t('am.slot');
+    const text = _splitGlyph(label).text;
+    buttons.push(`<button type="button" class="btn btn-ghost sm am-act-2" data-alert-action="slot" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}" aria-label="${_esc(text)}"`
       + (v.whatIf ? lock : ` title="${_esc(text)}"`) + `>${_glyphBtnInner(label)}</button>`);
   }
   buttons.push(`<button type="button" class="icon-btn sm am-row-menu" data-alert-id="${id}" data-ovf-key="${id}" aria-haspopup="menu" aria-expanded="false"`

@@ -2461,6 +2461,7 @@ window.__NIMBUS_LOCALES.fr = {
   'am.profile_missing': 'Votre profil d’alertes enregistré pour cette usine n’existe plus ; toutes les alertes sont affichées',
   'am.open_in_table': 'Ouvrir ces {{n}} commandes dans le tableau',
   'am.diagnose': 'Diagnostiquer',
+  'am.slot': '◫ Créneau…',
   'am.ack': 'Acquitter…',
   'am.ack_by': 'Acquittée par {{who}} jusqu’au {{until}}',
   'am.ack_by_noend': 'Acquittée par {{who}}',

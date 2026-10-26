@@ -2461,6 +2461,7 @@ window.__NIMBUS_LOCALES.es = {
   'am.profile_missing': 'Su perfil de alertas guardado para esta planta ya no existe; se muestran todas las alertas',
   'am.open_in_table': 'Abrir estos {{n}} pedidos en la tabla',
   'am.diagnose': 'Diagnosticar',
+  'am.slot': '◫ Hueco…',
   'am.ack': 'Reconocer…',
   'am.ack_by': 'Reconocida por {{who}} hasta {{until}}',
   'am.ack_by_noend': 'Reconocida por {{who}}',
