@@ -4661,10 +4661,10 @@ class TestBundle3RewriteSafety(_ReweightFixtureBase):
             [self._row(self.ORD, 200.0), self._row(self.ORD2)], batch_id)
         real = distribution_data._apply_children
 
-        def flaky(cur, parent):
+        def flaky(cur, parent, events_out=None):
             if parent["production_order"] == self.ORD2:
                 raise RuntimeError("boom")
-            return real(cur, parent)
+            return real(cur, parent, events_out)
 
         with mock.patch.object(distribution_data, "_apply_children", side_effect=flaky),                 pg._pool.connection() as conn:
             res = distribution_data.apply(plan_struct, batch_id, conn)
@@ -4842,14 +4842,14 @@ class TestApplyAndRepairLockOrderNeverDeadlocks(_ReweightFixtureBase):
             real = distribution_data._apply_children
             paused, release = threading.Event(), threading.Event()
 
-            def stepped(cur, parent):
+            def stepped(cur, parent, events_out=None):
                 rows = parent["child_rows"]
                 if len(rows) < 2:
-                    return real(cur, parent)
-                n = real(cur, dict(parent, child_rows=rows[:1]))
+                    return real(cur, parent, events_out)
+                n = real(cur, dict(parent, child_rows=rows[:1]), events_out)
                 paused.set()
                 release.wait(30)
-                return n + real(cur, dict(parent, child_rows=rows[1:]))
+                return n + real(cur, dict(parent, child_rows=rows[1:]), events_out)
 
             res = {}
 
@@ -4909,8 +4909,8 @@ class TestApplyAndRepairLockOrderNeverDeadlocks(_ReweightFixtureBase):
             real = distribution_data._repair_one_header
             seen, first_done, release = [], threading.Event(), threading.Event()
 
-            def stepped(cur, plant, order, material, header):
-                r = real(cur, plant, order, material, header)
+            def stepped(cur, plant, order, material, header, **kwargs):
+                r = real(cur, plant, order, material, header, **kwargs)
                 seen.append(order)
                 if len(seen) == 1:
                     first_done.set()

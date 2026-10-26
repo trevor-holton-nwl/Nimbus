@@ -16,6 +16,9 @@ from backend.schedule_events.events import (
 )
 from tests.support.planning_pg import cleanup_schedule_events
 
+# Registers the planning_pg fixture (the pg-marked classes below use it); importing the helper alone does not.
+pytest_plugins = ("tests.support.planning_pg",)
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MIGRATION = os.path.join(ROOT, "migrations", "2026-10-23-1-schedule-event.sql")
 SCHEMA = os.path.join(ROOT, "schema.sql")
@@ -878,7 +881,7 @@ def test_zero_open_reset_records_only_orders_that_actually_changed(pe):
 
 @pytest.mark.pg
 class TestRoutingResolverEvents:
-    SUB, PLANT, MATERIAL = "ZZTEST_SE5_S", "ZZTEST_SE5P", "ZZTEST_SE5_M"
+    SUB, PLANT, MATERIAL = "ZZTEST_SE5_S", "ZZSE5P", "ZZTEST_SE5_M"  # plants.plant is varchar(10)
     M1, W1 = "ZZTEST_SE5_L1", "ZZTEST_SE5_W1"
     START = dt.datetime(2026, 10, 5, 8)
 
@@ -1057,7 +1060,7 @@ class TestDistributionHooks:
         self.pg = pg
         self.actor = planning_pg.actor
         self.WC, self.L1, self.L2 = f"ZZTEST_WC_SE{t}", f"ZZTEST_L1_SE{t}", f"ZZTEST_L2_SE{t}"
-        self.ORD, self.MAT = f"ZZTEST_ORD_SE{t}", f"ZZTEST_MAT_SE{t}"
+        self.ORD, self.MAT = f"ZZTEST_ORD_SE{t}", f"ZZMAT_SE{t}"  # materials.material_id is varchar(18)
         import backend.schedule_events.data as se_data
         se_data.ensure_schedule_event_table()
         with pg._pool.connection() as conn, conn.cursor() as cur:
@@ -1213,7 +1216,8 @@ def test_sap_production_version_change_records_one_net_row(ing):
     second = {**first, "production_version": "0002", "sap_production_version": "0002"}
     _ing_upload(ing, [second], source="sap")
     evs = _ing_events(ing, order_id=oid)
-    pv_rows = [e for e in evs if "production_version" in e[5]]
+    # The first upload's create row carries the initial value too; the net change is the one modify row.
+    pv_rows = [e for e in evs if e[1] == "modify" and "production_version" in e[5]]
     assert len(pv_rows) == 1
     assert pv_rows[0][5]["production_version"] == ["0001", "0002"]
     assert pv_rows[0][2] == "sap_ingest"
