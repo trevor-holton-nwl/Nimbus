@@ -2404,6 +2404,21 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
+     MODAL: Slot a Needs Planning order (body/foot rendered by AlertSlotModal).
+     data-no-backdrop-close: the module's own close() must run (it destroys the picker and clears its state).
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-alert-slot" data-no-backdrop-close hidden>
+  <div class="modal">
+    <header class="modal-head">
+      <h3 id="asl-title" data-i18n="am.slot_title">Slot order</h3>
+      <button class="icon-btn sm" id="asl-close" type="button" aria-label="Close" data-i18n-title="btn.close">✕</button>
+    </header>
+    <div class="modal-body" id="asl-body"></div>
+    <footer class="modal-foot" id="asl-foot"></footer>
+  </div>
+</div>
+
+<!-- =========================================================
      MODAL: Date Override
      ========================================================= -->
 <div class="modal-backdrop" id="modal-override" hidden>
