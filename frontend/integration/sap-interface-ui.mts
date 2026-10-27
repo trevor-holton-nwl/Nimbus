@@ -1332,16 +1332,20 @@ export const Interface = (() => {
         const generic = orders.length > 0 && orders.every((x) => x.key != null);
         const row = (x: StageDeletion): string => {
           if (generic) return `<tr><td>${Util.escapeHtml(x.key ?? '')}</td></tr>`;
-          const firmed = !!x.manual_firmed || x.firming_indicator === 'X';
+          // Two separate flags (universal firm D5): the planner's firm locks the order in NIMBUS; the SAP firming
+          // indicator is display-only. The old single "Firmed" column mixed them.
+          const plannerFirm = !!x.manual_firmed;
+          const sapFirmed = String(x.firming_indicator ?? '').trim().toUpperCase() === 'X';
           return `<tr><td>${Util.escapeHtml(x.production_order ?? '')}</td><td>${Util.escapeHtml(x.material_number ?? '')}</td>`
             + `<td>${Util.escapeHtml(x.machine ?? '')}</td><td>${Util.escapeHtml(_fmtTs(x.scheduled_end ?? null))}</td>`
-            + `<td>${firmed ? Util.escapeHtml(Util.t('ui.sap_stage_firmed_yes')) : ''}</td>`
+            + `<td>${plannerFirm ? Util.escapeHtml(Util.t('ui.sap_stage_firmed_yes')) : ''}</td>`
+            + `<td>${sapFirmed ? 'X' : ''}</td>`
             + `<td>${x.running ? `<b>${Util.escapeHtml(Util.t('ui.sap_stage_running_yes'))}</b>` : ''}</td></tr>`;
         };
         const head = generic
           ? `<th>${Util.escapeHtml(Util.t('ui.sap_stage_col_key'))}</th>`
           : `<th>${Util.escapeHtml(Util.t('ui.sap_stage_col_order'))}</th><th>${Util.escapeHtml(Util.t('col.material'))}</th><th>${Util.escapeHtml(Util.t('col.machine'))}</th>
-            <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_end'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_firmed'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_running'))}</th>`;
+            <th>${Util.escapeHtml(Util.t('ui.sap_stage_col_end'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_firmed'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_sap_firmed'))}</th><th>${Util.escapeHtml(Util.t('ui.sap_stage_col_running'))}</th>`;
         if (!generic && orders.length > 0) {
           const running = orders.filter((x) => x.running).length;
           notice = `<div class="sap-banner sap-banner-err"><span class="sap-banner-ico">⚠</span><div><b>${Util.escapeHtml(Util.t('ui.sap_stage_delete_notice'))}</b>`

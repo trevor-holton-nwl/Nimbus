@@ -474,7 +474,7 @@ test('SAP staging (Admin > Interface > Staging) keys exist in all 5 locales', ()
     'ui.sap_stage_held_banner', 'ui.sap_stage_held_routing',
     'ui.sap_stage_vanish', 'ui.sap_stage_deletions', 'ui.sap_stage_deletions_more', 'ui.sap_stage_counts',
     'ui.sap_stage_time_received', 'ui.sap_stage_time_ready', 'ui.sap_stage_time_validated', 'ui.sap_stage_time_applied',
-    'ui.sap_stage_col_order', 'ui.sap_stage_col_end', 'ui.sap_stage_col_firmed',
+    'ui.sap_stage_col_order', 'ui.sap_stage_col_end', 'ui.sap_stage_col_firmed', 'ui.sap_stage_col_sap_firmed',
     'ui.sap_stage_col_key', 'ui.sap_stage_deletions_rows',
     'ui.sap_stage_col_deleted_at', 'ui.sap_stage_col_deleted_by', 'ui.sap_stage_firmed_yes',
     'ui.sap_stage_confirm_msg',
