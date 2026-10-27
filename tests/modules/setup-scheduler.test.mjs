@@ -6059,3 +6059,50 @@ test('window-end boundary: explicit scope (Remove Backlog) exempts the order and
   const noFirm = Engine.evaluateSetupAware('due-date', dueDateBounds({ ...setupTruth(), plant_active: true }), { ...snapshot, firmedIds: [] });
   assert.deepEqual([...noFirm.windowEndHeldIds], ['straddle']);
 });
+
+// ---- setup value defaults (2026-10-27, Wave B) ----
+const withValueDefaults = (truth, defaults) => ({ ...truth, value_defaults: defaults });
+const REDVD = [{ field_key: 'colorWheel', value: 'RED', setup_min: 20, signature_version: 1 }];
+
+test('value default: a pair with no row is covered and charged the default, not the plant default', () => {
+  const red = scheduledTask('vd-red', 1, 'RED', '2026-08-03T12:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    policySnapshot([red], { unknownSetupPolicy: 'plantDefaultMinutes', unknownSetupDefaultMinutes: 45, version: 2 }),
+    dueDateBounds(withValueDefaults(UNCOVERED(), REDVD)),
+  );
+  assert.equal(patchFor(result, 'vd-red').changes.start_date.getTime(), at('2026-08-03T08:20').getTime(),
+    '20 default minutes (not the 45 plant default) precede the first productive minute');
+  assert.equal(result.objective?.setupMinutes, 20);
+  assert.equal(result.explanation.some(r => r.code === 'admitted-without-setup' && r.taskId === 'vd-red'), false);
+  assert.equal(result.missingEdges.some(e => e.successorOrderId === 'vd-red'), false, 'a default-covered edge is not a missing edge');
+});
+
+test('value default: excludeFromSearch admits a default-covered pair instead of queueing it', () => {
+  const red = scheduledTask('vd-ered', 1, 'RED', '2026-08-03T12:00');
+  const result = SetupScheduler.evaluateDueDateFirst(
+    policySnapshot([red], { unknownSetupPolicy: 'excludeFromSearch', version: 2 }),
+    dueDateBounds(withValueDefaults(UNCOVERED(), REDVD)),
+  );
+  assert.ok(patchFor(result, 'vd-ered'), 'the order is placed');
+  assert.equal(result.dispositions.some(d => d.id === 'vd-ered' && d.status === 'needs_planning'), false);
+  // Control: without the default the same order is queued.
+  const control = SetupScheduler.evaluateDueDateFirst(
+    policySnapshot([scheduledTask('vd-ered', 1, 'RED', '2026-08-03T12:00')], { unknownSetupPolicy: 'excludeFromSearch', version: 2 }),
+    dueDateBounds(UNCOVERED()),
+  );
+  assert.equal(control.dispositions.find(d => d.id === 'vd-ered')?.status, 'needs_planning');
+});
+
+test('value default: the Gantt observation agrees with the optimizer (same minutes, no uncovered diagnostic), also on a setup-off plant', () => {
+  const t = (id, color, s, e) => ({ id, PLANT: 'P1', MACHINE: 'L1', COLOR: color, RUN_TIME: 1, start_date: at(s), end_date: at(e) });
+  const tasks = [t('vd-a', 'GREEN', '2026-08-03T08:00:00', '2026-08-03T09:00:00'), t('vd-b', 'RED', '2026-08-03T09:30:00', '2026-08-03T10:30:00')];
+  for (const plant_active of [true, false]) {
+    const setup = { ...withValueDefaults(setupTruth({ current: null }), REDVD), plant_active };
+    const obs = deriveSetupObservation(setup, tasks, new Set(['L1']));
+    assert.equal(obs.diagnostics.some(d => d.type === 'setup-uncovered'), false);
+    assert.equal(obs.intervals.length, 1);
+    assert.equal(obs.intervals[0].requiredMinutes, 20);
+  }
+  const noDefaults = deriveSetupObservation(setupTruth({ current: null }), tasks, new Set(['L1']));
+  assert.equal(noDefaults.diagnostics.some(d => d.type === 'setup-uncovered'), true, 'control: uncovered without the default');
+});

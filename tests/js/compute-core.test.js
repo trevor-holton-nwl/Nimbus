@@ -211,6 +211,7 @@ test('computeAlerts reports resolved setup violations and de-duplicates supplied
     { required: 60, available: 20, short: 40, line: 'L' },
   );
   assert.equal(alerts.filter(alert => alert.type === 'setup-uncovered').length, 1);
+  assert.match(alerts.find(alert => alert.type === 'setup-uncovered').msg, /Add a setup rule or a default by value./);
   assert.deepEqual(alerts.filter(alert => alert.type !== 'setup-violated' && alert.type !== 'setup-uncovered').map(alert => alert.type).sort(), [
     'current-state-diverged', 'initial-state-unknown', 'override-inactive',
   ]);
