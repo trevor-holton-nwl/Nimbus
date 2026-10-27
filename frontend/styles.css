@@ -104,7 +104,7 @@ h1, h2, h3, h4 {
   --l5: #3c6e7a; --l6: #7a5a2a; --l7: #5e498b; --l8: #ae4268; --l9: #4a7a5e;
 
   /* P2: order-bar firming status colors (replace per-line lc-N coloring on
-     Gantt bars — union of SAP/frozen-horizon/manual firming, not per-line). */
+     Gantt bars — union of planner/frozen-horizon/running firming; SAP's flag is display-only, not per-line). */
   --bar-standard: #1f5fbf;
   --bar-firmed:   #b02a20;
 
@@ -1039,6 +1039,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .firmed-row .pin { color: var(--accent); font-size: 13px; }
 .firmed-row .id  { font-family: 'JetBrains Mono', monospace; color: var(--fg-mute); font-size: 11px; }
 .firmed-row .name { flex: 1; font-weight: 500; }
+.firmed-row .reason { display: block; font-weight: 400; font-size: 11px; color: var(--fg-mute); }
 .firmed-row .when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--fg-mute); }
 .firmed-row button { margin-left: 6px; }
 
@@ -1697,7 +1698,6 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
   padding: 12px;
   margin-bottom: 10px;
 }
-.insp-sap-firm-info { font-size: 12px; color: var(--fg-mute); margin: 0 0 8px; }
 .insp-card h4 {
   font-size: 11px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.07em;
@@ -1751,26 +1751,16 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
 .insp-notes-counter { font-size: 10px; color: var(--fg-faint); text-align: right; margin-top: 3px; }
 
 .insp-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
-.insp-firmed-banner {
-  background: var(--accent-wash);
-  border: 1px solid var(--accent-soft);
-  border-radius: var(--r-md);
-  padding: 8px 10px;
-  font-size: 12px;
-  color: var(--accent-hot);
-  margin-bottom: 10px;
-  display: flex; align-items: center; gap: 8px;
-  font-weight: 500;
-}
-/* Frozen-horizon banner (Workstream C2, 2026-08-20) — same shape as
-   .insp-firmed-banner above but green-toned (matches the Gantt's
-   .frozen-horizon-zone band) so a planner reads it as a DISTINCT reason from
-   a genuine manual pin, not a restyled duplicate of the same banner. */
-.insp-frozen-banner {
-  background: var(--ok-soft);
-  border: 1px solid var(--ok);
-  color: var(--ok);
-}
+.insp-firm-slot { display: contents; }
+/* Lock block (universal firm, C-3): the Firmed card means NIMBUS locks the order; the neutral SAP tag
+   beside it is SAP's own flag and locks nothing. The lock glyph is a colour emoji, so it takes no tint. */
+.insp-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.insp-flags:empty { display: none; }
+.insp-status { flex: 1 1 100%; min-width: 0; background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: var(--r-md); padding: 8px 10px; font-size: 12px; color: var(--fg); }
+.insp-status-head { font-weight: 600; }
+.insp-status-reasons { margin-top: 2px; font-size: 11.5px; line-height: 1.4; color: var(--fg-mute); overflow-wrap: anywhere; }
+.sap-pill.neutral.insp-sap-tag { background: var(--bg-subtle); border: 1px solid var(--line); }
 
 /* =============================================================================
    TABLE TAB — AG Grid wrapper
@@ -2255,6 +2245,8 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
 }
 .ctx-menu button:hover { background: var(--bg-subtle); }
 .ctx-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Lock reason shown instead of Firm/Unfirm (a div, so arrow/Tab navigation skips it). */
+.ctx-note { padding: 6px 10px; font-size: 11.5px; line-height: 1.4; color: var(--fg-mute); max-width: 260px; overflow-wrap: anywhere; }
 
 /* Overflow (⋯) menu primitive - frontend/platform/overflow-menu.mts. Same look as .ctx-menu but a
    dropdown, so --shadow-md (--shadow-lg is for modals). Tokens only; dark mode rides on them. */

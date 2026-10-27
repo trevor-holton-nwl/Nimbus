@@ -101,6 +101,8 @@ import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSe
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
+import { firmActionForReasons, firmReasonLabels, planFirmActions } from './firm-actions.mjs';
+import type { FirmAction, FirmPlan, FirmReason } from './firm-actions.mjs';
 
 // -- Local type declarations (Phase 3 conversion; scoped to this file) ------
 // Structurally identical to the copy in calendar/calendar-engine.mjs and
@@ -1327,6 +1329,67 @@ export const Engine = {
     if (Store.isFirmed(task.id)) reasons.push('manual');
     if (Engine.isInProgress(task, now)) reasons.push('running');
     return { firmed: reasons.length > 0, reasons };
+  },
+
+  /** The one firm/unfirm action a surface may offer for `task` (D4): 'firm' when
+   *  nothing firms it, 'unfirm' when only the planner does, null when the frozen
+   *  horizon or a running state firms it (a planner can still drag it). UI/live
+   *  path only. Callers re-check at click time because the window rolls. */
+  firmActionFor(task: NimbusTask, now?: Date): FirmAction {
+    return firmActionForReasons(Engine.firmingStatus(task, now).reasons);
+  },
+
+  /** Split `ids` into firm / unfirm / locked lists with ONE shared clock per
+   *  plant and one frozenEnd (firmingStatus alone costs ~3 plantNow calls per
+   *  task, so a 5,000-row selection must not repeat them). Ids that no longer
+   *  resolve to a task are dropped. */
+  firmPlan(ids: ReadonlyArray<string | number>, now?: Date): FirmPlan {
+    const frozenEnd = Engine.frozenHorizonEnd();
+    const clocks = new Map<string, Date | null>();
+    return planFirmActions(ids, id => {
+      const task = Store.tasks[id];
+      if (!task) return null;
+      let at: Date | null | undefined = now;
+      if (at === undefined) {
+        const plant = task.PLANT || (task.MACHINE ? Store.getPlantForLine(task.MACHINE) : null) || Store.selectedPlant || '';
+        if (!clocks.has(plant)) clocks.set(plant, Store.plantNow(plant || null));
+        at = clocks.get(plant) ?? null;
+      }
+      const reasons: FirmReason[] = [];
+      if (at && frozenEnd && Engine.isFrozenHorizon(task, at, frozenEnd)) reasons.push('frozen');
+      if (Store.isFirmed(task.id)) reasons.push('manual');
+      if (at && Engine.isInProgress(task, at)) reasons.push('running');
+      return reasons;
+    });
+  },
+
+  /** "Running · Frozen horizon (finishes before Thu 30 Oct) · Planner", or ''
+   *  when nothing firms the order. */
+  firmReasonsText(task: NimbusTask): string {
+    const { reasons } = Engine.firmingStatus(task);
+    const end = Engine.frozenHorizonEnd();
+    // The edge is an instant (plant-local now + N days): date AND time, through the per-user
+    // date/time display prefs (the same formatter the Inspector uses), never the browser locale.
+    const frozenUntil = end ? Util.fmtDTReadable(end) : null;
+    return firmReasonLabels(reasons, { t: Util.t, frozenUntil }).join(' · ');
+  },
+
+  /** One line for tooltips and diagnostics: "Firmed: <reasons>" or ''. */
+  firmStatusText(task: NimbusTask): string {
+    const text = Engine.firmReasonsText(task);
+    return text ? Util.t('ui.firm_status_line', { reasons: text }) : '';
+  },
+
+  /** THE choke point for firm writes (C10): filters `ids` through `firmPlan`
+   *  (firm -> the not-firmed ids, unfirm -> the manual-only ids; frozen/running
+   *  ids are refused) and only then calls `Store.setFirmed`. Returns the ids
+   *  changed and the locked ids skipped; ids already in the requested state are
+   *  neither. Sandbox, undo and Time Machine restores stay on raw Store.setFirmed. */
+  applyFirm(ids: ReadonlyArray<string | number>, firmed: boolean, source?: string): { changed: string[]; skipped: string[] } {
+    const plan = Engine.firmPlan(ids);
+    const changed = firmed ? plan.firm : plan.unfirm;
+    if (changed.length) Store.setFirmed(changed, firmed, source);
+    return { changed, skipped: plan.locked };
   },
 
   /** The optimizer's frozen FINISH floor: `frozenEnd` when it lies after the run's

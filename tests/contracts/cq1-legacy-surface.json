@@ -504,16 +504,6 @@
     {
       "file": "scheduling/orders.mjs",
       "attribute": "onclick",
-      "expression": "NIMBUS.Inspector.toggleFirm(false)"
-    },
-    {
-      "file": "scheduling/orders.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Inspector.toggleFirm(true)"
-    },
-    {
-      "file": "scheduling/orders.mjs",
-      "attribute": "onclick",
       "expression": "NIMBUS.Table._closeNotePopover()"
     }
   ],

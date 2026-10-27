@@ -48,7 +48,7 @@ export interface NimbusTask {
   original_end_date: Date | null;
   BASIC_START_DATE: Date | null;
   BASIC_FINISH_DATE: Date | null;
-  /** Manual (planner) firm mirror of Store.firmedIds — never derived. See Engine.firmingStatus for the ECC/frozen/manual union. */
+  /** Manual (planner) firm mirror of Store.firmedIds — never derived. See Engine.firmingStatus for the frozen/manual/running union (SAP's flag never locks). */
   firmed: boolean;
   /** SAP FIRMING_INDICATOR == 'X' (read-only; from the /tasks DTO). */
   ecc_firmed?: boolean;

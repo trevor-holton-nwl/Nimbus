@@ -2279,7 +2279,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <div class="ctx-menu" id="ctx-menu" hidden>
   <button data-action="firm" data-i18n="ctx.firm_order">🔒 Firm this order</button>
   <button data-action="unfirm" data-i18n="ctx.unfirm_order">🔓 Unfirm this order</button>
-  <div class="ctx-sep"></div>
+  <div class="ctx-note" role="none" hidden></div>
+  <div class="ctx-sep" id="ctx-sep-firm"></div>
   <button data-action="override" data-i18n="ctx.override_datetime">📅 Override date / time…</button>
   <div class="ctx-sep"></div>
   <button data-action="inspect" data-i18n="ctx.open_inspector">👁 Open in inspector</button>
@@ -2895,7 +2896,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <label class="opt-check" id="opt-firmed-label">
               <input type="checkbox" id="opt-chk-firmed" checked>
               <span class="opt-check-box"></span>
-              <span data-i18n="ui.opt_respect_firmed">Respect firmed orders</span>
+              <span data-i18n="ui.opt_respect_firmed">Respect planner-firmed orders</span>
             </label>
             <label class="opt-check" id="opt-calendar-label">
               <input type="checkbox" id="opt-chk-calendar" checked>

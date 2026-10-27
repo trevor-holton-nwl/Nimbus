@@ -38,6 +38,7 @@ import { Alerts, Compute, Utilization, buildPlantSnapshot } from '../insights/se
 import { groupLeverage, analyzeLeverage, replayWithMinutes } from '../insights/alert-leverage.mjs';
 import type { LeverageItem, LeverageInput, LeverageRunner } from '../insights/alert-leverage.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
+import { Engine } from '../optimization/engine.mjs';
 import {
   MONITOR_GROUP_BYS, MONITOR_SORTS, GROUP_ROW_CAP, ROW_H, DIAG_H, GROUP_MOVE_CONFIRM_ABOVE,
   summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
@@ -1261,7 +1262,7 @@ function _diagnoseFor(a: NimbusAlert, task: NimbusTask | undefined, plant: strin
       const basis = _nim().Inspector?._formatRuntimeBasis?.(task) ?? '';
       fields.push({ label: t('ui.insp_run_time'), value: `${fmtNum(run)} h${basis ? ` · ${basis}` : ''}` });
     }
-    fields.push({ label: t('ui.insp_firming'), value: task.firmed || task.ecc_firmed ? t('ui.firmed') : t('am.diag_not_firmed') });
+    fields.push({ label: t('ui.insp_firming'), value: Engine.firmingStatus(task).firmed ? Engine.firmStatusText(task) : t('am.diag_not_firmed') });
   }
   const pair = formatPairKey(a.pairKey);
   if (pair) fields.push({ label: t('am.diag_setup'), value: pair });

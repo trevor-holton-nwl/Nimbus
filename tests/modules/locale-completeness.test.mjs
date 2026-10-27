@@ -657,6 +657,13 @@ const BRANCH_KEYS = [
   // fix wave B6 (U28, U34)
   'toast.pushed_orders_skipped', 'undo.push_orders_1h',
   // schedule_event Inspector History + retention knob (Task 9)
+  // universal firm (2026-10-27, Workstream C)
+  'ui.firm_status_line', 'ui.firm_reason_frozen', 'ui.firm_reason_frozen_until', 'ui.firm_reason_manual',
+  'ui.firm_reason_running_short', 'ui.sap_firmed', 'col.sap_firmed', 'ui.multi_firmed_count',
+  'toast.firm_skipped_locked', 'toast.firm_nothing', 'toast.firm_none_to_firm', 'toast.unfirm_none_selected',
+  'ui.opt_respect_firmed_hint', 'ui.opt_respect_firmed', 'legend.firmed_d', 'tip.firmed_column', 'toast.still_firmed', 'toast.firm_state_changed',
+  'cmdp.intent_freeze_sub', 'toast.cannot_fix_firmed', 'ui.history_field_manual_firmed', 'ui.dist_banner_firmed_left',
+  'toast.freeze_saved', 'toast.frozen_schedule', 'toast.unschedule_all_firmed', 'am.slot_place', 'am.slot_hint', 'am.slot_placed',
   'ui.insp_history_title',
   'ui.insp_history_loading',
   'ui.insp_history_empty',
@@ -894,5 +901,21 @@ test('Alert Monitor: es says pedido and fr says commande (no orden/ordre)', () =
   for (const key of ALERT_MONITOR_KEYS) {
     assert.doesNotMatch(es[key], /\b[Oo]rden(es)?\b/, `es "${key}" must say pedido, not orden`);
     assert.doesNotMatch(fr[key], /\b[Oo]rdres?\b/, `fr "${key}" must say commande, not ordre`);
+  }
+});
+
+test('universal firm: removed keys are gone from all 5 locales; cmdp.intent_freeze_sub is translated, not a MISSING TRANSLATION copy', () => {
+  for (const locale of LOCALES) {
+    const keys = keysOf(locale);
+    for (const dead of ['ui.insp_firmed_banner', 'col.firming', 'ui.insp_frozen_horizon_banner']) {
+      assert.ok(!keys.has(dead), `${locale}.js still carries removed key "${dead}"`);
+    }
+  }
+  const val = loc => readFileSync(join(LOCALES_DIR, `${loc}.js`), 'utf8').match(/'cmdp\.intent_freeze_sub'\s*:\s*'((?:[^'\\]|\\.)*)'(.*)/);
+  const en = val('en');
+  for (const loc of ['de', 'es', 'fr', 'pt']) {
+    const m = val(loc);
+    assert.ok(m[1] !== en[1], `${loc} must translate cmdp.intent_freeze_sub`);
+    assert.doesNotMatch(m[2], /MISSING TRANSLATION/);
   }
 });

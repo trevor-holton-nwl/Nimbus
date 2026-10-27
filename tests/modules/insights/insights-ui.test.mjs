@@ -813,3 +813,33 @@ test('Dashboard.render: toggling the line filter or an alert refresh never recom
     Store.setTasks(prior.tasks, 'unit-test'); Store.setSelectedPlant(prior.plant, 'unit-test');
   }
 });
+
+test('Dashboard firmed list: Unfirm only for a planner-only firm, a reason on every row, the FINISH shown', t => {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const priorOffset = Store.serverOffsetMs, priorEnd = Store.frozenHorizonEnd;
+  const priorTasks = Store.tasksArr.map(x => ({ ...x })), priorFirmed = new Set(Store.firmedIds);
+  const priorDoc = globalThis.document, priorFiltered = Dashboard._filteredTasks;
+  const list = { innerHTML: '', querySelectorAll: () => [] };
+  t.after(() => {
+    Store.serverOffsetMs = priorOffset; Store.setFrozenHorizonEnd(priorEnd, 'test'); Store._blockedPlants.clear();
+    Store.setTasks(priorTasks, 'test'); Store.firmedIds.clear(); for (const id of priorFirmed) Store.firmedIds.add(id);
+    globalThis.document = priorDoc; Dashboard._filteredTasks = priorFiltered;
+  });
+  Store.setMasterData({ plants: [{ plant: 'DB', timezone: tz }], lines: [] }, 'test');
+  Store._blockedPlants.clear();
+  Store.serverOffsetMs = new Date('2026-10-27T08:00:00').getTime() - Date.now();
+  Store.setFrozenHorizonEnd(new Date('2026-10-30T08:00:00'), 'test');
+  const mk = (id, s, e) => ({ id, ORDER: id, PLANT: 'DB', MACHINE: 'DB-L1', RUN_TIME: 1, user_scheduled: true, start_date: new Date(s), end_date: new Date(e) });
+  Store.setTasks([mk('planner', '2026-11-05T08:00:00', '2026-11-05T09:00:00'), mk('frozen', '2026-10-28T08:00:00', '2026-10-28T09:00:00')], 'test');
+  Store.firmedIds.clear(); Store.setFirmed(['planner'], true, 'test');
+  Dashboard._filteredTasks = () => Store.tasksArr;
+  globalThis.document = { getElementById: id => (id === 'firmed-list' ? list : null) };
+  Dashboard._renderFirmedList();
+  const rows = list.innerHTML.split('class="firmed-row"').slice(1);
+  assert.equal(rows.length, 2);
+  const planner = rows.find(r => r.includes('planner')), frozen = rows.find(r => r.includes('frozen'));
+  assert.match(planner, /data-order-id="planner"/, 'planner-only firm keeps Unfirm');
+  assert.doesNotMatch(frozen, /data-order-id/, 'a frozen order has no Unfirm');
+  assert.match(frozen, /class="reason">[^<]+</, 'and shows its reason');
+  assert.ok(frozen.includes(Util.fmtDTShort(new Date('2026-10-28T09:00:00'))), 'the finish, not the start, is shown');
+});

@@ -1098,3 +1098,26 @@ test('F7: a retry that is refused again is explained, not looped', async () => {
   assert.deepEqual(calls.toast.at(-1), ['toast.manual_refusal_generic', 'error']);
   assert.equal(AlertSlotModal.isOpenFor('P1'), true);
 });
+
+test('C9: a placement whose finish lands inside the frozen window is NOT manually firmed (the horizon protects it) and undo has nothing to unfirm', async () => {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const priorOffset = Store.serverOffsetMs, priorEnd = Store.frozenHorizonEnd;
+  try {
+    Store.setMasterData({ plants: [{ plant: 'P1', timezone: tz }], lines: [] }, 'test');
+    Store._blockedPlants.clear();
+    Store.serverOffsetMs = new Date(2026, 9, 26, 12).getTime() - Date.now();
+    Store.setFrozenHorizonEnd(new Date(2026, 9, 30), 'test');   // the placed finish (28 Oct 22:00) is inside [now, 30 Oct)
+    openIt();
+    await AlertSlotModal.place();
+    assert.equal(Store.tasks.t1.MACHINE, 'M2', 'it was still placed');
+    assert.equal(firmsOf().length, 0, 'no planner firm on an order the frozen horizon already protects');
+    assert.equal(Store.isFirmed('t1'), false);
+    assert.equal(UndoStack._entries.length, 1);
+    UndoStack._entries[0].undoFn();
+    assert.equal(firmsOf().length, 0, 'undo writes no firm either');
+  } finally {
+    Store.serverOffsetMs = priorOffset;
+    Store.setFrozenHorizonEnd(priorEnd, 'test');
+    Store._blockedPlants.clear();
+  }
+});
