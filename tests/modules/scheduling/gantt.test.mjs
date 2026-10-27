@@ -3551,7 +3551,7 @@ test('Timeline._onStore alerts:change: a hidden Gantt neither rebuilds nor runs 
   assert.equal(rig.profile, 0);
 });
 
-test('Timeline._onStore: task:update, tasks:bulkUpdate, firmed:change, tasks:bulk and setup-snapshot:replace each set _taskDataDirty, including when evt.source is \'timeline\'', (t) => {
+test('Timeline._onStore: task:update, tasks:bulkUpdate, firmed:change, tasks:bulk, setup-snapshot:replace and task:remove each set _taskDataDirty, including when evt.source is \'timeline\'', (t) => {
   gateRig(t, { active: false });
   const events = [
     { type: 'task:update', id: 't-1' },
@@ -3559,6 +3559,7 @@ test('Timeline._onStore: task:update, tasks:bulkUpdate, firmed:change, tasks:bul
     { type: 'firmed:change', ids: ['t-1'] },
     { type: 'tasks:bulk' },
     { type: 'setup-snapshot:replace' },
+    { type: 'task:remove', id: 't-1' },
   ];
   for (const source of ['optimizer', 'timeline']) {
     for (const evt of events) {

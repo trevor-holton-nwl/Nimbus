@@ -782,8 +782,9 @@ export const Timeline = {
     // Task data changed since the last clean rebuild pass, so the next alerts:change must rebuild (it is what
     // refreshes setup bars and stack badges). Set BEFORE the own-mutation return below: a drop's Store write
     // carries source 'timeline' and is exactly the case the gate must not skip.
+    // task:remove has no handler here: the next alerts-driven rebuild is what drops the vanished bar, so it counts too.
     if (evt.type === 'task:update' || evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change'
-        || evt.type === 'tasks:bulk' || evt.type === 'setup-snapshot:replace') {
+        || evt.type === 'tasks:bulk' || evt.type === 'setup-snapshot:replace' || evt.type === 'task:remove') {
       Timeline._taskDataDirty = true;
     }
     // Ignore our own mutations — we already applied them visually.
