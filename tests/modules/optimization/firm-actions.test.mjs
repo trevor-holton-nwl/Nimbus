@@ -140,3 +140,19 @@ test('Engine.applyFirm on the live plant clock skips frozen and running orders (
     }
   });
 });
+
+test('Engine.firmReasonsText passes the frozen edge as date AND time through the app formatter (not the browser locale)', async () => {
+  const { Util } = await import('../../../frontend/platform/foundation.mjs');
+  withFixture(() => {
+    const priorStatus = Engine.firmingStatus;
+    const priorT = Util.t;
+    const seen = [];
+    Engine.firmingStatus = () => ({ firmed: true, reasons: ['frozen'] });
+    Util.t = (k, p) => { seen.push([k, p]); return k; };
+    try { Engine.firmReasonsText(Store.tasks.frozen); } finally { Engine.firmingStatus = priorStatus; Util.t = priorT; }
+    const call = seen.find(([k]) => k === 'ui.firm_reason_frozen_until');
+    assert.ok(call, 'dated frozen label used');
+    assert.equal(call[1].date, Util.fmtDTReadable(FROZEN_END));
+    assert.match(call[1].date, /\d{1,2}:\d{2}/, 'includes the time of the edge');
+  });
+});

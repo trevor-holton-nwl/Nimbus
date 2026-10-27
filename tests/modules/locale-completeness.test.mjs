@@ -661,7 +661,7 @@ const BRANCH_KEYS = [
   'ui.firm_status_line', 'ui.firm_reason_frozen', 'ui.firm_reason_frozen_until', 'ui.firm_reason_manual',
   'ui.firm_reason_running_short', 'ui.sap_firmed', 'col.sap_firmed', 'ui.multi_firmed_count',
   'toast.firm_skipped_locked', 'toast.firm_nothing', 'toast.firm_none_to_firm', 'toast.unfirm_none_selected',
-  'ui.opt_respect_firmed_hint', 'ui.opt_respect_firmed', 'legend.firmed_d', 'tip.firmed_column', 'toast.still_firmed',
+  'ui.opt_respect_firmed_hint', 'ui.opt_respect_firmed', 'legend.firmed_d', 'tip.firmed_column', 'toast.still_firmed', 'toast.firm_state_changed',
   'cmdp.intent_freeze_sub', 'toast.cannot_fix_firmed', 'ui.history_field_manual_firmed', 'ui.dist_banner_firmed_left',
   'toast.freeze_saved', 'toast.frozen_schedule', 'toast.unschedule_all_firmed', 'am.slot_place', 'am.slot_hint', 'am.slot_placed',
   'ui.insp_history_title',

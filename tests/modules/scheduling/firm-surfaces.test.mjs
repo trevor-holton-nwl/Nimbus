@@ -271,3 +271,28 @@ test('multi-inspector shows Firm all / Unfirm all only when their list is non-em
   assert.doesNotMatch(panel.innerHTML, /data-action="unfirm"/);
   assert.match(panel.innerHTML, /ui\.multi_firmed_count/, 'the firmed count is the union, i18n-routed');
 });
+
+test('click-time mismatch: locked orders say still firmed, an order already changed elsewhere says nothing to do', t => {
+  liveClockFixture(t);
+  const toasts = [];
+  t.mock.method(Toast, 'show', (m) => toasts.push(m));
+  t.mock.method(Alerts, 'scheduleRecompute', () => {});
+  globalThis.document = { getElementById: () => null };
+  const priorId = Inspector._currentId;
+  t.after(() => { Inspector._currentId = priorId; });
+  Inspector._currentId = 'frozen';
+  Inspector.toggleFirm(true);
+  Inspector._currentId = 'manual';   // already planner-firmed by another tab: Firm is a no-op, not a lock
+  Inspector.toggleFirm(true);
+  assert.deepEqual(toasts, ['toast.still_firmed', 'toast.firm_state_changed']);
+});
+
+test('refreshLock is driven by its own 30 s ticker throttle ahead of the past-zone early return', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../../../frontend/scheduling/gantt.mts', import.meta.url), 'utf8');
+  const lock = src.indexOf('Inspector.refreshLock(Inspector._currentId)');
+  const early = src.indexOf('!Timeline._pastZoneIds.length) return;');
+  const hidden = src.indexOf('if (document.hidden) return; // skip ticker work');
+  assert.ok(hidden > 0 && hidden < lock && lock < early, 'refreshLock sits after the hidden skip and before the band early-return');
+  assert.equal(src.split('Inspector.refreshLock(Inspector._currentId)').length - 1, 1, 'called once, not also inside the scan');
+});

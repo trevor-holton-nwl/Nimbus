@@ -742,8 +742,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             CommandPalette.close();
             // Scoped to the SELECTED plant, and to orders that can still take a firm: frozen and running
             // orders are already locked (firmPlan), so they are neither counted nor written.
-            const plantIds = Store.tasksArr.filter(t => !t.PLANT || t.PLANT === Store.selectedPlant).map(t => t.id);
-            const unfirmedIds = NIMBUS.Engine?.firmPlan?.(plantIds)?.firm ?? [];
+            const plantIds = Store.tasksForSelectedPlant().map(t => t.id);
+            const freezePlan = NIMBUS.Engine?.firmPlan?.(plantIds);
+            const unfirmedIds = freezePlan?.firm ?? [];
+            const lockedCount = freezePlan?.locked?.length ?? 0;
             if (unfirmedIds.length) {
               // A firm is shared with every planner once saved, so a bulk Firm All asks first.
               // Native confirm on purpose: Modal.confirm would add a NIMBUS.Modal consumer to this
@@ -756,6 +758,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             const label = `Frozen · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
             TimeMachine.snapshot(label);
             Toast.show(t('toast.freeze_saved'), 'success', 3000);
+            if (lockedCount) Toast.show(t('toast.firm_skipped_locked', { n: lockedCount }), 'info');
           }
         },
         {

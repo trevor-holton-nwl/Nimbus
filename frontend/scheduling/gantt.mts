@@ -230,6 +230,7 @@ export const Timeline = {
   _frozenBandIds: null as Set<string> | null, // P2: task ids currently inside the frozen horizon band, for live repaint diffing
   _zonePushedMs: 0,                         // epoch ms of the "now" last written into the zone bands; 0 = unknown, next tick pushes
   _zoneEdgeKey: '',                         // `${hzMinutes}|${frozenEndMs}` the bands were last written with; a change forces a push
+  _lastLockRefreshTs: 0,                  // throttle for the open Inspector's lock-block refresh (independent of band items)
   _lastFirmScanTs: 0,                     // P2: throttle for the coarse 30s frozen-band rescan in the 1s ticker
   _visibilityHorizonMarker: false,          // C1: tracks whether the 'visibility-horizon' custom time bar has been added to _tl (addCustomTime/removeCustomTime throw on a duplicate/missing id)
   _lineColorIdx: {} as Record<string, number>,            // stable line → colour index mapping
@@ -503,6 +504,12 @@ export const Timeline = {
      * pane is visible: every DataSet update costs a full vis redraw. -- */
     setInterval(() => {
       if (document.hidden) return; // skip ticker work while the tab is backgrounded
+      // The open Inspector's lock block depends on the clock (the frozen window rolls), not on band
+      // items, so it refreshes on its own 30 s throttle, ahead of the band early-return below.
+      if (Date.now() - Timeline._lastLockRefreshTs > 30_000) {
+        Timeline._lastLockRefreshTs = Date.now();
+        Inspector.refreshLock(Inspector._currentId);
+      }
       if (!Timeline._items || !Timeline._pastZoneIds.length) return;
       const _pmT0 = performance.now();
       const now  = Timeline._plantNow(Store.selectedPlant);
@@ -556,9 +563,6 @@ export const Timeline = {
           }
         } finally { Timeline._clockMemo = null; }
         Timeline._frozenBandIds = next;
-        // The reasons text and the Firm button depend on the clock, not on a Store event, so the open
-        // Inspector's lock block is patched on EVERY scan (a partial patch, never a full _render).
-        Inspector.refreshLock(Inspector._currentId);
       }
       PerfMonitor.record('Timeline.ticker', performance.now() - _pmT0);
     }, 1000);

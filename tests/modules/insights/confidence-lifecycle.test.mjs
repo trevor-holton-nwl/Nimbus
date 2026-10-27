@@ -846,3 +846,24 @@ test('6c: after Confidence._recompute a later computeMatrix returns rows whose t
     globalThis.NIMBUS = priorNimbus;
   }
 });
+
+test('palette freeze scope excludes other plants and reports how many orders were skipped as locked', async () => {
+  await withPaletteHarness(async ({ setFirmedCalls }) => {
+    Store.setTasks([mkTask('s1'), { ...mkTask('other1'), PLANT: 'OTHER-P', MACHINE: 'OTHER-L' }, { ...mkTask('noplant'), PLANT: undefined, MACHINE: 'OTHER-L' }], 'test');
+    setFirmedCalls.length = 0;
+    const toasts = [];
+    const priorShow = nimbus.Toast.show;
+    nimbus.Toast.show = (m) => toasts.push(m);
+    const priorPlan = nimbus.Engine.firmPlan;
+    nimbus.Engine.firmPlan = function (ids) {
+      const plan = priorPlan.call(this, ids);
+      return { ...plan, locked: ['L1', 'L2'] };
+    };
+    const priorConfirm = context.window.confirm;
+    context.window.confirm = () => true;
+    try { nimbus.NeedsEngine.resolveIntent('freeze').find(r => r.type === 'intent').run(); }
+    finally { context.window.confirm = priorConfirm; nimbus.Engine.firmPlan = priorPlan; nimbus.Toast.show = priorShow; }
+    assert.deepEqual(brief(setFirmedCalls).flatMap(c => c.ids), ['s1'], 'only the selected plant is firmed');
+    assert.ok(toasts.some(m => /firm_skipped_locked/.test(m) || /2 skipped/.test(m)), `locked count reported: ${JSON.stringify(toasts)}`);
+  });
+});

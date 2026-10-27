@@ -87,6 +87,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.firmed_orders':               'Firmed {{count}} orders',
   'toast.unfirmed_orders':             'Unfirmed {{count}} orders',
   'toast.still_firmed':                'Order remains firmed (frozen horizon or running).',
+  'toast.firm_state_changed':          'This order was already changed, so there is nothing to do.',
   'toast.firm_needs_save': 'Firm isn\'t shared with other planners until you Save',
   'confirm.firm_all': 'Firm all {{count}} unfirmed orders? A firm is shared with other planners once you Save.',
   'confirm.signout_title': 'Sign out?',

@@ -2091,6 +2091,11 @@ type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaEleme
  *  still firmed via the union (frozen horizon or running; SAP's flag never locks) — otherwise
  *  "Unfirm" silently no-ops from the planner's point of view. Called from
  *  every unfirm entry point: context-menu, Inspector, F-key, Dashboard. */
+/** Click-time mismatch message: still locked (frozen/running) vs. already changed elsewhere (another tab). */
+export function firmMismatchMessage(task: NimbusTask | undefined): string {
+  return Util.t(task && Engine.firmActionFor(task) === null ? 'toast.still_firmed' : 'toast.firm_state_changed');
+}
+
 export function notifyResidualFirming(ids: string[]): void {
   const still = ids.some(id => { const t = Store.tasks[id]; return !!t && Engine.firmingStatus(t).firmed; });
   if (still) Toast.show(Util.t('toast.still_firmed'));
@@ -3065,7 +3070,7 @@ export const Inspector = {
     // Click-time re-check: the frozen window rolls, so the offered action may have changed.
     const task = Store.tasks[id];
     if (task && Engine.firmActionFor(task) !== (firmed ? 'firm' : 'unfirm')) {
-      Toast.show(Util.t('toast.still_firmed'));
+      Toast.show(firmMismatchMessage(task));
       Inspector.refreshLock(id);
       return;
     }
@@ -3098,7 +3103,7 @@ export const ContextMenu = {
           const want = action === 'firm';
           // Click-time re-check: the window rolls while the menu is open.
           const t = Store.tasks[id];
-          if (t && Engine.firmActionFor(t) !== action) { Toast.show(Util.t('toast.still_firmed')); return; }
+          if (t && Engine.firmActionFor(t) !== action) { Toast.show(firmMismatchMessage(t)); return; }
           Engine.applyFirm([id], want, 'ctx');
           Alerts.scheduleRecompute();
           if (!want) notifyResidualFirming([id]);

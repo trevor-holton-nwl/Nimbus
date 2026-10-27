@@ -21,7 +21,7 @@ export function firmActionForReasons(reasons: readonly FirmReason[]): FirmAction
 export interface FirmReasonLabelOptions {
   /** Translator (Util.t). */
   t: (key: string, params?: Record<string, string | number>) => string;
-  /** Pre-formatted frozen-window edge ("Thu 30 Oct"); omitted -> the plain label. */
+  /** Pre-formatted frozen-window edge date and time ("10/30/2026 · 06:00 PM"); omitted -> the plain label. */
   frozenUntil?: string | null;
 }
 

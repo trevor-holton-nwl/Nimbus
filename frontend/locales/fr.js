@@ -87,6 +87,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.firmed_orders':               '{{count}} ordres passés en ferme',
   'toast.unfirmed_orders':             '{{count}} ordres libérés',
   'toast.still_firmed':                'La commande reste ferme (horizon gelé ou en cours).',
+  'toast.firm_state_changed':          'Cette commande a déjà été modifiée, il n’y a rien à faire.',
   'toast.firm_needs_save': 'Le statut ferme n\'est partagé avec les autres planificateurs qu\'après l\'enregistrement',
   'confirm.firm_all': 'Mettre en ferme les {{count}} commandes qui ne le sont pas encore ? Le statut ferme est partagé avec les autres planificateurs après l\'enregistrement.',
   'confirm.signout_title': 'Se déconnecter ?',

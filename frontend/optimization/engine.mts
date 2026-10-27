@@ -1368,9 +1368,9 @@ export const Engine = {
   firmReasonsText(task: NimbusTask): string {
     const { reasons } = Engine.firmingStatus(task);
     const end = Engine.frozenHorizonEnd();
-    const frozenUntil = end
-      ? end.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
-      : null;
+    // The edge is an instant (plant-local now + N days): date AND time, through the per-user
+    // date/time display prefs (the same formatter the Inspector uses), never the browser locale.
+    const frozenUntil = end ? Util.fmtDTReadable(end) : null;
     return firmReasonLabels(reasons, { t: Util.t, frozenUntil }).join(' · ');
   },
 
