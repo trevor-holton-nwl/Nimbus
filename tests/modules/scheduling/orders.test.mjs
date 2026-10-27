@@ -349,6 +349,54 @@ test('Task 6 (B3b): Inspector._setupDetailForTask, called with its default (real
   }
 });
 
+test('Inspector._setupOverrideFor resolves the real predecessor and existing override on a setup-off plant exactly as on a setup-on plant', () => {
+  const plant = 'OVR-OFF-PLANT';
+  const line = 'OVR-OFF-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorMaster = Store.masterData;
+
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [{ machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+    machine_rows: [],
+    machine_states: [{ machine: line, state_key: state('RED'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [{ status: 'active', machine: line, signature_version: 1, predecessor_order_id: 'ovr-green', successor_order_id: 'ovr-blue', override_min: 9 }],
+  }, 'unit-test');
+  const greenTask = { id: 'ovr-green', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'GREEN',
+    start_date: new Date('2026-08-21T08:00:00'), end_date: new Date('2026-08-21T09:00:00') };
+  const blueTask = { id: 'ovr-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE',
+    start_date: new Date('2026-08-21T09:00:00'), end_date: new Date('2026-08-21T10:00:00') };
+  Store.setTasks([greenTask, blueTask], 'unit-test');
+  const withPlantRow = flag => Store.setMasterData({ ...(priorMaster ?? {}), plants: [{ plant, setup_active: flag }] }, 'unit-test');
+
+  try {
+    const results = [];
+    for (const flag of [false, true]) {
+      withPlantRow(flag);
+      const found = Inspector._setupOverrideFor(blueTask);
+      assert.equal(found?.predecessorOrderId, 'ovr-green', `real predecessor, not the machine state (setup_active=${flag})`);
+      assert.equal(found.existing?.override_min, 9, `existing active override found (setup_active=${flag})`);
+      results.push(found.predecessorOrderId);
+    }
+    assert.deepEqual(results, ['ovr-green', 'ovr-green']);
+    withPlantRow(false);
+    assert.equal(Inspector._setupDetailForTask(blueTask).requiredMinutes, null, 'display stays empty on a setup-off plant');
+  } finally {
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setMasterData(priorMaster, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('Fix 2: Inspector renders no missingDetail for a genuine setup-no-change diagnostic (identical-signature, zero-minute transition)', () => {
   // Regression target: the D4 'setup-no-change' diagnostic never sets
   // .message and has no SETUP_DIAGNOSTIC_PRESENTATION entry, so the old

@@ -30,7 +30,7 @@ import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import { ALL_ALERTS_PROFILE_ID } from '../insights/alert-profiles.mjs';
-import { Engine, predecessorOnMachine } from '../optimization/engine.mjs';
+import { Engine, predecessorOnMachine, deriveSetupObservation } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
@@ -2440,7 +2440,12 @@ export const Inspector = {
     const snapshot = Store.setupSnapshot;
     const definition = snapshot?.definition;
     if (!snapshot || !definition) return null;
-    const observation = Timeline._setupObservation(Store.tasksForSelectedPlant());
+    // Deliberately ungated (not Timeline._setupObservation): overrides must resolve the real predecessor on a
+    // setup-off plant too, while the display paths stay empty there.
+    const observation = deriveSetupObservation(snapshot, Store.tasksForSelectedPlant(), undefined, {
+      calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
+      masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
+    });
     const interval = observation.intervals.find(entry => String(entry.successorOrderId) === String(task.id));
     const diagnostic = observation.diagnostics.find(entry => String(entry.successorOrderId || '') === String(task.id));
     const predecessorOrderId = interval?.predecessorOrderId ?? diagnostic?.predecessorOrderId ?? null;
