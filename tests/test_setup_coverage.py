@@ -122,11 +122,13 @@ def test_bounded_coverage_summary_and_page_match_existing_semantics_without_snap
         "observed": {"total_pairs": 4, "covered_pairs": 3, "missing_pairs": 1},
         "reachable": {"total_pairs": 18, "covered_pairs": 9, "missing_pairs": 9},
     }
+    assert result["observed"]["default_covered_pairs"] == 0 and result["reachable"]["default_covered_pairs"] == 0
+    # To-state-major: to=RED gives BLUE->RED, GREEN->RED; to=BLUE gives GREEN->BLUE (RED->BLUE is a row); ...
     assert result["reachable"]["missing_page"] == {
         "rows": [
-            {"machine": "L2", "scope": "plant", "from_key": BLUE, "to_key": RED,
+            {"machine": "L2", "scope": "plant", "from_key": GREEN, "to_key": RED,
              "covered": False, "implicit_zero": False},
-            {"machine": "L2", "scope": "plant", "from_key": BLUE, "to_key": GREEN,
+            {"machine": "L2", "scope": "plant", "from_key": GREEN, "to_key": BLUE,
              "covered": False, "implicit_zero": False},
         ],
         "meta": {"total": 5, "offset": 1, "limit": 2},
@@ -135,8 +137,7 @@ def test_bounded_coverage_summary_and_page_match_existing_semantics_without_snap
     assert "FROM machine_setup_state" not in statements
     assert "FROM setup_occurrence_override" not in statements
     assert "jsonb_to_recordset" in statements
-    assert "candidate_input" in statements
-    assert "LIMIT %s" in statements
+    assert "setup reachable missing machine rows" in statements
 
 
 def test_get_setup_coverage_compatibility_wrapper_never_loads_snapshot(monkeypatch):
@@ -154,8 +155,8 @@ def test_get_setup_coverage_compatibility_wrapper_never_loads_snapshot(monkeypat
     assert result == {
         "plant": "5512",
         "definition": DEFINITION,
-        "observed": {"total_pairs": 4, "covered_pairs": 3, "missing_pairs": 1},
-        "reachable": {"total_pairs": 18, "covered_pairs": 9, "missing_pairs": 9},
+        "observed": {"total_pairs": 4, "covered_pairs": 3, "default_covered_pairs": 0, "missing_pairs": 1},
+        "reachable": {"total_pairs": 18, "covered_pairs": 9, "default_covered_pairs": 0, "missing_pairs": 9},
     }
 
 
@@ -166,8 +167,8 @@ def test_bounded_coverage_rejects_an_oversized_page_before_database_access(monke
         setup_data.get_setup_coverage_page("5512", limit=501)
 
 
-def test_coverage_bundle_uses_one_repeatable_read_cursor_and_bounded_reachable_candidates(monkeypatch):
-    """Summary and pages share one snapshot, while reachable paging submits only a bounded ordinal window."""
+def test_coverage_bundle_uses_one_repeatable_read_cursor_and_one_bounded_row_query_per_machine(monkeypatch):
+    """Summary and pages share one snapshot; the reachable page reads one machine's rows, never a Cartesian product."""
     cursor = _CoverageCursor()
     pool = _CountingPool(cursor)
     monkeypatch.setattr(setup_data, "_pool", pool)
@@ -176,16 +177,20 @@ def test_coverage_bundle_uses_one_repeatable_read_cursor_and_bounded_reachable_c
     assert pool.connection_calls == 1
     assert cursor.executed[0][0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
     assert result["reachable"]["missing_page"]["meta"] == {"total": 5, "offset": 1, "limit": 2}
-    reachable_sql = [sql for sql, _params in cursor.executed if "setup reachable missing" in sql]
-    assert reachable_sql
-    assert all("JOIN state_input AS target_state" not in sql for sql in reachable_sql)
-    assert all("candidate_input" in sql for sql in reachable_sql)
-    candidate_sizes = [
-        len(params[0].obj if hasattr(params[0], "obj") else params[0])
-        for sql, params in cursor.executed
-        if "setup reachable missing" in sql
-    ]
-    assert candidate_sizes and max(candidate_sizes) <= 500
+    row_queries = [(sql, params) for sql, params in cursor.executed if "setup reachable missing machine rows" in sql]
+    assert len(row_queries) == 1
+    assert row_queries[0][1] == ("5512", 4, "L2")
+    assert not any("candidate_input" in sql or "ordinal window" in sql for sql, _ in cursor.executed)
+
+
+def test_missing_page_skips_whole_machines_by_their_missing_counts(monkeypatch):
+    """An offset past machine L1's 4 missing pairs lands in L2 without reading L1's rows."""
+    cursor = _CoverageCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    result = setup_data.get_setup_coverage_page("5512", offset=4, limit=2)
+    assert [(r["machine"], r["from_key"], r["to_key"]) for r in result["reachable"]["missing_page"]["rows"]] == [
+        ("L2", BLUE, RED), ("L2", GREEN, RED)]
+    assert [params[2] for sql, params in cursor.executed if "setup reachable missing machine rows" in sql] == ["L2"]
 
 
 class _CoverageCursor:
@@ -224,14 +229,11 @@ class _CoverageCursor:
                     ("reachable", "L1", 5), ("reachable", "L2", 4)]
         if "setup observed missing page" in sql:
             return [("L2", BLUE, GREEN)]
-        if "setup reachable missing ordinal window" in sql:
-            candidates = params[0].obj if hasattr(params[0], "obj") else params[0]
-            rows = [
-                (candidate["machine"], candidate["from_key"], candidate["to_key"])
-                for candidate in candidates
-                if candidate["pair_ordinal"] in (1, 3, 5)
-            ]
-            return rows[:params[-1]]
+        if "setup reachable missing machine rows" in sql:
+            # effective off-diagonal rows: L1 has two (covered 3 diagonal + 2), L2 has one (3 + 1)
+            return {"L1": [(RED, BLUE), (BLUE, GREEN)], "L2": [(RED, BLUE)]}[params[2]]
+        if "FROM setup_value_default" in sql:
+            return []
         raise AssertionError(f"Unexpected coverage query: {sql}")
 
 
@@ -283,7 +285,7 @@ def test_real_coverage_no_definition_is_empty_and_snapshot_free(pg):
         assert result["definition"] is None
         for kind in ("observed", "reachable"):
             assert result[kind] == {
-                "total_pairs": 0, "covered_pairs": 0, "missing_pairs": 0,
+                "total_pairs": 0, "covered_pairs": 0, "default_covered_pairs": 0, "missing_pairs": 0,
                 "missing_page": {"rows": [], "meta": {"total": 0, "offset": 0, "limit": 500}},
             }
     finally:
@@ -300,7 +302,7 @@ def test_real_coverage_empty_orders_has_zero_state_universe(pg):
         result = setup_data.get_setup_coverage_page(plant, offset=0, limit=500)
         assert result["definition"]["signature_version"] == 7
         assert result["observed"] == {
-            "total_pairs": 0, "covered_pairs": 0, "missing_pairs": 0,
+            "total_pairs": 0, "covered_pairs": 0, "default_covered_pairs": 0, "missing_pairs": 0,
             "missing_page": {"rows": [], "meta": {"total": 0, "offset": 0, "limit": 500}},
         }
         assert result["reachable"] == result["observed"]
@@ -334,6 +336,17 @@ def test_real_coverage_matches_pure_semantics_for_paging_filter_and_inheritance(
     ]
     states = {"L1": [red, blue, green], "L2": [red, blue, green]}
     expected = setup_data.build_setup_coverage(definition, plant_rows, machine_rows, observed, states)
+    state_order = {"RED": 0, "BLUE": 1, "GREEN": 2}
+
+    def page_row(row):
+        return {key: value for key, value in row.items() if key != "covered_by"}
+
+    def expected_missing_rows(kind, machine=None):
+        rows = [page_row(r) for r in expected[kind]["missing"] if machine in (None, r["machine"])]
+        if kind == "reachable":   # the reachable page is to-state-major, partners in state order
+            rows.sort(key=lambda r: (r["machine"], state_order[r["to_key"][0]["value"]],
+                                     state_order[r["from_key"][0]["value"]]))
+        return rows
     _reset_real_coverage_plant(pg, plant)
     _insert_real_coverage_definition(pg, plant, version=version)
     _insert_real_coverage_orders(pg, plant, states={"L1": [red, blue, green, red], "L2": [red, blue, green]})
@@ -341,7 +354,7 @@ def test_real_coverage_matches_pure_semantics_for_paging_filter_and_inheritance(
     try:
         result = setup_data.get_setup_coverage_page(plant, offset=1, limit=1)
         for kind in ("observed", "reachable"):
-            expected_missing = expected[kind]["missing"]
+            expected_missing = expected_missing_rows(kind)
             assert {
                 key: result[kind][key] for key in ("total_pairs", "covered_pairs", "missing_pairs")
             } == {
@@ -354,7 +367,7 @@ def test_real_coverage_matches_pure_semantics_for_paging_filter_and_inheritance(
 
         filtered = setup_data.get_setup_coverage_page(plant, machine="L2", offset=0, limit=500)
         for kind in ("observed", "reachable"):
-            expected_missing = [row for row in expected[kind]["missing"] if row["machine"] == "L2"]
+            expected_missing = expected_missing_rows(kind, "L2")
             assert filtered[kind]["missing_page"] == {
                 "rows": expected_missing,
                 "meta": {"total": len(expected_missing), "offset": 0, "limit": 500},
@@ -434,6 +447,8 @@ def test_coverage_orders_on_stored_edges_and_excludes_queued_rows_from_transitio
             self.sql = sql
 
         def fetchall(self):
+            if "setup_value_default" in self.sql:
+                return []
             # (machine, queued, colorWheel) in the order the SQL sorts them: RED placed, BLUE queued, GREEN placed
             return [("L1", False, "RED"), ("L1", True, "BLUE"), ("L1", False, "GREEN")]
 

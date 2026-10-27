@@ -1142,3 +1142,13 @@ def test_plant_blackouts_write_requires_authentication(monkeypatch):
         brain.api.dependency_overrides.clear()
     assert response.status_code == 401
     assert calls == []
+
+
+def test_setup_value_defaults_write_is_admin_api_key_gated_and_audit_logged():
+    """The value-defaults PUT is admin-only and registered for the admin audit log (the only setup trail)."""
+    path = "/setup/{plant}/value-defaults"
+    matches = [r for r in iter_route_contexts(brain.api.routes) if getattr(r, "path", None) == path]
+    assert len(matches) == 1
+    dep_names = {dep.call.__name__ for dep in matches[0].dependant.dependencies}
+    assert {"require_admin", "require_api_key", "require_authenticated"} <= dep_names
+    assert brain._ADMIN_WRITE_OPERATIONS[path] == "setup.value_defaults_write"

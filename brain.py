@@ -794,6 +794,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/setup/{plant}/active": "setup.active_write",  # D2: vestigial-but-retained; see plant.setup_active_update below
     "/plant/{plant}/setup-active": "plant.setup_active_update",
     "/setup/{plant}/matrix/import": "setup.matrix_import",
+    "/setup/{plant}/value-defaults": "setup.value_defaults_write",
     "/setup/{plant}/matrix": "setup.matrix_delete",
     "/setup/{plant}/lines/{machine}/state": "setup.line_state_write",
     "/setup/{plant}/lines/{machine}/compatibility": "setup.line_compatibility_write",

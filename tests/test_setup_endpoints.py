@@ -57,6 +57,21 @@ class _SetupService:
         self._check_rows(rows, signature_version)
         return {"plant": plant, "machine": machine, "signature_version": self.version, "deleted": len(rows)}
 
+    def save_value_defaults(self, plant, signature_version, field_key, entries, actor):
+        self._check_version(signature_version)
+        if field_key != "colorWheel":
+            raise ValueError(f"Field {field_key!r} is not part of the setup definition for plant {plant}")
+        if not isinstance(entries, list):
+            raise ValueError("entries must be a list")
+        deleted = sum(1 for entry in entries if entry.get("setup_min") is None)
+        return {"plant": plant, "signature_version": self.version, "field_key": field_key,
+                "upserted": len(entries) - deleted, "deleted": deleted}
+
+    def value_defaults_values(self, plant, field_key):
+        if field_key != "colorWheel":
+            raise ValueError(f"Field {field_key!r} is not part of the setup definition for plant {plant}")
+        return {"plant": plant, "field_key": field_key, "listed": ["RED"], "observed": ["BLUE"]}
+
     def set_machine_state(self, plant, machine, values, signature_version, observed_at, source, reason, actor,
                        physical_mold_id=None):
         if machine != "LINE-1":
@@ -228,7 +243,7 @@ def tc(monkeypatch):
     service = _SetupService()
     for name in (
         "get_setup_snapshot", "save_definition", "set_definition_active", "replace_plant_matrix",
-        "upsert_machine_matrix_rows", "delete_plant_matrix_rows", "delete_machine_matrix_rows", "set_machine_state",
+        "save_value_defaults", "value_defaults_values", "upsert_machine_matrix_rows", "delete_plant_matrix_rows", "delete_machine_matrix_rows", "set_machine_state",
         "upsert_occurrence_override", "update_occurrence_override", "clear_occurrence_override",
     ):
         monkeypatch.setattr(brain.setup_data, name, getattr(service, name), raising=False)
@@ -689,3 +704,52 @@ def test_setup_missing_pairs_csv_is_bom_prefixed_and_formula_guarded(monkeypatch
     rows = list(_csv.reader(_io.StringIO(response.content.decode("utf-8-sig"))))
     assert rows[0][0] == "Plant"
     assert rows[1][:3] == ["'@PLANT", "'=HYPERLINK(\"x\")", "'+plant"]
+
+
+def test_value_defaults_write_maps_400_409_and_200_with_freshness(tc):
+    """The PUT mirrors the matrix import: stale is 409, a bad field or payload is 400, success carries freshness."""
+    body = {"signature_version": 4, "field_key": "colorWheel",
+            "entries": [{"value": "red", "setup_min": 30}, {"value": "blue", "setup_min": None}]}
+    stale = tc.put("/setup/5512/value-defaults", json={**body, "signature_version": 3})
+    bad_field = tc.put("/setup/5512/value-defaults", json={**body, "field_key": "nope"})
+    bad_entries = tc.put("/setup/5512/value-defaults", json={**body, "entries": "x"})
+    saved = tc.put("/setup/5512/value-defaults", headers={"x-request-id": "vd-1"}, json=body)
+    assert stale.status_code == 409
+    assert bad_field.status_code == 400
+    assert bad_entries.status_code == 400
+    assert saved.status_code == 200
+    assert saved.json()["upserted"] == 1 and saved.json()["deleted"] == 1
+    assert saved.json()["freshness"]["signature_version"] == 4
+
+
+def test_value_defaults_write_requires_admin_and_a_plant_in_scope(tc):
+    body = {"signature_version": 4, "field_key": "colorWheel", "entries": []}
+    brain.api.dependency_overrides[brain.require_admin] = lambda: (_ for _ in ()).throw(
+        brain.HTTPException(status_code=403, detail="Admin role required")
+    )
+    assert tc.put("/setup/5512/value-defaults", json=body).status_code == 403
+    brain.api.dependency_overrides[brain.require_admin] = lambda: "owner@example.com"
+    assert tc.put("/setup/OTHER/value-defaults", json=body).status_code == 403
+
+
+def test_value_defaults_values_route_validates_field_and_is_plant_scoped(tc):
+    ok = tc.get("/setup/5512/value-defaults/values", params={"field_key": "colorWheel"})
+    bad = tc.get("/setup/5512/value-defaults/values", params={"field_key": "prt01"})
+    missing = tc.get("/setup/5512/value-defaults/values")
+    out_of_scope = tc.get("/setup/OTHER/value-defaults/values", params={"field_key": "colorWheel"})
+    assert ok.status_code == 200 and ok.json()["listed"] == ["RED"] and ok.json()["observed"] == ["BLUE"]
+    assert bad.status_code == 400
+    assert missing.status_code == 400
+    assert out_of_scope.status_code == 403
+
+
+def test_setup_snapshot_response_keeps_the_additive_value_defaults_key(tc, monkeypatch):
+    """SetupEnvelope is extra-allow, so the snapshot's value_defaults key reaches the client."""
+    original = brain.setup_data.get_setup_snapshot
+
+    def with_defaults(plant):
+        return {**original(plant), "value_defaults": [{"field_key": "colorWheel", "value": "RED", "setup_min": 30}]}
+
+    monkeypatch.setattr(brain.setup_data, "get_setup_snapshot", with_defaults)
+    body = tc.get("/setup/5512").json()
+    assert body["value_defaults"] == [{"field_key": "colorWheel", "value": "RED", "setup_min": 30}]

@@ -513,6 +513,53 @@ def test_definition_edit_versions_and_deactivates_without_rewriting_prior_matrix
     assert "signature_version = %s" in statements
     assert "DELETE FROM setup_matrix" not in statements
     assert "UPDATE setup_matrix" not in statements
+    # value defaults carry forward: still-present fields only, from the old version to the new one
+    carry_sql, carry_params = next(
+        (sql, params) for sql, params in cursor.executed if "INSERT INTO setup_value_default" in sql
+    )
+    assert "SELECT" in carry_sql and "field_key = ANY(%s)" in carry_sql and "ON CONFLICT DO NOTHING" in carry_sql
+    assert carry_params == (3, "5512", 2, ["prt01", "colorWheel"])
+
+
+def test_definition_save_without_a_signature_change_does_not_copy_value_defaults(monkeypatch):
+    """An unchanged definition keeps its version, so there is nothing to carry forward."""
+    cursor = _DefinitionCursor()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    setup_data.save_definition("5512", ["colorWheel"], True, "owner@example.com", expected_signature_version=2)
+    assert not any("setup_value_default" in sql for sql, _params in cursor.executed)
+
+
+def test_first_definition_create_does_not_copy_value_defaults(monkeypatch):
+    class _NoDefinition(_DefinitionCursor):
+        def fetchone(self):
+            return None
+
+    cursor = _NoDefinition()
+    monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
+    setup_data.save_definition("5512", ["colorWheel"], True, "owner@example.com")
+    assert not any("setup_value_default" in sql for sql, _params in cursor.executed)
+
+
+def test_snapshot_carries_the_current_versions_value_defaults(monkeypatch):
+    class _Cursor(_SnapshotCursor):
+        def fetchall(self):
+            if "FROM setup_value_default" in self.executed[-1][0]:
+                return [("colorWheel", "RED", 30, 4, "owner", None)]
+            return super().fetchall()
+
+    monkeypatch.setattr(setup_data, "_pool", _Pool(_Cursor()))
+    snapshot = setup_data.get_setup_snapshot("5512")
+    assert snapshot["value_defaults"] == [{"field_key": "colorWheel", "value": "RED", "setup_min": 30,
+                                           "signature_version": 4, "updated_by": "owner", "updated_at": None}]
+
+
+def test_snapshot_without_a_definition_returns_empty_value_defaults(monkeypatch):
+    class _NoDefinition(_SnapshotCursor):
+        def fetchone(self):
+            return None
+
+    monkeypatch.setattr(setup_data, "_pool", _Pool(_NoDefinition()))
+    assert setup_data.get_setup_snapshot("5512")["value_defaults"] == []
 
 
 def test_set_definition_active_toggles_without_touching_fields(monkeypatch):

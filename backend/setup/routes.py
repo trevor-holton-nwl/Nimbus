@@ -253,6 +253,40 @@ def import_setup_matrix(plant: str, request: Request, body: dict = Body(default=
     return _setup_freshness(result)
 
 
+@router.put("/setup/{plant}/value-defaults", response_model=SetupEnvelope,
+           dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
+                                                     Depends(require_admin)])
+def save_setup_value_defaults(plant: str, request: Request, body: dict = Body(default={}),
+                              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+                              actor: str = Depends(auth.require_authenticated)):
+    """Upsert (minutes) or delete (null) default changeover minutes for one signature field's values."""
+    _setup_plant_guard(plant, allowed_plants)
+    entries = body.get("entries")
+    _set_admin_log_details(request, plant=plant, field_key=body.get("field_key"),
+                           entry_count=len(entries) if isinstance(entries, list) else 0)
+    try:
+        result = setup_data.save_value_defaults(
+            plant, body.get("signature_version"), body.get("field_key"), entries, actor,
+        )
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+    _set_admin_log_details(request, signature_version=result["signature_version"],
+                           upserted=result["upserted"], deleted=result["deleted"])
+    return _setup_freshness(result)
+
+
+@router.get("/setup/{plant}/value-defaults/values", response_model=SetupEnvelope,
+            dependencies=[Depends(auth.require_authenticated)])
+def get_setup_value_default_values(plant: str, field_key: str = Query(default=""),
+                                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Listed (priority list) and observed (order) values for one signature field."""
+    _setup_plant_guard(plant, allowed_plants)
+    try:
+        return _setup_freshness(setup_data.value_defaults_values(plant, field_key))
+    except ValueError as exc:
+        raise _setup_error(exc) from exc
+
+
 @router.delete("/setup/{plant}/matrix", response_model=SetupEnvelope,
               dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
                                                      Depends(require_admin)])
