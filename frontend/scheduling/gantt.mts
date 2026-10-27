@@ -206,11 +206,13 @@ const _ZONE_MIN_PX = 0.5;
 const ZOOM_MIN_MS = 15 * 60 * 1000;            // vis zoomMin (init) — also the floor for a Go To window
 const ZOOM_MAX_MS = 30 * 24 * 3600 * 1000;     // vis zoomMax (init) — also the ceiling for a Go To window
 const GOTO_SPOTLIGHT_MS = 2500;                // how long the Go To spotlight + row tint last
-const PAN_WATCHDOG_MS = 300;                   // no further panmove for this long ends a pan gesture (a cancelled pan never emits rangechanged)
+const _wiredViews = new WeakSet<object>();     // DataView instances whose add/remove events _refreshViewNow already listens to
+const PAN_WATCHDOG_MS = 300;                  // no further panmove for this long ends a pan gesture (a cancelled pan never emits rangechanged)
 export const Timeline = {
   _tl: null as NimbusVendor.VisTimelineInstance | null,
   _items:     null as NimbusVendor.VisDataSet<TimelineVisItem> | null,
   _visItems:  null as NimbusVendor.VisDataView<TimelineVisItem> | null,             // DataView filter layer — vis-timeline sees only items near the viewport
+  _visItemsChanged: false,                                 // set by the DataView add/remove events; reset and read by _refreshViewNow
   _groups:    null as NimbusVendor.VisDataSet<TimelineGroupData> | null,
   _viewWindow: null as TimelineWindowMs | null,            // { start: ms, end: ms } — current viewport, kept in sync via rangechanged
   _pastZoneIds:     [] as string[],         // cached IDs for ticker updates (avoids getIds() scan every second)
@@ -2363,19 +2365,34 @@ export const Timeline = {
   // excluded while _viewWindow was stale stays excluded until a refresh — vis-data
   // DataViews filter incrementally at add/update time), and force a relayout.
   // Returns false when vis threw (the heal ladder has then been entered), true otherwise.
+  // The forced redraw runs only when this refresh() added or removed DataView items: those
+  // events already queue vis's own throttled redraw, so with no membership change it is pure
+  // cost (~16 ms). The flag is read AFTER refresh() returns because its events fire inside it.
   _refreshViewNow(): boolean {
-    if (!Timeline._tl || !Timeline._visItems) return true;
+    const view = Timeline._visItems;
+    if (!Timeline._tl || !view) return true;
+    if (!_wiredViews.has(view)) {
+      _wiredViews.add(view);
+      view.on('add', () => { Timeline._visItemsChanged = true; });
+      view.on('remove', () => { Timeline._visItemsChanged = true; });
+    }
+    Timeline._visItemsChanged = false;
     const _pmT0 = performance.now();
     try {
       const w = Timeline._tl.getWindow();
       Timeline._viewWindow = { start: w.start.getTime(), end: w.end.getTime() };
-      Timeline._visItems.refresh();
-      Timeline._tl.redraw();
+      view.refresh();
+      const changed = Timeline._visItemsChanged;
+      PerfMonitor.record('Timeline.refreshView.filter', performance.now() - _pmT0);
+      if (changed) {
+        const _pmT1 = performance.now();
+        Timeline._tl.redraw();
+        PerfMonitor.record('Timeline.refreshView.redraw', performance.now() - _pmT1);
+      }
     } catch (e) {
       Timeline._heal('refresh-view', e);
       return false;
     }
-    PerfMonitor.record('Timeline.refreshView', performance.now() - _pmT0);
     return true;
   },
 

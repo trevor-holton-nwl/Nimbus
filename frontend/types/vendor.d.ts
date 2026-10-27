@@ -50,6 +50,7 @@ declare global {
     interface VisDataView<T = unknown> {
       refresh(): void;
       get(id?: string | number): T | T[] | null;
+      on(event: 'add' | 'update' | 'remove' | '*', callback: (...args: unknown[]) => void): void;
     }
 
     /** vis-timeline's internal event→props mapping — the shape returned both by

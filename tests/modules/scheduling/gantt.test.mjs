@@ -3728,3 +3728,127 @@ test('a stuck pan flag cannot defer forever: the 300 ms watchdog flushes the pen
   assert.equal(rig.scheduled, 1, 'the watchdog end flushed it');
   assert.equal(Timeline._alertsRebuildPending, false);
 });
+
+// ---- Settle refresh: _refreshViewNow redraws only when the DataView membership changed ----
+
+function refreshRig(t) {
+  const prior = { tl: Timeline._tl, vis: Timeline._visItems, win: Timeline._viewWindow, heal: Timeline._heal };
+  const rig = { redraws: 0, heals: [], subscribes: 0, onRefresh: null };
+  rig.makeView = () => {
+    const handlers = { add: [], remove: [] };
+    return {
+      handlers,
+      refresh() { if (rig.onRefresh) rig.onRefresh(this); },
+      on(ev, cb) { rig.subscribes += 1; handlers[ev].push(cb); },
+      emit(ev) { for (const cb of handlers[ev]) cb(ev, { items: ['x'] }, null); },
+    };
+  };
+  rig.view = rig.makeView();
+  Timeline._tl = {
+    getWindow: () => ({ start: new Date(1000), end: new Date(5000) }),
+    redraw: () => { rig.redraws += 1; },
+  };
+  Timeline._visItems = rig.view;
+  Timeline._viewWindow = null;
+  Timeline._heal = (scope, e) => { rig.heals.push({ scope, e }); };
+  PerfMonitor.clear();
+  t.after(() => {
+    Timeline._tl = prior.tl; Timeline._visItems = prior.vis; Timeline._viewWindow = prior.win; Timeline._heal = prior.heal;
+    PerfMonitor.clear();
+  });
+  return rig;
+}
+
+test('_refreshViewNow: no add/remove during refresh means no redraw, returns true, and still updates _viewWindow', (t) => {
+  const rig = refreshRig(t);
+  assert.equal(Timeline._refreshViewNow(), true);
+  assert.equal(rig.redraws, 0);
+  assert.deepEqual(Timeline._viewWindow, { start: 1000, end: 5000 });
+});
+
+test('_refreshViewNow: an add during refresh triggers exactly one redraw', (t) => {
+  const rig = refreshRig(t);
+  rig.onRefresh = v => v.emit('add');
+  assert.equal(Timeline._refreshViewNow(), true);
+  assert.equal(rig.redraws, 1);
+});
+
+test('_refreshViewNow: a remove during refresh triggers exactly one redraw', (t) => {
+  const rig = refreshRig(t);
+  rig.onRefresh = v => v.emit('remove');
+  assert.equal(Timeline._refreshViewNow(), true);
+  assert.equal(rig.redraws, 1);
+});
+
+test('_refreshViewNow: the flag resets per call', (t) => {
+  const rig = refreshRig(t);
+  rig.onRefresh = v => v.emit('add');
+  Timeline._refreshViewNow();
+  assert.equal(rig.redraws, 1);
+  rig.onRefresh = null;
+  Timeline._refreshViewNow();
+  assert.equal(rig.redraws, 1, 'the second call saw no event, so no second redraw');
+});
+
+test('_refreshViewNow: events fired before the call (an earlier item write) do not count', (t) => {
+  const rig = refreshRig(t);
+  Timeline._refreshViewNow();            // wires the subscription
+  rig.view.emit('add'); rig.view.emit('remove');
+  Timeline._refreshViewNow();
+  assert.equal(rig.redraws, 0, 'those writes queued their own redraw through vis');
+});
+
+test('_refreshViewNow: the flag is read after refresh() returns', (t) => {
+  const rig = refreshRig(t);
+  let redrawsAtRefreshEnd = null;
+  rig.onRefresh = v => { v.emit('add'); redrawsAtRefreshEnd = rig.redraws; };
+  Timeline._refreshViewNow();
+  assert.equal(redrawsAtRefreshEnd, 0, 'no redraw while refresh() is still running');
+  assert.equal(rig.redraws, 1, 'the event fired inside refresh() is seen after it returns');
+});
+
+test('_refreshViewNow: a refresh() throw heals, returns false and does not redraw', (t) => {
+  const rig = refreshRig(t);
+  const boom = new Error('boom');
+  rig.onRefresh = v => { v.emit('add'); throw boom; };
+  assert.equal(Timeline._refreshViewNow(), false);
+  assert.equal(rig.redraws, 0);
+  assert.equal(rig.heals.length, 1);
+  assert.equal(rig.heals[0].scope, 'refresh-view');
+  assert.equal(rig.heals[0].e, boom);
+  assert.equal(PerfMonitor.stats('Timeline.refreshView.filter'), null, 'a failed refresh records no mark');
+});
+
+test('_refreshViewNow: subscribes once per DataView instance across calls, and again for a replaced instance', (t) => {
+  const rig = refreshRig(t);
+  Timeline._refreshViewNow(); Timeline._refreshViewNow(); Timeline._refreshViewNow();
+  assert.equal(rig.subscribes, 2, 'one add and one remove subscription, not per call');
+  assert.equal(rig.view.handlers.add.length, 1);
+  assert.equal(rig.view.handlers.remove.length, 1);
+  const next = rig.makeView();
+  Timeline._visItems = next;
+  Timeline._refreshViewNow(); Timeline._refreshViewNow();
+  assert.equal(rig.subscribes, 4);
+  assert.equal(next.handlers.add.length, 1);
+  assert.equal(next.handlers.remove.length, 1);
+  assert.equal(rig.view.handlers.add.length, 1, 'the old instance is not re-wired');
+});
+
+test('_refreshViewNow: records Timeline.refreshView.filter always and Timeline.refreshView.redraw only when it redrew', (t) => {
+  const rig = refreshRig(t);
+  Timeline._refreshViewNow();
+  assert.equal(PerfMonitor.stats('Timeline.refreshView.filter').count, 1);
+  assert.equal(PerfMonitor.stats('Timeline.refreshView.redraw'), null, 'no redraw, no redraw mark');
+  rig.onRefresh = v => v.emit('add');
+  Timeline._refreshViewNow();
+  assert.equal(PerfMonitor.stats('Timeline.refreshView.filter').count, 2);
+  assert.equal(PerfMonitor.stats('Timeline.refreshView.redraw').count, 1);
+  assert.equal(PerfMonitor.stats('Timeline.refreshView'), null, 'the old combined mark is gone');
+});
+
+test('_refreshViewNow: returns true without touching vis when _tl is missing', (t) => {
+  const rig = refreshRig(t);
+  Timeline._tl = null;
+  assert.equal(Timeline._refreshViewNow(), true);
+  assert.equal(rig.subscribes, 0);
+});
