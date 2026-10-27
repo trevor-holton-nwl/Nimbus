@@ -482,3 +482,103 @@ def test_pg_usage_counts_cover_both_columns(pg):
         with db._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM orders WHERE id IN ('zzti1','zzti2','zzti3')")
             conn.commit()
+
+
+# --- review-fix tests (Wave 1 review) -------------------------------------------------------------------
+@pytest.mark.parametrize("headers", [
+    ("Tool ID", "Total Inventory", "Out of Service", "Note"),
+    ("tool_id", "total_qty", "out_of_service_qty", "note"),
+    ("TOOL_ID", "TOTAL_QTY", "OUT_OF_SERVICE_QTY", "NOTE"),
+])
+def test_excel_accepts_template_and_raw_column_headers(headers):
+    ups, rej, _w, n = ti.parse_tool_inventory_excel(_xlsx([("t1", 3, 1, "x")], headers=headers), PLANT)
+    assert not rej and n == 1
+    assert ups == [{"plant": PLANT, "tool_id": "T1", "total_qty": 3, "out_of_service_qty": 1, "note": "x"}]
+
+
+def test_excel_missing_total_column_still_raises_for_either_spelling():
+    with pytest.raises(ValueError, match="Missing required column"):
+        ti.parse_tool_inventory_excel(_xlsx([("t1", 1)], headers=("tool_id", "out_of_service_qty")), PLANT)
+
+
+def test_download_filename_is_sanitised():
+    from backend.master_data import routes
+    plant = 'P"1;é中'  # quote, semicolon, non-latin-1 characters
+    resp = routes._xlsx_response(b"x", f"tool-inventory-{plant}.xlsx")
+    cd = resp.headers["content-disposition"]
+    assert cd == 'attachment; filename="tool-inventory-P_1___.xlsx"'
+    cd.encode("latin-1")  # header must be latin-1 encodable
+
+
+def test_usage_counts_normalise_requested_ids_like_the_writers(monkeypatch):
+    seen = {}
+
+    class Cur:
+        def execute(self, q, params=None):
+            seen["params"] = params
+
+        def fetchall(self):
+            return []
+
+    monkeypatch.setattr(db, "_pool", _Pool(Cur()))
+    out = db.tool_usage_counts(PLANT, ["100.0", "100", " t5 ", "N/A", "-", "0", "none", "", None])
+    assert seen["params"][-1] == ["100", "T5"]
+    assert out == {"100": {"count": 0, "orders": []}, "T5": {"count": 0, "orders": []}}
+    assert db.tool_usage_counts(PLANT, ["N/A", "0"]) == {}  # all placeholders: no query at all
+
+
+@pytest.mark.parametrize("bad", [True, False, ["T1"], {"a": 1}])
+def test_tool_id_must_be_text_or_number(bad):
+    with pytest.raises(ValueError, match="Tool ID must be text or a number"):
+        md.normalize_tool_inventory_row(_row(tool_id=bad), PLANT)
+
+
+@pytest.mark.parametrize("bad", ["３", "٣", "1٣"])
+def test_quantities_reject_non_ascii_digits(bad):
+    with pytest.raises(ValueError, match="whole number"):
+        md.normalize_tool_inventory_row(_row(total_qty=bad), PLANT)
+
+
+def test_zero_width_and_nbsp_are_stripped_from_tool_ids():
+    assert md.normalize_tool_inventory_row(_row(tool_id="\u200bt1\u00a0"), PLANT)["tool_id"] == "T1"
+    assert md.normalize_tool_id("T\u200b1\ufeff") == "T1"
+    with pytest.raises(ValueError, match="required"):  # nothing but invisibles is blank, not a phantom id
+        md.normalize_tool_inventory_row(_row(tool_id="\u200b\u00a0"), PLANT)
+
+
+@pytest.mark.parametrize("ops", [{"upserts": 5}, {"deletes": 5}, {"upserts": "abc"}, {"deletes": {"a": 1}}])
+def test_prepare_rejects_non_list_ops_cleanly(ops):
+    with pytest.raises(ValueError, match="must be lists"):
+        md._prepare_tool_inventory_ops(ops)
+
+
+def test_admin_bulk_route_gives_400_for_non_list_upserts(monkeypatch):
+    brain.api.dependency_overrides[auth.require_admin] = lambda: "admin@example.com"
+    try:
+        c = TestClient(brain.api)
+        r = c.post("/master-data/tool_inventory/bulk", json={"upserts": 5, "deletes": []})
+    finally:
+        brain.api.dependency_overrides.clear()
+    assert r.status_code == 400, r.text
+    assert "must be lists" in r.text
+
+
+def test_dry_run_response_shape_contract(client, known_plant, monkeypatch):
+    """The shape the Tool Inventory upload UI (Wave 4) relies on. Change it only with the UI."""
+    monkeypatch.setattr(md, "load_tool_inventory_rows", lambda p: [])
+    monkeypatch.setattr(md, "bulk_apply", lambda *a, **k: pytest.fail("dry run must not write"))
+    n = ti.REVIEW_LIST_CAP + 20
+    rows = [(f"T{i}", 1, 0, None) for i in range(n)] + [("BAD", 2.5, 0, None)] * 60
+    r = client.post(f"/tool-inventory/{PLANT}/upload?dry_run=1", files={"file": ("f.xlsx", _xlsx(rows))})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {"counts", "new", "changed", "unchanged", "rejected", "rows", "warnings"}
+    assert set(body["counts"]) == {"new", "changed", "unchanged", "rejected"}
+    assert body["counts"] == {"new": n, "changed": 0, "unchanged": 0, "rejected": 60}  # counts are uncapped
+    assert isinstance(body["rows"], int) and body["rows"] == n + 60  # data rows, header excluded
+    assert len(body["new"]) == ti.REVIEW_LIST_CAP == 200  # lists capped at 200
+    assert set(body["new"][0]) == {"tool_id", "total_qty", "out_of_service_qty", "note"}
+    assert len(body["rejected"]) == 60 and set(body["rejected"][0]) == {"row", "tool_id", "error"}
+    assert body["changed"] == [] and body["unchanged"] == []
+    assert len(body["warnings"]) <= 51  # 50 listed rejections + one "N more" line
+    assert body["warnings"][0].keys() >= {"level", "msg"}

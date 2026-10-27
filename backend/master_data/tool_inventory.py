@@ -37,10 +37,13 @@ TOOL_INVENTORY_HEADERS: dict[str, str] = {
     "PLANT": "plant",
     "TOOL_ID": "tool_id",
     "TOTAL_INVENTORY": "total_qty",
+    "TOTAL_QTY": "total_qty",
     "OUT_OF_SERVICE": "out_of_service_qty",
+    "OUT_OF_SERVICE_QTY": "out_of_service_qty",
     "NOTE": "note",
 }
-TOOL_INVENTORY_KEY_HEADERS = ("TOOL_ID", "TOTAL_INVENTORY")
+# Each required column may be spelled either way (template header or raw column name).
+TOOL_INVENTORY_REQUIRED_HEADERS = (("TOOL_ID",), ("TOTAL_INVENTORY", "TOTAL_QTY"))
 SHEET_HEADERS = ("Tool ID", "Total Inventory", "Out of Service", "Note")
 SHEET_NAME = "Tool Inventory"
 NO_ROW_NOTE = "no inventory row yet"
@@ -117,8 +120,14 @@ def parse_tool_inventory_excel(file_bytes: bytes, plant: str) -> tuple[list[dict
     """.xlsx bytes -> `(upserts, rejected, prefix_warnings, data_row_count)`. ValueError (a clean
     400 for the route) for an unreadable file / `.xls`, a missing required column, or too many rows."""
     try:
-        rows, prefix_warnings = ingest._read_excel_rows(
-            file_bytes, TOOL_INVENTORY_HEADERS, TOOL_INVENTORY_KEY_HEADERS)
+        # ingest._read_excel_rows requires one exact header each, so the alias-aware
+        # required-column check happens here.
+        df = ingest._read_excel(file_bytes)
+        present = set(df.columns)
+        missing = [alts[0] for alts in TOOL_INVENTORY_REQUIRED_HEADERS if not present.intersection(alts)]
+        if missing:
+            raise ValueError(f"Missing required column(s): {', '.join(missing)}")
+        rows, prefix_warnings = ingest.map_row_keys(df.to_dict("records"), TOOL_INVENTORY_HEADERS)
     except ValueError as exc:
         if str(exc).startswith("Missing required column"):
             raise

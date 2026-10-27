@@ -1103,13 +1103,16 @@ TOOL_QTY_MAX = 1_000_000
 MAX_TOOL_INVENTORY_OPS = 5000
 # Strict string enum so a middle mode can be added later without a migration.
 TOOLING_RULES = ("off", "hard")
-_TOOL_QTY_TEXT_RE = re.compile(r"^\d+(?:\.0+)?$")
+_TOOL_QTY_TEXT_RE = re.compile(r"^[0-9]+(?:\.0+)?$")  # ASCII digits only (\d takes fullwidth / Arabic-Indic)
+_TOOL_ID_INVISIBLES = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00a0"))
 _TOOL_INVENTORY_AUDIT_CAP = 50
 
 
 def normalize_tool_id(value) -> str:
     """Stored form of a tool id: SAP-float-suffix stripped, trimmed, UPPER-cased ('' for blank).
     UPPER because /tasks already upper-cases PRT values, so a mixed-case row would never match."""
+    if isinstance(value, str):
+        value = value.translate(_TOOL_ID_INVISIBLES)  # zero-width / nbsp would create phantom ids
     return _str_id(value).strip().upper()
 
 
@@ -1152,7 +1155,10 @@ def normalize_tool_inventory_row(row: dict, plant: str | None = None) -> dict:
     row_plant = plant if plant is not None else str(row.get("plant") or "").strip()
     if not row_plant:
         raise ValueError("plant is required")
-    tool_id = normalize_tool_id(row.get("tool_id"))
+    raw_id = row.get("tool_id")
+    if raw_id is not None and (isinstance(raw_id, bool) or not isinstance(raw_id, (str, int, float))):
+        raise ValueError("Tool ID must be text or a number")
+    tool_id = normalize_tool_id(raw_id)
     if not tool_id:
         raise ValueError("Tool ID is required")
     if tool_id in TOOL_PLACEHOLDERS:
@@ -1207,6 +1213,8 @@ def _prepare_tool_inventory_ops(ops: dict) -> tuple[list[dict], list[dict]]:
     plant = plant.strip() if isinstance(plant, str) and plant.strip() else None
     upserts = ops.get("upserts") or []
     deletes = ops.get("deletes") or []
+    if not isinstance(upserts, list) or not isinstance(deletes, list):
+        raise ValueError("Cannot save tool inventory: upserts and deletes must be lists")
     if len(upserts) + len(deletes) > MAX_TOOL_INVENTORY_OPS:
         raise ValueError(f"At most {MAX_TOOL_INVENTORY_OPS} tool inventory changes per save")
     clean, rejected = normalize_tool_inventory_upserts(upserts, plant)

@@ -18,6 +18,7 @@ browser; the shared data-layer functions themselves stay in root db.py/
 master_data.py (deferred split, see docs/MIGRATION.md).
 """
 import json
+import re
 from contextlib import suppress
 from datetime import datetime, timezone
 
@@ -823,6 +824,7 @@ _XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
 
 
 def _xlsx_response(data: bytes, filename: str) -> Response:
+    filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename)
     # no-store: the corporate proxy caches by URL and would serve a stale inventory file.
     return Response(content=data, media_type=_XLSX_MEDIA, headers={
         "Content-Disposition": f'attachment; filename="{filename}"',

@@ -5785,7 +5785,10 @@ def tool_usage_counts(plant: str, tool_ids: list[str]) -> dict[str, dict]:
     orders.prt_01 and prt_02; an order carrying the id in both counts once), with the first 5
     production order numbers. Read-only; feeds the "this tool is used by N orders" confirm
     before an inventory row is removed. Every requested id is present in the result."""
-    wanted = sorted({str(t).strip().upper() for t in tool_ids if t is not None and str(t).strip()})
+    # Same normalisation as the writers (master_data.normalize_tool_id): '100.0' -> '100',
+    # placeholders dropped, so the result is keyed by the stored id.
+    wanted = sorted({n for n in (_str_id(t).strip().upper() for t in tool_ids if t is not None)
+                     if n and n not in TOOL_PLACEHOLDERS})
     out: dict[str, dict] = {t: {"count": 0, "orders": []} for t in wanted}
     if not wanted:
         return out
