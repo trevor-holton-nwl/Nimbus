@@ -975,3 +975,57 @@ test('needs_planning is registered as a firing planning-category alert type', as
   assert.ok(ALERT_CATEGORIES.planning.includes('needs_planning'));
   assert.ok(FIRING_ALERT_TYPES.includes('needs_planning'));
 });
+
+
+// ---- Tool Inventory (Wave 2): count-aware Fix over N holders + the shared tool-id reader ----
+test('taskCarriesTool reads the compute core taskToolIds (NAN / TBD are placeholders, case and spaces ignored)', async () => {
+  const { taskCarriesTool } = await import('../../../frontend/insights/services.mjs');
+  assert.equal(taskCarriesTool({ PRT_01: 't100 ' }), true);
+  assert.equal(taskCarriesTool({ PRT_02: 'T2' }), true);
+  for (const v of ['', '-', '0', 'n/a', 'NONE', 'null', 'NaN', 'tbd']) assert.equal(taskCarriesTool({ PRT_01: v, PRT_02: v }), false, v);
+  assert.equal(taskCarriesTool(null), false);
+});
+
+test('Alerts.applyFix on a tool-conflict with N holders searches from the d-th earliest holder release (d = inUse - available)', async () => {
+  const { Calendar } = await import('../../../frontend/calendar/calendar-engine.mjs');
+  const plant = '5512', line = 'TOOLFIX-P';
+  const H = 3600000, base = Math.floor(Date.now() / H) * H + 24 * H;   // hour-aligned: the Store snaps task times to a grid
+  const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts);
+  const priorNext = Calendar.nextAvailable, priorReflow = Engine.autoReflow, priorPolicy = Engine.splitOrderPolicyFor;
+  let searchedFrom = null;
+  Calendar.nextAvailable = (l, from, dur) => { searchedFrom = new Date(+from); return new Date(+from); };
+  Engine.autoReflow = () => {};
+  Engine.splitOrderPolicyFor = () => 'never';
+  const mk = (id, mach, fromH, toH) => ({ id, PLANT: plant, MACHINE: mach, RUN_TIME: String(toH - fromH), PRT_01: 'T100',
+    start_date: new Date(base + fromH * H), end_date: new Date(base + toH * H) });
+  Store.setSelectedPlant(plant, 'unit-test');
+  // holders end at +5h (h1), +7h (h2), +9h (h3); pusher starts +4h. 4 machines, 2 copies -> d = 2: wait for the 2nd release.
+  Store.setTasks([mk('h1', 'TOOLFIX-A', 1, 5), mk('h2', 'TOOLFIX-B', 2, 7), mk('h3', 'TOOLFIX-C', 3, 9), mk('p', line, 4, 8)], 'unit-test');
+  const alert = { id: 'toolc-p|T100', type: 'tool-conflict', sev: 'err', taskId: 'p', peerId: 'h1', peerIds: ['h1', 'h2', 'h3'],
+    line, time: new Date(base + 4 * H), tool: 'T100', available: 2, inUse: 4, hasRow: true };
+  Store.setAlerts([alert], 'unit-test');
+  try {
+    Alerts.applyFix(alert.id, { quiet: true });
+    assert.equal(+searchedFrom, base + 7 * H, 'd = 2 -> the 2nd earliest holder release (h2 at +7h), not h1 at +5h');
+
+    // A legacy two-order conflict (no peerIds / counts) still searches from the single peer's end.
+    searchedFrom = null;
+    Store.setTasks([mk('h1', 'TOOLFIX-A', 1, 5), mk('p', line, 4, 8)], 'unit-test');
+    const legacy = { id: 'toolc-h1|p', type: 'tool-conflict', sev: 'err', taskId: 'p', peerId: 'h1', line, time: new Date(base + 4 * H) };
+    Store.setAlerts([legacy], 'unit-test');
+    Alerts.applyFix(legacy.id, { quiet: true });
+    assert.equal(+searchedFrom, base + 5 * H);
+
+    // Zero copies: moving the order can never clear it, so nothing moves.
+    searchedFrom = null;
+    Store.setTasks([mk('p', line, 4, 8)], 'unit-test');
+    const zero = { id: 'toolc-p|T100', type: 'tool-conflict', sev: 'err', taskId: 'p', line, time: new Date(base + 4 * H), tool: 'T100', available: 0, inUse: 1, hasRow: true };
+    Store.setAlerts([zero], 'unit-test');
+    Alerts.applyFix(zero.id, { quiet: true });
+    assert.equal(searchedFrom, null, 'a zero-copy conflict is not movable');
+  } finally {
+    Calendar.nextAvailable = priorNext; Engine.autoReflow = priorReflow; Engine.splitOrderPolicyFor = priorPolicy;
+    Store.setAlerts(priorAlerts, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
