@@ -1314,6 +1314,9 @@ export const Timeline = {
   // predecessor's end, which is null for a line's first order and renders a
   // false "setup-conflict" on every line's first setup with no alert to match.
   _setupObservation(tasks: ReadonlyArray<NimbusTask>): SetupObservation {
+    // Setup off for the plant (same `!== false` reading as the alert core, so a plant with no master row stays
+    // active): no setup bars, no "!" markers, and the Inspector's setup detail reads an empty observation.
+    if (Store.masterPlant(Store.setupSnapshot?.plant ?? null)?.setup_active === false) return { intervals: [], diagnostics: [] } as SetupObservation;
     return deriveSetupObservation(Store.setupSnapshot, tasks, undefined, {
       calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
       masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
