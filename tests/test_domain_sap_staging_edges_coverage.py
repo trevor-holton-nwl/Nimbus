@@ -57,7 +57,8 @@ def _candidate(row_id, **overrides):
     return {"id": row_id, "production_order": f"PO-{row_id}", "parent_production_order": "PARENT",
             "material_number": "MAT", "production_version": "B", "planning_status": "scheduled",
             "manual_firmed": False, "firming_indicator": None,
-            "eff_start": datetime(2026, 10, 13, 12), "eff_end": datetime(2026, 10, 13, 14), **overrides}
+            "placed_start": datetime(2026, 10, 13, 12), "placed_end": datetime(2026, 10, 13, 14),
+            "eff_end": datetime(2026, 10, 13, 14), **overrides}
 
 
 @pytest.mark.parametrize("skip_override", [{"eff_end": None}, {"planning_status": "needs_planning"}])
@@ -116,11 +117,12 @@ def test_rollup_business_values_are_invariant_to_child_input_order():
         assert set(group["member_ids"]) == set(group["sent_ids"]) == {"a", "b", "c"}
 
 
-def test_frozen_horizon_is_exclusive_at_exact_start_boundary():
-    frozen_end = datetime(2026, 10, 13, 12)
-    groups, _, unfirmed = staging.build_outbound_groups([_candidate("a")], frozen_end)
-    assert groups == [] and unfirmed == 1                                 # exactly at the boundary: not firmed, not sent
+def test_frozen_horizon_is_exclusive_at_exact_finish_boundary():
+    now = datetime(2026, 10, 13, 6)
+    frozen_end = datetime(2026, 10, 13, 14)                               # the candidate's placed finish
+    groups, _, unfirmed = staging.build_outbound_groups([_candidate("a")], frozen_end, now)
+    assert groups == [] and unfirmed == 1                                 # finish == edge: not firmed, not sent
     groups, _, unfirmed = staging.build_outbound_groups([
-        _candidate("a", eff_start=datetime(2026, 10, 13, 11, 59, 59, 999999)),
-    ], frozen_end)
+        _candidate("a", placed_end=datetime(2026, 10, 13, 13, 59, 59, 999999)),
+    ], frozen_end, now)
     assert groups[0]["auffx"] == "X" and unfirmed == 0
