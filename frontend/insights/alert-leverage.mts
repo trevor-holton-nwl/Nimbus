@@ -25,7 +25,7 @@
 
 import type { NimbusTask, SetupSnapshot, SetupStateKey, NimbusMasterPlant } from '../platform/types.mjs';
 import type { buildPlantSnapshot, LeverageBase, LeverageVariant, LeverageResult } from './services.mjs';
-import { impactPoints } from './alert-profiles.mjs';
+import { impactPoints, alertOrderIds } from './alert-profiles.mjs';
 
 // ---- Contract -----------------------------------------------------------------------------------
 
@@ -212,7 +212,7 @@ function _bucketFor<K>(map: Map<K, Bucket>, key: K): Bucket {
   if (!b) map.set(key, b = _bucket());
   return b;
 }
-const _alertOrders = (a: NimbusAlert): Array<string | undefined> => [a.taskId, a.peerId];
+const _alertOrders = (a: NimbusAlert): string[] => alertOrderIds(a);
 
 function _finish(
   ctx: Ctx, family: LeverageFamily, key: string, titleKey: string, titleVars: Record<string, string | number>,
@@ -365,14 +365,15 @@ function _toolItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
   const byTool = new Map<string, Bucket>();
   for (const a of alerts) {
     if (a.type !== 'tool-conflict') continue;
-    const tool = a.msgVars?.tool;
+    const tool = a.tool ?? a.msgVars?.tool;
     if (tool == null || tool === '') continue;
     const b = _bucketFor(byTool, String(tool));
     _push(b, a, _alertOrders(a));
-    for (const l of [a.msgVars?.lineA, a.msgVars?.lineB]) if (typeof l === 'string' && l) b.lines.add(l);
+    // Lines come from every order the conflict touches (pusher + all holders), not a fixed lineA/lineB pair.
+    for (const id of _alertOrders(a)) { const l = ctx.input.tasksById[id]?.MACHINE; if (l) b.lines.add(l); }
   }
   return [...byTool].map(([tool, b]) => _finish(ctx, 'tool', `tool:${tool}`, 'leverage.title.tool',
-    { n: b.alerts.length, tool }, b, { kind: 'tool', tool, alertIds: b.alerts.map(a => a.id) }));
+    { n: b.orders.size, tool }, b, { kind: 'tool', tool, alertIds: b.alerts.map(a => a.id) }));
 }
 
 function _machineStateItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {

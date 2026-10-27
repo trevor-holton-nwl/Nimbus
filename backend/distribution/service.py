@@ -17,8 +17,9 @@ and the ingest post-hook in db.py.
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional
 
-# Exact match to frontend/nimbus-compute-core.js:391 — parity test in test_distribution.py
-TOOL_PLACEHOLDERS = {'', '-', '0', 'N/A', 'NONE', 'NULL'}
+# Exact match to TOOL_PLACEHOLDERS in frontend/nimbus-compute-core.js (the one shared tool-id reader) —
+# parity test in test_distribution.py parses that file, so the two sets cannot drift.
+TOOL_PLACEHOLDERS = {'', '-', '0', 'N/A', 'NONE', 'NULL', 'NAN', 'TBD'}
 
 
 def resolve_plant(
@@ -167,8 +168,8 @@ def compute_default_shares(
     prt_01 = material_attrs.get("prt_01")
     prt_02 = material_attrs.get("prt_02")
     is_tooled = (
-        (prt_01 and isinstance(prt_01, str) and prt_01.upper() not in TOOL_PLACEHOLDERS)
-        or (prt_02 and isinstance(prt_02, str) and prt_02.upper() not in TOOL_PLACEHOLDERS)
+        (prt_01 and isinstance(prt_01, str) and prt_01.strip().upper() not in TOOL_PLACEHOLDERS)
+        or (prt_02 and isinstance(prt_02, str) and prt_02.strip().upper() not in TOOL_PLACEHOLDERS)
     )
 
     if is_tooled and not workcenter.get("distribute_tooled"):

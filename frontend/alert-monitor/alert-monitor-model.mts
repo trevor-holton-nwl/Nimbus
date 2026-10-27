@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, alertOrderIds, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -19,6 +19,8 @@ export interface AlertLike {
   taskId?: string;
   /** The other order of a pairwise alert (overlap, tool-conflict). */
   peerId?: string;
+  /** Every other order of a count-aware tool conflict; read through alertOrderIds(). */
+  peerIds?: string[];
   line?: string;
   time?: Date | null;
 }
@@ -85,8 +87,7 @@ export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
   const orders = new Set<string>();
   for (const a of input.alerts) {
     if (a.sev === 'err') errors++; else warnings++;
-    if (a.taskId) orders.add(String(a.taskId));
-    if (a.peerId) orders.add(String(a.peerId));   // an overlap / tool conflict affects both orders
+    for (const id of alertOrderIds(a)) orders.add(id);   // an overlap affects both orders; a tool conflict every holder
   }
   const n = input.alerts.length;
   let lead: string;
@@ -282,7 +283,7 @@ export function formatPairKey(pairKey: string | null | undefined): string {
 export interface GroupCounts {
   errors: number;
   warnings: number;
-  /** Distinct orders the group touches (taskId ∪ peerId). */
+  /** Distinct orders the group touches (alertOrderIds). */
   orders: number;
   /** The whole group's alerts "Move N orders" would move, in list order. */
   movableIds: string[];
@@ -299,8 +300,7 @@ export function groupCounts<A extends AlertLike>(alerts: ReadonlyArray<A>, isAck
   const out: GroupCounts = { errors: 0, warnings: 0, orders: 0, movableIds: [], movableOrders: 0, unackedIds: [] };
   for (const a of alerts) {
     if (a.sev === 'err') out.errors++; else out.warnings++;
-    if (a.taskId) orders.add(String(a.taskId));
-    if (a.peerId) orders.add(String(a.peerId));
+    for (const id of alertOrderIds(a)) orders.add(id);
     if (MOVABLE_ALERT_TYPES.has(a.type)) { out.movableIds.push(a.id); movable.add(String(a.taskId ?? a.id)); }
     if (!isAcked(a.id)) out.unackedIds.push(a.id);
   }

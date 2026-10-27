@@ -49,6 +49,7 @@ import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { planningReasonText } from '../scheduling/planning-reason.mjs';
+import { alertOrderIds } from './alert-profiles.mjs';
 import type { SetupObservation } from '../optimization/engine.mjs';
 import type { ScheduleSnapshot } from '../optimization/setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, PlantCalendarEntry } from '../platform/types.mjs';
@@ -663,13 +664,24 @@ export const Alerts = {
       const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
       const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
 
-      // For pairwise alerts: start searching from the end of the peer (earlier) order.
-      // Prefer the structured peerId; the id-parse fallback is wrong for ids containing '-'.
+      // For multi-order alerts: start searching from the end of the peer (earlier) order. A count-aware tool
+      // conflict has several holders: the pusher only fits once d = inUse - available of them have released
+      // their copy, so search from the d-th earliest holder release (d = 1 for an overlap / a 2-order conflict).
+      // Peers come from alertOrderIds; the id-parse fallback is wrong for ids containing '-'.
       let searchFrom = task.start_date;
       if (a.type === 'overlap' || a.type === 'tool-conflict') {
-        const peerId = a.peerId ?? (a.type === 'overlap' ? a.id.replace(/^ovl-/, '').split('-')[0] : null);
-        const peer = peerId ? Store.tasks[peerId] : null;
-        searchFrom = peer && peer.end_date ? peer.end_date : task.start_date;
+        let peerIds = alertOrderIds(a).slice(1);
+        if (!peerIds.length && a.type === 'overlap') peerIds = [a.id.replace(/^ovl-/, '').split('-')[0]];
+        const releases = peerIds.map(id => Store.tasks[id]?.end_date).filter((d): d is Date => !!d)
+          .map(d => d.getTime()).sort((x, y) => x - y);
+        if (a.type === 'tool-conflict' && a.available === 0) {
+          // No copy exists (all out of service): moving this order can never clear the conflict.
+          if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error');
+          return;
+        }
+        const d = a.type === 'tool-conflict' && a.inUse != null && a.available != null ? Math.max(1, a.inUse - a.available) : 1;
+        const release = releases.length ? releases[Math.min(d, releases.length) - 1] : null;
+        searchFrom = release != null ? new Date(release) : task.start_date;
       }
 
       const snap = UndoStack.snapshotTasks([task.id]);
@@ -788,21 +800,13 @@ export const Alerts = {
  *  entirely — a scoped merge retains untouched lines' stale (dismissal-
  *  filtered) alert lists as-is, so a cleared dismissal on an untouched line
  *  would otherwise never re-surface until some later full recompute. */
-// N: same placeholder set as nimbus-compute-core.js's tool-conflict rule
-// (`TOOL_PLACEHOLDERS`, ~line 391) — kept in sync deliberately, not shared,
-// since the core module has no import boundary into this one.
-const _TOOL_PLACEHOLDERS = new Set(['', '-', '0', 'N/A', 'NONE', 'NULL']);
-
 /** True when `task` carries a real (non-placeholder) PRT_01/PRT_02 tool id.
  *  Used to decide whether an incremental alert recompute must escalate to a
  *  full recompute — see `scheduleAlertsForPatches`'s header comment. */
 export function taskCarriesTool(task: NimbusTask | undefined | null): boolean {
+  // The ONE tool-id reader (placeholder set, trim, upper-case) is the compute core's taskToolIds.
   if (!task) return false;
-  for (const key of ['PRT_01', 'PRT_02'] as const) {
-    const v = String(task[key] ?? '').trim();
-    if (v && !_TOOL_PLACEHOLDERS.has(v.toUpperCase())) return true;
-  }
-  return false;
+  return globalThis.NimbusComputeCore!.taskToolIds(task).length > 0;
 }
 
 /** True when `task` carries a `PARENT_ORDER` (i.e. is one of a group of

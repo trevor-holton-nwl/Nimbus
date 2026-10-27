@@ -205,8 +205,20 @@ export function impactPoints(alert: NimbusAlert, horizonStart: Date, horizonMinu
   return base * (days <= 3 ? FALLBACK_WEIGHTS.tw3 : days <= 7 ? FALLBACK_WEIGHTS.tw7 : 1);
 }
 
+/** Every order an alert touches: the anchor order, then every peer (`peerIds` when present, else the single
+ *  `peerId`), de-duplicated. THE one reader of the peer fields: a count-aware tool conflict carries many peers, so
+ *  no consumer may read `alert.peerId` directly (tests/modules/insights/alert-order-ids.test.mjs gates this). */
+export function alertOrderIds(alert: Pick<NimbusAlert, "taskId" | "peerId" | "peerIds">): string[] {
+  const out: string[] = [];
+  const add = (id: unknown): void => { if (id != null && id !== "" && !out.includes(String(id))) out.push(String(id)); };
+  add(alert.taskId);
+  if (alert.peerIds) for (const id of alert.peerIds) add(id);
+  else add(alert.peerId);
+  return out;
+}
+
 function _affectedOrders(alert: NimbusAlert): number {
-  return 1 + (alert.peerId ? 1 : 0);
+  return alertOrderIds(alert).length;
 }
 
 /** Anchor as sortable ms; alerts with no anchor sort last. */
@@ -250,7 +262,7 @@ export interface AlertGroup {
   alerts: NimbusAlert[];
   /** Summed uncapped impact points. */
   points: number;
-  /** Distinct orders touched (taskId and peerId). */
+  /** Distinct orders touched (`alertOrderIds`). */
   orderIds: string[];
 }
 
@@ -297,8 +309,7 @@ export function groupAlerts(alerts: NimbusAlert[], by: AlertGroupBy, ctx: GroupC
     g.alerts.push(a);
     g.points += impactPoints(a, ctx.horizonStart, ctx.horizonMinutes);
     const ids = orderSets.get(key)!;
-    if (a.taskId) ids.add(a.taskId);
-    if (a.peerId) ids.add(a.peerId);
+    for (const id of alertOrderIds(a)) ids.add(id);
   }
   for (const [key, g] of groups) g.orderIds = [...orderSets.get(key)!];
   return [...groups.values()].sort((x, y) =>

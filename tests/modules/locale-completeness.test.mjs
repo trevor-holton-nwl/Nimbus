@@ -713,6 +713,8 @@ const BRANCH_KEYS = [
   'ui.history_field_segments',
   'ui.system_config_history_retention',
   'ui.system_config_history_retention_hint',
+  // Tool Inventory (Wave 2): count-aware tool-conflict alert wording.
+  'alert.tool_conflict', 'alert.tool_conflict_zero', 'alert.tool_conflict_no_row', 'alert.help.tool-conflict',
 ];
 const localeDict = locale => {
   const sandbox = { window: {} };
@@ -843,6 +845,8 @@ const ALERT_MONITOR_KEYS = [
   'am.slot_option_closed', 'am.slot_option_unknown', 'am.slot_none', 'am.slot_suggested', 'am.slot_place',
   'am.slot_confirm_title', 'am.slot_confirm_short', 'am.slot_confirm_closed', 'am.slot_confirm_place',
   'am.slot_placed', 'am.slot_stale', 'am.slot_no_window', 'am.slot_undo', 'am.slot_suggested_on',
+  // Tool Inventory (Wave 2): the tool card counts orders and shows all of them.
+  'leverage.title.tool', 'leverage.action.tool',
 ];
 
 test('Slot wording (final fix wave): the toast carries the landing day, the confirm names the overlap, the help points at Slot', () => {

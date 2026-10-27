@@ -26,7 +26,7 @@ import { Engine } from '../optimization/engine.mjs';
 import { Timeline } from '../scheduling/gantt.mjs';
 import { Table, Inspector, notifyResidualFirming, firmMismatchMessage } from '../scheduling/orders.mjs';
 import { Selection } from '../scheduling/selection.mjs';
-import { categoryOf, ackLabel, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
+import { categoryOf, alertOrderIds, ackLabel, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
 import { AlertProfileMatches } from './alert-profile-matches.mjs';
 import { ToastLogTab } from './toast-log-tab.mjs';
 import type { NimbusTask, UtilSevBucket } from '../platform/types.mjs';
@@ -1304,7 +1304,10 @@ export const AlertsUIAdapter = {
     // The anchor (the order, plus the pairwise peer when it exists in the store) centers the view on the
     // order(s) rather than the alert's day; a task-less alert passes none and the alert's day is centered.
     const anchorTaskId = a.taskId && Store.tasks[String(a.taskId)] ? String(a.taskId) : '';
-    const anchorPeerId = anchorTaskId && a.peerId && Store.tasks[String(a.peerId)] ? String(a.peerId) : '';
+    // Orders other than the anchor (alertOrderIds): the first one present in the store is the Gantt anchor peer
+    // (a tool conflict names every holder, earliest first); focus-first below selects all of them.
+    const peerIdsInStore = alertOrderIds(a).slice(1).filter(id => Store.tasks[id]);
+    const anchorPeerId = anchorTaskId ? (peerIdsInStore[0] ?? '') : '';
     const anchor = anchorTaskId ? { taskId: anchorTaskId, ...(anchorPeerId ? { peerId: anchorPeerId } : {}) } : undefined;
     Timeline.gotoLineDay(a.line, Util.dayKey(a.time), () => {
       const taskId = a.taskId ? String(a.taskId) : '';
@@ -1319,11 +1322,11 @@ export const AlertsUIAdapter = {
       // wired at boot) shows the Inspector. Selection.set no-ops when the order is already the
       // sole selection, so show the Inspector ourselves in that one case. Select BEFORE marking:
       // the listener clears a marker whose order is not selected and must only see the old one.
-      // A pairwise alert (overlap, tool-conflict) selects both orders when the peer exists in the store.
-      const peerId = a.peerId && Store.tasks[String(a.peerId)] ? String(a.peerId) : '';
+      // A multi-order alert (overlap, tool-conflict) selects the order and every peer / holder that exists in the store.
+      const peers = peerIdsInStore;
       const cur = Selection.ids();
-      if (!peerId && cur.length === 1 && cur[0] === taskId) Inspector.show(t);
-      else Selection.set(peerId ? [taskId, peerId] : [taskId]);
+      if (!peers.length && cur.length === 1 && cur[0] === taskId) Inspector.show(t);
+      else Selection.set([taskId, ...peers]);
       Timeline.markGotoTask(taskId);
     }, anchor);
     // Close the alert drawer if it is open (the drawer would otherwise cover the Gantt).
@@ -1418,10 +1421,13 @@ export const AlertsUIAdapter = {
       } else if (a.type === 'overlap' || a.type === 'tool-conflict') {
         headline = a.type === 'overlap' ? AlertsUIAdapter.headlineFor('overlap') : Util.t('ui.alert_headline_tool_conflict');
         const m = a.id.match(/^ovl-(.+)-(.+)$/);
-        const peer = a.peerId ?? (m ? m[1] : null);
-        const later = a.taskId ?? (m ? m[2] : null);
-        if (peer && later) {
-          chipsHtml = `<div class="ac-chips">${renderChip(peer)}<span class="ac-chip-sep">⇄</span>${renderChip(later)}</div>`;
+        const ids = alertOrderIds(a);
+        const peers = ids.length > 1 ? ids.slice(1) : (m ? [m[1]] : []);
+        const later = ids[0] ?? (m ? m[2] : null);
+        if (peers.length && later) {
+          const shownPeers = peers.slice(0, 4).map(renderChip).join('');
+          const more = peers.length > 4 ? `<span class="ac-chip-sep">+${peers.length - 4}</span>` : '';
+          chipsHtml = `<div class="ac-chips">${shownPeers}${more}<span class="ac-chip-sep">⇄</span>${renderChip(later)}</div>`;
         } else if (a.taskId) {
           chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
         }
