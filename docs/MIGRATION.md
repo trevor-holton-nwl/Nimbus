@@ -1088,6 +1088,17 @@ setup pseudo-orders or changed order dates. Do not drop the four setup tables as
 rollback step—they contain audit-worthy matrix/state/override truth. A destructive schema rollback,
 if ever required, must be a separately reviewed backup-restoration decision.
 
+**Value defaults (2026-10-27).** "Default changeover by value" adds one table, `setup_value_default`, through
+the additive, idempotent `migrations/2026-10-27-1-setup-value-defaults.sql` (mirrored in `schema.sql`; no
+ledger row and no destructive flag needed). Defaults take effect on a plant the moment they are saved: a pair with
+no matrix row but a default is covered and charged the summed default, and a plant can reach activation review on
+default coverage alone. There is **no kill switch**; to neutralise a plant's defaults delete the entries in the
+Setup Matrix "Default changeover by value" card, or roll back the image. Rolling back to the previous image is safe:
+the old code ignores the table and the extra `value_defaults` snapshot key, and stored defaults simply go inert (the
+table is data to keep, like the four sibling setup tables). Saving defaults does not release orders already queued as
+`setup_transition_unrecorded`; run Optimize or place them manually. Planner release note and known gaps:
+`docs/superpowers/specs/2026-10-27-setup-value-defaults-design.md`.
+
 ## Multi-user real-time sync (planned)
 
 A design for near-real-time (seconds) freshness across concurrent schedulers on the same plant was
