@@ -159,6 +159,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-20-2-alert-profiles.sql",
         "2026-10-20-3-reset-date-format.sql",
         "2026-10-23-1-schedule-event.sql",
+        "2026-10-27-1-setup-value-defaults.sql",
         "2026-07-07-color-wheel-table.sql",
         "2026-07-07-security-tables.sql",
         "2026-07-08-username-ci-index.sql",
@@ -538,6 +539,37 @@ def test_setup_schema_prevents_duplicate_active_occurrence_adjacencies():
     )
     for path, text in _setup_schema_texts():
         assert re.search(expected, text, re.DOTALL), path
+
+
+def test_setup_value_default_table_contract_matches_in_schema_and_migration():
+    """The value-defaults table is additive and identical in schema.sql and its dated migration."""
+    migration_path = os.path.join(ROOT, "migrations", "2026-10-27-1-setup-value-defaults.sql")
+    with open(migration_path, encoding="utf-8") as handle:
+        migration = handle.read()
+    for path, text in ((SCHEMA_PATH, _schema_text()), (migration_path, migration)):
+        block = _table_block(text, "setup_value_default")
+        for required in (
+            "plant             TEXT NOT NULL",
+            "signature_version INTEGER NOT NULL CHECK (signature_version > 0)",
+            "field_key         TEXT NOT NULL",
+            "value             TEXT NOT NULL",
+            "setup_min         INTEGER NOT NULL CHECK (setup_min BETWEEN 0 AND 10080)",
+            "created_by        TEXT",
+            "created_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "updated_by        TEXT",
+            "updated_at        TIMESTAMP NOT NULL DEFAULT NOW()",
+            "PRIMARY KEY (plant, signature_version, field_key, value)",
+        ):
+            assert required in block, f"{path}: setup_value_default missing {required}"
+
+
+def test_setup_value_default_migration_is_additive_and_clears_the_destructive_regex():
+    """The deploy runner scans comments too, so the file must avoid every destructive word."""
+    migration_path = os.path.join(ROOT, "migrations", "2026-10-27-1-setup-value-defaults.sql")
+    with open(migration_path, encoding="utf-8") as handle:
+        migration = handle.read()
+    assert re.search(r"(ALTER|DROP|DELETE|UPDATE|TRUNCATE|RENAME|GRANT|REVOKE)", migration, re.IGNORECASE) is None
+    assert "CREATE TABLE IF NOT EXISTS setup_value_default" in migration
 
 
 def test_setup_schema_enforces_matrix_bound_and_unbounded_override_minutes():

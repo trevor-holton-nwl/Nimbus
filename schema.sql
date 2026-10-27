@@ -1898,6 +1898,21 @@ CREATE TABLE IF NOT EXISTS setup_matrix (
     PRIMARY KEY (plant, machine, signature_version, from_key, to_key)
 );
 
+-- Default changeover minutes charged when a transition arrives at a signature
+-- value (value defaults); resolved below exact rows, carried across signature bumps.
+CREATE TABLE IF NOT EXISTS setup_value_default (
+    plant             TEXT NOT NULL,
+    signature_version INTEGER NOT NULL CHECK (signature_version > 0),
+    field_key         TEXT NOT NULL,
+    value             TEXT NOT NULL,
+    setup_min         INTEGER NOT NULL CHECK (setup_min BETWEEN 0 AND 10080),
+    created_by        TEXT,
+    created_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_by        TEXT,
+    updated_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (plant, signature_version, field_key, value)
+);
+
 -- The most recently accepted physical setup state for each plant/machine.
 CREATE TABLE IF NOT EXISTS machine_setup_state (
     plant             TEXT NOT NULL,
