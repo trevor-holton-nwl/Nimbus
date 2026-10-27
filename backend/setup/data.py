@@ -1292,7 +1292,98 @@ def _load_setup_coverage(cur, plant: str) -> dict:
             "value_defaults": value_defaults}
 
 
+def _machine_state_structures(cur, context: dict) -> dict[str, dict]:
+    """Per machine (state order): state lists, canonical tuples and token -> index maps.
+
+    `index` keys the JSON-dump token (observed pairs); `text_index` keys PostgreSQL's own
+    jsonb text form, which is what the matrix-row query returns, so rows can be matched
+    without parsing any JSON in Python.  Cached on the context."""
+    cached = context.get("_machine_structures")
+    if cached is not None:
+        return cached
+    fields = context["definition"]["fields"]
+    result: dict[str, dict] = {}
+    for machine, states in _states_by_machine(context).items():
+        result[machine] = {
+            "states": states,
+            "tuples": [_state_tuple(state, fields) for state in states],
+            "index": {_state_token(state): i for i, state in enumerate(states)},
+            "text_index": {},
+        }
+    if result:
+        cur.execute(
+            """/* setup state text tokens */
+            SELECT machine, state_order, state_key::text
+              FROM jsonb_to_recordset(%s::jsonb)
+                   AS state(machine text, state_key jsonb, machine_order integer, state_order integer)""",
+            (Jsonb(context["states"]),),
+        )
+        for machine, state_order, text in cur.fetchall():
+            if machine in result:
+                result[machine]["text_index"][text] = int(state_order)
+    context["_machine_structures"] = result
+    return result
+
+
+def _fetch_matrix_rows(cur, context: dict, machines: list[str]):
+    """Plant-scope and per-machine matrix rows that start and end on a known state, as jsonb text.
+
+    One query for the whole plant, bounded by the observed state universe (a row that
+    touches a state no machine has seen cannot affect coverage) and never joined per
+    machine.  Rows come back as PostgreSQL text so no JSON is parsed here."""
+    definition = context["definition"]
+    cur.execute(
+        """/* setup coverage matrix rows */
+        WITH known AS (
+            SELECT DISTINCT state_key
+              FROM jsonb_to_recordset(%s::jsonb)
+                   AS state(machine text, state_key jsonb, machine_order integer, state_order integer)
+        )
+        SELECT m.machine, m.from_key::text, m.to_key::text
+          FROM setup_matrix AS m
+          JOIN known AS f ON f.state_key = m.from_key
+          JOIN known AS t ON t.state_key = m.to_key
+         WHERE m.plant = %s AND m.signature_version = %s
+           AND (m.machine = '' OR m.machine = ANY(%s))
+           AND m.from_key <> m.to_key""",
+        (Jsonb(context["states"]), context["plant"], definition["signature_version"], machines),
+    )
+    plant_by_to: dict[str, list[str]] = {}
+    machine_pairs: dict[str, list[tuple[str, str]]] = {}
+    for machine, from_text, to_text in cur.fetchall():
+        if machine == "":
+            plant_by_to.setdefault(to_text, []).append(from_text)
+        else:
+            machine_pairs.setdefault(machine, []).append((from_text, to_text))
+    return plant_by_to, machine_pairs
+
+
+def _machine_row_pairs(info: dict, plant_by_to: dict, machine_pairs: list) -> set[tuple[int, int]]:
+    """Effective off-diagonal recorded (from_index, to_index) pairs of one machine.
+
+    Plant rows apply to every machine; a machine's own rows add to (or repeat) them, and a
+    set de-duplicates the repeat exactly as the old DISTINCT effective-rows CTE did."""
+    text_index = info["text_index"]
+    pairs: set[tuple[int, int]] = set()
+    for to_text, b in text_index.items():
+        for from_text in plant_by_to.get(to_text, ()):
+            a = text_index.get(from_text)
+            if a is not None and a != b:
+                pairs.add((a, b))
+    for from_text, to_text in machine_pairs or ():
+        a, b = text_index.get(from_text), text_index.get(to_text)
+        if a is not None and b is not None and a != b:
+            pairs.add((a, b))
+    return pairs
+
+
 def _coverage_counts(cur, context: dict) -> dict[str, dict[str, dict[str, int]]]:
+    """Reachable and observed coverage counts, computed without enumerating state pairs.
+
+    covered = recorded rows (+ the diagonal for reachable); default_covered = the pairs a
+    value default covers that no row already covers (grouping maths, see above);
+    missing = total - covered - default_covered.  Per-machine recorded-pair sets are kept
+    on the context for the missing-page generator."""
     cached = context.get("_coverage_counts")
     if isinstance(cached, dict):
         return cached
@@ -1302,175 +1393,41 @@ def _coverage_counts(cur, context: dict) -> dict[str, dict[str, dict[str, int]]]
         context["_coverage_counts"] = counts
         return counts
 
-    states_by_machine: dict[str, int] = {}
-    for row in context["states"]:
-        states_by_machine[row["machine"]] = states_by_machine.get(row["machine"], 0) + 1
-    observed_by_machine: dict[str, int] = {}
+    observed_by_machine: dict[str, list[dict]] = {}
     for row in context["observed"]:
-        observed_by_machine[row["machine"]] = observed_by_machine.get(row["machine"], 0) + 1
-    for machine, total in observed_by_machine.items():
-        counts["observed"][machine] = {"total": total, "covered": 0, "default_covered": 0}
-    for machine, state_count in states_by_machine.items():
-        counts["reachable"][machine] = {"total": state_count * state_count, "covered": 0, "default_covered": 0}
+        observed_by_machine.setdefault(row["machine"], []).append(row)
+    structures = _machine_state_structures(cur, context)
+    default_sets = _default_sets_for(definition, context.get("value_defaults"))
+    has_defaults = any(default_sets)
+    plant_by_to, machine_pairs = _fetch_matrix_rows(cur, context, list(structures)) if structures else ({}, {})
+    row_pairs_by_machine: dict[str, set[tuple[int, int]]] = {}
 
-    cur.execute(
-        """/* setup coverage summary */
-        WITH state_input AS (
-            SELECT machine, state_key
-              FROM jsonb_to_recordset(%s::jsonb)
-                   AS state(machine text, state_key jsonb, machine_order integer, state_order integer)
-        ),
-        observed_input AS (
-            SELECT machine, from_key, to_key
-              FROM jsonb_to_recordset(%s::jsonb)
-                   AS pair(machine text, from_key jsonb, to_key jsonb, pair_order integer)
-        ),
-        effective_rows AS (
-            SELECT DISTINCT target.machine, matrix.from_key, matrix.to_key
-              FROM (SELECT DISTINCT machine FROM state_input) AS target
-              JOIN setup_matrix AS matrix
-                ON matrix.plant = %s
-               AND matrix.signature_version = %s
-               AND matrix.machine IN ('', target.machine)
-             WHERE EXISTS (
-                       SELECT 1 FROM state_input AS source_state
-                        WHERE source_state.machine = target.machine
-                          AND source_state.state_key = matrix.from_key
-                   )
-               AND EXISTS (
-                       SELECT 1 FROM state_input AS target_state
-                        WHERE target_state.machine = target.machine
-                          AND target_state.state_key = matrix.to_key
-                   )
-               AND (
-                   matrix.machine = target.machine
-                   OR NOT EXISTS (
-                       SELECT 1 FROM setup_matrix AS override
-                        WHERE override.plant = matrix.plant
-                          AND override.signature_version = matrix.signature_version
-                          AND override.machine = target.machine
-                          AND override.from_key = matrix.from_key
-                          AND override.to_key = matrix.to_key
-                   )
-               )
-        ),
-        reachable_counts AS (
-            SELECT machine, COUNT(*)::bigint AS state_count
-              FROM state_input GROUP BY machine
-        )
-        SELECT 'observed', pair.machine,
-               COUNT(*) FILTER (
-                   WHERE pair.from_key = pair.to_key
-                      OR EXISTS (
-                          SELECT 1 FROM effective_rows AS effective
-                           WHERE effective.machine = pair.machine
-                             AND effective.from_key = pair.from_key
-                             AND effective.to_key = pair.to_key
-                      )
-               )::bigint AS covered
-          FROM observed_input AS pair
-         GROUP BY pair.machine
-        UNION ALL
-        SELECT 'reachable', reachable.machine,
-               (reachable.state_count + COUNT(effective.from_key) FILTER (
-                   WHERE effective.from_key <> effective.to_key
-               ))::bigint AS covered
-          FROM reachable_counts AS reachable
-          LEFT JOIN effective_rows AS effective ON effective.machine = reachable.machine
-         GROUP BY reachable.machine, reachable.state_count""",
-        (Jsonb(context["states"]), Jsonb(context["observed"]),
-         context["plant"], definition["signature_version"]),
-    )
-    for kind, machine, covered in cur.fetchall():
-        if kind in counts and machine in counts[kind]:
-            counts[kind][machine]["covered"] = int(covered)
-    _add_default_coverage(cur, context, counts)
+    for machine, info in structures.items():
+        tuples, index, n = info["tuples"], info["index"], len(info["states"])
+        row_pairs = _machine_row_pairs(info, plant_by_to, machine_pairs.get(machine))
+        row_pairs_by_machine[machine] = row_pairs
+        default_reachable = 0
+        if has_defaults:
+            masks, groups = _value_default_structure(tuples, default_sets)
+            default_reachable = (_default_covered_all(tuples, masks, groups)
+                                 - _rows_default_overlap(tuples, masks, row_pairs))
+        counts["reachable"][machine] = {"total": n * n, "covered": n + len(row_pairs),
+                                        "default_covered": default_reachable}
+        if machine in observed_by_machine:
+            covered = by_default = 0
+            for pair in observed_by_machine[machine]:
+                from_token, to_token = _state_token(pair["from_key"]), _state_token(pair["to_key"])
+                a, b = index.get(from_token), index.get(to_token)
+                if from_token == to_token or (a, b) in row_pairs:
+                    covered += 1
+                elif (has_defaults and a is not None and b is not None
+                      and _pair_default_covered(tuples[a], tuples[b], default_sets)):
+                    by_default += 1
+            counts["observed"][machine] = {"total": len(observed_by_machine[machine]), "covered": covered,
+                                           "default_covered": by_default}
+    context["_row_pairs"] = row_pairs_by_machine
     context["_coverage_counts"] = counts
     return counts
-
-
-def _fetch_default_target_rows(cur, plant: str, version: int, machines: list[str]):
-    """Matrix rows (plant scope and these machines) whose to-key has a default on some field.
-
-    Bounded by the defaults: a plant row set that never arrives at a defaulted value
-    returns nothing.  The comparison is case-folded so a stored server-form "TRUE" meets
-    a stored client-form "true" default; the exact canonical test runs in Python."""
-    cur.execute(
-        """/* setup value-default overlapping rows */
-        SELECT m.machine, m.from_key, m.to_key
-          FROM setup_matrix AS m
-         WHERE m.plant = %s AND m.signature_version = %s
-           AND (m.machine = '' OR m.machine = ANY(%s))
-           AND m.from_key <> m.to_key
-           AND EXISTS (
-                   SELECT 1 FROM setup_value_default AS d, jsonb_array_elements(m.to_key) AS e
-                    WHERE d.plant = m.plant AND d.signature_version = m.signature_version
-                      AND e->>'fieldKey' = d.field_key
-                      AND upper(btrim(e->>'value')) = upper(d.value)
-               )""",
-        (plant, version, machines),
-    )
-    plant_by_to: dict[str, list[str]] = {}
-    machine_pairs: dict[str, list[tuple[str, str]]] = {}
-    for machine, from_key, to_key in cur.fetchall():
-        if machine == "":
-            plant_by_to.setdefault(_state_token(to_key), []).append(_state_token(from_key))
-        else:
-            machine_pairs.setdefault(machine, []).append((_state_token(from_key), _state_token(to_key)))
-    return plant_by_to, machine_pairs
-
-
-def _machine_state_structures(context: dict):
-    """Per machine (state order): state lists, canonical tuples and token -> index."""
-    fields = context["definition"]["fields"]
-    result = {}
-    for machine, states in _states_by_machine(context).items():
-        result[machine] = {
-            "states": states,
-            "tuples": [_state_tuple(state, fields) for state in states],
-            "index": {_state_token(state): i for i, state in enumerate(states)},
-        }
-    return result
-
-
-def _add_default_coverage(cur, context: dict, counts: dict) -> None:
-    """Fill `default_covered` for the reachable and observed kinds (zero when no defaults exist)."""
-    definition = context["definition"]
-    default_sets = _default_sets_for(definition, context.get("value_defaults"))
-    if not any(default_sets):
-        return
-    structures = _machine_state_structures(context)
-    plant_by_to, machine_pairs = _fetch_default_target_rows(
-        cur, context["plant"], definition["signature_version"], list(structures))
-    observed_by_machine: dict[str, list[dict]] = {}
-    for pair in context["observed"]:
-        observed_by_machine.setdefault(pair["machine"], []).append(pair)
-    for machine, info in structures.items():
-        tuples, index = info["tuples"], info["index"]
-        masks, groups = _value_default_structure(tuples, default_sets)
-        row_pairs: set[tuple[int, int]] = set()
-        for b, mask in enumerate(masks):
-            if not mask:
-                continue
-            for from_token in plant_by_to.get(_state_token(info["states"][b]), ()):
-                a = index.get(from_token)
-                if a is not None and a != b:
-                    row_pairs.add((a, b))
-        for from_token, to_token in machine_pairs.get(machine, ()):
-            a, b = index.get(from_token), index.get(to_token)
-            if a is not None and b is not None and a != b:
-                row_pairs.add((a, b))
-        reachable = counts["reachable"][machine]
-        reachable["default_covered"] = (_default_covered_all(tuples, masks, groups)
-                                        - _rows_default_overlap(tuples, masks, row_pairs))
-        if machine in counts["observed"]:
-            default_observed = 0
-            for pair in observed_by_machine.get(machine, ()):
-                a, b = index.get(_state_token(pair["from_key"])), index.get(_state_token(pair["to_key"]))
-                if (a is not None and b is not None and a != b and (a, b) not in row_pairs
-                        and _pair_default_covered(tuples[a], tuples[b], default_sets)):
-                    default_observed += 1
-            counts["observed"][machine]["default_covered"] = default_observed
 
 
 def _summarize_setup_coverage(cur, context: dict) -> dict:
@@ -1510,30 +1467,19 @@ def _states_by_machine(context: dict) -> dict[str, list[list[dict[str, str]]]]:
     }
 
 
-def _fetch_machine_row_pairs(cur, plant: str, version: int, machine: str) -> list[tuple[str, str]]:
-    """Every effective off-diagonal (from, to) token pair of one machine (plant rows plus its own)."""
-    cur.execute(
-        """/* setup reachable missing machine rows */
-        SELECT from_key, to_key FROM setup_matrix
-         WHERE plant = %s AND signature_version = %s AND machine IN ('', %s) AND from_key <> to_key""",
-        (plant, version, machine),
-    )
-    return [(_state_token(from_key), _state_token(to_key)) for from_key, to_key in cur.fetchall()]
-
-
 def _page_reachable_missing_pairs(cur, context: dict, *, machine: str | None,
                                   offset: int, limit: int) -> list[dict]:
     """One to-state-major page of missing reachable pairs, built from the grouping maths.
 
     Whole machines (and, inside `_iter_missing_pairs`, whole to-states) are skipped by
     their missing counts; the state Cartesian product is never formed."""
-    structures = _machine_state_structures(context)
+    structures = _machine_state_structures(cur, context)
     selected = [machine] if machine is not None and machine in structures else (
         [] if machine is not None else list(structures)
     )
-    definition = context["definition"]
-    default_sets = _default_sets_for(definition, context.get("value_defaults"))
+    default_sets = _default_sets_for(context["definition"], context.get("value_defaults"))
     counts = _coverage_counts(cur, context)["reachable"]
+    row_pairs_by_machine = context["_row_pairs"]
     remaining_skip = offset
     result: list[dict] = []
     for current_machine in selected:
@@ -1543,14 +1489,11 @@ def _page_reachable_missing_pairs(cur, context: dict, *, machine: str | None,
             remaining_skip -= machine_missing
             continue
         info = structures[current_machine]
-        tuples, index = info["tuples"], info["index"]
+        tuples = info["tuples"]
         masks, groups = _value_default_structure(tuples, default_sets)
         row_hits: dict[int, set[int]] = {}
-        for from_token, to_token in _fetch_machine_row_pairs(
-                cur, context["plant"], definition["signature_version"], current_machine):
-            a, b = index.get(from_token), index.get(to_token)
-            if a is not None and b is not None and a != b:
-                row_hits.setdefault(b, set()).add(a)
+        for a, b in row_pairs_by_machine[current_machine]:
+            row_hits.setdefault(b, set()).add(a)
         pairs = _iter_missing_pairs(tuples, masks, groups, row_hits,
                                     offset=remaining_skip, limit=limit - len(result))
         remaining_skip = 0

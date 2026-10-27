@@ -1,5 +1,6 @@
 """Read-only coverage contracts for Stage 0 setup shadow diagnostics."""
 import copy
+import json
 from datetime import datetime
 
 import pytest
@@ -137,7 +138,7 @@ def test_bounded_coverage_summary_and_page_match_existing_semantics_without_snap
     assert "FROM machine_setup_state" not in statements
     assert "FROM setup_occurrence_override" not in statements
     assert "jsonb_to_recordset" in statements
-    assert "setup reachable missing machine rows" in statements
+    assert "setup coverage matrix rows" in statements
 
 
 def test_get_setup_coverage_compatibility_wrapper_never_loads_snapshot(monkeypatch):
@@ -167,8 +168,8 @@ def test_bounded_coverage_rejects_an_oversized_page_before_database_access(monke
         setup_data.get_setup_coverage_page("5512", limit=501)
 
 
-def test_coverage_bundle_uses_one_repeatable_read_cursor_and_one_bounded_row_query_per_machine(monkeypatch):
-    """Summary and pages share one snapshot; the reachable page reads one machine's rows, never a Cartesian product."""
+def test_coverage_bundle_uses_one_repeatable_read_cursor_and_one_plant_wide_row_query(monkeypatch):
+    """Summary and pages share one snapshot; one bounded row query serves counts and pages, never a Cartesian product."""
     cursor = _CoverageCursor()
     pool = _CountingPool(cursor)
     monkeypatch.setattr(setup_data, "_pool", pool)
@@ -177,20 +178,20 @@ def test_coverage_bundle_uses_one_repeatable_read_cursor_and_one_bounded_row_que
     assert pool.connection_calls == 1
     assert cursor.executed[0][0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
     assert result["reachable"]["missing_page"]["meta"] == {"total": 5, "offset": 1, "limit": 2}
-    row_queries = [(sql, params) for sql, params in cursor.executed if "setup reachable missing machine rows" in sql]
+    row_queries = [(sql, params) for sql, params in cursor.executed if "setup coverage matrix rows" in sql]
     assert len(row_queries) == 1
-    assert row_queries[0][1] == ("5512", 4, "L2")
+    assert row_queries[0][1][1:] == ("5512", 4, ["L1", "L2"])
+    assert "m.machine = ANY(%s)" in row_queries[0][0] and "JOIN known AS f" in row_queries[0][0]
     assert not any("candidate_input" in sql or "ordinal window" in sql for sql, _ in cursor.executed)
 
 
 def test_missing_page_skips_whole_machines_by_their_missing_counts(monkeypatch):
-    """An offset past machine L1's 4 missing pairs lands in L2 without reading L1's rows."""
+    """An offset past machine L1's 4 missing pairs lands in L2 (counts, not enumeration, do the skipping)."""
     cursor = _CoverageCursor()
     monkeypatch.setattr(setup_data, "_pool", _Pool(cursor))
     result = setup_data.get_setup_coverage_page("5512", offset=4, limit=2)
     assert [(r["machine"], r["from_key"], r["to_key"]) for r in result["reachable"]["missing_page"]["rows"]] == [
         ("L2", BLUE, RED), ("L2", GREEN, RED)]
-    assert [params[2] for sql, params in cursor.executed if "setup reachable missing machine rows" in sql] == ["L2"]
 
 
 class _CoverageCursor:
@@ -224,14 +225,16 @@ class _CoverageCursor:
         sql, params = self.executed[-1]
         if "FROM orders" in sql:
             return self.ORDER_ROWS
-        if "setup coverage summary" in sql:
-            return [("observed", "L1", 2), ("observed", "L2", 1),
-                    ("reachable", "L1", 5), ("reachable", "L2", 4)]
+        if "setup state text tokens" in sql:
+            states = params[0].obj if hasattr(params[0], "obj") else params[0]
+            return [(row["machine"], row["state_order"], json.dumps(row["state_key"], sort_keys=True))
+                    for row in states]
+        if "setup coverage matrix rows" in sql:
+            # effective off-diagonal rows: L1 has two (covered 3 diagonal + 2), L2 has one (3 + 1)
+            text = lambda key: json.dumps(key, sort_keys=True)  # noqa: E731
+            return [("L1", text(RED), text(BLUE)), ("L1", text(BLUE), text(GREEN)), ("", text(RED), text(BLUE))]
         if "setup observed missing page" in sql:
             return [("L2", BLUE, GREEN)]
-        if "setup reachable missing machine rows" in sql:
-            # effective off-diagonal rows: L1 has two (covered 3 diagonal + 2), L2 has one (3 + 1)
-            return {"L1": [(RED, BLUE), (BLUE, GREEN)], "L2": [(RED, BLUE)]}[params[2]]
         if "FROM setup_value_default" in sql:
             return []
         raise AssertionError(f"Unexpected coverage query: {sql}")
