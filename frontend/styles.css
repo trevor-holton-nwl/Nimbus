@@ -7179,7 +7179,7 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 .setup-grid-implicit-zero { color: var(--fg-faint); font-style: italic; }
 .setup-grid-line-override { background: color-mix(in srgb, var(--accent) 6%, transparent); }
 /* Covered by a default by value (no row): muted italic number on a faint "covered" wash. Typing records a real row. */
-.setup-grid-value-default { color: var(--fg-mute); font-style: italic; background: color-mix(in srgb, var(--ok-soft) 60%, transparent); }
+.setup-grid-value-default { color: color-mix(in srgb, var(--fg-mute) 70%, var(--fg)); font-style: italic; background: color-mix(in srgb, var(--ok-soft) 60%, transparent); }
 /* Dirty marker reuses the Master Data grid's inset-accent idiom (.md-cell-dirty, styles.css:4515). */
 .setup-grid-dirty { box-shadow: inset 3px 0 0 var(--accent-hot); }
 .setup-grid-selected { background: color-mix(in srgb, var(--accent) 16%, transparent); outline: 1px solid var(--accent); outline-offset: -1px; }
@@ -7205,7 +7205,7 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 .setup-vd-minutes { height: 26px; width: 84px; text-align: right; font-family: var(--font-mono); }
 .setup-vd-table th:first-child, .setup-vd-table td:first-child { width: 40%; overflow-wrap: anywhere; }
 .setup-vd-table td { vertical-align: middle; }
-.setup-vd-dirty td:first-child { box-shadow: inset 3px 0 0 var(--accent-hot); }
+.setup-vd-dirty td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .setup-vd-badge { display: inline-block; padding: 1px 7px; border: 1px solid var(--line); border-radius: var(--r-sm); font-size: 11px; color: var(--fg-mute); }
 .setup-vd-badge-listed { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
 .setup-vd-badge-stored { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
