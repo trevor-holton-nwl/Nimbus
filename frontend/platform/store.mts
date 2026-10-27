@@ -250,7 +250,10 @@ export const Store = {
    *  `frozen_horizon_days` key at all (master data not loaded yet; cache-only boot), does it fall back
    *  to the server-resolved instant cached from /tasks `meta` (`setFrozenHorizonEnd`). */
   get frozenHorizonEnd(): Date | null {
-    const plant = this._state.selectedPlant;
+    return this.frozenHorizonEndFor(this._state.selectedPlant);
+  },
+  /** The same rolling edge for an explicit plant (a task's own plant, not the selected one). */
+  frozenHorizonEndFor(plant: string | null | undefined): Date | null {
     const row = plant ? this._state.masterData?.plants?.find(p => p.plant === plant) : undefined;
     if (row && row.frozen_horizon_days !== undefined) {
       const days = row.frozen_horizon_days;

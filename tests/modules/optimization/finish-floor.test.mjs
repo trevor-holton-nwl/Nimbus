@@ -70,6 +70,20 @@ test('placeWithFinishFloor (split-capable): bisects toward the minimal start ins
   assert.ok(calls.length <= 6, `bounded retries, got ${calls.length}`);
 });
 
+test('placeWithFinishFloor (split-capable): searches earlier starts when the probe at the floor is infeasible', () => {
+  // Day-2 window is cut to 00-03 by the completion ceiling, so a start AT the floor (day 2, 02:00) has
+  // only 1 h and fails; a start on day 1 around 04:00 finishes 02:00-03:00 and fits.
+  const calls = [];
+  const attempt = windowAttempt([['2026-08-03T00:00:00', '2026-08-03T08:00:00'], ['2026-08-04T00:00:00', '2026-08-04T03:00:00']], 360, 'partial_allowed', calls);
+  const floor = at('2026-08-04T02:00:00');
+  const result = SetupScheduler.placeWithFinishFloor(attempt, at('2026-08-03T00:00:00'), floor, 0, 360, 'partial_allowed');
+  assert.equal(result.kind, 'placed');
+  const finish = +result.productiveSegments.at(-1).end;
+  assert.ok(finish >= +floor && finish <= +at('2026-08-04T03:00:00'), 'finishes between the floor and the ceiling');
+  assert.ok(+result.productiveSegments[0].start >= +at('2026-08-03T00:00:00'));
+  assert.ok(calls.length <= 6, `bounded probes, got ${calls.length}`);
+});
+
 test('placeWithFinishFloor: nothing at or after the floor fits -> the infeasible result is returned', () => {
   const calls = [];
   const result = SetupScheduler.placeWithFinishFloor(

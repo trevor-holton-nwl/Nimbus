@@ -130,6 +130,22 @@ test('Allowed window labels a frozen finish-floor conflict instead of showing a 
   }
 });
 
+test('Allowed window label reads the task plant frozen edge, not the selected plant', () => {
+  const priorMasterData = Store.masterData;
+  const priorFrozen = Store.frozenHorizonEnd;
+  const order = { id: 'other-plant', PLANT: 'P1', MACHINE: 'L1', RUN_TIME: 1, original_end_date: new Date('2026-09-15T18:00:00') };
+  try {
+    // P1 has no frozen window; the selected plant's fallback edge (set below) must not leak into P1's label.
+    Store.setMasterData({ ...priorMasterData, plants: [{ plant: 'P1', frozen_horizon_days: 0, max_pull_forward_days: 0, max_push_forward_days: 0 }] }, 'test');
+    Store.setFrozenHorizonEnd(new Date('2026-09-19T00:00:00'), 'test');
+    assert.equal(Store.frozenHorizonEndFor('P1'), null);
+    assert.ok(!/No valid window/.test(Table._planningWindowLabel(order)));
+  } finally {
+    Store.setMasterData(priorMasterData, 'test');
+    Store.setFrozenHorizonEnd(priorFrozen, 'test');
+  }
+});
+
 // Same split-realm/no-DOM situation documented in
 // tests/modules/schedule-services.test.mjs and schedule-data.test.mjs.
 if (typeof globalThis.document === 'undefined') {

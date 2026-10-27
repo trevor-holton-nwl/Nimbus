@@ -218,7 +218,7 @@ export const Table = {
     }
     // The frozen horizon is a FINISH floor (2026-10-27): an unprotected order may not finish before the window edge,
     // so a completion limit before the edge leaves no valid window (equality is valid).
-    const frozenEnd = Store.frozenHorizonEnd;
+    const frozenEnd = Store.frozenHorizonEndFor(plant);
     if (frozenEnd && ceiling && frozenEnd > ceiling) {
       return `No valid window: finish on/after ${Util.fmtDTReadable(frozenEnd)}; complete by ${Util.fmtDTReadable(ceiling)}`;
     }

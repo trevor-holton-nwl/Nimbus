@@ -2804,18 +2804,24 @@ export function placeWithFinishFloor(
   const firstFinish = finishOf(first);
   if (firstFinish === null || firstFinish >= floorMs) return first;
   let hiStart = Math.max(earliestMs, floorMs);
-  let best = attempt(new Date(hiStart));
-  const bestFinish = finishOf(best);
-  if (bestFinish === null || bestFinish < floorMs) return best;
+  const top = attempt(new Date(hiStart));
+  const topFinish = finishOf(top);
+  let best: PlacementResult | null = topFinish !== null && topFinish >= floorMs ? top : null;
   let loStart = earliestMs;
+  // Even when the probe at the floor is infeasible (e.g. it overshoots the completion
+  // ceiling), an earlier start can still finish just after the floor, so search anyway.
+  // A probe that does not place is "too late" (hi moves down); a placed probe that
+  // finishes before the floor is "too early" (lo moves up).
   for (let probe = 0; probe < 4; probe += 1) {
     const mid = Math.floor((loStart + hiStart) / 2 / MIN_MS) * MIN_MS;
     if (mid <= loStart || mid >= hiStart) break;
     const result = attempt(new Date(mid));
     const finish = finishOf(result);
-    if (finish !== null && finish >= floorMs) { best = result; hiStart = mid; } else loStart = mid;
+    if (finish !== null && finish >= floorMs) { best = result; hiStart = mid; }
+    else if (finish === null) hiStart = mid;
+    else loStart = mid;
   }
-  return best;
+  return best ?? top;
 }
 
 /** Marker on arrays `freeIntervalsForPlacement` returns: every interval is

@@ -539,7 +539,7 @@ export const Timeline = {
       // symmetric diff against the last-known membership set. Orders leave
       // the band as "now" advances past them; new members appear as the
       // rolling far edge (now + frozen days, read live through
-      // Engine.isFrozenHorizon) advances over their start.
+      // Engine.isFrozenHorizon) advances past their planned finish.
       // Also self-heals if the horizon changes mid-session. Cache-only boots
       // have frozenHorizonEnd null until the plant's master data (or the
       // first /tasks fetch) is in, matching the band's own absence then.
