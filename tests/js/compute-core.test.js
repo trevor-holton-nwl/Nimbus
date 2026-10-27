@@ -253,7 +253,7 @@ test('computeAlerts recognizes predecessor-state-unknown/successor-state-unknown
   }, 'each of the six setup diagnostic types must resolve its documented severity, not a blanket default');
 });
 
-test('computeAlerts downgrades setup severity to warn only when the plant setup_active flag is truly off', () => {
+test('computeAlerts raises no setup alerts only when the plant setup_active flag is truly off', () => {
   const time = new Date(Date.now() + 24 * 3600000);
   const workHours = allDays([0, 24]);
   const fixture = (setupActive) => ({
@@ -271,6 +271,8 @@ test('computeAlerts downgrades setup severity to warn only when the plant setup_
         { type: 'predecessor-state-unknown', line: 'L', scope: 'P/L', predecessorOrderId: 'mid', successorOrderId: 'after-mid', time },
         { type: 'successor-state-unknown', line: 'L', scope: 'P/L', predecessorOrderId: 'before', successorOrderId: 'unknown-successor', time },
         { type: 'override-inactive', line: 'L', scope: 'P/L', successorOrderId: 'override-line', time },
+        { type: 'initial-state-unknown', line: 'L', scope: 'P/L', successorOrderId: 'first', time },
+        { type: 'current-state-diverged', line: 'L', scope: 'P/L', successorOrderId: 'diverged-line', time },
       ],
     },
   });
@@ -278,11 +280,10 @@ test('computeAlerts downgrades setup severity to warn only when the plant setup_
   const sevOf = (alerts, type) => alerts.find(alert => alert.type === type)?.sev;
 
   const off = Core.computeAlerts(fixture(false)).alerts;
-  assert.equal(sevOf(off, 'setup-violated'), 'warn');
-  assert.equal(sevOf(off, 'setup-uncovered'), 'warn');
-  assert.equal(sevOf(off, 'predecessor-state-unknown'), 'warn');
-  assert.equal(sevOf(off, 'successor-state-unknown'), 'warn');
-  assert.equal(sevOf(off, 'override-inactive'), 'warn', 'an already-warn diagnostic type must not be affected either way');
+  for (const type of ['setup-violated', 'setup-uncovered', 'predecessor-state-unknown', 'successor-state-unknown',
+    'override-inactive', 'initial-state-unknown', 'current-state-diverged']) {
+    assert.equal(sevOf(off, type), undefined, `${type} must be suppressed on a setup-off plant`);
+  }
 
   for (const on of [Core.computeAlerts(fixture(true)).alerts, Core.computeAlerts(fixture(undefined)).alerts]) {
     assert.equal(sevOf(on, 'setup-violated'), 'err');
