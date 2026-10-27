@@ -412,6 +412,17 @@ export interface SetupOccurrenceOverride {
   reason: string;
 }
 
+/** One per-plant "default changeover by value" entry: minutes charged when a
+ * transition arrives at `value` on signature field `field_key`. */
+export interface SetupValueDefault {
+  field_key: string;
+  value: string;
+  setup_min: number;
+  signature_version: number;
+  updated_by?: string | null;
+  updated_at?: string | null;
+}
+
 /** One authorized plant's complete setup truth, returned by GET /setup/{plant}.
  * This remains separate from persisted schedule state: it is read-only
  * observation data for the changeover matrix rollout. */
@@ -425,6 +436,8 @@ export interface SetupSnapshot {
   machine_rows: SetupMatrixRow[];
   machine_states: LineSetupState[];
   overrides: SetupOccurrenceOverride[];
+  /** Value defaults (absent = none; every reader treats undefined as `[]`). */
+  value_defaults?: SetupValueDefault[];
   /** Workstream D2 (2026-08-20): the real "include setup times in optimizer"
    *  gate, sourced from plants.setup_active — durable and plant-level, unlike
    *  `definition.active` (per-signature-version, force-reset to FALSE on
@@ -450,7 +463,7 @@ export interface SetupSnapshot {
   synthetic?: boolean;
 }
 
-export type SetupResolutionSource = 'occurrence' | 'line' | 'plant' | 'implicit-zero' | 'uncovered';
+export type SetupResolutionSource = 'occurrence' | 'line' | 'plant' | 'implicit-zero' | 'value-default' | 'uncovered';
 
 export interface ResolvedSetup {
   covered: boolean;
@@ -478,6 +491,9 @@ export interface ResolveSetupInput {
   plantRows: ReadonlyArray<SetupMatrixRow>;
   machineRows: ReadonlyArray<SetupMatrixRow>;
   overrides: ReadonlyArray<SetupOccurrenceOverride>;
+  /** Value defaults. Required in the type so a missed call site fails typecheck; the resolver
+   *  is runtime-defensive (undefined is treated as `[]`) for untyped callers. */
+  valueDefaults: ReadonlyArray<SetupValueDefault>;
   /** Optional caller-owned prebuilt lookup index (Phase 1b, `setup-domain.mts`'s
    *  `buildSetupResolutionIndex`) letting `resolveSetup` replace its three linear
    *  scans with O(1) map lookups. Only consulted when its `signatureVersion`

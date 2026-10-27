@@ -1873,6 +1873,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.setup_read_only':              'Read-only access',
   'ui.setup_source':                 'Source',
   'ui.setup_source_no_change':       'No change',
+  'ui.setup_source_value_default':   'Default by value',
   'ui.setup_current_state':          'Current machine state',
   'ui.setup_state_unknown':          'Unknown current state',
   'ui.setup_state_source':           'State source',

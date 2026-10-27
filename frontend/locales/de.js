@@ -1743,6 +1743,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_not_global_exclusion': 'Nur Setup-Opt-out. Dies ändert nicht den separaten globalen Optimierungsausschluss.',
   'ui.setup_strict_blanks': 'Leere Signaturwerte als ungedeckt behandeln', 'ui.setup_read_only': 'Schreibgeschützter Zugriff',
   'ui.setup_source': 'Quelle',
+  'ui.setup_source_value_default': 'Standard nach Wert',
   'ui.setup_source_no_change': 'Keine Änderung',
   'btn.setup_add_field': 'Feld hinzufügen',
   'btn.setup_update_state': 'Zustand aktualisieren',

@@ -1270,7 +1270,7 @@
       'initial-state-unknown': d => `Can't determine what needs to be set up before order ${orderNumberForId(d.successorOrderId)} on ${d.line}.`,
       'override-inactive': d => `A manual changeover override on ${d.line} no longer matches the current schedule.`,
       'current-state-diverged': d => `The recorded changeover state on ${d.line} doesn't match what order ${orderNumberForId(d.successorOrderId)} expected.`,
-      'setup-uncovered': (d, pair) => `No changeover time defined${pair} on ${d.line}. Add a setup rule to the matrix.`,
+      'setup-uncovered': (d, pair) => `No changeover time defined${pair} on ${d.line}. Add a setup rule or a default by value.`,
       'predecessor-state-unknown': d => `Order ${orderNumberForId(d.predecessorOrderId)} on ${d.line} is missing attributes needed to calculate the changeover before ${orderNumberForId(d.successorOrderId)}.`,
       'successor-state-unknown': d => `Order ${orderNumberForId(d.successorOrderId)} on ${d.line} is missing attributes needed to calculate its changeover.`,
     };

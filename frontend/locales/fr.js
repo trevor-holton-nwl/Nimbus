@@ -1741,6 +1741,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_you_are_here_hint': 'L’état d’outillage actuel connu pour la machine {{line}}.',
   'ui.setup_no_definition': 'Aucune signature de réglage définie pour cette usine.',
   'ui.setup_source': 'Source',
+  'ui.setup_source_value_default': 'Valeur par défaut',
   'ui.setup_source_no_change': 'Aucun changement',
   'ui.setup_no_overrides': 'Aucun remplacement ponctuel actif ou inactif dans ce périmètre.',
   'ui.setup_compatibility': 'Compatible avec cette signature de réglage usine', 'ui.setup_compatibility_reason': 'Motif requis en cas d’incompatibilité',

@@ -1741,6 +1741,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.setup_you_are_here_hint': 'El estado de utillaje actual conocido para la máquina {{line}}.',
   'ui.setup_no_definition': 'No hay firma de preparación definida para esta planta.',
   'ui.setup_source': 'Origen',
+  'ui.setup_source_value_default': 'Predeterminado por valor',
   'ui.setup_source_no_change': 'Sin cambio',
   'ui.setup_no_overrides': 'No hay anulaciones de ocurrencia activas o inactivas en este alcance.',
   'ui.setup_compatibility': 'Compatible con esta firma de preparación de planta', 'ui.setup_compatibility_reason': 'Motivo obligatorio si es incompatible',

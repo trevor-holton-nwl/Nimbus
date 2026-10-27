@@ -2455,7 +2455,7 @@ export const Inspector = {
     const successorState = stateForOrder(task, definition);
     if (!predecessorState || !successorState) return null;
     const resolved = resolveSetup({ definition, machine: task.MACHINE, predecessorState, successorState,
-      predecessorOrderId, successorOrderId: String(task.id), plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides });
+      predecessorOrderId, successorOrderId: String(task.id), plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides, valueDefaults: snapshot.value_defaults ?? [] });
     const existing = snapshot.overrides.find(override => override.status === 'active' && override.machine === task.MACHINE
       && override.signature_version === definition.signature_version && override.predecessor_order_id === predecessorOrderId
       && override.successor_order_id === String(task.id));
@@ -2485,7 +2485,7 @@ export const Inspector = {
     const resolved = hasObservedEntry && definition && predecessorState && successorState && snapshot
       ? resolveSetup({ definition, machine: task.MACHINE, predecessorState, successorState,
         predecessorOrderId: entry.predecessorOrderId ?? null, successorOrderId: id,
-        plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides }) : null;
+        plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides, valueDefaults: snapshot.value_defaults ?? [] }) : null;
     const scheduledPredecessor = predecessorOnMachine(task, Store.tasksByPlant(String(task.PLANT ?? task.plant ?? '') || null));
     const predecessorStateText = hasObservedEntry
       ? (Inspector._formatSetupState(predecessorState ?? null, definition) || entry.predecessorState || null)

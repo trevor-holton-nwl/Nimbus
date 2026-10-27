@@ -1740,6 +1740,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.setup_you_are_here_hint': 'O estado atual conhecido de ferramental para a máquina {{line}}.',
   'ui.setup_no_definition': 'Nenhuma assinatura de preparação definida para esta fábrica.',
   'ui.setup_source': 'Origem',
+  'ui.setup_source_value_default': 'Padrão por valor',
   'ui.setup_source_no_change': 'Sem alteração',
   'ui.setup_no_overrides': 'Nenhuma substituição de ocorrência ativa ou inativa neste escopo.',
   'ui.setup_compatibility': 'Compatível com esta assinatura de preparação da fábrica', 'ui.setup_compatibility_reason': 'Motivo obrigatório se incompatível',

@@ -97,7 +97,7 @@ import type {
   ScheduleSnapshot,
   EvaluationRequest,
 } from './setup-scheduler.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupDefinition, SetupStateKey, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, ConstraintConfig, OptimizerMode, OrderScheduleSegment, SplitOrderPolicy, SetupSnapshot, SetupDefinition, SetupStateKey, SetupValueDefault, PlantCalendarEntry, PlantPeriod } from '../platform/types.mjs';
 import { MIN_PRODUCTIVE_SEGMENT_MINUTES } from './scheduler-contract.mjs';
 import type { RemoveBacklogResult, RemoveBacklogDiagnostics } from './scheduler-contract.mjs';
 import type { SerializedOptimizerValidation } from './optimizer-worker-contract.mjs';
@@ -539,8 +539,12 @@ export function predecessorOnMachine(task: NimbusTask, tasks: ReadonlyArray<Nimb
 const _setupIndexBySnapshot = new WeakMap<object, {
   definition: SetupDefinition; machineRows: ReadonlyArray<unknown>; plantRows: ReadonlyArray<unknown>;
   overrides: ReadonlyArray<unknown>; machineLen: number; plantLen: number; overridesLen: number;
+  valueDefaults: ReadonlyArray<unknown>; valueDefaultsLen: number;
   index: SetupResolutionIndex;
 }>();
+
+/** Shared empty value-defaults list so an absent `value_defaults` allocates nothing per call. */
+const NO_VALUE_DEFAULTS: ReadonlyArray<SetupValueDefault> = [];
 
 /** The memoised `buildSetupResolutionIndex` for a snapshot with a definition. Resolving through it returns exactly
  *  what the unindexed linear scan returns (first matching row wins; see setup-resolution-index.test.mjs). */
@@ -550,13 +554,16 @@ export function setupResolutionIndexFor(setup: SetupSnapshot & { definition: Set
     && cached.definition === setup.definition
     && cached.machineRows === setup.machine_rows && cached.machineLen === setup.machine_rows.length
     && cached.plantRows === setup.plant_rows && cached.plantLen === setup.plant_rows.length
-    && cached.overrides === setup.overrides && cached.overridesLen === setup.overrides.length) return cached.index;
+    && cached.overrides === setup.overrides && cached.overridesLen === setup.overrides.length
+    && cached.valueDefaults === (setup.value_defaults ?? NO_VALUE_DEFAULTS)
+    && cached.valueDefaultsLen === (setup.value_defaults ?? NO_VALUE_DEFAULTS).length) return cached.index;
   const index = buildSetupResolutionIndex({
-    definition: setup.definition, machineRows: setup.machine_rows, plantRows: setup.plant_rows, overrides: setup.overrides,
+    definition: setup.definition, machineRows: setup.machine_rows, plantRows: setup.plant_rows, overrides: setup.overrides, valueDefaults: setup.value_defaults ?? NO_VALUE_DEFAULTS,
   });
   _setupIndexBySnapshot.set(setup, {
-    definition: setup.definition, machineRows: setup.machine_rows, plantRows: setup.plant_rows, overrides: setup.overrides,
-    machineLen: setup.machine_rows.length, plantLen: setup.plant_rows.length, overridesLen: setup.overrides.length, index,
+    definition: setup.definition, machineRows: setup.machine_rows, plantRows: setup.plant_rows, overrides: setup.overrides, valueDefaults: setup.value_defaults ?? NO_VALUE_DEFAULTS,
+    machineLen: setup.machine_rows.length, plantLen: setup.plant_rows.length, overridesLen: setup.overrides.length,
+    valueDefaultsLen: (setup.value_defaults ?? NO_VALUE_DEFAULTS).length, index,
   });
   return index;
 }
@@ -687,7 +694,7 @@ function deriveSetupObservationUntimed(
         if (indexed) resolutionIndex ??= setupResolutionIndexFor(setup as SetupSnapshot & { definition: SetupDefinition });
         const resolved = resolveSetup({
           definition, machine: line, predecessorState, successorState, predecessorOrderId, successorOrderId: String(order.task.id),
-          plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides, index: resolutionIndex ?? undefined,
+          plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides, valueDefaults: setup.value_defaults ?? NO_VALUE_DEFAULTS, index: resolutionIndex ?? undefined,
         });
         if (!resolved.covered || resolved.effectiveMin == null) {
           observation.diagnostics.push({
@@ -1986,7 +1993,7 @@ export const Engine = {
       setupIndex ??= setupResolutionIndexFor(setup as SetupSnapshot & { definition: SetupDefinition });
       const resolved = resolveSetup({
         definition: setupDefinition, machine: line, predecessorState, successorState, predecessorOrderId: predecessorId,
-        successorOrderId: String(task.id), plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
+        successorOrderId: String(task.id), plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides, valueDefaults: setup.value_defaults ?? NO_VALUE_DEFAULTS,
         index: setupIndex,
       });
       if (chargeDefault) return { minutes: storeChargedSetupMinutes(plant, line, resolved), orphaned };
@@ -3230,7 +3237,7 @@ export const Engine = {
       const resolved = resolveSetup({
         definition, machine: line, predecessorState, successorState,
         predecessorOrderId: String(predecessor.id), successorOrderId: String(successor.id),
-        plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides,
+        plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides, valueDefaults: setup.value_defaults ?? NO_VALUE_DEFAULTS,
       });
       return storeChargedSetupMinutes(plantOfLine, line, resolved);
     };

@@ -25,11 +25,15 @@ import type {
   SetupOccurrenceOverride,
   SetupSnapshot as SetupTruthSnapshot,
   SetupStateKey,
+  SetupValueDefault,
   SplitOrderPolicy,
   UnknownSetupPolicy,
   WorkHours,
   PlantCalendarEntry,
 } from '../platform/types.mjs';
+
+/** Shared empty value-defaults list so an absent `value_defaults` allocates nothing per resolve call. */
+const NO_VALUE_DEFAULTS: ReadonlyArray<SetupValueDefault> = [];
 
 export interface SchedulePatch {
   id: string;
@@ -664,7 +668,7 @@ export function buildRunContext(
       definition,
       machineRows: bounds.setup.machine_rows,
       plantRows: bounds.setup.plant_rows,
-      overrides: bounds.setup.overrides,
+      overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
     })
     : null;
   return {
@@ -2282,7 +2286,7 @@ function orderedBySetupNearest(
           successorOrderId: taskId(task),
           plantRows: bounds.setup.plant_rows,
           machineRows: bounds.setup.machine_rows,
-          overrides: bounds.setup.overrides,
+          overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
           index: bounds.runContext?.resolutionIndex ?? undefined,
         })
         : null;
@@ -3211,7 +3215,7 @@ function candidateForSequence(
         successorOrderId: taskId(task),
         plantRows: bounds.setup.plant_rows,
         machineRows: bounds.setup.machine_rows,
-        overrides: bounds.setup.overrides,
+        overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
         index: bounds.runContext?.resolutionIndex ?? undefined,
       });
       if (!resolved.covered || resolved.effectiveMin === null) {
@@ -3348,7 +3352,7 @@ function candidateForSequence(
   while (fragment.nextFirmed && predecessorState && checkpoints.length) {
     const boundary = fragment.nextFirmed;
     const outgoing = boundary.state
-      ? resolveSetup({ definition, machine: line, predecessorState, successorState: boundary.state, predecessorOrderId, successorOrderId: taskId(boundary.task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined })
+      ? resolveSetup({ definition, machine: line, predecessorState, successorState: boundary.state, predecessorOrderId, successorOrderId: taskId(boundary.task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS, index: bounds.runContext?.resolutionIndex ?? undefined })
       : null;
     // Under plantDefaultMinutes an uncovered pair, or a boundary with no setup state, still reserves the plant
     // default (same charge the boundary block below and `validateCandidate` make); zero/excludeFromSearch
@@ -3436,7 +3440,7 @@ function candidateForSequence(
         successorOrderId: taskId(firmed.task),
         plantRows: bounds.setup.plant_rows,
         machineRows: bounds.setup.machine_rows,
-        overrides: bounds.setup.overrides,
+        overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
         index: bounds.runContext?.resolutionIndex ?? undefined,
       });
       if (!resolved.covered || resolved.effectiveMin === null) {
@@ -5055,7 +5059,7 @@ function tailCapacityEnd(
     successorOrderId: taskId(nextFirmed.task),
     plantRows: bounds.setup.plant_rows,
     machineRows: bounds.setup.machine_rows,
-    overrides: bounds.setup.overrides,
+    overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
     index: bounds.runContext?.resolutionIndex ?? undefined,
   });
   const reserveMinutes = chargedSetupMinutes(bounds.runContext, resolved, chargeable);
@@ -6984,7 +6988,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       const protectedTask = taskIsEvaluationProtected(snapshot, bounds, task);
       const successor = definition ? stateForOrder(task, definition) : null;
       const resolution = chargeable && state && successor
-        ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined })
+        ? resolveSetup({ definition: definition!, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS, index: bounds.runContext?.resolutionIndex ?? undefined })
         : null;
       // excludeFromSearch (O2): the search refuses an unprotected order whose transition has no matrix row, so an incumbent
       // sitting behind one is an error too (repairCandidate queues it). Both states are known (resolution exists only then) and the
@@ -7435,7 +7439,7 @@ export function fillPlanningGaps(
       if (!from || !to) return chargedSetupMinutes(bounds.runContext, null, true);
       const resolution = resolveSetup({ definition: definition!, machine: line, predecessorState: from, successorState: to,
         predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(successor),
-        plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides,
+        plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
         index: bounds.runContext?.resolutionIndex ?? undefined });
       if (!resolution.covered && bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch') return null;
       return chargedSetupMinutes(bounds.runContext, resolution, true);
@@ -7680,7 +7684,7 @@ export function objectiveFactsForCandidate(
       const successor = stateForOrder(task, definition);
       if (chargeable) {
         const resolved = state && successor
-          ? resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: previous, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, index: bounds.runContext?.resolutionIndex ?? undefined })
+          ? resolveSetup({ definition, machine: line, predecessorState: state, successorState: successor, predecessorOrderId: previous, successorOrderId: taskId(task), plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS, index: bounds.runContext?.resolutionIndex ?? undefined })
           : null;
         setupMinutes += chargedSetupMinutes(bounds.runContext, resolved, true);
       }
@@ -7718,7 +7722,7 @@ export function objectiveFactsForCandidate(
           successorOrderId: taskId(task),
           plantRows: bounds.setup.plant_rows,
           machineRows: bounds.setup.machine_rows,
-          overrides: bounds.setup.overrides,
+          overrides: bounds.setup.overrides, valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS,
           index: bounds.runContext?.resolutionIndex ?? undefined,
         });
         if (!resolved.covered || resolved.effectiveMin === null) uncoveredEdges += 1;

@@ -120,11 +120,12 @@ export function setupDiagnosticLabel(type: string | undefined | null): string {
 }
 
 /** D4: the resolveSetup() 'source' field is raw plumbing (`'line'|'plant'|
- * 'occurrence'|'implicit-zero'|'uncovered'`), displayed verbatim in the
+ * 'occurrence'|'implicit-zero'|'value-default'|'uncovered'`), displayed verbatim in the
  * Inspector's Source row for every value except 'implicit-zero' — that one
  * value gets a translated label so an identical-signature no-change
  * transition never reads as though a matrix row had been consulted. */
 export function setupSourceLabel(source: string | null | undefined): string {
+  if (source === 'value-default') return Util.t('ui.setup_source_value_default');
   return source === 'implicit-zero' ? Util.t('ui.setup_source_no_change') : (source || '');
 }
 

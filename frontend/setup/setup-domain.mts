@@ -22,6 +22,7 @@ import type {
   SetupMatrixRow,
   SetupOccurrenceOverride,
   SetupStateKey,
+  SetupValueDefault,
 } from '../platform/types.mjs';
 
 const ORDER_FIELD_BY_SIGNATURE_FIELD: Readonly<Record<string, string>> = {
@@ -34,8 +35,10 @@ const ORDER_FIELD_BY_SIGNATURE_FIELD: Readonly<Record<string, string>> = {
 /**
  * Canonicalizes one setup-attribute value to the same fold `setup_data._normalise_value`
  * applies server-side: trimmed and uppercased, except the literal booleans `"true"`/`"false"`
- * (case-insensitive), which pass through lowercase so they agree with `String(true)`/`String(false)`
- * and with the Python side's early bool-typed return. This is the single source of truth for
+ * (case-insensitive), which pass through lowercase so they agree with `String(true)`/`String(false)`.
+ * The Python side's `_normalise_value` mirrors this only for real booleans: it upper-folds the
+ * STRING "true" to "TRUE", so server-sourced strings (state values, stored rows, observed order
+ * values) must be re-run through this client rule before any value-default lookup. This is the single source of truth for
  * setup state-value canonicalization on the client — see `setup-scheduler.mts`'s
  * `normalizedPriorityValue`, which reuses this fold for rank-lookup values.
  */
@@ -184,6 +187,63 @@ export interface SetupResolutionIndex {
    * machine/order-id components, guarding against a sentinel collision) over
    * this (small) group instead. */
   overrides: ReadonlyMap<string, ReadonlyArray<SetupOccurrenceOverride>>;
+  /** Value defaults for this signature version: fieldKey -> (normalized value -> minutes).
+   * Precomputed once so the resolver does two Map reads per changed field. */
+  valueDefaults: ReadonlyMap<string, ReadonlyMap<string, number>>;
+}
+
+/** Builds the per-field default lookup. Version-filtered, keys normalized with the client rule,
+ * minutes validated, blank values dropped, first entry wins on a (field, value) duplicate.
+ * `undefined` is treated as no defaults (untyped callers). */
+function buildValueDefaultMap(
+  definition: SetupDefinition,
+  valueDefaults: ReadonlyArray<SetupValueDefault> | undefined,
+): ReadonlyMap<string, ReadonlyMap<string, number>> {
+  const byField = new Map<string, Map<string, number>>();
+  if (!valueDefaults) return byField;
+  for (const entry of valueDefaults) {
+    if (!entry || entry.signature_version !== definition.signature_version) continue;
+    if (!definition.fields.includes(entry.field_key) || !validMinutes(entry.setup_min)) continue;
+    const value = normalizedValue(entry.value);
+    if (value.length === 0) continue;
+    let values = byField.get(entry.field_key);
+    if (!values) { values = new Map(); byField.set(entry.field_key, values); }
+    if (!values.has(value)) values.set(value, entry.setup_min);
+  }
+  return byField;
+}
+
+/** The value-default tier: sums, over every field whose (normalized) value changed, the default
+ * for the arriving value. A blank arriving value never contributes. Partial sums count: changed
+ * fields with no default are named in `reason`. Returns null when no changed field contributes.
+ * Raw values are compared first, so the normalization cost is paid only for fields that differ
+ * (machine-state keys can arrive in the server's raw form, e.g. "TRUE"). */
+function valueDefaultResolution(
+  definition: SetupDefinition,
+  predecessorState: SetupStateKey,
+  successorState: SetupStateKey,
+  byField: ReadonlyMap<string, ReadonlyMap<string, number>>,
+): { sum: number; reason: string } | null {
+  if (byField.size === 0) return null;
+  let sum = 0;
+  let used: string[] | null = null;
+  let missing: string[] | null = null;
+  for (let i = 0; i < definition.fields.length; i += 1) {
+    const from = predecessorState[i].value;
+    const to = successorState[i].value;
+    if (from === to) continue;
+    const toValue = normalizedValue(to);
+    if (toValue.length === 0 || normalizedValue(from) === toValue) continue;
+    const fieldKey = definition.fields[i];
+    const minutes = byField.get(fieldKey)?.get(toValue);
+    if (minutes === undefined) (missing ??= []).push(`${fieldKey}=${toValue}`);
+    else { sum += minutes; (used ??= []).push(`${fieldKey}=${toValue} (${minutes})`); }
+  }
+  if (!used) return null;
+  return {
+    sum,
+    reason: `Default by value: ${used.join(' + ')}${missing ? `; no default: ${missing.join(', ')}` : ''}`,
+  };
 }
 
 /**
@@ -198,6 +258,7 @@ export function buildSetupResolutionIndex(input: {
   machineRows: ReadonlyArray<SetupMatrixRow>;
   plantRows: ReadonlyArray<SetupMatrixRow>;
   overrides: ReadonlyArray<SetupOccurrenceOverride>;
+  valueDefaults: ReadonlyArray<SetupValueDefault>;
 }): SetupResolutionIndex {
   const { definition, machineRows, plantRows, overrides } = input;
   const signatureVersion = definition.signature_version;
@@ -238,7 +299,10 @@ export function buildSetupResolutionIndex(input: {
     else overrideIndex.set(key, [override]);
   }
 
-  return { signatureVersion, machineRows: machineIndex, plantRows: plantIndex, overrides: overrideIndex };
+  return {
+    signatureVersion, machineRows: machineIndex, plantRows: plantIndex, overrides: overrideIndex,
+    valueDefaults: buildValueDefaultMap(definition, input.valueDefaults),
+  };
 }
 
 /** Fast-path matrix-row lookup: a Map hit is only a CANDIDATE. Correctness
@@ -334,7 +398,7 @@ export function stateForOrder(order: NimbusTask, definition: SetupDefinition): S
 /**
  * Resolves a version-matched setup transition without changing schedule data.
  * The deliberate precedence is occurrence override, line row, plant row,
- * complete identical-state zero, then uncovered.
+ * complete identical-state zero, value default (sum of arriving-value defaults), then uncovered.
  */
 export function resolveSetup(input: ResolveSetupInput): ResolvedSetup {
   const { definition, predecessorState, successorState } = input;
@@ -369,12 +433,18 @@ export function resolveSetup(input: ResolveSetupInput): ResolvedSetup {
     override = matchingOverride(input.overrides, input);
   }
 
+  let defaultsByField: ReadonlyMap<string, ReadonlyMap<string, number>> | null = null;
+  const defaultResolution = (): { sum: number; reason: string } | null => {
+    defaultsByField ??= index ? index.valueDefaults : buildValueDefaultMap(definition, input.valueDefaults);
+    return valueDefaultResolution(definition, predecessorState, successorState, defaultsByField);
+  };
+
   if (override) {
     const currentStandard = lineRow?.setup_min
       ?? plantRow?.setup_min
       ?? (isCompleteState(predecessorState, definition)
         && isCompleteState(successorState, definition)
-        && statesEqual(predecessorState, successorState) ? 0 : override.standard_min);
+        && statesEqual(predecessorState, successorState) ? 0 : (defaultResolution()?.sum ?? override.standard_min));
     return {
       covered: true,
       requiredMin: override.remaining_min,
@@ -405,6 +475,19 @@ export function resolveSetup(input: ResolveSetupInput): ResolvedSetup {
     };
   }
 
+  const byDefault = defaultResolution();
+  if (byDefault) {
+    return {
+      covered: true,
+      requiredMin: byDefault.sum,
+      effectiveMin: byDefault.sum,
+      standardMin: byDefault.sum,
+      source: 'value-default',
+      reason: byDefault.reason,
+      signatureVersion,
+    };
+  }
+
   return uncovered(signatureVersion);
 }
 
@@ -420,6 +503,7 @@ export function computeShadowDiagnostics(
     plant_rows: ReadonlyArray<SetupMatrixRow>;
     machine_rows: ReadonlyArray<SetupMatrixRow>;
     overrides: ReadonlyArray<SetupOccurrenceOverride>;
+    value_defaults?: ReadonlyArray<SetupValueDefault>;
   },
   tasks: ReadonlyArray<NimbusTask>,
   policy: { percentile?: number } = {},
@@ -475,6 +559,7 @@ export function computeShadowDiagnostics(
         definition, machine: line, predecessorState, successorState,
         predecessorOrderId: predecessor.id, successorOrderId: successor.id,
         plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, overrides: snapshot.overrides,
+        valueDefaults: snapshot.value_defaults ?? [],
       });
       if (result.covered) {
         coveredTransitions += 1;

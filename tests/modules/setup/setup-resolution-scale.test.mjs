@@ -129,3 +129,39 @@ test('two 10,000-edge sparse plant indexes preserve occurrence > line > plant pr
     }
   }
 });
+
+test('value-default resolution over 200 states (39,800 directional pairs, zero rows) stays constant-time and never iterates the index', () => {
+  const size = 200;
+  const data = snapshot(size);
+  data.plantRows = [];
+  const valueDefaults = [];
+  for (let i = 0; i < size; i++) valueDefaults.push({ field_key: 'prt01', value: `TOOL ${i}`, setup_min: 5 + i % 50, signature_version: 1 });
+  for (let i = 0; i < 10; i++) valueDefaults.push({ field_key: 'colorWheel', value: `COLOR ${i}`, setup_min: 3 + i, signature_version: 1 });
+  data.valueDefaults = valueDefaults;
+  const index = buildSetupResolutionIndex(data);
+  let reads = 0, iterations = 0;
+  const observedDefaults = new Proxy(index.valueDefaults, {
+    get(target, key) {
+      if (key === 'get') return v => { reads++; return target.get(v); };
+      if (['entries', 'values', 'keys', 'forEach', Symbol.iterator].includes(key)) return (...a) => { iterations++; return target[key](...a); };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const observed = { ...index, valueDefaults: observedDefaults };
+  let queries = 0;
+  for (let from = 0; from < size; from++) {
+    for (let to = 0; to < size; to++) {
+      if (from === to) continue;
+      const r = resolveSetup({ ...data, index: observed, machine: 'LINE 0', predecessorOrderId: 'P', successorOrderId: 'S',
+        predecessorState: data.states[from], successorState: data.states[to] });
+      assert.equal(r.covered, true);
+      assert.equal(r.source, 'value-default');
+      const colorChanged = from % 10 !== to % 10;
+      assert.equal(r.effectiveMin, 5 + to % 50 + (colorChanged ? 3 + to % 10 : 0));
+      queries++;
+    }
+  }
+  assert.ok(reads <= 3 * queries, `default lookups ${reads} must stay within 3 x ${queries} queries`);
+  assert.equal(iterations, 0, 'value-default resolution must not iterate the default maps');
+});
