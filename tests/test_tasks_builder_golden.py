@@ -362,3 +362,15 @@ def test_builder_does_not_mutate_input_rows(monkeypatch):
     out = routes._build_task_rows(rows, "P1")
     assert out[3] == len([r for r in rows if r["BASIC_START_DATE"] or r["BASIC_FINISH_DATE"] or r["PLANNING_STATUS"] == "needs_planning"])
     assert rows == before
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("X", True), ("x", True), (" X ", True), (" x\t", True),
+    ("", False), (None, False), ("N", False), ("XX", False),
+])
+def test_ecc_firmed_is_normalised_strip_upper(monkeypatch, raw, expected):
+    """Universal firm B4: ingest stores the indicator raw (Excel) or only stripped (SAP staging), so the wire flag
+    strips + uppercases like Send's firm rule. Display only (it never locks an order). Not a legacy-parity case:
+    the frozen legacy copy compares `== "X"` exactly."""
+    live = live_build(monkeypatch, [mk("o001", "M1", D(22), D(22, 12), FIRMING_INDICATOR=raw)], "P1")
+    assert live["data"][0]["ecc_firmed"] is expected
