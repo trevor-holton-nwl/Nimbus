@@ -31,7 +31,7 @@ import { AlertAckModal } from './alert-ack-modal.mjs';
 import { AlertSlotModal, formatSlotOption } from './alert-slot-modal.mjs';
 import { AlertAcksClient } from '../insights/alert-acks-client.mjs';
 import {
-  ALL_ALERTS_PROFILE_ID, SLOT_ALERT_TYPES, resolveActiveProfileId, ackLabel, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
+  ALL_ALERTS_PROFILE_ID, SLOT_ALERT_TYPES, alertOrderIds, resolveActiveProfileId, ackLabel, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
 } from '../insights/alert-profiles.mjs';
 import type { AlertGroup, GroupContext } from '../insights/alert-profiles.mjs';
 import { Alerts, Compute, Utilization, buildPlantSnapshot } from '../insights/services.mjs';
@@ -610,7 +610,7 @@ function _runBatchMove(key: string, ids: string[]): void {
     for (const id of ids) {
       const a = Store.alerts.find(x => x.id === id);
       if (!a) continue;                                    // already gone (cleared by an earlier move or a recompute)
-      if ((a.taskId && movedOrders.has(String(a.taskId))) || (a.peerId && movedOrders.has(String(a.peerId)))) continue;
+      if (alertOrderIds(a).some(oid => movedOrders.has(oid))) continue;   // the order itself or ANY holder/peer already moved
       Alerts.applyFix(id, { quiet: true });
       if (!Store.alerts.some(x => x.id === id)) movedOrders.add(String(a.taskId ?? id));
     }
@@ -1110,8 +1110,7 @@ function _levShowAlerts(item: LeverageItem): void {
   const taskIds = new Set<string>();
   for (const id of item.alertIds) {
     const a = byId.get(id);
-    if (a?.taskId) taskIds.add(String(a.taskId));
-    if (a?.peerId) taskIds.add(String(a.peerId));
+    if (a) for (const oid of alertOrderIds(a)) taskIds.add(oid);
   }
   AlertMonitorPane.setFocus(item.alertIds, title);
   AlertProfileMatches.setFocusTaskIds(taskIds);   // the Gantt follows the focused card, not the profile

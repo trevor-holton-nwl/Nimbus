@@ -221,6 +221,272 @@
     }).filter(Boolean);
   }
 
+  /* ── Tool inventory (shared pure API) ──────────────────────────────────────────────────────────────
+     ONE implementation of "which orders hold a copy of a tool, and when are there more holders than
+     copies". The Gantt alert (rule 1b) and the optimizer's overflow pass both read these functions, so
+     they can never disagree. A tool id is a TYPE: a plant owns several interchangeable copies
+     (Master Data > Tool Inventory); capacity is the number of DISTINCT MACHINES using the tool at the
+     same instant, half-open [start, end). The placeholder set below is mirrored by
+     backend/distribution/service.py TOOL_PLACEHOLDERS (parity-tested). */
+  const TOOL_PLACEHOLDERS = new Set(['', '-', '0', 'N/A', 'NONE', 'NULL', 'NAN', 'TBD']);
+
+  // Trimmed, upper-cased tool id; null for blank / placeholder values.
+  function normalizeToolId(v) {
+    if (v == null) return null;
+    const s = String(v).trim().toUpperCase();
+    return TOOL_PLACEHOLDERS.has(s) ? null : s;
+  }
+
+  // The distinct tool ids an order carries. PRT_01 and PRT_02 share one id pool per plant, so the same id
+  // in both columns is ONE copy.
+  function taskToolIds(task) {
+    const out = [];
+    for (const key of ['PRT_01', 'PRT_02']) {
+      const id = normalizeToolId(task?.[key]);
+      if (id && !out.includes(id)) out.push(id);
+    }
+    return out;
+  }
+
+  // Alert and optimizer resolve an order's plant the same way: the order's own PLANT first, else its line's.
+  function taskToolPlant(task, plantOf) {
+    return task?.PLANT || (plantOf ? plantOf(task?.MACHINE || 'Unknown') : null) || null;
+  }
+
+  // When an order occupies its tool: the ENVELOPE from the first segment's start to the last segment's end
+  // (a split order keeps its tool mounted across the weekend/blackout gap), run time only (setup is not
+  // counted). A finish-only row (start null, end set: a freshly distributed child before the reconcile
+  // derives its start) is the U29 bar [end - run_time, end]. Anything else -> null.
+  function toolOccupancyInterval(task) {
+    const intervals = scheduleIntervals(task);
+    if (intervals.length) {
+      let start = intervals[0].start, end = intervals[0].end;
+      for (const iv of intervals) {
+        if (iv.start < start) start = iv.start;
+        if (iv.end > end) end = iv.end;
+      }
+      return { start: new Date(+start), end: new Date(+end) };
+    }
+    if (parseDate(task?.start_date)) return null;
+    const end = parseDate(task?.end_date);
+    const runMin = runHours(task) * 60;
+    if (!end || runMin <= 0) return null;
+    return { start: new Date(+end - runMin * 60000), end: new Date(+end) };
+  }
+
+  const _toolKey = (plant, tool) => `${plant == null ? '' : plant}\u0000${tool}`;
+  const _num = v => (v instanceof Date ? v.getTime() : +v);
+  const _cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+  // Capacity map {plant\0tool -> {available, hasRow:true}} from masterData.tool_inventory. Tolerates an
+  // undefined/non-array table (every tool is then one copy) and two row shapes: the full rows
+  // {plant, tool_id, total_qty, out_of_service_qty} and the compact projection {plant, tool_id, available}.
+  function buildToolCapacity(masterData) {
+    const map = new Map();
+    const rows = masterData?.tool_inventory;
+    if (!Array.isArray(rows)) return map;
+    for (const row of rows) {
+      const tool = normalizeToolId(row?.tool_id);
+      if (!tool) continue;
+      let available;
+      if (row.available != null && row.total_qty == null) available = Number(row.available);
+      else available = Number(row.total_qty ?? 1) - Number(row.out_of_service_qty ?? 0);
+      if (!Number.isFinite(available)) continue;
+      map.set(_toolKey(row.plant, tool), { available: Math.max(0, Math.floor(available)), hasRow: row.hasRow !== false });
+    }
+    return map;
+  }
+
+  // Copies of `tool` the plant can use. A missing row is ONE copy (hasRow:false) so a plant that has not
+  // registered a tool behaves like the old "one physical tool" rule.
+  function availableCopies(capacity, plant, tool) {
+    const hit = capacity?.get(_toolKey(plant, normalizeToolId(tool) ?? tool));
+    return hit ? { available: hit.available, hasRow: true } : { available: 1, hasRow: false };
+  }
+
+  // Group items by (plant, tool) with the envelope in ms. `item` = {id, line, plant, tools:[...] | tool, start, end}.
+  // `now` (Date|ms) drops intervals that ended and clips starts (the optimizer's "past never blocks" rule).
+  function _toolGroups(items, now) {
+    const nowMs = now == null ? null : _num(now);
+    const groups = new Map();
+    for (const it of items || []) {
+      let s = _num(it?.start), e = _num(it?.end);
+      if (!Number.isFinite(s) || !Number.isFinite(e)) continue;
+      if (nowMs != null) { if (e <= nowMs) continue; if (s < nowMs) s = nowMs; }
+      if (e <= s) continue;
+      const ids = new Set();
+      for (const raw of Array.isArray(it.tools) ? it.tools : [it.tool]) {
+        const id = normalizeToolId(raw);
+        if (id) ids.add(id);
+      }
+      const line = it.line || 'Unknown', id = String(it.id);
+      for (const tool of ids) {
+        const key = _toolKey(it.plant, tool);
+        let g = groups.get(key);
+        if (!g) groups.set(key, g = { plant: it.plant == null ? '' : it.plant, tool, rows: [] });
+        g.rows.push({ id, line, s, e });
+      }
+    }
+    return groups;
+  }
+
+  const _distinctLines = rows => { const set = new Set(); for (const r of rows) set.add(r.line); return set.size; };
+
+  // Every point where MORE distinct machines use a tool than it has copies. Per (plant, tool) sweep, events
+  // sorted (time, end-before-start, start, end, id, line): touching intervals never overlap and the result is identical
+  // for any input order. One cluster per PUSHER (the start that takes the machine count over the limit):
+  //   {plant, tool, at, available, hasRow, inUse, pusher, pusherLine, holders:[{id,line,start,end}]}
+  // `holders` are the OTHER orders in use at that instant, sorted (start, end, id); the same machine twice,
+  // and the same order twice, count once. Tools whose copies cover every machine that ever uses them are
+  // pruned without a sweep.
+  function findToolOverages({ items, capacityFor, now } = {}) {
+    const groups = _toolGroups(items, now);
+    const keys = Array.from(groups.keys()).sort();
+    const clusters = [];
+    for (const key of keys) {
+      const g = groups.get(key);
+      const cap = capacityFor ? capacityFor(g.plant, g.tool) : null;
+      const available = cap && Number.isFinite(cap.available) ? Math.max(0, cap.available) : 1;
+      const hasRow = !!(cap && cap.hasRow);
+      if (available >= _distinctLines(g.rows)) continue;
+      const events = [];
+      for (const r of g.rows) {
+        events.push({ t: r.s, type: 1, r });
+        events.push({ t: r.e, type: 0, r });
+      }
+      events.sort((a, b) => a.t - b.t || a.type - b.type || a.r.s - b.r.s || a.r.e - b.r.e
+        || _cmp(a.r.id, b.r.id) || _cmp(a.r.line, b.r.line));
+      const active = new Set();
+      const lineCount = new Map();
+      for (const ev of events) {
+        const r = ev.r;
+        if (ev.type === 0) {
+          if (!active.delete(r)) continue;
+          const n = (lineCount.get(r.line) || 0) - 1;
+          if (n <= 0) lineCount.delete(r.line); else lineCount.set(r.line, n);
+          continue;
+        }
+        const had = lineCount.get(r.line) || 0;
+        active.add(r);
+        lineCount.set(r.line, had + 1);
+        if (had > 0 || lineCount.size <= available) continue;
+        const seen = new Set([r.id]);
+        const holders = [];
+        for (const h of Array.from(active).sort((a, b) => a.s - b.s || a.e - b.e || _cmp(a.id, b.id))) {
+          if (seen.has(h.id)) continue;
+          seen.add(h.id);
+          holders.push({ id: h.id, line: h.line, start: new Date(h.s), end: new Date(h.e) });
+        }
+        clusters.push({
+          plant: g.plant, tool: g.tool, at: new Date(r.s), available, hasRow, inUse: lineCount.size,
+          pusher: r.id, pusherLine: r.line, holders,
+        });
+      }
+    }
+    return clusters;
+  }
+
+  // Alert id for one cluster. EXACTLY two orders (pusher + one holder): the legacy 'toolc-<prev>|<cur>' so
+  // existing acknowledgements keep matching. Otherwise 'toolc-<pusher>|<tool>' with / % # replaced (they
+  // break the ack DELETE route). `used` (a Set the caller keeps) resolves collisions - e.g. two tools
+  // conflicting on the same pair - by falling through to the tool form and then a numeric suffix.
+  function toolConflictAlertId(cluster, used) {
+    const safe = String(cluster.tool).replace(/[\/%#]/g, '_');
+    const candidates = [];
+    if (cluster.holders?.length === 1) candidates.push(`toolc-${cluster.holders[0].id}|${cluster.pusher}`);
+    candidates.push(`toolc-${cluster.pusher}|${safe}`);
+    let id = candidates.find(c => !used || !used.has(c));
+    if (!id) {
+      const base = candidates[candidates.length - 1];
+      let n = 2;
+      while (used.has(`${base}~${n}`)) n++;
+      id = `${base}~${n}`;
+    }
+    if (used) used.add(id);
+    return id;
+  }
+
+  // Reusable per-(plant, tool) index for the optimizer's headroom queries: {groups, capacityFor}.
+  function buildToolIndex({ items, capacityFor, now } = {}) {
+    return { groups: _toolGroups(items, now), capacityFor };
+  }
+
+  // Mutate an index in place when ONE order's interval changes: drop `oldInterval` and add `newInterval`
+  // ({plant, line, tools:[...]|tool, start, end}; null = only remove / only insert). Rows are matched by order
+  // id + line + start + end within each (plant, tool) group, so the optimizer pass never rebuilds the index.
+  // The index keeps no `now` clip: pass the same clipped values buildToolIndex would have used. Returns the index.
+  function toolIndexUpdate(index, id, oldInterval, newInterval) {
+    if (!index || !index.groups) return index;
+    const sid = String(id);
+    if (oldInterval) {
+      const ids = new Set();
+      for (const raw of Array.isArray(oldInterval.tools) ? oldInterval.tools : [oldInterval.tool]) {
+        const t = normalizeToolId(raw); if (t) ids.add(t);
+      }
+      const line = oldInterval.line || 'Unknown', s = _num(oldInterval.start), e = _num(oldInterval.end);
+      for (const tool of ids) {
+        const key = _toolKey(oldInterval.plant, tool);
+        const g = index.groups.get(key);
+        if (!g) continue;
+        const at = g.rows.findIndex(r => r.id === sid && r.line === line && r.s === s && r.e === e);
+        if (at >= 0) g.rows.splice(at, 1);
+        if (!g.rows.length) index.groups.delete(key);
+      }
+    }
+    if (newInterval) {
+      for (const [key, ng] of _toolGroups([{ ...newInterval, id: sid }], null)) {
+        const g = index.groups.get(key);
+        if (g) g.rows.push(...ng.rows); else index.groups.set(key, ng);
+      }
+    }
+    return index;
+  }
+
+  // Tool-free windows inside [from, to] for placing ONE more order on `excludeLine` that needs every tool in
+  // `tools`: a window is free while, for each tool, the distinct machines OTHER than excludeLine are fewer
+  // than the available copies. Returns [{start: Date, end: Date}] ascending, merged, non-empty.
+  function toolHeadroom(index, plant, tools, from, to, excludeLine) {
+    const lo = _num(from), hi = _num(to);
+    if (!(hi > lo)) return [];
+    const blocked = [];
+    const ids = new Set();
+    for (const raw of tools || []) { const id = normalizeToolId(raw); if (id) ids.add(id); }
+    for (const tool of Array.from(ids).sort()) {
+      const cap = index?.capacityFor ? index.capacityFor(plant, tool) : null;
+      const available = cap && Number.isFinite(cap.available) ? Math.max(0, cap.available) : 1;
+      if (available <= 0) return [];
+      const g = index?.groups?.get(_toolKey(plant, tool));
+      if (!g) continue;
+      const events = [];
+      for (const r of g.rows) {
+        if (excludeLine != null && r.line === excludeLine) continue;
+        if (r.e <= lo || r.s >= hi) continue;
+        events.push({ t: r.s, type: 1, r }, { t: r.e, type: 0, r });
+      }
+      events.sort((a, b) => a.t - b.t || a.type - b.type);
+      const lineCount = new Map();
+      let from0 = null;
+      for (const ev of events) {
+        const n = (lineCount.get(ev.r.line) || 0) + (ev.type ? 1 : -1);
+        if (n <= 0) lineCount.delete(ev.r.line); else lineCount.set(ev.r.line, n);
+        const full = lineCount.size >= available;
+        if (full && from0 == null) from0 = ev.t;
+        else if (!full && from0 != null) { if (ev.t > from0) blocked.push([from0, ev.t]); from0 = null; }
+      }
+      if (from0 != null) blocked.push([from0, hi]);
+    }
+    blocked.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const free = [];
+    let cursor = lo;
+    for (const [bs, be] of blocked) {
+      if (bs > cursor) free.push({ start: new Date(cursor), end: new Date(Math.min(bs, hi)) });
+      if (be > cursor) cursor = be;
+      if (cursor >= hi) break;
+    }
+    if (cursor < hi) free.push({ start: new Date(cursor), end: new Date(hi) });
+    return free.filter(w => w.end > w.start);
+  }
+
   function mergedOverlapHours(win, intervals) {
     if (!win || !intervals?.length) return 0;
     const w0 = win[0] instanceof Date ? win[0].getTime() : +win[0];
@@ -711,56 +977,54 @@
       }
     }
 
-    /* 1b. TOOL CONFLICT — one physical tool (PRT_01 / PRT_02 identify a unique tool,
-       confirmed with the pilot plant 2026-09-11) scheduled on two DIFFERENT lines at
-       the same instant. Same-line adjacency is a changeover, not a conflict.
-       The peer pool is horizon-filtered but NOT line-filtered: an incremental
-       recompute for L1 must still see the peer on L2. The alert attaches to the
-       later order, on its own line, and is emitted only when that line is in scope. */
-    const TOOL_PLACEHOLDERS = new Set(['', '-', '0', 'N/A', 'NONE', 'NULL']);
-    const toolIds = task => {
-      const out = [];
-      for (const key of ['PRT_01', 'PRT_02']) {
-        const v = String(task?.[key] ?? '').trim();
-        if (!TOOL_PLACEHOLDERS.has(v.toUpperCase())) out.push(v);
-      }
-      return out;
-    };
-    const byTool = {};
+    /* 1b. TOOL CONFLICT - count-aware. A tool id is a TYPE and the plant owns several copies
+       (masterData.tool_inventory; a missing row = 1 copy). The alert fires on the order whose start
+       takes the number of DISTINCT MACHINES using the tool above the available copies (the "pusher"),
+       one alert per pusher, so a 3-way overlap on a 1-copy tool is now 2 alerts (one per pusher), not 3
+       pair alerts. Occupancy = first segment start to last segment end (a split order keeps its tool
+       across the gap), run time only; PRT_01 and PRT_02 share one id pool. Same-line adjacency is a
+       changeover (rule 1), not a conflict. Ids: exactly two orders keeps the legacy 'toolc-<prev>|<cur>'
+       (acks survive); a third holder flips it to 'toolc-<pusher>|<tool>' (ack lost), and acks orphan
+       when capacity rises. The peer pool is horizon-filtered but NOT line-filtered: an incremental
+       recompute for L1 must still see the peer on L2. The alert is emitted only when the pusher's line
+       is in scope. All the logic is the shared pure API above (also read by the optimizer). */
+    const toolCapacity = buildToolCapacity(masterData);
+    const toolItems = [];
     for (const t of tasks) {
       if (t.end_date && t.end_date < todayStartFor(t)) continue;
-      for (const tool of toolIds(t)) {
-        for (const interval of scheduleIntervals(t)) {
-          (byTool[tool] ||= []).push({ task: t, start: interval.start, end: interval.end });
-        }
-      }
+      const tools = taskToolIds(t);
+      if (!tools.length) continue;
+      const occ = toolOccupancyInterval(t);
+      if (!occ) continue;
+      toolItems.push({ id: t.id, line: t.MACHINE || 'Unknown', plant: taskToolPlant(t, plantOf), tools, start: occ.start, end: occ.end });
     }
-    const toolConflictIds = new Set();
-    for (const tool of Object.keys(byTool)) {
-      const arr = byTool[tool].slice().sort((a, b) => a.start - b.start);
-      for (let i = 1; i < arr.length; i++) {
-        const cur = arr[i];
-        const curLine = cur.task.MACHINE || 'Unknown';
-        if (onlyLines && !onlyLines.has(curLine)) continue;
-        // Ends are not monotone in start order, so every earlier interval is a candidate.
-        for (let j = i - 1; j >= 0; j--) {
-          const prev = arr[j];
-          if (prev.task.id === cur.task.id) continue;
-          if (prev.end <= cur.start) continue;                 // touching is not overlapping
-          const prevLine = prev.task.MACHINE || 'Unknown';
-          if (prevLine === curLine) continue;                  // rule 1's territory
-          const id = `toolc-${prev.task.id}|${cur.task.id}`;
-          if (toolConflictIds.has(id)) continue;               // split segments of the same pair
-          toolConflictIds.add(id);
-          const vars = { tool, a: orderNumber(prev.task), b: orderNumber(cur.task), lineA: prevLine, lineB: curLine };
-          alerts.push({
-            id, sev: 'err', type: 'tool-conflict',
-            msg: `Tool "${tool}" is needed by "${vars.a}" on ${prevLine} and "${vars.b}" on ${curLine} at the same time.`,
-            msgKey: 'alert.tool_conflict', msgVars: vars,
-            taskId: cur.task.id, peerId: prev.task.id, line: curLine, time: cur.start,
-          });
-        }
+    const toolAlertIds = new Set();
+    const MAX_HOLDERS_SHOWN = 3;
+    for (const c of findToolOverages({ items: toolItems, capacityFor: (plant, tool) => availableCopies(toolCapacity, plant, tool) })) {
+      if (onlyLines && !onlyLines.has(c.pusherLine)) continue;
+      const holderIds = [];
+      for (const h of c.holders) if (!holderIds.includes(h.id)) holderIds.push(h.id);
+      const shown = c.holders.slice(0, MAX_HOLDERS_SHOWN).map(h => `${orderNumberForId(h.id)} (${h.line})`);
+      const holdersText = shown.join(', ') + (c.holders.length > MAX_HOLDERS_SHOWN ? ` +${c.holders.length - MAX_HOLDERS_SHOWN}` : '');
+      const vars = { tool: c.tool, available: c.available, inUse: c.inUse, holders: holdersText };
+      const pusherNo = orderNumberForId(c.pusher);
+      let msgKey, msg;
+      if (c.available === 0) {
+        msgKey = 'alert.tool_conflict_zero';
+        msg = `Tool "${c.tool}" has no copies available but "${pusherNo}" on ${c.pusherLine} needs it${holdersText ? ` (also needed by ${holdersText})` : ''}.`;
+      } else if (!c.hasRow) {
+        msgKey = 'alert.tool_conflict_no_row';
+        msg = `Tool "${c.tool}" has no inventory row (treated as 1 copy) but ${c.inUse} machines need it at the same time: "${pusherNo}" on ${c.pusherLine} and ${holdersText}.`;
+      } else {
+        msgKey = 'alert.tool_conflict';
+        msg = `Tool "${c.tool}" has ${c.available} available but ${c.inUse} are in use at the same time: "${pusherNo}" on ${c.pusherLine} and ${holdersText}.`;
       }
+      alerts.push({
+        id: toolConflictAlertId(c, toolAlertIds), sev: 'err', type: 'tool-conflict',
+        msg, msgKey, msgVars: vars,
+        taskId: c.pusher, peerId: holderIds[0], peerIds: holderIds, line: c.pusherLine, time: c.at,
+        tool: c.tool, available: c.available, inUse: c.inUse, hasRow: c.hasRow,
+      });
     }
 
     /* D50 severity note: this ALERT is sev 'err' (it is a red, planner-must-fix item).
@@ -1445,6 +1709,9 @@
     MS_DAY, MS_HOUR, OVERLOAD_THRESHOLD, WARN_THRESHOLD, SHOW_NEAR_CAPACITY_ALERTS, DEFAULT_SHIFT, WEEKEND_OFF,
     // date/time helpers
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
+    // tool inventory (shared by the alert rule and the optimizer)
+    TOOL_PLACEHOLDERS, normalizeToolId, taskToolIds, taskToolPlant, toolOccupancyInterval, buildToolCapacity, availableCopies,
+    findToolOverages, toolConflictAlertId, buildToolIndex, toolIndexUpdate, toolHeadroom,
     // calendar engine
     activeWorkHours, plantWorkHoursOn, periodBoundaryKeys, validatePlantPeriods, unionWeeklyHours,
     getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant, workingMinutesByDay,

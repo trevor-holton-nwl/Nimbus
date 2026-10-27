@@ -636,3 +636,18 @@ test('setupTasks (the plant rows) replays identically to the all-tasks fallback'
   const scoped = await analyzeLeverage({ ...withOther, setupTasks: tasks }, f.runner);
   assert.equal(JSON.stringify(scoped), JSON.stringify(fallback));
 });
+
+// ---- Tool Inventory (Wave 2): a count-aware conflict names many orders ------------------------------------
+
+test('tool card: n counts ORDERS, the order set is the pusher plus every holder, lines come from the holders', () => {
+  const alerts = [
+    al('x1', 'tool-conflict', 'err', 1, { tool: 'T1', msgVars: { tool: 'T1' }, taskId: 'd', peerId: 'a', peerIds: ['a', 'b', 'c'], line: 'L4' }),
+    al('x2', 'tool-conflict', 'err', 2, { tool: 'T1', msgVars: { tool: 'T1' }, taskId: 'e', peerId: 'a', peerIds: ['a', 'b', 'c', 'd'], line: 'L5' }),
+  ];
+  const tasksById = Object.fromEntries(['a', 'b', 'c', 'd', 'e'].map((id, i) => [id, { id, MACHINE: `M${i + 1}` }]));
+  const [item] = byFamily(groupLeverage(mkInput({ alerts, tasksById })), 'tool');
+  assert.deepEqual(item.orderIds.slice().sort(), ['a', 'b', 'c', 'd', 'e']);
+  assert.equal(item.titleVars.n, 5, 'n is the number of orders, not the number of alerts (2)');
+  assert.deepEqual(item.lines.slice().sort(), ['L4', 'L5', 'M1', 'M2', 'M3', 'M4', 'M5']);
+  assert.equal(item.action.kind, 'tool');
+});

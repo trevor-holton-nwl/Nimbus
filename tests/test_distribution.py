@@ -34,12 +34,22 @@ from backend.distribution.data import (
 
 
 class TestToolPlaceholders:
-    """Verify TOOL_PLACEHOLDERS parity with frontend/nimbus-compute-core.js:391"""
+    """Verify TOOL_PLACEHOLDERS parity with TOOL_PLACEHOLDERS in frontend/nimbus-compute-core.js"""
 
     def test_tool_placeholders_exact_match(self):
         """Assert our set matches the frontend exactly."""
-        expected = {'', '-', '0', 'N/A', 'NONE', 'NULL'}
+        expected = {'', '-', '0', 'N/A', 'NONE', 'NULL', 'NAN', 'TBD'}
         assert expected == TOOL_PLACEHOLDERS
+
+    def test_tool_placeholders_match_compute_core_source(self):
+        """The set literal in the compute core is parsed, so editing either side alone fails this."""
+        import pathlib
+        import re
+        core = pathlib.Path(__file__).resolve().parent.parent / 'frontend' / 'nimbus-compute-core.js'
+        m = re.search(r"TOOL_PLACEHOLDERS\s*=\s*new Set\(\[([^\]]*)\]\)", core.read_text(encoding='utf-8'))
+        assert m, 'TOOL_PLACEHOLDERS literal not found in nimbus-compute-core.js'
+        js_set = set(re.findall(r"'([^']*)'", m.group(1)))
+        assert js_set == TOOL_PLACEHOLDERS
 
 
 class TestResolvePlant:
