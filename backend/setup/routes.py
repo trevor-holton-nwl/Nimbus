@@ -15,6 +15,7 @@ import csv
 import io
 import json
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 
@@ -256,11 +257,13 @@ def import_setup_matrix(plant: str, request: Request, body: dict = Body(default=
 @router.put("/setup/{plant}/value-defaults", response_model=SetupEnvelope,
            dependencies=[Depends(require_api_key), Depends(auth.require_authenticated),
                                                      Depends(require_admin)])
-def save_setup_value_defaults(plant: str, request: Request, body: dict = Body(default={}),
+def save_setup_value_defaults(plant: str, request: Request, body: Any = Body(default=None),
                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
                               actor: str = Depends(auth.require_authenticated)):
     """Upsert (minutes) or delete (null) default changeover minutes for one signature field's values."""
     _setup_plant_guard(plant, allowed_plants)
+    if not isinstance(body, dict):
+        raise _setup_error(ValueError("Request body must be a JSON object"))
     entries = body.get("entries")
     _set_admin_log_details(request, plant=plant, field_key=body.get("field_key"),
                            entry_count=len(entries) if isinstance(entries, list) else 0)

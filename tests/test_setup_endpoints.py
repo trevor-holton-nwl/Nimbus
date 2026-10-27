@@ -722,6 +722,11 @@ def test_value_defaults_write_maps_400_409_and_200_with_freshness(tc):
     assert saved.json()["freshness"]["signature_version"] == 4
 
 
+def test_value_defaults_write_rejects_non_object_body_with_400(tc):
+    for payload in ([], [1], "text", 5, None):
+        assert tc.put("/setup/5512/value-defaults", json=payload).status_code == 400, payload
+
+
 def test_value_defaults_write_requires_admin_and_a_plant_in_scope(tc):
     body = {"signature_version": 4, "field_key": "colorWheel", "entries": []}
     brain.api.dependency_overrides[brain.require_admin] = lambda: (_ for _ in ()).throw(
