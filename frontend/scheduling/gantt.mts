@@ -65,7 +65,7 @@ interface TimelineVisItem {
   segmentNumber?: number;
   segmentCount?: number;
   /** Absent on the synthetic background bands (past-zone, alert-horizon-zone,
-   *  alertcell) built inline in Timeline.rebuild() — only order/blackout items
+   *  frozen-horizon-zone, alertcell) built inline in Timeline.rebuild() — only order/blackout items
    *  (built by _itemForTask/_itemForBlock) set this. */
   content?: string;
   start: Date;
@@ -471,8 +471,8 @@ export const Timeline = {
     Timeline._tl.on('changed', _calibrate);
 
     // Geometry self-heal: vis-timeline's per-group BackgroundItem.repositionY()
-    // can leave a grouped background band (past-zone/alert-horizon-zone/
-    // frozen-horizon-zone/alertcell-*) at 0px height or hidden when its group
+    // can leave a grouped background band (blackout/alertcell-*; the zone washes are
+    // ungrouped since the Gantt pan-perf work) at 0px height or hidden when its group
     // has no visible foreground item at the current zoom (the faee810 bug
     // class). rAF-coalesced so a burst of 'changed' events in one frame only
     // runs the pass once.
@@ -520,22 +520,12 @@ export const Timeline = {
         nowMs: now.getTime(), lastPushedMs: Timeline._zonePushedMs,
         windowMs: Timeline._windowSpanMs(), centerPx: Timeline._centerWidthPx(),
       }))) {
-        const updates: Array<{ id: string; start?: Date; end?: Date }> = Timeline._pastZoneIds
-          .filter(id => Timeline._items!.get(id))
-          .map(id => ({ id, end: now }));
-        if (typeof hz === 'number') {
-          const hzEnd = new Date(now.getTime() + hz * Config.MS_MIN);
-          for (const id of Timeline._alertHorizonIds) {
-            if (Timeline._items!.get(id)) updates.push({ id, start: now, end: hzEnd });
-          }
-        }
-        // C2 (rolling since 2026-10-19): BOTH edges track "now", like the alert band above —
+        // C2 (rolling since 2026-10-19): BOTH edges of the alert and frozen bands track "now" —
         // Store.frozenHorizonEnd is plant-local now + frozen_horizon_days, recomputed live.
-        if (frozenEnd) {
-          for (const id of Timeline._frozenHorizonIds) {
-            if (Timeline._items!.get(id)) updates.push({ id, start: now, end: frozenEnd });
-          }
-        }
+        const updates = zoneTickerUpdates({
+          pastIds: Timeline._pastZoneIds, alertIds: Timeline._alertHorizonIds, frozenIds: Timeline._frozenHorizonIds,
+          now, hzMinutes: hz, frozenEnd, has: id => !!Timeline._items!.get(id),
+        });
         if (updates.length) {
           Timeline._items!.update(updates);
           Timeline._zonePushedMs = now.getTime();
@@ -716,8 +706,8 @@ export const Timeline = {
 
   /** Self-heal grouped background-item geometry after every vis 'changed'
    *  redraw (see the init() hook). vis-timeline's own repositionY() sometimes
-   *  leaves a grouped background band (past-zone/alert-horizon-zone/
-   *  frozen-horizon-zone/alertcell-*) at 0px height or hidden when its group
+   *  leaves a grouped background band (blackout/alertcell-*; the past and
+   *  horizon zone washes are ungrouped) at 0px height or hidden when its group
    *  currently has no visible foreground item — the white-row regression
    *  the faee810 CSS revert deferred. This supplies the same per-row pixel
    *  geometry vis's own repositionY() would, straight from JS.
@@ -1728,79 +1718,48 @@ export const Timeline = {
       }
     }
 
-    // Past-zone shading — one background item per visible line covering [epoch → now].
-    // vis-timeline clips the rendered span to the visible window, so the far-past
-    // start date is harmless. The item updates each rebuild so the boundary tracks time.
-    const pastEnd = Timeline._plantNow(plant);
-    const pastStart = new Date('2000-01-01T00:00:00');
-    for (const line of visibleLines) {
-      const item: TimelineVisItem = {
-        id:       `past-zone-${line}`,
-        group:    line,
-        kind:     'zone',
-        start:    pastStart,
-        end:      pastEnd,
-        type:     'background',
-        className: 'past-zone',
-        editable: false,
+    // Zone washes (past, alert horizon, frozen horizon) — ONE ungrouped background item each, not one per
+    // visible line: they are identical on every row, and the library's reserved BackgroundGroup stretches an
+    // ungrouped background across every row (same as the nonworking-* and day-gridline-* items), so vis
+    // walks 3 items per frame instead of 3 x lines and the ticker pushes 3 updates. Created only while at
+    // least one row is visible, so the id arrays stay empty (and the ticker idles) with no rows. Ungrouped
+    // means _healBackgroundBands skips them by design; kind:'zone' keeps TimelineNav ignoring them. Paint
+    // order is the CSS z-index ladder in styles.css (.vis-itemset > .vis-background is its own stacking
+    // context), never DOM order and never top/height.
+    // vis-timeline clips the rendered span to the visible window, so the far-past past-zone start is harmless;
+    // each pass re-reads "now" so the boundaries track time.
+    if (visibleLines.length) {
+      const zoneNow = Timeline._plantNow(plant);
+      const zone = (id: string, className: string, start: Date, end: Date): void => {
+        desired.set(id, { id, kind: 'zone', start, end, type: 'background', className, editable: false });
       };
-      desired.set(item.id, item);
-    }
-    Timeline._pastZoneIds = visibleLines.map(l => `past-zone-${l}`);
+      zone('past-zone', 'past-zone', new Date('2000-01-01T00:00:00'), zoneNow);
+      Timeline._pastZoneIds = ['past-zone'];
 
-    // Alert-horizon zone — light green band from now to now+alertHorizon, one per line.
-    // Respects per-plant alt_flag_horizon override; absent when no horizon is configured.
-    {
+      // Alert-horizon zone — light green band from now to now+alertHorizon.
+      // Respects per-plant alt_flag_horizon override; absent when no horizon is configured.
       const plantRow = Store.masterData?.plants?.find(p => p.plant === plant) ?? null;
       const hz = plantRow?.alt_flag_horizon ?? Store.userSettings?.alertHorizonMinutes ?? null;
       if (typeof hz === 'number') {
-        const hzNow = Timeline._plantNow(plant);
-        const hzEnd = new Date(hzNow.getTime() + hz * Config.MS_MIN);
-        for (const line of visibleLines) {
-          desired.set(`alert-horizon-zone-${line}`, {
-            id:        `alert-horizon-zone-${line}`,
-            group:     line,
-            kind:      'zone',
-            start:     hzNow,
-            end:       hzEnd,
-            type:      'background',
-            className: 'alert-horizon-zone',
-            editable:  false,
-          });
-        }
-        Timeline._alertHorizonIds = visibleLines.map(l => `alert-horizon-zone-${l}`);
+        zone('alert-horizon-zone', 'alert-horizon-zone', zoneNow, new Date(zoneNow.getTime() + hz * Config.MS_MIN));
+        Timeline._alertHorizonIds = ['alert-horizon-zone'];
       } else {
         Timeline._alertHorizonIds = [];
       }
-    }
 
-    // C2 (2026-08-20; rolling since 2026-10-19): frozen-horizon zone — darker green
-    // band from now through now + frozen_horizon_days (Store.frozenHorizonEnd,
-    // computed live from the plant clock and master data, mirroring
-    // db.compute_frozen_horizon_end), one per visible line, inserted AFTER (so
-    // painted above, DOM order = paint order) the alert-horizon zone above. Like
-    // that band, BOTH edges track "now" (see the ticker above). Absent when the
-    // plant has no frozen window (frozen_horizon_days NULL/0 -> Store.frozenHorizonEnd null).
-    {
+      // C2 (2026-08-20; rolling since 2026-10-19): frozen-horizon zone — darker green band from now through
+      // now + frozen_horizon_days (Store.frozenHorizonEnd, computed live from the plant clock and master
+      // data, mirroring db.compute_frozen_horizon_end). Like the alert band, BOTH edges track "now" (see
+      // the ticker above). Absent when the plant has no frozen window (NULL/0 days -> null).
       const frozenEnd = Store.frozenHorizonEnd;
       if (frozenEnd) {
-        const frozenNow = Timeline._plantNow(plant);
-        for (const line of visibleLines) {
-          desired.set(`frozen-horizon-zone-${line}`, {
-            id:        `frozen-horizon-zone-${line}`,
-            group:     line,
-            kind:      'zone',
-            start:     frozenNow,
-            end:       frozenEnd,
-            type:      'background',
-            className: 'frozen-horizon-zone',
-            editable:  false,
-          });
-        }
-        Timeline._frozenHorizonIds = visibleLines.map(l => `frozen-horizon-zone-${l}`);
+        zone('frozen-horizon-zone', 'frozen-horizon-zone', zoneNow, frozenEnd);
+        Timeline._frozenHorizonIds = ['frozen-horizon-zone'];
       } else {
         Timeline._frozenHorizonIds = [];
       }
+    } else {
+      Timeline._pastZoneIds = []; Timeline._alertHorizonIds = []; Timeline._frozenHorizonIds = [];
     }
     // Every zone was just rewritten with a fresh "now": the first ticker tick re-establishes the push baseline.
     Timeline._zonePushedMs = 0; Timeline._zoneEdgeKey = '';
@@ -1855,9 +1814,9 @@ export const Timeline = {
       }
     }
 
-    // Alert-cell background items — inserted last so they sit on top of the horizon
-    // and past-zone shading within .vis-background (DOM order = paint order).
-    // Err severity wins over warn on the same cell.
+    // Alert-cell background items — grouped, per {line, day}. They sit on top of the horizon
+    // and past-zone shading by the CSS z-index ladder in styles.css (alert cells are the top rung),
+    // not by insertion or DOM order. Err severity wins over warn on the same cell.
     const alertCellMap = alertCellMapFor(Store.alerts, lineVisible);
     for (const key of Object.keys(alertCellMap)) {
       const cell = alertCellMap[key];
@@ -2933,6 +2892,27 @@ export function visItemEqual(existing: TimelineVisItem | null | undefined, desir
   const a = existing.setup, b = desired.setup;
   if (a == null || b == null) return a == null && b == null;
   return _SETUP_DETAIL_KEYS.every(k => a[k] === b[k]);
+}
+
+export interface ZoneTickerInput {
+  pastIds: ReadonlyArray<string>; alertIds: ReadonlyArray<string>; frozenIds: ReadonlyArray<string>;
+  now: Date; hzMinutes: number | null; frozenEnd: Date | null; has: (id: string) => boolean;
+}
+/** The DataSet updates one ticker push writes: the past band's end follows `now`; the alert band (when
+ *  `hzMinutes` is a number) and the frozen band (when `frozenEnd` is set) move both edges. Ids the DataSet
+ *  does not hold (`has` false) are skipped. Pure so the push can be tested without a DOM. */
+export function zoneTickerUpdates(i: ZoneTickerInput): Array<{ id: string; start?: Date; end?: Date }> {
+  const updates: Array<{ id: string; start?: Date; end?: Date }> = i.pastIds
+    .filter(id => i.has(id))
+    .map(id => ({ id, end: i.now }));
+  if (typeof i.hzMinutes === 'number') {
+    const hzEnd = new Date(i.now.getTime() + i.hzMinutes * Config.MS_MIN);
+    for (const id of i.alertIds) if (i.has(id)) updates.push({ id, start: i.now, end: hzEnd });
+  }
+  if (i.frozenEnd) {
+    for (const id of i.frozenIds) if (i.has(id)) updates.push({ id, start: i.now, end: i.frozenEnd });
+  }
+  return updates;
 }
 
 export interface TickerPushInput { nowMs: number; lastPushedMs: number; windowMs: number; centerPx: number; minPx?: number }

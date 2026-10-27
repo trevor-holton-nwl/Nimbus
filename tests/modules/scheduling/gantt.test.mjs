@@ -7,7 +7,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor, alertSig, frameMeterSummary, installFrameMeter, visItemEqual } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor, alertSig, frameMeterSummary, installFrameMeter, visItemEqual, zoneTickerUpdates } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast, PerfMonitor } from '../../../frontend/platform/foundation.mjs';
@@ -4002,6 +4002,145 @@ test('Timeline._rebuildPass: _itemIdsByTask is rebuilt on a pass that writes not
   assert.deepEqual(nonZoneUpdates(fake), []);
   assert.ok(Timeline.itemIdsForTask('lane-a').length > 0, 'the id map is repopulated from the desired set, not from the writes');
 }));
+
+/* ---- Task 5: the three zone washes are single ungrouped background items ---- */
+// Pins the plant clock and gives NW_PLANT a master row with the given horizons (null = off), runs fn, restores.
+function zoneRig({ hz = null, frozenDays = null } = {}, fn) {
+  return laneRebuildHarness(ctx => {
+    const restoreClock = pinPlantClock([NW_PLANT]);
+    const master = Store.masterData;
+    const priorHz = Store.userSettings.alertHorizonMinutes;
+    Store.setMasterData({
+      ...master,
+      plants: master.plants.map(p => p.plant === NW_PLANT ? { ...p, alt_flag_horizon: hz, frozen_horizon_days: frozenDays } : p),
+    }, 'unit-test');
+    Store.userSettings.alertHorizonMinutes = null;
+    const priorIds = [Timeline._pastZoneIds, Timeline._alertHorizonIds, Timeline._frozenHorizonIds];
+    try { return fn(ctx); } finally {
+      Store.userSettings.alertHorizonMinutes = priorHz;
+      [Timeline._pastZoneIds, Timeline._alertHorizonIds, Timeline._frozenHorizonIds] = priorIds;
+      restoreClock();
+    }
+  });
+}
+const ZONE_IDS = ['past-zone', 'alert-horizon-zone', 'frozen-horizon-zone'];
+const zoneItems = fake => [...fake.records.values()].filter(i => i.kind === 'zone' && ZONE_IDS.some(z => String(i.id).startsWith(z)));
+
+test('Timeline._rebuildPass: exactly one past-zone item, ungrouped', () => zoneRig({}, ({ fake }) => {
+  Timeline._rebuildPass();
+  const past = zoneItems(fake).filter(i => String(i.id).startsWith('past-zone'));
+  assert.equal(past.length, 1);
+  const item = past[0];
+  assert.equal(item.id, 'past-zone');
+  assert.equal('group' in item, false, 'ungrouped: the library routes it to its BackgroundGroup');
+  assert.equal(item.kind, 'zone');
+  assert.equal(item.type, 'background');
+  assert.equal(item.className, 'past-zone');
+  assert.equal(item.editable, false);
+}));
+
+test('Timeline._rebuildPass: alert-horizon-zone and frozen-horizon-zone are single ungrouped items when configured, absent otherwise', () => {
+  zoneRig({ hz: 720, frozenDays: 2 }, ({ fake }) => {
+    Timeline._rebuildPass();
+    for (const id of ['alert-horizon-zone', 'frozen-horizon-zone']) {
+      const found = zoneItems(fake).filter(i => String(i.id).startsWith(id));
+      assert.equal(found.length, 1, id);
+      assert.equal(found[0].id, id);
+      assert.equal('group' in found[0], false);
+      assert.equal(found[0].className, id);
+      assert.equal(found[0].type, 'background');
+      assert.equal(found[0].kind, 'zone');
+      assert.equal(found[0].editable, false);
+    }
+    const a = fake.records.get('alert-horizon-zone');
+    assert.equal(a.end.getTime() - a.start.getTime(), 720 * 60_000, 'alert band spans the horizon');
+    assert.equal(fake.records.get('frozen-horizon-zone').start.getTime(), a.start.getTime(), 'both start at the plant now');
+    assert.deepEqual(Timeline._alertHorizonIds, ['alert-horizon-zone']);
+    assert.deepEqual(Timeline._frozenHorizonIds, ['frozen-horizon-zone']);
+  });
+  zoneRig({ hz: null, frozenDays: null }, ({ fake }) => {
+    Timeline._rebuildPass();
+    assert.deepEqual(zoneItems(fake).map(i => i.id), ['past-zone']);
+    assert.deepEqual(Timeline._alertHorizonIds, []);
+    assert.deepEqual(Timeline._frozenHorizonIds, []);
+  });
+});
+
+test('Timeline._rebuildPass: 30 visible lines still produce 3 zone items, not 90', () => zoneRig({ hz: 720, frozenDays: 2 }, ({ fake }) => {
+  const at = h => new Date(2026, 7, 10, h);
+  const tasks = [];
+  for (let i = 0; i < 30; i++) tasks.push({ id: `many-${i}`, PRODUCTION_ORDER: `P${i}`, MATERIAL_NUMBER: 'M', MACHINE: `LINE-${i}`, PLANT: NW_PLANT, plant: NW_PLANT, start_date: at(7), end_date: at(9), RUN_TIME: 2, COLOR: 'RED' });
+  Store.setTasks(tasks, 'unit-test');
+  assert.equal(Timeline._visibleLines().length, 30, 'precondition: 30 rows');
+  Timeline._rebuildPass();
+  assert.deepEqual(zoneItems(fake).map(i => i.id).sort(), [...ZONE_IDS].sort());
+  assert.ok(![...fake.records.keys()].some(id => /^(past|alert-horizon|frozen-horizon)-zone-/.test(id)), 'no per-line zone ids');
+}));
+
+test('Timeline._rebuildPass: no visible rows creates no zone items and leaves the id arrays empty', () => zoneRig({ hz: 720, frozenDays: 2 }, ({ fake }) => {
+  Store.setTasks([], 'unit-test');
+  assert.deepEqual(Timeline._visibleLines(), [], 'precondition: no rows');
+  Timeline._rebuildPass();
+  assert.deepEqual(zoneItems(fake), []);
+  assert.deepEqual(Timeline._pastZoneIds, []);
+  assert.deepEqual(Timeline._alertHorizonIds, []);
+  assert.deepEqual(Timeline._frozenHorizonIds, []);
+}));
+
+test('Timeline._rebuildPass: the three _*ZoneIds arrays have length 1 after a rebuild and the ticker guard stays truthy', () => zoneRig({ hz: 720, frozenDays: 2 }, () => {
+  Timeline._rebuildPass();
+  assert.deepEqual(Timeline._pastZoneIds, ['past-zone']);
+  assert.deepEqual(Timeline._alertHorizonIds, ['alert-horizon-zone']);
+  assert.deepEqual(Timeline._frozenHorizonIds, ['frozen-horizon-zone']);
+  assert.ok(Timeline._pastZoneIds.length, 'the ticker guard (and the 30 s lock scan behind it) runs');
+}));
+
+test('Timeline._rebuildPass: the first pass after the change removes the old per-line zone ids and adds the three; a second pass leaves them alone', () => zoneRig({ hz: 720, frozenDays: 2 }, ({ fake }) => {
+  const legacy = ['past-zone-L-A', 'alert-horizon-zone-L-A', 'frozen-horizon-zone-L-A'];
+  for (const id of legacy) fake.records.set(id, { id, group: 'L-A', kind: 'zone', type: 'background', className: id.replace(/-L-A$/, ''), editable: false, start: new Date(2026, 0, 1), end: new Date(2026, 0, 2) });
+  Timeline._rebuildPass();
+  const removed = fake.calls.remove.flat();
+  for (const id of legacy) assert.ok(removed.includes(id), `${id} removed through the normal diff`);
+  assert.deepEqual(zoneItems(fake).map(i => i.id).sort(), [...ZONE_IDS].sort());
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  Timeline._rebuildPass();
+  assert.deepEqual(fake.calls.add.flat(), []);
+  assert.deepEqual(fake.calls.remove.flat().filter(id => !id.startsWith('nonworking-')), []);
+}));
+
+test('zoneTickerUpdates: pushes the past id end, the alert-horizon start/end and the frozen start/end for the 3 single ids; skips ids not in the DataSet; omits horizon updates when hz is not a number or frozenEnd is null', () => {
+  const now = new Date(2026, 7, 10, 8), frozenEnd = new Date(2026, 7, 12, 8);
+  const base = { pastIds: ['past-zone'], alertIds: ['alert-horizon-zone'], frozenIds: ['frozen-horizon-zone'], now, hzMinutes: 90, frozenEnd, has: () => true };
+  assert.deepEqual(zoneTickerUpdates(base), [
+    { id: 'past-zone', end: now },
+    { id: 'alert-horizon-zone', start: now, end: new Date(now.getTime() + 90 * 60_000) },
+    { id: 'frozen-horizon-zone', start: now, end: frozenEnd },
+  ]);
+  assert.deepEqual(zoneTickerUpdates({ ...base, has: id => id !== 'alert-horizon-zone' }).map(u => u.id), ['past-zone', 'frozen-horizon-zone'], 'ids missing from the DataSet are skipped');
+  assert.deepEqual(zoneTickerUpdates({ ...base, has: () => false }), []);
+  assert.deepEqual(zoneTickerUpdates({ ...base, hzMinutes: null }).map(u => u.id), ['past-zone', 'frozen-horizon-zone']);
+  assert.deepEqual(zoneTickerUpdates({ ...base, frozenEnd: null }).map(u => u.id), ['past-zone', 'alert-horizon-zone']);
+  assert.deepEqual(zoneTickerUpdates({ ...base, hzMinutes: null, frozenEnd: null }), [{ id: 'past-zone', end: now }]);
+});
+
+test('zone CSS: the z-index ladder is ordered gridline < nonworking < blackout < past < alert-horizon < frozen < alert cell, the background container is isolated, and no top/height/position appears in the zone rules', () => {
+  const css = readFileSync(new URL('../../../frontend/styles.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rule = sel => {
+    const esc = sel.replace(/[.>\-]/g, m => '\\' + m);
+    const m = stripped.match(new RegExp(`(?:^|\\n)${esc}\\s*\\{([^}]*)\\}`));
+    assert.ok(m, `rule ${sel} exists`);
+    return m[1];
+  };
+  const z = sel => { const m = rule(sel).match(/z-index:\s*(\d+)\s*(?:!important)?\s*;/); assert.ok(m, `${sel} declares a z-index`); return Number(m[1]); };
+  const order = ['.vis-item.day-gridline', '.vis-item.nonworking', '.vis-item.blackout', '.vis-item.past-zone', '.vis-item.alert-horizon-zone', '.vis-item.frozen-horizon-zone'].map(z);
+  for (let i = 1; i < order.length; i++) assert.ok(order[i - 1] < order[i], `ladder step ${i} (${order.join(' < ')})`);
+  for (const c of ['.vis-item.alertcell-err', '.vis-item.alertcell-warn', '.vis-item.alertcell-calendar'].map(z)) assert.ok(c > order[order.length - 1], 'alert cells sit above the frozen band');
+  assert.match(rule('.vis-itemset > .vis-background'), /isolation:\s*isolate/);
+  for (const sel of ['.vis-item.past-zone', '.vis-item.alert-horizon-zone', '.vis-item.frozen-horizon-zone', '.vis-item.nonworking', '.vis-item.day-gridline', '.vis-item.blackout', '.vis-item.alertcell-err', '.vis-item.alertcell-warn', '.vis-item.alertcell-calendar']) {
+    assert.doesNotMatch(rule(sel), /(^|[\s;{])(top|height|position)\s*:/, `${sel} must not set top/height/position`);
+  }
+});
 
 test('Timeline.rebuildSetupForLines: a second identical call writes no setup bar update, and a changed setup bar is written', () => {
   const line = 'SETUP-EQ-LINE', plant = 'SETUP-EQ-PLANT';

@@ -1347,6 +1347,19 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-labelset .vis-label.goto-row { background: rgba(var(--accent-rgb), 0.16); }
 .vis-labelset .vis-label.goto-row { box-shadow: inset 3px 0 0 var(--accent); }
 
+/* Background paint order (Gantt pan-perf, Task 5). The past / alert-horizon / frozen-horizon washes are single
+   UNGROUPED background items (vis's reserved BackgroundGroup stretches them across every row), no longer one
+   grouped item per line, so their order against the grouped bands is a z-index ladder, not DOM order (vis
+   attaches a background item's element when it first becomes visible, so tree order is not insertion order).
+   vis 7.7.3 gives every .vis-item z-index 1, and .vis-background is positioned with no z-index, so it is NOT a
+   stacking context: a z-index above 1 on a background item would paint over the foreground bars. The
+   isolation rule below makes the background container its own stacking context, so the ladder stays inside
+   it and every bar (foreground, z-index 1, painted after the background) stays above every wash.
+   Bottom to top: day gridline 1, .nonworking 2, .blackout 3, .past-zone 4, .alert-horizon-zone 5,
+   .frozen-horizon-zone 6, alert cells 7. z-index and isolation ONLY: never position/top/height on
+   a .vis-item rule (vis owns that geometry; see frontend/scheduling/CLAUDE.md). */
+.vis-itemset > .vis-background { isolation: isolate; }
+
 /* Custom vis background areas for blackout blocks */
 .vis-item.blackout {
   background: repeating-linear-gradient(
@@ -1359,10 +1372,12 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   font-style: italic;
   font-size: 11px !important;
   font-weight: 600 !important;
+  z-index: 3;
 }
 
 /* Alert-cell background highlights — render inside .vis-background, beneath
-   foreground order bars. Solid translucent tint, no border, severity-colored.
+   foreground order bars and above every zone wash (z-index 7, the top rung of
+   the background ladder above). Solid translucent tint, no border, severity-colored.
    Rgba (not var(--err-soft) etc.) is deliberate: these overlay ON TOP of the
    colored order blocks underneath, so they need true alpha transparency, not
    an opaque soft-tint chip background. The rgba values live in the
@@ -1370,50 +1385,58 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.alertcell-err {
   background: var(--alertcell-err-bg) !important;
   border: 1px solid var(--alertcell-err-edge) !important;
+  z-index: 7;
 }
 .vis-item.alertcell-warn {
   background: var(--alertcell-warn-bg) !important;
   border-color: transparent !important;
+  z-index: 7;
 }
 /* Calendar-restriction alert cells — blue tint signals "zone unavailable",
    distinct from red scheduling-conflict cells. */
 .vis-item.alertcell-calendar {
   background: var(--alertcell-cal-bg) !important;
   border: 1px solid var(--alertcell-cal-edge) !important;
+  z-index: 7;
 }
-/* Past-time zone shading — light gray wash behind orders for elapsed time */
+/* Past-time zone shading — light gray wash behind orders for elapsed time (z-index 4) */
 .vis-item.past-zone {
   background: var(--zone-past) !important;
   border-color: transparent !important;
+  z-index: 4;
 }
-/* Alert-horizon zone — light green wash from now to the plant's alert horizon */
+/* Alert-horizon zone — light green wash from now to the plant's alert horizon (z-index 5) */
 .vis-item.alert-horizon-zone {
   background: var(--zone-alert) !important;
   border-color: transparent !important;
   border-right: 3px solid var(--zone-alert-edge) !important;
   pointer-events: none !important;
+  z-index: 5;
 }
 /* Frozen-horizon zone (Workstream C2, 2026-08-20) — darker green wash from now
    through the plant's frozen horizon, layered ABOVE .alert-horizon-zone above
-   (later in DOM/paint order — see Timeline.rebuild). The optimizer may not
-   place or move anything into this band; a manual drag still can (OD-C2c). */
+   (z-index 6 against 5; see the ladder comment above and Timeline._rebuildPass).
+   The optimizer may not place or move anything into this band; a manual drag
+   still can (OD-C2c). */
 .vis-item.frozen-horizon-zone {
   background: var(--zone-frozen) !important;
   border-color: transparent !important;
   border-right: 3px solid var(--zone-frozen-edge) !important;
   pointer-events: none !important;
+  z-index: 6;
 }
 
 /* Day-boundary gridlines — ungrouped full-height background items, one per
    local midnight ('day-gridline-<dayKey>' in Timeline.rebuild). They paint
-   beneath the zone washes (shared .vis-background canvas, BackgroundGroup
-   first), so the wash alphas keep the 1px line visible. Month starts get the
-   stronger token. */
+   beneath the zone washes (z-index 1, the bottom rung of the background
+   ladder above), so the wash alphas keep the 1px line visible. Month starts
+   get the stronger token. */
 .vis-item.day-gridline {
   background: transparent !important;
   border: none !important;
   border-left: 1px solid var(--line) !important;
   pointer-events: none !important;
+  z-index: 1;
 }
 .vis-item.day-gridline-month {
   border-left-color: var(--line-strong) !important;
@@ -1424,11 +1447,14 @@ details.line-group > summary::-webkit-details-marker { display: none; }
    off-shift hours of the plant pattern. About as dark as .past-zone
    (--zone-past) but slate-tinted (35% light / 20% dark via the
    --zone-nonworking token; the dark step is lower so the wash does not
-   swallow bar-adjacent text). No position/top/height: vis owns the geometry. */
+   swallow bar-adjacent text). z-index 2 on the background ladder (above the
+   gridlines, below blackouts and every zone). No position/top/height: vis owns
+   the geometry. */
 .vis-item.nonworking {
   background: var(--zone-nonworking) !important;
   border: none !important;
   pointer-events: none !important;
+  z-index: 2;
 }
 
 /* Plant visibility-horizon marker (C1, 2026-08-21) — a thin labeled vertical
