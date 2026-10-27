@@ -232,10 +232,18 @@ function valueDefaultResolution(
     const from = predecessorState[i].value;
     const to = successorState[i].value;
     if (from === to) continue;
-    const toValue = normalizedValue(to);
-    if (toValue.length === 0 || normalizedValue(from) === toValue) continue;
     const fieldKey = definition.fields[i];
-    const minutes = byField.get(fieldKey)?.get(toValue);
+    const values = byField.get(fieldKey);
+    // Order-derived values are already normalized, so try the raw arriving value first: a hit proves
+    // it is its own normalized form (map keys are normalized, and normalization is idempotent).
+    let toValue = to;
+    let minutes = values?.get(to);
+    if (minutes === undefined) {
+      toValue = normalizedValue(to);
+      if (toValue.length === 0) continue;
+      if (normalizedValue(from) === toValue) continue;
+      minutes = toValue === to ? undefined : values?.get(toValue);
+    } else if (normalizedValue(from) === toValue) continue;
     if (minutes === undefined) (missing ??= []).push(`${fieldKey}=${toValue}`);
     else { sum += minutes; (used ??= []).push(`${fieldKey}=${toValue} (${minutes})`); }
   }
@@ -244,6 +252,19 @@ function valueDefaultResolution(
     sum,
     reason: `Default by value: ${used.join(' + ')}${missing ? `; no default: ${missing.join(', ')}` : ''}`,
   };
+}
+
+/** Value-default tier entry point, hoisted so `resolveSetup` allocates no closure on calls an earlier tier
+ * resolves. Uses the index's precomputed map when present, else builds one from `input.valueDefaults`. */
+function resolveValueDefault(
+  input: ResolveSetupInput,
+  index: SetupResolutionIndex | null,
+  definition: SetupDefinition,
+  predecessorState: SetupStateKey,
+  successorState: SetupStateKey,
+): { sum: number; reason: string } | null {
+  const byField = index ? index.valueDefaults : buildValueDefaultMap(definition, input.valueDefaults);
+  return valueDefaultResolution(definition, predecessorState, successorState, byField);
 }
 
 /**
@@ -433,18 +454,12 @@ export function resolveSetup(input: ResolveSetupInput): ResolvedSetup {
     override = matchingOverride(input.overrides, input);
   }
 
-  let defaultsByField: ReadonlyMap<string, ReadonlyMap<string, number>> | null = null;
-  const defaultResolution = (): { sum: number; reason: string } | null => {
-    defaultsByField ??= index ? index.valueDefaults : buildValueDefaultMap(definition, input.valueDefaults);
-    return valueDefaultResolution(definition, predecessorState, successorState, defaultsByField);
-  };
-
   if (override) {
     const currentStandard = lineRow?.setup_min
       ?? plantRow?.setup_min
       ?? (isCompleteState(predecessorState, definition)
         && isCompleteState(successorState, definition)
-        && statesEqual(predecessorState, successorState) ? 0 : (defaultResolution()?.sum ?? override.standard_min));
+        && statesEqual(predecessorState, successorState) ? 0 : (resolveValueDefault(input, index, definition, predecessorState, successorState)?.sum ?? override.standard_min));
     return {
       covered: true,
       requiredMin: override.remaining_min,
@@ -475,7 +490,7 @@ export function resolveSetup(input: ResolveSetupInput): ResolvedSetup {
     };
   }
 
-  const byDefault = defaultResolution();
+  const byDefault = resolveValueDefault(input, index, definition, predecessorState, successorState);
   if (byDefault) {
     return {
       covered: true,
