@@ -230,7 +230,9 @@ Implementers and reviewers append one row per task as they finish.
 | 3 Settle refresh | 1f40e7b | Done, reviewed | Redraw only on DataView add/remove |
 | 4 Rebuild equality diff | c160ccd | Done, reviewed | `visItemEqual`; skips unchanged DataSet writes |
 | 5 Zones 90 to 3 | e02a69d | Done, reviewed | Three ungrouped washes plus z-index ladder |
-| Final fix wave | this commit | Done | Background `z-index: 1` (not isolation), past-zone pass-through, test hygiene, docs |
+| Final fix wave | 2167f41 | Done | Background `z-index: 1` (not isolation), past-zone pass-through, test hygiene, docs |
+
+Merged to local main as a fast-forward on 2026-10-27 (main = 2167f41). Not pushed, not deployed. Owner browser check (spec checklist) still owed before deploy.
 
 ## Side issues to log (not fixed here)
 
