@@ -656,3 +656,282 @@ test('mass-upload Stage and Download-rejected re-check the outcome after flushin
   assert.match(source, /data-setup-mass-upload-download\]'\)!\.addEventListener\('click', \(\) => \{\s*debounced\.flush\(\);\s*if \(!lastOutcome\.rejected\.length\) return;/);
   assert.match(source, /data-setup-mass-upload-stage\]'\)!\.addEventListener\('click', \(\) => \{\s*debounced\.flush\(\);\s*if \(!lastOutcome\.ready\.length\) return;/);
 });
+
+// ── Default changeover by value (Wave C): grid/list states, activation, tiles, card helpers ─────────────────────
+import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
+import { Toast } from '../../../frontend/platform/foundation.mjs';
+
+const VD_DEF = { signature_version: 4, fields: ['prt01', 'colorWheel'], strict_blanks: true, active: false };
+const vdState = (prt, color) => [{ fieldKey: 'prt01', value: prt }, { fieldKey: 'colorWheel', value: color }];
+const vdGridState = (prt, color) => { const key = vdState(prt, color); return { key, sig: SetupAdmin.stateSig(key), parts: [prt, color] }; };
+const VD_DEFAULTS = [
+  { field_key: 'prt01', value: 'A', setup_min: 10, signature_version: 4 },
+  { field_key: 'prt01', value: 'B', setup_min: 30, signature_version: 4 },
+  { field_key: 'prt01', value: 'C', setup_min: 60, signature_version: 4 },
+  { field_key: 'colorWheel', value: 'RED', setup_min: 15, signature_version: 4 },
+  { field_key: 'prt01', value: 'Z', setup_min: 999, signature_version: 3 }, // old version: ignored
+];
+
+test('gridCellState: a default-covered pair is "value-default" only below every exact row and the diagonal', () => {
+  const a = vdGridState('A', 'RED'), b = vdGridState('B', 'RED');
+  assert.equal(SetupAdmin.gridCellState(a, b, undefined, undefined, '', 30), 'value-default');
+  assert.equal(SetupAdmin.gridCellState(a, b, undefined, undefined, '', null), 'uncovered');
+  assert.equal(SetupAdmin.gridCellState(a, b, undefined, undefined, ''), 'uncovered', 'the sixth parameter is optional');
+  assert.equal(SetupAdmin.gridCellState(a, a, undefined, undefined, '', 30), 'implicit-zero', 'identical states stay implicit zero');
+  assert.equal(SetupAdmin.gridCellState(a, b, undefined, { setup_min: 5 }, '', 30), 'dirty', 'a pending edit wins');
+  assert.equal(SetupAdmin.gridCellState(a, b, { setup_min: 5, inherited: false }, undefined, '', 30), 'plant-default', 'a plant row beats the default');
+  // line scope: a line override stays line-override, a plant row seen at line scope stays plant-default
+  assert.equal(SetupAdmin.gridCellState(a, b, { setup_min: 5, inherited: false }, undefined, 'L1', 30), 'line-override');
+  assert.equal(SetupAdmin.gridCellState(a, b, { setup_min: 5, inherited: true }, undefined, 'L1', 30), 'plant-default');
+  // line scope with no row at all: the plant-wide default still covers the pair
+  assert.equal(SetupAdmin.gridCellState(a, b, undefined, undefined, 'L1', 30), 'value-default');
+});
+
+test('valueDefaultFor resolves the worked check through the real resolver (only the default tier can answer)', () => {
+  const idx = SetupAdmin.defaultIndexFor(VD_DEF, VD_DEFAULTS);
+  const f = (from, to) => SetupAdmin.valueDefaultFor(VD_DEF, vdState(...from), vdState(...to), VD_DEFAULTS, idx);
+  assert.equal(f(['A', 'RED'], ['B', 'RED']).min, 30);
+  assert.equal(f(['B', 'RED'], ['A', 'BLUE']).min, 10, 'partial sum: BLUE has no default');
+  assert.match(f(['B', 'RED'], ['A', 'BLUE']).reason, /no default: colorWheel=BLUE/);
+  assert.equal(f(['C', 'BLUE'], ['C', 'RED']).min, 15);
+  assert.equal(f(['A', 'RED'], ['B', 'RED']).min, SetupAdmin.valueDefaultFor(VD_DEF, vdState('A', 'RED'), vdState('B', 'RED'), VD_DEFAULTS).min, 'indexed and index-less agree');
+  assert.equal(f(['A', 'RED'], ['A', 'RED']), null, 'identical states are implicit zero, not a default');
+  assert.equal(f(['A', 'RED'], ['X', 'BLUE']), null, 'no default on any changed field: uncovered');
+  assert.equal(SetupAdmin.valueDefaultFor(VD_DEF, vdState('A', 'RED'), vdState('B', 'RED'), [], undefined), null);
+  assert.equal(SetupAdmin.valueDefaultFor(VD_DEF, vdState('A', 'RED'), vdState('B', 'RED'), undefined, undefined), null, 'absent value_defaults is []');
+});
+
+test('listRowView: a default-covered pair is its own state, never a Gap; a line override outranks it', () => {
+  const row = { from_key: vdState('A', 'RED'), to_key: vdState('B', 'RED'), setup_min: null, source: 'plant', inherited: false, plant_value: null };
+  const gap = SetupAdmin.listRowView(row, '');
+  assert.equal(gap.isGap, true);
+  const covered = SetupAdmin.listRowView(row, '', { min: 30, reason: 'Default by value: prt01=B (30)' });
+  assert.equal(covered.isGap, false);
+  assert.equal(covered.isValueDefault, true);
+  assert.equal(covered.defaultMin, 30);
+  assert.equal(covered.sourceLabel, Util.t('ui.setup_source_value_default'));
+  assert.match(covered.detail, /prt01=B/);
+  const lineRow = { ...row, setup_min: 5, inherited: false };
+  const override = SetupAdmin.listRowView(lineRow, 'L1', { min: 30, reason: 'x' });
+  assert.equal(override.isOverride, true);
+  assert.equal(override.isValueDefault, false, 'line override beats the default');
+  const planted = SetupAdmin.listRowView({ ...row, setup_min: 7, plant_value: 7, inherited: true }, 'L1', { min: 30, reason: 'x' });
+  assert.equal(planted.isValueDefault, false, 'a plant row (inherited at line scope) beats the default');
+});
+
+test('matrixVersionFor counts value defaults for the CURRENT version so a defaults-only plant can pass the version check', () => {
+  assert.equal(SetupAdmin.matrixVersionFor({ rowCount: 0, valueDefaults: [], version: 4 }), null, 'no rows, no defaults');
+  assert.equal(SetupAdmin.matrixVersionFor({ rowCount: 0, valueDefaults: undefined, version: 4 }), null);
+  assert.equal(SetupAdmin.matrixVersionFor({ rowCount: 0, valueDefaults: VD_DEFAULTS, version: 4 }), 4, 'defaults-only plant');
+  assert.equal(SetupAdmin.matrixVersionFor({ rowCount: 0, valueDefaults: [VD_DEFAULTS[4]], version: 4 }), null, 'a default for an old version does not count');
+  assert.equal(SetupAdmin.matrixVersionFor({ rowCount: 3, valueDefaults: [], version: 4 }), 4, 'rows still count');
+  assert.equal(SetupAdmin.matrixVersionFor({ rowCount: 3, valueDefaults: [], version: null }), null);
+  const matrixVersion = SetupAdmin.matrixVersionFor({ rowCount: 0, valueDefaults: VD_DEFAULTS, version: 4 });
+  assert.equal(SetupAdmin.activationStatus(VD_DEF, { matrixVersion, coveragePass: true }, true).active, true, 'a defaults-only plant with passing coverage activates');
+  // Util.t falls back to the key when another test has already defined `window`, so accept either rendering.
+  assert.match(SetupAdmin.activationStatus(VD_DEF, { matrixVersion: null, coveragePass: true }).reason, /version-matched matrix or default by value|ui.setup_status_version_mismatch/i, 'the reason names defaults');
+});
+
+test('coverageSummary: Recorded / By default / Gaps come from the server counts, not total - gaps', () => {
+  assert.deepEqual(SetupAdmin.coverageSummary({ total_pairs: 100, covered_pairs: 20, default_covered_pairs: 70, missing_pairs: 10 }),
+    { total: 100, recorded: 20, byDefault: 70, gaps: 10, covered: 90 });
+  // an older response with no covered_pairs / default key degrades to a derived number
+  assert.deepEqual(SetupAdmin.coverageSummary({ total_pairs: 10, missing_pairs: 4 }), { total: 10, recorded: 6, byDefault: 0, gaps: 4, covered: 6 });
+  assert.deepEqual(SetupAdmin.coverageSummary(undefined), { total: 0, recorded: 0, byDefault: 0, gaps: 0, covered: 0 });
+  // the observed bucket has the same shape
+  assert.equal(SetupAdmin.coverageSummary({ total_pairs: 8, covered_pairs: 3, default_covered_pairs: 4, missing_pairs: 1 }).covered, 7);
+});
+
+test('setupWriteKind maps the value-defaults route to its own kind (stales an open optimizer preview)', () => {
+  assert.equal(SetupAdmin.setupWriteKind('/setup/P1/value-defaults'), 'value-default');
+  assert.equal(SetupAdmin.setupWriteKind('http://x/setup/P1/value-defaults?x=1'), 'value-default');
+  assert.equal(SetupAdmin.setupWriteKind('/setup/P1/matrix/import'), 'matrix');
+  assert.equal(SetupAdmin.setupWriteKind('/setup/P1/definition'), 'definition');
+});
+
+test('value-default rows dedupe on the canonical value, badge listed > observed > stored, natural sort', () => {
+  const stored = new Map([['T10', 5], ['ORPHAN', 7]]);
+  const rows = SetupAdmin.buildValueDefaultRows({
+    listed: ['Red', 'RED ', 't2', 'T10'], observed: ['red', 'BLUE', 'TRUE', 'true'], stored,
+  });
+  assert.deepEqual(rows.map(r => r.value), ['BLUE', 'ORPHAN', 'RED', 'T2', 'T10', 'true']);
+  const byValue = Object.fromEntries(rows.map(r => [r.value, r]));
+  assert.equal(rows.filter(r => r.value === 'RED').length, 1, 'Red / "RED " / red collapse to one row');
+  assert.equal(byValue.RED.badge, 'listed');
+  assert.equal(byValue.BLUE.badge, 'observed');
+  assert.equal(byValue.ORPHAN.badge, 'stored');
+  assert.equal(byValue.T10.stored, 5);
+  assert.ok(byValue.true, 'booleans keep the client canonical lowercase form, and the server TRUE is the same row');
+  assert.deepEqual(SetupAdmin.filterValueDefaultRows(rows, ' re ').map(r => r.value), ['RED']);
+  assert.equal(SetupAdmin.filterValueDefaultRows(rows, '').length, rows.length);
+});
+
+test('stage / mass-fill / entries: only dirty values, blank removes, equal-to-stored is no change', () => {
+  const stored = new Map([['A', 10], ['B', 30]]);
+  const dirty = new Map();
+  SetupAdmin.stageValueDefault(dirty, stored, 'a', 10);
+  assert.equal(dirty.size, 0, 'same as stored: not dirty');
+  SetupAdmin.stageValueDefault(dirty, stored, 'A', 12);
+  SetupAdmin.stageValueDefault(dirty, stored, 'B', null);
+  SetupAdmin.stageValueDefault(dirty, stored, 'NEW', 5);
+  SetupAdmin.stageValueDefault(dirty, stored, 'NOPE', null);
+  assert.deepEqual(SetupAdmin.valueDefaultEntries(dirty), [{ value: 'A', setup_min: 12 }, { value: 'B', setup_min: null }, { value: 'NEW', setup_min: 5 }]);
+  SetupAdmin.stageValueDefault(dirty, stored, 'A', 10);
+  assert.equal(dirty.has('A'), false, 'typing the stored value back clears the dirty entry');
+  const chunks = SetupAdmin.chunkValueDefaultEntries(Array.from({ length: 4500 }, (_, i) => ({ value: `V${i}`, setup_min: 1 })));
+  assert.deepEqual(chunks.map(c => c.length), [2000, 2000, 500], 'the 2,000-entry route cap is honoured');
+  assert.equal(SetupAdmin.valueDefaultWorstCase(VD_DEFAULTS, 4, ['prt01', 'colorWheel'], 'prt01', new Map()), 75, '60 + 15; the old-version 999 is ignored');
+  assert.equal(SetupAdmin.valueDefaultWorstCase(VD_DEFAULTS, 4, ['prt01', 'colorWheel'], 'prt01', new Map([['C', 10000]])), 10015);
+  assert.equal(SetupAdmin.valueDefaultWorstCase(VD_DEFAULTS, 4, ['prt01', 'colorWheel'], 'prt01', new Map([['C', null]])), 45, 'a pending removal drops C');
+});
+
+/** A target that records innerHTML per mount and answers querySelector for the card's mounts. */
+function vdFakeTarget() {
+  const mk = () => ({ innerHTML: '', textContent: '', toggled: {}, querySelector: () => null, toggleAttribute(name, on) { this.toggled[name] = on; } });
+  const nodes = {
+    '[data-setup-vd-mount]': mk(), '[data-setup-vd-rows]': mk(), '[data-setup-vd-massfill]': mk(), '[data-setup-vd-notes]': mk(),
+    '[data-setup-vd-dirty-count]': mk(), '[data-setup-vd-discard]': mk(), '[data-setup-vd-save]': mk(),
+  };
+  return { nodes, querySelector: sel => nodes[sel] ?? null };
+}
+const vdPermissions = { read: true, copy: true, export: true, definitionWrite: true, matrixWrite: true, stateWrite: true };
+
+test('the card renders at most 200 rows with an "N more" text node; mass-fill applies to EVERY matching value', () => {
+  const t = SetupAdmin._valueDefaultsForTest;
+  t.reset();
+  const target = vdFakeTarget();
+  const snapshot = { plant: 'P-VD', definition: VD_DEF, plant_rows: [], machine_rows: [], machine_states: [], overrides: [], value_defaults: [], plant_active: true };
+  t.attach(target, snapshot, vdPermissions);
+  t.setValues('P-VD', 4, 'prt01', { listed: [], observed: Array.from({ length: 450 }, (_, i) => `V${String(i).padStart(3, '0')}`) });
+  SetupAdmin.paintValueDefaultRows();
+  const html = target.nodes['[data-setup-vd-rows]'].innerHTML;
+  assert.equal((html.match(/data-setup-vd-row=/g) || []).length, t.rowCap);
+  assert.equal(t.rowCap, 200);
+  assert.ok(html.includes(Util.escapeHtml(Util.t('ui.setup_vd_more', { count: 250 }))), 'the 250 hidden rows are announced in a text node');
+  assert.match(html, /role="status"/);
+  assert.ok(target.nodes['[data-setup-vd-massfill]'].innerHTML.includes('data-setup-vd-massfill-input'), 'writers get the mass-fill strip');
+  assert.ok(target.nodes['[data-setup-vd-massfill]'].innerHTML.includes(Util.escapeHtml(Util.t('ui.setup_vd_massfill_label', { count: 450 }))), 'the label counts every match, not the rendered rows');
+  // filter then mass-fill: applies to all matching, rendered or not
+  t.setFilter('V4');
+  SetupAdmin.paintValueDefaultRows();
+  assert.equal(t.massFillMatching(20), 50, 'V400..V449 match: all 50 staged');
+  assert.equal(t.state().dirty.size, 50);
+  t.setFilter('');
+  assert.equal(t.massFillMatching(20), 450, 'unfiltered: every one of the 450');
+  assert.equal(t.state().dirty.size, 450);
+  SetupAdmin.paintValueDefaultRows();
+  assert.equal((target.nodes['[data-setup-vd-rows]'].innerHTML.match(/class="setup-vd-dirty"/g) || []).length, 200, 'rendered dirty rows are marked');
+  t.reset();
+});
+
+test('the card is disabled and explained for read-only users, never hidden', () => {
+  const t = SetupAdmin._valueDefaultsForTest;
+  t.reset();
+  const target = vdFakeTarget();
+  const snapshot = { plant: 'P-RO', definition: VD_DEF, plant_rows: [], machine_rows: [], machine_states: [], overrides: [], value_defaults: [{ field_key: 'prt01', value: 'A', setup_min: 10, signature_version: 4 }], plant_active: false };
+  t.attach(target, snapshot, { ...vdPermissions, matrixWrite: false });
+  t.setValues('P-RO', 4, 'prt01', { listed: [], observed: ['B'] });
+  SetupAdmin.paintValueDefaultRows();
+  const rows = target.nodes['[data-setup-vd-rows]'].innerHTML;
+  assert.ok(rows.includes('data-setup-vd-row="A"') && rows.includes('data-setup-vd-row="B"'));
+  assert.equal((rows.match(/ disabled>/g) || []).length, 2, 'every minutes input is disabled');
+  assert.equal(target.nodes['[data-setup-vd-massfill]'].innerHTML, '', 'no mass-fill for a reader');
+  const notes = target.nodes['[data-setup-vd-notes]'].innerHTML;
+  assert.ok(notes.includes(Util.escapeHtml(Util.t('ui.setup_vd_admin_only'))), 'the reason is shown');
+  assert.ok(notes.includes(Util.escapeHtml(Util.t('ui.setup_vd_inert_note'))), 'setup-off plants are told defaults are inert');
+  assert.equal(target.nodes['[data-setup-vd-save]'].toggled.disabled, true);
+  t.reset();
+});
+
+test('saveValueDefaults PUTs only dirty entries, then reloads the snapshot, drops the coverage cache and stales the preview', async () => {
+  const t = SetupAdmin._valueDefaultsForTest;
+  t.reset();
+  const plant = 'P-VD-SAVE';
+  const priors = { fetch: Util.fetchTraced, plant: Store.selectedPlant, snapshot: Store.setupSnapshot, load: Persistence.loadSetupSnapshot, inval: Persistence._invalidateSetupSnapshot, toast: Toast.show };
+  const calls = []; const kinds = []; const order = [];
+  Util.fetchTraced = (url, init) => { calls.push({ url: String(url), init }); return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ rows: [], meta: { total: 0 } }) }); };
+  Persistence.loadSetupSnapshot = async () => { order.push('load'); return null; };
+  Persistence._invalidateSetupSnapshot = () => { order.push('invalidate'); };
+  Persistence.setSetupWriteListener((p, k) => kinds.push([p, k]));
+  Toast.show = () => {};
+  try {
+    Store.setSelectedPlant(null, 'test');
+    const snapshot = { plant, definition: VD_DEF, plant_rows: [], machine_rows: [], machine_states: [], overrides: [], value_defaults: [{ field_key: 'prt01', value: 'A', setup_min: 10, signature_version: 4 }, { field_key: 'prt01', value: 'B', setup_min: 30, signature_version: 4 }] };
+    Store.replaceSetupSnapshot(snapshot, 'test');
+    const target = { innerHTML: '', querySelector: () => null };
+    t.attach(target, snapshot, vdPermissions);
+    t.setValues(plant, 4, 'prt01', { listed: [], observed: ['C'] });
+    t.stage('A', 10);          // equals stored: not dirty
+    t.stage('B', null);        // remove
+    t.stage('C', 60);          // new
+    await SetupAdmin.saveValueDefaults();
+    const put = calls.find(c => c.init?.method === 'PUT');
+    assert.ok(put, 'a PUT was sent');
+    assert.ok(put.url.endsWith(`/setup/${plant}/value-defaults`));
+    assert.deepEqual(JSON.parse(put.init.body), { signature_version: 4, field_key: 'prt01', entries: [{ value: 'B', setup_min: null }, { value: 'C', setup_min: 60 }] });
+    assert.deepEqual(kinds, [[plant, 'value-default']], 'an open optimizer preview is staled with the value-default kind');
+    assert.deepEqual(order.slice(0, 2), ['invalidate', 'load'], 'snapshot invalidated then reloaded');
+    assert.equal(t.state().dirty.size, 0, 'draft cleared after a successful save');
+    await new Promise(r => setTimeout(r, 20));
+    assert.ok(calls.some(c => c.url.includes(`/setup/${plant}/coverage`)), 'coverage was invalidated and re-fetched (tiles refresh)');
+    // nothing dirty: no request at all
+    const before = calls.length;
+    await SetupAdmin.saveValueDefaults();
+    assert.equal(calls.length, before);
+  } finally {
+    Util.fetchTraced = priors.fetch; Persistence.loadSetupSnapshot = priors.load; Persistence._invalidateSetupSnapshot = priors.inval; Toast.show = priors.toast;
+    Persistence.setSetupWriteListener(null);
+    Store.setSelectedPlant(priors.plant, 'test-restore'); Store.replaceSetupSnapshot(priors.snapshot, 'test-restore');
+    t.reset();
+  }
+});
+
+test('saveValueDefaults refuses without a definition, without matrixWrite, and keeps dirty entries on a 409', async () => {
+  const t = SetupAdmin._valueDefaultsForTest;
+  t.reset();
+  const priors = { fetch: Util.fetchTraced, load: Persistence.loadSetupSnapshot, inval: Persistence._invalidateSetupSnapshot, toast: Toast.show, plant: Store.selectedPlant, snapshot: Store.setupSnapshot };
+  const calls = [];
+  let status = 200;
+  Util.fetchTraced = (url, init) => { calls.push({ url: String(url), init }); return Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(status === 409 ? { detail: 'signature_version is stale' } : { rows: [], meta: { total: 0 } }) }); };
+  Persistence.loadSetupSnapshot = async () => null; Persistence._invalidateSetupSnapshot = () => {}; Toast.show = () => {};
+  try {
+    Store.setSelectedPlant(null, 'test');
+    const target = { innerHTML: '', querySelector: () => null };
+    const empty = { plant: 'P-NODEF', definition: null, plant_rows: [], machine_rows: [], machine_states: [], overrides: [], value_defaults: [] };
+    t.attach(target, empty, vdPermissions);
+    await SetupAdmin.saveValueDefaults();
+    assert.equal(calls.length, 0, 'no definition: no PUT attempted');
+    t.reset();
+    const snap = { ...empty, plant: 'P-RO2', definition: VD_DEF };
+    t.attach(target, snap, { ...vdPermissions, matrixWrite: false });
+    t.stage('C', 60);
+    await SetupAdmin.saveValueDefaults();
+    assert.equal(calls.length, 0, 'read-only: no PUT attempted');
+    t.reset();
+    Store.replaceSetupSnapshot({ ...snap, plant: 'P-409' }, 'test');
+    t.attach(target, { ...snap, plant: 'P-409' }, vdPermissions);
+    t.stage('C', 60);
+    status = 409;
+    await SetupAdmin.saveValueDefaults();
+    assert.ok(calls.some(c => c.init?.method === 'PUT'));
+    assert.equal(t.state().dirty.size, 1, '409 keeps the unsaved entries');
+  } finally {
+    Util.fetchTraced = priors.fetch; Persistence.loadSetupSnapshot = priors.load; Persistence._invalidateSetupSnapshot = priors.inval; Toast.show = priors.toast;
+    Store.setSelectedPlant(priors.plant, 'test-restore'); Store.replaceSetupSnapshot(priors.snapshot, 'test-restore');
+    t.reset();
+  }
+});
+
+test('the card repaints after every render() and on master-data-changed, and typing never calls renderSnapshot (source contract)', () => {
+  // renderSnapshot rebuilds target.innerHTML, so the card mount is re-created every time. There is no HTML-parsing DOM
+  // in this suite, so pin the wiring: paint follows wire() inside renderSnapshot, the subscriber repaints it, and the
+  // card's own handlers never call renderSnapshot/render (focus loss).
+  const source = readFileSync(new URL('../../../frontend/setup/setup-admin.mts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(source, /wire\(target, snapshot, permissions, rows, definition\);\n\s*\/\/[^\n]*\n\s*_vdCtx = \{ target, snapshot, definition, permissions \};\n\s*paintValueDefaults\(\);/);
+  assert.match(source, /if \(evt\.type !== 'master-data-changed'\) return;[\s\S]*?paintValueDefaults\(\);\n  \}, 'SetupAdmin\.cacheReset'\);/);
+  const start = source.indexOf('function wireValueDefaults(');
+  const end = source.indexOf('async function saveValueDefaults(');
+  const handlers = source.slice(start, end);
+  assert.doesNotMatch(handlers, /renderSnapshot\(|[^a-zA-Z]render\(/, 'typing / filtering / mass-fill never rebuild the whole panel');
+  assert.doesNotMatch(source.slice(source.indexOf('// ── "Default changeover by value" card'), end), /\bon(click|change|input|keydown)=/, 'no inline on*= attributes');
+});

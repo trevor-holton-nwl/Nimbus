@@ -134,7 +134,7 @@ interface LoadStats {
   errors: number;
 }
 
-type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override';
+type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override' | 'value-default';
 let _setupWriteListener: ((plant: string, kind: SetupWriteKind) => void) | null = null;
 
 /* =============================================================================

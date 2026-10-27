@@ -7140,6 +7140,7 @@ button.setup-coverage-tile { cursor: pointer; }
 .setup-list-minutes-input { height: 26px; width: 76px; text-align: right; font-family: var(--font-mono); }
 .setup-list-source-override { color: var(--accent); font-weight: 600; }
 .setup-list-source-gap { color: var(--warn); }
+.setup-list-source-default { color: var(--ok); }
 .setup-list-source-inherited { color: var(--fg-mute); }
 .setup-list-new-row td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
 .setup-list-new-row input { height: 26px; }
@@ -7177,6 +7178,8 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 .setup-grid-uncovered { color: var(--fg-faint); font-size: 13px; }
 .setup-grid-implicit-zero { color: var(--fg-faint); font-style: italic; }
 .setup-grid-line-override { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+/* Covered by a default by value (no row): muted italic number on a faint "covered" wash. Typing records a real row. */
+.setup-grid-value-default { color: var(--fg-mute); font-style: italic; background: color-mix(in srgb, var(--ok-soft) 60%, transparent); }
 /* Dirty marker reuses the Master Data grid's inset-accent idiom (.md-cell-dirty, styles.css:4515). */
 .setup-grid-dirty { box-shadow: inset 3px 0 0 var(--accent-hot); }
 .setup-grid-selected { background: color-mix(in srgb, var(--accent) 16%, transparent); outline: 1px solid var(--accent); outline-offset: -1px; }
@@ -7186,6 +7189,31 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 /* Single floating editor shared across every grid cell (§7/§9-C.3) — replaces
    one live <input> per cell; repositioned over whichever cell is focused. */
 .setup-grid-editor-input { position: fixed; z-index: 30; border: 0; outline: 2px solid var(--accent); outline-offset: -2px; background: var(--bg-elev); text-align: right; font-family: var(--font-mono); font-size: 12px; padding: 0 8px; color: var(--fg); }
+
+/* "Default changeover by value" card: a value list (one field), a mass-fill strip and its own Save bar.
+   Wraps at phone width; the minutes column keeps a fixed-width input so long de/fr badge text never squeezes it. */
+.setup-vd-body { display: flex; flex-direction: column; gap: 12px; }
+.setup-vd-controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: flex-end; }
+.setup-vd-control { display: flex; flex-direction: column; gap: 4px; min-width: min(100%, 200px); flex: 1 1 200px; max-width: 320px; }
+.setup-vd-control .input { height: 30px; }
+.setup-vd-notes { display: flex; flex-direction: column; gap: 4px; }
+.setup-vd-notes:empty { display: none; }
+.setup-vd-note { margin: 0; font-size: 11.5px; color: var(--fg-mute); }
+.setup-vd-note.warn { color: var(--warn); }
+.setup-vd-massfill { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+.setup-vd-massfill:empty { display: none; }
+.setup-vd-minutes { height: 26px; width: 84px; text-align: right; font-family: var(--font-mono); }
+.setup-vd-table th:first-child, .setup-vd-table td:first-child { width: 40%; overflow-wrap: anywhere; }
+.setup-vd-table td { vertical-align: middle; }
+.setup-vd-dirty td:first-child { box-shadow: inset 3px 0 0 var(--accent-hot); }
+.setup-vd-badge { display: inline-block; padding: 1px 7px; border: 1px solid var(--line); border-radius: var(--r-sm); font-size: 11px; color: var(--fg-mute); }
+.setup-vd-badge-listed { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
+.setup-vd-badge-stored { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
+.setup-vd-more { margin: 8px 0 0; font-size: 11.5px; color: var(--fg-mute); }
+@media (max-width: 560px) {
+  .setup-vd-control { max-width: none; }
+  .setup-vd-table th:nth-child(2), .setup-vd-table td:nth-child(2) { display: none; }
+}
 
 .setup-mass-upload-modal, .setup-history-modal { width: 100%; max-width: 720px; }
 .setup-history-modal .modal-body { container-type: inline-size; }

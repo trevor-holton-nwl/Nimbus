@@ -9,7 +9,9 @@ import { Config, Util, ErrorLog, Toast, Modal, PerfMonitor } from '../platform/f
 import { Store } from '../platform/store.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
-import type { SetupDefinition, SetupMatrixRow, SetupSnapshot, LineSetupState, SetupStateKey, PriorityRankMaps } from '../platform/types.mjs';
+import type { SetupDefinition, SetupMatrixRow, SetupSnapshot, LineSetupState, SetupStateKey, PriorityRankMaps, SetupValueDefault } from '../platform/types.mjs';
+import { buildSetupResolutionIndex, normalizedValue, resolveSetup } from './setup-domain.mjs';
+import type { SetupResolutionIndex } from './setup-domain.mjs';
 // `Plant.gotoTab` is called from `reviewMissingPairs` below (the missing-setup
 // review handoff navigates to Master Data > Plant > Settings). This creates a
 // two-way module dependency with master-data/admin-ui.mjs (which itself calls
@@ -127,7 +129,7 @@ function _mkCombobox(containerEl: HTMLElement | null, options: string[], { value
 type SetupPermissions = { read: boolean; copy: boolean; export: boolean; definitionWrite: boolean; matrixWrite: boolean; stateWrite: boolean };
 type EffectiveSetupRow = SetupMatrixRow & { inherited: boolean; inheritedFromPlant: boolean };
 type MissingSetupReviewPair = { line: string; predecessorOrderId?: string | null; successorOrderId?: string | null; fromState?: string | null; toState?: string | null; reason: string; remedy?: string };
-type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override';
+type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override' | 'value-default';
 type SetupReviewNavigation = { selectPlant: boolean; openMasterData: boolean; masterSub: 'plant'; plantTab: 'settings'; renderAfterNavigation: boolean };
 
 /** One cell of the from-state x to-state grid's header axis. `sig` is an
@@ -154,7 +156,7 @@ export const SetupAdmin = (() => {
   let _registeredFields = FALLBACK_REGISTERED_FIELDS.slice();
   let _linesByPlant: Record<string, string[]> = {};
   let _compatibilityByLine: Record<string, { setup_compatible: boolean; setup_compatibility_reason: string | null }> = {};
-  let _coverageByPlant: Record<string, { observed?: { total_pairs: number; missing_pairs: number }; reachable?: { total_pairs: number; missing_pairs: number } }> = {};
+  let _coverageByPlant: Record<string, { observed?: SetupCoverageBucket; reachable?: SetupCoverageBucket }> = {};
   let _lineScope = '';
   let _missingReview: { plant: string; pairs: MissingSetupReviewPair[] } | null = null;
   // N6b: the missing-setup review chip's per-reason filter — 'all' shows
@@ -221,6 +223,23 @@ export const SetupAdmin = (() => {
   type GridWireCtx = { snapshot: SetupSnapshot; definition: SetupDefinition | null; rows: EffectiveSetupRow[]; permissions: SetupPermissions };
   let _gridEditorCtx: { target: HTMLElement; snapshot: SetupSnapshot; definition: SetupDefinition | null; rows: EffectiveSetupRow[]; permissions: SetupPermissions } | null = null;
 
+  // "Default changeover by value" card (own panel, own mount, own Save bar). Module-level like the grid
+  // state: `render()` rebuilds `target.innerHTML`, so the card repaints from this state after every render
+  // (`paintValueDefaults`), and typing never calls `renderSnapshot` (it would drop focus).
+  let _vdField = '';
+  let _vdFilter = '';
+  /** value (canonical) -> minutes to set, or null = remove the stored default. Dirty entries only. */
+  let _vdDirty: Map<string, number | null> = new Map();
+  let _vdPlant = '';
+  let _vdVersion: number | null = null;
+  /** `${plant}\0${version}\0${field}` -> the values endpoint's answer; dropped on `invalidatePlant`. */
+  let _vdValues: Record<string, { listed: string[]; observed: string[] }> = {};
+  let _vdValuesFailed: Set<string> = new Set();
+  let _vdValuesLoading: Set<string> = new Set();
+  let _vdCtx: { target: HTMLElement; snapshot: SetupSnapshot; definition: SetupDefinition | null; permissions: SetupPermissions } | null = null;
+  let _vdSaving = false;
+  const VD_ROW_CAP = 200;
+
   const keyText = (key: SetupStateKey): string => key.map(part => `${part.fieldKey}=${part.value}`).join(' | ');
   const keyId = (row: Pick<SetupMatrixRow, 'from_key' | 'to_key'>): string => `${JSON.stringify(row.from_key)}→${JSON.stringify(row.to_key)}`;
   const headers = (): HeadersInit => ({ 'content-type': 'application/json', 'x-user-email': Session.actor() });
@@ -271,7 +290,7 @@ export const SetupAdmin = (() => {
   function activationStatus(definition: SetupDefinition | null, checks: { matrixVersion?: number | null; coveragePass?: boolean }, plantActive: boolean = false): { active: boolean; reason: string } {
     if (!definition) return { active: false, reason: setupText('ui.setup_status_no_definition', 'Create an ordered setup signature before setup-aware optimization can be reviewed.') };
     if (checks.matrixVersion !== definition.signature_version) {
-      return { active: false, reason: setupText('ui.setup_status_version_mismatch', 'Activation is disabled: a version-matched matrix is required after a definition change.') };
+      return { active: false, reason: setupText('ui.setup_status_version_mismatch', 'Activation is disabled: a version-matched matrix or default by value is required after a definition change.') };
     }
     if (checks.coveragePass === undefined) return { active: false, reason: setupText('ui.setup_status_coverage_pending', 'Activation is pending: coverage has not been measured yet (Stage 0 observation-only).') };
     if (!checks.coveragePass) return { active: false, reason: setupText('ui.setup_status_coverage_fail', 'Activation is disabled: the reachable coverage pass is required.') };
@@ -424,13 +443,30 @@ export const SetupAdmin = (() => {
    *  line override, and a plant-default value into the same look. `lineScope`
    *  is threaded explicitly (not read from module state) so this stays a pure,
    *  directly-testable function like its sibling `fieldValueSet`. */
-  type SetupGridCellState = 'dirty' | 'uncovered' | 'diagonal-explicit' | 'implicit-zero' | 'line-override' | 'plant-default';
-  function gridCellState(row: SetupGridState, col: SetupGridState, existing: EffectiveSetupRow | undefined, dirty: SetupGridEdit | undefined, lineScope: string): SetupGridCellState {
+  type SetupGridCellState = 'dirty' | 'uncovered' | 'diagonal-explicit' | 'implicit-zero' | 'line-override' | 'plant-default' | 'value-default';
+  /** `defaultMin` is the summed value default that covers this pair (null = none). It only matters for a
+   *  pair with no row and no pending edit: every exact row (line override, plant row) and the identical-state
+   *  zero outrank a default, mirroring `resolveSetup`'s precedence, so a line override stays `line-override`
+   *  and a plant row shown at line scope stays `plant-default`. */
+  function gridCellState(row: SetupGridState, col: SetupGridState, existing: EffectiveSetupRow | undefined, dirty: SetupGridEdit | undefined, lineScope: string, defaultMin: number | null = null): SetupGridCellState {
     if (dirty) return 'dirty';
     const diagonal = row.sig === col.sig;
-    if (!existing) return diagonal ? 'implicit-zero' : 'uncovered';
+    if (!existing) return diagonal ? 'implicit-zero' : (defaultMin !== null ? 'value-default' : 'uncovered');
     if (diagonal) return 'diagonal-explicit';
     return lineScope && !existing.inherited ? 'line-override' : 'plant-default';
+  }
+
+  /** What a value default would charge for one pair, resolved through the real resolver with NO rows and NO
+   *  overrides (so only the default tier can answer). Pass a `SetupResolutionIndex` built once per paint
+   *  (`defaultIndexFor`) so a 60x60 grid does not rebuild the per-field map per cell. Null when no default covers it. */
+  function valueDefaultFor(definition: SetupDefinition, from: SetupStateKey, to: SetupStateKey, valueDefaults: ReadonlyArray<SetupValueDefault> | undefined, index?: SetupResolutionIndex): { min: number; reason: string } | null {
+    if (!valueDefaults || !valueDefaults.length) return null;
+    const resolved = resolveSetup({ definition, machine: '', predecessorState: from, successorState: to, successorOrderId: '', plantRows: [], machineRows: [], overrides: [], valueDefaults, ...(index ? { index } : {}) });
+    return resolved.source === 'value-default' ? { min: resolved.requiredMin ?? 0, reason: resolved.reason } : null;
+  }
+  function defaultIndexFor(definition: SetupDefinition, valueDefaults: ReadonlyArray<SetupValueDefault> | undefined): SetupResolutionIndex | undefined {
+    if (!valueDefaults || !valueDefaults.length) return undefined;
+    return buildSetupResolutionIndex({ definition, machineRows: [], plantRows: [], overrides: [], valueDefaults });
   }
 
   /** Bounds the rendered universe per axis (docs/archive/Setup_matrix_redesign.md §6
@@ -453,6 +489,107 @@ export const SetupAdmin = (() => {
     const num = Math.round(Number(trimmed));
     if (!Number.isFinite(num) || num < 0 || num > 10080) return 'invalid';
     return num;
+  }
+
+  // ── Default changeover by value: pure helpers (exported for tests) ────────────
+  // A default is keyed by (signature field, canonical value). Every key runs through the client rule
+  // (`normalizedValue`) before it is displayed, compared, staged or sent, so "Red", "RED" and " red " are one
+  // row and a boolean "true" keeps its lowercase form (the server mirrors that rule).
+  type ValueDefaultBadge = 'listed' | 'observed' | 'stored';
+  type ValueDefaultRow = { value: string; badge: ValueDefaultBadge; stored: number | null };
+  const VD_MAX_ENTRIES = 2000; // the PUT route's cap per request
+
+  /** Stored defaults of ONE field for the current signature version: canonical value -> minutes. */
+  function valueDefaultStoredMap(valueDefaults: ReadonlyArray<SetupValueDefault> | undefined, version: number | null | undefined, fieldKey: string): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const entry of valueDefaults ?? []) {
+      if (!entry || entry.signature_version !== version || entry.field_key !== fieldKey) continue;
+      const value = normalizedValue(entry.value);
+      if (value && !out.has(value)) out.set(value, entry.setup_min);
+    }
+    return out;
+  }
+
+  /** Union of priority-list values, observed order values and stored defaults, deduped on the canonical value.
+   *  Badge precedence: listed, then observed-only, then stored-only (a stored default whose value is in no
+   *  list and on no order, i.e. possibly stale). Natural sort so "T2" precedes "T10". */
+  function buildValueDefaultRows({ listed, observed, stored, pending = [] }: { listed: Iterable<string>; observed: Iterable<string>; stored: ReadonlyMap<string, number>; pending?: Iterable<string> }): ValueDefaultRow[] {
+    const badges = new Map<string, ValueDefaultBadge>();
+    const add = (raw: string, badge: ValueDefaultBadge): void => { const value = normalizedValue(raw); if (value && !badges.has(value)) badges.set(value, badge); };
+    for (const raw of listed) add(raw, 'listed');
+    for (const raw of observed) add(raw, 'observed');
+    for (const raw of stored.keys()) add(raw, 'stored');
+    // A value with an unsaved default that no list/order/stored row offers any more (the lists changed under
+    // the draft) stays visible so the pending entry is never invisible.
+    for (const raw of pending) add(raw, 'stored');
+    return [...badges.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+      .map(([value, badge]) => ({ value, badge, stored: stored.get(value) ?? null }));
+  }
+
+  function filterValueDefaultRows(rows: ReadonlyArray<ValueDefaultRow>, query: string): ValueDefaultRow[] {
+    const q = query.trim().toLowerCase();
+    return q ? rows.filter(row => row.value.toLowerCase().includes(q)) : rows.slice();
+  }
+
+  /** Stages one value's minutes against the stored default: equal to stored (or blank with nothing stored) is
+   *  "no change" and drops the dirty entry; blank with a stored default stages a removal (null). */
+  function stageValueDefault(dirty: Map<string, number | null>, stored: ReadonlyMap<string, number>, rawValue: string, minutes: number | null): void {
+    const value = normalizedValue(rawValue);
+    if (!value) return;
+    if (minutes === (stored.get(value) ?? null)) dirty.delete(value);
+    else dirty.set(value, minutes);
+  }
+
+  /** "Set all N matching to x": applies to EVERY matching value, not just the rendered (capped) rows. */
+  function massFillValueDefaults(dirty: Map<string, number | null>, stored: ReadonlyMap<string, number>, values: ReadonlyArray<string>, minutes: number | null): number {
+    values.forEach(value => stageValueDefault(dirty, stored, value, minutes));
+    return values.length;
+  }
+
+  /** The request body entries: only dirty values. `setup_min: null` deletes. */
+  function valueDefaultEntries(dirty: ReadonlyMap<string, number | null>): Array<{ value: string; setup_min: number | null }> {
+    return [...dirty.entries()].map(([value, setup_min]) => ({ value, setup_min }));
+  }
+
+  /** Splits entries into request-sized chunks (the route caps one request at 2,000 entries). */
+  function chunkValueDefaultEntries<T>(entries: ReadonlyArray<T>, size: number = VD_MAX_ENTRIES): T[][] {
+    const chunks: T[][] = [];
+    for (let i = 0; i < entries.length; i += size) chunks.push(entries.slice(i, i + size));
+    return chunks;
+  }
+
+  /** Worst-case sum if a transition changed EVERY signature field at once: the largest default per field
+   *  (stored, with this field's pending edits applied) added up. Sums are not capped anywhere, so the card
+   *  warns when this exceeds one week (10,080), the cap on a single default. */
+  function valueDefaultWorstCase(valueDefaults: ReadonlyArray<SetupValueDefault> | undefined, version: number | null | undefined, fields: ReadonlyArray<string>, activeField: string, dirty: ReadonlyMap<string, number | null>): number {
+    let total = 0;
+    for (const field of fields) {
+      const stored = valueDefaultStoredMap(valueDefaults, version, field);
+      if (field === activeField) dirty.forEach((minutes, value) => { if (minutes === null) stored.delete(value); else stored.set(value, minutes); });
+      total += stored.size ? Math.max(...stored.values()) : 0;
+    }
+    return total;
+  }
+
+  /** `matrixVersion` for the activation check: a plant is "matrix-backed" for the current signature version
+   *  when it has rows OR at least one value default saved for that version. Without the second clause a
+   *  defaults-only plant (zero rows) would fail the version check before the coverage check is even read. */
+  function matrixVersionFor({ rowCount, valueDefaults, version }: { rowCount: number; valueDefaults: ReadonlyArray<SetupValueDefault> | undefined; version: number | null }): number | null {
+    if (version === null) return null;
+    if (rowCount > 0) return version;
+    return (valueDefaults ?? []).some(entry => entry && entry.signature_version === version) ? version : null;
+  }
+
+  type SetupCoverageBucket = { total_pairs: number; missing_pairs: number; covered_pairs?: number; default_covered_pairs?: number };
+  /** Coverage tile numbers: Recorded (rows + diagonal) / By default / Gaps. "Recorded" comes from the
+   *  server's `covered_pairs`; it is only derived (total - gaps - by default) for an older response without it. */
+  function coverageSummary(bucket: SetupCoverageBucket | undefined | null): { total: number; recorded: number; byDefault: number; gaps: number; covered: number } {
+    const total = bucket?.total_pairs ?? 0;
+    const gaps = bucket?.missing_pairs ?? 0;
+    const byDefault = bucket?.default_covered_pairs ?? 0;
+    const recorded = bucket?.covered_pairs ?? Math.max(0, total - gaps - byDefault);
+    return { total, recorded, byDefault, gaps, covered: recorded + byDefault };
   }
 
   /** Splits pending grid edits into the request bodies the EXISTING endpoints
@@ -527,6 +664,7 @@ export const SetupAdmin = (() => {
   function setupWriteKind(url: string): SetupWriteKind {
     if (/\/active(?:$|\?)/.test(url)) return 'definition';
     if (/\/definition(?:$|\?)/.test(url)) return 'definition';
+    if (/\/value-defaults(?:\/|$|\?)/.test(url)) return 'value-default';
     if (/\/matrix(?:\/|$)/.test(url)) return 'matrix';
     if (/\/state(?:$|\?)/.test(url)) return 'state';
     return 'override';
@@ -965,6 +1103,9 @@ export const SetupAdmin = (() => {
   function invalidatePlant(plant: string): void {
     delete _linesByPlant[plant];
     delete _coverageByPlant[plant];
+    // The values endpoint's answer (observed order values) goes stale with the plant's orders and lists too.
+    for (const key of Object.keys(_vdValues)) if (key.startsWith(`${plant}\u0000`)) delete _vdValues[key];
+    _vdValuesFailed = new Set([..._vdValuesFailed].filter(key => !key.startsWith(`${plant}\u0000`)));
     const prefix = `${plant}\u0000`;
     for (const key of Object.keys(_compatibilityByLine)) {
       if (key.startsWith(prefix)) delete _compatibilityByLine[key];
@@ -979,6 +1120,9 @@ export const SetupAdmin = (() => {
     if (evt.type !== 'master-data-changed') return;
     const plant = Store.selectedPlant;
     if (plant) invalidatePlant(plant);
+    // Priority-list edits change the "listed" values the value-defaults card offers; if the card is on screen
+    // repaint just it (never renderSnapshot: that would drop unsaved grid edits). Dirty entries are kept.
+    if (plant && _vdCtx?.snapshot.plant === plant && _vdCtx.target.querySelector?.('[data-setup-vd-mount]')) paintValueDefaults();
   }, 'SetupAdmin.cacheReset');
 
   function renderSnapshot(target: HTMLElement, snapshot: SetupSnapshot): void {
@@ -1005,7 +1149,8 @@ export const SetupAdmin = (() => {
     if (_lineScope && !lines.includes(_lineScope)) _lineScope = '';
     const rows = version === null ? [] : effectiveRows({ plantRows: snapshot.plant_rows, machineRows: snapshot.machine_rows, machine: _lineScope, version });
     const definitionFields = definition?.fields?.length ? definition.fields : [_registeredFields[0]].filter(Boolean);
-    const matrixVersion = rows.length ? version : null;
+    // A defaults-only plant has zero rows; its saved value defaults for the current version count too.
+    const matrixVersion = matrixVersionFor({ rowCount: rows.length, valueDefaults: snapshot.value_defaults, version });
     const coverage = _coverageByPlant[snapshot.plant];
     const coveragePass = coverage ? coverage.reachable?.missing_pairs === 0 : undefined;
     const status = activationStatus(definition, { matrixVersion, coveragePass }, snapshot.plant_active);
@@ -1023,10 +1168,12 @@ export const SetupAdmin = (() => {
       ['row', Util.t('ui.setup_review_filter_row')],
     ] as const;
     const missingChipHtml = review ? `<span class="setup-review-chip">${Util.escapeHtml(Util.t('ui.setup_review_chip', { count: review.pairs.length }))}<select data-setup-review-filter aria-label="${Util.escapeHtml(Util.t('ui.setup_review_missing_title'))}">${missingReviewFilterOptions.map(([value, label]) => `<option value="${value}"${_missingReviewFilter === value ? ' selected' : ''}>${Util.escapeHtml(label)}</option>`).join('')}</select><button type="button" class="setup-review-chip-clear" data-setup-review-clear aria-label="${Util.escapeHtml(Util.t('btn.setup_review_clear'))}">&times;</button></span>` : '';
-    const totalPairs = coverage?.reachable?.total_pairs ?? 0;
-    const missingPairs = coverage?.reachable?.missing_pairs ?? 0;
+    // Recorded / By default / Gaps come straight from the server's counts (rows + diagonal, default-covered,
+    // truly uncovered); "recorded" is no longer derived as total - gaps now that defaults also cover pairs.
+    const cov = coverageSummary(coverage?.reachable);
+    const missingPairs = cov.gaps;
     const coverageInlineHtml = coverage
-      ? `<button type="button" class="setup-coverage-inline${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter>${Util.escapeHtml(Util.t('ui.setup_coverage_inline', { covered: Math.max(0, totalPairs - missingPairs), total: totalPairs }))} · ${Util.escapeHtml(Util.t('ui.setup_kpi_missing_count', { missing: missingPairs }))} &#9656;</button>`
+      ? `<button type="button" class="setup-coverage-inline${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter>${Util.escapeHtml(Util.t('ui.setup_coverage_inline', { covered: cov.covered, total: cov.total }))} · ${Util.escapeHtml(Util.t('ui.setup_kpi_missing_count', { missing: missingPairs }))} &#9656;</button>`
       : '';
     const signatureChipHtml = definitionFields.length
       ? definitionFields.map(field => Util.escapeHtml(fieldLabel(field))).join(' &rsaquo; ')
@@ -1039,7 +1186,8 @@ export const SetupAdmin = (() => {
       : '';
     const coverageTilesHtml = coverage
       ? `<div class="setup-coverage-tiles">
-          <div class="setup-coverage-tile"><span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_coverage_recorded'))}</span><span class="setup-coverage-tile-num">${totalPairs - missingPairs}</span></div>
+          <div class="setup-coverage-tile"><span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_coverage_recorded'))}</span><span class="setup-coverage-tile-num">${cov.recorded}</span></div>
+          <div class="setup-coverage-tile" title="${Util.escapeHtml(Util.t('ui.setup_vd_plant_wide_note'))}"><span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_coverage_by_default'))}</span><span class="setup-coverage-tile-num" data-setup-coverage-by-default>${cov.byDefault}</span></div>
           <button type="button" class="setup-coverage-tile${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter><span class="mono-eyebrow">${Util.escapeHtml(Util.t('ui.setup_coverage_gaps'))}</span><span class="setup-coverage-tile-num">${missingPairs}</span></button>
         </div>`
       : '';
@@ -1095,6 +1243,14 @@ export const SetupAdmin = (() => {
           </div>
         </div>
 
+        <div class="panel setup-panel setup-vd-panel" role="region" aria-labelledby="setup-vd-title">
+          <div class="panel-head">
+            <span class="mono-eyebrow" id="setup-vd-title">${Util.escapeHtml(Util.t('ui.setup_vd_title'))}</span>
+            <p class="panel-hint">${Util.escapeHtml(Util.t('ui.setup_vd_intro'))}</p>
+          </div>
+          <div data-setup-vd-mount></div>
+        </div>
+
         <div class="panel setup-panel">
           <div class="panel-head">
             <div class="setup-view-toolbar">
@@ -1142,8 +1298,290 @@ export const SetupAdmin = (() => {
       else renderSnapshot(target, snapshot);
     } });
     wire(target, snapshot, permissions, rows, definition);
+    // The card's mount was just re-created by the innerHTML above; repaint it from the module-level draft state.
+    _vdCtx = { target, snapshot, definition, permissions };
+    paintValueDefaults();
     if (_setupView === 'matrix') paintGrid(target, snapshot, definition, rows, permissions);
     else renderListView(target, snapshot, definition, permissions);
+  }
+
+  // ── "Default changeover by value" card ───────────────────────────────────────
+  // Third panel, between the definition panel and the matrix panel. It never fetches or renders anything
+  // O(states^2): its rows are the VALUES of one signature field (hundreds at most), 200 rendered at a time.
+  const vdValuesKey = (plant: string, version: number, field: string): string => `${plant}\u0000${version}\u0000${field}`;
+  const _vdWired = new WeakSet<HTMLElement>();
+
+  async function loadValueDefaultValues(plant: string, version: number, field: string): Promise<void> {
+    const key = vdValuesKey(plant, version, field);
+    if (_vdValues[key] || _vdValuesLoading.has(key)) return;
+    _vdValuesLoading.add(key);
+    try {
+      const response = await Util.fetchTraced(`${API}/setup/${encodeURIComponent(plant)}/value-defaults/values?field_key=${encodeURIComponent(field)}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json() as { listed?: string[]; observed?: string[] };
+      _vdValues[key] = { listed: data.listed ?? [], observed: data.observed ?? [] };
+      _vdValuesFailed.delete(key);
+    } catch (error) {
+      _vdValuesFailed.add(key);
+      ErrorLog.warn('setup-admin', `Value-default values unavailable: ${(error as Error).message}`);
+    } finally { _vdValuesLoading.delete(key); }
+  }
+
+  /** Resets the card's draft state on a plant, signature-version or field change. A signature bump with unsaved
+   *  entries is never dropped silently: it asks (keep them for the new version, or discard), and entries for a
+   *  field the new signature no longer has are discarded with a warning. */
+  function syncValueDefaultState(snapshot: SetupSnapshot, definition: SetupDefinition | null): void {
+    const plant = snapshot.plant;
+    const version = definition?.signature_version ?? null;
+    if (plant !== _vdPlant) {
+      _vdPlant = plant; _vdVersion = version; _vdField = ''; _vdFilter = ''; _vdDirty = new Map();
+    } else if (version !== _vdVersion) {
+      _vdVersion = version;
+      if (_vdDirty.size) {
+        const count = _vdDirty.size;
+        if (!(_vdField && definition?.fields.includes(_vdField))) {
+          _vdDirty = new Map();
+          Toast.show(Util.t('ui.setup_vd_dropped_field', { count }), 'warn');
+        } else {
+          void Modal.confirm({ title: Util.t('ui.setup_vd_keep_title'), message: Util.t('ui.setup_vd_keep_msg', { count }), confirmLabel: Util.t('btn.setup_vd_keep'), tone: 'warn' })
+            .then(keep => { if (!keep && _vdVersion === version) { _vdDirty = new Map(); paintValueDefaults(); } });
+        }
+      }
+    }
+    if (!definition) _vdField = '';
+    else if (!definition.fields.includes(_vdField)) _vdField = definition.fields[0] ?? '';
+  }
+
+  function paintValueDefaults(): void {
+    const ctx = _vdCtx; if (!ctx) return;
+    const mount = ctx.target.querySelector<HTMLElement>('[data-setup-vd-mount]'); if (!mount) return;
+    const { snapshot, definition } = ctx;
+    syncValueDefaultState(snapshot, definition);
+    if (!definition || !definition.fields?.length) {
+      mount.innerHTML = `<div class="panel-body">${emptyState(Util.t('ui.setup_vd_no_definition'))}</div>`;
+      return;
+    }
+    // Re-apply the filter's focus and caret after the rebuild (a repaint triggered by master-data-changed).
+    const active = document.activeElement as HTMLInputElement | null;
+    const refocus = !!active && mount.contains(active) && active.hasAttribute('data-setup-vd-filter');
+    const caret = refocus ? active!.selectionStart : null;
+    mount.innerHTML = `
+      <div class="panel-body setup-vd-body">
+        <div class="setup-vd-controls">
+          <div class="setup-vd-control">
+            <label class="mono-eyebrow" for="setup-vd-field">${Util.escapeHtml(Util.t('ui.setup_vd_field_label'))}</label>
+            <select id="setup-vd-field" class="input" data-setup-vd-field>${definition.fields.map(field => `<option value="${Util.escapeHtml(field)}"${field === _vdField ? ' selected' : ''}>${Util.escapeHtml(fieldLabel(field))}</option>`).join('')}</select>
+          </div>
+          <div class="setup-vd-control">
+            <label class="mono-eyebrow" for="setup-vd-filter">${Util.escapeHtml(Util.t('ui.setup_vd_filter_label'))}</label>
+            <input type="search" id="setup-vd-filter" class="input" data-setup-vd-filter autocomplete="off" placeholder="${Util.escapeHtml(Util.t('ph.setup_vd_filter'))}" value="${Util.escapeHtml(_vdFilter)}">
+          </div>
+        </div>
+        <div class="setup-vd-notes" data-setup-vd-notes></div>
+        <div class="setup-vd-massfill" data-setup-vd-massfill></div>
+        <div data-setup-vd-rows></div>
+      </div>
+      <div class="setup-action-bar">
+        <span data-setup-vd-dirty-count aria-live="polite"></span>
+        <div class="setup-action-buttons">
+          <button type="button" class="btn btn-ghost sm" data-setup-vd-discard>${Util.escapeHtml(Util.t('btn.discard'))}</button>
+          <button type="button" class="btn btn-primary sm" data-setup-vd-save>${Util.escapeHtml(Util.t('btn.save'))}</button>
+        </div>
+      </div>`;
+    wireValueDefaults(mount);
+    paintValueDefaultRows();
+    if (refocus) {
+      const filter = mount.querySelector<HTMLInputElement>('[data-setup-vd-filter]');
+      filter?.focus();
+      if (filter && caret !== null) { try { filter.setSelectionRange(caret, caret); } catch { /* search inputs may refuse */ } }
+    }
+  }
+
+  /** The rows the card currently shows (before the 200-row cap), so paint, mass-fill and tests agree. */
+  function currentValueDefaultRows(): { all: ValueDefaultRow[]; matching: ValueDefaultRow[]; stored: Map<string, number>; fetchState: 'ready' | 'loading' | 'failed' } {
+    const ctx = _vdCtx;
+    const definition = ctx?.definition;
+    if (!ctx || !definition || !_vdField) return { all: [], matching: [], stored: new Map(), fetchState: 'ready' };
+    const stored = valueDefaultStoredMap(ctx.snapshot.value_defaults, definition.signature_version, _vdField);
+    const key = vdValuesKey(ctx.snapshot.plant, definition.signature_version, _vdField);
+    const fetched = _vdValues[key];
+    const pending = [..._vdDirty.entries()].filter(([, minutes]) => minutes !== null).map(([value]) => value);
+    // Plant scope only: the card is plant-wide, so a machine's own priority-list override map is not offered.
+    const listed = [...fieldValueSet(Store.priorityRankMaps, _vdField, ''), ...(fetched?.listed ?? [])];
+    const all = buildValueDefaultRows({ listed, observed: fetched?.observed ?? [], stored, pending });
+    return { all, matching: filterValueDefaultRows(all, _vdFilter), stored, fetchState: fetched ? 'ready' : _vdValuesFailed.has(key) ? 'failed' : 'loading' };
+  }
+
+  function paintValueDefaultNotes(): void {
+    const ctx = _vdCtx; const mount = ctx?.target.querySelector<HTMLElement>('[data-setup-vd-notes]');
+    if (!ctx || !mount || !ctx.definition) return;
+    const { snapshot, definition, permissions } = ctx;
+    const notes: Array<{ text: string; warn?: boolean }> = [];
+    if (!permissions.matrixWrite) notes.push({ text: Util.t('ui.setup_vd_admin_only'), warn: true });
+    if (snapshot.plant_active === false) notes.push({ text: Util.t('ui.setup_vd_inert_note') });
+    if (_lineScope) notes.push({ text: Util.t('ui.setup_vd_plant_wide_note') });
+    const fetchState = currentValueDefaultRows().fetchState;
+    if (fetchState === 'failed') notes.push({ text: Util.t('ui.setup_vd_observed_unavailable'), warn: true });
+    else if (fetchState === 'loading') notes.push({ text: Util.t('ui.setup_vd_loading') });
+    const worst = valueDefaultWorstCase(snapshot.value_defaults, definition.signature_version, definition.fields, _vdField, _vdDirty);
+    if (worst > 10080) notes.push({ text: Util.t('ui.setup_vd_sum_hint', { minutes: worst }), warn: true });
+    mount.innerHTML = notes.map(note => `<p class="setup-vd-note${note.warn ? ' warn' : ''}">${Util.escapeHtml(note.text)}</p>`).join('');
+  }
+
+  function refreshValueDefaultBar(): void {
+    const ctx = _vdCtx; if (!ctx) return;
+    const writable = ctx.permissions.matrixWrite;
+    const count = ctx.target.querySelector<HTMLElement>('[data-setup-vd-dirty-count]');
+    if (count) count.textContent = Util.t('ui.setup_vd_dirty_count', { count: _vdDirty.size });
+    ctx.target.querySelector<HTMLButtonElement>('[data-setup-vd-discard]')?.toggleAttribute('disabled', !writable || _vdDirty.size === 0 || _vdSaving);
+    ctx.target.querySelector<HTMLButtonElement>('[data-setup-vd-save]')?.toggleAttribute('disabled', !writable || _vdDirty.size === 0 || _vdSaving);
+  }
+
+  /** Repaints only the mass-fill strip and the value rows (never the filter box or the field picker, so typing
+   *  in the filter keeps its focus). Renders at most VD_ROW_CAP rows; the rest are announced in a text node. */
+  function paintValueDefaultRows(): void {
+    const ctx = _vdCtx; if (!ctx || !ctx.definition) return;
+    const rowsMount = ctx.target.querySelector<HTMLElement>('[data-setup-vd-rows]');
+    const fillMount = ctx.target.querySelector<HTMLElement>('[data-setup-vd-massfill]');
+    if (!rowsMount || !fillMount) return;
+    const { snapshot, definition, permissions } = ctx;
+    const state = currentValueDefaultRows();
+    if (state.fetchState === 'loading') {
+      const key = vdValuesKey(snapshot.plant, definition.signature_version, _vdField);
+      const field = _vdField;
+      void loadValueDefaultValues(snapshot.plant, definition.signature_version, field).then(() => {
+        if (_vdCtx?.snapshot.plant === snapshot.plant && _vdField === field && _vdCtx.target.querySelector('[data-setup-vd-rows]') === rowsMount && (_vdValues[key] || _vdValuesFailed.has(key))) paintValueDefaultRows();
+      });
+    }
+    const writable = permissions.matrixWrite;
+    const previousFill = fillMount.querySelector<HTMLInputElement>('[data-setup-vd-massfill-input]')?.value ?? '';
+    fillMount.innerHTML = writable && state.all.length
+      ? `<label for="setup-vd-massfill-input">${Util.escapeHtml(Util.t('ui.setup_vd_massfill_label', { count: state.matching.length }))}</label>
+         <input type="text" id="setup-vd-massfill-input" class="input setup-vd-minutes" inputmode="numeric" data-setup-vd-massfill-input value="${Util.escapeHtml(previousFill)}" aria-label="${Util.escapeHtml(Util.t('ui.setup_vd_massfill_aria'))}">
+         <button type="button" class="btn btn-ghost sm" data-setup-vd-massfill-apply ${state.matching.length ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.setup_vd_massfill_apply'))}</button>`
+      : '';
+    if (!state.all.length) rowsMount.innerHTML = state.fetchState === 'loading' ? '' : emptyState(Util.t('ui.setup_vd_no_values'));
+    else if (!state.matching.length) rowsMount.innerHTML = emptyState(Util.t('ui.no_matches'));
+    else {
+      const shown = state.matching.slice(0, VD_ROW_CAP);
+      const more = state.matching.length - shown.length;
+      const badgeKey = { listed: 'ui.setup_vd_badge_listed', observed: 'ui.setup_vd_badge_observed', stored: 'ui.setup_vd_badge_stored' } as const;
+      const bodyRows = shown.map(row => {
+        const dirty = _vdDirty.has(row.value);
+        const effective = dirty ? _vdDirty.get(row.value)! : row.stored;
+        const badgeText = Util.t(badgeKey[row.badge]);
+        return `<tr data-setup-vd-row="${Util.escapeHtml(row.value)}"${dirty ? ' class="setup-vd-dirty"' : ''}>
+          <td class="mono">${Util.escapeHtml(row.value)}</td>
+          <td><span class="setup-vd-badge setup-vd-badge-${row.badge}">${Util.escapeHtml(badgeText)}</span></td>
+          <td class="setup-num"><input type="text" class="input setup-vd-minutes" inputmode="numeric" data-setup-vd-minutes data-value="${Util.escapeHtml(row.value)}" value="${effective === null || effective === undefined ? '' : effective}" aria-label="${Util.escapeHtml(Util.t('ui.setup_vd_minutes_aria', { value: row.value }))}" ${writable ? '' : 'disabled'}></td>
+        </tr>`;
+      }).join('');
+      rowsMount.innerHTML = `<table class="setup-table setup-vd-table"><thead><tr>
+          <th>${Util.escapeHtml(Util.t('ui.setup_vd_col_value'))}</th><th>${Util.escapeHtml(Util.t('ui.setup_vd_col_source'))}</th><th class="setup-num">${Util.escapeHtml(Util.t('ui.setup_vd_col_minutes'))}</th>
+        </tr></thead><tbody>${bodyRows}</tbody></table>${more > 0 ? `<p class="setup-vd-more" role="status">${Util.escapeHtml(Util.t('ui.setup_vd_more', { count: more }))}</p>` : ''}`;
+    }
+    paintValueDefaultNotes();
+    refreshValueDefaultBar();
+  }
+
+  function wireValueDefaults(mount: HTMLElement): void {
+    if (_vdWired.has(mount)) return;
+    _vdWired.add(mount);
+    const rowOf = (el: EventTarget | null, selector: string): HTMLElement | null => (el as HTMLElement | null)?.closest<HTMLElement>(selector) ?? null;
+    mount.addEventListener('input', event => {
+      const filter = rowOf(event.target, '[data-setup-vd-filter]') as HTMLInputElement | null;
+      if (!filter) return;
+      _vdFilter = filter.value;
+      paintValueDefaultRows();
+    });
+    mount.addEventListener('change', event => {
+      const ctx = _vdCtx; if (!ctx) return;
+      const select = rowOf(event.target, '[data-setup-vd-field]') as HTMLSelectElement | null;
+      if (select) {
+        const next = select.value;
+        if (next === _vdField) return;
+        const apply = (): void => { _vdField = next; _vdFilter = ''; _vdDirty = new Map(); paintValueDefaults(); };
+        if (!_vdDirty.size) { apply(); return; }
+        void Modal.confirm({ title: Util.t('ui.setup_vd_field_change_title'), message: Util.t('ui.setup_vd_field_change_msg', { count: _vdDirty.size }), confirmLabel: Util.t('btn.discard'), tone: 'warn' })
+          .then(ok => { if (ok) apply(); else select.value = _vdField; });
+        return;
+      }
+      const input = rowOf(event.target, '[data-setup-vd-minutes]') as HTMLInputElement | null;
+      if (!input || !ctx.permissions.matrixWrite) return;
+      const value = input.dataset.value ?? '';
+      const stored = currentValueDefaultRows().stored;
+      const parsed = parseGridMinutes(input.value);
+      if (parsed === 'invalid') {
+        Toast.show(Util.t('ui.setup_grid_invalid_minutes'), 'error');
+        const before = _vdDirty.has(value) ? _vdDirty.get(value)! : (stored.get(value) ?? null);
+        input.value = before === null ? '' : String(before);
+        return;
+      }
+      stageValueDefault(_vdDirty, stored, value, parsed);
+      input.value = parsed === null ? '' : String(parsed);
+      rowOf(input, '[data-setup-vd-row]')?.classList.toggle('setup-vd-dirty', _vdDirty.has(normalizedValue(value)));
+      paintValueDefaultNotes();
+      refreshValueDefaultBar();
+    });
+    const applyMassFill = (): void => {
+      const ctx = _vdCtx; if (!ctx?.permissions.matrixWrite) return;
+      const input = mount.querySelector<HTMLInputElement>('[data-setup-vd-massfill-input]'); if (!input) return;
+      const parsed = parseGridMinutes(input.value);
+      if (parsed === 'invalid') { Toast.show(Util.t('ui.setup_grid_invalid_minutes'), 'error'); return; }
+      const state = currentValueDefaultRows();
+      massFillValueDefaults(_vdDirty, state.stored, state.matching.map(row => row.value), parsed);
+      paintValueDefaultRows();
+    };
+    mount.addEventListener('click', event => {
+      if (rowOf(event.target, '[data-setup-vd-massfill-apply]')) applyMassFill();
+      else if (rowOf(event.target, '[data-setup-vd-save]')) void saveValueDefaults();
+      else if (rowOf(event.target, '[data-setup-vd-discard]')) { _vdDirty = new Map(); paintValueDefaultRows(); }
+    });
+    mount.addEventListener('keydown', event => {
+      if (event.key !== 'Enter') return;
+      if (rowOf(event.target, '[data-setup-vd-massfill-input]')) { event.preventDefault(); applyMassFill(); return; }
+      const input = rowOf(event.target, '[data-setup-vd-minutes]') as HTMLInputElement | null;
+      if (!input) return;
+      // Spreadsheet-style: commit this value (blur fires change) and move to the next row's input.
+      event.preventDefault();
+      const inputs = Array.from(mount.querySelectorAll<HTMLInputElement>('[data-setup-vd-minutes]'));
+      const next = inputs[inputs.indexOf(input) + 1];
+      input.blur();
+      next?.focus(); next?.select();
+    });
+  }
+
+  async function saveValueDefaults(): Promise<void> {
+    const ctx = _vdCtx;
+    if (!ctx || _vdSaving || !ctx.definition || !ctx.permissions.matrixWrite || !_vdField || !_vdDirty.size) return;
+    const { target, snapshot, definition } = ctx;
+    const plant = snapshot.plant;
+    const chunks = chunkValueDefaultEntries(valueDefaultEntries(_vdDirty));
+    const url = `${API}/setup/${encodeURIComponent(plant)}/value-defaults`;
+    let status = 0;
+    _vdSaving = true; refreshValueDefaultBar();
+    try {
+      for (const entries of chunks) {
+        const response = await Util.fetchTraced(url, { method: 'PUT', headers: headers(), body: JSON.stringify({ signature_version: definition.signature_version, field_key: _vdField, entries }) });
+        if (!response.ok) { status = response.status; const err = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(err.detail) || `HTTP ${response.status}`); }
+      }
+      Persistence.noteSetupWrite(plant, setupWriteKind(url));
+      _vdDirty = new Map();
+      Persistence._invalidateSetupSnapshot('setup-admin');
+      await Persistence.loadSetupSnapshot(plant);
+      invalidatePlant(plant); // the coverage tiles (Recorded / By default / Gaps) must refresh; the grid save never did
+      render(target, plant);
+      Toast.show(Util.t('toast.setup_saved'), 'success');
+    } catch (error) {
+      if (status === 409) {
+        // The signature moved under the card: reload the snapshot and keep the unsaved entries (nothing dropped).
+        Toast.show(Util.t('toast.setup_vd_stale'), 'warn');
+        Persistence._invalidateSetupSnapshot('setup-admin');
+        await Persistence.loadSetupSnapshot(plant);
+        invalidatePlant(plant);
+        render(target, plant);
+      } else Toast.show(Util.t('toast.save_failed', { msg: (error as Error).message }), 'error');
+    } finally { _vdSaving = false; refreshValueDefaultBar(); }
   }
 
   /** Compact "you are here" readout inline under the Scope selector — replaces
@@ -1320,8 +1758,12 @@ export const SetupAdmin = (() => {
   interface ListRowView {
     fromText: string; toText: string; minutes: string; plantValue: string;
     sourceLabel: string; sourceClass: string; isOverride: boolean; isGap: boolean; key: string;
+    /** True when no row records this pair but a value default covers it (never labelled a gap). */
+    isValueDefault: boolean; defaultMin: number | null; detail: string;
   }
-  function listRowView(row: typeof _listRows[number], line: string): ListRowView {
+  /** `valueDefault` is what a default by value charges for this pair (null = none). It is the tier BELOW every
+   *  exact row, so it only applies when the pair is not an override and has no recorded plant value. */
+  function listRowView(row: typeof _listRows[number], line: string, valueDefault: { min: number; reason: string } | null = null): ListRowView {
     const key = `${stateSig(row.from_key)} ${stateSig(row.to_key)}`;
     const dirty = _gridDirty.get(key);
     const isOverride = dirty ? dirty.setup_min !== row.plant_value : (!!line && !row.inherited);
@@ -1329,7 +1771,9 @@ export const SetupAdmin = (() => {
     // default leaves nothing recorded anywhere, so it reads as a gap too —
     // otherwise the row that fix #3 now correctly stages would still claim to
     // be "Inherited from plant" with no plant value to inherit.
-    const gap = !isOverride && row.plant_value === null && (dirty === undefined || dirty.setup_min === null);
+    const nothingRecorded = !isOverride && row.plant_value === null && (dirty === undefined || dirty.setup_min === null);
+    const isValueDefault = nothingRecorded && valueDefault !== null;
+    const gap = nothingRecorded && !isValueDefault;
     const effective = dirty ? dirty.setup_min : row.setup_min;
     const minutes = effective === null ? '' : String(effective);
     return {
@@ -1340,9 +1784,11 @@ export const SetupAdmin = (() => {
       // interpolation, so plant-scope edits get their own label.
       sourceLabel: isOverride
         ? (line ? Util.t('ui.setup_list_source_override', { line }) : Util.t('ui.setup_list_source_plant_edit'))
+        : isValueDefault ? Util.t('ui.setup_source_value_default')
         : gap ? Util.t('ui.setup_list_source_gap') : Util.t('ui.setup_list_source_inherited'),
-      sourceClass: isOverride ? 'setup-list-source-override' : gap ? 'setup-list-source-gap' : 'setup-list-source-inherited',
+      sourceClass: isOverride ? 'setup-list-source-override' : isValueDefault ? 'setup-list-source-default' : gap ? 'setup-list-source-gap' : 'setup-list-source-inherited',
       isOverride, isGap: gap, key,
+      isValueDefault, defaultMin: isValueDefault ? valueDefault!.min : null, detail: isValueDefault ? valueDefault!.reason : '',
     };
   }
 
@@ -1377,14 +1823,18 @@ export const SetupAdmin = (() => {
     // setup_min (which a line override has even with no plant default) or a
     // staged edit. Testing plant_value here hid every line-scoped override on
     // a pair the plant has no default for.
-    if (_hideEmptyStates) rows = rows.filter(r => r.setup_min !== null || _gridDirty.has(`${stateSig(r.from_key)} ${stateSig(r.to_key)}`));
+    // A pair a value default covers is not an empty state (it is covered, just not by a row), so it stays visible.
+    const vdIndex = defaultIndexFor(definition, snapshot.value_defaults);
+    const defaultFor = (r: typeof _listRows[number]): { min: number; reason: string } | null =>
+      r.setup_min === null && r.plant_value === null && vdIndex ? valueDefaultFor(definition, r.from_key, r.to_key, snapshot.value_defaults, vdIndex) : null;
+    if (_hideEmptyStates) rows = rows.filter(r => r.setup_min !== null || _gridDirty.has(`${stateSig(r.from_key)} ${stateSig(r.to_key)}`) || defaultFor(r) !== null);
     // Workstream D3: keys for the rows actually on screen, so a stale
     // selection from a filtered-out or previous-page row never inflates the
     // header "select all" checkbox's checked state.
     const onScreenKeys = rows.map(row => `${stateSig(row.from_key)} ${stateSig(row.to_key)}`);
     const allSelected = onScreenKeys.length > 0 && onScreenKeys.every(key => _listSelected.has(key));
     const bodyRows = rows.map(row => {
-      const v = listRowView(row, _lineScope);
+      const v = listRowView(row, _lineScope, defaultFor(row));
       // Two separate data attributes, not one space-joined `${sig1} ${sig2}`
       // string — stateSig() values are `|`-joined and a priority-list value
       // containing a literal space (e.g. "Light Blue") would make a combined
@@ -1395,9 +1845,9 @@ export const SetupAdmin = (() => {
         <td class="setup-num">${permissions.matrixWrite ? `<input type="checkbox" data-setup-list-select value="${Util.escapeHtml(key)}" ${_listSelected.has(key) ? 'checked' : ''} aria-label="${Util.escapeHtml(Util.t('ui.setup_list_select_row'))}">` : ''}</td>
         <td class="mono">${Util.escapeHtml(v.fromText)}</td>
         <td class="mono">${Util.escapeHtml(v.toText)}</td>
-        <td class="setup-num"><input type="text" class="input setup-list-minutes-input" inputmode="numeric" value="${Util.escapeHtml(v.minutes)}" data-setup-list-minutes ${permissions.matrixWrite ? '' : 'disabled'}></td>
+        <td class="setup-num"><input type="text" class="input setup-list-minutes-input" inputmode="numeric" value="${Util.escapeHtml(v.minutes)}"${v.defaultMin !== null ? ` placeholder="${v.defaultMin}"` : ''} data-setup-list-minutes ${permissions.matrixWrite ? '' : 'disabled'}></td>
         <td class="setup-num">${Util.escapeHtml(v.plantValue)}</td>
-        <td><span class="${v.sourceClass}">${Util.escapeHtml(v.sourceLabel)}</span></td>
+        <td><span class="${v.sourceClass}"${v.detail ? ` title="${Util.escapeHtml(Util.t('ui.setup_grid_value_default_hint', { detail: v.detail }))}"` : ''}>${Util.escapeHtml(v.sourceLabel)}</span></td>
         <td class="setup-num">
           ${v.isOverride ? `<button type="button" class="setup-list-revert" data-setup-list-revert title="${Util.escapeHtml(Util.t('ui.setup_list_revert_title'))}">&#8630;</button>` : ''}
           ${permissions.matrixWrite ? `<button type="button" class="setup-list-delete" data-setup-list-delete title="${Util.escapeHtml(Util.t('btn.setup_list_delete_row'))}" aria-label="${Util.escapeHtml(Util.t('btn.setup_list_delete_row'))}">&times;</button>` : ''}
@@ -1438,7 +1888,7 @@ export const SetupAdmin = (() => {
       <div class="setup-list-bulk-actions">
         <button type="button" class="btn btn-ghost sm" data-setup-list-delete-selected ${_listSelected.size ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.setup_list_delete_selected', { count: _listSelected.size }))}</button>
         <div class="setup-list-delete-all">
-          <label for="setup-list-delete-all-confirm">${Util.escapeHtml(Util.t('ui.setup_delete_all_hint', { plant: snapshot.plant }))}</label>
+          <label for="setup-list-delete-all-confirm">${Util.escapeHtml(`${Util.t('ui.setup_delete_all_hint', { plant: snapshot.plant })} ${Util.t('ui.setup_vd_untouched_note')}`)}</label>
           <input type="text" id="setup-list-delete-all-confirm" class="input" data-setup-list-delete-all-confirm placeholder="${Util.escapeHtml(Util.t('ph.setup_delete_all_confirm', { plant: snapshot.plant }))}" value="${Util.escapeHtml(_deleteAllConfirmText)}">
           <button type="button" class="btn btn-danger sm" data-setup-list-delete-all ${deleteAllConfirmationMatches(_deleteAllConfirmText, snapshot.plant) ? '' : 'disabled'}>${Util.escapeHtml(Util.t('btn.setup_list_delete_all'))}</button>
         </div>
@@ -1707,6 +2157,10 @@ export const SetupAdmin = (() => {
       tierRuns(rowStates, tier).forEach(run => map.set(run.start, run.span));
       return map;
     });
+    // Value defaults resolved through the real resolver (rows/overrides empty, so only that tier can answer);
+    // the per-field map is built once per paint, not per cell.
+    const vdDefaults = snapshot.value_defaults;
+    const vdIndex = definition ? defaultIndexFor(definition, vdDefaults) : undefined;
     const bodyRows = rowStates.map((rowState, r) => {
       const youAreHere = currentStateSig !== null && rowState.sig === currentStateSig;
       const headerCells = Array.from({ length: tierCount }, (_, tier) => {
@@ -1719,12 +2173,17 @@ export const SetupAdmin = (() => {
         const existing = _gridModel!.cellLookup.get(rowState.sig)?.get(colState.sig);
         const dirty = _gridDirty.get(gridEditKey(rowState, colState));
         const value = gridCellValue(rowState, colState, existing, dirty);
-        const missing = value === null;
-        const cellState = gridCellState(rowState, colState, existing, dirty, _lineScope);
+        // Only a pair with no row and no pending edit can be answered by a default (exact rows always win).
+        const byDefault = !existing && !dirty && definition && vdIndex ? valueDefaultFor(definition, rowState.key, colState.key, vdDefaults, vdIndex) : null;
+        const cellState = gridCellState(rowState, colState, existing, dirty, _lineScope, byDefault ? byDefault.min : null);
+        // A default-covered cell is covered, so it never counts as "missing" for the review highlight.
+        const missing = value === null && cellState !== 'value-default';
         const cellClass = ['setup-grid-td', `setup-grid-${cellState}`, permissions.matrixWrite ? 'setup-grid-editable' : ''].filter(Boolean).join(' ');
-        const display = cellState === 'uncovered' ? '&middot;' : (value !== null ? Util.escapeHtml(String(value)) : '');
+        // The default's sum is a placeholder, not a value: the editor opens empty and typing creates a real row.
+        const display = cellState === 'uncovered' ? '&middot;' : cellState === 'value-default' ? Util.escapeHtml(String(byDefault!.min)) : (value !== null ? Util.escapeHtml(String(value)) : '');
         const title = cellState === 'uncovered' ? Util.t('ui.setup_grid_uncovered_hint')
           : cellState === 'implicit-zero' ? Util.t('ui.setup_grid_implicit_zero_hint')
+          : cellState === 'value-default' ? Util.t('ui.setup_grid_value_default_hint', { detail: byDefault!.reason })
           : cellState === 'line-override' ? Util.t('ui.setup_grid_line_override_hint') : '';
         return `<td class="${cellClass}" data-setup-grid-row="${r}" data-setup-grid-col="${c}" data-missing="${missing}" ${permissions.matrixWrite ? 'tabindex="0"' : ''}${title ? ` title="${Util.escapeHtml(title)}"` : ''}>${display}</td>`;
       }).join('');
@@ -1927,6 +2386,9 @@ export const SetupAdmin = (() => {
     const value = gridCellValue(row, col, existing, dirty);
     const el = ensureGridEditorEl();
     el.value = value !== null ? String(value) : '';
+    // A default-covered cell opens EMPTY (typing records an exact row); its sum shows as the placeholder.
+    const byDefault = !existing && !dirty && definition ? valueDefaultFor(definition, row.key, col.key, snapshot.value_defaults) : null;
+    el.placeholder = byDefault ? String(byDefault.min) : '';
     positionGridEditor();
     el.focus(); el.select();
   }
@@ -2040,7 +2502,7 @@ export const SetupAdmin = (() => {
         const existingCount = snapshot.plant_rows.filter(row => row.signature_version === parsed.signature_version).length;
         const confirmed = await Modal.confirm({
           title: Util.t('ui.setup_replace_confirm_title'),
-          message: Util.t('ui.setup_replace_confirm_msg', { existing: existingCount, incoming: parsed.rows.length }),
+          message: `${Util.t('ui.setup_replace_confirm_msg', { existing: existingCount, incoming: parsed.rows.length })} ${Util.t('ui.setup_vd_untouched_note')}`,
           confirmLabel: Util.t('btn.setup_replace_confirm'),
           tone: 'warn',
         });
@@ -2152,6 +2614,23 @@ export const SetupAdmin = (() => {
     }, permissionsFor, canWriteVersion, activationStatus, effectiveRows, deleteRequest, deleteAllConfirmationMatches, removeSignatureField, csvColumns, missingPairsCsv, reviewAction, canReviewMissingPairs, reviewNavigation, reviewMissingPairs, registeredFields, parseLongFormCsv, collectPagedLines, mountStateEditor, render, invalidatePlant, setSetupActive,
     // Grid helpers — exported for direct unit testing, matching this file's
     // existing pattern of testing pure logic without a DOM harness.
+    setupWriteKind, matrixVersionFor, coverageSummary, valueDefaultFor, defaultIndexFor, listRowView,
+    // Default changeover by value (pure helpers + the card's paint/stage/save seams, for tests)
+    valueDefaultStoredMap, buildValueDefaultRows, filterValueDefaultRows, stageValueDefault, massFillValueDefaults, valueDefaultEntries, chunkValueDefaultEntries, valueDefaultWorstCase,
+    paintValueDefaults, paintValueDefaultRows, saveValueDefaults,
+    _valueDefaultsForTest: {
+      attach: (target: HTMLElement, snapshot: SetupSnapshot, permissions: SetupPermissions) => {
+        _vdCtx = { target, snapshot, definition: snapshot.definition, permissions };
+        if (!_vdField) _vdField = snapshot.definition?.fields[0] ?? '';
+      },
+      stage: (value: string, minutes: number | null) => stageValueDefault(_vdDirty, valueDefaultStoredMap(_vdCtx?.snapshot.value_defaults, _vdCtx?.definition?.signature_version, _vdField), value, minutes),
+      massFillMatching: (minutes: number | null) => { const state = currentValueDefaultRows(); return massFillValueDefaults(_vdDirty, state.stored, state.matching.map(row => row.value), minutes); },
+      setFilter: (text: string) => { _vdFilter = text; },
+      state: () => ({ field: _vdField, filter: _vdFilter, dirty: new Map(_vdDirty) }),
+      reset: () => { _vdField = ''; _vdFilter = ''; _vdDirty = new Map(); _vdPlant = ''; _vdVersion = null; _vdValues = {}; _vdValuesFailed = new Set(); _vdValuesLoading = new Set(); _vdSaving = false; _vdCtx = null; },
+      setValues: (plant: string, version: number, field: string, data: { listed: string[]; observed: string[] }) => { _vdValues[vdValuesKey(plant, version, field)] = data; },
+      rowCap: VD_ROW_CAP,
+    },
     stateSig, fieldValueSet, cartesianStates, resolveFromKey, parseMassUploadText, createDebouncedValidator, buildGridModel, filterStates, tierRuns, gridCellValue, gridCellState, capAxis, parseGridMinutes, buildSaveRequests, fieldLabel, reviewStateSigFromText,
     // Exported for direct unit testing of the "delete all rows in scope"
     // and List-view-page request shapes (mock Util.fetchTraced's underlying
