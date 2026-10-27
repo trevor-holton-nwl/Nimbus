@@ -1351,14 +1351,17 @@ details.line-group > summary::-webkit-details-marker { display: none; }
    UNGROUPED background items (vis's reserved BackgroundGroup stretches them across every row), no longer one
    grouped item per line, so their order against the grouped bands is a z-index ladder, not DOM order (vis
    attaches a background item's element when it first becomes visible, so tree order is not insertion order).
-   vis 7.7.3 gives every .vis-item z-index 1, and .vis-background is positioned with no z-index, so it is NOT a
-   stacking context: a z-index above 1 on a background item would paint over the foreground bars. The
-   isolation rule below makes the background container its own stacking context, so the ladder stays inside
-   it and every bar (foreground, z-index 1, painted after the background) stays above every wash.
+   vis 7.7.3 gives every .vis-item z-index 1, and .vis-background is positioned with no z-index and no stacking
+   context, so a z-index above 1 on a background item would paint over the foreground bars. The container gets
+   z-index:1 so the ladder works inside it while bars in .vis-foreground (same z-index 1, later in the tree)
+   stay above it. Measured on vis 7.7.3: `isolation: isolate` was tried and rejected, because it lifts the
+   foreground rows above the whole background layer (row tints and the Go To row paint over washes and alert
+   cells, and an alert cell stops being the hit target); z-index:1 restores the original relationships: bars on
+   top, alert cells above zones, horizon washes pass-through.
    Bottom to top: day gridline 1, .nonworking 2, .blackout 3, .past-zone 4, .alert-horizon-zone 5,
-   .frozen-horizon-zone 6, alert cells 7. z-index and isolation ONLY: never position/top/height on
+   .frozen-horizon-zone 6, alert cells 7. z-index ONLY: never position/top/height on
    a .vis-item rule (vis owns that geometry; see frontend/scheduling/CLAUDE.md). */
-.vis-itemset > .vis-background { isolation: isolate; }
+.vis-itemset > .vis-background { z-index: 1; }
 
 /* Custom vis background areas for blackout blocks */
 .vis-item.blackout {
@@ -1403,6 +1406,7 @@ details.line-group > summary::-webkit-details-marker { display: none; }
 .vis-item.past-zone {
   background: var(--zone-past) !important;
   border-color: transparent !important;
+  pointer-events: none !important;
   z-index: 4;
 }
 /* Alert-horizon zone — light green wash from now to the plant's alert horizon (z-index 5) */

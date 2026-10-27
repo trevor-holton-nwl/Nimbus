@@ -3231,6 +3231,7 @@ function _frameRig(t) {
   t.after(() => {
     globalThis.requestAnimationFrame = prior.raf;
     Timeline._endPanGesture();
+    Timeline._lastPan = null;
     PerfMonitor.clear();
   });
   return rig;
@@ -3604,6 +3605,49 @@ test('Timeline._rebuildPass: a clean pass clears _taskDataDirty and stores the s
     assert.equal(Timeline._alertsRebuildPending, false, 'and clears the pending flush (it already covered the alerts)');
   } finally {
     Store.setAlerts(priorAlerts, 'unit-test'); Timeline._taskDataDirty = priorDirty; Timeline._lastAlertSig = priorSig; Timeline._alertsRebuildPending = priorPending;
+  }
+}));
+
+test('Timeline._onStore alerts:change with an active line filter: the gate signature equals the one a _rebuildPass stores under the same filter', () => laneRebuildHarness(() => {
+  const keys = ['_taskDataDirty', '_lastAlertSig', '_alertsRebuildPending', '_panActive', '_conflictSrc', '_ganttActive', '_applyProfileMatchClasses', '_scheduleRebuild'];
+  const prior = Object.fromEntries(keys.map(k => [k, Timeline[k]]));
+  const priorAlerts = Store.alerts, hadFilter = 'GanttFilter' in globalThis.NIMBUS, priorFilter = globalThis.NIMBUS.GanttFilter;
+  const rig = { scheduled: 0, profile: 0 };
+  try {
+    Timeline._scheduleRebuild = () => { rig.scheduled++; };
+    Timeline._ganttActive = () => true;
+    Timeline._applyProfileMatchClasses = () => { rig.profile++; };
+    Timeline._panActive = false; Timeline._alertsRebuildPending = false;
+    // The filter branch of _lineVisiblePredicate: L-A is shown, L-HIDDEN is not.
+    globalThis.NIMBUS.GanttFilter = { _selectedLines: new Set(['L-A']) };
+    const visible = _sigAlert({ id: 'v', line: 'L-A', taskId: 'lane-a', time: new Date(2026, 7, 10, 9) });
+    const hidden = _sigAlert({ id: 'h', line: 'L-HIDDEN', time: new Date(2026, 7, 10, 9) });
+    Store.setAlerts([visible, hidden], 'unit-test');
+    const unfiltered = alertSig(Store.alerts, () => true);
+
+    Timeline._refreshViewNow = () => true;
+    Timeline._taskDataDirty = true; Timeline._lastAlertSig = null;
+    Timeline._rebuildPass();
+    const stored = Timeline._lastAlertSig;
+    assert.equal(Timeline._taskDataDirty, false, 'precondition: the pass was clean');
+    assert.ok(stored, 'the pass stored a signature');
+    assert.notEqual(stored, unfiltered, 'precondition: the hidden line\'s cell is excluded, so the filtered signature differs from the unfiltered one');
+
+    Timeline._onStore({ type: 'alerts:change', source: 'alerts' });
+    assert.equal(rig.scheduled, 0, 'the gate computes the same filtered signature through _onStore: skipped');
+    assert.equal(rig.profile, 1);
+
+    // A change confined to the hidden line (no taskId) paints nothing: still skipped. A visible-line change schedules.
+    Store.setAlerts([visible, { ...hidden, sev: 'warn' }], 'unit-test');
+    Timeline._onStore({ type: 'alerts:change', source: 'alerts' });
+    assert.equal(rig.scheduled, 0, 'a hidden-line cell change is invisible to the gate, as to the pass');
+    Store.setAlerts([{ ...visible, sev: 'warn' }, hidden], 'unit-test');
+    Timeline._onStore({ type: 'alerts:change', source: 'alerts' });
+    assert.equal(rig.scheduled, 1, 'a visible-line change schedules the rebuild');
+  } finally {
+    for (const k of keys) Timeline[k] = prior[k];
+    Store.setAlerts(priorAlerts, 'unit-test');
+    if (hadFilter) globalThis.NIMBUS.GanttFilter = priorFilter; else delete globalThis.NIMBUS.GanttFilter;
   }
 }));
 
@@ -4123,7 +4167,7 @@ test('zoneTickerUpdates: pushes the past id end, the alert-horizon start/end and
   assert.deepEqual(zoneTickerUpdates({ ...base, hzMinutes: null, frozenEnd: null }), [{ id: 'past-zone', end: now }]);
 });
 
-test('zone CSS: the z-index ladder is ordered gridline < nonworking < blackout < past < alert-horizon < frozen < alert cell, the background container is isolated, and no top/height/position appears in the zone rules', () => {
+test('zone CSS: the z-index ladder is ordered gridline < nonworking < blackout < past < alert-horizon < frozen < alert cell, the background container has z-index 1 (not isolation), the past zone is pass-through, and no top/height/position appears in the zone rules', () => {
   const css = readFileSync(new URL('../../../frontend/styles.css', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '');
   const rule = sel => {
@@ -4136,7 +4180,9 @@ test('zone CSS: the z-index ladder is ordered gridline < nonworking < blackout <
   const order = ['.vis-item.day-gridline', '.vis-item.nonworking', '.vis-item.blackout', '.vis-item.past-zone', '.vis-item.alert-horizon-zone', '.vis-item.frozen-horizon-zone'].map(z);
   for (let i = 1; i < order.length; i++) assert.ok(order[i - 1] < order[i], `ladder step ${i} (${order.join(' < ')})`);
   for (const c of ['.vis-item.alertcell-err', '.vis-item.alertcell-warn', '.vis-item.alertcell-calendar'].map(z)) assert.ok(c > order[order.length - 1], 'alert cells sit above the frozen band');
-  assert.match(rule('.vis-itemset > .vis-background'), /isolation:\s*isolate/);
+  assert.match(rule('.vis-itemset > .vis-background'), /(^|[\s;{])z-index:\s*1\s*;/);
+  assert.doesNotMatch(rule('.vis-itemset > .vis-background'), /isolation/, 'isolation lifts the foreground rows above the whole background layer');
+  assert.match(rule('.vis-item.past-zone'), /pointer-events:\s*none/, 'the past wash is pass-through like the horizon washes');
   for (const sel of ['.vis-item.past-zone', '.vis-item.alert-horizon-zone', '.vis-item.frozen-horizon-zone', '.vis-item.nonworking', '.vis-item.day-gridline', '.vis-item.blackout', '.vis-item.alertcell-err', '.vis-item.alertcell-warn', '.vis-item.alertcell-calendar']) {
     assert.doesNotMatch(rule(sel), /(^|[\s;{])(top|height|position)\s*:/, `${sel} must not set top/height/position`);
   }

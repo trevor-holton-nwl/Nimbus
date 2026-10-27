@@ -64,7 +64,7 @@ The mid-pan stalls (the alerts rebuild after a drop, the settle refresh) are sep
 - **D2. Transform pan (Option T) and the canvas item layer (Option C) are NOT authorised.** They stay documented here as the only two mechanisms that fix steady pan jitter, for a separate decision once Wave 1's frame timings are visible in the Admin Cockpit. Rejected outright on the evidence: a full custom renderer, commercial libraries, forking or patching vis-timeline, CSS containment, over-render.
 - **D3. Ctrl+F on bars is accepted as lost** if Option C is ever built (bars on a canvas are not searchable text). Release-note it then; a hidden accessibility list is an optional later add.
 - **D4. No horizontal wheel pan** is added.
-- **D5. Expectation set with the owner:** Wave 1 removes the stalls (post-drop rebuild, settle refresh, rebuild cost) and adds measurement. **The steady jitter while dragging will remain** (frames about 25-70 ms).
+- **D5. Expectation set with the owner:** Wave 1 removes the stalls (the alerts-driven rebuild landing mid-pan, the settle refresh, rebuild cost) and adds measurement. Note the post-drop rebuild itself still runs, because a drop always marks task data dirty and the gate never skips after a task write; it is cheaper (Items 3 and 4) and deferred off the pan. **The steady jitter while dragging will remain** (frames about 25-70 ms).
 - **D6. Process:** Sonnet subagents implement, TDD, one commit per item on `feature/gantt-pan-perf`; implementers append to the Progress ledger below; the orchestrator dispatches and reviews only. Plan file `C:\Users\PJ29587\.claude\plans\it-feels-a-little-serene-island.md` was the authority until this spec landed. Per-task briefs live in the git-ignored `.superpowers/sdd/it-feels-a-little-serene-island/`.
 
 ## What the review corrected (binding on the builders)
@@ -127,7 +127,7 @@ Line references are to `frontend/scheduling/gantt.mts` (6,057 lines at main a618
 
 **Tests.** `_alertSig` including `hasConflictErr`; order independence; the task-id part; the dirty-flag gate; the deferred flush including the 300 ms watchdog; a heal pass stores nothing; `_scheduleRebuild` still schedules during a pan.
 
-**Acceptance.** Dropping an order whose alerts did not change causes no rebuild; setup bars and stack badges still update after an optimizer apply or an Inspector edit (browser check on the pilot).
+**Acceptance.** The gate never skips after a task write (a drop always marks `_taskDataDirty`), so the post-drop rebuild still runs; it is cheaper (Items 3 and 4) and deferred off the pan. An `alerts:change` with no task write since the last clean pass and an unchanged signature causes no rebuild; setup bars and stack badges still update after an optimizer apply or an Inspector edit (browser check on the pilot).
 
 ### Item 3. Settle refresh (about 0.5 day)
 
@@ -173,7 +173,7 @@ Line references are to `frontend/scheduling/gantt.mts` (6,057 lines at main a618
 
 **Binding corrections.** Never set `top`/`height` on background items via CSS; keep the three `_*ZoneIds` arrays.
 
-**Stacking-order hazard found while verifying the plan against vis's own stylesheet (not in the plan; the builder and the browser check must resolve it).** vis 7.7.3 gives every `.vis-item`, background items included, `z-index: 1` (selected bars 2), and its `.vis-background` and `.vis-foreground` containers are positioned but form no stacking context. Today every wash and every bar therefore tie at 1 and the bars win by DOM order. The plan's `z-index` ladder `.nonworking` 0 < `.past-zone` 1 < `.alert-horizon-zone` 2 < `.frozen-horizon-zone` 3 would lift the alert-horizon and frozen washes above the bars, and grouped bands that keep `z-index: 1` (blackouts, alert cells) would end up under the new zones, where today alert cells sit above them. The required end state: bars above every wash; and bottom to top gridline, nonworking, blackout, past, alert-horizon, frozen, alert cell. A safe way to get there is to make the background container its own stacking context (`.vis-itemset > .vis-background { isolation: isolate; }`, no layout effect) and give the background classes an explicit ladder inside it. Unit tests can only pin the CSS text; the owner-owed browser check is what confirms it.
+**Stacking-order hazard found while verifying the plan against vis's own stylesheet (not in the plan; the builder and the browser check must resolve it).** vis 7.7.3 gives every `.vis-item`, background items included, `z-index: 1` (selected bars 2), and its `.vis-background` and `.vis-foreground` containers are positioned but form no stacking context. Today every wash and every bar therefore tie at 1 and the bars win by DOM order. The plan's `z-index` ladder `.nonworking` 0 < `.past-zone` 1 < `.alert-horizon-zone` 2 < `.frozen-horizon-zone` 3 would lift the alert-horizon and frozen washes above the bars, and grouped bands that keep `z-index: 1` (blackouts, alert cells) would end up under the new zones, where today alert cells sit above them. The required end state: bars above every wash; and bottom to top gridline, nonworking, blackout, past, alert-horizon, frozen, alert cell. A safe way to get there is to make the background container its own stacking context (`.vis-itemset > .vis-background { isolation: isolate; }`, no layout effect) and give the background classes an explicit ladder inside it. **Resolved in the final fix wave:** isolation was measured on a scratch vis 7.7.3 page and rejected, because it lifts the foreground rows above the whole background layer (row tints and the Go To row paint over washes and alert cells, and an alert cell stops being the hit target). The shipped rule is `.vis-itemset > .vis-background { z-index: 1; }`, which restores today's relationships exactly: bars on top, alert cells above zones, horizon washes pass-through. Unit tests can only pin the CSS text; the owner-owed browser check is what confirms it.
 
 **Also.** Create the three items only when there is at least one visible row (today no rows means no zone ids, and the ticker's early return depends on it).
 
@@ -188,7 +188,8 @@ Post-drop and settle stalls gone (the "hitch after I move something"), rebuilds 
 ### Verification
 
 - Node: `npm run build && node --test tests/modules/scheduling/gantt.test.mjs tests/modules/scheduling/pv-drag.test.mjs` plus the new tests; all existing tests stay green. `npm run lint`, `npm run typecheck`, `npm run check:static-assets`, `npm run check:legacy-surface`.
-- Browser (Azure pilot plant 1008, or local with `scripts/seed_frontend_audit.py --orders 1000|10000`): Admin Cockpit, Thread pane shows `Timeline.frame` and `Timeline.pan`; `Timeline._bench({days:3|14|30})` prints p50 / p95 / max. Checks: drop an order and confirm no rebuild when its alerts did not change, and that setup bars and stack badges still update after an optimizer apply or an Inspector edit; settle refresh under 2 ms when nothing entered the window and still correct after a long pan; zone bands look identical (edges, dark mode, 15-minute zoom ticker movement, expanded-row tint) with bars above them; a rebuild after a filter change still dims and undims correctly; Go To, marquee, expand/collapse and plant switch unchanged.
+- Browser (Azure pilot plant 1008, or local with `scripts/seed_frontend_audit.py --orders 1000|10000`): Admin Cockpit, Thread pane shows `Timeline.frame` and `Timeline.pan`; `Timeline._bench({days:3|14|30})` prints p50 / p95 / max. Checks: after a drop, the post-drop `Timeline.rebuild` and the settle are short (the rebuild still runs, since the gate never skips after a task write), and that setup bars and stack badges still update after an optimizer apply or an Inspector edit; settle refresh under 2 ms when nothing entered the window and still correct after a long pan; zone bands look identical (edges, dark mode, 15-minute zoom ticker movement, expanded-row tint) with bars above them; a rebuild after a filter change still dims and undims correctly; Go To, marquee, expand/collapse and plant switch unchanged.
+- Added by the final fix wave (owner-owed browser checks): the expanded-row tint and the Go To row tint do not paint over the washes or the alert cells, and a Go To cell stays visible over the washes; a rejected drop springs back (`finish_cannot_hold`, `running_finish_locked`, `multi_drag_line_locked`); a click on the empty past area below the last row clears the selection; a ctrl-drag marquee starting there works.
 - Expected after Wave 1: stalls gone, `Timeline.rebuild` several times cheaper when little changed, steady pan frames unchanged.
 
 ## Deferred options (documented, not authorised): the two mechanisms that fix the jitter
@@ -224,17 +225,18 @@ Implementers and reviewers append one row per task as they finish.
 
 | Task | Commit | Status | Notes |
 |---|---|---|---|
-| 1 Instrumentation | | | |
-| 2 Alerts gate + deferred rebuild | | | |
-| 3 Settle refresh | | | |
-| 4 Rebuild equality diff | | | |
-| 5 Zones 90 to 3 | | | |
+| 1 Instrumentation | 2105317 | Done, reviewed | Frame meter, `Timeline.pan`, `_panActive`, `_bench` |
+| 2 Alerts gate + deferred rebuild | f2b729a + fix 8e0017c | Done, reviewed | Gate, deferral; fix: `task:remove` marks task data dirty (ghost bar) |
+| 3 Settle refresh | 1f40e7b | Done, reviewed | Redraw only on DataView add/remove |
+| 4 Rebuild equality diff | c160ccd | Done, reviewed | `visItemEqual`; skips unchanged DataSet writes |
+| 5 Zones 90 to 3 | e02a69d | Done, reviewed | Three ungrouped washes plus z-index ladder |
+| Final fix wave | this commit | Done | Background `z-index: 1` (not isolation), past-zone pass-through, test hygiene, docs |
 
 ## Side issues to log (not fixed here)
 
 - **Day-alert popup is one 1.36 s long task.** Opening a day-cell alert popup blocks the page for 1.36 s on plant 1008. Separate from pan; unscheduled.
 - **`TimelineNav._cssVar` reads `:root`, but dark tokens live on `body.dark`** (`frontend/scheduling/gantt.mts` 3163-3167: `getComputedStyle(document.documentElement)`). The minimap is probably wrong in dark mode today; browser check owed. Option C needs the same fix for its own theme reads.
-- **Stale line-count claim** in `frontend/scheduling/CLAUDE.md` (line 5): `gantt.mts` "(~5,550 lines)"; the file is 6,057 lines at main a618b69.
+- **Stale line-count claim** in `frontend/scheduling/CLAUDE.md` (line 5): `gantt.mts` "(~5,550 lines)"; the file was 6,057 lines at main a618b69. Corrected in the final fix wave.
 - Also noticed: the comment at `gantt.mts` 2735-2737 still says the ticker is "~line 291"; it is at 458-525.
 
 ## Context appendix

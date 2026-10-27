@@ -54,8 +54,10 @@ import type { LaneInterval, LaneResult } from './gantt-lanes.mjs';
  *  synthetic-item call sites for which subset each produces. */
 interface TimelineVisItem {
   id: string;
-  /** Absent on the ungrouped day-boundary gridlines built inline in
-   *  Timeline.rebuild() — every other item (order/blackout/zone/setup)
+  /** Absent on the ungrouped kinds: the day gridlines built inline in
+   *  Timeline.rebuild(), the `nonworking-*` spans, and the three zone washes
+   *  (`past-zone`, `alert-horizon-zone`, `frozen-horizon-zone`) — they live in
+   *  the library's BackgroundGroup. Everything else (order/blackout/setup)
    *  belongs to a machine line group. */
   group?: string;
   kind: TimelineItemKind;
@@ -1724,8 +1726,8 @@ export const Timeline = {
     // walks 3 items per frame instead of 3 x lines and the ticker pushes 3 updates. Created only while at
     // least one row is visible, so the id arrays stay empty (and the ticker idles) with no rows. Ungrouped
     // means _healBackgroundBands skips them by design; kind:'zone' keeps TimelineNav ignoring them. Paint
-    // order is the CSS z-index ladder in styles.css (.vis-itemset > .vis-background is its own stacking
-    // context), never DOM order and never top/height.
+    // order is the CSS z-index ladder in styles.css (.vis-itemset > .vis-background carries z-index:1 so the
+    // ladder works inside it while bars stay above), never DOM order and never top/height.
     // vis-timeline clips the rendered span to the visible window, so the far-past past-zone start is harmless;
     // each pass re-reads "now" so the boundaries track time.
     if (visibleLines.length) {
@@ -2340,9 +2342,9 @@ export const Timeline = {
     const view = Timeline._visItems;
     if (!Timeline._tl || !view) return true;
     if (!_wiredViews.has(view)) {
-      _wiredViews.add(view);
       view.on('add', () => { Timeline._visItemsChanged = true; });
       view.on('remove', () => { Timeline._visItemsChanged = true; });
+      _wiredViews.add(view);   // after both subscriptions: a throwing on() must not leave a view marked wired but unsubscribed
     }
     Timeline._visItemsChanged = false;
     const _pmT0 = performance.now();
