@@ -204,9 +204,9 @@ export const Persistence = {
   // a load for any other plant clears the key at once so the previous plant's counts are never judged against
   // the new plant's orders. Never "empty": undefined means not loaded / the fetch failed.
   _toolInventoryPlant: null as string | null,
-  // Per-plant fingerprint of the rows this tab holds ("<count>|<max updated_at ms>"); the first /tasks/horizons
-  // probe that disagrees (see _noteToolInventoryVersion) re-fetches. Undefined = nothing good held, so the next
-  // probe (even for an empty plant) retries the fetch.
+  // Per-plant baseline: the server's own tool_inventory_version string, read BEFORE the rows were fetched and kept
+  // verbatim (never recomputed client-side). The first /tasks/horizons probe that disagrees (see
+  // _noteToolInventoryVersion) re-fetches. Undefined = the version read failed or nothing good is held.
   _toolInventoryBaseline: {} as Record<string, string | undefined>,
   _toolInventoryRefreshing: new Set<string>(),
   _toolingRuleRefreshing: new Set<string>(),
@@ -517,7 +517,7 @@ export const Persistence = {
             Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
             Util.fetchTraced(`${Config.API_BASE}/master-data/machine?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
             Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
-            Persistence._fetchToolInventory(plant),
+            Persistence._fetchToolInventoryWithVersion(plant),
           ]).then(([pData, lData, wcData, tiRows]) => {
             // A newer load() (e.g. the user switched plants again) may have
             // started while this was in flight — discard rather than let a
@@ -665,7 +665,7 @@ export const Persistence = {
           Util.fetchTraced(`${Config.API_BASE}/master-data/machine?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           Util.fetchTraced(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }>; schedule_event_retention_days?: number }> : null),
           Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
-          Persistence._fetchToolInventory(plant),
+          Persistence._fetchToolInventoryWithVersion(plant),
         ]).then(([pData, lData, ssData, wcData, tiRows]) => {
           // A newer load() (e.g. the user switched plants again) may have
           // started while this was in flight — discard rather than let a
@@ -871,75 +871,82 @@ export const Persistence = {
       .catch(() => undefined);
   },
 
-  /** "<row count>|<max updated_at as epoch ms>" for loaded rows ("" for none): the client twin of the backend's
-   *  tool_inventory_version once that is normalised by _normToolInventoryVersion. */
-  _toolInventoryFingerprint(rows: ReadonlyArray<NimbusToolInventoryRow>): string {
-    if (!rows.length) return '';
-    let max = NaN;
-    for (const row of rows) {
-      const t = row.updated_at ? Date.parse(row.updated_at) : NaN;
-      if (Number.isFinite(t) && !(t <= max)) max = t;
-    }
-    return `${rows.length}|${Number.isFinite(max) ? max : ''}`;
+  /** The server's own `tool_inventory_version` for a plant (the /tasks/horizons field), read directly (not through the
+   *  10 s throttle of refreshHorizons). `null` (no rows / table missing) reads as '' (a valid version); `undefined`
+   *  when the call fails or an older backend omits the field. Never rejects. The string is only ever stored and
+   *  compared verbatim: the client never recomputes it (the row endpoint does not return updated_at). */
+  _readToolInventoryVersion(plant: string): Promise<string | undefined> {
+    return Util.fetchTraced(`${Config.API_BASE}/tasks/horizons?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) })
+      .then(r => r.ok ? r.json() as Promise<{ tool_inventory_version?: string | null }> : null)
+      .then(j => (j && j.tool_inventory_version !== undefined ? (j.tool_inventory_version ?? '') : undefined))
+      .catch(() => undefined);
   },
 
-  /** The backend's "<count>|<max updated_at ISO>" (null = no rows / table missing) in _toolInventoryFingerprint's form. */
-  _normToolInventoryVersion(version: string | null | undefined): string {
-    if (!version) return '';
-    const bar = version.indexOf('|');
-    if (bar < 0) return version;
-    const iso = version.slice(bar + 1);
-    const ms = iso ? Date.parse(iso) : NaN;
-    return `${version.slice(0, bar)}|${Number.isFinite(ms) ? ms : ''}`;
+  /** Version FIRST, rows SECOND (sequential on purpose): an edit landing between the two reads leaves the stored
+   *  baseline OLDER than the rows, so the worst case is one extra refetch, never a missed edit. */
+  async _fetchToolInventoryWithVersion(plant: string): Promise<{ rows: NimbusToolInventoryRow[] | undefined; version: string | undefined }> {
+    const version = await Persistence._readToolInventoryVersion(plant);
+    const rows = await Persistence._fetchToolInventory(plant);
+    return { rows, version };
   },
 
-  /** One ErrorLog.warn + toast per plant per session when a plant's inventory could not be loaded. */
+  /** Always logs (ErrorLog.warn) when a plant's inventory could not be loaded; toasts once per plant per session. */
   _warnToolInventoryUnavailable(plant: string): void {
+    ErrorLog.warn('persistence', `Tool inventory fetch failed (plant=${plant}); tools are treated as 1 copy until it loads`);
     if (Persistence._toolInventoryWarned.has(plant)) return;
     Persistence._toolInventoryWarned.add(plant);
-    ErrorLog.warn('persistence', `Tool inventory fetch failed (plant=${plant}); tools are treated as 1 copy until it loads`);
     Toast.show(Util.t('toast.tool_inventory_unavailable', { plant }), 'warn', 6000);
   },
 
   /** What `masterData.tool_inventory` should be after a load's fetch: the fresh rows; on failure `undefined` (never
    *  []), except a same-plant reload keeps the rows already held (keep-on-failure, like workcenters). Records the
-   *  owning plant and the probe baseline. A different plant's rows are never reused. */
-  _resolveToolInventory(plant: string, fetched: NimbusToolInventoryRow[] | undefined): NimbusToolInventoryRow[] | undefined {
-    let rows = fetched;
+   *  owning plant and the probe baseline (the server's version string read before the rows; undefined when that read
+   *  failed). A different plant's rows are never reused. */
+  _resolveToolInventory(plant: string, fetched: { rows: NimbusToolInventoryRow[] | undefined; version: string | undefined }): NimbusToolInventoryRow[] | undefined {
+    let rows = fetched.rows;
     if (rows === undefined) {
       Persistence._warnToolInventoryUnavailable(plant);
       rows = Persistence._toolInventoryPlant === plant ? Store.masterData?.tool_inventory : undefined;
+      if (rows === undefined) Persistence._toolInventoryBaseline[plant] = undefined;
     } else {
-      Persistence._toolInventoryBaseline[plant] = Persistence._toolInventoryFingerprint(rows);
+      Persistence._toolInventoryBaseline[plant] = fetched.version;
     }
-    if (rows === undefined) Persistence._toolInventoryBaseline[plant] = undefined;
     Persistence._toolInventoryPlant = plant;
     return rows;
   },
 
   /** Re-fetch one plant's inventory into Store.masterData.tool_inventory (emits master-data-changed with table
-   *  'tool_inventory', which the shell already turns into an alert recompute). Resolves true iff rows were applied.
-   *  A failed fetch keeps whatever is held; a plant switch or newer load() while the request is in flight discards
-   *  the response (the same selectedPlant + _loadRequest guard as refreshHorizons). */
+   *  'tool_inventory', which the shell already turns into an alert recompute). Resolves true iff rows were applied
+   *  (or already identical, in which case only the baseline moves and nothing is emitted). The plant is marked in
+   *  _toolInventoryRefreshing for the whole call so a probe racing it is ignored. A failed fetch keeps whatever is
+   *  held; a plant switch or newer load() while the request is in flight discards the response (the same
+   *  selectedPlant + _loadRequest guard as refreshHorizons). */
   async refreshToolInventory(plant: string | null): Promise<boolean> {
     if (!plant) return false;
     const gen = Persistence._loadRequest;
-    const rows = await Persistence._fetchToolInventory(plant);
-    if (Store.selectedPlant !== plant || Persistence._loadRequest !== gen) return false;
-    if (rows === undefined) { Persistence._warnToolInventoryUnavailable(plant); return false; }
-    const md = Store.masterData;
-    if (!md) return false;
-    Persistence._toolInventoryBaseline[plant] = Persistence._toolInventoryFingerprint(rows);
-    Persistence._toolInventoryPlant = plant;
-    Store.setMasterData({ ...md, tool_inventory: rows }, 'tool-inventory-refresh', 'tool_inventory');
-    return true;
+    Persistence._toolInventoryRefreshing.add(plant);
+    try {
+      const { rows, version } = await Persistence._fetchToolInventoryWithVersion(plant);
+      if (Store.selectedPlant !== plant || Persistence._loadRequest !== gen) return false;
+      if (rows === undefined) { Persistence._warnToolInventoryUnavailable(plant); return false; }
+      const md = Store.masterData;
+      if (!md) return false;
+      const held = Persistence._toolInventoryPlant === plant ? md.tool_inventory : undefined;
+      Persistence._toolInventoryBaseline[plant] = version;
+      Persistence._toolInventoryPlant = plant;
+      if (held !== undefined && JSON.stringify(held) === JSON.stringify(rows)) return true;   // nothing changed: no emit
+      Store.setMasterData({ ...md, tool_inventory: rows }, 'tool-inventory-refresh', 'tool_inventory');
+      return true;
+    } finally { Persistence._toolInventoryRefreshing.delete(plant); }
   },
 
-  /** The /tasks/horizons probe's Tool Inventory fields. A different inventory fingerprint than the rows this tab
-   *  holds (or no good rows held at all) re-fetches them; a `tooling_rule` that differs from the plant row in the
-   *  Store re-fetches the plants rows. Each toasts once, and only when something really changed. Skipped (and the
-   *  throttle zeroed so the next entry retries) while a drag is in flight, a dialog is open or What-If is active,
-   *  exactly like the calendar probe. Older backends omit both fields: nothing happens. */
+  /** The /tasks/horizons probe's Tool Inventory fields. The baseline is the server's own version string, read before
+   *  the rows were loaded (never recomputed here). A held baseline that differs from the probe's version re-fetches
+   *  and toasts (only if the rows really changed). No baseline: with rows held (loaded this session, but the version
+   *  read failed) the probe adopts the server value WITHOUT refetching; with no rows held (a failed load) it
+   *  refetches silently. A version-less (older) backend does nothing. A `tooling_rule` that differs from the plant
+   *  row in the Store re-fetches the plants rows and toasts likewise. Skipped (and the throttle zeroed so the next
+   *  entry retries) while a drag is in flight, a dialog is open or What-If is active, like the calendar probe. */
   _noteToolInventoryVersion(plant: string, version: string | null | undefined, rule: 'off' | 'hard' | undefined): void {
     const blocked = (): boolean => {
       if (Sandbox.active || Modal.anyOpen() || Persistence._calendarRefreshBlocked?.()) {
@@ -950,17 +957,16 @@ export const Persistence = {
     };
 
     if (version !== undefined && Persistence._toolInventoryPlant === plant && !Persistence._toolInventoryRefreshing.has(plant)) {
+      const server = version ?? '';
       const known = Persistence._toolInventoryBaseline[plant];
-      if (known === undefined || known !== Persistence._normToolInventoryVersion(version)) {
-        if (!blocked()) {
-          const before = known;
-          Persistence._toolInventoryRefreshing.add(plant);
-          void Persistence.refreshToolInventory(plant).then(applied => {
-            if (!applied) { Persistence._horizonsFetchedAt[plant] = 0; return; }
-            const after = Persistence._toolInventoryBaseline[plant];
-            if (before !== undefined && after !== before) Toast.show(Util.t('toast.tool_inventory_refreshed_remote'), 'info');
-          }).finally(() => { Persistence._toolInventoryRefreshing.delete(plant); });
-        }
+      const heldBefore = Store.masterData?.tool_inventory;
+      if (known === undefined && heldBefore !== undefined) {
+        Persistence._toolInventoryBaseline[plant] = server;      // adopt, no refetch (no loop when the version read failed)
+      } else if (known !== server && !blocked()) {
+        void Persistence.refreshToolInventory(plant).then(applied => {
+          if (!applied) { Persistence._horizonsFetchedAt[plant] = 0; return; }
+          if (known !== undefined && Store.masterData?.tool_inventory !== heldBefore) Toast.show(Util.t('toast.tool_inventory_refreshed_remote'), 'info');
+        });
       }
     }
 

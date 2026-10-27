@@ -23,8 +23,8 @@ if (typeof globalThis.document === 'undefined') {
 }
 
 const tick = () => new Promise(r => setTimeout(r, 0));
-const row = (plant, tool_id, total_qty = 1, out_of_service_qty = 0, updated_at = '2026-10-27T10:00:00+00:00') =>
-  ({ plant, tool_id, total_qty, out_of_service_qty, note: null, updated_at });
+const row = (plant, tool_id, total_qty = 1, out_of_service_qty = 0) =>
+  ({ plant, tool_id, total_qty, out_of_service_qty, note: null });
 
 function env(plant = 'TP') {
   const prior = {
@@ -224,27 +224,138 @@ test('refreshToolInventory discards its response when the plant switches (or a n
   } finally { restore(); }
 });
 
-// --- horizons probe -------------------------------------------------------------------------------------------------
-test('probe: a different tool_inventory_version re-fetches and toasts once; the same version is a no-op; own baseline is honoured', async () => {
+// --- horizons probe (WIRE-ACCURATE rows: GET /master-data/tool_inventory never returns updated_at) -----------------
+const invFetches = s => s.urls.filter(u => u.includes('/master-data/tool_inventory')).length;
+
+test('probe: baseline is the server version read before the rows; the same version settles (no refetch, no emit, no toast)', async () => {
+  const { s, probe, restore, toastsOf } = env();
+  const events = [];
+  const unsub = Store.subscribe(e => { if (e.type === 'master-data-changed') events.push(e); });
+  try {
+    s.inv = [row('TP', 'A', 2)];
+    s.horizons = { tool_inventory_version: '1|2026-10-27T10:00:00+00:00' };
+    await Persistence.refreshToolInventory('TP');
+    assert.equal(Persistence._toolInventoryBaseline.TP, '1|2026-10-27T10:00:00+00:00', 'verbatim server string, never recomputed');
+    const fetchesBefore = invFetches(s); const eventsBefore = events.length;
+    await probe(); await probe();
+    assert.equal(invFetches(s), fetchesBefore, 'settled: probes with an unchanged version never refetch');
+    assert.equal(events.length, eventsBefore, 'and never emit (no alert recompute loop)');
+    assert.equal(toastsOf('toast.tool_inventory_refreshed_remote').length, 0);
+  } finally { unsub(); restore(); }
+});
+
+test('probe: a changed server version refetches once and toasts remote; the next probe is quiet', async () => {
   const { s, probe, restore, toastsOf } = env();
   try {
-    s.inv = [row('TP', 'A', 2, 0, '2026-10-27T10:00:00+00:00')];
-    await Persistence.refreshToolInventory('TP');                   // baseline: 1|<ms of 10:00>
-    const before = s.urls.filter(u => u.includes('/master-data/tool_inventory')).length;
-    s.horizons = { tool_inventory_version: '1|2026-10-27T10:00:00+00:00' };     // identical instant, different formatting path
-    await probe();
-    assert.equal(s.urls.filter(u => u.includes('/master-data/tool_inventory')).length, before, 'same version: nothing fetched');
-    s.inv = [row('TP', 'A', 2, 1, '2026-10-27T11:00:00.123456+00:00'), row('TP', 'B')];
+    s.inv = [row('TP', 'A', 2)];
+    s.horizons = { tool_inventory_version: '1|2026-10-27T10:00:00+00:00' };
+    await Persistence.refreshToolInventory('TP');
+    s.inv = [row('TP', 'A', 2, 1), row('TP', 'B')];
     s.horizons = { tool_inventory_version: '2|2026-10-27T11:00:00.123456+00:00' };
+    const before = invFetches(s);
     await probe();
-    assert.equal(Store.masterData.tool_inventory.length, 2, 'refetched');
+    assert.equal(invFetches(s), before + 1, 'refetched once');
+    assert.equal(Store.masterData.tool_inventory.length, 2);
     assert.equal(toastsOf('toast.tool_inventory_refreshed_remote').length, 1);
     await probe();
-    assert.equal(toastsOf('toast.tool_inventory_refreshed_remote').length, 1, 'baseline moved: no repeat');
+    assert.equal(invFetches(s), before + 1, 'baseline moved: no repeat');
+    assert.equal(toastsOf('toast.tool_inventory_refreshed_remote').length, 1);
   } finally { restore(); }
 });
 
-test('probe: a failed load (undefined) is retried by the next probe, silently (no "remote" toast)', async () => {
+test('probe: a version change whose rows are identical (e.g. an edit reverted) refetches silently, no emit, no toast', async () => {
+  const { s, probe, restore, toastsOf } = env();
+  const events = [];
+  try {
+    s.inv = [row('TP', 'A', 2)];
+    s.horizons = { tool_inventory_version: '1|2026-10-27T10:00:00+00:00' };
+    await Persistence.refreshToolInventory('TP');
+    const unsub = Store.subscribe(e => { if (e.type === 'master-data-changed') events.push(e); });
+    s.horizons = { tool_inventory_version: '1|2026-10-27T12:00:00+00:00' };
+    await probe();
+    unsub();
+    assert.equal(events.length, 0);
+    assert.equal(toastsOf('toast.tool_inventory_refreshed_remote').length, 0);
+    assert.equal(Persistence._toolInventoryBaseline.TP, '1|2026-10-27T12:00:00+00:00');
+  } finally { restore(); }
+});
+
+test('probe: our own save (refreshStoreMasterData) moves the baseline, so the next probe is not announced as remote', async () => {
+  const { s, probe, restore, toastsOf } = env();
+  const priorDoc = globalThis.document;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  try {
+    s.inv = [row('TP', 'A')];
+    s.horizons = { tool_inventory_version: '1|2026-10-27T10:00:00+00:00' };
+    await Persistence.refreshToolInventory('TP');
+    // the planner saves: the server now reports a new version and new rows
+    s.inv = [row('TP', 'A', 5)];
+    s.horizons = { tool_inventory_version: '1|2026-10-27T13:00:00+00:00' };
+    await refreshStoreMasterData('master-data-save', 'tool_inventory');
+    assert.equal(Store.masterData.tool_inventory[0].total_qty, 5);
+    assert.equal(Persistence._toolInventoryBaseline.TP, '1|2026-10-27T13:00:00+00:00');
+    const before = invFetches(s);
+    await probe();
+    assert.equal(invFetches(s), before, 'no refetch');
+    assert.equal(toastsOf('toast.tool_inventory_refreshed_remote').length, 0, 'own change is never "updated by another session"');
+    assert.ok(!Persistence._toolInventoryRefreshing.has('TP'), 'refreshing flag released');
+  } finally {
+    if (priorDoc === undefined) delete globalThis.document; else globalThis.document = priorDoc;
+    restore();
+  }
+});
+
+test('probe: a probe racing our own refetch is suppressed (refreshing flag), with no toast', async () => {
+  const { s, probe, restore, toastsOf } = env();
+  const priorDoc = globalThis.document;
+  globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+  try {
+    s.inv = [row('TP', 'A')];
+    s.horizons = { tool_inventory_version: 'v1' };
+    await Persistence.refreshToolInventory('TP');
+    s.inv = [row('TP', 'A', 7)];
+    s.horizons = { tool_inventory_version: 'v2' };
+    let release;
+    const gate = new Promise(r => { release = r; });
+    const inner = Util.fetchTraced;
+    Util.fetchTraced = async (u, o) => { if (String(u).includes('/master-data/tool_inventory')) await gate; return inner(u, o); };
+    const saving = refreshStoreMasterData('master-data-save', 'tool_inventory');
+    await tick();
+    assert.ok(Persistence._toolInventoryRefreshing.has('TP'));
+    const before = invFetches(s);
+    await probe();                                              // lands mid-refetch: must do nothing
+    assert.equal(invFetches(s), before, 'the probe made no inventory request (the save\'s own is still gated)');
+    release(); await saving; await tick();
+    assert.equal(toastsOf('toast.tool_inventory_refreshed_remote').length, 0);
+    assert.equal(Store.masterData.tool_inventory[0].total_qty, 7);
+    assert.equal(Persistence._toolInventoryBaseline.TP, 'v2');
+  } finally {
+    if (priorDoc === undefined) delete globalThis.document; else globalThis.document = priorDoc;
+    restore();
+  }
+});
+
+test('probe: a failed version read leaves the baseline undefined; the next probe adopts the server value without refetching (no loop)', async () => {
+  const { s, probe, restore, toastsOf } = env();
+  try {
+    s.inv = [row('TP', 'A', 2)];
+    s.horizons = {};                                            // no tool_inventory_version: the read yields undefined
+    await Persistence.refreshToolInventory('TP');
+    assert.equal(Persistence._toolInventoryBaseline.TP, undefined);
+    assert.equal(Store.masterData.tool_inventory.length, 1, 'rows still applied');
+    s.horizons = { tool_inventory_version: '1|2026-10-27T10:00:00+00:00' };
+    const before = invFetches(s);
+    await probe(); await probe(); await probe();
+    assert.equal(invFetches(s), before, 'adopted silently, never refetched');
+    assert.equal(Persistence._toolInventoryBaseline.TP, '1|2026-10-27T10:00:00+00:00');
+    assert.equal(toastsOf('toast.tool_inventory_refreshed_remote').length, 0);
+    // a failed HTTP read behaves the same
+    Util.fetchTraced = async (u) => String(u).includes('/tasks/horizons') ? { ok: false, status: 500, json: async () => ({}) } : { ok: true, json: async () => ({ rows: [row('TP', 'A', 2)] }) };
+    assert.equal(await Persistence._readToolInventoryVersion('TP'), undefined);
+  } finally { restore(); }
+});
+
+test('probe: a failed load (undefined rows) is retried by the next probe, silently (no "remote" toast)', async () => {
   const { s, probe, restore, toastsOf } = env();
   try {
     s.invStatus = 500;
@@ -260,13 +371,23 @@ test('probe: a failed load (undefined) is retried by the next probe, silently (n
   } finally { restore(); }
 });
 
+test('_warnToolInventoryUnavailable: ErrorLog.warn every time, toast once per plant', () => {
+  const { s, restore } = env();
+  try {
+    Persistence._warnToolInventoryUnavailable('TP');
+    Persistence._warnToolInventoryUnavailable('TP');
+    assert.equal(s.toasts.filter(t => t[0] === 'toast.tool_inventory_unavailable').length, 1);
+  } finally { restore(); }
+});
+
 test('probe: skipped while a drag/dialog/What-If is active (throttle released), picked up on the next entry', async () => {
   const { s, probe, restore } = env();
   try {
     s.inv = [row('TP', 'A')];
+    s.horizons = { tool_inventory_version: 'v1' };
     await Persistence.refreshToolInventory('TP');
-    s.inv = [row('TP', 'A', 9, 0, '2026-10-28T10:00:00+00:00')];
-    s.horizons = { tool_inventory_version: '1|2026-10-28T10:00:00+00:00' };
+    s.inv = [row('TP', 'A', 9)];
+    s.horizons = { tool_inventory_version: 'v2' };
     let dragging = true;
     Persistence._calendarRefreshBlocked = () => dragging;
     await probe();

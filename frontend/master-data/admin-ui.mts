@@ -94,6 +94,7 @@ export async function refreshStoreMasterData(source: string, table?: string): Pr
   const refreshPlant = Store.selectedPlant;
   const refreshLoadGen = Persistence._loadRequest;
   const refreshWriteGen = _lineWriteGen;
+  let toolsMarked = false;
   try {
     // A sap_workcenter save must reach Store.masterData.workcenters (distribution alerts and the
     // optimizer's distribution validation read it), so refetch that plant's work centers; every
@@ -101,7 +102,9 @@ export async function refreshStoreMasterData(source: string, table?: string): Pr
     const refetchWc = table === 'sap_workcenter' && !!Store.selectedPlant;
     // Same for a tool_inventory save: refetch the plant's rows (undefined on any failure => keep the held rows).
     const refetchTools = table === 'tool_inventory' && !!Store.selectedPlant;
-    const [pData, lData, wcData, tiRows] = await Promise.all([
+    // Mark the plant refreshing for the whole refetch so a /tasks/horizons probe racing our own save is ignored.
+    if (refetchTools && refreshPlant) { Persistence._toolInventoryRefreshing.add(refreshPlant); toolsMarked = true; }
+    const [pData, lData, wcData, tiFetched] = await Promise.all([
       Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
       // Plant-scoped (#25): never refetch every plant's machines. With no
       // selected plant, keep whatever lines are already in the Store.
@@ -112,13 +115,23 @@ export async function refreshStoreMasterData(source: string, table?: string): Pr
         ? Util.fetchTraced(`${API}/master-data/sap_workcenter?${new URLSearchParams({ plant: Store.selectedPlant as string }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterWorkcenter> | null>
         : Promise.resolve(null),
       refetchTools
-        ? Persistence._fetchToolInventory(Store.selectedPlant as string)
-        : Promise.resolve(undefined as NimbusToolInventoryRow[] | undefined),
+        ? Persistence._fetchToolInventoryWithVersion(Store.selectedPlant as string)
+        : Promise.resolve(undefined as { rows: NimbusToolInventoryRow[] | undefined; version: string | undefined } | undefined),
     ]);
+    const tiRows = tiFetched?.rows;
     if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return false;
     // A Machines-pane write committed while these GETs were in flight: they may carry the
     // pre-edit row, so drop them (the locally patched Store rows already hold the new value).
-    if (_lineWriteGen !== refreshWriteGen) return false;
+    // The inventory rows are unrelated to that write, so a successful inventory refetch is still applied
+    // (and its baseline moved) on its own: dropping it would let the next probe announce our own save as remote.
+    if (_lineWriteGen !== refreshWriteGen) {
+      if (tiRows && refreshPlant && Store.masterData) {
+        Store.setMasterData({ ...Store.masterData, tool_inventory: tiRows }, source, table);
+        Persistence._toolInventoryBaseline[refreshPlant] = tiFetched?.version;
+        Persistence._toolInventoryPlant = refreshPlant;
+      }
+      return false;
+    }
     if (pData || lData || wcData || tiRows) {
       // Public Store.setMasterData(...) equivalent of the former direct
       // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
@@ -141,7 +154,7 @@ export async function refreshStoreMasterData(source: string, table?: string): Pr
       }, source, table);
       if (tiRows && refreshPlant) {
         // Our own save: move the probe baseline so the next /tasks/horizons does not announce it as a remote change.
-        Persistence._toolInventoryBaseline[refreshPlant] = Persistence._toolInventoryFingerprint(tiRows);
+        Persistence._toolInventoryBaseline[refreshPlant] = tiFetched?.version;
         Persistence._toolInventoryPlant = refreshPlant;
       }
       // Fresh machine rows landed: the line-sync cache (filled on the first line edit, never
@@ -156,6 +169,8 @@ export async function refreshStoreMasterData(source: string, table?: string): Pr
   } catch {
     // A failed fetch must not emit 'master-data-changed' (it re-applies the stale Store lines).
     return false;
+  } finally {
+    if (toolsMarked && refreshPlant) Persistence._toolInventoryRefreshing.delete(refreshPlant);
   }
 }
 
