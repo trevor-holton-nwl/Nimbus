@@ -20,7 +20,7 @@ The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<dom
 | Calendar | `frontend/calendar/` + `backend/calendars/` | Working hours, blackouts, capacity-math engine (mirrored in `nimbus-compute-core.js`); backward walk from the planned finish; effective-dated plant calendar periods (2026-10-16) | `frontend/calendar/` |
 | Insights | `frontend/insights/` | Alerts, Utilization matrix, Dashboard KPIs, the off-thread `Compute` worker client | `frontend/insights/` |
 | Priority Lists | `frontend/priority-lists/` + `backend/priority_lists/` | Per-plant rankable lists (color, PRT tooling, production version) feeding optimizer sort terms | `backend/priority_lists/` |
-| Master Data | `frontend/master-data/` + `backend/master_data/` | CRUD/DDL for the twelve `ALLOWED_TABLES`, cascade preview, schema export, table browser | `backend/master_data/` |
+| Master Data | `frontend/master-data/` + `backend/master_data/` | CRUD/DDL for the thirteen `ALLOWED_TABLES` (incl. the per-plant `tool_inventory`), cascade preview, schema export, table browser | `backend/master_data/` |
 | Labor | `frontend/labor/` + `backend/labor/` | Aggregate and line-level available-labor-hours planning | `backend/labor/` |
 | Alert Monitor | `frontend/alert-monitor/` + `backend/alert_profiles/` | Plant-shared alert profiles, alert acknowledgements, and the leverage-ranked Alert Monitor page | both |
 | Security | `frontend/security/` + `backend/security/` | Login, RBAC guards, users/roles, `role_plants` scoping, per-user settings | `backend/security/` |

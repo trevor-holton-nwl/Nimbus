@@ -51,7 +51,7 @@ The codebase is organized into `frontend/<domain>/` (frontend) and `backend/<dom
 | Calendar | `frontend/calendar/` + `backend/calendars/` | Working hours, blackouts, capacity-math engine (mirrored in `nimbus-compute-core.js`); backward walk from the planned finish | `frontend/calendar/` |
 | Insights | `frontend/insights/` | Alerts, Utilization matrix, Dashboard KPIs, the off-thread `Compute` worker client | `frontend/insights/` |
 | Priority Lists | `frontend/priority-lists/` + `backend/priority_lists/` | Per-plant rankable lists (color, PRT tooling, production version) feeding optimizer sort terms | `backend/priority_lists/` |
-| Master Data | `frontend/master-data/` + `backend/master_data/` | CRUD/DDL for the twelve `ALLOWED_TABLES`, cascade preview, schema export, table browser | `backend/master_data/` |
+| Master Data | `frontend/master-data/` + `backend/master_data/` | CRUD/DDL for the thirteen `ALLOWED_TABLES` (incl. the per-plant `tool_inventory`), cascade preview, schema export, table browser | `backend/master_data/` |
 | Labor | `frontend/labor/` + `backend/labor/` | Aggregate and line-level available-labor-hours planning | `backend/labor/` |
 | Security | `frontend/security/` + `backend/security/` | Login, RBAC guards, users/roles, `role_plants` scoping, per-user settings | `backend/security/` |
 | Integration | `frontend/integration/` + `backend/integration/` | Excel order/BOM ingest, purge, upload audit, missing-master-data reports, SAP sync skeleton; SAP staging tables + Mulesoft contract + Send to SAP (implemented and validated 2026-10-07 on `feature/sap-staging`, not yet merged or deployed; its migrations are dated 2026-10-08; see docs/SAP_STAGING_DESIGN.md) | `backend/integration/` |
