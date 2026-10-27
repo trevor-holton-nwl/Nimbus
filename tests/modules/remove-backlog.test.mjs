@@ -247,7 +247,9 @@ test('Engine.removeBacklog shifts a frozen-window order later when the compressi
     'sequence is preserved: it starts right after the overdue order it collided with');
   assert.ok(frozen.changes.start_date.getTime() >= overdue.changes.start_date.getTime());
 
-  assert.equal(result.diagnostics.frozenMoved, 1);
+  // Finish-based since 2026-10-27: the overdue trigger (06:00-09:00) is RUNNING and its finish is inside
+  // [now, frozenEnd), so it counts too (Backlog moves running orders); both orders are counted.
+  assert.equal(result.diagnostics.frozenMoved, 2);
 });
 
 test('Engine.removeBacklog no longer floors overdue orders to the frozen boundary, and still leaves a frozen order the cursor never reaches unpatched', () => {

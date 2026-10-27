@@ -32,6 +32,8 @@ export interface SerializedOptimizerValidation {
   effectiveFirmedIds: readonly string[];
   notBeforeById: Record<string, Date | string | number | null>;
   notAfterById: Record<string, Date | string | number | null>;
+  /** Frozen-horizon finish floor (2026-10-27); null/absent = none. */
+  finishFloor?: Date | string | number | null;
 }
 
 export interface OptimizerWorkerResponse {
@@ -88,5 +90,6 @@ export function serializeOptimizerValidation(
     effectiveFirmedIds: Array.from(snapshot.firmedIds, String),
     notBeforeById,
     notAfterById,
+    finishFloor: bounds.finishFloor ?? null,
   };
 }

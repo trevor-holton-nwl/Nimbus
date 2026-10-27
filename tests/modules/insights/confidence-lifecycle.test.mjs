@@ -262,7 +262,7 @@ test('Push +1 hour moves the finish and re-derives the start; firmed, frozen and
   const mk = (id, h1, h2) => ({ id, PLANT: 'PUSH-P', MACHINE: 'PUSH-L', RUN_TIME: h2 - h1,
     user_scheduled: true, start_date: new Date(2026, 7, 3, h1), end_date: new Date(2026, 7, 3, h2) });
   try {
-    Store.setTasks([mk('normal', 10, 11), mk('firmed', 12, 13), mk('running', 5, 7), mk('frozen', 8, 9), mk('late', 18, 19)], 'test');
+    Store.setTasks([mk('normal', 10, 11), mk('firmed', 12, 13), mk('running', 5, 7), mk('frozen', 7, 8), mk('late', 18, 19)], 'test');
     Store.setSelectedPlant('PUSH-P', 'test');
     Store.setFirmed(['firmed'], true, 'test');
     Selection.set(['normal', 'firmed', 'running', 'frozen', 'late']);
@@ -272,7 +272,7 @@ test('Push +1 hour moves the finish and re-derives the start; firmed, frozen and
     assert.deepEqual(at('normal'), [11, 12], 'finish +1 h, start re-derived from the run time');
     assert.deepEqual(at('firmed'), [12, 13], 'a firmed order is skipped');
     assert.deepEqual(at('running'), [5, 7], 'a running order is skipped');
-    assert.deepEqual(at('frozen'), [8, 9], 'a frozen order is skipped');
+    assert.deepEqual(at('frozen'), [7, 8], 'a frozen order (finish inside [now, 09:00)) is skipped');
     assert.deepEqual(at('late'), [18, 19], 'a finish past closing cannot be held, so it is skipped rather than leapt');
   } finally {
     Selection.clear();

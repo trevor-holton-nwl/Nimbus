@@ -211,10 +211,16 @@ export const Table = {
     const bounded = rules?.max_pull_forward_days != null || rules?.max_push_forward_days != null;
     const due = Util.sapDueDate(task);
     if (bounded && (!due || !Number.isFinite(due.getTime()))) return 'SAP due date required';
-    const floor = Engine.earliestAllowedStart(task, plant);
+    const floor = Engine.earliestAllowedStart(task, plant);   // pull-forward start floor only
     const ceiling = Engine.latestAllowedEnd(task, plant);
     if (floor && ceiling && floor >= ceiling) {
       return `No valid window: earliest start ${Util.fmtDTReadable(floor)}; complete by ${Util.fmtDTReadable(ceiling)}`;
+    }
+    // The frozen horizon is a FINISH floor (2026-10-27): an unprotected order may not finish before the window edge,
+    // so a completion limit before the edge leaves no valid window (equality is valid).
+    const frozenEnd = Store.frozenHorizonEnd;
+    if (frozenEnd && ceiling && frozenEnd > ceiling) {
+      return `No valid window: finish on/after ${Util.fmtDTReadable(frozenEnd)}; complete by ${Util.fmtDTReadable(ceiling)}`;
     }
     return `${floor ? Util.fmtDTReadable(floor) : 'No start limit'} — ${ceiling ? Util.fmtDTReadable(ceiling) : 'No completion limit'}`;
   },

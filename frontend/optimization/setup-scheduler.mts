@@ -513,6 +513,10 @@ export interface DueDateFirstBounds {
   respectCalendar?: boolean;
   /** Optional plant rule supplied by the live engine; absent retains detached legacy behavior. */
   notBefore?: (task: NimbusTask) => Date | null;
+  /** Frozen-horizon FINISH floor (2026-10-27, D3): no unprotected order may
+   * finish before it. Null/absent = none. A run-wide instant (not per task), set
+   * by the engine from the snapshot's frozenHorizonEnd; Remove Backlog omits it. */
+  finishFloor?: Date | null;
   /** Optional plant rule: latest allowed END for a task (due-date push-forward
    * limit). Null = unconstrained. Mirrors notBefore. */
   notAfter?: (task: NimbusTask) => Date | null;
@@ -2750,6 +2754,70 @@ function freeIntervalsFor(
   return result;
 }
 
+/**
+ * Frozen FINISH floor placement (universal firm, 2026-10-27, D3). Places so the
+ * productive finish is at or after `finishFloor`, never starting before
+ * `earliestStart`. `attempt(start)` MUST rebuild the free intervals AND
+ * `isInherentlyOverlong` from `start` on every call: `freeIntervalsForPlacement`
+ * stops at the first fitting interval (T3), so intervals built from an earlier
+ * cursor would wrongly leave the order unplaced.
+ *
+ * - `never` (contiguous): closed form. setup + run sit in one interval, so the
+ *   earliest start that can finish at the floor is `floor - setup - run`; if
+ *   closed time still leaves the finish short, shift by the shortfall and retry
+ *   (bounded).
+ * - split-capable policies: a closed-form shift overshoots (windows 0-8 and
+ *   24-32, 6 h run, floor 26: the minimal start is 4, a naive shift gives 24),
+ *   so bisect between the unconstrained start and a start AT the floor (which
+ *   always finishes at or after it) with at most 4 probes, keeping the best
+ *   legal result.
+ * Returns the last infeasible result when nothing at or after the floor fits.
+ */
+export function placeWithFinishFloor(
+  attempt: (earliestStart: Date) => PlacementResult,
+  earliestStart: Date,
+  finishFloor: Date | null | undefined,
+  setupMinutes: number,
+  runtimeMinutes: number,
+  policy: SplitOrderPolicy,
+): PlacementResult {
+  if (!finishFloor) return attempt(earliestStart);
+  const floorMs = +finishFloor;
+  const earliestMs = +earliestStart;
+  const MIN_MS = 60 * 1000;
+  const finishOf = (result: PlacementResult): number | null =>
+    result.kind === 'placed' && result.productiveSegments.length ? +result.productiveSegments.at(-1)!.end : null;
+  if (policy === 'never') {
+    let start = Math.max(earliestMs, floorMs - (Math.max(0, setupMinutes) + Math.max(0, runtimeMinutes)) * MIN_MS);
+    let result = attempt(new Date(start));
+    for (let retry = 0; retry < 4; retry += 1) {
+      const finish = finishOf(result);
+      if (finish === null || finish >= floorMs) return result;
+      start += floorMs - finish;
+      result = attempt(new Date(start));
+    }
+    const finish = finishOf(result);
+    if (finish === null || finish >= floorMs) return result;
+    return attempt(new Date(Math.max(earliestMs, floorMs)));
+  }
+  const first = attempt(earliestStart);
+  const firstFinish = finishOf(first);
+  if (firstFinish === null || firstFinish >= floorMs) return first;
+  let hiStart = Math.max(earliestMs, floorMs);
+  let best = attempt(new Date(hiStart));
+  const bestFinish = finishOf(best);
+  if (bestFinish === null || bestFinish < floorMs) return best;
+  let loStart = earliestMs;
+  for (let probe = 0; probe < 4; probe += 1) {
+    const mid = Math.floor((loStart + hiStart) / 2 / MIN_MS) * MIN_MS;
+    if (mid <= loStart || mid >= hiStart) break;
+    const result = attempt(new Date(mid));
+    const finish = finishOf(result);
+    if (finish !== null && finish >= floorMs) { best = result; hiStart = mid; } else loStart = mid;
+  }
+  return best;
+}
+
 /** Marker on arrays `freeIntervalsForPlacement` returns: every interval is
  * minute-aligned, sorted, disjoint, merged and non-empty, so `placeWithSetup`
  * may skip `normalizedIntervals` (it still clips to `earliestStart`). */
@@ -3192,23 +3260,32 @@ function candidateForSequence(
 
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
     const splitPolicy = bounds.runContext?.splitOrderPolicy ?? splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
-    const isInherentlyOverlong = splitPolicy === 'overlong_only'
-      ? !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext)
-      : undefined;
     const minProductiveSegmentMinutes = bounds.runContext?.minProductiveSegmentMinutes
       ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
-    const placement = placeWithSetup({
-      earliestStart: cursor,
-      runtimeMinutes,
-      setup: setupRequirement,
-      policy: splitPolicy,
-      ...(isInherentlyOverlong !== undefined ? { isInherentlyOverlong } : {}),
-      freeIntervals: freeIntervalsForPlacement(
-        snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, fragment.end), bounds.runContext,
-        continuousFitMinutes(setupRequirement, runtimeMinutes, splitPolicy, isInherentlyOverlong, minProductiveSegmentMinutes),
-      ),
-      minProductiveSegmentMinutes,
-    });
+    const candidateEnd = completionEnd(bounds, task, fragment.end);
+    // Frozen finish floor: a fragment that ends before it can admit nothing.
+    const finishFloor = bounds.finishFloor ?? null;
+    // Each attempt rebuilds the free intervals and isInherentlyOverlong from ITS start (T3 early exit).
+    const attemptPlacement = (earliest: Date): PlacementResult => {
+      const isInherentlyOverlong = splitPolicy === 'overlong_only'
+        ? !hasNominalWindow(snapshot, line, bounds.setup.plant, earliest, runtimeMinutes, bounds.runContext)
+        : undefined;
+      return placeWithSetup({
+        earliestStart: earliest,
+        runtimeMinutes,
+        setup: setupRequirement,
+        policy: splitPolicy,
+        ...(isInherentlyOverlong !== undefined ? { isInherentlyOverlong } : {}),
+        freeIntervals: freeIntervalsForPlacement(
+          snapshot, line, bounds.setup.plant, earliest, candidateEnd, bounds.runContext,
+          continuousFitMinutes(setupRequirement, runtimeMinutes, splitPolicy, isInherentlyOverlong, minProductiveSegmentMinutes),
+        ),
+        minProductiveSegmentMinutes,
+      });
+    };
+    const placement: PlacementResult = finishFloor && candidateEnd < finishFloor
+      ? { kind: 'infeasible', reason: 'no-feasible-capacity', productiveSegments: [] }
+      : placeWithFinishFloor(attemptPlacement, cursor, finishFloor, setupRequirement.kind === 'resolved' ? setupRequirement.minutes : 0, runtimeMinutes, splitPolicy);
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       unadmitted.push(task);
       cursor = priorCursor;
@@ -4858,23 +4935,31 @@ export function placeUnknownTail(
     if (pullForwardFloor && cursor < pullForwardFloor) cursor = new Date(pullForwardFloor);
     const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
     const tailSetup = { kind: 'resolved' as const, minutes: tailChargeableMinutes };
-    const isInherentlyOverlong = splitPolicy === 'overlong_only'
-      ? !hasNominalWindow(snapshot, line, bounds.setup.plant, cursor, runtimeMinutes, bounds.runContext)
-      : undefined;
     const minProductiveSegmentMinutes = bounds.runContext?.minProductiveSegmentMinutes
       ?? minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
-    const placement = placeWithSetup({
-      earliestStart: cursor,
-      runtimeMinutes,
-      setup: tailSetup,
-      policy: splitPolicy,
-      ...(isInherentlyOverlong !== undefined ? { isInherentlyOverlong } : {}),
-      freeIntervals: freeIntervalsForPlacement(
-        snapshot, line, bounds.setup.plant, cursor, completionEnd(bounds, task, capacityEnd), bounds.runContext,
-        continuousFitMinutes(tailSetup, runtimeMinutes, splitPolicy, isInherentlyOverlong, minProductiveSegmentMinutes),
-      ),
-      minProductiveSegmentMinutes,
-    });
+    const tailEnd = completionEnd(bounds, task, capacityEnd);
+    const tailFloor = bounds.finishFloor ?? null;
+    // Frozen finish floor; every attempt rebuilds the free intervals and isInherentlyOverlong (T3 early exit).
+    const attemptTail = (earliest: Date): PlacementResult => {
+      const isInherentlyOverlong = splitPolicy === 'overlong_only'
+        ? !hasNominalWindow(snapshot, line, bounds.setup.plant, earliest, runtimeMinutes, bounds.runContext)
+        : undefined;
+      return placeWithSetup({
+        earliestStart: earliest,
+        runtimeMinutes,
+        setup: tailSetup,
+        policy: splitPolicy,
+        ...(isInherentlyOverlong !== undefined ? { isInherentlyOverlong } : {}),
+        freeIntervals: freeIntervalsForPlacement(
+          snapshot, line, bounds.setup.plant, earliest, tailEnd, bounds.runContext,
+          continuousFitMinutes(tailSetup, runtimeMinutes, splitPolicy, isInherentlyOverlong, minProductiveSegmentMinutes),
+        ),
+        minProductiveSegmentMinutes,
+      });
+    };
+    const placement: PlacementResult = tailFloor && tailEnd < tailFloor
+      ? { kind: 'infeasible', reason: 'no-feasible-capacity', productiveSegments: [] }
+      : placeWithFinishFloor(attemptTail, cursor, tailFloor, tailSetup.minutes, runtimeMinutes, splitPolicy);
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       // B2: this order alone doesn't fit at the current cursor — defer it
       // and continue, rather than abandoning every order behind it. Failure
@@ -6570,6 +6655,8 @@ function planningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<D
   const ceiling = notAfterFor(bounds, task);
   const floor = notBeforeFor(bounds, task);
   if (ceiling && +ceiling <= Math.max(+bounds.now, floor ? +floor : -Infinity)) return { code: 'expired_window', message: 'The allowed completion window ends before available planning time.' };
+  // Frozen finish floor: a completion ceiling before it can never hold an unprotected order (equality is valid).
+  if (ceiling && bounds.finishFloor && +ceiling < +bounds.finishFloor) return { code: 'expired_window', message: 'The allowed completion window ends before available planning time.' };
   return null;
 }
 
@@ -6848,6 +6935,8 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     if (defect) add(defect.code, defect.message, task, protectedTask);
     const floor = notBeforeFor(bounds, task); const ceiling = notAfterFor(bounds, task);
     if ((!protectedTask && (+start < +bounds.now || end > bounds.horizonEnd)) || (floor && start < floor) || (ceiling && end > ceiling)) add('date_window', 'Production lies outside its allowed planning window.', task, protectedTask);
+    // Frozen finish floor (unprotected orders only): the message is fixed so applyPartial's code|taskId|message baseline key is stable.
+    if (!protectedTask && bounds.finishFloor && end < bounds.finishFloor) add('date_window', 'Production finishes inside the frozen horizon.', task, protectedTask);
     const minutes = intervals.reduce((sum, i) => sum + (+i.end - +i.start) / 60000, 0);
     if (Math.abs(minutes - Math.round(Number(task.RUN_TIME) * 60)) > 0.001) add('runtime', 'Productive duration does not match runtime.', task, protectedTask);
     const policy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
@@ -7364,18 +7453,21 @@ export function fillPlanningGaps(
           && coversInterval(nextStart > +bounds.horizonEnd
             ? freeIntervalsFor(snapshot, line, bounds.setup.plant, new Date(setupStart), new Date(nextStart), bounds.runContext) : free,
           { start: new Date(setupStart), end: new Date(nextStart) }));
-        if (ceiling > floor && outgoingFits) {
+        // Frozen finish floor: a gap whose ceiling is before it admits nothing (equality is valid).
+        const gapFinishFloor = bounds.finishFloor ?? null;
+        if (ceiling > floor && outgoingFits && !(gapFinishFloor && ceiling < +gapFinishFloor)) {
           const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
           const policy = bounds.runContext!.splitOrderPolicy;
-          const placement = placeWithSetup({ earliestStart: new Date(floor), runtimeMinutes,
+          // Each attempt rebuilds the clipped intervals and isInherentlyOverlong from its own start.
+          const placement = placeWithFinishFloor((earliest: Date) => placeWithSetup({ earliestStart: earliest, runtimeMinutes,
             setup: { kind: 'resolved', minutes: incoming }, policy,
-            isInherentlyOverlong: policy === 'overlong_only' && !hasNominalWindow(snapshot, line, bounds.setup.plant, new Date(floor), runtimeMinutes, bounds.runContext),
+            isInherentlyOverlong: policy === 'overlong_only' && !hasNominalWindow(snapshot, line, bounds.setup.plant, earliest, runtimeMinutes, bounds.runContext),
             minProductiveSegmentMinutes: bounds.runContext!.minProductiveSegmentMinutes,
             freeIntervals: free.flatMap(slot => {
-              const start = Math.max(+slot.start, floor); const end = Math.min(+slot.end, ceiling);
+              const start = Math.max(+slot.start, +earliest); const end = Math.min(+slot.end, ceiling);
               return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
             }),
-          });
+          }), new Date(floor), gapFinishFloor, incoming, runtimeMinutes, policy);
           if (placement.kind === 'placed') {
             const segments = placement.productiveSegments;
             const patch: SchedulePatch = { id, changes: { start_date: segments[0].start, end_date: segments.at(-1)!.end,
@@ -7443,7 +7535,7 @@ function baselineWithinWindow(snapshot: Readonly<ScheduleSnapshot>, bounds: Read
   if (task.planning_status === 'needs_planning' || planningDefect(snapshot, bounds, task)) return false;
   const start = timestamp(task.start_date); const end = timestamp(task.end_date);
   const floor = notBeforeFor(bounds, task); const ceiling = notAfterFor(bounds, task);
-  return !!(start && end && end > start && start >= bounds.now && (!floor || start >= floor) && (!ceiling || end <= ceiling));
+  return !!(start && end && end > start && start >= bounds.now && (!floor || start >= floor) && (!ceiling || end <= ceiling) && (!bounds.finishFloor || end >= bounds.finishFloor));
 }
 function admissionKey(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, line: string, sequence: ReadonlyArray<NimbusTask>, patches: readonly SchedulePatch[], fragmentEnd: Date): string {
   const ids = new Set(patches.map(patch => patch.id));

@@ -73,6 +73,7 @@ import { Alerts, scheduleAlertsForPatches, taskCarriesTool, taskCarriesDistribut
 import {
   chargedSetupMinutesFor,
   placeWithSetup as placeWithSetupPure,
+  placeWithFinishFloor,
   evaluateDueDateFirst as evaluateDueDateFirstPure,
   evaluateMinChangeover as evaluateMinChangeoverPure,
   evaluateSptWithSetup as evaluateSptWithSetupPure,
@@ -286,6 +287,8 @@ export function applySchedulePatches(patches: ReadonlyArray<SchedulePatch>): voi
  * `respectFirmed`), folded with every running (in-progress) and frozen-horizon
  * task. Running and frozen fold in regardless of `respectFirmed`: a running
  * order never moves, and the frozen horizon is a scheduling-window constraint.
+ * Frozen means the planned FINISH is inside the window (2026-10-27); a straddler
+ * is movable, bounded by the finish floor (`Engine.frozenFinishFloor`).
  * SAP's firm flag (`ecc_firmed`) is display-only and never locks anything.
  * Pure and run-local: never written back to Store. */
 export function effectiveFirmedIdSet(
@@ -1228,42 +1231,34 @@ export const Engine = {
     return Store.frozenHorizonEnd;
   },
 
-  /** True when `task`'s CURRENT start already falls inside the plant's
-   *  frozen window (OD-C2a: frozen iff start is inside). Unlike C1's
-   *  visibility gate (a legitimate from-the-beginning-of-time cutoff — the
-   *  past is always visible), C2's frozen window is a near-term protection
-   *  BAND, not a from-time-zero cutoff: it's drawn on the Gantt as
-   *  `[now, now + frozen days]` (Timeline's `.frozen-horizon-zone`, BOTH edges
-   *  advancing every second, same shape as the alert-horizon band it layers
-   *  above) — bounded on BOTH sides. This check must agree with that visual
-   *  band: `[now, end)`, not `(-infinity, end)`. An earlier version checked
-   *  only the upper bound, which silently treated every already-overdue
-   *  order (however long ago) as frozen/immovable everywhere this is
-   *  consulted — a real regression, caught in review, not merely a
-   *  removeBacklog-specific quirk. `now` defaults to the current moment at
-   *  call time (not plant-local midnight, not cached, no new value needed
-   *  from the backend) — but callers that already carry their OWN
-   *  authoritative "now" pass it explicitly instead, so this stays
-   *  consistent with the rest of that call site's own scoping rather than
-   *  splitting into two different clocks in the same run:
-   *  runAndApply's isAged/isOutOfWin (its planningStart, with runNow
-   *  injected for candidate runs) and removeBacklog's plant-local
-   *  wall-clock `now` (Engine._plantWallNow) both thread their own value
-   *  through; autoReflow has no such concept and relies on the default.
+  /** True when `task`'s planned FINISH falls inside the plant's frozen window
+   *  `[now, frozenHorizonEnd)` (finish-based since 2026-10-27, following SAP's
+   *  planning time fence; it replaces the start-based OD-C2a rule, OQ27 and R26).
+   *  Persisted placement only (`hasPersistedPlacement`). Rules:
+   *   - An order that STRADDLES the edge (starts inside, finishes at or after
+   *     it) is NOT frozen: Optimize may move it. The optimizer's frozen floor
+   *     is a FINISH floor (`Engine.frozenFinishFloor`), so no unprotected order
+   *     may end inside the window.
+   *   - An overdue order (finish already past `now`) is NOT frozen.
+   *   - finish == frozenHorizonEnd is not frozen (exclusive edge); finish == now is.
+   *   - Only `end_date` is read, so a finish-only placed row (a distribution
+   *     child with a NULL scheduled start) freezes on its real held finish.
+   *  The window is bounded on BOTH sides, matching the Gantt's
+   *  `.frozen-horizon-zone` band `[now, now + frozen days]`. `now` defaults to
+   *  the task's plant clock (`_clockFor`); callers carrying their own
+   *  authoritative "now" (runAndApply's runNow, removeBacklog's plant-wall
+   *  clock) pass it so one run never splits across two clocks.
    *
-   *  Such an order is treated as implicitly pinned by every placement call
-   *  site below — a reason DISTINCT from Store.isFirmed (a genuine manual
-   *  pin) so the UI can explain why it didn't move without conflating the
-   *  two. This check alone never blocks anything — callers decide what
-   *  "pinned" means in their own context (excluded from the free/movable
-   *  set, an obstacle for peers, etc). Manual drags never consult this
-   *  (OD-C2c): only optimizer/auto-reflow placement code does. */
+   *  A frozen order is implicitly pinned by every optimizer/auto-reflow
+   *  placement site: a reason DISTINCT from Store.isFirmed (a manual pin) so
+   *  the UI can explain why it didn't move. This check alone blocks nothing;
+   *  callers decide what "pinned" means. Manual drags never consult it (OD-C2c). */
   isFrozenHorizon(task: NimbusTask, now?: Date, frozenHorizonEnd?: Date | null): boolean {
     const end = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
-    if (!end || !task.start_date || !Engine.hasPersistedPlacement(task)) return false;
+    if (!end || !task.end_date || !Engine.hasPersistedPlacement(task)) return false;
     const at = now ?? Engine._clockFor(task);
     // A plant with no valid timezone has no clock (OQ52): not frozen, never a throw.
-    return !!at && task.start_date >= at && task.start_date < end;
+    return !!at && task.end_date >= at && task.end_date < end;
   },
 
   /** Senior review I10 (OQ3): running/frozen arithmetic applies only to a row with a real placement, i.e. `user_scheduled`
@@ -1334,25 +1329,20 @@ export const Engine = {
     return { firmed: reasons.length > 0, reasons };
   },
 
-  /** Push `at` forward to the frozen-horizon boundary when it falls short —
-   *  the one clamp every OPTIMIZER-side placement call site (autoReflow,
-   *  earliestAllowedStart below, setup-scheduler's bounds.notBefore) applies before committing a NEW start for a task
-   *  that isn't itself frozen-pinned. Manual-path code
-   *  (manualSchedulePatchFor, Alerts.applyFix) deliberately never calls
-   *  this (OD-C2c). */
-  applyFrozenFloor(at: Date, frozenHorizonEnd?: Date | null): Date {
-    const end = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
-    return (end && at < end) ? new Date(end) : at;
+  /** The optimizer's frozen FINISH floor: `frozenEnd` when it lies after the run's
+   *  now, else null. No unprotected order may finish before it (D3, 2026-10-27).
+   *  Takes the snapshot's `frozenHorizonEnd`, never live Store (the worker's
+   *  Store is empty). Manual-path code (manualSchedulePatchFor, Alerts.applyFix)
+   *  deliberately never consults it (OD-C2c). */
+  frozenFinishFloor(runNow: Date, frozenEnd: Date | null | undefined): Date | null {
+    return frozenEnd && frozenEnd > runNow ? new Date(frozenEnd) : null;
   },
 
-  /** Local due-date calendar-day floor for a plant's optional pull-forward
-   *  limit, MAXED with the plant's C2 frozen-horizon floor (Engine.
-   *  frozenHorizonEnd) so every one of this function's callers — the reconcile's
-   *  pull-floor check and setup-scheduler's bounds.notBefore seam — gets the
-   *  frozen floor for free, with no call site needing to know a second floor
-   *  exists. */
+  /** Local due-date calendar-day START floor for a plant's optional pull-forward
+   *  limit. This is the pull-forward floor ONLY; the frozen horizon is a separate
+   *  FINISH floor (`frozenFinishFloor`, `DueDateFirstBounds.finishFloor`). */
   earliestAllowedStart(
-    task: NimbusTask, plant: string | null, frozenHorizonEnd?: Date | null,
+    task: NimbusTask, plant: string | null,
     masterDataOverride?: NimbusMasterData | null,
     view?: Pick<ScheduleSnapshot, 'calendars' | 'plants' | 'lineSettings' | 'masterData'> | null,
   ): Date | null {
@@ -1367,8 +1357,6 @@ export const Engine = {
         floor.setDate(floor.getDate() - (value as number));
       }
     }
-    const frozenEnd = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
-    if (frozenEnd && (!floor || frozenEnd > floor)) floor = new Date(frozenEnd);
     return floor;
   },
 
@@ -1378,8 +1366,8 @@ export const Engine = {
    *  means "by end of its due day". Null when the plant has no limit or the
    *  order has no SAP due date (Util.sapDueDate). Optimizer-only, like the
    *  pull-forward floor: manual moves, Alerts fixes, autoReflow and Remove
-   *  Backlog never consult it. Unlike earliestAllowedStart this is NOT maxed
-   *  with the frozen horizon — the two floors/ceilings are independent. */
+   *  Backlog never consult it. Independent of the frozen horizon
+   *  (that is a separate finish floor). */
   latestAllowedEnd(
     task: NimbusTask, plant: string | null, masterDataOverride?: NimbusMasterData | null,
     view?: Pick<ScheduleSnapshot, 'calendars' | 'plants' | 'lineSettings' | 'masterData'> | null,
@@ -2020,13 +2008,12 @@ export const Engine = {
         const dueOnBlackout = !placed && result.moveReason === 'blackout' && Util.isDateOnlyDue(task);
         if (result.finishMoved && !dueOnBlackout) issue = { code: 'finish_moved_earlier', from: anchor, to: result.changes.end_date! };
         else if (orphaned) issue = { code: 'setup_override_orphaned' };   // an active override no longer names the row before it (recorded only, Task 3.3 alerts)
-        else if (placed && task.start_date
-          && !Engine.isFrozenHorizon(task, plantNow) && Engine.isFrozenHorizon({ ...task, start_date: derivedStart, user_scheduled: true }, plantNow)) {
-          // D19 (VU17) + R26: a row (firmed or not) whose start moves from OUTSIDE to INSIDE the frozen window in
-          // this reconcile is warned; one already inside, or never placed (display-derived dates are no transition), is silent (no cutover-morning flood).
-          issue = { code: 'frozen_window_crossed', from: task.start_date, to: derivedStart };
-        } else {
-          const pullFloor = Engine.earliestAllowedStart(task, plant, null);
+        else {
+          // 2026-10-27 (C4): the D19/VU17 `frozen_window_crossed` branch is gone. Under the finish rule a placed row's
+          // finish is held, and a moved finish is reported as `finish_moved_earlier` first, so it was unreachable. Two
+          // silent flips to frozen remain (a `reversal_forward` row re-placed from now, a calendar closure pulling a
+          // finish in); each is already alerted by its own movement alert. The alert type id stays accepted for saved profiles.
+          const pullFloor = Engine.earliestAllowedStart(task, plant);
           if (pullFloor && derivedStart < pullFloor) issue = { code: 'pull_floor_crossed', from: derivedStart, to: pullFloor };   // OQ20
         }
         schedulePatch(task, stale, result.changes, issue, moveReason(stale));
@@ -2195,7 +2182,7 @@ export const Engine = {
    * has no priority, due-date, firmed-protection, day-integrity, or
    * frozen-horizon branches. The C2 (2026-08-20) frozen-horizon guard --
    * obstacle-skip on encountering a frozen-window order, and a placement
-   * floor on every candidate start -- was removed for this mode on
+   * floor (now the finish floor, `bounds.finishFloor`, which backlogBounds never sets) -- was removed for this mode on
    * 2026-08-22 by planner decision (SAP002 "Remove Backlog" parity):
    * insert-operation semantics require the overdue backlog to compress
    * fully into now, including into the frozen window. A frozen-window
@@ -2204,11 +2191,11 @@ export const Engine = {
    * `item.snapshotStart >= now && cursor <= item.snapshotStart` break above
    * still guarantees that) -- mirroring the pre-existing treatment of a
    * genuinely Store.isFirmed-pinned order, and is now counted separately via
-   * diagnostics.frozenMoved. All other placement sites (runAndApply's
-   * firmedTasks/freeTasks split, the setup-aware evaluator's firmedIds,
-   * autoReflow, Engine.earliestAllowedStart) are unaffected and keep
-   * applying Engine.isFrozenHorizon / Engine.applyFrozenFloor exactly as
-   * before. */
+   * diagnostics.frozenMoved. Since 2026-10-27 `frozenMoved` counts orders whose
+   * FINISH is inside the window, including running ones (Backlog moves running
+   * orders). All other placement sites (runAndApply's firmedTasks/freeTasks
+   * split, the setup-aware evaluator's firmedIds, autoReflow) keep applying
+   * Engine.isFrozenHorizon and the finish floor (`Engine.frozenFinishFloor`). */
   removeBacklog(opts: Record<string, unknown> = {}): RemoveBacklogResult {
     const plant = (opts.plant as string | undefined) ?? sourceSelectedPlant();
     if (!plant) throw new Error('Remove Backlog requires a selected plant');
@@ -2985,7 +2972,9 @@ export const Engine = {
       respectCalendar,
       // Snapshot-bound: the worker serializes these closures after the run ends (optimizer-worker.mts), so they
       // must never read the ambient _candidateSnapshot or the realm's Store.
-      notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.frozenHorizonEnd, baseSnapshot.masterData, baseSnapshot),
+      notBefore: (task: NimbusTask) => Engine.earliestAllowedStart(task, plant, baseSnapshot.masterData, baseSnapshot),
+      // D3 (2026-10-27): the frozen horizon is a FINISH floor on every unprotected order (a run-wide instant, from the snapshot, never live Store).
+      finishFloor: Engine.frozenFinishFloor(runNow, baseSnapshot.frozenHorizonEnd),
       notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData, baseSnapshot),
       convergenceWindow: exhaustive ? SETUP_AWARE_EXHAUSTIVE_CONVERGENCE_WINDOW : SETUP_AWARE_CONVERGENCE_WINDOW,
     };
@@ -3154,6 +3143,16 @@ export const Engine = {
     if (changed.end_date < _horizonStart) return; // aged task — don't reflow
     const line = changed.MACHINE || 'Unknown';
     const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
+    // D3 (2026-10-27): a moved peer may not FINISH inside the frozen window. The floor reads the changed order's plant
+    // clock; every attempt re-places through the calendar, which rebuilds its free intervals from that start.
+    const _floorNow = Engine._clockFor(changed) ?? Store.serverNow();
+    const _finishFloor = Engine.frozenFinishFloor(_floorNow, Engine.frozenHorizonEnd());
+    const placeReflowed = (p: NimbusTask, from: Date, setupMinutes: number): PlacementResult => {
+      const runtimeMinutes = Math.round(Util.runHours(p) * 60);
+      return placeWithFinishFloor(
+        earliest => Calendar.placeWithSetup(line, { earliestStart: earliest, runtimeMinutes, policy: splitPolicy, setup: { kind: 'resolved', minutes: setupMinutes } }),
+        from, _finishFloor, setupMinutes, runtimeMinutes, splitPolicy);
+    };
     const setup = Store.setupSnapshot;
     const definition = setup?.definition;
     // Workstream D2: the real gate is plants.setup_active (setup.plant_active),
@@ -3203,12 +3202,9 @@ export const Engine = {
             predecessor = p;
             continue;
           }
-          // C2: this peer is about to be MOVED (not merely left in place) —
-          // its new start must never land inside the plant's frozen window.
-          const placement = Calendar.placeWithSetup(line, {
-            earliestStart: Engine.applyFrozenFloor(cursor), runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
-            setup: { kind: 'resolved', minutes: requiredSetupMinutes },
-          });
+          // This peer is about to be MOVED (not merely left in place) — its new FINISH must not land inside the
+          // plant's frozen window (finish floor; a straddler may start inside it).
+          const placement = placeReflowed(p, cursor, requiredSetupMinutes);
           const changes: Partial<NimbusTask> | null = placement.kind === 'placed' && placement.productiveSegments.length
             ? {
               start_date: placement.productiveSegments[0].start,
@@ -3259,12 +3255,8 @@ export const Engine = {
         predecessor = p;
         continue;
       }
-      // C2: this peer is about to be MOVED (not merely left in place) — its
-      // new start must never land inside the plant's frozen window.
-      const placement = Calendar.placeWithSetup(line, {
-        earliestStart: Engine.applyFrozenFloor(cursor), runtimeMinutes: Math.round(Util.runHours(p) * 60), policy: splitPolicy,
-        setup: { kind: 'resolved', minutes: requiredSetupMinutes },
-      });
+      // This peer is about to be MOVED — its new FINISH must not land inside the plant's frozen window.
+      const placement = placeReflowed(p, cursor, requiredSetupMinutes);
       if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
         ErrorLog.warn('engine',
           `Could not reflow order "${p.text || p.id}" on "${line}" within the 90-day calendar search.`,
@@ -3398,6 +3390,7 @@ export function rehydrateOptimizerCandidate(
     || !serialized.effectiveFirmedIds.every(id => typeof id === 'string')) malformed('effectiveFirmedIds');
   if (!validDateMap(serialized.notBeforeById)) malformed('notBeforeById');
   if (!validDateMap(serialized.notAfterById)) malformed('notAfterById');
+  if (serialized.finishFloor !== undefined && serialized.finishFloor !== null && !isDateFieldValid(serialized.finishFloor)) malformed('finishFloor');
   if (serialized.lines !== undefined && (!Array.isArray(serialized.lines) || !serialized.lines.every(line => typeof line === 'string'))) malformed('lines');
   if (serialized.scopeTaskIds !== undefined && (!Array.isArray(serialized.scopeTaskIds) || !serialized.scopeTaskIds.every(id => typeof id === 'string'))) malformed('scopeTaskIds');
   if (typeof serialized.respectCalendar !== 'boolean') malformed('respectCalendar');
@@ -3438,6 +3431,7 @@ export function rehydrateOptimizerCandidate(
     respectCalendar: serialized.respectCalendar,
     notBefore: task => dateFor(serialized.notBeforeById, task),
     notAfter: task => dateFor(serialized.notAfterById, task),
+    finishFloor: serialized.finishFloor === undefined || serialized.finishFloor === null ? null : rehydrateDate(serialized.finishFloor),
   };
   const validationSnapshot: ScheduleSnapshot = {
     ...snapshot,
