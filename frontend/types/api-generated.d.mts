@@ -1020,6 +1020,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/priority-list/{plant}/{field_key}/template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Priority List Template
+         * @description Prefilled .xlsx for the field's upload: every value this plant's orders
+         *     use, with the current plant-wide rank filled in when a list exists. Not
+         *     admin-gated — it exposes nothing beyond GET /priority-list/{plant}/{field_key}.
+         */
+        get: operations["get_priority_list_template_priority_list__plant___field_key__template_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/color-wheel/{plant}": {
         parameters: {
             query?: never;
@@ -1243,6 +1265,46 @@ export interface paths {
          * @description Write canonical long-form plant rows or sparse rows for one owned machine.
          */
         post: operations["import_setup_matrix_setup__plant__matrix_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/setup/{plant}/value-defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save Setup Value Defaults
+         * @description Upsert (minutes) or delete (null) default changeover minutes for one signature field's values.
+         */
+        put: operations["save_setup_value_defaults_setup__plant__value_defaults_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/setup/{plant}/value-defaults/values": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Setup Value Default Values
+         * @description Listed (priority list) and observed (order) values for one signature field.
+         */
+        get: operations["get_setup_value_default_values_setup__plant__value_defaults_values_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2567,7 +2629,10 @@ export interface paths {
          * Plant Calendar Get
          * @description Return a plant's full calendar/blackout config for Store hydration:
          *     { plant, subnetwork, plant_work_hours, line_work_hours:{line:{0..6}},
-         *       machine_blackouts:[{id, machine, start, end, reason}], plant_blackouts:[...] }.
+         *       machine_blackouts:[{id, machine, start, end, reason}], plant_blackouts:[...],
+         *       plant_periods:[{id, name, valid_from, valid_to, work_hours}],
+         *       calendar_version: opaque fingerprint of the above (same value GET /tasks/horizons carries) }.
+         *     The browser records calendar_version at hydration as the baseline it later compares with the horizons probe.
          */
         get: operations["plant_calendar_get_plant_calendar_get"];
         put?: never;
@@ -2654,8 +2719,32 @@ export interface paths {
          * Plant Calendar Plant Blackouts Post
          * @description Delta write of plant-level blackouts. Payload:
          *     { plant, upserts:[{id, start, end, reason?}], deletes?:[id] }.
+         *     Planner-writable (any signed-in user whose role_plants scope covers the
+         *     plant); line blackouts, hours and periods stay admin-only.
          */
         post: operations["plant_calendar_plant_blackouts_post_plant_calendar_plant_blackouts_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/plant-calendar/plant-periods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Plant Calendar Plant Periods Post
+         * @description Delta write of effective-dated calendar periods. Payload:
+         *     { plant, upserts:[{id, name?, valid_from, valid_to?, work_hours}], deletes?:[id] }.
+         *     A rejected write answers 400 with detail {code, message, ids}.
+         */
+        post: operations["plant_calendar_plant_periods_post_plant_calendar_plant_periods_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2841,6 +2930,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/maintenance/schedule-event-sweep": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Maintenance Schedule Event Sweep
+         * @description Run the schedule_event retention sweep now. Optional {retention_days: int 1-60} overrides the setting.
+         */
+        post: operations["maintenance_schedule_event_sweep_maintenance_schedule_event_sweep_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/logs/backend": {
         parameters: {
             query?: never;
@@ -2860,6 +2969,7 @@ export interface paths {
          *       ?rid=       exact request ID correlation match
          *       ?outcome=   exact terminal outcome (success|rejected|failure)
          *       ?event=     exact structured event name (for example, orders.upload)
+         *       ?user=      exact user: frontend entries' `user` OR admin-action `ctx.actor`
          *     Paging: ?offset= (rows to skip) + ?limit= (cap). `total` is the full filtered
          *     count (pre-paging) so the viewer can show "showing N of total".
          */
@@ -2936,10 +3046,119 @@ export interface paths {
          *     rid/error_code/stack/level.
          *
          *     Body: { entries: [ { ts, level, scope, msg, errorCode?, reqId?, stack?,
-         *             buildId?, sessionId?, plant?, route?, ctx? } ] }
+         *             buildId?, sessionId?, plant?, route?, user?, ctx? } ] }
+         *     `user` falls back to the `x-user-email` request header when absent.
          *     Returns: { status:'ok', accepted: N }
          */
         post: operations["ingest_frontend_logs_logs_frontend_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alert-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Alert Profiles List */
+        get: operations["alert_profiles_list_alert_profiles_get"];
+        put?: never;
+        /** Alert Profiles Create */
+        post: operations["alert_profiles_create_alert_profiles_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alert-profiles/{profile_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Alert Profiles Update */
+        put: operations["alert_profiles_update_alert_profiles__profile_id__put"];
+        post?: never;
+        /** Alert Profiles Delete */
+        delete: operations["alert_profiles_delete_alert_profiles__profile_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alert-acks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Alert Acks List */
+        get: operations["alert_acks_list_alert_acks_get"];
+        put?: never;
+        /** Alert Acks Upsert */
+        post: operations["alert_acks_upsert_alert_acks_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alert-acks/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Alert Acks Bulk
+         * @description Acknowledge up to 500 alerts of one plant with one reason/until, in one transaction.
+         */
+        post: operations["alert_acks_bulk_alert_acks_bulk_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alert-acks/{plant}/{alert_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Alert Acks Delete */
+        delete: operations["alert_acks_delete_alert_acks__plant___alert_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/schedule-events/{plant}/order/{order_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Schedule Events For Order */
+        get: operations["schedule_events_for_order_schedule_events__plant__order__order_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3362,6 +3581,8 @@ export interface components {
             code: string;
             /** Message */
             message: string;
+            /** Step */
+            step?: string | null;
         };
         /**
          * PlantConstraintsResult
@@ -3770,6 +3991,8 @@ export interface components {
             planning_reason?: {
                 [key: string]: unknown;
             } | null;
+            /** Source */
+            source?: string | null;
         };
         /**
          * TaskRefreshPayload
@@ -3934,6 +4157,8 @@ export interface components {
              * @default false
              */
             atomic_optimizer: boolean;
+            /** Client Id */
+            client_id?: string | null;
             /**
              * Strict Conflicts
              * @default false
@@ -5615,6 +5840,38 @@ export interface operations {
             };
         };
     };
+    get_priority_list_template_priority_list__plant___field_key__template_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plant: string;
+                field_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_color_wheel_color_wheel__plant__get: {
         parameters: {
             query?: never;
@@ -5989,6 +6246,78 @@ export interface operations {
                 };
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_setup_value_defaults_setup__plant__value_defaults_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_setup_value_default_values_setup__plant__value_defaults_values_get: {
+        parameters: {
+            query?: {
+                field_key?: string;
+            };
+            header?: never;
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -8420,6 +8749,43 @@ export interface operations {
             };
         };
     };
+    plant_calendar_plant_periods_post_plant_calendar_plant_periods_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_health_health_get: {
         parameters: {
             query?: never;
@@ -8684,6 +9050,43 @@ export interface operations {
             };
         };
     };
+    maintenance_schedule_event_sweep_maintenance_schedule_event_sweep_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_backend_logs_logs_backend_get: {
         parameters: {
             query?: {
@@ -8696,6 +9099,7 @@ export interface operations {
                 rid?: string | null;
                 outcome?: string | null;
                 event?: string | null;
+                user?: string | null;
             };
             header?: {
                 "x-api-key"?: string | null;
@@ -8788,6 +9192,310 @@ export interface operations {
                 };
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alert_profiles_list_alert_profiles_get: {
+        parameters: {
+            query?: {
+                plant?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alert_profiles_create_alert_profiles_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alert_profiles_update_alert_profiles__profile_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alert_profiles_delete_alert_profiles__profile_id__delete: {
+        parameters: {
+            query?: {
+                plant?: string;
+            };
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alert_acks_list_alert_acks_get: {
+        parameters: {
+            query?: {
+                plant?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alert_acks_upsert_alert_acks_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alert_acks_bulk_alert_acks_bulk_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alert_acks_delete_alert_acks__plant___alert_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plant: string;
+                alert_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    schedule_events_for_order_schedule_events__plant__order__order_id__get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                before_id?: number | null;
+            };
+            header?: never;
+            path: {
+                plant: string;
+                order_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
