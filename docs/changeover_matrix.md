@@ -80,11 +80,11 @@ states and remain uncovered.
 
 ### Missing non-diagonal transitions
 
-For `A != B`, missing means unknown, never zero. Optimization treats the edge as unavailable. Two cases:
+For `A != B`, a pair with no matrix row **and** no value default (see "Default changeover by value" below) means unknown, never zero. Optimization treats the edge as unavailable. Two cases:
 
 **Orders with blank or unresolvable setup signatures** (signature field missing, signature incompatible with line) are placed at the tail of their day bucket, ordered among tail orders by the normal priority terms; they contribute no setup bar; and they raise an initial-state-unknown or signature-incompatible alert.
 
-**Orders with a resolvable setup signature but an uncovered transition** (known predecessor and successor states, missing matrix pair) are admitted *in sequence* near other orders sharing the same signature state, charged zero setup minutes, placed with no changeover bar, and raise a setup-uncovered alert. They are de-preferred in candidate selection by a dedicated coverage-tier comparison (fewer uncovered edges is better), guaranteeing that a fully-covered sequence still wins whenever one exists. This tier is compared immediately after policy key and outside the mode-permuted terms list, ensuring uncovered orders cluster with their signature peers rather than being scattered throughout a sequence.
+**Orders with a resolvable setup signature but an uncovered transition** (known predecessor and successor states, no matrix row and no value default) are admitted *in sequence* near other orders sharing the same signature state, charged zero setup minutes, placed with no changeover bar, and raise a setup-uncovered alert. They are de-preferred in candidate selection by a dedicated coverage-tier comparison (fewer uncovered edges is better), guaranteeing that a fully-covered sequence still wins whenever one exists. This tier is compared immediately after policy key and outside the mode-permuted terms list, ensuring uncovered orders cluster with their signature peers rather than being scattered throughout a sequence.
 
 The optimizer never freezes a line for missing setup data. Both kinds of missing-setup orders are excluded from the min-changeover permutation search over the covered core — they are never charged a fake zero-minute setup. Once search and coverage-tier ranking complete, each order places via real capacity and split-policy logic.
 
@@ -114,7 +114,30 @@ Reachable coverage is the optimization safety gate. Missing edges cannot win a s
 2. Exact line-level matrix row.
 3. Exact plant-level matrix row.
 4. Implicit zero for identical, fully known states.
-5. Otherwise uncovered.
+5. Default by value (the sum of the defaults of the values the transition arrives at; see below).
+6. Otherwise uncovered, and the plant's unknown-setup policy applies.
+
+### Default changeover by value
+
+Filling a matrix cell by cell does not scale (a real signature has on the order of a thousand states per field, so
+millions of pairs). A plant can instead store a small per-plant, per-signature-version set of **value defaults**: for
+one signature field and one value, a number of minutes charged whenever a transition *arrives at* that value from a
+state that has a different value on that field. Storage is one row per value, never per pair.
+
+- **Direction is arriving at.** The default on PRT01 = C is charged by any transition whose to-state has PRT01 = C and
+  whose from-state does not; the same value on a field never charges that field. A to C and C to A may differ.
+- **Several changed fields add up.** If both PRT01 and color change and both arriving values have a default, the
+  minutes are summed. If only one has a default the pair is still covered at that one number (a partial sum); the
+  resolution reason names the changed fields that had no default.
+- **Exact rows win.** An occurrence override, a line row and a plant row all beat a value default; identical complete
+  states stay implicit zero; a hand-entered row below the default silently wins.
+- **A blank arriving value never gets a default.** It is simply never a contributing field.
+- **The sum is not capped.** One default is capped like a row (10,080 minutes); a sum over several changed fields can
+  exceed that, and the scheduler does not clamp it.
+- **Defaults carry forward on a signature change** for every field still in the new signature; a removed field's
+  defaults stay on the old version and are ignored. Matrix rows keep the existing reset on a new version.
+- Matrix import, export and plant replace ignore defaults; defaults are plant-wide only (no line-scoped and no
+  from-value defaults). There is no kill switch: to neutralise a default, delete it or roll the release back.
 
 Line overrides are sparse cell-level overrides. Deleting one exposes the inherited plant value; a partial line
 upload never replaces the whole plant matrix.
@@ -125,6 +148,8 @@ The conceptual persistent records are:
 
 - **Plant setup-signature definition:** fields, version, strict blank policy, activation, audit metadata.
 - **Setup matrix row:** plant, optional line, signature version, ordered keys, setup minutes, source/audit metadata.
+- **Setup value default:** plant, signature version, one signature field, one value, setup minutes, audit metadata.
+  Plant-wide; one record per value rather than per pair.
 - **Current line state:** plant/line, state key, signature version, optional physical mold ID, observed timestamp,
   source, reason, actor.
 - **Setup occurrence override:** exact line, predecessor state/order, successor state/order, signature version,
@@ -422,7 +447,7 @@ V1 uses canonical long-form upload/storage:
 
 This matches missing-pair CSVs and sparse overrides. A pivot viewer may come later.
 
-- Master-data owners manage signatures, activation, matrices, and standard rows.
+- Master-data owners manage signatures, activation, matrices, standard rows, and defaults by value.
 - Authorized plant schedulers manage current state and occurrence-specific remaining setup.
 - Preview users may inspect, select/copy, and export missing pairs but not enter standards there.
 
@@ -439,7 +464,9 @@ optimizer to create a new setup-aware sequence.
 Build versioned definitions, long-form plant rows and sparse line overrides, current state, occurrence overrides,
 observed/reachable coverage, missing-pair export, shadow KPIs, group-count measurement, and performance evidence.
 
-Exit requires version-matched validation, acceptable reachable coverage, visible/acknowledged unknown states,
+Exit requires version-matched validation (a plant with value defaults but no rows counts as having a matrix for the
+current signature version), acceptable reachable coverage (a pair covered by a row, the identical-state zero or a
+value default is covered; only pairs with none of those are gaps), visible/acknowledged unknown states,
 representative performance budgets, and clear derived-versus-manual state UX.
 
 ### Stage 1 — schedule-real Due-date first
