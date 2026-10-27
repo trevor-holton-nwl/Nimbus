@@ -1180,7 +1180,7 @@ export const Store = {
     }
     // task.firmed is the MANUAL (planner) firm mirror only. The SAP flag arrives
     // separately as task.ecc_firmed and the frozen-horizon reason is derived live —
-    // the three unite in Engine.firmingStatus(); derived firming never enters firmedIds.
+    // the frozen-horizon (finish-based) and running reasons unite with this planner firm in Engine.firmingStatus() (the SAP flag is display-only and never locks); derived firming never enters firmedIds.
     task.firmed = !!task.firmed;
     // firmedIds mirrors task.firmed both ways, so undo/restore of a snapshot
     // (updateMany with firmed:false) also drops the id.

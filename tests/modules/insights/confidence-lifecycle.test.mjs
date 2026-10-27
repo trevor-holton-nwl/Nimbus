@@ -425,6 +425,9 @@ async function withPaletteHarness(body) {
   const priorSetFirmed = Store.setFirmed;
   const priorPush = UndoStack.push;
   const priorSchedule = Alerts.scheduleRecompute;
+  // Freeze All is scoped to the SELECTED plant (universal firm, C-2), so the fixtures' plant is selected.
+  const priorPlant = Store.selectedPlant;
+  Store.setSelectedPlant('CMD-P', 'test');
   const setFirmedCalls = [];
   const pushCalls = [];
   Toast.show = () => {};
@@ -451,6 +454,7 @@ async function withPaletteHarness(body) {
     TimeMachine.snapshot = priorSnapshot;
     Alerts.scheduleRecompute = priorSchedule;
     nimbus.Selection = priorSelection;
+    Store.setSelectedPlant(priorPlant, 'test');
     Store.setTasks(priorTasks, 'test');
     Store.firmedIds.clear();
     for (const id of priorFirmed) Store.firmedIds.add(id);
@@ -465,17 +469,18 @@ test('palette Firm N orders firms exactly the valid selected ids with cmd-palett
     Store.setTasks([mkTask('c1'), mkTask('c2'), mkTask('c3'), mkTask('c4')], 'test');
     Store.setFirmed(['c1'], true, 'test');             // c1 already firmed before the action
     setFirmedCalls.length = 0;
-    nimbus.Selection = { ids: () => ['c1', 'c2', 'c3', 'ghost'], stats: () => ({ firmedCount: 1 }) };
+    nimbus.Selection = { ids: () => ['c1', 'c2', 'c3', 'ghost'] };
 
     const cmd = CommandPalette._buildSelectionCommands().find(c => c.type === 'selection');
-    assert.ok(cmd, 'a firm command is offered when not every selected order is firmed');
+    assert.ok(cmd, 'a firm command is offered when any selected order can still be firmed');
     cmd.run();
 
-    // Unknown ids (a stale selection) are filtered out before firming and snapshotting.
-    assert.deepEqual(brief(setFirmedCalls), [{ ids: ['c1', 'c2', 'c3'], firmed: true, source: 'cmd-palette' }]);
+    // Universal firm (C10): the command goes through Engine.firmPlan/applyFirm, so c1 (already planner-firmed,
+    // an Unfirm candidate) and the unknown id are not part of the Firm write or the undo scope.
+    assert.deepEqual(brief(setFirmedCalls), [{ ids: ['c2', 'c3'], firmed: true, source: 'cmd-palette' }]);
     assert.equal(pushCalls.length, 1);
-    assert.equal(pushCalls[0].label, 'Firm 4 orders', 'label carries the SELECTION count');
-    assert.deepEqual(pushCalls[0].ids, ['c1', 'c2', 'c3']);
+    assert.equal(pushCalls[0].label, 'Firm 2 orders', 'label carries the count of orders actually firmed');
+    assert.deepEqual(pushCalls[0].ids, ['c2', 'c3']);
     assert.ok(['c1', 'c2', 'c3'].every(id => Store.isFirmed(id)));
     assert.equal(Store.isFirmed('c4'), false, 'unselected order untouched');
 
@@ -485,7 +490,6 @@ test('palette Firm N orders firms exactly the valid selected ids with cmd-palett
     assert.equal(Store.isFirmed('c2'), false, 'c2 returns to unfirmed');
     assert.equal(Store.isFirmed('c3'), false, 'c3 returns to unfirmed');
     assert.deepEqual(brief(setFirmedCalls), [
-      { ids: ['c1'], firmed: true, source: 'undo' },
       { ids: ['c2', 'c3'], firmed: false, source: 'undo' },
     ]);
   });
@@ -496,7 +500,7 @@ test('palette Unfirm N orders (all selected firmed) unfirms them and undo re-fir
     Store.setTasks([mkTask('u1'), mkTask('u2')], 'test');
     Store.setFirmed(['u1', 'u2'], true, 'test');
     setFirmedCalls.length = 0;
-    nimbus.Selection = { ids: () => ['u1', 'u2'], stats: () => ({ firmedCount: 2 }) };
+    nimbus.Selection = { ids: () => ['u1', 'u2'] };
 
     CommandPalette._buildSelectionCommands().find(c => c.type === 'selection').run();
     assert.deepEqual(brief(setFirmedCalls), [{ ids: ['u1', 'u2'], firmed: false, source: 'cmd-palette' }]);

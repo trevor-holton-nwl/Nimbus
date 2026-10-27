@@ -556,6 +556,9 @@ export const Timeline = {
           }
         } finally { Timeline._clockMemo = null; }
         Timeline._frozenBandIds = next;
+        // The reasons text and the Firm button depend on the clock, not on a Store event, so the open
+        // Inspector's lock block is patched on EVERY scan (a partial patch, never a full _render).
+        Inspector.refreshLock(Inspector._currentId);
       }
       PerfMonitor.record('Timeline.ticker', performance.now() - _pmT0);
     }, 1000);
@@ -6195,9 +6198,17 @@ export const Interaction = {
     if (e.key.toLowerCase() === 'f' && !mod && Selection.size()) {
       e.preventDefault();
       const ids = Selection.ids();
-      const allFirmed = ids.every(id => Store.isFirmed(id));
-      Store.setFirmed(ids, !allFirmed, 'interaction');
-      if (allFirmed) notifyResidualFirming(ids); // was firmed, now unfirming
+      // Lock-aware toggle (C3): firm whatever is not firmed; when nothing is left to firm, unfirm the
+      // planner-only firms. Frozen and running orders are skipped (counted in a toast).
+      const plan = Engine.firmPlan(ids);
+      if (!plan.firm.length && !plan.unfirm.length) {
+        if (plan.locked.length) Toast.show(Util.t('toast.firm_nothing'), 'info');
+        return;
+      }
+      const unfirming = plan.firm.length === 0;
+      const { changed, skipped } = Engine.applyFirm(unfirming ? plan.unfirm : plan.firm, !unfirming, 'interaction');
+      if (skipped.length || plan.locked.length) Toast.show(Util.t('toast.firm_skipped_locked', { n: plan.locked.length }), 'info');
+      if (unfirming && changed.length) notifyResidualFirming(changed);
       return;
     }
 
@@ -6273,6 +6284,9 @@ export const Interaction = {
     const panel = document.querySelector('#right-sidebar .inspector-body, #inspector-body');
     if (!panel) return;
     const s = Selection.stats();
+    // Firmed = the union (planner, frozen horizon, running), i.e. everything not offered "Firm".
+    const plan = Engine.firmPlan(Selection.ids());
+    const firmedTotal = plan.unfirm.length + plan.locked.length;
     panel.innerHTML = `
       <div class="multi-select-panel" style="padding:12px;">
         <div style="font-size:20px;font-weight:700;margin-bottom:8px;">
@@ -6280,11 +6294,11 @@ export const Interaction = {
         </div>
         <div style="font-size:13px;color:#666;margin-bottom:12px;">
           ${Util.fmtHours(s.totalHours)} total run-time · ${s.lines.length} line${s.lines.length === 1 ? '' : 's'}
-          ${s.firmedCount ? ` · ${s.firmedCount} firmed` : ''}
+          ${firmedTotal ? ` · ${Util.t('ui.multi_firmed_count', { n: firmedTotal })}` : ''}
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;">
-          <button class="btn btn-ghost" data-action="firm">${Util.t('btn.firm_all')}</button>
-          <button class="btn btn-ghost" data-action="unfirm">${Util.t('btn.unfirm_all')}</button>
+          ${plan.firm.length ? `<button class="btn btn-ghost" data-action="firm">${Util.t('btn.firm_all')}</button>` : ''}
+          ${plan.unfirm.length ? `<button class="btn btn-ghost" data-action="unfirm">${Util.t('btn.unfirm_all')}</button>` : ''}
           <button class="btn btn-ghost" data-action="unschedule">${Util.t('btn.unschedule_all')}</button>
           <button class="btn btn-ghost" data-action="clear">${Util.t('btn.clear_selection')}</button>
         </div>
@@ -6304,7 +6318,10 @@ export const Interaction = {
   _bulkFirm(firmed: boolean): void {
     const ids = Selection.ids();
     if (!ids.length) return;
-    Store.setFirmed(ids, firmed, 'interaction');
+    const plan = Engine.firmPlan(ids);
+    const { changed } = Engine.applyFirm(ids, firmed, 'interaction');
+    if (plan.locked.length) Toast.show(Util.t('toast.firm_skipped_locked', { n: plan.locked.length }), 'info');
+    if (!firmed && changed.length) notifyResidualFirming(changed);
     this._showMultiInspector();
   },
 

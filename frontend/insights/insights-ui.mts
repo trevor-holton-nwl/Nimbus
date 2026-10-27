@@ -18,7 +18,7 @@
 // file, not a bare identifier, so those call sites are left untouched here —
 // no import edge is needed in the other direction.
 /* global NIMBUS */
-import { Config, Util, VirtualList } from '../platform/foundation.mjs';
+import { Config, Util, VirtualList, Toast } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Utilization, Alerts } from './services.mjs';
@@ -984,20 +984,23 @@ export const Dashboard = {
     // Union count/list (frozen-horizon OR running OR manual; SAP firm is display-only) — see Engine.firmingStatus.
     const firmed = Dashboard._filteredTasks().filter(t => Engine.firmingStatus(t).firmed);
     if (!firmed.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_firmed_orders')}</div>`; return; }
+    // Reason text and the Unfirm button are computed only for the (at most 12) rendered rows. Unfirm is
+    // offered for a planner-only firm (D4); a frozen or running order shows its reason and no button.
     list.innerHTML = firmed.slice(0, 12).map(t => `
       <div class="firmed-row">
         <span class="pin">🔒</span>
         <span class="id">${Util.escapeHtml(t.MACHINE || '')}</span>
-        <span class="name">${Util.escapeHtml(t.text || t.ORDER || t.id)}</span>
-        <span class="when">${Util.fmtDTShort(t.start_date)}</span>
-        <button class="btn btn-ghost sm" data-order-id="${Util.escapeHtml(String(t.id))}">${Util.t('btn.unfirm_dashboard')}</button>
+        <span class="name">${Util.escapeHtml(t.text || t.ORDER || t.id)}<small class="reason">${Util.escapeHtml(Engine.firmReasonsText(t))}</small></span>
+        <span class="when">${Util.fmtDTShort(t.end_date)}</span>
+        ${Engine.firmActionFor(t) === 'unfirm' ? `<button class="btn btn-ghost sm" data-order-id="${Util.escapeHtml(String(t.id))}">${Util.t('btn.unfirm_dashboard')}</button>` : ''}
       </div>
     `).join('');
     list.querySelectorAll<HTMLButtonElement>('[data-order-id]').forEach(button =>
       button.addEventListener('click', () => Dashboard._unfirm(button.dataset.orderId || '')));
   },
   _unfirm(id: string): void {
-    Store.setFirmed([id], false, 'dashboard');
+    const { changed } = Engine.applyFirm([id], false, 'dashboard');
+    if (!changed.length) { Toast.show(Util.t('toast.still_firmed')); Dashboard._renderFirmedList(); return; }
     notifyResidualFirming([id]);
     Alerts.scheduleRecompute();
   },

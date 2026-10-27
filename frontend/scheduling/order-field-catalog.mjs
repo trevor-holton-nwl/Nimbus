@@ -73,7 +73,7 @@ export const ORDER_FIELD_CATALOG = [
         i18nGridKey: 'col.plant', i18nInspectorKey: 'ui.insp_plant', gridWidth: 90 },
     { key: 'FIRMING_INDICATOR', dbColumn: 'firming_indicator', type: 'text',
         gridDefault: false, inspectorDefault: false,
-        i18nGridKey: 'col.firming', i18nInspectorKey: 'ui.insp_firming', gridWidth: 90 },
+        i18nGridKey: 'col.sap_firmed', i18nInspectorKey: 'ui.sap_firmed', gridWidth: 90 },
     // 9 SAP COOIS extract fields — upload-sourced (db.ingest_orders_from_excel),
     // never rendered anywhere yet. Default hidden in both surfaces until an
     // admin opts in via System Configuration.

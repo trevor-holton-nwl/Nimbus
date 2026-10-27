@@ -307,7 +307,7 @@ export const OptimizeDialog = (() => {
     if (calendar) { calendar.checked = backlog || calendar.checked; calendar.disabled = backlog; }
     const firmedLabel = document.getElementById('opt-firmed-label');
     const calendarLabel = document.getElementById('opt-calendar-label');
-    if (firmedLabel) firmedLabel.title = backlog ? 'Firmed orders move when reached and remain firmed.' : '';
+    if (firmedLabel) firmedLabel.title = backlog ? 'Firmed orders move when reached and remain firmed.' : Util.t('ui.opt_respect_firmed_hint');
     if (calendarLabel) calendarLabel.title = backlog ? 'Calendar adherence is required for Remove Backlog.' : '';
   }
 

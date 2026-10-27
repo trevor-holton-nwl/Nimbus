@@ -617,10 +617,12 @@ export const AlertSlotModal = {
       const wasFirmed = Store.isFirmed(id);
       const snap = UndoStack.snapshotTasks([id]);
       Store.updateTask(id, patch, 'alerts');
-      if (!wasFirmed) Store.setFirmed([id], true, 'alerts');
+      // C9: firm the placed order unless the frozen horizon (or a running state) already protects it:
+      // applyFirm skips a locked order, and a redundant planner firm there would be unremovable.
+      const firmedHere = !wasFirmed && Engine.applyFirm([id], true, 'alerts').changed.length > 0;
       UndoStack.push(t('am.slot_undo', { order: _orderLabel(cur) }), () => {
         UndoStack.restoreTasks(snap);   // strips `firmed` on purpose, so the firm is undone here, as its own write
-        if (!wasFirmed) Store.setFirmed([id], false, 'undo');
+        if (firmedHere) Store.setFirmed([id], false, 'undo');
       }, [id]);
       Alerts.scheduleRecompute();
       const placedOn = patch.MACHINE ?? machine;

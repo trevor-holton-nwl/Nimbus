@@ -740,14 +740,17 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           icon:  '🔒',
           run() {
             CommandPalette.close();
-            const unfirmedIds = Store.tasksArr.filter(t => !Store.isFirmed(t.id)).map(t => t.id);
+            // Scoped to the SELECTED plant, and to orders that can still take a firm: frozen and running
+            // orders are already locked (firmPlan), so they are neither counted nor written.
+            const plantIds = Store.tasksArr.filter(t => !t.PLANT || t.PLANT === Store.selectedPlant).map(t => t.id);
+            const unfirmedIds = NIMBUS.Engine?.firmPlan?.(plantIds)?.firm ?? [];
             if (unfirmedIds.length) {
               // A firm is shared with every planner once saved, so a bulk Firm All asks first.
               // Native confirm on purpose: Modal.confirm would add a NIMBUS.Modal consumer to this
               // classic script, and the legacy-surface ratchet only allows that surface to shrink.
               if (!window.confirm(t('confirm.firm_all', { count: unfirmedIds.length }))) return;
               _pushTaskUndo('Firm All (freeze)', unfirmedIds, true);
-              Store.setFirmed(unfirmedIds, true, 'cmd-palette');
+              NIMBUS.Engine?.applyFirm?.(unfirmedIds, true, 'cmd-palette');
             }
             Alerts.scheduleRecompute();
             const label = `Frozen · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
@@ -1172,27 +1175,28 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const n     = ids.length;
       if (!n) return [];
 
-      const stats       = NIMBUS.Selection?.stats?.() || {};
-      const firmedCount = stats.firmedCount || 0;
-      const allFirmed   = firmedCount === n;
-      const cmds        = [];
+      // Lock-aware (D4/C10): a mixed selection offers Firm (n) when anything can be firmed, else Unfirm (n)
+      // when anything is planner-only firmed, else no command (frozen / running orders take neither).
+      const plan  = NIMBUS.Engine?.firmPlan?.(ids) || { firm: [], unfirm: [], locked: [] };
+      const cmds  = [];
+      const newFirmed = plan.firm.length > 0;
+      const firmIds = newFirmed ? plan.firm : plan.unfirm;
 
       // Firm / Unfirm
-      cmds.push({
+      if (firmIds.length) cmds.push({
         type: 'selection',
-        icon:  allFirmed ? '🔓' : '🔒',
-        label: allFirmed ? t('cmdp.label_unfirm_selected', { count: n }) : t('cmdp.label_firm_selected', { count: n }),
-        sub:   allFirmed ? t('cmdp.sub_make_orders_moveable') : t('cmdp.sub_pin_orders_in_place'),
+        icon:  newFirmed ? '🔒' : '🔓',
+        label: newFirmed ? t('cmdp.label_firm_selected', { count: firmIds.length }) : t('cmdp.label_unfirm_selected', { count: firmIds.length }),
+        sub:   newFirmed ? t('cmdp.sub_pin_orders_in_place') : t('cmdp.sub_make_orders_moveable'),
         run() {
           CommandPalette.close();
-          const newFirmed = !allFirmed;
-          const validIds = ids.filter(id => Store.tasks[id]);
-          if (validIds.length) {
-            _pushTaskUndo(`${newFirmed ? 'Firm' : 'Unfirm'} ${n} orders`, validIds, true);
-            Store.setFirmed(validIds, newFirmed, 'cmd-palette');
-          }
+          // Undo covers only the ids that actually change.
+          _pushTaskUndo(`${newFirmed ? 'Firm' : 'Unfirm'} ${firmIds.length} orders`, firmIds, true);
+          const res = NIMBUS.Engine?.applyFirm?.(firmIds, newFirmed, 'cmd-palette') || { changed: [], skipped: [] };
           Alerts.scheduleRecompute();
-          Toast.show(newFirmed ? t('toast.firmed_orders', { count: n }) : t('toast.unfirmed_orders', { count: n }), 'success', 1400);
+          const count = res.changed.length;
+          Toast.show(newFirmed ? t('toast.firmed_orders', { count }) : t('toast.unfirmed_orders', { count }), 'success', 1400);
+          if (res.skipped.length) Toast.show(t('toast.firm_skipped_locked', { n: res.skipped.length }), 'info', 2200);
         }
       });
 
