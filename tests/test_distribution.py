@@ -3333,6 +3333,56 @@ class TestReweightSharesCollapse(_ReweightFixtureBase):
             base_version=header["xmin"], dry_run=True, actor="tester")
         assert old["id"] not in [r["id"] for r in preview["removed_scheduled"]]
 
+    # --- universal firm (2026-10-27): survivor listed iff NIMBUS-firmed (planner, frozen by finish, running) ---
+    _SURV_START, _SURV_END = dt.datetime(2026, 10, 1, 8), dt.datetime(2026, 10, 1, 12)
+
+    def _collapse_preview(self, pg, *, window, **cols):
+        """Dry-run the N->1 collapse onto L1 with the plant window patched to `window` = (now_local, frozen_end);
+        returns (old child id, ids listed in removed_scheduled)."""
+        old = next(c for c in _snapshot_children(pg, self.PLANT, self.ORD) if c["machine"] == self.L1)
+        sets = ", ".join(f"{k} = %s" for k in cols)
+        with pg._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(f"UPDATE orders SET {sets} WHERE id = %s", (*cols.values(), old["id"]))
+            conn.commit()
+        header = _snapshot_header(pg, self.PLANT, self.ORD, self.MAT)
+        with mock.patch.object(distribution_data.db, "frozen_window_for_plant", return_value=window):
+            preview = distribution_data.reweight_shares(
+                self.PLANT, self.ORD, self.MAT,
+                [{"machine": self.L1, "weight": 100}, {"machine": self.L2, "weight": 0}],
+                base_version=header["xmin"], dry_run=True, actor="tester")
+        return old["id"], [r["id"] for r in preview["removed_scheduled"]], preview
+
+    def test_collapse_of_an_sap_x_only_survivor_is_not_listed(self, pg):
+        old_id, listed, _ = self._collapse_preview(
+            pg, window=(dt.datetime(2026, 10, 20), dt.datetime(2026, 10, 25)), scheduled_start=self._SURV_START,
+            scheduled_end=self._SURV_END, manual_firmed=False, firming_indicator="X")
+        assert old_id not in listed
+
+    def test_collapse_of_a_frozen_by_finish_survivor_is_listed(self, pg):
+        old_id, listed, _ = self._collapse_preview(
+            pg, window=(dt.datetime(2026, 10, 1, 6), dt.datetime(2026, 10, 3)), scheduled_start=self._SURV_START,
+            scheduled_end=self._SURV_END, manual_firmed=False, firming_indicator=None)
+        assert old_id in listed
+
+    def test_collapse_of_a_running_survivor_is_listed_even_with_no_frozen_horizon(self, pg):
+        old_id, listed, _ = self._collapse_preview(
+            pg, window=(dt.datetime(2026, 10, 1, 10), None), scheduled_start=self._SURV_START,
+            scheduled_end=self._SURV_END, manual_firmed=False, firming_indicator=None)
+        assert old_id in listed
+
+    def test_collapse_of_an_overdue_survivor_is_not_listed(self, pg):
+        old_id, listed, _ = self._collapse_preview(
+            pg, window=(dt.datetime(2026, 10, 2), dt.datetime(2026, 10, 5)), scheduled_start=self._SURV_START,
+            scheduled_end=self._SURV_END, manual_firmed=False, firming_indicator=None)
+        assert old_id not in listed
+
+    def test_finish_only_child_is_frozen_by_finish_in_the_plan_entry(self, pg):
+        """A distribution child placed by its finish alone (scheduled_start NULL) used to read frozen=False."""
+        _id, _listed, preview = self._collapse_preview(
+            pg, window=(dt.datetime(2026, 10, 1, 6), dt.datetime(2026, 10, 3)), scheduled_start=None,
+            scheduled_end=self._SURV_END, manual_firmed=False, firming_indicator=None)
+        assert next(p for p in preview["plan"] if p["machine"] == self.L1)["frozen"] is True
+
     def test_repair_runs_with_the_scheduled_removal_confirmed(self, pg):
         """Repair re-materializes with `confirm_remove_scheduled=True` (A.3 #16): the guard is evaluated, never
         raised, for a header repair must fix."""
@@ -4613,6 +4663,12 @@ class TestBundle3FetchChildrenLock:
         cur = self._Cur()
         distribution_data._fetch_children_by_machine(cur, "1006", "ORD", "MAT")
         assert "FOR UPDATE" not in cur.queries[0]
+
+    def test_reads_the_last_segment_end_and_never_reads_the_sap_firming_indicator(self):
+        cur = self._Cur()
+        distribution_data._fetch_children_by_machine(cur, "1006", "ORD", "MAT")
+        assert "MAX(s.scheduled_end)" in cur.queries[0]
+        assert "firming_indicator" not in cur.queries[0]
 
 
 @pytest.mark.pg

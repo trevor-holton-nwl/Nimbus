@@ -2279,7 +2279,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <div class="ctx-menu" id="ctx-menu" hidden>
   <button data-action="firm" data-i18n="ctx.firm_order">🔒 Firm this order</button>
   <button data-action="unfirm" data-i18n="ctx.unfirm_order">🔓 Unfirm this order</button>
-  <div class="ctx-sep"></div>
+  <div class="ctx-note" role="none" hidden></div>
+  <div class="ctx-sep" id="ctx-sep-firm"></div>
   <button data-action="override" data-i18n="ctx.override_datetime">📅 Override date / time…</button>
   <div class="ctx-sep"></div>
   <button data-action="inspect" data-i18n="ctx.open_inspector">👁 Open in inspector</button>
@@ -2693,7 +2694,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <li class="lg-k" data-key="past"><span class="lg-k-num" aria-hidden="true">6</span><span class="lg-sw band" aria-hidden="true"><i class="lg-past"></i></span><div><div class="lg-k-t" id="lg-t-past" data-i18n="legend.past_t">Elapsed time</div><p class="lg-k-d" id="lg-d-past" data-i18n="legend.past_d">Everything left of the Now line has already happened. Orders here are not rescheduled.</p></div></li>
             <li class="lg-k" data-key="nonworking"><span class="lg-k-num" aria-hidden="true">7</span><span class="lg-sw band" aria-hidden="true"><i class="lg-nonworking"></i></span><div><div class="lg-k-t" id="lg-t-nonworking" data-i18n="legend.nonworking_t">Closed time</div><p class="lg-k-d" id="lg-d-nonworking" data-i18n="legend.nonworking_d">Hours the plant calendar is closed: nights, weekends, holidays. Orders are not placed here.</p></div></li>
             <li class="lg-k" data-key="blackout"><span class="lg-k-num" aria-hidden="true">8</span><span class="lg-sw blackout" aria-hidden="true"><i class="lg-v-blackout">✕</i></span><div><div class="lg-k-t" id="lg-t-blackout" data-i18n="legend.blackout_t">Blackout</div><p class="lg-k-d" id="lg-d-blackout" data-i18n="legend.blackout_d">A planned stop on one machine or the whole plant, with its reason. Nothing runs here.</p></div></li>
-            <li class="lg-k" data-key="frozen"><span class="lg-k-num" aria-hidden="true">9</span><span class="lg-sw edge" aria-hidden="true"><i class="lg-frozen-horizon"></i></span><div><div class="lg-k-t" id="lg-t-frozen" data-i18n="legend.frozen_t">Frozen horizon</div><p class="lg-k-d" id="lg-d-frozen" data-i18n="legend.frozen_d">The near-term window Optimize never touches, ending at the dark green line. You can still drag orders here by hand.</p></div></li>
+            <li class="lg-k" data-key="frozen"><span class="lg-k-num" aria-hidden="true">9</span><span class="lg-sw edge" aria-hidden="true"><i class="lg-frozen-horizon"></i></span><div><div class="lg-k-t" id="lg-t-frozen" data-i18n="legend.frozen_t">Frozen horizon</div><p class="lg-k-d" id="lg-d-frozen" data-i18n="legend.frozen_d">The near-term window Optimize never touches, ending at the dark green line. An order whose finish falls inside it stays put; nothing else is scheduled to finish there. You can still drag orders here by hand.</p></div></li>
             <li class="lg-k" data-key="alert"><span class="lg-k-num" aria-hidden="true">10</span><span class="lg-sw edge" aria-hidden="true"><i class="lg-alert-horizon"></i></span><div><div class="lg-k-t" id="lg-t-alert" data-i18n="legend.alert_t">Alert horizon</div><p class="lg-k-d" id="lg-d-alert" data-i18n="legend.alert_d">Alerts are raised only for orders up to this line. Beyond it the schedule is shown but not yet checked.</p></div></li>
             <li class="lg-k" data-key="alertcell_err"><span class="lg-k-num" aria-hidden="true">11</span><span class="lg-sw band" aria-hidden="true"><i class="lg-alertcell-err"></i></span><div><div class="lg-k-t" id="lg-t-alertcell_err" data-i18n="legend.alertcell_err_t">Day with a conflict</div><p class="lg-k-d" id="lg-d-alertcell_err" data-i18n="legend.alertcell_err_d">A red day cell: at least one order on this machine has a conflict that day. Click the cell to see them.</p></div></li>
             <li class="lg-k"><span class="lg-k-num" aria-hidden="true"></span><span class="lg-sw band" aria-hidden="true"><i class="lg-alertcell-warn"></i></span><div><div class="lg-k-t" data-i18n="legend.alertcell_warn_t">Day with a warning</div><p class="lg-k-d" data-i18n="legend.alertcell_warn_d">An amber day cell: something on this machine needs a look that day, but nothing is blocked.</p></div></li>
@@ -2895,7 +2896,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <label class="opt-check" id="opt-firmed-label">
               <input type="checkbox" id="opt-chk-firmed" checked>
               <span class="opt-check-box"></span>
-              <span data-i18n="ui.opt_respect_firmed">Respect firmed orders</span>
+              <span data-i18n="ui.opt_respect_firmed">Respect planner-firmed orders</span>
             </label>
             <label class="opt-check" id="opt-calendar-label">
               <input type="checkbox" id="opt-chk-calendar" checked>

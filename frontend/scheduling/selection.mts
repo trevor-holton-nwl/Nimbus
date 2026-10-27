@@ -100,19 +100,17 @@ export const Selection = {
   },
 
   /** Summary for the Inspector multi-selection view. */
-  stats(): { count: number; totalHours: number; lines: string[]; firmedCount: number } {
+  stats(): { count: number; totalHours: number; lines: string[] } {
     const ids = [...this._ids];
     let totalHours = 0;
     const lines = new Set<string>();
-    let firmedCount = 0;
     for (const id of ids) {
       const t = Store.tasks[id];
       if (!t) continue;
       totalHours += Util.runHours(t);
       if (t.MACHINE) lines.add(t.MACHINE);
-      if (Store.isFirmed(id)) firmedCount++;
     }
-    return { count: ids.length, totalHours, lines: [...lines], firmedCount };
+    return { count: ids.length, totalHours, lines: [...lines] };
   },
 
   on(fn: (payload: SelectionEmitPayload) => void): () => void { this._listeners.add(fn); return () => this._listeners.delete(fn); },

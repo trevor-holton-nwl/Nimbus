@@ -2197,27 +2197,38 @@ def restore_archived(archive_id: int, *, actor: str) -> dict:
 # ---------------------------------------------------------------------------
 # Send to SAP -- the outbound queue (NIMBUS -> SAP planned-order import)
 # ---------------------------------------------------------------------------
-def firm_flag(manual_firmed, firming_indicator, eff_start, frozen_end) -> str:
-    """Firm Indicator we send (D10): 'X' when the planner firmed the order, SAP already had it
-    firmed, or its effective start lies inside the frozen horizon (`frozen_end` None = no frozen
-    firming); blank otherwise. Add-only by construction: an existing SAP 'X' always yields 'X'."""
+def firm_flag(manual_firmed, firming_indicator, placed_start, placed_end, frozen_end, now) -> str:
+    """Firm Indicator we send (D10; universal firm, 2026-10-27): 'X' for every NIMBUS-firmed order and for an
+    SAP X, blank otherwise. NIMBUS-firmed = planner firm (`manual_firmed`), frozen by FINISH (the PLACED finish
+    lies in `[now, frozen_end)`, `db.finish_in_frozen_window`), or running (`placed_start <= now < placed_end`,
+    the same rule as `db._order_is_running`). `placed_*` are the stored placement only (first/last segment, else
+    `scheduled_start`/`scheduled_end`); a never-placed or Needs Planning order has none, so it is never frozen or
+    running, and an overdue order (finish before now) is not frozen either (D7: they are not sent). Running does
+    not depend on `frozen_end` (a plant with no frozen horizon still has running orders), but needs `now`
+    (None = running off). An existing SAP 'X' (strip/upper) always yields 'X': add-only, and SAP's flag drives
+    no NIMBUS locking."""
     if manual_firmed:
         return "X"
     if str(firming_indicator or "").strip().upper() == "X":
         return "X"
-    if frozen_end is not None and eff_start is not None and eff_start < frozen_end:
+    if db.finish_in_frozen_window(placed_end, now, frozen_end):
+        return "X"
+    if now is not None and placed_start is not None and placed_end is not None and placed_start <= now < placed_end:
         return "X"
     return ""
 
 
-def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int, int]:
+def build_outbound_groups(rows: list[dict], frozen_end, now=None) -> tuple[list[dict], int, int]:
     """Roll candidate order rows up to one outbound row per planned order (D9 / D17). Pure.
 
     `rows`: dicts with id, production_order, parent_production_order, material_number, manual_firmed,
-    firming_indicator, production_version, planning_status, eff_start, eff_end (naive plant-local).
+    firming_indicator, production_version, planning_status, placed_start, placed_end, eff_end (naive plant-local;
+    `placed_*` are the stored placement the firm rule reads, `eff_end` is what is sent). `now` is the plant-local
+    clock for the frozen/running firm reasons; None turns "running" off and (with `frozen_end`) freezes nothing.
     A row is a candidate when it has an effective end and is not 'needs_planning'; the rest are
     counted as skipped. Rows group by (parent order or own order number, material): the group's end is
-    the latest member end, its firm flag is 'X' when ANY candidate member qualifies (`firm_flag`), its
+    the latest member end, its firm flag is 'X' when ANY candidate member qualifies (`firm_flag`; so a running or
+    frozen child can carry a far-later sibling's end out with the X), its
     version is the smallest non-blank member version (children of one parent carry the same one).
     Only FIRMED planned orders are sent (OQ61, D9): a group whose firm flag would be blank is dropped and
     counted in `skipped_unfirmed` (one per planned order, not per child). An aggregate stays when ANY candidate
@@ -2242,7 +2253,8 @@ def build_outbound_groups(rows: list[dict], frozen_end) -> tuple[list[dict], int
         g["sent_ids"].append(r["id"])
         if g["end"] is None or r["eff_end"] > g["end"]:
             g["end"] = r["eff_end"]
-        if firm_flag(r.get("manual_firmed"), r.get("firming_indicator"), r.get("eff_start"), frozen_end) == "X":
+        if firm_flag(r.get("manual_firmed"), r.get("firming_indicator"), r.get("placed_start"), r.get("placed_end"),
+                     frozen_end, now) == "X":
             g["firm"] = True
         v = _text(r.get("production_version"))
         if v:
@@ -2266,16 +2278,18 @@ def _outbound_candidate_rows(cur, plant: str) -> list[dict]:
     cur.execute(
         "SELECT o.id, o.production_order, o.parent_production_order, o.material_number, o.manual_firmed,"
         " o.firming_indicator, o.production_version, o.planning_status,"
-        # The frozen-horizon half of the firm rule reads the LOCKED start (OQ26/OQ27): first segment, else the stored
-        # start, else the SAP start as first received. `basic_start_date` is echo-movable for a never-placed order, so
-        # an SAP echo must not be able to flip the firm flag (db._EFF_START_SQL would fall back to it).
+        # The frozen/running half of the firm rule reads the PLACED edges only (universal firm, C1): first/last
+        # segment, else scheduled_start/scheduled_end; NULL when needs_planning. A never-placed order (whose eff_end
+        # is SAP's due date) is therefore neither frozen nor running. The SENT end stays _EFF_END_SQL below.
         " CASE WHEN o.planning_status = 'needs_planning' THEN NULL"
-        " ELSE COALESCE(seg.first_start, o.scheduled_start, o.original_start_received, o.basic_start_date) END,"
+        " ELSE COALESCE(seg.first_start, o.scheduled_start) END,"
+        " CASE WHEN o.planning_status = 'needs_planning' THEN NULL"
+        " ELSE COALESCE(seg.last_end, o.scheduled_end) END,"
         " " + db._EFF_END_SQL + ","            # the stored finish: what Send transmits (backward scheduling)
         " o.machine, o.scheduled_end, seg.segment_count, o.original_finish_date_only"
         " FROM orders o " + db._SCHEDULE_SEGMENTS_LATERAL_SQL + " WHERE o.plant = %s ORDER BY o.id", (plant,))
     names = ("id", "production_order", "parent_production_order", "material_number", "manual_firmed",
-             "firming_indicator", "production_version", "planning_status", "eff_start", "eff_end",
+             "firming_indicator", "production_version", "planning_status", "placed_start", "placed_end", "eff_end",
              "machine", "scheduled_end", "segment_count", "date_only")
     return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
 
@@ -2332,8 +2346,9 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
 
     Still-`ready` rows from an earlier click are retired first (row_status='error',
     error_text='requeued', so history survives; the poll sweeps them after 30 days). Every
-    firmed order of the plant is queued (D9, OQ61: planner-firmed, SAP-firmed or starting inside the frozen
-    horizon; the rest are counted in `skipped_unfirmed`); distribution children roll up to their parent
+    firmed order of the plant is queued (D9, OQ61, universal firm D6/D7: planner-firmed, SAP X (add-only),
+    frozen by finish, or running; strict, so overdue and never-placed orders are not sent and are counted in
+    `skipped_unfirmed`); distribution children roll up to their parent
     order with the latest child end (D17); the end is converted plant-local -> SAP system zone
     (D34); the firm flag is add-only (D10). NIMBUS also remembers what it sent on each member order
     (side table `order_sap_sent`, D20) so SAP's echo of that finish is not read as an SAP change. Only member
@@ -2356,7 +2371,7 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
                 if _zone(tz) is None:
                     raise ValueError(f"plant {plant} has no valid time zone; set it in Master Data before "
                                      "sending to SAP (VI13)")
-                _vis, frozen_end = db._horizon_bounds_for_plant(cur, plant)
+                now_local, frozen_end = db.frozen_window_for_plant(cur, plant)
                 candidates = _outbound_candidate_rows(cur, plant)
                 periods = md._load_plant_period_rows(cur, plant)   # once, not per row
                 for row in candidates:
@@ -2367,7 +2382,7 @@ def queue_send_to_sap(plant: str, *, actor: str) -> dict:
                             and row["eff_end"] is not None):
                         row["eff_end"] = _working_window_close(cur, plant, row["machine"], row["eff_end"].date(),
                                                           periods)
-                groups, skipped, skipped_unfirmed = build_outbound_groups(candidates, frozen_end)
+                groups, skipped, skipped_unfirmed = build_outbound_groups(candidates, frozen_end, now_local)
                 cur.execute("UPDATE sap_stage_planned_order_out SET row_status = 'error', error_text = 'requeued',"
                             " sent_at = now() WHERE plant = %s AND row_status = 'ready'", (plant,))
                 firmed = rolled = 0

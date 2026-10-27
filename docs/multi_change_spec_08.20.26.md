@@ -493,7 +493,7 @@ and all manual paths ignore it.
   `.alert-horizon-zone`, on the same one-second ticker via a `Timeline._frozenHorizonIds` list.
 
 *Open decisions:*
-- **OD-C2a — Straddling orders.** *Recommend: frozen iff the order's **start** is inside* (consistent
+- **OD-C2a — Straddling orders.** *Recommend: frozen iff the order's **start** is inside* (consistent *[Historical: superseded 2026-10-27; frozen is now judged on the placed finish, see `docs/superpowers/specs/2026-10-27-universal-firm-design.md`.]*
   with OD-C1d).
 - **OD-C2c — Does frozen block manual drags?** *Recommend no* — it constrains the optimizer only.
   The planner is always free to move things (B1).
@@ -830,7 +830,7 @@ one table.
 | OD-C1c | Plant-local midnight with a UTC roll hour? | Yes — deliberate, worth confirming |
 | OD-C1d | Orders starting inside but ending outside | Include (gate on start) |
 | OD-C1e | Hide beyond-horizon orders, or just block scrolling? | Hide, on both surfaces |
-| OD-C2a | Frozen-window straddling orders | Frozen iff start is inside |
+| OD-C2a | Frozen-window straddling orders | Frozen iff start is inside *[Historical: superseded 2026-10-27; frozen is now judged on the placed finish, see `docs/superpowers/specs/2026-10-27-universal-firm-design.md`.]* |
 | OD-C2c | Does frozen block manual drags? | No — optimizer only |
 | — (2026-08-22) | Does Remove Backlog respect the frozen floor? | No — carved out for SAP002 parity; frozen orders shift when reached, via `diagnostics.frozenMoved` |
 | OD-D1a | Uppercase-backfill PK collisions | Keep most recent, log discards to `admin_audit`, report a count |

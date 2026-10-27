@@ -537,8 +537,8 @@ test('scheduleAlertsForPatches still scopes to lines when no moved task carries 
 // ---------------------------------------------------------------------------
 // effectiveFirmedIdSet -- the single fold the setup-aware branch of
 // runAndApply uses to decide which orders are immovable for a run, and the
-// bugfix pinned here: respectFirmed must gate ECC-firmed orders exactly like
-// it gates manual firms, while the frozen-horizon fold is unconditional.
+// bugfix pinned here: respectFirmed gates manual firms only; SAP's firm flag never
+// locks (2026-10-27), and the running/frozen fold is unconditional.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

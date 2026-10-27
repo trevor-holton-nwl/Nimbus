@@ -516,8 +516,9 @@ def compute_frozen_horizon_end(now_utc: datetime, timezone_name: str | None,
     any order. The frozen window is `[now, this instant)`, and BOTH edges
     advance continuously with the clock, exactly like the alert horizon: the
     result is plant-local now plus `frozen_horizon_days` wall-clock days. An
-    order whose own start already falls inside it is treated as implicitly
-    pinned rather than moved.
+    order whose planned FINISH falls inside it is frozen (universal-firm
+    2026-10-27, finish-based; formerly start-based) and treated as implicitly
+    pinned rather than moved; see `finish_in_frozen_window`.
 
     This no longer uses `_horizon_boundary_core`'s once-a-day anchor-day/
     roll-hour clock (that stays in force for the VISIBILITY horizon only), so
@@ -565,6 +566,47 @@ def _horizon_bounds_for_plant(cur, plant: str) -> tuple[datetime | None, datetim
         now_utc, timezone_name, horizon_roll_hour_utc, frozen_horizon_days,
     )
     return visibility_end, frozen_end
+
+
+def frozen_window_for_plant(cur, plant: str) -> tuple[datetime | None, datetime | None]:
+    """Universal-firm (2026-10-27): the plant's frozen window as `(now_local, frozen_end)`, both naive
+    plant-local wall-clock datetimes taken from ONE `now_utc` (no skew between the two edges). The frozen
+    window is `[now_local, frozen_end)` and an order is frozen by its FINISH (`finish_in_frozen_window`).
+
+    Returns `(None, None)` when the plant is unknown OR has no timezone: the browser has no clock for such a
+    plant and treats nothing as frozen, so the server must not firm orders the UI never shows as frozen.
+    `frozen_end` alone is None when the plant's frozen horizon is off (0/NULL days); `now_local` is still
+    returned so callers can judge "running" without a frozen horizon.
+
+    Known, pre-existing: the plant timezone read is `LIMIT 1` with no ORDER BY (`plants` is keyed on
+    subnetwork, so several rows can share a plant). Recorded, not fixed here."""
+    cur.execute(
+        "SELECT horizon_roll_hour_utc, timezone, frozen_horizon_days FROM plants WHERE plant = %s LIMIT 1",
+        (plant,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None, None
+    horizon_roll_hour_utc, timezone_name, frozen_horizon_days = row
+    if not timezone_name:
+        return None, None
+    now_utc = datetime.now(timezone.utc)
+    try:
+        now_local = now_utc.astimezone(ZoneInfo(timezone_name)).replace(tzinfo=None)
+    except (ZoneInfoNotFoundError, ValueError):
+        # Same bad-master-data fallback as compute_frozen_horizon_end (UTC as the local clock).
+        now_local = now_utc.replace(tzinfo=None)
+    frozen_end = compute_frozen_horizon_end(now_utc, timezone_name, horizon_roll_hour_utc, frozen_horizon_days)
+    return now_local, frozen_end
+
+
+def finish_in_frozen_window(end: datetime | None, now: datetime | None, frozen_end: datetime | None) -> bool:
+    """Pure frozen predicate (universal-firm D2): the planned FINISH lies in `[now, frozen_end)`. An overdue
+    order (finish before now), a straddler (finish at/after the edge) and an order with no finish or no
+    window are NOT frozen. Mirrors the browser's `Engine.isFrozenHorizon`."""
+    if end is None or now is None or frozen_end is None:
+        return False
+    return now <= end < frozen_end
 
 
 # One-query fingerprint of everything a plant's calendar is made of: the plant's default week and timezone, the

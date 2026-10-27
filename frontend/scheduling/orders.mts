@@ -211,10 +211,16 @@ export const Table = {
     const bounded = rules?.max_pull_forward_days != null || rules?.max_push_forward_days != null;
     const due = Util.sapDueDate(task);
     if (bounded && (!due || !Number.isFinite(due.getTime()))) return 'SAP due date required';
-    const floor = Engine.earliestAllowedStart(task, plant);
+    const floor = Engine.earliestAllowedStart(task, plant);   // pull-forward start floor only
     const ceiling = Engine.latestAllowedEnd(task, plant);
     if (floor && ceiling && floor >= ceiling) {
       return `No valid window: earliest start ${Util.fmtDTReadable(floor)}; complete by ${Util.fmtDTReadable(ceiling)}`;
+    }
+    // The frozen horizon is a FINISH floor (2026-10-27): an unprotected order may not finish before the window edge,
+    // so a completion limit before the edge leaves no valid window (equality is valid).
+    const frozenEnd = Store.frozenHorizonEndFor(plant);
+    if (frozenEnd && ceiling && frozenEnd > ceiling) {
+      return `No valid window: finish on/after ${Util.fmtDTReadable(frozenEnd)}; complete by ${Util.fmtDTReadable(ceiling)}`;
     }
     return `${floor ? Util.fmtDTReadable(floor) : 'No start limit'} — ${ceiling ? Util.fmtDTReadable(ceiling) : 'No completion limit'}`;
   },
@@ -451,6 +457,11 @@ export const Table = {
     return ORDER_FIELD_CATALOG.filter(f => !handwritten.has(f.key)).map(f => ({
       headerName: Util.t(f.i18nGridKey),
       field: f.key,
+      // SAP Firmed (D5): the raw FIRMING_INDICATOR never reaches the browser (/tasks sends
+      // only the normalised `ecc_firmed`), so the cell reads that flag: a capital X or blank.
+      ...(f.key === 'FIRMING_INDICATOR'
+        ? { valueGetter: (p: { data: NimbusTask }) => (p.data && Engine.isSapFirmed(p.data) ? 'X' : '') }
+        : {}),
       width: f.gridWidth ?? 110,
       flex: 0,
       editable: false,
@@ -533,7 +544,9 @@ export const Table = {
           width: 60, minWidth: 60, maxWidth: 60, flex: 0,
           pinned: 'left',
           editable: false,
-          cellRenderer: (p: { value: unknown }) => p.value ? '<span title="Firmed" style="color:var(--accent);font-size:13px;">🔒</span>' : '',
+          cellRenderer: (p: { value: unknown }) => p.value ? '<span style="color:var(--accent);font-size:13px;">🔒</span>' : '',
+          // Lazy: the reasons text is computed only for rows the grid actually hovers.
+          tooltipValueGetter: (p: { data?: NimbusTask }) => (p.data ? Engine.firmStatusText(p.data) : ''),
           headerTooltip: Util.t('tip.firmed_column')
         },
         { headerName: Util.t('col.id'),   field: 'id',   width: 80, minWidth: 80, flex: 0, hide: true,
@@ -1604,7 +1617,12 @@ export const Table = {
     const sel = Table._api.getSelectedRows() as NimbusTask[];
     if (!sel.length) { Toast.show(Util.t('toast.select_rows_first'), 'warn'); return; }
     const ids = sel.map(r => String(r.id));
-    Store.setFirmed(ids, firmed, 'table');
+    const { changed, skipped } = Engine.applyFirm(ids, firmed, 'table');
+    if (skipped.length) Toast.show(Util.t('toast.firm_skipped_locked', { n: skipped.length }), 'warn');
+    if (!changed.length) {
+      if (!skipped.length) Toast.show(Util.t(firmed ? 'toast.firm_none_to_firm' : 'toast.unfirm_none_selected'), 'info');
+      return;
+    }
     Alerts.scheduleRecompute();
   },
 
@@ -1633,7 +1651,11 @@ export const Table = {
     const selectedValue = routingPairs ? `${Runtime.normPv(t.PRODUCTION_VERSION) ?? ''}|${t.MACHINE || 'Unknown'}` : t.MACHINE;
     lineEl.innerHTML = Table._getPairOptions(t).map(o =>
       `<option value="${Util.escapeHtml(o.value)}" ${o.value === selectedValue ? 'selected' : ''}>${Util.escapeHtml(o.label)}</option>`).join('');
+    // D4: the "Also firm" row is hidden while the frozen horizon or a running state locks the order (`.checked`
+    // is still set first so a bare test mock works). applyOverride re-checks at apply time.
     firmEl.checked = !!t.firmed;
+    const firmRow = (firmEl as { closest?: (s: string) => HTMLElement | null }).closest?.('.chk-row');
+    if (firmRow) firmRow.hidden = Engine.firmActionFor(t) === null;
     Modal.open('modal-override');
   },
 
@@ -1686,7 +1708,9 @@ export const Table = {
     Store.updateTask(id, schedule, 'table');
     if (undoSnap) Table._pushPairUndo(id, undoSnap);
     if (Table._api) Table._api.applyTransaction({ update: [Store.tasks[id]] });
-    if (alsoFirm !== Store.isFirmed(id)) Store.setFirmed([id], alsoFirm, 'table');
+    // Re-check at apply time: the window may have rolled while the modal was open, and applyFirm
+    // refuses a now-locked order.
+    if (alsoFirm !== Store.isFirmed(id)) Engine.applyFirm([id], alsoFirm, 'table');
 
     // Override explicitly does NOT auto-reflow (user's manual choice),
     // but we DO recompute alerts so conflicts become visible.
@@ -2067,6 +2091,11 @@ type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaEleme
  *  still firmed via the union (frozen horizon or running; SAP's flag never locks) — otherwise
  *  "Unfirm" silently no-ops from the planner's point of view. Called from
  *  every unfirm entry point: context-menu, Inspector, F-key, Dashboard. */
+/** Click-time mismatch message: still locked (frozen/running) vs. already changed elsewhere (another tab). */
+export function firmMismatchMessage(task: NimbusTask | undefined): string {
+  return Util.t(task && Engine.firmActionFor(task) === null ? 'toast.still_firmed' : 'toast.firm_state_changed');
+}
+
 export function notifyResidualFirming(ids: string[]): void {
   const still = ids.some(id => { const t = Store.tasks[id]; return !!t && Engine.firmingStatus(t).firmed; });
   if (still) Toast.show(Util.t('toast.still_firmed'));
@@ -2522,10 +2551,6 @@ export const Inspector = {
     if (!task) { Inspector.clear(); return; }
 
     // Order fields originate from uploaded Excel — escape before innerHTML.
-    const firmed = Store.isFirmed(task.id);        // manual layer — drives the Firm/Unfirm button
-    const firmStatus = Engine.firmingStatus(task);
-    const firmedUnion = firmStatus.firmed;  // frozen-horizon OR manual OR running — drives the one banner below
-    const sapFirmed = Engine.isSapFirmed(task);  // display-only info row; never locks
     const lineOptions = Table._getLineOptions();
     // Routing plants pick the production version and machine together ("PV - Machine"); a distribution sub-order
     // keeps its locked machine select.
@@ -2564,8 +2589,7 @@ export const Inspector = {
 
     Inspector._destroyEndPicker();
     body.innerHTML = `
-      ${firmedUnion ? `<div class="insp-firmed-banner">${Util.t('ui.insp_firmed_banner')}${firmStatus.reasons.includes('running') ? `<div>${Util.t('ui.firm_reason_running')}</div>` : ''}</div>` : ''}
-      ${sapFirmed ? `<div class="insp-sap-firm-info">${Util.t('ui.sap_firm_marker')}</div>` : ''}
+      <div class="insp-flags" data-insp-lock>${Inspector._lockBlockHtml(task)}</div>
       ${relAlerts.length ? `<div class="insp-card" style="border-color:var(--err);background:var(--err-soft);">
         <h4 style="color:var(--err);">⚐ ${Util.t('ui.insp_alerts_title', { count: relAlerts.length })}</h4>
         ${relAlerts.map(a => `<div style="font-size:12px;margin-bottom:4px;">${Util.escapeHtml(Util.alertMessage(a))}</div>`).join('')}
@@ -2664,7 +2688,10 @@ export const Inspector = {
           if (!Inspector._fieldVisible(key)) return '';
           const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
           if (!f) return '';
-          const val = (task as unknown as Record<string, unknown>)[key];
+          // SAP firm flag: the raw key never reaches the browser, only `ecc_firmed` (X or —).
+          const val = key === 'FIRMING_INDICATOR'
+            ? (Engine.isSapFirmed(task) ? 'X' : '—')
+            : (task as unknown as Record<string, unknown>)[key];
           return `<div class="insp-row"><label>${Util.t(f.i18nInspectorKey)}</label>
             <div class="insp-val">${Util.escapeHtml(val ?? '—')}</div></div>`;
         }).join('');
@@ -2717,9 +2744,7 @@ export const Inspector = {
       </div>
 
       <div class="insp-actions">
-        ${firmed
-          ? `<button class="btn" onclick="NIMBUS.Inspector.toggleFirm(false)">${Util.t('btn.unfirm')}</button>`
-          : `<button class="btn btn-primary" onclick="NIMBUS.Inspector.toggleFirm(true)">${Util.t('btn.firm_order')}</button>`}
+        <span class="insp-firm-slot" data-insp-firm>${Inspector._firmButtonHtml(task)}</span>
         <button class="btn" data-act="override">${Util.t('btn.override_date')}</button>
         <button class="btn btn-ghost" data-act="focus">${Util.t('btn.focus')}</button>
       </div>
@@ -2732,6 +2757,7 @@ export const Inspector = {
     });
     // Action buttons via listeners (id is never concatenated into an HTML attribute).
     const _id = String(task.id);
+    Inspector._wireFirmButton(body, _id);
     body.querySelector('[data-act="override"]')?.addEventListener('click', () => NIMBUS!.Table!._openOverrideModalForId!(_id));
     body.querySelector('[data-act="focus"]')?.addEventListener('click', () => NIMBUS!.Timeline!.focus!(_id));
     // Distribution card: per-sibling jump links + "Open in Order Distribution".
@@ -2985,10 +3011,71 @@ export const Inspector = {
     }, 800);
   },
 
+  /** The lock block (C-3): the Firmed card (only while NIMBUS locks the order: manual, frozen or
+   *  running) and, outside it, the neutral SAP tag (SAP's flag locks nothing). '' when neither applies. */
+  _lockBlockHtml(task: NimbusTask): string {
+    const firmed = Engine.firmingStatus(task).firmed;
+    const sap = Engine.isSapFirmed(task);
+    if (!firmed && !sap) return '';
+    const card = firmed
+      ? `<div class="insp-status">
+          <div class="insp-status-head"><span aria-hidden="true">🔒</span> <strong>${Util.t('ui.firmed')}</strong></div>
+          <div class="insp-status-reasons">${Util.escapeHtml(Engine.firmReasonsText(task))}</div>
+        </div>`
+      : '';
+    const tag = sap
+      ? `<span class="sap-pill neutral insp-sap-tag" title="${Util.escapeHtml(Util.t('ui.sap_firm_marker'))}">${Util.t('ui.sap_firmed')}</span>`
+      : '';
+    return card + tag;
+  },
+
+  /** The Firm / Unfirm button for the order's current lock state ('' when frozen or running: no action). */
+  _firmButtonHtml(task: NimbusTask): string {
+    const action = Engine.firmActionFor(task);
+    if (action === 'unfirm') return `<button class="btn" data-act="unfirm">${Util.t('btn.unfirm')}</button>`;
+    if (action === 'firm') return `<button class="btn btn-primary" data-act="firm">${Util.t('btn.firm_order')}</button>`;
+    return '';
+  },
+
+  _wireFirmButton(root: ParentNode, id: string): void {
+    root.querySelector('[data-act="firm"]')?.addEventListener('click', () => Inspector.toggleFirm(true));
+    root.querySelector('[data-act="unfirm"]')?.addEventListener('click', () => Inspector.toggleFirm(false));
+    void id;
+  },
+
+  /** Partial patch of the lock block and the firm button for the open order (C-3). Called by the Gantt's
+   *  30 s lock-band scan on EVERY scan, because the reasons change as the window rolls (frozen <-> running)
+   *  without any Store event. Deliberately not a full `_render`: that would replace the Notes textarea,
+   *  the Flatpickr and the History card. */
+  refreshLock(id: string | null | undefined): void {
+    if (!id || id !== Inspector._currentId) return;
+    const task = Store.tasks[id];
+    const body = document.getElementById('inspector-body');
+    if (!task || !body) return;
+    const lock = body.querySelector('[data-insp-lock]');
+    if (lock) {
+      const html = Inspector._lockBlockHtml(task);
+      if (lock.innerHTML !== html) lock.innerHTML = html;
+    }
+    const slot = body.querySelector('[data-insp-firm]');
+    if (slot) {
+      const html = Inspector._firmButtonHtml(task);
+      if (slot.innerHTML !== html) { slot.innerHTML = html; Inspector._wireFirmButton(slot, id); }
+    }
+  },
+
   toggleFirm(firmed: boolean): void {
-    if (!Inspector._currentId) return;
-    Store.setFirmed([Inspector._currentId], firmed, 'inspector');
-    if (!firmed) notifyResidualFirming([Inspector._currentId]);
+    const id = Inspector._currentId;
+    if (!id) return;
+    // Click-time re-check: the frozen window rolls, so the offered action may have changed.
+    const task = Store.tasks[id];
+    if (task && Engine.firmActionFor(task) !== (firmed ? 'firm' : 'unfirm')) {
+      Toast.show(firmMismatchMessage(task));
+      Inspector.refreshLock(id);
+      return;
+    }
+    Engine.applyFirm([id], firmed, 'inspector');
+    if (!firmed) notifyResidualFirming([id]);
     Alerts.scheduleRecompute();
   }
 };
@@ -3012,8 +3099,15 @@ export const ContextMenu = {
         const id = ContextMenu._targetId;
         ContextMenu.close(true);
         if (!id) return;
-        if (action === 'firm')       { Store.setFirmed([id], true, 'ctx');  Alerts.scheduleRecompute(); }
-        else if (action === 'unfirm'){ Store.setFirmed([id], false, 'ctx'); Alerts.scheduleRecompute(); notifyResidualFirming([id]); }
+        if (action === 'firm' || action === 'unfirm') {
+          const want = action === 'firm';
+          // Click-time re-check: the window rolls while the menu is open.
+          const t = Store.tasks[id];
+          if (t && Engine.firmActionFor(t) !== action) { Toast.show(firmMismatchMessage(t)); return; }
+          Engine.applyFirm([id], want, 'ctx');
+          Alerts.scheduleRecompute();
+          if (!want) notifyResidualFirming([id]);
+        }
         else if (action === 'override') { Table._openOverrideModalForId(id); }
         else if (action === 'inspect')  { const t = Store.tasks[id]; if (t) Inspector.show(t); }
       };
@@ -3053,9 +3147,21 @@ export const ContextMenu = {
     if (!menu) return;
     ContextMenu._targetId = targetId;
     ContextMenu._returnFocus = document.activeElement as HTMLElement | null;
-    const firmed = Store.isFirmed(targetId);
-    (menu.querySelector('[data-action="firm"]') as HTMLElement | null)!.style.display = firmed ? 'none' : '';
-    (menu.querySelector('[data-action="unfirm"]') as HTMLElement | null)!.style.display = firmed ? '' : 'none';
+    // Three states (D4): not firmed -> Firm; manual only -> Unfirm; frozen/running -> neither, a note with the reason.
+    const task = Store.tasks[targetId];
+    const action = task ? Engine.firmActionFor(task) : 'firm';
+    const firmBtn = menu.querySelector('[data-action="firm"]') as HTMLElement | null;
+    const unfirmBtn = menu.querySelector('[data-action="unfirm"]') as HTMLElement | null;
+    const note = menu.querySelector('.ctx-note') as HTMLElement | null;
+    const sep = menu.querySelector('#ctx-sep-firm') as HTMLElement | null;
+    if (firmBtn) firmBtn.style.display = action === 'firm' ? '' : 'none';
+    if (unfirmBtn) unfirmBtn.style.display = action === 'unfirm' ? '' : 'none';
+    if (note) {
+      const lockedText = action === null && task ? Engine.firmStatusText(task) : '';
+      note.textContent = lockedText;
+      note.hidden = !lockedText;
+    }
+    if (sep) sep.style.display = action === null ? 'none' : '';
     menu.hidden = false;
     menu.style.maxHeight = Math.max(0, window.innerHeight - 12) + 'px';
     menu.style.maxWidth = Math.max(0, window.innerWidth - 12) + 'px';

@@ -250,7 +250,10 @@ export const Store = {
    *  `frozen_horizon_days` key at all (master data not loaded yet; cache-only boot), does it fall back
    *  to the server-resolved instant cached from /tasks `meta` (`setFrozenHorizonEnd`). */
   get frozenHorizonEnd(): Date | null {
-    const plant = this._state.selectedPlant;
+    return this.frozenHorizonEndFor(this._state.selectedPlant);
+  },
+  /** The same rolling edge for an explicit plant (a task's own plant, not the selected one). */
+  frozenHorizonEndFor(plant: string | null | undefined): Date | null {
     const row = plant ? this._state.masterData?.plants?.find(p => p.plant === plant) : undefined;
     if (row && row.frozen_horizon_days !== undefined) {
       const days = row.frozen_horizon_days;
@@ -1180,7 +1183,7 @@ export const Store = {
     }
     // task.firmed is the MANUAL (planner) firm mirror only. The SAP flag arrives
     // separately as task.ecc_firmed and the frozen-horizon reason is derived live —
-    // the three unite in Engine.firmingStatus(); derived firming never enters firmedIds.
+    // the frozen-horizon (finish-based) and running reasons unite with this planner firm in Engine.firmingStatus() (the SAP flag is display-only and never locks); derived firming never enters firmedIds.
     task.firmed = !!task.firmed;
     // firmedIds mirrors task.firmed both ways, so undo/restore of a snapshot
     // (updateMany with firmed:false) also drops the id.

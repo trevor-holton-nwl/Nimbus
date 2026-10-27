@@ -272,7 +272,10 @@ def _build_task_rows(raw_rows: list[dict], plant: str | None) -> tuple[list[dict
             "RUN_TIME": _nn(r.get("RUN_TIME")),
             "FORM_SIZE": r.get("FORM_SIZE"),
             "notes": r.get("NOTES"),
-            "ecc_firmed": r.get("FIRMING_INDICATOR") == "X",
+            # Normalised like the outbound firm rule (sap_staging.firm_flag): ingest stores the indicator raw (Excel)
+            # or only stripped (SAP staging), so strip + upper here keeps the grid X, the Inspector tag and Send's X
+            # in agreement. Display only: it never locks an order.
+            "ecc_firmed": str(r.get("FIRMING_INDICATOR") or "").strip().upper() == "X",
             "firmed": bool(r.get("FIRMED")),
             "PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)": _nn(r.get("PLANNED_ORDER_INITIAL_QUANTITY_(GMEIN)")),
             "REDUCED_QUANTITY_(GMEIN)": _nn(r.get("REDUCED_QUANTITY_(GMEIN)")),

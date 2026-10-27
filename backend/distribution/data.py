@@ -3318,13 +3318,19 @@ def _fetch_children_by_machine(cur, plant: str, order: str, material: str, *,
     `lock=True` (D17, real writes only) takes `FOR UPDATE OF o` in id order, the
     same order a normal /tasks save locks in, so a re-weight cannot overwrite or
     delete a sub-order a planner is saving, and the two cannot deadlock. The
-    dry-run preview stays lock-free (D56)."""
+    dry-run preview stays lock-free (D56).
+
+    Each child also carries `first_start`/`last_end` (first/last schedule segment edge, NULL without segments)
+    so the frozen/running judgement reads the PLACED finish (universal firm: frozen by finish), and `firmed`
+    is the PLANNER firm only (`manual_firmed`); an SAP firming indicator is display-only and never firms."""
     cur.execute(
         f"""
         SELECT o.id, o.production_order, o.machine, o.order_quantity, o.run_time,
                o.scheduled_start, o.scheduled_end, o.notes, o.planning_status, o.planning_reason,
                EXISTS(SELECT 1 FROM order_schedule_segments s WHERE s.order_id = o.id) AS has_segments,
-               o.manual_firmed, o.firming_indicator
+               o.manual_firmed,
+               (SELECT MIN(s.scheduled_start) FROM order_schedule_segments s WHERE s.order_id = o.id) AS first_start,
+               (SELECT MAX(s.scheduled_end) FROM order_schedule_segments s WHERE s.order_id = o.id) AS last_end
           FROM orders o
          WHERE o.plant = %s AND o.parent_production_order = %s AND o.material_number = %s
          ORDER BY o.id
@@ -3334,13 +3340,13 @@ def _fetch_children_by_machine(cur, plant: str, order: str, material: str, *,
     )
     out = {}
     for (oid, po, machine, qty, run_time, sched_start, sched_end, notes, plan_status,
-         plan_reason, has_segments, manual_firmed, firming_indicator) in cur.fetchall():
+         plan_reason, has_segments, manual_firmed, first_start, last_end) in cur.fetchall():
         out[machine] = {
             "id": oid, "production_order": po, "order_quantity": qty, "run_time": run_time,
             "scheduled_start": sched_start, "scheduled_end": sched_end, "notes": notes,
             "planning_status": plan_status, "planning_reason": plan_reason,
             "has_segments": bool(has_segments),
-            "firmed": bool(manual_firmed) or str(firming_indicator or "").strip().upper() == "X",
+            "firmed": bool(manual_firmed), "first_start": first_start, "last_end": last_end,
         }
     return out
 
@@ -3441,18 +3447,28 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
             collapse = {"machine": surv_machine, "old_child_id": prev["child_id"], "new_child_id": new_bare_id}
 
     children_before = _fetch_children_by_machine(cur, plant, order, material, lock=not dry_run)
-    _visibility_end, frozen_end = db._horizon_bounds_for_plant(cur, plant)
+    now_local, frozen_end = db.frozen_window_for_plant(cur, plant)
+
+    def _frozen_by_finish(child) -> bool:
+        # Universal firm (D2): frozen = the placed FINISH (last segment end, else scheduled_end) in [now, edge).
+        return bool(child) and db.finish_in_frozen_window(
+            child.get("last_end") or child["scheduled_end"], now_local, frozen_end)
+
+    def _running(child) -> bool:
+        return bool(child) and now_local is not None and db._order_is_running(child, now_local)
 
     removed_details = []
     for machine, before in children_before.items():
         if before["id"] not in removed_ids:
             continue
-        if collapse and before["id"] == collapse["old_child_id"] and not before["firmed"]:
-            # An unfirmed survivor's schedule carries via _collapse_to_survivor, not a destructive removal. A FIRMED
-            # one is listed (and needs the confirm): its start re-derives from the carried finish (OQ37 rule R2),
-            # so the protected placement may move.
+        frozen = _frozen_by_finish(before)
+        if (collapse and before["id"] == collapse["old_child_id"]
+                and not (before["firmed"] or frozen or _running(before))):
+            # A survivor that is not NIMBUS-firmed (planner firm, frozen by finish, running) carries its schedule via
+            # _collapse_to_survivor, not a destructive removal. A NIMBUS-firmed one is listed (and needs the confirm):
+            # its start re-derives from the carried finish (OQ37 rule R2), so the protected placement may move. An
+            # SAP firming indicator alone no longer asks (universal firm D9).
             continue
-        frozen = bool(before["scheduled_start"] and frozen_end and before["scheduled_start"] < frozen_end)
         removed_details.append({
             "id": before["id"], "production_order": before["production_order"], "machine": machine,
             "scheduled_start": before["scheduled_start"], "scheduled_end": before["scheduled_end"],
@@ -3496,7 +3512,7 @@ def _materialize_reweight(cur, plant: str, order: str, material: str, header: di
         effective_pct = float(weight / total_weight * 100) if total_weight else 0.0
         scheduled = bool(before and (before["scheduled_start"] is not None
                                      or before["scheduled_end"] is not None or before["has_segments"]))
-        frozen = bool(before and before["scheduled_start"] and frozen_end and before["scheduled_start"] < frozen_end)
+        frozen = _frozen_by_finish(before)
         below_min_lot = bool(
             min_lot_size and min_lot_size > 0 and qty_after is not None
             and Decimal(0) < _dec(qty_after) < _dec(min_lot_size)

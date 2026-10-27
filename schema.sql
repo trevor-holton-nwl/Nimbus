@@ -398,7 +398,7 @@ END $$;
 -- Workstream C2 (2026-08-20): plant-level frozen horizon — the near-term
 -- window (same anchor-day/UTC-roll-hour clock as visibility_horizon_days
 -- above, via db.compute_frozen_horizon_end / db._horizon_boundary_core)
--- inside which the optimizer may not place or move any order. UNLIKE
+-- inside which the optimizer may not place or move any order (an order is frozen when its planned FINISH falls inside it, since 2026-10-27). UNLIKE
 -- visibility_horizon_days, NULL *and* 0 both mean "off" — a 0-day frozen
 -- window is meaningless, so it must disable the feature outright rather than
 -- resolve to a same-instant boundary. Deliberately unregistered (no
