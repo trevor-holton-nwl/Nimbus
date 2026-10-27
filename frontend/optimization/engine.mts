@@ -3238,6 +3238,7 @@ export const Engine = {
         definition, machine: line, predecessorState, successorState,
         predecessorOrderId: String(predecessor.id), successorOrderId: String(successor.id),
         plantRows: setup.plant_rows, machineRows: setup.machine_rows, overrides: setup.overrides, valueDefaults: setup.value_defaults ?? NO_VALUE_DEFAULTS,
+        index: setupResolutionIndexFor(setup as SetupSnapshot & { definition: SetupDefinition }),
       });
       return storeChargedSetupMinutes(plantOfLine, line, resolved);
     };
