@@ -125,6 +125,24 @@ interface SnapshotOpts {
   stripPriorityFields?: boolean;
 }
 
+/** The masterData the alert worker receives: identical to the Store's except `tool_inventory` is projected to the
+ *  compact rows the compute core reads, {plant, tool_id, available, hasRow: true} (no note/timestamps/quantities to
+ *  structured-clone on every ALERTS post). Every row is kept, including available === 1: its mere existence decides
+ *  the "no inventory row" wording, so only a tool with NO row stays absent (= 1 copy). `undefined` (not loaded /
+ *  failed) stays undefined, never []. The key stays INSIDE masterData: a new top-level payload key breaks the
+ *  worker contract pinned by tests/modules/insights/leverage-batch.test.mjs. Returns the Store object itself when
+ *  there is nothing to project. */
+export function projectMasterDataForWorker(md: NimbusMasterData | null): NimbusMasterData | null {
+  if (!md || !Array.isArray(md.tool_inventory)) return md;
+  const compact = md.tool_inventory.map(row => ({
+    plant: row.plant,
+    tool_id: row.tool_id,
+    available: Math.max(0, Number(row.total_qty ?? 1) - Number(row.out_of_service_qty ?? 0)),
+    hasRow: true as const,
+  }));
+  return { ...md, tool_inventory: compact as unknown as NimbusMasterData['tool_inventory'] };
+}
+
 /** The plant-scoped worker payload body. Shared by Compute._snap (which must not touch the plant
  *  clock registry) and the exported buildPlantSnapshot. */
 function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts = {}): { snap: WorkerSnapshotBase; lines: string[] | null } {
@@ -149,7 +167,7 @@ function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts
       calendars:    Store._state.calendars,
       plants:       Store._state.plants,
       lineSettings: Store._state.lineSettings,
-      masterData:   Store._state.masterData,
+      masterData:   projectMasterDataForWorker(Store._state.masterData),
       setup,
     } };
   }
@@ -184,7 +202,7 @@ function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts
     calendars:    pick(Store._state.calendars),
     plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
     lineSettings: pick(Store._state.lineSettings),
-    masterData:   Store._state.masterData,
+    masterData:   projectMasterDataForWorker(Store._state.masterData),
     setup,
   } };
 }
@@ -578,7 +596,7 @@ export const Alerts = {
       calendars:    Store.calendars,
       plants:       Store.plants,
       lineSettings: Store.lineSettings as any,
-      masterData:   Store.masterData as unknown as NimbusMasterData,
+      masterData:   projectMasterDataForWorker(Store.masterData) as unknown as NimbusMasterData,
       setup:        deriveSetupObservation(Store.setupSnapshot, Store.tasksArr, onlyLines || undefined, {
         calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
         masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,

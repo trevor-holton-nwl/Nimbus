@@ -17,7 +17,7 @@ import { Runtime } from '../routing/runtime-client.mjs';
 import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { PriorityListViewer } from '../priority-lists/viewers.mjs';
-import type { WorkHours, NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusMasterWorkcenter, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
+import type { WorkHours, NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusMasterWorkcenter, NimbusToolInventoryRow, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
 // Cross-domain seams (see docs/architecture/domain-refactor-plan.md Phase P2
 // task brief / report for the full verified cross-reference list):
 //   - `SetupAdmin.render` is called from Plant's Settings pane. `SetupAdmin`
@@ -89,7 +89,7 @@ let _lineWriteGen = 0;
  *  catch branch. Staleness tokens: a plant switch or a newer Persistence load while these
  *  fetches are in flight must not let this response overwrite the (now different)
  *  plant's master data. */
-async function refreshStoreMasterData(source: string, table?: string): Promise<boolean> {
+export async function refreshStoreMasterData(source: string, table?: string): Promise<boolean> {
   const API = Config.API_BASE;
   const refreshPlant = Store.selectedPlant;
   const refreshLoadGen = Persistence._loadRequest;
@@ -99,7 +99,9 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
     // optimizer's distribution validation read it), so refetch that plant's work centers; every
     // other table keeps the in-memory copy.
     const refetchWc = table === 'sap_workcenter' && !!Store.selectedPlant;
-    const [pData, lData, wcData] = await Promise.all([
+    // Same for a tool_inventory save: refetch the plant's rows (undefined on any failure => keep the held rows).
+    const refetchTools = table === 'tool_inventory' && !!Store.selectedPlant;
+    const [pData, lData, wcData, tiRows] = await Promise.all([
       Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
       // Plant-scoped (#25): never refetch every plant's machines. With no
       // selected plant, keep whatever lines are already in the Store.
@@ -109,12 +111,15 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
       refetchWc
         ? Util.fetchTraced(`${API}/master-data/sap_workcenter?${new URLSearchParams({ plant: Store.selectedPlant as string }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterWorkcenter> | null>
         : Promise.resolve(null),
+      refetchTools
+        ? Persistence._fetchToolInventory(Store.selectedPlant as string)
+        : Promise.resolve(undefined as NimbusToolInventoryRow[] | undefined),
     ]);
     if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return false;
     // A Machines-pane write committed while these GETs were in flight: they may carry the
     // pre-edit row, so drop them (the locally patched Store rows already hold the new value).
     if (_lineWriteGen !== refreshWriteGen) return false;
-    if (pData || lData || wcData) {
+    if (pData || lData || wcData || tiRows) {
       // Public Store.setMasterData(...) equivalent of the former direct
       // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
       // (CQ-1 Phase 4 Task 2 — closes MasterData's tracked §6 exception).
@@ -130,7 +135,15 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
         // in-memory copy unless this refresh is for a sap_workcenter save, which refetched
         // them above (a failed refetch also keeps the copy).
         workcenters: wcData?.rows ?? (Store.masterData?.workcenters ?? []),
+        // Same wholesale-replace hazard for the tool inventory: carry the held rows forward on every rebuild
+        // (undefined stays undefined = not loaded), take fresh rows only from a successful tool_inventory refetch.
+        tool_inventory: tiRows ?? Store.masterData?.tool_inventory,
       }, source, table);
+      if (tiRows && refreshPlant) {
+        // Our own save: move the probe baseline so the next /tasks/horizons does not announce it as a remote change.
+        Persistence._toolInventoryBaseline[refreshPlant] = Persistence._toolInventoryFingerprint(tiRows);
+        Persistence._toolInventoryPlant = refreshPlant;
+      }
       // Fresh machine rows landed: the line-sync cache (filled on the first line edit, never
       // expiring) may predate a machine a colleague just added.
       if (lData && refreshPlant) delete _lineSyncMachineCache[refreshPlant];
@@ -3025,7 +3038,7 @@ interface PlantRow extends MasterDataRow {
   setup_active?: boolean;
   /** N8 (2026-09): plants.setup_policy_config JSONB sidecar — see
    *  NimbusMasterPlant's field of the same name. */
-  setup_policy_config?: { unknownSetupPolicy?: UnknownSetupPolicy; unknownSetupDefaultMinutes?: number } | null;
+  setup_policy_config?: { unknownSetupPolicy?: UnknownSetupPolicy; unknownSetupDefaultMinutes?: number; toolingRule?: 'off' | 'hard' } | null;
 }
 
 interface MaterialRow extends MasterDataRow {

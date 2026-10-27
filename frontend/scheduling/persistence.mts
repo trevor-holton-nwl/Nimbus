@@ -34,7 +34,7 @@ import { Store } from '../platform/store.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, StoredState, NaiveLocalTs, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment, NimbusMasterWorkcenter } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, StoredState, NaiveLocalTs, PriorityRankMaps, SetupSnapshot, OrderScheduleSegment, NimbusMasterWorkcenter, NimbusToolInventoryRow } from '../platform/types.mjs';
 import type { components } from '../types/api-generated.mjs';
 
 /** Store event source tag -> the per-task `source` the server records in schedule_event (PLANNER_SOURCES in
@@ -200,6 +200,18 @@ export const Persistence = {
   // means another session changed the calendar, so the plant config is re-fetched (see _noteCalendarVersion).
   _calendarVersion: {} as Record<string, string>,
   _calendarRefreshing: new Set<string>(),
+  // Tool Inventory (Wave 3). The plant whose rows Store.masterData.tool_inventory currently holds (null = none):
+  // a load for any other plant clears the key at once so the previous plant's counts are never judged against
+  // the new plant's orders. Never "empty": undefined means not loaded / the fetch failed.
+  _toolInventoryPlant: null as string | null,
+  // Per-plant fingerprint of the rows this tab holds ("<count>|<max updated_at ms>"); the first /tasks/horizons
+  // probe that disagrees (see _noteToolInventoryVersion) re-fetches. Undefined = nothing good held, so the next
+  // probe (even for an empty plant) retries the fetch.
+  _toolInventoryBaseline: {} as Record<string, string | undefined>,
+  _toolInventoryRefreshing: new Set<string>(),
+  _toolingRuleRefreshing: new Set<string>(),
+  // Plants already warned about an unavailable inventory this session (one ErrorLog.warn + toast each).
+  _toolInventoryWarned: new Set<string>(),
   // Seam wired by the shell: true while a Gantt drag is in flight (persistence cannot import gantt).
   _calendarRefreshBlocked: null as null | (() => boolean),
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
@@ -381,6 +393,13 @@ export const Persistence = {
       Persistence._rankMapsPlant = null;
       Store.setPriorityRankMaps({}, 'persistence');
     }
+    // Same idea for the tool inventory: the outgoing plant's counts must not be judged against the new plant's
+    // orders while its own rows are still in flight (the first schedule:hydrated alert pass runs before them).
+    // Silent in-place clear (no emit): undefined = "not loaded", which the compute core treats as no counts; the
+    // setMasterData below announces the real rows. lines/workcenters are replaced wholesale only on arrival.
+    if (plant !== Persistence._toolInventoryPlant && Store.masterData && Store.masterData.tool_inventory !== undefined) {
+      Store.masterData.tool_inventory = undefined;
+    }
     if (plant !== Persistence._setupSnapshotPlant) Persistence._invalidateSetupSnapshot('persistence');
     // A later load invalidates this generation immediately. The older task-load
     // continuation must then not begin a fresh setup request for its old plant.
@@ -416,7 +435,10 @@ export const Persistence = {
             plants: pData?.rows ?? [],
             lines:  lData?.rows ?? [],
             workcenters: [],
+            // No plant, no inventory: undefined (not loaded), never [].
+            tool_inventory: undefined,
           }, 'persistence');
+          Persistence._toolInventoryPlant = null;
         }
       }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (no-plant path): ${e.message}`));
     }
@@ -495,7 +517,8 @@ export const Persistence = {
             Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null),
             Util.fetchTraced(`${Config.API_BASE}/master-data/machine?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
             Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
-          ]).then(([pData, lData, wcData]) => {
+            Persistence._fetchToolInventory(plant),
+          ]).then(([pData, lData, wcData, tiRows]) => {
             // A newer load() (e.g. the user switched plants again) may have
             // started while this was in flight — discard rather than let a
             // stale plant's response clobber the now-current one.
@@ -505,6 +528,7 @@ export const Persistence = {
                 plants: pData?.rows ?? [],
                 lines:  lData?.rows ?? [],
                 workcenters: wcData?.rows ?? [],
+                tool_inventory: Persistence._resolveToolInventory(plant, tiRows),
               }, 'persistence');
             }
           }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (zero-task path): ${e.message}`))
@@ -641,7 +665,8 @@ export const Persistence = {
           Util.fetchTraced(`${Config.API_BASE}/master-data/machine?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterLineRow>> : null),
           Util.fetchTraced(`${Config.API_BASE}/system-settings`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<{ orderFields?: Record<string, { grid?: boolean; inspector?: boolean }>; schedule_event_retention_days?: number }> : null),
           Util.fetchTraced(`${Config.API_BASE}/master-data/sap_workcenter?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) }).then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusMasterWorkcenter>> : null),
-        ]).then(([pData, lData, ssData, wcData]) => {
+          Persistence._fetchToolInventory(plant),
+        ]).then(([pData, lData, ssData, wcData, tiRows]) => {
           // A newer load() (e.g. the user switched plants again) may have
           // started while this was in flight — discard rather than let a
           // stale plant's response clobber the now-current one.
@@ -651,6 +676,7 @@ export const Persistence = {
               plants: pData?.rows ?? [],
               lines:  lData?.rows ?? [],
               workcenters: wcData?.rows ?? [],
+              tool_inventory: Persistence._resolveToolInventory(plant, tiRows),
             }, 'persistence');
           }
           Store.setOrderFieldVisibility(ssData?.orderFields ?? {}, 'persistence');
@@ -760,6 +786,8 @@ export const Persistence = {
           frozen_horizon_end: string | null;
           alert_horizon_minutes: number | null;
           calendar_version?: string | null;
+          tool_inventory_version?: string | null;
+          tooling_rule?: 'off' | 'hard';
         }>).then(json => {
           // The user has since switched plants, or a newer load() has since
           // started (its own /tasks meta will win) — discard this response.
@@ -790,6 +818,7 @@ export const Persistence = {
           }
 
           Persistence._noteCalendarVersion(plant, json.calendar_version);
+          Persistence._noteToolInventoryVersion(plant, json.tool_inventory_version, json.tooling_rule);
 
           return changed;
         });
@@ -826,6 +855,141 @@ export const Persistence = {
       if (Persistence._calendarVersion[plant] === known) Persistence._calendarVersion[plant] = version;   // a backend whose GET lacks the field
       if (Persistence._calendarFingerprint(plant) !== before) Toast.show(Util.t('toast.calendar_refreshed_remote'), 'info');
     }).finally(() => { Persistence._calendarRefreshing.delete(plant); });
+  },
+
+  /** GET /master-data/tool_inventory?plant= -> the plant's rows sorted by tool_id (ascending, plain code-unit order:
+   *  deterministic input for the optimizer's JSON stale diff), or `undefined` when the response is not ok, the body
+   *  is unusable, the request times out or throws. Never rejects, and NEVER returns [] for a failure: a failed fetch
+   *  must not read as "loaded, every tool is 1 copy". */
+  _fetchToolInventory(plant: string): Promise<NimbusToolInventoryRow[] | undefined> {
+    return Util.fetchTraced(`${Config.API_BASE}/master-data/tool_inventory?plant=${encodeURIComponent(plant)}`, { signal: AbortSignal.timeout(5000) })
+      .then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<NimbusToolInventoryRow>> : null)
+      .then(body => {
+        if (!body || !Array.isArray(body.rows)) return undefined;
+        return body.rows.slice().sort((a, b) => (a.tool_id < b.tool_id ? -1 : a.tool_id > b.tool_id ? 1 : 0));
+      })
+      .catch(() => undefined);
+  },
+
+  /** "<row count>|<max updated_at as epoch ms>" for loaded rows ("" for none): the client twin of the backend's
+   *  tool_inventory_version once that is normalised by _normToolInventoryVersion. */
+  _toolInventoryFingerprint(rows: ReadonlyArray<NimbusToolInventoryRow>): string {
+    if (!rows.length) return '';
+    let max = NaN;
+    for (const row of rows) {
+      const t = row.updated_at ? Date.parse(row.updated_at) : NaN;
+      if (Number.isFinite(t) && !(t <= max)) max = t;
+    }
+    return `${rows.length}|${Number.isFinite(max) ? max : ''}`;
+  },
+
+  /** The backend's "<count>|<max updated_at ISO>" (null = no rows / table missing) in _toolInventoryFingerprint's form. */
+  _normToolInventoryVersion(version: string | null | undefined): string {
+    if (!version) return '';
+    const bar = version.indexOf('|');
+    if (bar < 0) return version;
+    const iso = version.slice(bar + 1);
+    const ms = iso ? Date.parse(iso) : NaN;
+    return `${version.slice(0, bar)}|${Number.isFinite(ms) ? ms : ''}`;
+  },
+
+  /** One ErrorLog.warn + toast per plant per session when a plant's inventory could not be loaded. */
+  _warnToolInventoryUnavailable(plant: string): void {
+    if (Persistence._toolInventoryWarned.has(plant)) return;
+    Persistence._toolInventoryWarned.add(plant);
+    ErrorLog.warn('persistence', `Tool inventory fetch failed (plant=${plant}); tools are treated as 1 copy until it loads`);
+    Toast.show(Util.t('toast.tool_inventory_unavailable', { plant }), 'warn', 6000);
+  },
+
+  /** What `masterData.tool_inventory` should be after a load's fetch: the fresh rows; on failure `undefined` (never
+   *  []), except a same-plant reload keeps the rows already held (keep-on-failure, like workcenters). Records the
+   *  owning plant and the probe baseline. A different plant's rows are never reused. */
+  _resolveToolInventory(plant: string, fetched: NimbusToolInventoryRow[] | undefined): NimbusToolInventoryRow[] | undefined {
+    let rows = fetched;
+    if (rows === undefined) {
+      Persistence._warnToolInventoryUnavailable(plant);
+      rows = Persistence._toolInventoryPlant === plant ? Store.masterData?.tool_inventory : undefined;
+    } else {
+      Persistence._toolInventoryBaseline[plant] = Persistence._toolInventoryFingerprint(rows);
+    }
+    if (rows === undefined) Persistence._toolInventoryBaseline[plant] = undefined;
+    Persistence._toolInventoryPlant = plant;
+    return rows;
+  },
+
+  /** Re-fetch one plant's inventory into Store.masterData.tool_inventory (emits master-data-changed with table
+   *  'tool_inventory', which the shell already turns into an alert recompute). Resolves true iff rows were applied.
+   *  A failed fetch keeps whatever is held; a plant switch or newer load() while the request is in flight discards
+   *  the response (the same selectedPlant + _loadRequest guard as refreshHorizons). */
+  async refreshToolInventory(plant: string | null): Promise<boolean> {
+    if (!plant) return false;
+    const gen = Persistence._loadRequest;
+    const rows = await Persistence._fetchToolInventory(plant);
+    if (Store.selectedPlant !== plant || Persistence._loadRequest !== gen) return false;
+    if (rows === undefined) { Persistence._warnToolInventoryUnavailable(plant); return false; }
+    const md = Store.masterData;
+    if (!md) return false;
+    Persistence._toolInventoryBaseline[plant] = Persistence._toolInventoryFingerprint(rows);
+    Persistence._toolInventoryPlant = plant;
+    Store.setMasterData({ ...md, tool_inventory: rows }, 'tool-inventory-refresh', 'tool_inventory');
+    return true;
+  },
+
+  /** The /tasks/horizons probe's Tool Inventory fields. A different inventory fingerprint than the rows this tab
+   *  holds (or no good rows held at all) re-fetches them; a `tooling_rule` that differs from the plant row in the
+   *  Store re-fetches the plants rows. Each toasts once, and only when something really changed. Skipped (and the
+   *  throttle zeroed so the next entry retries) while a drag is in flight, a dialog is open or What-If is active,
+   *  exactly like the calendar probe. Older backends omit both fields: nothing happens. */
+  _noteToolInventoryVersion(plant: string, version: string | null | undefined, rule: 'off' | 'hard' | undefined): void {
+    const blocked = (): boolean => {
+      if (Sandbox.active || Modal.anyOpen() || Persistence._calendarRefreshBlocked?.()) {
+        Persistence._horizonsFetchedAt[plant] = 0;
+        return true;
+      }
+      return false;
+    };
+
+    if (version !== undefined && Persistence._toolInventoryPlant === plant && !Persistence._toolInventoryRefreshing.has(plant)) {
+      const known = Persistence._toolInventoryBaseline[plant];
+      if (known === undefined || known !== Persistence._normToolInventoryVersion(version)) {
+        if (!blocked()) {
+          const before = known;
+          Persistence._toolInventoryRefreshing.add(plant);
+          void Persistence.refreshToolInventory(plant).then(applied => {
+            if (!applied) { Persistence._horizonsFetchedAt[plant] = 0; return; }
+            const after = Persistence._toolInventoryBaseline[plant];
+            if (before !== undefined && after !== before) Toast.show(Util.t('toast.tool_inventory_refreshed_remote'), 'info');
+          }).finally(() => { Persistence._toolInventoryRefreshing.delete(plant); });
+        }
+      }
+    }
+
+    if (rule !== undefined && !Persistence._toolingRuleRefreshing.has(plant)) {
+      const row = Store.masterData?.plants?.find(p => p.plant === plant);
+      const held = row?.setup_policy_config?.toolingRule ?? 'off';
+      if (row && held !== rule && !blocked()) {
+        Persistence._toolingRuleRefreshing.add(plant);
+        void Persistence._refreshPlantRows(plant).then(applied => {
+          if (!applied) { Persistence._horizonsFetchedAt[plant] = 0; return; }
+          const now = Store.masterData?.plants?.find(p => p.plant === plant)?.setup_policy_config?.toolingRule ?? 'off';
+          if (now !== held) Toast.show(Util.t('toast.tool_inventory_refreshed_remote'), 'info');
+        }).finally(() => { Persistence._toolingRuleRefreshing.delete(plant); });
+      }
+    }
+  },
+
+  /** Re-fetch GET /master-data/plants and replace Store.masterData.plants (lines, work centers and the inventory are
+   *  carried unchanged). Same selectedPlant + _loadRequest guard; a failed fetch keeps the held rows. */
+  async _refreshPlantRows(plant: string): Promise<boolean> {
+    const gen = Persistence._loadRequest;
+    const data = await Util.fetchTraced(`${Config.API_BASE}/master-data/plants`, { signal: AbortSignal.timeout(5000) })
+      .then(r => r.ok ? r.json() as Promise<MasterDataRowsResponse<MasterPlantRow>> : null)
+      .catch(() => null);
+    if (Store.selectedPlant !== plant || Persistence._loadRequest !== gen) return false;
+    const md = Store.masterData;
+    if (!data || !Array.isArray(data.rows) || !md) return false;
+    Store.setMasterData({ ...md, plants: data.rows }, 'tooling-rule-refresh', 'plants');
+    return true;
   },
 
   /** What the browser holds of a plant's calendar, for "did the re-hydration change anything". */

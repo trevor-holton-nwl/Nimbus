@@ -336,6 +336,8 @@ export interface NimbusMasterPlant {
   setup_policy_config?: {
     unknownSetupPolicy?: UnknownSetupPolicy;
     unknownSetupDefaultMinutes?: number;
+    /** Treat Tooling as Hard Constraint (per plant; absent = 'off'). */
+    toolingRule?: 'off' | 'hard';
     version?: number;
     [key: string]: unknown;
   } | null;
@@ -352,10 +354,26 @@ export interface NimbusMasterWorkcenter {
   distribute_tooled: boolean;
 }
 
+/** One row of GET /master-data/tool_inventory?plant= (a tool id is a TYPE; the plant owns total_qty
+ *  interchangeable copies). A tool with no row is 1 copy; available = max(0, total_qty - out_of_service_qty). */
+export interface NimbusToolInventoryRow {
+  plant: string;
+  tool_id: string;
+  total_qty: number;
+  out_of_service_qty: number;
+  note?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface NimbusMasterData {
   plants: NimbusMasterPlant[];
   lines: NimbusMasterLine[];
   workcenters: NimbusMasterWorkcenter[];
+  /** The selected plant's tool inventory, sorted by tool_id. `undefined` means NOT LOADED / the fetch FAILED
+   *  (never "empty": an empty array is a loaded plant with no rows, where every tool is 1 copy). A required
+   *  key on purpose so every writer of a masterData object must decide what to carry. */
+  tool_inventory: NimbusToolInventoryRow[] | undefined;
 }
 
 // ---------------------------------------------------------------------------

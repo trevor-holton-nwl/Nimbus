@@ -3447,6 +3447,14 @@ export interface components {
             alert_horizon_minutes: number | null;
             /** Calendar Version */
             calendar_version?: string | null;
+            /** Tool Inventory Version */
+            tool_inventory_version?: string | null;
+            /**
+             * Tooling Rule
+             * @default off
+             * @enum {string}
+             */
+            tooling_rule?: "off" | "hard";
         };
         /**
          * LinkDTO

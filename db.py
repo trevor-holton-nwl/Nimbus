@@ -644,29 +644,60 @@ def plant_calendar_version(plant: str, cur=None) -> str | None:
         return plant_calendar_version(plant, c)
 
 
+_TOOL_INVENTORY_VERSION_SQL = (
+    "SELECT count(*), max(updated_at) FROM tool_inventory WHERE plant = %s"
+)
+
+
+def _tool_inventory_version(plant: str, cur) -> str | None:
+    """Cheap deterministic fingerprint of one plant's tool inventory: "<row count>|<max updated_at ISO>".
+    None when the plant has no rows or the table is absent (an image that rolled before its migration):
+    the probe is fail-open and must never break /tasks/horizons. A failed statement aborts the caller's
+    transaction, so the caller must have finished every other read first."""
+    try:
+        cur.execute(_TOOL_INVENTORY_VERSION_SQL, (plant,))
+        row = cur.fetchone()
+    except Exception:
+        try:
+            cur.connection.rollback()
+        except Exception:
+            pass
+        return None
+    if not row or not row[0]:
+        return None
+    return f"{int(row[0])}|{row[1].isoformat() if row[1] is not None else ''}"
+
+
 def plant_horizons(plant: str) -> dict:
     """Meta-only horizon probe for one plant (GET /tasks/horizons) — the same
     resolved instants GET /tasks ships in `meta`, without the task payload.
     Exists so the Gantt can refresh its frozen/visibility-horizon bands on tab
     re-entry without a full /tasks reload (which has no unsaved-edit guard).
     Reuses the exact compute_* clock as _horizon_bounds_for_plant; unknown
-    plant -> every value None."""
+    plant -> every value None (tooling_rule 'off').
+
+    Also carries the Tool Inventory freshness probe: `tool_inventory_version` (None when empty or the
+    table is missing) and `tooling_rule` ('off' | 'hard', default 'off')."""
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT visibility_horizon_days, horizon_roll_hour_utc, timezone, "
-            "frozen_horizon_days, alt_flag_horizon "
+            "frozen_horizon_days, alt_flag_horizon, setup_policy_config "
             "FROM plants WHERE plant = %s LIMIT 1",
             (plant,),
         )
         row = cur.fetchone()
         if row is None:
             return {"visibility_horizon_end": None, "frozen_horizon_end": None, "alert_horizon_minutes": None,
-                    "calendar_version": None}
+                    "calendar_version": None, "tool_inventory_version": None, "tooling_rule": "off"}
         calendar_version = plant_calendar_version(plant, cur)
-    visibility_horizon_days, horizon_roll_hour_utc, timezone_name, frozen_horizon_days, alt_flag_horizon = row
+        tool_inventory_version = _tool_inventory_version(plant, cur)   # last: the fail-open path may roll back
+    visibility_horizon_days, horizon_roll_hour_utc, timezone_name, frozen_horizon_days, alt_flag_horizon, policy_config = row
+    tooling_rule = policy_config.get("toolingRule") if isinstance(policy_config, dict) else None
     now_utc = datetime.now(timezone.utc)
     return {
         "calendar_version": calendar_version,
+        "tool_inventory_version": tool_inventory_version,
+        "tooling_rule": tooling_rule if tooling_rule in ("off", "hard") else "off",
         "visibility_horizon_end": compute_visibility_horizon_end(now_utc, timezone_name, horizon_roll_hour_utc, visibility_horizon_days),
         "frozen_horizon_end": compute_frozen_horizon_end(now_utc, timezone_name, horizon_roll_hour_utc, frozen_horizon_days),
         "alert_horizon_minutes": int(alt_flag_horizon) if alt_flag_horizon is not None else None,

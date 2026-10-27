@@ -121,6 +121,10 @@ class HorizonsResponse(BaseModel):
     # Opaque fingerprint of the plant's calendar (hours, periods, blackouts); the Gantt re-fetches the plant
     # calendar when it differs from the last one it hydrated. Optional and additive: None for an unknown plant.
     calendar_version: str | None = None
+    # Tool Inventory freshness (additive): "<row count>|<max updated_at ISO>" (None when the plant has no rows or
+    # the table is missing) and the plant's Treat Tooling as Hard Constraint rule. The tab re-fetches on change.
+    tool_inventory_version: str | None = None
+    tooling_rule: Literal['off', 'hard'] = 'off'
 
 
 class ScheduleConflict(BaseModel):

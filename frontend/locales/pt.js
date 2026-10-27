@@ -5,6 +5,8 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.calendar_saved_locally':      'Salvo localmente — será sincronizado quando o servidor estiver acessível',
   'toast.calendar_offline_cache':      'Exibindo calendários em cache — servidor inacessível',
   'toast.calendar_refreshed_remote': 'Calendário da planta atualizado em outra sessão; sombreado da programação atualizado',
+  'toast.tool_inventory_unavailable': 'Não foi possível carregar o inventário de ferramentas da planta {{plant}}; até carregar, cada ferramenta conta como 1 unidade',
+  'toast.tool_inventory_refreshed_remote': 'Inventário de ferramentas atualizado em outra sessão; quantidades de ferramentas atualizadas',
   'modal.opt_calendar_not_loaded_title': 'Calendário da planta não carregado',
   'modal.opt_calendar_not_loaded_msg': 'O calendário da planta {{plant}} não foi carregado do servidor (ele pode estar inacessível). A execução usaria o calendário em cache, que pode estar desatualizado. Executar mesmo assim?',
   'btn.opt_run_anyway': 'Executar mesmo assim',

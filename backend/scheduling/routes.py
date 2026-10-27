@@ -515,6 +515,8 @@ def get_task_horizons(plant: str,
         "frozen_horizon_end": h["frozen_horizon_end"].isoformat() if h["frozen_horizon_end"] else None,
         "alert_horizon_minutes": h["alert_horizon_minutes"],
         "calendar_version": h.get("calendar_version"),
+        "tool_inventory_version": h.get("tool_inventory_version"),
+        "tooling_rule": h.get("tooling_rule") or "off",
     }
 
 

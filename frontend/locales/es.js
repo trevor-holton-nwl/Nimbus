@@ -5,6 +5,8 @@ window.__NIMBUS_LOCALES.es = {
   'toast.calendar_saved_locally':      'Guardado localmente: se sincronizará cuando el servidor esté disponible',
   'toast.calendar_offline_cache':      'Mostrando calendarios en caché: servidor no disponible',
   'toast.calendar_refreshed_remote': 'Calendario de la planta actualizado en otra sesión; sombreado del programa actualizado',
+  'toast.tool_inventory_unavailable': 'No se pudo cargar el inventario de herramientas de la planta {{plant}}; hasta que cargue, cada herramienta cuenta como 1 unidad',
+  'toast.tool_inventory_refreshed_remote': 'Inventario de herramientas actualizado en otra sesión; cantidades de herramientas actualizadas',
   'modal.opt_calendar_not_loaded_title': 'Calendario de la planta no cargado',
   'modal.opt_calendar_not_loaded_msg': 'El calendario de la planta {{plant}} no se ha cargado desde el servidor (puede que no esté disponible). La ejecución usaría el calendario en caché, que puede estar desactualizado. ¿Ejecutar de todos modos?',
   'btn.opt_run_anyway': 'Ejecutar de todos modos',

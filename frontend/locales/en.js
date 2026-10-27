@@ -5,6 +5,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.calendar_saved_locally':      'Saved locally — will sync when the server is reachable',
   'toast.calendar_offline_cache':      'Showing cached calendars — server unreachable',
   'toast.calendar_refreshed_remote': 'Plant calendar updated by another session; schedule shading refreshed',
+  'toast.tool_inventory_unavailable': 'Tool inventory for plant {{plant}} could not be loaded; every tool is treated as 1 copy until it loads',
+  'toast.tool_inventory_refreshed_remote': 'Tool inventory updated by another session; tool counts refreshed',
   'modal.opt_calendar_not_loaded_title': 'Plant calendar not loaded',
   'modal.opt_calendar_not_loaded_msg': 'The calendar for plant {{plant}} has not been loaded from the server (it may be unreachable). The run would use the cached calendar, which can be out of date. Run anyway?',
   'btn.opt_run_anyway': 'Run anyway',
