@@ -1631,7 +1631,8 @@ def ensure_plant_visibility_horizon_columns() -> None:
 
 def ensure_plant_frozen_horizon_column() -> None:
     """Idempotent Workstream C2 (2026-08-20) column: the near-term window
-    inside which the optimizer may not place or move any order. Nullable,
+    inside which the optimizer may not place or move any order (an order is frozen
+    when its planned FINISH falls inside it, universal firm 2026-10-27). Nullable,
     NO default, and — unlike visibility_horizon_days — NULL/0 both mean
     "off" (validated in set_plant_frozen_horizon_days; this column itself
     stays a plain INTEGER, same shape as max_pull_forward_days). Redeploy-safe
