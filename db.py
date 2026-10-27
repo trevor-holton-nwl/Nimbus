@@ -5731,3 +5731,77 @@ def distinct_order_values(plant: str, column: str) -> list[str]:
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(q, (plant,))
         return [r[0] for r in cur.fetchall() if r[0]]
+
+
+# Tool ids (orders.prt_01 / prt_02) that are blank stand-ins, never a real tool. Same set as
+# frontend `TOOL_PLACEHOLDERS` (compute-core) and backend/distribution/service.py, plus the
+# NAN/TBD members Excel round trips produce; compared AFTER UPPER(BTRIM()).
+TOOL_PLACEHOLDERS = ('', '-', '0', 'N/A', 'NONE', 'NULL', 'NAN', 'TBD')
+
+# Orders of `plant`: the materialized plant column, or (rows uploaded before their machine
+# existed) a NULL plant whose machine belongs to this plant and no other. Params: (plant, plant, plant).
+_TOOL_ORDERS_OF_PLANT = """
+    (o.plant = %s
+     OR (o.plant IS NULL
+         AND EXISTS (SELECT 1 FROM machine m WHERE m.machine = o.machine AND m.plant = %s)
+         AND NOT EXISTS (SELECT 1 FROM machine m2 WHERE m2.machine = o.machine AND m2.plant <> %s)))
+"""
+
+
+def tool_ids_in_use(plant: str, include_material_plants: bool = False) -> list[str]:
+    """Every distinct real tool id carried by an order of `plant` in either PRT column
+    (UPPER/TRIM-normalised, placeholders dropped), alphabetical. One id pool per plant: the same
+    string in PRT 1 and PRT 2 is one tool. With `include_material_plants` the plant's
+    material_plants.prt_01/prt_02 values join the set (the template prefill wants tools that
+    will appear on the next order stamp, not only today's orders)."""
+    q = f"""
+        SELECT DISTINCT UPPER(BTRIM(t.tool))
+          FROM orders o
+          CROSS JOIN LATERAL (VALUES (o.prt_01), (o.prt_02)) AS t(tool)
+         WHERE {_TOOL_ORDERS_OF_PLANT}
+           AND t.tool IS NOT NULL
+           AND UPPER(BTRIM(t.tool)) <> ALL(%s)
+    """
+    params: list = [plant, plant, plant, list(TOOL_PLACEHOLDERS)]
+    if include_material_plants:
+        q += """
+        UNION
+        SELECT DISTINCT UPPER(BTRIM(t.tool))
+          FROM material_plants mp
+          CROSS JOIN LATERAL (VALUES (mp.prt_01), (mp.prt_02)) AS t(tool)
+         WHERE mp.plant = %s
+           AND t.tool IS NOT NULL
+           AND UPPER(BTRIM(t.tool)) <> ALL(%s)
+        """
+        params += [plant, list(TOOL_PLACEHOLDERS)]
+    q += " ORDER BY 1"
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(q, params)
+        return [r[0] for r in cur.fetchall() if r[0]]
+
+
+def tool_usage_counts(plant: str, tool_ids: list[str]) -> dict[str, dict]:
+    """How many orders of `plant` carry each of `tool_ids` (matched UPPER/TRIM against BOTH
+    orders.prt_01 and prt_02; an order carrying the id in both counts once), with the first 5
+    production order numbers. Read-only; feeds the "this tool is used by N orders" confirm
+    before an inventory row is removed. Every requested id is present in the result."""
+    wanted = sorted({str(t).strip().upper() for t in tool_ids if t is not None and str(t).strip()})
+    out: dict[str, dict] = {t: {"count": 0, "orders": []} for t in wanted}
+    if not wanted:
+        return out
+    q = f"""
+        SELECT UPPER(BTRIM(t.tool)) AS tool,
+               COUNT(DISTINCT o.id),
+               (ARRAY_AGG(DISTINCT o.production_order ORDER BY o.production_order))[1:5]
+          FROM orders o
+          CROSS JOIN LATERAL (VALUES (o.prt_01), (o.prt_02)) AS t(tool)
+         WHERE {_TOOL_ORDERS_OF_PLANT}
+           AND t.tool IS NOT NULL
+           AND UPPER(BTRIM(t.tool)) = ANY(%s)
+         GROUP BY 1
+    """
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(q, (plant, plant, plant, wanted))
+        for tool, count, orders in cur.fetchall():
+            out[tool] = {"count": int(count), "orders": list(orders or [])}
+    return out

@@ -8,6 +8,8 @@ parameter placeholder.  The user cannot inject SQL through any of these paths.
 """
 import io
 import logging
+import math
+import numbers
 import re
 from datetime import date, datetime, timezone
 
@@ -18,7 +20,7 @@ from psycopg.types.json import Jsonb
 
 # Import the shared pool + SAP-numeric-ID normalizer + ILIKE-escape helper
 # from the existing db module.
-from db import _pool, _str_id, _like_contains
+from db import _pool, _str_id, _like_contains, TOOL_PLACEHOLDERS
 
 # Child of brain.py's `nimbus.*` structured-logging tree (propagates up), so a
 # narrowed-but-unexpected error class here still reaches the operator log.
@@ -32,6 +34,7 @@ ALLOWED_TABLES = frozenset({
     'materials', 'material_plants', 'bom_items',
     'roles', 'role_plants', 'sap_workcenter',
     'production_version', 'routing_operation', 'routing_rules',
+    'tool_inventory',
 })
 
 # Tables whose `plant` column is business/scheduling data, subject to
@@ -45,6 +48,7 @@ ALLOWED_TABLES = frozenset({
 PLANT_SCOPED_TABLES = frozenset({
     'plants', 'machine', 'material_plants', 'bom_items', 'sap_workcenter',
     'production_version', 'routing_operation', 'routing_rules',
+    'tool_inventory',
 })
 
 # Tables the "delete filtered rows" mass-delete endpoint (backend/routing,
@@ -95,6 +99,7 @@ _KEY_COLUMNS = {
     'routing_operation':  frozenset({'plant', 'material_id', 'task_list_type', 'routing_group',
                                       'group_counter', 'sequence_no', 'activity'}),
     'routing_rules':      frozenset({'plant', 'rule_kind', 'code'}),
+    'tool_inventory':     frozenset({'plant', 'tool_id'}),
 }
 
 # Explicit search-column overrides for list_rows' ILIKE search filter, keyed
@@ -116,6 +121,7 @@ _SEARCH_COLUMNS: dict[str, tuple[str, ...]] = {
     'material_plants': ('material_id',),
     'bom_items': ('material_id', 'component_id'),
     'role_plants': ('role',),
+    'tool_inventory': ('tool_id', 'note'),
 }
 
 # The ONLY material_plants columns POST /master-data/material-plants/attributes
@@ -1085,6 +1091,188 @@ def _autolink_same_named_machines(cur, plants, only=None) -> list[dict]:
     return [{"plant": p, "machine": mname} for p, mname in sorted(cur.fetchall())]
 
 
+# ---------------------------------------------------------------------------
+# Tool inventory (per-plant PRT 1 / PRT 2 copy counts). ONE normaliser/validator
+# shared by the generic admin /bulk path, the planner /tool-inventory routes and
+# the Excel parser, so a row means the same thing whichever door it came through.
+# ---------------------------------------------------------------------------
+TOOL_ID_MAX_LEN = 100
+TOOL_NOTE_MAX_LEN = 500
+TOOL_QTY_MAX = 1_000_000
+# Hard ceiling on one inventory save (upserts + deletes) -- cf. MAX_ATTRIBUTE_UPDATES.
+MAX_TOOL_INVENTORY_OPS = 5000
+# Strict string enum so a middle mode can be added later without a migration.
+TOOLING_RULES = ("off", "hard")
+_TOOL_QTY_TEXT_RE = re.compile(r"^\d+(?:\.0+)?$")
+_TOOL_INVENTORY_AUDIT_CAP = 50
+
+
+def normalize_tool_id(value) -> str:
+    """Stored form of a tool id: SAP-float-suffix stripped, trimmed, UPPER-cased ('' for blank).
+    UPPER because /tasks already upper-cases PRT values, so a mixed-case row would never match."""
+    return _str_id(value).strip().upper()
+
+
+def _strict_tool_qty(value, label: str):
+    """A whole number >= 0 as int, or None for a blank cell. Accepts int, an integer-valued
+    float (Excel), and a digit string ('3', '3.0'); rejects bool, fractions (2.7 would silently
+    truncate to 2), negatives and anything else."""
+    msg = f"{label} must be a whole number from 0 to {TOOL_QTY_MAX}"
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(msg)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if not _TOOL_QTY_TEXT_RE.match(s):
+            raise ValueError(msg)
+        n = int(s.split(".")[0])
+    elif isinstance(value, numbers.Integral):
+        n = int(value)
+    elif isinstance(value, float):
+        if not math.isfinite(value) or value != int(value):
+            raise ValueError(msg)
+        n = int(value)
+    else:
+        raise ValueError(msg)
+    if n < 0 or n > TOOL_QTY_MAX:
+        raise ValueError(msg)
+    return n
+
+
+def normalize_tool_inventory_row(row: dict, plant: str | None = None) -> dict:
+    """One tool_inventory row -> its clean stored shape {plant, tool_id, total_qty,
+    out_of_service_qty, note}; ValueError with a planner-readable message otherwise. `plant`,
+    when given, is FORCED onto the row (the planner routes scope by path plant, never by
+    whatever the body claims)."""
+    if not isinstance(row, dict):
+        raise ValueError("row must be an object")
+    row_plant = plant if plant is not None else str(row.get("plant") or "").strip()
+    if not row_plant:
+        raise ValueError("plant is required")
+    tool_id = normalize_tool_id(row.get("tool_id"))
+    if not tool_id:
+        raise ValueError("Tool ID is required")
+    if tool_id in TOOL_PLACEHOLDERS:
+        raise ValueError(f"Tool ID {tool_id!r} is a placeholder, not a tool")
+    if len(tool_id) > TOOL_ID_MAX_LEN:
+        raise ValueError(f"Tool ID must be at most {TOOL_ID_MAX_LEN} characters")
+    total = _strict_tool_qty(row.get("total_qty"), "Total Inventory")
+    if total is None:
+        raise ValueError("Total Inventory is required")
+    oos = _strict_tool_qty(row.get("out_of_service_qty"), "Out of Service")
+    if oos is None:
+        oos = 0
+    if oos > total:
+        raise ValueError(f"Out of Service ({oos}) cannot exceed Total Inventory ({total})")
+    note = row.get("note")
+    note = None if note is None or (isinstance(note, float) and note != note) else (str(note).strip() or None)
+    if note is not None and len(note) > TOOL_NOTE_MAX_LEN:
+        raise ValueError(f"Note must be at most {TOOL_NOTE_MAX_LEN} characters")
+    return {"plant": row_plant, "tool_id": tool_id, "total_qty": total,
+            "out_of_service_qty": oos, "note": note}
+
+
+def normalize_tool_inventory_upserts(rows: list, plant: str | None = None) -> tuple[list[dict], list[dict]]:
+    """Normalise every upsert row. Returns (clean_rows, rejected) where `rejected` holds
+    {index, tool_id, error}; a duplicate of an earlier row after normalisation ('t100' then
+    'T100') is rejected -- the first row wins."""
+    clean: list[dict] = []
+    rejected: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for i, row in enumerate(rows):
+        raw_id = str(row.get("tool_id") or "") if isinstance(row, dict) else ""
+        try:
+            c = normalize_tool_inventory_row(row, plant)
+        except ValueError as exc:
+            rejected.append({"index": i, "tool_id": raw_id, "error": str(exc)})
+            continue
+        key = (c["plant"], c["tool_id"])
+        if key in seen:
+            rejected.append({"index": i, "tool_id": c["tool_id"],
+                             "error": "duplicate Tool ID after normalisation (the first row wins)"})
+            continue
+        seen.add(key)
+        clean.append(c)
+    return clean, rejected
+
+
+def _prepare_tool_inventory_ops(ops: dict) -> tuple[list[dict], list[dict]]:
+    """bulk_apply's tool_inventory pre-pass: (clean upserts, clean deletes) with the plant
+    forced onto BOTH from `ops['plant']` when present (planner routes), else each row must
+    carry its own (generic admin grid). All-or-nothing: any bad row raises ValueError."""
+    plant = ops.get("plant")
+    plant = plant.strip() if isinstance(plant, str) and plant.strip() else None
+    upserts = ops.get("upserts") or []
+    deletes = ops.get("deletes") or []
+    if len(upserts) + len(deletes) > MAX_TOOL_INVENTORY_OPS:
+        raise ValueError(f"At most {MAX_TOOL_INVENTORY_OPS} tool inventory changes per save")
+    clean, rejected = normalize_tool_inventory_upserts(upserts, plant)
+    if rejected:
+        shown = "; ".join(
+            f"{r['tool_id'] or 'row ' + str(r['index'] + 1)}: {r['error']}" for r in rejected[:5])
+        more = f" (+{len(rejected) - 5} more)" if len(rejected) > 5 else ""
+        raise ValueError(f"Cannot save tool inventory: {shown}{more}")
+    del_clean: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for d in deletes:
+        if not isinstance(d, dict):
+            raise ValueError("Cannot save tool inventory: delete key must be an object")
+        d_plant = plant if plant is not None else str(d.get("plant") or "").strip()
+        d_tool = normalize_tool_id(d.get("tool_id"))
+        if not d_plant or not d_tool:
+            raise ValueError("Cannot save tool inventory: a delete needs a plant and a Tool ID")
+        if (d_plant, d_tool) in seen:
+            continue
+        seen.add((d_plant, d_tool))
+        del_clean.append({"plant": d_plant, "tool_id": d_tool})
+    return clean, del_clean
+
+
+def _tool_inventory_audit(cur, upserts: list[dict], deletes: list[dict]) -> list[dict]:
+    """Before/after of every tool the save touches (read inside the write's transaction,
+    BEFORE it runs): [{plant, tool_id, before, after}], unchanged upserts skipped. A key both
+    deleted and re-added in one save (the typo-fix path) shows its old and new state."""
+    keys = {(r["plant"], r["tool_id"]) for r in upserts} | {(d["plant"], d["tool_id"]) for d in deletes}
+    if not keys:
+        return []
+    cur.execute(
+        "SELECT plant, tool_id, total_qty, out_of_service_qty, note FROM tool_inventory"
+        " WHERE plant = ANY(%s) AND tool_id = ANY(%s)",
+        (sorted({k[0] for k in keys}), sorted({k[1] for k in keys})),
+    )
+    before = {(r[0], r[1]): {"total_qty": r[2], "out_of_service_qty": r[3], "note": r[4]}
+              for r in cur.fetchall() if (r[0], r[1]) in keys}
+    after: dict[tuple[str, str], dict | None] = {(d["plant"], d["tool_id"]): None for d in deletes}
+    for r in upserts:
+        after[(r["plant"], r["tool_id"])] = {k: r[k] for k in ("total_qty", "out_of_service_qty", "note")}
+    return [
+        {"plant": k[0], "tool_id": k[1], "before": before.get(k), "after": a}
+        for k, a in sorted(after.items()) if before.get(k) != a
+    ]
+
+
+def load_tool_inventory_rows(plant: str) -> list[dict]:
+    """The plant's inventory rows ({tool_id, total_qty, out_of_service_qty, note}), sorted by
+    tool_id (deterministic for diffs and exports)."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT tool_id, total_qty, out_of_service_qty, note FROM tool_inventory"
+            " WHERE plant = %s ORDER BY tool_id",
+            (plant,),
+        )
+        return [{"tool_id": r[0], "total_qty": r[1], "out_of_service_qty": r[2], "note": r[3]}
+                for r in cur.fetchall()]
+
+
+def plant_exists(plant: str) -> bool:
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM plants WHERE plant = %s LIMIT 1", (plant,))
+        return cur.fetchone() is not None
+
+
 def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
     """
     ops = {
@@ -1092,10 +1280,16 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         'deletes': [{key_col: val, ...}, ...],
     }
     All in one transaction.  Returns counts.
+
+    tool_inventory is normalised/validated up front (see normalize_tool_inventory_row): the
+    optional ops['plant'] is forced onto upserts AND deletes, and ops['source'] /
+    ops['filename'] ride into the audit row with a capped before/after of the tools touched.
     """
     _assert_table(table)
     upserts = ops.get("upserts", [])
     deletes = ops.get("deletes", [])
+    if table == "tool_inventory":
+        upserts, deletes = _prepare_tool_inventory_ops(ops)
     keys = sorted(_KEY_COLUMNS[table])
 
     inserted = updated = deleted = 0
@@ -1115,6 +1309,7 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         # `roles` column at all (42703 undefined column, same generic 500).
         col_meta_by_name = {m["column_name"]: m for m in _column_meta(cur, table)} if upserts else {}
         allowed_cols = set(col_meta_by_name)
+        tool_changes = _tool_inventory_audit(cur, upserts, deletes) if table == "tool_inventory" else None
 
         # --- Deletes first so upserts don't conflict with to-be-deleted rows ---
         for d in deletes:
@@ -1295,6 +1490,13 @@ def bulk_apply(table: str, ops: dict, user_email: str | None = None) -> dict:
         audit_details = {"inserted": inserted, "updated": updated, "deleted": deleted}
         if linked:
             audit_details["auto_linked"] = linked
+        if tool_changes is not None:
+            audit_details["plants"] = sorted({r["plant"] for r in upserts} | {d["plant"] for d in deletes})
+            audit_details["changes"] = tool_changes[:_TOOL_INVENTORY_AUDIT_CAP]
+            audit_details["changes_total"] = len(tool_changes)
+            for extra in ("source", "filename"):
+                if ops.get(extra):
+                    audit_details[extra] = str(ops[extra])[:200]
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
             " VALUES (%s, %s, %s, %s)",
@@ -2028,6 +2230,38 @@ def set_plant_unknown_setup_policy(subnetwork: str, plant: str, policy: str, def
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
             " VALUES ('plants', 'set_unknown_setup_policy', %s, %s)",
+            (Jsonb({"plant": plant, **patch}), user_email),
+        )
+        conn.commit()
+    return {"status": "ok", "plant": plant, "setup_policy_config": patch}
+
+
+def set_plant_tooling_rule(subnetwork: str, plant: str, rule: str, user_email: str | None = None) -> dict:
+    """Persist the per-plant "Treat Tooling as Hard Constraint" Order Rule into the
+    plants.setup_policy_config JSONB sidecar (same merge as set_plant_unknown_setup_policy, so the
+    other keys survive). A strict string enum -- exactly 'off' or 'hard', no trimming or case
+    folding -- so a named middle mode can be added later without a migration. 'off' is today's
+    behavior for every plant."""
+    if not plant:
+        raise ValueError("plant is required")
+    if not isinstance(rule, str) or rule not in TOOLING_RULES:
+        raise ValueError("tooling_rule must be 'off' or 'hard'")
+    patch = {"toolingRule": rule, "version": 2}
+    params: list = [Jsonb(patch), plant]
+    where = "plant = %s"
+    if subnetwork:
+        where += " AND subnetwork = %s"
+        params.append(subnetwork)
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE plants SET setup_policy_config = setup_policy_config || %s, updated_at = NOW() WHERE {where}",
+            params,
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"Plant {plant!r} not found")
+        cur.execute(
+            "INSERT INTO admin_audit (table_name, action, details, user_email)"
+            " VALUES ('plants', 'set_tooling_rule', %s, %s)",
             (Jsonb({"plant": plant, **patch}), user_email),
         )
         conn.commit()
@@ -2806,6 +3040,39 @@ def ensure_plant_calendar_periods() -> None:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_plant_calendar_period_plant"
                     " ON plant_calendar_period(plant, valid_from)")
+        conn.commit()
+
+
+def ensure_tool_inventory_table() -> None:
+    """Idempotent boot hook (mirrors migrations/2026-10-27-1-tool-inventory.sql and schema.sql):
+    the table AND its column_metadata seed, so an image that rolls before the migration is
+    applied still serves GET /master-data/tool_inventory with its columns (list_rows INNER JOINs
+    column_metadata; without the seed the grid reads as empty, which means 'every tool is 1 copy')."""
+    with _pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tool_inventory (
+                plant              TEXT NOT NULL,
+                tool_id            TEXT NOT NULL,
+                total_qty          INTEGER NOT NULL DEFAULT 1,
+                out_of_service_qty INTEGER NOT NULL DEFAULT 0,
+                note               TEXT,
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (plant, tool_id),
+                CONSTRAINT chk_tool_inventory_total CHECK (total_qty >= 0),
+                CONSTRAINT chk_tool_inventory_qty   CHECK (out_of_service_qty >= 0 AND out_of_service_qty <= total_qty),
+                CONSTRAINT chk_tool_inventory_id    CHECK (tool_id = upper(btrim(tool_id)) AND tool_id <> '')
+            )
+        """)
+        cur.execute("""
+            INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+                ('tool_inventory', 'plant',              'Plant',           TRUE,  1),
+                ('tool_inventory', 'tool_id',            'Tool ID',         TRUE,  2),
+                ('tool_inventory', 'total_qty',          'Total Inventory', FALSE, 3),
+                ('tool_inventory', 'out_of_service_qty', 'Out of Service',  FALSE, 4),
+                ('tool_inventory', 'note',               'Note',            FALSE, 5)
+            ON CONFLICT (table_name, column_name) DO NOTHING
+        """)
         conn.commit()
 
 

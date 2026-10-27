@@ -1,7 +1,7 @@
 """
 NIMBUS 2.0 — master-data domain routes: the audit log, schema export, admin
-universal table browser, the nine ALLOWED_TABLES CRUD/DDL family, per-plant
-policy settings, and role page-access.
+universal table browser, the thirteen ALLOWED_TABLES CRUD/DDL family, per-plant
+policy settings, the planner-level Tool Inventory family, and role page-access.
 
 P5 relocation: pure move from brain.py (lines 2839-3291, minus the
 system-settings pair which is interleaved in that range but belongs to
@@ -21,13 +21,15 @@ import json
 from contextlib import suppress
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
 import db
 import master_data as md
 from backend.admin_ops.logbuffer import _current_rid, _log_event, _set_admin_log_details
 from backend.master_data import browser as admin_tables
+from backend.master_data import tool_inventory as tool_inv
 from backend.master_data.models import (
     AddColumnResult,
     AdminTableRowsResult,
@@ -44,10 +46,17 @@ from backend.master_data.models import (
     PlantMaxPushForwardDaysResult,
     PlantMinProductiveSegmentMinutesResult,
     PlantSplitOrderPolicyResult,
+    PlantToolingRuleBody,
+    PlantToolingRuleResult,
     RolePageAccessResult,
     SchemaExportResult,
     StatusOkResult,
+    ToolInventoryBulkBody,
+    ToolInventoryDryRunResult,
+    ToolInventoryUsageBody,
+    ToolInventoryUsageEntry,
 )
+from backend.routing.models import RoutingUploadResult
 from backend.priority_lists.audit_log import _cw_append_audit, _cw_audit_path
 from backend.security import auth
 from backend.security.auth import require_admin, require_api_key
@@ -770,6 +779,162 @@ def md_set_plant_unknown_setup_policy(plant: str, request: Request, body: dict =
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/master-data/plants/{plant}/tooling-rule", response_model=PlantToolingRuleResult,
+            dependencies=[Depends(require_api_key)])
+def md_set_plant_tooling_rule(plant: str, request: Request, body: PlantToolingRuleBody,
+                              email: str = Depends(auth.require_authenticated),
+                              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Per-plant "Treat Tooling as Hard Constraint" Order Rule: off | hard, stored in the
+    plants.setup_policy_config JSONB sidecar.
+
+    Deliberately PLANNER-level (require_authenticated + plant scoping), NOT require_admin like
+    every sibling plant-policy route above: the owner decided (2026-10-27) that planners flip
+    this switch themselves, the same people who maintain the Tool Inventory it governs."""
+    _check_tool_plant(plant, allowed_plants)
+    try:
+        return md.set_plant_tooling_rule(
+            subnetwork=body.subnetwork, plant=plant, rule=body.tooling_rule, user_email=email)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# =============================================================================
+# TOOL INVENTORY -- planner-level (any known user, scoped to their plants). "planners" is not a
+# server role: require_authenticated accepts any known user and the plant scope
+# (role_plants via get_allowed_plants_for_request + md._assert_plant_allowed) is the boundary.
+# The generic admin POST /master-data/tool_inventory/bulk stays admin-only and shares the same
+# normaliser/validator (md.bulk_apply). Literal first segment: cannot collide with /master-data/{table}.
+# =============================================================================
+def _check_tool_plant(plant: str, allowed_plants: list[str] | None) -> None:
+    """403 when out of the caller's scope (before any DB access); 404 for an unknown plant."""
+    try:
+        md._assert_plant_allowed(plant, allowed_plants)
+    except md.PlantNotAllowed as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if not md.plant_exists(plant):
+        raise HTTPException(status_code=404, detail=f"Unknown plant: {plant!r}")
+
+
+_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _xlsx_response(data: bytes, filename: str) -> Response:
+    # no-store: the corporate proxy caches by URL and would serve a stale inventory file.
+    return Response(content=data, media_type=_XLSX_MEDIA, headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+    })
+
+
+@router.post("/tool-inventory/{plant}/bulk", response_model=BulkApplyResult,
+            dependencies=[Depends(require_api_key)])
+def tool_inventory_bulk(plant: str, request: Request, body: ToolInventoryBulkBody,
+                        email: str = Depends(auth.require_authenticated),
+                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Save one plant's inventory edits in one transaction: { upserts, deletes, source? }. The path
+    plant is forced onto every row; deletes run first so remove + re-add of an id (typo fix) is one save."""
+    _check_tool_plant(plant, allowed_plants)
+    try:
+        result = md.bulk_apply(
+            "tool_inventory",
+            ops={"plant": plant, "upserts": body.upserts, "deletes": body.deletes, "source": body.source},
+            user_email=email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _set_admin_log_details(
+        request, upsert_count=len(body.upserts), delete_count=len(body.deletes),
+        inserted=result.get("inserted", 0), updated=result.get("updated", 0), deleted=result.get("deleted", 0),
+    )
+    return result
+
+
+def _do_tool_inventory_upload(raw: bytes, plant: str, filename: str | None, email: str, dry_run: bool) -> dict:
+    upserts, rejected, prefix_warnings, n_rows = tool_inv.parse_tool_inventory_excel(raw, plant)
+    warnings = prefix_warnings + tool_inv.rejection_warnings(rejected)
+    diff = tool_inv.diff_tool_inventory(md.load_tool_inventory_rows(plant), upserts)
+    if dry_run:
+        cap = tool_inv.REVIEW_LIST_CAP
+        return {
+            "new": diff["new"][:cap],
+            "changed": diff["changed"][:cap],
+            "unchanged": diff["unchanged"][:cap],
+            "rejected": rejected[:cap],
+            "counts": {"new": len(diff["new"]), "changed": len(diff["changed"]),
+                       "unchanged": len(diff["unchanged"]), "rejected": len(rejected)},
+            "warnings": warnings,
+            "rows": n_rows,
+        }
+    # Upsert-only, and only what actually differs (unchanged rows are not rewritten).
+    changed_ids = {r["tool_id"] for r in diff["new"]} | {c["tool_id"] for c in diff["changed"]}
+    to_write = [u for u in upserts if u["tool_id"] in changed_ids]
+    inserted = updated = 0
+    if to_write:
+        res = md.bulk_apply(
+            "tool_inventory",
+            ops={"plant": plant, "upserts": to_write, "deletes": [], "source": "excel_upload", "filename": filename},
+            user_email=email,
+        )
+        inserted, updated = res["inserted"], res["updated"]
+    return {"inserted": inserted, "updated": updated, "rejected": len(rejected),
+            "warnings": warnings, "plants": [plant]}
+
+
+@router.post("/tool-inventory/{plant}/upload", response_model=ToolInventoryDryRunResult | RoutingUploadResult,
+            dependencies=[Depends(require_api_key)])
+async def tool_inventory_upload(plant: str, request: Request, file: UploadFile = File(...),
+                                dry_run: int = Query(default=0, ge=0, le=1),
+                                email: str = Depends(auth.require_authenticated),
+                                allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """.xlsx -> upsert-only tool inventory. dry_run=1 returns the review diff (new / changed
+    old->new / unchanged / rejected) and WRITES NOTHING; dry_run=0 applies the same parse. Tools
+    missing from the file are left untouched."""
+    _check_tool_plant(plant, allowed_plants)
+    raw = await file.read()
+    if len(raw) > tool_inv.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"Upload exceeds maximum allowed size of {tool_inv.MAX_UPLOAD_BYTES} bytes")
+    try:
+        result = await run_in_threadpool(_do_tool_inventory_upload, raw, plant, file.filename, email, bool(dry_run))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _set_admin_log_details(request, filename=file.filename, dry_run=dry_run,
+                           **{k: v for k, v in result.items() if isinstance(v, int)})
+    return result
+
+
+@router.get("/tool-inventory/{plant}/template.xlsx", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+async def tool_inventory_template(plant: str,
+                                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Prefilled upload template: current rows + tools in use with no row yet; 'How to use' second."""
+    _check_tool_plant(plant, allowed_plants)
+    data = await run_in_threadpool(tool_inv.build_template, plant)
+    return _xlsx_response(data, f"tool-inventory-template-{plant}.xlsx")
+
+
+@router.get("/tool-inventory/{plant}/export.xlsx", dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+async def tool_inventory_export(plant: str,
+                                allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Current inventory as .xlsx (same columns as the template; re-uploadable)."""
+    _check_tool_plant(plant, allowed_plants)
+    data = await run_in_threadpool(tool_inv.build_export, plant)
+    return _xlsx_response(data, f"tool-inventory-{plant}.xlsx")
+
+
+@router.post("/tool-inventory/{plant}/usage", response_model=dict[str, ToolInventoryUsageEntry],
+            dependencies=[Depends(require_api_key), Depends(auth.require_authenticated)])
+def tool_inventory_usage(plant: str, body: ToolInventoryUsageBody,
+                         allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Read-only: how many orders of this plant carry each tool id (either PRT column) plus the
+    first 5 order numbers. Feeds the "used by N orders" confirm before a row is removed."""
+    _check_tool_plant(plant, allowed_plants)
+    if len(body.tool_ids) > md.MAX_TOOL_INVENTORY_OPS:
+        raise HTTPException(status_code=400, detail=f"At most {md.MAX_TOOL_INVENTORY_OPS} tool ids per request")
+    return db.tool_usage_counts(plant, body.tool_ids)
 
 
 @router.post("/master-data/roles/{role}/page-access", response_model=RolePageAccessResult,

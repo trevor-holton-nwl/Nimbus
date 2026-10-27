@@ -2276,6 +2276,135 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/master-data/plants/{plant}/tooling-rule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Md Set Plant Tooling Rule
+         * @description Per-plant "Treat Tooling as Hard Constraint" Order Rule: off | hard, stored in the
+         *     plants.setup_policy_config JSONB sidecar.
+         *
+         *     Deliberately PLANNER-level (require_authenticated + plant scoping), NOT require_admin like
+         *     every sibling plant-policy route above: the owner decided (2026-10-27) that planners flip
+         *     this switch themselves, the same people who maintain the Tool Inventory it governs.
+         */
+        post: operations["md_set_plant_tooling_rule_master_data_plants__plant__tooling_rule_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tool-inventory/{plant}/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Tool Inventory Bulk
+         * @description Save one plant's inventory edits in one transaction: { upserts, deletes, source? }. The path
+         *     plant is forced onto every row; deletes run first so remove + re-add of an id (typo fix) is one save.
+         */
+        post: operations["tool_inventory_bulk_tool_inventory__plant__bulk_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tool-inventory/{plant}/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Tool Inventory Upload
+         * @description .xlsx -> upsert-only tool inventory. dry_run=1 returns the review diff (new / changed
+         *     old->new / unchanged / rejected) and WRITES NOTHING; dry_run=0 applies the same parse. Tools
+         *     missing from the file are left untouched.
+         */
+        post: operations["tool_inventory_upload_tool_inventory__plant__upload_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tool-inventory/{plant}/template.xlsx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tool Inventory Template
+         * @description Prefilled upload template: current rows + tools in use with no row yet; 'How to use' second.
+         */
+        get: operations["tool_inventory_template_tool_inventory__plant__template_xlsx_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tool-inventory/{plant}/export.xlsx": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tool Inventory Export
+         * @description Current inventory as .xlsx (same columns as the template; re-uploadable).
+         */
+        get: operations["tool_inventory_export_tool_inventory__plant__export_xlsx_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tool-inventory/{plant}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Tool Inventory Usage
+         * @description Read-only: how many orders of this plant carry each tool id (either PRT column) plus the
+         *     first 5 order numbers. Feeds the "used by N orders" confirm before a row is removed.
+         */
+        post: operations["tool_inventory_usage_tool_inventory__plant__usage_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/master-data/roles/{role}/page-access": {
         parameters: {
             query?: never;
@@ -3077,6 +3206,11 @@ export interface components {
             /** Plant */
             plant: string;
         };
+        /** Body_tool_inventory_upload_tool_inventory__plant__upload_post */
+        Body_tool_inventory_upload_tool_inventory__plant__upload_post: {
+            /** File */
+            file: string;
+        };
         /** Body_upload_bom_bom_upload_post */
         Body_upload_bom_bom_upload_post: {
             /** File */
@@ -3438,6 +3572,31 @@ export interface components {
             plant: string;
             /** Split Order Policy */
             split_order_policy: string;
+        };
+        /**
+         * PlantToolingRuleBody
+         * @description POST /master-data/plants/{plant}/tooling-rule. `tooling_rule` is a strict
+         *     string enum validated in master_data.set_plant_tooling_rule ('off' | 'hard').
+         */
+        PlantToolingRuleBody: {
+            /**
+             * Subnetwork
+             * @default
+             */
+            subnetwork: string;
+            /** Tooling Rule */
+            tooling_rule: string;
+        };
+        /** PlantToolingRuleResult */
+        PlantToolingRuleResult: {
+            /** Status */
+            status: string;
+            /** Plant */
+            plant: string;
+            /** Setup Policy Config */
+            setup_policy_config: {
+                [key: string]: unknown;
+            };
         };
         /** PlantUnknownSetupPolicyResult */
         PlantUnknownSetupPolicyResult: {
@@ -3939,6 +4098,129 @@ export interface components {
              * @default false
              */
             strict_conflicts: boolean;
+        };
+        /**
+         * ToolInventoryBulkBody
+         * @description POST /tool-inventory/{plant}/bulk. Rows are normalised and validated in
+         *     master_data.bulk_apply; the path plant is forced onto upserts and deletes, so
+         *     any `plant` inside a row is ignored. `source` is audit provenance only.
+         */
+        ToolInventoryBulkBody: {
+            /**
+             * Upserts
+             * @default []
+             */
+            upserts: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Deletes
+             * @default []
+             */
+            deletes: {
+                [key: string]: unknown;
+            }[];
+            /** Source */
+            source?: string | null;
+        };
+        /** ToolInventoryChange */
+        ToolInventoryChange: {
+            /** Tool Id */
+            tool_id: string;
+            before: components["schemas"]["ToolInventoryRowOut"];
+            after: components["schemas"]["ToolInventoryRowOut"];
+        };
+        /** ToolInventoryDryRunCounts */
+        ToolInventoryDryRunCounts: {
+            /** New */
+            new: number;
+            /** Changed */
+            changed: number;
+            /** Unchanged */
+            unchanged: number;
+            /** Rejected */
+            rejected: number;
+        };
+        /**
+         * ToolInventoryDryRunResult
+         * @description POST /tool-inventory/{plant}/upload?dry_run=1 -- the "review changes" step.
+         *     Writes nothing. `new` / `changed` / `unchanged` / `rejected` are capped at 200
+         *     entries each; `counts` carries the exact totals and `rows` the number of data
+         *     rows read from the sheet.
+         */
+        ToolInventoryDryRunResult: {
+            /**
+             * New
+             * @default []
+             */
+            new: components["schemas"]["ToolInventoryRowOut"][];
+            /**
+             * Changed
+             * @default []
+             */
+            changed: components["schemas"]["ToolInventoryChange"][];
+            /**
+             * Unchanged
+             * @default []
+             */
+            unchanged: string[];
+            /**
+             * Rejected
+             * @default []
+             */
+            rejected: components["schemas"]["ToolInventoryRejectedRow"][];
+            counts: components["schemas"]["ToolInventoryDryRunCounts"];
+            /**
+             * Warnings
+             * @default []
+             */
+            warnings: components["schemas"]["UploadWarning"][];
+            /** Rows */
+            rows: number;
+        };
+        /**
+         * ToolInventoryRejectedRow
+         * @description `row` is the 1-based spreadsheet row number (header = row 1).
+         */
+        ToolInventoryRejectedRow: {
+            /** Row */
+            row: number;
+            /**
+             * Tool Id
+             * @default
+             */
+            tool_id: string;
+            /** Error */
+            error: string;
+        };
+        /** ToolInventoryRowOut */
+        ToolInventoryRowOut: {
+            /** Tool Id */
+            tool_id: string;
+            /** Total Qty */
+            total_qty: number;
+            /** Out Of Service Qty */
+            out_of_service_qty: number;
+            /** Note */
+            note?: string | null;
+        };
+        /** ToolInventoryUsageBody */
+        ToolInventoryUsageBody: {
+            /**
+             * Tool Ids
+             * @default []
+             */
+            tool_ids: string[];
+        };
+        /** ToolInventoryUsageEntry */
+        ToolInventoryUsageEntry: {
+            /** Count */
+            count: number;
+            /**
+             * Orders
+             * @default []
+             */
+            orders: string[];
         };
         /**
          * UpdateOwnNameResult
@@ -7764,6 +8046,224 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RolePageAccessResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_plant_tooling_rule_master_data_plants__plant__tooling_rule_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlantToolingRuleBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlantToolingRuleResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    tool_inventory_bulk_tool_inventory__plant__bulk_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolInventoryBulkBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkApplyResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    tool_inventory_upload_tool_inventory__plant__upload_post: {
+        parameters: {
+            query?: {
+                dry_run?: number;
+            };
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_tool_inventory_upload_tool_inventory__plant__upload_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolInventoryDryRunResult"] | components["schemas"]["RoutingUploadResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    tool_inventory_template_tool_inventory__plant__template_xlsx_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    tool_inventory_export_tool_inventory__plant__export_xlsx_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    tool_inventory_usage_tool_inventory__plant__usage_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                plant: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolInventoryUsageBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: components["schemas"]["ToolInventoryUsageEntry"];
+                    };
                 };
             };
             /** @description Validation Error */

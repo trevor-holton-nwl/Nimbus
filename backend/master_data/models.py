@@ -23,6 +23,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from backend.routing.models import UploadWarning
+
 
 class StatusOkResult(BaseModel):
     """Shared shape for drop_column/rename_label/append_audit_log/clear_audit_log
@@ -217,6 +219,78 @@ class PlantUnknownSetupPolicyResult(BaseModel):
     status: str
     plant: str
     setup_policy_config: dict
+
+
+class PlantToolingRuleResult(BaseModel):
+    status: str
+    plant: str
+    setup_policy_config: dict
+
+
+class PlantToolingRuleBody(BaseModel):
+    """POST /master-data/plants/{plant}/tooling-rule. `tooling_rule` is a strict
+    string enum validated in master_data.set_plant_tooling_rule ('off' | 'hard')."""
+    subnetwork: str = ""
+    tooling_rule: str
+
+
+class ToolInventoryBulkBody(BaseModel):
+    """POST /tool-inventory/{plant}/bulk. Rows are normalised and validated in
+    master_data.bulk_apply; the path plant is forced onto upserts and deletes, so
+    any `plant` inside a row is ignored. `source` is audit provenance only."""
+    upserts: list[dict[str, Any]] = []
+    deletes: list[dict[str, Any]] = []
+    source: str | None = None
+
+
+class ToolInventoryUsageBody(BaseModel):
+    tool_ids: list[str] = []
+
+
+class ToolInventoryUsageEntry(BaseModel):
+    count: int
+    orders: list[str] = []
+
+
+class ToolInventoryRowOut(BaseModel):
+    tool_id: str
+    total_qty: int
+    out_of_service_qty: int
+    note: str | None = None
+
+
+class ToolInventoryChange(BaseModel):
+    tool_id: str
+    before: ToolInventoryRowOut
+    after: ToolInventoryRowOut
+
+
+class ToolInventoryRejectedRow(BaseModel):
+    """`row` is the 1-based spreadsheet row number (header = row 1)."""
+    row: int
+    tool_id: str = ""
+    error: str
+
+
+class ToolInventoryDryRunCounts(BaseModel):
+    new: int
+    changed: int
+    unchanged: int
+    rejected: int
+
+
+class ToolInventoryDryRunResult(BaseModel):
+    """POST /tool-inventory/{plant}/upload?dry_run=1 -- the "review changes" step.
+    Writes nothing. `new` / `changed` / `unchanged` / `rejected` are capped at 200
+    entries each; `counts` carries the exact totals and `rows` the number of data
+    rows read from the sheet."""
+    new: list[ToolInventoryRowOut] = []
+    changed: list[ToolInventoryChange] = []
+    unchanged: list[str] = []
+    rejected: list[ToolInventoryRejectedRow] = []
+    counts: ToolInventoryDryRunCounts
+    warnings: list[UploadWarning] = []
+    rows: int
 
 
 class RolePageAccessResult(BaseModel):
