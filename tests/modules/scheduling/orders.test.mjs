@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Table, Inspector, ContextMenu, Printer, historyRowView, groupHistoryEvents } from '../../../frontend/scheduling/orders.mjs';
 import { makeDocument, makeEl } from '../helpers/dom-stub.mjs';
-import { Timeline } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, setupSourceLabel } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { ORDER_FIELD_CATALOG } from '../../../frontend/scheduling/order-field-catalog.mjs';
@@ -342,6 +342,46 @@ test('Task 6 (B3b): Inspector._setupDetailForTask, called with its default (real
     assert.match(body.innerHTML, /ui\.setup_missing/, 'the warning paragraph carries the real missing-setup label, not an empty tag');
   } finally {
     globalThis.document.getElementById = priorGetElementById;
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
+test('value-default setup: Inspector detail, override baseline and source label agree with the Gantt observation', () => {
+  const plant = 'VD-INSPECTOR-PLANT';
+  const line = 'VD-INSPECTOR-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [], machine_rows: [],
+    machine_states: [{ machine: line, state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+    value_defaults: [{ field_key: 'colorWheel', value: 'BLUE', setup_min: 20, signature_version: 1 }],
+  }, 'unit-test');
+  const blueTask = { id: 'vd-insp-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE',
+    start_date: new Date('2026-08-21T08:00:00'), end_date: new Date('2026-08-21T09:00:00') };
+  Store.setTasks([blueTask], 'unit-test');
+  try {
+    const observation = Timeline._setupObservation(Store.tasksForSelectedPlant());
+    const interval = observation.intervals.find(entry => String(entry.successorOrderId) === 'vd-insp-blue');
+    assert.ok(interval, 'the Gantt observation carries the value-default setup interval');
+    assert.equal(interval.requiredMinutes, 20);
+    const detail = Inspector._setupDetailForTask(blueTask);
+    assert.equal(detail.requiredMinutes, 20, 'Inspector detail agrees with the observation');
+    assert.equal(detail.source, 'value-default');
+    assert.equal(setupSourceLabel(detail.source), Util.t('ui.setup_source_value_default'));
+    assert.notEqual(setupSourceLabel('value-default'), 'value-default', 'the raw plumbing value is never shown verbatim');
+    assert.equal(Inspector._setupOverrideFor(blueTask).baseline, 20, 'the override baseline uses the same default');
+  } finally {
     globalThis.NimbusComputeCore = priorCore;
     Store.setTasks(priorTasks, 'unit-test');
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');

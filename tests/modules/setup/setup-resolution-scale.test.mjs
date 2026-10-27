@@ -139,15 +139,23 @@ test('value-default resolution over 200 states (39,800 directional pairs, zero r
   for (let i = 0; i < 10; i++) valueDefaults.push({ field_key: 'colorWheel', value: `COLOR ${i}`, setup_min: 3 + i, signature_version: 1 });
   data.valueDefaults = valueDefaults;
   const index = buildSetupResolutionIndex(data);
-  let reads = 0, iterations = 0;
-  const observedDefaults = new Proxy(index.valueDefaults, {
+  let reads = 0, innerReads = 0, iterations = 0;
+  const iterating = ['entries', 'values', 'keys', 'forEach', Symbol.iterator];
+  // Observe a Map: count get() reads, count iteration-method invocations, and (for the outer
+  // per-field map) hand back observed INNER maps so an inner scan is detected too.
+  const observeMap = (map, wrapChildren) => new Proxy(map, {
     get(target, key) {
-      if (key === 'get') return v => { reads++; return target.get(v); };
-      if (['entries', 'values', 'keys', 'forEach', Symbol.iterator].includes(key)) return (...a) => { iterations++; return target[key](...a); };
+      if (key === 'get') return v => {
+        if (wrapChildren) reads++; else innerReads++;
+        const found = target.get(v);
+        return wrapChildren && found instanceof Map ? observeMap(found, false) : found;
+      };
+      if (iterating.includes(key)) return (...a) => { iterations++; return target[key](...a); };
       const value = Reflect.get(target, key, target);
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
+  const observedDefaults = observeMap(index.valueDefaults, true);
   const observed = { ...index, valueDefaults: observedDefaults };
   let queries = 0;
   for (let from = 0; from < size; from++) {
@@ -163,5 +171,38 @@ test('value-default resolution over 200 states (39,800 directional pairs, zero r
     }
   }
   assert.ok(reads <= 3 * queries, `default lookups ${reads} must stay within 3 x ${queries} queries`);
-  assert.equal(iterations, 0, 'value-default resolution must not iterate the default maps');
+  assert.ok(innerReads <= 2 * queries, `inner lookups ${innerReads} must stay within one per field (2) x ${queries} queries`);
+  assert.equal(iterations, 0, 'value-default resolution must not iterate the default maps (outer or inner)');
+});
+
+test('value-default maps are built once per index, never per indexed resolve; the linear path rebuilds per call', () => {
+  const data = snapshot(20);
+  data.plantRows = [];
+  data.valueDefaults = [
+    ...Array.from({ length: 20 }, (_, i) => ({ field_key: 'prt01', value: `TOOL ${i}`, setup_min: 5 + i, signature_version: 1 })),
+    ...Array.from({ length: 10 }, (_, i) => ({ field_key: 'colorWheel', value: `COLOR ${i}`, setup_min: 3 + i, signature_version: 1 })),
+  ];
+  const index = buildSetupResolutionIndex(data);
+  const RealMap = globalThis.Map;
+  let constructed = 0;
+  globalThis.Map = class CountingMap extends RealMap { constructor(...a) { super(...a); constructed++; } };
+  try {
+    let queries = 0;
+    for (let from = 0; from < 20; from++) for (let to = 0; to < 20; to++) {
+      if (from === to) continue;
+      resolveSetup({ ...data, index, machine: 'LINE 0', predecessorOrderId: 'P', successorOrderId: 'S',
+        predecessorState: data.states[from], successorState: data.states[to] });
+      queries++;
+    }
+    assert.ok(queries > 0);
+    assert.equal(constructed, 0, 'the indexed path must not construct any Map per resolve');
+    constructed = 0;
+    for (let to = 1; to < 20; to++) {
+      resolveSetup({ ...data, machine: 'LINE 0', predecessorOrderId: 'P', successorOrderId: 'S',
+        predecessorState: data.states[0], successorState: data.states[to] });
+    }
+    assert.ok(constructed >= 19, 'the linear path builds the default maps per call (callers with many pairs must pass an index)');
+  } finally {
+    globalThis.Map = RealMap;
+  }
 });

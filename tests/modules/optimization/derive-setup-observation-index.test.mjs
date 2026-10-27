@@ -159,6 +159,23 @@ test('the index is memoised per snapshot object and rebuilt when its rows change
   assert.notEqual(setupResolutionIndexFor(setup), second, 'an in-place length change must not reuse a stale index');
 });
 
+test('the index is rebuilt when value_defaults is replaced or changes length', () => {
+  const vd = (value, setup_min) => ({ field_key: 'colorWheel', value, setup_min, signature_version: 1 });
+  const setup = snapshot();
+  setup.value_defaults = [vd('BLUE', 20)];
+  const first = setupResolutionIndexFor(setup);
+  assert.equal(setupResolutionIndexFor(setup), first, 'unchanged value_defaults reuses the memoised index');
+  assert.equal(first.valueDefaults.get('colorWheel').get('BLUE'), 20);
+  setup.value_defaults = [vd('BLUE', 45)];
+  const second = setupResolutionIndexFor(setup);
+  assert.notEqual(second, first, 'a replaced value_defaults array must rebuild');
+  assert.equal(second.valueDefaults.get('colorWheel').get('BLUE'), 45);
+  setup.value_defaults.push(vd('RED', 7));
+  const third = setupResolutionIndexFor(setup);
+  assert.notEqual(third, second, 'an in-place length change must rebuild');
+  assert.equal(third.valueDefaults.get('colorWheel').get('RED'), 7);
+});
+
 test('counted: derivation reads each row array a bounded number of times, not once per order', () => {
   const states = Array.from({ length: 60 }, (_, i) => `C${i}`);
   const plantRows = [];

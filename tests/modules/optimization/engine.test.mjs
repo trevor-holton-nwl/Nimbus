@@ -784,6 +784,39 @@ test('Engine.autoReflow reserves a covered incoming setup before moving a downst
 });
 
 
+test('Engine.autoReflow (index-less setupMinutes closure) reserves a value-default setup', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-17T00:00:00') });
+  const line = 'VD-REFLOW-LINE';
+  const plant = 'VD-REFLOW-PLANT';
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorCalendar = Store.calendars[line];
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setCalendar(line, { 1: [0, 24] }, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [], machine_rows: [], machine_states: [], overrides: [],
+    value_defaults: [{ field_key: 'colorWheel', value: 'BLUE', setup_min: 30, signature_version: 1 }],
+  }, 'unit-test');
+  Store.setTasks([
+    { id: 'vd-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED', start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') },
+    { id: 'vd-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE', start_date: new Date('2026-08-17T09:15:00'), end_date: new Date('2026-08-17T10:15:00') },
+  ], 'unit-test');
+  try {
+    Engine.autoReflow('vd-red');
+    assert.equal(Store.tasks['vd-blue'].start_date.getTime(), new Date('2026-08-17T09:30:00').getTime(),
+      'the arriving-BLUE default (30 min) is reserved even though no matrix row exists');
+  } finally {
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    if (priorCalendar) Store.setCalendar(line, priorCalendar.workHours, 'unit-test');
+    else delete Store.calendars[line];
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('Engine.autoReflow resolves equal-start successors by id before reserving setup', t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-08-17T00:00:00') });
   // This fails if equal starts retain object insertion order: z-first would

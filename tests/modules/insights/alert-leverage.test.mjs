@@ -207,6 +207,24 @@ test('minutes: plant default policy gives assumedMinutes; otherwise requiresMinu
   }
 });
 
+test('hypotheticalSetupSnapshot carries value_defaults through and the added row wins over the default', () => {
+  const ss = { ...setupSnapshot(), value_defaults: [{ field_key: 'colorWheel', value: 'B', setup_min: 40, signature_version: 1 }] };
+  const pair = parsePairKey(PAIR_AB);
+  const hypo = hypotheticalSetupSnapshot(ss, pair, 15);
+  assert.equal(hypo.value_defaults, ss.value_defaults, 'value_defaults must survive the shallow copy');
+  const input = (snap) => ({
+    definition: snap.definition, machine: LINE, predecessorState: pair.from, successorState: pair.to,
+    predecessorOrderId: 'a', successorOrderId: 'b', plantRows: snap.plant_rows, machineRows: [], overrides: [],
+    valueDefaults: snap.value_defaults,
+  });
+  const base = resolveSetup(input(ss));
+  assert.equal(base.source, 'value-default');
+  assert.equal(base.effectiveMin, 40);
+  const withRow = resolveSetup(input(hypo));
+  assert.equal(withRow.source, 'plant');
+  assert.equal(withRow.effectiveMin, 15);
+});
+
 test('hypotheticalSetupSnapshot adds a plant row that resolves covered and does not mutate the source', () => {
   const ss = setupSnapshot();
   const pair = parsePairKey(PAIR_AB);
