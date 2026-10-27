@@ -486,8 +486,9 @@ export const SetupAdmin = (() => {
   function parseGridMinutes(raw: string): number | null | 'invalid' {
     const trimmed = raw.trim().replace(/,/g, '');
     if (trimmed === '') return null;
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(trimmed)) return 'invalid'; // no exponent / hex / Infinity forms
     const num = Math.round(Number(trimmed));
-    if (!Number.isFinite(num) || num < 0 || num > 10080) return 'invalid';
+    if (!Number.isFinite(num) || num < 0 || num > 10080 || Object.is(num, -0)) return 'invalid';
     return num;
   }
 
@@ -1154,7 +1155,6 @@ export const SetupAdmin = (() => {
     const coverage = _coverageByPlant[snapshot.plant];
     const coveragePass = coverage ? coverage.reachable?.missing_pairs === 0 : undefined;
     const status = activationStatus(definition, { matrixVersion, coveragePass }, snapshot.plant_active);
-    const sourceLabel = _lineScope ? _lineScope : Util.t('ui.setup_plant_default');
     const state = _lineScope ? snapshot.machine_states.find(row => row.machine === _lineScope) : null;
     const overrides = _lineScope ? snapshot.overrides.filter(row => row.machine === _lineScope) : snapshot.overrides;
     const review = _missingReview?.plant === snapshot.plant ? _missingReview : null;
@@ -1172,9 +1172,6 @@ export const SetupAdmin = (() => {
     // truly uncovered); "recorded" is no longer derived as total - gaps now that defaults also cover pairs.
     const cov = coverageSummary(coverage?.reachable);
     const missingPairs = cov.gaps;
-    const coverageInlineHtml = coverage
-      ? `<button type="button" class="setup-coverage-inline${missingPairs > 0 ? ' warn' : ''}" data-setup-missing-filter>${Util.escapeHtml(Util.t('ui.setup_coverage_inline', { covered: cov.covered, total: cov.total }))} · ${Util.escapeHtml(Util.t('ui.setup_kpi_missing_count', { missing: missingPairs }))} &#9656;</button>`
-      : '';
     const signatureChipHtml = definitionFields.length
       ? definitionFields.map(field => Util.escapeHtml(fieldLabel(field))).join(' &rsaquo; ')
       : Util.escapeHtml(Util.t('ui.setup_no_definition_short'));
@@ -1334,6 +1331,8 @@ export const SetupAdmin = (() => {
     const plant = snapshot.plant;
     const version = definition?.signature_version ?? null;
     if (plant !== _vdPlant) {
+      // The plant switch cannot be intercepted here (the new snapshot is already rendering), so say so instead.
+      if (_vdPlant && _vdDirty.size) Toast.show(Util.t('toast.setup_vd_plant_discarded', { count: _vdDirty.size, plant: _vdPlant }), 'warn');
       _vdPlant = plant; _vdVersion = version; _vdField = ''; _vdFilter = ''; _vdDirty = new Map();
     } else if (version !== _vdVersion) {
       _vdVersion = version;
@@ -1344,7 +1343,16 @@ export const SetupAdmin = (() => {
           Toast.show(Util.t('ui.setup_vd_dropped_field', { count }), 'warn');
         } else {
           void Modal.confirm({ title: Util.t('ui.setup_vd_keep_title'), message: Util.t('ui.setup_vd_keep_msg', { count }), confirmLabel: Util.t('btn.setup_vd_keep'), tone: 'warn' })
-            .then(keep => { if (!keep && _vdVersion === version) { _vdDirty = new Map(); paintValueDefaults(); } });
+            .then(keep => {
+              if (_vdVersion !== version) return;
+              if (!keep) _vdDirty = new Map();
+              else {
+                // Kept entries that already equal the new version's stored default are not changes any more.
+                const stored = valueDefaultStoredMap(_vdCtx?.snapshot.value_defaults, version, _vdField);
+                for (const [value, minutes] of [..._vdDirty.entries()]) stageValueDefault(_vdDirty, stored, value, minutes);
+              }
+              paintValueDefaults();
+            });
         }
       }
     }
@@ -1362,9 +1370,18 @@ export const SetupAdmin = (() => {
       return;
     }
     // Re-apply the filter's focus and caret after the rebuild (a repaint triggered by master-data-changed).
-    const active = document.activeElement as HTMLInputElement | null;
-    const refocus = !!active && mount.contains(active) && active.hasAttribute('data-setup-vd-filter');
-    const caret = refocus ? active!.selectionStart : null;
+    // Same for the active minutes input and the mass-fill input: their half-typed text survives the rebuild.
+    const active = (typeof document !== 'undefined' ? document.activeElement : null) as HTMLInputElement | null;
+    let focusKind: 'filter' | 'minutes' | 'massfill' | null = null;
+    if (active && mount.contains(active)) {
+      if (active.hasAttribute('data-setup-vd-filter')) focusKind = 'filter';
+      else if (active.hasAttribute('data-setup-vd-minutes')) focusKind = 'minutes';
+      else if (active.hasAttribute('data-setup-vd-massfill-input')) focusKind = 'massfill';
+    }
+    const focusValue = focusKind === 'minutes' ? (active!.dataset?.value ?? '') : '';
+    const focusText = focusKind ? active!.value : '';
+    const caret = focusKind ? active!.selectionStart : null;
+    const fillText = mount.querySelector<HTMLInputElement>('[data-setup-vd-massfill-input]')?.value ?? '';
     mount.innerHTML = `
       <div class="panel-body setup-vd-body">
         <div class="setup-vd-controls">
@@ -1390,10 +1407,17 @@ export const SetupAdmin = (() => {
       </div>`;
     wireValueDefaults(mount);
     paintValueDefaultRows();
-    if (refocus) {
-      const filter = mount.querySelector<HTMLInputElement>('[data-setup-vd-filter]');
-      filter?.focus();
-      if (filter && caret !== null) { try { filter.setSelectionRange(caret, caret); } catch { /* search inputs may refuse */ } }
+    const fill = mount.querySelector<HTMLInputElement>('[data-setup-vd-massfill-input]');
+    if (fill && fillText) fill.value = fillText;
+    if (focusKind) {
+      const el = focusKind === 'filter' ? mount.querySelector<HTMLInputElement>('[data-setup-vd-filter]')
+        : focusKind === 'massfill' ? fill
+        : Array.from(mount.querySelectorAll<HTMLInputElement>('[data-setup-vd-minutes]')).find(input => input.dataset.value === focusValue) ?? null;
+      if (el) {
+        if (focusKind !== 'filter') el.value = focusText;
+        el.focus();
+        if (caret !== null) { try { el.setSelectionRange(caret, caret); } catch { /* search inputs may refuse */ } }
+      }
     }
   }
 
@@ -1490,9 +1514,17 @@ export const SetupAdmin = (() => {
     const rowOf = (el: EventTarget | null, selector: string): HTMLElement | null => (el as HTMLElement | null)?.closest<HTMLElement>(selector) ?? null;
     mount.addEventListener('input', event => {
       const filter = rowOf(event.target, '[data-setup-vd-filter]') as HTMLInputElement | null;
-      if (!filter) return;
-      _vdFilter = filter.value;
-      paintValueDefaultRows();
+      if (filter) { _vdFilter = filter.value; paintValueDefaultRows(); return; }
+      // Stage a typed value immediately (Save is enabled by the dirty set, and a mouse click on Save may not blur first).
+      // Only the dirty map, the row tint, the notes and the bar update: rows are never repainted, so focus stays.
+      const input = rowOf(event.target, '[data-setup-vd-minutes]') as HTMLInputElement | null;
+      if (!input || !_vdCtx?.permissions.matrixWrite) return;
+      const parsed = parseGridMinutes(input.value);
+      if (parsed === 'invalid') return; // the change handler reports and reverts it
+      stageValueDefault(_vdDirty, currentValueDefaultRows().stored, input.dataset.value ?? '', parsed);
+      rowOf(input, '[data-setup-vd-row]')?.classList.toggle('setup-vd-dirty', _vdDirty.has(normalizedValue(input.dataset.value ?? '')));
+      paintValueDefaultNotes();
+      refreshValueDefaultBar();
     });
     mount.addEventListener('change', event => {
       const ctx = _vdCtx; if (!ctx) return;
@@ -1559,11 +1591,14 @@ export const SetupAdmin = (() => {
     const chunks = chunkValueDefaultEntries(valueDefaultEntries(_vdDirty));
     const url = `${API}/setup/${encodeURIComponent(plant)}/value-defaults`;
     let status = 0;
+    const saved = new Set<string>(); // values already persisted by earlier chunks
+    const total = chunks.reduce((sum, entries) => sum + entries.length, 0);
     _vdSaving = true; refreshValueDefaultBar();
     try {
       for (const entries of chunks) {
         const response = await Util.fetchTraced(url, { method: 'PUT', headers: headers(), body: JSON.stringify({ signature_version: definition.signature_version, field_key: _vdField, entries }) });
         if (!response.ok) { status = response.status; const err = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(err.detail) || `HTTP ${response.status}`); }
+        entries.forEach(entry => saved.add(entry.value));
       }
       Persistence.noteSetupWrite(plant, setupWriteKind(url));
       _vdDirty = new Map();
@@ -1573,7 +1608,16 @@ export const SetupAdmin = (() => {
       render(target, plant);
       Toast.show(Util.t('toast.setup_saved'), 'success');
     } catch (error) {
-      if (status === 409) {
+      if (saved.size) {
+        // A later chunk failed after earlier ones were committed: refresh like a success, keep only the unsaved entries.
+        Persistence.noteSetupWrite(plant, setupWriteKind(url));
+        saved.forEach(value => _vdDirty.delete(value));
+        Persistence._invalidateSetupSnapshot('setup-admin');
+        await Persistence.loadSetupSnapshot(plant);
+        invalidatePlant(plant);
+        render(target, plant);
+        Toast.show(Util.t('toast.setup_vd_partial', { saved: saved.size, total, msg: (error as Error).message }), 'error');
+      } else if (status === 409) {
         // The signature moved under the card: reload the snapshot and keep the unsaved entries (nothing dropped).
         Toast.show(Util.t('toast.setup_vd_stale'), 'warn');
         Persistence._invalidateSetupSnapshot('setup-admin');

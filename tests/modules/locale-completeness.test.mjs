@@ -689,6 +689,8 @@ const BRANCH_KEYS = [
   'ui.setup_vd_field_change_title',
   'ui.setup_vd_field_change_msg',
   'toast.setup_vd_stale',
+  'toast.setup_vd_partial',
+  'toast.setup_vd_plant_discarded',
   'ui.setup_coverage_by_default',
   'ui.setup_grid_value_default_hint',
   'ui.setup_vd_untouched_note',

@@ -1906,6 +1906,8 @@ window.__NIMBUS_LOCALES.en = {
   'ui.setup_vd_field_change_title': 'Discard unsaved defaults?',
   'ui.setup_vd_field_change_msg': 'Switching field discards {{count}} unsaved default(s) for the current field.',
   'toast.setup_vd_stale': 'The setup signature changed. Defaults reloaded; your unsaved entries were kept.',
+  'toast.setup_vd_partial': 'Saved {{saved}} of {{total}} defaults before an error: {{msg}}. The rest are still staged.',
+  'toast.setup_vd_plant_discarded': '{{count}} unsaved default(s) for plant {{plant}} were discarded when you switched plants.',
   'ui.setup_coverage_by_default': 'By default',
   'ui.setup_grid_value_default_hint': 'Covered by a default by value ({{detail}}). Typing a number records an exact row that replaces it.',
   'ui.setup_vd_untouched_note': 'Defaults by value are not changed.',

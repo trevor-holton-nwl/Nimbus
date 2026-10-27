@@ -1774,6 +1774,8 @@ window.__NIMBUS_LOCALES.es = {
   'ui.setup_vd_field_change_title': '¿Descartar valores sin guardar?',
   'ui.setup_vd_field_change_msg': 'Al cambiar de campo se descartan {{count}} valor(es) predeterminado(s) sin guardar del campo actual.',
   'toast.setup_vd_stale': 'La firma de cambio cambió. Valores recargados; se conservaron sus entradas sin guardar.',
+  'toast.setup_vd_partial': 'Se guardaron {{saved}} de {{total}} valores predeterminados antes de un error: {{msg}}. El resto sigue pendiente.',
+  'toast.setup_vd_plant_discarded': 'Al cambiar de planta se descartaron {{count}} valor(es) predeterminado(s) sin guardar de la planta {{plant}}.',
   'ui.setup_coverage_by_default': 'Por defecto',
   'ui.setup_grid_value_default_hint': 'Cubierto por un valor predeterminado ({{detail}}). Escribir un número registra una fila exacta que lo reemplaza.',
   'ui.setup_vd_untouched_note': 'Los valores predeterminados por valor no se modifican.',

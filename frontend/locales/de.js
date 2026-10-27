@@ -1776,6 +1776,8 @@ window.__NIMBUS_LOCALES.de = {
   'ui.setup_vd_field_change_title': 'Ungespeicherte Standards verwerfen?',
   'ui.setup_vd_field_change_msg': 'Beim Feldwechsel werden {{count}} ungespeicherte Standards des aktuellen Felds verworfen.',
   'toast.setup_vd_stale': 'Die Rüstsignatur hat sich geändert. Standards neu geladen; Ihre ungespeicherten Eingaben bleiben erhalten.',
+  'toast.setup_vd_partial': '{{saved}} von {{total}} Standards gespeichert, dann trat ein Fehler auf: {{msg}}. Der Rest bleibt vorgemerkt.',
+  'toast.setup_vd_plant_discarded': '{{count}} ungespeicherte Standards für Werk {{plant}} wurden beim Werkwechsel verworfen.',
   'ui.setup_coverage_by_default': 'Nach Standard',
   'ui.setup_grid_value_default_hint': 'Durch einen Standard nach Wert abgedeckt ({{detail}}). Eine eingegebene Zahl legt eine exakte Zeile an, die ihn ersetzt.',
   'ui.setup_vd_untouched_note': 'Standards nach Wert werden nicht geändert.',

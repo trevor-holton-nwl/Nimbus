@@ -1773,6 +1773,8 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.setup_vd_field_change_title': 'Descartar padrões não salvos?',
   'ui.setup_vd_field_change_msg': 'Trocar de campo descarta {{count}} padrão(ões) não salvo(s) do campo atual.',
   'toast.setup_vd_stale': 'A assinatura de troca mudou. Padrões recarregados; suas entradas não salvas foram mantidas.',
+  'toast.setup_vd_partial': '{{saved}} de {{total}} padrões salvos antes de um erro: {{msg}}. O restante continua pendente.',
+  'toast.setup_vd_plant_discarded': '{{count}} padrão(ões) não salvo(s) da planta {{plant}} foram descartados ao trocar de planta.',
   'ui.setup_coverage_by_default': 'Por padrão',
   'ui.setup_grid_value_default_hint': 'Coberto por um padrão por valor ({{detail}}). Digitar um número registra uma linha exata que o substitui.',
   'ui.setup_vd_untouched_note': 'Os padrões por valor não são alterados.',

@@ -935,3 +935,240 @@ test('the card repaints after every render() and on master-data-changed, and typ
   assert.doesNotMatch(handlers, /renderSnapshot\(|[^a-zA-Z]render\(/, 'typing / filtering / mass-fill never rebuild the whole panel');
   assert.doesNotMatch(source.slice(source.indexOf('// ── "Default changeover by value" card'), end), /\bon(click|change|input|keydown)=/, 'no inline on*= attributes');
 });
+
+// ── Wave C fix pass: staging on input, partial-save, repaint focus, bump/field/plant paths, escaping, parse rules ──
+import { Modal } from '../../../frontend/platform/foundation.mjs';
+
+const tick = () => new Promise(r => setTimeout(r, 0));
+function vdEl(attrs, extra = {}) {
+  const el = {
+    attrs: new Set(attrs), dataset: {}, value: '', parent: null, selectionStart: null, inMount: true, cls: null, focused: false, sel: null,
+    classList: { toggle(c, on) { el.cls = [c, on]; } },
+    closest(sel) { const name = sel.slice(1, -1); return el.attrs.has(name) ? el : (el.parent ? el.parent.closest(sel) : null); },
+    hasAttribute(name) { return el.attrs.has(name); },
+    focus() { el.focused = true; },
+    setSelectionRange(a, b) { el.sel = [a, b]; },
+    ...extra,
+  };
+  return el;
+}
+/** vdFakeTarget plus a mount that records listeners and hands out fresh input stubs on every innerHTML rebuild. */
+function vdRichTarget() {
+  const target = vdFakeTarget();
+  const mount = {
+    _h: '', adds: 0, listeners: {}, fill: null, minutes: [], filter: null,
+    set innerHTML(v) { this._h = v; this.fill = vdEl(['data-setup-vd-massfill-input']); this.minutes = [vdEl(['data-setup-vd-minutes'], { dataset: { value: 'C' } })]; this.filter = vdEl(['data-setup-vd-filter']); },
+    get innerHTML() { return this._h; },
+    addEventListener(type, fn) { this.adds += 1; this.listeners[type] = fn; },
+    contains(el) { return !!el && el.inMount === true; },
+    querySelector(sel) { return sel === '[data-setup-vd-massfill-input]' ? this.fill : sel === '[data-setup-vd-filter]' ? this.filter : null; },
+    querySelectorAll(sel) { return sel === '[data-setup-vd-minutes]' ? this.minutes : []; },
+  };
+  target.nodes['[data-setup-vd-mount]'] = mount;
+  return { target, mount };
+}
+const vdSnap = (plant, extra = {}) => ({ plant, definition: VD_DEF, plant_rows: [], machine_rows: [], machine_states: [], overrides: [], value_defaults: [{ field_key: 'prt01', value: 'A', setup_min: 10, signature_version: 4 }], plant_active: true, ...extra });
+async function withVdStubs(fn) {
+  const t = SetupAdmin._valueDefaultsForTest;
+  t.reset();
+  const priors = { fetch: Util.fetchTraced, toast: Toast.show, confirm: Modal.confirm, doc: globalThis.document };
+  const toasts = [];
+  Util.fetchTraced = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+  Toast.show = (msg) => { toasts.push(msg); };
+  try { await fn(t, toasts); } finally {
+    Util.fetchTraced = priors.fetch; Toast.show = priors.toast; Modal.confirm = priors.confirm;
+    if (priors.doc === undefined) delete globalThis.document; else globalThis.document = priors.doc;
+    t.reset();
+  }
+}
+
+test('typing a minutes value stages it on input (no blur needed), enables Save, never repaints rows; wiring is added once', () => withVdStubs(async (t) => {
+  const { target, mount } = vdRichTarget();
+  t.attach(target, vdSnap('P-IN'), vdPermissions);
+  t.setValues('P-IN', 4, 'prt01', { listed: [], observed: ['C'] });
+  SetupAdmin.paintValueDefaults();
+  const adds = mount.adds;
+  assert.ok(adds > 0 && mount.listeners.input);
+  SetupAdmin.paintValueDefaults();
+  assert.equal(mount.adds, adds, 'repainting never re-wires the persistent mount');
+  assert.equal(target.nodes['[data-setup-vd-save]'].toggled.disabled, true, 'nothing staged yet');
+  target.nodes['[data-setup-vd-rows]'].innerHTML = 'SENTINEL';
+  const row = vdEl(['data-setup-vd-row']);
+  const input = vdEl(['data-setup-vd-minutes'], { dataset: { value: 'C' }, value: '60', parent: row });
+  mount.listeners.input({ target: input });
+  assert.equal(t.state().dirty.get('C'), 60);
+  assert.equal(target.nodes['[data-setup-vd-save]'].toggled.disabled, false, 'Save is enabled while the input still has focus');
+  assert.deepEqual(row.cls, ['setup-vd-dirty', true]);
+  assert.equal(target.nodes['[data-setup-vd-rows]'].innerHTML, 'SENTINEL', 'rows are not repainted (focus stays)');
+  input.value = '1e2';
+  mount.listeners.input({ target: input });
+  assert.equal(t.state().dirty.get('C'), 60, 'a half-typed invalid value changes nothing (the change handler reports it)');
+  input.value = '';
+  mount.listeners.input({ target: input });
+  assert.equal(t.state().dirty.size, 0, 'blank with nothing stored is no change');
+  assert.equal(target.nodes['[data-setup-vd-save]'].toggled.disabled, true);
+}));
+
+test('saveValueDefaults: a failing later chunk still refreshes, drops the saved entries and says "saved N of M"', async () => {
+  const t = SetupAdmin._valueDefaultsForTest;
+  t.reset();
+  const plant = 'P-VD-PART';
+  const priors = { fetch: Util.fetchTraced, plant: Store.selectedPlant, snapshot: Store.setupSnapshot, load: Persistence.loadSetupSnapshot, inval: Persistence._invalidateSetupSnapshot, toast: Toast.show };
+  const puts = []; const kinds = []; const order = []; const toasts = [];
+  Util.fetchTraced = (url, init) => {
+    if (init?.method !== 'PUT') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ rows: [], meta: { total: 0 } }) });
+    puts.push(JSON.parse(init.body).entries.length);
+    return puts.length === 1 ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) }) : Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ detail: 'boom' }) });
+  };
+  Persistence.loadSetupSnapshot = async () => { order.push('load'); return null; };
+  Persistence._invalidateSetupSnapshot = () => { order.push('invalidate'); };
+  Persistence.setSetupWriteListener((p, k) => kinds.push([p, k]));
+  Toast.show = (m) => { toasts.push(m); };
+  try {
+    Store.setSelectedPlant(null, 'test');
+    const snapshot = vdSnap(plant, { value_defaults: [] });
+    Store.replaceSetupSnapshot(snapshot, 'test');
+    t.attach({ innerHTML: '', querySelector: () => null }, snapshot, vdPermissions);
+    t.setValues(plant, 4, 'prt01', { listed: [], observed: [] });
+    for (let i = 0; i < 2001; i += 1) t.stage(`V${String(i).padStart(4, '0')}`, 5);
+    await SetupAdmin.saveValueDefaults();
+    assert.deepEqual(puts, [2000, 1], 'two chunks; the second one failed');
+    assert.deepEqual(kinds, [[plant, 'value-default']], 'the preview is staled because chunk 1 was committed');
+    assert.deepEqual(order.slice(0, 2), ['invalidate', 'load']);
+    assert.deepEqual([...t.state().dirty.keys()], ['V2000'], 'only the unsaved entry stays dirty');
+    assert.ok(toasts.some(m => m === Util.t('toast.setup_vd_partial', { saved: 2000, total: 2001, msg: 'boom' })), 'reports saved 2000 of 2001');
+  } finally {
+    Util.fetchTraced = priors.fetch; Persistence.loadSetupSnapshot = priors.load; Persistence._invalidateSetupSnapshot = priors.inval; Toast.show = priors.toast;
+    Persistence.setSetupWriteListener(null);
+    Store.setSelectedPlant(priors.plant, 'test-restore'); Store.replaceSetupSnapshot(priors.snapshot, 'test-restore');
+    t.reset();
+  }
+});
+
+test('a master-data-changed style repaint keeps the focused minutes input, the mass-fill text and the caret', () => withVdStubs(async (t) => {
+  const { target, mount } = vdRichTarget();
+  t.attach(target, vdSnap('P-RF'), vdPermissions);
+  t.setValues('P-RF', 4, 'prt01', { listed: [], observed: ['C'] });
+  SetupAdmin.paintValueDefaults();
+  // half-typed text in the minutes input and a pending mass-fill value
+  mount.fill.value = '15';
+  const typing = mount.minutes[0]; typing.value = '6x'; typing.selectionStart = 1;
+  globalThis.document = { activeElement: typing };
+  const oldFill = mount.fill;
+  SetupAdmin.paintValueDefaults();
+  assert.notEqual(mount.minutes[0], typing, 'the DOM was rebuilt');
+  assert.equal(mount.minutes[0].value, '6x', 'half-typed text survives');
+  assert.equal(mount.minutes[0].focused, true);
+  assert.deepEqual(mount.minutes[0].sel, [1, 1], 'caret restored');
+  assert.notEqual(mount.fill, oldFill);
+  assert.equal(mount.fill.value, '15', 'mass-fill text survives');
+  // focus in the mass-fill input
+  const fill = mount.fill; fill.value = '99'; fill.selectionStart = 2;
+  globalThis.document = { activeElement: fill };
+  SetupAdmin.paintValueDefaults();
+  assert.equal(mount.fill.focused, true);
+  assert.equal(mount.fill.value, '99');
+  assert.deepEqual(mount.fill.sel, [2, 2]);
+}));
+
+test('paintValueDefaults resets draft state on a field/version change, shows notes and the bar, and warns on a plant switch', () => withVdStubs(async (t, toasts) => {
+  const { target } = vdRichTarget();
+  t.attach(target, vdSnap('P-ST'), vdPermissions);
+  t.setValues('P-ST', 4, 'prt01', { listed: [], observed: ['C'] });
+  SetupAdmin.paintValueDefaults();
+  assert.equal(t.state().field, 'prt01');
+  assert.equal(target.nodes['[data-setup-vd-dirty-count]'].textContent, Util.t('ui.setup_vd_dirty_count', { count: 0 }));
+  t.stage('C', 60);
+  SetupAdmin.paintValueDefaultRows();
+  assert.equal(target.nodes['[data-setup-vd-dirty-count]'].textContent, Util.t('ui.setup_vd_dirty_count', { count: 1 }));
+  assert.equal(target.nodes['[data-setup-vd-save]'].toggled.disabled, false);
+  // switching plant with a draft: the draft is dropped, with a toast that says so
+  t.attach(target, vdSnap('P-ST2'), vdPermissions);
+  t.setValues('P-ST2', 4, 'prt01', { listed: [], observed: [] });
+  SetupAdmin.paintValueDefaults();
+  assert.equal(t.state().dirty.size, 0);
+  assert.ok(toasts.includes(Util.t('toast.setup_vd_plant_discarded', { count: 1, plant: 'P-ST' })));
+  assert.equal(target.nodes['[data-setup-vd-save]'].toggled.disabled, true);
+}));
+
+test('signature bump: Keep re-stages against the new stored defaults, Discard clears, a dropped field clears with a warning', () => withVdStubs(async (t, toasts) => {
+  const bumped = (version, fields, valueDefaults) => ({ ...vdSnap('P-VB'), definition: { ...VD_DEF, signature_version: version, fields }, value_defaults: valueDefaults });
+  const { target } = vdRichTarget();
+  const seed = () => { t.attach(target, vdSnap('P-VB'), vdPermissions); t.setValues('P-VB', 4, 'prt01', { listed: [], observed: ['C', 'D'] }); SetupAdmin.paintValueDefaults(); t.stage('C', 60); t.stage('D', 5); };
+  const confirms = [];
+  // Keep: C already equals the new version's stored default -> it stops being a change; D stays
+  seed();
+  Modal.confirm = async (opts) => { confirms.push(opts); return true; };
+  t.attach(target, bumped(5, ['prt01', 'colorWheel'], [{ field_key: 'prt01', value: 'C', setup_min: 60, signature_version: 5 }]), vdPermissions);
+  t.setValues('P-VB', 5, 'prt01', { listed: [], observed: ['C', 'D'] });
+  SetupAdmin.paintValueDefaults();
+  await tick();
+  assert.equal(confirms.length, 1);
+  assert.equal(confirms[0].message, Util.t('ui.setup_vd_keep_msg', { count: 2 }));
+  assert.deepEqual([...t.state().dirty.entries()], [['D', 5]]);
+  // Discard
+  t.reset(); seed();
+  Modal.confirm = async () => false;
+  t.attach(target, bumped(6, ['prt01', 'colorWheel'], []), vdPermissions);
+  SetupAdmin.paintValueDefaults();
+  await tick();
+  assert.equal(t.state().dirty.size, 0);
+  // Dropped field: the new signature has no prt01
+  t.reset(); seed();
+  let asked = false; Modal.confirm = async () => { asked = true; return true; };
+  t.attach(target, bumped(7, ['colorWheel'], []), vdPermissions);
+  SetupAdmin.paintValueDefaults();
+  await tick();
+  assert.equal(asked, false, 'no question when the field is gone');
+  assert.equal(t.state().dirty.size, 0);
+  assert.ok(toasts.includes(Util.t('ui.setup_vd_dropped_field', { count: 2 })));
+  assert.equal(t.state().field, 'colorWheel');
+}));
+
+test('switching the field with staged entries asks first: cancel keeps field and entries, confirm discards them', () => withVdStubs(async (t) => {
+  const { target, mount } = vdRichTarget();
+  t.attach(target, vdSnap('P-FS'), vdPermissions);
+  t.setValues('P-FS', 4, 'prt01', { listed: [], observed: ['C'] });
+  SetupAdmin.paintValueDefaults();
+  t.stage('C', 60);
+  const select = vdEl(['data-setup-vd-field'], { value: 'colorWheel' });
+  Modal.confirm = async () => false;
+  mount.listeners.change({ target: select });
+  await tick();
+  assert.equal(select.value, 'prt01', 'the picker snaps back');
+  assert.equal(t.state().field, 'prt01');
+  assert.equal(t.state().dirty.size, 1);
+  Modal.confirm = async () => true;
+  select.value = 'colorWheel';
+  mount.listeners.change({ target: select });
+  await tick();
+  assert.equal(t.state().field, 'colorWheel');
+  assert.equal(t.state().dirty.size, 0);
+}));
+
+test('a hostile value stays escaped through the row render (text, attribute and aria-label)', () => withVdStubs(async (t) => {
+  const target = vdFakeTarget();
+  t.attach(target, vdSnap('P-XSS', { value_defaults: [] }), vdPermissions);
+  t.setValues('P-XSS', 4, 'prt01', { listed: [], observed: ['<img src=x onerror=alert(1)>', 'a" onmouseover="x'] });
+  SetupAdmin.paintValueDefaultRows();
+  const html = target.nodes['[data-setup-vd-rows]'].innerHTML;
+  assert.ok(!/<img/i.test(html), 'no raw tag is emitted');
+  assert.ok(/&lt;IMG/i.test(html), 'the tag text is escaped');
+  assert.ok(!/ onmouseover="x/i.test(html) && !/"\s+onmouseover=/i.test(html), 'a quote cannot break out of an attribute');
+}));
+
+test('parseGridMinutes: comma, decimals, bounds, negative zero and exponent/hex forms', () => {
+  const p = SetupAdmin.parseGridMinutes;
+  assert.equal(p('1,234'), 1234);
+  assert.equal(p('45.4'), 45);
+  assert.equal(p('45.5'), 46);
+  assert.equal(p('0'), 0);
+  assert.equal(p('10080'), 10080);
+  assert.equal(p('10081'), 'invalid');
+  assert.equal(p('-0.4'), 'invalid', 'rounds to -0');
+  assert.equal(p('-1'), 'invalid');
+  assert.equal(p('1e2'), 'invalid');
+  assert.equal(p('0x10'), 'invalid');
+  assert.equal(p('Infinity'), 'invalid');
+  assert.equal(p('+5'), 5);
+});

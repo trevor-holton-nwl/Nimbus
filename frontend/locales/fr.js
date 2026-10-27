@@ -1774,6 +1774,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.setup_vd_field_change_title': 'Abandonner les valeurs non enregistrées ?',
   'ui.setup_vd_field_change_msg': 'Changer de champ abandonne {{count}} valeur(s) par défaut non enregistrée(s) du champ actuel.',
   'toast.setup_vd_stale': 'La signature de changement a changé. Valeurs rechargées ; vos saisies non enregistrées sont conservées.',
+  'toast.setup_vd_partial': '{{saved}} valeur(s) par défaut sur {{total}} enregistrée(s) avant une erreur : {{msg}}. Le reste reste en attente.',
+  'toast.setup_vd_plant_discarded': '{{count}} valeur(s) par défaut non enregistrée(s) de l’usine {{plant}} ont été supprimée(s) au changement d’usine.',
   'ui.setup_coverage_by_default': 'Par défaut',
   'ui.setup_grid_value_default_hint': 'Couvert par une valeur par défaut ({{detail}}). Saisir un nombre enregistre une ligne exacte qui la remplace.',
   'ui.setup_vd_untouched_note': 'Les valeurs par défaut ne sont pas modifiées.',
