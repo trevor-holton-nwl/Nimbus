@@ -1,6 +1,6 @@
 # Setup matrix: default changeover by value ("value defaults")
 
-> **Status (2026-10-27): design settled, nothing built.** Design rev. 3: rev. 2 (builder check + seven read-only Sonnet verifiers) amended after a three-reviewer double-check against live code that corrected the activation claim, the true/false rule, the values endpoint, the audit map, the locale plan and added performance, UI edge-state, docs, risk, rollout and verification sections. File:line anchors were re-verified on 2026-10-27; a few are marked approximate. The implementation plan is `docs/superpowers/plans/2026-10-27-setup-value-defaults.md`. Base commit: `831bbf2` (the base includes unpushed local-main commits 01a1021, 6d9d994, 831bbf2).
+> **Status (2026-10-27): implemented, awaiting owner browser check; not merged, not pushed, not deployed.** Waves A-D are committed on branch `worktree-setup-value-defaults` (base `831bbf2`); where the build differs from the text below, Appendix B ("Deviations in the build") records it and the shipped code wins. Design rev. 3: rev. 2 (builder check + seven read-only Sonnet verifiers) amended after a three-reviewer double-check against live code that corrected the activation claim, the true/false rule, the values endpoint, the audit map, the locale plan and added performance, UI edge-state, docs, risk, rollout and verification sections. File:line anchors were re-verified on 2026-10-27; a few are marked approximate. The implementation plan is `docs/superpowers/plans/2026-10-27-setup-value-defaults.md`. Base commit: `831bbf2` (the base includes unpushed local-main commits 01a1021, 6d9d994, 831bbf2).
 
 ---
 
@@ -146,6 +146,23 @@ Not in `ALLOWED_TABLES`; maintenance lists are catalog-driven; no purge touches 
 - Missing-pairs list and CSV are ordered by to-state.
 - Value-level history is not kept: the admin log records the written `field_key` and the upsert/delete counts only, never the values or minutes, and there is no history table.
 - The observed missing page is cut in Python when any value default exists (the SQL returns the row-uncovered observed pairs, defaults are filtered in Python, then the page is sliced); this is acceptable because the observed pair set is small. Without defaults the SQL `LIMIT/OFFSET` is the page.
+- **There is no kill switch.** A saved default affects resolution immediately; delete the entries in the card, or roll the image back (stored defaults are then inert).
+
+### Release note for planners
+
+Default changeover by value lets you type one number next to each value of a signature attribute (for example PRT01 = C is 60 minutes) in Setup Matrix, "Default changeover by value", instead of filling the matrix cell by cell. A transition that arrives at a value is charged that number when the two states differ on that field; if several fields change the numbers add up, and if only some of them have a default the pair is still covered at the partial sum (the Inspector reason names the fields with no default). Exact rows still win, so refine the pairs that matter with real rows. The grid shades default cells, the List view labels them "Default by value", the coverage tiles read Recorded / By default / Gaps, and a plant can now reach activation review on defaults alone. What to expect: pairs that were "unrecorded" are now covered, so Min Changeover and SPT rankings change, and Optimize under "exclude unrecorded" admits them; orders already sitting in Needs Planning as "setup transition unrecorded" are not released by saving defaults (run Optimize or place them). The missing-pairs list and CSV are now ordered by to-state.
+
+### Known gaps (v1)
+
+1. A machine state stored by the server as "TRUE" against an order value "true" is not recognised as identical (implicit zero); this predates this feature, and such a pair reads as uncovered unless a default or row covers it.
+2. Defaults are plant-wide only: no machine-scoped defaults and no from-value defaults.
+3. Matrix import, export and plant replace ignore defaults.
+4. Value-level history is not kept (the admin log records the field and counts only).
+5. The summed default is uncapped (one default is capped at 10,080 minutes; a sum over several fields can exceed it).
+6. The grid tooltip reason text ("Default by value: ...") is English-only; the label and card text are localised.
+7. A whole missing-pairs request takes about 0.8 s on a typical 70-machine, 50k-row plant (the 500 ms target was not met); a stress case where every machine shares one 1,024-state universe takes about 6.5 s and 130 MB. Follow-up: cache the counts per plant, signature version, matrix token and defaults instead of recomputing per request.
+8. The coverage counts moved from SQL to a Python pass (see Appendix B).
+9. The List view shows the default state only for rows whose effective minutes are null (no line row and no plant row).
 
 ## Docs to update (Wave D)
 
@@ -217,3 +234,15 @@ The implementation plan (waves, verification) is at `docs/superpowers/plans/2026
 - **`setup_active=false` is only half gated.** The optimizer never resolves, but the Inspector override editor and `deriveSetupObservation` are ungated (`ce29ad5`).
 - **Default view is the list, not the matrix** (`setup-admin.mts:188`), so `listRowView` needs the new state, not just the grid.
 - **The index-less call sites are three**, not two: `engine.mts:3230` joins `orders.mts:2457/2486`; `.mjs` tests are not typechecked, hence the runtime-defensive `valueDefaults`.
+
+### Deviations in the build (Waves A-C, recorded in Wave D)
+
+- **Coverage counts are a Python pass, not SQL.** The planned per-machine `effective_rows` join plus a second bounded SQL row query measured about 7 s on a seeded 70-machine, 50k-row plant. `_coverage_counts` now runs one plant-wide text row fetch bounded by the observed state universe (`_fetch_matrix_rows`), encodes each machine's recorded pairs as integers transiently (rebuilt only for machines the page walks, never retained per machine), and applies the grouping maths in Python. The spec's SQL latency targets were not met as written: a whole missing-pairs request is about 0.8 s on the typical plant (target 500 ms), and a shared-universe stress case (all machines on one 1,024-state universe) about 6.5 s and 130 MB. The cache-the-counts follow-up is in Known gaps.
+- **`_page_reachable_missing_pairs` was kept**, rewritten as the entry point of the lazy to-state-major generator (`_iter_missing_pairs`), rather than deleted; `_COVERAGE_SCAN_SIZE` and the old row-major window scan are gone.
+- **Input hardening beyond the spec.** The value-defaults PUT answers 400 for a non-object JSON body and rejects non-scalar default values; the values endpoint also requires the field to be in `RANKABLE_FIELDS`.
+- **Resolver hot path.** The resolver tries the raw arriving value before normalizing (a hit proves it is already normalized) and allocates no per-resolve closure; the optimizer's reflow `setupMinutes` path now reuses the memoised resolution index. A micro-benchmark `scripts/bench-value-defaults.mjs` was added.
+- **OpenAPI types were regenerated** (`frontend/types/api-generated.d.mts`); the checked-in file was already stale, so the regeneration also picked up routes added since.
+- **Locale keys: 35, not about 20**, in all five locales (card, badges, notes, confirm and toast text, the By default tile, the grid hint), appended to `BRANCH_KEYS`; the activation version-mismatch reason was reworded to name defaults.
+- **Admin card additions.** Beyond the spec the card shows a worst-case sum hint, and chunks saves at the route's 2,000-entry cap; `matrixVersionFor` and `coverageSummary` are exported pure helpers (`gridCellState`'s sixth argument is `defaultMin`).
+- **List view.** The default state is shown only for rows whose effective minutes are null (no line row and no plant row); the Gap filter and count exclude default-covered pairs.
+- **`setupWriteKind`** exists in two places (`setup-admin.mts` and `persistence.mts`); both gained `'value-default'`.
