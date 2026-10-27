@@ -159,6 +159,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-20-2-alert-profiles.sql",
         "2026-10-20-3-reset-date-format.sql",
         "2026-10-23-1-schedule-event.sql",
+        "2026-10-27-1-tool-inventory.sql",
         "2026-07-07-color-wheel-table.sql",
         "2026-07-07-security-tables.sql",
         "2026-07-08-username-ci-index.sql",
@@ -937,3 +938,55 @@ def test_schedule_event_migration_is_idempotent_and_creates_every_object(pg):
         assert any(r[0] == "schedule_event" and "create" in r[2] and "modify" in r[2] and "remove" in r[2]
                    for r in before["constraints"])
 
+
+
+# --- tool_inventory (per-plant PRT copy counts) ------------------------------------------------------
+TOOL_INVENTORY_MIGRATION = "2026-10-27-1-tool-inventory.sql"
+# Word-bounded, like the deploy runner's own regex (apply-migrations.ps1 $DESTRUCTIVE); the older
+# substring regex above would wrongly flag the harmless column name `updated_at`.
+DEPLOY_DESTRUCTIVE_WORD_RE = re.compile(r"\b(ALTER|DROP|DELETE|UPDATE|TRUNCATE|RENAME|GRANT|REVOKE)\b", re.IGNORECASE)
+TOOL_INVENTORY_BLOCK = (
+    "CREATE TABLE IF NOT EXISTS tool_inventory (",
+    "    plant              TEXT NOT NULL,",
+    "    tool_id            TEXT NOT NULL,",
+    "    total_qty          INTEGER NOT NULL DEFAULT 1,",
+    "    out_of_service_qty INTEGER NOT NULL DEFAULT 0,",
+    "    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),",
+    "    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),",
+    "    PRIMARY KEY (plant, tool_id),",
+    "    CONSTRAINT chk_tool_inventory_total CHECK (total_qty >= 0),",
+    "    CONSTRAINT chk_tool_inventory_qty   CHECK (out_of_service_qty >= 0 AND out_of_service_qty <= total_qty),",
+    "    CONSTRAINT chk_tool_inventory_id    CHECK (tool_id = upper(btrim(tool_id)) AND tool_id <> '')",
+    "    ('tool_inventory', 'plant',              'Plant',           TRUE,  1),",
+    "    ('tool_inventory', 'tool_id',            'Tool ID',         TRUE,  2),",
+    "    ('tool_inventory', 'total_qty',          'Total Inventory', FALSE, 3),",
+    "    ('tool_inventory', 'out_of_service_qty', 'Out of Service',  FALSE, 4),",
+    "    ('tool_inventory', 'note',               'Note',            FALSE, 5)",
+)
+
+
+def _tool_inventory_migration_text() -> str:
+    with open(os.path.join(ROOT, "migrations", TOOL_INVENTORY_MIGRATION), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_tool_inventory_ddl_in_schema_and_migration():
+    """schema.sql, the migration and the boot hook carry the identical table, named constraints and seed."""
+    schema_text, migration_text = _schema_text(), _tool_inventory_migration_text()
+    with open(os.path.join(ROOT, "master_data.py"), encoding="utf-8") as f:
+        hook_text = f.read()
+    for line in TOOL_INVENTORY_BLOCK:
+        assert line in schema_text, line
+        assert line in migration_text, line
+    for line in TOOL_INVENTORY_BLOCK[1:]:
+        assert line.strip() in hook_text or line.lstrip() in hook_text, line  # whitespace-insensitive for the hook
+    assert "ON CONFLICT (table_name, column_name) DO NOTHING" in migration_text
+    assert "REFERENCES" not in migration_text  # no plant FK on purpose
+
+
+def test_tool_inventory_migration_has_no_deploy_destructive_words():
+    """The deploy runner scans the whole file (comments included); `updated_at` must NOT trip it."""
+    text = _tool_inventory_migration_text()
+    assert "updated_at" in text
+    match = DEPLOY_DESTRUCTIVE_WORD_RE.search(text)
+    assert match is None, f"destructive word in migration: {match.group(0)!r}"

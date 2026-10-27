@@ -41,7 +41,8 @@ def test_materials_was_not_added_to_plant_scoped_tables():
     Material grid closes this gap itself via _assert_plant_allowed instead."""
     assert "materials" not in md.PLANT_SCOPED_TABLES
     assert frozenset({"plants", "machine", "material_plants", "bom_items", "sap_workcenter",
-                      "production_version", "routing_operation", "routing_rules"}) == md.PLANT_SCOPED_TABLES
+                      "production_version", "routing_operation", "routing_rules",
+                      "tool_inventory"}) == md.PLANT_SCOPED_TABLES
 
 
 def test_plant_not_allowed_is_a_permission_error_not_a_value_error():
