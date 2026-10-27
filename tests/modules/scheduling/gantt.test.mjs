@@ -681,6 +681,55 @@ test('Task 6 (B3b): Timeline renders a real setup-missing marker end-to-end from
   }
 });
 
+test('Timeline._setupObservation is empty (no setup bars or markers) when the plant has setup_active off, and unchanged when on or unknown', () => {
+  const plant = 'SETUP-OFF-PLANT';
+  const line = 'SETUP-OFF-LINE';
+  const state = value => [{ fieldKey: 'colorWheel', value }];
+  const priorCore = globalThis.NimbusComputeCore;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSetup = Store.setupSnapshot;
+  const priorMaster = Store.masterData;
+
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { plant, fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [{ machine: '', signature_version: 1, from_key: state('GREEN'), to_key: state('BLUE'), setup_min: 5 }],
+    machine_rows: [],
+    machine_states: [{ machine: line, state_key: state('GREEN'), signature_version: 1, source: 'manual', reason: 'unit test' }],
+    overrides: [],
+  }, 'unit-test');
+  const blueTask = { id: 'off-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE',
+    start_date: new Date('2026-08-21T08:00:00'), end_date: new Date('2026-08-21T09:00:00') };
+  const redTask = { id: 'off-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED',
+    start_date: new Date('2026-08-21T09:00:00'), end_date: new Date('2026-08-21T10:00:00') };
+  Store.setTasks([blueTask, redTask], 'unit-test');
+  const withPlantRow = flag => Store.setMasterData({ ...(priorMaster ?? {}), plants: [{ plant, setup_active: flag }] }, 'unit-test');
+
+  try {
+    withPlantRow(false);
+    const off = Timeline._setupObservation([blueTask, redTask]);
+    assert.deepEqual(off, { intervals: [], diagnostics: [] });
+    assert.deepEqual(Timeline._setupItemsForObservation([blueTask, redTask], off), []);
+
+    withPlantRow(true);
+    const on = Timeline._setupObservation([blueTask, redTask]);
+    assert.ok(on.diagnostics.some(d => d.successorOrderId === 'off-red'), 'setup-on plant still derives the gap');
+    assert.ok(Timeline._setupItemsForObservation([blueTask, redTask], on).some(item => item.className.includes('setup-missing')));
+
+    Store.setMasterData({ ...(priorMaster ?? {}), plants: [] }, 'unit-test');
+    assert.ok(Timeline._setupObservation([blueTask, redTask]).diagnostics.length > 0, 'a plant with no master row behaves as active');
+  } finally {
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setMasterData(priorMaster, 'unit-test');
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
+});
+
 test('missing setup marker is pinned to the center of a narrow setup bar', () => {
   // Regression target: vis-timeline could reflow the warning marker to an
   // edge of a narrow bar, where it looked misplaced or overflowed. Centring

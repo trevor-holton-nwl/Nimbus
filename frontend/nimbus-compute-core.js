@@ -1240,7 +1240,8 @@
       entry.predecessorOrderId ?? 'initial', entry.successorOrderId ?? '',
     ].join('|');
     for (const interval of setupIntervals(setup)) {
-      if (!inScope(interval.line)) continue;
+      // Setup is off for the plant: the observation still computes, but no setup alert is raised.
+      if (!inScope(interval.line) || !setupActiveForLine(interval.line)) continue;
       const requiredMinutes = Number(interval.requiredMinutes);
       const availableMinutes = Number(interval.availableMinutes);
       if (!Number.isFinite(requiredMinutes) || !Number.isFinite(availableMinutes) || requiredMinutes <= availableMinutes) continue;
@@ -1249,7 +1250,7 @@
       setupSeen.add(key);
       const shortMinutes = requiredMinutes - availableMinutes;
       alerts.push({
-        id: `setup-violated-${key}`, sev: setupActiveForLine(interval.line) ? 'err' : 'warn', type: 'setup-violated',
+        id: `setup-violated-${key}`, sev: 'err', type: 'setup-violated',
         msg: `Not enough changeover time before order "${orderNumberForId(interval.successorOrderId)}" on ${interval.line}: needs ${requiredMinutes} min, only ${availableMinutes} min available (${shortMinutes} min short).`,
         msgKey: 'alert.setup_violated',
         msgVars: { order: orderNumberForId(interval.successorOrderId), line: interval.line, required: requiredMinutes, available: availableMinutes, short: shortMinutes },
@@ -1275,7 +1276,7 @@
     };
     const setupDiagnostics = Array.isArray(setup?.diagnostics) ? setup.diagnostics : [];
     for (const diagnostic of setupDiagnostics) {
-      if (!diagnosticTypes.has(diagnostic?.type) || !inScope(diagnostic.line)) continue;
+      if (!diagnosticTypes.has(diagnostic?.type) || !inScope(diagnostic.line) || !setupActiveForLine(diagnostic.line)) continue;
       // A missing matrix transition is a pair/scope problem, not one alert per
       // order occurrence. Other diagnostics remain occurrence-specific.
       const key = diagnostic.type === 'setup-uncovered'
@@ -1286,8 +1287,7 @@
       const time = parseDate(diagnostic.time) || new Date();
       const pair = diagnostic.pairKey ? ` for ${formatSetupPairKey(diagnostic.pairKey)}` : '';
       const defaultMsg = SETUP_DIAGNOSTIC_DEFAULT_MSG[diagnostic.type];
-      const baseSev = SETUP_DIAGNOSTIC_SEVERITY[diagnostic.type] || 'err';
-      const sev = baseSev === 'err' && !setupActiveForLine(diagnostic.line) ? 'warn' : baseSev;
+      const sev = SETUP_DIAGNOSTIC_SEVERITY[diagnostic.type] || 'err';
       alerts.push({
         id: `${diagnostic.type}-${key}`, sev, type: diagnostic.type,
         msg: diagnostic.message || (defaultMsg ? defaultMsg(diagnostic, pair) : `Setup ${diagnostic.type.replaceAll('-', ' ')}${pair} on ${diagnostic.line}.`),
