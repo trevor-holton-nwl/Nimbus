@@ -1497,3 +1497,42 @@ test('rule 1b: the holders text is capped (3 shown, +N for the rest)', () => {
   assert.equal(hits.length, 1);
   assert.match(hits[0].msgVars.holders, /\+2$/);
 });
+
+test('findToolOverages: at an equal instant the pusher is chosen by (start, end, id), not by machine name', () => {
+  const run = (lineX, lineY) => Core.findToolOverages({
+    items: [item('ord-a', lineX, 0, 4), item('ord-b', lineY, 0, 6)], capacityFor: cap(1),
+  }).map(c => c.pusher);
+  // same start; shorter order sorts first: it holds, the longer one pushes - whichever machine name each has
+  assert.deepEqual(run('L1', 'L2'), ['ord-b']);
+  assert.deepEqual(run('L2', 'L1'), ['ord-b'], 'swapping the machines does not change the pusher');
+  // identical start and end: the id decides, again independent of the machines
+  const tie = (lineX, lineY) => Core.findToolOverages({
+    items: [item('ord-a', lineX, 0, 4), item('ord-b', lineY, 0, 4)], capacityFor: cap(1),
+  }).map(c => c.pusher);
+  assert.deepEqual(tie('L1', 'L2'), ['ord-b']);
+  assert.deepEqual(tie('L2', 'L1'), ['ord-b']);
+});
+
+test('toolIndexUpdate: moves the interval of one order inside the index without a rebuild', () => {
+  const cf = cap(1);
+  const items = [item('a', 'L1', 0, 4), item('b', 'L2', 6, 10)];
+  const live = Core.buildToolIndex({ items, capacityFor: cf });
+  const win = (idx, ex) => Core.toolHeadroom(idx, 'P1', ['T100'], new Date(T0), new Date(T0 + 12 * H), ex)
+    .map(w => [(+w.start - T0) / H, (+w.end - T0) / H]);
+  assert.deepEqual(win(live, 'L9'), [[4, 6], [10, 12]]);
+  // move b from 6-10 to 2-5
+  Core.toolIndexUpdate(live, 'b', item('b', 'L2', 6, 10), item('b', 'L2', 2, 5));
+  const rebuilt = Core.buildToolIndex({ items: [item('a', 'L1', 0, 4), item('b', 'L2', 2, 5)], capacityFor: cf });
+  assert.deepEqual(win(live, 'L9'), win(rebuilt, 'L9'));
+  assert.deepEqual(win(live, 'L9'), [[5, 12]]);
+  // null new: remove only; null old: insert only
+  Core.toolIndexUpdate(live, 'b', item('b', 'L2', 2, 5), null);
+  assert.deepEqual(win(live, 'L9'), [[4, 12]]);
+  Core.toolIndexUpdate(live, 'a', item('a', 'L1', 0, 4), item('a', 'L1', 8, 9));
+  assert.deepEqual(win(live, 'L9'), [[0, 8], [9, 12]]);
+  // removing an interval that is not there is a no-op; emptying a tool drops its group
+  Core.toolIndexUpdate(live, 'zz', item('zz', 'L5', 0, 1), null);
+  assert.equal(live.groups.size, 1);
+  Core.toolIndexUpdate(live, 'a', item('a', 'L1', 8, 9), null);
+  assert.equal(live.groups.size, 0);
+});

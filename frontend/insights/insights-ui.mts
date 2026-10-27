@@ -26,7 +26,7 @@ import { Engine } from '../optimization/engine.mjs';
 import { Timeline } from '../scheduling/gantt.mjs';
 import { Table, Inspector, notifyResidualFirming, firmMismatchMessage } from '../scheduling/orders.mjs';
 import { Selection } from '../scheduling/selection.mjs';
-import { categoryOf, alertOrderIds, ackLabel, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
+import { categoryOf, alertOrderIds, ackLabel, ALL_ALERTS_PROFILE_ID, isFixableAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
 import { AlertProfileMatches } from './alert-profile-matches.mjs';
 import { ToastLogTab } from './toast-log-tab.mjs';
 import type { NimbusTask, UtilSevBucket } from '../platform/types.mjs';
@@ -1572,7 +1572,7 @@ export const AlertsUIAdapter = {
     const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
     const isCalendar = CALENDAR_ALERT_TYPES.has(a.type);
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
-    const fixable  = FIXABLE_ALERT_TYPES.has(a.type);
+    const fixable  = isFixableAlert(a);
     const override = OVERRIDE_ALERT_TYPES.has(a.type) && a.taskId != null;
     const msg = a.msgKey ? Util.t(a.msgKey, a.msgVars ?? {}) : a.msg;
     // An acknowledged alert is only listed when "Show acknowledged" is on; it says who hid it and until when.

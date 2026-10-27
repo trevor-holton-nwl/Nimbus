@@ -392,6 +392,13 @@ test('alert drawer renders tool-conflict alerts with localized text and a fix bu
   assert.match(row, /data-alert-action="fix"/);
 });
 
+test('alert drawer hides the Fix button on a tool conflict with zero available copies, keeps it otherwise', () => {
+  const base = { id: 'toolc-p|T1', type: 'tool-conflict', sev: 'err', msgKey: 'alert.tool_conflict_zero', msgVars: { tool: 'T1' }, taskId: 'p', line: 'L1', time: new Date() };
+  assert.doesNotMatch(AlertsUIAdapter._renderAlertRow({ ...base, available: 0 }), /data-alert-action="fix"/);
+  assert.match(AlertsUIAdapter._renderAlertRow({ ...base, available: 2 }), /data-alert-action="fix"/);
+  assert.match(AlertsUIAdapter._renderAlertRow({ ...base, available: undefined }), /data-alert-action="fix"/);
+});
+
 test('alert drawer host binds the delegated action handler even in its empty state', () => {
   const body = { innerHTML: '', onclick: null };
   const priorGetElementById = globalThis.document.getElementById;

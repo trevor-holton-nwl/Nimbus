@@ -333,7 +333,7 @@
   const _distinctLines = rows => { const set = new Set(); for (const r of rows) set.add(r.line); return set.size; };
 
   // Every point where MORE distinct machines use a tool than it has copies. Per (plant, tool) sweep, events
-  // sorted (time, end-before-start, line, id): touching intervals never overlap and the result is identical
+  // sorted (time, end-before-start, start, end, id, line): touching intervals never overlap and the result is identical
   // for any input order. One cluster per PUSHER (the start that takes the machine count over the limit):
   //   {plant, tool, at, available, hasRow, inUse, pusher, pusherLine, holders:[{id,line,start,end}]}
   // `holders` are the OTHER orders in use at that instant, sorted (start, end, id); the same machine twice,
@@ -354,8 +354,8 @@
         events.push({ t: r.s, type: 1, r });
         events.push({ t: r.e, type: 0, r });
       }
-      events.sort((a, b) => a.t - b.t || a.type - b.type || _cmp(a.r.line, b.r.line) || _cmp(a.r.id, b.r.id)
-        || a.r.s - b.r.s || a.r.e - b.r.e);
+      events.sort((a, b) => a.t - b.t || a.type - b.type || a.r.s - b.r.s || a.r.e - b.r.e
+        || _cmp(a.r.id, b.r.id) || _cmp(a.r.line, b.r.line));
       const active = new Set();
       const lineCount = new Map();
       for (const ev of events) {
@@ -409,6 +409,37 @@
   // Reusable per-(plant, tool) index for the optimizer's headroom queries: {groups, capacityFor}.
   function buildToolIndex({ items, capacityFor, now } = {}) {
     return { groups: _toolGroups(items, now), capacityFor };
+  }
+
+  // Mutate an index in place when ONE order's interval changes: drop `oldInterval` and add `newInterval`
+  // ({plant, line, tools:[...]|tool, start, end}; null = only remove / only insert). Rows are matched by order
+  // id + line + start + end within each (plant, tool) group, so the optimizer pass never rebuilds the index.
+  // The index keeps no `now` clip: pass the same clipped values buildToolIndex would have used. Returns the index.
+  function toolIndexUpdate(index, id, oldInterval, newInterval) {
+    if (!index || !index.groups) return index;
+    const sid = String(id);
+    if (oldInterval) {
+      const ids = new Set();
+      for (const raw of Array.isArray(oldInterval.tools) ? oldInterval.tools : [oldInterval.tool]) {
+        const t = normalizeToolId(raw); if (t) ids.add(t);
+      }
+      const line = oldInterval.line || 'Unknown', s = _num(oldInterval.start), e = _num(oldInterval.end);
+      for (const tool of ids) {
+        const key = _toolKey(oldInterval.plant, tool);
+        const g = index.groups.get(key);
+        if (!g) continue;
+        const at = g.rows.findIndex(r => r.id === sid && r.line === line && r.s === s && r.e === e);
+        if (at >= 0) g.rows.splice(at, 1);
+        if (!g.rows.length) index.groups.delete(key);
+      }
+    }
+    if (newInterval) {
+      for (const [key, ng] of _toolGroups([{ ...newInterval, id: sid }], null)) {
+        const g = index.groups.get(key);
+        if (g) g.rows.push(...ng.rows); else index.groups.set(key, ng);
+      }
+    }
+    return index;
   }
 
   // Tool-free windows inside [from, to] for placing ONE more order on `excludeLine` that needs every tool in
@@ -1680,7 +1711,7 @@
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // tool inventory (shared by the alert rule and the optimizer)
     TOOL_PLACEHOLDERS, normalizeToolId, taskToolIds, taskToolPlant, toolOccupancyInterval, buildToolCapacity, availableCopies,
-    findToolOverages, toolConflictAlertId, buildToolIndex, toolHeadroom,
+    findToolOverages, toolConflictAlertId, buildToolIndex, toolIndexUpdate, toolHeadroom,
     // calendar engine
     activeWorkHours, plantWorkHoursOn, periodBoundaryKeys, validatePlantPeriods, unionWeeklyHours,
     getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant, workingMinutesByDay,

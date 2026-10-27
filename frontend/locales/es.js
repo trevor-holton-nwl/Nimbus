@@ -100,6 +100,7 @@ window.__NIMBUS_LOCALES.es = {
   'toast.unscheduled_bulk':            '{{count}} pedidos desplanificados',
   'toast.order_moved':                 'Movido "{{name}}" para que ahora termine el {{date}}',
   'toast.cannot_fix_task':             'No se puede fijar: tarea no encontrada',
+  'toast.cannot_fix_tool_unavailable': 'No hay ninguna copia de esta herramienta disponible. Aumente el inventario total o reduzca «Fuera de servicio».',
   'toast.cannot_fix_firmed': 'No se puede corregir automáticamente: este pedido está en firme (horizonte congelado o planificador) o en curso. Muévalo a mano.',
   'toast.commit_failed':               'No se pudo mantener el fin allí. El pedido sigue donde estaba.',
   'toast.gantt_reload_needed':         'El Gantt tuvo un error de visualización que no pudo recuperar. Recargue la página.',
@@ -696,7 +697,7 @@ window.__NIMBUS_LOCALES.es = {
 
   'tip.fix_alert':                     'Resolver esta alerta automáticamente',
   'alert.tool_conflict':               'Herramienta "{{tool}}": {{available}} disponibles, {{inUse}} en uso al mismo tiempo (ya ocupadas por {{holders}}).',
-  'alert.tool_conflict_zero':          'La herramienta "{{tool}}" no tiene copias disponibles (todas fuera de servicio), pero un pedido la necesita aquí. Vea Datos Maestros > Inventario de herramientas.',
+  'alert.tool_conflict_zero':          'La herramienta "{{tool}}" no tiene copias disponibles (cantidad 0 o todas fuera de servicio), pero un pedido la necesita aquí. Vea Datos Maestros > Inventario de herramientas.',
   'alert.tool_conflict_no_row':        'La herramienta "{{tool}}" no tiene fila de inventario (se cuenta como 1 copia), pero {{inUse}} máquinas la necesitan al mismo tiempo (ya ocupadas por {{holders}}).',
   'alert.setup_violated':              'No hay tiempo suficiente de cambio antes del pedido "{{order}}" en {{line}}: necesita {{required}} min, solo hay {{available}} min disponibles (faltan {{short}} min).',
   'alert.distribution_separation':     'Los subpedidos de {{parent}} terminan en diferentes {{scope}}s',

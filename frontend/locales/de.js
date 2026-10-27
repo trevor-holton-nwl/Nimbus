@@ -100,6 +100,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.unscheduled_bulk':            '{{count}} Aufträge abgeplant',
   'toast.order_moved':                 '"{{name}}" verschoben, sodass es nun um {{date}} endet',
   'toast.cannot_fix_task':             'Fixieren nicht möglich: Aufgabe nicht gefunden',
+  'toast.cannot_fix_tool_unavailable': 'Kein Exemplar dieses Werkzeugs ist verfügbar. Gesamtbestand erhöhen oder „Außer Betrieb“ verringern.',
   'toast.cannot_fix_firmed': 'Automatische Korrektur nicht möglich: Dieser Auftrag ist festgeschrieben (eingefrorener Horizont oder Planer) oder läuft gerade. Stattdessen von Hand verschieben.',
   'toast.commit_failed':               'Das Ende konnte dort nicht gehalten werden. Der Auftrag bleibt, wo er war.',
   'toast.gantt_reload_needed':         'Im Gantt-Diagramm ist ein Anzeigefehler aufgetreten, der sich nicht beheben ließ. Bitte laden Sie die Seite neu.',
@@ -692,7 +693,7 @@ window.__NIMBUS_LOCALES.de = {
 
   'tip.fix_alert':                     'Diese Warnung automatisch beheben',
   'alert.tool_conflict':               'Werkzeug "{{tool}}": {{available}} verfügbar, aber {{inUse}} gleichzeitig im Einsatz (bereits belegt durch {{holders}}).',
-  'alert.tool_conflict_zero':          'Werkzeug "{{tool}}" hat keine verfügbaren Exemplare (alle außer Betrieb), wird hier aber von einem Auftrag benötigt. Siehe Stammdaten > Werkzeugbestand.',
+  'alert.tool_conflict_zero':          'Werkzeug "{{tool}}" hat keine verfügbaren Exemplare (Menge 0 oder alle außer Betrieb), wird hier aber von einem Auftrag benötigt. Siehe Stammdaten > Werkzeugbestand.',
   'alert.tool_conflict_no_row':        'Werkzeug "{{tool}}" hat keinen Bestandseintrag (gilt als 1 Exemplar), wird aber gleichzeitig von {{inUse}} Maschinen benötigt (bereits belegt durch {{holders}}).',
   'alert.setup_violated':              'Zu wenig Umrüstzeit vor Auftrag "{{order}}" auf {{line}}: benötigt {{required}} Min., nur {{available}} Min. verfügbar ({{short}} Min. zu wenig).',
   'alert.distribution_separation':     'Teilaufträge von {{parent}} enden in verschiedenen {{scope}}s',

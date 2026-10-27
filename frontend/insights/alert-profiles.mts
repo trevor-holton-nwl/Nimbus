@@ -116,6 +116,14 @@ export function categoryOf(type: string): AlertCategory {
 
 /** Types the drawer and the Alert Monitor offer a one-click Fix for. */
 export const FIXABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'overload', 'tool-conflict']);
+/** A tool conflict with no usable copy (available 0) can never be cleared by moving an order: the Fix action and "Move N orders" skip it. */
+export function isUnfixableToolAlert(a: { type: string; available?: number | null }): boolean {
+  return a.type === 'tool-conflict' && a.available === 0;
+}
+/** Whether an alert offers the one-click Fix: a fixable type, minus a tool conflict with zero available copies. */
+export function isFixableAlert(a: { type: string; available?: number | null }): boolean {
+  return FIXABLE_ALERT_TYPES.has(a.type) && !isUnfixableToolAlert(a);
+}
 /** Types offered Override (when the alert carries a taskId). */
 export const OVERRIDE_ALERT_TYPES: ReadonlySet<string> = new Set(['closed', 'firmed-closed', 'firmed-out-of-hours']);
 /** Calendar-family types: drawn with the ⊘ glyph / calendar styling. */

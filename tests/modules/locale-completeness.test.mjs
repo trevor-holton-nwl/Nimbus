@@ -715,6 +715,7 @@ const BRANCH_KEYS = [
   'ui.system_config_history_retention_hint',
   // Tool Inventory (Wave 2): count-aware tool-conflict alert wording.
   'alert.tool_conflict', 'alert.tool_conflict_zero', 'alert.tool_conflict_no_row', 'alert.help.tool-conflict',
+  'toast.cannot_fix_tool_unavailable',
 ];
 const localeDict = locale => {
   const sandbox = { window: {} };

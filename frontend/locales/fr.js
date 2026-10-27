@@ -100,6 +100,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.unscheduled_bulk':            '{{count}} ordres déplanifiés',
   'toast.order_moved':                 '"{{name}}" déplacé pour se terminer désormais le {{date}}',
   'toast.cannot_fix_task':             'Impossible de fixer : tâche introuvable',
+  'toast.cannot_fix_tool_unavailable': 'Aucun exemplaire de cet outil n’est disponible. Augmentez le stock total ou réduisez « Hors service ».',
   'toast.cannot_fix_firmed': 'Correction automatique impossible : cette commande est ferme (horizon gelé ou planificateur) ou en cours. Déplacez-la à la main.',
   'toast.commit_failed':               'Impossible de maintenir la fin à cet endroit. La commande reste où elle était.',
   'toast.gantt_reload_needed':         'Le Gantt a rencontré une erreur d\'affichage irrécupérable. Veuillez recharger la page.',
@@ -692,7 +693,7 @@ window.__NIMBUS_LOCALES.fr = {
 
   'tip.fix_alert':                     'Résoudre automatiquement cette alerte',
   'alert.tool_conflict':               'Outil "{{tool}}" : {{available}} disponible(s), {{inUse}} utilisé(s) en même temps (déjà occupés par {{holders}}).',
-  'alert.tool_conflict_zero':          'L’outil "{{tool}}" n’a aucun exemplaire disponible (tous hors service), mais une commande en a besoin ici. Voir Données maîtres > Inventaire des outils.',
+  'alert.tool_conflict_zero':          'L’outil "{{tool}}" n’a aucun exemplaire disponible (quantité 0 ou tous hors service), mais une commande en a besoin ici. Voir Données maîtres > Inventaire des outils.',
   'alert.tool_conflict_no_row':        'L’outil "{{tool}}" n’a pas de ligne d’inventaire (compté comme 1 exemplaire), mais {{inUse}} machines en ont besoin en même temps (déjà occupés par {{holders}}).',
   'alert.setup_violated':              'Temps de changement insuffisant avant la commande "{{order}}" sur {{line}} : {{required}} min nécessaires, seulement {{available}} min disponibles ({{short}} min manquantes).',
   'alert.distribution_separation':     'Les sous-commandes de {{parent}} se terminent dans différents {{scope}}s',

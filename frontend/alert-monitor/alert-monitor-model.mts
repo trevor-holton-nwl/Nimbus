@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, alertOrderIds, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, alertOrderIds, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -23,6 +23,8 @@ export interface AlertLike {
   peerIds?: string[];
   line?: string;
   time?: Date | null;
+  /** Tool-conflict only: copies the plant can use; 0 = no move can clear it. */
+  available?: number | null;
 }
 
 export type MonitorGroupBy = 'category' | 'type' | 'line' | 'day' | 'order' | 'none';
@@ -244,11 +246,11 @@ export type DiagnoseKind = 'cell' | 'order' | 'none';
 export interface RowActions { goto: boolean; fix: boolean; override: boolean; slot: boolean; diagnose: DiagnoseKind }
 
 /** Which actions an alert row offers — the same eligibility the drawer uses, plus Diagnose. */
-export function rowActionsFor(a: { type: string; taskId?: string | null; line?: string; time?: Date | null }): RowActions {
+export function rowActionsFor(a: { type: string; taskId?: string | null; line?: string; time?: Date | null; available?: number | null }): RowActions {
   const hasTask = a.taskId != null && a.taskId !== '';
   return {
     goto: hasTask || !!(a.line && a.time),
-    fix: FIXABLE_ALERT_TYPES.has(a.type),
+    fix: isFixableAlert(a),
     override: OVERRIDE_ALERT_TYPES.has(a.type) && hasTask,
     slot: SLOT_ALERT_TYPES.has(a.type) && hasTask,
     diagnose: hasTask ? 'order' : (a.line && a.time ? 'cell' : 'none'),
@@ -301,7 +303,7 @@ export function groupCounts<A extends AlertLike>(alerts: ReadonlyArray<A>, isAck
   for (const a of alerts) {
     if (a.sev === 'err') out.errors++; else out.warnings++;
     for (const id of alertOrderIds(a)) orders.add(id);
-    if (MOVABLE_ALERT_TYPES.has(a.type)) { out.movableIds.push(a.id); movable.add(String(a.taskId ?? a.id)); }
+    if (MOVABLE_ALERT_TYPES.has(a.type) && !isUnfixableToolAlert(a)) { out.movableIds.push(a.id); movable.add(String(a.taskId ?? a.id)); }
     if (!isAcked(a.id)) out.unackedIds.push(a.id);
   }
   out.orders = orders.size;

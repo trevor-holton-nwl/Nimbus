@@ -100,6 +100,7 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.unscheduled_bulk':            '{{count}} ordens desagendadas',
   'toast.order_moved':                 '"{{name}}" movida para terminar agora em {{date}}',
   'toast.cannot_fix_task':             'Não é possível fixar: tarefa não encontrada',
+  'toast.cannot_fix_tool_unavailable': 'Nenhuma cópia desta ferramenta está disponível. Aumente o estoque total ou reduza “Fora de serviço”.',
   'toast.cannot_fix_firmed': 'Não é possível corrigir automaticamente: este pedido está firmado (horizonte congelado ou planejador) ou em execução. Mova-o manualmente.',
   'toast.commit_failed':               'Não foi possível manter o término ali. A ordem permanece onde estava.',
   'toast.gantt_reload_needed':         'O Gantt teve um erro de exibição que não pôde ser recuperado. Recarregue a página.',
@@ -692,7 +693,7 @@ window.__NIMBUS_LOCALES.pt = {
 
   'tip.fix_alert':                     'Resolver este alerta automaticamente',
   'alert.tool_conflict':               'Ferramenta "{{tool}}": {{available}} disponíveis, {{inUse}} em uso ao mesmo tempo (já ocupadas por {{holders}}).',
-  'alert.tool_conflict_zero':          'A ferramenta "{{tool}}" não tem cópias disponíveis (todas fora de serviço), mas um pedido a necessita aqui. Veja Dados Mestre > Inventário de ferramentas.',
+  'alert.tool_conflict_zero':          'A ferramenta "{{tool}}" não tem cópias disponíveis (quantidade 0 ou todas fora de serviço), mas um pedido a necessita aqui. Veja Dados Mestre > Inventário de ferramentas.',
   'alert.tool_conflict_no_row':        'A ferramenta "{{tool}}" não tem linha de inventário (contada como 1 cópia), mas {{inUse}} máquinas a necessitam ao mesmo tempo (já ocupadas por {{holders}}).',
   'alert.setup_violated':              'Tempo de troca insuficiente antes da ordem "{{order}}" em {{line}}: precisa de {{required}} min, só há {{available}} min disponíveis (faltam {{short}} min).',
   'alert.distribution_separation':     'Subpedidos de {{parent}} terminam em diferentes {{scope}}s',

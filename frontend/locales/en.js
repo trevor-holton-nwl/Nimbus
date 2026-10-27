@@ -100,6 +100,7 @@ window.__NIMBUS_LOCALES.en = {
   'toast.unscheduled_bulk':            'Unscheduled {{count}} orders',
   'toast.order_moved':                 'Moved "{{name}}" so it now finishes {{date}}',
   'toast.cannot_fix_task':             'Cannot fix: task not found',
+  'toast.cannot_fix_tool_unavailable': 'No copy of this tool is available. Raise Total Inventory or lower Out of Service.',
   'toast.cannot_fix_firmed': 'Cannot auto-fix: this order is firmed (frozen horizon or planner) or running. Move it by hand instead.',
   'toast.commit_failed':               'Could not hold the finish there. The order stays where it was.',
   'toast.gantt_reload_needed':         'The Gantt hit a display error it could not recover from. Please reload the page.',
@@ -1041,7 +1042,7 @@ window.__NIMBUS_LOCALES.en = {
   /* ── Additional tooltip text ─────────────────────────────────────────────── */
   'tip.fix_alert':                     'Automatically resolve this alert',
   'alert.tool_conflict':               'Tool "{{tool}}": {{available}} available, {{inUse}} in use at the same time (already held by {{holders}}).',
-  'alert.tool_conflict_zero':          'Tool "{{tool}}" has no copies available (all are out of service) but an order here needs it. See Master Data > Tool Inventory.',
+  'alert.tool_conflict_zero':          'Tool "{{tool}}" has no copies available (quantity 0 or all out of service) but an order here needs it. See Master Data > Tool Inventory.',
   'alert.tool_conflict_no_row':        'Tool "{{tool}}" has no inventory row (treated as 1 copy) but {{inUse}} machines need it at the same time (already held by {{holders}}).',
   'alert.setup_violated':              'Not enough changeover time before order "{{order}}" on {{line}}: needs {{required}} min, only {{available}} min available ({{short}} min short).',
   'alert.distribution_separation':     'Sub-orders of {{parent}} finish in different {{scope}}s',

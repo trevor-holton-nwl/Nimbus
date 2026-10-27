@@ -318,8 +318,14 @@ declare global {
     buildToolCapacity(masterData?: NimbusMasterData | null): Map<string, { available: number; hasRow: boolean }>;
     availableCopies(capacity: Map<string, { available: number; hasRow: boolean }> | null | undefined, plant: string | null | undefined, tool: string): { available: number; hasRow: boolean };
     findToolOverages(args: { items: NimbusToolItem[]; capacityFor: (plant: string, tool: string) => { available: number; hasRow: boolean }; now?: Date | number }): NimbusToolCluster[];
-    toolConflictAlertId(cluster: Pick<NimbusToolCluster, tool | pusher | holders>, used?: Set<string>): string;
+    toolConflictAlertId(cluster: Pick<NimbusToolCluster, 'tool' | 'pusher' | 'holders'>, used?: Set<string>): string;
     buildToolIndex(args: { items: NimbusToolItem[]; capacityFor: (plant: string, tool: string) => { available: number; hasRow: boolean }; now?: Date | number }): NimbusToolIndex;
+    /**
+     * Mutate a buildToolIndex result in place when ONE order's interval changes (no rebuild): removes `oldInterval`
+     * (matched by id + line + start + end per tool) and inserts `newInterval`; null = only remove / only insert.
+     * Intervals are `{plant, line, tools | tool, start, end}`; pass already-clipped times (the index keeps no `now`). Returns the index.
+     */
+    toolIndexUpdate(index: NimbusToolIndex, id: string | number, oldInterval: Omit<NimbusToolItem, 'id'> | null, newInterval: Omit<NimbusToolItem, 'id'> | null): NimbusToolIndex;
     toolHeadroom(index: NimbusToolIndex, plant: string, tools: string[], from: Date | number, to: Date | number, excludeLine?: string | null): Array<{ start: Date; end: Date }>;
 
     // date/time helpers

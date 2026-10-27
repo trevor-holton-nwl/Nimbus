@@ -675,8 +675,8 @@ export const Alerts = {
         const releases = peerIds.map(id => Store.tasks[id]?.end_date).filter((d): d is Date => !!d)
           .map(d => d.getTime()).sort((x, y) => x - y);
         if (a.type === 'tool-conflict' && a.available === 0) {
-          // No copy exists (all out of service): moving this order can never clear the conflict.
-          if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error');
+          // No copy exists (quantity 0 / all out of service): moving this order can never clear the conflict.
+          if (!quiet) Toast.show(Util.t('toast.cannot_fix_tool_unavailable'), 'error');
           return;
         }
         const d = a.type === 'tool-conflict' && a.inUse != null && a.available != null ? Math.max(1, a.inUse - a.available) : 1;

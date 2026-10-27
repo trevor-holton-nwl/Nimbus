@@ -1023,6 +1023,12 @@ test('Alerts.applyFix on a tool-conflict with N holders searches from the d-th e
     Store.setAlerts([zero], 'unit-test');
     Alerts.applyFix(zero.id, { quiet: true });
     assert.equal(searchedFrom, null, 'a zero-copy conflict is not movable');
+    // Not quiet: the refusal names the real cause, not "task not found".
+    const priorShow = Toast.show, toasts = [];
+    Toast.show = (msg, type) => { toasts.push({ msg: String(msg), type }); };
+    try { Alerts.applyFix(zero.id); } finally { Toast.show = priorShow; }
+    assert.deepEqual(toasts.map(t => t.msg), [String(Util.t('toast.cannot_fix_tool_unavailable'))]);
+    assert.notEqual(toasts[0].msg, String(Util.t('toast.cannot_fix_task')));
   } finally {
     Calendar.nextAvailable = priorNext; Engine.autoReflow = priorReflow; Engine.splitOrderPolicyFor = priorPolicy;
     Store.setAlerts(priorAlerts, 'unit-test');
