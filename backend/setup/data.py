@@ -461,7 +461,10 @@ def _validated_value_default_entries(entries) -> list[tuple[str, int | None]]:
     for entry in entries:
         if not isinstance(entry, dict):
             raise ValueError("Each value-default entry must be an object")
-        value = canonical_default_value(entry.get("value"))
+        raw_value = entry.get("value")
+        if raw_value is not None and not isinstance(raw_value, (str, int, float)):
+            raise ValueError("A value-default entry's value must be text, a number or a boolean")
+        value = canonical_default_value(raw_value)
         if not value:
             raise ValueError("A value-default entry's value is required")
         if value in seen:
@@ -1190,6 +1193,22 @@ def _rows_default_overlap(tuples, masks, row_pairs) -> int:
     )
 
 
+def _rows_default_overlap_codes(tuples, masks, codes, n: int) -> int:
+    """`_rows_default_overlap` over `from * n + to` codes, comparing interned projections by int."""
+    interned: dict[tuple, int] = {}
+    by_mask: dict[tuple, list[int]] = {}
+    for mask in set(masks):
+        by_mask[mask] = [interned.setdefault(tuple(t[i] for i in mask), len(interned)) for t in tuples]
+    projections = [by_mask[mask] for mask in masks]
+    count = 0
+    for code in codes:
+        a, b = divmod(code, n)
+        proj = projections[b]
+        if proj[a] != proj[b]:
+            count += 1
+    return count
+
+
 def _applicable_row_hits(tuples, masks, row_hits, b: int) -> set[int]:
     """Row partners of b that sit inside b's uncovered group (the only ones that matter)."""
     return {a for a in row_hits.get(b, ()) if a != b and all(tuples[a][i] == tuples[b][i] for i in masks[b])}
@@ -1358,23 +1377,30 @@ def _fetch_matrix_rows(cur, context: dict, machines: list[str]):
     return plant_by_to, machine_pairs
 
 
-def _machine_row_pairs(info: dict, plant_by_to: dict, machine_pairs: list) -> set[tuple[int, int]]:
-    """Effective off-diagonal recorded (from_index, to_index) pairs of one machine.
+def _machine_row_codes(info: dict, plant_by_to: dict, machine_pairs) -> set[int]:
+    """Effective off-diagonal recorded pairs of one machine, encoded as `from_index * n + to_index`.
 
     Plant rows apply to every machine; a machine's own rows add to (or repeat) them, and a
-    set de-duplicates the repeat exactly as the old DISTINCT effective-rows CTE did."""
+    set de-duplicates the repeat exactly as the old DISTINCT effective-rows CTE did.  The
+    result is TRANSIENT: it is built for one machine, used, and dropped -- never retained
+    per machine (plant rows x machines sharing one state universe is millions of pairs)."""
     text_index = info["text_index"]
-    pairs: set[tuple[int, int]] = set()
+    n = len(info["states"])
+    codes: set[int] = set()
+    add = codes.add
+    get = text_index.get
     for to_text, b in text_index.items():
-        for from_text in plant_by_to.get(to_text, ()):
-            a = text_index.get(from_text)
-            if a is not None and a != b:
-                pairs.add((a, b))
+        froms = plant_by_to.get(to_text)
+        if froms:
+            for from_text in froms:
+                a = get(from_text)
+                if a is not None and a != b:
+                    add(a * n + b)
     for from_text, to_text in machine_pairs or ():
-        a, b = text_index.get(from_text), text_index.get(to_text)
+        a, b = get(from_text), get(to_text)
         if a is not None and b is not None and a != b:
-            pairs.add((a, b))
-    return pairs
+            add(a * n + b)
+    return codes
 
 
 def _coverage_counts(cur, context: dict) -> dict[str, dict[str, dict[str, int]]]:
@@ -1400,32 +1426,31 @@ def _coverage_counts(cur, context: dict) -> dict[str, dict[str, dict[str, int]]]
     default_sets = _default_sets_for(definition, context.get("value_defaults"))
     has_defaults = any(default_sets)
     plant_by_to, machine_pairs = _fetch_matrix_rows(cur, context, list(structures)) if structures else ({}, {})
-    row_pairs_by_machine: dict[str, set[tuple[int, int]]] = {}
 
     for machine, info in structures.items():
         tuples, index, n = info["tuples"], info["index"], len(info["states"])
-        row_pairs = _machine_row_pairs(info, plant_by_to, machine_pairs.get(machine))
-        row_pairs_by_machine[machine] = row_pairs
+        row_codes = _machine_row_codes(info, plant_by_to, machine_pairs.get(machine))
         default_reachable = 0
         if has_defaults:
             masks, groups = _value_default_structure(tuples, default_sets)
             default_reachable = (_default_covered_all(tuples, masks, groups)
-                                 - _rows_default_overlap(tuples, masks, row_pairs))
-        counts["reachable"][machine] = {"total": n * n, "covered": n + len(row_pairs),
+                                 - _rows_default_overlap_codes(tuples, masks, row_codes, n))
+        counts["reachable"][machine] = {"total": n * n, "covered": n + len(row_codes),
                                         "default_covered": default_reachable}
         if machine in observed_by_machine:
             covered = by_default = 0
             for pair in observed_by_machine[machine]:
                 from_token, to_token = _state_token(pair["from_key"]), _state_token(pair["to_key"])
                 a, b = index.get(from_token), index.get(to_token)
-                if from_token == to_token or (a, b) in row_pairs:
+                if from_token == to_token or (a is not None and b is not None and a * n + b in row_codes):
                     covered += 1
                 elif (has_defaults and a is not None and b is not None
                       and _pair_default_covered(tuples[a], tuples[b], default_sets)):
                     by_default += 1
             counts["observed"][machine] = {"total": len(observed_by_machine[machine]), "covered": covered,
                                            "default_covered": by_default}
-    context["_row_pairs"] = row_pairs_by_machine
+    # Only the compact raw rows are kept (shared, one copy); per-machine pairs are rebuilt on demand.
+    context["_row_source"] = (plant_by_to, machine_pairs)
     context["_coverage_counts"] = counts
     return counts
 
@@ -1479,7 +1504,7 @@ def _page_reachable_missing_pairs(cur, context: dict, *, machine: str | None,
     )
     default_sets = _default_sets_for(context["definition"], context.get("value_defaults"))
     counts = _coverage_counts(cur, context)["reachable"]
-    row_pairs_by_machine = context["_row_pairs"]
+    plant_by_to, machine_pairs = context["_row_source"]
     remaining_skip = offset
     result: list[dict] = []
     for current_machine in selected:
@@ -1491,8 +1516,10 @@ def _page_reachable_missing_pairs(cur, context: dict, *, machine: str | None,
         info = structures[current_machine]
         tuples = info["tuples"]
         masks, groups = _value_default_structure(tuples, default_sets)
+        n = len(info["states"])
         row_hits: dict[int, set[int]] = {}
-        for a, b in row_pairs_by_machine[current_machine]:
+        for code in _machine_row_codes(info, plant_by_to, machine_pairs.get(current_machine)):
+            a, b = divmod(code, n)
             row_hits.setdefault(b, set()).add(a)
         pairs = _iter_missing_pairs(tuples, masks, groups, row_hits,
                                     offset=remaining_skip, limit=limit - len(result))
@@ -1584,10 +1611,13 @@ def _coverage_bundle(cur, plant: str, *, machine: str | None, offset: int, limit
     summary = _summarize_setup_coverage(cur, context)
     result = {"plant": summary["plant"], "definition": summary["definition"],
               "observed": dict(summary["observed"]), "reachable": dict(summary["reachable"])}
-    for kind in page_kinds:
-        result[kind]["missing_page"] = _page_setup_missing_pairs(
-            cur, context, kind, machine=machine, offset=offset, limit=limit,
-        )
+    try:
+        for kind in page_kinds:
+            result[kind]["missing_page"] = _page_setup_missing_pairs(
+                cur, context, kind, machine=machine, offset=offset, limit=limit,
+            )
+    finally:
+        context.pop("_row_source", None)    # free the retained matrix rows as soon as the pages are cut
     return result
 
 

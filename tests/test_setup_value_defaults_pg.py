@@ -375,6 +375,47 @@ def test_scale_70_machines_50k_rows_counts_and_page_latency(pg):
 
 
 @pytest.mark.pg
+def test_scale_shared_state_universe_memory_and_latency(pg):
+    """Worst case for retained per-machine pair state: every machine shares ONE state universe."""
+    import tracemalloc
+    plant = "ZZTEST_VD_SHARED"
+    version = 3
+    _reset(pg, plant)
+    _define(pg, plant, version)
+    rng = random.Random(11)
+    prts = [f"P{i:02d}" for i in range(32)]
+    colors = [f"C{i:02d}" for i in range(32)]
+    universe = [(p, c) for p in prts for c in colors]                      # 1,024 states on every machine
+    _insert_orders(pg, plant, {f"M{m:02d}": list(universe) for m in range(70)})
+    _insert_defaults(pg, plant, version, [("prt01", p, 10) for p in prts[:20]])
+    plant_pairs = set()
+    while len(plant_pairs) < 50_000:
+        f, t = rng.sample(universe, 2)
+        plant_pairs.add((f, t))
+    _insert_matrix(pg, plant, version, [("", _key(*f), _key(*t)) for f, t in plant_pairs])
+    try:
+        started = time.perf_counter()
+        page = setup_data.get_setup_missing_pairs_page(plant, "reachable", offset=1_000, limit=100)["page"]
+        request_s = time.perf_counter() - started
+        assert len(page["rows"]) == 100
+        tracemalloc.start()
+        try:
+            setup_data.get_setup_missing_pairs_page(plant, "reachable", offset=1_000, limit=100)
+            peak_mb = tracemalloc.get_traced_memory()[1] / 1e6
+        finally:
+            tracemalloc.stop()
+        print(f"\nshared-universe: whole missing-page request {request_s:.3f}s, tracemalloc peak {peak_mb:.1f} MB")
+        assert peak_mb < 150, f"request peak memory {peak_mb:.0f} MB"
+        # Extreme worst case (71k order rows + 50k plant rows on one universe): the dominant costs are the
+        # context load and the per-machine row fold (~6.5 s measured, ~8.5 s before the memory fix).  This is a
+        # regression guard, not the <500 ms spec target (met only for the typical-shape test above on the page
+        # generator; its whole request is ~0.8 s).
+        assert request_s < 12.0, f"whole missing-page request took {request_s:.2f}s"
+    finally:
+        _reset(pg, plant)
+
+
+@pytest.mark.pg
 def test_true_false_canonicalization_end_to_end(pg):
     """Orders hold 'true' (server state value 'TRUE'); the stored default is the client form 'true'.
     The pair arriving at it is default-covered; the reverse pair has no default and stays missing."""

@@ -72,6 +72,8 @@ def test_grouping_maths_and_lazy_page_generator_equal_naive_enumeration_500_case
         # overlap of default coverage with the recorded rows (what the counts subtract)
         overlap = sum(1 for p in row_pairs if p in naive_default)
         assert setup_data._rows_default_overlap(states, masks, row_pairs) == overlap, case
+        assert setup_data._rows_default_overlap_codes(
+            states, masks, [a * n + b for a, b in row_pairs], n) == overlap, case
 
         # missing = off-diagonal, no row, no default; to-state-major, partners in state order
         naive_missing = [(a, b) for b in range(n) for a in range(n)
@@ -266,3 +268,12 @@ def test_value_defaults_values_rejects_unknown_field_and_missing_definition(monk
     monkeypatch.setattr(setup_data, "_pool", _PoolFake(_NoDef()))
     with pytest.raises(ValueError, match="No setup definition"):
         setup_data.value_defaults_values("5512", "prt01")
+
+
+def test_value_default_entries_reject_non_scalar_values():
+    for value in ([1], {"a": 1}):
+        with pytest.raises(ValueError):
+            setup_data._validated_value_default_entries([{"value": value, "setup_min": 5}])
+    assert setup_data._validated_value_default_entries(
+        [{"value": "red", "setup_min": 5}, {"value": 7, "setup_min": None}, {"value": True, "setup_min": 1}]
+    ) == [("RED", 5), ("7", None), ("true", 1)]
