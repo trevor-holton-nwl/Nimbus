@@ -1413,6 +1413,9 @@ export const Timeline = {
     // A setup bar whose lane changed is removed and re-added, never updated (vis 7.7.3 subgroup residue).
     const split = Timeline._splitRelocations(update);
     for (const it of split.relocate) { remove.push(String(it.id)); add.push(it); }
+    // An unchanged setup bar is not handed to vis again (it would re-measure it); className/style compare verbatim,
+    // so a bar left with drag dimming still writes through. Relocations were split off first and stay remove + add.
+    split.update = split.update.filter(it => !visItemEqual(Timeline._items!.get(String(it.id)) as TimelineVisItem | null, it));
     PerfMonitor.record('Timeline.setup.diff', performance.now() - _diffT0);
     const _redrawT0 = performance.now();
     Timeline._suppressEvents = true;
@@ -1941,11 +1944,17 @@ export const Timeline = {
     // never updated (vis 7.7.3 leaves a dangling subgroup reference on a subgroup -> other/undefined update).
     for (const [id, data] of desired) {
       if (!existingIds.has(id)) { toAdd.push(data); continue; }
+      let cur: TimelineVisItem | null | undefined;
       if ('subgroup' in data && (Timeline._laneIds.has(id) || (!!expandedLine && data.group === expandedLine))) {
-        const cur = Timeline._items.get(id) as TimelineVisItem | null;
+        cur = Timeline._items.get(id) as TimelineVisItem | null;
         if (cur && cur.subgroup !== data.subgroup) { toRemove.push(id); toAdd.push(data); continue; }
       }
-      toUpdate.push(data);
+      // Only now (after the lane relocation above, which must win) skip an item whose stored copy already
+      // equals the desired one: vis re-measures every item it is handed an update for, so an unchanged item
+      // costs a write-then-measure pass for nothing. className and style are compared verbatim, so drag dimming,
+      // `dist-sibling`, `goto-target`, `dimmed` and profile-match classes left on a stored item still write through.
+      if (cur === undefined) cur = Timeline._items.get(id) as TimelineVisItem | null;
+      if (!visItemEqual(cur, data)) toUpdate.push(data);
     }
     for (const id of existingIds) {
       if (!desired.has(id)) toRemove.push(id);
@@ -2893,6 +2902,37 @@ export function bulkTouchesExpandedLine(
  *  write schedules (Timeline._onStore, source 'timeline') relocates the companions anyway. */
 export function companionWritesDeferred(expandedLine: string | null): boolean {
   return !!expandedLine;
+}
+
+const _SETUP_DETAIL_KEYS: ReadonlyArray<keyof SetupPresentationDetail> = [
+  'predecessorOrderId', 'predecessorState', 'successorOrderId', 'requiredMinutes', 'effectiveMinutes',
+  'standardMinutes', 'source', 'overrideStatus', 'availableMinutes', 'shortMinutes', 'missingDetail',
+];
+
+/** True when the item vis already holds (`existing`, the DataSet's stored copy) needs no write for `desired`:
+ *  every field the builders produce matches. Pure. Strict equality, except that `start`/`end` compare as
+ *  instants (a Date and a ms value of the same time are equal; NaN equals NaN), a missing key reads as
+ *  `undefined`, and `null`/`undefined` setup details are one value. `subgroup` is presence-aware: it is
+ *  compared only when `desired` carries the key (the lane decorator always writes it, background items never
+ *  do), so a desired item without the key never makes a stored lane look different. A missing stored item is
+ *  never equal. */
+export function visItemEqual(existing: TimelineVisItem | null | undefined, desired: TimelineVisItem): boolean {
+  if (!existing) return false;
+  if (existing.id !== desired.id || existing.group !== desired.group || existing.kind !== desired.kind
+    || existing.parentId !== desired.parentId || existing.segmentNumber !== desired.segmentNumber
+    || existing.segmentCount !== desired.segmentCount || existing.className !== desired.className
+    || existing.editable !== desired.editable || existing.type !== desired.type || existing.title !== desired.title
+    || existing.content !== desired.content || existing.style !== desired.style
+    || existing.laneIndex !== desired.laneIndex) return false;
+  const sameInstant = (a: unknown, b: unknown): boolean => {
+    const x = +(a as number), y = +(b as number);
+    return x === y || (Number.isNaN(x) && Number.isNaN(y));
+  };
+  if (!sameInstant(existing.start, desired.start) || !sameInstant(existing.end, desired.end)) return false;
+  if ('subgroup' in desired && existing.subgroup !== desired.subgroup) return false;
+  const a = existing.setup, b = desired.setup;
+  if (a == null || b == null) return a == null && b == null;
+  return _SETUP_DETAIL_KEYS.every(k => a[k] === b[k]);
 }
 
 export interface TickerPushInput { nowMs: number; lastPushedMs: number; windowMs: number; centerPx: number; minPx?: number }

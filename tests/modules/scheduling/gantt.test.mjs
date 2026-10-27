@@ -7,7 +7,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor, alertSig, frameMeterSummary, installFrameMeter } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor, alertSig, frameMeterSummary, installFrameMeter, visItemEqual } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast, PerfMonitor } from '../../../frontend/platform/foundation.mjs';
@@ -3851,4 +3851,197 @@ test('_refreshViewNow: returns true without touching vis when _tl is missing', (
   Timeline._tl = null;
   assert.equal(Timeline._refreshViewNow(), true);
   assert.equal(rig.subscribes, 0);
+});
+
+/* ---- Rebuild equality diff (Gantt pan perf, Task 4): visItemEqual skips unchanged DataSet writes ---- */
+
+function eqItem() {
+  return {
+    id: 'o1', group: 'L-A', kind: 'order', parentId: 'o1', segmentNumber: 1, segmentCount: 2,
+    content: '<b>o1</b>', start: new Date(2026, 7, 10, 7), end: new Date(2026, 7, 10, 11),
+    className: 'order-item', editable: true, type: undefined, title: 'tip', style: '',
+    subgroup: undefined, laneIndex: undefined,
+    setup: {
+      predecessorOrderId: 'p1', predecessorState: 'RED', successorOrderId: 'o1', requiredMinutes: 30, effectiveMinutes: 30,
+      standardMinutes: 30, source: 'matrix', overrideStatus: null, availableMinutes: 45, shortMinutes: null, missingDetail: null,
+    },
+  };
+}
+
+test('visItemEqual: identical clones are equal, including Date objects of the same instant', () => {
+  const a = eqItem(), b = eqItem();
+  assert.notEqual(a.start, b.start, 'precondition: distinct Date objects');
+  assert.equal(visItemEqual(a, b), true);
+  const c = structuredClone(eqItem());
+  assert.equal(visItemEqual(a, c), true);
+  // A non-Date value is coerced with + (a stored ms number equals the desired Date of that instant).
+  assert.equal(visItemEqual({ ...a, start: a.start.getTime() }, b), true);
+  // NaN on both sides is equal, NaN on one side is not.
+  assert.equal(visItemEqual({ ...a, end: new Date(NaN) }, { ...b, end: new Date(NaN) }), true);
+  assert.equal(visItemEqual({ ...a, end: new Date(NaN) }, b), false);
+});
+
+test('visItemEqual: each compared field difference makes it unequal', () => {
+  const plus = d => new Date(d.getTime() + 60000);
+  const changes = {
+    id: 'o2', group: 'L-B', kind: 'setup', parentId: 'o2', segmentNumber: 2, segmentCount: 3,
+    start: plus(eqItem().start), end: plus(eqItem().end), className: 'order-item dimmed', editable: false,
+    type: 'background', title: 'other', content: '<b>o2</b>', style: 'opacity:0.18;', laneIndex: 1,
+  };
+  for (const [field, value] of Object.entries(changes)) {
+    assert.equal(visItemEqual(eqItem(), { ...eqItem(), [field]: value }), false, `${field} differs`);
+  }
+  const setupChanges = {
+    predecessorOrderId: 'p2', predecessorState: 'BLUE', successorOrderId: 'o2', requiredMinutes: 31, effectiveMinutes: 29,
+    standardMinutes: 28, source: 'override', overrideStatus: 'active', availableMinutes: 46, shortMinutes: 5, missingDetail: 'x',
+  };
+  for (const [field, value] of Object.entries(setupChanges)) {
+    const desired = eqItem(); desired.setup = { ...desired.setup, [field]: value };
+    assert.equal(visItemEqual(eqItem(), desired), false, `setup.${field} differs`);
+  }
+});
+
+test('visItemEqual: undefined and an absent key are the same value; a setup detail on one side only is unequal; null equals undefined', () => {
+  const a = eqItem(), b = eqItem();
+  delete b.type; delete b.laneIndex; delete b.parentId;
+  a.parentId = undefined;
+  assert.equal(visItemEqual(a, b), true, 'undefined vs absent');
+  assert.equal(visItemEqual(eqItem(), { ...eqItem(), setup: undefined }), false);
+  assert.equal(visItemEqual({ ...eqItem(), setup: undefined }, eqItem()), false);
+  assert.equal(visItemEqual({ ...eqItem(), setup: null }, { ...eqItem(), setup: undefined }), true, 'null and undefined setup are one value');
+  assert.equal(visItemEqual({ ...eqItem(), group: undefined }, { ...eqItem(), group: 'L-A' }), false);
+  assert.equal(visItemEqual({ ...eqItem(), style: undefined }, { ...eqItem(), style: '' }), false, 'an unset style is not an empty style');
+});
+
+test('visItemEqual: subgroup is compared only when the desired item carries the key', () => {
+  const stored = { ...eqItem(), subgroup: 'lane-1' };
+  const desiredNoKey = eqItem(); delete desiredNoKey.subgroup;
+  assert.equal(visItemEqual(stored, desiredNoKey), true, 'a desired item without the key ignores the stored subgroup');
+  assert.equal(visItemEqual(eqItem(), { ...eqItem(), subgroup: undefined }), true, 'present undefined vs stored undefined');
+  assert.equal(visItemEqual(stored, { ...eqItem(), subgroup: undefined }), false, 'present undefined vs a stored lane');
+  assert.equal(visItemEqual(stored, { ...eqItem(), subgroup: 'lane-2' }), false, 'differing lane ids');
+  assert.equal(visItemEqual(stored, { ...eqItem(), subgroup: 'lane-1' }), true);
+});
+
+test('visItemEqual: a missing stored item is never equal', () => {
+  assert.equal(visItemEqual(null, eqItem()), false);
+  assert.equal(visItemEqual(undefined, eqItem()), false);
+});
+
+// Ids the pass wrote as an update that are not zone bands (past/alert/frozen zones take a fresh "now" each pass).
+const nonZoneUpdates = fake => fake.calls.update.flat().filter(id => fake.records.get(id)?.kind !== 'zone');
+
+test('Timeline._rebuildPass: a second identical pass writes no order or setup item as an update', () => laneRebuildHarness(({ fake }) => {
+  Timeline._rebuildPass();
+  assert.ok([...fake.records.values()].some(i => i.kind === 'order'), 'precondition: the first pass added orders');
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  Timeline._rebuildPass();
+  assert.deepEqual(nonZoneUpdates(fake), [], 'no order, setup, blackout or gridline item is rewritten');
+  assert.deepEqual(fake.calls.add.flat(), []);
+  assert.deepEqual(fake.calls.remove.flat().filter(id => !id.startsWith('nonworking-')), []);
+}));
+
+test('Timeline._rebuildPass: changing one order\'s end writes only that order', () => laneRebuildHarness(({ fake }) => {
+  Timeline._rebuildPass();
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  const tasks = structuredClone(Store.tasksArr);
+  const b = tasks.find(t => t.id === 'lane-b');
+  b.end_date = new Date(2026, 7, 10, 14);
+  Store.setTasks(tasks, 'unit-test');
+  Timeline._rebuildPass();
+  assert.deepEqual(nonZoneUpdates(fake), ['lane-b'], 'only the order whose end moved is written');
+  assert.equal(fake.records.get('lane-b').end.getTime(), new Date(2026, 7, 10, 14).getTime());
+}));
+
+test('Timeline._rebuildPass: the lane-relocation check still runs before the equality skip', () => laneRebuildHarness(({ fake }) => {
+  Timeline._expandedLine = 'L-A';
+  Timeline._rebuildPass();
+  const laned = [...fake.records.values()].filter(i => i.subgroup !== undefined).map(i => String(i.id));
+  assert.ok(laned.length >= 2, 'precondition: both orders are laned');
+  // A second pass with the row still expanded changes nothing: nothing relocated, nothing updated.
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  Timeline._rebuildPass();
+  assert.deepEqual(nonZoneUpdates(fake), []);
+  assert.deepEqual(fake.calls.add.flat(), []);
+  // Collapse: only the subgroup differs, yet each laned item is removed and re-added, never updated or skipped.
+  Timeline._expandedLine = null;
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  Timeline._rebuildPass();
+  for (const id of laned) {
+    assert.ok(fake.calls.remove.flat().includes(id), `${id} relocated by remove`);
+    assert.ok(fake.calls.add.flat().includes(id), `${id} re-added`);
+    assert.ok(!fake.calls.update.flat().includes(id), `${id} never updated across a subgroup change`);
+    assert.equal(fake.records.get(id).subgroup, undefined);
+  }
+  // Expand again: the lane-less stored items now differ only by subgroup and are relocated too.
+  Timeline._expandedLine = 'L-A';
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  Timeline._rebuildPass();
+  for (const id of laned) assert.ok(fake.calls.remove.flat().includes(id) && fake.calls.add.flat().includes(id), `${id} relocated into its lane`);
+}));
+
+test('Timeline._rebuildPass: a stored className that differs (dist-sibling, dimmed) is written back', () => laneRebuildHarness(({ fake }) => {
+  Timeline._rebuildPass();
+  const cleanA = fake.records.get('lane-a').className, cleanB = fake.records.get('lane-b').className;
+  fake.records.set('lane-a', { ...fake.records.get('lane-a'), className: `${cleanA} dist-sibling` });
+  fake.records.set('lane-b', { ...fake.records.get('lane-b'), className: `${cleanB} dimmed` });
+  fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+  const priorApply = Interaction._applyDistSiblingHighlight;
+  Interaction._applyDistSiblingHighlight = () => {};
+  try { Timeline._rebuildPass(); } finally { Interaction._applyDistSiblingHighlight = priorApply; }
+  assert.deepEqual(nonZoneUpdates(fake).sort(), ['lane-a', 'lane-b']);
+  assert.equal(fake.records.get('lane-a').className, cleanA);
+  assert.equal(fake.records.get('lane-b').className, cleanB);
+}));
+
+test('Timeline._rebuildPass: _itemIdsByTask is rebuilt on a pass that writes nothing', () => laneRebuildHarness(({ fake }) => {
+  Timeline._rebuildPass();
+  Timeline._itemIdsByTask = new Map();
+  fake.calls.update.length = 0;
+  Timeline._rebuildPass();
+  assert.deepEqual(nonZoneUpdates(fake), []);
+  assert.ok(Timeline.itemIdsForTask('lane-a').length > 0, 'the id map is repopulated from the desired set, not from the writes');
+}));
+
+test('Timeline.rebuildSetupForLines: a second identical call writes no setup bar update, and a changed setup bar is written', () => {
+  const line = 'SETUP-EQ-LINE', plant = 'SETUP-EQ-PLANT';
+  const priorItems = Timeline._items, priorCore = globalThis.NimbusComputeCore, priorSetup = Store.setupSnapshot;
+  const priorTasks = structuredClone(Store.tasksArr), priorPlant = Store.selectedPlant;
+  const fake = nwFakeItems();
+  Timeline._items = fake;
+  globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.replaceSetupSnapshot({
+    plant,
+    definition: { fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_active: true,
+    plant_rows: [{ machine: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: 'RED' }], to_key: [{ fieldKey: 'colorWheel', value: 'BLUE' }], setup_min: 30 }],
+    machine_rows: [], machine_states: [], overrides: [],
+  }, 'unit-test');
+  Store.setTasks([
+    { id: 'eq-red', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'RED', start_date: new Date('2026-08-17T08:00:00'), end_date: new Date('2026-08-17T09:00:00') },
+    { id: 'eq-blue', PLANT: plant, MACHINE: line, RUN_TIME: 1, COLOR: 'BLUE', start_date: new Date('2026-08-17T09:30:00'), end_date: new Date('2026-08-17T10:30:00') },
+  ], 'unit-test');
+  try {
+    Timeline.rebuildSetupForLines(new Set([line]));
+    const setupIds = [...fake.records.values()].filter(i => i.kind === 'setup').map(i => String(i.id));
+    assert.ok(setupIds.length >= 1, 'precondition: the first call added a setup bar');
+    fake.calls.add.length = fake.calls.update.length = fake.calls.remove.length = 0;
+    Timeline.rebuildSetupForLines(new Set([line]));
+    assert.deepEqual(fake.calls.update, [], 'an unchanged setup bar is not handed to vis again');
+    assert.deepEqual(fake.calls.add, []);
+    assert.deepEqual(fake.calls.remove, []);
+    // A stored setup bar that no longer matches (drag dimming left behind) is written back.
+    const id = setupIds[0];
+    fake.records.set(id, { ...fake.records.get(id), className: 'setup-item setup-drag-dim', style: 'opacity:0.18;' });
+    Timeline.rebuildSetupForLines(new Set([line]));
+    assert.deepEqual(fake.calls.update.flat(), [id]);
+    assert.equal(fake.records.get(id).style, '');
+    assert.doesNotMatch(fake.records.get(id).className, /setup-drag-dim/);
+  } finally {
+    Timeline._items = priorItems;
+    globalThis.NimbusComputeCore = priorCore;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.replaceSetupSnapshot(priorSetup, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
 });
