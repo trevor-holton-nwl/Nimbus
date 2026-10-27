@@ -178,6 +178,22 @@ export function alertCellMapFor(
   return map;
 }
 
+/** Everything the Gantt paints from `Store.alerts`, as one comparable string: the alert day cells (line, day,
+ *  severity and `hasConflictErr`, which picks `alertcell-err` over `alertcell-calendar`, filtered by the SAME
+ *  `lineVisible` the rebuild used) plus the ids of EVERY alert that carries a `taskId` (the `conflict-order` class;
+ *  that set is deliberately not line-filtered). Equal strings mean an alerts-driven rebuild has nothing to repaint
+ *  from the alerts side; `Timeline._onStore` also requires that no task data changed (see `_taskDataDirty`). */
+export function alertSig(
+  alerts: ReadonlyArray<NimbusAlert>, lineVisible: (line: string) => boolean,
+): string {
+  const cells = Object.values(alertCellMapFor(alerts, lineVisible))
+    .map(c => `${c.line}|${c.dayKey}|${c.sev}|${c.hasConflictErr ? 1 : 0}`)
+    .sort();
+  const taskIds = new Set<string>();
+  for (const a of alerts) if (a.taskId != null) taskIds.add(String(a.taskId));
+  return `${cells.join(',')}#${[...taskIds].sort().join(',')}`;
+}
+
 /* =============================================================================
    TIMELINE — vis-timeline integration.
      • builds groups (production lines) and items (orders + blackout blocks)
@@ -230,6 +246,14 @@ export const Timeline = {
   _cachedRowH:  null as number | null,
   _cachedAxisH: null as number | null,
   _rebuildRaf:  null as number | null,
+  // Alerts-change rebuild gate (see _onStore 'alerts:change'). The alerts-driven rebuild is the only path that
+  // refreshes setup bars, stack badges, _itemIdsByTask and lock state after task writes (those patch order bars
+  // only), so it may be skipped only when NO task data changed since the last clean pass AND the alert signature is
+  // unchanged. Starts dirty / unsigned so the first alerts event always rebuilds; both are settled only by a clean
+  // _rebuildPass (a healed pass leaves them as they were).
+  _taskDataDirty: true,
+  _lastAlertSig: null as string | null,
+  _alertsRebuildPending: false,   // an alerts rebuild held back while a pan gesture is in flight (flushed by _endPanGesture)
   _healScheduled: false,
   // Pan instrumentation (see _wirePanTracking). _panActive is read by the alert-rebuild deferral; it is
   // cleared FIRST on every gesture end so a stuck flag can never hold work back past the next gesture.
@@ -619,9 +643,17 @@ export const Timeline = {
   /** vis emits rangechanged at the end of every pan and zoom; with no gesture in flight this only clears. */
   _onVisRangeChanged(_props?: VisRangeProps | null): void { Timeline._endPanGesture(); },
 
-  /** Ends the gesture: flag first, then the watchdog, then the mark. Safe to call any number of times. */
+  /** Ends the gesture: flag first, then the held alerts rebuild, then the watchdog, then the mark. Safe to call any
+   *  number of times; every end path (rangechanged of any type, pointerup/pointercancel, the watchdog) lands here,
+   *  so this is the one place the deferred alerts rebuild is flushed.
+   *
+   *  A NON-user rangechanged (a rebuild's saved-window restore, `_syncNonWorking`) also lands here and can clear the
+   *  flag while the finger is still down. That only releases the held rebuild early, once: the very next panmove
+   *  re-sets `_panActive`, so later alerts events defer again, and nothing is ever lost (pending is cleared only as
+   *  the rebuild is scheduled). */
   _endPanGesture(endMs?: number): void {
     Timeline._panActive = false;
+    Timeline._flushDeferredAlertsRebuild();
     if (Timeline._panWatchdog !== null) { clearTimeout(Timeline._panWatchdog); Timeline._panWatchdog = null; }
     const g = Timeline._panGesture;
     if (!g) return;
@@ -747,6 +779,13 @@ export const Timeline = {
 
   /** Handle store updates: refresh vis-timeline WITHOUT echoing back. */
   _onStore(evt: StoreEvent): void {
+    // Task data changed since the last clean rebuild pass, so the next alerts:change must rebuild (it is what
+    // refreshes setup bars and stack badges). Set BEFORE the own-mutation return below: a drop's Store write
+    // carries source 'timeline' and is exactly the case the gate must not skip.
+    if (evt.type === 'task:update' || evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change'
+        || evt.type === 'tasks:bulk' || evt.type === 'setup-snapshot:replace') {
+      Timeline._taskDataDirty = true;
+    }
     // Ignore our own mutations — we already applied them visually.
     if (evt.source === 'timeline') {
       const ids = evt.type === 'tasks:bulkUpdate'
@@ -842,9 +881,18 @@ export const Timeline = {
       if (Timeline._ganttActive()) {
         // rebuild() already recomputes the conflict-order className for every task
         // via its desired-map diff AND reconciles the alert-cell background items, so
-        // the old per-task _applyTaskPatch loop here was pure duplicate work. Just run
-        // the (coalesced) diff rebuild.
-        Timeline._scheduleRebuild();
+        // the old per-task _applyTaskPatch loop here was pure duplicate work. Run the
+        // (coalesced) diff rebuild, unless it provably has nothing to do: no task data
+        // changed since the last clean pass and the painted alert signature is the same.
+        // A skipped rebuild still re-derives the profile-match classes (they follow the
+        // alerts, and rebuild() would have repainted them). The Store emit itself is
+        // never gated; other subscribers use it as "recompute finished".
+        const sig = alertSig(Store.alerts, Timeline._lineVisiblePredicate());
+        if (!Timeline._taskDataDirty && sig === Timeline._lastAlertSig) {
+          Timeline._applyProfileMatchClasses();
+        } else {
+          Timeline._scheduleAlertsRebuild();
+        }
       }
     }
   },
@@ -1482,6 +1530,33 @@ export const Timeline = {
     });
   },
 
+  /** The alerts-change rebuild (used ONLY by the `alerts:change` branch of `_onStore`): held while a vis pan gesture
+   *  is in flight, because a full diff rebuild landing mid-pan hitches the pan; `_endPanGesture` flushes it. Many
+   *  alerts events during one pan make one rebuild. Deliberately NOT inside `_scheduleRebuild`, which is the
+   *  immediate spring-back path for the drag call sites. */
+  _scheduleAlertsRebuild(): void {
+    if (Timeline._panActive) { Timeline._alertsRebuildPending = true; return; }
+    Timeline._scheduleRebuild();
+  },
+
+  /** Releases an alerts rebuild held by `_scheduleAlertsRebuild` (called from `_endPanGesture`, flag already cleared). */
+  _flushDeferredAlertsRebuild(): void {
+    if (!Timeline._alertsRebuildPending) return;
+    Timeline._alertsRebuildPending = false;
+    Timeline._scheduleRebuild();
+  },
+
+  /** The one "is this line rendered?" predicate: the alert day cells (`_rebuildPass`) and the alerts-change gate's
+   *  signature (`_onStore`) must filter lines identically or the gate would skip a rebuild that has cells to paint.
+   *  `visibleSet` is the pass's already-computed `_visibleLines()` set; omitted, it is computed only when a line
+   *  filter is active. */
+  _lineVisiblePredicate(visibleSet?: ReadonlySet<string>): (line: string) => boolean {
+    const sel = NIMBUS!.GanttFilter ? NIMBUS!.GanttFilter!._selectedLines : null;
+    if (!(sel && sel.size > 0)) return () => true;
+    const set = visibleSet ?? new Set(Timeline._visibleLines());
+    return line => set.has(line);
+  },
+
   /** Diff-based rebuild: compare desired item set to current DataSet contents
    *  and emit minimal add/update/remove operations. Preserves selection and
    *  avoids the clear/add flicker of a wholesale replacement.               */
@@ -1553,6 +1628,9 @@ export const Timeline = {
     // Compute alert-per-task set ONCE (fixes snapshot inconsistency during rebuild).
     const conflictIds = new Set<string>();
     for (const a of Store.alerts) if (a.taskId != null) conflictIds.add(String(a.taskId));
+    // The alerts this pass paints, as the alerts-change gate's signature (stored only if the pass ends clean).
+    const lineVisible = Timeline._lineVisiblePredicate(visibleSet);
+    const passAlertSig = alertSig(Store.alerts, lineVisible);
 
     /* ---- lanes + groups ---------------------------------------------------- */
     // Lane assignment for EVERY visible line (cheap: one sort per line): the max depth is the badge
@@ -1774,7 +1852,7 @@ export const Timeline = {
     // Alert-cell background items — inserted last so they sit on top of the horizon
     // and past-zone shading within .vis-background (DOM order = paint order).
     // Err severity wins over warn on the same cell.
-    const alertCellMap = alertCellMapFor(Store.alerts, line => !lineFilterActive || visibleSet.has(line));
+    const alertCellMap = alertCellMapFor(Store.alerts, lineVisible);
     for (const key of Object.keys(alertCellMap)) {
       const cell = alertCellMap[key];
       const cls  = cell.sev !== 'err'  ? 'alertcell-warn'
@@ -1964,7 +2042,14 @@ export const Timeline = {
     // event-wise). Resync + full refresh + redraw here, or freshly-added bars stay
     // culled until the user's next zoom/pan.
     if (Timeline._refreshViewNow() === false) passClean = false;
-    if (passClean) { Timeline._healCount = 0; Timeline._healToastShown = false; }
+    if (passClean) {
+      Timeline._healCount = 0; Timeline._healToastShown = false;
+      // Everything this pass was asked to settle is settled: the alerts-change gate may now skip an unchanged
+      // alerts event, and a held alerts rebuild has been overtaken. A healed or failed pass never reaches here.
+      Timeline._taskDataDirty = false;
+      Timeline._lastAlertSig = passAlertSig;
+      Timeline._alertsRebuildPending = false;
+    }
     // Re-apply the remembered vertical offset AFTER _fitHeight() has set the
     // new height — must be rAF-deferred because setOptions({height}) doesn't
     // take effect (and thus doesn't clamp scrollTop to the new max) until

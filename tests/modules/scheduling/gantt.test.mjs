@@ -7,7 +7,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor, frameMeterSummary, installFrameMeter } from '../../../frontend/scheduling/gantt.mjs';
+import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor, alertSig, frameMeterSummary, installFrameMeter } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast, PerfMonitor } from '../../../frontend/platform/foundation.mjs';
@@ -3450,4 +3450,280 @@ test('Timeline._bench is callable and returns p50/p95/max/items against a fake t
   assert.equal(sets[sets.length - 1].end, original.end);
   assert.equal(Timeline._frameSamples, null, 'the sample sink is released');
   assert.equal(rig.rafQueue.length, 0);
+});
+
+// ---- Alerts-change rebuild gate and pan-deferred alerts rebuild ----
+
+const _sigDay = new Date(2026, 9, 28, 9);
+const _sigAlert = (over = {}) => ({ id: 'a', type: 'overlap', sev: 'err', line: 'L1', time: _sigDay, ...over });
+
+test('alertSig: hasConflictErr flips the signature (same line/day/sev, a conflict err vs a calendar err)', () => {
+  const conflict = [_sigAlert({ type: 'overlap' })];
+  const calendar = [_sigAlert({ type: 'closed' })];
+  assert.equal(alertCellMapFor(conflict, () => true)['L1|2026-10-28'].hasConflictErr, true);
+  assert.equal(alertCellMapFor(calendar, () => true)['L1|2026-10-28'].hasConflictErr, false, 'precondition: the two lists differ only in hasConflictErr');
+  assert.notEqual(alertSig(conflict, () => true), alertSig(calendar, () => true));
+});
+
+test('alertSig: an alert with a taskId changes the signature even when the cells are identical', () => {
+  const plain = [_sigAlert()];
+  const withTask = [_sigAlert({ taskId: 't-1' })];
+  assert.deepEqual(alertCellMapFor(plain, () => true), alertCellMapFor(withTask, () => true));
+  assert.notEqual(alertSig(plain, () => true), alertSig(withTask, () => true));
+  assert.notEqual(alertSig(withTask, () => true), alertSig([_sigAlert({ taskId: 't-2' })], () => true), 'a different task id is a different signature');
+});
+
+test('alertSig: order independent', () => {
+  const list = [
+    _sigAlert({ id: '1', line: 'L2', taskId: 't-9' }),
+    _sigAlert({ id: '2', line: 'L1', sev: 'warn', type: 'late', taskId: 't-3' }),
+    _sigAlert({ id: '3', line: 'L3', time: new Date(2026, 9, 29, 9), taskId: 't-5' }),
+  ];
+  const a = alertSig(list, () => true);
+  assert.equal(alertSig([...list].reverse(), () => true), a);
+  assert.equal(alertSig([list[1], list[2], list[0]], () => true), a);
+});
+
+test('alertSig: a hidden line\'s alerts add nothing to the cell part, but its taskId alerts still count (the cell filter and the conflict set differ)', () => {
+  const visibleOnly = line => line === 'L1';
+  const base = [_sigAlert({ line: 'L1' })];
+  const withHidden = [...base, _sigAlert({ id: 'h', line: 'L2' })];
+  assert.equal(alertSig(withHidden, visibleOnly), alertSig(base, visibleOnly), 'a hidden line paints no cell and carries no task: no change');
+  const hiddenWithTask = [...base, _sigAlert({ id: 'h', line: 'L2', taskId: 't-hidden' })];
+  assert.notEqual(alertSig(hiddenWithTask, visibleOnly), alertSig(base, visibleOnly), 'a hidden-line alert with a taskId still toggles conflict-order, so it must count');
+});
+
+// Saves and restores every Timeline field the gate and the deferral touch, and the globals around them.
+function gateRig(t, { active = true } = {}) {
+  const keys = ['_taskDataDirty', '_lastAlertSig', '_alertsRebuildPending', '_panActive', '_panGesture', '_panWatchdog', '_conflictSrc',
+    '_scheduleRebuild', '_ganttActive', '_applyProfileMatchClasses', '_applyTaskPatch'];
+  const prior = Object.fromEntries(keys.map(k => [k, Timeline[k]]));
+  const priorAlerts = Store.alerts, priorNimbus = globalThis.NIMBUS;
+  globalThis.NIMBUS = priorNimbus ?? {};   // the line predicate reads NIMBUS.GanttFilter (absent = no line filter)
+  const rig = { scheduled: 0, profile: 0 };
+  Timeline._scheduleRebuild = () => { rig.scheduled++; };
+  Timeline._ganttActive = () => active;
+  Timeline._applyProfileMatchClasses = () => { rig.profile++; };
+  Timeline._applyTaskPatch = () => {};
+  Timeline._panActive = false; Timeline._panGesture = null; Timeline._panWatchdog = null;
+  Timeline._alertsRebuildPending = false;
+  t.after(() => {
+    if (Timeline._panWatchdog !== null) clearTimeout(Timeline._panWatchdog);
+    for (const k of keys) Timeline[k] = prior[k];
+    Store.setAlerts(priorAlerts, 'unit-test');
+    if (priorNimbus === undefined) delete globalThis.NIMBUS;
+  });
+  return rig;
+}
+
+test('Timeline._onStore alerts:change: skips the rebuild only when nothing is dirty and the signature matches', (t) => {
+  const rig = gateRig(t);
+  Store.setAlerts([_sigAlert({ taskId: 't-1' })], 'unit-test');
+  const sig = alertSig(Store.alerts, () => true);
+  const fire = () => { Timeline._onStore({ type: 'alerts:change', source: 'alerts' }); };
+
+  Timeline._taskDataDirty = false; Timeline._lastAlertSig = sig;
+  fire();
+  assert.equal(rig.scheduled, 0, 'clean + equal signature: skipped');
+  assert.equal(rig.profile, 1, 'the profile-match class diff still runs exactly once on the skip path');
+
+  Timeline._taskDataDirty = true; Timeline._lastAlertSig = sig;
+  fire();
+  assert.equal(rig.scheduled, 1, 'task data changed since the last rebuild: schedules');
+  assert.equal(rig.profile, 1, 'the rebuild path does not call the class diff (rebuild repaints classes itself)');
+
+  Timeline._taskDataDirty = false; Timeline._lastAlertSig = sig + 'x';
+  fire();
+  assert.equal(rig.scheduled, 2, 'signature differs: schedules');
+
+  Timeline._taskDataDirty = false; Timeline._lastAlertSig = null;
+  fire();
+  assert.equal(rig.scheduled, 3, 'no stored signature: always schedules');
+  assert.equal(Timeline._conflictSrc, null, 'the conflict-set cache is still invalidated on every event');
+});
+
+test('Timeline._onStore alerts:change: a hidden Gantt neither rebuilds nor runs the class diff', (t) => {
+  const rig = gateRig(t, { active: false });
+  Store.setAlerts([_sigAlert()], 'unit-test');
+  Timeline._taskDataDirty = false; Timeline._lastAlertSig = alertSig(Store.alerts, () => true);
+  Timeline._onStore({ type: 'alerts:change', source: 'alerts' });
+  assert.equal(rig.scheduled, 0);
+  assert.equal(rig.profile, 0);
+});
+
+test('Timeline._onStore: task:update, tasks:bulkUpdate, firmed:change, tasks:bulk and setup-snapshot:replace each set _taskDataDirty, including when evt.source is \'timeline\'', (t) => {
+  gateRig(t, { active: false });
+  const events = [
+    { type: 'task:update', id: 't-1' },
+    { type: 'tasks:bulkUpdate', ids: ['t-1'] },
+    { type: 'firmed:change', ids: ['t-1'] },
+    { type: 'tasks:bulk' },
+    { type: 'setup-snapshot:replace' },
+  ];
+  for (const source of ['optimizer', 'timeline']) {
+    for (const evt of events) {
+      Timeline._taskDataDirty = false;
+      Timeline._onStore({ ...evt, source });
+      assert.equal(Timeline._taskDataDirty, true, `${evt.type} from ${source} marks task data dirty`);
+    }
+  }
+  Timeline._taskDataDirty = false;
+  Timeline._onStore({ type: 'alerts:change', source: 'alerts' });
+  Timeline._onStore({ type: 'lines:selected', source: 'ui' });
+  assert.equal(Timeline._taskDataDirty, false, 'events that carry no task data leave it clean');
+});
+
+test('Timeline._onStore: a drop (source timeline) followed by an unchanged alert signature still rebuilds', (t) => {
+  const rig = gateRig(t);
+  Store.setAlerts([_sigAlert({ taskId: 't-1' })], 'unit-test');
+  Timeline._taskDataDirty = false; Timeline._lastAlertSig = alertSig(Store.alerts, () => true);
+  Timeline._onStore({ type: 'task:update', id: 't-1', source: 'timeline' });
+  assert.equal(Timeline._taskDataDirty, true);
+  Timeline._onStore({ type: 'alerts:change', source: 'alerts' });
+  assert.equal(rig.scheduled, 1, 'the drop left setup bars and stack badges to this rebuild');
+});
+
+test('Timeline._rebuildPass: a clean pass clears _taskDataDirty and stores the signature; a pass whose _refreshViewNow returns false stores neither', () => laneRebuildHarness(() => {
+  const priorAlerts = Store.alerts, priorDirty = Timeline._taskDataDirty, priorSig = Timeline._lastAlertSig, priorPending = Timeline._alertsRebuildPending;
+  try {
+    Store.setAlerts([{ id: 'x1', type: 'overlap', sev: 'err', line: 'L-A', time: new Date(2026, 7, 10, 9), taskId: 'lane-a' }], 'unit-test');
+    const expected = alertSig(Store.alerts, () => true);
+
+    Timeline._refreshViewNow = () => false;
+    Timeline._taskDataDirty = true; Timeline._lastAlertSig = 'old'; Timeline._alertsRebuildPending = true;
+    Timeline._rebuildPass();
+    assert.equal(Timeline._taskDataDirty, true, 'a non-clean pass leaves the flag set');
+    assert.equal(Timeline._lastAlertSig, 'old', 'and the stored signature untouched');
+    assert.equal(Timeline._alertsRebuildPending, true, 'and the pending flush');
+
+    Timeline._refreshViewNow = () => true;
+    Timeline._rebuildPass();
+    assert.equal(Timeline._taskDataDirty, false, 'a clean pass clears the flag');
+    assert.equal(Timeline._lastAlertSig, expected, 'stores the signature of the alerts it used');
+    assert.equal(Timeline._alertsRebuildPending, false, 'and clears the pending flush (it already covered the alerts)');
+  } finally {
+    Store.setAlerts(priorAlerts, 'unit-test'); Timeline._taskDataDirty = priorDirty; Timeline._lastAlertSig = priorSig; Timeline._alertsRebuildPending = priorPending;
+  }
+}));
+
+test('Timeline._rebuildPass: a flush that throws (heal path) leaves the dirty flag set and the stored signature untouched', () => laneRebuildHarness(({ fake }) => {
+  const priorAlerts = Store.alerts, priorDirty = Timeline._taskDataDirty, priorSig = Timeline._lastAlertSig, priorPending = Timeline._alertsRebuildPending;
+  try {
+    Store.setAlerts([{ id: 'x1', type: 'overlap', sev: 'err', line: 'L-A', time: new Date(2026, 7, 10, 9), taskId: 'lane-a' }], 'unit-test');
+    Timeline._scheduleRebuild = () => {};   // the heal schedules the retry pass
+    Timeline._taskDataDirty = true; Timeline._lastAlertSig = 'old'; Timeline._alertsRebuildPending = true;
+    const origAdd = fake.add, origUpdate = fake.update;
+    fake.add = () => { throw new Error('vis: orderSubgroups'); };
+    fake.update = () => { throw new Error('vis: orderSubgroups'); };
+    try { Timeline._rebuildPass(); } finally { fake.add = origAdd; fake.update = origUpdate; }
+    assert.equal(Timeline._healCount, 1, 'precondition: the heal ran');
+    assert.equal(Timeline._taskDataDirty, true);
+    assert.equal(Timeline._lastAlertSig, 'old');
+    assert.equal(Timeline._alertsRebuildPending, true);
+  } finally {
+    Store.setAlerts(priorAlerts, 'unit-test'); Timeline._taskDataDirty = priorDirty; Timeline._lastAlertSig = priorSig; Timeline._alertsRebuildPending = priorPending;
+  }
+}));
+
+test('_scheduleAlertsRebuild: while _panActive it only records pending; ending the pan schedules exactly one rebuild for any number of alerts events', (t) => {
+  const rig = gateRig(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'panmove' } });
+  assert.equal(Timeline._panActive, true);
+  for (let i = 0; i < 5; i++) Timeline._scheduleAlertsRebuild();
+  assert.equal(rig.scheduled, 0, 'nothing scheduled mid-pan');
+  assert.equal(Timeline._alertsRebuildPending, true);
+
+  Timeline._onVisRangeChanged({ byUser: true, event: { type: 'panend' } });
+  assert.equal(Timeline._panActive, false);
+  assert.equal(Timeline._alertsRebuildPending, false);
+  assert.equal(rig.scheduled, 1, 'one rebuild for the whole burst');
+  Timeline._endPanGesture();
+  assert.equal(rig.scheduled, 1, 'a second end flushes nothing');
+});
+
+test('_scheduleAlertsRebuild: every gesture-end path (rangechanged, pointerup, pointercancel) flushes the pending rebuild, even with no gesture record', (t) => {
+  const rig = gateRig(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const priorTl = Timeline._tl, priorWired = Timeline._panDocWired, priorAdd = globalThis.document.addEventListener;
+  const docHandlers = {}, tlHandlers = {};
+  globalThis.document.addEventListener = (type, fn) => { docHandlers[type] = fn; };
+  Timeline._panDocWired = false;
+  t.after(() => { Timeline._tl = priorTl; Timeline._panDocWired = priorWired; globalThis.document.addEventListener = priorAdd; });
+  Timeline._tl = { on(ev, fn) { tlHandlers[ev] = fn; }, off() {}, _origRedraw() {}, _redraw() {} };
+  Timeline._wirePanTracking();
+
+  const endings = {
+    rangechanged: () => tlHandlers.rangechanged({ byUser: true, event: { type: 'panend' } }),
+    pointerup: () => docHandlers.pointerup({ type: 'pointerup' }),
+    pointercancel: () => docHandlers.pointercancel({ type: 'pointercancel' }),
+  };
+  let expected = 0;
+  for (const [name, end] of Object.entries(endings)) {
+    tlHandlers.rangechange({ byUser: true, event: { type: 'panmove' } });
+    Timeline._scheduleAlertsRebuild();
+    assert.equal(rig.scheduled, expected, `${name}: held during the pan`);
+    end();
+    expected++;
+    assert.equal(rig.scheduled, expected, `${name}: flushed on gesture end`);
+  }
+  // A flag set without a gesture record (the early-return branch of _endPanGesture) still flushes.
+  Timeline._panActive = true; Timeline._panGesture = null;
+  Timeline._scheduleAlertsRebuild();
+  Timeline._endPanGesture();
+  assert.equal(rig.scheduled, expected + 1);
+});
+
+test('_scheduleAlertsRebuild: a non-user rangechanged mid-pan flushes once, and the next panmove re-sets the flag so later alerts events defer again', (t) => {
+  const rig = gateRig(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'panmove' } });
+  Timeline._scheduleAlertsRebuild();
+  assert.equal(rig.scheduled, 0);
+  // A rebuild's saved-window restore (or _syncNonWorking) reports a non-user rangechanged while the finger is still down.
+  Timeline._onVisRangeChanged({ byUser: false });
+  assert.equal(rig.scheduled, 1, 'the deferred rebuild flushed (once)');
+  Timeline._scheduleAlertsRebuild();
+  assert.equal(rig.scheduled, 2, 'with the flag cleared an alerts event schedules immediately, never lost');
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'panmove' } });
+  Timeline._scheduleAlertsRebuild();
+  assert.equal(rig.scheduled, 2, 'the next panmove re-sets the flag: deferred again');
+  assert.equal(Timeline._alertsRebuildPending, true);
+});
+
+test('_scheduleAlertsRebuild: when no pan is active it schedules immediately', (t) => {
+  const rig = gateRig(t);
+  Timeline._scheduleAlertsRebuild();
+  assert.equal(rig.scheduled, 1);
+  assert.equal(Timeline._alertsRebuildPending, false);
+});
+
+test('_scheduleRebuild is unchanged: it schedules even while _panActive (the drag and spring-back call sites stay immediate)', (t) => {
+  const prior = { raf: globalThis.requestAnimationFrame, rebuildRaf: Timeline._rebuildRaf, panActive: Timeline._panActive, pending: Timeline._alertsRebuildPending, rebuild: Timeline.rebuild };
+  const queue = [];
+  globalThis.requestAnimationFrame = cb => { queue.push(cb); return queue.length; };
+  Timeline._rebuildRaf = null; Timeline._panActive = true; Timeline._alertsRebuildPending = false;
+  let rebuilds = 0; Timeline.rebuild = () => { rebuilds++; };
+  t.after(() => {
+    globalThis.requestAnimationFrame = prior.raf; Timeline._rebuildRaf = prior.rebuildRaf; Timeline._panActive = prior.panActive;
+    Timeline._alertsRebuildPending = prior.pending; Timeline.rebuild = prior.rebuild;
+  });
+  Timeline._scheduleRebuild();
+  assert.equal(queue.length, 1, 'a frame is requested despite the pan');
+  assert.equal(Timeline._alertsRebuildPending, false, 'and nothing is deferred');
+  queue.shift()(0);
+  assert.equal(rebuilds, 1);
+});
+
+test('a stuck pan flag cannot defer forever: the 300 ms watchdog flushes the pending alerts rebuild', (t) => {
+  const rig = gateRig(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  Timeline._onVisRangeChange({ byUser: true, event: { type: 'panmove' } });
+  Timeline._scheduleAlertsRebuild();
+  t.mock.timers.tick(299);
+  assert.equal(rig.scheduled, 0, 'still held inside the watchdog window');
+  t.mock.timers.tick(1);
+  assert.equal(Timeline._panActive, false);
+  assert.equal(rig.scheduled, 1, 'the watchdog end flushed it');
+  assert.equal(Timeline._alertsRebuildPending, false);
 });
