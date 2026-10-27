@@ -683,6 +683,7 @@ export const Dashboard = {
     const days = Object.keys(matrix[lines[0]]);
 
     const idleBg  = Dashboard._cssVar('--bg-subtle', '#ecebe4');
+    const infoBg  = Dashboard._cssVar('--info', '#1f5fbf');
     const warnBg  = Dashboard._cssVar('--warn', '#b57a0a');
     const vividBg = Dashboard._cssVar('--warn-vivid', '#f39c12');
     const errBg   = Dashboard._cssVar('--err', '#b1362a');
@@ -691,9 +692,11 @@ export const Dashboard = {
     const onTxt   = Dashboard._cssVar('--primary-fg', '#fcfbf6');
     function heatBg(pct: number): string {
       if (pct <= 0)    return idleBg;
-      if (pct <= 0.5)  return Dashboard._lerpHex(idleBg, warnBg, pct / 0.5);
-      if (pct <= 1.0)  return Dashboard._lerpHex(warnBg, vividBg, (pct - 0.5) / 0.5);
-      return Dashboard._lerpHex(vividBg, errBg, Math.min((pct - 1.0) / 0.25, 1));
+      if (pct >= 1.0)  return errBg;
+      if (pct <= 0.25) return Dashboard._lerpHex(idleBg, infoBg, pct / 0.25);
+      if (pct <= 0.5)  return Dashboard._lerpHex(infoBg, warnBg, (pct - 0.25) / 0.25);
+      if (pct <= 0.75) return Dashboard._lerpHex(warnBg, vividBg, (pct - 0.5) / 0.25);
+      return Dashboard._lerpHex(vividBg, errBg, (pct - 0.75) / 0.25);
     }
     function heatText(pct: number, bg: string): string {
       if (pct <= 0) return muteTxt;

@@ -297,13 +297,9 @@
   flex: 1;
   height: 6px;
   border-radius: 3px;
-  /* Command Band re-skin (Task 7): 5-stop legend — neutral -> info-blue -> warn
-     -> vivid-warn -> err. NOTE: this legend swatch is a hand-authored visual
-     approximation of Dashboard._renderHeatmap's heatBg() ramp (schedule-workbench.mjs),
-     which is still a 4-stop JS interpolation (idle/warn/warn-vivid/err) with no
-     info-blue step — adding that step to the real per-cell colors would require
-     editing that JS function, out of scope for this CSS-only task. Flagged in the
-     Task 7 report as a legend/actual-cell mismatch for a follow-up. */
+  /* 5-stop legend: neutral -> info-blue -> warn -> vivid-warn -> err. Matches
+     Dashboard._renderHeatmap's heatBg() ramp, which uses the same five evenly
+     spaced stops (0/25/50/75/100%); 100% and above is solid err. */
   background: linear-gradient(to right, var(--bg-subtle), var(--info), var(--warn), var(--warn-vivid), var(--err));
 }
 /* Heatmap dark-mode overrides */
