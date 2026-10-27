@@ -78,6 +78,10 @@ const _lineSyncMachineCache: Record<string, MasterDataTableState<ProductionLineR
  *  committed and would otherwise revert the pane to the pre-edit value. */
 let _lineWriteGen = 0;
 
+/** Gates the Order Rules "tooling rule" control and the Tool Inventory status line's rule text. Stays false until the
+ *  optimizer consumes the rule (Wave 6 flips it in its last commit), so no control ever exists without its consumer. */
+export const TOOLING_RULE_CONTROL_READY = false;
+
 /** Re-pull `plants` + the selected plant's `machine` rows into `Store.masterData` so
  *  Hierarchy/ProdLines/Plant stay in sync with Postgres. Shared by `MasterData._save`
  *  (fire-and-forget, `source: 'master-data-save'`) and the Production Lines / Plant

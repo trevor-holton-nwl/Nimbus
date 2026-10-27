@@ -78,6 +78,7 @@ import { AdminCockpit } from '../admin-ops/admin-ui.mjs';
 import { Plant, ProdLines, WorkCenters } from '../master-data/admin-ui.mjs';
 import { LaborPlanning } from '../labor/labor-planning.mjs';
 import { MaterialGrids } from '../master-data/material-grids.mjs';
+import { ToolInventory } from '../master-data/tool-inventory.mjs';
 import { DistributionPane } from '../distribution/distribution-pane.mjs';
 import { AlertMonitorPane } from '../alert-monitor/alert-monitor-pane.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
@@ -457,6 +458,7 @@ const SessionUIAdapter = {
       ['material-plant', Util.t('tab.material_plant')],
       ['routing-pv',     Util.t('tab.routing_pv')],
       ['work-centers',   Util.t('tab.work_centers')],
+      ['tool-inventory', Util.t('tab.tool_inventory')],
     ];
     return null;   // home / labor / admin land on the tab with no sub-view here
   },
@@ -2200,6 +2202,8 @@ const App = {
 
     /* Manage Master Data sub-tabs (Production Lines / Plant) */
     installLayoutAffordances();
+    // Tool Inventory follows the top-bar plant and keeps per-plant drafts, so it subscribes itself (idempotent).
+    ToolInventory.init();
     document.querySelectorAll<HTMLElement>('.md-master-subtabs .admin-subtab').forEach(btn => {
       btn.onclick = () => App.gotoMasterSub(btn.dataset.mdMaster as MasterSubTab);
     });
@@ -2789,6 +2793,7 @@ const App = {
     { sub: 'material-plant', paneId: 'md-master-material-plant-pane', render: () => MaterialGrids.render('material-plant'), refresh: () => MaterialGrids.refresh('material-plant') },
     { sub: 'routing-pv',     paneId: 'md-master-routing-pv-pane',     render: () => MaterialGrids.render('routing-pv'),     refresh: () => MaterialGrids.refresh('routing-pv') },
     { sub: 'work-centers',   paneId: 'md-master-work-centers-pane',   render: () => void WorkCenters.render(),            refresh: () => WorkCenters.refresh() },
+    { sub: 'tool-inventory', paneId: 'md-master-tool-inventory-pane', render: () => ToolInventory.render(),               refresh: () => ToolInventory.refresh() },
   ] as Array<{ sub: MasterSubTab; paneId: string; render(): void; refresh(): Promise<boolean> }>,
 
   _masterRefreshInFlight: false,

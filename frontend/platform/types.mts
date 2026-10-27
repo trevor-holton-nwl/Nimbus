@@ -571,7 +571,7 @@ export type TopLevelTab = 'home' | 'gantt' | 'masterdata' | 'labor' | 'alerts' |
 
 export type GanttSubTab = 'timeline' | 'orders' | 'distribution';
 
-export type MasterSubTab = 'lines' | 'plant' | 'material' | 'material-plant' | 'routing-pv' | 'work-centers';
+export type MasterSubTab = 'lines' | 'plant' | 'material' | 'material-plant' | 'routing-pv' | 'work-centers' | 'tool-inventory';
 
 export type LaborSubTab = 'aggregate' | 'line-plan' | 'capacity' | 'exceptions' | 'inputs';
 

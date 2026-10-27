@@ -1677,6 +1677,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button class="admin-subtab" data-md-master="material-plant" role="tab" data-i18n="tab.material_plant">Material Plant</button>
       <button class="admin-subtab" data-md-master="routing-pv" role="tab" data-i18n="tab.routing_pv">Routing & Production Versions</button>
       <button class="admin-subtab" data-md-master="work-centers" role="tab" data-i18n="tab.work_centers">Work Centers</button>
+      <button class="admin-subtab" data-md-master="tool-inventory" role="tab" data-i18n="tab.tool_inventory">Tool Inventory</button>
     </nav>
       <button id="md-master-refresh" class="btn btn-ghost sm md-master-refresh"
               data-i18n="btn.refresh" data-i18n-title="tip.md_refresh">↻ Refresh</button>
@@ -1842,6 +1843,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
          WorkCenters.render() (frontend/master-data/admin-ui.mts), same
          on-demand-innerHTML convention as the Production Lines pane above. -->
     <div id="md-master-work-centers-pane" hidden></div>
+
+    <!-- SUB-PANE: TOOL INVENTORY — content built entirely by ToolInventory.render()
+         (frontend/master-data/tool-inventory.mts); same on-demand convention as the pane above. -->
+    <div id="md-master-tool-inventory-pane" hidden></div>
   </section>
 
   <!-- =========================================================

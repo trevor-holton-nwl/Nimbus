@@ -5018,7 +5018,8 @@ body.dark .cw-active-card {
 #md-master-material-pane,
 #md-master-material-plant-pane,
 #md-master-routing-pv-pane,
-#md-master-work-centers-pane {
+#md-master-work-centers-pane,
+#md-master-tool-inventory-pane {
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -5030,7 +5031,8 @@ body.dark .cw-active-card {
 #md-master-material-pane[hidden],
 #md-master-material-plant-pane[hidden],
 #md-master-routing-pv-pane[hidden],
-#md-master-work-centers-pane[hidden] { display: none; }
+#md-master-work-centers-pane[hidden],
+#md-master-tool-inventory-pane[hidden] { display: none; }
 /* Previously an inline style on the Plant pane itself (height:100%;overflow:hidden),
    removed so gotoMasterSub can toggle all four sub-panes uniformly via [hidden].
    Scoped here rather than folded into the shared rule above: the Plant pane's
@@ -5296,6 +5298,20 @@ body.dark { --period-default-fill: #313d4d; --period-default-fg: color-mix(in sr
    with zero additional dark-mode work.
    ============================================================================= */
 #md-mat-grid, #md-mp-grid, #md-rpv-grid { flex: 1; min-height: 0; width: 100%; }
+
+/* MASTER DATA > TOOL INVENTORY — add/delete grid. The toolbar wraps (flex-wrap on .table-toolbar), so five
+   locales never overflow; headers wrap to two lines (wrapHeaderText) instead of truncating. */
+#ti-grid { flex: 1; min-height: 240px; width: 100%; }
+.ti-toolbar .input { flex: 0 1 260px; min-width: 160px; }
+.ti-toolbar .ti-filter { flex: 0 1 240px; min-width: 190px; width: auto; }
+.ti-status { flex-shrink: 0; padding: 6px 16px; font-size: 12px; color: var(--text-muted); background: var(--bg-elev); border-bottom: 1px solid var(--line); }
+.ti-hint { flex-shrink: 0; padding: 6px 16px; font-size: 12px; color: var(--fg); background: var(--bg-elev); border-bottom: 1px solid var(--line); }
+.ti-errors { flex-shrink: 0; padding: 8px 16px; font-size: 12.5px; color: var(--err); background: var(--err-soft); border-bottom: 1px solid var(--err); }
+.ti-errors ul { margin: 4px 0 0; padding-left: 18px; }
+.ti-state { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+.ti-confirm-list { margin: 6px 0 0; padding-left: 18px; text-align: left; }
+.ag-theme-quartz .md-cell-invalid { box-shadow: inset 0 0 0 1px var(--err); background: var(--err-soft); color: var(--err); }
+.ag-theme-quartz .ti-cell-locked { color: var(--text-muted); cursor: not-allowed; }
 
 /* Dirty-cell marker for the three planner-editable Material Plant columns. */
 .ag-theme-quartz .md-cell-dirty { box-shadow: inset 3px 0 0 var(--accent-hot); }
