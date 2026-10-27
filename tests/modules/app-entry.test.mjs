@@ -97,6 +97,42 @@ test('runCacheBustGuard redirects on a version mismatch, keyed off NIMBUS_BUILD_
   assert.equal(fakeWindow.sessionStorage.getItem('nimbus.app.ver'), 'build-2');
 });
 
+test('cache-bust redirect skips script loading on the outgoing page', async () => {
+  let replaced = null;
+  const scriptRequests = [];
+  const documentObject = {
+    createElement: () => ({}),
+    head: { appendChild: script => scriptRequests.push(script.src) },
+    body: { insertBefore() {} },
+  };
+  const fakeWindow = {
+    NIMBUS_BUILD_ID: 'build-2',
+    document: documentObject,
+    sessionStorage: makeStorage({ 'nimbus.app.ver': 'build-1' }),
+    location: { pathname: '/app', search: '', replace(url) { replaced = url; } },
+  };
+  const hadWindow = Object.prototype.hasOwnProperty.call(globalThis, 'window');
+  const previousWindow = globalThis.window;
+  const hadDocument = Object.prototype.hasOwnProperty.call(globalThis, 'document');
+  const previousDocument = globalThis.document;
+
+  try {
+    globalThis.window = fakeWindow;
+    globalThis.document = documentObject;
+    const entryUrl = new URL('../../frontend/app-entry.mjs', import.meta.url);
+    entryUrl.searchParams.set('boot-test', String(Date.now()));
+    await import(entryUrl.href);
+  } finally {
+    if (hadWindow) globalThis.window = previousWindow;
+    else delete globalThis.window;
+    if (hadDocument) globalThis.document = previousDocument;
+    else delete globalThis.document;
+  }
+
+  assert.equal(replaced, '/app?_v=build-2');
+  assert.deepEqual(scriptRequests, []);
+});
+
 test('runCacheBustGuard does not redirect when the stored version already matches', () => {
   let replaced = null;
   const fakeWindow = {

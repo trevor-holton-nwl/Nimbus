@@ -134,26 +134,28 @@ export function runCacheBustGuard(win) {
   const version = win.NIMBUS_BUILD_ID || 'dev';
   let stored;
   try { stored = win.sessionStorage.getItem(KEY); }
-  catch { return; } // sessionStorage can throw (e.g. privacy mode) — never block boot on it
-  if (stored === version) return;
+  catch { return false; } // sessionStorage can throw (e.g. privacy mode) — never block boot on it
+  if (stored === version) return false;
   try {
     win.sessionStorage.setItem(KEY, version);
     const base = win.location.pathname + win.location.search.replace(/[?&]_v=[^&]*/g, '');
     const sep = base.includes('?') ? '&' : '?';
     win.location.replace(base + sep + '_v=' + version);
-  } catch { /* never block boot on a storage/location failure */ }
+    return true; // a navigation is pending; don't start script requests on this page
+  } catch { return false; /* never block boot on a storage/location failure */ }
 }
 
 // Auto-boot when this module is the page's real entry point. Under a plain
 // Node `import()` (as in tests), `window` is undefined, so this never fires —
 // tests call `bootEntry({ window, loadScript })` explicitly instead.
 if (typeof window !== 'undefined' && window.document) {
-  runCacheBustGuard(window);
-  bootEntry().catch(e => {
-    console.error('[NIMBUS boot]', e);
-    const banner = document.createElement('div');
-    banner.className = 'nimbus-boot-error-banner';
-    banner.textContent = `NIMBUS failed to load: ${(e && e.message) || e}`;
-    document.body.insertBefore(banner, document.body.firstChild);
-  });
+  if (!runCacheBustGuard(window)) {
+    bootEntry().catch(e => {
+      console.error('[NIMBUS boot]', e);
+      const banner = document.createElement('div');
+      banner.className = 'nimbus-boot-error-banner';
+      banner.textContent = `NIMBUS failed to load: ${(e && e.message) || e}`;
+      document.body.insertBefore(banner, document.body.firstChild);
+    });
+  }
 }
