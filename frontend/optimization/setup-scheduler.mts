@@ -378,8 +378,8 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
  * as immutable and never fills missing calendar defaults back into this object. */
 export interface ScheduleSnapshot {
   tasks: ReadonlyArray<NimbusTask>;
-  /** Manually firmed ids; callers additionally fold ECC-firmed and
-   * frozen-horizon ids in before invoking. */
+  /** Manually firmed ids; callers additionally fold running and
+   * frozen-horizon ids in before invoking (SAP's firm flag never locks). */
   firmedIds: ReadonlySet<string> | ReadonlyArray<string>;
   selectedPlant: string | null;
   blocks: ReadonlyArray<NimbusBlock>;
@@ -2400,7 +2400,7 @@ function taskIsFirmed(snapshot: Readonly<ScheduleSnapshot>, task: NimbusTask): b
     ? snapshot.firmedIds
     : new Set(Array.from(snapshot.firmedIds, String));
   // `task.firmed` is a Store mirror and may be stale in a detached snapshot.
-  // The caller folds manual/ECC/frozen protection into this effective set
+  // The caller folds manual/running/frozen protection into this effective set
   // before evaluation; membership in that set is the only authoritative
   // protection contract here.
   return firmedIds.has(taskId(task));
@@ -5215,7 +5215,7 @@ function evaluateLineWithFirmedBoundaries(
     if (start && start > bounds.horizonEnd) continue;
     if (!start || !end || end <= start) {
       // Never-freeze (e24b12b follow-up): an unusable interval cannot become
-      // a boundary at all — an in-progress/SAP-firmed order can legitimately
+      // a boundary at all — an in-progress (running) order can legitimately
       // have odd interval data. Skip it as a boundary rather than freezing
       // every other order on the line; it stays excluded from `free` via
       // `taskIsFirmed` above and keeps its own current dates either way.
@@ -5335,8 +5335,8 @@ function evaluateLineWithFirmedBoundaries(
     return applyWinner(run);
   };
 
-  // Monotone-cursor union bookkeeping (never-freeze, e24b12b follow-up): an
-  // SAP ECC-firmed order folded into `firmedIds` may already be in progress
+  // Monotone-cursor union bookkeeping (never-freeze, e24b12b follow-up): a
+  // running or frozen order folded into `firmedIds` may already be in progress
   // or fully in the past, so its boundary can legitimately start at or
   // before `fragmentStart`. Tracks the latest boundary END actually adopted
   // as a predecessor so a shorter, earlier-ending past run can never
@@ -5410,7 +5410,7 @@ function evaluateLineWithFirmedBoundaries(
       );
     }
 
-    // Never-freeze clamp (e24b12b follow-up): an SAP ECC-firmed order that is
+    // Never-freeze clamp (e24b12b follow-up): a running (or frozen) order that is
     // already in progress or fully in the past has a boundary that starts at
     // or before the cursor — a zero-width (or negative-width) pre-fragment
     // that needs no search at all. Every override-lock check above already
@@ -6810,7 +6810,7 @@ function buildTaskScope(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<D
     }
     // A protected interval remains a physical obstacle even when a caller
     // supplies only the mutable ids. This keeps an omitted boundary list from
-    // allowing a selected repair to overlap firmed/ECC/frozen work.
+    // allowing a selected repair to overlap firmed/running/frozen work.
     if (protectedTask && validInterval && !intersects) {
       boundaries.push(task);
       continue;

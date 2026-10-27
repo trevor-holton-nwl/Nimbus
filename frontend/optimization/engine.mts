@@ -254,7 +254,7 @@ export function snapshotSchedule(plant?: string): ScheduleSnapshot {
       : Store.calendars;
     return {
       tasks,
-      firmedIds: Array.from(Store.firmedIds), // manual firms only — ECC/frozen derivation joins at the setup-aware fold; do not union here.
+      firmedIds: Array.from(Store.firmedIds), // manual firms only — running/frozen/placement-exception derivation joins at the setup-aware fold (SAP's firm flag never locks); do not union here.
       selectedPlant: Store.selectedPlant,
       // Every consumer (setup-scheduler lineBlocksFor/overlapBlocks, Calendar._indexBlocks,
       // nextAvailable) skips blocks of another plant, so a plant-scoped snapshot clones
@@ -3163,10 +3163,10 @@ export const Engine = {
     // sourceGetPlantForLine(t.MACHINE)`) so this reporting and the
     // setup-aware evaluators' own scoping agree on which orders exist for
     // this plant. "Firmed" here means membership in `effectiveFirmedIds` —
-    // the SAME effectively-folded set (manual + ECC-firmed, gated by
-    // respectFirmed, plus the unconditional frozen-horizon fold; see
+    // the SAME effectively-folded set (manual firms, gated by
+    // respectFirmed, plus the unconditional running/frozen fold; see
     // effectiveFirmedIdSet) actually handed to the evaluator above, not
-    // just a manual `sourceIsFirmed` check — so an ECC-firmed or
+    // just a manual `sourceIsFirmed` check — so a running or
     // frozen-horizon order the evaluator deliberately left untouched is
     // never miscounted here as "left in place".
     const unplacedLines = new Set<string>();
@@ -3196,7 +3196,7 @@ export const Engine = {
   /** After a manual edit to one task, re-flow subsequent unfirmed orders on the
    *  same line to eliminate overlap. Spans day boundaries so Day-1 overflow
    *  cascades correctly into Day-2 tasks. Does NOT move firmed orders (manual
-   *  or ECC-firmed). */
+   *  firms, running or frozen orders; SAP's firm flag never locks). */
   autoReflow(changedId: string): void {
     const changed = Store.tasks[changedId];
     if (!changed || !changed.start_date || !changed.end_date) return;

@@ -336,6 +336,13 @@ Every listed file has an **`AGENTS.md` twin** with the same stale lines; update 
 6. **Stale-tab writes.** The lock is client-side; the server accepts `FIRMED` toggles regardless (`routes.py:574-616`). A stale tab can write a harmless planner firm on a frozen order.
 7. **Server/browser running parity.** A finish-only placed child reads "running" in the browser (derived start) but not on the server (`_order_is_running` needs both stored edges). Transient, until the reconcile saves.
 
+## 9a. Known inconsistencies / follow-ups (recorded at hand-off, 2026-10-27)
+
+- **Hover card wording (C-7).** The Gantt hover shows no frozen/manual reason, and its long SAP line differs from the Inspector's short tag. Left unchanged per D5.
+- **`placement_exception` is not a firm reason (C11).** The optimizer fold protects a `placement_exception` order (`effectiveFirmedIdSet`), but `firmingStatus` does not list it as a reason, so the UI can show an order as unlocked that the optimizer will not move.
+- **Plant timezone `LIMIT 1` (B1).** The backend frozen-window computation reads the plant timezone with a `LIMIT 1` lookup; a plant whose rows disagree on timezone resolves to whichever row Postgres returns first. Pre-existing, not changed here.
+- **Risks at hand-off.** Risks 1-7 in section 9 are the hand-off list; none is resolved by this branch (they are accepted behaviour, D4/D7).
+
 ## 10. Sequencing and delivery
 
 - Branch `feature/universal-firm` in a `.claude/worktrees` worktree off `main`. Record HEAD at start; the owner commits concurrently.
