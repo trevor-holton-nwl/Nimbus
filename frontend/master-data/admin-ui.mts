@@ -2468,7 +2468,6 @@ export const ProdLines = {
       <div class="ld-header">
         <span class="line-dot" style="background:${color};width:14px;height:14px;border-radius:50%;display:inline-block;flex-shrink:0;"></span>
         <span class="ld-name">${Util.escapeHtml(line)}</span>
-        <span class="plant-badge" style="margin-left:auto;">${Util.escapeHtml(Store.selectedPlant || '—')}</span>
       </div>
       <div class="ld-settings-row">
         <label class="ld-ctrl-label">
@@ -5729,7 +5728,6 @@ export const WorkCenters = {
         <div class="ld-header">
           <span class="line-dot" style="background:${color};width:14px;height:14px;border-radius:50%;display:inline-block;flex-shrink:0;"></span>
           <span class="ld-name">${Util.escapeHtml(code)}</span>
-          <span class="plant-badge" style="margin-left:auto;">${Util.escapeHtml(Store.selectedPlant || '—')}</span>
         </div>
 
         <div class="ld-settings-row">
