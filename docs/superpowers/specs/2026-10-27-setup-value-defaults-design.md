@@ -144,6 +144,8 @@ Not in `ALLOWED_TABLES`; maintenance lists are catalog-driven; no purge touches 
 - Min Changeover / SPT rankings change once defaults exist (covered edges compete on minutes).
 - A plant can now reach activation on default coverage alone.
 - Missing-pairs list and CSV are ordered by to-state.
+- Value-level history is not kept: the admin log records the written `field_key` and the upsert/delete counts only, never the values or minutes, and there is no history table.
+- The observed missing page is cut in Python when any value default exists (the SQL returns the row-uncovered observed pairs, defaults are filtered in Python, then the page is sliced); this is acceptable because the observed pair set is small. Without defaults the SQL `LIMIT/OFFSET` is the page.
 
 ## Docs to update (Wave D)
 
