@@ -21,6 +21,7 @@ frontend/scheduling/selection.mjs
 frontend/optimization/sandbox.mjs
 frontend/optimization/scheduler-contract.mjs
 frontend/optimization/engine.mjs
+frontend/optimization/firm-actions.mjs
 frontend/calendar/calendar-engine.mjs
 frontend/insights/services.mjs
 frontend/insights/toast-log-tab.mjs
