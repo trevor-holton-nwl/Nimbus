@@ -2,14 +2,14 @@
 
 ## What lives here
 
-- **`gantt.mts`** (4,940 lines) — the Gantt timeline surface and its supporting UI:
+- **`gantt.mts`** (~6,380 lines) — the Gantt timeline surface and its supporting UI:
   - `Timeline` — the vis-timeline wrapper (render, item lifecycle, drag/resize hooks).
   - `TimelineNav` — the canvas minimap/navigator strip above the Gantt. It is a **projection of `Timeline._items` + `Timeline._visibleLines()`** (same bars, split-order segments, row order and `.dimmed` filter state the Gantt renders — never re-derive the task/line filter chain here). Repaints are rAF-coalesced and triggered by `Timeline._items.on('*')` (the only signal for GanttFilter's className-only dim/undim updates) plus `lines:selected`/`plant:selected`/alerts/blocks/calendar Store events. Two rules for that `_items` subscriber: **skip events whose changed ids are all `kind:'zone'`** (the 1s ticker pushes zone bands whenever 'now' has moved ≥0.5 px at the current zoom, or an edge input changed) and **never gate on `Timeline._suppressEvents`** (GanttFilter._doApply sets it around exactly the updates the nav needs). Pure geometry helpers `navComputeRange`/`navLayout`/`navBarStyle`/`navClampRect` are exported for tests. Colors are read from CSS tokens at paint time (canvas can't use `var()`); DarkMode's repaint hook in `nimbus-intelligence.js` calls `render()`.
   - `DependencyOverlay` — finish-to-start link line rendering.
   - `Hierarchy` — plant → machine navigation tree.
   - `GanttFilter` — the Gantt's own line/search filter UI.
   - `Interaction` — the unified click/keyboard/drag pipeline (marquee multi-select, hover-preview card, double-click line isolation, multi-order ghost-drag, two-way AG Grid ↔ `Selection` sync).
-  - `setupDiagnosticLabel` / `setupSourceLabel` — small label helpers for setup-aware diagnostics badges drawn on the timeline; `SetupPresentationDetail` is their shared type.
+  - `setupDiagnosticLabel` / `setupSourceLabel` — small label helpers for setup-aware diagnostics badges drawn on the timeline; `SetupPresentationDetail` is their shared type. Since 2026-10-27 `setupSourceLabel` maps the resolver's `'value-default'` source to `ui.setup_source_value_default` ("Default by value"; present in all five locales) next to the `implicit-zero` mapping, so the Inspector's "Setup source" row names a default-derived interval; the Gantt bar and the Inspector agree because `orders.mts`'s two index-less `resolveSetup` calls pass `snapshot.value_defaults ?? []` like every other caller. A default-covered pair is **covered**: it draws a normal setup bar for the summed default minutes, and the `setup-uncovered` "!" marker and alert no longer apply to it (their text now reads "Add a setup rule or a default by value"). On a setup-off plant the bars stay hidden (see the gating bullet below) but the ungated Inspector override editor can still show default-derived minutes. `persistence.mts`'s `SetupWriteKind` gained `'value-default'` so a saved default stales an open optimizer preview.
 - **`orders.mts`** (2,833 lines) — the AG Grid orders table and order-detail chrome:
   - `Table` — the AG Grid wrapper (column defs, cell editors, row model).
   - `Inspector` — the single/multi-selection detail panel.
