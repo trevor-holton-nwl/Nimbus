@@ -126,7 +126,7 @@ window.__NIMBUS_LOCALES.en = {
   'modal.discard_schedule_title':       'Discard unsaved schedule changes?',
   'modal.discard_schedule_message':     'Switching plants will discard your unsaved schedule changes. Save them first if you want to keep them.',
   'btn.discard_and_switch':             'Discard and switch',
-  'tab.routing_pv':                    'Routing & Production Versions',
+  'tab.routing_pv':                    'Routing',
   'ui.review_distributions':            'Review {{count}} distributions',
   'ui.conflicting_parent_rows':         'Conflicting parent orders',
   'ui.ambiguous_plant_conflicts':       'Ambiguous plant conflicts',
