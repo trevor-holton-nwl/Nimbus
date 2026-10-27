@@ -589,8 +589,11 @@ def test_outbound_candidate_rows_read_the_shared_stored_finish_not_start_plus_ru
     st._outbound_candidate_rows(cur, "ZZP1")
     sql = cur.executed[0][0]
     assert st.db._EFF_END_SQL in sql
-    # F15: the firm rule's start is the LOCKED start (never the echo-movable basic start ahead of the received one)
-    assert "COALESCE(seg.first_start, o.scheduled_start, o.original_start_received, o.basic_start_date)" in sql
+    # Universal firm (C1): the firm rule reads the PLACED edges only (first/last segment, else scheduled_*), NULL when
+    # queued; never the SAP start chain (original_start_received / basic_start_date)
+    assert "COALESCE(seg.first_start, o.scheduled_start)" in sql
+    assert "COALESCE(seg.last_end, o.scheduled_end)" in sql
+    assert "original_start_received" not in sql and "basic_start_date" not in sql
     assert st.db._EFF_START_SQL not in sql
     assert "INTERVAL" not in sql and "run_time" not in sql
 
@@ -598,30 +601,40 @@ def test_outbound_candidate_rows_read_the_shared_stored_finish_not_start_plus_ru
 # ===========================================================================
 # Send to SAP -- pure pieces (firm rule, roll-up, zone conversion of the outbound value)
 # ===========================================================================
-_FROZEN = datetime(2026, 10, 10)
+_NOW = datetime(2026, 10, 5, 12)
+_FROZEN = datetime(2026, 10, 10)          # frozen window = [_NOW, _FROZEN)
+_FAR_S, _FAR_E = datetime(2026, 10, 20, 2), datetime(2026, 10, 20, 8)
 
 
-@pytest.mark.parametrize("manual, ind, start, frozen, expected", [
-    (False, None, datetime(2026, 10, 20), _FROZEN, ""),               # nothing qualifies
-    (True, None, datetime(2026, 10, 20), _FROZEN, "X"),               # planner firmed
-    (False, "X", datetime(2026, 10, 20), _FROZEN, "X"),               # SAP already firmed -- never blanked
-    (False, " x ", datetime(2026, 10, 20), None, "X"),                # tolerant of case / whitespace
-    (False, None, datetime(2026, 10, 9), _FROZEN, "X"),               # inside the frozen horizon
-    (False, None, datetime(2026, 10, 10), _FROZEN, ""),               # exactly at the boundary is outside
-    (False, None, datetime(2026, 10, 9), None, ""),                   # no frozen horizon -> no frozen firming
-    (False, None, None, _FROZEN, ""),                                 # no start -> cannot be inside
-    (False, "", datetime(2026, 10, 20), _FROZEN, ""),
-    (None, "N", datetime(2026, 10, 20), _FROZEN, ""),
+@pytest.mark.parametrize("manual, ind, pstart, pend, frozen, now, expected", [
+    (False, None, _FAR_S, _FAR_E, _FROZEN, _NOW, ""),                                        # nothing qualifies
+    (True, None, _FAR_S, _FAR_E, _FROZEN, _NOW, "X"),                                        # planner firmed
+    (False, "X", _FAR_S, _FAR_E, _FROZEN, _NOW, "X"),                                        # SAP already firmed: add-only
+    (False, " x ", _FAR_S, _FAR_E, None, _NOW, "X"),                                         # lowercase / whitespace
+    (False, None, datetime(2026, 10, 9, 2), datetime(2026, 10, 9, 8), _FROZEN, _NOW, "X"),   # finish inside the window
+    (False, None, datetime(2026, 10, 9), datetime(2026, 10, 10), _FROZEN, _NOW, ""),         # finish == edge: outside
+    (False, None, datetime(2026, 10, 1), datetime(2026, 10, 3), _FROZEN, _NOW, ""),          # overdue (finish < now)
+    (False, None, datetime(2026, 10, 9), datetime(2026, 10, 12), _FROZEN, _NOW, ""),         # straddler: finish after edge
+    (False, None, datetime(2026, 10, 5, 8), datetime(2026, 10, 5, 20), None, _NOW, "X"),     # running, no frozen horizon
+    (False, None, datetime(2026, 10, 5, 8), datetime(2026, 10, 5, 12), None, _NOW, ""),      # finish == now: not running (and no window)
+    (False, None, datetime(2026, 10, 5, 8), datetime(2026, 10, 5, 20), _FROZEN, None, ""),   # no clock: running off
+    (False, None, None, None, _FROZEN, _NOW, ""),                                            # never placed
+    (False, None, None, datetime(2026, 10, 9), _FROZEN, _NOW, "X"),                          # finish-only placed, frozen
+    (False, None, datetime(2026, 10, 9), datetime(2026, 10, 9, 8), None, _NOW, ""),          # no frozen horizon
+    (False, None, datetime(2026, 10, 9), datetime(2026, 10, 9, 8), None, None, ""),          # no timezone: (None, None)
+    (False, "", _FAR_S, _FAR_E, _FROZEN, _NOW, ""),
+    (None, "N", _FAR_S, _FAR_E, _FROZEN, _NOW, ""),
 ])
-def test_firm_flag_truth_table(manual, ind, start, frozen, expected):
-    assert st.firm_flag(manual, ind, start, frozen) == expected
+def test_firm_flag_truth_table(manual, ind, pstart, pend, frozen, now, expected):
+    assert st.firm_flag(manual, ind, pstart, pend, frozen, now) == expected
 
 
 def _o(oid, po, *, parent=None, mat="777", end=datetime(2026, 11, 1, 8), start=datetime(2026, 11, 1, 2),
-       manual=False, ind=None, version="V1", status="scheduled"):
+       manual=False, ind=None, version="V1", status="scheduled", pstart=None, pend=None):
+    # `end` is what Send transmits (eff_end); `pstart`/`pend` are the PLACED edges the firm rule reads.
     return {"id": oid, "production_order": po, "parent_production_order": parent, "material_number": mat,
             "manual_firmed": manual, "firming_indicator": ind, "production_version": version,
-            "planning_status": status, "eff_start": start, "eff_end": end}
+            "planning_status": status, "placed_start": pstart, "placed_end": pend, "eff_end": end}
 
 
 def test_build_outbound_groups_rolls_children_up_with_max_end_and_any_firm():
@@ -647,19 +660,24 @@ def test_build_outbound_groups_rolls_children_up_with_max_end_and_any_firm():
 
 
 def test_build_outbound_groups_groups_by_material_and_applies_frozen_firming():
-    rows = [_o("a", "9", mat="M1", start=datetime(2026, 10, 9)), _o("b", "9", mat="M2", start=datetime(2026, 10, 20))]
-    groups, skipped, unfirmed = st.build_outbound_groups(rows, _FROZEN)
-    assert skipped == 0 and unfirmed == 1 and len(groups) == 1           # M2 starts after the frozen end: not firmed
+    rows = [_o("a", "9", mat="M1", pstart=datetime(2026, 10, 9), pend=datetime(2026, 10, 9, 6)),
+            _o("b", "9", mat="M2", pstart=datetime(2026, 10, 9), pend=datetime(2026, 10, 12))]
+    groups, skipped, unfirmed = st.build_outbound_groups(rows, _FROZEN, _NOW)
+    assert skipped == 0 and unfirmed == 1 and len(groups) == 1           # M2 finishes after the edge (straddler)
     assert {g["matnr"]: g["auffx"] for g in groups} == {"M1": "X"}
 
 
 def test_send_skips_unfirmed_orders():
-    """OQ61: only firmed planned orders are sent -- planner-firmed, SAP-firmed or inside the frozen horizon."""
+    """OQ61 + universal firm D7: only NIMBUS-firmed planned orders are sent -- planner-firmed, SAP X (add-only),
+    finish inside the frozen window, or running. Overdue and never-placed orders are not."""
     rows = [
         _o("u1", "U1"),                                                  # nothing qualifies -> dropped
         _o("m1", "M1", manual=True),                                     # planner-firmed
         _o("s1", "S1", ind="X"),                                         # SAP-firmed
-        _o("f1", "F1", start=datetime(2026, 10, 9)),                     # starts inside the frozen horizon
+        _o("f1", "F1", pstart=datetime(2026, 10, 9), pend=datetime(2026, 10, 9, 6)),   # finishes inside the window
+        _o("r1", "R1", pstart=datetime(2026, 10, 5, 8), pend=datetime(2026, 10, 5, 20)),  # running
+        _o("o1", "O1", pstart=datetime(2026, 10, 1), pend=datetime(2026, 10, 3)),      # overdue: not sent (D7)
+        _o("v1", "V1", pstart=None, pend=None),                                         # never placed: not sent (D7)
         _o("n1", "N1", end=None, manual=True),                           # firmed but no end: counted as no-end, not unfirmed
         # an aggregate with one firmed child stays; its end is the latest over ALL children (the unfirmed one too)
         _o("c1", "AG-A", parent="AG", end=datetime(2026, 11, 1, 8), manual=True),
@@ -668,12 +686,12 @@ def test_send_skips_unfirmed_orders():
         _o("d1", "DG-A", parent="DG"),
         _o("d2", "DG-B", parent="DG"),
     ]
-    groups, no_end, unfirmed = st.build_outbound_groups(rows, _FROZEN)
+    groups, no_end, unfirmed = st.build_outbound_groups(rows, _FROZEN, _NOW)
     by = {g["plnum"]: g for g in groups}
-    assert sorted(by) == ["AG", "F1", "M1", "S1"]
+    assert sorted(by) == ["AG", "F1", "M1", "R1", "S1"]
     assert all(g["auffx"] == "X" for g in groups)
     assert by["AG"]["end"] == datetime(2026, 11, 5, 8) and by["AG"]["member_ids"] == ["c1", "c2"]
-    assert no_end == 1 and unfirmed == 2                                 # unfirmed planned orders: U1 and the DG aggregate
+    assert no_end == 1 and unfirmed == 4                                 # U1, O1, V1 and the DG aggregate
 
 
 

@@ -597,7 +597,7 @@ Planned-order apply also reports the shared order-upsert warnings (the same ones
 
 ### 7.7 Outbound contract (NIMBUS to SAP)
 
-An admin's **Send to SAP** click queues one row per firmed planned order of the plant (an order that is not firmed is skipped; distribution sub-orders roll up to their parent with the latest end, and an aggregate is sent when any of its sub-orders is firmed) into `sap_stage_planned_order_out` with `row_status = 'ready'`, `pedtr`/`pedti` converted to the SAP system zone, and `auffx = 'X'` when the order is firmed (planner-firmed, already firmed in SAP, or inside the frozen horizon; **add-only**, NIMBUS never clears an SAP firm). Materials and order numbers are sent as NIMBUS stores them (no leading zeros); pad them on the Mulesoft side if SAP requires fixed width. Mulesoft then:
+An admin's **Send to SAP** click queues one row per firmed planned order of the plant (an order that is not firmed is skipped; distribution sub-orders roll up to their parent with the latest end, and an aggregate is sent when any of its sub-orders is firmed) into `sap_stage_planned_order_out` with `row_status = 'ready'`, `pedtr`/`pedti` converted to the SAP system zone, and `auffx = 'X'` when the order is firmed (planner-firmed, already firmed in SAP, finishing inside the frozen horizon, or running; overdue and never-placed orders are not sent; **add-only**, NIMBUS never clears an SAP firm). Materials and order numbers are sent as NIMBUS stores them (no leading zeros); pad them on the Mulesoft side if SAP requires fixed width. Mulesoft then:
 
 ```sql
 BEGIN;
