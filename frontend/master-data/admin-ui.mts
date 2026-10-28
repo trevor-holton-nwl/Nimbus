@@ -3418,7 +3418,7 @@ export const MasterData = (() => {
     production_version: 'Production Versions',
     routing_operation:  'Routing Operations',
     routing_rules:      'Routing Rules',
-    tool_inventory:     'Tool Inventory',
+    tool_inventory:     'PRT Inventory',
   };
 
   // KEY_COLS drives primary-key identification per table.

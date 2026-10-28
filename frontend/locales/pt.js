@@ -2902,7 +2902,7 @@ window.__NIMBUS_LOCALES.pt = {
   'tip.split_segment': "Segmento {{i}} de {{n}} - {{h}}h produtivas",
   'ui.minutes_value': "{{n}} min",
   /* ── Tool Inventory sub-tab (Master Data) ── */
-  'tab.tool_inventory': 'Inventário de ferramentas',
+  'tab.tool_inventory': 'Inventário de PRT',
   'col.tool_id': 'ID da ferramenta',
   'col.total_qty': 'Inventário total',
   'col.out_of_service_qty': 'Fora de serviço',

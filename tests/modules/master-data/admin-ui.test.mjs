@@ -2473,7 +2473,7 @@ test('tool_inventory is registered in the Manage Data grid engine (union, labels
   const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
   assert.match(html, /<button class="md-tab" data-md-tab="tool_inventory" role="tab" data-i18n="tab\.tool_inventory">/);
   assert.match(source, /\|\s*'routing_rules'\s*\|\s*'tool_inventory';/, 'MasterDataTable union');
-  assert.match(source, /tool_inventory:\s+'Tool Inventory',/, 'TABLE_LABELS');
+  assert.match(source, /tool_inventory:\s+'PRT Inventory',/, 'TABLE_LABELS');
   assert.match(source, /tool_inventory:\s+\['plant', 'tool_id'\],/, 'KEY_COLS');
   assert.match(source, /tool_inventory: \{ total_qty: 1, out_of_service_qty: 0 \},/, 'NEW_ROW_DEFAULTS');
   assert.match(source, /tool_inventory:\s+\{ plant: 'plants' \},/, 'FK_SOURCE');

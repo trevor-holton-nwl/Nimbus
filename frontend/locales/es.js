@@ -2903,7 +2903,7 @@ window.__NIMBUS_LOCALES.es = {
   'tip.split_segment': "Segmento {{i}} de {{n}} - {{h}}h productivas",
   'ui.minutes_value': "{{n}} min",
   /* ── Tool Inventory sub-tab (Master Data) ── */
-  'tab.tool_inventory': 'Inventario de herramientas',
+  'tab.tool_inventory': 'Inventario de PRT',
   'col.tool_id': 'ID de herramienta',
   'col.total_qty': 'Inventario total',
   'col.out_of_service_qty': 'Fuera de servicio',

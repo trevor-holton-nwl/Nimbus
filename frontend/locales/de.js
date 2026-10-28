@@ -2942,7 +2942,7 @@ window.__NIMBUS_LOCALES.de = {
   'tip.split_segment': "Segment {{i}} von {{n}} - {{h}}h produktiv",
   'ui.minutes_value': "{{n}} Min",
   /* ── Tool Inventory sub-tab (Master Data) ── */
-  'tab.tool_inventory': 'Werkzeugbestand',
+  'tab.tool_inventory': 'PRT-Bestand',
   'col.tool_id': 'Werkzeug-ID',
   'col.total_qty': 'Gesamtbestand',
   'col.out_of_service_qty': 'Außer Betrieb',

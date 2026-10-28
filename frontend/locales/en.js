@@ -3145,7 +3145,7 @@ window.__NIMBUS_LOCALES.en = {
   'tip.split_segment': "Segment {{i}} of {{n}} - {{h}}h productive",
   'ui.minutes_value': "{{n}} min",
   /* ── Tool Inventory sub-tab (Master Data) ── */
-  'tab.tool_inventory': 'Tool Inventory',
+  'tab.tool_inventory': 'PRT Inventory',
   'col.tool_id': 'Tool ID',
   'col.total_qty': 'Total Inventory',
   'col.out_of_service_qty': 'Out of Service',
