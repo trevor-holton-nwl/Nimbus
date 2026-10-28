@@ -22,7 +22,7 @@ The ORCHESTRATOR owns this file. Subagents (implementers, reviewers) do not edit
 ## Deferred items log
 (Orchestrator appends per wave.)
 
-- OWED: pg-marked tests unrun (no local Postgres credentials): tests/test_tool_inventory.py (2 tests), the new DDL parity/replay tests in tests/test_schema_idempotent.py; run them once credentials are available (local DB only, NIMBUS_TEST_DB=1, NIMBUS_REQUIRE_TEST_DB=1).
+- DONE: pg tests ran locally 2026-10-28 (146 targeted passed; full suite 2331 passed, 3 failed pre-existing on main in tests/test_audit_routing_db.py::TestRoutingEditTransactions). Merged to local main (not pushed or deployed). Browser checks remain owed.
 - Wave 5 follow-up: also consider a pane test for _runBatchMove over many holders; the tool-conflict `lineA/lineB` fields no longer exist.
 
 ## Closure (2026-10-28)
@@ -43,7 +43,7 @@ Wave 6 validation-fix history: fed8872 gate on, 5cf2f00 gate off, e18cf6c fixes,
 ### OWED before merge or deploy
 
 - **Browser checks:** grid single-instance on plant switch; header wrapping in de/es/fr/pt; Order Rules select width; delete confirm default-focus Cancel; Excel round trip; review modal a11y; deep links; Tool-blocked panel; cascade line in the confirm; preview row note; `tool_overflow_failed` banner; Fix overload Undo/toasts; Needs Planning reason after reload.
-- **pg-marked tests unrun locally:** `tests/test_tool_inventory.py` and the DDL parity/replay tests in `tests/test_schema_idempotent.py`. They need local Postgres credentials with `NIMBUS_TEST_DB=1` and `NIMBUS_REQUIRE_TEST_DB=1`; never retarget `.env` at Azure.
+- **pg-marked tests:** pg tests ran locally 2026-10-28 (146 targeted passed; full suite 2331 passed, 3 failed pre-existing on main in tests/test_audit_routing_db.py::TestRoutingEditTransactions). Merged to local main (not pushed or deployed). Browser checks remain owed.
 - **CI api-types drift at main (about 600 lines):** Waves 1/3/5 applied additive hand patches only to `frontend/types/api-generated.d.mts`; regenerate with a running app before merge if CI complains.
 - **Pilot confirmations:** Tooling PRT value meaning; split-order-stays-mounted assumption; compare a Hard run's Needs Planning count with Off on the same input (about 1.8% adversarial no-fit).
 
