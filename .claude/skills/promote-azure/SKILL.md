@@ -47,7 +47,7 @@ Run from a host with `psql` + DB firewall access (the dev laptop's `DevLaptop` r
 - Schema goes before the roll so the new code never serves traffic against missing tables.
 
 ### 1b. Local gate — required before `az acr build` (read-only, safe to run)
-Deploys build from the working tree, so nothing else stops a red or untested commit from shipping. Before step 2, **both** must pass locally for the working tree being built (there is no GitHub CI gate: no GitHub token is enabled, so check-runs are not consulted):
+Deploys build from the working tree, so nothing else stops a red or untested commit from shipping. Before step 2, **both** must pass locally for the working tree being built (GitHub CI also runs on push: typecheck, lint, tests, legacy-surface, static-assets, api-types drift, ruff and pytest; no GitHub token is enabled here, so check-runs are not consulted and this local gate stays the one that blocks a build):
 
 1. **`npm test`** passes (it runs the build first).
 2. **`npm run check:static-assets`** passes.

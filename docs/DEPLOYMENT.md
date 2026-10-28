@@ -114,6 +114,21 @@ The `2026-10-15-1` backfill `UPDATE` rewrites every `orders` row, which bumps ea
 
 `migrations/2026-10-23-1-schedule-event.sql` is additive (one table, `schedule_event`, and two indexes, all `IF NOT EXISTS`; no destructive word anywhere in the file, comments included), so it needs no `-AllowDestructive`. The app also creates the table at boot (`ensure_schedule_event_table()`), so applying it before or after the image roll are both safe. After the first apply, check `/diagnostics/deep` -> `db_stats.schedule_event`. Domain doc: `backend/schedule_events/CLAUDE.md`.
 
+## Tool inventory release (2026-10-28)
+
+`migrations/2026-10-27-1-tool-inventory.sql` is additive (one table, `tool_inventory`, keyed by plant and tool id, all `IF NOT EXISTS`; no destructive word anywhere in the file, comments included), so it needs no `-AllowDestructive`. **Apply the migration first** through the `promote-azure` ledger, then roll the image. The app also creates the table at boot (`ensure_tool_inventory_table()` in `master_data.py`), so either order is safe; an image that rolls first reads a missing table as an empty inventory (every tool counts as one copy) until the boot hook has run. The release adds no other schema change. Domain docs: `frontend/master-data/CLAUDE.md`, `frontend/optimization/CLAUDE.md`; design: `docs/superpowers/specs/2026-10-27-tool-inventory-design.md`; planner-facing notes: `docs/releases/2026-10-28-tool-inventory.md`.
+
+Verify after the roll (cache-bust every request with a random query parameter and a `no-cache` header; the corporate proxy caches by URL):
+
+1. **Ledger**: `SELECT filename FROM migration_files_applied WHERE filename = '2026-10-27-1-tool-inventory.sql';` returns the file.
+2. **Table and route**: `GET /master-data/tool_inventory?plant=<plant>` returns 200 with column metadata (an empty row list is correct before seeding).
+3. **UI**: Master Data > Tool Inventory opens and Template downloads; System Settings > Scheduling Rules > Order Rules shows "Treat Tooling as Hard Constraint" set to Off.
+4. **Alerts**: with an empty inventory every tool counts as one copy, so alert counts match the previous release until the inventory is seeded.
+
+Pilot rollout: (1) seed the plant's inventory from the Excel template (Master Data > Tool Inventory > Template, fill copies, Upload, review, Apply); (2) watch alert counts for a day, since a tool with several copies now raises fewer conflicts and a split order keeping its tool across the weekend can raise new ones; (3) enable the rule (Hard) on ONE plant only; (4) run Optimize with the preview and read the Tool-blocked panel and the Needs Planning reasons before Apply; (5) widen to other plants one at a time.
+
+Rollback: set the rule back to Off (Order Rules, per plant); the optimizer then behaves as before and nothing else needs reverting. Rolling the image back is safe (older code ignores the table; the table and its rows stay). Never drop `tool_inventory`.
+
 ## Backward-scheduling cutover
 
 > **This runbook was written, not executed.** The 2026-10 backward-scheduling work was built and reviewed without touching the pilot (owner decision "deploy nothing", 2026-10-13): no `az` command, no `psql` against Azure and no `/promote-azure` run was made while writing it. Every command below is a plan for the operator, to be rehearsed on a copy first (step 3). Where a platform fact could not be checked from the repository it is marked **[unverified]**. The design evidence and every decision behind it are in `BACKWARD_SCHEDULING_MIGRATION.md` (section 8.13 is the long form of this runbook; section 8.8 is the rollback matrix).
