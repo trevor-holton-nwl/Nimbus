@@ -562,6 +562,7 @@
     "Timeline.zoomToFit"
   ],
   "intelligenceCommands": [
+    "Alerts.confidenceInput",
     "Alerts.scheduleRecompute",
     "AlertsUIAdapter.focus",
     "App.goto",
@@ -634,7 +635,6 @@
     "CommandPalette._search",
     "Confidence._apply",
     "Confidence._badge",
-    "Confidence._canApply",
     "Confidence._cancelRecomputeDebounced",
     "Confidence._cssVar",
     "Confidence._drawChart",

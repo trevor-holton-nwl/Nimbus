@@ -207,9 +207,21 @@ export function impactPoints(alert: NimbusAlert, horizonStart: Date, horizonMinu
   const horizonEnd = new Date(horizonStart.getTime() + horizonMinutes * 60000);
   const core = _core();
   if (core?.alertPoints) return core.alertPoints(alert, horizonStart, horizonEnd);
-  if (!_validDate(alert.time) || alert.time < horizonStart || alert.time >= horizonEnd) return 0;
+  // Mirrors the core: an alert with a `due` is scored by it (past due counts as due now), else by `time`.
+  let when: Date;
+  if (_validDate(alert.due)) {
+    if (alert.due >= horizonEnd) return 0;
+    when = alert.due < horizonStart ? horizonStart : alert.due;
+  } else {
+    if (!_validDate(alert.time) || alert.time >= horizonEnd) return 0;
+    if (alert.time < horizonStart) {
+      const dayStart = new Date(horizonStart.getFullYear(), horizonStart.getMonth(), horizonStart.getDate());
+      if (alert.time < dayStart) return 0;   // an earlier day is history; earlier today counts as due now
+      when = horizonStart;
+    } else when = alert.time;
+  }
   const base = alert.sev === 'err' ? FALLBACK_WEIGHTS.err : alert.sev === 'warn' ? FALLBACK_WEIGHTS.warn : 0;
-  const days = (alert.time.getTime() - horizonStart.getTime()) / 86400000;
+  const days = (when.getTime() - horizonStart.getTime()) / 86400000;
   return base * (days <= 3 ? FALLBACK_WEIGHTS.tw3 : days <= 7 ? FALLBACK_WEIGHTS.tw7 : 1);
 }
 

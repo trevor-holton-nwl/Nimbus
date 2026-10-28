@@ -519,7 +519,7 @@ export const Alerts = {
    *  never that it is guaranteed to fit. Recomputed with every
    *  alert pass (`calendar:change` already schedules one), so it clears itself when the row stops fitting, is
    *  placed or is dismissed. `onlyLines` scopes it like the core's incremental pass. */
-  queuedNowFits(onlyLines: Set<string> | null = null): NimbusAlert[] {
+  queuedNowFits(onlyLines: Set<string> | null = null, includeDismissed = false): NimbusAlert[] {
     const out: NimbusAlert[] = [];
     for (const t of Store.tasksArr) {
       if (t.planning_status !== 'needs_planning' || t.planning_reason?.code !== 'overlong_never') continue;
@@ -534,7 +534,7 @@ export const Alerts = {
       const tz = Store.masterData?.plants?.find(p => p.plant === plant)?.timezone ?? null;
       if (!Calendar.hasNominalWindow(line, now, minutes * Config.MS_MIN, tz)) continue;
       const id = `queued-now-fits-${t.id}`;
-      if (Alerts._dismissed.has(id)) continue;
+      if (!includeDismissed && Alerts._dismissed.has(id)) continue;
       const order = String(t.PRODUCTION_ORDER ?? t.id);
       out.push({
         id, sev: 'warn', type: 'queued_now_fits',
@@ -554,7 +554,7 @@ export const Alerts = {
    *  no machine, rows outside `onlyLines` and dismissed alerts. `time` is the due instant (the plant's now when the
    *  order has no due date); `err` once that instant is already before the plant's now. `nowFitsIds` are the order
    *  ids `queuedNowFits` just flagged, so an `overlong_never` row that now fits reads "now fits". */
-  needsPlanning(onlyLines: Set<string> | null = null, nowFitsIds: ReadonlySet<string> = new Set()): NimbusAlert[] {
+  needsPlanning(onlyLines: Set<string> | null = null, nowFitsIds: ReadonlySet<string> = new Set(), includeDismissed = false): NimbusAlert[] {
     const out: NimbusAlert[] = [];
     for (const t of Store.tasksArr) {
       if (t.planning_status !== 'needs_planning') continue;
@@ -563,7 +563,7 @@ export const Alerts = {
       const line = t.MACHINE;
       if (!line || (onlyLines && !onlyLines.has(line))) continue;
       const id = `needs-planning-${t.id}`;
-      if (Alerts._dismissed.has(id)) continue;
+      if (!includeDismissed && Alerts._dismissed.has(id)) continue;
       const plant = t.PLANT || Store.getPlantForLine(line);
       const now = plant ? Store.plantNow(plant) : null;
       const due = Util.dueInstant(t);
@@ -575,7 +575,7 @@ export const Alerts = {
         id, sev: due && now && due.getTime() < now.getTime() ? 'err' : 'warn', type: 'needs_planning',
         msg: reason ? `Order "${order}" has no slot yet: ${reason}` : `Order "${order}" has no slot yet.`,
         msgKey: reason ? 'alert.needs_planning' : 'alert.needs_planning_no_reason', msgVars: { order, reason },
-        taskId: t.id, line, time,
+        taskId: t.id, line, time, due: time,   // Confidence scores a queued order by its due instant (past due counts as due now)
       });
     }
     return out;
@@ -583,9 +583,33 @@ export const Alerts = {
 
   /** Both queue-alert producers in one call (the four publish sites use this): "now fits" first, then Needs Planning
    *  with the now-fits ids so its reason text agrees with the sibling alert. */
-  queuedAlerts(onlyLines: Set<string> | null = null): NimbusAlert[] {
-    const fits = Alerts.queuedNowFits(onlyLines);
-    return fits.concat(Alerts.needsPlanning(onlyLines, new Set(fits.map(a => String(a.taskId)))));
+  queuedAlerts(onlyLines: Set<string> | null = null, includeDismissed = false): NimbusAlert[] {
+    const fits = Alerts.queuedNowFits(onlyLines, includeDismissed);
+    return fits.concat(Alerts.needsPlanning(onlyLines, new Set(fits.map(a => String(a.taskId))), includeDismissed));
+  },
+
+  /** The alert list BEFORE the dismiss filter (null until the first recompute): what Schedule Confidence and the Alert
+   *  Monitor's leverage score. Dismissing hides an alert from the bell, drawer, Gantt and Orders only; it never raises
+   *  the score (an acknowledgement, which is accountable, does not either). Maintained by `_publish`, the one place
+   *  both the worker and the sync path (full and incremental) write alerts, so the two paths cannot drift. */
+  _allAlerts: null as NimbusAlert[] | null,
+  scoringAlerts(): NimbusAlert[] { return Alerts._allAlerts ?? Store.alerts ?? []; },
+
+  /** Everything Schedule Confidence needs besides the horizon: the pre-dismiss alerts and the machine count of the
+   *  selected plant (`Store.linesForSelectedPlant()`, the same line set the utilization matrix and the alert pass use;
+   *  minimum 1). The badge, its breakdown and the Alert Monitor's leverage all read this, so they cannot disagree. */
+  confidenceInput(): { alerts: NimbusAlert[]; machines: number } {
+    return { alerts: Alerts.scoringAlerts(), machines: Math.max(1, Store.linesForSelectedPlant().length) };
+  },
+
+  /** Merge a fresh compute result (UNFILTERED by dismissals) into the pre-dismiss list, then publish the
+   *  dismiss-filtered view to the Store. `fresh` already includes the queued-order alerts. */
+  _publish(fresh: NimbusAlert[], onlyLines: Set<string> | null): void {
+    const base = Alerts._allAlerts ?? Store.alerts ?? [];
+    const all = onlyLines ? base.filter(a => !onlyLines.has(a.line)).concat(fresh) : fresh;
+    Alerts._allAlerts = all;
+    const dismissed = Alerts._dismissed;
+    Store.setAlerts(dismissed.size ? all.filter(a => !dismissed.has(a.id)) : all.slice(), 'alerts');
   },
 
   recompute(opts: { lines?: Set<string> } = {}): void {
@@ -594,19 +618,14 @@ export const Alerts = {
     // structured-cloning every line's calendars/lineSettings/masterData across.
     if (Compute.available() && Store.selectedPlant) {
       const reqRev = Store.rev();
-      Compute.alerts(opts, Alerts._dismissed)
+      Compute.alerts(opts)   // never filtered by dismissals: _publish filters, Confidence needs the full list
         .then(({ alerts, elapsed }) => {
           if (Store.rev() !== reqRev) {
             Alerts.scheduleRecompute();
             return;
           }
           const onlyLines = opts.lines instanceof Set && opts.lines.size ? opts.lines : null;
-          if (onlyLines) {
-            const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
-            Store.setAlerts(retained.concat(alerts, Alerts.queuedAlerts(onlyLines)), 'alerts');
-          } else {
-            Store.setAlerts(alerts.concat(Alerts.queuedAlerts()), 'alerts');
-          }
+          Alerts._publish(alerts.concat(Alerts.queuedAlerts(onlyLines, true)), onlyLines);
           Alerts._lastMs = elapsed;
         })
         .catch((e) => {
@@ -640,17 +659,12 @@ export const Alerts = {
         masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
       }),
       ..._alertClockPayload(Object.keys(Store._tasksByPlant)),
-      dismissed:    [...Alerts._dismissed],
+      dismissed:    [],   // unfiltered, like the worker path: _publish applies the dismissals
       opts:         { lines: onlyLines ? [...onlyLines] : null },
     });
-    if (onlyLines) {
-      // Incremental merge: retain alerts on untouched lines, replace only the affected
-      // ones. Callers of the scoped path never move a task across lines.
-      const retained = (Store.alerts || []).filter(a => !onlyLines.has(a.line));
-      Store.setAlerts(retained.concat(kept, Alerts.queuedAlerts(onlyLines)), 'alerts');
-    } else {
-      Store.setAlerts(kept.concat(Alerts.queuedAlerts()), 'alerts');
-    }
+    // Incremental: retain alerts on untouched lines, replace only the affected ones (callers of the scoped path never
+    // move a task across lines). Full: replace. Same merge as the worker path (_publish).
+    Alerts._publish(kept.concat(Alerts.queuedAlerts(onlyLines, true)), onlyLines);
     Alerts._lastMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - _t0;
     PerfMonitor.record('Alerts.syncFallback', Alerts._lastMs);
   },

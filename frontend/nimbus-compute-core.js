@@ -1330,7 +1330,7 @@
           ? `Order "${vars.order}" finishes ${vars.hours} h after its due date, beyond the plant limit of ${cap} day(s) late.`
           : `Order "${vars.order}" finishes ${vars.hours} h after its due date.`,
         msgKey: beyondCap ? 'alert.late_beyond_cap' : 'alert.late', msgVars: vars,
-        taskId: t.id, line, time: end,
+        taskId: t.id, line, time: end, due,
       });
     }
 
@@ -1666,7 +1666,11 @@
   }
 
   // ── Schedule Confidence formula (single source for the badge and the Alert Monitor) ──
-  const CONFIDENCE_WEIGHTS = Object.freeze({ err: 5, warn: 2, tw3: 1.5, tw7: 1.25, alertCap: 50, utilCap: 20, perOverload: 1.5 });
+  // score = round(100 * exp(-raw / (perMachine * machines))): a diminishing curve (never negative, no caps), scaled by
+  // the plant's machine count so a big plant is not punished for being big. `raw` is the sum of alert points only
+  // (an overloaded day is already an `overload` err alert, so there is no separate utilisation bucket).
+  const CONFIDENCE_WEIGHTS = Object.freeze({ err: 5, warn: 2, tw3: 1.5, tw7: 1.25, perMachine: 20 });
+  const DEFAULT_CONFIDENCE_MACHINES = 5;
 
   // Days-out from the horizon start -> multiplier (imminent = more costly).
   function timeWeight(time, horizonStart) {
@@ -1675,32 +1679,56 @@
     return d <= 3 ? CONFIDENCE_WEIGHTS.tw3 : d <= 7 ? CONFIDENCE_WEIGHTS.tw7 : 1.0;
   }
 
-  // Uncapped impact points of one alert (0 outside [horizonStart, horizonEnd)).
+  // Uncapped impact points of one alert. An alert with a `due` (late, needs_planning) is scored by its due date:
+  // due >= horizonEnd -> 0; due before horizonStart -> past due and still open, scored as due now (weight 1.5).
+  // An alert without `due` is scored by `time`: at/after horizonEnd is 0, an earlier DAY is history (0), and one dated
+  // earlier TODAY (today's overload is dated noon) counts as due now (weight 1.5).
   function alertPoints(alert, horizonStart, horizonEnd) {
-    if (!alert.time || alert.time < horizonStart || alert.time >= horizonEnd) return 0;
+    let when;
+    if (alert.due) {
+      if (alert.due >= horizonEnd) return 0;
+      when = alert.due < horizonStart ? horizonStart : alert.due;
+    } else {
+      if (!alert.time || alert.time >= horizonEnd) return 0;
+      if (alert.time < horizonStart) {
+        if (alert.time < startOfDay(horizonStart)) return 0;
+        when = horizonStart;
+      } else when = alert.time;
+    }
     const base = alert.sev === 'err' ? CONFIDENCE_WEIGHTS.err : alert.sev === 'warn' ? CONFIDENCE_WEIGHTS.warn : 0;
-    return base * timeWeight(alert.time, horizonStart);
+    return base * timeWeight(when, horizonStart);
   }
 
-  function countOverloadedLineDays(matrix) {
-    let n = 0;
-    Object.values(matrix || {}).forEach(lineData => {
-      Object.values(lineData).forEach(row => {
-        if (row.effectiveCapacity > 0 && row.scheduled > row.effectiveCapacity) n++;
-      });
-    });
-    return n;
+  function _machinesOrDefault(machines) {
+    return Number.isFinite(machines) && machines >= 1 ? machines : DEFAULT_CONFIDENCE_MACHINES;
   }
 
-  function scoreConfidence({ alerts, matrix, overloadedLineDays, horizonStart, horizonMinutes }) {
+  // The score for a raw point total (shared with the leverage engine's O(1) "score without these alerts").
+  function confidenceFromRaw(raw, machines) {
+    return Math.round(100 * Math.exp(-Math.max(0, raw) / (CONFIDENCE_WEIGHTS.perMachine * _machinesOrDefault(machines))));
+  }
+
+  function scoreConfidence({ alerts, horizonStart, horizonMinutes, machines }) {
     const horizonEnd = new Date(horizonStart.getTime() + horizonMinutes * 60000);
-    let rawAlertPoints = 0;
-    (alerts || []).forEach(a => { rawAlertPoints += alertPoints(a, horizonStart, horizonEnd); });
-    const alertPenalty = Math.min(CONFIDENCE_WEIGHTS.alertCap, Math.round(rawAlertPoints));
-    const lineDays = overloadedLineDays != null ? overloadedLineDays : countOverloadedLineDays(matrix);
-    const utilPenalty = Math.min(CONFIDENCE_WEIGHTS.utilCap, Math.round(CONFIDENCE_WEIGHTS.perOverload * lineDays));
-    const score = Math.max(0, Math.min(100, 100 - alertPenalty - utilPenalty));
-    return { score, alertPenalty, utilPenalty, rawAlertPoints, overloadedLineDays: lineDays };
+    const m = _machinesOrDefault(machines);
+    let rawErrPoints = 0, rawWarnPoints = 0;
+    (alerts || []).forEach(a => {
+      const p = alertPoints(a, horizonStart, horizonEnd);
+      if (a.sev === 'err') rawErrPoints += p; else rawWarnPoints += p;
+    });
+    const rawAlertPoints = rawErrPoints + rawWarnPoints;
+    const score = confidenceFromRaw(rawAlertPoints, m);
+    const penalty = 100 - score;
+    // Split the penalty between err and warn by raw-point share (largest remainder, so the two add up exactly).
+    let errPenalty = 0;
+    if (penalty > 0 && rawAlertPoints > 0) {
+      const errExact = penalty * rawErrPoints / rawAlertPoints;
+      const warnExact = penalty - errExact;
+      errPenalty = Math.floor(errExact);
+      const warnFloor = Math.floor(warnExact);
+      if (errPenalty + warnFloor < penalty && errExact - errPenalty >= warnExact - warnFloor) errPenalty++;
+    }
+    return { score, penalty, errPenalty, warnPenalty: penalty - errPenalty, rawAlertPoints, rawErrPoints, rawWarnPoints, machines: m };
   }
 
   return {
@@ -1719,6 +1747,6 @@
     // top-level compute
     computeAlerts, computeUtilization,
     // confidence scoring
-    timeWeight, alertPoints, countOverloadedLineDays, scoreConfidence,
+    timeWeight, alertPoints, confidenceFromRaw, scoreConfidence,
   };
 });

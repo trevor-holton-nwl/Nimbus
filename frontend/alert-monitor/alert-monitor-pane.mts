@@ -871,7 +871,9 @@ function _levBuildInput(s: PaintState): LeverageInput {
     snapshotBase: buildPlantSnapshot(plant),
     // The replay scores over exactly this window: [start of the plant's day, +ceil(horizon/1440) days).
     baselineMatrix: Utilization.computeMatrix(s.plantToday, days) as unknown as NimbusUtilizationMatrix,
-    dismissed: [...Alerts._dismissed],
+    // The score counts dismissed alerts: score over the same pre-dismiss list and machine count the badge uses, so "before" equals it.
+    scoringAlerts: Alerts.confidenceInput().alerts,
+    machines: Alerts.confidenceInput().machines,
   };
 }
 

@@ -26,14 +26,13 @@ const { Store, Sandbox, Alerts, SandboxAdapter } = nimbus;
 nimbus.Compute = Compute;
 Confidence.init();
 
-test('an in-flight production Confidence request cannot overwrite a discarded baseline', async () => {
+test('the production Confidence path scores from alerts alone: it never requests a utilization matrix', async () => {
   const priorTasks = structuredClone(Store.tasksArr);
   const priorPlant = Store.selectedPlant;
   const priorAvailable = Compute.available;
   const priorUtilization = Compute.utilization;
   const priorNimbus = globalThis.NIMBUS;
-  const request = {};
-  request.promise = new Promise(resolve => { request.resolve = resolve; });
+  let utilizationCalls = 0;
   globalThis.NIMBUS = nimbus;
 
   try {
@@ -42,20 +41,10 @@ test('an in-flight production Confidence request cannot overwrite a discarded ba
     Store.setTasks([{ id: 'confidence-pending', PLANT: 'CONF-P', MACHINE: 'CONF-L', RUN_TIME: 1 }], 'test');
     Store.setSelectedPlant('CONF-P', 'test');
     Compute.available = () => true;
-    Compute.utilization = () => request.promise;
-
-    const baseline = Confidence.snapshot();
-    const pending = Confidence._recompute();
-    await Promise.resolve();
-    assert.ok(request.resolve, 'the production Confidence path must await utilization');
-
-    Sandbox.enter('test');
-    Sandbox.exit(false, 'test');
-    request.resolve({ matrix: {} });
-    await pending;
-
-    assert.deepEqual(Confidence.snapshot(), baseline,
-      'a worker result that resolves after discard must not change score or history');
+    Compute.utilization = () => { utilizationCalls++; return new Promise(() => {}); };
+    Confidence._lastAlertsSrc = null; Confidence._lastRev = null;
+    await Confidence._recompute();
+    assert.equal(utilizationCalls, 0, 'an overloaded day is an overload alert already: no matrix is needed for the score');
   } finally {
     Confidence._invalidatePending(true);
     if (Sandbox.active) Sandbox.exit(false, 'test');
@@ -302,6 +291,7 @@ test('#32 Confidence uses the selected plant\'s conf_score_horizon (master data)
   const scoreFor = async (horizonMinutes) => {
     Store.setMasterData({ plants: [{ plant: 'CH', conf_score_horizon: horizonMinutes }], lines: [] }, 'test');
     Store.setAlerts(alertIn2Days, 'test');
+    Alerts._allAlerts = null;   // score the Store list directly (a recompute would otherwise have filled the pre-dismiss list)
     Confidence._lastAlertsSrc = null; Confidence._lastRev = null;
     await Confidence._recompute();
     return Confidence.snapshot().score;
@@ -668,38 +658,28 @@ test('gate 15: TimeMachine.restore brings back each row\'s finish, flags it stal
 });
 
 // ---- Senior review I13 (one clock): intelligence panels read the plant's "today", like the Dashboard ----------------
-test('I13: the Confidence and peak-briefing matrix requests start on the plant clock, not the viewer clock', async () => {
+test('I13: the peak-briefing matrix read starts on the plant clock, not the viewer clock', async () => {
   const { NeedsEngine, Util } = nimbus;
   const priorTasks = structuredClone(Store.tasksArr);
   const priorPlant = Store.selectedPlant;
-  const priorAvailable = Compute.available;
-  const priorUtilization = Compute.utilization;
   const priorNimbus = globalThis.NIMBUS;
-  const starts = [];
   globalThis.NIMBUS = nimbus;
-  // The plant is a day ahead of the viewer: its wall clock reads Thu 15 Oct 00:30 whatever the machine's clock says.
+  // The plant is a day ahead of the viewer: its wall clock reads Thu 15 Oct 00:30 whatever the machine clock says.
   Util.setPlantClockResolver(plant => (plant === 'I13-P' ? new Date(2026, 9, 15, 0, 30) : null));
-  Compute.available = () => true;
-  Compute.utilization = (startMs) => { starts.push(startMs); return Promise.resolve({ matrix: {} }); };
   try {
     Confidence._invalidatePending(true);
     Store.setTasks([{ id: 'i13-1', PLANT: 'I13-P', MACHINE: 'I13-L', RUN_TIME: 1 }], 'test');
     Store.setSelectedPlant('I13-P', 'test');
     nimbus.Utilization._cacheClear();
-    await Confidence._recompute();
     NeedsEngine._readState();   // sync computeMatrix on the plant clock: no worker post of its own any more
     const plantToday = new Date(2026, 9, 15).getTime();
-    assert.ok(starts.length >= 1, 'Confidence asked the worker for a matrix');
     // NeedsEngine's 7-day read runs on the plant clock and fills the shared cache entry the Dashboard reads
     assert.ok(nimbus.Utilization._cacheEntries().some(e => e.startMs === plantToday && e.days >= 7),
-      'a cache entry (the 14-day Confidence window, which the 7-day read slices) starting at the plant today exists after NeedsEngine._readState()');
-    for (const startMs of starts) assert.equal(startMs, plantToday, 'the matrix window starts on the plant\'s today');
+      'a cache entry starting at the plant today exists after NeedsEngine._readState()');
   } finally {
     Confidence._invalidatePending(true);
     Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Store.getPlantForLine(line) : null)));
     nimbus.Utilization._cacheClear();
-    Compute.available = priorAvailable;
-    Compute.utilization = priorUtilization;
     Store.setTasks(priorTasks, 'test');
     Store.setSelectedPlant(priorPlant, 'test');
     globalThis.NIMBUS = priorNimbus;
@@ -803,7 +783,7 @@ test('U34: Push +1 hour reports moved and skipped counts and the undo label carr
 });
 
 // ---- Workload relief 6c: the shared utilization cache must never hold raw worker task ids ------------------------
-test('6c: after Confidence._recompute a later computeMatrix returns rows whose tasks are task objects, not ids', async () => {
+test('6c: after a worker-filled computeMatrixAsync a later computeMatrix returns rows whose tasks are task objects, not ids', async () => {
   const { Util } = nimbus;
   const priorTasks = structuredClone(Store.tasksArr);
   const priorPlant = Store.selectedPlant;
@@ -826,9 +806,9 @@ test('6c: after Confidence._recompute a later computeMatrix returns rows whose t
     Store.setTasks([{ id: '6c-1', PLANT: '6C-P', MACHINE: '6C-L', RUN_TIME: 1 }], 'test');
     Store.setSelectedPlant('6C-P', 'test');
     nimbus.Utilization._cacheClear();
-    await Confidence._recompute();
+    await nimbus.Utilization.computeMatrixAsync(Util.plantToday('6C-P'), 14, { syncFallback: false });
     const entry = nimbus.Utilization._cacheEntries().find(e => e.plant === '6C-P');
-    assert.ok(entry, 'the recompute filled the shared cache');
+    assert.ok(entry, 'the worker reply filled the shared cache');
     const today = Util.plantToday('6C-P');
     const rows = nimbus.Utilization.computeMatrix(today, entry.days)['6C-L'];
     for (const row of Object.values(rows)) {
@@ -866,4 +846,62 @@ test('palette freeze scope excludes other plants and reports how many orders wer
     assert.deepEqual(brief(setFirmedCalls).flatMap(c => c.ids), ['s1'], 'only the selected plant is firmed');
     assert.ok(toasts.some(m => /firm_skipped_locked/.test(m) || /2 skipped/.test(m)), `locked count reported: ${JSON.stringify(toasts)}`);
   });
+});
+
+// ---- Confidence curve: dismissed alerts still count -------------------------------------------------------------
+test('dismissing an alert hides it from Store.alerts but leaves the Confidence input (and score) unchanged', async () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorAlerts = structuredClone(Store.alerts);
+  const priorAll = Alerts._allAlerts;
+  const priorDismissed = Alerts.snapshotDismissed();
+  const priorAvailable = Compute.available;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorConfidence = Confidence.snapshot();
+  globalThis.NIMBUS = nimbus;
+  Compute.available = () => false;
+  Alerts.scheduleRecompute = () => {};
+  const soon = d => new Date(Date.now() + d * 86400000);
+  const fresh = [
+    { id: 'dm-1', type: 'overlap', sev: 'err', line: 'DM-L', taskId: 'dm-1', time: soon(2) },
+    { id: 'dm-2', type: 'overlap', sev: 'err', line: 'DM-L', taskId: 'dm-2', time: soon(3) },
+  ];
+  try {
+    Confidence._invalidatePending(true);
+    Alerts.restoreDismissed([]);
+    Store.setTasks([{ id: 'dm-1', PLANT: 'DM', MACHINE: 'DM-L', RUN_TIME: 1 }], 'test');
+    Store.setSelectedPlant('DM', 'test');
+    Alerts._publish(fresh, null);
+    const scoreNow = async () => { Confidence._lastAlertsSrc = null; Confidence._lastRev = null; await Confidence._recompute(); return Confidence.snapshot().score; };
+    const before = await scoreNow();
+    assert.ok(before < 100);
+    const listBefore = Alerts.scoringAlerts();
+
+    Alerts.dismiss('dm-1');
+    assert.deepEqual(Store.alerts.map(a => a.id), ['dm-2'], 'the bell/drawer list loses the dismissed alert');
+    assert.deepEqual(Alerts.scoringAlerts().map(a => a.id), ['dm-1', 'dm-2'], 'the scoring list keeps it');
+    assert.equal(Alerts.scoringAlerts(), listBefore);
+    assert.equal(await scoreNow(), before, 'Confidence is unchanged by a dismissal');
+
+    // an incremental publish on the same line keeps the dismissal hidden but still scored
+    Alerts._publish([fresh[0], fresh[1]], new Set(['DM-L']));
+    assert.deepEqual(Store.alerts.map(a => a.id), ['dm-2']);
+    assert.equal(await scoreNow(), before);
+
+    Alerts.dismissAll();
+    assert.equal(Store.alerts.length, 0);
+    assert.equal(await scoreNow(), before, 'Dismiss all leaves the score alone');
+  } finally {
+    Confidence._invalidatePending(true);
+    Confidence.restore(priorConfidence);
+    Alerts.restoreDismissed(priorDismissed);
+    Alerts._allAlerts = priorAll;
+    Alerts.scheduleRecompute = priorSchedule;
+    Compute.available = priorAvailable;
+    Store.setAlerts(priorAlerts, 'test');
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
 });
