@@ -5786,3 +5786,134 @@ test('stale compute core: no periods never calls the core helper; periods withou
     Store.setPlantPeriods('STALE-P', [], 'unit-test');
   }
 });
+
+// ---------------------------------------------------------------------------
+// 2026-10-28 owner decision (narrows D7/OQ17): a split order moved to a finish where its whole run fits ONE
+// working window rejoins into one bar; anything else keeps the rigid shift.
+// ---------------------------------------------------------------------------
+function splitRejoinTask(fx, extra = {}) {
+  // 4 h run split 2 h + 2 h around the weekend: Fri 17:00-19:00 and Mon 07:00-09:00.
+  const s1 = { sequence: 1, startDate: new Date('2026-08-21T17:00:00'), endDate: new Date('2026-08-21T19:00:00') };
+  const s2 = { sequence: 2, startDate: new Date('2026-08-24T07:00:00'), endDate: new Date('2026-08-24T09:00:00') };
+  return { id: `rejoin-${Math.random().toString(36).slice(2, 7)}`, PLANT: fx.plant, MACHINE: fx.line, RUN_TIME: '4',
+    start_date: s1.startDate, end_date: s2.endDate, scheduleSegments: [s1, s2], ...extra };
+}
+
+for (const policy of ['never', 'overlong_only', 'partial_allowed']) {
+  test(`split rejoin: a finish whose whole run fits one window gives one bar under ${policy}`, () => {
+    const fx = manualFixture({ split_order_policy: policy });
+    try {
+      const finish = new Date('2026-08-25T14:00:00');
+      const patch = Engine.manualSchedulePatchFor(splitRejoinTask(fx), fx.line, finish);
+      assert.ok(patch);
+      assert.deepEqual(patch.scheduleSegments, []);
+      assert.equal(patch.end_date.getTime(), finish.getTime());
+      assert.equal(patch.start_date.getTime(), new Date('2026-08-25T10:00:00').getTime());
+      assert.equal(Engine.lastManualRefusal, null);
+      assert.equal(fx.toasts.length, 0);
+    } finally { fx.restore(); }
+  });
+}
+
+for (const policy of ['never', 'partial_allowed']) {
+  test(`split rejoin: a destination that still needs splitting keeps the rigid offsets (${policy})`, () => {
+    const fx = manualFixture({ split_order_policy: policy });
+    try {
+      const task = splitRejoinTask(fx);
+      const finish = new Date('2026-08-25T09:00:00');   // only 2 h of window before 09:00
+      const patch = Engine.manualSchedulePatchFor(task, fx.line, finish);
+      const deltaMs = finish.getTime() - task.scheduleSegments[1].endDate.getTime();
+      assert.equal(patch.scheduleSegments.length, 2);
+      patch.scheduleSegments.forEach((seg, i) => {
+        assert.equal(seg.startDate.getTime(), task.scheduleSegments[i].startDate.getTime() + deltaMs);
+        assert.equal(seg.endDate.getTime(), task.scheduleSegments[i].endDate.getTime() + deltaMs);
+      });
+      assert.equal(Engine.lastManualRefusal, null);
+    } finally { fx.restore(); }
+  });
+}
+
+test('split rejoin: a finish in closed time stays rigid with no refusal and no toast', () => {
+  const fx = manualFixture({ split_order_policy: 'partial_allowed' });
+  try {
+    const task = splitRejoinTask(fx);
+    const finish = new Date('2026-08-23T12:00:00');   // Sunday
+    const patch = Engine.manualSchedulePatchFor(task, fx.line, finish);
+    assert.equal(patch.scheduleSegments.length, 2);
+    assert.equal(patch.end_date.getTime(), finish.getTime());
+    assert.equal(Engine.lastManualRefusal, null);
+    assert.equal(fx.toasts.length, 0);
+  } finally { fx.restore(); }
+});
+
+test('split rejoin: an order with an approved placement_exception stays rigid', () => {
+  const fx = manualFixture({ split_order_policy: 'partial_allowed' });
+  try {
+    const patch = Engine.manualSchedulePatchFor(splitRejoinTask(fx, { placement_exception: 'overtime' }), fx.line, new Date('2026-08-25T14:00:00'));
+    assert.equal(patch.scheduleSegments.length, 2);
+  } finally { fx.restore(); }
+});
+
+test('split rejoin: a no-op (same line, same finish) leaves the pieces unchanged', () => {
+  const fx = manualFixture({ split_order_policy: 'partial_allowed' });
+  try {
+    const task = splitRejoinTask(fx);
+    const original = Engine.finishAnchoredPatchFor;
+    let calls = 0;
+    Engine.finishAnchoredPatchFor = function (...args) { calls++; return original.apply(this, args); };
+    let patch;
+    try { patch = Engine.manualSchedulePatchFor(task, fx.line, task.end_date); }
+    finally { Engine.finishAnchoredPatchFor = original; }
+    assert.equal(calls, 0, 'the no-op guard must skip the rejoin attempt');
+    assert.equal(patch.scheduleSegments.length, 2);
+    task.scheduleSegments.forEach((seg, i) => {
+      assert.equal(patch.scheduleSegments[i].startDate.getTime(), seg.startDate.getTime());
+      assert.equal(patch.scheduleSegments[i].endDate.getTime(), seg.endDate.getTime());
+    });
+  } finally { fx.restore(); }
+});
+
+test('split rejoin: a machine change to a line whose calendar fits gives one bar', () => {
+  const fx = manualFixture({ split_order_policy: 'partial_allowed' });
+  const other = `${fx.line}-B`;
+  try {
+    Store.setMasterData({ plants: [{ plant: fx.plant, split_order_policy: 'partial_allowed', timezone: LOCAL_TZ }],
+      lines: [{ machine: fx.line, plant: fx.plant }, { machine: other, plant: fx.plant }] }, 'unit-test');
+    const task = splitRejoinTask(fx);
+    const patch = Engine.manualSchedulePatchFor(task, other, task.end_date);   // same finish, new line
+    assert.equal(patch.MACHINE, other);
+    // Mon 09:00 finish, 4 h run: only 2 h of window before 09:00 on that line, so it stays split here ...
+    assert.equal(patch.scheduleSegments.length, 2);
+    // ... while a finish inside a longer window on the new line rejoins.
+    const fits = Engine.manualSchedulePatchFor(task, other, new Date('2026-08-24T14:00:00'));
+    assert.deepEqual(fits.scheduleSegments, []);
+    assert.equal(fits.MACHINE, other);
+  } finally { fx.restore(); delete Store.calendars[other]; }
+});
+
+test('split rejoin: pushFinishPatches rejoins when the +1 h finish fits one window', () => {
+  const fx = manualFixture({ split_order_policy: 'partial_allowed' });
+  try {
+    const task = splitRejoinTask(fx);
+    // Move the order so the second piece ends mid-day (Tue 12:00 -> 13:00): 4 h fits 09:00-13:00.
+    const s1 = { sequence: 1, startDate: new Date('2026-08-24T17:00:00'), endDate: new Date('2026-08-24T19:00:00') };
+    const s2 = { sequence: 2, startDate: new Date('2026-08-25T10:00:00'), endDate: new Date('2026-08-25T12:00:00') };
+    Object.assign(task, { start_date: s1.startDate, end_date: s2.endDate, scheduleSegments: [s1, s2] });
+    const [p] = Engine.pushFinishPatches([task], 3600000);
+    assert.deepEqual(p.changes.scheduleSegments, []);
+    assert.equal(p.changes.end_date.getTime(), new Date('2026-08-25T13:00:00').getTime());
+    assert.equal(p.changes.start_date.getTime(), new Date('2026-08-25T09:00:00').getTime());
+  } finally { fx.restore(); }
+});
+
+test('split rejoin: a blackout inside the window keeps the rigid shift', () => {
+  const fx = manualFixture({ split_order_policy: 'partial_allowed' });
+  const priorBlocks = structuredClone(Store.blocks);
+  try {
+    Store.addBlock({ id: 'rejoin-blackout', plant: fx.plant, line: fx.line,
+      start: new Date('2026-08-25T11:00:00'), end: new Date('2026-08-25T12:00:00') }, 'unit-test');
+    const patch = Engine.manualSchedulePatchFor(splitRejoinTask(fx), fx.line, new Date('2026-08-25T14:00:00'));
+    assert.equal(patch.scheduleSegments.length, 2);
+    assert.equal(Engine.lastManualRefusal, null);
+  } finally { Store.replaceBlocks(priorBlocks, 'unit-test'); fx.restore(); }
+});
