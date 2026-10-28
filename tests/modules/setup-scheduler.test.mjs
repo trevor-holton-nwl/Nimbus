@@ -6555,3 +6555,29 @@ test('tool overflow: with a fake clock the pass is deterministic at every budget
     }
   }
 });
+
+test('tool overflow: a cascade marker is dropped once a later repair relabels the order to another reason', () => {
+  const entry = (orderId, reasonCode) => ({ orderId, tool: 'T1', available: 1, inUse: 0, holderIds: ['A'], cause: 'cascade', reasonCode });
+  const result = { patches: [], toolPass: { complete: true, elapsedMs: 0 },
+    dispositions: [
+      { id: 'E', line: 'L2', status: 'needs_planning', reason: { code: 'no_fit_found', message: 'x' } },
+      { id: 'F', line: 'L2', status: 'needs_planning', reason: { code: 'setup_transition_unrecorded', message: 'x' } },
+      { id: 'G', line: 'L2', status: 'scheduled' },
+    ],
+    toolBlocked: [entry('E', 'setup_transition_unrecorded'), entry('F', 'setup_transition_unrecorded'), entry('G', 'setup_transition_unrecorded')] };
+  const out = SetupScheduler.reconcileToolOutcomes(result);
+  assert.deepEqual((out.toolBlocked ?? []).map(e => e.orderId), ['F'], 'E was relabelled (dropped); G is scheduled (dropped); F keeps its cascade marker');
+});
+
+test('tool overflow: the contention detail counts distinct other machines from the untruncated holders (two items on one line are one copy)', () => {
+  const item = (id, line) => ({ id, line, start: new Date('2035-08-07T03:00:00'), end: new Date('2035-08-07T05:00:00') });
+  const mk = items => ({ ctx: { core: { toolHeadroom: () => [] }, plant: 'P1', capacityFor: () => ({ available: 1 }) }, byTool: new Map([['T1', new Map(items.map(x => [x.id, x]))]]) });
+  const span = [new Date('2035-08-07T02:00:00'), new Date('2035-08-07T06:00:00')];
+  // two items on ONE other machine: one copy in use, plus the order itself
+  const single = SetupScheduler.toolContentionDetail(mk([item('B', 'L2'), item('B2', 'L2')]), ['T1'], 'L1', ...span);
+  assert.deepEqual(single.holders, ['B', 'B2']); assert.equal(single.inUse, 2);
+  // 14 items on 14 distinct machines: holders are capped at 10, inUse is NOT (14 + the order itself)
+  const many = Array.from({ length: 14 }, (_, k) => item('H' + String(k).padStart(2, '0'), 'M' + k));
+  const wide = SetupScheduler.toolContentionDetail(mk(many), ['T1'], 'L1', ...span);
+  assert.equal(wide.holders.length, 10); assert.equal(wide.inUse, 15);
+});
