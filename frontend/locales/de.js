@@ -2925,7 +2925,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.opt_tool_incomplete': 'Werkzeugprüfung unvollständig: Einige Aufträge wurden ohne vollständige Suche eingereiht.',
   'ui.opt_tool_need_planning_suffix': '({{n}} wegen Werkzeugen)',
   'modal.opt_tool_confirm_title': 'Aufträge werden wegen Werkzeugen eingereiht',
-  'modal.opt_tool_confirm_moved': '{{n}} Aufträge wegen Werkzeugen verschoben (Information)',
+  'modal.opt_tool_confirm_moved': 'Wegen Werkzeugen verschobene Aufträge: {{n}}',
   'modal.opt_tool_confirm_queued': 'Davon Werkzeug: {{n}} eingereiht',
   'btn.opt_tool_confirm_apply': 'Trotzdem anwenden',
   'modal.opt_tool_inventory_not_loaded': 'Der Werkzeugbestand ist nicht geladen, daher zählt jedes Werkzeug als 1 Exemplar. Fortfahren?',
@@ -2941,4 +2941,8 @@ window.__NIMBUS_LOCALES.de = {
   'toast.tool_id_unknown': 'Werkzeug {{tool}} hat keine Bestandszeile und zählt als 1 Exemplar.',
   'am.slot_confirm_tool': 'Werkzeug {{tool}} würde seine {{available}} Exemplare überschreiten.',
   'ui.tool_inventory_rule_link': 'In den Werkseinstellungen ändern',
+  'modal.opt_tool_raise_discard': 'Das Schließen der Vorschau verwirft diesen Plan. Bestand jetzt erhöhen?',
+  'toast.opt_tool_raise_closed': 'Vorschau geschlossen. Führen Sie die Optimierung nach der Bestandsänderung erneut aus.',
+  'toast.fix_overload_blocked_batch': 'Nicht angewendete Überlastungskorrekturen: {{n}}. Sie würden einen Fehler hinterlassen, daher wurde dafür nichts geändert.',
+  'toast.optimize_need_planning': '{{count}} Auftrag/Aufträge benötigen Planung. Prüfen Sie die zulässigen Zeitfenster und Gründe unter Aufträge.',
 };

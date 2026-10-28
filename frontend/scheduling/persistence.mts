@@ -882,6 +882,26 @@ export const Persistence = {
       .catch(() => undefined);
   },
 
+  /** Public freshness check for a consumer that is about to READ the inventory (the Optimize run, rule Hard): one cheap
+   *  version probe, and a re-read only when the server's version differs from the one the held rows were read at. Bounded
+   *  by `timeoutMs` (default 1500) so a slow or dead probe never stalls the caller: on timeout, a failed probe or no
+   *  baseline to compare it resolves {fresh:false} and the caller proceeds with the held rows. {fresh:true} means the held
+   *  rows are confirmed current (version unchanged, or re-read and applied). Never rejects. */
+  async ensureToolInventoryCurrent(plant: string | null, opts: { timeoutMs?: number } = {}): Promise<{ fresh: boolean }> {
+    if (!plant) return { fresh: false };
+    const timeoutMs = opts.timeoutMs ?? 1500;
+    const work = (async (): Promise<boolean> => {
+      const version = await Persistence._readToolInventoryVersion(plant);
+      const baseline = Persistence._toolInventoryBaseline[plant];
+      if (version === undefined || baseline === undefined) return false;
+      if (version === baseline) return true;
+      return Persistence.refreshToolInventory(plant);
+    })().catch(() => false);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    try { return { fresh: await Promise.race([work, timeout]) }; } finally { clearTimeout(timer); }
+  },
+
   /** Version FIRST, rows SECOND (sequential on purpose): an edit landing between the two reads leaves the stored
    *  baseline OLDER than the rows, so the worst case is one extra refetch, never a missed edit. */
   async _fetchToolInventoryWithVersion(plant: string): Promise<{ rows: NimbusToolInventoryRow[] | undefined; version: string | undefined }> {

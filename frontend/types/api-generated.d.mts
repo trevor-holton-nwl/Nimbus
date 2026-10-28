@@ -3504,6 +3504,8 @@ export interface components {
             code: string;
             /** Message */
             message: string;
+            /** Code-specific structured keys (tool_id, available, holders, incomplete, run_time, cap_hours, ...): extra="allow" */
+            [key: string]: unknown;
         };
         /**
          * PlantConstraintsResult

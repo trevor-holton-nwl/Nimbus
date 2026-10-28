@@ -48,6 +48,7 @@ import { Store, UndoStack } from '../platform/store.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Engine, deriveSetupObservation, snapshotSchedule } from '../optimization/engine.mjs';
 import { confirmToolQueue, toolQueueSummary } from '../optimization/tool-queue-confirm.mjs';
+import type { CandidateResult } from '../optimization/setup-scheduler.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { planningReasonText } from '../scheduling/planning-reason.mjs';
 import { alertOrderIds } from './alert-profiles.mjs';
@@ -472,6 +473,42 @@ export const Compute = (() => {
 // them when called, well after module evaluation completes.
 const _ALERTS_MIN_DEBOUNCE_MS = 90;
 const _ALERTS_MAX_DEBOUNCE_MS = 500;
+/** What the live `Engine.runAndApply` tail told the planner after an apply, restated for the detached overload fix so
+ *  the move to a detached candidate drops nothing: orders placed without a setup transition, distribution siblings
+ *  separated, orders queued/left unplaced (Needs Planning, with the tooling share) and lines left guarded. The Needs
+ *  Planning toast shows even for a quiet batch (a queued order is the one outcome the planner must not miss); the other
+ *  lines are suppressed by `quiet`. */
+function reportOverloadFixTail(candidate: CandidateResult, quiet: boolean): void {
+  const patchedIds = new Set(candidate.patches.filter(patch => patch.changes.planning_status !== 'needs_planning').map(patch => String(patch.id)));
+  if (!quiet) {
+    const orders = new Set<string>();
+    const lines = new Set<string>();
+    for (const edge of candidate.missingEdges ?? []) {
+      if (edge.reason !== 'scheduled-without-setup' || !edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
+      orders.add(String(edge.successorOrderId));
+      lines.add(edge.line);
+    }
+    for (const reason of candidate.explanation ?? []) {
+      if (reason.code !== 'unknown-setup-tail-placement' || !reason.taskId || !patchedIds.has(String(reason.taskId))) continue;
+      orders.add(String(reason.taskId));
+      lines.add(reason.line ?? Store.tasks[String(reason.taskId)]?.MACHINE ?? 'Unknown');
+    }
+    if (orders.size && !candidate.validationContext?.bounds.setup.synthetic) {
+      Toast.show(Util.t('toast.optimize_missing_setup_summary', { orders: orders.size, lines: lines.size }), 'warn');
+    }
+    const separated = candidate.validationFindings?.filter(finding => finding.code === 'distribution_separation').length ?? 0;
+    if (separated) Toast.show(Util.t('toast.optimize_distribution_separation', { parents: separated }), 'warn');
+  }
+  const needPlanning = candidate.dispositions?.filter(item => item.status === 'needs_planning').length ?? 0;
+  if (needPlanning) {
+    const toolQueued = toolQueueSummary(candidate, candidate.patches).queued.length;
+    const toolNote = toolQueued ? ` ${Util.t('ui.opt_tool_need_planning_suffix', { n: toolQueued })}` : '';
+    Toast.show(`${Util.t('toast.optimize_need_planning', { count: needPlanning })}${toolNote}`, 'warn', 7000);
+  }
+  const guarded = candidate.unchangedLines?.length ?? 0;
+  if (!quiet && guarded) Toast.show(Util.t('toast.optimize_lines_guarded', { count: guarded }), 'warn');
+}
+
 export const Alerts = {
   /** Gap A (2026-10-23): queued `overlong_never` rows that now fit one working period after the calendar widened.
    *  Frontend-only and display-only: no bar moves and nothing is persisted (D6); Optimize or a manual placement
@@ -667,7 +704,20 @@ export const Alerts = {
    * candidate first and may ask to confirm tooling queues (Cancel applies nothing and keeps the alert). `quiet` suppresses the per-order toasts (moved / cannot fix) and nothing else: a caller that runs
    * many fixes (the Alert Monitor's "Move N orders") reports one summary itself. The result is the alert id leaving `Store.alerts`.
    */
-  async applyFix(alertId: string, opts?: { quiet?: boolean }): Promise<boolean> {
+  async applyFix(alertId: string, opts?: { quiet?: boolean; onBlocked?: () => void }): Promise<boolean> {
+    // One overload fix per alert at a time: a second call while the first is parked at the tooling confirm would queue a
+    // second dialog and, on Confirm, apply the same patches twice. It is a no-op that reports "nothing applied". The other
+    // fix types finish synchronously and are never guarded.
+    if (Store.alerts.find(x => x.id === alertId)?.type !== 'overload') return Alerts._applyFixOnce(alertId, opts);
+    if (Alerts._fixInFlight.has(alertId)) return false;
+    Alerts._fixInFlight.add(alertId);
+    try { return await Alerts._applyFixOnce(alertId, opts); } finally { Alerts._fixInFlight.delete(alertId); }
+  },
+  _fixInFlight: new Set<string>(),
+
+  /** The body of `applyFix`. `opts.onBlocked` is called (once) when an overload fix is refused because its result would
+   *  leave an error finding; a quiet batch uses it to raise ONE summary toast instead of one per refused alert. */
+  async _applyFixOnce(alertId: string, opts?: { quiet?: boolean; onBlocked?: () => void }): Promise<boolean> {
     const quiet = opts?.quiet === true;
     const a = Store.alerts.find(x => x.id === alertId);
     if (!a) return false;
@@ -752,30 +802,35 @@ export const Alerts = {
       }
       const dayStart = Util.startOfDay(a.time || new Date())!;
       const dayEnd   = new Date(dayStart.getTime() + 24 * Config.MS_HOUR);
-      // Snapshot a SUPERSET of what the optimizer can move: every task on this line
-      // that runAndApply would NOT treat as aged/out-of-window — i.e. its free-set
-      // predicate (!isAged && !isOutOfWin), null-dated tasks included. Keying on
-      // dayKey(start) missed cross-midnight orders and lost them on undo.
-      const snap = UndoStack.snapshotTasks(Store.tasksArr.filter(t =>
-        (t.MACHINE || 'Unknown') === line &&
-        (!t.end_date   || t.end_date   >= dayStart) &&
-        (!t.start_date || t.start_date <= dayEnd)
-      ).map(t => t.id));
       // Detached run first (never the live Store): the result is judged BEFORE anything changes. An error finding means
       // the optimizer would leave the schedule invalid, so nothing is applied, no Undo entry is pushed and the alert
       // stays. Orders it would queue for tooling need the same confirm as the Optimize preview (Cancel default).
       const candidate = Engine.evaluateSchedule('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd }, snapshotSchedule(plant));
       if (candidate.status === 'invalid_horizon' || candidate.validationFindings?.some(finding => finding.severity === 'error')) {
-        Toast.show(Util.t('toast.fix_overload_blocked'), 'error', 7000);
+        if (!quiet) Toast.show(Util.t('toast.fix_overload_blocked'), 'error', 7000);
+        opts?.onBlocked?.();
         return false;
       }
       if (toolQueueSummary(candidate, candidate.patches).queued.length && !(await confirmToolQueue(candidate, candidate.patches))) return false;
+      // Undo scope, taken AFTER the evaluate and the confirm and right before the apply: a SUPERSET of what the optimizer
+      // can move. The line-day part is every task on this line that runAndApply would NOT treat as aged/out-of-window (its
+      // free-set predicate, null-dated tasks included; keying on dayKey(start) missed cross-midnight orders). The UNION
+      // with the candidate's own patch ids covers a patch outside that filter (e.g. a distribution sibling on another
+      // line), so Undo restores exactly what the apply touched.
+      const snapIds = new Set<string>(Store.tasksArr.filter(t =>
+        (t.MACHINE || 'Unknown') === line &&
+        (!t.end_date   || t.end_date   >= dayStart) &&
+        (!t.start_date || t.start_date <= dayEnd)
+      ).map(t => String(t.id)));
+      for (const patch of candidate.patches) snapIds.add(String(patch.id));
+      const snap = UndoStack.snapshotTasks([...snapIds]);
       Engine.applySchedulePatches(candidate.patches);
       Store.setLastOptimize(new Date(), 'engine');
       Alerts.clearDismissed();
       Alerts.scheduleRecompute();
       UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
       Alerts.dismiss(alertId);
+      reportOverloadFixTail(candidate, quiet);
       return true;
     }
     return false;

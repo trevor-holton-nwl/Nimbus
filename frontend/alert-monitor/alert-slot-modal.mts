@@ -36,33 +36,44 @@ const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
 
 /** Tool Inventory: would placing `task` on `machine` so it ENDS at `finish` take a tool over its copies? Returns the first
  *  tool whose over-capacity cluster involves this order (it holds an unplaced order today, so any such cluster is new), else
- *  null. Warn-only: Slot never refuses and never moves anything. Reads the compute core's shared functions, so it agrees with
- *  the Gantt alert. null when the inventory is not loaded or the core is unreachable. */
+ *  null. `orders` (default just `task`) lets a multi-order slot check EVERY order it places, each ending at `finish`; their
+ *  plant resolves like order-tooling.mts (own PLANT, its line's plant, else the selected plant). A split order (two or more
+ *  segments) occupies its tool for the ENVELOPE of its segments (the compute core's toolOccupancyInterval), so that width is
+ *  used instead of the run time. Warn-only: Slot never refuses and never moves anything. Reads the compute core's shared
+ *  functions, so it agrees with the Gantt alert. null when the inventory is not loaded or the core is unreachable. */
 export function slotToolOverage(args: {
   task: NimbusTask; machine: string; finish: Date; needHours: number | null; plant: string; now?: Date | null;
-  tasks?: ReadonlyArray<NimbusTask>;
+  tasks?: ReadonlyArray<NimbusTask>; orders?: ReadonlyArray<NimbusTask>;
 }): { tool: string; available: number } | null {
   const core = globalThis.NimbusComputeCore;
   const inventory = Store.masterData?.tool_inventory;
   if (!core || inventory === undefined) return null;
-  const tools = core.taskToolIds(args.task);
-  if (!tools.length) return null;
-  const hours = args.needHours ?? Util.runHours(args.task);
-  if (!(hours > 0)) return null;
-  const id = String(args.task.id);
-  const plantOf = (t: NimbusTask): string => t.PLANT || Store.getPlantForLine(t.MACHINE || 'Unknown') || '';
+  const mine = args.orders?.length ? args.orders : [args.task];
+  const mineIds = new Set(mine.map(order => String(order.id)));
+  const plantOf = (t: NimbusTask): string => t.PLANT || Store.getPlantForLine(t.MACHINE || 'Unknown') || Store.selectedPlant || '';
   const items: Array<{ id: string; line: string; plant: string; tools: string[]; start: Date; end: Date }> = [];
   for (const other of args.tasks ?? Store.tasksArr) {
-    if (String(other.id) === id || plantOf(other) !== args.plant) continue;
+    if (mineIds.has(String(other.id)) || plantOf(other) !== args.plant) continue;
     const otherTools = core.taskToolIds(other);
     if (!otherTools.length) continue;
     const iv = core.toolOccupancyInterval(other);
     if (iv) items.push({ id: String(other.id), line: other.MACHINE || 'Unknown', plant: args.plant, tools: otherTools, start: iv.start, end: iv.end });
   }
-  items.push({ id, line: args.machine, plant: args.plant, tools, start: new Date(args.finish.getTime() - hours * Config.MS_HOUR), end: args.finish });
+  let added = false;
+  for (const order of mine) {
+    const tools = core.taskToolIds(order);
+    if (!tools.length) continue;
+    const envelope = (order.scheduleSegments?.length ?? 0) >= 2 ? core.toolOccupancyInterval(order) : null;
+    const widthMs = envelope ? +envelope.end - +envelope.start
+      : (order === args.task ? (args.needHours ?? Util.runHours(order)) : Util.runHours(order)) * Config.MS_HOUR;
+    if (!(widthMs > 0)) continue;
+    items.push({ id: String(order.id), line: args.machine, plant: args.plant, tools, start: new Date(args.finish.getTime() - widthMs), end: args.finish });
+    added = true;
+  }
+  if (!added) return null;
   const capacity = core.buildToolCapacity({ tool_inventory: inventory });
   const hit = core.findToolOverages({ items, capacityFor: (p: string, tool: string) => core.availableCopies(capacity, p, tool), now: args.now ?? undefined })
-    .find(c => c.pusher === id || c.holders.some(h => h.id === id));
+    .find(c => mineIds.has(String(c.pusher)) || c.holders.some(h => mineIds.has(String(h.id))));
   return hit ? { tool: hit.tool, available: hit.available } : null;
 }
 

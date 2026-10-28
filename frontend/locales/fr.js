@@ -2886,7 +2886,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.opt_tool_incomplete': 'Contrôle d\'outillage incomplet : certaines commandes ont été mises en attente sans recherche complète.',
   'ui.opt_tool_need_planning_suffix': '({{n}} pour l\'outillage)',
   'modal.opt_tool_confirm_title': 'Des commandes seront mises en attente pour l\'outillage',
-  'modal.opt_tool_confirm_moved': '{{n}} commandes déplacées pour l\'outillage (information)',
+  'modal.opt_tool_confirm_moved': 'Commandes déplacées pour l\'outillage : {{n}}',
   'modal.opt_tool_confirm_queued': 'Dont outillage : {{n}} en attente',
   'btn.opt_tool_confirm_apply': 'Appliquer quand même',
   'modal.opt_tool_inventory_not_loaded': 'L\'inventaire des outils n\'est pas chargé, donc chaque outil compte pour 1 exemplaire. Continuer ?',
@@ -2902,4 +2902,8 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.tool_id_unknown': 'L\'outil {{tool}} n\'a pas de ligne d\'inventaire ; il compte pour 1 exemplaire.',
   'am.slot_confirm_tool': 'L\'outil {{tool}} dépasserait ses {{available}} exemplaires.',
   'ui.tool_inventory_rule_link': 'Modifier dans les paramètres de l\'usine',
+  'modal.opt_tool_raise_discard': 'La fermeture de l\'aperçu abandonne ce plan. Augmenter le stock maintenant ?',
+  'toast.opt_tool_raise_closed': 'Aperçu fermé. Relancez l\'optimisation après avoir modifié le stock.',
+  'toast.fix_overload_blocked_batch': 'Corrections de surcharge non appliquées : {{n}}. Elles laisseraient une erreur, donc rien n\'a été modifié pour elles.',
+  'toast.optimize_need_planning': '{{count}} commande(s) à planifier. Consultez leurs fenêtres autorisées et leurs motifs dans Commandes.',
 };

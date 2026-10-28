@@ -607,12 +607,13 @@ function _moveGroup(key: string): void {
 async function _runBatchMove(key: string, ids: string[]): Promise<void> {
   if (Sandbox.active) return;
   const movedOrders = new Set<string>();
+  let blocked = 0;
   try {
     for (const id of ids) {
       const a = Store.alerts.find(x => x.id === id);
       if (!a) continue;                                    // already gone (cleared by an earlier move or a recompute)
       if (alertOrderIds(a).some(oid => movedOrders.has(oid))) continue;   // the order itself or ANY holder/peer already moved
-      const applied = await Alerts.applyFix(id, { quiet: true });
+      const applied = await Alerts.applyFix(id, { quiet: true, onBlocked: () => { blocked++; } });
       if (applied !== false && !Store.alerts.some(x => x.id === id)) movedOrders.add(String(a.taskId ?? id));
     }
   } catch (e) {
@@ -620,6 +621,8 @@ async function _runBatchMove(key: string, ids: string[]): Promise<void> {
   } finally {
     const moved = movedOrders.size;
     Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
+    // Refused fixes are quiet inside the batch; one summary here instead of one toast per refused alert.
+    if (blocked > 0) Toast.show(t('toast.fix_overload_blocked_batch', { n: blocked }), 'warn', 7000);
     if (_active) _paint();
     _focusGroupHead(key);
   }
@@ -667,7 +670,7 @@ function _runAlertAction(action: string | undefined, alertId: string, taskId?: s
     case 'focus': nim.AlertsUIAdapter?.focus?.(alertId); break;
     case 'fix':
       if (Sandbox.active) return;
-      return Promise.resolve(Alerts.applyFix(alertId)).then(() => undefined);
+      return Promise.resolve(Alerts.applyFix(alertId)).then(() => undefined, error => { Toast.show((error as Error)?.message || String(error), 'error'); });
     case 'override': {
       if (Sandbox.active) return;
       if (taskId) nim.Table?._openOverrideModalForId?.(taskId);
@@ -1175,7 +1178,18 @@ function _onLevAction(act: string, key: string): void {
       if (Sandbox.active || action.kind !== 'calendar-day') return;
       item.alertIds.forEach(id => _levAttempted.add(id));
       // One at a time: a Fix overload may stop at its own confirm, and each fix reads the schedule the previous one left.
-      void (async () => { for (const id of action.fixableAlertIds) await Alerts.applyFix(id); })();
+      void (async () => {
+        let moved = 0, blocked = 0;
+        try {
+          for (const id of action.fixableAlertIds) {
+            if (await Alerts.applyFix(id, { quiet: true, onBlocked: () => { blocked++; } })) moved++;
+          }
+        } catch (error) { Toast.show((error as Error)?.message || String(error), 'error'); }
+        finally {
+          Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
+          if (blocked > 0) Toast.show(t('toast.fix_overload_blocked_batch', { n: blocked }), 'warn', 7000);
+        }
+      })();
       break;
     case 'edit-calendar':
       if (action.kind === 'calendar-day') {

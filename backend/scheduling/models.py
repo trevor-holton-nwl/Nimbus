@@ -31,6 +31,12 @@ class ScheduleSegmentDTO(BaseModel):
 
 
 class PlanningReason(BaseModel):
+    """Why an order is queued. `extra="allow"`: a reason carries code-specific structured keys (tool_id, available, holders,
+    incomplete for the tooling codes; run_time / cap_hours for run_time_over_cap) that the save already stores verbatim; the
+    default (ignore) dropped them from /tasks and /tasks/refresh, so they vanished after a reload. Only keys actually stored
+    are emitted; nothing is padded with nulls."""
+    model_config = ConfigDict(extra="allow")
+
     code: str
     message: str
     step: str | None = None

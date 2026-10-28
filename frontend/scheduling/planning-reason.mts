@@ -50,11 +50,22 @@ export function planningReasonText(
   return reason.message ?? '';
 }
 
+/** One holder as text: a plain id, or an object carrying `id` / `order`; anything else JSON, never "[object Object]". */
+function holderText(holder: unknown): string {
+  if (holder && typeof holder === 'object') {
+    const record = holder as Record<string, unknown>;
+    const id = record.id ?? record.order;
+    if (id != null) return String(id);
+    try { return JSON.stringify(holder) ?? ''; } catch { return ''; }
+  }
+  return String(holder ?? '');
+}
+
 /** Holder order ids as one short neutral string: the first five, then "(+N more)". Accepts an array or a ready string. */
 export function formatToolHolders(holders: unknown, t: PlanningReasonTranslate): string {
   if (typeof holders === 'string') return holders;
   if (!Array.isArray(holders)) return '';
-  const ids = holders.map(h => String(h)).filter(Boolean);
+  const ids = holders.map(holderText).filter(Boolean);
   const shown = ids.slice(0, 5).join(', ');
   return ids.length > 5 ? `${shown} ${t('ui.opt_bg_more', { count: ids.length - 5 })}` : shown;
 }

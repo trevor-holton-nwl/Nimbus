@@ -2885,7 +2885,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.opt_tool_incomplete': 'Verificação de ferramentas incompleta: alguns pedidos foram colocados na fila sem uma busca completa.',
   'ui.opt_tool_need_planning_suffix': '({{n}} por ferramentas)',
   'modal.opt_tool_confirm_title': 'Pedidos serão colocados na fila por ferramentas',
-  'modal.opt_tool_confirm_moved': '{{n}} pedidos movidos por ferramentas (informativo)',
+  'modal.opt_tool_confirm_moved': 'Pedidos movidos por ferramentas: {{n}}',
   'modal.opt_tool_confirm_queued': 'Destes por ferramentas: {{n}} na fila',
   'btn.opt_tool_confirm_apply': 'Aplicar mesmo assim',
   'modal.opt_tool_inventory_not_loaded': 'O inventário de ferramentas não está carregado, então cada ferramenta conta como 1 cópia. Continuar?',
@@ -2901,4 +2901,8 @@ window.__NIMBUS_LOCALES.pt = {
   'toast.tool_id_unknown': 'A ferramenta {{tool}} não tem linha de inventário; conta como 1 cópia.',
   'am.slot_confirm_tool': 'A ferramenta {{tool}} ultrapassaria suas {{available}} cópias.',
   'ui.tool_inventory_rule_link': 'Alterar nas configurações da fábrica',
+  'modal.opt_tool_raise_discard': 'Fechar a pré-visualização descarta este plano. Aumentar o inventário agora?',
+  'toast.opt_tool_raise_closed': 'Pré-visualização fechada. Execute a otimização novamente após alterar o inventário.',
+  'toast.fix_overload_blocked_batch': 'Correções de sobrecarga não aplicadas: {{n}}. Deixariam um erro, então nada foi alterado para elas.',
+  'toast.optimize_need_planning': '{{count}} pedido(s) precisam de planejamento. Revise as janelas permitidas e os motivos em Pedidos.',
 };

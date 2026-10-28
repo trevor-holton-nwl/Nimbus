@@ -1013,11 +1013,13 @@ function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): str
 
 /** Tool Inventory: the plant's tooling rule plus its inventory rows, as one comparable string. A preview or a finished
  *  background run keeps the value it ran on; a different live value means the tool facts moved under it. Rows are sorted
- *  by tool id so the order the server returned them in never matters; an unloaded inventory is distinct from an empty one. */
+ *  by tool id so the order the server returned them in never matters; an unloaded inventory is distinct from an empty one.
+ *  The inventory part is null while the rule is not Hard: an Off plant never reads the counts, so a count change must not
+ *  stale its preview (the rule itself is still part of the string, so flipping Off -> Hard does). */
 export function toolFingerprint(masterData: NimbusMasterData | null | undefined, plant: string): string {
   const rule = toolingRuleForSnapshot({ masterData: masterData ?? null } as unknown as ScheduleSnapshot, plant);
   const inventory = masterData?.tool_inventory;
-  const rows = inventory === undefined ? null : inventory
+  const rows = rule !== 'hard' || inventory === undefined ? null : inventory
     .filter(row => !row.plant || row.plant === plant)
     .map(row => [String(row.tool_id), row.total_qty, row.out_of_service_qty] as const)
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
@@ -1045,9 +1047,7 @@ export async function ensureToolInventoryForRun(plant: string): Promise<boolean>
     }
     return true;
   }
-  const version = await Persistence._readToolInventoryVersion(plant);
-  const baseline = Persistence._toolInventoryBaseline[plant];
-  if (version !== undefined && baseline !== undefined && version !== baseline) await Persistence.refreshToolInventory(plant);
+  await Persistence.ensureToolInventoryCurrent(plant);   // short, non-blocking: on timeout the run proceeds with the held rows
   return true;
 }
 
@@ -1707,7 +1707,8 @@ export const OptimizerPreview = {
       preKpis, postKpis, explanation, previewDiagnostics, splitOrderPolicy,
       backlogResult, backlogAudit, auditDetails, syntheticSetup,
       startedAt, runtimeMs: 0,
-      toolFingerprint: toolFingerprint(candidateSnapshot.masterData, plant),
+      // Backlog never reads tool facts, so it carries no fingerprint (never stale on a tool change, no chip).
+      toolFingerprint: mode === 'backlog' ? undefined : toolFingerprint(candidateSnapshot.masterData, plant),
     };
     onPrimary?.(base);
 
@@ -2240,7 +2241,7 @@ export const OptimizerPreview = {
       ${toolMovedCount ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_moved_summary', { n: toolMovedCount }))}</div>` : ''}
       ${toolIncomplete ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_incomplete'))}</div>` : ''}
     </div>` : '';
-    const toolingChipHtml = OptimizerPreview._toolFingerprint !== null && (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r === 'hard'
+    const toolingChipHtml = OptimizerPreview._mode !== 'backlog' && OptimizerPreview._toolFingerprint !== null && (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r === 'hard'
       ? `<div class="opt-pv-chip opt-pv-chip-tooling" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling_title'))}">${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling'))}</div>` : '';
     body.innerHTML = `
       <div class="opt-pv-shell">
@@ -2294,7 +2295,7 @@ export const OptimizerPreview = {
       </div>`;
 
     body.querySelectorAll<HTMLButtonElement>('[data-opt-tool-raise]').forEach(button => {
-      button.addEventListener('click', () => raiseToolInventory(OptimizerPreview._plant, button.dataset.optToolRaise ?? ''));
+      button.addEventListener('click', () => { void OptimizerPreview._raiseInventory(button.dataset.optToolRaise ?? ''); });
     });
     body.querySelector<HTMLButtonElement>('[data-opt-tool-export]')?.addEventListener('click', () => {
       const blob = new Blob(['\uFEFF' + OptimizerPreview.toolBlockedCsv(toolBlocked, labelOf, linesById)], { type: 'text/csv;charset=utf-8' });
@@ -2325,7 +2326,8 @@ export const OptimizerPreview = {
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
     // A background result viewed after local edits: Apply becomes "apply what still fits".
     if (!OptimizerPreview.canApply() && OptimizerPreview._canApplyPartial() && plant) {
-      return OptimizerPreview._runGuardedCommit(OptimizerPreview.applyPartial({ plant, candidate, snapshot: snap, taskBaseline: OptimizerPreview._taskBaseline! }));
+      await OptimizerPreview._runGuardedCommit(OptimizerPreview.applyPartial({ plant, candidate, snapshot: snap, taskBaseline: OptimizerPreview._taskBaseline! }));
+      return;
     }
     if (!OptimizerPreview.canApply()) {
       Toast.show(OptimizerPreview._staleMessage(), 'warn');
@@ -2368,8 +2370,9 @@ export const OptimizerPreview = {
       keptPatches = candidate.patches.filter(patch => survivors.has(String(patch.id)));
       validationDroppedIds = pruned.dropped.filter(id => !running.has(id));
     }
-    await OptimizerPreview._runGuardedCommit(OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }, snap));
-    if (validationDroppedIds.length) {
+    const committed = await OptimizerPreview._runGuardedCommit(OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }, snap));
+    // Cancel at the tool confirm (or a task edit during it) commits nothing: no "dropped" toast for a plan that was not applied.
+    if (committed && validationDroppedIds.length) {
       Toast.show(Util.t('toast.opt_apply_invalid_dropped', { count: validationDroppedIds.length }), 'warn', 7000);
     }
   },
@@ -2378,44 +2381,90 @@ export const OptimizerPreview = {
   _showPreviewAfterCancel(): void {
     if (typeof document === 'undefined') return;
     const el = document.getElementById('modal-opt-preview');
-    if (el?.hidden) Modal.open('modal-opt-preview');
+    // Foreground (the preview never closed): its DOM is intact, so leave it alone, or a rebuild would collapse the open
+    // <details> sections and reset the scroll position. Only a hidden modal (the background path) needs opening + rendering.
+    if (!el?.hidden) return;
+    Modal.open('modal-opt-preview');
     OptimizerPreview._render();
     OptimizerPreview._syncApplyButton();
   },
 
+  /** "Raise inventory" from the preview's Tool-blocked panel. The destination (Master Data) opens behind the modal, so
+   *  the preview must close first; closing discards the plan, hence the confirm (Cancel default). */
+  async _raiseInventory(tool: string): Promise<void> {
+    const plant = OptimizerPreview._plant;
+    const previewOpen = OptimizerPreview.active && !!OptimizerPreview._candidate;
+    if (previewOpen) {
+      const ok = await Modal.confirm({
+        title: Util.t('ui.opt_tool_raise'),
+        message: Util.t('modal.opt_tool_raise_discard'),
+        confirmLabel: Util.t('ui.opt_tool_raise'),
+        tone: 'warn',
+      });
+      if (!ok) return;
+      OptimizerPreview._clear();
+      Modal.close('modal-opt-preview');
+    }
+    raiseToolInventory(plant, tool);
+    if (previewOpen) Toast.show(Util.t('toast.opt_tool_raise_closed'), 'info', 7000);
+  },
+
   /** Await an apply-tail promise and route a failure to ErrorLog, so it is never silent. */
-  async _runGuardedCommit(commit: Promise<void>): Promise<void> {
-    try { await commit; } catch (err) {
+  async _runGuardedCommit(commit: Promise<unknown>): Promise<boolean> {
+    try { return (await commit) !== false; } catch (err) {
       ErrorLog.error('optimizer', `Apply failed: ${err instanceof Error ? err.message : String(err)}`, err);
       // Never leave an installed preview active (task watch running) with no modal to act on it.
       OptimizerPreview._clear();
       Modal.close('modal-opt-preview');
+      return false;
     }
   },
 
   /** Commit a (possibly filtered) set of preview patches: audit, apply, undo
    *  entry, toasts, teardown, and alert recompute. `skipped` carries the ids
-   *  dropped before this call and why, so the caller owns the filtering. */
+   *  dropped before this call and why, so the caller owns the filtering. Resolves true only when the patches were
+   *  committed; false when nothing was (no candidate, Cancel at the tool confirm, or a task edited during it). */
   async _commitPatches(
     kept: ReadonlyArray<SchedulePatch>,
     skipped: { ids: string[]; reason: 'running' | 'changed' },
     snapBeforeApply: NimbusTask[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const snap = snapBeforeApply;
     const candidate = OptimizerPreview._candidate;
     const mode = OptimizerPreview._mode;
     const plant = OptimizerPreview._plant;
     const auditDetails = OptimizerPreview._auditDetails;
-    if (!candidate) return;
+    if (!candidate) return false;
     // The ONE tool-queue guard: every apply path (Apply, "Apply what still fits", "Apply without preview") ends here, so
     // it confirms, from the KEPT patches only, before anything is audited or committed. Cancel aborts and keeps the
     // preview open and untouched. With no `toolBlocked` on the candidate this is a no-op.
     const toolSummary = toolQueueSummary(candidate, kept);
     // No await when there is nothing to confirm: the commit stays synchronous exactly as before.
-    if (toolSummary.queued.length && !(await confirmToolQueue(candidate, kept))) {
-      OptimizerPreview._applying = false;
-      OptimizerPreview._showPreviewAfterCancel();
-      return;
+    if (toolSummary.queued.length) {
+      // The confirm is async and a planner can still edit tasks behind it: remember what the kept patches' orders looked
+      // like, and refuse to commit if any of them changed (or vanished) before the answer arrived.
+      const before = taskBaseline(kept.map(patch => Store.tasks[String(patch.id)]).filter((task): task is NimbusTask => !!task));
+      let confirmed = false;
+      try { confirmed = await confirmToolQueue(candidate, kept); } finally {
+        if (!confirmed) OptimizerPreview._applying = false;   // Cancel or a thrown confirm: never leave the flag set
+      }
+      if (!confirmed) {
+        OptimizerPreview._showPreviewAfterCancel();
+        return false;
+      }
+      const drifted = kept.some(patch => {
+        const id = String(patch.id);
+        const live = Store.tasks[id];
+        if (!before.has(id)) return !!live;
+        return !live || taskBaseline([live]).get(id) !== before.get(id);
+      });
+      if (drifted) {
+        OptimizerPreview._applying = false;
+        OptimizerPreview._markTaskStale('a task changed while the tool confirm was open');
+        Toast.show(Util.t('ui.opt_preview_task_stale'), 'warn');
+        OptimizerPreview._showPreviewAfterCancel();
+        return false;
+      }
     }
     OptimizerPreview._applying = true;
     if (auditDetails && plant) {
@@ -2523,6 +2572,7 @@ export const OptimizerPreview = {
       const byId = new Map(snap.map(t => [String(t.id), t]));
       scheduleAlertsForPatches(candidate.patches, id => byId.get(String(id))?.MACHINE || 'Unknown', id => byId.get(String(id)));
     }
+    return true;
   },
 
   /* ---------------------------------------------------------------------

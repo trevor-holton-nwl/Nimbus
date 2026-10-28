@@ -3131,7 +3131,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.opt_tool_incomplete': 'Tool check incomplete: some orders were queued without a full search.',
   'ui.opt_tool_need_planning_suffix': '({{n}} for tooling)',
   'modal.opt_tool_confirm_title': 'Orders will be queued for tooling',
-  'modal.opt_tool_confirm_moved': '{{n}} orders moved for tooling (informational)',
+  'modal.opt_tool_confirm_moved': 'Orders moved for tooling: {{n}}',
   'modal.opt_tool_confirm_queued': 'Of which tool: {{n}} queued',
   'btn.opt_tool_confirm_apply': 'Apply anyway',
   'modal.opt_tool_inventory_not_loaded': 'Tool inventory is not loaded, so every tool counts as 1 copy. Continue?',
@@ -3147,4 +3147,8 @@ window.__NIMBUS_LOCALES.en = {
   'toast.tool_id_unknown': 'Tool {{tool}} has no inventory row; it counts as 1 copy.',
   'am.slot_confirm_tool': 'Tool {{tool}} would be over its {{available}} copies.',
   'ui.tool_inventory_rule_link': 'Change in plant settings',
+  'modal.opt_tool_raise_discard': 'Closing the preview discards this plan. Raise inventory now?',
+  'toast.opt_tool_raise_closed': 'Preview closed. Run Optimize again after changing inventory.',
+  'toast.fix_overload_blocked_batch': 'Overload fixes not applied: {{n}}. They would leave an error, so nothing was changed for them.',
+  'toast.optimize_need_planning': '{{count}} order(s) need planning. Review their allowed windows and reasons in Orders.',
 };

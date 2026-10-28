@@ -82,7 +82,11 @@ let _lineWriteGen = 0;
  *  optimizer consumes the rule (Wave 6 flips it in its last commit), so no control ever exists without its consumer. */
 export let TOOLING_RULE_CONTROL_READY = false;
 /** Test hook only: production flips the initial value above (Wave 6). A live binding, so importers see the change. */
-export function __setToolingRuleControlReady(value: boolean): void { TOOLING_RULE_CONTROL_READY = value; }
+export function __setToolingRuleControlReady(value: boolean): void {
+  // Test hook only: inert unless the test setup declared itself, so a console import cannot flip the gate.
+  if ((globalThis as { __NIMBUS_TEST__?: boolean }).__NIMBUS_TEST__ !== true) return;
+  TOOLING_RULE_CONTROL_READY = value;
+}
 
 /** `/tool-inventory/{plant}/upload` -> the plant's concrete URL path (null when the template needs a plant and none is given;
  *  an endpoint without a placeholder passes through). */
@@ -1530,7 +1534,7 @@ export const Plant = {
                      once the optimizer consumes the rule (TOOLING_RULE_CONTROL_READY). Wide row: labels wrap, never truncate. -->
                 <div class="sched-rule-row sched-rule-row--wide" data-rule-key="toolingRule">
                   <label for="sys-tooling-rule">${Util.t('ui.tooling_rule_title')}</label>
-                  <select id="sys-tooling-rule" class="form-input">
+                  <select id="sys-tooling-rule" class="form-input" style="width:auto;max-width:100%">
                     <option value="off">${Util.t('ui.tooling_rule_off')}</option>
                     <option value="hard">${Util.t('ui.tooling_rule_hard')}</option>
                   </select>

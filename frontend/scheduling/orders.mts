@@ -1489,7 +1489,8 @@ export const Table = {
       // Trim on commit; an id with no inventory row only draws a soft warning (never blocks the edit). A per-order PRT edit
       // is overwritten by the next material-plant stamp.
       const typed = String(p.newValue ?? '').trim();
-      changes[field] = typed;
+      // A cleared cell stays NULL (the material-plant stamp only fills NULL, never ''); the task type says string | undefined.
+      changes[field] = (typed || null) as unknown as string;
       warnUnknownToolId(p.data, typed);
     } else {
       changes[field!] = p.newValue;
@@ -2945,7 +2946,7 @@ export const Inspector = {
       return;
     } else if (field === 'PRT_01' || field === 'PRT_02') {
       const typed = value.trim();
-      changes[field] = typed;
+      changes[field] = (typed || null) as unknown as string;
       warnUnknownToolId(t, typed);
     } else {
       if (field === 'MACHINE') {

@@ -41,7 +41,7 @@ export async function confirmToolQueue(
     ? ` ${Util.t('ui.opt_bg_more', { count: summary.queuedIds.length - TOOL_QUEUE_LIST_CAP })}` : '';
   return Modal.confirm({
     title: Util.t('modal.opt_tool_confirm_title'),
-    message: Util.t('modal.opt_tool_confirm_moved', { n: summary.moved }),
+    message: summary.moved > 0 ? Util.t('modal.opt_tool_confirm_moved', { n: summary.moved }) : '',   // no "moved: 0" line
     detail: `<p>${Util.escapeHtml(Util.t('modal.opt_tool_confirm_queued', { n: summary.queued.length }))}</p><p>${shown}${Util.escapeHtml(more)}</p>`,
     confirmLabel: Util.t('btn.opt_tool_confirm_apply'),
     tone: 'warn',
