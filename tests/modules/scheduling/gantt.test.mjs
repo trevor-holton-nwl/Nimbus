@@ -11,7 +11,7 @@ import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Inter
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Util, Toast, PerfMonitor } from '../../../frontend/platform/foundation.mjs';
-import { Alerts } from '../../../frontend/insights/services.mjs';
+import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 import { AlertProfileMatches } from '../../../frontend/insights/alert-profile-matches.mjs';
@@ -4313,4 +4313,81 @@ test('split-segment tooltip uses a real newline and the locale key', () => {
   const src = readFileSync(new URL('../../../frontend/scheduling/gantt.mts', import.meta.url), 'utf8');
   assert.ok(src.includes("Util.t('tip.split_segment'"));
   assert.ok(!src.includes('productive\\n'));
+});
+
+// ── Machines-pane day stepper ───────────────────────────────────────────────
+function hierStepperFixture() {
+  const now = new Date('2026-10-19T09:00:00');
+  const cell = (s) => ({ scheduled: s, capacity: 16, effectiveCapacity: 16, pct: s / 16 });
+  const matrix = { 'L-1': { '2026-10-19': cell(8), '2026-10-20': cell(4), '2026-10-21': cell(0) } };
+  const mk = (id, s, e) => ({ id, ORDER: id, MACHINE: 'L-1', start_date: new Date(s), end_date: new Date(e) });
+  const tasks = [mk('a', '2026-10-19T10:00:00', '2026-10-19T12:00:00'), mk('b', '2026-10-20T10:00:00', '2026-10-20T12:00:00')];
+  return { now, matrix, tasks };
+}
+
+test('Hierarchy.step moves the day, clamps at both ends, and scrolls the timeline (Today -> now)', (t) => {
+  const { now } = hierStepperFixture();
+  const prior = { key: Hierarchy._dayKey, clock: Util.plantClock, render: Hierarchy.render, now: Timeline.gotoNow, day: Timeline.gotoDay };
+  const calls = [];
+  Util.plantClock = () => now; Hierarchy.render = () => {};
+  Timeline.gotoNow = () => calls.push('now'); Timeline.gotoDay = (k) => calls.push(k);
+  t.after(() => { Hierarchy._dayKey = prior.key; Util.plantClock = prior.clock; Hierarchy.render = prior.render; Timeline.gotoNow = prior.now; Timeline.gotoDay = prior.day; });
+  Hierarchy._dayKey = null;
+  Hierarchy.step(-1);
+  assert.equal(Hierarchy._dayKey, '2026-10-19');          // already today: stays
+  Hierarchy.step(1); Hierarchy.step(1);
+  assert.equal(Hierarchy._dayKey, '2026-10-21');
+  for (let i = 0; i < 10; i++) Hierarchy.step(1);
+  assert.equal(Hierarchy._dayKey, '2026-10-25');          // clamped at today+6
+  while (Hierarchy._dayKey !== '2026-10-19') Hierarchy.step(-1);
+  assert.deepEqual([calls[0], calls[1], calls[2]], ['now', '2026-10-20', '2026-10-21']);
+  assert.equal(calls[calls.length - 1], 'now');
+});
+
+test('Hierarchy resets to Today on plant:selected', (t) => {
+  const prior = { key: Hierarchy._dayKey, render: Hierarchy.render };
+  let renders = 0;
+  Hierarchy.render = () => { renders++; };
+  t.after(() => { Hierarchy._dayKey = prior.key; Hierarchy.render = prior.render; });
+  Hierarchy.init();
+  Hierarchy._dayKey = '2026-10-22';
+  Store.emit({ type: 'plant:selected', plant: null, source: 'unit-test' });
+  assert.equal(Hierarchy._dayKey, null);
+  assert.ok(renders >= 1);
+});
+
+test('Hierarchy.render shows the chosen day: chip, task count and order list', (t) => {
+  const { now, matrix, tasks } = hierStepperFixture();
+  const prior = {
+    key: Hierarchy._dayKey, vl: Hierarchy._vl, wired: Hierarchy._wired, clock: Util.plantClock, compute: Utilization.computeMatrix,
+    scoped: Store.tasksForSelectedPlant, lines: Store.linesForSelectedPlant, plant: Store._state.selectedPlant,
+    getEl: globalThis.document.getElementById, pref: Store.pref,
+  };
+  const shown = [];
+  Util.plantClock = () => now;
+  Utilization.computeMatrix = (_c, days) => { assert.equal(days, 7); return matrix; };
+  Store.tasksForSelectedPlant = () => tasks; Store.linesForSelectedPlant = () => ['L-1'];
+  Store._state.selectedPlant = '5512'; Store.pref = () => [];
+  Hierarchy._vl = { update: (items) => shown.push(items), destroy() {} };
+  const label = { textContent: '', title: '' };
+  globalThis.document.getElementById = (id) => (id === 'hierarchy' ? { addEventListener() {} } : id === 'hier-day-label' ? label : null);
+  t.after(() => {
+    Hierarchy._dayKey = prior.key; Hierarchy._vl = prior.vl; Hierarchy._wired = prior.wired; Util.plantClock = prior.clock;
+    Utilization.computeMatrix = prior.compute; Store.tasksForSelectedPlant = prior.scoped; Store.linesForSelectedPlant = prior.lines;
+    Store._state.selectedPlant = prior.plant; globalThis.document.getElementById = prior.getEl; Store.pref = prior.pref;
+  });
+  Hierarchy._wired = true;
+  Hierarchy._dayKey = null;
+  Hierarchy.render();
+  assert.equal(shown.at(-1)[0].pct, 50);
+  assert.deepEqual(shown.at(-1)[0].tasks.map(x => x.id), ['a']);
+  Hierarchy._dayKey = '2026-10-20';
+  Hierarchy.render();
+  assert.equal(shown.at(-1)[0].pct, 25);
+  assert.deepEqual(shown.at(-1)[0].tasks.map(x => x.id), ['b']);
+  assert.equal(label.title, label.textContent);
+  Hierarchy._dayKey = '2026-10-21';
+  Hierarchy.render();
+  assert.equal(shown.at(-1)[0].pct, null);                 // nothing scheduled that day: dash chip
+  assert.equal(shown.at(-1)[0].tasks.length, 0);
 });

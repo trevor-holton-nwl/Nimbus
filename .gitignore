@@ -145,3 +145,6 @@ data/color_wheels/_audit_log.json
 
 # Compiled layout affordances (source: frontend/platform/layout.mts)
 frontend/platform/layout.mjs
+
+# Compiled day-stepper helper (source: frontend/platform/day-stepper.mts)
+frontend/platform/day-stepper.mjs

@@ -20,6 +20,7 @@
 /* global NIMBUS */
 import { Config, Util, VirtualList, Toast } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
+import { dayStepKeys, dayStepActive, dayStepNext, dayStepLabel } from '../platform/day-stepper.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Utilization, Alerts } from './services.mjs';
 import { Engine } from '../optimization/engine.mjs';
@@ -815,45 +816,22 @@ export const Dashboard = {
     return Util.t(n === 1 ? key + '_one' : key, { n, ...vars });
   },
 
-  /** The 7 day keys the dashboard matrix covers, starting at plant-today (mirrors computeMatrix's key build). */
-  _lsDayKeys(now: Date): string[] {
-    const start = Util.startOfDay(now)!;
-    return Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(start); d.setDate(start.getDate() + i);
-      return Util.dayKey(d);
-    });
-  },
+  /** The 7 day keys the dashboard matrix covers, starting at plant-today (shared with the Gantt Machines pane). */
+  _lsDayKeys(now: Date): string[] { return dayStepKeys(now); },
 
   /** The day the card shows: the stored key clamped into [today, today+6]; null -> today. */
-  _lsActiveKey(keys: string[]): string {
-    const k = Dashboard._lsDayKey;
-    if (!k || k < keys[0]) return keys[0];
-    if (k > keys[keys.length - 1]) return keys[keys.length - 1];
-    return k;
-  },
+  _lsActiveKey(keys: string[]): string { return dayStepActive(keys, Dashboard._lsDayKey); },
 
   /** Step the card by +/-1 day (clamped) and re-render only the card. */
   _lsStep(dir: number): void {
-    const keys = Dashboard._lsDayKeys(Util.plantClock(Store.selectedPlant));
-    const idx = Math.max(0, Math.min(keys.length - 1, keys.indexOf(Dashboard._lsActiveKey(keys)) + (dir < 0 ? -1 : 1)));
-    Dashboard._lsDayKey = keys[idx];
+    Dashboard._lsDayKey = dayStepNext(Dashboard._lsDayKeys(Util.plantClock(Store.selectedPlant)), Dashboard._lsDayKey, dir);
     // computeMatrix is a shared-cache hit here (same plant, window and data revision as the last render), so the card
     // always reads current data; after midnight rolls over it simply computes the new window.
     Dashboard._renderLineStatus(Utilization.computeMatrix(Util.plantClock(Store.selectedPlant), 7));
     Dashboard._syncLineStatusHeight();
   },
 
-  _lsDayLabel(key: string, keys: string[]): string {
-    if (key === keys[0]) return Util.t('ui.today');
-    if (key === keys[1]) return Util.t('ui.tomorrow');
-    const dt = new Date(key + 'T12:00:00');
-    try {
-      const loc = Util.locale();
-      return `${new Intl.DateTimeFormat(loc, { weekday: 'short' }).format(dt)} ${new Intl.DateTimeFormat(loc, { month: 'numeric', day: 'numeric' }).format(dt)}`;
-    } catch {
-      return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-    }
-  },
+  _lsDayLabel(key: string, keys: string[]): string { return dayStepLabel(key, keys); },
 
   _renderLsDayControl(keys: string[], active: string): void {
     const label = document.getElementById('ls-day-label');

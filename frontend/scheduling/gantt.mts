@@ -24,6 +24,7 @@
 import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from '../platform/foundation.mjs';
 import type { PasteMatcher } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
+import { dayStepKeys, dayStepActive, dayStepNext, dayStepLabel } from '../platform/day-stepper.mjs';
 import { Selection } from './selection.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Utilization, Alerts } from '../insights/services.mjs';
@@ -2546,6 +2547,15 @@ export const Timeline = {
     );
   },
 
+  /** Center the window on a plant day (the Machines-pane day stepper); reuses the Go To window, with no row scroll or spotlight. */
+  gotoDay(dateStr: string): void {
+    const tl = Timeline._tl;
+    if (!tl) return;
+    const win = Timeline._gotoWindowFor(dateStr);
+    Timeline._syncViewWindow(win.start, win.end);
+    tl.setWindow(new Date(win.start), new Date(win.end), { animation: { duration: 300 } });
+  },
+
   _colorIndex(line: string): number {
     if (Timeline._lineColorIdx[line] === undefined) {
       Timeline._lineColorIdx[line] = Timeline._nextColorIdx++ % Config.COLORS.length;
@@ -3882,7 +3892,7 @@ type HierarchyUtilMatrix = ReturnType<typeof Utilization.computeMatrix>;
 
 /** Hierarchy._lineItems — one VirtualList row per production line, rebuilt
  *  fresh on every render() from Store.tasksForSelectedPlant() plus the
- *  today-scoped utilization matrix (the shared Utilization cache). */
+ *  chosen day's utilization column (the shared Utilization cache). */
 interface HierarchyLineItem {
   name: string;
   tasks: NimbusTask[];
@@ -3906,6 +3916,8 @@ export const Hierarchy = {
   // re-applied against an entirely different set of rows.
   _vlIdentity: null as string | null,
   _wired:     false,
+  // Day the pane shows (YYYY-MM-DD); null = plant-today. Reset on plant switch; panning the timeline never changes it.
+  _dayKey:    null as string | null,
 
   _renderPending: false,
 
@@ -3928,9 +3940,39 @@ export const Hierarchy = {
       } else if (evt.type === 'calendar:change' || evt.type === 'blocks:change'
           || evt.type === 'firmed:change' || evt.type === 'plant:selected'
           || evt.type === 'lineSettings:change') {
+        if (evt.type === 'plant:selected') Hierarchy._dayKey = null;
         Hierarchy.render();
       }
     }, 'Hierarchy');
+  },
+
+  /** Step the pane by +/-1 day (clamped), re-render, and scroll the timeline to that day (Today returns to now). */
+  step(dir: number): void {
+    const keys = dayStepKeys(Util.plantClock(Store.selectedPlant));
+    Hierarchy._dayKey = dayStepNext(keys, Hierarchy._dayKey, dir);
+    Hierarchy.render();
+    if (Hierarchy._dayKey === keys[0]) Timeline.gotoNow();
+    else Timeline.gotoDay(Hierarchy._dayKey);
+  },
+
+  _renderStepper(keys: string[], active: string): void {
+    const label = document.getElementById('hier-day-label');
+    const prev  = document.getElementById('hier-day-prev') as HTMLButtonElement | null;
+    const next  = document.getElementById('hier-day-next') as HTMLButtonElement | null;
+    document.getElementById('hier-day-group')?.setAttribute('aria-label', Util.t('ui.sidebar_lines'));
+    if (label) {
+      label.textContent = dayStepLabel(active, keys);
+      label.title = label.textContent;
+    }
+    const idx = keys.indexOf(active);
+    if (prev) {
+      prev.disabled = idx <= 0;
+      prev.title = Util.t('ui.ls_day_prev'); prev.setAttribute('aria-label', prev.title);
+    }
+    if (next) {
+      next.disabled = idx >= keys.length - 1;
+      next.title = Util.t('ui.ls_day_next'); next.setAttribute('aria-label', next.title);
+    }
   },
 
   _itemH(item: HierarchyLineItem): number {
@@ -3994,24 +4036,22 @@ export const Hierarchy = {
       ];
     }
 
-    const todayStart = Util.plantToday(Store.selectedPlant);
-    const _todayDayKey = Util.dayKey(todayStart);
-
-    // Utilization chip reads the SAME proportional daily-load matrix the Dashboard
-    // heatmap + Line Status use, so all three agree for today (fixes R197). The full-plant matrix
-    // (no task subset) comes from the shared per-plant Utilization cache: a day-0 slice of a cached
-    // 7/14-day window when one exists (the prewarm and Confidence fill them), else one cheap 1-day
-    // compute that is then reused until Store.dataRev() moves (alert refreshes no longer evict it).
-    const _todayKey = Util.dayKey(Util.startOfDay(todayStart));
-    const _utilToday: HierarchyUtilMatrix = Utilization.computeMatrix(todayStart, 1);
+    // The chip, count and order list read the chosen day's column of the shared 7-day utilization matrix (the same
+    // proportional daily-load matrix the Dashboard heatmap + Line Status use, so all three agree); the per-plant
+    // Utilization cache makes this a hit until Store.dataRev() moves.
+    const _clock = Util.plantClock(Store.selectedPlant);
+    const _dayKeys = dayStepKeys(_clock);
+    const _dayKey = dayStepActive(_dayKeys, Hierarchy._dayKey);
+    Hierarchy._renderStepper(_dayKeys, _dayKey);
+    const _utilDay: HierarchyUtilMatrix = Utilization.computeMatrix(_clock, 7);
 
     Hierarchy._lineItems = visibleNames.map((name): HierarchyLineItem => {
       const ci    = Timeline._colorIndex(name);
       const color = Config.COLORS[ci % Config.COLORS.length];
       const tasks = lines[name]
-        .filter(tk => Util.overlapsDay(tk, _todayDayKey))   // OQ42: overlaps today on the plant clock
+        .filter(tk => Util.overlapsDay(tk, _dayKey))   // OQ42: overlaps the chosen day on the plant clock
         .sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
-      const u   = _utilToday[name]?.[_todayKey];
+      const u   = _utilDay[name]?.[_dayKey];
       const pct = (u && u.scheduled > 0) ? Math.round(u.pct! * 100) : null;
       const sev: UtilSevBucket = u
         ? Utilization.sev(u.pct!, u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD)
@@ -4038,6 +4078,10 @@ export const Hierarchy = {
     // mutate Hierarchy._open and call render(); do not set det.open.
     if (!Hierarchy._wired) {
       Hierarchy._wired = true;
+      document.getElementById('hier-day-group')?.addEventListener('click', (e: MouseEvent) => {
+        const btn = (e.target as Element | null)?.closest('[data-hier-step]') as HTMLButtonElement | null;
+        if (btn && !btn.disabled) Hierarchy.step(Number(btn.dataset.hierStep));
+      });
       el.addEventListener('click', (e: MouseEvent) => {
         const target = e.target as Element | null;
         const sum = target?.closest('details.line-group > summary') as HTMLElement | null;

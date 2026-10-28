@@ -1070,6 +1070,7 @@ textarea { min-height: 60px; padding: 7px 10px; }
 .side.collapsed { width: 34px; }
 .side.collapsed .side-head h4,
 .side.collapsed #hierarchy,
+.side.collapsed .hier-day-row,
 .side.collapsed .inspector-body,
 .side-left.collapsed .resize-handle { display: none; }
 /* Right inspector: absolutely positioned so transform runs GPU-only (no flex reflow) */
@@ -1098,6 +1099,11 @@ textarea { min-height: 60px; padding: 7px 10px; }
   color: var(--fg-mute);
 }
 .side-head .icon-btn { color: var(--fg-faint); }
+
+/* Machines-pane day stepper: its own row under the header; the label flexes (ellipsis) instead of the Dashboard's fixed 78-120px. */
+.hier-day-row { padding: 8px 12px 0; }
+.hier-day-row .hier-day-group { display: flex; width: 100%; }
+.hier-day-row .hier-day-group .ls-day-label { flex: 1 1 auto; min-width: 0; max-width: none; }
 
 /* Hierarchy list */
 #hierarchy { overflow-y: auto; padding: 8px 10px 20px; flex: 1; }
