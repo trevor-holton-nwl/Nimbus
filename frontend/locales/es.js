@@ -3124,6 +3124,7 @@ window.__NIMBUS_LOCALES.es = {
   'jobs.preset_once': 'Una vez',
   'jobs.preset_hourly': 'Cada hora',
   'jobs.preset_daily': 'Diario',
+  'jobs.preset_weekdays': 'Días laborables',
   'jobs.preset_weekly': 'Semanal',
   'jobs.preset_monthly': 'Mensual',
   'jobs.preset_cron': 'Cron (avanzado)',

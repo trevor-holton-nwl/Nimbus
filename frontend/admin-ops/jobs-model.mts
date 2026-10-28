@@ -5,10 +5,13 @@
    `JobsDeps` the caller injects (`t`, `esc`, optional `fmtTime`), so the node tests drive it with
    plain stubs. The client owns wire shapes (jobs-client.mts); the pane, dialog and run detail own the DOM.
 
-   Times: every instant the backend sends is a naive plant-local ISO string (the Naive-local-time
-   convention in backend/alert_profiles/CLAUDE.md), and every cron / run_at we send is plant-local too,
-   so this module never converts a zone; the plant's timezone is shown read-only in the dialog.
-   ========================================================================== */
+   Times (backend contract, backend/jobs/CLAUDE.md): run and created/modified instants are tz-aware ISO
+   strings (TIMESTAMPTZ), schedule run_at / valid_from / valid_until are naive plant-local, and the
+   preview / upcoming entries carry both `at_utc` and `at_local`. Display always goes through
+   plantWall() so a viewer in another zone still reads the plant's wall clock; Util.fmtDTPref then
+   applies the viewer's date/time format. Schedules are sent as PRESET kinds with time_of_day,
+   days_of_week (0 = Monday .. 6 = Sunday) and day_of_month; the server compiles the cron.
+   */
 
 export interface JobsDeps {
   t: (key: string, vars?: Record<string, string | number>) => string;
@@ -49,16 +52,16 @@ export function isActiveRun(status: string | null | undefined): boolean {
 /* ---------------------------------------------------------------------------
    Recurrence: preset <-> cron, cron -> prose
    ------------------------------------------------------------------------- */
-export const RECUR_PRESETS = ['once', 'hourly', 'daily', 'weekly', 'monthly', 'cron'] as const;
+export const RECUR_PRESETS = ['once', 'hourly', 'daily', 'weekdays', 'weekly', 'monthly', 'cron'] as const;
 export type RecurPreset = typeof RECUR_PRESETS[number];
 
 export interface Recurrence {
   preset: RecurPreset;
-  /** 'HH:MM' (daily / weekly / monthly). */
+  /** 'HH:MM' (daily / weekdays / weekly / monthly). */
   time: string;
   /** Minute past the hour (hourly). */
   minute: number;
-  /** Cron weekday numbers, 0 = Sunday (weekly). */
+  /** Backend weekday numbers, 0 = Monday .. 6 = Sunday (weekly). */
   days: number[];
   /** Day of month 1-31 (monthly). */
   dom: number;
@@ -70,7 +73,7 @@ export interface Recurrence {
 export const DEFAULT_TIME = '08:00';
 
 export function defaultRecurrence(): Recurrence {
-  return { preset: 'daily', time: DEFAULT_TIME, minute: 0, days: [1, 2, 3, 4, 5], dom: 1, cron: '', runAt: '' };
+  return { preset: 'daily', time: DEFAULT_TIME, minute: 0, days: [0, 1, 2, 3, 4], dom: 1, cron: '', runAt: '' };
 }
 
 /** 'HH:MM' -> [hour, minute], or null when it is not a valid 24-hour time. */
@@ -81,28 +84,6 @@ export function parseTime(s: string | null | undefined): [number, number] | null
   return h <= 23 && mi <= 59 ? [h, mi] : null;
 }
 
-/** The 5-field cron for a preset, or null for 'once' / an incomplete or invalid form. */
-export function presetToCron(r: Pick<Recurrence, 'preset'> & Partial<Recurrence>): string | null {
-  const tm = parseTime(r.time ?? DEFAULT_TIME);
-  switch (r.preset) {
-    case 'hourly': {
-      const m = Number(r.minute ?? 0);
-      return Number.isInteger(m) && m >= 0 && m <= 59 ? `${m} * * * *` : null;
-    }
-    case 'daily': return tm ? `${tm[1]} ${tm[0]} * * *` : null;
-    case 'weekly': {
-      const days = [...new Set((r.days ?? []).filter(x => Number.isInteger(x) && x >= 0 && x <= 6))].sort((a, b) => a - b);
-      return tm && days.length ? `${tm[1]} ${tm[0]} * * ${days.join(',')}` : null;
-    }
-    case 'monthly': {
-      const dom = Number(r.dom ?? 1);
-      return tm && Number.isInteger(dom) && dom >= 1 && dom <= 31 ? `${tm[1]} ${tm[0]} ${dom} * *` : null;
-    }
-    case 'cron': return isValidCronShape(r.cron ?? '') ? String(r.cron).trim().replace(/\s+/g, ' ') : null;
-    default: return null;
-  }
-}
-
 /** A cheap shape check (five whitespace-separated fields of cron characters); the server's trigger is the authority. */
 export function isValidCronShape(c: string | null | undefined): boolean {
   const p = String(c ?? '').trim().split(/\s+/);
@@ -110,28 +91,57 @@ export function isValidCronShape(c: string | null | undefined): boolean {
 }
 
 const _isNum = (s: string): boolean => /^\d+$/.test(s);
+const _pad2 = (n: number): string => String(n).padStart(2, '0');
 
-/** Reverse of presetToCron, for editing a saved schedule: the preset the cron came from, else 'cron' (advanced). */
-export function cronToRecurrence(cron: string | null | undefined): Recurrence {
-  const base = defaultRecurrence();
-  const c = String(cron ?? '').trim();
-  const p = c.split(/\s+/);
-  if (p.length !== 5) return { ...base, preset: c ? 'cron' : base.preset, cron: c };
-  const [mi, ho, dom, mon, dow] = p;
-  const pad = (s: string): string => s.padStart(2, '0');
-  if (_isNum(mi) && ho === '*' && dom === '*' && mon === '*' && dow === '*') return { ...base, preset: 'hourly', minute: Number(mi), cron: c };
-  if (_isNum(mi) && _isNum(ho) && mon === '*') {
-    const time = `${pad(ho)}:${pad(mi)}`;
-    if (dom === '*' && dow === '*') return { ...base, preset: 'daily', time, cron: c };
-    if (dom === '*' && /^\d(,\d)*$/.test(dow)) return { ...base, preset: 'weekly', time, days: dow.split(',').map(Number), cron: c };
-    if (_isNum(dom) && dow === '*') return { ...base, preset: 'monthly', time, dom: Number(dom), cron: c };
+/** The ScheduleIn body for a recurrence (only the fields its kind reads, so a PATCH never carries stale ones). */
+export interface ScheduleIn {
+  kind: RecurPreset;
+  time_of_day?: string;
+  days_of_week?: number[];
+  day_of_month?: number;
+  cron_expr?: string;
+  run_at?: string;
+}
+export function recurrenceToScheduleIn(r: Recurrence): ScheduleIn {
+  switch (r.preset) {
+    case 'once': return { kind: 'once', run_at: r.runAt };
+    case 'hourly': return { kind: 'hourly', time_of_day: `00:${_pad2(Number(r.minute) || 0)}` };
+    case 'weekly': return { kind: 'weekly', time_of_day: r.time, days_of_week: [...new Set(r.days)].sort((a, b) => a - b) };
+    case 'monthly': return { kind: 'monthly', time_of_day: r.time, day_of_month: Number(r.dom) };
+    case 'cron': return { kind: 'cron', cron_expr: String(r.cron).trim().replace(/\s+/g, ' ') };
+    default: return { kind: r.preset, time_of_day: r.time };
   }
-  return { ...base, preset: 'cron', cron: c };
 }
 
-const _defaultFmtTime = (h: number, m: number): string => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+export interface ScheduleWire {
+  kind?: string | null;
+  time_of_day?: string | null;
+  days_of_week?: number[] | null;
+  day_of_month?: number | null;
+  cron_expr?: string | null;
+  run_at?: string | null;
+}
 
-/** Plain-language reading of a cron, or null when it is not one of the shapes we can phrase (the UI then shows the raw cron). */
+/** A saved schedule back into the editable recurrence. */
+export function scheduleToRecurrence(s: ScheduleWire | null | undefined): Recurrence {
+  const base = defaultRecurrence();
+  if (!s) return base;
+  const kind = (RECUR_PRESETS as readonly string[]).includes(String(s.kind)) ? (s.kind as RecurPreset) : 'cron';
+  const tm = parseTime(s.time_of_day);
+  const time = tm ? `${_pad2(tm[0])}:${_pad2(tm[1])}` : base.time;
+  switch (kind) {
+    case 'once': return { ...base, preset: 'once', runAt: String(s.run_at ?? '').slice(0, 16) };
+    case 'hourly': return { ...base, preset: 'hourly', minute: tm ? tm[1] : 0 };
+    case 'weekly': return { ...base, preset: 'weekly', time, days: s.days_of_week?.length ? [...s.days_of_week] : base.days };
+    case 'monthly': return { ...base, preset: 'monthly', time, dom: s.day_of_month ?? 1 };
+    case 'cron': return { ...base, preset: 'cron', cron: String(s.cron_expr ?? '') };
+    default: return { ...base, preset: kind, time };
+  }
+}
+
+const _defaultFmtTime = (h: number, m: number): string => `${_pad2(h)}:${_pad2(m)}`;
+
+/** Plain-language reading of a stored cron (kind 'cron'), or null when it is not a shape we can phrase (the UI then shows the raw cron). */
 export function cronProse(cron: string | null | undefined, d: JobsDeps): string | null {
   const c = String(cron ?? '').trim();
   if (!c) return null;
@@ -149,31 +159,35 @@ export function cronProse(cron: string | null | undefined, d: JobsDeps): string 
   if (!_isNum(mi) || !_isNum(ho) || mon !== '*') return null;
   const time = fmt(Number(ho), Number(mi));
   if (dom === '*' && dow === '*') return d.t('jobs.cron_daily', { time });
-  if (dom === '*' && /^\d(,\d)*$/.test(dow)) {
-    const days = dow.split(',').map(Number);
-    if (days.join(',') === '1,2,3,4,5') return d.t('jobs.cron_weekdays', { time });
-    return d.t('jobs.cron_weekly', { days: days.map(x => d.t(`jobs.dow_${x}`)).join(', '), time });
-  }
   if (_isNum(dom) && dow === '*') return d.t('jobs.cron_monthly', { dom, time });
   return null;
 }
 
-export interface ScheduleLike {
-  kind?: string | null;
-  cron_expr?: string | null;
-  run_at?: string | null;
+/** Locale key for a backend weekday number (0 = Monday); the existing keys are numbered 0 = Sunday. */
+export const dowLabelKey = (d: number): string => `jobs.dow_${(d + 1) % 7}`;
+
+export interface ScheduleLike extends ScheduleWire {
   paused?: boolean | null;
 }
 
-/** One-line recurrence for the table: prose, the raw cron, or "Once <when>" (the pane formats run_at through Util.fmtDTPref). */
+/** One-line recurrence for the table, read from the stored preset fields (the pane formats run_at through Util.fmtDTPref). */
 export function recurrenceText(s: ScheduleLike | null | undefined, d: JobsDeps, fmtDT: (iso: string) => string): string {
   if (!s) return d.t('jobs.no_schedule');
-  if (s.kind === 'once' || (!s.cron_expr && s.run_at)) return d.t('jobs.once_at', { when: fmtDT(String(s.run_at ?? '')) });
-  return cronProse(s.cron_expr, d) ?? String(s.cron_expr ?? d.t('jobs.no_schedule'));
+  const tm = parseTime(s.time_of_day);
+  const time = tm ? (d.fmtTime ?? _defaultFmtTime)(tm[0], tm[1]) : '';
+  switch (s.kind) {
+    case 'once': return d.t('jobs.once_at', { when: fmtDT(String(s.run_at ?? '')) });
+    case 'hourly': return d.t('jobs.cron_hourly', { m: tm ? tm[1] : 0 });
+    case 'daily': return d.t('jobs.cron_daily', { time });
+    case 'weekdays': return d.t('jobs.cron_weekdays', { time });
+    case 'weekly': return d.t('jobs.cron_weekly', { days: [...(s.days_of_week ?? [])].sort((a, b) => a - b).map(x => d.t(dowLabelKey(x))).join(', '), time });
+    case 'monthly': return d.t('jobs.cron_monthly', { dom: s.day_of_month ?? '', time });
+    default: return cronProse(s.cron_expr, d) ?? String(s.cron_expr ?? d.t('jobs.no_schedule'));
+  }
 }
 
 /* ---------------------------------------------------------------------------
-   Query builders (server pagination: limit/offset for jobs, a before_id cursor for runs)
+   Query builders (both lists page by a before_id cursor: no total count, a Load more button)
    ------------------------------------------------------------------------- */
 export const JOBS_PAGE = 50;
 export const RUNS_PAGE = 50;
@@ -184,11 +198,10 @@ function _qs(pairs: Array<[string, string | number | null | undefined]>): string
   return sp.length ? `?${sp.join('&')}` : '';
 }
 
-export interface JobsQuery { plant?: string; q?: string; status?: string; type?: string; limit?: number; offset?: number }
+export interface JobsQuery { plant?: string; q?: string; status?: string; type?: string; limit?: number; beforeId?: number | string | null }
 export function buildJobsQuery(o: JobsQuery): string {
   const limit = Math.max(1, Math.min(200, Math.floor(o.limit ?? JOBS_PAGE)));
-  const offset = Math.max(0, Math.floor(o.offset ?? 0));
-  return _qs([['plant', o.plant], ['q', (o.q ?? '').trim()], ['status', o.status], ['type', o.type], ['limit', limit], ['offset', offset || null]]);
+  return _qs([['plant', o.plant], ['q', (o.q ?? '').trim()], ['status', o.status], ['job_type', o.type], ['before_id', o.beforeId], ['limit', limit]]);
 }
 
 export interface RunsQuery { plant?: string; status?: string; beforeId?: number | string | null; limit?: number; jobId?: number | string }
@@ -201,11 +214,29 @@ export function buildLogQuery(o: { afterSeq?: number | null; level?: string }): 
   return _qs([['after_seq', o.afterSeq ?? 0], ['level', o.level && o.level !== 'all' ? o.level : null]]);
 }
 
-/** "1-50 of 130" bounds for the server-paged jobs table; to is clamped to total. */
-export function pageRange(offset: number, count: number, total: number): { from: number; to: number } {
-  if (!count || !total) return { from: 0, to: 0 };
-  return { from: offset + 1, to: Math.min(total, offset + count) };
+/* ---------------------------------------------------------------------------
+   Plant wall clock
+   ------------------------------------------------------------------------- */
+const _OFFSET_RE = /(Z|[+-]\d{2}:?\d{2})$/;
+
+/** An ISO string as a naive plant wall-clock 'YYYY-MM-DDTHH:MM:SS' for Util.fmtDTPref. A string with an offset is an
+ *  instant, converted into `tz`; with no `tz` it is returned untouched (the viewer's zone). A naive string is already wall. */
+export function plantWall(iso: string | null | undefined, tz?: string | null): string {
+  const s = String(iso ?? '').trim();
+  if (!s || !_OFFSET_RE.test(s)) return s;
+  const t = String(tz ?? '').trim();
+  if (!t) return s;
+  const ms = Date.parse(s);
+  if (!Number.isFinite(ms)) return s;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: t, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(ms));
+    const g = (k: string): string => parts.find(p => p.type === k)?.value ?? '00';
+    return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}:${g('second')}`;
+  } catch { return s; }
 }
+
+/** An `at_local` value: the plant wall clock with its offset dropped. */
+export const stripOffset = (iso: string | null | undefined): string => String(iso ?? '').replace(_OFFSET_RE, '');
 
 /* ---------------------------------------------------------------------------
    Run log: merge / dedupe by seq, level filter, text for copy + download
@@ -325,7 +356,7 @@ export function weekStrip(runs: UpcomingRun[], startDay: string): StripDay[] {
 /* ---------------------------------------------------------------------------
    Job form: shape, validation, payload
    ------------------------------------------------------------------------- */
-export const JOB_MODES = ['due-date', 'min-changeover', 'spt'] as const;
+export const JOB_MODES = ['due_date', 'min_changeover', 'spt'] as const;
 export const JOB_SEARCHES = ['normal', 'exhaustive'] as const;
 export const JOB_RESULTS = ['propose', 'apply'] as const;
 export const NAME_MAX = 80;
@@ -337,8 +368,7 @@ export interface JobForm {
   mode: string;
   search: string;
   respectFirmed: boolean;
-  respectCalendar: boolean;
-  /** 'propose' = leave the run's result as a proposal; 'apply' = write it to the schedule (admin only). */
+  /** 'propose' = leave the run's result as a proposal; 'apply' = write it to the schedule (admin only); sent as params.apply_mode. */
   result: string;
   recur: Recurrence;
   validFrom: string;
@@ -348,7 +378,7 @@ export interface JobForm {
 
 export function defaultJobForm(plant = '', jobType = 'optimizer.plant'): JobForm {
   return {
-    jobType, name: '', plant, mode: 'due-date', search: 'exhaustive', respectFirmed: true, respectCalendar: true,
+    jobType, name: '', plant, mode: 'due_date', search: 'exhaustive', respectFirmed: true,
     result: 'apply', recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true,
   };
 }
@@ -371,33 +401,30 @@ export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: strin
   if (r.preset === 'once') {
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(r.runAt)) e.runAt = 'jobs.err_run_at';
   } else if (r.preset === 'hourly') {
-    if (presetToCron(r) === null) e.minute = 'jobs.err_minute';
+    if (!Number.isInteger(Number(r.minute)) || Number(r.minute) < 0 || Number(r.minute) > 59) e.minute = 'jobs.err_minute';
   } else if (r.preset === 'cron') {
     if (!isValidCronShape(r.cron)) e.cron = 'jobs.err_cron';
   } else {
     if (!parseTime(r.time)) e.time = 'jobs.err_time';
     if (r.preset === 'weekly' && !r.days.length) e.days = 'jobs.err_days';
-    if (r.preset === 'monthly' && presetToCron(r) === null && parseTime(r.time)) e.dom = 'jobs.err_dom';
+    if (r.preset === 'monthly' && !(Number.isInteger(Number(r.dom)) && Number(r.dom) >= 1 && Number(r.dom) <= 31)) e.dom = 'jobs.err_dom';
   }
   if (f.validFrom && f.validUntil && f.validUntil < f.validFrom) e.validity = 'jobs.err_validity';
   return e;
 }
 
-/** The three request bodies the client sends for a valid form. Plant-local, naive; the server owns the zone. */
+/** The request bodies for a valid form: the job (params carry apply_mode explicitly) and its ScheduleIn. The server owns the zone and the cron. */
 export function buildJobPayload(f: JobForm): {
   job: { name: string; plant: string; job_type: string; params: Record<string, unknown> };
-  schedule: { kind: 'once' | 'cron'; cron_expr: string | null; run_at: string | null; valid_from: string | null; valid_until: string | null; skip_if_running: boolean };
+  schedule: ScheduleIn & { valid_from: string | null; valid_until: string | null; skip_if_running: boolean };
 } {
-  const once = f.recur.preset === 'once';
   return {
     job: {
       name: f.name.trim(), plant: f.plant, job_type: f.jobType,
-      params: { mode: f.mode, search: f.search, respect_firmed: f.respectFirmed, respect_calendar: f.respectCalendar, apply_mode: f.result },
+      params: { mode: f.mode, search: f.search, respect_firmed: f.respectFirmed, apply_mode: f.result },
     },
     schedule: {
-      kind: once ? 'once' : 'cron',
-      cron_expr: once ? null : presetToCron(f.recur),
-      run_at: once ? f.recur.runAt : null,
+      ...recurrenceToScheduleIn(f.recur),
       valid_from: f.validFrom || null,
       valid_until: f.validUntil || null,
       skip_if_running: f.skipIfRunning,
@@ -408,21 +435,19 @@ export function buildJobPayload(f: JobForm): {
 /** A saved job (+ its schedule) back into the form; also the Duplicate seed (caller clears the name). */
 export function jobToForm(job: {
   name?: string; plant?: string; job_type?: string; params?: Record<string, unknown> | null;
-  schedule?: { kind?: string | null; cron_expr?: string | null; run_at?: string | null; valid_from?: string | null; valid_until?: string | null; skip_if_running?: boolean | null } | null;
+  schedule?: (ScheduleWire & { valid_from?: string | null; valid_until?: string | null; skip_if_running?: boolean | null }) | null;
 }): JobForm {
   const base = defaultJobForm(job.plant ?? '', job.job_type ?? 'optimizer.plant');
   const p = job.params ?? {};
   const s = job.schedule;
-  const recur = s ? (s.kind === 'once' ? { ...defaultRecurrence(), preset: 'once' as const, runAt: String(s.run_at ?? '').slice(0, 16) } : cronToRecurrence(s.cron_expr)) : base.recur;
   return {
     ...base,
     name: job.name ?? '',
     mode: String(p.mode ?? base.mode),
     search: String(p.search ?? base.search),
     respectFirmed: p.respect_firmed !== false,
-    respectCalendar: p.respect_calendar !== false,
     result: String(p.apply_mode ?? base.result),
-    recur,
+    recur: s ? scheduleToRecurrence(s) : base.recur,
     validFrom: String(s?.valid_from ?? '').slice(0, 10),
     validUntil: String(s?.valid_until ?? '').slice(0, 10),
     skipIfRunning: s?.skip_if_running !== false,

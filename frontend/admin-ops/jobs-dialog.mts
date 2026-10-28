@@ -5,9 +5,10 @@
    and footer (#jb-foot) at runtime and opens/closes it through Modal.open/close. Admin only: the
    pane never offers the entry points to anyone else and the server re-checks every write.
 
-   Save = POST/PATCH /jobs, then POST/PATCH the job's one schedule (the contract keeps them apart).
-   Recurrence is built client-side (preset -> cron in jobs-model.mts) and previewed by the server's
-   own trigger (POST /jobs/schedules/preview), so what the planner sees is what will fire.
+   Save = POST /jobs with the schedule inline (create) or PATCH /jobs + PATCH the job's one schedule (edit).
+   The recurrence goes to the server as a PRESET kind (time_of_day, days_of_week, day_of_month); the
+   server compiles the cron and previews it with its own trigger (POST /jobs/schedules/preview), so
+   what the planner sees is what will fire.
    The searchable plant combobox here is the deliberate duplicate the frontend CLAUDE.md allows.
    ========================================================================== */
 
@@ -18,7 +19,7 @@ import { JobsClient } from './jobs-client.mjs';
 import type { Job } from './jobs-client.mjs';
 import {
   RECUR_PRESETS, JOB_MODES, JOB_SEARCHES, JOB_RESULTS, NAME_MAX, defaultJobForm, jobToForm, validateJobForm, buildJobPayload,
-  presetToCron, cronProse,
+  recurrenceText, stripOffset, dowLabelKey,
 } from './jobs-model.mjs';
 import type { JobForm, FormErrors, Recurrence, JobsDeps } from './jobs-model.mjs';
 
@@ -125,7 +126,7 @@ const _el = <E extends HTMLElement = HTMLElement>(id: string): E | null => docum
 const _val = (id: string): string => (_el<HTMLInputElement>(id)?.value ?? '');
 const _chk = (id: string): boolean => !!_el<HTMLInputElement>(id)?.checked;
 
-const DOW_ORDER = [1, 2, 3, 4, 5, 6, 0];
+const DOW_ORDER = [0, 1, 2, 3, 4, 5, 6];   // backend numbering, Monday first
 
 /* ---------------------------------------------------------------------------
    Markup
@@ -147,7 +148,7 @@ export function recurFieldsHtml(r: Recurrence): string {
         + `<input class="input job-num" id="jb-minute" type="number" min="0" max="59" value="${esc(r.minute)}">${_err('minute')}</div>`;
     case 'weekly':
       return time + `<div class="form-row"><label>${esc(t('jobs.f_days'))}</label><div class="job-dows" role="group" aria-label="${esc(t('jobs.f_days'))}">`
-        + DOW_ORDER.map(d => `<label class="chk-inline"><input type="checkbox" id="jb-dow-${d}"${r.days.includes(d) ? ' checked' : ''}><span>${esc(t(`jobs.dow_${d}`))}</span></label>`).join('')
+        + DOW_ORDER.map(d => `<label class="chk-inline"><input type="checkbox" id="jb-dow-${d}"${r.days.includes(d) ? ' checked' : ''}><span>${esc(t(dowLabelKey(d)))}</span></label>`).join('')
         + `</div>${_err('days')}</div>`;
     case 'monthly':
       return time + `<div class="form-row"><label for="jb-dom">${esc(t('jobs.f_dom'))}</label>`
@@ -169,12 +170,11 @@ export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean): string
     + `<div class="form-row-2"><div class="form-row"><label>${esc(t('jobs.f_type'))}</label><div class="readonly" id="jb-type">${esc(t('jobs.type_optimizer'))}</div></div>`
     + `<div class="form-row"><label for="jb-plant">${esc(t('jobs.f_plant'))}</label><div id="jb-plant-host"></div>${_err('plant')}</div></div>`
     + `<div class="form-row-2"><div class="form-row"><label for="jb-mode">${esc(t('jobs.f_mode'))}</label><select class="input" id="jb-mode">`
-    + JOB_MODES.map(m => _opt(m, t('jobs.mode_' + m.replace(/-/g, '_')), f.mode)).join('') + `</select>${_err('mode')}</div>`
+    + JOB_MODES.map(m => _opt(m, t('jobs.mode_' + m), f.mode)).join('') + `</select>${_err('mode')}</div>`
     + `<div class="form-row"><label for="jb-search">${esc(t('jobs.f_search'))}</label><select class="input" id="jb-search">`
     + JOB_SEARCHES.map(s => _opt(s, t(`jobs.search_${s}`), f.search)).join('') + `</select>${_err('search')}</div></div>`
     + `<div class="ape-hint" id="jb-search-note">${esc(t('jobs.search_note'))}</div>`
-    + `<div class="form-row job-checks"><label class="chk-inline"><input type="checkbox" id="jb-firmed"${f.respectFirmed ? ' checked' : ''}><span>${esc(t('jobs.f_firmed'))}</span></label>`
-    + `<label class="chk-inline"><input type="checkbox" id="jb-calendar"${f.respectCalendar ? ' checked' : ''}><span>${esc(t('jobs.f_calendar'))}</span></label></div>`
+    + `<div class="form-row job-checks"><label class="chk-inline"><input type="checkbox" id="jb-firmed"${f.respectFirmed ? ' checked' : ''}><span>${esc(t('jobs.f_firmed'))}</span></label></div>`
     + `<div class="form-row"><label for="jb-result">${esc(t('jobs.f_result'))}</label><select class="input" id="jb-result"${isAdmin ? '' : ' disabled'}>`
     + JOB_RESULTS.map(r => _opt(r, t(`jobs.result_${r}`), f.result)).join('') + `</select>`
     + `<div class="ape-hint">${esc(t('jobs.result_hint'))}</div>${_err('result')}</div>`
@@ -232,7 +232,7 @@ export function readForm(prev: JobForm): JobForm {
   };
   return {
     ...prev, name: _val('jb-name'), mode: _val('jb-mode') || prev.mode, search: _val('jb-search') || prev.search,
-    respectFirmed: _chk('jb-firmed'), respectCalendar: _chk('jb-calendar'),
+    respectFirmed: _chk('jb-firmed'),
     result: _val('jb-result') || prev.result, recur,
     validFrom: _val('jb-from'), validUntil: _val('jb-until'), skipIfRunning: _chk('jb-overlap'),
   };
@@ -263,18 +263,20 @@ async function _runPreview(): Promise<void> {
   if (!s || !box) return;
   s.form = readForm(s.form);
   const r = s.form.recur;
-  const cron = presetToCron(r);
-  const valid = r.preset === 'once' ? /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(r.runAt) : cron !== null;
-  if (!valid || !s.form.plant) { box.innerHTML = ''; return; }
+  // The form-level check only gates the request; the server's trigger is the authority on what is valid.
+  const errs = validateJobForm({ ...s.form, name: s.form.name || 'x' }, { isAdmin: true, plants: null });
+  const bad = r.preset === 'once' ? !!errs.runAt : r.preset === 'hourly' ? !!errs.minute : r.preset === 'cron' ? !!errs.cron
+    : !!(errs.time || errs.days || errs.dom);
+  if (bad || !s.form.plant) { box.innerHTML = ''; return; }
   const seq = ++s.previewSeq;
-  const prose = cron ? cronProse(cron, jobsDeps()) : null;
   try {
     const p = buildJobPayload(s.form).schedule;
+    const prose = recurrenceText(p, jobsDeps(), x => Util.fmtDTPref(x));
     const res = await JobsClient.preview(s.form.plant, p, 5);
     if (_s !== s || seq !== s.previewSeq) return;
-    box.innerHTML = `<div class="job-preview-head">${esc(t('jobs.next_runs'))}${prose ? ` <span class="ape-hint">${esc(prose)}</span>` : ''}</div>`
-      + (res.runs.length ? `<ol class="job-preview-list">${res.runs.map(x => `<li class="job-mono">${esc(Util.fmtDTPref(x))}</li>`).join('')}</ol>` : `<div class="ape-hint">${esc(t('jobs.no_runs'))}</div>`)
-      + (res.dst ? `<div class="job-dst" role="note">${esc(t('jobs.dst_warning'))}</div>` : '');
+    box.innerHTML = `<div class="job-preview-head">${esc(t('jobs.next_runs'))} <span class="ape-hint">${esc(prose)}</span></div>`
+      + (res.entries.length ? `<ol class="job-preview-list">${res.entries.map(x => `<li class="job-mono">${esc(Util.fmtDTPref(stripOffset(x.atLocal)))}</li>`).join('')}</ol>` : `<div class="ape-hint">${esc(t('jobs.no_runs'))}</div>`)
+      + (res.entries.some(x => x.dstShifted) ? `<div class="job-dst" role="note">${esc(t('jobs.dst_warning'))}</div>` : '');
   } catch (e) {
     if (_s !== s || seq !== s.previewSeq) return;
     box.innerHTML = `<div class="ape-err">${esc((e as Error).message)}</div>`;
@@ -395,11 +397,13 @@ export const JobsDialog = {
     const btn = _el<HTMLButtonElement>('jb-save');
     if (btn) btn.disabled = true;
     try {
-      let id = s.job?.id;
-      if (s.job) await JobsClient.update(s.job.id, { name: job.name, params: job.params });
-      else id = (await JobsClient.create(job)).id;
-      if (s.job?.schedule) await JobsClient.updateSchedule(s.job.schedule.id, schedule);
-      else await JobsClient.addSchedule(id as number, schedule);
+      if (s.job) {
+        await JobsClient.update(s.job.id, { name: job.name, params: job.params });
+        if (s.job.schedule) await JobsClient.updateSchedule(s.job.schedule.id, schedule);
+        else await JobsClient.addSchedule(s.job.id, schedule);
+      } else {
+        await JobsClient.create({ ...job, schedules: [schedule] });
+      }
       Toast.show(t('jobs.toast_saved'), 'ok');
       const cb = s.onSaved;
       JobsDialog.close();
@@ -431,8 +435,7 @@ async function _submitCopy(s: DialogState): Promise<void> {
   for (const plant of [...s.targets]) {
     try {
       const { job, schedule } = buildJobPayload({ ...form, plant });
-      const made = await JobsClient.create(job);
-      await JobsClient.addSchedule(made.id, schedule);
+      await JobsClient.create({ ...job, schedules: [schedule] });
       ok++;
     } catch { failed.push(plant); }
   }

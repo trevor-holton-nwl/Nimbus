@@ -3124,6 +3124,7 @@ window.__NIMBUS_LOCALES.fr = {
   'jobs.preset_once': 'Une fois',
   'jobs.preset_hourly': 'Toutes les heures',
   'jobs.preset_daily': 'Quotidien',
+  'jobs.preset_weekdays': 'Jours ouvrés',
   'jobs.preset_weekly': 'Hebdomadaire',
   'jobs.preset_monthly': 'Mensuel',
   'jobs.preset_cron': 'Cron (avancé)',

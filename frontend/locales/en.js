@@ -3366,6 +3366,7 @@ window.__NIMBUS_LOCALES.en = {
   'jobs.preset_once': 'Once',
   'jobs.preset_hourly': 'Hourly',
   'jobs.preset_daily': 'Daily',
+  'jobs.preset_weekdays': 'Weekdays',
   'jobs.preset_weekly': 'Weekly',
   'jobs.preset_monthly': 'Monthly',
   'jobs.preset_cron': 'Cron (advanced)',

@@ -25,9 +25,9 @@ function add(id, props = {}) {
 }
 /** The live form fields a real body would contain, filled for a valid default job. */
 function fillForm(over = {}) {
-  const v = { 'jb-name': 'Morning optimize', 'jb-mode': 'due-date', 'jb-search': 'exhaustive', 'jb-result': 'apply', 'jb-recur': 'daily', 'jb-time': '08:00', 'jb-from': '', 'jb-until': '', ...over };
+  const v = { 'jb-name': 'Morning optimize', 'jb-mode': 'due_date', 'jb-search': 'exhaustive', 'jb-result': 'apply', 'jb-recur': 'daily', 'jb-time': '08:00', 'jb-from': '', 'jb-until': '', ...over };
   for (const [id, value] of Object.entries(v)) (els[id] ?? add(id)).value = value;
-  for (const id of ['jb-firmed', 'jb-calendar', 'jb-overlap']) (els[id] ?? add(id)).checked = true;
+  for (const id of ['jb-firmed', 'jb-overlap']) (els[id] ?? add(id)).checked = true;
 }
 
 beforeEach(() => {
@@ -39,7 +39,7 @@ beforeEach(() => {
     update: JobsClient.update, addSchedule: JobsClient.addSchedule, updateSchedule: JobsClient.updateSchedule, open: Modal.open, close: Modal.close, toast: Toast.show,
   });
   Session.isAdmin = () => true; Session.allowedPlants = () => null; Store.knownPlants = () => ['1008', '2000', '3000'];
-  JobsClient.preview = async () => ({ runs: ['2026-10-30T08:00:00'], dst: false });
+  JobsClient.preview = async () => ({ timezone: 'America/New_York', cronExpr: '0 8 * * *', entries: [{ atUtc: '2026-10-30T12:00:00+00:00', atLocal: '2026-10-30T08:00:00-04:00', dstShifted: false }] });
   JobsClient.create = async j => { calls.create.push(j); return { id: 7 }; };
   JobsClient.update = async (id, p) => { calls.update.push([id, p]); return { id }; };
   JobsClient.addSchedule = async (id, s) => { calls.addSch.push([id, s]); return null; };
@@ -67,8 +67,8 @@ test('body markup: every field has a label, defaults are 08:00 / Exhaustive / Ap
 
 test('recurrence fields follow the preset and escape their values', () => {
   const r = defaultRecurrence();
-  assert.match(recurFieldsHtml({ ...r, preset: 'weekly' }), /id="jb-dow-1" checked/);
-  assert.doesNotMatch(recurFieldsHtml({ ...r, preset: 'weekly' }), /id="jb-dow-0" checked/);
+  assert.match(recurFieldsHtml({ ...r, preset: 'weekly' }), /id="jb-dow-0" checked/, 'Monday is 0');
+  assert.doesNotMatch(recurFieldsHtml({ ...r, preset: 'weekly' }), /id="jb-dow-6" checked/, 'Sunday is 6');
   assert.match(recurFieldsHtml({ ...r, preset: 'monthly' }), /id="jb-dom"/);
   assert.match(recurFieldsHtml({ ...r, preset: 'hourly' }), /id="jb-minute"/);
   assert.match(recurFieldsHtml({ ...r, preset: 'once' }), /type="datetime-local"/);
@@ -95,7 +95,7 @@ test('readForm reads live fields and keeps the recurrence of the previous form f
   const f = readForm(defaultJobForm('1008'));
   assert.equal(f.name, ' Night run ');
   assert.equal(f.recur.preset, 'daily'); assert.equal(f.recur.time, '22:30');
-  assert.deepEqual(f.recur.days, [1, 2, 3, 4, 5], 'weekday boxes are not on screen, so the previous days stay');
+  assert.deepEqual(f.recur.days, [0, 1, 2, 3, 4], 'weekday boxes are not on screen, so the previous days stay');
   assert.equal(f.respectFirmed, true);
 });
 
@@ -108,7 +108,7 @@ test('submit with an empty name shows the inline error and sends nothing', async
   assert.equal(calls.create.length, 0);
 });
 
-test('submit creates the job then its schedule (plant-local cron), toasts, closes and calls onSaved', async () => {
+test('submit creates the job with its preset schedule inline, toasts, closes and calls onSaved', async () => {
   let saved = 0;
   JobsDialog.open({ plant: '1008', onSaved: () => { saved++; } });
   fillForm();
@@ -116,25 +116,24 @@ test('submit creates the job then its schedule (plant-local cron), toasts, close
   assert.equal(calls.create.length, 1);
   assert.deepEqual(calls.create[0], {
     name: 'Morning optimize', plant: '1008', job_type: 'optimizer.plant',
-    params: { mode: 'due-date', search: 'exhaustive', respect_firmed: true, respect_calendar: true, apply_mode: 'apply' },
+    params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' },
+    schedules: [{ kind: 'daily', time_of_day: '08:00', valid_from: null, valid_until: null, skip_if_running: true }],
   });
-  assert.equal(calls.addSch.length, 1);
-  assert.equal(calls.addSch[0][0], 7);
-  assert.equal(calls.addSch[0][1].cron_expr, '0 8 * * *');
+  assert.equal(calls.addSch.length, 0, 'the schedule rides inside the create call');
   assert.deepEqual(calls.toast.at(-1)[1], 'ok');
   assert.deepEqual(calls.closed, ['modal-job-edit']);
   assert.equal(saved, 1);
 });
 
 test('submit on an existing job patches the job and its schedule (no create)', async () => {
-  const job = { id: 3, name: 'Old', plant: '1008', job_type: 'optimizer.plant', params: {}, enabled: true, schedule: { id: 9, kind: 'cron', cron_expr: '0 6 * * *', valid_from: null, valid_until: null, skip_if_running: true } };
+  const job = { id: 3, name: 'Old', plant: '1008', job_type: 'optimizer.plant', params: {}, enabled: true, schedule: { id: 9, kind: 'daily', time_of_day: '06:00', cron_expr: '0 6 * * *', valid_from: null, valid_until: null, skip_if_running: true } };
   JobsDialog.open({ job });
   fillForm({ 'jb-name': 'Renamed', 'jb-time': '07:15' });
   await JobsDialog.submit();
   assert.equal(calls.create.length, 0);
   assert.equal(calls.update[0][0], 3);
   assert.equal(calls.update[0][1].name, 'Renamed');
-  assert.deepEqual([calls.updSch[0][0], calls.updSch[0][1].cron_expr], [9, '15 7 * * *']);
+  assert.deepEqual([calls.updSch[0][0], calls.updSch[0][1].kind, calls.updSch[0][1].time_of_day], [9, 'daily', '07:15']);
   assert.equal(calls.addSch.length, 0);
 });
 
@@ -161,16 +160,16 @@ test('duplicate seeds a new job: name cleared, saves as create', async () => {
   assert.equal(calls.update.length, 0);
 });
 
-test('copy to plants creates one job + schedule per ticked plant and reports partial failures', async () => {
-  const job = { id: 3, name: 'Source', plant: '1008', job_type: 'optimizer.plant', params: { search: 'normal' }, enabled: true, schedule: { id: 9, kind: 'cron', cron_expr: '0 8 * * *', skip_if_running: true } };
+test('copy to plants creates one job (schedule inline) per ticked plant and reports partial failures', async () => {
+  const job = { id: 3, name: 'Source', plant: '1008', job_type: 'optimizer.plant', params: { search: 'normal' }, enabled: true, schedule: { id: 9, kind: 'daily', time_of_day: '08:00', skip_if_running: true } };
   let n = 0;
   JobsClient.create = async j => { calls.create.push(j); if (j.plant === '3000') throw new Error('nope'); return { id: 100 + n++ }; };
   JobsDialog.openCopy(job);
   JobsDialog._state().targets = new Set(['2000', '3000']);
   await JobsDialog.submit();
   assert.deepEqual(calls.create.map(c => c.plant), ['2000', '3000']);
-  assert.equal(calls.addSch.length, 1, 'no schedule for the plant whose job failed');
-  assert.equal(calls.addSch[0][1].cron_expr, '0 8 * * *');
+  assert.equal(calls.addSch.length, 0);
+  assert.deepEqual(calls.create[0].schedules.map(x => [x.kind, x.time_of_day]), [['daily', '08:00']]);
   assert.equal(calls.toast.at(-1)[1], 'warn');
   assert.deepEqual([...JobsDialog._state().targets], ['3000'], 'the failed plant stays ticked for a retry');
   assert.equal(calls.closed.length, 0);

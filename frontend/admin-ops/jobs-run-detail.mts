@@ -3,8 +3,10 @@
 
    Rendered into the Runs sub-tab's #jobs-run-detail host by the pane. The log is fetched whole
    (every level) and cached by seq; the level filter and search are client-side, so a filter
-   change never refetches. While the run is running/scheduled the log is polled every 2 s by
-   after_seq, and the poll stops by itself when the run ends or the pane stops being visible.
+   change never refetches. The log is polled every 2 s with after_seq = the response's last_seq and
+   stops when the response says done (or the pane stops being visible); on done the run is re-read by
+   id (GET /jobs/runs/{id}) so the header, tiles and error show the final state. Times are shown in
+   the plant's timezone (the run's instants are tz-aware).
    The viewer is a fixed-row VirtualList (a wrapped line makes the row taller, estimated from the
    character count). Module state only; no Store events.
    ========================================================================== */
@@ -15,7 +17,7 @@ import { JobsClient } from './jobs-client.mjs';
 import type { JobRun } from './jobs-client.mjs';
 import {
   statusBadgeHtml, isActiveRun, durationText, stepSegments, resultTiles, mergeLog, lastSeq, filterLog, logToText,
-  LOG_LEVELS,
+  LOG_LEVELS, plantWall,
 } from './jobs-model.mjs';
 import type { LogLine } from './jobs-model.mjs';
 
@@ -31,6 +33,9 @@ interface DetailState {
   host: HTMLElement;
   run: JobRun;
   lines: LogLine[];
+  tz: string;
+  lastSeq: number;
+  done: boolean;
   level: string;
   q: string;
   follow: boolean;
@@ -44,7 +49,7 @@ interface DetailState {
 let _d: DetailState | null = null;
 
 const _q = <E extends HTMLElement = HTMLElement>(sel: string): E | null => (_d?.host.querySelector(sel) as E | null);
-const _fmt = (iso: string | null | undefined): string => (iso ? Util.fmtDTPref(iso) : '—');
+const _fmt = (iso: string | null | undefined): string => (iso ? Util.fmtDTPref(plantWall(iso, _d?.tz)) : '—');
 
 function _headerHtml(r: JobRun, canCancel: boolean): string {
   const facts: Array<[string, string]> = [
@@ -92,8 +97,8 @@ function _toolbarHtml(s: DetailState): string {
     + `<span class="ape-hint" id="jr-count" aria-live="polite"></span></div>`;
 }
 
-export function logRowHtml(l: LogLine): string {
-  return `<div class="job-log-row job-lv-${esc(l.level)}"><span class="job-log-at job-mono">${esc(l.at ? Util.fmtDTShortPref(l.at) : '')}</span>`
+export function logRowHtml(l: LogLine, tz = ''): string {
+  return `<div class="job-log-row job-lv-${esc(l.level)}"><span class="job-log-at job-mono">${esc(l.at ? Util.fmtDTShortPref(plantWall(l.at, tz)) : '')}</span>`
     + `<span class="job-log-lv">${esc(t(`jobs.level_${l.level}`))}</span>`
     + `<span class="job-log-step job-mono">${esc(l.step ?? '')}</span><span class="job-log-msg">${esc(l.msg)}</span>`
     + `<span class="job-log-dur job-mono">${esc(l.duration_ms != null ? durationText(l.duration_ms) : '')}</span></div>`;
@@ -111,7 +116,7 @@ function _paintLog(): void {
   const scroll = _q('#jr-log');
   if (!s || !scroll) return;
   if (!s.vl) {
-    s.vl = new VirtualList<LogLine>(scroll, { getRowH: (l) => _rowHeight(l, s), renderFn: logRowHtml, buffer: 12 });
+    s.vl = new VirtualList<LogLine>(scroll, { getRowH: (l) => _rowHeight(l, s), renderFn: (l) => logRowHtml(l, s.tz), buffer: 12 });
   }
   const shown = filterLog(s.lines, { level: s.level, q: s.q });
   s.vl._getRowH = (l) => _rowHeight(l, s);
@@ -128,11 +133,16 @@ async function _fetchLog(): Promise<void> {
   if (!s || s.inflight) return;
   s.inflight = true;
   try {
-    const res = await JobsClient.log(s.run.id, { afterSeq: lastSeq(s.lines) });
+    const res = await JobsClient.log(s.run.id, { afterSeq: s.lastSeq });
     if (_d !== s) return;
     if (res.lines.length) { s.lines = mergeLog(s.lines, res.lines); _paintLog(); }
-    if (res.status && res.status !== s.run.status) {
-      s.run = { ...s.run, status: res.status };
+    s.lastSeq = Math.max(s.lastSeq, res.lastSeq, lastSeq(s.lines));
+    s.done = res.done;
+    if (res.truncated && !s.run.log_truncated) s.run = { ...s.run, log_truncated: true };
+    if (res.done || (res.status && res.status !== s.run.status)) {
+      // The run changed state: re-read it so ended_at, summary and error show (the log page only carries status).
+      s.run = await JobsClient.getRun(s.run.id).catch(() => ({ ...s.run, status: res.status ?? s.run.status }));
+      if (_d !== s) return;
       _paintHead();
       s.onChanged?.();
     }
@@ -153,12 +163,12 @@ function _tick(): void {
   if (!s.visible()) return;   // paused while hidden; JobsRunDetail.resume() restarts it
   void _fetchLog().then(() => {
     if (_d !== s) return;
-    if (isActiveRun(s.run.status)) s.timer = setTimeout(_tick, LOG_POLL_MS);
+    if (!s.done) s.timer = setTimeout(_tick, LOG_POLL_MS);
   });
 }
 
 function _download(s: DetailState): void {
-  const text = logToText(s.lines, Util.fmtDTPref);
+  const text = logToText(s.lines, x => Util.fmtDTPref(plantWall(x, s.tz)));
   const a = document.createElement('a');
   const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
   a.href = url; a.download = `job-run-${s.run.id}.log`;
@@ -167,10 +177,10 @@ function _download(s: DetailState): void {
 }
 
 export const JobsRunDetail = {
-  show(host: HTMLElement, run: JobRun, opts: { onBack: () => void; onChanged?: () => void; visible: () => boolean }): void {
+  show(host: HTMLElement, run: JobRun, opts: { onBack: () => void; onChanged?: () => void; visible: () => boolean; tz?: string }): void {
     JobsRunDetail.stop();
     const s: DetailState = {
-      host, run, lines: [], level: 'all', q: '', follow: isActiveRun(run.status), wrap: false, vl: null, timer: null,
+      host, run, lines: [], tz: opts.tz ?? '', lastSeq: 0, done: false, level: 'all', q: '', follow: isActiveRun(run.status), wrap: false, vl: null, timer: null,
       inflight: false, onChanged: opts.onChanged ?? null, visible: opts.visible,
     };
     _d = s;
@@ -183,7 +193,7 @@ export const JobsRunDetail = {
       if (!act || _d !== s) return;
       if (act === 'back') { opts.onBack(); }
       else if (act === 'copy') {
-        const txt = logToText(filterLog(s.lines, { level: s.level, q: s.q }), Util.fmtDTPref);
+        const txt = logToText(filterLog(s.lines, { level: s.level, q: s.q }), x => Util.fmtDTPref(plantWall(x, s.tz)));
         navigator.clipboard?.writeText(txt).then(() => Toast.show(t('jobs.log_copied'), 'ok'), () => Toast.show(t('jobs.log_copy_failed'), 'err'));
       }
       else if (act === 'download') _download(s);
@@ -213,13 +223,13 @@ export const JobsRunDetail = {
       if (cb) cb.checked = false;
     }, { passive: true });
     _paintLog();
-    void _fetchLog().then(() => { if (_d === s && isActiveRun(s.run.status)) s.timer = setTimeout(_tick, LOG_POLL_MS); });
+    void _fetchLog().then(() => { if (_d === s && !s.done) s.timer = setTimeout(_tick, LOG_POLL_MS); });
   },
 
   /** Restart the poll after the pane became visible again. */
   resume(): void {
     const s = _d;
-    if (s && !s.timer && isActiveRun(s.run.status)) s.timer = setTimeout(_tick, 0);
+    if (s && !s.timer && !s.done) s.timer = setTimeout(_tick, 0);
   },
 
   stop(): void {

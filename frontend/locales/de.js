@@ -3163,6 +3163,7 @@ window.__NIMBUS_LOCALES.de = {
   'jobs.preset_once': 'Einmalig',
   'jobs.preset_hourly': 'Stündlich',
   'jobs.preset_daily': 'Täglich',
+  'jobs.preset_weekdays': 'Werktags',
   'jobs.preset_weekly': 'Wöchentlich',
   'jobs.preset_monthly': 'Monatlich',
   'jobs.preset_cron': 'Cron (erweitert)',

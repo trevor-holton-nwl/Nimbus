@@ -1,0 +1,54 @@
+{
+  "_doc": "Response bodies of the /jobs routes exactly as backend/jobs/routes.py returns them (key names, nesting, value formats). tests/test_jobs_contract.py asserts the live routes match these keys; tests/modules/admin-ops/jobs-client.test.mjs feeds them through the frontend client and asserts it reads only keys that exist here. Free-form objects (params, summary, log data) are opaque.",
+  "schedule": {
+    "id": 11, "job_id": 5, "kind": "weekly", "cron_expr": "0 8 * * mon,wed,fri", "time_of_day": "08:00",
+    "days_of_week": [0, 2, 4], "day_of_month": null, "run_at": null, "timezone": "America/New_York",
+    "valid_from": "2026-11-01T00:00:00", "valid_until": null, "paused": false, "retired": false,
+    "misfire_grace_s": 300, "skip_if_running": true, "created_by": "admin@example.com", "modified_by": "admin@example.com",
+    "created_at": "2026-10-28T14:00:00+00:00", "modified_at": "2026-10-28T14:00:00+00:00"
+  },
+  "run": {
+    "id": 42, "job_id": 5, "job_name": "Morning optimize", "plant": "1008", "job_type": "optimizer.plant", "schedule_id": 11,
+    "status": "warning", "trigger": "schedule", "attempt": 1, "scheduled_for": "2026-10-29T12:00:00+00:00",
+    "started_at": "2026-10-29T12:00:01+00:00", "ended_at": "2026-10-29T12:03:40+00:00", "duration_ms": 219000,
+    "triggered_by": null,
+    "summary": {"late": 3, "changeovers": 41, "moved": 120, "applied": 118, "dropped": 2, "action_id": "a-17", "mode": "due_date", "search": "exhaustive", "apply_mode": "apply"},
+    "error": null, "log_truncated": false, "cancel_requested": false
+  },
+  "job": {
+    "id": 5, "plant": "1008", "job_type": "optimizer.plant", "name": "Morning optimize",
+    "params": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"},
+    "enabled": true, "archived": false, "retry_max": 0, "timeout_s": null,
+    "created_by": "admin@example.com", "modified_by": "admin@example.com",
+    "created_at": "2026-10-28T14:00:00+00:00", "modified_at": "2026-10-28T14:00:00+00:00",
+    "schedules": ["$schedule"],
+    "next_run_at": "2026-10-30T12:00:00+00:00", "next_run_local": "2026-10-30T08:00:00-04:00",
+    "last_run": "$run"
+  },
+  "types": {"types": [{
+    "key": "optimizer.plant", "label": "Optimizer (one plant)", "plant_scoped": true, "default_timeout_s": 600, "stub": false,
+    "params_schema": {"type": "object"},
+    "defaults": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "propose"}
+  }]},
+  "jobs_list": {"jobs": ["$job"], "next_before_id": 4},
+  "runs_list": {"runs": ["$run"], "next_before_id": 41},
+  "run_wrapped": {"run": "$run"},
+  "log": {
+    "run_id": 42, "status": "running", "log_truncated": false, "done": false,
+    "lines": [{"seq": 1, "at": "2026-10-29T12:00:01+00:00", "level": "info", "step": "load", "msg": "loaded 120 orders", "duration_ms": 850, "data": {}}],
+    "last_seq": 1
+  },
+  "preview": {
+    "timezone": "America/New_York", "cron_expr": "0 8 * * mon,wed,fri",
+    "entries": [{"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "dst_shifted": false}]
+  },
+  "upcoming_job": {
+    "job_id": 5,
+    "entries": [{"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "dst_shifted": false,
+                 "job_id": 5, "job_name": "Morning optimize", "plant": "1008", "schedule_id": 11, "timezone": "America/New_York"}]
+  },
+  "upcoming_all": {
+    "entries": [{"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "dst_shifted": false,
+                 "job_id": 5, "job_name": "Morning optimize", "plant": "1008", "schedule_id": 11, "timezone": "America/New_York"}]
+  }
+}

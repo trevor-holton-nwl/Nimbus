@@ -1,10 +1,11 @@
-// Tests for frontend/admin-ops/jobs-model.mts: status map, preset <-> cron, cron prose, query builders,
-// the job form validation / payload, step bar, result tiles and the 7-day strip. Pure: no DOM, no Store.
+// Tests for frontend/admin-ops/jobs-model.mts: status map, preset <-> ScheduleIn (the server compiles the cron),
+// cron prose, query builders (before_id cursors), plant wall clock, the job form validation / payload, step bar,
+// result tiles and the 7-day strip. Pure: no DOM, no Store.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  statusBadgeClass, statusBadgeHtml, isActiveRun, presetToCron, cronToRecurrence, cronProse, isValidCronShape, parseTime,
-  recurrenceText, buildJobsQuery, buildRunsQuery, buildLogQuery, pageRange, durationText, stepSegments, resultTiles,
+  statusBadgeClass, statusBadgeHtml, isActiveRun, recurrenceToScheduleIn, scheduleToRecurrence, cronProse, isValidCronShape, parseTime,
+  recurrenceText, buildJobsQuery, buildRunsQuery, buildLogQuery, plantWall, stripOffset, dowLabelKey, durationText, stepSegments, resultTiles,
   weekStrip, addDays, isoDayKey, defaultJobForm, validateJobForm, buildJobPayload, jobToForm, defaultRecurrence,
 } from '../../../frontend/admin-ops/jobs-model.mjs';
 
@@ -12,7 +13,7 @@ const EN = {
   'jobs.cron_daily': 'Every day at {{time}}', 'jobs.cron_weekdays': 'Weekdays at {{time}}', 'jobs.cron_weekly': 'Every {{days}} at {{time}}',
   'jobs.cron_monthly': 'Day {{dom}} of every month at {{time}}', 'jobs.cron_hourly': 'Every hour at minute {{m}}',
   'jobs.cron_every_minutes': 'Every {{n}} minutes', 'jobs.cron_every_hours': 'Every {{n}} hours at minute {{m}}',
-  'jobs.dow_0': 'Sun', 'jobs.dow_1': 'Mon', 'jobs.dow_3': 'Wed', 'jobs.dow_5': 'Fri',
+  'jobs.dow_0': 'Sun', 'jobs.dow_1': 'Mon', 'jobs.dow_3': 'Wed', 'jobs.dow_5': 'Fri', 'jobs.dow_2': 'Tue',
   'jobs.no_schedule': 'No schedule', 'jobs.once_at': 'Once, {{when}}', 'jobs.status_failed': 'Failed',
 };
 const deps = {
@@ -36,20 +37,15 @@ test('status badge escapes an unknown status instead of injecting it', () => {
   assert.doesNotMatch(statusBadgeHtml('<img onerror=x>', deps), /<img/);
 });
 
-test('presetToCron: each preset compiles; invalid or incomplete forms give null', () => {
+test('recurrenceToScheduleIn: preset kinds with only the fields they read (the server compiles the cron)', () => {
   const base = defaultRecurrence();
-  assert.equal(presetToCron({ ...base, preset: 'daily' }), '0 8 * * *');
-  assert.equal(presetToCron({ ...base, preset: 'daily', time: '17:45' }), '45 17 * * *');
-  assert.equal(presetToCron({ ...base, preset: 'weekly', time: '06:05', days: [5, 1, 1, 3] }), '5 6 * * 1,3,5');
-  assert.equal(presetToCron({ ...base, preset: 'weekly', days: [] }), null);
-  assert.equal(presetToCron({ ...base, preset: 'monthly', dom: 15 }), '0 8 15 * *');
-  assert.equal(presetToCron({ ...base, preset: 'monthly', dom: 32 }), null);
-  assert.equal(presetToCron({ ...base, preset: 'hourly', minute: 30 }), '30 * * * *');
-  assert.equal(presetToCron({ ...base, preset: 'hourly', minute: 60 }), null);
-  assert.equal(presetToCron({ ...base, preset: 'once' }), null);
-  assert.equal(presetToCron({ ...base, preset: 'cron', cron: '  0   8 * *  1-5 ' }), '0 8 * * 1-5');
-  assert.equal(presetToCron({ ...base, preset: 'cron', cron: '0 8 *' }), null);
-  assert.equal(presetToCron({ ...base, preset: 'daily', time: '25:00' }), null);
+  assert.deepEqual(recurrenceToScheduleIn(base), { kind: 'daily', time_of_day: '08:00' });
+  assert.deepEqual(recurrenceToScheduleIn({ ...base, preset: 'weekdays', time: '17:45' }), { kind: 'weekdays', time_of_day: '17:45' });
+  assert.deepEqual(recurrenceToScheduleIn({ ...base, preset: 'weekly', time: '06:05', days: [4, 0, 0, 2] }), { kind: 'weekly', time_of_day: '06:05', days_of_week: [0, 2, 4] });
+  assert.deepEqual(recurrenceToScheduleIn({ ...base, preset: 'monthly', dom: 15 }), { kind: 'monthly', time_of_day: '08:00', day_of_month: 15 });
+  assert.deepEqual(recurrenceToScheduleIn({ ...base, preset: 'hourly', minute: 30 }), { kind: 'hourly', time_of_day: '00:30' });
+  assert.deepEqual(recurrenceToScheduleIn({ ...base, preset: 'once', runAt: '2026-11-02T08:00' }), { kind: 'once', run_at: '2026-11-02T08:00' });
+  assert.deepEqual(recurrenceToScheduleIn({ ...base, preset: 'cron', cron: '  0   8 * *  1-5 ' }), { kind: 'cron', cron_expr: '0 8 * * 1-5' });
 });
 
 test('parseTime and isValidCronShape', () => {
@@ -64,26 +60,27 @@ test('parseTime and isValidCronShape', () => {
   assert.equal(isValidCronShape('0 8 * * ; rm'), false);
 });
 
-test('cronToRecurrence reverses the presets and sends anything else to advanced cron', () => {
-  assert.deepEqual(
-    (({ preset, time }) => ({ preset, time }))(cronToRecurrence('0 8 * * *')), { preset: 'daily', time: '08:00' });
-  const wk = cronToRecurrence('5 6 * * 1,3,5');
-  assert.equal(wk.preset, 'weekly'); assert.deepEqual(wk.days, [1, 3, 5]); assert.equal(wk.time, '06:05');
-  const mo = cronToRecurrence('0 8 15 * *');
+test('scheduleToRecurrence reads the stored preset fields back (days 0 = Monday) and round-trips', () => {
+  const daily = scheduleToRecurrence({ kind: 'daily', time_of_day: '08:00', cron_expr: '0 8 * * *' });
+  assert.deepEqual([daily.preset, daily.time], ['daily', '08:00']);
+  assert.equal(scheduleToRecurrence({ kind: 'weekdays', time_of_day: '7:05' }).time, '07:05');
+  const wk = scheduleToRecurrence({ kind: 'weekly', time_of_day: '06:05', days_of_week: [0, 2, 4] });
+  assert.equal(wk.preset, 'weekly'); assert.deepEqual(wk.days, [0, 2, 4]); assert.equal(wk.time, '06:05');
+  const mo = scheduleToRecurrence({ kind: 'monthly', time_of_day: '08:00', day_of_month: 15 });
   assert.equal(mo.preset, 'monthly'); assert.equal(mo.dom, 15);
-  const hr = cronToRecurrence('30 * * * *');
+  const hr = scheduleToRecurrence({ kind: 'hourly', time_of_day: '00:30' });
   assert.equal(hr.preset, 'hourly'); assert.equal(hr.minute, 30);
-  assert.equal(cronToRecurrence('*/15 * * * *').preset, 'cron');
-  assert.equal(cronToRecurrence('0 8 * * 1-5').preset, 'cron');
-  assert.equal(cronToRecurrence('').preset, 'daily');
-  // round trip
-  for (const c of ['0 8 * * *', '5 6 * * 1,3,5', '0 8 15 * *', '30 * * * *']) assert.equal(presetToCron(cronToRecurrence(c)), c);
+  assert.equal(scheduleToRecurrence({ kind: 'cron', cron_expr: '*/15 * * * *' }).cron, '*/15 * * * *');
+  assert.equal(scheduleToRecurrence({ kind: 'mystery', cron_expr: '1 2 3 4 5' }).preset, 'cron');
+  assert.equal(scheduleToRecurrence(null).preset, 'daily');
+  for (const s of [{ kind: 'daily', time_of_day: '08:00' }, { kind: 'weekly', time_of_day: '06:05', days_of_week: [0, 2, 4] }, { kind: 'monthly', time_of_day: '08:00', day_of_month: 15 }, { kind: 'hourly', time_of_day: '00:30' }]) {
+    assert.deepEqual(recurrenceToScheduleIn(scheduleToRecurrence(s)), s);
+  }
 });
 
 test('cronProse phrases the supported shapes and returns null for the rest', () => {
   assert.equal(cronProse('0 8 * * *', deps), 'Every day at 08:00');
-  assert.equal(cronProse('0 8 * * 1,2,3,4,5', deps), 'Weekdays at 08:00');
-  assert.equal(cronProse('30 6 * * 1,3,5', deps), 'Every Mon, Wed, Fri at 06:30');
+  assert.equal(cronProse('0 8 * * mon,wed', deps), null, 'a day-of-week cron falls back to the raw expression');
   assert.equal(cronProse('0 8 15 * *', deps), 'Day 15 of every month at 08:00');
   assert.equal(cronProse('30 * * * *', deps), 'Every hour at minute 30');
   assert.equal(cronProse('*/15 * * * *', deps), 'Every 15 minutes');
@@ -94,29 +91,44 @@ test('cronProse phrases the supported shapes and returns null for the rest', () 
   assert.equal(cronProse('0 17 * * *', { ...deps, fmtTime: (h, m) => `${h % 12 || 12}:${String(m).padStart(2, '0')} PM` }), 'Every day at 5:00 PM', 'viewer time format injected');
 });
 
-test('recurrenceText: prose, raw cron fallback, once, none', () => {
+test('recurrenceText: preset prose from the stored fields (0 = Monday), raw cron fallback, once, none', () => {
   const fmt = iso => `<${iso}>`;
   assert.equal(recurrenceText(null, deps, fmt), 'No schedule');
+  assert.equal(recurrenceText({ kind: 'daily', time_of_day: '08:00' }, deps, fmt), 'Every day at 08:00');
+  assert.equal(recurrenceText({ kind: 'weekdays', time_of_day: '08:00' }, deps, fmt), 'Weekdays at 08:00');
+  assert.equal(recurrenceText({ kind: 'weekly', time_of_day: '06:30', days_of_week: [4, 0, 2] }, deps, fmt), 'Every Mon, Wed, Fri at 06:30');
+  assert.equal(recurrenceText({ kind: 'monthly', time_of_day: '08:00', day_of_month: 15 }, deps, fmt), 'Day 15 of every month at 08:00');
+  assert.equal(recurrenceText({ kind: 'hourly', time_of_day: '00:30' }, deps, fmt), 'Every hour at minute 30');
   assert.equal(recurrenceText({ kind: 'cron', cron_expr: '0 8 * * *' }, deps, fmt), 'Every day at 08:00');
   assert.equal(recurrenceText({ kind: 'cron', cron_expr: '0 8 * 6 *' }, deps, fmt), '0 8 * 6 *');
   assert.equal(recurrenceText({ kind: 'once', run_at: '2026-11-02T08:00:00' }, deps, fmt), 'Once, <2026-11-02T08:00:00>');
+  assert.equal(dowLabelKey(0), 'jobs.dow_1', 'Monday');
+  assert.equal(dowLabelKey(6), 'jobs.dow_0', 'Sunday');
 });
 
-test('query builders: encode, drop empties, clamp limit, offset only when non-zero', () => {
+test('query builders: encode, drop empties, clamp limit, before_id cursor, job_type name', () => {
   assert.equal(buildJobsQuery({}), '?limit=50');
-  assert.equal(buildJobsQuery({ plant: '1008', q: ' a b&c ', status: 'failed', limit: 20, offset: 40 }), '?plant=1008&q=a%20b%26c&status=failed&limit=20&offset=40');
-  assert.equal(buildJobsQuery({ limit: 9999, offset: -5 }), '?limit=200');
+  assert.equal(buildJobsQuery({ plant: '1008', q: ' a b&c ', status: 'failed', type: 'optimizer.plant', limit: 20, beforeId: 40 }), '?plant=1008&q=a%20b%26c&status=failed&job_type=optimizer.plant&before_id=40&limit=20');
+  assert.equal(buildJobsQuery({ limit: 9999 }), '?limit=200');
+  assert.doesNotMatch(buildJobsQuery({ plant: 'P' }), /offset/);
   assert.equal(buildRunsQuery({ plant: 'P1', beforeId: 120 }), '?plant=P1&before_id=120&limit=50');
+  assert.equal(buildRunsQuery({ jobId: 7 }), '?job_id=7&limit=50');
   assert.equal(buildRunsQuery({}), '?limit=50');
   assert.equal(buildLogQuery({}), '?after_seq=0');
   assert.equal(buildLogQuery({ afterSeq: 17, level: 'warn' }), '?after_seq=17&level=warn');
   assert.equal(buildLogQuery({ afterSeq: 3, level: 'all' }), '?after_seq=3');
 });
 
-test('pageRange clamps to the total and is empty for no rows', () => {
-  assert.deepEqual(pageRange(0, 50, 130), { from: 1, to: 50 });
-  assert.deepEqual(pageRange(100, 30, 130), { from: 101, to: 130 });
-  assert.deepEqual(pageRange(0, 0, 0), { from: 0, to: 0 });
+test('plantWall: an instant is shown on the plant wall clock (DST aware); naive and offset-free values pass through', () => {
+  assert.equal(plantWall('2026-10-29T12:00:00+00:00', 'America/New_York'), '2026-10-29T08:00:00', 'EDT');
+  assert.equal(plantWall('2026-11-02T13:00:00+00:00', 'America/New_York'), '2026-11-02T08:00:00', 'EST after fall-back');
+  assert.equal(plantWall('2026-10-29T12:00:00Z', 'Asia/Tokyo'), '2026-10-29T21:00:00');
+  assert.equal(plantWall('2026-10-29T08:00:00', 'Asia/Tokyo'), '2026-10-29T08:00:00', 'naive is already wall clock');
+  assert.equal(plantWall('2026-10-29T12:00:00+00:00', ''), '2026-10-29T12:00:00+00:00', 'no zone known: left for the viewer zone');
+  assert.equal(plantWall('2026-10-29T12:00:00+00:00', 'Not/AZone'), '2026-10-29T12:00:00+00:00');
+  assert.equal(plantWall(null, 'UTC'), '');
+  assert.equal(stripOffset('2026-10-30T08:00:00-04:00'), '2026-10-30T08:00:00');
+  assert.equal(stripOffset('2026-10-30T08:00:00'), '2026-10-30T08:00:00');
 });
 
 test('durationText is compact and tolerant', () => {
@@ -176,6 +188,7 @@ test('validateJobForm: name, plant scope, result gate, recurrence fields and val
   assert.equal(validateJobForm(good(), { isAdmin: false, plants: null }).result, 'jobs.err_apply_admin');
   assert.equal(validateJobForm({ ...good(), result: 'propose' }, { isAdmin: false, plants: null }).result, undefined);
   assert.equal(validateJobForm({ ...good(), mode: 'remove-backlog' }, ok).mode, 'jobs.err_mode');
+  assert.equal(validateJobForm({ ...good(), mode: 'due-date' }, ok).mode, 'jobs.err_mode', 'the backend names are due_date / min_changeover / spt');
   const r = (patch) => ({ ...good(), recur: { ...defaultRecurrence(), ...patch } });
   assert.equal(validateJobForm(r({ time: '' }), ok).time, 'jobs.err_time');
   assert.equal(validateJobForm(r({ preset: 'weekly', days: [] }), ok).days, 'jobs.err_days');
@@ -187,26 +200,27 @@ test('validateJobForm: name, plant scope, result gate, recurrence fields and val
   assert.equal(validateJobForm({ ...good(), validFrom: '2026-11-10', validUntil: '2026-11-01' }, ok).validity, 'jobs.err_validity');
 });
 
-test('buildJobPayload: cron job and once job, plant-local naive values, trimmed name', () => {
+test('buildJobPayload: backend job params (apply_mode explicit) and a preset ScheduleIn, trimmed name, no zone', () => {
   const p = buildJobPayload({ ...good(), name: '  Morning optimize ', validFrom: '2026-11-01' });
   assert.deepEqual(p.job, {
     name: 'Morning optimize', plant: '1008', job_type: 'optimizer.plant',
-    params: { mode: 'due-date', search: 'exhaustive', respect_firmed: true, respect_calendar: true, apply_mode: 'apply' },
+    params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' },
   });
-  assert.deepEqual(p.schedule, { kind: 'cron', cron_expr: '0 8 * * *', run_at: null, valid_from: '2026-11-01', valid_until: null, skip_if_running: true });
+  assert.deepEqual(p.schedule, { kind: 'daily', time_of_day: '08:00', valid_from: '2026-11-01', valid_until: null, skip_if_running: true });
   const once = buildJobPayload({ ...good(), recur: { ...defaultRecurrence(), preset: 'once', runAt: '2026-11-02T08:00' } });
-  assert.deepEqual([once.schedule.kind, once.schedule.cron_expr, once.schedule.run_at], ['once', null, '2026-11-02T08:00']);
-  assert.doesNotMatch(JSON.stringify(p), /Z"|\+\d\d:\d\d/, 'no zone suffix or offset');
+  assert.deepEqual([once.schedule.kind, once.schedule.cron_expr, once.schedule.run_at], ['once', undefined, '2026-11-02T08:00']);
+  assert.doesNotMatch(JSON.stringify(p), /Z"|\+\d\d:\d\d|timezone/, 'no zone suffix, offset or timezone field');
+  assert.equal(buildJobPayload({ ...good(), result: 'propose' }).job.params.apply_mode, 'propose');
 });
 
-test('jobToForm restores a saved job (cron preset, once, params) for Edit and Duplicate', () => {
+test('jobToForm restores a saved job (preset schedule, once, params) for Edit and Duplicate', () => {
   const f = jobToForm({
     name: 'N', plant: '1008', job_type: 'optimizer.plant',
-    params: { mode: 'spt', search: 'normal', respect_firmed: false, respect_calendar: true, apply_mode: 'propose' },
-    schedule: { kind: 'cron', cron_expr: '5 6 * * 1,3,5', valid_until: '2026-12-31T00:00:00', skip_if_running: false },
+    params: { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' },
+    schedule: { kind: 'weekly', time_of_day: '06:05', days_of_week: [0, 2, 4], cron_expr: '5 6 * * mon,wed,fri', valid_until: '2026-12-31T00:00:00', skip_if_running: false },
   });
   assert.equal(f.mode, 'spt'); assert.equal(f.search, 'normal'); assert.equal(f.respectFirmed, false); assert.equal(f.result, 'propose');
-  assert.equal(f.recur.preset, 'weekly'); assert.deepEqual(f.recur.days, [1, 3, 5]); assert.equal(f.validUntil, '2026-12-31'); assert.equal(f.skipIfRunning, false);
+  assert.equal(f.recur.preset, 'weekly'); assert.deepEqual(f.recur.days, [0, 2, 4]); assert.equal(f.validUntil, '2026-12-31'); assert.equal(f.skipIfRunning, false);
   const once = jobToForm({ name: 'O', plant: 'P', schedule: { kind: 'once', run_at: '2026-11-02T08:00:00' } });
   assert.equal(once.recur.preset, 'once'); assert.equal(once.recur.runAt, '2026-11-02T08:00');
   assert.equal(jobToForm({ name: 'bare', plant: 'P' }).recur.preset, 'daily');
