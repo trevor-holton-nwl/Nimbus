@@ -28,6 +28,9 @@ window.__NIMBUS_LOCALES.es = {
   'toast.plant_blackout_removed':      'Apagón de planta eliminado',
   'toast.line_settings_updated':       'Configuración de máquina actualizada',
   'toast.buffer_updated':              'Reserva actualizada',
+  'toast.line_settings_failed':        'No se pudo guardar. Cambio revertido',
+  'toast.line_undo_stale':             'El valor cambió; no se deshizo nada',
+  'toast.line_setting_restored':       'Valor anterior restaurado',
   'toast.select_plant_first':          'Seleccione primero una planta',
   'toast.no_plant_assigned_line':      'No hay planta asignada a esta máquina',
   'toast.select_a_line':               'Por favor, seleccione una máquina',
@@ -2830,7 +2833,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.system_config_history_retention_hint': 'Cuánto tiempo se conserva el historial de cambios de los pedidos. De 1 a 60 días; el valor por defecto es 14. Las entradas más antiguas se eliminan cada noche.',
   'ui.insp_history_more': 'No se muestran los cambios anteriores',
   'ui.system_config_history_retention_invalid': 'Introduzca un número entero del 1 al 60.',
-  /* ── i18n sweep: Labor page + Production Lines sub-tab ── */
+  /* ── i18n sweep: Labor page + Machines sub-tab ── */
   "labor.sub_aggregate": "Agregado",
   "labor.sub_line_plan": "Plan de línea",
   "labor.sub_capacity": "Capacidad",

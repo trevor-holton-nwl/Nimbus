@@ -654,6 +654,8 @@ const BRANCH_KEYS = [
   'toast.sap_sent_skipped_unfirmed', 'ui.preview_stale', 'ui.opt_backlog_runtime_grew',
   'ui.dist_status_separation_violated_tip', 'ui.opt_pv_distribution_separation_head', 'ui.reject_run_time_over_cap',
   'ui.reject_width_mismatch', 'ui.reject_single_edge',
+  // Machines pane Undo toast (2026-10-28)
+  'toast.line_settings_failed', 'toast.line_undo_stale', 'toast.line_setting_restored',
   // setup value defaults (2026-10-27, Wave B)
   'ui.setup_source_value_default',
   // setup value defaults (2026-10-27, Wave C: admin card, grid hint, coverage tile)

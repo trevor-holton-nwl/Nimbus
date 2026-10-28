@@ -99,7 +99,7 @@ export function resolveUploadEndpoint(endpoint: string | undefined, plant?: stri
 
 /** Re-pull `plants` + the selected plant's `machine` rows into `Store.masterData` so
  *  Hierarchy/ProdLines/Plant stay in sync with Postgres. Shared by `MasterData._save`
- *  (fire-and-forget, `source: 'master-data-save'`) and the Production Lines / Plant
+ *  (fire-and-forget, `source: 'master-data-save'`) and the Machines / Plant
  *  sub-tab Refresh (awaited, `source: 'master-data-refresh'`). Resolves once the Store
  *  write — or the no-op/failed-fetch `master-data-changed` emit — has happened; never
  *  rejects. Resolves `true` only when BOTH fetches returned rows; `false` for the staleness
@@ -801,9 +801,7 @@ export const Plant = {
       inp.onchange = () => {
         const val = inp.value.trim();
         const line = inp.dataset.line!;
-        Store.setLineSetting(line, { plGroup: val }, 'plant-roster');
-        NIMBUS!.MasterData!.syncLineSettings!(line, { plGroup: val });
-        Toast.show(Util.t('toast.line_settings_updated'), 'success');
+        void ProdLines._applyLineEdit(line, { plGroup: val }, 'plant-roster', 'toast.line_settings_updated');
       };
     });
 
@@ -2444,6 +2442,11 @@ type LinesNavInput = HTMLInputElement & { _wired?: boolean };
    PRODLINES — per-line settings: capacity buffer, bottleneck, working hours,
    and line-scoped blackout blocks.
    ========================================================================== */
+/** Monotonic id per Machines-pane edit, and the newest edit id per toast key / `line|column`
+ *  (`ProdLines._applyLineEdit`: only the newest edit owns the Undo and re-asserts its value). */
+let _lineEditSeq = 0;
+const _lineEditNewest = new Map<string, number>();
+
 export const ProdLines = {
   _lineSearch: '', // search text for the cross-screen line-filter dropdown (not the selection itself)
   _activeNavLine: null as string | null,
@@ -2451,7 +2454,7 @@ export const ProdLines = {
   _fpBlkStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpBlkEnd: null as NimbusVendor.FlatpickrInstance | null,
 
-  /** Master Data ▸ Production Lines sub-tab Refresh: re-pull this plant's master data and
+  /** Master Data ▸ Machines sub-tab Refresh: re-pull this plant's master data and
    *  calendar (hours + blackouts; fetchPlantConfig emits `calendar:change`/`blocks:change`),
    *  then re-render. Resolves `true` once fresh master data landed; `false` when there is
    *  no selected plant or no fresh master data landed (failed fetch, plant switched mid-flight).
@@ -2677,9 +2680,9 @@ export const ProdLines = {
       ErrorLog.error('master-data', `Error checking distribution impact for ${line}: ${err}`);
     }
 
-    Store.setLineSetting(line, { sapWorkcenter: wc || null }, 'prodlines');
-    NIMBUS!.MasterData!.syncLineSettings!(line, { sapWorkcenter: wc || null });
-    Toast.show(Util.t('toast.line_settings_updated'), 'success');
+    if (await ProdLines._writeLineSetting(line, { sapWorkcenter: wc || null }, 'prodlines')) {
+      Toast.show(Util.t('toast.line_settings_updated'), 'success');
+    }
   },
 
   _renderNav(allLines: string[], shownLines: string[]): void {
@@ -2834,6 +2837,86 @@ export const ProdLines = {
     return lineRows + plantRows;
   },
 
+  /** Autosave one Machines-pane edit (Store + bulk write), then toast with an Undo action.
+   *  A failed write toasts an error and reverts the Store value and the control, so an unsaved
+   *  value is never shown as saved. Undo restores the values captured before this edit, but only
+   *  while the line still holds what this edit wrote (same plant, no refresh or later edit in
+   *  between); one level, no redo. Resolves once the write settled (not awaited by the handlers). */
+  async _applyLineEdit(line: string, patch: Partial<NimbusLineSetting>, source: string,
+                       toastKey: string): Promise<void> {
+    const plant = Store.selectedPlant;
+    Store.ensureLineSettings(line);
+    const cur = Store.lineSettings[line] as unknown as Record<string, unknown>;
+    const next = patch as Record<string, unknown>;
+    const keys = Object.keys(next);
+    const prev: Record<string, unknown> = {};
+    for (const k of keys) prev[k] = cur[k];
+    if (keys.every((k) => prev[k] === next[k])) return; // no-op (e.g. a clamped 0 -> 0): no write, no Undo
+    const seq = ++_lineEditSeq;
+    _lineEditNewest.set(toastKey, seq);
+    for (const k of keys) _lineEditNewest.set(`${line}|${k}`, seq);
+    const holds = (vals: Record<string, unknown>): boolean =>
+      Object.keys(vals).every((k) => (Store.lineSettings[line] as unknown as Record<string, unknown> | undefined)?.[k] === vals[k]);
+    const write = async (vals: Record<string, unknown>): Promise<boolean> => {
+      try { return !!(await NIMBUS!.MasterData!.syncLineSettings!(line, vals as Partial<NimbusLineSetting>)); }
+      catch { return false; }
+    };
+
+    // Every setLineSetting emits `lineSettings:change`, which repaints the open pane, so no explicit repaint here.
+    Store.setLineSetting(line, patch, source);
+    if (!(await write(next))) {
+      if (holds(next)) Store.setLineSetting(line, prev as Partial<NimbusLineSetting>, source);
+      Toast.show(Util.t('toast.line_settings_failed'), 'error');
+      return;
+    }
+    // A master-data-changed refresh that landed mid-POST re-applied the old row over the typed value;
+    // the write succeeded, so put the value back unless a newer edit of that key owns it now.
+    const lost = keys.filter((k) => Store.lineSettings[line]?.[k as keyof NimbusLineSetting] !== next[k]
+      && _lineEditNewest.get(`${line}|${k}`) === seq);
+    if (lost.length) {
+      const fix: Record<string, unknown> = {};
+      for (const k of lost) fix[k] = next[k];
+      Store.setLineSetting(line, fix as Partial<NimbusLineSetting>, source);
+    }
+    // The toast dedupes by (msg, type) and the latest action wins: an older edit finishing late must not
+    // replace (or strip) the newer edit's Undo, so it stays silent.
+    if (_lineEditNewest.get(toastKey) !== seq) return;
+    const undo = (): void => {
+      void (async () => {
+        if (Store.selectedPlant !== plant || !holds(next)) {
+          Toast.show(Util.t('toast.line_undo_stale'), 'warn');
+          return;
+        }
+        Store.setLineSetting(line, prev as Partial<NimbusLineSetting>, source);
+        if (!(await write(prev))) {
+          if (holds(prev)) Store.setLineSetting(line, next as Partial<NimbusLineSetting>, source);
+          Toast.show(Util.t('toast.line_settings_failed'), 'error');
+          return;
+        }
+        Toast.show(Util.t('toast.line_setting_restored'), 'success');
+      })();
+    };
+    Toast.show(Util.t(toastKey), 'success', 7000, { label: Util.t('btn.undo'), run: undo });
+  },
+
+  /** Write one setting through the bulk path with failure handling only (no Undo): on a failed
+   *  write the Store value goes back and an error toast shows. Resolves whether it was saved. */
+  async _writeLineSetting(line: string, patch: Partial<NimbusLineSetting>, source: string): Promise<boolean> {
+    Store.ensureLineSettings(line);
+    const cur = Store.lineSettings[line] as unknown as Record<string, unknown>;
+    const next = patch as Record<string, unknown>;
+    const prev: Record<string, unknown> = {};
+    for (const k of Object.keys(next)) prev[k] = cur[k];
+    Store.setLineSetting(line, patch, source);
+    let ok = false;
+    try { ok = !!(await NIMBUS!.MasterData!.syncLineSettings!(line, patch)); } catch { ok = false; }
+    if (ok) return true;
+    const now = Store.lineSettings[line] as unknown as Record<string, unknown>;
+    if (Object.keys(next).every((k) => now[k] === next[k])) Store.setLineSetting(line, prev as Partial<NimbusLineSetting>, source);
+    Toast.show(Util.t('toast.line_settings_failed'), 'error');
+    return false;
+  },
+
   // Delegated ONCE on the persistent #lines-body container (survives the
   // innerHTML re-renders in _renderDetail), replacing the old per-render
   // _wireInputs that re-bound 6 querySelectorAll loops every edit. Every
@@ -2849,28 +2932,18 @@ export const ProdLines = {
       const line = el.dataset && el.dataset.line;
       if (!line) return;
       if (el.classList.contains('line-bottleneck-chk')) {
-        Store.setLineSetting(line, { bottleneck: el.checked }, 'prodlines');
-        NIMBUS!.MasterData!.syncLineSettings!(line, { bottleneck: el.checked });
-        Toast.show(Util.t('toast.line_settings_updated'), 'success');
+        void ProdLines._applyLineEdit(line, { bottleneck: el.checked }, 'prodlines', 'toast.line_settings_updated');
       } else if (el.classList.contains('line-excl-opt-chk')) {
-        Store.setLineSetting(line, { excludeFromOpt: el.checked }, 'prodlines');
-        NIMBUS!.MasterData!.syncLineSettings!(line, { excludeFromOpt: el.checked });
-        Toast.show(Util.t('toast.line_settings_updated'), 'success');
+        void ProdLines._applyLineEdit(line, { excludeFromOpt: el.checked }, 'prodlines', 'toast.line_settings_updated');
       } else if (el.classList.contains('buf-pct-input')) {
         const val = Math.max(0, Math.min(100, +el.value || 0));
-        Store.setLineSetting(line, { bufferPct: val }, 'prodlines');
-        NIMBUS!.MasterData!.syncLineSettings!(line, { bufferPct: val });
-        Toast.show(Util.t('toast.buffer_updated'), 'success');
+        void ProdLines._applyLineEdit(line, { bufferPct: val }, 'prodlines', 'toast.buffer_updated');
       } else if (el.classList.contains('buf-hrs-input')) {
         const val = Math.max(0, +el.value || 0);
-        Store.setLineSetting(line, { bufferHours: val }, 'prodlines');
-        NIMBUS!.MasterData!.syncLineSettings!(line, { bufferHours: val });
-        Toast.show(Util.t('toast.buffer_updated'), 'success');
+        void ProdLines._applyLineEdit(line, { bufferHours: val }, 'prodlines', 'toast.buffer_updated');
       } else if (el.classList.contains('plgroup-input')) {
         const val = el.value.trim();
-        Store.setLineSetting(line, { plGroup: val }, 'prodlines');
-        NIMBUS!.MasterData!.syncLineSettings!(line, { plGroup: val });
-        Toast.show(Util.t('toast.line_settings_updated'), 'success');
+        void ProdLines._applyLineEdit(line, { plGroup: val }, 'prodlines', 'toast.line_settings_updated');
       }
     });
 
@@ -2906,8 +2979,7 @@ export const ProdLines = {
       const line = btn.dataset.line;
       if (!line) return;
       const unit = btn.dataset.unit as BufferUnit;
-      Store.setLineSetting(line, { bufferUnit: unit }, 'prodlines');
-      NIMBUS!.MasterData!.syncLineSettings!(line, { bufferUnit: unit });
+      void ProdLines._writeLineSetting(line, { bufferUnit: unit }, 'prodlines');
       ProdLines._renderDetail(ProdLines._activeNavLine);
     });
   },
@@ -3410,7 +3482,7 @@ export const MasterData = (() => {
   const TABLE_LABELS: Record<MasterDataTable, string> = {
     subnetworks:      'Subnetworks',
     plants:           'Plants',
-    machine: 'Production Lines',
+    machine: 'Machines',
     materials:        'Material',
     material_plants:  'Material Plant',
     bom_items:        'Bill of Materials',
@@ -5321,9 +5393,11 @@ export const MasterData = (() => {
     };
   }
 
-  async function syncLineSettings(line: string, patch: Partial<NimbusLineSetting>): Promise<void> {
+  /** Resolves `true` once the bulk POST succeeded, `false` on a failed POST or any bail-out
+   *  where nothing was written (unknown plant/line, failed cache fill). */
+  async function syncLineSettings(line: string, patch: Partial<NimbusLineSetting>): Promise<boolean> {
     const plant = Store.getPlantForLine(line);
-    if (!plant) return;
+    if (!plant) return false;
 
     const fillCache = async (): Promise<boolean> => {
       try {
@@ -5339,7 +5413,7 @@ export const MasterData = (() => {
       } catch { return false; }
     };
 
-    if (!_lineSyncMachineCache[plant] && !(await fillCache())) return;
+    if (!_lineSyncMachineCache[plant] && !(await fillCache())) return false;
 
     let state = _lineSyncMachineCache[plant]!;
     let rowIdx = state.rows.findIndex((r) => r.machine === line);
@@ -5347,10 +5421,10 @@ export const MasterData = (() => {
       // The cache may predate a machine added since (e.g. one a colleague just created that
       // Refresh now shows): drop it and refetch once before concluding the line is unknown.
       delete _lineSyncMachineCache[plant];
-      if (!(await fillCache())) return;
+      if (!(await fillCache())) return false;
       state = _lineSyncMachineCache[plant]!;
       rowIdx = state.rows.findIndex((r) => r.machine === line);
-      if (rowIdx < 0) return;
+      if (rowIdx < 0) return false;
     }
 
     const updatedRow = { ...state.rows[rowIdx] };
@@ -5396,8 +5470,10 @@ export const MasterData = (() => {
         void refreshStoreMasterData('line-settings', 'machine');
       }
       if (_activeTable === 'machine') _renderTable('machine');
+      return true;
     } catch (e) {
       ErrorLog.error('prod-lines', `Failed to save line setting: ${(e as Error).message}`);
+      return false;
     }
   }
 
