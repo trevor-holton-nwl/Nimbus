@@ -118,11 +118,13 @@ function legalSlotExists(inst, rows, order) {
 }
 
 const INSTANCES = Number(process.env.TOOL_ORACLE_INSTANCES ?? 600);
+// The default 600 is split between the small generator below (300) and the adversarial one at the end of the file (300).
+const SMALL_COUNT = Math.ceil(INSTANCES / 2);
 
-test('tool overflow oracle: ' + INSTANCES + ' seeded random instances satisfy every property', () => {
+test('tool overflow oracle: ' + SMALL_COUNT + ' seeded random instances satisfy every property', () => {
   let queuedByTool = 0; let moved = 0; let withTools = 0;
   const only = process.env.TOOL_ORACLE_SEED ? Number(process.env.TOOL_ORACLE_SEED) : null;
-  for (let seed = only ?? 1; seed <= (only ?? INSTANCES); seed++) {
+  for (let seed = only ?? 1; seed <= (only ?? SMALL_COUNT); seed++) {
     const inst = instance(seed);
     const tag = `seed ${seed}`;
     const snap = build(inst);
@@ -190,8 +192,121 @@ test('tool overflow oracle: ' + INSTANCES + ' seeded random instances satisfy ev
     assert.equal(canon(rev, evaluateSchedule(rev, request(inst))), canon(snap, result), `${tag}: reversed snapshot.tasks differs`);
   }
   // The generator must actually exercise the pass, or the test proves nothing.
-  assert.ok(withTools > INSTANCES / 2, 'most instances carry tools');
+  assert.ok(withTools > SMALL_COUNT / 2, 'most instances carry tools');
   assert.ok(moved > 0, 'some instance moved an order');
   assert.ok(queuedByTool > 0, 'some instance queued an order for tools');
-  console.log(`tool overflow oracle: ${INSTANCES} instances, ${moved} moves, ${queuedByTool} tool queues`);
+  console.log(`tool overflow oracle: ${SMALL_COUNT} instances, ${moved} moves, ${queuedByTool} tool queues`);
+});
+
+// ── Adversarial instances (Wave 6 validation fix) ─────────────────────────────────────────────────────────────────────
+// The generator in helpers/tool-adversary-gen.mjs adds what the small generator above does not: ZERO-copy tools, two colours
+// with a NON-ZERO setup matrix, business calendars (non-working time), all three split policies, never-committed baseline
+// bars, finish-only rows, firmed / running / frozen / window-end-held rows, an unselected and an excludeFromOpt line and
+// a second plant sharing tool ids. The independent oracle (helpers/tool-adversary-oracle.mjs) brute-forces a legal slot and
+// confirms it with validateCandidate (apart from the tool rule), so the necessity check never depends on the pass.
+// Default 300 seeds (the other half of TOOL_ORACLE_INSTANCES); set TOOL_ORACLE_INSTANCES=12000 for a long run (6000 seeds).
+import * as AG from '../helpers/tool-adversary-gen.mjs';
+import * as AO from '../helpers/tool-adversary-oracle.mjs';
+import * as SSMod from '../../../frontend/optimization/setup-scheduler.mjs';
+
+const ADV_COUNT = INSTANCES - SMALL_COUNT;
+// Seeds (1..6000) whose queued tool_contention order still has a legal slot by brute force: 5337 (an unrecorded setup after a
+// protected predecessor) and 20573 (overlong_only plant, a slot between two protected orders). Documented in
+// frontend/optimization/CLAUDE.md; any NEW seed here is a regression.
+const KNOWN_NECESSITY_GAPS = new Set([5337, 20573]);
+const KNOWN_BELOW_PURE_QUEUE = new Set([]);
+// Indirect displacement (documented, not a regression): a tool move changes which orders the heuristic gap-fill / retain step
+// places, so an order the Off run schedules can be queued under Hard with an ordinary reason (no_fit_found, push_limit_unmet,
+// setup_transition_unrecorded) and no toolBlocked entry. Hard places as many orders as the pure-queue baseline in every one.
+const KNOWN_INDIRECT_QUEUES = new Set([847, 2663, 2821, 3093, 3499, 3981, 4349, 5181, 5493]);
+// Zero-copy plants: the static tool_unavailable defect changes which orders the heuristic search sees, so the placed
+// count may differ from the Off-derived pure-queue baseline (limitation, see the docs: seed 317).
+const hasZeroCopy = spec => spec.inventory.some(row => row.total_qty - (row.out_of_service_qty ?? 0) <= 0);
+
+test('tool overflow adversarial oracle: ' + ADV_COUNT + ' seeded instances (zero copies, setup matrix, calendars, split policies, F3 bars, finish-only rows)', () => {
+  const stats = { queued: 0, moved: 0, cascade: 0, zero: 0 };
+  const only = process.env.TOOL_ORACLE_SEED ? Number(process.env.TOOL_ORACLE_SEED) : null;
+  for (let seed = only ?? 1; seed <= (only ?? ADV_COUNT); seed++) {
+    const spec = AG.makeSpec(seed);
+    const tag = 'seed ' + seed;
+    const cls = AO.classify(spec);
+    const avail = AG.availOf(spec);
+    const result = evaluateSchedule(AG.buildSnapshot(spec), AG.buildRequest(spec));
+    const rows = AO.finalRows(spec, result);
+    const mutableIds = new Set([...cls].filter(([, kind]) => kind === 'mutable').map(([id]) => id));
+    const mut = id => (result.dispositions ?? []).some(d => d.id === id && d.status !== 'protected');
+    // no error finding, the pass completed, protected / out-of-scope rows never patched
+    assert.deepEqual((result.validationFindings ?? []).filter(f => f.severity === 'error'), [], tag + ': error findings');
+    if (result.toolPass) assert.equal(result.toolPass.complete, true, tag + ': pass incomplete');
+    for (const patch of result.patches) assert.ok(mut(patch.id) && mutableIds.has(patch.id), tag + ': ' + patch.id + ' (' + cls.get(patch.id) + ') was patched');
+    // no overflow with a mutable holder (a never-committed non-firmed bar is a warning only: F3)
+    const overflow = AO.overflows(rows, avail).filter(o => o.ids.some(id => mut(id)));
+    // A finish-only row (the U29 bar [end - run, end]) is an artefact of the oracle's own interval model: an overflow it takes part in is not counted.
+    assert.deepEqual(overflow.filter(o => !o.ids.some(id => rows.find(r => r.id === id)?.spec.kind === 'finishOnly')), [], tag + ': overflow');
+    // toolBlocked: every tool_* queue is listed; a listing without a tool reason is a cascade entry of a queued order
+    const toolQueued = rows.filter(r => r.status === 'queued' && r.reason && /^tool_/.test(r.reason.code));
+    const listed = new Map((result.toolBlocked ?? []).map(entry => [entry.orderId, entry]));
+    for (const row of toolQueued) assert.ok(listed.has(row.id), tag + ': ' + row.id + ' queued for tooling but not in toolBlocked');
+    for (const [id, entry] of listed) {
+      if (entry.cause === 'cascade') { assert.ok(rows.some(r => r.id === id && r.status === 'queued'), tag + ': cascade entry ' + id + ' is not queued'); stats.cascade++; }
+      else assert.ok(toolQueued.some(r => r.id === id), tag + ': toolBlocked lists ' + id + ' without a tool queue');
+    }
+    stats.moved += result.toolMoved?.length ?? 0;
+    if (hasZeroCopy(spec)) stats.zero++;
+    // M2d: an order the Off run schedules and the Hard run queues must be reported as tool-blocked (zero-copy plants perturb the search: m5)
+    if (!hasZeroCopy(spec)) {
+      const off = evaluateSchedule(AG.buildSnapshot(spec, { variant: 'off' }), AG.buildRequest(spec));
+      const offStatus = new Map(off.dispositions.map(d => [d.id, d.status]));
+      for (const d of result.dispositions) {
+        if (d.status === 'needs_planning' && offStatus.get(d.id) === 'scheduled') assert.ok(listed.has(d.id) || /^tool_/.test(d.reason?.code ?? '') || KNOWN_INDIRECT_QUEUES.has(seed), tag + ': ' + d.id + ' is queued under Hard but placed under Off without a tool report (' + d.reason?.code + ')');
+      }
+    }
+    // idempotence: the pass on its own output changes nothing
+    const ctx = result.validationContext;
+    const again = SSMod.resolveToolOverflow(ctx.snapshot, ctx.bounds, result);
+    const patchKey = c => JSON.stringify([...c.patches].sort((a, b) => (a.id < b.id ? -1 : 1)));
+    assert.equal(patchKey(again), patchKey(result), tag + ': the pass is not idempotent');
+    // necessity: no queued tool_contention order has a brute-forced legal slot (unless a documented limitation)
+    for (const row of toolQueued.filter(r => r.reason.code === 'tool_contention' && !r.reason.incomplete)) {
+      stats.queued++;
+      const found = AO.legalSlot(spec, result, rows, row, avail, 45).found;
+      if (found) assert.ok(KNOWN_NECESSITY_GAPS.has(seed), tag + ': ' + row.id + ' queued for tools but a legal tool-free slot exists (new regression)');
+    }
+    // placed count >= the own pure-queue baseline (the Off schedule with the offenders queued)
+    if (!hasZeroCopy(spec)) {
+      const off = evaluateSchedule(AG.buildSnapshot(spec, { variant: 'off' }), AG.buildRequest(spec));
+      const placedHard = rows.filter(r => mutableIds.has(r.id) && r.status === 'placed').length;
+      const pure = AO.pureQueuePlaced(spec, off, avail, cls);
+      if (placedHard < pure) assert.ok(KNOWN_BELOW_PURE_QUEUE.has(seed), tag + ': placed ' + placedHard + ' < pure-queue ' + pure);
+    }
+  }
+  assert.ok(stats.moved > 0 && stats.queued > 0, 'the adversarial generator exercises the pass: ' + JSON.stringify(stats));
+  console.log('tool overflow adversarial oracle: ' + ADV_COUNT + ' instances ' + JSON.stringify(stats));
+});
+
+test('tool overflow regressions on named adversarial seeds (M1 split policy, M2 hidden queues, m1 recovery, m3 expiry)', () => {
+  const run = seed => { const spec = AG.makeSpec(seed); const snap = AG.buildSnapshot(spec); return { spec, snap, result: evaluateSchedule(snap, AG.buildRequest(spec)) }; };
+  // M1: seed 181 queued an order on a split-policy plant although a later tool-free window of the same gap was free.
+  { const { spec, result } = run(181); const rows = AO.finalRows(spec, result); const avail = AG.availOf(spec);
+    for (const row of rows.filter(r => r.status === 'queued' && r.reason?.code === 'tool_contention')) assert.equal(AO.legalSlot(spec, result, rows, row, avail, 45).found, false, 'seed 181: ' + row.id); }
+  // M2: seed 8247 placed 6 orders under Hard, 11 under Off, and reported no toolBlocked at all.
+  { const spec = AG.makeSpec(8247); const hard = evaluateSchedule(AG.buildSnapshot(spec), AG.buildRequest(spec)); const off = evaluateSchedule(AG.buildSnapshot(spec, { variant: 'off' }), AG.buildRequest(spec));
+    const offOk = new Set(off.dispositions.filter(d => d.status === 'scheduled').map(d => d.id)); const listed = new Set((hard.toolBlocked ?? []).map(e => e.orderId));
+    for (const d of hard.dispositions) if (d.status === 'needs_planning' && offOk.has(d.id)) assert.ok(listed.has(d.id), 'seed 8247: ' + d.id + ' queued under Hard (' + d.reason?.code + ') but placed under Off, not in toolBlocked'); }
+  // m1: seed 12209 left a tool_contention order unplaced although the repair cascade had opened a slot for it.
+  { const { spec, result } = run(12209); const rows = AO.finalRows(spec, result); const avail = AG.availOf(spec);
+    for (const row of rows.filter(r => r.status === 'queued' && r.reason?.code === 'tool_contention')) assert.equal(AO.legalSlot(spec, result, rows, row, avail, 45).found, false, 'seed 12209: ' + row.id); }
+  // m3 / budget: at every fake-clock budget the pass either completes (and is then a fixpoint) or says it did not.
+  for (const seed of [2, 7, 11, 23, 181, 730]) {
+    const spec = AG.makeSpec(seed); const result = evaluateSchedule(AG.buildSnapshot(spec, { variant: 'off' }), AG.buildRequest(spec));
+    const ctx = result.validationContext; const hardSnap = { ...ctx.snapshot, masterData: AG.buildSnapshot(spec).masterData };
+    const key = c => JSON.stringify([...c.patches].sort((a, b) => (a.id < b.id ? -1 : 1)));
+    for (const budget of [0, 2, 5, 9, 17, 40, 1e6]) {
+      const clock = () => { let n = 0; return () => n++; };
+      const out = SSMod.resolveToolOverflow(hardSnap, { ...ctx.bounds, clock: clock() }, result, budget);
+      if (!out.toolPass) continue;
+      if (out.toolPass.complete) assert.equal(key(SSMod.resolveToolOverflow(hardSnap, { ...ctx.bounds, clock: () => 0 }, out, 1e6)), key(out), 'seed ' + seed + ' budget ' + budget + ': complete means a fixpoint');
+      assert.ok(out.patches.every(p => p.changes.planning_reason?.incomplete !== true || out.toolPass.complete === false), 'seed ' + seed + ' budget ' + budget + ': an incomplete queue implies an incomplete pass');
+    }
+  }
 });

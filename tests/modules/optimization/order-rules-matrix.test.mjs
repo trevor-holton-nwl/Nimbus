@@ -649,7 +649,7 @@ for (const testCase of CASES) {
         const spec = withTool(normalizeScenario(testCase.spec), tool);
         const request = { mode, plant: 'P1', respectFirmed: true, respectCalendar: true,
           now: at(spec.now), runNow: at(spec.now), planningStart: at(spec.now), endDate: at(spec.horizonEnd) };
-        const run = s => buildOptimizerWorkerResponse({ runId: `matrix-tool-${mode}`, mode, snapshot: scenarioSnapshot(s), request, deadlineDurationMs: 5000 });
+        const run = s => buildOptimizerWorkerResponse({ runId: `matrix-tool-${mode}`, mode, snapshot: scenarioSnapshot(s), request, deadlineDurationMs: 5000 }, () => 5000);
         const base = run(normalizeScenario(testCase.spec)).candidate;
         const response = run(spec);
         assert.equal(canonCandidate(response.candidate), canonCandidate(base));

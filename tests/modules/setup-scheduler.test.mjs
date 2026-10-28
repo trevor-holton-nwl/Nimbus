@@ -6425,3 +6425,133 @@ test('tool overflow: inputs in any order give IDENTICAL patches (snapshot.tasks 
   assert.deepEqual(run(tasks), forward);
   assert.deepEqual(run([...tasks].reverse()), forward);
 });
+
+// ── Tool Inventory Wave 6 validation fixes (M2 / M4 / m6 / iv) ─────────────────────────────────────────────────────
+
+test('tool overflow (F3): a never-committed bar on an UNSELECTED line does not reserve a copy for mutable work, a committed one does', () => {
+  const mk = userScheduled => TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00', userScheduled },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2'] });
+  // Never committed (user_scheduled false, both dates): the optimizer does NOT move A; the overlap is a WARNING only.
+  const never = mk(false);
+  const r1 = evaluateSchedule(never, TF.toolRequest({ lines: ['L1'] }));
+  const a1 = TF.finalRows(never, r1).find(x => x.id === 'A');
+  assert.equal(a1.status, 'placed');
+  assert.equal(a1.start, tms('2035-08-06T10:00:00'), 'A keeps its slot: the never-committed bar does not reserve the copy');
+  assert.equal(r1.toolMoved, undefined); assert.equal(r1.toolBlocked, undefined);
+  assert.deepEqual(errorsOf(r1), []);
+  const warn = SetupScheduler.validateCandidate(never, TF.toolBounds(never, { lines: ['L1'] }), { ...r1, toolPass: { complete: true, elapsedMs: 0 } }).filter(f => f.code === 'tool_overflow');
+  assert.ok(warn.length && warn.every(f => f.severity === 'warning'), 'the overlap with the never-committed bar is still shown, as a warning');
+  // The same bar committed (user_scheduled true): it reserves the copy, so A has to move.
+  const committed = mk(true);
+  const r2 = evaluateSchedule(committed, TF.toolRequest({ lines: ['L1'] }));
+  const a2 = TF.finalRows(committed, r2).find(x => x.id === 'A');
+  assert.ok(a2.status === 'queued' || a2.start !== tms('2035-08-06T10:00:00'), 'A moved off the committed bar');
+  noOverflow(TF.finalRows(committed, r2), one(1));
+});
+
+test('tool overflow (F3): a never-committed bar still reserves when it is MUTABLE (the optimizer places it) and a bar wholly outside the window never takes part', () => {
+  // Both on selected lines: B is mutable (its baseline is only a starting point), so the two cannot overlap.
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00', userScheduled: false },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2'] });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  noOverflow(TF.finalRows(snap, r), one(1));
+  assert.deepEqual(errorsOf(r), []);
+  // A one-day window that ends before the bar starts: the bar is outside it, never overlaps, and raises nothing.
+  const outside = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-08T10:00:00', end: '2035-08-08T14:00:00', userScheduled: false },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2'] });
+  const win = TF.toolRequest({ lines: ['L1'], endDate: new Date('2035-08-07T08:00:00') });
+  const r2 = evaluateSchedule(outside, win);
+  const a = TF.finalRows(outside, r2).find(x => x.id === 'A');
+  assert.equal(a.start, tms('2035-08-06T10:00:00'));
+  assert.equal(r2.toolMoved, undefined);
+  assert.equal(SetupScheduler.validateCandidate(outside, TF.toolBounds(outside, { lines: ['L1'], horizonEnd: new Date('2035-08-07T08:00:00') }), r2).some(f => f.code === 'tool_overflow'), false);
+});
+
+test('tool overflow (F3): a finish-only row and a firmed never-committed bar still reserve copies', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'F', line: 'L2', run: 4, tools: ['T1'], start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00', userScheduled: false },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2'], firmedIds: ['F'] });
+  const r = evaluateSchedule(snap, TF.toolRequest({ lines: ['L1'] }));
+  const a = TF.finalRows(snap, r).find(x => x.id === 'A');
+  assert.ok(a.status === 'queued' || a.start !== tms('2035-08-06T10:00:00'), 'a firmed bar is physical: it reserves even though it was never committed');
+});
+
+test('tool overflow: a non-stale exception FAILS CLOSED (fixed tool_overflow_failed error, candidate unchanged); compute-core-stale propagates', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  const bounds = TF.toolBounds(snap);
+  const cand = toolCandidate([sched('A', '2035-08-06T08:00:00', '2035-08-06T12:00:00'), sched('B', '2035-08-06T08:00:00', '2035-08-06T12:00:00')], [dispOf('A', 'L1'), dispOf('B', 'L2')]);
+  const core = globalThis.NimbusComputeCore;
+  const real = core.findToolOverages;
+  try {
+    core.findToolOverages = () => { throw new Error('boom'); };
+    const out = SetupScheduler.resolveToolOverflow(snap, bounds, cand);
+    assert.equal(out.toolPass.failed, true);
+    assert.equal(out.toolPass.complete, false);
+    assert.deepEqual(out.patches, cand.patches, 'the candidate is returned unchanged');
+    const failed = f => f.code === 'tool_overflow_failed' && f.severity === 'error';
+    assert.ok(out.validationFindings.some(failed), 'a planner-visible error finding, not a silent skip');
+    // The finding survives any recomputation (validateCandidate derives it from toolPass.failed) and a throw inside validate is itself caught.
+    assert.ok(SetupScheduler.validateCandidate(snap, bounds, out).some(failed));
+    assert.ok(SetupScheduler.validateCandidate(snap, bounds, cand).some(failed), 'a throw while validating also fails closed, never crashes');
+    const msgs = new Set(SetupScheduler.validateCandidate(snap, bounds, out).filter(failed).map(f => f.message));
+    assert.equal(msgs.size, 1, 'one fixed message');
+    const r = evaluateSchedule(snap, TF.toolRequest());
+    assert.ok(r.validationFindings.some(failed), 'the engine returns a result that cannot be applied, it does not throw');
+  } finally { core.findToolOverages = real; }
+  const savedCore = globalThis.NimbusComputeCore;
+  try {
+    globalThis.NimbusComputeCore = { ...savedCore, toolHeadroom: undefined };
+    assert.throws(() => SetupScheduler.resolveToolOverflow(snap, bounds, cand), /compute-core-stale/);
+    assert.throws(() => SetupScheduler.validateCandidate(snap, bounds, cand), /compute-core-stale/);
+  } finally { globalThis.NimbusComputeCore = savedCore; }
+});
+
+test('tool overflow: toolMoved keeps ONE entry per order (first from, last to) and drops a net no-op; a tool queue outranks a cascade marker', () => {
+  const m = (orderId, fromStart, toStart) => ({ orderId, tool: 'T1', fromStart, fromEnd: fromStart + 'e', toStart, toEnd: toStart + 'e' });
+  const merged = SetupScheduler.mergeToolMoved([m('A', 'a', 'b'), m('B', 'x', 'y')], [m('A', 'b', 'c')]);
+  assert.deepEqual(merged.map(e => [e.orderId, e.fromStart, e.toStart]), [['A', 'a', 'c'], ['B', 'x', 'y']]);
+  assert.deepEqual(SetupScheduler.mergeToolMoved([m('A', 'a', 'b')], [m('A', 'b', 'a')]), [], 'moved away and back = nothing to report');
+  const blocked = SetupScheduler.mergeToolBlocked(
+    [{ orderId: 'A', tool: 'T1', available: 1, inUse: 2, holderIds: ['B'] }],
+    [{ orderId: 'A', tool: 'T2', available: 1, inUse: 0, holderIds: ['C'], cause: 'cascade' }, { orderId: 'D', tool: 'T2', available: 1, inUse: 0, holderIds: ['C'], cause: 'cascade' }]);
+  assert.equal(blocked.find(e => e.orderId === 'A').cause, undefined, 'the tool queue is kept');
+  assert.equal(blocked.find(e => e.orderId === 'D').cause, 'cascade');
+});
+
+test('tool overflow: with a fake clock the pass is deterministic at every budget, and a pass that reports complete is a fixpoint', () => {
+  // Four orders on one copy, three of them movable; a counter clock makes every budget reproducible.
+  const specs = [
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-08T08:00:00' },
+    { id: 'C', line: 'L3', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+    { id: 'D', line: 'L4', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+  ];
+  const opts = { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2', 'L3', 'L4'] };
+  const snap = TF.toolSnapshot(specs, opts);
+  const base = evaluateSchedule(TF.toolSnapshot(specs, { ...opts, rule: 'off' }), TF.toolRequest());
+  const ctx = base.validationContext;
+  const hardSnap = { ...ctx.snapshot, masterData: snap.masterData };
+  const sig = c => JSON.stringify([...c.patches].sort((a, b) => (a.id < b.id ? -1 : 1)).map(p => [p.id, p.changes.planning_status, p.changes.start_date?.toISOString?.() ?? null, p.changes.planning_reason?.code ?? null, !!p.changes.planning_reason?.incomplete]));
+  for (const budget of [0, 1, 2, 3, 5, 8, 13, 21, 55, 1e6]) {
+    const run = () => { let n = 0; return SetupScheduler.resolveToolOverflow(hardSnap, { ...ctx.bounds, clock: () => n++ }, base, budget); };
+    const out = run();
+    assert.equal(sig(run()), sig(out), 'budget ' + budget + ': deterministic');
+    const queuedPass = out.patches.filter(p => p.changes.planning_reason?.code === 'tool_contention');
+    if (out.toolPass.complete) {
+      assert.equal(queuedPass.some(p => p.changes.planning_reason.incomplete), false, 'budget ' + budget + ': a complete pass leaves no incomplete queue');
+      assert.equal(sig(SetupScheduler.resolveToolOverflow(hardSnap, { ...ctx.bounds, clock: () => 0 }, out, 1e6)), sig(out), 'budget ' + budget + ': complete means a fixpoint');
+    } else {
+      assert.ok(queuedPass.length > 0 || out.toolPass.complete === false, 'an incomplete pass reports it');
+    }
+  }
+});
