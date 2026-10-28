@@ -862,3 +862,53 @@ test('Dashboard firmed list: Unfirm only for a planner-only firm, a reason on ev
   assert.match(frozen, /class="reason">[^<]+</, 'and shows its reason');
   assert.ok(frozen.includes(Util.fmtDTShort(new Date('2026-10-28T09:00:00'))), 'the finish, not the start, is shown');
 });
+
+// ---- i18n sweep (Dashboard): wording comes from the locale files, never hardcoded English ----
+import { readFileSync as _readLocale } from 'node:fs';
+import _vm from 'node:vm';
+
+function withRealLocales(lang, fn) {
+  const win = {};
+  for (const l of ['en', lang]) {
+    _vm.runInNewContext(_readLocale(new URL(`../../../frontend/locales/${l}.js`, import.meta.url), 'utf8'), { window: win });
+  }
+  const prior = globalThis.window.__NIMBUS_LOCALES;
+  const priorLocale = Util.locale();
+  globalThis.window.__NIMBUS_LOCALES = win.__NIMBUS_LOCALES;
+  Util.setLocale(lang);
+  try { return fn(); } finally { globalThis.window.__NIMBUS_LOCALES = prior; Util.setLocale(priorLocale); }
+}
+
+test('Dashboard._fmtNextCO and _tileTooltip follow the viewer language', () => {
+  const now = new Date('2026-10-27T08:00:00');
+  const at = ms => new Date(now.getTime() + ms);
+  withRealLocales('de', () => {
+    assert.equal(Dashboard._fmtNextCO(at(-1000), now), 'jetzt');
+    assert.equal(Dashboard._fmtNextCO(at(5 * 60000), now), '+5 Min');
+    assert.equal(Dashboard._fmtNextCO(at(3 * 3600000), now), '+3h');
+    assert.equal(Dashboard._fmtNextCO(at(48 * 3600000), now), '+2 T');
+    assert.equal(Dashboard._tileTooltip('orders-today'), 'Offene Aufträge gefiltert auf heute');
+    assert.match(Dashboard._tileTooltip('alerts-today'), /Konflikten/);
+  });
+  withRealLocales('en', () => {
+    assert.equal(Dashboard._fmtNextCO(at(5 * 60000), now), '+5m');
+    assert.equal(Dashboard._fmtNextCO(null, now), '—');
+  });
+});
+
+test('Dashboard._tp picks the singular key for 1 and shows the Unknown machine key in the viewer language', () => {
+  withRealLocales('fr', () => {
+    assert.equal(Dashboard._tp('ui.verdict_warnings', 1), '1 avertissement');
+    assert.equal(Dashboard._tp('ui.verdict_warnings', 3), '3 avertissements');
+    assert.equal(Dashboard._lineLabel('Unknown'), 'Inconnue');
+    assert.equal(Dashboard._lineLabel('L1'), 'L1');
+  });
+});
+
+test('Dashboard weekday and date labels use Util.locale()', () => {
+  const dt = new Date('2026-10-27T12:00:00');
+  withRealLocales('de', () => {
+    assert.equal(Dashboard._dowShort(dt), new Intl.DateTimeFormat('de', { weekday: 'short' }).format(dt));
+    assert.equal(Dashboard._dateNumeric(dt), new Intl.DateTimeFormat('de', { month: 'numeric', day: 'numeric' }).format(dt));
+  });
+});

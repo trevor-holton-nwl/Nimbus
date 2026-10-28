@@ -501,10 +501,10 @@ export const Dashboard = {
 
   _tileTooltip(action: DashboardTileAction): string {
     switch (action) {
-      case 'orders-today': return 'Open Orders table filtered to today';
-      case 'late':         return 'Open Orders table filtered to orders past their SAP due date';
-      case 'alerts-today': return 'Open Orders table filtered to conflicting orders due today';
-      case 'headroom':     return 'Jump to utilization heatmap';
+      case 'orders-today': return Util.t('ui.orders_today_tip');
+      case 'late':         return Util.t('ui.late_tip');
+      case 'alerts-today': return Util.t('tip.tile_conflicts_today');
+      case 'headroom':     return Util.t('ui.headroom_tip');
       case 'needs-planning': return Util.t('tip.tile_needs_planning');
       default: return '';
     }
@@ -710,8 +710,8 @@ export const Dashboard = {
     html += `<div class="hm-corner hm-sticky"></div>`;
     days.forEach(d => {
       const dt = new Date(d + 'T12:00:00');
-      const dow  = dt.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
-      const date = dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+      const dow  = Dashboard._dowShort(dt).toUpperCase();
+      const date = Dashboard._dateNumeric(dt);
       html += `<div class="hm-day-head hm-sticky"><span class="hm-dow">${dow}</span><span class="hm-date">${date}</span></div>`;
     });
 
@@ -727,16 +727,17 @@ export const Dashboard = {
         const cap     = (matrix[line][d]?.capacity || 0).toFixed(2);
         const effCap  = (matrix[line][d]?.effectiveCapacity ?? (matrix[line][d]?.capacity || 0)).toFixed(2);
         const sched   = (matrix[line][d]?.scheduled || 0).toFixed(2);
-        const effNote = effCap !== cap ? ` · limit ${effCap}h` : '';
-        html += `<button type="button" class="hm-cell" data-line="${Util.escapeHtml(line)}" data-date="${Util.escapeHtml(d)}" style="background:${bg};color:${tc}" title="Click to view ${Util.escapeHtml(line)} on ${Util.escapeHtml(d)} · ${lbl} (${sched}h / ${cap}h${effNote})">${lbl}</button>`;
+        const effNote = effCap !== cap ? Util.t('ui.hm_limit_note', { eff: effCap }) : '';
+        const hmTip = Util.t('tip.hm_cell', { line, day: d, pct: lbl, hours: Util.t('ui.hours_caption', { sched, cap }), note: effNote });
+        html += `<button type="button" class="hm-cell" data-line="${Util.escapeHtml(line)}" data-date="${Util.escapeHtml(d)}" style="background:${bg};color:${tc}" title="${Util.escapeHtml(hmTip)}">${lbl}</button>`;
       });
     });
 
     html += `</div></div>
       <div class="hm-legend">
-        <span>idle</span>
+        <span>${Util.escapeHtml(Util.t('ui.idle'))}</span>
         <div class="hm-grad"></div>
-        <span>overload</span>
+        <span>${Util.escapeHtml(Util.t('ui.overload'))}</span>
       </div>`;
 
     container.innerHTML = html;
@@ -791,12 +792,27 @@ export const Dashboard = {
   _fmtNextCO(dt: Date | null, now: Date): string {
     if (!dt) return '—';
     const ms = dt.getTime() - now.getTime();
-    if (ms <= 0) return 'now';
+    if (ms <= 0) return Util.t('ui.co_now');
     const mins = Math.round(ms / Config.MS_MIN);
-    if (mins < 60) return `+${mins}m`;
+    if (mins < 60) return Util.t('ui.co_in_min', { n: mins });
     const hrs = Math.round(mins / 60);
-    if (hrs < 24) return `+${hrs}h`;
-    return `+${Math.round(hrs / 24)}d`;
+    if (hrs < 24) return Util.t('ui.co_in_hr', { n: hrs });
+    return Util.t('ui.co_in_day', { n: Math.round(hrs / 24) });
+  },
+  /** Short weekday / numeric month-day in the viewer's language (Util.locale()), shared by the heatmaps and the briefing. */
+  _dowShort(dt: Date): string {
+    try { return new Intl.DateTimeFormat(Util.locale(), { weekday: 'short' }).format(dt); }
+    catch { return dt.toLocaleDateString('en-US', { weekday: 'short' }); }
+  },
+  _dateNumeric(dt: Date): string {
+    try { return new Intl.DateTimeFormat(Util.locale(), { month: 'numeric', day: 'numeric' }).format(dt); }
+    catch { return dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }); }
+  },
+  /** Display name for a machine key: the data key 'Unknown' (no machine) shows in the viewer's language; every other name is data. */
+  _lineLabel(line: string): string { return line === 'Unknown' ? Util.t('ui.unknown_machine') : line; },
+  /** One-or-many wording: `key_one` when n === 1, else `key` (the Alert Monitor `am.*_one` pattern). */
+  _tp(key: string, n: number, vars: Record<string, string | number> = {}): string {
+    return Util.t(n === 1 ? key + '_one' : key, { n, ...vars });
   },
 
   /** The 7 day keys the dashboard matrix covers, starting at plant-today (mirrors computeMatrix's key build). */
@@ -913,9 +929,9 @@ export const Dashboard = {
       el.innerHTML = '';
       const hdr = document.createElement('div');
       hdr.innerHTML = `<div class="ls-dot" style="visibility:hidden"></div>` +
-        `<div class="ls-code">Line</div><div class="ls-hours">Hours</div>` +
-        `<div class="ls-bar-wrap" style="background:none">Utilization</div>` +
-        `<div class="ls-pct">%</div><div class="ls-co">Next CO</div>`;
+        `<div class="ls-code">${Util.escapeHtml(Util.t('ui.line_col'))}</div><div class="ls-hours">${Util.escapeHtml(Util.t('ui.hours_col'))}</div>` +
+        `<div class="ls-bar-wrap" style="background:none">${Util.escapeHtml(Util.t('ui.utilization_col'))}</div>` +
+        `<div class="ls-pct">%</div><div class="ls-co">${Util.escapeHtml(Util.t('ui.next_co'))}</div>`;
       hdr.className = 'ls-row ls-header';
       el.appendChild(hdr);
       Dashboard._lsVL = new VirtualList<DashboardLineStatusRow>(el, {
@@ -923,8 +939,8 @@ export const Dashboard = {
         renderFn: (d: DashboardLineStatusRow) =>
           `<div class="ls-row">` +
           `<div class="ls-dot" style="background:${d.color}"></div>` +
-          `<div class="ls-code">${Util.escapeHtml(d.line)}</div>` +
-          `<div class="ls-hours" title="${d.cap}h total capacity">${d.sched}/${d.effCap}h</div>` +
+          `<div class="ls-code">${Util.escapeHtml(Dashboard._lineLabel(d.line))}</div>` +
+          `<div class="ls-hours" title="${Util.escapeHtml(Util.t('tip.ls_total_capacity', { cap: d.cap }))}">${d.sched}/${d.effCap}h</div>` +
           `<div class="ls-bar-wrap"><div class="ls-bar${d.isOver ? ' over' : ''}" style="width:${d.barW}%;background:${d.color}"></div></div>` +
           `<div class="ls-pct${d.sev !== 'ok' ? ' ' + d.sev : ''}">${d.pct}%</div>` +
           `<div class="ls-co">${Util.escapeHtml(d.nxtCO)}</div></div>`,
@@ -969,7 +985,7 @@ export const Dashboard = {
     if (!alerts.length) { list.innerHTML = `<div class="empty-state">${Util.t('empty.no_alerts')}</div>`; return; }
     list.innerHTML = alerts.slice(0, 8).map(a => `
       <div class="alert-row sev-${a.sev}" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">
-        <span class="sev" data-sev="${a.sev}" aria-label="${a.sev === 'err' ? 'Error' : a.sev === 'warn' ? 'Warning' : 'Info'}"></span>
+        <span class="sev" data-sev="${a.sev}" aria-label="${Util.escapeHtml(Util.t(a.sev === 'err' ? 'ui.sev_error' : a.sev === 'warn' ? 'ui.warning' : 'ui.sev_info'))}"></span>
         <button type="button" class="msg alert-summary-focus" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.escapeHtml(Util.alertMessage(a))}</button>
         <span class="meta">${a.time ? Util.fmtDTShort(a.time) : ''}</span>
         <button type="button" class="dismiss" aria-label="${Util.t('btn.dismiss')}" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">×</button>
@@ -1098,15 +1114,16 @@ export const Dashboard = {
     html += `<div class="lh-corner lh-sticky"></div>`;
     for (const dk of days) {
       const dt = new Date(dk + 'T12:00:00');
-      const dow  = dt.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
-      const date = dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+      const dow  = Dashboard._dowShort(dt).toUpperCase();
+      const date = Dashboard._dateNumeric(dt);
       html += `<div class="lh-day-head lh-sticky"><span class="lh-dow">${dow}</span><span class="lh-date">${date}</span></div>`;
     }
 
     // Data rows
     lines.forEach((line, li) => {
       const dot = Config.COLORS[li % Config.COLORS.length];
-      html += `<div class="lh-line-label" title="${Util.escapeHtml(line)}"><span class="lh-dot" style="background:${dot}"></span><span class="lh-line-name">${Util.escapeHtml(line)}</span></div>`;
+      const lineName = Dashboard._lineLabel(line);
+      html += `<div class="lh-line-label" title="${Util.escapeHtml(lineName)}"><span class="lh-dot" style="background:${dot}"></span><span class="lh-line-name">${Util.escapeHtml(lineName)}</span></div>`;
       for (const dk of days) {
         const cell = cells[line][dk];
         const h = cell.lateHours;
@@ -1114,8 +1131,8 @@ export const Dashboard = {
         const tc = cellText(h, bg);
         const lbl = h <= 0 ? '·' : (h < 10 ? h.toFixed(1) + 'h' : Math.round(h) + 'h');
         const title = h <= 0
-          ? `${line} · ${dk} · on plan`
-          : `${line} · ${dk} · ${cell.lateCount} late order${cell.lateCount === 1 ? '' : 's'} · ${h.toFixed(1)}h cumulative late`;
+          ? Util.t('tip.lh_cell_ok', { line: lineName, day: dk })
+          : Dashboard._tp('tip.lh_cell', cell.lateCount, { line: lineName, day: dk, h: h.toFixed(1) });
         // Only late cells are interactive — render those as real buttons for free
         // keyboard access; on-plan cells stay inert divs (nothing to activate).
         const tag = h > 0 ? 'button' : 'div';
@@ -1126,14 +1143,14 @@ export const Dashboard = {
     });
 
     const lineCountNote = allLines.length > 1
-      ? `<span class="lh-legend-more">${lines.length} line${lines.length !== 1 ? 's' : ''} · sorted by risk</span>`
+      ? `<span class="lh-legend-more">${Util.escapeHtml(Util.t('ui.lh_lines_sorted', { n: lines.length }))}</span>`
       : '';
     html += `</div></div>
       <div class="lh-legend">
-        <span class="lh-leg-sw" style="background:${idleBg}"></span><span>on plan</span>
-        <span class="lh-leg-sw" style="background:${amber}"></span><span>≤ 8h late</span>
-        <span class="lh-leg-sw" style="background:${orange}"></span><span>8–24h</span>
-        <span class="lh-leg-sw" style="background:${red}"></span><span>&gt; 24h</span>
+        <span class="lh-leg-sw" style="background:${idleBg}"></span><span>${Util.escapeHtml(Util.t('ui.on_plan'))}</span>
+        <span class="lh-leg-sw" style="background:${amber}"></span><span>${Util.escapeHtml(Util.t('ui.lh_leg_le8'))}</span>
+        <span class="lh-leg-sw" style="background:${orange}"></span><span>${Util.escapeHtml(Util.t('ui.lh_leg_8_24'))}</span>
+        <span class="lh-leg-sw" style="background:${red}"></span><span>${Util.escapeHtml(Util.t('ui.lh_leg_gt24'))}</span>
         ${lineCountNote}
       </div>`;
 
@@ -1174,17 +1191,17 @@ export const Dashboard = {
         return `<div class="lh-drill-row" role="button" tabindex="0" data-order-id="${Util.escapeHtml(String(t.id))}">
           <span class="lh-drill-id">${Util.escapeHtml(t.id).slice(0, 10)}</span>
           <span class="lh-drill-name">${Util.escapeHtml(t.text || t.ORDER || t.MATERIAL_DESCRIPTION || t.id)}</span>
-          <span class="lh-drill-due">due ${due ? Util.fmtDTShort(due) : '—'}</span>
+          <span class="lh-drill-due">${Util.escapeHtml(Util.t('ui.lh_due', { date: due ? Util.fmtDTShort(due) : '—' }))}</span>
           <span class="lh-drill-sched">→ ${sched ? Util.fmtDTShort(sched) : '—'}</span>
           <span class="lh-drill-late">${lateLbl}</span>
         </div>`;
       }).join('');
-    const more = cell.tasks.length > 12 ? `<div class="lh-drill-more">+${cell.tasks.length - 12} more</div>` : '';
+    const more = cell.tasks.length > 12 ? `<div class="lh-drill-more">${Util.escapeHtml(Util.t('ui.lh_more', { n: cell.tasks.length - 12 }))}</div>` : '';
     drill.innerHTML = `
       <div class="lh-drill-head">
-        <strong>${Util.escapeHtml(line)}</strong> · ${Util.escapeHtml(dateStr)} ·
-        <span>${cell.lateCount} late order${cell.lateCount === 1 ? '' : 's'} · ${cell.lateHours.toFixed(1)}h cumulative</span>
-        <button class="lh-drill-close" onclick="NIMBUS.Dashboard._latenessDrillClear()" title="Close">×</button>
+        <strong>${Util.escapeHtml(Dashboard._lineLabel(line))}</strong> · ${Util.escapeHtml(dateStr)} ·
+        <span>${Util.escapeHtml(Dashboard._tp('ui.lh_drill_summary', cell.lateCount, { h: cell.lateHours.toFixed(1) }))}</span>
+        <button class="lh-drill-close" onclick="NIMBUS.Dashboard._latenessDrillClear()" title="${Util.escapeHtml(Util.t('btn.close'))}">×</button>
       </div>
       ${rows}${more}`;
     drill.querySelectorAll<HTMLElement>('.lh-drill-row').forEach(row => {
@@ -1342,8 +1359,9 @@ export const AlertsUIAdapter = {
     if (!matches.length) return;
 
     const day = new Date(dayKey + 'T12:00:00');
-    const dateLabel = day.toLocaleDateString('en-US',
-      { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase();
+    let dateLabel: string;
+    try { dateLabel = new Intl.DateTimeFormat(Util.locale(), { weekday: 'short', month: 'short', day: 'numeric' }).format(day).toLocaleUpperCase(Util.locale()); }
+    catch { dateLabel = day.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase(); }
 
     // -------- Cell context: scheduled hours, capacity, orders, changeovers
     const dayStart = Util.startOfDay(day)!;
@@ -1388,9 +1406,10 @@ export const AlertsUIAdapter = {
 
     const errCt  = matches.filter(a => a.sev === 'err').length;
     const warnCt = matches.filter(a => a.sev === 'warn').length;
+    const warnTxt = Dashboard._tp('ui.verdict_warnings', warnCt);
     const verdict = errCt > 0
-      ? `${errCt} critical${warnCt ? ` · ${warnCt} warning${warnCt > 1 ? 's' : ''}` : ''}`
-      : `${warnCt} warning${warnCt > 1 ? 's' : ''}`;
+      ? Util.t('ui.verdict_critical', { n: errCt }) + (warnCt ? ` · ${warnTxt}` : '')
+      : warnTxt;
     const verdictSev = errCt > 0 ? 'err' : 'warn';
 
     // -------- Per-card renderers
@@ -1447,7 +1466,7 @@ export const AlertsUIAdapter = {
       }
 
       const gotoBtn = (a.taskId || (a.line && a.time))
-        ? `<button class="btn sm" data-act="goto" data-id="${Util.escapeHtml(a.id)}">Go to</button>` : '';
+        ? `<button class="btn sm" data-act="goto" data-id="${Util.escapeHtml(a.id)}">${Util.escapeHtml(Util.t('btn.go_to'))}</button>` : '';
 
       return `
         <div class="ac-card ${CALENDAR_ALERT_TYPES.has(a.type) ? 'ac-card-calendar' : `ac-card-${a.sev}`}">
@@ -1460,7 +1479,7 @@ export const AlertsUIAdapter = {
           ${chipsHtml}
           <div class="ac-card-actions">
             ${gotoBtn}
-            <button class="btn sm" data-act="dismiss" data-id="${Util.escapeHtml(a.id)}">Dismiss</button>
+            <button class="btn sm" data-act="dismiss" data-id="${Util.escapeHtml(a.id)}">${Util.escapeHtml(Util.t('btn.dismiss'))}</button>
           </div>
         </div>`;
     };
@@ -1484,7 +1503,7 @@ export const AlertsUIAdapter = {
       <div class="ac-wrap">
         <header class="ac-head">
           <div class="ac-head-row">
-            <span class="ac-title">${Util.escapeHtml(line)}</span>
+            <span class="ac-title">${Util.escapeHtml(Dashboard._lineLabel(line))}</span>
             <span class="ac-date">${dateLabel}</span>
             <button class="ac-x" data-act="close" aria-label="${Util.t('btn.close')}">×</button>
           </div>
@@ -1494,31 +1513,31 @@ export const AlertsUIAdapter = {
           <div class="ac-stats">
             <div class="ac-stat">
               <div class="ac-stat-num ${utilPct > 1 ? 'over' : ''}">
-                ${scheduledH.toFixed(1)}h / ${effCap.toFixed(1)}h
+                ${Util.escapeHtml(Util.t('ui.hours_caption', { sched: scheduledH.toFixed(1), cap: effCap.toFixed(1) }))}
               </div>
               <div class="ac-cap-bar">
                 <div class="ac-cap-fill" style="width:${fillPct.toFixed(0)}%"></div>
                 ${overPct > 0 ? `<div class="ac-cap-over" style="width:${overPct.toFixed(0)}%"></div>` : ''}
               </div>
-              <div class="ac-stat-sub">${(utilPct * 100).toFixed(0)}% utilization</div>
+              <div class="ac-stat-sub">${Util.escapeHtml(Util.t('ui.utilization_label', { pct: (utilPct * 100).toFixed(0) }))}</div>
             </div>
             <div class="ac-stat-pair">
-              <div><span class="ac-stat-num">${cellTasks.length}</span><span class="ac-stat-lbl">orders</span></div>
-              <div><span class="ac-stat-num">${changeovers}</span><span class="ac-stat-lbl">changeovers</span></div>
+              <div><span class="ac-stat-num">${cellTasks.length}</span><span class="ac-stat-lbl">${Util.escapeHtml(Util.t('ui.orders_count_label'))}</span></div>
+              <div><span class="ac-stat-num">${changeovers}</span><span class="ac-stat-lbl">${Util.escapeHtml(Util.t('ui.changeovers_label'))}</span></div>
             </div>
           </div>
         </header>
 
         <div class="ac-body">
-          ${renderCategory('capacity',   'Capacity',              byCat.capacity)}
-          ${renderCategory('conflicts',  'Scheduling Conflicts',  byCat.conflicts)}
-          ${renderCategory('calendar',   'Calendar Restrictions', byCat.calendar)}
-          ${renderCategory('exceptions', 'Other',                 byCat.exceptions)}
+          ${renderCategory('capacity',   Util.t('ape.cat_capacity'),   byCat.capacity)}
+          ${renderCategory('conflicts',  Util.t('ape.cat_conflicts'),  byCat.conflicts)}
+          ${renderCategory('calendar',   Util.t('ape.cat_calendar'),   byCat.calendar)}
+          ${renderCategory('exceptions', Util.t('ape.cat_exceptions'), byCat.exceptions)}
         </div>
 
         <footer class="ac-foot">
-          <button class="ac-dismiss-all" data-act="dismiss-all">Dismiss all on this cell</button>
-          <button class="btn btn-primary sm" data-act="close">Close</button>
+          <button class="ac-dismiss-all" data-act="dismiss-all">${Util.escapeHtml(Util.t('btn.dismiss_all_cell'))}</button>
+          <button class="btn btn-primary sm" data-act="close">${Util.escapeHtml(Util.t('btn.close'))}</button>
         </footer>
       </div>`;
     document.body.appendChild(dlg);

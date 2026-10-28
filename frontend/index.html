@@ -1266,13 +1266,13 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <button class="dash-filter-btn" id="line-filter-btn" disabled
                       aria-haspopup="listbox" aria-expanded="false"
                       onclick="NIMBUS.Dashboard._toggleDropdown('line-filter-dropdown', 'line-filter-btn')">
-                <span id="line-filter-label">All Lines</span>
+                <span id="line-filter-label" data-i18n="ui.all_lines">All Machines</span>
                 <span class="dash-filter-arrow">▾</span>
               </button>
               <div class="dash-filter-dropdown" id="line-filter-dropdown" role="listbox" hidden>
                 <div class="dash-filter-paste-row">
                   <input type="text" class="dash-filter-paste-input" id="line-filter-search"
-                         placeholder="Search lines…" oninput="NIMBUS.Dashboard._filterLineSearch(this.value)">
+                         data-i18n-placeholder="ph.search_lines" placeholder="Search machines…" oninput="NIMBUS.Dashboard._filterLineSearch(this.value)">
                 </div>
                 <div class="dash-filter-checklist" id="line-filter-checklist"></div>
               </div>
@@ -1304,7 +1304,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
                 <h3 data-i18n="ui.line_status_title">Machine Status</h3>
                 <div class="lateness-horizon-group ls-day-group" id="ls-day-group" role="group" aria-label="Machine Status">
                   <button type="button" class="seg-btn" id="ls-day-prev" data-ls-step="-1" data-i18n-title="ui.ls_day_prev" title="Previous day" aria-label="Previous day">‹</button>
-                  <span class="ls-day-label" id="ls-day-label" aria-live="polite">Today</span>
+                  <span class="ls-day-label" id="ls-day-label" aria-live="polite" data-i18n="ui.today">Today</span>
                   <button type="button" class="seg-btn" id="ls-day-next" data-ls-step="1" data-i18n-title="ui.ls_day_next" title="Next day" aria-label="Next day">›</button>
                 </div>
               </div>
@@ -1372,7 +1372,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div class="gantt-line-filter-group">
         <button class="flt-sel gantt-line-btn" id="gantt-flt-line-btn"
                 onclick="NIMBUS.GanttFilter._toggleLineDropdown()">
-          <span id="gantt-flt-line-label">All Lines</span>
+          <span id="gantt-flt-line-label" data-i18n="ui.all_lines">All Machines</span>
           <span style="margin-left:4px;opacity:.6;">▾</span>
         </button>
         <div class="dash-filter-dropdown" id="gantt-line-dropdown" hidden>
@@ -1387,7 +1387,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div class="gantt-line-filter-group">
         <button class="flt-sel gantt-line-btn" id="gantt-flt-color-btn"
                 onclick="NIMBUS.GanttFilter._toggleColorDropdown()">
-          <span id="gantt-flt-color-label">All Colors</span>
+          <span id="gantt-flt-color-label" data-i18n="ui.all_colors">All Colors</span>
           <span style="margin-left:4px;opacity:.6;">▾</span>
         </button>
         <div class="dash-filter-dropdown" id="gantt-color-dropdown" hidden>
@@ -1402,7 +1402,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <div class="gantt-line-filter-group">
         <button class="flt-sel gantt-line-btn" id="gantt-flt-form-btn"
                 onclick="NIMBUS.GanttFilter._toggleFormDropdown()">
-          <span id="gantt-flt-form-label">All Forms</span>
+          <span id="gantt-flt-form-label" data-i18n="ui.all_forms">All Forms</span>
           <span style="margin-left:4px;opacity:.6;">▾</span>
         </button>
         <div class="dash-filter-dropdown" id="gantt-form-dropdown" hidden>
@@ -1450,7 +1450,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <div class="main-row">
       <aside class="side side-left collapsed" id="left-sidebar">
         <header class="side-head">
-          <h4 data-i18n="ui.sidebar_lines">Production Lines</h4>
+          <h4 data-i18n="ui.sidebar_lines">Machines</h4>
           <button class="icon-btn sm" id="left-sidebar-toggle-btn" aria-expanded="false" aria-controls="hierarchy" data-i18n-title="tip.machines_expand" title="Show machines">▶</button>
         </header>
         <div id="hierarchy"></div>
