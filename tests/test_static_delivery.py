@@ -31,6 +31,19 @@ def test_mjs_responses_carry_no_cache_header(client):
     assert r.headers.get("cache-control") == "no-cache"
 
 
+@pytest.mark.parametrize("path", ["/", "/index.html"])
+def test_html_shell_carries_no_cache_header(client, path):
+    r = client.get(path)
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-cache"
+
+
+def test_html_shell_revalidates_with_etag(client):
+    etag = client.get("/").headers.get("etag")
+    assert etag
+    assert client.get("/", headers={"if-none-match": etag}).status_code == 304
+
+
 def test_non_mjs_static_responses_are_not_forced_no_cache(client):
     r = client.get("/app.js")
     assert r.headers.get("cache-control") != "no-cache"
