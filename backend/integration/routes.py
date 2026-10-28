@@ -116,7 +116,7 @@ async def upload_orders(request: Request, file: UploadFile = File(...), actor: s
         if known["lines"]:
             for ul in sorted(set(result.get("lines", [])) - set(known["lines"])):
                 result.setdefault("warnings", []).append(
-                    {"level": "warn", "msg": f"Unknown production line: {ul} — add it in Admin Cockpit > Manage Data Tables"}
+                    {"level": "warn", "msg": f"Unknown machine: {ul} — add it in Master Data > Machines"}
                 )
     except Exception as e:
         # Soft-warn enrichment is best-effort; never fail the upload over it — but

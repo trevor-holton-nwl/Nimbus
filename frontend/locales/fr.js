@@ -29,7 +29,7 @@ window.__NIMBUS_LOCALES.fr = {
   'toast.line_settings_updated':       'Paramètres de machine mis à jour',
   'toast.buffer_updated':              'Tampon mis à jour',
   'toast.line_settings_failed':        'Échec de l’enregistrement. Modification annulée',
-  'toast.line_undo_stale':             'La valeur a changé; rien n’a été annulé',
+  'toast.line_undo_stale':             'La valeur a changé ; rien n’a été annulé',
   'toast.line_setting_restored':       'Valeur précédente rétablie',
   'toast.select_plant_first':          'Sélectionnez d\'abord une usine',
   'toast.no_plant_assigned_line':      'Aucune usine assignée à cette machine',

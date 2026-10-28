@@ -546,7 +546,7 @@ test('ProdLines._reassignWorkcenter writes through on confirm when there are exi
   // lookup is asserted here, or the unguarded post-write Toast.show(Util.t(...))
   // throws ReferenceError: window is not defined.
   globalThis.window = { ...(priorWindow || {}), __NIMBUS_LOCALES: priorWindow?.__NIMBUS_LOCALES || { en: {} } };
-  globalThis.NIMBUS = { MasterData: { syncLineSettings: (line, patch) => { syncCalls += 1; syncPatch = patch; return Promise.resolve(); } } };
+  globalThis.NIMBUS = { MasterData: { syncLineSettings: (line, patch) => { syncCalls += 1; syncPatch = patch; return Promise.resolve(true); } } };
   globalThis.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ data: [], meta: { total: 1, scheduled_children: 0 } }) });
 
   try {
@@ -583,7 +583,7 @@ test('ProdLines._reassignWorkcenter writes directly with no dialog when meta.tot
   Modal.confirm = () => { confirmCalls += 1; return Promise.resolve(false); };
   Toast.show = () => {};
   globalThis.window = { ...(priorWindow || {}), __NIMBUS_LOCALES: priorWindow?.__NIMBUS_LOCALES || { en: {} } };
-  globalThis.NIMBUS = { MasterData: { syncLineSettings: (line, patch) => { syncCalls += 1; syncPatch = patch; return Promise.resolve(); } } };
+  globalThis.NIMBUS = { MasterData: { syncLineSettings: (line, patch) => { syncCalls += 1; syncPatch = patch; return Promise.resolve(true); } } };
   globalThis.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ data: [], meta: { total: 0, scheduled_children: 0 } }) });
 
   try {
@@ -638,8 +638,7 @@ test('ProdLines._applyLineEdit: success toasts with an Undo action (7 s) and Und
   const h = _lineEditHarness();
   try {
     Store.setLineSetting('UNDO1', { bufferPct: 10 }, 'test');
-    let repaints = 0;
-    await ProdLines._applyLineEdit('UNDO1', { bufferPct: 25 }, 'prodlines', 'toast.buffer_updated', () => { repaints += 1; });
+    await ProdLines._applyLineEdit('UNDO1', { bufferPct: 25 }, 'prodlines', 'toast.buffer_updated');
     assert.deepEqual(h.writes, [{ line: 'UNDO1', patch: { bufferPct: 25 } }]);
     assert.equal(Store.lineSettings.UNDO1.bufferPct, 25);
     assert.equal(h.toasts.length, 1);
@@ -654,21 +653,18 @@ test('ProdLines._applyLineEdit: success toasts with an Undo action (7 s) and Und
     assert.deepEqual(h.writes[1], { line: 'UNDO1', patch: { bufferPct: 10 } });
     assert.equal(h.writes.length, 2, 'a double click writes the previous value once');
     assert.equal(Store.lineSettings.UNDO1.bufferPct, 10);
-    assert.equal(repaints, 1);
     const restored = h.toasts.find((t) => t.msg === 'toast.line_setting_restored');
     assert.ok(restored && restored.type === 'success' && !restored.action, 'plain "restored" toast, no redo');
     assert.ok(h.toasts.some((t) => t.msg === 'toast.line_undo_stale'), 'the second click is reported as stale');
   } finally { h.restore(); }
 });
 
-test('ProdLines._applyLineEdit: a failed write toasts an error, reverts the Store value and repaints', async () => {
+test('ProdLines._applyLineEdit: a failed write toasts an error, reverts the Store value', async () => {
   const h = _lineEditHarness([false]);
   try {
     Store.setLineSetting('UNDO2', { bottleneck: false }, 'test');
-    let repaints = 0;
-    await ProdLines._applyLineEdit('UNDO2', { bottleneck: true }, 'prodlines', 'toast.line_settings_updated', () => { repaints += 1; });
+    await ProdLines._applyLineEdit('UNDO2', { bottleneck: true }, 'prodlines', 'toast.line_settings_updated');
     assert.equal(Store.lineSettings.UNDO2.bottleneck, false, 'unsaved value must not stay in the Store');
-    assert.equal(repaints, 1);
     assert.equal(h.toasts.length, 1);
     assert.equal(h.toasts[0].msg, 'toast.line_settings_failed');
     assert.equal(h.toasts[0].type, 'error');
@@ -680,7 +676,7 @@ test('ProdLines._applyLineEdit: Undo is refused when the value changed meanwhile
   const h = _lineEditHarness();
   try {
     Store.setLineSetting('UNDO3', { plGroup: 'A' }, 'test');
-    await ProdLines._applyLineEdit('UNDO3', { plGroup: 'B' }, 'prodlines', 'toast.line_settings_updated', () => {});
+    await ProdLines._applyLineEdit('UNDO3', { plGroup: 'B' }, 'prodlines', 'toast.line_settings_updated');
     Store.setLineSetting('UNDO3', { plGroup: 'C' }, 'test'); // a refresh or later edit
     h.toasts[0].action.run();
     await _flush();
@@ -688,7 +684,7 @@ test('ProdLines._applyLineEdit: Undo is refused when the value changed meanwhile
     assert.equal(Store.lineSettings.UNDO3.plGroup, 'C');
     assert.equal(h.toasts.at(-1).msg, 'toast.line_undo_stale');
 
-    await ProdLines._applyLineEdit('UNDO3', { plGroup: 'D' }, 'prodlines', 'toast.line_settings_updated', () => {});
+    await ProdLines._applyLineEdit('UNDO3', { plGroup: 'D' }, 'prodlines', 'toast.line_settings_updated');
     const action = h.toasts.at(-1).action;
     Store.setSelectedPlant('5512', 'test');
     action.run();
@@ -703,11 +699,90 @@ test('ProdLines._applyLineEdit: a failed Undo write restores the edited value an
   const h = _lineEditHarness([true, false]);
   try {
     Store.setLineSetting('UNDO4', { bufferHours: 2 }, 'test');
-    await ProdLines._applyLineEdit('UNDO4', { bufferHours: 5 }, 'prodlines', 'toast.buffer_updated', () => {});
+    await ProdLines._applyLineEdit('UNDO4', { bufferHours: 5 }, 'prodlines', 'toast.buffer_updated');
     h.toasts[0].action.run();
     await _flush();
     assert.equal(Store.lineSettings.UNDO4.bufferHours, 5, 'the server still holds the edit, so the Store does too');
     assert.equal(h.toasts.at(-1).msg, 'toast.line_settings_failed');
+  } finally { h.restore(); }
+});
+
+test('ProdLines._applyLineEdit: a refresh that clobbers the Store mid-POST is re-asserted, so Undo still works', async () => {
+  const h = _lineEditHarness();
+  try {
+    Store.setLineSetting('UNDO5', { bufferPct: 10 }, 'test');
+    globalThis.NIMBUS.MasterData.syncLineSettings = (line, patch) => {
+      h.writes.push({ line, patch });
+      Store.setLineSetting('UNDO5', { bufferPct: 10 }, 'refresh'); // master-data-changed re-applies the old row
+      return Promise.resolve(true);
+    };
+    await ProdLines._applyLineEdit('UNDO5', { bufferPct: 25 }, 'prodlines', 'toast.buffer_updated');
+    assert.equal(Store.lineSettings.UNDO5.bufferPct, 25, 'the saved value is put back');
+    assert.ok(h.toasts[0].action, 'Undo offered');
+    globalThis.NIMBUS.MasterData.syncLineSettings = (line, patch) => { h.writes.push({ line, patch }); return Promise.resolve(true); };
+    h.toasts[0].action.run();
+    await _flush();
+    assert.deepEqual(h.writes.at(-1), { line: 'UNDO5', patch: { bufferPct: 10 } });
+    assert.equal(Store.lineSettings.UNDO5.bufferPct, 10);
+  } finally { h.restore(); }
+});
+
+test('ProdLines._applyLineEdit: an older edit finishing after a newer one does not take over the Undo', async () => {
+  const h = _lineEditHarness();
+  try {
+    Store.setLineSetting('UNDO6', { bufferHours: 1 }, 'test');
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let calls = 0;
+    globalThis.NIMBUS.MasterData.syncLineSettings = (line, patch) => {
+      h.writes.push({ line, patch });
+      calls += 1;
+      return calls === 1 ? gate : Promise.resolve(true);
+    };
+    const first = ProdLines._applyLineEdit('UNDO6', { bufferHours: 2 }, 'prodlines', 'toast.buffer_updated');
+    await ProdLines._applyLineEdit('UNDO6', { bufferHours: 3 }, 'prodlines', 'toast.buffer_updated');
+    release(true);
+    await first;
+    const withUndo = h.toasts.filter((t) => t.msg === 'toast.buffer_updated');
+    assert.equal(withUndo.length, 1, 'the late older edit shows no toast that would replace the newer Undo');
+    assert.ok(withUndo[0].action);
+    assert.equal(Store.lineSettings.UNDO6.bufferHours, 3, 'the older edit does not re-assert over the newer value');
+  } finally { h.restore(); }
+});
+
+test('ProdLines._applyLineEdit: a no-op edit writes nothing and offers no Undo', async () => {
+  const h = _lineEditHarness();
+  try {
+    Store.setLineSetting('UNDO7', { bufferPct: 0 }, 'test');
+    await ProdLines._applyLineEdit('UNDO7', { bufferPct: 0 }, 'prodlines', 'toast.buffer_updated');
+    assert.equal(h.writes.length, 0);
+    assert.equal(h.toasts.length, 0);
+  } finally { h.restore(); }
+});
+
+test('ProdLines._reassignWorkcenter: a failed write reverts the work center and toasts the failure, no success toast', async () => {
+  const h = _lineEditHarness([false]);
+  const priorFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ data: [], meta: { total: 0, scheduled_children: 0 } }) });
+    Store.setLineSetting('UNDO8', { sapWorkcenter: 'WC-OLD' }, 'test');
+    await ProdLines._reassignWorkcenter('UNDO8', 'WC-NEW');
+    assert.equal(Store.lineSettings.UNDO8.sapWorkcenter, 'WC-OLD');
+    assert.deepEqual(h.toasts.map((t) => [t.msg, t.type]), [['toast.line_settings_failed', 'error']]);
+  } finally { globalThis.fetch = priorFetch; h.restore(); }
+});
+
+test('ProdLines._writeLineSetting (buffer unit): failure reverts and toasts, success stays toast-free', async () => {
+  const h = _lineEditHarness([false, true]);
+  try {
+    Store.setLineSetting('UNDO9', { bufferUnit: 'pct' }, 'test');
+    assert.equal(await ProdLines._writeLineSetting('UNDO9', { bufferUnit: 'hrs' }, 'prodlines'), false);
+    assert.equal(Store.lineSettings.UNDO9.bufferUnit, 'pct');
+    assert.equal(h.toasts.at(-1).msg, 'toast.line_settings_failed');
+    const n = h.toasts.length;
+    assert.equal(await ProdLines._writeLineSetting('UNDO9', { bufferUnit: 'hrs' }, 'prodlines'), true);
+    assert.equal(Store.lineSettings.UNDO9.bufferUnit, 'hrs');
+    assert.equal(h.toasts.length, n, 'no success toast for the unit buttons');
   } finally { h.restore(); }
 });
 
