@@ -68,7 +68,7 @@ async function fixture(t, { plant = 'A', rows = [row('T100', 3, 1, 'spare')], by
     agGrid: { createGrid(_el, opts) { createCount++; gridOptions = opts; gridRows = opts.rowData; opts.onGridReady({ api }); } },
   });
   const prev = { plant: Store.selectedPlant, md: Store.masterData, alerts: Store._state.alerts, active: Sandbox.active, ready: TOOLING_RULE_CONTROL_READY };
-  // The shipped gate is true (Wave 6); these tests pin the grid and the save flow, so the status-line rule text and its link stay
+  // The shipped gate is false until re-validation; these tests pin the grid and the save flow, so the status-line rule text and its link stay
   // off unless a test turns the gate on itself.
   __setToolingRuleControlReady(false);
   t.after(() => {

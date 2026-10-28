@@ -78,10 +78,9 @@ const _lineSyncMachineCache: Record<string, MasterDataTableState<ProductionLineR
  *  committed and would otherwise revert the pane to the pre-edit value. */
 let _lineWriteGen = 0;
 
-/** Gates the Order Rules "tooling rule" control and the Tool Inventory status line's rule text. It stayed false until the
- *  optimizer consumed the rule; Tool Inventory Wave 6 (the overflow pass) flipped it in its last commit, so no control ever
- *  existed without its consumer. Kept as a gate so a future rollback is one line. */
-export let TOOLING_RULE_CONTROL_READY = true;
+/** Gates the Order Rules "tooling rule" control and the Tool Inventory status line's rule text. It stays false until the
+ *  optimizer overflow pass (Tool Inventory Wave 6) is re-validated; the orchestrator flips it, never an implementation task. */
+export let TOOLING_RULE_CONTROL_READY = false;
 /** Test hook only: production sets the initial value above. A live binding, so importers see the change. */
 export function __setToolingRuleControlReady(value: boolean): void {
   // Test hook only: inert unless the test setup declared itself, so a console import cannot flip the gate.
