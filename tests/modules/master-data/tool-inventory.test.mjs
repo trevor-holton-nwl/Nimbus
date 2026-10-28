@@ -8,7 +8,7 @@ import { Store } from '../../../frontend/platform/store.mjs';
 import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
-import { __setToolingRuleControlReady } from '../../../frontend/master-data/admin-ui.mjs';
+import { __setToolingRuleControlReady, TOOLING_RULE_CONTROL_READY } from '../../../frontend/master-data/admin-ui.mjs';
 globalThis.__NIMBUS_TEST__ = true;   // the gate setter is inert without it
 
 // Real English strings, so assertions read the shipped wording (Util.t falls back to the bare key without them).
@@ -67,8 +67,12 @@ async function fixture(t, { plant = 'A', rows = [row('T100', 3, 1, 'spare')], by
     window: { __NIMBUS_LOCALES: { en: EN } }, requestAnimationFrame() {},
     agGrid: { createGrid(_el, opts) { createCount++; gridOptions = opts; gridRows = opts.rowData; opts.onGridReady({ api }); } },
   });
-  const prev = { plant: Store.selectedPlant, md: Store.masterData, alerts: Store._state.alerts, active: Sandbox.active };
+  const prev = { plant: Store.selectedPlant, md: Store.masterData, alerts: Store._state.alerts, active: Sandbox.active, ready: TOOLING_RULE_CONTROL_READY };
+  // The shipped gate is true (Wave 6); these tests pin the grid and the save flow, so the status-line rule text and its link stay
+  // off unless a test turns the gate on itself.
+  __setToolingRuleControlReady(false);
   t.after(() => {
+    __setToolingRuleControlReady(prev.ready);
     Store.setMasterData(prev.md, 'test-restore');
     Store._state.alerts = prev.alerts;
     Sandbox.active = prev.active;
@@ -538,9 +542,12 @@ test('tool_alerts_cleared: silent when the count did not drop, and when alerts:c
 
 test('the status line always says inventory feeds alerts and omits the tooling-rule text while the control is not ready', async t => {
   const f = await fixture(t, { rows: [row('T1')] });
-  f.setInventory('A', [row('T1')], { setup_policy_config: { toolingRule: 'hard' } });
-  f.TI.render();
-  assert.equal(f.element('ti-status').textContent, Util.t('ui.tool_inventory_alerts'));
+  __setToolingRuleControlReady(false);
+  try {
+    f.setInventory('A', [row('T1')], { setup_policy_config: { toolingRule: 'hard' } });
+    f.TI.render();
+    assert.equal(f.element('ti-status').textContent, Util.t('ui.tool_inventory_alerts'));
+  } finally { __setToolingRuleControlReady(true); }
 });
 
 test('with the control ready the status line shows Tooling rule Off/Hard and a button that opens plant settings (and never otherwise)', async t => {
@@ -563,11 +570,14 @@ test('with the control ready the status line shows Tooling rule Off/Hard and a b
     f.setInventory('A', [row('T1')], { setup_policy_config: { toolingRule: 'off' } });
     f.TI.render();
     assert.ok(status.textContent.includes(Util.t('ui.tool_inventory_status_off')));
-  } finally { __setToolingRuleControlReady(false); }
-  appended.length = 0;
-  f.TI.render();
-  assert.equal(appended.length, 0, 'no link while the control is not ready');
-  assert.equal(status.textContent, Util.t('ui.tool_inventory_alerts'));
+  } finally { __setToolingRuleControlReady(true); }
+  __setToolingRuleControlReady(false);
+  try {
+    appended.length = 0;
+    f.TI.render();
+    assert.equal(appended.length, 0, 'no link while the control is not ready');
+    assert.equal(status.textContent, Util.t('ui.tool_inventory_alerts'));
+  } finally { __setToolingRuleControlReady(true); }
 });
 
 test('Refresh with unsaved edits asks first; cancelled leaves the edits; confirmed re-pulls through Persistence', async t => {

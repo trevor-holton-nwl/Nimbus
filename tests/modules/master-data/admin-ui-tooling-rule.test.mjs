@@ -68,8 +68,8 @@ async function withHarness(ready, body) {
   }
 }
 
-test('the gate defaults to false in the shipped build (no control without its consumer)', () => {
-  assert.equal(TOOLING_RULE_CONTROL_READY, false);
+test('the gate is true in the shipped build (the optimizer overflow pass, its consumer, exists since Wave 6)', () => {
+  assert.equal(TOOLING_RULE_CONTROL_READY, true);
 });
 
 test('control absent while the gate is false; present (wide row, Off/Hard options, hint, no admin gate) when true', async () => {

@@ -738,7 +738,7 @@ test('Tool Inventory: a real worker round trip carries toolBlocked / toolMoved /
   const response = await runInRealWorker(toolWorkerRequest(snap));
   assert.ok(!response.error, response.error);
   const fromWorker = response.candidate;
-  const direct = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap)), () => 5000).candidate;
+  const direct = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap))).candidate;
   assert.ok(fromWorker.toolMoved?.length >= 1, 'the overlap on T1 was resolved by moving an order');
   assert.ok(fromWorker.toolBlocked?.length >= 1, 'the order that cannot finish inside the push cap was queued for tooling');
   assert.ok(fromWorker.toolBlocked.every(e => ['A', 'B', 'Q'].includes(e.orderId) && e.tool === 'T1'));
@@ -757,7 +757,7 @@ test('Tool Inventory: a real worker round trip carries toolBlocked / toolMoved /
 
 test('Tool Inventory: Apply-time validation re-derives the rule from the SNAPSHOT (Hard flags an overlap, Off does not)', () => {
   const snap = toolWorkerSnapshot('hard');
-  const response = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap)), () => 5000);
+  const response = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap)));
   const movedId = response.candidate.toolMoved[0].orderId;
   const withoutMove = c => ({ ...c, patches: c.patches.filter(p => p.id !== movedId) });
   const hard = rehydrateOptimizerCandidate(withoutMove(response.candidate), snap, response.validation);
@@ -776,10 +776,10 @@ test('Tool Inventory: compute-core-stale is thrown ONLY for a Hard plant with a 
   try {
     for (const missing of ['findToolOverages', 'toolHeadroom']) {
       globalThis.NimbusComputeCore = { ...real, [missing]: undefined };
-      assert.throws(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('hard'))), () => 5000), /compute-core-stale/, 'Hard + loaded inventory + old core: ' + missing);
-      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('off'))), () => 5000), 'an Off plant keeps working with the older core');
+      assert.throws(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('hard')))), /compute-core-stale/, 'Hard + loaded inventory + old core: ' + missing);
+      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('off')))), 'an Off plant keeps working with the older core');
       const unloaded = TF.toolSnapshot([{ id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' }], { inventory: null, rule: 'hard' });
-      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(unloaded)), () => 5000), 'Hard with the inventory not loaded is a no-op');
+      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(unloaded))), 'Hard with the inventory not loaded is a no-op');
     }
   } finally { globalThis.NimbusComputeCore = real; }
 });
