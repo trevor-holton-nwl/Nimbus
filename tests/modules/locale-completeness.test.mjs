@@ -637,7 +637,7 @@ const BRANCH_KEYS = [
   'toast.system_moved_n', 'toast.cutover_summary', 'toast.manual_refusal_generic', 'toast.order_moved', 'toast.commit_failed',
   'modal.override_finish_label', 'modal.override_finish_hint', 'modal.override_title', 'modal.override_line_label',
   'modal.override_apply', 'modal.confirm_overtime_title', 'modal.confirm_overtime_msg', 'modal.confirm_overtime_confirm',
-  'col.due_date', 'col.planned_start', 'col.planned_finish', 'planning_reason.run_time_over_cap',
+  'col.sap_start', 'ui.insp_sap_start', 'ui.sap_start_hint', 'col.due_date', 'col.planned_start', 'col.planned_finish', 'planning_reason.run_time_over_cap',
   'planning_reason.overlong_never', 'ui.diff_kind_start', 'ui.diff_kind_finish', 'ui.max_push_forward_help',
   'ui.insp_due_date', 'ui.insp_planned_start', 'ui.insp_planned_finish', 'ui.insp_system_move',
   'ui.insp_move_reason_finish_moved_earlier', 'ui.insp_move_reason_reversal_forward', 'ui.insp_move_reason_pull_floor_crossed',

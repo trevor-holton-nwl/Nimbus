@@ -298,7 +298,14 @@ export const Table = {
         return typeof api?.getColumn !== 'function' || !!api.getColumn(String(id));
       };
       if (Array.isArray(layout.columnState)) {
-        Table._api.applyColumnState({ state: layout.columnState.filter(c => known(c.colId)), applyOrder: true });
+        const state = layout.columnState.filter(c => known(c.colId));
+        // A layout saved before SAP Start existed lacks it: slot it directly before Due Date rather than letting
+        // AG Grid append it at the end.
+        if (known('original_start_date') && !state.some(c => c.colId === 'original_start_date')) {
+          const at = state.findIndex(c => c.colId === 'original_end_date');
+          if (at >= 0) state.splice(at, 0, { colId: 'original_start_date' } as (typeof state)[number]);
+        }
+        Table._api.applyColumnState({ state, applyOrder: true });
       }
       if (layout.filterModel && typeof layout.filterModel === 'object') {
         const filterModel = Object.fromEntries(Object.entries(layout.filterModel).filter(([id]) => known(id)));
@@ -402,6 +409,15 @@ export const Table = {
     return planningReasonText(task.planning_reason, (k, v) => Util.t(k, v), { nowFits });
   },
 
+  /** SAP Start text: the raw SAP start as received, date only (a date-only SAP start must not read "12:00 AM");
+   *  the time is appended only when the value carries a non-midnight time. Display only, never fed to the scheduler. */
+  _fmtSapStart(v: unknown): string {
+    const d = Util.parseDate(v);
+    if (!d) return '';
+    const timed = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
+    return timed ? Util.fmtDTReadable(d) : Util._fmtDatePref(d);
+  },
+
   /** Due Date / Planned Start / Planned Finish columns (backward scheduling OQ1, OQ16). The FINISH is the input
    *  and the start is derived from it, so Planned Start and Due Date are read-only and Planned Finish takes the
    *  typed value. Due Date shows the due instant (a date-only SAP finish reads as the close of that day), not the
@@ -409,6 +425,13 @@ export const Table = {
    *  and agDateColumnFilter. Extracted (like `_runTimeEditable`) so it is testable without a live AG Grid. */
   _scheduleDateColumns(): TableColDef[] {
     return [
+      // SAP Start (2026-10-28, owner request): the RAW SAP start as received, read-only. The derived Original Start
+      // (OQ16) stays retired; the schedule is anchored on the finish, so this will differ from Planned Start.
+      { headerName: Util.t('col.sap_start'), field: 'original_start_date', minWidth: 170,
+        editable: false, hide: Table._fieldHidden('original_start_date'),
+        headerTooltip: Util.t('ui.sap_start_hint'),
+        valueFormatter: (p: TableValueFormatterParams) => Table._fmtSapStart(p.value),
+        cellClass: 'cell-date cell-date-original' },
       { headerName: Util.t('col.due_date'), field: 'original_end_date', minWidth: 160,
         editable: false, hide: Table._fieldHidden('original_end_date'),
         valueGetter: (p: { data: NimbusTask }) => Util.dueInstant(p.data),
@@ -455,7 +478,7 @@ export const Table = {
    *  no-column catalog entry doesn't need a matching hand-written columnDef. */
   _catalogOnlyColumns(): TableColDef[] {
     const handwritten = new Set(['MATERIAL_DESCRIPTION', 'ORDER_QUANTITY_(GMEIN)', 'COLOR', 'RUN_TIME',
-      'original_end_date', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION', 'run_time_basis']);
+      'original_start_date', 'original_end_date', 'PRT_01', 'PRT_02', 'PRODUCTION_VERSION', 'run_time_basis']);
     return ORDER_FIELD_CATALOG.filter(f => !handwritten.has(f.key)).map(f => ({
       headerName: Util.t(f.i18nGridKey),
       field: f.key,
@@ -2678,6 +2701,9 @@ export const Inspector = {
 
       <div class="insp-card">
         <h4>${Util.t('ui.insp_schedule_section')}</h4>
+        ${Inspector._fieldVisible('original_start_date') ? `
+        <div class="insp-row"><label>${Util.t('ui.insp_sap_start')}</label>
+          <div class="insp-val" title="${Util.escapeHtml(Util.t('ui.sap_start_hint'))}">${task.original_start_date ? Util.escapeHtml(Table._fmtSapStart(task.original_start_date)) : '—'}</div></div>` : ''}
         ${Inspector._fieldVisible('original_end_date') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_due_date')}</label>
           <div class="insp-val">${dueInstant ? Util.fmtDTReadable(dueInstant) : '—'}</div></div>` : ''}
