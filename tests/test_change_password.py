@@ -189,7 +189,9 @@ def test_new_password_keys_present_in_all_locales():
     required = [
         "sec.change_password_title", "sec.current_password", "sec.new_password",
         "sec.confirm_password", "sec.update_password", "sec.password_mismatch",
-        "sec.password_updated",
+        "sec.password_updated", "sec.password_too_short", "sec.password_current_required",
+        "sec.password_too_long", "sec.password_same_as_current", "sec.password_current_wrong",
+        "sec.password_rate_limited", "sec.password_failed", "sec.password_pending_hint",
     ]
     for fname in ["en.js", "de.js", "es.js", "fr.js", "pt.js"]:
         path = os.path.join(locales_dir, fname)
