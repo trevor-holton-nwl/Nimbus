@@ -1776,42 +1776,71 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       const _esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-      const tile = (count, label, sublabel, accent) => `
-        <div class="ni-conf-tile">
-          <div class="ni-conf-tile-num" style="color:${count > 0 ? accent : 'var(--fg-mute)'}">${count}</div>
-          <div class="ni-conf-tile-lbl">${label}</div>
-          <div class="ni-conf-tile-sub">${sublabel || '&nbsp;'}</div>
-        </div>`;
-      const tilesHtml = `
+      // Clickable filter tiles (toggle). A tile with nothing behind it is disabled; the active one is aria-pressed.
+      let filter = null;   // null | 'err' | 'warn' | 'overload'
+      const tile = (key, count, label, sublabel, accent) => `
+        <button type="button" class="ni-conf-tile" data-conf-filter="${key}" aria-pressed="${filter === key}"${count > 0 ? '' : ' disabled'}>
+          <span class="ni-conf-tile-num" style="color:${count > 0 ? accent : 'var(--fg-mute)'}">${count}</span>
+          <span class="ni-conf-tile-lbl">${label}</span>
+          <span class="ni-conf-tile-sub">${sublabel || '&nbsp;'}</span>
+        </button>`;
+      const tilesHtml = () => `
         <div class="ni-conf-tiles">
-          ${tile(errCt,  errCt === 1 ? 'Critical conflict' : 'Critical conflicts', errCt ? `−${alertPts} pts` : '', 'var(--err)')}
-          ${tile(warnCt, warnCt === 1 ? 'Warning' : 'Warnings', '', 'var(--warn)')}
-          ${tile(overloadedCount, overloadedCount === 1 ? 'Overloaded line' : 'Overloaded lines',
-                 overloadedCount ? `${overloadedLineDays} day${overloadedLineDays>1?'s':''} · −${utilPts} pts` : '', 'var(--warn)')}
+          ${tile('err', errCt, t(errCt === 1 ? 'ui.critical_conflict' : 'ui.critical_conflicts'), errCt ? t('ui.err_pts', { pts: alertPts }) : '', 'var(--err)')}
+          ${tile('warn', warnCt, t(warnCt === 1 ? 'ui.warning' : 'ui.warnings'), '', 'var(--warn)')}
+          ${tile('overload', overloadedCount, t(overloadedCount === 1 ? 'ui.overloaded_line' : 'ui.overloaded_lines'),
+                 overloadedCount ? t('ui.overloaded_line_days', { days: overloadedLineDays, plural: overloadedLineDays > 1 ? 's' : '', pts: utilPts }) : '', 'var(--warn)')}
         </div>`;
 
       const hasAny = errCt || warnCt || overloadedCount;
-      const breakdownBlock = hasAny
-        ? tilesHtml
-        : `<p style="text-align:center;color:var(--fg-mute);font-size:12.5px;padding:14px 0;margin:0">Schedule looks healthy — no major issues detected.</p>`;
 
       const sortedAlerts = [...horizonAlerts].sort((a, b) => (a.time || 0) - (b.time || 0));
-      const alertListHtml = sortedAlerts.length ? `
-        <details class="ni-conf-alerts">
-          <summary>
-            <span class="ni-alerts-caret">▶</span>
-            <span>Alerts in horizon (${sortedAlerts.length})</span>
-          </summary>
-          <div class="ni-conf-alerts-list">
-            ${sortedAlerts.map(a => `
+      const alertRow = a => `
               <div class="ni-conf-row">
                 <span class="ni-conf-dot" style="background:${a.sev==='err'?'var(--err)':'var(--warn)'}"></span>
                 <span class="ni-conf-msg">${_esc(a.msgKey ? t(a.msgKey, a.msgVars) : a.msg)}</span>
                 <span class="ni-conf-date">${a.time ? a.time.toLocaleDateString('en-US',{month:'short',day:'numeric'}) : ''}</span>
                 ${(a.taskId || (a.line && a.time)) ? `<button data-conf-goto="${_esc(a.id)}" class="ni-conf-goto" title="Go to" aria-label="Go to"><span class="ni-conf-goto-arrow">→</span><span class="ni-conf-goto-label">Go to</span></button>` : ''}
-              </div>`).join('')}
-          </div>
-        </details>` : '';
+              </div>`;
+      // Overloaded lines have no single alert to focus, so these rows carry the line name and days only (no Go to).
+      const overloadRow = ([line, days]) => `
+              <div class="ni-conf-row">
+                <span class="ni-conf-dot" style="background:var(--warn)"></span>
+                <span class="ni-conf-msg">${_esc(line)}</span>
+                <span class="ni-conf-date">${_esc(t('ui.conf_days_over', { days, plural: days > 1 ? 's' : '' }))}</span>
+              </div>`;
+      const listHtml = () => {
+        let title, rows;
+        if (filter === 'overload') {
+          const entries = Object.entries(overloadedLines).sort((x, y) => y[1] - x[1] || String(x[0]).localeCompare(String(y[0])));
+          title = t('ui.conf_filter_overloaded', { count: entries.length });
+          rows = entries.map(overloadRow);
+        } else if (filter === 'err' || filter === 'warn') {
+          const shown = sortedAlerts.filter(a => a.sev === filter);
+          title = t(filter === 'err' ? 'ui.conf_filter_critical' : 'ui.conf_filter_warnings', { count: shown.length });
+          rows = shown.map(alertRow);
+        } else {
+          if (!sortedAlerts.length) return '';
+          title = t('ui.conf_score_breakdown', { count: sortedAlerts.length });
+          rows = sortedAlerts.map(alertRow);
+        }
+        return `
+        <div class="ni-conf-listwrap">
+          ${filter ? `<button type="button" class="ni-conf-clear" data-conf-clear>${_esc(t('ui.conf_show_all'))}</button>` : ''}
+          <details class="ni-conf-alerts"${filter ? ' open' : ''}>
+            <summary>
+              <span class="ni-alerts-caret">▶</span>
+              <span>${_esc(title)}</span>
+            </summary>
+            <div class="ni-conf-alerts-list">
+              ${rows.join('')}
+            </div>
+          </details>
+        </div>`;
+      };
+      const dynHtml = () => (hasAny
+        ? tilesHtml()
+        : `<p style="text-align:center;color:var(--fg-mute);font-size:12.5px;padding:14px 0;margin:0">Schedule looks healthy — no major issues detected.</p>`) + listHtml();
 
       const cached = Confidence._history;
       const hasHistory = cached.length >= 2;
@@ -1844,7 +1873,15 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           .ni-breakdown-dlg .ni-conf-chart-wrap canvas { width:100%; height:120px; display:block; border-radius:8px; background:var(--bg-subtle) }
           .ni-breakdown-dlg .ni-conf-chart-axis { display:flex; justify-content:space-between; margin-top:4px; font-size:9.5px; color:var(--fg-faint) }
           .ni-breakdown-dlg .ni-conf-tiles { display:grid; grid-template-columns:repeat(3,1fr); gap:8px }
-          .ni-breakdown-dlg .ni-conf-tile { padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg-subtle); display:flex; flex-direction:column; gap:3px }
+          .ni-breakdown-dlg .ni-conf-tile { padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg-subtle); display:flex; flex-direction:column; gap:3px; font:inherit; color:inherit; text-align:left; width:100%; cursor:pointer; transition:border-color .12s, background .12s }
+          .ni-breakdown-dlg .ni-conf-tile:hover:not(:disabled) { border-color:var(--fg-mute) }
+          .ni-breakdown-dlg .ni-conf-tile:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+          .ni-breakdown-dlg .ni-conf-tile:active:not(:disabled) { background:var(--bg) }
+          .ni-breakdown-dlg .ni-conf-tile[aria-pressed="true"] { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) }
+          .ni-breakdown-dlg .ni-conf-tile:disabled { cursor:default; opacity:.6 }
+          .ni-breakdown-dlg .ni-conf-listwrap { position:relative }
+          .ni-breakdown-dlg .ni-conf-clear { position:absolute; top:12px; right:0; background:none; border:none; padding:0; font-size:11px; color:var(--accent); cursor:pointer; text-decoration:underline }
+          .ni-breakdown-dlg .ni-conf-clear:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
           .ni-breakdown-dlg .ni-conf-tile-num { font-size:22px; font-weight:700; line-height:1.1 }
           .ni-breakdown-dlg .ni-conf-tile-lbl { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--fg-mute); font-weight:600 }
           .ni-breakdown-dlg .ni-conf-tile-sub { font-size:11px; color:var(--fg-mute) }
@@ -1885,8 +1922,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             <canvas id="ni-conf-chart" width="760" height="240"></canvas>
             <div class="ni-conf-chart-axis"><span>${startLabel}</span><span>now</span></div>
           </div>` : ''}
-          ${breakdownBlock}
-          ${alertListHtml}
+          <div class="ni-conf-dyn">${dynHtml()}</div>
         </div>`;
       document.body.appendChild(dlg);
       try { dlg.showModal(); } catch { dlg.open = true; }
@@ -1895,7 +1931,18 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       dlg.addEventListener('click', e => {
         if (e.target === dlg) { dlg.close(); return; }
         const gotoBtn = e.target.closest('[data-conf-goto]');
-        if (gotoBtn) { dlg.close(); if (typeof AlertsUIAdapter !== 'undefined') AlertsUIAdapter.focus(gotoBtn.dataset.confGoto); }
+        if (gotoBtn) { dlg.close(); if (typeof AlertsUIAdapter !== 'undefined') AlertsUIAdapter.focus(gotoBtn.dataset.confGoto); return; }
+        // Tile toggle / Show all: re-render the dynamic region, then hand focus back to the tile that was used.
+        const tileBtn = e.target.closest('[data-conf-filter]');
+        const clearBtn = !tileBtn && e.target.closest('[data-conf-clear]');
+        if (!tileBtn && !clearBtn) return;
+        const prev = filter;
+        filter = tileBtn ? (filter === tileBtn.dataset.confFilter ? null : tileBtn.dataset.confFilter) : null;
+        const dyn = dlg.querySelector('.ni-conf-dyn');
+        if (dyn) dyn.innerHTML = dynHtml();
+        const focusKey = tileBtn ? tileBtn.dataset.confFilter : prev;
+        const again = dlg.querySelector(`[data-conf-filter="${focusKey}"]`);
+        if (again && again.focus) again.focus();
       });
     },
 

@@ -1232,6 +1232,11 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.overloaded_line':                'Machine en surcharge',
   'ui.overloaded_lines':               'Machines en surcharge',
   'ui.overloaded_line_days':           '{{days}} jour{{plural}} · −{{pts}} pts',
+  'ui.conf_show_all': 'Tout afficher',
+  'ui.conf_filter_critical': 'Conflits critiques ({{count}})',
+  'ui.conf_filter_warnings': 'Avertissements ({{count}})',
+  'ui.conf_filter_overloaded': 'Machines en surcharge ({{count}})',
+  'ui.conf_days_over': '{{days}} jour{{plural}} au-dessus de la capacité',
   'ui.err_pts':                        '−{{pts}} pts',
 
   /* ── Time machine / diff ─────────────────────────────────────────────────── */
