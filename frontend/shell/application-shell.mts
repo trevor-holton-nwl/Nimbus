@@ -565,10 +565,15 @@ const SessionUIAdapter = {
     // the user sees: DarkMode may have applied 'dark' from the legacy nimbus.theme
     // cache even when no user_settings.theme pref exists yet (pref() → 'light').
     const theme = document.body.classList.contains('dark') ? 'dark' : ((Session.pref('theme') as string | undefined) || 'light');
-    const lang  = Session.pref('language') as string | undefined;
-    const langOpts = [
+    // Same rule for language: seed from the ACTUALLY-applied locale (Util.locale(), which boots
+    // from the nimbus.locale cache), not the pref — they diverge when no pref is saved, a refresh
+    // brings a different DB value, or a PATCH failed after the cache was written.
+    const langChoices = [
       ['en', 'English'], ['es', 'Español'], ['fr', 'Français'], ['de', 'Deutsch'], ['pt', 'Português'],
-    ].map(([c, n]) => SessionUIAdapter._optTag(c, n, lang)).join('');
+    ];
+    const applied = Util.locale();
+    const lang = langChoices.some(([c]) => c === applied) ? applied : (Session.pref('language') as string | undefined);
+    const langOpts = langChoices.map(([c, n]) => SessionUIAdapter._optTag(c, n, lang)).join('');
     // Landing view — tab select + (dependent) sub-view select.
     const lv       = (Session.pref('landingView') as LandingViewPref | undefined) || {};
     const validLvTab = SessionUIAdapter._landingTabDefs().some(([v]) => v === lv.tab);
