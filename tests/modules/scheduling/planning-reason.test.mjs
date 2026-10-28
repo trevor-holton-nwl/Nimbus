@@ -64,6 +64,9 @@ test('Tool Inventory: tool_contention fills tool, available and holders (array c
 test('Tool Inventory: tool_unavailable and tool_contention_incomplete use the tool id; an unknown shape falls back to the stored message', () => {
   assert.equal(planningReasonText({ code: 'tool_unavailable', message: 'stored', tool_id: 'T9', available: 0 }, t), 'planning_reason.tool_unavailable|tool=T9');
   assert.equal(planningReasonText({ code: 'tool_contention_incomplete', message: 'stored', tool_id: 'T9' }, t), 'planning_reason.tool_contention_incomplete|tool=T9');
+  assert.equal(planningReasonText({ code: 'tool_contention', message: 'stored', tool_id: 'T9', available: 1, holders: ['A'], incomplete: true }, t), 'planning_reason.tool_contention_incomplete|tool=T9', 'the optimizer queues at budget expiry with code tool_contention + incomplete');
+  assert.equal(planningReasonText({ code: 'tool_contention', message: 'stored', tool_id: 'T9', incomplete: true }, t), 'planning_reason.tool_contention_incomplete|tool=T9', 'incomplete needs only the tool id');
+  assert.equal(planningReasonText({ code: 'tool_contention', message: 'stored', tool_id: 'T9', available: 1, incomplete: false }, t), 'planning_reason.tool_contention|tool=T9,available=1,holders=', 'incomplete: false is a plain contention');
   assert.equal(planningReasonText({ code: 'tool_contention', message: 'stored English' }, t), 'stored English', 'no structured fields');
   assert.equal(planningReasonText({ code: 'tool_contention', message: 'stored', tool_id: 'T1', available: 'x' }, t), 'stored', 'available must be a number');
   assert.equal(planningReasonText({ code: 'tool_unavailable', message: 'stored', tool_id: '  ' }, t), 'stored', 'blank tool id');

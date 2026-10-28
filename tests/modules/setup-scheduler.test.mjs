@@ -6335,12 +6335,16 @@ test('tool overflow: moving or queueing an offender hands its old SAME-LINE succ
     [dispOf('A', 'L1', 'protected'), dispOf('C', 'L2'), dispOf('D', 'L2'), dispOf('E', 'L2')]);
   const out = SetupScheduler.resolveToolOverflow(snap, bounds, cand);
   const byId = Object.fromEntries(out.patches.map(p => [p.id, p.changes]));
-  assert.equal(byId.D.planning_status, 'needs_planning');
-  assert.equal(byId.D.planning_reason.code, 'tool_contention');
   assert.equal(byId.E.planning_status, 'needs_planning', 'the old successor is queued by the repair cascade');
   assert.equal(byId.E.planning_reason.code, 'setup_transition_unrecorded');
+  // Recovery runs again after the repair (E vacated its slot): D, queued for tooling first, now fits behind C after A's slot.
+  assert.equal(byId.D.planning_status, 'scheduled');
+  assert.ok(byId.D.start_date.getTime() >= tms('2035-08-06T12:00:00'), 'D moved past the firmed holder A (10:00-12:00)');
   assert.deepEqual(errorsOf(out), []);
-  assert.deepEqual(out.toolBlocked.map(e => e.orderId), ['D'], 'only the tool-queued order is reported as tool-blocked');
+  // Decision 7 (M2c): the cascade-queued order is reported as tool-blocked with the tool of the order whose move caused it.
+  assert.deepEqual(out.toolBlocked.map(e => [e.orderId, e.cause, e.tool, e.holderIds]), [['E', 'cascade', 'T1', ['D']]]);
+  assert.deepEqual(out.toolMoved.map(e => e.orderId), ['D']);
+  assert.equal(SetupScheduler.validateCandidate(snap, bounds, out).some(f => f.severity === 'error'), false);
 });
 
 test('tool overflow: distribution siblings take turns on a shared tool (each child individually)', () => {

@@ -2887,6 +2887,8 @@ window.__NIMBUS_LOCALES.pt = {
   'modal.opt_tool_confirm_title': 'Pedidos serão colocados na fila por ferramentas',
   'modal.opt_tool_confirm_moved': 'Pedidos movidos por ferramentas: {{n}}',
   'modal.opt_tool_confirm_queued': 'Destes por ferramentas: {{n}} na fila',
+  'modal.opt_tool_confirm_cascade': 'Destes na fila porque um movimento por ferramentas mudou a preparação: {{n}}',
+  'ui.opt_tool_cascade_note': 'Na fila porque um movimento por ferramentas mudou a preparação anterior',
   'btn.opt_tool_confirm_apply': 'Aplicar mesmo assim',
   'modal.opt_tool_inventory_not_loaded': 'O inventário de ferramentas não está carregado, então cada ferramenta conta como 1 cópia. Continuar?',
   'toast.fix_overload_blocked': 'Não foi possível aplicar a correção: ela deixaria um erro. Nada foi alterado.',

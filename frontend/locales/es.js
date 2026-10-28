@@ -2888,6 +2888,8 @@ window.__NIMBUS_LOCALES.es = {
   'modal.opt_tool_confirm_title': 'Pedidos pasarán a la cola por herramientas',
   'modal.opt_tool_confirm_moved': 'Pedidos movidos por herramientas: {{n}}',
   'modal.opt_tool_confirm_queued': 'De ellos por herramientas: {{n}} en cola',
+  'modal.opt_tool_confirm_cascade': 'De ellos en cola porque un movimiento por herramientas cambió su preparación: {{n}}',
+  'ui.opt_tool_cascade_note': 'En cola porque un movimiento por herramientas cambió la preparación anterior',
   'btn.opt_tool_confirm_apply': 'Aplicar de todos modos',
   'modal.opt_tool_inventory_not_loaded': 'El inventario de herramientas no está cargado, por lo que cada herramienta cuenta como 1 copia. ¿Continuar?',
   'toast.fix_overload_blocked': 'No se pudo aplicar la corrección: dejaría un error. No se cambió nada.',

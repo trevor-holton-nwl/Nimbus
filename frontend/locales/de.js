@@ -2927,6 +2927,8 @@ window.__NIMBUS_LOCALES.de = {
   'modal.opt_tool_confirm_title': 'Aufträge werden wegen Werkzeugen eingereiht',
   'modal.opt_tool_confirm_moved': 'Wegen Werkzeugen verschobene Aufträge: {{n}}',
   'modal.opt_tool_confirm_queued': 'Davon Werkzeug: {{n}} eingereiht',
+  'modal.opt_tool_confirm_cascade': 'Davon eingereiht, weil ein Werkzeug-Verschieben das Umrüsten änderte: {{n}}',
+  'ui.opt_tool_cascade_note': 'Eingereiht, weil ein Werkzeug-Verschieben das Umrüsten davor geändert hat',
   'btn.opt_tool_confirm_apply': 'Trotzdem anwenden',
   'modal.opt_tool_inventory_not_loaded': 'Der Werkzeugbestand ist nicht geladen, daher zählt jedes Werkzeug als 1 Exemplar. Fortfahren?',
   'toast.fix_overload_blocked': 'Die Korrektur konnte nicht angewendet werden: Sie würde einen Fehler hinterlassen. Es wurde nichts geändert.',

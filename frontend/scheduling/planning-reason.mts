@@ -15,6 +15,8 @@ export interface PlanningReasonLike {
   tool_id?: unknown;
   available?: unknown;
   holders?: unknown;
+  /** `tool_contention` queued at the tool pass's budget expiry carries `incomplete: true` (the code stays `tool_contention`). */
+  incomplete?: unknown;
 }
 
 export type PlanningReasonTranslate = (key: string, vars?: Record<string, string | number>) => string;
@@ -41,9 +43,11 @@ export function planningReasonText(
   if (reason.code === 'tool_contention' || reason.code === 'tool_contention_incomplete' || reason.code === 'tool_unavailable') {
     const tool = typeof reason.tool_id === 'string' ? reason.tool_id.trim() : '';
     const available = typeof reason.available === 'number' && Number.isFinite(reason.available) ? reason.available : null;
-    if (tool && (reason.code !== 'tool_contention' || available !== null)) {
+    // The optimizer queues at its budget expiry with code 'tool_contention' + incomplete: true; the older dedicated code still reads the same.
+    const incomplete = reason.code === 'tool_contention_incomplete' || (reason.code === 'tool_contention' && reason.incomplete === true);
+    if (tool && (incomplete || reason.code !== 'tool_contention' || available !== null)) {
       if (reason.code === 'tool_unavailable') return t('planning_reason.tool_unavailable', { tool });
-      if (reason.code === 'tool_contention_incomplete') return t('planning_reason.tool_contention_incomplete', { tool });
+      if (incomplete) return t('planning_reason.tool_contention_incomplete', { tool });
       return t('planning_reason.tool_contention', { tool, available: available as number, holders: formatToolHolders(reason.holders, t) });
     }
   }

@@ -3133,6 +3133,8 @@ window.__NIMBUS_LOCALES.en = {
   'modal.opt_tool_confirm_title': 'Orders will be queued for tooling',
   'modal.opt_tool_confirm_moved': 'Orders moved for tooling: {{n}}',
   'modal.opt_tool_confirm_queued': 'Of which tool: {{n}} queued',
+  'modal.opt_tool_confirm_cascade': 'Of which queued after a tool move changed their setup: {{n}}',
+  'ui.opt_tool_cascade_note': 'Queued because a tool move changed the setup before it',
   'btn.opt_tool_confirm_apply': 'Apply anyway',
   'modal.opt_tool_inventory_not_loaded': 'Tool inventory is not loaded, so every tool counts as 1 copy. Continue?',
   'toast.fix_overload_blocked': 'The fix could not be applied: it would leave an error. Nothing was changed.',

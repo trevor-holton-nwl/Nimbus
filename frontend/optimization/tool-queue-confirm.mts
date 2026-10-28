@@ -10,7 +10,9 @@ import type { CandidateResult, SchedulePatch, ToolBlockedEntry } from './setup-s
 
 export const TOOL_QUEUE_LIST_CAP = 5;
 
-export interface ToolQueueSummary { queued: ToolBlockedEntry[]; queuedIds: string[]; moved: number }
+/** `queued` = every kept order queued for tooling; `cascade` = how many of those were queued by the repair cascade after a tool move
+ *  (their setup changed), not by tool contention itself. */
+export interface ToolQueueSummary { queued: ToolBlockedEntry[]; queuedIds: string[]; moved: number; cascade: number }
 
 /** Counts from the kept patches only: an order counts as queued/moved when its patch is among `kept`. */
 export function toolQueueSummary(
@@ -26,7 +28,7 @@ export function toolQueueSummary(
     return true;
   });
   const movedIds = new Set((candidate?.toolMoved ?? []).map(entry => String(entry.orderId)).filter(id => keptIds.has(id)));
-  return { queued, queuedIds: queued.map(entry => String(entry.orderId)), moved: movedIds.size };
+  return { queued, queuedIds: queued.map(entry => String(entry.orderId)), moved: movedIds.size, cascade: queued.filter(entry => entry.cause === 'cascade').length };
 }
 
 /** Resolves true when there is nothing to confirm or the planner confirms; false on Cancel (the default focus). */
@@ -42,7 +44,7 @@ export async function confirmToolQueue(
   return Modal.confirm({
     title: Util.t('modal.opt_tool_confirm_title'),
     message: summary.moved > 0 ? Util.t('modal.opt_tool_confirm_moved', { n: summary.moved }) : '',   // no "moved: 0" line
-    detail: `<p>${Util.escapeHtml(Util.t('modal.opt_tool_confirm_queued', { n: summary.queued.length }))}</p><p>${shown}${Util.escapeHtml(more)}</p>`,
+    detail: `<p>${Util.escapeHtml(Util.t('modal.opt_tool_confirm_queued', { n: summary.queued.length - summary.cascade }))}</p>${summary.cascade > 0 ? `<p>${Util.escapeHtml(Util.t('modal.opt_tool_confirm_cascade', { n: summary.cascade }))}</p>` : ''}<p>${shown}${Util.escapeHtml(more)}</p>`,
     confirmLabel: Util.t('btn.opt_tool_confirm_apply'),
     tone: 'warn',
   });

@@ -1313,14 +1313,14 @@ export const OptimizerPreview = {
 
   /** CSV of the tool-blocked list (every entry, not just the 50 shown); each cell goes through Util.csvCell. */
   toolBlockedCsv(
-    entries: ReadonlyArray<{ orderId: string; tool: string; available: number; inUse: number; holderIds: readonly string[] }>,
+    entries: ReadonlyArray<{ orderId: string; tool: string; available: number; inUse: number; holderIds: readonly string[]; cause?: string }>,
     labelOf: (id: string) => string = id => id,
     linesById: ReadonlyMap<string, string> = new Map(),
   ): string {
-    const header = ['order', 'line', 'tool', 'available', 'in_use', 'holders'];
+    const header = ['order', 'line', 'tool', 'available', 'in_use', 'holders', 'cause'];
     return [header, ...entries.map(entry => [
       labelOf(entry.orderId), linesById.get(String(entry.orderId)) ?? '', entry.tool, entry.available, entry.inUse,
-      entry.holderIds.map(labelOf).join(' '),
+      entry.holderIds.map(labelOf).join(' '), entry.cause === 'cascade' ? 'cascade' : 'tool',
     ])].map(row => row.map(Util.csvCell).join(',')).join('\n');
   },
 
@@ -2231,7 +2231,7 @@ export const OptimizerPreview = {
           <thead><tr><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_order'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_tool'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_avail'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_holders'))}</th><th></th></tr></thead>
           <tbody>${toolBlocked.slice(0, 50).map(entry => {
             const holders = entry.holderIds.slice(0, 5).map(labelOf).join(', ') + (entry.holderIds.length > 5 ? ` ${Util.t('ui.opt_bg_more', { count: entry.holderIds.length - 5 })}` : '');
-            return `<tr><td>${Util.escapeHtml(labelOf(entry.orderId))}</td><td>${Util.escapeHtml(linesById.get(String(entry.orderId)) ?? '')}</td><td>${Util.escapeHtml(entry.tool)}</td><td>${entry.available} / ${entry.inUse}</td><td>${Util.escapeHtml(holders)}</td><td><button type="button" class="btn btn-sm" data-opt-tool-raise="${Util.escapeHtml(entry.tool)}">${Util.escapeHtml(Util.t('ui.opt_tool_raise'))}</button></td></tr>`;
+            return `<tr${entry.cause === 'cascade' ? ' data-opt-tool-cascade' : ''}><td>${Util.escapeHtml(labelOf(entry.orderId))}${entry.cause === 'cascade' ? `<div class="opt-pv-tool-cascade">${Util.escapeHtml(Util.t('ui.opt_tool_cascade_note'))}</div>` : ''}</td><td>${Util.escapeHtml(linesById.get(String(entry.orderId)) ?? '')}</td><td>${Util.escapeHtml(entry.tool)}</td><td>${entry.available} / ${entry.inUse}</td><td>${Util.escapeHtml(holders)}</td><td><button type="button" class="btn btn-sm" data-opt-tool-raise="${Util.escapeHtml(entry.tool)}">${Util.escapeHtml(Util.t('ui.opt_tool_raise'))}</button></td></tr>`;
           }).join('')}</tbody>
         </table>
         ${toolBlocked.length > 50 ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_first_50'))}</div>` : ''}
@@ -2935,10 +2935,12 @@ export const OptimizerPreview = {
     // Tool Inventory: a `tool_overflow` error names exactly ONE order, and only an order of the KEPT set can be named (the
     // dispositions passed above are the kept patches'), so `dropWithFamily` always resolves it; its message is fixed (holders
     // live in `detail`), so this key stays stable. Dropping a patch reverts the order to its LIVE slot, which can collide with the
-    // next kept patch: the 3-pass cap below resolves a chain of two sequential drops and refuses a chain of three.
+    // next kept patch: each pass drops at least one patch (monotone, bounded by the kept count), so the cap below is
+    // min(8, kept patches): a chain of N sequential drops resolves while N + 1 passes fit, a longer chain is refused.
     const baselineKeys = new Set(errorsFor([]).map(keyOf));
     let kept: SchedulePatch[] = patches.filter(patch => !drop.has(String(patch.id)));
-    for (let pass = 0; pass < 3; pass++) {
+    const maxPasses = Math.min(8, kept.length);
+    for (let pass = 0; pass < maxPasses; pass++) {
       const keptIds = new Set(kept.map(patch => String(patch.id)));
       const findings = errorsFor(kept);
       if (!findings.length) break;
@@ -2970,7 +2972,7 @@ export const OptimizerPreview = {
         dropped = true;
       }
       if (!dropped) break;
-      if (pass === 2) return null;
+      if (pass === maxPasses - 1) return null;
       kept = patches.filter(patch => !drop.has(String(patch.id)));
     }
     if (!kept.length) return null;

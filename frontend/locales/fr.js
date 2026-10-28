@@ -2888,6 +2888,8 @@ window.__NIMBUS_LOCALES.fr = {
   'modal.opt_tool_confirm_title': 'Des commandes seront mises en attente pour l\'outillage',
   'modal.opt_tool_confirm_moved': 'Commandes déplacées pour l\'outillage : {{n}}',
   'modal.opt_tool_confirm_queued': 'Dont outillage : {{n}} en attente',
+  'modal.opt_tool_confirm_cascade': 'Dont mis en attente parce qu\'un déplacement d\'outillage a changé leur réglage : {{n}}',
+  'ui.opt_tool_cascade_note': 'Mise en attente car un déplacement d\'outillage a changé le réglage précédent',
   'btn.opt_tool_confirm_apply': 'Appliquer quand même',
   'modal.opt_tool_inventory_not_loaded': 'L\'inventaire des outils n\'est pas chargé, donc chaque outil compte pour 1 exemplaire. Continuer ?',
   'toast.fix_overload_blocked': 'La correction n\'a pas pu être appliquée : elle laisserait une erreur. Rien n\'a été modifié.',

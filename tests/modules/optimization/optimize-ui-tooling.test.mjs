@@ -77,7 +77,10 @@ test('toolQueueSummary counts only KEPT patches, once per order', () => {
   const s = toolQueueSummary(candidate, [{ id: 'a' }, { id: 'c' }]);
   assert.deepEqual(s.queuedIds, ['a', 'c'], 'b was dropped from the kept set; a is counted once');
   assert.equal(s.moved, 1, 'a moved order outside the kept set is not counted');
-  assert.deepEqual(toolQueueSummary({}, [{ id: 'a' }]), { queued: [], queuedIds: [], moved: 0 }, 'absent fields read as empty');
+  assert.deepEqual(toolQueueSummary({}, [{ id: 'a' }]), { queued: [], queuedIds: [], moved: 0, cascade: 0 }, 'absent fields read as empty');
+  const withCascade = toolQueueSummary({ toolBlocked: [blocked('a'), blocked('c', { cause: 'cascade' })] }, [{ id: 'a' }, { id: 'c' }]);
+  assert.equal(withCascade.queued.length, 2, 'a cascade-queued order counts as queued for tooling');
+  assert.equal(withCascade.cascade, 1, 'and is reported separately');
   assert.deepEqual(toolQueueSummary(null, []).queuedIds, []);
 });
 
@@ -220,8 +223,9 @@ test('preview panel: Tool-blocked section with escaped ids, chip, moved summary 
 test('toolBlockedCsv goes through the CSV-injection-safe cell helper', () => {
   const csv = OptimizerPreview.toolBlockedCsv([{ orderId: '1', tool: '=CMD()', available: 1, inUse: 2, holderIds: ['2', '3'] }], id => `PO${id}`, new Map([['1', 'L1']]));
   const [header, row] = csv.split('\n');
-  assert.equal(header, 'order,line,tool,available,in_use,holders');
-  assert.match(row, /^PO1,L1,'=CMD\(\),1,2,PO2 PO3$/);
+  assert.equal(header, 'order,line,tool,available,in_use,holders,cause');
+  assert.match(row, /^PO1,L1,'=CMD\(\),1,2,PO2 PO3,tool$/);
+  assert.match(OptimizerPreview.toolBlockedCsv([{ orderId: '1', tool: 'T1', available: 1, inUse: 0, holderIds: ['2'], cause: 'cascade' }]).split('\n')[1], /,cascade$/);
 });
 
 test('an open preview goes stale (tooling banner) on master-data-changed for tool_inventory or plants, not for other tables or plants', () => {
@@ -502,8 +506,8 @@ test('Persistence.ensureToolInventoryCurrent: unchanged version is fresh without
 // A tool_overflow ERROR names exactly ONE order, and only an order of the KEPT set can be named (the validated
 // dispositions are the kept patches'), so `dropWithFamily` always resolves it; the message is fixed, the holders live in
 // `detail`, so the code|taskId|message key stays stable across passes. Dropping a patch reverts that order to its LIVE
-// position, which can collide with the next kept patch: the loop re-validates up to 3 passes, so a chain needing two
-// sequential drops resolves and a chain needing three is refused (null) rather than half-applied.
+// position, which can collide with the next kept patch: the loop re-validates up to min(8, kept patches) passes, so a chain of
+// up to 7 sequential drops resolves and a longer one is refused (null) rather than half-applied.
 const T0 = new Date('2035-08-06T10:00:00');
 const hrs = n => new Date(+T0 + n * 3600 * 1000);
 function pruneFixture(live, kept, { plant = 'P1' } = {}) {
@@ -559,7 +563,7 @@ test('prune: the tool_overflow finding names one kept order with a fixed message
   } finally { fx.restore(); }
 });
 
-test('prune: three-pass cap with a chain of live collisions (two sequential drops resolve, three are refused)', () => {
+test('prune: pass cap min(8, kept) with a chain of live collisions (chains of 2, 3 and 4 sequential drops resolve; 8 are refused)', () => {
   // Dropping a patch reverts that order to its live slot, which sits on the NEXT kept patch.
   const live2 = { A: [4, 8], O2: [8, 12], O3: [12, 16], Y: [40, 44] };
   const fx2 = pruneFixture(live2, { O2: [4, 8], O3: [8, 12], Y: [44, 48] });       // O2 kept at A's live slot; dropping O2 puts it on O3's kept slot
@@ -569,9 +573,23 @@ test('prune: three-pass cap with a chain of live collisions (two sequential drop
     assert.deepEqual(r.kept.map(p => p.id), ['Y'], 'O2 collides with live A, falls back onto kept O3, which then falls back too');
     assert.deepEqual([...r.dropped].sort(), ['O2', 'O3']);
   } finally { fx2.restore(); }
-  const live3 = { A: [4, 8], O2: [8, 12], O3: [12, 16], O4: [16, 20], Y: [40, 44] };
-  const fx3 = pruneFixture(live3, { O2: [4, 8], O3: [8, 12], O4: [12, 16], Y: [44, 48] });
+  // A chain of n sequential drops: A is live at 4-8; order k (2..n+1) is live at 4k..4k+4 and kept at the previous order's live slot.
+  const chain = n => {
+    const live = { A: [4, 8], Y: [100, 104] }; const kept = { Y: [104, 108] };
+    for (let k = 2; k <= n + 1; k++) { live['O' + k] = [4 * k, 4 * k + 4]; kept['O' + k] = [4 * (k - 1), 4 * k]; }
+    return pruneFixture(live, kept);
+  };
+  for (const n of [3, 4, 7]) {
+    const fx = chain(n);
+    try {
+      const r = fx.prune([]);
+      assert.ok(r, 'a chain of ' + n + ' sequential drops resolves under the raised cap');
+      assert.deepEqual(r.kept.map(p => p.id), ['Y']);
+      assert.equal(r.dropped.length, n);
+    } finally { fx.restore(); }
+  }
+  const fx8 = chain(8);
   try {
-    assert.equal(fx3.prune([]), null, 'a chain needing three sequential drops is refused, never half-applied');
-  } finally { fx3.restore(); }
+    assert.equal(fx8.prune([]), null, 'a chain longer than the cap (8 sequential drops, 9 kept) is refused, never half-applied');
+  } finally { fx8.restore(); }
 });

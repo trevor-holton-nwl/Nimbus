@@ -946,9 +946,11 @@ export interface CandidateResult {
   /** Tool Inventory: orders re-placed into a tool-free gap (Wave 6; absent = none). */
   toolMoved?: readonly ToolMovedEntry[];
   /** Tool Inventory: `complete: false` = the overflow pass hit its budget and queued the rest without a full search. */
-  toolPass?: { complete: boolean; elapsedMs: number };
+  toolPass?: { complete: boolean; elapsedMs: number; /** The pass threw (not the stale core): fail closed, Apply is disabled by a tool_overflow_failed error. */ failed?: true; error?: string };
 }
-export interface ToolBlockedEntry { orderId: string; tool: string; available: number; inUse: number; holderIds: readonly string[] }
+/** `cause: 'cascade'` = queued by the repair cascade after a tool move (the old successor needed a longer or an unrecorded
+ * setup), not by tool contention itself; `tool` is then the tool of the order whose move caused it. */
+export interface ToolBlockedEntry { orderId: string; tool: string; available: number; inUse: number; holderIds: readonly string[]; cause?: 'cascade' }
 export interface ToolMovedEntry { orderId: string; tool: string; fromStart: string | null; fromEnd: string | null; toStart: string; toEnd: string }
 
 interface DueDateGroup {
@@ -6931,6 +6933,7 @@ const TOOL_CONTENTION_MESSAGE = 'No copy of a tool this order needs is free with
 const TOOL_CONTENTION_INCOMPLETE_MESSAGE = 'The tool check ran out of time before every free slot was searched.';
 const TOOL_UNAVAILABLE_MESSAGE = 'A tool this order needs has no copies available.';
 const TOOL_OVERFLOW_ERROR_MESSAGE = 'More machines need a tool at the same time than there are copies available.';
+const TOOL_OVERFLOW_FAILED_MESSAGE = 'The tool check could not be completed, so this proposal cannot be applied. Try again or contact support.';
 const TOOL_OVERFLOW_WARNING_MESSAGE = 'Protected or out-of-scope orders already need more copies of a tool than are available.';
 const TOOL_CORE_FUNCTIONS = ['normalizeToolId', 'taskToolIds', 'toolOccupancyInterval', 'buildToolCapacity', 'availableCopies',
   'findToolOverages', 'buildToolIndex', 'toolIndexUpdate', 'toolHeadroom'] as const;
@@ -6960,8 +6963,18 @@ export interface ToolStatic {
   tasks: ReadonlyArray<NimbusTask>;
   masterData: NimbusMasterData | null;
   byId: Map<string, { tools: string[]; plant: string | null }>;
+  /** Owner decision F3: tool-carrying rows with BOTH dates and `user_scheduled !== true` (a never-committed baseline bar).
+   * They do not reserve copies against mutable work (the alert still counts them); finish-only rows are not in this set. */
+  neverCommitted: Set<string>;
 }
-interface ToolOcc { ctx: ToolRuleCtx; items: Map<string, ToolItem>; index: unknown; runNowMs: number }
+interface ToolOcc {
+  ctx: ToolRuleCtx; items: Map<string, ToolItem>; index: unknown; runNowMs: number;
+  /** Items per tool, and the per-tool overflow clusters (`hot`: only tools with a cluster); `dirty` tools are re-swept on the next
+   * read, so a step re-sweeps only the tools of the order it moved or queued. */
+  byTool: Map<string, Map<string, ToolItem>>; dirty: Set<string>; hot: Map<string, ToolCluster[]>;
+}
+/** Who may reserve copies: with this set, never-committed rows that are neither mutable nor firmed are left out (F3). */
+interface ToolReserveScope { mutableIds: ReadonlySet<string>; snapshot: Readonly<ScheduleSnapshot> }
 interface ToolGapHooks { windows(from: number, to: number): PlacementInterval[]; envelopeFits(start: Date, end: Date): boolean }
 
 const toolCapacityMemo = new WeakMap<object, Map<string, ToolCapacity>>();
@@ -7003,12 +7016,14 @@ function toolStaticFor(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<Du
   const memo = toolStaticMemo.get(snapshot.tasks as object);
   if (memo && memo.masterData === snapshot.masterData) return memo;
   const byId = new Map<string, { tools: string[]; plant: string | null }>();
+  const neverCommitted = new Set<string>();
   for (const task of snapshot.tasks) {
     const tools = ctx.core.taskToolIds(task);
     if (!tools.length) continue;
     byId.set(taskId(task), { tools, plant: resolveTaskPlant(task, snapshot, bounds.runContext) });
+    if (task.user_scheduled !== true && timestamp(task.start_date) && timestamp(task.end_date)) neverCommitted.add(taskId(task));
   }
-  const built: ToolStatic = { tasks: snapshot.tasks, masterData: snapshot.masterData, byId };
+  const built: ToolStatic = { tasks: snapshot.tasks, masterData: snapshot.masterData, byId, neverCommitted };
   toolStaticMemo.set(snapshot.tasks as object, built);
   return built;
 }
@@ -7035,14 +7050,22 @@ function toolItemFor(ctx: ToolRuleCtx, stat: ToolStatic, runNowMs: number, task:
   return { id: taskId(task), line: String(task.MACHINE ?? '') || 'Unknown', plant: ctx.plant, tools: info.tools, start: new Date(start), end: new Date(end) };
 }
 
-function buildToolOcc(ctx: ToolRuleCtx, stat: ToolStatic, bounds: Readonly<DueDateFirstBounds>, patched: ReadonlyArray<NimbusTask>): ToolOcc {
+function buildToolOcc(
+  ctx: ToolRuleCtx, stat: ToolStatic, bounds: Readonly<DueDateFirstBounds>, patched: ReadonlyArray<NimbusTask>,
+  reserve?: ToolReserveScope,
+): ToolOcc {
   const runNowMs = toolRunNowMs(bounds);
   const items = new Map<string, ToolItem>();
+  const byTool = new Map<string, Map<string, ToolItem>>();
   for (const task of patched) {
+    if (reserve && stat.neverCommitted.has(taskId(task)) && !reserve.mutableIds.has(taskId(task)) && !taskIsFirmed(reserve.snapshot, task)) continue;
     const item = toolItemFor(ctx, stat, runNowMs, task);
-    if (item) items.set(item.id, item);
+    if (!item) continue;
+    items.set(item.id, item);
+    for (const tool of item.tools) { let list = byTool.get(tool); if (!list) byTool.set(tool, list = new Map()); list.set(item.id, item); }
   }
-  return { ctx, items, index: ctx.core.buildToolIndex({ items: [...items.values()], capacityFor: ctx.capacityFor }), runNowMs };
+  return { ctx, items, index: ctx.core.buildToolIndex({ items: [...items.values()], capacityFor: ctx.capacityFor }), runNowMs,
+    byTool, dirty: new Set(byTool.keys()), hot: new Map() };
 }
 
 function toolOccRemove(occ: ToolOcc, id: string): void {
@@ -7050,16 +7073,41 @@ function toolOccRemove(occ: ToolOcc, id: string): void {
   if (!item) return;
   occ.items.delete(id);
   occ.ctx.core.toolIndexUpdate(occ.index, id, item, null);
+  for (const tool of item.tools) { occ.byTool.get(tool)?.delete(id); occ.dirty.add(tool); }
 }
 
 function toolOccAdd(occ: ToolOcc, item: ToolItem): void {
   occ.items.set(item.id, item);
   occ.ctx.core.toolIndexUpdate(occ.index, item.id, null, item);
+  for (const tool of item.tools) { let list = occ.byTool.get(tool); if (!list) occ.byTool.set(tool, list = new Map()); list.set(item.id, item); occ.dirty.add(tool); }
 }
 
+/** Re-sweep the DIRTY tools only; the core orders its events totally (time, end before start, start, end, id, line), so a
+ * tool's clusters never depend on item order. `hot` keeps only the tools that currently overflow. */
+function refreshToolClusters(occ: ToolOcc): void {
+  for (const tool of occ.dirty) {
+    const list = occ.byTool.get(tool);
+    const found = list && list.size
+      ? occ.ctx.core.findToolOverages({ items: [...list.values()].map(item => ({ ...item, tools: [tool] })), capacityFor: occ.ctx.capacityFor })
+      : [];
+    if (found.length) occ.hot.set(tool, found); else occ.hot.delete(tool);
+  }
+  occ.dirty.clear();
+}
+
+/** Every overflow cluster, tools ascending (the order the core's own sweep uses). */
 function toolClusters(occ: ToolOcc): ToolCluster[] {
-  const items = [...occ.items.values()].sort((a, b) => ordinalCompare(a.id, b.id));
-  return occ.ctx.core.findToolOverages({ items, capacityFor: occ.ctx.capacityFor });
+  refreshToolClusters(occ);
+  const out: ToolCluster[] = [];
+  for (const tool of [...occ.hot.keys()].sort()) out.push(...occ.hot.get(tool)!);
+  return out;
+}
+
+/** The first cluster (tool, then time order) the predicate accepts, without materialising the whole list. */
+function findToolCluster(occ: ToolOcc, accept: (cluster: ToolCluster) => boolean): ToolCluster | null {
+  refreshToolClusters(occ);
+  for (const tool of [...occ.hot.keys()].sort()) for (const cluster of occ.hot.get(tool)!) if (accept(cluster)) return cluster;
+  return null;
 }
 
 function toolGapHooks(occ: ToolOcc, tools: string[], line: string): ToolGapHooks {
@@ -7158,9 +7206,22 @@ function toolOverflowFindings(
   const stat = toolStaticFor(snapshot, bounds, ctx);
   if (!stat.byId.size) return [];
   const patches = new Map(candidate.patches.map(patch => [patch.id, patch]));
-  const occ = buildToolOcc(ctx, stat, bounds, patchedTaskView(snapshot.tasks, patches));
+  const patchedView = patchedTaskView(snapshot.tasks, patches);
+  const mutableIds = new Set(scope.mutable.map(taskId));
+  const occ = buildToolOcc(ctx, stat, bounds, patchedView, { mutableIds, snapshot });
   const clusters = toolClusters(occ);
-  if (!clusters.length) return [];
+  // F3: a never-committed bar that is neither mutable nor firmed does not reserve copies, but an overflow it takes part in is
+  // still shown, as a WARNING only (the alert counts it too).
+  const warnOnly: ToolCluster[] = [];
+  if ([...stat.neverCommitted].some(id => !mutableIds.has(id))) {
+    const seenKeys = new Set(clusters.map(cluster => cluster.pusher + '\u0000' + cluster.tool));
+    const everything = toolClusters(buildToolOcc(ctx, stat, bounds, patchedView));
+    for (const cluster of everything) {
+      if (seenKeys.has(cluster.pusher + '\u0000' + cluster.tool)) continue;
+      if (toolClusterHolderIds(cluster).some(id => stat.neverCommitted.has(id) && !mutableIds.has(id))) warnOnly.push(cluster);
+    }
+  }
+  if (!clusters.length && !warnOnly.length) return [];
   const movable = toolMovablePredicate(snapshot, bounds, scope, dispositions);
   const rank = toolUrgencyRank(snapshot, bounds, scope.mutable);
   const ran = candidate.toolPass !== undefined;
@@ -7183,7 +7244,25 @@ function toolOverflowFindings(
       detail: { tool: cluster.tool, available: cluster.available, inUse: cluster.inUse, holders: toolHoldersDetail(cluster, offender) },
     });
   }
+  for (const cluster of warnOnly) {
+    const key = cluster.pusher + '\u0000' + cluster.tool + '\u0000w';
+    if (seen.has(key)) continue;
+    seen.add(key);
+    findings.push({
+      code: 'tool_overflow', message: TOOL_OVERFLOW_WARNING_MESSAGE, severity: 'warning', taskId: cluster.pusher,
+      line: lineOf.get(cluster.pusher) ?? cluster.pusherLine,
+      detail: { tool: cluster.tool, available: cluster.available, inUse: cluster.inUse, holders: toolHoldersDetail(cluster, null) },
+    });
+  }
   return findings;
+}
+
+function isStaleCoreError(error: unknown): boolean {
+  return error instanceof Error && error.message === 'compute-core-stale';
+}
+
+function toolOverflowFailedFinding(): ValidationFinding {
+  return { code: 'tool_overflow_failed', message: TOOL_OVERFLOW_FAILED_MESSAGE, severity: 'error' };
 }
 
 /** After retain / gap-fill / repair: keep `toolBlocked` / `toolMoved` truthful (an order that was later placed or
@@ -7196,7 +7275,7 @@ function reconcileToolOutcomes(result: CandidateResult): CandidateResult {
   const blocked = new Map<string, ToolBlockedEntry>();
   for (const entry of result.toolBlocked ?? []) {
     const d = status.get(entry.orderId);
-    if (d?.status === 'needs_planning' && isToolCode(d.reason?.code)) blocked.set(entry.orderId, entry);
+    if (d?.status === 'needs_planning' && (isToolCode(d.reason?.code) || entry.cause === 'cascade')) blocked.set(entry.orderId, entry);
   }
   for (const patch of result.patches) {
     const reason = patch.changes.planning_reason;
@@ -7226,13 +7305,70 @@ function toolIso(value: unknown): string | null {
   return timestamp(value)?.toISOString() ?? null;
 }
 
+/** Which tool a placement of `tools` on `line` over [start, end) is blocked by, with its copies and the OTHER-line holders in
+ * that span (sorted, capped). Pure read of the occupancy; the first tool whose own headroom does not cover the span wins. */
+function toolContentionDetail(
+  occ: ToolOcc, tools: readonly string[], line: string, start: Date | null, end: Date | null,
+): { tool: string; available: number; holders: string[]; inUse: number } {
+  const sorted = [...tools].sort();
+  let tool = sorted[0] ?? '';
+  if (start && end) {
+    for (const candidate of sorted) {
+      const windows = occ.ctx.core.toolHeadroom(occ.index, occ.ctx.plant, [candidate], start, end, line);
+      if (!(windows.length === 1 && +windows[0].start <= +start && +windows[0].end >= +end)) { tool = candidate; break; }
+    }
+  }
+  const available = occ.ctx.capacityFor(occ.ctx.plant, tool).available;
+  const holders = [...(occ.byTool.get(tool)?.values() ?? [])]
+    .filter(item => item.line !== line && (!start || !end || (+item.start < +end && +item.end > +start)))
+    .map(item => item.id).sort(ordinalCompare).slice(0, TOOL_HOLDER_CAP);
+  return { tool, available, holders, inUse: holders.length + 1 };
+}
+
+function mergeToolBlocked(prior: readonly ToolBlockedEntry[] | undefined, added: readonly ToolBlockedEntry[]): ToolBlockedEntry[] {
+  const byOrder = new Map<string, ToolBlockedEntry>();
+  for (const entry of [...(prior ?? []), ...added]) {
+    const held = byOrder.get(entry.orderId);
+    if (held && held.cause !== 'cascade' && entry.cause === 'cascade') continue;   // a tool queue outranks a cascade marker
+    byOrder.set(entry.orderId, entry);
+  }
+  return [...byOrder.values()];
+}
+
+/** One entry per order (a second pass may move the same order again): the FIRST from, the LAST to; a net no-op is dropped. */
+function mergeToolMoved(prior: readonly ToolMovedEntry[] | undefined, added: readonly ToolMovedEntry[]): ToolMovedEntry[] {
+  const byOrder = new Map<string, ToolMovedEntry>();
+  for (const entry of [...(prior ?? []), ...added]) {
+    const held = byOrder.get(entry.orderId);
+    byOrder.set(entry.orderId, held ? { ...entry, fromStart: held.fromStart, fromEnd: held.fromEnd } : entry);
+  }
+  return [...byOrder.values()].filter(entry => !(entry.fromStart === entry.toStart && entry.fromEnd === entry.toEnd));
+}
+
 /**
  * Resolve every tool overflow on a finished candidate (see the header comment above for the algorithm and its
  * termination argument). Returns the candidate UNTOUCHED (same object, none of the tool fields) when the rule is not
  * active. Otherwise returns a repaired candidate carrying `toolPass`, plus `toolBlocked` / `toolMoved` when non-empty.
- * `budgetMs` defaults to 1 s (10 s for an Exhaustive run).
+ * `budgetMs` defaults to 1 s (10 s for an Exhaustive run). `compute-core-stale` is rethrown unchanged (the worker client
+ * answers it); any other exception fails CLOSED: the candidate comes back untouched except for `toolPass.failed`, and
+ * `validateCandidate` then reports the fixed `tool_overflow_failed` ERROR, so Apply is disabled with a visible reason.
  */
 export function resolveToolOverflow(
+  snapshot: Readonly<ScheduleSnapshot>, boundsIn: Readonly<DueDateFirstBounds>, candidate: CandidateResult, budgetMs?: number,
+): CandidateResult {
+  try {
+    return resolveToolOverflowRun(snapshot, boundsIn, candidate, budgetMs);
+  } catch (error) {
+    if (isStaleCoreError(error)) throw error;
+    return {
+      ...candidate,
+      toolPass: { complete: false, elapsedMs: candidate.toolPass?.elapsedMs ?? 0, failed: true, error: String((error as Error | undefined)?.message ?? error).slice(0, 300) },
+      validationFindings: [...(candidate.validationFindings ?? []).filter(f => f.code !== 'tool_overflow_failed'), toolOverflowFailedFinding()],
+    };
+  }
+}
+
+function resolveToolOverflowRun(
   snapshot: Readonly<ScheduleSnapshot>, boundsIn: Readonly<DueDateFirstBounds>, candidate: CandidateResult, budgetMs?: number,
 ): CandidateResult {
   const ctx = toolRuleContext(snapshot, boundsIn);
@@ -7245,40 +7381,113 @@ export function resolveToolOverflow(
   const scope = buildTaskScope(snapshot, bounds);
   const patches = new Map(candidate.patches.map(patch => [patch.id, patch]));
   const dispositions = new Map((candidate.dispositions ?? []).map(d => [d.id, d]));
-  const occ = buildToolOcc(ctx, stat, bounds, patchedTaskView(snapshot.tasks, patches));
+  const mutableIds = new Set(scope.mutable.map(taskId));
+  const reserve: ToolReserveScope = { mutableIds, snapshot };
+  let occ = buildToolOcc(ctx, stat, bounds, patchedTaskView(snapshot.tasks, patches), reserve);
   const movable = toolMovablePredicate(snapshot, bounds, scope, dispositions);
   const mutableById = new Map(scope.mutable.map(task => [taskId(task), task]));
   const originalById = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   const moved: ToolMovedEntry[] = [];
   const blocked: ToolBlockedEntry[] = [];
   const beforeDates = new Map<string, { start: string | null; end: string | null }>();
+  const byLine = new Map<string, NimbusTask[]>();
+  for (const task of scope.evaluation) {
+    const line = String(task.MACHINE);
+    const peers = byLine.get(line) ?? []; peers.push(task); byLine.set(line, peers);
+  }
+  const env: GapEnv = { snapshot, bounds, candidate, byLine, availability: new Map(), patches, dispositions, expired };
+  let rankMemo: Map<string, number> | null = null;
+  const rank = (): Map<string, number> => rankMemo ??= toolUrgencyRank(snapshot, bounds, scope.mutable);
+  const settled = new Set<string>();
   let complete = true;
   let changed = false;
+  let degraded = false;
+
+  const originalDates = (id: string): { start: string | null; end: string | null } => {
+    const row = originalById.get(id);
+    return { start: toolIso(row?.start_date), end: toolIso(row?.end_date) };
+  };
+  /** Queue one order with the structured reason and record it (the caller has already taken it out of the occupancy). */
+  const queueOrder = (id: string, tools: readonly string[], cluster: { tool: string; inUse: number }, holders: string[], incomplete: boolean): void => {
+    const line = String(mutableById.get(id)!.MACHINE);
+    const zero = [...tools].sort().find(tool => ctx.capacityFor(ctx.plant, tool).available <= 0);
+    const tool = zero ?? cluster.tool;
+    const available = ctx.capacityFor(ctx.plant, tool).available;
+    const reason = toolQueueReason(zero ? 'tool_unavailable' : 'tool_contention', tool, available, holders, incomplete);
+    patches.set(id, toolQueuePatch(id, reason));
+    dispositions.set(id, { id, line, status: 'needs_planning', reason });
+    blocked.push({ orderId: id, tool, available, inUse: zero ? 0 : cluster.inUse, holderIds: holders });
+    changed = true;
+  };
+  const recordMove = (id: string, tool: string, patch: SchedulePatch): void => {
+    const was = beforeDates.get(id) ?? originalDates(id);
+    moved.push({
+      orderId: id, tool, fromStart: was.start, fromEnd: was.end,
+      toStart: toolIso(patch.changes.start_date) ?? '', toEnd: toolIso(patch.changes.end_date) ?? '',
+    });
+  };
+
+  /** Budget expired: ONE greedy sweep per tool queues the least urgent movable holder whenever the machines in use exceed the copies. */
+  const queueSweep = (): void => {
+    complete = false; degraded = true;
+    for (const tool of [...occ.byTool.keys()].sort()) {
+      const list = [...(occ.byTool.get(tool)?.values() ?? [])];
+      const available = ctx.capacityFor(ctx.plant, tool).available;
+      if (!list.length || new Set(list.map(item => item.line)).size <= available) continue;
+      const events: Array<{ t: number; type: 0 | 1; item: ToolItem }> = [];
+      for (const item of list) { events.push({ t: +item.start, type: 1, item }, { t: +item.end, type: 0, item }); }
+      events.sort((a, b) => a.t - b.t || a.type - b.type || +a.item.start - +b.item.start || +a.item.end - +b.item.end
+        || ordinalCompare(a.item.id, b.item.id) || ordinalCompare(a.item.line, b.item.line));
+      const active = new Map<string, ToolItem>();
+      const lineCount = new Map<string, number>();
+      const gone = new Set<string>();
+      const drop = (item: ToolItem): void => {
+        active.delete(item.id);
+        const n = (lineCount.get(item.line) ?? 0) - 1;
+        if (n <= 0) lineCount.delete(item.line); else lineCount.set(item.line, n);
+      };
+      for (const ev of events) {
+        if (gone.has(ev.item.id)) continue;
+        if (ev.type === 0) { if (active.has(ev.item.id)) drop(ev.item); continue; }
+        active.set(ev.item.id, ev.item);
+        lineCount.set(ev.item.line, (lineCount.get(ev.item.line) ?? 0) + 1);
+        while (lineCount.size > available) {
+          const ids = [...active.keys()].filter(id => movable(id) && !settled.has(id));
+          if (!ids.length) break;
+          const victim = leastUrgentToolHolder(ids, rank());
+          const holders = [...active.keys()].filter(id => id !== victim).sort(ordinalCompare).slice(0, TOOL_HOLDER_CAP);
+          const inUse = lineCount.size;
+          drop(active.get(victim)!); gone.add(victim);
+          beforeDates.set(victim, originalDates(victim));
+          toolOccRemove(occ, victim);
+          queueOrder(victim, stat.byId.get(victim)?.tools ?? [], { tool, inUse }, holders, true);
+        }
+      }
+    }
+  };
+
+  const pickOffender = (): { cluster: ToolCluster; offender: string } | null => {
+    let pick: { cluster: ToolCluster; offender: string } | null = null;
+    findToolCluster(occ, cluster => {
+      const ids = toolClusterHolderIds(cluster).filter(id => movable(id) && !settled.has(id));
+      if (!ids.length) return false;
+      pick = { cluster, offender: leastUrgentToolHolder(ids, rank()) };
+      return true;
+    });
+    return pick;
+  };
 
   if (stat.byId.size && toolClusters(occ).length) {
-    const rank = toolUrgencyRank(snapshot, bounds, scope.mutable);
-    const byLine = new Map<string, NimbusTask[]>();
-    for (const task of scope.evaluation) {
-      const line = String(task.MACHINE);
-      const peers = byLine.get(line) ?? []; peers.push(task); byLine.set(line, peers);
-    }
-    const env: GapEnv = { snapshot, bounds, candidate, byLine, availability: new Map(), patches, dispositions, expired };
-    const settled = new Set<string>();
     let movableTools = 0;
     for (const id of occ.items.keys()) if (movable(id)) movableTools++;
     const maxSteps = movableTools + 1;
-    let queueOnly = false;
     let steps = 0;
     for (;;) {
-      let pick: { cluster: ToolCluster; offender: string } | null = null;
-      for (const cluster of toolClusters(occ)) {
-        const ids = toolClusterHolderIds(cluster).filter(id => movable(id) && !settled.has(id));
-        if (ids.length) { pick = { cluster, offender: leastUrgentToolHolder(ids, rank) }; break; }
-      }
+      const pick = pickOffender();
       if (!pick) break;
       if (steps >= maxSteps) { complete = false; break; }
       steps++;
-      if (!queueOnly && expired()) queueOnly = true;
+      if (expired()) { queueSweep(); break; }
       const { cluster, offender } = pick;
       const task = mutableById.get(offender)!;
       const line = String(task.MACHINE);
@@ -7289,8 +7498,7 @@ export function resolveToolOverflow(
       // Tentatively queue the offender so the gap walk sees the line without it (exactly the gap-fill situation).
       patches.set(offender, toolQueuePatch(offender, { code: 'tool_contention', message: TOOL_CONTENTION_MESSAGE }));
       dispositions.set(offender, { id: offender, line, status: 'needs_planning', reason: { code: 'tool_contention', message: TOOL_CONTENTION_MESSAGE } });
-      let outcome: GapOutcome = { kind: 'none' };
-      if (!queueOnly) outcome = placeTaskInLineGaps(env, task, toolGapHooks(occ, tools, line));
+      const outcome: GapOutcome = placeTaskInLineGaps(env, task, toolGapHooks(occ, tools, line));
       changed = true;
       if (outcome.kind === 'placed') {
         patches.set(offender, outcome.patch);
@@ -7298,70 +7506,115 @@ export function resolveToolOverflow(
         const item = toolItemFor(ctx, stat, occ.runNowMs, { ...task, ...outcome.patch.changes } as NimbusTask);
         if (item) toolOccAdd(occ, item);
         settled.add(offender);
-        moved.push({
-          orderId: offender, tool: cluster.tool, fromStart: toolIso(before.start_date), fromEnd: toolIso(before.end_date),
-          toStart: toolIso(outcome.patch.changes.start_date) ?? '', toEnd: toolIso(outcome.patch.changes.end_date) ?? '',
-        });
+        recordMove(offender, cluster.tool, outcome.patch);
         continue;
       }
-      const incomplete = queueOnly || outcome.kind === 'incomplete';
-      if (incomplete) complete = false;
-      const zero = [...tools].sort().find(tool => ctx.capacityFor(ctx.plant, tool).available <= 0);
-      const tool = zero ?? cluster.tool;
-      const available = ctx.capacityFor(ctx.plant, tool).available;
-      const holders = toolHoldersDetail(cluster, offender);
-      const reason = toolQueueReason(zero ? 'tool_unavailable' : 'tool_contention', tool, available, holders, incomplete);
-      patches.set(offender, toolQueuePatch(offender, reason));
-      dispositions.set(offender, { id: offender, line, status: 'needs_planning', reason });
-      blocked.push({ orderId: offender, tool, available, inUse: zero ? 0 : cluster.inUse, holderIds: holders });
-    }
-    // RECOVERY: the loop above decides an order's fate against the occupancy of its moment, and a later step can vacate
-    // a slot an earlier queued order needed (O1 waited for O3, then O3 itself had to give way to a protected holder).
-    // Re-offer every pass-queued order, most urgent first, to the gaps of the FINAL occupancy until nothing changes:
-    // each success un-queues one order (a finite, strictly decreasing count) and never re-creates overflow (tool-free
-    // windows + envelope check), so the queued orders that remain really have no legal tool-free slot.
-    if (!queueOnly && complete) {
-      let progressed = true;
-      while (progressed && !expired()) {
-        progressed = false;
-        const retry = blocked.filter(entry => dispositions.get(entry.orderId)?.status === 'needs_planning'
-          && patches.get(entry.orderId)?.changes.planning_reason?.code === 'tool_contention')
-          .sort((a, b) => (rank.get(a.orderId) ?? 0) - (rank.get(b.orderId) ?? 0) || ordinalCompare(a.orderId, b.orderId));
-        for (const entry of retry) {
-          const task = mutableById.get(entry.orderId)!;
-          const line = String(task.MACHINE);
-          const outcome = placeTaskInLineGaps(env, task, toolGapHooks(occ, stat.byId.get(entry.orderId)?.tools ?? [], line));
-          if (outcome.kind === 'incomplete') { complete = false; break; }
-          if (outcome.kind !== 'placed') continue;
-          patches.set(entry.orderId, outcome.patch);
-          dispositions.set(entry.orderId, outcome.disposition);
-          const item = toolItemFor(ctx, stat, occ.runNowMs, { ...task, ...outcome.patch.changes } as NimbusTask);
-          if (item) toolOccAdd(occ, item);
-          blocked.splice(blocked.indexOf(entry), 1);
-          const was = beforeDates.get(entry.orderId);
-          moved.push({
-            orderId: entry.orderId, tool: entry.tool, fromStart: was?.start ?? null, fromEnd: was?.end ?? null,
-            toStart: toolIso(outcome.patch.changes.start_date) ?? '', toEnd: toolIso(outcome.patch.changes.end_date) ?? '',
-          });
-          progressed = true;
-          break;
-        }
-        if (!complete) break;
-      }
+      if (outcome.kind === 'incomplete') complete = false;
+      queueOrder(offender, tools, cluster, toolHoldersDetail(cluster, offender), outcome.kind === 'incomplete');
     }
   }
-  const prior = candidate.toolPass;
-  const toolPass = { complete: complete && prior?.complete !== false, elapsedMs: (prior?.elapsedMs ?? 0) + Math.max(0, bounds.clock() - started) };
-  let result: CandidateResult = {
-    ...candidate,
-    ...(changed ? { patches: [...patches.values()], dispositions: [...dispositions.values()] } : {}),
-    toolPass,
-    toolBlocked: [...(candidate.toolBlocked ?? []), ...blocked],
-    toolMoved: [...(candidate.toolMoved ?? []), ...moved],
+
+  /** Budget ran out with queued tool orders still waiting for a slot: say so on the orders this pass queued. */
+  const markIncomplete = (): void => {
+    complete = false;
+    for (const entry of blocked) {
+      const reason = patches.get(entry.orderId)?.changes.planning_reason as { code?: string; tool_id?: string; available?: number; holders?: string[]; incomplete?: boolean } | null | undefined;
+      if (dispositions.get(entry.orderId)?.status !== 'needs_planning' || reason?.code !== 'tool_contention' || reason.incomplete) continue;
+      const next = toolQueueReason('tool_contention', String(reason.tool_id ?? entry.tool), Number(reason.available ?? entry.available), reason.holders ?? [], true);
+      patches.set(entry.orderId, toolQueuePatch(entry.orderId, next));
+      dispositions.set(entry.orderId, { id: entry.orderId, line: String(mutableById.get(entry.orderId)?.MACHINE ?? ''), status: 'needs_planning', reason: next });
+      changed = true;
+    }
   };
+
+  // RECOVERY: a step decides an order's fate against the occupancy of its moment, and a later step (or the repair
+  // cascade) can vacate a slot an earlier queued order needed. Re-offer every tool_contention order the candidate holds
+  // (this pass's AND those an earlier run of the pass left), most urgent first, to the gaps of the FINAL occupancy until
+  // nothing changes: each success un-queues one order (a finite, strictly decreasing count) and never re-creates overflow
+  // (tool-free windows + envelope check), so the queued orders that remain really have no legal tool-free slot.
+  const recover = (): boolean => {
+    if (degraded || !complete) return false;
+    let placedAny = false;
+    for (;;) {
+      const retry = [...dispositions.values()]
+        .filter(d => d.status === 'needs_planning' && d.reason?.code === 'tool_contention' && mutableIds.has(d.id))
+        .map(d => d.id)
+        .sort((a, b) => (rank().get(a) ?? 0) - (rank().get(b) ?? 0) || ordinalCompare(a, b));
+      if (!retry.length) return placedAny;
+      if (expired()) { markIncomplete(); return placedAny; }
+      let progressed = false;
+      for (const id of retry) {
+        const task = mutableById.get(id)!;
+        const line = String(task.MACHINE);
+        const outcome = placeTaskInLineGaps(env, task, toolGapHooks(occ, stat.byId.get(id)?.tools ?? [], line));
+        if (outcome.kind === 'incomplete') { markIncomplete(); return placedAny; }
+        if (outcome.kind !== 'placed') continue;
+        const queuedReason = patches.get(id)?.changes.planning_reason as { tool_id?: string } | null | undefined;
+        patches.set(id, outcome.patch);
+        dispositions.set(id, outcome.disposition);
+        const item = toolItemFor(ctx, stat, occ.runNowMs, { ...task, ...outcome.patch.changes } as NimbusTask);
+        if (item) toolOccAdd(occ, item);
+        const entry = blocked.find(b => b.orderId === id);
+        if (entry) blocked.splice(blocked.indexOf(entry), 1);
+        recordMove(id, entry?.tool ?? String(queuedReason?.tool_id ?? ''), outcome.patch);
+        progressed = true; placedAny = true; changed = true;
+        break;
+      }
+      if (!progressed) return placedAny;
+    }
+  };
+  recover();
+
+  const assemble = (base: CandidateResult): CandidateResult => ({
+    ...base,
+    ...(changed ? { patches: [...patches.values()], dispositions: [...dispositions.values()] } : {}),
+    toolPass: { complete: complete && candidate.toolPass?.complete !== false, elapsedMs: (candidate.toolPass?.elapsedMs ?? 0) + Math.max(0, bounds.clock() - started) },
+    toolBlocked: mergeToolBlocked(base.toolBlocked, blocked),
+    toolMoved: mergeToolMoved(base.toolMoved, moved),
+  });
+  /** Orders the repair cascade queued (they were scheduled before it) on the line of an order this pass moved or queued. */
+  const cascadeOf = (after: CandidateResult, before: ReadonlyMap<string, PlanningDisposition>): ToolBlockedEntry[] => {
+    const causes = new Map<string, string>();                       // order id -> tool, for every order this pass moved or queued
+    for (const entry of moved) causes.set(entry.orderId, entry.tool);
+    for (const entry of blocked) causes.set(entry.orderId, entry.tool);
+    const out: ToolBlockedEntry[] = [];
+    for (const d of after.dispositions ?? []) {
+      if (d.status !== 'needs_planning' || before.get(d.id)?.status !== 'scheduled' || !mutableIds.has(d.id) || blocked.some(b => b.orderId === d.id)) continue;
+      const row = { ...originalById.get(d.id)!, ...patches.get(d.id)?.changes } as NimbusTask;
+      const startMs = +(timestamp(row.start_date) ?? 0);
+      const onLine = [...causes.keys()].filter(id => id !== d.id && String(mutableById.get(id)?.MACHINE) === d.line).sort(ordinalCompare);
+      if (!onLine.length && !causes.has(d.id)) continue;
+      if (!onLine.length) onLine.push(d.id);
+      // The cause is the order whose ORIGINAL slot ended last at or before this order's start; else the first on the line.
+      let cause = onLine[0]; let best = -Infinity;
+      for (const id of onLine) {
+        const end = +(timestamp((beforeDates.get(id) ?? originalDates(id)).end) ?? -Infinity);
+        if (end <= startMs && end > best) { best = end; cause = id; }
+      }
+      const tool = causes.get(cause) ?? '';
+      out.push({ orderId: d.id, tool, available: ctx.capacityFor(ctx.plant, tool).available, inUse: 0, holderIds: [cause], cause: 'cascade' });
+    }
+    return out;
+  };
+
   // The old successor of a moved or queued order may now need a longer (or an unrecorded) setup: the existing repair
   // cascade handles that exactly as it does for any queued order. It also refreshes `validationFindings`.
-  result = repairCandidate(snapshot, bounds, result);
+  let statusBefore = new Map(dispositions);
+  let result = repairCandidate(snapshot, bounds, assemble(candidate));
+  for (let round = 0; round < 2; round++) {
+    const queuedByRepair = (result.dispositions ?? []).some(d => d.status === 'needs_planning' && statusBefore.get(d.id)?.status === 'scheduled');
+    if (!queuedByRepair) break;
+    blocked.push(...cascadeOf(result, statusBefore));
+    // Repair freed copies (the queued successor holds none) and may have opened a slot an earlier tool_contention order
+    // never saw: sync the working state to the repaired candidate and run recovery once more.
+    patches.clear(); for (const patch of result.patches) patches.set(patch.id, patch);
+    dispositions.clear(); for (const d of result.dispositions ?? []) dispositions.set(d.id, d);
+    occ = buildToolOcc(ctx, stat, bounds, patchedTaskView(snapshot.tasks, patches), reserve);
+    changed = true;
+    statusBefore = new Map(dispositions);
+    if (!recover()) { result = assemble(result); break; }
+    result = repairCandidate(snapshot, bounds, assemble(result));
+  }
   return reconcileToolOutcomes(result);
 }
 
@@ -7476,7 +7729,13 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
   }
   // Tool Inventory: plant-wide tool overflow (rule Hard + inventory loaded + not Remove Backlog; skipped by per-line trials).
   const toolCtx = bounds.skipToolOverflowFinding === true ? null : toolRuleContext(snapshot, bounds);
-  if (toolCtx) findings.push(...toolOverflowFindings(snapshot, bounds, candidate, taskScope, dispositions, toolCtx));
+  if (toolCtx) {
+    // Fail closed: a throw here (anything but the stale core, which the worker client answers) must not silently skip the
+    // rule. The candidate then carries an ERROR finding with a fixed, planner-visible message and Apply stays disabled.
+    try { findings.push(...toolOverflowFindings(snapshot, bounds, candidate, taskScope, dispositions, toolCtx)); }
+    catch (error) { if (isStaleCoreError(error)) throw error; findings.push(toolOverflowFailedFinding()); }
+    if (candidate.toolPass?.failed === true) findings.push(toolOverflowFailedFinding());
+  }
   // Setup occupies the calendar immediately before each productive start.
   const proposed = applyPatchesToSnapshot(occupancyTasks, candidate.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date) && timestamp(task.end_date));
   const lines = new Set(proposed.map(task => String(task.MACHINE)));
@@ -7585,7 +7844,9 @@ function retainCompatiblePlacements(
   // Tool Inventory: occupancy from the FULL plant task list (the per-line trials below are tool-blind).
   const toolCtx = toolRuleContext(snapshot, bounds);
   const toolStat = toolCtx ? toolStaticFor(snapshot, bounds, toolCtx) : null;
-  const toolOcc = toolCtx && toolStat ? buildToolOcc(toolCtx, toolStat, bounds, patchedTaskView(snapshot.tasks, patches)) : null;
+  const toolMutable = toolCtx ? new Set(eligibleTasks(snapshot, bounds).map(taskId)) : null;
+  const toolOcc = toolCtx && toolStat && toolMutable ? buildToolOcc(toolCtx, toolStat, bounds, patchedTaskView(snapshot.tasks, patches), { mutableIds: toolMutable, snapshot }) : null;
+  const toolDropped = new Map<string, { tools: string[]; line: string; start: Date; end: Date }>();
   const byLine = new Map<string, NimbusTask[]>();
   for (const item of evaluationTasks(snapshot, bounds)) {
     const line = String(item.MACHINE);
@@ -7605,7 +7866,8 @@ function retainCompatiblePlacements(
         const placement = additions.get(id)!;
         // A retained placement may not re-create tool overflow: its ENVELOPE must be tool-free against the whole plant.
         const toolAdd = toolOcc ? toolItemFor(toolOcc.ctx, toolStat!, toolOcc.runNowMs, { ...item, ...placement.changes } as NimbusTask) : null;
-        if (toolOcc && toolAdd && !toolGapHooks(toolOcc, toolAdd.tools, line).envelopeFits(toolAdd.start, toolAdd.end)) continue;
+        const toolBlockedHere = !!(toolOcc && toolAdd && !toolGapHooks(toolOcc, toolAdd.tools, line).envelopeFits(toolAdd.start, toolAdd.end));
+        if (toolBlockedHere && preferred.toolPass === undefined) continue;
         const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
         const proposal = {
           ...preferred,
@@ -7616,6 +7878,11 @@ function retainCompatiblePlacements(
           }),
         };
         const errors = validateCandidate(localSnapshot, localBounds, proposal).filter(f => f.severity === 'error');
+        if (toolBlockedHere) {
+          // The incumbent slot is dropped for tooling alone when nothing else rejects it: report it as a tool queue below.
+          if (!errors.length && toolAdd) toolDropped.set(id, { tools: toolAdd.tools, line, start: toolAdd.start, end: toolAdd.end });
+          continue;
+        }
         if (!errors.length) {
           patches.set(id, placement); dispositions.set(id, disposition); progressed = true;
           if (toolOcc && toolAdd) toolOccAdd(toolOcc, toolAdd);
@@ -7628,7 +7895,20 @@ function retainCompatiblePlacements(
       pending = retry;
     }
   }
-  const result = { ...preferred, patches: [...patches.values()], dispositions: [...dispositions.values()] };
+  const droppedBlocked: ToolBlockedEntry[] = [];
+  if (toolOcc && toolDropped.size) {
+    // Decision 7: an order whose only obstacle was a tool is a tool queue (reason + toolBlocked), whatever reason it carried.
+    for (const [id, info] of toolDropped) {
+      if (dispositions.get(id)?.status !== 'needs_planning' || isToolReasonCode(dispositions.get(id)?.reason?.code)) continue;
+      const detail = toolContentionDetail(toolOcc, info.tools, info.line, info.start, info.end);
+      const reason = toolQueueReason('tool_contention', detail.tool, detail.available, detail.holders, false);
+      patches.set(id, toolQueuePatch(id, reason));
+      dispositions.set(id, { id, line: info.line, status: 'needs_planning', reason });
+      droppedBlocked.push({ orderId: id, tool: detail.tool, available: detail.available, inUse: detail.inUse, holderIds: detail.holders });
+    }
+  }
+  const result = { ...preferred, patches: [...patches.values()], dispositions: [...dispositions.values()],
+    ...(droppedBlocked.length ? { toolBlocked: mergeToolBlocked(preferred.toolBlocked, droppedBlocked) } : {}) };
   return { ...result, validationFindings: validateCandidate(snapshot, bounds, result) };
 }
 
@@ -7921,14 +8201,27 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
   const lineIds = new Set(peers.map(taskId));
   const definition = bounds.setup.definition;
   const state = (item: NimbusTask): SetupStateKey | null => definition ? orderState(bounds, item, definition) : null;
-  const accepted = applyPatchesToSnapshot(peers, [...patches.values()]).filter(item => {
+  // A shallow patched view of THIS line only (the walk reads fields; it never mutates, never needs the deep copies).
+  const placedOnLine = peers.map(peer => { const patch = patches.get(taskId(peer)); return patch ? { ...peer, ...patch.changes } as NimbusTask : peer; }).filter(item => {
     const start = timestamp(item.start_date);
     const end = timestamp(item.end_date);
     return dispositions.get(taskId(item))?.status !== 'needs_planning' && start && end && end > start;
-  }).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
+  });
+  const byStart = (a: NimbusTask, b: NimbusTask): number => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b));
+  // Tool walks only: a SPLIT order reserves its SEGMENTS, not its whole envelope, so another order may take the idle stretch
+  // between two of its segments (the validator allows it; the historical walk, kept for Off, reserves the envelope).
+  const accepted = (hooks ? placedOnLine.flatMap(item => {
+    const pieces = (item.scheduleSegments ?? []).flatMap(segment => {
+      const a = timestamp(segment.startDate); const b = timestamp(segment.endDate);
+      return a && b && b > a ? [{ ...item, start_date: a, end_date: b, scheduleSegments: [] } as NimbusTask] : [];
+    });
+    return pieces.length > 1 ? pieces : [item];
+  }) : placedOnLine).sort(byStart);
   if (!env.availability.has(line)) env.availability.set(line, freeIntervalsFor(snapshot, line, bounds.setup.plant, bounds.now, bounds.horizonEnd, bounds.runContext));
   const free = env.availability.get(line)!;
-  const transition = (predecessor: NimbusTask | null, successor: NimbusTask): number | null => {
+  // `relaxExclude` (tool walks only, a PROTECTED successor): an unrecorded transition under excludeFromSearch is a warning for a
+  // protected order in the validator, so the tool walk charges it like any unresolved transition instead of refusing the gap.
+  const transition = (predecessor: NimbusTask | null, successor: NimbusTask, relaxExclude = false): number | null => {
     const from = predecessor ? state(predecessor) : definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
     const to = state(successor);
     if (definition && inactiveOverrideForTransition(bounds, line, from, to, predecessor ? taskId(predecessor) : null, taskId(successor), lineIds, true)) return null;
@@ -7944,9 +8237,13 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
       predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(successor),
       plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides,
       index: bounds.runContext?.resolutionIndex ?? undefined });
-    if (!resolution.covered && bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch') return null;
+    if (!resolution.covered && bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch' && !relaxExclude) return null;
     return chargedSetupMinutes(bounds.runContext, resolution, true);
   };
+  // Tool walks make a SECOND pass that relaxes the setup after a PROTECTED successor (the validator only warns about it for a
+  // protected order): the strict pass runs first, so a placement that was legal before is never replaced by a relaxed one.
+  const anyProtectedNext = !!hooks && accepted.some(item => taskIsEvaluationProtected(snapshot, bounds, item));
+  for (const relax of anyProtectedNext ? [false, true] : [false]) {
   let cursor = +bounds.now;
   let predecessor: NimbusTask | null = null;
   for (let index = 0; index <= accepted.length; index++) {
@@ -7955,12 +8252,13 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
     const gapEnd = Math.min(+bounds.horizonEnd, next ? +timestamp(next.start_date)! : Infinity);
     const floor = Math.max(cursor, +(notBeforeFor(bounds, task) ?? bounds.now));
     const incoming = gapEnd > floor ? transition(predecessor, task) : null;
-    const outgoing = next && incoming !== null ? transition(task, next) : 0;
+    const relaxNext = relax && !!next && taskIsEvaluationProtected(snapshot, bounds, next);
+    const outgoing = next && incoming !== null ? transition(task, next, relaxNext) : 0;
     if (incoming !== null && outgoing !== null) {
       const nextStart = next ? +timestamp(next.start_date)! : gapEnd;
       const setupStart = nextStart - outgoing * 60000;
       const ceiling = Math.min(gapEnd, setupStart, +(notAfterFor(bounds, task) ?? bounds.horizonEnd));
-      const outgoingFits = !next || outgoing === 0 || (
+      const outgoingFits = !next || outgoing === 0 || relaxNext || (
         setupStart >= +(notBeforeFor(bounds, next) ?? bounds.now)
         && coversInterval(nextStart > +bounds.horizonEnd
           ? freeIntervalsFor(snapshot, line, bounds.setup.plant, new Date(setupStart), new Date(nextStart), bounds.runContext) : free,
@@ -8014,6 +8312,7 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
       predecessor = next;
     }
   }
+  }
   return { kind: 'none' };
 }
 
@@ -8037,9 +8336,10 @@ export function fillPlanningGaps(
   const dispositions = new Map(candidate.dispositions?.map(d => [d.id, d]));
   const pending = urgencyOrder(snapshot, bounds, '', tasks).filter(task =>
     dispositions.get(taskId(task))?.status === 'needs_planning' && !planningDefect(snapshot, bounds, task)
-    // Tool Inventory: an order the overflow pass queued (no tool-free gap on its line) is final: re-walking the same
-    // gaps cannot succeed and must not relabel its structured tool reason.
-    && !(toolCtx && isToolReasonCode(dispositions.get(taskId(task))?.reason?.code)));
+    // Tool Inventory: a tool_unavailable order is final (no copy exists). A tool_contention order IS walked again (with the
+    // tool windows): retain / this walk may have labelled it for tooling before a later placement vacated its slot, and the
+    // walk is the same one the pass's recovery makes; if it still fits nowhere it keeps its structured reason (below).
+    && !(toolCtx && dispositions.get(taskId(task))?.reason?.code === 'tool_unavailable'));
   if (!pending.length) {
     // A completed gap check still needs the same final-state accounting pass
     // as a run that inserted work. The primary candidate may have emitted
@@ -8069,7 +8369,7 @@ export function fillPlanningGaps(
   // Do not try to repair an internally invalid proposal by inserting more work.
   const valid = !validateCandidate(snapshot, bounds, candidate).some(f => f.severity === 'error');
   // Tool Inventory: occupancy from the FULL plant task list; every insertion must be tool-free (see placeTaskInLineGaps).
-  const toolOcc = toolCtx && toolStat ? buildToolOcc(toolCtx, toolStat, bounds, patchedTaskView(snapshot.tasks, patches)) : null;
+  const toolOcc = toolCtx && toolStat ? buildToolOcc(toolCtx, toolStat, bounds, patchedTaskView(snapshot.tasks, patches), { mutableIds: new Set(tasks.map(taskId)), snapshot }) : null;
   while (valid && !expired()) {
     const task = pending.find(item => dispositions.get(taskId(item))?.status === 'needs_planning'
       && checked.get(taskId(item)) !== (revision.get(String(item.MACHINE)) ?? 0));
@@ -8089,11 +8389,28 @@ export function fillPlanningGaps(
     checked.set(id, revision.get(line) ?? 0);
   }
   let unchecked = 0;
+  const toolQueued: ToolBlockedEntry[] = [];
   for (const task of pending) {
     const id = taskId(task); const line = String(task.MACHINE);
     if (dispositions.get(id)?.status !== 'needs_planning') continue;
     const complete = checked.get(id) === (revision.get(line) ?? 0);
     if (!complete) unchecked++;
+    const toolHeld = toolCtx && dispositions.get(id)?.reason?.code === 'tool_contention';
+    if (toolHeld) continue;                                   // still no tool-free slot: the structured tool reason stays
+    if (complete && toolOcc && toolStat!.byId.has(id)) {
+      // Decision 7: a COMPLETED hooked walk found nothing; if the same walk WITHOUT the tool windows would place the order,
+      // the tools alone kept it out. Pure probe (no state change); it must not hit the soft budget a second time.
+      const probe = placeTaskInLineGaps({ ...env, expired: () => false }, task);
+      if (probe.kind === 'placed') {
+        const detail = toolContentionDetail(toolOcc, toolStat!.byId.get(id)!.tools, line,
+          timestamp(probe.patch.changes.start_date), timestamp(probe.patch.changes.end_date));
+        const toolReason = toolQueueReason('tool_contention', detail.tool, detail.available, detail.holders, false);
+        patches.set(id, toolQueuePatch(id, toolReason));
+        dispositions.set(id, { id, line, status: 'needs_planning', reason: toolReason });
+        toolQueued.push({ orderId: id, tool: detail.tool, available: detail.available, inUse: detail.inUse, holderIds: detail.holders });
+        continue;
+      }
+    }
     // A completed capacity check that still finds nothing is NOT the real story for an order
     // the primary search refused because its setup transition is unrecorded (N8
     // excludeFromSearch) — keep that actionable reason instead of the generic "No slot found".
@@ -8113,6 +8430,7 @@ export function fillPlanningGaps(
     dispositions.set(id, { id, line, status: 'needs_planning', reason });
   }
   const result: CandidateResult = { ...candidate, patches: [...patches.values()], dispositions: [...dispositions.values()],
+    ...(toolQueued.length ? { toolBlocked: mergeToolBlocked(candidate.toolBlocked, toolQueued) } : {}),
     unchangedLines: candidate.unchangedLines.filter(line => !revision.has(line)),
     gapFill: { complete: valid && unchecked === 0, placed, unchecked, runtimeMs: bounds.clock() - started } };
   result.validationFindings = validateCandidate(snapshot, bounds, result);
