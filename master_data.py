@@ -2245,7 +2245,7 @@ def set_plant_unknown_setup_policy(subnetwork: str, plant: str, policy: str, def
 
 
 def set_plant_tooling_rule(subnetwork: str, plant: str, rule: str, user_email: str | None = None) -> dict:
-    """Persist the per-plant "Treat Tooling as Hard Constraint" Order Rule into the
+    """Persist the per-plant "PRT's as Hard Constraint" Order Rule into the
     plants.setup_policy_config JSONB sidecar (same merge as set_plant_unknown_setup_policy, so the
     other keys survive). A strict string enum -- exactly 'off' or 'hard', no trimming or case
     folding -- so a named middle mode can be added later without a migration. 'off' is today's

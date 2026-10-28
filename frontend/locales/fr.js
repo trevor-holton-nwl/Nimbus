@@ -2992,7 +2992,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.alert_open_tool_inventory': 'Ouvrir l\'inventaire des outils',
   'am.act_open_tool_inventory': 'Ouvrir l\'inventaire des outils',
   // Tool Inventory Wave 5: tooling rule control, Optimize UX, planning reasons, Inspector, Slot
-  'ui.tooling_rule_title': 'Traiter l\'outillage comme contrainte stricte',
+  'ui.tooling_rule_title': 'Traiter les PRT comme une contrainte stricte',
   'ui.tooling_rule_off': 'Désactivé : ignore le nombre d\'outils',
   'ui.tooling_rule_hard': 'Strict : respecter les exemplaires libres',
   'ui.tooling_rule_help': 'Tool 1 et Tool 2 sont les identifiants d\'outil de chaque commande. Un outil est un type dont l\'usine possède plusieurs exemplaires interchangeables ; les quantités se trouvent dans Données de base: Inventaire des outils. Les exemplaires disponibles sont le total moins ceux hors service, et un outil sans ligne compte pour 1 exemplaire.',

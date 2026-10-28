@@ -3234,7 +3234,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.alert_open_tool_inventory': 'Open tool inventory',
   'am.act_open_tool_inventory': 'Open tool inventory',
   // Tool Inventory Wave 5: tooling rule control, Optimize UX, planning reasons, Inspector, Slot
-  'ui.tooling_rule_title': 'Treat Tooling as Hard Constraint',
+  'ui.tooling_rule_title': 'PRT\'s as Hard Constraint',
   'ui.tooling_rule_off': 'Off: optimizer ignores tool counts',
   'ui.tooling_rule_hard': 'Hard: never exceed available copies',
   'ui.tooling_rule_help': 'Tool 1 and Tool 2 are the tooling ids on each order. A tool is a type, and the plant owns several interchangeable copies of it; the counts live in Master Data: Tool Inventory. Available copies are the total minus the copies out of service, and a tool with no row counts as 1 copy.',

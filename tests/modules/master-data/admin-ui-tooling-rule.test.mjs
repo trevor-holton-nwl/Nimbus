@@ -1,4 +1,4 @@
-// Tool Inventory Wave 5: the Order Rules "Treat Tooling as Hard Constraint" drop-down in System Settings > Scheduling Rules.
+// Tool Inventory Wave 5: the Order Rules "PRT's as Hard Constraint" drop-down in System Settings > Scheduling Rules.
 // Rendered only while TOOLING_RULE_CONTROL_READY is true (shipped true); planner-level (no isAdmin gate); saves through
 // POST /master-data/plants/{plant}/tooling-rule and patches the LIVE Store row without rebuilding the pane.
 import { test } from 'node:test';

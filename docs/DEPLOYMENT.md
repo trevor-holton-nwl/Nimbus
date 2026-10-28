@@ -122,7 +122,7 @@ Verify after the roll (cache-bust every request with a random query parameter an
 
 1. **Ledger**: `SELECT filename FROM migration_files_applied WHERE filename = '2026-10-27-1-tool-inventory.sql';` returns the file.
 2. **Table and route**: `GET /master-data/tool_inventory?plant=<plant>` returns 200 with column metadata (an empty row list is correct before seeding).
-3. **UI**: Master Data > Tool Inventory opens and Template downloads; System Settings > Scheduling Rules > Order Rules shows "Treat Tooling as Hard Constraint" set to Off.
+3. **UI**: Master Data > Tool Inventory opens and Template downloads; System Settings > Scheduling Rules > Order Rules shows "PRT's as Hard Constraint" set to Off.
 4. **Alerts**: with an empty inventory every tool counts as one copy, so alert counts match the previous release until the inventory is seeded.
 
 Pilot rollout: (1) seed the plant's inventory from the Excel template (Master Data > Tool Inventory > Template, fill copies, Upload, review, Apply); (2) watch alert counts for a day, since a tool with several copies now raises fewer conflicts and a split order keeping its tool across the weekend can raise new ones; (3) enable the rule (Hard) on ONE plant only; (4) run Optimize with the preview and read the Tool-blocked panel and the Needs Planning reasons before Apply; (5) widen to other plants one at a time.

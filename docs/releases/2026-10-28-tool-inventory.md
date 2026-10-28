@@ -12,7 +12,7 @@ For planners. Status: built on `feature/tool-inventory`, not yet deployed.
 
 **New page: Master Data > Tool Inventory.** Enter how many copies of each tool your plant has (and how many are out of service). Use Template to download a prefilled Excel file, fill it in, then Upload; a review screen shows what is new, changed and rejected before anything is saved. Tool conflict alerts have an "Open tool inventory" link that jumps to the tool.
 
-**New Order Rule: "Treat Tooling as Hard Constraint".** Off by default, and planners can change it for their plant (System Settings > Scheduling Rules > Order Rules). When it is Hard, an Optimize run makes sure no tool is used by more machines than it has copies. The least urgent order is moved into a free gap, or sent to Needs Planning with the reason "Tool contention". The preview shows a Tool-blocked panel and asks you to confirm before Apply. To go back, set the rule to Off; nothing else needs undoing.
+**New Order Rule: "PRT's as Hard Constraint".** Off by default, and planners can change it for their plant (System Settings > Scheduling Rules > Order Rules). When it is Hard, an Optimize run makes sure no tool is used by more machines than it has copies. The least urgent order is moved into a free gap, or sent to Needs Planning with the reason "Tool contention". The preview shows a Tool-blocked panel and asks you to confirm before Apply. To go back, set the rule to Off; nothing else needs undoing.
 
 **Apply what still fits now resolves longer chains.** On all plants, if some orders in a run were edited by someone else, the partial Apply now works through chains of up to 7 dependent drops instead of refusing.
 

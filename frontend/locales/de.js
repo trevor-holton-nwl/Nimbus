@@ -3031,7 +3031,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.alert_open_tool_inventory': 'Werkzeugbestand öffnen',
   'am.act_open_tool_inventory': 'Werkzeugbestand öffnen',
   // Tool Inventory Wave 5: tooling rule control, Optimize UX, planning reasons, Inspector, Slot
-  'ui.tooling_rule_title': 'Werkzeuge als harte Einschränkung behandeln',
+  'ui.tooling_rule_title': 'PRTs als harte Einschränkung behandeln',
   'ui.tooling_rule_off': 'Aus: Optimierer ignoriert Werkzeugzahlen',
   'ui.tooling_rule_hard': 'Hart: Verfügbare Exemplare nie überschreiten',
   'ui.tooling_rule_help': 'Tool 1 und Tool 2 sind die Werkzeug-IDs eines Auftrags. Ein Werkzeug ist ein Typ, von dem das Werk mehrere austauschbare Exemplare besitzt; die Anzahlen stehen unter Stammdaten: Werkzeugbestand. Verfügbar ist der Gesamtbestand minus die außer Betrieb genommenen Exemplare, und ein Werkzeug ohne Zeile zählt als 1 Exemplar.',

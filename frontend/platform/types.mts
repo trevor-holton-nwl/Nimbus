@@ -336,7 +336,7 @@ export interface NimbusMasterPlant {
   setup_policy_config?: {
     unknownSetupPolicy?: UnknownSetupPolicy;
     unknownSetupDefaultMinutes?: number;
-    /** Treat Tooling as Hard Constraint (per plant; absent = 'off'). */
+    /** PRT's as Hard Constraint (per plant; absent = 'off'). */
     toolingRule?: 'off' | 'hard';
     version?: number;
     [key: string]: unknown;

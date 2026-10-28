@@ -787,7 +787,7 @@ def md_set_plant_unknown_setup_policy(plant: str, request: Request, body: dict =
 def md_set_plant_tooling_rule(plant: str, request: Request, body: PlantToolingRuleBody,
                               email: str = Depends(auth.require_authenticated),
                               allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Per-plant "Treat Tooling as Hard Constraint" Order Rule: off | hard, stored in the
+    """Per-plant "PRT's as Hard Constraint" Order Rule: off | hard, stored in the
     plants.setup_policy_config JSONB sidecar.
 
     Deliberately PLANNER-level (require_authenticated + plant scoping), NOT require_admin like

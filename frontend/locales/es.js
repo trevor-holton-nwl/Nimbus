@@ -2992,7 +2992,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.alert_open_tool_inventory': 'Abrir inventario de herramientas',
   'am.act_open_tool_inventory': 'Abrir inventario de herramientas',
   // Tool Inventory Wave 5: tooling rule control, Optimize UX, planning reasons, Inspector, Slot
-  'ui.tooling_rule_title': 'Tratar las herramientas como restricción estricta',
+  'ui.tooling_rule_title': 'Tratar los PRT como una restricción estricta',
   'ui.tooling_rule_off': 'Desactivado: ignora el número de herramientas',
   'ui.tooling_rule_hard': 'Estricto: nunca superar las copias libres',
   'ui.tooling_rule_help': 'Tool 1 y Tool 2 son los identificadores de herramienta de cada pedido. Una herramienta es un tipo y la planta tiene varias copias intercambiables; las cantidades están en Datos maestros: Inventario de herramientas. Las copias disponibles son el total menos las que están fuera de servicio, y una herramienta sin fila cuenta como 1 copia.',

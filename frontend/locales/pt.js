@@ -2991,7 +2991,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.alert_open_tool_inventory': 'Abrir inventário de ferramentas',
   'am.act_open_tool_inventory': 'Abrir inventário de ferramentas',
   // Tool Inventory Wave 5: tooling rule control, Optimize UX, planning reasons, Inspector, Slot
-  'ui.tooling_rule_title': 'Tratar ferramentas como restrição rígida',
+  'ui.tooling_rule_title': 'Tratar os PRT como uma restrição rígida',
   'ui.tooling_rule_off': 'Desligado: ignora a quantidade de ferramentas',
   'ui.tooling_rule_hard': 'Rígido: nunca exceder as cópias livres',
   'ui.tooling_rule_help': 'Tool 1 e Tool 2 são os identificadores de ferramenta de cada pedido. Uma ferramenta é um tipo e a fábrica tem várias cópias intercambiáveis; as quantidades ficam em Dados mestres: Inventário de ferramentas. As cópias disponíveis são o total menos as fora de serviço, e uma ferramenta sem linha conta como 1 cópia.',

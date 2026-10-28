@@ -128,7 +128,7 @@ class HorizonsResponse(BaseModel):
     # calendar when it differs from the last one it hydrated. Optional and additive: None for an unknown plant.
     calendar_version: str | None = None
     # Tool Inventory freshness (additive): "<row count>|<max updated_at ISO>" (None when the plant has no rows or
-    # the table is missing) and the plant's Treat Tooling as Hard Constraint rule. The tab re-fetches on change.
+    # the table is missing) and the plant's "PRT's as Hard Constraint" rule. The tab re-fetches on change.
     tool_inventory_version: str | None = None
     tooling_rule: Literal['off', 'hard'] = 'off'
 

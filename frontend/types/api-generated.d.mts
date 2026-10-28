@@ -2349,7 +2349,7 @@ export interface paths {
         put?: never;
         /**
          * Md Set Plant Tooling Rule
-         * @description Per-plant "Treat Tooling as Hard Constraint" Order Rule: off | hard, stored in the
+         * @description Per-plant "PRT's as Hard Constraint" Order Rule: off | hard, stored in the
          *     plants.setup_policy_config JSONB sidecar.
          *
          *     Deliberately PLANNER-level (require_authenticated + plant scoping), NOT require_admin like
