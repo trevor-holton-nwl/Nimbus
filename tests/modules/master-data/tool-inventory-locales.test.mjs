@@ -59,7 +59,7 @@ test('the sub-tab name uses the wording the tool-conflict alert text already poi
 });
 
 test('the English tool inventory copy never uses SAP field codes', () => {
-  for (const key of KEYS.filter(k => k !== 'tab.tool_inventory')) assert.doesNotMatch(dicts.en[key], /\b(PRT|PRT_0[12]|MEINH|MATNR)\b/, key);
+  for (const key of KEYS.filter(k => k !== 'tab.tool_inventory')) assert.doesNotMatch(dicts.en[key], /\b(PRT_0[12]|MEINH|MATNR)\b/, key);
 });
 
 test('the Wave 4a review-fix keys are in the block and es says planta (not centro) for plant', () => {

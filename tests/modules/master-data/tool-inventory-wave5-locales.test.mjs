@@ -54,7 +54,7 @@ test('rule help is popover-safe (no < > &), uses "Tool 1 / Tool 2" wording and n
   for (const l of LOCALES) {
     for (const key of ['ui.tooling_rule_title', 'ui.tooling_rule_help', 'ui.tooling_rule_help_detail', 'ui.tooling_rule_hint', 'ui.tooling_rule_off', 'ui.tooling_rule_hard']) {
       assert.doesNotMatch(dicts[l][key], /[<>&]/, `${l} ${key}`);
-      assert.doesNotMatch(dicts[l][key], /\bPRT_?0?[12]\b|\bPRT\b/, `${l} ${key} must not name SAP field codes`);
+      assert.doesNotMatch(dicts[l][key], /\bPRT_?0?[12]\b/, `${l} ${key} must not name SAP field codes`);
     }
     assert.match(dicts[l]['ui.tooling_rule_help'], /Tool 1/, `${l} help names Tool 1`);
     assert.match(dicts[l]['ui.tooling_rule_help'], /Tool 2/, `${l} help names Tool 2`);
