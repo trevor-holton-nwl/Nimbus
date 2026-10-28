@@ -46,18 +46,22 @@ async function fixture(t, { plant = 'A', rows = [row('T100', 3, 1, 'spare')], by
   };
   const handlers = [];     // [{ match(url, opts), respond(url, opts) }]
   t.mock.method(Util, 'fetchTraced', async (url, opts) => {
-    requests.push({ url, opts, body: opts?.body ? JSON.parse(opts.body) : undefined });
+    requests.push({ url, opts, body: typeof opts?.body === 'string' ? JSON.parse(opts.body) : undefined, form: opts?.body instanceof FormData ? opts.body : undefined });
     for (const h of handlers) if (h.match(url, opts)) return h.respond(url, opts);
     return respond({}, 404);
   });
   t.mock.method(Toast, 'show', (msg, type) => { toasts.push({ msg, type }); });
   t.mock.method(Modal, 'confirm', async opts => { confirms.push(opts); return typeof confirmAnswer === 'function' ? confirmAnswer(opts) : confirmAnswer; });
+  const modalCalls = [];
+  t.mock.method(Modal, 'open', id => { modalCalls.push(['open', id]); });
+  t.mock.method(Modal, 'close', id => { modalCalls.push(['close', id]); });
+  const docKeys = [];
   t.mock.method(Store, 'subscribe', fn => { listeners.add(fn); return () => listeners.delete(fn); });
   const refreshCalls = [];
   t.mock.method(Persistence, 'refreshToolInventory', async p => { refreshCalls.push(p); return true; });
   const originals = { document: globalThis.document, agGrid: globalThis.agGrid, requestAnimationFrame: globalThis.requestAnimationFrame, window: globalThis.window };
   Object.assign(globalThis, {
-    document: { getElementById: element, createElement: () => ({ setAttribute() {}, style: {} }), addEventListener() {} },
+    document: { getElementById: element, createElement: () => ({ setAttribute() {}, style: {} }), addEventListener(evt, fn) { if (evt === 'keydown') docKeys.push(fn); } },
     window: { __NIMBUS_LOCALES: { en: EN } }, requestAnimationFrame() {},
     agGrid: { createGrid(_el, opts) { createCount++; gridOptions = opts; gridRows = opts.rowData; opts.onGridReady({ api }); } },
   });
@@ -73,6 +77,8 @@ async function fixture(t, { plant = 'A', rows = [row('T100', 3, 1, 'spare')], by
   const TI = mod.ToolInventory;
   const seamCalls = [];
   mod._seams.refreshStoreMasterData = async (...args) => { seamCalls.push(args); return true; };
+  const saved = [];
+  mod._seams.saveBlob = (blob, name) => { saved.push({ blob, name }); };
   const emit = evt => { for (const fn of [...listeners]) fn(evt); };
   function setInventory(p, inv, extra = {}) {
     Store.setMasterData({ plants: [{ plant: p, ...extra }], lines: [], workcenters: [], tool_inventory: inv }, 'test');
@@ -94,9 +100,10 @@ async function fixture(t, { plant = 'A', rows = [row('T100', 3, 1, 'spare')], by
     return changed;
   }
   return {
-    TI, mod, element, toasts, confirms, requests, handlers, emit, listeners, seamCalls, refreshCalls, setInventory, selectPlant, edit, colDef,
+    TI, mod, element, toasts, modalCalls, docKeys, saved, confirms, requests, handlers, emit, listeners, seamCalls, refreshCalls, setInventory, selectPlant, edit, colDef,
     createCount: () => createCount, options: () => gridOptions, gridRows: () => gridRows, snap: () => TI._snapshot(),
     setConfirm: v => { confirmAnswer = v; },
+    click: id => { for (const fn of element(id).listeners.click ?? []) fn({}); },
     select: picked => { selected = picked; gridOptions.onSelectionChanged({}); },
   };
 }
@@ -799,4 +806,254 @@ test('perf: Used by over 10,000 loaded tasks renders well inside a generous boun
   const ms = performance.now() - t0;
   assert.ok(ms < 250, `render took ${ms.toFixed(1)} ms`);
   assert.equal(f.colDef('used_by').valueGetter({ data: f.snap().rows[0] }) > 0, true);
+});
+
+// ---- Wave 4b: Excel Template / Export / Upload with a review step --------------------------------------------------------------
+
+const settle = async () => { await new Promise(r => setImmediate(r)); };
+async function until(fn, label = 'condition') {
+  for (let i = 0; i < 300; i++) { if (fn()) return; await settle(); }
+  assert.fail(`timed out waiting for ${label}`);
+}
+const xlsxRes = (name, status = 200) => {
+  const res = { ok: status < 400, status, headers: new Headers(name ? { 'content-disposition': `attachment; filename="${name}"` } : {}), blob: async () => new Blob(['xlsx']), json: async () => ({}), text: async () => '' };
+  res.clone = () => res;
+  return res;
+};
+const dryBody = (over = {}) => ({
+  dry_run: true, counts: { new: 1, changed: 1, unchanged: 3, rejected: 0 },
+  new: [{ tool_id: 'T200', total_qty: 2, out_of_service_qty: 0, note: null }],
+  changed: [{ tool_id: 'T100', before: { total_qty: 3, out_of_service_qty: 1, note: 'spare' }, after: { total_qty: 4, out_of_service_qty: 1, note: 'spare' } }],
+  unchanged: ['A', 'B', 'C'], rejected: [], rows: 5, warnings: [], ...over,
+});
+const dryHandler = body => ({ match: u => u.includes('/upload?dry_run=1'), respond: () => respond(body) });
+const applyHandler = (body = { inserted: 1, updated: 1, rejected: 0, warnings: [], plants: ['A'] }, status = 200) =>
+  ({ match: u => u.includes('/upload?dry_run=0'), respond: () => respond(body, status) });
+const uploadReqs = f => f.requests.filter(r => r.url.includes('/upload'));
+const mkFile = (name = 'tools.xlsx') => new File(['x'], name);
+const reviewText = f => f.element('ti-review-body').innerHTML.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+const reviewOpened = f => f.modalCalls.some(c => c[0] === 'open' && c[1] === 'modal-tool-inventory-review');
+
+test('Template and Export download through fetchTraced with the Content-Disposition filename (sanitised), the plant URL and a toast on error', async t => {
+  const f = await fixture(t);
+  f.handlers.push({ match: u => u.endsWith('/template.xlsx'), respond: () => xlsxRes('tool inventory (A) template.xlsx') });
+  f.handlers.push({ match: u => u.endsWith('/export.xlsx'), respond: () => xlsxRes(null) });
+  f.click('ti-template');
+  await until(() => f.saved.length === 1, 'template');
+  assert.match(f.requests[0].url, /\/tool-inventory\/A\/template\.xlsx$/);
+  assert.equal(f.saved[0].name, 'tool_inventory_A_template.xlsx');
+  f.click('ti-export-xlsx');
+  await until(() => f.saved.length === 2, 'export');
+  assert.match(f.requests[1].url, /\/tool-inventory\/A\/export\.xlsx$/);
+  assert.equal(f.saved[1].name, 'tool-inventory-A.xlsx', 'fallback filename when the header is absent');
+  f.handlers.length = 0;
+  f.handlers.push({ match: u => u.endsWith('/export.xlsx'), respond: () => xlsxRes(null, 500) });
+  await f.TI._download('export');
+  assert.ok(f.toasts.some(x => x.type === 'error' && x.msg === Util.t('toast.export_failed', { msg: 'HTTP 500' })), JSON.stringify(f.toasts));
+  assert.equal(f.saved.length, 2);
+});
+
+test('filenameFromDisposition handles filename*, quotes, path characters and the fallback', async () => {
+  const { filenameFromDisposition: fn } = await import('../../../frontend/master-data/tool-inventory.mjs');
+  assert.equal(fn("attachment; filename*=UTF-8''tools%20A.xlsx", 'x.xlsx'), 'tools_A.xlsx');
+  assert.doesNotMatch(fn('attachment; filename=../../evil.xlsx', 'x.xlsx'), /[\\/]/);
+  assert.equal(fn(null, 'tool-inventory-A.xlsx'), 'tool-inventory-A.xlsx');
+});
+
+test('Upload while the grid has unsaved edits: Cancel on the discard confirm sends nothing and opens no picker; Discard clears the edits and opens it', async t => {
+  const f = await fixture(t);
+  let picked = 0;
+  f.element('ti-upload-input').click = () => { picked++; };
+  f.TI._addRow();
+  assert.ok(f.snap().dirty > 0);
+  f.setConfirm(false);
+  f.click('ti-upload');
+  await until(() => f.toasts.some(x => x.msg === Util.t('toast.tool_inventory_upload_dirty')), 'dirty toast');
+  assert.equal(picked, 0);
+  assert.equal(f.requests.length, 0);
+  f.setConfirm(true);
+  await f.TI._pickUpload();
+  assert.equal(picked, 1);
+  assert.equal(f.snap().dirty, 0, 'edits were discarded');
+});
+
+test('Upload: dry run is a multipart POST ?dry_run=1 (never dry_run=0), then the review lists counts, capped lists and the standing sentences; Cancel writes nothing', async t => {
+  const f = await fixture(t);
+  const changed = Array.from({ length: 200 }, (_, i) => ({ tool_id: `C${i}`, before: { total_qty: 1, out_of_service_qty: 0, note: null }, after: { total_qty: 2, out_of_service_qty: 0, note: null } }));
+  const rejected = [{ row: 7, tool_id: 'T9', error: 'Total Inventory must be a whole number' }];
+  f.handlers.push(dryHandler(dryBody({ counts: { new: 1, changed: 250, unchanged: 3, rejected: 1 }, changed, rejected, warnings: ['Header row guessed'] })));
+  const file = mkFile('inventory.xlsx');
+  const p = f.TI.uploadFile('A', file);
+  await until(() => reviewOpened(f), 'review modal');
+  assert.equal(uploadReqs(f).length, 1);
+  const r = uploadReqs(f)[0];
+  assert.match(r.url, /\/tool-inventory\/A\/upload\?dry_run=1$/);
+  assert.equal(r.opts.method, 'POST');
+  assert.equal(r.form.get('file').name, 'inventory.xlsx');
+  assert.equal(r.opts.headers, undefined, 'no explicit content-type: the browser sets the multipart boundary');
+  const text = reviewText(f);
+  assert.ok(text.includes('1 new, 250 changed, 3 unchanged, 1 rejected'), text);
+  assert.ok(text.includes('inventory.xlsx'));
+  assert.ok(text.includes('and 50 more'), 'changes capped at 200: 250 - 200');
+  assert.ok(text.includes('T200: Total Inventory 2, Out of Service 0'));
+  assert.ok(text.includes('Row 7: Total Inventory must be a whole number'));
+  assert.ok(text.includes('(T9)'));
+  assert.ok(text.includes('Header row guessed'));
+  assert.ok(text.includes('Rows missing from the file are left unchanged.'));
+  assert.ok(text.includes('Rejected rows will be skipped; the valid rows will still be saved.'));
+  assert.ok(f.element('ti-review-body').innerHTML.includes('role="alert"'), 'the rejected warning is announced');
+  assert.equal(f.element('ti-review-apply').textContent, 'Apply 251 changes');
+  assert.equal(f.element('ti-review-apply').disabled, false);
+  f.click('ti-review-cancel');
+  assert.equal(await p, false);
+  assert.equal(uploadReqs(f).length, 1, 'Cancel makes NO write');
+  assert.deepEqual(f.seamCalls, []);
+  assert.deepEqual(f.modalCalls.at(-1), ['close', 'modal-tool-inventory-review']);
+});
+
+test('Review: before -> after cells, no rejected warning at 0 rejected, Escape and the close button cancel', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody()));
+  let p = f.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(f), 'open');
+  const html = f.element('ti-review-body').innerHTML;
+  assert.ok(html.includes('3 <span class="ti-review-arrow"'), 'total 3 -> 4');
+  assert.ok(html.includes('<strong>4</strong>'));
+  assert.doesNotMatch(html, /Rejected rows will be skipped/);
+  assert.equal(f.element('ti-review-apply').textContent, 'Apply 2 changes');
+  for (const fn of f.docKeys) fn({ key: 'Escape', preventDefault() {} });
+  assert.equal(await p, false);
+  f.modalCalls.length = 0;
+  p = f.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(f), 'reopen');
+  f.click('ti-review-close');
+  assert.equal(await p, false);
+  assert.equal(uploadReqs(f).filter(r => r.url.includes('dry_run=0')).length, 0);
+});
+
+test('Review: Apply is disabled when nothing would change', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody({ counts: { new: 0, changed: 0, unchanged: 4, rejected: 0 }, new: [], changed: [] })));
+  const p = f.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(f), 'open');
+  assert.equal(f.element('ti-review-apply').disabled, true);
+  assert.equal(f.element('ti-review-apply').textContent, 'Apply 0 changes');
+  f.click('ti-review-apply');
+  await settle();
+  assert.equal(uploadReqs(f).length, 1, 'a click on the disabled Apply sends nothing');
+  f.click('ti-review-cancel');
+  await p;
+});
+
+test('Apply re-POSTs the SAME File with dry_run=0, toasts the summary, lists warnings, awaits the Store refresh and re-renders', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody()));
+  f.handlers.push(applyHandler({ inserted: 1, updated: 2, rejected: 1, warnings: [{ msg: 'Row 9 ignored' }, 'plain warning'], plants: ['A'] }));
+  const file = mkFile();
+  const p = f.TI.uploadFile('A', file);
+  await until(() => reviewOpened(f), 'open');
+  f.click('ti-review-apply');
+  assert.equal(await p, true);
+  const reqs = uploadReqs(f);
+  assert.equal(reqs.length, 2);
+  assert.match(reqs[1].url, /\/upload\?dry_run=0$/);
+  assert.equal(reqs[1].form.get('file').name, file.name, 'the same file is re-posted');
+  assert.equal(reqs[0].opts.body === reqs[1].opts.body, false, 'a fresh FormData per request');
+  assert.deepEqual(f.seamCalls, [['tool-inventory-save', 'tool_inventory']]);
+  const done = f.toasts.find(x => x.msg === Util.t('toast.tool_inventory_upload_done', { inserted: 1, updated: 2, rejected: 1 }));
+  assert.ok(done, JSON.stringify(f.toasts));
+  assert.equal(done.type, 'warn', 'rejected rows downgrade the toast');
+  const result = f.element('ti-upload-result');
+  assert.equal(result.hidden, false);
+  assert.ok(result.innerHTML.includes('Row 9 ignored') && result.innerHTML.includes('plain warning'), 'readable warnings block');
+});
+
+test('Apply also reuses the "N tool alerts cleared" toast', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody()), applyHandler());
+  Store._state.alerts = [{ type: 'tool-conflict' }, { type: 'tool-conflict' }, { type: 'tool-conflict' }];
+  f.mod._seams.refreshStoreMasterData = async () => {
+    Store._state.alerts = [{ type: 'tool-conflict' }];
+    f.emit({ type: 'master-data-changed', table: 'tool_inventory' });
+    f.emit({ type: 'alerts:change' });
+    return true;
+  };
+  const p = f.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(f), 'open');
+  f.click('ti-review-apply');
+  await p;
+  assert.ok(f.toasts.some(x => x.msg === Util.t('toast.tool_alerts_cleared', { n: 2 })), JSON.stringify(f.toasts));
+});
+
+test('upload failures are readable: 413 too large, 400 detail, 403 read-only; nothing is applied', async t => {
+  const f = await fixture(t);
+  f.handlers.push({ match: u => u.includes('dry_run=1'), respond: () => respond({ detail: 'file too big' }, 413) });
+  assert.equal(await f.TI.uploadFile('A', mkFile()), false);
+  assert.ok(f.toasts.some(x => x.msg === Util.t('toast.tool_inventory_upload_too_large')));
+  f.handlers.length = 0;
+  f.handlers.push({ match: u => u.includes('dry_run=1'), respond: () => respond({ detail: 'Unreadable workbook (.xls is not supported)' }, 400) });
+  assert.equal(await f.TI.uploadFile('A', mkFile()), false);
+  assert.ok(f.toasts.some(x => x.type === 'error' && x.msg.includes('Unreadable workbook')), JSON.stringify(f.toasts));
+  f.handlers.length = 0;
+  f.handlers.push({ match: u => u.includes('dry_run=1'), respond: () => respond({ detail: 'forbidden' }, 403) });
+  assert.equal(await f.TI.uploadFile('A', mkFile()), false);
+  assert.ok(f.toasts.some(x => x.msg === Util.t('toast.no_write_permission')));
+  assert.equal(f.snap().readOnly, true, '403 flips the grid read-only');
+  assert.equal(f.element('ti-upload').disabled, true);
+  assert.equal(reviewOpened(f), false);
+});
+
+test('an apply that fails after a good review (403) applies nothing and does not refresh the Store', async t => {
+  const g = await fixture(t);
+  g.handlers.push(dryHandler(dryBody()), applyHandler({ detail: 'x' }, 403));
+  const p = g.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(g), 'open');
+  g.click('ti-review-apply');
+  assert.equal(await p, false);
+  assert.deepEqual(g.seamCalls, [], 'no Store refresh after a failed apply');
+  assert.ok(g.toasts.some(x => x.msg === Util.t('toast.no_write_permission')));
+});
+
+test('Template / Export / Upload are disabled while a request is in flight; a second upload is refused; no upload in What-If', async t => {
+  const f = await fixture(t);
+  let release;
+  f.handlers.push({ match: u => u.includes('dry_run=1'), respond: () => new Promise(r => { release = () => r(respond(dryBody())); }) });
+  assert.equal(f.element('ti-upload').disabled, false);
+  const p = f.TI.uploadFile('A', mkFile());
+  await until(() => release, 'in-flight dry run');
+  for (const id of ['ti-template', 'ti-export-xlsx', 'ti-upload']) assert.equal(f.element(id).disabled, true, `${id} disabled in flight`);
+  assert.equal(await f.TI.uploadFile('A', mkFile()), false, 'a second upload while busy is refused');
+  release();
+  await until(() => reviewOpened(f), 'open');
+  f.click('ti-review-cancel');
+  await p;
+  for (const id of ['ti-template', 'ti-export-xlsx', 'ti-upload']) assert.equal(f.element(id).disabled, false, `${id} enabled again`);
+  Sandbox.active = true;
+  assert.equal(await f.TI.uploadFile('A', mkFile()), false, 'no upload in What-If');
+  Sandbox.active = false;
+});
+
+test('uploadFile for a plant other than the grid plant posts to THAT plant (Manage Data scope) and still refreshes the Store', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody()), applyHandler());
+  const p = f.TI.uploadFile('B', mkFile());
+  await until(() => reviewOpened(f), 'open');
+  f.click('ti-review-apply');
+  assert.equal(await p, true);
+  assert.match(uploadReqs(f)[0].url, /\/tool-inventory\/B\/upload\?dry_run=1$/);
+  assert.match(uploadReqs(f)[1].url, /\/tool-inventory\/B\/upload\?dry_run=0$/);
+  assert.deepEqual(f.seamCalls, [['tool-inventory-save', 'tool_inventory']]);
+});
+
+test('the shared removal confirm is exported for the Manage Data grid: in-use ids warn, an unused id passes silently', async t => {
+  const f = await fixture(t);
+  f.handlers.push(usageHandler({ T1: { count: 2, orders: ['A1', 'A2'] }, T2: { count: 0, orders: [] } }));
+  f.setConfirm(false);
+  assert.equal(await f.TI.confirmRemovals('A', ['T1', 'T2']), false);
+  assert.equal(f.confirms.length, 1);
+  assert.match(f.confirms[0].detail, /T1/);
+  f.setConfirm(true);
+  assert.equal(await f.TI.confirmRemovals('A', ['T1']), true);
+  assert.equal(await f.TI.confirmRemovals('A', ['T2']), true);
+  assert.equal(f.confirms.length, 2, 'T2 alone is not in use: no confirm');
 });

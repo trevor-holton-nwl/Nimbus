@@ -73,3 +73,40 @@ test('the Wave 4a review-fix keys are in the block and es says planta (not centr
   assert.match(dicts.en['tip.add_tools_in_use'], /loaded window/);
   assert.equal(dicts.en['toast.tool_inventory_remote_deleted_kept'], 'A row you edited was removed by another session; it was kept as a new row. Save to add it back.');
 });
+
+// ---- Excel upload / review modal / deep link block (Wave 4b) ------------------------------------------------------------------
+const XL_BLOCK = enText.slice(enText.indexOf('Tool Inventory Excel upload (Wave 4b)'));
+const XL_KEYS = [...XL_BLOCK.matchAll(/^\s*'([a-z_.]+)'\s*:/gm)].map(m => m[1]);
+
+test('the Excel upload block carries the documented keys, all included in the Tool Inventory locale gate above', () => {
+  for (const key of ['btn.download_data', 'btn.upload_tool_inventory', 'tip.upload_tool_inventory', 'modal.tool_inventory_review_title',
+    'modal.tool_inventory_review_summary', 'modal.tool_inventory_review_changes', 'modal.tool_inventory_review_new', 'modal.tool_inventory_review_rejected',
+    'modal.tool_inventory_review_warnings', 'modal.tool_inventory_review_untouched', 'modal.tool_inventory_review_rejected_warn',
+    'modal.tool_inventory_review_apply', 'modal.tool_inventory_review_more', 'toast.tool_inventory_upload_done', 'toast.tool_inventory_upload_failed',
+    'toast.tool_inventory_upload_too_large', 'toast.tool_inventory_upload_dirty', 'ui.alert_open_tool_inventory', 'am.act_open_tool_inventory']) {
+    assert.ok(XL_KEYS.includes(key), `missing ${key}`);
+    assert.ok(KEYS.includes(key), `${key} is covered by the all-locales gate`);
+  }
+  for (const l of LOCALES) assert.ok(dicts[l]['btn.download_template'], `${l} reuses btn.download_template`);
+});
+
+test('the review modal wording: counts placeholders, the standing sentences, translated in every locale', () => {
+  for (const l of LOCALES) {
+    const d = dicts[l];
+    assert.equal(placeholders(d['modal.tool_inventory_review_summary']), 'changed,new,rejected,unchanged', l);
+    assert.equal(placeholders(d['modal.tool_inventory_review_apply']), 'n', l);
+    assert.equal(placeholders(d['modal.tool_inventory_review_more']), 'n', l);
+    assert.equal(placeholders(d['toast.tool_inventory_upload_done']), 'inserted,rejected,updated', l);
+  }
+  assert.equal(dicts.en['modal.tool_inventory_review_untouched'], 'Rows missing from the file are left unchanged.');
+  assert.equal(dicts.en['modal.tool_inventory_review_rejected_warn'], 'Rejected rows will be skipped; the valid rows will still be saved.');
+  for (const key of XL_KEYS) {
+    if (key === 'btn.download_data' || key === 'ui.alert_open_tool_inventory' || key === 'am.act_open_tool_inventory') continue;
+    for (const l of ['de', 'es', 'fr', 'pt']) assert.notEqual(dicts[l][key], dicts.en[key], `${l} "${key}" is still English`);
+  }
+});
+
+test('Monitor vocabulary: the English am.* deep-link label avoids points / pts / exact / estimate', () => {
+  assert.doesNotMatch(dicts.en['am.act_open_tool_inventory'], /points|pts|exact|estimate/i);
+  assert.equal(dicts.en['am.act_open_tool_inventory'], dicts.en['ui.alert_open_tool_inventory']);
+});

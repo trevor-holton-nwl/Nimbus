@@ -594,3 +594,29 @@ test('a leverage timeout keeps the phase-1 removal-only cards and is not painted
   assert.doesNotMatch(els['am-leverage'].innerHTML, /am\.fix_conf/);
   assert.equal(counts.analyze, 1, 'no retry loop after a timeout');
 });
+
+test('tool card "Open tool inventory" goes to Master Data > Tool Inventory, then filters the grid to the tool on the selected plant', async () => {
+  const { ToolInventory } = await import('../../../frontend/master-data/tool-inventory.mjs');
+  const seen = [];
+  const priorOpen = ToolInventory.openForTool;
+  ToolInventory.openForTool = (plant, tool) => seen.push(`open:${plant}:${tool}`);
+  globalThis.NIMBUS = { App: { goto: t => seen.push(`goto:${t}`), gotoMasterSub: s => seen.push(`sub:${s}`) } };
+  try {
+    seed([alert('a1', { type: 'tool-conflict' })]);
+    groupItems = [item('tool:T100', { family: 'tool', titleKey: 'leverage.title.tool', action: { kind: 'tool', tool: 'T100', alertIds: ['a1'] } })];
+    AlertMonitorPane.render();
+    await sleep(40);
+    clickLev('tool-inventory', 'tool:T100');
+    await sleep(10);
+    assert.deepEqual(seen, ['goto:masterdata', 'sub:tool-inventory', 'open:P1:T100']);
+    seen.length = 0;
+    groupItems = [item('k1')];
+    AlertMonitorPane.render();
+    await sleep(40);
+    clickLev('tool-inventory', 'k1');                  // not a tool card: nothing happens
+    await sleep(10);
+    assert.deepEqual(seen, []);
+  } finally {
+    ToolInventory.openForTool = priorOpen;
+  }
+});

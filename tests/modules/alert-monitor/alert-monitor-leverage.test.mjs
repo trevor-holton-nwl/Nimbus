@@ -370,3 +370,18 @@ test('needs-planning: the title carries n and h, and the row has no "Clears N al
   // Other families keep the clears line.
   assert.match(unq(fixLineParts(item(), ctx(), t).join(' · ')), /am.fix_clears/);
 });
+
+test('the tool card keeps Go to as its primary and offers "Open tool inventory" in the menu, for any alert count and for non-admins', () => {
+  const tool = item({ family: 'tool', key: 'tool:T1', action: { kind: 'tool', tool: 'T1', alertIds: ['a'] } });
+  for (const c of [ctx(), ctx({ isAdmin: true }), ctx({ whatIf: true })]) {
+    const a = levActions(tool, c);
+    assert.equal(a.primary.act, 'focus-first');
+    const open = a.menu.find(x => x.act === 'tool-inventory');
+    assert.ok(open, 'menu has the action');
+    assert.equal(open.labelKey, 'am.act_open_tool_inventory');
+    assert.equal(open.admin, undefined, 'planners can edit the inventory: not an admin-tagged action');
+    assert.equal(open.disabled, undefined);
+  }
+  assert.ok(!acts(item(), ctx()).includes('tool-inventory'), 'only the tool family carries it');
+  assert.ok(!acts(routing('no_routing'), ctx({ isAdmin: true })).includes('tool-inventory'));
+});
