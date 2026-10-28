@@ -867,7 +867,7 @@ test('Dashboard firmed list: Unfirm only for a planner-only firm, a reason on ev
   assert.match(planner, /data-order-id="planner"/, 'planner-only firm keeps Unfirm');
   assert.doesNotMatch(frozen, /data-order-id/, 'a frozen order has no Unfirm');
   assert.match(frozen, /class="reason">[^<]+</, 'and shows its reason');
-  assert.ok(frozen.includes(Util.fmtDTShort(new Date('2026-10-28T09:00:00'))), 'the finish, not the start, is shown');
+  assert.ok(frozen.includes(Util.fmtDTShortPref(new Date('2026-10-28T09:00:00'))), 'the finish, not the start, is shown');
 });
 
 // ---- i18n sweep (Dashboard): wording comes from the locale files, never hardcoded English ----
@@ -912,11 +912,11 @@ test('Dashboard._tp picks the singular key for 1 and shows the Unknown machine k
   });
 });
 
-test('Dashboard weekday and date labels use Util.locale()', () => {
+test('Dashboard weekday uses Util.locale(); the month-day follows the dateFormat pref', () => {
   const dt = new Date('2026-10-27T12:00:00');
   withRealLocales('de', () => {
     assert.equal(Dashboard._dowShort(dt), new Intl.DateTimeFormat('de', { weekday: 'short' }).format(dt));
-    assert.equal(Dashboard._dateNumeric(dt), new Intl.DateTimeFormat('de', { month: 'numeric', day: 'numeric' }).format(dt));
+    assert.equal(Dashboard._dateNumeric(dt), Util.fmtDateShortPref(dt), 'the month-day follows the dateFormat pref, not the language');
   });
 });
 

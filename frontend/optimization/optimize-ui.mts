@@ -28,6 +28,7 @@ import { stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
+import { seedOptimizerMode, seedOptimizerPreset } from './optimizer-prefs.mjs';
 import type { NimbusMasterData, NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
 
 /* =============================================================================
@@ -313,10 +314,7 @@ export const OptimizeDialog = (() => {
   }
 
   function _displayDate(d: Date) {
-    return d.toLocaleString('en-US', {
-      month: 'short', day: 'numeric', year: 'numeric',
-      hour: 'numeric', minute: '2-digit'
-    });
+    return Util.fmtDTPref(d);
   }
 
   function _updateSummary() {
@@ -551,12 +549,12 @@ export const OptimizeDialog = (() => {
     _initPlantChangeListener();
     // Only the "safe" no-date presets seed cleanly (custom needs explicit dates).
     const savedPreset = _od?.preset;
-    const _seedPreset: string = (savedPreset && ['horizon', '2w'].includes(savedPreset)) ? savedPreset : 'horizon';
+    const _seedPreset: string = seedOptimizerPreset(savedPreset);
     applyPreset(_seedPreset);
     const savedMode = _od?.mode;
     // A previously saved unsupported strategy is intentionally normalized to
     // the default changeover strategy.
-    const _seedMode: OptimizerMode = (savedMode && ['spt', 'changeover', 'duedate', 'backlog'].includes(savedMode)) ? (savedMode as OptimizerMode) : 'changeover';
+    const _seedMode: OptimizerMode = seedOptimizerMode(savedMode);
     _startDirty = false;
     _endDirty = false;
     selectMode(_seedMode);
@@ -1930,7 +1928,7 @@ export const OptimizerPreview = {
       partial_allowed: Util.t('ui.opt_pv_split_partial'),
     };
     const splitPolicy = OptimizerPreview._splitOrderPolicy;
-    const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const stamp = Util._fmtTimePref(new Date());
     const whyHtml = (() => {
       if (!explanation) return '';
       const constraints = explanation.constraints.join(', ') || Util.t('ui.setup_constraints_none');

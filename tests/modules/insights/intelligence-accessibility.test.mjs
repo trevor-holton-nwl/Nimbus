@@ -316,3 +316,57 @@ test('command search finds the final selected-plant order at 10000 rows with bou
     Store.setTasks(prior.tasks, 'test'); Store.setSelectedPlant(prior.plant, 'test');
   }
 });
+
+test('a failed theme save restores body.dark, the pill and the offline cache; no pref falls back to the pre-edit cache', () => {
+  const { byId } = fixture();
+  const ls = context.localStorage;
+  const priorTheme = ls.getItem('nimbus.theme'), priorUs = { ...Store.userSettings }, priorRd = { ...Store.roleDefaults };
+  const priorSession = nimbus.Session.setPref;
+  try {
+    CommandPalette._buildPanel();
+    ls.setItem('nimbus.theme', 'light');
+    for (const k of Object.keys(Store.userSettings)) if (k !== 'alertHorizonMinutes' && k !== 'confidenceHorizonMinutes') delete Store.userSettings[k];
+    Store.setRoleDefaults({}, 't');
+    context.document.body.classList.remove('dark');
+    nimbus.Session.setPref = () => {};              // the write itself is not under test here
+    DarkMode.set(true, { toast: false });
+    assert.equal(DarkMode.isDark(), true);
+    assert.equal(ls.getItem('nimbus.theme'), 'dark');
+    DarkMode.reapply();                              // what the shell calls on settings-pref-revert (no pref saved)
+    assert.equal(DarkMode.isDark(), false);
+    assert.equal(ls.getItem('nimbus.theme'), 'light');
+    assert.equal(byId.get('ni-dm-pill')?.getAttribute('aria-pressed') ?? 'false', 'false');
+    // with a saved pref the pref wins over the cache
+    Store.setUserSettings({ theme: 'dark' }, 't');
+    DarkMode.reapply();
+    assert.equal(DarkMode.isDark(), true);
+  } finally {
+    nimbus.Session.setPref = priorSession;
+    for (const k of Object.keys(Store.userSettings)) delete Store.userSettings[k];
+    Store.setUserSettings(priorUs, 't'); Store.setRoleDefaults(priorRd, 't');
+    if (priorTheme == null) ls.removeItem('nimbus.theme'); else ls.setItem('nimbus.theme', priorTheme);
+    context.document.body.classList.remove('dark');
+  }
+});
+
+test('LangSwitcher.set reloads only after a successful save; a failed save keeps the locale and does not reload', async () => {
+  fixture();
+  const ls = context.localStorage;
+  const priorLocale = ls.getItem('nimbus.locale'), priorSession = nimbus.Session, priorLoc = context.location;
+  let reloads = 0, flushResult = false;
+  try {
+    context.location = { reload: () => { reloads++; } };
+    ls.setItem('nimbus.locale', 'en');
+    nimbus.Session = { setPref() {}, flushPrefs: async () => flushResult };
+    assert.equal(await LangSwitcher.set('de'), false);
+    assert.equal(reloads, 0);
+    assert.equal(ls.getItem('nimbus.locale'), 'en', 'cache not written for a language the server rejected');
+    flushResult = true;
+    assert.equal(await LangSwitcher.set('de'), true);
+    assert.equal(reloads, 1);
+    assert.equal(ls.getItem('nimbus.locale'), 'de');
+  } finally {
+    nimbus.Session = priorSession; context.location = priorLoc;
+    if (priorLocale == null) ls.removeItem('nimbus.locale'); else ls.setItem('nimbus.locale', priorLocale);
+  }
+});

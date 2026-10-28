@@ -331,7 +331,7 @@ export const Security = (() => {
       <td class="md-td"><input type="text" class="input" data-last-name-user="${Util.escapeHtml(u.username)}" value="${Util.escapeHtml(u.last_name || '')}" maxlength="100"></td>
       <td class="md-td">${_roleSelectHtml(u.role || '', `data-role-select-user="${Util.escapeHtml(u.username)}"`)}</td>
       <td class="md-td">${pwCell}</td>
-      <td class="md-td">${Util.escapeHtml(u.last_login ? (Util.fmtDT(u.last_login) || String(u.last_login)) : Util.t('sec.never'))}</td>
+      <td class="md-td">${Util.escapeHtml(u.last_login ? (Util.fmtDTPref(u.last_login) || String(u.last_login)) : Util.t('sec.never'))}</td>
       <td class="md-td md-td-action"><button class="icon-btn md-del-btn" data-del-user="${Util.escapeHtml(u.username)}" title="${Util.escapeHtml(Util.t('tip.delete_row'))}">🗑</button></td>
     </tr>`;
   }

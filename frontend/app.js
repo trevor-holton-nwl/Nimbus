@@ -688,7 +688,7 @@ const NIMBUS = (function () {
         const cached = Persistence._rememberedPlant();
         if (cached && known.includes(cached)) return;
         // Neither a default nor a remembered plant, but the user can see exactly one.
-        if (dp == null && known.length === 1) Store.setSelectedPlant(known[0], 'default-plant');
+        if (!dp && known.length === 1) Store.setSelectedPlant(known[0], 'default-plant');
       } catch (e) { ErrorLog.warn('boot', `default-plant apply failed: ${e.message}`); }
     }, 'App.defaultPlant');
 

@@ -1121,6 +1121,18 @@ export const Store = {
     Object.assign(this._state.userSettings, patch);
     this.emit({ type: 'settings:change', source });
   },
+  // Replace the persisted pref keys wholesale with `obj` (the server's merged
+  // blob), so a key the server deleted (a null PATCH) disappears here too instead
+  // of lingering the way Object.assign would leave it. Mutates in place (callers
+  // may hold the reference) and keeps the two runtime-only horizon fields, which
+  // are not pref-persisted and would otherwise be wiped by a settings refresh.
+  replaceUserSettings(obj: Record<string, unknown>, source?: string): void {
+    const cur = this._state.userSettings as Record<string, unknown>;
+    const keep = { alertHorizonMinutes: cur.alertHorizonMinutes, confidenceHorizonMinutes: cur.confidenceHorizonMinutes };
+    for (const k of Object.keys(cur)) delete cur[k];
+    Object.assign(cur, keep, obj || {});
+    this.emit({ type: 'settings:change', source });
+  },
   // Replace the role-defaults snapshot wholesale (roles.settings for the signed-in
   // user's role). Session.signIn/refresh push this from GET /security/me.role_settings.
   setRoleDefaults(obj: Record<string, unknown> | null | undefined, source?: string): void {
@@ -1138,7 +1150,7 @@ export const Store = {
       const rd   = this._state.roleDefaults || {};
       const defs = _settingsDefaultsResolver() || {};
       // ── region/{plant} fallback — EXTENSION POINT, NO-OP TODAY ──────────
-      // For region-scoped keys (Settings.isRegion(key): timezone, firstDayOfWeek)
+      // For region-scoped keys (Settings.isRegion(key): firstDayOfWeek)
       // a per-plant regional default keyed on opts.plant would slot in between the
       // user blob and the role defaults right here. There is NO plants timezone /
       // week-start column yet, so we deliberately do not read one — do not invent a

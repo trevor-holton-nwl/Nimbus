@@ -287,7 +287,7 @@ export const Session = (() => {
         settings, role_settings: roleSettings,
         loggedInAt: u.loggedInAt, // carried forward, never reset — the 12h clock is anchored to signIn()
       }));
-      Store.setUserSettings(settings, 'session-refresh');
+      _adoptServerSettings(settings, 'session-refresh');
       Store.setRoleDefaults(roleSettings, 'session-refresh');
       // Plant-scope enforcement is Store-only business logic — safe to keep in
       // this pure module. The actual PlantSelector DOM refresh/toast, and the
@@ -325,12 +325,24 @@ export const Session = (() => {
   let _prefTimer: ReturnType<typeof setTimeout> | null = null;
   let _prefPending: Record<string, unknown> = {};   // key → queued new value for the next PATCH
   let _prefPrev: Record<string, unknown>    = {};   // key → pre-edit value, for revert on failure
+  let _prefInflight: Record<string, unknown> = {};  // keys of the PATCH currently on the wire
+  let _prefChain: Promise<void> = Promise.resolve(); // flushes run one at a time, in order
+  let _prefFailures = 0;                             // bumped per failed batch; flushPrefs() diffs it
+
+  // Adopt a server settings blob into Store (deleted keys disappear) while keeping
+  // optimistic values a newer, not-yet-saved batch still owns, so a slow earlier
+  // response can never visibly roll a newer edit back.
+  // `ownInflight` is false for the response to the in-flight PATCH itself (the server
+  // blob already reflects it, including deletions) and true for an unrelated refresh.
+  function _adoptServerSettings(settings: Record<string, unknown>, source: string, ownInflight = true): void {
+    Store.replaceUserSettings({ ...settings, ...(ownInflight ? _prefInflight : {}), ..._prefPending }, source);
+  }
 
   async function _flushPrefs(): Promise<void> {
-    _prefTimer = null;
     const patch = _prefPending; _prefPending = {};
     const prev  = _prefPrev;    _prefPrev = {};
     if (!Object.keys(patch).length) return;
+    _prefInflight = patch;
     try {
       const r = await Util.fetchTraced(`${Config.API_BASE}/security/me/settings`, {
         method: 'PATCH',
@@ -341,24 +353,38 @@ export const Session = (() => {
       const updated = await r.json() as { settings?: Record<string, unknown> };
       // Server returns the full merged blob — adopt it as truth + mirror to cache.
       const settings = updated.settings || {};
-      Store.setUserSettings(settings, 'settings-pref');
+      _adoptServerSettings(settings, 'settings-pref-saved', false);
       const u = currentUser();
       if (u) localStorage.setItem(KEY, JSON.stringify({ ...u, settings }));
     } catch (e) {
-      // Revert only the keys this failed batch touched — in Store and the cache —
-      // leaving keys a still-pending batch owns untouched.
-      Store.setUserSettings(prev, 'settings-pref-revert');
+      _prefFailures++;
+      // Revert only the keys this failed batch touched — in Store and the cache.
+      // A key a newer queued batch also edits is left optimistic (that batch owns
+      // it now) but its revert target is rebased to this batch's pre-edit value.
+      const next: Record<string, unknown> = { ...Store.userSettings };
       const u = currentUser();
-      if (u) {
-        const cached: Record<string, unknown> = (u.settings && typeof u.settings === 'object') ? { ...u.settings } : {};
-        for (const k of Object.keys(prev)) {
-          if (prev[k] === undefined) delete cached[k]; else cached[k] = prev[k];
-        }
-        localStorage.setItem(KEY, JSON.stringify({ ...u, settings: cached }));
+      const cached: Record<string, unknown> = (u && u.settings && typeof u.settings === 'object') ? { ...u.settings } : {};
+      for (const k of Object.keys(prev)) {
+        if (k in _prefPending) { _prefPrev[k] = prev[k]; continue; }
+        if (prev[k] === undefined) { delete next[k]; delete cached[k]; }
+        else { next[k] = prev[k]; cached[k] = prev[k]; }
       }
-      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
-      ErrorLog.error('settings', `Save preference failed: ${(e as Error).message}`);
+      Store.replaceUserSettings(next, 'settings-pref-revert');
+      if (u) localStorage.setItem(KEY, JSON.stringify({ ...u, settings: cached }));
+      try {
+        Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+        ErrorLog.error('settings', `Save preference failed: ${(e as Error).message}`);
+      } catch { /* logging must never break the revert */ }
+    } finally {
+      _prefInflight = {};
     }
+  }
+
+  // Chain the next flush after whatever is in flight (a patch is taken when its turn
+  // starts, so edits made while an earlier PATCH is on the wire coalesce into one).
+  function _enqueueFlush(): Promise<void> {
+    _prefChain = _prefChain.then(_flushPrefs, _flushPrefs);
+    return _prefChain;
   }
 
   function setPref(key: string, value: unknown): void {
@@ -368,17 +394,21 @@ export const Session = (() => {
     _prefPending[key] = value;
     Store.setUserSettings({ [key]: value }, 'settings-pref');   // optimistic
     if (_prefTimer) clearTimeout(_prefTimer);
-    _prefTimer = setTimeout(_flushPrefs, 600);
+    _prefTimer = setTimeout(() => { _prefTimer = null; void _enqueueFlush(); }, 600);
   }
 
-  // Flush any pending pref writes immediately and return the PATCH promise. The
-  // language switch must await this BEFORE location.reload() — a reload cancels
-  // the debounced timer and in-flight fetch, so without an explicit flush the DB
-  // (and the session cache _flushPrefs refreshes on success) would never catch up
-  // and the next boot would revert the language from stale truth.
-  function flushPrefs(): Promise<void> {
+  // Flush any pending pref writes immediately and resolve once everything queued
+  // or in flight has settled: true when no batch failed meanwhile, false otherwise
+  // (the failed batch has already reverted Store/cache and toasted). The language
+  // switch must await this BEFORE location.reload() — a reload cancels the
+  // debounced timer and in-flight fetch, so without an explicit flush the DB
+  // (and the session cache the flush refreshes on success) would never catch up —
+  // and must NOT reload on false, or the failure toast is never seen.
+  async function flushPrefs(): Promise<boolean> {
     if (_prefTimer) { clearTimeout(_prefTimer); _prefTimer = null; }
-    return _flushPrefs();
+    const before = _prefFailures;
+    await _enqueueFlush();
+    return _prefFailures === before;
   }
 
   // Convenience read — resolves via Store.pref (user ?? role ?? system default).

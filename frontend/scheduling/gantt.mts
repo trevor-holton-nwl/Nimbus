@@ -3278,7 +3278,7 @@ export const TimelineNav = {
       if (!range) return;
       const cssW = canvas.offsetWidth || 1;
       const ms = range.startMs + (e.offsetX / cssW) * (range.endMs - range.startMs);
-      try { canvas.title = Util._fmtDatePref(new Date(ms)); } catch { canvas.title = new Date(ms).toLocaleDateString(); }
+      try { canvas.title = Util._fmtDatePref(new Date(ms)); } catch { canvas.title = ''; }
       if (Timeline._tl) {
         const win = Timeline._tl.getWindow();
         const totalMs = (range.endMs - range.startMs) || 1;

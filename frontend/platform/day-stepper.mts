@@ -27,11 +27,5 @@ export function dayStepNext(keys: string[], key: string | null, dir: number): st
 export function dayStepLabel(key: string, keys: string[]): string {
   if (key === keys[0]) return Util.t('ui.today');
   if (key === keys[1]) return Util.t('ui.tomorrow');
-  const dt = new Date(key + 'T12:00:00');
-  try {
-    const loc = Util.locale();
-    return `${new Intl.DateTimeFormat(loc, { weekday: 'short' }).format(dt)} ${new Intl.DateTimeFormat(loc, { month: 'numeric', day: 'numeric' }).format(dt)}`;
-  } catch {
-    return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-  }
+  return Util.fmtDayLabelPref(new Date(key + 'T12:00:00'));
 }

@@ -306,8 +306,8 @@ test('gate 33: the auto-fix "order moved" toast reads the FINISH of the moved or
     Alerts.applyFix('ordermoved-alert');
     assert.equal(shown.length, 1, 'the toast was raised once');
     const moved = Store.tasks[taskId];
-    assert.equal(shown[0].date, Util.fmtDT(moved.end_date), 'the date is the finish of the moved order');
-    assert.notEqual(shown[0].date, Util.fmtDT(moved.start_date), 'and not its start');
+    assert.equal(shown[0].date, Util.fmtDTPref(moved.end_date), 'the date is the finish of the moved order');
+    assert.notEqual(shown[0].date, Util.fmtDTPref(moved.start_date), 'and not its start');
   } finally {
     Toast.show = priorShow; Util.t = priorT;
     Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test');

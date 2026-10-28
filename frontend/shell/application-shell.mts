@@ -70,6 +70,7 @@ import { Alerts } from '../insights/services.mjs';
 import { Engine } from '../optimization/engine.mjs';
 import { Persistence, SOURCE_WIRE } from '../scheduling/persistence.mjs';
 import { Session } from '../security/session.mjs';
+import { OPTIMIZER_MODES, seedOptimizerMode, seedOptimizerPreset } from '../optimization/optimizer-prefs.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../scheduling/gantt.mjs';
 import { Table } from '../scheduling/orders.mjs';
 import { GanttLegend } from '../scheduling/gantt-legend.mjs';
@@ -168,9 +169,11 @@ type WiredElement = HTMLElement & { _wired?: boolean };
                 (gridLayout / pinnedPlants / pinnedLines), which are inherently
                 per-person and never role-overridable.
      region   : true only for keys eligible for the (NO-OP today) {plant} region
-                fallback — timezone & firstDayOfWeek.
-   timeFormat / dateFormat / timezone are DISPLAY-ONLY (they change how values
-   render, never the stored data).
+                fallback — firstDayOfWeek.
+   timeFormat / dateFormat are DISPLAY-ONLY (they change how values render,
+   never the stored data). There is no timezone setting: the dead per-user
+   `timezone` key was removed (plant timezones live in master data); a stale
+   stored value in a user_settings row is ignored.
    ========================================================================== */
 const Settings = (() => {
   const CATALOG: SettingsCatalogEntry[] = [
@@ -189,7 +192,6 @@ const Settings = (() => {
     // ── Workflow ───────────────────────────────────────────────────────
     { key: 'timeFormat',        category: 'workflow', type: 'enum',     default: '12h',              tier: 'user', region: false },
     { key: 'dateFormat',        category: 'workflow', type: 'enum',     default: 'm/d/Y',             tier: 'user', region: false },
-    { key: 'timezone',          category: 'workflow', type: 'timezone', default: 'America/New_York', tier: 'user', region: true  },
     { key: 'firstDayOfWeek',    category: 'workflow', type: 'enum',     default: 0,                  tier: 'user', region: true  },
     { key: 'optimizerDefaults', category: 'workflow', type: 'object',   default: null,               tier: 'user', region: false },
     { key: 'distributionFilters', category: 'workflow', type: 'object',  default: null,               tier: 'user', region: false },
@@ -244,6 +246,7 @@ const Settings = (() => {
 const SessionUIAdapter = {
   init(): void {
     Store.subscribe(evt => {
+      if (evt.type === 'settings:change' && evt.source === 'settings-pref-revert') SessionUIAdapter._onPrefRevert();
       if (evt.type !== 'session:changed') return;
       SessionUIAdapter._applyGates();
       if (evt.kind === 'refresh') {
@@ -251,6 +254,10 @@ const SessionUIAdapter = {
         // (schedule-data.mjs) only reports the FACTS (isAdmin(), plantAccessChanged);
         // every actual DOM/tab-navigation effect happens here.
         try { if (typeof PlantSelector !== 'undefined') PlantSelector._refreshOptions(); } catch {}
+        // Display prefs saved on another device: re-apply theme + week start now
+        // (language stays applies-on-next-boot — a reload would cost unsaved work).
+        try { if (typeof NIMBUS !== 'undefined') NIMBUS.DarkMode?.reapply?.(); } catch {}
+        try { if (typeof App !== 'undefined') App._applyFirstDayOfWeek(); } catch {}
         // If we just lost access to the tab we're sitting on, leave it.
         if (typeof App !== 'undefined' && !Session.canAccessTab(App._currentTab)) {
           try { App.goto(App._firstAccessibleTab()); } catch {}
@@ -261,6 +268,17 @@ const SessionUIAdapter = {
         } catch {}
       }
     }, 'SessionUIAdapter');
+  },
+
+  // A preference save failed and Session reverted Store + cache: put the DOM back too
+  // (theme class/pill/cache) and re-seed the open Settings modal so its controls stop
+  // showing the value that did not save.
+  _onPrefRevert(): void {
+    try { if (typeof NIMBUS !== 'undefined') NIMBUS.DarkMode?.reapply?.(); } catch {}
+    try { App._applyFirstDayOfWeek(); } catch {}
+    const modal = document.getElementById('modal-user-settings');
+    if (!modal || modal.hidden) return;
+    try { SessionUIAdapter._renderSettingsPanes(); } catch (e) { ErrorLog.error('settings', `Render settings panes failed: ${(e as Error).message}`); }
   },
 
   _applyGates(): void {
@@ -339,6 +357,7 @@ const SessionUIAdapter = {
         // Build the Personalization / Workflow controls fresh so they reflect
         // the current resolved prefs each time the modal opens.
         try { SessionUIAdapter._renderSettingsPanes(); } catch (e) { ErrorLog.error('settings', `Render settings panes failed: ${(e as Error).message}`); }
+        SessionUIAdapter._resetPasswordForm();
         Modal.open('modal-user-settings');
       });
     }
@@ -361,10 +380,15 @@ const SessionUIAdapter = {
       saveBtn._wired = true;
       saveBtn.addEventListener('click', SessionUIAdapter.saveProfile);
     }
-    const changePwBtn = document.getElementById('us-change-password-btn') as WiredElement | null;
-    if (changePwBtn && !changePwBtn._wired) {
-      changePwBtn._wired = true;
-      changePwBtn.addEventListener('click', SessionUIAdapter.changePassword);
+    // A real <form> so Enter in any password field submits (and the browser
+    // sees current-password / new-password for its credential manager).
+    const changePwForm = document.getElementById('us-password-form') as WiredElement | null;
+    if (changePwForm && !changePwForm._wired) {
+      changePwForm._wired = true;
+      changePwForm.addEventListener('submit', (ev: Event) => {
+        ev.preventDefault();
+        void SessionUIAdapter.changePassword();
+      });
     }
     // Wire the User Settings tab bar (Personalization / Workflow / Profile).
     // _renderSettingsPanes() populates the Personalization/Workflow panes on
@@ -410,6 +434,8 @@ const SessionUIAdapter = {
     // AG Grid date columns render through pref-aware valueFormatters — force a
     // cell repaint so the new format shows without an edit/scroll.
     try { if (NIMBUS.Table?._api) NIMBUS.Table._api.refreshCells({ force: true }); } catch {}
+    // Date pickers already built bake altFormat at construction: re-apply it live.
+    try { Util.refreshFlatpickrPrefs(); } catch {}
     // Inspector schedule rows are baked into innerHTML — re-render the current
     // selection so its dates repaint too.
     try {
@@ -752,7 +778,8 @@ const SessionUIAdapter = {
       items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
       const a = items[activeIdx]; if (a) a.scrollIntoView({ block: 'nearest' });
     };
-    const choose = (plant: string | null) => { Session.setPref('defaultPlant', plant || null); reflect(); close(); input.blur(); };
+    // '' (not null) is the explicit "no default" value: a null PATCH deletes the key, which would let a role default show through again.
+    const choose = (plant: string | null) => { Session.setPref('defaultPlant', plant || ''); reflect(); close(); input.blur(); };
 
     const renderList = (query: string) => {
       const all = options();
@@ -812,7 +839,7 @@ const SessionUIAdapter = {
     const fdowSel = (fdow === 1) ? 1 : 0;
     // Optimizer defaults — seed the strategy + option toggles the dialog opens with.
     const od      = Session.pref('optimizerDefaults') as OptimizerDefaultsPref | null | undefined;
-    const odMode: string = (od && od.mode && ['spt', 'changeover', 'duedate'].includes(od.mode)) ? od.mode : 'changeover';
+    const odMode: string = seedOptimizerMode(od?.mode);
     const odFirmed = od ? (od.respectFirmed ?? (od as any).respectFixed) !== false : true;
     const odCal   = od ? od.respectCalendar !== false : true;
     pane.innerHTML = `
@@ -839,9 +866,7 @@ const SessionUIAdapter = {
       <div class="form-row">
         <label data-i18n="us.opt_defaults">${Util.t('us.opt_defaults')}</label>
         <select id="us-opt-mode">
-          ${SessionUIAdapter._optTag('spt',        Util.t('us.opt_mode_spt'),        odMode)}
-          ${SessionUIAdapter._optTag('changeover', Util.t('us.opt_mode_changeover'), odMode)}
-          ${SessionUIAdapter._optTag('duedate',    Util.t('us.opt_mode_duedate'),    odMode)}
+          ${OPTIMIZER_MODES.map(m => SessionUIAdapter._optTag(m.value, Util.t(m.labelKey), odMode)).join('')}
         </select>
         <label class="us-toggle-row" style="margin-top:8px">
           <input type="checkbox" id="us-opt-firmed"${odFirmed ? ' checked' : ''}>
@@ -876,7 +901,7 @@ const SessionUIAdapter = {
       const existing = (Session.pref('optimizerDefaults') as OptimizerDefaultsPref | undefined) || {};
       Session.setPref('optimizerDefaults', {
         mode: modeSel!.value,
-        preset: ['horizon', '2w'].includes(existing.preset ?? '') ? existing.preset : 'horizon',
+        preset: seedOptimizerPreset(existing.preset),
         respectFirmed: firmedChk!.checked,
         respectCalendar: calChk!.checked,
       });
@@ -982,6 +1007,10 @@ const SessionUIAdapter = {
     const lastEl = document.getElementById('us-last-name') as HTMLInputElement | null;
     const first_name = firstEl ? firstEl.value.trim() : '';
     const last_name = lastEl ? lastEl.value.trim() : '';
+    // The footer Save never submits the password form. If the user typed
+    // into it, keep the modal open and point them at Update Password rather
+    // than silently dropping what they typed.
+    const pendingPassword = SessionUIAdapter._passwordFieldsHaveText();
     try {
       const r = await Util.fetchTraced(`${Config.API_BASE}/security/me`, {
         method: 'PATCH',
@@ -998,6 +1027,11 @@ const SessionUIAdapter = {
       // event, and the next natural _renderUserButton() call is a future
       // session:changed (signin/refresh), which could be a while away.
       SessionUIAdapter._renderUserButton();
+      if (pendingPassword) {
+        SessionUIAdapter._showUserTab('profile');
+        SessionUIAdapter._setPasswordStatus('sec.password_pending_hint', 'hint');
+        return;
+      }
       Modal.close('modal-user-settings');
     } catch (e) {
       Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
@@ -1005,26 +1039,88 @@ const SessionUIAdapter = {
     }
   },
 
+  // True when any of the three change-password inputs holds text.
+  _passwordFieldsHaveText(): boolean {
+    return ['us-current-password', 'us-new-password', 'us-confirm-password'].some(id => {
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      return !!(el && el.value);
+    });
+  },
+
+  // Inline status line under the password fields. key '' clears it. kind
+  // 'error' reuses .field-error, 'hint' reuses .form-hint. rawText (an
+  // unrecognized server detail) wins over key.
+  _setPasswordStatus(key: string, kind: 'error' | 'hint' = 'error', rawText?: string): void {
+    const el = document.getElementById('us-password-status');
+    if (!el) return;
+    const text = rawText || (key ? Util.t(key) : '');
+    el.textContent = text;
+    el.className = kind === 'hint' ? 'form-hint' : 'field-error';
+    el.hidden = !text;
+  },
+
+  // Empty the three password inputs and the status line (modal open, success).
+  _resetPasswordForm(): void {
+    for (const id of ['us-current-password', 'us-new-password', 'us-confirm-password']) {
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      if (el) el.value = '';
+    }
+    SessionUIAdapter._setPasswordStatus('');
+  },
+
+  // Pure client-side mirror of the server's password policy
+  // (auth.change_own_password). Returns the locale key of the first broken
+  // rule, or null when the form is acceptable.
+  _validatePasswordForm(current: string, next: string, confirm: string): string | null {
+    if (!current) return 'sec.password_current_required';
+    if (next.length < 8) return 'sec.password_too_short';
+    if (next.length > 256) return 'sec.password_too_long';
+    if (next === current) return 'sec.password_same_as_current';
+    if (next !== confirm) return 'sec.password_mismatch';
+    return null;
+  },
+
+  // Map a failed PATCH /security/me/password to a locale key. Status first;
+  // a 400 detail is matched only to recognise policy rules we also localize.
+  // Returns { key } for a localized message, or { detail } to show the
+  // server's own text (unrecognized 400).
+  _passwordErrorFor(status: number | null, detail?: string): { key?: string; detail?: string } {
+    if (status === 401) return { key: 'sec.password_current_wrong' };
+    if (status === 429) return { key: 'sec.password_rate_limited' };
+    if (status === 400) {
+      const d = detail || '';
+      if (/at least 8/i.test(d)) return { key: 'sec.password_too_short' };
+      if (/at most/i.test(d)) return { key: 'sec.password_too_long' };
+      if (/different/i.test(d)) return { key: 'sec.password_same_as_current' };
+      return d ? { detail: d } : { key: 'sec.password_failed' };
+    }
+    return { key: 'sec.password_failed' };
+  },
+
   // Self-service: PATCH /security/me/password. Unlike saveProfile(), the
   // caller's identity header alone isn't enough here — the backend re-verifies
   // current_password (auth.change_own_password) since there's no session token
   // binding the header to a prior login. Fields are cleared on success but the
-  // modal stays open (mirrors the admin panel's non-closing _savePassword).
+  // modal stays open (mirrors the admin panel's non-closing _savePassword);
+  // they are kept on failure so the user can correct and retry.
+  _pwInFlight: false,
   async changePassword(): Promise<void> {
+    if (SessionUIAdapter._pwInFlight) return;
     const curEl = document.getElementById('us-current-password') as HTMLInputElement | null;
     const newEl = document.getElementById('us-new-password') as HTMLInputElement | null;
     const confEl = document.getElementById('us-confirm-password') as HTMLInputElement | null;
+    const btn = document.getElementById('us-change-password-btn') as HTMLButtonElement | null;
     const current_password = curEl ? curEl.value : '';
     const new_password = newEl ? newEl.value : '';
     const confirm_password = confEl ? confEl.value : '';
-    if (!new_password || new_password.length < 4) {
-      Toast.show(Util.t('sec.password_too_short'), 'error');
+    const bad = SessionUIAdapter._validatePasswordForm(current_password, new_password, confirm_password);
+    if (bad) {
+      SessionUIAdapter._setPasswordStatus(bad);
       return;
     }
-    if (new_password !== confirm_password) {
-      Toast.show(Util.t('sec.password_mismatch'), 'error');
-      return;
-    }
+    SessionUIAdapter._setPasswordStatus('');
+    SessionUIAdapter._pwInFlight = true;
+    if (btn) btn.disabled = true;
     try {
       const r = await Util.fetchTraced(`${Config.API_BASE}/security/me/password`, {
         method: 'PATCH',
@@ -1033,15 +1129,19 @@ const SessionUIAdapter = {
       });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        throw new Error(Util.errorDetailText(e.detail) || `HTTP ${r.status}`);
+        const m = SessionUIAdapter._passwordErrorFor(r.status, Util.errorDetailText(e.detail) || '');
+        SessionUIAdapter._setPasswordStatus(m.key || '', 'error', m.detail);
+        ErrorLog.warn('security', `Change password rejected (HTTP ${r.status})`);
+        return;
       }
-      if (curEl) curEl.value = '';
-      if (newEl) newEl.value = '';
-      if (confEl) confEl.value = '';
+      SessionUIAdapter._resetPasswordForm();
       Toast.show(Util.t('sec.password_updated'), 'success');
     } catch (e) {
-      Toast.show(Util.t('toast.save_failed', { msg: (e as Error).message }), 'error');
+      SessionUIAdapter._setPasswordStatus('sec.password_failed');
       ErrorLog.error('security', `Change password failed: ${(e as Error).message}`);
+    } finally {
+      SessionUIAdapter._pwInFlight = false;
+      if (btn) btn.disabled = false;
     }
   },
 };
@@ -2730,8 +2830,10 @@ const App = {
 
   // Push pref('firstDayOfWeek') into Flatpickr's default l10n so calendar pickers
   // start the week on the user's chosen day. Flatpickr reads firstDayOfWeek at
-  // construction time, so this affects pickers created AFTER the call (all NIMBUS
-  // pickers are lazily built on first open). Safe no-op if Flatpickr isn't loaded.
+  // construction time, so the default covers pickers created AFTER the call and
+  // Util.refreshFlatpickrPrefs patches the ones already built. Labor Plan weeks are
+  // ISO weeks (Monday start) regardless: they are the stored period keys.
+  // Safe no-op if Flatpickr isn't loaded.
   _applyFirstDayOfWeek(): void {
     try {
       let fdow = Number(Store.pref('firstDayOfWeek'));
@@ -2740,6 +2842,9 @@ const App = {
         (flatpickr.l10ns.default as { firstDayOfWeek?: number }).firstDayOfWeek = fdow;
       }
     } catch {}
+    // Pickers that already exist keep their construction-time week start: patch them too
+    // (this also re-applies the date/time altFormat, which covers a failed-save revert).
+    try { Util.refreshFlatpickrPrefs(); } catch {}
   },
 
   // Navigate to the user's saved default landing view (pref('landingView') =
@@ -2753,7 +2858,10 @@ const App = {
     let tab: TopLevelTab = (lv?.tab && (validTabs as string[]).includes(lv.tab)) ? (lv.tab as TopLevelTab) : 'home';
     if (!Session.canAccessTab(tab)) tab = App._firstAccessibleTab();
     App.goto(tab);
-    const sub = lv && lv.sub;
+    // Only a sub-view the landing picker itself offers for this tab; anything else
+    // (a stale or hand-edited value) lands on the tab's own default view.
+    const sub = (lv && typeof lv.sub === 'string'
+      && SessionUIAdapter._landingSubDefs(tab)?.some(([v]) => v === lv!.sub)) ? lv.sub : null;
     if (sub) {
       try {
         if (tab === 'gantt')           App.gotoGanttSub(sub as GanttSubTab);

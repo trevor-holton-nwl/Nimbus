@@ -141,15 +141,15 @@ function _formatCell(value: unknown): string {
   return String(value);
 }
 
-// date / timestamp columns show MM/DD/YYYY (timestamps: MM/DD/YYYY HH:mm:ss), built from the
+// date / timestamp columns follow the dateFormat / timeFormat prefs (timestamps keep their seconds), built from the
 // wire string's own parts -- no Date parsing, so no timezone shift. Anything that does not
 // look like an ISO date/time is shown as served.
 function _formatTemporal(value: unknown, sqlType: string): string {
   const s = _formatCell(value);
   if (!s) return s;
-  if (sqlType === 'date') return Util.fmtIsoDate(s.slice(0, 10));
+  if (sqlType === 'date') return Util.fmtIsoDatePref(s.slice(0, 10));
   const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/.exec(s);
-  return m ? `${Util.fmtIsoDate(m[1])} ${m[2]}` : s;
+  return m ? Util.fmtIsoStampPref(s, true) : s;
 }
 
 function _hasAnyFilter(): boolean {

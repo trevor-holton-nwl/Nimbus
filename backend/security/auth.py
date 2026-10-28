@@ -14,6 +14,7 @@ to a caller, or written to admin_audit.
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -288,24 +289,50 @@ def bulk_upsert_users(upserts: list[dict], deletes: list[dict],
     return {"inserted": inserted, "updated": updated, "deleted": deleted}
 
 
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 256  # PBKDF2 cost grows with input size; cap it
+
+
 def set_user_password(username: str, raw_password: str,
-                      user_email: str | None = None) -> dict:
+                      user_email: str | None = None,
+                      must_exist: bool = False) -> dict:
     """Set/replace a user's password. Hashed before storage; the plaintext
-    password and its hash are never written to admin_audit or returned."""
-    username = (username or "").strip()
+    password and its hash are never written to admin_audit or returned.
+    With must_exist=True the write is UPDATE-only: an unknown username raises
+    404 instead of silently creating a roleless account (admin reset and
+    self-service change both pass it; callers that onboard users do not)."""
+    if not isinstance(username, str):
+        raise ValueError("Username must be a string")
+    username = username.strip()
     if not username:
         raise ValueError("Username is required")
-    if not raw_password or len(raw_password) < 8:
+    if not isinstance(raw_password, str):
+        raise ValueError("Password must be a string")
+    if len(raw_password) < PASSWORD_MIN_LENGTH:
         raise ValueError("Password must be at least 8 characters")
+    if len(raw_password) > PASSWORD_MAX_LENGTH:
+        raise ValueError(f"Password must be at most {PASSWORD_MAX_LENGTH} characters")
 
     password_hash = _hash_password(raw_password)
 
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO user_security (username, password_hash) VALUES (%s, %s)"
-            " ON CONFLICT (lower(username)) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = NOW()",
-            (username, password_hash),
-        )
+        if must_exist:
+            cur.execute(
+                "UPDATE user_security SET password_hash = %s, updated_at = NOW()"
+                " WHERE lower(username) = lower(%s) RETURNING username",
+                (password_hash, username),
+            )
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail="User not found")
+            username = row[0]  # canonical casing for the audit row
+        else:
+            cur.execute(
+                "INSERT INTO user_security (username, password_hash) VALUES (%s, %s)"
+                " ON CONFLICT (lower(username)) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = NOW()",
+                (username, password_hash),
+            )
         cur.execute(
             "INSERT INTO admin_audit (table_name, action, details, user_email)"
             " VALUES (%s, %s, %s, %s)",
@@ -356,9 +383,18 @@ def change_own_password(actor_email: str | None, current_password: str, new_pass
     username = (actor_email or "").strip()
     if not username:
         raise HTTPException(status_code=401, detail="Not signed in")
-    if not verify_user_password(username, current_password or ""):
+    if not isinstance(current_password, str) or not isinstance(new_password, str):
+        raise ValueError("current_password and new_password must be strings")
+    if not verify_user_password(username, current_password):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
-    return set_user_password(username, new_password, user_email=username)
+    if new_password == current_password:
+        raise ValueError("New password must be different from the current password")
+    try:
+        return set_user_password(username, new_password, user_email=username, must_exist=True)
+    except HTTPException as e:
+        if e.status_code == 404:  # deleted between verify and write: never recreate
+            raise HTTPException(status_code=401, detail="Not signed in") from e
+        raise
 
 
 # =========================
@@ -392,19 +428,65 @@ def get_role_settings(role: str | None) -> dict:
     return (row[0] or {}) if row else {}
 
 
+# Keys the frontend may write via Session.setPref. KEEP IN SYNC with
+# Settings.CATALOG in frontend/shell/application-shell.mts (a new catalog key
+# must be added here or its save is rejected with 400). There is no
+# `timezone` setting: the dead catalog key was removed; a stale stored value
+# in a user_settings row is simply ignored.
+ALLOWED_SETTINGS_KEYS = frozenset({
+    "theme", "language", "defaultPlant", "landingView", "gridLayout",
+    "pinnedPlants", "pinnedLines", "timeFormat", "dateFormat",
+    "firstDayOfWeek", "optimizerDefaults", "distributionFilters",
+    "alertProfileByPlant", "alertProfileGanttHighlight", "alertMonitorView",
+    "alertsShowAcknowledged", "alertMonitorOverview",
+})
+SETTINGS_PATCH_MAX_BYTES = 64 * 1024
+SETTINGS_BLOB_MAX_BYTES = 256 * 1024
+
+
+def _validate_settings_patch(patch: dict) -> None:
+    """Key allowlist, JSON sanity and patch size cap. Value shapes are NOT
+    validated per key (the frontend owns those)."""
+    for key in patch:
+        if key not in ALLOWED_SETTINGS_KEYS:
+            raise ValueError(f"Unknown setting: {key}")
+
+    def _bad_json(v) -> bool:
+        if isinstance(v, str):
+            return "\u0000" in v
+        if isinstance(v, float):
+            return v != v or v in (float("inf"), float("-inf"))
+        if isinstance(v, dict):
+            return any(_bad_json(k) or _bad_json(x) for k, x in v.items())
+        if isinstance(v, (list, tuple)):
+            return any(_bad_json(x) for x in v)
+        return not (v is None or isinstance(v, (bool, int)))
+
+    if _bad_json(patch):
+        raise ValueError("settings contain a value that cannot be stored")
+    if len(json.dumps(patch).encode("utf-8")) > SETTINGS_PATCH_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Settings patch too large")
+
+
 def upsert_user_settings(actor_username: str | None, patch: dict) -> dict:
     """Shallow-merge a PARTIAL `patch` into the CALLER's own user_settings blob
     and return the full merged result. This is a self-service write (like
     update_own_name): `actor_username` comes from the request header and must
     already resolve to a user_security row. Keys absent from `patch` are
-    preserved. The canonical username casing is resolved from user_security (the
-    same case-insensitive match every identity lookup uses) and used as the row
-    key, so header casing can never create a duplicate row."""
+    preserved. A top-level key whose patch value is JSON null is REMOVED from
+    the stored blob (nested nulls are kept as-is). The canonical username casing
+    is resolved from user_security (the same case-insensitive match every
+    identity lookup uses) and used as the row key, so header casing can never
+    create a duplicate row. Keys must be in ALLOWED_SETTINGS_KEYS; an oversize
+    patch or merged blob is 413."""
     username = (actor_username or "").strip()
     if not username:
         raise HTTPException(status_code=401, detail="Not signed in")
     if not isinstance(patch, dict):
         raise ValueError("settings must be a JSON object")
+    _validate_settings_patch(patch)
+    set_part = {k: v for k, v in patch.items() if v is not None}
+    del_keys = [k for k, v in patch.items() if v is None]
     with _pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT username FROM user_security WHERE lower(username) = lower(%s)",
@@ -418,12 +500,15 @@ def upsert_user_settings(actor_username: str | None, patch: dict) -> dict:
         cur.execute(
             "INSERT INTO user_settings (username, settings) VALUES (%s, %s)"
             " ON CONFLICT (username) DO UPDATE SET"
-            "   settings = user_settings.settings || EXCLUDED.settings,"
+            "   settings = (user_settings.settings || EXCLUDED.settings) - %s::text[],"
             "   updated_at = NOW()"
             " RETURNING settings",
-            (canonical, Jsonb(patch)),
+            (canonical, Jsonb(set_part), del_keys),
         )
         merged = cur.fetchone()[0]
+        if len(json.dumps(merged or {}).encode("utf-8")) > SETTINGS_BLOB_MAX_BYTES:
+            conn.rollback()
+            raise HTTPException(status_code=413, detail="Settings too large")
         conn.commit()
     return {"username": canonical, "settings": merged or {}}
 

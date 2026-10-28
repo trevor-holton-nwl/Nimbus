@@ -642,3 +642,132 @@ test('App._trackDirty: an unmapped planner source after a mapped one drops the e
     priorSource.forEach((v, k) => Persistence._dirtySource.set(k, v));
   }
 });
+
+// --- Change-password form (User Settings > Profile) ---------------------------------
+function pwHarness({ values = {}, fetchImpl } = {}) {
+  const els = {};
+  const mk = id => (els[id] = { id, value: values[id] || '', textContent: '', className: '', hidden: true, disabled: false });
+  ['us-current-password', 'us-new-password', 'us-confirm-password', 'us-password-status', 'us-change-password-btn'].forEach(mk);
+  const prior = { doc: globalThis.document, fetch: Util.fetchTraced, toast: Toast.show };
+  const toasts = [];
+  globalThis.document = { getElementById: id => els[id] || null };
+  Toast.show = (m, k) => toasts.push([m, k]);
+  if (fetchImpl) Util.fetchTraced = fetchImpl;
+  return { els, toasts, restore() { globalThis.document = prior.doc; Util.fetchTraced = prior.fetch; Toast.show = prior.toast; } };
+}
+const jsonRes = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const FILLED = { 'us-current-password': 'oldpass12', 'us-new-password': 'newpass12', 'us-confirm-password': 'newpass12' };
+
+test('password validation mirrors the server policy, one rule at a time', () => {
+  const v = SessionUIAdapter._validatePasswordForm;
+  assert.equal(v('', 'newpass12', 'newpass12'), 'sec.password_current_required');
+  assert.equal(v('old', 'short7!', 'short7!'), 'sec.password_too_short');
+  assert.equal(v('old', 'a'.repeat(257), 'a'.repeat(257)), 'sec.password_too_long');
+  assert.equal(v('samepass1', 'samepass1', 'samepass1'), 'sec.password_same_as_current');
+  assert.equal(v('old', 'newpass12', 'newpass13'), 'sec.password_mismatch');
+  assert.equal(v('old', 'a'.repeat(8), 'a'.repeat(8)), null);
+  assert.equal(v('old', 'a'.repeat(256), 'a'.repeat(256)), null);
+});
+
+test('password error mapping is status-first', () => {
+  const m = SessionUIAdapter._passwordErrorFor;
+  assert.deepEqual(m(401, 'Current password is incorrect'), { key: 'sec.password_current_wrong' });
+  assert.deepEqual(m(429, 'x'), { key: 'sec.password_rate_limited' });
+  assert.deepEqual(m(400, 'Password must be at least 8 characters'), { key: 'sec.password_too_short' });
+  assert.deepEqual(m(400, 'Password must be at most 256 characters'), { key: 'sec.password_too_long' });
+  assert.deepEqual(m(400, 'New password must be different from the current password'), { key: 'sec.password_same_as_current' });
+  assert.deepEqual(m(400, 'something odd'), { detail: 'something odd' });
+  assert.deepEqual(m(500, 'boom'), { key: 'sec.password_failed' });
+  assert.deepEqual(m(null), { key: 'sec.password_failed' });
+});
+
+test('changePassword: validation failure shows inline status, sends nothing', async () => {
+  let calls = 0;
+  const h = pwHarness({ values: { 'us-current-password': 'oldpass12', 'us-new-password': 'abc', 'us-confirm-password': 'abc' }, fetchImpl: async () => { calls++; return jsonRes(200, {}); } });
+  try {
+    await SessionUIAdapter.changePassword();
+    assert.equal(calls, 0);
+    assert.equal(h.els['us-password-status'].textContent, Util.t('sec.password_too_short'));
+    assert.equal(h.els['us-password-status'].hidden, false);
+    assert.equal(h.toasts.length, 0);
+    assert.equal(h.els['us-new-password'].value, 'abc');
+  } finally { h.restore(); }
+});
+
+for (const [status, body, key] of [[401, { detail: 'Current password is incorrect' }, 'sec.password_current_wrong'], [429, { detail: 'Too many' }, 'sec.password_rate_limited'], [500, {}, 'sec.password_failed']]) {
+  test(`changePassword: HTTP ${status} shows localized inline message and keeps fields`, async () => {
+    const h = pwHarness({ values: FILLED, fetchImpl: async () => jsonRes(status, body) });
+    try {
+      await SessionUIAdapter.changePassword();
+      assert.equal(h.els['us-password-status'].textContent, Util.t(key));
+      assert.equal(h.els['us-password-status'].className, 'field-error');
+      assert.equal(h.els['us-current-password'].value, 'oldpass12');
+      assert.equal(h.els['us-new-password'].value, 'newpass12');
+      assert.equal(h.els['us-change-password-btn'].disabled, false);
+      assert.equal(h.toasts.length, 0);
+    } finally { h.restore(); }
+  });
+}
+
+test('changePassword: network failure shows the generic message and restores the button', async () => {
+  const h = pwHarness({ values: FILLED, fetchImpl: async () => { throw new Error('offline'); } });
+  try {
+    await SessionUIAdapter.changePassword();
+    assert.equal(h.els['us-password-status'].textContent, Util.t('sec.password_failed'));
+    assert.equal(h.els['us-change-password-btn'].disabled, false);
+    assert.equal(h.els['us-new-password'].value, 'newpass12');
+  } finally { h.restore(); }
+});
+
+test('changePassword: disables the button in flight, blocks a double submit, clears fields on success', async () => {
+  let release, calls = 0;
+  const gate = new Promise(r => { release = r; });
+  const h = pwHarness({ values: FILLED, fetchImpl: async () => { calls++; await gate; return jsonRes(200, { ok: true }); } });
+  try {
+    const first = SessionUIAdapter.changePassword();
+    assert.equal(h.els['us-change-password-btn'].disabled, true);
+    await SessionUIAdapter.changePassword();   // second submit while in flight
+    assert.equal(calls, 1);
+    release();
+    await first;
+    assert.equal(h.els['us-change-password-btn'].disabled, false);
+    for (const id of ['us-current-password', 'us-new-password', 'us-confirm-password']) assert.equal(h.els[id].value, '');
+    assert.equal(h.els['us-password-status'].hidden, true);
+    assert.deepEqual(h.toasts, [[Util.t('sec.password_updated'), 'success']]);
+  } finally { h.restore(); }
+});
+
+test('_resetPasswordForm clears the fields and status (modal open)', () => {
+  const h = pwHarness({ values: FILLED });
+  try {
+    SessionUIAdapter._setPasswordStatus('sec.password_failed');
+    SessionUIAdapter._resetPasswordForm();
+    for (const id of ['us-current-password', 'us-new-password', 'us-confirm-password']) assert.equal(h.els[id].value, '');
+    assert.equal(h.els['us-password-status'].textContent, '');
+    assert.equal(h.els['us-password-status'].hidden, true);
+  } finally { h.restore(); }
+});
+
+test('footer Save with a typed password saves the name, keeps the modal open and shows the hint', async () => {
+  const h = pwHarness({ values: { 'us-new-password': 'typed-but-not-submitted' } });
+  h.els['us-first-name'] = { value: 'Ada' }; h.els['us-last-name'] = { value: 'L' };
+  const priorClose = Modal.close, priorUpdate = Session.updateCachedUser, priorTab = SessionUIAdapter._showUserTab, priorBtn = SessionUIAdapter._renderUserButton;
+  let closed = 0, bodies = [];
+  Modal.close = () => { closed++; };
+  Session.updateCachedUser = () => {};
+  SessionUIAdapter._showUserTab = () => {};
+  SessionUIAdapter._renderUserButton = () => {};
+  Util.fetchTraced = async (_u, init) => { bodies.push(init.body); return jsonRes(200, { first_name: 'Ada', last_name: 'L' }); };
+  try {
+    await SessionUIAdapter.saveProfile();
+    assert.equal(bodies.length, 1);
+    assert.equal(closed, 0);
+    assert.equal(h.els['us-password-status'].textContent, Util.t('sec.password_pending_hint'));
+    assert.equal(h.els['us-password-status'].className, 'form-hint');
+    h.els['us-new-password'].value = '';
+    await SessionUIAdapter.saveProfile();
+    assert.equal(closed, 1);
+  } finally {
+    Modal.close = priorClose; Session.updateCachedUser = priorUpdate; SessionUIAdapter._showUserTab = priorTab; SessionUIAdapter._renderUserButton = priorBtn; h.restore();
+  }
+});

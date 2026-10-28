@@ -800,15 +800,12 @@ export const Dashboard = {
     if (hrs < 24) return Util.t('ui.co_in_hr', { n: hrs });
     return Util.t('ui.co_in_day', { n: Math.round(hrs / 24) });
   },
-  /** Short weekday / numeric month-day in the viewer's language (Util.locale()), shared by the heatmaps and the briefing. */
+  /** Short weekday (viewer's language, Util.locale()) / month-day per the dateFormat pref, shared by the heatmaps and the briefing. */
   _dowShort(dt: Date): string {
     try { return new Intl.DateTimeFormat(Util.locale(), { weekday: 'short' }).format(dt); }
-    catch { return dt.toLocaleDateString('en-US', { weekday: 'short' }); }
+    catch { return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][dt.getDay()]; }
   },
-  _dateNumeric(dt: Date): string {
-    try { return new Intl.DateTimeFormat(Util.locale(), { month: 'numeric', day: 'numeric' }).format(dt); }
-    catch { return dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }); }
-  },
+  _dateNumeric(dt: Date): string { return Util.fmtDateShortPref(dt); },
   /** Display name for a machine key: the data key 'Unknown' (no machine) shows in the viewer's language; every other name is data. */
   _lineLabel(line: string): string { return line === 'Unknown' ? Util.t('ui.unknown_machine') : line; },
   /** One-or-many wording: `key_one` when n === 1, else `key` (the Alert Monitor `am.*_one` pattern). */
@@ -965,7 +962,7 @@ export const Dashboard = {
       <div class="alert-row sev-${a.sev}" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">
         <span class="sev" data-sev="${a.sev}" aria-label="${Util.escapeHtml(Util.t(a.sev === 'err' ? 'ui.sev_error' : a.sev === 'warn' ? 'ui.warning' : 'ui.sev_info'))}"></span>
         <button type="button" class="msg alert-summary-focus" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.escapeHtml(Util.alertMessage(a))}</button>
-        <span class="meta">${a.time ? Util.fmtDTShort(a.time) : ''}</span>
+        <span class="meta">${a.time ? Util.fmtDTShortPref(a.time) : ''}</span>
         <button type="button" class="dismiss" aria-label="${Util.t('btn.dismiss')}" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">×</button>
       </div>
     `).join('');
@@ -988,7 +985,7 @@ export const Dashboard = {
         <span class="pin">🔒</span>
         <span class="id">${Util.escapeHtml(t.MACHINE || '')}</span>
         <span class="name">${Util.escapeHtml(t.text || t.ORDER || t.id)}<small class="reason">${Util.escapeHtml(Engine.firmReasonsText(t))}</small></span>
-        <span class="when">${Util.fmtDTShort(t.end_date)}</span>
+        <span class="when">${Util.fmtDTShortPref(t.end_date)}</span>
         ${Engine.firmActionFor(t) === 'unfirm' ? `<button class="btn btn-ghost sm" data-order-id="${Util.escapeHtml(String(t.id))}">${Util.t('btn.unfirm_dashboard')}</button>` : ''}
       </div>
     `).join('');
@@ -1169,8 +1166,8 @@ export const Dashboard = {
         return `<div class="lh-drill-row" role="button" tabindex="0" data-order-id="${Util.escapeHtml(String(t.id))}">
           <span class="lh-drill-id">${Util.escapeHtml(t.id).slice(0, 10)}</span>
           <span class="lh-drill-name">${Util.escapeHtml(t.text || t.ORDER || t.MATERIAL_DESCRIPTION || t.id)}</span>
-          <span class="lh-drill-due">${Util.escapeHtml(Util.t('ui.lh_due', { date: due ? Util.fmtDTShort(due) : '—' }))}</span>
-          <span class="lh-drill-sched">→ ${sched ? Util.fmtDTShort(sched) : '—'}</span>
+          <span class="lh-drill-due">${Util.escapeHtml(Util.t('ui.lh_due', { date: due ? Util.fmtDTShortPref(due) : '—' }))}</span>
+          <span class="lh-drill-sched">→ ${sched ? Util.fmtDTShortPref(sched) : '—'}</span>
           <span class="lh-drill-late">${lateLbl}</span>
         </div>`;
       }).join('');
@@ -1362,8 +1359,8 @@ export const AlertsUIAdapter = {
 
     const day = new Date(dayKey + 'T12:00:00');
     let dateLabel: string;
-    try { dateLabel = new Intl.DateTimeFormat(Util.locale(), { weekday: 'short', month: 'short', day: 'numeric' }).format(day).toLocaleUpperCase(Util.locale()); }
-    catch { dateLabel = day.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).toUpperCase(); }
+    try { dateLabel = Util.fmtDayLabelPref(day).toLocaleUpperCase(Util.locale()); }
+    catch { dateLabel = Util.fmtDayLabelPref(day).toUpperCase(); }
 
     // -------- Cell context: scheduled hours, capacity, orders, changeovers
     const dayStart = Util.startOfDay(day)!;
