@@ -51,6 +51,10 @@ frontend/optimization/optimizer-prefs.mjs
 frontend/optimization/optimizer-worker-client.mjs
 frontend/optimization/optimizer-worker-contract.mjs
 frontend/optimization/optimizer-worker.mjs
+frontend/optimization/headless-snapshot.mjs
+frontend/optimization/headless-runtime.mjs
+frontend/optimization/headless-cli.mjs
+frontend/optimization/headless-writer.mjs
 frontend/insights/insights-ui.mjs
 frontend/scheduling/gantt-axis-locale.mjs
 frontend/priority-lists/viewers.mjs
@@ -157,3 +161,4 @@ frontend/platform/layout.mjs
 
 # Compiled day-stepper helper (source: frontend/platform/day-stepper.mts)
 frontend/platform/day-stepper.mjs
+frontend/optimization/headless-codec.mjs
