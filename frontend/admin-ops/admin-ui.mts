@@ -14,10 +14,11 @@ import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { ORDER_FIELD_CATALOG } from '../scheduling/order-field-catalog.mjs';
 import { AdminTables } from '../master-data/admin-tables.mjs';
-// AdminCockpit's _setSub dispatches to these three sub-tab renderers.
+// AdminCockpit's _setSub dispatches to these sub-tab renderers (Jobs: jobs-pane.mts).
 import { MasterData } from '../master-data/admin-ui.mjs';
 import { Interface } from '../integration/sap-interface-ui.mjs';
 import { Security } from '../security/security-admin.mjs';
+import { JobsAdmin } from './jobs-pane.mjs';
 
 /* =============================================================================
    AdminCockpit backend response shapes — local interfaces for endpoints
@@ -493,17 +494,21 @@ export const AdminCockpit = {
     const sec = document.getElementById('admin-security-pane');
     const sc  = document.getElementById('admin-system-config-pane');
     const tbl = document.getElementById('admin-table-browser-pane');
+    const jobs = document.getElementById('admin-jobs-pane');
     if (ov) ov.hidden = (sub !== 'overview');
     if (mg) mg.hidden = (sub !== 'manage');
     if (ifc) ifc.hidden = (sub !== 'interface');
     if (sec) sec.hidden = (sub !== 'security');
     if (sc) sc.hidden = (sub !== 'system-config');
     if (tbl) tbl.hidden = (sub !== 'table-browser');
+    if (jobs) jobs.hidden = (sub !== 'jobs');
+    if (sub !== 'jobs') JobsAdmin.setActive(false);
     if (sub === 'manage') MasterData.render();
     else if (sub === 'interface') Interface.render();
     else if (sub === 'security') Security.render();
     else if (sub === 'system-config') SystemConfig.render();
     else if (sub === 'table-browser') AdminTables.render();
+    else if (sub === 'jobs') void JobsAdmin.render();
     else AdminCockpit._renderOverview();
   },
 

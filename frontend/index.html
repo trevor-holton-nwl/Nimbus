@@ -1873,6 +1873,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <button class="admin-subtab" data-sub="security" role="tab" data-i18n="tab.security">Security</button>
           <button class="admin-subtab" data-sub="system-config" role="tab" data-i18n="tab.system_config">System Configuration</button>
           <button class="admin-subtab" data-sub="table-browser" role="tab" data-i18n="tab.table_browser">Table Browser</button>
+          <button class="admin-subtab" data-sub="jobs" role="tab" data-i18n="tab.jobs">Jobs</button>
         </nav>
 
         <!-- OVERVIEW PANE -->
@@ -2185,6 +2186,18 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
              (GET /admin/tables et al.), deliberately separate from the
              editable Manage Data Tables grid above. See frontend/admin-tables.mts. -->
         <div id="admin-table-browser-pane" hidden><div id="admin-table-browser-host"></div></div>
+        <!-- Admin > Jobs (jobs-admin in admin-ops/jobs-pane.mts): sub-tab strip + three views filled at runtime. -->
+        <div id="admin-jobs-pane" class="job-pane" hidden>
+          <p class="ape-hint" id="jobs-readonly-note" data-i18n="jobs.readonly_note" hidden>Only admins can create or change jobs.</p>
+          <nav class="admin-subtabs admin-ov-tabs" role="tablist">
+            <button class="sub-subtab active" data-jobs-tab="jobs" role="tab" aria-selected="true" data-i18n="jobs.tab_jobs">Jobs</button>
+            <button class="sub-subtab" data-jobs-tab="runs" role="tab" aria-selected="false" data-i18n="jobs.tab_runs">Runs</button>
+            <button class="sub-subtab" data-jobs-tab="upcoming" role="tab" aria-selected="false" data-i18n="jobs.tab_upcoming">Upcoming</button>
+          </nav>
+          <div id="jobs-view-jobs"></div>
+          <div id="jobs-view-runs" hidden></div>
+          <div id="jobs-view-upcoming" hidden></div>
+        </div>
 
       </div>
     </div>
@@ -2394,6 +2407,18 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <!-- =========================================================
      MODAL: Alert profile editor (body/foot rendered by AlertProfileEditor)
      ========================================================= -->
+<div class="modal-backdrop" id="modal-job-edit" data-no-backdrop-close hidden>
+  <div class="modal job-modal">
+    <header class="modal-head">
+      <h3 id="jb-title" data-i18n="jobs.title_new">New job</h3>
+      <button class="icon-btn sm" id="jb-close" type="button" aria-label="Close" data-i18n-title="btn.close">✕</button>
+    </header>
+    <div class="modal-body" id="jb-body"></div>
+    <footer class="modal-foot" id="jb-foot"></footer>
+  </div>
+</div>
+
+<!-- Job editor above: body/foot rendered by JobsDialog (Admin > Jobs); data-no-backdrop-close so a stray click cannot discard a half-built schedule. -->
 <div class="modal-backdrop" id="modal-alert-profile" hidden>
   <div class="modal ape-modal">
     <header class="modal-head">
