@@ -592,18 +592,19 @@ function _moveGroup(key: string): void {
   const ids = counts.movableIds;
   const n = counts.movableOrders;   // distinct orders, as the button says
   if (n === 0) return;
-  if (n <= GROUP_MOVE_CONFIRM_ABOVE) { _runBatchMove(key, ids); return; }
+  if (n <= GROUP_MOVE_CONFIRM_ABOVE) { void _runBatchMove(key, ids); return; }
   void Modal.confirm({ title: t('am.group_fix_n', { n }), message: t('am.group_fix_confirm', { n }) })
-    .then(ok => { if (ok) _runBatchMove(key, ids); });
+    .then(ok => { if (ok) void _runBatchMove(key, ids); });
 }
 
 /**
- * Sequential batch: `Alerts.applyFix(id, { quiet: true })` is synchronous and dismisses the alert on success, so an id that
- * has left Store.alerts afterwards means that order moved. The moved order's other alerts (and its peers' alerts) stay in
+ * Sequential batch: `await Alerts.applyFix(id, { quiet: true })` resolves true and dismisses the alert on success (false = refused:
+ * nothing changed and the alert stays, e.g. a Fix overload that would leave an error or was cancelled at the tooling confirm; the
+ * batch then simply continues with the next alert), so an id that has left Store.alerts afterwards means that order moved. The moved order's other alerts (and its peers' alerts) stay in
  * Store.alerts until the debounced recompute, so any alert naming an already-moved order is skipped: it describes a
  * position that no longer exists. One summary toast; focus returns to the group head.
  */
-function _runBatchMove(key: string, ids: string[]): void {
+async function _runBatchMove(key: string, ids: string[]): Promise<void> {
   if (Sandbox.active) return;
   const movedOrders = new Set<string>();
   try {
@@ -611,8 +612,8 @@ function _runBatchMove(key: string, ids: string[]): void {
       const a = Store.alerts.find(x => x.id === id);
       if (!a) continue;                                    // already gone (cleared by an earlier move or a recompute)
       if (alertOrderIds(a).some(oid => movedOrders.has(oid))) continue;   // the order itself or ANY holder/peer already moved
-      Alerts.applyFix(id, { quiet: true });
-      if (!Store.alerts.some(x => x.id === id)) movedOrders.add(String(a.taskId ?? id));
+      const applied = await Alerts.applyFix(id, { quiet: true });
+      if (applied !== false && !Store.alerts.some(x => x.id === id)) movedOrders.add(String(a.taskId ?? id));
     }
   } catch (e) {
     Toast.show((e as Error)?.message || String(e), 'error');   // reported once; what moved before the throw is still summarised below
@@ -666,8 +667,7 @@ function _runAlertAction(action: string | undefined, alertId: string, taskId?: s
     case 'focus': nim.AlertsUIAdapter?.focus?.(alertId); break;
     case 'fix':
       if (Sandbox.active) return;
-      Alerts.applyFix(alertId);
-      break;
+      return Promise.resolve(Alerts.applyFix(alertId)).then(() => undefined);
     case 'override': {
       if (Sandbox.active) return;
       if (taskId) nim.Table?._openOverrideModalForId?.(taskId);
@@ -1174,7 +1174,8 @@ function _onLevAction(act: string, key: string): void {
     case 'cal-fix':
       if (Sandbox.active || action.kind !== 'calendar-day') return;
       item.alertIds.forEach(id => _levAttempted.add(id));
-      for (const id of action.fixableAlertIds) Alerts.applyFix(id);
+      // One at a time: a Fix overload may stop at its own confirm, and each fix reads the schedule the previous one left.
+      void (async () => { for (const id of action.fixableAlertIds) await Alerts.applyFix(id); })();
       break;
     case 'edit-calendar':
       if (action.kind === 'calendar-day') {

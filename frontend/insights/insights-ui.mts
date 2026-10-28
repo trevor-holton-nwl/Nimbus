@@ -1272,7 +1272,7 @@ export const AlertsUIAdapter = {
     } else if (action === 'tool-inventory') {
       AlertsUIAdapter.openToolInventory(alertId);
     } else if (action === 'fix') {
-      Alerts.applyFix(alertId);
+      void Alerts.applyFix(alertId);
     } else if (action === 'dismiss') {
       // The Dashboard row itself is a focus target; a nested dismiss button
       // must not bubble into that second action.

@@ -20,7 +20,7 @@
    ========================================================================== */
 
 import { Store, UndoStack } from '../platform/store.mjs';
-import { Util, Modal, Toast } from '../platform/foundation.mjs';
+import { Config, Util, Modal, Toast } from '../platform/foundation.mjs';
 import type { NimbusTask } from '../platform/types.mjs';
 import { Session } from '../security/session.mjs';
 import { Runtime, normPv } from '../routing/runtime-client.mjs';
@@ -29,9 +29,42 @@ import { Alerts, Utilization } from '../insights/services.mjs';
 import { Engine } from '../optimization/engine.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { planningReasonText } from '../scheduling/planning-reason.mjs';
+import { raiseToolInventory } from '../optimization/tool-queue-confirm.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
+
+/** Tool Inventory: would placing `task` on `machine` so it ENDS at `finish` take a tool over its copies? Returns the first
+ *  tool whose over-capacity cluster involves this order (it holds an unplaced order today, so any such cluster is new), else
+ *  null. Warn-only: Slot never refuses and never moves anything. Reads the compute core's shared functions, so it agrees with
+ *  the Gantt alert. null when the inventory is not loaded or the core is unreachable. */
+export function slotToolOverage(args: {
+  task: NimbusTask; machine: string; finish: Date; needHours: number | null; plant: string; now?: Date | null;
+  tasks?: ReadonlyArray<NimbusTask>;
+}): { tool: string; available: number } | null {
+  const core = globalThis.NimbusComputeCore;
+  const inventory = Store.masterData?.tool_inventory;
+  if (!core || inventory === undefined) return null;
+  const tools = core.taskToolIds(args.task);
+  if (!tools.length) return null;
+  const hours = args.needHours ?? Util.runHours(args.task);
+  if (!(hours > 0)) return null;
+  const id = String(args.task.id);
+  const plantOf = (t: NimbusTask): string => t.PLANT || Store.getPlantForLine(t.MACHINE || 'Unknown') || '';
+  const items: Array<{ id: string; line: string; plant: string; tools: string[]; start: Date; end: Date }> = [];
+  for (const other of args.tasks ?? Store.tasksArr) {
+    if (String(other.id) === id || plantOf(other) !== args.plant) continue;
+    const otherTools = core.taskToolIds(other);
+    if (!otherTools.length) continue;
+    const iv = core.toolOccupancyInterval(other);
+    if (iv) items.push({ id: String(other.id), line: other.MACHINE || 'Unknown', plant: args.plant, tools: otherTools, start: iv.start, end: iv.end });
+  }
+  items.push({ id, line: args.machine, plant: args.plant, tools, start: new Date(args.finish.getTime() - hours * Config.MS_HOUR), end: args.finish });
+  const capacity = core.buildToolCapacity({ tool_inventory: inventory });
+  const hit = core.findToolOverages({ items, capacityFor: (p: string, tool: string) => core.availableCopies(capacity, p, tool), now: args.now ?? undefined })
+    .find(c => c.pusher === id || c.holders.some(h => h.id === id));
+  return hit ? { tool: hit.tool, available: hit.available } : null;
+}
 
 /** How many calendar days a closed target day may walk back to find the latest open working window. */
 export const SLOT_LOOKBACK_DAYS = 30;
@@ -425,12 +458,20 @@ function _orderLabel(task: NimbusTask): string {
   return Util.orderNumber(task, String(task.id));
 }
 
+/** "Raise inventory" next to a tool-queued order's reason: the same deep link as the Optimize preview. */
+function _raiseHtml(task: NimbusTask): string {
+  const reason = task.planning_reason;
+  const tool = typeof reason?.tool_id === 'string' ? reason.tool_id : '';
+  if (!tool || !String(reason?.code ?? '').startsWith('tool_')) return '';
+  return `<button type="button" class="btn btn-ghost sm" data-asl-raise="${esc(tool)}">${esc(t('ui.opt_tool_raise'))}</button>`;
+}
+
 function _bodyHtml(task: NimbusTask): string {
   const nowFits = !!Store.alertsByTask().get(String(task.id))?.some(a => a.type === 'queued_now_fits');
   const reason = planningReasonText(task.planning_reason, t, { nowFits });
   return `<div class="form-row"><label>${esc(t('ui.insp_order'))}</label>`
     + `<div class="readonly" id="asl-order">${esc(_orderLabel(task))} · ${esc(task.MACHINE || '—')}</div></div>`
-    + (reason ? `<div class="form-row"><div class="hint" id="asl-reason">${esc(reason)}</div></div>` : '')
+    + (reason ? `<div class="form-row"><div class="hint" id="asl-reason">${esc(reason)}</div>${_raiseHtml(task)}</div>` : '')
     + `<div class="form-row"><label for="asl-day">${esc(t('am.slot_day'))}</label>`
     + `<input type="text" id="asl-day" autocomplete="off"></div>`
     + `<div class="form-row"><label for="asl-pair">${esc(t('am.slot_pair'))}</label>`
@@ -485,6 +526,10 @@ function _wire(): void {
   const shell = _el('modal-alert-slot') as (HTMLElement & { _aslWired?: boolean }) | null;
   if (!shell || shell._aslWired) return;
   shell._aslWired = true;
+  _el('asl-body')?.addEventListener('click', e => {
+    const tool = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-asl-raise]')?.dataset.aslRaise;
+    if (tool && _s) { const plant = _s.plant; AlertSlotModal.close(); raiseToolInventory(plant, tool); }
+  });
   _el('asl-body')?.addEventListener('change', e => {
     const target = e.target as (HTMLElement & { value?: string }) | null;
     if (target?.id === 'asl-pair' && _s) _s.picked = target.value ?? null;
@@ -584,12 +629,18 @@ export const AlertSlotModal = {
     try {
       // "Fits" must mean a real gap: the totals can fit while the free time is cut up by other orders (not viaGap).
       const short = cand.needHours === null || cand.freeHours === null || cand.needHours > cand.freeHours || !fin.viaGap;
-      if (fin.movedBack > 0 || short) {
+      // Tool Inventory: warn (never refuse) when the slotted interval would put a tool over its copies.
+      const toolOver = slotToolOverage({ task: first, machine, finish: fin.finish, needHours: cand.needHours, plant: s.plant, now: slotSeams.plantNow(s.plant) });
+      if (fin.movedBack > 0 || short || toolOver) {
+        const base = fin.movedBack > 0
+          ? t('am.slot_confirm_closed', { order: _orderLabel(first), machine, day: s.day, moved: fin.day })
+          : short
+            ? t('am.slot_confirm_short', { order: _orderLabel(first), machine, day: s.day })
+            : '';
+        const toolClause = toolOver ? t('am.slot_confirm_tool', { tool: toolOver.tool, available: toolOver.available }) : '';
         const ok = await Modal.confirm({
           tone: 'warn', title: t('am.slot_confirm_title'),
-          message: fin.movedBack > 0
-            ? t('am.slot_confirm_closed', { order: _orderLabel(first), machine, day: s.day, moved: fin.day })
-            : t('am.slot_confirm_short', { order: _orderLabel(first), machine, day: s.day }),
+          message: [base, toolClause].filter(Boolean).join(' '),
           confirmLabel: t('am.slot_confirm_place'),
         });
         if (_s !== s || !ok) return;   // closed meanwhile (a plant change) or cancelled

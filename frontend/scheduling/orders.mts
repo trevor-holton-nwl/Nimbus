@@ -39,6 +39,8 @@ import { Persistence } from './persistence.mjs';
 import { SetupAdmin } from '../setup/setup-admin.mjs';
 import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
 import { planningReasonText } from './planning-reason.mjs';
+import { toolingRowHtml, warnUnknownToolId } from './order-tooling.mjs';
+import { raiseToolInventory } from '../optimization/tool-queue-confirm.mjs';
 import { Timeline, TimelineNav, setupDiagnosticLabel, setupSourceLabel } from './gantt.mjs';
 import type { SetupPresentationDetail } from './gantt.mjs';
 import type { NimbusTask, SetupStateKey, SetupOccurrenceOverride } from '../platform/types.mjs';
@@ -1483,6 +1485,12 @@ export const Table = {
       Table._api!.applyTransaction({ update: [Store.tasks[id]] });
       Toast.show(Util.t('toast.row_updated'), 'success', 1200);
       return;
+    } else if (field === 'PRT_01' || field === 'PRT_02') {
+      // Trim on commit; an id with no inventory row only draws a soft warning (never blocks the edit). A per-order PRT edit
+      // is overwritten by the next material-plant stamp.
+      const typed = String(p.newValue ?? '').trim();
+      changes[field] = typed;
+      warnUnknownToolId(p.data, typed);
     } else {
       changes[field!] = p.newValue;
     }
@@ -2634,6 +2642,7 @@ export const Inspector = {
           return `<div class="insp-row"><label>${Util.t(field.i18nInspectorKey)}</label>
             <div class="insp-val"><input type="text" data-field="${key}" value="${Util.escapeHtml(value)}"></div></div>`;
         }).join('')}
+        ${toolingRowHtml(task)}
         ${pairSelect ? `<div class="insp-row"><label>${Util.t('ui.insp_pv_machine')}</label>
           <div class="insp-val"><select data-field="PV_MACHINE">
             ${pairOptions.map(o => `<option value="${Util.escapeHtml(o.value)}" ${o.value === pairCurrent ? 'selected' : ''}>${Util.escapeHtml(o.label)}</option>`).join('')}
@@ -2769,6 +2778,9 @@ export const Inspector = {
     body.querySelectorAll<HTMLButtonElement>('[data-act="focus-sibling"]').forEach((el) => {
       const sid = el.dataset.id;
       if (sid) el.addEventListener('click', () => NIMBUS!.Timeline!.focus!(sid));
+    });
+    body.querySelectorAll<HTMLButtonElement>('[data-act="open-tool-inventory"]').forEach((el) => {
+      el.addEventListener('click', () => raiseToolInventory(el.dataset.plant, el.dataset.tool ?? ''));
     });
     body.querySelector('[data-act="open-distribution"]')?.addEventListener('click', () => {
       const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;
@@ -2931,6 +2943,10 @@ export const Inspector = {
       changes.notes = value.trim() || null;
       Inspector._updateNote(id, changes.notes ?? null);
       return;
+    } else if (field === 'PRT_01' || field === 'PRT_02') {
+      const typed = value.trim();
+      changes[field] = typed;
+      warnUnknownToolId(t, typed);
     } else {
       if (field === 'MACHINE') {
         const newMachine = value || 'Unknown';

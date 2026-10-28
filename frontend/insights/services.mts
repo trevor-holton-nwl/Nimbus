@@ -46,7 +46,8 @@
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
-import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
+import { Engine, deriveSetupObservation, snapshotSchedule } from '../optimization/engine.mjs';
+import { confirmToolQueue, toolQueueSummary } from '../optimization/tool-queue-confirm.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { planningReasonText } from '../scheduling/planning-reason.mjs';
 import { alertOrderIds } from './alert-profiles.mjs';
@@ -662,22 +663,23 @@ export const Alerts = {
   },
 
   /**
-   * One-click fix. `quiet` suppresses the per-order toasts (moved / cannot fix) and nothing else: a caller that runs
+   * One-click fix; resolves true when something was applied. Async because the overload fix is judged on a detached
+   * candidate first and may ask to confirm tooling queues (Cancel applies nothing and keeps the alert). `quiet` suppresses the per-order toasts (moved / cannot fix) and nothing else: a caller that runs
    * many fixes (the Alert Monitor's "Move N orders") reports one summary itself. The result is the alert id leaving `Store.alerts`.
    */
-  applyFix(alertId: string, opts?: { quiet?: boolean }): void {
+  async applyFix(alertId: string, opts?: { quiet?: boolean }): Promise<boolean> {
     const quiet = opts?.quiet === true;
     const a = Store.alerts.find(x => x.id === alertId);
-    if (!a) return;
+    if (!a) return false;
 
     if (a.type === 'overlap' || a.type === 'blackout' || a.type === 'tool-conflict') {
       const task = Store.tasks[a.taskId!];
-      if (!task || !task.start_date) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
+      if (!task || !task.start_date) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return false; }
       // Firmed orders are immovable. firmingStatus is the EFFECTIVE set — frozen horizon,
       // the manual flag and running (in progress), all on this parent-level task — not just
       // Store.isFirmed. SAP's firm flag is display-only and does not block a fix. Optimizer runs and autoReflow already honor the same union.
       // G-0.25: a row carrying an approved placement exception ('overtime' / 'overlong') is fixed the same way.
-      if (task.placement_exception || Engine.firmingStatus(task).firmed) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_firmed'), 'warn', 5000); return; }
+      if (task.placement_exception || Engine.firmingStatus(task).firmed) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_firmed'), 'warn', 5000); return false; }
       const line = task.MACHINE || 'Unknown';
       const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
       const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
@@ -695,7 +697,7 @@ export const Alerts = {
         if (a.type === 'tool-conflict' && a.available === 0) {
           // No copy exists (quantity 0 / all out of service): moving this order can never clear the conflict.
           if (!quiet) Toast.show(Util.t('toast.cannot_fix_tool_unavailable'), 'error');
-          return;
+          return false;
         }
         const d = a.type === 'tool-conflict' && a.inUse != null && a.available != null ? Math.max(1, a.inUse - a.available) : 1;
         const release = releases.length ? releases[Math.min(d, releases.length) - 1] : null;
@@ -710,7 +712,7 @@ export const Alerts = {
         if (!found) {
           // No slot (overlong order / closed line / nothing within 90 days): never move the order.
           if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error');
-          return;
+          return false;
         }
         newStart = found;
         const newEnd = new Date(newStart.getTime() + dur);
@@ -726,7 +728,7 @@ export const Alerts = {
         }
         if (!changes.start_date || !changes.end_date) {
           if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error');
-          return;
+          return false;
         }
         newStart = changes.start_date;
       }
@@ -735,6 +737,7 @@ export const Alerts = {
       UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap), [task.id]);
       Alerts.dismiss(alertId);
       if (!quiet) Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(changes.end_date ?? newStart) }), 'success');
+      return true;
 
     } else if (a.type === 'overload') {
       // Scope the changeover optimizer to just this line+day so the optimize and the
@@ -745,7 +748,7 @@ export const Alerts = {
       const plant = Store.getPlantForLine(line) || Store.selectedPlant;
       if (!plant || !Store.plantNow(plant)) {   // VM6 (OQ52): no clock, no placement; same refusal as the Optimize dialog
         Toast.show(Util.t('toast.optimize_plant_no_timezone', { plant: plant ?? '' }), 'error', 9000);
-        return;
+        return false;
       }
       const dayStart = Util.startOfDay(a.time || new Date())!;
       const dayEnd   = new Date(dayStart.getTime() + 24 * Config.MS_HOUR);
@@ -758,10 +761,24 @@ export const Alerts = {
         (!t.end_date   || t.end_date   >= dayStart) &&
         (!t.start_date || t.start_date <= dayEnd)
       ).map(t => t.id));
-      Engine.runAndApply('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd });
+      // Detached run first (never the live Store): the result is judged BEFORE anything changes. An error finding means
+      // the optimizer would leave the schedule invalid, so nothing is applied, no Undo entry is pushed and the alert
+      // stays. Orders it would queue for tooling need the same confirm as the Optimize preview (Cancel default).
+      const candidate = Engine.evaluateSchedule('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd }, snapshotSchedule(plant));
+      if (candidate.status === 'invalid_horizon' || candidate.validationFindings?.some(finding => finding.severity === 'error')) {
+        Toast.show(Util.t('toast.fix_overload_blocked'), 'error', 7000);
+        return false;
+      }
+      if (toolQueueSummary(candidate, candidate.patches).queued.length && !(await confirmToolQueue(candidate, candidate.patches))) return false;
+      Engine.applySchedulePatches(candidate.patches);
+      Store.setLastOptimize(new Date(), 'engine');
+      Alerts.clearDismissed();
+      Alerts.scheduleRecompute();
       UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
       Alerts.dismiss(alertId);
+      return true;
     }
+    return false;
   },
 
   // -- Adaptive debounced dispatcher state/methods -----------------------
