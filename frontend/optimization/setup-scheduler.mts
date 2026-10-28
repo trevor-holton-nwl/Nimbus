@@ -928,7 +928,16 @@ export interface CandidateResult {
   /** Ids of placed, user-scheduled orders that straddle the window end and are
    * held in place (see `isWindowEndBoundary`). Preview-only tally. */
   windowEndHeldIds?: readonly string[];
+  /** Tool Inventory: orders queued to Needs Planning because a tool had no free copy (Wave 6 fills these; absent = none).
+   * Plain arrays so they survive the worker structuredClone and `rehydrateOptimizerCandidate`'s spread. */
+  toolBlocked?: readonly ToolBlockedEntry[];
+  /** Tool Inventory: orders re-placed into a tool-free gap (Wave 6; absent = none). */
+  toolMoved?: readonly ToolMovedEntry[];
+  /** Tool Inventory: `complete: false` = the overflow pass hit its budget and queued the rest without a full search. */
+  toolPass?: { complete: boolean; elapsedMs: number };
 }
+export interface ToolBlockedEntry { orderId: string; tool: string; available: number; inUse: number; holderIds: readonly string[] }
+export interface ToolMovedEntry { orderId: string; tool: string; fromStart: string | null; fromEnd: string | null; toStart: string; toEnd: string }
 
 interface DueDateGroup {
   key: string;
@@ -2887,6 +2896,12 @@ function minProductiveSegmentMinutesForSnapshot(snapshot: Readonly<ScheduleSnaps
 function unknownSetupPolicyForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): UnknownSetupPolicy {
   const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.setup_policy_config?.unknownSetupPolicy;
   return value === 'plantDefaultMinutes' || value === 'excludeFromSearch' ? value : 'zero';
+}
+/** Tool Inventory: Store-free read of the plant's tooling rule; absent/garbage -> 'off'. Deliberately NOT gated on
+ * `bounds.setup.synthetic` (setup-off plants still get the tool rule). */
+export function toolingRuleForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): 'off' | 'hard' {
+  const value = snapshot.masterData?.plants?.find(candidate => candidate.plant === plant)?.setup_policy_config?.toolingRule;
+  return value === 'hard' ? 'hard' : 'off';
 }
 function unknownSetupDefaultMinutesForSnapshot(snapshot: Readonly<ScheduleSnapshot>, plant: string): number {
   const value = snapshot.masterData?.plants.find(candidate => candidate.plant === plant)?.setup_policy_config?.unknownSetupDefaultMinutes;

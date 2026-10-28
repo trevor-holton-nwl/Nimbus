@@ -21,13 +21,14 @@ import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
 import { runOptimizerPreview } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidate, validateCandidateForApply } from './setup-scheduler.mjs';
-import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch } from './setup-scheduler.mjs';
+import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidate, validateCandidateForApply, toolingRuleForSnapshot } from './setup-scheduler.mjs';
+import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
+import { confirmToolQueue, toolQueueSummary, raiseToolInventory } from './tool-queue-confirm.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
-import type { NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
+import type { NimbusMasterData, NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
 
 /* =============================================================================
    OPTIMIZE DIALOG — time-window & strategy picker for Engine.runAndApply
@@ -751,6 +752,13 @@ export const OptimizeDialog = (() => {
       if (!proceed) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
     }
 
+    // Tool Inventory (rule Hard only; Remove Backlog ignores the rule): the run must read loaded, current counts.
+    if (_mode !== 'backlog' && !(await ensureToolInventoryForRun(plant))) {
+      if (!exhaustive) OptimizerPreview.hideLoading();
+      restoreRunBtn();
+      return;
+    }
+
     const linesScope = (_scope === 'lines' && _selectedLines.size) ? Array.from(_selectedLines) : null;
     const optsForEngine: OptimizerRunOptions = {
       plant,
@@ -1003,6 +1011,46 @@ function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): str
   return Util.t('ui.opt_pv_plan_pruned_mixed', { better: better.join(' and '), worse: worse.join(' and ') });
 }
 
+/** Tool Inventory: the plant's tooling rule plus its inventory rows, as one comparable string. A preview or a finished
+ *  background run keeps the value it ran on; a different live value means the tool facts moved under it. Rows are sorted
+ *  by tool id so the order the server returned them in never matters; an unloaded inventory is distinct from an empty one. */
+export function toolFingerprint(masterData: NimbusMasterData | null | undefined, plant: string): string {
+  const rule = toolingRuleForSnapshot({ masterData: masterData ?? null } as unknown as ScheduleSnapshot, plant);
+  const inventory = masterData?.tool_inventory;
+  const rows = inventory === undefined ? null : inventory
+    .filter(row => !row.plant || row.plant === plant)
+    .map(row => [String(row.tool_id), row.total_qty, row.out_of_service_qty] as const)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return JSON.stringify({ r: rule, i: rows });
+}
+
+function liveToolingRule(plant: string): 'off' | 'hard' {
+  return toolingRuleForSnapshot({ masterData: Store.masterData ?? null } as unknown as ScheduleSnapshot, plant);
+}
+
+/** Optimize start, rule Hard only: make sure this plant's tool inventory is loaded and current before the run reads it.
+ *  Not loaded -> one fetch; still not loaded -> ask (Cancel default: every tool would count as 1 copy). Loaded -> a cheap
+ *  version probe, and a re-read only when the server's version differs from the one the held rows were read at.
+ *  Resolves false when the planner cancelled. Backlog and rule Off never call this. */
+export async function ensureToolInventoryForRun(plant: string): Promise<boolean> {
+  if (liveToolingRule(plant) !== 'hard') return true;
+  if (Store.masterData?.tool_inventory === undefined) {
+    await Persistence.refreshToolInventory(plant);
+    if (Store.masterData?.tool_inventory === undefined) {
+      return Modal.confirm({
+        title: Util.t('modal.opt_tool_inventory_not_loaded'),
+        confirmLabel: Util.t('btn.opt_run_anyway'),
+        tone: 'warn',
+      });
+    }
+    return true;
+  }
+  const version = await Persistence._readToolInventoryVersion(plant);
+  const baseline = Persistence._toolInventoryBaseline[plant];
+  if (version !== undefined && baseline !== undefined && version !== baseline) await Persistence.refreshToolInventory(plant);
+  return true;
+}
+
 const PREVIEW_TASK_CHANGE_EVENTS = new Set<StoreEvent['type']>([
   'task:update', 'tasks:bulkUpdate', 'tasks:bulk', 'task:remove',
 ]);
@@ -1051,6 +1099,8 @@ interface PreviewResult {
   backlogResult: RemoveBacklogResult | null; backlogAudit: PreviewBacklogAudit | null;
   auditDetails: OptimizationAuditDetails | null; syntheticSetup: boolean;
   startedAt: number; runtimeMs: number;
+  /** `toolFingerprint` of the plant's tool facts when the run started (compared with the live Store later). */
+  toolFingerprint?: string;
 }
 
 export const OptimizerPreview = {
@@ -1105,6 +1155,8 @@ export const OptimizerPreview = {
   _staleReason: null as string | null,
   _staleMessageKey: null as string | null,
   _taskBaseline: null as Map<string, string> | null,
+  /** Tool facts (rule + inventory) the open preview ran on; null = unknown (never stales on tool changes). */
+  _toolFingerprint: null as string | null,
   _taskWatchUnsubscribe: null as (() => void) | null,
   _applying: false,
   /** True for a result opened from the background-finished popup: when local edits stale it, Apply becomes
@@ -1259,6 +1311,19 @@ export const OptimizerPreview = {
     return { pairs, total: candidate.missingEdges.length };
   },
 
+  /** CSV of the tool-blocked list (every entry, not just the 50 shown); each cell goes through Util.csvCell. */
+  toolBlockedCsv(
+    entries: ReadonlyArray<{ orderId: string; tool: string; available: number; inUse: number; holderIds: readonly string[] }>,
+    labelOf: (id: string) => string = id => id,
+    linesById: ReadonlyMap<string, string> = new Map(),
+  ): string {
+    const header = ['order', 'line', 'tool', 'available', 'in_use', 'holders'];
+    return [header, ...entries.map(entry => [
+      labelOf(entry.orderId), linesById.get(String(entry.orderId)) ?? '', entry.tool, entry.available, entry.inUse,
+      entry.holderIds.map(labelOf).join(' '),
+    ])].map(row => row.map(Util.csvCell).join(',')).join('\n');
+  },
+
   missingPairsCsv(pairs: ReadonlyArray<PreviewExplanation['missingPairs'][number]>): string {
     // Util.csvCell: RFC-4180 quoting AND the spreadsheet formula guard (a state/order value
     // starting with = + - @ must not execute when the planner opens the export in Excel).
@@ -1309,6 +1374,17 @@ export const OptimizerPreview = {
   _startTaskWatch(): void {
     OptimizerPreview._stopTaskWatch();
     OptimizerPreview._taskWatchUnsubscribe = Store.subscribe(event => {
+      // Tool Inventory / tooling rule edits (any session's, via the freshness probe too) stale an open preview: the
+      // numbers and the Tool-blocked list were computed against the old counts.
+      if (event.type === 'master-data-changed') {
+        const table = (event as unknown as { table?: string }).table;
+        if (OptimizerPreview.active && OptimizerPreview._toolFingerprint !== null && OptimizerPreview._plant
+          && (table === 'tool_inventory' || table === 'plants')
+          && toolFingerprint(Store.masterData, OptimizerPreview._plant) !== OptimizerPreview._toolFingerprint) {
+          OptimizerPreview._markTaskStale('tool inventory or tooling rule changed', 'ui.opt_stale_banner_tooling');
+        }
+        return;
+      }
       if (!OptimizerPreview.active || !OptimizerPreview._taskBaseline
         || !PREVIEW_TASK_CHANGE_EVENTS.has(event.type)) return;
       // Group 26: the engine re-deriving starts (run time changed, calendar landed) under an open preview makes
@@ -1631,6 +1707,7 @@ export const OptimizerPreview = {
       preKpis, postKpis, explanation, previewDiagnostics, splitOrderPolicy,
       backlogResult, backlogAudit, auditDetails, syntheticSetup,
       startedAt, runtimeMs: 0,
+      toolFingerprint: toolFingerprint(candidateSnapshot.masterData, plant),
     };
     onPrimary?.(base);
 
@@ -1718,6 +1795,7 @@ export const OptimizerPreview = {
   _installPreviewResult(result: PreviewResult): void {
     OptimizerPreview._snapshot = result.snapshot;
     OptimizerPreview._taskBaseline = result.taskBaseline;
+    OptimizerPreview._toolFingerprint = result.toolFingerprint ?? null;
     OptimizerPreview._preKpis  = result.preKpis;
     OptimizerPreview._postKpis = result.postKpis;
     OptimizerPreview._candidate = result.candidate;
@@ -2138,17 +2216,45 @@ export const OptimizerPreview = {
         ${distributionSeparationFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}
       </div>
     </details>` : '';
+    // Tool Inventory (all of this is empty/absent while the candidate carries no toolBlocked/toolMoved/toolPass).
+    const toolBlocked = OptimizerPreview._candidate?.toolBlocked ?? [];
+    const toolMovedCount = new Set((OptimizerPreview._candidate?.toolMoved ?? []).map(entry => entry.orderId)).size;
+    const toolIncomplete = OptimizerPreview._candidate?.toolPass?.complete === false;
+    const linesById = new Map((OptimizerPreview._snapshot ?? []).map(task => [String(task.id), task.MACHINE || '']));
+    const labelOf = (id: string): string => String(orderLabels.get(id) ?? id);
+    const toolBlockedHtml = toolBlocked.length ? `<details class="opt-pv-section" data-opt-tool-section>
+      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${Util.escapeHtml(Util.t('ui.opt_tool_blocked_title', { n: toolBlocked.length }))}</span><span class="opt-pv-section-badge">${toolBlocked.length}</span></summary>
+      <div class="opt-pv-section-body">
+        <div><button type="button" class="btn btn-sm" data-opt-tool-export>${Util.escapeHtml(Util.t('ui.opt_tool_export'))}</button></div>
+        <table class="opt-pv-tool-table">
+          <thead><tr><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_order'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_tool'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_avail'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_holders'))}</th><th></th></tr></thead>
+          <tbody>${toolBlocked.slice(0, 50).map(entry => {
+            const holders = entry.holderIds.slice(0, 5).map(labelOf).join(', ') + (entry.holderIds.length > 5 ? ` ${Util.t('ui.opt_bg_more', { count: entry.holderIds.length - 5 })}` : '');
+            return `<tr><td>${Util.escapeHtml(labelOf(entry.orderId))}</td><td>${Util.escapeHtml(linesById.get(String(entry.orderId)) ?? '')}</td><td>${Util.escapeHtml(entry.tool)}</td><td>${entry.available} / ${entry.inUse}</td><td>${Util.escapeHtml(holders)}</td><td><button type="button" class="btn btn-sm" data-opt-tool-raise="${Util.escapeHtml(entry.tool)}">${Util.escapeHtml(Util.t('ui.opt_tool_raise'))}</button></td></tr>`;
+          }).join('')}</tbody>
+        </table>
+        ${toolBlocked.length > 50 ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_first_50'))}</div>` : ''}
+      </div>
+    </details>` : '';
+    const toolNoteHtml = (toolMovedCount || toolIncomplete) ? `<div class="opt-pv-footer-note" role="status">
+      ${toolMovedCount ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_moved_summary', { n: toolMovedCount }))}</div>` : ''}
+      ${toolIncomplete ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_incomplete'))}</div>` : ''}
+    </div>` : '';
+    const toolingChipHtml = OptimizerPreview._toolFingerprint !== null && (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r === 'hard'
+      ? `<div class="opt-pv-chip opt-pv-chip-tooling" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling_title'))}">${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling'))}</div>` : '';
     body.innerHTML = `
       <div class="opt-pv-shell">
         <div class="opt-pv-header">
           <div class="opt-pv-chip opt-pv-chip-mode">${Util.escapeHtml(modeLabel)}</div>
           <div class="opt-pv-chip opt-pv-chip-plant" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_plant_title'))}">${Util.escapeHtml(plant)}</div>
           <div class="opt-pv-chip opt-pv-chip-policy" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_policy_title'))}">${Util.escapeHtml(splitPolicyLabel[splitPolicy])}</div>
+          ${toolingChipHtml}
           <div class="opt-pv-chip opt-pv-chip-time">${Util.escapeHtml(stamp)}</div>
         </div>
 
         ${staleHtml}
         ${planningHtml}
+        ${toolNoteHtml}
 
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
           <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
@@ -2179,6 +2285,7 @@ export const OptimizerPreview = {
           ${diagHtml}
           ${protectedHtml}
           ${distributionSeparationHtml}
+          ${toolBlockedHtml}
         </div>
 
         <div class="opt-pv-footer-note">
@@ -2186,6 +2293,14 @@ export const OptimizerPreview = {
         </div>
       </div>`;
 
+    body.querySelectorAll<HTMLButtonElement>('[data-opt-tool-raise]').forEach(button => {
+      button.addEventListener('click', () => raiseToolInventory(OptimizerPreview._plant, button.dataset.optToolRaise ?? ''));
+    });
+    body.querySelector<HTMLButtonElement>('[data-opt-tool-export]')?.addEventListener('click', () => {
+      const blob = new Blob(['\uFEFF' + OptimizerPreview.toolBlockedCsv(toolBlocked, labelOf, linesById)], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url;
+      link.download = `tool-blocked-${OptimizerPreview._plant || 'preview'}.csv`; link.click(); URL.revokeObjectURL(url);
+    });
     const missingCsv = () => OptimizerPreview.missingPairsCsv(OptimizerPreview._explanation?.missingPairs || []);
     body.querySelector<HTMLButtonElement>('[data-opt-copy-missing]')?.addEventListener('click', () => {
       navigator.clipboard?.writeText(missingCsv()).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
@@ -2259,6 +2374,15 @@ export const OptimizerPreview = {
     }
   },
 
+  /** After the planner cancels the tool-queue confirm: make sure the (possibly background-opened) preview is showing. */
+  _showPreviewAfterCancel(): void {
+    if (typeof document === 'undefined') return;
+    const el = document.getElementById('modal-opt-preview');
+    if (el?.hidden) Modal.open('modal-opt-preview');
+    OptimizerPreview._render();
+    OptimizerPreview._syncApplyButton();
+  },
+
   /** Await an apply-tail promise and route a failure to ErrorLog, so it is never silent. */
   async _runGuardedCommit(commit: Promise<void>): Promise<void> {
     try { await commit; } catch (err) {
@@ -2283,6 +2407,16 @@ export const OptimizerPreview = {
     const plant = OptimizerPreview._plant;
     const auditDetails = OptimizerPreview._auditDetails;
     if (!candidate) return;
+    // The ONE tool-queue guard: every apply path (Apply, "Apply what still fits", "Apply without preview") ends here, so
+    // it confirms, from the KEPT patches only, before anything is audited or committed. Cancel aborts and keeps the
+    // preview open and untouched. With no `toolBlocked` on the candidate this is a no-op.
+    const toolSummary = toolQueueSummary(candidate, kept);
+    // No await when there is nothing to confirm: the commit stays synchronous exactly as before.
+    if (toolSummary.queued.length && !(await confirmToolQueue(candidate, kept))) {
+      OptimizerPreview._applying = false;
+      OptimizerPreview._showPreviewAfterCancel();
+      return;
+    }
     OptimizerPreview._applying = true;
     if (auditDetails && plant) {
       Util.fetchTraced(`${Config.API_BASE}/audit/log`, {
@@ -2298,6 +2432,9 @@ export const OptimizerPreview = {
             active_priority_fields: auditDetails.activePriorityFields,
             unranked_priority_fields: auditDetails.unrankedPriorityFields,
             split_order_policy: auditDetails.splitOrderPolicy,
+            tooling_rule: OptimizerPreview._toolFingerprint ? (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r : 'off',
+            tool_blocked: toolSummary.queued.length,
+            tool_moved: toolSummary.moved,
             ...(auditDetails.searchBudgetMs !== undefined ? { search_budget_ms: auditDetails.searchBudgetMs, exhaustive: auditDetails.exhaustive === true } : {}),
           },
         }),
@@ -2352,7 +2489,8 @@ export const OptimizerPreview = {
       }
       if (candidate.dispositions?.some(item => item.status === 'needs_planning')) {
         const count = candidate.dispositions.filter(item => item.status === 'needs_planning').length;
-        Toast.show(`${count} order(s) need planning. Review their allowed windows and reasons in Orders.`, 'warn', 7000);
+        const toolNote = toolSummary.queued.length ? ` ${Util.t('ui.opt_tool_need_planning_suffix', { n: toolSummary.queued.length })}` : '';
+        Toast.show(`${count} order(s) need planning${toolNote}. Review their allowed windows and reasons in Orders.`, 'warn', 7000);
       } else if (unplacedOrders.orders && !candidate.dispositions) {
         Toast.show(Util.t('toast.optimize_orders_left_in_place', {
           orders: unplacedOrders.orders,
@@ -2533,6 +2671,12 @@ export const OptimizerPreview = {
     return { changed, missing };
   },
 
+  /** A finished run whose tool facts (rule + inventory) differ from the live Store: its Tool-blocked list and placements
+   *  describe counts that no longer hold. */
+  _toolFactsChanged(result: Pick<PreviewResult, 'plant' | 'toolFingerprint'>): boolean {
+    return !!result.toolFingerprint && toolFingerprint(Store.masterData, result.plant) !== result.toolFingerprint;
+  },
+
   _renderBackgroundDone(): void {
     const run = OptimizerPreview._backgroundRun;
     const body = typeof document === 'undefined' ? null : document.getElementById('opt-bg-done-body');
@@ -2563,6 +2707,10 @@ export const OptimizerPreview = {
       html += warn(Util.t('ui.opt_bg_done_changed', { count: changed.length + missing.length }));
     }
     let blocked = false;
+    if (OptimizerPreview._toolFactsChanged(result)) {
+      html += warn(Util.t('ui.opt_stale_banner_tooling'));
+      blocked = true;
+    }
     if (Store.selectedPlant !== result.plant) {
       html += warn(Util.t('ui.opt_bg_done_other_plant', { current: Store.selectedPlant ?? '', plant: result.plant }));
       blocked = true;
@@ -2651,7 +2799,9 @@ export const OptimizerPreview = {
     OptimizerPreview._partialApplyAllowed = true;
     OptimizerPreview.present(result, { open: true });
     const { changed, missing } = OptimizerPreview._changedSinceBaseline(result);
-    if (changed.length + missing.length > 0) {
+    if (OptimizerPreview._toolFactsChanged(result)) {
+      OptimizerPreview._markTaskStale('tool inventory or tooling rule changed', 'ui.opt_stale_banner_tooling');
+    } else if (changed.length + missing.length > 0) {
       OptimizerPreview._markTaskStale('background result predates local edits', 'ui.opt_preview_task_stale');
     }
   },
@@ -2662,6 +2812,11 @@ export const OptimizerPreview = {
     if (!run || !result) return;
     if (Store.selectedPlant !== result.plant) {
       Toast.show(Util.t('toast.opt_bg_other_plant', { plant: result.plant }), 'warn');
+      return;
+    }
+    if (OptimizerPreview._toolFactsChanged(result)) {
+      Toast.show(Util.t('ui.opt_stale_banner_tooling'), 'warn');
+      OptimizerPreview._renderBackgroundDone();
       return;
     }
     OptimizerPreview._backgroundRun = null;
@@ -2813,6 +2968,7 @@ export const OptimizerPreview = {
     OptimizerPreview._stopTaskWatch();
     OptimizerPreview._snapshot = null;
     OptimizerPreview._taskBaseline = null;
+    OptimizerPreview._toolFingerprint = null;
     OptimizerPreview._candidate = null;
     OptimizerPreview._preKpis  = null;
     OptimizerPreview._postKpis = null;

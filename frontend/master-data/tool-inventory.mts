@@ -20,7 +20,7 @@ import { Config, Util, ErrorLog, Toast, Modal } from '../platform/foundation.mjs
 import { Store } from '../platform/store.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
-import { refreshStoreMasterData, TOOLING_RULE_CONTROL_READY } from './admin-ui.mjs';
+import { refreshStoreMasterData, TOOLING_RULE_CONTROL_READY, Plant } from './admin-ui.mjs';
 import type { NimbusToolInventoryRow } from '../platform/types.mjs';
 
 // -- Local contract -----------------------------------------------------------
@@ -535,7 +535,21 @@ function _updateChrome(): void {
   const parts: string[] = [];
   if (TOOLING_RULE_CONTROL_READY && _st.plant) parts.push(Util.t(_toolingRule() === 'hard' ? 'ui.tool_inventory_status_hard' : 'ui.tool_inventory_status_off'));
   parts.push(Util.t('ui.tool_inventory_alerts'));
-  set('ti-status', e => { e.textContent = parts.join(' · '); });
+  set('ti-status', e => {
+    e.textContent = parts.join(' · ');
+    // Same gate as the rule text: the control lives in plant settings, so the link exists only when the control does.
+    if (TOOLING_RULE_CONTROL_READY && _st.plant) {
+      const link = document.createElement('button');
+      link.type = 'button'; link.className = 'btn btn-ghost sm'; link.id = 'ti-rule-link';
+      link.textContent = Util.t('ui.tool_inventory_rule_link');
+      link.addEventListener('click', () => {
+        NIMBUS?.App?.goto?.('masterdata');
+        NIMBUS?.App?.gotoMasterSub?.('plant');
+        Plant.gotoTab('settings');
+      });
+      e.append(' ', link);
+    }
+  });
   // Hint line: one reason at a time, most blocking first.
   let hint = '';
   if (_st.view === 'ready') {

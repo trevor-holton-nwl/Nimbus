@@ -80,7 +80,9 @@ let _lineWriteGen = 0;
 
 /** Gates the Order Rules "tooling rule" control and the Tool Inventory status line's rule text. Stays false until the
  *  optimizer consumes the rule (Wave 6 flips it in its last commit), so no control ever exists without its consumer. */
-export const TOOLING_RULE_CONTROL_READY = false;
+export let TOOLING_RULE_CONTROL_READY = false;
+/** Test hook only: production flips the initial value above (Wave 6). A live binding, so importers see the change. */
+export function __setToolingRuleControlReady(value: boolean): void { TOOLING_RULE_CONTROL_READY = value; }
 
 /** `/tool-inventory/{plant}/upload` -> the plant's concrete URL path (null when the template needs a plant and none is given;
  *  an endpoint without a placeholder passes through). */
@@ -220,7 +222,7 @@ export async function refreshStoreMasterData(source: string, table?: string): Pr
  *  had already removed its only frontend caller) — these keys are now purely
  *  historical, kept only because the locale test still pins them, not
  *  because anything live still depends on them. */
-const RULE_HELP: Record<string, { title: string; help: string[] }> = {
+export const RULE_HELP: Record<string, { title: string; help: string[] }> = {
   alertHorizon:         { title: 'ui.alert_horizon_title',          help: ['ui.alert_horizon_help'] },
   confHorizon:          { title: 'ui.conf_horizon_title',           help: ['ui.conf_horizon_help'] },
   frozenHorizon:        { title: 'ui.frozen_horizon_title',         help: ['ui.frozen_horizon_help'] },
@@ -229,6 +231,7 @@ const RULE_HELP: Record<string, { title: string; help: string[] }> = {
   minProductiveSegment: { title: 'ui.min_productive_segment_title', help: ['ui.min_productive_segment_help', 'ui.min_productive_segment_help_detail'] },
   splitOrderPolicy:     { title: 'ui.split_order_title',            help: ['ui.split_order_help', 'ui.split_order_policy_help'] },
   unknownSetupPolicy:   { title: 'ui.unknown_setup_title',          help: ['ui.unknown_setup_help'] },
+  toolingRule:          { title: 'ui.tooling_rule_title',           help: ['ui.tooling_rule_help', 'ui.tooling_rule_help_detail'] },
 };
 
 export const Plant = {
@@ -1522,6 +1525,18 @@ export const Plant = {
                 <!-- Shown only while the plant's setup flag is strictly false (O7): the
                      policy above is saved either way but the optimizer ignores it then. -->
                 <p class="panel-hint sched-rule-note" id="sys-unknown-setup-inactive-note" hidden>${Util.t('ui.unknown_setup_inactive_note')}</p>
+                ${TOOLING_RULE_CONTROL_READY ? `
+                <!-- Planners can change this (no Session.isAdmin gate): the server route is planner-level. Rendered only
+                     once the optimizer consumes the rule (TOOLING_RULE_CONTROL_READY). Wide row: labels wrap, never truncate. -->
+                <div class="sched-rule-row sched-rule-row--wide" data-rule-key="toolingRule">
+                  <label for="sys-tooling-rule">${Util.t('ui.tooling_rule_title')}</label>
+                  <select id="sys-tooling-rule" class="form-input">
+                    <option value="off">${Util.t('ui.tooling_rule_off')}</option>
+                    <option value="hard">${Util.t('ui.tooling_rule_hard')}</option>
+                  </select>
+                  <span class="sched-rule-unit"></span>
+                </div>
+                <p class="panel-hint sched-rule-note" id="sys-tooling-rule-hint">${Util.t('ui.tooling_rule_hint')}</p>` : ''}
               </div>
             </div>
           </div>
@@ -1834,6 +1849,35 @@ export const Plant = {
       } finally { unknownSetupSelect.disabled = false; unknownSetupMinutesInp.disabled = false; }
     }
     unknownSetupSelect.addEventListener('change', saveUnknownSetupPolicy);
+
+    // Tooling rule (Off / Hard): planner-level route, so no isAdmin gate; a 403 reverts the select like any failure.
+    const toolingRuleSelect = pane.querySelector('#sys-tooling-rule') as HTMLSelectElement | null;
+    if (toolingRuleSelect) {
+      const readToolingRule = (row: NimbusMasterPlant | null = plantRow): 'off' | 'hard' =>
+        row?.setup_policy_config?.toolingRule === 'hard' ? 'hard' : 'off';
+      toolingRuleSelect.value = readToolingRule();
+      toolingRuleSelect.addEventListener('change', async () => {
+        const key = captureRuleKey();
+        if (!key) { toolingRuleSelect.value = readToolingRule(); Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+        const previous = readToolingRule(ruleRow(key));
+        const next = toolingRuleSelect.value === 'hard' ? 'hard' : 'off';
+        toolingRuleSelect.disabled = true;
+        try {
+          const response = await Util.fetchTraced(
+            `${Config.API_BASE}/master-data/plants/${encodeURIComponent(key.plant)}/tooling-rule`,
+            { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+              body: JSON.stringify({ subnetwork: key.subnetwork, tooling_rule: next }) },
+          );
+          if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
+          const saved = await response.json();
+          commitOrderRule(key, row => { row.setup_policy_config = { ...(row.setup_policy_config ?? {}), ...saved.setup_policy_config }; });
+          Toast.show(Util.t('ui.tooling_rule_saved'), 'success');
+        } catch (error) {
+          toolingRuleSelect.value = previous;
+          Toast.show(`${Util.t('ui.tooling_rule_failed')}: ${(error as Error).message}`, 'error');
+        } finally { toolingRuleSelect.disabled = false; }
+      });
+    }
     unknownSetupMinutesInp.addEventListener('change', saveUnknownSetupPolicy);
     unknownSetupMinutesInp.addEventListener('input', syncUnknownZeroHint);
 
