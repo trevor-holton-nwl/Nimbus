@@ -6923,7 +6923,12 @@ function productiveIntervals(task: NimbusTask): PlacementInterval[] {
    remaining offenders are queued with `incomplete: true` and `toolPass.complete = false`.
    PROTECTED rows (firmed, running, frozen, placement_exception, window-end held, explicit boundaries), rows on
    unselected / excludeFromOpt lines, rows outside the window and finish-only rows all RESERVE copies and are
-   never patched; a cluster with no mutable holder is a WARNING (grandfathered), never an error.
+   never patched, EXCEPT a never-committed baseline bar (both dates, user_scheduled !== true) that is neither mutable
+   nor firmed (owner decision F3): it does not reserve for mutable work and only raises a WARNING. A cluster with no
+   mutable holder is a WARNING (grandfathered), never an error.
+   RECOVERY then re-offers every tool_contention order to the final occupancy, again after the repair cascade;
+   the pass on its own output changes nothing (idempotent). Exceptions: compute-core-stale is rethrown, anything
+   else fails closed (toolPass.failed + the tool_overflow_failed error finding).
    ============================================================================= */
 
 const TOOL_PASS_NORMAL_BUDGET_MS = 1000;
@@ -7325,7 +7330,7 @@ function toolContentionDetail(
   return { tool, available, holders, inUse: holders.length + 1 };
 }
 
-function mergeToolBlocked(prior: readonly ToolBlockedEntry[] | undefined, added: readonly ToolBlockedEntry[]): ToolBlockedEntry[] {
+export function mergeToolBlocked(prior: readonly ToolBlockedEntry[] | undefined, added: readonly ToolBlockedEntry[]): ToolBlockedEntry[] {
   const byOrder = new Map<string, ToolBlockedEntry>();
   for (const entry of [...(prior ?? []), ...added]) {
     const held = byOrder.get(entry.orderId);
@@ -7336,7 +7341,7 @@ function mergeToolBlocked(prior: readonly ToolBlockedEntry[] | undefined, added:
 }
 
 /** One entry per order (a second pass may move the same order again): the FIRST from, the LAST to; a net no-op is dropped. */
-function mergeToolMoved(prior: readonly ToolMovedEntry[] | undefined, added: readonly ToolMovedEntry[]): ToolMovedEntry[] {
+export function mergeToolMoved(prior: readonly ToolMovedEntry[] | undefined, added: readonly ToolMovedEntry[]): ToolMovedEntry[] {
   const byOrder = new Map<string, ToolMovedEntry>();
   for (const entry of [...(prior ?? []), ...added]) {
     const held = byOrder.get(entry.orderId);
@@ -7395,7 +7400,7 @@ function resolveToolOverflowRun(
     const line = String(task.MACHINE);
     const peers = byLine.get(line) ?? []; peers.push(task); byLine.set(line, peers);
   }
-  const env: GapEnv = { snapshot, bounds, candidate, byLine, availability: new Map(), patches, dispositions, expired };
+  const env: GapEnv = { snapshot, bounds, candidate, byLine, availability: new Map(), patches, dispositions, expired, toolRuleActive: true };
   let rankMemo: Map<string, number> | null = null;
   const rank = (): Map<string, number> => rankMemo ??= toolUrgencyRank(snapshot, bounds, scope.mutable);
   const settled = new Set<string>();
@@ -8182,6 +8187,9 @@ interface GapEnv {
   patches: Map<string, SchedulePatch>;
   dispositions: Map<string, PlanningDisposition>;
   expired: () => boolean;
+  /** The tool rule is active for this run (every order of it, tool-carrying or not): the walk may fall back to the second,
+   *  relaxed pass and reserves a split order's segments (see `placeTaskInLineGaps`). Absent = the historical Off walk. */
+  toolRuleActive?: boolean;
 }
 type GapOutcome =
   | { kind: 'placed'; patch: SchedulePatch; disposition: PlanningDisposition }
@@ -8210,7 +8218,8 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
   const byStart = (a: NimbusTask, b: NimbusTask): number => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b));
   // Tool walks only: a SPLIT order reserves its SEGMENTS, not its whole envelope, so another order may take the idle stretch
   // between two of its segments (the validator allows it; the historical walk, kept for Off, reserves the envelope).
-  const accepted = (hooks ? placedOnLine.flatMap(item => {
+  const toolWalk = !!hooks || env.toolRuleActive === true;
+  const accepted = (toolWalk ? placedOnLine.flatMap(item => {
     const pieces = (item.scheduleSegments ?? []).flatMap(segment => {
       const a = timestamp(segment.startDate); const b = timestamp(segment.endDate);
       return a && b && b > a ? [{ ...item, start_date: a, end_date: b, scheduleSegments: [] } as NimbusTask] : [];
@@ -8242,7 +8251,9 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
   };
   // Tool walks make a SECOND pass that relaxes the setup after a PROTECTED successor (the validator only warns about it for a
   // protected order): the strict pass runs first, so a placement that was legal before is never replaced by a relaxed one.
-  const anyProtectedNext = !!hooks && accepted.some(item => taskIsEvaluationProtected(snapshot, bounds, item));
+  // Decided on the WHOLE order (a window-end crosser's first segment alone does not cross the window end).
+  const protectedOnLine = toolWalk ? new Set(placedOnLine.filter(item => taskIsEvaluationProtected(snapshot, bounds, item)).map(taskId)) : null;
+  const anyProtectedNext = !!protectedOnLine && protectedOnLine.size > 0;
   for (const relax of anyProtectedNext ? [false, true] : [false]) {
   let cursor = +bounds.now;
   let predecessor: NimbusTask | null = null;
@@ -8252,7 +8263,7 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
     const gapEnd = Math.min(+bounds.horizonEnd, next ? +timestamp(next.start_date)! : Infinity);
     const floor = Math.max(cursor, +(notBeforeFor(bounds, task) ?? bounds.now));
     const incoming = gapEnd > floor ? transition(predecessor, task) : null;
-    const relaxNext = relax && !!next && taskIsEvaluationProtected(snapshot, bounds, next);
+    const relaxNext = relax && !!next && !!protectedOnLine?.has(taskId(next));
     const outgoing = next && incoming !== null ? transition(task, next, relaxNext) : 0;
     if (incoming !== null && outgoing !== null) {
       const nextStart = next ? +timestamp(next.start_date)! : gapEnd;
@@ -8364,8 +8375,9 @@ export function fillPlanningGaps(
     const line = String(task.MACHINE);
     const peers = byLine.get(line) ?? []; peers.push(task); byLine.set(line, peers);
   }
-  const env: GapEnv = { snapshot, bounds, candidate, byLine, availability, patches, dispositions, expired };
+  const env: GapEnv = { snapshot, bounds, candidate, byLine, availability, patches, dispositions, expired, toolRuleActive: !!toolCtx };
   let placed = 0;
+  const toolProbed = new Map<string, { tool: string; available: number; holders: string[]; inUse: number }>();
   // Do not try to repair an internally invalid proposal by inserting more work.
   const valid = !validateCandidate(snapshot, bounds, candidate).some(f => f.severity === 'error');
   // Tool Inventory: occupancy from the FULL plant task list; every insertion must be tool-free (see placeTaskInLineGaps).
@@ -8386,6 +8398,17 @@ export function fillPlanningGaps(
       }
     }
     if (outcome.kind === 'incomplete') break;
+    if (toolOcc && toolInfo && outcome.kind === 'none') {
+      // Decision 7: the hooked walk found nothing. If the same walk WITHOUT the tool windows places the order in THIS state, the
+      // tools alone kept it out (a later placement may take that slot, so the verdict is taken now). Pure probe, no state change.
+      const probe = placeTaskInLineGaps({ ...env, expired: () => false }, task);
+      if (probe.kind === 'placed') {
+        const detail = toolContentionDetail(toolOcc, toolInfo.tools, line, timestamp(probe.patch.changes.start_date), timestamp(probe.patch.changes.end_date));
+        toolProbed.set(id, { tool: detail.tool, available: detail.available, holders: detail.holders, inUse: detail.inUse });
+      }
+      // Sticky: a later re-check after ANOTHER order took the slot is a consequence of the same tool wait, so a negative probe
+      // does not clear the verdict (the order is placed instead if a later check succeeds).
+    }
     checked.set(id, revision.get(line) ?? 0);
   }
   let unchecked = 0;
@@ -8397,19 +8420,13 @@ export function fillPlanningGaps(
     if (!complete) unchecked++;
     const toolHeld = toolCtx && dispositions.get(id)?.reason?.code === 'tool_contention';
     if (toolHeld) continue;                                   // still no tool-free slot: the structured tool reason stays
-    if (complete && toolOcc && toolStat!.byId.has(id)) {
-      // Decision 7: a COMPLETED hooked walk found nothing; if the same walk WITHOUT the tool windows would place the order,
-      // the tools alone kept it out. Pure probe (no state change); it must not hit the soft budget a second time.
-      const probe = placeTaskInLineGaps({ ...env, expired: () => false }, task);
-      if (probe.kind === 'placed') {
-        const detail = toolContentionDetail(toolOcc, toolStat!.byId.get(id)!.tools, line,
-          timestamp(probe.patch.changes.start_date), timestamp(probe.patch.changes.end_date));
-        const toolReason = toolQueueReason('tool_contention', detail.tool, detail.available, detail.holders, false);
-        patches.set(id, toolQueuePatch(id, toolReason));
-        dispositions.set(id, { id, line, status: 'needs_planning', reason: toolReason });
-        toolQueued.push({ orderId: id, tool: detail.tool, available: detail.available, inUse: detail.inUse, holderIds: detail.holders });
-        continue;
-      }
+    const probed = complete ? toolProbed.get(id) : undefined;
+    if (probed) {
+      const toolReason = toolQueueReason('tool_contention', probed.tool, probed.available, probed.holders, false);
+      patches.set(id, toolQueuePatch(id, toolReason));
+      dispositions.set(id, { id, line, status: 'needs_planning', reason: toolReason });
+      toolQueued.push({ orderId: id, tool: probed.tool, available: probed.available, inUse: probed.inUse, holderIds: probed.holders });
+      continue;
     }
     // A completed capacity check that still finds nothing is NOT the real story for an order
     // the primary search refused because its setup transition is unrecorded (N8
