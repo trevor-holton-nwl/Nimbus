@@ -79,8 +79,8 @@ const _lineSyncMachineCache: Record<string, MasterDataTableState<ProductionLineR
 let _lineWriteGen = 0;
 
 /** Gates the Order Rules "tooling rule" control and the Tool Inventory status line's rule text. It stays false until the
- *  optimizer overflow pass (Tool Inventory Wave 6) is re-validated; the orchestrator flips it, never an implementation task. */
-export let TOOLING_RULE_CONTROL_READY = false;
+ *  optimizer overflow pass (Tool Inventory Wave 6) was re-validated (2026-10-28, SHIP behind a pilot-only Hard toggle), so it ships true. */
+export let TOOLING_RULE_CONTROL_READY = true;
 /** Test hook only: production sets the initial value above. A live binding, so importers see the change. */
 export function __setToolingRuleControlReady(value: boolean): void {
   // Test hook only: inert unless the test setup declared itself, so a console import cannot flip the gate.

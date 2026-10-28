@@ -1,5 +1,5 @@
 // Tool Inventory Wave 5: the Order Rules "Treat Tooling as Hard Constraint" drop-down in System Settings > Scheduling Rules.
-// Rendered only while TOOLING_RULE_CONTROL_READY is true (Wave 6 flips it); planner-level (no isAdmin gate); saves through
+// Rendered only while TOOLING_RULE_CONTROL_READY is true (shipped true); planner-level (no isAdmin gate); saves through
 // POST /master-data/plants/{plant}/tooling-rule and patches the LIVE Store row without rebuilding the pane.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -68,8 +68,8 @@ async function withHarness(ready, body) {
   }
 }
 
-test('the gate is false in the shipped build until the optimizer overflow pass is re-validated (no control without a validated consumer)', () => {
-  assert.equal(TOOLING_RULE_CONTROL_READY, false);
+test('the gate is true in the shipped build (the optimizer overflow pass was re-validated, Wave 6)', () => {
+  assert.equal(TOOLING_RULE_CONTROL_READY, true);
 });
 
 test('control absent while the gate is false; present (wide row, Off/Hard options, hint, no admin gate) when true', async () => {
