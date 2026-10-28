@@ -51,6 +51,7 @@ frontend/optimization/optimizer-worker-client.mjs
 frontend/optimization/optimizer-worker-contract.mjs
 frontend/optimization/optimizer-worker.mjs
 frontend/insights/insights-ui.mjs
+frontend/scheduling/gantt-axis-locale.mjs
 frontend/priority-lists/viewers.mjs
 frontend/calendar/edit-calendar.mjs
 frontend/shell/application-shell.mjs

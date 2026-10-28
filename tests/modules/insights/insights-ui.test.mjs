@@ -39,19 +39,38 @@ globalThis.window = globalThis.window || {};
 
 test('heatmap foreground meets AA across both theme ramps, including warning orange', () => {
   const themes = [
-    ['#f4f7fa', '#93610a', '#f39c12', '#b02a20', '#1c2b3a'],
-    ['#16212f', '#d09010', '#e0a018', '#d94a3a', '#e8edf3'],
+    ['#f4f7fa', '#1f5fbf', '#93610a', '#f39c12', '#b02a20', '#1c2b3a'],
+    ['#16212f', '#5a9bf0', '#d09010', '#e0a018', '#d94a3a', '#e8edf3'],
   ];
   for (const colors of themes) {
-    for (let pair = 0; pair < 3; pair++) {
+    for (let pair = 0; pair < 4; pair++) {
       for (let step = 0; step <= 100; step++) {
         const bg = Dashboard._lerpHex(colors[pair], colors[pair + 1], step / 100);
-        const fg = Dashboard._heatForeground(bg, colors[4], '#ffffff');
+        const fg = Dashboard._heatForeground(bg, colors[5], '#ffffff');
         const a = Dashboard._relLuminance(bg), b = Dashboard._relLuminance(fg);
         assert.ok((Math.max(a, b) + .05) / (Math.min(a, b) + .05) >= 4.5, `${fg} on ${bg}`);
       }
     }
   }
+});
+
+test('heatmap ramp: 100% is solid err, 25% is the info stop, 0 is idle', () => {
+  const prior = { doc: globalThis.document, cs: globalThis.getComputedStyle, vis: Dashboard._visibleLines };
+  const tokens = { '--bg-subtle': '#eeeeee', '--info': '#1f5fbf', '--warn': '#93610a', '--warn-vivid': '#f39c12', '--err': '#b02a20' };
+  const panel = { innerHTML: '', querySelectorAll: () => [] };
+  try {
+    globalThis.document = { ...prior.doc, body: {}, getElementById: id => id === 'util-heatmap-panel' ? panel : null };
+    globalThis.getComputedStyle = () => ({ getPropertyValue: n => tokens[n] || '' });
+    Dashboard._visibleLines = () => ['L1'];
+    const mk = pct => ({ L1: { '2020-01-01': { pct, capacity: 8, scheduled: 8 * pct } } });
+    const bgOf = pct => { Dashboard._renderHeatmap(mk(pct)); return /class="hm-cell"[^>]*style="background:(#[0-9a-f]{6})/.exec(panel.innerHTML)[1]; };
+    assert.equal(bgOf(1.0), '#b02a20');
+    assert.equal(bgOf(1.4), '#b02a20');
+    assert.equal(bgOf(0.25), '#1f5fbf');
+    assert.equal(bgOf(0.5), '#93610a');
+    assert.equal(bgOf(0.75), '#f39c12');
+    assert.equal(bgOf(0), '#eeeeee');
+  } finally { globalThis.document = prior.doc; globalThis.getComputedStyle = prior.cs; Dashboard._visibleLines = prior.vis; }
 });
 
 test('heatmap reads tokens from the themed body', () => {
@@ -842,4 +861,54 @@ test('Dashboard firmed list: Unfirm only for a planner-only firm, a reason on ev
   assert.doesNotMatch(frozen, /data-order-id/, 'a frozen order has no Unfirm');
   assert.match(frozen, /class="reason">[^<]+</, 'and shows its reason');
   assert.ok(frozen.includes(Util.fmtDTShort(new Date('2026-10-28T09:00:00'))), 'the finish, not the start, is shown');
+});
+
+// ---- i18n sweep (Dashboard): wording comes from the locale files, never hardcoded English ----
+import { readFileSync as _readLocale } from 'node:fs';
+import _vm from 'node:vm';
+
+function withRealLocales(lang, fn) {
+  const win = {};
+  for (const l of ['en', lang]) {
+    _vm.runInNewContext(_readLocale(new URL(`../../../frontend/locales/${l}.js`, import.meta.url), 'utf8'), { window: win });
+  }
+  const prior = globalThis.window.__NIMBUS_LOCALES;
+  const priorLocale = Util.locale();
+  globalThis.window.__NIMBUS_LOCALES = win.__NIMBUS_LOCALES;
+  Util.setLocale(lang);
+  try { return fn(); } finally { globalThis.window.__NIMBUS_LOCALES = prior; Util.setLocale(priorLocale); }
+}
+
+test('Dashboard._fmtNextCO and _tileTooltip follow the viewer language', () => {
+  const now = new Date('2026-10-27T08:00:00');
+  const at = ms => new Date(now.getTime() + ms);
+  withRealLocales('de', () => {
+    assert.equal(Dashboard._fmtNextCO(at(-1000), now), 'jetzt');
+    assert.equal(Dashboard._fmtNextCO(at(5 * 60000), now), '+5 Min');
+    assert.equal(Dashboard._fmtNextCO(at(3 * 3600000), now), '+3h');
+    assert.equal(Dashboard._fmtNextCO(at(48 * 3600000), now), '+2 T');
+    assert.equal(Dashboard._tileTooltip('orders-today'), 'Offene Aufträge gefiltert auf heute');
+    assert.match(Dashboard._tileTooltip('alerts-today'), /Konflikten/);
+  });
+  withRealLocales('en', () => {
+    assert.equal(Dashboard._fmtNextCO(at(5 * 60000), now), '+5m');
+    assert.equal(Dashboard._fmtNextCO(null, now), '—');
+  });
+});
+
+test('Dashboard._tp picks the singular key for 1 and shows the Unknown machine key in the viewer language', () => {
+  withRealLocales('fr', () => {
+    assert.equal(Dashboard._tp('ui.verdict_warnings', 1), '1 avertissement');
+    assert.equal(Dashboard._tp('ui.verdict_warnings', 3), '3 avertissements');
+    assert.equal(Dashboard._lineLabel('Unknown'), 'Inconnue');
+    assert.equal(Dashboard._lineLabel('L1'), 'L1');
+  });
+});
+
+test('Dashboard weekday and date labels use Util.locale()', () => {
+  const dt = new Date('2026-10-27T12:00:00');
+  withRealLocales('de', () => {
+    assert.equal(Dashboard._dowShort(dt), new Intl.DateTimeFormat('de', { weekday: 'short' }).format(dt));
+    assert.equal(Dashboard._dateNumeric(dt), new Intl.DateTimeFormat('de', { month: 'numeric', day: 'numeric' }).format(dt));
+  });
 });
