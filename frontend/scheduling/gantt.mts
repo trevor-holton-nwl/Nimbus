@@ -39,6 +39,7 @@ import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import type { DropDecision } from '../routing/runtime-client.mjs';
 import { buildNonWorkingSpans } from './nonworking-spans.mjs';
+import { ensureAxisLocale } from './gantt-axis-locale.mjs';
 import { computeLaneMap, laneId } from './gantt-lanes.mjs';
 import type { LaneInterval, LaneResult } from './gantt-lanes.mjs';
 
@@ -416,7 +417,9 @@ export const Timeline = {
       height: '100%',
       verticalScroll: true,
       tooltip: { delay: 400, followMouse: false },
-      showCurrentTime: true
+      showCurrentTime: true,
+      // Axis month/weekday names in the viewer's language (de/es/fr from vis's bundled moment, pt defined inline).
+      locale: ensureAxisLocale(vis, Util.locale())
     };
 
     Timeline._tl = new vis.Timeline(container, Timeline._visItems, Timeline._groups, options);
@@ -1122,7 +1125,8 @@ export const Timeline = {
         end: segment.endDate,
         className: classNames.filter(Boolean).join(' '),
         content: index === 0 ? base.content : `<span class="split-order-part">${index + 1}/${count}</span>`,
-        title: `Segment ${index + 1} of ${count} - ${durationHours.toFixed(2)}h productive\\n${Util.fmtDTReadable(segment.startDate)} → ${Util.fmtDTReadable(segment.endDate)}`,
+        // The item popup sets its text with innerText, so a real newline (not an escaped one) breaks the line.
+        title: `${Util.t('tip.split_segment', { i: index + 1, n: count, h: durationHours.toFixed(2) })}\n${Util.fmtDTReadable(segment.startDate)} → ${Util.fmtDTReadable(segment.endDate)}`,
       };
     });
   },
@@ -1358,7 +1362,7 @@ export const Timeline = {
         className: `setup-item${conflict ? ' setup-conflict' : ''}`,
         style: '',
         content: `<span aria-hidden="true">${required}m</span>`,
-        title: `${Util.t('ui.setup_detail_title')}: ${required} min`, setup: detail,
+        title: `${Util.t('ui.setup_detail_title')}: ${Util.t('ui.minutes_value', { n: required })}`, setup: detail,
       });
     }
     const marked = new Set<string>();
@@ -3943,7 +3947,7 @@ export const Hierarchy = {
       `<span class="line-expand">${open ? '−' : '+'}</span>` +
       `<span class="line-dot" style="background:${item.color}"></span>` +
       (item.pinned ? '<span class="line-pin-ico" aria-hidden="true">📌</span>' : '') +
-      `<span>${Util.escapeHtml(item.name)}</span>` +
+      `<span>${Util.escapeHtml(item.name === 'Unknown' ? Util.t('ui.unknown_machine') : item.name)}</span>` +
       `<span style="color:var(--fg-faint);font-weight:500;">(${item.tasks.length})</span>` +
       `${chip}</summary>` +
       (open ? item.tasks.map((tk, i) => {
@@ -5525,7 +5529,7 @@ export const Interaction = {
    *  the lock toast with an action to open the Order Distribution pane. */
   _rejectDistMachineMove(task: NimbusTask): void {
     Toast.show(
-      Util.t('toast.dist_machine_locked', { order: Util.orderNumber(task), machine: task.MACHINE || 'Unknown' }),
+      Util.t('toast.dist_machine_locked', { order: Util.orderNumber(task), machine: task.MACHINE || Util.t('ui.unknown_machine') }),
       'warn', 4000,
       {
         label: Util.t('btn.insp_dist_open'),
@@ -5575,7 +5579,7 @@ export const Interaction = {
    *  distribution-share edit. */
   _rejectRuntimeMove(task: NimbusTask, machine: string): void {
     Toast.show(
-      Util.t('toast.no_routing_at_workcenter', { order: Util.orderNumber(task), machine: machine || 'Unknown' }),
+      Util.t('toast.no_routing_at_workcenter', { order: Util.orderNumber(task), machine: machine || Util.t('ui.unknown_machine') }),
       'warn', 4000
     );
   },
@@ -6240,7 +6244,7 @@ export const Interaction = {
     // envelope, which Store would correctly reconstruct from its children.
     const eligibleIds = ids.filter(id => (Store.tasks[id]?.scheduleSegments?.length ?? 0) < 2);
     if (!eligibleIds.length) {
-      Toast.show('Split orders must be rescheduled as a whole.', 'warn');
+      Toast.show(Util.t('cmdp.toast_split_orders_whole'), 'warn');
       return;
     }
     const snap = UndoStack.snapshotTasks(eligibleIds);

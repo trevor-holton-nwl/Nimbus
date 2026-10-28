@@ -198,6 +198,8 @@ declare global {
     Timeline: new (container: HTMLElement, items: unknown, groups: unknown, options?: NimbusVendor.VisTimelineOptions) => NimbusVendor.VisTimelineInstance;
     DataSet: new <T = unknown>(data?: T[]) => NimbusVendor.VisDataSet<T>;
     DataView: new <T = unknown>(dataset: NimbusVendor.VisDataSet<T>, options: { filter: (item: T) => boolean }) => NimbusVendor.VisDataView<T>;
+    /** The moment build bundled in the standalone UMD (re-exported as `vis.moment`); only the locale API is used. */
+    moment?: { locales?: () => string[]; defineLocale?: (name: string, config: Record<string, unknown>) => unknown };
   };
 
   const agGrid: {

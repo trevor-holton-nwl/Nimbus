@@ -524,6 +524,9 @@ test('Timeline renders split schedules as multiple parent-mapped timeline items'
 });
 
 test('Timeline derives exact setup bars before successor processing, including the first split segment', () => {
+  const priorLocales = globalThis.window && globalThis.window.__NIMBUS_LOCALES;
+  globalThis.window.__NIMBUS_LOCALES = { en: { 'ui.setup_detail_title': 'Derived setup detail', 'ui.minutes_value': '{{n}} min' } };
+  try {
   const successor = {
     id: 'setup-successor', MACHINE: 'SETUP-L1', RUN_TIME: 3,
     start_date: new Date('2026-08-14T08:00:00'), end_date: new Date('2026-08-14T11:00:00'),
@@ -543,6 +546,7 @@ test('Timeline derives exact setup bars before successor processing, including t
   assert.equal(items[0].end.getTime(), successor.scheduleSegments[0].startDate.getTime());
   assert.equal(items[0].editable, false);
   assert.match(items[0].title, /20 min/);
+  } finally { globalThis.window.__NIMBUS_LOCALES = priorLocales; }
 });
 
 test('Timeline omits zero setup but renders a leading-edge marker for missing setup detail', () => {
@@ -4278,4 +4282,35 @@ test('Timeline.rebuildSetupForLines: a second identical call writes no setup bar
     Store.replaceSetupSnapshot(priorSetup, 'unit-test');
     Store.setSelectedPlant(priorPlant, 'unit-test');
   }
+});
+
+// ---- i18n sweep (Gantt): axis locale + split-segment tooltip ----
+import { ensureAxisLocale, axisLocaleCode, PT_MOMENT_LOCALE } from '../../../frontend/scheduling/gantt-axis-locale.mjs';
+
+test('axisLocaleCode maps the app locale to a supported moment code', () => {
+  assert.equal(axisLocaleCode('pt'), 'pt');
+  assert.equal(axisLocaleCode('de-DE'), 'de');
+  assert.equal(axisLocaleCode('xx'), 'en');
+  assert.equal(axisLocaleCode(undefined), 'en');
+});
+
+test('ensureAxisLocale defines pt once when the bundled moment lacks it, and falls back to en when vis.moment is missing', () => {
+  const defined = [];
+  const known = ['en', 'de', 'es', 'fr'];
+  const vis = { moment: { locales: () => known, defineLocale: (n, c) => { defined.push([n, c]); known.push(n); } } };
+  assert.equal(ensureAxisLocale(vis, 'pt'), 'pt');
+  assert.equal(ensureAxisLocale(vis, 'pt'), 'pt');
+  assert.equal(defined.length, 1);
+  assert.equal(defined[0][1], PT_MOMENT_LOCALE);
+  assert.equal(PT_MOMENT_LOCALE.week.dow, 1);
+  assert.equal(ensureAxisLocale(vis, 'de'), 'de');
+  assert.equal(ensureAxisLocale(vis, 'en'), 'en');
+  assert.equal(ensureAxisLocale({}, 'pt'), 'en');
+  assert.equal(ensureAxisLocale(undefined, 'de'), 'en');
+});
+
+test('split-segment tooltip uses a real newline and the locale key', () => {
+  const src = readFileSync(new URL('../../../frontend/scheduling/gantt.mts', import.meta.url), 'utf8');
+  assert.ok(src.includes("Util.t('tip.split_segment'"));
+  assert.ok(!src.includes('productive\\n'));
 });
