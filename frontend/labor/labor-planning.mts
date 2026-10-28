@@ -437,24 +437,24 @@ export const LaborPlanning = (() => {
     const fmtH = (h: number) => h >= 1000 ? `${(h / 1000).toFixed(1)}k` : h.toFixed(0);
     strip.innerHTML = `
       <div class="lp-kpi-tile">
-        <span class="lp-kpi-label">Available</span>
+        <span class="lp-kpi-label">${Util.escapeHtml(Util.t('labor.kpi_available'))}</span>
         <span class="lp-kpi-val">${fmtH(totalAvail)}h</span>
         <span class="lp-kpi-sub">${Util.escapeHtml(Util.t('labor.horizon_filtered', { weeks: _horizonSpan }))}</span>
       </div>
       <div class="lp-kpi-tile">
-        <span class="lp-kpi-label">Required</span>
+        <span class="lp-kpi-label">${Util.escapeHtml(Util.t('labor.kpi_required'))}</span>
         <span class="lp-kpi-val">${fmtH(totalRequired)}h</span>
-        <span class="lp-kpi-sub">from scheduled orders</span>
+        <span class="lp-kpi-sub">${Util.escapeHtml(Util.t('labor.kpi_from_orders'))}</span>
       </div>
       <div class="lp-kpi-tile${hSev ? ' lp-kpi-' + hSev : ''}">
-        <span class="lp-kpi-label">Headroom</span>
+        <span class="lp-kpi-label">${Util.escapeHtml(Util.t('labor.kpi_headroom'))}</span>
         <span class="lp-kpi-val">${headroom}%</span>
-        <span class="lp-kpi-sub">${fmtH(Math.abs(diff))}h ${diff >= 0 ? 'surplus' : 'deficit'}</span>
+        <span class="lp-kpi-sub">${fmtH(Math.abs(diff))}h ${Util.escapeHtml(Util.t(diff >= 0 ? 'labor.kpi_surplus' : 'labor.kpi_deficit'))}</span>
       </div>
       <div class="lp-kpi-tile${shortfalls > 0 ? ' lp-kpi-err' : ''}">
-        <span class="lp-kpi-label">Shortfalls</span>
+        <span class="lp-kpi-label">${Util.escapeHtml(Util.t('labor.kpi_shortfalls'))}</span>
         <span class="lp-kpi-val">${shortfalls}</span>
-        <span class="lp-kpi-sub">line·day cells</span>
+        <span class="lp-kpi-sub">${Util.escapeHtml(Util.t('labor.kpi_line_day_cells'))}</span>
       </div>`;
   }
 
@@ -559,13 +559,13 @@ export const LaborPlanning = (() => {
       <div class="lp-card lp-card-scroll">
         <table class="lp-table">
           <thead><tr>
-            <th>Group</th>
+            <th>${Util.escapeHtml(Util.t('labor.col_group'))}</th>
             ${_weeks.map((w) => `<th>${w.label}</th>`).join('')}
           </tr></thead>
           <tbody>
             ${groupRows}
             <tr class="lp-total-row">
-              <td>TOTAL</td>${totalCells}
+              <td>${Util.escapeHtml(Util.t('ui.wc_total_row'))}</td>${totalCells}
             </tr>
           </tbody>
         </table>
@@ -745,7 +745,7 @@ export const LaborPlanning = (() => {
     grid.innerHTML = `
       <div class="lp-card lp-card-scroll">
         <table class="lp-table">
-          <thead><tr><th>Line</th>${dayHeaders}</tr></thead>
+          <thead><tr><th>${Util.escapeHtml(Util.t('labor.col_line'))}</th>${dayHeaders}</tr></thead>
           <tbody>${lineRows}</tbody>
         </table>
       </div>`;
@@ -871,7 +871,7 @@ export const LaborPlanning = (() => {
       <div class="lp-hm-wrap"><div class="lp-hm-grid" style="grid-template-columns:${cols}">`;
     html += `<div class="lp-hm-corner"></div>`;
     days.forEach((d) => {
-      const dow = d.date.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
+      const dow = Util.escapeHtml(Util.t(['day.sun','day.mon','day.tue','day.wed','day.thu','day.fri','day.sat'][d.date.getDay()]).toUpperCase());
       html += `<div class="lp-hm-head"><span class="lp-hm-dow">${dow}</span><span class="lp-hm-date">${d.date.getMonth()+1}/${d.date.getDate()}</span></div>`;
     });
     lines.forEach((line, li) => {
@@ -885,10 +885,10 @@ export const LaborPlanning = (() => {
         const ratio  = avail > 0 ? req / avail : (req > 0 ? 2 : 0);
         const bg     = heatBg(ratio), tc = Util.contrastText(bg);
         const lbl    = avail > 0 || req > 0 ? `${req.toFixed(0)}/${avail.toFixed(0)}` : '—';
-        html += `<div class="lp-hm-cell" style="background:${bg};color:${tc};" title="${Util.escapeHtml(line)} · ${d.dayKey} | Req: ${req.toFixed(1)}h | Avail: ${avail.toFixed(1)}h | ${Math.round(ratio*100)}%">${lbl}</div>`;
+        html += `<div class="lp-hm-cell" style="background:${bg};color:${tc};" title="${Util.escapeHtml(Util.t('labor.hm_cell_title', { line, day: d.dayKey, required: req.toFixed(1), available: avail.toFixed(1), pct: Math.round(ratio*100) }))}">${lbl}</div>`;
       });
     });
-    html += `</div></div><div class="lp-hm-legend"><span>idle</span><div class="lp-hm-grad"></div><span>overload</span></div></div>`;
+    html += `</div></div><div class="lp-hm-legend"><span>${Util.escapeHtml(Util.t('labor.hm_idle'))}</span><div class="lp-hm-grad"></div><span>${Util.escapeHtml(Util.t('labor.hm_overload'))}</span></div></div>`;
     container.innerHTML = html;
   }
 
@@ -912,9 +912,9 @@ export const LaborPlanning = (() => {
         const avail = ld?.avail_hours != null ? ld.avail_hours : (cell.effectiveCapacity || 0);
         const req   = cell.scheduled || 0, calCap = cell.effectiveCapacity || 0;
         if (req > avail + 0.05 && req > 0)
-          exceptions.push({ sev: 'err',  line, day: dayKey, msg: `${req.toFixed(1)}h required, ${avail.toFixed(1)}h available — ${(req - avail).toFixed(1)}h short` });
+          exceptions.push({ sev: 'err',  line, day: dayKey, msg: Util.t('labor.exc_short', { req: req.toFixed(1), avail: avail.toFixed(1), short: (req - avail).toFixed(1) }) });
         else if (avail > calCap + 0.05)
-          exceptions.push({ sev: 'warn', line, day: dayKey, msg: `${avail.toFixed(1)}h planned exceeds ${calCap.toFixed(1)}h calendar capacity` });
+          exceptions.push({ sev: 'warn', line, day: dayKey, msg: Util.t('labor.exc_over_calendar', { avail: avail.toFixed(1), cap: calCap.toFixed(1) }) });
       });
     });
     exceptions.sort((a, b) => (a.sev === 'err' ? -1 : 1) - (b.sev === 'err' ? -1 : 1) || a.day.localeCompare(b.day));
@@ -923,7 +923,7 @@ export const LaborPlanning = (() => {
     if (badge) { badge.textContent = String(exceptions.length); badge.hidden = exceptions.length === 0; }
 
     if (!exceptions.length) {
-      container.innerHTML = `<div class="empty-state" style="padding:40px 0;">✓ No exceptions in the current horizon.</div>`; return;
+      container.innerHTML = `<div class="empty-state" style="padding:40px 0;">${Util.escapeHtml(Util.t('labor.exc_none'))}</div>`; return;
     }
     const rows = exceptions.map((ex) => `
       <div class="lp-exc-row lp-exc-${ex.sev}">
@@ -931,9 +931,9 @@ export const LaborPlanning = (() => {
         <span class="lp-exc-line">${Util.escapeHtml(ex.line)}</span>
         <span class="lp-exc-day">${ex.day}</span>
         <span class="lp-exc-msg">${Util.escapeHtml(ex.msg)}</span>
-        <button class="btn btn-sm lp-exc-fix" data-line="${Util.escapeHtml(ex.line)}" data-day="${ex.day}">Line Plan →</button>
+        <button class="btn btn-sm lp-exc-fix" data-line="${Util.escapeHtml(ex.line)}" data-day="${ex.day}">${Util.escapeHtml(Util.t('labor.exc_go_line_plan'))}</button>
       </div>`).join('');
-    container.innerHTML = `<div class="lp-exc-summary">${exceptions.length} exception${exceptions.length !== 1 ? 's' : ''}</div><div class="lp-exc-list">${rows}</div>`;
+    container.innerHTML = `<div class="lp-exc-summary">${Util.escapeHtml(Util.t(exceptions.length === 1 ? 'labor.exc_count_one' : 'labor.exc_count_other', { count: exceptions.length }))}</div><div class="lp-exc-list">${rows}</div>`;
     container.querySelectorAll<HTMLButtonElement>('.lp-exc-fix').forEach(button => {
       button.onclick = () => {
         _focusCell = { line: button.dataset.line!, day: button.dataset.day! };
@@ -947,27 +947,27 @@ export const LaborPlanning = (() => {
     const container = document.getElementById('labor-inputs-pane'); if (!container) return;
     container.innerHTML = `
       <div class="lp-inputs-section">
-        <h3 class="lp-inputs-title">Disaggregation</h3>
+        <h3 class="lp-inputs-title">${Util.escapeHtml(Util.t('labor.inputs_disagg'))}</h3>
         <div class="lp-input-row">
-          <label class="lp-input-label">Default split mode</label>
-          <select class="lp-input-sel"><option selected>Even split (equal hours per open day)</option></select>
+          <label class="lp-input-label">${Util.escapeHtml(Util.t('labor.inputs_split_mode'))}</label>
+          <select class="lp-input-sel"><option selected>${Util.escapeHtml(Util.t('labor.inputs_even_split'))}</option></select>
           <span class="lp-input-hint">${Util.escapeHtml(Util.t('labor.split_hint'))}</span>
         </div>
       </div>
       <div class="lp-inputs-section">
-        <h3 class="lp-inputs-title">Horizon</h3>
+        <h3 class="lp-inputs-title">${Util.escapeHtml(Util.t('labor.inputs_horizon'))}</h3>
         <div class="lp-input-row">
-          <label class="lp-input-label">Week span</label>
+          <label class="lp-input-label">${Util.escapeHtml(Util.t('labor.inputs_week_span'))}</label>
           <select class="lp-input-sel" onchange="NIMBUS.LaborPlanning.setSpan(+this.value)">
-            <option value="4" ${_horizonSpan===4?'selected':''}>4 weeks</option>
-            <option value="8" ${_horizonSpan===8?'selected':''}>8 weeks</option>
-            <option value="12" ${_horizonSpan===12?'selected':''}>12 weeks</option>
-            <option value="16" ${_horizonSpan===16?'selected':''}>16 weeks</option>
+            <option value="4" ${_horizonSpan===4?'selected':''}>${Util.t('labor.span_weeks', { n: 4 })}</option>
+            <option value="8" ${_horizonSpan===8?'selected':''}>${Util.t('labor.span_weeks', { n: 8 })}</option>
+            <option value="12" ${_horizonSpan===12?'selected':''}>${Util.t('labor.span_weeks', { n: 12 })}</option>
+            <option value="16" ${_horizonSpan===16?'selected':''}>${Util.t('labor.span_weeks', { n: 16 })}</option>
           </select>
         </div>
       </div>
       <div class="lp-inputs-section">
-        <h3 class="lp-inputs-title">Aggregate ↔ Line reconciliation</h3>
+        <h3 class="lp-inputs-title">${Util.escapeHtml(Util.t('labor.inputs_reconciliation'))}</h3>
         <p style="font-size:12px;color:var(--fg-mute);margin:0;">${Util.escapeHtml(Util.t('labor.reconciliation_help'))}</p>
       </div>`;
   }
@@ -1136,6 +1136,8 @@ export const LaborPlanning = (() => {
   }
 
   function init(): void {
+    // Span options carry a {{n}} count, which the static data-i18n sweep cannot fill, so label them here.
+    document.querySelectorAll<HTMLOptionElement>('#labor-span-sel option').forEach(opt => { opt.textContent = Util.t('labor.span_wks', { n: opt.value }); });
     document.addEventListener('keydown', _onLPKeyDown, { capture: true });
     document.addEventListener('mouseup', () => { _dragging = false; });
     Store.subscribe((evt) => {

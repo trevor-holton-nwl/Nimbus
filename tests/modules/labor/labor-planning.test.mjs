@@ -83,8 +83,8 @@ test('group 8 (labor downstream): the KPI strip reads the proportionally re-buck
   const monday = new Date(); monday.setHours(0, 0, 0, 0); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
   const at = (dayOffset, hour) => { const d = new Date(monday); d.setDate(d.getDate() + dayOffset); d.setHours(hour, 0, 0, 0); return d; };
   const strip = () => ({
-    required: Number((html.kpi.match(/Required<\/span>\s*<span class="lp-kpi-val">(\d+)h/) || [])[1]),
-    shortfalls: Number((html.kpi.match(/Shortfalls<\/span>\s*<span class="lp-kpi-val">(\d+)</) || [])[1]),
+    required: Number((html.kpi.match(/labor.kpi_required<\/span>\s*<span class="lp-kpi-val">(\d+)h/) || [])[1]),
+    shortfalls: Number((html.kpi.match(/labor.kpi_shortfalls<\/span>\s*<span class="lp-kpi-val">(\d+)</) || [])[1]),
   });
   try {
     Store.setMasterData({ plants: [{ plant: 'LB-G8', subnetwork: 'S' }], lines: [{ plant: 'LB-G8', machine: line, wc_group: 'G1' }] }, 'unit-test');

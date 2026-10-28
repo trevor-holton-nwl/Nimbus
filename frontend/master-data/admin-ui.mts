@@ -2393,7 +2393,7 @@ export const ProdLines = {
     if (filterBar) {
       filterBar.innerHTML = `
         <div style="display:flex;align-items:center;gap:6px;font-size:13px;">
-          <span style="color:var(--text-muted,#64748b);">Plant</span>
+          <span style="color:var(--text-muted,#64748b);">${Util.escapeHtml(Util.t('ui.plant_label'))}</span>
           <span class="plant-badge">${Store.selectedPlant || '—'}</span>
         </div>`;
     }
@@ -2482,21 +2482,21 @@ export const ProdLines = {
           <span class="ld-buffer-label">${Util.t('ui.buffer_label')}</span>
           <span class="buf-seg">
             <button class="seg-btn buf-unit-btn ${ls.bufferUnit === 'pct' ? 'active' : ''}" data-line="${Util.escapeHtml(line)}" data-unit="pct">%</button>
-            <button class="seg-btn buf-unit-btn ${ls.bufferUnit === 'hours' ? 'active' : ''}" data-line="${Util.escapeHtml(line)}" data-unit="hours">hrs</button>
+            <button class="seg-btn buf-unit-btn ${ls.bufferUnit === 'hours' ? 'active' : ''}" data-line="${Util.escapeHtml(line)}" data-unit="hours">${Util.escapeHtml(Util.t('ui.pl_unit_hrs'))}</button>
           </span>
           <input type="number" class="input buf-pct-input" ${ls.bufferUnit !== 'pct' ? 'style="display:none"' : ''} min="0" max="100" step="1" value="${ls.bufferPct || 0}" data-line="${Util.escapeHtml(line)}">
           <input type="number" class="input buf-hrs-input" ${ls.bufferUnit !== 'hours' ? 'style="display:none"' : ''} min="0" step="0.25" value="${ls.bufferHours || 0}" data-line="${Util.escapeHtml(line)}">
         </span>
         <span class="ld-buffer">
-          <span class="ld-buffer-label">Production Line Group</span>
-          <input type="text" class="input plgroup-input" style="width:140px;" value="${Util.escapeHtml(ls.plGroup || '')}" data-line="${Util.escapeHtml(line)}" placeholder="e.g. PREMIUM">
+          <span class="ld-buffer-label">${Util.escapeHtml(Util.t('ui.pl_group'))}</span>
+          <input type="text" class="input plgroup-input" style="width:140px;" value="${Util.escapeHtml(ls.plGroup || '')}" data-line="${Util.escapeHtml(line)}" placeholder="${Util.escapeHtml(Util.t('ph.pl_group'))}">
         </span>
         <span class="ld-buffer">
-          <span class="ld-buffer-label">SAP Work Center</span>
+          <span class="ld-buffer-label">${Util.escapeHtml(Util.t('ui.pl_sap_wc'))}</span>
           <div class="sap-workcenter-combo" id="sap-workcenter-combo-${Util.escapeHtml(line)}" style="width:140px;"></div>
         </span>
         <span class="ld-buffer">
-          <span class="ld-buffer-label">Distribution Weight</span>
+          <span class="ld-buffer-label">${Util.escapeHtml(Util.t('ui.pl_dist_weight'))}</span>
           <input type="text" class="input distribution-weight-input" style="width:140px;" value="${Util.escapeHtml(String(ls.distributionWeight ?? ''))}" data-line="${Util.escapeHtml(line)}" placeholder="—" readonly>
         </span>
       </div>
@@ -2520,7 +2520,7 @@ export const ProdLines = {
       <div class="ld-section">
         <div class="ld-section-head">
           <span class="ld-section-title">${Util.t('ui.line_blackouts_section')}</span>
-          <button class="btn btn-ghost sm" data-action="add-block" data-line="${Util.escapeHtml(line)}">+ Add</button>
+          <button class="btn btn-ghost sm" data-action="add-block" data-line="${Util.escapeHtml(line)}">${Util.escapeHtml(Util.t('btn.add_block'))}</button>
         </div>
         <div class="ld-section-body">
           <div class="line-blocks-list" id="line-blocks-${Util.escapeHtml(line)}">${ProdLines._renderLineBlocks(line)}</div>
@@ -2610,8 +2610,8 @@ export const ProdLines = {
       return `<div class="lines-nav-item${isActive ? ' active' : ''}" data-line="${Util.escapeHtml(line)}">
         <span class="line-dot" style="background:${color};display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0;"></span>
         <span class="lines-nav-label">${Util.escapeHtml(line)}</span>
-        ${ls.bottleneck ? '<span class="lines-nav-bottleneck" title="Bottleneck">🚧</span>' : ''}
-        ${ls.excludeFromOpt ? '<span class="lines-nav-excl-opt" title="Excluded from optimization">🚫</span>' : ''}
+        ${ls.bottleneck ? `<span class="lines-nav-bottleneck" title="${Util.escapeHtml(Util.t('ui.bottleneck'))}">🚧</span>` : ''}
+        ${ls.excludeFromOpt ? `<span class="lines-nav-excl-opt" title="${Util.escapeHtml(Util.t('tip.excluded_from_opt'))}">🚫</span>` : ''}
       </div>`;
     }).join('');
     // Cross-screen multi-select filter (Store.selectedLines) replaces the old
@@ -2621,10 +2621,10 @@ export const ProdLines = {
     if (!document.getElementById('lines-nav-filter-btn')) {
       nav.innerHTML = `
         <div class="lines-nav-header">
-          <div class="lines-nav-title" id="lines-nav-title">Lines &middot; ${allLines.length}</div>
+          <div class="lines-nav-title" id="lines-nav-title">${Util.escapeHtml(Util.t('ui.lines_nav_title', { count: allLines.length }))}</div>
           <div class="lines-nav-filter" id="lines-nav-filter" style="position:relative;">
             <button class="seg-btn lp-group-btn" id="lines-nav-filter-btn" type="button" style="width:100%;">
-              <span id="lines-nav-filter-label">All Lines</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
+              <span id="lines-nav-filter-label">${Util.escapeHtml(Util.t('ui.all_lines'))}</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
             </button>
             <div class="dash-filter-dropdown" id="lines-nav-filter-dropdown" hidden>
               <div class="dash-filter-paste-row">
@@ -2638,7 +2638,7 @@ export const ProdLines = {
         <div class="lines-nav-list" id="lines-nav-list"></div>`;
     } else {
       const t = document.getElementById('lines-nav-title');
-      if (t) t.textContent = `Lines · ${allLines.length}`;
+      if (t) t.textContent = Util.t('ui.lines_nav_title', { count: allLines.length });
     }
     Util.refreshMultiSelectLabel(
       document.getElementById('lines-nav-filter-label'), document.getElementById('lines-nav-filter-btn'), Store.selectedLines);
@@ -2744,7 +2744,7 @@ export const ProdLines = {
       <div class="block-row" style="opacity:0.75;padding-left:6px;padding-right:6px;">
         <span class="ico" style="color:var(--warn,#93610a);">■</span>
         <span class="reason">${Util.escapeHtml(b.reason || Util.t('ui.plant_blackout_default'))}</span>
-        <span class="line-tag" style="background:var(--warn-soft,#f8ecd0);color:var(--warn,#93610a);">Plant</span>
+        <span class="line-tag" style="background:var(--warn-soft,#f8ecd0);color:var(--warn,#93610a);">${Util.escapeHtml(Util.t('ui.plant_label'))}</span>
         <span class="range" title="${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}">${Util.fmtBlockRange(b.start, b.end)}</span>
       </div>`).join('');
 

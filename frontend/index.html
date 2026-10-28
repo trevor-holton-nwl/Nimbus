@@ -1593,16 +1593,16 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     <!-- Toolbar -->
     <div class="labor-toolbar" id="labor-toolbar">
       <div class="group">
-        <button class="seg-btn active" data-labor-sub="aggregate">Aggregate</button>
-        <button class="seg-btn" data-labor-sub="line-plan">Line Plan</button>
-        <button class="seg-btn" data-labor-sub="capacity">Capacity</button>
-        <button class="seg-btn" data-labor-sub="exceptions">Exceptions <span class="labor-exc-badge" id="labor-exc-badge" hidden>0</span></button>
-        <button class="seg-btn" data-labor-sub="inputs">Inputs</button>
+        <button class="seg-btn active" data-labor-sub="aggregate" data-i18n="labor.sub_aggregate">Aggregate</button>
+        <button class="seg-btn" data-labor-sub="line-plan" data-i18n="labor.sub_line_plan">Line Plan</button>
+        <button class="seg-btn" data-labor-sub="capacity" data-i18n="labor.sub_capacity">Capacity</button>
+        <button class="seg-btn" data-labor-sub="exceptions"><span data-i18n="labor.sub_exceptions">Exceptions</span> <span class="labor-exc-badge" id="labor-exc-badge" hidden>0</span></button>
+        <button class="seg-btn" data-labor-sub="inputs" data-i18n="labor.sub_inputs">Inputs</button>
       </div>
       <div class="sep-v"></div>
       <div class="lp-group-filter" id="lp-group-filter">
         <button class="seg-btn lp-group-btn" id="lp-group-btn" onclick="NIMBUS.LaborPlanning.toggleGroupDropdown(event)">
-          <span id="lp-group-label">All Groups</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
+          <span id="lp-group-label" data-i18n="labor.all_groups">All Groups</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
         </button>
         <div class="lp-group-dropdown" id="lp-group-dropdown" hidden></div>
       </div>
@@ -1612,7 +1612,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
            pickers; narrows the group filter above rather than replacing it. -->
       <div class="lp-group-filter" id="lp-line-filter">
         <button class="seg-btn lp-group-btn" id="lp-line-btn" onclick="NIMBUS.LaborPlanning.toggleLineDropdown(event)">
-          <span id="lp-line-label">All Lines</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
+          <span id="lp-line-label" data-i18n="ui.all_lines">All Machines</span><span style="margin-left:4px;font-size:10px;opacity:.7;">▾</span>
         </button>
         <div class="dash-filter-dropdown" id="lp-line-dropdown" hidden>
           <div class="dash-filter-paste-row">
@@ -1624,9 +1624,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       </div>
       <div class="sep-v"></div>
       <div class="lp-seg-group">
-        <button class="seg-btn" id="labor-prev" onclick="NIMBUS.LaborPlanning.prevHorizon()" title="Previous period">‹</button>
-        <input id="labor-horizon-input" class="labor-horizon-input" readonly placeholder="Jump to week…" title="Click to jump to any week">
-        <button class="seg-btn" id="labor-next" onclick="NIMBUS.LaborPlanning.nextHorizon()" title="Next period">›</button>
+        <button class="seg-btn" id="labor-prev" onclick="NIMBUS.LaborPlanning.prevHorizon()" title="Previous period" data-i18n-title="labor.prev_period">‹</button>
+        <input id="labor-horizon-input" class="labor-horizon-input" readonly placeholder="Jump to week…" title="Click to jump to any week" data-i18n-placeholder="labor.jump_week" data-i18n-title="labor.jump_week_tip">
+        <button class="seg-btn" id="labor-next" onclick="NIMBUS.LaborPlanning.nextHorizon()" title="Next period" data-i18n-title="labor.next_period">›</button>
         <div class="sep-v" style="height:18px;"></div>
         <select id="labor-span-sel" class="labor-span-sel" onchange="NIMBUS.LaborPlanning.setSpan(+this.value)">
           <option value="4">4 wks</option>
@@ -2765,32 +2765,32 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 <div class="modal-backdrop" id="modal-lines-block" hidden>
   <div class="modal">
     <header class="modal-head">
-      <h3>Add line blackout</h3>
-      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-lines-block')" aria-label="Close">✕</button>
+      <h3 data-i18n="ui.add_line_blackout">Add line blackout</h3>
+      <button class="icon-btn sm" onclick="NIMBUS.Modal.close('modal-lines-block')" aria-label="Close" data-i18n-aria-label="btn.close">✕</button>
     </header>
     <div class="modal-body">
       <div class="form-row">
-        <label>Production line</label>
+        <label data-i18n="modal.override_line_label">Production line</label>
         <select id="lines-blk-line"></select>
       </div>
       <div class="form-row form-row-2">
         <div>
-          <label>Start</label>
+          <label data-i18n="ui.blk_start">Start</label>
           <input type="text" id="lines-blk-start" readonly>
         </div>
         <div>
-          <label>End</label>
+          <label data-i18n="ui.blk_end">End</label>
           <input type="text" id="lines-blk-end" readonly>
         </div>
       </div>
       <div class="form-row">
-        <label>Reason</label>
+        <label data-i18n="ui.blk_reason">Reason</label>
         <input type="text" id="lines-blk-reason" placeholder="Maintenance, cleaning, shift change…" data-i18n-placeholder="ph.blackout_reason_line">
       </div>
     </div>
     <footer class="modal-foot">
-      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-lines-block')">Cancel</button>
-      <button id="modal-lines-block-save-btn" class="btn btn-primary">Save block</button>
+      <button class="btn btn-ghost" onclick="NIMBUS.Modal.close('modal-lines-block')" data-i18n="btn.cancel">Cancel</button>
+      <button id="modal-lines-block-save-btn" class="btn btn-primary" data-i18n="btn.save_block">Save block</button>
     </footer>
   </div>
 </div>

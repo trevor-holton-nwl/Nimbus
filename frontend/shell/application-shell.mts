@@ -2098,6 +2098,9 @@ const App = {
     document.querySelectorAll<HTMLElement>('[data-i18n-placeholder]').forEach(el => {
       (el as HTMLInputElement).placeholder = Util.t(el.dataset.i18nPlaceholder as string);
     });
+    document.querySelectorAll<HTMLElement>('[data-i18n-aria-label]').forEach(el => {
+      el.setAttribute('aria-label', Util.t(el.dataset.i18nAriaLabel as string));
+    });
 
     /* Tab buttons */
     document.querySelectorAll<HTMLElement>('.tab-btn').forEach(btn => {

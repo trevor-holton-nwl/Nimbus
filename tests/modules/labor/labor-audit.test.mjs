@@ -193,7 +193,7 @@ test('LAB-006 daily overrides control KPI availability and zero-capacity demand 
   Store.setSelectedLines(new Set(['LINE-A']));
   Utilization.computeMatrix.mock.mockImplementation(() => ({ 'LINE-A': { [day]: { scheduled: 9, capacity: 8, effectiveCapacity: 8 } } }));
   await LaborPlanning.render();
-  assert.match(h.nodes['labor-kpi-strip'].innerHTML, /Available<\/span>\s*<span class="lp-kpi-val">0h/);
+  assert.match(h.nodes['labor-kpi-strip'].innerHTML, /labor.kpi_available<\/span>\s*<span class="lp-kpi-val">0h/);
   assert.match(h.nodes['labor-capacity-grid'].innerHTML, />9\/0<\/div>/);
   assert.doesNotMatch(h.nodes['labor-capacity-grid'].innerHTML, /LINE-B/);
 });
