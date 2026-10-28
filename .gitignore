@@ -156,3 +156,4 @@ frontend/platform/layout.mjs
 
 # Compiled day-stepper helper (source: frontend/platform/day-stepper.mts)
 frontend/platform/day-stepper.mjs
+frontend/optimization/headless-codec.mjs
