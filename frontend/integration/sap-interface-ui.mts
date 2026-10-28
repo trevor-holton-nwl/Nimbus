@@ -1637,7 +1637,7 @@ export const Interface = (() => {
     try {
       const d = new Date(ts);
       if (isNaN(d.getTime())) return String(ts);
-      return Util.fmtDTReadable ? Util.fmtDTReadable(d) : Util.fmtDT(d);
+      return Util.fmtDTReadable ? Util.fmtDTReadable(d) : Util.fmtDTPref(d);
     } catch { return String(ts); }
   }
 

@@ -169,9 +169,11 @@ type WiredElement = HTMLElement & { _wired?: boolean };
                 (gridLayout / pinnedPlants / pinnedLines), which are inherently
                 per-person and never role-overridable.
      region   : true only for keys eligible for the (NO-OP today) {plant} region
-                fallback — timezone & firstDayOfWeek.
-   timeFormat / dateFormat / timezone are DISPLAY-ONLY (they change how values
-   render, never the stored data).
+                fallback — firstDayOfWeek.
+   timeFormat / dateFormat are DISPLAY-ONLY (they change how values render,
+   never the stored data). There is no timezone setting: the dead per-user
+   `timezone` key was removed (plant timezones live in master data); a stale
+   stored value in a user_settings row is ignored.
    ========================================================================== */
 const Settings = (() => {
   const CATALOG: SettingsCatalogEntry[] = [
@@ -190,7 +192,6 @@ const Settings = (() => {
     // ── Workflow ───────────────────────────────────────────────────────
     { key: 'timeFormat',        category: 'workflow', type: 'enum',     default: '12h',              tier: 'user', region: false },
     { key: 'dateFormat',        category: 'workflow', type: 'enum',     default: 'm/d/Y',             tier: 'user', region: false },
-    { key: 'timezone',          category: 'workflow', type: 'timezone', default: 'America/New_York', tier: 'user', region: true  },
     { key: 'firstDayOfWeek',    category: 'workflow', type: 'enum',     default: 0,                  tier: 'user', region: true  },
     { key: 'optimizerDefaults', category: 'workflow', type: 'object',   default: null,               tier: 'user', region: false },
     { key: 'distributionFilters', category: 'workflow', type: 'object',  default: null,               tier: 'user', region: false },
@@ -433,6 +434,8 @@ const SessionUIAdapter = {
     // AG Grid date columns render through pref-aware valueFormatters — force a
     // cell repaint so the new format shows without an edit/scroll.
     try { if (NIMBUS.Table?._api) NIMBUS.Table._api.refreshCells({ force: true }); } catch {}
+    // Date pickers already built bake altFormat at construction: re-apply it live.
+    try { Util.refreshFlatpickrPrefs(); } catch {}
     // Inspector schedule rows are baked into innerHTML — re-render the current
     // selection so its dates repaint too.
     try {
@@ -2827,8 +2830,10 @@ const App = {
 
   // Push pref('firstDayOfWeek') into Flatpickr's default l10n so calendar pickers
   // start the week on the user's chosen day. Flatpickr reads firstDayOfWeek at
-  // construction time, so this affects pickers created AFTER the call (all NIMBUS
-  // pickers are lazily built on first open). Safe no-op if Flatpickr isn't loaded.
+  // construction time, so the default covers pickers created AFTER the call and
+  // Util.refreshFlatpickrPrefs patches the ones already built. Labor Plan weeks are
+  // ISO weeks (Monday start) regardless: they are the stored period keys.
+  // Safe no-op if Flatpickr isn't loaded.
   _applyFirstDayOfWeek(): void {
     try {
       let fdow = Number(Store.pref('firstDayOfWeek'));
@@ -2837,6 +2842,9 @@ const App = {
         (flatpickr.l10ns.default as { firstDayOfWeek?: number }).firstDayOfWeek = fdow;
       }
     } catch {}
+    // Pickers that already exist keep their construction-time week start: patch them too
+    // (this also re-applies the date/time altFormat, which covers a failed-save revert).
+    try { Util.refreshFlatpickrPrefs(); } catch {}
   },
 
   // Navigate to the user's saved default landing view (pref('landingView') =

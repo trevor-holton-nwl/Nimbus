@@ -18,8 +18,7 @@ test('every Settings.CATALOG key is in the backend ALLOWED_SETTINGS_KEYS (the tw
   const block = py.match(/ALLOWED_SETTINGS_KEYS\s*=\s*frozenset\(\{([\s\S]*?)\}\)/);
   assert.ok(block, 'ALLOWED_SETTINGS_KEYS not found in backend/security/auth.py');
   const allowed = new Set([...block[1].matchAll(/"([A-Za-z0-9_]+)"/g)].map(m => m[1]));
-  // timezone is the one known exception: it is a dead key that Wave D removes from the catalog.
-  const missing = Settings.CATALOG.map(e => e.key).filter(k => !allowed.has(k) && k !== 'timezone');
+  const missing = Settings.CATALOG.map(e => e.key).filter(k => !allowed.has(k));
   assert.deepEqual(missing, [], `catalog keys the backend would reject with 400: ${missing.join(', ')}`);
 });
 
@@ -127,4 +126,34 @@ test('session:changed/refresh re-applies theme and firstDayOfWeek; settings-pref
     Store.emit({ type: 'settings:change', source: 'settings-pref' });
     assert.equal(reverts, 1);
   } finally { globalThis.NIMBUS = priorNimbus; }
+});
+
+test('tab.routing_pv exists in all five locales, and the dead timezone key is gone from the catalog and the defaults', () => {
+  for (const lang of ['en', 'de', 'es', 'fr', 'pt']) {
+    const src = readFileSync(new URL(`../../frontend/locales/${lang}.js`, import.meta.url), 'utf8');
+    assert.match(src, /'tab\.routing_pv'\s*:\s*'[^']+'/, `${lang} missing tab.routing_pv`);
+  }
+  assert.equal(Settings.CATALOG.some(e => e.key === 'timezone'), false);
+  assert.equal('timezone' in Settings.DEFAULTS, false);
+});
+
+test('App._applyFirstDayOfWeek patches the default locale and every existing picker', t => {
+  const priorFp = globalThis.flatpickr;
+  const refreshed = [];
+  globalThis.flatpickr = { l10ns: { default: { firstDayOfWeek: 0 } } };
+  t.mock.method(Store, 'pref', k => (k === 'firstDayOfWeek' ? 1 : undefined));
+  t.mock.method(Util, 'refreshFlatpickrPrefs', () => { refreshed.push(1); return 0; });
+  try {
+    App._applyFirstDayOfWeek();
+    assert.equal(globalThis.flatpickr.l10ns.default.firstDayOfWeek, 1);
+    assert.equal(refreshed.length, 1, 'already-built pickers are refreshed too');
+  } finally { if (priorFp === undefined) delete globalThis.flatpickr; else globalThis.flatpickr = priorFp; }
+});
+
+test('_repaintDisplayFormat re-applies the format prefs to existing pickers', t => {
+  const priorNimbus = globalThis.NIMBUS;
+  let refreshed = 0;
+  globalThis.NIMBUS = {};
+  t.mock.method(Util, 'refreshFlatpickrPrefs', () => { refreshed++; return 0; });
+  try { SessionUIAdapter._repaintDisplayFormat(); assert.equal(refreshed, 1); } finally { globalThis.NIMBUS = priorNimbus; }
 });

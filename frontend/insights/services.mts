@@ -786,7 +786,7 @@ export const Alerts = {
       try { Engine.autoReflow(task.id); } catch {}
       UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap), [task.id]);
       Alerts.dismiss(alertId);
-      if (!quiet) Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(changes.end_date ?? newStart) }), 'success');
+      if (!quiet) Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDTPref(changes.end_date ?? newStart) }), 'success');
       return true;
 
     } else if (a.type === 'overload') {

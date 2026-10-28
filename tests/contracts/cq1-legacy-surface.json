@@ -601,8 +601,12 @@
     "UndoStack.push",
     "UndoStack.restoreTasks",
     "UndoStack.snapshotTasks",
+    "Util._fmtTimePref",
     "Util.debounce",
     "Util.escapeHtml",
+    "Util.fmtDTShortPref",
+    "Util.fmtDateShortPref",
+    "Util.fmtDayLabelPref",
     "Util.norm",
     "Util.scheduleIntervals",
     "Util.startOfDay",
@@ -692,6 +696,7 @@
     "TimeMachine._relTime",
     "TimeMachine._renderPanel",
     "TimeMachine._snapshotAuto",
-    "TimeMachine._snapshots"
+    "TimeMachine._snapshots",
+    "Util._fmtTimePref"
   ]
 }

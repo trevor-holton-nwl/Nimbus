@@ -1216,7 +1216,7 @@ window.__NIMBUS_LOCALES.en = {
   'us.first_day':                  'First day of week',
   'us.first_day_sun':              'Sunday',
   'us.first_day_mon':              'Monday',
-  'us.first_day_hint':             'Sets the starting day for calendar date pickers.',
+  'us.first_day_hint':             'Sets the starting day for calendar date pickers. Labor Plan weeks always start on Monday.',
   'us.opt_defaults':               'Optimizer defaults',
   'us.opt_defaults_hint':          'Pre-fills the optimizer dialog. Updated automatically when you run an optimization.',
   'us.opt_mode_spt':               'SPT',

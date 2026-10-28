@@ -204,6 +204,13 @@ export const Config = {
    locale is proper module state instead of a bag property.
    ========================================================================== */
 let _prefResolver: PreferenceResolver = () => undefined;
+
+/** The slice of a flatpickr instance `Util.refreshFlatpickrPrefs` reads and patches. */
+interface PickerLike {
+  config?: { altInput?: boolean; altFormat?: string; noCalendar?: boolean; enableTime?: boolean };
+  l10n?: { firstDayOfWeek?: number } & Record<string, unknown>;
+  set(option: string, value: unknown): void;
+}
 let _actorResolver: ActorResolver = () => undefined;
 let _utilizationResolver: UtilizationResolverFn | null = null;
 let _changeoverFieldsResolver: (() => string[]) | null = null;
@@ -354,6 +361,101 @@ export const Util = {
     const p = (n: number) => String(n).padStart(2, '0');
     return `${p(date.getMonth() + 1)}/${p(date.getDate())}/${date.getFullYear()}`;
   },
+  // Short date token: the dateFormat pref with its year dropped and the orphaned
+  // separator trimmed ('m/d/Y' -> 'm/d', 'Y-m-d' -> 'm-d', 'M j, Y' -> 'M j').
+  _shortDateToken(tok: string): string {
+    const s = String(tok).replace(/[Yy]/g, '').replace(/^[\s/.,-]+|[\s/.,-]+$/g, '');
+    return s || String(tok);
+  },
+  // Compact date (no year) per the dateFormat pref: "10/28", "28/10", "Oct 28".
+  // Display only. Null/invalid -> ''.
+  fmtDateShortPref(d: unknown): string {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    const tok = Util._shortDateToken(Util._dateFormatPref());
+    try {
+      if (typeof flatpickr !== 'undefined' && flatpickr.formatDate) return flatpickr.formatDate(date, tok);
+    } catch { /* fall through to compact MM/DD */ }
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${p(date.getMonth() + 1)}/${p(date.getDate())}`;
+  },
+  // Pref-aware counterparts of fmtDT / fmtDTShort. The fixed-format originals stay for
+  // DATA uses (the grid's typed-date editor round-trip, CSV export). Same '' for null/invalid.
+  fmtDTPref(d: unknown): string {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    return `${Util._fmtDatePref(date)} ${Util._fmtTimePref(date)}`;
+  },
+  fmtDTShortPref(d: unknown): string {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    return `${Util.fmtDateShortPref(date)} ${Util._fmtTimePref(date)}`;
+  },
+  // "Wed 10/28": the short weekday (page language) plus fmtDateShortPref. Display only.
+  fmtDayLabelPref(d: unknown, locale?: string): string {
+    const date = Util.parseDate(d);
+    if (!date) return '';
+    let wd = '';
+    try { wd = new Intl.DateTimeFormat(locale || Util.locale() || 'en-US', { weekday: 'short' }).format(date); }
+    catch { try { wd = new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(date); } catch { wd = ''; } }
+    return `${wd} ${Util.fmtDateShortPref(date)}`.trim();
+  },
+  // Pref-aware counterpart of fmtIsoDate for DISPLAY: an ISO "YYYY-MM-DD[...]" string ->
+  // the user's dateFormat, from string parts (no timezone shift). Non-matching input is
+  // returned unchanged (null/undefined -> ''); an impossible date (2026-02-30) falls back
+  // to fmtIsoDate's fixed rendering rather than rolling over.
+  fmtIsoDatePref(s: string | null | undefined): string {
+    if (s == null) return '';
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s));
+    if (!m) return String(s);
+    const y = Number(m[1]), mo = Number(m[2]), da = Number(m[3]);
+    const dt = new Date(2000, mo - 1, da, 12);
+    dt.setFullYear(y);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== da) return Util.fmtIsoDate(s);
+    return Util._fmtDatePref(dt);
+  },
+  // ISO timestamp string ("YYYY-MM-DDTHH:MM[:SS]...", wall-clock parts used as served, no
+  // zone shift; the caller labels the zone, e.g. " UTC") -> "<date pref> <time pref>". A
+  // date-only string gives the date; non-matching input is returned unchanged.
+  fmtIsoStampPref(s: string | null | undefined, withSeconds = false): string {
+    if (s == null) return '';
+    const m = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(String(s));
+    if (!m) return String(s);
+    const date = Util.fmtIsoDatePref(m[1]);
+    if (m[2] == null) return date;
+    const p = (n: number) => String(n).padStart(2, '0');
+    const h = Number(m[2]), mi = m[3], sec = withSeconds && m[4] != null ? `:${m[4]}` : '';
+    if (Util._timeFormatPref() === '24h') return `${date} ${p(h)}:${mi}${sec}`;
+    return `${date} ${p(h % 12 || 12)}:${mi}${sec} ${h < 12 ? 'AM' : 'PM'}`;
+  },
+  // Re-apply the display prefs to every flatpickr instance already built (they bake
+  // altFormat and the week start at construction): altInput pickers get the current
+  // date / datetime / time-only altFormat and every picker the firstDayOfWeek pref.
+  // time_24hr (the popup clock) is NOT live-patchable: flatpickr builds that DOM once, so
+  // it follows the pref on the next picker built (a reload). Returns the number touched.
+  refreshFlatpickrPrefs(root?: ParentNode | null): number {
+    const scope = root ?? (typeof document !== 'undefined' ? document : null);
+    if (!scope || typeof scope.querySelectorAll !== 'function') return 0;
+    let fdow = 0;
+    try { fdow = Number(_prefResolver('firstDayOfWeek')) === 1 ? 1 : 0; } catch { fdow = 0; }
+    let n = 0;
+    scope.querySelectorAll('.flatpickr-input').forEach((el) => {
+      const fp = (el as unknown as { _flatpickr?: PickerLike })._flatpickr;
+      if (!fp || typeof fp.set !== 'function') return;
+      try {
+        const cfg = fp.config || {};
+        if (cfg.altInput) {
+          const fmt = cfg.noCalendar ? Util._fpTimeAltFormat() : cfg.enableTime ? Util._fpAltFormat() : Util._dateFormatPref();
+          if (cfg.altFormat !== fmt) fp.set('altFormat', fmt);
+        }
+        if (!cfg.noCalendar && fp.l10n && fp.l10n.firstDayOfWeek !== fdow) {
+          fp.set('locale', { ...fp.l10n, firstDayOfWeek: fdow });
+        }
+        n++;
+      } catch { /* a picker mid-teardown: skip it */ }
+    });
+    return n;
+  },
   // Human-readable datetime (e.g. "05/15/2026 · 06:00 PM"), routed through the
   // per-user dateFormat + timeFormat display prefs.
   fmtDTReadable(d: unknown): string {
@@ -460,6 +562,7 @@ export const Util = {
     return flatpickr(sel, {
       enableTime: true, dateFormat: 'Y-m-d\\TH:i',
       altInput: true, altFormat: Util._fpAltFormat(), minuteIncrement: 30,
+      time_24hr: Util._timeFormatPref() === '24h',
       ...extra,
     });
   },

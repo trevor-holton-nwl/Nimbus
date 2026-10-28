@@ -945,8 +945,8 @@ export const Table = {
     // Quick presets + clear. Underlying filter stores YYYY-MM-DD (single day) only;
     // longer ranges set status='atrisk-or-window' via dedicated keys.
     const presets = [
-      { v: Util.dayKey(today),    k: Util.t('ui.today'),    d: today.toLocaleDateString(Util.locale(), { weekday: 'short', month: 'short', day: 'numeric' }) },
-      { v: Util.dayKey(tomorrow), k: Util.t('ui.tomorrow'), d: tomorrow.toLocaleDateString(Util.locale(), { weekday: 'short', month: 'short', day: 'numeric' }) },
+      { v: Util.dayKey(today),    k: Util.t('ui.today'),    d: Util.fmtDayLabelPref(today) },
+      { v: Util.dayKey(tomorrow), k: Util.t('ui.tomorrow'), d: Util.fmtDayLabelPref(tomorrow) },
     ];
     drop.innerHTML = presets.map(p =>
       `<label style="display:flex;flex-direction:column;align-items:flex-start;gap:1px;padding:6px 14px;">

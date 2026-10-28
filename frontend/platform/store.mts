@@ -1150,7 +1150,7 @@ export const Store = {
       const rd   = this._state.roleDefaults || {};
       const defs = _settingsDefaultsResolver() || {};
       // ── region/{plant} fallback — EXTENSION POINT, NO-OP TODAY ──────────
-      // For region-scoped keys (Settings.isRegion(key): timezone, firstDayOfWeek)
+      // For region-scoped keys (Settings.isRegion(key): firstDayOfWeek)
       // a per-plant regional default keyed on opts.plant would slot in between the
       // user blob and the role defaults right here. There is NO plants timezone /
       // week-start column yet, so we deliberately do not read one — do not invent a

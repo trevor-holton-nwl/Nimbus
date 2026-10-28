@@ -1274,9 +1274,9 @@ function _diagnoseFor(a: NimbusAlert, task: NimbusTask | undefined, plant: strin
   const fields: Array<{ label: string; value: string }> = [];
   if (task) {
     const due = Util.dueInstant(task);
-    if (due) fields.push({ label: t('ui.insp_due_date'), value: Util.fmtDT(due) });
+    if (due) fields.push({ label: t('ui.insp_due_date'), value: Util.fmtDTPref(due) });
     const end = Util.scheduledEnd(task);
-    if (end) fields.push({ label: t('ui.insp_planned_finish'), value: Util.fmtDT(end) });
+    if (end) fields.push({ label: t('ui.insp_planned_finish'), value: Util.fmtDTPref(end) });
     const late = Util.latenessHours(task);
     fields.push({ label: t('ui.late'), value: late > 0 ? `${fmtNum(late)} h` : '—' });
     const run = Number(task.RUN_TIME);
@@ -1331,7 +1331,7 @@ function _rowView(a: NimbusAlert, rc: RowCtx): RowView {
     dateText: anchor ? _fmtDay(anchor) : '',
     relText: anchor ? relativeDaysText(offset, t) : '',
     overdue: !!anchor && offset < 0,
-    anchorTip: anchor ? `${t(fromDue ? 'am.anchor_due' : 'am.anchor_time')}: ${Util.fmtDT(anchor)}` : t(fromDue ? 'am.anchor_due' : 'am.anchor_time'),
+    anchorTip: anchor ? `${t(fromDue ? 'am.anchor_due' : 'am.anchor_time')}: ${Util.fmtDTPref(anchor)}` : t(fromDue ? 'am.anchor_due' : 'am.anchor_time'),
     whatIf: Sandbox.active === true,
     ackLabel: _ackLabel(rc.s.m.acked.get(a.id)),
     diagOpen: open,
@@ -1351,16 +1351,16 @@ function _groupLabel(by: MonitorView['groupBy'], key: string, rc: RowCtx): strin
   }, t);
 }
 
-/** "Thu 23 Oct" in the page language: the day label of group heads and of a row's when column. */
+/** "Thu 10/23" (weekday in the page language, date per the dateFormat pref): the day label of group heads and of a row's when column. */
 function _fmtDay(d: Date): string {
   const lang = document.documentElement?.lang || 'en-US';
   let f = _dayFmt.get(lang);
   if (!f) {
-    try { f = new Intl.DateTimeFormat(lang, { weekday: 'short', day: 'numeric', month: 'short' }); }
-    catch { f = new Intl.DateTimeFormat('en-US', { weekday: 'short', day: 'numeric', month: 'short' }); }
+    try { f = new Intl.DateTimeFormat(lang, { weekday: 'short' }); }
+    catch { f = new Intl.DateTimeFormat('en-US', { weekday: 'short' }); }
     _dayFmt.set(lang, f);
   }
-  return f.format(d);
+  return `${f.format(d)} ${Util.fmtDateShortPref(d)}`;
 }
 /** One formatter per page language: constructing an Intl.DateTimeFormat per row dominated the row-building cost. */
 const _dayFmt = new Map<string, Intl.DateTimeFormat>();

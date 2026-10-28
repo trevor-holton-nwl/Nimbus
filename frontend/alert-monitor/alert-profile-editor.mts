@@ -138,7 +138,7 @@ export function uniqueCopyName(name: string, existing: Iterable<string>): string
   }
 }
 
-const _defaultFmt = (d: Date): string => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+const _defaultFmt = (d: Date): string => Util._fmtDatePref(d);
 
 /** The plant-local dates a day window covers (inclusive); a blank side is "…". Null when both are blank. */
 export function liveRange(

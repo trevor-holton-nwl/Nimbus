@@ -647,7 +647,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           when:  s => s.minsSinceSnap !== null && s.minsSinceSnap >= 20 && s.hasPlant,
           run()  {
             CommandPalette.close();
-            const label = `Manual · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
+            const label = `Manual · ${Util._fmtTimePref(new Date())}`;
             TimeMachine.snapshot(label);
             Toast.show(t('toast.snapshot_saved'), 'success', 1400);
           }
@@ -661,7 +661,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           when:  s => s.snapshotCount === 0 && s.hasPlant,
           run()  {
             CommandPalette.close();
-            const label = `First snapshot · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
+            const label = `First snapshot · ${Util._fmtTimePref(new Date())}`;
             TimeMachine.snapshot(label);
             Toast.show(t('toast.snapshot_saved'), 'success', 1400);
           }
@@ -755,7 +755,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
               NIMBUS.Engine?.applyFirm?.(unfirmedIds, true, 'cmd-palette');
             }
             Alerts.scheduleRecompute();
-            const label = `Frozen · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
+            const label = `Frozen · ${Util._fmtTimePref(new Date())}`;
             TimeMachine.snapshot(label);
             Toast.show(t('toast.freeze_saved'), 'success', 3000);
             if (lockedCount) Toast.show(t('toast.firm_skipped_locked', { n: lockedCount }), 'info');
@@ -796,7 +796,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           icon:  '📸',
           run()  {
             CommandPalette.close();
-            const label = `Intent · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
+            const label = `Intent · ${Util._fmtTimePref(new Date())}`;
             TimeMachine.snapshot(label);
             Toast.show(t('toast.snapshot_saved'), 'success', 1400);
           }
@@ -1012,7 +1012,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         { type:'action', label:t('cmdp.label_take_snapshot_title'), sub:t('cmdp.sub_save_manual_checkpoint'), icon:'📷',
           run(){
             CommandPalette.close();
-            const label = `Manual · ${new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}`;
+            const label = `Manual · ${Util._fmtTimePref(new Date())}`;
             TimeMachine.snapshot(label);
             Toast.show(t('toast.snapshot_saved'), 'success', 1400);
           } },
@@ -1254,7 +1254,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         sub:   t('cmdp.sub_save_checkpoint_now'),
         run() {
           CommandPalette.close();
-          const label = `Pre-selection · ${n} orders · ${new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })}`;
+          const label = `Pre-selection · ${n} orders · ${Util._fmtTimePref(new Date())}`;
           TimeMachine.snapshot(label);
           Toast.show(t('toast.snapshot_saved'), 'success', 1400);
         }
@@ -1387,7 +1387,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (m < 60) return `${m}m ago`;
       const h = Math.floor(m / 60);
       if (h < 24) return `${h}h${m % 60 ? ` ${m % 60}m` : ''} ago`;
-      return new Date(ts).toLocaleDateString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+      return Util.fmtDTShortPref(ts);
     },
 
     openUI() {
@@ -1775,7 +1775,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         alerts, overloadedLineDays, horizonStart, horizonMinutes: hMinutes,
       });
 
-      const horizonEndLabel = horizonEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const horizonEndLabel = Util.fmtDateShortPref(horizonEnd);
 
       const _esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -1802,7 +1802,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
               <div class="ni-conf-row">
                 <span class="ni-conf-dot" style="background:${a.sev==='err'?'var(--err)':'var(--warn)'}"></span>
                 <span class="ni-conf-msg">${_esc(a.msgKey ? t(a.msgKey, a.msgVars) : a.msg)}</span>
-                <span class="ni-conf-date">${a.time ? a.time.toLocaleDateString('en-US',{month:'short',day:'numeric'}) : ''}</span>
+                <span class="ni-conf-date">${a.time ? Util.fmtDateShortPref(a.time) : ''}</span>
                 ${(a.taskId || (a.line && a.time)) ? `<button data-conf-goto="${_esc(a.id)}" class="ni-conf-goto" title="Go to" aria-label="Go to"><span class="ni-conf-goto-arrow">→</span><span class="ni-conf-goto-label">Go to</span></button>` : ''}
               </div>`;
       // Overloaded lines have no single alert to focus, so these rows carry the line name and days only (no Go to).
@@ -1848,7 +1848,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const cached = Confidence._history;
       const hasHistory = cached.length >= 2;
       const firstTs = hasHistory ? cached[0].ts : null;
-      const startLabel = firstTs ? new Date(firstTs).toLocaleDateString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) : '';
+      const startLabel = firstTs ? Util.fmtDTShortPref(firstTs) : '';
 
       const _sc = Confidence._score;
       // Verdict/threshold text triad — theme-driven via --ok/--warn/--err tokens
@@ -2056,10 +2056,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (nearest && minDist < threshold) {
           const col = `color:${ptColor(nearest.score)}`;
           const timeStr = nearest.ts
-            ? new Date(nearest.ts).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})
+            ? Util._fmtTimePref(new Date(nearest.ts))
             : '';
           const dateStr = nearest.ts
-            ? new Date(nearest.ts).toLocaleDateString('en-US',{month:'short',day:'numeric'})
+            ? Util.fmtDateShortPref(nearest.ts)
             : '';
           tip.innerHTML = `<span style="${col};margin-right:5px">●</span>`
             + `<strong style="${col}">${nearest.score}</strong>`
@@ -2203,15 +2203,13 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _fmtDate(ms) {
       if (!ms) return '—';
       const d = new Date(ms);
-      return d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' })
-        + ' ' + d.toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+      return Util.fmtDayLabelPref(d) + ' ' + Util._fmtTimePref(d);
     },
 
     _fmtShort(ms) {
       if (!ms) return '—';
       const d = new Date(ms);
-      return d.toLocaleDateString('en-US', { month:'short', day:'numeric' })
-        + ' · ' + d.toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+      return Util.fmtDateShortPref(d) + ' · ' + Util._fmtTimePref(d);
     },
 
     _fmtDelta(ms) {

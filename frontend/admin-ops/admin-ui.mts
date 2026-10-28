@@ -888,8 +888,8 @@ export const AdminCockpit = {
       [Util.t('ui.diag_null_line'), dbSt.null_line ?? '—'],
       [Util.t('ui.diag_null_desc'), dbSt.null_desc ?? '—'],
       [Util.t('ui.diag_null_runtime'), dbSt.null_runtime ?? '—'],
-      [Util.t('ui.diag_date_range_min'), Util.fmtIsoDate(dbSt.date_range?.min?.slice(0, 10)) || '—'],
-      [Util.t('ui.diag_date_range_max'), Util.fmtIsoDate(dbSt.date_range?.max?.slice(0, 10)) || '—'],
+      [Util.t('ui.diag_date_range_min'), Util.fmtIsoDatePref(dbSt.date_range?.min?.slice(0, 10)) || '—'],
+      [Util.t('ui.diag_date_range_max'), Util.fmtIsoDatePref(dbSt.date_range?.max?.slice(0, 10)) || '—'],
       [Util.t('ui.diag_unreadable_start'), p.unreadable_start_date ?? 0],
       [Util.t('ui.diag_dropped_no_finish'), p.dropped_no_finish_date ?? 0],
       [Util.t('ui.diag_load_time'), p.load_ms != null ? p.load_ms + ' ms' : '—'],
@@ -972,7 +972,7 @@ export const AdminCockpit = {
       [Util.t('ui.diag_color_merge_misses'), st?.color_merge_misses ?? 0],
       [Util.t('ui.diag_emitted'), st?.raw_received ?? '—'],
       [Util.t('ui.diag_unique_ids'), p.unique_id_count ?? '—'],
-      [Util.t('ui.diag_loaded_at'), p.loaded_at ? Util.fmtIsoDate(p.loaded_at) + ' ' + p.loaded_at.slice(11, 19) + ' UTC' : '—'],
+      [Util.t('ui.diag_loaded_at'), p.loaded_at ? Util.fmtIsoStampPref(p.loaded_at, true) + ' UTC' : '—'],
     ];
     frag.appendChild(AdminCockpit._kvTable(rows));
 
@@ -1239,7 +1239,7 @@ export const AdminCockpit = {
       lvl.textContent = (w.level || 'warn').toUpperCase();
       const ts = document.createElement('span');
       ts.className = 'admin-bwarn-ts';
-      ts.textContent = w.ts ? Util.fmtIsoDate(w.ts) + ' ' + w.ts.slice(11, 19) + ' UTC' : '';
+      ts.textContent = w.ts ? Util.fmtIsoStampPref(w.ts, true) + ' UTC' : '';
       meta.appendChild(lvl);
       meta.appendChild(ts);
 
@@ -2678,7 +2678,7 @@ export const AdminCockpit = {
 
           const batchShort = it.batch_id ? it.batch_id.slice(0, 8) + '…' : '—';
           const cells = [
-            `${Util.fmtIsoDate(it.uploaded_at || '')} ${(it.uploaded_at || '').slice(11, 19)}`.trim(),
+            Util.fmtIsoStampPref(it.uploaded_at || '', true).trim(),
             it.filename || '—',
             String(it.row_count ?? '—'),
             String(it.inserted ?? '—'),
@@ -2810,7 +2810,7 @@ export const AdminCockpit = {
             ? Object.entries(it.details).map(([k, v]) => `${k}: ${v}`).join(' · ')
             : '—';
           const cells = [
-            `${Util.fmtIsoDate(it.ts || '')} ${(it.ts || '').slice(11, 19)}`.trim(),
+            Util.fmtIsoStampPref(it.ts || '', true).trim(),
             it.user || '—',
             '',
             it.plant || '—',
@@ -2896,7 +2896,7 @@ export const AdminCockpit = {
     const inv  = Persistence.storageInventory();
     const totK = (inv.totalBytes / 1024).toFixed(1);
     const lastK = (inv.lastBytes / 1024).toFixed(1);
-    const lastWhen = inv.lastSavedAt ? new Date(inv.lastSavedAt).toLocaleTimeString() : '—';
+    const lastWhen = inv.lastSavedAt ? Util._fmtTimePref(new Date(inv.lastSavedAt)) : '—';
     const errCount  = ErrorLog.countBy('error');
     const warnCount = ErrorLog.countBy('warn');
     const errRate   = ErrorLog.errorRatePerMin();

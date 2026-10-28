@@ -314,10 +314,7 @@ export const OptimizeDialog = (() => {
   }
 
   function _displayDate(d: Date) {
-    return d.toLocaleString('en-US', {
-      month: 'short', day: 'numeric', year: 'numeric',
-      hour: 'numeric', minute: '2-digit'
-    });
+    return Util.fmtDTPref(d);
   }
 
   function _updateSummary() {
@@ -1931,7 +1928,7 @@ export const OptimizerPreview = {
       partial_allowed: Util.t('ui.opt_pv_split_partial'),
     };
     const splitPolicy = OptimizerPreview._splitOrderPolicy;
-    const stamp = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const stamp = Util._fmtTimePref(new Date());
     const whyHtml = (() => {
       if (!explanation) return '';
       const constraints = explanation.constraints.join(', ') || Util.t('ui.setup_constraints_none');

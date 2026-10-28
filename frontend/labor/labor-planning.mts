@@ -155,10 +155,8 @@ export const LaborPlanning = (() => {
   }
 
   function _weekLabel(monday: Date): string {
-    const m = String(monday.getMonth() + 1).padStart(2, '0');
-    const d = String(monday.getDate()).padStart(2, '0');
-    const y = String(monday.getFullYear());
-    return `${m}/${d}/${y}`;
+    // DISPLAY only (the column header); the week KEY stays the ISO week (_isoWeek).
+    return Util._fmtDatePref(monday);
   }
 
   function _computeWeeks(): LaborWeek[] {

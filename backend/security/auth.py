@@ -430,8 +430,9 @@ def get_role_settings(role: str | None) -> dict:
 
 # Keys the frontend may write via Session.setPref. KEEP IN SYNC with
 # Settings.CATALOG in frontend/shell/application-shell.mts (a new catalog key
-# must be added here or its save is rejected with 400). `timezone` is
-# deliberately absent: it is a dead catalog key slated for removal.
+# must be added here or its save is rejected with 400). There is no
+# `timezone` setting: the dead catalog key was removed; a stale stored value
+# in a user_settings row is simply ignored.
 ALLOWED_SETTINGS_KEYS = frozenset({
     "theme", "language", "defaultPlant", "landingView", "gridLayout",
     "pinnedPlants", "pinnedLines", "timeFormat", "dateFormat",

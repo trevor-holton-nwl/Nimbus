@@ -2369,7 +2369,7 @@ export const DistributionPane = (() => {
         <td>${Util.escapeHtml(row.header.material_number)}</td>
         <td>${Util.escapeHtml(row.header.sap_workcenter || '')}</td>
         <td>${row.header.order_quantity ?? ''}</td>
-        <td>${Util.escapeHtml(Util.fmtDT(row.header.basic_start_date))}</td>
+        <td>${Util.escapeHtml(Util.fmtDTPref(row.header.basic_start_date))}</td>
         <td>${Util.escapeHtml(formatSubOrders(row.shares))}</td>
         <td>
           ${primary.code ? `<span class="sap-pill ${primary.tier} dist-badge-action${whatIf ? ' disabled' : ''}" title="${Util.escapeHtml(badgeTitle)}">${Util.escapeHtml(badgeText)}</span>` : ''}
@@ -2478,7 +2478,7 @@ export const DistributionPane = (() => {
         <dt>${Util.escapeHtml(Util.t('ui.dist_col_workcenter'))}</dt><dd>${Util.escapeHtml(h.sap_workcenter || '')}</dd>
         <dt>${Util.escapeHtml(Util.t('ui.dist_col_qty'))}</dt><dd>${h.order_quantity ?? ''}</dd>
         <dt>${Util.escapeHtml(Util.t('ui.dist_detail_window'))}</dt>
-        <dd>${Util.escapeHtml(Util.fmtDT(h.basic_start_date))} → ${Util.escapeHtml(Util.fmtDT(h.basic_finish_date))}</dd>
+        <dd>${Util.escapeHtml(Util.fmtDTPref(h.basic_start_date))} → ${Util.escapeHtml(Util.fmtDTPref(h.basic_finish_date))}</dd>
         <dt>${Util.escapeHtml(Util.t('ui.dist_detail_hours'))}</dt>
         <dd>${Util.escapeHtml(Util.t('ui.dist_detail_hours_vs', { sum: sumHours.toFixed(1), parent: String(h.run_time ?? '') }))}</dd>
       </dl>
@@ -2603,7 +2603,7 @@ export const DistributionPane = (() => {
         <td>${r.effectivePct != null ? r.effectivePct.toFixed(1) + '%' : ''}</td>
         <td>${r.qtyAfter != null ? r.qtyAfter : ''}</td>
         <td>${r.hoursAfter != null ? r.hoursAfter.toFixed(2) : ''}</td>
-        <td>${Util.escapeHtml(Util.fmtDT(r.currentStart))}</td>
+        <td>${Util.escapeHtml(Util.fmtDTPref(r.currentStart))}</td>
         <td>${Util.escapeHtml(outcomeLabel)}${markers.length ? ' · ' + markers.map(m => Util.escapeHtml(m)).join(', ') : ''}</td>
         <td>
           <button type="button" class="btn btn-ghost sm dist-row-only" ${disabled ? 'disabled' : ''}>${Util.escapeHtml(Util.t('btn.dist_only_this_machine'))}</button>
