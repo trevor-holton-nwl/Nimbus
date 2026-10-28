@@ -376,10 +376,10 @@ test('G-0.25: Alerts.applyFix never moves a row carrying a placement exception (
   }
 });
 
-test('gate 23 b: the overload auto-fix leaves exactly two undo entries (the optimizer and the fix) and one Ctrl+Z restores the line', () => {
+test('gate 23 b: the overload auto-fix (detached candidate, Wave 5) leaves exactly one undo entry and one Ctrl+Z restores the line', () => {
   const plant = '5512', line = 'OVERLOAD-UNDO-LINE';
   const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts);
-  const priorRun = Engine.runAndApply, priorShow = Toast.show;
+  const priorEval = Engine.evaluateSchedule, priorShow = Toast.show;
   Toast.show = () => {};
   const day = new Date('2026-08-25T00:00:00');
   const aStart = new Date('2026-08-25T08:00:00'), aEnd = new Date('2026-08-25T12:00:00');
@@ -389,20 +389,21 @@ test('gate 23 b: the overload auto-fix leaves exactly two undo entries (the opti
   Store.setTasks([{ id: 'ov-a', PLANT: plant, MACHINE: line, RUN_TIME: '4', start_date: aStart, end_date: aEnd }], 'unit-test');
   Store.setAlerts([{ id: 'ov-alert', type: 'overload', line, time: day }], 'unit-test');
   UndoStack._entries.length = 0;
-  // Stand in for the optimizer: it moves the order and pushes its own entry, exactly as Engine.runAndApply does.
-  Engine.runAndApply = () => {
-    const snap = UndoStack.snapshotTasks(['ov-a']);
-    Store.updateTask('ov-a', { start_date: new Date('2026-08-25T14:00:00'), end_date: new Date('2026-08-25T18:00:00') }, 'engine');
-    UndoStack.push('Optimization (changeover)', () => UndoStack.restoreTasks(snap), ['ov-a']);
-  };
+  // Stand in for the detached optimizer: a valid candidate that moves the order. The fix itself applies it and pushes the
+  // ONE undo entry (the live optimizer, which pushed its own entry, is no longer used).
+  Engine.evaluateSchedule = () => ({
+    patches: [{ id: 'ov-a', changes: { start_date: new Date('2026-08-25T14:00:00'), end_date: new Date('2026-08-25T18:00:00') } }],
+    validationFindings: [], missingEdges: [], explanation: [], unchangedLines: [],
+  });
   try {
     Alerts.applyFix('ov-alert');
-    assert.equal(UndoStack._entries.length, 2, 'the optimizer entry plus the auto-fix entry');
-    assert.match(UndoStack._entries[1].label, /Auto-fix overload/);
-    UndoStack.pop();                                         // one Ctrl+Z: the fix's snapshot predates the optimizer
+    assert.equal(Store.tasks['ov-a'].end_date.getTime(), new Date('2026-08-25T18:00:00').getTime(), 'the candidate was applied');
+    assert.equal(UndoStack._entries.length, 1, 'exactly the auto-fix entry');
+    assert.match(UndoStack._entries[0].label, /Auto-fix overload/);
+    UndoStack.pop();                                         // one Ctrl+Z restores the pre-fix snapshot
     assert.equal(Store.tasks['ov-a'].end_date.getTime(), aEnd.getTime(), 'the finish is back where it was before the auto-fix');
   } finally {
-    Engine.runAndApply = priorRun; Toast.show = priorShow;
+    Engine.evaluateSchedule = priorEval; Toast.show = priorShow;
     Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test');
     Store.setTasks([], 'unit-test'); UndoStack._entries.length = 0;
     Store.setMasterData(priorMasterData, 'unit-test');

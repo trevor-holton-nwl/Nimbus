@@ -9,6 +9,7 @@ import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
 import { __setToolingRuleControlReady } from '../../../frontend/master-data/admin-ui.mjs';
+globalThis.__NIMBUS_TEST__ = true;   // the gate setter is inert without it
 
 // Real English strings, so assertions read the shipped wording (Util.t falls back to the bare key without them).
 const EN = (() => {

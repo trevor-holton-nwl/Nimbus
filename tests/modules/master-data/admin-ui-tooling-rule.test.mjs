@@ -11,6 +11,9 @@ import { Toast, Util } from '../../../frontend/platform/foundation.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 
+// The gate setter is inert unless the test setup declares itself (a console import cannot flip the gate).
+globalThis.__NIMBUS_TEST__ = true;
+
 function mountPane(plants) {
   const els = new Map();
   const mkEl = () => {
@@ -151,4 +154,25 @@ test('the select starts at the stored rule (hard) and treats anything else as of
     assert.equal(mountPane([{ subnetwork: 'SN', plant: '5512', setup_policy_config: { toolingRule: 'bogus' } }]).el('sys-tooling-rule').value, 'off');
     assert.equal(mountPane([{ subnetwork: 'SN', plant: '5512' }]).el('sys-tooling-rule').value, 'off');
   });
+});
+
+test('the select sizes to its widest option (width:auto, max-width:100%), never a fixed ch width', async () => {
+  await withHarness(true, async () => {
+    const { pane } = mountPane([{ subnetwork: 'SN', plant: '5512', setup_policy_config: {} }]);
+    const tag = pane.innerHTML.match(/<select id="sys-tooling-rule"[^>]*>/)?.[0] ?? '';
+    assert.match(tag, /style="width:auto;max-width:100%"/);
+    assert.doesNotMatch(tag, /50ch/);
+  });
+});
+
+test('__setToolingRuleControlReady is inert unless the test flag is set (a console import cannot flip the gate)', () => {
+  const before = TOOLING_RULE_CONTROL_READY;
+  globalThis.__NIMBUS_TEST__ = false;
+  try {
+    __setToolingRuleControlReady(!before);
+    assert.equal(TOOLING_RULE_CONTROL_READY, before, 'unchanged without the flag');
+  } finally { globalThis.__NIMBUS_TEST__ = true; }
+  __setToolingRuleControlReady(!before);
+  assert.equal(TOOLING_RULE_CONTROL_READY, !before, 'flips with the flag');
+  __setToolingRuleControlReady(before);
 });

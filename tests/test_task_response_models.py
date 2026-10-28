@@ -1087,3 +1087,33 @@ def test_pandas_free_builder_emits_exactly_the_taskdto_wire_fields():
 def test_planning_reason_carries_step():
     assert PlanningReason(code="c", message="m", step="pv_missing").model_dump()["step"] == "pv_missing"
     assert PlanningReason(code="c", message="m").step is None
+
+
+_TOOL_REASON = {
+    "code": "tool_contention", "message": "Tool T1 has 1 copy", "tool_id": "T1", "available": 1,
+    "holders": ["a", "b"], "incomplete": False,
+}
+_CAP_REASON = {"code": "run_time_over_cap", "message": "over cap", "run_time": 30.5, "cap_hours": 24}
+
+
+def test_planning_reason_keeps_structured_extras_and_no_null_bloat():
+    # Wave 6 writes these keys; the response models must hand them back after a reload.
+    for stored in (_TOOL_REASON, _CAP_REASON):
+        dumped = PlanningReason(**stored).model_dump()
+        assert {key: dumped[key] for key in stored} == stored
+        assert set(dumped) == set(stored) | {"step"}, "only stored keys (plus the declared step) are emitted"
+    plain = PlanningReason(code="c", message="m").model_dump()
+    assert set(plain) == {"code", "message", "step"}, "no tool_id / run_time padding on a plain reason"
+
+
+def test_tasks_response_and_refresh_dto_round_trip_planning_reason_extras():
+    from backend.scheduling.models import TaskVersionRow, TasksRefreshResponse, TasksResponse
+    for stored in (_TOOL_REASON, _CAP_REASON):
+        row = {**SAMPLE_TASK_ROW, "planning_status": "needs_planning", "planning_reason": stored}
+        envelope = TasksResponse(data=[row], links=[], meta={})
+        out = envelope.model_dump(by_alias=True)["data"][0]["planning_reason"]
+        assert {key: out[key] for key in stored} == stored
+        refresh = TasksRefreshResponse(
+            data=[TaskVersionRow(id="a", planning_status="needs_planning", planning_reason=stored)], missing=[])
+        refreshed = refresh.model_dump(by_alias=True)["data"][0]["planning_reason"]
+        assert {key: refreshed[key] for key in stored} == stored

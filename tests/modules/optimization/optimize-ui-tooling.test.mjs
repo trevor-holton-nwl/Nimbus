@@ -312,3 +312,185 @@ test('ensureToolInventoryForRun: Off never fetches; Hard + not loaded fetches th
     if (prior.md) Store.setMasterData(prior.md, 'unit-test');
   }
 });
+
+test('confirmToolQueue hides the moved line when nothing moved', async () => {
+  const prior = Modal.confirm;
+  const seen = [];
+  Modal.confirm = async opts => { seen.push(opts); return true; };
+  try {
+    await confirmToolQueue({ toolBlocked: [blocked('a')] }, [{ id: 'a' }]);
+    await confirmToolQueue({ toolBlocked: [blocked('a')], toolMoved: [{ orderId: 'a' }] }, [{ id: 'a' }]);
+    assert.equal(seen[0].message, '', 'no "moved: 0" line');
+    assert.match(seen[1].message, /opt_tool_confirm_moved|moved for tooling/);
+  } finally { Modal.confirm = prior; }
+});
+
+test('toolFingerprint: the inventory part is null while the rule is Off (a count change cannot stale an Off plant); Hard keeps it', () => {
+  const rows = n => [{ plant: 'P', tool_id: 'A', total_qty: n, out_of_service_qty: 0 }];
+  const md = (rule, n) => ({ plants: [plantRow('P', rule)], lines: [], workcenters: [], tool_inventory: rows(n) });
+  assert.equal(toolFingerprint(md('off', 1), 'P'), toolFingerprint(md('off', 9), 'P'), 'Off: counts do not matter');
+  assert.equal(JSON.parse(toolFingerprint(md('off', 1), 'P')).i, null);
+  assert.notEqual(toolFingerprint(md('hard', 1), 'P'), toolFingerprint(md('hard', 9), 'P'), 'Hard: counts matter');
+  assert.notEqual(toolFingerprint(md('off', 1), 'P'), toolFingerprint(md('hard', 1), 'P'), 'the rule flip itself changes it');
+});
+
+test('open preview: Off plant is NOT staled by an inventory change; Hard is; an Off->Hard flip is', () => {
+  const plant = 'TQ-OFFSTALE';
+  setMd(plant, 'off', [{ plant, tool_id: 'T1', total_qty: 2, out_of_service_qty: 0 }]);
+  const f = openPreview(plant, [previewTask('os-a', plant, 1)]);
+  try {
+    Store.setMasterData({ ...Store.masterData, tool_inventory: [{ plant, tool_id: 'T1', total_qty: 7, out_of_service_qty: 0 }] }, 'unit-test', 'tool_inventory');
+    assert.equal(OptimizerPreview.stale, false, 'rule Off: inventory edits are irrelevant');
+    setMd(plant, 'hard', [{ plant, tool_id: 'T1', total_qty: 7, out_of_service_qty: 0 }]);
+    Store.setMasterData({ ...Store.masterData }, 'unit-test', 'plants');
+    assert.equal(OptimizerPreview.stale, true, 'Off -> Hard stales it');
+  } finally { f.restore(); }
+  setMd(plant, 'hard', [{ plant, tool_id: 'T1', total_qty: 2, out_of_service_qty: 0 }]);
+  const g = openPreview(plant, [previewTask('os-b', plant, 1)]);
+  try {
+    Store.setMasterData({ ...Store.masterData, tool_inventory: [{ plant, tool_id: 'T1', total_qty: 3, out_of_service_qty: 0 }] }, 'unit-test', 'tool_inventory');
+    assert.equal(OptimizerPreview.stale, true, 'rule Hard: inventory edits stale it');
+  } finally { g.restore(); }
+});
+
+test('Backlog preview: no tooling chip and a tool change never stales it', () => {
+  const plant = 'TQ-BACKLOG';
+  setMd(plant, 'hard', [{ plant, tool_id: 'T1', total_qty: 2, out_of_service_qty: 0 }]);
+  const f = openPreview(plant, [previewTask('bl-a', plant, 1)]);
+  const body = mkEl('opt-preview-body');
+  els.set('opt-preview-body', body);
+  try {
+    OptimizerPreview._mode = 'backlog';
+    OptimizerPreview._toolFingerprint = null;   // what a backlog run stores: no fingerprint
+    OptimizerPreview._render();
+    assert.doesNotMatch(body.innerHTML, /opt-pv-chip-tooling/);
+    Store.setMasterData({ ...Store.masterData, tool_inventory: [{ plant, tool_id: 'T1', total_qty: 9, out_of_service_qty: 0 }] }, 'unit-test', 'tool_inventory');
+    assert.equal(OptimizerPreview.stale, false);
+    // Even with a fingerprint left over, the chip is suppressed for backlog.
+    OptimizerPreview._toolFingerprint = toolFingerprint(Store.masterData, plant);
+    OptimizerPreview._render();
+    assert.doesNotMatch(body.innerHTML, /opt-pv-chip-tooling/);
+  } finally { els.delete('opt-preview-body'); f.restore(); }
+});
+
+test('_commitPatches: Cancel at the confirm resolves false and commits nothing; Confirm resolves true', async () => {
+  const plant = 'TQ-BOOL';
+  setMd(plant, 'hard', []);
+  const f = openPreview(plant, [previewTask('bo-a', plant, 2)]);
+  const prior = Modal.confirm;
+  let answer = false;
+  Modal.confirm = async () => answer;
+  try {
+    const cand = OptimizerPreview._candidate;
+    cand.toolBlocked = [blocked('bo-a')];
+    const kept = cand.patches;
+    const snap = structuredClone(Store.tasksArr);
+    assert.equal(await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }, snap), false);
+    assert.equal(OptimizerPreview._applying, false);
+    assert.equal(Store.tasks['bo-a'].start_date, null);
+    answer = true;
+    assert.equal(await OptimizerPreview._commitPatches(kept, { ids: [], reason: 'running' }, snap), true);
+    assert.ok(Store.tasks['bo-a'].start_date instanceof Date);
+  } finally { Modal.confirm = prior; f.restore(); }
+});
+
+test('a task edited while the tool confirm is open aborts the commit (no stale apply)', async () => {
+  const plant = 'TQ-DRIFT';
+  setMd(plant, 'hard', []);
+  const f = openPreview(plant, [previewTask('dr-a', plant, 2)]);
+  const prior = { confirm: Modal.confirm, show: Toast.show };
+  const toasts = [];
+  Toast.show = (m, k) => { toasts.push([m, k]); };
+  Modal.confirm = async () => { Store.updateTask('dr-a', { RUN_TIME: 5 }, 'table'); return true; };   // the planner edits behind the dialog
+  try {
+    const cand = OptimizerPreview._candidate;
+    cand.toolBlocked = [blocked('dr-a')];
+    assert.equal(await OptimizerPreview._commitPatches(cand.patches, { ids: [], reason: 'running' }, structuredClone(Store.tasksArr)), false);
+    assert.equal(Store.tasks['dr-a'].start_date, null, 'nothing was applied');
+    assert.equal(OptimizerPreview._applying, false, 'the flag is restored');
+    assert.equal(OptimizerPreview.stale, true, 'the preview is marked stale');
+    assert.ok(toasts.some(([m]) => /opt_preview_task_stale|stale|changed/i.test(String(m))));
+  } finally { Modal.confirm = prior.confirm; Toast.show = prior.show; f.restore(); }
+});
+
+test('_showPreviewAfterCancel leaves a visible (foreground) preview untouched; a hidden one (background) is opened and rendered', () => {
+  const plant = 'TQ-SHOW';
+  setMd(plant, 'hard', []);
+  const f = openPreview(plant, [previewTask('sh-a', plant, 1)]);
+  const body = mkEl('opt-preview-body');
+  const modal = mkEl('modal-opt-preview');
+  els.set('opt-preview-body', body); els.set('modal-opt-preview', modal);
+  const prior = Modal.open;
+  const opened = [];
+  Modal.open = id => { opened.push(id); };
+  try {
+    body.innerHTML = 'SENTINEL';
+    modal.hidden = false;
+    OptimizerPreview._showPreviewAfterCancel();
+    assert.equal(body.innerHTML, 'SENTINEL', 'not rebuilt: open details and scroll position survive');
+    assert.deepEqual(opened, []);
+    modal.hidden = true;
+    OptimizerPreview._showPreviewAfterCancel();
+    assert.deepEqual(opened, ['modal-opt-preview']);
+    assert.notEqual(body.innerHTML, 'SENTINEL', 'rendered once opened');
+  } finally { Modal.open = prior; els.delete('opt-preview-body'); els.delete('modal-opt-preview'); f.restore(); }
+});
+
+test('Raise inventory from the preview: confirm first (Cancel keeps the preview), then close it, navigate and toast', async () => {
+  const plant = 'TQ-RAISE';
+  setMd(plant, 'hard', []);
+  const f = openPreview(plant, [previewTask('ra-a', plant, 1)]);
+  const prior = { confirm: Modal.confirm, close: Modal.close, show: Toast.show };
+  const asked = [], closed = [], toasts = [], nav = [];
+  let answer = false;
+  Modal.confirm = async o => { asked.push(o); return answer; };
+  Modal.close = id => { closed.push(id); };
+  Toast.show = (m, k) => { toasts.push([String(m), k]); };
+  try {
+    globalThis.NIMBUS = { App: { goto: s => nav.push(['goto', s]), gotoMasterSub: s => nav.push(['sub', s]) } };
+    await OptimizerPreview._raiseInventory('T1');
+    assert.equal(asked.length, 1);
+    assert.match(asked[0].message, /opt_tool_raise_discard|discards this plan/);
+    assert.deepEqual(nav, [], 'Cancel: no navigation');
+    assert.ok(OptimizerPreview._candidate, 'Cancel keeps the preview');
+    answer = true;
+    await OptimizerPreview._raiseInventory('T1');
+    assert.equal(OptimizerPreview._candidate, null, 'the preview was cleared');
+    assert.ok(closed.includes('modal-opt-preview'));
+    assert.deepEqual(nav.map(n => n[1]), ['masterdata', 'tool-inventory']);
+    assert.ok(toasts.some(([m]) => /opt_tool_raise_closed|Preview closed/.test(m)));
+    // No preview open: no confirm, no "preview closed" toast.
+    asked.length = 0; toasts.length = 0; nav.length = 0;
+    await OptimizerPreview._raiseInventory('T1');
+    assert.equal(asked.length, 0);
+    assert.equal(toasts.length, 0);
+    assert.equal(nav.length, 2);
+  } finally {
+    Modal.confirm = prior.confirm; Modal.close = prior.close; Toast.show = prior.show; f.restore();
+  }
+});
+
+test('Persistence.ensureToolInventoryCurrent: unchanged version is fresh without a re-read; a moved version re-reads; no baseline or a slow probe proceeds unfresh', async () => {
+  const plant = 'TQ-ENSURE';
+  const prior = { refresh: Persistence.refreshToolInventory, read: Persistence._readToolInventoryVersion, base: { ...Persistence._toolInventoryBaseline } };
+  let refreshes = 0, version = 'v1', hang = false;
+  Persistence.refreshToolInventory = async () => { refreshes++; return true; };
+  Persistence._readToolInventoryVersion = () => (hang ? new Promise(() => {}) : Promise.resolve(version));
+  try {
+    Persistence._toolInventoryBaseline[plant] = 'v1';
+    assert.deepEqual(await Persistence.ensureToolInventoryCurrent(plant), { fresh: true });
+    assert.equal(refreshes, 0);
+    version = 'v2';
+    assert.deepEqual(await Persistence.ensureToolInventoryCurrent(plant), { fresh: true });
+    assert.equal(refreshes, 1);
+    delete Persistence._toolInventoryBaseline[plant];
+    assert.deepEqual(await Persistence.ensureToolInventoryCurrent(plant), { fresh: false }, 'nothing to compare with');
+    Persistence._toolInventoryBaseline[plant] = 'v1'; hang = true;
+    const t0 = Date.now();
+    assert.deepEqual(await Persistence.ensureToolInventoryCurrent(plant, { timeoutMs: 30 }), { fresh: false }, 'timeout: proceed with the held rows');
+    assert.ok(Date.now() - t0 < 1000, 'bounded by the short timeout');
+    assert.deepEqual(await Persistence.ensureToolInventoryCurrent(null), { fresh: false });
+  } finally {
+    Persistence.refreshToolInventory = prior.refresh; Persistence._readToolInventoryVersion = prior.read; Persistence._toolInventoryBaseline = prior.base;
+  }
+});

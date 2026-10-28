@@ -35,3 +35,37 @@ test('slotToolOverage: unloaded inventory, no tool, or no run time says nothing 
   assert.equal(run([], others, queued('q', ''), at(11), 2), null);
   assert.equal(run([], others, { ...queued('q', 'T100'), RUN_TIME: 0 }, at(11), null), null);
 });
+
+test('slotToolOverage: every order of a multi-order slot is checked, not only the first', () => {
+  const prior = { md: Store.masterData, tasks: structuredClone(Store.tasksArr) };
+  const mine = [queued('q1', 'T1'), queued('q2', 'T100')];
+  Store.setTasks([placed('x', 'L1', 8, 12, 'T100'), ...mine], 'unit-test');
+  Store.setMasterData({ plants: [], lines: [], workcenters: [], tool_inventory: [] }, 'unit-test');
+  try {
+    const args = { task: Store.tasks.q1, machine: 'L2', finish: at(11), needHours: 2, plant: 'P' };
+    assert.equal(slotToolOverage(args), null, 'the first order alone is fine (T1 is free)');
+    assert.deepEqual(slotToolOverage({ ...args, orders: [Store.tasks.q1, Store.tasks.q2] }), { tool: 'T100', available: 1 }, 'the second order collides on T100');
+  } finally { Store.setTasks(prior.tasks, 'unit-test'); if (prior.md) Store.setMasterData(prior.md, 'unit-test'); }
+});
+
+test('slotToolOverage: plant resolution falls back to the selected plant like order-tooling (no PLANT, unmapped line)', () => {
+  const prior = { md: Store.masterData, tasks: structuredClone(Store.tasksArr), plant: Store.selectedPlant };
+  const noPlant = (id, line, s, e, tool) => ({ id, MACHINE: line, RUN_TIME: e - s, start_date: at(s), end_date: at(e), PRT_01: tool });
+  Store.setSelectedPlant('P', 'unit-test');
+  Store.setTasks([noPlant('x', 'ZZ-UNMAPPED', 8, 12, 'T100'), { ...queued('q', 'T100'), PLANT: undefined }], 'unit-test');
+  Store.setMasterData({ plants: [], lines: [], workcenters: [], tool_inventory: [] }, 'unit-test');
+  try {
+    assert.deepEqual(slotToolOverage({ task: Store.tasks.q, machine: 'L2', finish: at(11), needHours: 2, plant: 'P' }), { tool: 'T100', available: 1 });
+  } finally { Store.setTasks(prior.tasks, 'unit-test'); Store.setSelectedPlant(prior.plant, 'unit-test'); if (prior.md) Store.setMasterData(prior.md, 'unit-test'); }
+});
+
+test('slotToolOverage: a split order occupies its tool for the envelope of its segments', () => {
+  const split = { ...placed('x', 'L1', 8, 9, 'T100'), scheduleSegments: [{ sequence: 1, start_date: at(8), end_date: at(9) }, { sequence: 2, start_date: at(14), end_date: at(15) }] };
+  const prior = { md: Store.masterData, tasks: structuredClone(Store.tasksArr) };
+  Store.setTasks([queued('q', 'T100')], 'unit-test');   // the split row is passed in directly: Store.setTasks would normalise its segments away
+  Store.setMasterData({ plants: [], lines: [], workcenters: [], tool_inventory: [] }, 'unit-test');
+  try {
+    // x holds T100 from 8 to 15 (envelope): a slot ending at 11 collides although the segments themselves do not.
+    assert.deepEqual(slotToolOverage({ task: Store.tasks.q, machine: 'L2', finish: at(11), needHours: 2, plant: 'P', tasks: [split] }), { tool: 'T100', available: 1 });
+  } finally { Store.setTasks(prior.tasks, 'unit-test'); if (prior.md) Store.setMasterData(prior.md, 'unit-test'); }
+});

@@ -68,3 +68,9 @@ test('Tool Inventory: tool_unavailable and tool_contention_incomplete use the to
   assert.equal(planningReasonText({ code: 'tool_contention', message: 'stored', tool_id: 'T1', available: 'x' }, t), 'stored', 'available must be a number');
   assert.equal(planningReasonText({ code: 'tool_unavailable', message: 'stored', tool_id: '  ' }, t), 'stored', 'blank tool id');
 });
+
+test('formatToolHolders never renders [object Object]: id, then order, then JSON', async () => {
+  const { formatToolHolders } = await import('../../../frontend/scheduling/planning-reason.mjs');
+  assert.equal(formatToolHolders([{ id: 'a1' }, { order: 'b2' }, { foo: 1 }, 'c3'], t), 'a1, b2, {"foo":1}, c3');
+  assert.doesNotMatch(formatToolHolders([{}, { x: { y: 1 } }], t), /object Object/);
+});

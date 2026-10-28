@@ -114,3 +114,65 @@ test('applyFix on an unknown alert resolves false', async () => {
   const h = harness({ candidate: okCandidate() });
   try { assert.equal(await Alerts.applyFix('nope'), false); } finally { h.restore(); }
 });
+
+test('Fix overload Undo scope is the UNION of the line-day tasks and the candidate patch ids (a sibling on another line is restored too)', async () => {
+  const h = harness({ candidate: okCandidate({ patches: [patchFor('in-day'), patchFor('sibling-elsewhere')] }) });
+  try {
+    Store.setTasks([
+      { id: 'in-day', PLANT: 'FX', MACHINE: 'FX-L1', RUN_TIME: 1, start_date: null, end_date: null },
+      { id: 'sibling-elsewhere', PLANT: 'FX', MACHINE: 'FX-L9', RUN_TIME: 1, start_date: new Date('2035-09-01T08:00:00'), end_date: new Date('2035-09-01T09:00:00') },
+      { id: 'untouched', PLANT: 'FX', MACHINE: 'FX-L9', RUN_TIME: 1, start_date: new Date('2035-09-02T08:00:00'), end_date: new Date('2035-09-02T09:00:00') },
+    ], 'unit-test');
+    assert.equal(await Alerts.applyFix('ov-1'), true);
+    assert.deepEqual([...h.calls.undo[0].ids].sort(), ['in-day', 'sibling-elsewhere'], 'the patched id outside the line-day filter is in the Undo set; an unrelated task is not');
+  } finally { h.restore(); Store.setTasks([], 'unit-test'); }
+});
+
+test('Fix overload tail: orders left needing planning are reported (with the tooling share), also for a quiet batch', async () => {
+  const toolBlocked = [{ orderId: 'o1', tool: 'T100', available: 1, inUse: 2, holderIds: ['x'] }];
+  const candidate = okCandidate({
+    toolBlocked,
+    dispositions: [{ id: 'o1', line: 'FX-L1', status: 'needs_planning' }, { id: 'o2', line: 'FX-L1', status: 'needs_planning' }, { id: 'o3', status: 'scheduled' }],
+    unchangedLines: ['FX-L7'],
+  });
+  const h = harness({ candidate });
+  try {
+    assert.equal(await Alerts.applyFix('ov-1'), true);
+    assert.ok(h.calls.toasts.some(([m]) => /optimize_need_planning/.test(m) && /opt_tool_need_planning_suffix/.test(m)), 'need-planning toast with the tooling note');
+    assert.ok(h.calls.toasts.some(([m]) => /optimize_lines_guarded/.test(m)), 'guarded lines reported on a normal fix');
+    h.calls.toasts.length = 0;
+    Store.setAlerts([alertFor()], 'unit-test');
+    assert.equal(await Alerts.applyFix('ov-1', { quiet: true }), true);
+    assert.ok(h.calls.toasts.some(([m]) => /optimize_need_planning/.test(m)), 'the need-planning toast survives quiet');
+    assert.ok(!h.calls.toasts.some(([m]) => /optimize_lines_guarded/.test(m)), 'other tail lines are quiet');
+  } finally { h.restore(); }
+});
+
+test('a refused overload fix respects quiet (no toast) and tells the batch through onBlocked', async () => {
+  const h = harness({ candidate: okCandidate({ validationFindings: [{ severity: 'error', code: 'overlap', message: 'x' }] }) });
+  try {
+    let blocked = 0;
+    assert.equal(await Alerts.applyFix('ov-1', { quiet: true, onBlocked: () => { blocked++; } }), false);
+    assert.equal(blocked, 1);
+    assert.ok(!h.calls.toasts.some(([m]) => /fix_overload_blocked/.test(m)), 'quiet: no per-alert toast');
+  } finally { h.restore(); }
+});
+
+test('a second applyFix on the same alert while the tool confirm is open is a no-op returning false', async () => {
+  const toolBlocked = [{ orderId: 'o1', tool: 'T100', available: 1, inUse: 2, holderIds: ['x'] }];
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const h = harness({ candidate: okCandidate({ toolBlocked }), confirm: async () => { await gate; return true; } });
+  try {
+    const first = Alerts.applyFix('ov-1');
+    await Promise.resolve();
+    assert.equal(await Alerts.applyFix('ov-1'), false, 'the in-flight guard');
+    assert.equal(h.calls.confirms.length, 1, 'only one dialog');
+    release();
+    assert.equal(await first, true);
+    assert.equal(h.calls.applied.length, 1, 'applied once');
+    // The guard is released afterwards.
+    Store.setAlerts([alertFor()], 'unit-test');
+    assert.equal(await Alerts.applyFix('ov-1'), true);
+  } finally { h.restore(); }
+});

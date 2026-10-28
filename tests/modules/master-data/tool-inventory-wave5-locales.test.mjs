@@ -26,7 +26,8 @@ test('the Wave 5 block is found and covers every documented key family', () => {
     'ui.tooling_rule_hint', 'ui.tooling_rule_saved', 'ui.tooling_rule_failed', 'ui.opt_stale_banner_tooling', 'ui.opt_pv_chip_tooling',
     'ui.opt_tool_blocked_title', 'ui.opt_tool_raise', 'modal.opt_tool_confirm_moved', 'modal.opt_tool_confirm_queued', 'modal.opt_tool_inventory_not_loaded',
     'toast.fix_overload_blocked', 'planning_reason.tool_contention', 'planning_reason.tool_contention_incomplete', 'planning_reason.tool_unavailable',
-    'ui.insp_tooling', 'toast.tool_id_unknown', 'am.slot_confirm_tool', 'ui.tool_inventory_rule_link']) {
+    'ui.insp_tooling', 'toast.tool_id_unknown', 'am.slot_confirm_tool', 'ui.tool_inventory_rule_link',
+    'modal.opt_tool_raise_discard', 'toast.opt_tool_raise_closed', 'toast.fix_overload_blocked_batch', 'toast.optimize_need_planning']) {
     assert.ok(KEYS.includes(key), `missing ${key}`);
   }
 });
@@ -64,4 +65,12 @@ test('English am.* clause: copies/limit wording, none of the banned Alert Monito
   const clause = dicts.en['am.slot_confirm_tool'];
   assert.match(clause, /copies/);
   assert.doesNotMatch(clause, /\b(points|pts|exact|estimate|cap)\b/i);
+});
+
+test('the moved-for-tooling line is plural-neutral (ends with the count after a colon) in every locale', () => {
+  for (const l of LOCALES) {
+    const v = dicts[l]['modal.opt_tool_confirm_moved'];
+    assert.match(v, /:\s\{\{n\}\}$/, `${l} ends with the count after a colon`);
+    assert.doesNotMatch(v, /informational|informativ|information/i, `${l} has no parenthetical`);
+  }
 });
