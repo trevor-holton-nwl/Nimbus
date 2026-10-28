@@ -82,7 +82,7 @@ test('the Excel upload block carries the documented keys, all included in the To
   for (const key of ['btn.download_data', 'btn.upload_tool_inventory', 'tip.upload_tool_inventory', 'modal.tool_inventory_review_title',
     'modal.tool_inventory_review_summary', 'modal.tool_inventory_review_changes', 'modal.tool_inventory_review_new', 'modal.tool_inventory_review_rejected',
     'modal.tool_inventory_review_warnings', 'modal.tool_inventory_review_untouched', 'modal.tool_inventory_review_rejected_warn',
-    'modal.tool_inventory_review_apply', 'modal.tool_inventory_review_more', 'toast.tool_inventory_upload_done', 'toast.tool_inventory_upload_failed',
+    'modal.tool_inventory_review_apply', 'modal.tool_inventory_review_more', 'ui.tool_inventory_review_arrow_sr', 'toast.tool_inventory_upload_done', 'toast.tool_inventory_upload_failed',
     'toast.tool_inventory_upload_too_large', 'toast.tool_inventory_upload_dirty', 'ui.alert_open_tool_inventory', 'am.act_open_tool_inventory']) {
     assert.ok(XL_KEYS.includes(key), `missing ${key}`);
     assert.ok(KEYS.includes(key), `${key} is covered by the all-locales gate`);
@@ -109,4 +109,14 @@ test('the review modal wording: counts placeholders, the standing sentences, tra
 test('Monitor vocabulary: the English am.* deep-link label avoids points / pts / exact / estimate', () => {
   assert.doesNotMatch(dicts.en['am.act_open_tool_inventory'], /points|pts|exact|estimate/i);
   assert.equal(dicts.en['am.act_open_tool_inventory'], dicts.en['ui.alert_open_tool_inventory']);
+});
+
+test('review strings use the same words as the grid headers (total / out of service); Apply needs no plural', () => {
+  for (const l of LOCALES) {
+    const d = dicts[l];
+    assert.ok(d['modal.tool_inventory_review_new_item'].includes(d['col.total_qty']), `${l} new_item says "${d['col.total_qty']}"`);
+    assert.ok(d['modal.tool_inventory_review_new_item'].includes(d['col.out_of_service_qty']), `${l} new_item says "${d['col.out_of_service_qty']}"`);
+    assert.match(d['modal.tool_inventory_review_apply'], /\(\{\{n\}\}\)$/, `${l} Apply label is "... (n)"`);
+  }
+  assert.equal(dicts.en['modal.tool_inventory_review_apply'], 'Apply changes ({{n}})');
 });

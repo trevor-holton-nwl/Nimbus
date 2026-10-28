@@ -464,7 +464,7 @@ function _ensureDom(): boolean {
     const file = input.files?.[0];
     try { input.value = ''; } catch {}
     const plant = _st.plant;
-    if (file && plant) void _uploadFile(plant, file);
+    if (file && plant) void _onFilePicked(plant, file);   // a picker cancel never fires 'change': nothing happens
   });
   const quick = _el<HTMLInputElement>('ti-quick');
   quick?.addEventListener('input', () => {
@@ -1018,15 +1018,21 @@ async function _download(kind: 'template' | 'export'): Promise<void> {
   }
 }
 
-/** The Upload button: refuse while the grid has unsaved edits (the existing discard confirm is the way out), then open the picker. */
+/** The Upload button: open the picker straight away (the click keeps its user gesture, and cancelling the picker changes nothing). */
 async function _pickUpload(): Promise<void> {
   if (_busy || !_canEdit()) return;
-  const n = _dirtyCount();
+  _el<HTMLInputElement>('ti-upload-input')?.click?.();
+}
+
+/** A file was chosen: unsaved grid edits go through the discard confirm NOW (declined -> toast, nothing sent), then the review flow. */
+async function _onFilePicked(plant: string, file: File): Promise<void> {
+  if (_busy) return;
+  const n = _st.plant === plant ? _dirtyCount() : 0;
   if (n > 0) {
     if (!await _confirmDiscard(n)) { Toast.show(Util.t('toast.tool_inventory_upload_dirty'), 'warn'); return; }
-    _resetEdits();
+    if (_st.plant === plant) _resetEdits();
   }
-  _el<HTMLInputElement>('ti-upload-input')?.click?.();
+  await _uploadFile(plant, file);
 }
 
 interface UploadEditable { total_qty?: unknown; out_of_service_qty?: unknown; note?: unknown }
@@ -1048,8 +1054,8 @@ function _warnText(w: unknown): string {
 function _cellDiff(before: unknown, after: unknown): string {
   const b = before == null || before === '' ? '' : String(before);
   const a = after == null || after === '' ? '' : String(after);
-  const arrow = Util.t('ui.tool_inventory_review_arrow');
-  return b === a ? Util.escapeHtml(a || '—') : `${Util.escapeHtml(b || '—')} <span class="ti-review-arrow" aria-label="${Util.escapeHtml(arrow)}">→</span> <strong>${Util.escapeHtml(a || '—')}</strong>`;
+  const arrow = Util.t('ui.tool_inventory_review_arrow_sr');
+  return b === a ? Util.escapeHtml(a || '—') : `${Util.escapeHtml(b || '—')} <span class="ti-review-arrow" aria-hidden="true">→</span><span class="ti-sr-only">${Util.escapeHtml(arrow)}</span> <strong>${Util.escapeHtml(a || '—')}</strong>`;
 }
 
 function _more(total: number, shown: number): string {
@@ -1199,7 +1205,9 @@ async function _uploadFile(plant: string, file: File): Promise<boolean> {
       _showUploadResult(summary, warnings);
       await _seams.refreshStoreMasterData('tool-inventory-save', 'tool_inventory');
       alertWatch.start(); watchStarted = true;
-      if (_st.plant === plant) { _loadFromStore(); _showState(); _pushRows(); }
+      // Re-sync the grid only for the reviewed plant AND when it holds no unsaved edits (never clobber the planner's work;
+      // the next Refresh / save rebases through _rebase).
+      if (_st.plant === plant && _dirtyCount() === 0) { _loadFromStore(); _showState(); _pushRows(); }
       return true;
     } finally {
       if (!watchStarted) alertWatch.cancel();
@@ -1322,6 +1330,12 @@ export const ToolInventory = {
   /** Deep link: show `plant`'s inventory filtered to one tool id. */
   openForTool(plant: string, toolId: string): void {
     if (plant && Store.selectedPlant !== plant) Store.setSelectedPlant(plant, 'tool-inventory-link');
+    // A stale "Out of service" filter must not hide the tool the alert points at.
+    _st.filter = 'all';
+    const sel = _el<HTMLSelectElement>('ti-filter');
+    if (sel) sel.value = 'all';
+    _call(_gridApi, 'onFilterChanged');
+    _updateChrome();
     ToolInventory.setQuickFilter(String(toolId ?? ''));
   },
 

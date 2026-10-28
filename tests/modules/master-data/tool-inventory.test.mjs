@@ -860,21 +860,35 @@ test('filenameFromDisposition handles filename*, quotes, path characters and the
   assert.equal(fn(null, 'tool-inventory-A.xlsx'), 'tool-inventory-A.xlsx');
 });
 
-test('Upload while the grid has unsaved edits: Cancel on the discard confirm sends nothing and opens no picker; Discard clears the edits and opens it', async t => {
+test('Upload with unsaved edits: the picker opens first and a cancelled picker changes nothing; the discard confirm runs only once a file is chosen', async t => {
   const f = await fixture(t);
   let picked = 0;
   f.element('ti-upload-input').click = () => { picked++; };
   f.TI._addRow();
-  assert.ok(f.snap().dirty > 0);
+  const dirty = f.snap().dirty;
+  assert.ok(dirty > 0);
   f.setConfirm(false);
   f.click('ti-upload');
-  await until(() => f.toasts.some(x => x.msg === Util.t('toast.tool_inventory_upload_dirty')), 'dirty toast');
-  assert.equal(picked, 0);
+  await settle();
+  assert.equal(picked, 1, 'the picker opens at once');
+  assert.equal(f.confirms.length, 0, 'no discard confirm before a file is chosen (a picker cancel fires no change event)');
+  assert.equal(f.snap().dirty, dirty, 'cancelling the picker keeps every edit');
   assert.equal(f.requests.length, 0);
+  const input = f.element('ti-upload-input');
+  const choose = () => input.listeners.change[0]({ target: Object.assign(input, { files: [mkFile()] }) });
+  choose();
+  await until(() => f.toasts.some(x => x.msg === Util.t('toast.tool_inventory_upload_dirty')), 'dirty toast');
+  assert.equal(f.confirms.length, 1);
+  assert.equal(f.snap().dirty, dirty, 'declining the discard keeps the edits');
+  assert.equal(f.requests.length, 0, 'nothing is sent');
   f.setConfirm(true);
-  await f.TI._pickUpload();
-  assert.equal(picked, 1);
-  assert.equal(f.snap().dirty, 0, 'edits were discarded');
+  f.handlers.push(dryHandler(dryBody()));
+  choose();
+  await until(() => reviewOpened(f), 'review after discard');
+  assert.equal(f.snap().dirty, 0, 'edits were discarded before the dry run');
+  assert.equal(uploadReqs(f).length, 1);
+  f.click('ti-review-cancel');
+  await settle();
 });
 
 test('Upload: dry run is a multipart POST ?dry_run=1 (never dry_run=0), then the review lists counts, capped lists and the standing sentences; Cancel writes nothing', async t => {
@@ -902,7 +916,7 @@ test('Upload: dry run is a multipart POST ?dry_run=1 (never dry_run=0), then the
   assert.ok(text.includes('Rows missing from the file are left unchanged.'));
   assert.ok(text.includes('Rejected rows will be skipped; the valid rows will still be saved.'));
   assert.ok(f.element('ti-review-body').innerHTML.includes('role="alert"'), 'the rejected warning is announced');
-  assert.equal(f.element('ti-review-apply').textContent, 'Apply 251 changes');
+  assert.equal(f.element('ti-review-apply').textContent, 'Apply changes (251)');
   assert.equal(f.element('ti-review-apply').disabled, false);
   f.click('ti-review-cancel');
   assert.equal(await p, false);
@@ -920,7 +934,7 @@ test('Review: before -> after cells, no rejected warning at 0 rejected, Escape a
   assert.ok(html.includes('3 <span class="ti-review-arrow"'), 'total 3 -> 4');
   assert.ok(html.includes('<strong>4</strong>'));
   assert.doesNotMatch(html, /Rejected rows will be skipped/);
-  assert.equal(f.element('ti-review-apply').textContent, 'Apply 2 changes');
+  assert.equal(f.element('ti-review-apply').textContent, 'Apply changes (2)');
   for (const fn of f.docKeys) fn({ key: 'Escape', preventDefault() {} });
   assert.equal(await p, false);
   f.modalCalls.length = 0;
@@ -937,7 +951,7 @@ test('Review: Apply is disabled when nothing would change', async t => {
   const p = f.TI.uploadFile('A', mkFile());
   await until(() => reviewOpened(f), 'open');
   assert.equal(f.element('ti-review-apply').disabled, true);
-  assert.equal(f.element('ti-review-apply').textContent, 'Apply 0 changes');
+  assert.equal(f.element('ti-review-apply').textContent, 'Apply changes (0)');
   f.click('ti-review-apply');
   await settle();
   assert.equal(uploadReqs(f).length, 1, 'a click on the disabled Apply sends nothing');
@@ -1056,4 +1070,110 @@ test('the shared removal confirm is exported for the Manage Data grid: in-use id
   assert.equal(await f.TI.confirmRemovals('A', ['T1']), true);
   assert.equal(await f.TI.confirmRemovals('A', ['T2']), true);
   assert.equal(f.confirms.length, 2, 'T2 alone is not in use: no confirm');
+});
+
+test('Apply with unsaved edits made during the review: the grid is not re-synced over them', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody()), applyHandler());
+  const p = f.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(f), 'open');
+  f.TI._addRow();
+  const dirty = f.snap().dirty;
+  assert.ok(dirty > 0);
+  f.click('ti-review-apply');
+  assert.equal(await p, true);
+  assert.equal(f.snap().dirty, dirty, 'the planner unsaved row survives the upload');
+  assert.deepEqual(f.seamCalls, [['tool-inventory-save', 'tool_inventory']], 'the Store is still refreshed');
+});
+
+test('reviewHtml escapes every server/file-supplied string (tool id, note, file name, row, error, warnings incl. {msg} objects)', async t => {
+  const f = await fixture(t);
+  const { reviewHtml } = f.mod;
+  const img = '<img src=x onerror=alert(1)>', scr = '<script>alert(2)</script>';
+  const html = reviewHtml(`${img}.xlsx`, {
+    counts: { new: 1, changed: 1, unchanged: 0, rejected: 1 },
+    new: [{ tool_id: scr, total_qty: img, out_of_service_qty: scr }],
+    changed: [{ tool_id: img, before: { total_qty: 1, out_of_service_qty: 0, note: scr }, after: { total_qty: 2, out_of_service_qty: 0, note: img } }],
+    rejected: [{ row: scr, tool_id: img, error: `${img}${scr}` }],
+    warnings: [img, { msg: scr }, { message: img }],
+  });
+  assert.doesNotMatch(html, /<img/i);
+  assert.doesNotMatch(html, /<script/i);
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'entity-escaped');
+  assert.ok(html.includes('&lt;script&gt;alert(2)&lt;/script&gt;'));
+});
+
+test('the review arrow is hidden from screen readers and followed by an sr-only "changed to"', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody()));
+  const p = f.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(f), 'open');
+  const html = f.element('ti-review-body').innerHTML;
+  assert.ok(html.includes('<span class="ti-review-arrow" aria-hidden="true">→</span><span class="ti-sr-only">changed to</span>'), html);
+  assert.doesNotMatch(html, /aria-label="changed to"/);
+  f.click('ti-review-cancel');
+  await p;
+});
+
+test('Apply label needs no plural: Apply changes (1)', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody({ counts: { new: 1, changed: 0, unchanged: 0, rejected: 0 }, changed: [] })));
+  const p = f.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(f), 'open');
+  assert.equal(f.element('ti-review-apply').textContent, 'Apply changes (1)');
+  f.click('ti-review-cancel');
+  await p;
+});
+
+test('a plant switch while the review is open: Apply still posts to the reviewed plant and does not re-sync the other plant grid', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody()), applyHandler());
+  const p = f.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(f), 'open');
+  f.selectPlant('B', [row('B1', 1, 0, null, 'B')]);
+  f.setInventory('B', [row('B1', 1, 0, null, 'B'), row('B2', 1, 0, null, 'B')]);   // a silent Store change a re-sync would pick up
+  f.click('ti-review-apply');
+  assert.equal(await p, true);
+  assert.match(uploadReqs(f)[1].url, /\/tool-inventory\/A\/upload\?dry_run=0$/);
+  assert.equal(f.snap().plant, 'B');
+  assert.deepEqual(f.gridRows().map(r => r.tool_id), ['B1'], 'no grid re-sync for the non-selected plant');
+});
+
+test('a double click on Apply posts once', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody()), applyHandler());
+  const p = f.TI.uploadFile('A', mkFile());
+  await until(() => reviewOpened(f), 'open');
+  f.click('ti-review-apply');
+  f.click('ti-review-apply');
+  assert.equal(await p, true);
+  await settle();
+  assert.equal(uploadReqs(f).filter(r => r.url.includes('dry_run=0')).length, 1);
+});
+
+test('a second upload while a review is open cancels the first review safely; only the second file can be applied', async t => {
+  const f = await fixture(t);
+  f.handlers.push(dryHandler(dryBody()), applyHandler());
+  const p1 = f.TI.uploadFile('A', mkFile('first.xlsx'));
+  await until(() => reviewOpened(f), 'first review');
+  const opens = () => f.modalCalls.filter(c => c[0] === 'open').length;
+  const p2 = f.TI.uploadFile('A', mkFile('second.xlsx'));
+  assert.equal(await p1, false, 'the first review resolves as cancelled');
+  await until(() => opens() === 2, 'second review');
+  assert.equal(uploadReqs(f).filter(r => r.url.includes('dry_run=0')).length, 0, 'the first file was never applied');
+  f.click('ti-review-apply');
+  assert.equal(await p2, true);
+  const applies = uploadReqs(f).filter(r => r.url.includes('dry_run=0'));
+  assert.equal(applies.length, 1);
+  assert.equal(applies[0].form.get('file').name, 'second.xlsx');
+});
+
+test('openForTool clears a stale status filter so the tool the alert points at is not hidden', async t => {
+  const f = await fixture(t);
+  f.TI._setFilter('oos');
+  f.element('ti-filter').value = 'oos';
+  f.TI.openForTool('A', 'T100');
+  assert.equal(f.snap().filter, 'all');
+  assert.equal(f.element('ti-filter').value, 'all');
+  assert.equal(f.element('ti-quick').value, 'T100');
 });
