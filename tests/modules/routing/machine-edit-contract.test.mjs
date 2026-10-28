@@ -182,8 +182,13 @@ test('changed runtime of an existing split aggregate is reallocated, unchanged r
   ]};
   const prior=Engine.finishAnchoredPatchFor;
   const allocated={start_date:new Date('2026-09-30T10:00:00'),end_date:new Date('2026-09-30T16:00:00'),scheduleSegments:[]};
-  let calls=0;
+  let calls=0, probes=0;
+  const stillSplit=[{sequence:1,startDate:new Date('2026-09-30T08:00:00'),endDate:new Date('2026-09-30T09:00:00')},
+    {sequence:2,startDate:new Date('2026-09-30T10:00:00'),endDate:new Date('2026-09-30T12:00:00')}];
   Engine.finishAnchoredPatchFor=(candidate,line,finish,policy)=>{
+    // 2026-10-28: an unchanged-total split first probes whether the run now fits ONE window. This destination
+    // still needs splitting (the probe returns pieces), so the rigid translation below stays the pinned case.
+    if(candidate.RUN_TIME===3){ probes++; return {kind:'placed',finishMoved:false,changes:{scheduleSegments:stillSplit}}; }
     calls++; assert.equal(candidate.RUN_TIME,6); assert.equal(policy,'partial_allowed');
     assert.equal(finish.getTime(), task.end_date.getTime(), 'the re-derivation is anchored on the held finish');
     return {kind:'placed',finishMoved:false,changes:allocated};
@@ -195,6 +200,7 @@ test('changed runtime of an existing split aggregate is reallocated, unchanged r
     // Unchanged run time: a rigid translation by the finish delta (+1 h), no re-derivation.
     const translated=Engine.manualSchedulePatchFor({...task,RUN_TIME:3},'M2',new Date('2026-09-30T13:00:00'));
     assert.equal(calls,1);
+    assert.equal(probes,1);
     assert.equal(translated.scheduleSegments[0].startDate.getHours(),9);
     assert.equal(translated.scheduleSegments[1].startDate.getHours(),11);
   } finally { Engine.finishAnchoredPatchFor=prior; }

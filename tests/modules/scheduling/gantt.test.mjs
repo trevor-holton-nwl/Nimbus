@@ -1467,6 +1467,34 @@ test('Interaction._onDataSetUpdate: dragging one segment of an already-split (>=
   } finally { fx.restore(); }
 });
 
+test('Interaction._onDataSetUpdate: dragging piece 1 of a split order whose shifted finish fits one window commits ONE bar ending at the shifted finish (2026-10-28, R3)', () => {
+  const id = 'split-rejoin-1';
+  const line = 'SPLIT-REJOIN-LINE';
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const seg1 = { sequence: 1, startDate: new Date('2026-08-04T17:00:00'), endDate: new Date('2026-08-04T19:00:00') };
+  const seg2 = { sequence: 2, startDate: new Date('2026-08-05T07:00:00'), endDate: new Date('2026-08-05T09:00:00') };
+  Store.setTasks([{
+    id, PRODUCTION_ORDER: 'PSPLITR1', MATERIAL_NUMBER: 'MSPLITR1', MACHINE: line, PLANT: '5512', RUN_TIME: 4,
+    start_date: seg1.startDate, end_date: seg2.endDate, scheduleSegments: [seg1, seg2],
+  }], 'test');
+  Selection.clear();
+  // Piece 1's end moves +29 h (to Thu 00:00), so the order's finish moves by the same delta: Wed 09:00 -> Thu 14:00,
+  // where the whole 4 h run fits Thursday's open window. The bar ends at that finish, not at the dropped piece.
+  const draggedId = Timeline._segmentItemId(id, 1);
+  Timeline._items = { get: (i) => (i === draggedId
+    ? { start: new Date('2026-08-05T22:00:00'), end: new Date('2026-08-06T00:00:00'), group: line, parentId: id }
+    : undefined) };
+  try {
+    Interaction._onDataSetUpdate({ items: [draggedId] });
+    const updated = Store.tasks[id];
+    assert.deepEqual(updated.scheduleSegments, []);
+    assert.equal(updated.end_date.getTime(), new Date('2026-08-06T14:00:00').getTime());
+    assert.equal(updated.start_date.getTime(), new Date('2026-08-06T10:00:00').getTime());
+    assert.equal(updated.MACHINE, line);
+  } finally { fx.restore(); restoreClock(); }
+});
+
 test('Interaction._onDataSetUpdate: a multi-select drag shifts a COMPANION\'s existing >=2 scheduleSegments by the GROUP delta too (whole-branch review fix)', () => {
   // The companion loop routes every companion through the same manualSchedulePatchFor the dragged item uses,
   // so a companion that is itself already split moves its pieces with the group instead of leaving them stale.

@@ -1635,9 +1635,9 @@ export const Engine = {
    * scheduling OQ1): a drop, a typed end, a run-time/machine/version edit that holds the finish, or the
    * Override dialog's finish. The start is derived backward through the working time and the result carries
    * both edges.
-   * - An order that already has two or more schedule segments of the right total is translated rigidly by the
-   *   finish delta (OQ17 b: the dragged piece's same-edge delta), never re-derived and never calendar-checked;
-   *   a changed total (rate or version edit) is re-derived from the held finish under the plant's policy.
+   * - An order that already has two or more schedule segments of the right total rejoins into ONE bar when its
+   *   whole run fits one working window ending at the finish (2026-10-28); otherwise it is translated rigidly by
+   *   the finish delta (OQ17 b: the dragged piece's same-edge delta), never re-derived; a changed total (rate or version edit) is re-derived from the held finish under the plant's policy.
    * - Otherwise `finishAnchoredPatchFor(snap(finish))`. A backward start before the plant's now reverses forward
    *   from now with a `reversal_forward` note (O2, OQ3, OQ7 a, OQ19 c), never a refusal. A manual drop whose finish
    *   cannot be held (it would have to move EARLIER) returns null with `toast.finish_cannot_hold` and the caller reverts (OQ13 b). A FIRMED order
@@ -1689,6 +1689,17 @@ export const Engine = {
         sum + (segment.endDate.getTime() - segment.startDate.getTime()) / Config.MS_MIN, 0));
       if (productiveMinutes === runtimeMinutes) {
         const deltaMs = finish.getTime() - segments[segments.length - 1].endDate.getTime();
+        // 2026-10-28 owner decision (narrows D7/OQ17): when the whole run fits ONE working window ending at the
+        // requested finish, the order rejoins into one bar instead of keeping its old gaps. Anything else (no-op,
+        // approved exception, still needs splitting, finish in closed time) stays on the rigid shift below.
+        if (!(deltaMs === 0 && line === task.MACHINE) && !task.placement_exception) {
+          const joined = Engine.finishAnchoredPatchFor(task, line, finish, policy ?? Engine.splitOrderPolicyFor(plant));
+          if (joined.kind === 'placed' && !joined.finishMoved && !joined.reversed
+              && (joined.changes.scheduleSegments?.length ?? 0) === 0) {
+            return { ...joined.changes, MACHINE: line, ...released };
+          }
+          Engine.lastManualRefusal = null;
+        }
         const shifted = segments.map(segment => ({
           ...segment,
           startDate: new Date(segment.startDate.getTime() + deltaMs),
