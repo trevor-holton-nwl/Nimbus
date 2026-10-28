@@ -42,7 +42,7 @@ export function normalizeToolId(v: unknown): string | null {
   return TOOL_PLACEHOLDERS.has(s) ? null : s;
 }
 
-type FilterMode = 'all' | 'oos' | 'available_zero' | 'total_not_one' | 'unused';
+type FilterMode = 'all' | 'oos' | 'available_zero' | 'total_not_one' | 'unused' | 'used_no_row' | 'in_use_now';
 type ViewState = 'noplant' | 'loading' | 'failed' | 'ready';
 
 interface SavedValues { total_qty: number; out_of_service_qty: number; note: string }
@@ -71,13 +71,13 @@ interface TiState {
   rows: TiRow[];
   deletes: TiDelete[];
   ref: NimbusToolInventoryRow[] | undefined;   // the Store array last adopted (identity = "unchanged")
-  api: NimbusVendor.AgGridApi | null;
   readOnly: boolean;
   writing: boolean;
   serverProblems: string[];
   filter: FilterMode;
   quick: string;
   usedBy: Map<string, number>;
+  inUseNow: Set<string>;                       // ids carried by an order whose tool occupancy covers the current time
   errors: Map<string, FieldErrors> | null;
 }
 
@@ -89,10 +89,20 @@ let _pendingQuick: string | null = null;
 let _subscribed = false;
 let _quickTimer: ReturnType<typeof setTimeout> | undefined;
 
-function _blank(): TiState {
+/** ONE AG Grid for the module lifetime (like MaterialGrids): a plant switch only replaces its rowData, so the
+ *  grid can never be stacked on #ti-grid and its callbacks always read the CURRENT `_st`. */
+let _gridApi: NimbusVendor.AgGridApi | null = null;
+let _gridCreated = false;
+let _recheckTimer: ReturnType<typeof setTimeout> | undefined;
+let _recheckCount = 0;
+const RECHECK_MS = 400;
+const RECHECK_MAX = 150;
+
+/** A fresh per-plant state. The filter select + quick filter are view preferences of the (single) grid and carry over. */
+function _blank(prev?: TiState): TiState {
   return {
-    plant: null, view: 'noplant', rows: [], deletes: [], ref: undefined, api: null, readOnly: false, writing: false,
-    serverProblems: [], filter: 'all', quick: '', usedBy: new Map(), errors: null,
+    plant: null, view: 'noplant', rows: [], deletes: [], ref: undefined, readOnly: false, writing: false,
+    serverProblems: [], filter: prev?.filter ?? 'all', quick: prev?.quick ?? '', usedBy: new Map(), inUseNow: new Set(), errors: null,
   };
 }
 let _st: TiState = _blank();
@@ -109,8 +119,12 @@ function _el<T extends HTMLElement = HTMLElement>(id: string): T | null {
 }
 
 /** Trim + upper-case a typed id (placeholders are NOT blanked here: the validator reports them). */
+const _INVISIBLES = /[\u200b\u200c\u200d\u2060\ufeff\u00a0]/g;
 function _typedId(v: unknown): string {
-  return v == null ? '' : String(v).trim().toUpperCase();
+  if (v == null) return '';
+  let s = String(v).replace(_INVISIBLES, '').trim();      // zero-width / nbsp would create phantom ids (the server strips them too)
+  if (s.endsWith('.0') && /^-?\d+$/.test(s.slice(0, -2))) s = s.slice(0, -2);   // numeric float suffix, like the server
+  return s.toUpperCase();
 }
 
 /** A whole number 0..QTY_MAX from a cell value, or null when it is not one (blank is null too). */
@@ -157,8 +171,19 @@ function _rowChanged(r: TiRow): boolean {
     || String(r.note ?? '').trim() !== r._orig.note;
 }
 
+/** A saved id that was staged for delete and re-added with exactly its saved values: a no-op (untouched). */
+function _isIdenticalReAdd(r: TiRow, st: TiState): boolean {
+  if (!r._isNew) return false;
+  const id = _typedId(r.tool_id);
+  const d = st.deletes.find(x => x.tool_id === id);
+  if (!d) return false;
+  return _parseQty(r.total_qty) === d.orig.total_qty && _oosOf(r) === d.orig.out_of_service_qty && String(r.note ?? '').trim() === d.orig.note;
+}
+
 function _dirtyCount(st: TiState = _st): number {
-  return st.rows.filter(_rowChanged).length + st.deletes.length;
+  const ids = new Set(st.rows.map(r => _typedId(r.tool_id)));
+  // A staged delete whose id is back as a row is one edit (counted on the row), or none when the values are identical.
+  return st.rows.filter(r => _rowChanged(r) && !_isIdenticalReAdd(r, st)).length + st.deletes.filter(d => !ids.has(d.tool_id)).length;
 }
 
 function _isDirty(st: TiState = _st): boolean { return _dirtyCount(st) > 0; }
@@ -216,8 +241,36 @@ function _buildUsedBy(plant: string): Map<string, number> {
   return m;
 }
 
-function _toolAlertCount(): number {
-  return Store.alerts.filter(a => a.type === 'tool-conflict').length;
+/** Ids carried by an order whose tool occupancy covers `now` (run-time envelope via the compute core when reachable,
+ *  else the order's own start/end). Rebuilt on render, on tasks:bulk and when the filter is chosen. */
+function _buildInUseNow(plant: string, now: number = Date.now()): Set<string> {
+  const out = new Set<string>();
+  const core = (globalThis as { NimbusComputeCore?: { toolOccupancyInterval?: (t: unknown) => { start: Date; end: Date } | null } }).NimbusComputeCore;
+  for (const t of Store.tasksByPlant(plant)) {
+    const ids: string[] = [];
+    for (const raw of [t.PRT_01, t.PRT_02]) { const id = normalizeToolId(raw); if (id && !ids.includes(id)) ids.push(id); }
+    if (!ids.length) continue;
+    let s: number, e: number;
+    const iv = core?.toolOccupancyInterval?.(t);
+    if (iv) { s = +iv.start; e = +iv.end; } else { s = Date.parse(String(t.start_date ?? '')); e = Date.parse(String(t.end_date ?? '')); }
+    if (Number.isFinite(s) && Number.isFinite(e) && s <= now && now < e) for (const id of ids) out.add(id);
+  }
+  return out;
+}
+
+/** Tools carried by the loaded orders that have no row and no draft (a staged delete is a deliberate removal: skipped). */
+function _missingInUse(): string[] {
+  const have = new Set(_st.rows.map(r => _typedId(r.tool_id)));
+  for (const d of _st.deletes) have.add(d.tool_id);
+  return [..._st.usedBy.keys()].filter(id => !have.has(id)).sort();
+}
+
+function _toolAlertCount(plant: string | null = null): number {
+  return Store.alerts.filter(a => {
+    if (a.type !== 'tool-conflict') return false;
+    const ap = (a as { plant?: string }).plant;
+    return !plant || !ap || ap === plant;
+  }).length;
 }
 
 function _savedRows(): NimbusToolInventoryRow[] | undefined {
@@ -236,16 +289,22 @@ function _call(api: NimbusVendor.AgGridApi | null, name: string, ...args: unknow
 // -- State load / rebase --------------------------------------------------------
 
 /** Re-anchor rows + staged deletes on a fresh saved list (last write wins). A field the user did not touch follows the
- *  server; a field they edited keeps their value; a row the server no longer has becomes a new row (it will be re-added);
+ *  server; a field they edited keeps their value; a row the server no longer has is dropped when untouched and kept as a new row when edited;
  *  a staged delete of a vanished row is dropped; server rows the draft has never seen are appended clean. */
 function _rebase(rows: TiRow[], deletes: TiDelete[], saved: NimbusToolInventoryRow[]): { rows: TiRow[]; deletes: TiDelete[] } {
   const byId = new Map(saved.map(s => [String(s.tool_id), s]));
   const used = new Set<string>();
   const nextRows: TiRow[] = [];
+  let keptRemoved = 0;
   for (const r of rows) {
     const s = r._isNew ? undefined : byId.get(r.tool_id);
     if (r._isNew) { nextRows.push(r); continue; }
-    if (!s || !r._orig) { r._isNew = true; r._orig = null; nextRows.push(r); continue; }
+    if (!s || !r._orig) {
+      // A saved row another session removed: untouched -> drop it (never resurrect it as a dirty row); edited -> keep as new.
+      if (r._orig && !_rowChanged(r)) continue;
+      r._isNew = true; r._orig = null; nextRows.push(r); keptRemoved++;
+      continue;
+    }
     const o = _origOf(s);
     const old = r._orig;
     if (_parseQty(r.total_qty) === old.total_qty) r.total_qty = o.total_qty;
@@ -263,14 +322,16 @@ function _rebase(rows: TiRow[], deletes: TiDelete[], saved: NimbusToolInventoryR
     used.add(d.tool_id);
   }
   for (const s of saved) if (!used.has(String(s.tool_id))) nextRows.push(_rowFromSaved(s));
+  if (keptRemoved) Toast.show(Util.t('toast.tool_inventory_remote_deleted_kept'), 'warn');
   return { rows: nextRows, deletes: nextDeletes };
 }
 
 /** Start a fresh state for `plant`, adopting the Store's rows (and this plant's retained draft) when they are loaded. */
 function _adoptPlant(plant: string): void {
-  _st = _blank();
+  _st = _blank(_st);
   _st.plant = plant;
   _st.usedBy = _buildUsedBy(plant);
+  _st.inUseNow = _buildInUseNow(plant);
   _loadFromStore();
 }
 
@@ -282,7 +343,13 @@ function _loadFromStore(): void {
   // Rows tagged for another plant are a stale object from before the plant switch finished loading.
   const foreign = !!inv && inv.length > 0 && inv.some(r => r.plant !== plant);
   if (inv === undefined || foreign) {
-    if (_st.ref === undefined) _st.view = Store.masterData && !foreign ? 'failed' : 'loading';
+    if (_st.ref === undefined) {
+      // 'failed' only when nothing is loading: during a plant switch / first load Store.masterData exists while the
+      // inventory has not arrived yet (undefined = not loaded, never empty).
+      const inFlight = Persistence.isLoading() || Persistence._toolInventoryRefreshing.has(plant);
+      _st.view = Store.masterData && !foreign && !inFlight ? 'failed' : 'loading';
+      if (_st.view === 'loading' && inFlight) _armRecheck(plant);
+    }
     return;
   }
   if (inv === _st.ref && _st.view === 'ready') return;
@@ -306,6 +373,18 @@ function _loadFromStore(): void {
   _st.errors = null;
 }
 
+/** A load that ends WITHOUT rows emits nothing, so poll (bounded) until the in-flight load finishes and re-decide loading vs failed. */
+function _armRecheck(plant: string): void {
+  if (_recheckTimer) return;
+  _recheckTimer = setTimeout(() => {
+    _recheckTimer = undefined;
+    if (_st.plant !== plant || _st.view !== 'loading') { _recheckCount = 0; return; }
+    if (++_recheckCount > RECHECK_MAX) { _recheckCount = 0; _st.view = 'failed'; _showState(); _updateChrome(); return; }
+    if (_paneVisible()) ToolInventory.render(); else _loadFromStore();
+  }, RECHECK_MS);
+  (_recheckTimer as unknown as { unref?: () => void }).unref?.();
+}
+
 /** Keep the plant's unsaved edits across a plant switch (rows are ready only once loaded; a draft on a never-loaded state is empty). */
 function _retainDraft(): void {
   if (_st.plant && _st.view === 'ready' && _isDirty()) _drafts.set(_st.plant, { rows: _st.rows, deletes: _st.deletes });
@@ -323,10 +402,12 @@ function _paneHtml(): string {
       <select id="ti-filter" class="input ti-filter" aria-label="${t('ui.tool_inventory_filter_label')}">
         ${opt('all', 'filter.tool_all')}${opt('oos', 'filter.tool_oos')}${opt('available_zero', 'filter.tool_available_zero')}
         ${opt('total_not_one', 'filter.tool_total_not_one')}${opt('unused', 'filter.tool_unused')}
+        ${opt('used_no_row', 'filter.tool_used_no_row')}${opt('in_use_now', 'filter.tool_in_use_now')}
       </select>
       <div class="spacer"></div>
       <span class="md-dirty-badge" id="ti-dirty" hidden></span>
       <button type="button" class="btn btn-ghost" id="ti-add">${t('btn.add_row')}</button>
+      <button type="button" class="btn btn-ghost" id="ti-add-in-use" title="${t('tip.add_tools_in_use')}">${t('btn.add_tools_in_use')}</button>
       <button type="button" class="btn btn-ghost" id="ti-delete" disabled>${t('btn.delete_selected')}</button>
       <button type="button" class="btn btn-ghost" id="ti-export">${t('btn.export_csv')}</button>
       <button type="button" class="btn btn-ghost" id="ti-discard" hidden>${t('btn.discard')}</button>
@@ -334,6 +415,7 @@ function _paneHtml(): string {
     </div>
     <div class="ti-status" id="ti-status" role="status"></div>
     <div class="ti-hint" id="ti-hint" hidden></div>
+    <div class="ti-hint" id="ti-filter-hint" hidden></div>
     <div class="ti-errors" id="ti-errors" role="alert" hidden></div>
     <div class="ti-state" id="ti-state" hidden></div>
     <div id="ti-grid" class="ag-theme-quartz" role="region" aria-label="${t('ui.tool_inventory_grid_label')}"></div>`;
@@ -347,10 +429,11 @@ function _ensureDom(): boolean {
   if (pane.dataset) pane.dataset.tiReady = '1';
   _el('ti-add')?.addEventListener('click', () => ToolInventory._addRow());
   _el('ti-delete')?.addEventListener('click', () => ToolInventory._deleteSelected());
+  _el('ti-add-in-use')?.addEventListener('click', () => ToolInventory._addInUse());
   _el('ti-save')?.addEventListener('click', () => { void ToolInventory._save(); });
   _el('ti-discard')?.addEventListener('click', () => { void ToolInventory._discard(); });
   _el('ti-export')?.addEventListener('click', () => {
-    try { _st.api?.exportDataAsCsv({ fileName: `nimbus-tool-inventory-${_st.plant ?? 'plant'}.csv`, processCellCallback: Util.csvProcessCell }); } catch {}
+    try { _gridApi?.exportDataAsCsv({ fileName: `nimbus-tool-inventory-${_st.plant ?? 'plant'}.csv`, processCellCallback: Util.csvProcessCell }); } catch {}
   });
   const quick = _el<HTMLInputElement>('ti-quick');
   quick?.addEventListener('input', () => {
@@ -359,7 +442,8 @@ function _ensureDom(): boolean {
   });
   _el<HTMLSelectElement>('ti-filter')?.addEventListener('change', e => {
     _st.filter = ((e.target as HTMLSelectElement).value || 'all') as FilterMode;
-    _call(_st.api, 'onFilterChanged');
+    if (_st.plant) _st.inUseNow = _buildInUseNow(_st.plant);   // "now" moves on: recompute when the filter is chosen
+    _call(_gridApi, 'onFilterChanged');
     _updateChrome();
   });
   return true;
@@ -404,12 +488,13 @@ function _updateChrome(): void {
   set('ti-quick', e => { (e as HTMLInputElement).disabled = !ready; });
   set('ti-filter', e => { (e as HTMLSelectElement).disabled = !ready; });
   set('ti-add', e => { (e as HTMLButtonElement).disabled = !editable; });
+  set('ti-add-in-use', e => { (e as HTMLButtonElement).disabled = !editable; });
   set('ti-export', e => { (e as HTMLButtonElement).disabled = !ready || !_st.rows.length; });
   set('ti-save', e => { (e as HTMLButtonElement).disabled = !_canSave(); });
   set('ti-discard', e => { e.hidden = dirty === 0; (e as HTMLButtonElement).disabled = _st.writing; });
   set('ti-dirty', e => { e.hidden = dirty === 0; e.textContent = Util.t('ui.n_unsaved', { count: dirty }); });
   set('ti-delete', e => {
-    const n = ((_call(_st.api, 'getSelectedRows') as unknown[] | undefined) ?? []).length;
+    const n = ((_call(_gridApi, 'getSelectedRows') as unknown[] | undefined) ?? []).length;
     (e as HTMLButtonElement).disabled = !editable || n === 0;
   });
   // Status: the tooling rule is shown only once Wave 5's control exists; the alerts sentence is always true.
@@ -428,6 +513,21 @@ function _updateChrome(): void {
     }
   }
   set('ti-hint', e => { e.hidden = !hint; e.textContent = hint; });
+  // "Used but no row" is select-and-add (no read-only ghost rows): the filter shows the new/draft rows of used tools and this
+  // line states how many used tools still have no row, with the Add tools in use action right there.
+  set('ti-filter-hint', e => {
+    const show = ready && _st.filter === 'used_no_row';
+    e.hidden = !show;
+    if (!show) { e.textContent = ''; return; }
+    const n = _missingInUse().length;
+    e.textContent = n ? Util.t('ui.tool_inventory_used_no_row_hint', { count: n }) : Util.t('ui.tool_inventory_used_no_row_none');
+    if (n && editable) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'btn btn-ghost sm'; b.textContent = Util.t('btn.add_tools_in_use');
+      b.addEventListener?.('click', () => ToolInventory._addInUse());
+      e.appendChild?.(b);
+    }
+  });
   set('ti-errors', e => {
     e.hidden = !_st.serverProblems.length;
     e.innerHTML = _st.serverProblems.length
@@ -535,6 +635,8 @@ function _passesFilter(r: TiRow): boolean {
     case 'available_zero': return _availableOf(r) === 0;
     case 'total_not_one': return _parseQty(r.total_qty) !== 1;
     case 'unused': return (_st.usedBy.get(_typedId(r.tool_id)) ?? 0) === 0;
+    case 'used_no_row': return r._isNew && (_st.usedBy.get(_typedId(r.tool_id)) ?? 0) > 0;
+    case 'in_use_now': return !r._isNew && _st.inUseNow.has(_typedId(r.tool_id));
     default: return true;
   }
 }
@@ -553,7 +655,8 @@ function _mkNoRowsOverlay() {
 
 function _createGrid(): void {
   const el = _el('ti-grid');
-  if (!el || _st.api || typeof agGrid === 'undefined') return;
+  if (!el || _gridApi || _gridCreated || typeof agGrid === 'undefined') return;
+  _gridCreated = true;
   const options = {
     rowData: _st.rows,
     getRowId: (p: { data: TiRow }) => p.data._cid,
@@ -571,19 +674,21 @@ function _createGrid(): void {
     onCellValueChanged: () => _onEdited(),
     onSelectionChanged: () => _updateChrome(),
     onGridReady: (params: { api: NimbusVendor.AgGridApi }) => {
-      _st.api = params.api;
+      _gridApi = params.api;
       const pending = _pendingQuick;
       if (pending != null) { _pendingQuick = null; ToolInventory.setQuickFilter(pending); }
     },
   };
-  agGrid.createGrid(el, options as unknown as NimbusVendor.AgGridOptions);
+  const created = agGrid.createGrid(el, options as unknown as NimbusVendor.AgGridOptions) as NimbusVendor.AgGridApi | undefined;
+  if (!_gridApi && created) _gridApi = created;
+  if (_pendingQuick != null && _gridApi) { const q = _pendingQuick; _pendingQuick = null; ToolInventory.setQuickFilter(q); }
 }
 
 /** Push the current rows into the grid (immutable rowData diffed by `_cid`) and repaint every cell: a duplicate or
  *  Out-of-Service-vs-Total error can sit on a row other than the one just edited. */
 function _pushRows(): void {
   _st.errors = null;
-  const api = _st.api;
+  const api = _gridApi;
   if (api) {
     try { api.setGridOption('rowData', [..._st.rows]); } catch {}
     try { api.refreshCells({ force: true }); } catch {}
@@ -593,7 +698,7 @@ function _pushRows(): void {
 function _onEdited(): void {
   _st.errors = null;
   _st.serverProblems = [];
-  try { _st.api?.refreshCells({ force: true }); } catch {}
+  try { _gridApi?.refreshCells({ force: true }); } catch {}
   _updateChrome();
 }
 
@@ -606,7 +711,7 @@ function _addRow(): void {
     _st.filter = 'all'; _st.quick = '';
     const f = _el<HTMLSelectElement>('ti-filter'); if (f) f.value = 'all';
     const q = _el<HTMLInputElement>('ti-quick'); if (q) q.value = '';
-    try { _st.api?.setGridOption('quickFilterText', ''); } catch {}
+    try { _gridApi?.setGridOption('quickFilterText', ''); } catch {}
   }
   const row = _newRow();
   _st.rows = [..._st.rows, row];
@@ -616,11 +721,35 @@ function _addRow(): void {
   _pushRows();
   _updateChrome();
   // Put the cursor in the Tool ID cell of the new row.
-  const idx = (_call(_st.api, 'getRowNode', row._cid) as { rowIndex?: number | null } | undefined)?.rowIndex;
+  const idx = (_call(_gridApi, 'getRowNode', row._cid) as { rowIndex?: number | null } | undefined)?.rowIndex;
   if (idx != null) {
-    _call(_st.api, 'ensureIndexVisible', idx);
-    _call(_st.api, 'startEditingCell', { rowIndex: idx, colKey: 'tool_id' });
+    _call(_gridApi, 'ensureIndexVisible', idx);
+    _call(_gridApi, 'startEditingCell', { rowIndex: idx, colKey: 'tool_id' });
   }
+}
+
+const ADD_IN_USE_CAP = 500;
+
+/** Draft NEW rows (1 copy, none out of service) for every tool carried by the loaded orders that has no row and no draft. */
+function _addInUse(): void {
+  if (!_canEdit()) return;
+  const missing = _missingInUse();
+  if (!missing.length) { Toast.show(Util.t('toast.tool_inventory_none_in_use'), 'info'); return; }
+  const take = missing.slice(0, ADD_IN_USE_CAP);
+  if (_st.filter !== 'all' || _st.quick) {
+    _st.filter = 'all'; _st.quick = '';
+    const f = _el<HTMLSelectElement>('ti-filter'); if (f) f.value = 'all';
+    const q = _el<HTMLInputElement>('ti-quick'); if (q) q.value = '';
+    try { _gridApi?.setGridOption('quickFilterText', ''); } catch {}
+  }
+  const wasEmpty = !_st.rows.length;
+  _st.rows = [..._st.rows, ...take.map(id => { const r = _newRow(); r.tool_id = id; return r; })];
+  _st.serverProblems = [];
+  if (wasEmpty) { _showState(); _createGrid(); }
+  _pushRows();
+  _updateChrome();
+  Toast.show(Util.t('toast.tool_inventory_added_in_use', { n: take.length }), 'success');
+  if (missing.length > take.length) Toast.show(Util.t('toast.tool_inventory_added_in_use_capped', { n: ADD_IN_USE_CAP }), 'info');
 }
 
 function _removeRows(cids: string[]): void {
@@ -632,14 +761,14 @@ function _removeRows(cids: string[]): void {
   }
   _st.rows = _st.rows.filter(r => !gone.has(r._cid));
   _st.serverProblems = [];
-  _call(_st.api, 'deselectAll');
+  _call(_gridApi, 'deselectAll');
   if (!_st.rows.length) _showState();
   _pushRows();
   _updateChrome();
 }
 
 function _deleteSelected(): void {
-  const sel = ((_call(_st.api, 'getSelectedRows') as TiRow[] | undefined) ?? []).map(r => r._cid);
+  const sel = ((_call(_gridApi, 'getSelectedRows') as TiRow[] | undefined) ?? []).map(r => r._cid);
   _removeRows(sel);
 }
 
@@ -716,9 +845,12 @@ async function _confirmRemovals(plant: string, ids: string[]): Promise<boolean> 
   });
 }
 
-/** Wait (bounded) for the alert recompute our save triggers, then say how many tool conflicts it cleared. */
-function _watchToolAlerts(before: number): void {
+/** After a save: say how many tool conflicts the alert recompute cleared. Subscribe BEFORE the Store refetch, but only
+ *  react to an `alerts:change` that arrives AFTER the tool_inventory `master-data-changed` (an earlier or unrelated alerts
+ *  change is ignored). The 3 s guard starts once the refetch resolved; counts are compared for the SAME plant. */
+function _watchToolAlerts(plant: string, before: number): { start: () => void; cancel: () => void; started: boolean } {
   let done = false;
+  let armed = false;
   let off: (() => void) | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const finish = (fired: boolean): void => {
@@ -726,22 +858,35 @@ function _watchToolAlerts(before: number): void {
     done = true;
     clearTimeout(timer);
     try { off?.(); } catch {}
-    if (!fired) return;
-    const after = _toolAlertCount();
+    if (!fired || Store.selectedPlant !== plant) return;
+    const after = _toolAlertCount(plant);
     if (after < before) Toast.show(Util.t('toast.tool_alerts_cleared', { n: before - after }), 'success');
   };
-  off = Store.subscribe(evt => { if (evt.type === 'alerts:change') finish(true); }, 'ToolInventoryAlerts');
-  timer = setTimeout(() => finish(false), ALERT_WATCH_MS);
-  (timer as unknown as { unref?: () => void }).unref?.();
+  off = Store.subscribe(evt => {
+    if (evt.type === 'master-data-changed' && (evt.table === 'tool_inventory' || evt.table === undefined)) armed = true;
+    else if (evt.type === 'alerts:change' && armed) finish(true);
+  }, 'ToolInventoryAlerts');
+  const handle = {
+    started: false,
+    start: () => {
+      handle.started = true;
+      if (done) return;
+      timer = setTimeout(() => finish(false), ALERT_WATCH_MS);
+      (timer as unknown as { unref?: () => void }).unref?.();
+    },
+    cancel: () => finish(false),
+  };
+  return handle;
 }
 
 function _bulkBody(): { upserts: Array<{ tool_id: string; total_qty: number; out_of_service_qty: number; note: string | null }>; deletes: Array<{ tool_id: string }>; source: { kind: 'grid' } } {
   const ids = new Set(_st.rows.map(r => _typedId(r.tool_id)));
-  const upserts = _st.rows.filter(_rowChanged).map(r => ({
+  const upserts = _st.rows.filter(r => _rowChanged(r) && !_isIdenticalReAdd(r, _st)).map(r => ({
     tool_id: _typedId(r.tool_id), total_qty: _parseQty(r.total_qty) as number, out_of_service_qty: _oosOf(r) as number,
     note: String(r.note ?? '').trim() || null,
   }));
   // A staged delete whose id is back as a row in this save is an edit (upsert only): no delete, no usage confirm.
+  // (An identical re-add is untouched: neither a delete nor an upsert.)
   const deletes = _st.deletes.filter(d => !ids.has(d.tool_id)).map(d => ({ tool_id: d.tool_id }));
   return { upserts, deletes, source: { kind: 'grid' } };
 }
@@ -754,9 +899,11 @@ async function _save(): Promise<void> {
   _st.serverProblems = [];
   _updateChrome();
   const stateAtStart = _st;
+  let watch: { start: () => void; cancel: () => void; started: boolean } | null = null;
   try {
     if (!await _confirmRemovals(plant, body.deletes.map(d => d.tool_id))) return;   // Cancel: keep every staged edit
-    const alertsBefore = _toolAlertCount();
+    const alertWatch = _watchToolAlerts(plant, _toolAlertCount(plant));
+    watch = alertWatch;
     const res = await Util.fetchTraced(`${Config.API_BASE}/tool-inventory/${encodeURIComponent(plant)}/bulk`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     });
@@ -775,8 +922,8 @@ async function _save(): Promise<void> {
       _st.errors = null;
     }
     Toast.show(Util.t('toast.tool_inventory_saved', { count: body.upserts.length + body.deletes.length }), 'success');
-    _watchToolAlerts(alertsBefore);
     await _seams.refreshStoreMasterData('tool-inventory-save', 'tool_inventory');
+    watch.start();
     if (_st.plant === plant) { _loadFromStore(); _showState(); _pushRows(); }
   } catch (e: unknown) {
     const status = (e as { status?: number })?.status;
@@ -787,12 +934,14 @@ async function _save(): Promise<void> {
         _st.readOnly = true;
         Toast.show(Util.t('toast.no_write_permission'), 'error');
       } else {
-        // Edits stay as they are so the planner can fix and retry; the server's first problems are listed inline.
-        _st.serverProblems = msg.replace(/^Cannot save tool inventory:\s*/i, '').split(/;\s+/).map(s => s.trim()).filter(Boolean);
+        // Edits stay as they are so the planner can fix and retry. Only a 400 carries the server's problem list; a network or
+        // other failure just toasts the message.
+        if (status === 400) _st.serverProblems = msg.replace(/^Cannot save tool inventory:\s*/i, '').split(/;\s+/).map(s => s.trim()).filter(Boolean);
         Toast.show(Util.t('toast.tool_inventory_save_failed', { msg }), 'error');
       }
     }
   } finally {
+    if (watch && !watch.started) watch.cancel();
     stateAtStart.writing = false;
     if (_st === stateAtStart) { _pushRows(); _updateChrome(); }
   }
@@ -810,9 +959,16 @@ async function _retry(): Promise<void> {
 
 // -- Public surface ----------------------------------------------------------------
 
+/** The pane is on screen: not hidden itself and its Master Data top tab is the active one (render() never runs against a hidden container). */
 function _paneVisible(): boolean {
   const pane = _el(PANE_ID);
-  return !!pane && !pane.hidden;
+  if (!pane || pane.hidden) return false;
+  const tab = _el('masterdata-tab');
+  if (tab) {
+    if (tab.hidden) return false;
+    if (tab.classList && typeof tab.classList.contains === 'function' && !tab.classList.contains('active')) return false;
+  }
+  return true;
 }
 
 export const ToolInventory = {
@@ -823,7 +979,7 @@ export const ToolInventory = {
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected') {
         _retainDraft();
-        _st = _blank();   // an in-flight save finishes against its own (detached) state
+        _st = _blank(_st);   // an in-flight save finishes against its own (detached) state
         if (_paneVisible()) ToolInventory.render();
         return;
       }
@@ -836,7 +992,8 @@ export const ToolInventory = {
       if (evt.type === 'sandbox:entered' || evt.type === 'sandbox:exited') { if (_paneVisible()) _updateChrome(); return; }
       if (evt.type === 'tasks:bulk' && _st.plant && _paneVisible()) {
         _st.usedBy = _buildUsedBy(_st.plant);
-        try { _st.api?.refreshCells({ force: true }); } catch {}
+        _st.inUseNow = _buildInUseNow(_st.plant);
+        try { _gridApi?.refreshCells({ force: true }); } catch {}
       }
     }, 'ToolInventory');
   },
@@ -846,20 +1003,22 @@ export const ToolInventory = {
     const plant = Store.selectedPlant;
     if (!plant) {
       _retainDraft();
-      _st = _blank();
+      _st = _blank(_st);
     } else if (_st.plant !== plant) {
       _retainDraft();
       _adoptPlant(plant);
     } else {
       _st.usedBy = _buildUsedBy(plant);
+      _st.inUseNow = _buildInUseNow(plant);
       _loadFromStore();
     }
     _showState();
     if (_st.view === 'ready' && (_st.rows.length || _st.deletes.length)) {
       _createGrid();
       _pushRows();
-      requestAnimationFrame(() => { try { if ((_el('ti-grid')?.clientWidth ?? 0) > 50) _st.api?.sizeColumnsToFit(); } catch {} });
+      requestAnimationFrame(() => { try { if ((_el('ti-grid')?.clientWidth ?? 0) > 50) _gridApi?.sizeColumnsToFit(); } catch {} });
     }
+    else _pushRows();   // not ready / no rows: the single grid must not keep showing another plant's rows
     _updateChrome();
   },
 
@@ -881,9 +1040,9 @@ export const ToolInventory = {
     _st.quick = text;
     const q = _el<HTMLInputElement>('ti-quick');
     if (q) q.value = text;
-    if (!_st.api) { _pendingQuick = text; return; }
+    if (!_gridApi) { _pendingQuick = text; return; }
     _pendingQuick = null;
-    try { _st.api.setGridOption('quickFilterText', text); } catch {}
+    try { _gridApi.setGridOption('quickFilterText', text); } catch {}
   },
 
   /** Deep link (Wave 4b wires the callers): show `plant`'s inventory filtered to one tool id. */
@@ -894,6 +1053,7 @@ export const ToolInventory = {
 
   // -- test / wiring hooks (not part of the documented surface) --
   _addRow: (): void => _addRow(),
+  _addInUse: (): void => _addInUse(),
   _deleteSelected: (): void => _deleteSelected(),
   _removeRows: (cids: string[]): void => _removeRows(cids),
   _save: (): Promise<void> => _save(),

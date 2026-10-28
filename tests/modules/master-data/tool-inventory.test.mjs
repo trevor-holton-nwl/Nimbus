@@ -35,6 +35,7 @@ async function fixture(t, { plant = 'A', rows = [row('T100', 3, 1, 'spare')], by
   const listeners = new Set();
   let confirmAnswer = true;
   let gridOptions;
+  let createCount = 0;
   let gridRows = [];
   let selected = [];
   const api = {
@@ -58,7 +59,7 @@ async function fixture(t, { plant = 'A', rows = [row('T100', 3, 1, 'spare')], by
   Object.assign(globalThis, {
     document: { getElementById: element, createElement: () => ({ setAttribute() {}, style: {} }), addEventListener() {} },
     window: { __NIMBUS_LOCALES: { en: EN } }, requestAnimationFrame() {},
-    agGrid: { createGrid(_el, opts) { gridOptions = opts; gridRows = opts.rowData; opts.onGridReady({ api }); } },
+    agGrid: { createGrid(_el, opts) { createCount++; gridOptions = opts; gridRows = opts.rowData; opts.onGridReady({ api }); } },
   });
   const prev = { plant: Store.selectedPlant, md: Store.masterData, alerts: Store._state.alerts, active: Sandbox.active };
   t.after(() => {
@@ -94,7 +95,7 @@ async function fixture(t, { plant = 'A', rows = [row('T100', 3, 1, 'spare')], by
   }
   return {
     TI, mod, element, toasts, confirms, requests, handlers, emit, listeners, seamCalls, refreshCalls, setInventory, selectPlant, edit, colDef,
-    options: () => gridOptions, gridRows: () => gridRows, snap: () => TI._snapshot(),
+    createCount: () => createCount, options: () => gridOptions, gridRows: () => gridRows, snap: () => TI._snapshot(),
     setConfirm: v => { confirmAnswer = v; },
     select: picked => { selected = picked; gridOptions.onSelectionChanged({}); },
   };
@@ -292,7 +293,7 @@ test('an id nobody uses is removed without a confirm', async t => {
   assert.deepEqual(bulkRequests(f)[0].body, { upserts: [], deletes: [{ tool_id: 'T100' }], source: { kind: 'grid' } });
 });
 
-test('usage cannot be read: an error confirm defaults to Cancel semantics and Cancel aborts; OK proceeds', async t => {
+test('usage cannot be read: the error confirm is a warn confirm, Cancel aborts the save and OK proceeds', async t => {
   const f = await fixture(t);
   f.handlers.push({ match: u => u.endsWith('/usage'), respond: () => respond({ detail: 'no' }, 403) }, bulkHandler());
   f.TI._removeRows([f.snap().rows[0]._cid]);
@@ -503,6 +504,7 @@ test('tool_alerts_cleared: toast with the difference when the next alerts:change
   Store._state.alerts = [{ type: 'tool-conflict' }, { type: 'tool-conflict' }, { type: 'tool-conflict' }, { type: 'overload' }];
   f.mod._seams.refreshStoreMasterData = async () => {
     Store._state.alerts = [{ type: 'tool-conflict' }, { type: 'overload' }];
+    f.emit({ type: 'master-data-changed', table: 'tool_inventory' });
     f.emit({ type: 'alerts:change' });
     return true;
   };
@@ -515,7 +517,7 @@ test('tool_alerts_cleared: silent when the count did not drop, and when alerts:c
   const f = await fixture(t);
   f.handlers.push(bulkHandler());
   Store._state.alerts = [{ type: 'tool-conflict' }];
-  f.mod._seams.refreshStoreMasterData = async () => { f.emit({ type: 'alerts:change' }); return true; };
+  f.mod._seams.refreshStoreMasterData = async () => { f.emit({ type: 'master-data-changed', table: 'tool_inventory' }); f.emit({ type: 'alerts:change' }); return true; };
   f.edit(f.snap().rows[0], 'total_qty', '8');
   await f.TI._save();
   assert.equal(f.toasts.some(x => x.msg.includes('conflict alert')), false);
@@ -548,4 +550,253 @@ test('openForTool selects the plant and sets the quick filter text', async t => 
   const f = await fixture(t);
   f.TI.openForTool('A', 'T100');
   assert.equal(f.element('ti-quick').value, 'T100');
+});
+
+test('exactly ONE AG Grid is created across initial render, repeated render, plant switches and a no-plant round trip', async t => {
+  const f = await fixture(t);
+  assert.equal(f.createCount(), 1, 'initial render');
+  f.TI.render(); f.TI.render();
+  assert.equal(f.createCount(), 1, 'repeated render');
+  f.selectPlant('B', [row('B1', 1, 0, null, 'B')]); f.TI.render();
+  f.selectPlant('A', [row('T100', 3, 1, 'spare')]); f.TI.render();
+  assert.equal(f.createCount(), 1, 'plant switch A -> B -> A');
+  Store._state.selectedPlant = null;
+  f.emit({ type: 'plant:selected', plant: null }); f.TI.render();
+  assert.equal(f.snap().view, 'noplant');
+  f.selectPlant('A', [row('T100', 3, 1, 'spare')]); f.TI.render();
+  assert.equal(f.createCount(), 1, 'plant -> no plant -> plant');
+  assert.deepEqual(f.gridRows().map(r => r.tool_id), ['T100'], 'the one grid shows the current plant rows');
+  f.selectPlant('B', [row('B1', 1, 0, null, 'B')]); f.TI.render();
+  assert.equal(f.gridRows()[0].tool_id, 'B1');
+  assert.equal(f.options().getRowId({ data: f.gridRows()[0] }), f.gridRows()[0]._cid);
+});
+
+test('a plant with no rows after a switch does not keep the previous plant rows in the single grid', async t => {
+  const f = await fixture(t);
+  f.selectPlant('B', []); f.TI.render();
+  assert.equal(f.gridRows().length, 0);
+  assert.equal(f.createCount(), 1);
+});
+
+test('loading vs failed: inventory undefined while a load is in flight shows loading; after it completes it shows failed', async t => {
+  const f = await fixture(t);
+  let loading = true;
+  t.mock.method(Persistence, 'isLoading', () => loading);
+  f.selectPlant('B', undefined);               // masterData exists, tool_inventory undefined
+  f.TI.render();
+  assert.equal(f.snap().view, 'loading');
+  assert.equal(f.element('ti-state').innerHTML.includes('ti-retry'), false);
+  loading = false;
+  f.TI.render();
+  assert.equal(f.snap().view, 'failed');
+  assert.ok(f.element('ti-state').innerHTML.includes('ti-retry'));
+});
+
+test('loading vs failed: an in-flight inventory refresh for the plant also counts as loading', async t => {
+  const f = await fixture(t);
+  Persistence._toolInventoryRefreshing.add('B');
+  t.after(() => Persistence._toolInventoryRefreshing.delete('B'));
+  f.selectPlant('B', undefined);
+  f.TI.render();
+  assert.equal(f.snap().view, 'loading');
+  Persistence._toolInventoryRefreshing.delete('B');
+  f.TI.render();
+  assert.equal(f.snap().view, 'failed');
+});
+
+test('rebase: a saved row removed remotely and UNTOUCHED locally is dropped and not counted dirty', async t => {
+  const f = await fixture(t, { rows: [row('T100', 3, 1, 'spare'), row('T200', 2, 0)] });
+  f.setInventory('A', [row('T100', 3, 1, 'spare')]);
+  f.emit({ type: 'master-data-changed', table: 'tool_inventory' });
+  const s = f.snap();
+  assert.deepEqual(s.rows.map(r => r.tool_id), ['T100']);
+  assert.equal(s.dirty, 0);
+  assert.equal(f.toasts.some(x => x.msg === Util.t('toast.tool_inventory_remote_deleted_kept')), false);
+});
+
+test('rebase: a saved row removed remotely but EDITED locally is kept as a new row with the explaining toast', async t => {
+  const f = await fixture(t, { rows: [row('T100', 3, 1, 'spare'), row('T200', 2, 0)] });
+  f.edit(f.snap().rows[1], 'total_qty', '9');
+  f.setInventory('A', [row('T100', 3, 1, 'spare')]);
+  f.emit({ type: 'master-data-changed', table: 'tool_inventory' });
+  const s = f.snap();
+  assert.deepEqual(s.rows.map(r => [r.tool_id, r._isNew, r.total_qty]), [['T100', false, 3], ['T200', true, 9]]);
+  assert.equal(s.dirty, 1);
+  assert.ok(f.toasts.some(x => x.type === 'warn' && x.msg === Util.t('toast.tool_inventory_remote_deleted_kept')));
+});
+
+test('Add tools in use: draft new rows (1/0/blank) for used ids with no row or draft, sorted, de-duplicated, placeholders excluded', async t => {
+  const f = await fixture(t, { rows: [row('T100', 3, 1, 'spare')] });
+  t.mock.method(Store, 'tasksByPlant', () => [
+    { PRT_01: 'z9', PRT_02: 'T100' }, { PRT_01: ' a1 ', PRT_02: 'Z9' }, { PRT_01: '-', PRT_02: 'n/a' }, { PRT_01: 'A1', PRT_02: null },
+  ]);
+  f.TI.render();
+  f.TI._addInUse();
+  const s = f.snap();
+  assert.deepEqual(s.rows.map(r => r.tool_id), ['T100', 'A1', 'Z9']);
+  assert.deepEqual(s.rows.slice(1).map(r => [r._isNew, r.total_qty, r.out_of_service_qty, r.note]), [[true, 1, 0, ''], [true, 1, 0, '']]);
+  assert.equal(s.dirty, 2);
+  assert.ok(f.toasts.some(x => x.msg === Util.t('toast.tool_inventory_added_in_use', { n: 2 })));
+  f.TI._addInUse();       // nothing left to add: no duplicates
+  assert.equal(f.snap().rows.length, 3);
+  assert.ok(f.toasts.some(x => x.msg === Util.t('toast.tool_inventory_none_in_use')));
+});
+
+test('Add tools in use caps at 500 with a note, is disabled in Sandbox, and the tooltip names the loaded window', async t => {
+  const f = await fixture(t, { rows: [] });
+  t.mock.method(Store, 'tasksByPlant', () => Array.from({ length: 520 }, (_, i) => ({ PRT_01: `X${String(i).padStart(4, '0')}` })));
+  f.TI.render();
+  f.TI._addInUse();
+  assert.equal(f.snap().rows.length, 500);
+  assert.equal(f.snap().rows[0].tool_id, 'X0000');
+  assert.ok(f.toasts.some(x => x.msg === Util.t('toast.tool_inventory_added_in_use_capped', { n: 500 })));
+  assert.match(Util.t('tip.add_tools_in_use'), /loaded window/);
+  Sandbox.active = true;
+  f.emit({ type: 'sandbox:entered' });
+  assert.equal(f.element('ti-add-in-use').disabled, true);
+  const before = f.snap().rows.length;
+  f.TI._addInUse();
+  assert.equal(f.snap().rows.length, before);
+  Sandbox.active = false;
+});
+
+test('filters: "Used but no row" lists draft rows of used tools and hints the count; "In use now" covers the current time', async t => {
+  const f = await fixture(t, { rows: [row('T1'), row('T2'), row('T3')] });
+  const now = Date.now();
+  const iso = ms => new Date(now + ms).toISOString();
+  t.mock.method(Store, 'tasksByPlant', () => [
+    { PRT_01: 'T1', start_date: iso(-3600e3), end_date: iso(3600e3) },        // covers now
+    { PRT_01: 'T2', start_date: iso(3600e3), end_date: iso(7200e3) },         // future
+    { PRT_01: 'NEW1', PRT_02: 'NEW2', start_date: iso(-7200e3), end_date: iso(-3600e3) },   // past, no row
+  ]);
+  f.TI.render();
+  const choose = v => { f.element('ti-filter').value = v; f.element('ti-filter').listeners.change[0]({ target: f.element('ti-filter') }); };
+  const pass = () => { const s = f.snap(); return s.rows.filter(r => s.passesFilter(r)).map(r => r.tool_id); };
+  choose('in_use_now');
+  assert.deepEqual(pass(), ['T1']);
+  choose('used_no_row');
+  assert.deepEqual(pass(), [], 'no draft rows yet');
+  assert.equal(f.element('ti-filter-hint').hidden, false);
+  assert.equal(f.element('ti-filter-hint').textContent, Util.t('ui.tool_inventory_used_no_row_hint', { count: 2 }));
+  f.TI._addInUse();      // resets the filter to All so the new rows show
+  assert.equal(f.snap().filter, 'all');
+  f.TI._setFilter('used_no_row');
+  assert.deepEqual(pass(), ['NEW1', 'NEW2']);
+});
+
+test('typed ids: invisible characters, nbsp and the numeric .0 suffix are stripped so duplicates are caught', async t => {
+  const f = await fixture(t, { rows: [row('T100'), row('12345')] });
+  f.TI._addRow();
+  const nr = f.snap().rows[2];
+  f.edit(nr, 'tool_id', 'T1​00 ');
+  assert.equal(nr.tool_id, 'T100');
+  assert.equal(f.snap().errors.get(nr._cid).tool_id, Util.t('ui.tool_inventory_duplicate', { id: 'T100' }));
+  f.edit(nr, 'tool_id', '﻿12345.0');
+  assert.equal(nr.tool_id, '12345');
+  assert.ok(f.snap().errors.get(nr._cid).tool_id);
+  f.edit(nr, 'tool_id', 'AB.0');
+  assert.equal(nr.tool_id, 'AB.0', 'a non-numeric .0 is left alone');
+  f.edit(nr, 'tool_id', '⁠‌');
+  assert.equal(f.snap().errors.get(nr._cid).tool_id, Util.t('ui.tool_inventory_invalid_id_required'));
+});
+
+test('non-400 save failure (network) toasts only: no inline problem list', async t => {
+  const f = await fixture(t);
+  t.mock.method(Util, 'fetchTraced', async () => { throw new Error('Failed to fetch'); });
+  f.edit(f.snap().rows[0], 'total_qty', '4');
+  await f.TI._save();
+  assert.deepEqual(f.snap().serverProblems, []);
+  assert.equal(f.element('ti-errors').hidden, true);
+  assert.ok(f.toasts.some(x => x.type === 'error' && x.msg === Util.t('toast.tool_inventory_save_failed', { msg: 'Failed to fetch' })));
+  assert.equal(f.snap().dirty, 1);
+});
+
+test('500 response also shows no inline problem list', async t => {
+  const f = await fixture(t);
+  f.handlers.push(bulkHandler(500, { detail: 'boom; and more' }));
+  f.edit(f.snap().rows[0], 'total_qty', '4');
+  await f.TI._save();
+  assert.deepEqual(f.snap().serverProblems, []);
+});
+
+test('a second Save while the first call is in flight sends nothing more (writing guard)', async t => {
+  const f = await fixture(t);
+  let release;
+  const gate = new Promise(r => { release = r; });
+  f.handlers.push({ match: u => u.endsWith('/bulk'), respond: async () => { await gate; return respond(bulkOk); } });
+  f.edit(f.snap().rows[0], 'total_qty', '4');
+  const first = f.TI._save();
+  const second = f.TI._save();
+  assert.equal(f.snap().writing, true);
+  assert.equal(f.element('ti-save').disabled, true);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(bulkRequests(f).length, 1);
+  assert.equal(f.snap().writing, false);
+});
+
+test('tool_alerts_cleared: an unrelated alerts:change before the inventory change does not toast; a real clear after it does', async t => {
+  const f = await fixture(t);
+  f.handlers.push(bulkHandler());
+  Store._state.alerts = [{ type: 'tool-conflict' }, { type: 'tool-conflict' }];
+  f.mod._seams.refreshStoreMasterData = async () => {
+    Store._state.alerts = [{ type: 'tool-conflict' }];
+    f.emit({ type: 'alerts:change' });                      // unrelated: arrives before the tool_inventory change
+    return true;
+  };
+  f.edit(f.snap().rows[0], 'total_qty', '8');
+  await f.TI._save();
+  assert.equal(f.toasts.some(x => x.msg.includes('conflict alert')), false);
+  f.mod._seams.refreshStoreMasterData = async () => true;
+  Store._state.alerts = [{ type: 'tool-conflict' }, { type: 'tool-conflict' }, { type: 'tool-conflict' }];
+  f.edit(f.snap().rows[0], 'total_qty', '9');
+  await f.TI._save();
+  Store._state.alerts = [{ type: 'tool-conflict' }];
+  f.emit({ type: 'master-data-changed', table: 'tool_inventory' });
+  f.emit({ type: 'alerts:change' });
+  assert.ok(f.toasts.some(x => x.msg === Util.t('toast.tool_alerts_cleared', { n: 2 })), JSON.stringify(f.toasts));
+});
+
+test('a staged delete re-added with identical values counts as 0 changes (no delete, no upsert)', async t => {
+  const f = await fixture(t, { rows: [row('T100', 3, 1, 'spare')] });
+  f.handlers.push(bulkHandler());
+  f.TI._removeRows([f.snap().rows[0]._cid]);
+  assert.equal(f.snap().dirty, 1);
+  f.TI._addRow();
+  const nr = f.snap().rows[0];
+  f.edit(nr, 'tool_id', 'T100'); f.edit(nr, 'total_qty', '3'); f.edit(nr, 'out_of_service_qty', '1'); f.edit(nr, 'note', 'spare');
+  assert.equal(f.snap().dirty, 0);
+  assert.equal(f.snap().canSave, false);
+  f.edit(nr, 'note', 'changed');
+  assert.equal(f.snap().dirty, 1, 'a changed re-add is one edit');
+  f.edit(nr, 'note', 'spare');
+  assert.equal(f.snap().dirty, 0);
+});
+
+test('pane visibility: a hidden Master Data top tab never triggers render on plant switch or data change', async t => {
+  const f = await fixture(t);
+  const tab = f.element('masterdata-tab');
+  tab.classList = { contains: () => false };            // top tab not active
+  let touched = 0;
+  const orig = globalThis.document.getElementById;
+  globalThis.document.getElementById = id => { if (id === 'ti-state') touched++; return orig(id); };
+  f.selectPlant('B', [row('B1', 1, 0, null, 'B')]);
+  f.setInventory('B', [row('B1', 1, 0, null, 'B'), row('B2', 1, 0, null, 'B')]);
+  f.emit({ type: 'master-data-changed', table: 'tool_inventory' });
+  assert.equal(touched, 0, 'render (which touches #ti-state) did not run');
+  tab.classList = { contains: () => true };
+  f.TI.render();
+  assert.ok(touched > 0);
+  assert.deepEqual(f.snap().rows.map(r => r.tool_id), ['B1', 'B2'], 'once visible, render adopts the Store rows');
+  globalThis.document.getElementById = orig;
+});
+
+test('perf: Used by over 10,000 loaded tasks renders well inside a generous bound', async t => {
+  const f = await fixture(t, { rows: [row('T1'), row('T2')] });
+  t.mock.method(Store, 'tasksByPlant', () => Array.from({ length: 10000 }, (_, i) => ({ PRT_01: `T${i % 500}`, PRT_02: i % 3 ? `T${(i + 7) % 500}` : '-' })));
+  const t0 = performance.now();
+  f.TI.render();
+  const ms = performance.now() - t0;
+  assert.ok(ms < 250, `render took ${ms.toFixed(1)} ms`);
+  assert.equal(f.colDef('used_by').valueGetter({ data: f.snap().rows[0] }) > 0, true);
 });

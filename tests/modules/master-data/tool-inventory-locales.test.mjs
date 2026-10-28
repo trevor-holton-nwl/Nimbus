@@ -61,3 +61,15 @@ test('the sub-tab name uses the wording the tool-conflict alert text already poi
 test('the English tool inventory copy never uses SAP field codes', () => {
   for (const key of KEYS) assert.doesNotMatch(dicts.en[key], /\b(PRT|PRT_0[12]|MEINH|MATNR)\b/, key);
 });
+
+test('the Wave 4a review-fix keys are in the block and es says planta (not centro) for plant', () => {
+  for (const k of ['btn.add_tools_in_use', 'tip.add_tools_in_use', 'filter.tool_used_no_row', 'filter.tool_in_use_now', 'toast.tool_inventory_added_in_use',
+    'toast.tool_inventory_added_in_use_capped', 'toast.tool_inventory_none_in_use', 'toast.tool_inventory_remote_deleted_kept',
+    'ui.tool_inventory_used_no_row_hint', 'ui.tool_inventory_used_no_row_none']) assert.ok(KEYS.includes(k), k);
+  for (const k of ['empty.no_tool_inventory_plant', 'toast.tool_inventory_draft_restored']) {
+    assert.match(dicts.es[k], /planta/, k);
+    assert.doesNotMatch(dicts.es[k], /centro/, k);
+  }
+  assert.match(dicts.en['tip.add_tools_in_use'], /loaded window/);
+  assert.equal(dicts.en['toast.tool_inventory_remote_deleted_kept'], 'A row you edited was removed by another session; it was kept as a new row. Save to add it back.');
+});
