@@ -10,6 +10,13 @@ export interface PlanningReasonLike {
   message?: string;
   run_time?: unknown;
   cap_hours?: unknown;
+  /** Tool Inventory (structured, so the text follows the locale and never goes stale): the tool id, the copies available
+   *  and the holder order ids (an array, or already joined). */
+  tool_id?: unknown;
+  available?: unknown;
+  holders?: unknown;
+  /** `tool_contention` queued at the tool pass's budget expiry carries `incomplete: true` (the code stays `tool_contention`). */
+  incomplete?: unknown;
 }
 
 export type PlanningReasonTranslate = (key: string, vars?: Record<string, string | number>) => string;
@@ -33,5 +40,36 @@ export function planningReasonText(
   if (reason.code === 'run_time_over_cap' && typeof reason.run_time === 'number' && typeof reason.cap_hours === 'number') {
     return t('planning_reason.run_time_over_cap', { hours: String(Math.round(reason.run_time * 10) / 10), cap: String(Math.round(reason.cap_hours * 10) / 10) });
   }
+  if (reason.code === 'tool_contention' || reason.code === 'tool_contention_incomplete' || reason.code === 'tool_unavailable') {
+    const tool = typeof reason.tool_id === 'string' ? reason.tool_id.trim() : '';
+    const available = typeof reason.available === 'number' && Number.isFinite(reason.available) ? reason.available : null;
+    // The optimizer queues at its budget expiry with code 'tool_contention' + incomplete: true; the older dedicated code still reads the same.
+    const incomplete = reason.code === 'tool_contention_incomplete' || (reason.code === 'tool_contention' && reason.incomplete === true);
+    if (tool && (incomplete || reason.code !== 'tool_contention' || available !== null)) {
+      if (reason.code === 'tool_unavailable') return t('planning_reason.tool_unavailable', { tool });
+      if (incomplete) return t('planning_reason.tool_contention_incomplete', { tool });
+      return t('planning_reason.tool_contention', { tool, available: available as number, holders: formatToolHolders(reason.holders, t) });
+    }
+  }
   return reason.message ?? '';
+}
+
+/** One holder as text: a plain id, or an object carrying `id` / `order`; anything else JSON, never "[object Object]". */
+function holderText(holder: unknown): string {
+  if (holder && typeof holder === 'object') {
+    const record = holder as Record<string, unknown>;
+    const id = record.id ?? record.order;
+    if (id != null) return String(id);
+    try { return JSON.stringify(holder) ?? ''; } catch { return ''; }
+  }
+  return String(holder ?? '');
+}
+
+/** Holder order ids as one short neutral string: the first five, then "(+N more)". Accepts an array or a ready string. */
+export function formatToolHolders(holders: unknown, t: PlanningReasonTranslate): string {
+  if (typeof holders === 'string') return holders;
+  if (!Array.isArray(holders)) return '';
+  const ids = holders.map(holderText).filter(Boolean);
+  const shown = ids.slice(0, 5).join(', ');
+  return ids.length > 5 ? `${shown} ${t('ui.opt_bg_more', { count: ids.length - 5 })}` : shown;
 }

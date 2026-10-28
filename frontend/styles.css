@@ -1679,7 +1679,7 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
 .ac-chip.firmed { background: var(--accent-soft); border-color: transparent; color: var(--accent-hot); font-weight: 600; }
 .ac-chip-sep { font-size: 11px; color: var(--fg-mute); padding: 0 2px; }
 
-.ac-card-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.ac-card-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 
 /* Sticky footer */
 .ac-foot {
@@ -2749,7 +2749,7 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
    P4: ALERT FIX BUTTON
    ========================================================================== */
 .alert-row { flex-wrap: wrap; }
-.alert-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.alert-actions { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; flex-shrink: 0; }
 .btn-fix {
   background: var(--ok-soft); color: var(--ok);
   border: 1px solid var(--ok); border-radius: var(--r-sm);
@@ -5024,7 +5024,8 @@ body.dark .cw-active-card {
 #md-master-material-pane,
 #md-master-material-plant-pane,
 #md-master-routing-pv-pane,
-#md-master-work-centers-pane {
+#md-master-work-centers-pane,
+#md-master-tool-inventory-pane {
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -5036,7 +5037,8 @@ body.dark .cw-active-card {
 #md-master-material-pane[hidden],
 #md-master-material-plant-pane[hidden],
 #md-master-routing-pv-pane[hidden],
-#md-master-work-centers-pane[hidden] { display: none; }
+#md-master-work-centers-pane[hidden],
+#md-master-tool-inventory-pane[hidden] { display: none; }
 /* Previously an inline style on the Plant pane itself (height:100%;overflow:hidden),
    removed so gotoMasterSub can toggle all four sub-panes uniformly via [hidden].
    Scoped here rather than folded into the shared rule above: the Plant pane's
@@ -5302,6 +5304,33 @@ body.dark { --period-default-fill: #313d4d; --period-default-fg: color-mix(in sr
    with zero additional dark-mode work.
    ============================================================================= */
 #md-mat-grid, #md-mp-grid, #md-rpv-grid { flex: 1; min-height: 0; width: 100%; }
+
+/* MASTER DATA > TOOL INVENTORY — add/delete grid. The toolbar wraps (flex-wrap on .table-toolbar), so five
+   locales never overflow; headers wrap to two lines (wrapHeaderText) instead of truncating. */
+#ti-grid { flex: 1; min-height: 240px; width: 100%; }
+.ti-toolbar .input { flex: 0 1 260px; min-width: 160px; }
+.ti-toolbar .ti-filter { flex: 0 1 240px; min-width: 190px; width: auto; }
+.ti-status { flex-shrink: 0; padding: 6px 16px; font-size: 12px; color: var(--text-muted); background: var(--bg-elev); border-bottom: 1px solid var(--line); }
+.ti-hint { flex-shrink: 0; padding: 6px 16px; font-size: 12px; color: var(--fg); background: var(--bg-elev); border-bottom: 1px solid var(--line); }
+.ti-errors { flex-shrink: 0; padding: 8px 16px; font-size: 12.5px; color: var(--err); background: var(--err-soft); border-bottom: 1px solid var(--err); }
+.ti-errors ul { margin: 4px 0 0; padding-left: 18px; }
+.ti-state { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+.ti-confirm-list { margin: 6px 0 0; padding-left: 18px; text-align: left; }
+.ti-result { flex-shrink: 0; padding: 8px 16px; font-size: 12.5px; color: var(--fg); background: var(--bg-elev); border-bottom: 1px solid var(--line); }
+.ti-result ul { margin: 4px 0 0; padding-left: 18px; }
+.ti-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.ti-review-body { padding: 16px 20px; max-height: 70vh; overflow: auto; }
+.ti-review-body h4 { margin: 14px 0 6px; font-size: 13px; }
+.ti-review-summary { font-size: 14px; margin: 4px 0 8px; }
+.ti-review-warn { margin: 6px 0; padding: 8px 10px; border: 1px solid var(--warn); background: var(--warn-soft, var(--bg-elev)); color: var(--warn-text); border-radius: 6px; font-size: 12.5px; }
+.ti-review-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ti-review-table th, .ti-review-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+.ti-review-table thead th { font-weight: 600; color: var(--text-muted); }
+.ti-review-list { margin: 0; padding-left: 18px; font-size: 12.5px; }
+.ti-review-more { margin: 4px 0 0; font-size: 12px; color: var(--text-muted); }
+.ti-review-untouched { margin: 14px 0 0; font-size: 12.5px; color: var(--text-muted); }
+.ag-theme-quartz .md-cell-invalid { box-shadow: inset 0 0 0 1px var(--err); background: var(--err-soft); color: var(--err); }
+.ag-theme-quartz .ti-cell-locked { color: var(--text-muted); cursor: not-allowed; }
 
 /* Dirty-cell marker for the three planner-editable Material Plant columns. */
 .ag-theme-quartz .md-cell-dirty { box-shadow: inset 3px 0 0 var(--accent-hot); }

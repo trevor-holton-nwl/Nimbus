@@ -2738,3 +2738,29 @@ test('Table._planningReasonText: an overlong_never row reads "now fits" only whi
     assert.equal(Table._planningReasonText({ id: 'x', planning_reason: null }), '');
   } finally { Util.t = priorT; Store.setAlerts(priorAlerts, 'unit-test'); }
 });
+
+test('Tool Inventory fix: a cleared PRT cell is stored as null (trimmed text otherwise), grid and Inspector alike', () => {
+  const plant = '5512';
+  const priorPlant = Store.selectedPlant;
+  const priorTableApi = Table._api;
+  const priorRecompute = Alerts.scheduleRecompute;
+  const priorRecomputeLines = Alerts.scheduleRecomputeLines;
+  Alerts.scheduleRecompute = () => {};
+  Alerts.scheduleRecomputeLines = () => {};
+  Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks([{ id: 'prt-clear', PLANT: plant, MACHINE: 'PRT-LINE', RUN_TIME: '2', PRT_01: 'T1', PRT_02: 'T2' }], 'unit-test');
+  try {
+    Table._onCellChanged({ colDef: { field: 'PRT_01' }, data: Store.tasks['prt-clear'], newValue: '', node: { refreshCells: () => {} } });
+    assert.equal(Store.tasks['prt-clear'].PRT_01, null, 'cleared (empty) is NULL, not an empty string');
+    Table._onCellChanged({ colDef: { field: 'PRT_02' }, data: Store.tasks['prt-clear'], newValue: '   ', node: { refreshCells: () => {} } });
+    assert.equal(Store.tasks['prt-clear'].PRT_02, null, 'whitespace only is also cleared');
+    Table._onCellChanged({ colDef: { field: 'PRT_01' }, data: Store.tasks['prt-clear'], newValue: '  T9  ', node: { refreshCells: () => {} } });
+    assert.equal(Store.tasks['prt-clear'].PRT_01, 'T9', 'trimmed on commit');
+  } finally {
+    Table._api = priorTableApi;
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    Alerts.scheduleRecompute = priorRecompute;
+    Alerts.scheduleRecomputeLines = priorRecomputeLines;
+  }
+});

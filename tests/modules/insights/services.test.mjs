@@ -376,10 +376,10 @@ test('G-0.25: Alerts.applyFix never moves a row carrying a placement exception (
   }
 });
 
-test('gate 23 b: the overload auto-fix leaves exactly two undo entries (the optimizer and the fix) and one Ctrl+Z restores the line', () => {
+test('gate 23 b: the overload auto-fix (detached candidate, Wave 5) leaves exactly one undo entry and one Ctrl+Z restores the line', () => {
   const plant = '5512', line = 'OVERLOAD-UNDO-LINE';
   const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts);
-  const priorRun = Engine.runAndApply, priorShow = Toast.show;
+  const priorEval = Engine.evaluateSchedule, priorShow = Toast.show;
   Toast.show = () => {};
   const day = new Date('2026-08-25T00:00:00');
   const aStart = new Date('2026-08-25T08:00:00'), aEnd = new Date('2026-08-25T12:00:00');
@@ -389,20 +389,21 @@ test('gate 23 b: the overload auto-fix leaves exactly two undo entries (the opti
   Store.setTasks([{ id: 'ov-a', PLANT: plant, MACHINE: line, RUN_TIME: '4', start_date: aStart, end_date: aEnd }], 'unit-test');
   Store.setAlerts([{ id: 'ov-alert', type: 'overload', line, time: day }], 'unit-test');
   UndoStack._entries.length = 0;
-  // Stand in for the optimizer: it moves the order and pushes its own entry, exactly as Engine.runAndApply does.
-  Engine.runAndApply = () => {
-    const snap = UndoStack.snapshotTasks(['ov-a']);
-    Store.updateTask('ov-a', { start_date: new Date('2026-08-25T14:00:00'), end_date: new Date('2026-08-25T18:00:00') }, 'engine');
-    UndoStack.push('Optimization (changeover)', () => UndoStack.restoreTasks(snap), ['ov-a']);
-  };
+  // Stand in for the detached optimizer: a valid candidate that moves the order. The fix itself applies it and pushes the
+  // ONE undo entry (the live optimizer, which pushed its own entry, is no longer used).
+  Engine.evaluateSchedule = () => ({
+    patches: [{ id: 'ov-a', changes: { start_date: new Date('2026-08-25T14:00:00'), end_date: new Date('2026-08-25T18:00:00') } }],
+    validationFindings: [], missingEdges: [], explanation: [], unchangedLines: [],
+  });
   try {
     Alerts.applyFix('ov-alert');
-    assert.equal(UndoStack._entries.length, 2, 'the optimizer entry plus the auto-fix entry');
-    assert.match(UndoStack._entries[1].label, /Auto-fix overload/);
-    UndoStack.pop();                                         // one Ctrl+Z: the fix's snapshot predates the optimizer
+    assert.equal(Store.tasks['ov-a'].end_date.getTime(), new Date('2026-08-25T18:00:00').getTime(), 'the candidate was applied');
+    assert.equal(UndoStack._entries.length, 1, 'exactly the auto-fix entry');
+    assert.match(UndoStack._entries[0].label, /Auto-fix overload/);
+    UndoStack.pop();                                         // one Ctrl+Z restores the pre-fix snapshot
     assert.equal(Store.tasks['ov-a'].end_date.getTime(), aEnd.getTime(), 'the finish is back where it was before the auto-fix');
   } finally {
-    Engine.runAndApply = priorRun; Toast.show = priorShow;
+    Engine.evaluateSchedule = priorEval; Toast.show = priorShow;
     Store.setAlerts(priorAlerts, 'unit-test'); Store.setSelectedPlant(priorPlant, 'unit-test');
     Store.setTasks([], 'unit-test'); UndoStack._entries.length = 0;
     Store.setMasterData(priorMasterData, 'unit-test');
@@ -974,4 +975,64 @@ test('needs_planning is registered as a firing planning-category alert type', as
   assert.equal(categoryOf('needs_planning'), 'planning');
   assert.ok(ALERT_CATEGORIES.planning.includes('needs_planning'));
   assert.ok(FIRING_ALERT_TYPES.includes('needs_planning'));
+});
+
+
+// ---- Tool Inventory (Wave 2): count-aware Fix over N holders + the shared tool-id reader ----
+test('taskCarriesTool reads the compute core taskToolIds (NAN / TBD are placeholders, case and spaces ignored)', async () => {
+  const { taskCarriesTool } = await import('../../../frontend/insights/services.mjs');
+  assert.equal(taskCarriesTool({ PRT_01: 't100 ' }), true);
+  assert.equal(taskCarriesTool({ PRT_02: 'T2' }), true);
+  for (const v of ['', '-', '0', 'n/a', 'NONE', 'null', 'NaN', 'tbd']) assert.equal(taskCarriesTool({ PRT_01: v, PRT_02: v }), false, v);
+  assert.equal(taskCarriesTool(null), false);
+});
+
+test('Alerts.applyFix on a tool-conflict with N holders searches from the d-th earliest holder release (d = inUse - available)', async () => {
+  const { Calendar } = await import('../../../frontend/calendar/calendar-engine.mjs');
+  const plant = '5512', line = 'TOOLFIX-P';
+  const H = 3600000, base = Math.floor(Date.now() / H) * H + 24 * H;   // hour-aligned: the Store snaps task times to a grid
+  const priorPlant = Store.selectedPlant, priorAlerts = structuredClone(Store.alerts);
+  const priorNext = Calendar.nextAvailable, priorReflow = Engine.autoReflow, priorPolicy = Engine.splitOrderPolicyFor;
+  let searchedFrom = null;
+  Calendar.nextAvailable = (l, from, dur) => { searchedFrom = new Date(+from); return new Date(+from); };
+  Engine.autoReflow = () => {};
+  Engine.splitOrderPolicyFor = () => 'never';
+  const mk = (id, mach, fromH, toH) => ({ id, PLANT: plant, MACHINE: mach, RUN_TIME: String(toH - fromH), PRT_01: 'T100',
+    start_date: new Date(base + fromH * H), end_date: new Date(base + toH * H) });
+  Store.setSelectedPlant(plant, 'unit-test');
+  // holders end at +5h (h1), +7h (h2), +9h (h3); pusher starts +4h. 4 machines, 2 copies -> d = 2: wait for the 2nd release.
+  Store.setTasks([mk('h1', 'TOOLFIX-A', 1, 5), mk('h2', 'TOOLFIX-B', 2, 7), mk('h3', 'TOOLFIX-C', 3, 9), mk('p', line, 4, 8)], 'unit-test');
+  const alert = { id: 'toolc-p|T100', type: 'tool-conflict', sev: 'err', taskId: 'p', peerId: 'h1', peerIds: ['h1', 'h2', 'h3'],
+    line, time: new Date(base + 4 * H), tool: 'T100', available: 2, inUse: 4, hasRow: true };
+  Store.setAlerts([alert], 'unit-test');
+  try {
+    Alerts.applyFix(alert.id, { quiet: true });
+    assert.equal(+searchedFrom, base + 7 * H, 'd = 2 -> the 2nd earliest holder release (h2 at +7h), not h1 at +5h');
+
+    // A legacy two-order conflict (no peerIds / counts) still searches from the single peer's end.
+    searchedFrom = null;
+    Store.setTasks([mk('h1', 'TOOLFIX-A', 1, 5), mk('p', line, 4, 8)], 'unit-test');
+    const legacy = { id: 'toolc-h1|p', type: 'tool-conflict', sev: 'err', taskId: 'p', peerId: 'h1', line, time: new Date(base + 4 * H) };
+    Store.setAlerts([legacy], 'unit-test');
+    Alerts.applyFix(legacy.id, { quiet: true });
+    assert.equal(+searchedFrom, base + 5 * H);
+
+    // Zero copies: moving the order can never clear it, so nothing moves.
+    searchedFrom = null;
+    Store.setTasks([mk('p', line, 4, 8)], 'unit-test');
+    const zero = { id: 'toolc-p|T100', type: 'tool-conflict', sev: 'err', taskId: 'p', line, time: new Date(base + 4 * H), tool: 'T100', available: 0, inUse: 1, hasRow: true };
+    Store.setAlerts([zero], 'unit-test');
+    Alerts.applyFix(zero.id, { quiet: true });
+    assert.equal(searchedFrom, null, 'a zero-copy conflict is not movable');
+    // Not quiet: the refusal names the real cause, not "task not found".
+    const priorShow = Toast.show, toasts = [];
+    Toast.show = (msg, type) => { toasts.push({ msg: String(msg), type }); };
+    try { Alerts.applyFix(zero.id); } finally { Toast.show = priorShow; }
+    assert.deepEqual(toasts.map(t => t.msg), [String(Util.t('toast.cannot_fix_tool_unavailable'))]);
+    assert.notEqual(toasts[0].msg, String(Util.t('toast.cannot_fix_task')));
+  } finally {
+    Calendar.nextAvailable = priorNext; Engine.autoReflow = priorReflow; Engine.splitOrderPolicyFor = priorPolicy;
+    Store.setAlerts(priorAlerts, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+  }
 });

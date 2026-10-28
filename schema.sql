@@ -689,6 +689,36 @@ INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, 
     ('routing_rules', 'note',      'Note',      FALSE, 5)
 ON CONFLICT (table_name, column_name) DO NOTHING;
 
+-- tool_inventory (per plant): how many physical copies of each tool id (PRT 1 / PRT 2
+-- production resource tool) the plant owns. A tool id is a TYPE; the plant owns several
+-- interchangeable copies. A tool with no row here counts as 1 copy. Available copies =
+-- total_qty - out_of_service_qty (qty 0 = unavailable). tool_id is stored trimmed and
+-- upper-cased (the /tasks wire upper-cases PRT values, so a mixed-case id would never match).
+-- No plant FK on purpose (same posture as schedule_event). To fix a typo in a tool id, remove
+-- the row and re-add it in one save: the id is part of the key and is never renamed in place.
+-- Mirrors migrations/2026-10-27-1-tool-inventory.sql and master_data.ensure_tool_inventory_table().
+CREATE TABLE IF NOT EXISTS tool_inventory (
+    plant              TEXT NOT NULL,
+    tool_id            TEXT NOT NULL,
+    total_qty          INTEGER NOT NULL DEFAULT 1,
+    out_of_service_qty INTEGER NOT NULL DEFAULT 0,
+    note               TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (plant, tool_id),
+    CONSTRAINT chk_tool_inventory_total CHECK (total_qty >= 0),
+    CONSTRAINT chk_tool_inventory_qty   CHECK (out_of_service_qty >= 0 AND out_of_service_qty <= total_qty),
+    CONSTRAINT chk_tool_inventory_id    CHECK (tool_id = upper(btrim(tool_id)) AND tool_id <> '')
+);
+
+INSERT INTO column_metadata (table_name, column_name, display_label, is_locked, column_order) VALUES
+    ('tool_inventory', 'plant',              'Plant',           TRUE,  1),
+    ('tool_inventory', 'tool_id',            'Tool ID',         TRUE,  2),
+    ('tool_inventory', 'total_qty',          'Total Inventory', FALSE, 3),
+    ('tool_inventory', 'out_of_service_qty', 'Out of Service',  FALSE, 4),
+    ('tool_inventory', 'note',               'Note',            FALSE, 5)
+ON CONFLICT (table_name, column_name) DO NOTHING;
+
 -- ----------------------------------------------------------------------------
 -- orders.plant backfill — the column itself is now added immediately after
 -- CREATE TABLE orders (see above) so bootstrap-order dependents (e.g.

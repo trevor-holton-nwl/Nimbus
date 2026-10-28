@@ -17,7 +17,7 @@ import { Runtime } from '../routing/runtime-client.mjs';
 import { AlertsUIAdapter } from '../insights/insights-ui.mjs';
 import { Alerts } from '../insights/services.mjs';
 import { PriorityListViewer } from '../priority-lists/viewers.mjs';
-import type { WorkHours, NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusMasterWorkcenter, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
+import type { WorkHours, NimbusBlock, NimbusPlantBlock, NimbusMasterPlant, NimbusMasterLine, NimbusMasterWorkcenter, NimbusToolInventoryRow, NimbusLineSetting, ConstraintConfig, BufferUnit, PriorityFieldMeta, PriorityListFieldSummary, MissingMasterDataReport, UnknownSetupPolicy } from '../platform/types.mjs';
 // Cross-domain seams (see docs/architecture/domain-refactor-plan.md Phase P2
 // task brief / report for the full verified cross-reference list):
 //   - `SetupAdmin.render` is called from Plant's Settings pane. `SetupAdmin`
@@ -78,6 +78,25 @@ const _lineSyncMachineCache: Record<string, MasterDataTableState<ProductionLineR
  *  committed and would otherwise revert the pane to the pre-edit value. */
 let _lineWriteGen = 0;
 
+/** Gates the Order Rules "tooling rule" control and the Tool Inventory status line's rule text. It stays false until the
+ *  optimizer overflow pass (Tool Inventory Wave 6) was re-validated (2026-10-28, SHIP behind a pilot-only Hard toggle), so it ships true. */
+export let TOOLING_RULE_CONTROL_READY = true;
+/** Test hook only: production sets the initial value above. A live binding, so importers see the change. */
+export function __setToolingRuleControlReady(value: boolean): void {
+  // Test hook only: inert unless the test setup declared itself, so a console import cannot flip the gate.
+  if ((globalThis as { __NIMBUS_TEST__?: boolean }).__NIMBUS_TEST__ !== true) return;
+  TOOLING_RULE_CONTROL_READY = value;
+}
+
+/** `/tool-inventory/{plant}/upload` -> the plant's concrete URL path (null when the template needs a plant and none is given;
+ *  an endpoint without a placeholder passes through). */
+export function resolveUploadEndpoint(endpoint: string | undefined, plant?: string | null): string | null {
+  if (!endpoint) return null;
+  if (!endpoint.includes('{plant}')) return endpoint;
+  const p = String(plant ?? '').trim();
+  return p ? endpoint.replace('{plant}', encodeURIComponent(p)) : null;
+}
+
 /** Re-pull `plants` + the selected plant's `machine` rows into `Store.masterData` so
  *  Hierarchy/ProdLines/Plant stay in sync with Postgres. Shared by `MasterData._save`
  *  (fire-and-forget, `source: 'master-data-save'`) and the Production Lines / Plant
@@ -89,17 +108,22 @@ let _lineWriteGen = 0;
  *  catch branch. Staleness tokens: a plant switch or a newer Persistence load while these
  *  fetches are in flight must not let this response overwrite the (now different)
  *  plant's master data. */
-async function refreshStoreMasterData(source: string, table?: string): Promise<boolean> {
+export async function refreshStoreMasterData(source: string, table?: string): Promise<boolean> {
   const API = Config.API_BASE;
   const refreshPlant = Store.selectedPlant;
   const refreshLoadGen = Persistence._loadRequest;
   const refreshWriteGen = _lineWriteGen;
+  let toolsMarked = false;
   try {
     // A sap_workcenter save must reach Store.masterData.workcenters (distribution alerts and the
     // optimizer's distribution validation read it), so refetch that plant's work centers; every
     // other table keeps the in-memory copy.
     const refetchWc = table === 'sap_workcenter' && !!Store.selectedPlant;
-    const [pData, lData, wcData] = await Promise.all([
+    // Same for a tool_inventory save: refetch the plant's rows (undefined on any failure => keep the held rows).
+    const refetchTools = table === 'tool_inventory' && !!Store.selectedPlant;
+    // Mark the plant refreshing for the whole refetch so a /tasks/horizons probe racing our own save is ignored.
+    if (refetchTools && refreshPlant) { Persistence._toolInventoryRefreshing.add(refreshPlant); toolsMarked = true; }
+    const [pData, lData, wcData, tiFetched] = await Promise.all([
       Util.fetchTraced(`${API}/master-data/plants`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterPlant> | null>,
       // Plant-scoped (#25): never refetch every plant's machines. With no
       // selected plant, keep whatever lines are already in the Store.
@@ -109,12 +133,25 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
       refetchWc
         ? Util.fetchTraced(`${API}/master-data/sap_workcenter?${new URLSearchParams({ plant: Store.selectedPlant as string }).toString()}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null) as Promise<MasterDataResponse<NimbusMasterWorkcenter> | null>
         : Promise.resolve(null),
+      refetchTools
+        ? Persistence._fetchToolInventoryWithVersion(Store.selectedPlant as string)
+        : Promise.resolve(undefined as { rows: NimbusToolInventoryRow[] | undefined; version: string | undefined } | undefined),
     ]);
+    const tiRows = tiFetched?.rows;
     if (Store.selectedPlant !== refreshPlant || Persistence._loadRequest !== refreshLoadGen) return false;
     // A Machines-pane write committed while these GETs were in flight: they may carry the
     // pre-edit row, so drop them (the locally patched Store rows already hold the new value).
-    if (_lineWriteGen !== refreshWriteGen) return false;
-    if (pData || lData || wcData) {
+    // The inventory rows are unrelated to that write, so a successful inventory refetch is still applied
+    // (and its baseline moved) on its own: dropping it would let the next probe announce our own save as remote.
+    if (_lineWriteGen !== refreshWriteGen) {
+      if (tiRows && refreshPlant && Store.masterData) {
+        Store.setMasterData({ ...Store.masterData, tool_inventory: tiRows }, source, table);
+        Persistence._toolInventoryBaseline[refreshPlant] = tiFetched?.version;
+        Persistence._toolInventoryPlant = refreshPlant;
+      }
+      return false;
+    }
+    if (pData || lData || wcData || tiRows) {
       // Public Store.setMasterData(...) equivalent of the former direct
       // `Store._state.masterData = {...}; Store.rebuildPlantIndex();` write
       // (CQ-1 Phase 4 Task 2 — closes MasterData's tracked §6 exception).
@@ -130,7 +167,15 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
         // in-memory copy unless this refresh is for a sap_workcenter save, which refetched
         // them above (a failed refetch also keeps the copy).
         workcenters: wcData?.rows ?? (Store.masterData?.workcenters ?? []),
+        // Same wholesale-replace hazard for the tool inventory: carry the held rows forward on every rebuild
+        // (undefined stays undefined = not loaded), take fresh rows only from a successful tool_inventory refetch.
+        tool_inventory: tiRows ?? Store.masterData?.tool_inventory,
       }, source, table);
+      if (tiRows && refreshPlant) {
+        // Our own save: move the probe baseline so the next /tasks/horizons does not announce it as a remote change.
+        Persistence._toolInventoryBaseline[refreshPlant] = tiFetched?.version;
+        Persistence._toolInventoryPlant = refreshPlant;
+      }
       // Fresh machine rows landed: the line-sync cache (filled on the first line edit, never
       // expiring) may predate a machine a colleague just added.
       if (lData && refreshPlant) delete _lineSyncMachineCache[refreshPlant];
@@ -143,6 +188,8 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
   } catch {
     // A failed fetch must not emit 'master-data-changed' (it re-applies the stale Store lines).
     return false;
+  } finally {
+    if (toolsMarked && refreshPlant) Persistence._toolInventoryRefreshing.delete(refreshPlant);
   }
 }
 
@@ -179,7 +226,7 @@ async function refreshStoreMasterData(source: string, table?: string): Promise<b
  *  had already removed its only frontend caller) — these keys are now purely
  *  historical, kept only because the locale test still pins them, not
  *  because anything live still depends on them. */
-const RULE_HELP: Record<string, { title: string; help: string[] }> = {
+export const RULE_HELP: Record<string, { title: string; help: string[] }> = {
   alertHorizon:         { title: 'ui.alert_horizon_title',          help: ['ui.alert_horizon_help'] },
   confHorizon:          { title: 'ui.conf_horizon_title',           help: ['ui.conf_horizon_help'] },
   frozenHorizon:        { title: 'ui.frozen_horizon_title',         help: ['ui.frozen_horizon_help'] },
@@ -188,6 +235,7 @@ const RULE_HELP: Record<string, { title: string; help: string[] }> = {
   minProductiveSegment: { title: 'ui.min_productive_segment_title', help: ['ui.min_productive_segment_help', 'ui.min_productive_segment_help_detail'] },
   splitOrderPolicy:     { title: 'ui.split_order_title',            help: ['ui.split_order_help', 'ui.split_order_policy_help'] },
   unknownSetupPolicy:   { title: 'ui.unknown_setup_title',          help: ['ui.unknown_setup_help'] },
+  toolingRule:          { title: 'ui.tooling_rule_title',           help: ['ui.tooling_rule_help', 'ui.tooling_rule_help_detail'] },
 };
 
 export const Plant = {
@@ -1481,6 +1529,18 @@ export const Plant = {
                 <!-- Shown only while the plant's setup flag is strictly false (O7): the
                      policy above is saved either way but the optimizer ignores it then. -->
                 <p class="panel-hint sched-rule-note" id="sys-unknown-setup-inactive-note" hidden>${Util.t('ui.unknown_setup_inactive_note')}</p>
+                ${TOOLING_RULE_CONTROL_READY ? `
+                <!-- Planners can change this (no Session.isAdmin gate): the server route is planner-level. Rendered only
+                     once the optimizer consumes the rule (TOOLING_RULE_CONTROL_READY). Wide row: labels wrap, never truncate. -->
+                <div class="sched-rule-row sched-rule-row--wide" data-rule-key="toolingRule">
+                  <label for="sys-tooling-rule">${Util.t('ui.tooling_rule_title')}</label>
+                  <select id="sys-tooling-rule" class="form-input" style="width:auto;max-width:100%">
+                    <option value="off">${Util.t('ui.tooling_rule_off')}</option>
+                    <option value="hard">${Util.t('ui.tooling_rule_hard')}</option>
+                  </select>
+                  <span class="sched-rule-unit"></span>
+                </div>
+                <p class="panel-hint sched-rule-note" id="sys-tooling-rule-hint">${Util.t('ui.tooling_rule_hint')}</p>` : ''}
               </div>
             </div>
           </div>
@@ -1793,6 +1853,35 @@ export const Plant = {
       } finally { unknownSetupSelect.disabled = false; unknownSetupMinutesInp.disabled = false; }
     }
     unknownSetupSelect.addEventListener('change', saveUnknownSetupPolicy);
+
+    // Tooling rule (Off / Hard): planner-level route, so no isAdmin gate; a 403 reverts the select like any failure.
+    const toolingRuleSelect = pane.querySelector('#sys-tooling-rule') as HTMLSelectElement | null;
+    if (toolingRuleSelect) {
+      const readToolingRule = (row: NimbusMasterPlant | null = plantRow): 'off' | 'hard' =>
+        row?.setup_policy_config?.toolingRule === 'hard' ? 'hard' : 'off';
+      toolingRuleSelect.value = readToolingRule();
+      toolingRuleSelect.addEventListener('change', async () => {
+        const key = captureRuleKey();
+        if (!key) { toolingRuleSelect.value = readToolingRule(); Toast.show(Util.t('toast.no_plant_selected'), 'warn'); return; }
+        const previous = readToolingRule(ruleRow(key));
+        const next = toolingRuleSelect.value === 'hard' ? 'hard' : 'off';
+        toolingRuleSelect.disabled = true;
+        try {
+          const response = await Util.fetchTraced(
+            `${Config.API_BASE}/master-data/plants/${encodeURIComponent(key.plant)}/tooling-rule`,
+            { method: 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() },
+              body: JSON.stringify({ subnetwork: key.subnetwork, tooling_rule: next }) },
+          );
+          if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(Util.errorDetailText(body.detail) || `HTTP ${response.status}`); }
+          const saved = await response.json();
+          commitOrderRule(key, row => { row.setup_policy_config = { ...(row.setup_policy_config ?? {}), ...saved.setup_policy_config }; });
+          Toast.show(Util.t('ui.tooling_rule_saved'), 'success');
+        } catch (error) {
+          toolingRuleSelect.value = previous;
+          Toast.show(`${Util.t('ui.tooling_rule_failed')}: ${(error as Error).message}`, 'error');
+        } finally { toolingRuleSelect.disabled = false; }
+      });
+    }
     unknownSetupMinutesInp.addEventListener('change', saveUnknownSetupPolicy);
     unknownSetupMinutesInp.addEventListener('input', syncUnknownZeroHint);
 
@@ -2914,7 +3003,7 @@ export const ProdLines = {
 type MasterDataTable =
   | 'subnetworks' | 'plants' | 'machine'
   | 'materials' | 'material_plants' | 'bom_items' | 'sap_workcenter'
-  | 'production_version' | 'routing_operation' | 'routing_rules';
+  | 'production_version' | 'routing_operation' | 'routing_rules' | 'tool_inventory';
 
 /** `column_metadata` row shape returned alongside every `GET
  *  /master-data/{table}` (master_data.py `_column_meta`/get_table_data). */
@@ -3024,7 +3113,7 @@ interface PlantRow extends MasterDataRow {
   setup_active?: boolean;
   /** N8 (2026-09): plants.setup_policy_config JSONB sidecar — see
    *  NimbusMasterPlant's field of the same name. */
-  setup_policy_config?: { unknownSetupPolicy?: UnknownSetupPolicy; unknownSetupDefaultMinutes?: number } | null;
+  setup_policy_config?: { unknownSetupPolicy?: UnknownSetupPolicy; unknownSetupDefaultMinutes?: number; toolingRule?: 'off' | 'hard' } | null;
 }
 
 interface MaterialRow extends MasterDataRow {
@@ -3335,6 +3424,7 @@ export const MasterData = (() => {
     production_version: 'Production Versions',
     routing_operation:  'Routing Operations',
     routing_rules:      'Routing Rules',
+    tool_inventory:     'Tool Inventory',
   };
 
   // KEY_COLS drives primary-key identification per table.
@@ -3349,6 +3439,7 @@ export const MasterData = (() => {
     production_version: ['plant', 'material_id', 'production_version'],
     routing_operation:  ['plant', 'material_id', 'task_list_type', 'routing_group', 'group_counter', 'sequence_no', 'activity'],
     routing_rules:      ['plant', 'rule_kind', 'code'],
+    tool_inventory:     ['plant', 'tool_id'],
   };
 
   /** Values pre-filled into a brand-new grid row so an admin can save after
@@ -3366,12 +3457,15 @@ export const MasterData = (() => {
       review_required:   false,
       distribute_tooled: false,
     },
+    // One copy, none out of service: the Tool Inventory sub-tab's new-row defaults.
+    tool_inventory: { total_qty: 1, out_of_service_qty: 0 },
   };
 
   // Tables that need a parent-dropdown for FK columns.
   const FK_SOURCE: Partial<Record<MasterDataTable, Record<string, MasterDataTable>>> = {
     plants:           { subnetwork: 'subnetworks' },
     machine: { subnetwork: 'subnetworks', plant: 'plants' },
+    tool_inventory:   { plant: 'plants' },
     // material_plants.material_id is deliberately NOT registered here either
     // (#25): the generic _fkSelect would fetch the whole `materials` table
     // (unbounded) to fill its <select>. It is a plain text cell; the backend
@@ -3397,6 +3491,9 @@ export const MasterData = (() => {
     bom_items:          '/bom/upload',
     production_version: '/routing/upload/production-versions',
     routing_operation:  '/routing/upload/operations',
+    // `{plant}` is the grid's scope-filter plant (resolveUploadEndpoint); the upload itself goes through the
+    // planner grid's review modal (ToolInventory.uploadFile), which builds the same URL.
+    tool_inventory:     '/tool-inventory/{plant}/upload',
   };
 
   // Toast message key stem by table — 'bom_items' maps to 'bom' (existing
@@ -3406,6 +3503,7 @@ export const MasterData = (() => {
     bom_items: 'bom',
     production_version: 'production_version',
     routing_operation: 'routing_operation',
+    tool_inventory: 'tool_inventory',
   };
 
   // The upload summary names inserted/updated/rejected counts and the plants: too much for the
@@ -3444,13 +3542,14 @@ export const MasterData = (() => {
     // 3,500+ machines must never load whole into the (non-virtualised) DOM table.
     machine:            'plant',
     material_plants:    'plant',
+    tool_inventory:     'plant',
   };
 
   // Scoped tables that open straight on the app-wide plant when one is
   // selected (the common case) and follow it when it changes — every scoped
   // table, so the top-bar plant and the filter bars never disagree.
   const AUTO_SCOPE_FROM_SELECTED_PLANT: ReadonlySet<MasterDataTable> = new Set([
-    'machine', 'material_plants', 'bom_items', 'production_version', 'routing_operation',
+    'machine', 'material_plants', 'bom_items', 'production_version', 'routing_operation', 'tool_inventory',
   ]);
 
   // Tables that load a server-side page (search + limit/offset + "Load more")
@@ -4370,8 +4469,12 @@ export const MasterData = (() => {
   // copy keeps its original (BOM-flavored) keys — table-specific wording is
   // a locale-string change, out of scope here.
   async function _uploadFile(table: MasterDataTable): Promise<void> {
-    const endpoint = UPLOAD_ENDPOINT[table];
-    if (!endpoint) return;
+    const endpoint = resolveUploadEndpoint(UPLOAD_ENDPOINT[table], table === 'tool_inventory' ? _scopeFilter(table).plant : undefined);
+    if (!endpoint) {
+      // A {plant} endpoint with no plant chosen: never send an upload without one.
+      if (UPLOAD_ENDPOINT[table]) Toast.show(Util.t('hint.scope_pick_plant'), 'warn');
+      return;
+    }
     // The upload moves the plant filter and reloads the grid, which would drop pending edits.
     const unsaved = _unsavedCount(table);
     if (unsaved) { Toast.show(Util.t('ui.n_unsaved', { count: unsaved }), 'warn'); return; }
@@ -4393,6 +4496,17 @@ export const MasterData = (() => {
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
+      if (table === 'tool_inventory') {
+        // Same review-then-apply flow as the planner grid (dry run, review modal, re-post of the same file).
+        const plant = _scopeFilter(table).plant;
+        if (!plant) return;
+        const { ToolInventory } = await import('./tool-inventory.mjs');
+        if (await ToolInventory.uploadFile(plant, file)) {
+          delete _cache[table];
+          if (_activeTable === table) await _loadAndRender(table);
+        }
+        return;
+      }
       const fd = new FormData();
       fd.append('file', file);
       try {
@@ -4949,6 +5063,21 @@ export const MasterData = (() => {
         ErrorLog.error('master-data', `Cascade preview fetch failed for ${table}: ${(e as Error).message}`);
         Toast.show(Util.t('toast.cascade_preview_failed'), 'error');
         return;
+      }
+    }
+
+    // Tool Inventory: removing a row makes the tool count as 1 copy, so warn when orders use it (same confirm as the planner grid).
+    if (table === 'tool_inventory' && deletes.length) {
+      const upserted = new Set(upserts.map((r) => `${String(r.plant)} ${String(r.tool_id).trim().toUpperCase()}`));
+      const byPlant = new Map<string, string[]>();
+      for (const d of deletes) {
+        const plant = String(d.plant ?? ''), id = String(d.tool_id ?? '').trim().toUpperCase();
+        if (!plant || !id || upserted.has(`${plant} ${id}`)) continue;   // delete + re-add in one save is an edit
+        byPlant.set(plant, [...(byPlant.get(plant) ?? []), id]);
+      }
+      const { ToolInventory } = await import('./tool-inventory.mjs');
+      for (const [plant, ids] of byPlant) {
+        if (!await ToolInventory.confirmRemovals(plant, ids)) return;   // Cancel keeps every staged edit
       }
     }
 

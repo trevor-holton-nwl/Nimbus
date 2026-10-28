@@ -320,6 +320,7 @@ async def lifespan(app: FastAPI):
     md.ensure_machine_key_columns()
     md.ensure_plant_blackout_table()
     md.ensure_plant_calendar_periods()
+    md.ensure_tool_inventory_table()
     md.ensure_unique_plant()
     md.ensure_material_plant_attributes()
     md.ensure_roles_table()
@@ -766,6 +767,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/master-data/plants/{plant}/visibility-horizon": "plant.visibility_horizon_update",
     "/master-data/plants/{plant}/frozen-horizon-days": "plant.frozen_horizon_update",
     "/master-data/plants/{plant}/unknown-setup-policy": "plant.unknown_setup_policy_update",
+    "/master-data/plants/{plant}/tooling-rule": "plant.tooling_rule_update",
     "/master-data/roles/{role}/page-access": "role.page_access_update",
     "/system-settings": "system_settings.update",
     "/master-data/material-plants/attributes": "material_plants.attributes_update",
@@ -811,6 +813,8 @@ _ADMIN_WRITE_OPERATIONS = {
     "/routing/validate/{table}": "routing.validate",
     "/routing/{plant}/recompute": "routing.recompute",
     "/master-data/{table}/delete-filtered": "master_data.delete_filtered",
+    "/tool-inventory/{plant}/bulk": "tool_inventory.bulk_write",
+    "/tool-inventory/{plant}/upload": "tool_inventory.upload",
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
     "/maintenance/schedule-event-sweep": "maintenance.schedule_event_sweep",

@@ -6,6 +6,7 @@ import * as SetupScheduler from '../../frontend/optimization/setup-scheduler.mjs
 import { ErrorLog } from '../../frontend/platform/foundation.mjs';
 import { Store } from '../../frontend/platform/store.mjs';
 import { Engine } from '../../frontend/optimization/engine.mjs';
+import * as ToolFx from './helpers/tool-overflow-fixture.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../frontend/nimbus-compute-core.js');
@@ -6105,4 +6106,523 @@ test('value default: the Gantt observation agrees with the optimizer (same minut
   }
   const noDefaults = deriveSetupObservation(setupTruth({ current: null }), tasks, new Set(['L1']));
   assert.equal(noDefaults.diagnostics.some(d => d.type === 'setup-uncovered'), true, 'control: uncovered without the default');
+// ── Tool Inventory Wave 6: the tool overflow pass ("tool overflow") ────────────────────────────────────────────────
+// Fixture: tests/modules/helpers/tool-overflow-fixture.mjs (24 h calendars, plant 'P1', 2035 dates, local time).
+const TF = ToolFx;
+const tms = text => +new Date(text);
+function toolCandidate(patches, dispositions) {
+  return { patches, dispositions, score: [0, 0, 0, 0, 0, 0, 0, 0], explanation: [], diagnostics: { candidateCount: 1, method: 'due-date-first-exact', termination: 'completed', runtimeMs: 0, limitReached: false, events: [] }, unchangedLines: [], missingEdges: [] };
+}
+const sched = (id, start, end) => ({ id, changes: { start_date: new Date(start), end_date: new Date(end), scheduleSegments: [], planning_status: 'scheduled', planning_reason: null } });
+const dispOf = (id, line, status = 'scheduled') => ({ id, line, status });
+const noOverflow = (rows, avail) => assert.deepEqual(TF.overflowOracle(rows, avail), [], 'no tool overflow');
+const one = t => () => t;
+const errorsOf = result => (result.validationFindings ?? []).filter(f => f.severity === 'error');
+
+test('tool overflow: the least urgent order slides later on its OWN line instead of being queued', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const rows = Object.fromEntries(TF.finalRows(snap, r).map(x => [x.id, x]));
+  assert.equal(rows.A.status, 'placed'); assert.equal(rows.B.status, 'placed', 'moved, not queued');
+  assert.equal(rows.B.line, 'L2', 'never changes machine');
+  assert.ok(rows.B.start >= rows.A.end, 'B waits for A to release the only copy');
+  noOverflow(Object.values(rows), one(1));
+  assert.equal(r.toolMoved.length, 1); assert.equal(r.toolMoved[0].orderId, 'B');
+  assert.equal(r.toolBlocked, undefined, 'nothing queued');
+  assert.equal(r.toolPass.complete, true);
+  assert.deepEqual(errorsOf(r), []);
+});
+
+test('tool overflow: an offender may move EARLIER than its current slot (earliest tool-free gap)', () => {
+  // Protected P on L1 uses T1 on Aug 7; B (L2) is currently placed on top of it; the earliest free gap is BEFORE it.
+  const snap = TF.toolSnapshot([
+    { id: 'P', line: 'L1', run: 8, tools: ['T1'], start: '2035-08-07T08:00:00', end: '2035-08-07T16:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-07T10:00:00', end: '2035-08-07T14:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], firmedIds: ['P'] });
+  const bounds = TF.toolBounds(snap);
+  const cand = toolCandidate([sched('B', '2035-08-07T10:00:00', '2035-08-07T14:00:00')], [dispOf('P', 'L1', 'protected'), dispOf('B', 'L2')]);
+  const out = SetupScheduler.resolveToolOverflow(snap, bounds, cand);
+  const b = out.patches.find(p => p.id === 'B');
+  assert.ok(b.changes.end_date.getTime() <= tms('2035-08-07T08:00:00'), 'B moved to the earlier free gap');
+  assert.equal(out.patches.some(p => p.id === 'P'), false, 'the protected holder is never patched');
+  assert.equal(out.toolMoved[0].orderId, 'B');
+  assert.equal(out.toolMoved[0].fromStart, new Date('2035-08-07T10:00:00').toISOString());
+});
+
+test('tool overflow: no gap inside the push cap -> queued with tool_contention and a structured reason', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 10, tools: ['T1'], due: '2035-08-06T18:00:00' },
+    { id: 'B', line: 'L2', run: 10, tools: ['T1'], due: '2035-08-06T18:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], plantExtra: { max_push_forward_days: 0 } });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const rows = Object.fromEntries(TF.finalRows(snap, r).map(x => [x.id, x]));
+  const queued = Object.values(rows).filter(x => x.status === 'queued');
+  assert.equal(queued.length, 1);
+  const q = queued[0];
+  assert.equal(q.reason.code, 'tool_contention');
+  assert.equal(q.reason.tool_id, 'T1'); assert.equal(q.reason.available, 1);
+  assert.deepEqual(q.reason.holders, [q.id === 'A' ? 'B' : 'A']);
+  assert.equal(typeof q.reason.message, 'string');
+  assert.equal(r.toolBlocked.length, 1); assert.equal(r.toolBlocked[0].orderId, q.id);
+  assert.deepEqual(r.toolBlocked[0].holderIds, q.reason.holders);
+  assert.equal(r.dispositions.find(d => d.id === q.id).status, 'needs_planning');
+  assert.deepEqual(errorsOf(r), []);
+  // The reason text is FIXED (no holder ids or numbers): identical for a different id set.
+  const snap2 = TF.toolSnapshot([
+    { id: 'X', line: 'L1', run: 10, tools: ['T1'], due: '2035-08-06T18:00:00' },
+    { id: 'Y', line: 'L2', run: 10, tools: ['T1'], due: '2035-08-06T18:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], plantExtra: { max_push_forward_days: 0 } });
+  const r2 = evaluateSchedule(snap2, TF.toolRequest());
+  const q2 = TF.finalRows(snap2, r2).find(x => x.status === 'queued');
+  assert.equal(q2.reason.message, q.reason.message);
+});
+
+test('tool overflow: a protected (firmed) holder never moves; a protected-vs-protected overlap is a WARNING that still reserves copies', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'P1', line: 'L1', run: 4, tools: ['T1'], start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+    { id: 'P2', line: 'L2', run: 4, tools: ['T1'], start: '2035-08-06T09:00:00', end: '2035-08-06T13:00:00' },
+    { id: 'C', line: 'L3', run: 2, tools: ['T1'], due: '2035-08-08T08:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], firmedIds: ['P1', 'P2'] });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const rows = Object.fromEntries(TF.finalRows(snap, r).map(x => [x.id, x]));
+  assert.equal(r.patches.some(p => p.id === 'P1' || p.id === 'P2'), false, 'protected rows are never patched');
+  assert.deepEqual(errorsOf(r), [], 'the pre-existing protected overlap is not an error');
+  const warn = r.validationFindings.find(f => f.code === 'tool_overflow');
+  assert.equal(warn.severity, 'warning');
+  assert.equal(rows.C.status, 'placed');
+  assert.ok(rows.C.start >= tms('2035-08-06T13:00:00'), 'C waits until BOTH protected holders are done');
+});
+
+test('tool overflow: a manual firm moves only when Respect firmed is off', () => {
+  const mk = () => TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], firmedIds: ['B'] });
+  const kept = mk();
+  const r1 = evaluateSchedule(kept, TF.toolRequest({ respectFirmed: true }));
+  assert.equal(r1.patches.some(p => p.id === 'B'), false, 'a respected firm is never patched');
+  const a1 = TF.finalRows(kept, r1).find(x => x.id === 'A');
+  assert.ok(a1.start >= tms('2035-08-06T14:00:00'), 'the mutable order A gives way');
+  const freed = mk();
+  const r2 = evaluateSchedule(freed, TF.toolRequest({ respectFirmed: false }));
+  const rows2 = TF.finalRows(freed, r2);
+  noOverflow(rows2, one(1));
+  assert.ok(rows2.every(x => x.status === 'placed'));
+  assert.ok(r2.toolMoved?.some(m => m.orderId === 'B') || r2.patches.some(p => p.id === 'B'), 'the least urgent order (B) may now move');
+});
+
+test('tool overflow: a holder on an UNSELECTED line and on an excludeFromOpt line still blocks, and is never patched', () => {
+  const tasks = [
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' },
+  ];
+  const unselected = TF.toolSnapshot(tasks, { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  const r1 = evaluateSchedule(unselected, TF.toolRequest({ lines: ['L1'] }));
+  const a1 = TF.finalRows(unselected, r1).find(x => x.id === 'A');
+  assert.ok(a1.status === 'placed' && a1.start >= tms('2035-08-06T12:00:00'), 'A waits for B on the unselected line');
+  assert.equal(r1.patches.some(p => p.id === 'B'), false);
+  const optOut = TF.toolSnapshot(tasks, { inventory: [{ tool_id: 'T1', total_qty: 1 }], lineSettings: { L2: { excludeFromOpt: true } } });
+  const r2 = evaluateSchedule(optOut, TF.toolRequest());
+  const a2 = TF.finalRows(optOut, r2).find(x => x.id === 'A');
+  assert.ok(a2.status === 'placed' && a2.start >= tms('2035-08-06T12:00:00'), 'A waits for B on the excludeFromOpt line');
+  assert.equal(r2.patches.some(p => p.id === 'B'), false);
+});
+
+test('tool overflow: a window-end HELD holder blocks (and is never patched)', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'B', line: 'L2', run: 8, tools: ['T1'], start: '2035-08-07T04:00:00', end: '2035-08-07T12:00:00' },
+    { id: 'A', line: 'L1', run: 3, tools: ['T1'], due: '2035-08-07T08:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  const r = evaluateSchedule(snap, TF.toolRequest({ planningStart: new Date('2035-08-07T02:00:00'), runNow: new Date('2035-08-07T02:00:00'), endDate: new Date('2035-08-07T08:00:00') }));
+  assert.equal(r.patches.some(p => p.id === 'B'), false, 'the held order is not patched');
+  const a = TF.finalRows(snap, r).find(x => x.id === 'A');
+  assert.equal(a.status, 'queued', 'only 2 tool-free hours before the held order: A cannot fit');
+  assert.equal(a.reason.code, 'tool_contention');
+  assert.deepEqual(a.reason.holders, ['B']);
+});
+
+test('tool overflow: a finish-only row blocks through its U29 bar [end - run, end]', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'F', line: 'L2', run: 4, tools: ['T1'], end: '2035-08-06T14:00:00' },
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const a = TF.finalRows(snap, r).find(x => x.id === 'A');
+  assert.equal(a.status, 'placed');
+  assert.ok(a.start >= tms('2035-08-06T14:00:00') || a.end <= tms('2035-08-06T10:00:00'), 'A stays out of [10:00, 14:00)');
+  assert.equal(r.patches.some(p => p.id === 'F'), false);
+});
+
+test('tool overflow: available 0 -> tool_unavailable, skipped by the search and listed in toolBlocked', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+    { id: 'C', line: 'L1', run: 2, tools: [], due: '2035-08-09T08:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1, out_of_service_qty: 1 }] });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const rows = Object.fromEntries(TF.finalRows(snap, r).map(x => [x.id, x]));
+  assert.equal(rows.C.status, 'placed');
+  assert.equal(rows.A.status, 'queued');
+  assert.equal(rows.A.reason.code, 'tool_unavailable');
+  assert.equal(rows.A.reason.tool_id, 'T1'); assert.equal(rows.A.reason.available, 0);
+  assert.deepEqual(r.toolBlocked.map(e => [e.orderId, e.tool, e.available, e.inUse]), [['A', 'T1', 0, 0]]);
+  // The static defect is what skips it in the search: the primary evaluator never admits it.
+  const direct = SetupScheduler.evaluateDueDateFirst(snap, TF.toolBounds(snap));
+  assert.equal(direct.patches.some(p => p.id === 'A' && p.changes.planning_status !== 'needs_planning'), false);
+});
+
+test('tool overflow: a SPLIT order keeps its tool mounted across the weekend gap (envelope), so an order inside the gap conflicts', () => {
+  const hours = { 0: [0, 24], 1: [8, 18], 2: [8, 18], 3: [8, 18], 4: [8, 18], 5: [8, 18], 6: [0, 24] };
+  const snap = TF.toolSnapshot([
+    { id: 'S', line: 'L1', run: 12, tools: ['T1'], start: '2035-08-10T14:00:00', end: '2035-08-13T16:00:00',
+      segments: [['2035-08-10T14:00:00', '2035-08-10T18:00:00'], ['2035-08-13T08:00:00', '2035-08-13T16:00:00']] },
+    { id: 'W', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-20T08:00:00', start: '2035-08-11T10:00:00', end: '2035-08-11T14:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], firmedIds: ['S'], hours });
+  const bounds = TF.toolBounds(snap, { horizonEnd: at20() });
+  function at20() { return new Date('2035-08-20T08:00:00'); }
+  const cand = toolCandidate([sched('W', '2035-08-11T10:00:00', '2035-08-11T14:00:00')], [dispOf('S', 'L1', 'protected'), dispOf('W', 'L2')]);
+  const before = SetupScheduler.validateCandidate(snap, bounds, { ...cand, toolPass: { complete: true, elapsedMs: 0 } });
+  assert.ok(before.some(f => f.code === 'tool_overflow' && f.severity === 'error' && f.taskId === 'W'), 'inside the weekend gap is a conflict');
+  const out = SetupScheduler.resolveToolOverflow(snap, bounds, cand);
+  const w = out.patches.find(p => p.id === 'W').changes;
+  const ws = +w.start_date; const we = +w.end_date;
+  assert.ok(we <= tms('2035-08-10T14:00:00') || ws >= tms('2035-08-13T16:00:00'), 'W is entirely outside the envelope');
+  assert.deepEqual(errorsOf(out), []);
+});
+
+test('tool overflow: two plants sharing a tool id never interact', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' },
+    { id: 'Z', line: 'L9', run: 4, tools: ['T1'], plant: 'P2', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1'] });
+  snap.masterData.lines.push({ plant: 'P2', machine: 'L9' });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const a = TF.finalRows(snap, r).find(x => x.id === 'A');
+  assert.equal(a.start, tms('2035-08-06T08:00:00'), 'P2 holds nothing of P1');
+  assert.equal(r.toolMoved, undefined); assert.equal(r.toolBlocked, undefined);
+});
+
+test('tool overflow: the same id in both PRT slots counts ONCE (one machine, one copy)', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1', 'T1'], due: '2035-08-07T08:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 2 }] });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const rows = TF.finalRows(snap, r);
+  assert.ok(rows.every(x => x.start === tms('2035-08-06T08:00:00')), 'two copies cover two machines');
+  assert.equal(r.toolMoved, undefined);
+});
+
+test('tool overflow: an incumbent with a PRE-EXISTING overlap is repaired before the comparison', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const rows = TF.finalRows(snap, r);
+  noOverflow(rows, one(1));
+  assert.ok(rows.every(x => x.status === 'placed'), 'both stay scheduled (a slide, not a queue)');
+  assert.deepEqual(errorsOf(r), []);
+});
+
+test('tool overflow: gap fill never re-creates overflow (search expired, every order placed by gap fill)', () => {
+  const tasks = [
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-08T08:00:00' },
+    { id: 'C', line: 'L3', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+  ];
+  const run = rule => {
+    const snap = TF.toolSnapshot(tasks, { inventory: [{ tool_id: 'T1', total_qty: 1 }], rule });
+    const bounds = TF.toolBounds(snap, { deadline: -2000 });
+    const cand = SetupScheduler.evaluateDueDateFirst(snap, bounds);
+    return { snap, out: SetupScheduler.fillPlanningGaps(snap, bounds, cand) };
+  };
+  const hard = run('hard');
+  const rows = TF.finalRows(hard.snap, hard.out);
+  assert.ok(rows.every(x => x.status === 'placed'));
+  noOverflow(rows, one(1));
+  const off = run('off');
+  assert.ok(TF.overflowOracle(TF.finalRows(off.snap, off.out), one(1)).length > 0, 'Off keeps the (alert-only) overlap, proving the Hard run changed something');
+});
+
+test('tool overflow: a setup-OFF (synthetic) plant still enforces the rule', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], plantExtra: { setup_active: false } });
+  snap.setupSnapshot = null;
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const rows = TF.finalRows(snap, r);
+  noOverflow(rows, one(1));
+  assert.equal(r.toolMoved?.length, 1);
+});
+
+test('tool overflow: moving or queueing an offender hands its old SAME-LINE successor to the repair cascade (excludeFromSearch)', () => {
+  // L2 runs C(GREEN) -> D(BLUE) -> E(RED). D collides with A on T1; GREEN->RED has no matrix row, so once D leaves,
+  // E would sit behind an unrecorded transition: the existing repair cascade queues it, with its own reason.
+  const colors = { C: 'GREEN', D: 'BLUE', E: 'RED' };
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 2, tools: ['T1'], due: '2035-08-06T10:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T12:00:00' },
+    { id: 'C', line: 'L2', run: 2, tools: [], color: colors.C, due: '2035-08-09T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T10:00:00' },
+    { id: 'D', line: 'L2', run: 2, tools: ['T1'], color: colors.D, due: '2035-08-09T08:00:00', start: '2035-08-06T10:05:00', end: '2035-08-06T12:05:00' },
+    { id: 'E', line: 'L2', run: 2, tools: [], color: colors.E, due: '2035-08-09T08:00:00', start: '2035-08-06T12:10:00', end: '2035-08-06T14:10:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], firmedIds: ['A'], plantExtra: { max_push_forward_days: 0, setup_policy_config: { toolingRule: 'hard', unknownSetupPolicy: 'excludeFromSearch' } } });
+  snap.setupSnapshot = {
+    ...snap.setupSnapshot, machine_states: [],
+    plant_rows: [['GREEN', 'BLUE', 5], ['BLUE', 'RED', 5]]
+      .map(([f, t, m]) => ({ machine: '', signature_version: 1, from_key: [{ fieldKey: 'colorWheel', value: f }], to_key: [{ fieldKey: 'colorWheel', value: t }], setup_min: m })),
+  };
+  const bounds = TF.toolBounds(snap, { notAfter: () => new Date('2035-08-06T15:00:00') });
+  const cand = toolCandidate(
+    [sched('C', '2035-08-06T08:00:00', '2035-08-06T10:00:00'), sched('D', '2035-08-06T10:05:00', '2035-08-06T12:05:00'), sched('E', '2035-08-06T12:10:00', '2035-08-06T14:10:00')],
+    [dispOf('A', 'L1', 'protected'), dispOf('C', 'L2'), dispOf('D', 'L2'), dispOf('E', 'L2')]);
+  const out = SetupScheduler.resolveToolOverflow(snap, bounds, cand);
+  const byId = Object.fromEntries(out.patches.map(p => [p.id, p.changes]));
+  assert.equal(byId.E.planning_status, 'needs_planning', 'the old successor is queued by the repair cascade');
+  assert.equal(byId.E.planning_reason.code, 'setup_transition_unrecorded');
+  // Recovery runs again after the repair (E vacated its slot): D, queued for tooling first, now fits behind C after A's slot.
+  assert.equal(byId.D.planning_status, 'scheduled');
+  assert.ok(byId.D.start_date.getTime() >= tms('2035-08-06T12:00:00'), 'D moved past the firmed holder A (10:00-12:00)');
+  assert.deepEqual(errorsOf(out), []);
+  // Decision 7 (M2c): the cascade-queued order is reported as tool-blocked with the tool of the order whose move caused it.
+  assert.deepEqual(out.toolBlocked.map(e => [e.orderId, e.cause, e.tool, e.holderIds]), [['E', 'cascade', 'T1', ['D']]]);
+  assert.deepEqual(out.toolMoved.map(e => e.orderId), ['D']);
+  assert.equal(SetupScheduler.validateCandidate(snap, bounds, out).some(f => f.severity === 'error'), false);
+});
+
+test('tool overflow: distribution siblings take turns on a shared tool (each child individually)', () => {
+  const sib = (id, line, due) => ({ id, line, run: 4, tools: ['T1'], due });
+  const snap = TF.toolSnapshot([sib('S1', 'L1', '2035-08-08T08:00:00'), sib('S2', 'L2', '2035-08-08T08:00:00')], { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  for (const t of snap.tasks) { t.PARENT_ORDER = 'PO-1'; t.MATERIAL_NUMBER = 'MAT'; }
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  const rows = TF.finalRows(snap, r);
+  assert.ok(rows.every(x => x.status === 'placed'));
+  noOverflow(rows, one(1));
+  assert.equal(r.toolMoved.length, 1);
+  assert.equal(errorsOf(r).length, 0, 'separation stays a warning, never an error');
+});
+
+test('tool overflow: budget expiry queues the remaining offenders as incomplete (toolPass.complete = false)', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  const cand = toolCandidate([sched('A', '2035-08-06T08:00:00', '2035-08-06T12:00:00'), sched('B', '2035-08-06T08:00:00', '2035-08-06T12:00:00')], [dispOf('A', 'L1'), dispOf('B', 'L2')]);
+  const out = SetupScheduler.resolveToolOverflow(snap, TF.toolBounds(snap), cand, 0);
+  assert.equal(out.toolPass.complete, false);
+  const b = out.patches.find(p => p.id === 'B').changes;
+  assert.equal(b.planning_status, 'needs_planning');
+  assert.equal(b.planning_reason.code, 'tool_contention'); assert.equal(b.planning_reason.incomplete, true);
+  assert.equal(out.toolBlocked.length, 1);
+  assert.deepEqual(errorsOf(out), [], 'an incomplete check never leaves an error finding behind');
+  // A generous budget resolves the same instance completely.
+  const full = SetupScheduler.resolveToolOverflow(snap, TF.toolBounds(snap), cand, 1000);
+  assert.equal(full.toolPass.complete, true);
+});
+
+test('tool overflow: Remove Backlog (ignoreToolRule), rule Off and an UNLOADED inventory are all no-ops with the three fields absent', () => {
+  const tasks = [
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+  ];
+  const cand = toolCandidate([sched('A', '2035-08-06T08:00:00', '2035-08-06T12:00:00'), sched('B', '2035-08-06T08:00:00', '2035-08-06T12:00:00')], [dispOf('A', 'L1'), dispOf('B', 'L2')]);
+  const hard = TF.toolSnapshot(tasks, { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  assert.equal(SetupScheduler.resolveToolOverflow(hard, TF.toolBounds(hard, { ignoreToolRule: true }), cand), cand, 'Remove Backlog: same object');
+  assert.equal(SetupScheduler.validateCandidate(hard, TF.toolBounds(hard, { ignoreToolRule: true }), cand).some(f => f.code === 'tool_overflow'), false);
+  const off = TF.toolSnapshot(tasks, { inventory: [{ tool_id: 'T1', total_qty: 1 }], rule: 'off' });
+  assert.equal(SetupScheduler.resolveToolOverflow(off, TF.toolBounds(off), cand), cand);
+  const unloaded = TF.toolSnapshot(tasks, { inventory: null });
+  assert.equal(SetupScheduler.resolveToolOverflow(unloaded, TF.toolBounds(unloaded), cand), cand, 'Hard + inventory undefined = unconstrained');
+  assert.equal(SetupScheduler.validateCandidate(unloaded, TF.toolBounds(unloaded), cand).some(f => f.code === 'tool_overflow'), false);
+  const r = evaluateSchedule(unloaded, TF.toolRequest());
+  assert.equal(r.toolPass, undefined); assert.equal(r.toolBlocked, undefined); assert.equal(r.toolMoved, undefined);
+});
+
+test('tool overflow: tool_overflow is a WARNING until the pass has run, then an ERROR naming exactly ONE order with a fixed message', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+    { id: 'C', line: 'L3', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  const cand = toolCandidate([], ['A', 'B', 'C'].map((id, i) => dispOf(id, 'L' + (i + 1))));
+  const pre = SetupScheduler.validateCandidate(snap, TF.toolBounds(snap), cand).filter(f => f.code === 'tool_overflow');
+  assert.ok(pre.length && pre.every(f => f.severity === 'warning'), 'not an error before the pass ran');
+  const post = SetupScheduler.validateCandidate(snap, TF.toolBounds(snap), { ...cand, toolPass: { complete: true, elapsedMs: 0 } }).filter(f => f.code === 'tool_overflow');
+  assert.ok(post.length && post.every(f => f.severity === 'error'));
+  assert.ok(post.every(f => ['B', 'C'].includes(f.taskId)), 'the least urgent mutable holder, never the most urgent');
+  assert.equal(new Set(post.map(f => f.message)).size, 1, 'one FIXED message');
+  assert.ok(post.every(f => Array.isArray(f.detail.holders) && f.detail.tool === 'T1'));
+  assert.ok(post.every(f => !f.message.includes('A') || !f.message.includes('T1')), 'message carries neither tool nor holders');
+});
+
+test('tool overflow: inputs in any order give IDENTICAL patches (snapshot.tasks reversed, repeated run)', () => {
+  const tasks = [
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-08T08:00:00' },
+    { id: 'C', line: 'L3', run: 4, tools: ['T1', 'T2'], due: '2035-08-09T08:00:00' },
+    { id: 'D', line: 'L1', run: 3, tools: ['T2'], due: '2035-08-09T08:00:00' },
+  ];
+  const inv = [{ tool_id: 'T1', total_qty: 1 }, { tool_id: 'T2', total_qty: 1 }];
+  const run = specs => { const s = TF.toolSnapshot(specs, { inventory: inv, lines: ['L1', 'L2', 'L3'] }); return TF.finalRows(s, evaluateSchedule(s, TF.toolRequest())).sort((a, b) => a.id < b.id ? -1 : 1).map(({ id, status, start, end, reason }) => ({ id, status, start, end, code: reason?.code })); };
+  const forward = run(tasks);
+  assert.deepEqual(run(tasks), forward);
+  assert.deepEqual(run([...tasks].reverse()), forward);
+});
+
+// ── Tool Inventory Wave 6 validation fixes (M2 / M4 / m6 / iv) ─────────────────────────────────────────────────────
+
+test('tool overflow (F3): a never-committed bar on an UNSELECTED line does not reserve a copy for mutable work, a committed one does', () => {
+  const mk = userScheduled => TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00', userScheduled },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2'] });
+  // Never committed (user_scheduled false, both dates): the optimizer does NOT move A; the overlap is a WARNING only.
+  const never = mk(false);
+  const r1 = evaluateSchedule(never, TF.toolRequest({ lines: ['L1'] }));
+  const a1 = TF.finalRows(never, r1).find(x => x.id === 'A');
+  assert.equal(a1.status, 'placed');
+  assert.equal(a1.start, tms('2035-08-06T10:00:00'), 'A keeps its slot: the never-committed bar does not reserve the copy');
+  assert.equal(r1.toolMoved, undefined); assert.equal(r1.toolBlocked, undefined);
+  assert.deepEqual(errorsOf(r1), []);
+  const warn = SetupScheduler.validateCandidate(never, TF.toolBounds(never, { lines: ['L1'] }), { ...r1, toolPass: { complete: true, elapsedMs: 0 } }).filter(f => f.code === 'tool_overflow');
+  assert.ok(warn.length && warn.every(f => f.severity === 'warning'), 'the overlap with the never-committed bar is still shown, as a warning');
+  // The same bar committed (user_scheduled true): it reserves the copy, so A has to move.
+  const committed = mk(true);
+  const r2 = evaluateSchedule(committed, TF.toolRequest({ lines: ['L1'] }));
+  const a2 = TF.finalRows(committed, r2).find(x => x.id === 'A');
+  assert.ok(a2.status === 'queued' || a2.start !== tms('2035-08-06T10:00:00'), 'A moved off the committed bar');
+  noOverflow(TF.finalRows(committed, r2), one(1));
+});
+
+test('tool overflow (F3): a never-committed bar still reserves when it is MUTABLE (the optimizer places it) and a bar wholly outside the window never takes part', () => {
+  // Both on selected lines: B is mutable (its baseline is only a starting point), so the two cannot overlap.
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00', userScheduled: false },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2'] });
+  const r = evaluateSchedule(snap, TF.toolRequest());
+  noOverflow(TF.finalRows(snap, r), one(1));
+  assert.deepEqual(errorsOf(r), []);
+  // A one-day window that ends before the bar starts: the bar is outside it, never overlaps, and raises nothing.
+  const outside = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-08T10:00:00', end: '2035-08-08T14:00:00', userScheduled: false },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2'] });
+  const win = TF.toolRequest({ lines: ['L1'], endDate: new Date('2035-08-07T08:00:00') });
+  const r2 = evaluateSchedule(outside, win);
+  const a = TF.finalRows(outside, r2).find(x => x.id === 'A');
+  assert.equal(a.start, tms('2035-08-06T10:00:00'));
+  assert.equal(r2.toolMoved, undefined);
+  assert.equal(SetupScheduler.validateCandidate(outside, TF.toolBounds(outside, { lines: ['L1'], horizonEnd: new Date('2035-08-07T08:00:00') }), r2).some(f => f.code === 'tool_overflow'), false);
+});
+
+test('tool overflow (F3): a finish-only row and a firmed never-committed bar still reserve copies', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'F', line: 'L2', run: 4, tools: ['T1'], start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00', userScheduled: false },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2'], firmedIds: ['F'] });
+  const r = evaluateSchedule(snap, TF.toolRequest({ lines: ['L1'] }));
+  const a = TF.finalRows(snap, r).find(x => x.id === 'A');
+  assert.ok(a.status === 'queued' || a.start !== tms('2035-08-06T10:00:00'), 'a firmed bar is physical: it reserves even though it was never committed');
+});
+
+test('tool overflow: a non-stale exception FAILS CLOSED (fixed tool_overflow_failed error, candidate unchanged); compute-core-stale propagates', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00', start: '2035-08-06T08:00:00', end: '2035-08-06T12:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }] });
+  const bounds = TF.toolBounds(snap);
+  const cand = toolCandidate([sched('A', '2035-08-06T08:00:00', '2035-08-06T12:00:00'), sched('B', '2035-08-06T08:00:00', '2035-08-06T12:00:00')], [dispOf('A', 'L1'), dispOf('B', 'L2')]);
+  const core = globalThis.NimbusComputeCore;
+  const real = core.findToolOverages;
+  try {
+    core.findToolOverages = () => { throw new Error('boom'); };
+    const out = SetupScheduler.resolveToolOverflow(snap, bounds, cand);
+    assert.equal(out.toolPass.failed, true);
+    assert.equal(out.toolPass.complete, false);
+    assert.deepEqual(out.patches, cand.patches, 'the candidate is returned unchanged');
+    const failed = f => f.code === 'tool_overflow_failed' && f.severity === 'error';
+    assert.ok(out.validationFindings.some(failed), 'a planner-visible error finding, not a silent skip');
+    // The finding survives any recomputation (validateCandidate derives it from toolPass.failed) and a throw inside validate is itself caught.
+    assert.ok(SetupScheduler.validateCandidate(snap, bounds, out).some(failed));
+    assert.ok(SetupScheduler.validateCandidate(snap, bounds, cand).some(failed), 'a throw while validating also fails closed, never crashes');
+    const msgs = new Set(SetupScheduler.validateCandidate(snap, bounds, out).filter(failed).map(f => f.message));
+    assert.equal(msgs.size, 1, 'one fixed message');
+    const r = evaluateSchedule(snap, TF.toolRequest());
+    assert.ok(r.validationFindings.some(failed), 'the engine returns a result that cannot be applied, it does not throw');
+  } finally { core.findToolOverages = real; }
+  const savedCore = globalThis.NimbusComputeCore;
+  try {
+    globalThis.NimbusComputeCore = { ...savedCore, toolHeadroom: undefined };
+    assert.throws(() => SetupScheduler.resolveToolOverflow(snap, bounds, cand), /compute-core-stale/);
+    assert.throws(() => SetupScheduler.validateCandidate(snap, bounds, cand), /compute-core-stale/);
+  } finally { globalThis.NimbusComputeCore = savedCore; }
+});
+
+test('tool overflow: toolMoved keeps ONE entry per order (first from, last to) and drops a net no-op; a tool queue outranks a cascade marker', () => {
+  const m = (orderId, fromStart, toStart) => ({ orderId, tool: 'T1', fromStart, fromEnd: fromStart + 'e', toStart, toEnd: toStart + 'e' });
+  const merged = SetupScheduler.mergeToolMoved([m('A', 'a', 'b'), m('B', 'x', 'y')], [m('A', 'b', 'c')]);
+  assert.deepEqual(merged.map(e => [e.orderId, e.fromStart, e.toStart]), [['A', 'a', 'c'], ['B', 'x', 'y']]);
+  assert.deepEqual(SetupScheduler.mergeToolMoved([m('A', 'a', 'b')], [m('A', 'b', 'a')]), [], 'moved away and back = nothing to report');
+  const blocked = SetupScheduler.mergeToolBlocked(
+    [{ orderId: 'A', tool: 'T1', available: 1, inUse: 2, holderIds: ['B'] }],
+    [{ orderId: 'A', tool: 'T2', available: 1, inUse: 0, holderIds: ['C'], cause: 'cascade' }, { orderId: 'D', tool: 'T2', available: 1, inUse: 0, holderIds: ['C'], cause: 'cascade' }]);
+  assert.equal(blocked.find(e => e.orderId === 'A').cause, undefined, 'the tool queue is kept');
+  assert.equal(blocked.find(e => e.orderId === 'D').cause, 'cascade');
+});
+
+test('tool overflow: with a fake clock the pass is deterministic at every budget, and a pass that reports complete is a fixpoint', () => {
+  // Four orders on one copy, three of them movable; a counter clock makes every budget reproducible.
+  const specs = [
+    { id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' },
+    { id: 'B', line: 'L2', run: 4, tools: ['T1'], due: '2035-08-08T08:00:00' },
+    { id: 'C', line: 'L3', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+    { id: 'D', line: 'L4', run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' },
+  ];
+  const opts = { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ['L1', 'L2', 'L3', 'L4'] };
+  const snap = TF.toolSnapshot(specs, opts);
+  const base = evaluateSchedule(TF.toolSnapshot(specs, { ...opts, rule: 'off' }), TF.toolRequest());
+  const ctx = base.validationContext;
+  const hardSnap = { ...ctx.snapshot, masterData: snap.masterData };
+  const sig = c => JSON.stringify([...c.patches].sort((a, b) => (a.id < b.id ? -1 : 1)).map(p => [p.id, p.changes.planning_status, p.changes.start_date?.toISOString?.() ?? null, p.changes.planning_reason?.code ?? null, !!p.changes.planning_reason?.incomplete]));
+  for (const budget of [0, 1, 2, 3, 5, 8, 13, 21, 55, 1e6]) {
+    const run = () => { let n = 0; return SetupScheduler.resolveToolOverflow(hardSnap, { ...ctx.bounds, clock: () => n++ }, base, budget); };
+    const out = run();
+    assert.equal(sig(run()), sig(out), 'budget ' + budget + ': deterministic');
+    const queuedPass = out.patches.filter(p => p.changes.planning_reason?.code === 'tool_contention');
+    if (out.toolPass.complete) {
+      assert.equal(queuedPass.some(p => p.changes.planning_reason.incomplete), false, 'budget ' + budget + ': a complete pass leaves no incomplete queue');
+      assert.equal(sig(SetupScheduler.resolveToolOverflow(hardSnap, { ...ctx.bounds, clock: () => 0 }, out, 1e6)), sig(out), 'budget ' + budget + ': complete means a fixpoint');
+    } else {
+      assert.ok(queuedPass.length > 0 || out.toolPass.complete === false, 'an incomplete pass reports it');
+    }
+  }
+});
+
+test('tool overflow: a cascade marker is dropped once a later repair relabels the order to another reason', () => {
+  const entry = (orderId, reasonCode) => ({ orderId, tool: 'T1', available: 1, inUse: 0, holderIds: ['A'], cause: 'cascade', reasonCode });
+  const result = { patches: [], toolPass: { complete: true, elapsedMs: 0 },
+    dispositions: [
+      { id: 'E', line: 'L2', status: 'needs_planning', reason: { code: 'no_fit_found', message: 'x' } },
+      { id: 'F', line: 'L2', status: 'needs_planning', reason: { code: 'setup_transition_unrecorded', message: 'x' } },
+      { id: 'G', line: 'L2', status: 'scheduled' },
+    ],
+    toolBlocked: [entry('E', 'setup_transition_unrecorded'), entry('F', 'setup_transition_unrecorded'), entry('G', 'setup_transition_unrecorded')] };
+  const out = SetupScheduler.reconcileToolOutcomes(result);
+  assert.deepEqual((out.toolBlocked ?? []).map(e => e.orderId), ['F'], 'E was relabelled (dropped); G is scheduled (dropped); F keeps its cascade marker');
+});
+
+test('tool overflow: the contention detail counts distinct other machines from the untruncated holders (two items on one line are one copy)', () => {
+  const item = (id, line) => ({ id, line, start: new Date('2035-08-07T03:00:00'), end: new Date('2035-08-07T05:00:00') });
+  const mk = items => ({ ctx: { core: { toolHeadroom: () => [] }, plant: 'P1', capacityFor: () => ({ available: 1 }) }, byTool: new Map([['T1', new Map(items.map(x => [x.id, x]))]]) });
+  const span = [new Date('2035-08-07T02:00:00'), new Date('2035-08-07T06:00:00')];
+  // two items on ONE other machine: one copy in use, plus the order itself
+  const single = SetupScheduler.toolContentionDetail(mk([item('B', 'L2'), item('B2', 'L2')]), ['T1'], 'L1', ...span);
+  assert.deepEqual(single.holders, ['B', 'B2']); assert.equal(single.inUse, 2);
+  // 14 items on 14 distinct machines: holders are capped at 10, inUse is NOT (14 + the order itself)
+  const many = Array.from({ length: 14 }, (_, k) => item('H' + String(k).padStart(2, '0'), 'M' + k));
+  const wide = SetupScheduler.toolContentionDetail(mk(many), ['T1'], 'L1', ...span);
+  assert.equal(wide.holders.length, 10); assert.equal(wide.inUse, 15);
 });

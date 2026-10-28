@@ -334,3 +334,33 @@ test('Remove Backlog ignores the plant pull/push window: candidate and Apply val
     { floor: null, ceiling: null, missingDue: false });
   assert.equal(allowedPlanningWindow(snapshot, { ...bounds, ignorePlantWindow: false }, Store.tasks['bk-nodue']).missingDue, true);
 });
+
+test('Tool Inventory: Remove Backlog is exempt from the tool rule (Hard + loaded inventory: no pass, no finding, no static defect, fields absent)', () => {
+  seed({ tasks: [
+    task('tb-a', '2026-08-12T06:00', 2, { PRT_01: 'T1' }),
+    task('tb-b', '2026-08-12T07:00', 2, { PRT_01: 'T1' }),
+    { ...task('tb-other', '2026-08-12T08:00', 2, { PRT_01: 'T1' }), MACHINE: 'L-OTHER' },
+    { ...task('tb-dead', '2026-08-12T05:00', 1, { PRT_01: 'T9' }) },
+  ] });
+  Store.setMasterData({
+    plants: [{ subnetwork: 'SN', plant, timezone: 'America/New_York', split_order_policy: 'never', setup_policy_config: { toolingRule: 'hard' } }],
+    lines: [{ machine: line, plant }, { machine: 'L-OTHER', plant }],
+    tool_inventory: [{ plant, tool_id: 'T1', total_qty: 1, out_of_service_qty: 0, note: null }, { plant, tool_id: 'T9', total_qty: 1, out_of_service_qty: 1, note: null }],
+  }, 'test');
+  Store.setLineSetting('L-OTHER', { plant, excludeFromOpt: false }, 'test');
+  Store.setCalendar('L-OTHER', allDays(8, 16), 'test');
+  const candidate = Engine.evaluateSchedule('backlog', opts({ plant }));
+  const { snapshot, bounds } = candidate.validationContext;
+  assert.equal(bounds.ignoreToolRule, true, 'only the Backlog bounds carry the flag');
+  assert.ok(candidate.patches.length >= 2, 'backlog still compresses the past-start orders');
+  assert.equal(candidate.toolPass, undefined);
+  assert.equal(candidate.toolBlocked, undefined);
+  assert.equal(candidate.toolMoved, undefined);
+  const tool = findings => findings.filter(f => f.code === 'tool_overflow' || f.code === 'tool_unavailable');
+  assert.deepEqual(tool(candidate.validationFindings ?? []), []);
+  assert.deepEqual(tool(validateCandidateForApply(candidate, snapshot)), [], 'Apply-time validation is exempt too');
+  assert.equal(candidate.patches.some(p => /^tool_/.test(p.changes.planning_reason?.code ?? '')), false, 'no tool queue reason');
+  // The same candidate judged WITHOUT the exemption (what a normal run does) sees the overlap with the other line.
+  const strict = { ...candidate, toolPass: { complete: true, elapsedMs: 0 }, validationContext: { snapshot, bounds: { ...bounds, ignoreToolRule: false } } };
+  assert.ok(tool(validateCandidateForApply(strict, snapshot)).length >= 1, 'without the flag the same placement is a tool finding');
+});

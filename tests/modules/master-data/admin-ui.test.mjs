@@ -2456,3 +2456,51 @@ test('refreshStoreMasterData refetches the selected plant\'s sap_workcenter rows
   assert.match(source, /workcenters: wcData\?\.rows \?\? \(Store\.masterData\?\.workcenters \?\? \[\]\)/);
   assert.match(source, /\}, source, table\);/);
 });
+
+// ---- Tool Inventory in Manage Data (Wave 4b) -----------------------------------------------------------------------------------
+
+test('resolveUploadEndpoint substitutes the scope plant, encodes it and refuses a {plant} endpoint without one', async () => {
+  const { resolveUploadEndpoint } = await import('../../../frontend/master-data/admin-ui.mjs');
+  assert.equal(resolveUploadEndpoint('/tool-inventory/{plant}/upload', '1008'), '/tool-inventory/1008/upload');
+  assert.equal(resolveUploadEndpoint('/tool-inventory/{plant}/upload', 'A B/C'), '/tool-inventory/A%20B%2FC/upload');
+  for (const none of [undefined, null, '', '   ']) assert.equal(resolveUploadEndpoint('/tool-inventory/{plant}/upload', none), null, `plant ${JSON.stringify(none)}`);
+  assert.equal(resolveUploadEndpoint('/bom/upload', null), '/bom/upload', 'plain endpoints pass through');
+  assert.equal(resolveUploadEndpoint(undefined, 'P'), null);
+});
+
+test('tool_inventory is registered in the Manage Data grid engine (union, labels, keys, defaults, FK, scope, upload) without disturbing the machine/material_plants pin', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
+  assert.match(html, /<button class="md-tab" data-md-tab="tool_inventory" role="tab" data-i18n="tab\.tool_inventory">/);
+  assert.match(source, /\|\s*'routing_rules'\s*\|\s*'tool_inventory';/, 'MasterDataTable union');
+  assert.match(source, /tool_inventory:\s+'Tool Inventory',/, 'TABLE_LABELS');
+  assert.match(source, /tool_inventory:\s+\['plant', 'tool_id'\],/, 'KEY_COLS');
+  assert.match(source, /tool_inventory: \{ total_qty: 1, out_of_service_qty: 0 \},/, 'NEW_ROW_DEFAULTS');
+  assert.match(source, /tool_inventory:\s+\{ plant: 'plants' \},/, 'FK_SOURCE');
+  assert.match(source, /machine:\s+'plant',\s*\n\s*material_plants:\s+'plant',/, 'the machine/material_plants adjacency pin still holds');
+  assert.match(source, /material_plants:\s+'plant',\s*\n\s*tool_inventory:\s+'plant',/, 'SCOPED_TABLES appended after the existing lines');
+  const autoScope = source.slice(source.indexOf('const AUTO_SCOPE_FROM_SELECTED_PLANT'), source.indexOf(']);', source.indexOf('const AUTO_SCOPE_FROM_SELECTED_PLANT')));
+  assert.match(autoScope, /'tool_inventory'/, 'follows the top-bar plant');
+  assert.match(source, /tool_inventory:\s+'\/tool-inventory\/\{plant\}\/upload',/, 'UPLOAD_ENDPOINT');
+  assert.match(source, /tool_inventory: 'tool_inventory',\s*\n\s*\};/, 'UPLOAD_TOAST_STEM');
+  assert.doesNotMatch(source.slice(source.indexOf('const MASS_DELETABLE'), source.indexOf('const ROUTING_TABLES')), /tool_inventory/, 'no delete-filtered for tool_inventory');
+});
+
+test('Manage Data upload for tool_inventory aborts without a plant and routes through the planner review modal', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  const up = source.slice(source.indexOf('async function _uploadFile'), source.indexOf('// The paste box'));
+  assert.match(up, /resolveUploadEndpoint\(UPLOAD_ENDPOINT\[table\], table === 'tool_inventory' \? _scopeFilter\(table\)\.plant : undefined\)/);
+  assert.match(up, /if \(!endpoint\) \{[\s\S]*?hint\.scope_pick_plant[\s\S]*?return;/, 'toast + abort, never an upload without a plant');
+  assert.match(up, /if \(table === 'tool_inventory'\) \{[\s\S]*?ToolInventory\.uploadFile\(plant, file\)/, 'review modal, not a direct dry_run=0 post');
+  assert.match(up, /_unsavedCount\(table\)/, 'pending edits still block the upload');
+});
+
+test('Manage Data delete commit for tool_inventory runs the shared in-use confirm before the bulk write; the save still refreshes the Store for the table', () => {
+  const source = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  const save = source.slice(source.indexOf('async function _save(table'), source.indexOf('// Filter / search'));
+  const confirmAt = save.indexOf('ToolInventory.confirmRemovals(plant, ids)');
+  const bulkAt = save.indexOf('/master-data/${table}/bulk');
+  assert.ok(confirmAt > 0 && bulkAt > confirmAt, 'confirm precedes the write');
+  assert.match(save, /if \(table === 'tool_inventory' && deletes\.length\)/);
+  assert.match(save, /void refreshStoreMasterData\('master-data-save', table\);/, 'Store refresh carries the table so tool_inventory is refetched');
+});

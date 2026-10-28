@@ -31,6 +31,12 @@ class ScheduleSegmentDTO(BaseModel):
 
 
 class PlanningReason(BaseModel):
+    """Why an order is queued. `extra="allow"`: a reason carries code-specific structured keys (tool_id, available, holders,
+    incomplete for the tooling codes; run_time / cap_hours for run_time_over_cap) that the save already stores verbatim; the
+    default (ignore) dropped them from /tasks and /tasks/refresh, so they vanished after a reload. Only keys actually stored
+    are emitted; nothing is padded with nulls."""
+    model_config = ConfigDict(extra="allow")
+
     code: str
     message: str
     step: str | None = None
@@ -121,6 +127,10 @@ class HorizonsResponse(BaseModel):
     # Opaque fingerprint of the plant's calendar (hours, periods, blackouts); the Gantt re-fetches the plant
     # calendar when it differs from the last one it hydrated. Optional and additive: None for an unknown plant.
     calendar_version: str | None = None
+    # Tool Inventory freshness (additive): "<row count>|<max updated_at ISO>" (None when the plant has no rows or
+    # the table is missing) and the plant's Treat Tooling as Hard Constraint rule. The tab re-fetches on change.
+    tool_inventory_version: str | None = None
+    tooling_rule: Literal['off', 'hard'] = 'off'
 
 
 class ScheduleConflict(BaseModel):

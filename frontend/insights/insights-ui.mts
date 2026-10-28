@@ -27,7 +27,7 @@ import { Engine } from '../optimization/engine.mjs';
 import { Timeline } from '../scheduling/gantt.mjs';
 import { Table, Inspector, notifyResidualFirming, firmMismatchMessage } from '../scheduling/orders.mjs';
 import { Selection } from '../scheduling/selection.mjs';
-import { categoryOf, ackLabel, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
+import { categoryOf, alertOrderIds, ackLabel, ALL_ALERTS_PROFILE_ID, isFixableAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES } from './alert-profiles.mjs';
 import { AlertProfileMatches } from './alert-profile-matches.mjs';
 import { ToastLogTab } from './toast-log-tab.mjs';
 import type { NimbusTask, UtilSevBucket } from '../platform/types.mjs';
@@ -1225,6 +1225,14 @@ const VL_ALERT_ROW_H = 72;
    `renderDrawer`/`renderBell` (now public — called from Dashboard,
    App._renderSettingsPane, and App's `alerts:change` subscriber).
    ========================================================================== */
+/** The plant + tool a count-aware tool-conflict alert points at (null for any other alert). */
+export function toolInvTarget(a: NimbusAlert): { plant: string; tool: string } | null {
+  if (a.type !== 'tool-conflict') return null;
+  const tool = a.tool ?? a.msgVars?.tool;
+  if (tool == null || tool === '') return null;
+  return { plant: (a as { plant?: string }).plant || Store.selectedPlant || '', tool: String(tool) };
+}
+
 export const AlertsUIAdapter = {
   /** The alert-card headline for an alert type: the localized `alert.type.<type>` row, falling back to the
    *  title-cased type only when a locale has no row (U28). Plain text; callers escape it. */
@@ -1259,14 +1267,27 @@ export const AlertsUIAdapter = {
     if (!alertId) return;
     if (action === 'focus') {
       AlertsUIAdapter.focus(alertId);
+    } else if (action === 'tool-inventory') {
+      AlertsUIAdapter.openToolInventory(alertId);
     } else if (action === 'fix') {
-      Alerts.applyFix(alertId);
+      Promise.resolve(Alerts.applyFix(alertId)).catch(error => Toast.show((error as Error)?.message || String(error), 'error'));
     } else if (action === 'dismiss') {
       // The Dashboard row itself is a focus target; a nested dismiss button
       // must not bubble into that second action.
       e.stopPropagation();
       Alerts.dismiss(alertId);
     }
+  },
+  /** "Open tool inventory": Master Data > Tool Inventory on the alert's plant, filtered to the alert's tool. Works for a zero-copy
+   *  alert too (raising the copies is the remedy there). The drawer closes so the page behind is visible. */
+  openToolInventory(alertId: string): void {
+    const a = Store.alerts.find(x => x.id === alertId);
+    const target = a ? toolInvTarget(a) : null;
+    if (!target) return;
+    document.getElementById('alert-drawer')?.classList.remove('open');
+    NIMBUS!.App!.goto!('masterdata');
+    NIMBUS!.App!.gotoMasterSub!('tool-inventory');
+    void import('../master-data/tool-inventory.mjs').then(m => m.ToolInventory.openForTool(target.plant, target.tool));
   },
   // Jump to the task related to an alert (navigates to Gantt tab and focuses it
   // at day-level zoom so the alert context — surrounding orders, blackouts — is visible).
@@ -1302,7 +1323,10 @@ export const AlertsUIAdapter = {
     // The anchor (the order, plus the pairwise peer when it exists in the store) centers the view on the
     // order(s) rather than the alert's day; a task-less alert passes none and the alert's day is centered.
     const anchorTaskId = a.taskId && Store.tasks[String(a.taskId)] ? String(a.taskId) : '';
-    const anchorPeerId = anchorTaskId && a.peerId && Store.tasks[String(a.peerId)] ? String(a.peerId) : '';
+    // Orders other than the anchor (alertOrderIds): the first one present in the store is the Gantt anchor peer
+    // (a tool conflict names every holder, earliest first); focus-first below selects all of them.
+    const peerIdsInStore = alertOrderIds(a).slice(1).filter(id => Store.tasks[id]);
+    const anchorPeerId = anchorTaskId ? (peerIdsInStore[0] ?? '') : '';
     const anchor = anchorTaskId ? { taskId: anchorTaskId, ...(anchorPeerId ? { peerId: anchorPeerId } : {}) } : undefined;
     Timeline.gotoLineDay(a.line, Util.dayKey(a.time), () => {
       const taskId = a.taskId ? String(a.taskId) : '';
@@ -1317,11 +1341,11 @@ export const AlertsUIAdapter = {
       // wired at boot) shows the Inspector. Selection.set no-ops when the order is already the
       // sole selection, so show the Inspector ourselves in that one case. Select BEFORE marking:
       // the listener clears a marker whose order is not selected and must only see the old one.
-      // A pairwise alert (overlap, tool-conflict) selects both orders when the peer exists in the store.
-      const peerId = a.peerId && Store.tasks[String(a.peerId)] ? String(a.peerId) : '';
+      // A multi-order alert (overlap, tool-conflict) selects the order and every peer / holder that exists in the store.
+      const peers = peerIdsInStore;
       const cur = Selection.ids();
-      if (!peerId && cur.length === 1 && cur[0] === taskId) Inspector.show(t);
-      else Selection.set(peerId ? [taskId, peerId] : [taskId]);
+      if (!peers.length && cur.length === 1 && cur[0] === taskId) Inspector.show(t);
+      else Selection.set([taskId, ...peers]);
       Timeline.markGotoTask(taskId);
     }, anchor);
     // Close the alert drawer if it is open (the drawer would otherwise cover the Gantt).
@@ -1418,10 +1442,13 @@ export const AlertsUIAdapter = {
       } else if (a.type === 'overlap' || a.type === 'tool-conflict') {
         headline = a.type === 'overlap' ? AlertsUIAdapter.headlineFor('overlap') : Util.t('ui.alert_headline_tool_conflict');
         const m = a.id.match(/^ovl-(.+)-(.+)$/);
-        const peer = a.peerId ?? (m ? m[1] : null);
-        const later = a.taskId ?? (m ? m[2] : null);
-        if (peer && later) {
-          chipsHtml = `<div class="ac-chips">${renderChip(peer)}<span class="ac-chip-sep">⇄</span>${renderChip(later)}</div>`;
+        const ids = alertOrderIds(a);
+        const peers = ids.length > 1 ? ids.slice(1) : (m ? [m[1]] : []);
+        const later = ids[0] ?? (m ? m[2] : null);
+        if (peers.length && later) {
+          const shownPeers = peers.slice(0, 4).map(renderChip).join('');
+          const more = peers.length > 4 ? `<span class="ac-chip-sep">+${peers.length - 4}</span>` : '';
+          chipsHtml = `<div class="ac-chips">${shownPeers}${more}<span class="ac-chip-sep">⇄</span>${renderChip(later)}</div>`;
         } else if (a.taskId) {
           chipsHtml = `<div class="ac-chips">${renderChip(a.taskId)}</div>`;
         }
@@ -1457,6 +1484,7 @@ export const AlertsUIAdapter = {
           ${chipsHtml}
           <div class="ac-card-actions">
             ${gotoBtn}
+            ${toolInvTarget(a) ? `<button class="btn sm" data-act="tool-inventory" data-id="${Util.escapeHtml(a.id)}">${Util.escapeHtml(Util.t('ui.alert_open_tool_inventory'))}</button>` : ''}
             <button class="btn sm" data-act="dismiss" data-id="${Util.escapeHtml(a.id)}">${Util.escapeHtml(Util.t('btn.dismiss'))}</button>
           </div>
         </div>`;
@@ -1533,6 +1561,7 @@ export const AlertsUIAdapter = {
       const act = btn.dataset.act, aid = btn.dataset.id ?? '';
       if (act === 'close')   { dlg.close(); return; }
       if (act === 'goto')    { dlg.close(); AlertsUIAdapter.focus(aid); return; }
+      if (act === 'tool-inventory') { dlg.close(); AlertsUIAdapter.openToolInventory(aid); return; }
       if (act === 'dismiss') {
         Alerts.dismiss(aid);
         btn.closest('.ac-card')?.remove();
@@ -1566,7 +1595,7 @@ export const AlertsUIAdapter = {
     const sevIcon: Record<string, string> = { err: '✖', warn: '⚠', info: 'ℹ' };
     const isCalendar = CALENDAR_ALERT_TYPES.has(a.type);
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
-    const fixable  = FIXABLE_ALERT_TYPES.has(a.type);
+    const fixable  = isFixableAlert(a);
     const override = OVERRIDE_ALERT_TYPES.has(a.type) && a.taskId != null;
     const msg = a.msgKey ? Util.t(a.msgKey, a.msgVars ?? {}) : a.msg;
     // An acknowledged alert is only listed when "Show acknowledged" is on; it says who hid it and until when.
@@ -1579,6 +1608,7 @@ export const AlertsUIAdapter = {
       `<div class="alert-actions">` +
         ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.go_to')}</button>` : '') +
         (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" data-alert-action="fix" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.fix_it')}</button>` : '') +
+        (toolInvTarget(a) ? `<button class="btn btn-ghost sm" data-alert-action="tool-inventory" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('ui.alert_open_tool_inventory')}</button>` : '') +
         (override ? `<button class="btn btn-ghost sm" data-alert-action="override" data-task-id="${Util.escapeHtml(a.taskId)}">${Util.t('btn.override')}</button>` : '') +
         `<button class="btn btn-ghost sm" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.dismiss')}</button>` +
       `</div></div>`;

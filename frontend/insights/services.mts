@@ -46,9 +46,12 @@
 import { Config, Util, ErrorLog, PerfMonitor, Toast } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
-import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
+import { Engine, deriveSetupObservation, snapshotSchedule } from '../optimization/engine.mjs';
+import { confirmToolQueue, toolQueueSummary } from '../optimization/tool-queue-confirm.mjs';
+import type { CandidateResult } from '../optimization/setup-scheduler.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { planningReasonText } from '../scheduling/planning-reason.mjs';
+import { alertOrderIds } from './alert-profiles.mjs';
 import type { SetupObservation } from '../optimization/engine.mjs';
 import type { ScheduleSnapshot } from '../optimization/setup-scheduler.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, WorkHours, NimbusLineSetting, NimbusMasterData, PlantCalendarEntry } from '../platform/types.mjs';
@@ -124,6 +127,24 @@ interface SnapshotOpts {
   stripPriorityFields?: boolean;
 }
 
+/** The masterData the alert worker receives: identical to the Store's except `tool_inventory` is projected to the
+ *  compact rows the compute core reads, {plant, tool_id, available, hasRow: true} (no note/timestamps/quantities to
+ *  structured-clone on every ALERTS post). Every row is kept, including available === 1: its mere existence decides
+ *  the "no inventory row" wording, so only a tool with NO row stays absent (= 1 copy). `undefined` (not loaded /
+ *  failed) stays undefined, never []. The key stays INSIDE masterData: a new top-level payload key breaks the
+ *  worker contract pinned by tests/modules/insights/leverage-batch.test.mjs. Returns the Store object itself when
+ *  there is nothing to project. */
+export function projectMasterDataForWorker(md: NimbusMasterData | null): NimbusMasterData | null {
+  if (!md || !Array.isArray(md.tool_inventory)) return md;
+  const compact = md.tool_inventory.map(row => ({
+    plant: row.plant,
+    tool_id: row.tool_id,
+    available: Math.max(0, Number(row.total_qty ?? 1) - Number(row.out_of_service_qty ?? 0)),
+    hasRow: true as const,
+  }));
+  return { ...md, tool_inventory: compact as unknown as NimbusMasterData['tool_inventory'] };
+}
+
 /** The plant-scoped worker payload body. Shared by Compute._snap (which must not touch the plant
  *  clock registry) and the exported buildPlantSnapshot. */
 function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts = {}): { snap: WorkerSnapshotBase; lines: string[] | null } {
@@ -148,7 +169,7 @@ function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts
       calendars:    Store._state.calendars,
       plants:       Store._state.plants,
       lineSettings: Store._state.lineSettings,
-      masterData:   Store._state.masterData,
+      masterData:   projectMasterDataForWorker(Store._state.masterData),
       setup,
     } };
   }
@@ -183,7 +204,7 @@ function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts
     calendars:    pick(Store._state.calendars),
     plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
     lineSettings: pick(Store._state.lineSettings),
-    masterData:   Store._state.masterData,
+    masterData:   projectMasterDataForWorker(Store._state.masterData),
     setup,
   } };
 }
@@ -452,6 +473,42 @@ export const Compute = (() => {
 // them when called, well after module evaluation completes.
 const _ALERTS_MIN_DEBOUNCE_MS = 90;
 const _ALERTS_MAX_DEBOUNCE_MS = 500;
+/** What the live `Engine.runAndApply` tail told the planner after an apply, restated for the detached overload fix so
+ *  the move to a detached candidate drops nothing: orders placed without a setup transition, distribution siblings
+ *  separated, orders queued/left unplaced (Needs Planning, with the tooling share) and lines left guarded. The Needs
+ *  Planning toast shows even for a quiet batch (a queued order is the one outcome the planner must not miss); the other
+ *  lines are suppressed by `quiet`. */
+function reportOverloadFixTail(candidate: CandidateResult, quiet: boolean): void {
+  const patchedIds = new Set(candidate.patches.filter(patch => patch.changes.planning_status !== 'needs_planning').map(patch => String(patch.id)));
+  if (!quiet) {
+    const orders = new Set<string>();
+    const lines = new Set<string>();
+    for (const edge of candidate.missingEdges ?? []) {
+      if (edge.reason !== 'scheduled-without-setup' || !edge.successorOrderId || !patchedIds.has(String(edge.successorOrderId))) continue;
+      orders.add(String(edge.successorOrderId));
+      lines.add(edge.line);
+    }
+    for (const reason of candidate.explanation ?? []) {
+      if (reason.code !== 'unknown-setup-tail-placement' || !reason.taskId || !patchedIds.has(String(reason.taskId))) continue;
+      orders.add(String(reason.taskId));
+      lines.add(reason.line ?? Store.tasks[String(reason.taskId)]?.MACHINE ?? 'Unknown');
+    }
+    if (orders.size && !candidate.validationContext?.bounds.setup.synthetic) {
+      Toast.show(Util.t('toast.optimize_missing_setup_summary', { orders: orders.size, lines: lines.size }), 'warn');
+    }
+    const separated = candidate.validationFindings?.filter(finding => finding.code === 'distribution_separation').length ?? 0;
+    if (separated) Toast.show(Util.t('toast.optimize_distribution_separation', { parents: separated }), 'warn');
+  }
+  const needPlanning = candidate.dispositions?.filter(item => item.status === 'needs_planning').length ?? 0;
+  if (needPlanning) {
+    const toolQueued = toolQueueSummary(candidate, candidate.patches).queued.length;
+    const toolNote = toolQueued ? ` ${Util.t('ui.opt_tool_need_planning_suffix', { n: toolQueued })}` : '';
+    Toast.show(`${Util.t('toast.optimize_need_planning', { count: needPlanning })}${toolNote}`, 'warn', 7000);
+  }
+  const guarded = candidate.unchangedLines?.length ?? 0;
+  if (!quiet && guarded) Toast.show(Util.t('toast.optimize_lines_guarded', { count: guarded }), 'warn');
+}
+
 export const Alerts = {
   /** Gap A (2026-10-23): queued `overlong_never` rows that now fit one working period after the calendar widened.
    *  Frontend-only and display-only: no bar moves and nothing is persisted (D6); Optimize or a manual placement
@@ -577,7 +634,7 @@ export const Alerts = {
       calendars:    Store.calendars,
       plants:       Store.plants,
       lineSettings: Store.lineSettings as any,
-      masterData:   Store.masterData as unknown as NimbusMasterData,
+      masterData:   projectMasterDataForWorker(Store.masterData) as unknown as NimbusMasterData,
       setup:        deriveSetupObservation(Store.setupSnapshot, Store.tasksArr, onlyLines || undefined, {
         calendars: Store.calendars, plants: Store.plants, lineSettings: Store.lineSettings,
         masterData: Store.masterData, blocks: Store.blocks, plantBlocks: Store.plantBlocks,
@@ -643,33 +700,58 @@ export const Alerts = {
   },
 
   /**
-   * One-click fix. `quiet` suppresses the per-order toasts (moved / cannot fix) and nothing else: a caller that runs
+   * One-click fix; resolves true when something was applied. Async because the overload fix is judged on a detached
+   * candidate first and may ask to confirm tooling queues (Cancel applies nothing and keeps the alert). `quiet` suppresses the per-order toasts (moved / cannot fix) and nothing else: a caller that runs
    * many fixes (the Alert Monitor's "Move N orders") reports one summary itself. The result is the alert id leaving `Store.alerts`.
    */
-  applyFix(alertId: string, opts?: { quiet?: boolean }): void {
+  async applyFix(alertId: string, opts?: { quiet?: boolean; onBlocked?: () => void }): Promise<boolean> {
+    // One overload fix per alert at a time: a second call while the first is parked at the tooling confirm would queue a
+    // second dialog and, on Confirm, apply the same patches twice. It is a no-op that reports "nothing applied". The other
+    // fix types finish synchronously and are never guarded.
+    if (Store.alerts.find(x => x.id === alertId)?.type !== 'overload') return Alerts._applyFixOnce(alertId, opts);
+    if (Alerts._fixInFlight.has(alertId)) return false;
+    Alerts._fixInFlight.add(alertId);
+    try { return await Alerts._applyFixOnce(alertId, opts); } finally { Alerts._fixInFlight.delete(alertId); }
+  },
+  _fixInFlight: new Set<string>(),
+
+  /** The body of `applyFix`. `opts.onBlocked` is called (once) when an overload fix is refused because its result would
+   *  leave an error finding; a quiet batch uses it to raise ONE summary toast instead of one per refused alert. */
+  async _applyFixOnce(alertId: string, opts?: { quiet?: boolean; onBlocked?: () => void }): Promise<boolean> {
     const quiet = opts?.quiet === true;
     const a = Store.alerts.find(x => x.id === alertId);
-    if (!a) return;
+    if (!a) return false;
 
     if (a.type === 'overlap' || a.type === 'blackout' || a.type === 'tool-conflict') {
       const task = Store.tasks[a.taskId!];
-      if (!task || !task.start_date) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return; }
+      if (!task || !task.start_date) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error'); return false; }
       // Firmed orders are immovable. firmingStatus is the EFFECTIVE set — frozen horizon,
       // the manual flag and running (in progress), all on this parent-level task — not just
       // Store.isFirmed. SAP's firm flag is display-only and does not block a fix. Optimizer runs and autoReflow already honor the same union.
       // G-0.25: a row carrying an approved placement exception ('overtime' / 'overlong') is fixed the same way.
-      if (task.placement_exception || Engine.firmingStatus(task).firmed) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_firmed'), 'warn', 5000); return; }
+      if (task.placement_exception || Engine.firmingStatus(task).firmed) { if (!quiet) Toast.show(Util.t('toast.cannot_fix_firmed'), 'warn', 5000); return false; }
       const line = task.MACHINE || 'Unknown';
       const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
       const dur  = (Number(task.end_date) - Number(task.start_date)) || Util.runHours(task) * Config.MS_HOUR || Config.MS_HOUR;
 
-      // For pairwise alerts: start searching from the end of the peer (earlier) order.
-      // Prefer the structured peerId; the id-parse fallback is wrong for ids containing '-'.
+      // For multi-order alerts: start searching from the end of the peer (earlier) order. A count-aware tool
+      // conflict has several holders: the pusher only fits once d = inUse - available of them have released
+      // their copy, so search from the d-th earliest holder release (d = 1 for an overlap / a 2-order conflict).
+      // Peers come from alertOrderIds; the id-parse fallback is wrong for ids containing '-'.
       let searchFrom = task.start_date;
       if (a.type === 'overlap' || a.type === 'tool-conflict') {
-        const peerId = a.peerId ?? (a.type === 'overlap' ? a.id.replace(/^ovl-/, '').split('-')[0] : null);
-        const peer = peerId ? Store.tasks[peerId] : null;
-        searchFrom = peer && peer.end_date ? peer.end_date : task.start_date;
+        let peerIds = alertOrderIds(a).slice(1);
+        if (!peerIds.length && a.type === 'overlap') peerIds = [a.id.replace(/^ovl-/, '').split('-')[0]];
+        const releases = peerIds.map(id => Store.tasks[id]?.end_date).filter((d): d is Date => !!d)
+          .map(d => d.getTime()).sort((x, y) => x - y);
+        if (a.type === 'tool-conflict' && a.available === 0) {
+          // No copy exists (quantity 0 / all out of service): moving this order can never clear the conflict.
+          if (!quiet) Toast.show(Util.t('toast.cannot_fix_tool_unavailable'), 'error');
+          return false;
+        }
+        const d = a.type === 'tool-conflict' && a.inUse != null && a.available != null ? Math.max(1, a.inUse - a.available) : 1;
+        const release = releases.length ? releases[Math.min(d, releases.length) - 1] : null;
+        searchFrom = release != null ? new Date(release) : task.start_date;
       }
 
       const snap = UndoStack.snapshotTasks([task.id]);
@@ -680,7 +762,7 @@ export const Alerts = {
         if (!found) {
           // No slot (overlong order / closed line / nothing within 90 days): never move the order.
           if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error');
-          return;
+          return false;
         }
         newStart = found;
         const newEnd = new Date(newStart.getTime() + dur);
@@ -696,7 +778,7 @@ export const Alerts = {
         }
         if (!changes.start_date || !changes.end_date) {
           if (!quiet) Toast.show(Util.t('toast.cannot_fix_task'), 'error');
-          return;
+          return false;
         }
         newStart = changes.start_date;
       }
@@ -705,6 +787,7 @@ export const Alerts = {
       UndoStack.push(`Auto-fix overlap "${task.text || task.id}"`, () => UndoStack.restoreTasks(snap), [task.id]);
       Alerts.dismiss(alertId);
       if (!quiet) Toast.show(Util.t('toast.order_moved', { name: task.text || task.id, date: Util.fmtDT(changes.end_date ?? newStart) }), 'success');
+      return true;
 
     } else if (a.type === 'overload') {
       // Scope the changeover optimizer to just this line+day so the optimize and the
@@ -715,23 +798,42 @@ export const Alerts = {
       const plant = Store.getPlantForLine(line) || Store.selectedPlant;
       if (!plant || !Store.plantNow(plant)) {   // VM6 (OQ52): no clock, no placement; same refusal as the Optimize dialog
         Toast.show(Util.t('toast.optimize_plant_no_timezone', { plant: plant ?? '' }), 'error', 9000);
-        return;
+        return false;
       }
       const dayStart = Util.startOfDay(a.time || new Date())!;
       const dayEnd   = new Date(dayStart.getTime() + 24 * Config.MS_HOUR);
-      // Snapshot a SUPERSET of what the optimizer can move: every task on this line
-      // that runAndApply would NOT treat as aged/out-of-window — i.e. its free-set
-      // predicate (!isAged && !isOutOfWin), null-dated tasks included. Keying on
-      // dayKey(start) missed cross-midnight orders and lost them on undo.
-      const snap = UndoStack.snapshotTasks(Store.tasksArr.filter(t =>
+      // Detached run first (never the live Store): the result is judged BEFORE anything changes. An error finding means
+      // the optimizer would leave the schedule invalid, so nothing is applied, no Undo entry is pushed and the alert
+      // stays. Orders it would queue for tooling need the same confirm as the Optimize preview (Cancel default).
+      const candidate = Engine.evaluateSchedule('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd }, snapshotSchedule(plant));
+      if (candidate.status === 'invalid_horizon' || candidate.validationFindings?.some(finding => finding.severity === 'error')) {
+        if (!quiet) Toast.show(Util.t('toast.fix_overload_blocked'), 'error', 7000);
+        opts?.onBlocked?.();
+        return false;
+      }
+      if (toolQueueSummary(candidate, candidate.patches).queued.length && !(await confirmToolQueue(candidate, candidate.patches))) return false;
+      // Undo scope, taken AFTER the evaluate and the confirm and right before the apply: a SUPERSET of what the optimizer
+      // can move. The line-day part is every task on this line that runAndApply would NOT treat as aged/out-of-window (its
+      // free-set predicate, null-dated tasks included; keying on dayKey(start) missed cross-midnight orders). The UNION
+      // with the candidate's own patch ids covers a patch outside that filter (e.g. a distribution sibling on another
+      // line), so Undo restores exactly what the apply touched.
+      const snapIds = new Set<string>(Store.tasksArr.filter(t =>
         (t.MACHINE || 'Unknown') === line &&
         (!t.end_date   || t.end_date   >= dayStart) &&
         (!t.start_date || t.start_date <= dayEnd)
-      ).map(t => t.id));
-      Engine.runAndApply('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd });
+      ).map(t => String(t.id)));
+      for (const patch of candidate.patches) snapIds.add(String(patch.id));
+      const snap = UndoStack.snapshotTasks([...snapIds]);
+      Engine.applySchedulePatches(candidate.patches);
+      Store.setLastOptimize(new Date(), 'engine');
+      Alerts.clearDismissed();
+      Alerts.scheduleRecompute();
       UndoStack.push(`Auto-fix overload ${line} ${day}`, () => UndoStack.restoreTasks(snap), snap.map(t => t.id));
       Alerts.dismiss(alertId);
+      reportOverloadFixTail(candidate, quiet);
+      return true;
     }
+    return false;
   },
 
   // -- Adaptive debounced dispatcher state/methods -----------------------
@@ -788,21 +890,13 @@ export const Alerts = {
  *  entirely — a scoped merge retains untouched lines' stale (dismissal-
  *  filtered) alert lists as-is, so a cleared dismissal on an untouched line
  *  would otherwise never re-surface until some later full recompute. */
-// N: same placeholder set as nimbus-compute-core.js's tool-conflict rule
-// (`TOOL_PLACEHOLDERS`, ~line 391) — kept in sync deliberately, not shared,
-// since the core module has no import boundary into this one.
-const _TOOL_PLACEHOLDERS = new Set(['', '-', '0', 'N/A', 'NONE', 'NULL']);
-
 /** True when `task` carries a real (non-placeholder) PRT_01/PRT_02 tool id.
  *  Used to decide whether an incremental alert recompute must escalate to a
  *  full recompute — see `scheduleAlertsForPatches`'s header comment. */
 export function taskCarriesTool(task: NimbusTask | undefined | null): boolean {
+  // The ONE tool-id reader (placeholder set, trim, upper-case) is the compute core's taskToolIds.
   if (!task) return false;
-  for (const key of ['PRT_01', 'PRT_02'] as const) {
-    const v = String(task[key] ?? '').trim();
-    if (v && !_TOOL_PLACEHOLDERS.has(v.toUpperCase())) return true;
-  }
-  return false;
+  return globalThis.NimbusComputeCore!.taskToolIds(task).length > 0;
 }
 
 /** True when `task` carries a `PARENT_ORDER` (i.e. is one of a group of

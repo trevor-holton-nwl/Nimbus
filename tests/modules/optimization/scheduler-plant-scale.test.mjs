@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import {
-  evaluateDueDateFirst, evaluateMinChangeover, evaluateSptWithSetup, fillPlanningGaps,
+  evaluateDueDateFirst, evaluateMinChangeover, evaluateSptWithSetup, fillPlanningGaps, validateCandidate,
 } from '../../../frontend/optimization/setup-scheduler.mjs';
 import {
   assertScalePlan, finalRows, hours, instant, MINUTE, scaleFixture, state,
@@ -223,3 +223,92 @@ for (const [name, evaluate] of strategies) {
     }
   });
 }
+
+// ── Tool Inventory Wave 6: the overflow pass at plant scale ─────────────────────────────────────────────────────────
+// 840 orders on 70 machines, 20 tools (2-4 copies each) assigned round-robin so ~3.5 machines want every tool at the same
+// time. The deterministic assertions (the pass completes, no overflow) run on an injectable FAKE clock (`fakeClock`: it never
+// expires), so a loaded CI runner cannot flake them; one real-clock smoke test keeps generous bounds. The rule Off must be
+// byte-identical to a snapshot with no inventory at all.
+const TOOL_COUNT = 20;
+function toolScaleFixture(rule, { withInventory = true, fakeClock = false } = {}) {
+  const fixture = scaleFixture();
+  for (const task of fixture.snapshot.tasks) {
+    const machine = fixture.lines.indexOf(task.MACHINE);
+    task.PRT_01 = 'TL' + String((machine + Number(task.id.slice(-2))) % TOOL_COUNT).padStart(2, '0');
+  }
+  if (rule) fixture.snapshot.masterData.plants[0].setup_policy_config = { toolingRule: rule };
+  if (withInventory) {
+    fixture.snapshot.masterData.tool_inventory = Array.from({ length: TOOL_COUNT }, (_, i) => ({
+      plant: fixture.plant, tool_id: 'TL' + String(i).padStart(2, '0'), total_qty: 2 + (i % 3), out_of_service_qty: 0, note: null }));
+  }
+  fixture.bounds.clock = fakeClock ? () => 0 : () => performance.now();
+  fixture.bounds.deadline = fixture.bounds.clock() + (fakeClock ? 1e9 : 30000);
+  fixture.bounds.gapFillBudgetMs = 2000;
+  return fixture;
+}
+const runScale = fixture => fillPlanningGaps(fixture.snapshot, { ...fixture.bounds, deadline: fixture.bounds.clock() + (fixture.bounds.clock() === 0 ? 1e9 : 30000) }, evaluateMinChangeover(fixture.snapshot, fixture.bounds));
+const canonScale = result => JSON.stringify({
+  patches: [...result.patches].sort((a, b) => (a.id < b.id ? -1 : 1)),
+  dispositions: [...result.dispositions].sort((a, b) => (a.id < b.id ? -1 : 1)),
+  score: result.score,
+  findings: result.validationFindings.map(f => [f.code, f.severity, f.taskId ?? null]).sort(),
+});
+
+test('tool overflow at scale: Off (inventory loaded) and Hard-with-inventory-not-loaded are identical to a snapshot with no inventory', () => {
+  const base = runScale(toolScaleFixture(null, { withInventory: false }));
+  const off = runScale(toolScaleFixture('off'));
+  const unloaded = runScale(toolScaleFixture('hard', { withInventory: false }));
+  assert.equal(canonScale(off), canonScale(base));
+  assert.equal(canonScale(unloaded), canonScale(base));
+  for (const result of [off, unloaded]) { assert.equal(result.toolPass, undefined); assert.equal(result.toolBlocked, undefined); assert.equal(result.toolMoved, undefined); }
+});
+
+test('tool overflow at scale: 840 orders / 70 machines / 20 tools complete the pass (fake clock) with no overflow and no error finding', () => {
+  const fixture = toolScaleFixture('hard', { fakeClock: true });
+  const result = runScale(fixture);
+  assert.equal(result.toolPass.complete, true, 'the pass finished (the fake clock never expires)');
+  assert.deepEqual(result.validationFindings.filter(f => f.severity === 'error'), []);
+  assert.ok(result.toolMoved.length > 0 || result.toolBlocked.length > 0, 'the instance genuinely contends');
+  // Independent overflow check over the final schedule: distinct machines per tool at every start instant.
+  const finals = finalRows(fixture.snapshot, result).filter(row => row.planning_status !== 'needs_planning' && row.start_date && row.end_date);
+  const copies = tool => 2 + (Number(tool.slice(2)) % 3);
+  const byTool = new Map();
+  for (const row of finals) { const list = byTool.get(row.PRT_01) ?? []; list.push([+row.start_date, +row.end_date, row.MACHINE]); byTool.set(row.PRT_01, list); }
+  for (const [tool, list] of byTool) {
+    for (const [start] of list) {
+      const machines = new Set(list.filter(([s, e]) => s <= start && start < e).map(item => item[2]));
+      assert.ok(machines.size <= copies(tool), tool + ' uses ' + machines.size + ' machines at once, only ' + copies(tool) + ' copies');
+    }
+  }
+  // The tool pass never costs more placed orders than the pure-queue outcome would (every offender queued).
+  const placed = result.dispositions.filter(d => d.status === 'scheduled').length;
+  assert.ok(placed >= 840 - 840 * 0.4, 'a bounded share of the plant is queued for tooling (' + placed + ' placed)');
+});
+
+test('tool overflow at scale: REAL-clock smoke (generous bounds; whether the pass completed is not asserted, a loaded runner may expire it)', () => {
+  const fixture = toolScaleFixture('hard');
+  const started = performance.now();
+  const result = runScale(fixture);
+  const elapsed = performance.now() - started;
+  assert.ok(result.toolPass, 'the pass ran');
+  assert.ok(result.toolPass.elapsedMs < 8000, 'pass time ' + Math.round(result.toolPass.elapsedMs) + ' ms (budget 1 s per call, soft)');
+  assert.ok(elapsed < 60000, 'whole run ' + Math.round(elapsed) + ' ms');
+  assert.deepEqual(result.validationFindings.filter(f => f.severity === 'error'), [], 'an expired pass still leaves no error finding');
+});
+
+test('tool overflow at scale: building the plant-wide tool index and sweeping it is fast (validateCandidate with the tool check, 840 orders, 20 tools)', () => {
+  const fixture = toolScaleFixture('hard');
+  const result = runScale(fixture);
+  const started = performance.now();
+  for (let i = 0; i < 5; i++) validateCandidate(fixture.snapshot, fixture.bounds, result);
+  const perCall = (performance.now() - started) / 5;
+  assert.ok(perCall < 500, 'tool-aware validation ' + Math.round(perCall) + ' ms per call');
+  // 50 plants of metadata (3,500 machines) around the selected plant: the index only ever holds the selected plant's orders.
+  const wide = scaleFixture({ plantCount: 50 });
+  wide.snapshot.masterData.plants[0].setup_policy_config = { toolingRule: 'hard' };
+  wide.snapshot.masterData.tool_inventory = [{ plant: wide.plant, tool_id: 'TL00', total_qty: 2, out_of_service_qty: 0, note: null }];
+  for (const task of wide.snapshot.tasks) task.PRT_01 = 'TL00';
+  const t0 = performance.now();
+  validateCandidate(wide.snapshot, wide.bounds, { patches: [], dispositions: [], score: [], explanation: [], diagnostics: {}, unchangedLines: [], missingEdges: [], toolPass: { complete: true, elapsedMs: 0 } });
+  assert.ok(performance.now() - t0 < 2000, 'index build over 3,500 machines of metadata ' + Math.round(performance.now() - t0) + ' ms');
+});

@@ -20,7 +20,7 @@ import type { AlertAck, AlertCategory, AlertProfile } from '../platform/types.mj
 import { AlertProfileClient } from './alert-profile-client.mjs';
 import { AlertAcksClient } from './alert-acks-client.mjs';
 import {
-  ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID, categoryOf, profileMatches, resolveActiveProfileId,
+  ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID, categoryOf, alertOrderIds, profileMatches, resolveActiveProfileId,
 } from './alert-profiles.mjs';
 
 export interface AlertProfileMatchSet {
@@ -89,7 +89,7 @@ function _ensureLoaded(key: string, cached: unknown, load: () => Promise<unknown
 }
 
 /** Replace the highlighted orders with the focused ones: severity / category come from the alerts that name them
- *  (as the order or as the peer of a pairwise alert). `alertIds` stays profile-based. */
+ *  (as the order or as a peer / holder of a multi-order alert). `alertIds` stays profile-based. */
 function _applyFocus(set: AlertProfileMatchSet, focus: ReadonlySet<string>): void {
   set.taskIds = new Set(focus);
   set.sevByTask = new Map();
@@ -98,8 +98,8 @@ function _applyFocus(set: AlertProfileMatchSet, focus: ReadonlySet<string>): voi
   for (const a of Store.alerts) {
     const sev: 'err' | 'warn' = a.sev === 'err' ? 'err' : 'warn';
     const cat = categoryOf(a.type);
-    for (const id of [a.taskId, a.peerId]) {
-      if (!id || !focus.has(id)) continue;
+    for (const id of alertOrderIds(a)) {
+      if (!focus.has(id)) continue;
       if (set.sevByTask.get(id) !== 'err') set.sevByTask.set(id, sev);
       const prev = set.categoryByTask.get(id);
       const prevSev = catSev.get(id);

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   profileWindow, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
-  MONITOR_GROUP_BYS, MONITOR_SORTS,
+  MONITOR_GROUP_BYS, MONITOR_SORTS, groupCounts, rowActionsFor,
 } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 import { ALL_ALERTS_PROFILE } from '../../../frontend/insights/alert-profiles.mjs';
 
@@ -182,4 +182,17 @@ test('emptyStateFor picks the right empty state', () => {
   assert.equal(emptyStateFor({ ...base, matchedCount: 0, visibleCount: 0, isAllAlerts: true }), 'no-alerts');
   assert.equal(emptyStateFor({ ...base, visibleCount: 0 }), 'all-acked');   // matches exist but all acknowledged
   assert.equal(emptyStateFor({ ...base, visibleCount: 0, isAllAlerts: true }), 'all-acked');
+});
+
+test('a tool conflict with zero available copies is not movable and offers no Fix; a normal one is', () => {
+  const zero = { id: 'z', sev: 'err', type: 'tool-conflict', taskId: 'a', peerId: 'b', available: 0 };
+  const some = { id: 's', sev: 'err', type: 'tool-conflict', taskId: 'c', peerId: 'd', available: 1 };
+  const ovl = { id: 'o', sev: 'err', type: 'overlap', taskId: 'e', peerId: 'f' };
+  const counts = groupCounts([zero, some, ovl], () => false);
+  assert.deepEqual(counts.movableIds, ['s', 'o']);
+  assert.equal(counts.movableOrders, 2);
+  assert.equal(counts.orders, 6, 'the zero-copy alert still counts its orders');
+  assert.equal(rowActionsFor(zero).fix, false);
+  assert.equal(rowActionsFor(some).fix, true);
+  assert.equal(rowActionsFor(ovl).fix, true);
 });

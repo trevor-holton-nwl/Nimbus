@@ -61,6 +61,9 @@ frontend/shell/factory-scene-model.mjs
 frontend/shell/factory-scene.mjs
 frontend/shell/factory-cameo.mjs
 frontend/master-data/material-grids.mjs
+frontend/master-data/tool-inventory.mjs
+frontend/optimization/tool-queue-confirm.mjs
+frontend/scheduling/order-tooling.mjs
 frontend/setup/setup-domain.mjs
 frontend/optimization/setup-scheduler.mjs
 frontend/master-data/admin-tables.mjs

@@ -21,13 +21,14 @@ import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
 import { runOptimizerPreview } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidate, validateCandidateForApply } from './setup-scheduler.mjs';
-import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch } from './setup-scheduler.mjs';
+import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidate, validateCandidateForApply, toolingRuleForSnapshot } from './setup-scheduler.mjs';
+import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
+import { confirmToolQueue, toolQueueSummary, raiseToolInventory } from './tool-queue-confirm.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
 import { Session } from '../security/session.mjs';
 import { Persistence } from '../scheduling/persistence.mjs';
 import { CalendarSync } from '../calendar/calendar-sync.mjs';
-import type { NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
+import type { NimbusMasterData, NimbusTask, OptimizerMode, SplitOrderPolicy, SetupSnapshot, SetupStateKey } from '../platform/types.mjs';
 
 /* =============================================================================
    OPTIMIZE DIALOG — time-window & strategy picker for Engine.runAndApply
@@ -751,6 +752,13 @@ export const OptimizeDialog = (() => {
       if (!proceed) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
     }
 
+    // Tool Inventory (rule Hard only; Remove Backlog ignores the rule): the run must read loaded, current counts.
+    if (_mode !== 'backlog' && !(await ensureToolInventoryForRun(plant))) {
+      if (!exhaustive) OptimizerPreview.hideLoading();
+      restoreRunBtn();
+      return;
+    }
+
     const linesScope = (_scope === 'lines' && _selectedLines.size) ? Array.from(_selectedLines) : null;
     const optsForEngine: OptimizerRunOptions = {
       plant,
@@ -1003,6 +1011,46 @@ function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): str
   return Util.t('ui.opt_pv_plan_pruned_mixed', { better: better.join(' and '), worse: worse.join(' and ') });
 }
 
+/** Tool Inventory: the plant's tooling rule plus its inventory rows, as one comparable string. A preview or a finished
+ *  background run keeps the value it ran on; a different live value means the tool facts moved under it. Rows are sorted
+ *  by tool id so the order the server returned them in never matters; an unloaded inventory is distinct from an empty one.
+ *  The inventory part is null while the rule is not Hard: an Off plant never reads the counts, so a count change must not
+ *  stale its preview (the rule itself is still part of the string, so flipping Off -> Hard does). */
+export function toolFingerprint(masterData: NimbusMasterData | null | undefined, plant: string): string {
+  const rule = toolingRuleForSnapshot({ masterData: masterData ?? null } as unknown as ScheduleSnapshot, plant);
+  const inventory = masterData?.tool_inventory;
+  const rows = rule !== 'hard' || inventory === undefined ? null : inventory
+    .filter(row => !row.plant || row.plant === plant)
+    .map(row => [String(row.tool_id), row.total_qty, row.out_of_service_qty] as const)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return JSON.stringify({ r: rule, i: rows });
+}
+
+function liveToolingRule(plant: string): 'off' | 'hard' {
+  return toolingRuleForSnapshot({ masterData: Store.masterData ?? null } as unknown as ScheduleSnapshot, plant);
+}
+
+/** Optimize start, rule Hard only: make sure this plant's tool inventory is loaded and current before the run reads it.
+ *  Not loaded -> one fetch; still not loaded -> ask (Cancel default: every tool would count as 1 copy). Loaded -> a cheap
+ *  version probe, and a re-read only when the server's version differs from the one the held rows were read at.
+ *  Resolves false when the planner cancelled. Backlog and rule Off never call this. */
+export async function ensureToolInventoryForRun(plant: string): Promise<boolean> {
+  if (liveToolingRule(plant) !== 'hard') return true;
+  if (Store.masterData?.tool_inventory === undefined) {
+    await Persistence.refreshToolInventory(plant);
+    if (Store.masterData?.tool_inventory === undefined) {
+      return Modal.confirm({
+        title: Util.t('modal.opt_tool_inventory_not_loaded'),
+        confirmLabel: Util.t('btn.opt_run_anyway'),
+        tone: 'warn',
+      });
+    }
+    return true;
+  }
+  await Persistence.ensureToolInventoryCurrent(plant);   // short, non-blocking: on timeout the run proceeds with the held rows
+  return true;
+}
+
 const PREVIEW_TASK_CHANGE_EVENTS = new Set<StoreEvent['type']>([
   'task:update', 'tasks:bulkUpdate', 'tasks:bulk', 'task:remove',
 ]);
@@ -1051,6 +1099,8 @@ interface PreviewResult {
   backlogResult: RemoveBacklogResult | null; backlogAudit: PreviewBacklogAudit | null;
   auditDetails: OptimizationAuditDetails | null; syntheticSetup: boolean;
   startedAt: number; runtimeMs: number;
+  /** `toolFingerprint` of the plant's tool facts when the run started (compared with the live Store later). */
+  toolFingerprint?: string;
 }
 
 export const OptimizerPreview = {
@@ -1105,6 +1155,8 @@ export const OptimizerPreview = {
   _staleReason: null as string | null,
   _staleMessageKey: null as string | null,
   _taskBaseline: null as Map<string, string> | null,
+  /** Tool facts (rule + inventory) the open preview ran on; null = unknown (never stales on tool changes). */
+  _toolFingerprint: null as string | null,
   _taskWatchUnsubscribe: null as (() => void) | null,
   _applying: false,
   /** True for a result opened from the background-finished popup: when local edits stale it, Apply becomes
@@ -1259,6 +1311,19 @@ export const OptimizerPreview = {
     return { pairs, total: candidate.missingEdges.length };
   },
 
+  /** CSV of the tool-blocked list (every entry, not just the 50 shown); each cell goes through Util.csvCell. */
+  toolBlockedCsv(
+    entries: ReadonlyArray<{ orderId: string; tool: string; available: number; inUse: number; holderIds: readonly string[]; cause?: string }>,
+    labelOf: (id: string) => string = id => id,
+    linesById: ReadonlyMap<string, string> = new Map(),
+  ): string {
+    const header = ['order', 'line', 'tool', 'available', 'in_use', 'holders', 'cause'];
+    return [header, ...entries.map(entry => [
+      labelOf(entry.orderId), linesById.get(String(entry.orderId)) ?? '', entry.tool, entry.available, entry.inUse,
+      entry.holderIds.map(labelOf).join(' '), entry.cause === 'cascade' ? 'cascade' : 'tool',
+    ])].map(row => row.map(Util.csvCell).join(',')).join('\n');
+  },
+
   missingPairsCsv(pairs: ReadonlyArray<PreviewExplanation['missingPairs'][number]>): string {
     // Util.csvCell: RFC-4180 quoting AND the spreadsheet formula guard (a state/order value
     // starting with = + - @ must not execute when the planner opens the export in Excel).
@@ -1309,6 +1374,17 @@ export const OptimizerPreview = {
   _startTaskWatch(): void {
     OptimizerPreview._stopTaskWatch();
     OptimizerPreview._taskWatchUnsubscribe = Store.subscribe(event => {
+      // Tool Inventory / tooling rule edits (any session's, via the freshness probe too) stale an open preview: the
+      // numbers and the Tool-blocked list were computed against the old counts.
+      if (event.type === 'master-data-changed') {
+        const table = (event as unknown as { table?: string }).table;
+        if (OptimizerPreview.active && OptimizerPreview._toolFingerprint !== null && OptimizerPreview._plant
+          && (table === 'tool_inventory' || table === 'plants')
+          && toolFingerprint(Store.masterData, OptimizerPreview._plant) !== OptimizerPreview._toolFingerprint) {
+          OptimizerPreview._markTaskStale('tool inventory or tooling rule changed', 'ui.opt_stale_banner_tooling');
+        }
+        return;
+      }
       if (!OptimizerPreview.active || !OptimizerPreview._taskBaseline
         || !PREVIEW_TASK_CHANGE_EVENTS.has(event.type)) return;
       // Group 26: the engine re-deriving starts (run time changed, calendar landed) under an open preview makes
@@ -1631,6 +1707,8 @@ export const OptimizerPreview = {
       preKpis, postKpis, explanation, previewDiagnostics, splitOrderPolicy,
       backlogResult, backlogAudit, auditDetails, syntheticSetup,
       startedAt, runtimeMs: 0,
+      // Backlog never reads tool facts, so it carries no fingerprint (never stale on a tool change, no chip).
+      toolFingerprint: mode === 'backlog' ? undefined : toolFingerprint(candidateSnapshot.masterData, plant),
     };
     onPrimary?.(base);
 
@@ -1718,6 +1796,7 @@ export const OptimizerPreview = {
   _installPreviewResult(result: PreviewResult): void {
     OptimizerPreview._snapshot = result.snapshot;
     OptimizerPreview._taskBaseline = result.taskBaseline;
+    OptimizerPreview._toolFingerprint = result.toolFingerprint ?? null;
     OptimizerPreview._preKpis  = result.preKpis;
     OptimizerPreview._postKpis = result.postKpis;
     OptimizerPreview._candidate = result.candidate;
@@ -2138,17 +2217,45 @@ export const OptimizerPreview = {
         ${distributionSeparationFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}
       </div>
     </details>` : '';
+    // Tool Inventory (all of this is empty/absent while the candidate carries no toolBlocked/toolMoved/toolPass).
+    const toolBlocked = OptimizerPreview._candidate?.toolBlocked ?? [];
+    const toolMovedCount = new Set((OptimizerPreview._candidate?.toolMoved ?? []).map(entry => entry.orderId)).size;
+    const toolIncomplete = OptimizerPreview._candidate?.toolPass?.complete === false;
+    const linesById = new Map((OptimizerPreview._snapshot ?? []).map(task => [String(task.id), task.MACHINE || '']));
+    const labelOf = (id: string): string => String(orderLabels.get(id) ?? id);
+    const toolBlockedHtml = toolBlocked.length ? `<details class="opt-pv-section" data-opt-tool-section>
+      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${Util.escapeHtml(Util.t('ui.opt_tool_blocked_title', { n: toolBlocked.length }))}</span><span class="opt-pv-section-badge">${toolBlocked.length}</span></summary>
+      <div class="opt-pv-section-body">
+        <div><button type="button" class="btn btn-sm" data-opt-tool-export>${Util.escapeHtml(Util.t('ui.opt_tool_export'))}</button></div>
+        <table class="opt-pv-tool-table">
+          <thead><tr><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_order'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_tool'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_avail'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_holders'))}</th><th></th></tr></thead>
+          <tbody>${toolBlocked.slice(0, 50).map(entry => {
+            const holders = entry.holderIds.slice(0, 5).map(labelOf).join(', ') + (entry.holderIds.length > 5 ? ` ${Util.t('ui.opt_bg_more', { count: entry.holderIds.length - 5 })}` : '');
+            return `<tr${entry.cause === 'cascade' ? ' data-opt-tool-cascade' : ''}><td>${Util.escapeHtml(labelOf(entry.orderId))}${entry.cause === 'cascade' ? `<div class="opt-pv-tool-cascade">${Util.escapeHtml(Util.t('ui.opt_tool_cascade_note'))}</div>` : ''}</td><td>${Util.escapeHtml(linesById.get(String(entry.orderId)) ?? '')}</td><td>${Util.escapeHtml(entry.tool)}</td><td>${entry.available} / ${entry.inUse}</td><td>${Util.escapeHtml(holders)}</td><td><button type="button" class="btn btn-sm" data-opt-tool-raise="${Util.escapeHtml(entry.tool)}">${Util.escapeHtml(Util.t('ui.opt_tool_raise'))}</button></td></tr>`;
+          }).join('')}</tbody>
+        </table>
+        ${toolBlocked.length > 50 ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_first_50'))}</div>` : ''}
+      </div>
+    </details>` : '';
+    const toolNoteHtml = (toolMovedCount || toolIncomplete) ? `<div class="opt-pv-footer-note" role="status">
+      ${toolMovedCount ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_moved_summary', { n: toolMovedCount }))}</div>` : ''}
+      ${toolIncomplete ? `<div>${Util.escapeHtml(Util.t('ui.opt_tool_incomplete'))}</div>` : ''}
+    </div>` : '';
+    const toolingChipHtml = OptimizerPreview._mode !== 'backlog' && OptimizerPreview._toolFingerprint !== null && (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r === 'hard'
+      ? `<div class="opt-pv-chip opt-pv-chip-tooling" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling_title'))}">${Util.escapeHtml(Util.t('ui.opt_pv_chip_tooling'))}</div>` : '';
     body.innerHTML = `
       <div class="opt-pv-shell">
         <div class="opt-pv-header">
           <div class="opt-pv-chip opt-pv-chip-mode">${Util.escapeHtml(modeLabel)}</div>
           <div class="opt-pv-chip opt-pv-chip-plant" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_plant_title'))}">${Util.escapeHtml(plant)}</div>
           <div class="opt-pv-chip opt-pv-chip-policy" title="${Util.escapeHtml(Util.t('ui.opt_pv_chip_policy_title'))}">${Util.escapeHtml(splitPolicyLabel[splitPolicy])}</div>
+          ${toolingChipHtml}
           <div class="opt-pv-chip opt-pv-chip-time">${Util.escapeHtml(stamp)}</div>
         </div>
 
         ${staleHtml}
         ${planningHtml}
+        ${toolNoteHtml}
 
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
           <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
@@ -2179,6 +2286,7 @@ export const OptimizerPreview = {
           ${diagHtml}
           ${protectedHtml}
           ${distributionSeparationHtml}
+          ${toolBlockedHtml}
         </div>
 
         <div class="opt-pv-footer-note">
@@ -2186,6 +2294,14 @@ export const OptimizerPreview = {
         </div>
       </div>`;
 
+    body.querySelectorAll<HTMLButtonElement>('[data-opt-tool-raise]').forEach(button => {
+      button.addEventListener('click', () => { void OptimizerPreview._raiseInventory(button.dataset.optToolRaise ?? ''); });
+    });
+    body.querySelector<HTMLButtonElement>('[data-opt-tool-export]')?.addEventListener('click', () => {
+      const blob = new Blob(['\uFEFF' + OptimizerPreview.toolBlockedCsv(toolBlocked, labelOf, linesById)], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url;
+      link.download = `tool-blocked-${OptimizerPreview._plant || 'preview'}.csv`; link.click(); URL.revokeObjectURL(url);
+    });
     const missingCsv = () => OptimizerPreview.missingPairsCsv(OptimizerPreview._explanation?.missingPairs || []);
     body.querySelector<HTMLButtonElement>('[data-opt-copy-missing]')?.addEventListener('click', () => {
       navigator.clipboard?.writeText(missingCsv()).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
@@ -2210,7 +2326,8 @@ export const OptimizerPreview = {
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
     // A background result viewed after local edits: Apply becomes "apply what still fits".
     if (!OptimizerPreview.canApply() && OptimizerPreview._canApplyPartial() && plant) {
-      return OptimizerPreview._runGuardedCommit(OptimizerPreview.applyPartial({ plant, candidate, snapshot: snap, taskBaseline: OptimizerPreview._taskBaseline! }));
+      await OptimizerPreview._runGuardedCommit(OptimizerPreview.applyPartial({ plant, candidate, snapshot: snap, taskBaseline: OptimizerPreview._taskBaseline! }));
+      return;
     }
     if (!OptimizerPreview.canApply()) {
       Toast.show(OptimizerPreview._staleMessage(), 'warn');
@@ -2253,36 +2370,102 @@ export const OptimizerPreview = {
       keptPatches = candidate.patches.filter(patch => survivors.has(String(patch.id)));
       validationDroppedIds = pruned.dropped.filter(id => !running.has(id));
     }
-    await OptimizerPreview._runGuardedCommit(OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }, snap));
-    if (validationDroppedIds.length) {
+    const committed = await OptimizerPreview._runGuardedCommit(OptimizerPreview._commitPatches(keptPatches, { ids: runningSkippedIds, reason: 'running' }, snap));
+    // Cancel at the tool confirm (or a task edit during it) commits nothing: no "dropped" toast for a plan that was not applied.
+    if (committed && validationDroppedIds.length) {
       Toast.show(Util.t('toast.opt_apply_invalid_dropped', { count: validationDroppedIds.length }), 'warn', 7000);
     }
   },
 
+  /** After the planner cancels the tool-queue confirm: make sure the (possibly background-opened) preview is showing. */
+  _showPreviewAfterCancel(): void {
+    if (typeof document === 'undefined') return;
+    const el = document.getElementById('modal-opt-preview');
+    // Foreground (the preview never closed): its DOM is intact, so leave it alone, or a rebuild would collapse the open
+    // <details> sections and reset the scroll position. Only a hidden modal (the background path) needs opening + rendering.
+    if (!el?.hidden) return;
+    Modal.open('modal-opt-preview');
+    OptimizerPreview._render();
+    OptimizerPreview._syncApplyButton();
+  },
+
+  /** "Raise inventory" from the preview's Tool-blocked panel. The destination (Master Data) opens behind the modal, so
+   *  the preview must close first; closing discards the plan, hence the confirm (Cancel default). */
+  async _raiseInventory(tool: string): Promise<void> {
+    const plant = OptimizerPreview._plant;
+    const previewOpen = OptimizerPreview.active && !!OptimizerPreview._candidate;
+    if (previewOpen) {
+      const ok = await Modal.confirm({
+        title: Util.t('ui.opt_tool_raise'),
+        message: Util.t('modal.opt_tool_raise_discard'),
+        confirmLabel: Util.t('ui.opt_tool_raise'),
+        tone: 'warn',
+      });
+      if (!ok) return;
+      OptimizerPreview._clear();
+      Modal.close('modal-opt-preview');
+    }
+    raiseToolInventory(plant, tool);
+    if (previewOpen) Toast.show(Util.t('toast.opt_tool_raise_closed'), 'info', 7000);
+  },
+
   /** Await an apply-tail promise and route a failure to ErrorLog, so it is never silent. */
-  async _runGuardedCommit(commit: Promise<void>): Promise<void> {
-    try { await commit; } catch (err) {
+  async _runGuardedCommit(commit: Promise<unknown>): Promise<boolean> {
+    try { return (await commit) !== false; } catch (err) {
       ErrorLog.error('optimizer', `Apply failed: ${err instanceof Error ? err.message : String(err)}`, err);
       // Never leave an installed preview active (task watch running) with no modal to act on it.
       OptimizerPreview._clear();
       Modal.close('modal-opt-preview');
+      return false;
     }
   },
 
   /** Commit a (possibly filtered) set of preview patches: audit, apply, undo
    *  entry, toasts, teardown, and alert recompute. `skipped` carries the ids
-   *  dropped before this call and why, so the caller owns the filtering. */
+   *  dropped before this call and why, so the caller owns the filtering. Resolves true only when the patches were
+   *  committed; false when nothing was (no candidate, Cancel at the tool confirm, or a task edited during it). */
   async _commitPatches(
     kept: ReadonlyArray<SchedulePatch>,
     skipped: { ids: string[]; reason: 'running' | 'changed' },
     snapBeforeApply: NimbusTask[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const snap = snapBeforeApply;
     const candidate = OptimizerPreview._candidate;
     const mode = OptimizerPreview._mode;
     const plant = OptimizerPreview._plant;
     const auditDetails = OptimizerPreview._auditDetails;
-    if (!candidate) return;
+    if (!candidate) return false;
+    // The ONE tool-queue guard: every apply path (Apply, "Apply what still fits", "Apply without preview") ends here, so
+    // it confirms, from the KEPT patches only, before anything is audited or committed. Cancel aborts and keeps the
+    // preview open and untouched. With no `toolBlocked` on the candidate this is a no-op.
+    const toolSummary = toolQueueSummary(candidate, kept);
+    // No await when there is nothing to confirm: the commit stays synchronous exactly as before.
+    if (toolSummary.queued.length) {
+      // The confirm is async and a planner can still edit tasks behind it: remember what the kept patches' orders looked
+      // like, and refuse to commit if any of them changed (or vanished) before the answer arrived.
+      const before = taskBaseline(kept.map(patch => Store.tasks[String(patch.id)]).filter((task): task is NimbusTask => !!task));
+      let confirmed = false;
+      try { confirmed = await confirmToolQueue(candidate, kept); } finally {
+        if (!confirmed) OptimizerPreview._applying = false;   // Cancel or a thrown confirm: never leave the flag set
+      }
+      if (!confirmed) {
+        OptimizerPreview._showPreviewAfterCancel();
+        return false;
+      }
+      const drifted = kept.some(patch => {
+        const id = String(patch.id);
+        const live = Store.tasks[id];
+        if (!before.has(id)) return !!live;
+        return !live || taskBaseline([live]).get(id) !== before.get(id);
+      });
+      if (drifted) {
+        OptimizerPreview._applying = false;
+        OptimizerPreview._markTaskStale('a task changed while the tool confirm was open');
+        Toast.show(Util.t('ui.opt_preview_task_stale'), 'warn');
+        OptimizerPreview._showPreviewAfterCancel();
+        return false;
+      }
+    }
     OptimizerPreview._applying = true;
     if (auditDetails && plant) {
       Util.fetchTraced(`${Config.API_BASE}/audit/log`, {
@@ -2298,6 +2481,9 @@ export const OptimizerPreview = {
             active_priority_fields: auditDetails.activePriorityFields,
             unranked_priority_fields: auditDetails.unrankedPriorityFields,
             split_order_policy: auditDetails.splitOrderPolicy,
+            tooling_rule: OptimizerPreview._toolFingerprint ? (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r : 'off',
+            tool_blocked: toolSummary.queued.length,
+            tool_moved: toolSummary.moved,
             ...(auditDetails.searchBudgetMs !== undefined ? { search_budget_ms: auditDetails.searchBudgetMs, exhaustive: auditDetails.exhaustive === true } : {}),
           },
         }),
@@ -2352,7 +2538,8 @@ export const OptimizerPreview = {
       }
       if (candidate.dispositions?.some(item => item.status === 'needs_planning')) {
         const count = candidate.dispositions.filter(item => item.status === 'needs_planning').length;
-        Toast.show(`${count} order(s) need planning. Review their allowed windows and reasons in Orders.`, 'warn', 7000);
+        const toolNote = toolSummary.queued.length ? ` ${Util.t('ui.opt_tool_need_planning_suffix', { n: toolSummary.queued.length })}` : '';
+        Toast.show(`${count} order(s) need planning${toolNote}. Review their allowed windows and reasons in Orders.`, 'warn', 7000);
       } else if (unplacedOrders.orders && !candidate.dispositions) {
         Toast.show(Util.t('toast.optimize_orders_left_in_place', {
           orders: unplacedOrders.orders,
@@ -2385,6 +2572,7 @@ export const OptimizerPreview = {
       const byId = new Map(snap.map(t => [String(t.id), t]));
       scheduleAlertsForPatches(candidate.patches, id => byId.get(String(id))?.MACHINE || 'Unknown', id => byId.get(String(id)));
     }
+    return true;
   },
 
   /* ---------------------------------------------------------------------
@@ -2533,6 +2721,12 @@ export const OptimizerPreview = {
     return { changed, missing };
   },
 
+  /** A finished run whose tool facts (rule + inventory) differ from the live Store: its Tool-blocked list and placements
+   *  describe counts that no longer hold. */
+  _toolFactsChanged(result: Pick<PreviewResult, 'plant' | 'toolFingerprint'>): boolean {
+    return !!result.toolFingerprint && toolFingerprint(Store.masterData, result.plant) !== result.toolFingerprint;
+  },
+
   _renderBackgroundDone(): void {
     const run = OptimizerPreview._backgroundRun;
     const body = typeof document === 'undefined' ? null : document.getElementById('opt-bg-done-body');
@@ -2563,6 +2757,10 @@ export const OptimizerPreview = {
       html += warn(Util.t('ui.opt_bg_done_changed', { count: changed.length + missing.length }));
     }
     let blocked = false;
+    if (OptimizerPreview._toolFactsChanged(result)) {
+      html += warn(Util.t('ui.opt_stale_banner_tooling'));
+      blocked = true;
+    }
     if (Store.selectedPlant !== result.plant) {
       html += warn(Util.t('ui.opt_bg_done_other_plant', { current: Store.selectedPlant ?? '', plant: result.plant }));
       blocked = true;
@@ -2651,7 +2849,9 @@ export const OptimizerPreview = {
     OptimizerPreview._partialApplyAllowed = true;
     OptimizerPreview.present(result, { open: true });
     const { changed, missing } = OptimizerPreview._changedSinceBaseline(result);
-    if (changed.length + missing.length > 0) {
+    if (OptimizerPreview._toolFactsChanged(result)) {
+      OptimizerPreview._markTaskStale('tool inventory or tooling rule changed', 'ui.opt_stale_banner_tooling');
+    } else if (changed.length + missing.length > 0) {
       OptimizerPreview._markTaskStale('background result predates local edits', 'ui.opt_preview_task_stale');
     }
   },
@@ -2662,6 +2862,11 @@ export const OptimizerPreview = {
     if (!run || !result) return;
     if (Store.selectedPlant !== result.plant) {
       Toast.show(Util.t('toast.opt_bg_other_plant', { plant: result.plant }), 'warn');
+      return;
+    }
+    if (OptimizerPreview._toolFactsChanged(result)) {
+      Toast.show(Util.t('ui.opt_stale_banner_tooling'), 'warn');
+      OptimizerPreview._renderBackgroundDone();
       return;
     }
     OptimizerPreview._backgroundRun = null;
@@ -2727,9 +2932,15 @@ export const OptimizerPreview = {
         dispositions: candidate.dispositions?.filter(item => ids.has(String(item.id))),
       }).filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate');
     };
+    // Tool Inventory: a `tool_overflow` error names exactly ONE order, and only an order of the KEPT set can be named (the
+    // dispositions passed above are the kept patches'), so `dropWithFamily` always resolves it; its message is fixed (holders
+    // live in `detail`), so this key stays stable. Dropping a patch reverts the order to its LIVE slot, which can collide with the
+    // next kept patch: each pass drops at least one patch (monotone, bounded by the kept count), so the cap below is
+    // min(8, kept patches): a chain of N sequential drops resolves while N + 1 passes fit, a longer chain is refused.
     const baselineKeys = new Set(errorsFor([]).map(keyOf));
     let kept: SchedulePatch[] = patches.filter(patch => !drop.has(String(patch.id)));
-    for (let pass = 0; pass < 3; pass++) {
+    const maxPasses = Math.min(8, kept.length);
+    for (let pass = 0; pass < maxPasses; pass++) {
       const keptIds = new Set(kept.map(patch => String(patch.id)));
       const findings = errorsFor(kept);
       if (!findings.length) break;
@@ -2761,7 +2972,7 @@ export const OptimizerPreview = {
         dropped = true;
       }
       if (!dropped) break;
-      if (pass === 2) return null;
+      if (pass === maxPasses - 1) return null;
       kept = patches.filter(patch => !drop.has(String(patch.id)));
     }
     if (!kept.length) return null;
@@ -2813,6 +3024,7 @@ export const OptimizerPreview = {
     OptimizerPreview._stopTaskWatch();
     OptimizerPreview._snapshot = null;
     OptimizerPreview._taskBaseline = null;
+    OptimizerPreview._toolFingerprint = null;
     OptimizerPreview._candidate = null;
     OptimizerPreview._preKpis  = null;
     OptimizerPreview._postKpis = null;

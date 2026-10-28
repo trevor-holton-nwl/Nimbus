@@ -41,7 +41,7 @@ class El {
 }
 
 const host = new El('div'); host.id = 'md-host';
-const tabs = ['subnetworks', 'plants', 'machine', 'materials', 'material_plants', 'production_version', 'routing_operation', 'bom_items'].map((t) => { const b = new El('button'); b.dataset.mdTab = t; return b; });
+const tabs = ['subnetworks', 'plants', 'machine', 'materials', 'material_plants', 'production_version', 'routing_operation', 'bom_items', 'tool_inventory'].map((t) => { const b = new El('button'); b.dataset.mdTab = t; return b; });
 const findNode = (pred) => { let f = null; host.walk((n) => { if (pred(n)) f = n; }); return f; };
 globalThis.document = {
   getElementById: (id) => (id === 'md-host' ? host : null),
@@ -576,6 +576,63 @@ test('F2: validate warnings that are not rejects (unknown column) reach the conf
     findBtn('btn.discard', 'Discard').onclick(); await tick();
     fire(fetchesSince(m2, '/master-data/production_version')[0], gridPage(pvColsGc, [])); await tick();
     globalThis.window.__NIMBUS_LOCALES = savedLocales;
+    Store.setSelectedPlant(prior, 't');
+  }
+});
+
+test('TI1: tool_inventory delete confirm runs before the bulk write: Cancel sends nothing and keeps the staged edit; OK sends one request; a delete + re-add of the same id skips the confirm', async () => {
+  const { ToolInventory } = await import('../../../frontend/master-data/tool-inventory.mjs');
+  const tiCols = [
+    { column_name: 'plant', display_label: 'Plant', is_locked: true }, { column_name: 'tool_id', display_label: 'Tool ID', is_locked: true },
+    { column_name: 'total_qty', display_label: 'Total', is_locked: false }, { column_name: 'out_of_service_qty', display_label: 'OOS', is_locked: false },
+  ];
+  const tiRows = () => [{ plant: 'TIP', tool_id: 'T1', total_qty: 2, out_of_service_qty: 0 }];
+  const prior = Store.selectedPlant;
+  const origConfirm = ToolInventory.confirmRemovals;
+  const asked = [];
+  let answer = false;
+  ToolInventory.confirmRemovals = async (plant, ids) => { asked.push([plant, [...ids]]); return answer; };
+  const delBtnFor = (key) => { let b = null; host.walk((n) => { if (n.tag === 'tr' && n.dataset.rowKey === key) n.walk((c) => { if (c._cls.has('md-del-btn')) b = c; }); }); return b; };
+  const reload = async (mark) => { fire(fetchesSince(mark, '/master-data/tool_inventory')[0], gridPage(tiCols, tiRows())); await tick(); };
+  try {
+    await openScoped('tool_inventory', 'TIP', tiCols, tiRows());
+    await delBtnFor('TIP|T1').onclick(); await tick();
+    // Cancel: no bulk request, the staged delete is still there to retry.
+    answer = false;
+    const m1 = pending.length;
+    saveBtn().onclick(); await tick();
+    assert.deepEqual(asked, [['TIP', ['T1']]]);
+    assert.equal(fetchesSince(m1, '/master-data/tool_inventory/bulk').length, 0, 'Cancel writes nothing');
+    assert.equal(saveBtn().disabled, false, 'the staged delete is kept (Save stays enabled)');
+    // OK: exactly one bulk request carrying the delete.
+    answer = true;
+    const m2 = pending.length;
+    saveBtn().onclick(); await tick();
+    const bulks = fetchesSince(m2, '/master-data/tool_inventory/bulk');
+    assert.equal(bulks.length, 1);
+    assert.deepEqual(postBody(bulks[0]).deletes.map((d) => d.tool_id), ['T1']);
+    const m3 = pending.length;
+    fire(bulks[0], { inserted: 0, updated: 0, deleted: 1, warnings: [] }); await tick();
+    await reload(m3);
+    // Delete + re-add of the same id in one save: an edit, no confirm.
+    asked.length = 0;
+    await delBtnFor('TIP|T1').onclick(); await tick();
+    findBtn('btn.add_row', '+ Add Row', 'Add row')?.onclick();
+    await tick();
+    const cell = findNode((n) => n._cls.has('md-cell') && n.dataset.col === 'tool_id' && n.dataset.rowKey === 'TIP|');
+    assert.ok(cell, 'the added row has an editable Tool ID cell');
+    cell.textContent = 'T1'; cell.oninput();
+    const m4 = pending.length;
+    saveBtn().onclick(); await tick();
+    assert.deepEqual(asked, [], 'no confirm for an id that is back as a row');
+    const b2 = fetchesSince(m4, '/master-data/tool_inventory/bulk');
+    assert.equal(b2.length, 1);
+    assert.deepEqual([...new Set(postBody(b2[0]).upserts.map((r) => r.tool_id))], ['T1'], 'the re-added id is upserted (the grid engine may send the typed row twice: raw dirty copy + stripped added copy)');
+    const m5 = pending.length;
+    fire(b2[0], { inserted: 0, updated: 1, deleted: 1, warnings: [] }); await tick();
+    await reload(m5);
+  } finally {
+    ToolInventory.confirmRemovals = origConfirm;
     Store.setSelectedPlant(prior, 't');
   }
 });

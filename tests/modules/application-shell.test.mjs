@@ -389,6 +389,21 @@ test('a firm toggle followed by a reload (tasks:bulk) leaves no stale FIRMED for
   } finally { globalThis.fetch = originalFetch; }
 }));
 
+test('the Tool Inventory sub-tab is registered after Work Centers with its pane id, render and refresh, and is offered as a landing sub-view', () => {
+  const subs = App._MASTER_SUBS.map(e => e.sub);
+  assert.equal(subs.at(-1), 'tool-inventory');
+  assert.equal(subs.indexOf('tool-inventory') - 1, subs.indexOf('work-centers'));
+  const entry = App._MASTER_SUBS.find(e => e.sub === 'tool-inventory');
+  assert.equal(entry.paneId, 'md-master-tool-inventory-pane');
+  assert.equal(typeof entry.render, 'function');
+  assert.equal(typeof entry.refresh, 'function');
+  const priorWindow = globalThis.window;
+  globalThis.window = globalThis.window || {};
+  try {
+    assert.deepEqual(SessionUIAdapter._landingSubDefs('masterdata').at(-1), ['tool-inventory', Util.t('tab.tool_inventory')]);
+  } finally { globalThis.window = priorWindow; }
+});
+
 // Master Data "↻ Refresh" button — App.refreshMasterSub dispatches to the active
 // sub-tab's refresh() through the _MASTER_SUBS registry.
 

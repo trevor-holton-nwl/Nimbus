@@ -31,7 +31,7 @@ import { AlertAckModal } from './alert-ack-modal.mjs';
 import { AlertSlotModal, formatSlotOption } from './alert-slot-modal.mjs';
 import { AlertAcksClient } from '../insights/alert-acks-client.mjs';
 import {
-  ALL_ALERTS_PROFILE_ID, SLOT_ALERT_TYPES, resolveActiveProfileId, ackLabel, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
+  ALL_ALERTS_PROFILE_ID, SLOT_ALERT_TYPES, alertOrderIds, resolveActiveProfileId, ackLabel, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
 } from '../insights/alert-profiles.mjs';
 import type { AlertGroup, GroupContext } from '../insights/alert-profiles.mjs';
 import { Alerts, Compute, Utilization, buildPlantSnapshot } from '../insights/services.mjs';
@@ -592,33 +592,37 @@ function _moveGroup(key: string): void {
   const ids = counts.movableIds;
   const n = counts.movableOrders;   // distinct orders, as the button says
   if (n === 0) return;
-  if (n <= GROUP_MOVE_CONFIRM_ABOVE) { _runBatchMove(key, ids); return; }
+  if (n <= GROUP_MOVE_CONFIRM_ABOVE) { void _runBatchMove(key, ids); return; }
   void Modal.confirm({ title: t('am.group_fix_n', { n }), message: t('am.group_fix_confirm', { n }) })
-    .then(ok => { if (ok) _runBatchMove(key, ids); });
+    .then(ok => { if (ok) void _runBatchMove(key, ids); });
 }
 
 /**
- * Sequential batch: `Alerts.applyFix(id, { quiet: true })` is synchronous and dismisses the alert on success, so an id that
- * has left Store.alerts afterwards means that order moved. The moved order's other alerts (and its peers' alerts) stay in
+ * Sequential batch: `await Alerts.applyFix(id, { quiet: true })` resolves true and dismisses the alert on success (false = refused:
+ * nothing changed and the alert stays, e.g. a Fix overload that would leave an error or was cancelled at the tooling confirm; the
+ * batch then simply continues with the next alert), so an id that has left Store.alerts afterwards means that order moved. The moved order's other alerts (and its peers' alerts) stay in
  * Store.alerts until the debounced recompute, so any alert naming an already-moved order is skipped: it describes a
  * position that no longer exists. One summary toast; focus returns to the group head.
  */
-function _runBatchMove(key: string, ids: string[]): void {
+async function _runBatchMove(key: string, ids: string[]): Promise<void> {
   if (Sandbox.active) return;
   const movedOrders = new Set<string>();
+  let blocked = 0;
   try {
     for (const id of ids) {
       const a = Store.alerts.find(x => x.id === id);
       if (!a) continue;                                    // already gone (cleared by an earlier move or a recompute)
-      if ((a.taskId && movedOrders.has(String(a.taskId))) || (a.peerId && movedOrders.has(String(a.peerId)))) continue;
-      Alerts.applyFix(id, { quiet: true });
-      if (!Store.alerts.some(x => x.id === id)) movedOrders.add(String(a.taskId ?? id));
+      if (alertOrderIds(a).some(oid => movedOrders.has(oid))) continue;   // the order itself or ANY holder/peer already moved
+      const applied = await Alerts.applyFix(id, { quiet: true, onBlocked: () => { blocked++; } });
+      if (applied !== false && !Store.alerts.some(x => x.id === id)) movedOrders.add(String(a.taskId ?? id));
     }
   } catch (e) {
     Toast.show((e as Error)?.message || String(e), 'error');   // reported once; what moved before the throw is still summarised below
   } finally {
     const moved = movedOrders.size;
     Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
+    // Refused fixes are quiet inside the batch; one summary here instead of one toast per refused alert.
+    if (blocked > 0) Toast.show(t('toast.fix_overload_blocked_batch', { n: blocked }), 'warn', 7000);
     if (_active) _paint();
     _focusGroupHead(key);
   }
@@ -666,8 +670,7 @@ function _runAlertAction(action: string | undefined, alertId: string, taskId?: s
     case 'focus': nim.AlertsUIAdapter?.focus?.(alertId); break;
     case 'fix':
       if (Sandbox.active) return;
-      Alerts.applyFix(alertId);
-      break;
+      return Promise.resolve(Alerts.applyFix(alertId)).then(() => undefined, error => { Toast.show((error as Error)?.message || String(error), 'error'); });
     case 'override': {
       if (Sandbox.active) return;
       if (taskId) nim.Table?._openOverrideModalForId?.(taskId);
@@ -1110,8 +1113,7 @@ function _levShowAlerts(item: LeverageItem): void {
   const taskIds = new Set<string>();
   for (const id of item.alertIds) {
     const a = byId.get(id);
-    if (a?.taskId) taskIds.add(String(a.taskId));
-    if (a?.peerId) taskIds.add(String(a.peerId));
+    if (a) for (const oid of alertOrderIds(a)) taskIds.add(oid);
   }
   AlertMonitorPane.setFocus(item.alertIds, title);
   AlertProfileMatches.setFocusTaskIds(taskIds);   // the Gantt follows the focused card, not the profile
@@ -1175,7 +1177,19 @@ function _onLevAction(act: string, key: string): void {
     case 'cal-fix':
       if (Sandbox.active || action.kind !== 'calendar-day') return;
       item.alertIds.forEach(id => _levAttempted.add(id));
-      for (const id of action.fixableAlertIds) Alerts.applyFix(id);
+      // One at a time: a Fix overload may stop at its own confirm, and each fix reads the schedule the previous one left.
+      void (async () => {
+        let moved = 0, blocked = 0;
+        try {
+          for (const id of action.fixableAlertIds) {
+            if (await Alerts.applyFix(id, { quiet: true, onBlocked: () => { blocked++; } })) moved++;
+          }
+        } catch (error) { Toast.show((error as Error)?.message || String(error), 'error'); }
+        finally {
+          Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
+          if (blocked > 0) Toast.show(t('toast.fix_overload_blocked_batch', { n: blocked }), 'warn', 7000);
+        }
+      })();
       break;
     case 'edit-calendar':
       if (action.kind === 'calendar-day') {
@@ -1191,6 +1205,14 @@ function _onLevAction(act: string, key: string): void {
         nim.App?.goto?.('masterdata');
         nim.App?.gotoMasterSub?.('routing-pv');
         void import('../master-data/material-grids.mjs').then(m => m.MaterialGrids.setQuickFilter('routing-pv', action.material));
+      }
+      break;
+    case 'tool-inventory':
+      if (action.kind === 'tool') {
+        const tool = action.tool;
+        nim.App?.goto?.('masterdata');
+        nim.App?.gotoMasterSub?.('tool-inventory');
+        void import('../master-data/tool-inventory.mjs').then(m => m.ToolInventory.openForTool(plant, tool));
       }
       break;
     case 'setup-review':

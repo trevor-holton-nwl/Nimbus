@@ -437,7 +437,10 @@ test('computeAlerts raises one tool-conflict for the same PRT_01 on two lines at
   assert.equal(hits[0].taskId, 'y-2');
   assert.equal(hits[0].peerId, 'x-1');
   assert.equal(hits[0].line, 'L2');
-  assert.equal(hits[0].msgKey, 'alert.tool_conflict');
+  // No inventory row: the legacy id / peerId survive, the wording says the tool is counted as 1 copy.
+  assert.equal(hits[0].msgKey, 'alert.tool_conflict_no_row');
+  assert.equal(hits[0].hasRow, false);
+  assert.deepEqual(hits[0].peerIds, ['x-1']);
   assert.equal(hits[0].msgVars.tool, 'MOLD-7');
 });
 
@@ -1239,4 +1242,298 @@ test('Core.workWindow: an inherited all-day line is bounded exactly by the plant
   const after = Core.workWindow('L', new Date(2026, 9, 20, 12), calendars, plants, ls, {});
   assert.deepEqual([before[0].getHours(), before[1].getHours()], [7, 19]);
   assert.deepEqual([after[0].getHours(), after[1].getHours()], [5, 22]);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Tool inventory: the shared pure API + the count-aware rule 1b.
+// ---------------------------------------------------------------------------------------------------------------
+const H = 3600000;
+const T0 = Date.UTC(2031, 0, 6, 8);   // a fixed Monday 08:00 UTC, far in the future
+const item = (id, line, fromH, toH, tools = ['T100'], plant = 'P1') =>
+  ({ id, line, plant, tools, start: new Date(T0 + fromH * H), end: new Date(T0 + toH * H) });
+const cap = n => () => ({ available: n, hasRow: true });
+
+test('TOOL_PLACEHOLDERS / normalizeToolId: one set, trimmed + upper-cased, placeholders and blanks -> null', () => {
+  assert.deepEqual([...Core.TOOL_PLACEHOLDERS].sort(), ['', '-', '0', 'N/A', 'NAN', 'NONE', 'NULL', 'TBD']);
+  assert.equal(Core.normalizeToolId('t100 '), 'T100');
+  for (const v of ['', ' ', '-', '0', 'n/a', 'None', 'null', 'nan', 'tbd', null, undefined]) assert.equal(Core.normalizeToolId(v), null, String(v));
+  assert.equal(Core.normalizeToolId(100), '100');
+});
+
+test('taskToolIds: deduped, normalized, PRT_01 == PRT_02 is one tool', () => {
+  assert.deepEqual(Core.taskToolIds({ PRT_01: 't1 ', PRT_02: 'T1' }), ['T1']);
+  assert.deepEqual(Core.taskToolIds({ PRT_01: 'T1', PRT_02: 'T2' }), ['T1', 'T2']);
+  assert.deepEqual(Core.taskToolIds({ PRT_01: 'TBD', PRT_02: '-' }), []);
+  assert.deepEqual(Core.taskToolIds(null), []);
+});
+
+test('taskToolPlant: the order PLANT first, else its line plant', () => {
+  const plantOf = line => (line === 'L1' ? 'P9' : null);
+  assert.equal(Core.taskToolPlant({ PLANT: 'P1', MACHINE: 'L1' }, plantOf), 'P1');
+  assert.equal(Core.taskToolPlant({ MACHINE: 'L1' }, plantOf), 'P9');
+  assert.equal(Core.taskToolPlant({ MACHINE: 'L2' }, plantOf), null);
+});
+
+test('toolOccupancyInterval: envelope across a weekend gap, single bar, finish-only U29 bar, otherwise null', () => {
+  const fri = new Date(T0 + 4 * 24 * H), mon = new Date(T0 + 7 * 24 * H);
+  const split = { scheduleSegments: [
+    { startDate: new Date(+mon), endDate: new Date(+mon + 2 * H), sequence: 2 },
+    { startDate: new Date(+fri), endDate: new Date(+fri + 2 * H), sequence: 1 }] };
+  const occ = Core.toolOccupancyInterval(split);
+  assert.equal(+occ.start, +fri, 'envelope starts at the first segment');
+  assert.equal(+occ.end, +mon + 2 * H, 'and ends at the LAST segment, covering the weekend gap');
+  assert.deepEqual(Core.toolOccupancyInterval({ start_date: new Date(T0), end_date: new Date(T0 + 3 * H) }),
+    { start: new Date(T0), end: new Date(T0 + 3 * H) });
+  // finish-only row (start null): [end - run_time, end]
+  const fin = Core.toolOccupancyInterval({ start_date: null, end_date: new Date(T0 + 10 * H), RUN_TIME: 4 });
+  assert.equal(+fin.start, T0 + 6 * H); assert.equal(+fin.end, T0 + 10 * H);
+  assert.equal(Core.toolOccupancyInterval({ start_date: null, end_date: new Date(T0), RUN_TIME: 0 }), null);
+  assert.equal(Core.toolOccupancyInterval({ start_date: new Date(T0), end_date: null, RUN_TIME: 2 }), null);
+  assert.equal(Core.toolOccupancyInterval({}), null);
+});
+
+test('buildToolCapacity / availableCopies: tolerates undefined, old rows, compact rows; missing row = 1 copy; qty 0 = unavailable', () => {
+  assert.equal(Core.buildToolCapacity(undefined).size, 0);
+  assert.equal(Core.buildToolCapacity({ lines: [] }).size, 0);
+  assert.equal(Core.buildToolCapacity({ tool_inventory: undefined }).size, 0);
+  const c = Core.buildToolCapacity({ tool_inventory: [
+    { plant: 'P1', tool_id: 't100 ', total_qty: 5, out_of_service_qty: 2 },
+    { plant: 'P1', tool_id: 'T0', total_qty: 0, out_of_service_qty: 0 },
+    { plant: 'P1', tool_id: 'T9', total_qty: 1, out_of_service_qty: 3 },
+    { plant: 'P2', tool_id: 'T100', total_qty: 1, out_of_service_qty: 0 },
+    { plant: 'P1', tool_id: 'TC', available: 4 }] });
+  assert.deepEqual(Core.availableCopies(c, 'P1', 'T100'), { available: 3, hasRow: true });
+  assert.deepEqual(Core.availableCopies(c, 'P1', 'T0'), { available: 0, hasRow: true });
+  assert.deepEqual(Core.availableCopies(c, 'P1', 'T9'), { available: 0, hasRow: true }, 'max(0, total - out of service)');
+  assert.deepEqual(Core.availableCopies(c, 'P2', 'T100'), { available: 1, hasRow: true }, 'plant keyed');
+  assert.deepEqual(Core.availableCopies(c, 'P1', 'TC'), { available: 4, hasRow: true }, 'compact projection');
+  assert.deepEqual(Core.availableCopies(c, 'P3', 'T100'), { available: 1, hasRow: false }, 'missing row -> 1 copy');
+  assert.deepEqual(Core.availableCopies(undefined, 'P1', 'X'), { available: 1, hasRow: false });
+});
+
+test('findToolOverages: 3 copies and 4 machines -> one cluster, on the 4th starter', () => {
+  const items = [item('a', 'L1', 0, 10), item('b', 'L2', 1, 10), item('c', 'L3', 2, 10), item('d', 'L4', 3, 10)];
+  const out = Core.findToolOverages({ items, capacityFor: cap(3) });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].pusher, 'd'); assert.equal(out[0].pusherLine, 'L4');
+  assert.equal(out[0].inUse, 4); assert.equal(out[0].available, 3);
+  assert.deepEqual(out[0].holders.map(h => h.id), ['a', 'b', 'c']);
+  assert.equal(+out[0].at, T0 + 3 * H);
+  // 4 machines but 4 copies -> pruned
+  assert.equal(Core.findToolOverages({ items, capacityFor: cap(4) }).length, 0);
+});
+
+test('findToolOverages: touching intervals do not overlap (half-open); a free copy releases at the instant', () => {
+  const items = [item('a', 'L1', 0, 5), item('b', 'L2', 5, 9)];
+  assert.equal(Core.findToolOverages({ items, capacityFor: cap(1) }).length, 0);
+  assert.equal(Core.findToolOverages({ items: [item('a', 'L1', 0, 5), item('b', 'L2', 4, 9)], capacityFor: cap(1) }).length, 1);
+});
+
+test('findToolOverages: zero copies -> every machine is over; the pusher has no holder when alone', () => {
+  const out = Core.findToolOverages({ items: [item('a', 'L1', 0, 5)], capacityFor: cap(0) });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].inUse, 1); assert.equal(out[0].available, 0); assert.deepEqual(out[0].holders, []);
+});
+
+test('findToolOverages: the same machine twice counts once; the same id in PRT_01 and PRT_02 counts once', () => {
+  const sameMachine = [item('a', 'L1', 0, 6), item('b', 'L1', 2, 8), item('c', 'L2', 3, 7)];
+  assert.equal(Core.findToolOverages({ items: sameMachine, capacityFor: cap(2) }).length, 0);
+  assert.equal(Core.findToolOverages({ items: sameMachine, capacityFor: cap(1) }).length, 1);
+  const twice = [item('a', 'L1', 0, 6, ['T100', 'T100']), item('b', 'L2', 7, 9)];
+  assert.equal(Core.findToolOverages({ items: twice, capacityFor: cap(1) }).length, 0);
+  const both = Core.findToolOverages({ items: [item('a', 'L1', 0, 6, ['T100', 't100 ']), item('b', 'L2', 1, 9)], capacityFor: cap(1) });
+  assert.equal(both.length, 1); assert.equal(both[0].inUse, 2);
+});
+
+test('findToolOverages: 3-way overlap on a 1-copy tool -> 2 clusters (one per pusher), not 3 pair alerts', () => {
+  const out = Core.findToolOverages({ items: [item('a', 'L1', 0, 9), item('b', 'L2', 1, 9), item('c', 'L3', 2, 9)], capacityFor: cap(1) });
+  assert.deepEqual(out.map(c => c.pusher), ['b', 'c']);
+  assert.deepEqual(out[1].holders.map(h => h.id), ['a', 'b']);
+});
+
+test('findToolOverages: plant keyed (two plants sharing a tool id never conflict) and ids are normalized', () => {
+  const items = [item('a', 'L1', 0, 9, ['T100'], 'P1'), item('b', 'L2', 1, 9, ['T100'], 'P2')];
+  assert.equal(Core.findToolOverages({ items, capacityFor: cap(1) }).length, 0);
+  const norm = [item('a', 'L1', 0, 9, ['t100 ']), item('b', 'L2', 1, 9, ['T100'])];
+  const out = Core.findToolOverages({ items: norm, capacityFor: cap(1) });
+  assert.equal(out.length, 1); assert.equal(out[0].tool, 'T100');
+});
+
+test('findToolOverages: deterministic under shuffled input, ties on start resolved by (line, id)', () => {
+  const base = [item('a', 'L1', 0, 9), item('b', 'L2', 0, 9), item('c', 'L3', 0, 9), item('d', 'L4', 2, 6), item('e', 'L5', 2, 6)];
+  const want = JSON.stringify(Core.findToolOverages({ items: base, capacityFor: cap(2) }));
+  let seed = 7;
+  const rnd = () => (seed = (seed * 48271) % 2147483647) / 2147483647;
+  for (let i = 0; i < 25; i++) {
+    const shuffled = base.slice().sort(() => rnd() - 0.5);
+    assert.equal(JSON.stringify(Core.findToolOverages({ items: shuffled, capacityFor: cap(2) })), want);
+  }
+  assert.ok(JSON.parse(want).length >= 2);
+});
+
+test('findToolOverages: now drops finished intervals and clips starts', () => {
+  const items = [item('a', 'L1', 0, 4), item('b', 'L2', 2, 9)];
+  assert.equal(Core.findToolOverages({ items, capacityFor: cap(1) }).length, 1);
+  assert.equal(Core.findToolOverages({ items, capacityFor: cap(1), now: new Date(T0 + 4 * H) }).length, 0, 'a ended by now');
+});
+
+test('toolConflictAlertId: legacy id for exactly 2 orders, tool form otherwise, sanitized, collision-suffixed', () => {
+  const two = { tool: 'T1', pusher: 'cur', holders: [{ id: 'prev' }] };
+  assert.equal(Core.toolConflictAlertId(two), 'toolc-prev|cur');
+  const three = { tool: 'T/1%2#', pusher: 'p', holders: [{ id: 'a' }, { id: 'b' }] };
+  assert.equal(Core.toolConflictAlertId(three), 'toolc-p|T_1_2_');
+  const used = new Set();
+  assert.equal(Core.toolConflictAlertId(two, used), 'toolc-prev|cur');
+  // a second tool conflicting on the same pair falls through to the tool form, then a suffix
+  assert.equal(Core.toolConflictAlertId({ ...two, tool: 'T2' }, used), 'toolc-cur|T2');
+  assert.equal(Core.toolConflictAlertId({ ...two, tool: 'T2' }, used), 'toolc-cur|T2~2');
+});
+
+test('toolHeadroom: tool-free windows for a machine, other machines only, every tool must have a free copy', () => {
+  const items = [item('a', 'L1', 2, 5), item('b', 'L2', 4, 8), item('c', 'L3', 0, 20, ['T200'])];
+  const index = Core.buildToolIndex({ items, capacityFor: (p, t) => ({ available: t === 'T100' ? 2 : 1, hasRow: true }) });
+  const win = (tools, ex) => Core.toolHeadroom(index, 'P1', tools, new Date(T0), new Date(T0 + 10 * H), ex)
+    .map(w => [(+w.start - T0) / H, (+w.end - T0) / H]);
+  // T100 has 2 copies: blocked only while BOTH a (2-5) and b (4-8) run -> 4..5
+  assert.deepEqual(win(['T100'], 'L9'), [[0, 4], [5, 10]]);
+  // excluding L2 (the machine itself) removes b's usage
+  assert.deepEqual(win(['T100'], 'L2'), [[0, 10]]);
+  // T200 has 1 copy fully held by L3 -> no window; both tools together -> no window
+  assert.deepEqual(win(['T200'], 'L9'), []);
+  assert.deepEqual(win(['T100', 'T200'], 'L9'), []);
+  assert.deepEqual(win(['T200'], 'L3'), [[0, 10]]);
+  // zero copies -> never free; unknown tool -> always free
+  const zero = Core.buildToolIndex({ items, capacityFor: cap(0) });
+  assert.deepEqual(Core.toolHeadroom(zero, 'P1', ['T100'], new Date(T0), new Date(T0 + H), 'L9'), []);
+  assert.equal(Core.toolHeadroom(index, 'P1', ['NOPE'], new Date(T0), new Date(T0 + H), 'L9').length, 1);
+});
+
+// ---- rule 1b through computeAlerts ----
+const futureBase = () => Date.now() + 24 * H;
+const toolTask = (id, line, fromH, toH, extra = {}) => {
+  const b = futureBase();
+  return { id, ORDER: 'PO-' + id, MACHINE: line, PLANT: 'P1', RUN_TIME: toH - fromH, PRT_01: 'T100',
+    start_date: new Date(b + fromH * H), end_date: new Date(b + toH * H), ...extra };
+};
+const alertsFor = (tasks, tool_inventory, opts = {}) => Core.computeAlerts({
+  tasks, blocks: [], plantBlocks: [], calendars: {}, plants: {}, lineSettings: {},
+  masterData: { lines: [{ machine: 'L1', plant: 'P1' }], tool_inventory }, dismissed: [], opts,
+}).alerts.filter(a => a.type === 'tool-conflict');
+
+test('rule 1b: 3 copies and 4 machines -> ONE red alert on the 4th order naming tool, available, in use and holders', () => {
+  const inv = [{ plant: 'P1', tool_id: 'T100', total_qty: 3, out_of_service_qty: 0 }];
+  const four = () => [toolTask('a', 'L1', 1, 9), toolTask('b', 'L2', 2, 9), toolTask('c', 'L3', 3, 9), toolTask('d', 'L4', 4, 9)];
+  const hits = alertsFor(four(), inv);
+  assert.equal(hits.length, 1);
+  const h = hits[0];
+  assert.equal(h.taskId, 'd'); assert.equal(h.line, 'L4'); assert.equal(h.sev, 'err');
+  assert.equal(h.peerId, 'a'); assert.deepEqual(h.peerIds, ['a', 'b', 'c']);
+  assert.equal(h.id, 'toolc-d|T100');
+  assert.equal(h.msgKey, 'alert.tool_conflict');
+  assert.equal(h.msgVars.available, 3); assert.equal(h.msgVars.inUse, 4); assert.equal(h.msgVars.tool, 'T100');
+  assert.match(h.msgVars.holders, /PO-a \(L1\), PO-b \(L2\), PO-c \(L3\)/);
+  assert.equal(h.hasRow, true);
+  // out of service shrinks the copies: 3 total - 1 oos = 2 -> the alert moves to the 3rd order (and the 4th also pushes)
+  const inv2 = [{ plant: 'P1', tool_id: 'T100', total_qty: 3, out_of_service_qty: 1 }];
+  assert.deepEqual(alertsFor(four(), inv2).map(x => x.taskId), ['c', 'd']);
+  // 4 copies -> nothing
+  assert.equal(alertsFor(four(), [{ plant: 'P1', tool_id: 'T100', total_qty: 4, out_of_service_qty: 0 }]).length, 0);
+});
+
+test('rule 1b: quantity 0 raises the zero-copy wording; a missing row raises the no-row wording', () => {
+  const zero = alertsFor([toolTask('a', 'L1', 1, 5)], [{ plant: 'P1', tool_id: 'T100', total_qty: 0, out_of_service_qty: 0 }]);
+  assert.equal(zero.length, 1); assert.equal(zero[0].msgKey, 'alert.tool_conflict_zero'); assert.equal(zero[0].available, 0);
+  assert.equal(zero[0].peerId, undefined);
+  const norow = alertsFor([toolTask('a', 'L1', 1, 5), toolTask('b', 'L2', 2, 6)], []);
+  assert.equal(norow.length, 1); assert.equal(norow[0].msgKey, 'alert.tool_conflict_no_row');
+  assert.equal(norow[0].id, 'toolc-a|b', 'no inventory: the legacy two-order id and peerId survive');
+  assert.equal(norow[0].peerId, 'a');
+  // inventory table undefined (failed load) behaves like no rows
+  assert.equal(alertsFor([toolTask('a', 'L1', 1, 5), toolTask('b', 'L2', 2, 6)], undefined)[0].id, 'toolc-a|b');
+});
+
+test('rule 1b: a 3-way overlap on one copy yields 2 alerts (one per pusher), the 3rd listing both holders', () => {
+  const hits = alertsFor([toolTask('a', 'L1', 1, 9), toolTask('b', 'L2', 2, 9), toolTask('c', 'L3', 3, 9)], undefined);
+  assert.deepEqual(hits.map(h => [h.id, h.taskId, h.peerIds]), [['toolc-a|b', 'b', ['a']], ['toolc-c|T100', 'c', ['a', 'b']]]);
+});
+
+test('rule 1b: PRT_01 and PRT_02 with the same id count once; the same machine twice counts once; ids are case/space-insensitive', () => {
+  const one = [{ plant: 'P1', tool_id: 'T100', total_qty: 1, out_of_service_qty: 0 }];
+  const dbl = alertsFor([toolTask('a', 'L1', 1, 9, { PRT_02: 't100 ' }), toolTask('b', 'L2', 10, 12)], one);
+  assert.equal(dbl.length, 0);
+  const sameLine = alertsFor([toolTask('a', 'L1', 1, 9), toolTask('b', 'L1', 3, 7), toolTask('c', 'L2', 4, 8)], [{ plant: 'P1', tool_id: 'T100', total_qty: 2, out_of_service_qty: 0 }]);
+  assert.equal(sameLine.length, 0, 'L1 counts once, so 2 machines fit 2 copies');
+  const lower = alertsFor([toolTask('a', 'L1', 1, 9, { PRT_01: 't100 ' }), toolTask('b', 'L2', 2, 9)], [{ plant: 'P1', tool_id: 'T100', total_qty: 2, out_of_service_qty: 0 }]);
+  assert.equal(lower.length, 0, "'t100 ' matches the inventory row 'T100'");
+});
+
+test('rule 1b: a split order keeps its tool across the weekend gap (envelope); a second machine in the gap conflicts', () => {
+  const b = futureBase();
+  const split = toolTask('s', 'L1', 0, 1, { start_date: new Date(b), end_date: new Date(b + 100 * H), scheduleSegments: [
+    { startDate: new Date(b), endDate: new Date(b + 8 * H), sequence: 1 },
+    { startDate: new Date(b + 90 * H), endDate: new Date(b + 100 * H), sequence: 2 }] });
+  const inGap = toolTask('g', 'L2', 40, 44);
+  const hits = alertsFor([split, inGap], [{ plant: 'P1', tool_id: 'T100', total_qty: 1, out_of_service_qty: 0 }]);
+  assert.equal(hits.length, 1); assert.equal(hits[0].taskId, 'g'); assert.deepEqual(hits[0].peerIds, ['s']);
+});
+
+test('rule 1b: a finish-only row occupies [end - run_time, end]', () => {
+  const b = futureBase();
+  const fin = toolTask('f', 'L2', 0, 1, { start_date: null, end_date: new Date(b + 10 * H), RUN_TIME: 4 });
+  const hits = alertsFor([toolTask('a', 'L1', 7, 9), fin], [{ plant: 'P1', tool_id: 'T100', total_qty: 1, out_of_service_qty: 0 }]);
+  assert.equal(hits.length, 1);
+});
+
+test('rule 1b: plant keyed - the same tool id in two plants never conflicts; onlyLines gates on the pusher line', () => {
+  const p2 = toolTask('b', 'L2', 2, 9, { PLANT: 'P2' });
+  assert.equal(alertsFor([toolTask('a', 'L1', 1, 9), p2], undefined).length, 0);
+  const tasks = [toolTask('a', 'L1', 1, 9), toolTask('b', 'L2', 2, 9)];
+  assert.equal(alertsFor(tasks, undefined, { lines: ['L1'] }).length, 0, 'pusher b is on L2, out of scope');
+  assert.equal(alertsFor(tasks, undefined, { lines: ['L2'] }).length, 1);
+});
+
+test('rule 1b: the holders text is capped (3 shown, +N for the rest)', () => {
+  const tasks = ['a', 'b', 'c', 'd', 'e', 'f'].map((id, i) => toolTask(id, 'L' + (i + 1), 1 + i, 20));
+  const hits = alertsFor(tasks, [{ plant: 'P1', tool_id: 'T100', total_qty: 5, out_of_service_qty: 0 }]);
+  assert.equal(hits.length, 1);
+  assert.match(hits[0].msgVars.holders, /\+2$/);
+});
+
+test('findToolOverages: at an equal instant the pusher is chosen by (start, end, id), not by machine name', () => {
+  const run = (lineX, lineY) => Core.findToolOverages({
+    items: [item('ord-a', lineX, 0, 4), item('ord-b', lineY, 0, 6)], capacityFor: cap(1),
+  }).map(c => c.pusher);
+  // same start; shorter order sorts first: it holds, the longer one pushes - whichever machine name each has
+  assert.deepEqual(run('L1', 'L2'), ['ord-b']);
+  assert.deepEqual(run('L2', 'L1'), ['ord-b'], 'swapping the machines does not change the pusher');
+  // identical start and end: the id decides, again independent of the machines
+  const tie = (lineX, lineY) => Core.findToolOverages({
+    items: [item('ord-a', lineX, 0, 4), item('ord-b', lineY, 0, 4)], capacityFor: cap(1),
+  }).map(c => c.pusher);
+  assert.deepEqual(tie('L1', 'L2'), ['ord-b']);
+  assert.deepEqual(tie('L2', 'L1'), ['ord-b']);
+});
+
+test('toolIndexUpdate: moves the interval of one order inside the index without a rebuild', () => {
+  const cf = cap(1);
+  const items = [item('a', 'L1', 0, 4), item('b', 'L2', 6, 10)];
+  const live = Core.buildToolIndex({ items, capacityFor: cf });
+  const win = (idx, ex) => Core.toolHeadroom(idx, 'P1', ['T100'], new Date(T0), new Date(T0 + 12 * H), ex)
+    .map(w => [(+w.start - T0) / H, (+w.end - T0) / H]);
+  assert.deepEqual(win(live, 'L9'), [[4, 6], [10, 12]]);
+  // move b from 6-10 to 2-5
+  Core.toolIndexUpdate(live, 'b', item('b', 'L2', 6, 10), item('b', 'L2', 2, 5));
+  const rebuilt = Core.buildToolIndex({ items: [item('a', 'L1', 0, 4), item('b', 'L2', 2, 5)], capacityFor: cf });
+  assert.deepEqual(win(live, 'L9'), win(rebuilt, 'L9'));
+  assert.deepEqual(win(live, 'L9'), [[5, 12]]);
+  // null new: remove only; null old: insert only
+  Core.toolIndexUpdate(live, 'b', item('b', 'L2', 2, 5), null);
+  assert.deepEqual(win(live, 'L9'), [[4, 12]]);
+  Core.toolIndexUpdate(live, 'a', item('a', 'L1', 0, 4), item('a', 'L1', 8, 9));
+  assert.deepEqual(win(live, 'L9'), [[0, 8], [9, 12]]);
+  // removing an interval that is not there is a no-op; emptying a tool drops its group
+  Core.toolIndexUpdate(live, 'zz', item('zz', 'L5', 0, 1), null);
+  assert.equal(live.groups.size, 1);
+  Core.toolIndexUpdate(live, 'a', item('a', 'L1', 8, 9), null);
+  assert.equal(live.groups.size, 0);
 });

@@ -411,6 +411,13 @@ test('alert drawer renders tool-conflict alerts with localized text and a fix bu
   assert.match(row, /data-alert-action="fix"/);
 });
 
+test('alert drawer hides the Fix button on a tool conflict with zero available copies, keeps it otherwise', () => {
+  const base = { id: 'toolc-p|T1', type: 'tool-conflict', sev: 'err', msgKey: 'alert.tool_conflict_zero', msgVars: { tool: 'T1' }, taskId: 'p', line: 'L1', time: new Date() };
+  assert.doesNotMatch(AlertsUIAdapter._renderAlertRow({ ...base, available: 0 }), /data-alert-action="fix"/);
+  assert.match(AlertsUIAdapter._renderAlertRow({ ...base, available: 2 }), /data-alert-action="fix"/);
+  assert.match(AlertsUIAdapter._renderAlertRow({ ...base, available: undefined }), /data-alert-action="fix"/);
+});
+
 test('alert drawer host binds the delegated action handler even in its empty state', () => {
   const body = { innerHTML: '', onclick: null };
   const priorGetElementById = globalThis.document.getElementById;
@@ -911,4 +918,72 @@ test('Dashboard weekday and date labels use Util.locale()', () => {
     assert.equal(Dashboard._dowShort(dt), new Intl.DateTimeFormat('de', { weekday: 'short' }).format(dt));
     assert.equal(Dashboard._dateNumeric(dt), new Intl.DateTimeFormat('de', { month: 'numeric', day: 'numeric' }).format(dt));
   });
+test('tool-conflict alerts (also zero-copy ones) offer "Open tool inventory" in the drawer and the cell briefing; other alerts do not', async () => {
+  const base = { id: 'toolc-p|T1', type: 'tool-conflict', sev: 'err', msgKey: 'alert.tool_conflict', msgVars: { tool: 'T1' }, taskId: 'p', line: 'L1', time: new Date(2026, 9, 21, 9) };
+  for (const available of [2, 0, undefined]) {
+    const row = AlertsUIAdapter._renderAlertRow({ ...base, tool: 'T1', available });
+    assert.match(row, /data-alert-action="tool-inventory" data-alert-id="toolc-p\|T1"/, `drawer, available=${available}`);
+    assert.match(row, /ui\.alert_open_tool_inventory/);
+  }
+  assert.doesNotMatch(AlertsUIAdapter._renderAlertRow({ ...base, msgVars: {}, tool: undefined }), /tool-inventory/, 'no tool id, no link');
+  assert.doesNotMatch(AlertsUIAdapter._renderAlertRow({ id: 'o', type: 'overlap', sev: 'err', msg: 'x', taskId: 'p', line: 'L1', time: new Date() }), /tool-inventory/);
+
+  // The cell briefing card carries the same action and dispatches it.
+  const prior = { doc: globalThis.document, alerts: Store.alerts, nimbus: globalThis.NIMBUS, open: AlertsUIAdapter.openToolInventory };
+  let html = '';
+  let onClick = null;
+  let closed = 0;
+  const dlg = {
+    className: '', open: false,
+    set innerHTML(v) { html = v; }, get innerHTML() { return html; },
+    showModal() {}, close() { closed++; }, addEventListener(evt, fn) { if (evt === 'click') onClick = fn; }, querySelectorAll() { return []; },
+  };
+  try {
+    globalThis.document = { ...prior.doc, createElement: () => dlg, body: { appendChild() {} } };
+    Store._state.alerts = [{ ...base, tool: 'T1', available: 0 }];
+    AlertsUIAdapter.showForCell('L1', Util.dayKey(base.time));
+    assert.match(html, /data-act="tool-inventory" data-id="toolc-p\|T1"/);
+    let opened = null;
+    AlertsUIAdapter.openToolInventory = id => { opened = id; };
+    onClick({ target: { closest: () => ({ dataset: { act: 'tool-inventory', id: 'toolc-p|T1' } }) } });
+    assert.equal(opened, 'toolc-p|T1');
+    assert.equal(closed, 1, 'the briefing closes first');
+  } finally {
+    globalThis.document = prior.doc; Store._state.alerts = prior.alerts; AlertsUIAdapter.openToolInventory = prior.open;
+  }
+});
+
+test('openToolInventory navigates Master Data > Tool Inventory then filters the grid to the alert tool on the alert plant', async () => {
+  const { ToolInventory } = await import('../../../frontend/master-data/tool-inventory.mjs');
+  const prior = { alerts: Store.alerts, nimbus: globalThis.NIMBUS, open: ToolInventory.openForTool, plant: Store.selectedPlant };
+  const calls = [];
+  try {
+    Store._state.selectedPlant = 'P9';
+    globalThis.NIMBUS = { App: { goto: t => calls.push(`goto:${t}`), gotoMasterSub: s => calls.push(`sub:${s}`) } };
+    ToolInventory.openForTool = (plant, tool) => calls.push(`open:${plant}:${tool}`);
+    Store._state.alerts = [
+      { id: 'tc1', type: 'tool-conflict', sev: 'err', msg: 'm', tool: 'T100', available: 0, plant: 'P2', line: 'L1', time: new Date() },
+      { id: 'tc2', type: 'tool-conflict', sev: 'err', msg: 'm', msgVars: { tool: 'T7' }, line: 'L1', time: new Date() },
+      { id: 'ov', type: 'overlap', sev: 'err', msg: 'm', line: 'L1', time: new Date() },
+    ];
+    AlertsUIAdapter.openToolInventory('tc1');
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(calls, ['goto:masterdata', 'sub:tool-inventory', 'open:P2:T100'], 'zero-copy alert, alert plant wins');
+    calls.length = 0;
+    AlertsUIAdapter.openToolInventory('tc2');
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(calls, ['goto:masterdata', 'sub:tool-inventory', 'open:P9:T7'], 'msgVars.tool and the selected plant are the fallbacks');
+    calls.length = 0;
+    AlertsUIAdapter.openToolInventory('ov');
+    AlertsUIAdapter.openToolInventory('missing');
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(calls, [], 'not a tool alert: nothing happens');
+    // The drawer's delegated handler routes the action.
+    AlertsUIAdapter._handleAction({ target: { closest: () => ({ dataset: { alertAction: 'tool-inventory', alertId: 'tc1' } }) }, stopPropagation() {} });
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(calls, ['goto:masterdata', 'sub:tool-inventory', 'open:P2:T100']);
+  } finally {
+    ToolInventory.openForTool = prior.open; Store._state.alerts = prior.alerts; Store._state.selectedPlant = prior.plant;
+    if (prior.nimbus === undefined) delete globalThis.NIMBUS; else globalThis.NIMBUS = prior.nimbus;
+  }
 });
