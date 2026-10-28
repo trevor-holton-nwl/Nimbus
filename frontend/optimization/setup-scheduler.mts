@@ -8264,7 +8264,9 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
     const floor = Math.max(cursor, +(notBeforeFor(bounds, task) ?? bounds.now));
     const incoming = gapEnd > floor ? transition(predecessor, task) : null;
     const relaxNext = relax && !!next && !!protectedOnLine?.has(taskId(next));
-    const outgoing = next && incoming !== null ? transition(task, next, relaxNext) : 0;
+    // The relaxed pass only differs from the strict one where the successor is protected: skip every other gap.
+    const outgoing = relax && !relaxNext ? null : next && incoming !== null ? transition(task, next, relaxNext) : 0;
+  let relaxBaseline: Set<string> | null = null;
     if (incoming !== null && outgoing !== null) {
       const nextStart = next ? +timestamp(next.start_date)! : gapEnd;
       const setupStart = nextStart - outgoing * 60000;
@@ -8309,7 +8311,18 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
               }),
             };
             // The per-line trial is single-line: the plant-wide tool check is made through `hooks`, never here.
-            if (!validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true }, trial).some(f => f.severity === 'error')) {
+            const trialFindings = validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true }, trial);
+            if (!trialFindings.some(f => f.severity === 'error')) {
+              // A relaxed placement ahead of a protected successor must not CREATE a setup warning on it (the validator only
+              // warns for protected orders, so Apply would accept it): compare with the same line without this placement.
+              if (relaxNext && outgoing! > 0) {
+                const setupKeys = (list: readonly ValidationFinding[]): Set<string> => new Set(list.filter(f => f.taskId && String(f.code).startsWith('setup_') && protectedOnLine!.has(String(f.taskId))).map(f => `${f.code}|${f.taskId}`));
+                // Edges already violated without this placement are not new (a warning key present in the baseline is allowed).
+                if (!relaxBaseline) relaxBaseline = setupKeys(validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true },
+                  { ...candidate, patches: peers.flatMap(peer => patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
+                    dispositions: peers.flatMap(peer => { const value = dispositions.get(taskId(peer)); return value ? [value] : []; }) }));
+                if ([...setupKeys(trialFindings)].some(key => !relaxBaseline!.has(key))) continue;
+              }
               return { kind: 'placed', patch, disposition };
             }
           }

@@ -106,6 +106,8 @@ export function legalSlot(spec, result, rows, order, avail, marginMin) {
   const others = rows.filter(r => r.id !== order.id && r.plant === 'P1' && r.occ && r.line !== order.line);
   if (order.tools.some(t => avail(t) <= 0)) return { found: false, why: 'zero' };
   const baseErr = new Set((result.validationFindings ?? []).filter(f => f.severity === 'error').map(f => f.code + '|' + f.taskId));
+  // A slot that would CREATE a setup warning on another (protected, grandfathered) order is not legal: Apply would accept a new violation.
+  const baseSetupWarn = new Set((result.validationFindings ?? []).filter(f => String(f.code).startsWith('setup_')).map(f => f.code + '|' + f.taskId));
   let tries = 0;
   for (let s = NOW; s + run <= spec.horizonEnd; s += 15 * MIN) {
     const e = s + run;
@@ -124,9 +126,10 @@ export function legalSlot(spec, result, rows, order, avail, marginMin) {
     const patch = { id: order.id, changes: { start_date: new Date(s), end_date: new Date(e), scheduleSegments: [], planning_status: 'scheduled', planning_reason: null } };
     const cand = { ...result, patches: [...result.patches.filter(p => p.id !== order.id), patch],
       dispositions: (result.dispositions ?? []).map(d => d.id === order.id ? { id: d.id, line: d.line, status: 'scheduled' } : d) };
-    const errs = SS.validateCandidate(ctx.snapshot, { ...ctx.bounds, skipToolOverflowFinding: true }, cand)
-      .filter(f => f.severity === 'error' && f.code !== 'tool_overflow' && !baseErr.has(f.code + '|' + f.taskId));
-    if (!errs.length) return { found: true, start: s, end: e };
+    const all = SS.validateCandidate(ctx.snapshot, { ...ctx.bounds, skipToolOverflowFinding: true }, cand);
+    const errs = all.filter(f => f.severity === 'error' && f.code !== 'tool_overflow' && !baseErr.has(f.code + '|' + f.taskId));
+    const newSetupWarn = all.filter(f => f.severity === 'warning' && String(f.code).startsWith('setup_') && f.taskId !== order.id && !baseSetupWarn.has(f.code + '|' + f.taskId));
+    if (!errs.length && !newSetupWarn.length) return { found: true, start: s, end: e };
   }
   return { found: false };
 }

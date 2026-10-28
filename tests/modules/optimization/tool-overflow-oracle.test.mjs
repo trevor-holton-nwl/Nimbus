@@ -218,7 +218,9 @@ const KNOWN_BELOW_PURE_QUEUE = new Set([]);
 // Indirect displacement (documented, not a regression): a tool move changes which orders the heuristic gap-fill / retain step
 // places, so an order the Off run schedules can be queued under Hard with an ordinary reason (no_fit_found, push_limit_unmet,
 // setup_transition_unrecorded) and no toolBlocked entry. Hard places as many orders as the pure-queue baseline in every one.
-const KNOWN_INDIRECT_QUEUES = new Set([847, 2663, 2821, 3093, 3499, 3981, 4349, 5181, 5493]);
+// 2439, 2883, 5211 joined with the M-A fix (the relaxed walk no longer creates a protected successor's setup warning, so an order whose only
+// slot did is left queued; documented in frontend/optimization/CLAUDE.md).
+const KNOWN_INDIRECT_QUEUES = new Set([847, 2439, 2663, 2821, 2883, 3093, 3499, 3981, 4349, 5181, 5211, 5493]);
 // Zero-copy plants: the static tool_unavailable defect changes which orders the heuristic search sees, so the placed
 // count may differ from the Off-derived pure-queue baseline (limitation, see the docs: seed 317).
 const hasZeroCopy = spec => spec.inventory.some(row => row.total_qty - (row.out_of_service_qty ?? 0) <= 0);
@@ -289,13 +291,27 @@ test('tool overflow regressions on named adversarial seeds (M1 split policy, M2 
   // M1: seed 181 queued an order on a split-policy plant although a later tool-free window of the same gap was free.
   { const { spec, result } = run(181); const rows = AO.finalRows(spec, result); const avail = AG.availOf(spec);
     for (const row of rows.filter(r => r.status === 'queued' && r.reason?.code === 'tool_contention')) assert.equal(AO.legalSlot(spec, result, rows, row, avail, 45).found, false, 'seed 181: ' + row.id); }
-  // M2: seed 8247 placed 6 orders under Hard, 11 under Off, and reported no toolBlocked at all.
+  // M2: seed 8247 placed 6 orders under Hard, 11 under Off, and reported no toolBlocked at all. With the M-A fix the orders left queued
+  // without a tool reason are the documented indirect ones (their only slot would have created a protected setup warning); every
+  // tool_* queue must still be listed.
   { const spec = AG.makeSpec(8247); const hard = evaluateSchedule(AG.buildSnapshot(spec), AG.buildRequest(spec)); const off = evaluateSchedule(AG.buildSnapshot(spec, { variant: 'off' }), AG.buildRequest(spec));
     const offOk = new Set(off.dispositions.filter(d => d.status === 'scheduled').map(d => d.id)); const listed = new Set((hard.toolBlocked ?? []).map(e => e.orderId));
-    for (const d of hard.dispositions) if (d.status === 'needs_planning' && offOk.has(d.id)) assert.ok(listed.has(d.id), 'seed 8247: ' + d.id + ' queued under Hard (' + d.reason?.code + ') but placed under Off, not in toolBlocked'); }
+    for (const d of hard.dispositions) if (d.status === 'needs_planning' && offOk.has(d.id)) assert.ok(listed.has(d.id) || !/^tool_/.test(d.reason?.code ?? ''), 'seed 8247: ' + d.id + ' tool-queued under Hard (' + d.reason?.code + '), not in toolBlocked');
+    assert.ok((hard.toolBlocked ?? []).length > 0, 'seed 8247: the tool queue is reported'); }
   // m1: seed 12209 left a tool_contention order unplaced although the repair cascade had opened a slot for it.
   { const { spec, result } = run(12209); const rows = AO.finalRows(spec, result); const avail = AG.availOf(spec);
     for (const row of rows.filter(r => r.status === 'queued' && r.reason?.code === 'tool_contention')) assert.equal(AO.legalSlot(spec, result, rows, row, avail, 45).found, false, 'seed 12209: ' + row.id); }
+  // M-A: seeds 53, 154, 176 (and 358 for the inherited baseline): the relaxed gap walk placed an order ahead of a protected successor whose
+  // changeover then fell in closed time / before its earliest start. Hard must raise no protected-order setup warning the Off run lacks
+  // (except the inherited ones the Off run already has), and the queued order stays queued rather than being forced in.
+  for (const seed of [53, 154, 176]) {
+    const spec = AG.makeSpec(seed);
+    const hard = evaluateSchedule(AG.buildSnapshot(spec), AG.buildRequest(spec)); const off = evaluateSchedule(AG.buildSnapshot(spec, { variant: 'off' }), AG.buildRequest(spec));
+    const key = f => f.code + '|' + f.taskId; const offKeys = new Set((off.validationFindings ?? []).map(key));
+    const patched = new Set(hard.patches.map(p => p.id));
+    const fresh = (hard.validationFindings ?? []).filter(f => f.taskId && /^setup_/.test(f.code) && !patched.has(f.taskId) && !offKeys.has(key(f)));
+    assert.deepEqual(fresh.map(key), [], 'seed ' + seed + ': a protected successor gained a setup warning from a relaxed placement');
+  }
   // m3 / budget: at every fake-clock budget the pass either completes (and is then a fixpoint) or says it did not.
   for (const seed of [2, 7, 11, 23, 181, 730]) {
     const spec = AG.makeSpec(seed); const result = evaluateSchedule(AG.buildSnapshot(spec, { variant: 'off' }), AG.buildRequest(spec));
