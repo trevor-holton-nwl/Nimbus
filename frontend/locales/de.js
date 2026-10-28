@@ -2923,8 +2923,6 @@ window.__NIMBUS_LOCALES.de = {
   'ui.verdict_warnings_one': "1 Warnung",
   'tip.split_segment': "Segment {{i}} von {{n}} - {{h}}h produktiv",
   'ui.minutes_value': "{{n}} Min",
-};
-
   /* ── Tool Inventory sub-tab (Master Data) ── */
   'tab.tool_inventory': 'Werkzeugbestand',
   'col.tool_id': 'Werkzeug-ID',

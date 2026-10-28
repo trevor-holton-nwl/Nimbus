@@ -2884,8 +2884,6 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.verdict_warnings_one': "1 avertissement",
   'tip.split_segment': "Segment {{i}} sur {{n}} - {{h}}h productives",
   'ui.minutes_value': "{{n}} min",
-};
-
   /* ── Tool Inventory sub-tab (Master Data) ── */
   'tab.tool_inventory': 'Inventaire des outils',
   'col.tool_id': 'ID de l\'outil',

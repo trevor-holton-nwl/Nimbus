@@ -918,6 +918,8 @@ test('Dashboard weekday and date labels use Util.locale()', () => {
     assert.equal(Dashboard._dowShort(dt), new Intl.DateTimeFormat('de', { weekday: 'short' }).format(dt));
     assert.equal(Dashboard._dateNumeric(dt), new Intl.DateTimeFormat('de', { month: 'numeric', day: 'numeric' }).format(dt));
   });
+});
+
 test('tool-conflict alerts (also zero-copy ones) offer "Open tool inventory" in the drawer and the cell briefing; other alerts do not', async () => {
   const base = { id: 'toolc-p|T1', type: 'tool-conflict', sev: 'err', msgKey: 'alert.tool_conflict', msgVars: { tool: 'T1' }, taskId: 'p', line: 'L1', time: new Date(2026, 9, 21, 9) };
   for (const available of [2, 0, undefined]) {

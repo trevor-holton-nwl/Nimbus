@@ -6106,6 +6106,8 @@ test('value default: the Gantt observation agrees with the optimizer (same minut
   }
   const noDefaults = deriveSetupObservation(setupTruth({ current: null }), tasks, new Set(['L1']));
   assert.equal(noDefaults.diagnostics.some(d => d.type === 'setup-uncovered'), true, 'control: uncovered without the default');
+});
+
 // ── Tool Inventory Wave 6: the tool overflow pass ("tool overflow") ────────────────────────────────────────────────
 // Fixture: tests/modules/helpers/tool-overflow-fixture.mjs (24 h calendars, plant 'P1', 2035 dates, local time).
 const TF = ToolFx;
