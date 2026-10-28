@@ -107,6 +107,8 @@ def _on_missed(event) -> None:
 
 def install(scheduler) -> None:
     """Wire the jobs domain into an (unstarted) AsyncIOScheduler."""
+    from backend.jobs.types import optimizer, optimizer_runner
+    optimizer.set_runner(optimizer_runner.run_optimizer)
     swept = data.boot_sweep()
     if swept:
         _log_event("warn", "jobs", "marked interrupted job runs failed on boot", count=swept)

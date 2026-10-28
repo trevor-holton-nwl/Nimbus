@@ -9,3 +9,7 @@ Substantive docs for this domain live at `backend/admin_ops/CLAUDE.md`.
 ## Schedule event retention input (2026-10-23)
 
 System Configuration (`admin-ui.mts`) has an order-history retention number input (`#sc-retention-days`, 1-60, default 14) read from and saved in the same `/system-settings` POST as the order-field visibility settings (`schedule_event_retention_days`); the server rejects values outside 1-60 with a 400. Details: `backend/schedule_events/CLAUDE.md`.
+
+## Jobs tab (2026-10-29)
+
+The Admin > Jobs tab (`jobs-model/client/pane/dialog/run-detail.mts`, sub-tab strip beside the others) drives `backend/jobs/`; the run summary carries `steps`, counts and `action_id`. Substantive docs: `backend/jobs/CLAUDE.md`.

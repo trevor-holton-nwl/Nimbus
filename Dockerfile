@@ -53,6 +53,13 @@ COPY . .
 # tree includes tsc's compiled output, not just the checked-in .ts/.mts sources.
 COPY --from=frontendbuild /build/frontend/ /app/frontend/
 
+# Node runtime for the Jobs optimizer (backend/jobs/types/optimizer_runner.py spawns the compiled
+# frontend/optimization/headless-cli.mjs, already in the copy above, as a child process). Only the single node
+# binary is copied (~100 MB, no npm, no node_modules: the CLI imports nothing but node: builtins and the compiled
+# frontend). The smoke fails the build when the binary cannot run on this base image or the CLI does not load.
+COPY --from=frontendbuild /usr/local/bin/node /usr/local/bin/node
+RUN node --version && node /app/frontend/optimization/headless-cli.mjs --help
+
 # Run as a non-root user; it owns the app dir and the writable color-wheel dir.
 RUN useradd --create-home --uid 10001 nimbus \
  && mkdir -p /data \

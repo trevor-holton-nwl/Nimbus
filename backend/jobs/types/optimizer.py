@@ -5,7 +5,9 @@ and writes back through POST /tasks/update with source=optimizer) is built elsew
 seam below: call `set_runner(fn)` once at startup. Until then a run fails with a clear message.
 
 Runner contract: `fn(ctx, plant, params) -> dict` with optional keys
-  late, changeovers, moved, applied, dropped (ints), action_id (str), warnings (list[str]), status ('failed' to fail).
+  late, changeovers, moved, applied, dropped (ints), action_id (str), warnings (list[str]), status ('failed' to fail),
+  plus steps ([{step, duration_ms}]), proposal and a few counts (see `keys` in run()).
+`optimizer_runner.run_optimizer` is the real runner; `scheduler.install` wires it at startup.
 It logs through `ctx.log` / `ctx.step`, polls `ctx.check_cancel()` (or `ctx.cancelled`) and kills its own
 subprocess when cancelled. Raising fails the run.
 """
@@ -56,7 +58,8 @@ def run(ctx, params: OptimizerParams) -> JobOutcome:
     ctx.log("info", f"optimizer run: plant {ctx.plant}, mode {params.mode}, search {params.search}, "
                     f"result {params.apply_mode}")
     result = _runner(ctx, ctx.plant, params) or {}
-    keys = ("late", "changeovers", "moved", "applied", "dropped", "action_id", "warnings")
+    keys = ("late", "changeovers", "moved", "applied", "dropped", "action_id", "warnings", "steps", "setup_minutes",
+            "search_complete", "termination", "tool_blocked", "proposal", "proposal_truncated")
     summary = {k: result[k] for k in keys if k in result}
     summary.update({"mode": params.mode, "search": params.search, "apply_mode": params.apply_mode})
     if result.get("status") == "failed":

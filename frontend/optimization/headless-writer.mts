@@ -159,10 +159,20 @@ export function planApply(args: {
       const other = liveById.get(id);
       const oStart = other?.start_date?.getTime(); const oEnd = other?.end_date?.getTime();
       const onLine = kept.filter(patch => !dropped.has(String(patch.id)) && liveById.get(String(patch.id))?.MACHINE === other?.MACHINE);
-      const hits = oStart === undefined || oEnd === undefined ? [] : onLine.filter(patch => {
+      const range = (patch: SchedulePatch): [number, number] | null => {
         const a = patch.changes.start_date?.getTime(); const b = patch.changes.end_date?.getTime();
-        return a !== undefined && b !== undefined && a < oEnd && oStart < b;
+        return a === undefined || b === undefined ? null : [a, b];
+      };
+      let hits = oStart === undefined || oEnd === undefined ? [] : onLine.filter(patch => {
+        const r = range(patch);
+        return !!r && r[0] < oEnd && oStart < r[1];
       });
+      // No overlap: the kept patch placed immediately before it changed its incoming setup (the preview's fallback).
+      if (!hits.length && oStart !== undefined) {
+        const before = onLine.flatMap(patch => { const r = range(patch); return r && r[1] <= oStart ? [{ patch, end: r[1] }] : []; })
+          .sort((a, b) => b.end - a.end)[0];
+        if (before) hits = [before.patch];
+      }
       if (!hits.length) return refuse('unresolvable_collision');
       for (const hit of hits) dropWithFamily(String(hit.id), 'validation');
       changed = true;

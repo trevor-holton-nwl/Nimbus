@@ -331,6 +331,10 @@ async function readInput(path: string): Promise<string> {
 
 async function main(argv: string[]): Promise<void> {
   const arg = (name: string): string | undefined => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
+  if (argv.includes('--help')) {
+    process.stdout.write('usage: headless-cli --phase run|apply [--input file|-]   (JSON in, one JSON result on stdout)\n');
+    return;
+  }
   const phase = arg('phase') ?? 'run';
   const input = JSON.parse(await readInput(arg('input') ?? '-')) as RunInput & ApplyInput;
   const sink: LogSink = entry => process.stderr.write(`${JSON.stringify(entry)}\n`);

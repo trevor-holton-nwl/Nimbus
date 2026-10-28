@@ -11,6 +11,8 @@ only the file that owns them changed. `_clean_id`, `_to_pydt`,
 helpers used only within this domain and moved along with their callers.
 """
 import gzip
+import hashlib
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -520,10 +522,34 @@ def get_task_horizons(plant: str,
     }
 
 
+def optimizer_snapshot_version(plant: str) -> str:
+    """One token over every input the optimizer reads that has no version of its own: priority lists, setup truth,
+    the plant calendar and the tool inventory (the last two reuse their existing fingerprints). The Jobs runner
+    compares it before an automatic apply. A false mismatch fails the run safely; a missed change cannot slip by."""
+    import backend.setup.data as setup_data
+    h = db.plant_horizons(plant)
+    setup = dict(setup_data.get_setup_snapshot(plant))
+    setup.pop("freshness", None)
+    parts = {"calendar": h.get("calendar_version"), "tools": h.get("tool_inventory_version"),
+             "rule": h.get("tooling_rule"), "priority": plcache.PLANT_LISTS.get(plant, {}),
+             "setup": setup, "setup_active": md.get_plant_setup_active(plant)}
+    return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+@router.get("/optimizer/snapshot-version")
+def get_optimizer_snapshot_version(plant: str,
+                                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Combined version token for one plant's optimizer inputs (priority lists, setup, calendar, tool inventory)."""
+    if allowed_plants is not None and plant not in allowed_plants:
+        raise HTTPException(status_code=403, detail=f"Plant {plant!r} is not in your assigned plants")
+    return {"plant": plant, "version": optimizer_snapshot_version(plant)}
+
+
 def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[str] | None = None,
                              *, atomic_optimizer: bool = False,
                              strict_conflicts: bool = False,
-                             actor: str | None = None, client_id: str | None = None) -> dict:
+                             actor: str | None = None, client_id: str | None = None,
+                             ev: EventCtx | None = None) -> dict:
     """
     Normalize schedule/attribute edits and persist them write-through to Postgres
     in a single transaction (db.update_task_dates_bulk). No in-memory frame to
@@ -647,7 +673,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 "not_found": 0, "invalid_ids": [], "not_found_ids": [],
                 "stale": [], "versions": {}, "conflicts": [], "rejection_reasons": {}}
 
-    ev = EventCtx(source="planner", actor=actor, action_id=new_action_id(), client_id=client_id)
+    # `ev` lets an in-process caller (the Jobs optimizer) choose the history source and learn the action_id.
+    ev = ev or EventCtx(source="planner", actor=actor, action_id=new_action_id(), client_id=client_id)
     try:
         res = db.update_task_dates_bulk(
             norm, allowed_plants=allowed_plants,

@@ -129,6 +129,15 @@ Pilot rollout: (1) seed the plant's inventory from the Excel template (Master Da
 
 Rollback: set the rule back to Off (Order Rules, per plant); the optimizer then behaves as before and nothing else needs reverting. Rolling the image back is safe (older code ignores the table; the table and its rows stay). Never drop `tool_inventory`.
 
+## Jobs optimizer: Node in the image (2026-10-29)
+
+The Jobs scheduler (`backend/jobs/`) runs the optimizer in a Node child process, so the image now carries a Node runtime: the `Dockerfile` copies the single `/usr/local/bin/node` binary from the `frontendbuild` stage (about 100 MB; no npm, no node_modules) and a build-time smoke (`node frontend/optimization/headless-cli.mjs --help`) fails the build if the binary cannot run on the base image. The compiled `headless-cli.mjs` and its imports already ship in the copied `frontend/` tree. The jobs tables come from `migrations/2026-10-29-1-job-scheduler.sql` (apply through the ledger first; the app also creates them at boot).
+
+- **CPU and memory**: an Exhaustive run is single-threaded for up to its 180 s search budget (plus the tool pass and gap fill), and a Node child may use up to `NIMBUS_OPTIMIZER_NODE_MB` (default 1536 MB heap); RSS is unmeasured on the largest plant (remeasure before enabling many 8 am jobs). Size the Container App for the API plus one child, and stagger jobs across plants' local times.
+- **One plant per process**, started with `TZ=<plant timezone>`. Concurrency is capped at 1 by default (`NIMBUS_OPTIMIZER_CONCURRENCY`, max 2); a second run waits for a slot, and the hard timeout is search budget + 60 s.
+- Single replica only (the boot sweep and the in-process cancel registry assume one).
+- **Option**: if contention shows up, move the runs to a Container Apps Job built from this same image (`node` and the CLI are already in it); the runner would then gather the bundle, start the job and collect its stdout. Not built.
+- Verify after the roll (cache-bust): `GET /jobs/types` lists `optimizer.plant`; Run now on a Propose job against a test plant finishes `succeeded` with `steps` in its summary.
 ## Backward-scheduling cutover
 
 > **This runbook was written, not executed.** The 2026-10 backward-scheduling work was built and reviewed without touching the pilot (owner decision "deploy nothing", 2026-10-13): no `az` command, no `psql` against Azure and no `/promote-azure` run was made while writing it. Every command below is a plan for the operator, to be rehearsed on a copy first (step 3). Where a platform fact could not be checked from the repository it is marked **[unverified]**. The design evidence and every decision behind it are in `BACKWARD_SCHEDULING_MIGRATION.md` (section 8.13 is the long form of this runbook; section 8.8 is the rollback matrix).
