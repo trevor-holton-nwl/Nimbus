@@ -73,32 +73,129 @@ export function startVersionWatch(opts: VersionWatchOptions): () => void {
 }
 
 interface PresenterDeps {
-  Toast: { show(msg: string, type?: string, ms?: number, action?: { label: string; run: () => void }): void };
   Util: { t(key: string): string };
   Persistence: { hasPendingWork(): boolean };
   Modal: { confirm(opts: { title?: string; message?: string; confirmLabel?: string }): Promise<boolean> };
   reload?: () => void;
+  doc?: Document;                // test seam, defaults to `document`
+  onLayoutChange?: () => void;   // the shell redraws the Gantt after the strip toggles (version-watch must not import it)
 }
 
-/* PLACEHOLDER presenter: an info Toast with a Refresh action. The final banner
-   look replaces this factory (the seam is the onNewVersion callback passed to
-   startVersionWatch); the pending-work confirm path in `run` is the contract to keep. */
+/* The "new version available" banner: one in-flow strip (#update-banner in index.html, translated by the
+   boot i18n sweep) shown through `hidden` + body.update-available. Presenter state lives in this closure only.
+   The watcher calls the presenter on every poll while the ids differ, so it is idempotent per id; showing
+   never moves focus and nothing here reloads without the planner pressing Refresh (the pending-work confirm
+   path in `run` is the contract to keep). */
 export function makeUpdatePresenter(deps: PresenterDeps): (remoteId: string) => void {
-  const { Toast, Util, Persistence, Modal } = deps;
+  const { Util, Persistence, Modal } = deps;
+  const doc = deps.doc ?? document;
   const reload = deps.reload ?? (() => location.reload());
+  let el: HTMLElement | null = null;
+  let shownId: string | null = null;
+  let lastDismissedId: string | null = null;
+  let refreshBusy = false;
+
   const run = async (): Promise<void> => {
-    if (Persistence.hasPendingWork()) {
-      const ok = await Modal.confirm({
-        title: Util.t('toast.update_available'),
-        message: Util.t('confirm.update_unsaved'),
-        confirmLabel: Util.t('toast.update_refresh'),
-      });
-      if (!ok) return;
+    if (refreshBusy) return;
+    refreshBusy = true;
+    try {
+      if (Persistence.hasPendingWork()) {
+        const ok = await Modal.confirm({
+          title: Util.t('toast.update_available'),
+          message: Util.t('confirm.update_unsaved'),
+          confirmLabel: Util.t('toast.update_refresh'),
+        });
+        if (!ok) return;
+      }
+      reload();
+    } finally {
+      refreshBusy = false;
     }
-    reload();
   };
-  return () => {
-    Toast.show(Util.t('toast.update_available'), 'info', 30 * 60 * 1000,
-      { label: Util.t('toast.update_refresh'), run: () => { void run(); } });
+
+  // Same markup as index.html, for a page that lacks the static element (test harness, future layout).
+  function build(): HTMLElement {
+    const node = doc.createElement('div');
+    node.id = 'update-banner';
+    node.className = 'update-banner';
+    node.setAttribute('role', 'status');
+    node.setAttribute('aria-live', 'polite');
+    node.hidden = true;
+    const ico = doc.createElement('span');
+    ico.className = 'update-banner-ico';
+    ico.setAttribute('aria-hidden', 'true');
+    ico.textContent = '↻';
+    const msg = doc.createElement('span');
+    msg.className = 'update-banner-msg';
+    msg.textContent = Util.t('toast.update_available');
+    msg.title = Util.t('toast.update_available');
+    const tag = doc.createElement('span');
+    tag.className = 'update-banner-build';
+    tag.id = 'update-banner-build';
+    tag.setAttribute('aria-hidden', 'true');
+    const actions = doc.createElement('span');
+    actions.className = 'update-banner-actions';
+    const refresh = doc.createElement('button');
+    refresh.type = 'button';
+    refresh.className = 'btn btn-primary sm update-banner-refresh';
+    refresh.id = 'update-banner-refresh';
+    refresh.textContent = Util.t('toast.update_refresh');
+    const dismissBtn = doc.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.className = 'icon-btn sm update-banner-dismiss';
+    dismissBtn.id = 'update-banner-dismiss';
+    dismissBtn.setAttribute('aria-label', Util.t('btn.dismiss'));
+    dismissBtn.title = Util.t('btn.dismiss');
+    dismissBtn.textContent = '×';
+    actions.append(refresh, dismissBtn);
+    node.append(ico, msg, tag, actions);
+    const bar = doc.querySelector('.context-bar');
+    if (bar) bar.after(node);
+    else doc.body.prepend(node);
+    return node;
+  }
+
+  function ensure(): HTMLElement {
+    if (el?.isConnected) return el;
+    el = doc.getElementById('update-banner') ?? build();
+    if (!el.dataset.wired) {
+      el.querySelector('#update-banner-refresh')?.addEventListener('click', () => { void run(); });
+      el.querySelector('#update-banner-dismiss')?.addEventListener('click', dismiss);
+      el.dataset.wired = '1';
+    }
+    return el;
+  }
+
+  function show(remoteId: string): void {
+    const node = ensure();
+    const tag = node.querySelector('#update-banner-build');
+    if (tag) tag.textContent = remoteId;
+    const wasHidden = node.hidden;
+    node.hidden = false;
+    doc.body.classList.add('update-available');
+    shownId = remoteId;
+    if (wasHidden) deps.onLayoutChange?.();
+  }
+
+  function hide(): void {
+    if (!el) return;
+    const hadFocus = el.contains(doc.activeElement);
+    el.hidden = true;
+    doc.body.classList.remove('update-available');
+    shownId = null;
+    if (hadFocus) doc.getElementById('nav-drawer-toggle')?.focus({ preventScroll: true });
+    deps.onLayoutChange?.();
+  }
+
+  function dismiss(): void {
+    lastDismissedId = shownId;
+    hide();
+  }
+
+  return function onNewVersion(remoteId: string): void {
+    if (!remoteId) return;
+    if (remoteId === lastDismissedId) return;
+    if (shownId === remoteId && el && !el.hidden) return;
+    show(remoteId);
   };
 }

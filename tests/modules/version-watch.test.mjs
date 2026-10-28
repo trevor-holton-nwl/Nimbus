@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { shouldNotify, startVersionWatch, makeUpdatePresenter } from '../../frontend/shell/version-watch.mjs';
+import { makeDocument, makeEl } from './helpers/dom-stub.mjs';
 
 function makeHarness({ hidden = false } = {}) {
   const listeners = new Set();
@@ -114,46 +115,142 @@ test('stop() clears the timer, removes the listener and silences later polls', a
   assert.deepEqual(seen, []);
 });
 
-function presenterDeps({ pending, confirmResult }) {
-  const shown = [];
+
+function presenterDeps({ pending = false, confirmResult = true, staticMarkup = true } = {}) {
+  const doc = makeDocument();
+  const bar = makeEl('', doc); bar.className = 'context-bar'; doc.body.appendChild(bar);
+  // dom-stub has no ChildNode.after()/prepend(); minimal shims for the presenter's markup fallback.
+  bar.after = node => { const kids = bar.parentNode.children; bar.parentNode.appendChild(node); kids.splice(kids.indexOf(node), 1); kids.splice(kids.indexOf(bar) + 1, 0, node); };
+  doc.body.prepend = node => { doc.body.appendChild(node); doc.body.children.unshift(doc.body.children.pop()); };
+  const toggle = makeEl('nav-drawer-toggle', doc, 'button'); doc.body.appendChild(toggle);
+  if (staticMarkup) {
+    const banner = makeEl('update-banner', doc); banner.hidden = true; doc.body.appendChild(banner);
+    banner.appendChild(makeEl('update-banner-build', doc, 'span'));
+    banner.appendChild(makeEl('update-banner-refresh', doc, 'button'));
+    banner.appendChild(makeEl('update-banner-dismiss', doc, 'button'));
+  }
   const confirms = [];
-  let reloads = 0;
+  let reloads = 0, layouts = 0;
   return {
-    shown, confirms, reloads: () => reloads,
+    doc, confirms, reloads: () => reloads, layouts: () => layouts,
+    banners: () => doc.querySelectorAll('#update-banner'),
+    banner: () => doc.getElementById('update-banner'),
+    click: id => doc.getElementById(id).dispatch('click'),
     deps: {
-      Toast: { show: (...a) => shown.push(a) },
       Util: { t: k => k },
       Persistence: { hasPendingWork: () => pending },
       Modal: { confirm: async o => { confirms.push(o); return confirmResult; } },
       reload: () => { reloads++; },
+      doc,
+      onLayoutChange: () => { layouts++; },
     },
   };
 }
 
-test('presenter shows a 30 minute info toast whose action reloads when nothing is pending', async () => {
-  const p = presenterDeps({ pending: false, confirmResult: true });
-  makeUpdatePresenter(p.deps)('new');
-  const [msg, type, ms, action] = p.shown[0];
-  assert.equal(msg, 'toast.update_available');
-  assert.equal(type, 'info');
-  assert.equal(ms, 30 * 60 * 1000);
-  assert.equal(action.label, 'toast.update_refresh');
-  action.run(); await flush();
+test('first call shows the strip, sets the build tag and body class, and fires onLayoutChange once', () => {
+  const p = presenterDeps();
+  makeUpdatePresenter(p.deps)('b2');
+  assert.equal(p.banner().hidden, false);
+  assert.equal(p.doc.getElementById('update-banner-build').textContent, 'b2');
+  assert.equal(p.doc.body.classList.contains('update-available'), true);
+  assert.equal(p.layouts(), 1);
+});
+
+test('repeated polls with the same id are no-ops', () => {
+  const p = presenterDeps();
+  const on = makeUpdatePresenter(p.deps);
+  on('b2'); on('b2'); on('b2');
+  assert.equal(p.layouts(), 1);
+  assert.equal(p.banners().length, 1);
+  assert.equal(p.doc.getElementById('update-banner-refresh').listeners.click.length, 1);
+});
+
+test('a still-newer id updates the tag in place without another layout call', () => {
+  const p = presenterDeps();
+  const on = makeUpdatePresenter(p.deps);
+  on('b2'); on('b3');
+  assert.equal(p.doc.getElementById('update-banner-build').textContent, 'b3');
+  assert.equal(p.layouts(), 1);
+});
+
+test('dismiss hides the strip until a different id arrives', () => {
+  const p = presenterDeps();
+  const on = makeUpdatePresenter(p.deps);
+  on('b2');
+  p.click('update-banner-dismiss');
+  assert.equal(p.banner().hidden, true);
+  assert.equal(p.doc.body.classList.contains('update-available'), false);
+  assert.equal(p.layouts(), 2);
+  on('b2'); on('b2');
+  assert.equal(p.banner().hidden, true);
+  assert.equal(p.layouts(), 2);
+  on('b3');
+  assert.equal(p.banner().hidden, false);
+  assert.equal(p.doc.getElementById('update-banner-build').textContent, 'b3');
+  assert.equal(p.layouts(), 3);
+});
+
+test('dismiss moves focus to the nav toggle only when focus was inside the strip', () => {
+  const p = presenterDeps();
+  makeUpdatePresenter(p.deps)('b2');
+  p.doc.getElementById('update-banner-dismiss').focus();
+  p.click('update-banner-dismiss');
+  assert.equal(p.doc.activeElement, p.doc.getElementById('nav-drawer-toggle'));
+
+  const q = presenterDeps();
+  makeUpdatePresenter(q.deps)('b2');
+  assert.equal(q.doc.activeElement, null, 'showing never steals focus');
+  q.click('update-banner-dismiss');
+  assert.equal(q.doc.activeElement, null);
+});
+
+test('Refresh reloads straight away when nothing is pending', async () => {
+  const p = presenterDeps({ pending: false });
+  makeUpdatePresenter(p.deps)('b2');
+  p.click('update-banner-refresh'); await flush();
   assert.equal(p.confirms.length, 0);
   assert.equal(p.reloads(), 1);
 });
 
-test('with pending work the action asks first and reloads only on confirm', async () => {
+test('with pending work Refresh asks first, reloads only on confirm and keeps the strip on cancel', async () => {
   const yes = presenterDeps({ pending: true, confirmResult: true });
-  makeUpdatePresenter(yes.deps)('new');
-  yes.shown[0][3].run(); await flush();
+  makeUpdatePresenter(yes.deps)('b2');
+  yes.click('update-banner-refresh'); await flush();
   assert.equal(yes.confirms.length, 1);
   assert.equal(yes.confirms[0].message, 'confirm.update_unsaved');
+  assert.equal(yes.confirms[0].confirmLabel, 'toast.update_refresh');
   assert.equal(yes.reloads(), 1);
 
   const no = presenterDeps({ pending: true, confirmResult: false });
-  makeUpdatePresenter(no.deps)('new');
-  no.shown[0][3].run(); await flush();
+  makeUpdatePresenter(no.deps)('b2');
+  no.click('update-banner-refresh'); await flush();
   assert.equal(no.confirms.length, 1);
   assert.equal(no.reloads(), 0);
+  assert.equal(no.banner().hidden, false);
+});
+
+test('a second Refresh click while the confirm is open is ignored', async () => {
+  let release;
+  const p = presenterDeps({ pending: true });
+  p.deps.Modal.confirm = o => { p.confirms.push(o); return new Promise(r => { release = r; }); };
+  makeUpdatePresenter(p.deps)('b2');
+  p.click('update-banner-refresh'); p.click('update-banner-refresh'); await flush();
+  assert.equal(p.confirms.length, 1);
+  release(false); await flush();
+  assert.equal(p.reloads(), 0);
+});
+
+test('without the static markup the presenter builds exactly one wired strip after the context bar', () => {
+  const p = presenterDeps({ staticMarkup: false });
+  const on = makeUpdatePresenter(p.deps);
+  on('b2'); on('b2'); on('b3');
+  assert.equal(p.banners().length, 1);
+  assert.equal(p.banner().hidden, false);
+  assert.equal(p.banner().getAttribute('role'), 'status');
+  const kids = p.doc.body.children;
+  assert.equal(kids[kids.findIndex(k => k.className === 'context-bar') + 1], p.banner());
+  assert.equal(p.doc.getElementById('update-banner-build').textContent, 'b3');
+  assert.equal(p.doc.getElementById('update-banner-refresh').textContent, 'toast.update_refresh');
+  assert.equal(p.doc.getElementById('update-banner-dismiss').getAttribute('aria-label'), 'btn.dismiss');
+  assert.equal(p.doc.getElementById('update-banner-refresh').listeners.click.length, 1);
 });

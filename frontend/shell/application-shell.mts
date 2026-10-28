@@ -2458,7 +2458,13 @@ const App = {
       }
     });
     // Tell this tab when a newer build is live (polls GET /version; never auto-reloads).
-    startVersionWatch({ onNewVersion: makeUpdatePresenter({ Toast, Util, Persistence, Modal }) });
+    startVersionWatch({
+      onNewVersion: makeUpdatePresenter({
+        Util, Persistence, Modal,
+        // The strip changes the panel height; redraw the Gantt once its fade settles (same hook as the side-panel toggle).
+        onLayoutChange: () => setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS),
+      }),
+    });
     // A drag in flight must never see the calendar re-hydrate under it (Persistence cannot import the Gantt).
     Persistence._calendarRefreshBlocked = () => !!Interaction._isDragging;
 
