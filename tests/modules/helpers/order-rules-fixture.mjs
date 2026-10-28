@@ -181,6 +181,21 @@ export function scenarioSnapshot(spec) {
   snapshot.blocks = s.blocks.map(([start, end], index) => ({ id: `blackout-${index}`, line: 'L1', start: at(start), end: at(end) }));
   snapshot.setupSnapshot = { ...scenarioSetupTruth(s), plant_active: true };
   snapshot.frozenHorizonEnd = null;
+  applyToolVariant(snapshot, s.tool);
+  return snapshot;
+}
+
+/** The sixth setting, the tooling rule column. `tool` is undefined (no inventory, rule absent: today's snapshot), 'off'
+ * (inventory loaded, rule Off), 'hard' (rule Hard, inventory loaded with 3 copies of T1: a single machine can never
+ * exceed them, so the pass must be transparent) or 'hard-unloaded' (rule Hard, inventory NOT loaded: unconstrained).
+ * Every task carries T1 in PRT_01 in every variant. */
+export function applyToolVariant(snapshot, tool) {
+  if (!tool) return snapshot;
+  for (const t of snapshot.tasks) t.PRT_01 = 'T1';
+  const plant = snapshot.masterData.plants[0];
+  plant.setup_policy_config = { ...(plant.setup_policy_config ?? {}), toolingRule: tool === 'off' ? 'off' : 'hard' };
+  snapshot.masterData.tool_inventory = tool === 'hard-unloaded' ? undefined
+    : [{ plant: 'P1', tool_id: 'T1', total_qty: 3, out_of_service_qty: 0, note: null }];
   return snapshot;
 }
 

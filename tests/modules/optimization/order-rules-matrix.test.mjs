@@ -1,8 +1,9 @@
 // Order Rules test matrix (Plant > System Settings > Scheduling Rules > Order Rules).
 //
-// Five settings, three optimizer modes (SPT, Min Changeover, Due Date):
+// Six settings, three optimizer modes (SPT, Min Changeover, Due Date):
 //   max pull-forward days, max push-forward days, productive segment floor,
-//   split order policy, unknown setup policy.
+//   split order policy, unknown setup policy, and the tooling rule (Off / Hard;
+//   see the "Sixth setting" section at the foot of this file).
 // Remove Backlog is out of scope.
 //
 // Every scenario in CASES is plain JSON built by tests/modules/helpers/
@@ -582,4 +583,160 @@ test('O2: gap-fill is not disabled after finalize (the repaired candidate is int
   const filled = SetupScheduler.fillPlanningGaps(snapshot, bounds, result);
   assert.equal(filled.gapFill.complete, true, 'an invalid candidate would have skipped the gap check and reported it incomplete');
   assert.equal(filled.dispositions.find(d => d.id === 'A').reason.code, 'setup_transition_unrecorded');
+});
+
+// ── Sixth setting: the tooling rule column (Off / Hard), crossed with every case above ────────────────────────────
+// Each case is run again with every task carrying T1 and with the rule in each variant (see applyToolVariant in the
+// fixture): 'off' (inventory loaded), 'hard' (inventory loaded, 3 copies: one machine can never exceed them) and
+// 'hard-unloaded' (inventory not loaded). The tooling rule must be INVISIBLE on this single-line matrix: patches,
+// dispositions, score and findings are byte-identical to the baseline snapshot with no inventory and the rule absent,
+// for all three strategies and the direct / engine / worker / live passes. The three tool fields are absent when the
+// rule is Off or the inventory is not loaded; under a loaded Hard rule only `toolPass` appears (nothing to move or queue).
+const TOOL_VARIANTS = ['off', 'hard', 'hard-unloaded'];
+const withTool = (spec, tool) => ({ ...spec, tool });
+const PATCH_KEYS = ['start_date', 'end_date', 'scheduleSegments', 'planning_status', 'planning_reason'];
+
+/** The comparable face of a candidate: everything but timings and the tool fields. */
+function canonCandidate(candidate) {
+  const byId = (a, b) => (a.id < b.id ? -1 : 1);
+  return JSON.stringify({
+    patches: [...candidate.patches].sort(byId).map(p => ({ id: p.id, changes: p.changes })),
+    dispositions: [...(candidate.dispositions ?? [])].sort(byId),
+    score: candidate.score,
+    findings: (candidate.validationFindings ?? []).map(f => [f.code, f.severity, f.taskId ?? null, f.message]).sort(),
+  });
+}
+
+/** checkInvariants, tool edition: a patch never changes MACHINE (or any business field), every tool outcome carries its
+ * structured reason, and the tool fields obey the Off / unloaded / Hard presence rule. */
+function checkToolInvariants(tool, candidate) {
+  for (const patch of candidate.patches) {
+    assert.deepEqual(Object.keys(patch.changes).filter(key => !PATCH_KEYS.includes(key)), [], `patch ${patch.id} changes only schedule fields (never MACHINE)`);
+    const reason = patch.changes.planning_reason;
+    if (reason && /^tool_/.test(reason.code)) {
+      assert.equal(typeof reason.tool_id, 'string', 'a tool reason names the tool');
+      assert.equal(typeof reason.available, 'number', 'and the copies available');
+      assert.ok(Array.isArray(reason.holders), 'and the holders');
+    }
+  }
+  assert.equal((candidate.validationFindings ?? []).some(f => f.severity === 'error' && f.code === 'tool_overflow'), false, 'no unresolved tool overflow');
+  if (tool === 'hard') {
+    assert.equal(candidate.toolPass?.complete, true);
+    assert.equal(candidate.toolBlocked, undefined); assert.equal(candidate.toolMoved, undefined);
+  } else {
+    assert.equal(candidate.toolPass, undefined); assert.equal(candidate.toolBlocked, undefined); assert.equal(candidate.toolMoved, undefined);
+  }
+}
+
+for (const testCase of CASES) {
+  for (const { mode, label, direct } of MODES) {
+    for (const tool of TOOL_VARIANTS) {
+      test(`tooling ${tool} parity, direct ${label}: ${testCase.name}`, options(testCase, 'direct', mode), () => {
+        const base = direct(scenarioSnapshot(testCase.spec), scenarioBounds(testCase.spec));
+        const spec = withTool(testCase.spec, tool);
+        const result = direct(scenarioSnapshot(spec), scenarioBounds(spec));
+        assert.equal(canonCandidate(result), canonCandidate(base), 'identical to the snapshot with no inventory');
+        checkToolInvariants(tool, result);
+      });
+      test(`tooling ${tool} parity, Engine.evaluateSchedule ${label}: ${testCase.name}`, options(testCase, 'engine', mode), () => {
+        const base = Engine.evaluateSchedule(mode, engineOptions(testCase.spec), scenarioSnapshot(testCase.spec));
+        const spec = withTool(testCase.spec, tool);
+        const result = Engine.evaluateSchedule(mode, engineOptions(spec), scenarioSnapshot(spec));
+        assert.equal(canonCandidate(result), canonCandidate(base), 'identical to the snapshot with no inventory');
+        checkToolInvariants(tool, result);
+      });
+      test(`tooling ${tool} parity, worker ${label}: ${testCase.name}`, options(testCase, 'worker', mode), () => {
+        const spec = withTool(normalizeScenario(testCase.spec), tool);
+        const request = { mode, plant: 'P1', respectFirmed: true, respectCalendar: true,
+          now: at(spec.now), runNow: at(spec.now), planningStart: at(spec.now), endDate: at(spec.horizonEnd) };
+        const run = s => buildOptimizerWorkerResponse({ runId: `matrix-tool-${mode}`, mode, snapshot: scenarioSnapshot(s), request, deadlineDurationMs: 5000 }, () => 5000);
+        const base = run(normalizeScenario(testCase.spec)).candidate;
+        const response = run(spec);
+        assert.equal(canonCandidate(response.candidate), canonCandidate(base));
+        const engineResult = Engine.evaluateSchedule(mode, engineOptions(spec), scenarioSnapshot(spec));
+        assert.equal(canonCandidate(response.candidate), canonCandidate(engineResult), 'worker == main thread');
+        checkToolInvariants(tool, response.candidate);
+      });
+    }
+  }
+}
+
+// Live: one more child, every (case, mode, variant) plus the baseline, compared task by task.
+let liveToolResults = null;
+function liveToolRun() {
+  if (liveToolResults) return liveToolResults;
+  const child = String.raw`
+    import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.url);
+    globalThis.NimbusComputeCore = require('./frontend/nimbus-compute-core.js');
+    globalThis.window = {};
+    globalThis.document = { getElementById: () => null };
+    const { Store } = await import('./frontend/platform/store.mjs');
+    const { Engine } = await import('./frontend/optimization/engine.mjs');
+    const F = await import('./tests/modules/helpers/order-rules-fixture.mjs');
+    const jobs = JSON.parse(process.env.ORDER_RULES_TOOL_JOBS);
+    const out = {};
+    for (const job of jobs) {
+      const spec = F.normalizeScenario({ ...job.spec, tool: job.tool || undefined });
+      const snapshot = F.scenarioSnapshot(spec);
+      Store.setMasterData(snapshot.masterData, 'child-test');
+      Store.setSelectedPlant('P1', 'child-test');
+      Store.replaceCalendars(snapshot.calendars, 'child-test');
+      Store.replacePlants(snapshot.plants, 'child-test');
+      Store.replaceSetupSnapshot(snapshot.setupSnapshot, 'child-test');
+      Store.replaceBlocks(snapshot.blocks, 'child-test');
+      Store.replaceFirmedIds(new Set(spec.firmed), 'child-test');
+      Store.setTasks(snapshot.tasks, 'child-test');
+      Engine.runAndApply(job.mode, {
+        plant: 'P1', respectFirmed: true, respectCalendar: true,
+        runNow: F.at(spec.now), startDate: F.at(spec.now), endDate: F.at(spec.horizonEnd),
+      });
+      out[job.key] = Store.tasksArr.map(t => ({
+        id: t.id, planning_status: t.planning_status, planning_reason: t.planning_reason ?? null,
+        start_date: t.start_date, end_date: t.end_date, scheduleSegments: t.scheduleSegments ?? [], MACHINE: t.MACHINE,
+      }));
+    }
+    console.log('@@RESULT@@' + JSON.stringify(out));
+    process.exit(0);
+  `;
+  const jobs = CASES.flatMap((testCase, index) => MODES.flatMap(({ mode }) => ['', ...TOOL_VARIANTS].map(tool => (
+    { key: `${index}:${mode}:${tool}`, mode, tool, spec: testCase.spec }))));
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', child], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, ORDER_RULES_TOOL_JOBS: JSON.stringify(jobs) },
+  });
+  assert.equal(run.error, undefined, `live tooling probe did not complete: ${run.error?.message || run.stderr}`);
+  assert.equal(run.status, 0, run.stderr || 'live tooling probe exited unsuccessfully');
+  const line = run.stdout.split('\n').find(text => text.startsWith('@@RESULT@@'));
+  assert.ok(line, `live tooling probe printed no result: ${run.stdout.slice(-400)}`);
+  liveToolResults = JSON.parse(line.slice('@@RESULT@@'.length));
+  return liveToolResults;
+}
+
+CASES.forEach((testCase, index) => {
+  for (const { mode, label } of MODES) {
+    for (const tool of TOOL_VARIANTS) {
+      test(`tooling ${tool} parity, live Engine.runAndApply ${label}: ${testCase.name}`, options(testCase, 'live', mode), () => {
+        const all = liveToolRun();
+        const strip = rows => JSON.stringify(rows.map(r => ({ ...r, planning_reason: r.planning_reason && { code: r.planning_reason.code, message: r.planning_reason.message } })));
+        assert.equal(strip(all[`${index}:${mode}:${tool}`]), strip(all[`${index}:${mode}:`]), 'live result identical to the snapshot with no inventory');
+        assert.ok(all[`${index}:${mode}:${tool}`].every(r => r.MACHINE === 'L1'), 'MACHINE never changes');
+      });
+    }
+  }
+});
+
+// Hard with available 0: every order carrying the tool goes to Needs Planning with the structured tool_unavailable reason.
+test('tooling Hard with 0 copies available: every optimizable order is queued with tool_unavailable on every strategy and pass', () => {
+  const spec = { rules: {}, tasks: [T('a', 2, 'GREEN', DUE_WED), T('b', 1, 'BLUE', DUE_WED)] };
+  for (const { mode, direct } of MODES) {
+    const make = () => { const s = scenarioSnapshot(withTool(spec, 'hard')); s.masterData.tool_inventory[0].out_of_service_qty = 3; return s; };
+    for (const result of [direct(make(), scenarioBounds(spec)), Engine.evaluateSchedule(mode, engineOptions(spec), make())]) {
+      const queued = result.patches.filter(p => p.changes.planning_status === 'needs_planning');
+      assert.deepEqual(queued.map(p => p.id).sort(), ['a', 'b']);
+      assert.ok(queued.every(p => p.changes.planning_reason.code === 'tool_unavailable' && p.changes.planning_reason.tool_id === 'T1' && p.changes.planning_reason.available === 0));
+      assert.deepEqual((result.toolBlocked ?? []).map(e => e.orderId).sort(), ['a', 'b']);
+      assert.equal((result.validationFindings ?? []).some(f => f.severity === 'error'), false);
+    }
+  }
 });

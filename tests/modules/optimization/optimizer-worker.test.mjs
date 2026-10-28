@@ -17,6 +17,7 @@ import {
   SETUP_AWARE_EXHAUSTIVE_BUDGET_MS,
 } from '../../../frontend/optimization/engine.mjs';
 import { validateCandidateForApply } from '../../../frontend/optimization/setup-scheduler.mjs';
+import * as TF from '../helpers/tool-overflow-fixture.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
@@ -688,4 +689,97 @@ test('Tool Inventory: the optional toolBlocked / toolMoved / toolPass fields sur
   const plainRe = rehydrateOptimizerCandidate(plain.candidate, workerSnapshot, plain.validation);
   assert.equal(plainRe.toolBlocked, undefined);
   assert.equal(plainRe.toolPass, undefined);
+});
+
+// ── Tool Inventory Wave 6: the overflow pass through the real worker path ──────────────────────────────────────────
+function toolWorkerSnapshot(rule = 'hard') {
+  return TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 10, tools: ['T1'], due: '2035-08-06T18:00:00' },
+    { id: 'B', line: 'L2', run: 10, tools: ['T1'], due: '2035-08-06T18:00:00' },
+    { id: 'Q', line: 'L3', run: 10, tools: ['T1'], due: '2035-08-06T18:00:00' },
+    { id: 'M1', line: 'L4', run: 4, tools: ['T2'], due: '2035-08-08T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+    { id: 'M2', line: 'L5', run: 4, tools: ['T2'], due: '2035-08-09T08:00:00', start: '2035-08-06T10:00:00', end: '2035-08-06T14:00:00' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }, { tool_id: 'T2', total_qty: 1 }], rule, plantExtra: { max_push_forward_days: 0 } });
+}
+const toolWorkerRequest = snap => ({
+  runId: 'tool-worker', mode: 'changeover', snapshot: snap, deadlineDurationMs: 8000,
+  request: { ...TF.toolRequest(), mode: 'changeover' },
+});
+const canonTool = candidate => JSON.stringify({
+  patches: [...candidate.patches].sort((a, b) => (a.id < b.id ? -1 : 1)).map(p => ({ id: p.id, c: JSON.parse(JSON.stringify(p.changes)) })),
+  dispositions: [...(candidate.dispositions ?? [])].sort((a, b) => (a.id < b.id ? -1 : 1)),
+  toolBlocked: candidate.toolBlocked, toolMoved: candidate.toolMoved, complete: candidate.toolPass?.complete,
+});
+
+async function runInRealWorker(request) {
+  const workerPath = pathToFileURL(resolve('frontend/optimization/optimizer-worker.mjs')).href;
+  const corePath = resolve('frontend/nimbus-compute-core.js');
+  const bridge = `
+    import { parentPort } from 'node:worker_threads';
+    import { createRequire } from 'node:module';
+    globalThis.postMessage = value => parentPort.postMessage(value);
+    Object.defineProperty(globalThis, 'onmessage', { configurable: true, set(handler) { parentPort.on('message', data => handler({ data })); } });
+    globalThis.NimbusComputeCore = createRequire(${JSON.stringify(corePath)})(${JSON.stringify(corePath)});
+    await import(${JSON.stringify(workerPath)});
+  `;
+  const worker = new Worker(bridge, { eval: true, type: 'module' });
+  try {
+    return await new Promise((resolveResponse, reject) => {
+      const timer = setTimeout(() => reject(new Error('real optimizer worker timed out')), 10000);
+      worker.on('message', value => { clearTimeout(timer); resolveResponse(value); });
+      worker.once('error', error => { clearTimeout(timer); reject(error); });
+      worker.postMessage(request);
+    });
+  } finally { await worker.terminate(); }
+}
+
+test('Tool Inventory: a real worker round trip carries toolBlocked / toolMoved / toolPass clone-safe and matches the main-thread evaluation', async () => {
+  const snap = toolWorkerSnapshot('hard');
+  const response = await runInRealWorker(toolWorkerRequest(snap));
+  assert.ok(!response.error, response.error);
+  const fromWorker = response.candidate;
+  const direct = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap)), () => 5000).candidate;
+  assert.ok(fromWorker.toolMoved?.length >= 1, 'the overlap on T1 was resolved by moving an order');
+  assert.ok(fromWorker.toolBlocked?.length >= 1, 'the order that cannot finish inside the push cap was queued for tooling');
+  assert.ok(fromWorker.toolBlocked.every(e => ['A', 'B', 'Q'].includes(e.orderId) && e.tool === 'T1'));
+  assert.equal(typeof fromWorker.toolPass.elapsedMs, 'number');
+  assert.equal(canonTool(fromWorker), canonTool(direct), 'worker and main thread agree (elapsedMs aside)');
+  const rehydrated = rehydrateOptimizerCandidate(response.candidate, snap, response.validation);
+  assert.deepEqual(rehydrated.toolBlocked, fromWorker.toolBlocked);
+  assert.deepEqual(rehydrated.toolMoved, fromWorker.toolMoved);
+  assert.deepEqual((rehydrated.validationFindings ?? []).filter(f => f.severity === 'error'), []);
+  // Off: the same request carries none of the three fields.
+  const off = await runInRealWorker({ ...toolWorkerRequest(toolWorkerSnapshot('off')), runId: 'tool-worker-off' });
+  assert.equal(off.candidate.toolPass, undefined);
+  assert.equal(off.candidate.toolBlocked, undefined);
+  assert.equal(off.candidate.toolMoved, undefined);
+});
+
+test('Tool Inventory: Apply-time validation re-derives the rule from the SNAPSHOT (Hard flags an overlap, Off does not)', () => {
+  const snap = toolWorkerSnapshot('hard');
+  const response = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap)), () => 5000);
+  const movedId = response.candidate.toolMoved[0].orderId;
+  const withoutMove = c => ({ ...c, patches: c.patches.filter(p => p.id !== movedId) });
+  const hard = rehydrateOptimizerCandidate(withoutMove(response.candidate), snap, response.validation);
+  const errs = validateCandidateForApply(hard, snap).filter(f => f.severity === 'error');
+  assert.ok(errs.some(f => f.code === 'tool_overflow' && f.taskId === movedId), 'dropping the move leaves the overlap: an error naming exactly that order');
+  const offSnap = toolWorkerSnapshot('off');
+  const off = rehydrateOptimizerCandidate(withoutMove(response.candidate), offSnap, response.validation);
+  assert.equal(validateCandidateForApply(off, offSnap).some(f => f.code === 'tool_overflow'), false, 'rule Off: no tool finding');
+  const unloaded = { ...snap, masterData: { ...snap.masterData, tool_inventory: undefined } };
+  const un = rehydrateOptimizerCandidate(withoutMove(response.candidate), unloaded, response.validation);
+  assert.equal(validateCandidateForApply(un, unloaded).some(f => f.code === 'tool_overflow'), false, 'inventory not loaded: unconstrained');
+});
+
+test('Tool Inventory: compute-core-stale is thrown ONLY for a Hard plant with a loaded inventory', () => {
+  const real = globalThis.NimbusComputeCore;
+  try {
+    for (const missing of ['findToolOverages', 'toolHeadroom']) {
+      globalThis.NimbusComputeCore = { ...real, [missing]: undefined };
+      assert.throws(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('hard'))), () => 5000), /compute-core-stale/, 'Hard + loaded inventory + old core: ' + missing);
+      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('off'))), () => 5000), 'an Off plant keeps working with the older core');
+      const unloaded = TF.toolSnapshot([{ id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' }], { inventory: null, rule: 'hard' });
+      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(unloaded)), () => 5000), 'Hard with the inventory not loaded is a no-op');
+    }
+  } finally { globalThis.NimbusComputeCore = real; }
 });

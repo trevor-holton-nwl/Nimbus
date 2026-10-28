@@ -11,6 +11,9 @@ import { Store } from '../../../frontend/platform/store.mjs';
 import { Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
+import { validateCandidate } from '../../../frontend/optimization/setup-scheduler.mjs';
+import { snapshotSchedule } from '../../../frontend/optimization/engine.mjs';
+import * as TF from '../helpers/tool-overflow-fixture.mjs';
 
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
@@ -493,4 +496,82 @@ test('Persistence.ensureToolInventoryCurrent: unchanged version is fresh without
   } finally {
     Persistence.refreshToolInventory = prior.refresh; Persistence._readToolInventoryVersion = prior.read; Persistence._toolInventoryBaseline = prior.base;
   }
+});
+
+// ── Tool Inventory Wave 6: _pruneAgainstLive with tool_overflow findings ─────────────────────────────────────────────
+// A tool_overflow ERROR names exactly ONE order, and only an order of the KEPT set can be named (the validated
+// dispositions are the kept patches'), so `dropWithFamily` always resolves it; the message is fixed, the holders live in
+// `detail`, so the code|taskId|message key stays stable across passes. Dropping a patch reverts that order to its LIVE
+// position, which can collide with the next kept patch: the loop re-validates up to 3 passes, so a chain needing two
+// sequential drops resolves and a chain needing three is refused (null) rather than half-applied.
+const T0 = new Date('2035-08-06T10:00:00');
+const hrs = n => new Date(+T0 + n * 3600 * 1000);
+function pruneFixture(live, kept, { plant = 'P1' } = {}) {
+  const ids = Object.keys(live);
+  const specs = ids.map((id, i) => ({ id, line: 'L' + (i + 1), run: 4, tools: ['T1'], due: '2035-08-09T08:00:00' }));
+  const snap = TF.toolSnapshot(specs.map(s => ({ ...s, start: undefined })), { inventory: [{ tool_id: 'T1', total_qty: 1 }], lines: ids.map((_, i) => 'L' + (i + 1)) });
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorMd = Store.masterData;
+  const priorPlant = Store.selectedPlant;
+  Store.setMasterData(structuredClone(snap.masterData), 'unit-test');
+  Store.setSelectedPlant(plant, 'unit-test');
+  Store.setTasks(snap.tasks.map(t => ({ ...t, start_date: hrs(live[t.id][0]), end_date: hrs(live[t.id][1]), planning_status: 'scheduled', user_scheduled: true })), 'unit-test');
+  const patches = Object.entries(kept).map(([id, [a, b]]) => ({ id, changes: { start_date: hrs(a), end_date: hrs(b), scheduleSegments: [], planning_status: 'scheduled', planning_reason: null } }));
+  const candidate = {
+    patches, dispositions: ids.map((id, i) => ({ id, line: 'L' + (i + 1), status: 'scheduled' })),
+    score: [], explanation: [], diagnostics: { candidateCount: 1 }, unchangedLines: [], missingEdges: [],
+    toolPass: { complete: true, elapsedMs: 0 },
+    validationContext: { snapshot: snap, bounds: TF.toolBounds(snap, { respectCalendar: false }) },
+  };
+  return {
+    snap, candidate,
+    prune: dropIds => OptimizerPreview._pruneAgainstLive({ plant, candidate, snapshot: snap.tasks, shouldDrop: id => dropIds.includes(id) }),
+    restore() { Store.setTasks(priorTasks, 'unit-test'); if (priorMd) Store.setMasterData(priorMd, 'unit-test'); if (priorPlant) Store.setSelectedPlant(priorPlant, 'unit-test'); },
+  };
+}
+
+test('prune: a planner edit that lands on a kept order\'s tool slot drops THAT kept order (one tool_overflow, fixed message)', () => {
+  // Live: A, B, C all on T1 at 0-4h (pre-existing overlap). Candidate keeps A, moves B to 4-8h and C to 8-12h.
+  const fx = pruneFixture({ A: [0, 4], B: [0, 4], C: [0, 4], Y: [40, 44] }, { B: [4, 8], C: [8, 12], Y: [44, 48] });
+  try {
+    assert.ok(fx.prune([]), 'the candidate applies as computed');
+    assert.deepEqual(fx.prune([]).dropped, []);
+    // The planner drags C (live) onto B's new slot: the live board now has C on top of kept B.
+    Store.updateTask('C', { start_date: hrs(5), end_date: hrs(9) }, 'user');
+    const pruned = fx.prune(['C']);
+    assert.ok(pruned, 'resolved, not refused');
+    assert.deepEqual(pruned.kept.map(p => p.id), ['Y'], 'B (the only KEPT holder in the cluster) is dropped, and C was skipped by the caller; Y is untouched');
+    assert.deepEqual([...pruned.dropped].sort(), ['B', 'C']);
+  } finally { fx.restore(); }
+});
+
+test('prune: the tool_overflow finding names one kept order with a fixed message and the holders in detail', () => {
+  const fx = pruneFixture({ A: [0, 4], B: [0, 4] }, { B: [4, 8] });
+  try {
+    Store.updateTask('A', { start_date: hrs(5), end_date: hrs(9) }, 'user');
+    const findings = validateCandidate(snapshotSchedule('P1'), fx.candidate.validationContext.bounds, { ...fx.candidate, dispositions: fx.candidate.dispositions.filter(d => d.id === 'B') })
+      .filter(f => f.code === 'tool_overflow' && f.severity === 'error');
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0].taskId, 'B');
+    assert.equal(findings[0].detail.tool, 'T1');
+    assert.deepEqual(findings[0].detail.holders, ['A']);
+    assert.doesNotMatch(findings[0].message, /A|T1/, 'no holder ids or tool names in the message');
+  } finally { fx.restore(); }
+});
+
+test('prune: three-pass cap with a chain of live collisions (two sequential drops resolve, three are refused)', () => {
+  // Dropping a patch reverts that order to its live slot, which sits on the NEXT kept patch.
+  const live2 = { A: [4, 8], O2: [8, 12], O3: [12, 16], Y: [40, 44] };
+  const fx2 = pruneFixture(live2, { O2: [4, 8], O3: [8, 12], Y: [44, 48] });       // O2 kept at A's live slot; dropping O2 puts it on O3's kept slot
+  try {
+    const r = fx2.prune([]);
+    assert.ok(r, 'two sequential drops resolve inside the cap');
+    assert.deepEqual(r.kept.map(p => p.id), ['Y'], 'O2 collides with live A, falls back onto kept O3, which then falls back too');
+    assert.deepEqual([...r.dropped].sort(), ['O2', 'O3']);
+  } finally { fx2.restore(); }
+  const live3 = { A: [4, 8], O2: [8, 12], O3: [12, 16], O4: [16, 20], Y: [40, 44] };
+  const fx3 = pruneFixture(live3, { O2: [4, 8], O3: [8, 12], O4: [12, 16], Y: [44, 48] });
+  try {
+    assert.equal(fx3.prune([]), null, 'a chain needing three sequential drops is refused, never half-applied');
+  } finally { fx3.restore(); }
 });

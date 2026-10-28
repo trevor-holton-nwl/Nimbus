@@ -7251,6 +7251,7 @@ export function resolveToolOverflow(
   const originalById = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   const moved: ToolMovedEntry[] = [];
   const blocked: ToolBlockedEntry[] = [];
+  const beforeDates = new Map<string, { start: string | null; end: string | null }>();
   let complete = true;
   let changed = false;
 
@@ -7283,6 +7284,7 @@ export function resolveToolOverflow(
       const line = String(task.MACHINE);
       const tools = stat.byId.get(offender)?.tools ?? [];
       const before = { ...originalById.get(offender)!, ...patches.get(offender)?.changes } as NimbusTask;
+      beforeDates.set(offender, { start: toolIso(before.start_date), end: toolIso(before.end_date) });
       toolOccRemove(occ, offender);
       // Tentatively queue the offender so the gap walk sees the line without it (exactly the gap-fill situation).
       patches.set(offender, toolQueuePatch(offender, { code: 'tool_contention', message: TOOL_CONTENTION_MESSAGE }));
@@ -7312,6 +7314,40 @@ export function resolveToolOverflow(
       patches.set(offender, toolQueuePatch(offender, reason));
       dispositions.set(offender, { id: offender, line, status: 'needs_planning', reason });
       blocked.push({ orderId: offender, tool, available, inUse: zero ? 0 : cluster.inUse, holderIds: holders });
+    }
+    // RECOVERY: the loop above decides an order's fate against the occupancy of its moment, and a later step can vacate
+    // a slot an earlier queued order needed (O1 waited for O3, then O3 itself had to give way to a protected holder).
+    // Re-offer every pass-queued order, most urgent first, to the gaps of the FINAL occupancy until nothing changes:
+    // each success un-queues one order (a finite, strictly decreasing count) and never re-creates overflow (tool-free
+    // windows + envelope check), so the queued orders that remain really have no legal tool-free slot.
+    if (!queueOnly && complete) {
+      let progressed = true;
+      while (progressed && !expired()) {
+        progressed = false;
+        const retry = blocked.filter(entry => dispositions.get(entry.orderId)?.status === 'needs_planning'
+          && patches.get(entry.orderId)?.changes.planning_reason?.code === 'tool_contention')
+          .sort((a, b) => (rank.get(a.orderId) ?? 0) - (rank.get(b.orderId) ?? 0) || ordinalCompare(a.orderId, b.orderId));
+        for (const entry of retry) {
+          const task = mutableById.get(entry.orderId)!;
+          const line = String(task.MACHINE);
+          const outcome = placeTaskInLineGaps(env, task, toolGapHooks(occ, stat.byId.get(entry.orderId)?.tools ?? [], line));
+          if (outcome.kind === 'incomplete') { complete = false; break; }
+          if (outcome.kind !== 'placed') continue;
+          patches.set(entry.orderId, outcome.patch);
+          dispositions.set(entry.orderId, outcome.disposition);
+          const item = toolItemFor(ctx, stat, occ.runNowMs, { ...task, ...outcome.patch.changes } as NimbusTask);
+          if (item) toolOccAdd(occ, item);
+          blocked.splice(blocked.indexOf(entry), 1);
+          const was = beforeDates.get(entry.orderId);
+          moved.push({
+            orderId: entry.orderId, tool: entry.tool, fromStart: was?.start ?? null, fromEnd: was?.end ?? null,
+            toStart: toolIso(outcome.patch.changes.start_date) ?? '', toEnd: toolIso(outcome.patch.changes.end_date) ?? '',
+          });
+          progressed = true;
+          break;
+        }
+        if (!complete) break;
+      }
     }
   }
   const prior = candidate.toolPass;
