@@ -655,3 +655,35 @@ test('a worker error compute-core-stale falls back to the synchronous evaluator 
     ErrorLog.warn = originalWarn;
   }
 });
+
+test('Tool Inventory: the optional toolBlocked / toolMoved / toolPass fields survive the worker structuredClone and rehydrate unchanged', () => {
+  const hours = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const workerSnapshot = {
+    ...snapshot, selectedPlant: 'P',
+    tasks: [{ id: 'tool-free', PLANT: 'P', MACHINE: 'L1', COLOR: 'GREEN', RUN_TIME: 2, original_end_date: new Date('2035-08-10T12:00:00') }],
+    calendars: { L1: { workHours: hours } }, plants: { P: { workHours: hours } },
+    masterData: { plants: [{ plant: 'P', setup_policy_config: { toolingRule: 'hard' } }], lines: [{ plant: 'P', machine: 'L1' }], tool_inventory: [] },
+    setupSnapshot: { plant: 'P', plant_active: true, definition: { plant: 'P', fields: ['colorWheel'], signature_version: 1, strict_blanks: true, active: true }, plant_rows: [], machine_rows: [], machine_states: [], overrides: [] },
+    frozenHorizonEnd: new Date('2035-08-07T00:00:00'),
+  };
+  const request = {
+    runId: 'tool-fields', mode: 'changeover', snapshot: workerSnapshot, deadlineDurationMs: 2000,
+    request: { mode: 'changeover', plant: 'P', respectFirmed: true, respectCalendar: false,
+      planningStart: new Date('2035-08-06T08:00:00'), runNow: new Date('2035-08-06T08:00:00'), endDate: new Date('2035-08-11T00:00:00') },
+  };
+  const response = buildOptimizerWorkerResponse(structuredClone(request), () => 5000);
+  // Wave 6 fills these inside the worker; here the transport is proven with synthetic values.
+  response.candidate.toolBlocked = [{ orderId: 'a', tool: 'T100', available: 1, inUse: 2, holderIds: ['h1', 'h2'] }];
+  response.candidate.toolMoved = [{ orderId: 'b', tool: 'T100', fromStart: null, fromEnd: null, toStart: '2035-08-10T08:00:00', toEnd: '2035-08-10T10:00:00' }];
+  response.candidate.toolPass = { complete: false, elapsedMs: 7 };
+  const crossed = structuredClone(response);
+  const rehydrated = rehydrateOptimizerCandidate(crossed.candidate, workerSnapshot, crossed.validation);
+  assert.deepEqual(rehydrated.toolBlocked, response.candidate.toolBlocked);
+  assert.deepEqual(rehydrated.toolMoved, response.candidate.toolMoved);
+  assert.deepEqual(rehydrated.toolPass, { complete: false, elapsedMs: 7 });
+  // Absent fields stay absent (rule Off / before the overflow pass exists).
+  const plain = structuredClone(buildOptimizerWorkerResponse(structuredClone(request), () => 5000));
+  const plainRe = rehydrateOptimizerCandidate(plain.candidate, workerSnapshot, plain.validation);
+  assert.equal(plainRe.toolBlocked, undefined);
+  assert.equal(plainRe.toolPass, undefined);
+});

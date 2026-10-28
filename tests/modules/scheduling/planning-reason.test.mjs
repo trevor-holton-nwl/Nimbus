@@ -47,3 +47,24 @@ test('planningReasonText: a missing reason is empty text', () => {
   assert.equal(planningReasonText(null, t), '');
   assert.equal(planningReasonText(undefined, t), '');
 });
+
+test('Tool Inventory: tool_contention fills tool, available and holders (array capped at five, or a ready string)', () => {
+  const holders = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7'];
+  assert.equal(
+    planningReasonText({ code: 'tool_contention', message: 'stored', tool_id: 'T100', available: 2, holders }, t),
+    'planning_reason.tool_contention|tool=T100,available=2,holders=h1, h2, h3, h4, h5 ui.opt_bg_more|count=2');
+  assert.equal(
+    planningReasonText({ code: 'tool_contention', message: 'stored', tool_id: 'T100', available: 1, holders: 'A, B' }, t),
+    'planning_reason.tool_contention|tool=T100,available=1,holders=A, B');
+  assert.equal(
+    planningReasonText({ code: 'tool_contention', message: 'stored', tool_id: 'T100', available: 1 }, t),
+    'planning_reason.tool_contention|tool=T100,available=1,holders=');
+});
+
+test('Tool Inventory: tool_unavailable and tool_contention_incomplete use the tool id; an unknown shape falls back to the stored message', () => {
+  assert.equal(planningReasonText({ code: 'tool_unavailable', message: 'stored', tool_id: 'T9', available: 0 }, t), 'planning_reason.tool_unavailable|tool=T9');
+  assert.equal(planningReasonText({ code: 'tool_contention_incomplete', message: 'stored', tool_id: 'T9' }, t), 'planning_reason.tool_contention_incomplete|tool=T9');
+  assert.equal(planningReasonText({ code: 'tool_contention', message: 'stored English' }, t), 'stored English', 'no structured fields');
+  assert.equal(planningReasonText({ code: 'tool_contention', message: 'stored', tool_id: 'T1', available: 'x' }, t), 'stored', 'available must be a number');
+  assert.equal(planningReasonText({ code: 'tool_unavailable', message: 'stored', tool_id: '  ' }, t), 'stored', 'blank tool id');
+});

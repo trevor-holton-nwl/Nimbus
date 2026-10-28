@@ -8,6 +8,7 @@ import { Store } from '../../../frontend/platform/store.mjs';
 import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
+import { __setToolingRuleControlReady } from '../../../frontend/master-data/admin-ui.mjs';
 
 // Real English strings, so assertions read the shipped wording (Util.t falls back to the bare key without them).
 const EN = (() => {
@@ -539,6 +540,33 @@ test('the status line always says inventory feeds alerts and omits the tooling-r
   f.setInventory('A', [row('T1')], { setup_policy_config: { toolingRule: 'hard' } });
   f.TI.render();
   assert.equal(f.element('ti-status').textContent, Util.t('ui.tool_inventory_alerts'));
+});
+
+test('with the control ready the status line shows Tooling rule Off/Hard and a button that opens plant settings (and never otherwise)', async t => {
+  const f = await fixture(t, { rows: [row('T1')] });
+  const appended = [];
+  const status = f.element('ti-status');
+  status.append = (...nodes) => { appended.push(...nodes); };
+  const made = [];
+  globalThis.document.createElement = () => { const b = { style: {}, setAttribute() {}, addEventListener(type, fn) { b.handlers[type] = fn; }, handlers: {} }; made.push(b); return b; };
+  __setToolingRuleControlReady(true);
+  try {
+    f.setInventory('A', [row('T1')], { setup_policy_config: { toolingRule: 'hard' } });
+    f.TI.render();
+    assert.ok(status.textContent.includes(Util.t('ui.tool_inventory_status_hard')));
+    const link = appended.find(n => n && n.id === 'ti-rule-link');
+    assert.ok(link, 'the settings link is appended to the status line');
+    assert.equal(link.type, 'button');
+    assert.equal(link.textContent, Util.t('ui.tool_inventory_rule_link'));
+    assert.equal(typeof link.handlers.click, 'function');
+    f.setInventory('A', [row('T1')], { setup_policy_config: { toolingRule: 'off' } });
+    f.TI.render();
+    assert.ok(status.textContent.includes(Util.t('ui.tool_inventory_status_off')));
+  } finally { __setToolingRuleControlReady(false); }
+  appended.length = 0;
+  f.TI.render();
+  assert.equal(appended.length, 0, 'no link while the control is not ready');
+  assert.equal(status.textContent, Util.t('ui.tool_inventory_alerts'));
 });
 
 test('Refresh with unsaved edits asks first; cancelled leaves the edits; confirmed re-pulls through Persistence', async t => {
