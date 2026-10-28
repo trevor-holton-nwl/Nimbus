@@ -7970,34 +7970,39 @@ function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks
       if (ceiling > floor && outgoingFits && !(gapFinishFloor && ceiling < +gapFinishFloor)) {
         const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
         const policy = bounds.runContext!.splitOrderPolicy;
-        // Tool rule: only the tool-free part of the calendar is usable (setup + run).
-        const usable = hooks ? intersectIntervals(free, hooks.windows(floor, ceiling)) : free;
-        // Each attempt rebuilds the clipped intervals and isInherentlyOverlong from its own start.
-        const placement = placeWithFinishFloor((earliest: Date) => placeWithSetup({ earliestStart: earliest, runtimeMinutes,
-          setup: { kind: 'resolved', minutes: incoming }, policy,
-          isInherentlyOverlong: policy === 'overlong_only' && !hasNominalWindow(snapshot, line, bounds.setup.plant, earliest, runtimeMinutes, bounds.runContext),
-          minProductiveSegmentMinutes: bounds.runContext!.minProductiveSegmentMinutes,
-          freeIntervals: usable.flatMap(slot => {
-            const start = Math.max(+slot.start, +earliest); const end = Math.min(+slot.end, ceiling);
-            return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
-          }),
-        }), new Date(floor), gapFinishFloor, incoming, runtimeMinutes, policy);
-        if (placement.kind === 'placed' && (!hooks || hooks.envelopeFits(placement.productiveSegments[0].start, placement.productiveSegments.at(-1)!.end))) {
-          const segments = placement.productiveSegments;
-          const patch: SchedulePatch = { id, changes: { start_date: segments[0].start, end_date: segments.at(-1)!.end,
-            scheduleSegments: segments.length > 1 ? segments.map((segment, i) => ({ sequence: i + 1, startDate: segment.start, endDate: segment.end })) : [],
-            planning_status: 'scheduled', planning_reason: null } };
-          const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
-          const trial = { ...candidate,
-            patches: peers.flatMap(peer => taskId(peer) === id ? [patch] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
-            dispositions: peers.flatMap(peer => {
-              const value = taskId(peer) === id ? disposition : dispositions.get(taskId(peer));
-              return value ? [value] : [];
+        // Tool rule: only the tool-free part of the calendar is usable (setup + run). Each MAXIMAL tool-free window of the
+        // gap is tried on its own: a split-policy order placed across a tool-blocked stretch fails the envelope check, and
+        // that must not abandon the later tool-free windows of the same gap. Without hooks: one pass over the whole `free`.
+        const toolWindows = hooks ? hooks.windows(floor, ceiling) : null;
+        for (const toolWindow of toolWindows ?? [null]) {
+          const usable = toolWindow ? intersectIntervals(free, [toolWindow]) : free;
+          // Each attempt rebuilds the clipped intervals and isInherentlyOverlong from its own start.
+          const placement = placeWithFinishFloor((earliest: Date) => placeWithSetup({ earliestStart: earliest, runtimeMinutes,
+            setup: { kind: 'resolved', minutes: incoming }, policy,
+            isInherentlyOverlong: policy === 'overlong_only' && !hasNominalWindow(snapshot, line, bounds.setup.plant, earliest, runtimeMinutes, bounds.runContext),
+            minProductiveSegmentMinutes: bounds.runContext!.minProductiveSegmentMinutes,
+            freeIntervals: usable.flatMap(slot => {
+              const start = Math.max(+slot.start, +earliest); const end = Math.min(+slot.end, ceiling);
+              return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
             }),
-          };
-          // The per-line trial is single-line: the plant-wide tool check is made through `hooks`, never here.
-          if (!validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true }, trial).some(f => f.severity === 'error')) {
-            return { kind: 'placed', patch, disposition };
+          }), new Date(floor), gapFinishFloor, incoming, runtimeMinutes, policy);
+          if (placement.kind === 'placed' && (!hooks || hooks.envelopeFits(placement.productiveSegments[0].start, placement.productiveSegments.at(-1)!.end))) {
+            const segments = placement.productiveSegments;
+            const patch: SchedulePatch = { id, changes: { start_date: segments[0].start, end_date: segments.at(-1)!.end,
+              scheduleSegments: segments.length > 1 ? segments.map((segment, i) => ({ sequence: i + 1, startDate: segment.start, endDate: segment.end })) : [],
+              planning_status: 'scheduled', planning_reason: null } };
+            const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
+            const trial = { ...candidate,
+              patches: peers.flatMap(peer => taskId(peer) === id ? [patch] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
+              dispositions: peers.flatMap(peer => {
+                const value = taskId(peer) === id ? disposition : dispositions.get(taskId(peer));
+                return value ? [value] : [];
+              }),
+            };
+            // The per-line trial is single-line: the plant-wide tool check is made through `hooks`, never here.
+            if (!validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true }, trial).some(f => f.severity === 'error')) {
+              return { kind: 'placed', patch, disposition };
+            }
           }
         }
       }
