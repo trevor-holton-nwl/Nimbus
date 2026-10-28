@@ -672,7 +672,7 @@ test('Tool Inventory: the optional toolBlocked / toolMoved / toolPass fields sur
       planningStart: new Date('2035-08-06T08:00:00'), runNow: new Date('2035-08-06T08:00:00'), endDate: new Date('2035-08-11T00:00:00') },
   };
   const response = buildOptimizerWorkerResponse(structuredClone(request), () => 5000);
-  // Wave 6 fills these inside the worker; here the transport is proven with synthetic values.
+  // Transport proof with synthetic values (the real worker-path round trip with a loaded inventory is the next test).
   response.candidate.toolBlocked = [{ orderId: 'a', tool: 'T100', available: 1, inUse: 2, holderIds: ['h1', 'h2'] }];
   response.candidate.toolMoved = [{ orderId: 'b', tool: 'T100', fromStart: null, fromEnd: null, toStart: '2035-08-10T08:00:00', toEnd: '2035-08-10T10:00:00' }];
   response.candidate.toolPass = { complete: false, elapsedMs: 7 };
@@ -681,8 +681,10 @@ test('Tool Inventory: the optional toolBlocked / toolMoved / toolPass fields sur
   assert.deepEqual(rehydrated.toolBlocked, response.candidate.toolBlocked);
   assert.deepEqual(rehydrated.toolMoved, response.candidate.toolMoved);
   assert.deepEqual(rehydrated.toolPass, { complete: false, elapsedMs: 7 });
-  // Absent fields stay absent (rule Off / before the overflow pass exists).
-  const plain = structuredClone(buildOptimizerWorkerResponse(structuredClone(request), () => 5000));
+  // Absent fields stay absent (rule Off).
+  const offRequest = structuredClone(request);
+  offRequest.snapshot.masterData.plants[0].setup_policy_config = { toolingRule: 'off' };
+  const plain = structuredClone(buildOptimizerWorkerResponse(offRequest, () => 5000));
   const plainRe = rehydrateOptimizerCandidate(plain.candidate, workerSnapshot, plain.validation);
   assert.equal(plainRe.toolBlocked, undefined);
   assert.equal(plainRe.toolPass, undefined);

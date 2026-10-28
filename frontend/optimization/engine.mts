@@ -83,6 +83,7 @@ import {
   SETUP_AWARE_CONVERGENCE_WINDOW,
   resolveTaskPlant,
   dueInstant,
+  assertToolCoreFor,
 } from './setup-scheduler.mjs';
 import { buildSetupResolutionIndex, resolveSetup, stateForOrder } from '../setup/setup-domain.mjs';
 import type { SetupResolutionIndex } from '../setup/setup-domain.mjs';
@@ -2833,6 +2834,8 @@ export const Engine = {
           notAfter: () => null,
           // X3: Backlog removal is exempt from the plant's pull/push window (candidate time and Apply time).
           ignorePlantWindow: true,
+          // Tool Inventory: Remove Backlog is exempt from the tool rule (no pass, no finding, no static defect).
+          ignoreToolRule: true,
         };
         return attachDetachedValidationContext(
           detachedCandidateResult(result.patches, _pmT0e, 'completed', result),
@@ -3041,6 +3044,9 @@ export const Engine = {
       notAfter: (task: NimbusTask) => Engine.latestAllowedEnd(task, plant, baseSnapshot.masterData, baseSnapshot),
       convergenceWindow: exhaustive ? SETUP_AWARE_EXHAUSTIVE_CONVERGENCE_WINDOW : SETUP_AWARE_CONVERGENCE_WINDOW,
     };
+    // Tool Inventory stale-core guard: only a Hard plant with a loaded inventory needs the new core functions; an Off
+    // plant never reaches this, so it keeps using the worker with an older cached core.
+    assertToolCoreFor(snapshot, plant);
     let result = Engine.evaluateSetupAware(evaluatorMode, bounds, snapshot);
     if (result.validationContext) result.validationContext = { ...result.validationContext, baselineSnapshot: baseSnapshot };
     // The setup-aware evaluators group every line for the plant with no

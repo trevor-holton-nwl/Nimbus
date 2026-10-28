@@ -537,6 +537,15 @@ export interface DueDateFirstBounds {
    * free-interval index so the plain day-walk serves every request. Not part
    * of the worker contract. */
   disableFreeIndex?: boolean;
+  /** Tool Inventory: Remove Backlog only (set in Engine's backlogBounds literal, never serialized): skips the tool
+   * overflow pass, the `tool_overflow` finding and the `tool_unavailable` static defect. */
+  ignoreToolRule?: boolean;
+  /** Tool Inventory: the base tool facts carried WITH the `snapshot.tasks` reference they were built from; every reader
+   * rebuilds when the reference differs. Internal; never serialized. */
+  toolIndex?: ToolStatic;
+  /** Internal: the per-line gap/retain trials validate a single line, so the plant-wide `tool_overflow` finding is
+   * skipped there (the tool check is made through the occupancy index instead). */
+  skipToolOverflowFinding?: boolean;
 }
 
 /** F2: one line's free intervals over the indexed span. `rs/re` hold the
@@ -906,6 +915,9 @@ export interface ValidationFinding {
    * `distribution_separation`) — orthogonal to `taskId`, which stays
    * single-task. */
   parents?: readonly string[];
+  /** `tool_overflow` only: the tool, copies available, machines in use and the OTHER holder order ids (sorted, capped to
+   * 10). Kept out of `message` so the message stays fixed and `_pruneAgainstLive`'s code|taskId|message key is stable. */
+  detail?: { tool: string; available: number; inUse: number; holders: readonly string[] };
 }
 export interface CandidateResult {
   /** A malformed or reversed normalized planning horizon is a caller error;
@@ -6641,7 +6653,7 @@ function completionEnd(bounds: Readonly<DueDateFirstBounds>, task: NimbusTask, e
   return ceiling && ceiling < end ? ceiling : end;
 }
 
-type PlanningDefect = { code: string; message: string };
+type PlanningDefect = { code: string; message: string; tool_id?: string; available?: number; holders?: string[] };
 
 /** T4: the part of `planningDefect` that depends only on the task and the
  * plant's configuration (missing SAP due date, run-time validity). The entry is
@@ -6658,7 +6670,10 @@ function staticPlanningDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Read
   const compute = (): PlanningDefect | null => {
     if (allowedPlanningWindow(snapshot, bounds, task).missingDue) return { code: 'missing_due_date', message: 'A SAP due date is required for the configured planning window.' };
     if (!Number.isFinite(Number(task.RUN_TIME)) || Math.round(Number(task.RUN_TIME) * 60) <= 0) return { code: 'invalid_runtime', message: 'Runtime must be a positive number.' };
-    return null;
+    // Tool Inventory: a carried tool with no available copy can never be placed. This sits FIRST in every reason chain
+    // (finalizeCandidate's result and baseline chains, repair, attachDetachedValidationContext), so a tool wait is
+    // never relabelled push-limit / search-incomplete. Off / not loaded / Remove Backlog: null, nothing changes.
+    return toolUnavailableDefect(snapshot, bounds, task);
   };
   const ctx = bounds.runContext;
   if (!ctx) return compute();
@@ -6872,6 +6887,448 @@ function productiveIntervals(task: NimbusTask): PlacementInterval[] {
   return start && end ? [{ start, end }] : [];
 }
 
+/* =============================================================================
+   TOOL INVENTORY OVERFLOW PASS (Tool Inventory Wave 6; design: the plan's section E)
+
+   A tool id is a TYPE: the plant owns several interchangeable copies (master data `tool_inventory`), and the
+   capacity is the number of DISTINCT MACHINES using the tool at the same instant (half-open intervals; the
+   order's occupancy is the ENVELOPE first segment start .. last segment end, run time only: setup may overlap).
+   Everything here is gated on the plant's tooling rule being 'hard' AND the inventory being LOADED
+   (`snapshot.masterData.tool_inventory` is an array; undefined = not loaded = unconstrained) AND the run not
+   being Remove Backlog (`bounds.ignoreToolRule`). With the rule Off every function below returns its input
+   untouched, so an Off plant is byte-identical to a build without this feature.
+
+   Overflow detection is the compute core's `findToolOverages` (the Gantt alert uses the same function), so the
+   alert and the optimizer can never disagree. The rule and the inventory are read ONLY from
+   `snapshot.masterData` (the worker contract drops unknown bounds fields, `fillPlanningGaps` rebuilds
+   `runContext`).
+
+   The pass (`resolveToolOverflow`) runs AFTER the search, on a finished candidate:
+     loop: re-sweep -> the first cluster that has a mutable holder -> offender = its LEAST URGENT mutable holder
+     (`urgencyOrder(snapshot, bounds, '', ...)`, the same plant-wide ordering `finalizeCandidate` uses for
+     admission; policy ranks are line-scoped, so mixing lines is the existing convention) ->
+       (a) re-place the offender on ITS OWN line (never another machine) through the gap-fill loop with every gap
+           intersected with the tool-free windows of every tool it carries (setup + run, so conservative), then
+           re-check the ENVELOPE (a split order spans the gap) against the full index; first gap that passes
+           both wins (it may be EARLIER than the current slot);
+       (b) otherwise QUEUE it (null dates, structured `tool_contention` / `tool_unavailable` reason).
+   TERMINATION: every step either queues an order (the number of placed orders strictly decreases) or moves it into
+   a window in which, for each tool it carries, fewer OTHER machines than copies are in use; later steps only
+   remove intervals or add intervals into such windows, so an order that has been moved is never part of a
+   later cluster, and a queued order has no interval. Each step therefore consumes one mutable tool-carrying
+   order, giving at most that many steps (the loop is also bounded by it defensively).
+   BUDGET: Normal 1 s, Exhaustive 10 s, soft, checked at step boundaries and inside the gap walk; on expiry the
+   remaining offenders are queued with `incomplete: true` and `toolPass.complete = false`.
+   PROTECTED rows (firmed, running, frozen, placement_exception, window-end held, explicit boundaries), rows on
+   unselected / excludeFromOpt lines, rows outside the window and finish-only rows all RESERVE copies and are
+   never patched; a cluster with no mutable holder is a WARNING (grandfathered), never an error.
+   ============================================================================= */
+
+const TOOL_PASS_NORMAL_BUDGET_MS = 1000;
+const TOOL_PASS_EXHAUSTIVE_BUDGET_MS = 10000;
+const TOOL_HOLDER_CAP = 10;
+const TOOL_CONTENTION_MESSAGE = 'No copy of a tool this order needs is free within its allowed planning window.';
+const TOOL_CONTENTION_INCOMPLETE_MESSAGE = 'The tool check ran out of time before every free slot was searched.';
+const TOOL_UNAVAILABLE_MESSAGE = 'A tool this order needs has no copies available.';
+const TOOL_OVERFLOW_ERROR_MESSAGE = 'More machines need a tool at the same time than there are copies available.';
+const TOOL_OVERFLOW_WARNING_MESSAGE = 'Protected or out-of-scope orders already need more copies of a tool than are available.';
+const TOOL_CORE_FUNCTIONS = ['normalizeToolId', 'taskToolIds', 'toolOccupancyInterval', 'buildToolCapacity', 'availableCopies',
+  'findToolOverages', 'buildToolIndex', 'toolIndexUpdate', 'toolHeadroom'] as const;
+
+interface ToolCapacity { available: number; hasRow: boolean }
+interface ToolCore {
+  taskToolIds(task: NimbusTask): string[];
+  toolOccupancyInterval(task: NimbusTask): { start: Date; end: Date } | null;
+  buildToolCapacity(masterData?: NimbusMasterData | null): Map<string, ToolCapacity>;
+  availableCopies(capacity: Map<string, ToolCapacity> | null | undefined, plant: string | null | undefined, tool: string): ToolCapacity;
+  findToolOverages(args: { items: ToolItem[]; capacityFor: (plant: string, tool: string) => ToolCapacity; now?: Date | number }): ToolCluster[];
+  buildToolIndex(args: { items: ToolItem[]; capacityFor: (plant: string, tool: string) => ToolCapacity }): unknown;
+  toolIndexUpdate(index: unknown, id: string, oldInterval: Omit<ToolItem, 'id'> | null, newInterval: Omit<ToolItem, 'id'> | null): unknown;
+  toolHeadroom(index: unknown, plant: string, tools: string[], from: Date | number, to: Date | number, excludeLine?: string | null): Array<{ start: Date; end: Date }>;
+}
+interface ToolItem { id: string; line: string; plant: string; tools: string[]; start: Date; end: Date }
+interface ToolCluster {
+  plant: string; tool: string; at: Date; available: number; hasRow: boolean; inUse: number;
+  pusher: string; pusherLine: string; holders: Array<{ id: string; line: string; start: Date; end: Date }>;
+}
+interface ToolRuleCtx { plant: string; core: ToolCore; capacityFor: (plant: string, tool: string) => ToolCapacity }
+/** The tool facts that depend only on the BASE task list (not on a candidate's patches): which orders carry which
+ * tools and in which plant. Carried on `bounds.toolIndex` together with the `snapshot.tasks` reference it was
+ * built from; every reader rebuilds when the reference (or the master-data object) differs (a `runContext` memo
+ * would be lost: `fillPlanningGaps` rebuilds it and the per-line trials validate against `{...snapshot, tasks: peers}`). */
+export interface ToolStatic {
+  tasks: ReadonlyArray<NimbusTask>;
+  masterData: NimbusMasterData | null;
+  byId: Map<string, { tools: string[]; plant: string | null }>;
+}
+interface ToolOcc { ctx: ToolRuleCtx; items: Map<string, ToolItem>; index: unknown; runNowMs: number }
+interface ToolGapHooks { windows(from: number, to: number): PlacementInterval[]; envelopeFits(start: Date, end: Date): boolean }
+
+const toolCapacityMemo = new WeakMap<object, Map<string, ToolCapacity>>();
+const toolStaticMemo = new WeakMap<object, ToolStatic>();
+
+/** The compute core, or `compute-core-stale` when a function the pass needs is missing (a proxy-cached old core).
+ * Only ever reached for a plant whose rule is Hard with a loaded inventory: an Off plant never touches it, so it
+ * keeps using the worker with an older cached core. */
+function toolCoreOrThrow(): ToolCore {
+  const core = (globalThis as any).NimbusComputeCore;
+  for (const name of TOOL_CORE_FUNCTIONS) {
+    if (!core || typeof core[name] !== 'function') throw new Error('compute-core-stale');
+  }
+  return core as ToolCore;
+}
+
+/** Non-null only when the tool rule is ACTIVE for this run: rule Hard, inventory loaded, not Remove Backlog. */
+export function toolRuleContext(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): ToolRuleCtx | null {
+  if (bounds.ignoreToolRule === true) return null;
+  const plant = bounds.setup.plant;
+  if (toolingRuleForSnapshot(snapshot, plant) !== 'hard') return null;
+  const inventory = snapshot.masterData?.tool_inventory;
+  if (!Array.isArray(inventory)) return null;
+  const core = toolCoreOrThrow();
+  let capacity = toolCapacityMemo.get(inventory);
+  if (!capacity) { capacity = core.buildToolCapacity(snapshot.masterData); toolCapacityMemo.set(inventory, capacity); }
+  const table = capacity;
+  return { plant, core, capacityFor: (p, tool) => core.availableCopies(table, p, tool) };
+}
+
+/** The engine's stale-core guard: throws `compute-core-stale` ONLY for a Hard plant with a loaded inventory. */
+export function assertToolCoreFor(snapshot: Readonly<ScheduleSnapshot>, plant: string): void {
+  if (toolingRuleForSnapshot(snapshot, plant) === 'hard' && Array.isArray(snapshot.masterData?.tool_inventory)) toolCoreOrThrow();
+}
+
+function toolStaticFor(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, ctx: ToolRuleCtx): ToolStatic {
+  const carried = bounds.toolIndex;
+  if (carried && carried.tasks === snapshot.tasks && carried.masterData === snapshot.masterData) return carried;
+  const memo = toolStaticMemo.get(snapshot.tasks as object);
+  if (memo && memo.masterData === snapshot.masterData) return memo;
+  const byId = new Map<string, { tools: string[]; plant: string | null }>();
+  for (const task of snapshot.tasks) {
+    const tools = ctx.core.taskToolIds(task);
+    if (!tools.length) continue;
+    byId.set(taskId(task), { tools, plant: resolveTaskPlant(task, snapshot, bounds.runContext) });
+  }
+  const built: ToolStatic = { tasks: snapshot.tasks, masterData: snapshot.masterData, byId };
+  toolStaticMemo.set(snapshot.tasks as object, built);
+  return built;
+}
+
+/** Shallow patched view (the tool code only reads fields). */
+function patchedTaskView(tasks: ReadonlyArray<NimbusTask>, patches: ReadonlyMap<string, SchedulePatch>): NimbusTask[] {
+  return tasks.map(task => { const patch = patches.get(taskId(task)); return patch ? { ...task, ...patch.changes } as NimbusTask : task; });
+}
+
+function toolRunNowMs(bounds: Readonly<DueDateFirstBounds>): number {
+  return +(timestamp(bounds.runNow ?? bounds.now) ?? new Date(0));
+}
+
+/** The order's tool occupancy (envelope, run time only), clipped to the run's now; null when it holds nothing. */
+function toolItemFor(ctx: ToolRuleCtx, stat: ToolStatic, runNowMs: number, task: NimbusTask): ToolItem | null {
+  const info = stat.byId.get(taskId(task));
+  if (!info || info.plant !== ctx.plant || task.planning_status === 'needs_planning') return null;
+  const interval = ctx.core.toolOccupancyInterval(task);
+  if (!interval) return null;
+  let start = +interval.start; const end = +interval.end;
+  if (end <= runNowMs) return null;
+  if (start < runNowMs) start = runNowMs;
+  if (!(end > start)) return null;
+  return { id: taskId(task), line: String(task.MACHINE ?? '') || 'Unknown', plant: ctx.plant, tools: info.tools, start: new Date(start), end: new Date(end) };
+}
+
+function buildToolOcc(ctx: ToolRuleCtx, stat: ToolStatic, bounds: Readonly<DueDateFirstBounds>, patched: ReadonlyArray<NimbusTask>): ToolOcc {
+  const runNowMs = toolRunNowMs(bounds);
+  const items = new Map<string, ToolItem>();
+  for (const task of patched) {
+    const item = toolItemFor(ctx, stat, runNowMs, task);
+    if (item) items.set(item.id, item);
+  }
+  return { ctx, items, index: ctx.core.buildToolIndex({ items: [...items.values()], capacityFor: ctx.capacityFor }), runNowMs };
+}
+
+function toolOccRemove(occ: ToolOcc, id: string): void {
+  const item = occ.items.get(id);
+  if (!item) return;
+  occ.items.delete(id);
+  occ.ctx.core.toolIndexUpdate(occ.index, id, item, null);
+}
+
+function toolOccAdd(occ: ToolOcc, item: ToolItem): void {
+  occ.items.set(item.id, item);
+  occ.ctx.core.toolIndexUpdate(occ.index, item.id, null, item);
+}
+
+function toolClusters(occ: ToolOcc): ToolCluster[] {
+  const items = [...occ.items.values()].sort((a, b) => ordinalCompare(a.id, b.id));
+  return occ.ctx.core.findToolOverages({ items, capacityFor: occ.ctx.capacityFor });
+}
+
+function toolGapHooks(occ: ToolOcc, tools: string[], line: string): ToolGapHooks {
+  return {
+    windows: (from, to) => occ.ctx.core.toolHeadroom(occ.index, occ.ctx.plant, tools, from, to, line),
+    envelopeFits: (start, end) => {
+      const windows = occ.ctx.core.toolHeadroom(occ.index, occ.ctx.plant, tools, start, end, line);
+      return windows.length === 1 && +windows[0].start <= +start && +windows[0].end >= +end;
+    },
+  };
+}
+
+/** Intersection of two ascending, disjoint interval lists. */
+function intersectIntervals(a: ReadonlyArray<PlacementInterval>, b: ReadonlyArray<PlacementInterval>): PlacementInterval[] {
+  const out: PlacementInterval[] = [];
+  let i = 0; let j = 0;
+  while (i < a.length && j < b.length) {
+    const start = Math.max(+a[i].start, +b[j].start);
+    const end = Math.min(+a[i].end, +b[j].end);
+    if (end > start) out.push({ start: new Date(start), end: new Date(end) });
+    if (+a[i].end < +b[j].end) i++; else j++;
+  }
+  return out;
+}
+
+function toolClusterHolderIds(cluster: ToolCluster): string[] {
+  return [cluster.pusher, ...cluster.holders.map(holder => holder.id)];
+}
+
+/** Which rows the pass may move: in the mutable scope, not protected, and currently scheduled. Decided from the
+ * ORIGINAL row (a patched copy that crosses the window end must not look protected). */
+function toolMovablePredicate(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, scope: TaskScope,
+  dispositions: ReadonlyMap<string, PlanningDisposition>,
+): (id: string) => boolean {
+  const mutable = new Map(scope.mutable.map(task => [taskId(task), task]));
+  const original = new Map(snapshot.tasks.map(task => [taskId(task), task]));
+  return id => {
+    if (!mutable.has(id)) return false;
+    const row = original.get(id) ?? mutable.get(id)!;
+    if (taskIsEvaluationProtected(snapshot, bounds, row)) return false;
+    return dispositions.get(id)?.status === 'scheduled';
+  };
+}
+
+function toolUrgencyRank(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, tasks: ReadonlyArray<NimbusTask>): Map<string, number> {
+  return new Map(urgencyOrder(snapshot, bounds, '', tasks).map((task, index) => [taskId(task), index]));
+}
+
+function leastUrgentToolHolder(ids: ReadonlyArray<string>, rank: ReadonlyMap<string, number>): string {
+  let best = ids[0];
+  for (const id of ids) {
+    const a = rank.get(id) ?? Number.MAX_SAFE_INTEGER; const b = rank.get(best) ?? Number.MAX_SAFE_INTEGER;
+    if (a > b || (a === b && ordinalCompare(id, best) > 0)) best = id;
+  }
+  return best;
+}
+
+function toolHoldersDetail(cluster: ToolCluster, offender: string | null): string[] {
+  return toolClusterHolderIds(cluster).filter(id => id !== offender).sort(ordinalCompare).slice(0, TOOL_HOLDER_CAP);
+}
+
+/** The structured planning reason for an order queued by the tool pass. The message is FIXED text (no holder ids or
+ * numbers that change run to run); the planner-visible wording is rendered from the structured fields. */
+function toolQueueReason(
+  code: 'tool_contention' | 'tool_unavailable', tool: string, available: number, holders: string[], incomplete: boolean,
+): { code: string; message: string; tool_id: string; available: number; holders: string[]; incomplete?: true } {
+  const message = code === 'tool_unavailable' ? TOOL_UNAVAILABLE_MESSAGE : incomplete ? TOOL_CONTENTION_INCOMPLETE_MESSAGE : TOOL_CONTENTION_MESSAGE;
+  return { code, message, tool_id: tool, available, holders, ...(incomplete ? { incomplete: true as const } : {}) };
+}
+
+function toolQueuePatch(id: string, reason: { code: string; message: string }): SchedulePatch {
+  return { id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning', planning_reason: reason } };
+}
+
+/** Static check behind `staticPlanningDefect`: an order carrying a tool whose plant has NO copy available can never be
+ * placed, so every search path skips it and it goes straight to Needs Planning with the structured reason. */
+function toolUnavailableDefect(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): PlanningDefect | null {
+  const ctx = toolRuleContext(snapshot, bounds);
+  if (!ctx) return null;
+  for (const tool of [...ctx.core.taskToolIds(task)].sort()) {
+    if (ctx.capacityFor(ctx.plant, tool).available <= 0) {
+      return { code: 'tool_unavailable', message: TOOL_UNAVAILABLE_MESSAGE, tool_id: tool, available: 0, holders: [] };
+    }
+  }
+  return null;
+}
+
+/** The plant-wide `tool_overflow` findings for `validateCandidate`. ERROR (naming exactly ONE order, the least urgent
+ * mutable holder, with a fixed message; the holders go in `detail`) only for a candidate the pass has run on; WARNING
+ * when every holder is protected / out of scope, or before the pass ran. */
+function toolOverflowFindings(
+  snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>,
+  scope: TaskScope, dispositions: ReadonlyMap<string, PlanningDisposition>, ctx: ToolRuleCtx,
+): ValidationFinding[] {
+  const stat = toolStaticFor(snapshot, bounds, ctx);
+  if (!stat.byId.size) return [];
+  const patches = new Map(candidate.patches.map(patch => [patch.id, patch]));
+  const occ = buildToolOcc(ctx, stat, bounds, patchedTaskView(snapshot.tasks, patches));
+  const clusters = toolClusters(occ);
+  if (!clusters.length) return [];
+  const movable = toolMovablePredicate(snapshot, bounds, scope, dispositions);
+  const rank = toolUrgencyRank(snapshot, bounds, scope.mutable);
+  const ran = candidate.toolPass !== undefined;
+  const lineOf = new Map(snapshot.tasks.map(task => [taskId(task), String(task.MACHINE ?? '')]));
+  const findings: ValidationFinding[] = [];
+  const seen = new Set<string>();
+  for (const cluster of clusters) {
+    const movableIds = toolClusterHolderIds(cluster).filter(movable);
+    const offender = ran && movableIds.length ? leastUrgentToolHolder(movableIds, rank) : null;
+    const subject = offender ?? cluster.pusher;
+    const key = subject + '\u0000' + cluster.tool + '\u0000' + (offender ? 'e' : 'w');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    findings.push({
+      code: 'tool_overflow',
+      message: offender ? TOOL_OVERFLOW_ERROR_MESSAGE : TOOL_OVERFLOW_WARNING_MESSAGE,
+      severity: offender ? 'error' : 'warning',
+      taskId: subject,
+      line: lineOf.get(subject) ?? cluster.pusherLine,
+      detail: { tool: cluster.tool, available: cluster.available, inUse: cluster.inUse, holders: toolHoldersDetail(cluster, offender) },
+    });
+  }
+  return findings;
+}
+
+/** After retain / gap-fill / repair: keep `toolBlocked` / `toolMoved` truthful (an order that was later placed or
+ * un-queued drops out; orders queued by the static `tool_unavailable` check or by repair on a tool finding join).
+ * Absent (not empty) arrays when there is nothing to report; a candidate the pass never ran on is returned as is. */
+function reconcileToolOutcomes(result: CandidateResult): CandidateResult {
+  if (result.toolPass === undefined) return result;
+  const status = new Map((result.dispositions ?? []).map(d => [d.id, d]));
+  const isToolCode = (code: unknown): boolean => code === 'tool_contention' || code === 'tool_unavailable';
+  const blocked = new Map<string, ToolBlockedEntry>();
+  for (const entry of result.toolBlocked ?? []) {
+    const d = status.get(entry.orderId);
+    if (d?.status === 'needs_planning' && isToolCode(d.reason?.code)) blocked.set(entry.orderId, entry);
+  }
+  for (const patch of result.patches) {
+    const reason = patch.changes.planning_reason;
+    if (patch.changes.planning_status !== 'needs_planning' || !reason || !isToolCode(reason.code) || blocked.has(patch.id)) continue;
+    const holders = Array.isArray(reason.holders) ? reason.holders.map(String) : [];
+    blocked.set(patch.id, {
+      orderId: patch.id, tool: String(reason.tool_id ?? ''), available: Number(reason.available ?? 0),
+      inUse: reason.code === 'tool_unavailable' ? 0 : holders.length + 1, holderIds: holders,
+    });
+  }
+  const patchById = new Map(result.patches.map(patch => [patch.id, patch]));
+  const moved = (result.toolMoved ?? []).filter(entry =>
+    status.get(entry.orderId)?.status === 'scheduled' && patchById.get(entry.orderId)?.changes.planning_status === 'scheduled');
+  const { toolBlocked: _blocked, toolMoved: _moved, ...rest } = result;
+  return {
+    ...rest,
+    ...(blocked.size ? { toolBlocked: [...blocked.values()].sort((a, b) => ordinalCompare(a.orderId, b.orderId)) } : {}),
+    ...(moved.length ? { toolMoved: moved } : {}),
+  };
+}
+
+function isToolReasonCode(code: unknown): boolean {
+  return code === 'tool_contention' || code === 'tool_unavailable';
+}
+
+function toolIso(value: unknown): string | null {
+  return timestamp(value)?.toISOString() ?? null;
+}
+
+/**
+ * Resolve every tool overflow on a finished candidate (see the header comment above for the algorithm and its
+ * termination argument). Returns the candidate UNTOUCHED (same object, none of the tool fields) when the rule is not
+ * active. Otherwise returns a repaired candidate carrying `toolPass`, plus `toolBlocked` / `toolMoved` when non-empty.
+ * `budgetMs` defaults to 1 s (10 s for an Exhaustive run).
+ */
+export function resolveToolOverflow(
+  snapshot: Readonly<ScheduleSnapshot>, boundsIn: Readonly<DueDateFirstBounds>, candidate: CandidateResult, budgetMs?: number,
+): CandidateResult {
+  const ctx = toolRuleContext(snapshot, boundsIn);
+  if (!ctx) return candidate;
+  const bounds = withRunContext(snapshot, hardBounds(snapshot, boundsIn));
+  const started = bounds.clock();
+  const limit = budgetMs ?? (bounds.exhaustive === true ? TOOL_PASS_EXHAUSTIVE_BUDGET_MS : TOOL_PASS_NORMAL_BUDGET_MS);
+  const expired = (): boolean => bounds.clock() - started >= limit;
+  const stat = toolStaticFor(snapshot, bounds, ctx);
+  const scope = buildTaskScope(snapshot, bounds);
+  const patches = new Map(candidate.patches.map(patch => [patch.id, patch]));
+  const dispositions = new Map((candidate.dispositions ?? []).map(d => [d.id, d]));
+  const occ = buildToolOcc(ctx, stat, bounds, patchedTaskView(snapshot.tasks, patches));
+  const movable = toolMovablePredicate(snapshot, bounds, scope, dispositions);
+  const mutableById = new Map(scope.mutable.map(task => [taskId(task), task]));
+  const originalById = new Map(snapshot.tasks.map(task => [taskId(task), task]));
+  const moved: ToolMovedEntry[] = [];
+  const blocked: ToolBlockedEntry[] = [];
+  let complete = true;
+  let changed = false;
+
+  if (stat.byId.size && toolClusters(occ).length) {
+    const rank = toolUrgencyRank(snapshot, bounds, scope.mutable);
+    const byLine = new Map<string, NimbusTask[]>();
+    for (const task of scope.evaluation) {
+      const line = String(task.MACHINE);
+      const peers = byLine.get(line) ?? []; peers.push(task); byLine.set(line, peers);
+    }
+    const env: GapEnv = { snapshot, bounds, candidate, byLine, availability: new Map(), patches, dispositions, expired };
+    const settled = new Set<string>();
+    let movableTools = 0;
+    for (const id of occ.items.keys()) if (movable(id)) movableTools++;
+    const maxSteps = movableTools + 1;
+    let queueOnly = false;
+    let steps = 0;
+    for (;;) {
+      let pick: { cluster: ToolCluster; offender: string } | null = null;
+      for (const cluster of toolClusters(occ)) {
+        const ids = toolClusterHolderIds(cluster).filter(id => movable(id) && !settled.has(id));
+        if (ids.length) { pick = { cluster, offender: leastUrgentToolHolder(ids, rank) }; break; }
+      }
+      if (!pick) break;
+      if (steps >= maxSteps) { complete = false; break; }
+      steps++;
+      if (!queueOnly && expired()) queueOnly = true;
+      const { cluster, offender } = pick;
+      const task = mutableById.get(offender)!;
+      const line = String(task.MACHINE);
+      const tools = stat.byId.get(offender)?.tools ?? [];
+      const before = { ...originalById.get(offender)!, ...patches.get(offender)?.changes } as NimbusTask;
+      toolOccRemove(occ, offender);
+      // Tentatively queue the offender so the gap walk sees the line without it (exactly the gap-fill situation).
+      patches.set(offender, toolQueuePatch(offender, { code: 'tool_contention', message: TOOL_CONTENTION_MESSAGE }));
+      dispositions.set(offender, { id: offender, line, status: 'needs_planning', reason: { code: 'tool_contention', message: TOOL_CONTENTION_MESSAGE } });
+      let outcome: GapOutcome = { kind: 'none' };
+      if (!queueOnly) outcome = placeTaskInLineGaps(env, task, toolGapHooks(occ, tools, line));
+      changed = true;
+      if (outcome.kind === 'placed') {
+        patches.set(offender, outcome.patch);
+        dispositions.set(offender, outcome.disposition);
+        const item = toolItemFor(ctx, stat, occ.runNowMs, { ...task, ...outcome.patch.changes } as NimbusTask);
+        if (item) toolOccAdd(occ, item);
+        settled.add(offender);
+        moved.push({
+          orderId: offender, tool: cluster.tool, fromStart: toolIso(before.start_date), fromEnd: toolIso(before.end_date),
+          toStart: toolIso(outcome.patch.changes.start_date) ?? '', toEnd: toolIso(outcome.patch.changes.end_date) ?? '',
+        });
+        continue;
+      }
+      const incomplete = queueOnly || outcome.kind === 'incomplete';
+      if (incomplete) complete = false;
+      const zero = [...tools].sort().find(tool => ctx.capacityFor(ctx.plant, tool).available <= 0);
+      const tool = zero ?? cluster.tool;
+      const available = ctx.capacityFor(ctx.plant, tool).available;
+      const holders = toolHoldersDetail(cluster, offender);
+      const reason = toolQueueReason(zero ? 'tool_unavailable' : 'tool_contention', tool, available, holders, incomplete);
+      patches.set(offender, toolQueuePatch(offender, reason));
+      dispositions.set(offender, { id: offender, line, status: 'needs_planning', reason });
+      blocked.push({ orderId: offender, tool, available, inUse: zero ? 0 : cluster.inUse, holderIds: holders });
+    }
+  }
+  const prior = candidate.toolPass;
+  const toolPass = { complete: complete && prior?.complete !== false, elapsedMs: (prior?.elapsedMs ?? 0) + Math.max(0, bounds.clock() - started) };
+  let result: CandidateResult = {
+    ...candidate,
+    ...(changed ? { patches: [...patches.values()], dispositions: [...dispositions.values()] } : {}),
+    toolPass,
+    toolBlocked: [...(candidate.toolBlocked ?? []), ...blocked],
+    toolMoved: [...(candidate.toolMoved ?? []), ...moved],
+  };
+  // The old successor of a moved or queued order may now need a longer (or an unrecorded) setup: the existing repair
+  // cascade handles that exactly as it does for any queued order. It also refreshes `validationFindings`.
+  result = repairCandidate(snapshot, bounds, result);
+  return reconcileToolOutcomes(result);
+}
+
 /** Revalidates the complete proposal. Protected legacy violations are warnings, never a partial-Apply veto. */
 export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: Readonly<CandidateResult>, currentSnapshot?: Readonly<ScheduleSnapshot>): ValidationFinding[] {
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
@@ -6981,6 +7438,9 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       add('capacity_overlap', `Orders ${taskId(list[i].task)} and ${taskId(list[j].task)} overlap.`, reject, list[i].protectedTask && list[j].protectedTask);
     }
   }
+  // Tool Inventory: plant-wide tool overflow (rule Hard + inventory loaded + not Remove Backlog; skipped by per-line trials).
+  const toolCtx = bounds.skipToolOverflowFinding === true ? null : toolRuleContext(snapshot, bounds);
+  if (toolCtx) findings.push(...toolOverflowFindings(snapshot, bounds, candidate, taskScope, dispositions, toolCtx));
   // Setup occupies the calendar immediately before each productive start.
   const proposed = applyPatchesToSnapshot(occupancyTasks, candidate.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date) && timestamp(task.end_date));
   const lines = new Set(proposed.map(task => String(task.MACHINE)));
@@ -7055,6 +7515,7 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
     const queueReason = (id: string): { code: string; message: string } => {
       const f = reasonBy.get(id);
       if (f?.code === 'setup_transition_unrecorded') return { code: f.code, message: f.message };
+      if (f?.code === 'tool_overflow' && f.detail) return toolQueueReason('tool_contention', f.detail.tool, f.detail.available, [...f.detail.holders], false);
       const generic = { code: 'no_fit_found', message: 'The proposed placement failed final capacity or setup validation.' };
       // O6: a date_window error caused by the end passing the push-forward ceiling is the limit's doing.
       if (f?.code !== 'date_window') return generic;
@@ -7085,6 +7546,10 @@ function retainCompatiblePlacements(
   if (!additions.size) return preferred;
   const patches = new Map(preferred.patches.map(patch => [patch.id, patch]));
   const dispositions = new Map(preferred.dispositions?.map(d => [d.id, d]));
+  // Tool Inventory: occupancy from the FULL plant task list (the per-line trials below are tool-blind).
+  const toolCtx = toolRuleContext(snapshot, bounds);
+  const toolStat = toolCtx ? toolStaticFor(snapshot, bounds, toolCtx) : null;
+  const toolOcc = toolCtx && toolStat ? buildToolOcc(toolCtx, toolStat, bounds, patchedTaskView(snapshot.tasks, patches)) : null;
   const byLine = new Map<string, NimbusTask[]>();
   for (const item of evaluationTasks(snapshot, bounds)) {
     const line = String(item.MACHINE);
@@ -7094,7 +7559,7 @@ function retainCompatiblePlacements(
     let pending = urgencyOrder(snapshot, bounds, line, tasks).filter(item => additions.has(taskId(item)));
     if (!pending.length) continue;
     const localSnapshot = { ...snapshot, tasks };
-    const localBounds = { ...bounds, lines: [line] };
+    const localBounds = { ...bounds, lines: [line], skipToolOverflowFinding: true };
     let progressed = true;
     while (pending.length && progressed) {
       progressed = false;
@@ -7102,6 +7567,9 @@ function retainCompatiblePlacements(
       for (const item of pending) {
         const id = taskId(item);
         const placement = additions.get(id)!;
+        // A retained placement may not re-create tool overflow: its ENVELOPE must be tool-free against the whole plant.
+        const toolAdd = toolOcc ? toolItemFor(toolOcc.ctx, toolStat!, toolOcc.runNowMs, { ...item, ...placement.changes } as NimbusTask) : null;
+        if (toolOcc && toolAdd && !toolGapHooks(toolOcc, toolAdd.tools, line).envelopeFits(toolAdd.start, toolAdd.end)) continue;
         const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
         const proposal = {
           ...preferred,
@@ -7114,6 +7582,7 @@ function retainCompatiblePlacements(
         const errors = validateCandidate(localSnapshot, localBounds, proposal).filter(f => f.severity === 'error');
         if (!errors.length) {
           patches.set(id, placement); dispositions.set(id, disposition); progressed = true;
+          if (toolOcc && toolAdd) toolOccAdd(toolOcc, toolAdd);
         } else if (errors.every(f => f.code.startsWith('setup_'))) {
           // Another accepted addition can supply a setup bridge. Production
           // overlaps and window failures cannot be repaired by adding orders.
@@ -7259,8 +7728,13 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
       ? { ...disposition, status: 'scheduled', reason: undefined }
       : { ...disposition, status: 'needs_planning', reason: changes.planning_reason! };
   });
-  const incumbent = repairCandidate(snapshot, bounds, { ...result, patches: baselinePatches, dispositions: baselineDispositions });
+  let incumbent = repairCandidate(snapshot, bounds, { ...result, patches: baselinePatches, dispositions: baselineDispositions });
   result = repairCandidate(snapshot, bounds, result);
+  // Tool Inventory (rule Hard + inventory loaded only; both calls return their input untouched otherwise): resolve tool
+  // overflow on BOTH candidates before the admission comparison, so the comparison is coherent and a pre-existing
+  // overlap on the live schedule is judged under the same rule.
+  incumbent = resolveToolOverflow(snapshot, bounds, incumbent);
+  result = resolveToolOverflow(snapshot, bounds, result);
   const urgency = urgencyOrder(snapshot, bounds, '', eligibleTasks(snapshot, bounds));
   const admitted = (proposal: CandidateResult): string => { const queued = new Set(proposal.dispositions?.filter(d => d.status === 'needs_planning').map(d => d.id)); return urgency.map(task => queued.has(taskId(task)) ? '1' : '0').join(''); };
   // Min Changeover (D11) keeps the incumbent only when the new plan schedules
@@ -7274,7 +7748,7 @@ function finalizeCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonl
   result = preferIncumbent
     ? retainCompatiblePlacements(snapshot, bounds, incumbent, result)
     : retainCompatiblePlacements(snapshot, bounds, result, incumbent);
-  const finalResult = refreshFinalMetrics(snapshot, bounds, result);
+  const finalResult = reconcileToolOutcomes(refreshFinalMetrics(snapshot, bounds, result));
   return withFreshDistributionFindings(finalResult, snapshot);
 }
 
@@ -7380,6 +7854,128 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   return { ...result, patches: changedPatches, score, objective, diagnostics, explanation: explanations, missingEdges: finalMissingEdges };
 }
 
+/** Shared state of one gap walk. `patches` / `dispositions` are the caller's LIVE maps (never copied): the walk reads the
+ * accepted production from them and the caller records a placement afterwards. */
+interface GapEnv {
+  snapshot: Readonly<ScheduleSnapshot>;
+  bounds: Readonly<DueDateFirstBounds>;
+  /** Spread under every per-line trial candidate. */
+  candidate: CandidateResult;
+  byLine: Map<string, NimbusTask[]>;
+  availability: Map<string, PlacementInterval[]>;
+  patches: Map<string, SchedulePatch>;
+  dispositions: Map<string, PlanningDisposition>;
+  expired: () => boolean;
+}
+type GapOutcome =
+  | { kind: 'placed'; patch: SchedulePatch; disposition: PlanningDisposition }
+  | { kind: 'none' }
+  | { kind: 'incomplete' };
+
+/** Try to place ONE queued order into the gaps between the accepted production of its own line (the body of the
+ * gap-fill loop, shared with the tool overflow pass). Earliest gap first; each candidate placement is validated
+ * against the whole line before it is accepted. With `hooks` (tool rule active) every gap is first intersected with
+ * the tool-free windows of the tools the order carries (setup + run, conservative), and a placement whose ENVELOPE
+ * (a split order spans the gap between its segments) is not entirely tool-free is skipped. Without `hooks` this is
+ * exactly the historical gap-fill walk. 'incomplete' = the soft budget expired mid-walk. */
+function placeTaskInLineGaps(env: GapEnv, task: NimbusTask, hooks?: ToolGapHooks): GapOutcome {
+  const { snapshot, bounds, candidate, patches, dispositions, expired } = env;
+  const id = taskId(task); const line = String(task.MACHINE);
+  const peers = env.byLine.get(line)!;
+  const lineIds = new Set(peers.map(taskId));
+  const definition = bounds.setup.definition;
+  const state = (item: NimbusTask): SetupStateKey | null => definition ? orderState(bounds, item, definition) : null;
+  const accepted = applyPatchesToSnapshot(peers, [...patches.values()]).filter(item => {
+    const start = timestamp(item.start_date);
+    const end = timestamp(item.end_date);
+    return dispositions.get(taskId(item))?.status !== 'needs_planning' && start && end && end > start;
+  }).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
+  if (!env.availability.has(line)) env.availability.set(line, freeIntervalsFor(snapshot, line, bounds.setup.plant, bounds.now, bounds.horizonEnd, bounds.runContext));
+  const free = env.availability.get(line)!;
+  const transition = (predecessor: NimbusTask | null, successor: NimbusTask): number | null => {
+    const from = predecessor ? state(predecessor) : definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
+    const to = state(successor);
+    if (definition && inactiveOverrideForTransition(bounds, line, from, to, predecessor ? taskId(predecessor) : null, taskId(successor), lineIds, true)) return null;
+    const chargeable = setupChargeableOnLine(bounds, snapshot, line);
+    // N8 fix-up: no definition / setup-incompatible line never charges,
+    // regardless of policy. An unrecorded predecessor/successor state is
+    // otherwise the same "unresolved transition" shape as an uncovered row
+    // below, so it goes through the same chargedSetupMinutes gate rather
+    // than a hardcoded zero.
+    if (!chargeable) return 0;
+    if (!from || !to) return chargedSetupMinutes(bounds.runContext, null, true);
+    const resolution = resolveSetup({ definition: definition!, machine: line, predecessorState: from, successorState: to,
+      predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(successor),
+      plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides,
+      index: bounds.runContext?.resolutionIndex ?? undefined });
+    if (!resolution.covered && bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch') return null;
+    return chargedSetupMinutes(bounds.runContext, resolution, true);
+  };
+  let cursor = +bounds.now;
+  let predecessor: NimbusTask | null = null;
+  for (let index = 0; index <= accepted.length; index++) {
+    if (expired()) return { kind: 'incomplete' };
+    const next = accepted[index];
+    const gapEnd = Math.min(+bounds.horizonEnd, next ? +timestamp(next.start_date)! : Infinity);
+    const floor = Math.max(cursor, +(notBeforeFor(bounds, task) ?? bounds.now));
+    const incoming = gapEnd > floor ? transition(predecessor, task) : null;
+    const outgoing = next && incoming !== null ? transition(task, next) : 0;
+    if (incoming !== null && outgoing !== null) {
+      const nextStart = next ? +timestamp(next.start_date)! : gapEnd;
+      const setupStart = nextStart - outgoing * 60000;
+      const ceiling = Math.min(gapEnd, setupStart, +(notAfterFor(bounds, task) ?? bounds.horizonEnd));
+      const outgoingFits = !next || outgoing === 0 || (
+        setupStart >= +(notBeforeFor(bounds, next) ?? bounds.now)
+        && coversInterval(nextStart > +bounds.horizonEnd
+          ? freeIntervalsFor(snapshot, line, bounds.setup.plant, new Date(setupStart), new Date(nextStart), bounds.runContext) : free,
+        { start: new Date(setupStart), end: new Date(nextStart) }));
+      // Frozen finish floor: a gap whose ceiling is before it admits nothing (equality is valid).
+      const gapFinishFloor = bounds.finishFloor ?? null;
+      if (ceiling > floor && outgoingFits && !(gapFinishFloor && ceiling < +gapFinishFloor)) {
+        const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
+        const policy = bounds.runContext!.splitOrderPolicy;
+        // Tool rule: only the tool-free part of the calendar is usable (setup + run).
+        const usable = hooks ? intersectIntervals(free, hooks.windows(floor, ceiling)) : free;
+        // Each attempt rebuilds the clipped intervals and isInherentlyOverlong from its own start.
+        const placement = placeWithFinishFloor((earliest: Date) => placeWithSetup({ earliestStart: earliest, runtimeMinutes,
+          setup: { kind: 'resolved', minutes: incoming }, policy,
+          isInherentlyOverlong: policy === 'overlong_only' && !hasNominalWindow(snapshot, line, bounds.setup.plant, earliest, runtimeMinutes, bounds.runContext),
+          minProductiveSegmentMinutes: bounds.runContext!.minProductiveSegmentMinutes,
+          freeIntervals: usable.flatMap(slot => {
+            const start = Math.max(+slot.start, +earliest); const end = Math.min(+slot.end, ceiling);
+            return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
+          }),
+        }), new Date(floor), gapFinishFloor, incoming, runtimeMinutes, policy);
+        if (placement.kind === 'placed' && (!hooks || hooks.envelopeFits(placement.productiveSegments[0].start, placement.productiveSegments.at(-1)!.end))) {
+          const segments = placement.productiveSegments;
+          const patch: SchedulePatch = { id, changes: { start_date: segments[0].start, end_date: segments.at(-1)!.end,
+            scheduleSegments: segments.length > 1 ? segments.map((segment, i) => ({ sequence: i + 1, startDate: segment.start, endDate: segment.end })) : [],
+            planning_status: 'scheduled', planning_reason: null } };
+          const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
+          const trial = { ...candidate,
+            patches: peers.flatMap(peer => taskId(peer) === id ? [patch] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
+            dispositions: peers.flatMap(peer => {
+              const value = taskId(peer) === id ? disposition : dispositions.get(taskId(peer));
+              return value ? [value] : [];
+            }),
+          };
+          // The per-line trial is single-line: the plant-wide tool check is made through `hooks`, never here.
+          if (!validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line], skipToolOverflowFinding: true }, trial).some(f => f.severity === 'error')) {
+            return { kind: 'placed', patch, disposition };
+          }
+        }
+      }
+    }
+    if (next) {
+      // Overlapping protected orders reserve their entire union, including
+      // split-order envelopes; the last chronological order supplies state.
+      cursor = Math.max(cursor, +timestamp(next.end_date)!);
+      predecessor = next;
+    }
+  }
+  return { kind: 'none' };
+}
+
 /** One final insertion pass, shared across all selected lines. Accepted production
  * stays fixed. A new predecessor can make an earlier failure fit, so recheck that
  * line until stable or the separate, soft wall-clock budget expires. */
@@ -7390,12 +7986,19 @@ export function fillPlanningGaps(
   const started = bounds.clock();
   const expired = (): boolean => bounds.clock() - started >= budgetMs;
   bounds = withRunContext(snapshot, hardBounds(snapshot, { ...bounds, runContext: undefined }));
+  // Tool Inventory: rule Hard + inventory loaded + not Remove Backlog; otherwise everything below is the historical walk.
+  const toolCtx = toolRuleContext(snapshot, bounds);
+  const toolStat = toolCtx ? toolStaticFor(snapshot, bounds, toolCtx) : null;
+  if (toolStat) bounds = { ...bounds, toolIndex: toolStat };
   const tasks = eligibleTasks(snapshot, bounds);
   const occupancyTasks = evaluationTasks(snapshot, bounds);
   const patches = new Map(candidate.patches.map(p => [p.id, p]));
   const dispositions = new Map(candidate.dispositions?.map(d => [d.id, d]));
   const pending = urgencyOrder(snapshot, bounds, '', tasks).filter(task =>
-    dispositions.get(taskId(task))?.status === 'needs_planning' && !planningDefect(snapshot, bounds, task));
+    dispositions.get(taskId(task))?.status === 'needs_planning' && !planningDefect(snapshot, bounds, task)
+    // Tool Inventory: an order the overflow pass queued (no tool-free gap on its line) is final: re-walking the same
+    // gaps cannot succeed and must not relabel its structured tool reason.
+    && !(toolCtx && isToolReasonCode(dispositions.get(taskId(task))?.reason?.code)));
   if (!pending.length) {
     // A completed gap check still needs the same final-state accounting pass
     // as a run that inserted work. The primary candidate may have emitted
@@ -7407,7 +8010,10 @@ export function fillPlanningGaps(
     // No pending orders to try doesn't guarantee nothing moved relative to
     // what finalizeCandidate last saw — recompute rather than assume the
     // incoming findings are still accurate.
-    return withFreshDistributionFindings(refreshed, snapshot);
+    const fresh = withFreshDistributionFindings(refreshed, snapshot);
+    return toolCtx && candidate.toolPass === undefined
+      ? withFreshDistributionFindings(refreshFinalMetrics(snapshot, bounds, resolveToolOverflow(snapshot, bounds, fresh)), snapshot)
+      : fresh;
   }
   const revision = new Map<string, number>();
   const checked = new Map<string, number>();
@@ -7417,108 +8023,29 @@ export function fillPlanningGaps(
     const line = String(task.MACHINE);
     const peers = byLine.get(line) ?? []; peers.push(task); byLine.set(line, peers);
   }
-  const definition = bounds.setup.definition;
-  const state = (task: NimbusTask): SetupStateKey | null => definition ? orderState(bounds, task, definition) : null;
+  const env: GapEnv = { snapshot, bounds, candidate, byLine, availability, patches, dispositions, expired };
   let placed = 0;
   // Do not try to repair an internally invalid proposal by inserting more work.
   const valid = !validateCandidate(snapshot, bounds, candidate).some(f => f.severity === 'error');
+  // Tool Inventory: occupancy from the FULL plant task list; every insertion must be tool-free (see placeTaskInLineGaps).
+  const toolOcc = toolCtx && toolStat ? buildToolOcc(toolCtx, toolStat, bounds, patchedTaskView(snapshot.tasks, patches)) : null;
   while (valid && !expired()) {
     const task = pending.find(item => dispositions.get(taskId(item))?.status === 'needs_planning'
       && checked.get(taskId(item)) !== (revision.get(String(item.MACHINE)) ?? 0));
     if (!task) break;
     const id = taskId(task); const line = String(task.MACHINE);
-    const peers = byLine.get(line)!;
-    const lineIds = new Set(peers.map(taskId));
-    const accepted = applyPatchesToSnapshot(peers, [...patches.values()]).filter(item => {
-      const start = timestamp(item.start_date);
-      const end = timestamp(item.end_date);
-      return dispositions.get(taskId(item))?.status !== 'needs_planning' && start && end && end > start;
-    }).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
-    if (!availability.has(line)) availability.set(line, freeIntervalsFor(snapshot, line, bounds.setup.plant, bounds.now, bounds.horizonEnd, bounds.runContext));
-    const free = availability.get(line)!;
-    const transition = (predecessor: NimbusTask | null, successor: NimbusTask): number | null => {
-      const from = predecessor ? state(predecessor) : definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
-      const to = state(successor);
-      if (definition && inactiveOverrideForTransition(bounds, line, from, to, predecessor ? taskId(predecessor) : null, taskId(successor), lineIds, true)) return null;
-      const chargeable = setupChargeableOnLine(bounds, snapshot, line);
-      // N8 fix-up: no definition / setup-incompatible line never charges,
-      // regardless of policy. An unrecorded predecessor/successor state is
-      // otherwise the same "unresolved transition" shape as an uncovered row
-      // below, so it goes through the same chargedSetupMinutes gate rather
-      // than a hardcoded zero.
-      if (!chargeable) return 0;
-      if (!from || !to) return chargedSetupMinutes(bounds.runContext, null, true);
-      const resolution = resolveSetup({ definition: definition!, machine: line, predecessorState: from, successorState: to,
-        predecessorOrderId: predecessor ? taskId(predecessor) : null, successorOrderId: taskId(successor),
-        plantRows: bounds.setup.plant_rows, machineRows: bounds.setup.machine_rows, overrides: bounds.setup.overrides,
-        index: bounds.runContext?.resolutionIndex ?? undefined });
-      if (!resolution.covered && bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch') return null;
-      return chargedSetupMinutes(bounds.runContext, resolution, true);
-    };
-    let cursor = +bounds.now;
-    let predecessor: NimbusTask | null = null;
-    let completed = true;
-    for (let index = 0; index <= accepted.length; index++) {
-      if (expired()) { completed = false; break; }
-      const next = accepted[index];
-      const gapEnd = Math.min(+bounds.horizonEnd, next ? +timestamp(next.start_date)! : Infinity);
-      const floor = Math.max(cursor, +(notBeforeFor(bounds, task) ?? bounds.now));
-      const incoming = gapEnd > floor ? transition(predecessor, task) : null;
-      const outgoing = next && incoming !== null ? transition(task, next) : 0;
-      if (incoming !== null && outgoing !== null) {
-        const nextStart = next ? +timestamp(next.start_date)! : gapEnd;
-        const setupStart = nextStart - outgoing * 60000;
-        const ceiling = Math.min(gapEnd, setupStart, +(notAfterFor(bounds, task) ?? bounds.horizonEnd));
-        const outgoingFits = !next || outgoing === 0 || (
-          setupStart >= +(notBeforeFor(bounds, next) ?? bounds.now)
-          && coversInterval(nextStart > +bounds.horizonEnd
-            ? freeIntervalsFor(snapshot, line, bounds.setup.plant, new Date(setupStart), new Date(nextStart), bounds.runContext) : free,
-          { start: new Date(setupStart), end: new Date(nextStart) }));
-        // Frozen finish floor: a gap whose ceiling is before it admits nothing (equality is valid).
-        const gapFinishFloor = bounds.finishFloor ?? null;
-        if (ceiling > floor && outgoingFits && !(gapFinishFloor && ceiling < +gapFinishFloor)) {
-          const runtimeMinutes = Math.round(Number(task.RUN_TIME) * 60);
-          const policy = bounds.runContext!.splitOrderPolicy;
-          // Each attempt rebuilds the clipped intervals and isInherentlyOverlong from its own start.
-          const placement = placeWithFinishFloor((earliest: Date) => placeWithSetup({ earliestStart: earliest, runtimeMinutes,
-            setup: { kind: 'resolved', minutes: incoming }, policy,
-            isInherentlyOverlong: policy === 'overlong_only' && !hasNominalWindow(snapshot, line, bounds.setup.plant, earliest, runtimeMinutes, bounds.runContext),
-            minProductiveSegmentMinutes: bounds.runContext!.minProductiveSegmentMinutes,
-            freeIntervals: free.flatMap(slot => {
-              const start = Math.max(+slot.start, +earliest); const end = Math.min(+slot.end, ceiling);
-              return end > start ? [{ start: new Date(start), end: new Date(end) }] : [];
-            }),
-          }), new Date(floor), gapFinishFloor, incoming, runtimeMinutes, policy);
-          if (placement.kind === 'placed') {
-            const segments = placement.productiveSegments;
-            const patch: SchedulePatch = { id, changes: { start_date: segments[0].start, end_date: segments.at(-1)!.end,
-              scheduleSegments: segments.length > 1 ? segments.map((segment, i) => ({ sequence: i + 1, startDate: segment.start, endDate: segment.end })) : [],
-              planning_status: 'scheduled', planning_reason: null } };
-            const disposition: PlanningDisposition = { id, line, status: 'scheduled' };
-          const trial = { ...candidate,
-              patches: peers.flatMap(peer => taskId(peer) === id ? [patch] : patches.has(taskId(peer)) ? [patches.get(taskId(peer))!] : []),
-              dispositions: peers.flatMap(peer => {
-                const value = taskId(peer) === id ? disposition : dispositions.get(taskId(peer));
-                return value ? [value] : [];
-              }),
-            };
-            if (!validateCandidate({ ...snapshot, tasks: peers }, { ...bounds, lines: [line] }, trial).some(f => f.severity === 'error')) {
-              patches.set(id, patch); dispositions.set(id, disposition); placed++;
-              revision.set(line, (revision.get(line) ?? 0) + 1);
-              break;
-            }
-          }
-        }
-      }
-      if (next) {
-        // Overlapping protected orders reserve their entire union, including
-        // split-order envelopes; the last chronological order supplies state.
-        cursor = Math.max(cursor, +timestamp(next.end_date)!);
-        predecessor = next;
+    const toolInfo = toolOcc ? toolStat!.byId.get(id) : undefined;
+    const outcome = placeTaskInLineGaps(env, task, toolOcc && toolInfo ? toolGapHooks(toolOcc, toolInfo.tools, line) : undefined);
+    if (outcome.kind === 'placed') {
+      patches.set(id, outcome.patch); dispositions.set(id, outcome.disposition); placed++;
+      revision.set(line, (revision.get(line) ?? 0) + 1);
+      if (toolOcc && toolInfo) {
+        const item = toolItemFor(toolOcc.ctx, toolStat!, toolOcc.runNowMs, { ...task, ...outcome.patch.changes } as NimbusTask);
+        if (item) toolOccAdd(toolOcc, item);
       }
     }
-    if (completed) checked.set(id, revision.get(line) ?? 0);
-    else break;
+    if (outcome.kind === 'incomplete') break;
+    checked.set(id, revision.get(line) ?? 0);
   }
   let unchecked = 0;
   for (const task of pending) {
@@ -7549,7 +8076,15 @@ export function fillPlanningGaps(
     gapFill: { complete: valid && unchecked === 0, placed, unchecked, runtimeMs: bounds.clock() - started } };
   result.validationFindings = validateCandidate(snapshot, bounds, result);
   const final = withFreshDistributionFindings(refreshFinalMetrics(snapshot, bounds, result), snapshot);
-  return { ...final, gapFill: { ...result.gapFill!, runtimeMs: bounds.clock() - started } };
+  let out: CandidateResult = { ...final, gapFill: { ...result.gapFill!, runtimeMs: bounds.clock() - started } };
+  if (toolCtx && (placed > 0 || candidate.toolPass === undefined)) {
+    // Gap-fill can never re-create overflow (its gaps are tool-free), but the pass is re-run once on the final candidate:
+    // it is the safety net, and it also repairs a candidate the pass never ran on.
+    const passed = resolveToolOverflow(snapshot, bounds, out);
+    out = withFreshDistributionFindings(refreshFinalMetrics(snapshot, bounds, passed), snapshot);
+    out = { ...out, gapFill: { ...result.gapFill!, runtimeMs: bounds.clock() - started } };
+  }
+  return reconcileToolOutcomes(out);
 }
 
 function baselineWithinWindow(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask): boolean {

@@ -34,7 +34,7 @@
 export interface NimbusTask {
   id: string;
   planning_status?: 'scheduled' | 'needs_planning';
-  planning_reason?: { code: string; step?: string | null; message: string; tool_id?: string; available?: number; holders?: string[] } | null;
+  planning_reason?: { code: string; step?: string | null; message: string; tool_id?: string; available?: number; holders?: string[]; incomplete?: boolean } | null;
   text?: string;
   MACHINE: string;
   PLANT?: string;
