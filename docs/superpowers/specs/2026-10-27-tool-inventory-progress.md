@@ -57,4 +57,13 @@ F1 (the pass may move an offender earlier), F4 (setup and run intersected with t
 
 ### Final gate (task 5)
 
-(Filled by the trial-merge step below.)
+Gate on feature/tool-inventory (before this ledger edit): build, typecheck, lint (0 errors, 40 warnings), npm test (legacy 130/130; modules 5,235 pass, 2 skipped, 0 fail), check:legacy-surface, check:static-assets, pytest 1,669 passed / 666 skipped (pg-marked) / 13 xfailed.
+
+Trial merge: main = 13466ff278c1287cb1876773870ad68fab7ec354 at the time; temp branch `trial/tool-inventory-merge` (tip 5cd6a9c; the worktree directory could not be fully deleted, OneDrive permission denied; the branch is kept). feature/tool-inventory was not rebased or altered. 14 files conflicted, not only the expected docs lines (main had advanced 36 commits, including setup value defaults and i18n sweeps):
+
+- keep-both (adjacent additions): `frontend/locales/{en,de,es,fr,pt}.js`, `tests/modules/insights/insights-ui.test.mjs`, `tests/modules/setup-scheduler.test.mjs`, `tests/test_schema_idempotent.py`, `frontend/types/api-generated.d.mts` (PlanningReason `step` plus the index signature), `frontend/index.html` (main's relabelled Routing / Work Center tabs plus our Tool Inventory tab), `frontend/insights/insights-ui.mts` (our Open tool inventory button plus main's localized Dismiss). The first keep-both pass dropped closing `};` / `});` lines; fixed in the trial.
+- `CLAUDE.md` / `AGENTS.md`: main's Setup row (value defaults) kept, our Optimization (and AGENTS Scheduling) additions re-applied.
+- `frontend/optimization/setup-scheduler.mts` (SEMANTIC, needs owner eyes): our refactor moved the gap walk into `placeTaskInLineGaps`; main added `valueDefaults` to every `resolveSetup` call. Resolved by taking our structure and adding `valueDefaults: bounds.setup.value_defaults ?? NO_VALUE_DEFAULTS` to the one `resolveSetup` call in our code that lacked it (the transition closure of the tool walk). All 9 `resolveSetup` calls now carry it.
+- Both migrations are named `2026-10-27-1-*` (setup-value-defaults and tool-inventory): distinct filenames and ledger-safe, but name each with `-Only`.
+
+Gate on the trial merge (after the fixes): build, typecheck, lint (0 errors, 38 warnings), npm test (legacy 130/130; modules 5,294 pass, 2 skipped, 0 fail), check:legacy-surface, check:static-assets, pytest 1,711 passed / 675 skipped / 13 xfailed. pg-marked tests skipped (no local Postgres credentials; Azure never used).
