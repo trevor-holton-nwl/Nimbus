@@ -2479,13 +2479,7 @@ export const ProdLines = {
     });
 
     const filterBar = document.getElementById('lines-filter-bar');
-    if (filterBar) {
-      filterBar.innerHTML = `
-        <div style="display:flex;align-items:center;gap:6px;font-size:13px;">
-          <span style="color:var(--text-muted,#64748b);">${Util.escapeHtml(Util.t('ui.plant_label'))}</span>
-          <span class="plant-badge">${Store.selectedPlant || '—'}</span>
-        </div>`;
-    }
+    if (filterBar) filterBar.innerHTML = '';
 
     // Cross-screen production-line filter (Store.selectedLines) — same
     // selection as the Scheduling Board / Dashboard / Labor Plan pickers.
