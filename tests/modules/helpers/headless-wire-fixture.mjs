@@ -70,3 +70,15 @@ export function wireFixture() {
     horizons: { calendar_version: 'cal-1', tool_inventory_version: '2|2035-08-01T00:00:00Z' },
   };
 }
+
+/** The fixture plus rows the browser derives starts for: a never-placed order (finish only), a second one on a
+ * machine with its own hours, and a placed order the server flagged stale (a dirty re-derivation). */
+export function wireWithUnplaced() {
+  const wire = wireFixture();
+  wire.tasks.data.push(
+    taskRow('3001', { user_scheduled: false, start_date: null, end_date: '2035-08-09T17:00:00', original_end_date: '2035-08-09T17:00:00', row_version: 3 }),
+    taskRow('3002', { MACHINE: 'L2', user_scheduled: false, RUN_TIME: 6, start_date: null, end_date: '2035-08-10T17:00:00', original_end_date: '2035-08-10T17:00:00' }),
+    taskRow('3003', { MACHINE: 'L2', runtime_schedule_mismatch: true, RUN_TIME: 3, start_date: '2035-08-09T09:00:00', end_date: '2035-08-09T12:00:00' }),
+  );
+  return wire;
+}

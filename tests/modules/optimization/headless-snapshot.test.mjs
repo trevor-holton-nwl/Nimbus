@@ -1,47 +1,11 @@
 import '../helpers/force-utc.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
 import { wireFixture, PLANT, SERVER_NOW } from '../helpers/headless-wire-fixture.mjs';
 
-const require = createRequire(import.meta.url);
-globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
-globalThis.window = globalThis.window || {};
-if (typeof globalThis.document === 'undefined') globalThis.document = { getElementById: () => null };
-
-const { Store } = await import('../../../frontend/platform/store.mjs');
-const { Persistence } = await import('../../../frontend/scheduling/persistence.mjs');
-const { CalendarSync } = await import('../../../frontend/calendar/calendar-sync.mjs');
+const { hydrateStoreLikeBrowser } = await import('../helpers/browser-store-hydrate.mjs');
 const { snapshotSchedule } = await import('../../../frontend/optimization/engine.mjs');
 const { buildScheduleSnapshot } = await import('../../../frontend/optimization/headless-snapshot.mjs');
-
-/** Populate the live Store through the same calls the browser's load makes, in the same order. */
-function hydrateStoreLikeBrowser(wire, plant) {
-  Store.setSelectedPlant(plant, 'unit-test');
-  const tasks = wire.tasks.data.map(raw => Persistence._prepTask(structuredClone(raw)));
-  for (const t of tasks) {
-    if (!t.MACHINE || !t.PLANT) continue;
-    Store.ensureLineSettings(t.MACHINE);
-    Store.lineSettings[t.MACHINE].plant = t.PLANT;
-  }
-  Store.setServerNow(wire.tasks.meta.server_now, Date.now());
-  Store.setFrozenHorizonEnd(wire.tasks.meta.frozen_horizon_end ? new Date(wire.tasks.meta.frozen_horizon_end) : null, 'unit-test');
-  Store.setTasks(tasks, 'unit-test');
-  for (const t of Store.tasksArr) Store.ensureCalendar(t.MACHINE || 'Unknown');
-  Store.setMasterData({
-    plants: wire.masterData.plants.rows,
-    lines: wire.masterData.machine.rows,
-    workcenters: wire.masterData.sap_workcenter?.rows ?? [],
-    tool_inventory: wire.masterData.tool_inventory
-      ? wire.masterData.tool_inventory.rows.slice().sort((a, b) => (a.tool_id < b.tool_id ? -1 : a.tool_id > b.tool_id ? 1 : 0))
-      : undefined,
-  }, 'unit-test');
-  Store.applyMasterLinesToSettings();   // the shell's master-data-changed subscriber
-  Store.rebuildPlantIndex();
-  CalendarSync._applyConfig(plant, structuredClone(wire.calendar));
-  Store.replaceSetupSnapshot(structuredClone(wire.setup), 'unit-test');
-  Store.setPriorityRankMaps(structuredClone(wire.priorityRankMaps), 'unit-test');
-}
 
 const withoutRevision = snapshot => { const { readModelVersion: _rev, ...rest } = snapshot; return rest; };
 
