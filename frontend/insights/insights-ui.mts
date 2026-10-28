@@ -1227,6 +1227,14 @@ const VL_ALERT_ROW_H = 72;
    `renderDrawer`/`renderBell` (now public — called from Dashboard,
    App._renderSettingsPane, and App's `alerts:change` subscriber).
    ========================================================================== */
+/** The plant + tool a count-aware tool-conflict alert points at (null for any other alert). */
+export function toolInvTarget(a: NimbusAlert): { plant: string; tool: string } | null {
+  if (a.type !== 'tool-conflict') return null;
+  const tool = a.tool ?? a.msgVars?.tool;
+  if (tool == null || tool === '') return null;
+  return { plant: (a as { plant?: string }).plant || Store.selectedPlant || '', tool: String(tool) };
+}
+
 export const AlertsUIAdapter = {
   /** The alert-card headline for an alert type: the localized `alert.type.<type>` row, falling back to the
    *  title-cased type only when a locale has no row (U28). Plain text; callers escape it. */
@@ -1261,6 +1269,8 @@ export const AlertsUIAdapter = {
     if (!alertId) return;
     if (action === 'focus') {
       AlertsUIAdapter.focus(alertId);
+    } else if (action === 'tool-inventory') {
+      AlertsUIAdapter.openToolInventory(alertId);
     } else if (action === 'fix') {
       Alerts.applyFix(alertId);
     } else if (action === 'dismiss') {
@@ -1269,6 +1279,17 @@ export const AlertsUIAdapter = {
       e.stopPropagation();
       Alerts.dismiss(alertId);
     }
+  },
+  /** "Open tool inventory": Master Data > Tool Inventory on the alert's plant, filtered to the alert's tool. Works for a zero-copy
+   *  alert too (raising the copies is the remedy there). The drawer closes so the page behind is visible. */
+  openToolInventory(alertId: string): void {
+    const a = Store.alerts.find(x => x.id === alertId);
+    const target = a ? toolInvTarget(a) : null;
+    if (!target) return;
+    document.getElementById('alert-drawer')?.classList.remove('open');
+    NIMBUS!.App!.goto!('masterdata');
+    NIMBUS!.App!.gotoMasterSub!('tool-inventory');
+    void import('../master-data/tool-inventory.mjs').then(m => m.ToolInventory.openForTool(target.plant, target.tool));
   },
   // Jump to the task related to an alert (navigates to Gantt tab and focuses it
   // at day-level zoom so the alert context — surrounding orders, blackouts — is visible).
@@ -1463,6 +1484,7 @@ export const AlertsUIAdapter = {
           ${chipsHtml}
           <div class="ac-card-actions">
             ${gotoBtn}
+            ${toolInvTarget(a) ? `<button class="btn sm" data-act="tool-inventory" data-id="${Util.escapeHtml(a.id)}">${Util.escapeHtml(Util.t('ui.alert_open_tool_inventory'))}</button>` : ''}
             <button class="btn sm" data-act="dismiss" data-id="${Util.escapeHtml(a.id)}">Dismiss</button>
           </div>
         </div>`;
@@ -1539,6 +1561,7 @@ export const AlertsUIAdapter = {
       const act = btn.dataset.act, aid = btn.dataset.id ?? '';
       if (act === 'close')   { dlg.close(); return; }
       if (act === 'goto')    { dlg.close(); AlertsUIAdapter.focus(aid); return; }
+      if (act === 'tool-inventory') { dlg.close(); AlertsUIAdapter.openToolInventory(aid); return; }
       if (act === 'dismiss') {
         Alerts.dismiss(aid);
         btn.closest('.ac-card')?.remove();
@@ -1585,6 +1608,7 @@ export const AlertsUIAdapter = {
       `<div class="alert-actions">` +
         ((a.taskId != null || (a.line && a.time)) ? `<button class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.go_to')}</button>` : '') +
         (fixable  ? `<button class="btn-fix" title="${Util.t('tip.fix_alert')}" data-alert-action="fix" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.fix_it')}</button>` : '') +
+        (toolInvTarget(a) ? `<button class="btn btn-ghost sm" data-alert-action="tool-inventory" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('ui.alert_open_tool_inventory')}</button>` : '') +
         (override ? `<button class="btn btn-ghost sm" data-alert-action="override" data-task-id="${Util.escapeHtml(a.taskId)}">${Util.t('btn.override')}</button>` : '') +
         `<button class="btn btn-ghost sm" data-alert-action="dismiss" data-alert-id="${Util.escapeHtml(a.id)}">${Util.t('btn.dismiss')}</button>` +
       `</div></div>`;

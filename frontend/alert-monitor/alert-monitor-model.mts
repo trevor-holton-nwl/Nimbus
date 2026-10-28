@@ -652,6 +652,8 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
       break;
     case 'tool':
       add('focus-first', 'leverage.action.tool', true);
+      // The remedy for a conflict (or a zero-copy tool) is often the copy count: Master Data > Tool Inventory on this tool.
+      add('tool-inventory', 'am.act_open_tool_inventory');
       break;
     case 'machine-state':
       add('focus-first', 'leverage.action.machine-state', true);

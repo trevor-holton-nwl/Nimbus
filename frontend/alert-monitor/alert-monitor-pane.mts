@@ -1192,6 +1192,14 @@ function _onLevAction(act: string, key: string): void {
         void import('../master-data/material-grids.mjs').then(m => m.MaterialGrids.setQuickFilter('routing-pv', action.material));
       }
       break;
+    case 'tool-inventory':
+      if (action.kind === 'tool') {
+        const tool = action.tool;
+        nim.App?.goto?.('masterdata');
+        nim.App?.gotoMasterSub?.('tool-inventory');
+        void import('../master-data/tool-inventory.mjs').then(m => m.ToolInventory.openForTool(plant, tool));
+      }
+      break;
     case 'setup-review':
     case 'setup-copy':
       if (action.kind === 'open-setup-matrix') void _levSetupAction(act, action.plant, action.pairs);
