@@ -3026,7 +3026,10 @@ export const Engine = {
       // F2 a shared 20,000 iterations starved later lines on big plants. With
       // F1 no exact fragment exceeds ~500 leaves and greedy tops ~165 candidates
       // per fragment, so per-line scaling keeps the pool usable for every line.
-      iterationCap: Math.round(SETUP_AWARE_ITERATION_CAP * Math.max(1, linesInScope) * scale),
+      // opts.iterationCap (headless runs, tests) replaces the scaled cap so a run can end on iterations alone, never on the clock.
+      iterationCap: typeof opts.iterationCap === 'number' && opts.iterationCap >= 1
+        ? Math.floor(opts.iterationCap)
+        : Math.round(SETUP_AWARE_ITERATION_CAP * Math.max(1, linesInScope) * scale),
       gapFillBudgetMs: gapFillBudgetFor(opts.searchBudgetMs as number | undefined),
       clock: () => performance.now(),
       // Phase 2 (Pkg D): an absolute deadline the caller already computed

@@ -26,27 +26,13 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+const { encodeTagged, decodeTagged } = await import('../frontend/optimization/headless-codec.mjs');
+
 /** Serialise any request/response graph. Dates become {"$d": iso}, Sets {"$set": [...]}. */
-export function encodeGolden(value) {
-  return JSON.stringify(value, function replacer(key, v) {
-    const raw = this[key];
-    if (raw instanceof Date) return Number.isFinite(raw.getTime()) ? { $d: raw.toISOString() } : { $d: null };
-    if (raw instanceof Set) return { $set: [...raw] };
-    return v;
-  }, 2);
-}
+export const encodeGolden = value => encodeTagged(value, 2);
 
 /** Inverse of encodeGolden. */
-export function decodeGolden(text) {
-  return JSON.parse(text, (_key, v) => {
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      const keys = Object.keys(v);
-      if (keys.length === 1 && keys[0] === '$d') return v.$d === null ? new Date(Number.NaN) : new Date(v.$d);
-      if (keys.length === 1 && keys[0] === '$set') return new Set(v.$set);
-    }
-    return v;
-  });
-}
+export const decodeGolden = text => decodeTagged(text);
 
 /** Install the compute core the engine delegates to (a browser loads it as a classic script first). */
 export function ensureComputeCore() {
