@@ -27,7 +27,7 @@ is no more global fallback wheel — COLOR_FILE/GLOBAL_CW are retired.
 P5 (docs/architecture/domain-refactor-plan.md) reorganized this file from
 ~4,074 lines holding all 103 routes down to this thin app-assembly file: app
 construction, middleware, exception handlers, lifespan bootstrap,
-`include_router` calls for the thirteen domain routers, and the StaticFiles mount
+`include_router` calls for the fourteen domain routers, and the StaticFiles mount
 (kept last). Routes themselves now live in `backend/<domain>/routes.py`; four
 whole modules moved to `backend/`: `auth.py` -> `backend/security/auth.py`,
 `setup_data.py` -> `backend/setup/data.py`, `admin_tables.py` ->
@@ -64,6 +64,9 @@ import backend.integration.sap_sync as sap_sync
 import backend.security.auth as auth
 from backend.alert_profiles.data import ensure_alert_profile_tables
 import backend.schedule_events.data as schedule_events_data
+import backend.jobs.data as jobs_data
+import backend.jobs.scheduler as jobs_scheduler
+import backend.jobs.runner as jobs_runner
 import backend.setup.data as setup_data  # noqa: F401 — back-compat (brain.setup_data), see below
 from backend.priority_lists.audit_log import COLOR_WHEEL_DIR, _migrate_audit_log
 from backend.security.auth import require_admin, require_api_key  # noqa: F401 — back-compat, see below
@@ -87,6 +90,7 @@ import backend.alert_profiles.routes as alert_profiles_routes
 import backend.calendars.routes as calendars_routes
 import backend.distribution.routes as distribution_routes
 import backend.integration.routes as integration_routes
+import backend.jobs.routes as jobs_routes
 import backend.labor.routes as labor_routes
 import backend.master_data.routes as master_data_routes
 import backend.priority_lists.routes as priority_lists_routes
@@ -331,6 +335,7 @@ async def lifespan(app: FastAPI):
     auth.ensure_user_settings_table()
     md.ensure_system_settings_table()
     schedule_events_data.ensure_schedule_event_table()
+    jobs_data.ensure_job_tables()
     _log_event("info", "startup", "Priority lists loaded",
                plants_with_lists=len(plcache.PLANT_LISTS))
     # Stateless backend: orders are NOT loaded into memory at startup — every
@@ -397,6 +402,7 @@ async def lifespan(app: FastAPI):
             coalesce=True,
             replace_existing=True,
         )
+        jobs_scheduler.install(scheduler)   # job:<schedule_id> jobs + reconcile tick + run-history sweep
         scheduler.start()
         app.state.sap_scheduler = scheduler
         if SAP_SYNC_ENABLED:
@@ -416,6 +422,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    with suppress(Exception):
+        jobs_runner.cancel_all()
     scheduler = getattr(app.state, "sap_scheduler", None)
     if scheduler is not None:
         with suppress(Exception):
@@ -818,9 +826,15 @@ _ADMIN_WRITE_OPERATIONS = {
     "/maintenance/vacuum-analyze": "maintenance.vacuum_analyze",
     "/maintenance/analyze": "maintenance.analyze",
     "/maintenance/schedule-event-sweep": "maintenance.schedule_event_sweep",
+    "/jobs": "jobs.create",
+    "/jobs/{job_id}": "jobs.update",
+    "/jobs/{job_id}/schedules": "jobs.schedule_create",
+    "/jobs/schedules/{schedule_id}": "jobs.schedule_update",
+    "/jobs/{job_id}/run": "jobs.run_now",
+    "/jobs/runs/{run_id}/cancel": "jobs.run_cancel",
 }
 
-_ADMIN_TARGET_PARAMS = frozenset({"plant", "machine", "override_id", "table", "column", "object", "username", "batch_id", "archive_id"})
+_ADMIN_TARGET_PARAMS = frozenset({"plant", "machine", "override_id", "table", "column", "object", "username", "batch_id", "archive_id", "job_id", "schedule_id", "run_id"})
 
 
 def _admin_route_details(request: Request) -> tuple[str | None, dict]:
@@ -828,6 +842,8 @@ def _admin_route_details(request: Request) -> tuple[str | None, dict]:
     route = request.scope.get("route")
     route_path = getattr(route, "path", None)
     operation = _ADMIN_WRITE_OPERATIONS.get(route_path)
+    if operation and operation.startswith("jobs.") and request.method in ("GET", "HEAD"):
+        operation = None   # /jobs and /jobs/{job_id}/... share paths with polled reads; only writes are audited
     details = {
         key: value for key, value in request.path_params.items()
         if key in _ADMIN_TARGET_PARAMS
@@ -836,7 +852,7 @@ def _admin_route_details(request: Request) -> tuple[str | None, dict]:
 
 
 # =========================
-# ROUTERS — thirteen domain-scoped routers (nine from docs/architecture/domain-refactor-plan.md
+# ROUTERS — fourteen domain-scoped routers (nine from docs/architecture/domain-refactor-plan.md
 # §4, plus backend/distribution/ added 2026-09-17 per aggregate_to_detail.md, backend/alert_profiles/ and
 # backend/schedule_events/; imported at
 # the top of this file — the module objects are already bound here)
@@ -854,6 +870,7 @@ api.include_router(calendars_routes.router)
 api.include_router(admin_ops_routes.router)
 api.include_router(alert_profiles_routes.router)
 api.include_router(schedule_events_routes.router)
+api.include_router(jobs_routes.router)
 
 
 # =========================

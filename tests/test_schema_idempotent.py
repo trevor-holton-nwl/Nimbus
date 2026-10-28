@@ -161,6 +161,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-23-1-schedule-event.sql",
         "2026-10-27-1-setup-value-defaults.sql",
         "2026-10-27-1-tool-inventory.sql",
+        "2026-10-29-1-job-scheduler.sql",
         "2026-07-07-color-wheel-table.sql",
         "2026-07-07-security-tables.sql",
         "2026-07-08-username-ci-index.sql",
