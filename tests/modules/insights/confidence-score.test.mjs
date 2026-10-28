@@ -32,7 +32,8 @@ test('alertPoints: base x weight; out-of-horizon and no-time give 0; horizonEnd 
   assert.equal(Core.alertPoints(alert('warn', 10), H0, H1), 2);
   assert.equal(Core.alertPoints({ sev: 'info', time: at(1) }, H0, H1), 0);
   assert.equal(Core.alertPoints({ sev: 'err' }, H0, H1), 0);
-  assert.equal(Core.alertPoints({ sev: 'err', time: new Date(H0.getTime() - 1) }, H0, H1), 0);
+  assert.equal(Core.alertPoints({ sev: 'err', time: new Date(H0.getTime() - 1) }, H0, H1), 7.5); // earlier today counts as due now
+  assert.equal(Core.alertPoints({ sev: 'err', time: new Date(H0.getTime() - DAY) }, H0, H1), 0);  // an earlier day is history
   assert.equal(Core.alertPoints({ sev: 'err', time: H1 }, H0, H1), 0);
   assert.equal(Core.alertPoints({ sev: 'err', time: H0 }, H0, H1), 7.5);
 });
@@ -86,6 +87,17 @@ test('past-due late/queued alerts (with a due) count at weight 1.5; a non-due al
   assert.equal(Core.alertPoints(pastDue, H0, H1), 3);            // 2 x 1.5
   assert.equal(Core.alertPoints({ sev: 'err', time: at(-2) }, H0, H1), 0);
   assert.equal(Core.alertPoints({ sev: 'err', time: at(-2), due: at(-30) }, H0, H1), 7.5);
+});
+
+test("today's overload (dated noon) counts at weight 1.5 after noon; the same alert dated yesterday scores 0", () => {
+  const h = new Date(2026, 9, 20, 15, 0, 0);
+  const end = new Date(h.getTime() + 14 * DAY);
+  const noonToday = { sev: 'err', type: 'overload', time: new Date(2026, 9, 20, 12, 0, 0) };
+  const noonYesterday = { sev: 'err', type: 'overload', time: new Date(2026, 9, 19, 12, 0, 0) };
+  assert.equal(Core.alertPoints(noonToday, h, end), 7.5);
+  assert.equal(Core.alertPoints(noonYesterday, h, end), 0);
+  assert.equal(Core.alertPoints({ ...noonToday, time: new Date(2026, 9, 20, 0, 0, 0) }, h, end), 7.5);
+  assert.equal(Core.alertPoints({ ...noonToday, time: new Date(2026, 9, 19, 23, 59, 59) }, h, end), 0);
 });
 
 test('a late alert whose finish is beyond the horizon but whose due is inside still counts, by its due date', () => {

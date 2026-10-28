@@ -213,8 +213,12 @@ export function impactPoints(alert: NimbusAlert, horizonStart: Date, horizonMinu
     if (alert.due >= horizonEnd) return 0;
     when = alert.due < horizonStart ? horizonStart : alert.due;
   } else {
-    if (!_validDate(alert.time) || alert.time < horizonStart || alert.time >= horizonEnd) return 0;
-    when = alert.time;
+    if (!_validDate(alert.time) || alert.time >= horizonEnd) return 0;
+    if (alert.time < horizonStart) {
+      const dayStart = new Date(horizonStart.getFullYear(), horizonStart.getMonth(), horizonStart.getDate());
+      if (alert.time < dayStart) return 0;   // an earlier day is history; earlier today counts as due now
+      when = horizonStart;
+    } else when = alert.time;
   }
   const base = alert.sev === 'err' ? FALLBACK_WEIGHTS.err : alert.sev === 'warn' ? FALLBACK_WEIGHTS.warn : 0;
   const days = (when.getTime() - horizonStart.getTime()) / 86400000;

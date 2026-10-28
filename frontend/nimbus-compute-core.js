@@ -1681,15 +1681,19 @@
 
   // Uncapped impact points of one alert. An alert with a `due` (late, needs_planning) is scored by its due date:
   // due >= horizonEnd -> 0; due before horizonStart -> past due and still open, scored as due now (weight 1.5).
-  // An alert without `due` keeps its `time` rule: before horizonStart is history (0), at/after horizonEnd is 0.
+  // An alert without `due` is scored by `time`: at/after horizonEnd is 0, an earlier DAY is history (0), and one dated
+  // earlier TODAY (today's overload is dated noon) counts as due now (weight 1.5).
   function alertPoints(alert, horizonStart, horizonEnd) {
     let when;
     if (alert.due) {
       if (alert.due >= horizonEnd) return 0;
       when = alert.due < horizonStart ? horizonStart : alert.due;
     } else {
-      if (!alert.time || alert.time < horizonStart || alert.time >= horizonEnd) return 0;
-      when = alert.time;
+      if (!alert.time || alert.time >= horizonEnd) return 0;
+      if (alert.time < horizonStart) {
+        if (alert.time < startOfDay(horizonStart)) return 0;
+        when = horizonStart;
+      } else when = alert.time;
     }
     const base = alert.sev === 'err' ? CONFIDENCE_WEIGHTS.err : alert.sev === 'warn' ? CONFIDENCE_WEIGHTS.warn : 0;
     return base * timeWeight(when, horizonStart);

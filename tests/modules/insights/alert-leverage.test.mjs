@@ -151,6 +151,15 @@ test('parity: score-without equals scoreConfidence on the reduced set for every 
 
 // ---- setup pairs ---------------------------------------------------------------------------------
 
+test("impactPoints mirrors the core: today's earlier-dated alert counts, yesterday's does not", async () => {
+  const { impactPoints } = await import('../../../frontend/insights/alert-profiles.mjs');
+  const h = new Date(2026, 9, 20, 15, 0, 0);
+  const today = { id: 'x', sev: 'err', type: 'overload', msg: '', line: LINE, time: new Date(2026, 9, 20, 12, 0, 0) };
+  const yday = { ...today, time: new Date(2026, 9, 19, 12, 0, 0) };
+  assert.equal(impactPoints(today, h, HM), 7.5);
+  assert.equal(impactPoints(yday, h, HM), 0);
+});
+
 test('parsePairKey splits on ]-> and rejects unknown halves', () => {
   const p = parsePairKey(PAIR_AB);
   assert.deepEqual(p.from, [{ fieldKey: 'colorWheel', value: 'A' }]);
