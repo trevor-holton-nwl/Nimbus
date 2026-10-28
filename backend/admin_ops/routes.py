@@ -14,7 +14,10 @@ constants are used only within this domain and moved along with their
 callers.
 """
 import json
+import os
+import re
 import time
+from pathlib import Path
 
 import psycopg
 import pandas as pd
@@ -75,6 +78,34 @@ def livez():
     Admin Cockpit keep using /health (which pings the DB). Keeping liveness DB-free
     means a slow or briefly-unreachable database can't trigger needless restarts."""
     return {"status": "ok"}
+
+
+# Parsed once from the stamped index.html; _UNREAD means "not looked up yet" so a
+# missing/unparseable file (None) is also cached rather than re-read per request.
+_UNREAD = object()
+_build_id_cache = _UNREAD
+
+
+def _read_build_id():
+    # NIMBUS_STATIC_DIR mirrors brain.py's STATIC_DIR (not imported: circular).
+    static_dir = os.getenv("NIMBUS_STATIC_DIR") or Path(__file__).resolve().parents[2] / "frontend"
+    try:
+        html = (Path(static_dir) / "index.html").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r"NIMBUS_BUILD_ID = '([^']*)'", html)
+    return m.group(1) if m else None
+
+
+@router.get("/version")
+def get_version(response: Response):
+    """Build id stamped into the served index.html, or null if unavailable.
+    Unauthenticated so open tabs can poll it to detect a newer deploy."""
+    global _build_id_cache
+    if _build_id_cache is _UNREAD:
+        _build_id_cache = _read_build_id()
+    response.headers["Cache-Control"] = "no-store"
+    return {"build_id": _build_id_cache}
 
 
 @router.get("/diagnostics/deep", dependencies=[Depends(require_api_key), Depends(require_admin)])

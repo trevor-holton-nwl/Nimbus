@@ -81,6 +81,7 @@ az containerapp update -g rg-nimbus-dev -n ca-nimbus-dev --image acrnimbusdev.az
 $fqdn = az containerapp show -g rg-nimbus-dev -n ca-nimbus-dev --query properties.configuration.ingress.fqdn -o tsv
 Invoke-RestMethod "https://$fqdn/health"                  # db.connected: true
 Invoke-RestMethod "https://$fqdn/sap/interface/objects"   # 200 (proves new tables + endpoints live, if SAP shipped)
+Invoke-RestMethod "https://$fqdn/version?cb=$(Get-Random)" -Headers @{ "Cache-Control" = "no-cache" }   # build_id must equal the git SHA just built (else the image lacked --build-arg BUILD_ID)
 Invoke-RestMethod "https://$fqdn/logs/backend"            # read errors here — `az logs` dies behind the corp proxy
 ```
 

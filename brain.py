@@ -584,12 +584,15 @@ async def domain_static_asset_mw(request: Request, call_next):
 
 # ES modules must never be served from a stale browser cache while a module
 # graph is being migrated in (CQ-1 Phase 1+) — unlike app.js, .mjs files carry
-# no APP_VERSION-driven cache-bust query string. Scoped to .mjs only; every
-# other static response and API route keeps its existing caching behavior.
+# no APP_VERSION-driven cache-bust query string. Scoped to .mjs plus the HTML
+# shell itself ("/" and "/index.html" exactly): it carries the stamped build id
+# and the ?v= asset URLs, so a stale cached copy would pin old code after a
+# deploy. no-cache means revalidate, not re-download. Every other static
+# response and API route keeps its existing caching behavior.
 @api.middleware("http")
 async def static_mjs_no_cache_mw(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path.endswith(".mjs"):
+    if request.url.path.endswith(".mjs") or request.url.path in ("/", "/index.html"):
         response.headers["Cache-Control"] = "no-cache"
     return response
 

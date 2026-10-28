@@ -83,6 +83,9 @@ while ((Get-Date) -lt $deadline) {
 }
 if (-not $healthy) { throw "Health check did not pass within 5 minutes — read the backend log in Admin Cockpit (below), then consider rollback (step 5)" }
 Invoke-RestMethod "https://$fqdn/sap/interface/objects?cb=$(Get-Random)" -Headers @{ "Cache-Control" = "no-cache" }   # 200 (proves new tables + endpoints live, if SAP shipped)
+# The served build must be the SHA just built; a mismatch means the image was built without --build-arg BUILD_ID (open tabs would never see the update banner)
+$ver = Invoke-RestMethod "https://$fqdn/version?cb=$(Get-Random)" -Headers @{ "Cache-Control" = "no-cache" }
+if ($ver.build_id -ne (git rev-parse --short HEAD)) { throw "build_id '$($ver.build_id)' does not match the SHA just built — rebuild with --build-arg BUILD_ID" }
 ```
 Then read backend errors **in the browser, signed in as an admin: Admin Cockpit → Logs** (Ctrl+Alt+L). `GET /logs/backend` is RBAC-gated (`require_api_key` + `require_admin`, `backend/admin_ops/routes.py`) and returns 401 to an anonymous `Invoke-RestMethod` and to a bare session cookie — that 401 is correct, not a deploy failure. `az containerapp logs show` still dies behind the corp proxy, so the Cockpit viewer is the log source.
 

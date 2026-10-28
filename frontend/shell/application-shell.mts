@@ -70,6 +70,7 @@ import { Alerts } from '../insights/services.mjs';
 import { Engine } from '../optimization/engine.mjs';
 import { Persistence, SOURCE_WIRE } from '../scheduling/persistence.mjs';
 import { Session } from '../security/session.mjs';
+import { startVersionWatch, makeUpdatePresenter } from './version-watch.mjs';
 import { OPTIMIZER_MODES, seedOptimizerMode, seedOptimizerPreset } from '../optimization/optimizer-prefs.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../scheduling/gantt.mjs';
 import { Table } from '../scheduling/orders.mjs';
@@ -2455,6 +2456,14 @@ const App = {
           if (changed && App._currentTab === 'gantt' && App._ganttSub === 'timeline') Timeline._scheduleRebuild();
         });
       }
+    });
+    // Tell this tab when a newer build is live (polls GET /version; never auto-reloads).
+    startVersionWatch({
+      onNewVersion: makeUpdatePresenter({
+        Util, Persistence, Modal,
+        // The strip changes the panel height; redraw the Gantt once its fade settles (same hook as the side-panel toggle).
+        onLayoutChange: () => setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS),
+      }),
     });
     // A drag in flight must never see the calendar re-hydrate under it (Persistence cannot import the Gantt).
     Persistence._calendarRefreshBlocked = () => !!Interaction._isDragging;

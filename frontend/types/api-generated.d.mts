@@ -2670,7 +2670,8 @@ export interface paths {
         put?: never;
         /**
          * Security Reset Password
-         * @description Set/replace a user's password. Hashed before storage; never retrievable afterward.
+         * @description Set/replace an EXISTING user's password (unknown username -> 404; create users
+         *     via /security/users/bulk first). Hashed before storage; never retrievable afterward.
          */
         post: operations["security_reset_password_security_users__username__reset_password_post"];
         delete?: never;
@@ -2915,6 +2916,27 @@ export interface paths {
          *     means a slow or briefly-unreachable database can't trigger needless restarts.
          */
         get: operations["livez_livez_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Version
+         * @description Build id stamped into the served index.html, or null if unavailable.
+         *     Unauthenticated so open tabs can poll it to detect a newer deploy.
+         */
+        get: operations["get_version_version_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3673,7 +3695,7 @@ export interface components {
              * @default off
              * @enum {string}
              */
-            tooling_rule?: "off" | "hard";
+            tooling_rule: "off" | "hard";
         };
         /**
          * LinkDTO
@@ -3717,7 +3739,13 @@ export interface components {
             /** Ok */
             ok: boolean;
         };
-        /** PlanningReason */
+        /**
+         * PlanningReason
+         * @description Why an order is queued. `extra="allow"`: a reason carries code-specific structured keys (tool_id, available, holders,
+         *     incomplete for the tooling codes; run_time / cap_hours for run_time_over_cap) that the save already stores verbatim; the
+         *     default (ignore) dropped them from /tasks and /tasks/refresh, so they vanished after a reload. Only keys actually stored
+         *     are emitted; nothing is padded with nulls.
+         */
         PlanningReason: {
             /** Code */
             code: string;
@@ -3725,7 +3753,7 @@ export interface components {
             message: string;
             /** Step */
             step?: string | null;
-            /** Code-specific structured keys (tool_id, available, holders, incomplete, run_time, cap_hours, ...): extra="allow" */
+        } & {
             [key: string]: unknown;
         };
         /**
@@ -6572,9 +6600,7 @@ export interface operations {
         };
         requestBody?: {
             content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
+                "application/json": unknown;
             };
         };
         responses: {
@@ -8359,45 +8385,6 @@ export interface operations {
             };
         };
     };
-    md_set_role_page_access_master_data_roles__role__page_access_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                "x-api-key"?: string | null;
-            };
-            path: {
-                role: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    [key: string]: unknown;
-                };
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RolePageAccessResult"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     md_set_plant_tooling_rule_master_data_plants__plant__tooling_rule_post: {
         parameters: {
             query?: never;
@@ -8603,6 +8590,45 @@ export interface operations {
                     "application/json": {
                         [key: string]: components["schemas"]["ToolInventoryUsageEntry"];
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    md_set_role_page_access_master_data_roles__role__page_access_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-api-key"?: string | null;
+            };
+            path: {
+                role: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RolePageAccessResult"];
                 };
             };
             /** @description Validation Error */
@@ -9317,6 +9343,26 @@ export interface operations {
         };
     };
     livez_livez_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_version_version_get: {
         parameters: {
             query?: never;
             header?: never;

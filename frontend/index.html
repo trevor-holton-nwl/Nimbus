@@ -1233,6 +1233,16 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
       <button id="btn-gantt-legend" class="seg-btn" data-i18n-title="tip.legend" title="What the colors and markers on the board mean"><span class="sa-label" data-i18n="btn.legend">Legend</span></button>
     </div>
   </div>
+  <!-- New-version banner: static, hidden until version-watch.mts's presenter shows it; the boot i18n sweep translates it. -->
+  <div id="update-banner" class="update-banner" role="status" aria-live="polite" hidden>
+    <span class="update-banner-ico" aria-hidden="true">&#x21BB;</span>
+    <span class="update-banner-msg" data-i18n="toast.update_available" data-i18n-title="toast.update_available">A new version of NIMBUS is available</span>
+    <span class="update-banner-build" id="update-banner-build" aria-hidden="true"></span>
+    <span class="update-banner-actions">
+      <button type="button" class="btn btn-primary sm update-banner-refresh" id="update-banner-refresh" data-i18n="toast.update_refresh">Refresh</button>
+      <button type="button" class="icon-btn sm update-banner-dismiss" id="update-banner-dismiss" data-i18n-aria-label="btn.dismiss" data-i18n-title="btn.dismiss" aria-label="Dismiss" title="Dismiss">&times;</button>
+    </span>
+  </div>
 
   <!-- =========================================================
        TAB: DASHBOARD

@@ -2825,6 +2825,110 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
 .concurrency-off.derive-paused .alert-drawer { margin-top: 68px; }
 
 /* =============================================================================
+   UPDATE BANNER — "a newer build is live" advisory strip
+   One in-flow strip under the context bar (inside .app, after .context-bar).
+   Shown/hidden by frontend/shell/version-watch.mts's presenter through the
+   `hidden` attribute plus body.update-available (the hook the fixed-top
+   siblings below use to step down by the strip's height). Tokens only; every
+   token used here has a body.dark counterpart, so no dark rules are needed.
+   Height is pinned to 34px so it shares the arithmetic of #sandbox-banner /
+   #concurrency-banner / #derive-paused-banner (their .tab-panel margin is 34px).
+   ========================================================================== */
+:root { --update-banner-h: 34px; }
+
+.update-banner {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 10px;
+  height: var(--update-banner-h);
+  padding: 0 18px;                         /* aligns with .context-bar's 18px gutter */
+  background: var(--info-soft);
+  border-bottom: 1px solid var(--info);
+  color: var(--fg);
+  font-size: 12.5px; font-weight: 500;     /* Control step, same as the sibling banners */
+  animation: update-banner-in var(--t-med);
+}
+.update-banner[hidden] { display: none; }
+@keyframes update-banner-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-banner { animation: none; }
+}
+
+/* Leading glyph: informational, not alarming. Non-text, so --info's 4.36:1 in
+   dark mode is fine (3:1 floor for graphics); the message itself stays --fg. */
+.update-banner-ico {
+  flex: none;
+  color: var(--info);
+  font-size: 13px; line-height: 1;         /* body step */
+}
+
+/* Message: the only thing allowed to shrink. One line, ellipsis below ~640px;
+   the full string rides along in `title` (data-i18n-title, same key). */
+.update-banner-msg {
+  flex: 1 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Build id readout: machine-generated, so JetBrains Mono (Mono-Means-Machine).
+   --fg rather than --fg-mute: 11px mono needs 4.5:1 and --fg-mute on the
+   info tint is only 4.1:1 in light mode. aria-hidden in markup. */
+.update-banner-build {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px; font-weight: 500; letter-spacing: 0.02em;
+  color: var(--fg);
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-elev);
+}
+@media (max-width: 900px) { .update-banner-build { display: none; } }
+
+/* Actions never shrink. Refresh = content-area primary CTA (navy fill,
+   DESIGN.md CTA/Chrome Rule #3) at the .btn.sm height so it sits inside 34px.
+   Dismiss = the app's standard .icon-btn.sm. Focus rings come from the global
+   :focus-visible rule (2px --accent, offset 2px) — not restyled here. */
+.update-banner-actions {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-left: 8px;
+}
+.update-banner-refresh { flex: none; }
+/* 16px is a glyph optical size for the "×", not a type step — same convention as
+   .nav-drawer-close (18px "×") and .icon-btn .bell (15px) elsewhere in styles.css. */
+.update-banner-dismiss { flex: none; font-size: 16px; line-height: 1; }
+
+/* Fixed-top siblings step down by the strip while it is showing. Specificity
+   (1,1,1) beats their bare #id rules (1,0,0) and (1,2,1) beats the existing
+   .concurrency-off #derive-paused-banner (1,1,0). The .tab-panel margin-top
+   rules those banners already carry stay valid: they push the panel below
+   the (now lower) fixed banner, relative to the in-flow strip. */
+body.update-available #sandbox-banner,
+body.update-available #concurrency-banner,
+body.update-available #derive-paused-banner,
+body.update-available .alert-drawer {
+  top: calc(var(--chrome-h) + var(--update-banner-h));
+}
+body.update-available.concurrency-off #derive-paused-banner {
+  top: calc(var(--chrome-h) + var(--update-banner-h) + 34px);
+}
+body.update-available #toast-stack {
+  top: calc(var(--chrome-h) + var(--update-banner-h) + 12px);
+}
+/* Two viewport-math scroll areas would overrun by the strip's height otherwise
+   (the same pre-existing gap the warn banners have; fixed here for this strip). */
+body.update-available .lp-card-scroll {
+  max-height: calc(100vh - var(--chrome-h) - 153px - var(--update-banner-h));
+}
+body.update-available .am-vl-scroll {
+  max-height: calc(100vh - 380px - var(--update-banner-h));
+}
+
+@media print { .update-banner { display: none !important; } }
+
+/* =============================================================================
    P7: PRINT / EXPORT
    ========================================================================== */
 @media print {

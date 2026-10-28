@@ -2,7 +2,7 @@
 
 ## What lives here
 
-- `routes.py` (13 routes) — `GET /health`, `GET /livez`, `GET /diagnostics/deep`, `POST /reload` (refreshes the priority-list cache — see `backend/priority_lists/CLAUDE.md`), `GET|POST /system-settings`, `GET /diagnostics/db`, `POST /maintenance/vacuum-analyze`, `POST /maintenance/analyze`, `GET /logs/backend`, `POST /logs/backend/clear`, `POST /logs/csp-report` (see the 2026-10 section below), `POST /logs/frontend`. Also owns the private `_diag_snapshot()`, `_truncate()`, and the `_FE_MAX_*` frontend-log-ingest size caps. (Plain `GET /diagnostics` was removed 2026-09 as confirmed dead — zero frontend callers, superseded by `/diagnostics/deep` and `/diagnostics/db`.)
+- `routes.py` (15 routes) — `GET /health`, `GET /livez`, `GET /version` (unauthenticated `{build_id}` parsed lazily from the served `index.html`'s `NIMBUS_BUILD_ID`, cached, `no-store`, null if unreadable; polled by `frontend/shell/version-watch.mts`), `POST /maintenance/schedule-event-sweep` (see the 2026-10-23 section), `GET /diagnostics/deep`, `GET /diagnostics/deep`, `POST /reload` (refreshes the priority-list cache — see `backend/priority_lists/CLAUDE.md`), `GET|POST /system-settings`, `GET /diagnostics/db`, `POST /maintenance/vacuum-analyze`, `POST /maintenance/analyze`, `GET /logs/backend`, `POST /logs/backend/clear`, `POST /logs/csp-report` (see the 2026-10 section below), `POST /logs/frontend`. Also owns the private `_diag_snapshot()`, `_truncate()`, and the `_FE_MAX_*` frontend-log-ingest size caps. (Plain `GET /diagnostics` was removed 2026-09 as confirmed dead — zero frontend callers, superseded by `/diagnostics/deep` and `/diagnostics/db`.)
 - `logbuffer.py` (155 lines) — `_BACKEND_LOG` (a 2000-entry `collections.deque` ring buffer), `_log_event()` (structured event → ring buffer + JSON log line), `_log_admin_action()` (admin-write audit event), `_set_admin_log_details()` (per-route safe-context accumulator read by `brain.py`'s `request_id_mw`), `_RID_CTX`/`_current_rid()` (the per-request-id `ContextVar`, shared with `brain.py`'s middleware).
 - `diagnostics_state.py` (48 lines) — `DIAGNOSTICS` (the load-metadata bag: `loaded_at`, `color_merge_misses`, `missed_colors`, `emitted_task_count`, `warnings`, etc.) and `_warn()`.
 
@@ -30,7 +30,7 @@ No deferred-split root-file line ranges to cite for this domain's *own* logic �
 - **`logbuffer.py`** (`_log_event`/`_current_rid`/`_set_admin_log_details`/`_BACKEND_LOG`) is imported by, confirmed via grep: `backend/calendars/routes.py`, `backend/distribution/routes.py`, `backend/integration/routes.py`, `backend/master_data/models.py`, `backend/master_data/routes.py`, `backend/priority_lists/cache.py`, `backend/priority_lists/routes.py`, `backend/routing/routes.py`, `backend/scheduling/routes.py`, `backend/setup/routes.py`, plus `brain.py` itself (for the `request_id_mw` middleware's `_RID_CTX`/`_log_admin_action`). That is nearly every other domain router in the backend (not `labor` or `security`).
 - **`diagnostics_state.py`** (`DIAGNOSTICS`/`_warn`) is imported by: `backend/priority_lists/cache.py` (`apply_priority_merge` calls `_warn` on a merge failure), `backend/priority_lists/audit_log.py`, `backend/scheduling/routes.py` (`GET /tasks` builds its response `meta` from `DIAGNOSTICS`), plus `brain.py`'s lifespan. Narrower blast radius than `logbuffer.py`, but still two domains outside this one.
 
-**Endpoints:** see the 13-route list above.
+**Endpoints:** see the 15-route list above.
 
 ## Tests
 
