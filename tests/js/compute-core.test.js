@@ -887,6 +887,9 @@ test('late alert: a finish after the due instant is a warning; on or before it t
   assert.equal(late[0].msgVars.hours, '2.0');
   assert.equal(late[0].taskId, 'late1');
   assert.equal(late[0].line, 'L');
+  // Confidence scores a late order by its due instant (Fri 18:00 close), while `time` stays the finish.
+  assert.equal(+late[0].due, +D(16, 18));
+  assert.equal(+late[0].time, +D(16, 20));
 });
 
 test('late alert (R-I6): on a 06:00-24:00 line a bar ending exactly at the close is on time, one minute later is late', () => {

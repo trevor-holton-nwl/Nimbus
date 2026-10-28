@@ -52,6 +52,8 @@ declare global {
     scope?: string | null;
     line: string;
     time: Date;
+    /** late and needs_planning only: the order's due instant. Confidence scores these by `due`, not `time`. */
+    due?: Date;
     requiredMinutes?: number;
     availableMinutes?: number;
     shortMinutes?: number;
@@ -250,25 +252,28 @@ declare global {
   }
 
   interface NimbusConfidenceWeights {
-    err: number; warn: number; tw3: number; tw7: number; alertCap: number; utilCap: number; perOverload: number;
+    err: number; warn: number; tw3: number; tw7: number; perMachine: number;
   }
 
   interface NimbusConfidenceInput {
-    alerts: Array<Pick<NimbusAlert, 'sev'> & { time?: Date | null }>;
-    /** Utilization matrix; used to count overloaded line-days when `overloadedLineDays` is not given. */
-    matrix?: NimbusUtilizationMatrix | null;
-    overloadedLineDays?: number;
+    alerts: Array<Pick<NimbusAlert, 'sev'> & { time?: Date | null; due?: Date | null }>;
     horizonStart: Date;
     horizonMinutes: number;
+    /** Active machines of the plant being scored (min 1); defaults to 5 when absent. */
+    machines?: number;
   }
 
   interface NimbusConfidenceResult {
     score: number;
-    alertPenalty: number;
-    utilPenalty: number;
-    /** Unrounded, uncapped sum of alert points. */
+    /** 100 - score; errPenalty + warnPenalty === penalty exactly. */
+    penalty: number;
+    errPenalty: number;
+    warnPenalty: number;
+    /** Unrounded sum of alert points (no caps). */
     rawAlertPoints: number;
-    overloadedLineDays: number;
+    rawErrPoints: number;
+    rawWarnPoints: number;
+    machines: number;
   }
 
   interface NimbusToolItem {
@@ -397,8 +402,8 @@ declare global {
     /** Days-out multiplier: <=3 days 1.5, <=7 days 1.25, else 1.0. */
     timeWeight(time: Date | null | undefined, horizonStart: Date): number;
     /** Uncapped impact points of one alert; 0 outside [horizonStart, horizonEnd) or without a time. */
-    alertPoints(alert: { sev: string; time?: Date | null }, horizonStart: Date, horizonEnd: Date): number;
-    countOverloadedLineDays(matrix: NimbusUtilizationMatrix | null | undefined): number;
+    alertPoints(alert: { sev: string; time?: Date | null; due?: Date | null }, horizonStart: Date, horizonEnd: Date): number;
+    confidenceFromRaw(raw: number, machines?: number): number;
     scoreConfidence(input: NimbusConfidenceInput): NimbusConfidenceResult;
   }
 

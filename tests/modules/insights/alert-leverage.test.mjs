@@ -29,8 +29,8 @@ const PAIR_AB = '[["colorWheel","A"]]->[["colorWheel","B"]]';
 function al(id, type, sev, day, extra = {}) {
   return { id, sev, type, msg: id, line: LINE, time: atDay(day), ...extra };
 }
-function score(alerts, matrix) {
-  return Core.scoreConfidence({ alerts, matrix, horizonStart: plantNow, horizonMinutes: HM }).score;
+function score(alerts, machines) {
+  return Core.scoreConfidence({ alerts, horizonStart: plantNow, horizonMinutes: HM, machines }).score;
 }
 function baseSnap(over = {}) {
   return {
@@ -127,10 +127,26 @@ test('confidenceBefore is the plant-wide score; removal delta equals scoreConfid
   const alerts = [...other, ...tool];
   const items = groupLeverage(mkInput({ alerts, baselineMatrix: matrix }));
   const item = byFamily(items, 'tool')[0];
-  assert.equal(item.confidenceBefore, score(alerts, matrix));
-  assert.equal(item.confidenceAfter, score(other, matrix));
+  assert.equal(item.confidenceBefore, score(alerts));
+  assert.equal(item.confidenceAfter, score(other));
   assert.equal(item.method, 'removal');
   assert.ok(item.confidenceAfter > item.confidenceBefore);
+});
+
+test('parity: score-without equals scoreConfidence on the reduced set for every machine count, with a pre-dismiss scoring list', () => {
+  const other = Array.from({ length: 6 }, (_, i) => al(`o${i}`, 'late', 'warn', 2 + i, { taskId: `x${i}` }));
+  const tool = [
+    al('t1', 'tool-conflict', 'err', 1, { msgVars: { tool: 'T9' }, taskId: 'a', peerId: 'b' }),
+    al('t2', 'tool-conflict', 'err', 2, { msgVars: { tool: 'T9' }, taskId: 'c', peerId: 'd' }),
+  ];
+  const dismissedAlert = al('dis1', 'overlap', 'err', 1, { taskId: 'z', peerId: 'y' });
+  for (const machines of [undefined, 1, 5, 70]) {
+    const shown = [...other, ...tool];                       // what the cards are built from (dismissed excluded)
+    const scoring = [...shown, dismissedAlert];              // what the badge scores (dismissed still counts)
+    const [item] = byFamily(groupLeverage(mkInput({ alerts: shown, scoringAlerts: scoring, machines })), 'tool');
+    assert.equal(item.confidenceBefore, score(scoring, machines), `before equals the badge (machines=${machines})`);
+    assert.equal(item.confidenceAfter, score([...other, dismissedAlert], machines), `after (machines=${machines})`);
+  }
 });
 
 // ---- setup pairs ---------------------------------------------------------------------------------
@@ -253,8 +269,9 @@ test('replay sign A: free minutes clear the pair, after > before and method is r
   assert.ok(item.points > 0);
 });
 
-test('replay sign B: oversized minutes create setup-violated; after < before and the card is still reported', async () => {
-  // 15 h of changeover into a 7 h gap: setup-violated, and the setup hours push Wednesday over its 12 h capacity.
+test('replay sign B: oversized minutes create setup-violated; after is no better than before and the card is still reported', async () => {
+  // 15 h of changeover into a 7 h gap: setup-violated replaces the uncovered-pair error. (The old utilisation penalty
+  // for the setup hours pushing Wednesday over capacity is gone: the overload alert counts run time only.)
   const f = fixture({ tasks: [orderTask('t1', 'A', 8, 9), orderTask('t2', 'B', 16, 17)], masterPlant: policy(900) });
   let replayAlerts = [];
   const spy = async (b, v) => { const r = runLeverageBatchSync(b, v); replayAlerts = r[0].alerts; return r; };
@@ -263,7 +280,7 @@ test('replay sign B: oversized minutes create setup-violated; after < before and
   assert.ok(!replayAlerts.some(a => a.type === 'setup-uncovered' && a.pairKey === PAIR_AB));
   assert.equal(item.method, 'replay');
   assert.equal(item.assumedMinutes, 900);
-  assert.ok(item.confidenceAfter < item.confidenceBefore, `after ${item.confidenceAfter} < before ${item.confidenceBefore}`);
+  assert.ok(item.confidenceAfter <= item.confidenceBefore, `after ${item.confidenceAfter} <= before ${item.confidenceBefore}`);
   assert.ok(item.points > 0, 'the item is reported with its points even when the replay is worse');
 });
 
@@ -574,14 +591,13 @@ test('needs-planning: method none, confidenceAfter null, never replayed', async 
   for (const c of runner2.calls) for (const v of c.variants) assert.ok(v.key.startsWith('setup-pair:'), v.key);
 });
 
-test('needs-planning: overdue scores as if due now; beyond-window scores 0', () => {
-  const overdue = al('o1', 'needs_planning', 'err', -2, { taskId: 'q1' });
-  const beyond = al('b1', 'needs_planning', 'err', 30, { taskId: 'q2' });
-  const soon = al('s1', 'needs_planning', 'warn', 1, { taskId: 'q3' });
+test('needs-planning: an overdue queued order scores as due now through its due; beyond-window scores 0', () => {
+  const overdue = al('o1', 'needs_planning', 'err', -2, { taskId: 'q1', due: atDay(-2) });
+  const beyond = al('b1', 'needs_planning', 'err', 30, { taskId: 'q2', due: atDay(30) });
+  const soon = al('s1', 'needs_planning', 'warn', 1, { taskId: 'q3', due: atDay(1) });
   const end = new Date(plantNow.getTime() + HM * 60000);
-  assert.equal(Core.alertPoints(overdue, plantNow, end), 0, 'the core scores a past alert 0 (the reason for the override)');
-  const asNow = Core.alertPoints({ ...overdue, time: plantNow }, plantNow, end);
-  assert.ok(asNow > 0);
+  const asNow = Core.alertPoints(overdue, plantNow, end);
+  assert.equal(asNow, 7.5, 'the core scores a past-due alert as due now (5 x 1.5)');
 
   const [only] = byFamily(groupLeverage(mkInput({ alerts: [overdue], tasksById: npTasks })), 'needs-planning');
   assert.equal(only.points, asNow);

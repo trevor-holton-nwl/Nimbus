@@ -1627,9 +1627,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // matrix build below is expensive. Store.alerts is reassigned on every change
       // (stable array identity) and Store.rev() bumps on every mutation, so this pair
       // fully captures the inputs. plant:selected nulls these to force a repaint.
-      const alerts = Store.alerts || [];
+      // Dismissed alerts still count (dismissing only hides an alert from the bell/drawer/Gantt): score the list
+      // BEFORE the dismiss filter. Acknowledged alerts are in it too.
+      const { alerts, machines } = Alerts.confidenceInput();
       const rev = Store.rev();
-      const generation = Confidence._lifecycleGeneration;
       if (Confidence._lastAlertsSrc === alerts && Confidence._lastRev === rev) return;
       Confidence._lastAlertsSrc = alerts;
       Confidence._lastRev = rev;
@@ -1640,25 +1641,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const hMinutes = _confHorizonMinutes();
       const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
 
-      // Factors (alert penalty cap 50, utilization overload cap 20) are computed by the
-      // shared formula in nimbus-compute-core.js so the Alert Monitor can never disagree.
-      // Utilization overload across horizon — use worker when available
-      let matrix = null;
-      const days = Math.ceil(hMinutes / 1440);
-      try {
-        // Off-thread when a plant is selected and the worker is up; shares the cache with computeMatrix, and
-        // resolves task ids to task objects (the old direct cache write stored raw ids). syncFallback:false: when the
-        // worker cannot answer (data moved, timeout, failure) this pass is simply dropped, never recomputed on the
-        // main thread; a data change schedules the next _recompute anyway.
-        matrix = await Utilization.computeMatrixAsync(_plantToday(), days, { syncFallback: false });
-      } catch (e) {
-        if (e && e.name !== 'UtilizationStale') Confidence._lastRev = null;   // a worker problem, not new data: let the next call retry
-        return;
-      }
-
-      if (!Confidence._canApply(generation, rev)) return;
-
-      Confidence._apply(NimbusComputeCore.scoreConfidence({ alerts, matrix, horizonStart, horizonMinutes: hMinutes }).score);
+      // The score is computed by the shared formula in nimbus-compute-core.js so the Alert Monitor can never disagree.
+      // It needs only the alerts and the plant's machine count (an overloaded day is an 'overload' alert already), so
+      // no utilization matrix is computed here any more.
+      Confidence._apply(NimbusComputeCore.scoreConfidence({
+        alerts, horizonStart, horizonMinutes: hMinutes, machines,
+      }).score);
     },
 
     _apply(score) {
@@ -1680,7 +1668,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const scoreEl = document.getElementById('ni-conf-score');
       if (scoreEl) {
         scoreEl.textContent = score;
-        scoreEl.style.color = score >= 70 ? '#4dbd7a' : score >= 40 ? '#e0a018' : '#e88f83';
+        scoreEl.style.color = score >= 80 ? '#4dbd7a' : score >= 50 ? '#e0a018' : '#e88f83';
       }
       const delta = score - prev;
       if (Confidence._badge && Math.abs(delta) >= 5) {
@@ -1708,7 +1696,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const scoreEl = document.getElementById('ni-conf-score');
       if (scoreEl) {
         scoreEl.textContent = snap.score;
-        scoreEl.style.color = snap.score >= 70 ? '#4dbd7a' : snap.score >= 40 ? '#e0a018' : '#e88f83';
+        scoreEl.style.color = snap.score >= 80 ? '#4dbd7a' : snap.score >= 50 ? '#e0a018' : '#e88f83';
       }
       Confidence._updateRing();
     },
@@ -1724,7 +1712,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (!ring) return;
       const score = Math.max(0, Math.min(100, Confidence._score));
       const deg = (score / 100) * 360;
-      const color = score >= 80 ? '#4ddb9f' : score >= 60 ? '#f0c04a' : '#f08a6a';
+      const color = score >= 80 ? '#4ddb9f' : score >= 50 ? '#f0c04a' : '#f08a6a';
       ring.style.setProperty('--conf-color', color);
       ring.style.background = `conic-gradient(var(--conf-color) 0 ${deg}deg, var(--chrome-border) ${deg}deg 360deg)`;
     },
@@ -1746,13 +1734,15 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     async showBreakdown() {
-      const alerts = Store.alerts || [];
+      const { alerts, machines } = Alerts.confidenceInput();   // pre-dismiss list + the plant's machine count, as the badge
       const hMinutes = _confHorizonMinutes();
       const hDays    = Math.ceil(hMinutes / 1440);
       const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
       const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
 
-      const horizonAlerts = alerts.filter(a => a.time && a.time >= horizonStart && a.time < horizonEnd);
+      // The alerts that carry points (a late or queued order is scored by its due date, so one dated past the horizon
+      // can count and a past-due one counts as due now).
+      const horizonAlerts = alerts.filter(a => NimbusComputeCore.alertPoints(a, horizonStart, horizonEnd) > 0);
       const errCt  = horizonAlerts.filter(a => a.sev === 'err').length;
       const warnCt = horizonAlerts.filter(a => a.sev === 'warn').length;
 
@@ -1771,8 +1761,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
       const overloadedCount = Object.keys(overloadedLines).length;
       const overloadedLineDays = Object.values(overloadedLines).reduce((s, d) => s + d, 0);
-      const { alertPenalty: alertPts, utilPenalty: utilPts } = NimbusComputeCore.scoreConfidence({
-        alerts, overloadedLineDays, horizonStart, horizonMinutes: hMinutes,
+      // The overloaded-line tile shows counts only: its points are already in the Critical tile (each overloaded day is
+      // an 'overload' error alert).
+      const { errPenalty: errPts, warnPenalty: warnPts } = NimbusComputeCore.scoreConfidence({
+        alerts, horizonStart, horizonMinutes: hMinutes, machines,
       });
 
       const horizonEndLabel = Util.fmtDateShortPref(horizonEnd);
@@ -1789,10 +1781,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         </button>`;
       const tilesHtml = () => `
         <div class="ni-conf-tiles">
-          ${tile('err', errCt, t(errCt === 1 ? 'ui.critical_conflict' : 'ui.critical_conflicts'), errCt ? t('ui.err_pts', { pts: alertPts }) : '', 'var(--err)')}
-          ${tile('warn', warnCt, t(warnCt === 1 ? 'ui.warning' : 'ui.warnings'), '', 'var(--warn)')}
+          ${tile('err', errCt, t(errCt === 1 ? 'ui.critical_conflict' : 'ui.critical_conflicts'), errCt ? t('ui.err_pts', { pts: errPts }) : '', 'var(--err)')}
+          ${tile('warn', warnCt, t(warnCt === 1 ? 'ui.warning' : 'ui.warnings'), warnCt && warnPts ? t('ui.err_pts', { pts: warnPts }) : '', 'var(--warn)')}
           ${tile('overload', overloadedCount, t(overloadedCount === 1 ? 'ui.overloaded_line' : 'ui.overloaded_lines'),
-                 overloadedCount ? t('ui.overloaded_line_days', { days: overloadedLineDays, plural: overloadedLineDays > 1 ? 's' : '', pts: utilPts }) : '', 'var(--warn)')}
+                 overloadedCount ? t('ui.conf_days_over', { days: overloadedLineDays, plural: overloadedLineDays > 1 ? 's' : '' }) : '', 'var(--warn)')}
         </div>`;
 
       const hasAny = errCt || warnCt || overloadedCount;
@@ -1857,10 +1849,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const _okC   = Confidence._cssVar('--ok',   '#1e7a4a');
       const _warnC = Confidence._cssVar('--warn', '#93610a');
       const _errC  = Confidence._cssVar('--err',  '#b02a20');
-      const _tier = _sc >= 80 ? { label:'EXCELLENT', color:_okC,   bg:Confidence._rgba(_okC, 0.18)   }
-                  : _sc >= 60 ? { label:'GOOD',      color:_okC,   bg:Confidence._rgba(_okC, 0.12)  }
-                  : _sc >= 40 ? { label:'AT RISK',   color:_warnC, bg:Confidence._rgba(_warnC, 0.18)  }
-                  :             { label:'CRITICAL',  color:_errC,  bg:Confidence._rgba(_errC, 0.18)    };
+      // One set of bands everywhere (badge, ring, this tier, the chart): GOOD >= 80, AT RISK 50-79, CRITICAL < 50.
+      const _tier = _sc >= 80 ? { label:'GOOD',     color:_okC,   bg:Confidence._rgba(_okC, 0.15)   }
+                  : _sc >= 50 ? { label:'AT RISK',  color:_warnC, bg:Confidence._rgba(_warnC, 0.18)  }
+                  :             { label:'CRITICAL', color:_errC,  bg:Confidence._rgba(_errC, 0.18)    };
 
       const styleBlock = `
         <style>
@@ -1967,12 +1959,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       const yFor = v => H - (Math.max(0, Math.min(100, v)) / 100) * H;
       const xFor = i => history.length > 1 ? (i / (history.length - 1)) * W : W / 2;
-      const ptColor = s => s >= 70 ? `rgb(${okRgb})` : s >= 40 ? `rgb(${warnRgb})` : `rgb(${errRgb})`;
+      const ptColor = s => s >= 80 ? `rgb(${okRgb})` : s >= 50 ? `rgb(${warnRgb})` : `rgb(${errRgb})`;
 
       // Zone bands
-      [{ from:0, to:40, color:`rgba(${errRgb},0.13)` },
-       { from:40,to:70, color:`rgba(${warnRgb},0.10)` },
-       { from:70,to:100,color:`rgba(${okRgb},0.10)` }
+      [{ from:0, to:50, color:`rgba(${errRgb},0.13)` },
+       { from:50,to:80, color:`rgba(${warnRgb},0.10)` },
+       { from:80,to:100,color:`rgba(${okRgb},0.10)` }
       ].forEach(b => {
         ctx.fillStyle = b.color;
         ctx.fillRect(0, yFor(b.to), W, yFor(b.from) - yFor(b.to));
@@ -1980,13 +1972,13 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Zone labels (right-aligned, faint)
       ctx.font = `bold ${Math.round(14/dpr)}px system-ui`; ctx.textAlign = 'right';
-      [{ y: yFor(20), label:'CRITICAL', color:`rgba(${errRgb},0.45)` },
-       { y: yFor(55), label:'AT RISK',  color:`rgba(${warnRgb},0.4)` },
-       { y: yFor(85), label:'GOOD',     color:`rgba(${okRgb},0.4)`  }
+      [{ y: yFor(25), label:'CRITICAL', color:`rgba(${errRgb},0.45)` },
+       { y: yFor(65), label:'AT RISK',  color:`rgba(${warnRgb},0.4)` },
+       { y: yFor(90), label:'GOOD',     color:`rgba(${okRgb},0.4)`  }
       ].forEach(({ y, label, color }) => { ctx.fillStyle = color; ctx.fillText(label, W - 6, y + 5); });
 
-      // Reference lines at 40 and 70
-      [[40,`rgba(${errRgb},0.55)`],[70,`rgba(${okRgb},0.55)`]].forEach(([v,col]) => {
+      // Reference lines at the band edges, 50 and 80
+      [[50,`rgba(${errRgb},0.55)`],[80,`rgba(${okRgb},0.55)`]].forEach(([v,col]) => {
         ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash([5,4]);
         ctx.beginPath(); ctx.moveTo(0, yFor(v)); ctx.lineTo(W, yFor(v)); ctx.stroke();
       });
@@ -1994,7 +1986,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Y-axis score labels
       ctx.font = `${Math.round(18/dpr)}px system-ui`; ctx.textAlign = 'left';
-      [[40,`rgba(${errRgb},0.65)`],[70,`rgba(${okRgb},0.65)`]].forEach(([v,col]) => {
+      [[50,`rgba(${errRgb},0.65)`],[80,`rgba(${okRgb},0.65)`]].forEach(([v,col]) => {
         ctx.fillStyle = col; ctx.fillText(v, 4, yFor(v) - 3);
       });
 
@@ -2002,7 +1994,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const pts = history.map((p, i) => ({ x: xFor(i), y: yFor(p.score), score: p.score, ts: p.ts }));
       const last = history[history.length - 1].score;
       const lineColor = ptColor(last);
-      const fillColor = last >= 70 ? `rgba(${okRgb},0.22)` : last >= 40 ? `rgba(${warnRgb},0.22)` : `rgba(${errRgb},0.22)`;
+      const fillColor = last >= 80 ? `rgba(${okRgb},0.22)` : last >= 50 ? `rgba(${warnRgb},0.22)` : `rgba(${errRgb},0.22)`;
 
       // Filled area under line
       ctx.beginPath();

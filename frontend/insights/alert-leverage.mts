@@ -81,8 +81,13 @@ export interface LeverageInput {
   plant: string;
   plantNow: Date;
   horizonMinutes: number;
-  /** The plant-wide alert list (dismissed already excluded), never the profile-filtered one (D10). */
+  /** The plant-wide alert list the cards are built from (dismissed already excluded), never the profile-filtered one (D10). */
   alerts: readonly NimbusAlert[];
+  /** The pre-dismiss list the score is computed over (`Alerts.scoringAlerts()`, plant lines, with the queued-order
+   *  alerts). Dismissed alerts keep counting toward the score, so "before" equals the badge. Default: `alerts`. */
+  scoringAlerts?: readonly NimbusAlert[];
+  /** Machines of the plant being scored (the badge's count; default 5, the core's default). */
+  machines?: number;
   /** Live Store tasks keyed by id (the snapshot's tasks drop PRODUCTION_VERSION). */
   tasksById: Record<string, NimbusTask>;
   /** The selected plant's live tasks (`Store.tasksByPlant(plant)`), the rows the replay's setup derivation reads.
@@ -97,8 +102,6 @@ export interface LeverageInput {
   baselineMatrix: NimbusUtilizationMatrix;
   /** Max setup-pair replays per analysis (default 20). */
   replayCap?: number;
-  /** Alert ids the replay must keep dismissed (so it matches `alerts`); default none. */
-  dismissed?: readonly string[];
 }
 
 export type LeverageRunner = (base: LeverageBase, variants: LeverageVariant[], opts?: { signal?: AbortSignal }) => Promise<LeverageResult[]>;
@@ -168,9 +171,9 @@ interface Ctx {
   input: LeverageInput;
   pointsById: Map<string, number>;
   before: number;
-  /** Unrounded uncapped points of every alert (the core's rawAlertPoints). */
+  /** Unrounded sum of the points of every scored alert (the core's rawAlertPoints). */
   rawAll: number;
-  utilPenalty: number;
+  machines: number | undefined;
 }
 
 function _buildCtx(input: LeverageInput): Ctx {
@@ -178,20 +181,18 @@ function _buildCtx(input: LeverageInput): Ctx {
   const pointsById = new Map<string, number>();
   for (const a of input.alerts) pointsById.set(a.id, impactPoints(a, input.plantNow, input.horizonMinutes));
   const full = core.scoreConfidence({
-    alerts: input.alerts as NimbusAlert[], matrix: input.baselineMatrix,
-    horizonStart: input.plantNow, horizonMinutes: input.horizonMinutes,
+    alerts: (input.scoringAlerts ?? input.alerts) as NimbusAlert[],
+    horizonStart: input.plantNow, horizonMinutes: input.horizonMinutes, machines: input.machines,
   });
-  return { input, pointsById, before: full.score, rawAll: full.rawAlertPoints, utilPenalty: full.utilPenalty };
+  return { input, pointsById, before: full.score, rawAll: full.rawAlertPoints, machines: input.machines };
 }
 
-/** The confidence score with `removedPoints` of alert points taken out. Same arithmetic as core.scoreConfidence
- *  (round the sum once, cap, subtract the utilization penalty) but O(1) per item instead of re-scoring the whole
- *  alert list: points are base x {1, 1.25, 1.5}, i.e. exact binary quarters, so subtracting is as exact as re-summing
+/** The confidence score with `removedPoints` of alert points taken out: the core's curve over the reduced raw total
+ *  (`confidenceFromRaw`, the same function scoreConfidence uses), O(1) per item instead of re-scoring the whole alert
+ *  list. Points are base x {1, 1.25, 1.5}, i.e. exact binary quarters, so subtracting is as exact as re-summing
  *  (tests pin equality with scoreConfidence on the reduced set). */
 function _scoreWithout(ctx: Ctx, removedPoints: number): number {
-  const w = _core().CONFIDENCE_WEIGHTS;
-  const alertPenalty = Math.min(w.alertCap, Math.round(Math.max(0, ctx.rawAll - removedPoints)));
-  return Math.max(0, Math.min(100, 100 - alertPenalty - ctx.utilPenalty));
+  return _core().confidenceFromRaw(Math.max(0, ctx.rawAll - removedPoints), ctx.machines);
 }
 
 // ---- Buckets ------------------------------------------------------------------------------------
@@ -447,23 +448,18 @@ function _optimizeItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
 }
 
 /** One plant-wide bucket over every `needs_planning` alert (a queued order with no slot). No confidence delta
- *  (`method: 'none'`: slotting adds load, so a removal delta would over-promise), and an overdue alert is scored as if
- *  due now: the core gives 0 points to anything before the horizon start, which would bury the most urgent orders.
- *  The hours are a 2-line local mirror of `Util.runHours` (this module imports nothing from foundation by design). */
+ *  (`method: 'none'`: slotting adds load, so a removal delta would over-promise). An overdue alert counts as due now:
+ *  the alert carries `due`, which the core scores (past due = horizon start). The hours are a 2-line local mirror of `Util.runHours` (this module imports nothing from foundation by design). */
 function _needsPlanningItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
   const { input } = ctx;
   const b = _bucket();
   for (const a of alerts) if (a.type === 'needs_planning') _push(b, a, _alertOrders(a));
   if (!b.alerts.length) return [];
 
-  const nowMs = input.plantNow.getTime();
   let points = 0;
   let outside = 0;
   for (const a of b.alerts) {
-    const t = a.time instanceof Date ? a.time.getTime() : NaN;
-    const p = Number.isFinite(t) && t < nowMs
-      ? impactPoints({ ...a, time: input.plantNow }, input.plantNow, input.horizonMinutes)
-      : ctx.pointsById.get(a.id) ?? 0;
+    const p = ctx.pointsById.get(a.id) ?? 0;
     points += p;
     if (p === 0) outside++;
   }
@@ -505,7 +501,8 @@ function _replayBase(input: LeverageInput): LeverageBase {
   const start = new Date(input.plantNow.getFullYear(), input.plantNow.getMonth(), input.plantNow.getDate());
   const snap = input.snapshotBase;
   return {
-    ...snap, dismissed: [...(input.dismissed ?? [])], opts: { lines: null },
+    // Never filtered by dismissals: the score counts dismissed alerts, so the replay's "after" must too.
+    ...snap, dismissed: [], opts: { lines: null },
     startMs: start.getTime(), days: Math.max(1, Math.ceil(input.horizonMinutes / 1440)), lines: snap.lines ?? undefined,
   } as LeverageBase;
 }
@@ -529,8 +526,12 @@ async function _variantFor(input: LeverageInput, item: LeverageItem, minutes: nu
 }
 
 function _applyReplay(input: LeverageInput, item: LeverageItem, result: LeverageResult): void {
+  // The replayed core run has no queued-order alerts (the frontend Alerts layer adds those), but the "before" score
+  // counts them: carry them over so before and after compare like with like.
+  const queued = (input.scoringAlerts ?? input.alerts).filter(a => a.type === 'needs_planning' || a.type === 'queued_now_fits');
   item.confidenceAfter = _core().scoreConfidence({
-    alerts: result.alerts, matrix: result.matrix, horizonStart: input.plantNow, horizonMinutes: input.horizonMinutes,
+    alerts: [...result.alerts, ...queued], horizonStart: input.plantNow, horizonMinutes: input.horizonMinutes,
+    machines: input.machines,
   }).score;
   item.method = 'replay';
 }
