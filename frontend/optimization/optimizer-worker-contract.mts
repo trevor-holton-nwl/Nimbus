@@ -54,8 +54,10 @@ export function serializeOptimizerValidation(
   const context = candidate.validationContext;
   if (!context) return undefined;
   const { bounds, snapshot } = context;
-  // `bounds.ignorePlantWindow` is intentionally NOT serialized: only Remove Backlog sets it and Backlog runs
-  // foreground-only, so no worker validation ever needs it. Add it here if Backlog ever moves to the worker.
+  // `bounds.ignorePlantWindow` and `bounds.ignoreToolRule` are intentionally NOT serialized: only Remove Backlog sets them
+  // and Backlog runs foreground-only, so no worker validation ever needs them. Add them here if Backlog ever moves to the
+  // worker. The tooling rule and the inventory are NEVER carried in bounds: the validator re-derives both from
+  // `snapshot.masterData` (Tool Inventory Wave 6), and `toolPass` on the candidate says the overflow pass has run.
   if (!Number.isFinite(bounds.now.getTime())
     || typeof bounds.respectCalendar !== 'boolean'
     || !bounds.planningStart || !Number.isFinite(bounds.planningStart.getTime())

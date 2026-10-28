@@ -2932,6 +2932,10 @@ export const OptimizerPreview = {
         dispositions: candidate.dispositions?.filter(item => ids.has(String(item.id))),
       }).filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate');
     };
+    // Tool Inventory: a `tool_overflow` error names exactly ONE order, and only an order of the KEPT set can be named (the
+    // dispositions passed above are the kept patches'), so `dropWithFamily` always resolves it; its message is fixed (holders
+    // live in `detail`), so this key stays stable. Dropping a patch reverts the order to its LIVE slot, which can collide with the
+    // next kept patch: the 3-pass cap below resolves a chain of two sequential drops and refuses a chain of three.
     const baselineKeys = new Set(errorsFor([]).map(keyOf));
     let kept: SchedulePatch[] = patches.filter(patch => !drop.has(String(patch.id)));
     for (let pass = 0; pass < 3; pass++) {
