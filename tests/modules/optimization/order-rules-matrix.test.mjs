@@ -39,6 +39,8 @@ globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js
 globalThis.window = globalThis.window || {};
 if (typeof globalThis.document === 'undefined') globalThis.document = { getElementById: () => null };
 
+// The worker localizes its deadline against this clock; it must be the real one because the engine judges bounds.clock() = performance.now().
+const realClock = () => performance.now();
 const MIN = 60 * 1000;
 const L = text => +at(text);
 
@@ -419,7 +421,8 @@ function engineOptions(spec) {
   return {
     plant: 'P1', respectFirmed: true, respectCalendar: true,
     now: at(s.now), runNow: at(s.now), planningStart: at(s.now), startDate: at(s.now), endDate: at(s.horizonEnd),
-    deadlineAt: performance.now() + 60000,
+    deadlineAt: performance.now() + 600000,
+    searchBudgetMs: 180000, // gap-fill budget 36 s: wall time cannot change the outcome
   };
 }
 
@@ -450,11 +453,11 @@ for (const testCase of CASES) {
       const spec = normalizeScenario(testCase.spec);
       const request = {
         mode, plant: 'P1', respectFirmed: true, respectCalendar: true,
-        now: at(spec.now), runNow: at(spec.now), planningStart: at(spec.now), endDate: at(spec.horizonEnd),
+        now: at(spec.now), runNow: at(spec.now), planningStart: at(spec.now), endDate: at(spec.horizonEnd), searchBudgetMs: 180000,
       };
       const response = buildOptimizerWorkerResponse({
-        runId: `matrix-${mode}`, mode, snapshot: scenarioSnapshot(spec), request, deadlineDurationMs: 5000,
-      }, () => 5000);
+        runId: `matrix-${mode}`, mode, snapshot: scenarioSnapshot(spec), request, deadlineDurationMs: 600000,
+      }, realClock);
       const workerRows = normalizeRows(spec, fromCandidate(spec, response.candidate));
       const engineResult = Engine.evaluateSchedule(mode, engineOptions(spec), scenarioSnapshot(spec));
       const engineRows = normalizeRows(spec, fromCandidate(spec, engineResult));
@@ -648,8 +651,8 @@ for (const testCase of CASES) {
       test(`tooling ${tool} parity, worker ${label}: ${testCase.name}`, options(testCase, 'worker', mode), () => {
         const spec = withTool(normalizeScenario(testCase.spec), tool);
         const request = { mode, plant: 'P1', respectFirmed: true, respectCalendar: true,
-          now: at(spec.now), runNow: at(spec.now), planningStart: at(spec.now), endDate: at(spec.horizonEnd) };
-        const run = s => buildOptimizerWorkerResponse({ runId: `matrix-tool-${mode}`, mode, snapshot: scenarioSnapshot(s), request, deadlineDurationMs: 5000 }, () => 5000);
+          now: at(spec.now), runNow: at(spec.now), planningStart: at(spec.now), endDate: at(spec.horizonEnd), searchBudgetMs: 180000 };
+        const run = s => buildOptimizerWorkerResponse({ runId: `matrix-tool-${mode}`, mode, snapshot: scenarioSnapshot(s), request, deadlineDurationMs: 600000 }, realClock);
         const base = run(normalizeScenario(testCase.spec)).candidate;
         const response = run(spec);
         assert.equal(canonCandidate(response.candidate), canonCandidate(base));

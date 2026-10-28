@@ -19,6 +19,8 @@ import {
 import { validateCandidateForApply } from '../../../frontend/optimization/setup-scheduler.mjs';
 import * as TF from '../helpers/tool-overflow-fixture.mjs';
 
+// The worker localizes its deadline on this clock; the engine judges bounds.clock() = performance.now(), so a fake clock would put the deadline in the past once the process is a few seconds old.
+const realClock = () => performance.now();
 const require = createRequire(import.meta.url);
 globalThis.NimbusComputeCore = require('../../../frontend/nimbus-compute-core.js');
 
@@ -226,16 +228,16 @@ test('real optimizer worker boundary localizes its deadline and round-trips effe
   };
   const request = {
     runId: 'worker-boundary', mode: 'changeover', snapshot: workerSnapshot,
-    deadlineDurationMs: 2000,
+    deadlineDurationMs: 600000,
     request: {
       mode: 'changeover', plant: 'P', respectFirmed: true, respectCalendar: false,
       planningStart: new Date('2035-08-06T08:00:00'),
       runNow: new Date('2035-08-06T08:00:00'), endDate: new Date('2035-08-11T00:00:00'),
     },
   };
-  const evaluated = evaluateOptimizerWorkerRequest(request, () => 5000);
+  const evaluated = evaluateOptimizerWorkerRequest(request, realClock);
   assert.ok(evaluated.validationContext, 'the worker evaluator must produce apply metadata');
-  const response = buildOptimizerWorkerResponse(request, () => 5000);
+  const response = buildOptimizerWorkerResponse(request, realClock);
   assert.ok(response.validation, 'the real worker response must include validation metadata');
   assert.deepEqual(new Set(response.validation.effectiveFirmedIds), new Set(['worker-running', 'worker-frozen']),
     'running and frozen effective firming must survive worker serialization; SAP firm never folds');
@@ -243,7 +245,7 @@ test('real optimizer worker boundary localizes its deadline and round-trips effe
   // Plant-scoped runs send `lines: null` (Optimize dialog default). That must
   // serialize as undefined and rehydrate on the main thread without throwing.
   const plantScoped = { ...request, runId: 'worker-plant-scope', request: { ...request.request, lines: null } };
-  const plantResponse = buildOptimizerWorkerResponse(plantScoped, () => 5000);
+  const plantResponse = buildOptimizerWorkerResponse(plantScoped, realClock);
   assert.equal(plantResponse.validation.lines, undefined,
     'a null lines scope must not cross the worker boundary as null');
   assert.doesNotThrow(() => rehydrateOptimizerCandidate(plantResponse.candidate, workerSnapshot, plantResponse.validation),
@@ -272,14 +274,14 @@ test('worker round-trip carries user_scheduled and holds a window-end straddler 
     frozenHorizonEnd: new Date('2035-08-07T00:00:00'),
   };
   const request = {
-    runId: 'worker-straddle', mode: 'changeover', snapshot: workerSnapshot, deadlineDurationMs: 2000,
+    runId: 'worker-straddle', mode: 'changeover', snapshot: workerSnapshot, deadlineDurationMs: 600000,
     request: {
       mode: 'changeover', plant: 'P', respectFirmed: true, respectCalendar: false,
       planningStart: new Date('2035-08-06T08:00:00'), runNow: new Date('2035-08-06T08:00:00'),
       endDate: new Date('2035-08-11T00:00:00'),
     },
   };
-  const response = buildOptimizerWorkerResponse(structuredClone(request), () => 5000);
+  const response = buildOptimizerWorkerResponse(structuredClone(request), realClock);
   assert.deepEqual([...response.candidate.windowEndHeldIds], ['worker-straddle']);
   assert.equal(response.candidate.patches.some(p => p.id === 'worker-straddle'), false);
   const rehydrated = rehydrateOptimizerCandidate(response.candidate, workerSnapshot, response.validation);
@@ -300,8 +302,8 @@ test('real optimizer worker preserves validation metadata on the legacy fallback
     runId: 'legacy-worker', mode: 'spt', snapshot: legacySnapshot,
     request: { mode: 'spt', plant: 'P', respectCalendar: false,
       now: '2035-08-06T08:00:00.000Z', endDate: '2035-08-07T18:00:00.000Z' },
-    deadlineDurationMs: 250,
-  }, () => 7000);
+    deadlineDurationMs: 600000,
+  }, realClock);
   assert.ok(response.validation, 'legacy worker candidates must also carry apply metadata');
   assert.ok(response.candidate?.patches.some(patch => patch.id === 'legacy-worker-task'));
   assert.deepEqual(response.validation.effectiveFirmedIds, []);
@@ -330,8 +332,8 @@ test('real optimizer worker preserves validation metadata for backlog candidates
     runId: 'backlog-worker', mode: 'backlog', snapshot: backlogSnapshot,
     request: { mode: 'backlog', plant: 'P', startDate: new Date('2035-08-04T00:00:00'),
       endDate: new Date('2035-08-06T00:00:00'), runAt: new Date('2035-08-06T12:00:00') },
-    deadlineDurationMs: 250,
-  }, () => 7000);
+    deadlineDurationMs: 600000,
+  }, realClock);
   assert.ok(response.validation, 'backlog worker candidates must also carry apply metadata');
   assert.ok(Array.isArray(response.candidate?.dispositions));
   assert.deepEqual(response.validation.effectiveFirmedIds, []);
@@ -365,8 +367,8 @@ test('detached Remove Backlog leaves skipped invalid-runtime work unchanged', ()
     runId: 'backlog-invalid-runtime', mode: 'backlog', snapshot: invalidRuntime,
     request: { mode: 'backlog', plant: 'P', startDate: new Date('2035-08-04T00:00:00'),
       endDate: new Date('2035-08-06T00:00:00'), runAt: new Date('2035-08-06T12:00:00') },
-    deadlineDurationMs: 250,
-  }, () => 7000);
+    deadlineDurationMs: 600000,
+  }, realClock);
 
   assert.ok(response.validation);
   assert.equal(response.validation.scopeTaskIds.includes('backlog-invalid-runtime'), false,
@@ -544,8 +546,8 @@ test('gate 16: a worker-produced patch keeps end = the last productive edge (fin
     runId: 'finish-first', mode: 'spt', snapshot: workerSnapshot,
     request: { mode: 'spt', plant: 'P', respectCalendar: true,
       now: '2035-08-06T08:00:00.000Z', planningStart: '2035-08-06T08:00:00.000Z', endDate: '2035-08-12T00:00:00.000Z' },
-    deadlineDurationMs: 1000,
-  }, () => 7000);
+    deadlineDurationMs: 600000,
+  }, realClock);
   const when = value => new Date(value).getTime();
   const byId = Object.fromEntries(response.candidate.patches.map(patch => [patch.id, patch.changes]));
   assert.ok(byId['w-seg'] && byId['w-one'], 'both orders are placed by the worker');
@@ -593,12 +595,12 @@ test('worker validation bounds are snapshot-bound: a date-only due on a closed F
     frozenHorizonEnd: null,
   };
   const request = {
-    runId: 'worker-due-window', mode: 'duedate', snapshot: dueSnapshot, deadlineDurationMs: 2000,
+    runId: 'worker-due-window', mode: 'duedate', snapshot: dueSnapshot, deadlineDurationMs: 600000,
     request: { mode: 'duedate', plant: 'P', respectFirmed: true, respectCalendar: true,
       planningStart: new Date(2035, 7, 6, 8, 0, 0), runNow: new Date(2035, 7, 6, 8, 0, 0),
       endDate: new Date(2035, 7, 14, 0, 0, 0) },
   };
-  const response = buildOptimizerWorkerResponse(request, () => 5000);
+  const response = buildOptimizerWorkerResponse(request, realClock);
   assert.ok(response.validation, 'the worker response must carry validation metadata');
   const wednesday = new Date(2035, 7, 8, 0, 0, 0);
   const saturday = new Date(2035, 7, 11, 0, 0, 0);
@@ -668,11 +670,11 @@ test('Tool Inventory: the optional toolBlocked / toolMoved / toolPass fields sur
     frozenHorizonEnd: new Date('2035-08-07T00:00:00'),
   };
   const request = {
-    runId: 'tool-fields', mode: 'changeover', snapshot: workerSnapshot, deadlineDurationMs: 2000,
+    runId: 'tool-fields', mode: 'changeover', snapshot: workerSnapshot, deadlineDurationMs: 600000,
     request: { mode: 'changeover', plant: 'P', respectFirmed: true, respectCalendar: false,
       planningStart: new Date('2035-08-06T08:00:00'), runNow: new Date('2035-08-06T08:00:00'), endDate: new Date('2035-08-11T00:00:00') },
   };
-  const response = buildOptimizerWorkerResponse(structuredClone(request), () => 5000);
+  const response = buildOptimizerWorkerResponse(structuredClone(request), realClock);
   // Transport proof with synthetic values (the real worker-path round trip with a loaded inventory is the next test).
   response.candidate.toolBlocked = [{ orderId: 'a', tool: 'T100', available: 1, inUse: 2, holderIds: ['h1', 'h2'] }];
   response.candidate.toolMoved = [{ orderId: 'b', tool: 'T100', fromStart: null, fromEnd: null, toStart: '2035-08-10T08:00:00', toEnd: '2035-08-10T10:00:00' }];
@@ -685,7 +687,7 @@ test('Tool Inventory: the optional toolBlocked / toolMoved / toolPass fields sur
   // Absent fields stay absent (rule Off).
   const offRequest = structuredClone(request);
   offRequest.snapshot.masterData.plants[0].setup_policy_config = { toolingRule: 'off' };
-  const plain = structuredClone(buildOptimizerWorkerResponse(offRequest, () => 5000));
+  const plain = structuredClone(buildOptimizerWorkerResponse(offRequest, realClock));
   const plainRe = rehydrateOptimizerCandidate(plain.candidate, workerSnapshot, plain.validation);
   assert.equal(plainRe.toolBlocked, undefined);
   assert.equal(plainRe.toolPass, undefined);
@@ -702,7 +704,7 @@ function toolWorkerSnapshot(rule = 'hard') {
   ], { inventory: [{ tool_id: 'T1', total_qty: 1 }, { tool_id: 'T2', total_qty: 1 }], rule, plantExtra: { max_push_forward_days: 0 } });
 }
 const toolWorkerRequest = snap => ({
-  runId: 'tool-worker', mode: 'changeover', snapshot: snap, deadlineDurationMs: 8000,
+  runId: 'tool-worker', mode: 'changeover', snapshot: snap, deadlineDurationMs: 600000,
   request: { ...TF.toolRequest(), mode: 'changeover' },
 });
 const canonTool = candidate => JSON.stringify({
@@ -738,7 +740,7 @@ test('Tool Inventory: a real worker round trip carries toolBlocked / toolMoved /
   const response = await runInRealWorker(toolWorkerRequest(snap));
   assert.ok(!response.error, response.error);
   const fromWorker = response.candidate;
-  const direct = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap)), () => 5000).candidate;
+  const direct = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap)), realClock).candidate;
   assert.ok(fromWorker.toolMoved?.length >= 1, 'the overlap on T1 was resolved by moving an order');
   assert.ok(fromWorker.toolBlocked?.length >= 1, 'the order that cannot finish inside the push cap was queued for tooling');
   assert.ok(fromWorker.toolBlocked.every(e => ['A', 'B', 'Q'].includes(e.orderId) && e.tool === 'T1'));
@@ -757,7 +759,7 @@ test('Tool Inventory: a real worker round trip carries toolBlocked / toolMoved /
 
 test('Tool Inventory: Apply-time validation re-derives the rule from the SNAPSHOT (Hard flags an overlap, Off does not)', () => {
   const snap = toolWorkerSnapshot('hard');
-  const response = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap)), () => 5000);
+  const response = buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(snap)), realClock);
   const movedId = response.candidate.toolMoved[0].orderId;
   const withoutMove = c => ({ ...c, patches: c.patches.filter(p => p.id !== movedId) });
   const hard = rehydrateOptimizerCandidate(withoutMove(response.candidate), snap, response.validation);
@@ -776,10 +778,10 @@ test('Tool Inventory: compute-core-stale is thrown ONLY for a Hard plant with a 
   try {
     for (const missing of ['findToolOverages', 'toolHeadroom']) {
       globalThis.NimbusComputeCore = { ...real, [missing]: undefined };
-      assert.throws(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('hard'))), () => 5000), /compute-core-stale/, 'Hard + loaded inventory + old core: ' + missing);
-      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('off'))), () => 5000), 'an Off plant keeps working with the older core');
+      assert.throws(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('hard'))), realClock), /compute-core-stale/, 'Hard + loaded inventory + old core: ' + missing);
+      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(toolWorkerSnapshot('off'))), realClock), 'an Off plant keeps working with the older core');
       const unloaded = TF.toolSnapshot([{ id: 'A', line: 'L1', run: 4, tools: ['T1'], due: '2035-08-07T08:00:00' }], { inventory: null, rule: 'hard' });
-      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(unloaded)), () => 5000), 'Hard with the inventory not loaded is a no-op');
+      assert.doesNotThrow(() => buildOptimizerWorkerResponse(structuredClone(toolWorkerRequest(unloaded)), realClock), 'Hard with the inventory not loaded is a no-op');
     }
   } finally { globalThis.NimbusComputeCore = real; }
 });
