@@ -2167,6 +2167,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <button class="md-tab" data-md-tab="routing_operation" role="tab" data-i18n="tab.routing_operation">Routing Operations</button>
             <button class="md-tab" data-md-tab="routing_rules" role="tab" data-i18n="tab.routing_rules">Routing Rules</button>
             <button class="md-tab" data-md-tab="sap_workcenter" role="tab" data-i18n="tab.sap_workcenter">Work Centers</button>
+            <button class="md-tab" data-md-tab="tool_inventory" role="tab" data-i18n="tab.tool_inventory">Tool Inventory</button>
           </nav>
             <button class="btn btn-ghost sm" id="md-export-schema-btn" data-i18n="btn.export_schema">Export Schema</button>
           </div>
@@ -2422,6 +2423,24 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
     </header>
     <div class="modal-body" id="asl-body"></div>
     <footer class="modal-foot" id="asl-foot"></footer>
+  </div>
+</div>
+
+<!-- =========================================================
+     MODAL: Tool Inventory Excel upload review (body/Apply label rendered by ToolInventory).
+     data-no-backdrop-close: a stray click must not discard the review; Cancel / Escape / the close button do.
+     ========================================================= -->
+<div class="modal-backdrop" id="modal-tool-inventory-review" data-no-backdrop-close hidden>
+  <div class="modal" style="max-width:760px;" role="dialog" aria-modal="true" aria-labelledby="ti-review-title">
+    <header class="modal-head">
+      <h3 id="ti-review-title" data-i18n="modal.tool_inventory_review_title">Review tool inventory upload</h3>
+      <button class="icon-btn sm" id="ti-review-close" type="button" aria-label="Close" data-i18n-title="btn.close">✕</button>
+    </header>
+    <div class="modal-body ti-review-body" id="ti-review-body"></div>
+    <footer class="modal-foot">
+      <button class="btn btn-ghost" id="ti-review-cancel" type="button" data-autofocus data-i18n="btn.cancel">Cancel</button>
+      <button class="btn btn-primary" id="ti-review-apply" type="button" disabled></button>
+    </footer>
   </div>
 </div>
 

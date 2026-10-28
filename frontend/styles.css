@@ -1673,7 +1673,7 @@ body.dark .vis-custom-time.visibility-horizon .vis-custom-time-marker {
 .ac-chip.firmed { background: var(--accent-soft); border-color: transparent; color: var(--accent-hot); font-weight: 600; }
 .ac-chip-sep { font-size: 11px; color: var(--fg-mute); padding: 0 2px; }
 
-.ac-card-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.ac-card-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 
 /* Sticky footer */
 .ac-foot {
@@ -2743,7 +2743,7 @@ button.alert-summary-more { display: block; width: 100%; border: 0; font-family:
    P4: ALERT FIX BUTTON
    ========================================================================== */
 .alert-row { flex-wrap: wrap; }
-.alert-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.alert-actions { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; flex-shrink: 0; }
 .btn-fix {
   background: var(--ok-soft); color: var(--ok);
   border: 1px solid var(--ok); border-radius: var(--r-sm);
@@ -5310,6 +5310,18 @@ body.dark { --period-default-fill: #313d4d; --period-default-fg: color-mix(in sr
 .ti-errors ul { margin: 4px 0 0; padding-left: 18px; }
 .ti-state { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
 .ti-confirm-list { margin: 6px 0 0; padding-left: 18px; text-align: left; }
+.ti-result { flex-shrink: 0; padding: 8px 16px; font-size: 12.5px; color: var(--fg); background: var(--bg-elev); border-bottom: 1px solid var(--line); }
+.ti-result ul { margin: 4px 0 0; padding-left: 18px; }
+.ti-review-body { padding: 16px 20px; max-height: 70vh; overflow: auto; }
+.ti-review-body h4 { margin: 14px 0 6px; font-size: 13px; }
+.ti-review-summary { font-size: 14px; margin: 4px 0 8px; }
+.ti-review-warn { margin: 6px 0; padding: 8px 10px; border: 1px solid var(--warn); background: var(--warn-soft, var(--bg-elev)); color: var(--warn-text); border-radius: 6px; font-size: 12.5px; }
+.ti-review-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ti-review-table th, .ti-review-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+.ti-review-table thead th { font-weight: 600; color: var(--text-muted); }
+.ti-review-list { margin: 0; padding-left: 18px; font-size: 12.5px; }
+.ti-review-more { margin: 4px 0 0; font-size: 12px; color: var(--text-muted); }
+.ti-review-untouched { margin: 14px 0 0; font-size: 12.5px; color: var(--text-muted); }
 .ag-theme-quartz .md-cell-invalid { box-shadow: inset 0 0 0 1px var(--err); background: var(--err-soft); color: var(--err); }
 .ag-theme-quartz .ti-cell-locked { color: var(--text-muted); cursor: not-allowed; }
 

@@ -110,7 +110,23 @@ let _st: TiState = _blank();
 /** Test seams: the Store refresh and the usage/bulk transport are the only things tests need to swap. */
 export const _seams = {
   refreshStoreMasterData: (source: string, table?: string): Promise<boolean> => refreshStoreMasterData(source, table),
+  /** Blob + temporary anchor download (the missing-master-data CSV precedent in admin-ui.mts). */
+  saveBlob: (blob: Blob, name: string): void => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  },
 };
+
+/** A template/export/upload request is in flight (module-wide: one Excel round trip at a time). */
+let _busy = false;
+const REVIEW_ID = 'modal-tool-inventory-review';
+const REVIEW_CAP = 200;
+const WARNINGS_CAP = 10;
 
 // -- Pure helpers ---------------------------------------------------------------
 
@@ -410,6 +426,10 @@ function _paneHtml(): string {
       <button type="button" class="btn btn-ghost" id="ti-add-in-use" title="${t('tip.add_tools_in_use')}">${t('btn.add_tools_in_use')}</button>
       <button type="button" class="btn btn-ghost" id="ti-delete" disabled>${t('btn.delete_selected')}</button>
       <button type="button" class="btn btn-ghost" id="ti-export">${t('btn.export_csv')}</button>
+      <button type="button" class="btn btn-ghost" id="ti-template" title="${t('tip.tool_inventory_template')}">${t('btn.download_template')}</button>
+      <button type="button" class="btn btn-ghost" id="ti-export-xlsx" title="${t('tip.tool_inventory_export_xlsx')}">${t('btn.download_data')}</button>
+      <button type="button" class="btn btn-ghost" id="ti-upload" title="${t('tip.upload_tool_inventory')}">${t('btn.upload_tool_inventory')}</button>
+      <input type="file" id="ti-upload-input" accept=".xlsx" hidden tabindex="-1" aria-hidden="true">
       <button type="button" class="btn btn-ghost" id="ti-discard" hidden>${t('btn.discard')}</button>
       <button type="button" class="btn btn-primary" id="ti-save" disabled>${t('btn.save')}</button>
     </div>
@@ -417,6 +437,7 @@ function _paneHtml(): string {
     <div class="ti-hint" id="ti-hint" hidden></div>
     <div class="ti-hint" id="ti-filter-hint" hidden></div>
     <div class="ti-errors" id="ti-errors" role="alert" hidden></div>
+    <div class="ti-result" id="ti-upload-result" role="status" aria-live="polite" hidden></div>
     <div class="ti-state" id="ti-state" hidden></div>
     <div id="ti-grid" class="ag-theme-quartz" role="region" aria-label="${t('ui.tool_inventory_grid_label')}"></div>`;
 }
@@ -434,6 +455,16 @@ function _ensureDom(): boolean {
   _el('ti-discard')?.addEventListener('click', () => { void ToolInventory._discard(); });
   _el('ti-export')?.addEventListener('click', () => {
     try { _gridApi?.exportDataAsCsv({ fileName: `nimbus-tool-inventory-${_st.plant ?? 'plant'}.csv`, processCellCallback: Util.csvProcessCell }); } catch {}
+  });
+  _el('ti-template')?.addEventListener('click', () => { void _download('template'); });
+  _el('ti-export-xlsx')?.addEventListener('click', () => { void _download('export'); });
+  _el('ti-upload')?.addEventListener('click', () => { void _pickUpload(); });
+  _el<HTMLInputElement>('ti-upload-input')?.addEventListener('change', e => {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    try { input.value = ''; } catch {}
+    const plant = _st.plant;
+    if (file && plant) void _uploadFile(plant, file);
   });
   const quick = _el<HTMLInputElement>('ti-quick');
   quick?.addEventListener('input', () => {
@@ -491,6 +522,9 @@ function _updateChrome(): void {
   set('ti-add-in-use', e => { (e as HTMLButtonElement).disabled = !editable; });
   set('ti-export', e => { (e as HTMLButtonElement).disabled = !ready || !_st.rows.length; });
   set('ti-save', e => { (e as HTMLButtonElement).disabled = !_canSave(); });
+  set('ti-template', e => { (e as HTMLButtonElement).disabled = _busy || !_st.plant; });
+  set('ti-export-xlsx', e => { (e as HTMLButtonElement).disabled = _busy || !_st.plant; });
+  set('ti-upload', e => { (e as HTMLButtonElement).disabled = _busy || _st.writing || !editable; });
   set('ti-discard', e => { e.hidden = dirty === 0; (e as HTMLButtonElement).disabled = _st.writing; });
   set('ti-dirty', e => { e.hidden = dirty === 0; e.textContent = Util.t('ui.n_unsaved', { count: dirty }); });
   set('ti-delete', e => {
@@ -947,6 +981,239 @@ async function _save(): Promise<void> {
   }
 }
 
+// -- Excel: Template / Export / Upload with a review step ------------------------------
+
+function _setBusy(on: boolean): void {
+  _busy = on;
+  _updateChrome();
+}
+
+/** `filename*=UTF-8''x.xlsx` or `filename="x.xlsx"` from a Content-Disposition header, sanitised; the fallback when absent. */
+export function filenameFromDisposition(header: string | null | undefined, fallback: string): string {
+  let name = '';
+  const star = /filename\*\s*=\s*[^']*''([^;]+)/i.exec(header ?? '');
+  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(header ?? '');
+  const raw = star?.[1] ?? plain?.[1] ?? '';
+  try { name = decodeURIComponent(raw); } catch { name = raw; }
+  name = name.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._]+/, '');
+  return name || fallback.replace(/[^A-Za-z0-9._-]+/g, '_');
+}
+
+async function _download(kind: 'template' | 'export'): Promise<void> {
+  const plant = _st.plant;
+  if (!plant || _busy) return;
+  _setBusy(true);
+  try {
+    const res = await Util.fetchTraced(`${Config.API_BASE}/tool-inventory/${encodeURIComponent(plant)}/${kind === 'template' ? 'template.xlsx' : 'export.xlsx'}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const fallback = kind === 'template' ? `tool-inventory-template-${plant}.xlsx` : `tool-inventory-${plant}.xlsx`;
+    _seams.saveBlob(blob, filenameFromDisposition(res.headers?.get?.('content-disposition'), fallback));
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    ErrorLog.error('tool-inventory', `${kind} download failed: ${msg}`);
+    Toast.show(Util.t('toast.export_failed', { msg }), 'error');
+  } finally {
+    _setBusy(false);
+  }
+}
+
+/** The Upload button: refuse while the grid has unsaved edits (the existing discard confirm is the way out), then open the picker. */
+async function _pickUpload(): Promise<void> {
+  if (_busy || !_canEdit()) return;
+  const n = _dirtyCount();
+  if (n > 0) {
+    if (!await _confirmDiscard(n)) { Toast.show(Util.t('toast.tool_inventory_upload_dirty'), 'warn'); return; }
+    _resetEdits();
+  }
+  _el<HTMLInputElement>('ti-upload-input')?.click?.();
+}
+
+interface UploadEditable { total_qty?: unknown; out_of_service_qty?: unknown; note?: unknown }
+interface UploadDry {
+  counts: { new: number; changed: number; unchanged: number; rejected: number };
+  new?: Array<UploadEditable & { tool_id?: unknown }>;
+  changed?: Array<{ tool_id?: unknown; before?: UploadEditable; after?: UploadEditable }>;
+  rejected?: Array<{ row?: unknown; tool_id?: unknown; error?: unknown }>;
+  warnings?: unknown[];
+}
+interface UploadApplied { inserted?: number; updated?: number; rejected?: number; warnings?: unknown[] }
+
+function _warnText(w: unknown): string {
+  if (typeof w === 'string') return w;
+  const o = w as { msg?: unknown; message?: unknown } | null;
+  return String(o?.msg ?? o?.message ?? JSON.stringify(w));
+}
+
+function _cellDiff(before: unknown, after: unknown): string {
+  const b = before == null || before === '' ? '' : String(before);
+  const a = after == null || after === '' ? '' : String(after);
+  const arrow = Util.t('ui.tool_inventory_review_arrow');
+  return b === a ? Util.escapeHtml(a || '—') : `${Util.escapeHtml(b || '—')} <span class="ti-review-arrow" aria-label="${Util.escapeHtml(arrow)}">→</span> <strong>${Util.escapeHtml(a || '—')}</strong>`;
+}
+
+function _more(total: number, shown: number): string {
+  return total > shown ? `<p class="ti-review-more">${Util.escapeHtml(Util.t('modal.tool_inventory_review_more', { n: total - shown }))}</p>` : '';
+}
+
+/** The review modal body: counts, changes, new tools, rejected rows, warnings and the two standing sentences. */
+export function reviewHtml(fileName: string, dry: UploadDry): string {
+  const c = dry.counts;
+  const esc = Util.escapeHtml;
+  const t = (k: string, v?: Record<string, string | number>): string => esc(Util.t(k, v));
+  let h = `<p class="ti-review-file"><strong>${esc(fileName)}</strong></p>`;
+  h += `<p class="ti-review-summary" role="status">${t('modal.tool_inventory_review_summary', { new: c.new, changed: c.changed, unchanged: c.unchanged, rejected: c.rejected })}</p>`;
+  if (c.rejected > 0) h += `<p class="ti-review-warn" role="alert">⚠ ${t('modal.tool_inventory_review_rejected_warn')}</p>`;
+  const changed = (dry.changed ?? []).slice(0, REVIEW_CAP);
+  if (c.changed > 0) {
+    h += `<h4>${t('modal.tool_inventory_review_changes')}</h4><table class="ti-review-table"><thead><tr>`
+      + `<th scope="col">${t('col.tool_id')}</th><th scope="col">${t('col.total_qty')}</th><th scope="col">${t('col.out_of_service_qty')}</th><th scope="col">${t('col.note')}</th></tr></thead><tbody>`;
+    for (const r of changed) {
+      h += `<tr><th scope="row">${esc(String(r.tool_id ?? ''))}</th><td>${_cellDiff(r.before?.total_qty, r.after?.total_qty)}</td>`
+        + `<td>${_cellDiff(r.before?.out_of_service_qty, r.after?.out_of_service_qty)}</td><td>${_cellDiff(r.before?.note, r.after?.note)}</td></tr>`;
+    }
+    h += `</tbody></table>${_more(c.changed, changed.length)}`;
+  }
+  const added = (dry.new ?? []).slice(0, REVIEW_CAP);
+  if (c.new > 0) {
+    h += `<h4>${t('modal.tool_inventory_review_new')}</h4><ul class="ti-review-list">`
+      + added.map(r => `<li>${t('modal.tool_inventory_review_new_item', { tool: String(r.tool_id ?? ''), total: String(r.total_qty ?? ''), oos: String(r.out_of_service_qty ?? 0) })}</li>`).join('')
+      + `</ul>${_more(c.new, added.length)}`;
+  }
+  const rejected = (dry.rejected ?? []).slice(0, REVIEW_CAP);
+  if (c.rejected > 0) {
+    h += `<h4>${t('modal.tool_inventory_review_rejected')}</h4><ul class="ti-review-list">`
+      + rejected.map(r => `<li>${t('modal.tool_inventory_review_rejected_item', { row: String(r.row ?? ''), error: String(r.error ?? '') })}${r.tool_id ? ` (${esc(String(r.tool_id))})` : ''}</li>`).join('')
+      + `</ul>${_more(c.rejected, rejected.length)}`;
+  }
+  const warnings = dry.warnings ?? [];
+  if (warnings.length) {
+    h += `<h4>${t('modal.tool_inventory_review_warnings')}</h4><ul class="ti-review-list">`
+      + warnings.slice(0, WARNINGS_CAP).map(w => `<li>${esc(_warnText(w))}</li>`).join('') + `</ul>${_more(warnings.length, WARNINGS_CAP)}`;
+  }
+  h += `<p class="ti-review-untouched">${t('modal.tool_inventory_review_untouched')}</p>`;
+  return h;
+}
+
+let _reviewDone: ((ok: boolean) => void) | null = null;
+let _reviewWired = false;
+
+function _finishReview(ok: boolean): void {
+  const done = _reviewDone;
+  if (!done) return;
+  _reviewDone = null;
+  Modal.close(REVIEW_ID);
+  done(ok);
+}
+
+function _wireReview(): void {
+  if (_reviewWired) return;
+  _reviewWired = true;
+  _el('ti-review-apply')?.addEventListener('click', () => {
+    if ((_el<HTMLButtonElement>('ti-review-apply')?.disabled)) return;
+    _finishReview(true);
+  });
+  _el('ti-review-cancel')?.addEventListener('click', () => _finishReview(false));
+  _el('ti-review-close')?.addEventListener('click', () => _finishReview(false));
+  // The backdrop never closes this modal (data-no-backdrop-close); Escape cancels, wherever the focus is.
+  document.addEventListener?.('keydown', (e: KeyboardEvent) => { if (e.key === 'Escape' && _reviewDone) { e.preventDefault?.(); _finishReview(false); } });
+}
+
+/** Open the review modal; resolves true on "Apply N changes", false on Cancel / close / Escape. Cancel is the default focus. */
+function _showReview(fileName: string, dry: UploadDry): Promise<boolean> {
+  _wireReview();
+  const body = _el('ti-review-body');
+  if (body) body.innerHTML = reviewHtml(fileName, dry);
+  const n = (dry.counts.new ?? 0) + (dry.counts.changed ?? 0);
+  const apply = _el<HTMLButtonElement>('ti-review-apply');
+  if (apply) { apply.textContent = Util.t('modal.tool_inventory_review_apply', { n }); apply.disabled = n === 0; }
+  const cancel = _el<HTMLButtonElement>('ti-review-cancel');
+  if (cancel) cancel.textContent = Util.t('btn.cancel');
+  return new Promise(resolve => {
+    _finishReview(false);        // a stale pending review (should not happen) never leaks
+    _reviewDone = resolve;
+    Modal.open(REVIEW_ID);
+  });
+}
+
+function _postUpload(plant: string, file: File, dry: boolean): Promise<Response> {
+  const fd = new FormData();
+  fd.append('file', file);
+  return Util.fetchTraced(`${Config.API_BASE}/tool-inventory/${encodeURIComponent(plant)}/upload?dry_run=${dry ? 1 : 0}`, { method: 'POST', body: fd });
+}
+
+/** A failed upload response -> one readable toast (413 too large, 403 read-only, 400 the server's reason). */
+async function _uploadFailed(plant: string, res: Response): Promise<void> {
+  if (res.status === 413) { Toast.show(Util.t('toast.tool_inventory_upload_too_large'), 'error'); return; }
+  if (res.status === 403) {
+    if (_st.plant === plant) { _st.readOnly = true; _updateChrome(); }
+    Toast.show(Util.t('toast.no_write_permission'), 'error');
+    return;
+  }
+  const err = await Util.parseBackendError(res);
+  ErrorLog.error('tool-inventory', `upload failed (${res.status}): ${err.message}`);
+  Toast.show(Util.t('toast.tool_inventory_upload_failed', { msg: err.message || `HTTP ${res.status}` }), 'error');
+}
+
+function _showUploadResult(summary: string, warnings: string[]): void {
+  const e = _el('ti-upload-result');
+  if (!e) return;
+  e.hidden = false;
+  e.innerHTML = `<strong>${Util.escapeHtml(summary)}</strong>`
+    + (warnings.length ? `<ul>${warnings.slice(0, WARNINGS_CAP).map(w => `<li>${Util.escapeHtml(w)}</li>`).join('')}</ul>`
+      + (warnings.length > WARNINGS_CAP ? `<p>${Util.escapeHtml(Util.t('modal.tool_inventory_review_more', { n: warnings.length - WARNINGS_CAP }))}</p>` : '') : '');
+}
+
+function _clearUploadResult(): void {
+  const e = _el('ti-upload-result');
+  if (e) { e.hidden = true; e.innerHTML = ''; }
+}
+
+/** Review-then-apply an Excel file for `plant`. POST ?dry_run=1 first (writes nothing), the review modal, and on Apply the SAME File
+ *  is re-posted with ?dry_run=0 (the server re-parses and re-diffs, so the result can differ if someone saved in between).
+ *  Resolves true when rows were applied. Shared by the planner toolbar and the Manage Data grid. */
+async function _uploadFile(plant: string, file: File): Promise<boolean> {
+  if (_busy) return false;
+  if (Sandbox.active) { Toast.show(Util.t('ui.tool_inventory_sandbox_hint'), 'warn'); return false; }
+  if (_st.plant === plant && _st.readOnly) { Toast.show(Util.t('toast.no_write_permission'), 'error'); return false; }
+  _setBusy(true);
+  try {
+    // Branch on what was SENT: a dry run returns a plan, an apply returns counts.
+    const dryRes = await _postUpload(plant, file, true);
+    if (!dryRes.ok) { await _uploadFailed(plant, dryRes); return false; }
+    const dry = await dryRes.json() as UploadDry;
+    _setBusy(false);                       // the buttons are usable while the planner reads the review
+    if (!await _showReview(file.name, dry)) return false;
+    _setBusy(true);
+    const alertWatch = _watchToolAlerts(plant, _toolAlertCount(plant));
+    let watchStarted = false;
+    try {
+      const res = await _postUpload(plant, file, false);
+      if (!res.ok) { await _uploadFailed(plant, res); return false; }
+      const out = await res.json() as UploadApplied;
+      const warnings = (out.warnings ?? []).map(_warnText);
+      warnings.slice(0, WARNINGS_CAP).forEach(w => ErrorLog.warn('tool-inventory', w));
+      ErrorLog.info('tool-inventory', `upload applied for plant ${plant}: ${out.inserted ?? 0} inserted, ${out.updated ?? 0} updated, ${out.rejected ?? 0} rejected`);
+      const summary = Util.t('toast.tool_inventory_upload_done', { inserted: out.inserted ?? 0, updated: out.updated ?? 0, rejected: out.rejected ?? 0 });
+      Toast.show(summary, out.rejected ? 'warn' : 'success', 6000);
+      _showUploadResult(summary, warnings);
+      await _seams.refreshStoreMasterData('tool-inventory-save', 'tool_inventory');
+      alertWatch.start(); watchStarted = true;
+      if (_st.plant === plant) { _loadFromStore(); _showState(); _pushRows(); }
+      return true;
+    } finally {
+      if (!watchStarted) alertWatch.cancel();
+    }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    ErrorLog.error('tool-inventory', `upload failed: ${msg}`);
+    Toast.show(Util.t('toast.tool_inventory_upload_failed', { msg }), 'error');
+    return false;
+  } finally {
+    _setBusy(false);
+  }
+}
+
 async function _retry(): Promise<void> {
   const plant = _st.plant;
   if (!plant) return;
@@ -979,6 +1246,7 @@ export const ToolInventory = {
     Store.subscribe(evt => {
       if (evt.type === 'plant:selected') {
         _retainDraft();
+        _clearUploadResult();
         _st = _blank(_st);   // an in-flight save finishes against its own (detached) state
         if (_paneVisible()) ToolInventory.render();
         return;
@@ -1045,7 +1313,13 @@ export const ToolInventory = {
     try { _gridApi.setGridOption('quickFilterText', text); } catch {}
   },
 
-  /** Deep link (Wave 4b wires the callers): show `plant`'s inventory filtered to one tool id. */
+  /** Excel upload with the review step (the planner toolbar and the Manage Data grid both call this). Resolves true when rows were applied. */
+  uploadFile(plant: string, file: File): Promise<boolean> { return _uploadFile(plant, file); },
+
+  /** The removal confirm (in-use warning / could-not-check) shared with the Manage Data grid's delete path: true = go ahead. */
+  confirmRemovals(plant: string, ids: string[]): Promise<boolean> { return _confirmRemovals(plant, ids); },
+
+  /** Deep link: show `plant`'s inventory filtered to one tool id. */
   openForTool(plant: string, toolId: string): void {
     if (plant && Store.selectedPlant !== plant) Store.setSelectedPlant(plant, 'tool-inventory-link');
     ToolInventory.setQuickFilter(String(toolId ?? ''));
@@ -1059,6 +1333,8 @@ export const ToolInventory = {
   _save: (): Promise<void> => _save(),
   _discard: (): Promise<boolean> => _discard(),
   _retry: (): Promise<void> => _retry(),
+  _pickUpload: (): Promise<void> => _pickUpload(),
+  _download: (kind: 'template' | 'export'): Promise<void> => _download(kind),
   /** Plain snapshot for tests: rows, staged deletes, per-field errors, view, flags. */
   _snapshot() {
     return { plant: _st.plant, view: _st.view, rows: _st.rows, deletes: _st.deletes, errors: _validate(), readOnly: _st.readOnly,
