@@ -933,7 +933,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       pill.addEventListener('click', () => DarkMode.toggle());
 
       const langPill = panel.querySelector('#ni-lang-pill');
-      langPill.addEventListener('change', () => LangSwitcher.set(langPill.value));
+      langPill.addEventListener('change', () => {
+        // A failed save keeps the current language (no reload): put the select back.
+        Promise.resolve(LangSwitcher.set(langPill.value)).then(ok => { if (ok === false) langPill.value = LangSwitcher.current(); });
+      });
       panel.addEventListener('keydown', e => {
         if (e.key === 'Escape' && e.target !== langPill) {
           e.preventDefault(); e.stopPropagation(); CommandPalette.close();
@@ -2537,6 +2540,24 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      DARK MODE — token swap via body.dark; persisted in localStorage.
      ========================================================================== */
+  // Offline nimbus.theme cache as it was before the first unsaved theme edit (undefined
+  // = none pending), so DarkMode.reapply() can restore it after a failed save.
+  let themeCachePrev;
+
+  // Repaint canvas-painted views whose colors are baked in at draw time.
+  function repaintTheme() {
+    try { NIMBUS.TimelineNav?.render?.(); } catch (e) {
+      (window.NIMBUS && window.NIMBUS.ErrorLog
+        ? window.NIMBUS.ErrorLog.warn('intel', 'DarkMode TimelineNav repaint failed', { err: String(e), errorCode: 'internal' })
+        : console.warn('[DarkMode] TimelineNav repaint failed', e));
+    }
+    try { NIMBUS.Dashboard?._renderHeatmap?.(); } catch (e) {
+      (window.NIMBUS && window.NIMBUS.ErrorLog
+        ? window.NIMBUS.ErrorLog.warn('intel', 'DarkMode heatmap repaint failed', { err: String(e), errorCode: 'internal' })
+        : console.warn('[DarkMode] heatmap repaint failed', e));
+    }
+  }
+
   const DarkMode = {
     _key: 'nimbus.theme',
 
@@ -2571,22 +2592,36 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     // pref via Session.setPref. Used by both the header pill and the settings control.
     set(isDark, opts = {}) {
       document.body.classList.toggle('dark', !!isDark);
+      // Remember the offline cache as it was before the first unsaved edit, so a
+      // failed save (reapply below) can put it back even when no pref existed.
+      if (themeCachePrev === undefined) {
+        try { themeCachePrev = localStorage.getItem(DarkMode._key) || null; } catch { themeCachePrev = null; }
+      }
       try { localStorage.setItem(DarkMode._key, isDark ? 'dark' : 'light'); } catch {}
       try { NIMBUS.Session && NIMBUS.Session.setPref && NIMBUS.Session.setPref('theme', isDark ? 'dark' : 'light'); } catch {}
       DarkMode._syncPill();
       if (opts.toast !== false)
         Toast.show(isDark ? t('toast.dark_mode_on') : t('toast.light_mode_on'), 'info', 1200);
-      // Repaint canvas-painted views whose colors are baked in at draw time.
-      try { NIMBUS.TimelineNav?.render?.(); } catch (e) {
-        (window.NIMBUS && window.NIMBUS.ErrorLog
-          ? window.NIMBUS.ErrorLog.warn('intel', 'DarkMode TimelineNav repaint failed', { err: String(e), errorCode: 'internal' })
-          : console.warn('[DarkMode] TimelineNav repaint failed', e));
-      }
-      try { NIMBUS.Dashboard?._renderHeatmap?.(); } catch (e) {
-        (window.NIMBUS && window.NIMBUS.ErrorLog
-          ? window.NIMBUS.ErrorLog.warn('intel', 'DarkMode heatmap repaint failed', { err: String(e), errorCode: 'internal' })
-          : console.warn('[DarkMode] heatmap repaint failed', e));
-      }
+      repaintTheme();
+    },
+
+    // Re-derive the theme from the saved prefs (user ?? role ?? the cache as it was
+    // before an unsaved edit) and bring body.dark, the header pill and the offline
+    // cache in line with it. Idempotent. Used after a failed theme save (the Store
+    // reverted but the DOM did not) and when Session.refresh() brings a theme saved
+    // on another device. Does not toast and does not write the pref.
+    reapply() {
+      const us = (Store && Store.userSettings) || {}, rd = (Store && Store.roleDefaults) || {};
+      let cache = null;
+      try { cache = localStorage.getItem(DarkMode._key); } catch {}
+      const th = us.theme ?? rd.theme ?? (themeCachePrev !== undefined ? themeCachePrev : cache);
+      themeCachePrev = undefined;
+      const dark = th === 'dark';
+      const changed = dark !== DarkMode.isDark();
+      document.body.classList.toggle('dark', dark);
+      if (th === 'dark' || th === 'light') { try { localStorage.setItem(DarkMode._key, th); } catch {} }
+      DarkMode._syncPill();
+      if (changed) repaintTheme();
     },
 
     toggle() { DarkMode.set(!DarkMode.isDark()); },
@@ -2604,20 +2639,24 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       { code: 'pt', label: 'PT', name: 'Português' },
     ],
     current() { return localStorage.getItem(LangSwitcher._key) || 'en'; },
+    // Returns false (language unchanged, no reload) when the save failed; the error
+    // toast and the settings-pane revert come from Session. Otherwise reloads.
     async set(code) {
-      // Offline render cache — the pre-network boot reads this before Store is
-      // hydrated, so it must reflect the new locale immediately.
-      try { localStorage.setItem(LangSwitcher._key, code); } catch {}
       // Durable per-user pref. Await an explicit flush BEFORE reload: setPref is
       // debounced and the reload would otherwise cancel the pending PATCH, leaving
       // the DB (and session cache) stale and reverting the language on next boot.
       try {
         if (NIMBUS.Session && NIMBUS.Session.setPref) {
           NIMBUS.Session.setPref('language', code);
-          if (NIMBUS.Session.flushPrefs) await NIMBUS.Session.flushPrefs();
+          if (NIMBUS.Session.flushPrefs && (await NIMBUS.Session.flushPrefs()) === false) return false;
         }
-      } catch { /* best-effort — the offline cache above still applies the locale */ }
+      } catch { /* best-effort — the offline cache below still applies the locale */ }
+      // Offline render cache — the pre-network boot reads this before Store is
+      // hydrated. Written only once the save succeeded, so a failed save never
+      // leaves a locale the server does not have.
+      try { localStorage.setItem(LangSwitcher._key, code); } catch {}
       location.reload();
+      return true;
     },
   };
 

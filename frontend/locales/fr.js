@@ -989,6 +989,8 @@ window.__NIMBUS_LOCALES.fr = {
   'us.opt_defaults_hint':          'Pré-remplit la boîte de dialogue de l’optimiseur. Mise à jour automatiquement lors d’une optimisation.',
   'us.opt_mode_spt':               'SPT',
   'us.opt_mode_changeover':        'Chang. min.',
+  'us.opt_mode_duedate':           'Date d\'échéance',
+  'us.opt_mode_backlog':           'Résorber le retard',
   'us.opt_mode_smart':             'Intelligent',
   'us.opt_respect_firmed':         'Respecter les commandes fermes',
   'ui.opt_respect_firmed':         'Respecter les commandes passées en ferme par le planificateur',

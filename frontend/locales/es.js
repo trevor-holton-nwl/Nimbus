@@ -933,6 +933,8 @@ window.__NIMBUS_LOCALES.es = {
   'us.opt_defaults_hint':          'Rellena previamente el diálogo del optimizador. Se actualiza automáticamente al ejecutar una optimización.',
   'us.opt_mode_spt':               'SPT',
   'us.opt_mode_changeover':        'Mín. cambio',
+  'us.opt_mode_duedate':           'Fecha de vencimiento',
+  'us.opt_mode_backlog':           'Eliminar atrasos',
   'us.opt_mode_smart':             'Inteligente',
   'us.opt_respect_firmed':         'Respetar pedidos en firme',
   'ui.opt_respect_firmed':         'Respetar pedidos puestos en firme por el planificador',

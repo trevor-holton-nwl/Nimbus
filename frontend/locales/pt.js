@@ -989,6 +989,8 @@ window.__NIMBUS_LOCALES.pt = {
   'us.opt_defaults_hint':          'Pré-preenche a caixa de diálogo do otimizador. Atualizado automaticamente ao executar uma otimização.',
   'us.opt_mode_spt':               'SPT',
   'us.opt_mode_changeover':        'Mín. troca',
+  'us.opt_mode_duedate':           'Data de vencimento',
+  'us.opt_mode_backlog':           'Eliminar atrasos',
   'us.opt_mode_smart':             'Inteligente',
   'us.opt_respect_firmed':         'Respeitar pedidos firmados',
   'ui.opt_respect_firmed':         'Respeitar pedidos firmados pelo planejador',

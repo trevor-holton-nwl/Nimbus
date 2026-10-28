@@ -88,9 +88,10 @@ declare global {
         };
         DarkMode?: {
           set?(isDark: boolean): void;
+          reapply?(): void;
         };
         LangSwitcher?: {
-          set?(lang: string): void;
+          set?(lang: string): void | boolean | Promise<boolean | void>;
         };
         CommandPalette?: {
           close?(): void;

@@ -989,6 +989,8 @@ window.__NIMBUS_LOCALES.de = {
   'us.opt_defaults_hint':          'Füllt den Optimierer-Dialog vor. Wird bei jedem Optimierungslauf automatisch aktualisiert.',
   'us.opt_mode_spt':               'SPT',
   'us.opt_mode_changeover':        'Min. Umrüstung',
+  'us.opt_mode_duedate':           'Fälligkeitsdatum',
+  'us.opt_mode_backlog':           'Rückstand abbauen',
   'us.opt_mode_smart':             'Smart',
   'us.opt_respect_firmed':         'Feste Aufträge berücksichtigen',
   'ui.opt_respect_firmed':         'Vom Planer festgeschriebene Aufträge berücksichtigen',

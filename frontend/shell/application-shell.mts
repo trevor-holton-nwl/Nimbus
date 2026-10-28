@@ -70,6 +70,7 @@ import { Alerts } from '../insights/services.mjs';
 import { Engine } from '../optimization/engine.mjs';
 import { Persistence, SOURCE_WIRE } from '../scheduling/persistence.mjs';
 import { Session } from '../security/session.mjs';
+import { OPTIMIZER_MODES, seedOptimizerMode, seedOptimizerPreset } from '../optimization/optimizer-prefs.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../scheduling/gantt.mjs';
 import { Table } from '../scheduling/orders.mjs';
 import { GanttLegend } from '../scheduling/gantt-legend.mjs';
@@ -244,6 +245,7 @@ const Settings = (() => {
 const SessionUIAdapter = {
   init(): void {
     Store.subscribe(evt => {
+      if (evt.type === 'settings:change' && evt.source === 'settings-pref-revert') SessionUIAdapter._onPrefRevert();
       if (evt.type !== 'session:changed') return;
       SessionUIAdapter._applyGates();
       if (evt.kind === 'refresh') {
@@ -251,6 +253,10 @@ const SessionUIAdapter = {
         // (schedule-data.mjs) only reports the FACTS (isAdmin(), plantAccessChanged);
         // every actual DOM/tab-navigation effect happens here.
         try { if (typeof PlantSelector !== 'undefined') PlantSelector._refreshOptions(); } catch {}
+        // Display prefs saved on another device: re-apply theme + week start now
+        // (language stays applies-on-next-boot — a reload would cost unsaved work).
+        try { if (typeof NIMBUS !== 'undefined') NIMBUS.DarkMode?.reapply?.(); } catch {}
+        try { if (typeof App !== 'undefined') App._applyFirstDayOfWeek(); } catch {}
         // If we just lost access to the tab we're sitting on, leave it.
         if (typeof App !== 'undefined' && !Session.canAccessTab(App._currentTab)) {
           try { App.goto(App._firstAccessibleTab()); } catch {}
@@ -261,6 +267,17 @@ const SessionUIAdapter = {
         } catch {}
       }
     }, 'SessionUIAdapter');
+  },
+
+  // A preference save failed and Session reverted Store + cache: put the DOM back too
+  // (theme class/pill/cache) and re-seed the open Settings modal so its controls stop
+  // showing the value that did not save.
+  _onPrefRevert(): void {
+    try { if (typeof NIMBUS !== 'undefined') NIMBUS.DarkMode?.reapply?.(); } catch {}
+    try { App._applyFirstDayOfWeek(); } catch {}
+    const modal = document.getElementById('modal-user-settings');
+    if (!modal || modal.hidden) return;
+    try { SessionUIAdapter._renderSettingsPanes(); } catch (e) { ErrorLog.error('settings', `Render settings panes failed: ${(e as Error).message}`); }
   },
 
   _applyGates(): void {
@@ -758,7 +775,8 @@ const SessionUIAdapter = {
       items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
       const a = items[activeIdx]; if (a) a.scrollIntoView({ block: 'nearest' });
     };
-    const choose = (plant: string | null) => { Session.setPref('defaultPlant', plant || null); reflect(); close(); input.blur(); };
+    // '' (not null) is the explicit "no default" value: a null PATCH deletes the key, which would let a role default show through again.
+    const choose = (plant: string | null) => { Session.setPref('defaultPlant', plant || ''); reflect(); close(); input.blur(); };
 
     const renderList = (query: string) => {
       const all = options();
@@ -818,7 +836,7 @@ const SessionUIAdapter = {
     const fdowSel = (fdow === 1) ? 1 : 0;
     // Optimizer defaults — seed the strategy + option toggles the dialog opens with.
     const od      = Session.pref('optimizerDefaults') as OptimizerDefaultsPref | null | undefined;
-    const odMode: string = (od && od.mode && ['spt', 'changeover', 'duedate'].includes(od.mode)) ? od.mode : 'changeover';
+    const odMode: string = seedOptimizerMode(od?.mode);
     const odFirmed = od ? (od.respectFirmed ?? (od as any).respectFixed) !== false : true;
     const odCal   = od ? od.respectCalendar !== false : true;
     pane.innerHTML = `
@@ -845,9 +863,7 @@ const SessionUIAdapter = {
       <div class="form-row">
         <label data-i18n="us.opt_defaults">${Util.t('us.opt_defaults')}</label>
         <select id="us-opt-mode">
-          ${SessionUIAdapter._optTag('spt',        Util.t('us.opt_mode_spt'),        odMode)}
-          ${SessionUIAdapter._optTag('changeover', Util.t('us.opt_mode_changeover'), odMode)}
-          ${SessionUIAdapter._optTag('duedate',    Util.t('us.opt_mode_duedate'),    odMode)}
+          ${OPTIMIZER_MODES.map(m => SessionUIAdapter._optTag(m.value, Util.t(m.labelKey), odMode)).join('')}
         </select>
         <label class="us-toggle-row" style="margin-top:8px">
           <input type="checkbox" id="us-opt-firmed"${odFirmed ? ' checked' : ''}>
@@ -882,7 +898,7 @@ const SessionUIAdapter = {
       const existing = (Session.pref('optimizerDefaults') as OptimizerDefaultsPref | undefined) || {};
       Session.setPref('optimizerDefaults', {
         mode: modeSel!.value,
-        preset: ['horizon', '2w'].includes(existing.preset ?? '') ? existing.preset : 'horizon',
+        preset: seedOptimizerPreset(existing.preset),
         respectFirmed: firmedChk!.checked,
         respectCalendar: calChk!.checked,
       });
@@ -2834,7 +2850,10 @@ const App = {
     let tab: TopLevelTab = (lv?.tab && (validTabs as string[]).includes(lv.tab)) ? (lv.tab as TopLevelTab) : 'home';
     if (!Session.canAccessTab(tab)) tab = App._firstAccessibleTab();
     App.goto(tab);
-    const sub = lv && lv.sub;
+    // Only a sub-view the landing picker itself offers for this tab; anything else
+    // (a stale or hand-edited value) lands on the tab's own default view.
+    const sub = (lv && typeof lv.sub === 'string'
+      && SessionUIAdapter._landingSubDefs(tab)?.some(([v]) => v === lv!.sub)) ? lv.sub : null;
     if (sub) {
       try {
         if (tab === 'gantt')           App.gotoGanttSub(sub as GanttSubTab);
