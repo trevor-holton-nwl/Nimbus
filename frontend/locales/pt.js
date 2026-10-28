@@ -1672,21 +1672,21 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.all_plants':                     'All plants',                                // MISSING TRANSLATION
   'ui.on_plant_label':                 'on plant',                                  // MISSING TRANSLATION
   // Dashboard KPI tiles
-  'kpi.orders_today':                  'Orders today',                              // MISSING TRANSLATION
-  'kpi.orders_total':                  '{{n}} total',                               // MISSING TRANSLATION
-  'kpi.overdue_backlog':               'All-Time Late Orders',                      // MISSING TRANSLATION
-  'kpi.no_backlog':                    'no backlog',                                // MISSING TRANSLATION
-  'kpi.all_open_past_finish':          'all open orders past due date',             // MISSING TRANSLATION
-  'kpi.conflicts_pending':             'Alerts Today',                              // MISSING TRANSLATION
-  'kpi.none_blocking':                 'none blocking',                             // MISSING TRANSLATION
-  'kpi.blocking_fix_now':              'blocking — fix now',                        // MISSING TRANSLATION
-  'kpi.open_alerts':                   'Open Alerts (Horizon)',                     // MISSING TRANSLATION
-  'kpi.warn_err_summary':              '{{w}} warn · {{e}} err',                    // MISSING TRANSLATION
-  'kpi.capacity_headroom_7d':          'Capacity Headroom Next 7D',                 // MISSING TRANSLATION
-  'kpi.avg_used':                      '{{p}}% avg used',                           // MISSING TRANSLATION
-  'kpi.no_data':                       'no data',                                   // MISSING TRANSLATION
-  'kpi.firmed_orders':                 'Firmed orders',                             // MISSING TRANSLATION
-  'kpi.locked_from_optimiser':         'locked from optimiser',                     // MISSING TRANSLATION
+  'kpi.orders_today':                  'Ordens hoje',
+  'kpi.orders_total':                  '{{n}} no total',
+  'kpi.overdue_backlog':               'Todas as ordens atrasadas',
+  'kpi.no_backlog':                    'sem atrasos',
+  'kpi.all_open_past_finish':          'todas as ordens abertas após a data de entrega',
+  'kpi.conflicts_pending':             'Alertas hoje',
+  'kpi.none_blocking':                 'nenhum bloqueante',
+  'kpi.blocking_fix_now':              'bloqueante: corrigir agora',
+  'kpi.open_alerts':                   'Alertas abertos (horizonte)',
+  'kpi.warn_err_summary':              '{{w}} avisos · {{e}} erros',
+  'kpi.capacity_headroom_7d':          'Folga de capacidade próx. 7 d',
+  'kpi.avg_used':                      '{{p}}% de uso médio',
+  'kpi.no_data':                       'sem dados',
+  'kpi.firmed_orders':                 'Ordens firmes',
+  'kpi.locked_from_optimiser':         'bloqueadas para o otimizador',
   'kpi.needs_planning':                'Precisa de planejamento',
   'kpi.needs_planning_demand':         '{{h}} h de demanda não posicionada',
   // Empty states & loading

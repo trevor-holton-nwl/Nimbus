@@ -483,7 +483,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.kpi_conflicts':                  'Conflits en attente',
   'ui.kpi_open_alerts':                'Alertes ouvertes',
   'ui.kpi_headroom':                   'Capacité dispo. 7 proch. jours',
-  'ui.kpi_firmed':                     'Ordres fermes',
+  'ui.kpi_firmed':                     'Commandes fermes',
   'ui.days':                           'jours',
   'ui.unit_minutes':                   'minutes',
   'ui.unit_hour_utc':                  'h (UTC)',
@@ -683,7 +683,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.gantt_row_collapse':             'Réduire les ordres empilés sur {{line}}',
   'ui.util_heatmap':                   "Carte d'Utilisation — 7 prochains jours",
   'ui.active_alerts':                  'Alertes actives',
-  'ui.firmed_orders':                  'Ordres fermes',
+  'ui.firmed_orders':                  'Commandes fermes',
   'ui.projected_lateness':             'Retard projeté — vs plan SAP',
   'ui.locked_optimizer':               "Verrouillé par l'optimiseur",
 
@@ -1673,21 +1673,21 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.all_plants':                     'All plants',                                // MISSING TRANSLATION
   'ui.on_plant_label':                 'on plant',                                  // MISSING TRANSLATION
   // Dashboard KPI tiles
-  'kpi.orders_today':                  'Orders today',                              // MISSING TRANSLATION
-  'kpi.orders_total':                  '{{n}} total',                               // MISSING TRANSLATION
-  'kpi.overdue_backlog':               'All-Time Late Orders',                      // MISSING TRANSLATION
-  'kpi.no_backlog':                    'no backlog',                                // MISSING TRANSLATION
-  'kpi.all_open_past_finish':          'all open orders past due date',             // MISSING TRANSLATION
-  'kpi.conflicts_pending':             'Alerts Today',                              // MISSING TRANSLATION
-  'kpi.none_blocking':                 'none blocking',                             // MISSING TRANSLATION
-  'kpi.blocking_fix_now':              'blocking — fix now',                        // MISSING TRANSLATION
-  'kpi.open_alerts':                   'Open Alerts (Horizon)',                     // MISSING TRANSLATION
-  'kpi.warn_err_summary':              '{{w}} warn · {{e}} err',                    // MISSING TRANSLATION
-  'kpi.capacity_headroom_7d':          'Capacity Headroom Next 7D',                 // MISSING TRANSLATION
-  'kpi.avg_used':                      '{{p}}% avg used',                           // MISSING TRANSLATION
-  'kpi.no_data':                       'no data',                                   // MISSING TRANSLATION
-  'kpi.firmed_orders':                 'Firmed orders',                             // MISSING TRANSLATION
-  'kpi.locked_from_optimiser':         'locked from optimiser',                     // MISSING TRANSLATION
+  'kpi.orders_today':                  'Commandes aujourd’hui',
+  'kpi.orders_total':                  '{{n}} au total',
+  'kpi.overdue_backlog':               'Toutes les commandes en retard',
+  'kpi.no_backlog':                    'aucun retard',
+  'kpi.all_open_past_finish':          'toutes les commandes ouvertes après l’échéance',
+  'kpi.conflicts_pending':             'Alertes aujourd’hui',
+  'kpi.none_blocking':                 'aucune bloquante',
+  'kpi.blocking_fix_now':              'bloquante : à corriger maintenant',
+  'kpi.open_alerts':                   'Alertes ouvertes (horizon)',
+  'kpi.warn_err_summary':              '{{w}} avert. · {{e}} err.',
+  'kpi.capacity_headroom_7d':          'Marge de capacité 7 prochains j',
+  'kpi.avg_used':                      '{{p}} % d’utilisation moy.',
+  'kpi.no_data':                       'aucune donnée',
+  'kpi.firmed_orders':                 'Commandes fermes',
+  'kpi.locked_from_optimiser':         'verrouillées pour l’optimiseur',
   'kpi.needs_planning':                'À planifier',
   'kpi.needs_planning_demand':         '{{h}} h de demande non placée',
   // Empty states & loading
