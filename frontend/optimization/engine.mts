@@ -1637,7 +1637,8 @@ export const Engine = {
    * both edges.
    * - An order that already has two or more schedule segments of the right total rejoins into ONE bar when its
    *   whole run fits one working window ending at the finish (2026-10-28); otherwise it is translated rigidly by
-   *   the finish delta (OQ17 b: the dragged piece's same-edge delta), never re-derived; a changed total (rate or version edit) is re-derived from the held finish under the plant's policy.
+   *   the finish delta (OQ17 b: the dragged piece's same-edge delta), never re-derived; a changed total (rate or
+   *   version edit) is re-derived from the held finish under the plant's policy.
    * - Otherwise `finishAnchoredPatchFor(snap(finish))`. A backward start before the plant's now reverses forward
    *   from now with a `reversal_forward` note (O2, OQ3, OQ7 a, OQ19 c), never a refusal. A manual drop whose finish
    *   cannot be held (it would have to move EARLIER) returns null with `toast.finish_cannot_hold` and the caller reverts (OQ13 b). A FIRMED order
@@ -1698,7 +1699,6 @@ export const Engine = {
               && (joined.changes.scheduleSegments?.length ?? 0) === 0) {
             return { ...joined.changes, MACHINE: line, ...released };
           }
-          Engine.lastManualRefusal = null;
         }
         const shifted = segments.map(segment => ({
           ...segment,

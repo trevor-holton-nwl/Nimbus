@@ -5858,7 +5858,13 @@ test('split rejoin: a no-op (same line, same finish) leaves the pieces unchanged
   const fx = manualFixture({ split_order_policy: 'partial_allowed' });
   try {
     const task = splitRejoinTask(fx);
-    const patch = Engine.manualSchedulePatchFor(task, fx.line, task.end_date);
+    const original = Engine.finishAnchoredPatchFor;
+    let calls = 0;
+    Engine.finishAnchoredPatchFor = function (...args) { calls++; return original.apply(this, args); };
+    let patch;
+    try { patch = Engine.manualSchedulePatchFor(task, fx.line, task.end_date); }
+    finally { Engine.finishAnchoredPatchFor = original; }
+    assert.equal(calls, 0, 'the no-op guard must skip the rejoin attempt');
     assert.equal(patch.scheduleSegments.length, 2);
     task.scheduleSegments.forEach((seg, i) => {
       assert.equal(patch.scheduleSegments[i].startDate.getTime(), seg.startDate.getTime());
