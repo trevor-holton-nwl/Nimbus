@@ -33,6 +33,8 @@ def security_login(request: Request, body: dict = Body(default={})):
     auth._check_login_throttle) — in-process only, appropriate for this
     single-container pilot."""
     username = body.get("username", "")
+    if not isinstance(username, str) or not isinstance(body.get("password", ""), str):
+        raise HTTPException(status_code=400, detail="username and password must be strings")
     client_ip = request.client.host if request.client else ""
     auth._check_login_throttle(username, client_ip)
     result = auth.authenticate(username, body.get("password", ""))
@@ -102,14 +104,28 @@ def security_change_my_password(request: Request, body: dict = Body(default={}))
     """Self-service: change the CALLER's own password. Requires the correct
     current password (see auth.change_own_password) since identity here comes
     from a client header, not a verified session token."""
+    actor = auth._actor_email(request)
+    current = body.get("current_password", "")
+    new = body.get("new_password", "")
+    if not isinstance(current, str) or not isinstance(new, str):
+        raise HTTPException(status_code=400, detail="current_password and new_password must be strings")
+    # Separate key namespace from login so password-change failures never lock
+    # out sign-in; same limits (8 failures / 5 min -> 429).
+    throttle_user = "pwchange:" + (actor or "").strip()
+    client_ip = request.client.host if request.client else ""
+    auth._check_login_throttle(throttle_user, client_ip)
     try:
-        return auth.change_own_password(
-            auth._actor_email(request),
-            body.get("current_password", ""),
-            body.get("new_password", ""),
-        )
+        result = auth.change_own_password(actor, current, new)
+    except HTTPException as e:
+        if e.status_code == 401 and actor and actor.strip():
+            auth._record_login_failure(throttle_user, client_ip)
+        raise
     except ValueError as e:
+        # the current password was correct (policy checks run after verify)
+        auth._reset_login_throttle(throttle_user, client_ip)
         raise HTTPException(status_code=400, detail=str(e)) from e
+    auth._reset_login_throttle(throttle_user, client_ip)
+    return result
 
 
 @router.get("/security/users", response_model=UserListResult, dependencies=[Depends(require_api_key), Depends(require_admin)])
@@ -140,11 +156,13 @@ def security_bulk_users(request: Request, body: dict = Body(default={})):
 
 @router.post("/security/users/{username}/reset-password", response_model=OkResult, dependencies=[Depends(require_api_key), Depends(require_admin)])
 def security_reset_password(username: str, request: Request, body: dict = Body(default={})):
-    """Set/replace a user's password. Hashed before storage; never retrievable afterward."""
+    """Set/replace an EXISTING user's password (unknown username -> 404; create users
+    via /security/users/bulk first). Hashed before storage; never retrievable afterward."""
     try:
         return auth.set_user_password(
             username, body.get("password", ""),
             user_email=request.headers.get("x-user-email") or request.headers.get("X-User"),
+            must_exist=True,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
