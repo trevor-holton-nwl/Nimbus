@@ -69,6 +69,7 @@ frontend/setup/setup-domain.mjs
 frontend/optimization/setup-scheduler.mjs
 frontend/master-data/admin-tables.mjs
 frontend/shell/tab-resolvers.mjs
+frontend/shell/version-watch.mjs
 frontend/setup/setup-admin.mjs
 frontend/calendar/calendar-admin.mjs
 frontend/calendar/calendar-periods.mjs

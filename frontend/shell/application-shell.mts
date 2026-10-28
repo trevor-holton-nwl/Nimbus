@@ -70,6 +70,7 @@ import { Alerts } from '../insights/services.mjs';
 import { Engine } from '../optimization/engine.mjs';
 import { Persistence, SOURCE_WIRE } from '../scheduling/persistence.mjs';
 import { Session } from '../security/session.mjs';
+import { startVersionWatch, makeUpdatePresenter } from './version-watch.mjs';
 import { OPTIMIZER_MODES, seedOptimizerMode, seedOptimizerPreset } from '../optimization/optimizer-prefs.mjs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction } from '../scheduling/gantt.mjs';
 import { Table } from '../scheduling/orders.mjs';
@@ -2456,6 +2457,8 @@ const App = {
         });
       }
     });
+    // Tell this tab when a newer build is live (polls GET /version; never auto-reloads).
+    startVersionWatch({ onNewVersion: makeUpdatePresenter({ Toast, Util, Persistence, Modal }) });
     // A drag in flight must never see the calendar re-hydrate under it (Persistence cannot import the Gantt).
     Persistence._calendarRefreshBlocked = () => !!Interaction._isDragging;
 

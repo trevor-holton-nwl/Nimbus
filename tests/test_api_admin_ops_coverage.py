@@ -4,8 +4,10 @@ Use the assembled app and real authorization dependencies. Database and cache
 I/O are replaced, so no administrative command ever reaches PostgreSQL.
 """
 
+import re
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import psycopg
@@ -295,6 +297,24 @@ def test_schedule_event_sweep_route_forwards_override(ops, monkeypatch, body, ex
     assert response.status_code == 200
     assert response.json() == {"ok": True, **canned}
     sweep.assert_called_once_with(retention_days=expected)
+
+
+def test_version_returns_build_id_from_index_html_without_auth(ops, monkeypatch):
+    html = (Path(__file__).resolve().parents[1] / "frontend" / "index.html").read_text(encoding="utf-8")
+    expected = re.search(r"NIMBUS_BUILD_ID = '([^']*)'", html).group(1)
+    monkeypatch.setattr(routes, "_build_id_cache", routes._UNREAD)
+    response = ops.get("/version")
+    assert response.status_code == 200
+    assert response.json() == {"build_id": expected}
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_version_is_null_when_index_html_is_unreadable(ops, monkeypatch, tmp_path):
+    monkeypatch.setenv("NIMBUS_STATIC_DIR", str(tmp_path))
+    monkeypatch.setattr(routes, "_build_id_cache", routes._UNREAD)
+    response = ops.get("/version")
+    assert response.status_code == 200
+    assert response.json() == {"build_id": None}
 
 
 def test_diagnostics_deep_includes_schedule_event_block(ops, monkeypatch):
