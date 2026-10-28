@@ -1457,6 +1457,13 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <h4 data-i18n="ui.sidebar_lines">Production Lines</h4>
           <button class="icon-btn sm" id="left-sidebar-toggle-btn" aria-expanded="false" aria-controls="hierarchy" data-i18n-title="tip.machines_expand" title="Show machines">▶</button>
         </header>
+        <div class="hier-day-row">
+          <div class="lateness-horizon-group ls-day-group hier-day-group" id="hier-day-group" role="group" aria-label="Production Lines">
+            <button type="button" class="seg-btn" id="hier-day-prev" data-hier-step="-1" data-i18n-title="ui.ls_day_prev" title="Previous day" aria-label="Previous day">‹</button>
+            <span class="ls-day-label hier-day-label" id="hier-day-label" aria-live="polite">Today</span>
+            <button type="button" class="seg-btn" id="hier-day-next" data-hier-step="1" data-i18n-title="ui.ls_day_next" title="Next day" aria-label="Next day">›</button>
+          </div>
+        </div>
         <div id="hierarchy"></div>
         <div class="resize-handle rh-right" data-side="left"></div>
       </aside>
