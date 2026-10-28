@@ -1066,7 +1066,7 @@ export const Util = {
   // Shared search+checkbox "N selected" multi-select combobox — the pattern
   // GanttFilter/Table/Dashboard's line pickers already used independently
   // (and, since the cross-screen production-line filter, Labor Planning's
-  // and Master Data > Production Lines' line pickers too). Renders checkboxes
+  // and Master Data > Machines' line pickers too). Renders checkboxes
   // for `candidateLines` (filtered by `search`, case-insensitive substring)
   // checked per `selected.has(line)`, and wires each box's change event to
   // `onToggle` — the caller owns what happens next (Store mutation, re-render

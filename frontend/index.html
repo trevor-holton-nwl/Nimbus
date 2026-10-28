@@ -104,7 +104,7 @@
   overflow-y: auto;
 }
 /* Used by dropdowns whose trigger sits inside an overflow:hidden ancestor
-   (e.g. the Production Lines sidebar) — position:absolute would just get
+   (e.g. the Machines sidebar) — position:absolute would just get
    clipped there regardless of z-index. top/left are set inline from the
    trigger button's getBoundingClientRect() at open time. */
 .dash-filter-dropdown-portal {
@@ -1454,7 +1454,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <button class="icon-btn sm" id="left-sidebar-toggle-btn" aria-expanded="false" aria-controls="hierarchy" data-i18n-title="tip.machines_expand" title="Show machines">▶</button>
         </header>
         <div class="hier-day-row">
-          <div class="lateness-horizon-group ls-day-group hier-day-group" id="hier-day-group" role="group" aria-label="Production Lines">
+          <div class="lateness-horizon-group ls-day-group hier-day-group" id="hier-day-group" role="group" aria-label="Machines">
             <button type="button" class="seg-btn" id="hier-day-prev" data-hier-step="-1" data-i18n-title="ui.ls_day_prev" title="Previous day" aria-label="Previous day">‹</button>
             <span class="ls-day-label hier-day-label" id="hier-day-label" aria-live="polite">Today</span>
             <button type="button" class="seg-btn" id="hier-day-next" data-hier-step="1" data-i18n-title="ui.ls_day_next" title="Next day" aria-label="Next day">›</button>
@@ -1669,12 +1669,12 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   <section class="tab-panel" id="alerts-tab" role="tabpanel"></section>
 
   <!-- =========================================================
-       TAB: MANAGE MASTER DATA — wraps Production Lines + Plant
+       TAB: MANAGE MASTER DATA — wraps Machines + Plant
        ========================================================= -->
   <section class="tab-panel" id="masterdata-tab" role="tabpanel">
     <div class="tab-strip-row">
     <nav class="admin-subtabs md-master-subtabs" role="tablist">
-      <button class="admin-subtab active" data-md-master="lines" role="tab" data-i18n="tab.machine">Production Lines</button>
+      <button class="admin-subtab active" data-md-master="lines" role="tab" data-i18n="tab.machine">Machines</button>
       <button class="admin-subtab" data-md-master="plant" role="tab" data-i18n="tab.plant">Plant</button>
       <button class="admin-subtab" data-md-master="material" role="tab" data-i18n="tab.materials">Material</button>
       <button class="admin-subtab" data-md-master="material-plant" role="tab" data-i18n="tab.material_plant">Material Plant</button>
@@ -1694,7 +1694,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <div class="cal-container">
             <header class="cal-head">
               <div style="flex:1;">
-                <h2 data-i18n="ui.prod_lines_h2">Production Lines</h2>
+                <h2 data-i18n="ui.prod_lines_h2">Machines</h2>
                 <p class="sub" data-i18n="ui.prod_lines_sub">Configure capacity buffers, bottleneck flags, and working hours per production line. Plant-level hours and blackouts act as the outer constraint.</p>
               </div>
               <div id="lines-filter-bar" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"></div>
@@ -1725,7 +1725,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <div class="cal-container">
           <div class="panel">
             <header class="panel-head">
-              <h3 data-i18n="ui.machine_panel">Production Lines</h3>
+              <h3 data-i18n="ui.machine_panel">Machines</h3>
               <span class="panel-hint" id="plant-lines-count"></span>
               <button id="plant-roster-toggle" class="btn btn-ghost sm"
                       style="padding:2px 8px;font-size:12px;">▼</button>
@@ -1844,7 +1844,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 
     <!-- SUB-PANE: WORK CENTERS (§4.3) — content rendered entirely by
          WorkCenters.render() (frontend/master-data/admin-ui.mts), same
-         on-demand-innerHTML convention as the Production Lines pane above. -->
+         on-demand-innerHTML convention as the Machines pane above. -->
     <div id="md-master-work-centers-pane" hidden></div>
 
     <!-- SUB-PANE: TOOL INVENTORY — content built entirely by ToolInventory.render()
@@ -2162,7 +2162,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <nav class="md-tabs" role="tablist">
             <button class="md-tab active" data-md-tab="subnetworks" role="tab" data-i18n="tab.subnetworks">Subnetworks</button>
             <button class="md-tab" data-md-tab="plants" role="tab" data-i18n="tab.plants">Plants</button>
-            <button class="md-tab" data-md-tab="machine" role="tab" data-i18n="tab.machine">Production Lines</button>
+            <button class="md-tab" data-md-tab="machine" role="tab" data-i18n="tab.machine">Machines</button>
             <button class="md-tab" data-md-tab="materials" role="tab" data-i18n="tab.materials">Material</button>
             <button class="md-tab" data-md-tab="material_plants" role="tab" data-i18n="tab.material_plant">Material Plant</button>
             <button class="md-tab" data-md-tab="bom_items" role="tab" data-i18n="tab.bom_items">Bill of Materials</button>
@@ -2787,7 +2787,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
-     MODAL: Production Lines blackout block editor
+     MODAL: Machines blackout block editor
      ========================================================= -->
 <div class="modal-backdrop" id="modal-lines-block" hidden>
   <div class="modal">

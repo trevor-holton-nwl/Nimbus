@@ -2203,7 +2203,7 @@ const App = {
       if (evt.type === 'master-data-changed' && linesPillDrop && !linesPillDrop.hidden) App._renderLinesPillChecklist();
     }, 'ContextLinesPill');
 
-    /* Manage Master Data sub-tabs (Production Lines / Plant) */
+    /* Manage Master Data sub-tabs (Machines / Plant) */
     installLayoutAffordances();
     // Tool Inventory follows the top-bar plant and keeps per-plant drafts, so it subscribes itself (idempotent).
     ToolInventory.init();
@@ -2566,7 +2566,7 @@ const App = {
     // Collapse line accordions when leaving the masterdata tab entirely
     if (App._currentTab === 'masterdata' && tab !== 'masterdata') {
       document.querySelectorAll('details.line-accordion[open]').forEach(d => d.removeAttribute('open'));
-      // The Production Lines line-filter dropdown is portaled onto <body> (see
+      // The Machines line-filter dropdown is portaled onto <body> (see
       // ProdLines._wireNav) to escape the sidebar's overflow:hidden clipping,
       // so it no longer gets hidden for free by the tab-panel switch below.
       document.getElementById('lines-nav-filter-dropdown')?.setAttribute('hidden', '');

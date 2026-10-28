@@ -28,6 +28,9 @@ window.__NIMBUS_LOCALES.en = {
   'toast.plant_blackout_removed':      'Plant blackout removed',
   'toast.line_settings_updated':       'Machine settings updated',
   'toast.buffer_updated':              'Buffer updated',
+  'toast.line_settings_failed':        'Could not save. Change reverted',
+  'toast.line_undo_stale':             'Value changed since; nothing undone',
+  'toast.line_setting_restored':       'Previous value restored',
   'toast.select_plant_first':          'Select a plant first',
   'toast.no_plant_assigned_line':      'No plant assigned to this machine',
   'toast.select_a_line':               'Please select a machine',
@@ -3057,7 +3060,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.system_config_history_retention_hint': 'How long order change history is kept. 1 to 60 days; the default is 14. Older entries are removed nightly.',
   'ui.insp_history_more': 'Older changes not shown',
   'ui.system_config_history_retention_invalid': 'Enter a whole number from 1 to 60.',
-  /* ── i18n sweep: Labor page + Production Lines sub-tab ── */
+  /* ── i18n sweep: Labor page + Machines sub-tab ── */
   "labor.sub_aggregate": "Aggregate",
   "labor.sub_line_plan": "Line Plan",
   "labor.sub_capacity": "Capacity",

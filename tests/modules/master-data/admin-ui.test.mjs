@@ -606,6 +606,117 @@ test('ProdLines._reassignWorkcenter writes directly with no dialog when meta.tot
   }
 });
 
+// Machines pane Undo toast (2026-10-28): ProdLines._applyLineEdit writes, then toasts with an Undo
+// action; a failed write reverts the Store; Undo restores the captured value once and refuses when stale.
+function _lineEditHarness(results) {
+  const prior = {
+    nimbus: globalThis.NIMBUS, window: globalThis.window, toast: Toast.show, plant: Store.selectedPlant,
+  };
+  const writes = [];
+  const toasts = [];
+  const queue = Array.isArray(results) ? results.slice() : [];
+  globalThis.window = { ...(prior.window || {}), __NIMBUS_LOCALES: prior.window?.__NIMBUS_LOCALES || { en: {} } };
+  globalThis.NIMBUS = { MasterData: { syncLineSettings: (line, patch) => {
+    writes.push({ line, patch });
+    return Promise.resolve(queue.length ? queue.shift() : true);
+  } } };
+  Toast.show = (msg, type, ms, action) => { toasts.push({ msg, type, ms, action }); };
+  Store.setSelectedPlant('1006', 'test');
+  return {
+    writes, toasts,
+    restore() {
+      Toast.show = prior.toast;
+      if (prior.nimbus === undefined) delete globalThis.NIMBUS; else globalThis.NIMBUS = prior.nimbus;
+      if (prior.window === undefined) delete globalThis.window; else globalThis.window = prior.window;
+      Store.setSelectedPlant(prior.plant, 'test-restore');
+    },
+  };
+}
+const _flush = () => new Promise((r) => setImmediate(r));
+
+test('ProdLines._applyLineEdit: success toasts with an Undo action (7 s) and Undo writes the previous value once', async () => {
+  const h = _lineEditHarness();
+  try {
+    Store.setLineSetting('UNDO1', { bufferPct: 10 }, 'test');
+    let repaints = 0;
+    await ProdLines._applyLineEdit('UNDO1', { bufferPct: 25 }, 'prodlines', 'toast.buffer_updated', () => { repaints += 1; });
+    assert.deepEqual(h.writes, [{ line: 'UNDO1', patch: { bufferPct: 25 } }]);
+    assert.equal(Store.lineSettings.UNDO1.bufferPct, 25);
+    assert.equal(h.toasts.length, 1);
+    assert.equal(h.toasts[0].msg, 'toast.buffer_updated');
+    assert.equal(h.toasts[0].type, 'success');
+    assert.equal(h.toasts[0].ms, 7000);
+    assert.equal(h.toasts[0].action.label, 'btn.undo');
+
+    h.toasts[0].action.run();
+    h.toasts[0].action.run(); // double click: the second is refused (value no longer what the edit wrote)
+    await _flush();
+    assert.deepEqual(h.writes[1], { line: 'UNDO1', patch: { bufferPct: 10 } });
+    assert.equal(h.writes.length, 2, 'a double click writes the previous value once');
+    assert.equal(Store.lineSettings.UNDO1.bufferPct, 10);
+    assert.equal(repaints, 1);
+    const restored = h.toasts.find((t) => t.msg === 'toast.line_setting_restored');
+    assert.ok(restored && restored.type === 'success' && !restored.action, 'plain "restored" toast, no redo');
+    assert.ok(h.toasts.some((t) => t.msg === 'toast.line_undo_stale'), 'the second click is reported as stale');
+  } finally { h.restore(); }
+});
+
+test('ProdLines._applyLineEdit: a failed write toasts an error, reverts the Store value and repaints', async () => {
+  const h = _lineEditHarness([false]);
+  try {
+    Store.setLineSetting('UNDO2', { bottleneck: false }, 'test');
+    let repaints = 0;
+    await ProdLines._applyLineEdit('UNDO2', { bottleneck: true }, 'prodlines', 'toast.line_settings_updated', () => { repaints += 1; });
+    assert.equal(Store.lineSettings.UNDO2.bottleneck, false, 'unsaved value must not stay in the Store');
+    assert.equal(repaints, 1);
+    assert.equal(h.toasts.length, 1);
+    assert.equal(h.toasts[0].msg, 'toast.line_settings_failed');
+    assert.equal(h.toasts[0].type, 'error');
+    assert.ok(!h.toasts[0].action);
+  } finally { h.restore(); }
+});
+
+test('ProdLines._applyLineEdit: Undo is refused when the value changed meanwhile or the plant switched', async () => {
+  const h = _lineEditHarness();
+  try {
+    Store.setLineSetting('UNDO3', { plGroup: 'A' }, 'test');
+    await ProdLines._applyLineEdit('UNDO3', { plGroup: 'B' }, 'prodlines', 'toast.line_settings_updated', () => {});
+    Store.setLineSetting('UNDO3', { plGroup: 'C' }, 'test'); // a refresh or later edit
+    h.toasts[0].action.run();
+    await _flush();
+    assert.equal(h.writes.length, 1, 'no second write');
+    assert.equal(Store.lineSettings.UNDO3.plGroup, 'C');
+    assert.equal(h.toasts.at(-1).msg, 'toast.line_undo_stale');
+
+    await ProdLines._applyLineEdit('UNDO3', { plGroup: 'D' }, 'prodlines', 'toast.line_settings_updated', () => {});
+    const action = h.toasts.at(-1).action;
+    Store.setSelectedPlant('5512', 'test');
+    action.run();
+    await _flush();
+    assert.equal(h.writes.length, 2, 'plant switch: no undo write');
+    assert.equal(Store.lineSettings.UNDO3.plGroup, 'D');
+    assert.equal(h.toasts.at(-1).msg, 'toast.line_undo_stale');
+  } finally { h.restore(); }
+});
+
+test('ProdLines._applyLineEdit: a failed Undo write restores the edited value and toasts the failure', async () => {
+  const h = _lineEditHarness([true, false]);
+  try {
+    Store.setLineSetting('UNDO4', { bufferHours: 2 }, 'test');
+    await ProdLines._applyLineEdit('UNDO4', { bufferHours: 5 }, 'prodlines', 'toast.buffer_updated', () => {});
+    h.toasts[0].action.run();
+    await _flush();
+    assert.equal(Store.lineSettings.UNDO4.bufferHours, 5, 'the server still holds the edit, so the Store does too');
+    assert.equal(h.toasts.at(-1).msg, 'toast.line_settings_failed');
+  } finally { h.restore(); }
+});
+
+test('Manage Data labels the machine table "Machines" (no leftover "Production Lines")', () => {
+  const src = readFileSync(new URL('../../../frontend/master-data/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(src, /machine:\s*'Machines',/);
+  assert.doesNotMatch(src, /machine:\s*'Production Lines'/);
+});
+
 // WorkCenters._wcBlockReason(staged: WorkCenterStaged, members: string[]): WcBlockReason
 // is the client-side pre-flight for the three PUT /distribution/{plant}/workcenters/{wc}
 // rules (backend/distribution/data.py:161-172) — autosave only fires when this
@@ -1033,7 +1144,7 @@ test('syncLineSettings posts only the key columns and the changed column, not th
     }) });
   };
   try {
-    await MasterData.syncLineSettings('LINE-46', { bottleneck: true });
+    assert.equal(await MasterData.syncLineSettings('LINE-46', { bottleneck: true }), true, 'a successful POST resolves true');
     assert.equal(posts.length, 1);
     assert.deepEqual(posts[0].upserts, [{ subnetwork: 'S1', plant: 'P46', machine: 'LINE-46', bottleneck: 'X' }],
       'untouched columns (buffer_hours, wc_group) must not be re-posted from the stale cache');

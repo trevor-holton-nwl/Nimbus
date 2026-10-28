@@ -139,7 +139,7 @@ declare global {
          *  through the shared `NIMBUS` binding rather than simplified once
          *  MasterData landed in this same file (see the file header comment). */
         MasterData?: {
-          syncLineSettings?(line: string, patch: Partial<NimbusLineSetting>): Promise<void>;
+          syncLineSettings?(line: string, patch: Partial<NimbusLineSetting>): Promise<boolean>;
         };
       };
 }
