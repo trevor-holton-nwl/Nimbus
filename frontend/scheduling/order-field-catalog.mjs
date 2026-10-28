@@ -47,7 +47,11 @@ export const ORDER_FIELD_CATALOG = [
         gridDefault: true, inspectorDefault: true,
         i18nGridKey: 'col.run_h', i18nInspectorKey: 'ui.insp_run_time' },
     // Display-only scheduling fields — shown in both surfaces today (grid column + Inspector Schedule card row).
-    // The retired Original Start entry is gone (backward scheduling OQ16); Due Date is the SAP finish as received.
+    // The DERIVED Original Start stays retired (backward scheduling OQ16); SAP Start is the raw SAP start as received,
+    // read-only, re-added 2026-10-28 on owner request. Due Date is the SAP finish as received.
+    { key: 'original_start_date', dbColumn: 'original_start_received', type: 'text',
+        gridDefault: true, inspectorDefault: true,
+        i18nGridKey: 'col.sap_start', i18nInspectorKey: 'ui.insp_sap_start' },
     { key: 'original_end_date', dbColumn: 'basic_finish_date', type: 'text',
         gridDefault: true, inspectorDefault: true,
         i18nGridKey: 'col.due_date', i18nInspectorKey: 'ui.insp_due_date' },

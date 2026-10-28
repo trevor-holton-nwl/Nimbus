@@ -1730,7 +1730,9 @@ function placementFixture(plant, nowNaive = '2026-08-03T06:00:00', plantExtras =
 }
 
 test('Planned Start is read-only and Planned Finish takes the typed finish (OQ1, OQ16)', () => {
-  const [due, start, end] = Table._scheduleDateColumns();
+  const [sapStart, due, start, end] = Table._scheduleDateColumns();
+  assert.equal(sapStart.field, 'original_start_date');
+  assert.equal(sapStart.editable, false, 'SAP Start is the raw SAP start and is never typed');
   assert.equal(due.field, 'original_end_date');
   assert.equal(due.headerName, Util.t('col.due_date'));
   assert.equal(due.editable, false, 'the due date is the SAP finish as received and is never typed');
@@ -1977,7 +1979,7 @@ test('OQ42: the date-chip Today/Tomorrow presets are the plant\'s days, not the 
 // ---------------------------------------------------------------------------
 
 test('the Due Date column shows the due instant (a date-only SAP finish reads as the close of that day), not the raw midnight', () => {
-  const [due] = Table._scheduleDateColumns();
+  const [, due] = Table._scheduleDateColumns();
   const task = { id: 'due-col', MACHINE: 'L1', original_end_date: new Date('2026-08-04T09:00:00') };
   assert.equal(due.valueGetter({ data: task }).getTime(), Util.dueInstant(task).getTime());
   assert.equal(due.valueGetter({ data: { id: 'x', MACHINE: 'L1' } }), null, 'no SAP finish, no value');
@@ -1991,7 +1993,7 @@ test('the Due Date column shows the due DAY for a date-only due on a 24:00-close
   let current = hours;
   Util.setDueCalendarResolver(line => (line === 'L24' ? { lineHours: current, plantHours: current, plant: 'P24', rev: current === hours ? 1 : 2 } : null));
   try {
-    const [due] = Table._scheduleDateColumns();
+    const [, due] = Table._scheduleDateColumns();
     const task = { id: 'due-24', MACHINE: 'L24', original_end_date: new Date(2026, 7, 5) };       // Wed 5 Aug, date-only
     const value = due.valueGetter({ data: task });
     assert.equal(+value, +new Date(2026, 7, 6, 0, 0, 0), 'the grid value (sort/filter) stays the exact instant');
@@ -2007,39 +2009,100 @@ test('the Due Date column shows the due DAY for a date-only due on a 24:00-close
   } finally { Util.setDueCalendarResolver(null); globalThis.NimbusComputeCore = prevCore; }
 });
 
-test('the retired Original Start column is gone from the grid and the field catalog; the wire field stays on the task', () => {
-  assert.ok(!ORDER_FIELD_CATALOG.some(f => f.key === 'original_start_date'), 'catalog entry removed');
-  assert.ok(!Table._catalogOnlyColumns().some(c => c.field === 'original_start_date'));
-  assert.ok(!Table._scheduleDateColumns().some(c => c.field === 'original_start_date'));
+test('SAP Start (raw, read-only) is the first schedule date column before Due Date and is not duplicated by the catalog-only columns', () => {
+  const cat = ORDER_FIELD_CATALOG.find(f => f.key === 'original_start_date');
+  assert.ok(cat, 'catalog entry present');
+  assert.equal(cat.dbColumn, 'original_start_received');
+  assert.equal(cat.i18nGridKey, 'col.sap_start');
+  assert.equal(cat.i18nInspectorKey, 'ui.insp_sap_start');
+  assert.ok(!Table._catalogOnlyColumns().some(c => c.field === 'original_start_date'), 'handwritten, so no generic duplicate');
+  const cols = Table._scheduleDateColumns();
+  assert.deepEqual(cols.map(c => c.field), ['original_start_date', 'original_end_date', 'start_date', 'end_date']);
+  assert.equal(cols[0].minWidth, 170);
+  assert.equal(cols[0].headerName, Util.t('col.sap_start'));
+  assert.equal(cols[0].cellClass, 'cell-date cell-date-original');
+  assert.equal(cols[0].headerTooltip, Util.t('ui.sap_start_hint'));
   assert.equal(ORDER_FIELD_CATALOG.find(f => f.key === 'original_end_date').i18nGridKey, 'col.due_date');
 });
 
-test('G-0.27: an admin visibility choice naming the retired column is ignored, not an error', () => {
+test('SAP Start shows the date only for a date-only value and adds the time only when the value is timed', () => {
+  const [sapStart] = Table._scheduleDateColumns();
+  const dateOnly = new Date(2026, 7, 4);
+  assert.equal(sapStart.valueFormatter({ value: dateOnly }), Util._fmtDatePref(dateOnly));
+  assert.ok(!/AM|PM|00:00/.test(sapStart.valueFormatter({ value: dateOnly })), 'no 12:00 AM on a date-only start');
+  const timed = new Date(2026, 7, 4, 13, 30);
+  assert.equal(sapStart.valueFormatter({ value: timed }), Util.fmtDTReadable(timed));
+  assert.equal(sapStart.valueFormatter({ value: null }), '');
+});
+
+test('the Inspector Schedule card lists SAP Start first, before Due Date', () => {
+  const priorGetElementById = globalThis.document.getElementById;
+  const body = { innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; } };
+  try {
+    globalThis.document.getElementById = id => id === 'inspector-body' ? body : null;
+    Inspector._render({
+      id: 'insp-sap-start', ORDER: '100021', MACHINE: 'L1', RUN_TIME: 6,
+      original_start_date: new Date(2026, 7, 1), original_end_date: new Date('2026-08-04T09:00:00'),
+      start_date: new Date('2026-08-04T03:00:00'), end_date: new Date('2026-08-04T09:00:00'),
+    });
+    const html = body.innerHTML;
+    assert.ok(html.indexOf('ui.insp_sap_start') > -1 && html.indexOf('ui.insp_sap_start') < html.indexOf('ui.insp_due_date'));
+    assert.match(html, /ui\.sap_start_hint/);
+  } finally {
+    globalThis.document.getElementById = priorGetElementById;
+    Inspector._fpEnd = null;
+  }
+});
+
+test('a saved layout without SAP Start places it directly before Due Date', () => {
+  const priorApi = Table._api;
+  const priorPref = Store.pref;
+  let applied = null;
+  const known = new Set(['PRODUCTION_ORDER', 'original_start_date', 'original_end_date', 'end_date']);
+  Store.pref = key => key === 'gridLayout' ? {
+    columnState: [{ colId: 'PRODUCTION_ORDER' }, { colId: 'original_end_date' }, { colId: 'end_date' }],
+    sortModel: null, filterModel: {},
+  } : priorPref.call(Store, key);
+  Table._api = { getColumn: id => known.has(id) ? { id } : null, applyColumnState: arg => { applied = arg; }, setFilterModel: () => {} };
+  try {
+    Table._applySavedLayout();
+    assert.deepEqual(applied.state.map(c => c.colId), ['PRODUCTION_ORDER', 'original_start_date', 'original_end_date', 'end_date']);
+  } finally {
+    Table._api = priorApi;
+    Store.pref = priorPref;
+  }
+});
+
+test('the Due Date catalog entry keeps its label key', () => {
+  assert.equal(ORDER_FIELD_CATALOG.find(f => f.key === 'original_end_date').i18nGridKey, 'col.due_date');
+});
+
+test('G-0.27: an admin visibility choice naming an unknown column is ignored, not an error', () => {
   const priorVisibility = structuredClone(Store.orderFieldVisibility);
   const priorApi = Table._api;
   const calls = [];
   try {
-    Store.setOrderFieldVisibility({ ...priorVisibility, original_start_date: { grid: false, inspector: false } }, 'unit-test');
-    assert.equal(Table._fieldHidden('original_start_date'), false, 'an unknown id is never hidden');
+    Store.setOrderFieldVisibility({ ...priorVisibility, no_such_retired_col: { grid: false, inspector: false } }, 'unit-test');
+    assert.equal(Table._fieldHidden('no_such_retired_col'), false, 'an unknown id is never hidden');
     assert.equal(Table._fieldHidden('no_such_column'), false);
     Table._api = { setColumnsVisible: (ids, visible) => calls.push({ ids, visible }) };
     Table._applyFieldVisibility();
-    assert.ok(calls.every(c => !c.ids.includes('original_start_date')), 'the retired id never reaches the grid');
+    assert.ok(calls.every(c => !c.ids.includes('no_such_retired_col')), 'the unknown id never reaches the grid');
   } finally {
     Table._api = priorApi;
     Store.setOrderFieldVisibility(priorVisibility, 'unit-test');
   }
 });
 
-test('G-0.27: a saved layout naming the retired Original Start column loads; the unknown column is dropped', () => {
+test('G-0.27: a saved layout naming an unknown column loads; the unknown column is dropped', () => {
   const priorApi = Table._api;
   const priorPref = Store.pref;
   let applied = null, filter = null;
   const known = new Set(['PRODUCTION_ORDER', 'end_date']);
   Store.pref = key => key === 'gridLayout' ? {
-    columnState: [{ colId: 'PRODUCTION_ORDER' }, { colId: 'original_start_date', hide: true }, { colId: 'end_date', sort: 'asc' }],
+    columnState: [{ colId: 'PRODUCTION_ORDER' }, { colId: 'retired_col', hide: true }, { colId: 'end_date', sort: 'asc' }],
     sortModel: null,
-    filterModel: { original_start_date: { type: 'equals' }, end_date: { type: 'equals' } },
+    filterModel: { retired_col: { type: 'equals' }, end_date: { type: 'equals' } },
   } : priorPref.call(Store, key);
   Table._api = {
     getColumn: id => known.has(id) ? { id } : null,
