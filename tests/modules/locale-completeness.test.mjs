@@ -454,7 +454,7 @@ test('SAP staging (Admin > Interface > Staging) keys exist in all 5 locales', ()
   // families below. Real translations in de/es/fr/pt, not English copies.
   const STATUSES = ['loading', 'ready', 'validated', 'held', 'applying', 'applied', 'error', 'rejected', 'superseded', 'discarded'];
   const WARNINGS = [
-    'routing_required', 'vanish_threshold', 'horizon_unlimited_no_deletes', 'empty_snapshot', 'incomplete_rows', 'lot_size_rounded',
+    'routing_required', 'vanish_threshold', 'horizon_unlimited_no_deletes', 'empty_snapshot', 'incomplete_rows', 'lot_size_rounded', 'value_truncated',
     'stale_loading', 'unknown_columns', 'rows_not_staged', 'discarded', 'unknown_object_key', 'unknown_plant',
     'vanish_not_reviewed', 'revalidate_required', 'apply_in_progress', 'not_applicable', 'superseded', 'order_exists',
     'sap_changed', 'unfirmed', 'sap_changed_running', 'unparseable_dates', 'routing_running_kept',

@@ -790,6 +790,7 @@ window.__NIMBUS_LOCALES.de = {
   'ui.sap_stage_warn_empty_snapshot':              'Der Snapshot ist leer — die Übernahme würde jede nicht referenzierte Zeile entfernen.',
   'ui.sap_stage_warn_incomplete_rows':             'Die von Mulesoft angekündigte Zeilenzahl stimmt nicht mit den eingegangenen Zeilen überein, daher kann diese Charge nicht übernommen werden. Bitten Sie Mulesoft, sie erneut zu senden.',
   'ui.sap_stage_warn_lot_size_rounded':            'Einige Losgrößen wurden auf ganze Zahlen gerundet.',
+  'ui.sap_stage_warn_value_truncated':             'Einige Materialbeschreibungen oder -typen waren zu lang und wurden gekürzt.',
   'ui.sap_stage_col_reason': 'Grund',
   'ui.sap_stage_reject_missing_key': 'Ein Schlüsselfeld ist leer.',
   'ui.sap_stage_reject_plant_mismatch': 'Das Werk der Zeile weicht vom Werk der Charge ab.',

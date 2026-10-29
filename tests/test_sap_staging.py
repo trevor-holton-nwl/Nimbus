@@ -257,6 +257,43 @@ def test_build_material_plant_rows_no_warning_for_whole_lots():
     assert rows[0]["min_lot_size"] == 10 and warnings == []
 
 
+_MASTER_MAP = _MATERIAL_MAP + [("MAKTX", "material_description", "none"), ("MTART", "material_type", "none")]
+
+
+def test_material_desc_type_never_reach_material_plant_rows():
+    stage = [{"id": 1, "matnr": "1", "werks": "P", "mmsta": "A1", "maktx": "Widget", "mtart": "FERT",
+              "material_id": "1", "plant": "P"}]
+    rows = st.build_material_plant_rows(stage, _fmap(_MASTER_MAP), [])
+    assert rows == [{"material_id": "1", "plant": "P", "status_pl": "A1"}]
+
+
+def test_build_material_master_rows_first_non_blank_wins_per_material():
+    stage = [{"id": 1, "maktx": "  ", "mtart": "FERT", "material_id": "1", "plant": "P"},
+             {"id": 2, "maktx": "Widget", "mtart": "HALB", "material_id": "1", "plant": "Q"},
+             {"id": 3, "maktx": "Other", "mtart": None, "material_id": "2", "plant": "P"},
+             {"id": 4, "maktx": None, "mtart": "", "material_id": "3", "plant": "P"}]
+    out = st.build_material_master_rows(stage, _fmap(_MASTER_MAP), [])
+    assert out == {"1": {"material_description": "Widget", "material_type": "FERT"},
+                   "2": {"material_description": "Other"}}
+
+
+def test_build_material_master_rows_truncates_and_warns_once():
+    stage = [{"id": 1, "maktx": "x" * 70, "mtart": "ABCDEF", "material_id": "1", "plant": "P"},
+             {"id": 2, "maktx": "y" * 61, "mtart": "OK", "material_id": "2", "plant": "P"}]
+    warnings: list = []
+    out = st.build_material_master_rows(stage, _fmap(_MASTER_MAP), warnings)
+    assert out["1"] == {"material_description": "x" * 60, "material_type": "ABCD"}
+    assert out["2"] == {"material_description": "y" * 60, "material_type": "OK"}
+    assert len(warnings) == 1 and warnings[0]["code"] == "value_truncated" and warnings[0]["count"] == 3
+
+
+def test_build_material_master_rows_inactive_map_row_disables_the_column():
+    stage = [{"id": 1, "maktx": "Widget", "mtart": "FERT", "material_id": "1", "plant": "P"}]
+    out = st.build_material_master_rows(stage, _fmap(_MASTER_MAP, inactive=("MAKTX",)), [])
+    assert out == {"1": {"material_type": "FERT"}}
+    assert st.build_material_master_rows(stage, _fmap(_MATERIAL_MAP), []) == {}
+
+
 # ---------------------------------------------------------------------------
 # Pure validators
 # ---------------------------------------------------------------------------
@@ -816,6 +853,43 @@ def test_material_plant_apply_creates_bare_material_and_deletes_or_flags_absent_
     st.validate_batch(bid2)                                              # nothing absent now: validated, no hold
     st.apply_batch(bid2, actor="pytest")
     assert _status(pg, bid) is None and _status(pg, bid2) == "applied"
+
+
+@pytest.mark.pg
+def test_material_plant_apply_writes_description_and_type_overwrite_only_when_non_blank(pg, stg_plant):
+    with _conn(pg) as (conn, cur):
+        cur.execute("INSERT INTO materials (material_id, material_description, material_type)"
+                    " VALUES ('ZZSTGOLD', 'Old name', 'ROH'), ('ZZSTGBLK', 'Keep me', 'HALB')")
+        conn.commit()
+
+    def apply(rows):
+        bid = _make_batch(pg, "stage_material_plants", "sap_stage_material_plant", rows)
+        assert st.validate_batch(bid)["status"] in ("validated", "held")
+        return st.apply_batch(bid, actor="pytest", confirm_held=True)
+
+    def stored(mid):
+        with _conn(pg) as (_c, cur):
+            cur.execute("SELECT material_description, material_type FROM materials WHERE material_id = %s", (mid,))
+            return cur.fetchone()
+
+    rows = [{"matnr": "ZZSTGNEW", "werks": PLANT, "maktx": "N" * 70, "mtart": "FERT"},
+            {"matnr": "ZZSTGOLD", "werks": PLANT, "maktx": "New name", "mtart": "HALB"},
+            {"matnr": "ZZSTGBLK", "werks": PLANT, "maktx": "", "mtart": None}]
+    out = apply(rows)
+    assert out["status"] == "applied"
+    assert stored("ZZSTGNEW") == ("N" * 60, "FERT")                      # new material: truncated values
+    assert stored("ZZSTGOLD") == ("New name", "HALB")                    # non-blank overwrites
+    assert stored("ZZSTGBLK") == ("Keep me", "HALB")                     # blank never erases
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT xmin::text FROM materials WHERE material_id IN ('ZZSTGNEW','ZZSTGOLD','ZZSTGBLK')"
+                    " ORDER BY material_id")
+        before = cur.fetchall()
+    # Repeat snapshot is a no-op: no materials row is rewritten.
+    assert apply(rows)["status"] == "applied"
+    with _conn(pg) as (_c, cur):
+        cur.execute("SELECT xmin::text FROM materials WHERE material_id IN ('ZZSTGNEW','ZZSTGOLD','ZZSTGBLK')"
+                    " ORDER BY material_id")
+        assert cur.fetchall() == before
 
 
 @pytest.mark.pg

@@ -790,6 +790,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.sap_stage_warn_empty_snapshot':              'O snapshot está vazio: aplicá-lo removeria todas as linhas sem referências.',
   'ui.sap_stage_warn_incomplete_rows':             'O número de linhas anunciado pelo Mulesoft não corresponde às linhas recebidas, então este lote não pode ser aplicado. Peça ao Mulesoft que o reenvie.',
   'ui.sap_stage_warn_lot_size_rounded':            'Alguns tamanhos de lote foram arredondados para números inteiros.',
+  'ui.sap_stage_warn_value_truncated':             'Algumas descrições ou tipos de material eram longos demais e foram encurtados.',
   'ui.sap_stage_col_reason': 'Motivo',
   'ui.sap_stage_reject_missing_key': 'Um campo-chave está em branco.',
   'ui.sap_stage_reject_plant_mismatch': 'A planta da linha difere da planta do lote.',

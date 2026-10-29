@@ -162,6 +162,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-27-1-setup-value-defaults.sql",
         "2026-10-27-1-tool-inventory.sql",
         "2026-10-29-1-job-scheduler.sql",
+        "2026-10-29-2-sap-stage-material-desc-type.sql",
         "2026-07-07-color-wheel-table.sql",
         "2026-07-07-security-tables.sql",
         "2026-07-08-username-ci-index.sql",
@@ -709,7 +710,22 @@ def test_sap_staging_tables_in_schema_and_migration():
     assert "orders ADD COLUMN IF NOT EXISTS sap_sent_" not in columns_text
 
 
-# --- Structural parity of the two SAP staging migrations (applied) -----------------------------------------
+def test_sap_stage_material_desc_type_in_schema_and_migration():
+    """The Material Plant staging table carries the two material-level columns and both the schema and the
+    migration seed their field-map rows (the staging-to-`materials` mapping)."""
+    with open(os.path.join(ROOT, "migrations", "2026-10-29-2-sap-stage-material-desc-type.sql"),
+              encoding="utf-8") as f:
+        mig = f.read()
+    schema = _schema_text()
+    assert "ADD COLUMN IF NOT EXISTS maktx TEXT, ADD COLUMN IF NOT EXISTS mtart TEXT" in mig
+    block = schema.split("CREATE TABLE IF NOT EXISTS sap_stage_material_plant (", 1)[1].split(");", 1)[0]
+    assert "maktx" in block and "mtart" in block
+    for row in ("('stage_material_plants', 'MAKTX', 'material_description', 'none', 7)",
+                "('stage_material_plants', 'MTART', 'material_type', 'none', 8)"):
+        assert row in schema and row in mig, row
+
+
+# --- Structural parity of the two SAP staging migrations (applied)-----------------------------------------
 STAGE_MIGRATIONS = ("2026-10-08-sap-staging-tables.sql", "2026-10-08-sap-staging-columns.sql")
 STAGE_COLUMNS = (("sap_sync_config", "apply_mode"), ("material_plants", "sap_missing_since"),
                  ("production_version", "sap_missing_since"))

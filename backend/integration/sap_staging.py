@@ -337,6 +337,8 @@ def build_material_plant_rows(stage_rows: list[dict], field_map: list[dict] | No
     for sr in stage_rows:
         row: dict = {}
         for sap_field, (col, tf) in amap.items():
+            if col in MATERIAL_MASTER_COLS:
+                continue                      # material-level: built by build_material_master_rows
             if sap_field in sr:
                 row[col] = sap_sync.apply_transform(tf, sr[sap_field])
         if sr.get("material_id"):
@@ -365,6 +367,46 @@ def build_material_plant_rows(stage_rows: list[dict], field_map: list[dict] | No
         warnings.append({"level": "warn", "code": "lot_size_rounded", "count": rounded,
                          "msg": f"{rounded} fractional lot size value(s) were rounded to whole numbers."})
     return out
+
+
+# Material-level columns carried on every Material Plant row; they belong to `materials`, not
+# `material_plants`, and are limited to the `materials` column sizes (schema.sql: VARCHAR(60) / VARCHAR(4)).
+MATERIAL_MASTER_COLS: dict[str, int] = {"material_description": 60, "material_type": 4}
+
+
+def build_material_master_rows(stage_rows: list[dict], field_map: list[dict] | None = None,
+                               warnings: list | None = None) -> dict[str, dict]:
+    """Valid material-plant staging rows -> {material_id: {material_description?, material_type?}} for the
+    `materials` table, through the ACTIVE field map (an inactive map row disables that column). The same
+    material repeats across plants, so the first non-blank value in the batch wins. Values are trimmed and
+    truncated to the `materials` column sizes (never a rejection); one `value_truncated` warning counts them.
+    A material with no non-blank value for a column simply has no key for it (blank never erases)."""
+    amap = active_map("stage_material_plants", field_map)
+    cols = [(sap_field, col, tf) for sap_field, (col, tf) in amap.items() if col in MATERIAL_MASTER_COLS]
+    out: dict[str, dict] = {}
+    truncated = 0
+    for sr in stage_rows:
+        mid = sr.get("material_id")
+        if not mid:
+            continue
+        entry = out.setdefault(mid, {})
+        for sap_field, col, tf in cols:
+            if col in entry or sap_field not in sr:
+                continue
+            val = sap_sync.apply_transform(tf, sr[sap_field])
+            val = str(val).strip() if val is not None else ""
+            if not val:
+                continue
+            limit = MATERIAL_MASTER_COLS[col]
+            if len(val) > limit:
+                val = val[:limit]
+                truncated += 1
+            entry[col] = val
+    if truncated and warnings is not None:
+        warnings.append({"level": "warn", "code": "value_truncated", "count": truncated,
+                         "msg": f"{truncated} material description / type value(s) were longer than the allowed "
+                                "length and were shortened."})
+    return {m: e for m, e in out.items() if e}
 
 
 def build_order_rows(stage_rows: list[dict], plant_tz: str | None, field_map: list[dict] | None = None,
@@ -1471,7 +1513,9 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
     with conn.cursor() as cur:
         stage = _fetch_rows(cur, table, bid, ("valid",))
         warnings: list = []
-        rows = build_material_plant_rows(stage, None, warnings)
+        field_map = sap_sync.load_field_map("stage_material_plants")
+        rows = build_material_plant_rows(stage, field_map, warnings)
+        master = build_material_master_rows(stage, field_map, warnings)
         _append_warnings(cur, bid, warnings)
         # H3: the absent sweep is protected by EVERY material SAP sent (valid rows and rows rejected for
         # a reason other than a bad key), not only the rows that were valid.
@@ -1480,12 +1524,28 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
     present = sorted({r["material_id"] for r in rows})
 
     step("create_materials")
-    created = 0
+    created = materials_updated = 0
     with conn.cursor() as cur:
         if present:
-            cur.execute("INSERT INTO materials (material_id) SELECT unnest(%s::text[])"
-                        " ON CONFLICT (material_id) DO NOTHING", (present,))
-            created = cur.rowcount or 0
+            # New materials get description / type; an existing one is overwritten only by a non-blank,
+            # different incoming value (blank never erases; an unchanged repeat snapshot writes nothing).
+            descs = [master.get(m, {}).get("material_description", "") for m in present]
+            types = [master.get(m, {}).get("material_type", "") for m in present]
+            cur.execute(
+                "INSERT INTO materials (material_id, material_description, material_type)"
+                " SELECT a.m, a.d, a.t FROM unnest(%s::text[], %s::text[], %s::text[]) AS a(m, d, t)"
+                " ON CONFLICT (material_id) DO UPDATE SET"
+                " material_description = CASE WHEN EXCLUDED.material_description <> ''"
+                "   THEN EXCLUDED.material_description ELSE materials.material_description END,"
+                " material_type = CASE WHEN EXCLUDED.material_type <> ''"
+                "   THEN EXCLUDED.material_type ELSE materials.material_type END"
+                " WHERE (EXCLUDED.material_description <> ''"
+                "        AND materials.material_description IS DISTINCT FROM EXCLUDED.material_description)"
+                "    OR (EXCLUDED.material_type <> '' AND materials.material_type IS DISTINCT FROM EXCLUDED.material_type)"
+                " RETURNING (xmax = 0)", (present, descs, types))
+            flags = [r[0] for r in cur.fetchall()]
+            created = sum(1 for f in flags if f)
+            materials_updated = len(flags) - created
     conn.commit()
 
     step("upsert")
@@ -1543,7 +1603,7 @@ def _apply_material_plants(conn, hdr, actor: str, step) -> dict:
         conn.commit()
     _audit_snapshot_vanish_finish(conn, audit_id, [d["material_id"] for d in done], flagged)
     return {"inserted": inserted, "updated": updated, "unchanged": unchanged, "deleted": deleted,
-            "flagged": flagged, "materials_created": created}
+            "flagged": flagged, "materials_created": created, "materials_updated": materials_updated}
 
 
 def _audit_snapshot_vanish_begin(conn, table_name: str, bid, plant: str, actor: str, planned: list):

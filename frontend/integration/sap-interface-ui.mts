@@ -291,7 +291,7 @@ const STAGE_STATUSES = ['loading', 'ready', 'validated', 'held', 'applying', 'ap
 /** Every batch warning / hold / error / apply-refusal code the backend emits (ui.sap_stage_warn_<code>). */
 const STAGE_WARN_CODES = [
   'routing_required', 'vanish_threshold', 'horizon_unlimited_no_deletes', 'empty_snapshot', 'incomplete_rows',
-  'lot_size_rounded', 'stale_loading', 'unknown_columns', 'rows_not_staged', 'discarded', 'unknown_object_key',
+  'lot_size_rounded', 'value_truncated', 'stale_loading', 'unknown_columns', 'rows_not_staged', 'discarded', 'unknown_object_key',
   'unknown_plant', 'vanish_not_reviewed', 'revalidate_required', 'apply_in_progress', 'not_applicable',
   'superseded', 'order_exists', 'sap_changed', 'unfirmed', 'sap_changed_running', 'unparseable_dates',
   'routing_running_kept', 'sap_system_tz_invalid',
