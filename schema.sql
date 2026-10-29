@@ -2390,3 +2390,19 @@ ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS tz_mode TEXT NOT NULL DEFAUL
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS fixed_timezone TEXT;
 ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS fan_out JSONB;
 ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS scope_plants JSONB;
+-- W3b: the schedule policy (DST, closed days, run window, monthly mode, catch-up) and the last fire the scheduler saw.
+ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS options JSONB;
+ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS last_fire_at TIMESTAMPTZ;
+
+-- W3b: catch-up runs are trigger 'catchup' (also run by ensure_job_tables; not a migration).
+DO $job_trigger$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'job_run'::regclass AND conname = 'job_run_trigger_check'
+              AND pg_get_constraintdef(oid) NOT LIKE '%catchup%') THEN
+    ALTER TABLE job_run DROP CONSTRAINT job_run_trigger_check;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'job_run'::regclass AND conname = 'job_run_trigger_check') THEN
+    ALTER TABLE job_run ADD CONSTRAINT job_run_trigger_check CHECK (trigger IN ('schedule','manual','retry','catchup'));
+  END IF;
+END
+$job_trigger$;
