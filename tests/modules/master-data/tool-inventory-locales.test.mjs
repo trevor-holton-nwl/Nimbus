@@ -75,7 +75,8 @@ test('the Wave 4a review-fix keys are in the block and es says planta (not centr
 });
 
 // ---- Excel upload / review modal / deep link block (Wave 4b) ------------------------------------------------------------------
-const XL_BLOCK = enText.slice(enText.indexOf('Tool Inventory Excel upload (Wave 4b)'));
+// Bounded at the first Jobs-scheduler key: later sections appended to en.js carry legitimate cognates (Jobs, Status, Info).
+const XL_BLOCK = enText.slice(enText.indexOf('Tool Inventory Excel upload (Wave 4b)'), enText.indexOf("'tab.jobs'"));
 const XL_KEYS = [...XL_BLOCK.matchAll(/^\s*'([a-z_.]+)'\s*:/gm)].map(m => m[1]);
 
 test('the Excel upload block carries the documented keys, all included in the Tool Inventory locale gate above', () => {

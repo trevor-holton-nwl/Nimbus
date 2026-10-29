@@ -17,7 +17,8 @@ const dicts = Object.fromEntries(LOCALES.map(l => [l, dict(l)]));
 const placeholders = s => [...String(s).matchAll(/\{\{(\w+)\}\}/g)].map(m => m[1]).sort().join(',');
 
 const enText = readFileSync(new URL('en.js', dir), 'utf8');
-const block = enText.slice(enText.indexOf('Tool Inventory Wave 5:'));
+// Bounded at the first Jobs-scheduler key: later sections appended to en.js carry legitimate cognates (Jobs, Status, Info).
+const block = enText.slice(enText.indexOf('Tool Inventory Wave 5:'), enText.indexOf("'tab.jobs'"));
 const KEYS = [...block.matchAll(/^\s*'([A-Za-z_.]+)'\s*:/gm)].map(m => m[1]);
 
 test('the Wave 5 block is found and covers every documented key family', () => {
