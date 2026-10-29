@@ -448,12 +448,15 @@ def test_fire_schedule_runs_and_retires_once(api, jobs_pg):
 
 @pytest.mark.pg
 def test_reconcile_arms_replaces_and_removes(api, jobs_pg):
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.schedulers.background import BackgroundScheduler
     from backend.jobs import scheduler as js
     j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "daily", "time_of_day": "08:00",
                                                 "misfire_grace_s": 120}])
     sid = j["schedules"][0]["id"]
-    sch = AsyncIOScheduler()
+    # Started (paused) so add_job(replace_existing) really replaces: on an unstarted scheduler APScheduler
+    # appends a duplicate pending entry and remove_job only drops the first. Paused = nothing ever fires.
+    sch = BackgroundScheduler()
+    sch.start(paused=True)
     js._SIGS.clear()
     js.reconcile(sch)
     job = sch.get_job(f"job:{sid}")
@@ -467,6 +470,7 @@ def test_reconcile_arms_replaces_and_removes(api, jobs_pg):
     api.patch(f"/jobs/{j['id']}", json={"enabled": False})
     js.reconcile(sch)
     assert sch.get_job(f"job:{sid}") is None
+    sch.shutdown(wait=False)
 
 
 @pytest.mark.pg
