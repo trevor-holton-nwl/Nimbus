@@ -1145,7 +1145,7 @@ function pushLimitAware(
   if (!ceiling || !(+ceiling < +bounds.horizonEnd)) return reason;
   return {
     code: 'push_limit_unmet',
-    message: "No placement finishes within the plant’s due-date push-forward limit. Raise the limit in the plant settings or release the order.",
+    message: 'No open window in the push/pull-forward range on its current machine.',
   };
 }
 

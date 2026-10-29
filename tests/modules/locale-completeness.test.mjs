@@ -889,6 +889,11 @@ const ALERT_MONITOR_KEYS = [
   'am.slot_option_closed', 'am.slot_option_unknown', 'am.slot_none', 'am.slot_suggested', 'am.slot_place',
   'am.slot_confirm_title', 'am.slot_confirm_short', 'am.slot_confirm_closed', 'am.slot_confirm_place',
   'am.slot_placed', 'am.slot_stale', 'am.slot_no_window', 'am.slot_undo', 'am.slot_suggested_on',
+  // Move to an open machine (2026-10-29): the lead, the radio rows, the filter, the consequence line, the day preview.
+  'am.slot_lead_push', 'am.slot_lead_push_sub', 'am.slot_st_fits', 'am.slot_st_short', 'am.slot_st_closed', 'am.slot_st_unknown',
+  'am.slot_best', 'am.slot_free_h', 'am.slot_free_of', 'am.slot_count', 'am.slot_count_one', 'am.slot_showing', 'am.slot_filter',
+  'am.slot_preview_show', 'am.slot_preview_hide', 'am.slot_finish', 'am.slot_legend_other', 'am.slot_legend_this', 'am.slot_legend_closed',
+  'am.slot_cons_fits', 'am.slot_cons_short', 'am.slot_cons_closed', 'am.slot_cons_unknown', 'am.slot_empty', 'am.slot_empty_sub',
   // Tool Inventory (Wave 2): the tool card counts orders and shows all of them.
   'leverage.title.tool', 'leverage.action.tool',
 ];
@@ -901,11 +906,34 @@ test('Slot wording (final fix wave): the toast carries the landing day, the conf
     assert.doesNotMatch(dicts[locale]['alert.help.needs_planning'], /Gantt/i, `${locale} help sends the planner to Slot, not the Gantt`);
   }
   assert.match(dicts.en['am.slot_confirm_short'], /overlap other orders/);
-  assert.match(dicts.en['alert.help.needs_planning'], /Slot…/);
+  assert.match(dicts.en['alert.help.needs_planning'], /Move…/);
   assert.doesNotMatch(dicts.en['alert.help.needs_planning'], /no legal placement/);
-  for (const [locale, slot] of [['de', 'Platz…'], ['es', 'Hueco…'], ['fr', 'Créneau…'], ['pt', 'Espaço…']]) {
+  for (const [locale, slot] of [['de', 'Verschieben…'], ['es', 'Mover…'], ['fr', 'Déplacer…'], ['pt', 'Mover…']]) {
     assert.ok(dicts[locale]['alert.help.needs_planning'].includes(slot), `${locale} help names the ${slot} action`);
     assert.ok(dicts[locale]['am.slot'].includes(slot), `${locale} help matches the row button label`);
+  }
+});
+
+test('Move to an open machine (2026-10-29): the owner wording in en.js, and the stored push-limit message matches the locale', () => {
+  const en = localeDict('en');
+  assert.equal(en['am.slot'], '◫ Move…');
+  assert.equal(en['am.slot_title'], 'Move to an open machine');
+  assert.equal(en['am.slot_place'], 'Move order');
+  assert.equal(en['am.slot_suggested'], 'Suggested move');
+  assert.equal(en['am.slot_undo'], 'Move order {{order}}');
+  assert.equal(en['am.slot_pair'], 'Move to');
+  assert.equal(en['am.slot_hint'], 'Finishes at the end of that day’s working hours, then firmed or frozen-protected. Nothing is saved until you Save.');
+  assert.equal(en['am.slot_lead_push'], 'No available window in the push/pull range');
+  assert.equal(en['am.slot_lead_push_sub'], 'Move it to another machine with open capacity? Or raise the limit in plant settings, or release the order.');
+  const stored = 'No open window in the push/pull-forward range on its current machine.';
+  assert.equal(en['planning_reason.push_limit_unmet'], stored);
+  const scheduler = readFileSync(new URL('../../frontend/optimization/setup-scheduler.mts', import.meta.url), 'utf8');
+  assert.ok(scheduler.includes(`code: 'push_limit_unmet',\r\n    message: '${stored}',`) || scheduler.includes(`code: 'push_limit_unmet',\n    message: '${stored}',`),
+    'the optimizer stores the same English text the locale shows');
+  for (const locale of LOCALES) {
+    const d = localeDict(locale);
+    assert.ok(/push|pull|Verschiebe|adelanto|avance|antecipa/i.test(d['planning_reason.push_limit_unmet']), `${locale} push_limit_unmet names the push/pull range`);
+    assert.doesNotMatch(d['am.slot'], /Slot|Platz|Hueco|Créneau|Espaço/, `${locale} row action no longer says Slot`);
   }
 });
 
