@@ -18,7 +18,7 @@ import { Session } from '../security/session.mjs';
 import { JobsClient } from './jobs-client.mjs';
 import type { Job, JobType } from './jobs-client.mjs';
 import {
-  RECUR_PRESETS, JOB_RESULTS, NAME_MAX, WINDOW_CHOICES, WINDOW_ANCHORS, WINDOW_UNITS, WINDOW_OPEN_START, defaultJobForm, jobToForm,
+  RECUR_PRESETS, NAME_MAX, WINDOW_CHOICES, WINDOW_ANCHORS, WINDOW_UNITS, WINDOW_OPEN_START, defaultJobForm, jobToForm,
   validateJobForm, buildJobPayload, recurrenceText, stripOffset, dowLabelKey, seedParams, resultOf, findType, hasApplyMode, typeGroups,
   typeLabel, paramLabel, enumLabel, paramHint, windowToUi, uiToWindow, validateWindowUi,
 } from './jobs-model.mjs';
@@ -224,7 +224,8 @@ export function paramHtml(p: ParamMeta, v: unknown, isAdmin: boolean): string {
 }
 
 export function paramsHtml(meta: TypeMeta | null, f: JobForm, isAdmin: boolean): string {
-  return meta ? meta.params.map(p => paramHtml(p, f.params[p.key], isAdmin)).join('') : '';
+  // The Result control (Apply / Dry run) belongs to action types only; a report never offers it.
+  return meta ? meta.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(meta)).map(p => paramHtml(p, f.params[p.key], isAdmin)).join('') : '';
 }
 
 /* ---------------------------------------------------------------------------
