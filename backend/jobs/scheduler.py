@@ -58,7 +58,8 @@ def plan_arms(r: dict, plants: list[dict]) -> tuple[list[dict], list[str]]:
     if not r.get("targets"):
         tz, skip = targets._tz_state((by.get(r["plant"]) or {}).get("timezone"))
         return [{**r, "timezone": r["timezone"] if skip else tz, "arm_plant": None}], []
-    exp = targets.expand_targets({"plant": r["plant"], "targets": r["targets"]}, plants=plants)
+    exp = targets.expand_targets({"plant": r["plant"], "targets": r["targets"], "scope_plants": r.get("scope_plants")},
+                                 plants=plants)
     return ([{**r, "timezone": e["timezone"], "arm_plant": e["plant"]} for e in targets.runnable(exp)],
             exp["warnings"])
 

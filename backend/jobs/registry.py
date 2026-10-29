@@ -32,6 +32,7 @@ class JobType:
     defer_clock: bool = False                                 # the body starts the timeout clock itself (ctx.begin_work)
     kind: str = "action"                                      # 'action' (may change data) | 'report' (read-only, artifact)
     mutates: bool = True                                      # False for reports
+    slot: Callable[[], Any] | None = None                     # returns the type's own semaphore; the RUNNER holds it
 
     def timeout_for(self, params: BaseModel) -> int:
         return int(self.timeout_fn(params)) if self.timeout_fn else self.default_timeout_s

@@ -67,7 +67,7 @@ def test_new_columns_come_from_the_startup_hook_and_schema_never_from_a_migratio
     import backend.jobs.data as data
     assert data.JOB_COLUMN_DDL.strip() in _read(SCHEMA)
     mig = _read(MIGRATION)
-    for col in ("batch_id", "tz_mode", "fixed_timezone", "fan_out"):
+    for col in ("batch_id", "tz_mode", "fixed_timezone", "fan_out", "scope_plants"):
         assert col not in re.sub(r"--[^\n]*", "", mig)
         assert col in data.JOB_COLUMN_DDL
     assert "CASCADE" not in data.JOB_COLUMN_DDL.upper()
@@ -369,12 +369,20 @@ def test_the_batch_rolls_up_warning_when_a_child_warns_or_is_skipped(fan):
     assert fan.batches[5]["status"] == "warning" and fan.batches[5]["counts"]["skipped"] == 1
 
 
+def _noop_needs_tz(monkeypatch, on: bool) -> None:
+    import dataclasses
+    from backend.jobs import registry
+    monkeypatch.setitem(registry.REGISTRY, "noop",
+                        dataclasses.replace(registry.REGISTRY["noop"], needs_plant_timezone=on))
+
+
 # ============================================================================================== pg tests
 @pytest.fixture
 def mp_pg(planning_pg, monkeypatch):
     """planning_pg with two plants that have timezones, a third plant WITHOUT one, and a clean job slate after."""
     import backend.jobs.data as data
     monkeypatch.setenv("NIMBUS_JOBS_STUBS", "1")
+    _noop_needs_tz(monkeypatch, True)          # a no-timezone plant is skipped only for types that need a zone
     data.ensure_job_tables()
     db = planning_pg.db
     third = planning_pg.plant + "_C"
@@ -653,8 +661,8 @@ def test_fixed_and_utc_modes_keep_one_job_and_fan_out_inside_the_fire(mapi, mp_p
         assert str(armed[0].trigger.timezone) == (fixed or "UTC")
     finally:
         sch.shutdown(wait=False)
-    bid = rn.fire_schedule(s["id"])                        # blocking: the whole batch runs inside the fire
-    b = mapi.get(f"/jobs/batches/{bid}").json()
+    bid = rn.fire_schedule(s["id"])                        # D4: returns at once, the batch runs on its own dispatcher
+    b = wait_batch(mapi, bid)
     assert b["batch"]["trigger"] == "schedule" and b["batch"]["status"] == "warning"
     assert {x["plant"]: x["status"] for x in b["runs"]} == {mp_pg.plant: "succeeded", mp_pg.other: "succeeded",
                                                               mp_pg.third: "skipped"}
@@ -668,7 +676,7 @@ def test_a_plant_mode_arm_fires_only_its_own_plant_as_a_batch_of_one(mapi, mp_pg
            schedules=[{"kind": "daily", "time_of_day": "08:00"}])
     sid = j["schedules"][0]["id"]
     bid = rn.fire_schedule(sid, mp_pg.other)
-    b = mapi.get(f"/jobs/batches/{bid}").json()
+    b = wait_batch(mapi, bid)
     assert [x["plant"] for x in b["runs"]] == [mp_pg.other] and b["batch"]["status"] == "succeeded"
     assert rn.fire_schedule(sid, mp_pg.third) is None, "not a target: nothing fires"
 
@@ -760,3 +768,365 @@ def test_job_wire_lists_next_run_and_upcoming_per_plant(mapi, mp_pg):
     assert all("at_local" in e and "at_utc" in e for e in up)
     strip = mapi.get("/jobs/upcoming", params={"plant": mp_pg.plant, "n": 3}).json()["entries"]
     assert len(strip) == 3
+
+
+# ================================================================================ W3a fix wave (decisions D1-D6)
+def test_creator_scope_intersects_the_expansion_and_marks_the_rest_skipped():
+    rows = [T("subnetwork", "NA"), T("explicit", "2001")]
+    exp = targets.expand_targets({"plant": "1008", "targets": rows, "scope_plants": ["1008", "2001"]}, plants=PLANTS)
+    by = {p["plant"]: p["skip"] for p in exp["plants"]}
+    assert by == {"1008": None, "1021": targets.SKIP_SCOPE, "2001": None}
+    unscoped = targets.expand_targets({"plant": "1008", "targets": rows, "scope_plants": None}, plants=PLANTS)
+    assert unscoped["plants"][1]["skip"] is None
+    free = targets.expand_targets({"plant": "1008", "targets": rows, "scope_plants": ["1008"]}, plants=PLANTS,
+                                  apply_scope=False)
+    assert all(p["skip"] is None for p in free["plants"]), "a write's scope check looks at the unfiltered expansion"
+
+
+def test_a_missing_timezone_skips_only_when_a_zone_is_required():
+    rows = [T("explicit", "3001"), T("explicit", "4001")]
+    need = targets.expand_targets({"plant": "1008", "targets": rows}, plants=PLANTS, require_tz=True)
+    assert [p["skip"] for p in need["plants"]] == [targets.SKIP_NO_TZ, targets.SKIP_BAD_TZ]
+    free = targets.expand_targets({"plant": "1008", "targets": rows}, plants=PLANTS, require_tz=False)
+    assert [p["skip"] for p in free["plants"]] == [None, None] and not free["warnings"]
+
+
+def test_plan_arms_skips_scope_dropped_plants_like_the_run_time_expansion():
+    sched = {"id": 1, "plant": "1008", "kind": "daily", "cron_expr": "0 8 * * *", "time_of_day": "08:00",
+             "days_of_week": None, "day_of_month": None, "run_at": None, "timezone": "America/Chicago",
+             "valid_from": None, "valid_until": None, "misfire_grace_s": 300, "modified_at": 1, "tz_mode": "plant",
+             "fixed_timezone": None, "targets": [T("subnetwork", "NA")], "scope_plants": ["1008"]}
+    arms, _ = scheduler.plan_arms(sched, PLANTS)
+    assert [a["arm_plant"] for a in arms] == ["1008"]
+
+
+def test_an_unset_max_parallel_is_bounded(fan):
+    c = fake_child(fan, delay=0.15)
+    go(fan, job(), exp_of(*[f"P{i}" for i in range(8)]), c)
+    assert c.live["max"] <= runner.MAX_PARALLEL_DEFAULT
+
+
+def test_a_dispatcher_crash_closes_unlaunched_children_and_still_rolls_the_batch_up(fan, monkeypatch):
+    closed, finished = [], []
+    monkeypatch.setattr(runner.data, "fail_batch_children", lambda bid, err, status="failed": closed.append((bid, err)))
+    monkeypatch.setattr(runner.data, "finish_batch", lambda bid, **kw: finished.append(bid))
+
+    def sleeper(s):
+        raise RuntimeError("boom")
+
+    j = job(fan_out={"stagger_s": 5})
+    children = runner.prepare_batch(j, exp_of("1008", "1021", "2001"), batch_id=5, trigger="manual", schedule_id=None,
+                                    scheduled_for=None, triggered_by="x")
+    runner.execute_batch(job=j, batch_id=5, children=children, trigger="manual", schedule_id=None, scheduled_for=None,
+                         triggered_by="x", skip_if_running=True, run_child=fake_child(fan), sleep=sleeper)
+    assert closed and finished == [5], "unstarted children are closed and the batch is finished, never left running"
+
+
+def test_finish_batch_is_retried_once(fan, monkeypatch):
+    seen = {"n": 0}
+
+    def flaky(bid, **kw):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            raise RuntimeError("db blip")
+
+    monkeypatch.setattr(runner.data, "finish_batch", flaky)
+    go(fan, job(), exp_of("1008"), fake_child(fan))
+    assert seen["n"] == 2
+
+
+def test_a_batch_child_skips_when_its_job_was_disabled_or_archived_after_it_queued(fan, monkeypatch):
+    jobs = {"enabled": True, "archived": False}
+    monkeypatch.setattr(runner.data, "get_job", lambda jid: {"id": jid, "plant": "1008", "job_type": "t", "params": {},
+                                                             "retry_max": 0, "timeout_s": None, **jobs})
+    rid = fan.insert_run(job_id=1, schedule_id=None, plant="1008", job_type="t", status="scheduled", trigger="schedule",
+                         batch_id=5)
+    jobs["enabled"] = False
+    runner.run_job(job_id=1, trigger="schedule", run_id=rid, plant="1008", batch_id=5)
+    assert fan.runs[rid]["status"] == "skipped" and "disabled" in fan.runs[rid]["error"]
+    rid2 = fan.insert_run(job_id=1, schedule_id=None, plant="1008", job_type="t", status="scheduled", trigger="manual",
+                          batch_id=5)
+    jobs["archived"] = True
+    runner.run_job(job_id=1, trigger="manual", run_id=rid2, plant="1008", batch_id=5)
+    assert fan.runs[rid2]["status"] == "skipped" and "archived" in fan.runs[rid2]["error"]
+
+
+def test_a_cancelled_child_is_never_started(fan):
+    started = []
+    children = runner.prepare_batch(job(), exp_of("1008", "1021"), batch_id=5, trigger="manual", schedule_id=None,
+                                    scheduled_for=None, triggered_by="x")
+    fan.runs[children[0]["run_id"]]["status"] = "skipped"           # a batch cancel got there first
+
+    def child(**kw):
+        started.append(kw["plant"])
+        fan.runs[kw["run_id"]]["status"] = "succeeded"
+        return kw["run_id"]
+
+    runner.execute_batch(job=job(), batch_id=5, children=children, trigger="manual", schedule_id=None,
+                         scheduled_for=None, triggered_by="x", skip_if_running=True, run_child=child,
+                         sleep=lambda s: None)
+    assert started == ["1021"]
+
+
+def test_slot_is_taken_before_the_global_semaphore(monkeypatch):
+    order = []
+
+    class Rec:
+        def __init__(self, name):
+            self.name = name
+
+        def acquire(self, *a, **k):
+            order.append(("acquire", self.name))
+            return True
+
+        def release(self):
+            order.append(("release", self.name))
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class Pool:
+        def connection(self):
+            return Conn()
+
+    monkeypatch.setattr(runner, "_SEM", Rec("sem"))
+    monkeypatch.setattr(runner, "_run_body", lambda *a, **k: "succeeded")
+    monkeypatch.setattr(runner.data, "try_session_lock", lambda conn, key: True)
+    monkeypatch.setattr(runner.data, "release_session_lock", lambda conn, key: None)
+    monkeypatch.setattr(runner.data, "get_run", lambda rid: {"cancel_requested": False, "status": "scheduled"})
+    monkeypatch.setattr(runner.db, "_pool", Pool(), raising=False)
+    jt = JobType(key="slotted", label="s", params_model=_P, run=lambda c, p: JobOutcome(), slot=lambda: Rec("slot"))
+    runner._execute(1, {"plant": "1008", "timeout_s": 60, "id": 1}, jt, _P(), True)
+    assert order == [("acquire", "slot"), ("acquire", "sem"), ("release", "sem"), ("release", "slot")]
+
+
+@pytest.mark.pg
+def test_scoped_admin_writes_403_when_the_jobs_targets_reach_outside_their_plants(mapi, mp_pg):
+    import brain
+    from backend.security import auth
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}, {"kind": "explicit", "value": mp_pg.other}],
+           schedules=[{"kind": "daily", "time_of_day": "08:00"}])
+    sid = j["schedules"][0]["id"]
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [mp_pg.plant]
+    for r in (mapi.post(f"/jobs/{j['id']}/run"), mapi.patch(f"/jobs/{j['id']}", json={"name": "x"}),
+              mapi.post(f"/jobs/{j['id']}/schedules", json={"kind": "daily", "time_of_day": "09:00"}),
+              mapi.patch(f"/jobs/schedules/{sid}", json={"paused": True})):
+        assert r.status_code == 403 and mp_pg.other in r.json()["detail"], r.text
+    assert mapi.get(f"/jobs/{j['id']}/upcoming").status_code == 200, "a read only needs one plant in scope"
+
+
+@pytest.mark.pg
+def test_a_scoped_creators_scope_is_stored_and_applied_at_fire_time(mapi, mp_pg):
+    import brain
+    import backend.jobs.data as data
+    import backend.jobs.runner as rn
+    from backend.security import auth
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [mp_pg.plant]
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}])
+    assert data.get_job(j["id"])["scope_plants"] == [mp_pg.plant]
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    assert data.get_job(mk(mapi, mp_pg.plant)["id"])["scope_plants"] is None, "an unrestricted creator has no scope"
+    # An unrestricted admin widens the targets; the creator's stored scope still limits who actually runs.
+    mapi.patch(f"/jobs/{j['id']}", json={"targets": [{"kind": "subnetwork", "value": mp_pg.subnet}]})
+    exp = rn._expand(data.get_job(j["id"]))
+    by = {e["plant"]: e["skip"] for e in exp["plants"]}
+    assert by[mp_pg.other] == targets.SKIP_SCOPE and by[mp_pg.plant] is None, "the creator could not reach it"
+    done = wait_batch(mapi, mapi.post(f"/jobs/{j['id']}/run").json()["batch"]["id"])
+    skipped = [x for x in done["runs"] if x["error"] == targets.SKIP_SCOPE]
+    assert skipped and skipped[0]["status"] == "skipped"
+
+
+@pytest.mark.pg
+def test_restart_of_a_run_reruns_only_its_plant_and_checks_only_that_plant(mapi, mp_pg):
+    import backend.jobs.data as data
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}, {"kind": "explicit", "value": mp_pg.other}])
+    first = wait_batch(mapi, mapi.post(f"/jobs/{j['id']}/run").json()["batch"]["id"])
+    mine = next(x for x in first["runs"] if x["plant"] == mp_pg.plant)
+    theirs = next(x for x in first["runs"] if x["plant"] == mp_pg.other)
+    data.insert_run(job_id=j["id"], schedule_id=None, plant=mp_pg.other, job_type="noop", status="running", trigger="manual")
+    busy = mapi.post(f"/jobs/{j['id']}/run")
+    assert busy.status_code == 409 and mp_pg.other in busy.json()["detail"], "a 409 names what is running"
+    r = mapi.post(f"/jobs/runs/{mine['id']}/restart")
+    assert r.status_code == 200, "the other plant's run is not in this plant's way"
+    done = wait_batch(mapi, r.json()["batch"]["id"])
+    assert [x["plant"] for x in done["runs"]] == [mp_pg.plant] and done["batch"]["trigger"] == "restart"
+    again = mapi.post(f"/jobs/runs/{theirs['id']}/restart")
+    assert again.status_code == 409 and mp_pg.other in again.json()["detail"]
+
+
+@pytest.mark.pg
+def test_restart_batch_reruns_only_failed_skipped_or_cancelled_plants(mapi, mp_pg):
+    import backend.jobs.data as data
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}, {"kind": "explicit", "value": mp_pg.other},
+                                       {"kind": "explicit", "value": mp_pg.third}])
+    bid = data.insert_batch(job_id=j["id"], schedule_id=None, scheduled_for=None, trigger="manual", triggered_by="x")
+    kw = dict(job_id=j["id"], schedule_id=None, job_type="noop", trigger="manual", batch_id=bid)
+    data.insert_run(plant=mp_pg.plant, status="succeeded", **kw)
+    data.insert_run(plant=mp_pg.other, status="failed", **kw)
+    data.insert_run(plant=mp_pg.third, status="skipped", **kw)
+    data.finish_batch(bid)
+    r = mapi.post(f"/jobs/batches/{bid}/restart")
+    assert r.status_code == 200
+    done = wait_batch(mapi, r.json()["batch"]["id"])
+    assert sorted(x["plant"] for x in done["runs"]) == sorted([mp_pg.other, mp_pg.third])
+    bid2 = data.insert_batch(job_id=j["id"], schedule_id=None, scheduled_for=None, trigger="manual", triggered_by="x")
+    data.insert_run(plant=mp_pg.plant, status="succeeded", **{**kw, "batch_id": bid2})
+    data.finish_batch(bid2)
+    assert mapi.post(f"/jobs/batches/{bid2}/restart").status_code == 400
+
+
+@pytest.mark.pg
+def test_batch_cancel_skips_pending_children_and_is_scoped(mapi, mp_pg):
+    import brain
+    import backend.jobs.data as data
+    from backend.security import auth
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}, {"kind": "explicit", "value": mp_pg.other}])
+    bid = data.insert_batch(job_id=j["id"], schedule_id=None, scheduled_for=None, trigger="manual", triggered_by="x")
+    kw = dict(job_id=j["id"], schedule_id=None, job_type="noop", trigger="manual", batch_id=bid)
+    data.insert_run(plant=mp_pg.plant, status="scheduled", **kw)
+    data.insert_run(plant=mp_pg.other, status="scheduled", **kw)
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [mp_pg.plant]
+    assert mapi.post(f"/jobs/batches/{bid}/cancel").status_code == 403
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    r = mapi.post(f"/jobs/batches/{bid}/cancel")
+    assert r.status_code == 200 and r.json()["batch"]["status"] == "warning"
+    runs = mapi.get(f"/jobs/batches/{bid}").json()["runs"]
+    assert {x["status"] for x in runs} == {"skipped"} and {x["error"] for x in runs} == {"batch cancelled"}
+    assert mapi.post(f"/jobs/batches/{bid}/cancel").status_code == 409
+
+
+@pytest.mark.pg
+def test_boot_sweep_skips_unstarted_batch_children_and_the_24h_failures_ignore_them(mapi, mp_pg):
+    import backend.jobs.data as data
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}, {"kind": "explicit", "value": mp_pg.other}])
+    bid = data.insert_batch(job_id=j["id"], schedule_id=None, scheduled_for=None, trigger="schedule", triggered_by="schedule")
+    kw = dict(job_id=j["id"], schedule_id=None, job_type="noop", trigger="schedule", batch_id=bid)
+    running = data.insert_run(plant=mp_pg.plant, status="scheduled", **kw)
+    data.mark_running(running)
+    waiting = data.insert_run(plant=mp_pg.other, status="scheduled", **kw)
+    data.boot_sweep()
+    assert data.get_run(running)["status"] == "failed" and data.get_run(running)["error"] == "interrupted by restart"
+    w = data.get_run(waiting)
+    assert w["status"] == "skipped" and w["error"] == "not started: restart interrupted the batch"
+    assert w["summary"]["error_kind"] == "system"
+    h = data.run_health(allowed_plants=[mp_pg.plant, mp_pg.other], plant=None)
+    assert h["failed_24h"] == 1 and h["failed_batches_24h"] == 1
+
+
+@pytest.mark.pg
+def test_last_success_watermark_is_keyed_by_plant(mapi, mp_pg):
+    import backend.jobs.data as data
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}, {"kind": "explicit", "value": mp_pg.other}])
+    kw = dict(job_id=j["id"], schedule_id=None, job_type="noop", trigger="schedule")
+    rid = data.insert_run(plant=mp_pg.plant, status="scheduled", **kw)
+    data.mark_running(rid)
+    data.finish_run(rid, "succeeded", {"window": {"end": "2026-10-28T10:00:00+00:00"}}, None, False)
+    assert data.last_success_watermark(j["id"], None, mp_pg.plant) is not None
+    assert data.last_success_watermark(j["id"], None, mp_pg.other) is None, "another plant's success must not move it"
+
+
+@pytest.mark.pg
+def test_batch_counts_are_live_and_detail_is_paginated(mapi, mp_pg):
+    import backend.jobs.data as data
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}, {"kind": "explicit", "value": mp_pg.other}])
+    bid = data.insert_batch(job_id=j["id"], schedule_id=None, scheduled_for=None, trigger="schedule", triggered_by="schedule")
+    kw = dict(job_id=j["id"], schedule_id=None, job_type="noop", trigger="schedule", batch_id=bid)
+    data.insert_run(plant=mp_pg.plant, status="succeeded", **kw)
+    data.insert_run(plant=mp_pg.other, status="scheduled", **kw)
+    body = mapi.get(f"/jobs/batches/{bid}", params={"limit": 1}).json()
+    assert body["batch"]["status"] == "running" and body["batch"]["counts"] == {"total": 2, "succeeded": 1, "scheduled": 1}
+    assert len(body["runs"]) == 1 and body["has_more"] is True, "counts cover all plants, runs are one page"
+    page2 = mapi.get(f"/jobs/batches/{bid}", params={"limit": 1, "offset": 1}).json()
+    assert len(page2["runs"]) == 1 and page2["has_more"] is False
+    listed = mapi.get("/jobs/batches", params={"job_id": j["id"]}).json()["batches"][0]
+    assert listed["counts"]["scheduled"] == 1, "the list carries the live tally too"
+
+
+@pytest.mark.pg
+def test_jobs_list_filters_by_real_expansion_and_carries_last_batch(mapi, mp_pg):
+    import backend.jobs.data as data
+    import brain
+    from backend.security import auth
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "subnetwork", "value": mp_pg.subnet},
+                                       {"kind": "explicit", "value": mp_pg.other, "excluded": True}])
+
+    def ids(**q):
+        return [x["id"] for x in mapi.get("/jobs", params=q).json()["jobs"]]
+
+    assert j["id"] in ids(plant=mp_pg.plant) and j["id"] not in ids(plant=mp_pg.other), "an excluded plant is no match"
+    home_out = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.other}])
+    assert home_out["id"] not in ids(plant=mp_pg.plant), "the home plant is not a target here"
+    assert home_out["id"] in ids(plant=mp_pg.other)
+    bid = data.insert_batch(job_id=j["id"], schedule_id=None, scheduled_for=None, trigger="manual", triggered_by="x")
+    data.insert_run(job_id=j["id"], schedule_id=None, plant=mp_pg.plant, job_type="noop", status="failed",
+                    trigger="manual", batch_id=bid)
+    data.finish_batch(bid)
+    row = next(x for x in mapi.get("/jobs", params={"plant": mp_pg.plant}).json()["jobs"] if x["id"] == j["id"])
+    assert row["last_batch"]["id"] == bid and row["last_batch"]["status"] == "failed"
+    assert j["id"] in ids(status="failed"), "the status filter uses the last batch for a multi-plant job"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: [mp_pg.other]
+    assert home_out["id"] in ids(), "scoped visibility includes jobs that target one of the caller's plants"
+    assert j["id"] not in ids()
+
+
+@pytest.mark.pg
+def test_patch_job_revalidates_per_plant_overrides_against_new_params(mapi, mp_pg):
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.other, "params_override": {"steps": 2}}])
+    assert mapi.patch(f"/jobs/{j['id']}", json={"params": {"steps": 3}}).status_code == 200
+    back = mapi.patch(f"/jobs/{j['id']}", json={"params": {"steps": 3}, "name": "same"}).json()
+    assert back["targets"][0]["params_override"] == {"steps": 2}, "the override rows are kept"
+
+
+@pytest.mark.pg
+def test_a_timezone_agnostic_type_runs_a_plant_without_a_timezone(mapi, mp_pg, monkeypatch):
+    _noop_needs_tz(monkeypatch, False)
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}, {"kind": "explicit", "value": mp_pg.third}])
+    assert j["target_count"] == 2 and j["target_skipped"] == 0
+    done = wait_batch(mapi, mapi.post(f"/jobs/{j['id']}/run").json()["batch"]["id"])
+    assert done["batch"]["status"] == "succeeded" and done["batch"]["counts"]["total"] == 2
+
+
+@pytest.mark.pg
+def test_a_fire_returns_at_once_and_the_children_show_queued(mapi, mp_pg):
+    import backend.jobs.runner as rn
+    j = mk(mapi, mp_pg.plant, params={"steps": 1, "sleep_s": 1},
+           targets=[{"kind": "explicit", "value": mp_pg.plant}, {"kind": "explicit", "value": mp_pg.other}],
+           schedules=[{"kind": "daily", "time_of_day": "08:00", "tz_mode": "utc"}])
+    t0 = time.time()
+    bid = rn.fire_schedule(j["schedules"][0]["id"])
+    assert time.time() - t0 < 1.0, "no fire worker is held for the run"
+    first = mapi.get(f"/jobs/batches/{bid}").json()
+    assert first["batch"]["status"] == "running" and len(first["runs"]) == 2
+    assert all(x["scheduled_for"] for x in first["runs"])
+    wait_batch(mapi, bid)
+
+
+@pytest.mark.pg
+def test_an_empty_expansion_never_makes_a_green_batch(mapi, mp_pg):
+    import backend.jobs.data as data
+    import backend.jobs.runner as rn
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}])
+    bid = rn._fan_out(data.get_job(j["id"]), {"plants": [], "warnings": [], "single": False}, trigger="schedule",
+                      schedule_id=None, triggered_by="schedule", skip_if_running=True)
+    b = data.get_batch(bid)
+    assert b["status"] == "warning" and b["summary"]["note"] and b["ended_at"]
+    bid2 = data.insert_batch(job_id=j["id"], schedule_id=None, scheduled_for=None, trigger="manual", triggered_by="x")
+    assert data.finish_batch(bid2)["status"] == "warning", "a batch with no children is never succeeded"
+
+
+@pytest.mark.pg
+def test_a_re_armed_once_a_day_fire_does_not_run_the_same_plant_twice_on_a_local_date(mapi, mp_pg):
+    import backend.jobs.runner as rn
+    j = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}],
+           schedules=[{"kind": "daily", "time_of_day": "08:00"}])
+    sid = j["schedules"][0]["id"]
+    wait_batch(mapi, rn.fire_schedule(sid, mp_pg.plant))
+    assert rn.fire_schedule(sid, mp_pg.plant) is None, "already ran today (a timezone edit re-armed the fire)"
+    hourly = mk(mapi, mp_pg.plant, targets=[{"kind": "explicit", "value": mp_pg.plant}], schedules=[{"kind": "hourly", "time_of_day": "00:15"}])
+    hid = hourly["schedules"][0]["id"]
+    wait_batch(mapi, rn.fire_schedule(hid, mp_pg.plant))
+    assert rn.fire_schedule(hid, mp_pg.plant), "hourly fires are not deduplicated"

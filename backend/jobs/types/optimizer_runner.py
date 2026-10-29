@@ -288,9 +288,11 @@ def _fail(steps: _Steps, error: str, *, kind: str = "system", step: str | None =
 def run_optimizer(ctx, plant: str, params) -> dict:
     """The `optimizer.set_runner` callable. Never raises except JobCancelled; every other failure is a failed result."""
     steps = _Steps(ctx)
-    ctx.log("info", "waiting for an optimizer slot", step="queue")
-    while not _SLOTS.acquire(timeout=0.5):
-        ctx.check_cancel()
+    held = bool(getattr(ctx, "slot_held", False))      # the runner took the slot before the global semaphore
+    if not held:
+        ctx.log("info", "waiting for an optimizer slot", step="queue")
+        while not _SLOTS.acquire(timeout=0.5):
+            ctx.check_cancel()
     getattr(ctx, "begin_work", lambda: None)()    # the run's time limit starts now, not while it queued for the slot
     try:
         return _run(ctx, plant, params, steps)
@@ -300,7 +302,8 @@ def run_optimizer(ctx, plant: str, params) -> dict:
         ctx.log("error", f"optimizer run failed: {type(exc).__name__}: {exc}")
         return _fail(steps, f"{type(exc).__name__}: {exc}", log=False)
     finally:
-        _SLOTS.release()
+        if not held:
+            _SLOTS.release()
 
 
 def _with_stored_delta(patches: list, wire: dict) -> list:

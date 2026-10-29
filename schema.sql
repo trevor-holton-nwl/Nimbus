@@ -2389,3 +2389,4 @@ CREATE INDEX IF NOT EXISTS idx_job_run_batch ON job_run (batch_id) WHERE batch_i
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS tz_mode TEXT NOT NULL DEFAULT 'plant' CHECK (tz_mode IN ('plant','fixed','utc'));
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS fixed_timezone TEXT;
 ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS fan_out JSONB;
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS scope_plants JSONB;

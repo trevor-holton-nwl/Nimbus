@@ -89,7 +89,7 @@ def _job_row(**kw):
     row = {"id": 5, "plant": "1008", "job_type": "optimizer.plant", "name": "Morning optimize",
            "params": {"mode": "due_date"}, "enabled": True, "archived": False, "retry_max": 0, "timeout_s": None,
            "created_by": "a", "modified_by": "a", "created_at": datetime(2026, 10, 28, 14, tzinfo=UTC),
-           "modified_at": datetime(2026, 10, 28, 14, tzinfo=UTC), "schedules": [_sched_row()], "last_run": _run_row(),
+           "modified_at": datetime(2026, 10, 28, 14, tzinfo=UTC), "schedules": [_sched_row()], "last_run": _run_row(), "last_batch": _batch_row(),
            "fan_out": {"stagger_s": 30, "max_parallel": 2, "fail_fast": False},
            "targets": [{"kind": "explicit", "value": "1008", "excluded": False, "params_override": {"mode": "spt"}}]}
     return {**row, **kw}
@@ -113,7 +113,7 @@ def client(monkeypatch):
     monkeypatch.setattr("backend.scheduling.routes.optimizer_snapshot_version", lambda plant: "v1")
     monkeypatch.setattr(data, "run_health", lambda **kw: {"running": 1, "queued": 0, "failed_24h": 2,
                                                           "failed_config_24h": 1, "failed_system_24h": 0,
-                                                          "failed_transient_24h": 1, "missed_24h": 0,
+                                                          "failed_transient_24h": 1, "failed_batches_24h": 1, "missed_24h": 0,
                                                           "warning_24h": 1, "longer_than_usual": [43]})
     monkeypatch.setattr(data, "next_fire_schedules", lambda **kw: [
         {**_sched_row(), "job_name": "Morning optimize", "plant": "1008"}])
@@ -124,12 +124,14 @@ def client(monkeypatch):
         {"plant": "1021", "subnetworks": ["NA"], "timezone": None},
         {"plant": "NOTZ", "subnetworks": ["EU"], "timezone": None}])
     monkeypatch.setattr(data, "get_batch", lambda bid: _batch_row() if bid == 9 else None)
-    monkeypatch.setattr(data, "batch_runs", lambda bid, allowed, limit=500: [_run_row(batch_id=9)] if bid == 9 else [])
+    monkeypatch.setattr(data, "batch_runs", lambda bid, allowed, limit=500, offset=0: [_run_row(batch_id=9)] if bid == 9 else [])
     monkeypatch.setattr(data, "list_batches", lambda **kw: {"batches": [_batch_row()], "next_before_id": 8})
     monkeypatch.setattr(data, "set_targets", lambda jid, rows, actor: None)
     monkeypatch.setattr(data, "plant_exists", lambda plant: True)
     monkeypatch.setattr(data, "plant_has_timezone", lambda plant: plant != "NOTZ")
-    monkeypatch.setattr(data, "has_active_run", lambda jid: False)
+    monkeypatch.setattr(data, "active_runs", lambda jid, plant=None, limit=20: [])
+    monkeypatch.setattr(data, "batch_latest_statuses", lambda ids, allowed=None: {b: ["succeeded", "warning", "skipped"] for b in ids})
+    monkeypatch.setattr(data, "batch_latest_by_plant", lambda bid: {"1008": "failed", "1021": "succeeded"})
     monkeypatch.setattr(data, "get_job", lambda jid: jobs.get(jid))
     monkeypatch.setattr(data, "get_schedule", lambda sid: _sched_row() if sid == 11 else None)
     monkeypatch.setattr(data, "list_jobs", lambda **kw: {"jobs": list(jobs.values()), "next_before_id": 4})
@@ -138,7 +140,7 @@ def client(monkeypatch):
     monkeypatch.setattr(data, "list_log", lambda rid, **kw: [] if kw.get("after_seq") else [
         {"seq": 1, "at": "2026-10-29T12:00:01+00:00", "level": "info", "step": "load", "msg": "loaded 120 orders",
          "duration_ms": 850, "data": {}}])
-    monkeypatch.setattr(data, "last_success_watermark", lambda jid, before=None: None)
+    monkeypatch.setattr(data, "last_success_watermark", lambda jid, before=None, plant=None: None)
     art = {"sections": [{"key": "counts", "title": "Changes", "columns": [{"key": "value", "label": "value", "type": "text"},
                                                                           {"key": "events", "label": "events", "type": "number"}],
                          "rows": [["drag", 3], ["=cmd", 1], ["note", 2]], "row_count": 3, "truncated": False}],
@@ -147,11 +149,12 @@ def client(monkeypatch):
         {"run_id": rid, "filename": "report-1008-run42.json", "content_type": "application/json", "row_count": 3,
          "size_bytes": 512, "created_at": "2026-10-29T12:03:40+00:00", "artifact": art} if rid == 42 else None))
     monkeypatch.setattr(data, "create_job", lambda **kw: 5)
-    monkeypatch.setattr(data, "patch_job", lambda jid, fields, actor: True)
+    monkeypatch.setattr(data, "patch_job", lambda jid, fields, actor, **kw: True)
     monkeypatch.setattr(data, "add_schedule", lambda jid, s, actor: 11)
     monkeypatch.setattr(data, "patch_schedule", lambda sid, norm, flags, actor: True)
-    monkeypatch.setattr(runner, "start_manual_run", lambda job, actor, trigger="manual": 42)
+    monkeypatch.setattr(runner, "start_manual_run", lambda job, actor, trigger="manual", only_plants=None: 42)
     monkeypatch.setattr(runner, "cancel_run", lambda rid: runs[rid])
+    monkeypatch.setattr(runner, "cancel_batch", lambda bid: _batch_row(status="warning"))
     app = FastAPI()
     app.include_router(routes.router)
     app.dependency_overrides[auth.require_authenticated] = lambda: "admin@example.com"
@@ -276,8 +279,9 @@ def test_run_filters_and_restart(client, monkeypatch):
     assert seen["since"] is not None
     assert client.get("/jobs/runs?periodicity=yearly").status_code == 400
     _check(client.post("/jobs/runs/42/restart").json(), "run_started")
-    monkeypatch.setattr(data, "has_active_run", lambda jid: True)
-    assert client.post("/jobs/runs/42/restart").status_code == 409
+    monkeypatch.setattr(data, "active_runs", lambda jid, plant=None, limit=20: [{"plant": "1008", "status": "running"}])
+    r = client.post("/jobs/runs/42/restart")
+    assert r.status_code == 409 and "1008 (running)" in r.json()["detail"], "the 409 names what is running"
 
 
 def test_proposal_of_a_dry_run(client):
@@ -307,7 +311,7 @@ def test_log_page_stops_on_done(client):
 
 
 def test_run_now_conflicts_while_a_run_is_active(client, monkeypatch):
-    monkeypatch.setattr(data, "has_active_run", lambda jid: True)
+    monkeypatch.setattr(data, "active_runs", lambda jid, plant=None, limit=20: [{"plant": "1008", "status": "running"}])
     r = client.post("/jobs/5/run")
     assert r.status_code == 409 and "already" in r.json()["detail"]
 
@@ -357,6 +361,17 @@ def test_batches_list_and_detail(client):
     _check(body, "batch_detail")
     assert body["runs"][0]["batch_id"] == 9
     assert client.get("/jobs/batches/99").status_code == 404
+    assert client.get("/jobs/batches/9?limit=1&offset=1").status_code == 200, "an empty later page is not a 404"
+
+
+def test_batch_cancel_and_restart_routes(client, monkeypatch):
+    assert client.post("/jobs/batches/9/cancel").status_code == 409, "the fixture batch is finished"
+    assert client.post("/jobs/batches/99/cancel").status_code == 404
+    monkeypatch.setattr(data, "get_batch", lambda bid: _batch_row(status="running") if bid == 9 else None)
+    _check(client.post("/jobs/batches/9/cancel").json(), "batch_cancelled")
+    _check(client.post("/jobs/batches/9/restart").json(), "run_started")        # re-runs the failed plant only
+    monkeypatch.setattr(data, "batch_latest_by_plant", lambda bid: {"1008": "succeeded"})
+    assert client.post("/jobs/batches/9/restart").status_code == 400, "nothing failed in the batch"
     assert client.get("/jobs/batches?status=nope").status_code == 400
 
 

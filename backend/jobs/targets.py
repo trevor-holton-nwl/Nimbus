@@ -23,6 +23,7 @@ ALL_VALUE = "*"
 SKIP_NO_TZ = "plant has no timezone"
 SKIP_BAD_TZ = "plant timezone is not a valid IANA zone"
 SKIP_GONE = "plant no longer exists"
+SKIP_SCOPE = "out of creator scope"
 
 
 class TargetError(ValueError):
@@ -79,13 +80,20 @@ def _tz_state(tz: str | None) -> tuple[str | None, str | None]:
     return tz, None
 
 
-def expand_targets(job: dict, now: datetime | None = None, *, plants: list[dict]) -> dict:
+def expand_targets(job: dict, now: datetime | None = None, *, plants: list[dict], require_tz: bool = True,
+                   apply_scope: bool = True) -> dict:
     """Ordered plants a job runs for. `job` carries `plant` (home) and `targets` (rows as stored). `plants` is the plant
     master list `[{plant, subnetworks:[...], timezone}]`. `now` is reserved (membership is not time-dependent yet).
 
     Returns `{"plants": [{plant, timezone, skip, params_override}], "warnings": [str], "single": bool}`; a plant with
     `skip` set is still listed (the runner records a skipped child run `config` for it; scheduling never arms it).
-    A job without target rows expands to its home plant only, `single` true, and is run exactly as before."""
+    A job without target rows expands to its home plant only, `single` true, and is run exactly as before.
+
+    `require_tz`: a plant with no (or an invalid) timezone is skipped only when True (a schedule read in each plant's
+    own zone, or a job type that cannot run without one); a fixed / UTC schedule or a timezone-agnostic type runs it.
+    `apply_scope`: a job saved by a plant-scoped admin carries `scope_plants`; plants outside it are listed with
+    `skip` = SKIP_SCOPE (never armed, recorded as a skipped child) so a subnetwork that later grows cannot reach
+    plants the creator could not."""
     rows = job.get("targets") or []
     by_code = {p["plant"]: p for p in plants}
     if not rows:
@@ -122,10 +130,15 @@ def expand_targets(job: dict, now: datetime | None = None, *, plants: list[dict]
                 overrides[code] = {}
             if r.get("params_override"):
                 overrides[code] = deep_merge(overrides[code], r["params_override"])
+    scope = set(job["scope_plants"]) if apply_scope and job.get("scope_plants") is not None else None
     out, warnings = [], []
     for code in order:
         p = by_code.get(code)
         tz, skip = _tz_state(p["timezone"]) if p else (None, SKIP_GONE)
+        if skip in (SKIP_NO_TZ, SKIP_BAD_TZ) and not require_tz:
+            skip = None
+        if scope is not None and code not in scope:
+            skip = SKIP_SCOPE
         if skip:
             warnings.append(f"{code}: {skip}")
         out.append({"plant": code, "timezone": tz, "skip": skip, "params_override": overrides[code]})
