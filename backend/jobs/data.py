@@ -291,11 +291,12 @@ def list_jobs(*, allowed_plants, plant, job_type, status, q, include_archived, l
     """Newest-first page of definitions with their schedules and last run attached (raw dicts)."""
     sql = f"""
     SELECT d.id FROM job_definition d
-      LEFT JOIN LATERAL (SELECT status FROM job_run r WHERE r.job_id = d.id ORDER BY r.id DESC LIMIT 1) lr ON TRUE
+      LEFT JOIN LATERAL (SELECT status, error FROM job_run r WHERE r.job_id = d.id ORDER BY r.id DESC LIMIT 1) lr ON TRUE
      WHERE (%(allowed)s::text[] IS NULL OR d.plant = ANY(%(allowed)s))
        AND (%(plant)s::text IS NULL OR d.plant = %(plant)s)
        AND (%(jt)s::text IS NULL OR d.job_type = %(jt)s)
-       AND (%(status)s::text IS NULL OR lr.status = %(status)s)
+       AND (%(status)s::text IS NULL OR lr.status = %(status)s
+            OR (%(status)s = 'missed' AND lr.status = 'skipped' AND lr.error LIKE 'missed:%%'))
        AND (%(q)s::text IS NULL OR d.name ILIKE %(q)s)
        AND (%(arch)s OR NOT d.archived)
        AND (%(before)s::bigint IS NULL OR d.id < %(before)s)
@@ -387,21 +388,86 @@ def get_run(run_id: int) -> dict | None:
         return cur.fetchone()
 
 
-def list_runs(*, allowed_plants, plant, job_id, status, limit, before_id) -> dict:
+MISSED_PREFIX = "missed:"          # record_skipped's reason for a fire that missed its grace time
+PERIODICITIES = ("once", "hourly", "daily", "weekdays", "weekly", "monthly", "cron", "manual")
+
+
+def list_runs(*, allowed_plants, plant, job_id, status, limit, before_id, periodicity=None, scheduled_by=None,
+              since=None) -> dict:
+    """`status='missed'` is a synthetic filter: skipped runs recorded for a misfire. `periodicity` is the schedule
+    kind (or `manual` for runs with no schedule); `scheduled_by` is `triggered_by` ('schedule' or an admin email)."""
     with db._pool.connection() as conn, _cur(conn) as cur:
         cur.execute(
             f"SELECT {_RUN_COLS} FROM job_run r JOIN job_definition d ON d.id = r.job_id"
+            " LEFT JOIN job_schedule s ON s.id = r.schedule_id"
             " WHERE (%(allowed)s::text[] IS NULL OR r.plant = ANY(%(allowed)s))"
             "   AND (%(plant)s::text IS NULL OR r.plant = %(plant)s)"
             "   AND (%(job)s::bigint IS NULL OR r.job_id = %(job)s)"
-            "   AND (%(status)s::text IS NULL OR r.status = %(status)s)"
+            "   AND (%(status)s::text IS NULL OR r.status = %(status)s"
+            "        OR (%(status)s = 'missed' AND r.status = 'skipped' AND r.error LIKE 'missed:%%'))"
+            "   AND (%(period)s::text IS NULL OR COALESCE(s.kind, 'manual') = %(period)s)"
+            "   AND (%(by)s::text IS NULL OR r.triggered_by = %(by)s)"
+            "   AND (%(since)s::timestamptz IS NULL OR COALESCE(r.ended_at, r.created_at) >= %(since)s)"
             "   AND (%(before)s::bigint IS NULL OR r.id < %(before)s)"
             " ORDER BY r.id DESC LIMIT %(lim)s",
-            {"allowed": allowed_plants, "plant": plant, "job": job_id, "status": status,
-             "before": before_id, "lim": limit + 1})
+            {"allowed": allowed_plants, "plant": plant, "job": job_id, "status": status, "period": periodicity,
+             "by": scheduled_by, "since": since, "before": before_id, "lim": limit + 1})
         rows = cur.fetchall()
     page = rows[:limit]
     return {"runs": page, "next_before_id": page[-1]["id"] if len(rows) > limit and page else None}
+
+
+LONGER_MIN_RUNS = 3
+LONGER_FLOOR_S = 300
+LONGER_FACTOR = 2.0
+
+
+def longer_than_usual(elapsed_s: float, history_s: list[float]) -> bool:
+    """Pure: a running run is 'longer than usual' once it exceeds max(2x the median of the job's last finished
+    runs, 5 min) and at least LONGER_MIN_RUNS finished runs exist."""
+    if len(history_s) < LONGER_MIN_RUNS:
+        return False
+    s = sorted(history_s)
+    n = len(s)
+    median = s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+    return elapsed_s > max(LONGER_FACTOR * median, LONGER_FLOOR_S)
+
+
+def run_health(*, allowed_plants, plant, hours: int = 24) -> dict:
+    """Counts behind GET /jobs/summary: live runs, 24 h outcomes and the ids of runs running longer than usual."""
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute(
+            "SELECT"
+            " COUNT(*) FILTER (WHERE r.status = 'running') AS running,"
+            " COUNT(*) FILTER (WHERE r.status = 'scheduled') AS queued,"
+            " COUNT(*) FILTER (WHERE r.status = 'failed' AND r.ended_at >= now() - make_interval(hours => %(h)s)) AS failed,"
+            " COUNT(*) FILTER (WHERE r.status = 'warning' AND r.ended_at >= now() - make_interval(hours => %(h)s)) AS warn,"
+            " COUNT(*) FILTER (WHERE r.status = 'skipped' AND r.error LIKE 'missed:%%'"
+            "                  AND r.ended_at >= now() - make_interval(hours => %(h)s)) AS missed"
+            " FROM job_run r"
+            " WHERE (%(allowed)s::text[] IS NULL OR r.plant = ANY(%(allowed)s))"
+            "   AND (%(plant)s::text IS NULL OR r.plant = %(plant)s)"
+            "   AND (r.status IN ('scheduled','running') OR r.ended_at >= now() - make_interval(hours => %(h)s))",
+            {"allowed": allowed_plants, "plant": plant, "h": hours})
+        c = cur.fetchone()
+        cur.execute(
+            "SELECT r.id, r.job_id, EXTRACT(EPOCH FROM (clock_timestamp() - r.started_at)) AS elapsed"
+            " FROM job_run r WHERE r.status = 'running' AND r.started_at IS NOT NULL"
+            "   AND (%(allowed)s::text[] IS NULL OR r.plant = ANY(%(allowed)s))"
+            "   AND (%(plant)s::text IS NULL OR r.plant = %(plant)s)",
+            {"allowed": allowed_plants, "plant": plant})
+        live = cur.fetchall()
+        longer: list[int] = []
+        for r in live:
+            cur.execute(
+                "SELECT EXTRACT(EPOCH FROM (ended_at - started_at)) AS s FROM job_run WHERE job_id = %s"
+                " AND status IN ('succeeded','warning') AND started_at IS NOT NULL AND ended_at IS NOT NULL"
+                " ORDER BY id DESC LIMIT 10", (r["job_id"],))
+            hist = [float(x["s"]) for x in cur.fetchall()]
+            if longer_than_usual(float(r["elapsed"] or 0), hist):
+                longer.append(r["id"])
+    return {"running": c["running"], "queued": c["queued"], "failed_24h": c["failed"], "missed_24h": c["missed"],
+            "warning_24h": c["warn"], "longer_than_usual": sorted(longer)}
 
 
 def write_log_rows(run_id: int, rows: list[dict]) -> None:
@@ -436,6 +502,7 @@ def boot_sweep() -> int:
     Single-replica assumption (a second replica would clobber the first one's live runs)."""
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("UPDATE job_run SET status = 'failed', error = 'interrupted by restart',"
+                    " summary = COALESCE(summary, '{}'::jsonb) || '{\"error_kind\": \"system\"}'::jsonb,"
                     " ended_at = clock_timestamp() WHERE status IN ('scheduled','running')")
         n = cur.rowcount
         conn.commit()

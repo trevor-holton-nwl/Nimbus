@@ -139,8 +139,8 @@ def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, schedu
                 run_id = data.insert_run(job_id=job_id, schedule_id=schedule_id, plant=job["plant"],
                                          job_type=job["job_type"], status="scheduled", trigger=trigger,
                                          attempt=attempt, scheduled_for=scheduled_for, triggered_by=triggered_by)
-            if err:
-                data.finish_run(run_id, "failed", None, err, False)
+            if err:                                       # an unknown type or bad params: the job needs fixing
+                data.finish_run(run_id, "failed", {"error_kind": "config", "failed_step": "validate"}, err, False)
                 return run_id
             status = _execute(run_id, job, jt, params, skip_if_running)
             if status != "failed" or attempt > int(job["retry_max"] or 0):
@@ -159,7 +159,7 @@ def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, schedu
         _log_event("error", "jobs", "job runner crashed", exc=exc, job_id=job_id)
         if run_id is not None:
             try:
-                data.finish_run(run_id, "failed", None, f"runner error: {exc}", False)
+                data.finish_run(run_id, "failed", {"error_kind": "system"}, f"runner error: {exc}", False)
             except Exception:  # noqa: BLE001
                 pass
         return run_id
@@ -243,6 +243,7 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
                 if row and row["cancel_requested"]:
                     ctx.cancel_event.set()
         status, summary, error = _resolve(holder, ctx, th, timeout)
+        summary = _describe_failure(status, summary, ctx)
         ctx.log("info" if status in ("succeeded", "cancelled") else "warn", f"run finished: {status}"
                 + (f" ({error})" if error else ""))
         ctx.flush()
@@ -251,6 +252,23 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
     finally:
         with _RUNNING_LOCK:
             _RUNNING.pop(run_id, None)
+
+
+def _describe_failure(status: str, summary: dict | None, ctx: JobContext) -> dict | None:
+    """A failed run always carries `error_kind` (config = fix the job or its inputs, system = fix the platform:
+    timeout, crash, interrupted), `failed_step` (the step an exception escaped from, else the last step that logged
+    an error) and `steps` (the timings the body reported, else those `ctx.step` recorded)."""
+    if status != "failed":
+        return summary
+    out = dict(summary or {})
+    out.setdefault("error_kind", "system")
+    if not out.get("failed_step"):
+        step = ctx.failed_step or ctx.last_error_step
+        if step:
+            out["failed_step"] = step
+    if not out.get("steps") and ctx.step_timings:
+        out["steps"] = list(ctx.step_timings)
+    return out
 
 
 def _resolve(holder: dict, ctx: JobContext, th: threading.Thread, timeout: int) -> tuple[str, dict | None, str | None]:

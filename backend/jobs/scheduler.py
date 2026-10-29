@@ -82,10 +82,27 @@ def reconcile(scheduler) -> dict:
     return out
 
 
+HEARTBEAT_STALE_S = 180        # three missed 60 s ticks: the scheduler is not ticking
+_LAST_TICK: dict[str, datetime | None] = {"at": None}
+
+
+def record_tick(now: datetime | None = None) -> None:
+    _LAST_TICK["at"] = now or datetime.now(timezone.utc)
+
+
+def heartbeat(now: datetime | None = None) -> dict:
+    """{ok, last_tick_at}: in-process only (a restart clears it; the install-time reconcile counts as a tick)."""
+    at = _LAST_TICK["at"]
+    now = now or datetime.now(timezone.utc)
+    ok = at is not None and (now - at).total_seconds() <= HEARTBEAT_STALE_S
+    return {"ok": ok, "last_tick_at": at.isoformat(timespec="seconds") if at else None}
+
+
 async def _reconcile_tick(scheduler) -> None:
     from fastapi.concurrency import run_in_threadpool
     try:
         await run_in_threadpool(reconcile, scheduler)
+        record_tick()
     except Exception as exc:  # noqa: BLE001
         _log_event("error", "jobs", "job reconcile raised", exc=exc)
 
@@ -136,6 +153,7 @@ def _install(scheduler) -> None:
     try:
         res = reconcile(scheduler)
         _log_event("info", "jobs", "job schedules armed", **res)
+        record_tick()
     except Exception as exc:  # noqa: BLE001 - the 60 s tick retries
         _log_event("error", "jobs", "initial job reconcile failed", exc=exc)
     scheduler.add_listener(_on_missed, EVENT_JOB_MISSED)

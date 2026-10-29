@@ -20,7 +20,8 @@ router = APIRouter()
 _BIGINT = 9223372036854775807
 _GRACE = timedelta(minutes=1)
 _ADMIN = [Depends(auth.require_api_key), Depends(auth.require_admin)]
-_STATUSES = ("scheduled", "running", "succeeded", "warning", "failed", "cancelled", "skipped")
+_STATUSES = ("scheduled", "running", "succeeded", "warning", "failed", "cancelled", "skipped", "missed")
+PROPOSAL_ROW_CAP = 200
 
 
 # ----------------------------------------------------------------------------------------------- request bodies
@@ -204,6 +205,31 @@ def list_jobs(
     return {"jobs": [_job_wire(j) for j in page["jobs"]], "next_before_id": page["next_before_id"]}
 
 
+@router.get("/jobs/summary", dependencies=[Depends(auth.require_authenticated)])
+def jobs_summary(
+    response: Response,
+    plant: str | None = Query(None),
+    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+):
+    """Health strip: live run counts, 24 h outcomes, the next fire, the scheduler heartbeat and the ids of runs
+    that are taking longer than the job's usual."""
+    from backend.jobs import scheduler
+    if plant:
+        _check_plant(plant, allowed_plants)
+    response.headers["Cache-Control"] = "no-store"
+    health = data.run_health(allowed_plants=allowed_plants, plant=plant)
+    page = data.list_jobs(allowed_plants=allowed_plants, plant=plant, job_type=None, status=None, q=None,
+                          include_archived=False, limit=200, before_id=None)
+    entries = []
+    for j in page["jobs"]:
+        entries += _job_upcoming(j, 1)
+    entries.sort(key=lambda e: e["at_utc"])
+    nxt = entries[0] if entries else None
+    return {**health,
+            "next_fire": ({k: nxt[k] for k in ("at_utc", "at_local", "job_id", "job_name", "plant")} if nxt else None),
+            "scheduler": scheduler.heartbeat()}
+
+
 @router.get("/jobs/upcoming", dependencies=[Depends(auth.require_authenticated)])
 def upcoming_all(
     response: Response,
@@ -351,6 +377,9 @@ def list_runs(
     plant: str | None = Query(None),
     job_id: int | None = Query(None, ge=1, le=_BIGINT),
     status: str | None = Query(None),
+    periodicity: str | None = Query(None),
+    scheduled_by: str | None = Query(None, max_length=200),
+    since_hours: int | None = Query(None, ge=1, le=168),
     limit: int = Query(50, ge=1, le=200),
     before_id: int | None = Query(None, ge=1, le=_BIGINT),
     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
@@ -359,9 +388,12 @@ def list_runs(
         _check_plant(plant, allowed_plants)
     if status and status not in _STATUSES:
         raise HTTPException(status_code=400, detail="unknown status")
+    if periodicity and periodicity not in data.PERIODICITIES:
+        raise HTTPException(status_code=400, detail="unknown periodicity")
     response.headers["Cache-Control"] = "no-store"
+    since = datetime.now(timezone.utc) - timedelta(hours=since_hours) if since_hours else None
     page = data.list_runs(allowed_plants=allowed_plants, plant=plant, job_id=job_id, status=status, limit=limit,
-                          before_id=before_id)
+                          before_id=before_id, periodicity=periodicity, scheduled_by=scheduled_by, since=since)
     return {"runs": [data.run_to_wire(r) for r in page["runs"]], "next_before_id": page["next_before_id"]}
 
 
@@ -381,7 +413,52 @@ def get_run(run_id: int, response: Response,
     return {"run": data.run_to_wire(run)}
 
 
-@router.get("/jobs/runs/{run_id}/log", dependencies=[Depends(auth.require_authenticated)])
+def _hours_between(a: str | None, b: str | None) -> float | None:
+    try:
+        return round((datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds() / 3600, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+@router.get("/jobs/runs/{run_id}/proposal", dependencies=[Depends(auth.require_authenticated)])
+def run_proposal(run_id: int, response: Response,
+                 allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """A dry run's stored proposal joined to the live orders: current machine, finish now vs proposed finish, delta
+    and status. Read-only; a dry run is never applied, so there is nothing to approve or discard."""
+    import db
+    run = _run_or_404(run_id, allowed_plants)
+    summ = run["summary"] or {}
+    if run["job_type"] != "optimizer.plant" or summ.get("apply_mode") != "propose":
+        raise HTTPException(status_code=400, detail="Only a dry run has a proposal")
+    response.headers["Cache-Control"] = "no-store"
+    prop = summ.get("proposal")
+    if not isinstance(prop, dict):
+        return {"run_id": run_id, "plant": run["plant"], "total": int(summ.get("moved") or 0), "shown": 0, "rows": [],
+                "findings": [], "board_matches": None, "truncated": True}
+    patches = [p for p in (prop.get("patches") or []) if isinstance(p, dict) and p.get("id") is not None]
+    live = {t["id"]: t for t in db.get_task_versions([str(p["id"]) for p in patches])}
+    rows = []
+    for p in patches:
+        t = live.get(str(p["id"]))
+        before, after = (t or {}).get("end_date"), p.get("end_date")
+        rows.append({"id": str(p["id"]), "machine": (t or {}).get("MACHINE"), "finish_before": before,
+                     "finish_after": after, "delta_hours": _hours_between(before, after),
+                     "status": (t or {}).get("planning_status"),
+                     "changed_since": t is None or t.get("row_version") != p.get("base_version")})
+    rows.sort(key=lambda r: -abs(r["delta_hours"] or 0))
+    matches = None
+    try:
+        from backend.scheduling import routes as sched
+        if prop.get("snapshot_version"):
+            matches = sched.optimizer_snapshot_version(run["plant"]) == prop["snapshot_version"]
+    except Exception:  # noqa: BLE001 - a version read failure is "unknown", not an error page
+        matches = None
+    return {"run_id": run_id, "plant": run["plant"], "total": len(rows), "shown": min(len(rows), PROPOSAL_ROW_CAP),
+            "rows": rows[:PROPOSAL_ROW_CAP], "findings": prop.get("findings") or [], "board_matches": matches,
+            "truncated": False}
+
+
+@router.get("/jobs/runs/{run_id}/log",dependencies=[Depends(auth.require_authenticated)])
 def run_log(
     run_id: int,
     response: Response,
@@ -400,6 +477,20 @@ def run_log(
     return {"run_id": run_id, "status": fresh["status"], "log_truncated": fresh["log_truncated"],
             "done": fresh["status"] in data.TERMINAL, "lines": lines,
             "last_seq": lines[-1]["seq"] if lines else after_seq}
+
+
+@router.post("/jobs/runs/{run_id}/restart", dependencies=_ADMIN)
+def restart_run(run_id: int, actor: str | None = Depends(auth.require_admin),
+                allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Run the same job again with its current params, as a manual run (the old run is left as it was)."""
+    run = _run_or_404(run_id, allowed_plants)
+    job = _job_or_404(run["job_id"], allowed_plants)
+    if job["archived"]:
+        raise HTTPException(status_code=409, detail="Job is archived")
+    if data.has_active_run(job["id"]):
+        raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
+    new_id = runner.start_manual_run(job, actor)
+    return {"run": data.run_to_wire(data.get_run(new_id))}
 
 
 @router.post("/jobs/runs/{run_id}/cancel", dependencies=_ADMIN)

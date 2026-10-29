@@ -835,6 +835,7 @@ _ADMIN_WRITE_OPERATIONS = {
     "/jobs/schedules/{schedule_id}": "jobs.schedule_update",
     "/jobs/{job_id}/run": "jobs.run_now",
     "/jobs/runs/{run_id}/cancel": "jobs.run_cancel",
+    "/jobs/runs/{run_id}/restart": "jobs.run_restart",
 }
 
 _ADMIN_TARGET_PARAMS = frozenset({"plant", "machine", "override_id", "table", "column", "object", "username", "batch_id", "archive_id", "job_id", "schedule_id", "run_id"})

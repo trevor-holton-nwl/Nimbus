@@ -25,7 +25,7 @@ class OptimizerParams(BaseModel):
     mode: Literal["due_date", "min_changeover", "spt"] = "due_date"
     search: Literal["normal", "exhaustive"] = "exhaustive"
     respect_firmed: bool = True
-    apply_mode: Literal["propose", "apply"] = "propose"   # the Jobs dialog defaults to "apply" (owner decision)
+    apply_mode: Literal["propose", "apply"] = "apply"   # "propose" is a dry run: viewable, never applied (owner 2026-10-28)
 
 
 RunnerFn = Callable[[object, str, OptimizerParams], dict]
@@ -59,7 +59,8 @@ def run(ctx, params: OptimizerParams) -> JobOutcome:
                     f"result {params.apply_mode}")
     result = _runner(ctx, ctx.plant, params) or {}
     keys = ("late", "changeovers", "moved", "applied", "dropped", "action_id", "warnings", "steps", "setup_minutes",
-            "search_complete", "termination", "tool_blocked", "proposal", "proposal_truncated")
+            "search_complete", "termination", "tool_blocked", "proposal", "proposal_truncated", "error_kind",
+            "failed_step")
     summary = {k: result[k] for k in keys if k in result}
     summary.update({"mode": params.mode, "search": params.search, "apply_mode": params.apply_mode})
     if result.get("status") == "failed":
