@@ -897,7 +897,7 @@ function normalizeBacklogRunDates(plant: string, opts: Record<string, unknown>):
  * receive a fabricated disposition or clearing patch. */
 function backlogValidationScope(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, lines: ReadonlySet<string> | null,
-  from: Date, to: Date,
+  from: Date, to: Date, held: ReadonlySet<string> = new Set(),
 ): { scopeTaskIds: string[]; boundaryTaskIds: string[] } {
   const candidates = snapshot.tasks.filter(task => {
     const line = String(task.MACHINE ?? 'Unknown');
@@ -912,7 +912,8 @@ function backlogValidationScope(
     return start && end && end > start ? [{ task, start, usableRuntime: Number.isFinite(runtimeHours) && runtimeHours > 0 }] : [];
   });
   const selected = new Set(valid
-    .filter(({ start, usableRuntime }) => usableRuntime && start >= from && start < to)
+    // `held` (holdRunning): an order left where it is is a boundary row, never a scope row the run must account for.
+    .filter(({ task, start, usableRuntime }) => usableRuntime && start >= from && start < to && !held.has(String(task.id)))
     .map(({ task }) => String(task.id)));
   return {
     scopeTaskIds: valid.filter(({ task }) => selected.has(String(task.id))).map(({ task }) => String(task.id)),
@@ -2171,11 +2172,15 @@ export const Engine = {
    *  calendar cannot place ends it too, reported in `failure`. Callers own the surrounding calendar run. */
   placeForwardSequence<T extends ForwardSequenceItem>(
     line: string, items: ReadonlyArray<T>, from: Date, policy: SplitOrderPolicy,
-    opts: { stopWhen?: (item: T, cursor: Date) => boolean; plantTz?: string | null } = {},
+    opts: { stopWhen?: (item: T, cursor: Date) => boolean; plantTz?: string | null;
+            /** Fixed intervals on the line (orders that must not move): a placement that would overlap one restarts from
+             *  its end, so the sequence is planned AROUND them. Absent: the walk is unchanged. */
+            obstacles?: ReadonlyArray<{ start: Date; end: Date }> } = {},
   ): ForwardSequenceResult<T> {
     const out: ForwardSequenceResult<T> = { placed: [], invalidRuntime: [], overlong: [], failure: null };
     let cursor = new Date(from);
-    for (const item of items) {
+    const obstacles = [...(opts.obstacles ?? [])];
+    nextItem: for (const item of items) {
       if (opts.stopWhen?.(item, cursor)) break;
       const runtimeHours = Number(item.task.RUN_TIME);
       if (!Number.isFinite(runtimeHours) || runtimeHours <= 0) {
@@ -2183,48 +2188,55 @@ export const Engine = {
         continue;
       }
       const runtimeMs = Math.round(runtimeHours * 60) * Config.MS_MIN;   // whole minutes like every other path (senior review M1)
-      const candidate = item.notBefore ? new Date(Math.max(item.notBefore.getTime(), cursor.getTime())) : cursor;
-      let start: Date;
-      let end: Date;
+      let candidate = item.notBefore ? new Date(Math.max(item.notBefore.getTime(), cursor.getTime())) : cursor;
+      let start!: Date;
+      let end!: Date;
       let scheduleSegments: OrderScheduleSegment[] | undefined;
-      if (policy === 'never') {
-        // Preserve the existing continuous-bar contract exactly for legacy
-        // schedules. A split schedule that is explicitly regenerated under
-        // this policy is cleared below as one atomic parent aggregate.
-        const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs, opts.plantTz ?? null);
-        if (slot.kind === 'unavailable' || (!opts.plantTz && !('start' in slot))) {
-          out.failure = { item, reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
-          break;
-        }
-        if (slot.kind === 'overlong' && !opts.plantTz) { out.overlong.push(item); continue; }
-        if (opts.plantTz) {
-          // The reversal's forward leg picks the slot AND the end in plant-zone instants (OQ46, U16), so a window
-          // whose edge lies on a DST jump is neither overrun nor skipped. Overlong / unavailable were classified above.
-          const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), 'never', opts.plantTz);
+      // A placement that would overlap a fixed interval (`opts.obstacles`) restarts from that interval's end.
+      for (let attempt = 0; ; attempt++) {
+        scheduleSegments = undefined;
+        if (policy === 'never') {
+          // Preserve the existing continuous-bar contract exactly for legacy
+          // schedules. A split schedule that is explicitly regenerated under
+          // this policy is cleared below as one atomic parent aggregate.
+          const slot = Calendar.findContiguousSlot(line, candidate, runtimeMs, opts.plantTz ?? null);
+          if (slot.kind === 'unavailable' || (!opts.plantTz && !('start' in slot))) {
+            out.failure = { item, reason: slot.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
+            break nextItem;
+          }
+          if (slot.kind === 'overlong' && !opts.plantTz) { out.overlong.push(item); continue nextItem; }
+          if (opts.plantTz) {
+            // The reversal's forward leg picks the slot AND the end in plant-zone instants (OQ46, U16), so a window
+            // whose edge lies on a DST jump is neither overrun nor skipped. Overlong / unavailable were classified above.
+            const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), 'never', opts.plantTz);
+            if (allocation.kind !== 'allocated') {
+              // Wall-clock said overlong and plant-zone time agrees (no window holds it): the continuous-bar exception.
+              if (slot.kind === 'overlong') { out.overlong.push(item); continue nextItem; }
+              out.failure = { item, reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
+              break nextItem;
+            }
+            start = allocation.start;
+            end = allocation.end;
+          } else {
+            start = (slot as { start: Date }).start;
+            end = new Date(start.getTime() + runtimeMs);
+          }
+          if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
+        } else {
+          const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), policy, opts.plantTz ?? null);
           if (allocation.kind !== 'allocated') {
-            // Wall-clock said overlong and plant-zone time agrees (no window holds it): the continuous-bar exception.
-            if (slot.kind === 'overlong') { out.overlong.push(item); continue; }
             out.failure = { item, reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
-            break;
+            break nextItem;
           }
           start = allocation.start;
           end = allocation.end;
-        } else {
-          start = (slot as { start: Date }).start;
-          end = new Date(start.getTime() + runtimeMs);
+          // Always include the full child aggregate, including [], so a
+          // regenerated continuous parent removes obsolete child rows.
+          scheduleSegments = allocation.scheduleSegments;
         }
-        if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
-      } else {
-        const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), policy, opts.plantTz ?? null);
-        if (allocation.kind !== 'allocated') {
-          out.failure = { item, reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
-          break;
-        }
-        start = allocation.start;
-        end = allocation.end;
-        // Always include the full child aggregate, including [], so a
-        // regenerated continuous parent removes obsolete child rows.
-        scheduleSegments = allocation.scheduleSegments;
+        const hit = obstacles.find(o => start.getTime() < o.end.getTime() && end.getTime() > o.start.getTime());
+        if (!hit || attempt >= obstacles.length) break;
+        candidate = new Date(hit.end);
       }
       cursor = end;
       out.placed.push({ item, start, end, ...(scheduleSegments !== undefined ? { scheduleSegments } : {}) });
@@ -2287,7 +2299,13 @@ export const Engine = {
     const diagnostics: RemoveBacklogDiagnostics = {
       backlogFound: 0, moved: 0, firmedMoved: 0, frozenMoved: 0, movedRuntimeHours: 0, largestDelayMinutes: 0,
       invalidRuntimeIds: [], missingStartIds: [], overlongIds: [], calendarSearchFailures: [], boundaryConflicts: [],
+      ...(opts.holdRunning === true ? { runningHeldIds: [] } : {}),
     };
+    // `holdRunning` (the headless job's include_running=false): an order in progress is NOT moved and the rest of the line
+    // is planned around its real slot, so the patches this returns are exactly what a writer that skips running orders
+    // writes. The browser's Backlog leaves it off (running orders are re-placed from now).
+    const holdRunning = opts.holdRunning === true;
+    const obstaclesByLine = new Map<string, Array<{ start: Date; end: Date }>>();
     const lines = Array.isArray(opts.lines) && opts.lines.length
       ? new Set((opts.lines as unknown[]).map(String))
       : null;
@@ -2296,6 +2314,14 @@ export const Engine = {
     for (const task of scopedTasks) {
       // G-0.25: an approved placement exception is fixed; Remove Backlog leaves it where the planner put it.
       if (task.placement_exception) continue;
+      if (holdRunning && Engine.isInProgress(task, now)) {
+        const lineKey = task.MACHINE || 'Unknown';
+        const held = obstaclesByLine.get(lineKey) || [];
+        held.push({ start: new Date(task.start_date!), end: new Date(task.end_date!) });
+        obstaclesByLine.set(lineKey, held);
+        diagnostics.runningHeldIds!.push(task.id);
+        continue;
+      }
       if (!task.start_date) {
         diagnostics.missingStartIds.push(task.id);
         continue;
@@ -2331,7 +2357,9 @@ export const Engine = {
           line,
           items.slice(firstBacklog).map(item => ({ ...item, notBefore: item.snapshotStart >= now ? item.snapshotStart : undefined })),
           now, splitPolicy,
-          { plantTz: Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null, stopWhen: (item, cursor) => item.snapshotStart >= now && cursor <= item.snapshotStart });
+          { plantTz: Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null,
+            stopWhen: (item, cursor) => item.snapshotStart >= now && cursor <= item.snapshotStart,
+            ...(holdRunning && obstaclesByLine.has(line) ? { obstacles: obstaclesByLine.get(line) } : {}) });
         for (const item of sequence.invalidRuntime) diagnostics.invalidRuntimeIds.push(item.task.id);
         // OQ50 c: an order that cannot be one bar under the `never` policy is queued, not stretched over closed time.
         for (const item of sequence.overlong) {
@@ -2830,7 +2858,7 @@ export const Engine = {
         const allowedLines = Array.isArray(opts.lines) && opts.lines.length
           ? new Set((opts.lines as unknown[]).map(String)) : null;
         const backlogScope = backlogValidationScope(
-          baselineSnapshot, plant, allowedLines, backlogDates.from, backlogDates.to,
+          baselineSnapshot, plant, allowedLines, backlogDates.from, backlogDates.to, new Set(result.diagnostics.runningHeldIds ?? []),
         );
         const placementStart = new Date(Math.max(backlogDates.from.getTime(), backlogDates.now.getTime()));
         const backlogBounds: DueDateFirstBounds = {

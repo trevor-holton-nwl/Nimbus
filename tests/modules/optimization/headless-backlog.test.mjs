@@ -97,17 +97,144 @@ test('apply with include_running true (default) writes the running order, like t
   assert.equal(plan.body.atomic_optimizer, true);
 });
 
-test('include_running false: the running order is left out of the run and dropped at apply, the rest applies', async () => {
+const at = (items, id) => items.find(item => item.id === id);
+const win = item => [item.start_date, item.end_date];
+const planFor = (run, mk, extra = {}) => planApplyFromState({
+  plant: PLANT, runWire: mk(), liveWire: mk(), state: run.state, params: params({ include_running: false, ...extra }), jobId: 3 });
+
+test('include_running false is a true plan-around: B2 holds its slot, B1 and B3 are placed after it, offered == applied', async () => {
   const withRunning = await runOptimizer(input());
   const run = await runOptimizer(input({ include_running: false }));
-  assert.ok(withRunning.patches.some(p => p.id === 'B2'), 'precondition: B2 is a backlog move');
-  assert.ok(!run.patches.some(p => p.id === 'B2'));
+  assert.ok(withRunning.patches.some(p => p.id === 'B2'), 'precondition: B2 is a backlog move when running orders are included');
+  assert.equal(run.status, 'completed');
+  assert.equal(run.ok, true, JSON.stringify(run.blockers));
+  assert.deepEqual(run.blockers, []);
+  assert.ok(!run.patches.some(p => p.id === 'B2'), 'the running order is not patched');
   assert.equal(run.summary.backlog.running_skipped, 1);
   assert.equal(run.summary.backlog.running_moved, 0);
   assert.equal(withRunning.summary.backlog.running_moved, 1);
-  const plan = await planApplyFromState({ plant: PLANT, runWire: wire(), liveWire: wire(), state: run.state, params: params({ include_running: false }), jobId: 3 });
-  assert.ok(plan.dropped.some(d => d.id === 'B2' && d.reason === 'running'), JSON.stringify(plan.dropped));
+  // B2 runs 06:00-10:00; B1 (2 h) and B3 (2 h) queue behind it in line order.
+  const b1 = at(run.patches, 'B1'); const b3 = at(run.patches, 'B3');
+  assert.ok(b1 && b3, ids(run.patches).join());
+  assert.ok(b1.start_date >= '2035-08-06T10:00:00', JSON.stringify(win(b1)));
+  assert.ok(b3.start_date >= b1.end_date, JSON.stringify([win(b1), win(b3)]));
+  assert.equal(run.summary.patched, run.patches.length);
+  const plan = await planFor(run, wire);
+  assert.equal(plan.ok, true, JSON.stringify(plan.refusal ?? plan.findings));
+  assert.deepEqual(plan.dropped, [], 'no validation (or any other) drops');
+  assert.deepEqual(ids(plan.apply), ids(run.patches), 'offered == applied');
   assert.ok(!plan.apply.some(item => item.id === 'B2'));
+});
+
+test('include_running true: summary, patches and applied agree too (nothing dropped for validation)', async () => {
+  const run = await runOptimizer(input());
+  assert.equal(run.ok, true, JSON.stringify(run.blockers));
+  assert.equal(run.summary.patched, run.patches.length);
+  const plan = await planApplyFromState({ plant: PLANT, runWire: wire(), liveWire: wire(), state: run.state, params: params(), jobId: 3 });
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.dropped.filter(d => d.reason === 'validation'), []);
+  assert.deepEqual(ids(plan.apply), ids(run.patches));
+});
+
+test('only backlog writes includeRunning / runningIds into the run state', async () => {
+  const run = await runOptimizer({ plant: PLANT, wire: wire(), params: { mode: 'duedate', search: 'normal', serverNow: SERVER_NOW.toISOString(), fakeClock: true } });
+  const state = decodeTagged(run.state);
+  assert.ok(!('includeRunning' in state) && !('runningIds' in state));
+  assert.deepEqual(decodeTagged((await runOptimizer(input())).state).runningIds, ['B2']);
+});
+
+test('apply (include_running true): an order that was not running at the run but started since is dropped, not moved', async () => {
+  const run = await runOptimizer(input());
+  // B3 (09:00-11:00 at the run) is in progress by apply time: the live board is read at 09:30 plant time.
+  const later = { ...params(), liveServerNow: '2035-08-06T14:30:00.000Z' };
+  const plan = await planApplyFromState({ plant: PLANT, runWire: wire(), liveWire: wire(), state: run.state, params: later, jobId: 3 });
+  const reasons = Object.fromEntries(plan.dropped.map(d => [d.id, d.reason]));
+  assert.equal(reasons.B3, 'running_changed', JSON.stringify(plan.dropped));
+  assert.ok(!plan.apply.some(item => item.id === 'B3'));
+});
+
+test('apply: a patched start earlier than the apply clock for a still-future order is rejected', async () => {
+  const run = await runOptimizer(input());
+  const lateApply = { ...params(), liveServerNow: '2035-08-06T13:20:00.000Z' };   // 08:20, twenty minutes after the run
+  const plan = await planApplyFromState({ plant: PLANT, runWire: wire(), liveWire: wire(), state: run.state, params: lateApply, jobId: 3 });
+  const stale = plan.dropped.filter(d => d.reason === 'start_in_past').map(d => d.id);
+  assert.ok(stale.includes('B1'), JSON.stringify(plan.dropped));
+});
+
+test('apply within a minute of the run keeps the compressed placements (latency slack)', async () => {
+  const run = await runOptimizer(input());
+  const near = { ...params(), liveServerNow: '2035-08-06T13:00:40.000Z' };
+  const plan = await planApplyFromState({ plant: PLANT, runWire: wire(), liveWire: wire(), state: run.state, params: near, jobId: 3 });
+  assert.deepEqual(plan.dropped, []);
+});
+
+test('Hard tooling rule plant: backlog is exempt, runs ok and applies in full', async () => {
+  const mk = () => {
+    const w = wire();
+    w.masterData.plants.rows.find(r => r.plant === PLANT).setup_policy_config = { toolingRule: 'hard', version: 1 };
+    for (const id of ['B1', 'B2', 'B3']) Object.assign(w.tasks.data.find(r => r.id === id), { PRT_01: 'T1' });
+    return w;
+  };
+  const run = await runOptimizer(input({ include_running: false }, mk()));
+  assert.equal(run.ok, true, JSON.stringify(run.blockers));
+  assert.equal(run.summary.tool_blocked, 0);
+  const plan = await planFor(run, mk);
+  assert.equal(plan.ok, true, JSON.stringify(plan.refusal ?? plan.findings));
+  assert.deepEqual(plan.dropped, []);
+  assert.deepEqual(ids(plan.apply), ids(run.patches));
+});
+
+test('setup-inactive and setup-active plants both plan around the running order consistently', async () => {
+  for (const active of [true, false]) {
+    const mk = () => {
+      const w = wire();
+      w.masterData.plants.rows.find(r => r.plant === PLANT).setup_active = active;
+      w.setup.plant_active = active;
+      return w;
+    };
+    const run = await runOptimizer(input({ include_running: false }, mk()));
+    assert.equal(run.ok, true, `active=${active} ${JSON.stringify(run.blockers)}`);
+    const plan = await planFor(run, mk);
+    assert.equal(plan.ok, true, JSON.stringify(plan.refusal));
+    assert.deepEqual(plan.dropped, []);
+    assert.deepEqual(ids(plan.apply), ids(run.patches));
+  }
+});
+
+test('a firmed backlog order is moved like the browser Backlog and counted', async () => {
+  const mk = () => {
+    const w = wire();
+    w.tasks.data.find(r => r.id === 'B1').firmed = true;
+    return w;
+  };
+  const run = await runOptimizer(input({ include_running: false }, mk()));
+  assert.equal(run.ok, true, JSON.stringify(run.blockers));
+  assert.ok(run.patches.some(p => p.id === 'B1'));
+  assert.ok(run.summary.backlog.firmed_moved >= 1, JSON.stringify(run.summary.backlog));
+  const plan = await planFor(run, mk);
+  assert.equal(plan.ok, true, JSON.stringify([plan.refusal, plan.dropped, plan.findings.map(f => [f.code, f.severity, f.taskId, f.message])]));
+  assert.deepEqual(ids(plan.apply), ids(run.patches));
+});
+
+test('a split backlog order is moved and still applies in full around the running order', async () => {
+  const mk = () => {
+    const w = wire();
+    Object.assign(w.tasks.data.find(r => r.id === 'B1'), {
+      RUN_TIME: 4, start_date: '2035-08-03T08:00:00', end_date: '2035-08-03T16:00:00',
+      schedule_segments: [
+        { sequence: 1, start_date: '2035-08-03T08:00:00', end_date: '2035-08-03T10:00:00' },
+        { sequence: 2, start_date: '2035-08-03T14:00:00', end_date: '2035-08-03T16:00:00' },
+      ],
+    });
+    return w;
+  };
+  const run = await runOptimizer(input({ include_running: false }, mk()));
+  assert.equal(run.ok, true, JSON.stringify(run.blockers));
+  assert.ok(run.patches.some(p => p.id === 'B1'));
+  const plan = await planFor(run, mk);
+  assert.equal(plan.ok, true, JSON.stringify(plan.refusal ?? plan.findings));
+  assert.deepEqual(plan.dropped, []);
+  assert.deepEqual(ids(plan.apply), ids(run.patches));
 });
 
 test('a changed row and its distribution family are dropped, the rest applies (backlog)', async () => {

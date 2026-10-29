@@ -118,8 +118,11 @@ interface RunState {
   validation: SerializedOptimizerValidation;
   serverNow: string;
   mode: string;
-  /** Backlog: running orders may be written (see RunParams.include_running). */
+  /** Backlog only (never written for another mode): running orders may be written (see RunParams.include_running). */
   includeRunning?: boolean;
+  /** Backlog only: ids of the orders in progress at the run's clock. Apply drops a patched order whose running state
+   *  changed since (it started, or finished, between the run and the write). */
+  runningIds?: string[];
 }
 
 /** `date` plus whole calendar months, the day clamped to the month's end (the dialog's `_addCalendarMonths`). */
@@ -225,6 +228,7 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
   startDate.setSeconds(0, 0);
   const days = params.horizonDays && params.horizonDays > 0 ? params.horizonDays : 28;
   const backlogMode = params.mode === 'backlog';
+  const includeRunning = params.include_running !== false;
   const exhaustive = !backlogMode && params.search === 'exhaustive';
   const budget = exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS;
   // Remove Backlog's window is the dialog's default (optimize-ui `_applyBacklogDefaults`): from the earliest start in the
@@ -247,6 +251,8 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
     startDate: bw ? bw.start : startDate,
     endDate: bw ? bw.end : new Date(plantNow.getTime() + days * 86_400_000), runAt: serverNow,
     respectFirmed: params.respect_firmed ?? true, respectCalendar: backlogMode ? true : (params.respect_calendar ?? true),
+    // include_running=false is a TRUE plan-around: orders in progress hold their slot and the rest is placed around them.
+    ...(backlogMode && !includeRunning ? { holdRunning: true } : {}),
     deadlineAt: performance.now() + budget, searchBudgetMs: budget, exhaustive,
     ...(params.iterationCap ? { iterationCap: params.iterationCap } : {}),
   };
@@ -273,21 +279,22 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
   for (const code of new Set(errors.map(f => f.code))) blockers.push(`finding:${code}`);
   if (toolBlocked) blockers.push(`tool_blocked:${toolBlocked}`);
 
-  // Backlog with running orders switched off: a patch for an order in progress is not offered (apply drops it too).
-  const includeRunning = params.include_running !== false;
+  // Backlog: which orders are in progress at the run's clock. With include_running=false the engine held them (they are
+  // fixed obstacles, never patched), so the offered set IS the candidate's patch set and equals what apply writes; a
+  // patch for a running order here would break that, so it blocks the run instead of being quietly filtered.
+  const runningIds: string[] = [];
   const runningPatchIds = new Set<string>();
   if (backlogMode) {
-    const byId = new Map(snapshot.tasks.map(task => [String(task.id), task]));
-    for (const patch of candidate.patches) {
-      const task = byId.get(String(patch.id));
-      if (task && Engine.isInProgress(task, plantNow)) runningPatchIds.add(String(patch.id));
-    }
+    for (const task of snapshot.tasks) if (Engine.isInProgress(task, plantNow)) runningIds.push(String(task.id));
+    const running = new Set(runningIds);
+    for (const patch of candidate.patches) if (running.has(String(patch.id))) runningPatchIds.add(String(patch.id));
+    if (!includeRunning && runningPatchIds.size) blockers.push(`running_patch:${runningPatchIds.size}`);
   }
-  const offered = backlogMode && !includeRunning ? candidate.patches.filter(patch => !runningPatchIds.has(String(patch.id))) : candidate.patches;
+  const offered = candidate.patches;
   const diag = candidate.backlogResult?.diagnostics;
   const backlog = backlogMode && bw ? {
     found: diag?.backlogFound ?? 0, moved: diag?.moved ?? 0, firmed_moved: diag?.firmedMoved ?? 0, frozen_moved: diag?.frozenMoved ?? 0,
-    running_moved: includeRunning ? runningPatchIds.size : 0, running_skipped: includeRunning ? 0 : runningPatchIds.size,
+    running_moved: includeRunning ? runningPatchIds.size : 0, running_skipped: includeRunning ? 0 : (diag?.runningHeldIds?.length ?? 0),
     moved_runtime_hours: Math.round((diag?.movedRuntimeHours ?? 0) * 100) / 100, largest_delay_minutes: diag?.largestDelayMinutes ?? 0,
     invalid_runtime: diag?.invalidRuntimeIds.length ?? 0, missing_start: diag?.missingStartIds.length ?? 0, overlong: diag?.overlongIds.length ?? 0,
     capacity_failures: diag?.calendarSearchFailures.length ?? 0, boundary_conflicts: diag?.boundaryConflicts.length ?? 0,
@@ -307,7 +314,8 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
   };
   const { validationContext: _context, ...bare } = candidate;
   const state: RunState | null = serialized
-    ? { candidate: bare, validation: serialized, serverNow: params.serverNow, mode: params.mode, includeRunning } : null;
+    ? { candidate: bare, validation: serialized, serverNow: params.serverNow, mode: params.mode,
+        ...(backlogMode ? { includeRunning, runningIds } : {}) } : null;
   emit(blockers.length ? 'warn' : 'info', 'result', blockers.length ? `blocked: ${blockers.join(', ')}` : 'result is applicable');
   return {
     ok: blockers.length === 0,
@@ -393,7 +401,9 @@ export async function planApplyFromState(input: ApplyInput, sink: LogSink = () =
   if (!now) return empty('plant_no_timezone');
   // Only Remove Backlog may write an order that is running (the browser's Backlog does); every other mode drops it.
   const includeRunning = state.mode === 'backlog' && state.includeRunning !== false;
-  const plan = planApply({ plant: input.plant, candidate, runSnapshot, liveSnapshot, now, includeRunning });
+  const plan = planApply({ plant: input.plant, candidate, runSnapshot, liveSnapshot, now, includeRunning,
+    ...(state.mode === 'backlog' ? { useRunFirmed: true } : {}),
+    ...(state.mode === 'backlog' && state.runningIds ? { runningAtRun: new Set(state.runningIds) } : {}) });
   emit(plan.ok ? 'info' : 'warn', 'guard', `apply ${plan.apply.length} of ${candidate.patches.length} patches, dropped ${plan.dropped.length}`,
     { dropped: plan.dropped.map(d => `${d.id}:${d.reason}`) });
   // Items carry the LIVE row version: that is the token the server compares, and a changed row was dropped above.

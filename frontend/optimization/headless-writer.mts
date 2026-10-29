@@ -73,7 +73,7 @@ export function buildApplyBody(items: ReadonlyArray<TaskDateUpdateItem>, jobId: 
   return { tasks: [...items], client_id: `job:${jobId}`, atomic_optimizer: true, strict_conflicts: true };
 }
 
-export type DropReason = 'row_version_changed' | 'row_missing' | 'running' | 'family' | 'validation';
+export type DropReason = 'row_version_changed' | 'row_missing' | 'running' | 'running_changed' | 'start_in_past' | 'family' | 'validation';
 
 export interface DroppedPatch { id: string; reason: DropReason }
 
@@ -137,8 +137,15 @@ export function planApply(args: {
   /** Remove Backlog only (default false): an order in progress is written like the browser's Backlog writes it instead
    *  of being dropped as `running`. Every optimizer mode leaves it false. */
   includeRunning?: boolean;
+  /** Remove Backlog only: the ids in progress at the run's clock. With it, a patched order whose running state changed
+   *  since the run is dropped (`running_changed`: it started, or finished, between the run and the write), and a patched
+   *  start earlier than the apply clock for an order that was not running is dropped (`start_in_past`). */
+  runningAtRun?: ReadonlySet<string>;
+  /** Remove Backlog only: validate the live board with the firmed set the RUN validated with (Backlog protects no firmed
+   *  order, so its patches may include one), not the live board's own firmed marks. */
+  useRunFirmed?: boolean;
 }): ApplyPlan {
-  const { plant, candidate, runSnapshot, liveSnapshot, now, includeRunning = false } = args;
+  const { plant, candidate, runSnapshot, liveSnapshot, now, includeRunning = false, runningAtRun, useRunFirmed = false } = args;
   const patches = candidate.patches;
   const runById = new Map(runSnapshot.tasks.map(task => [String(task.id), task]));
   const liveById = new Map(liveSnapshot.tasks.map(task => [String(task.id), task]));
@@ -168,7 +175,16 @@ export function planApply(args: {
     if (!live) { dropWithFamily(id, 'row_missing'); continue; }
     // null === null: a never-versioned row that is still never-versioned has not changed.
     if ((live.row_version ?? null) !== (ran?.row_version ?? null)) { dropWithFamily(id, 'row_version_changed'); continue; }
-    if (!includeRunning && Engine.isInProgress(live, now)) dropWithFamily(id, 'running');
+    if (!includeRunning && Engine.isInProgress(live, now)) { dropWithFamily(id, 'running'); continue; }
+    if (runningAtRun) {
+      if (Engine.isInProgress(live, now) !== runningAtRun.has(id)) { dropWithFamily(id, 'running_changed'); continue; }
+      // An order that was not running is re-placed in the future: a start already in the past (the run waited too long
+      // for its write) is stale. One minute of slack covers the run-to-write latency; the run clock is minute-floored.
+      const start = patch.changes.start_date?.getTime();
+      if (!runningAtRun.has(id) && start !== undefined && start < Math.floor(now.getTime() / 60_000) * 60_000 - 60_000) {
+        dropWithFamily(id, 'start_in_past');
+      }
+    }
   }
   // A family member the run did NOT patch can also have changed, vanished or started running since.
   for (const members of familyOf.values()) {
@@ -184,6 +200,7 @@ export function planApply(args: {
   }
 
   const context = candidate.validationContext;
+  const validationLive: ScheduleSnapshot = useRunFirmed && context ? { ...liveSnapshot, firmedIds: context.snapshot.firmedIds } : liveSnapshot;
   const refuse = (refusal: string): ApplyPlan => ({
     apply: [], dropped: [...dropped].map(([id, reason]) => ({ id, reason })), findings: [], ok: false, refusal,
   });
@@ -194,7 +211,7 @@ export function planApply(args: {
   const keyOf = (finding: ValidationFinding): string => `${finding.code}|${finding.taskId}|${finding.message}`;
   const errorsFor = (set: SchedulePatch[]): ValidationFinding[] => {
     const ids = new Set(set.map(patch => String(patch.id)));
-    return validateCandidate(liveSnapshot, context.bounds, {
+    return validateCandidate(validationLive, context.bounds, {
       ...candidate, patches: set,
       dispositions: candidate.dispositions?.filter(item => ids.has(String(item.id))),
     }).filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate');
@@ -246,7 +263,7 @@ export function planApply(args: {
   const finalCandidate: CandidateResult = droppedAny
     ? { ...candidate, patches: kept, dispositions: candidate.dispositions?.filter(item => kept.some(p => String(p.id) === String(item.id))) }
     : candidate;
-  const findings = validateCandidateForApply(finalCandidate, liveSnapshot)
+  const findings = validateCandidateForApply(finalCandidate, validationLive)
     .filter(finding => !(finding.code === 'stale_candidate' && finding.severity === 'error'));
   const blocking = findings.filter(finding => finding.severity === 'error' && !(droppedAny && (finding.code === 'accounting' || baseline.has(keyOf(finding)))));
   return {

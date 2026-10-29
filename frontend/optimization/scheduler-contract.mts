@@ -43,6 +43,8 @@ export interface RemoveBacklogDiagnostics {
   overlongIds: string[];
   calendarSearchFailures: Array<{ line: string; taskId?: string; reason: 'no-operating-interval' | 'search-exhausted' }>;
   boundaryConflicts: Array<{ line: string; movedTaskId: string; protectedTaskId?: string; type: 'overlap' }>;
+  /** `holdRunning` runs only: orders in progress left where they are (fixed obstacles the backlog plans around). */
+  runningHeldIds?: string[];
 }
 
 export interface RemoveBacklogResult {
