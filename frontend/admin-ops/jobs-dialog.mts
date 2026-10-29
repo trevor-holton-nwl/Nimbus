@@ -169,7 +169,8 @@ function _opt(value: string, label: string, sel: string): string {
 /** A type option; a scaffolded type (Send to SAP) is shown disabled, with its reason as the tooltip. */
 function _typeOpt(x: JobType, sel: string, d: JobsDeps): string {
   if (!isUnavailable(x)) return _opt(x.key, typeLabel(x, d), sel);
-  return `<option value="${esc(x.key)}" disabled title="${esc(unavailableWhy(x, d))}">${esc(t('jobs.opt_unavailable', { name: typeLabel(x, d) }))}</option>`;
+  // Selected-but-disabled when it is the current value (a restored draft, an imported template, an old job): never swapped silently.
+  return `<option value="${esc(x.key)}" disabled${x.key === sel ? ' selected' : ''} title="${esc(unavailableWhy(x, d))}">${esc(t('jobs.opt_unavailable', { name: typeLabel(x, d) }))}</option>`;
 }
 /** What the chosen result mode does, in one sentence: Apply writes the plan, Dry run only shows it. */
 export const resultHint = (result: string): string => t(result === 'propose' ? 'jobs.result_hint_propose' : 'jobs.result_hint_apply');
@@ -248,7 +249,9 @@ function _typeHtml(f: JobForm, types: JobType[], locked: boolean): string {
   if (!types.length) return `<div class="form-row"><label>${esc(t('jobs.f_type'))}</label><div class="readonly" id="jb-type">${esc(typeLabel({ key: f.jobType, label: f.jobType }, d))}</div></div>`;
   return `<div class="form-row"><label for="jb-jobtype">${esc(t('jobs.f_type'))}</label><select class="input" id="jb-jobtype"${locked ? ' disabled' : ''}>`
     + typeGroups(types).map(g => `<optgroup label="${esc(t(g.labelKey))}">${g.types.map(x => _typeOpt(x, f.jobType, d)).join('')}</optgroup>`).join('')
-    + `</select></div>`;
+    + `</select>`
+    + types.filter(isUnavailable).map(x => `<div class="ape-hint job-unavail-hint">${esc(typeLabel(x, d))}: ${esc(unavailableWhy(x, d))}</div>`).join('')
+    + `<div class="ape-err" id="jb-err-type" role="alert" hidden></div></div>`;
 }
 
 const _errP = (key: string, ns = ''): string => `<div class="ape-err" id="jb-err-${ns}p-${esc(key)}" role="alert" hidden></div>`;
@@ -662,10 +665,11 @@ export function readForm(prev: JobForm, meta: TypeMeta | null = _s?.meta ?? null
 
 function _showErrors(errs: FormErrors, scope: 'all' | 'steps' = 'all'): void {
   // 'steps' (Save as template): only the step list and the step params are painted; no unrelated error appears.
-  for (const f of (scope === 'steps' ? ['steps'] : ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity', 'targets', 'fixedTz', 'fanOut', 'policyWin', 'policyGrace', 'policyTz', 'steps']) as readonly (keyof FormErrors)[]) {
+  for (const f of (scope === 'steps' ? ['steps'] : ['name', 'type', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity', 'targets', 'fixedTz', 'fanOut', 'policyWin', 'policyGrace', 'policyTz', 'steps']) as readonly (keyof FormErrors)[]) {
     const el = _el(`jb-err-${f}`);
     if (!el) continue;
-    el.textContent = errs[f] ? t(errs[f] as string) : '';
+    const tm = f === 'type' ? _s?.meta : null;
+    el.textContent = errs[f] ? t(errs[f] as string, tm ? { name: typeLabel(tm, jobsDeps()), reason: unavailableWhy(tm, jobsDeps()) } : undefined) : '';
     el.hidden = !errs[f];
   }
   for (const p of scope === 'steps' ? [] : _s?.meta?.params ?? []) {
@@ -684,7 +688,9 @@ function _showErrors(errs: FormErrors, scope: 'all' | 'steps' = 'all'): void {
       const el = _el(k === '_type' ? `jb-err-s${i}-type` : `jb-err-s${i}-p-${k}`);
       if (!el) continue;
       const p = findType(_s?.types ?? [], st.type)?.params.find(q => q.key === k);
-      el.textContent = per[k] ? t(per[k], { min: p?.min ?? '', max: p?.max ?? '', n: floor }) : '';
+      const tm = findType(_s?.types ?? [], st.type);
+      el.textContent = per[k] ? t(per[k], { min: p?.min ?? '', max: p?.max ?? '', n: floor, name: tm ? typeLabel(tm, jobsDeps()) : st.type,
+        reason: tm ? unavailableWhy(tm, jobsDeps()) : '' }) : '';
       el.hidden = !per[k];
     }
   });

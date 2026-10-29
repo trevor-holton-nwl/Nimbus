@@ -298,6 +298,8 @@ export function normProposal(data: unknown): Proposal {
   return {
     runId: Number(d.run_id), total: Number(d.total ?? rows.length), shown: Number(d.shown ?? rows.length), rows,
     findings: _arr(d, 'findings').length, boardMatches: typeof d.board_matches === 'boolean' ? d.board_matches : null, truncated: !!d.truncated,
+    step: d.proposal_step && typeof d.proposal_step === 'object' ? { seq: Number((d.proposal_step as Record<string, unknown>).seq) || 0, label: String((d.proposal_step as Record<string, unknown>).label ?? ''),
+      type: String((d.proposal_step as Record<string, unknown>).type ?? ''), earlierDrySteps: Number((d.proposal_step as Record<string, unknown>).earlier_dry_steps) || 0 } : null,
     pending: d.pending === true,
   };
 }

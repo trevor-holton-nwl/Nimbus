@@ -487,7 +487,9 @@ export async function runSequential<T>(items: T[], fn: (item: T) => Promise<unkn
    Dry-run proposal (GET /jobs/runs/{id}/proposal)
    ------------------------------------------------------------------------- */
 export interface ProposalRow { id: string; machine: string | null; finishBefore: string | null; finishAfter: string | null; deltaHours: number | null; status: string | null; changedSince: boolean }
-export interface Proposal { runId: number; total: number; shown: number; rows: ProposalRow[]; findings: number; boardMatches: boolean | null; truncated: boolean; pending: boolean }
+export interface Proposal { runId: number; total: number; shown: number; rows: ProposalRow[]; findings: number; boardMatches: boolean | null; truncated: boolean; pending: boolean;
+  /** A dry-run chain: the step whose preview this is, and how many earlier dry-run steps it does NOT include. */
+  step?: { seq: number; label: string; type: string; earlierDrySteps: number } | null }
 
 /** +4.0 h / -1.5 h / 0 h; '' when unknown. */
 export function deltaText(h: number | null | undefined): string {
@@ -957,7 +959,7 @@ export function validatePolicy(p: PolicyForm, preset: RecurPreset, tzMode: TzMod
 /** The result mode of a form or a stored params object ('apply' when the job never set one). */
 export const resultOf = (params: Record<string, unknown> | null | undefined): string => String(params?.apply_mode ?? 'apply');
 
-export type FormErrors = Partial<Record<'name' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity' | 'targets' | 'fixedTz' | 'fanOut' | 'policyWin' | 'policyGrace' | 'policyTz' | 'steps', string>>
+export type FormErrors = Partial<Record<'name' | 'type' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity' | 'targets' | 'fixedTz' | 'fanOut' | 'policyWin' | 'policyGrace' | 'policyTz' | 'steps', string>>
   & { params?: Record<string, string>; stepParams?: Record<number, Record<string, string>> };
 
 /** Field -> i18n key. Empty object = valid. `isAdmin` guards the auto-apply result (the server re-checks).
@@ -969,6 +971,8 @@ export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: strin
   else if (name.length > NAME_MAX) e.name = 'jobs.err_name_long';
   if (!f.plant) e.plant = 'jobs.err_plant';
   else if (o.plants && !o.plants.includes(f.plant)) e.plant = 'jobs.err_plant_scope';
+  // A type that is not available (a restored draft, an old job) is shown selected-but-disabled and fails here, visibly.
+  if (o.meta && isUnavailable(o.meta)) e.type = 'jobs.err_type_unavailable';
   const chain = isChainKey(f.jobType) || !!o.meta?.composite;
   if (chain) Object.assign(e, validateChain(f.steps, o.types ?? [], o.limits ?? DEFAULT_CHAIN_LIMITS));
   const pe = o.meta && !chain ? validateParams(o.meta.params, f.params) : {};
@@ -1378,6 +1382,7 @@ export function validateChain(steps: ChainStep[], types: ReadonlyArray<TypeMeta>
   steps.forEach((s, i) => {
     const m = findType(types, s.type);
     if (!m || m.composite) { per[i] = { _type: 'jobs.err_chain_type' }; return; }
+    if (isUnavailable(m)) { per[i] = { _type: 'jobs.err_type_unavailable' }; return; }
     const errs = validateParams(m.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(m)), s.params);
     if (m.key === 'purge.orders') {
       const pe = purgeWindowError(s.params.window as DateWindow | null, limits.purgeMinAgeDays);
@@ -1422,11 +1427,38 @@ export const ranInRun = (s: Pick<StepRow, 'summary'>): number | null => {
   return v == null ? null : Number(v);
 };
 
-/** Counts a step's summary reports, in fixed order (a count it did not report is omitted). */
-export const STEP_FACTS = ['late', 'moved', 'applied', 'dropped', 'matched', 'deleted', 'findings', 'rows'] as const;
+/** Counts a step's summary reports, in fixed order (a count it did not report is omitted). The backlog step keeps its own
+ *  counts under `summary.backlog` (found, running_moved, running_skipped); they are read from there. */
+export const STEP_FACTS = ['late', 'moved', 'applied', 'dropped', 'matched', 'deleted', 'findings', 'rows',
+  'found', 'running_moved', 'running_skipped', 'resolved', 'unknown', 'unmatched_pairs', 'unmatched_orders', 'applied_batches'] as const;
+const _BACKLOG_FACTS: ReadonlyArray<string> = ['found', 'running_moved', 'running_skipped'];
 export function stepFacts(s: Pick<StepRow, 'summary'>): Array<{ key: typeof STEP_FACTS[number]; value: number }> {
   const out: Array<{ key: typeof STEP_FACTS[number]; value: number }> = [];
-  for (const k of STEP_FACTS) { const v = s.summary?.[k]; if (typeof v === 'number' && Number.isFinite(v)) out.push({ key: k, value: v }); }
+  const nested = (s.summary?.backlog && typeof s.summary.backlog === 'object' ? s.summary.backlog : null) as Record<string, unknown> | null;
+  for (const k of STEP_FACTS) {
+    const v = _BACKLOG_FACTS.includes(k) ? nested?.[k] : s.summary?.[k];
+    if (typeof v === 'number' && Number.isFinite(v)) out.push({ key: k, value: v });
+  }
+  return out;
+}
+
+/** The words a step adds under its counts: its warnings (the server's own text, counts included), the known notes in the
+ *  viewer's language, and one line per SAP object (applied / held and needing a person / nothing). Empty for a plain step. */
+export function stepDetailLines(s: Pick<StepRow, 'summary'>, d: Pick<JobsDeps, 't'>): string[] {
+  const sm = s.summary;
+  if (!sm) return [];
+  const out: string[] = [];
+  if (Array.isArray(sm.warnings)) for (const w of sm.warnings) if (typeof w === 'string' && w) out.push(w);
+  if (sm.skipped === 'routing_off') out.push(d.t('jobs.note_routing_off'));
+  else if (sm.note === 'no validated batch to apply') out.push(d.t('jobs.note_sap_none'));
+  else if (typeof sm.note === 'string' && sm.note) out.push(sm.note);
+  if (Array.isArray(sm.notes)) {
+    for (const n of sm.notes as Array<Record<string, unknown>>) {
+      if (!n || typeof n.object !== 'string' || typeof n.result !== 'string') continue;
+      // an applied object also carries its counts in `summary.applied`; the line names the result only
+      out.push(`${tryKey(`jobs.p.sap.apply_batch.objects.${n.object}`, d) || n.object}: ${tryKey(`jobs.sap_res_${n.result}`, d) || n.result}`);
+    }
+  }
   return out;
 }
 
