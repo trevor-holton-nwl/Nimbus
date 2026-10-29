@@ -8172,6 +8172,9 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
    shared .badge-* classes and is always paired with its text label.
    ========================================================================== */
 .job-pane { display: flex; flex-direction: column; gap: 12px; }
+/* `display:flex` above beats UA `[hidden]{display:none}` at equal specificity; AdminCockpit._setSub hides the pane
+   with the hidden attribute, so without this pair Jobs showed under every Admin sub-tab. */
+.job-pane[hidden] { display: none; }
 .job-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; margin: 12px 0; }
 .job-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .job-field.job-grow { flex: 1 1 200px; }
@@ -8179,6 +8182,8 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .job-plant-field { width: 200px; }
 .job-combobox .hps-input { width: 100%; }
 .job-combobox .hps-dropdown { width: 100%; }
+/* .hps-clear sets display:flex, which beats [hidden]; jobs-dialog.mts toggles clearBtn.hidden. */
+.job-combobox .hps-clear[hidden] { display: none; }
 .job-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .job-sub { font-size: 11.5px; color: var(--fg-mute); }
 .job-table-wrap { overflow-x: auto; background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-lg); }
