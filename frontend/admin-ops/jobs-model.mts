@@ -398,6 +398,8 @@ export interface HealthSummary {
   running: number; queued: number; failed24h: number; missed24h: number; warning24h: number;
   /** The failed count split by `error_kind`: fix the job / platform error / the board changed under the run. */
   failedConfig24h: number; failedSystem24h: number; failedTransient24h: number;
+  /** Fan-out BATCHES that finished failed in the last 24 h (the counts above are plant runs). */
+  failedBatches24h: number;
   nextFire: { atUtc: string; atLocal: string; jobId: number; jobName: string; plant: string } | null;
   scheduler: { ok: boolean; lastTickAt: string | null };
   longerThanUsual: number[];
@@ -529,7 +531,7 @@ export function addDays(dayKey: string, n: number): string {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
-export interface UpcomingRun { at: string; jobId?: number | string; jobName?: string; plant?: string }
+export interface UpcomingRun { at: string; jobId?: number | string; jobName?: string; plant?: string; tz?: string }
 export interface StripDay { day: string; runs: UpcomingRun[] }
 
 /** Seven consecutive day buckets from `startDay` (the plant's today); runs outside the week are ignored. */
@@ -765,6 +767,9 @@ export interface JobForm {
   excludedPlants: string[];
   /** The target rows as saved: their per-plant `params_override` (API-only, no editor yet) rides along unchanged on save. */
   storedTargets: JobTarget[];
+  /** The saved rows combine kinds the form cannot show (several kinds, an excluded subnetwork): they are kept exactly as
+   *  saved and the target controls are replaced by a note, so an edit never drops a row. */
+  targetsLocked?: boolean;
   fanOut: FanOutForm;
   /** How the schedule's times are read: each plant's own zone, one fixed zone, or UTC. */
   tzMode: TzMode;
@@ -780,6 +785,14 @@ export interface FanOutForm { staggerS: number; maxParallel: number | null; fail
 export const FAN_OUT_DEFAULT: FanOutForm = { staggerS: 0, maxParallel: null, failFast: false };
 export const STAGGER_MAX = 3600;
 export const PARALLEL_MAX = 50;
+/** The server refuses more than this many target rows on one job (explicit plants + exclusions). */
+export const TARGET_ROWS_MAX = 500;
+
+/** `key` or `key_one` for a count of one (the locale tables spell singular and plural as two keys). */
+export function plural(key: string, n: number, d: Pick<JobsDeps, 't'>, vars: Record<string, string | number> = {}): string {
+  if (n === 1) { const one = tryKey(`${key}_one`, d); if (one) return d.t(`${key}_one`, { n, ...vars }); }
+  return d.t(key, { n, ...vars });
+}
 
 /** A new job starts from the server's own param defaults (`GET /jobs/types` -> `defaults`, plus each param's default).
  *  The Result defaults to APPLY (SAP-style background job; owner ruling 2026-10-28); a Dry run is the alternative. */
@@ -828,6 +841,7 @@ export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: strin
   }
   if (f.validFrom && f.validUntil && f.validUntil < f.validFrom) e.validity = 'jobs.err_validity';
   if (f.targetMode === 'selected' && !f.targetPlants.length) e.targets = 'jobs.err_targets_none';
+  if (!f.targetsLocked && targetRowCount(f) > TARGET_ROWS_MAX) e.targets = 'jobs.err_targets_cap';
   else if (f.targetMode === 'subnetwork' && !f.targetSubnetwork) e.targets = 'jobs.err_targets_subnetwork';
   else if (o.plants && f.targetMode === 'selected' && f.targetPlants.some(p => !o.plants?.includes(p))) e.targets = 'jobs.err_plant_scope';
   if (f.tzMode === 'fixed' && !f.fixedTz.trim()) e.fixedTz = 'jobs.err_fixed_tz';
@@ -839,7 +853,22 @@ export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: strin
 }
 
 /** The target rows to save for a form: none for a single-plant job. Per-plant overrides of a row that is still there are kept. */
+export function targetRowCount(f: Pick<JobForm, 'targetMode' | 'targetPlants' | 'excludedPlants'>): number {
+  return f.targetMode === 'selected' ? f.targetPlants.length : f.targetMode === 'single' ? 0 : 1 + f.excludedPlants.length;
+}
+
+/** True when the saved rows survive a round trip through the form's modes (one kind, explicit exclusions only). */
+export function targetsLossless(rows: JobTarget[]): boolean {
+  const inc = rows.filter(r => !r.excluded);
+  if (rows.some(r => r.excluded && r.kind !== 'explicit')) return false;
+  const kinds = new Set(inc.map(r => r.kind));
+  if (kinds.size > 1) return false;
+  if (inc.filter(r => r.kind === 'subnetwork').length > 1 || inc.filter(r => r.kind === 'all').length > 1) return false;
+  return true;
+}
+
 export function buildTargetRows(f: JobForm): JobTarget[] {
+  if (f.targetsLocked) return f.storedTargets.map(r => ({ ...r }));
   const keep = (kind: JobTarget['kind'], value: string): Record<string, unknown> | null =>
     f.storedTargets.find(r => !r.excluded && r.kind === kind && r.value === value)?.params_override ?? null;
   const excl = (): JobTarget[] => f.excludedPlants.map(value => ({ kind: 'explicit' as const, value, excluded: true, params_override: null }));
@@ -855,10 +884,10 @@ export function buildTargetRows(f: JobForm): JobTarget[] {
 export function targetsLabel(j: { plant: string; targetKind?: string; targetCount?: number; targets?: JobTarget[] }, d: Pick<JobsDeps, 't'>): string {
   const kind = j.targetKind ?? 'single';
   if (kind === 'single') return d.t('jobs.targets_single', { plant: j.plant });
-  if (kind === 'all') return d.t('jobs.targets_all');
+  if (kind === 'all') return (j.targetCount ?? 0) > 1 ? d.t('jobs.targets_all_n', { n: j.targetCount ?? 0 }) : (j.targetCount === 1 ? d.t('jobs.targets_all_one') : d.t('jobs.targets_all'));
   const sub = kind === 'subnetwork' ? j.targets?.find(r => r.kind === 'subnetwork' && !r.excluded)?.value : '';
   if (sub) return d.t('jobs.targets_subnetwork', { name: sub });
-  return d.t('jobs.targets_n', { n: j.targetCount ?? 0 });
+  return plural('jobs.targets_n', j.targetCount ?? 0, d);
 }
 
 /** Plant codes narrowed by a case-insensitive search, at most `cap` of them (a 50+ plant list is never rendered whole). */
@@ -870,9 +899,9 @@ export function filterPlants(all: string[], q: string, cap = 200): { shown: stri
 
 /** "12 plants" / "12 plants; 2 skipped: no timezone" from a targets preview. */
 export function targetsPreviewText(p: { count: number; skipped: number; warnings: string[] }, d: Pick<JobsDeps, 't'>): string {
-  if (!p.skipped) return d.t('jobs.t_preview', { n: p.count });
+  if (!p.skipped) return plural('jobs.t_preview', p.count, d);
   const reasons = [...new Set(p.warnings.map(w => w.replace(/^[^:]*:\s*/, '')))].map(r => (r === 'plant has no timezone' ? d.t('jobs.t_skip_no_tz') : r === 'plant no longer exists' ? d.t('jobs.t_skip_gone') : r));
-  return d.t('jobs.t_preview_skipped', { n: p.count, skipped: p.skipped, reason: reasons.join(', ') });
+  return plural('jobs.t_preview_skipped', p.count, d, { skipped: p.skipped, reason: reasons.join(', ') });
 }
 
 /** The IANA zones the browser knows (for the fixed-zone picker); a short fallback when the runtime has no list. */
@@ -944,12 +973,13 @@ export function jobToForm(job: {
 
 /** Saved target rows back into the form's mode and lists. */
 export function targetsToForm(rows: JobTarget[], fan: { stagger_s?: number; max_parallel?: number | null; fail_fast?: boolean } | null):
-  Pick<JobForm, 'targetMode' | 'targetPlants' | 'targetSubnetwork' | 'excludedPlants' | 'storedTargets' | 'fanOut'> {
+  Pick<JobForm, 'targetMode' | 'targetPlants' | 'targetSubnetwork' | 'excludedPlants' | 'storedTargets' | 'targetsLocked' | 'fanOut'> {
   const inc = rows.filter(r => !r.excluded);
   const all = inc.some(r => r.kind === 'all');
   const sub = inc.find(r => r.kind === 'subnetwork');
   const mode: TargetMode = !rows.length ? 'single' : all ? 'all' : sub ? 'subnetwork' : 'selected';
   return {
+    targetsLocked: !targetsLossless(rows),
     targetMode: mode,
     targetPlants: mode === 'selected' ? inc.filter(r => r.kind === 'explicit').map(r => r.value) : [],
     targetSubnetwork: sub?.value ?? '',

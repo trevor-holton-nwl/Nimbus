@@ -24,7 +24,7 @@ import {
   RECUR_PRESETS, NAME_MAX, WINDOW_CHOICES, WINDOW_ANCHORS, WINDOW_UNITS, WINDOW_OPEN_START, defaultJobForm, jobToForm,
   validateJobForm, buildJobPayload, recurrenceText, stripOffset, dowLabelKey, seedParams, resultOf, findType, hasApplyMode, typeGroups,
   typeLabel, paramLabel, enumLabel, paramHint, windowToUi, uiToWindow, validateWindowUi,
-  TARGET_MODES, TZ_MODES, STAGGER_MAX, PARALLEL_MAX, buildTargetRows, filterPlants, targetsPreviewText, timeZoneList, tzShort,
+  TARGET_MODES, TZ_MODES, STAGGER_MAX, PARALLEL_MAX, buildTargetRows, filterPlants, targetsPreviewText, plural, TARGET_ROWS_MAX, targetRowCount, timeZoneList, tzShort,
 } from './jobs-model.mjs';
 import type { JobForm, FormErrors, Recurrence, JobsDeps, TypeMeta, ParamMeta, DateWindow, WindowUi, TargetMode, TzMode } from './jobs-model.mjs';
 
@@ -311,10 +311,15 @@ const _chosen = (f: JobForm, kind: PickKind): string[] => (kind === 'sel' ? f.ta
 
 /** The checkbox rows of one plant picker (at most 200 rendered; the rest is reached by searching). */
 export function pickRowsHtml(kind: PickKind, chosen: string[], filter: string): string {
-  const { shown, total } = filterPlants(allowedPlantList(), filter);
+  const all = allowedPlantList();
+  const { shown, total } = filterPlants(all, filter);
   const on = new Set(chosen);
-  if (!shown.length) return `<div class="hps-empty">${esc(t('ui.no_matches'))}</div>`;
-  return shown.map(p => `<label class="chk-inline job-copy-row"><input type="checkbox" ${_PICK[kind].attr}="${esc(p)}"${on.has(p) ? ' checked' : ''}><span>${esc(p)}</span></label>`).join('')
+  const known = new Set(all);
+  // A selected code that is not in the viewer's plant list (a plant removed, or outside their access) stays visible and
+  // removable: it would otherwise ride along invisibly and survive Clear.
+  const unknown = chosen.filter(c => !known.has(c)).map(c => `<label class="chk-inline job-copy-row"><input type="checkbox" ${_PICK[kind].attr}="${esc(c)}" checked><span>${esc(c)} <span class="badge badge-warn">${esc(t('jobs.t_unknown_plant'))}</span></span></label>`).join('');
+  if (!shown.length) return unknown + `<div class="hps-empty">${esc(t('ui.no_matches'))}</div>`;
+  return unknown + shown.map(p => `<label class="chk-inline job-copy-row"><input type="checkbox" ${_PICK[kind].attr}="${esc(p)}"${on.has(p) ? ' checked' : ''}><span>${esc(p)}</span></label>`).join('')
     + (total > shown.length ? `<div class="ape-hint">${esc(t('jobs.t_more', { shown: shown.length, total }))}</div>` : '');
 }
 
@@ -322,12 +327,12 @@ export function pickRowsHtml(kind: PickKind, chosen: string[], filter: string): 
 export function pickerHtml(kind: PickKind, f: JobForm): string {
   const c = _PICK[kind];
   const label = t(c.label);
-  return `<div class="form-row job-pick"><label for="${c.filter}">${esc(label)}</label>`
+  return `<div class="form-row job-pick"><label id="${c.filter}-lbl" for="${c.filter}">${esc(label)}</label>`
     + `<input class="input" id="${c.filter}" type="search" placeholder="${esc(t('jobs.copy_search'))}" aria-label="${esc(label)}" autocomplete="off">`
-    + `<div class="job-copy-actions"><button type="button" class="btn btn-ghost sm" data-jb-act="${kind}-all">${esc(t('jobs.copy_all_shown'))}</button>`
+    + `<div class="job-copy-actions"><button type="button" class="btn btn-ghost sm" data-jb-act="${kind}-all">${esc(t('jobs.t_select_all', { n: allowedPlantList().length }))}</button>`
     + `<button type="button" class="btn btn-ghost sm" data-jb-act="${kind}-none">${esc(t('jobs.copy_clear'))}</button>`
     + `<span class="ape-hint" id="${c.count}">${esc(t('jobs.copy_count', { n: _chosen(f, kind).length }))}</span></div>`
-    + `<div class="job-copy-list" id="${c.list}">${pickRowsHtml(kind, _chosen(f, kind), '')}</div></div>`;
+    + `<div class="job-copy-list" id="${c.list}" role="group" aria-labelledby="${c.filter}-lbl">${pickRowsHtml(kind, _chosen(f, kind), '')}</div></div>`;
 }
 
 export function fanOutHtml(f: JobForm): string {
@@ -352,6 +357,9 @@ export function targetsBodyHtml(f: JobForm): string {
 }
 
 export function targetsFieldsetHtml(f: JobForm): string {
+  if (f.targetsLocked) {
+    return `<fieldset class="job-targets"><legend>${esc(t('jobs.t_legend'))}</legend><div class="ape-hint" role="note">${esc(t('jobs.t_locked'))}</div></fieldset>`;
+  }
   const hasSubs = subnetworkList().length > 0;
   return `<fieldset class="job-targets"><legend>${esc(t('jobs.t_legend'))}</legend>`
     + `<div class="job-radios" role="radiogroup" aria-label="${esc(t('jobs.t_legend'))}">`
@@ -389,7 +397,7 @@ export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: T
     + `<div class="form-row-2"><div class="form-row"><label for="jb-from">${esc(t('jobs.f_valid_from'))}</label><input class="input" id="jb-from" type="date" value="${esc(f.validFrom)}"></div>`
     + `<div class="form-row"><label for="jb-until">${esc(t('jobs.f_valid_until'))}</label><input class="input" id="jb-until" type="date" value="${esc(f.validUntil)}"></div></div>${_err('validity')}`
     + `<label class="chk-inline"><input type="checkbox" id="jb-overlap"${f.skipIfRunning ? ' checked' : ''}><span>${esc(t('jobs.f_skip_overlap'))}</span></label>`
-    + `<div class="job-preview" id="jb-preview" aria-live="polite"></div></fieldset></div>`;
+    + `<div class="job-preview" id="jb-preview"></div><span class="job-sr" id="jb-preview-live" role="status" aria-live="polite"></span></fieldset></div>`;
 }
 
 function _footHtml(): string {
@@ -538,19 +546,23 @@ async function _runPreview(): Promise<void> {
     const multi = job.targets.length > 0 && s.form.tzMode === 'plant';
     const res = await JobsClient.preview(s.form.plant, p, multi ? 3 : 5, { targets: job.targets, plantLimit: s.planLimit });
     if (_s !== s || seq !== s.previewSeq) return;
+    const hadMoreFocus = document.activeElement?.getAttribute?.('data-jb-act') === 'plants-more';
+    const live = _el('jb-preview-live');
+    if (live) live.textContent = multi ? t('jobs.preview_live', { shown: res.plants.length, total: res.totalPlants }) : '';
     const head = `<div class="job-preview-head">${esc(t('jobs.next_runs'))} <span class="ape-hint">${esc(prose)}</span></div>`;
     const dst = (res.entries.some(x => x.dstShifted) || res.plants.some(pl => pl.entries.some(x => x.dstShifted))) ? `<div class="job-dst" role="note">${esc(t('jobs.dst_warning'))}</div>` : '';
-    const skipped = res.warnings.length ? `<div class="ape-hint">${esc(t('jobs.t_skipped_note', { n: res.warnings.length }))}</div>` : '';
+    const skipped = res.warnings.length ? `<div class="ape-hint">${esc(plural('jobs.t_skipped_note', res.warnings.length, jobsDeps()))}</div>` : '';
     if (multi) {
       const more = res.totalPlants > res.plants.length
         ? (res.plants.length < PLANT_PAGE_MAX
           ? `<button type="button" class="btn btn-ghost sm" data-jb-act="plants-more">${esc(t('jobs.t_show_more', { shown: res.plants.length, total: res.totalPlants }))}</button>`
           : `<div class="ape-hint">${esc(t('jobs.t_showing', { shown: res.plants.length, total: res.totalPlants }))}</div>`)
         : '';
-      box.innerHTML = head + `<div class="ape-hint">${esc(t('jobs.t_preview_plants', { n: res.totalPlants }))}</div>` + skipped
+      box.innerHTML = head + `<div class="ape-hint">${esc(plural('jobs.t_preview_plants', res.totalPlants, jobsDeps()))}</div>` + skipped
         + (res.plants.length ? res.plants.map(pl => `<div class="job-pp"><span class="job-mono job-pp-plant">${esc(pl.plant)}</span> <span class="ape-hint">${esc(pl.timezone)}</span>`
           + `<ol class="job-preview-list">${pl.entries.map(x => `<li class="job-mono">${esc(_fireText(x, pl.timezone))}</li>`).join('')}</ol></div>`).join('')
           : `<div class="ape-hint">${esc(t('jobs.no_runs'))}</div>`) + more + dst;
+      if (hadMoreFocus) (box.querySelector('[data-jb-act="plants-more"]') as HTMLElement | null)?.focus();
       return;
     }
     box.innerHTML = head + skipped
@@ -624,17 +636,37 @@ function _refreshPick(s: DialogState, kind: PickKind): void {
   const c = _PICK[kind];
   const list = _el(c.list);
   if (list) list.innerHTML = pickRowsHtml(kind, _chosen(s.form, kind), _val(c.filter));
-  const n = _el(c.count);
+  _refreshPickCount(s, kind);
+  // The bulk button names how many plants the search matches ("Select all 37 matches").
+  const btn = document.querySelector<HTMLElement>(`[data-jb-act="${kind}-all"]`);
+  if (btn) btn.textContent = t('jobs.t_select_all', { n: filterPlants(allowedPlantList(), _val(c.filter), Number.MAX_SAFE_INTEGER).total });
+}
+
+/** A tick only moves the count: the rows (and the focus on the box just ticked) stay exactly where they are. */
+function _refreshPickCount(s: DialogState, kind: PickKind): void {
+  const n = _el(_PICK[kind].count);
   if (n) n.textContent = t('jobs.copy_count', { n: _chosen(s.form, kind).length });
+  const row = _el(_PICK[kind].list);
+  // An unticked unknown code has nothing left to show: drop its row (the ticked box that was clicked keeps focus otherwise).
+  if (row) row.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(i => {
+    const code = i.getAttribute(_PICK[kind].attr) ?? '';
+    if (!i.checked && !allowedPlantList().includes(code)) i.closest('label')?.remove();
+  });
 }
 
 function _pickBulk(s: DialogState, kind: PickKind, all: boolean): void {
   const c = _PICK[kind];
   const key = kind === 'sel' ? 'targetPlants' : 'excludedPlants';
   const shown = filterPlants(allowedPlantList(), _val(c.filter), Number.MAX_SAFE_INTEGER).shown;
-  const cur = new Set(s.form[key]);
-  for (const p of shown) { if (all) cur.add(p); else cur.delete(p); }
-  s.form = { ...s.form, [key]: [...cur] };
+  // Clear means clear: the whole selection goes, including codes the list no longer shows (unknown plants, other searches).
+  const cur = new Set(all ? s.form[key] : []);
+  if (all) for (const p of shown) cur.add(p);
+  const next = { ...s.form, [key]: [...cur] };
+  if (all && targetRowCount(next) > TARGET_ROWS_MAX) {
+    Toast.show(t('jobs.err_targets_cap', { max: TARGET_ROWS_MAX, n: targetRowCount(next) }), 'error');
+    return;                                        // the server refuses more rows than this: say so before the Save
+  }
+  s.form = next;
   _refreshPick(s, kind);
   _scheduleTargetsPreview();
   _schedulePreview();
@@ -726,7 +758,7 @@ function _wire(): void {
       const cur = new Set(s.form[key]);
       if ((e.target as HTMLInputElement).checked) cur.add(plant); else cur.delete(plant);
       s.form = { ...s.form, [key]: [...cur] };
-      _refreshPick(s, kind);
+      _refreshPickCount(s, kind);
       _scheduleTargetsPreview(); _schedulePreview();
       return true;
     };

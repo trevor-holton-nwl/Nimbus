@@ -65,6 +65,8 @@ export interface Job {
   next_run_at: string | null;
   next_run_local: string | null;
   last_run: JobRun | null;
+  /** A multi-plant job's newest batch (live counts, in the viewer's plants), else null. */
+  lastBatch: { id: number; status: string; counts: Record<string, number> } | null;
   /** W3a: the target rows (empty = the home plant only), how many plants they run today, and the fan-out settings. */
   targets: JobTarget[];
   targetKind: string;
@@ -156,6 +158,12 @@ export function normJob(r: Raw): Job {
     params: (r.params as Record<string, unknown> | null) ?? {}, enabled: r.enabled !== false,
     schedule: schedules[0] ?? null, schedules, next_run_at: _s(r.next_run_at), next_run_local: _s(r.next_run_local),
     last_run: lr ? normRun(lr) : null,
+    lastBatch: r.last_batch ? (() => {
+      const b = r.last_batch as Raw;
+      const counts: Record<string, number> = {};
+      for (const [k, v] of Object.entries((b.counts as Record<string, unknown> | null) ?? {})) counts[k] = Number(v);
+      return { id: Number(b.id), status: String(b.status ?? ''), counts };
+    })() : null,
     targets: _arr(r, 'targets').map(normTarget), targetKind: String(r.target_kind ?? 'single'), targetCount: Number(r.target_count ?? 1),
     targetSkipped: Number(r.target_skipped ?? 0), fanOut: (r.fan_out as Job['fanOut']) ?? null,
   };
@@ -202,7 +210,7 @@ export function normHealth(data: unknown): HealthSummary {
     running: Number(d.running ?? 0), queued: Number(d.queued ?? 0), failed24h: Number(d.failed_24h ?? 0),
     missed24h: Number(d.missed_24h ?? 0), warning24h: Number(d.warning_24h ?? 0),
     failedConfig24h: Number(d.failed_config_24h ?? 0), failedSystem24h: Number(d.failed_system_24h ?? 0),
-    failedTransient24h: Number(d.failed_transient_24h ?? 0),
+    failedTransient24h: Number(d.failed_transient_24h ?? 0), failedBatches24h: Number(d.failed_batches_24h ?? 0),
     nextFire: nf ? { atUtc: String(nf.at_utc ?? ''), atLocal: String(nf.at_local ?? ''), jobId: Number(nf.job_id), jobName: String(nf.job_name ?? ''), plant: String(nf.plant ?? '') } : null,
     scheduler: { ok: sch.ok === true, lastTickAt: _s(sch.last_tick_at) },
     longerThanUsual: Array.isArray(d.longer_than_usual) ? (d.longer_than_usual as unknown[]).map(Number) : [],
@@ -299,9 +307,12 @@ export const JobsClient = {
     return { items: _arr(data, 'batches').map(normBatch), nextBeforeId: _cursor(data) };
   },
   /** One batch with its child runs (one row per plant run, plant then id). */
-  async batch(id: number): Promise<{ batch: Batch; runs: JobRun[] }> {
-    const d = await _req('GET', `/jobs/batches/${id}`) as Raw;
-    return { batch: normBatch((d.batch as Raw) ?? {}), runs: _arr(d, 'runs').map(normRun) };
+  async batch(id: number, page: { limit?: number; offset?: number } = {}): Promise<{ batch: Batch; runs: JobRun[]; hasMore: boolean }> {
+    const q = new URLSearchParams();
+    if (page.limit) q.set('limit', String(page.limit));
+    if (page.offset) q.set('offset', String(page.offset));
+    const d = await _req('GET', `/jobs/batches/${id}${q.size ? `?${q}` : ''}`) as Raw;
+    return { batch: normBatch((d.batch as Raw) ?? {}), runs: _arr(d, 'runs').map(normRun), hasMore: d.has_more === true };
   },
   async upcoming(jobId: number, n = 10): Promise<UpcomingEntry[]> { return _arr(await _req('GET', `/jobs/${jobId}/upcoming?n=${n}`), 'entries').map(normEntry); },
   /** Soonest first across the viewer's visible jobs; `plant` narrows it. */
@@ -311,7 +322,11 @@ export const JobsClient = {
   },
 
   async runNow(jobId: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/${jobId}/run`)) as Raw).run) as Raw); },
-  /** Run the same job again as a manual run (admin); 409 while a run of it is active. */
+  /** Cancel a live batch (admin): running plants are cancelled, plants not started are skipped. */
+  async cancelBatch(id: number): Promise<Batch> { return normBatch((((await _req('POST', `/jobs/batches/${id}/cancel`)) as Raw).batch) as Raw); },
+  /** Re-run only the failed, skipped or cancelled plants of a batch (admin); answers the first new run. */
+  async restartBatch(id: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/batches/${id}/restart`)) as Raw).run) as Raw); },
+  /** Run again the PLANT of this run only (admin); 409 while a run of that plant is active. */
   async restartRun(runId: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/runs/${runId}/restart`)) as Raw).run) as Raw); },
   /** The job's CURRENT params (what a restart would run with). */
   async jobParams(jobId: number): Promise<Record<string, unknown>> {

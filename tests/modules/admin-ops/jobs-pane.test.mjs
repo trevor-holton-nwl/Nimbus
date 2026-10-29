@@ -94,3 +94,36 @@ test('the Jobs list has a Targets column (no Copy-to-plants action), and the Run
   assert.match(list(), /data-run-id="41"/, 'the per-plant run is listed under the batch');
   assert.match(list(), /jobs\.error_kind_config|Fix the job/);
 });
+
+test('batch rows offer Cancel while running and Restart failed plants once finished with failures (admin only); a nested button never opens a run', async () => {
+  Session.isAdmin = () => true;
+  const run = { id: 41, job_id: 5, job_name: 'Multi', plant: '1008', job_type: 'optimizer.plant', status: 'failed', trigger: 'schedule', scheduled_for: null, started_at: null,
+    ended_at: null, duration_ms: 1000, triggered_by: 'schedule', summary: { error_kind: 'config', row_counts: { orders: 7, queued: 2 } }, error: 'boom', log_truncated: false, batchId: 9 };
+  const running = { id: 20, jobId: 5, jobName: 'Live', status: 'running', trigger: 'schedule', triggeredBy: 'schedule', startedAt: null, endedAt: null, durationMs: null, counts: { total: 4, succeeded: 1, scheduled: 3 } };
+  const failed = { id: 19, jobId: 5, jobName: 'Multi', status: 'failed', trigger: 'schedule', triggeredBy: 'schedule', startedAt: null, endedAt: null, durationMs: 1, counts: { total: 3, succeeded: 2, failed: 1 } };
+  const okBatch = { ...failed, id: 18, jobName: 'Fine', status: 'succeeded', counts: { total: 3, succeeded: 3 } };
+  JobsClient.batches = async () => ({ items: [running, failed, okBatch], nextBeforeId: null });
+  JobsClient.batch = async id => ({ batch: failed, runs: [run], hasMore: id === 19 });
+  JobsAdmin._setTab('runs');
+  const pane = dom.doc.getElementById('admin-jobs-pane');
+  const view = add('jobs-runs-view', pane); view.value = 'batches'; view.dispatch('change');
+  await new Promise(r => setTimeout(r, 20));
+  const list = () => dom.doc.getElementById('jobs-runs-list').innerHTML;
+  assert.match(list(), /data-jobs-batch-cancel="20"/, 'a running batch can be cancelled');
+  assert.doesNotMatch(list(), /data-jobs-batch-restart="20"/);
+  assert.match(list(), /data-jobs-batch-restart="19"/, 'a batch with a failed plant can be restarted');
+  assert.doesNotMatch(list(), /data-jobs-batch-restart="18"/, 'nothing to restart when every plant finished');
+  assert.doesNotMatch(list(), /data-jobs-batch-cancel="19"/);
+  const toggle = add('jobs-batch-toggle2', pane); toggle.setAttribute('data-jobs-batch', '19'); toggle.dataset.jobsBatch = '19';
+  toggle.dispatch('click');
+  await new Promise(r => setTimeout(r, 20));
+  assert.match(list(), /jobs\.col_row_counts/, 'a report run in the batch adds a rows-found column');
+  assert.match(list(), /<td class="job-mono">9<\/td>/, 'the sum of the run summary row_counts');
+  assert.match(list(), /data-jobs-batch-more="19"/, 'a batch with more plants than one page offers the next page');
+  Session.isAdmin = () => false;
+  JobsAdmin._setTab('runs');
+  view.dispatch('change');
+  await new Promise(r => setTimeout(r, 20));
+  assert.doesNotMatch(list(), /data-jobs-batch-restart|data-jobs-batch-cancel/, 'read-only users get no batch actions');
+  Session.isAdmin = () => true;
+});

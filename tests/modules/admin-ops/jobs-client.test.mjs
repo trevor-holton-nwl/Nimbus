@@ -294,3 +294,22 @@ test('run now and restart still answer the run (a batch rides next to it and the
   assert.equal(r.id, 42);
   assert.deepEqual(phantom, []);
 });
+
+test('W3a fix wave: health carries failed_batches_24h, a job carries last_batch, batch detail pages, and batch cancel / restart hit their routes', async () => {
+  reply = body('summary');
+  assert.equal((await JobsClient.summary('')).failedBatches24h, 1);
+  reply = body('jobs_list');
+  const j = (await JobsClient.list({})).items[0];
+  assert.deepEqual(j.lastBatch, { id: 9, status: 'warning', counts: { total: 3, succeeded: 1, warning: 1, skipped: 1 } });
+  reply = body('batch_detail');
+  const b = await JobsClient.batch(9, { limit: 50, offset: 100 });
+  assert.equal(calls.at(-1).url.endsWith('/jobs/batches/9?limit=50&offset=100'), true);
+  assert.equal(b.hasMore, false);
+  reply = body('batch_cancelled');
+  await JobsClient.cancelBatch(9);
+  assert.equal(calls.at(-1).method, 'POST'); assert.match(calls.at(-1).url, /\/jobs\/batches\/9\/cancel$/);
+  reply = body('batch_run_started');
+  const r = await JobsClient.restartBatch(9);
+  assert.match(calls.at(-1).url, /\/jobs\/batches\/9\/restart$/); assert.equal(r.id, 42);
+  assert.deepEqual(phantom, [], 'the client read only keys the wire has');
+});

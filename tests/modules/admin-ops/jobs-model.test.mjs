@@ -11,7 +11,7 @@ import {
   shouldPollJobs, runSequential, deltaText, isDryRun, tzShort, isLongerThanUsual, RUN_STATUSES, JOB_RESULTS,
   resultOf, seedParams, typeGroups, findType, hasApplyMode, paramLabel, enumLabel, paramHint, typeLabel, validateParams, defaultWindowUi,
   uiToWindow, windowToUi, validateWindowUi, artifactTiles, isReportRun, cellText, windowLine, sectionTitle, columnLabel, isReportType,
-  buildTargetRows, targetsLabel, filterPlants, targetsPreviewText, targetsToForm, batchTiles, buildBatchesQuery, timeZoneList, TARGET_MODES, TZ_MODES,
+  plural, targetsLossless, targetRowCount, TARGET_ROWS_MAX, buildTargetRows, targetsLabel, filterPlants, targetsPreviewText, targetsToForm, batchTiles, buildBatchesQuery, timeZoneList, TARGET_MODES, TZ_MODES,
 } from '../../../frontend/admin-ops/jobs-model.mjs';
 import { TYPES, OPT, byKey } from './jobs-types-fixture.mjs';
 
@@ -547,7 +547,9 @@ test('targetsLabel names the targets: Plant 1021, 12 plants, All plants, Subnetw
   assert.equal(targetsLabel({ plant: '1021' }, d), 'jobs.targets_single|{"plant":"1021"}');
   assert.equal(targetsLabel({ plant: '1021', targetKind: 'selected', targetCount: 12 }, d), 'jobs.targets_n|{"n":12}');
   assert.equal(targetsLabel({ plant: '1021', targetKind: 'mixed', targetCount: 3 }, d), 'jobs.targets_n|{"n":3}');
-  assert.equal(targetsLabel({ plant: '1021', targetKind: 'all', targetCount: 50 }, d), 'jobs.targets_all|{}');
+  assert.equal(targetsLabel({ plant: '1021', targetKind: 'all', targetCount: 50 }, d), 'jobs.targets_all_n|{"n":50}');
+  assert.equal(targetsLabel({ plant: '1021', targetKind: 'all', targetCount: 1 }, d), 'jobs.targets_all_one|{}');
+  assert.equal(targetsLabel({ plant: '1021', targetKind: 'selected', targetCount: 1 }, { t: (k, v) => (k === 'jobs.targets_n_one' ? `one:${v?.n}` : `${k}`) }), 'one:1');
   assert.equal(targetsLabel({ plant: '1021', targetKind: 'subnetwork', targets: [{ kind: 'subnetwork', value: 'NA', excluded: false }] }, d), 'jobs.targets_subnetwork|{"name":"NA"}');
 });
 
@@ -572,4 +574,34 @@ test('batchTiles keeps a fixed order and drops zero counts; buildBatchesQuery pa
   assert.equal(buildBatchesQuery({}), '?limit=50');
   assert.equal(buildBatchesQuery({ limit: 9999 }), '?limit=200');
   assert.ok(timeZoneList().includes('UTC') && timeZoneList().length >= 10);
+});
+
+test('plural picks the _one key for a count of one and falls back to the base key when a locale has none', () => {
+  const t = (k, v) => ({ 'jobs.x': 'many {{n}}', 'jobs.x_one': 'one {{n}}' }[k] ?? k);
+  assert.equal(plural('jobs.x', 1, { t }), 'one {{n}}');
+  assert.equal(plural('jobs.x', 2, { t }), 'many {{n}}');
+  assert.equal(plural('jobs.y', 1, { t }), 'jobs.y');
+  assert.equal(targetsPreviewText({ count: 1, skipped: 0, warnings: [] }, { t: (k) => k }), 'jobs.t_preview');
+});
+
+test('mixed target rows are not editable in the form: they are kept exactly as saved (a subnetwork plus a plant, an excluded subnetwork)', () => {
+  const sub = { kind: 'subnetwork', value: 'NA', excluded: false, params_override: null };
+  const one = { kind: 'explicit', value: '1008', excluded: false, params_override: { mode: 'spt' } };
+  const exclSub = { kind: 'subnetwork', value: 'EU', excluded: true, params_override: null };
+  assert.equal(targetsLossless([sub]), true);
+  assert.equal(targetsLossless([sub, { kind: 'explicit', value: '3001', excluded: true, params_override: null }]), true);
+  assert.equal(targetsLossless([sub, one]), false);
+  assert.equal(targetsLossless([sub, exclSub]), false);
+  const f = { ...defaultJobForm('1008'), ...targetsToForm([sub, one], null) };
+  assert.equal(f.targetsLocked, true);
+  assert.deepEqual(buildTargetRows(f), [sub, one], 'every row, override included, survives an edit');
+  assert.equal(targetsToForm([sub], null).targetsLocked, false);
+});
+
+test('a selection beyond the server cap of 500 target rows is refused client-side with its own message', () => {
+  const plants = Array.from({ length: TARGET_ROWS_MAX + 1 }, (_, i) => 'P' + i);
+  const f = { ...defaultJobForm('1008'), name: 'n', targetMode: 'selected', targetPlants: plants };
+  assert.equal(targetRowCount(f), TARGET_ROWS_MAX + 1);
+  assert.equal(validateJobForm(f, { isAdmin: true, plants: null }).targets, 'jobs.err_targets_cap');
+  assert.equal(validateJobForm({ ...f, targetPlants: plants.slice(0, TARGET_ROWS_MAX) }, { isAdmin: true, plants: null }).targets, undefined);
 });
