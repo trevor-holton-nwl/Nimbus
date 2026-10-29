@@ -62,7 +62,7 @@ def run_what_changed(ctx, p: WhatChangedParams) -> JobOutcome:
     except windows.WindowConfigError as e:
         return _fail_config(ctx, e)
     # schedule_event.at is timestamptz: use the window's aware instants; idx_schedule_event_plant (plant, id) drives it.
-    start, end = w["start"], w["end"]
+    start, end = w["start_aware"], w["end_aware"]
     where = "plant = %s AND at >= %s::timestamptz AND at < %s::timestamptz"
     args = (ctx.plant, start, end)
     with ctx.step("counts"), db._pool.connection() as conn, conn.cursor() as cur:

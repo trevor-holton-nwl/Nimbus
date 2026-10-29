@@ -98,8 +98,10 @@ def _sections(art):
 def _order(cur, plant, oid, *, machine="SHARED_LINE", start=None, end=None, due=None, status="scheduled", prt=None):
     cur.execute(
         "INSERT INTO orders (id, production_order, material_number, machine, plant, scheduled_start, scheduled_end,"
-        " original_finish_received, planning_status, prt_01) VALUES (%s, %s, 'ZZ_MAT', %s, %s, %s, %s, %s, %s, %s)",
-        (oid, oid, machine, plant, start, end, due, status, prt))
+        " original_finish_received, planning_status, planning_reason, prt_01)"
+        " VALUES (%s, %s, 'ZZ_MAT', %s, %s, %s, %s, %s, %s,"
+        " CASE WHEN %s = 'needs_planning' THEN '{\"code\":\"x\",\"message\":\"y\"}'::jsonb END, %s)",
+        (oid, oid, machine, plant, start, end, due, status, status, prt))
 
 
 def _event(cur, plant, order_id, source="drag", actor="a@x.com", op="modify", at=None):
