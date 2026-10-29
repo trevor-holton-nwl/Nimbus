@@ -35,6 +35,8 @@
     "fan_out": {"stagger_s": 30, "max_parallel": 2, "fail_fast": false}, "targets": ["$target"],
     "schedules": ["$schedule"],
     "next_run_at": "2026-10-30T12:00:00+00:00", "next_run_local": "2026-10-30T08:00:00-04:00",
+    "template_id": null, "template_version": null,
+    "template": {"id": 3, "name": "Purge then re-optimize", "version": 1, "current_version": 2, "archived": false, "changed": true},
     "target_kind": "selected", "target_count": 2, "target_skipped": 0,
     "last_run": "$run",
     "last_batch": {"id": 9, "status": "warning", "counts": {"total": 3, "succeeded": 1, "warning": 1, "skipped": 1}, "scheduled_for": "2026-10-29T12:00:00+00:00"}
@@ -46,8 +48,32 @@
                 "required": false, "widget": null, "enum": ["due_date", "min_changeover", "spt"],
                 "enum_label_keys": {"due_date": "jobs.p.optimizer.plant.mode.due_date"}}],
     "params_schema": {"type": "object"},
-    "defaults": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"}
-  }]},
+    "defaults": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"},
+    "idempotent": true, "composite": false, "estimate_s": 180,
+    "dry_run": {"param": "apply_mode", "value": "propose"}, "lock_keys": ["jobs:optimizer.plant:{plant}"]
+  }], "limits": {"chain_max_steps": 10, "purge_min_age_days": 7}},
+  "step": {
+    "seq": 1, "step_type": "optimizer.plant", "label": null, "run_on": "success", "continue_on_failure": false,
+    "params": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"},
+    "status": "failed", "started_at": "2026-10-29T12:00:01+00:00", "ended_at": "2026-10-29T12:03:40+00:00", "duration_ms": 219000,
+    "summary": {"applied": 0}, "error": "write refused", "error_kind": "transient", "action_id": null
+  },
+  "run_detail": {"run": "$run", "steps": ["$step"]},
+  "template": {
+    "id": 3, "name": "Purge then re-optimize", "description": "Remove old orders, then re-optimize.",
+    "steps": [{"type": "purge.orders", "params": {"max_rows": 5000}, "label": null, "continue_on_failure": false, "run_on": "success"}],
+    "defaults": {"retry_max": 1}, "version": 2, "created_by": "system", "modified_at": "2026-10-29T12:00:00+00:00", "archived": false
+  },
+  "templates_list": {"templates": ["$template"]},
+  "template_wrapped": {"template": "$template"},
+  "template_diff": {
+    "job_id": 5, "template": {"id": 3, "name": "Purge then re-optimize", "version": 2, "archived": false},
+    "job_version": 1, "changed": true,
+    "diff": [{"seq": 1, "change": "changed",
+              "job": {"type": "purge.orders", "params": {"max_rows": 100}, "label": null, "continue_on_failure": false, "run_on": "success"},
+              "template": {"type": "purge.orders", "params": {"max_rows": 5000}, "label": null, "continue_on_failure": false, "run_on": "success"},
+              "fields": ["params.max_rows"]}]
+  },
   "window_preview": {
     "start": "2026-09-28T00:00:00-05:00", "end": "2026-10-29T00:00:00-05:00", "label": "2026-09-28 to 2026-10-28",
     "timezone": "America/Chicago"
@@ -106,7 +132,7 @@
   },
   "log": {
     "run_id": 42, "status": "running", "log_truncated": false, "done": false,
-    "lines": [{"seq": 1, "at": "2026-10-29T12:00:01+00:00", "level": "info", "step": "load", "msg": "loaded 120 orders", "duration_ms": 850, "data": {}}],
+    "lines": [{"seq": 1, "at": "2026-10-29T12:00:01+00:00", "level": "info", "step": "load", "msg": "loaded 120 orders", "duration_ms": 850, "data": {}, "step_seq": null}],
     "last_seq": 1
   },
   "preview": {

@@ -17,6 +17,7 @@ LEVEL_RANK = {name: i for i, name in enumerate(LEVELS)}
 MSG_MAX_BYTES = 2048
 DATA_MAX_BYTES = 8192
 MAX_LINES = 2000
+CHAIN_MAX_LINES = 8000
 FLUSH_INTERVAL_S = 0.5
 
 
@@ -59,6 +60,8 @@ class JobContext:
         self._timer: threading.Timer | None = None
         self._last_flush = 0.0
         self.truncated = False
+        self.max_lines = MAX_LINES                   # a chain raises it to min(MAX_LINES x steps, CHAIN_MAX_LINES)
+        self.step_seq: int | None = None             # the chain step the next lines belong to (job_run_log.step_seq)
         self.timed_out = False
         # A job type that queues for a shared resource (the optimizer slot) keeps the hard-timeout clock stopped
         # until it actually has the resource: the runner sets `defer_clock`, the body calls `begin_work()`.
@@ -107,12 +110,12 @@ class JobContext:
             except Exception:  # noqa: BLE001 - mirroring must never break the run
                 pass
         with self._lock:
-            if self._seq >= MAX_LINES:
+            if self._seq >= self.max_lines:
                 return
             self._seq += 1
-            if self._seq == MAX_LINES:
+            if self._seq == self.max_lines:
                 self.truncated = True
-                row = self._row("warn", f"log truncated: line limit of {MAX_LINES} reached, further lines dropped",
+                row = self._row("warn", f"log truncated: line limit of {self.max_lines} reached, further lines dropped",
                                 None, None, {})
             else:
                 row = self._row(level, cap_text(msg), step, duration_ms, data)
@@ -125,7 +128,7 @@ class JobContext:
 
     def _row(self, level, msg, step, duration_ms, data) -> dict:
         return {"seq": self._seq, "at": datetime.now(timezone.utc), "level": level, "step": step,
-                "msg": msg, "duration_ms": duration_ms, "data": cap_data(data)}
+                "msg": msg, "duration_ms": duration_ms, "data": cap_data(data), "step_seq": self.step_seq}
 
     @contextmanager
     def step(self, name: str, **data):

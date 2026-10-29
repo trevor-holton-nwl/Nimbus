@@ -86,6 +86,7 @@ class JobCreate(BaseModel):
     schedules: list[ScheduleIn] = Field(default_factory=list)
     targets: list[TargetIn] = Field(default_factory=list, max_length=500)
     fan_out: FanOutIn | None = None
+    template_id: int | None = Field(None, ge=1, le=_BIGINT)   # made from this template: the job keeps a COPY of its steps
 
 
 class JobPatch(BaseModel):
@@ -354,15 +355,27 @@ def _job_wire(job: dict, plants: list[dict] | None = None) -> dict:
     lb = job.get("last_batch")                      # multi-plant jobs: the newest batch's rollup (live counts)
     w["last_batch"] = ({"id": lb["id"], "status": lb["status"], "counts": lb["counts"] or {},
                         "scheduled_for": data._iso(lb["scheduled_for"])} if lb else None)
+    w["template"] = None
+    if job.get("template_id") is not None:          # made from a template: is its copy out of date?
+        t = data.template_briefs([job["template_id"]]).get(job["template_id"])
+        if t:
+            w["template"] = {"id": t["id"], "name": t["name"], "version": job.get("template_version"),
+                             "current_version": t["version"], "archived": bool(t["archived"]),
+                             "changed": job.get("template_version") != t["version"]}
     return w
 
 
 def _validate_params(jt, params: dict, plant: str | None = None) -> dict:
     try:
-        return jt.params_model.model_validate(params or {}).model_dump(mode="json")
+        out = jt.params_model.model_validate(params or {}).model_dump(mode="json")
     except ValidationError as e:
         where = f" for plant {plant}" if plant else ""
-        raise HTTPException(status_code=400, detail=f"invalid params{where}: {e.errors(include_url=False)}") from e
+        # No context / input: a validator's own exception is not JSON, and a chain's input is its whole step list.
+        raise HTTPException(status_code=400, detail=f"invalid params{where}: "
+                            f"{e.errors(include_url=False, include_context=False, include_input=False)}") from e
+    if jt.composite and not out.get("steps"):
+        raise HTTPException(status_code=400, detail="a chain needs at least one step")
+    return out
 
 
 # ----------------------------------------------------------------------------------------------------- types
@@ -371,12 +384,19 @@ def job_types(response: Response):
     response.headers["Cache-Control"] = "no-store"
     out = []
     for jt in list_types():
+        defaults = jt.params_model().model_dump(mode="json")
         out.append({"key": jt.key, "label": jt.label, "plant_scoped": jt.plant_scoped,
                     "default_timeout_s": jt.default_timeout_s, "stub": jt.stub,
                     "kind": jt.kind, "mutates": jt.mutates, "params": describe_params(jt),
                     "params_schema": jt.params_model.model_json_schema(),
-                    "defaults": jt.params_model().model_dump(mode="json")})
-    return {"types": out}
+                    "defaults": defaults,
+                    # step-type contract (W4a): what a chain builder validates client-side
+                    "idempotent": jt.idempotent, "composite": jt.composite, "estimate_s": jt.estimate_s,
+                    "dry_run": {"param": jt.dry_run[0], "value": jt.dry_run[1]} if jt.dry_run else None,
+                    "lock_keys": [] if jt.composite else jt.lock_names("{plant}", jt.params_model())})
+    from backend.jobs.types import chain as chain_type, purge as purge_type
+    return {"types": out, "limits": {"chain_max_steps": chain_type.MAX_STEPS,
+                                     "purge_min_age_days": purge_type.min_age_days()}}
 
 
 # ----------------------------------------------------------------------------------------------- windows
@@ -694,6 +714,16 @@ def create_job(body: JobCreate, actor: str | None = Depends(auth.require_admin),
         raise HTTPException(status_code=400, detail=f"unknown job type {body.job_type!r}")
     if not data.plant_exists(body.plant):
         raise HTTPException(status_code=400, detail=f"unknown plant {body.plant!r}")
+    tpl_version = None
+    if body.template_id is not None:
+        tpl = data.get_template(body.template_id)
+        if tpl is None or tpl["archived"]:
+            raise HTTPException(status_code=400, detail="unknown or archived template")
+        if not jt.composite:
+            raise HTTPException(status_code=400, detail="only a chain can be made from a template")
+        tpl_version = tpl["version"]
+        if not (body.params or {}).get("steps"):          # no steps sent: start from the template's copy
+            body.params = {**(body.params or {}), "steps": tpl["steps"]}
     params = _validate_params(jt, body.params)
     rows, _exp = _resolve_targets(body.plant, body.targets, allowed_plants, jt, params)
     schedules = [{**_normalize(body.plant, _timing_fields(s), need_tz=jt.needs_plant_timezone and not rows,
@@ -704,7 +734,7 @@ def create_job(body: JobCreate, actor: str | None = Depends(auth.require_admin),
                              enabled=body.enabled, retry_max=body.retry_max, timeout_s=body.timeout_s,
                              schedules=schedules, actor=actor, targets=rows,
                              fan_out=body.fan_out.model_dump() if body.fan_out else None,
-                             scope_plants=allowed_plants)
+                             scope_plants=allowed_plants, template_id=body.template_id, template_version=tpl_version)
     return _job_wire(data.get_job(job_id))
 
 
@@ -995,7 +1025,9 @@ def get_run(run_id: int, response: Response,
             allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     run = _run_or_404(run_id, allowed_plants)
     response.headers["Cache-Control"] = "no-store"
-    return {"run": data.run_to_wire(run)}
+    # A chain run also carries its step rows (empty for every other run), so the timeline polls this one route.
+    steps = [data.step_to_wire(s) for s in data.list_steps(run_id)] if run["job_type"] == "chain" else []
+    return {"run": data.run_to_wire(run), "steps": steps}
 
 
 def _hours_between(a: str | None, b: str | None) -> float | None:
@@ -1076,13 +1108,14 @@ def run_log(
     after_seq: int = Query(0, ge=0, le=1_000_000),
     level: str = Query("debug"),
     limit: int = Query(500, ge=1, le=2000),
+    step_seq: int | None = Query(None, ge=1, le=50),
     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
 ):
     if level not in LEVELS:
         raise HTTPException(status_code=400, detail=f"level must be one of {', '.join(LEVELS)}")
     run = _run_or_404(run_id, allowed_plants)
     response.headers["Cache-Control"] = "no-store"
-    lines = data.list_log(run_id, after_seq=after_seq, min_level=level, limit=limit)
+    lines = data.list_log(run_id, after_seq=after_seq, min_level=level, limit=limit, step_seq=step_seq)
     # Re-read the run AFTER the lines so `done` can never be true while unseen lines still exist.
     fresh = data.get_run(run_id) or run
     return {"run_id": run_id, "status": fresh["status"], "log_truncated": fresh["log_truncated"],
@@ -1149,3 +1182,173 @@ def cancel_run(run_id: int, allowed_plants: list[str] | None = Depends(auth.get_
     if run["status"] not in ("scheduled", "running"):
         raise HTTPException(status_code=409, detail=f"Run is already {run['status']}")
     return {"run": data.run_to_wire(runner.cancel_run(run_id) or run)}
+
+
+# ---------------------------------------------------------------------------------------- chains: restart a step
+class RestartStepIn(BaseModel):
+    from_step: int | None = Field(None, ge=1, le=50)       # default: the first step that failed (or was cancelled)
+    confirm: bool = False                                    # required when that step is not safe to repeat
+
+
+@router.post("/jobs/runs/{run_id}/restart-step", dependencies=_ADMIN)
+def restart_run_from_step(run_id: int, body: RestartStepIn | None = None,
+                          actor: str | None = Depends(auth.require_admin),
+                          allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Run a failed (or cancelled) chain again starting at one of its steps, using the steps the failed run SNAPSHOT (an
+    edit to the job since then is not picked up). The steps before it are shown as done in the earlier run. A step that
+    already failed may have partly applied: unless its type is declared idempotent the admin must send `confirm`."""
+    body = body or RestartStepIn()
+    run = _run_or_404(run_id, allowed_plants)
+    job = _job_or_404(run["job_id"], allowed_plants, write=True)
+    if job["archived"]:
+        raise HTTPException(status_code=409, detail="Job is archived")
+    if run["job_type"] != "chain":
+        raise HTTPException(status_code=400, detail="only a chain run can restart from a step")
+    if run["status"] not in ("failed", "cancelled"):
+        raise HTTPException(status_code=409, detail=f"Run is {run['status']}; only a failed or cancelled run restarts")
+    if job.get("targets"):
+        raise HTTPException(status_code=400, detail="restart a multi-plant chain as a whole (per plant), not from a step")
+    steps = data.list_steps(run_id)
+
+    def carried(s: dict) -> bool:                 # done in an earlier run (a resumed run's leading steps)
+        return bool((s["summary"] or {}).get("ran_in_run"))
+
+    if body.from_step is not None:
+        pick = next((s for s in steps if s["seq"] == body.from_step), None)
+        if pick is None or carried(pick) or pick["status"] not in ("failed", "cancelled", "skipped"):
+            raise HTTPException(status_code=400, detail="that step did not fail and was not skipped")
+    else:
+        pick = (next((s for s in steps if s["status"] in ("failed", "cancelled")), None)
+                or next((s for s in steps if s["status"] == "skipped" and not carried(s)), None))
+        if pick is None:
+            raise HTTPException(status_code=400, detail="no step to restart from")
+    jt = get_type(pick["step_type"]) or _registered(pick["step_type"])
+    if pick["status"] in ("failed", "cancelled") and not jt.idempotent and not body.confirm:
+        name = pick["label"] or jt.label
+        raise HTTPException(status_code=409, detail=f"step {pick['seq']} ({name}) is not safe to repeat: it may have "
+                                                    "partly applied. Confirm to restart from it.")
+    _409_if_busy(job["id"])
+    try:
+        new_id = runner.start_manual_run(job, actor, "restart", resume={"from_run": run_id, "from_seq": pick["seq"]})
+    except runner.NoTargetPlants as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if new_id is None:
+        raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
+    return {"run": data.run_to_wire(data.get_run(new_id)), "batch": None}
+
+
+# ----------------------------------------------------------------------------------------------- job templates
+class TemplateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(None, max_length=500)
+    steps: list[dict] = Field(min_length=1, max_length=10)
+    defaults: dict = Field(default_factory=dict)
+
+
+class TemplatePatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=120)
+    description: str | None = Field(None, max_length=500)
+    steps: list[dict] | None = Field(None, min_length=1, max_length=10)
+    defaults: dict | None = None
+    archived: bool | None = None
+
+
+def _template_defaults(raw: dict | None) -> dict:
+    """Only the keys a template may carry (a job starts from them): retry_max 0-5, timeout_s 10-21600."""
+    out = {}
+    raw = raw or {}
+    try:
+        if raw.get("retry_max") is not None:
+            out["retry_max"] = max(0, min(5, int(raw["retry_max"])))
+        if raw.get("timeout_s") is not None:
+            out["timeout_s"] = max(10, min(21600, int(raw["timeout_s"])))
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail="defaults: retry_max and timeout_s must be whole numbers") from e
+    return out
+
+
+def _normalized_steps(raw: list[dict]) -> list[dict]:
+    from backend.jobs.types import chain as chain_type
+    try:
+        return chain_type.normalize_steps(raw)
+    except (ValueError, ValidationError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid steps: {e}") from e
+
+
+@router.get("/jobs/templates", dependencies=[Depends(auth.require_admin)])
+def list_templates(response: Response, include_archived: bool = Query(False)):
+    response.headers["Cache-Control"] = "no-store"
+    return {"templates": [data.template_to_wire(t) for t in data.list_templates(include_archived)]}
+
+
+@router.post("/jobs/templates", dependencies=_ADMIN)
+def create_template(body: TemplateIn, actor: str | None = Depends(auth.require_admin)):
+    steps = _normalized_steps(body.steps)
+    try:
+        tid = data.create_template(name=body.name.strip(), description=body.description, steps=steps,
+                                   defaults=_template_defaults(body.defaults), actor=actor)
+    except data.TemplateNameTaken as e:
+        raise HTTPException(status_code=409, detail="a template with this name already exists") from e
+    return {"template": data.template_to_wire(data.get_template(tid))}
+
+
+@router.patch("/jobs/templates/{template_id}", dependencies=_ADMIN)
+def patch_template(template_id: int, body: TemplatePatch, actor: str | None = Depends(auth.require_admin)):
+    fields = body.model_dump(exclude_unset=True)
+    for k in ("name", "archived"):
+        if k in fields and fields[k] is None:
+            fields.pop(k)
+    if fields.get("steps") is not None:
+        fields["steps"] = _normalized_steps(fields["steps"])
+    else:
+        fields.pop("steps", None)
+    if fields.get("defaults") is not None:
+        fields["defaults"] = _template_defaults(fields["defaults"])
+    else:
+        fields.pop("defaults", None)
+    if "name" in fields:
+        fields["name"] = fields["name"].strip()
+    try:
+        row = data.patch_template(template_id, fields, actor)
+    except data.TemplateNameTaken as e:
+        raise HTTPException(status_code=409, detail="a template with this name already exists") from e
+    if row is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {"template": data.template_to_wire(row)}
+
+
+@router.get("/jobs/{job_id}/template-diff", dependencies=[Depends(auth.require_authenticated)])
+def job_template_diff(job_id: int, response: Response,
+                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """The job's copy of its steps against the template's current steps (a simple position-by-position diff)."""
+    from backend.jobs import templates as tpl_mod
+    job = _job_or_404(job_id, allowed_plants)
+    if job.get("template_id") is None:
+        raise HTTPException(status_code=404, detail="This job was not made from a template")
+    tpl = data.get_template(job["template_id"])
+    if tpl is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    response.headers["Cache-Control"] = "no-store"
+    mine = _normalized_steps((job["params"] or {}).get("steps") or [])
+    theirs = _normalized_steps(tpl["steps"]) if tpl["steps"] else []
+    return {"job_id": job_id, "template": {"id": tpl["id"], "name": tpl["name"], "version": tpl["version"],
+                                           "archived": bool(tpl["archived"])},
+            "job_version": job.get("template_version"), "changed": job.get("template_version") != tpl["version"],
+            "diff": tpl_mod.diff_steps(mine, theirs)}
+
+
+@router.post("/jobs/{job_id}/template/update", dependencies=_ADMIN)
+def job_template_update(job_id: int, actor: str | None = Depends(auth.require_admin),
+                        allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Replace the job's copy of the steps with the template's current ones (and its version). A run already going keeps
+    the snapshot it started with; the next run uses the new steps."""
+    job = _job_or_404(job_id, allowed_plants, write=True)
+    if job.get("template_id") is None:
+        raise HTTPException(status_code=404, detail="This job was not made from a template")
+    tpl = data.get_template(job["template_id"])
+    if tpl is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    jt = get_type(job["job_type"]) or _registered(job["job_type"])
+    params = _validate_params(jt, {**(job["params"] or {}), "steps": tpl["steps"]})
+    data.patch_job(job_id, {"params": params, "template_version": tpl["version"]}, actor)
+    return _job_wire(data.get_job(job_id))

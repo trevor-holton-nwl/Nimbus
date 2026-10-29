@@ -16,7 +16,10 @@ import backend.jobs.types  # noqa: E402,F401  (registers the types)
 def live() -> dict:
     return {"types": [
         {"key": jt.key, "label": jt.label, "plant_scoped": jt.plant_scoped, "kind": jt.kind, "mutates": jt.mutates,
-         "params": describe_params(jt), "defaults": jt.params_model().model_dump(mode="json")}
+         "params": describe_params(jt), "defaults": jt.params_model().model_dump(mode="json"),
+         "idempotent": jt.idempotent, "composite": jt.composite, "estimate_s": jt.estimate_s,
+         "dry_run": {"param": jt.dry_run[0], "value": jt.dry_run[1]} if jt.dry_run else None,
+         "lock_keys": [] if jt.composite else jt.lock_names("{plant}", jt.params_model())}
         for jt in list_types()]}
 
 

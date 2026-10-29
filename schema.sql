@@ -2383,6 +2383,40 @@ CREATE TABLE IF NOT EXISTS job_batch (
 );
 CREATE INDEX IF NOT EXISTS idx_job_batch_job ON job_batch (job_id, id DESC);
 
+-- job chain steps (mirrors migrations/2026-11-01-1-job-step-run.sql). Idempotent.
+CREATE TABLE IF NOT EXISTS job_step_run (
+    run_id               BIGINT NOT NULL REFERENCES job_run (id),
+    seq                  INTEGER NOT NULL,
+    step_type            TEXT NOT NULL,              -- registry key of the step's job type
+    label                TEXT,
+    run_on               TEXT NOT NULL DEFAULT 'success' CHECK (run_on IN ('success','failure','always')),
+    continue_on_failure  BOOLEAN NOT NULL DEFAULT FALSE,
+    params               JSONB NOT NULL DEFAULT '{}'::jsonb,   -- the snapshot this run started the step with
+    status               TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','running','succeeded','warning','failed','skipped','cancelled')),
+    started_at           TIMESTAMPTZ,
+    ended_at             TIMESTAMPTZ,
+    summary              JSONB,
+    error                TEXT,
+    error_kind           TEXT CHECK (error_kind IN ('config','system','transient')),
+    action_id            TEXT,                       -- schedule-event history id of the step's own write
+    PRIMARY KEY (run_id, seq)
+);
+
+-- job templates (mirrors migrations/2026-11-01-2-job-template.sql). Idempotent.
+CREATE TABLE IF NOT EXISTS job_template (
+    id           BIGSERIAL PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT,
+    steps        JSONB NOT NULL DEFAULT '[]'::jsonb,     -- ordered [{type, params, label, continue_on_failure, run_on}]
+    defaults     JSONB NOT NULL DEFAULT '{}'::jsonb,     -- optional {retry_max, timeout_s} a new job starts with
+    version      INTEGER NOT NULL DEFAULT 1,             -- raised by every change to steps or defaults
+    created_by   TEXT,
+    modified_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    archived     BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_job_template_name ON job_template (lower(name)) WHERE NOT archived;
+
 -- W3a columns on existing job tables (also run by backend/jobs/data.py ensure_job_tables; not a migration).
 ALTER TABLE job_run        ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES job_batch (id);
 CREATE INDEX IF NOT EXISTS idx_job_run_batch ON job_run (batch_id) WHERE batch_id IS NOT NULL;
@@ -2395,6 +2429,10 @@ ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS options JSONB;
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS last_fire_at TIMESTAMPTZ;
 -- W3b fix wave: the newest fire each arm saw, {plant: iso} ('*' = the schedule's plant-less arm), so catch-up baselines are per arm.
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS arm_fire_at JSONB;
+-- W4a: the template a job was made from (the job keeps its own copy of the steps) and the chain step a log line belongs to.
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_id BIGINT REFERENCES job_template (id);
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_version INTEGER;
+ALTER TABLE job_run_log    ADD COLUMN IF NOT EXISTS step_seq INTEGER;
 
 -- W3b: catch-up runs are trigger 'catchup' (also run by ensure_job_tables; not a migration).
 DO $job_trigger$

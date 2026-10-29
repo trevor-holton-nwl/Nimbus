@@ -27,4 +27,4 @@ def run(ctx, params: NoopParams) -> JobOutcome:
 
 
 NOOP = register(JobType(key="noop", label="No-op (test)", params_model=NoopParams, run=run,
-                        default_timeout_s=60, stub=True))
+                        default_timeout_s=60, stub=True, idempotent=True, estimate_s=2))

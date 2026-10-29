@@ -142,7 +142,7 @@ def client(monkeypatch):
     monkeypatch.setattr(data, "get_run", lambda rid: runs.get(rid))
     monkeypatch.setattr(data, "list_log", lambda rid, **kw: [] if kw.get("after_seq") else [
         {"seq": 1, "at": "2026-10-29T12:00:01+00:00", "level": "info", "step": "load", "msg": "loaded 120 orders",
-         "duration_ms": 850, "data": {}}])
+         "duration_ms": 850, "data": {}, "step_seq": None}])
     monkeypatch.setattr(data, "last_success_watermark", lambda jid, before=None, plant=None: None)
     art = {"sections": [{"key": "counts", "title": "Changes", "columns": [{"key": "value", "label": "value", "type": "text"},
                                                                           {"key": "events", "label": "events", "type": "number"}],
@@ -318,7 +318,7 @@ def test_preview_and_upcoming(client):
 
 def test_runs(client):
     _check(client.get("/jobs/runs?plant=1008&job_id=5&status=warning&limit=50&before_id=100").json(), "runs_list")
-    _check(client.get("/jobs/runs/42").json(), "run_wrapped")
+    _check(client.get("/jobs/runs/42").json(), "run_detail")
     _check(client.post("/jobs/5/run").json(), "run_started")
     _check(client.post("/jobs/runs/43/cancel").json(), "run_wrapped")
     assert client.post("/jobs/runs/42/cancel").status_code == 409, "a finished run cannot be cancelled"
@@ -489,3 +489,127 @@ def test_schedule_tz_mode_round_trips_and_job_targets_validate(client):
     assert client.post("/jobs", json={**base, "targets": [{"kind": "subnetwork", "value": "XX"}]}).status_code == 400
     assert client.post("/jobs", json={**base, "fan_out": {"stagger_s": -1}}).status_code == 422
     assert client.post("/jobs", json={**base, "targets": [{"kind": "all", "value": "", "excluded": True}]}).status_code == 400
+
+
+# ------------------------------------------------------------------------------------------------ W4a chains
+def _step_row(**kw):
+    row = {"seq": 1, "step_type": "optimizer.plant", "label": None, "run_on": "success", "continue_on_failure": False,
+           "params": {"mode": "due_date", "search": "exhaustive", "respect_firmed": True, "apply_mode": "apply"},
+           "status": "failed", "started_at": datetime(2026, 10, 29, 12, 0, 1, tzinfo=UTC),
+           "ended_at": datetime(2026, 10, 29, 12, 3, 40, tzinfo=UTC), "summary": {"applied": 0}, "error": "write refused",
+           "error_kind": "transient", "action_id": None}
+    return {**row, **kw}
+
+
+def _tpl_row(**kw):
+    row = {"id": 3, "name": "Purge then re-optimize", "description": "Remove old orders, then re-optimize.",
+           "steps": [{"type": "purge.orders", "params": {"max_rows": 5000}, "label": None, "continue_on_failure": False,
+                      "run_on": "success"}],
+           "defaults": {"retry_max": 1}, "version": 2, "created_by": "system",
+           "modified_at": datetime(2026, 10, 29, 12, tzinfo=UTC), "archived": False}
+    return {**row, **kw}
+
+
+def test_chain_run_detail_carries_its_step_rows(client, monkeypatch):
+    runs = {46: _run_row(id=46, job_type="chain", status="failed")}
+    monkeypatch.setattr(data, "get_run", lambda rid: runs.get(rid))
+    monkeypatch.setattr(data, "list_steps", lambda rid: [_step_row()])
+    body = client.get("/jobs/runs/46").json()
+    _check(body, "run_detail")
+    assert body["steps"][0]["duration_ms"] == 219000 and body["steps"][0]["error_kind"] == "transient"
+
+
+def test_log_can_be_filtered_to_one_step(client, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(data, "list_log", lambda rid, **kw: seen.update(kw) or [])
+    assert client.get("/jobs/runs/42/log?step_seq=2").status_code == 200 and seen["step_seq"] == 2
+    assert client.get("/jobs/runs/42/log?step_seq=0").status_code == 422
+
+
+def test_template_routes_round_trip_and_validate_steps(client, monkeypatch):
+    monkeypatch.setattr(data, "list_templates", lambda include_archived=False: [_tpl_row()])
+    _check(client.get("/jobs/templates").json(), "templates_list")
+    made = {}
+    monkeypatch.setattr(data, "create_template", lambda **kw: made.update(kw) or 3)
+    monkeypatch.setattr(data, "get_template", lambda tid: _tpl_row() if tid == 3 else None)
+    step = {"type": "purge.orders", "params": {"max_rows": 100}}
+    body = {"name": " Nightly purge ", "steps": [step], "defaults": {"retry_max": 9, "junk": 1}}
+    _check(client.post("/jobs/templates", json=body).json(), "template_wrapped")
+    assert made["name"] == "Nightly purge" and made["defaults"] == {"retry_max": 5}      # clamped, unknown keys dropped
+    assert made["steps"][0]["params"]["max_rows"] == 100 and made["steps"][0]["params"]["window"]["mode"] == "rolling"
+    assert client.post("/jobs/templates", json={**body, "steps": []}).status_code == 422
+    for bad in ({"type": "nope"}, {"type": "chain"}, {"type": "purge.orders", "params": {"max_rows": 0}},
+                {"type": "purge.orders", "params": {"window": {"mode": "rolling", "rolling": {"anchor": "now", "to_offset": -1}}}}):
+        r = client.post("/jobs/templates", json={**body, "steps": [bad]})
+        assert r.status_code == 400, (bad, r.text)
+    assert client.post("/jobs/templates", json={**body, "steps": [{"type": "purge.orders", "params": {"dry_run": True}},
+                                                                   {"type": "optimizer.plant", "params": {"apply_mode": "apply"}}]}
+                       ).status_code == 400, "a chain cannot mix dry-run and apply steps"
+    patched = {}
+    monkeypatch.setattr(data, "patch_template", lambda tid, fields, actor: patched.update(fields) or _tpl_row())
+    _check(client.patch("/jobs/templates/3", json={"name": "x", "archived": True}).json(), "template_wrapped")
+    assert patched == {"name": "x", "archived": True}
+
+
+def test_job_created_from_a_template_stores_a_copy_and_the_version(client, monkeypatch):
+    monkeypatch.setattr(data, "get_template", lambda tid: _tpl_row() if tid == 3 else _tpl_row(id=4, archived=True))
+    made = {}
+    monkeypatch.setattr(data, "create_job", lambda **kw: made.update(kw) or 5)
+    r = client.post("/jobs", json={"plant": "1008", "job_type": "chain", "name": "n", "template_id": 3})
+    assert r.status_code == 200, r.text
+    assert made["template_id"] == 3 and made["template_version"] == 2
+    assert made["params"]["steps"][0]["type"] == "purge.orders", "no steps sent: the template's copy is stored"
+    assert client.post("/jobs", json={"plant": "1008", "job_type": "chain", "name": "n", "template_id": 4}).status_code == 400
+    assert client.post("/jobs", json={"plant": "1008", "job_type": "optimizer.plant", "name": "n", "template_id": 3}).status_code == 400
+    assert client.post("/jobs", json={"plant": "1008", "job_type": "chain", "name": "n"}).status_code == 400, "a chain needs a step"
+
+
+def test_template_diff_and_update(client, monkeypatch):
+    jobs = {5: _job_row(job_type="chain", template_id=3, template_version=1,
+                        params={"steps": [{"type": "purge.orders", "params": {"max_rows": 100}, "label": None,
+                                           "continue_on_failure": False, "run_on": "success"}]})}
+    monkeypatch.setattr(data, "get_job", lambda jid: jobs.get(jid))
+    monkeypatch.setattr(data, "get_template", lambda tid: _tpl_row())
+    monkeypatch.setattr(data, "template_briefs", lambda ids: {3: {"id": 3, "name": "Purge then re-optimize", "version": 2,
+                                                                  "archived": False}})
+    body = client.get("/jobs/5/template-diff").json()
+    _check(body, "template_diff")
+    assert body["changed"] and body["diff"][0]["fields"] == ["params.max_rows"]
+    monkeypatch.setattr(data, "list_jobs", lambda **kw: {"jobs": list(jobs.values()), "next_before_id": None})
+    job = client.get("/jobs?limit=1").json()["jobs"][0]
+    assert job["template"] == {"id": 3, "name": "Purge then re-optimize", "version": 1, "current_version": 2,
+                               "archived": False, "changed": True}
+    saved = {}
+    monkeypatch.setattr(data, "patch_job", lambda jid, fields, actor, **kw: saved.update(fields) or True)
+    assert client.post("/jobs/5/template/update").status_code == 200
+    assert saved["template_version"] == 2 and saved["params"]["steps"][0]["params"]["max_rows"] == 5000
+    jobs[5] = _job_row(job_type="chain")
+    assert client.get("/jobs/5/template-diff").status_code == 404
+
+
+def test_restart_from_a_step_needs_confirm_unless_the_step_is_idempotent(client, monkeypatch):
+    jobs = {5: _job_row(job_type="chain", targets=[])}
+    runs = {50: _run_row(id=50, job_type="chain", status="failed"), 51: _run_row(id=51, job_type="chain", status="succeeded")}
+    steps = [_step_row(seq=1, step_type="optimizer.plant", status="succeeded", error=None, error_kind=None),
+             _step_row(seq=2, step_type="purge.orders", status="failed"),
+             _step_row(seq=3, step_type="optimizer.plant", status="skipped", summary={"reason": "an earlier step failed"})]
+    monkeypatch.setattr(data, "get_job", lambda jid: jobs.get(jid))
+    monkeypatch.setattr(data, "get_run", lambda rid: runs.get(rid) or runs[50])
+    monkeypatch.setattr(data, "list_steps", lambda rid: steps)
+    started = {}
+    monkeypatch.setattr(runner, "start_manual_run",
+                        lambda job, actor, trigger="manual", only_plants=None, resume=None: started.update(resume=resume) or 52)
+    blocked = client.post("/jobs/runs/50/restart-step", json={})
+    assert blocked.status_code == 409 and "not safe to repeat" in blocked.json()["detail"] and not started
+    ok = client.post("/jobs/runs/50/restart-step", json={"confirm": True})
+    assert ok.status_code == 200 and started["resume"] == {"from_run": 50, "from_seq": 2}
+    _check(ok.json(), "run_started")
+    # restarting at a skipped step needs no confirm (it never ran); a step that succeeded cannot be the start
+    assert client.post("/jobs/runs/50/restart-step", json={"from_step": 3}).status_code == 200 and started["resume"]["from_seq"] == 3
+    assert client.post("/jobs/runs/50/restart-step", json={"from_step": 1}).status_code == 400
+    assert client.post("/jobs/runs/51/restart-step", json={}).status_code == 409, "only a failed or cancelled run"
+    idem = [_step_row(seq=1, step_type="optimizer.plant", status="failed")]
+    monkeypatch.setattr(data, "list_steps", lambda rid: idem)
+    assert client.post("/jobs/runs/50/restart-step").status_code == 200, "an idempotent step restarts without confirm"
+    jobs[5] = _job_row(job_type="chain")                       # has targets: whole-chain restart only
+    assert client.post("/jobs/runs/50/restart-step").status_code == 400

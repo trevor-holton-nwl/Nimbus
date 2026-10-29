@@ -75,7 +75,17 @@
     "search": "exhaustive",
     "respect_firmed": true,
     "apply_mode": "apply"
-   }
+   },
+   "idempotent": true,
+   "composite": false,
+   "estimate_s": 180,
+   "dry_run": {
+    "param": "apply_mode",
+    "value": "propose"
+   },
+   "lock_keys": [
+    "jobs:optimizer.plant:{plant}"
+   ]
   },
   {
    "key": "report.what_changed",
@@ -138,7 +148,14 @@
     },
     "first_run_lookback_days": 1,
     "top_n": 20
-   }
+   },
+   "idempotent": true,
+   "composite": false,
+   "estimate_s": 20,
+   "dry_run": null,
+   "lock_keys": [
+    "jobs:report.what_changed:{plant}"
+   ]
   },
   {
    "key": "report.late_orders",
@@ -201,7 +218,14 @@
     },
     "min_days_late": 0.0,
     "warn_if_over": null
-   }
+   },
+   "idempotent": true,
+   "composite": false,
+   "estimate_s": 20,
+   "dry_run": null,
+   "lock_keys": [
+    "jobs:report.late_orders:{plant}"
+   ]
   },
   {
    "key": "report.missing_master_data",
@@ -224,7 +248,14 @@
    ],
    "defaults": {
     "warn_if_over": null
-   }
+   },
+   "idempotent": true,
+   "composite": false,
+   "estimate_s": 20,
+   "dry_run": null,
+   "lock_keys": [
+    "jobs:report.missing_master_data:{plant}"
+   ]
   },
   {
    "key": "report.coverage",
@@ -275,7 +306,14 @@
      "setup"
     ],
     "warn_if_over": null
-   }
+   },
+   "idempotent": true,
+   "composite": false,
+   "estimate_s": 20,
+   "dry_run": null,
+   "lock_keys": [
+    "jobs:report.coverage:{plant}"
+   ]
   },
   {
    "key": "report.distribution",
@@ -336,7 +374,122 @@
      }
     },
     "warn_if_over": null
-   }
+   },
+   "idempotent": true,
+   "composite": false,
+   "estimate_s": 20,
+   "dry_run": null,
+   "lock_keys": [
+    "jobs:report.distribution:{plant}"
+   ]
+  },
+  {
+   "key": "purge.orders",
+   "label": "Purge old orders",
+   "plant_scoped": true,
+   "kind": "action",
+   "mutates": true,
+   "params": [
+    {
+     "key": "window",
+     "type": "date_window",
+     "label_key": "jobs.p.purge.orders.window",
+     "title": "Window",
+     "default": {
+      "mode": "rolling",
+      "fixed": null,
+      "rolling": {
+       "anchor": "start_of_day",
+       "from_offset": -3650,
+       "to_offset": -90,
+       "unit": "day"
+      }
+     },
+     "required": false,
+     "widget": "date-window"
+    },
+    {
+     "key": "machines",
+     "type": "string",
+     "label_key": "jobs.p.purge.orders.machines",
+     "title": "Machines",
+     "default": [],
+     "required": false,
+     "widget": null
+    },
+    {
+     "key": "max_rows",
+     "type": "integer",
+     "label_key": "jobs.p.purge.orders.max_rows",
+     "title": "Max Rows",
+     "default": 5000,
+     "required": false,
+     "widget": null,
+     "min": 1,
+     "max": 1000000
+    },
+    {
+     "key": "dry_run",
+     "type": "boolean",
+     "label_key": "jobs.p.purge.orders.dry_run",
+     "title": "Dry Run",
+     "default": false,
+     "required": false,
+     "widget": null
+    }
+   ],
+   "defaults": {
+    "window": {
+     "mode": "rolling",
+     "fixed": null,
+     "rolling": {
+      "anchor": "start_of_day",
+      "from_offset": -3650,
+      "to_offset": -90,
+      "unit": "day"
+     }
+    },
+    "machines": [],
+    "max_rows": 5000,
+    "dry_run": false
+   },
+   "idempotent": false,
+   "composite": false,
+   "estimate_s": 30,
+   "dry_run": {
+    "param": "dry_run",
+    "value": true
+   },
+   "lock_keys": [
+    "jobs:optimizer.plant:{plant}",
+    "jobs:purge.orders:{plant}"
+   ]
+  },
+  {
+   "key": "chain",
+   "label": "Chain of steps",
+   "plant_scoped": true,
+   "kind": "action",
+   "mutates": true,
+   "params": [
+    {
+     "key": "steps",
+     "type": "string",
+     "label_key": "jobs.p.chain.steps",
+     "title": "Steps",
+     "default": [],
+     "required": false,
+     "widget": null
+    }
+   ],
+   "defaults": {
+    "steps": []
+   },
+   "idempotent": false,
+   "composite": true,
+   "estimate_s": null,
+   "dry_run": null,
+   "lock_keys": []
   }
  ]
 }
