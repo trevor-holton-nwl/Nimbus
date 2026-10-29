@@ -237,6 +237,16 @@ The screen shows their verified email, states that access is pending, and names 
 
 There is a rollout hazard: **if `email` backfill is incomplete when Entra is enabled, every affected user lands here at once.** That is the correct failure mode — fail-closed, legible, recoverable — but it is also a support event, which is why §9 sequences backfill and verification ahead of the cutover.
 
+### 4.6 Email alerts (planned, depends on this migration)
+
+Owner ruling 2026-10-29: the Jobs scheduler's email alerts are deferred until this migration ships. Today its failure signals are in-app only (run history, health strip, banner). The build sketch lives in `backend/jobs/CLAUDE.md` ("Planned: email alerts"); this section records the decisions that belong with identity.
+
+- **Purpose.** Tell the right people when a scheduled job fails, finishes with a warning, or is missed.
+- **Sender.** A dedicated NIMBUS mailbox (for example a shared "nimbus alerts" mailbox), sending through Microsoft Graph `sendMail` from the container. It needs no SMTP relay exception and Graph can be locked to that one mailbox. Prefer a managed identity (no secret to rotate); the fallback is an app registration secret held as a Container App secret, never in the repo or in a setting.
+- **Recipients.** The Entra-sourced `user_security.email` (§4.1, backfilled in §4.2), targeted by plant and role through `role_plants`, plus optional typed shared-mailbox addresses per job and a global default in System Configuration. The unverified `x-user-email` header is never used as an address.
+- **Sequencing.** Do not build before the `email` column and its backfill have shipped and container egress to `graph.microsoft.com` is verified. Until then in-app signals stay the only channel.
+- **Open.** The mailbox name, and whether IT accepts a managed identity or requires an app registration.
+
 ## 5. Login screen
 
 The visual is preserved. What changes is that Microsoft owns the credential prompt.
@@ -471,6 +481,7 @@ Steps 1–8 are invisible to users. Step 9 is the visible cutover. Steps 10–12
 | Token store | Not enabled. Only needed for `X-MS-TOKEN-AAD-*` headers, and NIMBUS calls no downstream Microsoft APIs |
 | **Entra-group-driven roles** | **Considered and rejected.** Roles and plants stay NIMBUS-admin-managed. Group-driven access would put every access change behind an IT ticket and make the Security tab read-only. Revisit if administration becomes a burden |
 | **Credential forwarding to Entra (ROPC)** | **Considered and rejected.** Collecting the password on the NIMBUS page and posting it to Entra's token endpoint fails under MFA and Conditional Access, is blocked by default in most tenants, is discouraged by Microsoft, and would put corporate passwords in NIMBUS's request path. Recorded here so the IT conversation has the reasoning on file |
+| Email alerts for the Jobs scheduler | Deferred to this migration; design in §4.6. Needs `user_security.email` (§4.1/4.2), the NIMBUS mailbox and Graph egress (§12) |
 | Task-ID plant collision | Unrelated to auth, but adjacent in `docs/MIGRATION.md:446-447`. `make_id` is plant-independent; ids collide if a `(production_order, material_number)` pair exists in two plants |
 
 ## 12. What IT must provide
@@ -486,6 +497,10 @@ Nothing in this document can be completed without these. None can be scripted fr
 | Claim confirmation | Which claim carries the corporate email (`preferred_username` expected), and that `oid` is present |
 | Network-ID → UPN roster | The §4.2 backfill input. Graph exposes `onPremisesSamAccountName` and `userPrincipalName` |
 | VPN egress ranges | For option A. Or a VNet, subnet, and private DNS zone for option B |
+| NIMBUS alerts mailbox (§4.6) | A dedicated mailbox to send Jobs alerts from |
+| `Mail.Send` application permission (§4.6) | With admin consent, for the managed identity or app registration that sends the alerts |
+| Exchange application access policy (§4.6) | Limits that permission to the NIMBUS mailbox only |
+| Graph egress check (§4.6) | Confirm the Container App environment can reach `graph.microsoft.com` |
 | Conditional Access confirmation | Which policies apply to this app, so sign-in behavior is predictable at rollout |
 
 If the hostname changes under option B or C, the redirect URI must be re-registered — worth flagging to IT up front so it isn't a second round-trip.
@@ -506,3 +521,4 @@ Run at cutover. Each item proves one layer, and they are ordered so a failure lo
 10. **Sign-out.** `/.auth/logout` clears the session; returning to the app shows the login screen rather than a live session.
 11. **Cache-bust guard.** Bump `NIMBUS_BUILD_ID`, deploy, sign in fresh. Confirm the §5.1 redirect does not break the callback — this is the intermittent one, so test it deliberately.
 12. **Local dev unaffected.** `uvicorn brain:api` on localhost still boots, still shows the login screen, still accepts a local password.
+13. **Email alerts (once built, §4.6).** The Send test email button delivers from the NIMBUS mailbox; a forced job failure emails the plant's role recipients exactly once; the Graph permission cannot send from any other mailbox; no secret appears in settings, logs or the repo.
