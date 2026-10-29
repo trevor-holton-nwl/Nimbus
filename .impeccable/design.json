@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-01T00:00:00Z",
+  "generatedAt": "2026-10-29T00:21:59.252Z",
   "title": "Design System: NIMBUS",
   "extensions": {
     "colorMeta": {
@@ -34,23 +34,162 @@
           "oklch(89% 0.04 255)"
         ]
       },
-      "cool-mist": { "role": "neutral", "displayName": "Cool Mist", "canonical": "oklch(94% 0.01 254)" },
-      "ink-navy": { "role": "neutral", "displayName": "Ink Navy", "canonical": "oklch(28% 0.03 249)" }
+      "cool-mist": {
+        "role": "neutral",
+        "displayName": "Cool Mist",
+        "canonical": "oklch(94% 0.01 254)"
+      },
+      "ink-navy": {
+        "role": "neutral",
+        "displayName": "Ink Navy",
+        "canonical": "oklch(28% 0.03 249)"
+      },
+      "signal-warn-text": {
+        "role": "semantic",
+        "displayName": "Signal Warn Text",
+        "canonical": "#8a5c08"
+      },
+      "hover-wash": {
+        "role": "neutral",
+        "displayName": "Hover Wash",
+        "canonical": "#eef4fb"
+      },
+      "stripe-mist": {
+        "role": "neutral",
+        "displayName": "Stripe Mist",
+        "canonical": "#f9fafb"
+      },
+      "row-hairline": {
+        "role": "neutral",
+        "displayName": "Row Hairline",
+        "canonical": "#e8eff3"
+      },
+      "tab-master-data": {
+        "role": "neutral",
+        "displayName": "Master Data Tab Tint",
+        "canonical": "#f0fdf4"
+      },
+      "bar-standard": {
+        "role": "data",
+        "displayName": "Bar Standard",
+        "canonical": "#1f5fbf"
+      },
+      "bar-firmed": {
+        "role": "data",
+        "displayName": "Bar Firmed",
+        "canonical": "#b02a20"
+      },
+      "bar-pm-capacity": {
+        "role": "data",
+        "displayName": "Alert Fill: Capacity",
+        "canonical": "#e0a800"
+      },
+      "bar-pm-conflicts": {
+        "role": "data",
+        "displayName": "Alert Fill: Conflicts",
+        "canonical": "#8750f0"
+      },
+      "bar-pm-calendar": {
+        "role": "data",
+        "displayName": "Alert Fill: Calendar",
+        "canonical": "#14b8a6"
+      },
+      "bar-pm-setup": {
+        "role": "data",
+        "displayName": "Alert Fill: Setup",
+        "canonical": "#c8359a"
+      },
+      "bar-pm-planning": {
+        "role": "data",
+        "displayName": "Alert Fill: Planning",
+        "canonical": "#e8602a"
+      },
+      "bar-pm-exceptions": {
+        "role": "data",
+        "displayName": "Alert Fill: Exceptions",
+        "canonical": "#78716c"
+      },
+      "zone-alert-edge": {
+        "role": "data",
+        "displayName": "Alert Horizon Edge",
+        "canonical": "#1a7a2e"
+      },
+      "zone-frozen-edge": {
+        "role": "data",
+        "displayName": "Frozen Horizon Edge",
+        "canonical": "#0f5c1f"
+      }
     },
     "typographyMeta": {
-      "display": { "displayName": "Display", "purpose": "Page/section titles, brand mark, modal headings. Archivo, 700 weight." },
-      "body": { "displayName": "Body", "purpose": "Default text everywhere — dense information UI, smaller and tighter than an editorial site." },
-      "label": { "displayName": "Mono / Label", "purpose": "IDs, timestamps, stat numbers, version strings — anything generated or measured rather than written. Includes the Mono-Eyebrow (tracked uppercase section/readout labels, e.g. panel headers and KPI category labels) and Mono-KPI-Value (large KPI-tile numerics) sub-patterns — see DESIGN.md §3." },
-      "control": { "displayName": "Control", "purpose": "Interactive chrome (buttons, tabs, inputs, filter dropdowns) — the app's most common text size by volume, not a one-off." }
+      "display": {
+        "displayName": "Display",
+        "purpose": "Page/section titles, brand mark, modal headings. Archivo, 700 weight."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Default text everywhere — dense information UI, smaller and tighter than an editorial site."
+      },
+      "label": {
+        "displayName": "Mono / Label",
+        "purpose": "IDs, timestamps, stat numbers, version strings — anything generated or measured rather than written. Includes the Mono-Eyebrow (tracked uppercase section/readout labels, e.g. panel headers and KPI category labels) and Mono-KPI-Value (large KPI-tile numerics) sub-patterns — see DESIGN.md §3."
+      },
+      "control": {
+        "displayName": "Control",
+        "purpose": "Interactive chrome (buttons, tabs, inputs, filter dropdowns) — the app's most common text size by volume, not a one-off."
+      }
     },
     "shadows": [
-      { "name": "sm", "value": "0 1px 2px rgba(12,28,48,0.06)", "purpose": "Barest lift — icon-button hover, small popovers. Dark mode: rgba(0,0,0,0.35)." },
-      { "name": "md", "value": "0 2px 6px rgba(12,28,48,0.08), 0 1px 2px rgba(12,28,48,0.04)", "purpose": "Dropdowns, tooltips, small floating panels. Dark mode: 0 2px 6px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.28)." },
-      { "name": "lg", "value": "0 24px 60px rgba(12,28,48,0.4), 0 12px 32px rgba(12,28,48,0.28)", "purpose": "Modals — the only surface that reads as floating above everything else. Deepened in the Command Band re-skin to match the new chrome's modal depth. Dark mode: 0 8px 24px rgba(0,0,0,0.5), 0 2px 6px rgba(0,0,0,0.3) — unchanged from before." }
+      {
+        "name": "sm",
+        "value": "0 1px 2px rgba(12,28,48,0.06)",
+        "purpose": "Barest lift — icon-button hover, small popovers. Dark mode: rgba(0,0,0,0.35)."
+      },
+      {
+        "name": "md",
+        "value": "0 2px 6px rgba(12,28,48,0.08), 0 1px 2px rgba(12,28,48,0.04)",
+        "purpose": "Dropdowns, tooltips, small floating panels. Dark mode: 0 2px 6px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.28)."
+      },
+      {
+        "name": "lg",
+        "value": "0 24px 60px rgba(12,28,48,0.4), 0 12px 32px rgba(12,28,48,0.28)",
+        "purpose": "Modals — the only surface that reads as floating above everything else. Deepened in the Command Band re-skin to match the new chrome's modal depth. Dark mode: 0 8px 24px rgba(0,0,0,0.5), 0 2px 6px rgba(0,0,0,0.3) — unchanged from before."
+      },
+      {
+        "name": "drawer",
+        "value": "2px 0 16px rgba(12,28,48,0.35)",
+        "purpose": "Left nav drawer sliding over the page; chrome floats by definition."
+      }
     ],
     "motion": [
-      { "name": "t-fast", "value": "0.12s ease", "purpose": "Default for color/background/border transitions on buttons, tabs, icon-buttons." },
-      { "name": "t-med", "value": "0.18s ease", "purpose": "Slightly slower transitions where the fast token feels too abrupt (larger surfaces)." }
+      {
+        "name": "t-fast",
+        "value": "0.12s ease",
+        "purpose": "Default for color/background/border transitions on buttons, tabs, icon-buttons."
+      },
+      {
+        "name": "t-med",
+        "value": "0.18s ease",
+        "purpose": "Slightly slower transitions where the fast token feels too abrupt (larger surfaces)."
+      },
+      {
+        "name": "drawer-slide",
+        "value": "0.22s cubic-bezier(0.4,0,0.2,1)",
+        "purpose": "Nav drawer open/close, the one slower move; entrance animations are disabled under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "900px"
+      },
+      {
+        "name": "narrow",
+        "value": "720px"
+      },
+      {
+        "name": "wide",
+        "value": "1200px"
+      }
     ]
   },
   "components": [
@@ -116,7 +255,39 @@
       "refersTo": "badge-warn",
       "description": "Soft-tint status label — distinct from the solid-fill toast.",
       "html": "<span class=\"ds-badge ds-badge--warn\">3 overloaded</span>",
-      "css": ".ds-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: var(--r-sm); font-size: 11px; font-weight: 600; } .ds-badge--warn { background: var(--warn-soft); color: var(--warn); } .ds-badge--err { background: var(--err-soft); color: var(--err); } .ds-badge--info { background: #ede9fe; color: #6366f1; }"
+      "css": ".ds-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: var(--r-sm); font-size: 11px; font-weight: 600; } .ds-badge--warn { background: var(--warn-soft); color: var(--warn); } .ds-badge--err { background: var(--err-soft); color: var(--err); } .ds-badge--info { background: var(--info-soft); color: var(--info); }"
+    },
+    {
+      "name": "KPI Tile",
+      "kind": "card",
+      "refersTo": "kpi-tile",
+      "description": "Dashboard stat tile: mono eyebrow label, mono value, 3px colored top border for severity (the sanctioned stripe exception).",
+      "html": "<div class=\"ds-kpi ds-kpi--warn\"><div class=\"ds-kpi-k\">LATE ORDERS</div><div class=\"ds-kpi-v\">14</div></div>",
+      "css": ".ds-kpi { width: 160px; padding: 10px 12px; background: var(--bg-elev); border: 1px solid var(--line); border-top: 3px solid var(--fg-faint); border-radius: var(--r-lg); } .ds-kpi--warn { border-top-color: var(--warn); } .ds-kpi-k { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-mute); } .ds-kpi-v { font-family: 'JetBrains Mono', monospace; font-size: 24px; font-weight: 600; letter-spacing: -0.02em; color: var(--fg); }"
+    },
+    {
+      "name": "Update Banner",
+      "kind": "custom",
+      "refersTo": "update-banner",
+      "description": "In-flow 34px advisory strip under the context bar announcing a newer build; info tint, never error red.",
+      "html": "<div class=\"ds-update-banner\"><span class=\"ds-update-ico\">&#9432;</span><span class=\"ds-update-msg\">A newer version is available. Refresh to update.</span><span class=\"ds-update-build\">b138</span></div>",
+      "css": ".ds-update-banner { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 18px; background: var(--info-soft); border-bottom: 1px solid var(--info); color: var(--fg); font-size: 12.5px; font-weight: 500; } .ds-update-ico { color: var(--info); font-size: 13px; } .ds-update-msg { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-update-build { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 500; letter-spacing: 0.02em; }"
+    },
+    {
+      "name": "Stack-Count Badge",
+      "kind": "chip",
+      "refersTo": "badge-err",
+      "description": "Pill on a Gantt machine label marking overlapping orders hidden in a collapsed row; solid when expanded.",
+      "html": "<button class=\"ds-stack\">4</button> <button class=\"ds-stack ds-stack--open\">4</button>",
+      "css": ".ds-stack { min-width: 28px; padding: 2px 7px; border: 0; border-radius: 10px; background: var(--err-soft); color: var(--err); font: inherit; font-size: 11px; font-weight: 700; line-height: 1; text-align: center; cursor: pointer; } .ds-stack:hover { filter: brightness(0.95); } .ds-stack:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; } .ds-stack--open { background: var(--err); color: var(--bg-elev); }"
+    },
+    {
+      "name": "Alert Monitor Row",
+      "kind": "custom",
+      "refersTo": "am-row",
+      "description": "One 44px alert line: severity glyph, mono prefix, message, mono when-column, hairline separator.",
+      "html": "<div class=\"ds-am-row\"><span class=\"ds-am-sev\">&#9888;</span><span class=\"ds-am-main\"><span class=\"ds-am-pfx\">M-204</span><span class=\"ds-am-msg\">Tool conflict with order 4501</span></span><span class=\"ds-am-when\">2 days late</span></div>",
+      "css": ".ds-am-row { display: grid; grid-template-columns: 14px minmax(0,1fr) 140px; align-items: center; column-gap: 12px; padding: 0 12px; height: 44px; box-sizing: border-box; box-shadow: inset 0 -1px 0 var(--line); background: var(--bg-elev); } .ds-am-row:hover { background: var(--bg-subtle); } .ds-am-sev { color: var(--warn); font-size: 12px; text-align: center; } .ds-am-main { display: flex; align-items: center; gap: 6px; min-width: 0; } .ds-am-pfx { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--fg-mute); } .ds-am-msg { font-size: 13px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-am-when { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--err); }"
     }
   ],
   "narrative": {
@@ -130,18 +301,42 @@
       "Brisk, exact motion — nothing lingers, nothing bounces"
     ],
     "rules": [
-      { "name": "The CTA/Chrome Color Rule", "body": "Navy is chrome/structure (command band, drawer — fixed dark in both themes). Bright blue (--chrome-accent) is the on-chrome highlight and the CTA that lives ON the band/drawer (e.g. Save). Content-area CTAs (.btn-primary, .seg-btn.active outside the chrome) are navy fill (--primary), not blue. --accent blue is for links, active-tab outlines, and focus rings in the light content area only — never a solid CTA fill there.", "section": "colors" },
-      { "name": "The One-Accent Rule (retired)", "body": "The prior rule — a single accent color (Foundry Amber) that was never a background fill, only a line/outline/icon/focus ring — no longer holds. This re-skin intentionally introduces a second, filled CTA color (navy) and a chrome-scoped bright-blue CTA alongside the outline-only accent. Kept as a historical marker; see The CTA/Chrome Color Rule for what replaced it.", "section": "colors" },
-      { "name": "The Hairline-Over-Shadow Rule", "body": "Regions are separated by a 1px border by default. A shadow is a deliberate signal that something is floating above the page (a modal, a popover), not a decorative default on every card.", "section": "colors" },
-      { "name": "The Dark-Mode Remap, Not Reversal", "body": "Dark mode re-lights the same navy/blue structure rather than inverting it: --accent brightens (#1f5fbf to #4d9fff), and --primary gets its own lighter navy (#12263f to #2b4f78) rather than reusing the light-mode value, so content-area CTAs still read as a distinct action color against a dark background. The --chrome-* tokens do not change between themes at all — the command band and drawer are fixed-dark chrome, a deliberate structural exception. Coverage elsewhere is still incomplete today: some newer components hardcode light-mode colors, and a few token names may be referenced in dark-mode CSS without a matching :root definition.", "section": "colors" },
-      { "name": "The Mono-Means-Machine Rule", "body": "If a string was generated, measured, or timestamped rather than written by a person, it renders in JetBrains Mono. This is the fastest visual cue in the system for \"this is data, not copy.\" The Mono-Eyebrow/Mono-KPI-Value pairing on every KPI tile is the most consistent, highest-visibility application of this rule today.", "section": "typography" },
-      { "name": "The Floating-Means-Floating Rule", "body": "A shadow above the sm step is reserved for something the user should read as temporarily suspended over the interface (a modal, an overlay). Don't reach for shadow-lg on a static panel just to make it feel premium.", "section": "elevation" }
+      {
+        "name": "The CTA/Chrome Color Rule",
+        "body": "Navy is chrome/structure (command band, drawer, fixed dark in both themes). Bright blue (--chrome-accent) is the on-chrome highlight and the CTA that lives ON the band/drawer (e.g. Save). Content-area CTAs (.btn-primary, .seg-btn.active outside the chrome) are navy fill (--primary), not blue. --accent blue is for links, active-tab outlines, and focus rings in the light content area only, never a solid CTA fill there.",
+        "section": "colors"
+      },
+      {
+        "name": "The One-Accent Rule (retired)",
+        "body": "The old rule — a single accent color (Foundry Amber) that was never a background fill, only a line/outline/icon/focus ring — no longer holds. This re-skin intentionally introduces a second, filled CTA color (Deep Navy) and a chrome-scoped bright-blue CTA (Chrome Accent) alongside the outline-only accent. Kept here as a historical marker, not an active rule — see The CTA/Chrome Color Rule above for what replaced it.",
+        "section": "colors"
+      },
+      {
+        "name": "The Hairline-Over-Shadow Rule",
+        "body": "Regions are separated by a 1px border by default. A shadow is a deliberate signal that something is floating above the page (a modal, a popover), not a decorative default on every card.",
+        "section": "colors"
+      },
+      {
+        "name": "The Dark-Mode Remap, Not Reversal",
+        "body": "Dark mode re-lights the same navy/blue structure rather than inverting it: --accent brightens (#1f5fbf → #4d9fff) for legibility on a dark page, and --primary gets its own lighter navy (#12263f → #2b4f78) rather than reusing the light-mode value — so content-area CTAs still read as a distinct \"action\" color against a dark background (a change from the old system, where Deep Slate was literally the same hex in both themes). The --chrome-* tokens do not change between themes at all — the command band and drawer are fixed-dark chrome, a deliberate structural exception (see §4 Elevation). Every :root color token, including the bar-mode, zone and alert-cell groups and all the compatibility aliases, now has a body.dark counterpart (the horizon and elapsed-time washes keep their :root values by design). New CSS must add its dark value in the same change and use tokens only; check :root and body.dark in styles.css before assuming a token exists.",
+        "section": "colors"
+      },
+      {
+        "name": "The Mono-Means-Machine Rule",
+        "body": "If a string was generated, measured, or timestamped rather than written by a person, it renders in JetBrains Mono. This is the fastest visual cue in the system for \"this is data, not copy.\" The Mono-Eyebrow/Mono-KPI-Value pairing on every KPI tile is the most consistent, highest-visibility application of this rule today.",
+        "section": "typography"
+      },
+      {
+        "name": "The Floating-Means-Floating Rule",
+        "body": "A shadow above the sm step is reserved for something the user should read as temporarily suspended over the interface (a modal, an overlay). Don't reach for shadow-lg on a static panel just to make it feel \"premium\" — that's the legacy-ERP-meets-consumer-SaaS mistake this system explicitly avoids.",
+        "section": "elevation"
+      }
     ],
     "dos": [
-      "Do follow the CTA/Chrome Color Rule: navy chrome, bright-blue on-chrome CTA/highlight, navy-fill content-area CTAs, blue outline/ring for links and focus in the content area — never mix the four up.",
+      "Do follow the CTA/Chrome Color Rule: navy chrome, bright-blue on-chrome CTA/highlight, navy-fill content-area CTAs, blue outline/ring for links and focus in the content area — never mix the four up (§2).",
       "Do separate regions with a 1px Hairline border by default; reach for a shadow only when something is genuinely floating above the page (modal, popover, splash card).",
-      "Do render anything generated/measured/timestamped in JetBrains Mono (IDs, durations, stat numbers, version strings) — including the Mono-Eyebrow label and Mono-KPI-Value numeric patterns used throughout KPI tiles and panel headers.",
-      "Do use a colored top-border for KPI/stat-tile severity (border-top: 3px solid var(--warn|--err)) — the one sanctioned exception to the no-colored-accent-stripe don't (top-border, not side).",
+      "Do render anything generated/measured/timestamped in JetBrains Mono (IDs, durations, stat numbers, version strings) — including the Mono-Eyebrow label and Mono-KPI-Value numeric patterns now used throughout KPI tiles and panel headers (§3).",
+      "Do use a colored top-border for KPI/stat-tile severity (border-top: 3px solid var(--warn|--err)) — the one sanctioned exception to the no-colored-accent-stripe don't below (top-border, not side).",
       "Do use Flatpickr for every date/time input — never native <input type=\"date\">, datetime-local, or time (the one exception is the AG Grid inline date-cell editor).",
       "Do use searchable/filterable comboboxes for plant and line selection, scoped to the plant→line hierarchy — this system is built to hold 50+ plants and 3,500+ lines, not the pilot's handful.",
       "Do re-skin third-party components (vis-timeline, Flatpickr, AG Grid) to the token system rather than shipping their default look.",
@@ -151,8 +346,10 @@
       "Don't use bubble or chip selectors for plants or lines — they break down past ~10 entries and this system must scale to thousands.",
       "Don't add gradient-hero sections, gradient text, or glassmorphism as a decorative default — that's the generic-consumer-SaaS gloss this system explicitly rejects.",
       "Don't use dated grid-of-forms ERP layouts, oversized bordered table cells, or beige/gray corporate-form styling — that's the legacy-ERP clunk this system explicitly rejects.",
-      "Don't use border-left/border-right as a colored accent stripe on cards or list rows — full borders, background tints, or a leading icon instead. (The one sanctioned exception is the KPI-tile border-top severity pattern — top, not side, and only on .kpi-tile.)",
-      "Don't reference a CSS variable name that isn't defined in :root or body.dark without checking first. The specific tokens this used to warn about (--border, --border-subtle, --font-mono, --nimbus-amber/--amber, --bg-float) are now all defined in :root as of the Command Band re-skin, but dark-mode coverage is still incomplete for some tokens (e.g. --bg-hover) — check before reusing one.",
+      "Don't use border-left/border-right as a colored accent stripe on cards or list rows — full borders, background tints, or a leading icon instead. (The one sanctioned exception is the KPI-tile border-top severity pattern in §5 — top, not side, and only on .kpi-tile.)",
+      "Don't reference a CSS variable name that isn't defined in :root or body.dark without checking first, and don't add a :root color without its body.dark value. The compatibility aliases (--border, --border-subtle, --font-mono, --nimbus-amber/--amber, --bg-float, --surface, --text-muted) are all defined, but prefer the canonical token names in new CSS.",
+      "Don't use --warn as small text or an icon color on a light surface (~3.2:1); use --warn-text. --warn is for fills, borders and tints.",
+      "Don't add a status or category color outside Signal OK/Warn/Err/Info and the six --bar-pm-* fills, and don't tint a Gantt bar by anything but firming status or the active alert category.",
       "Don't reach for --shadow-lg on a static, non-floating panel just to make it feel more \"premium\" — see The Floating-Means-Floating Rule."
     ]
   }
