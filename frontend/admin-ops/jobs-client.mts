@@ -10,8 +10,8 @@
    ========================================================================== */
 
 import { Util, Config } from '../platform/foundation.mjs';
-import { buildJobsQuery, buildRunsQuery, buildLogQuery, normColumnType } from './jobs-model.mjs';
-import type { JobsQuery, RunsQuery, LogLine, RunSummary, HealthSummary, Proposal, TypeMeta, ParamMeta, DateWindow, Artifact, ArtifactSection } from './jobs-model.mjs';
+import { buildJobsQuery, buildRunsQuery, buildBatchesQuery, buildLogQuery, normColumnType } from './jobs-model.mjs';
+import type { JobsQuery, RunsQuery, BatchesQuery, Batch, JobTarget, TzMode, LogLine, RunSummary, HealthSummary, Proposal, TypeMeta, ParamMeta, DateWindow, Artifact, ArtifactSection } from './jobs-model.mjs';
 
 export interface JobSchedule {
   id: number;
@@ -26,6 +26,9 @@ export interface JobSchedule {
   valid_until: string | null;
   paused: boolean;
   skip_if_running: boolean;
+  /** How the times are read: each plant's own zone (`plant`), one `fixed` zone (`fixedTimezone`) or `utc`. */
+  tzMode: TzMode;
+  fixedTimezone: string | null;
 }
 
 export interface JobRun {
@@ -44,6 +47,8 @@ export interface JobRun {
   summary: RunSummary | null;
   error: string | null;
   log_truncated: boolean;
+  /** The fan-out batch this run belongs to (a multi-plant job), else null. */
+  batchId: number | null;
 }
 
 export interface Job {
@@ -60,6 +65,12 @@ export interface Job {
   next_run_at: string | null;
   next_run_local: string | null;
   last_run: JobRun | null;
+  /** W3a: the target rows (empty = the home plant only), how many plants they run today, and the fan-out settings. */
+  targets: JobTarget[];
+  targetKind: string;
+  targetCount: number;
+  targetSkipped: number;
+  fanOut: { stagger_s?: number; max_parallel?: number | null; fail_fast?: boolean } | null;
 }
 
 /** A job type with its param metadata (GET /jobs/types): kind, whether it mutates data, and the params the generic form renders. */
@@ -67,6 +78,12 @@ export type JobType = TypeMeta;
 
 /** What a DateWindow resolves to today in the plant timezone (POST /jobs/windows/preview). */
 export interface WindowPreview { start: string; end: string; label: string; timezone: string }
+
+/** One plant's fires in a multi-plant schedule preview (each in that plant's own zone). */
+export interface PlantPreview { plant: string; timezone: string; entries: UpcomingEntry[] }
+export interface SchedulePreview { timezone: string; cronExpr: string | null; entries: UpcomingEntry[]; plants: PlantPreview[]; totalPlants: number; warnings: string[] }
+/** POST /jobs/targets/preview: what a target selection runs for, in run order (paged). */
+export interface TargetsPreview { plants: Array<{ plant: string; timezone: string | null; warning: string | null }>; count: number; skipped: number; warnings: string[] }
 
 /** One upcoming fire: `atLocal` is the plant wall clock (offset kept on the wire, ignore it), `atUtc` the instant. */
 export interface UpcomingEntry {
@@ -117,6 +134,7 @@ export function normSchedule(r: Raw): JobSchedule {
     days_of_week: Array.isArray(r.days_of_week) ? (r.days_of_week as number[]).map(Number) : null,
     day_of_month: _n(r.day_of_month), run_at: _s(r.run_at), timezone: _s(r.timezone),
     valid_from: _s(r.valid_from), valid_until: _s(r.valid_until), paused: !!r.paused, skip_if_running: r.skip_if_running !== false,
+    tzMode: r.tz_mode === 'fixed' || r.tz_mode === 'utc' ? r.tz_mode : 'plant', fixedTimezone: _s(r.fixed_timezone),
   };
 }
 
@@ -126,6 +144,7 @@ export function normRun(r: Raw): JobRun {
     status: String(r.status ?? ''), trigger: _s(r.trigger), scheduled_for: _s(r.scheduled_for), started_at: _s(r.started_at),
     ended_at: _s(r.ended_at), duration_ms: typeof r.duration_ms === 'number' ? r.duration_ms : null, triggered_by: _s(r.triggered_by),
     summary: (r.summary as RunSummary | null) ?? null, error: _s(r.error), log_truncated: !!r.log_truncated,
+    batchId: r.batch_id == null ? null : Number(r.batch_id),
   };
 }
 
@@ -137,6 +156,23 @@ export function normJob(r: Raw): Job {
     params: (r.params as Record<string, unknown> | null) ?? {}, enabled: r.enabled !== false,
     schedule: schedules[0] ?? null, schedules, next_run_at: _s(r.next_run_at), next_run_local: _s(r.next_run_local),
     last_run: lr ? normRun(lr) : null,
+    targets: _arr(r, 'targets').map(normTarget), targetKind: String(r.target_kind ?? 'single'), targetCount: Number(r.target_count ?? 1),
+    targetSkipped: Number(r.target_skipped ?? 0), fanOut: (r.fan_out as Job['fanOut']) ?? null,
+  };
+}
+
+export function normTarget(r: Raw): JobTarget {
+  const kind = r.kind === 'subnetwork' || r.kind === 'all' ? r.kind : 'explicit';
+  return { kind, value: String(r.value ?? ''), excluded: r.excluded === true, params_override: (r.params_override as Record<string, unknown> | null) ?? null };
+}
+
+export function normBatch(r: Raw): Batch {
+  const counts: Record<string, number> = {};
+  for (const [k, v] of Object.entries((r.counts as Record<string, unknown> | null) ?? {})) counts[k] = Number(v);
+  return {
+    id: Number(r.id), jobId: Number(r.job_id), jobName: String(r.job_name ?? ''), status: String(r.status ?? ''), trigger: String(r.trigger ?? ''),
+    triggeredBy: _s(r.triggered_by), startedAt: _s(r.started_at), endedAt: _s(r.ended_at),
+    durationMs: typeof r.duration_ms === 'number' ? r.duration_ms : null, counts,
   };
 }
 
@@ -240,9 +276,32 @@ export const JobsClient = {
   retireSchedule(id: number): Promise<JobSchedule> { return JobsClient.updateSchedule(id, { retired: true }); },
 
   /** Next N fire times of an unsaved schedule, from the same trigger the scheduler arms; `dstShifted` flags a time a spring-forward gap moved. */
-  async preview(plant: string, s: object, n = 5): Promise<{ timezone: string; cronExpr: string | null; entries: UpcomingEntry[] }> {
-    const data = await _req('POST', '/jobs/schedules/preview', { plant, n, ...s }) as Raw | null;
-    return { timezone: String(data?.timezone ?? ''), cronExpr: _s(data?.cron_expr), entries: _arr(data, 'entries').map(normEntry) };
+  async preview(plant: string, s: object, n = 5, o: { targets?: JobTarget[]; plantOffset?: number; plantLimit?: number } = {}): Promise<SchedulePreview> {
+    const body: Raw = { plant, n, ...s };
+    if (o.targets?.length) { body.targets = o.targets; body.plant_offset = o.plantOffset ?? 0; body.plant_limit = o.plantLimit ?? 10; }
+    const data = await _req('POST', '/jobs/schedules/preview', body) as Raw | null;
+    return {
+      timezone: String(data?.timezone ?? ''), cronExpr: _s(data?.cron_expr), entries: _arr(data, 'entries').map(normEntry),
+      plants: _arr(data, 'plants').map(p => ({ plant: String(p.plant), timezone: String(p.timezone ?? ''), entries: _arr(p, 'entries').map(normEntry) })),
+      totalPlants: Number(data?.total_plants ?? 1), warnings: Array.isArray(data?.warnings) ? (data?.warnings as unknown[]).map(String) : [],
+    };
+  },
+  /** What the target rows run for today (same expansion and scope check as saving); `offset`/`limit` page the plant list. */
+  async targetsPreview(targets: JobTarget[], o: { offset?: number; limit?: number } = {}): Promise<TargetsPreview> {
+    const d = await _req('POST', '/jobs/targets/preview', { targets, offset: o.offset ?? 0, limit: o.limit ?? 200 }) as Raw | null;
+    return {
+      plants: _arr(d, 'plants').map(p => ({ plant: String(p.plant), timezone: _s(p.timezone), warning: _s(p.warning) })),
+      count: Number(d?.count ?? 0), skipped: Number(d?.skipped ?? 0), warnings: Array.isArray(d?.warnings) ? (d?.warnings as unknown[]).map(String) : [],
+    };
+  },
+  async batches(q: BatchesQuery): Promise<{ items: Batch[]; nextBeforeId: number | null }> {
+    const data = await _req('GET', `/jobs/batches${buildBatchesQuery(q)}`);
+    return { items: _arr(data, 'batches').map(normBatch), nextBeforeId: _cursor(data) };
+  },
+  /** One batch with its child runs (one row per plant run, plant then id). */
+  async batch(id: number): Promise<{ batch: Batch; runs: JobRun[] }> {
+    const d = await _req('GET', `/jobs/batches/${id}`) as Raw;
+    return { batch: normBatch((d.batch as Raw) ?? {}), runs: _arr(d, 'runs').map(normRun) };
   },
   async upcoming(jobId: number, n = 10): Promise<UpcomingEntry[]> { return _arr(await _req('GET', `/jobs/${jobId}/upcoming?n=${n}`), 'entries').map(normEntry); },
   /** Soonest first across the viewer's visible jobs; `plant` narrows it. */

@@ -8304,6 +8304,22 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .job-window { border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px 2px; margin: 0 0 8px; min-width: 0; }
 .job-window legend { font-size: 11.5px; font-weight: 600; color: var(--fg-mute); padding: 0 6px; }
 .job-window-line { margin: 2px 0 8px; font-size: 12.5px; min-height: 1.3em; }
+/* W3a multi-plant: targets, time zone mode, fan-out settings, per-plant previews, batches */
+.job-targets { border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px 6px; margin: 0 0 8px; min-width: 0; }
+.job-targets legend { font-size: 11.5px; font-weight: 600; color: var(--fg-mute); padding: 0 6px; }
+.job-radios { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 4px; }
+.job-pick .input[type="search"] { margin-bottom: 6px; }
+.job-tpreview { margin: 4px 0 6px; min-height: 1.3em; font-size: 12.5px; }
+.job-adv { margin: 6px 0 4px; }
+.job-adv > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--fg-mute); margin-bottom: 6px; }
+.job-pp { margin: 4px 0 6px; }
+.job-pp-plant { font-weight: 600; }
+.job-targets-cell { font-size: 12.5px; white-space: nowrap; }
+.job-batch-counts { display: flex; flex-wrap: wrap; gap: 4px; }
+.job-batch-tile { padding: 2px 8px; font-size: 12px; }
+.job-batch-kids > td { padding: 0 0 8px 24px; background: var(--bg-subtle); }
+.job-batch-table { margin: 0; }
+.job-batch-link { cursor: pointer; border: 0; font: inherit; font-size: 11px; }
 .job-run-window { margin: 0 0 10px; font-size: 12.5px; color: var(--fg-mute); }
 .job-artifact { margin-bottom: 12px; }
 .job-art-title { margin: 0 0 8px; font-size: 14px; font-weight: 600; }

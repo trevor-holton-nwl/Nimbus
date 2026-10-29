@@ -8,7 +8,7 @@
    A health strip (GET /jobs/summary) sits above the three views: each tile filters the Runs list, and the
    whole pane polls every 30 s (15 s when a run started here is being watched) only while a run is active.
 
-   Admin controls (New, Run now, Pause, Edit, Duplicate, Copy, Delete) exist only for admins;
+   Admin controls (New, Run now, Pause, Edit, Duplicate, Delete) exist only for admins;
    other Admin-page users read jobs, runs and logs for Session.allowedPlants() (server re-checks).
    Plant is a searchable combobox, never chips; the jobs table and the runs list are server-paginated
    by a before_id cursor (no total count: a Load more button while next_before_id is set). Times show
@@ -21,12 +21,13 @@ import { OverflowMenu } from '../platform/overflow-menu.mjs';
 import type { MenuItem } from '../platform/overflow-menu.mjs';
 import { JobsClient } from './jobs-client.mjs';
 import type { Job, JobRun, JobType } from './jobs-client.mjs';
+import type { Batch } from './jobs-model.mjs';
 import { JobsDialog, mkCombobox, allowedPlantList, jobsDeps, plantTimezone } from './jobs-dialog.mjs';
 import { JobsRunDetail, resultBadgeHtml, reportBadgeHtml } from './jobs-run-detail.mjs';
 import {
   RUN_STATUSES, PERIODICITIES, JOBS_PAGE, runStatusHtml, recurrenceText, durationText, weekStrip, isoDayKey, addDays, plantWall, stripOffset,
   mergeRuns, stripCompleteThrough, healthTiles, heartbeatState, ageText, shouldPollJobs, runSequential, isActiveRun, isLongerThanUsual, tzShort,
-  typeLabel, typeGroups, findType, isReportType,
+  typeLabel, typeGroups, findType, isReportType, targetsLabel, batchTiles, statusBadgeHtml, statusLabel, BATCH_STATUSES,
 } from './jobs-model.mjs';
 import type { UpcomingRun, HealthSummary, RunsQuery } from './jobs-model.mjs';
 import type { UpcomingEntry } from './jobs-client.mjs';
@@ -65,6 +66,12 @@ let _nextBeforeJob: number | null = null;
 let _runs: JobRun[] = [];
 let _nextBefore: number | null = null;
 let _runPages = 1;               // pages of the runs list loaded (the poll merges instead of replacing when > 1)
+let _runView: 'runs' | 'batches' = 'runs';   // Runs tab: every child run as one flat list, or one row per fan-out batch
+let _batchStatus = '';           // batches view: rollup status filter
+let _batches: Batch[] = [];
+let _nextBeforeBatch: number | null = null;
+/** Batches opened in the list: their child runs (null while loading) or the load error. */
+const _openBatches = new Map<number, { runs: JobRun[] | null; error?: string }>();
 let _upcomingRequested = 20;
 let _upcoming: UpcomingRun[] = [];
 let _stripPlant = '';
@@ -290,6 +297,7 @@ function _jobRowHtml(j: Job): string {
     + `<td class="job-name"><button type="button" class="job-link" data-jobs-act="runs-of" data-job-id="${j.id}">${esc(j.name)}</button>`
     + `<div class="job-sub">${_jobSubHtml(j)}</div></td>`
     + `<td class="job-mono">${esc(j.plant)}</td>`
+    + `<td class="job-targets-cell">${esc(targetsLabel(j, d))}${j.targetSkipped ? ` <span class="badge badge-warn">${esc(t('jobs.targets_skipped', { n: j.targetSkipped }))}</span>` : ''}</td>`
     + `<td class="job-col-recur">${esc(recurrenceText(j.schedule, d, x => _fmt(x, j.plant)))}</td>`
     + `<td class="job-mono">${next}</td>`
     + `<td>${lr ? `${runStatusHtml(lr, d)} <span class="job-sub job-mono">${esc(_fmt(lr.ended_at ?? lr.started_at ?? lr.scheduled_for, j.plant))}</span>` : `<span class="job-sub">${esc(t('jobs.never_run'))}</span>`}</td>`
@@ -317,7 +325,7 @@ function _jobsTableHtml(): string {
   const admin = _isAdmin();
   return (admin ? _bulkBarHtml() : '') + `<div class="job-table-wrap"><table class="job-table"><thead><tr>`
     + (admin ? `<th scope="col" class="job-sel"><input type="checkbox" id="jobs-sel-all" aria-label="${esc(t('jobs.sel_all'))}"></th>` : '')
-    + [t('jobs.col_name'), t('jobs.col_plant'), t('jobs.col_recurrence'), t('jobs.col_next'), t('jobs.col_last'), ''].map((h, i) => `<th scope="col"${i === 2 ? ' class="job-col-recur"' : ''}>${esc(h)}</th>`).join('')
+    + [t('jobs.col_name'), t('jobs.col_plant'), t('jobs.col_targets'), t('jobs.col_recurrence'), t('jobs.col_next'), t('jobs.col_last'), ''].map((h, i) => `<th scope="col"${i === 3 ? ' class="job-col-recur"' : ''}>${esc(h)}</th>`).join('')
     + `</tr></thead><tbody>${_jobs.map(_jobRowHtml).join('')}</tbody></table></div>`
     + (_nextBeforeJob != null ? `<div class="job-pager"><button type="button" class="btn btn-ghost sm" data-jobs-act="more-jobs">${esc(t('jobs.load_more'))}</button></div>` : '');
 }
@@ -369,7 +377,6 @@ function _menuItems(j: Job): MenuItem[] {
       { id: 'pause', label: paused ? t('jobs.m_resume') : t('jobs.m_pause'), onSelect: () => void _setEnabled(j, paused) },
       { id: 'edit', label: t('jobs.m_edit'), onSelect: () => JobsDialog.open({ job: j, types: _types, onSaved: () => void _loadJobs() }) },
       { id: 'dup', label: t('jobs.m_duplicate'), onSelect: () => JobsDialog.open({ job: j, duplicate: true, types: _types, onSaved: () => void _loadJobs() }) },
-      { id: 'copy', label: t('jobs.m_copy'), onSelect: () => JobsDialog.openCopy(j, () => void _loadJobs()) },
       { id: 'del', label: t('jobs.m_delete'), danger: true, onSelect: () => void _delete(j) },
     );
   }
@@ -446,7 +453,8 @@ async function _delete(j: Job): Promise<void> {
 function _runRowHtml(r: JobRun): string {
   const d = jobsDeps();
   const longer = isLongerThanUsual(r.id, _health?.longerThanUsual) ? ` <span class="badge badge-warn job-longer">${esc(t('jobs.longer_than_usual'))}</span>` : '';
-  return `<tr class="job-run-row" data-run-id="${r.id}" tabindex="0"><td class="job-name">${esc(r.job_name)}</td><td class="job-mono">${esc(r.plant)}</td>`
+  const batch = r.batchId ? ` <button type="button" class="badge badge-muted job-batch-link" data-jobs-batch-open="${r.batchId}" aria-label="${esc(t('jobs.batch_open', { id: r.batchId }))}">${esc(t('jobs.batch_badge', { id: r.batchId }))}</button>` : '';
+  return `<tr class="job-run-row" data-run-id="${r.id}" tabindex="0"><td class="job-name">${esc(r.job_name)}${batch}</td><td class="job-mono">${esc(r.plant)}</td>`
     + `<td>${runStatusHtml(r, d)}${longer}</td><td>${resultBadgeHtml(r) || (_isReport(r.job_type) ? reportBadgeHtml() : '')}</td><td class="job-mono">${esc(_fmt(r.scheduled_for ?? r.started_at, r.plant))}</td>`
     + `<td class="job-mono">${esc(durationText(r.duration_ms) || '—')}</td>`
     + `<td>${esc(r.trigger ? t(`jobs.trigger_${r.trigger}`) : '')}${r.triggered_by && r.triggered_by !== 'schedule' ? ` <span class="job-sub">${esc(r.triggered_by)}</span>` : ''}</td></tr>`;
@@ -485,6 +493,88 @@ async function _loadRuns(mode: 'replace' | 'append' | 'refresh' = 'replace'): Pr
   }
 }
 
+/* ---- Batches view: one row per fan-out, expandable to its per-plant runs ---- */
+function _batchChildrenHtml(b: Batch): string {
+  const d = jobsDeps();
+  const o = _openBatches.get(b.id);
+  if (!o) return '';
+  if (o.error) return `<tr class="job-batch-kids"><td colspan="7" role="alert">${esc(t('jobs.load_failed', { msg: o.error }))}</td></tr>`;
+  if (!o.runs) return `<tr class="job-batch-kids"><td colspan="7"><div class="job-skel job-skel-row" aria-hidden="true"></div></td></tr>`;
+  const rows = o.runs.map(r => `<tr class="job-run-row" data-run-id="${r.id}" tabindex="0"><td class="job-mono">${esc(r.plant)}</td><td>${runStatusHtml(r, d)}</td>`
+    + `<td class="job-mono">${esc(_fmt(r.started_at ?? r.scheduled_for, r.plant))}</td><td class="job-mono">${esc(durationText(r.duration_ms) || '—')}</td>`
+    + `<td>${r.summary?.error_kind ? esc(t(`jobs.error_kind_${r.summary.error_kind}`)) : ''}</td>`
+    + `<td class="job-sub">${esc(r.error ?? '')}</td><td><button type="button" class="btn btn-ghost sm" data-run-id="${r.id}">${esc(t('jobs.batch_view_run'))}</button></td></tr>`).join('');
+  return `<tr class="job-batch-kids"><td colspan="7"><table class="job-table job-batch-table"><caption class="job-sr">${esc(t('jobs.batch_children', { id: b.id }))}</caption><thead><tr>`
+    + [t('jobs.col_plant'), t('jobs.col_status'), t('jobs.run_started'), t('jobs.run_duration'), t('jobs.col_error_kind'), t('jobs.col_error'), ''].map(h => `<th scope="col">${esc(h)}</th>`).join('')
+    + `</tr></thead><tbody>${rows}</tbody></table></td></tr>`;
+}
+
+function _batchRowHtml(b: Batch): string {
+  const d = jobsDeps();
+  const open = _openBatches.has(b.id);
+  const tiles = batchTiles(b).map(x => `<span class="kpi-tile job-batch-tile"><span class="job-sub">${esc(t(`jobs.batch_tile_${x.key}`))}</span> <b>${x.value}</b></span>`).join(' ');
+  return `<tr class="job-batch-row" data-batch-id="${b.id}"><td class="job-name"><button type="button" class="job-link" data-jobs-batch="${b.id}" aria-expanded="${open ? 'true' : 'false'}">`
+    + `${open ? '▾' : '▸'} ${esc(b.jobName)}</button></td><td>${statusBadgeHtml(b.status, d)}</td><td class="job-batch-counts">${tiles}</td>`
+    + `<td class="job-mono">${esc(_fmt(b.startedAt))}</td><td class="job-mono">${esc(durationText(b.durationMs) || '—')}</td>`
+    + `<td>${esc(b.trigger ? t(`jobs.batch_trigger_${b.trigger}`) : '')}${b.triggeredBy && b.triggeredBy !== 'schedule' ? ` <span class="job-sub">${esc(b.triggeredBy)}</span>` : ''}</td></tr>`
+    + _batchChildrenHtml(b);
+}
+
+function _batchesListHtml(): string {
+  if (!_batches.length) return `<div class="empty-state job-empty">${esc(t('jobs.batches_empty'))}</div>`;
+  return `<div class="job-table-wrap"><table class="job-table"><thead><tr>`
+    + [t('jobs.col_name'), t('jobs.col_status'), t('jobs.col_batch_counts'), t('jobs.run_started'), t('jobs.run_duration'), t('jobs.run_trigger')].map(h => `<th scope="col">${esc(h)}</th>`).join('')
+    + `</tr></thead><tbody>${_batches.map(_batchRowHtml).join('')}</tbody></table></div>`
+    + (_nextBeforeBatch != null ? `<div class="job-pager"><button type="button" class="btn btn-ghost sm" data-jobs-act="more-batches">${esc(t('jobs.load_more'))}</button></div>` : '');
+}
+
+async function _loadBatches(mode: 'replace' | 'append' | 'refresh' = 'replace'): Promise<void> {
+  const my = ++_seq;
+  const host = _el('jobs-runs-list');
+  if (!host) return;
+  if (mode === 'replace') { _busy(host, true); _setHtml(host, _skeletonHtml()); }
+  try {
+    const res = await JobsClient.batches({ plant: _plant, status: _batchStatus, beforeId: mode === 'append' ? _nextBeforeBatch : null });
+    if (my !== _seq) return;
+    if (mode === 'append') { _batches = mergeRuns(_batches, res.items); _nextBeforeBatch = res.nextBeforeId; }
+    else if (mode === 'refresh' && _batches.length > res.items.length) _batches = mergeRuns(_batches, res.items);
+    else { _batches = res.items; _nextBeforeBatch = res.nextBeforeId; }
+    _setHtml(host, _batchesListHtml());
+    _busy(host, false);
+    _announce(t('jobs.count_batches', { n: _batches.length }), 'jobs-runs-live');
+    // Open batches that are still running re-read their children so the per-plant table follows the run.
+    for (const b of _batches) if (_openBatches.has(b.id) && b.status === 'running') void _loadBatchKids(b.id);
+  } catch (e) {
+    if (my === _seq) { _setHtml(host, _errorHtml(e as Error)); _busy(host, false); }
+  }
+}
+
+async function _loadBatchKids(id: number): Promise<void> {
+  try {
+    const r = await JobsClient.batch(id);
+    if (!_openBatches.has(id)) return;
+    _openBatches.set(id, { runs: r.runs });
+    const i = _batches.findIndex(x => x.id === id);
+    if (i >= 0) _batches[i] = r.batch;
+  } catch (e) { if (_openBatches.has(id)) _openBatches.set(id, { runs: null, error: (e as Error).message }); }
+  const host = _el('jobs-runs-list');
+  if (host && _runView === 'batches') _setHtml(host, _batchesListHtml());
+}
+
+function _toggleBatch(id: number): void {
+  if (_openBatches.has(id)) _openBatches.delete(id); else { _openBatches.set(id, { runs: null }); void _loadBatchKids(id); }
+  const host = _el('jobs-runs-list');
+  if (host) _setHtml(host, _batchesListHtml());
+}
+
+/** A child run's "Batch #n" badge: show the batches view with that batch opened (read by id when it is not on page 1). */
+async function _openBatchFromRun(id: number): Promise<void> {
+  _runView = 'batches'; _openBatches.set(id, { runs: null });
+  _renderRunsTab();
+  try { const r = await JobsClient.batch(id); if (!_batches.some(x => x.id === id)) _batches = [r.batch, ..._batches]; } catch { /* the kids loader shows the error */ }
+  void _loadBatchKids(id);
+}
+
 function _periodicityOptions(sel: string): string {
   return `<option value="">${esc(t('jobs.period_any'))}</option>`
     + PERIODICITIES.map(p => `<option value="${p}"${p === sel ? ' selected' : ''}>${esc(t(p === 'manual' ? 'jobs.trigger_manual' : `jobs.preset_${p}`))}</option>`).join('');
@@ -499,18 +589,24 @@ function _renderRunsTab(): void {
   const host = _el('jobs-view-runs');
   if (!host) return;
   JobsRunDetail.stop();
-  host.innerHTML = `<div id="jobs-runs-main"><div class="job-toolbar">${_plantFilterHtml('jobs-runs')}`
-    + `<div class="job-field"><label class="job-field-l" for="jobs-runs-status">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-status">${_statusOptions(_runStatus)}</select></div>`
+  const viewSel = `<div class="job-field"><label class="job-field-l" for="jobs-runs-view">${esc(t('jobs.f_view'))}</label><select class="input" id="jobs-runs-view">`
+    + (['runs', 'batches'] as const).map(v => `<option value="${v}"${v === _runView ? ' selected' : ''}>${esc(t(`jobs.view_${v}`))}</option>`).join('') + `</select></div>`;
+  const batchToolbar = `<div class="job-toolbar">${_plantFilterHtml('jobs-runs')}${viewSel}`
+    + `<div class="job-field"><label class="job-field-l" for="jobs-runs-bstatus">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-bstatus"><option value="">${esc(t('jobs.status_any'))}</option>`
+    + BATCH_STATUSES.map(b => `<option value="${b}"${b === _batchStatus ? ' selected' : ''}>${esc(statusLabel(b === 'running' ? 'running' : b, jobsDeps()))}</option>`).join('') + `</select></div>`
+    + `<button type="button" class="btn btn-ghost" data-jobs-act="refresh-runs">${esc(t('btn.refresh'))}</button></div>`;
+  host.innerHTML = `<div id="jobs-runs-main">${_runView === 'batches' ? batchToolbar : `<div class="job-toolbar">${_plantFilterHtml('jobs-runs')}${viewSel}`}`
+    + (_runView === 'batches' ? '' : `<div class="job-field"><label class="job-field-l" for="jobs-runs-status">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-status">${_statusOptions(_runStatus)}</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-type">${esc(t('jobs.f_type'))}</label><select class="input" id="jobs-runs-type"><option value="">${esc(t('jobs.type_any'))}</option>`
     + _typeOptionsHtml(_runType) + `</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-period">${esc(t('jobs.f_periodicity'))}</label><select class="input" id="jobs-runs-period">${_periodicityOptions(_periodicity)}</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-by">${esc(t('jobs.f_scheduled_by'))}</label><select class="input" id="jobs-runs-by">${_byOptions(_scheduledBy)}</select></div>`
     + (_since ? `<button type="button" class="btn btn-ghost sm job-chip" data-jobs-act="clear-since">${esc(t('jobs.since_chip', { h: _since }))} ×</button>` : '')
-    + `<button type="button" class="btn btn-ghost" data-jobs-act="refresh-runs">${esc(t('btn.refresh'))}</button></div>`
+    + `<button type="button" class="btn btn-ghost" data-jobs-act="refresh-runs">${esc(t('btn.refresh'))}</button></div>`)
     + `<div id="jobs-runs-list"></div><span class="job-sr" id="jobs-runs-live" role="status" aria-live="polite"></span></div><div id="jobs-run-detail" hidden></div>`;
   _announced = '';
-  _mountPlantCombo('jobs-runs', () => { void _loadRuns(); void _loadHealth(); });
-  void _loadRuns();
+  _mountPlantCombo('jobs-runs', () => { void (_runView === 'batches' ? _loadBatches() : _loadRuns()); void _loadHealth(); });
+  void (_runView === 'batches' ? _loadBatches() : _loadRuns());
   _armRunsPoll();
 }
 
@@ -521,7 +617,7 @@ function _armRunsPoll(): void {
   _runsTimer = setTimeout(() => {
     _runsTimer = null;
     // Health and the watcher belong to _pollTimer (one owner), so the Runs tab never duplicates those requests.
-    if (_visible() && _tab === 'runs' && !JobsRunDetail.isOpen()) void _loadRuns('refresh');
+    if (_visible() && _tab === 'runs' && !JobsRunDetail.isOpen()) void (_runView === 'batches' ? _loadBatches('refresh') : _loadRuns('refresh'));
     _armRunsPoll();
   }, RUNS_POLL_MS);
 }
@@ -673,16 +769,21 @@ function _wire(): void {
       _jobsRerender();
       return;
     }
+    const bOpen = target.closest<HTMLElement>('[data-jobs-batch-open]');
+    if (bOpen) { void _openBatchFromRun(Number(bOpen.dataset.jobsBatchOpen)); return; }
+    const bTog = target.closest<HTMLElement>('[data-jobs-batch]');
+    if (bTog) { _toggleBatch(Number(bTog.dataset.jobsBatch)); return; }
     const runRow = target.closest<HTMLElement>('[data-run-id]');
     if (runRow) { void _openRun(Number(runRow.dataset.runId)); return; }
     const act = target.closest<HTMLElement>('[data-jobs-act]')?.dataset.jobsAct;
     if (act === 'retry-health') { void _loadHealth(); return; }
-    if (act === 'retry') { if (_tab === 'jobs') void _loadJobs(); else if (_tab === 'runs') void _loadRuns(); else void _loadUpcoming(); return; }
+    if (act === 'retry') { if (_tab === 'jobs') void _loadJobs(); else if (_tab === 'runs') void (_runView === 'batches' ? _loadBatches() : _loadRuns()); else void _loadUpcoming(); return; }
     if (act === 'clear-since') { _since = 0; _renderRunsTab(); return; }
     if (act === 'new') void _openNew();
     else if (act === 'more-jobs') void _loadJobs(true);
     else if (act === 'more-runs') void _loadRuns('append');
-    else if (act === 'refresh-runs') void _loadRuns();
+    else if (act === 'more-batches') void _loadBatches('append');
+    else if (act === 'refresh-runs') void (_runView === 'batches' ? _loadBatches() : _loadRuns());
     else if (act === 'runs-of') { const j = _jobs.find(x => x.id === Number((target.closest<HTMLElement>('[data-job-id]'))?.dataset.jobId)); if (j) _gotoRuns(j); }
   });
   pane.addEventListener('keydown', (e) => {
@@ -694,6 +795,8 @@ function _wire(): void {
     const v = (e.target as HTMLSelectElement).value;
     if (id === 'jobs-type') { _type = v; void _loadJobs(); }
     else if (id === 'jobs-status') { _status = v; void _loadJobs(); }
+    else if (id === 'jobs-runs-view') { _runView = v === 'batches' ? 'batches' : 'runs'; _renderRunsTab(); }
+    else if (id === 'jobs-runs-bstatus') { _batchStatus = v; void _loadBatches(); }
     else if (id === 'jobs-runs-status') { _runStatus = v; _since = 0; void _loadRuns(); }
     else if (id === 'jobs-runs-type') { _runType = v; void _loadRuns(); }
     else if (id === 'jobs-runs-period') { _periodicity = v; void _loadRuns(); }

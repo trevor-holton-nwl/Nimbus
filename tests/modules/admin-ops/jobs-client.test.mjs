@@ -237,3 +237,60 @@ test('artifact columns carry a type; a plain string column reads as text and an 
   const a = await JobsClient.artifact(1);
   assert.deepEqual(a.sections[0].columns.map(c => [c.key, c.label, c.type]), [['plain', 'plain', 'text'], ['n', 'N', 'number'], ['x', 'X', 'text'], ['d', 'd', 'datetime']]);
 });
+
+// ----------------------------------------------------------------------------------------------- W3a multi-plant
+test('job: targets, target_kind / count / skipped, fan_out and the schedule zone mode come through normJob', async () => {
+  reply = body('jobs_list');
+  const j = (await JobsClient.list({})).items[0];
+  assert.deepEqual(j.targets, [{ kind: 'explicit', value: '1008', excluded: false, params_override: { mode: 'spt' } }]);
+  assert.deepEqual([j.targetKind, j.targetCount, j.targetSkipped], ['selected', 2, 0]);
+  assert.deepEqual(j.fanOut, { stagger_s: 30, max_parallel: 2, fail_fast: false });
+  assert.deepEqual([j.schedule.tzMode, j.schedule.fixedTimezone], ['plant', null]);
+  assert.equal(j.last_run.batchId, null);
+  assert.deepEqual(phantom, []);
+});
+
+test('batches: cursor envelope, counts, and one batch with its child runs', async () => {
+  reply = body('batches_list');
+  const r = await JobsClient.batches({ plant: '1008', status: 'warning', jobId: 5, beforeId: 20, limit: 10 });
+  assert.equal(path(0), '/jobs/batches?plant=1008&status=warning&job_id=5&before_id=20&limit=10');
+  assert.equal(r.nextBeforeId, 8);
+  assert.deepEqual([r.items[0].id, r.items[0].jobName, r.items[0].status, r.items[0].trigger, r.items[0].durationMs], [9, 'Morning optimize', 'warning', 'schedule', 300000]);
+  assert.deepEqual(r.items[0].counts, { total: 3, succeeded: 1, warning: 1, skipped: 1 });
+  assert.deepEqual(phantom, []);
+  reply = body('batch_detail');
+  const d = await JobsClient.batch(9);
+  assert.equal(path(1), '/jobs/batches/9');
+  assert.deepEqual([d.batch.id, d.runs.length, d.runs[0].plant], [9, 1, '1008']);
+  assert.deepEqual(phantom, []);
+});
+
+test('targetsPreview posts the rows with paging and reads count / skipped / per-plant warnings', async () => {
+  reply = body('targets_preview');
+  const rows = [{ kind: 'subnetwork', value: 'NA', excluded: false, params_override: null }];
+  const r = await JobsClient.targetsPreview(rows, { offset: 5, limit: 10 });
+  assert.equal(path(0), '/jobs/targets/preview');
+  assert.deepEqual(calls[0].body, { targets: rows, offset: 5, limit: 10 });
+  assert.deepEqual([r.count, r.skipped, r.plants[1].warning, r.plants[0].timezone], [1, 1, 'plant has no timezone', 'America/Chicago']);
+  assert.deepEqual(phantom, []);
+});
+
+test('schedule preview: single plant keeps entries; targets add the plants paging parameters and read per-plant fires', async () => {
+  reply = body('preview');
+  const one = await JobsClient.preview('1008', { kind: 'daily', time_of_day: '08:00' }, 3);
+  assert.deepEqual(calls[0].body, { plant: '1008', n: 3, kind: 'daily', time_of_day: '08:00' }, 'no targets, no paging fields');
+  assert.deepEqual([one.entries.length, one.plants, one.totalPlants], [1, [], 1]);
+  reply = body('preview_multi');
+  const rows = [{ kind: 'explicit', value: '1008', excluded: false, params_override: null }];
+  const m = await JobsClient.preview('1008', { kind: 'daily', tz_mode: 'plant' }, 3, { targets: rows, plantOffset: 0, plantLimit: 20 });
+  assert.deepEqual([calls[1].body.targets, calls[1].body.plant_offset, calls[1].body.plant_limit], [rows, 0, 20]);
+  assert.deepEqual([m.totalPlants, m.plants[0].plant, m.plants[0].timezone, m.plants[0].entries[0].atUtc], [2, '1008', 'America/Chicago', '2026-10-30T13:00:00+00:00']);
+  assert.deepEqual(phantom.filter(k => !/entries\[0\]\.(job_id|job_name|plant|schedule_id|timezone)$/.test(k)), [], 'preview entries carry only the fire times (the job fields are the upcoming lists\')');
+});
+
+test('run now and restart still answer the run (a batch rides next to it and the run carries its batch_id)', async () => {
+  reply = body('batch_run_started');
+  const r = await JobsClient.runNow(5);
+  assert.equal(r.id, 42);
+  assert.deepEqual(phantom, []);
+});
