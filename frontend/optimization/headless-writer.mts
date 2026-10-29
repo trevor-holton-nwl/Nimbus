@@ -134,8 +134,11 @@ export function planApply(args: {
   runSnapshot: ScheduleSnapshot;
   liveSnapshot: ScheduleSnapshot;
   now: Date;
+  /** Remove Backlog only (default false): an order in progress is written like the browser's Backlog writes it instead
+   *  of being dropped as `running`. Every optimizer mode leaves it false. */
+  includeRunning?: boolean;
 }): ApplyPlan {
-  const { plant, candidate, runSnapshot, liveSnapshot, now } = args;
+  const { plant, candidate, runSnapshot, liveSnapshot, now, includeRunning = false } = args;
   const patches = candidate.patches;
   const runById = new Map(runSnapshot.tasks.map(task => [String(task.id), task]));
   const liveById = new Map(liveSnapshot.tasks.map(task => [String(task.id), task]));
@@ -165,7 +168,7 @@ export function planApply(args: {
     if (!live) { dropWithFamily(id, 'row_missing'); continue; }
     // null === null: a never-versioned row that is still never-versioned has not changed.
     if ((live.row_version ?? null) !== (ran?.row_version ?? null)) { dropWithFamily(id, 'row_version_changed'); continue; }
-    if (Engine.isInProgress(live, now)) dropWithFamily(id, 'running');
+    if (!includeRunning && Engine.isInProgress(live, now)) dropWithFamily(id, 'running');
   }
   // A family member the run did NOT patch can also have changed, vanished or started running since.
   for (const members of familyOf.values()) {
@@ -174,7 +177,7 @@ export function planApply(args: {
     for (const id of members) {
       if (patched.has(id)) continue;
       const live = liveById.get(id); const ran = runById.get(id);
-      if (!live || !ran || (live.row_version ?? null) !== (ran.row_version ?? null) || Engine.isInProgress(live, now)) {
+      if (!live || !ran || (live.row_version ?? null) !== (ran.row_version ?? null) || (!includeRunning && Engine.isInProgress(live, now))) {
         dropWithFamily(first, 'family');
       }
     }

@@ -34,6 +34,10 @@ export interface SerializedOptimizerValidation {
   notAfterById: Record<string, Date | string | number | null>;
   /** Frozen-horizon finish floor (2026-10-27); null/absent = none. */
   finishFloor?: Date | string | number | null;
+  /** Remove Backlog only (headless backlog step, Jobs W4b): exempt from the plant's pull/push window and from the tool
+   *  rule at validation. Absent = false, so every other mode is unchanged. */
+  ignorePlantWindow?: boolean;
+  ignoreToolRule?: boolean;
 }
 
 export interface OptimizerWorkerResponse {
@@ -54,9 +58,9 @@ export function serializeOptimizerValidation(
   const context = candidate.validationContext;
   if (!context) return undefined;
   const { bounds, snapshot } = context;
-  // `bounds.ignorePlantWindow` and `bounds.ignoreToolRule` are intentionally NOT serialized: only Remove Backlog sets them
-  // and Backlog runs foreground-only, so no worker validation ever needs them. Add them here if Backlog ever moves to the
-  // worker. The tooling rule and the inventory are NEVER carried in bounds: the validator re-derives both from
+  // `ignorePlantWindow` and `ignoreToolRule` are set only by Remove Backlog (engine.runAndApply). They ARE serialized: the
+  // headless backlog step (Jobs W4b) re-validates at apply time from this descriptor, and without them the validator would
+  // enforce the plant window and the tool rule that Backlog is exempt from and drop its patches. The tooling rule and the inventory are NEVER carried in bounds: the validator re-derives both from
   // `snapshot.masterData` (Tool Inventory Wave 6), and `toolPass` on the candidate says the overflow pass has run.
   if (!Number.isFinite(bounds.now.getTime())
     || typeof bounds.respectCalendar !== 'boolean'
@@ -93,5 +97,7 @@ export function serializeOptimizerValidation(
     notBeforeById,
     notAfterById,
     finishFloor: bounds.finishFloor ?? null,
+    ...(bounds.ignorePlantWindow ? { ignorePlantWindow: true } : {}),
+    ...(bounds.ignoreToolRule ? { ignoreToolRule: true } : {}),
   };
 }

@@ -94,7 +94,7 @@ test('apply phase: a calendar or tool inventory edit since the run refuses the w
 test('an unusable request is answered, not thrown', async () => {
   const bad = await runOptimizer({ plant: PLANT, wire: wireWithUnplaced(), params: { ...params, serverNow: 'nope' } });
   assert.deepEqual([bad.ok, bad.status], [false, 'invalid_server_now']);
-  const mode = await runOptimizer({ plant: PLANT, wire: wireWithUnplaced(), params: { ...params, mode: 'backlog' } });
+  const mode = await runOptimizer({ plant: PLANT, wire: wireWithUnplaced(), params: { ...params, mode: 'combined' } });
   assert.deepEqual([mode.ok, mode.status], [false, 'invalid_mode']);
 });
 

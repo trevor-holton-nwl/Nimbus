@@ -3523,6 +3523,8 @@ export function rehydrateOptimizerCandidate(
     notBefore: task => dateFor(serialized.notBeforeById, task),
     notAfter: task => dateFor(serialized.notAfterById, task),
     finishFloor: serialized.finishFloor === undefined || serialized.finishFloor === null ? null : rehydrateDate(serialized.finishFloor),
+    ...(serialized.ignorePlantWindow === true ? { ignorePlantWindow: true } : {}),
+    ...(serialized.ignoreToolRule === true ? { ignoreToolRule: true } : {}),
   };
   const validationSnapshot: ScheduleSnapshot = {
     ...snapshot,
