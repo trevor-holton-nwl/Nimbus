@@ -387,3 +387,49 @@ def test_options_normalise_to_a_full_dict_and_none_when_empty():
                  "run_window": {"start": "06:00", "end": "18:00", "action": "skip"}, "monthly": "day_of_month",
                  "monthly_clamp": False, "catch_up": {"enabled": True, "grace_s": 3600}}
     assert triggers.options_need_plant_time(o) and not triggers.options_need_plant_time({"closed_day": "run"})
+
+
+# ------------------------------------------------------------------------------------- W3b fix wave (pure)
+def test_deferred_fire_never_lands_on_a_closed_day():
+    # 2027-04-02 is a Friday; a 20:00 fire is outside 08:00-17:00 and opens next at Saturday 08:00 (closed).
+    win = {"start": "08:00", "end": "17:00", "action": "defer"}
+    now = utc(2027, 4, 2, 12)
+    mv = sched(tz="UTC", time_of_day="20:00", options={"closed_day": "next_working_day", "run_window": win})
+    assert local_list(mv, 1, now, FakeCal()) == ["2027-04-05T08:00:00+00:00"], "walks to Monday's opening"
+    sk = sched(tz="UTC", time_of_day="20:00", options={"closed_day": "skip", "run_window": win})
+    entries, skipped = triggers.preview_full(sk, 2, now=now, cal=FakeCal(), plant="P")
+    assert all(e["at_local"][:10] not in ("2027-04-03", "2027-04-04") for e in entries)
+    assert any(s["reason"] == "closed_day" and s["at_local"].startswith("2027-04-02") for s in skipped)
+
+
+def test_validity_is_tested_on_the_final_moved_instant():
+    # Saturday 08:00 is inside valid_until (Sat 23:00) but the closed-day move carries it to Monday, outside it.
+    s = sched(tz="UTC", time_of_day="08:00", valid_until="2027-04-03T23:00:00", options={"closed_day": "next_working_day"})
+    entries, skipped = triggers.preview_full(s, 5, now=utc(2027, 4, 2, 12), cal=FakeCal(), plant="P")
+    assert all(e["at_local"][:10] <= "2027-04-03" for e in entries), "nothing moved past valid_until"
+    assert any(x["reason"] == "outside_validity" for x in skipped)
+    assert triggers.recheck(s, at=utc(2027, 4, 5, 8), window_s=120, cal=FakeCal(), plant="P") is not None
+
+
+def test_recheck_scan_does_not_reject_a_valid_fire_of_a_busy_schedule():
+    s = sched(kind="cron", tz="UTC", cron_expr="* * * * *")
+    assert triggers.recheck(s, at=utc(2027, 4, 2, 12, 0, 1), window_s=86400, cal=None, plant="P") is None
+    far = utc(2027, 4, 2, 12, 0, 0)
+    assert triggers.recheck(sched(kind="cron", tz="UTC", cron_expr="0 12 * * *", options={"run_window": {"start": "11:00", "end": "13:00", "action": "skip"}}),
+                            at=far, window_s=120, plant="P") is None
+
+
+def test_fire_at_names_the_second_pass_of_a_repeated_hour():
+    s = sched(tz="America/Chicago", time_of_day="01:30", options={"dst_overlap": "twice"})
+    first = triggers.fire_at(s, at=utc(2026, 11, 1, 6, 30), window_s=60, plant="P")
+    second = triggers.fire_at(s, at=utc(2026, 11, 1, 7, 30), window_s=60, plant="P")
+    assert first is not None and first.note is None and second is not None and second.note == "dst_overlap_second"
+
+
+def test_blocked_now_tests_the_current_instant():
+    w = sched(tz="UTC", time_of_day="08:00", options={"run_window": {"start": "08:00", "end": "17:00", "action": "skip"}})
+    assert triggers.blocked_now(w, now=utc(2027, 4, 2, 20), plant="P") == "outside run window"
+    assert triggers.blocked_now(w, now=utc(2027, 4, 2, 10), plant="P") is None
+    c = sched(tz="UTC", time_of_day="08:00", options={"closed_day": "skip"})
+    assert triggers.blocked_now(c, now=utc(2027, 4, 3, 10), cal=FakeCal(), plant="P") == "closed day"
+    assert triggers.blocked_now(c, now=utc(2027, 4, 2, 10), cal=FakeCal(), plant="P") is None

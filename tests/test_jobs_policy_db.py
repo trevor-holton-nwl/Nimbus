@@ -82,8 +82,9 @@ def test_maintenance_mode_skips_scheduled_fires_visibly_but_not_manual_runs(api,
 
 # ------------------------------------------------------------------------------------------------- catch-up
 def _age_schedule(db, sid, days=2):
-    _sql(db, "UPDATE job_schedule SET modified_at = clock_timestamp() - make_interval(days => %s), last_fire_at = NULL WHERE id = %s",
-         days, sid)
+    """The process was down for `days`: the schedule's last edit and the last fire its (plant-less) arm saw are that old."""
+    _sql(db, "UPDATE job_schedule SET modified_at = clock_timestamp() - make_interval(days => %s),"
+             " last_fire_at = clock_timestamp() - make_interval(days => %s), arm_fire_at = NULL WHERE id = %s", days, days, sid)
 
 
 @pytest.mark.pg
@@ -293,3 +294,139 @@ def test_ensure_job_tables_is_idempotent_and_allows_the_catchup_trigger(jobs_pg)
     assert {"options", "last_fire_at"} <= cols
     (defn,) = _sql(jobs_pg.db, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'job_run_trigger_check'")[0]
     assert "catchup" in defn and "retry" in defn
+
+
+# ------------------------------------------------------------------------------------ W3b fix wave (pg)
+@pytest.mark.pg
+def test_catch_up_baselines_are_per_arm_so_three_plants_keep_their_own_misses(api, jobs_pg):
+    """One arm's fire used to stamp the schedule-wide last_fire_at, so the arms armed after it lost their misses."""
+    from backend.jobs import data
+    j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "daily", "time_of_day": "08:00"}])
+    sid = j["schedules"][0]["id"]
+    old = datetime.now(timezone.utc) - timedelta(days=2)
+    _sql(jobs_pg.db, "UPDATE job_schedule SET modified_at = %s, last_fire_at = NULL,"
+                     " arm_fire_at = jsonb_build_object('P1', %s::text, 'P2', %s::text, 'P3', %s::text) WHERE id = %s",
+         old - timedelta(days=1), old.isoformat(), old.isoformat(), old.isoformat(), sid)
+    data.touch_last_fire(sid, "P1")                       # plant 1 fires first, as the first arm of the batch
+    b1, b2, b3 = (data.schedule_baseline(sid, p, arm=p) for p in ("P1", "P2", "P3"))
+    assert b1 > old + timedelta(days=1), "P1's own baseline moved"
+    assert abs((b2 - old).total_seconds()) < 2 and abs((b3 - old).total_seconds()) < 2, "P2 and P3 keep their own"
+
+
+@pytest.mark.pg
+def test_no_reliable_baseline_means_no_missed_storm_and_resume_moves_the_floor(api, jobs_pg):
+    from backend.jobs import data, runner
+    j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "daily", "time_of_day": _utc_time_of_day(20)}])
+    sid = j["schedules"][0]["id"]
+    _sql(jobs_pg.db, "UPDATE job_schedule SET modified_at = clock_timestamp() - interval '9 days', last_fire_at = NULL,"
+                     " arm_fire_at = NULL WHERE id = %s", sid)          # an upgrade: old schedule, no watermark, no runs
+    assert data.schedule_baseline(sid, jobs_pg.plant) is None
+    assert runner.run_catch_up(sid) is None and _runs(api, j["id"]) == [], "no 'process was down' storm"
+    assert data.schedule_baseline(sid, jobs_pg.plant) is not None, "the first boot seeds the watermark"
+    # a disabled job re-enabled later: the pause is not process downtime
+    _sql(jobs_pg.db, "UPDATE job_schedule SET modified_at = clock_timestamp() - interval '9 days',"
+                     " arm_fire_at = jsonb_build_object('*', (clock_timestamp() - interval '9 days')::text) WHERE id = %s", sid)
+    api.patch(f"/jobs/{j['id']}", json={"enabled": False})
+    api.patch(f"/jobs/{j['id']}", json={"enabled": True})
+    base = data.schedule_baseline(sid, jobs_pg.plant)
+    assert base > datetime.now(timezone.utc) - timedelta(minutes=2), "re-enable bumped the floor"
+    assert runner.run_catch_up(sid) is None and not [r for r in _runs(api, j["id"]) if r["status"] == "skipped"]
+    api.patch(f"/jobs/{j['id']}", json={"archived": True})
+    _sql(jobs_pg.db, "UPDATE job_schedule SET modified_at = clock_timestamp() - interval '9 days' WHERE id = %s", sid)
+    api.patch(f"/jobs/{j['id']}", json={"archived": False})
+    assert data.schedule_baseline(sid, jobs_pg.plant) > datetime.now(timezone.utc) - timedelta(minutes=2), "restore too"
+
+
+@pytest.mark.pg
+def test_overlap_twice_second_fire_runs_and_default_once_dedupes_it(api, chicago):
+    """Chicago 01:30 on 2026-11-01 happens twice (06:30Z CDT, 07:30Z CST)."""
+    from backend.jobs import runner
+    first, second = (datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc), datetime(2026, 11, 1, 7, 30, tzinfo=timezone.utc))
+    tw = _mk_job(api, chicago.plant, name="twice", schedules=[{"kind": "daily", "time_of_day": "01:30", "options": {"dst_overlap": "twice"}}])
+    sid = tw["schedules"][0]["id"]
+    assert runner.fire_schedule(sid, fired_at=first)
+    assert runner.fire_schedule(sid, fired_at=second), "the second pass is a deliberate fire (the preview lists it)"
+    assert len([r for r in _runs(api, tw["id"]) if r["trigger"] == "schedule"]) == 2
+    one = _mk_job(api, chicago.plant, name="once", schedules=[{"kind": "daily", "time_of_day": "01:30"}])
+    oid = one["schedules"][0]["id"]
+    assert runner.fire_schedule(oid, fired_at=first)
+    assert runner.fire_schedule(oid, fired_at=second) is None, "default 'once': one run that local date"
+    assert len([r for r in _runs(api, one["id"]) if r["trigger"] == "schedule"]) == 1
+
+
+@pytest.mark.pg
+def test_a_pool_delayed_fire_is_rechecked_at_its_fire_time_not_at_dequeue_time(api, jobs_pg):
+    from backend.jobs import runner
+    t = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=10)
+    lo, hi = (t - timedelta(minutes=5)).strftime("%H:%M"), (t + timedelta(minutes=5)).strftime("%H:%M")
+    j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "daily", "time_of_day": t.strftime("%H:%M"),
+                                                "options": {"run_window": {"start": lo, "end": hi, "action": "skip"}}}])
+    sid = j["schedules"][0]["id"]
+    assert runner.fire_schedule(sid, fired_at=t), "inside the window when it fired; the pool started it 10 minutes later"
+    assert [r["status"] for r in _runs(api, j["id"])] != ["skipped"]
+
+
+@pytest.mark.pg
+def test_catch_up_retests_the_current_time_against_window_and_closed_day(api, jobs_pg):
+    from backend.jobs import runner
+    now = datetime.now(timezone.utc)
+    lo, hi = (now + timedelta(hours=2)).strftime("%H:00"), (now + timedelta(hours=3)).strftime("%H:00")
+    j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "daily", "time_of_day": "08:00",
+                                                "options": {"run_window": {"start": lo, "end": hi, "action": "skip"}}}])
+    sid = j["schedules"][0]["id"]
+    assert runner.fire_schedule(sid, catchup_for=now - timedelta(minutes=20)) is None
+    runs = _runs(api, j["id"])
+    assert [r["status"] for r in runs] == ["skipped"] and runs[0]["error"] == "outside run window"
+    assert not [r for r in runs if r["trigger"] == "catchup"]
+
+
+@pytest.mark.pg
+def test_system_settings_cannot_write_jobs_keys_and_get_hides_who_paused(api, jobs_pg, monkeypatch):
+    import master_data as md
+    from backend.jobs import data
+    for key in ("jobs_paused", "jobs_paused_at", "jobs_paused_by"):
+        r = api.post("/system-settings", json={key: "x"})
+        assert r.status_code == 400 and "/jobs/maintenance" in r.text, key
+    try:
+        api.post("/jobs/maintenance", json={"enabled": True})
+        blob = api.get("/system-settings").json()
+        assert blob["jobs_paused"] is True and "jobs_paused_by" not in blob, "no admin identity on the unauthenticated read"
+        assert api.get("/jobs/summary").json()["maintenance"]["by"] == "admin@example.com"
+    finally:
+        api.post("/jobs/maintenance", json={"enabled": False})
+    for stored, want in (("false", False), ("False", False), ("0", False), ("", False), ("true", True), (True, True), (None, False)):
+        monkeypatch.setattr(md, "get_system_settings", lambda s=stored: {"jobs_paused": s})
+        assert data.maintenance_state(fresh=True)["enabled"] is want, stored
+
+
+@pytest.mark.pg
+def test_last_success_watermark_and_ran_on_count_catchup_runs(api, jobs_pg):
+    from backend.jobs import data
+    j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "daily", "time_of_day": "08:00"}])
+    sid = j["schedules"][0]["id"]
+    at = datetime.now(timezone.utc) - timedelta(minutes=30)
+    rid = data.insert_run(job_id=j["id"], schedule_id=sid, plant=jobs_pg.plant, job_type="noop", status="succeeded",
+                          trigger="catchup", scheduled_for=at)
+    _sql(jobs_pg.db, "UPDATE job_run SET started_at = %s WHERE id = %s", at, rid)
+    assert data.last_success_watermark(j["id"], None, jobs_pg.plant) is not None
+    assert data.schedule_ran_on(sid, jobs_pg.plant, "UTC", at.date())
+
+
+@pytest.mark.pg
+def test_timeline_reports_upcoming_truncation_and_bad_instants_are_400(api, jobs_pg):
+    j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "hourly", "time_of_day": "00:00"}])
+    now = datetime.now(timezone.utc)
+    q = {"plant": jobs_pg.plant, "from": now.isoformat(), "to": (now + timedelta(days=7)).isoformat()}
+    body = api.get("/jobs/timeline", params=q).json()
+    assert body["upcoming_truncated"] is True and len(body["lanes"][0]["upcoming"]) == 100, "168 hourly fires, capped at 100 per arm"
+    short = api.get("/jobs/timeline", params={**q, "to": (now + timedelta(hours=6)).isoformat()}).json()
+    assert short["upcoming_truncated"] is False
+    assert api.get("/jobs/timeline", params={"from": "0001-01-01T00:00:00+14:00"}).status_code == 400
+    assert j
+
+
+def test_trigger_ddl_is_race_safe_and_the_arm_column_is_mirrored():
+    import backend.jobs.data as data
+    assert "DROP CONSTRAINT IF EXISTS job_run_trigger_check" in data.JOB_TRIGGER_DDL
+    assert "EXCEPTION WHEN duplicate_object OR undefined_object" in data.JOB_TRIGGER_DDL
+    assert "arm_fire_at JSONB" in data.JOB_COLUMN_DDL and data.JOB_COLUMN_DDL.strip() in _read("schema.sql")

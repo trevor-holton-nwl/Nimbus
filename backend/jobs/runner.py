@@ -305,7 +305,21 @@ def _retire_once_if_spent(sched: dict, job: dict, plant: str | None) -> None:
 ONCE_A_DAY_KINDS = ("daily", "weekdays", "weekly", "monthly")
 
 
-def _already_ran_today(sched: dict, job: dict, plant: str | None) -> bool:
+def _is_overlap_second(sched: dict, job: dict, plant: str | None, at: datetime) -> bool:
+    """True when the fire at `at` is the SECOND pass of a repeated hour (`dst_overlap` 'twice'): a deliberate second
+    run on the same local date, which the once-a-day dedupe must not drop (the preview lists it as a fire)."""
+    try:
+        row = arm_row(sched, job, plant)
+        if triggers.policy_of(row).dst_overlap != "twice":
+            return False
+        occ = triggers.fire_at(row, at=at, window_s=max(int(sched["misfire_grace_s"]), 120),
+                               cal=calendar_for(row, plant), plant=plant or job["plant"])
+        return bool(occ is not None and occ.note == "dst_overlap_second")
+    except Exception:  # noqa: BLE001 - classification only; the dedupe then behaves as before
+        return False
+
+
+def _already_ran_today(sched: dict, job: dict, plant: str | None, when: datetime | None = None) -> bool:
     """A timezone edit re-arms a schedule, and the new zone's clock can reach the fire time a second time on the same
     local date. For the once-a-day presets, a fire is dropped when this plant already has a (non-skipped) scheduled run
     from this schedule on today's local date. The edge, accepted: moving the time of day LATER after today's fire has
@@ -315,9 +329,11 @@ def _already_ran_today(sched: dict, job: dict, plant: str | None) -> bool:
         return False
     who = plant or job["plant"]
     try:
+        if when is not None and _is_overlap_second(sched, job, plant, when):
+            return False
         tz = (next((p["timezone"] for p in data.load_plant_rows() if p["plant"] == who), None)
               or sched["timezone"])
-        today = _now().astimezone(triggers.get_zone(tz)).date()
+        today = (when or _now()).astimezone(triggers.get_zone(tz)).date()   # the FIRE's local date
         if data.schedule_ran_on(sched["id"], who, tz, today):
             _log_event("info", "jobs", "fire skipped: this plant already ran this schedule today (re-armed)",
                        schedule_id=sched["id"], plant=who)
@@ -334,9 +350,10 @@ def _maintenance_on() -> bool:
         return False
 
 
-def _touch(schedule_id: int) -> None:
+def _touch(schedule_id: int, plant: str | None = None) -> None:
+    """Stamp the catch-up watermark of this schedule's ARM (`plant` = the arm's plant, None = the plant-less arm)."""
     try:
-        data.touch_last_fire(schedule_id)
+        data.touch_last_fire(schedule_id, plant)
     except Exception as exc:  # noqa: BLE001 - bookkeeping only
         log.warning("could not stamp last_fire_at for schedule %s: %s", schedule_id, exc)
 
@@ -378,20 +395,36 @@ def _recheck(sched: dict, job: dict, plant: str | None, now: datetime) -> str | 
         return None
 
 
+def _blocked_now(sched: dict, job: dict, plant: str | None) -> str | None:
+    """Catch-up only: the reason the CURRENT time is outside the run window / on a closed day, else None. Fail open."""
+    try:
+        row = arm_row(sched, job, plant)
+        if not triggers.policy_of(row).needs_recheck():
+            return None
+        return triggers.blocked_now(row, now=_now(), cal=calendar_for(row, plant), plant=plant or job["plant"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("catch-up window check failed for schedule %s: %s", sched["id"], exc)
+        return None
+
+
 def _record_policy_skip(sched: dict, job: dict, plant: str | None, when: datetime, reason: str, step: str) -> None:
     """One visible skipped run per plant this fire would have run (a fixed / UTC fan-out names every runnable plant)."""
+    arm = plant
     plants = [plant] if plant else None
     if plants is None and job.get("targets"):
         plants = [e["plant"] for e in targets.runnable(_expand(job))] or None
     for p in plants or [job["plant"]]:
-        record_skipped(sched["id"], when, reason, p, summary={"skipped_reason": step})
-    _touch(sched["id"])
+        record_skipped(sched["id"], when, reason, p, summary={"skipped_reason": step}, touch=False)
+    _touch(sched["id"], arm)
 
 
-def fire_schedule(schedule_id: int, plant: str | None = None, catchup_for: datetime | None = None) -> int | None:
+def fire_schedule(schedule_id: int, plant: str | None = None, catchup_for: datetime | None = None,
+                  fired_at: datetime | None = None) -> int | None:
     """APScheduler fired schedule `schedule_id`. Blocking. `plant` is set for a per-plant (`plant` time zone mode)
     arm of a multi-plant job: only that plant runs, as its own batch of one. Returns the run id (single plant) or the
     batch id (a fan-out). `catchup_for` is the EXPECTED fire time of a catch-up (trigger 'catchup', scheduled_for = it).
+    `fired_at` is when the scheduler fired it (the fire pool may start it much later, so the policy re-check and
+    `scheduled_for` use this, not the dequeue time).
 
     Order: retired / paused / archived / disabled -> nothing; maintenance mode -> a skipped run 'maintenance mode';
     the policy re-checked against current calendar data -> a skipped run with the reason ('closed day', 'outside run
@@ -403,18 +436,21 @@ def fire_schedule(schedule_id: int, plant: str | None = None, catchup_for: datet
     if job is None or job["archived"] or not job["enabled"]:
         return None
     trigger = "catchup" if catchup_for else "schedule"
-    when = catchup_for or _now()
-    if not catchup_for and _already_ran_today(sched, job, plant):
+    when = catchup_for or fired_at or _now()
+    if not catchup_for and _already_ran_today(sched, job, plant, when):
         return None
     if _maintenance_on():
         _record_policy_skip(sched, job, plant, when, "maintenance mode", "maintenance")
         return None
     if not catchup_for:
         reason = _recheck(sched, job, plant, when)
-        if reason:
-            _record_policy_skip(sched, job, plant, when, reason, "policy")
-            return None
-    _touch(schedule_id)
+    else:                                  # a catch-up runs NOW: the run window and closed-day rule apply to this instant
+        reason = _blocked_now(sched, job, plant)
+    if reason:
+        _record_policy_skip(sched, job, plant, when, reason, "policy")
+        return None
+    if not catchup_for:                    # a catch-up is recorded by its own run row (scheduled_for = the expected fire)
+        _touch(schedule_id, plant)
     if job.get("targets"):
         # An arm for one plant reads the schedule in that plant's own zone, so that plant needs one; a fixed / UTC fan-out
         # needs a zone only when the job type does (the same rule `plan_arms` used to arm it).
@@ -455,22 +491,28 @@ def run_catch_up(schedule_id: int, plant: str | None = None, now: datetime | Non
             return None
         row = arm_row(sched, job, plant)
         runs_plant = plant or (None if job.get("targets") else job["plant"])
-        base = data.schedule_baseline(schedule_id, runs_plant)
-        if base is None:
+        base = data.schedule_baseline(schedule_id, runs_plant, arm=plant)
+        if base is None:                                 # no reliable baseline (first boot, a plant that just joined):
+            _touch(schedule_id, plant)                   # start counting from now, never a 'process was down' storm
             return None
         plan = triggers.plan_catch_up(row, baseline=base, now=now, cal=calendar_for(row, plant), plant=plant or job["plant"])
         if plan is None:
             return None
         fire, missed, last = plan.fire, plan.missed, plan.missed_last
         if fire is not None and (data.run_since(schedule_id, runs_plant, fire.utc - timedelta(seconds=60))
-                                 or _ran_that_day(sched, job, plant, row["timezone"], fire.at)):
+                                 or (fire.note != "dst_overlap_second"
+                                     and _ran_that_day(sched, job, plant, row["timezone"], fire.at))):
             fire = None                                  # already covered (a late normal fire, a re-armed duplicate)
         if missed and last is not None:
             n = f"{missed}+" if plan.capped else str(missed)
             record_skipped(schedule_id, last, f"{data.MISSED_PREFIX} process was down ({n} fire{'s' if missed != 1 else ''})",
-                           plant, summary={"skipped_reason": "downtime", "missed": missed})
+                           plant, summary={"skipped_reason": "downtime", "missed": missed}, touch=False)
         if fire is not None:
+            # Order: the downtime summary above does not move the watermark, and the fire's own run row (scheduled_for =
+            # the expected time) is what records it, so a crash between the two re-plans the fire instead of losing it.
             fire_schedule(schedule_id, plant, catchup_for=fire.utc)
+        else:
+            _touch(schedule_id, plant)
         _log_event("info", "jobs", "schedule caught up after downtime", schedule_id=schedule_id, plant=plant,
                    fired=fire is not None, missed=missed)
         return {"fired": fire is not None, "missed": missed}
@@ -490,7 +532,7 @@ def _ran_that_day(sched: dict, job: dict, plant: str | None, tz: str, at: dateti
 
 
 def record_skipped(schedule_id: int, scheduled_for: datetime | None, reason: str, plant: str | None = None,
-                   summary: dict | None = None) -> int | None:
+                   summary: dict | None = None, touch: bool = True) -> int | None:
     """A fire that never ran (APScheduler misfire past its grace time, maintenance mode, a policy re-check, downtime)
     still leaves a visible `skipped` run (for the per-plant arm's `plant` when there is one, else the job's home
     plant), and stamps the schedule's `last_fire_at`."""
@@ -503,7 +545,8 @@ def record_skipped(schedule_id: int, scheduled_for: datetime | None, reason: str
         rid = data.insert_run(job_id=job["id"], schedule_id=schedule_id, plant=plant or job["plant"],
                               job_type=job["job_type"], status="skipped", trigger="schedule",
                               scheduled_for=scheduled_for, triggered_by="schedule", error=reason, summary=summary)
-        _touch(schedule_id)
+        if touch:
+            _touch(schedule_id, plant)
         return rid
     except Exception as exc:  # noqa: BLE001
         log.warning("could not record skipped run for schedule %s: %s", schedule_id, exc)

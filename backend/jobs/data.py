@@ -154,6 +154,8 @@ ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS scope_plants JSONB;
 -- W3b: the schedule policy (DST, closed days, run window, monthly mode, catch-up) and the last fire the scheduler saw.
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS options JSONB;
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS last_fire_at TIMESTAMPTZ;
+-- W3b fix wave: the newest fire each arm saw, {plant: iso} ('*' = the schedule's plant-less arm), so catch-up baselines are per arm.
+ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS arm_fire_at JSONB;
 """
 
 # W3b: a catch-up fire is recorded as trigger 'catchup'. The original CHECK only allows schedule|manual|retry and a
@@ -161,13 +163,16 @@ ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS last_fire_at TIMESTAMPTZ;
 JOB_TRIGGER_DDL = """
 DO $job_trigger$
 BEGIN
+  PERFORM pg_advisory_xact_lock(hashtext('nimbus:job-trigger-ddl'));
   IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'job_run'::regclass AND conname = 'job_run_trigger_check'
               AND pg_get_constraintdef(oid) NOT LIKE '%catchup%') THEN
-    ALTER TABLE job_run DROP CONSTRAINT job_run_trigger_check;
+    ALTER TABLE job_run DROP CONSTRAINT IF EXISTS job_run_trigger_check;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'job_run'::regclass AND conname = 'job_run_trigger_check') THEN
     ALTER TABLE job_run ADD CONSTRAINT job_run_trigger_check CHECK (trigger IN ('schedule','manual','retry','catchup'));
   END IF;
+EXCEPTION WHEN duplicate_object OR undefined_object THEN
+  NULL;   -- another booting process swapped it first
 END
 $job_trigger$;
 """
@@ -228,14 +233,24 @@ def plant_has_timezone(plant: str) -> bool:
     return bool(row and row[0] and str(row[0]).strip())
 
 
+class PlantRows(list):
+    """The plant rows list, carrying a per-request calendar-view memo (`cal_memo`: plant -> view) so one route call reads
+    each plant's calendar version once, however many schedules and arms it expands."""
+    cal_memo: dict
+
+    def __init__(self, rows=()):
+        super().__init__(rows)
+        self.cal_memo = {}
+
+
 def load_plant_rows() -> list[dict]:
     """Every plant with its timezone and subnetworks: [{plant, subnetworks, timezone}] sorted by plant code. One small
     query (tens of plants); target expansion and reconcile read it fresh so a timezone edit is seen at once."""
     with db._pool.connection() as conn, _cur(conn) as cur:
         cur.execute("SELECT plant, array_agg(DISTINCT subnetwork ORDER BY subnetwork) AS subnetworks,"
                     " MIN(NULLIF(BTRIM(timezone), '')) AS timezone FROM plants GROUP BY plant ORDER BY plant")
-        return [{"plant": r["plant"], "subnetworks": list(r["subnetworks"] or []), "timezone": r["timezone"]}
-                for r in cur.fetchall()]
+        return PlantRows({"plant": r["plant"], "subnetworks": list(r["subnetworks"] or []), "timezone": r["timezone"]}
+                         for r in cur.fetchall())
 
 
 def has_active_run(job_id: int, plant: str | None = None) -> bool:
@@ -412,6 +427,10 @@ def patch_job(job_id: int, fields: dict, actor: str | None, *, targets: list[dic
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(f"UPDATE job_definition SET {', '.join(sets)} WHERE id = %s", (*vals, actor, job_id))
         ok = cur.rowcount == 1
+        if ok and (fields.get("enabled") is True or fields.get("archived") is False):
+            # Re-enabled / restored: the downtime of the PAUSE is not process downtime, so move every schedule's
+            # catch-up floor to now (it also re-arms them, which is what a resume needs anyway).
+            cur.execute("UPDATE job_schedule SET modified_at = clock_timestamp() WHERE job_id = %s", (job_id,))
         if ok and targets is not None:
             cur.execute("DELETE FROM job_target WHERE job_id = %s", (job_id,))
             _insert_targets(cur, job_id, targets)
@@ -458,25 +477,46 @@ def retire_schedule(schedule_id: int) -> None:
 
 
 # ----------------------------------------------------------------------------- W3b: fire bookkeeping, calendars
-def touch_last_fire(schedule_id: int) -> None:
-    """The scheduler saw a fire for this schedule (it ran, or was recorded skipped). Does not touch `modified_at`, so it
-    never looks like an edit to the re-arm signature."""
+ARM_KEY_NONE = "*"          # `arm_fire_at` key for a schedule's plant-less arm (single plant, fixed / UTC fan-out)
+
+
+def touch_last_fire(schedule_id: int, plant: str | None = None) -> None:
+    """The scheduler saw a fire for this schedule's arm for `plant` (it ran, or was recorded skipped). Stamps the
+    schedule-wide `last_fire_at` (display) AND that arm's own `arm_fire_at` entry: the catch-up baseline is per arm, so
+    one arm's fire never moves another arm's baseline. Does not touch `modified_at`, so it never looks like an edit to
+    the re-arm signature."""
     with db._pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE job_schedule SET last_fire_at = clock_timestamp() WHERE id = %s", (schedule_id,))
+        cur.execute(
+            "UPDATE job_schedule SET last_fire_at = clock_timestamp(),"
+            " arm_fire_at = COALESCE(arm_fire_at, '{}'::jsonb) || jsonb_build_object(%s::text,"
+            "   to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'))"
+            " WHERE id = %s", (plant or ARM_KEY_NONE, schedule_id))
         conn.commit()
 
 
-def schedule_baseline(schedule_id: int, plant: str | None = None) -> datetime | None:
-    """The newest instant already accounted for: the later of the schedule's last edit, its `last_fire_at` and the
-    newest `scheduled_for` of any run it produced (for `plant` when given). Catch-up counts fires after this."""
+def schedule_baseline(schedule_id: int, plant: str | None = None, arm: str | None = None) -> datetime | None:
+    """The newest instant already accounted for, for ONE arm: the later of the schedule's last edit (`modified_at`: a
+    save, resume, enable or restore bumps it) and the arm's own evidence: its `arm_fire_at` entry (`arm` = the arm's
+    plant, None = the plant-less arm, which also honours the legacy schedule-wide `last_fire_at`) and the newest
+    `scheduled_for` of any run it produced (for `plant` when given). NO evidence at all (first boot after the upgrade,
+    a plant that just joined the targets) = None: there is no reliable baseline, so nothing is counted as missed. Catch-up
+    counts fires after this."""
+    key = arm or ARM_KEY_NONE
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT GREATEST(s.modified_at, COALESCE(s.last_fire_at, s.modified_at),"
-            "  COALESCE((SELECT MAX(r.scheduled_for) FROM job_run r WHERE r.schedule_id = s.id"
-            "            AND (%s::text IS NULL OR r.plant = %s)), s.modified_at))"
-            " FROM job_schedule s WHERE s.id = %s", (plant, plant, schedule_id))
+            "SELECT s.modified_at,"
+            "  NULLIF(s.arm_fire_at ->> %s, '')::timestamptz,"
+            "  CASE WHEN %s::text = %s::text THEN s.last_fire_at END,"
+            "  (SELECT MAX(r.scheduled_for) FROM job_run r WHERE r.schedule_id = s.id"
+            "   AND (%s::text IS NULL OR r.plant = %s))"
+            " FROM job_schedule s WHERE s.id = %s", (key, key, ARM_KEY_NONE, plant, plant, schedule_id))
         row = cur.fetchone()
-    return row[0] if row else None
+    if not row:
+        return None
+    evidence = [v for v in row[1:] if v is not None]
+    if not evidence:
+        return None
+    return max([row[0], *evidence])
 
 
 def run_since(schedule_id: int, plant: str | None, since: datetime) -> bool:
@@ -492,6 +532,13 @@ _MAINT_TTL_S = 3.0
 _MAINT: dict = {"at": 0.0, "value": None}
 
 
+def _truthy(v) -> bool:
+    """A stored flag read strictly: the string 'false' (or '0', 'no', '') is NOT paused."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes", "on")
+    return bool(v) if isinstance(v, (bool, int, float)) else False
+
+
 def maintenance_state(*, fresh: bool = False) -> dict:
     """{enabled, since, by}: the global `jobs_paused` setting. Cached a few seconds (a fan-out reads it per child);
     a failed read answers 'not paused' so a settings glitch never silences the scheduler."""
@@ -499,7 +546,7 @@ def maintenance_state(*, fresh: bool = False) -> dict:
         return dict(_MAINT["value"])
     try:
         st = md.get_system_settings()
-        val = {"enabled": bool(st.get(JOBS_PAUSED_KEY)), "since": st.get("jobs_paused_at"), "by": st.get("jobs_paused_by")}
+        val = {"enabled": _truthy(st.get(JOBS_PAUSED_KEY)), "since": st.get("jobs_paused_at"), "by": st.get("jobs_paused_by")}
     except Exception:  # noqa: BLE001
         return {"enabled": False, "since": None, "by": None}
     _MAINT.update(at=time.monotonic(), value=val)
@@ -888,7 +935,7 @@ def schedule_ran_on(schedule_id: int, plant: str, tz: str, local_date) -> bool:
     """A run (not a skip) of this schedule for `plant` already exists whose fire time falls on `local_date` in `tz`:
     a re-armed once-a-day fire (a timezone edit) must not run the same plant twice that day."""
     with db._pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM job_run WHERE schedule_id = %s AND plant = %s AND trigger = 'schedule'"
+        cur.execute("SELECT 1 FROM job_run WHERE schedule_id = %s AND plant = %s AND trigger IN ('schedule','catchup')"
                     " AND status <> 'skipped' AND (scheduled_for AT TIME ZONE %s)::date = %s LIMIT 1",
                     (schedule_id, plant, tz, local_date))
         return cur.fetchone() is not None
@@ -1171,7 +1218,7 @@ def last_success_watermark(job_id: int, before_run_id: int | None = None, plant:
     last night still owes that night). `plant` None = any plant (the legacy single-plant job)."""
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT COALESCE(NULLIF(summary->'window'->>'end', '')::timestamptz, started_at) FROM job_run"
-                    " WHERE job_id = %s AND trigger = 'schedule' AND status IN ('succeeded','warning')"
+                    " WHERE job_id = %s AND trigger IN ('schedule','catchup') AND status IN ('succeeded','warning')"
                     " AND started_at IS NOT NULL AND (%s::bigint IS NULL OR id < %s::bigint)"
                     " AND (%s::text IS NULL OR plant = %s)"
                     " ORDER BY id DESC LIMIT 1", (job_id, before_run_id, before_run_id, plant, plant))

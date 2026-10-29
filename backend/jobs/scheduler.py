@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import functools
 import json
 import logging
 import threading
@@ -77,8 +78,9 @@ _FIRE_POOL = ThreadPoolExecutor(max_workers=FIRE_WORKERS, thread_name_prefix="jo
 async def _fire(schedule_id: int, plant: str | None = None) -> None:
     """APScheduler job body. Offloads the blocking run to the dedicated fire pool; never raises."""
     try:
-        args = (schedule_id,) if plant is None else (schedule_id, plant)
-        await asyncio.get_running_loop().run_in_executor(_FIRE_POOL, runner.fire_schedule, *args)
+        fired_at = datetime.now(timezone.utc)           # taken here, not in the pool: a queued fire keeps its fire time
+        await asyncio.get_running_loop().run_in_executor(
+            _FIRE_POOL, functools.partial(runner.fire_schedule, schedule_id, plant, fired_at=fired_at))
     except Exception as exc:  # noqa: BLE001
         _log_event("error", "jobs", "scheduled job fire raised", exc=exc, schedule_id=schedule_id)
 
@@ -167,7 +169,7 @@ def reconcile(scheduler) -> dict:
                               misfire_grace_time=int(r["misfire_grace_s"]), replace_existing=True)
             _SIGS[jid] = _sig(r)
             out["added"] += 1
-            if r["kind"] != "once":
+            if r["kind"] != "once" and (r["id"], r["arm_plant"]) not in _CATCHUP_QUEUE:
                 _CATCHUP_QUEUE.append((r["id"], r["arm_plant"]))
         except Exception as exc:  # noqa: BLE001 - one bad schedule must not block the others
             _log_event("error", "jobs", "could not arm schedule", exc=exc, schedule_id=r["id"])

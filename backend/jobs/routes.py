@@ -274,7 +274,21 @@ def _cal_for(arms: list[dict], plants: list[dict]):
     need = {a.get("arm_plant") or a["plant"] for a in arms if triggers.policy_of(a).needs_calendar()}
     if not need:
         return None
-    return data.load_calendar_view(need, {p["plant"]: p["timezone"] for p in plants if p["timezone"]})
+    memo = getattr(plants, "cal_memo", None)            # per request: each plant's calendar is read once
+    zones = {p["plant"]: p["timezone"] for p in plants if p["timezone"]}
+    if memo is None:
+        return data.load_calendar_view(need, zones)
+    missing = [p for p in sorted(need) if p not in memo]
+    if missing:
+        view = data.load_calendar_view(missing, zones)
+        for p in missing:
+            memo[p] = view
+    views = {id(memo[p]): memo[p] for p in need}
+    if len(views) == 1:
+        return next(iter(views.values()))
+    from backend.jobs.calview import PlantCalendarView
+    return PlantCalendarView({p: v.cals[p] for p in need for v in [memo[p]] if p in v.cals},
+                             {p: v.zones[p] for p in need for v in [memo[p]] if p in v.zones})
 
 
 def _fires_of(sid: int, a: dict, what, fn, cal):
@@ -521,9 +535,9 @@ def _parse_instant(v: str | None, default: datetime, name: str) -> datetime:
         return default
     try:
         t = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
-    except ValueError as e:
+        return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    except (ValueError, OverflowError) as e:           # a year-1 / year-9999 value overflows the UTC conversion
         raise HTTPException(status_code=400, detail=f"{name} is not an ISO date-time") from e
-    return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
 
 
 @router.get("/jobs/timeline", dependencies=[Depends(auth.require_authenticated)])
@@ -599,6 +613,7 @@ def jobs_timeline(
             lane["now_local"] = now.isoformat(timespec="seconds")
     rows = data.timeline_runs(allowed_plants=allowed_plants, plants=page, start=t0, end=t1, limit=limit) if page else []
     truncated = len(rows) > limit
+    upcoming_truncated = False
     for r in rows[:limit]:
         started = r["started_at"] or r["scheduled_for"] or r["created_at"]
         lanes[r["plant"]]["runs"].append({
@@ -623,10 +638,13 @@ def jobs_timeline(
                                                    plant=a["arm_plant"] or job["plant"])
                 except Exception:  # noqa: BLE001
                     continue
+                if len(fires) >= TIMELINE_UPCOMING_PER_ARM:
+                    upcoming_truncated = True            # the arm has more fires in range than the per-arm cap
                 for p in targets_in_page:
                     lane = lanes[p]
                     for o in fires:
                         if len(lane["upcoming"]) >= TIMELINE_UPCOMING_PER_LANE:
+                            upcoming_truncated = True
                             break
                         w = triggers.occ_wire(o)
                         lane["upcoming"].append({
@@ -637,7 +655,8 @@ def jobs_timeline(
             lane["upcoming"].sort(key=lambda e: e["at_utc"])
     return {"from": t0.isoformat(timespec="seconds"), "to": t1.isoformat(timespec="seconds"),
             "now_utc": now.isoformat(timespec="seconds"), "lanes": [lanes[p] for p in page],
-            "total_plants": total, "plant_offset": plant_offset, "plant_limit": plant_limit, "truncated": truncated}
+            "total_plants": total, "plant_offset": plant_offset, "plant_limit": plant_limit, "truncated": truncated,
+            "upcoming_truncated": upcoming_truncated}
 
 
 UPCOMING_JOB_MAX = 200

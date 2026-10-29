@@ -316,7 +316,7 @@ class Occ:
     """One occurrence the policy produced: a fire, or a policy-skip (`kind == 'skip'`, with its `reason` code)."""
     at: datetime                      # aware, plant timezone (for a skip: where it would have fallen)
     kind: str = "fire"
-    reason: str | None = None         # skip: closed_day | no_working_day | dst_gap | outside_run_window
+    reason: str | None = None         # skip: closed_day | no_working_day | dst_gap | outside_run_window | outside_validity
     shifted: bool = False             # a spring-forward gap moved it (wall time differs from the configured one)
     note: str | None = None           # dst_overlap_second | moved_next_working_day | moved_previous_working_day | deferred_to_window
     raw: datetime | None = None       # the configured wall time (naive plant-local) it came from
@@ -340,8 +340,10 @@ def _instants(w: datetime, tz: ZoneInfo, pol: Policy) -> list[tuple[datetime, st
     return out
 
 
-def _window_hit(at: datetime, pol: Policy, tz: ZoneInfo, base: Occ) -> Occ:
-    """Apply the run window to a fire: inside = as is; outside = skip, or defer to the next opening."""
+def _window_hit(at: datetime, pol: Policy, tz: ZoneInfo, base: Occ, cal=None, plant: str | None = None) -> Occ:
+    """Apply the run window to a fire: inside = as is; outside = skip, or defer to the next opening. A deferral that
+    lands on a closed day re-applies the closed-day rule (bounded): `skip` skips it, a move rule walks forward to the
+    next working day's opening (never backward: a deferred fire stays after the time it was due)."""
     if pol.run_window is None:
         return base
     s, e, action = pol.run_window
@@ -352,6 +354,18 @@ def _window_hit(at: datetime, pol: Policy, tz: ZoneInfo, base: Occ) -> Occ:
     if action == "skip":
         return Occ(at, "skip", "outside_run_window", raw=base.raw)
     day = at.date() if m < s else at.date() + timedelta(days=1)
+    if pol.closed_day != "run" and cal is not None:
+        for _ in range(MAX_SHIFT_DAYS + 2):
+            if cal.is_working_day(plant, day):
+                break
+            if pol.closed_day == "skip":
+                return Occ(at, "skip", "closed_day", raw=base.raw)
+            nxt = cal.next_working_day(plant, day)
+            if nxt is None:
+                return Occ(at, "skip", "no_working_day", raw=base.raw)
+            day = nxt
+        else:
+            return Occ(at, "skip", "no_working_day", raw=base.raw)
     w2 = datetime.combine(day, _time(s // 60, s % 60))
     inst, flag = _instants(w2, tz, Policy(dst_overlap="once"))[0]
     return Occ(inst, "fire", shifted=flag == "gap", note="deferred_to_window", raw=base.raw)
@@ -374,7 +388,7 @@ def _process_wall(w: datetime, tz: ZoneInfo, pol: Policy, cal, plant: str | None
             out.append(Occ(at, "skip", "dst_gap", raw=w))
             continue
         base = Occ(at, "fire", shifted=flag == "gap", note="dst_overlap_second" if flag == "second" else note, raw=w)
-        out.append(_window_hit(at, pol, tz, base))
+        out.append(_window_hit(at, pol, tz, base, cal, plant))
     return out
 
 
@@ -382,7 +396,7 @@ def _process_instant(at: datetime, tz: ZoneInfo, pol: Policy, cal, plant: str | 
     """An hourly instant: only the closed-day skip and the run window apply (no wall-clock mapping)."""
     if pol.closed_day == "skip" and cal is not None and not cal.is_working_day(plant, at.date()):
         return [Occ(at, "skip", "closed_day", raw=at.replace(tzinfo=None))]
-    return [_window_hit(at, pol, tz, Occ(at, "fire", raw=at.replace(tzinfo=None)))]
+    return [_window_hit(at, pol, tz, Occ(at, "fire", raw=at.replace(tzinfo=None)), cal, plant)]
 
 
 def _floating_cron(row: dict) -> CronTrigger:
@@ -472,6 +486,25 @@ def _raw_hourly(row: dict, tz: ZoneInfo, start: datetime) -> Iterator[datetime]:
         t += timedelta(hours=1)
 
 
+def _bound(occs: list[Occ], row: dict) -> list[Occ]:
+    """Validity (`valid_from` / `valid_until`) on the FINAL instant: a fire that a closed-day move or a window deferral
+    carried outside the bounds becomes a skip `outside_validity` (the raw wall time was checked when it was generated).
+    A once schedule ignores validity, as before."""
+    if row.get("kind") == "once":
+        return occs
+    vf, vu = _to_naive(row.get("valid_from"), "valid_from"), _to_naive(row.get("valid_until"), "valid_until")
+    if vf is None and vu is None:
+        return occs
+    out = []
+    for o in occs:
+        if o.kind == "fire" and o.note in ("moved_next_working_day", "moved_previous_working_day", "deferred_to_window"):
+            local = o.at.replace(tzinfo=None)
+            if (vf is not None and local < vf) or (vu is not None and local > vu):
+                o = Occ(o.at, "skip", "outside_validity", raw=o.raw)
+        out.append(o)
+    return out
+
+
 def occurrences(row: dict, *, after: datetime, cal=None, plant: str | None = None) -> Iterator[Occ]:
     """Fire and policy-skip occurrences with `at >= after`, ascending (an unbounded stream: the caller stops). `after`
     is an aware datetime. `plant` names whose calendar `cal` is asked about (the arm's plant, else the home plant)."""
@@ -479,8 +512,8 @@ def occurrences(row: dict, *, after: datetime, cal=None, plant: str | None = Non
     tz = get_zone(row.get("timezone"))
     plant = plant or row.get("arm_plant") or row.get("plant")
     after = after.astimezone(_tz.utc)
-    if pol.closed_day == "next_working_day":
-        fwd = timedelta(days=MAX_SHIFT_DAYS + 2)
+    if pol.closed_day == "next_working_day" or (pol.run_window is not None and pol.closed_day != "run"):
+        fwd = timedelta(days=MAX_SHIFT_DAYS + 2)       # a move, or a deferral that walks past closed days, looks ahead
     elif pol.run_window is not None:
         fwd = timedelta(days=2)
     else:
@@ -488,10 +521,10 @@ def occurrences(row: dict, *, after: datetime, cal=None, plant: str | None = Non
     back = timedelta(days=MAX_SHIFT_DAYS + 2) if pol.closed_day == "previous_working_day" else timedelta(hours=4)
     start = after - fwd
     if row.get("kind") == "hourly":
-        source = ((at, _process_instant(at, tz, pol, cal, plant)) for at in _raw_hourly(row, tz, start))
+        source = ((at, _bound(_process_instant(at, tz, pol, cal, plant), row)) for at in _raw_hourly(row, tz, start))
     else:
         lo = start.astimezone(tz).replace(tzinfo=None)
-        source = ((w, _process_wall(w, tz, pol, cal, plant)) for w in _raw_walls(row, pol, cal, plant, lo))
+        source = ((w, _bound(_process_wall(w, tz, pol, cal, plant), row)) for w in _raw_walls(row, pol, cal, plant, lo))
     heap: list = []
     seq = 0
     seen: set = set()
@@ -628,17 +661,46 @@ def recheck(row: dict, *, at: datetime, window_s: int, cal=None, plant: str | No
     plant = _plant_of(row, plant)
     at = at.astimezone(_tz.utc)
     for scanned, o in enumerate(occurrences(row, after=at - timedelta(seconds=window_s), cal=cal, plant=plant)):
-        if o.utc > at + timedelta(seconds=5) or scanned > 200:
+        if o.utc > at + timedelta(seconds=5) or scanned > MAX_SCAN:
             break
         if o.kind == "fire":
             return None
     last = "schedule changed"
     for scanned, o in enumerate(occurrences(row, after=at - timedelta(days=1), cal=cal, plant=plant)):
-        if o.utc > at + timedelta(seconds=5) or scanned > 200:
+        if o.utc > at + timedelta(seconds=5) or scanned > MAX_SCAN:
             break
         if o.kind == "skip" and SKIP_TEXT.get(o.reason or ""):
             last = SKIP_TEXT[o.reason]                 # the latest policy skip of the last day names the rejection
     return last
+
+
+def fire_at(row: dict, *, at: datetime, window_s: int = 120, cal=None, plant: str | None = None) -> Occ | None:
+    """The FIRE occurrence the stream has within `window_s` seconds before `at` (the closest one), else None. The fire
+    path uses it to know WHICH occurrence it is running (for instance the second pass of a repeated hour)."""
+    at = at.astimezone(_tz.utc)
+    best = None
+    for scanned, o in enumerate(occurrences(row, after=at - timedelta(seconds=window_s), cal=cal, plant=_plant_of(row, plant))):
+        if o.utc > at + timedelta(seconds=5) or scanned > MAX_SCAN:
+            break
+        if o.kind == "fire":
+            best = o
+    return best
+
+
+def blocked_now(row: dict, *, now: datetime, cal=None, plant: str | None = None) -> str | None:
+    """A catch-up runs at `now`, not at the expected time, so the CURRENT instant is tested against the run window and
+    the closed-day rule. Returns the reason text ('outside run window' | 'closed day') or None."""
+    pol = policy_of(row)
+    tz = get_zone(row.get("timezone"))
+    local = now.astimezone(tz)
+    if pol.run_window is not None:
+        s, e, _ = pol.run_window
+        m = local.hour * 60 + local.minute
+        if not (s <= m < e if s < e else (m >= s or m < e)):
+            return SKIP_TEXT["outside_run_window"]
+    if pol.closed_day != "run" and cal is not None and not cal.is_working_day(_plant_of(row, plant), local.date()):
+        return SKIP_TEXT["closed_day"]
+    return None
 
 
 @dataclass

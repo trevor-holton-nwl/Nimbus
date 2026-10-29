@@ -211,8 +211,12 @@ def get_system_settings():
     """Return the global system-settings blob (currently just orderFields —
     which optional Orders fields show by default in the AG Grid / Inspector).
     Unauthenticated: every user's boot needs this, same as color-wheel reads.
-    Response body IS the settings content directly, no wrapper envelope."""
-    return md.get_system_settings()
+    Response body IS the settings content directly, no wrapper envelope. `jobs_paused_by` (the admin who paused the
+    job scheduler) is left out: this route has no auth, and that identity is served to signed-in users by
+    GET /jobs/summary."""
+    out = dict(md.get_system_settings())
+    out.pop("jobs_paused_by", None)
+    return out
 
 
 @router.post("/system-settings", dependencies=[Depends(require_api_key), Depends(require_admin)])
@@ -223,6 +227,9 @@ def post_system_settings(request: Request, body: dict = Body(default={})):
     The 'orderFields' key is replaced wholesale by whatever is sent — callers
     must POST the complete map, not a per-field diff. Response body is the
     full post-merge settings blob, same unwrapped shape as the GET above."""
+    jobs_keys = sorted(k for k in body if isinstance(k, str) and k.startswith("jobs_"))
+    if jobs_keys:               # maintenance mode is written only by POST /jobs/maintenance (unrestricted admin, audited)
+        raise HTTPException(status_code=400, detail=f"{', '.join(jobs_keys)} cannot be set here; use POST /jobs/maintenance")
     if "schedule_event_retention_days" in body:
         v = body["schedule_event_retention_days"]
         if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 60:

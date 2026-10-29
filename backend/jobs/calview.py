@@ -37,6 +37,7 @@ class PlantCalendarView:
     def __init__(self, cals: dict[str, dict], zones: dict | None = None):
         self.cals = cals or {}
         self.zones = zones or {}
+        self._parsed: dict = {}
 
     def working_window(self, plant, d: date):
         """(open_hour, close_hour) for the day, or None when closed (no hours, or a plant blackout covers them)."""
@@ -50,11 +51,19 @@ class PlantCalendarView:
         tz = self.zones.get(plant)
         if tz is not None:
             lo, hi = due._at(d, hours[0]), due._at(d, hours[1])
-            for b in cal.get("plant_blackouts") or []:
-                r = _blackout_range(b, tz)
-                if r and r[0] <= lo and r[1] >= hi:
+            for r in self._blackouts(plant, cal, tz):
+                if r[0] <= lo and r[1] >= hi:
                     return None
         return hours
+
+    def _blackouts(self, plant, cal: dict, tz) -> list:
+        """The plant's blackouts as naive plant-local (start, end), parsed once per view (a 50-plant list asks about
+        thousands of days)."""
+        hit = self._parsed.get(plant)
+        if hit is None:
+            hit = [r for r in (_blackout_range(b, tz) for b in cal.get("plant_blackouts") or []) if r]
+            self._parsed[plant] = hit
+        return hit
 
     def is_working_day(self, plant, d: date) -> bool:
         return self.working_window(plant, d) is not None

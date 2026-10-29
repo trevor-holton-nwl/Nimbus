@@ -68,7 +68,7 @@
   "maintenance": {"enabled": true, "since": "2026-10-29T12:00:00+00:00", "by": "admin@example.com"},
   "timeline": {
     "from": "2026-10-29T00:00:00+00:00", "to": "2026-10-30T00:00:00+00:00", "now_utc": "2026-10-29T12:00:00+00:00",
-    "total_plants": 1, "plant_offset": 0, "plant_limit": 20, "truncated": false,
+    "total_plants": 1, "plant_offset": 0, "plant_limit": 20, "truncated": false, "upcoming_truncated": false,
     "lanes": [{"plant": "1008", "timezone": "America/Chicago", "now_local": "2026-10-29T07:00:00-05:00",
                "runs": [{"id": 42, "job_id": 5, "job_name": "Morning optimize", "job_type": "optimizer.plant", "status": "warning",
                          "trigger": "schedule", "batch_id": null, "error": null, "scheduled_for": "2026-10-29T12:00:00+00:00",

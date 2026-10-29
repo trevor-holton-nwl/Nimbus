@@ -2393,16 +2393,21 @@ ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS scope_plants JSONB;
 -- W3b: the schedule policy (DST, closed days, run window, monthly mode, catch-up) and the last fire the scheduler saw.
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS options JSONB;
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS last_fire_at TIMESTAMPTZ;
+-- W3b fix wave: the newest fire each arm saw, {plant: iso} ('*' = the schedule's plant-less arm), so catch-up baselines are per arm.
+ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS arm_fire_at JSONB;
 
 -- W3b: catch-up runs are trigger 'catchup' (also run by ensure_job_tables; not a migration).
 DO $job_trigger$
 BEGIN
+  PERFORM pg_advisory_xact_lock(hashtext('nimbus:job-trigger-ddl'));
   IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'job_run'::regclass AND conname = 'job_run_trigger_check'
               AND pg_get_constraintdef(oid) NOT LIKE '%catchup%') THEN
-    ALTER TABLE job_run DROP CONSTRAINT job_run_trigger_check;
+    ALTER TABLE job_run DROP CONSTRAINT IF EXISTS job_run_trigger_check;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'job_run'::regclass AND conname = 'job_run_trigger_check') THEN
     ALTER TABLE job_run ADD CONSTRAINT job_run_trigger_check CHECK (trigger IN ('schedule','manual','retry','catchup'));
   END IF;
+EXCEPTION WHEN duplicate_object OR undefined_object THEN
+  NULL;   -- another booting process swapped it first
 END
 $job_trigger$;
