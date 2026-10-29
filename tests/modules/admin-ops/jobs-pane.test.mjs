@@ -48,7 +48,7 @@ test('Jobs, Runs and Upcoming never share a control id, and each plant combobox 
   // The status filters reach their own loader after the other views have rendered.
   // Every registered type is in both type filters, grouped Optimization | Reports.
   for (const view of [views.jobs, views.runs]) {
-    assert.equal([...view.innerHTML.matchAll(/<optgroup label=/g)].length, 3, 'Optimization, Reports and Chains');
+    assert.equal([...view.innerHTML.matchAll(/<optgroup label=/g)].length, 5, 'Optimization, Data, SAP, Reports and Chains');
     for (const t of TYPES) assert.match(view.innerHTML, new RegExp(`<option value="${t.key.replace('.', '\\.')}"`), t.key);
   }
   const jobsStatus = add('jobs-status', pane); jobsStatus.value = 'warning';

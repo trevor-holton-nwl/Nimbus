@@ -320,6 +320,7 @@ export function normType(r: Raw): JobType {
     idempotent: r.idempotent === true, composite: r.composite === true, estimateS: typeof r.estimate_s === 'number' ? r.estimate_s : null,
     dryRun: r.dry_run && typeof r.dry_run === 'object' ? { param: String((r.dry_run as Raw).param), value: (r.dry_run as Raw).value } : null,
     lockKeys: Array.isArray(r.lock_keys) ? (r.lock_keys as unknown[]).map(String) : [],
+    available: r.available !== false, unavailableReason: typeof r.unavailable_reason === 'string' ? r.unavailable_reason : null,
   };
 }
 

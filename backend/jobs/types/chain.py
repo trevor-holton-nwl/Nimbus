@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.jobs import data as _data
 from backend.jobs.context import CHAIN_MAX_LINES, MAX_LINES, JobCancelled
-from backend.jobs.registry import REGISTRY, JobOutcome, JobType, get_type, register
+from backend.jobs.registry import REGISTRY, JobOutcome, JobType, get_type, register, unavailable_message
 
 MAX_STEPS = 10
 STEP_TIMEOUT_MARGIN_S = 30
@@ -55,6 +55,8 @@ def check_steps(steps: list[StepSpec]) -> list[StepSpec]:
             raise ValueError(f"step {i}: unknown job type {st.type!r}")
         if jt.composite:
             raise ValueError(f"step {i}: a chain cannot contain a chain")
+        if not jt.available:
+            raise ValueError(f"step {i}: {unavailable_message(jt)}")
         try:
             p = jt.params_model.model_validate(st.params or {})
         except ValidationError as e:
@@ -164,6 +166,12 @@ def run(ctx, params: ChainParams) -> JobOutcome:
     n = len(steps)
     if n == 0:
         return JobOutcome("failed", {"error_kind": "config", "failed_step": "validate"}, "the chain has no steps")
+    for i, st in enumerate(steps, 1):            # hard guard: a scaffolded type never runs, whatever the stored snapshot says
+        jt = REGISTRY.get(st.type)
+        if jt is not None and not jt.available:
+            msg = f"step {i}: {unavailable_message(jt)}"
+            ctx.log("error", msg, step="validate")
+            return JobOutcome("failed", {"error_kind": "config", "failed_step": "validate"}, msg)
     ctx.max_lines = min(MAX_LINES * n, CHAIN_MAX_LINES)
     _store.insert_step_rows(ctx.run_id, [
         {"seq": i, "step_type": st.type, "label": st.label, "run_on": st.run_on,

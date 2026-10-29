@@ -49,7 +49,7 @@
                 "enum_label_keys": {"due_date": "jobs.p.optimizer.plant.mode.due_date"}}],
     "params_schema": {"type": "object"},
     "defaults": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"},
-    "idempotent": true, "composite": false, "estimate_s": 180,
+    "idempotent": true, "composite": false, "estimate_s": 180, "available": true, "unavailable_reason": null,
     "dry_run": {"param": "apply_mode", "value": "propose"}, "lock_keys": ["jobs:optimizer.plant:{plant}"]
   }], "limits": {"chain_max_steps": 10, "purge_min_age_days": 7}},
   "step": {

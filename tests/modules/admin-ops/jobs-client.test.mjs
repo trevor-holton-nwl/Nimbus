@@ -66,8 +66,10 @@ test('types: key, label, plant_scoped and the params defaults', async () => {
 test('types: kind, mutates and the param metadata of every type survive normalisation (real /jobs/types shapes)', async () => {
   reply = { types: JSON.parse(readFileSync(new URL('../../fixtures/jobs_types.json', import.meta.url), 'utf8')).types };
   const ts = await JobsClient.types();
-  assert.deepEqual(ts.map(t => [t.key, t.kind]), [['optimizer.plant', 'action'], ['report.what_changed', 'report'], ['report.late_orders', 'report'],
-    ['report.missing_master_data', 'report'], ['report.coverage', 'report'], ['report.distribution', 'report'], ['purge.orders', 'action'], ['chain', 'action']]);
+  assert.deepEqual(ts.map(t => [t.key, t.kind]), [['optimizer.plant', 'action'], ['optimizer.backlog', 'action'], ['report.what_changed', 'report'], ['report.late_orders', 'report'],
+    ['report.missing_master_data', 'report'], ['report.coverage', 'report'], ['report.distribution', 'report'], ['purge.orders', 'action'], ['routing.recompute', 'action'],
+    ['attributes.resync', 'action'], ['sap.apply_batch', 'action'], ['sap.send', 'action'], ['chain', 'action']]);
+  assert.deepEqual(ts.filter(t => t.available === false).map(t => [t.key, t.unavailableReason]), [['sap.send', 'SAP interface is not live']]);
   assert.ok(ts.filter(t => t.kind === 'report').every(t => t.mutates === false));
   const p = Object.fromEntries(ts.find(t => t.key === 'report.late_orders').params.map(x => [x.key, x]));
   assert.deepEqual([p.horizon.type, p.horizon.widget, p.min_days_late.type, p.min_days_late.min, p.min_days_late.max], ['date_window', 'date-window', 'number', 0, 365]);

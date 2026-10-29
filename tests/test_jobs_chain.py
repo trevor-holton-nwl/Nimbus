@@ -475,10 +475,13 @@ def test_purge_is_a_mutating_non_idempotent_step_with_a_dry_run_mode_and_two_loc
 # --------------------------------------------------------------------------------------------- templates (pure)
 def test_builtin_templates_are_valid_chains():
     names = [t["name"] for t in templates.BUILTIN_TEMPLATES]
-    assert names == ["Purge then re-optimize", "Optimize then report"]
+    assert names == ["Purge then re-optimize", "Optimize then report", "Remove backlog, then re-optimize"]
     for t in templates.BUILTIN_TEMPLATES:
         steps = chain.normalize_steps(t["steps"])
         assert len(steps) == 2 and all("window" in s["params"] or s["type"] != "purge.orders" for s in steps)
+    backlog = chain.normalize_steps(templates.BUILTIN_TEMPLATES[2]["steps"])
+    assert [s["type"] for s in backlog] == ["optimizer.backlog", "optimizer.plant"]
+    assert backlog[0]["params"] == {"include_running": True, "apply_mode": "apply"}
 
 
 def test_step_diff_names_what_changed():
@@ -1030,7 +1033,8 @@ def test_a_fixed_purge_window_below_the_floor_is_refused_at_save():
 
 
 def test_builtin_templates_have_stable_keys():
-    assert [t["key"] for t in templates.BUILTIN_TEMPLATES] == ["purge_then_reoptimize", "optimize_then_report"]
+    assert [t["key"] for t in templates.BUILTIN_TEMPLATES] == ["purge_then_reoptimize", "optimize_then_report",
+                                                                     "remove_backlog_then_reoptimize"]
 
 
 @pytest.mark.pg
@@ -1099,3 +1103,41 @@ def test_a_restart_runs_after_the_job_was_edited_and_is_never_retried(chain_pg, 
     with chain_pg.db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM job_run WHERE job_id = %s AND trigger = 'retry'", (jid,))
         assert cur.fetchone()[0] == 0, "a restart from a step is not retried (it would re-run the whole current chain)"
+
+
+# ---------------------------------------------------------------------------------------------- W4b step types (pg)
+@pytest.mark.pg
+def test_w4b_send_to_sap_is_refused_at_save_over_http_and_listed_unavailable(capi, chain_pg):
+    types = {t["key"]: t for t in capi.get("/jobs/types").json()["types"]}
+    assert types["sap.send"]["available"] is False and types["sap.send"]["unavailable_reason"] == "SAP interface is not live"
+    assert all(t["available"] for k, t in types.items() if k != "sap.send")
+    plant = chain_pg.plant
+    r = capi.post("/jobs", json={"plant": plant, "job_type": "sap.send", "name": "send"})
+    assert r.status_code == 400 and "not available yet" in r.text
+    r = capi.post("/jobs", json={"plant": plant, "job_type": "chain", "name": "c",
+                                 "params": {"steps": [noop_spec(), {"type": "sap.send", "params": {}}]}})
+    assert r.status_code == 400 and "step 2" in r.text and "not available yet" in r.text
+    assert capi.post("/jobs/templates", json={"name": f"zz send {plant}", "steps": [{"type": "sap.send", "params": {}}]}).status_code in (400, 422)
+
+
+@pytest.mark.pg
+def test_w4b_routing_and_attribute_steps_run_in_a_chain_on_a_routing_off_plant(capi, chain_pg):
+    steps = [{"type": "routing.recompute", "params": {}}, {"type": "attributes.resync", "params": {}}]
+    r = capi.post("/jobs", json={"plant": chain_pg.plant, "job_type": "chain", "name": "w4b data", "params": {"steps": steps}})
+    assert r.status_code == 200, r.text
+    jid = r.json()["id"]
+    chain_pg.jobs.append(jid)
+    run = capi.post(f"/jobs/{jid}/run").json()["run"]
+    done = wait_run(run["id"])
+    assert done["status"] == "succeeded", done
+    detail = capi.get(f"/jobs/runs/{run['id']}").json()
+    by = {s["step_type"]: s for s in detail["steps"]}
+    assert by["routing.recompute"]["summary"]["routing_enabled"] is False and by["routing.recompute"]["summary"]["skipped"] == "routing_off"
+    assert by["attributes.resync"]["summary"]["unmatched_pairs"] >= 0 and by["attributes.resync"]["status"] == "succeeded"
+
+
+@pytest.mark.pg
+def test_w4b_builtin_backlog_template_is_seeded(capi, chain_pg):
+    data.seed_builtin_templates()
+    names = [t["name"] for t in capi.get("/jobs/templates").json()["templates"]]
+    assert "Remove backlog, then re-optimize" in names

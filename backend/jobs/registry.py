@@ -41,6 +41,9 @@ class JobType:
     composite: bool = False                                   # a chain: its params hold steps, it cannot nest
     slots: Callable[[BaseModel], list] | None = None          # several slots (a chain: those of its steps)
     plant_check: Callable[[BaseModel, str | None], None] | None = None   # save-time check that needs the plant (ValueError)
+    # --- scaffolded types (W4b): listed so the builder can show them disabled, but never saved or run -------------
+    available: bool = True                                    # False: refused at save (400) and again at run time
+    unavailable_reason: str | None = None                     # shown by the builder and in the refusal
 
     def timeout_for(self, params: BaseModel) -> int:
         return int(self.timeout_fn(params)) if self.timeout_fn else self.default_timeout_s
@@ -72,6 +75,11 @@ class JobType:
 
 
 REGISTRY: dict[str, JobType] = {}
+
+
+def unavailable_message(jt: JobType) -> str:
+    """The one refusal text for a scaffolded type (save, template, chain step, run)."""
+    return f"job type {jt.key!r} is not available yet: {jt.unavailable_reason or 'not built'}"
 
 
 def register(jt: JobType) -> JobType:

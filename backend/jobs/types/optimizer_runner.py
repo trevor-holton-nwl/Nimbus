@@ -27,6 +27,7 @@ from backend.jobs.context import JobCancelled
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MODE_MAP = {"due_date": "duedate", "min_changeover": "changeover", "spt": "spt"}
 BUDGET_S = {"normal": 8, "exhaustive": 180}      # mirrors SETUP_AWARE_*_BUDGET_MS in engine.mts
+BACKLOG_BUDGET_S = 8                             # Remove Backlog is a single pass, not a search; the normal budget bounds it
 TIMEOUT_MARGIN_S = 60
 MAX_OLD_SPACE_MB = int(os.environ.get("NIMBUS_OPTIMIZER_NODE_MB", "1536") or 1536)
 MAX_STORED_PATCH_BYTES = 256 * 1024              # job_run.summary is JSONB: a bigger proposal keeps counts only
@@ -330,14 +331,20 @@ def _run(ctx, plant: str, params, steps: _Steps) -> dict:
     tz = plant_timezone(wire, plant)
     if not tz:
         return _fail(steps, f"plant {plant} has no timezone; the optimizer cannot run", kind="config", step="gather")
-    node_params = {"mode": MODE_MAP[params.mode], "search": params.search, "respect_firmed": params.respect_firmed,
-                   "serverNow": bundle["server_now"], "plantTimezone": tz}
+    backlog = bool(getattr(params, "is_backlog", False))          # `optimizer.backlog`: Remove Backlog, not a search
+    if backlog:
+        node_params = {"mode": "backlog", "search": "normal", "include_running": bool(params.include_running),
+                       "serverNow": bundle["server_now"], "plantTimezone": tz}
+    else:
+        node_params = {"mode": MODE_MAP[params.mode], "search": params.search, "respect_firmed": params.respect_firmed,
+                       "serverNow": bundle["server_now"], "plantTimezone": tz}
     result = run_node(ctx, steps, "run", {"plant": plant, "wire": wire, "params": node_params},
-                      tz=tz, timeout_s=BUDGET_S[params.search] + TIMEOUT_MARGIN_S)
+                      tz=tz, timeout_s=(BACKLOG_BUDGET_S if backlog else BUDGET_S[params.search]) + TIMEOUT_MARGIN_S)
     summary = result.get("summary") or {}
     out = {"late": summary.get("late_count"), "moved": summary.get("patched"),
            "setup_minutes": summary.get("setup_minutes"), "search_complete": summary.get("search_complete"),
-           "termination": summary.get("termination"), "tool_blocked": summary.get("tool_blocked")}
+           "termination": summary.get("termination"), "tool_blocked": summary.get("tool_blocked"),
+           "backlog": summary.get("backlog")}
     out = {k: v for k, v in out.items() if v is not None}
     blockers = result.get("blockers") or []
     if result.get("status") not in (None, "completed"):

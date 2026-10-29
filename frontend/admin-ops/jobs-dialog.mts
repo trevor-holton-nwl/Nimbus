@@ -23,7 +23,7 @@ import type { Job, JobType } from './jobs-client.mjs';
 import {
   RECUR_PRESETS, NAME_MAX, WINDOW_CHOICES, WINDOW_ANCHORS, WINDOW_UNITS, WINDOW_OPEN_START, defaultJobForm, jobToForm,
   validateJobForm, buildJobPayload, recurrenceText, stripOffset, dowLabelKey, seedParams, resultOf, findType, hasApplyMode, typeGroups,
-  isChainKey, stepTypes, newStep, stepToWire, stepFromWire, moveStep, removeStep, RUN_ONS, DEFAULT_CHAIN_LIMITS,
+  isUnavailable, unavailableWhy, typeHint, isChainKey, stepTypes, newStep, stepToWire, stepFromWire, moveStep, removeStep, RUN_ONS, DEFAULT_CHAIN_LIMITS,
   dependentFields, stepIsCustomised, templateDefaults, stepTitle, typeLabel, paramLabel, enumLabel, paramHint, windowToUi, uiToWindow, validateWindowUi,
   TARGET_MODES, TZ_MODES, STAGGER_MAX, PARALLEL_MAX, buildTargetRows, filterPlants, targetsPreviewText, plural, TARGET_ROWS_MAX, targetRowCount, timeZoneList, tzShort,
   DST_GAPS, DST_OVERLAPS, WINDOW_ACTIONS, MONTHLY_MODES, GRACE_MAX_MIN, closedDayChoices, policyToOptions, policyNoteText, skipReasonCodeText,
@@ -166,6 +166,11 @@ const PLANT_PAGE_MAX = 50;
 function _opt(value: string, label: string, sel: string): string {
   return `<option value="${esc(value)}"${value === sel ? ' selected' : ''}>${esc(label)}</option>`;
 }
+/** A type option; a scaffolded type (Send to SAP) is shown disabled, with its reason as the tooltip. */
+function _typeOpt(x: JobType, sel: string, d: JobsDeps): string {
+  if (!isUnavailable(x)) return _opt(x.key, typeLabel(x, d), sel);
+  return `<option value="${esc(x.key)}" disabled title="${esc(unavailableWhy(x, d))}">${esc(t('jobs.opt_unavailable', { name: typeLabel(x, d) }))}</option>`;
+}
 /** What the chosen result mode does, in one sentence: Apply writes the plan, Dry run only shows it. */
 export const resultHint = (result: string): string => t(result === 'propose' ? 'jobs.result_hint_propose' : 'jobs.result_hint_apply');
 
@@ -242,7 +247,7 @@ function _typeHtml(f: JobForm, types: JobType[], locked: boolean): string {
   const d = jobsDeps();
   if (!types.length) return `<div class="form-row"><label>${esc(t('jobs.f_type'))}</label><div class="readonly" id="jb-type">${esc(typeLabel({ key: f.jobType, label: f.jobType }, d))}</div></div>`;
   return `<div class="form-row"><label for="jb-jobtype">${esc(t('jobs.f_type'))}</label><select class="input" id="jb-jobtype"${locked ? ' disabled' : ''}>`
-    + typeGroups(types).map(g => `<optgroup label="${esc(t(g.labelKey))}">${g.types.map(x => _opt(x.key, typeLabel(x, d), f.jobType)).join('')}</optgroup>`).join('')
+    + typeGroups(types).map(g => `<optgroup label="${esc(t(g.labelKey))}">${g.types.map(x => _typeOpt(x, f.jobType, d)).join('')}</optgroup>`).join('')
     + `</select></div>`;
 }
 
@@ -286,8 +291,9 @@ export function paramsHtml(meta: TypeMeta | null, f: Pick<JobForm, 'params'>, is
   // The aggregate window means nothing while "Limit the aggregate view to a date window" is off: hide it until it is on.
   if (meta?.composite) return '';                                   // a chain's params are its steps (see chainHtml)
   const gated = !!meta && meta.params.some(q => q.key === 'filter_by_window' && q.type === 'boolean');
-  return meta ? meta.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(meta))
-    .map(p => paramHtml(p, f.params[p.key], isAdmin, gated && p.key === 'window' && f.params.filter_by_window !== true, ns)).join('') : '';
+  const blurb = meta ? typeHint(meta, jobsDeps()) : '';          // a one-line "what this step does" (W4b types have one)
+  return (blurb ? `<div class="ape-hint job-type-hint">${esc(blurb)}</div>` : '') + (meta ? meta.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(meta))
+    .map(p => paramHtml(p, f.params[p.key], isAdmin, gated && p.key === 'window' && f.params.filter_by_window !== true, ns)).join('') : '');
 }
 
 /* ---------------------------------------------------------------------------
@@ -300,7 +306,7 @@ const ON_FAIL = ['stop', 'continue'] as const;
 
 function _stepTypeOptions(types: JobType[], cur: string): string {
   const d = jobsDeps();
-  return typeGroups(stepTypes(types)).map(g => `<optgroup label="${esc(t(g.labelKey))}">${g.types.map(x => _opt(x.key, typeLabel(x, d), cur)).join('')}</optgroup>`).join('');
+  return typeGroups(stepTypes(types)).map(g => `<optgroup label="${esc(t(g.labelKey))}">${g.types.map(x => _typeOpt(x, cur, d)).join('')}</optgroup>`).join('');
 }
 
 export function stepCardHtml(st: ChainStep, i: number, n: number, types: JobType[], isAdmin: boolean): string {
@@ -354,6 +360,7 @@ export function chainHtml(f: JobForm, types: JobType[], isAdmin: boolean, templa
     + `<div class="job-chain-add"><select class="input" id="jb-addtype" aria-label="${esc(t('jobs.step_add_type'))}">${_stepTypeOptions(types, '')}</select>`
     + `<button type="button" class="btn btn-ghost" id="jb-addstep" data-jb-act="step-add"${full ? ' disabled aria-describedby="jb-addhint"' : ''}>${esc(t('jobs.step_add'))}</button></div>`
     + `<div class="ape-hint" id="jb-addhint">${full ? esc(t('jobs.step_max_hint', { n: JobsClient.limits().maxSteps })) : ''}</div>`
+    + stepTypes(types).filter(isUnavailable).map(x => `<div class="ape-hint job-unavail-hint">${esc(typeLabel(x, jobsDeps()))}: ${esc(unavailableWhy(x, jobsDeps()))}</div>`).join('')
     + `<div class="ape-err" id="jb-err-steps" role="alert" hidden></div>`
     + `<div class="job-chain-tpl"><label for="jb-tplname" class="job-field-l">${esc(t('jobs.tpl_name'))}</label><input class="input" id="jb-tplname" type="text" maxlength="120" autocomplete="off" aria-describedby="jb-err-tplname">`
     + `<button type="button" class="btn btn-ghost" data-jb-act="tpl-save">${esc(t('jobs.tpl_save'))}</button></div>`

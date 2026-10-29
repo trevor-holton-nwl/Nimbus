@@ -267,8 +267,9 @@ test('jobToForm restores a saved job (preset schedule, once, params) for Edit an
 // ---- W2: generic params, types, DateWindow, report artifact -----------------------------------------------------------
 test('typeGroups: Optimization then Reports, each only when it has types; findType and hasApplyMode', () => {
   const g = typeGroups(TYPES);
-  assert.deepEqual(g.map(x => [x.kind, x.labelKey]), [['action', 'jobs.group_optimization'], ['report', 'jobs.group_reports'], ['chain', 'jobs.group_chains']]);
-  assert.deepEqual(g[1].types.map(x => x.key), ['report.what_changed', 'report.late_orders', 'report.missing_master_data', 'report.coverage', 'report.distribution']);
+  assert.deepEqual(g.map(x => [x.kind, x.labelKey]), [['action', 'jobs.group_optimization'], ['data', 'jobs.group_data'], ['sap', 'jobs.group_sap'],
+    ['report', 'jobs.group_reports'], ['chain', 'jobs.group_chains']]);
+  assert.deepEqual(g[3].types.map(x => x.key),['report.what_changed', 'report.late_orders', 'report.missing_master_data', 'report.coverage', 'report.distribution']);
   assert.deepEqual(typeGroups(TYPES.filter(x => x.kind === 'report')).map(x => x.kind), ['report']);
   assert.equal(findType(TYPES, 'report.coverage').kind, 'report');
   assert.equal(hasApplyMode(OPT), true, 'the Result control shows for an action type with apply_mode');

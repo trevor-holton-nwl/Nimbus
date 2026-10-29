@@ -600,6 +600,8 @@ export interface TypeMeta {
   /** The step-type contract (W4a): safe to run again, a chain (its params are steps), rough seconds, the param value
    *  that makes it a dry run, and the lock keys it takes (`{plant}` placeholder). */
   idempotent?: boolean; composite?: boolean; estimateS?: number | null; dryRun?: { param: string; value: unknown } | null; lockKeys?: string[];
+  /** W4b: false for a scaffolded type (Send to SAP): listed disabled, never saved or run. `unavailableReason` is the server's text. */
+  available?: boolean; unavailableReason?: string | null;
 }
 
 /** Strings the optimizer's params already had before the generic form: reused so no translation is duplicated. */
@@ -617,6 +619,10 @@ export const LABEL_ALIASES: Record<string, string> = {
   'jobs.p.optimizer.plant.apply_mode.apply': 'jobs.result_apply',
   'jobs.p.optimizer.plant.apply_mode.propose': 'jobs.result_propose',
   'jobs.type.optimizer.plant': 'jobs.type_optimizer',
+  // Remove backlog has the same Result control as the optimizer
+  'jobs.p.optimizer.backlog.apply_mode': 'jobs.f_result',
+  'jobs.p.optimizer.backlog.apply_mode.apply': 'jobs.result_apply',
+  'jobs.p.optimizer.backlog.apply_mode.propose': 'jobs.result_propose',
 };
 
 /** The translation for `key` (or its legacy alias), or '' when neither exists. */
@@ -631,16 +637,30 @@ export const enumLabel = (m: ParamMeta, v: string, d: Pick<JobsDeps, 't'>): stri
 export const paramHint = (m: ParamMeta, d: Pick<JobsDeps, 't'>): string => tryKey(`${m.labelKey}.hint`, d);
 export const typeLabel = (x: { key: string; label: string }, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.type.${x.key}`, d) || x.label;
 
-/** Dialog / filter groups: Optimization (actions), Reports, then Chains (a chain is made of the others). */
-export function typeGroups(types: ReadonlyArray<TypeMeta>): Array<{ kind: JobKind | 'chain'; labelKey: string; types: TypeMeta[] }> {
-  const labelOf = { action: 'jobs.group_optimization', report: 'jobs.group_reports', chain: 'jobs.group_chains' } as const;
-  return (['action', 'report', 'chain'] as const)
-    .map(kind => ({
-      kind, labelKey: labelOf[kind],
-      types: types.filter(x => (kind === 'chain' ? !!x.composite : !x.composite && x.kind === kind)),
-    }))
+export type TypeGroupKind = 'action' | 'data' | 'sap' | 'report' | 'chain';
+/** Which group a type sits in: an `optimizer.*` action is Optimization, a `sap.*` one is SAP, any other action
+ *  (purge, routing recompute, attribute resync) is Data. */
+export function typeGroupOf(x: Pick<TypeMeta, 'key' | 'kind' | 'composite'>): TypeGroupKind {
+  if (x.composite) return 'chain';
+  if (x.kind === 'report') return 'report';
+  if (x.key.startsWith('optimizer.')) return 'action';
+  return x.key.startsWith('sap.') ? 'sap' : 'data';
+}
+
+/** Dialog / filter groups: Optimization, Data, SAP (actions), Reports, then Chains (a chain is made of the others). */
+export function typeGroups(types: ReadonlyArray<TypeMeta>): Array<{ kind: TypeGroupKind; labelKey: string; types: TypeMeta[] }> {
+  const labelOf = { action: 'jobs.group_optimization', data: 'jobs.group_data', sap: 'jobs.group_sap', report: 'jobs.group_reports', chain: 'jobs.group_chains' } as const;
+  return (['action', 'data', 'sap', 'report', 'chain'] as const)
+    .map(kind => ({ kind, labelKey: labelOf[kind], types: types.filter(x => typeGroupOf(x) === kind) }))
     .filter(g => g.types.length);
 }
+
+/** A scaffolded type is listed but disabled; its reason is a translation (`jobs.type.<key>.unavailable`) or the server's text. */
+export const isUnavailable = (x: { available?: boolean } | null | undefined): boolean => !!x && x.available === false;
+export const unavailableWhy = (x: Pick<TypeMeta, 'key' | 'unavailableReason'>, d: Pick<JobsDeps, 't'>): string =>
+  d.t('jobs.type_unavailable_why', { reason: tryKey(`jobs.type.${x.key}.unavailable`, d) || x.unavailableReason || '' });
+/** The one-line description of a step type (`jobs.type.<key>.hint`), '' when it has none. */
+export const typeHint = (x: Pick<TypeMeta, 'key'>, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.type.${x.key}.hint`, d);
 
 export const findType = (types: ReadonlyArray<TypeMeta>, key: string): TypeMeta | undefined => types.find(x => x.key === key);
 /** The Result control (Apply / Dry run) shows only for an action type that has an `apply_mode` param. */
