@@ -24,7 +24,7 @@ import {
   RECUR_PRESETS, NAME_MAX, WINDOW_CHOICES, WINDOW_ANCHORS, WINDOW_UNITS, WINDOW_OPEN_START, defaultJobForm, jobToForm,
   validateJobForm, buildJobPayload, recurrenceText, stripOffset, dowLabelKey, seedParams, resultOf, findType, hasApplyMode, typeGroups,
   isChainKey, stepTypes, newStep, stepToWire, stepFromWire, moveStep, removeStep, RUN_ONS, DEFAULT_CHAIN_LIMITS,
-  typeLabel, paramLabel, enumLabel, paramHint, windowToUi, uiToWindow, validateWindowUi,
+  dependentFields, stepIsCustomised, templateDefaults, stepTitle, typeLabel, paramLabel, enumLabel, paramHint, windowToUi, uiToWindow, validateWindowUi,
   TARGET_MODES, TZ_MODES, STAGGER_MAX, PARALLEL_MAX, buildTargetRows, filterPlants, targetsPreviewText, plural, TARGET_ROWS_MAX, targetRowCount, timeZoneList, tzShort,
   DST_GAPS, DST_OVERLAPS, WINDOW_ACTIONS, MONTHLY_MODES, GRACE_MAX_MIN, closedDayChoices, policyToOptions, policyNoteText, skipReasonCodeText,
 } from './jobs-model.mjs';
@@ -307,7 +307,7 @@ export function stepCardHtml(st: ChainStep, i: number, n: number, types: JobType
   const meta = findType(types, st.type) ?? null;
   const ns = `s${i}-`;
   const btn = (act: string, label: string, glyph: string, off: boolean): string =>
-    `<button type="button" class="icon-btn sm" data-jb-act="${act}" data-jb-i="${i}" aria-label="${esc(t(label, { n: i + 1 }))}"${off ? ' disabled' : ''}>${glyph}</button>`;
+    `<button type="button" class="icon-btn job-step-act" data-jb-act="${act}" data-jb-i="${i}" aria-label="${esc(t(label, { n: i + 1 }))}"${off ? ' disabled' : ''}>${glyph}</button>`;
   return `<li class="job-step-card" data-jb-step="${i}"><div class="job-step-head"><span class="job-step-n">${esc(t('jobs.step_n', { n: i + 1 }))}</span>`
     + `<select class="input job-step-type" id="jb-s${i}-type" aria-label="${esc(t('jobs.step_type', { n: i + 1 }))}">${_stepTypeOptions(types, st.type)}</select>`
     + `<span class="job-step-btns">${btn('step-up', 'jobs.step_up', '↑', i === 0)}${btn('step-down', 'jobs.step_down', '↓', i === n - 1)}${btn('step-remove', 'jobs.step_remove', '×', false)}</span></div>`
@@ -326,25 +326,43 @@ export function stepListHtml(f: Pick<JobForm, 'steps'>, types: JobType[], isAdmi
   return f.steps.map((st, i) => stepCardHtml(st, i, f.steps.length, types, isAdmin)).join('');
 }
 
-export function chainHtml(f: JobForm, types: JobType[], isAdmin: boolean, templates: JobTemplate[], mode: DialogMode): string {
+/** The line under the template picker: which template the job is tied to (and its version), what the template's defaults
+ *  give a new job, and the note when a retry default is ignored. Re-rendered IN PLACE (never with the fieldset). */
+export function tplInfoHtml(f: Pick<JobForm, 'templateId' | 'templateVersion' | 'tplDefaults'>, templates: JobTemplate[], editedLocally = false): string {
+  const parts: string[] = [];
+  if (f.templateId != null) {
+    const name = templates.find(x => x.id === f.templateId)?.name ?? `#${f.templateId}`;
+    parts.push(`<div class="ape-hint job-tpl-tied">${esc(t('jobs.tpl_tied', { name, version: f.templateVersion ?? '?' }))}${editedLocally ? ` <span class="badge badge-muted">${esc(t('jobs.tpl_edited_locally'))}</span>` : ''}</div>`);
+  }
+  const d = f.tplDefaults;
+  if (d?.retryMax != null) parts.push(`<div class="ape-hint">${esc(t('jobs.tpl_defaults_retry', { n: d.retryMax }))}</div>`);
+  if (d?.timeoutS != null) parts.push(`<div class="ape-hint">${esc(t('jobs.tpl_defaults_limit', { n: Math.round(d.timeoutS / 60) }))}</div>`);
+  if (d?.retryIgnored) parts.push(`<div class="ape-hint">${esc(t('jobs.tpl_retry_ignored'))}</div>`);
+  return parts.join('');
+}
+
+export function chainHtml(f: JobForm, types: JobType[], isAdmin: boolean, templates: JobTemplate[], mode: DialogMode, editedLocally = false): string {
   const live = templates.filter(x => !x.archived);
+  const full = f.steps.length >= JobsClient.limits().maxSteps;
   return `<fieldset class="job-chain" id="jb-chain"><legend>${esc(t('jobs.steps_title'))}</legend>`
     + (mode === 'new' && live.length
       ? `<div class="form-row"><label for="jb-template">${esc(t('jobs.tpl_start'))}</label><select class="input" id="jb-template"><option value="">${esc(t('jobs.tpl_none'))}</option>`
         + live.map(x => _opt(String(x.id), x.name, String(f.templateId ?? ''))).join('') + `</select><div class="ape-hint">${esc(t('jobs.tpl_hint'))}</div></div>` : '')
+    + `<div id="jb-tplinfo">${tplInfoHtml(f, templates, editedLocally)}</div>`
     + `<ol class="job-steps-edit" id="jb-steps">${stepListHtml(f, types, isAdmin)}</ol>`
+    + `<div class="job-sr" id="jb-steps-live" role="status" aria-live="polite"></div>`
     + `<div class="job-chain-add"><select class="input" id="jb-addtype" aria-label="${esc(t('jobs.step_add_type'))}">${_stepTypeOptions(types, '')}</select>`
-    + `<button type="button" class="btn btn-ghost" data-jb-act="step-add">${esc(t('jobs.step_add'))}</button></div>`
+    + `<button type="button" class="btn btn-ghost" id="jb-addstep" data-jb-act="step-add"${full ? ' disabled aria-describedby="jb-addhint"' : ''}>${esc(t('jobs.step_add'))}</button></div>`
+    + `<div class="ape-hint" id="jb-addhint">${full ? esc(t('jobs.step_max_hint', { n: JobsClient.limits().maxSteps })) : ''}</div>`
     + `<div class="ape-err" id="jb-err-steps" role="alert" hidden></div>`
-    + `<div class="job-chain-tpl"><label for="jb-tplname" class="job-field-l">${esc(t('jobs.tpl_name'))}</label><input class="input" id="jb-tplname" type="text" maxlength="120" autocomplete="off">`
-    + `<button type="button" class="btn btn-ghost" data-jb-act="tpl-save">${esc(t('jobs.tpl_save'))}</button>`
-    + (f.templateId != null ? `<button type="button" class="btn btn-ghost" data-jb-act="tpl-update">${esc(t('jobs.tpl_update'))}</button>` : '')
-    + `</div></fieldset>`;
+    + `<div class="job-chain-tpl"><label for="jb-tplname" class="job-field-l">${esc(t('jobs.tpl_name'))}</label><input class="input" id="jb-tplname" type="text" maxlength="120" autocomplete="off" aria-describedby="jb-err-tplname">`
+    + `<button type="button" class="btn btn-ghost" data-jb-act="tpl-save">${esc(t('jobs.tpl_save'))}</button></div>`
+    + `<div class="ape-err" id="jb-err-tplname" role="alert" hidden></div></fieldset>`;
 }
 
 /** The block under the type select: a chain's step builder, or the type's own params form (+ the result error slot). */
-export function paramsBlockHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: TypeMeta | null, types: JobType[], templates: JobTemplate[]): string {
-  return meta?.composite || isChainKey(f.jobType) ? chainHtml(f, types, isAdmin, templates, mode) : `${paramsHtml(meta, f, isAdmin)}${_err('result')}`;
+export function paramsBlockHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: TypeMeta | null, types: JobType[], templates: JobTemplate[], editedLocally = false): string {
+  return meta?.composite || isChainKey(f.jobType) ? chainHtml(f, types, isAdmin, templates, mode, editedLocally) : `${paramsHtml(meta, f, isAdmin)}${_err('result')}`;
 }
 
 /* ---------------------------------------------------------------------------
@@ -483,14 +501,14 @@ export function tzBlockHtml(f: JobForm): string {
     + `<div class="ape-hint">${esc(t(f.tzMode === 'plant' ? 'jobs.tz_hint' : 'jobs.tz_hint_other'))}</div></div>`;
 }
 
-export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: TypeMeta | null = null, types: JobType[] = [], templates: JobTemplate[] = []): string {
+export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: TypeMeta | null = null, types: JobType[] = [], templates: JobTemplate[] = [], editedLocally = false): string {
   return `<div class="job-form">`
     + `<div class="form-row"><label for="jb-name">${esc(t('jobs.f_name'))}</label>`
     + `<input class="input" id="jb-name" type="text" maxlength="${NAME_MAX}" value="${esc(f.name)}" autocomplete="off">${_err('name')}</div>`
     + `<div class="form-row-2">${_typeHtml(f, types, mode === 'edit')}`
     + `<div class="form-row"><label for="jb-plant">${esc(t('jobs.f_plant'))}</label><div id="jb-plant-host"></div>${_err('plant')}</div></div>`
     + targetsFieldsetHtml(f)
-    + `<div id="jb-params">${paramsBlockHtml(f, mode, isAdmin, meta, types, templates)}</div>`
+    + `<div id="jb-params">${paramsBlockHtml(f, mode, isAdmin, meta, types, templates, editedLocally)}</div>`
     + `<fieldset class="job-recur"><legend>${esc(t('jobs.f_recurrence'))}</legend>`
     + `<div class="form-row"><label for="jb-recur">${esc(t('jobs.f_repeat'))}</label><select class="input" id="jb-recur">`
     + RECUR_PRESETS.map(p => _opt(p, t(`jobs.preset_${p}`), f.recur.preset)).join('') + `</select></div>`
@@ -635,14 +653,15 @@ export function readForm(prev: JobForm, meta: TypeMeta | null = _s?.meta ?? null
   };
 }
 
-function _showErrors(errs: FormErrors): void {
-  for (const f of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity', 'targets', 'fixedTz', 'fanOut', 'policyWin', 'policyGrace', 'policyTz', 'steps'] as const) {
+function _showErrors(errs: FormErrors, scope: 'all' | 'steps' = 'all'): void {
+  // 'steps' (Save as template): only the step list and the step params are painted; no unrelated error appears.
+  for (const f of (scope === 'steps' ? ['steps'] : ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity', 'targets', 'fixedTz', 'fanOut', 'policyWin', 'policyGrace', 'policyTz', 'steps']) as readonly (keyof FormErrors)[]) {
     const el = _el(`jb-err-${f}`);
     if (!el) continue;
     el.textContent = errs[f] ? t(errs[f] as string) : '';
     el.hidden = !errs[f];
   }
-  for (const p of _s?.meta?.params ?? []) {
+  for (const p of scope === 'steps' ? [] : _s?.meta?.params ?? []) {
     const el = _el(`jb-err-p-${p.key}`);
     const key = errs.params?.[p.key];
     if (!el) continue;
@@ -960,13 +979,36 @@ function _changeType(s: DialogState, key: string): void {
 function _renderSteps(s: DialogState, focus?: string): void {
   const host = _el('jb-steps');
   if (host) host.innerHTML = stepListHtml(s.form, s.types, Session.isAdmin());
+  _syncAddButton(s);
   _initPickers();
   _scheduleWindowPreview();
   if (focus) _el(focus)?.focus();
 }
 
+/** Add step is disabled at the limit, with the reason in the hint line under it (updated in place). */
+function _syncAddButton(s: DialogState): void {
+  const max = JobsClient.limits().maxSteps;
+  const full = s.form.steps.length >= max;
+  const btn = _el<HTMLButtonElement>('jb-addstep');
+  if (btn) { btn.disabled = full; if (full) btn.setAttribute('aria-describedby', 'jb-addhint'); else btn.removeAttribute?.('aria-describedby'); }
+  const hint = _el('jb-addhint');
+  if (hint) hint.textContent = full ? t('jobs.step_max_hint', { n: max }) : '';
+}
+
+/** The "tied to template X" line and the template's default notes: only this block is redrawn (the template name the admin
+ *  typed, the picker and the focus stay where they are). */
+function _renderTplInfo(s: DialogState): void {
+  const host = _el('jb-tplinfo');
+  if (host) host.innerHTML = tplInfoHtml(s.form, s.templates, s.job?.template?.editedLocally === true && s.form.templateId === s.job.templateId);
+}
+
+function _announce(msg: string): void {
+  const live = _el('jb-steps-live');
+  if (live) live.textContent = msg;
+}
+
 /** A step-structure click (add / move / remove / template); the live fields are read first so no typing is lost. */
-function _stepAction(s: DialogState, act: string, i: number): void {
+async function _stepAction(s: DialogState, act: string, i: number): Promise<void> {
   s.form = readForm(s.form);
   const steps = s.form.steps;
   if (act === 'step-add') {
@@ -975,12 +1017,26 @@ function _stepAction(s: DialogState, act: string, i: number): void {
     s.form = { ...s.form, steps: [...steps, newStep(meta)] };
     _renderSteps(s, `jb-s${steps.length}-type`);
   } else if (act === 'step-remove') {
-    s.form = { ...s.form, steps: removeStep(steps, i) };
+    const st = steps[i];
+    if (st && stepIsCustomised(st, findType(s.types, st.type) ?? null)) {      // a step the admin set up is not dropped by a stray click
+      const ok = await Modal.confirm({ title: t('jobs.step_remove_confirm_title', { n: i + 1 }), message: t('jobs.step_remove_confirm_msg', { step: stepTitle(st, s.types, jobsDeps()) }),
+        confirmLabel: t('jobs.step_remove_btn'), tone: 'warn' });
+      if (!ok || _s !== s) return;
+      s.form = readForm(s.form);
+    }
+    s.form = { ...s.form, steps: removeStep(s.form.steps, i) };
     _renderSteps(s, 'jb-addtype');
   } else {
     const delta = act === 'step-up' ? -1 : 1;
+    const to = i + delta;
     s.form = { ...s.form, steps: moveStep(steps, i, delta) };
-    _renderSteps(s, `jb-s${i + delta}-type`);
+    _renderSteps(s);
+    // Focus stays on the button that was pressed (now on the moved card); at the end of the list it falls back to its twin.
+    const pick = (a: string): HTMLElement | null => document.querySelector<HTMLElement>(`#jb-steps [data-jb-act="${a}"][data-jb-i="${to}"]`);
+    const same = pick(act);
+    const target = same && !(same as HTMLButtonElement).disabled ? same : pick(act === 'step-up' ? 'step-down' : 'step-up');
+    target?.focus();
+    _announce(t('jobs.step_moved', { n: to + 1, of: s.form.steps.length }));
   }
   _schedulePreview();
 }
@@ -989,40 +1045,67 @@ function _stepAction(s: DialogState, act: string, i: number): void {
 function _applyTemplate(s: DialogState, id: string): void {
   s.form = readForm(s.form);
   const tpl = s.templates.find(x => String(x.id) === id);
-  s.form = tpl ? { ...s.form, steps: tpl.steps.map(stepFromWire), templateId: tpl.id, templateVersion: tpl.version }
-    : { ...s.form, templateId: null, templateVersion: null };
-  const host = _el('jb-chain');
-  if (host) host.outerHTML = chainHtml(s.form, s.types, Session.isAdmin(), s.templates, s.mode);
-  _initPickers();
-  _scheduleWindowPreview();
+  const defs = tpl ? templateDefaults(tpl, s.types, jobsDeps()) : null;
+  s.form = tpl ? { ...s.form, steps: tpl.steps.map(stepFromWire), templateId: tpl.id, templateVersion: tpl.version, tplDefaults: defs }
+    : { ...s.form, templateId: null, templateVersion: null, tplDefaults: null };
+  _renderSteps(s);                        // in place: the picker, the typed template name and the focus are left alone
+  _renderTplInfo(s);
 }
 
-/** Save the current steps as a NEW template, or (update) as the next version of the job's own template. */
-async function _saveTemplate(s: DialogState, update: boolean): Promise<void> {
+function _tplNameError(msg: string | null): void {
+  const el = _el('jb-err-tplname');
+  if (el) { el.textContent = msg ?? ''; el.hidden = !msg; }
+}
+
+/** Save the steps as a template. Only the steps, their params and the template name are validated (nothing unrelated is
+ *  painted). A job already tied to a template is asked: update that template, or create a new one and tie the job to it. */
+async function _saveTemplate(s: DialogState): Promise<void> {
   s.form = readForm(s.form);
   const errs = validateJobForm(s.form, { isAdmin: Session.isAdmin(), plants: Session.allowedPlants(), meta: s.meta, types: s.types, limits: JobsClient.limits() });
-  _showErrors(errs);
+  _showErrors(errs, 'steps');
   if (errs.steps || errs.stepParams) return;
   const steps = s.form.steps.map(stepToWire);
+  const cur = s.form.templateId != null ? s.templates.find(x => x.id === s.form.templateId) : undefined;
+  let update = false;
+  if (cur) {
+    const pick = await Modal.choose({ title: t('jobs.tpl_which_title'), message: t('jobs.tpl_which_msg', { name: cur.name }), confirmLabel: t('jobs.tpl_save'),
+      options: [{ value: 'update', label: t('jobs.tpl_which_update', { name: cur.name }) }, { value: 'new', label: t('jobs.tpl_which_new') }] });
+    if (!pick || _s !== s) return;
+    update = pick === 'update';
+    if (update && !await Modal.confirm({ title: t('jobs.tpl_update_ask_title', { name: cur.name }), message: t('jobs.tpl_update_ask_msg'),
+      confirmLabel: t('jobs.tpl_update_btn'), tone: 'warn' })) return;
+    if (_s !== s) return;
+  }
+  if (!update) {
+    const name = (_val('jb-tplname') || s.form.name).trim();
+    if (!name || name.length > 120) { _tplNameError(t(name ? 'jobs.tpl_name_too_long' : 'jobs.tpl_name_needed')); _el('jb-tplname')?.focus(); return; }
+  }
+  _tplNameError(null);
   try {
-    if (update && s.form.templateId != null) {
-      const tpl = await JobsClient.updateTemplate(s.form.templateId, { steps });
+    if (update && cur) {
+      const tpl = await JobsClient.updateTemplate(cur.id, { steps, expectedVersion: cur.version });
       s.templates = s.templates.map(x => (x.id === tpl.id ? tpl : x));
       s.form = { ...s.form, templateVersion: tpl.version };
     } else {
       const name = (_val('jb-tplname') || s.form.name).trim();
-      if (!name) { Toast.show(t('jobs.tpl_name_needed'), 'error'); _el('jb-tplname')?.focus(); return; }
       const tpl = await JobsClient.createTemplate({ name, steps });
       s.templates = [...s.templates, tpl];
-      s.form = { ...s.form, templateId: tpl.id, templateVersion: tpl.version };
+      s.form = { ...s.form, templateId: tpl.id, templateVersion: tpl.version, tplDefaults: null };
     }
     Toast.show(t('jobs.tpl_saved'), 'success');
-    const host = _el('jb-chain');               // the Update button appears once the job is tied to a template
-    if (host) host.outerHTML = chainHtml(s.form, s.types, Session.isAdmin(), s.templates, s.mode);
-    _initPickers();
+    _renderTplInfo(s);                          // in place: the typed template name and the focus stay
   } catch (e) {
     Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error');
   }
+}
+
+/** A control whose value drives another one: `filter_by_window` shows / hides its window picker, `apply_mode` rewrites the
+ *  hint under it. Works for the type's own form (`jb-p-...`) and for every chain step card (`jb-s<i>-p-...`). */
+export function applyDependentFields(id: string): void {
+  const dep = dependentFields(id);
+  if (!dep) return;
+  if (dep.kind === 'filter_by_window') { const w = _el(dep.windowId as string); if (w) w.hidden = !_chk(id); }
+  else { const hint = _el(dep.hintId as string); if (hint) hint.textContent = resultHint(_val(id)); }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1074,8 +1157,7 @@ function _wire(): void {
     }
     const wm = /^(jb-(?:s(\d+)-)?p-(.+))-choice$/.exec(id);
     if (wm) _windowChoiceChanged(s, wm[1], wm[3], wm[2] == null ? null : Number(wm[2]));
-    if (id === 'jb-p-filter_by_window') { const w = _el('jb-p-window'); if (w) w.hidden = !_chk(id); }
-    if (id === 'jb-p-apply_mode') { const hint = _el('jb-p-apply_mode-hint'); if (hint) hint.textContent = resultHint(_val('jb-p-apply_mode')); }
+    applyDependentFields(id);
     if (id.startsWith('jb-p-') || /^jb-s\d+-p-/.test(id)) _scheduleWindowPreview();
     _schedulePreview();
   });
@@ -1095,8 +1177,8 @@ function _wire(): void {
     const s = _s;
     const act = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-jb-act]')?.dataset.jbAct;
     if (!s || !act) return;
-    if (act.startsWith('step-')) { _stepAction(s, act, Number((e.target as HTMLElement).closest<HTMLElement>('[data-jb-i]')?.dataset.jbI ?? -1)); return; }
-    if (act === 'tpl-save' || act === 'tpl-update') { void _saveTemplate(s, act === 'tpl-update'); return; }
+    if (act.startsWith('step-')) { void _stepAction(s, act, Number((e.target as HTMLElement).closest<HTMLElement>('[data-jb-i]')?.dataset.jbI ?? -1)); return; }
+    if (act === 'tpl-save') { void _saveTemplate(s); return; }
     if (act === 'sel-all' || act === 'sel-none') _pickBulk(s, 'sel', act === 'sel-all');
     else if (act === 'excl-all' || act === 'excl-none') _pickBulk(s, 'excl', act === 'excl-all');
     else if (act === 'plants-more') { s.planLimit = Math.min(PLANT_PAGE_MAX, s.planLimit + PLANT_PAGE); void _runPreview(); }
@@ -1133,11 +1215,11 @@ export const JobsDialog = {
     if (duplicate) form.name = '';
     const templates = opts.templates ?? [];
     const fromTpl = !job && opts.templateId != null ? templates.find(x => x.id === opts.templateId) : undefined;
-    if (fromTpl) { form.steps = fromTpl.steps.map(stepFromWire); form.templateId = fromTpl.id; form.templateVersion = fromTpl.version; }
+    if (fromTpl) { form.steps = fromTpl.steps.map(stepFromWire); form.templateId = fromTpl.id; form.templateVersion = fromTpl.version; form.tplDefaults = templateDefaults(fromTpl, types, jobsDeps()); }
     _s = { mode, job: job && !duplicate ? job : null, form, types, meta, templates, winSeq: 0, winTimer: null, tpSeq: 0, tpTimer: null, planLimit: PLANT_PAGE, busy: false, baseline: JSON.stringify(form), previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
     _wire();
     const body = _el('jb-body');
-    if (body) body.innerHTML = bodyHtml(form, mode, Session.isAdmin(), meta, types, templates);
+    if (body) body.innerHTML = bodyHtml(form, mode, Session.isAdmin(), meta, types, templates, job?.template?.editedLocally === true);
     _initPickers();
     mkCombobox(_el('jb-plant-host'), allowedPlantList(), {
       value: form.plant, placeholder: t('jobs.f_plant'), id: 'jb-plant', disabled: mode === 'edit',
@@ -1166,7 +1248,11 @@ export const JobsDialog = {
     if (btn) btn.disabled = true;
     try {
       if (s.job) {
-        await JobsClient.update(s.job.id, { name: job.name, params: job.params, targets: job.targets, fan_out: job.fan_out });
+        // A job that now follows another template or a newer version of its own (after "Save as template") says so, so it
+        // is not shown as changed or out of date.
+        const link = s.form.templateId != null && (s.form.templateId !== s.job.templateId || s.form.templateVersion !== s.job.templateVersion)
+          ? { template_id: s.form.templateId, template_version: s.form.templateVersion } : {};
+        await JobsClient.update(s.job.id, { name: job.name, params: job.params, targets: job.targets, fan_out: job.fan_out, ...link });
         if (s.job.schedule) await JobsClient.updateSchedule(s.job.schedule.id, schedule);
         else await JobsClient.addSchedule(s.job.id, schedule);
       } else {

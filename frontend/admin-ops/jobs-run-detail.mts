@@ -23,7 +23,7 @@ import {
   runStatusHtml, isActiveRun, durationText, stepSegments, resultTiles, mergeLog, lastSeq, filterLog,
   logToText, errorsToText, firstErrorIndex, lineDataText, elapsedText, elapsedMs, errorKindOf, isDryRun, deltaText,
   LOG_LEVELS, LOG_PAGE, plantWall, tzShort, ARTIFACT_PAGE, artifactTiles, isReportRun, sectionTitle, tryKey, columnLabel, cellText, windowLine,
-  stepStatusHtml, stepTitle, stepFacts, stepWaterfall, ranInRun, restartStepOf, findType,
+  stepStatusHtml, stepTitle, stepFacts, stepWaterfall, ranInRun, restartStepOf, findType, firstUnsafeStep, stepFromWire,
 } from './jobs-model.mjs';
 import type { LogLine, Proposal, ProposalRow, ArtifactSection, ArtifactColumn, CellFmt, StepRow } from './jobs-model.mjs';
 
@@ -66,6 +66,8 @@ interface DetailState {
   steps: StepRow[];
   types: JobType[];
   stepSeq: number | null;
+  /** 1 s client timer that grows the running step's bar between polls (set while a step runs and the pane is visible). */
+  tick: ReturnType<typeof setInterval> | null;
 }
 let _d: DetailState | null = null;
 
@@ -125,12 +127,12 @@ export function chainStepsHtml(run: JobRun, steps: StepRow[], types: JobType[], 
       const facts = stepFacts(s);
       const kind = s.errorKind ? ` <span class="badge ${s.errorKind === 'system' ? 'badge-err' : 'badge-warn'} job-error-kind">${esc(t(`jobs.error_kind_${s.errorKind}`))}</span>` : '';
       const name = stepTitle({ type: s.stepType, label: s.label }, types, deps);
-      return `<li class="job-step-row" data-step-seq="${s.seq}"><span class="job-step-idx job-mono">${s.seq}</span><span class="job-step-name">${esc(name)}`
+      return `<li class="job-step-row job-step-${esc(s.status)}${done != null ? ' job-step-earlier' : ''}" data-step-seq="${s.seq}"><span class="job-step-idx job-mono">${s.seq}</span><span class="job-step-name">${esc(name)}`
         + (s.runOn !== 'success' ? ` <span class="job-sub">${esc(t(`jobs.step_runon_${s.runOn}`))}</span>` : '') + `</span>`
         + (done != null ? `<span class="badge badge-muted job-status">${esc(t('jobs.step_done_earlier', { id: done }))}</span>` : stepStatusHtml(s.status, deps))
         + `<span class="job-step-track" role="img" aria-label="${esc(name)} ${esc(durationText(s.durationMs) || '')}">`
         + (bar ? `<span class="job-step-bar job-step-bar-${esc(bar.status)}" style="left:${bar.leftPct}%;width:${bar.widthPct}%"></span>` : '') + `</span>`
-        + `<span class="job-mono job-step-dur">${esc(durationText(s.durationMs) || '—')}</span>`
+        + `<span class="job-mono job-step-dur">${esc((s.status === 'running' && s.durationMs == null && s.startedAt ? durationText(nowMs - Date.parse(s.startedAt)) : durationText(s.durationMs)) || '—')}</span>`
         + (facts.length ? `<span class="job-step-tiles">${facts.map(f => `<span class="kpi-tile"><span class="k">${esc(t(`jobs.tile_${f.key}`))}</span><span class="v">${esc(f.value)}</span></span>`).join('')}</span>` : '')
         + (s.error ? `<div class="job-step-err" role="note">${esc(s.error)}${kind}</div>` : '')
         + `<span class="job-step-acts">`
@@ -342,10 +344,41 @@ function _paintHead(): void {
   const head = _q('#jr-head');
   if (!s || !head) return;
   const admin = Session.isAdmin();
-  const timeline = isChainRun(s.run) ? chainStepsHtml(s.run, s.steps, s.types, Date.now(), admin) : '';
+  // "Restart from this step" is for a single-plant chain: the server answers 400 for a plant run of a fan-out, so it is not offered there.
+  const timeline = isChainRun(s.run) ? chainStepsHtml(s.run, s.steps, s.types, Date.now(), admin && s.run.batchId == null) : '';
+  // The head is repainted whole; keep the focus on the button the admin was on (a step's log / history button).
+  const ae = typeof document !== 'undefined' ? document.activeElement as HTMLElement | null : null;
+  const inHead = !!ae && typeof head.contains === 'function' && head.contains(ae);
+  const keep = inHead && ae ? { id: ae.id, act: ae.dataset?.jrAct, step: ae.dataset?.jrStep, action: ae.dataset?.jrAction } : null;
   head.innerHTML = _headerHtml(s.run, { canCancel: admin && isActiveRun(s.run.status), canRestart: admin && !isActiveRun(s.run.status), longer: s.longer() })
     + (timeline || stepBarHtml(s.run)) + tilesHtml(s.run);
+  if (keep) {
+    const sel = keep.id ? `#${keep.id}` : keep.act ? `[data-jr-act="${keep.act}"]${keep.step ? `[data-jr-step="${keep.step}"]` : ''}${keep.action ? `[data-jr-action="${keep.action}"]` : ''}` : '';
+    if (sel) head.querySelector<HTMLElement>(sel)?.focus();
+  }
+  _syncTicker(s);
   _updateLive();
+}
+
+/** While a step runs and the pane is showing, a 1 s timer grows its bar and its duration between the 2 s polls (cleared on leave). */
+function _syncTicker(s: DetailState): void {
+  const need = isChainRun(s.run) && s.steps.some(x => x.status === 'running');
+  if (need && !s.tick) s.tick = setInterval(() => _tickBars(s), 1000);
+  else if (!need && s.tick) { clearInterval(s.tick); s.tick = null; }
+}
+
+export function _tickBars(s: Pick<DetailState, 'steps' | 'visible'>, root: ParentNode | null = _q('#jr-steps')): void {
+  if (!root || !s.visible()) return;
+  const now = Date.now();
+  const bars = new Map(stepWaterfall(s.steps, now).map(b => [b.seq, b]));
+  for (const st of s.steps) {
+    const row = root.querySelector<HTMLElement>(`[data-step-seq="${st.seq}"]`);
+    const b = bars.get(st.seq);
+    const bar = row?.querySelector<HTMLElement>('.job-step-bar');
+    if (bar && b) { bar.style.left = `${b.leftPct}%`; bar.style.width = `${b.widthPct}%`; }
+    const dur = row?.querySelector<HTMLElement>('.job-step-dur');
+    if (dur && st.status === 'running' && st.startedAt) dur.textContent = durationText(now - Date.parse(st.startedAt)) || '—';
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -529,15 +562,19 @@ function _copy(text: string): void {
 
 /** Restart a failed chain at its failed step (confirm first; a step that is not safe to repeat gets a stronger warning and `confirm`). */
 async function _restartFromStep(s: DetailState, seq?: number): Promise<void> {
+  if (s.run.batchId != null) return;                 // a plant run of a fan-out restarts whole (the server refuses a step restart)
   const step = (seq ? s.steps.find(x => x.seq === seq) : null) ?? restartStepOf(s.run, s.steps);
   if (!step) return;
+  // Starting at a step AFTER one that failed leaves that one failed and not re-run: the confirm says so.
+  const skipped = step.status === 'skipped' ? s.steps.find(x => x.seq < step.seq && (x.status === 'failed' || x.status === 'cancelled') && ranInRun(x) == null) : undefined;
   const meta = findType(s.types, step.stepType);
   const safe = step.status === 'skipped' || meta?.idempotent === true;
   const name = stepTitle({ type: step.stepType, label: step.label }, s.types, deps);
   const ok = await Modal.confirm({
     title: t('jobs.confirm_restart_step', { name: s.run.job_name, n: step.seq }),
-    message: t(safe ? 'jobs.confirm_restart_step_msg' : 'jobs.confirm_restart_step_unsafe', { n: step.seq, step: name }),
-    confirmLabel: t('jobs.restart_step'), tone: safe ? undefined : 'warn',
+    message: skipped ? t('jobs.confirm_restart_step_skips', { k: skipped.seq, n: step.seq })
+      : t(safe ? 'jobs.confirm_restart_step_msg' : 'jobs.confirm_restart_step_unsafe', { n: step.seq, step: name }),
+    confirmLabel: t('jobs.restart_step'), tone: safe && !skipped ? undefined : 'warn',
   });
   if (!ok || _d !== s) return;
   try {
@@ -557,7 +594,7 @@ export const JobsRunDetail = {
       wrap: false, open: new Set(), vl: null, timer: null, inflight: false, proposal: { vl: null, seq: 0 },
       art: { seq: 0, rows: new Map(), vls: new Map() },
       onChanged: opts.onChanged ?? null, onRestart: opts.onRestart ?? null, visible: opts.visible, longer: opts.longer ?? (() => false),
-      steps: [], types: opts.types ?? [], stepSeq: null,
+      steps: [], types: opts.types ?? [], stepSeq: null, tick: null,
     };
     _d = s;
     host.innerHTML = `<div id="jr-head"></div>${_toolbarHtml(s)}`
@@ -610,11 +647,16 @@ export const JobsRunDetail = {
         // Restart = run the job now with its CURRENT settings, so the confirm names its current mode (not the old run's).
         // A plant run of a multi-plant job restarts THAT plant only, and the confirm says which.
         const multi = s.run.batchId != null;
-        void JobsClient.jobParams(s.run.job_id).then(p => Modal.confirm({
-          title: multi ? t('jobs.confirm_restart_plant', { name: s.run.job_name, plant: s.run.plant }) : t('jobs.confirm_restart', { name: s.run.job_name }),
-          message: t(multi ? 'jobs.confirm_restart_plant_msg' : 'jobs.confirm_restart_msg', { plant: s.run.plant, mode: t(String(p.apply_mode) === 'propose' ? 'jobs.result_propose' : 'jobs.result_apply') }),
-          confirmLabel: t('jobs.restart'),
-        })).then(ok => ok ? JobsClient.restartRun(s.run.id).then(nr => { Toast.show(t('jobs.toast_run_started', { name: nr.job_name }), 'success'); s.onRestart?.(nr); }) : undefined)
+        let unsafe: string | null = null;      // a chain with a step that is not safe to repeat: stronger warning + the server's confirm flag
+        void JobsClient.jobParams(s.run.job_id).then(p => {
+          if (isChainRun(s.run) && Array.isArray(p.steps)) unsafe = firstUnsafeStep((p.steps as Array<Record<string, unknown>>).map(stepFromWire), s.types, deps);
+          return Modal.confirm({
+            title: multi ? t('jobs.confirm_restart_plant', { name: s.run.job_name, plant: s.run.plant }) : t('jobs.confirm_restart', { name: s.run.job_name }),
+            message: unsafe ? t('jobs.confirm_restart_unsafe', { step: unsafe })
+              : t(multi ? 'jobs.confirm_restart_plant_msg' : 'jobs.confirm_restart_msg', { plant: s.run.plant, mode: t(String(p.apply_mode) === 'propose' ? 'jobs.result_propose' : 'jobs.result_apply') }),
+            confirmLabel: t('jobs.restart'), tone: unsafe ? 'warn' : undefined,
+          });
+        }).then(ok => ok ? JobsClient.restartRun(s.run.id, { confirm: unsafe != null }).then(nr => { Toast.show(t('jobs.toast_run_started', { name: nr.job_name }), 'success'); s.onRestart?.(nr); }) : undefined)
           .catch((err: Error) => Toast.show(t('jobs.toast_action_failed', { msg: err.message }), 'error'));
       }
       else if (act === 'cancel') {
@@ -661,6 +703,7 @@ export const JobsRunDetail = {
 
   stop(): void {
     if (_d?.timer) clearTimeout(_d.timer);
+    if (_d?.tick) { clearInterval(_d.tick); _d.tick = null; }
     if (_d) { _d.host.onclick = null; _d.host.onchange = null; _d.host.oninput = null; }
     _d = null;
   },

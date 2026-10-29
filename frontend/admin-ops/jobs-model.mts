@@ -67,10 +67,21 @@ export function skipReasonText(error: string, d: Pick<JobsDeps, 't'>): string {
 }
 
 /** A run's badge: Missed for a misfire, else its status; Skipped carries the reason beside it. */
-export function runStatusHtml(run: { status: string; error?: string | null }, d: JobsDeps): string {
+export function runStatusHtml(run: { status: string; error?: string | null; summary?: RunSummary | null }, d: JobsDeps): string {
   const shown = displayStatus(run);
   const reason = shown === 'skipped' && run.error ? ` <span class="job-sub">${d.esc(skipReasonText(run.error, d))}</span>` : '';
-  return statusBadgeHtml(shown, d) + reason;
+  const n = toleratedFailures(run);
+  const failed = n ? ` <span class="job-sub job-warn-failed">${d.esc(plural('jobs.warn_failed_steps', n, d, { n }))}</span>` : '';
+  return statusBadgeHtml(shown, d) + reason + failed;
+}
+
+/** A `warning` chain run that is a step which FAILED and did not stop the chain (continue on failure): the count, else 0.
+ *  The status stays Finished with warnings; this is the text that tells an admin a step failed (a nightly purge that
+ *  keeps refusing at its row limit would otherwise look like an ordinary warning). */
+export function toleratedFailures(run: { status: string; summary?: RunSummary | null }): number {
+  if (run.status !== 'warning') return 0;
+  const n = run.summary?.step_counts?.failed;
+  return typeof n === 'number' && n > 0 ? n : 0;
 }
 
 export type ErrorKind = 'config' | 'system' | 'transient';
@@ -526,6 +537,8 @@ export interface RunSummary {
   row_counts?: Record<string, number> | null;
   artifact?: { size_bytes?: number; truncated?: boolean } | null;
   window?: { start: string; end: string; label: string; timezone: string } | null;
+  /** Chain runs: steps per status, and the steps that failed without stopping the chain ("step 2: Purge"). */
+  step_counts?: Record<string, number> | null; tolerated_failures?: string[] | null;
 }
 export const RESULT_TILES = ['late', 'changeovers', 'moved', 'applied', 'dropped'] as const;
 
@@ -808,6 +821,8 @@ export interface JobForm {
   steps: ChainStep[];
   /** The template this job was made from and its version then (the job keeps its own copy of the steps). */
   templateId: number | null;
+  /** W4a fix wave: what a template's defaults give a NEW job made from it (retry count, time limit); null otherwise. Sent on create only. */
+  tplDefaults?: { retryMax: number | null; timeoutS: number | null; retryIgnored?: boolean } | null;
   templateVersion: number | null;
 }
 
@@ -1045,7 +1060,7 @@ export function batchTiles(b: { counts: Record<string, number> }): Array<{ key: 
 
 /** The request bodies for a valid form: the job (params as the form holds them) and its ScheduleIn. The server owns the zone and the cron. */
 export function buildJobPayload(f: JobForm): {
-  job: { name: string; plant: string; job_type: string; params: Record<string, unknown>; template_id?: number; targets: JobTarget[]; fan_out: { stagger_s: number; max_parallel: number | null; fail_fast: boolean } | null };
+  job: { name: string; plant: string; job_type: string; params: Record<string, unknown>; template_id?: number; retry_max?: number; timeout_s?: number; targets: JobTarget[]; fan_out: { stagger_s: number; max_parallel: number | null; fail_fast: boolean } | null };
   schedule: ScheduleIn & { valid_from: string | null; valid_until: string | null; skip_if_running: boolean; tz_mode: TzMode; fixed_timezone: string | null; options: Record<string, unknown> | null };
 } {
   const targets = buildTargetRows(f);
@@ -1056,6 +1071,8 @@ export function buildJobPayload(f: JobForm): {
     job: {
       name: f.name.trim(), plant: f.plant, job_type: f.jobType, params, targets,
       ...(isChainKey(f.jobType) && f.templateId != null ? { template_id: f.templateId } : {}),
+      ...(f.tplDefaults?.retryMax != null ? { retry_max: f.tplDefaults.retryMax } : {}),
+      ...(f.tplDefaults?.timeoutS != null ? { timeout_s: f.tplDefaults.timeoutS } : {}),
       fan_out: targets.length ? { stagger_s: f.fanOut.staggerS, max_parallel: f.fanOut.maxParallel, fail_fast: f.fanOut.failFast } : null,
     },
     schedule: {
@@ -1409,6 +1426,44 @@ export function stepWaterfall(steps: ReadonlyArray<Pick<StepRow, 'seq' | 'status
   });
 }
 
+/** The id a dependent control belongs to: the window picker that `filter_by_window` shows / hides and the hint line under
+ *  `apply_mode`, for the type's own form (`jb-p-...`) AND for a chain step's card (`jb-s<i>-p-...`). Null for any other id. */
+export function dependentFields(id: string): { kind: 'filter_by_window' | 'apply_mode'; windowId?: string; hintId?: string } | null {
+  const fw = /^(jb-(?:s\d+-)?p-)filter_by_window$/.exec(id);
+  if (fw) return { kind: 'filter_by_window', windowId: `${fw[1]}window` };
+  const am = /^jb-(?:s\d+-)?p-apply_mode$/.exec(id);
+  if (am) return { kind: 'apply_mode', hintId: `${id}-hint` };
+  return null;
+}
+
+/** A step the admin has set up (any param off its default, a name, continue-on-failure, a cleanup rule): removing it asks first. */
+export function stepIsCustomised(st: ChainStep, meta: TypeMeta | null): boolean {
+  if (st.label.trim() || st.continueOnFailure || st.runOn !== 'success') return true;
+  if (!meta) return Object.keys(st.params).length > 0;
+  const base = seedParams(meta, meta.defaults);
+  const keys = new Set([...Object.keys(base), ...Object.keys(st.params)]);
+  return [...keys].some(k => JSON.stringify(base[k] ?? null) !== JSON.stringify(st.params[k] ?? null));
+}
+
+/** The first step of a chain whose type is not safe to run twice (a purge): its name, else null. */
+export function firstUnsafeStep(steps: ReadonlyArray<Pick<ChainStep, 'type' | 'label'>>, types: ReadonlyArray<TypeMeta>, d: Pick<JobsDeps, 't'>): string | null {
+  for (const s of steps) {
+    const m = findType(types, s.type);
+    if (m && !m.idempotent) return stepTitle(s, types, d);
+  }
+  return null;
+}
+
+/** A template's defaults for a NEW job: the retry count (ignored when the chain has a step that is not safe to repeat, the
+ *  server would never retry it) and the time limit. `retryIgnored` drives the visible hint. */
+export function templateDefaults(tpl: Pick<JobTemplate, 'defaults' | 'steps'>, types: ReadonlyArray<TypeMeta>, d: Pick<JobsDeps, 't'>):
+  { retryMax: number | null; timeoutS: number | null; retryIgnored: boolean } {
+  const retry = typeof tpl.defaults.retry_max === 'number' ? tpl.defaults.retry_max : null;
+  const timeout = typeof tpl.defaults.timeout_s === 'number' ? tpl.defaults.timeout_s : null;
+  const unsafe = firstUnsafeStep(tpl.steps.map(stepFromWire), types, d) != null;
+  return { retryMax: retry != null && retry > 0 && !unsafe ? retry : null, timeoutS: timeout, retryIgnored: retry != null && retry > 0 && unsafe };
+}
+
 /** The step "Restart from failed step" would start at: the first failed or cancelled one, else the first never-run one. */
 export function restartStepOf(run: { status: string }, steps: ReadonlyArray<StepRow>): StepRow | null {
   if (run.status !== 'failed' && run.status !== 'cancelled') return null;
@@ -1422,7 +1477,7 @@ export interface JobTemplate {
   version: number; createdBy: string | null; modifiedAt: string | null; archived: boolean;
 }
 /** On a job: the template it was made from, the version it holds and the current one. */
-export interface TemplateRef { id: number; name: string; version: number | null; currentVersion: number; archived: boolean; changed: boolean }
+export interface TemplateRef { id: number; name: string; version: number | null; currentVersion: number; archived: boolean; changed: boolean; editedLocally?: boolean }
 export interface StepDiff { seq: number; change: 'same' | 'changed' | 'added' | 'removed'; job: Record<string, unknown> | null; template: Record<string, unknown> | null; fields: string[] }
 
 /** One line per step of the diff: "Step 2: changed (Maximum orders to remove)", "Step 3: removed in the template". */

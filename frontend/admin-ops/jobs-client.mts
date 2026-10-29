@@ -186,7 +186,7 @@ export function normJob(r: Raw): Job {
 
 export function normTemplateRef(r: Raw): TemplateRef {
   return { id: Number(r.id), name: String(r.name ?? ''), version: r.version == null ? null : Number(r.version),
-    currentVersion: Number(r.current_version ?? r.version ?? 0), archived: r.archived === true, changed: r.changed === true };
+    currentVersion: Number(r.current_version ?? r.version ?? 0), archived: r.archived === true, changed: r.changed === true, editedLocally: r.edited_locally === true };
 }
 
 export function normTemplate(r: Raw): JobTemplate {
@@ -358,8 +358,11 @@ export const JobsClient = {
   async createTemplate(body: { name: string; description?: string | null; steps: Array<Record<string, unknown>>; defaults?: Record<string, unknown> }): Promise<JobTemplate> {
     return normTemplate((((await _req('POST', '/jobs/templates', body)) as Raw).template) as Raw);
   },
-  async updateTemplate(id: number, patch: { name?: string; description?: string | null; steps?: Array<Record<string, unknown>>; archived?: boolean }): Promise<JobTemplate> {
-    return normTemplate((((await _req('PATCH', `/jobs/templates/${id}`, patch)) as Raw).template) as Raw);
+  /** `expectedVersion` is the If-Match: the version the editor opened; a template saved by someone else since is a 409 (the message names its version). */
+  async updateTemplate(id: number, patch: { name?: string; description?: string | null; steps?: Array<Record<string, unknown>>; archived?: boolean; expectedVersion?: number }): Promise<JobTemplate> {
+    const { expectedVersion, ...rest } = patch;
+    const body: Raw = expectedVersion != null ? { ...rest, expected_version: expectedVersion } : rest;
+    return normTemplate((((await _req('PATCH', `/jobs/templates/${id}`, body)) as Raw).template) as Raw);
   },
   /** The job's copy of its steps against the template's current ones. */
   async templateDiff(jobId: number): Promise<{ template: { id: number; name: string; version: number; archived: boolean }; jobVersion: number | null; changed: boolean; diff: StepDiff[] }> {
@@ -369,7 +372,10 @@ export const JobsClient = {
       jobVersion: d.job_version == null ? null : Number(d.job_version), changed: d.changed === true, diff: _arr(d, 'diff').map(normStepDiff) };
   },
   /** Replace the job's copy of the steps with the template's current ones. */
-  async updateFromTemplate(jobId: number): Promise<Job> { return normJob((await _req('POST', `/jobs/${jobId}/template/update`)) as Raw); },
+  async updateFromTemplate(jobId: number): Promise<{ job: Job; overriddenPlants: string[] }> {
+    const r = await _req('POST', `/jobs/${jobId}/template/update`) as Raw;
+    return { job: normJob(r), overriddenPlants: Array.isArray(r.steps_overridden_plants) ? (r.steps_overridden_plants as unknown[]).map(String) : [] };
+  },
   /** Restart a failed / cancelled chain run at `fromStep` (default: its first failed step); `confirm` for a step that is not safe to repeat. */
   async restartFromStep(runId: number, o: { fromStep?: number; confirm?: boolean } = {}): Promise<JobRun> {
     const body: Raw = { confirm: o.confirm === true };
@@ -444,7 +450,9 @@ export const JobsClient = {
   /** Re-run only the failed, skipped or cancelled plants of a batch (admin); answers the first new run. */
   async restartBatch(id: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/batches/${id}/restart`)) as Raw).run) as Raw); },
   /** Run again the PLANT of this run only (admin); 409 while a run of that plant is active. */
-  async restartRun(runId: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/runs/${runId}/restart`)) as Raw).run) as Raw); },
+  async restartRun(runId: number, o: { confirm?: boolean } = {}): Promise<JobRun> {
+    return normRun((((await _req('POST', `/jobs/runs/${runId}/restart`, o.confirm ? { confirm: true } : undefined)) as Raw).run) as Raw);
+  },
   /** The job's CURRENT params (what a restart would run with). */
   async jobParams(jobId: number): Promise<Record<string, unknown>> {
     const jobs = await _req('GET', `/jobs?limit=1&before_id=${jobId + 1}&include_archived=true`);

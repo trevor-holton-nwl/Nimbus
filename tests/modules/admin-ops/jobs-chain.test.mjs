@@ -211,9 +211,9 @@ test('the dialog shows the step builder for a chain and the params form for any 
   assert.doesNotMatch(html, /id="jb-p-/, 'no top-level param ids in a chain dialog');
   assert.match(html, /<details class="job-step-adv"><summary>jobs\.step_advanced/, 'on-failure is visible, run-when and name are under Advanced');
   assert.match(html, /id="jb-s0-onfail"/); assert.match(html, /id="jb-s0-runon"/);
-  assert.match(html, /data-jb-act="tpl-save"/); assert.doesNotMatch(html, /data-jb-act="tpl-update"/);
-  const linked = chainHtml({ ...f, templateId: 3 }, TYPES, true, WITH_TPL, 'edit');
-  assert.match(linked, /data-jb-act="tpl-update"/); assert.doesNotMatch(linked, /id="jb-template"/, 'the picker is for a new job only');
+  assert.match(html, /data-jb-act="tpl-save"/); assert.doesNotMatch(html, /data-jb-act="tpl-update"/, 'one Save as template button; a tied job is asked which one it means');
+  const linked = chainHtml({ ...f, templateId: 3, templateVersion: 2 }, TYPES, true, WITH_TPL, 'edit');
+  assert.match(linked, /jobs\.tpl_tied/, 'the dialog says which template the job is tied to'); assert.doesNotMatch(linked, /id="jb-template"/, 'the picker is for a new job only');
   const plain = bodyHtml(M.defaultJobForm('1008', 'optimizer.plant', OPT.defaults, OPT), 'new', true, OPT, TYPES, WITH_TPL);
   assert.match(plain, /id="jb-p-mode"/); assert.doesNotMatch(plain, /id="jb-chain"/);
 });
@@ -286,7 +286,7 @@ test('the run detail lists each step with its status, bar, counts, error, histor
     { seq: 3, stepType: 'report.late_orders', label: null, runOn: 'always', status: 'skipped', startedAt: null, endedAt: null, durationMs: null, summary: { reason: 'x' }, error: null, errorKind: null, actionId: null },
   ];
   const html = chainStepsHtml(run, rows, TYPES, Date.now(), true);
-  assert.equal((html.match(/class="job-step-row"/g) || []).length, 3);
+  assert.equal((html.match(/class="job-step-row job-step-\w+/g) || []).length, 3);
   assert.match(html, /Re-optimize/); assert.match(html, /write refused/); assert.match(html, /jobs\.error_kind_transient/);
   assert.match(html, /job-step-bar job-step-bar-failed/);
   assert.match(html, /kpi-tile[^>]*><span class="k">jobs\.tile_deleted<\/span><span class="v">12</);

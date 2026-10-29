@@ -29,7 +29,7 @@ import {
   mergeRuns, stripCompleteThrough, healthTiles, heartbeatState, ageText, shouldPollJobs, runSequential, isActiveRun, isLongerThanUsual, tzShort,
   typeLabel, typeGroups, findType, isReportType, targetsLabel, batchTiles, statusBadgeHtml, statusLabel, BATCH_STATUSES, plural,
   TL_RANGES, TL_W, timelineWindow, timelineBars, timelineTicks, timelineRows, policyNoteText, statusBadgeClass,
-  chainSummaryText, diffLines, stepFromWire, isChainKey,
+  chainSummaryText, diffLines, stepFromWire, isChainKey, firstUnsafeStep,
 } from './jobs-model.mjs';
 import type { UpcomingRun, HealthSummary, RunsQuery } from './jobs-model.mjs';
 import type { UpcomingEntry } from './jobs-client.mjs';
@@ -65,6 +65,7 @@ let _pollTimer: ReturnType<typeof setTimeout> | null = null;
 let _type = '';
 let _types: JobType[] = [];
 let _templates: JobTemplate[] = [];
+let _tplSeq = 0;                 // _loadTemplates: only the newest response may replace the list
 let _tplArchived = false;        // templates tab: also list archived ones
 let _jobs: Job[] = [];
 let _nextBeforeJob: number | null = null;
@@ -315,7 +316,11 @@ async function _openNew(templateId?: number): Promise<void> {
 /** Admins read the templates (the dialog's picker, the Templates tab); a failed load just leaves the list as it was. */
 async function _loadTemplates(): Promise<void> {
   if (!_isAdmin()) return;
-  try { _templates = await JobsClient.templates(_tplArchived); } catch { /* keep the last list */ }
+  const seq = ++_tplSeq;
+  try {
+    const list = await JobsClient.templates(_tplArchived);
+    if (seq === _tplSeq) _templates = list;         // a slower, older response never overwrites a newer one
+  } catch { /* keep the last list */ }
 }
 
 /** Under a job's name: the Result badge and search time for an optimizer job, the Report badge and type for a report. */
@@ -327,6 +332,7 @@ function _jobSubHtml(j: Job): string {
     const steps = Array.isArray(j.params.steps) ? (j.params.steps as Array<Record<string, unknown>>).map(stepFromWire) : [];
     const tpl = j.template;
     return `<span class="badge badge-info job-kind">${esc(t('jobs.kind_chain'))}</span> ${esc(chainSummaryText(steps, _types, jobsDeps()))}`
+      + (tpl?.editedLocally ? ` <span class="badge badge-muted job-tpl-edited">${esc(t('jobs.tpl_edited_locally'))}</span>` : '')
       + (tpl?.changed && _isAdmin() ? ` <button type="button" class="btn btn-ghost sm job-tpl-changed" data-jobs-act="tpl-update" data-job-id="${j.id}">${esc(t('jobs.tpl_changed', { name: tpl.name }))}</button>`
         : tpl?.changed ? ` <span class="badge badge-warn">${esc(t('jobs.tpl_changed_badge'))}</span>` : '');
   }
@@ -455,8 +461,13 @@ async function _restartLast(j: Job): Promise<void> {
   if (!j.last_run) return;
   // Restart runs the job NOW with its current settings, so the confirm names the job's current mode.
   const mode = t(String(j.params.apply_mode ?? 'apply') === 'propose' ? 'jobs.result_propose' : 'jobs.result_apply');
-  if (!await Modal.confirm({ title: t('jobs.confirm_restart', { name: j.name }), message: t('jobs.confirm_restart_msg', { mode }), confirmLabel: t('jobs.restart') })) return;
-  try { const r = await JobsClient.restartRun(j.last_run.id); _watch(r, j.name); Toast.show(t('jobs.toast_run_started', { name: j.name }), 'success'); void _loadJobs(false, true); void _loadHealth(); }
+  // A chain with a step that is not safe to repeat (a purge) gets the stronger warning and the server's confirm flag.
+  const unsafe = isChainKey(j.job_type) && Array.isArray(j.params.steps)
+    ? firstUnsafeStep((j.params.steps as Array<Record<string, unknown>>).map(stepFromWire), _types, jobsDeps()) : null;
+  if (!await Modal.confirm(unsafe
+    ? { title: t('jobs.confirm_restart', { name: j.name }), message: t('jobs.confirm_restart_unsafe', { step: unsafe }), confirmLabel: t('jobs.restart'), tone: 'warn' }
+    : { title: t('jobs.confirm_restart', { name: j.name }), message: t('jobs.confirm_restart_msg', { mode }), confirmLabel: t('jobs.restart') })) return;
+  try { const r = await JobsClient.restartRun(j.last_run.id, { confirm: unsafe != null }); _watch(r, j.name); Toast.show(t('jobs.toast_run_started', { name: j.name }), 'success'); void _loadJobs(false, true); void _loadHealth(); }
   catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
 }
 
@@ -503,8 +514,10 @@ async function _templateUpdate(j: Job): Promise<void> {
     const ok = await Modal.confirm({ title: t('jobs.tpl_update_title', { name: j.name }), message: t('jobs.tpl_update_msg', { tpl: d.template.name }),
       detail: lines.length ? lines.join('\n') : t('jobs.tpl_no_diff'), confirmLabel: t('jobs.tpl_update_btn') });
     if (!ok) return;
-    await JobsClient.updateFromTemplate(j.id);
+    const res = await JobsClient.updateFromTemplate(j.id);
     Toast.show(t('jobs.tpl_updated'), 'success');
+    // A plant whose per-plant override replaces the steps keeps its own steps: say so rather than let it look updated.
+    if (res.overriddenPlants.length) Toast.show(t('jobs.tpl_overridden_note', { plants: res.overriddenPlants.slice(0, 6).join(', ') + (res.overriddenPlants.length > 6 ? ', ...' : '') }), 'info');
     void _loadJobs();
   } catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
 }

@@ -8324,6 +8324,19 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .job-step-bar { position: absolute; top: 0; bottom: 0; background: var(--fg-mute); border-radius: var(--r-sm); }
 .job-step-bar-failed { background: var(--err); }
 .job-step-bar-warning { background: var(--warn); }
+/* W4a fix wave: every step status has a style (tokens only). A step "done in an earlier run" reads quieter than one that ran here. */
+.job-step-bar-running { background: var(--accent); }
+.job-step-bar-succeeded { background: var(--fg-mute); }
+.job-step-bar-cancelled { background: var(--fg-faint); }
+.job-step-bar-skipped { background: var(--bg-strong); }
+.job-step-row.job-step-running { border-color: var(--accent); }
+.job-step-row.job-step-failed { border-color: var(--err); }
+.job-step-row.job-step-warning { border-color: var(--warn); }
+.job-step-row.job-step-pending, .job-step-row.job-step-skipped, .job-step-row.job-step-cancelled { border-style: dashed; }
+.job-step-row.job-step-earlier { background: var(--bg-subtle); }
+.job-step-row.job-step-earlier .job-step-name { color: var(--fg-mute); }
+.job-step-btns .icon-btn.job-step-act { width: 32px; height: 32px; }
+.job-warn-failed { color: var(--warn); }
 .job-step-dur { text-align: right; font-size: 12px; }
 .job-step-tiles, .job-step-err, .job-step-acts { grid-column: 2 / -1; }
 .job-step-tiles { display: flex; flex-wrap: wrap; gap: 6px; }
