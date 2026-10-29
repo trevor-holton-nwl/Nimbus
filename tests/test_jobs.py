@@ -726,10 +726,10 @@ def test_run_blocked_on_the_optimizer_slot_counts_as_queued(api, jobs_pg, monkey
         ra = api.post(f"/jobs/{a['id']}/run").json()["run"]
         assert entered.wait(10)
         rb = api.post(f"/jobs/{b['id']}/run").json()["run"]
-        _wait(api, rb["id"], done=("running",))
+        time.sleep(0.5)      # D4: the runner takes the slot BEFORE the global semaphore, so a waiter stays `scheduled`
         s = api.get("/jobs/summary").json()
         assert (s["running"], s["queued"]) == (1, 1)
-        assert api.get(f"/jobs/runs/{rb['id']}").json()["run"]["summary"]["waiting_for"] == "slot"
+        assert api.get(f"/jobs/runs/{rb['id']}").json()["run"]["status"] == "scheduled"
         released = datetime.now(timezone.utc)
         gate.set()
         fa, fb = _wait(api, ra["id"]), _wait(api, rb["id"])

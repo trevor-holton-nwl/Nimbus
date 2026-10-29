@@ -39,6 +39,11 @@ test('every key the Jobs sources ask for is defined', () => {
     'jobs.win_': ['fixed', 'older_than', 'last', 'next', 'since_last_success', 'this_week', 'this_month', 'custom'],
     'jobs.win_anchor_': ['now', 'start_of_day', 'start_of_week', 'start_of_month', 'last_success'],
     'jobs.win_unit_': ['day', 'week', 'month'],
+    'jobs.t_mode_': ['single', 'selected', 'all', 'subnetwork'],
+    'jobs.tz_mode_': ['plant', 'fixed', 'utc'],
+    'jobs.view_': ['runs', 'batches'],
+    'jobs.batch_tile_': ['total', 'succeeded', 'warning', 'failed', 'skipped', 'cancelled', 'running', 'scheduled'],
+    'jobs.batch_trigger_': ['schedule', 'manual', 'restart'],
   };
   for (const [p, vs] of Object.entries(families)) for (const v of vs) keys.add(p + v);
   const missing = [...keys].filter(k => !k.endsWith('_') && !tables.en[k]);   // `'jobs.mode_' + m` is a dynamic prefix

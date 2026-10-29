@@ -229,6 +229,12 @@ export function buildJobsQuery(o: JobsQuery): string {
   return _qs([['plant', o.plant], ['q', (o.q ?? '').trim()], ['status', o.status], ['job_type', o.type], ['before_id', o.beforeId], ['limit', limit]]);
 }
 
+export interface BatchesQuery { plant?: string; status?: string; jobId?: number | string; beforeId?: number | string | null; limit?: number }
+export function buildBatchesQuery(o: BatchesQuery): string {
+  const limit = Math.max(1, Math.min(200, Math.floor(o.limit ?? RUNS_PAGE)));
+  return _qs([['plant', o.plant], ['status', o.status], ['job_id', o.jobId], ['before_id', o.beforeId], ['limit', limit]]);
+}
+
 export interface RunsQuery {
   plant?: string; status?: string; beforeId?: number | string | null; limit?: number; jobId?: number | string;
   /** Schedule kind (or `manual`), `triggered_by` ('schedule' or an admin email) and a look-back window in hours. */
@@ -392,6 +398,8 @@ export interface HealthSummary {
   running: number; queued: number; failed24h: number; missed24h: number; warning24h: number;
   /** The failed count split by `error_kind`: fix the job / platform error / the board changed under the run. */
   failedConfig24h: number; failedSystem24h: number; failedTransient24h: number;
+  /** Fan-out BATCHES that finished failed in the last 24 h (the counts above are plant runs). */
+  failedBatches24h: number;
   nextFire: { atUtc: string; atLocal: string; jobId: number; jobName: string; plant: string } | null;
   scheduler: { ok: boolean; lastTickAt: string | null };
   longerThanUsual: number[];
@@ -523,7 +531,7 @@ export function addDays(dayKey: string, n: number): string {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
-export interface UpcomingRun { at: string; jobId?: number | string; jobName?: string; plant?: string }
+export interface UpcomingRun { at: string; jobId?: number | string; jobName?: string; plant?: string; tz?: string }
 export interface StripDay { day: string; runs: UpcomingRun[] }
 
 /** Seven consecutive day buckets from `startDay` (the plant's today); runs outside the week are ignored. */
@@ -751,18 +759,55 @@ export interface JobForm {
   validFrom: string;
   validUntil: string;
   skipIfRunning: boolean;
+  /** W3a. `single` = the home plant only (today's job: no target rows). `selected` = `targetPlants`, `all` = every plant the
+   *  admin may reach, `subnetwork` = every plant of `targetSubnetwork`; `excludedPlants` removes plants from `all` / `subnetwork`. */
+  targetMode: TargetMode;
+  targetPlants: string[];
+  targetSubnetwork: string;
+  excludedPlants: string[];
+  /** The target rows as saved: their per-plant `params_override` (API-only, no editor yet) rides along unchanged on save. */
+  storedTargets: JobTarget[];
+  /** The saved rows combine kinds the form cannot show (several kinds, an excluded subnetwork): they are kept exactly as
+   *  saved and the target controls are replaced by a note, so an edit never drops a row. */
+  targetsLocked?: boolean;
+  fanOut: FanOutForm;
+  /** How the schedule's times are read: each plant's own zone, one fixed zone, or UTC. */
+  tzMode: TzMode;
+  fixedTz: string;
+}
+
+export type TargetMode = 'single' | 'selected' | 'all' | 'subnetwork';
+export const TARGET_MODES: readonly TargetMode[] = ['single', 'selected', 'all', 'subnetwork'];
+export type TzMode = 'plant' | 'fixed' | 'utc';
+export const TZ_MODES: readonly TzMode[] = ['plant', 'fixed', 'utc'];
+export interface JobTarget { kind: 'explicit' | 'subnetwork' | 'all'; value: string; excluded: boolean; params_override: Record<string, unknown> | null }
+export interface FanOutForm { staggerS: number; maxParallel: number | null; failFast: boolean }
+export const FAN_OUT_DEFAULT: FanOutForm = { staggerS: 0, maxParallel: null, failFast: false };
+export const STAGGER_MAX = 3600;
+export const PARALLEL_MAX = 50;
+/** The server refuses more than this many target rows on one job (explicit plants + exclusions). */
+export const TARGET_ROWS_MAX = 500;
+
+/** `key` or `key_one` for a count of one (the locale tables spell singular and plural as two keys). */
+export function plural(key: string, n: number, d: Pick<JobsDeps, 't'>, vars: Record<string, string | number> = {}): string {
+  if (n === 1) { const one = tryKey(`${key}_one`, d); if (one) return d.t(`${key}_one`, { n, ...vars }); }
+  return d.t(key, { n, ...vars });
 }
 
 /** A new job starts from the server's own param defaults (`GET /jobs/types` -> `defaults`, plus each param's default).
  *  The Result defaults to APPLY (SAP-style background job; owner ruling 2026-10-28); a Dry run is the alternative. */
 export function defaultJobForm(plant = '', jobType = 'optimizer.plant', defaults: Record<string, unknown> | null = null, meta: TypeMeta | null = null): JobForm {
-  return { jobType, name: '', plant, params: seedParams(meta, defaults), recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true };
+  return {
+    jobType, name: '', plant, params: seedParams(meta, defaults), recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true,
+    targetMode: 'single', targetPlants: [], targetSubnetwork: '', excludedPlants: [], storedTargets: [], fanOut: { ...FAN_OUT_DEFAULT },
+    tzMode: 'plant', fixedTz: '',
+  };
 }
 
 /** The result mode of a form or a stored params object ('apply' when the job never set one). */
 export const resultOf = (params: Record<string, unknown> | null | undefined): string => String(params?.apply_mode ?? 'apply');
 
-export type FormErrors = Partial<Record<'name' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity', string>>
+export type FormErrors = Partial<Record<'name' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity' | 'targets' | 'fixedTz' | 'fanOut', string>>
   & { params?: Record<string, string> };
 
 /** Field -> i18n key. Empty object = valid. `isAdmin` guards the auto-apply result (the server re-checks).
@@ -795,23 +840,111 @@ export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: strin
     if (r.preset === 'monthly' && !(Number.isInteger(Number(r.dom)) && Number(r.dom) >= 1 && Number(r.dom) <= 31)) e.dom = 'jobs.err_dom';
   }
   if (f.validFrom && f.validUntil && f.validUntil < f.validFrom) e.validity = 'jobs.err_validity';
+  if (f.targetMode === 'selected' && !f.targetPlants.length) e.targets = 'jobs.err_targets_none';
+  if (!f.targetsLocked && targetRowCount(f) > TARGET_ROWS_MAX) e.targets = 'jobs.err_targets_cap';
+  else if (f.targetMode === 'subnetwork' && !f.targetSubnetwork) e.targets = 'jobs.err_targets_subnetwork';
+  else if (o.plants && f.targetMode === 'selected' && f.targetPlants.some(p => !o.plants?.includes(p))) e.targets = 'jobs.err_plant_scope';
+  if (f.tzMode === 'fixed' && !f.fixedTz.trim()) e.fixedTz = 'jobs.err_fixed_tz';
+  if (f.targetMode !== 'single') {
+    const sg = f.fanOut.staggerS; const mp = f.fanOut.maxParallel;
+    if (!Number.isInteger(sg) || sg < 0 || sg > STAGGER_MAX || (mp != null && (!Number.isInteger(mp) || mp < 1 || mp > PARALLEL_MAX))) e.fanOut = 'jobs.err_fan_out';
+  }
   return e;
+}
+
+/** The target rows to save for a form: none for a single-plant job. Per-plant overrides of a row that is still there are kept. */
+export function targetRowCount(f: Pick<JobForm, 'targetMode' | 'targetPlants' | 'excludedPlants'>): number {
+  return f.targetMode === 'selected' ? f.targetPlants.length : f.targetMode === 'single' ? 0 : 1 + f.excludedPlants.length;
+}
+
+/** True when the saved rows survive a round trip through the form's modes (one kind, explicit exclusions only). */
+export function targetsLossless(rows: JobTarget[]): boolean {
+  const inc = rows.filter(r => !r.excluded);
+  if (rows.some(r => r.excluded && r.kind !== 'explicit')) return false;
+  const kinds = new Set(inc.map(r => r.kind));
+  if (kinds.size > 1) return false;
+  if (inc.filter(r => r.kind === 'subnetwork').length > 1 || inc.filter(r => r.kind === 'all').length > 1) return false;
+  return true;
+}
+
+export function buildTargetRows(f: JobForm): JobTarget[] {
+  if (f.targetsLocked) return f.storedTargets.map(r => ({ ...r }));
+  const keep = (kind: JobTarget['kind'], value: string): Record<string, unknown> | null =>
+    f.storedTargets.find(r => !r.excluded && r.kind === kind && r.value === value)?.params_override ?? null;
+  const excl = (): JobTarget[] => f.excludedPlants.map(value => ({ kind: 'explicit' as const, value, excluded: true, params_override: null }));
+  switch (f.targetMode) {
+    case 'selected': return f.targetPlants.map(value => ({ kind: 'explicit' as const, value, excluded: false, params_override: keep('explicit', value) }));
+    case 'all': return [{ kind: 'all', value: '', excluded: false, params_override: f.storedTargets.find(r => r.kind === 'all')?.params_override ?? null }, ...excl()];
+    case 'subnetwork': return [{ kind: 'subnetwork', value: f.targetSubnetwork, excluded: false, params_override: keep('subnetwork', f.targetSubnetwork) }, ...excl()];
+    default: return [];
+  }
+}
+
+/** What the Targets column says: "Plant 1021", "12 plants", "All plants", "Subnetwork NA". */
+export function targetsLabel(j: { plant: string; targetKind?: string; targetCount?: number; targets?: JobTarget[] }, d: Pick<JobsDeps, 't'>): string {
+  const kind = j.targetKind ?? 'single';
+  if (kind === 'single') return d.t('jobs.targets_single', { plant: j.plant });
+  if (kind === 'all') return (j.targetCount ?? 0) > 1 ? d.t('jobs.targets_all_n', { n: j.targetCount ?? 0 }) : (j.targetCount === 1 ? d.t('jobs.targets_all_one') : d.t('jobs.targets_all'));
+  const sub = kind === 'subnetwork' ? j.targets?.find(r => r.kind === 'subnetwork' && !r.excluded)?.value : '';
+  if (sub) return d.t('jobs.targets_subnetwork', { name: sub });
+  return plural('jobs.targets_n', j.targetCount ?? 0, d);
+}
+
+/** Plant codes narrowed by a case-insensitive search, at most `cap` of them (a 50+ plant list is never rendered whole). */
+export function filterPlants(all: string[], q: string, cap = 200): { shown: string[]; total: number } {
+  const needle = q.trim().toLowerCase();
+  const hit = needle ? all.filter(p => p.toLowerCase().includes(needle)) : all;
+  return { shown: hit.slice(0, cap), total: hit.length };
+}
+
+/** "12 plants" / "12 plants; 2 skipped: no timezone" from a targets preview. */
+export function targetsPreviewText(p: { count: number; skipped: number; warnings: string[] }, d: Pick<JobsDeps, 't'>): string {
+  if (!p.skipped) return plural('jobs.t_preview', p.count, d);
+  const reasons = [...new Set(p.warnings.map(w => w.replace(/^[^:]*:\s*/, '')))].map(r => (r === 'plant has no timezone' ? d.t('jobs.t_skip_no_tz') : r === 'plant no longer exists' ? d.t('jobs.t_skip_gone') : r));
+  return plural('jobs.t_preview_skipped', p.count, d, { skipped: p.skipped, reason: reasons.join(', ') });
+}
+
+/** The IANA zones the browser knows (for the fixed-zone picker); a short fallback when the runtime has no list. */
+export function timeZoneList(): string[] {
+  const sv = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf;
+  try { const l = sv?.('timeZone'); if (l?.length) return ['UTC', ...l.filter(z => z !== 'UTC')]; } catch { /* fall through */ }
+  return ['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Sao_Paulo', 'Europe/London', 'Europe/Berlin', 'Europe/Paris', 'Europe/Madrid', 'Asia/Tokyo', 'Asia/Shanghai', 'Australia/Sydney'];
+}
+
+/* ---------------------------------------------------------------------------
+   Batches (a multi-plant fan-out: GET /jobs/batches)
+   ------------------------------------------------------------------------- */
+export const BATCH_STATUSES = ['running', 'succeeded', 'warning', 'failed'] as const;
+export interface Batch {
+  id: number; jobId: number; jobName: string; status: string; trigger: string; triggeredBy: string | null;
+  startedAt: string | null; endedAt: string | null; durationMs: number | null; counts: Record<string, number>;
+}
+/** Count tiles for a batch in a fixed order, zero counts left out ("12 plants" first). */
+export function batchTiles(b: { counts: Record<string, number> }): Array<{ key: string; value: number }> {
+  const order = ['total', 'succeeded', 'warning', 'failed', 'skipped', 'cancelled', 'running', 'scheduled'];
+  return order.filter(k => (b.counts[k] ?? 0) > 0).map(key => ({ key, value: b.counts[key] }));
 }
 
 /** The request bodies for a valid form: the job (params as the form holds them) and its ScheduleIn. The server owns the zone and the cron. */
 export function buildJobPayload(f: JobForm): {
-  job: { name: string; plant: string; job_type: string; params: Record<string, unknown> };
-  schedule: ScheduleIn & { valid_from: string | null; valid_until: string | null; skip_if_running: boolean };
+  job: { name: string; plant: string; job_type: string; params: Record<string, unknown>; targets: JobTarget[]; fan_out: { stagger_s: number; max_parallel: number | null; fail_fast: boolean } | null };
+  schedule: ScheduleIn & { valid_from: string | null; valid_until: string | null; skip_if_running: boolean; tz_mode: TzMode; fixed_timezone: string | null };
 } {
+  const targets = buildTargetRows(f);
   const params: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(f.params)) if (v !== undefined) params[k] = v;
   return {
-    job: { name: f.name.trim(), plant: f.plant, job_type: f.jobType, params },
+    job: {
+      name: f.name.trim(), plant: f.plant, job_type: f.jobType, params, targets,
+      fan_out: targets.length ? { stagger_s: f.fanOut.staggerS, max_parallel: f.fanOut.maxParallel, fail_fast: f.fanOut.failFast } : null,
+    },
     schedule: {
       ...recurrenceToScheduleIn(f.recur),
       valid_from: f.validFrom || null,
       valid_until: f.validUntil || null,
       skip_if_running: f.skipIfRunning,
+      tz_mode: f.tzMode,
+      fixed_timezone: f.tzMode === 'fixed' ? f.fixedTz.trim() : null,
     },
   };
 }
@@ -819,7 +952,8 @@ export function buildJobPayload(f: JobForm): {
 /** A saved job (+ its schedule) back into the form; also the Duplicate seed (caller clears the name). */
 export function jobToForm(job: {
   name?: string; plant?: string; job_type?: string; params?: Record<string, unknown> | null;
-  schedule?: (ScheduleWire & { valid_from?: string | null; valid_until?: string | null; skip_if_running?: boolean | null }) | null;
+  schedule?: (ScheduleWire & { valid_from?: string | null; valid_until?: string | null; skip_if_running?: boolean | null; tzMode?: string | null; fixedTimezone?: string | null }) | null;
+  targets?: JobTarget[] | null; fanOut?: { stagger_s?: number; max_parallel?: number | null; fail_fast?: boolean } | null;
 }, meta: TypeMeta | null = null): JobForm {
   const base = defaultJobForm(job.plant ?? '', job.job_type ?? 'optimizer.plant', null, meta);
   const s = job.schedule;
@@ -831,6 +965,27 @@ export function jobToForm(job: {
     validFrom: String(s?.valid_from ?? '').slice(0, 10),
     validUntil: String(s?.valid_until ?? '').slice(0, 10),
     skipIfRunning: s?.skip_if_running !== false,
+    ...targetsToForm(job.targets ?? [], job.fanOut ?? null),
+    tzMode: s?.tzMode === 'fixed' || s?.tzMode === 'utc' ? s.tzMode : 'plant',
+    fixedTz: s?.tzMode === 'fixed' ? String(s.fixedTimezone ?? '') : '',
+  };
+}
+
+/** Saved target rows back into the form's mode and lists. */
+export function targetsToForm(rows: JobTarget[], fan: { stagger_s?: number; max_parallel?: number | null; fail_fast?: boolean } | null):
+  Pick<JobForm, 'targetMode' | 'targetPlants' | 'targetSubnetwork' | 'excludedPlants' | 'storedTargets' | 'targetsLocked' | 'fanOut'> {
+  const inc = rows.filter(r => !r.excluded);
+  const all = inc.some(r => r.kind === 'all');
+  const sub = inc.find(r => r.kind === 'subnetwork');
+  const mode: TargetMode = !rows.length ? 'single' : all ? 'all' : sub ? 'subnetwork' : 'selected';
+  return {
+    targetsLocked: !targetsLossless(rows),
+    targetMode: mode,
+    targetPlants: mode === 'selected' ? inc.filter(r => r.kind === 'explicit').map(r => r.value) : [],
+    targetSubnetwork: sub?.value ?? '',
+    excludedPlants: rows.filter(r => r.excluded && r.kind === 'explicit').map(r => r.value),
+    storedTargets: rows.map(r => ({ ...r })),
+    fanOut: { staggerS: Number(fan?.stagger_s ?? 0), maxParallel: fan?.max_parallel == null ? null : Number(fan.max_parallel), failFast: fan?.fail_fast === true },
   };
 }
 

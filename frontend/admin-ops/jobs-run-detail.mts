@@ -512,9 +512,11 @@ export const JobsRunDetail = {
       }
       else if (act === 'restart') {
         // Restart = run the job now with its CURRENT settings, so the confirm names its current mode (not the old run's).
+        // A plant run of a multi-plant job restarts THAT plant only, and the confirm says which.
+        const multi = s.run.batchId != null;
         void JobsClient.jobParams(s.run.job_id).then(p => Modal.confirm({
-          title: t('jobs.confirm_restart', { name: s.run.job_name }),
-          message: t('jobs.confirm_restart_msg', { mode: t(String(p.apply_mode) === 'propose' ? 'jobs.result_propose' : 'jobs.result_apply') }),
+          title: multi ? t('jobs.confirm_restart_plant', { name: s.run.job_name, plant: s.run.plant }) : t('jobs.confirm_restart', { name: s.run.job_name }),
+          message: t(multi ? 'jobs.confirm_restart_plant_msg' : 'jobs.confirm_restart_msg', { plant: s.run.plant, mode: t(String(p.apply_mode) === 'propose' ? 'jobs.result_propose' : 'jobs.result_apply') }),
           confirmLabel: t('jobs.restart'),
         })).then(ok => ok ? JobsClient.restartRun(s.run.id).then(nr => { Toast.show(t('jobs.toast_run_started', { name: nr.job_name }), 'success'); s.onRestart?.(nr); }) : undefined)
           .catch((err: Error) => Toast.show(t('jobs.toast_action_failed', { msg: err.message }), 'error'));

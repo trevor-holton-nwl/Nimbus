@@ -1,5 +1,5 @@
 /* =============================================================================
-   JOB DIALOG — create / edit / duplicate a job, and "Copy to plants…".
+   JOB DIALOG — create / edit / duplicate a job (one job, one or many plants).
 
    The static shell (#modal-job-edit) lives in index.html; this module fills the body (#jb-body)
    and footer (#jb-foot) at runtime and opens/closes it through Modal.open/close. Admin only: the
@@ -9,6 +9,9 @@
    The recurrence goes to the server as a PRESET kind (time_of_day, days_of_week, day_of_month); the
    server compiles the cron and previews it with its own trigger (POST /jobs/schedules/preview), so
    what the planner sees is what will fire.
+   Targets (W3a): Single plant (default, today's job) | Selected plants | All plants I can access | Subnetwork, as radios over a
+   searchable checkbox list (never chips), exclusions for All / Subnetwork, a live expansion line from POST /jobs/targets/preview,
+   fan-out settings under Advanced. The schedule's time zone is each plant's own, one fixed zone, or UTC.
    The searchable plant combobox here is the deliberate duplicate the frontend CLAUDE.md allows.
    ========================================================================== */
 
@@ -21,8 +24,9 @@ import {
   RECUR_PRESETS, NAME_MAX, WINDOW_CHOICES, WINDOW_ANCHORS, WINDOW_UNITS, WINDOW_OPEN_START, defaultJobForm, jobToForm,
   validateJobForm, buildJobPayload, recurrenceText, stripOffset, dowLabelKey, seedParams, resultOf, findType, hasApplyMode, typeGroups,
   typeLabel, paramLabel, enumLabel, paramHint, windowToUi, uiToWindow, validateWindowUi,
+  TARGET_MODES, TZ_MODES, STAGGER_MAX, PARALLEL_MAX, buildTargetRows, filterPlants, targetsPreviewText, plural, TARGET_ROWS_MAX, targetRowCount, timeZoneList, tzShort,
 } from './jobs-model.mjs';
-import type { JobForm, FormErrors, Recurrence, JobsDeps, TypeMeta, ParamMeta, DateWindow, WindowUi } from './jobs-model.mjs';
+import type { JobForm, FormErrors, Recurrence, JobsDeps, TypeMeta, ParamMeta, DateWindow, WindowUi, TargetMode, TzMode } from './jobs-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -37,6 +41,12 @@ export function allowedPlantList(): string[] {
   const all = Store.knownPlants();
   const scope = Session.allowedPlants();
   return scope ? all.filter(p => scope.includes(p)) : all;
+}
+
+/** Subnetwork codes the plants list knows (the Subnetwork target picks one of these). */
+export function subnetworkList(): string[] {
+  const rows = (Store.masterData?.plants ?? []) as Array<{ subnetwork?: unknown }>;
+  return [...new Set(rows.map(p => String(p.subnetwork ?? '').trim()).filter(Boolean))].sort();
 }
 
 export function plantTimezone(plant: string): string {
@@ -112,7 +122,7 @@ export function mkCombobox(host: HTMLElement | null, options: string[], opts: { 
 /* ---------------------------------------------------------------------------
    State
    ------------------------------------------------------------------------- */
-type DialogMode = 'new' | 'edit' | 'copy';
+type DialogMode = 'new' | 'edit';
 interface DialogState {
   mode: DialogMode;
   job: Job | null;
@@ -123,9 +133,11 @@ interface DialogState {
   /** Sequence + timer of the live "Resolves today to ..." lines (one debounce for every window widget). */
   winSeq: number;
   winTimer: ReturnType<typeof setTimeout> | null;
-  /** Copy mode: target plants (checked) and the filter text. */
-  targets: Set<string>;
-  filter: string;
+  /** Live "12 plants; 2 skipped" line: sequence + timer (stale responses are dropped). */
+  tpSeq: number;
+  tpTimer: ReturnType<typeof setTimeout> | null;
+  /** How many plants the multi-plant schedule preview lists (grows by PLANT_PAGE through Show more, server max 50). */
+  planLimit: number;
   busy: boolean;
   /** JSON of the form as opened; Escape / X ask before discarding when the live form differs. */
   baseline: string;
@@ -140,6 +152,8 @@ const _val = (id: string): string => (_el<HTMLInputElement>(id)?.value ?? '');
 const _chk = (id: string): boolean => !!_el<HTMLInputElement>(id)?.checked;
 
 const DOW_ORDER = [0, 1, 2, 3, 4, 5, 6];   // backend numbering, Monday first
+const PLANT_PAGE = 10;
+const PLANT_PAGE_MAX = 50;
 
 /* ---------------------------------------------------------------------------
    Markup
@@ -285,46 +299,109 @@ function _readWindowUi(id: string, prev: WindowUi): WindowUi {
   };
 }
 
+const _radio = (name: string, id: string, value: string, label: string, on: boolean): string =>
+  `<label class="chk-inline"><input type="radio" name="${name}" id="${id}" value="${esc(value)}"${on ? ' checked' : ''}><span>${esc(label)}</span></label>`;
+
+const _PICK = {
+  sel: { filter: 'jb-tsel-filter', list: 'jb-tsel-list', count: 'jb-tsel-count', attr: 'data-jb-tp', label: 'jobs.t_pick_plants' },
+  excl: { filter: 'jb-texcl-filter', list: 'jb-texcl-list', count: 'jb-texcl-count', attr: 'data-jb-tx', label: 'jobs.t_exclude_plants' },
+} as const;
+type PickKind = keyof typeof _PICK;
+const _chosen = (f: JobForm, kind: PickKind): string[] => (kind === 'sel' ? f.targetPlants : f.excludedPlants);
+
+/** The checkbox rows of one plant picker (at most 200 rendered; the rest is reached by searching). */
+export function pickRowsHtml(kind: PickKind, chosen: string[], filter: string): string {
+  const all = allowedPlantList();
+  const { shown, total } = filterPlants(all, filter);
+  const on = new Set(chosen);
+  const known = new Set(all);
+  // A selected code that is not in the viewer's plant list (a plant removed, or outside their access) stays visible and
+  // removable: it would otherwise ride along invisibly and survive Clear.
+  const unknown = chosen.filter(c => !known.has(c)).map(c => `<label class="chk-inline job-copy-row"><input type="checkbox" ${_PICK[kind].attr}="${esc(c)}" checked><span>${esc(c)} <span class="badge badge-warn">${esc(t('jobs.t_unknown_plant'))}</span></span></label>`).join('');
+  if (!shown.length) return unknown + `<div class="hps-empty">${esc(t('ui.no_matches'))}</div>`;
+  return unknown + shown.map(p => `<label class="chk-inline job-copy-row"><input type="checkbox" ${_PICK[kind].attr}="${esc(p)}"${on.has(p) ? ' checked' : ''}><span>${esc(p)}</span></label>`).join('')
+    + (total > shown.length ? `<div class="ape-hint">${esc(t('jobs.t_more', { shown: shown.length, total }))}</div>` : '');
+}
+
+/** A searchable multi-select with a count summary line (the Copy-to-plants pattern, not chips). */
+export function pickerHtml(kind: PickKind, f: JobForm): string {
+  const c = _PICK[kind];
+  const label = t(c.label);
+  return `<div class="form-row job-pick"><label id="${c.filter}-lbl" for="${c.filter}">${esc(label)}</label>`
+    + `<input class="input" id="${c.filter}" type="search" placeholder="${esc(t('jobs.copy_search'))}" aria-label="${esc(label)}" autocomplete="off">`
+    + `<div class="job-copy-actions"><button type="button" class="btn btn-ghost sm" data-jb-act="${kind}-all">${esc(t('jobs.t_select_all', { n: allowedPlantList().length }))}</button>`
+    + `<button type="button" class="btn btn-ghost sm" data-jb-act="${kind}-none">${esc(t('jobs.copy_clear'))}</button>`
+    + `<span class="ape-hint" id="${c.count}">${esc(t('jobs.copy_count', { n: _chosen(f, kind).length }))}</span></div>`
+    + `<div class="job-copy-list" id="${c.list}" role="group" aria-labelledby="${c.filter}-lbl">${pickRowsHtml(kind, _chosen(f, kind), '')}</div></div>`;
+}
+
+export function fanOutHtml(f: JobForm): string {
+  const fo = f.fanOut;
+  const dflt = !fo.staggerS && fo.maxParallel == null && !fo.failFast;
+  return `<details class="job-adv" id="jb-adv"${dflt ? '' : ' open'}><summary>${esc(t('jobs.t_adv'))}</summary>`
+    + `<div class="form-row-2"><div class="form-row"><label for="jb-fo-stagger">${esc(t('jobs.t_stagger'))}</label>`
+    + `<input class="input job-num" id="jb-fo-stagger" type="number" min="0" max="${STAGGER_MAX}" step="1" value="${esc(fo.staggerS)}"></div>`
+    + `<div class="form-row"><label for="jb-fo-par">${esc(t('jobs.t_parallel'))}</label>`
+    + `<input class="input job-num" id="jb-fo-par" type="number" min="1" max="${PARALLEL_MAX}" step="1" value="${esc(fo.maxParallel ?? '')}" placeholder="${esc(t('jobs.t_no_limit'))}"></div></div>`
+    + `<label class="chk-inline"><input type="checkbox" id="jb-fo-ff"${fo.failFast ? ' checked' : ''}><span>${esc(t('jobs.t_fail_fast'))}</span></label>`
+    + `<div class="ape-hint">${esc(t('jobs.t_adv_hint'))}</div>${_err('fanOut')}</details>`;
+}
+
+/** What sits under the mode radios for the current mode (swapped as one block when the mode changes). */
+export function targetsBodyHtml(f: JobForm): string {
+  const m = f.targetMode;
+  return (m === 'selected' ? pickerHtml('sel', f) : '')
+    + (m === 'subnetwork' ? `<div class="form-row"><label for="jb-tsub">${esc(t('jobs.t_subnetwork'))}</label><div id="jb-tsub-host"></div></div>` : '')
+    + (m === 'all' || m === 'subnetwork' ? pickerHtml('excl', f) : '')
+    + (m !== 'single' ? `<div class="ape-hint job-tpreview" id="jb-tpreview" role="status" aria-live="polite"></div>${fanOutHtml(f)}` : '');
+}
+
+export function targetsFieldsetHtml(f: JobForm): string {
+  if (f.targetsLocked) {
+    return `<fieldset class="job-targets"><legend>${esc(t('jobs.t_legend'))}</legend><div class="ape-hint" role="note">${esc(t('jobs.t_locked'))}</div></fieldset>`;
+  }
+  const hasSubs = subnetworkList().length > 0;
+  return `<fieldset class="job-targets"><legend>${esc(t('jobs.t_legend'))}</legend>`
+    + `<div class="job-radios" role="radiogroup" aria-label="${esc(t('jobs.t_legend'))}">`
+    + TARGET_MODES.filter(m => m !== 'subnetwork' || hasSubs || f.targetMode === 'subnetwork').map(m => _radio('jb-tmode', `jb-tmode-${m}`, m, t(`jobs.t_mode_${m}`), m === f.targetMode)).join('')
+    + `</div><div class="ape-hint">${esc(t('jobs.t_home_hint'))}</div>`
+    + `<div id="jb-t-body">${targetsBodyHtml(f)}</div>${_err('targets')}</fieldset>`;
+}
+
+/** The schedule's time zone choice: each plant's own, one fixed zone (searchable), or UTC. */
+export function tzBlockHtml(f: JobForm): string {
+  const multi = f.targetMode !== 'single';
+  const home = plantTimezone(f.plant);
+  const shown = f.tzMode === 'utc' ? 'UTC' : f.tzMode === 'fixed' ? (f.fixedTz || '—') : multi ? t('jobs.tz_each_plant') : (home || t('jobs.tz_unknown'));
+  return `<div class="form-row"><label id="jb-tzmode-l">${esc(t('jobs.f_tz'))}</label>`
+    + `<div class="job-radios" role="radiogroup" aria-labelledby="jb-tzmode-l">`
+    + TZ_MODES.map(m => _radio('jb-tzmode', `jb-tzmode-${m}`, m, t(`jobs.tz_mode_${m}`), m === f.tzMode)).join('') + `</div>`
+    + (f.tzMode === 'fixed' ? `<div id="jb-fixedtz-host"></div>${_err('fixedTz')}` : '')
+    + `<div class="readonly job-mono" id="jb-tz">${esc(shown)}</div>`
+    + `<div class="ape-hint">${esc(t(f.tzMode === 'plant' ? 'jobs.tz_hint' : 'jobs.tz_hint_other'))}</div></div>`;
+}
+
 export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: TypeMeta | null = null, types: JobType[] = []): string {
-  const tz = plantTimezone(f.plant);
   return `<div class="job-form">`
     + `<div class="form-row"><label for="jb-name">${esc(t('jobs.f_name'))}</label>`
     + `<input class="input" id="jb-name" type="text" maxlength="${NAME_MAX}" value="${esc(f.name)}" autocomplete="off">${_err('name')}</div>`
     + `<div class="form-row-2">${_typeHtml(f, types, mode === 'edit')}`
     + `<div class="form-row"><label for="jb-plant">${esc(t('jobs.f_plant'))}</label><div id="jb-plant-host"></div>${_err('plant')}</div></div>`
+    + targetsFieldsetHtml(f)
     + `<div id="jb-params">${paramsHtml(meta, f, isAdmin)}${_err('result')}</div>`
     + `<fieldset class="job-recur"><legend>${esc(t('jobs.f_recurrence'))}</legend>`
     + `<div class="form-row"><label for="jb-recur">${esc(t('jobs.f_repeat'))}</label><select class="input" id="jb-recur">`
     + RECUR_PRESETS.map(p => _opt(p, t(`jobs.preset_${p}`), f.recur.preset)).join('') + `</select></div>`
     + `<div id="jb-recur-fields">${recurFieldsHtml(f.recur)}</div>`
-    + `<div class="form-row"><label>${esc(t('jobs.f_tz'))}</label><div class="readonly job-mono" id="jb-tz">${esc(tz || t('jobs.tz_unknown'))}</div>`
-    + `<div class="ape-hint">${esc(t('jobs.tz_hint'))}</div></div>`
+    + `<div id="jb-tz-block">${tzBlockHtml(f)}</div>`
     + `<div class="form-row-2"><div class="form-row"><label for="jb-from">${esc(t('jobs.f_valid_from'))}</label><input class="input" id="jb-from" type="date" value="${esc(f.validFrom)}"></div>`
     + `<div class="form-row"><label for="jb-until">${esc(t('jobs.f_valid_until'))}</label><input class="input" id="jb-until" type="date" value="${esc(f.validUntil)}"></div></div>${_err('validity')}`
     + `<label class="chk-inline"><input type="checkbox" id="jb-overlap"${f.skipIfRunning ? ' checked' : ''}><span>${esc(t('jobs.f_skip_overlap'))}</span></label>`
-    + `<div class="job-preview" id="jb-preview" aria-live="polite"></div></fieldset></div>`;
-}
-
-export function copyRowsHtml(job: Job, targets: Set<string>, filter: string): string {
-  const q = filter.trim().toLowerCase();
-  const plants = allowedPlantList().filter(p => p !== job.plant && (!q || p.toLowerCase().includes(q)));
-  return plants.length
-    ? plants.map(p => `<label class="chk-inline job-copy-row"><input type="checkbox" data-jb-plant="${esc(p)}"${targets.has(p) ? ' checked' : ''}><span>${esc(p)}</span></label>`).join('')
-    : `<div class="hps-empty">${esc(t('ui.no_matches'))}</div>`;
-}
-
-export function copyBodyHtml(job: Job, targets: Set<string>, filter: string): string {
-  const rows = copyRowsHtml(job, targets, filter);
-  return `<div class="job-form"><p class="ape-hint">${esc(t('jobs.copy_hint', { name: job.name }))}</p>`
-    + `<div class="form-row"><input class="input" id="jb-copy-filter" type="search" value="${esc(filter)}" placeholder="${esc(t('jobs.copy_search'))}" aria-label="${esc(t('jobs.copy_search'))}" autocomplete="off"></div>`
-    + `<div class="job-copy-actions"><button type="button" class="btn btn-ghost sm" data-jb-act="all">${esc(t('jobs.copy_all_shown'))}</button>`
-    + `<button type="button" class="btn btn-ghost sm" data-jb-act="none">${esc(t('jobs.copy_clear'))}</button>`
-    + `<span class="ape-hint" id="jb-copy-count">${esc(t('jobs.copy_count', { n: targets.size }))}</span></div>`
-    + `<div class="job-copy-list" id="jb-copy-list">${rows}</div></div>`;
+    + `<div class="job-preview" id="jb-preview"></div><span class="job-sr" id="jb-preview-live" role="status" aria-live="polite"></span></fieldset></div>`;
 }
 
 function _footHtml(): string {
-  const label = _s?.mode === 'copy' ? t('jobs.copy_btn') : t('btn.save');
+  const label = t('btn.save');
   return `<button type="button" class="btn btn-ghost" data-jb-act="cancel">${esc(t('btn.cancel'))}</button>`
     + `<button type="button" class="btn btn-primary" id="jb-save" data-jb-act="save">${esc(label)}</button>`;
 }
@@ -408,14 +485,19 @@ export function readForm(prev: JobForm, meta: TypeMeta | null = _s?.meta ?? null
     cron: _el('jb-cron') ? _val('jb-cron') : prev.recur.cron,
     runAt: _el('jb-runat') ? _val('jb-runat') : prev.recur.runAt,
   };
+  const radio = <T extends string>(ids: readonly T[], base: string, fallback: T): T => ids.find(m => _chk(`${base}${m}`)) ?? fallback;
+  const hasFan = !!_el('jb-fo-stagger');
+  const par = _val('jb-fo-par').trim();
   return {
     ...prev, name: _val('jb-name'), params: meta ? _readParams(meta, prev.params) : prev.params, recur,
     validFrom: _val('jb-from'), validUntil: _val('jb-until'), skipIfRunning: _chk('jb-overlap'),
+    targetMode: radio(TARGET_MODES, 'jb-tmode-', prev.targetMode), tzMode: radio(TZ_MODES, 'jb-tzmode-', prev.tzMode),
+    fanOut: hasFan ? { staggerS: _val('jb-fo-stagger').trim() === '' ? 0 : Number(_val('jb-fo-stagger')), maxParallel: par === '' ? null : Number(par), failFast: _chk('jb-fo-ff') } : prev.fanOut,
   };
 }
 
 function _showErrors(errs: FormErrors): void {
-  for (const f of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity'] as const) {
+  for (const f of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity', 'targets', 'fixedTz', 'fanOut'] as const) {
     const el = _el(`jb-err-${f}`);
     if (!el) continue;
     el.textContent = errs[f] ? t(errs[f] as string) : '';
@@ -435,9 +517,15 @@ function _showErrors(errs: FormErrors): void {
    ------------------------------------------------------------------------- */
 function _schedulePreview(): void {
   const s = _s;
-  if (!s || s.mode === 'copy') return;
+  if (!s) return;
   if (s.previewTimer) clearTimeout(s.previewTimer);
   s.previewTimer = setTimeout(() => void _runPreview(), 300);
+}
+
+/** One fire as "Fri 30 Oct 08:00 (CDT) · 13:00 UTC": the plant's wall clock (offset kept on the wire, ignored) and the instant in UTC. */
+function _fireText(e: { atLocal: string; atUtc: string }, tz: string): string {
+  const zone = tzShort(tz, e.atUtc);
+  return `${Util.fmtDTPref(stripOffset(e.atLocal))}${zone ? ` ${zone}` : ''} · ${Util.fmtDTPref(stripOffset(e.atUtc))} UTC`;
 }
 
 async function _runPreview(): Promise<void> {
@@ -449,21 +537,139 @@ async function _runPreview(): Promise<void> {
   // The form-level check only gates the request; the server's trigger is the authority on what is valid.
   const errs = validateJobForm({ ...s.form, name: s.form.name || 'x' }, { isAdmin: true, plants: null });
   const bad = r.preset === 'once' ? !!errs.runAt : r.preset === 'hourly' ? !!errs.minute : r.preset === 'cron' ? !!errs.cron
-    : !!(errs.time || errs.days || errs.dom);
+    : !!(errs.time || errs.days || errs.dom || errs.fixedTz || errs.targets);
   if (bad || !s.form.plant) { box.innerHTML = ''; return; }
   const seq = ++s.previewSeq;
   try {
-    const p = buildJobPayload(s.form).schedule;
+    const { job, schedule: p } = buildJobPayload(s.form);
     const prose = recurrenceText(p, jobsDeps(), x => Util.fmtDTPref(x));
-    const res = await JobsClient.preview(s.form.plant, p, 5);
+    const multi = job.targets.length > 0 && s.form.tzMode === 'plant';
+    const res = await JobsClient.preview(s.form.plant, p, multi ? 3 : 5, { targets: job.targets, plantLimit: s.planLimit });
     if (_s !== s || seq !== s.previewSeq) return;
-    box.innerHTML = `<div class="job-preview-head">${esc(t('jobs.next_runs'))} <span class="ape-hint">${esc(prose)}</span></div>`
-      + (res.entries.length ? `<ol class="job-preview-list">${res.entries.map(x => `<li class="job-mono">${esc(Util.fmtDTPref(stripOffset(x.atLocal)))}</li>`).join('')}</ol>` : `<div class="ape-hint">${esc(t('jobs.no_runs'))}</div>`)
-      + (res.entries.some(x => x.dstShifted) ? `<div class="job-dst" role="note">${esc(t('jobs.dst_warning'))}</div>` : '');
+    const hadMoreFocus = document.activeElement?.getAttribute?.('data-jb-act') === 'plants-more';
+    const live = _el('jb-preview-live');
+    if (live) live.textContent = multi ? t('jobs.preview_live', { shown: res.plants.length, total: res.totalPlants }) : '';
+    const head = `<div class="job-preview-head">${esc(t('jobs.next_runs'))} <span class="ape-hint">${esc(prose)}</span></div>`;
+    const dst = (res.entries.some(x => x.dstShifted) || res.plants.some(pl => pl.entries.some(x => x.dstShifted))) ? `<div class="job-dst" role="note">${esc(t('jobs.dst_warning'))}</div>` : '';
+    const skipped = res.warnings.length ? `<div class="ape-hint">${esc(plural('jobs.t_skipped_note', res.warnings.length, jobsDeps()))}</div>` : '';
+    if (multi) {
+      const more = res.totalPlants > res.plants.length
+        ? (res.plants.length < PLANT_PAGE_MAX
+          ? `<button type="button" class="btn btn-ghost sm" data-jb-act="plants-more">${esc(t('jobs.t_show_more', { shown: res.plants.length, total: res.totalPlants }))}</button>`
+          : `<div class="ape-hint">${esc(t('jobs.t_showing', { shown: res.plants.length, total: res.totalPlants }))}</div>`)
+        : '';
+      box.innerHTML = head + `<div class="ape-hint">${esc(plural('jobs.t_preview_plants', res.totalPlants, jobsDeps()))}</div>` + skipped
+        + (res.plants.length ? res.plants.map(pl => `<div class="job-pp"><span class="job-mono job-pp-plant">${esc(pl.plant)}</span> <span class="ape-hint">${esc(pl.timezone)}</span>`
+          + `<ol class="job-preview-list">${pl.entries.map(x => `<li class="job-mono">${esc(_fireText(x, pl.timezone))}</li>`).join('')}</ol></div>`).join('')
+          : `<div class="ape-hint">${esc(t('jobs.no_runs'))}</div>`) + more + dst;
+      if (hadMoreFocus) (box.querySelector('[data-jb-act="plants-more"]') as HTMLElement | null)?.focus();
+      return;
+    }
+    box.innerHTML = head + skipped
+      + (res.entries.length ? `<ol class="job-preview-list">${res.entries.map(x => `<li class="job-mono">${esc(s.form.tzMode === 'utc' ? `${Util.fmtDTPref(stripOffset(x.atUtc))} UTC` : _fireText(x, res.timezone))}</li>`).join('')}</ol>` : `<div class="ape-hint">${esc(t('jobs.no_runs'))}</div>`)
+      + dst;
   } catch (e) {
     if (_s !== s || seq !== s.previewSeq) return;
     box.innerHTML = `<div class="ape-err">${esc((e as Error).message)}</div>`;
   }
+}
+
+/** The "12 plants; 2 skipped: no timezone" line under the targets (debounced, newest response wins). */
+function _scheduleTargetsPreview(): void {
+  const s = _s;
+  if (!s || s.form.targetMode === 'single') return;
+  if (s.tpTimer) clearTimeout(s.tpTimer);
+  s.tpTimer = setTimeout(() => void _runTargetsPreview(), 300);
+}
+
+async function _runTargetsPreview(): Promise<void> {
+  const s = _s;
+  const box = _el('jb-tpreview');
+  if (!s || !box) return;
+  s.form = readForm(s.form);
+  const rows = buildTargetRows(s.form);
+  const say = (text: string, err: boolean): void => { box.textContent = text; box.classList.toggle('ape-err', err); box.classList.toggle('ape-hint', !err); };
+  if (!rows.length || (s.form.targetMode === 'selected' && !s.form.targetPlants.length)) { say('', false); return; }
+  const seq = ++s.tpSeq;
+  try {
+    const r = await JobsClient.targetsPreview(rows, { limit: 1 });
+    if (_s !== s || seq !== s.tpSeq) return;
+    say(targetsPreviewText(r, jobsDeps()), false);
+  } catch (e) {
+    if (_s !== s || seq !== s.tpSeq) return;
+    say((e as Error).message, true);               // e.g. a plant outside the admin's scope
+  }
+}
+
+/** The mode radios changed: swap the block under them, re-mount what needs a live widget, refresh both previews. */
+function _renderTargets(s: DialogState): void {
+  const host = _el('jb-t-body');
+  if (host) host.innerHTML = targetsBodyHtml(s.form);
+  _mountSubnetwork(s);
+  _renderTz(s);
+  _scheduleTargetsPreview();
+  _schedulePreview();
+}
+
+function _mountSubnetwork(s: DialogState): void {
+  mkCombobox(_el('jb-tsub-host'), subnetworkList(), {
+    value: s.form.targetSubnetwork, placeholder: t('jobs.t_subnetwork'), id: 'jb-tsub',
+    onSelect: (v) => { if (!_s) return; _s.form.targetSubnetwork = v; _scheduleTargetsPreview(); _schedulePreview(); },
+  });
+}
+
+function _renderTz(s: DialogState): void {
+  const host = _el('jb-tz-block');
+  if (host) host.innerHTML = tzBlockHtml(s.form);
+  _renderTzCombo(s);
+}
+
+function _renderTzCombo(s: DialogState): void {
+  mkCombobox(_el('jb-fixedtz-host'), timeZoneList(), {
+    value: s.form.fixedTz, placeholder: t('jobs.tz_fixed_ph'), id: 'jb-fixedtz',
+    onSelect: (v) => { if (!_s) return; _s.form.fixedTz = v; const tz = _el('jb-tz'); if (tz) tz.textContent = v || '—'; _schedulePreview(); },
+  });
+}
+
+/** A picker's rows and count after a tick, a search or a bulk action. */
+function _refreshPick(s: DialogState, kind: PickKind): void {
+  const c = _PICK[kind];
+  const list = _el(c.list);
+  if (list) list.innerHTML = pickRowsHtml(kind, _chosen(s.form, kind), _val(c.filter));
+  _refreshPickCount(s, kind);
+  // The bulk button names how many plants the search matches ("Select all 37 matches").
+  const btn = document.querySelector<HTMLElement>(`[data-jb-act="${kind}-all"]`);
+  if (btn) btn.textContent = t('jobs.t_select_all', { n: filterPlants(allowedPlantList(), _val(c.filter), Number.MAX_SAFE_INTEGER).total });
+}
+
+/** A tick only moves the count: the rows (and the focus on the box just ticked) stay exactly where they are. */
+function _refreshPickCount(s: DialogState, kind: PickKind): void {
+  const n = _el(_PICK[kind].count);
+  if (n) n.textContent = t('jobs.copy_count', { n: _chosen(s.form, kind).length });
+  const row = _el(_PICK[kind].list);
+  // An unticked unknown code has nothing left to show: drop its row (the ticked box that was clicked keeps focus otherwise).
+  if (row) row.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(i => {
+    const code = i.getAttribute(_PICK[kind].attr) ?? '';
+    if (!i.checked && !allowedPlantList().includes(code)) i.closest('label')?.remove();
+  });
+}
+
+function _pickBulk(s: DialogState, kind: PickKind, all: boolean): void {
+  const c = _PICK[kind];
+  const key = kind === 'sel' ? 'targetPlants' : 'excludedPlants';
+  const shown = filterPlants(allowedPlantList(), _val(c.filter), Number.MAX_SAFE_INTEGER).shown;
+  // Clear means clear: the whole selection goes, including codes the list no longer shows (unknown plants, other searches).
+  const cur = new Set(all ? s.form[key] : []);
+  if (all) for (const p of shown) cur.add(p);
+  const next = { ...s.form, [key]: [...cur] };
+  if (all && targetRowCount(next) > TARGET_ROWS_MAX) {
+    Toast.show(t('jobs.err_targets_cap', { max: TARGET_ROWS_MAX, n: targetRowCount(next) }), 'error');
+    return;                                        // the server refuses more rows than this: say so before the Save
+  }
+  s.form = next;
+  _refreshPick(s, kind);
+  _scheduleTargetsPreview();
+  _schedulePreview();
 }
 
 /* ---------------------------------------------------------------------------
@@ -472,7 +678,7 @@ async function _runPreview(): Promise<void> {
    ------------------------------------------------------------------------- */
 function _scheduleWindowPreview(): void {
   const s = _s;
-  if (!s || s.mode === 'copy' || !s.meta?.params.some(p => p.type === 'date_window')) return;
+  if (!s || !s.meta?.params.some(p => p.type === 'date_window')) return;
   if (s.winTimer) clearTimeout(s.winTimer);
   for (const p of s.meta.params.filter(x => x.type === 'date_window')) {        // the old line is stale the moment the window changes
     const l = _el(`jb-p-${p.key}-line`);
@@ -545,11 +751,21 @@ function _wire(): void {
   body?.addEventListener('change', (e) => {
     const s = _s; const id = (e.target as HTMLElement | null)?.id ?? '';
     if (!s) return;
-    if (s.mode === 'copy') {
-      const p = (e.target as HTMLElement).dataset?.jbPlant;
-      if (p) { if ((e.target as HTMLInputElement).checked) s.targets.add(p); else s.targets.delete(p); _copyCount(); }
-      return;
-    }
+    const ds = (e.target as HTMLElement).dataset ?? {};
+    const tick = (kind: PickKind, plant: string | undefined): boolean => {
+      if (plant === undefined) return false;
+      const key = kind === 'sel' ? 'targetPlants' : 'excludedPlants';
+      const cur = new Set(s.form[key]);
+      if ((e.target as HTMLInputElement).checked) cur.add(plant); else cur.delete(plant);
+      s.form = { ...s.form, [key]: [...cur] };
+      _refreshPickCount(s, kind);
+      _scheduleTargetsPreview(); _schedulePreview();
+      return true;
+    };
+    if (tick('sel', ds.jbTp) || tick('excl', ds.jbTx)) return;
+    if (id.startsWith('jb-tmode-')) { s.form = readForm(s.form); s.planLimit = PLANT_PAGE; _renderTargets(s); return; }
+    if (id.startsWith('jb-tzmode-')) { s.form = readForm(s.form); _renderTz(s); _schedulePreview(); return; }
+    if (id.startsWith('jb-fo-')) { s.form = readForm(s.form); _scheduleTargetsPreview(); return; }
     if (id === 'jb-jobtype') { _changeType(s, _val('jb-jobtype')); return; }
     if (id === 'jb-recur') {
       s.form = readForm(s.form);
@@ -566,18 +782,23 @@ function _wire(): void {
   });
   body?.addEventListener('input', (e) => {
     const id = (e.target as HTMLElement | null)?.id ?? '';
-    if (id === 'jb-copy-filter' && _s?.mode === 'copy' && _s.job) {
-      _s.filter = _val('jb-copy-filter');
-      const list = _el('jb-copy-list');
-      if (list) list.innerHTML = copyRowsHtml(_s.job, _s.targets, _s.filter);
-    } else if (_s && _s.mode !== 'copy' && id !== 'jb-name') {
+    const s = _s;
+    if (!s) return;
+    if (id === _PICK.sel.filter) _refreshPick(s, 'sel');
+    else if (id === _PICK.excl.filter) _refreshPick(s, 'excl');
+    else if (id.startsWith('jb-fo-')) _scheduleTargetsPreview();
+    else if (id !== 'jb-name') {
       if (id.startsWith('jb-p-')) _scheduleWindowPreview();
       else _schedulePreview();
     }
   });
   body?.addEventListener('click', (e) => {
+    const s = _s;
     const act = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-jb-act]')?.dataset.jbAct;
-    if (act === 'all' || act === 'none') JobsDialog.copyBulk(act);
+    if (!s || !act) return;
+    if (act === 'sel-all' || act === 'sel-none') _pickBulk(s, 'sel', act === 'sel-all');
+    else if (act === 'excl-all' || act === 'excl-none') _pickBulk(s, 'excl', act === 'excl-all');
+    else if (act === 'plants-more') { s.planLimit = Math.min(PLANT_PAGE_MAX, s.planLimit + PLANT_PAGE); void _runPreview(); }
   });
   _el('jb-foot')?.addEventListener('click', (e) => {
     const act = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-jb-act]')?.dataset.jbAct;
@@ -586,11 +807,6 @@ function _wire(): void {
   });
   _el('jb-close')?.addEventListener('click', () => void JobsDialog.requestClose());
   shell.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) void JobsDialog.requestClose(); });
-}
-
-function _copyCount(): void {
-  const el = _el('jb-copy-count');
-  if (el && _s) el.textContent = t('jobs.copy_count', { n: _s.targets.size });
 }
 
 function _show(title: string): void {
@@ -614,49 +830,28 @@ export const JobsDialog = {
     const meta = findType(types, typeKey) ?? null;
     const form = job ? jobToForm(job, meta) : defaultJobForm(opts.plant ?? '', typeKey, opts.defaults ?? meta?.defaults ?? null, meta);
     if (duplicate) form.name = '';
-    _s = { mode, job: job && !duplicate ? job : null, form, types, meta, winSeq: 0, winTimer: null, targets: new Set(), filter: '', busy: false, baseline: JSON.stringify(form), previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
+    _s = { mode, job: job && !duplicate ? job : null, form, types, meta, winSeq: 0, winTimer: null, tpSeq: 0, tpTimer: null, planLimit: PLANT_PAGE, busy: false, baseline: JSON.stringify(form), previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
     _wire();
     const body = _el('jb-body');
     if (body) body.innerHTML = bodyHtml(form, mode, Session.isAdmin(), meta, types);
     _initPickers();
     mkCombobox(_el('jb-plant-host'), allowedPlantList(), {
       value: form.plant, placeholder: t('jobs.f_plant'), id: 'jb-plant', disabled: mode === 'edit',
-      onSelect: (v) => { if (!_s) return; _s.form.plant = v; const tz = _el('jb-tz'); if (tz) tz.textContent = plantTimezone(v) || t('jobs.tz_unknown'); _schedulePreview(); _scheduleWindowPreview(); },
+      onSelect: (v) => { if (!_s) return; _s.form.plant = v; const tz = _el('jb-tz'); if (tz && _s.form.tzMode === 'plant' && _s.form.targetMode === 'single') tz.textContent = plantTimezone(v) || t('jobs.tz_unknown'); _schedulePreview(); _scheduleWindowPreview(); },
     });
+    _mountSubnetwork(_s);
+    _renderTzCombo(_s);
     _show(mode === 'edit' ? t('jobs.title_edit') : t('jobs.title_new'));
     _s.baseline = JSON.stringify(readForm(form));   // read back from the rendered fields, so dirty = a real edit
     _el('jb-name')?.focus();
     void _runPreview();
     void _runWindowPreviews();
-  },
-
-  /** Copy one job's definition and schedule to many plants (one POST /jobs + schedule per plant, each in its own plant timezone). */
-  openCopy(job: Job, onSaved?: () => void): void {
-    if (!Session.isAdmin()) return;
-    _s = { mode: 'copy', job, form: jobToForm(job), types: [], meta: null, winSeq: 0, winTimer: null, targets: new Set(), filter: '', busy: false, baseline: '', previewSeq: 0, previewTimer: null, onSaved: onSaved ?? null };
-    _wire();
-    const body = _el('jb-body');
-    if (body) body.innerHTML = copyBodyHtml(job, _s.targets, '');
-    _show(t('jobs.title_copy'));
-    _el('jb-copy-filter')?.focus();
-  },
-
-  copyBulk(act: 'all' | 'none'): void {
-    const s = _s;
-    if (!s || s.mode !== 'copy') return;
-    const shown = Array.from(_el('jb-copy-list')?.querySelectorAll<HTMLInputElement>('[data-jb-plant]') ?? []);
-    for (const cb of shown) {
-      const p = cb.dataset.jbPlant as string;
-      cb.checked = act === 'all';
-      if (act === 'all') s.targets.add(p); else s.targets.delete(p);
-    }
-    _copyCount();
+    void _runTargetsPreview();
   },
 
   async submit(): Promise<void> {
     const s = _s;
     if (!s || s.busy) return;
-    if (s.mode === 'copy') return _submitCopy(s);
     s.form = readForm(s.form);
     const errs = validateJobForm(s.form, { isAdmin: Session.isAdmin(), plants: Session.allowedPlants(), meta: s.meta });
     _showErrors(errs);
@@ -667,7 +862,7 @@ export const JobsDialog = {
     if (btn) btn.disabled = true;
     try {
       if (s.job) {
-        await JobsClient.update(s.job.id, { name: job.name, params: job.params });
+        await JobsClient.update(s.job.id, { name: job.name, params: job.params, targets: job.targets, fan_out: job.fan_out });
         if (s.job.schedule) await JobsClient.updateSchedule(s.job.schedule.id, schedule);
         else await JobsClient.addSchedule(s.job.id, schedule);
       } else {
@@ -689,7 +884,7 @@ export const JobsDialog = {
   async requestClose(): Promise<void> {
     const s = _s;
     if (!s) return;
-    if (s.mode !== 'copy' && s.baseline && JSON.stringify(readForm(s.form)) !== s.baseline) {
+    if (s.baseline && JSON.stringify(readForm(s.form)) !== s.baseline) {
       const discard = await Modal.confirm({ title: t('jobs.confirm_discard'), message: t('jobs.confirm_discard_msg'), confirmLabel: t('btn.discard'), tone: 'warn' });
       if (!discard || _s !== s) return;
     }
@@ -699,6 +894,7 @@ export const JobsDialog = {
   close(): void {
     if (_s?.previewTimer) clearTimeout(_s.previewTimer);
     if (_s?.winTimer) clearTimeout(_s.winTimer);
+    if (_s?.tpTimer) clearTimeout(_s.tpTimer);
     _s = null;
     _destroyPickers();
     Modal.close('modal-job-edit');
@@ -707,24 +903,3 @@ export const JobsDialog = {
   /** Test seam. */
   _state(): DialogState | null { return _s; },
 };
-
-async function _submitCopy(s: DialogState): Promise<void> {
-  const src = s.job;
-  if (!src || !s.targets.size) { Toast.show(t('jobs.copy_none'), 'warn'); return; }
-  const form = jobToForm(src);
-  s.busy = true;
-  let ok = 0; const failed: string[] = [];
-  let reason = '';   // the first failure's message: usually the same for every plant (e.g. no timezone)
-  for (const plant of [...s.targets]) {
-    try {
-      const { job, schedule } = buildJobPayload({ ...form, plant });
-      await JobsClient.create({ ...job, schedules: [schedule] });
-      ok++;
-    } catch (e) { failed.push(plant); if (!reason) reason = (e as Error).message; }
-  }
-  s.busy = false;
-  Toast.show(failed.length ? t('jobs.toast_copy_partial', { ok, failed: failed.join(', '), reason }) : t('jobs.toast_copy_done', { n: ok }), failed.length ? 'warn' : 'success');
-  const cb = s.onSaved;
-  if (!failed.length) JobsDialog.close(); else s.targets = new Set(failed);
-  if (ok) cb?.();
-}

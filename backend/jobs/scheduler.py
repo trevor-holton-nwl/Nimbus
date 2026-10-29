@@ -18,18 +18,50 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.admin_ops.logbuffer import _log_event
-from backend.jobs import data, runner, triggers
+from backend.jobs import data, runner, targets, triggers
 
 log = logging.getLogger("nimbus.jobs")
 
 JOB_PREFIX = "job:"
 RECONCILE_SECONDS = 60
 _SIGS: dict[str, tuple] = {}
+_WARNED: set[tuple] = set()          # (schedule id, warning) already logged, so a 60 s tick does not repeat it
 
 
 def _sig(r: dict) -> tuple:
+    """What an armed job was built from. `r` is an ARM row (`plan_arms`): `timezone` is the EFFECTIVE zone resolved at
+    this reconcile, so a plant timezone edit, or a plant joining or leaving the target set, changes the signature."""
     return (r["modified_at"], r["kind"], r["cron_expr"], r["time_of_day"], tuple(r["days_of_week"] or ()),
-            r["day_of_month"], r["run_at"], r["timezone"], r["valid_from"], r["valid_until"], r["misfire_grace_s"])
+            r["day_of_month"], r["run_at"], r["timezone"], r["valid_from"], r["valid_until"], r["misfire_grace_s"],
+            r.get("arm_plant"))
+
+
+def arm_id(schedule_id: int, plant: str | None) -> str:
+    return f"{JOB_PREFIX}{schedule_id}" if plant is None else f"{JOB_PREFIX}{schedule_id}:{plant}"
+
+
+def plan_arms(r: dict, plants: list[dict]) -> tuple[list[dict], list[str]]:
+    """The APScheduler jobs one active schedule needs, plus expansion warnings. Pure (plant rows injected).
+
+    - `plant` mode (default) with target rows: one arm per runnable plant, id `job:<sid>:<plant>`, built in THAT
+      plant's timezone; a plant with no valid timezone is not armed (warning).
+    - `plant` mode without target rows (a legacy single-plant job): one arm `job:<sid>` in the home plant's CURRENT
+      timezone (the stored zone only when the plant has none), so a plant timezone edit re-arms without a restart.
+    - `fixed` / `utc`: one arm `job:<sid>` in that zone; the fan-out over the plants happens inside the fire.
+    Each arm is the schedule row with `timezone` replaced by the effective zone and `arm_plant` set."""
+    mode = r.get("tz_mode") or "plant"
+    if mode == "fixed":
+        return [{**r, "timezone": r.get("fixed_timezone") or r["timezone"], "arm_plant": None}], []
+    if mode == "utc":
+        return [{**r, "timezone": "UTC", "arm_plant": None}], []
+    by = {p["plant"]: p for p in plants}
+    if not r.get("targets"):
+        tz, skip = targets._tz_state((by.get(r["plant"]) or {}).get("timezone"))
+        return [{**r, "timezone": r["timezone"] if skip else tz, "arm_plant": None}], []
+    exp = targets.expand_targets({"plant": r["plant"], "targets": r["targets"], "scope_plants": r.get("scope_plants")},
+                                 plants=plants)
+    return ([{**r, "timezone": e["timezone"], "arm_plant": e["plant"]} for e in targets.runnable(exp)],
+            exp["warnings"])
 
 
 # Scheduled fires block for the whole run (minutes), so they get their own bounded pool: on the shared anyio
@@ -38,10 +70,11 @@ FIRE_WORKERS = 6
 _FIRE_POOL = ThreadPoolExecutor(max_workers=FIRE_WORKERS, thread_name_prefix="job-fire")
 
 
-async def _fire(schedule_id: int) -> None:
+async def _fire(schedule_id: int, plant: str | None = None) -> None:
     """APScheduler job body. Offloads the blocking run to the dedicated fire pool; never raises."""
     try:
-        await asyncio.get_running_loop().run_in_executor(_FIRE_POOL, runner.fire_schedule, schedule_id)
+        args = (schedule_id,) if plant is None else (schedule_id, plant)
+        await asyncio.get_running_loop().run_in_executor(_FIRE_POOL, runner.fire_schedule, *args)
     except Exception as exc:  # noqa: BLE001
         _log_event("error", "jobs", "scheduled job fire raised", exc=exc, schedule_id=schedule_id)
 
@@ -50,10 +83,22 @@ def reconcile(scheduler) -> dict:
     """Arm/replace/remove APScheduler jobs so they match the active schedules in the DB. Blocking."""
     out = {"added": 0, "removed": 0, "skipped": 0}
     want: dict[str, dict] = {}
+    plants = data.load_plant_rows()                        # fresh each time: a timezone edit is seen at once
     for r in data.list_active_schedules():
-        if r["kind"] == "once" and data.schedule_has_run(r["id"]):
-            continue
-        want[f"{JOB_PREFIX}{r['id']}"] = r
+        arms, warnings = plan_arms(r, plants)
+        for w in warnings:
+            if (r["id"], w) not in _WARNED:
+                _WARNED.add((r["id"], w))
+                _log_event("warn", "jobs", "plant is not armed for a multi-plant schedule", schedule_id=r["id"], reason=w)
+        if r["kind"] == "once":
+            if not any(a["arm_plant"] for a in arms):
+                if data.schedule_has_run(r["id"]):
+                    continue
+            else:                                          # per-plant once: each plant is spent on its own
+                fired = data.schedule_fired_plants(r["id"])
+                arms = [a for a in arms if a["arm_plant"] not in fired]
+        for a in arms:
+            want[arm_id(r["id"], a["arm_plant"])] = a
     have = {j.id for j in scheduler.get_jobs() if j.id.startswith(JOB_PREFIX)}
     for jid in have - set(want):
         try:
@@ -73,7 +118,7 @@ def reconcile(scheduler) -> dict:
                 if jid in have:
                     scheduler.remove_job(jid)
                 continue
-            scheduler.add_job(_fire, trig, args=[r["id"]], id=jid, max_instances=1, coalesce=True,
+            scheduler.add_job(_fire, trig, args=[r["id"], r["arm_plant"]], id=jid, max_instances=1, coalesce=True,
                               misfire_grace_time=int(r["misfire_grace_s"]), replace_existing=True)
             _SIGS[jid] = _sig(r)
             out["added"] += 1
@@ -120,12 +165,14 @@ def _on_missed(event) -> None:
     jid = str(getattr(event, "job_id", ""))
     if not jid.startswith(JOB_PREFIX):
         return
+    parts = jid[len(JOB_PREFIX):].split(":", 1)          # job:<sid> or job:<sid>:<plant>
     try:
-        sid = int(jid[len(JOB_PREFIX):])
+        sid = int(parts[0])
     except ValueError:
         return
+    plant = parts[1] if len(parts) > 1 else None
     at = getattr(event, "scheduled_run_time", None)
-    threading.Thread(target=runner.record_skipped, args=(sid, at, data.MISSED_PREFIX + " fired after its grace time"),
+    threading.Thread(target=runner.record_skipped, args=(sid, at, data.MISSED_PREFIX + " fired after its grace time", plant),
                      name=f"job-missed-{sid}", daemon=True).start()
 
 

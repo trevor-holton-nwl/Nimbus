@@ -11,6 +11,7 @@ import {
   shouldPollJobs, runSequential, deltaText, isDryRun, tzShort, isLongerThanUsual, RUN_STATUSES, JOB_RESULTS,
   resultOf, seedParams, typeGroups, findType, hasApplyMode, paramLabel, enumLabel, paramHint, typeLabel, validateParams, defaultWindowUi,
   uiToWindow, windowToUi, validateWindowUi, artifactTiles, isReportRun, cellText, windowLine, sectionTitle, columnLabel, isReportType,
+  plural, targetsLossless, targetRowCount, TARGET_ROWS_MAX, buildTargetRows, targetsLabel, filterPlants, targetsPreviewText, targetsToForm, batchTiles, buildBatchesQuery, timeZoneList, TARGET_MODES, TZ_MODES,
 } from '../../../frontend/admin-ops/jobs-model.mjs';
 import { TYPES, OPT, byKey } from './jobs-types-fixture.mjs';
 
@@ -238,12 +239,12 @@ test('buildJobPayload: backend job params (apply_mode explicit) and a preset Sch
   const p = buildJobPayload({ ...withParams({ apply_mode: 'apply' }), name: '  Morning optimize ', validFrom: '2026-11-01' });
   assert.deepEqual(p.job, {
     name: 'Morning optimize', plant: '1008', job_type: 'optimizer.plant',
-    params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' },
+    params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' }, targets: [], fan_out: null,
   });
-  assert.deepEqual(p.schedule, { kind: 'daily', time_of_day: '08:00', valid_from: '2026-11-01', valid_until: null, skip_if_running: true });
+  assert.deepEqual(p.schedule, { kind: 'daily', time_of_day: '08:00', valid_from: '2026-11-01', valid_until: null, skip_if_running: true, tz_mode: 'plant', fixed_timezone: null });
   const once = buildJobPayload({ ...good(), recur: { ...defaultRecurrence(), preset: 'once', runAt: '2026-11-02T08:00' } });
   assert.deepEqual([once.schedule.kind, once.schedule.cron_expr, once.schedule.run_at], ['once', undefined, '2026-11-02T08:00']);
-  assert.doesNotMatch(JSON.stringify(p), /Z"|\+\d\d:\d\d|timezone/, 'no zone suffix, offset or timezone field');
+  assert.doesNotMatch(JSON.stringify(p), /Z"|\+\d\d:\d\d|"timezone"/, 'no zone suffix, offset or timezone field (the server owns the zone; only tz_mode travels)');
   assert.equal(buildJobPayload(withParams({ apply_mode: 'propose' })).job.params.apply_mode, 'propose');
   assert.equal('undefined' in buildJobPayload({ ...good(), params: { a: undefined, b: 1 } }).job.params, false);
 });
@@ -486,4 +487,121 @@ test('windowToUi: a stored offset beyond the picker range stays Custom and valid
 test('isReportType: a report job is a report even when the type metadata failed to load', () => {
   assert.equal(isReportType('report.late_orders', []), true);
   assert.equal(isReportType('optimizer.plant', []), false);
+});
+
+// ---------------------------------------------------------------------------------------------- W3a multi-plant
+const multi = (over) => ({ ...good(), ...over });
+
+test('a single-plant form saves no targets and no fan-out (today\'s job); the modes and zone modes are the documented sets', () => {
+  const p = buildJobPayload(good());
+  assert.deepEqual([p.job.targets, p.job.fan_out, p.schedule.tz_mode, p.schedule.fixed_timezone], [[], null, 'plant', null]);
+  assert.deepEqual([...TARGET_MODES], ['single', 'selected', 'all', 'subnetwork']);
+  assert.deepEqual([...TZ_MODES], ['plant', 'fixed', 'utc']);
+});
+
+test('buildTargetRows: selected = one explicit row per plant, all / subnetwork add exclusions, per-plant overrides ride along', () => {
+  const stored = [{ kind: 'explicit', value: '2000', excluded: false, params_override: { mode: 'spt' } }];
+  assert.deepEqual(buildTargetRows(multi({ targetMode: 'selected', targetPlants: ['1008', '2000'], storedTargets: stored })).map(r => [r.kind, r.value, r.excluded, r.params_override]),
+    [['explicit', '1008', false, null], ['explicit', '2000', false, { mode: 'spt' }]]);
+  assert.deepEqual(buildTargetRows(multi({ targetMode: 'all', excludedPlants: ['3000'] })).map(r => [r.kind, r.value, r.excluded]),
+    [['all', '', false], ['explicit', '3000', true]]);
+  assert.deepEqual(buildTargetRows(multi({ targetMode: 'subnetwork', targetSubnetwork: 'NA', excludedPlants: ['1008'] })).map(r => [r.kind, r.value, r.excluded]),
+    [['subnetwork', 'NA', false], ['explicit', '1008', true]]);
+  const p = buildJobPayload(multi({ targetMode: 'selected', targetPlants: ['1008'], fanOut: { staggerS: 30, maxParallel: 2, failFast: true }, tzMode: 'fixed', fixedTz: ' Asia/Tokyo ' }));
+  assert.deepEqual(p.job.fan_out, { stagger_s: 30, max_parallel: 2, fail_fast: true });
+  assert.deepEqual([p.schedule.tz_mode, p.schedule.fixed_timezone], ['fixed', 'Asia/Tokyo']);
+  assert.equal(buildJobPayload(multi({ tzMode: 'utc', fixedTz: 'Asia/Tokyo' })).schedule.fixed_timezone, null, 'a zone only travels in fixed mode');
+});
+
+test('validateJobForm: targets, fixed zone and fan-out limits', () => {
+  const ok = { isAdmin: true, plants: null };
+  assert.equal(validateJobForm(multi({ targetMode: 'selected', targetPlants: [] }), ok).targets, 'jobs.err_targets_none');
+  assert.equal(validateJobForm(multi({ targetMode: 'subnetwork' }), ok).targets, 'jobs.err_targets_subnetwork');
+  assert.equal(validateJobForm(multi({ targetMode: 'selected', targetPlants: ['1008', '9999'] }), { isAdmin: true, plants: ['1008'] }).targets, 'jobs.err_plant_scope');
+  assert.equal('targets' in validateJobForm(multi({ targetMode: 'all' }), ok), false);
+  assert.equal(validateJobForm(multi({ tzMode: 'fixed', fixedTz: '  ' }), ok).fixedTz, 'jobs.err_fixed_tz');
+  const fo = (staggerS, maxParallel) => validateJobForm(multi({ targetMode: 'all', fanOut: { staggerS, maxParallel, failFast: false } }), ok).fanOut;
+  assert.equal(fo(0, null), undefined);
+  assert.equal(fo(3601, null), 'jobs.err_fan_out');
+  assert.equal(fo(-1, null), 'jobs.err_fan_out');
+  assert.equal(fo(0, 0), 'jobs.err_fan_out');
+  assert.equal(fo(0, 51), 'jobs.err_fan_out');
+  assert.equal(validateJobForm(multi({ targetMode: 'single', fanOut: { staggerS: 99999, maxParallel: 0, failFast: false } }), ok).fanOut, undefined, 'fan-out only matters for many plants');
+});
+
+test('jobToForm / targetsToForm restore the mode, plants, exclusions and zone mode of a saved multi-plant job', () => {
+  const rows = [{ kind: 'subnetwork', value: 'NA', excluded: false, params_override: null }, { kind: 'explicit', value: '1021', excluded: true, params_override: null }];
+  const f = jobToForm({ name: 'J', plant: '1008', job_type: 'optimizer.plant', params: {}, targets: rows, fanOut: { stagger_s: 20, max_parallel: 3, fail_fast: true },
+    schedule: { kind: 'daily', time_of_day: '08:00', tzMode: 'fixed', fixedTimezone: 'Europe/London' } });
+  assert.deepEqual([f.targetMode, f.targetSubnetwork, f.excludedPlants, f.tzMode, f.fixedTz], ['subnetwork', 'NA', ['1021'], 'fixed', 'Europe/London']);
+  assert.deepEqual(f.fanOut, { staggerS: 20, maxParallel: 3, failFast: true });
+  assert.deepEqual(buildTargetRows(f).map(r => [r.kind, r.value, r.excluded]), [['subnetwork', 'NA', false], ['explicit', '1021', true]], 'round trip');
+  assert.equal(targetsToForm([{ kind: 'all', value: '*', excluded: false, params_override: null }], null).targetMode, 'all');
+  assert.equal(targetsToForm([{ kind: 'explicit', value: '1', excluded: false, params_override: null }], null).targetMode, 'selected');
+  assert.equal(targetsToForm([], null).targetMode, 'single');
+  assert.equal(jobToForm({ name: 'J', plant: '1008', job_type: 'optimizer.plant', params: {} }).tzMode, 'plant');
+});
+
+test('targetsLabel names the targets: Plant 1021, 12 plants, All plants, Subnetwork NA', () => {
+  const d = { t: (k, v) => `${k}|${JSON.stringify(v ?? {})}` };
+  assert.equal(targetsLabel({ plant: '1021' }, d), 'jobs.targets_single|{"plant":"1021"}');
+  assert.equal(targetsLabel({ plant: '1021', targetKind: 'selected', targetCount: 12 }, d), 'jobs.targets_n|{"n":12}');
+  assert.equal(targetsLabel({ plant: '1021', targetKind: 'mixed', targetCount: 3 }, d), 'jobs.targets_n|{"n":3}');
+  assert.equal(targetsLabel({ plant: '1021', targetKind: 'all', targetCount: 50 }, d), 'jobs.targets_all_n|{"n":50}');
+  assert.equal(targetsLabel({ plant: '1021', targetKind: 'all', targetCount: 1 }, d), 'jobs.targets_all_one|{}');
+  assert.equal(targetsLabel({ plant: '1021', targetKind: 'selected', targetCount: 1 }, { t: (k, v) => (k === 'jobs.targets_n_one' ? `one:${v?.n}` : `${k}`) }), 'one:1');
+  assert.equal(targetsLabel({ plant: '1021', targetKind: 'subnetwork', targets: [{ kind: 'subnetwork', value: 'NA', excluded: false }] }, d), 'jobs.targets_subnetwork|{"name":"NA"}');
+});
+
+test('filterPlants searches and caps the rendered rows; targetsPreviewText reads "12 plants; 2 skipped: no timezone"', () => {
+  const all = Array.from({ length: 500 }, (_, i) => `P${String(i).padStart(3, '0')}`);
+  assert.deepEqual(filterPlants(all, '').shown.length, 200);
+  assert.equal(filterPlants(all, '').total, 500);
+  assert.deepEqual(filterPlants(all, 'p49'), { shown: all.slice(490, 500), total: 10 });
+  assert.equal(filterPlants(all, 'p', 5).shown.length, 5);
+  const d = { t: (k, v) => `${k}|${JSON.stringify(v ?? {})}` };
+  assert.equal(targetsPreviewText({ count: 12, skipped: 0, warnings: [] }, d), 'jobs.t_preview|{"n":12}');
+  const txt = targetsPreviewText({ count: 10, skipped: 2, warnings: ['3001: plant has no timezone', '3002: plant has no timezone'] }, d);
+  assert.match(txt, /^jobs\.t_preview_skipped\|/);
+  assert.match(txt, /"skipped":2/);
+  assert.match(txt, /jobs\.t_skip_no_tz/, 'the reason is translated once, not repeated per plant');
+});
+
+test('batchTiles keeps a fixed order and drops zero counts; buildBatchesQuery pages by cursor', () => {
+  assert.deepEqual(batchTiles({ counts: { failed: 1, total: 3, succeeded: 2, skipped: 0 } }).map(x => [x.key, x.value]), [['total', 3], ['succeeded', 2], ['failed', 1]]);
+  assert.deepEqual(batchTiles({ counts: {} }), []);
+  assert.equal(buildBatchesQuery({ plant: '1008', status: 'failed', jobId: 5, beforeId: 9, limit: 20 }), '?plant=1008&status=failed&job_id=5&before_id=9&limit=20');
+  assert.equal(buildBatchesQuery({}), '?limit=50');
+  assert.equal(buildBatchesQuery({ limit: 9999 }), '?limit=200');
+  assert.ok(timeZoneList().includes('UTC') && timeZoneList().length >= 10);
+});
+
+test('plural picks the _one key for a count of one and falls back to the base key when a locale has none', () => {
+  const t = (k, v) => ({ 'jobs.x': 'many {{n}}', 'jobs.x_one': 'one {{n}}' }[k] ?? k);
+  assert.equal(plural('jobs.x', 1, { t }), 'one {{n}}');
+  assert.equal(plural('jobs.x', 2, { t }), 'many {{n}}');
+  assert.equal(plural('jobs.y', 1, { t }), 'jobs.y');
+  assert.equal(targetsPreviewText({ count: 1, skipped: 0, warnings: [] }, { t: (k) => k }), 'jobs.t_preview');
+});
+
+test('mixed target rows are not editable in the form: they are kept exactly as saved (a subnetwork plus a plant, an excluded subnetwork)', () => {
+  const sub = { kind: 'subnetwork', value: 'NA', excluded: false, params_override: null };
+  const one = { kind: 'explicit', value: '1008', excluded: false, params_override: { mode: 'spt' } };
+  const exclSub = { kind: 'subnetwork', value: 'EU', excluded: true, params_override: null };
+  assert.equal(targetsLossless([sub]), true);
+  assert.equal(targetsLossless([sub, { kind: 'explicit', value: '3001', excluded: true, params_override: null }]), true);
+  assert.equal(targetsLossless([sub, one]), false);
+  assert.equal(targetsLossless([sub, exclSub]), false);
+  const f = { ...defaultJobForm('1008'), ...targetsToForm([sub, one], null) };
+  assert.equal(f.targetsLocked, true);
+  assert.deepEqual(buildTargetRows(f), [sub, one], 'every row, override included, survives an edit');
+  assert.equal(targetsToForm([sub], null).targetsLocked, false);
+});
+
+test('a selection beyond the server cap of 500 target rows is refused client-side with its own message', () => {
+  const plants = Array.from({ length: TARGET_ROWS_MAX + 1 }, (_, i) => 'P' + i);
+  const f = { ...defaultJobForm('1008'), name: 'n', targetMode: 'selected', targetPlants: plants };
+  assert.equal(targetRowCount(f), TARGET_ROWS_MAX + 1);
+  assert.equal(validateJobForm(f, { isAdmin: true, plants: null }).targets, 'jobs.err_targets_cap');
+  assert.equal(validateJobForm({ ...f, targetPlants: plants.slice(0, TARGET_ROWS_MAX) }, { isAdmin: true, plants: null }).targets, undefined);
 });

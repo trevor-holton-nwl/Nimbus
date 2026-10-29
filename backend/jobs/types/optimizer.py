@@ -69,6 +69,12 @@ def run(ctx, params: OptimizerParams) -> JobOutcome:
     return JobOutcome("warning" if warn else "succeeded", summary)
 
 
+def _slot():
+    """The optimizer's process-wide slot semaphore (taken by the runner before the global semaphore)."""
+    from backend.jobs.types import optimizer_runner
+    return optimizer_runner._SLOTS
+
+
 OPTIMIZER = register(JobType(key="optimizer.plant", label="Optimizer (one plant)", params_model=OptimizerParams,
                              run=run, default_timeout_s=600, timeout_fn=timeout_s,
-                             needs_plant_timezone=True, defer_clock=True))
+                             needs_plant_timezone=True, defer_clock=True, slot=_slot))

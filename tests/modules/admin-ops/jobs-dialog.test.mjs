@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { installDom } from '../helpers/dom-stub.mjs';
-import { JobsDialog, bodyHtml, recurFieldsHtml, copyRowsHtml, readForm } from '../../../frontend/admin-ops/jobs-dialog.mjs';
+import { JobsDialog, bodyHtml, recurFieldsHtml, pickRowsHtml, targetsBodyHtml, tzBlockHtml, readForm } from '../../../frontend/admin-ops/jobs-dialog.mjs';
 import { JobsClient } from '../../../frontend/admin-ops/jobs-client.mjs';
 import { defaultJobForm, defaultRecurrence } from '../../../frontend/admin-ops/jobs-model.mjs';
 import { TYPES, OPT, byKey } from './jobs-types-fixture.mjs';
@@ -41,15 +41,16 @@ function loadEnglish(win) {
 
 beforeEach(() => {
   dom = installDom();
-  loadEnglish(dom.win); els = {}; calls = { create: [], update: [], addSch: [], updSch: [], toast: [], closed: [] };
+  loadEnglish(dom.win); els = {}; calls = { create: [], update: [], addSch: [], updSch: [], toast: [], closed: [], previews: [], tpreviews: [] };
   for (const id of ['modal-job-edit', 'jb-body', 'jb-foot', 'jb-title', 'jb-close', 'jb-plant-host', 'jb-save']) add(id);
   for (const id of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity']) add(`jb-err-${id}`, { hidden: true });
   Object.assign(prior, {
     admin: Session.isAdmin, allowed: Session.allowedPlants, plants: Store.knownPlants, preview: JobsClient.preview, winPreview: JobsClient.windowPreview, create: JobsClient.create,
-    update: JobsClient.update, addSchedule: JobsClient.addSchedule, updateSchedule: JobsClient.updateSchedule, open: Modal.open, close: Modal.close, toast: Toast.show,
+    targets: JobsClient.targetsPreview, update: JobsClient.update, addSchedule: JobsClient.addSchedule, updateSchedule: JobsClient.updateSchedule, open: Modal.open, close: Modal.close, toast: Toast.show,
   });
   Session.isAdmin = () => true; Session.allowedPlants = () => null; Store.knownPlants = () => ['1008', '2000', '3000'];
-  JobsClient.preview = async () => ({ timezone: 'America/New_York', cronExpr: '0 8 * * *', entries: [{ atUtc: '2026-10-30T12:00:00+00:00', atLocal: '2026-10-30T08:00:00-04:00', dstShifted: false }] });
+  JobsClient.preview = async (...a) => { calls.previews.push(a); return { timezone: 'America/New_York', cronExpr: '0 8 * * *', entries: [{ atUtc: '2026-10-30T12:00:00+00:00', atLocal: '2026-10-30T08:00:00-04:00', dstShifted: false }], plants: [], totalPlants: 1, warnings: [] }; };
+  JobsClient.targetsPreview = async (rows, o) => { calls.tpreviews.push([rows, o]); return { plants: [], count: rows.length, skipped: 0, warnings: [] }; };
   JobsClient.windowPreview = async () => ({ start: 'S', end: 'E', label: '2026-10-22 to 2026-11-04', timezone: 'America/Chicago' });
   JobsClient.create = async j => { calls.create.push(j); return { id: 7 }; };
   JobsClient.update = async (id, p) => { calls.update.push([id, p]); return { id }; };
@@ -124,12 +125,37 @@ test('recurrence fields follow the preset and escape their values', () => {
   assert.match(recurFieldsHtml({ ...r, preset: 'cron', cron: '"><script>' }), /value="&quot;&gt;&lt;script&gt;"/);
 });
 
-test('copy rows: source plant excluded, filter narrows, role_plants scope respected', () => {
-  const job = { id: 1, name: 'J', plant: '1008' };
-  assert.deepEqual([...copyRowsHtml(job, new Set(), '').matchAll(/data-jb-plant="(\w+)"/g)].map(m => m[1]), ['2000', '3000']);
-  assert.deepEqual([...copyRowsHtml(job, new Set(['3000']), '30').matchAll(/data-jb-plant="(\w+)" checked/g)].map(m => m[1]), ['3000']);
+test('plant picker rows: search narrows, ticks show, role_plants scope respected, the checkbox carries the plant', () => {
+  assert.deepEqual([...pickRowsHtml('sel', [], '').matchAll(/data-jb-tp="(\w+)"/g)].map(m => m[1]), ['1008', '2000', '3000']);
+  assert.deepEqual([...pickRowsHtml('sel', ['3000'], '30').matchAll(/data-jb-tp="(\w+)" checked/g)].map(m => m[1]), ['3000']);
+  assert.match(pickRowsHtml('excl', [], ''), /data-jb-tx="1008"/, 'the exclusion picker uses its own attribute');
   Session.allowedPlants = () => ['1008', '2000'];
-  assert.deepEqual([...copyRowsHtml(job, new Set(), '').matchAll(/data-jb-plant="(\w+)"/g)].map(m => m[1]), ['2000']);
+  assert.deepEqual([...pickRowsHtml('sel', [], '').matchAll(/data-jb-tp="(\w+)"/g)].map(m => m[1]), ['1008', '2000']);
+  Session.allowedPlants = () => null;
+  Store.knownPlants = () => Array.from({ length: 300 }, (_, k) => `P${k}`);
+  assert.equal((pickRowsHtml('sel', [], '').match(/data-jb-tp=/g) || []).length, 200, 'a long list is capped, never rendered whole');
+  assert.match(pickRowsHtml('sel', [], ''), /jobs\.t_more|Showing 200 of 300/);
+});
+
+test('the body offers the four target modes, a single plant by default, and no preview or fan-out until a mode needs them', () => {
+  const f = defaultJobForm('1008', 'optimizer.plant', OPT.defaults, OPT);
+  const html = bodyHtml(f, 'new', true, OPT, TYPES);
+  assert.match(html, /id="jb-tmode-single" value="single" checked/);
+  for (const m of ['selected', 'all']) assert.match(html, new RegExp(`id="jb-tmode-${m}"`));
+  assert.doesNotMatch(html, /id="jb-tmode-subnetwork"/, 'no subnetwork radio while no plant carries one');
+  assert.doesNotMatch(html, /jb-tpreview|jb-fo-stagger|jb-tsel-list/);
+  assert.match(html, /id="jb-tzmode-plant" value="plant" checked/);
+  const sel = targetsBodyHtml({ ...f, targetMode: 'selected', targetPlants: ['2000'] });
+  assert.match(sel, /id="jb-tsel-list"/);
+  assert.match(sel, /data-jb-tp="2000" checked/);
+  assert.match(sel, /id="jb-tpreview"/);
+  assert.match(sel, /id="jb-fo-stagger"[^>]*value="0"/);
+  assert.match(targetsBodyHtml({ ...f, targetMode: 'all' }), /id="jb-texcl-list"/, 'All offers exclusions');
+  assert.doesNotMatch(targetsBodyHtml({ ...f, targetMode: 'all' }), /id="jb-tsel-list"/);
+  assert.match(targetsBodyHtml({ ...f, targetMode: 'subnetwork' }), /id="jb-tsub-host"/);
+  assert.match(tzBlockHtml({ ...f, tzMode: 'fixed', fixedTz: 'Asia/Tokyo' }), /id="jb-fixedtz-host"/);
+  assert.doesNotMatch(tzBlockHtml(f), /jb-fixedtz-host/);
+  assert.match(tzBlockHtml({ ...f, targetMode: 'selected' }), /jobs\.tz_each_plant|Each plant/);
 });
 
 test('open is a no-op for a non-admin', () => {
@@ -247,8 +273,8 @@ test('submit creates the job with its preset schedule inline, toasts, closes and
   assert.equal(calls.create.length, 1);
   assert.deepEqual(calls.create[0], {
     name: 'Morning optimize', plant: '1008', job_type: 'optimizer.plant',
-    params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' },
-    schedules: [{ kind: 'daily', time_of_day: '08:00', valid_from: null, valid_until: null, skip_if_running: true }],
+    params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' }, targets: [], fan_out: null,
+    schedules: [{ kind: 'daily', time_of_day: '08:00', valid_from: null, valid_until: null, skip_if_running: true, tz_mode: 'plant', fixed_timezone: null }],
   });
   assert.equal(calls.addSch.length, 0, 'the schedule rides inside the create call');
   assert.deepEqual(calls.toast.at(-1)[1], 'success');
@@ -291,19 +317,46 @@ test('duplicate seeds a new job: name cleared, saves as create', async () => {
   assert.equal(calls.update.length, 0);
 });
 
-test('copy to plants creates one job (schedule inline) per ticked plant and reports partial failures', async () => {
-  const job = { id: 3, name: 'Source', plant: '1008', job_type: 'optimizer.plant', params: { search: 'normal' }, enabled: true, schedule: { id: 9, kind: 'daily', time_of_day: '08:00', skip_if_running: true } };
-  let n = 0;
-  JobsClient.create = async j => { calls.create.push(j); if (j.plant === '3000') throw new Error('nope'); return { id: 100 + n++ }; };
-  JobsDialog.openCopy(job);
-  JobsDialog._state().targets = new Set(['2000', '3000']);
+test('create with selected plants sends the target rows, fan-out and the time zone mode; the preview asks for the same targets', async () => {
+  JobsDialog.open({ plant: '1008', types: TYPES });
+  JobsDialog._state().form = { ...JobsDialog._state().form, targetMode: 'selected', targetPlants: ['2000', '3000'], fanOut: { staggerS: 15, maxParallel: 2, failFast: true }, tzMode: 'utc' };
+  fillForm();
   await JobsDialog.submit();
-  assert.deepEqual(calls.create.map(c => c.plant), ['2000', '3000']);
-  assert.equal(calls.addSch.length, 0);
-  assert.deepEqual(calls.create[0].schedules.map(x => [x.kind, x.time_of_day]), [['daily', '08:00']]);
-  assert.equal(calls.toast.at(-1)[1], 'warn');
-  assert.deepEqual([...JobsDialog._state().targets], ['3000'], 'the failed plant stays ticked for a retry');
-  assert.equal(calls.closed.length, 0);
+  const c = calls.create[0];
+  assert.deepEqual(c.targets.map(r => [r.kind, r.value, r.excluded]), [['explicit', '2000', false], ['explicit', '3000', false]]);
+  assert.deepEqual(c.fan_out, { stagger_s: 15, max_parallel: 2, fail_fast: true });
+  assert.deepEqual([c.schedules[0].tz_mode, c.schedules[0].fixed_timezone], ['utc', null]);
+});
+
+test('a single-plant create sends no targets and no fan-out; edit PATCHes the targets so a multi-plant job can go back to one plant', async () => {
+  JobsDialog.open({ plant: '1008', types: TYPES });
+  fillForm();
+  await JobsDialog.submit();
+  assert.deepEqual([calls.create[0].targets, calls.create[0].fan_out], [[], null]);
+  const job = { id: 3, name: 'Source', plant: '1008', job_type: 'optimizer.plant', params: { search: 'normal' }, enabled: true,
+    targets: [{ kind: 'explicit', value: '2000', excluded: false, params_override: { mode: 'spt' } }], fanOut: { stagger_s: 5 },
+    schedule: { id: 9, kind: 'daily', time_of_day: '08:00', skip_if_running: true, tzMode: 'plant' } };
+  JobsDialog.open({ job, types: TYPES });
+  assert.equal(JobsDialog._state().form.targetMode, 'selected');
+  fillForm();
+  await JobsDialog.submit();
+  assert.deepEqual(calls.update[0][1].targets, [{ kind: 'explicit', value: '2000', excluded: false, params_override: { mode: 'spt' } }], 'a per-plant override survives an edit');
+  JobsDialog.open({ job, types: TYPES });          // the save closed the dialog: open it again and move the job back to one plant
+  JobsDialog._state().form = { ...JobsDialog._state().form, targetMode: 'single' };
+  fillForm();
+  await JobsDialog.submit();
+  assert.deepEqual([calls.update.at(-1)[1].targets, calls.update.at(-1)[1].fan_out], [[], null]);
+});
+
+test('Save is refused with an inline error when Selected plants has none ticked, or Fixed zone has no zone', async () => {
+  JobsDialog.open({ plant: '1008', types: TYPES });
+  JobsDialog._state().form = { ...JobsDialog._state().form, targetMode: 'selected', targetPlants: [], tzMode: 'fixed', fixedTz: '' };
+  add('jb-err-targets', { hidden: true }); add('jb-err-fixedTz', { hidden: true });
+  fillForm();
+  await JobsDialog.submit();
+  assert.equal(calls.create.length, 0);
+  assert.equal(els['jb-err-targets'].hidden, false);
+  assert.equal(els['jb-err-fixedTz'].hidden, false);
 });
 
 test('a new job defaults to APPLY, seeded from the server defaults; Dry run is the alternative', () => {

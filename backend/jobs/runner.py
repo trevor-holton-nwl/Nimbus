@@ -16,7 +16,7 @@ from pydantic import ValidationError
 
 import db
 from backend.admin_ops.logbuffer import _log_event
-from backend.jobs import data
+from backend.jobs import data, targets, triggers
 from backend.jobs.context import JobCancelled, JobContext, cap_text
 from backend.jobs.registry import REGISTRY, JobOutcome
 import backend.jobs.types  # noqa: F401 - registers the job types
@@ -24,6 +24,7 @@ import backend.jobs.types  # noqa: F401 - registers the job types
 log = logging.getLogger("nimbus.jobs")
 
 MAX_CONCURRENCY = 2                  # plants run on staggered local times; the API keeps CPU
+MAX_PARALLEL_DEFAULT = MAX_CONCURRENCY * 2   # live children of one batch when fan_out.max_parallel is unset
 RETRY_DELAY_S = 30                   # fixed retry policy (backoff is deferred)
 CANCEL_POLL_S = 2.0
 ERROR_KINDS = ("config", "system", "transient")
@@ -43,9 +44,33 @@ def _now() -> datetime:
 
 
 # ------------------------------------------------------------------------------------------------ entry points
-def start_manual_run(job: dict, actor: str | None) -> int:
+class NoTargetPlants(ValueError):
+    """The job's targets expand to no plant at all (every plant removed or excluded)."""
+
+
+class BatchPrepareError(RuntimeError):
+    """Inserting the batch's child runs failed; the batch was closed `failed` and nothing ran."""
+
+
+def _expand(job: dict, require_tz: bool | None = None) -> dict:
+    """The job's current expansion. A plant with no timezone is skipped only when the job type cannot run without one
+    (or the caller reads the schedule in each plant's zone: `require_tz=True`); `plan_arms` and the run-time expansion
+    share `targets.expand_targets`, so they agree on who runs."""
+    if require_tz is None:
+        jt = REGISTRY.get(job["job_type"])
+        require_tz = bool(jt and jt.needs_plant_timezone)
+    return targets.expand_targets(job, _now(), plants=data.load_plant_rows(), require_tz=require_tz)
+
+
+def start_manual_run(job: dict, actor: str | None, trigger: str = "manual",
+                     only_plants: set[str] | None = None) -> int | None:
     """Insert a `scheduled` manual run and execute it on a background thread. Returns the run id, or None when the
-    job already has a scheduled|running run (checked and inserted atomically)."""
+    job already has a scheduled|running run (checked and inserted atomically). A job with target rows fans out into a
+    batch instead (`trigger` 'manual' or 'restart'); the id returned is its first child run, whose `batch_id` names
+    the batch. `only_plants` limits the fan-out to those plants (restart of one run's plant, or of a batch's failed
+    plants); the busy check then covers only them. Raises NoTargetPlants when the targets expand to nothing."""
+    if job.get("targets"):
+        return _start_manual_batch(job, actor, trigger, only_plants)
     run_id = data.insert_manual_run_if_idle(job=job, triggered_by=actor, scheduled_for=_now())
     if run_id is None:
         return None
@@ -55,14 +80,275 @@ def start_manual_run(job: dict, actor: str | None) -> int:
     return run_id
 
 
-def fire_schedule(schedule_id: int) -> int | None:
-    """APScheduler fired schedule `schedule_id`. Blocking."""
+def _start_manual_batch(job: dict, actor: str | None, trigger: str, only_plants: set[str] | None = None) -> int | None:
+    exp = _expand(job)
+    if only_plants is not None:
+        exp = {**exp, "plants": [e for e in exp["plants"] if e["plant"] in only_plants]}
+    if not exp["plants"]:
+        raise NoTargetPlants("the job's targets expand to no plants" if only_plants is None
+                             else "none of those plants is a target of this job any more")
+    when = _now()
+    only_one = next(iter(only_plants)) if only_plants is not None and len(only_plants) == 1 else None
+    batch_id = data.batch_idle_check_and_insert(job=job, trigger=trigger, triggered_by=actor, scheduled_for=when,
+                                                plant=only_one)
+    if batch_id is None:
+        return None
+    children = _prepare_or_fail(job, exp, batch_id=batch_id, trigger=trigger, schedule_id=None, scheduled_for=when,
+                                triggered_by=actor)
+    if children is None:
+        raise BatchPrepareError("could not prepare the batch; see the Admin log")
+    _dispatch(job, batch_id, children, trigger=trigger, schedule_id=None, scheduled_for=when, triggered_by=actor,
+              skip_if_running=True)
+    return children[0]["run_id"]
+
+
+def _dispatch(job: dict, batch_id: int, children: list[dict], **kw) -> None:
+    """Hand a prepared batch to its own dispatcher thread and return at once, so neither a request nor a fire-pool
+    worker is held for the stagger or the run time."""
+    threading.Thread(target=execute_batch, kwargs={"job": job, "batch_id": batch_id, "children": children, **kw},
+                     name=f"job-batch-{batch_id}", daemon=True).start()
+
+
+def _prepare_or_fail(job: dict, expansion: dict, *, batch_id: int, **kw) -> list[dict] | None:
+    """`prepare_batch`, or None after closing the batch `failed` (and any child already inserted) when it raises."""
+    try:
+        return prepare_batch(job, expansion, batch_id=batch_id, **kw)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("batch %s could not be prepared", batch_id)
+        _log_event("error", "jobs", "job batch could not be prepared", exc=exc, batch_id=batch_id)
+        try:
+            data.fail_batch_children(batch_id, f"batch preparation failed: {exc}")
+            data.finish_batch(batch_id, force_status="failed",
+                              summary_extra={"error_kind": "system", "error": f"batch preparation failed: {exc}"[:300]})
+        except Exception:  # noqa: BLE001
+            log.exception("could not close batch %s after a preparation failure", batch_id)
+        return None
+
+
+
+
+def cancel_batch(batch_id: int) -> dict | None:
+    """Cancel a batch: children not started become `skipped` ('batch cancelled'), running ones are cancelled (the
+    dispatcher then rolls the batch up when they end; with none running it is rolled up here)."""
+    for rid in data.cancel_batch_pending(batch_id):
+        cancel_run(rid)
+    return data.finish_batch(batch_id)
+
+
+# ------------------------------------------------------------------------------------------------------ fan-out
+def _apply_target(job: dict, plant: str | None, override: dict | None) -> dict:
+    """The job as ONE plant's child sees it: that plant, and the job params with the plant's override deep-merged."""
+    if plant is None:
+        return job
+    return {**job, "plant": plant, "params": targets.deep_merge(job["params"] or {}, override)}
+
+
+def prepare_batch(job: dict, expansion: dict, *, batch_id: int, trigger: str, schedule_id: int | None,
+                  scheduled_for: datetime | None, triggered_by: str | None) -> list[dict]:
+    """Insert one child run per expanded plant under the batch BEFORE any of them starts, so the batch shows its full
+    size at once. A skipped plant (no timezone, removed) becomes a `skipped` run (`error_kind` config); a child whose
+    merged params fail the type's model becomes a `failed` run (config) without touching its siblings. Returns
+    `[{plant, run_id, override, state}]` in expansion order; only `state == 'pending'` children will run."""
+    child_trigger = "schedule" if trigger == "schedule" else "manual"
+    base = dict(job_id=job["id"], schedule_id=schedule_id, job_type=job["job_type"], trigger=child_trigger,
+                scheduled_for=scheduled_for, triggered_by=triggered_by, batch_id=batch_id)
+    out = []
+    for e in expansion["plants"]:
+        plant, override = e["plant"], e.get("params_override") or {}
+        if e.get("skip"):
+            rid = data.insert_run(plant=plant, status="skipped", error=e["skip"],
+                                  summary={"error_kind": "config", "failed_step": "targets"}, **base)
+            out.append({"plant": plant, "run_id": rid, "override": override, "state": "skipped"})
+            continue
+        _jt, _params, err = _prepare(_apply_target(job, plant, override))
+        if err:
+            rid = data.insert_run(plant=plant, status="failed", error=err,
+                                  summary={"error_kind": "config", "failed_step": "validate"}, **base)
+            _log_failure_line(rid, err, "validate")
+            out.append({"plant": plant, "run_id": rid, "override": override, "state": "failed"})
+            continue
+        rid = data.insert_run(plant=plant, status="scheduled", **base)
+        out.append({"plant": plant, "run_id": rid, "override": override, "state": "pending"})
+    return out
+
+
+def execute_batch(*, job: dict, batch_id: int, children: list[dict], trigger: str, schedule_id: int | None,
+                  scheduled_for: datetime | None, triggered_by: str | None, skip_if_running: bool,
+                  run_child=None, sleep=time.sleep) -> None:
+    """Run the pending children honouring the job's `fan_out`: `stagger_s` between child STARTS, `max_parallel` live
+    children at once (on top of the global MAX_CONCURRENCY semaphore), `fail_fast` stops launching after a failure
+    (the rest are recorded `skipped`). Blocks until every child is terminal, then rolls the batch up. Never raises.
+    `run_child` and `sleep` are injectable for tests."""
+    run_child = run_child or run_job
+    child_trigger = "schedule" if trigger == "schedule" else "manual"
+    fan = job.get("fan_out") or {}
+    stagger = max(0, int(fan.get("stagger_s") or 0))
+    # Unset = bounded anyway: 50 plants must not mean 50 live threads all queuing on the global semaphore.
+    max_parallel = int(fan["max_parallel"]) if fan.get("max_parallel") else MAX_PARALLEL_DEFAULT
+    fail_fast = bool(fan.get("fail_fast"))
+    stop = threading.Event()
+    if fail_fast and any(c["state"] == "failed" for c in children):
+        stop.set()
+    slots = threading.BoundedSemaphore(max_parallel)
+    threads: list[threading.Thread] = []
+
+    def work(c: dict) -> None:
+        try:
+            rid = run_child(job_id=job["id"], trigger=child_trigger, schedule_id=schedule_id,
+                            scheduled_for=scheduled_for, triggered_by=triggered_by, run_id=c["run_id"],
+                            skip_if_running=skip_if_running, plant=c["plant"], override=c["override"],
+                            batch_id=batch_id)
+            row = data.get_run(rid) if rid else None
+            if row is None or row["status"] == "failed":
+                stop.set()
+        except Exception as exc:  # noqa: BLE001 - one child must not take the batch down
+            log.exception("batch %s child %s crashed", batch_id, c["plant"])
+            stop.set()
+            try:
+                data.finish_run(c["run_id"], "failed", {"error_kind": "system"}, f"runner error: {exc}", False)
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            if slots:
+                slots.release()
+
+    def skip_rest(c: dict) -> None:
+        data.finish_run(c["run_id"], "skipped", {"error_kind": "config", "failed_step": "fail_fast"},
+                        "stopped: an earlier plant failed", False)
+
+    def not_started(c: dict) -> bool:
+        """Cancelled or skipped while it waited (a batch cancel): leave the row as it was."""
+        try:
+            row = data.get_run(c["run_id"])
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(row and row["status"] != "scheduled")
+
+    crashed = False
+    try:
+        pending = [c for c in children if c["state"] == "pending"]
+        launched = 0
+        for c in pending:
+            if not_started(c):
+                continue
+            if fail_fast and stop.is_set():
+                skip_rest(c)
+                continue
+            if launched and stagger:
+                sleep(stagger)
+            slots.acquire()
+            if (fail_fast and stop.is_set()) or not_started(c):
+                slots.release()
+                if not not_started(c):
+                    skip_rest(c)
+                continue
+            th = threading.Thread(target=work, args=(c,), name=f"job-batch-{batch_id}-{c['plant']}", daemon=True)
+            th.start()
+            threads.append(th)
+            launched += 1
+    except Exception as exc:  # noqa: BLE001
+        crashed = True
+        log.exception("batch %s dispatcher crashed", batch_id)
+        _log_event("error", "jobs", "job batch dispatcher crashed", exc=exc, batch_id=batch_id)
+    finally:
+        for th in threads:                     # never roll the batch up while a started child is still running
+            th.join()
+    if crashed:
+        try:                                   # children the crashed dispatcher never launched must not stay queued
+            data.fail_batch_children(batch_id, "dispatcher crashed before this plant started")
+        except Exception:  # noqa: BLE001
+            log.exception("could not close the unstarted children of batch %s", batch_id)
+    for attempt in (1, 2):                     # one retry: a transient DB error must not leave the batch `running`
+        try:
+            data.finish_batch(batch_id)
+            break
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not finish batch %s (attempt %s): %s", batch_id, attempt, exc)
+            if attempt == 1:
+                sleep(1)
+
+
+def _fan_out(job: dict, expansion: dict, *, trigger: str, schedule_id: int | None, triggered_by: str | None,
+             skip_if_running: bool) -> int:
+    """Batch + every child row (status `scheduled`, so Queued shows at once, `scheduled_for` = this fire time), then
+    hand dispatch to the batch's own thread. Returns the batch id immediately: a fire-pool worker is never held for a
+    stagger or a run. An expansion with no plant at all closes the batch `warning` with a note (never a green empty
+    batch)."""
+    when = _now()
+    batch_id = data.insert_batch(job_id=job["id"], schedule_id=schedule_id, scheduled_for=when, trigger=trigger,
+                                 triggered_by=triggered_by)
+    if not expansion["plants"]:
+        data.finish_batch(batch_id, force_status="warning", summary_extra={"note": "the targets expand to no plants"})
+        return batch_id
+    children = _prepare_or_fail(job, expansion, batch_id=batch_id, trigger=trigger, schedule_id=schedule_id,
+                                scheduled_for=when, triggered_by=triggered_by)
+    if children is not None:
+        _dispatch(job, batch_id, children, trigger=trigger, schedule_id=schedule_id, scheduled_for=when,
+                  triggered_by=triggered_by, skip_if_running=skip_if_running)
+    return batch_id
+
+
+def _retire_once_if_spent(sched: dict, job: dict, plant: str | None) -> None:
+    """A `once` schedule is spent when it starts. Armed per plant (each plant's local time), it is spent only when
+    every armable plant has fired, so the later plants' fires are not removed by the first one."""
+    if sched["kind"] != "once":
+        return
+    if plant is None or not job.get("targets"):
+        data.retire_schedule(sched["id"])
+        return
+    armable = {e["plant"] for e in targets.runnable(_expand(job, require_tz=True))}   # what plan_arms armed
+    if armable <= data.schedule_fired_plants(sched["id"]) | {plant}:
+        data.retire_schedule(sched["id"])
+
+
+ONCE_A_DAY_KINDS = ("daily", "weekdays", "weekly", "monthly")
+
+
+def _already_ran_today(sched: dict, job: dict, plant: str | None) -> bool:
+    """A timezone edit re-arms a schedule, and the new zone's clock can reach the fire time a second time on the same
+    local date. For the once-a-day presets, a fire is dropped when this plant already has a (non-skipped) scheduled run
+    from this schedule on today's local date. The edge, accepted: moving the time of day LATER after today's fire has
+    run skips today's new fire (tomorrow is unaffected). `hourly` / `cron` fire several times a day and are not
+    deduplicated; fixed / UTC fan-outs have no single plant and are not either."""
+    if sched["kind"] not in ONCE_A_DAY_KINDS or (job.get("targets") and plant is None):
+        return False
+    who = plant or job["plant"]
+    try:
+        tz = (next((p["timezone"] for p in data.load_plant_rows() if p["plant"] == who), None)
+              or sched["timezone"])
+        today = _now().astimezone(triggers.get_zone(tz)).date()
+        if data.schedule_ran_on(sched["id"], who, tz, today):
+            _log_event("info", "jobs", "fire skipped: this plant already ran this schedule today (re-armed)",
+                       schedule_id=sched["id"], plant=who)
+            return True
+    except Exception as exc:  # noqa: BLE001 - the dedupe is a guard, never a reason to miss a run
+        log.warning("daily dedupe check failed for schedule %s: %s", sched["id"], exc)
+    return False
+
+
+def fire_schedule(schedule_id: int, plant: str | None = None) -> int | None:
+    """APScheduler fired schedule `schedule_id`. Blocking. `plant` is set for a per-plant (`plant` time zone mode)
+    arm of a multi-plant job: only that plant runs, as its own batch of one. Returns the run id (single plant) or the
+    batch id (a fan-out)."""
     sched = data.get_schedule(schedule_id)
     if sched is None or sched["retired"] or sched["paused"]:
         return None
     job = data.get_job(sched["job_id"])
     if job is None or job["archived"] or not job["enabled"]:
         return None
+    if _already_ran_today(sched, job, plant):
+        return None
+    if job.get("targets"):
+        # An arm for one plant reads the schedule in that plant's own zone, so that plant needs one; a fixed / UTC fan-out
+        # needs a zone only when the job type does (the same rule `plan_arms` used to arm it).
+        exp = _expand(job, require_tz=True if plant is not None else None)
+        if plant is not None:
+            exp = {**exp, "plants": [e for e in exp["plants"] if e["plant"] == plant and not e["skip"]]}
+            if not exp["plants"]:
+                return None                      # the plant left the target set (or lost its timezone) since arming
+        _retire_once_if_spent(sched, job, plant)
+        return _fan_out(job, exp, trigger="schedule", schedule_id=schedule_id, triggered_by="schedule",
+                        skip_if_running=sched["skip_if_running"])
     if not data.plant_exists(job["plant"]):
         # The plant was removed from master data: leave a visible skipped run and stop firing this job.
         data.insert_run(job_id=job["id"], schedule_id=schedule_id, plant=job["plant"], job_type=job["job_type"],
@@ -71,22 +357,21 @@ def fire_schedule(schedule_id: int) -> int | None:
         data.patch_job(job["id"], {"enabled": False}, "schedule")
         _log_event("warn", "jobs", "job disabled: its plant no longer exists", job_id=job["id"], plant=job["plant"])
         return None
-    if sched["kind"] == "once":
-        data.retire_schedule(schedule_id)          # spent once it starts; never re-armed
+    _retire_once_if_spent(sched, job, None)        # spent once it starts; never re-armed
     return run_job(job_id=job["id"], trigger="schedule", schedule_id=schedule_id, scheduled_for=_now(),
                    triggered_by="schedule", skip_if_running=sched["skip_if_running"])
 
 
-def record_skipped(schedule_id: int, scheduled_for: datetime | None, reason: str) -> int | None:
-    """A fire that never ran (APScheduler misfire past its grace time) still leaves a visible `skipped` run."""
+def record_skipped(schedule_id: int, scheduled_for: datetime | None, reason: str, plant: str | None = None) -> int | None:
+    """A fire that never ran (APScheduler misfire past its grace time) still leaves a visible `skipped` run (for the
+    per-plant arm's `plant` when there is one, else the job's home plant)."""
     try:
         sched = data.get_schedule(schedule_id)
         job = data.get_job(sched["job_id"]) if sched else None
         if sched is None or job is None:
             return None
-        if sched["kind"] == "once":
-            data.retire_schedule(schedule_id)
-        return data.insert_run(job_id=job["id"], schedule_id=schedule_id, plant=job["plant"],
+        _retire_once_if_spent(sched, job, plant)
+        return data.insert_run(job_id=job["id"], schedule_id=schedule_id, plant=plant or job["plant"],
                                job_type=job["job_type"], status="skipped", trigger="schedule",
                                scheduled_for=scheduled_for, triggered_by="schedule", error=reason)
     except Exception as exc:  # noqa: BLE001
@@ -137,20 +422,43 @@ def _log_failure_line(run_id: int, msg: str, step: str) -> None:
         log.warning("could not log failure line for run %s: %s", run_id, exc)
 
 
+def _not_startable(job: dict, trigger: str) -> str | None:
+    """Why a run must not start now: the job was archived, or (for a scheduled run) disabled, after it was queued. A
+    manual run of a disabled job is the admin's explicit choice and still starts. Maintenance mode is W3b."""
+    if job["archived"]:
+        return "not started: the job was archived"
+    if not job["enabled"] and trigger == "schedule":
+        return "not started: the job was disabled"
+    return None
+
+
 def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, scheduled_for: datetime | None = None,
-            triggered_by: str | None = None, run_id: int | None = None, skip_if_running: bool = True) -> int | None:
-    """Execute one job (plus fixed-policy retries). Returns the id of the last run row. Never raises."""
+            triggered_by: str | None = None, run_id: int | None = None, skip_if_running: bool = True,
+            plant: str | None = None, override: dict | None = None, batch_id: int | None = None) -> int | None:
+    """Execute one job (plus fixed-policy retries). Returns the id of the last run row. Never raises. A fan-out child
+    passes its `plant` and per-plant `override` (re-applied to the freshly read job on every retry) and `batch_id`."""
     try:
         job = data.get_job(job_id)
         if job is None:
             return None
+        if run_id is not None:
+            row = data.get_run(run_id)
+            if row and row["status"] != "scheduled":      # skipped or cancelled while it waited (a batch cancel)
+                return run_id
+        reason = _not_startable(job, trigger)
+        if reason:                                         # re-checked at the moment the child starts, not at fire time
+            if run_id is not None:
+                data.finish_run(run_id, "skipped", {"error_kind": "config", "failed_step": "recheck"}, reason, False)
+            return run_id
+        job = _apply_target(job, plant, override)
         jt, params, err = _prepare(job)
         attempt = 1
         while True:
             if run_id is None:
                 run_id = data.insert_run(job_id=job_id, schedule_id=schedule_id, plant=job["plant"],
                                          job_type=job["job_type"], status="scheduled", trigger=trigger,
-                                         attempt=attempt, scheduled_for=scheduled_for, triggered_by=triggered_by)
+                                         attempt=attempt, scheduled_for=scheduled_for, triggered_by=triggered_by,
+                                         batch_id=batch_id)
             if err:                                       # an unknown type or bad params: the job needs fixing
                 _log_failure_line(run_id, err, "validate")
                 data.finish_run(run_id, "failed", {"error_kind": "config", "failed_step": "validate"}, err, False)
@@ -164,6 +472,7 @@ def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, schedu
             if job is None or job["archived"] or not job["enabled"]:
                 log.info("job %s retry cancelled: it was archived, disabled or removed", job_id)
                 return run_id
+            job = _apply_target(job, plant, override)
             jt, params, err = _prepare(job)
             attempt += 1
             trigger, run_id = "retry", None
@@ -182,6 +491,34 @@ def _execute(run_id: int, job: dict, jt, params, skip_if_running: bool) -> str:
     """Run one attempt on an existing run row; returns its final status."""
     timeout = int(job["timeout_s"] or jt.timeout_for(params))
     lock_key = jt.lock_name(job["plant"], params)
+    # LOCK ORDER (slot-gated types, the optimizer): the type's own slot BEFORE the global semaphore. Holders of the
+    # semaphore never wait on a slot they do not already hold, so there is no cycle, and a run queued for a slot does
+    # not sit on one of the two global places. It stays `scheduled` (Queued) while it waits on either.
+    slot = jt.slot() if getattr(jt, "slot", None) else None
+    if slot is not None and not _acquire_slot(slot, run_id):
+        data.finish_run(run_id, "cancelled", None, "cancelled before start", False)
+        return "cancelled"
+    try:
+        return _execute_gated(run_id, job, jt, params, skip_if_running, timeout, lock_key, slot is not None)
+    finally:
+        if slot is not None:
+            slot.release()
+
+
+def _acquire_slot(slot, run_id: int) -> bool:
+    """Wait for a type's slot, polling the DB cancel flag every ~2 s (the run has no context yet). False = cancelled."""
+    next_poll = time.monotonic() + CANCEL_POLL_S
+    while not slot.acquire(timeout=0.5):
+        if time.monotonic() >= next_poll:
+            next_poll = time.monotonic() + CANCEL_POLL_S
+            row = data.get_run(run_id)
+            if row and row["cancel_requested"]:
+                return False
+    return True
+
+
+def _execute_gated(run_id: int, job: dict, jt, params, skip_if_running: bool, timeout: int, lock_key: str,
+                   slot_held: bool) -> str:
     _SEM.acquire()
     try:
         with db._pool.connection() as conn:
@@ -202,7 +539,7 @@ def _execute(run_id: int, job: dict, jt, params, skip_if_running: bool) -> str:
                 if run and run["cancel_requested"]:
                     data.finish_run(run_id, "cancelled", None, "cancelled before start", False)
                     return "cancelled"
-                return _run_body(run_id, job, jt, params, timeout)
+                return _run_body(run_id, job, jt, params, timeout, slot_held)
             finally:
                 if got:
                     data.release_session_lock(conn, lock_key)
@@ -210,7 +547,7 @@ def _execute(run_id: int, job: dict, jt, params, skip_if_running: bool) -> str:
         _SEM.release()
 
 
-def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
+def _run_body(run_id: int, job: dict, jt, params, timeout: int, slot_held: bool = False) -> str:
     def sink(rows):
         try:
             data.write_log_rows(run_id, rows)
@@ -219,13 +556,16 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
 
     ctx = JobContext(run_id=run_id, plant=job["plant"], job_id=job["id"], sink=sink, mirror=_mirror)
     ctx.defer_clock = bool(getattr(jt, "defer_clock", False))
+    ctx.slot_held = slot_held                    # the runner already holds the type's slot: the body must not take it
     with _RUNNING_LOCK:
         _RUNNING[run_id] = ctx
-    # A deferred-clock body (the optimizer) may block on a shared slot: until begin_work() the run counts as Queued
-    # and its elapsed time / duration start from begin_work(), not from here.
-    data.mark_running(run_id, waiting_for="slot" if ctx.defer_clock else None)
+    # A deferred-clock body that still has to wait for a shared slot itself (no runner-held slot) counts as Queued
+    # until begin_work(); its elapsed time / duration start from begin_work(), not from here.
+    data.mark_running(run_id, waiting_for="slot" if ctx.defer_clock and not slot_held else None)
     if ctx.defer_clock:
         ctx.on_work_start = lambda: data.mark_work_started(run_id)
+    if slot_held:
+        ctx.begin_work()
     holder: dict = {}
 
     def target():
@@ -240,7 +580,7 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
     th = threading.Thread(target=target, name=f"job-body-{run_id}", daemon=True)
     th.start()
     # A deferred clock stays off while the body waits for its resource (cancel still works); it starts at begin_work().
-    deadline = None if ctx.defer_clock else time.monotonic() + timeout
+    deadline = None if ctx.defer_clock and not ctx.work_started.is_set() else time.monotonic() + timeout
     next_poll = time.monotonic() + CANCEL_POLL_S
     try:
         while th.is_alive():
