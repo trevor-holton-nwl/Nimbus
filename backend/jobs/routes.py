@@ -11,9 +11,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, ValidationError
 
 import master_data as md
-from backend.jobs import data, runner, triggers
+from backend.jobs import artifacts, data, runner, triggers, window_service, windows
 from backend.jobs.context import LEVELS
-from backend.jobs.registry import get_type, list_types
+from backend.jobs.registry import describe_params, get_type, list_types
 from backend.security import auth
 
 router = APIRouter()
@@ -177,9 +177,38 @@ def job_types(response: Response):
     for jt in list_types():
         out.append({"key": jt.key, "label": jt.label, "plant_scoped": jt.plant_scoped,
                     "default_timeout_s": jt.default_timeout_s, "stub": jt.stub,
+                    "kind": jt.kind, "mutates": jt.mutates, "params": describe_params(jt),
                     "params_schema": jt.params_model.model_json_schema(),
                     "defaults": jt.params_model().model_dump(mode="json")})
     return {"types": out}
+
+
+# ----------------------------------------------------------------------------------------------- windows
+class WindowPreviewIn(BaseModel):
+    plant: str
+    window: dict
+    job_id: int | None = Field(None, ge=1, le=_BIGINT)
+    first_run_lookback_days: int = Field(1, ge=1, le=60)
+
+
+@router.post("/jobs/windows/preview", dependencies=[Depends(auth.require_authenticated)])
+def preview_window(body: WindowPreviewIn, response: Response,
+                   allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """What a DateWindow resolves to today in the plant timezone: the same resolver a run uses
+    (window_service.resolve_for_plant), so the dialog line cannot disagree with the run."""
+    _check_plant(body.plant, allowed_plants)
+    if body.job_id is not None:
+        _job_or_404(body.job_id, allowed_plants)
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        win = windows.DateWindow.model_validate(body.window)
+        resolved = window_service.resolve_for_plant(body.plant, win, job_id=body.job_id,
+                                                    first_run_lookback_days=body.first_run_lookback_days)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=f"invalid window: {e.errors(include_url=False)}") from e
+    except windows.WindowConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return window_service.public(resolved)
 
 
 # ------------------------------------------------------------------------------------------------ jobs: read
@@ -513,6 +542,42 @@ def run_log(
     return {"run_id": run_id, "status": fresh["status"], "log_truncated": fresh["log_truncated"],
             "done": fresh["status"] in data.TERMINAL, "lines": lines,
             "last_seq": lines[-1]["seq"] if lines else after_seq}
+
+
+@router.get("/jobs/runs/{run_id}/artifact", dependencies=[Depends(auth.require_authenticated)])
+def run_artifact(
+    run_id: int,
+    response: Response,
+    section: str | None = Query(None, max_length=100),
+    format: str = Query("json", pattern="^(json|csv)$"),
+    offset: int = Query(0, ge=0, le=10_000_000),
+    limit: int = Query(artifacts.PAGE_MAX, ge=1, le=artifacts.PAGE_MAX),
+    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+):
+    """A report run's stored result. JSON: every section (or the one named by `section`) with `rows` cut to one page
+    (`offset`/`limit`, max 500), so a large artifact never ships in a single response. `format=csv` needs `section`
+    and returns that section's stored rows as text/csv."""
+    run = _run_or_404(run_id, allowed_plants)
+    art = data.get_artifact(run_id)
+    if art is None:
+        raise HTTPException(status_code=404, detail="This run has no artifact")
+    body = art["artifact"]
+    secs = body.get("sections") or []
+    if section is not None:
+        secs = [s for s in secs if s.get("key") == section]
+        if not secs:
+            raise HTTPException(status_code=404, detail="Unknown section")
+    if format == "csv":
+        if section is None:
+            raise HTTPException(status_code=400, detail="format=csv needs a section")
+        name = f"{run['job_type']}-{section}-run{run_id}.csv".replace("/", "_")
+        return Response(content=artifacts.section_csv(secs[0]), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
+    response.headers["Cache-Control"] = "no-store"
+    return {"run_id": run_id, "filename": art["filename"], "size_bytes": art["size_bytes"],
+            "created_at": art["created_at"], "summary": body.get("summary") or {},
+            "truncated": bool((body.get("summary") or {}).get("truncated")),
+            "sections": [artifacts.page(s, offset, limit) for s in secs]}
 
 
 @router.post("/jobs/runs/{run_id}/restart", dependencies=_ADMIN)

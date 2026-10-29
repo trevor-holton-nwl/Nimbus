@@ -35,6 +35,39 @@ def test_ddl_constant_matches_migration_and_schema_verbatim():
         assert data.JOB_DDL in text, path
 
 
+ARTIFACT_MIGRATION = os.path.join(ROOT, "migrations", "2026-10-30-1-job-artifacts.sql")
+
+
+def test_artifact_ddl_matches_migration_and_schema_verbatim():
+    import backend.jobs.data as data
+    for path in (ARTIFACT_MIGRATION, SCHEMA):
+        with open(path, encoding="utf-8") as f:
+            text = f.read().replace("\r\n", "\n")
+        assert data.JOB_ARTIFACT_DDL.strip() in text, path
+    assert "REFERENCES job_run (id)" in data.JOB_ARTIFACT_DDL
+
+
+def test_artifact_migration_has_no_destructive_words_or_cascade_and_only_creates():
+    import backend.jobs.data as data
+    with open(ARTIFACT_MIGRATION, encoding="utf-8") as f:
+        text = f.read()
+    assert not DESTRUCTIVE.search(text) and not DESTRUCTIVE.search(data.JOB_ARTIFACT_DDL)
+    assert "CASCADE" not in text.upper()
+    stmts = [s.strip() for s in re.sub(r"--[^\n]*", "", text).split(";") if s.strip()]
+    assert stmts and all(s.upper().startswith("CREATE TABLE IF NOT EXISTS") for s in stmts)
+
+
+def test_schedule_event_plant_index_is_a_startup_hook_mirrored_in_schema_not_a_migration():
+    import backend.schedule_events.data as sed
+    ddl = sed.SCHEDULE_EVENT_PLANT_INDEX_DDL.strip()
+    with open(SCHEMA, encoding="utf-8") as f:
+        assert ddl in f.read().replace("\r\n", "\n")
+    mig = os.path.join(ROOT, "migrations", "2026-10-23-1-schedule-event.sql")
+    with open(mig, encoding="utf-8") as f:
+        assert "idx_schedule_event_plant" not in f.read()
+    assert not DESTRUCTIVE.search(ddl)
+
+
 def test_migration_text_has_no_destructive_words_or_cascade():
     import backend.jobs.data as data
     with open(MIGRATION, encoding="utf-8") as f:
@@ -294,6 +327,8 @@ def jobs_pg(planning_pg, monkeypatch):
     yield planning_pg
     with db._pool.connection() as conn, conn.cursor() as cur:
         plants = [planning_pg.plant, planning_pg.other]
+        cur.execute("DELETE FROM job_run_artifact WHERE run_id IN (SELECT id FROM job_run WHERE plant = ANY(%s))",
+                    (plants,))
         cur.execute("DELETE FROM job_run_log WHERE run_id IN (SELECT id FROM job_run WHERE plant = ANY(%s))", (plants,))
         cur.execute("DELETE FROM job_run WHERE plant = ANY(%s)", (plants,))
         cur.execute("DELETE FROM job_schedule WHERE job_id IN (SELECT id FROM job_definition WHERE plant = ANY(%s))",
