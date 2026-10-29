@@ -220,7 +220,8 @@ export function normTimeline(data: unknown): Timeline {
     })),
   }));
   return { from: String(d.from ?? ''), to: String(d.to ?? ''), nowUtc: String(d.now_utc ?? ''), lanes, totalPlants: Number(d.total_plants ?? lanes.length),
-    plantOffset: Number(d.plant_offset ?? 0), plantLimit: Number(d.plant_limit ?? 20), truncated: d.truncated === true };
+    plantOffset: Number(d.plant_offset ?? 0), plantLimit: Number(d.plant_limit ?? 20), truncated: d.truncated === true,
+    upcomingTruncated: d.upcoming_truncated === true };
 }
 
 export function normLog(data: unknown): LogPage {

@@ -3635,7 +3635,7 @@ window.__NIMBUS_LOCALES.de = {
   'jobs.adv_win_action': 'Außerhalb dieser Zeiten',
   'jobs.adv_win_skip': 'Lauf überspringen',
   'jobs.adv_win_defer': 'Ausführen, wenn das Fenster öffnet',
-  'jobs.adv_win_hint': 'Werkszeit. Ein Fenster wie 22:00 bis 05:00 geht über Mitternacht. Überspringen verwirft den Lauf; die andere Wahl verschiebt ihn auf die nächste Öffnung des Fensters.',
+  'jobs.adv_win_hint': 'Gilt in der Zeitzone des Zeitplans: Werkszeit oder die gewählte feste bzw. UTC-Zone. Ein Fenster wie 22:00 bis 05:00 geht über Mitternacht. Überspringen verwirft den Lauf; die andere Wahl verschiebt ihn auf die nächste Öffnung des Fensters (an einem Arbeitstag, wenn eine Regel für Schließtage gesetzt ist).',
   'jobs.adv_monthly': 'Tag des Monats',
   'jobs.adv_monthly_day_of_month': 'Ein fester Tag',
   'jobs.adv_monthly_last_day': 'Letzter Tag des Monats',
@@ -3671,6 +3671,7 @@ window.__NIMBUS_LOCALES.de = {
   'jobs.maint_since': 'Seit {{at}} durch {{who}}',
   'jobs.maint_on_btn': 'Geplante Jobs pausieren',
   'jobs.maint_off_btn': 'Geplante Jobs fortsetzen',
+  'jobs.maint_scoped_hint': 'Nur ein Admin mit Zugriff auf alle Werke kann geplante Jobs pausieren.',
   'jobs.maint_confirm_on_title': 'Alle geplanten Jobs pausieren?',
   'jobs.maint_confirm_on_msg': 'Jeder geplante Lauf in jedem Werk wird bis zur Fortsetzung als Übersprungen: Wartungsmodus erfasst. Jetzt ausführen funktioniert weiter.',
   'jobs.maint_confirm_off_title': 'Geplante Jobs fortsetzen?',
@@ -3699,4 +3700,5 @@ window.__NIMBUS_LOCALES.de = {
   'jobs.tl_next': 'Nächste Werke',
   'jobs.tl_page': 'Werke {{from}} bis {{to}} von {{total}}',
   'jobs.tl_truncated': 'Es werden nur die ersten Läufe dieses Zeitraums angezeigt. Wählen Sie ein Werk oder einen kürzeren Zeitraum, um den Rest zu sehen.',
+  'jobs.tl_upcoming_truncated': 'Einige kommende Läufe werden nicht gezeichnet (langer Zeitraum mit häufigen Zeitplänen). Wählen Sie ein Werk oder einen kürzeren Zeitraum, um alle zu sehen.',
 };

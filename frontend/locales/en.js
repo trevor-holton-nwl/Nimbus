@@ -3838,7 +3838,7 @@ window.__NIMBUS_LOCALES.en = {
   'jobs.adv_win_action': 'Outside those hours',
   'jobs.adv_win_skip': 'Skip the run',
   'jobs.adv_win_defer': 'Run when the window opens',
-  'jobs.adv_win_hint': 'Plant time. A window such as 22:00 to 05:00 crosses midnight. Skip drops the run; the other choice moves it to the next time the window opens.',
+  'jobs.adv_win_hint': 'Evaluated in the schedule\'s time zone: the plant\'s time, or the fixed or UTC zone you chose. A window such as 22:00 to 05:00 crosses midnight. Skip drops the run; the other choice moves it to the next time the window opens (on a working day when a closed-day rule is set).',
   'jobs.adv_monthly': 'Day of the month',
   'jobs.adv_monthly_day_of_month': 'A fixed day',
   'jobs.adv_monthly_last_day': 'Last day of the month',
@@ -3874,6 +3874,7 @@ window.__NIMBUS_LOCALES.en = {
   'jobs.maint_since': 'Since {{at}} by {{who}}',
   'jobs.maint_on_btn': 'Pause scheduled jobs',
   'jobs.maint_off_btn': 'Resume scheduled jobs',
+  'jobs.maint_scoped_hint': 'Only an admin with access to every plant can pause scheduled jobs.',
   'jobs.maint_confirm_on_title': 'Pause all scheduled jobs?',
   'jobs.maint_confirm_on_msg': 'Every scheduled run, in every plant, is recorded as Skipped: maintenance mode until you resume. Run now keeps working.',
   'jobs.maint_confirm_off_title': 'Resume scheduled jobs?',
@@ -3902,4 +3903,5 @@ window.__NIMBUS_LOCALES.en = {
   'jobs.tl_next': 'Next plants',
   'jobs.tl_page': 'Plants {{from}} to {{to}} of {{total}}',
   'jobs.tl_truncated': 'Only the first runs of this range are shown. Pick a plant or a shorter range to see the rest.',
+  'jobs.tl_upcoming_truncated': 'Some upcoming runs are not drawn (a long range with frequent schedules). Pick a plant or a shorter range to see them all.',
 };

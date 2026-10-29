@@ -476,6 +476,10 @@ function _initPickers(): void {
     } catch { /* the native input stays usable */ }
   };
   mount('jb-time', 'jobs.f_time', { enableTime: true, noCalendar: true, dateFormat: 'H:i', altFormat: Util._fpTimeAltFormat(), time_24hr: h24, minuteIncrement: 1 });
+  // The run window's From / Until use the same picker (and 12 / 24 h preference) as the run time above.
+  const timeCfg = { enableTime: true, noCalendar: true, dateFormat: 'H:i', altFormat: Util._fpTimeAltFormat(), time_24hr: h24, minuteIncrement: 1 };
+  mount('jb-pol-win-start', 'jobs.adv_win_start', timeCfg);
+  mount('jb-pol-win-end', 'jobs.adv_win_end', timeCfg);
   mount('jb-runat', 'jobs.f_run_at', { enableTime: true, dateFormat: 'Y-m-d\\TH:i', altFormat: Util._fpAltFormat(), time_24hr: h24, minuteIncrement: 1 });
   mount('jb-from', 'jobs.f_valid_from', { dateFormat: 'Y-m-d', altFormat: Util._dateFormatPref() });
   mount('jb-until', 'jobs.f_valid_until', { dateFormat: 'Y-m-d', altFormat: Util._dateFormatPref() });
@@ -609,9 +613,14 @@ async function _runPreview(): Promise<void> {
   const errs = validateJobForm({ ...s.form, name: s.form.name || 'x' }, { isAdmin: true, plants: null });
   const bad = r.preset === 'once' ? !!errs.runAt : r.preset === 'hourly' ? !!errs.minute : r.preset === 'cron' ? !!errs.cron
     : !!(errs.time || errs.days || errs.dom || errs.fixedTz || errs.targets);
-  if (bad || errs.policyWin || errs.policyGrace || errs.policyTz) { box.innerHTML = ''; return; }
+  const seq = ++s.previewSeq;                             // every path, early returns included, retires an older response
+  const polKey = errs.policyWin ?? errs.policyGrace ?? errs.policyTz;
+  for (const k of ['policyWin', 'policyGrace', 'policyTz'] as const) {   // the rule errors show in their own slots as soon as they exist
+    const slot = _el(`jb-err-${k}`);
+    if (slot) { slot.textContent = errs[k] ? t(errs[k] as string) : ''; slot.hidden = !errs[k]; }
+  }
   if (bad || !s.form.plant) { box.innerHTML = ''; return; }
-  const seq = ++s.previewSeq;
+  if (polKey) { box.innerHTML = `<div class="ape-err" role="alert">${esc(t(polKey))}</div>`; return; }
   try {
     const { job, schedule: p } = buildJobPayload(s.form);
     const prose = recurrenceText(p, jobsDeps(), x => Util.fmtDTPref(x));
@@ -694,7 +703,15 @@ function _mountSubnetwork(s: DialogState): void {
 
 function _renderPolicy(s: DialogState): void {
   const host = _el('jb-pol');
-  if (host) host.innerHTML = policyInnerHtml(s.form);
+  if (!host) return;
+  host.innerHTML = policyInnerHtml(s.form);
+  _initPickers();                                         // the window's From / Until inputs come and go with its checkbox
+}
+
+/** Focus a field by id; a picker field is focused through its visible alt input. */
+function _focusField(id: string): void {
+  const el = _el<HTMLInputElement & { _flatpickr?: PickerLike }>(id);
+  (el?._flatpickr?.altInput ?? el)?.focus();
 }
 
 /** An Advanced control changed: read it, rebuild the block (a choice can change what else applies), keep focus on it. */
@@ -707,7 +724,7 @@ function _policyChanged(s: DialogState, id: string): void {
     if (host) host.innerHTML = recurFieldsHtml(s.form.recur, s.form.policy.monthly);
     _initPickers();
   }
-  _el(id)?.focus();
+  _focusField(id);
   _schedulePreview();
 }
 

@@ -214,7 +214,8 @@ test('the Runs view select offers Timeline; choosing it loads /jobs/timeline for
   JobsAdmin._setTab('runs');
   assert.match(runs.innerHTML, /<option value="timeline">/, 'Runs | Batches | Timeline');
   assert.match(dom.doc.getElementById('jobs-maint').innerHTML, /job-maint-banner/, 'the banner is up while maintenance is on');
-  assert.match(dom.doc.getElementById('jobs-maint').innerHTML, /data-jobs-act="maint"[^>]*aria-pressed="true"[^>]*>Resume scheduled jobs/, 'an admin sees the toggle, naming the action');
+  assert.match(dom.doc.getElementById('jobs-maint').innerHTML, /id="jobs-maint-btn" data-jobs-act="maint">Resume scheduled jobs/, 'an admin sees the toggle, naming the action');
+  assert.doesNotMatch(dom.doc.getElementById('jobs-maint').innerHTML, /aria-pressed/, 'a plain button: the label changes, no pressed state');
   const sel = { id: 'jobs-runs-view', value: 'timeline' };
   pane.dispatch('change', { target: { ...sel, tagName: 'SELECT' } });
   await new Promise(r => setTimeout(r, 20));
@@ -234,5 +235,18 @@ test('the Runs view select offers Timeline; choosing it loads /jobs/timeline for
   pane.dispatch('change', { target: { id: 'jobs-tl-range', value: '7d', tagName: 'SELECT' } });
   await new Promise(r => setTimeout(r, 20));
   assert.equal(Date.parse(asked.at(-1).to) - Date.parse(asked.at(-1).from), 7 * 24 * 3600000, 'the 7 d switch asks for seven days');
+  assert.match(list, /<details class="job-tl-list"><summary id="jobs-tl-sum">/, 'the list is closed until opened, and its summary can take focus back');
+  // a page past the end (plants went away) still shows the pager, and a capped upcoming range says so
+  JobsClient.timeline = async q => ({ from: q.from, to: q.to, nowUtc: new Date().toISOString(), totalPlants: 20, plantOffset: 20, plantLimit: 20, truncated: false, upcomingTruncated: true, lanes: [] });
+  pane.dispatch('change', { target: { id: 'jobs-tl-range', value: '24h', tagName: 'SELECT' } });
+  await new Promise(r => setTimeout(r, 20));
+  const empty = dom.doc.getElementById('jobs-runs-list').innerHTML;
+  assert.match(empty, /data-jobs-act="tl-prev"/, 'an empty page still has Previous');
+  assert.match(empty, /data-jobs-act="tl-next" disabled/, 'and Next is off at the end');
+  JobsClient.timeline = async q => ({ from: q.from, to: q.to, nowUtc: new Date().toISOString(), totalPlants: 1, plantOffset: 0, plantLimit: 20, truncated: false, upcomingTruncated: true, lanes: [{
+    plant: '1008', timezone: 'UTC', nowLocal: new Date().toISOString(), runs: [], upcoming: [{ atUtc: new Date(Date.now() + 3600000).toISOString(), atLocal: new Date().toISOString(), jobId: 5, jobName: 'A', scheduleId: 1, dstShifted: false, policyNote: null }] }] });
+  pane.dispatch('change', { target: { id: 'jobs-tl-range', value: '7d', tagName: 'SELECT' } });
+  await new Promise(r => setTimeout(r, 20));
+  assert.match(dom.doc.getElementById('jobs-runs-list').innerHTML, /Some upcoming runs are not drawn/, 'upcoming bars cut by the server say so');
   JobsAdmin.setActive(false);
 });

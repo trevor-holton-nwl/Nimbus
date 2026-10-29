@@ -3596,7 +3596,7 @@ window.__NIMBUS_LOCALES.fr = {
   'jobs.adv_win_action': 'En dehors de ces heures',
   'jobs.adv_win_skip': 'Ignorer l’exécution',
   'jobs.adv_win_defer': 'Exécuter à l’ouverture de la plage',
-  'jobs.adv_win_hint': 'Heure de l’usine. Une plage comme 22:00 à 05:00 passe minuit. Ignorer abandonne l’exécution ; l’autre choix la reporte à la prochaine ouverture de la plage.',
+  'jobs.adv_win_hint': 'Évaluée dans le fuseau horaire de la planification : l’heure de l’usine ou le fuseau fixe ou UTC choisi. Une plage comme 22:00 à 05:00 passe minuit. Ignorer abandonne l’exécution ; l’autre choix la reporte à la prochaine ouverture de la plage (un jour ouvré si une règle de jours fermés est définie).',
   'jobs.adv_monthly': 'Jour du mois',
   'jobs.adv_monthly_day_of_month': 'Un jour fixe',
   'jobs.adv_monthly_last_day': 'Dernier jour du mois',
@@ -3632,6 +3632,7 @@ window.__NIMBUS_LOCALES.fr = {
   'jobs.maint_since': 'Depuis {{at}} par {{who}}',
   'jobs.maint_on_btn': 'Suspendre les travaux planifiés',
   'jobs.maint_off_btn': 'Reprendre les travaux planifiés',
+  'jobs.maint_scoped_hint': 'Seul un administrateur ayant accès à toutes les usines peut mettre en pause les travaux planifiés.',
   'jobs.maint_confirm_on_title': 'Suspendre tous les travaux planifiés ?',
   'jobs.maint_confirm_on_msg': 'Chaque exécution planifiée, dans toutes les usines, est enregistrée comme Ignorée : mode maintenance jusqu’à la reprise. Exécuter maintenant fonctionne toujours.',
   'jobs.maint_confirm_off_title': 'Reprendre les travaux planifiés ?',
@@ -3660,4 +3661,5 @@ window.__NIMBUS_LOCALES.fr = {
   'jobs.tl_next': 'Usines suivantes',
   'jobs.tl_page': 'Usines {{from}} à {{to}} sur {{total}}',
   'jobs.tl_truncated': 'Seules les premières exécutions de cette période sont affichées. Choisissez une usine ou une période plus courte pour voir le reste.',
+  'jobs.tl_upcoming_truncated': 'Certaines exécutions à venir ne sont pas dessinées (période longue avec des planifications fréquentes). Choisissez une usine ou une période plus courte pour toutes les voir.',
 };

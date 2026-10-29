@@ -3596,7 +3596,7 @@ window.__NIMBUS_LOCALES.es = {
   'jobs.adv_win_action': 'Fuera de esas horas',
   'jobs.adv_win_skip': 'Omitir la ejecución',
   'jobs.adv_win_defer': 'Ejecutar cuando se abra la ventana',
-  'jobs.adv_win_hint': 'Hora de la planta. Una ventana como 22:00 a 05:00 cruza la medianoche. Omitir descarta la ejecución; la otra opción la pasa a la próxima apertura de la ventana.',
+  'jobs.adv_win_hint': 'Se evalúa en la zona horaria del programa: la hora de la planta o la zona fija o UTC elegida. Una ventana como 22:00 a 05:00 cruza la medianoche. Omitir descarta la ejecución; la otra opción la pasa a la próxima apertura de la ventana (en un día laborable si hay una regla de días cerrados).',
   'jobs.adv_monthly': 'Día del mes',
   'jobs.adv_monthly_day_of_month': 'Un día fijo',
   'jobs.adv_monthly_last_day': 'Último día del mes',
@@ -3632,6 +3632,7 @@ window.__NIMBUS_LOCALES.es = {
   'jobs.maint_since': 'Desde {{at}} por {{who}}',
   'jobs.maint_on_btn': 'Pausar trabajos programados',
   'jobs.maint_off_btn': 'Reanudar trabajos programados',
+  'jobs.maint_scoped_hint': 'Solo un administrador con acceso a todas las plantas puede pausar los trabajos programados.',
   'jobs.maint_confirm_on_title': '¿Pausar todos los trabajos programados?',
   'jobs.maint_confirm_on_msg': 'Cada ejecución programada, en todas las plantas, se registra como Omitida: modo de mantenimiento hasta que reanude. Ejecutar ahora sigue funcionando.',
   'jobs.maint_confirm_off_title': '¿Reanudar los trabajos programados?',
@@ -3660,4 +3661,5 @@ window.__NIMBUS_LOCALES.es = {
   'jobs.tl_next': 'Plantas siguientes',
   'jobs.tl_page': 'Plantas {{from}} a {{to}} de {{total}}',
   'jobs.tl_truncated': 'Solo se muestran las primeras ejecuciones de este intervalo. Elija una planta o un intervalo más corto para ver el resto.',
+  'jobs.tl_upcoming_truncated': 'Algunas ejecuciones próximas no se dibujan (un intervalo largo con programas frecuentes). Elija una planta o un intervalo más corto para verlas todas.',
 };

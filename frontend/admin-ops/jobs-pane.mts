@@ -70,7 +70,7 @@ let _nextBefore: number | null = null;
 let _runPages = 1;               // pages of the runs list loaded (the poll merges instead of replacing when > 1)
 let _runView: 'runs' | 'batches' | 'timeline' = 'runs';   // Runs tab: every child run as one flat list, one row per fan-out batch, or the lanes timeline
 let _tlRange: TlRange = '24h';
-let _tl: Timeline | null = null;
+let _tlListOpen = false;         // the timeline's "list" <details> stays open across the 15 s repaints
 let _tlOffset = 0;               // first plant lane of the page (the server pages the lanes by plant)
 let _tlSeq = 0;                  // the newest timeline request wins
 let _batchStatus = '';           // batches view: rollup status filter
@@ -758,7 +758,10 @@ async function _loadTimeline(mode: 'replace' | 'append' | 'refresh' = 'replace')
   try {
     const tl = await JobsClient.timeline({ from: win.from, to: win.to, plant: _plant, plantOffset: _tlOffset, plantLimit: TL_PAGE });
     if (my !== _tlSeq || _runView !== 'timeline') return;          // a newer request, or the view changed meanwhile
-    _tl = tl;
+    if (_tlOffset > 0 && !tl.lanes.length) {                       // the page is past the end (plants went away): clamp, ask again
+      _tlOffset = tl.totalPlants > 0 ? Math.floor((tl.totalPlants - 1) / TL_PAGE) * TL_PAGE : 0;
+      if (_tlOffset !== tl.plantOffset) { void _loadTimeline(mode); return; }
+    }
     _setHtml(host, _timelineHtml(tl, win.fromMs, win.toMs, now));
     _busy(host, false);
     _announce(t('jobs.tl_page', { from: tl.lanes.length ? tl.plantOffset + 1 : 0, to: tl.plantOffset + tl.lanes.length, total: tl.totalPlants }), 'jobs-runs-live');
@@ -775,7 +778,12 @@ function _tlWhen(iso: string, tz: string): string {
 
 function _timelineHtml(tl: Timeline, fromMs: number, toMs: number, nowMs: number): string {
   const d = jobsDeps();
-  if (!tl.lanes.length) return `<div class="empty-state job-empty">${esc(t('jobs.tl_empty'))}</div>`;
+  const paging = tl.totalPlants > TL_PAGE || tl.plantOffset > 0
+    ? `<div class="job-pager"><span class="job-sub">${esc(t('jobs.tl_page', { from: tl.lanes.length ? tl.plantOffset + 1 : 0, to: tl.plantOffset + tl.lanes.length, total: tl.totalPlants }))}</span>`
+      + `<button type="button" class="btn btn-ghost sm" data-jobs-act="tl-prev"${tl.plantOffset <= 0 ? ' disabled' : ''}>${esc(t('jobs.tl_prev'))}</button>`
+      + `<button type="button" class="btn btn-ghost sm" data-jobs-act="tl-next"${tl.plantOffset + tl.lanes.length >= tl.totalPlants ? ' disabled' : ''}>${esc(t('jobs.tl_next'))}</button></div>`
+    : '';
+  if (!tl.lanes.length) return `<div class="empty-state job-empty">${esc(t('jobs.tl_empty'))}</div>${paging}`;
   const ticks = timelineTicks(_tlRange, fromMs, toMs, nowMs);
   const axis = `<div class="job-tl-row job-tl-axis-row"><div></div><div class="job-tl-axis" aria-hidden="true">${ticks.map(k => `<span>${esc(k.labelKey === 'jobs.tl_now_axis' ? t(k.labelKey) : t(k.labelKey, { n: k.n }))}</span>`).join('')}</div></div>`;
   const nowX = ((nowMs - fromMs) / (toMs - fromMs)) * TL_W;
@@ -797,7 +805,7 @@ function _timelineHtml(tl: Timeline, fromMs: number, toMs: number, nowMs: number
       + `${grid}<line class="job-tl-nowline" x1="${nowX.toFixed(1)}" x2="${nowX.toFixed(1)}" y1="0" y2="28"/>${bars}</svg></div>`;
   }).join('');
   const rows = timelineRows(tl);
-  const table = `<details class="job-tl-list"><summary>${esc(t('jobs.tl_list'))}</summary><div class="job-table-wrap"><table class="job-table"><thead><tr>`
+  const table = `<details class="job-tl-list"${_tlListOpen ? ' open' : ''}><summary id="jobs-tl-sum">${esc(t('jobs.tl_list'))}</summary><div class="job-table-wrap"><table class="job-table"><thead><tr>`
     + [t('jobs.col_plant'), t('jobs.col_name'), t('jobs.tl_col_kind'), t('jobs.col_status'), t('jobs.tl_col_when')].map(h => `<th scope="col">${esc(h)}</th>`).join('')
     + `</tr></thead><tbody>${rows.map((r, i) => {
       const target = r.runId != null ? `data-tl-run="${r.runId}"` : `data-tl-job="${r.jobId}" data-tl-name="${esc(r.jobName)}"`;
@@ -806,14 +814,10 @@ function _timelineHtml(tl: Timeline, fromMs: number, toMs: number, nowMs: number
       return `<tr class="job-run-row" tabindex="0" data-tl-key="row${i}" ${target}><td class="job-mono">${esc(r.plant)}</td><td class="job-name">${esc(r.jobName)}</td>`
         + `<td>${esc(t(r.kind === 'run' ? 'jobs.tl_kind_run' : 'jobs.tl_kind_upcoming'))}</td><td>${status}</td><td class="job-mono">${esc(_tlWhen(r.whenUtc, r.timezone))}${note}</td></tr>`;
     }).join('')}</tbody></table></div></details>`;
-  const paging = tl.totalPlants > TL_PAGE
-    ? `<div class="job-pager"><span class="job-sub">${esc(t('jobs.tl_page', { from: tl.plantOffset + 1, to: tl.plantOffset + tl.lanes.length, total: tl.totalPlants }))}</span>`
-      + `<button type="button" class="btn btn-ghost sm" data-jobs-act="tl-prev"${tl.plantOffset <= 0 ? ' disabled' : ''}>${esc(t('jobs.tl_prev'))}</button>`
-      + `<button type="button" class="btn btn-ghost sm" data-jobs-act="tl-next"${tl.plantOffset + tl.lanes.length >= tl.totalPlants ? ' disabled' : ''}>${esc(t('jobs.tl_next'))}</button></div>`
-    : '';
   return `<div class="job-tl" role="region" aria-label="${esc(t('jobs.tl_label'))}">${axis}${lanes}</div>`
     + `<div class="ape-hint">${esc(t('jobs.tl_note'))}</div>`
-    + (tl.truncated ? `<div class="ape-hint" role="note">${esc(t('jobs.tl_truncated'))}</div>` : '') + paging + table;
+    + (tl.truncated ? `<div class="ape-hint" role="note">${esc(t('jobs.tl_truncated'))}</div>` : '')
+    + (tl.upcomingTruncated ? `<div class="ape-hint" role="note">${esc(t('jobs.tl_upcoming_truncated'))}</div>` : '') + paging + table;
 }
 
 /** A bar or a table row of the timeline was activated: a run opens its detail, an upcoming fire opens its job in the Jobs tab. */
@@ -826,19 +830,26 @@ function _tlActivate(el: HTMLElement): void {
    Maintenance mode: an admin toggle beside the sub-tabs and a persistent banner while it is on
    ------------------------------------------------------------------------- */
 let _maintSig = '';
+/** The pause switch is global, so only a plant-unrestricted admin may use it (the server answers 403 to a scoped one):
+ *  a scoped admin sees the button disabled with the reason beside it. A plain button whose LABEL says the next action
+ *  (no aria-pressed: a pressed state plus a flipping label would be read twice). */
 function _renderMaint(m: HealthSummary['maintenance']): void {
   const host = _el('jobs-maint');
   if (!host) return;
-  const on = !!m?.enabled; const admin = _isAdmin();
-  const sig = `${on}|${m?.since ?? ''}|${m?.by ?? ''}|${admin}`;
+  const on = !!m?.enabled; const admin = _isAdmin(); const scoped = Session.allowedPlants() !== null;
+  const sig = `${on}|${m?.since ?? ''}|${m?.by ?? ''}|${admin}|${scoped}`;
   if (sig === _maintSig) return;
   _maintSig = sig;
+  const hadFocus = document.activeElement?.id === 'jobs-maint-btn';
   const since = on && m?.since ? t('jobs.maint_since', { at: _fmt(m.since), who: m.by ?? '—' }) : '';
   host.innerHTML = (on ? `<div class="job-banner job-maint-banner" role="status">${esc(t('jobs.maint_banner'))}${since ? ` <span class="job-maint-since">${esc(since)}</span>` : ''}</div>` : '')
-    + (admin ? `<button type="button" class="btn btn-ghost sm job-maint-btn" data-jobs-act="maint" aria-pressed="${on ? 'true' : 'false'}">${esc(t(on ? 'jobs.maint_off_btn' : 'jobs.maint_on_btn'))}</button>` : '');
+    + (admin ? `<button type="button" class="btn btn-ghost sm job-maint-btn" id="jobs-maint-btn" data-jobs-act="maint"${scoped ? ' disabled aria-describedby="jobs-maint-why"' : ''}>${esc(t(on ? 'jobs.maint_off_btn' : 'jobs.maint_on_btn'))}</button>`
+      + (scoped ? `<span class="ape-hint" id="jobs-maint-why">${esc(t('jobs.maint_scoped_hint'))}</span>` : '') : '');
+  if (hadFocus) _el('jobs-maint-btn')?.focus();
 }
 
 async function _toggleMaint(): Promise<void> {
+  if (Session.allowedPlants() !== null) return;          // global setting: the button is disabled for a scoped admin
   const on = !!_health?.maintenance?.enabled;
   const ok = await Modal.confirm({
     title: t(on ? 'jobs.maint_confirm_off_title' : 'jobs.maint_confirm_on_title'), message: t(on ? 'jobs.maint_confirm_off_msg' : 'jobs.maint_confirm_on_msg'),
@@ -848,6 +859,7 @@ async function _toggleMaint(): Promise<void> {
   try { await JobsClient.setMaintenance(!on); } catch (e) { Toast.show(t('jobs.maint_failed', { msg: (e as Error).message }), 'error'); return; }
   _healthSig = ''; _maintSig = '';
   await _loadHealth();
+  _el('jobs-maint-btn')?.focus();                       // the button was rebuilt: put focus back on it
 }
 
 function _armRunsPoll(): void {
@@ -1037,6 +1049,10 @@ function _wire(): void {
     else if (act === 'refresh-runs') void _loadRunsView();
     else if (act === 'runs-of') { const j = _jobs.find(x => x.id === Number((target.closest<HTMLElement>('[data-job-id]'))?.dataset.jobId)); if (j) _gotoRuns(j); }
   });
+  pane.addEventListener('toggle', (e) => {                // `toggle` does not bubble: listen in the capture phase
+    const d = e.target as HTMLDetailsElement;
+    if (d?.classList?.contains('job-tl-list')) _tlListOpen = d.open;
+  }, true);
   pane.addEventListener('keydown', (e) => {
     const tlRow = (e.target as HTMLElement).closest<HTMLElement>('[data-tl-key]');
     if (tlRow && e.target === tlRow && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); _tlActivate(tlRow); return; }

@@ -1170,7 +1170,7 @@ export interface TimelineRun {
 }
 export interface TimelineUpcoming { atUtc: string; atLocal: string; jobId: number; jobName: string; scheduleId: number; dstShifted: boolean; policyNote: string | null }
 export interface TimelineLane { plant: string; timezone: string; nowLocal: string; runs: TimelineRun[]; upcoming: TimelineUpcoming[] }
-export interface Timeline { from: string; to: string; nowUtc: string; lanes: TimelineLane[]; totalPlants: number; plantOffset: number; plantLimit: number; truncated: boolean }
+export interface Timeline { from: string; to: string; nowUtc: string; lanes: TimelineLane[]; totalPlants: number; plantOffset: number; plantLimit: number; truncated: boolean; upcomingTruncated: boolean }
 
 /** The window the switch asks for: 24 h = 12 h either side of now, 7 d = 3 days back and 4 ahead (the server allows 8). */
 export function timelineWindow(range: TlRange, nowMs: number): { fromMs: number; toMs: number; from: string; to: string } {

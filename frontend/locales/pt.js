@@ -3595,7 +3595,7 @@ window.__NIMBUS_LOCALES.pt = {
   'jobs.adv_win_action': 'Fora desses horários',
   'jobs.adv_win_skip': 'Ignorar a execução',
   'jobs.adv_win_defer': 'Executar quando a janela abrir',
-  'jobs.adv_win_hint': 'Horário da planta. Uma janela como 22:00 às 05:00 cruza a meia-noite. Ignorar descarta a execução; a outra opção a move para a próxima abertura da janela.',
+  'jobs.adv_win_hint': 'Avaliada no fuso horário do agendamento: o horário da planta ou o fuso fixo ou UTC escolhido. Uma janela como 22:00 às 05:00 cruza a meia-noite. Ignorar descarta a execução; a outra opção a move para a próxima abertura da janela (em um dia útil, se houver uma regra de dias fechados).',
   'jobs.adv_monthly': 'Dia do mês',
   'jobs.adv_monthly_day_of_month': 'Um dia fixo',
   'jobs.adv_monthly_last_day': 'Último dia do mês',
@@ -3631,6 +3631,7 @@ window.__NIMBUS_LOCALES.pt = {
   'jobs.maint_since': 'Desde {{at}} por {{who}}',
   'jobs.maint_on_btn': 'Pausar trabalhos agendados',
   'jobs.maint_off_btn': 'Retomar trabalhos agendados',
+  'jobs.maint_scoped_hint': 'Somente um administrador com acesso a todas as plantas pode pausar os trabalhos agendados.',
   'jobs.maint_confirm_on_title': 'Pausar todos os trabalhos agendados?',
   'jobs.maint_confirm_on_msg': 'Cada execução agendada, em todas as plantas, é registrada como Ignorada: modo de manutenção até você retomar. Executar agora continua funcionando.',
   'jobs.maint_confirm_off_title': 'Retomar os trabalhos agendados?',
@@ -3659,4 +3660,5 @@ window.__NIMBUS_LOCALES.pt = {
   'jobs.tl_next': 'Próximas plantas',
   'jobs.tl_page': 'Plantas {{from}} a {{to}} de {{total}}',
   'jobs.tl_truncated': 'Só as primeiras execuções deste intervalo são mostradas. Escolha uma planta ou um intervalo menor para ver o resto.',
+  'jobs.tl_upcoming_truncated': 'Algumas execuções futuras não são desenhadas (intervalo longo com agendamentos frequentes). Escolha uma planta ou um intervalo menor para ver todas.',
 };
