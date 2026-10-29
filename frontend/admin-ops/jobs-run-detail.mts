@@ -18,13 +18,14 @@
 import { Util, Toast, Modal, VirtualList } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
 import { JobsClient } from './jobs-client.mjs';
-import type { JobRun } from './jobs-client.mjs';
+import type { JobRun, JobType } from './jobs-client.mjs';
 import {
   runStatusHtml, isActiveRun, durationText, stepSegments, resultTiles, mergeLog, lastSeq, filterLog,
   logToText, errorsToText, firstErrorIndex, lineDataText, elapsedText, elapsedMs, errorKindOf, isDryRun, deltaText,
   LOG_LEVELS, LOG_PAGE, plantWall, tzShort, ARTIFACT_PAGE, artifactTiles, isReportRun, sectionTitle, tryKey, columnLabel, cellText, windowLine,
+  stepStatusHtml, stepTitle, stepFacts, stepWaterfall, ranInRun, restartStepOf, findType,
 } from './jobs-model.mjs';
-import type { LogLine, Proposal, ProposalRow, ArtifactSection, ArtifactColumn, CellFmt } from './jobs-model.mjs';
+import type { LogLine, Proposal, ProposalRow, ArtifactSection, ArtifactColumn, CellFmt, StepRow } from './jobs-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -61,6 +62,10 @@ interface DetailState {
   onRestart: ((run: JobRun) => void) | null;
   visible: () => boolean;
   longer: () => boolean;
+  /** A chain run: its step rows (re-read with every poll while it runs), the job types (for names and idempotency) and the step the log is filtered to. */
+  steps: StepRow[];
+  types: JobType[];
+  stepSeq: number | null;
 }
 let _d: DetailState | null = null;
 
@@ -103,6 +108,37 @@ export function errorPanelHtml(r: JobRun): string {
 function _elapsedFact(r: JobRun): string {
   const ms = r.duration_ms ?? elapsedMs(r.started_at, r.ended_at, Date.now());
   return durationText(ms) || '—';
+}
+
+const isChainRun = (r: { job_type: string }): boolean => r.job_type === 'chain';
+
+/** The chain run's step timeline: one row per step with its own status, a waterfall bar on a shared axis, duration, the
+ *  counts it reported as tiles, its error, a link to its history entry and a button that filters the log to it. */
+export function chainStepsHtml(run: JobRun, steps: StepRow[], types: JobType[], nowMs: number, canRestart = false): string {
+  if (!steps.length) return '';
+  const bars = new Map(stepWaterfall(steps, nowMs).map(b => [b.seq, b]));
+  const restart = canRestart ? restartStepOf(run, steps) : null;
+  return `<section class="job-chain-run" id="jr-steps" aria-label="${esc(t('jobs.steps_title'))}"><h3 class="job-art-title">${esc(t('jobs.steps_title'))}</h3><ol class="job-step-rows">`
+    + steps.map(s => {
+      const bar = bars.get(s.seq);
+      const done = ranInRun(s);
+      const facts = stepFacts(s);
+      const kind = s.errorKind ? ` <span class="badge ${s.errorKind === 'system' ? 'badge-err' : 'badge-warn'} job-error-kind">${esc(t(`jobs.error_kind_${s.errorKind}`))}</span>` : '';
+      const name = stepTitle({ type: s.stepType, label: s.label }, types, deps);
+      return `<li class="job-step-row" data-step-seq="${s.seq}"><span class="job-step-idx job-mono">${s.seq}</span><span class="job-step-name">${esc(name)}`
+        + (s.runOn !== 'success' ? ` <span class="job-sub">${esc(t(`jobs.step_runon_${s.runOn}`))}</span>` : '') + `</span>`
+        + (done != null ? `<span class="badge badge-muted job-status">${esc(t('jobs.step_done_earlier', { id: done }))}</span>` : stepStatusHtml(s.status, deps))
+        + `<span class="job-step-track" role="img" aria-label="${esc(name)} ${esc(durationText(s.durationMs) || '')}">`
+        + (bar ? `<span class="job-step-bar job-step-bar-${esc(bar.status)}" style="left:${bar.leftPct}%;width:${bar.widthPct}%"></span>` : '') + `</span>`
+        + `<span class="job-mono job-step-dur">${esc(durationText(s.durationMs) || '—')}</span>`
+        + (facts.length ? `<span class="job-step-tiles">${facts.map(f => `<span class="kpi-tile"><span class="k">${esc(t(`jobs.tile_${f.key}`))}</span><span class="v">${esc(f.value)}</span></span>`).join('')}</span>` : '')
+        + (s.error ? `<div class="job-step-err" role="note">${esc(s.error)}${kind}</div>` : '')
+        + `<span class="job-step-acts">`
+        + (s.actionId ? `<button type="button" class="btn btn-ghost sm" data-jr-act="history" data-jr-action="${esc(s.actionId)}">${esc(t('jobs.open_history'))}</button>` : '')
+        + (s.status !== 'pending' && s.status !== 'skipped' && done == null ? `<button type="button" class="btn btn-ghost sm" data-jr-act="step-log" data-jr-step="${s.seq}">${esc(t('jobs.step_log'))}</button>` : '')
+        + (restart && restart.seq === s.seq ? `<button type="button" class="btn btn-primary sm" data-jr-act="restart-step" data-jr-step="${s.seq}">${esc(t('jobs.restart_step'))}</button>` : '')
+        + `</span></li>`;
+    }).join('') + `</ol></section>`;
 }
 
 function _headerHtml(r: JobRun, o: { canCancel: boolean; canRestart: boolean; longer: boolean }): string {
@@ -153,6 +189,7 @@ export function tilesHtml(r: JobRun): string {
 function _toolbarHtml(s: DetailState): string {
   return `<div class="job-log-bar"><select class="input" id="jr-level" aria-label="${esc(t('jobs.log_level'))}"><option value="all">${esc(t('jobs.level_all'))}</option>`
     + LOG_LEVELS.map(l => `<option value="${l}"${l === s.level ? ' selected' : ''}>${esc(t(`jobs.level_${l}`))}</option>`).join('') + `</select>`
+    + (isChainRun(s.run) ? `<select class="input" id="jr-stepf" aria-label="${esc(t('jobs.step_filter'))}"><option value="">${esc(t('jobs.step_all'))}</option></select>` : '')
     + `<input class="input" id="jr-q" type="search" value="${esc(s.q)}" placeholder="${esc(t('jobs.log_search'))}" aria-label="${esc(t('jobs.log_search'))}" autocomplete="off">`
     + `<label class="chk-inline"><input type="checkbox" id="jr-errors"${s.errorsOnly ? ' checked' : ''}><span>${esc(t('jobs.log_errors_only'))}</span></label>`
     + `<label class="chk-inline"><input type="checkbox" id="jr-follow"${s.follow ? ' checked' : ''}><span>${esc(t('jobs.log_follow'))}</span></label>`
@@ -193,7 +230,31 @@ function _rowHeight(l: LogLine, s: DetailState): number {
 }
 
 function _shown(s: DetailState): LogLine[] {
-  return filterLog(s.lines, { level: s.errorsOnly ? 'error' : s.level, q: s.q });
+  return filterLog(s.lines, { level: s.errorsOnly ? 'error' : s.level, q: s.q, stepSeq: s.stepSeq });
+}
+
+/** Re-read a chain run's step rows (cheap, one request); repaint the head only when they changed. */
+async function _fetchSteps(s: DetailState): Promise<void> {
+  if (!isChainRun(s.run)) return;
+  try {
+    const d = await JobsClient.getRunDetail(s.run.id);
+    if (_d !== s) return;
+    const changed = JSON.stringify(d.steps) !== JSON.stringify(s.steps);
+    s.steps = d.steps;
+    if (changed) { _paintHead(); _syncStepFilter(s); }
+  } catch { /* the next tick retries */ }
+}
+
+/** The log's step filter lists the steps that have started; it is absent for a run that is not a chain. */
+function _syncStepFilter(s: DetailState): void {
+  const sel = _q<HTMLSelectElement>('#jr-stepf');
+  if (!sel) return;
+  const started = s.steps.filter(x => x.status !== 'pending' && x.status !== 'skipped');
+  const sig = started.map(x => x.seq).join(',');
+  if (sel.dataset.sig === sig) return;
+  sel.dataset.sig = sig;
+  sel.innerHTML = `<option value="">${esc(t('jobs.step_all'))}</option>`
+    + started.map(x => `<option value="${x.seq}"${s.stepSeq === x.seq ? ' selected' : ''}>${esc(t('jobs.step_n', { n: x.seq }))}: ${esc(stepTitle({ type: x.stepType, label: x.label }, s.types, deps))}</option>`).join('');
 }
 
 function _paintLog(): void {
@@ -258,11 +319,14 @@ async function _fetchLog(): Promise<void> {
     }
     _paintLog();
     _updateLive();
+    await _fetchSteps(s);
     s.done = res.done;
     if (res.truncated && !s.run.log_truncated) { s.run = { ...s.run, log_truncated: true }; const note = _q('#jr-trunc'); if (note) note.hidden = false; }
     if (res.done || (res.status && res.status !== s.run.status)) {
       // The run changed state: re-read it so ended_at, summary and error show (the log page only carries status).
       s.run = await JobsClient.getRun(s.run.id).catch(() => ({ ...s.run, status: res.status ?? s.run.status }));
+      if (_d !== s) return;
+      await _fetchSteps(s);                       // the final step rows (the run's summary and status are final now)
       if (_d !== s) return;
       _paintHead();
       _paintLog();
@@ -278,8 +342,9 @@ function _paintHead(): void {
   const head = _q('#jr-head');
   if (!s || !head) return;
   const admin = Session.isAdmin();
+  const timeline = isChainRun(s.run) ? chainStepsHtml(s.run, s.steps, s.types, Date.now(), admin) : '';
   head.innerHTML = _headerHtml(s.run, { canCancel: admin && isActiveRun(s.run.status), canRestart: admin && !isActiveRun(s.run.status), longer: s.longer() })
-    + stepBarHtml(s.run) + tilesHtml(s.run);
+    + (timeline || stepBarHtml(s.run)) + tilesHtml(s.run);
   _updateLive();
 }
 
@@ -462,14 +527,37 @@ function _copy(text: string): void {
   navigator.clipboard?.writeText(text).then(() => Toast.show(t('jobs.log_copied'), 'success'), () => Toast.show(t('jobs.log_copy_failed'), 'error'));
 }
 
+/** Restart a failed chain at its failed step (confirm first; a step that is not safe to repeat gets a stronger warning and `confirm`). */
+async function _restartFromStep(s: DetailState, seq?: number): Promise<void> {
+  const step = (seq ? s.steps.find(x => x.seq === seq) : null) ?? restartStepOf(s.run, s.steps);
+  if (!step) return;
+  const meta = findType(s.types, step.stepType);
+  const safe = step.status === 'skipped' || meta?.idempotent === true;
+  const name = stepTitle({ type: step.stepType, label: step.label }, s.types, deps);
+  const ok = await Modal.confirm({
+    title: t('jobs.confirm_restart_step', { name: s.run.job_name, n: step.seq }),
+    message: t(safe ? 'jobs.confirm_restart_step_msg' : 'jobs.confirm_restart_step_unsafe', { n: step.seq, step: name }),
+    confirmLabel: t('jobs.restart_step'), tone: safe ? undefined : 'warn',
+  });
+  if (!ok || _d !== s) return;
+  try {
+    const nr = await JobsClient.restartFromStep(s.run.id, { fromStep: step.seq, confirm: true });
+    Toast.show(t('jobs.toast_run_started', { name: nr.job_name }), 'success');
+    s.onRestart?.(nr);
+  } catch (err) {
+    Toast.show(t('jobs.toast_action_failed', { msg: (err as Error).message }), 'error');
+  }
+}
+
 export const JobsRunDetail = {
-  show(host: HTMLElement, run: JobRun, opts: { onBack: () => void; onChanged?: () => void; onRestart?: (run: JobRun) => void; visible: () => boolean; longer?: () => boolean; tz?: string }): void {
+  show(host: HTMLElement, run: JobRun, opts: { onBack: () => void; onChanged?: () => void; onRestart?: (run: JobRun) => void; visible: () => boolean; longer?: () => boolean; tz?: string; types?: JobType[] }): void {
     JobsRunDetail.stop();
     const s: DetailState = {
       host, run, lines: [], tz: opts.tz ?? '', lastSeq: 0, done: false, level: 'all', errorsOnly: false, q: '', follow: isActiveRun(run.status),
       wrap: false, open: new Set(), vl: null, timer: null, inflight: false, proposal: { vl: null, seq: 0 },
       art: { seq: 0, rows: new Map(), vls: new Map() },
       onChanged: opts.onChanged ?? null, onRestart: opts.onRestart ?? null, visible: opts.visible, longer: opts.longer ?? (() => false),
+      steps: [], types: opts.types ?? [], stepSeq: null,
     };
     _d = s;
     host.innerHTML = `<div id="jr-head"></div>${_toolbarHtml(s)}`
@@ -477,6 +565,7 @@ export const JobsRunDetail = {
       + `<div class="job-log-empty" id="jr-empty">${esc(t('jobs.log_empty'))}</div>`
       + `<div class="ape-hint" id="jr-trunc"${run.log_truncated ? '' : ' hidden'}>${esc(t('jobs.log_truncated'))}</div>`;
     _paintHead();
+    void _fetchSteps(s);
     void _loadProposal(s);
     void _loadArtifact(s);
     host.onclick = (e: MouseEvent) => {
@@ -503,6 +592,13 @@ export const JobsRunDetail = {
         _paintLog();
         _q('#jr-log')?.scrollIntoView?.({ block: 'nearest' });
       }
+      else if (act === 'step-log') {
+        s.stepSeq = Number(tgt.closest<HTMLElement>('[data-jr-step]')?.dataset.jrStep) || null;
+        const sel = _q<HTMLSelectElement>('#jr-stepf'); if (sel) sel.value = s.stepSeq == null ? '' : String(s.stepSeq);
+        _paintLog();
+        _q('#jr-log')?.scrollIntoView?.({ block: 'nearest' });
+      }
+      else if (act === 'restart-step') void _restartFromStep(s, Number(tgt.closest<HTMLElement>('[data-jr-step]')?.dataset.jrStep) || undefined);
       else if (act === 'retry-proposal') void _loadProposal(s);
       else if (act === 'retry-artifact') void _loadArtifact(s);
       else if (act === 'art-csv') {
@@ -526,13 +622,14 @@ export const JobsRunDetail = {
           .catch((err: Error) => Toast.show(err.message, 'error'));
       } else if (act === 'history') {
         (globalThis as unknown as { NIMBUS?: { App?: { goto?(tab: string): void } } }).NIMBUS?.App?.goto?.('gantt');
-        Toast.show(t('jobs.history_hint', { id: String(s.run.summary?.action_id ?? '') }), 'info');
+        Toast.show(t('jobs.history_hint', { id: String(tgt.closest<HTMLElement>('[data-jr-action]')?.dataset.jrAction ?? s.run.summary?.action_id ?? '') }), 'info');
       }
     };
     host.onchange = (e: Event) => {
       const id = (e.target as HTMLElement).id;
       if (_d !== s) return;
       if (id === 'jr-level') { s.level = (e.target as HTMLSelectElement).value; _paintLog(); }
+      else if (id === 'jr-stepf') { s.stepSeq = Number((e.target as HTMLSelectElement).value) || null; _paintLog(); }
       else if (id === 'jr-errors') { s.errorsOnly = (e.target as HTMLInputElement).checked; _paintLog(); }
       else if (id === 'jr-follow') { s.follow = (e.target as HTMLInputElement).checked; if (s.follow) _paintLog(); }
       else if (id === 'jr-wrap') { s.wrap = (e.target as HTMLInputElement).checked; _paintLog(); }

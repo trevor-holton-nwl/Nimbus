@@ -67,7 +67,7 @@ test('types: kind, mutates and the param metadata of every type survive normalis
   reply = { types: JSON.parse(readFileSync(new URL('../../fixtures/jobs_types.json', import.meta.url), 'utf8')).types };
   const ts = await JobsClient.types();
   assert.deepEqual(ts.map(t => [t.key, t.kind]), [['optimizer.plant', 'action'], ['report.what_changed', 'report'], ['report.late_orders', 'report'],
-    ['report.missing_master_data', 'report'], ['report.coverage', 'report'], ['report.distribution', 'report']]);
+    ['report.missing_master_data', 'report'], ['report.coverage', 'report'], ['report.distribution', 'report'], ['purge.orders', 'action'], ['chain', 'action']]);
   assert.ok(ts.filter(t => t.kind === 'report').every(t => t.mutates === false));
   const p = Object.fromEntries(ts.find(t => t.key === 'report.late_orders').params.map(x => [x.key, x]));
   assert.deepEqual([p.horizon.type, p.horizon.widget, p.min_days_late.type, p.min_days_late.min, p.min_days_late.max], ['date_window', 'date-window', 'number', 0, 365]);

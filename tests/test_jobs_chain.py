@@ -823,3 +823,49 @@ def test_a_timed_out_chain_closes_its_open_steps_and_derives_the_step_bar(chain_
     assert time.time() - t0 < 40 and run["status"] == "failed" and "timed out" in run["error"]
     assert [s["status"] for s in data.list_steps(rid)] == ["failed", "skipped"]
     assert [r["status"] for r in run["summary"]["steps"]] == ["failed", "skipped"]
+
+
+@pytest.fixture
+def capi(chain_pg, client):
+    import brain
+    from backend.security import auth
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "admin@example.com"
+    brain.api.dependency_overrides[auth.require_admin] = lambda: "admin@example.com"
+    brain.api.dependency_overrides[auth.require_api_key] = lambda: None
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: None
+    yield client
+    brain.api.dependency_overrides.clear()
+
+
+@pytest.mark.pg
+def test_templates_end_to_end_over_http_create_from_template_diff_update_and_restart_from_step(capi, chain_pg):
+    name = f"zz http tpl {chain_pg.plant}"
+    chain_pg.tpl_names.append(name)
+    steps = [{"type": "noop", "params": {"steps": 1, "sleep_s": 0, "outcome": "succeeded"}},
+             {"type": "noop", "params": {"steps": 1, "sleep_s": 0, "outcome": "failed"}}]
+    tpl = capi.post("/jobs/templates", json={"name": name, "steps": steps}).json()["template"]
+    assert tpl["version"] == 1 and capi.post("/jobs/templates", json={"name": name.upper(), "steps": steps}).status_code == 409
+    assert name in [x["name"] for x in capi.get("/jobs/templates").json()["templates"]]
+    r = capi.post("/jobs", json={"plant": chain_pg.plant, "job_type": "chain", "name": "from tpl", "template_id": tpl["id"]})
+    assert r.status_code == 200, r.text
+    job = r.json()
+    chain_pg.jobs.append(job["id"])
+    assert job["template"] == {"id": tpl["id"], "name": name, "version": 1, "current_version": 1, "archived": False, "changed": False}
+    # the template moves on: the job keeps its copy and says so; the diff names the change; Update applies it
+    new_steps = [steps[0], {"type": "noop", "params": {"steps": 1, "sleep_s": 0, "outcome": "succeeded"}}]
+    assert capi.patch(f"/jobs/templates/{tpl['id']}", json={"steps": new_steps}).json()["template"]["version"] == 2
+    d = capi.get(f"/jobs/{job['id']}/template-diff").json()
+    assert d["changed"] and [x["change"] for x in d["diff"]] == ["same", "changed"] and d["diff"][1]["fields"] == ["params.outcome"]
+    # run the (old, failing) copy, then restart from the failed step: the noop type is idempotent so no confirm is needed
+    run = capi.post(f"/jobs/{job['id']}/run").json()["run"]
+    assert wait_run(run["id"])["status"] == "failed"
+    detail = capi.get(f"/jobs/runs/{run['id']}").json()
+    assert [s["status"] for s in detail["steps"]] == ["succeeded", "failed"]
+    again = capi.post(f"/jobs/runs/{run['id']}/restart-step", json={})
+    assert again.status_code == 200, again.text
+    assert wait_run(again.json()["run"]["id"])["status"] == "failed", "the snapshot's step 2 still fails"
+    assert capi.patch(f"/jobs/{job['id']}", json={"name": "from tpl"}).status_code == 200
+    updated = capi.post(f"/jobs/{job['id']}/template/update").json()
+    assert updated["template"]["changed"] is False
+    run2 = capi.post(f"/jobs/{job['id']}/run").json()["run"]
+    assert wait_run(run2["id"])["status"] == "succeeded", "after the update the job runs the template's new steps"

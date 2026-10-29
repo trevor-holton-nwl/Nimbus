@@ -31,7 +31,11 @@ test('every key the Jobs sources ask for is defined', () => {
   const src = ['jobs-pane', 'jobs-dialog', 'jobs-run-detail', 'jobs-model'].map(n => readFileSync(new URL(`admin-ops/${n}.mts`, root), 'utf8')).join('\n');
   const keys = new Set([...src.matchAll(/['"`](jobs\.[a-z0-9_]+)['"`]/g)].map(m => m[1]));
   const families = {
-    'jobs.status_': ['scheduled', 'running', 'succeeded', 'warning', 'failed', 'cancelled', 'skipped', 'missed'],
+    'jobs.status_': ['scheduled', 'running', 'succeeded', 'warning', 'failed', 'cancelled', 'skipped', 'missed', 'pending'],
+    'jobs.step_runon_': ['success', 'failure', 'always'],
+    'jobs.step_onfail_': ['stop', 'continue'],
+    'jobs.diff_f_': ['type', 'label', 'continue_on_failure', 'run_on'],
+    'jobs.tile_': ['matched', 'deleted', 'findings', 'rows'],
     'jobs.result_': ['apply', 'propose', 'apply_tip', 'propose_tip', 'hint_apply', 'hint_propose'],
     'jobs.error_kind_': ['config', 'system', 'transient', 'config_hint', 'system_hint', 'transient_hint'],
     'jobs.health_': ['running', 'queued', 'failed', 'missed', 'next'],

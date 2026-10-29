@@ -325,6 +325,8 @@ export interface LogLine {
   at?: string | null;
   level: string;
   step?: string | null;
+  /** The chain step (1-based) a line belongs to; null for the run's own lines and for a single-step job. */
+  step_seq?: number | null;
   msg: string;
   duration_ms?: number | null;
   data?: unknown;
@@ -347,10 +349,11 @@ export function lastSeq(lines: LogLine[]): number {
 }
 
 /** Level is a minimum ('warn' keeps warn + error); `q` is a case-insensitive substring over step and message. */
-export function filterLog(lines: LogLine[], o: { level?: string; q?: string }): LogLine[] {
+export function filterLog(lines: LogLine[], o: { level?: string; q?: string; stepSeq?: number | null }): LogLine[] {
   const min = o.level && o.level !== 'all' ? (LEVEL_RANK[o.level] ?? 0) : 0;
   const q = (o.q ?? '').trim().toLowerCase();
   return lines.filter(l => (LEVEL_RANK[l.level] ?? 1) >= min
+    && (o.stepSeq == null || l.step_seq === o.stepSeq)
     && (!q || `${l.step ?? ''} ${l.msg}`.toLowerCase().includes(q)));
 }
 
@@ -581,6 +584,9 @@ export interface ParamMeta {
 export interface TypeMeta {
   key: string; label: string; kind: JobKind; mutates: boolean; plantScoped: boolean;
   params: ParamMeta[]; defaults: Record<string, unknown>;
+  /** The step-type contract (W4a): safe to run again, a chain (its params are steps), rough seconds, the param value
+   *  that makes it a dry run, and the lock keys it takes (`{plant}` placeholder). */
+  idempotent?: boolean; composite?: boolean; estimateS?: number | null; dryRun?: { param: string; value: unknown } | null; lockKeys?: string[];
 }
 
 /** Strings the optimizer's params already had before the generic form: reused so no translation is duplicated. */
@@ -612,10 +618,14 @@ export const enumLabel = (m: ParamMeta, v: string, d: Pick<JobsDeps, 't'>): stri
 export const paramHint = (m: ParamMeta, d: Pick<JobsDeps, 't'>): string => tryKey(`${m.labelKey}.hint`, d);
 export const typeLabel = (x: { key: string; label: string }, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.type.${x.key}`, d) || x.label;
 
-/** Dialog / filter groups: Optimization (actions) then Reports. */
-export function typeGroups(types: ReadonlyArray<TypeMeta>): Array<{ kind: JobKind; labelKey: string; types: TypeMeta[] }> {
-  return (['action', 'report'] as const)
-    .map(kind => ({ kind, labelKey: kind === 'report' ? 'jobs.group_reports' : 'jobs.group_optimization', types: types.filter(x => x.kind === kind) }))
+/** Dialog / filter groups: Optimization (actions), Reports, then Chains (a chain is made of the others). */
+export function typeGroups(types: ReadonlyArray<TypeMeta>): Array<{ kind: JobKind | 'chain'; labelKey: string; types: TypeMeta[] }> {
+  const labelOf = { action: 'jobs.group_optimization', report: 'jobs.group_reports', chain: 'jobs.group_chains' } as const;
+  return (['action', 'report', 'chain'] as const)
+    .map(kind => ({
+      kind, labelKey: labelOf[kind],
+      types: types.filter(x => (kind === 'chain' ? !!x.composite : !x.composite && x.kind === kind)),
+    }))
     .filter(g => g.types.length);
 }
 
@@ -794,6 +804,11 @@ export interface JobForm {
   fixedTz: string;
   /** W3b: the schedule's Advanced rules (DST, closed days, run window, monthly mode, catch-up). */
   policy: PolicyForm;
+  /** W4a: a chain job's ordered steps (empty for every other type; the chain's `params` is just `{steps}` on the wire). */
+  steps: ChainStep[];
+  /** The template this job was made from and its version then (the job keeps its own copy of the steps). */
+  templateId: number | null;
+  templateVersion: number | null;
 }
 
 export type TargetMode = 'single' | 'selected' | 'all' | 'subnetwork';
@@ -818,7 +833,7 @@ export function plural(key: string, n: number, d: Pick<JobsDeps, 't'>, vars: Rec
  *  The Result defaults to APPLY (SAP-style background job; owner ruling 2026-10-28); a Dry run is the alternative. */
 export function defaultJobForm(plant = '', jobType = 'optimizer.plant', defaults: Record<string, unknown> | null = null, meta: TypeMeta | null = null): JobForm {
   return {
-    jobType, name: '', plant, params: seedParams(meta, defaults), recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true,
+    jobType, name: '', plant, params: meta?.composite ? {} : seedParams(meta, defaults), steps: [], templateId: null, templateVersion: null, recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true,
     targetMode: 'single', targetPlants: [], targetSubnetwork: '', excludedPlants: [], storedTargets: [], fanOut: { ...FAN_OUT_DEFAULT },
     tzMode: 'plant', fixedTz: '', policy: defaultPolicy(),
   };
@@ -907,20 +922,22 @@ export function validatePolicy(p: PolicyForm, preset: RecurPreset, tzMode: TzMod
 /** The result mode of a form or a stored params object ('apply' when the job never set one). */
 export const resultOf = (params: Record<string, unknown> | null | undefined): string => String(params?.apply_mode ?? 'apply');
 
-export type FormErrors = Partial<Record<'name' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity' | 'targets' | 'fixedTz' | 'fanOut' | 'policyWin' | 'policyGrace' | 'policyTz', string>>
-  & { params?: Record<string, string> };
+export type FormErrors = Partial<Record<'name' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity' | 'targets' | 'fixedTz' | 'fanOut' | 'policyWin' | 'policyGrace' | 'policyTz' | 'steps', string>>
+  & { params?: Record<string, string>; stepParams?: Record<number, Record<string, string>> };
 
 /** Field -> i18n key. Empty object = valid. `isAdmin` guards the auto-apply result (the server re-checks).
  *  `meta` is the type's param list (for the generic checks); without it only the result gate runs. */
-export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: string[] | null; meta?: TypeMeta | null }): FormErrors {
+export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: string[] | null; meta?: TypeMeta | null; types?: ReadonlyArray<TypeMeta>; limits?: ChainLimits }): FormErrors {
   const e: FormErrors = {};
   const name = f.name.trim();
   if (!name) e.name = 'jobs.err_name';
   else if (name.length > NAME_MAX) e.name = 'jobs.err_name_long';
   if (!f.plant) e.plant = 'jobs.err_plant';
   else if (o.plants && !o.plants.includes(f.plant)) e.plant = 'jobs.err_plant_scope';
-  const pe = o.meta ? validateParams(o.meta.params, f.params) : {};
-  if (o.meta ? hasApplyMode(o.meta) : 'apply_mode' in f.params) {
+  const chain = isChainKey(f.jobType) || !!o.meta?.composite;
+  if (chain) Object.assign(e, validateChain(f.steps, o.types ?? [], o.limits ?? DEFAULT_CHAIN_LIMITS));
+  const pe = o.meta && !chain ? validateParams(o.meta.params, f.params) : {};
+  if (!chain && (o.meta ? hasApplyMode(o.meta) : 'apply_mode' in f.params)) {
     const r = resultOf(f.params);
     if (!(JOB_RESULTS as readonly string[]).includes(r)) e.result = 'jobs.err_result';
     else if (r === 'apply' && !o.isAdmin) e.result = 'jobs.err_apply_admin';
@@ -1028,15 +1045,17 @@ export function batchTiles(b: { counts: Record<string, number> }): Array<{ key: 
 
 /** The request bodies for a valid form: the job (params as the form holds them) and its ScheduleIn. The server owns the zone and the cron. */
 export function buildJobPayload(f: JobForm): {
-  job: { name: string; plant: string; job_type: string; params: Record<string, unknown>; targets: JobTarget[]; fan_out: { stagger_s: number; max_parallel: number | null; fail_fast: boolean } | null };
+  job: { name: string; plant: string; job_type: string; params: Record<string, unknown>; template_id?: number; targets: JobTarget[]; fan_out: { stagger_s: number; max_parallel: number | null; fail_fast: boolean } | null };
   schedule: ScheduleIn & { valid_from: string | null; valid_until: string | null; skip_if_running: boolean; tz_mode: TzMode; fixed_timezone: string | null; options: Record<string, unknown> | null };
 } {
   const targets = buildTargetRows(f);
   const params: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(f.params)) if (v !== undefined) params[k] = v;
+  if (isChainKey(f.jobType)) { for (const k of Object.keys(params)) delete params[k]; params.steps = f.steps.map(stepToWire); }
   return {
     job: {
       name: f.name.trim(), plant: f.plant, job_type: f.jobType, params, targets,
+      ...(isChainKey(f.jobType) && f.templateId != null ? { template_id: f.templateId } : {}),
       fan_out: targets.length ? { stagger_s: f.fanOut.staggerS, max_parallel: f.fanOut.maxParallel, fail_fast: f.fanOut.failFast } : null,
     },
     schedule: {
@@ -1056,13 +1075,17 @@ export function jobToForm(job: {
   name?: string; plant?: string; job_type?: string; params?: Record<string, unknown> | null;
   schedule?: (ScheduleWire & { valid_from?: string | null; valid_until?: string | null; skip_if_running?: boolean | null; tzMode?: string | null; fixedTimezone?: string | null }) | null;
   targets?: JobTarget[] | null; fanOut?: { stagger_s?: number; max_parallel?: number | null; fail_fast?: boolean } | null;
+  templateId?: number | null; templateVersion?: number | null;
 }, meta: TypeMeta | null = null): JobForm {
   const base = defaultJobForm(job.plant ?? '', job.job_type ?? 'optimizer.plant', null, meta);
   const s = job.schedule;
+  const chain = isChainKey(job.job_type ?? '') || !!meta?.composite;
+  const rawSteps = chain && Array.isArray(job.params?.steps) ? (job.params?.steps as Array<Record<string, unknown>>) : [];
   return {
     ...base,
     name: job.name ?? '',
-    params: { ...base.params, ...(job.params ?? {}) },     // a saved job always carries its own params
+    params: chain ? {} : { ...base.params, ...(job.params ?? {}) },     // a saved job always carries its own params
+    steps: rawSteps.map(stepFromWire), templateId: job.templateId ?? null, templateVersion: job.templateVersion ?? null,
     recur: s ? scheduleToRecurrence(s) : base.recur,
     validFrom: String(s?.valid_from ?? '').slice(0, 10),
     validUntil: String(s?.valid_until ?? '').slice(0, 10),
@@ -1243,3 +1266,177 @@ export function timelineRows(tl: Pick<Timeline, 'lanes'>): TlRow[] {
 /** Preview wording for a policy note / skip reason code (jobs.note_<code> / jobs.skip_reason_<code>); unknown codes show as they are. */
 export const policyNoteText = (code: string | null | undefined, d: Pick<JobsDeps, 't'>): string => (code ? (tryKey(`jobs.note_${code}`, d) || code) : '');
 export const skipReasonCodeText = (code: string, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.skip_reason_${code}`, d) || code;
+
+/* ---------------------------------------------------------------------------
+   W4a chains: ordered steps, each an ordinary job type (backend/jobs/types/chain.py is the authority)
+   ------------------------------------------------------------------------- */
+export const CHAIN_TYPE = 'chain';
+export const isChainKey = (jobType: string): boolean => jobType === CHAIN_TYPE;
+export const RUN_ONS = ['success', 'failure', 'always'] as const;
+export type RunOn = typeof RUN_ONS[number];
+export interface ChainLimits { maxSteps: number; purgeMinAgeDays: number }
+export const DEFAULT_CHAIN_LIMITS: ChainLimits = { maxSteps: 10, purgeMinAgeDays: 7 };
+
+export interface ChainStep { type: string; params: Record<string, unknown>; label: string; continueOnFailure: boolean; runOn: RunOn }
+
+/** A chain can hold every type except another chain. */
+export const stepTypes = (types: ReadonlyArray<TypeMeta>): TypeMeta[] => types.filter(x => !x.composite);
+
+export function newStep(meta: TypeMeta): ChainStep {
+  return { type: meta.key, params: seedParams(meta, meta.defaults), label: '', continueOnFailure: false, runOn: 'success' };
+}
+
+export function stepToWire(s: ChainStep): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(s.params)) if (v !== undefined) params[k] = v;
+  return { type: s.type, params, label: s.label.trim() || null, continue_on_failure: s.continueOnFailure, run_on: s.runOn };
+}
+
+export function stepFromWire(r: Record<string, unknown>): ChainStep {
+  const runOn = (RUN_ONS as readonly string[]).includes(String(r.run_on)) ? (r.run_on as RunOn) : 'success';
+  return {
+    type: String(r.type ?? ''), params: (r.params as Record<string, unknown> | null) ?? {}, label: String(r.label ?? ''),
+    continueOnFailure: r.continue_on_failure === true, runOn,
+  };
+}
+
+/** `steps` moved one place (delta -1 up, +1 down); the same array when it cannot move. */
+export function moveStep<T>(steps: T[], i: number, delta: -1 | 1): T[] {
+  const j = i + delta;
+  if (i < 0 || i >= steps.length || j < 0 || j >= steps.length) return steps;
+  const out = steps.slice();
+  [out[i], out[j]] = [out[j], out[i]];
+  return out;
+}
+export const removeStep = <T extends unknown>(steps: T[], i: number): T[] => steps.filter((_, k) => k !== i);
+
+/** True when this step would only preview (its type's dry-run param holds the dry-run value); false when it applies. */
+export const stepIsDry = (s: Pick<ChainStep, 'params'>, meta: TypeMeta | undefined): boolean =>
+  !!meta?.dryRun && s.params[meta.dryRun.param] === meta.dryRun.value;
+
+/** `dry_run` | `apply` | `report` (nothing writes) | `mixed` (refused by the server). Read-only steps do not count. */
+export function chainMode(steps: ChainStep[], types: ReadonlyArray<TypeMeta>): 'dry_run' | 'apply' | 'report' | 'mixed' {
+  const modes = new Set<boolean>();
+  for (const s of steps) { const m = findType(types, s.type); if (m?.mutates) modes.add(stepIsDry(s, m)); }
+  return modes.size === 0 ? 'report' : modes.size > 1 ? 'mixed' : modes.has(true) ? 'dry_run' : 'apply';
+}
+
+const _UNIT_DAYS: Record<string, number> = { day: 1, week: 7, month: 28 };
+
+/** Static client-side twin of the purge guard: a rolling window may not be "since the last run" and may not reach orders
+ *  younger than the floor. A fixed window is only checked by the server (it needs today's plant date). */
+export function purgeWindowError(w: DateWindow | null | undefined, floorDays: number): string {
+  if (!w || w.mode !== 'rolling' || !w.rolling) return '';
+  if (w.rolling.anchor === 'last_success') return 'jobs.err_purge_since';
+  return Number(w.rolling.to_offset) * (_UNIT_DAYS[w.rolling.unit] ?? 1) > -floorDays ? 'jobs.err_purge_young' : '';
+}
+
+/** Chain-level errors (`steps`: i18n key) and per-step param errors (`stepParams[index][param]`: i18n key). Empty = valid. */
+export function validateChain(steps: ChainStep[], types: ReadonlyArray<TypeMeta>, limits: ChainLimits = DEFAULT_CHAIN_LIMITS):
+  Pick<FormErrors, 'steps' | 'stepParams'> {
+  const out: Pick<FormErrors, 'steps' | 'stepParams'> = {};
+  if (!steps.length) { out.steps = 'jobs.err_chain_empty'; return out; }
+  if (steps.length > limits.maxSteps) out.steps = 'jobs.err_chain_max';
+  const per: Record<number, Record<string, string>> = {};
+  steps.forEach((s, i) => {
+    const m = findType(types, s.type);
+    if (!m || m.composite) { per[i] = { _type: 'jobs.err_chain_type' }; return; }
+    const errs = validateParams(m.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(m)), s.params);
+    if (m.key === 'purge.orders') {
+      const pe = purgeWindowError(s.params.window as DateWindow | null, limits.purgeMinAgeDays);
+      if (pe) errs.window = pe;
+    }
+    if (Object.keys(errs).length) per[i] = errs;
+  });
+  if (Object.keys(per).length) out.stepParams = per;
+  if (!out.steps && chainMode(steps, types) === 'mixed') out.steps = 'jobs.err_chain_mixed';
+  return out;
+}
+
+export const stepTitle = (s: { type: string; label?: string | null }, types: ReadonlyArray<TypeMeta>, d: Pick<JobsDeps, 't'>): string => {
+  if (s.label) return s.label;
+  const m = findType(types, s.type);
+  return m ? typeLabel(m, d) : s.type;
+};
+
+/** "3 steps: Purge old orders, Optimizer, Late orders" for the Jobs table, cut after `max` names. */
+export function chainSummaryText(steps: ReadonlyArray<{ type: string; label?: string | null }>, types: ReadonlyArray<TypeMeta>, d: Pick<JobsDeps, 't'>, max = 3): string {
+  if (!steps.length) return '';
+  const names = steps.slice(0, max).map(s => stepTitle(s, types, d)).join(' > ');
+  return `${plural('jobs.chain_steps', steps.length, d)}: ${names}${steps.length > max ? ' ...' : ''}`;
+}
+
+/* ---- step rows of a chain run (GET /jobs/runs/{id} -> steps) ------------------------------------------------------ */
+export type StepStatus = 'pending' | 'running' | 'succeeded' | 'warning' | 'failed' | 'skipped' | 'cancelled';
+export interface StepRow {
+  seq: number; stepType: string; label: string | null; runOn: RunOn; continueOnFailure: boolean; params: Record<string, unknown>;
+  status: StepStatus | string; startedAt: string | null; endedAt: string | null; durationMs: number | null;
+  summary: Record<string, unknown> | null; error: string | null; errorKind: string | null; actionId: string | null;
+}
+
+export function stepStatusHtml(status: string, d: JobsDeps): string {
+  if (status === 'pending') return `<span class="badge badge-muted job-status">${d.esc(d.t('jobs.status_pending'))}</span>`;
+  return statusBadgeHtml(status, d);
+}
+
+/** A resumed run lists the steps that ran in the earlier run as skipped with `ran_in_run`; they read "Done in run #n". */
+export const ranInRun = (s: Pick<StepRow, 'summary'>): number | null => {
+  const v = s.summary?.ran_in_run;
+  return v == null ? null : Number(v);
+};
+
+/** Counts a step's summary reports, in fixed order (a count it did not report is omitted). */
+export const STEP_FACTS = ['late', 'moved', 'applied', 'dropped', 'matched', 'deleted', 'findings', 'rows'] as const;
+export function stepFacts(s: Pick<StepRow, 'summary'>): Array<{ key: typeof STEP_FACTS[number]; value: number }> {
+  const out: Array<{ key: typeof STEP_FACTS[number]; value: number }> = [];
+  for (const k of STEP_FACTS) { const v = s.summary?.[k]; if (typeof v === 'number' && Number.isFinite(v)) out.push({ key: k, value: v }); }
+  return out;
+}
+
+export interface WaterfallBar { seq: number; leftPct: number; widthPct: number; status: string }
+/** One bar per step that has started, on a shared axis from the first start to the last end (or now while one runs). */
+export function stepWaterfall(steps: ReadonlyArray<Pick<StepRow, 'seq' | 'status' | 'startedAt' | 'endedAt'>>, nowMs: number): WaterfallBar[] {
+  const started = steps.filter(s => s.startedAt && Number.isFinite(Date.parse(s.startedAt)));
+  if (!started.length) return [];
+  const t0 = Math.min(...started.map(s => Date.parse(s.startedAt as string)));
+  const endOf = (s: { endedAt: string | null }): number => (s.endedAt && Number.isFinite(Date.parse(s.endedAt)) ? Date.parse(s.endedAt) : nowMs);
+  const t1 = Math.max(...started.map(endOf), t0 + 1);
+  const span = t1 - t0;
+  return started.map(s => {
+    const a = Date.parse(s.startedAt as string);
+    return { seq: s.seq, status: String(s.status), leftPct: Math.round(((a - t0) / span) * 1000) / 10,
+      widthPct: Math.min(100, Math.max(1.5, Math.round(((endOf(s) - a) / span) * 1000) / 10)) };
+  });
+}
+
+/** The step "Restart from failed step" would start at: the first failed or cancelled one, else the first never-run one. */
+export function restartStepOf(run: { status: string }, steps: ReadonlyArray<StepRow>): StepRow | null {
+  if (run.status !== 'failed' && run.status !== 'cancelled') return null;
+  return steps.find(s => s.status === 'failed' || s.status === 'cancelled')
+    ?? steps.find(s => s.status === 'skipped' && ranInRun(s) == null) ?? null;
+}
+
+/* ---- templates ---------------------------------------------------------------------------------------------------- */
+export interface JobTemplate {
+  id: number; name: string; description: string | null; steps: Array<Record<string, unknown>>; defaults: Record<string, unknown>;
+  version: number; createdBy: string | null; modifiedAt: string | null; archived: boolean;
+}
+/** On a job: the template it was made from, the version it holds and the current one. */
+export interface TemplateRef { id: number; name: string; version: number | null; currentVersion: number; archived: boolean; changed: boolean }
+export interface StepDiff { seq: number; change: 'same' | 'changed' | 'added' | 'removed'; job: Record<string, unknown> | null; template: Record<string, unknown> | null; fields: string[] }
+
+/** One line per step of the diff: "Step 2: changed (Maximum orders to remove)", "Step 3: removed in the template". */
+export function diffLines(diff: ReadonlyArray<StepDiff>, types: ReadonlyArray<TypeMeta>, d: Pick<JobsDeps, 't'>): string[] {
+  return diff.filter(x => x.change !== 'same').map(x => {
+    const step = (x.template ?? x.job ?? {}) as { type?: string; label?: string | null };
+    const name = stepTitle({ type: String(step.type ?? ''), label: step.label }, types, d);
+    if (x.change === 'added') return d.t('jobs.diff_added', { n: x.seq, name });
+    if (x.change === 'removed') return d.t('jobs.diff_removed', { n: x.seq, name });
+    const meta = findType(types, String(step.type ?? ''));
+    const fields = x.fields.map(f => {
+      if (f.startsWith('params.')) { const p = meta?.params.find(q => q.key === f.slice(7)); return p ? paramLabel(p, d) : f.slice(7); }
+      return d.t(`jobs.diff_f_${f}`);
+    }).join(', ');
+    return d.t('jobs.diff_changed', { n: x.seq, name, fields });
+  });
+}

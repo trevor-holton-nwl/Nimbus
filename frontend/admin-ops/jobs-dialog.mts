@@ -23,11 +23,12 @@ import type { Job, JobType } from './jobs-client.mjs';
 import {
   RECUR_PRESETS, NAME_MAX, WINDOW_CHOICES, WINDOW_ANCHORS, WINDOW_UNITS, WINDOW_OPEN_START, defaultJobForm, jobToForm,
   validateJobForm, buildJobPayload, recurrenceText, stripOffset, dowLabelKey, seedParams, resultOf, findType, hasApplyMode, typeGroups,
+  isChainKey, stepTypes, newStep, stepToWire, stepFromWire, moveStep, removeStep, RUN_ONS, DEFAULT_CHAIN_LIMITS,
   typeLabel, paramLabel, enumLabel, paramHint, windowToUi, uiToWindow, validateWindowUi,
   TARGET_MODES, TZ_MODES, STAGGER_MAX, PARALLEL_MAX, buildTargetRows, filterPlants, targetsPreviewText, plural, TARGET_ROWS_MAX, targetRowCount, timeZoneList, tzShort,
   DST_GAPS, DST_OVERLAPS, WINDOW_ACTIONS, MONTHLY_MODES, GRACE_MAX_MIN, closedDayChoices, policyToOptions, policyNoteText, skipReasonCodeText,
 } from './jobs-model.mjs';
-import type { JobForm, FormErrors, Recurrence, JobsDeps, TypeMeta, ParamMeta, DateWindow, WindowUi, TargetMode, TzMode, PolicyForm } from './jobs-model.mjs';
+import type { JobForm, FormErrors, Recurrence, JobsDeps, TypeMeta, ParamMeta, DateWindow, WindowUi, TargetMode, TzMode, PolicyForm, ChainStep, JobTemplate, RunOn } from './jobs-model.mjs';
 import type { SkippedEntry } from './jobs-client.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
@@ -132,6 +133,8 @@ interface DialogState {
   /** The job types (GET /jobs/types) and the one the form is for; the params block renders from `meta`. */
   types: JobType[];
   meta: TypeMeta | null;
+  /** Job templates offered to a new chain (admin; empty when none or the load failed). */
+  templates: JobTemplate[];
   /** Sequence + timer of the live "Resolves today to ..." lines (one debounce for every window widget). */
   winSeq: number;
   winTimer: ReturnType<typeof setTimeout> | null;
@@ -243,12 +246,12 @@ function _typeHtml(f: JobForm, types: JobType[], locked: boolean): string {
     + `</select></div>`;
 }
 
-const _errP = (key: string): string => `<div class="ape-err" id="jb-err-p-${esc(key)}" role="alert" hidden></div>`;
+const _errP = (key: string, ns = ''): string => `<div class="ape-err" id="jb-err-${ns}p-${esc(key)}" role="alert" hidden></div>`;
 
 /** Number box, text box, select, checkbox(es) or the window picker for one param, from the server's metadata. */
-export function paramHtml(p: ParamMeta, v: unknown, isAdmin: boolean, hideWindow = false): string {
+export function paramHtml(p: ParamMeta, v: unknown, isAdmin: boolean, hideWindow = false, ns = ""): string {
   const d = jobsDeps();
-  const id = `jb-p-${p.key}`;
+  const id = `jb-${ns}p-${p.key}`;
   const label = esc(paramLabel(p, d));
   // Apply / Dry run keeps its sentence that follows the value; every other hint is a translation (or none).
   const hint = p.key === 'apply_mode' ? resultHint(resultOf({ apply_mode: v })) : paramHint(p, d);
@@ -260,30 +263,88 @@ export function paramHtml(p: ParamMeta, v: unknown, isAdmin: boolean, hideWindow
     case 'enum': {
       const locked = p.key === 'apply_mode' && !isAdmin;
       return `<div class="form-row"><label for="${id}">${label}</label><select class="input" id="${id}"${desc}${locked ? ' disabled' : ''}>`
-        + (p.enum ?? []).map(o => _opt(o, enumLabel(p, o, d), String(v ?? ''))).join('') + `</select>${hintHtml}${_errP(p.key)}</div>`;
+        + (p.enum ?? []).map(o => _opt(o, enumLabel(p, o, d), String(v ?? ''))).join('') + `</select>${hintHtml}${_errP(p.key, ns)}</div>`;
     }
     case 'multi_enum': {
       const on = new Set(Array.isArray(v) ? v.map(String) : []);
       return `<div class="form-row"><label id="${id}-l">${label}</label><div class="job-dows" role="group" aria-labelledby="${id}-l">`
         + (p.enum ?? []).map(o => `<label class="chk-inline"><input type="checkbox" id="${id}-${esc(o)}"${on.has(o) ? ' checked' : ''}><span>${esc(enumLabel(p, o, d))}</span></label>`).join('')
-        + `</div>${hintHtml}${_errP(p.key)}</div>`;
+        + `</div>${hintHtml}${_errP(p.key, ns)}</div>`;
     }
     case 'integer': case 'number':
       return `<div class="form-row"><label for="${id}">${label}</label><input class="input job-num" id="${id}" type="number"`
-        + `${p.min != null ? ` min="${p.min}"` : ''}${p.max != null ? ` max="${p.max}"` : ''} step="${p.type === 'integer' ? 1 : 'any'}" value="${esc(v ?? '')}"${desc}>${hintHtml}${_errP(p.key)}</div>`;
+        + `${p.min != null ? ` min="${p.min}"` : ''}${p.max != null ? ` max="${p.max}"` : ''} step="${p.type === 'integer' ? 1 : 'any'}" value="${esc(v ?? '')}"${desc}>${hintHtml}${_errP(p.key, ns)}</div>`;
     case 'date_window':
-      return windowWidgetHtml(p, windowToUi(v as DateWindow | null), hideWindow);
+      return windowWidgetHtml(p, windowToUi(v as DateWindow | null), hideWindow, ns);
     default:
-      return `<div class="form-row"><label for="${id}">${label}</label><input class="input" id="${id}" type="text" value="${esc(v ?? '')}" autocomplete="off"${desc}>${hintHtml}${_errP(p.key)}</div>`;
+      return `<div class="form-row"><label for="${id}">${label}</label><input class="input" id="${id}" type="text" value="${esc(v ?? '')}" autocomplete="off"${desc}>${hintHtml}${_errP(p.key, ns)}</div>`;
   }
 }
 
-export function paramsHtml(meta: TypeMeta | null, f: JobForm, isAdmin: boolean): string {
+export function paramsHtml(meta: TypeMeta | null, f: Pick<JobForm, 'params'>, isAdmin: boolean, ns = ''): string {
   // The Result control (Apply / Dry run) belongs to action types only; a report never offers it.
   // The aggregate window means nothing while "Limit the aggregate view to a date window" is off: hide it until it is on.
+  if (meta?.composite) return '';                                   // a chain's params are its steps (see chainHtml)
   const gated = !!meta && meta.params.some(q => q.key === 'filter_by_window' && q.type === 'boolean');
   return meta ? meta.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(meta))
-    .map(p => paramHtml(p, f.params[p.key], isAdmin, gated && p.key === 'window' && f.params.filter_by_window !== true)).join('') : '';
+    .map(p => paramHtml(p, f.params[p.key], isAdmin, gated && p.key === 'window' && f.params.filter_by_window !== true, ns)).join('') : '';
+}
+
+/* ---------------------------------------------------------------------------
+   Chain builder (W4a): an ordered step list, each step an ordinary job type with its own params form (control ids
+   `jb-s<i>-...`, params `jb-s<i>-p-<param>`), what to do when it fails, and (under Advanced) when it runs and its name.
+   The step list is re-rendered as a whole when its structure changes (add / move / remove / type); typing in a step's
+   own fields never re-renders it.
+   ------------------------------------------------------------------------- */
+const ON_FAIL = ['stop', 'continue'] as const;
+
+function _stepTypeOptions(types: JobType[], cur: string): string {
+  const d = jobsDeps();
+  return typeGroups(stepTypes(types)).map(g => `<optgroup label="${esc(t(g.labelKey))}">${g.types.map(x => _opt(x.key, typeLabel(x, d), cur)).join('')}</optgroup>`).join('');
+}
+
+export function stepCardHtml(st: ChainStep, i: number, n: number, types: JobType[], isAdmin: boolean): string {
+  const meta = findType(types, st.type) ?? null;
+  const ns = `s${i}-`;
+  const btn = (act: string, label: string, glyph: string, off: boolean): string =>
+    `<button type="button" class="icon-btn sm" data-jb-act="${act}" data-jb-i="${i}" aria-label="${esc(t(label, { n: i + 1 }))}"${off ? ' disabled' : ''}>${glyph}</button>`;
+  return `<li class="job-step-card" data-jb-step="${i}"><div class="job-step-head"><span class="job-step-n">${esc(t('jobs.step_n', { n: i + 1 }))}</span>`
+    + `<select class="input job-step-type" id="jb-s${i}-type" aria-label="${esc(t('jobs.step_type', { n: i + 1 }))}">${_stepTypeOptions(types, st.type)}</select>`
+    + `<span class="job-step-btns">${btn('step-up', 'jobs.step_up', '↑', i === 0)}${btn('step-down', 'jobs.step_down', '↓', i === n - 1)}${btn('step-remove', 'jobs.step_remove', '×', false)}</span></div>`
+    + `<div class="job-step-body">${paramsHtml(meta, { params: st.params }, isAdmin, ns)}</div>`
+    + `<div class="form-row"><label for="jb-s${i}-onfail">${esc(t('jobs.step_onfail'))}</label><select class="input" id="jb-s${i}-onfail">`
+    + ON_FAIL.map(o => _opt(o, t(`jobs.step_onfail_${o}`), st.continueOnFailure ? 'continue' : 'stop')).join('') + `</select></div>`
+    + `<details class="job-step-adv"><summary>${esc(t('jobs.step_advanced'))}</summary>`
+    + `<div class="form-row"><label for="jb-s${i}-runon">${esc(t('jobs.step_runon'))}</label><select class="input" id="jb-s${i}-runon">`
+    + RUN_ONS.map(o => _opt(o, t(`jobs.step_runon_${o}`), st.runOn)).join('') + `</select><div class="ape-hint">${esc(t('jobs.step_runon_hint'))}</div></div>`
+    + `<div class="form-row"><label for="jb-s${i}-label">${esc(t('jobs.step_label'))}</label><input class="input" id="jb-s${i}-label" type="text" maxlength="80" value="${esc(st.label)}" autocomplete="off"></div>`
+    + `</details><div class="ape-err" id="jb-err-s${i}-type" role="alert" hidden></div></li>`;
+}
+
+export function stepListHtml(f: Pick<JobForm, 'steps'>, types: JobType[], isAdmin: boolean): string {
+  if (!f.steps.length) return `<li class="job-step-empty ape-hint">${esc(t('jobs.steps_none'))}</li>`;
+  return f.steps.map((st, i) => stepCardHtml(st, i, f.steps.length, types, isAdmin)).join('');
+}
+
+export function chainHtml(f: JobForm, types: JobType[], isAdmin: boolean, templates: JobTemplate[], mode: DialogMode): string {
+  const live = templates.filter(x => !x.archived);
+  return `<fieldset class="job-chain" id="jb-chain"><legend>${esc(t('jobs.steps_title'))}</legend>`
+    + (mode === 'new' && live.length
+      ? `<div class="form-row"><label for="jb-template">${esc(t('jobs.tpl_start'))}</label><select class="input" id="jb-template"><option value="">${esc(t('jobs.tpl_none'))}</option>`
+        + live.map(x => _opt(String(x.id), x.name, String(f.templateId ?? ''))).join('') + `</select><div class="ape-hint">${esc(t('jobs.tpl_hint'))}</div></div>` : '')
+    + `<ol class="job-steps-edit" id="jb-steps">${stepListHtml(f, types, isAdmin)}</ol>`
+    + `<div class="job-chain-add"><select class="input" id="jb-addtype" aria-label="${esc(t('jobs.step_add_type'))}">${_stepTypeOptions(types, '')}</select>`
+    + `<button type="button" class="btn btn-ghost" data-jb-act="step-add">${esc(t('jobs.step_add'))}</button></div>`
+    + `<div class="ape-err" id="jb-err-steps" role="alert" hidden></div>`
+    + `<div class="job-chain-tpl"><label for="jb-tplname" class="job-field-l">${esc(t('jobs.tpl_name'))}</label><input class="input" id="jb-tplname" type="text" maxlength="120" autocomplete="off">`
+    + `<button type="button" class="btn btn-ghost" data-jb-act="tpl-save">${esc(t('jobs.tpl_save'))}</button>`
+    + (f.templateId != null ? `<button type="button" class="btn btn-ghost" data-jb-act="tpl-update">${esc(t('jobs.tpl_update'))}</button>` : '')
+    + `</div></fieldset>`;
+}
+
+/** The block under the type select: a chain's step builder, or the type's own params form (+ the result error slot). */
+export function paramsBlockHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: TypeMeta | null, types: JobType[], templates: JobTemplate[]): string {
+  return meta?.composite || isChainKey(f.jobType) ? chainHtml(f, types, isAdmin, templates, mode) : `${paramsHtml(meta, f, isAdmin)}${_err('result')}`;
 }
 
 /* ---------------------------------------------------------------------------
@@ -315,13 +376,13 @@ export function windowFieldsHtml(id: string, ui: WindowUi): string {
   }
 }
 
-export function windowWidgetHtml(p: ParamMeta, ui: WindowUi, hidden = false): string {
-  const id = `jb-p-${p.key}`;
+export function windowWidgetHtml(p: ParamMeta, ui: WindowUi, hidden = false, ns = ""): string {
+  const id = `jb-${ns}p-${p.key}`;
   return `<fieldset class="job-window" id="${id}"${hidden ? ' hidden' : ''}><legend>${esc(paramLabel(p, jobsDeps()))}</legend>`
     + `<div class="form-row"><label for="${id}-choice">${esc(t('jobs.win_choice'))}</label><select class="input" id="${id}-choice">`
     + WINDOW_CHOICES.map(c => _opt(c, t(`jobs.win_${c}`), ui.choice)).join('') + `</select></div>`
     + `<div id="${id}-fields">${windowFieldsHtml(id, ui)}</div>`
-    + `<div class="ape-hint job-window-line" id="${id}-line" aria-live="polite"></div>${_errP(p.key)}</fieldset>`;
+    + `<div class="ape-hint job-window-line" id="${id}-line" aria-live="polite"></div>${_errP(p.key, ns)}</fieldset>`;
 }
 
 /** A number box's value; a blank box is NaN (an error), never 0. */
@@ -422,14 +483,14 @@ export function tzBlockHtml(f: JobForm): string {
     + `<div class="ape-hint">${esc(t(f.tzMode === 'plant' ? 'jobs.tz_hint' : 'jobs.tz_hint_other'))}</div></div>`;
 }
 
-export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: TypeMeta | null = null, types: JobType[] = []): string {
+export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: TypeMeta | null = null, types: JobType[] = [], templates: JobTemplate[] = []): string {
   return `<div class="job-form">`
     + `<div class="form-row"><label for="jb-name">${esc(t('jobs.f_name'))}</label>`
     + `<input class="input" id="jb-name" type="text" maxlength="${NAME_MAX}" value="${esc(f.name)}" autocomplete="off">${_err('name')}</div>`
     + `<div class="form-row-2">${_typeHtml(f, types, mode === 'edit')}`
     + `<div class="form-row"><label for="jb-plant">${esc(t('jobs.f_plant'))}</label><div id="jb-plant-host"></div>${_err('plant')}</div></div>`
     + targetsFieldsetHtml(f)
-    + `<div id="jb-params">${paramsHtml(meta, f, isAdmin)}${_err('result')}</div>`
+    + `<div id="jb-params">${paramsBlockHtml(f, mode, isAdmin, meta, types, templates)}</div>`
     + `<fieldset class="job-recur"><legend>${esc(t('jobs.f_recurrence'))}</legend>`
     + `<div class="form-row"><label for="jb-recur">${esc(t('jobs.f_repeat'))}</label><select class="input" id="jb-recur">`
     + RECUR_PRESETS.map(p => _opt(p, t(`jobs.preset_${p}`), f.recur.preset)).join('') + `</select></div>`
@@ -493,10 +554,10 @@ function _initPickers(): void {
    Form <-> DOM
    ------------------------------------------------------------------------- */
 /** The type's params read from the live fields; a control that is not on screen keeps its previous value. */
-function _readParams(meta: TypeMeta, prev: Record<string, unknown>): Record<string, unknown> {
+function _readParams(meta: TypeMeta, prev: Record<string, unknown>, ns = ''): Record<string, unknown> {
   const out: Record<string, unknown> = { ...prev };
   for (const p of meta.params) {
-    const id = `jb-p-${p.key}`;
+    const id = `jb-${ns}p-${p.key}`;
     switch (p.type) {
       case 'boolean': if (_el(id)) out[p.key] = _chk(id); break;
       case 'enum': case 'string': if (_el(id)) out[p.key] = _val(id); break;
@@ -516,6 +577,22 @@ function _readParams(meta: TypeMeta, prev: Record<string, unknown>): Record<stri
     }
   }
   return out;
+}
+
+/** The chain's steps read from the live step cards; a card that is not on screen keeps its previous values. */
+function _readSteps(prev: ChainStep[], types: JobType[]): ChainStep[] {
+  return prev.map((st, i) => {
+    if (!_el(`jb-s${i}-type`)) return st;
+    const type = _val(`jb-s${i}-type`) || st.type;
+    const meta = findType(types, type);
+    const runOn = _val(`jb-s${i}-runon`);
+    return {
+      type, params: meta && type === st.type ? _readParams(meta, st.params, `s${i}-`) : st.params,
+      label: _el(`jb-s${i}-label`) ? _val(`jb-s${i}-label`) : st.label,
+      continueOnFailure: _el(`jb-s${i}-onfail`) ? _val(`jb-s${i}-onfail`) === 'continue' : st.continueOnFailure,
+      runOn: (RUN_ONS as readonly string[]).includes(runOn) ? (runOn as RunOn) : st.runOn,
+    };
+  });
 }
 
 /** The Advanced rules from the live fields; a control that is not on screen keeps its previous value. */
@@ -550,7 +627,8 @@ export function readForm(prev: JobForm, meta: TypeMeta | null = _s?.meta ?? null
   const hasFan = !!_el('jb-fo-stagger');
   const par = _val('jb-fo-par').trim();
   return {
-    ...prev, name: _val('jb-name'), params: meta ? _readParams(meta, prev.params) : prev.params, recur, policy: _readPolicy(prev.policy, preset),
+    ...prev, name: _val('jb-name'), params: meta && !meta.composite ? _readParams(meta, prev.params) : prev.params,
+    steps: isChainKey(prev.jobType) ? _readSteps(prev.steps, _s?.types ?? []) : prev.steps, recur, policy: _readPolicy(prev.policy, preset),
     validFrom: _val('jb-from'), validUntil: _val('jb-until'), skipIfRunning: _chk('jb-overlap'),
     targetMode: radio(TARGET_MODES, 'jb-tmode-', prev.targetMode), tzMode: radio(TZ_MODES, 'jb-tzmode-', prev.tzMode),
     fanOut: hasFan ? { staggerS: _val('jb-fo-stagger').trim() === '' ? 0 : Number(_val('jb-fo-stagger')), maxParallel: par === '' ? null : Number(par), failFast: _chk('jb-fo-ff') } : prev.fanOut,
@@ -558,7 +636,7 @@ export function readForm(prev: JobForm, meta: TypeMeta | null = _s?.meta ?? null
 }
 
 function _showErrors(errs: FormErrors): void {
-  for (const f of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity', 'targets', 'fixedTz', 'fanOut', 'policyWin', 'policyGrace', 'policyTz'] as const) {
+  for (const f of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity', 'targets', 'fixedTz', 'fanOut', 'policyWin', 'policyGrace', 'policyTz', 'steps'] as const) {
     const el = _el(`jb-err-${f}`);
     if (!el) continue;
     el.textContent = errs[f] ? t(errs[f] as string) : '';
@@ -571,6 +649,19 @@ function _showErrors(errs: FormErrors): void {
     el.textContent = key ? t(key, { min: p.min ?? '', max: p.max ?? '' }) : '';
     el.hidden = !key;
   }
+  // A chain's per-step errors sit under the field they belong to (`jb-err-s<i>-p-<param>`), a bad type under the step.
+  const floor = JobsClient.limits().purgeMinAgeDays;
+  (_s?.form.steps ?? []).forEach((st, i) => {
+    const per = errs.stepParams?.[i] ?? {};
+    const keys = [...(findType(_s?.types ?? [], st.type)?.params ?? []).map(p => p.key), '_type'];
+    for (const k of keys) {
+      const el = _el(k === '_type' ? `jb-err-s${i}-type` : `jb-err-s${i}-p-${k}`);
+      if (!el) continue;
+      const p = findType(_s?.types ?? [], st.type)?.params.find(q => q.key === k);
+      el.textContent = per[k] ? t(per[k], { min: p?.min ?? '', max: p?.max ?? '', n: floor }) : '';
+      el.hidden = !per[k];
+    }
+  });
 }
 
 /* ---------------------------------------------------------------------------
@@ -786,12 +877,22 @@ function _pickBulk(s: DialogState, kind: PickKind, all: boolean): void {
    Window preview: "Resolves today to <from> to <to> (<tz>, plant time)" for every window param, debounced, with a
    stale-response guard (winSeq). The server resolves it with the same code a run uses.
    ------------------------------------------------------------------------- */
+/** Every params form on screen that holds a window: the type's own, or one per chain step (`ns` = the id namespace). */
+function _windowUnits(s: DialogState): Array<{ ns: string; meta: TypeMeta; params: Record<string, unknown> }> {
+  if (isChainKey(s.form.jobType)) {
+    return s.form.steps.flatMap((st, i) => { const m = findType(s.types, st.type); return m ? [{ ns: `s${i}-`, meta: m, params: st.params }] : []; });
+  }
+  return s.meta ? [{ ns: '', meta: s.meta, params: s.form.params }] : [];
+}
+
 function _scheduleWindowPreview(): void {
   const s = _s;
-  if (!s || !s.meta?.params.some(p => p.type === 'date_window')) return;
+  if (!s) return;
+  const units = _windowUnits(s).filter(u => u.meta.params.some(p => p.type === 'date_window'));
+  if (!units.length) return;
   if (s.winTimer) clearTimeout(s.winTimer);
-  for (const p of s.meta.params.filter(x => x.type === 'date_window')) {        // the old line is stale the moment the window changes
-    const l = _el(`jb-p-${p.key}-line`);
+  for (const u of units) for (const p of u.meta.params.filter(x => x.type === 'date_window')) {        // the old line is stale the moment the window changes
+    const l = _el(`jb-${u.ns}p-${p.key}-line`);
     if (l) { l.textContent = ''; l.classList.remove('ape-err'); l.classList.add('ape-hint'); }
   }
   s.winTimer = setTimeout(() => void _runWindowPreviews(), 300);
@@ -802,13 +903,14 @@ async function _runWindowPreviews(): Promise<void> {
   if (!s || !s.meta) return;
   s.form = readForm(s.form);
   const seq = ++s.winSeq;
-  const lookback = Number(s.form.params.first_run_lookback_days) || undefined;
-  for (const p of s.meta.params.filter(x => x.type === 'date_window')) {
-    const line = _el(`jb-p-${p.key}-line`);
+  for (const u of _windowUnits(s)) {
+   const lookback = Number(u.params.first_run_lookback_days) || undefined;
+   for (const p of u.meta.params.filter(x => x.type === 'date_window')) {
+    const line = _el(`jb-${u.ns}p-${p.key}-line`);
     if (!line) continue;
-    const w = s.form.params[p.key] as DateWindow;
+    const w = u.params[p.key] as DateWindow;
     const setLine = (text: string, err: boolean): void => { line.textContent = text; line.classList.toggle('ape-err', err); line.classList.toggle('ape-hint', !err); };
-    if ((_el(`jb-p-${p.key}`) as HTMLElement | null)?.hidden) { setLine('', false); continue; }
+    if ((_el(`jb-${u.ns}p-${p.key}`) as HTMLElement | null)?.hidden) { setLine('', false); continue; }
     const bad = validateWindowUi(windowToUi(w));
     if (bad) { setLine(t(bad), true); continue; }                                  // an invalid window says why, inline
     if (!s.form.plant) { setLine('', false); continue; }
@@ -820,12 +922,15 @@ async function _runWindowPreviews(): Promise<void> {
       if (_s !== s || seq !== s.winSeq) return;
       setLine((e as Error).message, true);          // e.g. the plant has no timezone
     }
+   }
   }
 }
 
 /** A window picker's choice changed: swap the fields under it. Switching to Custom keeps the meaning of the preset it left. */
-function _windowChoiceChanged(s: DialogState, id: string, key: string): void {
-  const prevUi = windowToUi(s.form.params[key] as DateWindow | null);
+function _windowChoiceChanged(s: DialogState, id: string, key: string, step: number | null = null): void {
+  const store = step == null ? s.form.params : s.form.steps[step]?.params;
+  if (!store) return;
+  const prevUi = windowToUi(store[key] as DateWindow | null);
   const ui = _readWindowUi(id, prevUi);
   if (ui.choice === 'custom' && prevUi.choice !== 'custom') {
     const r = uiToWindow(prevUi).rolling;
@@ -834,7 +939,8 @@ function _windowChoiceChanged(s: DialogState, id: string, key: string): void {
   if (['older_than', 'last', 'next'].includes(ui.choice) && !(Number(ui.n) >= (ui.choice === 'older_than' ? 0 : 1))) ui.n = 7;
   const host = _el(`${id}-fields`);
   if (host) host.innerHTML = windowFieldsHtml(id, ui);
-  s.form.params = { ...s.form.params, [key]: uiToWindow(ui) };
+  if (step == null) s.form.params = { ...s.form.params, [key]: uiToWindow(ui) };
+  else s.form.steps = s.form.steps.map((st, i) => (i === step ? { ...st, params: { ...st.params, [key]: uiToWindow(ui) } } : st));
   _initPickers();
 }
 
@@ -842,12 +948,81 @@ function _windowChoiceChanged(s: DialogState, id: string, key: string): void {
 function _changeType(s: DialogState, key: string): void {
   const meta = findType(s.types, key);
   if (!meta || s.mode !== 'new') return;
-  s.form = { ...readForm(s.form), jobType: key, params: seedParams(meta, meta.defaults) };
+  s.form = { ...readForm(s.form), jobType: key, params: meta.composite ? {} : seedParams(meta, meta.defaults), steps: [], templateId: null, templateVersion: null };
   s.meta = meta;
   const host = _el('jb-params');
-  if (host) host.innerHTML = paramsHtml(meta, s.form, Session.isAdmin()) + _err('result');
+  if (host) host.innerHTML = paramsBlockHtml(s.form, s.mode, Session.isAdmin(), meta, s.types, s.templates);
   _initPickers();
   _scheduleWindowPreview();
+}
+
+/** Re-render the step cards after the list changed shape (the other fields of the dialog are untouched). */
+function _renderSteps(s: DialogState, focus?: string): void {
+  const host = _el('jb-steps');
+  if (host) host.innerHTML = stepListHtml(s.form, s.types, Session.isAdmin());
+  _initPickers();
+  _scheduleWindowPreview();
+  if (focus) _el(focus)?.focus();
+}
+
+/** A step-structure click (add / move / remove / template); the live fields are read first so no typing is lost. */
+function _stepAction(s: DialogState, act: string, i: number): void {
+  s.form = readForm(s.form);
+  const steps = s.form.steps;
+  if (act === 'step-add') {
+    const meta = findType(s.types, _val('jb-addtype')) ?? stepTypes(s.types)[0];
+    if (!meta || steps.length >= JobsClient.limits().maxSteps) return;
+    s.form = { ...s.form, steps: [...steps, newStep(meta)] };
+    _renderSteps(s, `jb-s${steps.length}-type`);
+  } else if (act === 'step-remove') {
+    s.form = { ...s.form, steps: removeStep(steps, i) };
+    _renderSteps(s, 'jb-addtype');
+  } else {
+    const delta = act === 'step-up' ? -1 : 1;
+    s.form = { ...s.form, steps: moveStep(steps, i, delta) };
+    _renderSteps(s, `jb-s${i + delta}-type`);
+  }
+  _schedulePreview();
+}
+
+/** Pick a template for a new chain: its steps replace the list (the job keeps a COPY and the template's id and version). */
+function _applyTemplate(s: DialogState, id: string): void {
+  s.form = readForm(s.form);
+  const tpl = s.templates.find(x => String(x.id) === id);
+  s.form = tpl ? { ...s.form, steps: tpl.steps.map(stepFromWire), templateId: tpl.id, templateVersion: tpl.version }
+    : { ...s.form, templateId: null, templateVersion: null };
+  const host = _el('jb-chain');
+  if (host) host.outerHTML = chainHtml(s.form, s.types, Session.isAdmin(), s.templates, s.mode);
+  _initPickers();
+  _scheduleWindowPreview();
+}
+
+/** Save the current steps as a NEW template, or (update) as the next version of the job's own template. */
+async function _saveTemplate(s: DialogState, update: boolean): Promise<void> {
+  s.form = readForm(s.form);
+  const errs = validateJobForm(s.form, { isAdmin: Session.isAdmin(), plants: Session.allowedPlants(), meta: s.meta, types: s.types, limits: JobsClient.limits() });
+  _showErrors(errs);
+  if (errs.steps || errs.stepParams) return;
+  const steps = s.form.steps.map(stepToWire);
+  try {
+    if (update && s.form.templateId != null) {
+      const tpl = await JobsClient.updateTemplate(s.form.templateId, { steps });
+      s.templates = s.templates.map(x => (x.id === tpl.id ? tpl : x));
+      s.form = { ...s.form, templateVersion: tpl.version };
+    } else {
+      const name = (_val('jb-tplname') || s.form.name).trim();
+      if (!name) { Toast.show(t('jobs.tpl_name_needed'), 'error'); _el('jb-tplname')?.focus(); return; }
+      const tpl = await JobsClient.createTemplate({ name, steps });
+      s.templates = [...s.templates, tpl];
+      s.form = { ...s.form, templateId: tpl.id, templateVersion: tpl.version };
+    }
+    Toast.show(t('jobs.tpl_saved'), 'success');
+    const host = _el('jb-chain');               // the Update button appears once the job is tied to a template
+    if (host) host.outerHTML = chainHtml(s.form, s.types, Session.isAdmin(), s.templates, s.mode);
+    _initPickers();
+  } catch (e) {
+    Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error');
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -877,6 +1052,18 @@ function _wire(): void {
     if (id.startsWith('jb-tzmode-')) { s.form = readForm(s.form); _renderTz(s); _schedulePreview(); return; }
     if (id.startsWith('jb-fo-')) { s.form = readForm(s.form); _scheduleTargetsPreview(); return; }
     if (id === 'jb-jobtype') { _changeType(s, _val('jb-jobtype')); return; }
+    if (id === 'jb-template') { _applyTemplate(s, _val('jb-template')); _schedulePreview(); return; }
+    const stepType = /^jb-s(\d+)-type$/.exec(id);
+    if (stepType) {                                      // another type for one step: that step starts from the type's own defaults
+      const i = Number(stepType[1]);
+      const meta = findType(s.types, _val(id));
+      s.form = readForm(s.form);
+      if (meta && s.form.steps[i]) {
+        s.form = { ...s.form, steps: s.form.steps.map((st, k) => (k === i ? { ...newStep(meta), continueOnFailure: st.continueOnFailure, runOn: st.runOn, label: st.label } : st)) };
+        _renderSteps(s, id);
+      }
+      return;
+    }
     if (id.startsWith('jb-pol-')) { _policyChanged(s, id); return; }
     if (id === 'jb-recur') {
       s.form = readForm(s.form);
@@ -885,11 +1072,11 @@ function _wire(): void {
       _renderPolicy(s);                                    // hourly drops the DST rules, monthly adds its own, closed-day choices differ
       _initPickers();
     }
-    const wm = /^(jb-p-(.+))-choice$/.exec(id);
-    if (wm) _windowChoiceChanged(s, wm[1], wm[2]);
+    const wm = /^(jb-(?:s(\d+)-)?p-(.+))-choice$/.exec(id);
+    if (wm) _windowChoiceChanged(s, wm[1], wm[3], wm[2] == null ? null : Number(wm[2]));
     if (id === 'jb-p-filter_by_window') { const w = _el('jb-p-window'); if (w) w.hidden = !_chk(id); }
     if (id === 'jb-p-apply_mode') { const hint = _el('jb-p-apply_mode-hint'); if (hint) hint.textContent = resultHint(_val('jb-p-apply_mode')); }
-    if (id.startsWith('jb-p-')) _scheduleWindowPreview();
+    if (id.startsWith('jb-p-') || /^jb-s\d+-p-/.test(id)) _scheduleWindowPreview();
     _schedulePreview();
   });
   body?.addEventListener('input', (e) => {
@@ -900,14 +1087,16 @@ function _wire(): void {
     else if (id === _PICK.excl.filter) _refreshPick(s, 'excl');
     else if (id.startsWith('jb-fo-')) _scheduleTargetsPreview();
     else if (id !== 'jb-name') {
-      if (id.startsWith('jb-p-')) _scheduleWindowPreview();
-      else _schedulePreview();
+      if (id.startsWith('jb-p-') || /^jb-s\d+-p-/.test(id)) _scheduleWindowPreview();
+      else if (id !== 'jb-tplname' && !/^jb-s\d+-label$/.test(id)) _schedulePreview();
     }
   });
   body?.addEventListener('click', (e) => {
     const s = _s;
     const act = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-jb-act]')?.dataset.jbAct;
     if (!s || !act) return;
+    if (act.startsWith('step-')) { _stepAction(s, act, Number((e.target as HTMLElement).closest<HTMLElement>('[data-jb-i]')?.dataset.jbI ?? -1)); return; }
+    if (act === 'tpl-save' || act === 'tpl-update') { void _saveTemplate(s, act === 'tpl-update'); return; }
     if (act === 'sel-all' || act === 'sel-none') _pickBulk(s, 'sel', act === 'sel-all');
     else if (act === 'excl-all' || act === 'excl-none') _pickBulk(s, 'excl', act === 'excl-all');
     else if (act === 'plants-more') { s.planLimit = Math.min(PLANT_PAGE_MAX, s.planLimit + PLANT_PAGE); void _runPreview(); }
@@ -931,21 +1120,24 @@ function _show(title: string): void {
 
 export const JobsDialog = {
   /** `job` edits it; `duplicate` seeds a new job from it (name cleared, same plant). */
-  open(opts: { job?: Job; duplicate?: boolean; plant?: string; defaults?: Record<string, unknown>; types?: JobType[]; jobType?: string; onSaved?: () => void }): void {
+  open(opts: { job?: Job; duplicate?: boolean; plant?: string; defaults?: Record<string, unknown>; types?: JobType[]; jobType?: string; templates?: JobTemplate[]; templateId?: number; onSaved?: () => void }): void {
     if (!Session.isAdmin()) return;
     const { job, duplicate } = opts;
     const mode: DialogMode = job && !duplicate ? 'edit' : 'new';
     const types = opts.types ?? [];
     // A new job starts as the first action type (the optimizer) unless the caller names one, seeded from that type's own
     // param defaults (GET /jobs/types); a saved job renders with its own type and params.
-    const typeKey = job ? job.job_type : (opts.jobType ?? types.find(x => x.kind === 'action')?.key ?? types[0]?.key ?? 'optimizer.plant');
+    const typeKey = job ? job.job_type : (opts.jobType ?? types.find(x => x.kind === 'action' && !x.composite)?.key ?? types[0]?.key ?? 'optimizer.plant');
     const meta = findType(types, typeKey) ?? null;
     const form = job ? jobToForm(job, meta) : defaultJobForm(opts.plant ?? '', typeKey, opts.defaults ?? meta?.defaults ?? null, meta);
     if (duplicate) form.name = '';
-    _s = { mode, job: job && !duplicate ? job : null, form, types, meta, winSeq: 0, winTimer: null, tpSeq: 0, tpTimer: null, planLimit: PLANT_PAGE, busy: false, baseline: JSON.stringify(form), previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
+    const templates = opts.templates ?? [];
+    const fromTpl = !job && opts.templateId != null ? templates.find(x => x.id === opts.templateId) : undefined;
+    if (fromTpl) { form.steps = fromTpl.steps.map(stepFromWire); form.templateId = fromTpl.id; form.templateVersion = fromTpl.version; }
+    _s = { mode, job: job && !duplicate ? job : null, form, types, meta, templates, winSeq: 0, winTimer: null, tpSeq: 0, tpTimer: null, planLimit: PLANT_PAGE, busy: false, baseline: JSON.stringify(form), previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
     _wire();
     const body = _el('jb-body');
-    if (body) body.innerHTML = bodyHtml(form, mode, Session.isAdmin(), meta, types);
+    if (body) body.innerHTML = bodyHtml(form, mode, Session.isAdmin(), meta, types, templates);
     _initPickers();
     mkCombobox(_el('jb-plant-host'), allowedPlantList(), {
       value: form.plant, placeholder: t('jobs.f_plant'), id: 'jb-plant', disabled: mode === 'edit',
@@ -965,7 +1157,7 @@ export const JobsDialog = {
     const s = _s;
     if (!s || s.busy) return;
     s.form = readForm(s.form);
-    const errs = validateJobForm(s.form, { isAdmin: Session.isAdmin(), plants: Session.allowedPlants(), meta: s.meta });
+    const errs = validateJobForm(s.form, { isAdmin: Session.isAdmin(), plants: Session.allowedPlants(), meta: s.meta, types: s.types, limits: JobsClient.limits() });
     _showErrors(errs);
     if (Object.keys(errs).length) return;
     const { job, schedule } = buildJobPayload(s.form);
