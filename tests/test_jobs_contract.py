@@ -90,15 +90,21 @@ def client(monkeypatch):
            "proposal": {"snapshot_version": "v1", "base_versions": {"1008-100": 7},
                         "patches": [{"id": "1008-100", "end_date": "2026-10-30T14:00:00", "base_version": 7}],
                         "findings": [{"severity": "warn", "message": "x"}]}}
-    runs = {42: _run_row(), 43: _run_row(id=43, status="running", ended_at=None), 44: _run_row(id=44, summary=dry)}
+    runs = {42: _run_row(), 43: _run_row(id=43, status="running", ended_at=None), 44: _run_row(id=44, summary=dry),
+            45: _run_row(id=45, job_id=6, status="running", ended_at=None, summary=None)}
+    jobs[6] = _job_row(id=6, params={"apply_mode": "propose"})
     import db
     from backend.jobs import scheduler as jobs_scheduler
     monkeypatch.setattr(db, "get_task_versions", lambda ids: [
         {"id": "1008-100", "end_date": "2026-10-30T10:00:00", "row_version": 7, "MACHINE": "L1",
          "planning_status": "scheduled"}])
     monkeypatch.setattr("backend.scheduling.routes.optimizer_snapshot_version", lambda plant: "v1")
-    monkeypatch.setattr(data, "run_health", lambda **kw: {"running": 1, "queued": 0, "failed_24h": 2, "missed_24h": 0,
+    monkeypatch.setattr(data, "run_health", lambda **kw: {"running": 1, "queued": 0, "failed_24h": 2,
+                                                          "failed_config_24h": 1, "failed_system_24h": 0,
+                                                          "failed_transient_24h": 1, "missed_24h": 0,
                                                           "warning_24h": 1, "longer_than_usual": [43]})
+    monkeypatch.setattr(data, "next_fire_schedules", lambda **kw: [
+        {**_sched_row(), "job_name": "Morning optimize", "plant": "1008"}])
     monkeypatch.setattr(jobs_scheduler, "heartbeat", lambda: {"ok": True, "last_tick_at": "2026-10-29T12:00:00+00:00"})
     monkeypatch.setattr(data, "plant_timezone", lambda plant: "America/New_York")
     monkeypatch.setattr(data, "plant_exists", lambda plant: True)
@@ -208,6 +214,13 @@ def test_proposal_of_a_dry_run(client):
     assert row["delta_hours"] == 4.0 and row["machine"] == "L1" and row["changed_since"] is False
     assert body["board_matches"] is True
     assert client.get("/jobs/runs/42/proposal").status_code == 400, "an applied run has no proposal"
+
+
+def test_proposal_of_a_running_dry_run_is_pending(client):
+    body = client.get("/jobs/runs/45/proposal").json()
+    _check(body, "proposal_pending")
+    assert body["pending"] is True
+    assert client.get("/jobs/runs/43/proposal").status_code == 400, "a running non-dry run has no proposal"
     assert client.post("/jobs/runs/44/approve").status_code in (404, 405), "no approve route exists"
 
 

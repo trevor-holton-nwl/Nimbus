@@ -33,7 +33,7 @@ test('every key the Jobs sources ask for is defined', () => {
   const families = {
     'jobs.status_': ['scheduled', 'running', 'succeeded', 'warning', 'failed', 'cancelled', 'skipped', 'missed'],
     'jobs.result_': ['apply', 'propose', 'apply_tip', 'propose_tip', 'hint_apply', 'hint_propose'],
-    'jobs.error_kind_': ['config', 'system', 'config_hint', 'system_hint'],
+    'jobs.error_kind_': ['config', 'system', 'transient', 'config_hint', 'system_hint', 'transient_hint'],
     'jobs.health_': ['running', 'queued', 'failed', 'missed', 'next'],
     'jobs.bulk_': ['run', 'pause', 'resume', 'archive'],
   };

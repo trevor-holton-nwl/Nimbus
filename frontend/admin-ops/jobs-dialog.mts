@@ -47,12 +47,16 @@ export function plantTimezone(plant: string): string {
    Searchable combobox (copy of master-data's / distribution's _mkCombobox; never chips)
    ------------------------------------------------------------------------- */
 const _comboAborts = new WeakMap<HTMLElement, AbortController>();
+const _comboByKey = new Map<string, AbortController>();
 
 export function mkCombobox(host: HTMLElement | null, options: string[], opts: { value?: string; placeholder?: string; disabled?: boolean; id?: string; onSelect?: (v: string) => void } = {}): void {
   if (!host) return;
   _comboAborts.get(host)?.abort();
+  // A re-render replaces the host element, so the host key alone leaks the old document click listener: also key by id.
+  if (opts.id) _comboByKey.get(opts.id)?.abort();
   const ac = new AbortController();
   _comboAborts.set(host, ac);
+  if (opts.id) _comboByKey.set(opts.id, ac);
   const { value = '', placeholder = '', onSelect } = opts;
   host.innerHTML = `<div class="hps-combobox job-combobox">`
     + `<input type="text"${opts.id ? ` id="${esc(opts.id)}"` : ''} class="hps-input" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}" autocomplete="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="false"${opts.disabled ? ' disabled' : ''}>`

@@ -17,7 +17,7 @@ from pydantic import ValidationError
 import db
 from backend.admin_ops.logbuffer import _log_event
 from backend.jobs import data
-from backend.jobs.context import JobCancelled, JobContext
+from backend.jobs.context import JobCancelled, JobContext, cap_text
 from backend.jobs.registry import REGISTRY, JobOutcome
 import backend.jobs.types  # noqa: F401 - registers the job types
 
@@ -26,7 +26,8 @@ log = logging.getLogger("nimbus.jobs")
 MAX_CONCURRENCY = 2                  # plants run on staggered local times; the API keeps CPU
 RETRY_DELAY_S = 30                   # fixed retry policy (backoff is deferred)
 CANCEL_POLL_S = 2.0
-KILL_GRACE_S = 10.0                  # after the cancel event, how long a body gets to stop before it is abandoned
+ERROR_KINDS = ("config", "system", "transient")
+KILL_GRACE_S = 10.0                 # after the cancel event, how long a body gets to stop before it is abandoned
 
 _SEM = threading.BoundedSemaphore(MAX_CONCURRENCY)
 _RUNNING: dict[int, JobContext] = {}
@@ -43,9 +44,11 @@ def _now() -> datetime:
 
 # ------------------------------------------------------------------------------------------------ entry points
 def start_manual_run(job: dict, actor: str | None) -> int:
-    """Insert a `scheduled` manual run and execute it on a background thread. Returns the run id."""
-    run_id = data.insert_run(job_id=job["id"], schedule_id=None, plant=job["plant"], job_type=job["job_type"],
-                             status="scheduled", trigger="manual", scheduled_for=_now(), triggered_by=actor)
+    """Insert a `scheduled` manual run and execute it on a background thread. Returns the run id, or None when the
+    job already has a scheduled|running run (checked and inserted atomically)."""
+    run_id = data.insert_manual_run_if_idle(job=job, triggered_by=actor, scheduled_for=_now())
+    if run_id is None:
+        return None
     threading.Thread(target=run_job, kwargs={"job_id": job["id"], "trigger": "manual", "run_id": run_id,
                                              "triggered_by": actor, "skip_if_running": True},
                      name=f"job-run-{run_id}", daemon=True).start()
@@ -125,6 +128,15 @@ def _prepare(job: dict):
         return jt, None, f"invalid job parameters: {e.errors(include_url=False)[:3]}"
 
 
+def _log_failure_line(run_id: int, msg: str, step: str) -> None:
+    """A failure that happens before a JobContext exists still gets an error line, so the Errors view has it."""
+    try:
+        data.write_log_rows(run_id, [{"seq": 1, "at": _now(), "level": "error", "step": step, "msg": cap_text(msg),
+                                      "duration_ms": None, "data": None}])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not log failure line for run %s: %s", run_id, exc)
+
+
 def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, scheduled_for: datetime | None = None,
             triggered_by: str | None = None, run_id: int | None = None, skip_if_running: bool = True) -> int | None:
     """Execute one job (plus fixed-policy retries). Returns the id of the last run row. Never raises."""
@@ -140,6 +152,7 @@ def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, schedu
                                          job_type=job["job_type"], status="scheduled", trigger=trigger,
                                          attempt=attempt, scheduled_for=scheduled_for, triggered_by=triggered_by)
             if err:                                       # an unknown type or bad params: the job needs fixing
+                _log_failure_line(run_id, err, "validate")
                 data.finish_run(run_id, "failed", {"error_kind": "config", "failed_step": "validate"}, err, False)
                 return run_id
             status = _execute(run_id, job, jt, params, skip_if_running)
@@ -208,7 +221,11 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
     ctx.defer_clock = bool(getattr(jt, "defer_clock", False))
     with _RUNNING_LOCK:
         _RUNNING[run_id] = ctx
-    data.mark_running(run_id)
+    # A deferred-clock body (the optimizer) may block on a shared slot: until begin_work() the run counts as Queued
+    # and its elapsed time / duration start from begin_work(), not from here.
+    data.mark_running(run_id, waiting_for="slot" if ctx.defer_clock else None)
+    if ctx.defer_clock:
+        ctx.on_work_start = lambda: data.mark_work_started(run_id)
     holder: dict = {}
 
     def target():
@@ -244,6 +261,8 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
                     ctx.cancel_event.set()
         status, summary, error = _resolve(holder, ctx, th, timeout)
         summary = _describe_failure(status, summary, ctx)
+        if status == "failed" and error and not ctx.error_lines:
+            ctx.log("error", error, step=(summary or {}).get("failed_step"))     # every failure leaves an error line
         ctx.log("info" if status in ("succeeded", "cancelled") else "warn", f"run finished: {status}"
                 + (f" ({error})" if error else ""))
         ctx.flush()
@@ -256,12 +275,13 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
 
 def _describe_failure(status: str, summary: dict | None, ctx: JobContext) -> dict | None:
     """A failed run always carries `error_kind` (config = fix the job or its inputs, system = fix the platform:
-    timeout, crash, interrupted), `failed_step` (the step an exception escaped from, else the last step that logged
+    timeout, crash, interrupted; transient = the board changed under the run, run again), `failed_step` (the step an exception escaped from, else the last step that logged
     an error) and `steps` (the timings the body reported, else those `ctx.step` recorded)."""
     if status != "failed":
         return summary
     out = dict(summary or {})
-    out.setdefault("error_kind", "system")
+    if out.get("error_kind") not in ERROR_KINDS:
+        out["error_kind"] = "system"
     if not out.get("failed_step"):
         step = ctx.failed_step or ctx.last_error_step
         if step:

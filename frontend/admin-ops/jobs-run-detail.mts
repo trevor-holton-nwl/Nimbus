@@ -15,7 +15,7 @@
    a line with its structured `data` expanded, makes the row taller). Module state only; no Store events.
    ========================================================================== */
 
-import { Util, Toast, VirtualList } from '../platform/foundation.mjs';
+import { Util, Toast, Modal, VirtualList } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
 import { JobsClient } from './jobs-client.mjs';
 import type { JobRun } from './jobs-client.mjs';
@@ -83,12 +83,13 @@ export function errorPanelHtml(r: JobRun): string {
   const step = r.summary?.failed_step;
   return `<section class="job-error-panel" role="alert" aria-label="${esc(t('jobs.error_panel'))}">`
     + `<div class="job-error-head"><strong>${esc(t('jobs.error_panel'))}</strong>`
-    + (kind ? ` <span class="badge ${kind === 'config' ? 'badge-warn' : 'badge-err'} job-error-kind">${esc(t(`jobs.error_kind_${kind}`))}</span>` : '')
+    + (kind ? ` <span class="badge ${kind === 'system' ? 'badge-err' : 'badge-warn'} job-error-kind">${esc(t(`jobs.error_kind_${kind}`))}</span>` : '')
     + (step ? ` <span class="job-sub">${esc(t('jobs.error_step'))} <span class="job-mono">${esc(step)}</span></span>` : '') + `</div>`
     + (r.error ? `<div class="job-error-msg">${esc(r.error)}</div>` : '')
     + (kind ? `<div class="ape-hint">${esc(t(`jobs.error_kind_${kind}_hint`))}</div>` : '')
-    + `<div class="job-error-actions"><button type="button" class="btn btn-ghost sm" data-jr-act="show-errors">${esc(t('jobs.err_show_errors'))}</button>`
-    + `<button type="button" class="btn btn-ghost sm" data-jr-act="first-error">${esc(t('jobs.err_first'))}</button></div></section>`;
+    // Both buttons stay hidden until the log holds an error line (_paintLog reveals them): a failure with no error line has nothing to jump to.
+    + `<div class="job-error-actions"><button type="button" class="btn btn-ghost sm" data-jr-act="show-errors" id="jr-panel-show-errors" hidden>${esc(t('jobs.err_show_errors'))}</button>`
+    + `<button type="button" class="btn btn-ghost sm" data-jr-act="first-error" id="jr-panel-first-error" hidden>${esc(t('jobs.err_first'))}</button></div></section>`;
 }
 
 function _elapsedFact(r: JobRun): string {
@@ -174,7 +175,8 @@ function _rowHeight(l: LogLine, s: DetailState): number {
   }
   if (s.open.has(l.seq)) {
     const d = lineDataText(l.data);
-    if (d) h += Math.min(DATA_MAX_H, (d.split('\n').length) * DATA_LINE_H) + 8;
+    // <pre> = lines x 16 px + 8 px padding (capped at 160 incl. padding), plus its 8 px bottom margin and the grid's 8 px row gap.
+    if (d) h += Math.min(DATA_MAX_H, d.split('\n').length * DATA_LINE_H + 8) + 16;
   }
   return h;
 }
@@ -199,7 +201,7 @@ function _paintLog(): void {
   const empty = _q('#jr-empty');
   if (empty) empty.hidden = shown.length > 0;
   const hasErr = firstErrorIndex(s.lines) >= 0;
-  for (const id of ['#jr-first-error', '#jr-copy-errors', '#jr-download-errors']) { const b = _q(id); if (b) b.hidden = !hasErr; }
+  for (const id of ['#jr-first-error', '#jr-copy-errors', '#jr-download-errors', '#jr-panel-show-errors', '#jr-panel-first-error']) { const b = _q(id); if (b) b.hidden = !hasErr; }
   if (s.follow && shown.length) scroll.scrollTop = scroll.scrollHeight;
 }
 
@@ -275,7 +277,7 @@ function _paintHead(): void {
 export function proposalRowHtml(r: ProposalRow): string {
   const fin = (iso: string | null): string => (iso ? esc(Util.fmtDTShortPref(iso)) : '—');
   const delta = deltaText(r.deltaHours);
-  return `<div class="job-prop-row${r.changedSince ? ' job-prop-stale' : ''}"><span class="job-mono">${esc(r.id)}</span><span class="job-mono">${esc(r.machine ?? '—')}</span>`
+  return `<div class="job-prop-row${r.changedSince ? ' job-prop-stale' : ''}"><span class="job-mono" title="${esc(r.id)}">${esc(r.id)}</span><span class="job-mono">${esc(r.machine ?? '—')}</span>`
     + `<span class="job-mono">${fin(r.finishBefore)}</span><span class="job-mono">${fin(r.finishAfter)}</span>`
     + `<span class="job-mono">${esc(delta || '—')}</span><span>${esc(r.status ?? '—')}${r.changedSince ? ` <span class="job-sub">${esc(t('jobs.prop_changed'))}</span>` : ''}</span></div>`;
 }
@@ -283,7 +285,7 @@ export function proposalRowHtml(r: ProposalRow): string {
 function _proposalShellHtml(): string {
   return `<section class="job-proposal" id="jr-proposal" aria-label="${esc(t('jobs.prop_title'))}">`
     + `<div class="job-banner" role="status">${esc(t('jobs.dry_run_banner'))}</div>`
-    + `<div id="jr-prop-body" aria-busy="true"><div class="job-skel" aria-hidden="true"></div><div class="job-skel" aria-hidden="true"></div></div></section>`;
+    + `<div id="jr-prop-body" aria-busy="true"><div class="job-skel job-skel-row" aria-hidden="true"></div><div class="job-skel job-skel-row" aria-hidden="true"></div></div></section>`;
 }
 
 async function _loadProposal(s: DetailState): Promise<void> {
@@ -299,14 +301,17 @@ async function _loadProposal(s: DetailState): Promise<void> {
     const p: Proposal = await JobsClient.proposal(r.id);
     if (_d !== s || my !== s.proposal.seq) return;
     host.setAttribute('aria-busy', 'false');
+    if (p.pending) { host.innerHTML = `<div class="ape-hint">${esc(t('jobs.prop_pending'))}</div>`; return; }
     if (p.truncated) { host.innerHTML = `<div class="ape-hint">${esc(t('jobs.prop_truncated', { n: p.total }))}</div>`; return; }
     if (!p.rows.length) { host.innerHTML = `<div class="ape-hint">${esc(t('jobs.prop_empty'))}</div>`; return; }
     const head = [t('jobs.prop_order'), t('jobs.prop_machine'), t('jobs.prop_before'), t('jobs.prop_after'), t('jobs.prop_delta'), t('jobs.col_status')];
     host.innerHTML = `<div class="job-prop-note">${esc(t('jobs.prop_count', { shown: p.shown, total: p.total }))}`
       + (p.findings ? ` · ${esc(t('jobs.prop_findings', { n: p.findings }))}` : '') + `</div>`
       + (p.boardMatches === false ? `<div class="job-prop-warn" role="note">${esc(t('jobs.prop_board_changed'))}</div>` : '')
-      + `<div class="job-prop-row job-prop-head" role="presentation">${head.map(h => `<span>${esc(h)}</span>`).join('')}</div>`
-      + `<div class="job-prop-list" id="jr-prop-list" tabindex="0" role="table" aria-label="${esc(t('jobs.prop_title'))}"></div>`;
+      + (p.boardMatches === true ? `<div class="ape-hint" role="note">${esc(t('jobs.prop_board_same'))}</div>` : '')
+      + `<div class="ape-hint" role="note">${esc(t('jobs.prop_may_skip'))}</div>`
+      + `<div class="job-prop-row job-prop-head" role="presentation">${head.map(h => `<span title="${esc(h)}">${esc(h)}</span>`).join('')}</div>`
+      + `<div class="job-prop-list" id="jr-prop-list" tabindex="0" role="region" aria-label="${esc(t('jobs.prop_title'))}"></div>`;
     const list = _q('#jr-prop-list');
     if (!list) return;
     s.proposal.vl = new VirtualList<ProposalRow>(list, { rowH: PROPOSAL_ROW_H, renderFn: (row) => proposalRowHtml(row), buffer: 10 });
@@ -383,7 +388,12 @@ export const JobsRunDetail = {
       }
       else if (act === 'retry-proposal') void _loadProposal(s);
       else if (act === 'restart') {
-        void JobsClient.restartRun(s.run.id).then(nr => { Toast.show(t('jobs.toast_run_started', { name: nr.job_name }), 'success'); s.onRestart?.(nr); })
+        // Restart = run the job now with its CURRENT settings, so the confirm names its current mode (not the old run's).
+        void JobsClient.jobParams(s.run.job_id).then(p => Modal.confirm({
+          title: t('jobs.confirm_restart', { name: s.run.job_name }),
+          message: t('jobs.confirm_restart_msg', { mode: t(String(p.apply_mode) === 'propose' ? 'jobs.result_propose' : 'jobs.result_apply') }),
+          confirmLabel: t('jobs.restart'),
+        })).then(ok => ok ? JobsClient.restartRun(s.run.id).then(nr => { Toast.show(t('jobs.toast_run_started', { name: nr.job_name }), 'success'); s.onRestart?.(nr); }) : undefined)
           .catch((err: Error) => Toast.show(t('jobs.toast_action_failed', { msg: err.message }), 'error'));
       }
       else if (act === 'cancel') {

@@ -98,6 +98,14 @@ CREATE TABLE IF NOT EXISTS job_run_log (
 );
 """
 
+# Read-path indexes for GET /jobs/summary (the run_health counts), run by the startup hook and mirrored in
+# schema.sql. They stay out of JOB_DDL and the migration file, which tests pin verbatim.
+JOB_INDEX_DDL = """
+CREATE INDEX IF NOT EXISTS idx_job_run_ended  ON job_run (ended_at) WHERE ended_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_job_run_active ON job_run (status) WHERE status IN ('scheduled','running');
+"""
+
+MISSED_PREFIX = "missed:"          # record_skipped's reason for a fire that missed its grace time
 TERMINAL = ("succeeded", "warning", "failed", "cancelled", "skipped")
 SWEEP_LOCK_KEY = "nimbus:job-run-sweep"
 _DEF_COLS = ("id, plant, job_type, name, params, enabled, archived, retry_max, timeout_s, "
@@ -122,6 +130,7 @@ def ensure_job_tables() -> None:
     """Idempotent bootstrap (mirrors migrations/2026-10-29-1-job-scheduler.sql and schema.sql)."""
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(JOB_DDL)
+        cur.execute(JOB_INDEX_DDL)
         conn.commit()
 
 
@@ -296,13 +305,13 @@ def list_jobs(*, allowed_plants, plant, job_type, status, q, include_archived, l
        AND (%(plant)s::text IS NULL OR d.plant = %(plant)s)
        AND (%(jt)s::text IS NULL OR d.job_type = %(jt)s)
        AND (%(status)s::text IS NULL OR lr.status = %(status)s
-            OR (%(status)s = 'missed' AND lr.status = 'skipped' AND lr.error LIKE 'missed:%%'))
+            OR (%(status)s = 'missed' AND lr.status = 'skipped' AND lr.error LIKE %(missed)s))
        AND (%(q)s::text IS NULL OR d.name ILIKE %(q)s)
        AND (%(arch)s OR NOT d.archived)
        AND (%(before)s::bigint IS NULL OR d.id < %(before)s)
      ORDER BY d.id DESC LIMIT %(lim)s"""
     params = {"allowed": allowed_plants, "plant": plant, "jt": job_type, "status": status,
-              "q": f"%{q}%" if q else None, "arch": include_archived, "before": before_id, "lim": limit + 1}
+              "missed": MISSED_PREFIX + "%", "q": f"%{q}%" if q else None, "arch": include_archived, "before": before_id, "lim": limit + 1}
     with db._pool.connection() as conn, _cur(conn) as cur:
         cur.execute(sql, params)
         ids = [r["id"] for r in cur.fetchall()]
@@ -336,6 +345,21 @@ def list_active_schedules() -> list[dict]:
         return cur.fetchall()
 
 
+def next_fire_schedules(*, allowed_plants, plant) -> list[dict]:
+    """Armed schedules of enabled, non-archived jobs in the visible plants, with the job's name and plant: all the
+    next-fire summary needs (no runs, no params). Scoped by plant in SQL, not by a page of the newest jobs."""
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute(
+            "SELECT s.id, s.job_id, s.kind, s.cron_expr, s.time_of_day, s.days_of_week, s.day_of_month, s.run_at,"
+            " s.timezone, s.valid_from, s.valid_until, s.misfire_grace_s, d.name AS job_name, d.plant"
+            "  FROM job_schedule s JOIN job_definition d ON d.id = s.job_id"
+            " WHERE NOT s.retired AND NOT s.paused AND d.enabled AND NOT d.archived"
+            "   AND (%(allowed)s::text[] IS NULL OR d.plant = ANY(%(allowed)s))"
+            "   AND (%(plant)s::text IS NULL OR d.plant = %(plant)s) ORDER BY s.id",
+            {"allowed": allowed_plants, "plant": plant})
+        return cur.fetchall()
+
+
 def schedule_has_run(schedule_id: int) -> bool:
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM job_run WHERE schedule_id = %s LIMIT 1", (schedule_id,))
@@ -355,13 +379,47 @@ def insert_run(*, job_id: int, schedule_id: int | None, plant: str, job_type: st
             (job_id, schedule_id, plant, job_type, status, trigger, attempt, scheduled_for, triggered_by, error, ended))
         rid = cur.fetchone()[0]
         conn.commit()
+    clear_health_cache()
     return rid
 
 
-def mark_running(run_id: int) -> None:
+def insert_manual_run_if_idle(*, job: dict, triggered_by: str | None, scheduled_for: datetime) -> int | None:
+    """A `scheduled` manual run, unless the job already has a scheduled|running one. The check and the insert share
+    one transaction under a per-job advisory xact lock, so two clicks cannot both pass. None = already active."""
     with db._pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE job_run SET status = 'running', started_at = clock_timestamp() WHERE id = %s", (run_id,))
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"jobs:manual:{job['id']}",))
+        cur.execute(
+            "INSERT INTO job_run (job_id, plant, job_type, status, trigger, scheduled_for, triggered_by)"
+            " SELECT %s, %s, %s, 'scheduled', 'manual', %s, %s"
+            "  WHERE NOT EXISTS (SELECT 1 FROM job_run WHERE job_id = %s AND status IN ('scheduled','running'))"
+            " RETURNING id",
+            (job["id"], job["plant"], job["job_type"], scheduled_for, triggered_by, job["id"]))
+        row = cur.fetchone()
         conn.commit()
+    clear_health_cache()
+    return row[0] if row else None
+
+
+def mark_running(run_id: int, *, waiting_for: str | None = None) -> None:
+    """`waiting_for='slot'` marks a run blocked on a shared resource: it still counts as Queued in the summary and
+    its clock restarts in `mark_work_started`."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE job_run SET status = 'running', started_at = clock_timestamp(),"
+                    " summary = CASE WHEN %s::text IS NULL THEN summary"
+                    "   ELSE COALESCE(summary, '{}'::jsonb) || jsonb_build_object('waiting_for', %s::text) END"
+                    " WHERE id = %s", (waiting_for, waiting_for, run_id))
+        conn.commit()
+    clear_health_cache()
+
+
+def mark_work_started(run_id: int) -> None:
+    """The body now holds its resource: elapsed time and duration measure from here, not from mark_running."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE job_run SET started_at = clock_timestamp(),"
+                    " summary = NULLIF(COALESCE(summary, '{}'::jsonb) - 'waiting_for', '{}'::jsonb)"
+                    " WHERE id = %s AND status = 'running'", (run_id,))
+        conn.commit()
+    clear_health_cache()
 
 
 def finish_run(run_id: int, status: str, summary: dict | None, error: str | None, log_truncated: bool) -> None:
@@ -371,6 +429,7 @@ def finish_run(run_id: int, status: str, summary: dict | None, error: str | None
             " ended_at = clock_timestamp() WHERE id = %s AND status IN ('scheduled','running')",
             (status, Jsonb(summary) if summary is not None else None, error, log_truncated, run_id))
         conn.commit()
+    clear_health_cache()
 
 
 def mark_cancel_requested(run_id: int) -> dict | None:
@@ -388,12 +447,11 @@ def get_run(run_id: int) -> dict | None:
         return cur.fetchone()
 
 
-MISSED_PREFIX = "missed:"          # record_skipped's reason for a fire that missed its grace time
 PERIODICITIES = ("once", "hourly", "daily", "weekdays", "weekly", "monthly", "cron", "manual")
 
 
 def list_runs(*, allowed_plants, plant, job_id, status, limit, before_id, periodicity=None, scheduled_by=None,
-              since=None) -> dict:
+              since=None, job_type=None) -> dict:
     """`status='missed'` is a synthetic filter: skipped runs recorded for a misfire. `periodicity` is the schedule
     kind (or `manual` for runs with no schedule); `scheduled_by` is `triggered_by` ('schedule' or an admin email)."""
     with db._pool.connection() as conn, _cur(conn) as cur:
@@ -403,15 +461,16 @@ def list_runs(*, allowed_plants, plant, job_id, status, limit, before_id, period
             " WHERE (%(allowed)s::text[] IS NULL OR r.plant = ANY(%(allowed)s))"
             "   AND (%(plant)s::text IS NULL OR r.plant = %(plant)s)"
             "   AND (%(job)s::bigint IS NULL OR r.job_id = %(job)s)"
+            "   AND (%(jt)s::text IS NULL OR r.job_type = %(jt)s)"
             "   AND (%(status)s::text IS NULL OR r.status = %(status)s"
-            "        OR (%(status)s = 'missed' AND r.status = 'skipped' AND r.error LIKE 'missed:%%'))"
+            "        OR (%(status)s = 'missed' AND r.status = 'skipped' AND r.error LIKE %(missed)s))"
             "   AND (%(period)s::text IS NULL OR COALESCE(s.kind, 'manual') = %(period)s)"
             "   AND (%(by)s::text IS NULL OR r.triggered_by = %(by)s)"
             "   AND (%(since)s::timestamptz IS NULL OR COALESCE(r.ended_at, r.created_at) >= %(since)s)"
             "   AND (%(before)s::bigint IS NULL OR r.id < %(before)s)"
             " ORDER BY r.id DESC LIMIT %(lim)s",
-            {"allowed": allowed_plants, "plant": plant, "job": job_id, "status": status, "period": periodicity,
-             "by": scheduled_by, "since": since, "before": before_id, "lim": limit + 1})
+            {"allowed": allowed_plants, "plant": plant, "job": job_id, "jt": job_type, "status": status,
+             "missed": MISSED_PREFIX + "%", "period": periodicity, "by": scheduled_by, "since": since, "before": before_id, "lim": limit + 1})
         rows = cur.fetchall()
     page = rows[:limit]
     return {"runs": page, "next_before_id": page[-1]["id"] if len(rows) > limit and page else None}
@@ -433,26 +492,53 @@ def longer_than_usual(elapsed_s: float, history_s: list[float]) -> bool:
     return elapsed_s > max(LONGER_FACTOR * median, LONGER_FLOOR_S)
 
 
+HEALTH_CACHE_TTL_S = 5.0
+_HEALTH_CACHE: dict[tuple, tuple[float, dict]] = {}
+
+
+def clear_health_cache() -> None:
+    """Every in-process run write drops the summary cache, so only a write by another process can be 5 s stale."""
+    _HEALTH_CACHE.clear()
+
+
 def run_health(*, allowed_plants, plant, hours: int = 24) -> dict:
-    """Counts behind GET /jobs/summary: live runs, 24 h outcomes and the ids of runs running longer than usual."""
+    """Counts behind GET /jobs/summary: live runs, 24 h outcomes and the ids of runs running longer than usual.
+    A run blocked on a shared slot (`summary.waiting_for`) counts as queued, not running. Cached for a few seconds
+    per plant scope (the strip is polled by every open admin tab)."""
+    key = (tuple(allowed_plants) if allowed_plants is not None else None, plant, hours)
+    hit = _HEALTH_CACHE.get(key)
+    if hit and time.monotonic() - hit[0] < HEALTH_CACHE_TTL_S:
+        return dict(hit[1])
+    out = _run_health(allowed_plants=allowed_plants, plant=plant, hours=hours)
+    _HEALTH_CACHE[key] = (time.monotonic(), out)
+    return dict(out)
+
+
+def _run_health(*, allowed_plants, plant, hours: int) -> dict:
     with db._pool.connection() as conn, _cur(conn) as cur:
+        waiting = "COALESCE(r.summary->>'waiting_for', '') <> ''"
+        failed = "r.status = 'failed' AND r.ended_at >= now() - make_interval(hours => %(h)s)"
         cur.execute(
             "SELECT"
-            " COUNT(*) FILTER (WHERE r.status = 'running') AS running,"
-            " COUNT(*) FILTER (WHERE r.status = 'scheduled') AS queued,"
-            " COUNT(*) FILTER (WHERE r.status = 'failed' AND r.ended_at >= now() - make_interval(hours => %(h)s)) AS failed,"
+            f" COUNT(*) FILTER (WHERE r.status = 'running' AND NOT ({waiting})) AS running,"
+            f" COUNT(*) FILTER (WHERE r.status = 'scheduled' OR (r.status = 'running' AND {waiting})) AS queued,"
+            f" COUNT(*) FILTER (WHERE {failed}) AS failed,"
+            f" COUNT(*) FILTER (WHERE {failed} AND r.summary->>'error_kind' = 'config') AS failed_config,"
+            f" COUNT(*) FILTER (WHERE {failed} AND r.summary->>'error_kind' = 'transient') AS failed_transient,"
+            f" COUNT(*) FILTER (WHERE {failed} AND COALESCE(r.summary->>'error_kind', 'system')"
+            "                  NOT IN ('config', 'transient')) AS failed_system,"
             " COUNT(*) FILTER (WHERE r.status = 'warning' AND r.ended_at >= now() - make_interval(hours => %(h)s)) AS warn,"
-            " COUNT(*) FILTER (WHERE r.status = 'skipped' AND r.error LIKE 'missed:%%'"
+            " COUNT(*) FILTER (WHERE r.status = 'skipped' AND r.error LIKE %(missed)s"
             "                  AND r.ended_at >= now() - make_interval(hours => %(h)s)) AS missed"
             " FROM job_run r"
             " WHERE (%(allowed)s::text[] IS NULL OR r.plant = ANY(%(allowed)s))"
             "   AND (%(plant)s::text IS NULL OR r.plant = %(plant)s)"
             "   AND (r.status IN ('scheduled','running') OR r.ended_at >= now() - make_interval(hours => %(h)s))",
-            {"allowed": allowed_plants, "plant": plant, "h": hours})
+            {"allowed": allowed_plants, "plant": plant, "h": hours, "missed": MISSED_PREFIX + "%"})
         c = cur.fetchone()
         cur.execute(
             "SELECT r.id, r.job_id, EXTRACT(EPOCH FROM (clock_timestamp() - r.started_at)) AS elapsed"
-            " FROM job_run r WHERE r.status = 'running' AND r.started_at IS NOT NULL"
+            f" FROM job_run r WHERE r.status = 'running' AND r.started_at IS NOT NULL AND NOT ({waiting})"
             "   AND (%(allowed)s::text[] IS NULL OR r.plant = ANY(%(allowed)s))"
             "   AND (%(plant)s::text IS NULL OR r.plant = %(plant)s)",
             {"allowed": allowed_plants, "plant": plant})
@@ -466,7 +552,9 @@ def run_health(*, allowed_plants, plant, hours: int = 24) -> dict:
             hist = [float(x["s"]) for x in cur.fetchall()]
             if longer_than_usual(float(r["elapsed"] or 0), hist):
                 longer.append(r["id"])
-    return {"running": c["running"], "queued": c["queued"], "failed_24h": c["failed"], "missed_24h": c["missed"],
+    return {"running": c["running"], "queued": c["queued"], "failed_24h": c["failed"], "failed_config_24h": c["failed_config"],
+            "failed_system_24h": c["failed_system"], "failed_transient_24h": c["failed_transient"],
+            "missed_24h": c["missed"],
             "warning_24h": c["warn"], "longer_than_usual": sorted(longer)}
 
 

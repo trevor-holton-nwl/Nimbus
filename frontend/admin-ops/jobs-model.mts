@@ -63,11 +63,11 @@ export function runStatusHtml(run: { status: string; error?: string | null }, d:
   return statusBadgeHtml(shown, d) + reason;
 }
 
-export type ErrorKind = 'config' | 'system';
-/** `error_kind` from a failed run's summary; anything else is unknown (no badge). */
+export type ErrorKind = 'config' | 'system' | 'transient';
+/** `error_kind` from a failed run's summary; anything else is unknown (no badge). `transient` = the board changed. */
 export function errorKindOf(summary: { error_kind?: string | null } | null | undefined): ErrorKind | null {
   const k = summary?.error_kind;
-  return k === 'config' || k === 'system' ? k : null;
+  return k === 'config' || k === 'system' || k === 'transient' ? k : null;
 }
 
 export function isActiveRun(status: string | null | undefined): boolean {
@@ -233,10 +233,12 @@ export interface RunsQuery {
   plant?: string; status?: string; beforeId?: number | string | null; limit?: number; jobId?: number | string;
   /** Schedule kind (or `manual`), `triggered_by` ('schedule' or an admin email) and a look-back window in hours. */
   periodicity?: string; scheduledBy?: string; sinceHours?: number;
+  /** Job type key (`optimizer.plant`). */
+  jobType?: string;
 }
 export function buildRunsQuery(o: RunsQuery): string {
   const limit = Math.max(1, Math.min(200, Math.floor(o.limit ?? RUNS_PAGE)));
-  return _qs([['plant', o.plant], ['status', o.status], ['job_id', o.jobId], ['periodicity', o.periodicity],
+  return _qs([['plant', o.plant], ['status', o.status], ['job_id', o.jobId], ['job_type', o.jobType], ['periodicity', o.periodicity],
     ['scheduled_by', (o.scheduledBy ?? '').trim()], ['since_hours', o.sinceHours], ['before_id', o.beforeId], ['limit', limit]]);
 }
 
@@ -388,6 +390,8 @@ export function elapsedMs(startedAt: string | null | undefined, endedAt: string 
    ------------------------------------------------------------------------- */
 export interface HealthSummary {
   running: number; queued: number; failed24h: number; missed24h: number; warning24h: number;
+  /** The failed count split by `error_kind`: fix the job / platform error / the board changed under the run. */
+  failedConfig24h: number; failedSystem24h: number; failedTransient24h: number;
   nextFire: { atUtc: string; atLocal: string; jobId: number; jobName: string; plant: string } | null;
   scheduler: { ok: boolean; lastTickAt: string | null };
   longerThanUsual: number[];
@@ -443,7 +447,7 @@ export async function runSequential<T>(items: T[], fn: (item: T) => Promise<unkn
    Dry-run proposal (GET /jobs/runs/{id}/proposal)
    ------------------------------------------------------------------------- */
 export interface ProposalRow { id: string; machine: string | null; finishBefore: string | null; finishAfter: string | null; deltaHours: number | null; status: string | null; changedSince: boolean }
-export interface Proposal { runId: number; total: number; shown: number; rows: ProposalRow[]; findings: number; boardMatches: boolean | null; truncated: boolean }
+export interface Proposal { runId: number; total: number; shown: number; rows: ProposalRow[]; findings: number; boardMatches: boolean | null; truncated: boolean; pending: boolean }
 
 /** +4.0 h / -1.5 h / 0 h; '' when unknown. */
 export function deltaText(h: number | null | undefined): string {

@@ -218,12 +218,7 @@ def jobs_summary(
         _check_plant(plant, allowed_plants)
     response.headers["Cache-Control"] = "no-store"
     health = data.run_health(allowed_plants=allowed_plants, plant=plant)
-    page = data.list_jobs(allowed_plants=allowed_plants, plant=plant, job_type=None, status=None, q=None,
-                          include_archived=False, limit=200, before_id=None)
-    entries = []
-    for j in page["jobs"]:
-        entries += _job_upcoming(j, 1)
-    entries.sort(key=lambda e: e["at_utc"])
+    entries = _upcoming_entries(allowed_plants, plant, 1)
     nxt = entries[0] if entries else None
     return {**health,
             "next_fire": ({k: nxt[k] for k in ("at_utc", "at_local", "job_id", "job_name", "plant")} if nxt else None),
@@ -241,13 +236,22 @@ def upcoming_all(
     if plant:
         _check_plant(plant, allowed_plants)
     response.headers["Cache-Control"] = "no-store"
-    page = data.list_jobs(allowed_plants=allowed_plants, plant=plant, job_type=None, status=None, q=None,
-                          include_archived=False, limit=200, before_id=None)
+    return {"entries": _upcoming_entries(allowed_plants, plant, n)[:n]}
+
+
+def _upcoming_entries(allowed_plants, plant, n: int) -> list[dict]:
+    """Next `n` fires per armed schedule over every visible enabled job (one light query, no run history), soonest
+    first. Each schedule contributes at most `n`, so the first `n` overall are always present."""
     entries = []
-    for j in page["jobs"]:
-        entries += _job_upcoming(j, n)
+    for s in data.next_fire_schedules(allowed_plants=allowed_plants, plant=plant):
+        try:
+            fires = triggers.preview(s, n)
+        except Exception:  # noqa: BLE001 - a broken row must not break the strip
+            continue
+        entries += [{**e, "job_id": s["job_id"], "job_name": s["job_name"], "plant": s["plant"],
+                     "schedule_id": s["id"], "timezone": s["timezone"]} for e in fires]
     entries.sort(key=lambda e: e["at_utc"])
-    return {"entries": entries[:n]}
+    return entries
 
 
 def _job_upcoming(job: dict, n: int) -> list[dict]:
@@ -299,7 +303,9 @@ def patch_job(job_id: int, body: JobPatch, actor: str | None = Depends(auth.requ
     fields = body.model_dump(exclude_unset=True)
     if fields.get("params") is not None:
         jt = get_type(job["job_type"]) or _registered(job["job_type"])
-        fields["params"] = _validate_params(jt, fields["params"])
+        # Merge over the stored params: a partial PATCH must not reset an omitted key (an old dry run's
+        # apply_mode) to the model default.
+        fields["params"] = _validate_params(jt, {**(job["params"] or {}), **fields["params"]})
     elif "params" in fields:
         fields.pop("params")
     for k in ("name", "enabled", "archived", "retry_max"):
@@ -367,6 +373,8 @@ def run_now(job_id: int, actor: str | None = Depends(auth.require_admin),
     if data.has_active_run(job_id):
         raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
     run_id = runner.start_manual_run(job, actor)
+    if run_id is None:
+        raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
     return {"run": data.run_to_wire(data.get_run(run_id))}
 
 
@@ -376,6 +384,7 @@ def list_runs(
     response: Response,
     plant: str | None = Query(None),
     job_id: int | None = Query(None, ge=1, le=_BIGINT),
+    job_type: str | None = Query(None, max_length=100),
     status: str | None = Query(None),
     periodicity: str | None = Query(None),
     scheduled_by: str | None = Query(None, max_length=200),
@@ -393,7 +402,8 @@ def list_runs(
     response.headers["Cache-Control"] = "no-store"
     since = datetime.now(timezone.utc) - timedelta(hours=since_hours) if since_hours else None
     page = data.list_runs(allowed_plants=allowed_plants, plant=plant, job_id=job_id, status=status, limit=limit,
-                          before_id=before_id, periodicity=periodicity, scheduled_by=scheduled_by, since=since)
+                          before_id=before_id, periodicity=periodicity, scheduled_by=scheduled_by, since=since,
+                          job_type=job_type)
     return {"runs": [data.run_to_wire(r) for r in page["runs"]], "next_before_id": page["next_before_id"]}
 
 
@@ -428,37 +438,63 @@ def run_proposal(run_id: int, response: Response,
     import db
     run = _run_or_404(run_id, allowed_plants)
     summ = run["summary"] or {}
+    response.headers["Cache-Control"] = "no-store"
+    if run["job_type"] == "optimizer.plant" and run["status"] in ("scheduled", "running") and not summ.get("apply_mode"):
+        # No summary yet: the job's current params say whether this run is a dry run.
+        job = data.get_job(run["job_id"])
+        if job and (job["params"] or {}).get("apply_mode") == "propose":
+            return {"run_id": run_id, "plant": run["plant"], "pending": True, "total": 0, "shown": 0, "rows": [],
+                    "findings": [], "board_matches": None, "truncated": False}
     if run["job_type"] != "optimizer.plant" or summ.get("apply_mode") != "propose":
         raise HTTPException(status_code=400, detail="Only a dry run has a proposal")
-    response.headers["Cache-Control"] = "no-store"
     prop = summ.get("proposal")
     if not isinstance(prop, dict):
         return {"run_id": run_id, "plant": run["plant"], "total": int(summ.get("moved") or 0), "shown": 0, "rows": [],
-                "findings": [], "board_matches": None, "truncated": True}
+                "findings": [], "board_matches": None, "truncated": True, "pending": False}
     patches = [p for p in (prop.get("patches") or []) if isinstance(p, dict) and p.get("id") is not None]
-    live = {t["id"]: t for t in db.get_task_versions([str(p["id"]) for p in patches])}
+    # Biggest stored moves first (`delta_hours` is written at run time), then read live rows for the page only.
+    patches.sort(key=lambda p: -abs(p.get("delta_hours") or 0))
+    page = patches[:PROPOSAL_ROW_CAP]
+    live = {t["id"]: t for t in db.get_task_versions([str(p["id"]) for p in page])}
     rows = []
-    for p in patches:
+    for p in page:
         t = live.get(str(p["id"]))
         before, after = (t or {}).get("end_date"), p.get("end_date")
         rows.append({"id": str(p["id"]), "machine": (t or {}).get("MACHINE"), "finish_before": before,
                      "finish_after": after, "delta_hours": _hours_between(before, after),
                      "status": (t or {}).get("planning_status"),
                      "changed_since": t is None or t.get("row_version") != p.get("base_version")})
-    rows.sort(key=lambda r: -abs(r["delta_hours"] or 0))
-    matches = None
+    rows.sort(key=lambda r: (r["changed_since"], -abs(r["delta_hours"] or 0)))      # changed-since rows last
+    return {"run_id": run_id, "plant": run["plant"], "total": len(patches), "shown": len(rows), "rows": rows,
+            "findings": prop.get("findings") or [], "board_matches": _board_matches(run_id, run["plant"], prop),
+            "truncated": False, "pending": False}
+
+
+_MATCH_TTL_S = 60.0
+_MATCH_CACHE: dict[int, tuple[float, bool | None]] = {}
+
+
+def _board_matches(run_id: int, plant: str, prop: dict) -> bool | None:
+    """Does the board's snapshot token still equal the one the dry run saw? Cached per run for a minute: the token
+    rebuilds four version reads and the proposal is re-polled."""
+    import time
+    if not prop.get("snapshot_version"):
+        return None
+    hit = _MATCH_CACHE.get(run_id)
+    if hit and time.monotonic() - hit[0] < _MATCH_TTL_S:
+        return hit[1]
     try:
         from backend.scheduling import routes as sched
-        if prop.get("snapshot_version"):
-            matches = sched.optimizer_snapshot_version(run["plant"]) == prop["snapshot_version"]
+        matches = sched.optimizer_snapshot_version(plant) == prop["snapshot_version"]
     except Exception:  # noqa: BLE001 - a version read failure is "unknown", not an error page
-        matches = None
-    return {"run_id": run_id, "plant": run["plant"], "total": len(rows), "shown": min(len(rows), PROPOSAL_ROW_CAP),
-            "rows": rows[:PROPOSAL_ROW_CAP], "findings": prop.get("findings") or [], "board_matches": matches,
-            "truncated": False}
+        return None
+    if len(_MATCH_CACHE) > 200:
+        _MATCH_CACHE.clear()
+    _MATCH_CACHE[run_id] = (time.monotonic(), matches)
+    return matches
 
 
-@router.get("/jobs/runs/{run_id}/log",dependencies=[Depends(auth.require_authenticated)])
+@router.get("/jobs/runs/{run_id}/log", dependencies=[Depends(auth.require_authenticated)])
 def run_log(
     run_id: int,
     response: Response,
@@ -489,7 +525,9 @@ def restart_run(run_id: int, actor: str | None = Depends(auth.require_admin),
         raise HTTPException(status_code=409, detail="Job is archived")
     if data.has_active_run(job["id"]):
         raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
-    new_id = runner.start_manual_run(job, actor)
+    new_id = runner.start_manual_run(job, actor)           # atomic check + insert: None = a run became active
+    if new_id is None:
+        raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
     return {"run": data.run_to_wire(data.get_run(new_id))}
 
 

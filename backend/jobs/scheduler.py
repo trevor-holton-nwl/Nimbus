@@ -125,7 +125,7 @@ def _on_missed(event) -> None:
     except ValueError:
         return
     at = getattr(event, "scheduled_run_time", None)
-    threading.Thread(target=runner.record_skipped, args=(sid, at, "missed: fired after its grace time"),
+    threading.Thread(target=runner.record_skipped, args=(sid, at, data.MISSED_PREFIX + " fired after its grace time"),
                      name=f"job-missed-{sid}", daemon=True).start()
 
 

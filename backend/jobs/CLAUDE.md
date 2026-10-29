@@ -50,10 +50,10 @@ Writes: `require_api_key` + `require_admin` + plant scope (`get_allowed_plants_f
 | `GET /jobs/upcoming?plant&n` (extra, not in the plan) | | `{entries:[same]}` soonest first across visible jobs |
 | `POST /jobs/{id}/run` | | `{run: Run}` (status `scheduled`, runs on a background thread) |
 | `POST /jobs/runs/{id}/cancel` | | `{run: Run}`; 409 when already finished |
-| `GET /jobs/runs?plant&job_id&status&periodicity&scheduled_by&since_hours(1-168)&limit&before_id` | `status` also accepts the synthetic `missed` (skipped runs recorded for a misfire); `periodicity` = schedule kind or `manual`; `scheduled_by` = `triggered_by` | `{runs:[Run], next_before_id}` |
+| `GET /jobs/runs?plant&job_id&job_type&status&periodicity&scheduled_by&since_hours(1-168)&limit&before_id` | `status` also accepts the synthetic `missed` (skipped runs recorded for a misfire); `periodicity` = schedule kind or `manual`; `scheduled_by` = `triggered_by` | `{runs:[Run], next_before_id}` |
 | `GET /jobs/runs/{id}` (extra) | | `{run: Run}` |
-| `GET /jobs/summary?plant` (W1) | | `{running, queued, failed_24h, missed_24h, warning_24h, next_fire:{at_utc,at_local,job_id,job_name,plant}\|null, scheduler:{ok,last_tick_at}, longer_than_usual:[run ids]}` |
-| `GET /jobs/runs/{id}/proposal` (W1) | dry-run runs only (400 otherwise) | `{run_id, plant, total, shown, rows:[{id,machine,finish_before,finish_after,delta_hours,status,changed_since}], findings, board_matches\|null, truncated}` |
+| `GET /jobs/summary?plant` (W1) | | `{running, queued, failed_24h, failed_config_24h, failed_system_24h, failed_transient_24h, missed_24h, warning_24h, next_fire:{at_utc,at_local,job_id,job_name,plant}\|null, scheduler:{ok,last_tick_at}, longer_than_usual:[run ids]}` |
+| `GET /jobs/runs/{id}/proposal` (W1) | dry-run runs only (400 otherwise) | `{run_id, plant, total, shown, rows:[{id,machine,finish_before,finish_after,delta_hours,status,changed_since}], findings, board_matches\|null, truncated, pending}` (`pending: true` while the dry run is scheduled/running) |
 | `POST /jobs/runs/{id}/restart` (W1) | admin | `{run: Run}` (a new manual run of the same job); 409 archived or a run is active |
 | `GET /jobs/runs/{id}/log?after_seq&level(min: debug\|info\|warn\|error)&limit(1-2000)` | | `{run_id, status, log_truncated, done, lines:[{seq,at,level,step,msg,duration_ms,data}], last_seq}` |
 
@@ -80,7 +80,22 @@ Poll the log with `after_seq=last_seq` until `done`.
 - The snapshot token is read before the wire is built and again after (one retry); the token read before the final build is kept.
 - Tests: `tests/test_jobs_runner_unit.py` (no DB), `tests/test_jobs_optimizer_runner.py`, `tests/test_jobs_contract.py`; JS `tests/modules/optimization/headless-guards.test.mjs` (live clock, tz_mismatch, a child process in America/Chicago across the 2035-11-04 fall-back, input drift, families, helper drift check).
 
+## W1 fix wave (2026-10-29, branch `w1-fixes`)
+
+- **Summary**: `GET /jobs/summary` no longer loads run summaries or the newest 200 jobs. `data.run_health` is one aggregate query (cached 5 s per plant scope, cleared by every in-process run write; partial indexes `idx_job_run_ended` / `idx_job_run_active` from `JOB_INDEX_DDL`, run by `ensure_job_tables` and mirrored at the end of `schema.sql`, kept OUT of `JOB_DDL` and the migration file which tests pin verbatim) and `data.next_fire_schedules` (armed schedules in the visible plants, minimum next fire over all of them). `GET /jobs/upcoming` uses the same query. New fields: `failed_config_24h`, `failed_system_24h`, `failed_transient_24h`.
+- **Slot wait**: an optimizer run (`defer_clock`) is marked `summary.waiting_for = 'slot'` by `mark_running`; it counts as **Queued** (not Running) in the summary and is left out of `longer_than_usual`. `ctx.begin_work()` (slot held) fires `data.mark_work_started`, which clears the marker and resets `started_at`, so elapsed, `duration_ms` and the duration medians measure from work start.
+- **Failure kinds**: `error_kind` is `config | system | transient`. `transient` ("Board changed, run again") = snapshot or inputs changed since the run / while applying, a calendar or tool-inventory refusal, a refused write. Every failure also logs an error line (`optimizer_runner._fail` logs at error level with `step=`; `runner` writes one for a pre-validation failure and, as a fallback, whenever a failed run logged none), so Errors-only, First error and Copy errors always have a line.
+- **PATCH /jobs/{id}** merges incoming `params` over the stored params before validating (a partial body keeps `apply_mode: propose`).
+- **Proposal**: stored patches carry `delta_hours` (proposed minus the run snapshot's finish); the route sorts by it, reads live rows only for the first 200, puts changed-since rows last and caches `board_matches` 60 s per run. A scheduled/running dry run answers `200 {pending: true, rows: [], total: 0}`; every proposal body now has `pending`. 400 stays for runs that are not dry runs.
+- **Restart / run now**: `start_manual_run` inserts under a per-job advisory xact lock with `INSERT ... WHERE NOT EXISTS` and returns `None` (route: 409) when a run is active. The UI confirm names the job's CURRENT mode: a restart runs the job with its current params, not the old run's.
+- `GET /jobs/runs` also filters by `job_type`. The `missed:` SQL is built from `data.MISSED_PREFIX`.
+
 ## Known limitations (accepted for the pilot)
+
+- **Periodicity filter** uses the schedule's CURRENT kind (a schedule edited from daily to weekly moves its old runs to Weekly).
+- **Missed** counts recorded misfires only; fires lost to downtime need W3's persisted `last_fire_at` / catch-up.
+- **Heartbeat** reflects the reconcile tick, not each job's own firing.
+- **Pre/post KPIs** (late count before and after) are deferred.
 
 - **Boot sweep ownership during a rolling revision**: `boot_sweep` marks every `scheduled|running` row `failed: interrupted by restart`. While the old and new revision overlap, the new one can fail the old one's live runs (the old body keeps running and its `finish_run` is then a no-op). Safe only because the pilot is single-replica; a lease/heartbeat column is the fix.
 - **Hourly preset on the fall-back day**: the DST-aware trigger fires an `hourly` job once per wall-clock hour, so the repeated 01:xx hour fires once and that day has one slot fewer than 24. Daily and weekly presets are unaffected.

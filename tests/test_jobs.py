@@ -618,3 +618,111 @@ def test_admin_write_operations_registered():
         assert path in brain._ADMIN_WRITE_OPERATIONS
     assert {"job_id", "schedule_id", "run_id"} <= brain._ADMIN_TARGET_PARAMS
 
+
+# ------------------------------------------------------------------------------------------------ W1 fix wave
+def test_optimizer_fail_logs_an_error_line_with_its_step():
+    from backend.jobs.types import optimizer_runner as orr
+    c, rows, _ = _ctx()
+    out = orr._fail(orr._Steps(c), "board changed", kind="transient", step="write")
+    assert out["error_kind"] == "transient" and out["failed_step"] == "write"
+    assert [(r["level"], r["step"], r["msg"]) for r in rows] == [("error", "write", "board changed")]
+    assert c.error_lines == 1
+    orr._fail(orr._Steps(c), "again", log=False)
+    assert c.error_lines == 1, "log=False leaves logging to the caller"
+
+
+def test_describe_failure_normalises_unknown_error_kinds():
+    from backend.jobs import runner
+    c, _, _ = _ctx()
+    assert runner._describe_failure("failed", {"error_kind": "transient"}, c)["error_kind"] == "transient"
+    assert runner._describe_failure("failed", {"error_kind": "bogus"}, c)["error_kind"] == "system"
+
+
+def test_begin_work_fires_the_hook_once():
+    c, _, _ = _ctx()
+    calls = []
+    c.on_work_start = lambda: calls.append(1)
+    c.begin_work()
+    c.begin_work()
+    assert calls == [1]
+
+
+@pytest.mark.pg
+def test_partial_params_patch_keeps_the_stored_dry_run(api, jobs_pg):
+    j = _mk_job(api, jobs_pg.plant, job_type="optimizer.plant", params={"apply_mode": "propose", "mode": "spt"})
+    p = api.patch(f"/jobs/{j['id']}", json={"params": {"search": "normal"}}).json()
+    assert p["params"]["apply_mode"] == "propose" and p["params"]["mode"] == "spt" and p["params"]["search"] == "normal"
+
+
+@pytest.mark.pg
+def test_summary_failure_split_next_fire_and_scope(api, jobs_pg):
+    import backend.jobs.data as data
+    j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "daily", "time_of_day": "08:00"}])
+    _mk_job(api, jobs_pg.other, schedules=[{"kind": "daily", "time_of_day": "08:00"}])
+    mk = lambda kind: data.finish_run(  # noqa: E731
+        data.insert_run(job_id=j["id"], schedule_id=None, plant=jobs_pg.plant, job_type="noop", trigger="manual",
+                        status="running"),
+        "failed", {"error_kind": kind} if kind else None, "x", False)
+    for kind in ("config", "system", "transient", "transient", None):
+        mk(kind)
+    s = api.get("/jobs/summary", params={"plant": jobs_pg.plant}).json()
+    assert (s["failed_24h"], s["failed_config_24h"], s["failed_system_24h"], s["failed_transient_24h"]) == (5, 1, 2, 2)
+    assert s["next_fire"]["plant"] == jobs_pg.plant, "the next fire only looks at the scoped plant"
+    assert api.get("/jobs/upcoming", params={"plant": jobs_pg.other}).json()["entries"][0]["plant"] == jobs_pg.other
+
+
+@pytest.mark.pg
+def test_run_blocked_on_the_optimizer_slot_counts_as_queued(api, jobs_pg, monkeypatch):
+    import threading
+    from backend.jobs.types import optimizer, optimizer_runner as orr
+    gate, entered = threading.Event(), threading.Event()
+
+    def fake_run(ctx, plant, params, steps):
+        entered.set()
+        gate.wait(15)
+        return {"applied": 0}
+
+    monkeypatch.setattr(orr, "_run", fake_run)
+    monkeypatch.setattr(orr, "_SLOTS", threading.BoundedSemaphore(1))
+    optimizer.set_runner(orr.run_optimizer)
+    try:
+        a = _mk_job(api, jobs_pg.plant, job_type="optimizer.plant", params={})
+        b = _mk_job(api, jobs_pg.other, job_type="optimizer.plant", params={})
+        ra = api.post(f"/jobs/{a['id']}/run").json()["run"]
+        assert entered.wait(10)
+        rb = api.post(f"/jobs/{b['id']}/run").json()["run"]
+        _wait(api, rb["id"], done=("running",))
+        s = api.get("/jobs/summary").json()
+        assert (s["running"], s["queued"]) == (1, 1)
+        assert api.get(f"/jobs/runs/{rb['id']}").json()["run"]["summary"]["waiting_for"] == "slot"
+        released = datetime.now(timezone.utc)
+        gate.set()
+        fa, fb = _wait(api, ra["id"]), _wait(api, rb["id"])
+        assert fa["status"] == fb["status"] == "succeeded"
+        assert "waiting_for" not in (fb["summary"] or {}), "the marker is cleared once work starts"
+        assert datetime.fromisoformat(fb["started_at"]) >= released, "the waiting run's clock starts at work start"
+    finally:
+        gate.set()
+        optimizer.set_runner(None)
+
+
+@pytest.mark.pg
+def test_proposal_pending_job_type_filter_and_atomic_restart(api, jobs_pg):
+    import backend.jobs.data as data
+    from backend.jobs import runner
+    j = _mk_job(api, jobs_pg.plant, job_type="optimizer.plant", params={"apply_mode": "propose"})
+    live = data.insert_run(job_id=j["id"], schedule_id=None, plant=jobs_pg.plant, job_type="optimizer.plant",
+                           trigger="manual", status="scheduled")
+    r = api.get(f"/jobs/runs/{live}/proposal")
+    assert r.status_code == 200 and r.json()["pending"] is True and r.json()["rows"] == []
+    assert runner.start_manual_run(data.get_job(j["id"]), "a@b.c") is None, "an active run blocks a second insert"
+    data.finish_run(live, "succeeded", {"apply_mode": "propose"}, None, False)
+    plain = _mk_job(api, jobs_pg.plant)
+    nid = data.insert_run(job_id=plain["id"], schedule_id=None, plant=jobs_pg.plant, job_type="noop",
+                          trigger="manual", status="succeeded")
+    done = api.post(f"/jobs/{plain['id']}/run").json()["run"]
+    _wait(api, done["id"])
+    assert api.get(f"/jobs/runs/{nid}/proposal").status_code == 400
+    only = api.get("/jobs/runs", params={"plant": jobs_pg.plant, "job_type": "noop"}).json()["runs"]
+    assert only and all(x["job_type"] == "noop" for x in only)
+

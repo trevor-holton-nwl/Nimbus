@@ -35,6 +35,7 @@ const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
 
 export const RUNS_POLL_MS = 15000;
 export const JOBS_POLL_MS = 30000;
+export const IDLE_POLL_MS = 60000;
 type SubTab = 'jobs' | 'runs' | 'upcoming';
 
 let _wired = false;
@@ -42,7 +43,13 @@ let _active = false;
 let _tab: SubTab = 'jobs';
 let _plant = '';                 // '' = every plant the viewer may see
 let _q = '';
-let _status = '';                // jobs: last-run status filter; runs: run status filter
+let _status = '';                // jobs: last-run status filter
+let _runStatus = '';             // runs: run status filter (set by the health tiles; separate from the Jobs tab's)
+let _runType = '';               // runs: job type filter
+let _jobPages = 1;               // pages of the jobs list loaded (the quiet poll merges instead of replacing when > 1)
+let _bulkBusy = false;           // a bulk action is running: the bar is disabled and a second click is ignored
+let _watchBusy = false;          // a _checkWatched pass is in flight
+const _watchFails = new Map<number, number>();   // consecutive failed reads per watched run id
 let _periodicity = '';           // runs: schedule kind (or manual)
 let _scheduledBy = '';           // runs: '' | 'schedule' | the viewer's own email
 let _since = 0;                  // runs: look-back window in hours (set by the Failed / Missed health tiles); 0 = none
@@ -81,6 +88,25 @@ const _errorHtml = (e: Error): string => `<div class="empty-state job-empty" rol
   + `<button type="button" class="btn btn-ghost sm" data-jobs-act="retry">${esc(t('jobs.retry'))}</button></div>`;
 function _busy(host: HTMLElement, on: boolean): void { host.setAttribute('aria-busy', on ? 'true' : 'false'); }
 
+/** Paint a list host, skipping the write when the markup is unchanged (a poll that found nothing new must not
+ *  rebuild the table: it would drop focus, text selection and scroll anchoring). */
+const _painted = new WeakMap<HTMLElement, string>();
+function _setHtml(host: HTMLElement, html: string): void {
+  if (_painted.get(host) === html) return;
+  _painted.set(host, html);
+  host.innerHTML = html;
+}
+
+/** One small polite status node announces list loads; the list hosts themselves are not live regions, so a quiet
+ *  poll repaint is not read out in full. */
+let _announced = '';
+function _announce(msg: string, id = 'jobs-live'): void {
+  const n = _el(id);
+  if (!n || msg === _announced) return;
+  _announced = msg;
+  n.textContent = msg;
+}
+
 /* ---------------------------------------------------------------------------
    Shared filter bar
    ------------------------------------------------------------------------- */
@@ -109,11 +135,15 @@ function _healthHtml(h: HealthSummary): string {
   const tiles = healthTiles(h).map(x => {
     const label = esc(t(`jobs.health_${x.key}`));
     const next = h.nextFire;
+    // The Failed tile's detail line also splits the count by cause (fix the job / system / the board changed).
+    const detail = x.key === 'next'
+      ? (next ? `${next.jobName} · ${next.plant} · ${tzShort(plantTimezone(next.plant), next.atUtc)}` : t('jobs.health_next_none'))
+      : x.key === 'failed' ? `${t('jobs.health_24h')}${h.failed24h > 0 ? ` · ${t('jobs.health_failed_split', { config: h.failedConfig24h, system: h.failedSystem24h, transient: h.failedTransient24h })}` : ''}`
+      : x.key === 'missed' ? t('jobs.health_24h') : '';
     const v = x.key === 'next'
-      ? `<div class="v job-kpi-text">${next ? esc(Util.fmtDTShortPref(stripOffset(next.atLocal))) : '—'}</div>`
-        + `<div class="d">${next ? esc(`${next.jobName} · ${next.plant} · ${tzShort(plantTimezone(next.plant), next.atUtc)}`) : esc(t('jobs.health_next_none'))}</div>`
-      : `<div class="v">${esc(x.value)}</div>${x.key === 'failed' || x.key === 'missed' ? `<div class="d">${esc(t('jobs.health_24h'))}</div>` : ''}`;
-    return `<button type="button" class="kpi-tile is-actionable${x.tone ? ` ${x.tone}` : ''}" data-jobs-tile="${x.key}"><div class="k">${label}</div>${v}</button>`;
+      ? `<div class="v job-kpi-text">${next ? esc(Util.fmtDTShortPref(stripOffset(next.atLocal))) : '—'}</div><div class="d" title="${esc(detail)}">${esc(detail)}</div>`
+      : `<div class="v">${esc(x.value)}</div>${detail ? `<div class="d" title="${esc(detail)}">${esc(detail)}</div>` : ''}`;
+    return `<button type="button" class="kpi-tile is-actionable${x.tone ? ` ${x.tone}` : ''}" data-jobs-tile="${x.key}" title="${esc(`${t(`jobs.health_${x.key}`)}${detail ? ` — ${detail}` : ''}`)}"><div class="k">${label}</div>${v}</button>`;
   }).join('');
   const hb = heartbeatState(h.scheduler, Date.now());
   const hbText = hb.state === 'ok' ? t('jobs.hb_ok', { age: ageText(hb.ageS) })
@@ -123,37 +153,56 @@ function _healthHtml(h: HealthSummary): string {
     + (h.warning24h ? ` <span class="job-sub">${esc(t('jobs.health_warn24', { n: h.warning24h }))}</span>` : '') + `</div>`;
 }
 
+let _healthSeq = 0;              // the newest summary request wins; a slower older one is dropped
+let _healthSig = '';             // last painted summary: an unchanged poll does not repaint (keeps text selection / focus)
+const _healthSkeletonHtml = (): string => `<div class="job-health-tiles" aria-hidden="true">${Array.from({ length: 5 }, () => '<div class="job-skel job-skel-row"></div>').join('')}</div>`;
+
 async function _loadHealth(): Promise<void> {
   const host = _el('jobs-health');
   if (!host) return;
+  const my = ++_healthSeq;
+  if (!_health) { host.innerHTML = _healthSkeletonHtml(); _healthSig = ''; host.setAttribute('aria-busy', 'true'); }
   try {
-    _health = await JobsClient.summary(_plant);
-    host.innerHTML = _healthHtml(_health);
+    const h = await JobsClient.summary(_plant);
+    if (my !== _healthSeq) return;
+    _health = h;
+    // The heartbeat age is computed from the clock, so the minute bucket is part of the signature.
+    const sig = `${JSON.stringify(h)}|${Math.floor(Date.now() / 60000)}`;
+    if (sig !== _healthSig) { host.innerHTML = _healthHtml(h); _healthSig = sig; }
     host.setAttribute('aria-label', t('jobs.health_label'));
     host.setAttribute('aria-busy', 'false');
   } catch (e) {
-    if (!_health) host.innerHTML = `<div class="job-sub" role="alert">${esc(t('jobs.load_failed', { msg: (e as Error).message }))}</div>`;
+    if (my !== _healthSeq) return;
+    host.setAttribute('aria-busy', 'false');
+    if (!_health) {
+      host.innerHTML = `<div class="job-sub" role="alert">${esc(t('jobs.load_failed', { msg: (e as Error).message }))} `
+        + `<button type="button" class="btn btn-ghost sm" data-jobs-act="retry-health">${esc(t('jobs.retry'))}</button></div>`;
+    }
   }
 }
 
-/** A tile applies its filter to the Runs list (Failed / Missed also limit to the last 24 h); Next fire opens Upcoming. */
+/** A tile applies its filter to the Runs list (Failed / Missed also limit to the last 24 h); Next fire opens Upcoming.
+ *  The Runs tab keeps its own status filter, so a tile never leaks into the Jobs tab's Last run filter. */
 function _tileClick(key: string): void {
-  const tile = healthTiles(_health ?? { running: 0, queued: 0, failed24h: 0, missed24h: 0, warning24h: 0, nextFire: null, scheduler: { ok: false, lastTickAt: null }, longerThanUsual: [] }).find(x => x.key === key);
+  const tile = healthTiles(_health ?? { running: 0, queued: 0, failed24h: 0, missed24h: 0, warning24h: 0, failedConfig24h: 0, failedSystem24h: 0, failedTransient24h: 0, nextFire: null, scheduler: { ok: false, lastTickAt: null }, longerThanUsual: [] }).find(x => x.key === key);
   if (!tile) return;
   if (tile.tab === 'upcoming') { _stripPlant = _plant; _setTab('upcoming'); return; }
-  _status = tile.status ?? ''; _since = tile.sinceHours ?? 0; _periodicity = ''; _scheduledBy = '';
+  _runStatus = tile.status ?? ''; _since = tile.sinceHours ?? 0; _periodicity = ''; _scheduledBy = ''; _runType = '';
   _setTab('runs');
 }
 
 /* ---------------------------------------------------------------------------
    Poll: every 30 s while a run is active (15 s while one started here is watched); never while hidden
    ------------------------------------------------------------------------- */
+/** The single owner of the health strip and watcher polling (the Runs timer only refreshes the runs list):
+ *  15 s while a run started here is watched, 30 s while anything is running, else 60 s so the heartbeat badge and
+ *  next fire never freeze on an idle pane. */
 function _armPoll(): void {
   if (_pollTimer) clearTimeout(_pollTimer);
   _pollTimer = null;
   if (!_visible()) return;
-  if (!_watched.size && !shouldPollJobs(_health, _jobs)) return;
-  _pollTimer = setTimeout(() => { _pollTimer = null; void _pollTick(); }, _watched.size ? RUNS_POLL_MS : JOBS_POLL_MS);
+  const ms = _watched.size ? RUNS_POLL_MS : shouldPollJobs(_health, _jobs) ? JOBS_POLL_MS : IDLE_POLL_MS;
+  _pollTimer = setTimeout(() => { _pollTimer = null; void _pollTick(); }, ms);
 }
 
 async function _pollTick(): Promise<void> {
@@ -164,17 +213,31 @@ async function _pollTick(): Promise<void> {
   _armPoll();
 }
 
-/** A run started from here that has finished raises one toast with a View action. */
+const WATCH_MAX_FAILS = 5;
+
+/** A run started from here that has finished raises one toast with a View action. A run that is gone (404) or
+ *  unreadable five polls in a row is dropped, so the watcher cannot poll it forever. */
 async function _checkWatched(): Promise<void> {
+  if (_watchBusy) return;
+  _watchBusy = true;
+  try { await _checkWatchedOnce(); } finally { _watchBusy = false; }
+}
+
+async function _checkWatchedOnce(): Promise<void> {
   for (const [id, name] of [..._watched]) {
     try {
       const r = await JobsClient.getRun(id);
+      _watchFails.delete(id);
       if (isActiveRun(r.status)) continue;
       _watched.delete(id);
       const failed = r.status === 'failed';
       Toast.show(t('jobs.toast_run_done', { name, status: t(`jobs.status_${r.status}`) }), failed ? 'error' : r.status === 'warning' ? 'warn' : 'success', 8000,
-        { label: t('jobs.view'), run: () => { _plant = r.plant; _status = ''; _since = 0; _periodicity = ''; _scheduledBy = ''; _setTab('runs'); void _openRun(id); } });
-    } catch { /* the next poll retries */ }
+        { label: t('jobs.view'), run: () => { _plant = r.plant; _runStatus = ''; _since = 0; _periodicity = ''; _scheduledBy = ''; _runType = ''; _setTab('runs'); void _openRun(id); } });
+    } catch (e) {
+      const n = (_watchFails.get(id) ?? 0) + 1;
+      if (/not found|404/i.test((e as Error).message) || n >= WATCH_MAX_FAILS) { _watched.delete(id); _watchFails.delete(id); }
+      else _watchFails.set(id, n);
+    }
   }
 }
 
@@ -239,26 +302,30 @@ async function _loadJobs(append = false, quiet = false): Promise<void> {
   const my = ++_seq;
   const host = _el('jobs-table');
   if (!host) return;
-  if (!append && !quiet) { _busy(host, true); host.innerHTML = _skeletonHtml(); }
+  if (!append && !quiet) { _busy(host, true); _setHtml(host, _skeletonHtml()); }
   try {
     const res = await JobsClient.list({ plant: _plant, q: _q, status: _status, type: _type, limit: JOBS_PAGE, beforeId: append ? _nextBeforeJob : null });
     if (my !== _seq) return;
-    _jobs = append ? [..._jobs, ...res.items.filter(x => !_jobs.some(y => y.id === x.id))] : res.items;
-    _selected = new Set([..._selected].filter(id => _jobs.some(j => j.id === id)));
-    _nextBeforeJob = res.nextBeforeId;
-    host.innerHTML = _jobsTableHtml();
+    if (append) { _jobs = [...(_jobs), ...res.items.filter(x => !_jobs.some(y => y.id === x.id))]; _nextBeforeJob = res.nextBeforeId; _jobPages++; }
+    else if (quiet && _jobPages > 1) {
+      // The poll re-read page 1 only: fold it into what is loaded (later pages, their cursor and the ticked rows stay).
+      _jobs = mergeRuns(_jobs, res.items);
+    } else { _jobs = res.items; _nextBeforeJob = res.nextBeforeId; _jobPages = 1; _selected = new Set([..._selected].filter(id => _jobs.some(j => j.id === id))); }
+    _setHtml(host, _jobsTableHtml());
     _busy(host, false);
+    _announce(t('jobs.count_jobs', { n: _jobs.length }));
     _syncBulk();
     _armPoll();
   } catch (e) {
-    if (my === _seq) { host.innerHTML = _errorHtml(e as Error); _busy(host, false); }
+    if (my === _seq) { _setHtml(host, _errorHtml(e as Error)); _busy(host, false); }
   }
 }
 
 function _renderJobsTab(): void {
   const host = _el('jobs-view-jobs');
   if (!host) return;
-  host.innerHTML = `${_jobsToolbarHtml()}<div id="jobs-table" aria-live="polite"></div>`;
+  host.innerHTML = `${_jobsToolbarHtml()}<div id="jobs-table"></div><span class="job-sr" id="jobs-live" role="status" aria-live="polite"></span>`;
+  _announced = '';
   _mountPlantCombo('jobs', () => { void _loadJobs(); void _loadHealth(); });
   void _loadJobs();
 }
@@ -295,32 +362,47 @@ async function _runNow(j: Job): Promise<void> {
 /** Restart = run the job again with its current params (a new manual run; the old run stays as it was). */
 async function _restartLast(j: Job): Promise<void> {
   if (!j.last_run) return;
+  // Restart runs the job NOW with its current settings, so the confirm names the job's current mode.
+  const mode = t(String(j.params.apply_mode ?? 'apply') === 'propose' ? 'jobs.result_propose' : 'jobs.result_apply');
+  if (!await Modal.confirm({ title: t('jobs.confirm_restart', { name: j.name }), message: t('jobs.confirm_restart_msg', { mode }), confirmLabel: t('jobs.restart') })) return;
   try { const r = await JobsClient.restartRun(j.last_run.id); _watch(r, j.name); Toast.show(t('jobs.toast_run_started', { name: j.name }), 'success'); void _loadJobs(false, true); void _loadHealth(); }
   catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
 }
 
 /** Bulk bar over the ticked rows: sequential requests, one summary toast. Archive asks first. */
 async function _bulk(action: string): Promise<void> {
+  if (_bulkBusy) return;                              // re-entrancy guard: one bulk action at a time
   if (action === 'clear') { _selected.clear(); _jobsRerender(); return; }
   const rows = _jobs.filter(j => _selected.has(j.id));
   if (!rows.length) return;
-  if (action === 'archive') {
-    const ok = await Modal.confirm({ title: t('jobs.bulk_confirm_archive', { n: rows.length }), message: t('jobs.confirm_delete_msg'), confirmLabel: t('jobs.m_delete'), tone: 'danger' });
-    if (!ok) return;
+  _bulkBusy = true;
+  _setBulkDisabled(true);
+  try {
+    if (action === 'archive') {
+      const ok = await Modal.confirm({ title: t('jobs.bulk_confirm_archive', { n: rows.length }), message: t('jobs.confirm_delete_msg'), confirmLabel: t('jobs.m_delete'), tone: 'danger' });
+      if (!ok) return;
+    }
+    const res = await runSequential(rows, async (j) => {
+      if (action === 'run') { const r = await JobsClient.runNow(j.id); _watch(r, j.name); }
+      else if (action === 'pause') await JobsClient.setEnabled(j.id, false);
+      else if (action === 'resume') await JobsClient.setEnabled(j.id, true);
+      else if (action === 'archive') await JobsClient.remove(j.id);
+    });
+    Toast.show(res.failed ? t('jobs.bulk_done_partial', { ok: res.ok, failed: res.failed, reason: res.firstError }) : t('jobs.bulk_done', { n: res.ok }), res.failed ? 'warn' : 'success');
+    _selected.clear();
+    void _loadJobs(false, true); void _loadHealth();
+  } finally {
+    _bulkBusy = false;
+    _setBulkDisabled(false);
   }
-  const res = await runSequential(rows, async (j) => {
-    if (action === 'run') { const r = await JobsClient.runNow(j.id); _watch(r, j.name); }
-    else if (action === 'pause') await JobsClient.setEnabled(j.id, false);
-    else if (action === 'resume') await JobsClient.setEnabled(j.id, true);
-    else if (action === 'archive') await JobsClient.remove(j.id);
-  });
-  Toast.show(res.failed ? t('jobs.bulk_done_partial', { ok: res.ok, failed: res.failed, reason: res.firstError }) : t('jobs.bulk_done', { n: res.ok }), res.failed ? 'warn' : 'success');
-  _selected.clear();
-  void _loadJobs(false, true); void _loadHealth();
+}
+function _setBulkDisabled(on: boolean): void {
+  _el('jobs-bulk')?.querySelectorAll<HTMLButtonElement>('button').forEach(b => { b.disabled = on; });
+  _el('jobs-bulk')?.setAttribute('aria-busy', on ? 'true' : 'false');
 }
 function _jobsRerender(): void {
   const host = _el('jobs-table');
-  if (host) { host.innerHTML = _jobsTableHtml(); _syncBulk(); }
+  if (host) { _setHtml(host, _jobsTableHtml()); _syncBulk(); }
 }
 async function _setEnabled(j: Job, enabled: boolean): Promise<void> {
   try { await JobsClient.setEnabled(j.id, enabled); void _loadJobs(); }
@@ -356,24 +438,25 @@ function _runsListHtml(): string {
 /** 'replace' = a fresh first page (filters changed, Refresh); 'append' = Load more; 'refresh' = the poll: page 1 is
  *  merged into what is loaded, so extra pages the viewer already pulled stay (and so does their cursor). */
 function _runsQuery(beforeId: number | null = null): RunsQuery {
-  return { plant: _plant, status: _status, periodicity: _periodicity, scheduledBy: _scheduledBy, sinceHours: _since || undefined, beforeId };
+  return { plant: _plant, status: _runStatus, jobType: _runType, periodicity: _periodicity, scheduledBy: _scheduledBy, sinceHours: _since || undefined, beforeId };
 }
 
 async function _loadRuns(mode: 'replace' | 'append' | 'refresh' = 'replace'): Promise<void> {
   const my = ++_seq;
   const host = _el('jobs-runs-list');
   if (!host) return;
-  if (mode === 'replace') { _busy(host, true); host.innerHTML = _skeletonHtml(); }
+  if (mode === 'replace') { _busy(host, true); _setHtml(host, _skeletonHtml()); }
   try {
     const res = await JobsClient.runs(_runsQuery(mode === 'append' ? _nextBefore : null));
     if (my !== _seq) return;
     if (mode === 'append') { _runs = mergeRuns(_runs, res.items); _nextBefore = res.nextBeforeId; _runPages++; }
     else if (mode === 'refresh' && _runPages > 1) _runs = mergeRuns(_runs, res.items);
     else { _runs = res.items; _nextBefore = res.nextBeforeId; _runPages = 1; }
-    host.innerHTML = _runsListHtml();
+    _setHtml(host, _runsListHtml());
     _busy(host, false);
+    _announce(t('jobs.count_runs', { n: _runs.length }), 'jobs-runs-live');
   } catch (e) {
-    if (my === _seq) { host.innerHTML = _errorHtml(e as Error); _busy(host, false); }
+    if (my === _seq) { _setHtml(host, _errorHtml(e as Error)); _busy(host, false); }
   }
 }
 
@@ -392,12 +475,15 @@ function _renderRunsTab(): void {
   if (!host) return;
   JobsRunDetail.stop();
   host.innerHTML = `<div id="jobs-runs-main"><div class="job-toolbar">${_plantFilterHtml('jobs-runs')}`
-    + `<div class="job-field"><label class="job-field-l" for="jobs-runs-status">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-status">${_statusOptions(_status)}</select></div>`
+    + `<div class="job-field"><label class="job-field-l" for="jobs-runs-status">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-status">${_statusOptions(_runStatus)}</select></div>`
+    + `<div class="job-field"><label class="job-field-l" for="jobs-runs-type">${esc(t('jobs.f_type'))}</label><select class="input" id="jobs-runs-type"><option value="">${esc(t('jobs.type_any'))}</option>`
+    + _types.map(x => `<option value="${esc(x.key)}"${x.key === _runType ? ' selected' : ''}>${esc(x.key === 'optimizer.plant' ? t('jobs.type_optimizer') : x.label)}</option>`).join('') + `</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-period">${esc(t('jobs.f_periodicity'))}</label><select class="input" id="jobs-runs-period">${_periodicityOptions(_periodicity)}</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-by">${esc(t('jobs.f_scheduled_by'))}</label><select class="input" id="jobs-runs-by">${_byOptions(_scheduledBy)}</select></div>`
     + (_since ? `<button type="button" class="btn btn-ghost sm job-chip" data-jobs-act="clear-since">${esc(t('jobs.since_chip', { h: _since }))} ×</button>` : '')
     + `<button type="button" class="btn btn-ghost" data-jobs-act="refresh-runs">${esc(t('btn.refresh'))}</button></div>`
-    + `<div id="jobs-runs-list" aria-live="polite"></div></div><div id="jobs-run-detail" hidden></div>`;
+    + `<div id="jobs-runs-list"></div><span class="job-sr" id="jobs-runs-live" role="status" aria-live="polite"></span></div><div id="jobs-run-detail" hidden></div>`;
+  _announced = '';
   _mountPlantCombo('jobs-runs', () => { void _loadRuns(); void _loadHealth(); });
   void _loadRuns();
   _armRunsPoll();
@@ -409,7 +495,8 @@ function _armRunsPoll(): void {
   if (!_visible() || _tab !== 'runs') return;
   _runsTimer = setTimeout(() => {
     _runsTimer = null;
-    if (_visible() && _tab === 'runs' && !JobsRunDetail.isOpen()) { void _loadRuns('refresh'); void _loadHealth(); void _checkWatched(); }
+    // Health and the watcher belong to _pollTimer (one owner), so the Runs tab never duplicates those requests.
+    if (_visible() && _tab === 'runs' && !JobsRunDetail.isOpen()) void _loadRuns('refresh');
     _armRunsPoll();
   }, RUNS_POLL_MS);
 }
@@ -434,7 +521,7 @@ async function _openRun(id: number): Promise<void> {
 }
 
 function _gotoRuns(j: Job): void {
-  _plant = j.plant; _status = ''; _since = 0; _periodicity = ''; _scheduledBy = '';
+  _plant = j.plant; _runStatus = ''; _since = 0; _periodicity = ''; _scheduledBy = ''; _runType = '';
   _setTab('runs');
 }
 
@@ -446,7 +533,7 @@ async function _loadUpcoming(): Promise<void> {
   const host = _el('jobs-upcoming-body');
   if (!host) return;
   _busy(host, true);
-  host.innerHTML = _skeletonHtml(4);
+  _setHtml(host, _skeletonHtml(4));
   try {
     // One server call: GET /jobs/upcoming, soonest first across the viewer's visible jobs (a plant narrows it).
     // The 7-day strip needs the whole week, so a chosen plant asks for more entries than the list shows.
@@ -456,10 +543,10 @@ async function _loadUpcoming(): Promise<void> {
     const entries: UpcomingEntry[] = await JobsClient.upcomingAll(_stripPlant, _upcomingRequested);
     if (my !== _seq) return;
     _upcoming = entries.map(e => ({ at: stripOffset(e.atLocal), jobId: e.jobId, jobName: e.jobName, plant: e.plant }));
-    host.innerHTML = _upcomingHtml();
+    _setHtml(host, _upcomingHtml());
     _busy(host, false);
   } catch (e) {
-    if (my === _seq) host.innerHTML = _errorHtml(e as Error);
+    if (my === _seq) _setHtml(host, _errorHtml(e as Error));
   }
 }
 
@@ -526,7 +613,7 @@ function _focusSearch(e: KeyboardEvent): void {
   if (tgt && (/^(INPUT|TEXTAREA|SELECT)$/.test(tgt.tagName) || tgt.isContentEditable)) return;
   if (Modal.anyOpen()) return;
   const el = _el<HTMLInputElement>(_tab === 'jobs' ? 'jobs-q' : _tab === 'runs' ? 'jobs-runs-plant' : 'jobs-up-plant');
-  if (!el) return;
+  if (!el || el.offsetParent === null) return;      // not laid out (a hidden sub-view or pane)
   e.preventDefault();
   el.focus();
 }
@@ -564,6 +651,7 @@ function _wire(): void {
     const runRow = target.closest<HTMLElement>('[data-run-id]');
     if (runRow) { void _openRun(Number(runRow.dataset.runId)); return; }
     const act = target.closest<HTMLElement>('[data-jobs-act]')?.dataset.jobsAct;
+    if (act === 'retry-health') { void _loadHealth(); return; }
     if (act === 'retry') { if (_tab === 'jobs') void _loadJobs(); else if (_tab === 'runs') void _loadRuns(); else void _loadUpcoming(); return; }
     if (act === 'clear-since') { _since = 0; _renderRunsTab(); return; }
     if (act === 'new') JobsDialog.open({ plant: _plant, defaults: _types.find(x => x.key === 'optimizer.plant')?.defaults, onSaved: () => void _loadJobs() });
@@ -581,7 +669,8 @@ function _wire(): void {
     const v = (e.target as HTMLSelectElement).value;
     if (id === 'jobs-type') { _type = v; void _loadJobs(); }
     else if (id === 'jobs-status') { _status = v; void _loadJobs(); }
-    else if (id === 'jobs-runs-status') { _status = v; _since = 0; void _loadRuns(); }
+    else if (id === 'jobs-runs-status') { _runStatus = v; _since = 0; void _loadRuns(); }
+    else if (id === 'jobs-runs-type') { _runType = v; void _loadRuns(); }
     else if (id === 'jobs-runs-period') { _periodicity = v; void _loadRuns(); }
     else if (id === 'jobs-runs-by') { _scheduledBy = v; void _loadRuns(); }
   });

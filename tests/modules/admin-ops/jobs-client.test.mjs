@@ -134,6 +134,7 @@ test('summary: the health strip body (counts, next_fire, scheduler heartbeat, lo
   const h = await JobsClient.summary('1008');
   assert.equal(path(0), '/jobs/summary?plant=1008');
   assert.deepEqual([h.running, h.queued, h.failed24h, h.missed24h, h.warning24h], [1, 0, 2, 0, 1]);
+  assert.deepEqual([h.failedConfig24h, h.failedSystem24h, h.failedTransient24h], [1, 0, 1], 'the failed split is read from the body');
   assert.deepEqual([h.nextFire.jobId, h.nextFire.jobName, h.nextFire.plant, h.nextFire.atLocal], [5, 'Morning optimize', '1008', '2026-10-30T08:00:00-04:00']);
   assert.deepEqual([h.scheduler.ok, h.scheduler.lastTickAt, h.longerThanUsual], [true, '2026-10-29T12:00:00+00:00', [43]]);
   assert.deepEqual(phantom, []);

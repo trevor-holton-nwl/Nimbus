@@ -14,7 +14,8 @@
     "triggered_by": null,
     "summary": {"late": 3, "changeovers": 41, "moved": 120, "applied": 118, "dropped": 2, "action_id": "a-17", "mode": "due_date", "search": "exhaustive", "apply_mode": "apply"},
     "error": null, "log_truncated": false, "cancel_requested": false
-  },  "job": {
+  },
+  "job": {
     "id": 5, "plant": "1008", "job_type": "optimizer.plant", "name": "Morning optimize",
     "params": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"},
     "enabled": true, "archived": false, "retry_max": 0, "timeout_s": null,
@@ -30,18 +31,22 @@
     "defaults": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"}
   }]},
   "summary": {
-    "running": 1, "queued": 0, "failed_24h": 2, "missed_24h": 0, "warning_24h": 1,
+    "running": 1, "queued": 0, "failed_24h": 2, "failed_config_24h": 1, "failed_system_24h": 0, "failed_transient_24h": 1, "missed_24h": 0, "warning_24h": 1,
     "next_fire": {"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "job_id": 5, "job_name": "Morning optimize", "plant": "1008"},
     "scheduler": {"ok": true, "last_tick_at": "2026-10-29T12:00:00+00:00"},
     "longer_than_usual": [43]
   },
   "proposal": {
-    "run_id": 44, "plant": "1008", "total": 1, "shown": 1, "truncated": false, "board_matches": true,
+    "run_id": 44, "plant": "1008", "total": 1, "shown": 1, "truncated": false, "pending": false, "board_matches": true,
     "rows": [{"id": "1008-100", "machine": "L1", "finish_before": "2026-10-30T10:00:00", "finish_after": "2026-10-30T14:00:00",
               "delta_hours": 4.0, "status": "scheduled", "changed_since": false}],
     "findings": [{"severity": "warn", "message": "opaque"}]
   },
-  "jobs_list": {"jobs": ["$job"], "next_before_id": 4},
+  "proposal_pending": {
+    "run_id": 45, "plant": "1008", "pending": true, "total": 0, "shown": 0, "truncated": false,
+    "board_matches": null, "rows": [], "findings": []
+  },
+  "jobs_list":{"jobs": ["$job"], "next_before_id": 4},
   "runs_list": {"runs": ["$run"], "next_before_id": 41},
   "run_wrapped": {"run": "$run"},
   "log": {

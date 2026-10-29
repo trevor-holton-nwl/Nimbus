@@ -2338,3 +2338,7 @@ CREATE TABLE IF NOT EXISTS job_run_log (
     data         JSONB,
     PRIMARY KEY (run_id, seq)
 );
+
+-- Read-path indexes for GET /jobs/summary (also created by backend/jobs/data.py ensure_job_tables).
+CREATE INDEX IF NOT EXISTS idx_job_run_ended  ON job_run (ended_at) WHERE ended_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_job_run_active ON job_run (status) WHERE status IN ('scheduled','running');

@@ -266,7 +266,12 @@ test('SAP-style status model: a misfire shows as Missed, running has a static do
   assert.doesNotMatch(runStatusHtml({ status: 'skipped', error: '<b>x</b>' }, deps), /<b>/, 'reason is escaped');
 });
 
-test('error kind: only config and system are recognised', () => {
+test('runs query carries the job type filter', () => {
+  assert.equal(buildRunsQuery({ jobType: 'optimizer.plant' }), '?job_type=optimizer.plant&limit=50');
+});
+
+test('error kind: config, system and transient are recognised', () => {
+  assert.equal(errorKindOf({ error_kind: 'transient' }), 'transient');
   assert.equal(errorKindOf({ error_kind: 'config' }), 'config');
   assert.equal(errorKindOf({ error_kind: 'system' }), 'system');
   assert.equal(errorKindOf({ error_kind: 'other' }), null);

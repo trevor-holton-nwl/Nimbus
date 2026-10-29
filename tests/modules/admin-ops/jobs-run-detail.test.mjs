@@ -19,7 +19,8 @@ test('a failed run opens on an Error panel: kind badge, failing step, message, j
   const html = errorPanelHtml(run({ error: 'plant 1008 has no timezone', summary: { error_kind: 'config', failed_step: 'gather' } }));
   assert.match(html, /role="alert"/);
   assert.match(html, /jobs\.error_kind_config/); assert.match(html, /gather/); assert.match(html, /no timezone/);
-  assert.match(html, /data-jr-act="show-errors"/); assert.match(html, /data-jr-act="first-error"/);
+  assert.match(html, /data-jr-act="show-errors"[^>]*\shidden/); assert.match(html, /data-jr-act="first-error"[^>]*\shidden/);   // shown only once the log has an error line
+  assert.match(errorPanelHtml(run({ error: 'x', summary: { error_kind: 'transient' } })), /badge-warn[^>]*>jobs\.error_kind_transient/);
   assert.match(errorPanelHtml(run({ error: 'timed out after 600s', summary: { error_kind: 'system' } })), /badge-err[^>]*>jobs\.error_kind_system/);
   assert.equal(errorPanelHtml(run({ status: 'succeeded', error: null })), '', 'no panel for a finished run');
   assert.doesNotMatch(errorPanelHtml(run({ error: '<img src=x onerror=1>' })), /<img/, 'the message is escaped');
