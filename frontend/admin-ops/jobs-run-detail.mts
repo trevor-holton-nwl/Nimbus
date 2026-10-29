@@ -22,9 +22,9 @@ import type { JobRun } from './jobs-client.mjs';
 import {
   runStatusHtml, isActiveRun, durationText, stepSegments, resultTiles, mergeLog, lastSeq, filterLog,
   logToText, errorsToText, firstErrorIndex, lineDataText, elapsedText, elapsedMs, errorKindOf, isDryRun, deltaText,
-  LOG_LEVELS, LOG_PAGE, plantWall, tzShort,
+  LOG_LEVELS, LOG_PAGE, plantWall, tzShort, ARTIFACT_PAGE, artifactTiles, isReportRun, sectionTitle, tryKey, columnLabel, cellText, windowLine,
 } from './jobs-model.mjs';
-import type { LogLine, Proposal, ProposalRow } from './jobs-model.mjs';
+import type { LogLine, Proposal, ProposalRow, ArtifactSection } from './jobs-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -35,6 +35,7 @@ const ROW_H = 20;
 const DATA_LINE_H = 16;
 const DATA_MAX_H = 160;
 const PROPOSAL_ROW_H = 28;
+const ARTIFACT_ROW_H = 28;
 const CHAR_W = 7.4;   // JetBrains Mono at 12 px, for the wrapped-row estimate
 
 interface DetailState {
@@ -54,6 +55,8 @@ interface DetailState {
   timer: ReturnType<typeof setTimeout> | null;
   inflight: boolean;
   proposal: { vl: VirtualList<ProposalRow> | null; seq: number };
+  /** A report run's artifact: rows loaded so far per section (pages of 500) and one VirtualList per section. */
+  art: { seq: number; rows: Map<string, unknown[][]>; vls: Map<string, VirtualList<unknown[]>> };
   onChanged: (() => void) | null;
   onRestart: ((run: JobRun) => void) | null;
   visible: () => boolean;
@@ -73,6 +76,11 @@ export function resultBadgeHtml(r: { summary: { apply_mode?: string | null } | n
   const m = r.summary?.apply_mode;
   if (m !== 'apply' && m !== 'propose') return '';
   return `<span class="badge ${m === 'propose' ? 'badge-info' : 'badge-muted'} job-result" title="${esc(t(`jobs.result_${m}_tip`))}">${esc(t(`jobs.result_${m}`))}</span>`;
+}
+
+/** The "Report" badge shown on report jobs and runs (they only read data and store a result). */
+export function reportBadgeHtml(): string {
+  return `<span class="badge badge-info job-kind" title="${esc(t('jobs.kind_report_tip'))}">${esc(t('jobs.kind_report'))}</span>`;
 }
 
 /** The Error panel of a failed run: kind badge, the failing step, the message. */
@@ -106,13 +114,14 @@ function _headerHtml(r: JobRun, o: { canCancel: boolean; canRestart: boolean; lo
   if (isActiveRun(r.status)) facts.push([t('jobs.run_step'), '—', 'jr-step']);
   const tz = _d?.tz;
   return `<div class="job-run-head"><button type="button" class="btn btn-ghost sm" data-jr-act="back">${esc(t('jobs.back_to_runs'))}</button>`
-    + `<h3 class="job-run-title">${esc(r.job_name)} <span class="job-mono job-run-id">#${esc(r.id)}</span> ${runStatusHtml(r, deps)} ${resultBadgeHtml(r)}`
+    + `<h3 class="job-run-title">${esc(r.job_name)} <span class="job-mono job-run-id">#${esc(r.id)}</span> ${runStatusHtml(r, deps)} ${resultBadgeHtml(r)}${isReportRun(r.summary) ? ` ${reportBadgeHtml()}` : ''}`
     + `<span class="badge badge-warn job-longer" id="jr-longer"${o.longer ? '' : ' hidden'}>${esc(t('jobs.longer_than_usual'))}</span></h3>`
     + `<span class="job-run-plant job-mono">${esc(r.plant)}${tz ? ` · ${esc(tz)}` : ''}</span>`
     + (o.canCancel ? `<button type="button" class="btn btn-ghost sm" data-jr-act="cancel">${esc(t('jobs.cancel_run'))}</button>` : '')
     + (o.canRestart ? `<button type="button" class="btn btn-ghost sm" data-jr-act="restart">${esc(t('jobs.restart'))}</button>` : '') + `</div>`
     + errorPanelHtml(r)
-    + `<dl class="job-facts">${facts.map(([k, v, id]) => `<div><dt>${esc(k)}</dt><dd class="job-mono"${id ? ` id="${id}"` : ''}>${esc(v)}</dd></div>`).join('')}</dl>`;
+    + `<dl class="job-facts">${facts.map(([k, v, id]) => `<div><dt>${esc(k)}</dt><dd class="job-mono"${id ? ` id="${id}"` : ''}>${esc(v)}</dd></div>`).join('')}</dl>`
+    + (r.summary?.window ? `<div class="job-run-window job-mono" id="jr-window">${esc(windowLine(r.summary.window, deps))}</div>` : '');
 }
 
 /** One neutral fill for every step (width = share of the run); only the failed step is marked, in the error colour. */
@@ -130,10 +139,12 @@ export function stepBarHtml(r: JobRun): string {
 
 export function tilesHtml(r: JobRun): string {
   const tiles = resultTiles(r.summary);
+  const rows = artifactTiles(r.summary);
   const action = r.summary?.action_id;
-  if (!tiles.length && action == null) return '';
+  if (!tiles.length && !rows.length && action == null) return '';
   return `<div class="job-tiles">`
     + tiles.map(x => `<div class="kpi-tile${x.key === 'dropped' && x.value > 0 ? ' warn' : ''}"><div class="k">${esc(t(`jobs.tile_${x.key}`))}</div><div class="v">${esc(x.value)}</div></div>`).join('')
+    + rows.map(x => `<div class="kpi-tile"><div class="k">${esc(tryKey(`jobs.a.tile.${x.key}`, deps) || sectionTitle({ key: x.key, title: x.key.replace(/_/g, ' ') }, deps))}</div><div class="v">${esc(x.value)}</div></div>`).join('')
     + (action != null ? `<div class="kpi-tile"><div class="k">${esc(t('jobs.tile_action'))}</div><div class="v">${esc(action)}</div>`
       + `<button type="button" class="btn btn-ghost sm" data-jr-act="history">${esc(t('jobs.open_history'))}</button></div>` : '')
     + `</div>`;
@@ -256,6 +267,7 @@ async function _fetchLog(): Promise<void> {
       _paintHead();
       _paintLog();
       void _loadProposal(s);
+      void _loadArtifact(s);
       s.onChanged?.();
     }
   } catch { /* transient: the next tick retries */ } finally { s.inflight = false; }
@@ -324,6 +336,98 @@ async function _loadProposal(s: DetailState): Promise<void> {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   Report artifact: one labelled table per section (VirtualList over the rows loaded so far), row counts, a per-section
+   CSV download, the truncation notice. The first page of every section comes in one request; the rest of a long
+   section is read in pages of 500 while the viewer is already usable. Read-only.
+   ------------------------------------------------------------------------- */
+export function artifactRowHtml(cols: number, cells: unknown[]): string {
+  return `<div class="job-art-row" role="row" style="--cols:${cols}">`
+    + cells.map(c => { const tx = cellText(c, deps); return `<span class="job-mono" role="cell" title="${esc(tx)}">${esc(tx)}</span>`; }).join('') + `</div>`;
+}
+
+export function artifactSectionHtml(sec: ArtifactSection): string {
+  const title = sectionTitle(sec, deps);
+  const hid = `jr-art-h-${sec.key}`;
+  const cols = sec.columns.length;
+  const notice = sec.truncated
+    ? `<div class="job-prop-warn" role="note">${esc(t('jobs.a.truncated', { shown: sec.rowsStored, total: sec.rowCount }))}</div>` : '';
+  const table = sec.rowsStored
+    ? `<div class="job-art-table" role="table" style="--cols:${cols}" aria-labelledby="${hid}" aria-rowcount="${sec.rowsStored + 1}">`
+      + `<div class="job-art-row job-art-headrow" role="row" style="--cols:${cols}">${sec.columns.map(c => `<span role="columnheader" title="${esc(columnLabel(c, deps))}">${esc(columnLabel(c, deps))}</span>`).join('')}</div>`
+      + `<div class="job-art-list" id="jr-art-list-${esc(sec.key)}" tabindex="0" role="rowgroup" aria-label="${esc(title)}"></div></div>`
+    : `<div class="ape-hint">${esc(t('jobs.a.empty'))}</div>`;
+  return `<div class="job-art-sec" data-art-sec="${esc(sec.key)}"><div class="job-art-head"><h4 id="${hid}">${esc(title)}</h4>`
+    + `<span class="ape-hint" id="jr-art-count-${esc(sec.key)}">${esc(t('jobs.a.rows', { n: sec.rowCount }))}</span>`
+    + `<button type="button" class="btn btn-ghost sm" data-jr-act="art-csv" data-art-sec="${esc(sec.key)}"${sec.rowsStored ? '' : ' disabled'}>${esc(t('jobs.a.csv'))}</button></div>`
+    + notice + table + `</div>`;
+}
+
+function _artifactShellHtml(): string {
+  return `<section class="job-artifact" id="jr-artifact" aria-label="${esc(t('jobs.a.title'))}">`
+    + `<h3 class="job-art-title">${esc(t('jobs.a.title'))}</h3>`
+    + `<div id="jr-art-body" aria-busy="true"><div class="job-skel job-skel-row" aria-hidden="true"></div><div class="job-skel job-skel-row" aria-hidden="true"></div></div></section>`;
+}
+
+function _paintArtifactList(s: DetailState, sec: ArtifactSection): void {
+  const list = _q(`#jr-art-list-${sec.key}`);
+  const rows = s.art.rows.get(sec.key);
+  if (!list || !rows) return;
+  let vl = s.art.vls.get(sec.key);
+  if (!vl) {
+    const cols = sec.columns.length;
+    vl = new VirtualList<unknown[]>(list, { rowH: ARTIFACT_ROW_H, renderFn: (row) => artifactRowHtml(cols, row), buffer: 10 });
+    s.art.vls.set(sec.key, vl);
+  }
+  vl.update(rows);
+}
+
+/** Pages 2.. of one long section, read in the background; the viewer already shows what is loaded. */
+async function _loadMoreRows(s: DetailState, sec: ArtifactSection, my: number): Promise<void> {
+  const rows = s.art.rows.get(sec.key);
+  const count = _q(`#jr-art-count-${sec.key}`);
+  if (!rows) return;
+  while (rows.length < sec.rowsStored) {
+    if (count) count.textContent = t('jobs.a.loading_rows', { shown: rows.length, total: sec.rowsStored });
+    const page = await JobsClient.artifact(s.run.id, { section: sec.key, offset: rows.length, limit: ARTIFACT_PAGE });
+    if (_d !== s || my !== s.art.seq) return;
+    const got = page.sections[0]?.rows ?? [];
+    if (!got.length) break;
+    rows.push(...got);
+    _paintArtifactList(s, sec);
+  }
+  if (count) count.textContent = t('jobs.a.rows', { n: sec.rowCount });
+}
+
+async function _loadArtifact(s: DetailState): Promise<void> {
+  const r = s.run;
+  if (!isReportRun(r.summary) || (r.status !== 'succeeded' && r.status !== 'warning')) return;
+  // The shell appears once the run has finished (a run opened while still going gets it on completion).
+  if (!_q('#jr-artifact')) _q('#jr-head')?.insertAdjacentHTML('afterend', _artifactShellHtml());
+  const host = _q('#jr-art-body');
+  if (!host) return;
+  const my = ++s.art.seq;
+  host.setAttribute('aria-busy', 'true');
+  try {
+    const a = await JobsClient.artifact(r.id, { offset: 0, limit: ARTIFACT_PAGE });
+    if (_d !== s || my !== s.art.seq) return;
+    host.setAttribute('aria-busy', 'false');
+    s.art.rows.clear(); s.art.vls.clear();
+    host.innerHTML = (a.truncated ? `<div class="job-prop-warn" role="note">${esc(t('jobs.a.truncated_all'))}</div>` : '')
+      + (a.sections.length ? a.sections.map(artifactSectionHtml).join('') : `<div class="ape-hint">${esc(t('jobs.a.empty'))}</div>`);
+    for (const sec of a.sections) {
+      s.art.rows.set(sec.key, sec.rows.slice());
+      _paintArtifactList(s, sec);
+      if (sec.rowsStored > sec.rows.length) void _loadMoreRows(s, sec, my).catch(() => { const c = _q(`#jr-art-count-${sec.key}`); if (c) c.textContent = t('jobs.a.rows_partial', { shown: s.art.rows.get(sec.key)?.length ?? 0, total: sec.rowsStored }); });
+    }
+  } catch (e) {
+    if (_d !== s || my !== s.art.seq) return;
+    host.setAttribute('aria-busy', 'false');
+    host.innerHTML = `<div class="job-run-error" role="alert">${esc(t('jobs.load_failed', { msg: (e as Error).message }))}</div>`
+      + `<button type="button" class="btn btn-ghost sm" data-jr-act="retry-artifact">${esc(t('jobs.retry'))}</button>`;
+  }
+}
+
 function _tick(): void {
   const s = _d;
   if (!s) return;
@@ -335,9 +439,9 @@ function _tick(): void {
   });
 }
 
-function _save(name: string, text: string): void {
+function _save(name: string, text: string, type = 'text/plain;charset=utf-8'): void {
   const a = document.createElement('a');
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+  const url = URL.createObjectURL(new Blob([text], { type }));
   a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -353,6 +457,7 @@ export const JobsRunDetail = {
     const s: DetailState = {
       host, run, lines: [], tz: opts.tz ?? '', lastSeq: 0, done: false, level: 'all', errorsOnly: false, q: '', follow: isActiveRun(run.status),
       wrap: false, open: new Set(), vl: null, timer: null, inflight: false, proposal: { vl: null, seq: 0 },
+      art: { seq: 0, rows: new Map(), vls: new Map() },
       onChanged: opts.onChanged ?? null, onRestart: opts.onRestart ?? null, visible: opts.visible, longer: opts.longer ?? (() => false),
     };
     _d = s;
@@ -362,6 +467,7 @@ export const JobsRunDetail = {
       + `<div class="ape-hint" id="jr-trunc"${run.log_truncated ? '' : ' hidden'}>${esc(t('jobs.log_truncated'))}</div>`;
     _paintHead();
     void _loadProposal(s);
+    void _loadArtifact(s);
     host.onclick = (e: MouseEvent) => {
       const tgt = e.target as HTMLElement;
       if (_d !== s) return;
@@ -387,6 +493,12 @@ export const JobsRunDetail = {
         _q('#jr-log')?.scrollIntoView?.({ block: 'nearest' });
       }
       else if (act === 'retry-proposal') void _loadProposal(s);
+      else if (act === 'retry-artifact') void _loadArtifact(s);
+      else if (act === 'art-csv') {
+        const key = tgt.closest<HTMLElement>('[data-jr-act]')?.dataset.artSec ?? '';
+        void JobsClient.artifactCsv(s.run.id, key).then(text => _save(`job-run-${s.run.id}-${key}.csv`, text, 'text/csv;charset=utf-8'))
+          .catch((err: Error) => Toast.show(t('jobs.a.csv_failed', { msg: err.message }), 'error'));
+      }
       else if (act === 'restart') {
         // Restart = run the job now with its CURRENT settings, so the confirm names its current mode (not the old run's).
         void JobsClient.jobParams(s.run.job_id).then(p => Modal.confirm({

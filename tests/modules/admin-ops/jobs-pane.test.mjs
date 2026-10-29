@@ -20,11 +20,12 @@ const add = (id, parent = dom.doc.body) => {
   return el;
 };
 const idsIn = html => [...String(html).matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
+const { TYPES } = await import('./jobs-types-fixture.mjs');
 
 test('Jobs, Runs and Upcoming never share a control id, and each plant combobox lands in its own host', async () => {
   const calls = { list: [], runs: [], upcoming: [] };
   Session.isAdmin = () => true; Session.allowedPlants = () => null; Store.knownPlants = () => ['1008', '2000'];
-  JobsClient.types = async () => [{ key: 'optimizer.plant', label: 'Optimizer', plant_scoped: true, defaults: {} }];
+  JobsClient.types = async () => TYPES;
   JobsClient.list = async q => { calls.list.push(q); return { items: [], nextBeforeId: null }; };
   JobsClient.runs = async q => { calls.runs.push(q); return { items: [], nextBeforeId: null }; };
   JobsClient.upcomingAll = async (plant, n) => { calls.upcoming.push([plant, n]); return []; };
@@ -45,6 +46,11 @@ test('Jobs, Runs and Upcoming never share a control id, and each plant combobox 
   }
 
   // The status filters reach their own loader after the other views have rendered.
+  // Every registered type is in both type filters, grouped Optimization | Reports.
+  for (const view of [views.jobs, views.runs]) {
+    assert.equal([...view.innerHTML.matchAll(/<optgroup label=/g)].length, 2, 'Optimization and Reports');
+    for (const t of TYPES) assert.match(view.innerHTML, new RegExp(`<option value="${t.key.replace('.', '\\.')}"`), t.key);
+  }
   const jobsStatus = add('jobs-status', pane); jobsStatus.value = 'warning';
   jobsStatus.dispatch('change');
   assert.equal(calls.list.at(-1).status, 'warning');

@@ -3,10 +3,13 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import { installDom } from '../helpers/dom-stub.mjs';
 import { JobsDialog, bodyHtml, recurFieldsHtml, copyRowsHtml, readForm } from '../../../frontend/admin-ops/jobs-dialog.mjs';
 import { JobsClient } from '../../../frontend/admin-ops/jobs-client.mjs';
 import { defaultJobForm, defaultRecurrence } from '../../../frontend/admin-ops/jobs-model.mjs';
+import { TYPES, OPT, byKey } from './jobs-types-fixture.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
 import { Modal, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -25,21 +28,29 @@ function add(id, props = {}) {
 }
 /** The live form fields a real body would contain, filled for a valid default job. */
 function fillForm(over = {}) {
-  const v = { 'jb-name': 'Morning optimize', 'jb-mode': 'due_date', 'jb-search': 'exhaustive', 'jb-result': 'apply', 'jb-recur': 'daily', 'jb-time': '08:00', 'jb-from': '', 'jb-until': '', ...over };
+  const v = { 'jb-name': 'Morning optimize', 'jb-p-mode': 'due_date', 'jb-p-search': 'exhaustive', 'jb-p-apply_mode': 'apply', 'jb-recur': 'daily', 'jb-time': '08:00', 'jb-from': '', 'jb-until': '', ...over };
   for (const [id, value] of Object.entries(v)) (els[id] ?? add(id)).value = value;
-  for (const id of ['jb-firmed', 'jb-overlap']) (els[id] ?? add(id)).checked = true;
+  for (const id of ['jb-p-respect_firmed', 'jb-overlap']) (els[id] ?? add(id)).checked = true;
+}
+
+function loadEnglish(win) {
+  const w = {};
+  vm.runInNewContext(readFileSync(new URL('../../../frontend/locales/en.js', import.meta.url), 'utf8'), { window: w });
+  win.__NIMBUS_LOCALES = w.__NIMBUS_LOCALES;
 }
 
 beforeEach(() => {
-  dom = installDom(); els = {}; calls = { create: [], update: [], addSch: [], updSch: [], toast: [], closed: [] };
+  dom = installDom();
+  loadEnglish(dom.win); els = {}; calls = { create: [], update: [], addSch: [], updSch: [], toast: [], closed: [] };
   for (const id of ['modal-job-edit', 'jb-body', 'jb-foot', 'jb-title', 'jb-close', 'jb-plant-host', 'jb-save']) add(id);
-  for (const id of ['name', 'plant', 'mode', 'search', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity']) add(`jb-err-${id}`, { hidden: true });
+  for (const id of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity']) add(`jb-err-${id}`, { hidden: true });
   Object.assign(prior, {
-    admin: Session.isAdmin, allowed: Session.allowedPlants, plants: Store.knownPlants, preview: JobsClient.preview, create: JobsClient.create,
+    admin: Session.isAdmin, allowed: Session.allowedPlants, plants: Store.knownPlants, preview: JobsClient.preview, winPreview: JobsClient.windowPreview, create: JobsClient.create,
     update: JobsClient.update, addSchedule: JobsClient.addSchedule, updateSchedule: JobsClient.updateSchedule, open: Modal.open, close: Modal.close, toast: Toast.show,
   });
   Session.isAdmin = () => true; Session.allowedPlants = () => null; Store.knownPlants = () => ['1008', '2000', '3000'];
   JobsClient.preview = async () => ({ timezone: 'America/New_York', cronExpr: '0 8 * * *', entries: [{ atUtc: '2026-10-30T12:00:00+00:00', atLocal: '2026-10-30T08:00:00-04:00', dstShifted: false }] });
+  JobsClient.windowPreview = async () => ({ start: 'S', end: 'E', label: '2026-10-22 to 2026-11-04', timezone: 'America/Chicago' });
   JobsClient.create = async j => { calls.create.push(j); return { id: 7 }; };
   JobsClient.update = async (id, p) => { calls.update.push([id, p]); return { id }; };
   JobsClient.addSchedule = async (id, s) => { calls.addSch.push([id, s]); return null; };
@@ -49,20 +60,58 @@ beforeEach(() => {
 afterEach(() => {
   JobsDialog.close();
   Session.isAdmin = prior.admin; Session.allowedPlants = prior.allowed; Store.knownPlants = prior.plants;
-  Object.assign(JobsClient, { preview: prior.preview, create: prior.create, update: prior.update, addSchedule: prior.addSchedule, updateSchedule: prior.updateSchedule });
+  Object.assign(JobsClient, { preview: prior.preview, windowPreview: prior.winPreview, create: prior.create, update: prior.update, addSchedule: prior.addSchedule, updateSchedule: prior.updateSchedule });
   Modal.open = prior.open; Modal.close = prior.close; Toast.show = prior.toast;
   dom.restore();
 });
 
+const optForm = () => defaultJobForm('1008', 'optimizer.plant', null, OPT);
+const optBody = (isAdmin = true, mode = 'new') => bodyHtml(optForm(), mode, isAdmin, OPT, TYPES);
+
 test('body markup: every field has a label, defaults are 08:00 / Exhaustive / Apply, plant timezone is read-only text', () => {
-  const html = bodyHtml(defaultJobForm('1008'), 'new', true);
-  for (const id of ['jb-name', 'jb-mode', 'jb-search', 'jb-result', 'jb-recur', 'jb-time', 'jb-from', 'jb-until', 'jb-overlap', 'jb-preview', 'jb-tz']) assert.match(html, new RegExp(`id="${id}"`), id);
+  const html = optBody();
+  for (const id of ['jb-name', 'jb-jobtype', 'jb-p-mode', 'jb-p-search', 'jb-p-respect_firmed', 'jb-p-apply_mode', 'jb-recur', 'jb-time', 'jb-from', 'jb-until', 'jb-overlap', 'jb-preview', 'jb-tz']) assert.match(html, new RegExp(`id="${id}"`), id);
   assert.match(html, /<option value="exhaustive" selected>/);
   assert.match(html, /<option value="apply" selected>/);
   assert.match(html, /id="jb-time"[^>]*value="08:00"/);
   assert.doesNotMatch(html, /<input[^>]*id="jb-tz"/, 'the timezone is not editable');
-  assert.doesNotMatch(bodyHtml(defaultJobForm('1008'), 'new', true), /id="jb-result"[^>]*disabled/);
-  assert.match(bodyHtml(defaultJobForm('1008'), 'new', false), /id="jb-result"[^>]*disabled/, 'non-admin cannot change the result');
+  assert.doesNotMatch(optBody(true), /id="jb-p-apply_mode"[^>]*disabled/);
+  assert.match(optBody(false), /id="jb-p-apply_mode"[^>]*disabled/, 'non-admin cannot change the result');
+  assert.match(html, /id="jb-p-apply_mode-hint"/, 'the Apply / Dry run hint is kept');
+  assert.match(html, /id="jb-p-search-hint"/, 'the Exhaustive duration note is kept');
+});
+
+test('the type select is grouped Optimization | Reports, lists every type, and is locked once a job exists', () => {
+  const html = optBody();
+  assert.equal([...html.matchAll(/<optgroup label=/g)].length, 2, 'Optimization and Reports');
+  for (const t of TYPES) assert.match(html, new RegExp(`<option value="${t.key.replace('.', '\\.')}"`), t.key);
+  assert.doesNotMatch(html, /id="jb-jobtype"[^>]*disabled/);
+  assert.match(optBody(true, 'edit'), /id="jb-jobtype"[^>]*disabled/);
+});
+
+test('a report type renders its own params (window picker, number box, checkboxes) and no Result control', () => {
+  const late = byKey('report.late_orders');
+  const html = bodyHtml(defaultJobForm('1008', late.key, null, late), 'new', true, late, TYPES);
+  assert.match(html, /id="jb-p-horizon-choice"/, 'the window picker');
+  assert.match(html, /<option value="next" selected>/, 'default Next 14 days');
+  assert.match(html, /id="jb-p-horizon-n"[^>]*value="14"/);
+  assert.match(html, /id="jb-p-min_days_late"[^>]*type="number"[^>]*max="365"/);
+  assert.doesNotMatch(html, /jb-p-apply_mode|jb-p-search/, 'no optimizer controls on a report');
+  const cov = byKey('report.coverage');
+  const ch = bodyHtml(defaultJobForm('1008', cov.key, null, cov), 'new', true, cov, TYPES);
+  for (const v of ['tools', 'priority_lists', 'setup']) assert.match(ch, new RegExp(`id="jb-p-sections-${v}" checked`));
+});
+
+test('the window picker shows the fields of its choice: fixed dates, N days, custom', async () => {
+  const { windowFieldsHtml, windowWidgetHtml } = await import('../../../frontend/admin-ops/jobs-dialog.mjs');
+  const { defaultWindowUi } = await import('../../../frontend/admin-ops/jobs-model.mjs');
+  assert.match(windowFieldsHtml('w', { ...defaultWindowUi(), choice: 'fixed', from: '2026-10-01', to: '2026-10-31' }), /id="w-from"[^>]*data-jb-wdate[^>]*value="2026-10-01"[\s\S]*id="w-to"/);
+  assert.match(windowFieldsHtml('w', { ...defaultWindowUi(), choice: 'older_than', n: 30 }), /id="w-n"[^>]*min="0"[^>]*value="30"/);
+  assert.match(windowFieldsHtml('w', { ...defaultWindowUi(), choice: 'last', n: 7 }), /id="w-n"[^>]*min="1"/);
+  const custom = windowFieldsHtml('w', { ...defaultWindowUi(), choice: 'custom', anchor: 'last_success', fromOffset: -2, toOffset: 0, unit: 'week' });
+  assert.match(custom, /<option value="last_success" selected>/); assert.match(custom, /id="w-foff"[^>]*value="-2"/); assert.match(custom, /<option value="week" selected>/);
+  assert.equal(windowFieldsHtml('w', { ...defaultWindowUi(), choice: 'this_week' }), '', 'a preset without a number has no fields');
+  assert.match(windowWidgetHtml(byKey('report.late_orders').params[0], defaultWindowUi('next', 14)), /id="jb-p-horizon-line"[^>]*aria-live="polite"/);
 });
 
 test('recurrence fields follow the preset and escape their values', () => {
@@ -85,22 +134,100 @@ test('copy rows: source plant excluded, filter narrows, role_plants scope respec
 
 test('open is a no-op for a non-admin', () => {
   Session.isAdmin = () => false;
-  JobsDialog.open({ plant: '1008' });
+  JobsDialog.open({ plant: '1008', types: TYPES });
   assert.equal(JobsDialog._state(), null);
   assert.equal(els['jb-body'].innerHTML, '');
 });
 
 test('readForm reads live fields and keeps the recurrence of the previous form for fields not on screen', () => {
   fillForm({ 'jb-name': ' Night run ', 'jb-recur': 'daily', 'jb-time': '22:30' });
-  const f = readForm(defaultJobForm('1008'));
+  const f = readForm(optForm(), OPT);
   assert.equal(f.name, ' Night run ');
   assert.equal(f.recur.preset, 'daily'); assert.equal(f.recur.time, '22:30');
   assert.deepEqual(f.recur.days, [0, 1, 2, 3, 4], 'weekday boxes are not on screen, so the previous days stay');
-  assert.equal(f.respectFirmed, true);
+  assert.deepEqual(f.params, { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' });
+});
+
+test('readForm reads number boxes, multi-select checkboxes and a window picker into their param shapes', () => {
+  const late = byKey('report.late_orders'); const cov = byKey('report.coverage');
+  (els['jb-p-min_days_late'] ?? add('jb-p-min_days_late')).value = '2.5';
+  (els['jb-p-horizon-choice'] ?? add('jb-p-horizon-choice')).value = 'older_than';
+  (els['jb-p-horizon-n'] ?? add('jb-p-horizon-n')).value = '30';
+  const f = readForm(defaultJobForm('1008', late.key, null, late), late);
+  assert.equal(f.params.min_days_late, 2.5);
+  assert.deepEqual(f.params.horizon.rolling, { anchor: 'start_of_day', from_offset: -3650, to_offset: -30, unit: 'day' });
+  (els['jb-p-sections-tools'] ?? add('jb-p-sections-tools')).checked = true;
+  (els['jb-p-sections-priority_lists'] ?? add('jb-p-sections-priority_lists')).checked = false;
+  (els['jb-p-sections-setup'] ?? add('jb-p-sections-setup')).checked = true;
+  assert.deepEqual(readForm(defaultJobForm('1008', cov.key, null, cov), cov).params.sections, ['tools', 'setup']);
+  els['jb-p-min_days_late'].value = '';
+  assert.equal(readForm(defaultJobForm('1008', late.key, null, late), late).params.min_days_late, null, 'blank stays blank (validation decides)');
+});
+
+test('a report job saves with its window and params as given; validation blocks a bad window and a missing section', async () => {
+  const late = byKey('report.late_orders');
+  JobsDialog.open({ plant: '1008', types: TYPES, jobType: late.key });
+  fillForm({ 'jb-p-horizon-choice': 'last', 'jb-p-horizon-n': '7', 'jb-p-min_days_late': '1' });
+  assert.equal(JobsDialog._state().meta.key, 'report.late_orders');
+  await JobsDialog.submit();
+  assert.equal(calls.create.length, 1);
+  assert.equal(calls.create[0].job_type, 'report.late_orders');
+  assert.deepEqual(calls.create[0].params.horizon.rolling, { anchor: 'start_of_day', from_offset: -7, to_offset: 1, unit: 'day' });
+  assert.equal(calls.create[0].params.min_days_late, 1);
+  assert.equal('apply_mode' in calls.create[0].params, false, 'a report carries no result mode');
+  // a bad window: 0 days for "Last N days"
+  calls.create.length = 0;
+  els['jb-p-horizon-n'].value = '0';
+  await JobsDialog.submit();
+  assert.equal(calls.create.length, 0);
+  const cov = byKey('report.coverage');
+  JobsDialog.open({ plant: '1008', types: TYPES, jobType: cov.key });
+  fillForm({});
+  for (const v of ['tools', 'priority_lists', 'setup']) (els[`jb-p-sections-${v}`] ?? add(`jb-p-sections-${v}`)).checked = false;
+  await JobsDialog.submit();
+  assert.equal(calls.create.length, 0, 'at least one section is required');
+});
+
+test('the live "Resolves today to" line comes from the preview route, with a stale-response guard', async () => {
+  const late = byKey('report.late_orders');
+  const seen = []; let release;
+  JobsClient.windowPreview = async (plant, w, o) => { seen.push([plant, w, o]); return new Promise(res => { release = () => res({ start: 'S', end: 'E', label: '2026-10-22 to 2026-11-04', timezone: 'America/Chicago' }); }); };
+  const line = add('jb-p-horizon-line');
+  (els['jb-p-horizon-choice'] ?? add('jb-p-horizon-choice')).value = 'next';
+  (els['jb-p-horizon-n'] ?? add('jb-p-horizon-n')).value = '14';
+  JobsDialog.open({ plant: '1008', types: TYPES, jobType: late.key });
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0][0], '1008');
+  assert.deepEqual(seen[0][1].rolling, { anchor: 'start_of_day', from_offset: 0, to_offset: 14, unit: 'day' });
+  JobsDialog.close();                       // the dialog closed while the request was in flight: its answer is dropped
+  release(); await new Promise(r => setTimeout(r, 0));
+  assert.equal(line.textContent, '');
+});
+
+test('the line shows what the server resolved, in the plant time wording', async () => {
+  const late = byKey('report.late_orders');
+  const line = add('jb-p-horizon-line');
+  (els['jb-p-horizon-choice'] ?? add('jb-p-horizon-choice')).value = 'next';
+  JobsDialog.open({ plant: '1008', types: TYPES, jobType: late.key });
+  await new Promise(r => setTimeout(r, 0));
+  assert.match(line.textContent, /Resolves today to 2026-10-22 to 2026-11-04 \(America\/Chicago, plant time\)/);
+  assert.equal(line.classList.contains('ape-err'), false);
+});
+
+test('a preview error (plant without a timezone) shows on the line as an error', async () => {
+  const late = byKey('report.late_orders');
+  JobsClient.windowPreview = async () => { throw new Error("plant '9' has no timezone"); };
+  const line = add('jb-p-horizon-line');
+  (els['jb-p-horizon-choice'] ?? add('jb-p-horizon-choice')).value = 'next';
+  JobsDialog.open({ plant: '1008', types: TYPES, jobType: late.key });
+  await new Promise(r => setTimeout(r, 0));
+  assert.match(line.textContent, /no timezone/);
+  assert.equal(line.classList.contains('ape-err'), true);
 });
 
 test('submit with an empty name shows the inline error and sends nothing', async () => {
-  JobsDialog.open({ plant: '1008' });
+  JobsDialog.open({ plant: '1008', types: TYPES });
   fillForm({ 'jb-name': '   ' });
   await JobsDialog.submit();
   assert.equal(els['jb-err-name'].hidden, false);
@@ -110,7 +237,7 @@ test('submit with an empty name shows the inline error and sends nothing', async
 
 test('submit creates the job with its preset schedule inline, toasts, closes and calls onSaved', async () => {
   let saved = 0;
-  JobsDialog.open({ plant: '1008', onSaved: () => { saved++; } });
+  JobsDialog.open({ plant: '1008', types: TYPES, onSaved: () => { saved++; } });
   fillForm();
   await JobsDialog.submit();
   assert.equal(calls.create.length, 1);
@@ -127,7 +254,7 @@ test('submit creates the job with its preset schedule inline, toasts, closes and
 
 test('submit on an existing job patches the job and its schedule (no create)', async () => {
   const job = { id: 3, name: 'Old', plant: '1008', job_type: 'optimizer.plant', params: {}, enabled: true, schedule: { id: 9, kind: 'daily', time_of_day: '06:00', cron_expr: '0 6 * * *', valid_from: null, valid_until: null, skip_if_running: true } };
-  JobsDialog.open({ job });
+  JobsDialog.open({ job, types: TYPES });
   fillForm({ 'jb-name': 'Renamed', 'jb-time': '07:15' });
   await JobsDialog.submit();
   assert.equal(calls.create.length, 0);
@@ -139,7 +266,7 @@ test('submit on an existing job patches the job and its schedule (no create)', a
 
 test('a server failure keeps the dialog open and toasts the error', async () => {
   JobsClient.create = async () => { throw new Error('plant is read-only'); };
-  JobsDialog.open({ plant: '1008' });
+  JobsDialog.open({ plant: '1008', types: TYPES });
   fillForm();
   await JobsDialog.submit();
   assert.equal(calls.closed.length, 0);
@@ -150,10 +277,10 @@ test('a server failure keeps the dialog open and toasts the error', async () => 
 
 test('duplicate seeds a new job: name cleared, saves as create', async () => {
   const job = { id: 3, name: 'Source', plant: '1008', job_type: 'optimizer.plant', params: { search: 'normal' }, enabled: true, schedule: null };
-  JobsDialog.open({ job, duplicate: true });
+  JobsDialog.open({ job, duplicate: true, types: TYPES });
   assert.equal(JobsDialog._state().mode, 'new');
   assert.equal(JobsDialog._state().form.name, '');
-  assert.equal(JobsDialog._state().form.search, 'normal');
+  assert.equal(JobsDialog._state().form.params.search, 'normal');
   fillForm({ 'jb-name': 'Copy', 'jb-search': 'normal' });
   await JobsDialog.submit();
   assert.equal(calls.create.length, 1);
@@ -176,12 +303,13 @@ test('copy to plants creates one job (schedule inline) per ticked plant and repo
 });
 
 test('a new job defaults to APPLY, seeded from the server defaults; Dry run is the alternative', () => {
-  JobsDialog.open({ plant: '1008' });
-  assert.equal(JobsDialog._state().form.result, 'apply');
-  JobsDialog.open({ plant: '1008', defaults: { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' } });
-  const f = JobsDialog._state().form;
-  assert.deepEqual([f.mode, f.search, f.respectFirmed, f.result], ['spt', 'normal', false, 'propose']);
-  assert.match(bodyHtml(defaultJobForm('1008'), 'new', true), /<option value="apply" selected>/);
+  JobsDialog.open({ plant: '1008', types: TYPES });
+  assert.equal(JobsDialog._state().form.params.apply_mode, 'apply');
+  assert.equal(JobsDialog._state().form.jobType, 'optimizer.plant', 'a new job starts as the first action type');
+  JobsDialog.open({ plant: '1008', types: TYPES, defaults: { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' } });
+  const f = JobsDialog._state().form.params;
+  assert.deepEqual([f.mode, f.search, f.respect_firmed, f.apply_mode], ['spt', 'normal', false, 'propose']);
+  assert.match(optBody(), /<option value="apply" selected>/);
 });
 
 test('Escape / X: a clean form closes at once, a dirty one asks first and stays open on Cancel', async () => {
@@ -190,11 +318,11 @@ test('Escape / X: a clean form closes at once, a dirty one asks first and stays 
   let answer = false;
   Modal.confirm = async o => { asked.push(o); return answer; };
   try {
-    JobsDialog.open({ plant: '1008' });          // nothing edited (the stub renders no fields, so read-back equals the baseline)
+    JobsDialog.open({ plant: '1008', types: TYPES });          // nothing edited (the stub renders no fields, so read-back equals the baseline)
     await JobsDialog.requestClose();
     assert.equal(asked.length, 0); assert.deepEqual(calls.closed, ['modal-job-edit']);
     calls.closed.length = 0;
-    JobsDialog.open({ plant: '1008' });
+    JobsDialog.open({ plant: '1008', types: TYPES });
     fillForm({ 'jb-name': 'half typed' });
     await JobsDialog.requestClose();
     assert.equal(asked.length, 1); assert.equal(calls.closed.length, 0, 'Cancel keeps the form');

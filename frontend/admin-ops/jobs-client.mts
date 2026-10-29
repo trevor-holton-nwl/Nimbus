@@ -11,7 +11,7 @@
 
 import { Util, Config } from '../platform/foundation.mjs';
 import { buildJobsQuery, buildRunsQuery, buildLogQuery } from './jobs-model.mjs';
-import type { JobsQuery, RunsQuery, LogLine, RunSummary, HealthSummary, Proposal } from './jobs-model.mjs';
+import type { JobsQuery, RunsQuery, LogLine, RunSummary, HealthSummary, Proposal, TypeMeta, ParamMeta, DateWindow, Artifact, ArtifactSection } from './jobs-model.mjs';
 
 export interface JobSchedule {
   id: number;
@@ -33,6 +33,7 @@ export interface JobRun {
   job_id: number;
   job_name: string;
   plant: string;
+  job_type: string;
   status: string;
   trigger: string | null;
   scheduled_for: string | null;
@@ -61,7 +62,11 @@ export interface Job {
   last_run: JobRun | null;
 }
 
-export interface JobType { key: string; label: string; plant_scoped: boolean; defaults: Record<string, unknown> }
+/** A job type with its param metadata (GET /jobs/types): kind, whether it mutates data, and the params the generic form renders. */
+export type JobType = TypeMeta;
+
+/** What a DateWindow resolves to today in the plant timezone (POST /jobs/windows/preview). */
+export interface WindowPreview { start: string; end: string; label: string; timezone: string }
 
 /** One upcoming fire: `atLocal` is the plant wall clock (offset kept on the wire, ignore it), `atUtc` the instant. */
 export interface UpcomingEntry {
@@ -105,7 +110,7 @@ export function normSchedule(r: Raw): JobSchedule {
 
 export function normRun(r: Raw): JobRun {
   return {
-    id: Number(r.id), job_id: Number(r.job_id), job_name: String(r.job_name ?? ''), plant: String(r.plant ?? ''),
+    id: Number(r.id), job_id: Number(r.job_id), job_name: String(r.job_name ?? ''), plant: String(r.plant ?? ''), job_type: String(r.job_type ?? ''),
     status: String(r.status ?? ''), trigger: _s(r.trigger), scheduled_for: _s(r.scheduled_for), started_at: _s(r.started_at),
     ended_at: _s(r.ended_at), duration_ms: typeof r.duration_ms === 'number' ? r.duration_ms : null, triggered_by: _s(r.triggered_by),
     summary: (r.summary as RunSummary | null) ?? null, error: _s(r.error), log_truncated: !!r.log_truncated,
@@ -169,12 +174,40 @@ export function normProposal(data: unknown): Proposal {
   };
 }
 
+export function normParam(r: Raw): ParamMeta {
+  const labelKey = String(r.label_key ?? '');
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  return {
+    key: String(r.key), type: String(r.type ?? 'string') as ParamMeta['type'], labelKey, title: String(r.title ?? r.key), default: r.default,
+    required: r.required === true, enum: Array.isArray(r.enum) ? (r.enum as unknown[]).map(String) : undefined,
+    enumLabelKeys: (r.enum_label_keys as Record<string, string> | undefined) ?? undefined, min: num(r.min), max: num(r.max),
+    pattern: typeof r.pattern === 'string' ? r.pattern : undefined, widget: typeof r.widget === 'string' ? r.widget : null,
+  };
+}
+
+export function normType(r: Raw): JobType {
+  return {
+    key: String(r.key), label: String(r.label ?? r.key), kind: r.kind === 'report' ? 'report' : 'action', mutates: r.mutates !== false,
+    plantScoped: r.plant_scoped !== false, params: _arr(r, 'params').map(normParam), defaults: (r.defaults as Record<string, unknown> | null) ?? {},
+  };
+}
+
+export function normArtifact(data: unknown): Artifact {
+  const d = (data as Raw | null) ?? {};
+  const sections: ArtifactSection[] = _arr(d, 'sections').map(s => ({
+    key: String(s.key), title: String(s.title ?? s.key),
+    columns: _arr(s, 'columns').map(c => ({ key: String(c.key), label: String(c.label ?? c.key) })),
+    rows: Array.isArray(s.rows) ? (s.rows as unknown[][]) : [], rowCount: Number(s.row_count ?? 0), rowsStored: Number(s.rows_stored ?? 0),
+    truncated: s.truncated === true, offset: Number(s.offset ?? 0),
+  }));
+  return { runId: Number(d.run_id), sizeBytes: Number(d.size_bytes ?? 0), truncated: d.truncated === true, sections };
+}
+
 const _cursor = (data: unknown): number | null => { const v = (data as Raw | null)?.next_before_id; return v == null ? null : Number(v); };
 
 export const JobsClient = {
   async types(): Promise<JobType[]> {
-    return _arr(await _req('GET', '/jobs/types'), 'types')
-      .map(r => ({ key: String(r.key), label: String(r.label ?? r.key), plant_scoped: r.plant_scoped !== false, defaults: (r.defaults as Record<string, unknown> | null) ?? {} }));
+    return _arr(await _req('GET', '/jobs/types'), 'types').map(normType);
   },
 
   async list(q: JobsQuery): Promise<{ items: Job[]; nextBeforeId: number | null }> {
@@ -221,6 +254,26 @@ export const JobsClient = {
   },
   /** A dry run's proposal joined to the live orders (read-only). */
   async proposal(runId: number): Promise<Proposal> { return normProposal(await _req('GET', `/jobs/runs/${runId}/proposal`)); },
+  /** Today's resolution of a date window in the plant timezone: the SAME resolver a run uses. `jobId` lets a last_success anchor use that job's watermark. */
+  async windowPreview(plant: string, window: DateWindow, o: { jobId?: number | null; lookbackDays?: number } = {}): Promise<WindowPreview> {
+    const body: Raw = { plant, window };
+    if (o.jobId) body.job_id = o.jobId;
+    if (o.lookbackDays) body.first_run_lookback_days = o.lookbackDays;
+    const d = await _req('POST', '/jobs/windows/preview', body) as Raw | null;
+    return { start: String(d?.start ?? ''), end: String(d?.end ?? ''), label: String(d?.label ?? ''), timezone: String(d?.timezone ?? '') };
+  },
+  /** One page of a report run's artifact (all sections, or just `section`); rows are cut to `limit` (max 500) from `offset`. */
+  async artifact(runId: number, o: { section?: string; offset?: number; limit?: number } = {}): Promise<Artifact> {
+    const q: string[] = [`offset=${o.offset ?? 0}`, `limit=${o.limit ?? 500}`];
+    if (o.section) q.push(`section=${encodeURIComponent(o.section)}`);
+    return normArtifact(await _req('GET', `/jobs/runs/${runId}/artifact?${q.join('&')}`));
+  },
+  /** One section as CSV text (the server adds the BOM and the formula guard). */
+  async artifactCsv(runId: number, section: string): Promise<string> {
+    const r = await Util.fetchTraced(`${API()}/jobs/runs/${runId}/artifact?section=${encodeURIComponent(section)}&format=csv`, { method: 'GET' });
+    if (!r.ok) { let d: unknown = null; try { d = (await r.json() as Raw).detail; } catch { /* not JSON */ } throw new Error(typeof d === 'string' && d ? d : `HTTP ${r.status}`); }
+    return await r.text();
+  },
   async cancelRun(runId: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/runs/${runId}/cancel`)) as Raw).run) as Raw); },
 
   async runs(q: RunsQuery): Promise<{ items: JobRun[]; nextBeforeId: number | null }> {

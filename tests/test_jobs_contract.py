@@ -298,3 +298,33 @@ def test_optimizer_schedule_for_a_plant_without_timezone_is_refused(client):
     assert r.status_code == 400 and "timezone" in r.json()["detail"]
     assert client.post("/jobs", json={**body, "schedules": []}).status_code == 200, "a job without a schedule is fine"
     assert client.post("/jobs/schedules/preview", json={"plant": "NOTZ", "n": 2, **SCHEDULE_BODY}).status_code == 200
+
+
+def test_committed_job_types_fixture_matches_the_registry():
+    """tests/fixtures/jobs_types.json feeds the frontend form tests; regenerate with scripts/dump_job_types.py."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dump_job_types", Path(__file__).parent.parent / "scripts" / "dump_job_types.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    committed = json.loads((Path(__file__).parent / "fixtures" / "jobs_types.json").read_text(encoding="utf-8"))
+    assert committed == mod.live(), "run: python scripts/dump_job_types.py"
+
+
+def test_every_param_and_type_label_key_is_translated_or_aliased():
+    """The server names `jobs.p.<type>.<param>[.<value>]` and `jobs.type.<key>`; the locale files (or the frontend's
+    legacy aliases for the optimizer) must answer every one, in all five locales."""
+    import re
+    root = Path(__file__).parent.parent / "frontend"
+    committed = json.loads((Path(__file__).parent / "fixtures" / "jobs_types.json").read_text(encoding="utf-8"))
+    model = (root / "admin-ops" / "jobs-model.mts").read_text(encoding="utf-8")
+    aliases = dict(re.findall(r"'(jobs\.[\w.]+)': '(jobs\.\w+)'", model))
+    for loc in ("en", "de", "es", "fr", "pt"):
+        text = (root / "locales" / f"{loc}.js").read_text(encoding="utf-8")
+        have = set(re.findall(r"^\s*'(jobs\.[\w.]+)':", text, re.M))
+        for t in committed["types"]:
+            keys = [f"jobs.type.{t['key']}"]
+            for p in t["params"]:
+                keys.append(p["label_key"])
+                keys += list((p.get("enum_label_keys") or {}).values())
+            missing = [k for k in keys if k not in have and aliases.get(k) not in have]
+            assert not missing, f"{loc}: {missing}"

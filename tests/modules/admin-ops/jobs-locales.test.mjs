@@ -36,10 +36,25 @@ test('every key the Jobs sources ask for is defined', () => {
     'jobs.error_kind_': ['config', 'system', 'transient', 'config_hint', 'system_hint', 'transient_hint'],
     'jobs.health_': ['running', 'queued', 'failed', 'missed', 'next'],
     'jobs.bulk_': ['run', 'pause', 'resume', 'archive'],
+    'jobs.win_': ['fixed', 'older_than', 'last', 'next', 'since_last_success', 'this_week', 'this_month', 'custom'],
+    'jobs.win_anchor_': ['now', 'start_of_day', 'start_of_week', 'start_of_month', 'last_success'],
+    'jobs.win_unit_': ['day', 'week', 'month'],
   };
   for (const [p, vs] of Object.entries(families)) for (const v of vs) keys.add(p + v);
   const missing = [...keys].filter(k => !k.endsWith('_') && !tables.en[k]);   // `'jobs.mode_' + m` is a dynamic prefix
   assert.deepEqual(missing, []);
+});
+
+test('the report viewer strings (jobs.a.*), the report section titles, tile labels and column labels exist in all five locales', () => {
+  const need = ['title', 'csv', 'rows', 'loading_rows', 'rows_partial', 'empty', 'truncated', 'truncated_all', 'csv_failed', 'yes', 'no'].map(k => `jobs.a.${k}`);
+  const reports = readFileSync(new URL('../../../backend/jobs/types/reports.py', import.meta.url), 'utf8');
+  const sections = [...reports.matchAll(/artifacts\.section\(\s*"(\w+)"[\s\S]*?\[([^\]]*)\]/g)];
+  assert.ok(sections.length >= 9, 'found the report sections in reports.py');
+  for (const [, key, cols] of sections) {
+    need.push(`jobs.a.sec.${key}`, `jobs.a.tile.${key}`);
+    for (const c of cols.matchAll(/"(\w+)"/g)) need.push(`jobs.a.col.${c[1]}`);
+  }
+  for (const l of LOCALES) assert.deepEqual([...new Set(need)].filter(k => !tables[l][k]), [], l);
 });
 
 test('Dry run replaces Propose in the UI, and the stored value stays propose', () => {

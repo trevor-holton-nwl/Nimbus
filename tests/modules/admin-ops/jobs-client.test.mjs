@@ -58,8 +58,54 @@ test('list: {jobs, next_before_id} envelope, cursor paging, job_type filter, sch
 test('types: key, label, plant_scoped and the params defaults', async () => {
   reply = body('types');
   const t = (await JobsClient.types())[0];
-  assert.deepEqual([t.key, t.plant_scoped, t.defaults.search, t.defaults.mode], ['optimizer.plant', true, 'exhaustive', 'due_date']);
+  assert.deepEqual([t.key, t.plantScoped, t.defaults.search, t.defaults.mode], ['optimizer.plant', true, 'exhaustive', 'due_date']);
+  assert.deepEqual([t.kind, t.mutates, t.params[0].key, t.params[0].labelKey, t.params[0].enum], ['action', true, 'mode', 'jobs.p.optimizer.plant.mode', ['due_date', 'min_changeover', 'spt']]);
   assert.deepEqual(phantom, []);
+});
+
+test('types: kind, mutates and the param metadata of every type survive normalisation (real /jobs/types shapes)', async () => {
+  reply = { types: JSON.parse(readFileSync(new URL('../../fixtures/jobs_types.json', import.meta.url), 'utf8')).types };
+  const ts = await JobsClient.types();
+  assert.deepEqual(ts.map(t => [t.key, t.kind]), [['optimizer.plant', 'action'], ['report.what_changed', 'report'], ['report.late_orders', 'report'],
+    ['report.missing_master_data', 'report'], ['report.coverage', 'report'], ['report.distribution', 'report']]);
+  assert.ok(ts.filter(t => t.kind === 'report').every(t => t.mutates === false));
+  const p = Object.fromEntries(ts.find(t => t.key === 'report.late_orders').params.map(x => [x.key, x]));
+  assert.deepEqual([p.horizon.type, p.horizon.widget, p.min_days_late.type, p.min_days_late.min, p.min_days_late.max], ['date_window', 'date-window', 'number', 0, 365]);
+  assert.equal(p.horizon.default.rolling.to_offset, 14);
+  const cov = ts.find(t => t.key === 'report.coverage').params[0];
+  assert.deepEqual([cov.type, cov.enum, cov.enumLabelKeys.setup], ['multi_enum', ['tools', 'priority_lists', 'setup'], 'jobs.p.report.coverage.sections.setup']);
+});
+
+test('windowPreview posts {plant, window} (+ job_id, lookback) and returns the resolved window', async () => {
+  reply = body('window_preview');
+  const win = { mode: 'rolling', rolling: { anchor: 'last_success', from_offset: 0, to_offset: 0, unit: 'day' } };
+  const r = await JobsClient.windowPreview('1008', win, { jobId: 5, lookbackDays: 3 });
+  assert.deepEqual([calls[0].method, path(0)], ['POST', '/jobs/windows/preview']);
+  assert.deepEqual(calls[0].body, { plant: '1008', window: win, job_id: 5, first_run_lookback_days: 3 });
+  assert.deepEqual([r.label, r.timezone, r.start.slice(0, 10)], ['2026-09-28 to 2026-10-28', 'America/Chicago', '2026-09-28']);
+  await JobsClient.windowPreview('1008', win);
+  assert.deepEqual(calls[1].body, { plant: '1008', window: win }, 'no job id, no lookback when not given');
+  assert.deepEqual(phantom, []);
+});
+
+test('artifact: sections with columns and one page of rows; a section page asks offset / limit', async () => {
+  reply = body('artifact');
+  const a = await JobsClient.artifact(42);
+  assert.equal(path(0), '/jobs/runs/42/artifact?offset=0&limit=500');
+  assert.deepEqual([a.runId, a.truncated, a.sizeBytes, a.sections.length], [42, false, 512, 1]);
+  const s = a.sections[0];
+  assert.deepEqual([s.key, s.title, s.columns.map(c => c.key), s.rows, s.rowCount, s.rowsStored, s.truncated, s.offset], ['counts', 'Changes', ['value', 'events'], [['drag', 3]], 1, 1, false, 0]);
+  assert.deepEqual(phantom, []);
+  await JobsClient.artifact(42, { section: 'top orders', offset: 500, limit: 500 });
+  assert.equal(path(1), '/jobs/runs/42/artifact?offset=500&limit=500&section=top%20orders');
+});
+
+test('artifactCsv fetches one section as text and throws the server detail on a non-2xx', async () => {
+  Util.fetchTraced = async (url, init) => { calls.push({ url, method: init?.method }); return { ok: true, status: 200, text: async () => '﻿value,events\r\ndrag,3\r\n' }; };
+  assert.equal(await JobsClient.artifactCsv(42, 'counts'), '﻿value,events\r\ndrag,3\r\n');
+  assert.equal(path(0), '/jobs/runs/42/artifact?section=counts&format=csv');
+  Util.fetchTraced = async () => ({ ok: false, status: 404, json: async () => ({ detail: 'This run has no artifact' }) });
+  await assert.rejects(JobsClient.artifactCsv(43, 'counts'), /no artifact/);
 });
 
 test('runs: {runs, next_before_id}; getRun and runNow / cancelRun unwrap {run}', async () => {
