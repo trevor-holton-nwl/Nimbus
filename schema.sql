@@ -2355,3 +2355,37 @@ CREATE TABLE IF NOT EXISTS job_run_artifact (
     size_bytes    INTEGER NOT NULL DEFAULT 0,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+
+-- job targets and batches (mirrors migrations/2026-10-31-1-job-targets.sql). Idempotent.
+CREATE TABLE IF NOT EXISTS job_target (
+    id               BIGSERIAL PRIMARY KEY,
+    job_id           BIGINT NOT NULL REFERENCES job_definition (id),
+    kind             TEXT NOT NULL CHECK (kind IN ('explicit','subnetwork','all')),
+    value            TEXT NOT NULL DEFAULT '',   -- plant code | subnetwork code | '*' or a plant list for 'all'
+    excluded         BOOLEAN NOT NULL DEFAULT FALSE,
+    params_override  JSONB,                      -- deep-merged over the job params for the plants this row adds
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS idx_job_target_job ON job_target (job_id, id);
+
+CREATE TABLE IF NOT EXISTS job_batch (
+    id             BIGSERIAL PRIMARY KEY,
+    job_id         BIGINT NOT NULL REFERENCES job_definition (id),
+    schedule_id    BIGINT REFERENCES job_schedule (id),
+    scheduled_for  TIMESTAMPTZ,
+    trigger        TEXT NOT NULL CHECK (trigger IN ('schedule','manual','restart')),
+    triggered_by   TEXT,
+    status         TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','warning','failed')),
+    counts         JSONB,                        -- {total, <status>: n}
+    started_at     TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    ended_at       TIMESTAMPTZ,
+    summary        JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_job_batch_job ON job_batch (job_id, id DESC);
+
+-- W3a columns on existing job tables (also run by backend/jobs/data.py ensure_job_tables; not a migration).
+ALTER TABLE job_run        ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES job_batch (id);
+CREATE INDEX IF NOT EXISTS idx_job_run_batch ON job_run (batch_id) WHERE batch_id IS NOT NULL;
+ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS tz_mode TEXT NOT NULL DEFAULT 'plant' CHECK (tz_mode IN ('plant','fixed','utc'));
+ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS fixed_timezone TEXT;
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS fan_out JSONB;

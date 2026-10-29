@@ -112,6 +112,46 @@ CREATE TABLE IF NOT EXISTS job_run_artifact (
 );
 """
 
+# Identical text lives in migrations/2026-10-31-1-job-targets.sql and the schema.sql mirror block (pinned verbatim by
+# tests/test_jobs.py). CREATE-only: the deploy gate refuses ALTER/DROP/DELETE/UPDATE words in migrations.
+JOB_TARGET_DDL = """
+CREATE TABLE IF NOT EXISTS job_target (
+    id               BIGSERIAL PRIMARY KEY,
+    job_id           BIGINT NOT NULL REFERENCES job_definition (id),
+    kind             TEXT NOT NULL CHECK (kind IN ('explicit','subnetwork','all')),
+    value            TEXT NOT NULL DEFAULT '',   -- plant code | subnetwork code | '*' or a plant list for 'all'
+    excluded         BOOLEAN NOT NULL DEFAULT FALSE,
+    params_override  JSONB,                      -- deep-merged over the job params for the plants this row adds
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS idx_job_target_job ON job_target (job_id, id);
+
+CREATE TABLE IF NOT EXISTS job_batch (
+    id             BIGSERIAL PRIMARY KEY,
+    job_id         BIGINT NOT NULL REFERENCES job_definition (id),
+    schedule_id    BIGINT REFERENCES job_schedule (id),
+    scheduled_for  TIMESTAMPTZ,
+    trigger        TEXT NOT NULL CHECK (trigger IN ('schedule','manual','restart')),
+    triggered_by   TEXT,
+    status         TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','warning','failed')),
+    counts         JSONB,                        -- {total, <status>: n}
+    started_at     TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    ended_at       TIMESTAMPTZ,
+    summary        JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_job_batch_job ON job_batch (job_id, id DESC);
+"""
+
+# W3a columns and indexes on EXISTING job tables: startup hook + schema.sql mirror only (never a migration, which the
+# deploy gate allows to CREATE only). Runs after JOB_TARGET_DDL because job_run.batch_id references job_batch.
+JOB_COLUMN_DDL = """
+ALTER TABLE job_run        ADD COLUMN IF NOT EXISTS batch_id BIGINT REFERENCES job_batch (id);
+CREATE INDEX IF NOT EXISTS idx_job_run_batch ON job_run (batch_id) WHERE batch_id IS NOT NULL;
+ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS tz_mode TEXT NOT NULL DEFAULT 'plant' CHECK (tz_mode IN ('plant','fixed','utc'));
+ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS fixed_timezone TEXT;
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS fan_out JSONB;
+"""
+
 # Read-path indexes for GET /jobs/summary (the run_health counts), run by the startup hook and mirrored in
 # schema.sql. They stay out of JOB_DDL and the migration file, which tests pin verbatim.
 JOB_INDEX_DDL = """
@@ -123,13 +163,13 @@ MISSED_PREFIX = "missed:"          # record_skipped's reason for a fire that mis
 TERMINAL = ("succeeded", "warning", "failed", "cancelled", "skipped")
 SWEEP_LOCK_KEY = "nimbus:job-run-sweep"
 _DEF_COLS = ("id, plant, job_type, name, params, enabled, archived, retry_max, timeout_s, "
-             "created_by, created_at, modified_by, modified_at")
+             "created_by, created_at, modified_by, modified_at, fan_out")
 _SCHED_COLS = ("id, job_id, kind, cron_expr, time_of_day, days_of_week, day_of_month, run_at, timezone, "
                "valid_from, valid_until, paused, retired, misfire_grace_s, skip_if_running, "
-               "created_by, created_at, modified_by, modified_at")
+               "tz_mode, fixed_timezone, created_by, created_at, modified_by, modified_at")
 _RUN_COLS = ("r.id, r.job_id, d.name AS job_name, r.plant, r.job_type, r.schedule_id, r.status, r.trigger, "
              "r.attempt, r.scheduled_for, r.started_at, r.ended_at, r.triggered_by, r.summary, r.error, "
-             "r.log_truncated, r.cancel_requested")
+             "r.log_truncated, r.cancel_requested, r.batch_id")
 
 
 def _cur(conn):
@@ -145,6 +185,8 @@ def ensure_job_tables() -> None:
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(JOB_DDL)
         cur.execute(JOB_ARTIFACT_DDL)
+        cur.execute(JOB_TARGET_DDL)
+        cur.execute(JOB_COLUMN_DDL)
         cur.execute(JOB_INDEX_DDL)
         conn.commit()
 
@@ -165,6 +207,16 @@ def plant_has_timezone(plant: str) -> bool:
     return bool(row and row[0] and str(row[0]).strip())
 
 
+def load_plant_rows() -> list[dict]:
+    """Every plant with its timezone and subnetworks: [{plant, subnetworks, timezone}] sorted by plant code. One small
+    query (tens of plants); target expansion and reconcile read it fresh so a timezone edit is seen at once."""
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute("SELECT plant, array_agg(DISTINCT subnetwork ORDER BY subnetwork) AS subnetworks,"
+                    " MIN(NULLIF(BTRIM(timezone), '')) AS timezone FROM plants GROUP BY plant ORDER BY plant")
+        return [{"plant": r["plant"], "subnetworks": list(r["subnetworks"] or []), "timezone": r["timezone"]}
+                for r in cur.fetchall()]
+
+
 def has_active_run(job_id: int) -> bool:
     """A non-terminal (scheduled or running) run exists for the job."""
     with db._pool.connection() as conn, conn.cursor() as cur:
@@ -182,6 +234,8 @@ def plant_exists(plant: str) -> bool:
 def definition_to_wire(r: dict) -> dict:
     return {**{k: r[k] for k in ("id", "plant", "job_type", "name", "params", "enabled", "archived", "retry_max",
                                   "timeout_s", "created_by", "modified_by")},
+            "fan_out": r.get("fan_out"),
+            "targets": [target_to_wire(t) for t in r.get("targets") or []],
             "created_at": _iso(r["created_at"]), "modified_at": _iso(r["modified_at"])}
 
 
@@ -192,6 +246,7 @@ def schedule_to_wire(r: dict) -> dict:
         "day_of_month": r["day_of_month"], "run_at": _iso(r["run_at"]), "timezone": r["timezone"],
         "valid_from": _iso(r["valid_from"]), "valid_until": _iso(r["valid_until"]), "paused": r["paused"],
         "retired": r["retired"], "misfire_grace_s": r["misfire_grace_s"], "skip_if_running": r["skip_if_running"],
+        "tz_mode": r["tz_mode"], "fixed_timezone": r["fixed_timezone"],
         "created_by": r["created_by"], "modified_by": r["modified_by"],
         "created_at": _iso(r["created_at"]), "modified_at": _iso(r["modified_at"]),
     }
@@ -206,8 +261,22 @@ def run_to_wire(r: dict) -> dict:
         "ended_at": _iso(ended),
         "duration_ms": int((ended - started).total_seconds() * 1000) if started and ended else None,
         "triggered_by": r["triggered_by"], "summary": r["summary"], "error": r["error"],
-        "log_truncated": r["log_truncated"], "cancel_requested": r["cancel_requested"],
+        "log_truncated": r["log_truncated"], "cancel_requested": r["cancel_requested"], "batch_id": r.get("batch_id"),
     }
+
+
+def target_to_wire(t: dict) -> dict:
+    return {"kind": t["kind"], "value": t["value"], "excluded": bool(t["excluded"]),
+            "params_override": t["params_override"]}
+
+
+def batch_to_wire(b: dict) -> dict:
+    started, ended = b["started_at"], b["ended_at"]
+    return {"id": b["id"], "job_id": b["job_id"], "job_name": b.get("job_name"), "schedule_id": b["schedule_id"],
+            "scheduled_for": _iso(b["scheduled_for"]), "trigger": b["trigger"], "triggered_by": b["triggered_by"],
+            "status": b["status"], "counts": b["counts"] or {}, "started_at": _iso(started), "ended_at": _iso(ended),
+            "duration_ms": int((ended - started).total_seconds() * 1000) if started and ended else None,
+            "summary": b["summary"]}
 
 
 # ------------------------------------------------------------------------------------------------ definitions
@@ -220,7 +289,34 @@ def get_job(job_id: int) -> dict | None:
             return None
         cur.execute(f"SELECT {_SCHED_COLS} FROM job_schedule WHERE job_id = %s AND NOT retired ORDER BY id", (job_id,))
         d["schedules"] = cur.fetchall()
+        d["targets"] = _targets_for(cur, [job_id]).get(job_id, [])
     return d
+
+
+def _targets_for(cur, job_ids: list[int]) -> dict[int, list[dict]]:
+    cur.execute("SELECT job_id, kind, value, excluded, params_override FROM job_target"
+                " WHERE job_id = ANY(%s) ORDER BY id", (job_ids,))
+    out: dict[int, list[dict]] = {}
+    for t in cur.fetchall():
+        out.setdefault(t["job_id"], []).append(t)
+    return out
+
+
+def _insert_targets(cur, job_id: int, targets: list[dict]) -> None:
+    for t in targets:
+        cur.execute("INSERT INTO job_target (job_id, kind, value, excluded, params_override) VALUES (%s,%s,%s,%s,%s)",
+                    (job_id, t["kind"], t["value"], bool(t["excluded"]),
+                     Jsonb(t["params_override"]) if t.get("params_override") else None))
+
+
+def set_targets(job_id: int, targets: list[dict], actor: str | None) -> None:
+    """Replace the job's target rows (configuration, not history: the old rows are removed)."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM job_target WHERE job_id = %s", (job_id,))
+        _insert_targets(cur, job_id, targets)
+        cur.execute("UPDATE job_definition SET modified_by = %s, modified_at = clock_timestamp() WHERE id = %s",
+                    (actor, job_id))
+        conn.commit()
 
 
 def get_schedule(schedule_id: int) -> dict | None:
@@ -232,23 +328,28 @@ def get_schedule(schedule_id: int) -> dict | None:
 def _insert_schedule(cur, job_id: int, s: dict, actor: str | None) -> int:
     cur.execute(
         "INSERT INTO job_schedule (job_id, kind, cron_expr, time_of_day, days_of_week, day_of_month, run_at, timezone,"
-        " valid_from, valid_until, paused, misfire_grace_s, skip_if_running, created_by, modified_by)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        " valid_from, valid_until, paused, misfire_grace_s, skip_if_running, tz_mode, fixed_timezone,"
+        " created_by, modified_by)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
         (job_id, s["kind"], s["cron_expr"], s["time_of_day"], s["days_of_week"], s["day_of_month"], s["run_at"],
          s["timezone"], s["valid_from"], s["valid_until"], bool(s.get("paused", False)),
-         int(s.get("misfire_grace_s", 300)), bool(s.get("skip_if_running", True)), actor, actor))
+         int(s.get("misfire_grace_s", 300)), bool(s.get("skip_if_running", True)),
+         s.get("tz_mode") or "plant", s.get("fixed_timezone"), actor, actor))
     return cur.fetchone()[0]
 
 
 def create_job(*, plant: str, job_type: str, name: str, params: dict, enabled: bool, retry_max: int,
-               timeout_s: int | None, schedules: list[dict], actor: str | None) -> int:
+               timeout_s: int | None, schedules: list[dict], actor: str | None, targets: list[dict] | None = None,
+               fan_out: dict | None = None) -> int:
     with db._pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO job_definition (plant, job_type, name, params, enabled, retry_max, timeout_s,"
-                " created_by, modified_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                (plant, job_type, name, Jsonb(params), enabled, retry_max, timeout_s, actor, actor))
+                " created_by, modified_by, fan_out) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (plant, job_type, name, Jsonb(params), enabled, retry_max, timeout_s, actor, actor,
+                 Jsonb(fan_out) if fan_out else None))
             job_id = cur.fetchone()[0]
+            _insert_targets(cur, job_id, targets or [])
             for s in schedules:
                 _insert_schedule(cur, job_id, s, actor)
         conn.commit()
@@ -256,7 +357,7 @@ def create_job(*, plant: str, job_type: str, name: str, params: dict, enabled: b
 
 
 _JOB_PATCHABLE = {"name": None, "params": Jsonb, "enabled": None, "archived": None, "retry_max": None,
-                  "timeout_s": None}
+                  "timeout_s": None, "fan_out": Jsonb}
 
 
 def patch_job(job_id: int, fields: dict, actor: str | None) -> bool:
@@ -265,7 +366,7 @@ def patch_job(job_id: int, fields: dict, actor: str | None) -> bool:
         if k not in _JOB_PATCHABLE:
             continue
         sets.append(f"{k} = %s")
-        vals.append(Jsonb(v) if k == "params" else v)
+        vals.append(Jsonb(v) if k in ("params", "fan_out") and v is not None else v)
     if not sets:
         return True
     sets += ["modified_by = %s", "modified_at = clock_timestamp()"]
@@ -292,7 +393,7 @@ def patch_schedule(schedule_id: int, s: dict | None, flags: dict, actor: str | N
                   "valid_from", "valid_until"):
             sets.append(f"{k} = %s")
             vals.append(s[k])
-    for k in ("paused", "retired", "misfire_grace_s", "skip_if_running"):
+    for k in ("paused", "retired", "misfire_grace_s", "skip_if_running", "tz_mode", "fixed_timezone"):
         if k in flags:
             sets.append(f"{k} = %s")
             vals.append(flags[k])
@@ -317,7 +418,12 @@ def list_jobs(*, allowed_plants, plant, job_type, status, q, include_archived, l
     SELECT d.id FROM job_definition d
       LEFT JOIN LATERAL (SELECT status, error FROM job_run r WHERE r.job_id = d.id ORDER BY r.id DESC LIMIT 1) lr ON TRUE
      WHERE (%(allowed)s::text[] IS NULL OR d.plant = ANY(%(allowed)s))
-       AND (%(plant)s::text IS NULL OR d.plant = %(plant)s)
+       AND (%(plant)s::text IS NULL OR d.plant = %(plant)s OR EXISTS (
+              SELECT 1 FROM job_target t WHERE t.job_id = d.id AND NOT t.excluded
+                 AND (t.kind = 'all' OR (t.kind = 'explicit' AND t.value = %(plant)s)
+                      OR (t.kind = 'subnetwork' AND t.value IN (SELECT subnetwork FROM plants WHERE plant = %(plant)s)))
+                 AND NOT EXISTS (SELECT 1 FROM job_target x WHERE x.job_id = d.id AND x.excluded
+                                   AND x.kind = 'explicit' AND x.value = %(plant)s)))
        AND (%(jt)s::text IS NULL OR d.job_type = %(jt)s)
        AND (%(status)s::text IS NULL OR lr.status = %(status)s
             OR (%(status)s = 'missed' AND lr.status = 'skipped' AND lr.error LIKE %(missed)s))
@@ -343,8 +449,10 @@ def list_jobs(*, allowed_plants, plant, job_type, status, q, include_archived, l
             cur.execute(f"SELECT DISTINCT ON (r.job_id) {_RUN_COLS} FROM job_run r JOIN job_definition d"
                         " ON d.id = r.job_id WHERE r.job_id = ANY(%s) ORDER BY r.job_id, r.id DESC", (page,))
             last = {r["job_id"]: r for r in cur.fetchall()}
+            tgt = _targets_for(cur, page)
             for j in jobs:
                 j["schedules"] = by_job.get(j["id"], [])
+                j["targets"] = tgt.get(j["id"], [])
                 j["last_run"] = last.get(j["id"])
     return {"jobs": jobs, "next_before_id": page[-1] if len(ids) > limit and page else None}
 
@@ -354,10 +462,15 @@ def list_active_schedules() -> list[dict]:
     with db._pool.connection() as conn, _cur(conn) as cur:
         cur.execute(
             "SELECT s.id, s.job_id, s.kind, s.cron_expr, s.time_of_day, s.days_of_week, s.day_of_month, s.run_at,"
-            " s.timezone, s.valid_from, s.valid_until, s.misfire_grace_s, s.modified_at, d.plant, d.job_type"
+            " s.timezone, s.valid_from, s.valid_until, s.misfire_grace_s, s.modified_at, s.tz_mode, s.fixed_timezone,"
+            " d.plant, d.job_type, d.modified_at AS job_modified_at"
             "  FROM job_schedule s JOIN job_definition d ON d.id = s.job_id"
             " WHERE NOT s.retired AND NOT s.paused AND d.enabled AND NOT d.archived ORDER BY s.id")
-        return cur.fetchall()
+        rows = cur.fetchall()
+        tgt = _targets_for(cur, sorted({r["job_id"] for r in rows})) if rows else {}
+        for r in rows:
+            r["targets"] = tgt.get(r["job_id"], [])
+        return rows
 
 
 def next_fire_schedules(*, allowed_plants, plant) -> list[dict]:
@@ -366,13 +479,18 @@ def next_fire_schedules(*, allowed_plants, plant) -> list[dict]:
     with db._pool.connection() as conn, _cur(conn) as cur:
         cur.execute(
             "SELECT s.id, s.job_id, s.kind, s.cron_expr, s.time_of_day, s.days_of_week, s.day_of_month, s.run_at,"
-            " s.timezone, s.valid_from, s.valid_until, s.misfire_grace_s, d.name AS job_name, d.plant"
+            " s.timezone, s.valid_from, s.valid_until, s.misfire_grace_s, s.tz_mode, s.fixed_timezone,"
+            " d.name AS job_name, d.plant"
             "  FROM job_schedule s JOIN job_definition d ON d.id = s.job_id"
             " WHERE NOT s.retired AND NOT s.paused AND d.enabled AND NOT d.archived"
             "   AND (%(allowed)s::text[] IS NULL OR d.plant = ANY(%(allowed)s))"
             "   AND (%(plant)s::text IS NULL OR d.plant = %(plant)s) ORDER BY s.id",
             {"allowed": allowed_plants, "plant": plant})
-        return cur.fetchall()
+        rows = cur.fetchall()
+        tgt = _targets_for(cur, sorted({r["job_id"] for r in rows})) if rows else {}
+        for r in rows:
+            r["targets"] = tgt.get(r["job_id"], [])
+        return rows
 
 
 def schedule_has_run(schedule_id: int) -> bool:
@@ -381,17 +499,25 @@ def schedule_has_run(schedule_id: int) -> bool:
         return cur.fetchone() is not None
 
 
+def schedule_fired_plants(schedule_id: int) -> set[str]:
+    """Plants that already have a run for the schedule (a `once` schedule in each plant's local time is spent per plant)."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT plant FROM job_run WHERE schedule_id = %s", (schedule_id,))
+        return {r[0] for r in cur.fetchall()}
+
+
 # ------------------------------------------------------------------------------------------------------ runs
 def insert_run(*, job_id: int, schedule_id: int | None, plant: str, job_type: str, status: str, trigger: str,
                attempt: int = 1, scheduled_for: datetime | None = None, triggered_by: str | None = None,
-               error: str | None = None) -> int:
+               error: str | None = None, batch_id: int | None = None, summary: dict | None = None) -> int:
     ended = status in TERMINAL
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO job_run (job_id, schedule_id, plant, job_type, status, trigger, attempt, scheduled_for,"
-            " triggered_by, error, ended_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+            " triggered_by, error, batch_id, summary, ended_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
             " CASE WHEN %s THEN clock_timestamp() END) RETURNING id",
-            (job_id, schedule_id, plant, job_type, status, trigger, attempt, scheduled_for, triggered_by, error, ended))
+            (job_id, schedule_id, plant, job_type, status, trigger, attempt, scheduled_for, triggered_by, error,
+             batch_id, Jsonb(summary) if summary is not None else None, ended))
         rid = cur.fetchone()[0]
         conn.commit()
     clear_health_cache()
@@ -462,7 +588,124 @@ def get_run(run_id: int) -> dict | None:
         return cur.fetchone()
 
 
-PERIODICITIES = ("once", "hourly", "daily", "weekdays", "weekly", "monthly", "cron", "manual")
+# ----------------------------------------------------------------------------------------------------- batches
+_BATCH_COLS = ("b.id, b.job_id, d.name AS job_name, b.schedule_id, b.scheduled_for, b.trigger, b.triggered_by,"
+               " b.status, b.counts, b.started_at, b.ended_at, b.summary")
+
+
+def insert_batch(*, job_id: int, schedule_id: int | None, scheduled_for: datetime | None, trigger: str,
+                 triggered_by: str | None, summary: dict | None = None) -> int:
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO job_batch (job_id, schedule_id, scheduled_for, trigger, triggered_by, summary)"
+                    " VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+                    (job_id, schedule_id, scheduled_for, trigger, triggered_by,
+                     Jsonb(summary) if summary is not None else None))
+        bid = cur.fetchone()[0]
+        conn.commit()
+    return bid
+
+
+def batch_idle_check_and_insert(*, job: dict, trigger: str, triggered_by: str | None,
+                                scheduled_for: datetime) -> int | None:
+    """A manual/restart batch, unless the job has a scheduled|running run or a running batch. Check and insert share
+    one transaction under the same per-job advisory xact lock `insert_manual_run_if_idle` uses. None = already active."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"jobs:manual:{job['id']}",))
+        cur.execute(
+            "INSERT INTO job_batch (job_id, scheduled_for, trigger, triggered_by)"
+            " SELECT %s, %s, %s, %s WHERE NOT EXISTS (SELECT 1 FROM job_run WHERE job_id = %s"
+            " AND status IN ('scheduled','running')) AND NOT EXISTS (SELECT 1 FROM job_batch WHERE job_id = %s"
+            " AND status = 'running') RETURNING id",
+            (job["id"], scheduled_for, trigger, triggered_by, job["id"], job["id"]))
+        row = cur.fetchone()
+        conn.commit()
+    clear_health_cache()
+    return row[0] if row else None
+
+
+def get_batch(batch_id: int) -> dict | None:
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute(f"SELECT {_BATCH_COLS} FROM job_batch b JOIN job_definition d ON d.id = b.job_id WHERE b.id = %s",
+                    (batch_id,))
+        return cur.fetchone()
+
+
+def batch_runs(batch_id: int, allowed_plants, limit: int = 500) -> list[dict]:
+    """Child runs of a batch (plant, then id), restricted to the caller's plants."""
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute(f"SELECT {_RUN_COLS} FROM job_run r JOIN job_definition d ON d.id = r.job_id"
+                    " WHERE r.batch_id = %s AND (%s::text[] IS NULL OR r.plant = ANY(%s)) ORDER BY r.plant, r.id LIMIT %s",
+                    (batch_id, allowed_plants, allowed_plants, limit))
+        return cur.fetchall()
+
+
+def batch_latest_statuses(batch_ids: list[int], allowed_plants=None) -> dict[int, list[str]]:
+    """Final status per plant (the newest run of each plant, so a retry replaces its failed attempt) for each batch."""
+    out: dict[int, list[str]] = {b: [] for b in batch_ids}
+    if not batch_ids:
+        return out
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT batch_id, status FROM (SELECT DISTINCT ON (batch_id, plant) batch_id, plant, status"
+                    " FROM job_run WHERE batch_id = ANY(%s) AND (%s::text[] IS NULL OR plant = ANY(%s))"
+                    " ORDER BY batch_id, plant, id DESC) x", (batch_ids, allowed_plants, allowed_plants))
+        for bid, st in cur.fetchall():
+            out[bid].append(st)
+    return out
+
+
+def finish_batch(batch_id: int, *, force_status: str | None = None, summary_extra: dict | None = None) -> dict | None:
+    """Recompute counts from the children's newest runs. While any child is still scheduled|running (and not forced)
+    only the counts move; otherwise the status becomes the rollup (or `force_status`) and `ended_at` is set."""
+    from backend.jobs import targets as jt
+    sts = batch_latest_statuses([batch_id])[batch_id]
+    live = any(s in ("scheduled", "running") for s in sts)
+    counts = jt.counts_of(sts)
+    done = force_status is not None or not live
+    status = force_status or (jt.rollup(sts) if done else "running")
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE job_batch SET counts = %s, status = %s,"
+                    " ended_at = CASE WHEN %s THEN COALESCE(ended_at, clock_timestamp()) ELSE ended_at END,"
+                    " summary = COALESCE(summary, '{}'::jsonb) || %s::jsonb WHERE id = %s AND status = 'running'",
+                    (Jsonb(counts), status, done, Jsonb(summary_extra or {}), batch_id))
+        conn.commit()
+    clear_health_cache()
+    return get_batch(batch_id)
+
+
+def list_batches(*, allowed_plants, plant, job_id, status, limit, before_id) -> dict:
+    """Newest-first page of batches that contain at least one run for a plant the caller may see (and for `plant`)."""
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute(
+            f"SELECT {_BATCH_COLS} FROM job_batch b JOIN job_definition d ON d.id = b.job_id"
+            " WHERE (%(job)s::bigint IS NULL OR b.job_id = %(job)s)"
+            "   AND (%(status)s::text IS NULL OR b.status = %(status)s)"
+            "   AND (%(before)s::bigint IS NULL OR b.id < %(before)s)"
+            "   AND EXISTS (SELECT 1 FROM job_run r WHERE r.batch_id = b.id"
+            "               AND (%(allowed)s::text[] IS NULL OR r.plant = ANY(%(allowed)s))"
+            "               AND (%(plant)s::text IS NULL OR r.plant = %(plant)s))"
+            " ORDER BY b.id DESC LIMIT %(lim)s",
+            {"job": job_id, "status": status, "before": before_id, "allowed": allowed_plants, "plant": plant,
+             "lim": limit + 1})
+        rows = cur.fetchall()
+    page = rows[:limit]
+    return {"batches": page, "next_before_id": page[-1]["id"] if len(rows) > limit and page else None}
+
+
+def scope_batches(batches: list[dict], allowed_plants) -> list[dict]:
+    """A plant-scoped caller sees counts and status over their own plants only (never the other plants' tally)."""
+    if allowed_plants is None or not batches:
+        return batches
+    from backend.jobs import targets as jt
+    vis = batch_latest_statuses([b["id"] for b in batches], allowed_plants)
+    out = []
+    for b in batches:
+        sts = vis[b["id"]]
+        out.append({**b, "counts": jt.counts_of(sts),
+                    "status": "running" if b["status"] == "running" else jt.rollup(sts)})
+    return out
+
+
+PERIODICITIES = ("once","hourly", "daily", "weekdays", "weekly", "monthly", "cron", "manual")
 
 
 def list_runs(*, allowed_plants, plant, job_id, status, limit, before_id, periodicity=None, scheduled_by=None,
@@ -670,7 +913,12 @@ def boot_sweep() -> int:
                     " summary = COALESCE(summary, '{}'::jsonb) || '{\"error_kind\": \"system\"}'::jsonb,"
                     " ended_at = clock_timestamp() WHERE status IN ('scheduled','running')")
         n = cur.rowcount
+        cur.execute("SELECT id FROM job_batch WHERE status = 'running'")
+        stale = [r[0] for r in cur.fetchall()]
         conn.commit()
+    for bid in stale:                  # a batch never stays running after a restart: same rule as its children
+        finish_batch(bid, force_status="failed", summary_extra={"error_kind": "system", "error": "interrupted by restart"})
+    clear_health_cache()
     return n
 
 
@@ -679,7 +927,7 @@ def sweep_job_runs(*, retention_days=None, chunk: int = 500, max_chunks: int = 2
     """Trim finished runs older than the retention window (log lines first, then the run rows) in chunks of
     `chunk` runs. Never raises. One transaction per chunk, opening with an advisory xact lock; another sweeper
     holding it yields {"locked": True}. Stores its result in DIAGNOSTICS["job_run_last_sweep"]."""
-    result = {"deleted_runs": 0, "deleted_log_lines": 0, "deleted_artifacts": 0, "chunks": 0, "retention_days": None,
+    result = {"deleted_runs": 0, "deleted_log_lines": 0, "deleted_artifacts": 0, "deleted_batches": 0, "chunks": 0, "retention_days": None,
               "locked": False, "error": None}
     try:
         days = md.get_job_run_retention_days() if retention_days is None else max(1, min(60, int(retention_days)))
@@ -704,6 +952,10 @@ def sweep_job_runs(*, retention_days=None, chunk: int = 500, max_chunks: int = 2
                     result["deleted_log_lines"] += cur.rowcount
                     cur.execute("DELETE FROM job_run WHERE id = ANY(%s)", (ids,))
                     result["deleted_runs"] += cur.rowcount
+                # A batch goes once it is old enough and none of its runs is left (job_run.batch_id has no cascade).
+                cur.execute("DELETE FROM job_batch b WHERE b.ended_at < now() - make_interval(days => %s)"
+                            " AND NOT EXISTS (SELECT 1 FROM job_run r WHERE r.batch_id = b.id)", (days,))
+                result["deleted_batches"] += cur.rowcount
                 conn.commit()
             result["chunks"] += 1
             if len(ids) < chunk:

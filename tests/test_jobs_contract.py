@@ -61,7 +61,8 @@ def _sched_row(**kw):
     row = {"id": 11, "job_id": 5, "kind": "weekly", "cron_expr": "0 8 * * mon,wed,fri", "time_of_day": "08:00",
            "days_of_week": [0, 2, 4], "day_of_month": None, "run_at": None, "timezone": "America/New_York",
            "valid_from": datetime(2026, 11, 1), "valid_until": None, "paused": False, "retired": False,
-           "misfire_grace_s": 300, "skip_if_running": True, "created_by": "a", "modified_by": "a",
+           "misfire_grace_s": 300, "skip_if_running": True, "tz_mode": "plant", "fixed_timezone": None,
+           "created_by": "a", "modified_by": "a",
            "created_at": datetime(2026, 10, 28, 14, tzinfo=UTC), "modified_at": datetime(2026, 10, 28, 14, tzinfo=UTC)}
     return {**row, **kw}
 
@@ -71,7 +72,16 @@ def _run_row(**kw):
            "schedule_id": 11, "status": "warning", "trigger": "schedule", "attempt": 1,
            "scheduled_for": datetime(2026, 10, 29, 12, tzinfo=UTC), "started_at": datetime(2026, 10, 29, 12, 0, 1, tzinfo=UTC),
            "ended_at": datetime(2026, 10, 29, 12, 3, 40, tzinfo=UTC), "triggered_by": None, "summary": {"late": 3},
-           "error": None, "log_truncated": False, "cancel_requested": False}
+           "error": None, "log_truncated": False, "cancel_requested": False, "batch_id": None}
+    return {**row, **kw}
+
+
+def _batch_row(**kw):
+    row = {"id": 9, "job_id": 5, "job_name": "Morning optimize", "schedule_id": 11,
+           "scheduled_for": datetime(2026, 10, 29, 12, tzinfo=UTC), "trigger": "schedule", "triggered_by": "schedule",
+           "status": "warning", "counts": {"total": 3, "succeeded": 1, "warning": 1, "skipped": 1},
+           "started_at": datetime(2026, 10, 29, 12, tzinfo=UTC), "ended_at": datetime(2026, 10, 29, 12, 5, tzinfo=UTC),
+           "summary": {"error_kind": "system"}}
     return {**row, **kw}
 
 
@@ -79,7 +89,9 @@ def _job_row(**kw):
     row = {"id": 5, "plant": "1008", "job_type": "optimizer.plant", "name": "Morning optimize",
            "params": {"mode": "due_date"}, "enabled": True, "archived": False, "retry_max": 0, "timeout_s": None,
            "created_by": "a", "modified_by": "a", "created_at": datetime(2026, 10, 28, 14, tzinfo=UTC),
-           "modified_at": datetime(2026, 10, 28, 14, tzinfo=UTC), "schedules": [_sched_row()], "last_run": _run_row()}
+           "modified_at": datetime(2026, 10, 28, 14, tzinfo=UTC), "schedules": [_sched_row()], "last_run": _run_row(),
+           "fan_out": {"stagger_s": 30, "max_parallel": 2, "fail_fast": False},
+           "targets": [{"kind": "explicit", "value": "1008", "excluded": False, "params_override": {"mode": "spt"}}]}
     return {**row, **kw}
 
 
@@ -107,6 +119,14 @@ def client(monkeypatch):
         {**_sched_row(), "job_name": "Morning optimize", "plant": "1008"}])
     monkeypatch.setattr(jobs_scheduler, "heartbeat", lambda: {"ok": True, "last_tick_at": "2026-10-29T12:00:00+00:00"})
     monkeypatch.setattr(data, "plant_timezone", lambda plant: "America/New_York")
+    monkeypatch.setattr(data, "load_plant_rows", lambda: [
+        {"plant": "1008", "subnetworks": ["NA"], "timezone": "America/Chicago"},
+        {"plant": "1021", "subnetworks": ["NA"], "timezone": None},
+        {"plant": "NOTZ", "subnetworks": ["EU"], "timezone": None}])
+    monkeypatch.setattr(data, "get_batch", lambda bid: _batch_row() if bid == 9 else None)
+    monkeypatch.setattr(data, "batch_runs", lambda bid, allowed, limit=500: [_run_row(batch_id=9)] if bid == 9 else [])
+    monkeypatch.setattr(data, "list_batches", lambda **kw: {"batches": [_batch_row()], "next_before_id": 8})
+    monkeypatch.setattr(data, "set_targets", lambda jid, rows, actor: None)
     monkeypatch.setattr(data, "plant_exists", lambda plant: True)
     monkeypatch.setattr(data, "plant_has_timezone", lambda plant: plant != "NOTZ")
     monkeypatch.setattr(data, "has_active_run", lambda jid: False)
@@ -130,7 +150,7 @@ def client(monkeypatch):
     monkeypatch.setattr(data, "patch_job", lambda jid, fields, actor: True)
     monkeypatch.setattr(data, "add_schedule", lambda jid, s, actor: 11)
     monkeypatch.setattr(data, "patch_schedule", lambda sid, norm, flags, actor: True)
-    monkeypatch.setattr(runner, "start_manual_run", lambda job, actor: 42)
+    monkeypatch.setattr(runner, "start_manual_run", lambda job, actor, trigger="manual": 42)
     monkeypatch.setattr(runner, "cancel_run", lambda rid: runs[rid])
     app = FastAPI()
     app.include_router(routes.router)
@@ -236,7 +256,7 @@ def test_preview_and_upcoming(client):
 def test_runs(client):
     _check(client.get("/jobs/runs?plant=1008&job_id=5&status=warning&limit=50&before_id=100").json(), "runs_list")
     _check(client.get("/jobs/runs/42").json(), "run_wrapped")
-    _check(client.post("/jobs/5/run").json(), "run_wrapped")
+    _check(client.post("/jobs/5/run").json(), "run_started")
     _check(client.post("/jobs/runs/43/cancel").json(), "run_wrapped")
     assert client.post("/jobs/runs/42/cancel").status_code == 409, "a finished run cannot be cancelled"
 
@@ -255,7 +275,7 @@ def test_run_filters_and_restart(client, monkeypatch):
     assert (seen["periodicity"], seen["scheduled_by"], seen["status"]) == ("daily", "schedule", "missed")
     assert seen["since"] is not None
     assert client.get("/jobs/runs?periodicity=yearly").status_code == 400
-    _check(client.post("/jobs/runs/42/restart").json(), "run_wrapped")
+    _check(client.post("/jobs/runs/42/restart").json(), "run_started")
     monkeypatch.setattr(data, "has_active_run", lambda jid: True)
     assert client.post("/jobs/runs/42/restart").status_code == 409
 
@@ -328,3 +348,69 @@ def test_every_param_and_type_label_key_is_translated_or_aliased():
                 keys += list((p.get("enum_label_keys") or {}).values())
             missing = [k for k in keys if k not in have and aliases.get(k) not in have]
             assert not missing, f"{loc}: {missing}"
+
+
+# ------------------------------------------------------------------------------------------------ W3a multi-plant
+def test_batches_list_and_detail(client):
+    _check(client.get("/jobs/batches?plant=1008&job_id=5&status=warning&limit=10&before_id=20").json(), "batches_list")
+    body = client.get("/jobs/batches/9").json()
+    _check(body, "batch_detail")
+    assert body["runs"][0]["batch_id"] == 9
+    assert client.get("/jobs/batches/99").status_code == 404
+    assert client.get("/jobs/batches?status=nope").status_code == 400
+
+
+def test_targets_preview_shape_scope_and_skipped_plants(client):
+    body = client.post("/jobs/targets/preview", json={"kind": "subnetwork", "value": "NA"}).json()
+    _check(body, "targets_preview")
+    assert (body["count"], body["skipped"]) == (1, 1) and body["plants"][1]["warning"] == "plant has no timezone"
+    allp = client.post("/jobs/targets/preview", json={"kind": "all", "excluded": ["NOTZ"]}).json()
+    assert [p["plant"] for p in allp["plants"]] == ["1008", "1021"]
+    page = client.post("/jobs/targets/preview", json={"kind": "all", "offset": 1, "limit": 1}).json()
+    assert [p["plant"] for p in page["plants"]] == ["1021"] and page["count"] == 1
+    assert client.post("/jobs/targets/preview", json={"kind": "explicit", "value": "NOPE"}).status_code == 400
+    assert client.post("/jobs/targets/preview", json={}).status_code == 400
+    assert client.post("/jobs/targets/preview", json={"targets": []}).json()["count"] == 0
+
+
+def test_multi_plant_preview_lists_fires_per_plant_zone(client):
+    body = client.post("/jobs/schedules/preview", json={
+        "plant": "1008", "n": 2, **SCHEDULE_BODY,
+        "targets": [{"kind": "explicit", "value": "1008"}, {"kind": "explicit", "value": "1021"}]}).json()
+    _check(body, "preview_multi")
+    assert body["total_plants"] == 1 and [p["plant"] for p in body["plants"]] == ["1008"], "1021 has no timezone"
+    assert body["warnings"] == ["1021: plant has no timezone"]
+    assert body["plants"][0]["timezone"] == "America/Chicago"
+    assert body["plants"][0]["entries"][0]["at_local"][-6:] in ("-05:00", "-06:00")
+    fixed = client.post("/jobs/schedules/preview", json={
+        "plant": "1008", "n": 2, **SCHEDULE_BODY, "tz_mode": "fixed", "fixed_timezone": "Europe/London",
+        "targets": [{"kind": "explicit", "value": "1008"}]}).json()
+    assert fixed["plants"] == [] and fixed["timezone"] == "Europe/London" and len(fixed["entries"]) == 2
+    utc = client.post("/jobs/schedules/preview", json={"plant": "1008", "n": 1, **SCHEDULE_BODY, "tz_mode": "utc"}).json()
+    assert utc["timezone"] == "UTC" and utc["entries"][0]["at_local"].endswith("+00:00")
+    assert client.post("/jobs/schedules/preview", json={"plant": "1008", **SCHEDULE_BODY, "tz_mode": "fixed"}).status_code == 400
+
+
+def test_restart_and_run_now_of_a_batch_answer_run_and_batch(client, monkeypatch):
+    monkeypatch.setattr(data, "get_run", lambda rid: _run_row(batch_id=9))
+    _check(client.post("/jobs/5/run").json(), "batch_run_started")
+    monkeypatch.setattr(runner, "start_manual_run", lambda job, actor, trigger="manual": (_ for _ in ()).throw(runner.NoTargetPlants("none")))
+    assert client.post("/jobs/5/run").status_code == 400
+
+
+def test_schedule_tz_mode_round_trips_and_job_targets_validate(client):
+    sch = client.post("/jobs/5/schedules", json={**SCHEDULE_BODY, "tz_mode": "utc"})
+    assert sch.status_code == 200
+    assert client.post("/jobs/5/schedules", json={**SCHEDULE_BODY, "tz_mode": "fixed"}).status_code == 400
+    assert client.post("/jobs/5/schedules", json={**SCHEDULE_BODY, "tz_mode": "fixed", "fixed_timezone": "Mars/Base"}).status_code == 400
+    assert client.patch("/jobs/schedules/11", json={"tz_mode": "fixed", "fixed_timezone": "Asia/Tokyo"}).status_code == 200
+    base = {"plant": "1008", "job_type": "optimizer.plant", "name": "n", "params": {}}
+    ok = client.post("/jobs", json={**base, "targets": [{"kind": "explicit", "value": "1008", "params_override": {"mode": "spt"}}],
+                                    "fan_out": {"stagger_s": 5, "max_parallel": 2, "fail_fast": True}})
+    assert ok.status_code == 200
+    bad_override = client.post("/jobs", json={**base, "targets": [{"kind": "explicit", "value": "1008", "params_override": {"mode": "nope"}}]})
+    assert bad_override.status_code == 400 and "1008" in bad_override.json()["detail"]
+    assert client.post("/jobs", json={**base, "targets": [{"kind": "explicit", "value": "9999"}]}).status_code == 400
+    assert client.post("/jobs", json={**base, "targets": [{"kind": "subnetwork", "value": "XX"}]}).status_code == 400
+    assert client.post("/jobs", json={**base, "fan_out": {"stagger_s": -1}}).status_code == 422
+    assert client.post("/jobs", json={**base, "targets": [{"kind": "all", "value": "", "excluded": True}]}).status_code == 400

@@ -6,12 +6,13 @@ require_api_key + require_admin and plant-scoped; reads are require_authenticate
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, ValidationError
 
 import master_data as md
-from backend.jobs import artifacts, data, runner, triggers, window_service, windows
+from backend.jobs import artifacts, data, runner, targets, triggers, window_service, windows
 from backend.jobs.context import LEVELS
 from backend.jobs.registry import describe_params, get_type, list_types
 from backend.security import auth
@@ -25,6 +26,19 @@ PROPOSAL_ROW_CAP = 200
 
 
 # ----------------------------------------------------------------------------------------------- request bodies
+class TargetIn(BaseModel):
+    kind: Literal["explicit", "subnetwork", "all"]
+    value: str = Field("", max_length=4000)
+    excluded: bool = False
+    params_override: dict | None = None
+
+
+class FanOutIn(BaseModel):
+    stagger_s: int = Field(0, ge=0, le=3600)
+    max_parallel: int | None = Field(None, ge=1, le=50)
+    fail_fast: bool = False
+
+
 class ScheduleIn(BaseModel):
     kind: str
     time_of_day: str | None = None
@@ -37,9 +51,13 @@ class ScheduleIn(BaseModel):
     paused: bool = False
     misfire_grace_s: int = Field(300, ge=1, le=86400)
     skip_if_running: bool = True
+    tz_mode: Literal["plant", "fixed", "utc"] = "plant"
+    fixed_timezone: str | None = Field(None, max_length=64)
 
 
 class SchedulePatch(BaseModel):
+    tz_mode: Literal["plant", "fixed", "utc"] | None = None
+    fixed_timezone: str | None = Field(None, max_length=64)
     kind: str | None = None
     time_of_day: str | None = None
     days_of_week: list[int] | None = None
@@ -63,6 +81,8 @@ class JobCreate(BaseModel):
     retry_max: int = Field(0, ge=0, le=5)
     timeout_s: int | None = Field(None, ge=10, le=21600)
     schedules: list[ScheduleIn] = Field(default_factory=list)
+    targets: list[TargetIn] = Field(default_factory=list, max_length=500)
+    fan_out: FanOutIn | None = None
 
 
 class JobPatch(BaseModel):
@@ -72,11 +92,26 @@ class JobPatch(BaseModel):
     archived: bool | None = None
     retry_max: int | None = Field(None, ge=0, le=5)
     timeout_s: int | None = Field(None, ge=10, le=21600)
+    targets: list[TargetIn] | None = Field(None, max_length=500)       # [] clears them (single plant again)
+    fan_out: FanOutIn | None = None
 
 
 class PreviewIn(ScheduleIn):
     plant: str
     n: int = Field(5, ge=1, le=20)
+    targets: list[TargetIn] = Field(default_factory=list, max_length=500)
+    plant_offset: int = Field(0, ge=0, le=100000)
+    plant_limit: int = Field(10, ge=1, le=50)
+
+
+class TargetsPreviewIn(BaseModel):
+    """Either `targets` (rows as stored) or the one-row shorthand `kind`/`value` plus `excluded` plant codes."""
+    targets: list[TargetIn] | None = Field(None, max_length=500)
+    kind: Literal["explicit", "subnetwork", "all"] | None = None
+    value: str = Field("", max_length=4000)
+    excluded: list[str] = Field(default_factory=list, max_length=500)
+    offset: int = Field(0, ge=0, le=100000)
+    limit: int = Field(200, ge=1, le=500)
 
 
 # ------------------------------------------------------------------------------------------------------ helpers
@@ -97,27 +132,76 @@ def _job_or_404(job_id: int, allowed) -> dict:
     return job
 
 
-def _normalize(plant: str, payload: dict, *, check_past: bool = True, need_tz: bool = False) -> dict:
-    """Validate a schedule payload against the plant timezone; ScheduleError becomes a 400. `need_tz`: the job type
-    cannot run without a plant timezone (the optimizer), so a schedule for such a plant is refused up front."""
-    if need_tz and not data.plant_has_timezone(plant):
+def _normalize(plant: str, payload: dict, *, check_past: bool = True, need_tz: bool = False,
+               tz_mode: str = "plant", fixed_timezone: str | None = None) -> dict:
+    """Validate a schedule payload; ScheduleError becomes a 400. The zone the times are read in comes from `tz_mode`:
+    `plant` = the home plant's timezone (each target plant's own at arm time), `fixed` = `fixed_timezone`, `utc`.
+    `need_tz`: the job type cannot run without a plant timezone (the optimizer) and the schedule is read in the home
+    plant's zone, so a schedule for a plant with none is refused up front."""
+    if tz_mode == "fixed" and not (fixed_timezone or "").strip():
+        raise HTTPException(status_code=400, detail="fixed_timezone is required when tz_mode is 'fixed'")
+    if tz_mode == "plant" and need_tz and not data.plant_has_timezone(plant):
         raise HTTPException(status_code=400, detail=f"plant {plant!r} has no timezone; set one in Plants before scheduling this job")
+    zone = {"plant": lambda: data.plant_timezone(plant), "fixed": lambda: (fixed_timezone or "").strip(),
+            "utc": lambda: "UTC"}[tz_mode]()
     try:
-        s = triggers.validate_schedule({**payload, "timezone": data.plant_timezone(plant)})
+        s = triggers.validate_schedule({**payload, "timezone": zone})
         if check_past and s["kind"] == "once":
             tz = triggers.get_zone(s["timezone"])
             if s["run_at"].replace(tzinfo=tz) < datetime.now(timezone.utc) - _GRACE:
                 raise triggers.ScheduleError("run_at is in the past")
     except triggers.ScheduleError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    s["tz_mode"] = tz_mode
+    s["fixed_timezone"] = zone if tz_mode == "fixed" else None
     return s
-
 
 
 def _needs_tz(job: dict) -> bool:
     from backend.jobs.registry import REGISTRY
     jt = REGISTRY.get(job["job_type"])
     return bool(jt and jt.needs_plant_timezone)
+
+
+def _resolve_targets(home: str, rows: list[TargetIn], allowed, jt=None, params: dict | None = None, *,
+                     plants: list[dict] | None = None, require_nonempty: bool = True) -> tuple[list[dict], dict]:
+    """Normalise incoming target rows and check them at SAVE time: every plant they expand to must be one the acting
+    admin may reach (403; an `all` row is stored with the admin's own scope so it is always in scope), an explicit
+    plant or a subnetwork must exist (400), the expansion must not be empty (400) and each plant's merged params must
+    pass the type's model (400). Returns (rows to store, expansion)."""
+    plants = plants if plants is not None else data.load_plant_rows()
+    try:
+        norm = targets.normalize_targets([r.model_dump() for r in rows])
+    except targets.TargetError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    known = {p["plant"] for p in plants}
+    subs = {s for p in plants for s in p["subnetworks"]}
+    for r in norm:
+        if r["kind"] == "all":
+            r["value"] = targets.all_scope_value(allowed)
+        elif not r["excluded"] and r["kind"] == "explicit" and r["value"] not in known:
+            raise HTTPException(status_code=400, detail=f"unknown plant {r['value']!r}")
+        elif not r["excluded"] and r["kind"] == "subnetwork" and r["value"] not in subs:
+            raise HTTPException(status_code=400, detail=f"unknown subnetwork {r['value']!r}")
+    exp = targets.expand_targets({"plant": home, "targets": norm}, plants=plants)
+    if norm and not exp["plants"] and require_nonempty:
+        raise HTTPException(status_code=400, detail="the targets expand to no plants")
+    for e in exp["plants"]:
+        _check_plant(e["plant"], allowed)
+    if jt is not None and norm:
+        for e in exp["plants"]:
+            if e["params_override"]:
+                _validate_params(jt, targets.deep_merge(params or {}, e["params_override"]), plant=e["plant"])
+    return norm, exp
+
+
+def _target_kind(rows: list[dict]) -> str:
+    kinds = {r["kind"] for r in rows if not r["excluded"]}
+    if not rows or not kinds:
+        return "single"
+    if len(kinds) > 1:
+        return "mixed"
+    return {"explicit": "selected", "subnetwork": "subnetwork", "all": "all"}[next(iter(kinds))]
 
 
 def _timing_fields(model: BaseModel) -> dict:
@@ -131,19 +215,29 @@ def _flags(model: BaseModel) -> dict:
             if k in ("paused", "retired", "misfire_grace_s", "skip_if_running") and v is not None}
 
 
-def _next_run(job: dict) -> dict | None:
+def _arms(schedule: dict, job: dict, plants: list[dict]) -> tuple[list[dict], list[str]]:
+    """The arm rows (see scheduler.plan_arms) of one stored schedule of `job`."""
+    from backend.jobs import scheduler
+    return scheduler.plan_arms({**schedule, "plant": job["plant"], "targets": job.get("targets") or []}, plants)
+
+
+def _next_run(job: dict, plants: list[dict] | None = None) -> dict | None:
+    """Soonest fire over every schedule and every plant arm (a multi-plant job's next run is its earliest plant's)."""
     if not job["enabled"] or job["archived"]:
         return None
+    plants = plants if plants is not None else data.load_plant_rows()
     best = None
     for s in job["schedules"]:
         if s["paused"]:
             continue
         try:
-            fires = triggers.next_fire_times(s, 1)
+            arms, _ = _arms(s, job, plants)
+            for a in arms:
+                fires = triggers.next_fire_times(a, 1)
+                if fires and (best is None or fires[0] < best[0]):
+                    best = (fires[0], s["id"])
         except Exception:  # noqa: BLE001 - a broken row must not break the list
             continue
-        if fires and (best is None or fires[0] < best[0]):
-            best = (fires[0], s["id"])
     if best is None:
         return None
     t, sid = best
@@ -151,22 +245,28 @@ def _next_run(job: dict) -> dict | None:
             "at_local": t.isoformat(timespec="seconds"), "schedule_id": sid}
 
 
-def _job_wire(job: dict) -> dict:
+def _job_wire(job: dict, plants: list[dict] | None = None) -> dict:
+    plants = plants if plants is not None else data.load_plant_rows()
     w = data.definition_to_wire(job)
     w["schedules"] = [data.schedule_to_wire(s) for s in job["schedules"]]
-    nxt = _next_run(job)
+    nxt = _next_run(job, plants)
     w["next_run_at"] = nxt["at_utc"] if nxt else None
     w["next_run_local"] = nxt["at_local"] if nxt else None
+    exp = targets.expand_targets(job, plants=plants)
+    w["target_kind"] = _target_kind(job.get("targets") or [])
+    w["target_count"] = 1 if exp["single"] else len(targets.runnable(exp))     # a legacy job always runs its home plant
+    w["target_skipped"] = 0 if exp["single"] else len(exp["plants"]) - w["target_count"]
     last = job.get("last_run")
     w["last_run"] = data.run_to_wire(last) if last else None
     return w
 
 
-def _validate_params(jt, params: dict) -> dict:
+def _validate_params(jt, params: dict, plant: str | None = None) -> dict:
     try:
         return jt.params_model.model_validate(params or {}).model_dump(mode="json")
     except ValidationError as e:
-        raise HTTPException(status_code=400, detail=f"invalid params: {e.errors(include_url=False)}") from e
+        where = f" for plant {plant}" if plant else ""
+        raise HTTPException(status_code=400, detail=f"invalid params{where}: {e.errors(include_url=False)}") from e
 
 
 # ----------------------------------------------------------------------------------------------------- types
@@ -231,7 +331,8 @@ def list_jobs(
     response.headers["Cache-Control"] = "no-store"
     page = data.list_jobs(allowed_plants=allowed_plants, plant=plant, job_type=job_type, status=status, q=q,
                           include_archived=include_archived, limit=limit, before_id=before_id)
-    return {"jobs": [_job_wire(j) for j in page["jobs"]], "next_before_id": page["next_before_id"]}
+    plants = data.load_plant_rows()
+    return {"jobs": [_job_wire(j, plants) for j in page["jobs"]], "next_before_id": page["next_before_id"]}
 
 
 @router.get("/jobs/summary", dependencies=[Depends(auth.require_authenticated)])
@@ -272,29 +373,50 @@ def _upcoming_entries(allowed_plants, plant, n: int) -> list[dict]:
     """Next `n` fires per armed schedule over every visible enabled job (one light query, no run history), soonest
     first. Each schedule contributes at most `n`, so the first `n` overall are always present."""
     entries = []
+    plants = data.load_plant_rows()
     for s in data.next_fire_schedules(allowed_plants=allowed_plants, plant=plant):
-        try:
-            fires = triggers.preview(s, n)
-        except Exception:  # noqa: BLE001 - a broken row must not break the strip
-            continue
-        entries += [{**e, "job_id": s["job_id"], "job_name": s["job_name"], "plant": s["plant"],
-                     "schedule_id": s["id"], "timezone": s["timezone"]} for e in fires]
+        entries += _schedule_entries(s, {"id": s["job_id"], "name": s["job_name"], "plant": s["plant"],
+                                         "targets": s.get("targets") or []}, plants, n, allowed_plants)
     entries.sort(key=lambda e: e["at_utc"])
     return entries
 
 
-def _job_upcoming(job: dict, n: int) -> list[dict]:
+def _schedule_entries(s: dict, job: dict, plants: list[dict], n: int, allowed_plants) -> list[dict]:
+    """Next `n` fires of one schedule for EACH of its plant arms (a scoped viewer only sees arms in their plants);
+    `plant` and `timezone` name the arm, `at_local` is in that plant's zone."""
+    try:
+        arms, _ = _arms(s, job, plants)
+    except Exception:  # noqa: BLE001 - a broken row must not break the strip
+        return []
+    out = []
+    for a in arms:
+        arm_plant = a["arm_plant"] or job["plant"]
+        if allowed_plants is not None and arm_plant not in allowed_plants:
+            continue
+        try:
+            fires = triggers.preview(a, n)
+        except Exception:  # noqa: BLE001
+            continue
+        out += [{**e, "job_id": job["id"], "job_name": job["name"], "plant": arm_plant,
+                 "schedule_id": s["id"], "timezone": a["timezone"]} for e in fires]
+    return out
+
+
+UPCOMING_JOB_MAX = 200
+
+
+def _job_upcoming(job: dict, n: int, allowed_plants=None) -> list[dict]:
+    """`n` fires per plant arm (the soonest `UPCOMING_JOB_MAX` overall); a single-plant job still returns `n`."""
     out = []
     if not job["enabled"] or job["archived"]:
         return out
+    plants = data.load_plant_rows()
     for s in job["schedules"]:
         if s["paused"]:
             continue
-        for e in triggers.preview(s, n):
-            out.append({**e, "job_id": job["id"], "job_name": job["name"], "plant": job["plant"],
-                        "schedule_id": s["id"], "timezone": s["timezone"]})
+        out += _schedule_entries(s, job, plants, n, allowed_plants)
     out.sort(key=lambda e: e["at_utc"])
-    return out[:n]
+    return out[:n] if not job.get("targets") else out[:UPCOMING_JOB_MAX]
 
 
 @router.get("/jobs/{job_id}/upcoming", dependencies=[Depends(auth.require_authenticated)])
@@ -302,7 +424,7 @@ def upcoming_for_job(job_id: int, response: Response, n: int = Query(5, ge=1, le
                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     job = _job_or_404(job_id, allowed_plants)
     response.headers["Cache-Control"] = "no-store"
-    return {"job_id": job_id, "entries": _job_upcoming(job, n)}
+    return {"job_id": job_id, "entries": _job_upcoming(job, n, allowed_plants)}
 
 
 # ---------------------------------------------------------------------------------------------- jobs: write
@@ -316,12 +438,15 @@ def create_job(body: JobCreate, actor: str | None = Depends(auth.require_admin),
     if not data.plant_exists(body.plant):
         raise HTTPException(status_code=400, detail=f"unknown plant {body.plant!r}")
     params = _validate_params(jt, body.params)
-    schedules = [{**_normalize(body.plant, _timing_fields(s), need_tz=jt.needs_plant_timezone), "paused": s.paused,
-                  "misfire_grace_s": s.misfire_grace_s, "skip_if_running": s.skip_if_running}
+    rows, _exp = _resolve_targets(body.plant, body.targets, allowed_plants, jt, params)
+    schedules = [{**_normalize(body.plant, _timing_fields(s), need_tz=jt.needs_plant_timezone and not rows,
+                               tz_mode=s.tz_mode, fixed_timezone=s.fixed_timezone),
+                  "paused": s.paused, "misfire_grace_s": s.misfire_grace_s, "skip_if_running": s.skip_if_running}
                  for s in body.schedules]
     job_id = data.create_job(plant=body.plant, job_type=body.job_type, name=body.name.strip(), params=params,
                              enabled=body.enabled, retry_max=body.retry_max, timeout_s=body.timeout_s,
-                             schedules=schedules, actor=actor)
+                             schedules=schedules, actor=actor, targets=rows,
+                             fan_out=body.fan_out.model_dump() if body.fan_out else None)
     return _job_wire(data.get_job(job_id))
 
 
@@ -340,7 +465,17 @@ def patch_job(job_id: int, body: JobPatch, actor: str | None = Depends(auth.requ
     for k in ("name", "enabled", "archived", "retry_max"):
         if k in fields and fields[k] is None:
             fields.pop(k)
+    new_targets = None
+    if fields.get("targets") is not None:
+        jt = get_type(job["job_type"]) or _registered(job["job_type"])
+        merged_params = fields.get("params") or job["params"] or {}
+        new_targets, _exp = _resolve_targets(job["plant"], body.targets or [], allowed_plants, jt, merged_params)
+    fields.pop("targets", None)
+    if fields.get("fan_out") is not None:
+        fields["fan_out"] = body.fan_out.model_dump()
     data.patch_job(job_id, fields, actor)
+    if new_targets is not None:
+        data.set_targets(job_id, new_targets, actor)
     return _job_wire(data.get_job(job_id))
 
 
@@ -356,8 +491,9 @@ def _registered(key: str):
 def add_schedule(job_id: int, body: ScheduleIn, actor: str | None = Depends(auth.require_admin),
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     job = _job_or_404(job_id, allowed_plants)
-    s = {**_normalize(job["plant"], _timing_fields(body), need_tz=_needs_tz(job)), "paused": body.paused,
-         "misfire_grace_s": body.misfire_grace_s, "skip_if_running": body.skip_if_running}
+    s = {**_normalize(job["plant"], _timing_fields(body), need_tz=_needs_tz(job) and not job["targets"],
+                      tz_mode=body.tz_mode, fixed_timezone=body.fixed_timezone),
+         "paused": body.paused, "misfire_grace_s": body.misfire_grace_s, "skip_if_running": body.skip_if_running}
     sid = data.add_schedule(job_id, s, actor)
     return data.schedule_to_wire(data.get_schedule(sid))
 
@@ -370,27 +506,72 @@ def patch_schedule(schedule_id: int, body: SchedulePatch, actor: str | None = De
         raise HTTPException(status_code=404, detail="Schedule not found")
     job = _job_or_404(cur["job_id"], allowed_plants)
     timing = _timing_fields(body)
+    tz_set = {"tz_mode", "fixed_timezone"} & body.model_fields_set
     normalized = None
-    if timing:
+    flags = _flags(body)
+    if timing or tz_set:
         merged = {k: cur[k] for k in ("kind", "time_of_day", "days_of_week", "day_of_month", "cron_expr", "run_at",
                                       "valid_from", "valid_until")}
         if "kind" in timing and timing["kind"] != cur["kind"]:
             merged = {"kind": timing["kind"]}          # a kind change starts clean; stale fields never leak
         merged.update(timing)
+        mode = body.tz_mode or cur["tz_mode"]
+        fixed = body.fixed_timezone if "fixed_timezone" in body.model_fields_set else cur["fixed_timezone"]
         normalized = _normalize(job["plant"], merged, check_past="run_at" in timing or "kind" in timing,
-                                need_tz=_needs_tz(job))
-    data.patch_schedule(schedule_id, normalized, _flags(body), actor)
+                                need_tz=_needs_tz(job) and not job["targets"], tz_mode=mode, fixed_timezone=fixed)
+        flags = {**flags, "tz_mode": normalized["tz_mode"], "fixed_timezone": normalized["fixed_timezone"]}
+    data.patch_schedule(schedule_id, normalized, flags, actor)
     return data.schedule_to_wire(data.get_schedule(schedule_id))
 
 
 @router.post("/jobs/schedules/preview", dependencies=[Depends(auth.require_authenticated)])
 def preview_schedule(body: PreviewIn, response: Response,
                      allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
-    """Next-N fire times for an unsaved schedule, from the same trigger the scheduler arms."""
+    """Next-N fire times for an unsaved schedule, from the same trigger the scheduler arms. With target rows in
+    `plant` time zone mode the answer is per plant (`plants`, paged by `plant_offset`/`plant_limit`, each with its own
+    zone and local times); otherwise `entries` is the one list (fixed / UTC / single plant) and `plants` is empty.
+    `total_plants` counts the plants the targets run (1 for a single-plant job); `warnings` names skipped plants."""
+    from backend.jobs import scheduler
     _check_plant(body.plant, allowed_plants)
-    s = _normalize(body.plant, _timing_fields(body), check_past=False)
+    plants = data.load_plant_rows()
+    rows, exp = _resolve_targets(body.plant, body.targets, allowed_plants, plants=plants, require_nonempty=False)
+    s = _normalize(body.plant, _timing_fields(body), check_past=False, tz_mode=body.tz_mode,
+                   fixed_timezone=body.fixed_timezone)
     response.headers["Cache-Control"] = "no-store"
-    return {"timezone": s["timezone"], "cron_expr": s["cron_expr"], "entries": triggers.preview(s, body.n)}
+    arms, _ = scheduler.plan_arms({**s, "id": 0, "plant": body.plant, "targets": rows}, plants)
+    out = {"timezone": s["timezone"], "cron_expr": s["cron_expr"], "entries": [], "plants": [],
+           "total_plants": 1 if exp["single"] else len(targets.runnable(exp)), "warnings": exp["warnings"] if rows else []}
+    if rows and body.tz_mode == "plant":
+        out["total_plants"] = len(arms)
+        out["plants"] = [{"plant": a["arm_plant"], "timezone": a["timezone"], "entries": triggers.preview(a, body.n)}
+                         for a in arms[body.plant_offset:body.plant_offset + body.plant_limit]]
+    else:
+        out["entries"] = triggers.preview(arms[0], body.n)
+        out["timezone"] = arms[0]["timezone"]
+    return out
+
+
+@router.post("/jobs/targets/preview", dependencies=[Depends(auth.require_authenticated)])
+def preview_targets(body: TargetsPreviewIn, response: Response,
+                    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """What a target selection runs for today, in the order it would run: `{plants:[{plant, timezone, warning?}],
+    count (plants that run), skipped, warnings}`; `plants` is paged by `offset`/`limit` (max 500). The same expansion
+    and scope check as saving (a plant outside the caller's scope is a 403), so the dialog line cannot disagree."""
+    if body.targets is not None:
+        rows_in = body.targets
+    elif body.kind:
+        rows_in = [TargetIn(kind=body.kind, value=body.value)] + [TargetIn(kind="explicit", value=c, excluded=True)
+                                                                   for c in body.excluded]
+    else:
+        raise HTTPException(status_code=400, detail="targets or kind is required")
+    response.headers["Cache-Control"] = "no-store"
+    if not rows_in:
+        return {"plants": [], "count": 0, "skipped": 0, "warnings": []}
+    _rows, exp = _resolve_targets("", rows_in, allowed_plants, require_nonempty=False)
+    run = targets.runnable(exp)
+    page = exp["plants"][body.offset:body.offset + body.limit]
+    return {"plants": [{"plant": e["plant"], "timezone": e["timezone"], "warning": e["skip"]} for e in page],
+            "count": len(run), "skipped": len(exp["plants"]) - len(run), "warnings": exp["warnings"]}
 
 
 @router.post("/jobs/{job_id}/run", dependencies=_ADMIN)
@@ -401,10 +582,58 @@ def run_now(job_id: int, actor: str | None = Depends(auth.require_admin),
         raise HTTPException(status_code=409, detail="Job is archived")
     if data.has_active_run(job_id):
         raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
-    run_id = runner.start_manual_run(job, actor)
+    return _start(job, actor, "manual")
+
+
+def _start(job: dict, actor: str | None, trigger: str) -> dict:
+    """Run a job now (a fan-out when it has targets). `{run, batch}`: `run` is the single run, or the first child of
+    the batch; `batch` is null for a single-plant job."""
+    try:
+        run_id = runner.start_manual_run(job, actor, trigger) if trigger != "manual" else runner.start_manual_run(job, actor)
+    except runner.NoTargetPlants as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if run_id is None:
         raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
-    return {"run": data.run_to_wire(data.get_run(run_id))}
+    run = data.get_run(run_id)
+    batch = data.get_batch(run["batch_id"]) if run.get("batch_id") else None
+    return {"run": data.run_to_wire(run), "batch": data.batch_to_wire(batch) if batch else None}
+
+
+# ------------------------------------------------------------------------------------------------------ batches
+@router.get("/jobs/batches", dependencies=[Depends(auth.require_authenticated)])
+def list_batches(
+    response: Response,
+    plant: str | None = Query(None),
+    job_id: int | None = Query(None, ge=1, le=_BIGINT),
+    status: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    before_id: int | None = Query(None, ge=1, le=_BIGINT),
+    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+):
+    """Fan-out batches, newest first (cursor `before_id`). A plant-scoped caller only gets batches that contain a run
+    for one of their plants, with counts and status over those plants."""
+    if plant:
+        _check_plant(plant, allowed_plants)
+    if status and status not in ("running", "succeeded", "warning", "failed"):
+        raise HTTPException(status_code=400, detail="unknown status")
+    response.headers["Cache-Control"] = "no-store"
+    page = data.list_batches(allowed_plants=allowed_plants, plant=plant, job_id=job_id, status=status, limit=limit,
+                             before_id=before_id)
+    batches = data.scope_batches(page["batches"], allowed_plants)
+    return {"batches": [data.batch_to_wire(b) for b in batches], "next_before_id": page["next_before_id"]}
+
+
+@router.get("/jobs/batches/{batch_id}", dependencies=[Depends(auth.require_authenticated)])
+def get_batch(batch_id: int, response: Response,
+              allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """One batch and its child runs (the caller's plants only; 404 when none of them is theirs)."""
+    b = data.get_batch(batch_id)
+    runs = data.batch_runs(batch_id, allowed_plants) if b else []
+    if b is None or not runs:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    response.headers["Cache-Control"] = "no-store"
+    b = data.scope_batches([b], allowed_plants)[0]
+    return {"batch": data.batch_to_wire(b), "runs": [data.run_to_wire(r) for r in runs]}
 
 
 # --------------------------------------------------------------------------------------------------- runs
@@ -590,10 +819,7 @@ def restart_run(run_id: int, actor: str | None = Depends(auth.require_admin),
         raise HTTPException(status_code=409, detail="Job is archived")
     if data.has_active_run(job["id"]):
         raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
-    new_id = runner.start_manual_run(job, actor)           # atomic check + insert: None = a run became active
-    if new_id is None:
-        raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
-    return {"run": data.run_to_wire(data.get_run(new_id))}
+    return _start(job, actor, "restart")           # atomic check + insert: 409 when a run became active
 
 
 @router.post("/jobs/runs/{run_id}/cancel", dependencies=_ADMIN)
