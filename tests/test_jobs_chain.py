@@ -1141,3 +1141,11 @@ def test_w4b_builtin_backlog_template_is_seeded(capi, chain_pg):
     data.seed_builtin_templates()
     names = [t["name"] for t in capi.get("/jobs/templates").json()["templates"]]
     assert "Remove backlog, then re-optimize" in names
+
+
+def test_a_dry_run_chain_labels_the_proposal_with_the_producing_step(world):
+    world.reg("t.dry", lambda ctx, p: JobOutcome("succeeded", {"proposal": {"patches": [1]}}), params=DryP, dry_run=("dry", True))
+    out, _c, _l = run_chain(world, [{"type": "t.dry", "params": {"dry": True}, "label": "Backlog"},
+                                    {"type": "t.dry", "params": {"dry": True}, "label": "SPT"}])
+    step = out.summary["proposal_step"]
+    assert (step["seq"], step["label"], step["type"], step["earlier_dry_steps"]) == (2, "SPT", "t.dry", 1)

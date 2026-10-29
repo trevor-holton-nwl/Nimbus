@@ -7,9 +7,14 @@ the dry run (`apply_mode: propose`), the actor `job:<id>` and the schedule-event
 browser's Backlog writes) are the optimizer's own. It takes the optimizer's locks and slot: it cannot run beside an
 optimizer, a purge or another backlog on the plant.
 
-`include_running` (default true, owner 2026-10-29): Remove Backlog may move an order that is running right now, as the
-browser's Backlog does. Turned off, a patch for an order in progress is left out of the run and dropped again at apply.
-Idempotent: a second run finds the backlog already compressed and moves nothing.
+`include_running` (default true, owner ruling 2026-10-29, kept explicitly): running orders are RE-PLACED FROM THE RUN'S
+'NOW' on every run, exactly as the browser's Backlog does. Turned off, it is a true plan-around: an order in progress
+holds its slot (a fixed obstacle) and the rest is placed around it, so what the run offers is what apply writes.
+
+NOT idempotent (`idempotent=False`): with running orders included, a second run moves a running order again (its new
+start is the new 'now'); only the non-running backlog is already compressed after a run. So a chain with this step is not
+retried as a whole, and restarting from a failed backlog step asks for confirmation. With `include_running=false` a second
+run would move nothing, but the flag is a property of the type, so it stays False.
 """
 from __future__ import annotations
 
@@ -49,6 +54,6 @@ def run(ctx, params: BacklogParams) -> JobOutcome:
 BACKLOG = register(JobType(
     key="optimizer.backlog", label="Remove backlog (one plant)", params_model=BacklogParams, run=run,
     default_timeout_s=120, timeout_fn=timeout_s, needs_plant_timezone=True, defer_clock=True,
-    slot=optimizer._slot, idempotent=True, dry_run=("apply_mode", "propose"), estimate_s=20,
+    slot=optimizer._slot, idempotent=False, dry_run=("apply_mode", "propose"), estimate_s=20,
     # also the optimizer's lock (and through it the purge's): backlog, optimizer and purge never interleave on one plant
     lock_keys=lambda plant, _p: [f"jobs:optimizer.backlog:{plant}", f"jobs:optimizer.plant:{plant}"]))

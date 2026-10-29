@@ -127,7 +127,7 @@
     "include_running": true,
     "apply_mode": "apply"
    },
-   "idempotent": true,
+   "idempotent": false,
    "composite": false,
    "estimate_s": 20,
    "available": true,

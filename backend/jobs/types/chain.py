@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from backend.jobs import data as _data
 from backend.jobs.context import CHAIN_MAX_LINES, MAX_LINES, JobCancelled
 from backend.jobs.registry import REGISTRY, JobOutcome, JobType, get_type, register, unavailable_message
+from backend.jobs.types.dbkind import is_transient_db_error
 
 MAX_STEPS = 10
 STEP_TIMEOUT_MARGIN_S = 30
@@ -143,6 +144,8 @@ def _kind_of(status: str, summary: dict | None, exc: BaseException | None = None
         return None
     if exc is not None and isinstance(exc, ValidationError):
         return "config"
+    if exc is not None and is_transient_db_error(exc):
+        return "transient"                       # a DB timeout / lock / connection blip: run it again
     k = (summary or {}).get("error_kind")
     return k if k in ERROR_KINDS else "system"
 
@@ -213,6 +216,10 @@ def run(ctx, params: ChainParams) -> JobOutcome:
             artifact = art                       # the last SUCCESSFUL report's: a chain that fails later keeps it
         if summary.get("proposal") is not None:
             proposal = {k: summary[k] for k in ("proposal", "proposal_truncated") if k in summary}
+            # Last wins, and it is built from the board as it is now: say which step produced it and how many earlier
+            # steps' proposed moves it does NOT include (a dry run applies nothing, so step N never saw step N-1's moves).
+            earlier = sum(1 for s2 in steps[:seq - 1] if REGISTRY[s2.type].mutates)
+            proposal["proposal_step"] = {"seq": seq, "label": label, "type": st.type, "earlier_dry_steps": earlier}
         jt_s = REGISTRY[st.type]
         if jt_s.kind == "report" and status in ("succeeded", "warning"):
             if summary.get("window"):        # only a report's window feeds the `since last success` watermark; with two

@@ -59,7 +59,7 @@ def test_backlog_type_contract():
     jt = REGISTRY["optimizer.backlog"]
     assert "is_backlog" not in backlog.BacklogParams.model_fields, "the runner switch is not a param"
     assert backlog.BacklogParams().model_dump() == {"include_running": True, "apply_mode": "apply"}
-    assert (jt.idempotent, jt.mutates, jt.dry_run, jt.needs_plant_timezone, jt.defer_clock) == (True, True, ("apply_mode", "propose"), True, True)
+    assert (jt.idempotent, jt.mutates, jt.dry_run, jt.needs_plant_timezone, jt.defer_clock) == (False, True, ("apply_mode", "propose"), True, True)
     assert jt.lock_names("P1", backlog.BacklogParams()) == ["jobs:optimizer.backlog:P1", "jobs:optimizer.plant:P1"]
     assert jt.slot_list(backlog.BacklogParams()) == [REGISTRY["optimizer.plant"].slot()], "the optimizer's own slot"
     assert jt.is_dry_run(backlog.BacklogParams(apply_mode="propose")) is True
@@ -135,7 +135,8 @@ def test_routing_recompute_wraps_the_resolver_with_the_job_actor(monkeypatch):
     ctx, _ = make_ctx(plant="1008", job_id=77)
     out = order_steps.run_routing_recompute(ctx, order_steps.RoutingRecomputeParams())
     assert calls == [("1008", {"full": True, "actor": "job:77"})]
-    assert out.status == "succeeded" and out.summary["resolved"] == 12 and out.summary["unknown"] == 3
+    assert out.status == "warning" and out.summary["resolved"] == 12 and out.summary["unknown"] == 3
+    assert out.summary["warnings"] == ["3 order(s) held for unknown routing data", "2 order(s) over the run-time cap"]
     assert out.summary["unmapped_workcenters"] == 1 and out.summary["over_cap"] == 2
 
 
@@ -155,7 +156,27 @@ def test_attributes_resync_wraps_the_db_function_with_the_job_actor(monkeypatch)
     ctx, _ = make_ctx(plant="1008", job_id=5)
     out = order_steps.run_attributes_resync(ctx, order_steps.AttributesResyncParams())
     assert calls == [("1008", "job:5")]
-    assert out.status == "succeeded" and out.summary == {"unmatched_pairs": 2, "unmatched_orders": 5}, "unmatched materials never change the status"
+    assert out.status == "warning" and out.summary["unmatched_pairs"] == 2 and out.summary["unmatched_orders"] == 5
+    assert "2 material(s)" in out.summary["warnings"][0], "unmatched materials make the step yellow, with the counts"
+    monkeypatch.setattr(order_steps.db, "resync_order_attributes", lambda plant, actor=None: {"unmatched_pairs": 0, "unmatched_orders": 0})
+    assert order_steps.run_attributes_resync(make_ctx()[0], order_steps.AttributesResyncParams()).status == "succeeded"
+
+
+def test_order_steps_classify_a_database_timeout_as_transient(monkeypatch):
+    class QueryCanceled(Exception):
+        pass
+    def boom(*a, **k):
+        raise QueryCanceled("canceling statement due to statement timeout")
+    monkeypatch.setattr(order_steps.db, "resync_order_attributes", boom)
+    out = order_steps.run_attributes_resync(make_ctx()[0], order_steps.AttributesResyncParams())
+    assert out.status == "failed" and out.summary["error_kind"] == "transient"
+    import backend.routing.resolver as resolver
+    monkeypatch.setattr(order_steps, "_routing_enabled", lambda plant: True)
+    monkeypatch.setattr(resolver, "resolve_orders", boom)
+    assert order_steps.run_routing_recompute(make_ctx()[0], order_steps.RoutingRecomputeParams()).summary["error_kind"] == "transient"
+    monkeypatch.setattr(order_steps.db, "resync_order_attributes", lambda *a, **k: (_ for _ in ()).throw(ValueError("bad")))
+    with pytest.raises(ValueError):
+        order_steps.run_attributes_resync(make_ctx()[0], order_steps.AttributesResyncParams())
 
 
 # --------------------------------------------------------------------------------------------- sap.apply_batch
@@ -172,14 +193,17 @@ class FakeStaging:
         pass
 
     def __init__(self, newest):
-        self.newest, self.applied, self.raises = newest, [], {}
+        self.newest, self.applied, self.raises, self.once, self.listed = newest, [], {}, {}, 0
 
     def list_batches(self, *, object_key=None, plant=None, limit=1, **kw):
+        self.listed += 1
         b = self.newest.get(object_key)
         return [{"batch_id": f"b-{object_key}", "status": b}] if b else []
 
     def apply_batch(self, batch_id, *, actor, confirm_held=False):
         key = batch_id[2:]
+        if key in self.once:
+            raise self.once.pop(key)
         if key in self.raises:
             raise self.raises[key]
         self.applied.append((key, actor, confirm_held))
@@ -213,11 +237,35 @@ def test_sap_apply_with_nothing_validated_is_a_clear_noop(staging):
     assert any("no validated batch" in r["msg"] for r in rows)
 
 
-def test_sap_apply_does_not_touch_a_held_or_failed_batch_and_warns(staging):
-    fake = staging({"stage_material_plants": "held", "stage_production_version": "error", "stage_planned_orders": "ready"})
+def test_sap_apply_fails_on_a_held_or_failed_batch_and_never_applies_it(staging):
+    fake = staging({"stage_material_plants": "held", "stage_production_version": "validated", "stage_planned_orders": "ready"})
     out = sap_steps.run_apply(make_ctx()[0], sap_steps.SapApplyParams())
-    assert fake.applied == [] and out.status == "warning" and "needs a person" in out.summary["warnings"][0]
-    assert [n["result"] for n in out.summary["notes"] if "batch_id" in n] == ["held", "error", "ready"]
+    assert fake.applied == [], "a held batch is never confirmed and the later objects do not run"
+    assert out.status == "failed" and out.summary["error_kind"] == "config" and "a person must review the held batch" in out.error
+    assert out.summary["notes"] == [{"object": "stage_material_plants", "batch_id": "b-stage_material_plants", "result": "held"}]
+    err = staging({"stage_production_version": "error"})
+    assert sap_steps.run_apply(make_ctx()[0], sap_steps.SapApplyParams()).status == "failed"
+    ready = staging({"stage_planned_orders": "ready"})
+    ok = sap_steps.run_apply(make_ctx()[0], sap_steps.SapApplyParams())
+    assert ok.status == "succeeded" and ready.applied == [] and ok.summary["notes"][-1]["result"] == "ready"
+
+
+def test_sap_apply_dry_run_only_warns_about_a_held_batch(staging):
+    staging({"stage_material_plants": "held"})
+    out = sap_steps.run_apply(make_ctx()[0], sap_steps.SapApplyParams(dry_run=True))
+    assert out.status == "warning" and "a person must review the held batch" in out.summary["warnings"][0]
+
+
+def test_sap_apply_relists_once_when_the_batch_was_superseded(staging):
+    fake = staging({"stage_material_plants": "validated"})
+    fake.once["stage_material_plants"] = FakeStaging.BatchSuperseded("a newer complete batch exists")
+    out = sap_steps.run_apply(make_ctx()[0], sap_steps.SapApplyParams())
+    assert out.status == "succeeded" and [a[0] for a in fake.applied] == ["stage_material_plants"] and fake.listed >= 5
+    both = staging({"stage_material_plants": "validated", "stage_production_version": "validated"})
+    both.raises["stage_material_plants"] = FakeStaging.BatchSuperseded("again")
+    out2 = sap_steps.run_apply(make_ctx()[0], sap_steps.SapApplyParams())
+    assert out2.status == "warning" and "superseded" in out2.summary["warnings"][0]
+    assert [a[0] for a in both.applied] == ["stage_production_version"], "the other objects still apply"
 
 
 def test_sap_apply_dry_run_lists_without_applying_and_objects_can_be_chosen(staging):
@@ -236,7 +284,7 @@ def test_sap_apply_failures_stop_later_objects_and_are_classified(staging):
     assert out.status == "failed" and out.summary["error_kind"] == "config" and out.summary["failed_step"] == "apply stage_material_plants"
     assert fake.applied == [], "a later object is never applied after a failure"
     fake2 = staging({"stage_material_plants": "validated"})
-    fake2.raises["stage_material_plants"] = FakeStaging.BatchSuperseded("a newer complete batch exists")
+    fake2.raises["stage_material_plants"] = FakeStaging.BatchNotApplicable("busy", {"code": "apply_in_progress"})
     assert sap_steps.run_apply(make_ctx()[0], sap_steps.SapApplyParams()).summary["error_kind"] == "transient"
     fake3 = staging({"stage_material_plants": "validated"})
     fake3.raises["stage_material_plants"] = RuntimeError("db down")

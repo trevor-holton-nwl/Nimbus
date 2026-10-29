@@ -1116,9 +1116,10 @@ def run_proposal(run_id: int, response: Response,
     if run["job_type"] not in _PROPOSAL_TYPES or summ.get("apply_mode") != "propose":
         raise HTTPException(status_code=400, detail="Only a dry run has a proposal")
     prop = summ.get("proposal")
+    pstep = summ.get("proposal_step") if isinstance(summ.get("proposal_step"), dict) else None   # a dry-run chain: the producing step
     if not isinstance(prop, dict):
         return {"run_id": run_id, "plant": run["plant"], "total": int(summ.get("moved") or 0), "shown": 0, "rows": [],
-                "findings": [], "board_matches": None, "truncated": True, "pending": False}
+                "findings": [], "board_matches": None, "truncated": True, "pending": False, "proposal_step": pstep}
     patches = [p for p in (prop.get("patches") or []) if isinstance(p, dict) and p.get("id") is not None]
     # Biggest stored moves first (`delta_hours` is written at run time), then read live rows for the page only.
     patches.sort(key=lambda p: -abs(p.get("delta_hours") or 0))
@@ -1135,7 +1136,7 @@ def run_proposal(run_id: int, response: Response,
     rows.sort(key=lambda r: (r["changed_since"], -abs(r["delta_hours"] or 0)))      # changed-since rows last
     return {"run_id": run_id, "plant": run["plant"], "total": len(patches), "shown": len(rows), "rows": rows,
             "findings": prop.get("findings") or [], "board_matches": _board_matches(run_id, run["plant"], prop),
-            "truncated": False, "pending": False}
+            "truncated": False, "pending": False, "proposal_step": pstep}
 
 
 _MATCH_TTL_S = 60.0

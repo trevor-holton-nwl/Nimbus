@@ -9,10 +9,12 @@ Actor `job:<id>`.
 
 Per object, the newest batch of this plant that is still actionable decides:
   `validated`  -> applied (or only listed when `dry_run`);
-  `held`       -> not applied; the step ends `warning` ("needs confirmation"); `error` -> `warning` too (resume from the SAP pane);
+  `held` / `error` -> not applied and the step FAILS (error_kind config, 'a person must review the held batch'), so the
+               chain stops by default (a step may set continue_on_failure); in a dry run it is only a warning;
   `ready` / `applying` -> not applied, noted (the poll validates a ready batch; an apply is running);
   none, or the newest is already `applied` -> "nothing to apply".
-Idempotent: a second run finds nothing validated and applies nothing.
+A batch superseded between the listing and the apply ends the object `warning` after ONE re-list (not a chain failure).
+The plant is compared trimmed on both the list and the apply side. Idempotent: a second run finds nothing validated.
 
 `sap.send` is registered only so the chain builder can show it disabled. The SAP interface does not exist yet, so the
 server refuses to save it and again to run it (`JobType.available=False`). Planned contract (see backend/jobs/CLAUDE.md):
@@ -59,56 +61,82 @@ def _fail(ctx, kind: str, step: str, msg: str, summary: dict) -> JobOutcome:
 
 def run_apply(ctx, p: SapApplyParams) -> JobOutcome:
     from backend.integration import sap_staging
+    from backend.jobs.types.dbkind import is_transient_db_error
     plant = ctx.plant
     actor = f"job:{ctx.job_id}"
     order = [o for o in sap_staging.APPLY_ORDER if o in p.objects]
     applied: list[dict] = []
     notes: list[dict] = []
-    waiting = False
+    warnings: list[str] = []
     for object_key in order:
         ctx.check_cancel()
         label = _OBJECT_LABELS[object_key]
-        with ctx.step(object_key):
-            batch = _newest_batch(plant, object_key)
-        status = batch["status"] if batch else None
-        if batch is None or status in ("applied", "superseded", "discarded", "rejected"):
-            ctx.log("info", f"{label}: nothing to apply" + (f" (newest batch is {status})" if status else ""))
-            notes.append({"object": object_key, "result": "nothing"})
-            continue
-        bid = str(batch["batch_id"])
-        if status != "validated":
-            if status in ("held", "error"):
-                waiting = True
-                ctx.log("warn", f"{label}: batch {bid} is {status} and needs a person (open the SAP staging pane)")
-            else:
+        # A batch superseded between the listing and the apply is a normal race (a newer one arrived): list again once.
+        for attempt in (1, 2):
+            try:
+                with ctx.step(object_key):
+                    batch = _newest_batch(plant, object_key)
+            except Exception as exc:  # noqa: BLE001 - a DB timeout is transient, anything else propagates
+                if is_transient_db_error(exc):
+                    return _fail(ctx, "transient", object_key, f"{label}: the database was busy ({type(exc).__name__}); run it again",
+                                 {"applied": applied, "notes": notes})
+                raise
+            status = batch["status"] if batch else None
+            if batch is None or status in ("applied", "superseded", "discarded", "rejected"):
+                ctx.log("info", f"{label}: nothing to apply" + (f" (newest batch is {status})" if status else ""))
+                notes.append({"object": object_key, "result": "nothing"})
+                break
+            bid = str(batch["batch_id"])
+            if status != "validated":
+                if status in ("held", "error"):
+                    msg = f"{label}: batch {bid} is {status}; a person must review the held batch (open the SAP staging pane)"
+                    notes.append({"object": object_key, "batch_id": bid, "result": status})
+                    if p.dry_run:                                # a dry run only reports it
+                        ctx.log("warn", msg)
+                        warnings.append(msg)
+                        break
+                    # Nothing was applied for this object and the later objects depend on it: stop the chain by default.
+                    return _fail(ctx, "config", object_key, msg, {"applied": applied, "notes": notes})
                 ctx.log("info", f"{label}: batch {bid} is {status}; not applied")
-            notes.append({"object": object_key, "batch_id": bid, "result": status})
-            continue
-        if p.dry_run:
-            ctx.log("info", f"{label}: batch {bid} would be applied (dry run)")
-            notes.append({"object": object_key, "batch_id": bid, "result": "would_apply"})
-            continue
-        ctx.check_cancel()                                       # the last cancel point before each write
-        try:
-            with ctx.step(f"apply {object_key}"):
-                res = sap_staging.apply_batch(bid, actor=actor)
-        except sap_staging.BatchNotApplicable as exc:
-            code = str((getattr(exc, "detail", None) or {}).get("code") or "")
-            kind = "transient" if code == "apply_in_progress" or isinstance(exc, sap_staging.BatchSuperseded) else "config"
-            return _fail(ctx, kind, f"apply {object_key}", f"{label}: batch {bid} was not applied: {exc}",
-                         {"applied": applied, "notes": notes})
-        except Exception as exc:  # noqa: BLE001 - the apply failed part-way; the batch is `error`, later objects must not run
-            return _fail(ctx, "system", f"apply {object_key}", f"{label}: batch {bid} failed: {type(exc).__name__}: {exc}",
-                         {"applied": applied, "notes": notes})
-        applied.append({"object": object_key, "batch_id": bid, "counts": res.get("counts")})
-        ctx.log("info", f"{label}: batch {bid} applied", counts=res.get("counts"))
+                notes.append({"object": object_key, "batch_id": bid, "result": status})
+                break
+            if p.dry_run:
+                ctx.log("info", f"{label}: batch {bid} would be applied (dry run)")
+                notes.append({"object": object_key, "batch_id": bid, "result": "would_apply"})
+                break
+            ctx.check_cancel()                                   # the last cancel point before each write
+            try:
+                with ctx.step(f"apply {object_key}"):
+                    res = sap_staging.apply_batch(bid, actor=actor)
+            except sap_staging.BatchSuperseded as exc:
+                if attempt == 1:
+                    ctx.log("warn", f"{label}: batch {bid} was superseded while applying ({exc}); listing again")
+                    continue
+                msg = f"{label}: a newer batch superseded batch {bid} again; not applied, run the step again"
+                ctx.log("warn", msg)
+                warnings.append(msg)
+                notes.append({"object": object_key, "batch_id": bid, "result": "superseded"})
+                break
+            except sap_staging.BatchNotApplicable as exc:
+                code = str((getattr(exc, "detail", None) or {}).get("code") or "")
+                kind = "transient" if code == "apply_in_progress" else "config"
+                return _fail(ctx, kind, f"apply {object_key}", f"{label}: batch {bid} was not applied: {exc}",
+                             {"applied": applied, "notes": notes})
+            except Exception as exc:  # noqa: BLE001 - the apply failed part-way; the batch is `error`, later objects must not run
+                kind = "transient" if is_transient_db_error(exc) else "system"
+                return _fail(ctx, kind, f"apply {object_key}", f"{label}: batch {bid} failed: {type(exc).__name__}: {exc}",
+                             {"applied": applied, "notes": notes})
+            applied.append({"object": object_key, "batch_id": bid, "counts": res.get("counts")})
+            notes.append({"object": object_key, "batch_id": bid, "result": "applied"})
+            ctx.log("info", f"{label}: batch {bid} applied", counts=res.get("counts"))
+            break
     summary: dict = {"dry_run": p.dry_run, "applied_batches": len(applied), "applied": applied, "notes": notes}
-    if not applied and not waiting and not p.dry_run:
+    if not applied and not warnings and not p.dry_run:
         summary["note"] = "no validated batch to apply"
         ctx.log("info", "no validated batch to apply")
-    if waiting:
-        summary["warnings"] = ["a held or failed batch needs a person; it was not applied"]
-    return JobOutcome("warning" if waiting else "succeeded", summary)
+    if warnings:
+        summary["warnings"] = warnings
+    return JobOutcome("warning" if warnings else "succeeded", summary)
 
 
 APPLY = register(JobType(
