@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import {
   AlertSlotModal, slotSeams, liveSlotDeps, canPlaceSlot,
   parsePairValue, rankSlotCandidates, slotFinishFor, slotGapFinishFor, slotTaskKey, defaultSlotDay, formatSlotOption, SLOT_LOOKBACK_DAYS,
+  SLOT_FILTER_ABOVE, slotCandidateState, filterSlotCandidates, slotStripModel, slotConsequence,
 } from '../../../frontend/alert-monitor/alert-slot-modal.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, Modal, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -384,6 +385,19 @@ afterEach(() => {
 const openIt = () => AlertSlotModal.open({ plant: 'P1', taskId: 't1', alertId: 'needs-planning-t1' });
 const optionOrder = () => [...els['asl-pair'].innerHTML.matchAll(/<option value="([^"]*)"/g)].map(m => m[1]);
 const pick = value => { els['asl-pair'].value = value; els['asl-body'].handlers.change?.({ target: els['asl-pair'] }); };
+// The radio rows: one <label class="asl-cand" ...> per candidate, in list order.
+const rows = () => [...els['asl-list'].innerHTML.matchAll(/<label class="asl-cand[^"]*" data-state="([a-z]+)" data-value="([^"]*)"( hidden)?>(.*?)<\/label>/g)]
+  .map(m => ({ state: m[1], value: m[2], hidden: !!m[3], html: m[4] }));
+const rowOrder = () => rows().map(r => r.value);
+const rowStates = () => rows().map(r => r.state);
+const checkedRows = () => rows().filter(r => / checked/.test(r.html)).map(r => r.value);
+const visibleRows = () => rows().filter(r => !r.hidden).map(r => r.value);
+const rowsWith = re => rows().filter(r => re.test(r.html)).map(r => r.value);
+// A radio row change (the browser fires it on the input), a key on a focused row, typing in the filter, the preview toggle.
+const chooseRow = value => els['asl-body'].handlers.change?.({ target: { name: 'asl-cand', value } });
+const keyOnList = key => { const e = { key, target: { name: 'asl-cand' }, prevented: false, preventDefault() { this.prevented = true; } }; els['asl-body'].handlers.keydown?.(e); return e; };
+const typeFilter = value => { els['asl-filter'].value = value; els['asl-body'].handlers.input?.({ target: { id: 'asl-filter', value } }); };
+const togglePreview = () => els['asl-body'].handlers.click?.({ target: { closest: q => (q === '[data-asl-act="preview"]' ? {} : null) } });
 
 test('open renders the order, the reason, the due day and the ranked pairs with the best one preselected', () => {
   openIt();
@@ -395,12 +409,29 @@ test('open renders the order, the reason, the due day and the ranked pairs with 
   assert.match(body, /M1/);
   assert.match(body, /No slot found/, 'the reason text');
   assert.match(body, /id="asl-day"/);
-  assert.match(body, /id="asl-pair"/);
+  assert.match(body, /<select id="asl-pair" class="asl-sr" aria-hidden="true" tabindex="-1">/, 'the select stays as the hidden source of truth');
+  assert.match(body, /id="asl-list" role="radiogroup" aria-labelledby="asl-cands-label"/);
+  assert.match(body, /id="asl-cands-label">am\.slot_pair</);
   assert.match(body, /am\.slot_hint/);
+  assert.doesNotMatch(body, /asl-lead/, 'no lead banner for an ordinary reason');
   assert.equal(els['asl-day'].value, '2026-10-28', 'the due day');
   assert.deepEqual(optionOrder(), ['M2', 'M3', 'M1'], 'most free hours first: M2 9, M3 6, M1 3 (3 free is short of 4)');
   assert.equal(els['asl-pair'].value, 'M2', 'the top pair is preselected');
   assert.match(els['asl-pair'].innerHTML, /am\.slot_option/);
+  assert.deepEqual(rowOrder(), ['M2', 'M3', 'M1'], 'the radio rows mirror the select');
+  assert.deepEqual(checkedRows(), ['M2'], 'the top pair is the checked row');
+  assert.match(els['asl-list'].innerHTML, /data-value="M2"[^>]*><input class="asl-sr" type="radio" name="asl-cand" value="M2" checked data-autofocus>/);
+  assert.equal(rowsWith(/asl-best/).join(), 'M2', 'Best fit tags the top fitting row only');
+  assert.deepEqual(rowStates(), ['fits', 'fits', 'short']);
+  assert.match(els['asl-list'].innerHTML, /data-value="M1"[^>]*>(?:(?!<\/label>).)*am\.slot_st_short/, 'a status word per row');
+  assert.match(els['asl-list'].innerHTML, /am\.slot_free_h/, 'bold free hours per open row');
+  assert.equal(els['asl-filter'].hidden, true, '3 candidates: no filter box');
+  assert.equal(els['asl-count'].textContent, 'am.slot_count');
+  assert.equal(els['asl-consequence'].textContent, 'am.slot_cons_fits', 'the consequence line for the preselected machine');
+  assert.equal(els['asl-consequence'].dataset.tone, 'fits');
+  assert.equal(els['asl-preview'].hidden, true, 'the day preview is collapsed by default');
+  assert.equal(els['asl-preview-toggle'].attrs['aria-expanded'], 'false');
+  assert.equal(els['asl-preview-toggle'].textContent, 'am.slot_preview_show');
   assert.match(els['asl-foot'].innerHTML, /btn\.cancel/);
   assert.match(els['asl-foot'].innerHTML, /id="asl-place"/);
   assert.match(els['asl-foot'].innerHTML, /am\.slot_place/);
@@ -430,6 +461,10 @@ test('open with no eligible pair shows the none text, disables the list and Plac
   assert.match(els['asl-pair'].innerHTML, /<option value=""/);
   assert.equal(els['asl-pair'].disabled, true);
   assert.match(els['asl-foot'].innerHTML, /id="asl-place"[^>]*disabled/);
+  assert.match(els['asl-list'].innerHTML, /<div class="asl-empty"><b>am\.slot_empty<\/b>am\.slot_empty_sub<\/div>/, 'an inline empty state in the list');
+  assert.equal(els['asl-filter'].hidden, true);
+  assert.equal(els['asl-preview-toggle'].hidden, true, 'nothing to preview');
+  assert.equal(els['asl-consequence'].textContent, '');
 });
 
 test('open ignores a missing plant or task', () => {
@@ -918,6 +953,9 @@ test('F1: the walk-back confirm is unchanged and the gap search runs on the day 
   const asked = [];
   liveSlotDeps.busyIntervals = (_m, day) => { asked.push(day); return [[at(19, 0, 27), at(22, 0, 27)]]; };
   openIt();
+  assert.deepEqual(asked, ['2026-10-27'], 'the consequence line under the list already ran the same walk-back on open');
+  assert.equal(els['asl-consequence'].textContent, 'am.slot_cons_closed');
+  asked.length = 0;
   await AlertSlotModal.place();
   assert.equal(calls.confirm[0].message, 'am.slot_confirm_closed');
   assert.deepEqual(asked, ['2026-10-27']);
@@ -1120,4 +1158,222 @@ test('C9: a placement whose finish lands inside the frozen window is NOT manuall
     Store.setFrozenHorizonEnd(priorEnd, 'test');
     Store._blockedPlants.clear();
   }
+});
+
+/* ---------------------------------------------------------------- Move to an open machine (2026-10-29): the picker */
+
+test('slotCandidateState: closed beats unknown hours beats fits / short', () => {
+  assert.equal(slotCandidateState(cand()), 'fits');
+  assert.equal(slotCandidateState(cand({ needHours: 7, fits: false })), 'short');
+  assert.equal(slotCandidateState(cand({ closed: true, freeHours: 0, capHours: 0, fits: false })), 'closed');
+  assert.equal(slotCandidateState(cand({ closed: true, needHours: null, fits: false })), 'closed');
+  assert.equal(slotCandidateState(cand({ needHours: null, fits: false })), 'unknown');
+  assert.equal(slotCandidateState(cand({ freeHours: null, capHours: null, fits: false })), 'unknown');
+});
+
+test('filterSlotCandidates: case-insensitive substring on the label or the pair value, empty keeps all in order', () => {
+  const list = [cand({ value: '0001|20STA04', label: '0001 - 20STA04', machine: '20STA04' }), cand({ value: 'M9', label: 'M9', machine: 'M9' }), cand({ value: '0002|20STA02', label: '0002 - 20STA02', machine: '20STA02' })];
+  assert.deepEqual(filterSlotCandidates(list, '').map(c => c.value), ['0001|20STA04', 'M9', '0002|20STA02']);
+  assert.deepEqual(filterSlotCandidates(list, '  sta0').map(c => c.value), ['0001|20STA04', '0002|20STA02']);
+  assert.deepEqual(filterSlotCandidates(list, 'm9').map(c => c.value), ['M9']);
+  assert.deepEqual(filterSlotCandidates(list, '0002 20').map(c => c.value), ['0002|20STA02'], 'the pipe reads as a space');
+  assert.deepEqual(filterSlotCandidates(list, 'zzz'), []);
+  assert.equal(SLOT_FILTER_ABOVE, 8);
+});
+
+test('slotStripModel: off hours outside the window, busy bars clipped to the day, the order ends at the finish, a 24:00 close is hour 24', () => {
+  const win = [at(6), at(22)];
+  const m = slotStripModel({ day: '2026-10-28', window: win, busy: [[at(10), at(14)], [at(21), at(3, 0, 29)], [at(1, 0, 27), at(2, 0, 27)]], finish: at(21), needHours: 4 });
+  assert.deepEqual(m.off, [[0, 6], [22, 24]]);
+  assert.deepEqual(m.busy, [[10, 14], [21, 24]], 'a bar crossing midnight is clipped, one on another day drops out');
+  assert.deepEqual(m.order, [17, 21]);
+  const full = slotStripModel({ day: '2026-10-28', window: [at(0), new Date(2026, 9, 29, 0)], busy: [], finish: new Date(2026, 9, 29, 0), needHours: 3 });
+  assert.deepEqual([full.off, full.order], [[], [21, 24]]);
+  assert.equal(slotStripModel({ day: '2026-10-28', window: null, busy: [], finish: null, needHours: 4 }), null, 'no window: no strip');
+  assert.equal(slotStripModel({ day: 'nope', window: win, busy: [], finish: null, needHours: 4 }), null);
+  assert.equal(slotStripModel({ day: '2026-10-28', window: win, busy: [], finish: at(22), needHours: null }).order, null, 'unknown need: nothing to draw');
+  const today = slotStripModel({ day: '2026-10-28', window: win, busy: [], finish: at(22), needHours: 2, now: at(14) });
+  assert.deepEqual(today.off, [[0, 6], [22, 24], [6, 14]], 'on the plant today the hours already gone are off too');
+  assert.deepEqual(slotStripModel({ day: '2026-10-28', window: win, busy: [], finish: at(22), needHours: 2, now: at(14, 0, 27) }).off, [[0, 6], [22, 24]], 'another day: no clamp');
+});
+
+test('slotConsequence: no window, walk-back, unknown need, short (totals or no real gap) and fits, each with its tone', () => {
+  const fmt = d => `D(${d})`;
+  const fin = (over = {}) => ({ finish: at(22), day: '2026-10-28', movedBack: 0, viaGap: true, gapHours: 16, ...over });
+  assert.deepEqual(slotConsequence(cand(), null, '2026-10-28', fmt), { key: 'am.slot_no_window', vars: { machine: 'M1', day: 'D(2026-10-28)', days: 30 }, tone: 'closed' });
+  assert.deepEqual(slotConsequence(cand(), fin({ day: '2026-10-27', movedBack: 1 }), '2026-10-28', fmt),
+    { key: 'am.slot_cons_closed', vars: { machine: 'M1', day: 'D(2026-10-28)', moved: 'D(2026-10-27)' }, tone: 'closed' });
+  assert.deepEqual(slotConsequence(cand({ needHours: null, fits: false }), fin({ viaGap: false }), '2026-10-28', fmt),
+    { key: 'am.slot_cons_unknown', vars: { machine: 'M1' }, tone: 'unknown' });
+  assert.deepEqual(slotConsequence(cand({ needHours: 7, fits: false }), fin(), '2026-10-28', fmt),
+    { key: 'am.slot_cons_short', vars: { machine: 'M1', when: 'D(2026-10-28)' }, tone: 'short' });
+  assert.equal(slotConsequence(cand(), fin({ viaGap: false }), '2026-10-28', fmt).key, 'am.slot_cons_short', 'the totals fit but no gap holds it');
+  assert.equal(slotConsequence(cand({ freeHours: null, capHours: null, fits: false }), fin(), '2026-10-28', fmt).tone, 'short', 'free hours unknown, need known');
+  assert.deepEqual(slotConsequence(cand(), fin(), '2026-10-28', fmt), { key: 'am.slot_cons_fits', vars: { machine: 'M1', when: 'D(2026-10-28)' }, tone: 'fits' });
+});
+
+test('the lead banner shows only for push_limit_unmet, and replaces the reason line there', () => {
+  seedTask({ planning_reason: { code: 'push_limit_unmet', message: 'stored text' } });
+  openIt();
+  let body = els['asl-body'].innerHTML;
+  assert.match(body, /^<div class="asl-lead" id="asl-lead"><span class="asl-lead-ico" aria-hidden="true">◫<\/span><div class="asl-lead-title">am\.slot_lead_push<\/div><div class="asl-lead-sub">am\.slot_lead_push_sub<\/div><\/div>/);
+  assert.doesNotMatch(body, /id="asl-reason"/, 'the lead is the reason');
+  assert.doesNotMatch(body, /stored text/);
+  AlertSlotModal.close();
+  seedTask({ planning_reason: { code: 'no_fit_found', message: 'No slot found' } });
+  openIt();
+  body = els['asl-body'].innerHTML;
+  assert.doesNotMatch(body, /asl-lead/);
+  assert.match(body, /id="asl-reason">No slot found</, 'every other reason keeps its line');
+});
+
+test('the radio rows and #asl-pair stay in step: a row change drives the select and the pick, a select change re-checks the row on the next render', () => {
+  openIt();
+  chooseRow('M3');
+  assert.equal(els['asl-pair'].value, 'M3', 'the select is the truth place() reads');
+  assert.equal(els['asl-consequence'].textContent, 'am.slot_cons_fits');
+  els['asl-day'].value = '2026-10-29';
+  AlertSlotModal.rerank();
+  assert.deepEqual(rowOrder(), ['M1', 'M3', 'M2']);
+  assert.deepEqual(checkedRows(), ['M3'], 'the planner picked M3: it stays checked after a re-rank');
+  assert.equal(els['asl-pair'].value, 'M3');
+  pick('M1');
+  assert.equal(els['asl-consequence'].textContent, 'am.slot_cons_fits', 'M1 fits on the 29th');
+  els['asl-day'].value = '2026-10-28';
+  AlertSlotModal.rerank();
+  assert.deepEqual(checkedRows(), ['M1'], 'a select pick is mirrored by the rows');
+  assert.equal(els['asl-consequence'].textContent, 'am.slot_cons_short', 'M1 has 3 free of 8 on the 28th, needs 4');
+  assert.equal(els['asl-consequence'].dataset.tone, 'short');
+});
+
+test('placing after a row choice uses the row machine (the select carried it)', async () => {
+  openIt();
+  chooseRow('M3');
+  await AlertSlotModal.place();
+  assert.equal(calls.patch[0][2], 'M3');
+});
+
+test('keyboard: arrows walk the rows and wrap, Home / End jump, every step updates the select and the consequence', () => {
+  openIt();
+  assert.equal(els['asl-pair'].value, 'M2');
+  let e = keyOnList('ArrowDown');
+  assert.equal(e.prevented, true);
+  assert.equal(els['asl-pair'].value, 'M3');
+  keyOnList('ArrowDown');
+  assert.equal(els['asl-pair'].value, 'M1');
+  assert.equal(els['asl-consequence'].textContent, 'am.slot_cons_short');
+  keyOnList('ArrowDown');
+  assert.equal(els['asl-pair'].value, 'M2', 'wraps to the top');
+  keyOnList('ArrowUp');
+  assert.equal(els['asl-pair'].value, 'M1', 'wraps to the bottom');
+  keyOnList('End');
+  assert.equal(els['asl-pair'].value, 'M1');
+  keyOnList('Home');
+  assert.equal(els['asl-pair'].value, 'M2');
+  keyOnList('ArrowRight');
+  assert.equal(els['asl-pair'].value, 'M3');
+  keyOnList('ArrowLeft');
+  assert.equal(els['asl-pair'].value, 'M2');
+  e = keyOnList('Tab');
+  assert.equal(e.prevented, false, 'Tab is left to the browser');
+  assert.equal(els['asl-pair'].value, 'M2');
+});
+
+test('the filter box appears above SLOT_FILTER_ABOVE candidates, hides rows without dropping the checked one, and arrows skip hidden rows', () => {
+  const many = n => Array.from({ length: n }, (_, i) => `L${String(i + 1).padStart(2, '0')}`);
+  liveSlotDeps.pairOptions = () => many(8).map(m => ({ value: m, label: m }));
+  liveSlotDeps.dayCapacity = () => ({ free: 9, cap: 10, closed: false });
+  openIt();
+  assert.equal(els['asl-filter'].hidden, true, '8 candidates: no filter');
+  AlertSlotModal.close();
+  liveSlotDeps.pairOptions = () => many(9).map(m => ({ value: m, label: m }));
+  openIt();
+  assert.equal(els['asl-filter'].hidden, false, '9 candidates: the filter shows');
+  assert.equal(rows().length, 9);
+  assert.equal(els['asl-count'].textContent, 'am.slot_count');
+  typeFilter('L0');
+  assert.deepEqual(visibleRows(), many(9), 'every label contains L0');
+  typeFilter('l09');
+  assert.deepEqual(visibleRows(), ['L09']);
+  assert.equal(rows().length, 9, 'hidden, not dropped');
+  assert.deepEqual(checkedRows(), ['L01'], 'the checked row survives a filter that hides it');
+  assert.equal(els['asl-pair'].value, 'L01');
+  assert.equal(els['asl-count'].textContent, 'am.slot_showing');
+  keyOnList('ArrowDown');
+  assert.equal(els['asl-pair'].value, 'L09', 'arrows walk the visible rows only');
+  typeFilter('L0');
+  keyOnList('ArrowDown');
+  assert.equal(els['asl-pair'].value, 'L01', 'wraps within the visible set');
+  // Escape in a non-empty filter clears it and is consumed; an empty filter leaves Escape to the shell (which closes).
+  typeFilter('L0');
+  const esc = { key: 'Escape', target: { id: 'asl-filter', value: 'L0' }, prevented: false, stopped: false, preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } };
+  els['asl-body'].handlers.keydown(esc);
+  assert.deepEqual([esc.prevented, esc.stopped, esc.target.value], [true, true, '']);
+  assert.deepEqual(visibleRows(), many(9));
+  const esc2 = { key: 'Escape', target: { id: 'asl-filter', value: '' }, prevented: false, preventDefault() { this.prevented = true; }, stopPropagation() {} };
+  els['asl-body'].handlers.keydown(esc2);
+  assert.equal(esc2.prevented, false);
+  assert.equal(AlertSlotModal.isOpenFor('P1'), true, 'the body handler never closes; the shell handler does');
+});
+
+test('the day preview is collapsed by default, toggles with aria-expanded, and draws the selected machine only', () => {
+  liveSlotDeps.busyIntervals = (machine) => (machine === 'M2' ? [[at(8), at(10)]] : []);
+  openIt();
+  assert.equal(els['asl-preview'].hidden, true);
+  assert.equal(els['asl-preview'].innerHTML, '', 'nothing is drawn while collapsed');
+  assert.equal(els['asl-consequence'].textContent, 'am.slot_cons_fits', 'the consequence is visible while collapsed');
+  togglePreview();
+  assert.equal(els['asl-preview'].hidden, false);
+  assert.equal(els['asl-preview-toggle'].attrs['aria-expanded'], 'true');
+  assert.equal(els['asl-preview-toggle'].textContent, 'am.slot_preview_hide');
+  const html = els['asl-preview'].innerHTML;
+  assert.match(html, /<span class="asl-preview-name">M2<\/span>/);
+  assert.match(html, /<span class="asl-preview-finish">am\.slot_finish<\/span>/);
+  assert.match(html, /<div class="asl-strip" aria-hidden="true">/);
+  assert.match(html, /<i class="blk off" style="left:0\.00%;width:25\.00%"><\/i><i class="blk off" style="left:91\.67%;width:8\.33%"><\/i>/, 'the 06-22 window leaves 0-6 and 22-24 off');
+  assert.match(html, /<i class="blk busy" style="left:33\.33%;width:8\.33%"><\/i>/, 'the 08-10 bar on M2');
+  assert.match(html, /<i class="blk me" style="left:75\.00%;width:16\.67%"><\/i>/, 'this order: 18-22, the end of the latest gap');
+  assert.match(html, /<div class="asl-ticks" aria-hidden="true"><span style="left:0\.00%">0<\/span>.*<span style="left:100\.00%">24<\/span><\/div>/);
+  assert.match(html, /<p class="asl-preview-nums">am\.slot_option<\/p>/);
+  assert.match(html, /am\.slot_legend_other.*am\.slot_legend_this.*am\.slot_legend_closed/);
+  chooseRow('M1');
+  assert.match(els['asl-preview'].innerHTML, /<span class="asl-preview-name">M1<\/span>/, 'follows the selection');
+  assert.match(els['asl-preview'].innerHTML, /<i class="blk me short"/, 'M1 is short: the order block is hatched');
+  assert.doesNotMatch(els['asl-preview'].innerHTML, /blk busy/, 'M1 has no other bars');
+  togglePreview();
+  assert.equal(els['asl-preview'].hidden, true);
+  assert.equal(els['asl-preview-toggle'].attrs['aria-expanded'], 'false');
+  assert.equal(els['asl-preview'].innerHTML, '');
+  AlertSlotModal.close();
+  openIt();
+  assert.equal(els['asl-preview'].hidden, true, 'collapsed again on the next open: never persisted');
+});
+
+test('the preview degrades to an unknown track and no finish line when the machine has no window in reach', () => {
+  openDays.clear();
+  openIt();
+  assert.equal(els['asl-consequence'].textContent, 'am.slot_no_window');
+  togglePreview();
+  assert.match(els['asl-preview'].innerHTML, /<div class="asl-strip is-unknown" aria-hidden="true"><\/div>/);
+  assert.doesNotMatch(els['asl-preview'].innerHTML, /asl-preview-finish/);
+});
+
+test('the finish line reads 24:00 for a close at next-day midnight, else the time preference', () => {
+  slotSeams.workWindow = (_line, date) => [new Date(date.getFullYear(), date.getMonth(), date.getDate(), 6), new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1, 0)];
+  const seen = [];
+  const priorT = Util.t;
+  Util.t = (key, vars) => { seen.push([key, vars]); return key; };
+  try {
+    openIt();
+    togglePreview();
+    const fin = seen.find(([k]) => k === 'am.slot_finish');
+    assert.equal(fin[1].time, '24:00');
+    assert.equal(fin[1].when, Util._fmtDatePref(new Date(2026, 9, 28)), 'the landed day, not the 29th');
+    seen.length = 0;
+    AlertSlotModal.close();
+    slotSeams.workWindow = (_line, date) => [new Date(date.getFullYear(), date.getMonth(), date.getDate(), 6), new Date(date.getFullYear(), date.getMonth(), date.getDate(), 22)];
+    openIt();
+    togglePreview();
+    assert.equal(seen.find(([k]) => k === 'am.slot_finish')[1].time, Util._fmtTimePref(new Date(2026, 9, 28, 22)));
+  } finally { Util.t = priorT; }
 });
