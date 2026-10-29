@@ -18,7 +18,7 @@ import db
 from backend.admin_ops.logbuffer import _log_event
 from backend.jobs import data, targets, triggers
 from backend.jobs.context import JobCancelled, JobContext, cap_text
-from backend.jobs.registry import REGISTRY, JobOutcome
+from backend.jobs.registry import REGISTRY, JobOutcome, unavailable_message
 import backend.jobs.types  # noqa: F401 - registers the job types
 from backend.jobs.types import chain as chain_type
 
@@ -584,6 +584,8 @@ def _prepare(job: dict):
     jt = REGISTRY.get(job["job_type"])
     if jt is None:
         return None, None, f"unknown job type {job['job_type']!r}"
+    if not jt.available:                       # hard guard for a scaffolded type (never runs, even if a row exists)
+        return jt, None, unavailable_message(jt)
     try:
         return jt, jt.params_model.model_validate(job["params"] or {}), None
     except ValidationError as e:

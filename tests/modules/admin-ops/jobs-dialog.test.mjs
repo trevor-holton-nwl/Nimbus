@@ -84,7 +84,7 @@ test('body markup: every field has a label, defaults are 08:00 / Exhaustive / Ap
 
 test('the type select is grouped Optimization | Reports, lists every type, and is locked once a job exists', () => {
   const html = optBody();
-  assert.equal([...html.matchAll(/<optgroup label=/g)].length, 3, 'Optimization, Reports and Chains');
+  assert.equal([...html.matchAll(/<optgroup label=/g)].length, 5, 'Optimization, Data, SAP, Reports and Chains');
   for (const t of TYPES) assert.match(html, new RegExp(`<option value="${t.key.replace('.', '\\.')}"`), t.key);
   assert.doesNotMatch(html, /id="jb-jobtype"[^>]*disabled/);
   assert.match(optBody(true, 'edit'), /id="jb-jobtype"[^>]*disabled/);

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 import master_data as md
 from backend.jobs import artifacts, data, runner, targets, triggers, window_service, windows
 from backend.jobs.context import LEVELS
-from backend.jobs.registry import describe_params, get_type, list_types
+from backend.jobs.registry import describe_params, get_type, list_types, unavailable_message
 from backend.security import auth
 
 router = APIRouter()
@@ -374,6 +374,8 @@ def _job_wire(job: dict, plants: list[dict] | None = None) -> dict:
 
 
 def _validate_params(jt, params: dict, plant: str | None = None) -> dict:
+    if not jt.available:                            # a scaffolded type (Send to SAP) is listed but never saved
+        raise HTTPException(status_code=400, detail=unavailable_message(jt))
     try:
         out = jt.params_model.model_validate(params or {}).model_dump(mode="json")
     except ValidationError as e:
@@ -405,6 +407,7 @@ def job_types(response: Response):
                     "defaults": defaults,
                     # step-type contract (W4a): what a chain builder validates client-side
                     "idempotent": jt.idempotent, "composite": jt.composite, "estimate_s": jt.estimate_s,
+                    "available": jt.available, "unavailable_reason": jt.unavailable_reason,
                     "dry_run": {"param": jt.dry_run[0], "value": jt.dry_run[1]} if jt.dry_run else None,
                     "lock_keys": [] if jt.composite else jt.lock_names("{plant}", jt.params_model())})
     from backend.jobs.types import chain as chain_type, purge as purge_type
@@ -1078,20 +1081,21 @@ def _hours_between(a: str | None, b: str | None) -> float | None:
         return None
 
 
-_PROPOSAL_TYPES = ("optimizer.plant", "chain")      # a dry-run chain hoists its optimizer step's proposal onto the run
+_OPTIMIZER_TYPES = ("optimizer.plant", "optimizer.backlog")     # both run the headless engine and store a proposal
+_PROPOSAL_TYPES = (*_OPTIMIZER_TYPES, "chain")      # a dry-run chain hoists its optimizer step's proposal onto the run
 
 
 def _may_be_dry_run(run: dict) -> bool:
     """A run that has no summary yet: is it (going to be) a dry run? An optimizer job reads its params; a chain reads its
     step rows (the restart snapshot is what runs), else the job's steps, for an optimizer step set to propose."""
-    if run["job_type"] == "optimizer.plant":
+    if run["job_type"] in _OPTIMIZER_TYPES:
         job = data.get_job(run["job_id"])
         return bool(job and (job["params"] or {}).get("apply_mode") == "propose")
     steps = [{"type": s["step_type"], "params": s["params"]} for s in data.list_steps(run["id"])]
     if not steps:
         job = data.get_job(run["job_id"])
         steps = (job["params"] or {}).get("steps") or [] if job else []
-    return any(s.get("type") == "optimizer.plant" and (s.get("params") or {}).get("apply_mode") == "propose"
+    return any(s.get("type") in _OPTIMIZER_TYPES and (s.get("params") or {}).get("apply_mode") == "propose"
                for s in steps)
 
 
@@ -1112,9 +1116,10 @@ def run_proposal(run_id: int, response: Response,
     if run["job_type"] not in _PROPOSAL_TYPES or summ.get("apply_mode") != "propose":
         raise HTTPException(status_code=400, detail="Only a dry run has a proposal")
     prop = summ.get("proposal")
+    pstep = summ.get("proposal_step") if isinstance(summ.get("proposal_step"), dict) else None   # a dry-run chain: the producing step
     if not isinstance(prop, dict):
         return {"run_id": run_id, "plant": run["plant"], "total": int(summ.get("moved") or 0), "shown": 0, "rows": [],
-                "findings": [], "board_matches": None, "truncated": True, "pending": False}
+                "findings": [], "board_matches": None, "truncated": True, "pending": False, "proposal_step": pstep}
     patches = [p for p in (prop.get("patches") or []) if isinstance(p, dict) and p.get("id") is not None]
     # Biggest stored moves first (`delta_hours` is written at run time), then read live rows for the page only.
     patches.sort(key=lambda p: -abs(p.get("delta_hours") or 0))
@@ -1131,7 +1136,7 @@ def run_proposal(run_id: int, response: Response,
     rows.sort(key=lambda r: (r["changed_since"], -abs(r["delta_hours"] or 0)))      # changed-since rows last
     return {"run_id": run_id, "plant": run["plant"], "total": len(patches), "shown": len(rows), "rows": rows,
             "findings": prop.get("findings") or [], "board_matches": _board_matches(run_id, run["plant"], prop),
-            "truncated": False, "pending": False}
+            "truncated": False, "pending": False, "proposal_step": pstep}
 
 
 _MATCH_TTL_S = 60.0

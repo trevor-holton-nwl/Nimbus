@@ -23,6 +23,14 @@ BUILTIN_TEMPLATES: list[dict] = [
           "label": None, "continue_on_failure": False, "run_on": "success"},
          {"type": "report.late_orders", "params": {}, "label": None, "continue_on_failure": False, "run_on": "success"}],
      "defaults": {}},
+    {"key": "remove_backlog_then_reoptimize", "name": "Remove backlog, then re-optimize",
+     "description": "Compress the overdue backlog into now (including orders already running), then re-optimize the plant.",
+     "steps": [
+         {"type": "optimizer.backlog", "params": {"include_running": True, "apply_mode": "apply"}, "label": None,
+          "continue_on_failure": False, "run_on": "success"},
+         {"type": "optimizer.plant", "params": {"mode": "due_date", "search": "exhaustive", "apply_mode": "apply"},
+          "label": None, "continue_on_failure": False, "run_on": "success"}],
+     "defaults": {}},
 ]
 
 _STEP_FIELDS = ("type", "label", "continue_on_failure", "run_on")

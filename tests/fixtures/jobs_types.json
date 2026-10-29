@@ -79,11 +79,65 @@
    "idempotent": true,
    "composite": false,
    "estimate_s": 180,
+   "available": true,
+   "unavailable_reason": null,
    "dry_run": {
     "param": "apply_mode",
     "value": "propose"
    },
    "lock_keys": [
+    "jobs:optimizer.plant:{plant}"
+   ]
+  },
+  {
+   "key": "optimizer.backlog",
+   "label": "Remove backlog (one plant)",
+   "plant_scoped": true,
+   "kind": "action",
+   "mutates": true,
+   "params": [
+    {
+     "key": "include_running",
+     "type": "boolean",
+     "label_key": "jobs.p.optimizer.backlog.include_running",
+     "title": "Include Running",
+     "default": true,
+     "required": false,
+     "widget": null
+    },
+    {
+     "key": "apply_mode",
+     "type": "enum",
+     "label_key": "jobs.p.optimizer.backlog.apply_mode",
+     "title": "Apply Mode",
+     "default": "apply",
+     "required": false,
+     "widget": null,
+     "enum": [
+      "propose",
+      "apply"
+     ],
+     "enum_label_keys": {
+      "propose": "jobs.p.optimizer.backlog.apply_mode.propose",
+      "apply": "jobs.p.optimizer.backlog.apply_mode.apply"
+     }
+    }
+   ],
+   "defaults": {
+    "include_running": true,
+    "apply_mode": "apply"
+   },
+   "idempotent": false,
+   "composite": false,
+   "estimate_s": 20,
+   "available": true,
+   "unavailable_reason": null,
+   "dry_run": {
+    "param": "apply_mode",
+    "value": "propose"
+   },
+   "lock_keys": [
+    "jobs:optimizer.backlog:{plant}",
     "jobs:optimizer.plant:{plant}"
    ]
   },
@@ -152,6 +206,8 @@
    "idempotent": true,
    "composite": false,
    "estimate_s": 20,
+   "available": true,
+   "unavailable_reason": null,
    "dry_run": null,
    "lock_keys": [
     "jobs:report.what_changed:{plant}"
@@ -222,6 +278,8 @@
    "idempotent": true,
    "composite": false,
    "estimate_s": 20,
+   "available": true,
+   "unavailable_reason": null,
    "dry_run": null,
    "lock_keys": [
     "jobs:report.late_orders:{plant}"
@@ -252,6 +310,8 @@
    "idempotent": true,
    "composite": false,
    "estimate_s": 20,
+   "available": true,
+   "unavailable_reason": null,
    "dry_run": null,
    "lock_keys": [
     "jobs:report.missing_master_data:{plant}"
@@ -310,6 +370,8 @@
    "idempotent": true,
    "composite": false,
    "estimate_s": 20,
+   "available": true,
+   "unavailable_reason": null,
    "dry_run": null,
    "lock_keys": [
     "jobs:report.coverage:{plant}"
@@ -378,6 +440,8 @@
    "idempotent": true,
    "composite": false,
    "estimate_s": 20,
+   "available": true,
+   "unavailable_reason": null,
    "dry_run": null,
    "lock_keys": [
     "jobs:report.distribution:{plant}"
@@ -456,6 +520,8 @@
    "idempotent": false,
    "composite": false,
    "estimate_s": 30,
+   "available": true,
+   "unavailable_reason": null,
    "dry_run": {
     "param": "dry_run",
     "value": true
@@ -463,6 +529,150 @@
    "lock_keys": [
     "jobs:optimizer.plant:{plant}",
     "jobs:purge.orders:{plant}"
+   ]
+  },
+  {
+   "key": "routing.recompute",
+   "label": "Recompute routing run times",
+   "plant_scoped": true,
+   "kind": "action",
+   "mutates": true,
+   "params": [],
+   "defaults": {},
+   "idempotent": true,
+   "composite": false,
+   "estimate_s": 60,
+   "available": true,
+   "unavailable_reason": null,
+   "dry_run": null,
+   "lock_keys": [
+    "jobs:optimizer.plant:{plant}",
+    "jobs:routing.recompute:{plant}"
+   ]
+  },
+  {
+   "key": "attributes.resync",
+   "label": "Resync order attributes",
+   "plant_scoped": true,
+   "kind": "action",
+   "mutates": true,
+   "params": [],
+   "defaults": {},
+   "idempotent": true,
+   "composite": false,
+   "estimate_s": 15,
+   "available": true,
+   "unavailable_reason": null,
+   "dry_run": null,
+   "lock_keys": [
+    "jobs:attributes.resync:{plant}",
+    "jobs:optimizer.plant:{plant}"
+   ]
+  },
+  {
+   "key": "sap.apply_batch",
+   "label": "Apply validated SAP batch",
+   "plant_scoped": true,
+   "kind": "action",
+   "mutates": true,
+   "params": [
+    {
+     "key": "objects",
+     "type": "multi_enum",
+     "label_key": "jobs.p.sap.apply_batch.objects",
+     "title": "Objects",
+     "default": [
+      "stage_material_plants",
+      "stage_production_version",
+      "stage_routing_operation",
+      "stage_planned_orders"
+     ],
+     "required": false,
+     "widget": null,
+     "enum": [
+      "stage_material_plants",
+      "stage_production_version",
+      "stage_routing_operation",
+      "stage_planned_orders"
+     ],
+     "enum_label_keys": {
+      "stage_material_plants": "jobs.p.sap.apply_batch.objects.stage_material_plants",
+      "stage_production_version": "jobs.p.sap.apply_batch.objects.stage_production_version",
+      "stage_routing_operation": "jobs.p.sap.apply_batch.objects.stage_routing_operation",
+      "stage_planned_orders": "jobs.p.sap.apply_batch.objects.stage_planned_orders"
+     }
+    },
+    {
+     "key": "dry_run",
+     "type": "boolean",
+     "label_key": "jobs.p.sap.apply_batch.dry_run",
+     "title": "Dry Run",
+     "default": false,
+     "required": false,
+     "widget": null
+    }
+   ],
+   "defaults": {
+    "objects": [
+     "stage_material_plants",
+     "stage_production_version",
+     "stage_routing_operation",
+     "stage_planned_orders"
+    ],
+    "dry_run": false
+   },
+   "idempotent": true,
+   "composite": false,
+   "estimate_s": 120,
+   "available": true,
+   "unavailable_reason": null,
+   "dry_run": {
+    "param": "dry_run",
+    "value": true
+   },
+   "lock_keys": [
+    "jobs:optimizer.plant:{plant}",
+    "jobs:sap.apply_batch:{plant}"
+   ]
+  },
+  {
+   "key": "sap.send",
+   "label": "Send to SAP",
+   "plant_scoped": true,
+   "kind": "action",
+   "mutates": true,
+   "params": [
+    {
+     "key": "plant",
+     "type": "string",
+     "label_key": "jobs.p.sap.send.plant",
+     "title": "Plant",
+     "default": null,
+     "required": false,
+     "widget": null
+    },
+    {
+     "key": "only_if_previous_steps_succeeded",
+     "type": "boolean",
+     "label_key": "jobs.p.sap.send.only_if_previous_steps_succeeded",
+     "title": "Only If Previous Steps Succeeded",
+     "default": true,
+     "required": false,
+     "widget": null
+    }
+   ],
+   "defaults": {
+    "plant": null,
+    "only_if_previous_steps_succeeded": true
+   },
+   "idempotent": false,
+   "composite": false,
+   "estimate_s": null,
+   "available": false,
+   "unavailable_reason": "SAP interface is not live",
+   "dry_run": null,
+   "lock_keys": [
+    "jobs:sap.send:{plant}"
    ]
   },
   {
@@ -488,6 +698,8 @@
    "idempotent": false,
    "composite": true,
    "estimate_s": null,
+   "available": true,
+   "unavailable_reason": null,
    "dry_run": null,
    "lock_keys": []
   }

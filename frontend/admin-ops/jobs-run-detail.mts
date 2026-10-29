@@ -23,7 +23,7 @@ import {
   runStatusHtml, isActiveRun, durationText, stepSegments, resultTiles, mergeLog, lastSeq, filterLog,
   logToText, errorsToText, firstErrorIndex, lineDataText, elapsedText, elapsedMs, errorKindOf, isDryRun, deltaText,
   LOG_LEVELS, LOG_PAGE, plantWall, tzShort, ARTIFACT_PAGE, artifactTiles, isReportRun, sectionTitle, tryKey, columnLabel, cellText, windowLine,
-  stepStatusHtml, stepTitle, stepFacts, stepWaterfall, ranInRun, restartStepOf, findType, firstUnsafeStep, stepFromWire,
+  stepStatusHtml, stepTitle, stepFacts, stepDetailLines, stepWaterfall, ranInRun, restartStepOf, findType, firstUnsafeStep, stepFromWire,
 } from './jobs-model.mjs';
 import type { LogLine, Proposal, ProposalRow, ArtifactSection, ArtifactColumn, CellFmt, StepRow } from './jobs-model.mjs';
 
@@ -125,6 +125,7 @@ export function chainStepsHtml(run: JobRun, steps: StepRow[], types: JobType[], 
       const bar = bars.get(s.seq);
       const done = ranInRun(s);
       const facts = stepFacts(s);
+      const lines = stepDetailLines(s, deps);
       const kind = s.errorKind ? ` <span class="badge ${s.errorKind === 'system' ? 'badge-err' : 'badge-warn'} job-error-kind">${esc(t(`jobs.error_kind_${s.errorKind}`))}</span>` : '';
       const name = stepTitle({ type: s.stepType, label: s.label }, types, deps);
       return `<li class="job-step-row job-step-${esc(s.status)}${done != null ? ' job-step-earlier' : ''}" data-step-seq="${s.seq}"><span class="job-step-idx job-mono">${s.seq}</span><span class="job-step-name">${esc(name)}`
@@ -135,6 +136,7 @@ export function chainStepsHtml(run: JobRun, steps: StepRow[], types: JobType[], 
         + `<span class="job-mono job-step-dur">${esc((s.status === 'running' && s.durationMs == null && s.startedAt ? durationText(nowMs - Date.parse(s.startedAt)) : durationText(s.durationMs)) || '—')}</span>`
         + (facts.length ? `<span class="job-step-tiles">${facts.map(f => `<span class="kpi-tile"><span class="k">${esc(t(`jobs.tile_${f.key}`))}</span><span class="v">${esc(f.value)}</span></span>`).join('')}</span>` : '')
         + (s.error ? `<div class="job-step-err" role="note">${esc(s.error)}${kind}</div>` : '')
+        + (lines.length ? `<ul class="job-step-notes${s.status === 'warning' ? ' job-step-notes-warn' : ''}" role="note">${lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul>` : '')
         + `<span class="job-step-acts">`
         + (s.actionId ? `<button type="button" class="btn btn-ghost sm" data-jr-act="history" data-jr-action="${esc(s.actionId)}">${esc(t('jobs.open_history'))}</button>` : '')
         + (s.status !== 'pending' && s.status !== 'skipped' && done == null ? `<button type="button" class="btn btn-ghost sm" data-jr-act="step-log" data-jr-step="${s.seq}">${esc(t('jobs.step_log'))}</button>` : '')
@@ -420,6 +422,7 @@ async function _loadProposal(s: DetailState): Promise<void> {
       + (p.boardMatches === false ? `<div class="job-prop-warn" role="note">${esc(t('jobs.prop_board_changed'))}</div>` : '')
       + (p.boardMatches === true ? `<div class="ape-hint" role="note">${esc(t('jobs.prop_board_same'))}</div>` : '')
       + `<div class="ape-hint" role="note">${esc(t('jobs.prop_may_skip'))}</div>`
+      + (p.step ? `<div class="${p.step.earlierDrySteps > 0 ? 'job-prop-warn' : 'ape-hint'}" role="note" id="jr-prop-step">${esc(t('jobs.prop_step_only', { n: p.step.seq, name: p.step.label }))}${p.step.earlierDrySteps > 0 ? ` ${esc(t('jobs.prop_step_earlier'))}` : ''}</div>` : '')
       + `<div class="job-prop-row job-prop-head" role="presentation">${head.map(h => `<span title="${esc(h)}">${esc(h)}</span>`).join('')}</div>`
       + `<div class="job-prop-list" id="jr-prop-list" tabindex="0" role="region" aria-label="${esc(t('jobs.prop_title'))}"></div>`;
     const list = _q('#jr-prop-list');

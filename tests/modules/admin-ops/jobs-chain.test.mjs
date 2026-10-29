@@ -35,8 +35,11 @@ test('the served types carry the step-type contract', () => {
 
 test('typeGroups puts chains in their own group and keeps them out of the others', () => {
   const g = M.typeGroups(TYPES);
-  assert.deepEqual(g.map(x => x.kind), ['action', 'report', 'chain']);
-  assert.deepEqual(g[2].types.map(x => x.key), ['chain']);
+  assert.deepEqual(g.map(x => x.kind), ['action', 'data', 'sap', 'report', 'chain']);
+  assert.deepEqual(g[0].types.map(x => x.key), ['optimizer.plant', 'optimizer.backlog']);
+  assert.deepEqual(g[1].types.map(x => x.key), ['purge.orders', 'routing.recompute', 'attributes.resync']);
+  assert.deepEqual(g[2].types.map(x => x.key), ['sap.apply_batch', 'sap.send']);
+  assert.deepEqual(g[4].types.map(x => x.key), ['chain']);
   assert.ok(!g[0].types.some(x => x.composite));
   assert.deepEqual(M.stepTypes(TYPES).map(x => x.key).includes('chain'), false);
 });

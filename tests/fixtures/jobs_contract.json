@@ -49,7 +49,7 @@
                 "enum_label_keys": {"due_date": "jobs.p.optimizer.plant.mode.due_date"}}],
     "params_schema": {"type": "object"},
     "defaults": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"},
-    "idempotent": true, "composite": false, "estimate_s": 180,
+    "idempotent": true, "composite": false, "estimate_s": 180, "available": true, "unavailable_reason": null,
     "dry_run": {"param": "apply_mode", "value": "propose"}, "lock_keys": ["jobs:optimizer.plant:{plant}"]
   }], "limits": {"chain_max_steps": 10, "purge_min_age_days": 7}},
   "step": {
@@ -106,7 +106,7 @@
     "run_id": 44, "plant": "1008", "total": 1, "shown": 1, "truncated": false, "pending": false, "board_matches": true,
     "rows": [{"id": "1008-100", "machine": "L1", "finish_before": "2026-10-30T10:00:00", "finish_after": "2026-10-30T14:00:00",
               "delta_hours": 4.0, "status": "scheduled", "changed_since": false}],
-    "findings": [{"severity": "warn", "message": "opaque"}]
+    "findings": [{"severity": "warn", "message": "opaque"}], "proposal_step": null
   },
   "proposal_pending": {
     "run_id": 45, "plant": "1008", "pending": true, "total": 0, "shown": 0, "truncated": false,

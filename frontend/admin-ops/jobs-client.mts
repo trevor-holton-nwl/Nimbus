@@ -298,6 +298,8 @@ export function normProposal(data: unknown): Proposal {
   return {
     runId: Number(d.run_id), total: Number(d.total ?? rows.length), shown: Number(d.shown ?? rows.length), rows,
     findings: _arr(d, 'findings').length, boardMatches: typeof d.board_matches === 'boolean' ? d.board_matches : null, truncated: !!d.truncated,
+    step: d.proposal_step && typeof d.proposal_step === 'object' ? { seq: Number((d.proposal_step as Record<string, unknown>).seq) || 0, label: String((d.proposal_step as Record<string, unknown>).label ?? ''),
+      type: String((d.proposal_step as Record<string, unknown>).type ?? ''), earlierDrySteps: Number((d.proposal_step as Record<string, unknown>).earlier_dry_steps) || 0 } : null,
     pending: d.pending === true,
   };
 }
@@ -320,6 +322,7 @@ export function normType(r: Raw): JobType {
     idempotent: r.idempotent === true, composite: r.composite === true, estimateS: typeof r.estimate_s === 'number' ? r.estimate_s : null,
     dryRun: r.dry_run && typeof r.dry_run === 'object' ? { param: String((r.dry_run as Raw).param), value: (r.dry_run as Raw).value } : null,
     lockKeys: Array.isArray(r.lock_keys) ? (r.lock_keys as unknown[]).map(String) : [],
+    available: r.available !== false, unavailableReason: typeof r.unavailable_reason === 'string' ? r.unavailable_reason : null,
   };
 }
 

@@ -949,7 +949,7 @@ def list_batches(*, object_key: str | None = None, plant: str | None = None, sta
         where.append("object_key = %s")
         params.append(object_key)
     if plant:
-        where.append("plant = %s")
+        where.append("btrim(plant) = btrim(%s)")      # the apply side compares trimmed too
         params.append(plant)
     if status:
         where.append("status = %s")

@@ -34,8 +34,12 @@ interface NodeProcess {
 declare const process: NodeProcess;
 
 export interface RunParams {
-  mode: Exclude<OptimizerMode, 'backlog'>;
+  /** 'backlog' is Remove Backlog (Jobs W4b): a schedule repair, not a search; `search` is ignored for it. */
+  mode: OptimizerMode;
   search: 'normal' | 'exhaustive';
+  /** Backlog only: also move orders already running on the line (the browser's Backlog does; default true). With false
+   *  a patch for an order in progress is left out at run time and dropped at apply time. */
+  include_running?: boolean;
   /** "Respect planner-firmed orders"; default true. */
   respect_firmed?: boolean;
   respect_calendar?: boolean;
@@ -84,6 +88,11 @@ export interface RunSummary {
   search: string;
   plant: string;
   run_now: string | null;
+  /** Remove Backlog only: the engine's own diagnostics counts and how many running orders were left out. */
+  backlog?: { found: number; moved: number; firmed_moved: number; frozen_moved: number; running_moved: number;
+    running_skipped: number; moved_runtime_hours: number; largest_delay_minutes: number; invalid_runtime: number;
+    missing_start: number; overlong: number; capacity_failures: number; boundary_conflicts: number;
+    window_start: string; window_end: string };
 }
 
 export interface RunResult {
@@ -109,6 +118,22 @@ interface RunState {
   validation: SerializedOptimizerValidation;
   serverNow: string;
   mode: string;
+  /** Backlog only (never written for another mode): running orders may be written (see RunParams.include_running). */
+  includeRunning?: boolean;
+  /** Backlog only: ids of the orders in progress at the run's clock. Apply drops a patched order whose running state
+   *  changed since (it started, or finished, between the run and the write). */
+  runningIds?: string[];
+}
+
+/** `date` plus whole calendar months, the day clamped to the month's end (the dialog's `_addCalendarMonths`). */
+function addCalendarMonths(date: Date, months: number): Date {
+  const result = new Date(date);
+  const day = result.getDate();
+  result.setDate(1);
+  result.setMonth(result.getMonth() + months);
+  const last = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate();
+  result.setDate(Math.min(day, last));
+  return result;
 }
 
 const isoOr = (value: Date | null | undefined): string | null => (value && Number.isFinite(value.getTime()) ? value.toISOString() : null);
@@ -171,7 +196,7 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
   const { plant, wire, params } = input;
   const serverNow = new Date(params.serverNow);
   if (!Number.isFinite(serverNow.getTime())) return failure('invalid_server_now', `serverNow is not a valid instant: ${params.serverNow}`, log);
-  if (!['duedate', 'changeover', 'spt'].includes(params.mode)) return failure('invalid_mode', `unsupported mode: ${String(params.mode)}`, log);
+  if (!['duedate', 'changeover', 'spt', 'backlog'].includes(params.mode)) return failure('invalid_mode', `unsupported mode: ${String(params.mode)}`, log);
   const tz = params.plantTimezone || plantTimezoneOf(wire, plant);
   if (!tz) return failure('plant_no_timezone', `plant ${plant} has no timezone`, log);
 
@@ -180,7 +205,7 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
   const { buildScheduleSnapshot } = await import('./headless-snapshot.mjs');
   const { deriveDisplayStarts, quiesceStore } = await import('./headless-runtime.mjs');
   const { patchesToUpdateItems } = await import('./headless-writer.mjs');
-  const { SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, evaluateSchedule } = await import('./engine.mjs');
+  const { SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, evaluateSchedule, Engine } = await import('./engine.mjs');
   const { serializeOptimizerValidation } = await import('./optimizer-worker-contract.mjs');
   const { validateCandidateForApply } = await import('./setup-scheduler.mjs');
   quiesceStore();
@@ -202,17 +227,37 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
   const startDate = new Date(plantNow);
   startDate.setSeconds(0, 0);
   const days = params.horizonDays && params.horizonDays > 0 ? params.horizonDays : 28;
-  const exhaustive = params.search === 'exhaustive';
+  const backlogMode = params.mode === 'backlog';
+  const includeRunning = params.include_running !== false;
+  const exhaustive = !backlogMode && params.search === 'exhaustive';
   const budget = exhaustive ? SETUP_AWARE_EXHAUSTIVE_BUDGET_MS : SETUP_AWARE_NORMAL_BUDGET_MS;
+  // Remove Backlog's window is the dialog's default (optimize-ui `_applyBacklogDefaults`): from the earliest start in the
+  // past to the latest end, capped four calendar months out; a run with nothing in the past starts at now.
+  const lineSet = params.lines && params.lines.length ? new Set(params.lines) : null;
+  const backlogWindow = (): { start: Date; end: Date } => {
+    const scoped = snapshot.tasks.filter(task => !lineSet || lineSet.has(String(task.MACHINE ?? 'Unknown')));
+    const past = scoped.map(task => task.start_date).filter((d): d is Date => !!d && d < plantNow);
+    const ends = scoped.map(task => task.end_date).filter((d): d is Date => !!d);
+    const capEnd = addCalendarMonths(plantNow, 4);
+    const start = past.length ? new Date(Math.min(...past.map(d => d.getTime()))) : new Date(plantNow);
+    let end = ends.length ? new Date(Math.min(Math.max(...ends.map(d => d.getTime())), capEnd.getTime())) : capEnd;
+    if (end < start) end = addCalendarMonths(start, 4);
+    return { start, end };
+  };
+  const bw = backlogMode ? backlogWindow() : null;
   const request = {
     mode: params.mode, plant,
     lines: params.lines && params.lines.length ? params.lines : null,
-    startDate, endDate: new Date(plantNow.getTime() + days * 86_400_000), runAt: serverNow,
-    respectFirmed: params.respect_firmed ?? true, respectCalendar: params.respect_calendar ?? true,
+    startDate: bw ? bw.start : startDate,
+    endDate: bw ? bw.end : new Date(plantNow.getTime() + days * 86_400_000), runAt: serverNow,
+    respectFirmed: params.respect_firmed ?? true, respectCalendar: backlogMode ? true : (params.respect_calendar ?? true),
+    // include_running=false is a TRUE plan-around: orders in progress hold their slot and the rest is placed around them.
+    ...(backlogMode && !includeRunning ? { holdRunning: true } : {}),
     deadlineAt: performance.now() + budget, searchBudgetMs: budget, exhaustive,
     ...(params.iterationCap ? { iterationCap: params.iterationCap } : {}),
   };
-  emit('info', 'optimize', `evaluating ${params.mode} (${params.search}, budget ${budget} ms)`);
+  emit('info', 'optimize', backlogMode ? `removing backlog (running orders ${params.include_running === false ? 'left alone' : 'included'})`
+    : `evaluating ${params.mode} (${params.search}, budget ${budget} ms)`);
   const t2 = performance.now();
   let candidate: CandidateResult;
   try {
@@ -227,16 +272,37 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
   const serialized = serializeOptimizerValidation(candidate);
   const validationFindings = validateCandidateForApply(candidate, snapshot);
   const errors = validationFindings.filter(f => f.severity === 'error');
-  const toolBlocked = candidate.toolBlocked?.length ?? 0;
+  const toolBlocked = backlogMode ? 0 : candidate.toolBlocked?.length ?? 0;
   const blockers: string[] = [];
   if (candidate.status === 'invalid_horizon') blockers.push('invalid_horizon');
   if (!serialized) blockers.push('no_validation_context');
   for (const code of new Set(errors.map(f => f.code))) blockers.push(`finding:${code}`);
   if (toolBlocked) blockers.push(`tool_blocked:${toolBlocked}`);
 
+  // Backlog: which orders are in progress at the run's clock. With include_running=false the engine held them (they are
+  // fixed obstacles, never patched), so the offered set IS the candidate's patch set and equals what apply writes; a
+  // patch for a running order here would break that, so it blocks the run instead of being quietly filtered.
+  const runningIds: string[] = [];
+  const runningPatchIds = new Set<string>();
+  if (backlogMode) {
+    for (const task of snapshot.tasks) if (Engine.isInProgress(task, plantNow)) runningIds.push(String(task.id));
+    const running = new Set(runningIds);
+    for (const patch of candidate.patches) if (running.has(String(patch.id))) runningPatchIds.add(String(patch.id));
+    if (!includeRunning && runningPatchIds.size) blockers.push(`running_patch:${runningPatchIds.size}`);
+  }
+  const offered = candidate.patches;
+  const diag = candidate.backlogResult?.diagnostics;
+  const backlog = backlogMode && bw ? {
+    found: diag?.backlogFound ?? 0, moved: diag?.moved ?? 0, firmed_moved: diag?.firmedMoved ?? 0, frozen_moved: diag?.frozenMoved ?? 0,
+    running_moved: includeRunning ? runningPatchIds.size : 0, running_skipped: includeRunning ? 0 : (diag?.runningHeldIds?.length ?? 0),
+    moved_runtime_hours: Math.round((diag?.movedRuntimeHours ?? 0) * 100) / 100, largest_delay_minutes: diag?.largestDelayMinutes ?? 0,
+    invalid_runtime: diag?.invalidRuntimeIds.length ?? 0, missing_start: diag?.missingStartIds.length ?? 0, overlong: diag?.overlongIds.length ?? 0,
+    capacity_failures: diag?.calendarSearchFailures.length ?? 0, boundary_conflicts: diag?.boundaryConflicts.length ?? 0,
+    window_start: bw.start.toISOString(), window_end: bw.end.toISOString(),
+  } : undefined;
   const disposition = (status: string): number => candidate.dispositions?.filter(d => d.status === status).length ?? 0;
   const summary: RunSummary = {
-    patched: candidate.patches.length,
+    patched: offered.length,
     scheduled: disposition('scheduled'), needs_planning: disposition('needs_planning'), protected: disposition('protected'),
     late_count: candidate.objective?.lateCount ?? null, lateness_minutes: candidate.objective?.latenessMinutes ?? null,
     setup_minutes: candidate.objective?.setupMinutes ?? null, scheduled_count: candidate.objective?.scheduledCount ?? null,
@@ -244,14 +310,17 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
     termination: candidate.diagnostics.termination ?? null, search_complete: candidate.searchComplete ?? null,
     iterations_used: candidate.diagnostics.iterationsUsed ?? null, runtime_ms: candidate.diagnostics.runtimeMs ?? null,
     mode: params.mode, search: params.search, plant, run_now: isoOr(serialized ? new Date(serialized.runNow) : null),
+    ...(backlog ? { backlog } : {}),
   };
   const { validationContext: _context, ...bare } = candidate;
-  const state: RunState | null = serialized ? { candidate: bare, validation: serialized, serverNow: params.serverNow, mode: params.mode } : null;
+  const state: RunState | null = serialized
+    ? { candidate: bare, validation: serialized, serverNow: params.serverNow, mode: params.mode,
+        ...(backlogMode ? { includeRunning, runningIds } : {}) } : null;
   emit(blockers.length ? 'warn' : 'info', 'result', blockers.length ? `blocked: ${blockers.join(', ')}` : 'result is applicable');
   return {
     ok: blockers.length === 0,
     status: candidate.status ?? 'completed',
-    patches: patchesToUpdateItems(snapshot.tasks, candidate.patches),
+    patches: patchesToUpdateItems(snapshot.tasks, offered),
     summary,
     findings: (candidate.validationFindings ?? []).map(({ code, message, severity, taskId, line }) => ({ code, message, severity, taskId, line })),
     validation: { findings: validationFindings, errors: errors.length, warnings: validationFindings.length - errors.length },
@@ -330,7 +399,11 @@ export async function planApplyFromState(input: ApplyInput, sink: LogSink = () =
   const core = (globalThis as unknown as { NimbusComputeCore: { plantWallClockFromInstant(tz: string, d: Date): Date | null } }).NimbusComputeCore;
   const now = core.plantWallClockFromInstant(tz, liveNow);
   if (!now) return empty('plant_no_timezone');
-  const plan = planApply({ plant: input.plant, candidate, runSnapshot, liveSnapshot, now });
+  // Only Remove Backlog may write an order that is running (the browser's Backlog does); every other mode drops it.
+  const includeRunning = state.mode === 'backlog' && state.includeRunning !== false;
+  const plan = planApply({ plant: input.plant, candidate, runSnapshot, liveSnapshot, now, includeRunning,
+    ...(state.mode === 'backlog' ? { useRunFirmed: true } : {}),
+    ...(state.mode === 'backlog' && state.runningIds ? { runningAtRun: new Set(state.runningIds) } : {}) });
   emit(plan.ok ? 'info' : 'warn', 'guard', `apply ${plan.apply.length} of ${candidate.patches.length} patches, dropped ${plan.dropped.length}`,
     { dropped: plan.dropped.map(d => `${d.id}:${d.reason}`) });
   // Items carry the LIVE row version: that is the token the server compares, and a changed row was dropped above.

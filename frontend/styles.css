@@ -8343,6 +8343,8 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .job-step-tiles .kpi-tile { padding: 4px 8px; display: inline-flex; gap: 6px; align-items: baseline; }
 .job-step-tiles .kpi-tile .v { font-size: 13px; }
 .job-step-err { padding: 6px 8px; background: var(--err-soft); color: var(--err); border-radius: var(--r-md); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.job-step-notes { grid-column: 2 / -1; margin: 0; padding-left: 18px; font-size: 12.5px; overflow-wrap: anywhere; }
+.job-step-notes-warn { color: var(--warn-text); }
 .job-step-acts { display: flex; flex-wrap: wrap; gap: 6px; }
 .job-step-acts:empty { display: none; }
 @media (max-width: 640px) {

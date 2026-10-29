@@ -487,7 +487,9 @@ export async function runSequential<T>(items: T[], fn: (item: T) => Promise<unkn
    Dry-run proposal (GET /jobs/runs/{id}/proposal)
    ------------------------------------------------------------------------- */
 export interface ProposalRow { id: string; machine: string | null; finishBefore: string | null; finishAfter: string | null; deltaHours: number | null; status: string | null; changedSince: boolean }
-export interface Proposal { runId: number; total: number; shown: number; rows: ProposalRow[]; findings: number; boardMatches: boolean | null; truncated: boolean; pending: boolean }
+export interface Proposal { runId: number; total: number; shown: number; rows: ProposalRow[]; findings: number; boardMatches: boolean | null; truncated: boolean; pending: boolean;
+  /** A dry-run chain: the step whose preview this is, and how many earlier dry-run steps it does NOT include. */
+  step?: { seq: number; label: string; type: string; earlierDrySteps: number } | null }
 
 /** +4.0 h / -1.5 h / 0 h; '' when unknown. */
 export function deltaText(h: number | null | undefined): string {
@@ -600,6 +602,8 @@ export interface TypeMeta {
   /** The step-type contract (W4a): safe to run again, a chain (its params are steps), rough seconds, the param value
    *  that makes it a dry run, and the lock keys it takes (`{plant}` placeholder). */
   idempotent?: boolean; composite?: boolean; estimateS?: number | null; dryRun?: { param: string; value: unknown } | null; lockKeys?: string[];
+  /** W4b: false for a scaffolded type (Send to SAP): listed disabled, never saved or run. `unavailableReason` is the server's text. */
+  available?: boolean; unavailableReason?: string | null;
 }
 
 /** Strings the optimizer's params already had before the generic form: reused so no translation is duplicated. */
@@ -617,6 +621,10 @@ export const LABEL_ALIASES: Record<string, string> = {
   'jobs.p.optimizer.plant.apply_mode.apply': 'jobs.result_apply',
   'jobs.p.optimizer.plant.apply_mode.propose': 'jobs.result_propose',
   'jobs.type.optimizer.plant': 'jobs.type_optimizer',
+  // Remove backlog has the same Result control as the optimizer
+  'jobs.p.optimizer.backlog.apply_mode': 'jobs.f_result',
+  'jobs.p.optimizer.backlog.apply_mode.apply': 'jobs.result_apply',
+  'jobs.p.optimizer.backlog.apply_mode.propose': 'jobs.result_propose',
 };
 
 /** The translation for `key` (or its legacy alias), or '' when neither exists. */
@@ -631,16 +639,30 @@ export const enumLabel = (m: ParamMeta, v: string, d: Pick<JobsDeps, 't'>): stri
 export const paramHint = (m: ParamMeta, d: Pick<JobsDeps, 't'>): string => tryKey(`${m.labelKey}.hint`, d);
 export const typeLabel = (x: { key: string; label: string }, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.type.${x.key}`, d) || x.label;
 
-/** Dialog / filter groups: Optimization (actions), Reports, then Chains (a chain is made of the others). */
-export function typeGroups(types: ReadonlyArray<TypeMeta>): Array<{ kind: JobKind | 'chain'; labelKey: string; types: TypeMeta[] }> {
-  const labelOf = { action: 'jobs.group_optimization', report: 'jobs.group_reports', chain: 'jobs.group_chains' } as const;
-  return (['action', 'report', 'chain'] as const)
-    .map(kind => ({
-      kind, labelKey: labelOf[kind],
-      types: types.filter(x => (kind === 'chain' ? !!x.composite : !x.composite && x.kind === kind)),
-    }))
+export type TypeGroupKind = 'action' | 'data' | 'sap' | 'report' | 'chain';
+/** Which group a type sits in: an `optimizer.*` action is Optimization, a `sap.*` one is SAP, any other action
+ *  (purge, routing recompute, attribute resync) is Data. */
+export function typeGroupOf(x: Pick<TypeMeta, 'key' | 'kind' | 'composite'>): TypeGroupKind {
+  if (x.composite) return 'chain';
+  if (x.kind === 'report') return 'report';
+  if (x.key.startsWith('optimizer.')) return 'action';
+  return x.key.startsWith('sap.') ? 'sap' : 'data';
+}
+
+/** Dialog / filter groups: Optimization, Data, SAP (actions), Reports, then Chains (a chain is made of the others). */
+export function typeGroups(types: ReadonlyArray<TypeMeta>): Array<{ kind: TypeGroupKind; labelKey: string; types: TypeMeta[] }> {
+  const labelOf = { action: 'jobs.group_optimization', data: 'jobs.group_data', sap: 'jobs.group_sap', report: 'jobs.group_reports', chain: 'jobs.group_chains' } as const;
+  return (['action', 'data', 'sap', 'report', 'chain'] as const)
+    .map(kind => ({ kind, labelKey: labelOf[kind], types: types.filter(x => typeGroupOf(x) === kind) }))
     .filter(g => g.types.length);
 }
+
+/** A scaffolded type is listed but disabled; its reason is a translation (`jobs.type.<key>.unavailable`) or the server's text. */
+export const isUnavailable = (x: { available?: boolean } | null | undefined): boolean => !!x && x.available === false;
+export const unavailableWhy = (x: Pick<TypeMeta, 'key' | 'unavailableReason'>, d: Pick<JobsDeps, 't'>): string =>
+  d.t('jobs.type_unavailable_why', { reason: tryKey(`jobs.type.${x.key}.unavailable`, d) || x.unavailableReason || '' });
+/** The one-line description of a step type (`jobs.type.<key>.hint`), '' when it has none. */
+export const typeHint = (x: Pick<TypeMeta, 'key'>, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.type.${x.key}.hint`, d);
 
 export const findType = (types: ReadonlyArray<TypeMeta>, key: string): TypeMeta | undefined => types.find(x => x.key === key);
 /** The Result control (Apply / Dry run) shows only for an action type that has an `apply_mode` param. */
@@ -937,7 +959,7 @@ export function validatePolicy(p: PolicyForm, preset: RecurPreset, tzMode: TzMod
 /** The result mode of a form or a stored params object ('apply' when the job never set one). */
 export const resultOf = (params: Record<string, unknown> | null | undefined): string => String(params?.apply_mode ?? 'apply');
 
-export type FormErrors = Partial<Record<'name' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity' | 'targets' | 'fixedTz' | 'fanOut' | 'policyWin' | 'policyGrace' | 'policyTz' | 'steps', string>>
+export type FormErrors = Partial<Record<'name' | 'type' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity' | 'targets' | 'fixedTz' | 'fanOut' | 'policyWin' | 'policyGrace' | 'policyTz' | 'steps', string>>
   & { params?: Record<string, string>; stepParams?: Record<number, Record<string, string>> };
 
 /** Field -> i18n key. Empty object = valid. `isAdmin` guards the auto-apply result (the server re-checks).
@@ -949,6 +971,8 @@ export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: strin
   else if (name.length > NAME_MAX) e.name = 'jobs.err_name_long';
   if (!f.plant) e.plant = 'jobs.err_plant';
   else if (o.plants && !o.plants.includes(f.plant)) e.plant = 'jobs.err_plant_scope';
+  // A type that is not available (a restored draft, an old job) is shown selected-but-disabled and fails here, visibly.
+  if (o.meta && isUnavailable(o.meta)) e.type = 'jobs.err_type_unavailable';
   const chain = isChainKey(f.jobType) || !!o.meta?.composite;
   if (chain) Object.assign(e, validateChain(f.steps, o.types ?? [], o.limits ?? DEFAULT_CHAIN_LIMITS));
   const pe = o.meta && !chain ? validateParams(o.meta.params, f.params) : {};
@@ -1358,6 +1382,7 @@ export function validateChain(steps: ChainStep[], types: ReadonlyArray<TypeMeta>
   steps.forEach((s, i) => {
     const m = findType(types, s.type);
     if (!m || m.composite) { per[i] = { _type: 'jobs.err_chain_type' }; return; }
+    if (isUnavailable(m)) { per[i] = { _type: 'jobs.err_type_unavailable' }; return; }
     const errs = validateParams(m.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(m)), s.params);
     if (m.key === 'purge.orders') {
       const pe = purgeWindowError(s.params.window as DateWindow | null, limits.purgeMinAgeDays);
@@ -1402,11 +1427,38 @@ export const ranInRun = (s: Pick<StepRow, 'summary'>): number | null => {
   return v == null ? null : Number(v);
 };
 
-/** Counts a step's summary reports, in fixed order (a count it did not report is omitted). */
-export const STEP_FACTS = ['late', 'moved', 'applied', 'dropped', 'matched', 'deleted', 'findings', 'rows'] as const;
+/** Counts a step's summary reports, in fixed order (a count it did not report is omitted). The backlog step keeps its own
+ *  counts under `summary.backlog` (found, running_moved, running_skipped); they are read from there. */
+export const STEP_FACTS = ['late', 'moved', 'applied', 'dropped', 'matched', 'deleted', 'findings', 'rows',
+  'found', 'running_moved', 'running_skipped', 'resolved', 'unknown', 'unmatched_pairs', 'unmatched_orders', 'applied_batches'] as const;
+const _BACKLOG_FACTS: ReadonlyArray<string> = ['found', 'running_moved', 'running_skipped'];
 export function stepFacts(s: Pick<StepRow, 'summary'>): Array<{ key: typeof STEP_FACTS[number]; value: number }> {
   const out: Array<{ key: typeof STEP_FACTS[number]; value: number }> = [];
-  for (const k of STEP_FACTS) { const v = s.summary?.[k]; if (typeof v === 'number' && Number.isFinite(v)) out.push({ key: k, value: v }); }
+  const nested = (s.summary?.backlog && typeof s.summary.backlog === 'object' ? s.summary.backlog : null) as Record<string, unknown> | null;
+  for (const k of STEP_FACTS) {
+    const v = _BACKLOG_FACTS.includes(k) ? nested?.[k] : s.summary?.[k];
+    if (typeof v === 'number' && Number.isFinite(v)) out.push({ key: k, value: v });
+  }
+  return out;
+}
+
+/** The words a step adds under its counts: its warnings (the server's own text, counts included), the known notes in the
+ *  viewer's language, and one line per SAP object (applied / held and needing a person / nothing). Empty for a plain step. */
+export function stepDetailLines(s: Pick<StepRow, 'summary'>, d: Pick<JobsDeps, 't'>): string[] {
+  const sm = s.summary;
+  if (!sm) return [];
+  const out: string[] = [];
+  if (Array.isArray(sm.warnings)) for (const w of sm.warnings) if (typeof w === 'string' && w) out.push(w);
+  if (sm.skipped === 'routing_off') out.push(d.t('jobs.note_routing_off'));
+  else if (sm.note === 'no validated batch to apply') out.push(d.t('jobs.note_sap_none'));
+  else if (typeof sm.note === 'string' && sm.note) out.push(sm.note);
+  if (Array.isArray(sm.notes)) {
+    for (const n of sm.notes as Array<Record<string, unknown>>) {
+      if (!n || typeof n.object !== 'string' || typeof n.result !== 'string') continue;
+      // an applied object also carries its counts in `summary.applied`; the line names the result only
+      out.push(`${tryKey(`jobs.p.sap.apply_batch.objects.${n.object}`, d) || n.object}: ${tryKey(`jobs.sap_res_${n.result}`, d) || n.result}`);
+    }
+  }
   return out;
 }
 

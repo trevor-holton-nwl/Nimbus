@@ -621,7 +621,8 @@ def test_a_dry_run_chain_has_a_proposal_and_a_pending_one(client, monkeypatch):
     dry_chain = {"chain": True, "mode": "dry_run", "apply_mode": "propose",
                  "proposal": {"snapshot_version": "v1", "base_versions": {"1008-100": 7},
                               "patches": [{"id": "1008-100", "end_date": "2026-10-30T14:00:00", "base_version": 7}],
-                              "findings": []}}
+                              "findings": []},
+                 "proposal_step": {"seq": 2, "label": "SPT", "type": "optimizer.plant", "earlier_dry_steps": 1}}
     runs = {90: _run_row(id=90, job_type="chain", summary=dry_chain),
             91: _run_row(id=91, job_type="chain", status="running", ended_at=None, summary=None),
             92: _run_row(id=92, job_type="chain", status="running", ended_at=None, summary=None)}
@@ -633,6 +634,7 @@ def test_a_dry_run_chain_has_a_proposal_and_a_pending_one(client, monkeypatch):
     monkeypatch.setattr(data, "list_steps", lambda rid: opt("propose") if rid == 91 else opt("apply"))
     body = client.get("/jobs/runs/90/proposal").json()
     assert body["pending"] is False and body["total"] == 1 and body["rows"][0]["machine"] == "L1"
+    assert body["proposal_step"] == {"seq": 2, "label": "SPT", "type": "optimizer.plant", "earlier_dry_steps": 1}
     assert client.get("/jobs/runs/91/proposal").json()["pending"] is True
     assert client.get("/jobs/runs/92/proposal").status_code == 400, "a running chain whose optimizer step applies"
 
