@@ -41,7 +41,7 @@
   "artifact": {
     "run_id": 42, "filename": "report-1008-run42.json", "size_bytes": 512, "created_at": "2026-10-29T12:03:40+00:00",
     "summary": {"events": 3}, "truncated": false,
-    "sections": [{"key": "counts", "title": "Changes", "columns": [{"key": "value", "label": "value"}, {"key": "events", "label": "events"}],
+    "sections": [{"key": "counts", "title": "Changes", "columns": [{"key": "value", "label": "value", "type": "text"}, {"key": "events", "label": "events", "type": "number"}],
                   "rows": [["drag", 3]], "row_count": 1, "truncated": false, "offset": 0, "limit": 500, "rows_stored": 1}]
   },
   "summary": {

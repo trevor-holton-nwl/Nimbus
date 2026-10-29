@@ -10,7 +10,7 @@
    ========================================================================== */
 
 import { Util, Config } from '../platform/foundation.mjs';
-import { buildJobsQuery, buildRunsQuery, buildLogQuery } from './jobs-model.mjs';
+import { buildJobsQuery, buildRunsQuery, buildLogQuery, normColumnType } from './jobs-model.mjs';
 import type { JobsQuery, RunsQuery, LogLine, RunSummary, HealthSummary, Proposal, TypeMeta, ParamMeta, DateWindow, Artifact, ArtifactSection } from './jobs-model.mjs';
 
 export interface JobSchedule {
@@ -79,6 +79,19 @@ export interface LogPage { lines: LogLine[]; status: string | null; done: boolea
 type Raw = Record<string, unknown>;
 const API = (): string => Config.API_BASE;
 
+/** The server's `detail` as one line: a string as is; a 422 array (FastAPI validation) joined as "field: message; ...". */
+export function detailText(d: unknown): string {
+  if (typeof d === 'string') return d;
+  if (!Array.isArray(d)) return '';
+  return d.map((x: unknown) => {
+    if (typeof x === 'string') return x;
+    const o = (x ?? {}) as { loc?: unknown; msg?: unknown };
+    const field = Array.isArray(o.loc) ? o.loc.filter(k => k !== 'body' && k !== 'params').join('.') : '';
+    const msg = typeof o.msg === 'string' ? o.msg : '';
+    return field && msg ? `${field}: ${msg}` : msg || field;
+  }).filter(Boolean).join('; ');
+}
+
 async function _req(method: string, path: string, body?: unknown): Promise<unknown> {
   const init: RequestInit = { method };
   if (body !== undefined) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body); }
@@ -86,8 +99,7 @@ async function _req(method: string, path: string, body?: unknown): Promise<unkno
   let data: unknown = null;
   try { data = await r.json(); } catch { /* empty body */ }
   if (!r.ok) {
-    const d = (data as Raw | null)?.detail;
-    throw new Error(typeof d === 'string' && d ? d : `HTTP ${r.status}`);
+    throw new Error(detailText((data as Raw | null)?.detail) || `HTTP ${r.status}`);
   }
   return data;
 }
@@ -196,7 +208,7 @@ export function normArtifact(data: unknown): Artifact {
   const d = (data as Raw | null) ?? {};
   const sections: ArtifactSection[] = _arr(d, 'sections').map(s => ({
     key: String(s.key), title: String(s.title ?? s.key),
-    columns: _arr(s, 'columns').map(c => ({ key: String(c.key), label: String(c.label ?? c.key) })),
+    columns: (Array.isArray(s.columns) ? s.columns as unknown[] : []).map(c => typeof c === 'string' ? { key: c, label: c, type: 'text' as const } : { key: String((c as Raw).key), label: String((c as Raw).label ?? (c as Raw).key), type: normColumnType((c as Raw).type) }),
     rows: Array.isArray(s.rows) ? (s.rows as unknown[][]) : [], rowCount: Number(s.row_count ?? 0), rowsStored: Number(s.rows_stored ?? 0),
     truncated: s.truncated === true, offset: Number(s.offset ?? 0),
   }));
@@ -268,11 +280,11 @@ export const JobsClient = {
     if (o.section) q.push(`section=${encodeURIComponent(o.section)}`);
     return normArtifact(await _req('GET', `/jobs/runs/${runId}/artifact?${q.join('&')}`));
   },
-  /** One section as CSV text (the server adds the BOM and the formula guard). */
-  async artifactCsv(runId: number, section: string): Promise<string> {
+  /** One section as CSV BYTES (the server adds the UTF-8 BOM and the formula guard; Response.text() would strip the BOM). */
+  async artifactCsv(runId: number, section: string): Promise<Uint8Array> {
     const r = await Util.fetchTraced(`${API()}/jobs/runs/${runId}/artifact?section=${encodeURIComponent(section)}&format=csv`, { method: 'GET' });
-    if (!r.ok) { let d: unknown = null; try { d = (await r.json() as Raw).detail; } catch { /* not JSON */ } throw new Error(typeof d === 'string' && d ? d : `HTTP ${r.status}`); }
-    return await r.text();
+    if (!r.ok) { let d: unknown = null; try { d = (await r.json() as Raw).detail; } catch { /* not JSON */ } throw new Error(detailText(d) || `HTTP ${r.status}`); }
+    return new Uint8Array(await r.arrayBuffer());
   },
   async cancelRun(runId: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/runs/${runId}/cancel`)) as Raw).run) as Raw); },
 

@@ -46,11 +46,14 @@ CREATE INDEX IF NOT EXISTS idx_schedule_event_order ON schedule_event (plant, or
 CREATE INDEX IF NOT EXISTS idx_schedule_event_at    ON schedule_event (at);
 """
 
-# Plant-level listing (report.what_changed). Run by the startup hook and mirrored in schema.sql; kept OUT of the
-# pinned SCHEDULE_EVENT_DDL and the migration file (an index on an existing table goes through the hook, not a migration).
+# Plant-level listing in time order (report.what_changed filters `plant = ? AND at in window`, so the index leads with
+# plant then `at`). Run by the startup hook and mirrored in schema.sql; kept OUT of the pinned SCHEDULE_EVENT_DDL and
+# the migration file (an index on an existing table goes through the hook, not a migration).
 SCHEDULE_EVENT_PLANT_INDEX_DDL = """
-CREATE INDEX IF NOT EXISTS idx_schedule_event_plant ON schedule_event (plant, id DESC);
+CREATE INDEX IF NOT EXISTS idx_schedule_event_plant_at ON schedule_event (plant, at DESC);
 """
+# The first W2 draft indexed (plant, id DESC), which a time-window filter cannot use; the hook removes it.
+SCHEDULE_EVENT_OLD_PLANT_INDEX_SQL = "DROP INDEX IF EXISTS idx_schedule_event_plant"
 
 SWEEP_LOCK_KEY = "nimbus:schedule-event-sweep"
 _SWEEP_SQL = ("DELETE FROM schedule_event WHERE id IN ("
@@ -63,6 +66,7 @@ def ensure_schedule_event_table() -> None:
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(SCHEDULE_EVENT_DDL)
         cur.execute(SCHEDULE_EVENT_PLANT_INDEX_DDL)
+        cur.execute(SCHEDULE_EVENT_OLD_PLANT_INDEX_SQL)
         conn.commit()
 
 

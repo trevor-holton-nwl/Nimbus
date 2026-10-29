@@ -91,7 +91,7 @@ test('artifact section: a truncated section says how many of how many; an empty 
 });
 
 test('artifact row: one cell per column, null empty, values escaped, the grid width comes from --cols', () => {
-  const html = artifactRowHtml(3, ['<i>', null, 2.456]);
+  const html = artifactRowHtml(3, ['<i>', null, 2.456]);   // a bare column count still works (untyped cells)
   assert.match(html, /role="row" style="--cols:3"/);
   assert.equal((html.match(/role="cell"/g) || []).length, 3);
   assert.match(html, /&lt;i&gt;/); assert.doesNotMatch(html, /<i>/); assert.match(html, />2\.46</);
@@ -110,4 +110,21 @@ test('there is no Approve or Discard control in the run detail source', () => {
   assert.doesNotMatch(src, /data-jr-act="(approve|discard)|\/(approve|discard)|act === '(approve|discard)'/i);
   const client = readFileSync(new URL('../../../frontend/admin-ops/jobs-client.mts', import.meta.url), 'utf8');
   assert.doesNotMatch(client, /approve|discard/i, 'the client has no such call');
+});
+
+test('typed cells: datetime reads as plant time through the display format, bool translates, sentinels and codes translate, dates are not raw ISO', () => {
+  const cols = [{ key: 'finish', label: 'Finish', type: 'datetime' }, { key: 'machine', label: 'Machine', type: 'text' }, { key: 'flag', label: 'Flag', type: 'bool' },
+    { key: 'status', label: 'Status', type: 'text' }, { key: 'due', label: 'Due', type: 'date' }];
+  const html = artifactRowHtml(cols, ['2026-10-28T14:30:00', '__plant_total__', true, 'yes', '2026-10-28']);
+  assert.doesNotMatch(html, /2026-10-28T14:30:00/, 'no raw ISO in the cell');
+  assert.match(html, /14:30|2:30/);
+  assert.match(html, />jobs\.a\.yes</, 'the boolean is translated');
+  assert.match(html, />yes</, 'a TEXT column that happens to hold the word yes is left alone');
+  assert.doesNotMatch(html, />2026-10-28</, 'a date cell is formatted');
+});
+
+test('a section with a datetime column says the times are plant time; the section id is escaped', () => {
+  const sec = { key: 'orders', title: 'Late', columns: [{ key: 'finish', label: 'Finish', type: 'datetime' }], rows: [['2026-10-28T09:00:00']], rowCount: 1, rowsStored: 1, truncated: false, offset: 0 };
+  assert.match(artifactSectionHtml(sec, 'America/Chicago'), /job-art-tz/);
+  assert.doesNotMatch(artifactSectionHtml({ ...sec, columns: [{ key: 'n', label: 'N', type: 'number' }] }), /job-art-tz/);
 });

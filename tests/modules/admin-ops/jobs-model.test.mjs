@@ -10,7 +10,7 @@ import {
   displayStatus, runStatusHtml, errorKindOf, elapsedText, firstErrorIndex, lineDataText, errorsToText, elapsedMs, healthTiles, heartbeatState, ageText,
   shouldPollJobs, runSequential, deltaText, isDryRun, tzShort, isLongerThanUsual, RUN_STATUSES, JOB_RESULTS,
   resultOf, seedParams, typeGroups, findType, hasApplyMode, paramLabel, enumLabel, paramHint, typeLabel, validateParams, defaultWindowUi,
-  uiToWindow, windowToUi, validateWindowUi, artifactTiles, isReportRun, cellText, windowLine, sectionTitle, columnLabel,
+  uiToWindow, windowToUi, validateWindowUi, artifactTiles, isReportRun, cellText, windowLine, sectionTitle, columnLabel, isReportType,
 } from '../../../frontend/admin-ops/jobs-model.mjs';
 import { TYPES, OPT, byKey } from './jobs-types-fixture.mjs';
 
@@ -451,4 +451,39 @@ test('tzShort reads the plant zone at the instant; blank zone gives nothing', ()
   assert.match(tzShort('America/Chicago', '2026-07-01T12:00:00+00:00'), /CDT|GMT-5/);
   assert.match(tzShort('America/Chicago', '2026-01-01T12:00:00+00:00'), /CST|GMT-6/);
   assert.equal(tzShort('', 'x'), '');
+});
+
+test('cellText by column type: bool, date / datetime through the formatter, sentinel and code translation, notes with detail', () => {
+  const tr = { 'jobs.a.yes': 'Yes', 'jobs.a.no': 'No', 'jobs.a.sentinel.plant_total': 'Plant total', 'jobs.a.val.reason.no_mp_row': 'No material-plant row',
+    'jobs.a.val.value.planner': 'Planner edits', 'jobs.a.note.no_list': 'No list for {{detail}}' };
+  const d = { t: (k, v) => (tr[k] ?? k).replace('{{detail}}', v?.detail ?? '') };
+  const fmt = { datetime: s => `DT(${s})`, date: s => `D(${s})` };
+  assert.equal(cellText('yes', d, { key: 'x', type: 'text' }), 'yes', 'yes/no words are only translated for bool (or untyped) columns');
+  assert.equal(cellText('yes', d, { key: 'x', type: 'bool' }), 'Yes');
+  assert.equal(cellText(false, d, { key: 'x', type: 'bool' }), 'No');
+  assert.equal(cellText('2026-10-28T09:00:00', d, { key: 'f', type: 'datetime' }, fmt), 'DT(2026-10-28T09:00:00)');
+  assert.equal(cellText('2026-10-28', d, { key: 'f', type: 'date' }, fmt), 'D(2026-10-28)');
+  assert.equal(cellText('__plant_total__', d, { key: 'machine', type: 'text' }), 'Plant total');
+  assert.equal(cellText('__unknown__', d, { key: 'machine', type: 'text' }), '__unknown__');
+  assert.equal(cellText('no_mp_row', d, { key: 'reason', type: 'text' }), 'No material-plant row');
+  assert.equal(cellText('planner', d, { key: 'value', type: 'text' }, undefined, ['category', 'planner', '', 3]), 'Planner edits');
+  assert.equal(cellText('planner', d, { key: 'value', type: 'text' }, undefined, ['source', 'planner', '', 3]), 'planner', 'value is a code only on category rows');
+  assert.equal(cellText('no_list', d, { key: 'code', type: 'text' }, undefined, ['no_list', 'colorWheel']), 'No list for colorWheel');
+  assert.equal(cellText('colorWheel', d, { key: 'detail', type: 'text' }, undefined, ['no_list', 'colorWheel']), '', 'the detail is already in the sentence');
+});
+
+test('windowToUi: a stored offset beyond the picker range stays Custom and validates; a blank offset fails validation', () => {
+  const far = windowToUi({ mode: 'rolling', rolling: { anchor: 'start_of_day', from_offset: -3655, to_offset: 1, unit: 'day' } });
+  assert.equal(far.choice, 'custom'); assert.equal(validateWindowUi(far), '');
+  const nextFar = windowToUi({ mode: 'rolling', rolling: { anchor: 'start_of_day', from_offset: 0, to_offset: 3660, unit: 'day' } });
+  assert.equal(nextFar.choice, 'custom'); assert.equal(validateWindowUi(nextFar), '');
+  assert.equal(windowToUi({ mode: 'rolling', rolling: { anchor: 'start_of_day', from_offset: -30, to_offset: 1, unit: 'day' } }).choice, 'last');
+  const blank = windowToUi({ mode: 'rolling', rolling: { anchor: 'now', from_offset: null, to_offset: 3, unit: 'day' } });
+  assert.equal(validateWindowUi(blank), 'jobs.err_win_offset');
+  assert.equal(validateWindowUi({ ...defaultWindowUi('custom'), anchor: 'now', fromOffset: NaN, toOffset: 1 }), 'jobs.err_win_offset');
+});
+
+test('isReportType: a report job is a report even when the type metadata failed to load', () => {
+  assert.equal(isReportType('report.late_orders', []), true);
+  assert.equal(isReportType('optimizer.plant', []), false);
 });

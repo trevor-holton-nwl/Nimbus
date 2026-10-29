@@ -118,9 +118,9 @@ def client(monkeypatch):
     monkeypatch.setattr(data, "list_log", lambda rid, **kw: [] if kw.get("after_seq") else [
         {"seq": 1, "at": "2026-10-29T12:00:01+00:00", "level": "info", "step": "load", "msg": "loaded 120 orders",
          "duration_ms": 850, "data": {}}])
-    monkeypatch.setattr(data, "last_success_started_at", lambda jid, before=None: None)
-    art = {"sections": [{"key": "counts", "title": "Changes", "columns": [{"key": "value", "label": "value"},
-                                                                          {"key": "events", "label": "events"}],
+    monkeypatch.setattr(data, "last_success_watermark", lambda jid, before=None: None)
+    art = {"sections": [{"key": "counts", "title": "Changes", "columns": [{"key": "value", "label": "value", "type": "text"},
+                                                                          {"key": "events", "label": "events", "type": "number"}],
                          "rows": [["drag", 3], ["=cmd", 1], ["note", 2]], "row_count": 3, "truncated": False}],
            "summary": {"events": 6}}
     monkeypatch.setattr(data, "get_artifact", lambda rid: (
@@ -169,7 +169,7 @@ def test_types_carry_kind_and_param_metadata(client):
     opt = {p["key"]: p for p in by["optimizer.plant"]["params"]}
     assert opt["search"]["type"] == "enum" and opt["search"]["enum"] == ["normal", "exhaustive"]
     assert opt["respect_firmed"]["type"] == "boolean" and opt["apply_mode"]["default"] == "apply"
-    assert {p["type"] for p in by["report.coverage"]["params"]} == {"multi_enum"}
+    assert {p["type"] for p in by["report.coverage"]["params"]} == {"multi_enum", "integer"}
 
 
 def test_window_preview_matches_the_resolver(client):

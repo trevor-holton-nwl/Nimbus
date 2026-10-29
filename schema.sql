@@ -2261,8 +2261,8 @@ CREATE TABLE IF NOT EXISTS schedule_event (
         autovacuum_analyze_scale_factor = 0.05);
 CREATE INDEX IF NOT EXISTS idx_schedule_event_order ON schedule_event (plant, order_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_event_at    ON schedule_event (at);
--- Plant-level change listing (also created by backend/schedule_events/data.py ensure_schedule_event_table).
-CREATE INDEX IF NOT EXISTS idx_schedule_event_plant ON schedule_event (plant, id DESC);
+-- Plant-level change listing in time order (also created by backend/schedule_events/data.py ensure_schedule_event_table).
+CREATE INDEX IF NOT EXISTS idx_schedule_event_plant_at ON schedule_event (plant, at DESC);
 
 -- job scheduler: definitions, schedules, runs and run logs (mirrors migrations/2026-10-29-1-job-scheduler.sql). Idempotent.
 CREATE TABLE IF NOT EXISTS job_definition (

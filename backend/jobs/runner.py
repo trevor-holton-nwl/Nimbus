@@ -285,6 +285,8 @@ def _store_artifact(run_id: int, ctx: JobContext, holder: dict, status: str, sum
         info = data.save_artifact(run_id, art, filename=f"report-{ctx.plant}-run{run_id}.json")
         out["artifact"] = info
         out["row_counts"] = info["row_counts"]                 # counts BEFORE the size cap (what the report found)
+        if info.get("error"):
+            out["artifact_error"] = info["error"]
         if info["truncated"]:
             ctx.log("warn", f"report artifact exceeded the size cap and was truncated ({info['size_bytes']} bytes kept)")
     except Exception as exc:  # noqa: BLE001

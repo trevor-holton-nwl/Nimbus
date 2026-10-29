@@ -161,7 +161,11 @@ test('readForm reads number boxes, multi-select checkboxes and a window picker i
   (els['jb-p-sections-setup'] ?? add('jb-p-sections-setup')).checked = true;
   assert.deepEqual(readForm(defaultJobForm('1008', cov.key, null, cov), cov).params.sections, ['tools', 'setup']);
   els['jb-p-min_days_late'].value = '';
-  assert.equal(readForm(defaultJobForm('1008', late.key, null, late), late).params.min_days_late, null, 'blank stays blank (validation decides)');
+  assert.equal(readForm(defaultJobForm('1008', late.key, null, late), late).params.min_days_late, 0, 'a blank optional box sends the model default, never a null the server refuses (422)');
+  (els['jb-p-warn_if_over'] ?? add('jb-p-warn_if_over')).value = '';
+  assert.equal(readForm(defaultJobForm('1008', late.key, null, late), late).params.warn_if_over, null, 'an optional param whose default is null clears to null');
+  els['jb-p-warn_if_over'].value = '3';
+  assert.equal(readForm(defaultJobForm('1008', late.key, null, late), late).params.warn_if_over, 3);
 });
 
 test('a report job saves with its window and params as given; validation blocks a bad window and a missing section', async () => {
@@ -330,4 +334,28 @@ test('Escape / X: a clean form closes at once, a dirty one asks first and stays 
     await JobsDialog.requestClose();
     assert.deepEqual(calls.closed, ['modal-job-edit']);
   } finally { Modal.confirm = confirm; }
+});
+
+test('the Aggregate-window block is hidden while "Limit to a date window" is off and shown when it is on (and not validated while off)', async () => {
+  const { paramsHtml } = await import('../../../frontend/admin-ops/jobs-dialog.mjs');
+  const { validateParams } = await import('../../../frontend/admin-ops/jobs-model.mjs');
+  const dist = byKey('report.distribution');
+  const off = defaultJobForm('1008', dist.key, null, dist);
+  assert.match(paramsHtml(dist, off, true), /<fieldset class="job-window" id="jb-p-window" hidden>/);
+  const on = { ...off, params: { ...off.params, filter_by_window: true } };
+  assert.doesNotMatch(paramsHtml(dist, on, true), /id="jb-p-window" hidden/);
+  const bad = { ...off.params, window: { mode: 'fixed', fixed: { from: '', to: '' } } };
+  assert.deepEqual(validateParams(dist.params, bad), {}, 'hidden window is not validated');
+  assert.ok(validateParams(dist.params, { ...bad, filter_by_window: true }).window, 'but is once it is on');
+  // a type without that switch keeps its window visible
+  const late = byKey('report.late_orders');
+  assert.doesNotMatch(paramsHtml(late, defaultJobForm('1008', late.key, null, late), true), /id="jb-p-horizon" hidden/);
+});
+
+test('every report type offers the optional warn_if_over param, except what_changed', () => {
+  for (const k of ['report.late_orders', 'report.missing_master_data', 'report.coverage', 'report.distribution']) {
+    const p = byKey(k).params.find(x => x.key === 'warn_if_over');
+    assert.ok(p, k); assert.equal(p.type, 'integer'); assert.equal(p.required, false); assert.equal(p.default, null);
+  }
+  assert.equal(byKey('report.what_changed').params.some(x => x.key === 'warn_if_over'), false, 'what_changed never warns');
 });

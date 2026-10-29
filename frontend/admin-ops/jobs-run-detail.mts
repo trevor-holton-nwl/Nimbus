@@ -24,7 +24,7 @@ import {
   logToText, errorsToText, firstErrorIndex, lineDataText, elapsedText, elapsedMs, errorKindOf, isDryRun, deltaText,
   LOG_LEVELS, LOG_PAGE, plantWall, tzShort, ARTIFACT_PAGE, artifactTiles, isReportRun, sectionTitle, tryKey, columnLabel, cellText, windowLine,
 } from './jobs-model.mjs';
-import type { LogLine, Proposal, ProposalRow, ArtifactSection } from './jobs-model.mjs';
+import type { LogLine, Proposal, ProposalRow, ArtifactSection, ArtifactColumn, CellFmt } from './jobs-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -341,12 +341,23 @@ async function _loadProposal(s: DetailState): Promise<void> {
    CSV download, the truncation notice. The first page of every section comes in one request; the rest of a long
    section is read in pages of 500 while the viewer is already usable. Read-only.
    ------------------------------------------------------------------------- */
-export function artifactRowHtml(cols: number, cells: unknown[]): string {
-  return `<div class="job-art-row" role="row" style="--cols:${cols}">`
-    + cells.map(c => { const tx = cellText(c, deps); return `<span class="job-mono" role="cell" title="${esc(tx)}">${esc(tx)}</span>`; }).join('') + `</div>`;
+/** A date / datetime cell is a plant wall clock (a string with an offset is converted into the plant zone first). */
+const _cellFmt = (tz?: string): CellFmt => ({
+  datetime: (x) => Util.fmtDTPref(plantWall(x, tz)),
+  date: (x) => Util.fmtIsoDatePref(x),
+});
+/** `_q` selector for an id that came from the server (a section key). */
+const _idSel = (id: string): string => `#${typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id}`;
+
+export function artifactRowHtml(cols: number | ArtifactColumn[], cells: unknown[], tz?: string): string {
+  const colArr = typeof cols === 'number' ? [] : cols;
+  const n = typeof cols === 'number' ? cols : cols.length;
+  const fmt = _cellFmt(tz);
+  return `<div class="job-art-row" role="row" style="--cols:${n}">`
+    + cells.map((c, i) => { const tx = cellText(c, deps, colArr[i], fmt, cells); return `<span class="job-mono" role="cell" title="${esc(tx)}">${esc(tx)}</span>`; }).join('') + `</div>`;
 }
 
-export function artifactSectionHtml(sec: ArtifactSection): string {
+export function artifactSectionHtml(sec: ArtifactSection, tz?: string): string {
   const title = sectionTitle(sec, deps);
   const hid = `jr-art-h-${sec.key}`;
   const cols = sec.columns.length;
@@ -360,6 +371,7 @@ export function artifactSectionHtml(sec: ArtifactSection): string {
   return `<div class="job-art-sec" data-art-sec="${esc(sec.key)}"><div class="job-art-head"><h4 id="${hid}">${esc(title)}</h4>`
     + `<span class="ape-hint" id="jr-art-count-${esc(sec.key)}">${esc(t('jobs.a.rows', { n: sec.rowCount }))}</span>`
     + `<button type="button" class="btn btn-ghost sm" data-jr-act="art-csv" data-art-sec="${esc(sec.key)}"${sec.rowsStored ? '' : ' disabled'}>${esc(t('jobs.a.csv'))}</button></div>`
+    + (sec.columns.some(c => c.type === 'datetime') ? `<div class="ape-hint job-art-tz">${esc(t('jobs.a.plant_time', { tz: tz || t('jobs.tz_unknown') }))}</div>` : '')
     + notice + table + `</div>`;
 }
 
@@ -370,13 +382,12 @@ function _artifactShellHtml(): string {
 }
 
 function _paintArtifactList(s: DetailState, sec: ArtifactSection): void {
-  const list = _q(`#jr-art-list-${sec.key}`);
+  const list = _q(_idSel(`jr-art-list-${sec.key}`));
   const rows = s.art.rows.get(sec.key);
   if (!list || !rows) return;
   let vl = s.art.vls.get(sec.key);
   if (!vl) {
-    const cols = sec.columns.length;
-    vl = new VirtualList<unknown[]>(list, { rowH: ARTIFACT_ROW_H, renderFn: (row) => artifactRowHtml(cols, row), buffer: 10 });
+    vl = new VirtualList<unknown[]>(list, { rowH: ARTIFACT_ROW_H, renderFn: (row) => artifactRowHtml(sec.columns, row, s.tz), buffer: 10 });
     s.art.vls.set(sec.key, vl);
   }
   vl.update(rows);
@@ -385,7 +396,7 @@ function _paintArtifactList(s: DetailState, sec: ArtifactSection): void {
 /** Pages 2.. of one long section, read in the background; the viewer already shows what is loaded. */
 async function _loadMoreRows(s: DetailState, sec: ArtifactSection, my: number): Promise<void> {
   const rows = s.art.rows.get(sec.key);
-  const count = _q(`#jr-art-count-${sec.key}`);
+  const count = _q(_idSel(`jr-art-count-${sec.key}`));
   if (!rows) return;
   while (rows.length < sec.rowsStored) {
     if (count) count.textContent = t('jobs.a.loading_rows', { shown: rows.length, total: sec.rowsStored });
@@ -414,11 +425,11 @@ async function _loadArtifact(s: DetailState): Promise<void> {
     host.setAttribute('aria-busy', 'false');
     s.art.rows.clear(); s.art.vls.clear();
     host.innerHTML = (a.truncated ? `<div class="job-prop-warn" role="note">${esc(t('jobs.a.truncated_all'))}</div>` : '')
-      + (a.sections.length ? a.sections.map(artifactSectionHtml).join('') : `<div class="ape-hint">${esc(t('jobs.a.empty'))}</div>`);
+      + (a.sections.length ? a.sections.map(x => artifactSectionHtml(x, s.tz)).join('') : `<div class="ape-hint">${esc(t('jobs.a.empty'))}</div>`);
     for (const sec of a.sections) {
       s.art.rows.set(sec.key, sec.rows.slice());
       _paintArtifactList(s, sec);
-      if (sec.rowsStored > sec.rows.length) void _loadMoreRows(s, sec, my).catch(() => { const c = _q(`#jr-art-count-${sec.key}`); if (c) c.textContent = t('jobs.a.rows_partial', { shown: s.art.rows.get(sec.key)?.length ?? 0, total: sec.rowsStored }); });
+      if (sec.rowsStored > sec.rows.length) void _loadMoreRows(s, sec, my).catch(() => { const c = _q(_idSel(`jr-art-count-${sec.key}`)); if (c) c.textContent = t('jobs.a.rows_partial', { shown: s.art.rows.get(sec.key)?.length ?? 0, total: sec.rowsStored }); });
     }
   } catch (e) {
     if (_d !== s || my !== s.art.seq) return;
@@ -439,9 +450,9 @@ function _tick(): void {
   });
 }
 
-function _save(name: string, text: string, type = 'text/plain;charset=utf-8'): void {
+function _save(name: string, data: string | Uint8Array, type = 'text/plain;charset=utf-8'): void {
   const a = document.createElement('a');
-  const url = URL.createObjectURL(new Blob([text], { type }));
+  const url = URL.createObjectURL(new Blob([data as BlobPart], { type }));
   a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -496,7 +507,7 @@ export const JobsRunDetail = {
       else if (act === 'retry-artifact') void _loadArtifact(s);
       else if (act === 'art-csv') {
         const key = tgt.closest<HTMLElement>('[data-jr-act]')?.dataset.artSec ?? '';
-        void JobsClient.artifactCsv(s.run.id, key).then(text => _save(`job-run-${s.run.id}-${key}.csv`, text, 'text/csv;charset=utf-8'))
+        void JobsClient.artifactCsv(s.run.id, key).then(bytes => _save(`job-run-${s.run.id}-${key}.csv`, bytes, 'text/csv;charset=utf-8'))
           .catch((err: Error) => Toast.show(t('jobs.a.csv_failed', { msg: err.message }), 'error'));
       }
       else if (act === 'restart') {

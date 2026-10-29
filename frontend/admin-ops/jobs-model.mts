@@ -595,6 +595,9 @@ export function typeGroups(types: ReadonlyArray<TypeMeta>): Array<{ kind: JobKin
 
 export const findType = (types: ReadonlyArray<TypeMeta>, key: string): TypeMeta | undefined => types.find(x => x.key === key);
 /** The Result control (Apply / Dry run) shows only for an action type that has an `apply_mode` param. */
+/** A report job, even when the types failed to load (every report key starts `report.`). */
+export const isReportType = (jobType: string, types: ReadonlyArray<TypeMeta>): boolean =>
+  findType(types, jobType)?.kind === 'report' || String(jobType).startsWith('report.');
 export const hasApplyMode = (m: TypeMeta | undefined | null): boolean => !!m && m.kind === 'action' && m.params.some(p => p.key === 'apply_mode');
 
 /* ---------------------------------------------------------------------------
@@ -629,14 +632,16 @@ export function windowToUi(w: DateWindow | null | undefined): WindowUi {
   if (w.mode === 'fixed') return { ...ui, choice: 'fixed', from: w.fixed?.from ?? '', to: w.fixed?.to ?? '' };
   const r = w.rolling;
   if (!r) return ui;
-  const custom = { ...ui, choice: 'custom' as const, anchor: r.anchor, fromOffset: r.from_offset, toOffset: r.to_offset, unit: r.unit };
+  const off = (x: unknown): number => (x === null || x === undefined || x === '' ? NaN : Number(x));   // a blank offset must fail validation, never read as 0
+  const custom = { ...ui, choice: 'custom' as const, anchor: r.anchor, fromOffset: off(r.from_offset), toOffset: off(r.to_offset), unit: r.unit };
   if (r.anchor === 'last_success' && r.from_offset === 0 && r.to_offset === 0 && r.unit === 'day') return { ...custom, choice: 'since_last_success' };
   if (r.anchor === 'start_of_week' && r.from_offset === 0 && r.to_offset === 1 && r.unit === 'week') return { ...custom, choice: 'this_week' };
   if (r.anchor === 'start_of_month' && r.from_offset === 0 && r.to_offset === 1 && r.unit === 'month') return { ...custom, choice: 'this_month' };
   if (r.anchor === 'start_of_day' && r.unit === 'day') {
-    if (r.from_offset <= -WINDOW_OPEN_START && r.to_offset <= 0) return { ...custom, choice: 'older_than', n: -r.to_offset };
-    if (r.from_offset < 0 && r.to_offset === 1) return { ...custom, choice: 'last', n: -r.from_offset };
-    if (r.from_offset === 0 && r.to_offset > 0) return { ...custom, choice: 'next', n: r.to_offset };
+    // A preset only when its day count is inside the picker's range; the server accepts offsets up to 3660, those stay Custom.
+    if (r.from_offset <= -WINDOW_OPEN_START && r.to_offset <= 0 && -r.to_offset <= WINDOW_OPEN_START) return { ...custom, choice: 'older_than', n: -r.to_offset };
+    if (r.from_offset < 0 && -r.from_offset < WINDOW_OPEN_START && r.to_offset === 1) return { ...custom, choice: 'last', n: -r.from_offset };
+    if (r.from_offset === 0 && r.to_offset > 0 && r.to_offset <= WINDOW_OPEN_START) return { ...custom, choice: 'next', n: r.to_offset };
   }
   return custom;
 }
@@ -715,6 +720,8 @@ export function validateParams(meta: ReadonlyArray<ParamMeta>, params: Record<st
         break;
       }
       case 'date_window': {
+        // The aggregate window is not in use (and not shown) while its switch is off.
+        if (m.key === 'window' && meta.some(q => q.key === 'filter_by_window') && params.filter_by_window !== true) break;
         const e = validateWindowUi(windowToUi(v as DateWindow | null));
         if (e) errs[m.key] = e;
         break;
@@ -831,7 +838,11 @@ export function jobToForm(job: {
    Report artifact (GET /jobs/runs/{id}/artifact)
    ------------------------------------------------------------------------- */
 export const ARTIFACT_PAGE = 500;
-export interface ArtifactColumn { key: string; label: string }
+export type ArtifactColumnType = 'text' | 'number' | 'date' | 'datetime' | 'bool';
+/** `type` is absent on a column from an older run (a plain string column reads as text). */
+export interface ArtifactColumn { key: string; label: string; type?: ArtifactColumnType }
+export const normColumnType = (v: unknown): ArtifactColumnType =>
+  (v === 'number' || v === 'date' || v === 'datetime' || v === 'bool') ? v : 'text';
 export interface ArtifactSection {
   key: string; title: string; columns: ArtifactColumn[]; rows: unknown[][];
   /** Rows the report found (before the size cap) and rows actually stored; `offset` is where `rows` starts. */
@@ -843,12 +854,32 @@ export interface Artifact { runId: number; sizeBytes: number; truncated: boolean
 export const sectionTitle = (s: { key: string; title: string }, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.a.sec.${s.key}`, d) || s.title;
 export const columnLabel = (c: ArtifactColumn, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.a.col.${c.key}`, d) || c.label;
 
-/** One cell as text: null is empty, 'yes' / 'no' are translated, numbers drop float noise. */
-export function cellText(v: unknown, d: Pick<JobsDeps, 't'>): string {
+/** Formatters for date / datetime cells (the run viewer passes Util.fmtIsoDatePref and Util.fmtDTPref over the plant wall clock). */
+export interface CellFmt { date?: (s: string) => string; datetime?: (s: string) => string }
+/** Text columns whose values are stable server codes the client translates (`jobs.a.val.<column>.<code>`). */
+const CODE_COLUMNS = new Set(['reason', 'bucket', 'state', 'dimension', 'category']);
+
+/** One cell as text, by its column's type: null is empty, bool columns read Yes / No (a JS boolean always does; the
+ *  strings 'yes' / 'no' only in a bool or an untyped column), date / datetime cells go through `fmt` (plant wall clock),
+ *  numbers drop float noise, `__sentinel__` strings and the server's reason / bucket / state / category codes are
+ *  translated, and a report note (`code` column) reads its sentence with the row's `detail`. `row` is the whole row. */
+export function cellText(v: unknown, d: Pick<JobsDeps, 't'>, col?: { key: string; type?: string }, fmt?: CellFmt, row?: unknown[]): string {
   if (v == null) return '';
-  if (v === 'yes' || v === 'no' || v === true || v === false) return d.t(v === 'yes' || v === true ? 'jobs.a.yes' : 'jobs.a.no');
+  const type = col?.type;
+  if (v === true || v === false || ((v === 'yes' || v === 'no') && (!col || type === 'bool'))) return d.t(v === 'yes' || v === true ? 'jobs.a.yes' : 'jobs.a.no');
   if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
-  return String(v);
+  const s = String(v);
+  if ((type === 'datetime' || type === 'date') && s) {
+    const f = type === 'date' ? fmt?.date : fmt?.datetime;
+    return f ? (f(s) || s) : s;
+  }
+  const sentinel = /^__(\w+)__$/.exec(s);
+  if (sentinel) return tryKey(`jobs.a.sentinel.${sentinel[1]}`, d) || s;
+  const k = col?.key ?? '';
+  if (CODE_COLUMNS.has(k) || (k === 'value' && row?.[0] === 'category')) return tryKey(`jobs.a.val.${k}.${s}`, d) || s;
+  if (k === 'code') { const key = `jobs.a.note.${s}`; const x = d.t(key, { detail: String(row?.[1] ?? '') }); return x && x !== key ? x : s; }
+  if (k === 'detail' && row && typeof row[0] === 'string' && d.t(`jobs.a.note.${row[0]}`) !== `jobs.a.note.${row[0]}`) return '';
+  return s;
 }
 
 /** Row-count tiles for a report run, in the report's own section order (summary.row_counts), zero counts kept. */

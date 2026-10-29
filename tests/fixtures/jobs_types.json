@@ -175,6 +175,17 @@
      "widget": null,
      "min": 0,
      "max": 365
+    },
+    {
+     "key": "warn_if_over",
+     "type": "integer",
+     "label_key": "jobs.p.report.late_orders.warn_if_over",
+     "title": "Warn If Over",
+     "default": null,
+     "required": false,
+     "widget": null,
+     "min": 0,
+     "max": 1000000
     }
    ],
    "defaults": {
@@ -188,7 +199,8 @@
       "unit": "day"
      }
     },
-    "min_days_late": 0.0
+    "min_days_late": 0.0,
+    "warn_if_over": null
    }
   },
   {
@@ -197,8 +209,22 @@
    "plant_scoped": true,
    "kind": "report",
    "mutates": false,
-   "params": [],
-   "defaults": {}
+   "params": [
+    {
+     "key": "warn_if_over",
+     "type": "integer",
+     "label_key": "jobs.p.report.missing_master_data.warn_if_over",
+     "title": "Warn If Over",
+     "default": null,
+     "required": false,
+     "widget": null,
+     "min": 0,
+     "max": 1000000
+    }
+   ],
+   "defaults": {
+    "warn_if_over": null
+   }
   },
   {
    "key": "report.coverage",
@@ -229,6 +255,17 @@
       "priority_lists": "jobs.p.report.coverage.sections.priority_lists",
       "setup": "jobs.p.report.coverage.sections.setup"
      }
+    },
+    {
+     "key": "warn_if_over",
+     "type": "integer",
+     "label_key": "jobs.p.report.coverage.warn_if_over",
+     "title": "Warn If Over",
+     "default": null,
+     "required": false,
+     "widget": null,
+     "min": 0,
+     "max": 1000000
     }
    ],
    "defaults": {
@@ -236,7 +273,8 @@
      "tools",
      "priority_lists",
      "setup"
-    ]
+    ],
+    "warn_if_over": null
    }
   },
   {
@@ -272,6 +310,17 @@
      },
      "required": false,
      "widget": "date-window"
+    },
+    {
+     "key": "warn_if_over",
+     "type": "integer",
+     "label_key": "jobs.p.report.distribution.warn_if_over",
+     "title": "Warn If Over",
+     "default": null,
+     "required": false,
+     "widget": null,
+     "min": 0,
+     "max": 1000000
     }
    ],
    "defaults": {
@@ -285,7 +334,8 @@
       "to_offset": 14,
       "unit": "day"
      }
-    }
+    },
+    "warn_if_over": null
    }
   }
  ]

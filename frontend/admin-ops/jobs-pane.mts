@@ -26,7 +26,7 @@ import { JobsRunDetail, resultBadgeHtml, reportBadgeHtml } from './jobs-run-deta
 import {
   RUN_STATUSES, PERIODICITIES, JOBS_PAGE, runStatusHtml, recurrenceText, durationText, weekStrip, isoDayKey, addDays, plantWall, stripOffset,
   mergeRuns, stripCompleteThrough, healthTiles, heartbeatState, ageText, shouldPollJobs, runSequential, isActiveRun, isLongerThanUsual, tzShort,
-  typeLabel, typeGroups, findType,
+  typeLabel, typeGroups, findType, isReportType,
 } from './jobs-model.mjs';
 import type { UpcomingRun, HealthSummary, RunsQuery } from './jobs-model.mjs';
 import type { UpcomingEntry } from './jobs-client.mjs';
@@ -252,7 +252,7 @@ function _typeOptionsHtml(selected: string): string {
     + g.types.map(x => `<option value="${esc(x.key)}"${x.key === selected ? ' selected' : ''}>${esc(typeLabel(x, d))}</option>`).join('') + `</optgroup>`).join('');
 }
 
-const _isReport = (jobType: string): boolean => findType(_types, jobType)?.kind === 'report';
+const _isReport = (jobType: string): boolean => isReportType(jobType, _types);
 
 /** New job: the dialog renders its params from the served types, so load them first when the first load failed. */
 async function _openNew(): Promise<void> {
@@ -263,7 +263,8 @@ async function _openNew(): Promise<void> {
 /** Under a job's name: the Result badge and search time for an optimizer job, the Report badge and type for a report. */
 function _jobSubHtml(j: Job): string {
   const meta = findType(_types, j.job_type);
-  if (meta?.kind === 'report') return `${reportBadgeHtml()} ${esc(typeLabel(meta, jobsDeps()))}`;
+  // A report whose type metadata failed to load is still a report (no Apply badge on it).
+  if (isReportType(j.job_type, _types)) return `${reportBadgeHtml()} ${esc(meta ? typeLabel(meta, jobsDeps()) : j.job_type)}`;
   const search = j.params.search ? esc(j.params.search === 'normal' ? t('jobs.search_normal') : t('jobs.search_exhaustive')) : '';
   return `${resultBadgeHtml({ summary: { apply_mode: String(j.params.apply_mode ?? 'apply') } })} ${search}`;
 }

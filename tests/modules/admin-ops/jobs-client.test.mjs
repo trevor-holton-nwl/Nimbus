@@ -100,9 +100,12 @@ test('artifact: sections with columns and one page of rows; a section page asks 
   assert.equal(path(1), '/jobs/runs/42/artifact?offset=500&limit=500&section=top%20orders');
 });
 
-test('artifactCsv fetches one section as text and throws the server detail on a non-2xx', async () => {
-  Util.fetchTraced = async (url, init) => { calls.push({ url, method: init?.method }); return { ok: true, status: 200, text: async () => '﻿value,events\r\ndrag,3\r\n' }; };
-  assert.equal(await JobsClient.artifactCsv(42, 'counts'), '﻿value,events\r\ndrag,3\r\n');
+test('artifactCsv fetches one section as BYTES (the UTF-8 BOM survives; Response.text() would strip it) and throws the server detail on a non-2xx', async () => {
+  const bytes = new TextEncoder().encode('\uFEFFvalue,events\r\ndrag,3\r\n');
+  Util.fetchTraced = async (url, init) => { calls.push({ url, method: init?.method }); return { ok: true, status: 200, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }; };
+  const out = await JobsClient.artifactCsv(42, 'counts');
+  assert.deepEqual([...out.slice(0, 3)], [0xEF, 0xBB, 0xBF], 'BOM bytes kept');
+  assert.equal(new TextDecoder().decode(out.slice(3)), 'value,events\r\ndrag,3\r\n');
   assert.equal(path(0), '/jobs/runs/42/artifact?section=counts&format=csv');
   Util.fetchTraced = async () => ({ ok: false, status: 404, json: async () => ({ detail: 'This run has no artifact' }) });
   await assert.rejects(JobsClient.artifactCsv(43, 'counts'), /no artifact/);
@@ -217,4 +220,20 @@ test('types: the optimizer default result is apply', async () => {
 test('a non-2xx throws the server detail', async () => {
   Util.fetchTraced = async () => ({ ok: false, status: 409, json: async () => ({ detail: 'Run is already succeeded' }) });
   await assert.rejects(JobsClient.cancelRun(1), /Run is already succeeded/);
+});
+
+test('a 422 with an array detail reads as field: message, never "HTTP 422"', async () => {
+  const { detailText } = await import('../../../frontend/admin-ops/jobs-client.mjs');
+  assert.equal(detailText('plain'), 'plain');
+  assert.equal(detailText([{ loc: ['body', 'params', 'top_n'], msg: 'Input should be a valid integer', type: 'int_type' }, { loc: ['body', 'name'], msg: 'Field required' }]),
+    'top_n: Input should be a valid integer; name: Field required');
+  assert.equal(detailText(undefined), '');
+  Util.fetchTraced = async () => ({ ok: false, status: 422, json: async () => ({ detail: [{ loc: ['body', 'params', 'top_n'], msg: 'Input should be a valid integer' }] }) });
+  await assert.rejects(JobsClient.update(1, { params: { top_n: null } }), /top_n: Input should be a valid integer/);
+});
+
+test('artifact columns carry a type; a plain string column reads as text and an unknown type falls back to text', async () => {
+  reply = { run_id: 1, sections: [{ key: 'a', title: 'A', columns: ['plain', { key: 'n', label: 'N', type: 'number' }, { key: 'x', label: 'X', type: 'money' }, { key: 'd', type: 'datetime' }], rows: [] }] };
+  const a = await JobsClient.artifact(1);
+  assert.deepEqual(a.sections[0].columns.map(c => [c.key, c.label, c.type]), [['plain', 'plain', 'text'], ['n', 'N', 'number'], ['x', 'X', 'text'], ['d', 'd', 'datetime']]);
 });

@@ -10,6 +10,8 @@ import pytest
 from backend.jobs import artifacts, windows
 from tests.test_jobs import _wait, api, jobs_pg  # noqa: F401 - fixtures
 
+from backend.jobs.types.reports import PLANT_TOTAL, PLANT_WIDE  # noqa: E402
+
 pytest_plugins = ("tests.support.planning_pg",)
 
 CHI = "America/Chicago"
@@ -122,9 +124,12 @@ def test_schedule_event_plant_index_exists(rep):
     import backend.schedule_events.data as sed
     sed.ensure_schedule_event_table()
     with rep.db._pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_schedule_event_plant'")
+        cur.execute("SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_schedule_event_plant_at'")
         row = cur.fetchone()
-    assert row and "(plant, id DESC)" in row[0]
+    assert row and "(plant, at DESC)" in row[0]
+    with rep.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'idx_schedule_event_plant'")
+        assert cur.fetchone() is None, "the first draft's (plant, id) index is removed by the startup hook"
 
 
 @pytest.mark.pg
@@ -144,28 +149,53 @@ def test_what_changed_counts_top_orders_and_window(api, rep):
     assert run["summary"]["window"]["label"] == pre["label"], "the run resolved what the preview showed"
     assert run["summary"]["window"]["timezone"] == CHI
     secs = _sections(_artifact(api, run["id"]))
-    counts = {(r[0], r[1]): r[2] for r in secs["counts"]["rows"]}
+    counts = {(r[0], r[1]): r[3] for r in secs["counts"]["rows"]}
     assert counts[("source", "drag")] == 3 and counts[("source", "optimizer")] == 1 and counts[("op", "modify")] == 4
+    assert counts[("category", "planner")] == 3 and counts[("category", "optimizer")] == 1
+    assert {c["key"]: c["type"] for c in secs["top_orders"]["columns"]} == {
+        "production_order": "text", "material_number": "text", "changes": "number", "last_change": "datetime"}
+    assert not any(c["key"] == "order_id" for c in secs["top_orders"]["columns"])
+    assert "T" in secs["top_orders"]["rows"][0][3] and "+" not in secs["top_orders"]["rows"][0][3][10:], "plant-local naive ISO"
+    assert "notes" not in secs, "a 7-day window is inside the 14-day retention"
     assert [r[0] for r in secs["top_orders"]["rows"]][:2] == ["zz-o1", "zz-o2"]
     assert run["summary"]["row_counts"] == {"counts": len(secs["counts"]["rows"]), "top_orders": 2}
 
 
 @pytest.mark.pg
-def test_what_changed_since_last_success_advances(api, rep):
-    with rep.db._pool.connection() as conn, conn.cursor() as cur:
-        _event(cur, rep.plant, "zz-a", at=datetime.now(timezone.utc) - timedelta(hours=30))
-        conn.commit()
+def test_what_changed_watermark_is_the_previous_scheduled_window_end(api, rep):
+    import backend.jobs.data as data
     j = api.post("/jobs", json={"plant": rep.plant, "job_type": "report.what_changed", "name": "digest",
                                 "params": {}}).json()
+    assert data.last_success_watermark(j["id"]) is None
     first = _wait(api, api.post(f"/jobs/{j['id']}/run").json()["run"]["id"], t=60)
-    assert first["summary"]["events"] == 0, "first run looks back 1 day by default; the event is 30 h old"
+    assert first["trigger"] == "manual"
+    assert data.last_success_watermark(j["id"]) is None, "a manual run never moves the watermark"
+    end = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
     with rep.db._pool.connection() as conn, conn.cursor() as cur:
-        _event(cur, rep.plant, "zz-b")
+        cur.execute("INSERT INTO job_run (job_id, plant, job_type, status, trigger, started_at, ended_at, summary)"
+                    " VALUES (%s, %s, 'report.what_changed', 'succeeded', 'schedule', %s, %s, %s::jsonb)",
+                    (j["id"], rep.plant, end + timedelta(minutes=5), end + timedelta(minutes=6),
+                     json.dumps({"window": {"end": end.isoformat()}})))
         conn.commit()
-    second = _wait(api, api.post(f"/jobs/{j['id']}/run").json()["run"]["id"], t=60)
-    assert second["summary"]["events"] == 1
-    started = datetime.fromisoformat(first["started_at"]).astimezone(ZoneInfo(CHI))
-    assert second["summary"]["window"]["start"][:16] == started.isoformat(timespec="seconds")[:16]
+    assert data.last_success_watermark(j["id"]) == end, "anchored on the resolved END, not on started_at"
+    nxt = _wait(api, api.post(f"/jobs/{j['id']}/run").json()["run"]["id"], t=60)
+    start = datetime.fromisoformat(nxt["summary"]["window"]["start"])
+    assert start.astimezone(timezone.utc) == end
+    stop = datetime.fromisoformat(nxt["summary"]["window"]["end"])
+    started = datetime.fromisoformat(nxt["started_at"])
+    assert 100 <= (started - stop).total_seconds() <= 200, "the window ends a safety margin before the run started"
+    assert nxt["summary"]["safety_margin_s"] == 120
+
+
+@pytest.mark.pg
+def test_what_changed_flags_a_window_older_than_the_retention(api, rep):
+    win = {"mode": "fixed", "fixed": {"from": (datetime.now().date() - timedelta(days=90)).isoformat(),
+                                      "to": datetime.now().date().isoformat()}}
+    run = _run(api, rep.plant, "report.what_changed", {"window": win})
+    assert run["status"] == "succeeded" and run["summary"]["window_truncated"] is True
+    assert run["summary"]["retention_days"] >= 1
+    notes = _sections(_artifact(api, run["id"]))["notes"]["rows"]
+    assert notes[0][0] == "window_truncated" and notes[0][1] == run["summary"]["retention_days"]
 
 
 @pytest.mark.pg
@@ -177,14 +207,40 @@ def test_late_orders_report(api, rep):
         _order(cur, rep.plant, "zz-far", start=_local_naive(40), end=_local_naive(42), due=_local_naive(30))
         conn.commit()
     run = _run(api, rep.plant, "report.late_orders")
-    assert run["status"] == "warning" and run["summary"]["late_orders"] == 1, run
+    assert run["status"] == "succeeded", "report content never changes the run status"
+    assert run["summary"]["late_orders"] == 1 and run["summary"]["queued_past_due"] == 1, run
+    assert run["summary"]["findings"] == 2
     secs = _sections(_artifact(api, run["id"]))
-    assert [r[1] for r in secs["orders"]["rows"]] == ["zz-late"]
-    assert secs["orders"]["rows"][0][5] == pytest.approx(2.0, abs=0.01)
+    assert [r[2] for r in secs["orders"]["rows"]] == ["zz-late"]
+    assert secs["orders"]["rows"][0][0] == "window" and secs["orders"]["rows"][0][6] == pytest.approx(2.0, abs=0.01)
     assert secs["by_machine"]["rows"][0][:2] == ["SHARED_LINE", 1]
+    assert [(r[0], r[3]) for r in secs["queued"]["rows"]] == [("past_due", "zz-queued")]
+    assert {c["key"]: c["type"] for c in secs["orders"]["columns"]}["finish"] == "datetime"
     assert run["summary"]["window"]["label"].startswith(_local_naive().date().isoformat())
+    warned = _run(api, rep.plant, "report.late_orders", {"warn_if_over": 1})
+    assert warned["status"] == "warning", "2 findings exceed warn_if_over=1"
+    quiet = _run(api, rep.plant, "report.late_orders", {"warn_if_over": 2})
+    assert quiet["status"] == "succeeded"
     strict = _run(api, rep.plant, "report.late_orders", {"min_days_late": 5})
     assert strict["status"] == "succeeded" and strict["summary"]["late_orders"] == 0
+
+
+@pytest.mark.pg
+def test_late_orders_date_only_due_is_the_close_of_the_day_and_overdue_is_kept(api, rep):
+    today = _local_naive().replace(hour=0, minute=0, second=0)
+    with rep.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE plants SET work_hours = %s::jsonb WHERE plant = %s",
+                    (json.dumps({str(d): [0, 24] for d in range(7)}), rep.plant))
+        _order(cur, rep.plant, "zz-sameday", start=today, end=today + timedelta(hours=1), due=today)     # on the day
+        _order(cur, rep.plant, "zz-old", start=today, end=today + timedelta(days=2), due=today - timedelta(days=3))
+        _order(cur, rep.plant, "zz-after", start=today, end=today + timedelta(days=40), due=today + timedelta(days=2))
+        conn.commit()
+    run = _run(api, rep.plant, "report.late_orders")
+    rows = {r[2]: r for r in _sections(_artifact(api, run["id"]))["orders"]["rows"]}
+    assert "zz-sameday" not in rows, "a date-only due finishing on that day is on time"
+    assert rows["zz-old"][0] == "overdue", "due before the window start: the Already overdue bucket"
+    assert rows["zz-after"][0] == "window", "due inside the horizon even though it finishes after it"
+    assert run["summary"]["overdue_orders"] == 1
 
 
 @pytest.mark.pg
@@ -196,9 +252,11 @@ def test_missing_master_data_report(api, rep):
         _order(cur, rep.plant, "zz-mm2")
         conn.commit()
     run = _run(api, rep.plant, "report.missing_master_data")
-    assert run["status"] == "warning" and run["summary"]["unmatched_orders"] == 2
+    assert run["status"] == "succeeded" and run["summary"]["unmatched_orders"] == 2
     rows = _sections(_artifact(api, run["id"]))["exceptions"]["rows"]
     assert rows[0][0] == "no_mp_row" and rows[0][3] == 2
+    assert _run(api, rep.plant, "report.missing_master_data", {"warn_if_over": 0})["status"] == "warning"
+    assert _run(api, rep.plant, "report.missing_master_data", {"warn_if_over": 1})["status"] == "succeeded"
 
 
 @pytest.mark.pg
@@ -209,13 +267,32 @@ def test_coverage_report_sections_are_selectable(api, rep):
         cur.execute("INSERT INTO tool_inventory (plant, tool_id, total_qty) VALUES (%s, 'TOOL-A', 2)", (rep.plant,))
         conn.commit()
     run = _run(api, rep.plant, "report.coverage", {"sections": ["tools", "priority_lists"]})
-    assert run["status"] in ("succeeded", "warning"), run
+    assert run["status"] == "succeeded", run
     secs = _sections(_artifact(api, run["id"]))
-    assert set(secs) == {"tools", "priority_lists"}
-    assert secs["tools"]["rows"] == [["TOOL-A", 2, "yes", 2, 0]]
-    assert {"colorWheel", "prt01", "prt02"} <= {r[0] for r in secs["priority_lists"]["rows"]}
+    assert set(secs) <= {"tools", "priority_lists", "notes"} and {"tools", "priority_lists"} <= set(secs)
+    assert secs["tools"]["rows"] == [["TOOL-A", 2, True, 2, 0, 2, False]]
+    assert {c["key"]: c["type"] for c in secs["tools"]["columns"]}["no_usable_copy"] == "bool"
+    notes = secs.get("notes", {"rows": []})["rows"]
+    listed = {r[0] for r in secs["priority_lists"]["rows"]}
+    assert listed.isdisjoint({r[1] for r in notes if r[0] == "no_list"}), "a field without a list is a note, not noise"
+    assert all(r[1] in (PLANT_TOTAL, PLANT_WIDE) or r[1] for r in secs["priority_lists"]["rows"])
     full = _run(api, rep.plant, "report.coverage")
-    assert set(_sections(_artifact(api, full["id"]))) == {"tools", "priority_lists", "setup"}, full
+    assert {"tools", "priority_lists"} <= set(_sections(_artifact(api, full["id"]))), full
+
+
+@pytest.mark.pg
+def test_coverage_skips_setup_with_a_note_when_setup_is_off(api, rep):
+    with rep.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE plants SET setup_active = FALSE WHERE plant = %s", (rep.plant,))
+        conn.commit()
+    try:
+        run = _run(api, rep.plant, "report.coverage", {"sections": ["setup"]})
+    finally:
+        with rep.db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE plants SET setup_active = TRUE WHERE plant = %s", (rep.plant,))
+            conn.commit()
+    secs = _sections(_artifact(api, run["id"]))
+    assert run["status"] == "succeeded" and "setup" not in secs and secs["notes"]["rows"] == [["setup_off", ""]]
 
 
 @pytest.mark.pg
@@ -224,7 +301,8 @@ def test_distribution_report_unresolved(api, rep):
         _order(cur, rep.plant, "zz-d1", machine="GHOST_WC")
         conn.commit()
     run = _run(api, rep.plant, "report.distribution")
-    assert run["status"] == "warning" and run["summary"]["unresolved_orders"] == 1, run
+    assert run["status"] == "succeeded" and run["summary"]["unresolved_orders"] == 1, run
+    assert _run(api, rep.plant, "report.distribution", {"warn_if_over": 0})["status"] == "warning"
     secs = _sections(_artifact(api, run["id"]))
     assert secs["unresolved"]["rows"] == [["GHOST_WC", 1, "no_machine_row"]]
     assert "aggregate" in secs
@@ -300,3 +378,54 @@ def test_report_types_cannot_write_orders(api, rep):
     with rep.db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT xmin::text FROM orders WHERE id = 'zz-ro'")
         assert cur.fetchone()[0] == before
+
+
+# ------------------------------------------------------------------------ W2 fix wave: pure report/artifact tests
+def test_columns_carry_a_type_and_plain_strings_default_to_text():
+    sec = artifacts.section("a", "A", ["x", ("y", "Why"), ("z", "Zed", "number"), artifacts.col("d", "datetime")], [])
+    assert [(c["key"], c["label"], c["type"]) for c in sec["columns"]] == [
+        ("x", "x", "text"), ("y", "Why", "text"), ("z", "Zed", "number"), ("d", "d", "datetime")]
+    with pytest.raises(ValueError):
+        artifacts.col("k", "money")
+
+
+def test_nan_and_inf_become_null_and_datetimes_are_iso():
+    art = {"sections": [artifacts.section("a", "A", ["n", "d"], [[float("nan"), datetime(2026, 10, 28, 9, 30)],
+                                                                [float("inf"), None], [1.5, None]])], "summary": {}}
+    out, _ = artifacts.cap_artifact(art)
+    assert [r[0] for r in out["sections"][0]["rows"]] == [None, None, 1.5]
+    text = artifacts._dumps(out)
+    assert "NaN" not in text and "Infinity" not in text
+    assert datetime(2026, 10, 28, 9, 30).isoformat() in text
+
+
+def test_cap_gives_up_rows_or_flags_an_error_when_nothing_fits():
+    out, trunc = artifacts.cap_artifact(_art(50, 400), limit=1500)
+    assert len(artifacts._dumps(out).encode()) <= 1500 or out["summary"].get("artifact_error") == "too_large"
+    tiny, t2 = artifacts.cap_artifact({"sections": [artifacts.section("a", "A", ["c" * 3000], [[1]])], "summary": {}}, limit=1024)
+    assert t2 and tiny["sections"][0]["rows"] == [] and tiny["summary"]["artifact_error"] == "too_large"
+
+
+def test_report_module_contains_no_write_sql():
+    import re
+    from pathlib import Path
+    text = (Path(__file__).resolve().parent.parent / "backend" / "jobs" / "types" / "reports.py").read_text(encoding="utf-8")
+    assert not re.search(r"\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE|CREATE)\b", text)
+    assert "SET TRANSACTION READ ONLY" in text
+
+
+def test_report_status_is_never_driven_by_content():
+    from backend.jobs.types import reports
+    assert reports._outcome([], summary={}, count=500, warn_if_over=None).status == "succeeded"
+    assert reports._outcome([], summary={}, count=5, warn_if_over=5).status == "succeeded"
+    assert reports._outcome([], summary={}, count=6, warn_if_over=5).status == "warning"
+    assert reports._outcome([], summary={}).status == "succeeded"
+
+
+def test_what_changed_categories_cover_every_documented_source():
+    from backend.jobs.types.reports import CATEGORY_ORDER, SOURCE_CATEGORY
+    assert {SOURCE_CATEGORY[k] for k in ("drag", "keyboard", "grid", "inspector", "alert_fix")} == {"planner"}
+    assert SOURCE_CATEGORY["optimizer"] == "optimizer" and SOURCE_CATEGORY["sap_ingest"] == "ingest"
+    assert SOURCE_CATEGORY["routing_hold"] == SOURCE_CATEGORY["master_data_stamp"] == "routing"
+    assert SOURCE_CATEGORY["purge"] == SOURCE_CATEGORY["sap_vanish"] == "purge"
+    assert set(SOURCE_CATEGORY.values()) <= set(CATEGORY_ORDER)

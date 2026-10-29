@@ -606,7 +606,7 @@ def save_artifact(run_id: int, artifact: dict, *, filename: str | None = None) -
     import json
     from backend.jobs import artifacts
     capped, truncated = artifacts.cap_artifact(artifact)
-    body = json.dumps(capped, default=str, separators=(",", ":"), ensure_ascii=False)
+    body = artifacts._dumps(capped)
     size = len(body.encode("utf-8"))
     counts = artifacts.row_counts(capped)
     with db._pool.connection() as conn, conn.cursor() as cur:
@@ -617,7 +617,10 @@ def save_artifact(run_id: int, artifact: dict, *, filename: str | None = None) -
             " row_count = EXCLUDED.row_count, size_bytes = EXCLUDED.size_bytes, created_at = clock_timestamp()",
             (run_id, filename, body, sum(counts.values()), size))
         conn.commit()
-    return {"row_counts": counts, "size_bytes": size, "truncated": truncated}
+    info = {"row_counts": counts, "size_bytes": size, "truncated": truncated}
+    if (capped.get("summary") or {}).get("artifact_error"):
+        info["error"] = str(capped["summary"]["artifact_error"])
+    return info
 
 
 def get_artifact(run_id: int) -> dict | None:
@@ -639,6 +642,19 @@ def last_success_started_at(job_id: int, before_run_id: int | None = None) -> da
     `before_run_id` excludes the current run and anything newer."""
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT started_at FROM job_run WHERE job_id = %s AND status IN ('succeeded','warning')"
+                    " AND started_at IS NOT NULL AND (%s::bigint IS NULL OR id < %s::bigint)"
+                    " ORDER BY id DESC LIMIT 1", (job_id, before_run_id, before_run_id))
+        r = cur.fetchone()
+    return r[0] if r else None
+
+
+def last_success_watermark(job_id: int, before_run_id: int | None = None) -> datetime | None:
+    """The `last_success` window anchor: the RESOLVED END of the previous SCHEDULED finished (succeeded or warning) run
+    (`summary.window.end`, so the next window starts exactly where the last one stopped and nothing is lost between
+    runs); a run without a stored window falls back to its started_at. Manual runs never move it."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT COALESCE(NULLIF(summary->'window'->>'end', '')::timestamptz, started_at) FROM job_run"
+                    " WHERE job_id = %s AND trigger = 'schedule' AND status IN ('succeeded','warning')"
                     " AND started_at IS NOT NULL AND (%s::bigint IS NULL OR id < %s::bigint)"
                     " ORDER BY id DESC LIMIT 1", (job_id, before_run_id, before_run_id))
         r = cur.fetchone()

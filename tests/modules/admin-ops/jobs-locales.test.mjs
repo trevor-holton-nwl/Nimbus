@@ -52,7 +52,7 @@ test('the report viewer strings (jobs.a.*), the report section titles, tile labe
   assert.ok(sections.length >= 9, 'found the report sections in reports.py');
   for (const [, key, cols] of sections) {
     need.push(`jobs.a.sec.${key}`, `jobs.a.tile.${key}`);
-    for (const c of cols.matchAll(/"(\w+)"/g)) need.push(`jobs.a.col.${c[1]}`);
+    for (const c of cols.matchAll(/col\("(\w+)"/g)) need.push(`jobs.a.col.${c[1]}`);
   }
   for (const l of LOCALES) assert.deepEqual([...new Set(need)].filter(k => !tables[l][k]), [], l);
 });

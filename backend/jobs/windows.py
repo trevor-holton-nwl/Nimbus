@@ -9,9 +9,14 @@ Rules
 - Month offsets clamp to the target month's last day (Jan 31 + 1 month = Feb 28/29). Weeks start on Monday.
 - The window is [start, end): `end` is exclusive. For a day-granular window `end` is local midnight, and the label
   shows the last INCLUDED date.
-- Anchor `last_success` is the watermark: the start side is the job's last finished (succeeded or warning) run's
-  started_at, the END side is the run's own `now`, so `since last successful run` is from_offset 0 / to_offset 0.
-  With no prior success the start falls back to `first_run_lookback_days` calendar days before now.
+- Anchor `last_success` is the watermark: the start side is the previous SCHEDULED finished run's resolved window END
+  (the caller passes it), the END side is the run's own `now` minus LAST_SUCCESS_MARGIN_S (so a commit still in
+  flight at the run's start is picked up by the next run, never lost), so `since last successful run` is from_offset 0
+  / to_offset 0. With no prior success (or a watermark in the future: clock skew) the start falls back to
+  `first_run_lookback_days` calendar days before now.
+- Every bound is rebuilt from its own CALENDAR DATE at the first valid instant of that date (a day whose local
+  midnight does not exist, e.g. America/Sao_Paulo 2018-11-04, starts at 01:00 for that bound only), never by reusing
+  another bound's wall time. Only the `now` and `last_success` anchors keep their wall time.
 - A missing or unknown plant timezone raises WindowConfigError (kind 'config': fix the plant, not the platform).
 """
 from __future__ import annotations
@@ -26,6 +31,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 Anchor = Literal["now", "start_of_day", "start_of_week", "start_of_month", "last_success"]
 Unit = Literal["day", "week", "month"]
 MAX_OFFSET = 3660
+FIXED_MIN, FIXED_MAX = date(1990, 1, 1), date(2100, 12, 31)
+LAST_SUCCESS_MARGIN_S = 120
 OPEN_START = 3650                    # a day-unit from_offset at or below -3650 means "no lower bound" (older than N)
 
 
@@ -38,6 +45,13 @@ class FixedRange(BaseModel):
     model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
     from_: date = Field(alias="from")
     to: date
+
+    @model_validator(mode="after")
+    def _bounds(self):
+        for v in (self.from_, self.to):
+            if v < FIXED_MIN or v > FIXED_MAX:
+                raise ValueError(f"fixed window dates must be between {FIXED_MIN} and {FIXED_MAX}")
+        return self
 
 
 class RollingRange(BaseModel):
@@ -118,10 +132,14 @@ def _add_months(d: date, n: int) -> date:
     m = d.year * 12 + (d.month - 1) + n
     y, mo = divmod(m, 12)
     mo += 1
+    if not 1 <= y <= 9999:
+        raise OverflowError("year out of range")
     return date(y, mo, min(d.day, calendar.monthrange(y, mo)[1]))
 
 
-def _shift(dt: datetime, n: int, unit: str, zone: ZoneInfo) -> datetime:
+def _shift(dt: datetime, n: int, unit: str, zone: ZoneInfo, keep_time: bool = True) -> datetime:
+    """`dt` moved by n units by CALENDAR date. keep_time=False rebuilds the bound at the first valid instant of the
+    target date (day-start anchors); True keeps dt's wall time (the `now` and `last_success` anchors)."""
     d = dt.date()
     if unit == "day":
         nd = d + timedelta(days=n)
@@ -129,7 +147,7 @@ def _shift(dt: datetime, n: int, unit: str, zone: ZoneInfo) -> datetime:
         nd = d + timedelta(days=7 * n)
     else:
         nd = _add_months(d, n)
-    return _local(zone, nd, dt.timetz().replace(tzinfo=None))
+    return _local(zone, nd, dt.timetz().replace(tzinfo=None) if keep_time else time(0, 0))
 
 
 def _anchor(kind: str, now_l: datetime, zone: ZoneInfo) -> datetime:
@@ -145,17 +163,31 @@ def _anchor(kind: str, now_l: datetime, zone: ZoneInfo) -> datetime:
     raise WindowConfigError(f"unknown anchor {kind!r}")
 
 
-def _label(start: datetime, end: datetime, open_start: bool) -> str:
-    midnight = end.timetz().replace(tzinfo=None) == time(0, 0)
-    last = (end.date() - timedelta(days=1)) if midnight else end.date()
+def _label(start: datetime, end: datetime, open_start: bool, zone: ZoneInfo | None = None,
+           last_date: date | None = None) -> str:
+    """`last_date` (fixed windows) is the last requested calendar date. Otherwise the end is a day boundary when it is
+    the first valid instant of its own date (00:00, or 01:00 on a day without a midnight), and then the last included
+    date is the day before."""
+    if last_date is None:
+        boundary = zone is not None and end == _local(zone, end.date())
+        last_date = (end.date() - timedelta(days=1)) if boundary else end.date()
     if open_start:
-        return f"before {end.date().isoformat()}"
-    return f"{start.date().isoformat()} to {last.isoformat()}"
+        return f"before {(last_date + timedelta(days=1)).isoformat()}"
+    return f"{start.date().isoformat()} to {last_date.isoformat()}"
 
 
 def resolve_window(window, tz: str | None, now: datetime, last_success_at: datetime | None = None,
                    first_run_lookback_days: int = 1) -> tuple[datetime, datetime, str]:
-    """(start_dt, end_dt, label) in the plant timezone; `now` must be timezone-aware."""
+    """(start_dt, end_dt, label) in the plant timezone; `now` must be timezone-aware. `last_success_at` is the
+    watermark instant (the previous scheduled run's resolved window end). An unrepresentable date (year overflow) is
+    a WindowConfigError, never an unhandled OverflowError."""
+    try:
+        return _resolve(window, tz, now, last_success_at, first_run_lookback_days)
+    except OverflowError as e:
+        raise WindowConfigError("the window is outside the supported date range") from e
+
+
+def _resolve(window, tz, now, last_success_at, first_run_lookback_days):
     if not isinstance(window, DateWindow):
         window = DateWindow.model_validate(window)
     zone = get_zone(tz)
@@ -166,21 +198,27 @@ def resolve_window(window, tz: str | None, now: datetime, last_success_at: datet
         f = window.fixed
         start = _local(zone, f.from_)
         end = _local(zone, f.to + timedelta(days=1))
-        return start, end, _label(start, end, False)
+        return start, end, _label(start, end, False, zone, f.to)
     r = window.rolling
     if r.anchor == "last_success":
-        base = (last_success_at.astimezone(zone) if last_success_at is not None
-                else _shift(now_l, -max(0, int(first_run_lookback_days)), "day", zone))
+        now_end = now_l - timedelta(seconds=LAST_SUCCESS_MARGIN_S)
+        if last_success_at is not None and last_success_at.astimezone(zone) <= now_end:
+            base = last_success_at.astimezone(zone)
+        else:                                   # no watermark, or one in the future (clock skew): the first-run lookback
+            base = _shift(now_l, -max(0, int(first_run_lookback_days)), "day", zone)
         start = _shift(base, r.from_offset, r.unit, zone)
-        end = _shift(now_l, r.to_offset, r.unit, zone)
+        end = _shift(now_end, r.to_offset, r.unit, zone)
     else:
+        keep = r.anchor == "now"
         a = _anchor(r.anchor, now_l, zone)
-        start = _shift(a, r.from_offset, r.unit, zone)
-        end = _shift(a, r.to_offset, r.unit, zone)
+        start = _shift(a, r.from_offset, r.unit, zone, keep)
+        end = _shift(a, r.to_offset, r.unit, zone, keep)
+        if end == start:
+            raise WindowConfigError("the window is empty (it ends where it starts)")
     if end < start:
         raise WindowConfigError("the window ends before it starts")
     open_start = r.unit == "day" and r.from_offset <= -OPEN_START
-    return start, end, _label(start, end, open_start)
+    return start, end, _label(start, end, open_start, zone)
 
 
 def window_wire(start: datetime, end: datetime, label: str, tz: str) -> dict:

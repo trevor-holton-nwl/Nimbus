@@ -136,7 +136,7 @@ def test_last_success_runs_from_watermark_to_now():
     now = utc(2026, 10, 28, 15)
     last = utc(2026, 10, 27, 13)
     s, e, _ = w.resolve_window(w.since_last_success(), CHI, now, last)
-    assert s.astimezone(timezone.utc) == last and e.astimezone(timezone.utc) == now
+    assert s.astimezone(timezone.utc) == last and e.astimezone(timezone.utc) == now - timedelta(seconds=w.LAST_SUCCESS_MARGIN_S)
 
 
 def test_last_success_without_prior_run_uses_lookback_calendar_days():
@@ -169,3 +169,63 @@ def test_presets_validate():
     for p in (w.older_than_days(30), w.last_days(7), w.next_days(14), w.since_last_success(), w.this_week(),
               w.this_month()):
         w.DateWindow.model_validate(p)
+
+
+# ------------------------------------------------------------------ W2 fix wave: gap days, labels, bounds, skew
+def _is_first_valid_instant_of_day(dt, zone):
+    from backend.jobs.windows import _local
+    return dt == _local(ZoneInfo(zone), dt.date())
+
+
+@pytest.mark.parametrize("tz,now", [("America/Sao_Paulo", utc(2018, 11, 6, 15)), ("America/Havana", utc(2026, 3, 10, 15)),
+                                    ("America/Santiago", utc(2026, 9, 10, 15))])
+def test_last_days_30_is_midnight_to_midnight_even_across_a_day_without_midnight(tz, now):
+    s, e, _ = w.resolve_window(w.last_days(30), tz, now)
+    assert _is_first_valid_instant_of_day(s, tz) and _is_first_valid_instant_of_day(e, tz)
+    assert e.hour == 0 and e.minute == 0
+
+
+def test_gap_day_anchor_does_not_poison_shifted_bounds():
+    # Sao Paulo 2018-11-04 has no local midnight (starts 01:00). Anchored ON that day, the bound 3 days back is 00:00.
+    now = utc(2018, 11, 4, 15)
+    s, e, label = w.resolve_window(w.last_days(3), "America/Sao_Paulo", now)
+    assert (s.date().isoformat(), s.hour) == ("2018-11-01", 0)
+    assert (e.date().isoformat(), e.hour) == ("2018-11-05", 0)
+    assert label == "2018-11-01 to 2018-11-04"
+    s0, _, _ = w.resolve_window(roll("start_of_day", 0, 1), "America/Sao_Paulo", now)
+    assert (s0.date().isoformat(), s0.hour) == ("2018-11-04", 1)
+
+
+def test_fixed_label_uses_requested_dates_in_a_gap_zone():
+    win = {"mode": "fixed", "fixed": {"from": "2018-11-01", "to": "2018-11-03"}}
+    assert w.resolve_window(win, "America/Sao_Paulo", utc(2018, 11, 10))[2] == "2018-11-01 to 2018-11-03"
+    win = {"mode": "fixed", "fixed": {"from": "2018-11-01", "to": "2018-11-04"}}
+    assert w.resolve_window(win, "America/Sao_Paulo", utc(2018, 11, 10))[2] == "2018-11-01 to 2018-11-04"
+
+
+def test_fixed_range_bounds_and_overflow_are_config_errors():
+    with pytest.raises(ValueError):
+        w.DateWindow.model_validate({"mode": "fixed", "fixed": {"from": "2026-01-01", "to": "9999-12-31"}})
+    with pytest.raises(ValueError):
+        w.DateWindow.model_validate({"mode": "fixed", "fixed": {"from": "1900-01-01", "to": "2026-01-01"}})
+    with pytest.raises(w.WindowConfigError):
+        w.resolve_window(roll("now", 0, 3660, "month"), CHI, utc(9999, 6, 1))
+
+
+def test_last_success_in_the_future_falls_back_to_the_lookback():
+    now = utc(2026, 11, 3, 15)
+    s, _, _ = w.resolve_window(w.since_last_success(), CHI, now, utc(2026, 11, 9), first_run_lookback_days=2)
+    assert s.date().isoformat() == "2026-11-01"
+
+
+def test_last_success_end_leaves_a_safety_margin():
+    now = utc(2026, 10, 28, 15)
+    _, e, _ = w.resolve_window(w.since_last_success(), CHI, now, utc(2026, 10, 27, 13))
+    assert (now - e.astimezone(timezone.utc)).total_seconds() == w.LAST_SUCCESS_MARGIN_S
+
+
+def test_zero_width_window_is_rejected_for_non_watermark_anchors():
+    with pytest.raises(w.WindowConfigError):
+        w.resolve_window(roll("start_of_day", 0, 0), CHI, utc(2026, 10, 28, 15))
+    with pytest.raises(w.WindowConfigError):
+        w.resolve_window(roll("now", 0, 0), CHI, utc(2026, 10, 28, 15))

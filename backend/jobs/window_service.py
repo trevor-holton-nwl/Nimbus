@@ -20,12 +20,14 @@ def resolve_for_plant(plant: str, window, *, job_id: int | None = None, before_r
             f"plant {plant!r} has no timezone; set one in Plants before using a date window")
     tz = data.plant_timezone(plant)
     now = now or datetime.now(timezone.utc)
-    last = data.last_success_started_at(job_id, before_run_id) if job_id else None
+    last = data.last_success_watermark(job_id, before_run_id) if job_id else None
     start, end, label = windows.resolve_window(window, tz, now, last, first_run_lookback_days)
     out = windows.window_wire(start, end, label, tz)
     # Full-precision values for SQL (the wire strings are cut to seconds, which would drop an event from the last second).
     out["start_naive"], out["end_naive"] = start.replace(tzinfo=None), end.replace(tzinfo=None)
     out["start_aware"], out["end_aware"] = start, end
+    out["now_aware"] = now
+    out["now_naive"] = now.astimezone(start.tzinfo).replace(tzinfo=None)      # the plant clock, for due-date rules
     return out
 
 

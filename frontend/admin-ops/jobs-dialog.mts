@@ -191,7 +191,7 @@ function _typeHtml(f: JobForm, types: JobType[], locked: boolean): string {
 const _errP = (key: string): string => `<div class="ape-err" id="jb-err-p-${esc(key)}" role="alert" hidden></div>`;
 
 /** Number box, text box, select, checkbox(es) or the window picker for one param, from the server's metadata. */
-export function paramHtml(p: ParamMeta, v: unknown, isAdmin: boolean): string {
+export function paramHtml(p: ParamMeta, v: unknown, isAdmin: boolean, hideWindow = false): string {
   const d = jobsDeps();
   const id = `jb-p-${p.key}`;
   const label = esc(paramLabel(p, d));
@@ -217,7 +217,7 @@ export function paramHtml(p: ParamMeta, v: unknown, isAdmin: boolean): string {
       return `<div class="form-row"><label for="${id}">${label}</label><input class="input job-num" id="${id}" type="number"`
         + `${p.min != null ? ` min="${p.min}"` : ''}${p.max != null ? ` max="${p.max}"` : ''} step="${p.type === 'integer' ? 1 : 'any'}" value="${esc(v ?? '')}"${desc}>${hintHtml}${_errP(p.key)}</div>`;
     case 'date_window':
-      return windowWidgetHtml(p, windowToUi(v as DateWindow | null));
+      return windowWidgetHtml(p, windowToUi(v as DateWindow | null), hideWindow);
     default:
       return `<div class="form-row"><label for="${id}">${label}</label><input class="input" id="${id}" type="text" value="${esc(v ?? '')}" autocomplete="off"${desc}>${hintHtml}${_errP(p.key)}</div>`;
   }
@@ -225,7 +225,10 @@ export function paramHtml(p: ParamMeta, v: unknown, isAdmin: boolean): string {
 
 export function paramsHtml(meta: TypeMeta | null, f: JobForm, isAdmin: boolean): string {
   // The Result control (Apply / Dry run) belongs to action types only; a report never offers it.
-  return meta ? meta.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(meta)).map(p => paramHtml(p, f.params[p.key], isAdmin)).join('') : '';
+  // The aggregate window means nothing while "Limit the aggregate view to a date window" is off: hide it until it is on.
+  const gated = !!meta && meta.params.some(q => q.key === 'filter_by_window' && q.type === 'boolean');
+  return meta ? meta.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(meta))
+    .map(p => paramHtml(p, f.params[p.key], isAdmin, gated && p.key === 'window' && f.params.filter_by_window !== true)).join('') : '';
 }
 
 /* ---------------------------------------------------------------------------
@@ -257,14 +260,17 @@ export function windowFieldsHtml(id: string, ui: WindowUi): string {
   }
 }
 
-export function windowWidgetHtml(p: ParamMeta, ui: WindowUi): string {
+export function windowWidgetHtml(p: ParamMeta, ui: WindowUi, hidden = false): string {
   const id = `jb-p-${p.key}`;
-  return `<fieldset class="job-window" id="${id}"><legend>${esc(paramLabel(p, jobsDeps()))}</legend>`
+  return `<fieldset class="job-window" id="${id}"${hidden ? ' hidden' : ''}><legend>${esc(paramLabel(p, jobsDeps()))}</legend>`
     + `<div class="form-row"><label for="${id}-choice">${esc(t('jobs.win_choice'))}</label><select class="input" id="${id}-choice">`
     + WINDOW_CHOICES.map(c => _opt(c, t(`jobs.win_${c}`), ui.choice)).join('') + `</select></div>`
     + `<div id="${id}-fields">${windowFieldsHtml(id, ui)}</div>`
     + `<div class="ape-hint job-window-line" id="${id}-line" aria-live="polite"></div>${_errP(p.key)}</fieldset>`;
 }
+
+/** A number box's value; a blank box is NaN (an error), never 0. */
+const _numOrNaN = (v: string): number => (v.trim() === '' ? NaN : Number(v));
 
 /** The picker state read from the live fields (a field that is not on screen keeps its previous value). */
 function _readWindowUi(id: string, prev: WindowUi): WindowUi {
@@ -272,10 +278,10 @@ function _readWindowUi(id: string, prev: WindowUi): WindowUi {
   const choice = (_val(`${id}-choice`) || prev.choice) as WindowUi['choice'];
   return {
     choice,
-    n: has('n') ? Number(_val(`${id}-n`)) : prev.n,
+    n: has('n') ? _numOrNaN(_val(`${id}-n`)) : prev.n,
     from: has('from') ? _val(`${id}-from`) : prev.from, to: has('to') ? _val(`${id}-to`) : prev.to,
     anchor: has('anchor') ? _val(`${id}-anchor`) : prev.anchor, unit: has('unit') ? _val(`${id}-unit`) : prev.unit,
-    fromOffset: has('foff') ? Number(_val(`${id}-foff`)) : prev.fromOffset, toOffset: has('toff') ? Number(_val(`${id}-toff`)) : prev.toOffset,
+    fromOffset: has('foff') ? _numOrNaN(_val(`${id}-foff`)) : prev.fromOffset, toOffset: has('toff') ? _numOrNaN(_val(`${id}-toff`)) : prev.toOffset,
   };
 }
 
@@ -371,7 +377,13 @@ function _readParams(meta: TypeMeta, prev: Record<string, unknown>): Record<stri
     switch (p.type) {
       case 'boolean': if (_el(id)) out[p.key] = _chk(id); break;
       case 'enum': case 'string': if (_el(id)) out[p.key] = _val(id); break;
-      case 'integer': case 'number': if (_el(id)) { const raw = _val(id).trim(); out[p.key] = raw === '' ? null : Number(raw); } break;
+      case 'integer': case 'number':
+        if (_el(id)) {
+          const raw = _val(id).trim();
+          // A blank box sends the param's own default (null for an optional one), never a null the server would refuse.
+          out[p.key] = raw === '' ? (p.required ? null : (p.default ?? null)) : Number(raw);
+        }
+        break;
       case 'multi_enum': {
         const live = (p.enum ?? []).filter(o => _el(`${id}-${o}`));
         if (live.length) out[p.key] = live.filter(o => _chk(`${id}-${o}`));
@@ -462,6 +474,10 @@ function _scheduleWindowPreview(): void {
   const s = _s;
   if (!s || s.mode === 'copy' || !s.meta?.params.some(p => p.type === 'date_window')) return;
   if (s.winTimer) clearTimeout(s.winTimer);
+  for (const p of s.meta.params.filter(x => x.type === 'date_window')) {        // the old line is stale the moment the window changes
+    const l = _el(`jb-p-${p.key}-line`);
+    if (l) { l.textContent = ''; l.classList.remove('ape-err'); l.classList.add('ape-hint'); }
+  }
   s.winTimer = setTimeout(() => void _runWindowPreviews(), 300);
 }
 
@@ -476,7 +492,10 @@ async function _runWindowPreviews(): Promise<void> {
     if (!line) continue;
     const w = s.form.params[p.key] as DateWindow;
     const setLine = (text: string, err: boolean): void => { line.textContent = text; line.classList.toggle('ape-err', err); line.classList.toggle('ape-hint', !err); };
-    if (!s.form.plant || validateWindowUi(windowToUi(w))) { setLine('', false); continue; }
+    if ((_el(`jb-p-${p.key}`) as HTMLElement | null)?.hidden) { setLine('', false); continue; }
+    const bad = validateWindowUi(windowToUi(w));
+    if (bad) { setLine(t(bad), true); continue; }                                  // an invalid window says why, inline
+    if (!s.form.plant) { setLine('', false); continue; }
     try {
       const r = await JobsClient.windowPreview(s.form.plant, w, { jobId: s.job?.id ?? null, lookbackDays: lookback });
       if (_s !== s || seq !== s.winSeq) return;
@@ -540,6 +559,7 @@ function _wire(): void {
     }
     const wm = /^(jb-p-(.+))-choice$/.exec(id);
     if (wm) _windowChoiceChanged(s, wm[1], wm[2]);
+    if (id === 'jb-p-filter_by_window') { const w = _el('jb-p-window'); if (w) w.hidden = !_chk(id); }
     if (id === 'jb-p-apply_mode') { const hint = _el('jb-p-apply_mode-hint'); if (hint) hint.textContent = resultHint(_val('jb-p-apply_mode')); }
     if (id.startsWith('jb-p-')) _scheduleWindowPreview();
     _schedulePreview();
