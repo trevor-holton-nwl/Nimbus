@@ -21,7 +21,7 @@ import { OverflowMenu } from '../platform/overflow-menu.mjs';
 import type { MenuItem } from '../platform/overflow-menu.mjs';
 import { JobsClient } from './jobs-client.mjs';
 import type { Job, JobRun, JobType } from './jobs-client.mjs';
-import type { Batch, Timeline, TlRange } from './jobs-model.mjs';
+import type { Batch, Timeline, TlRange, JobTemplate } from './jobs-model.mjs';
 import { JobsDialog, mkCombobox, allowedPlantList, jobsDeps, plantTimezone } from './jobs-dialog.mjs';
 import { JobsRunDetail, resultBadgeHtml, reportBadgeHtml } from './jobs-run-detail.mjs';
 import {
@@ -29,6 +29,7 @@ import {
   mergeRuns, stripCompleteThrough, healthTiles, heartbeatState, ageText, shouldPollJobs, runSequential, isActiveRun, isLongerThanUsual, tzShort,
   typeLabel, typeGroups, findType, isReportType, targetsLabel, batchTiles, statusBadgeHtml, statusLabel, BATCH_STATUSES, plural,
   TL_RANGES, TL_W, timelineWindow, timelineBars, timelineTicks, timelineRows, policyNoteText, statusBadgeClass,
+  chainSummaryText, diffLines, stepFromWire, isChainKey, firstUnsafeStep,
 } from './jobs-model.mjs';
 import type { UpcomingRun, HealthSummary, RunsQuery } from './jobs-model.mjs';
 import type { UpcomingEntry } from './jobs-client.mjs';
@@ -39,7 +40,7 @@ const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
 export const RUNS_POLL_MS = 15000;
 export const JOBS_POLL_MS = 30000;
 export const IDLE_POLL_MS = 60000;
-type SubTab = 'jobs' | 'runs' | 'upcoming';
+type SubTab = 'jobs' | 'runs' | 'upcoming' | 'templates';
 
 let _wired = false;
 let _active = false;
@@ -63,6 +64,9 @@ const _watchedBatches = new Map<number, string>();   // a fan-out is followed by
 let _pollTimer: ReturnType<typeof setTimeout> | null = null;
 let _type = '';
 let _types: JobType[] = [];
+let _templates: JobTemplate[] = [];
+let _tplSeq = 0;                 // _loadTemplates: only the newest response may replace the list
+let _tplArchived = false;        // templates tab: also list archived ones
 let _jobs: Job[] = [];
 let _nextBeforeJob: number | null = null;
 let _runs: JobRun[] = [];
@@ -303,9 +307,20 @@ function _typeOptionsHtml(selected: string): string {
 const _isReport = (jobType: string): boolean => isReportType(jobType, _types);
 
 /** New job: the dialog renders its params from the served types, so load them first when the first load failed. */
-async function _openNew(): Promise<void> {
+async function _openNew(templateId?: number): Promise<void> {
   if (!_types.length) { try { _types = await JobsClient.types(); } catch { /* the dialog opens with the type unnamed */ } }
-  JobsDialog.open({ plant: _plant, types: _types, onSaved: () => void _loadJobs() });
+  await _loadTemplates();
+  JobsDialog.open({ plant: _plant, types: _types, templates: _templates, templateId, jobType: templateId != null ? 'chain' : undefined, onSaved: () => void _loadJobs() });
+}
+
+/** Admins read the templates (the dialog's picker, the Templates tab); a failed load just leaves the list as it was. */
+async function _loadTemplates(): Promise<void> {
+  if (!_isAdmin()) return;
+  const seq = ++_tplSeq;
+  try {
+    const list = await JobsClient.templates(_tplArchived);
+    if (seq === _tplSeq) _templates = list;         // a slower, older response never overwrites a newer one
+  } catch { /* keep the last list */ }
 }
 
 /** Under a job's name: the Result badge and search time for an optimizer job, the Report badge and type for a report. */
@@ -313,6 +328,14 @@ function _jobSubHtml(j: Job): string {
   const meta = findType(_types, j.job_type);
   // A report whose type metadata failed to load is still a report (no Apply badge on it).
   if (isReportType(j.job_type, _types)) return `${reportBadgeHtml()} ${esc(meta ? typeLabel(meta, jobsDeps()) : j.job_type)}`;
+  if (isChainKey(j.job_type)) {                       // a chain: its steps in one line, and a note when its template moved on
+    const steps = Array.isArray(j.params.steps) ? (j.params.steps as Array<Record<string, unknown>>).map(stepFromWire) : [];
+    const tpl = j.template;
+    return `<span class="badge badge-info job-kind">${esc(t('jobs.kind_chain'))}</span> ${esc(chainSummaryText(steps, _types, jobsDeps()))}`
+      + (tpl?.editedLocally ? ` <span class="badge badge-muted job-tpl-edited">${esc(t('jobs.tpl_edited_locally'))}</span>` : '')
+      + (tpl?.changed && _isAdmin() ? ` <button type="button" class="btn btn-ghost sm job-tpl-changed" data-jobs-act="tpl-update" data-job-id="${j.id}">${esc(t('jobs.tpl_changed', { name: tpl.name }))}</button>`
+        : tpl?.changed ? ` <span class="badge badge-warn">${esc(t('jobs.tpl_changed_badge'))}</span>` : '');
+  }
   const search = j.params.search ? esc(j.params.search === 'normal' ? t('jobs.search_normal') : t('jobs.search_exhaustive')) : '';
   return `${resultBadgeHtml({ summary: { apply_mode: String(j.params.apply_mode ?? 'apply') } })} ${search}`;
 }
@@ -417,8 +440,8 @@ function _menuItems(j: Job): MenuItem[] {
       { id: 'restart', label: j.lastBatch ? t('jobs.restart_batch') : t('jobs.m_restart'), disabled: !j.last_run || paused, hint: !j.last_run ? t('jobs.m_restart_none') : undefined,
         onSelect: () => void (j.lastBatch ? _restartBatch(j.lastBatch.id) : _restartLast(j)) },
       { id: 'pause', label: paused ? t('jobs.m_resume') : t('jobs.m_pause'), onSelect: () => void _setEnabled(j, paused) },
-      { id: 'edit', label: t('jobs.m_edit'), onSelect: () => JobsDialog.open({ job: j, types: _types, onSaved: () => void _loadJobs() }) },
-      { id: 'dup', label: t('jobs.m_duplicate'), onSelect: () => JobsDialog.open({ job: j, duplicate: true, types: _types, onSaved: () => void _loadJobs() }) },
+      { id: 'edit', label: t('jobs.m_edit'), onSelect: () => JobsDialog.open({ job: j, types: _types, templates: _templates, onSaved: () => void _loadJobs() }) },
+      { id: 'dup', label: t('jobs.m_duplicate'), onSelect: () => JobsDialog.open({ job: j, duplicate: true, types: _types, templates: _templates, onSaved: () => void _loadJobs() }) },
       { id: 'del', label: t('jobs.m_delete'), danger: true, onSelect: () => void _delete(j) },
     );
   }
@@ -438,8 +461,13 @@ async function _restartLast(j: Job): Promise<void> {
   if (!j.last_run) return;
   // Restart runs the job NOW with its current settings, so the confirm names the job's current mode.
   const mode = t(String(j.params.apply_mode ?? 'apply') === 'propose' ? 'jobs.result_propose' : 'jobs.result_apply');
-  if (!await Modal.confirm({ title: t('jobs.confirm_restart', { name: j.name }), message: t('jobs.confirm_restart_msg', { mode }), confirmLabel: t('jobs.restart') })) return;
-  try { const r = await JobsClient.restartRun(j.last_run.id); _watch(r, j.name); Toast.show(t('jobs.toast_run_started', { name: j.name }), 'success'); void _loadJobs(false, true); void _loadHealth(); }
+  // A chain with a step that is not safe to repeat (a purge) gets the stronger warning and the server's confirm flag.
+  const unsafe = isChainKey(j.job_type) && Array.isArray(j.params.steps)
+    ? firstUnsafeStep((j.params.steps as Array<Record<string, unknown>>).map(stepFromWire), _types, jobsDeps()) : null;
+  if (!await Modal.confirm(unsafe
+    ? { title: t('jobs.confirm_restart', { name: j.name }), message: t('jobs.confirm_restart_unsafe', { step: unsafe }), confirmLabel: t('jobs.restart'), tone: 'warn' }
+    : { title: t('jobs.confirm_restart', { name: j.name }), message: t('jobs.confirm_restart_msg', { mode }), confirmLabel: t('jobs.restart') })) return;
+  try { const r = await JobsClient.restartRun(j.last_run.id, { confirm: unsafe != null }); _watch(r, j.name); Toast.show(t('jobs.toast_run_started', { name: j.name }), 'success'); void _loadJobs(false, true); void _loadHealth(); }
   catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
 }
 
@@ -478,6 +506,59 @@ function _jobsRerender(): void {
   const host = _el('jobs-table');
   if (host) { _setHtml(host, _jobsTableHtml()); _syncBulk(); }
 }
+/** "Template changed, update?": show the step diff, then replace the job's copy of its steps (runs under way keep theirs). */
+async function _templateUpdate(j: Job): Promise<void> {
+  try {
+    const d = await JobsClient.templateDiff(j.id);
+    const lines = diffLines(d.diff, _types, jobsDeps());
+    const ok = await Modal.confirm({ title: t('jobs.tpl_update_title', { name: j.name }), message: t('jobs.tpl_update_msg', { tpl: d.template.name }),
+      detail: lines.length ? lines.join('\n') : t('jobs.tpl_no_diff'), confirmLabel: t('jobs.tpl_update_btn') });
+    if (!ok) return;
+    const res = await JobsClient.updateFromTemplate(j.id);
+    Toast.show(t('jobs.tpl_updated'), 'success');
+    // A plant whose per-plant override replaces the steps keeps its own steps: say so rather than let it look updated.
+    if (res.overriddenPlants.length) Toast.show(t('jobs.tpl_overridden_note', { plants: res.overriddenPlants.slice(0, 6).join(', ') + (res.overriddenPlants.length > 6 ? ', ...' : '') }), 'info');
+    void _loadJobs();
+  } catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
+}
+
+/* ---------------------------------------------------------------------------
+   Templates sub-tab (admin): the reusable step lists. New job from one, archive / restore. A template's steps are edited
+   from a job made from it (its dialog's "Update the template with these steps").
+   ------------------------------------------------------------------------- */
+function _templatesHtml(): string {
+  const d = jobsDeps();
+  const rows = _templates.map(x => `<tr data-tpl-id="${x.id}"><td class="job-name">${esc(x.name)}${x.archived ? ` <span class="badge badge-muted">${esc(t('jobs.tpl_archived'))}</span>` : ''}`
+    + (x.description ? `<div class="job-sub">${esc(x.description)}</div>` : '') + `</td>`
+    + `<td>${esc(chainSummaryText(x.steps.map(stepFromWire), _types, d, 4))}</td>`
+    + `<td class="job-mono">v${x.version}</td><td class="job-mono">${esc(x.modifiedAt ? Util.fmtDTPref(stripOffset(x.modifiedAt)) : '—')}</td>`
+    + `<td class="job-actions">${x.archived ? '' : `<button type="button" class="btn btn-ghost sm" data-jobs-act="tpl-new" data-tpl-id="${x.id}">${esc(t('jobs.tpl_new_job'))}</button>`}`
+    + `<button type="button" class="btn btn-ghost sm" data-jobs-act="tpl-archive" data-tpl-id="${x.id}">${esc(t(x.archived ? 'jobs.tpl_restore' : 'jobs.tpl_archive'))}</button></td></tr>`).join('');
+  return `<div class="job-toolbar"><label class="chk-inline"><input type="checkbox" id="jobs-tpl-archived"${_tplArchived ? ' checked' : ''}><span>${esc(t('jobs.tpl_show_archived'))}</span></label></div>`
+    + (_templates.length
+      ? `<div class="job-table-wrap"><table class="job-table"><thead><tr><th>${esc(t('jobs.col_name'))}</th><th>${esc(t('jobs.tpl_col_steps'))}</th><th>${esc(t('jobs.tpl_col_version'))}</th><th>${esc(t('jobs.tpl_col_modified'))}</th><th><span class="job-sr">${esc(t('jobs.row_actions'))}</span></th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="empty-state job-empty">${esc(t('jobs.tpl_empty'))}</div>`);
+}
+
+function _renderTemplatesTab(): void {
+  const host = _el('jobs-view-templates');
+  if (!host) return;
+  host.innerHTML = `<div id="jobs-tpl-body" aria-busy="true">${_skeletonHtml(3)}</div>`;
+  void _loadTemplates().then(() => {
+    const body = _el('jobs-tpl-body');
+    if (!body || _tab !== 'templates') return;
+    body.setAttribute('aria-busy', 'false');
+    body.innerHTML = _templatesHtml();
+  });
+}
+
+async function _archiveTemplate(id: number): Promise<void> {
+  const x = _templates.find(q => q.id === id);
+  if (!x) return;
+  try { await JobsClient.updateTemplate(id, { archived: !x.archived }); _renderTemplatesTab(); }
+  catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
+}
+
 async function _setEnabled(j: Job, enabled: boolean): Promise<void> {
   try { await JobsClient.setEnabled(j.id, enabled); void _loadJobs(); }
   catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
@@ -884,7 +965,7 @@ async function _openRun(id: number): Promise<void> {
   JobsRunDetail.show(det, run, {
     visible: _visible,
     longer: () => isLongerThanUsual(run.id, _health?.longerThanUsual),
-    tz: plantTimezone(run.plant),
+    tz: plantTimezone(run.plant), types: _types,
     onBack: () => { JobsRunDetail.stop(); det.hidden = true; main.hidden = false; void _loadRunsView('refresh'); void _loadHealth(); },
     // The open run changed state: fold page 1 into the list (never replace it, later pages stay loaded).
     onChanged: () => { void _loadHealth(); void JobsClient.runs(_runsQuery()).then(r => { if (r.items.some(x => x.id === id)) _runs = mergeRuns(_runs, r.items); }).catch(() => undefined); },
@@ -972,9 +1053,10 @@ function _setTab(tab: SubTab): void {
     b.classList.toggle('active', on);
     b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
-  for (const k of ['jobs', 'runs', 'upcoming'] as const) { const v = _el(`jobs-view-${k}`); if (v) v.hidden = k !== tab; }
+  for (const k of ['jobs', 'runs', 'upcoming', 'templates'] as const) { const v = _el(`jobs-view-${k}`); if (v) v.hidden = k !== tab; }
   if (tab === 'jobs') _renderJobsTab();
   else if (tab === 'runs') _renderRunsTab();
+  else if (tab === 'templates') _renderTemplatesTab();
   else _renderUpcomingTab();
   if (tab !== 'runs' && _runsTimer) { clearTimeout(_runsTimer); _runsTimer = null; }
   void _loadHealth().then(() => _armPoll());
@@ -1042,6 +1124,10 @@ function _wire(): void {
     if (act === 'clear-since') { _since = 0; _renderRunsTab(); return; }
     if (act === 'maint') { void _toggleMaint(); return; }
     if (act === 'tl-prev' || act === 'tl-next') { _tlOffset = Math.max(0, _tlOffset + (act === 'tl-next' ? TL_PAGE : -TL_PAGE)); void _loadTimeline(); return; }
+    const tplId = Number(target.closest<HTMLElement>('[data-tpl-id]')?.dataset.tplId);
+    if (act === 'tpl-new') { void _openNew(tplId); return; }
+    if (act === 'tpl-archive') { void _archiveTemplate(tplId); return; }
+    if (act === 'tpl-update') { const j = _jobs.find(x => x.id === Number(target.closest<HTMLElement>('[data-job-id]')?.dataset.jobId)); if (j) void _templateUpdate(j); return; }
     if (act === 'new') void _openNew();
     else if (act === 'more-jobs') void _loadJobs(true);
     else if (act === 'more-runs') void _loadRuns('append');
@@ -1062,7 +1148,8 @@ function _wire(): void {
   pane.addEventListener('change', (e) => {
     const id = (e.target as HTMLElement).id;
     const v = (e.target as HTMLSelectElement).value;
-    if (id === 'jobs-type') { _type = v; void _loadJobs(); }
+    if (id === 'jobs-tpl-archived') { _tplArchived = (e.target as HTMLInputElement).checked; _renderTemplatesTab(); }
+    else if (id === 'jobs-type') { _type = v; void _loadJobs(); }
     else if (id === 'jobs-status') { _status = v; void _loadJobs(); }
     else if (id === 'jobs-runs-view') { _runView = v === 'batches' ? 'batches' : v === 'timeline' ? 'timeline' : 'runs'; _tlOffset = 0; _renderRunsTab(); }
     else if (id === 'jobs-tl-range') { _tlRange = v === '7d' ? '7d' : '24h'; _tlOffset = 0; void _loadTimeline(); }
@@ -1096,6 +1183,9 @@ export const JobsAdmin = {
     const note = _el('jobs-readonly-note');
     if (note) note.hidden = admin;
     if (!_types.length) { try { _types = await JobsClient.types(); } catch { /* the type filter just stays at Any */ } }
+    const tplTab = _el('jobs-tab-templates');
+    if (tplTab) tplTab.hidden = !admin;                  // templates are an admin tool
+    if (!admin && _tab === 'templates') _tab = 'jobs';
     _setTab(_tab);
   },
 

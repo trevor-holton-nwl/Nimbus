@@ -77,4 +77,5 @@ def _slot():
 
 OPTIMIZER = register(JobType(key="optimizer.plant", label="Optimizer (one plant)", params_model=OptimizerParams,
                              run=run, default_timeout_s=600, timeout_fn=timeout_s,
-                             needs_plant_timezone=True, defer_clock=True, slot=_slot))
+                             needs_plant_timezone=True, defer_clock=True, slot=_slot,
+                             idempotent=True, dry_run=("apply_mode", "propose"), estimate_s=180))

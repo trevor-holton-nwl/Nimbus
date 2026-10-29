@@ -414,7 +414,7 @@ def run_distribution(ctx, p: DistributionParams) -> JobOutcome:
 
 def _rt(key: str, label: str, model, fn) -> JobType:
     return register(JobType(key=key, label=label, params_model=model, run=fn, kind="report", mutates=False,
-                            default_timeout_s=REPORT_TIMEOUT_S))
+                            default_timeout_s=REPORT_TIMEOUT_S, idempotent=True, estimate_s=20))
 
 
 WHAT_CHANGED = _rt("report.what_changed", "What changed (schedule events)", WhatChangedParams, run_what_changed)

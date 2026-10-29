@@ -836,12 +836,16 @@ _ADMIN_WRITE_OPERATIONS = {
     "/jobs/{job_id}/run": "jobs.run_now",
     "/jobs/runs/{run_id}/cancel": "jobs.run_cancel",
     "/jobs/runs/{run_id}/restart": "jobs.run_restart",
+    "/jobs/runs/{run_id}/restart-step": "jobs.run_restart_step",
+    "/jobs/templates": "jobs.template_create",
+    "/jobs/templates/{template_id}": "jobs.template_update",
+    "/jobs/{job_id}/template/update": "jobs.template_apply",
     "/jobs/maintenance": "jobs.maintenance",
     "/jobs/batches/{batch_id}/cancel": "jobs.batch_cancel",
     "/jobs/batches/{batch_id}/restart": "jobs.batch_restart",
 }
 
-_ADMIN_TARGET_PARAMS = frozenset({"plant", "machine", "override_id", "table", "column", "object", "username", "batch_id", "archive_id", "job_id", "schedule_id", "run_id"})
+_ADMIN_TARGET_PARAMS = frozenset({"plant", "machine", "override_id", "table", "column", "object", "username", "batch_id", "archive_id", "job_id", "schedule_id", "run_id", "template_id"})
 
 
 def _admin_route_details(request: Request) -> tuple[str | None, dict]:

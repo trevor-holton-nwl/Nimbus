@@ -33,12 +33,42 @@ class JobType:
     kind: str = "action"                                      # 'action' (may change data) | 'report' (read-only, artifact)
     mutates: bool = True                                      # False for reports
     slot: Callable[[], Any] | None = None                     # returns the type's own semaphore; the RUNNER holds it
+    # --- step-type contract (W4a): what a chain builder and the chain engine need to know about a type -------------
+    idempotent: bool = False                                  # running it again after a failure is safe (restart from a step)
+    dry_run: tuple[str, Any] | None = None                    # (param, value) that makes the run a dry run; None = always applies
+    estimate_s: int | None = None                             # rough duration, for the step timeline
+    lock_keys: Callable[[str, BaseModel], list[str]] | None = None   # several locks (a chain: the union of its steps')
+    composite: bool = False                                   # a chain: its params hold steps, it cannot nest
+    slots: Callable[[BaseModel], list] | None = None          # several slots (a chain: those of its steps)
+    plant_check: Callable[[BaseModel, str | None], None] | None = None   # save-time check that needs the plant (ValueError)
 
     def timeout_for(self, params: BaseModel) -> int:
         return int(self.timeout_fn(params)) if self.timeout_fn else self.default_timeout_s
 
     def lock_name(self, plant: str, params: BaseModel) -> str:
         return self.lock_key(plant, params) if self.lock_key else f"jobs:{self.key}:{plant}"
+
+    def lock_names(self, plant: str, params: BaseModel) -> list[str]:
+        """Every advisory lock the run takes, sorted (a fixed acquisition order, so two runs cannot deadlock). One
+        element for an ordinary type: the single-job behaviour is unchanged."""
+        if self.lock_keys:
+            return sorted(set(self.lock_keys(plant, params)))
+        return [self.lock_name(plant, params)]
+
+    def slot_list(self, params: BaseModel) -> list:
+        """The shared semaphores the RUNNER holds for this run (de-duplicated, in a stable order)."""
+        if self.slots:
+            return list(self.slots(params))
+        return [self.slot()] if self.slot else []
+
+    def is_dry_run(self, params: BaseModel) -> bool | None:
+        """True / False for a mutating type (a type with no dry-run mode always applies); None for a read-only one."""
+        if not self.mutates:
+            return None
+        if self.dry_run is None:
+            return False
+        name, value = self.dry_run
+        return getattr(params, name, None) == value
 
 
 REGISTRY: dict[str, JobType] = {}

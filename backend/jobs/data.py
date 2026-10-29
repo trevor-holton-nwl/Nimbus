@@ -142,6 +142,48 @@ CREATE TABLE IF NOT EXISTS job_batch (
 CREATE INDEX IF NOT EXISTS idx_job_batch_job ON job_batch (job_id, id DESC);
 """
 
+# W4a: one row per chain step per run. Identical text lives in migrations/2026-11-01-1-job-step-run.sql and the schema.sql
+# mirror block (pinned verbatim by tests/test_jobs_chain.py). CREATE-only like the other job migrations; no cascading
+# foreign key: the retention sweep removes step rows by run id in code before the run rows.
+JOB_STEP_DDL = """
+CREATE TABLE IF NOT EXISTS job_step_run (
+    run_id               BIGINT NOT NULL REFERENCES job_run (id),
+    seq                  INTEGER NOT NULL,
+    step_type            TEXT NOT NULL,              -- registry key of the step's job type
+    label                TEXT,
+    run_on               TEXT NOT NULL DEFAULT 'success' CHECK (run_on IN ('success','failure','always')),
+    continue_on_failure  BOOLEAN NOT NULL DEFAULT FALSE,
+    params               JSONB NOT NULL DEFAULT '{}'::jsonb,   -- the snapshot this run started the step with
+    status               TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','running','succeeded','warning','failed','skipped','cancelled')),
+    started_at           TIMESTAMPTZ,
+    ended_at             TIMESTAMPTZ,
+    summary              JSONB,
+    error                TEXT,
+    error_kind           TEXT CHECK (error_kind IN ('config','system','transient')),
+    action_id            TEXT,                       -- schedule-event history id of the step's own write
+    PRIMARY KEY (run_id, seq)
+);
+"""
+
+# W4a: reusable chains. Identical text lives in migrations/2026-11-01-2-job-template.sql and the schema.sql mirror block
+# (pinned verbatim by tests/test_jobs_chain.py). A job stores a COPY of the steps (job_definition.params) plus the
+# template id / version it was made from (columns added by the startup hook, see JOB_COLUMN_DDL).
+JOB_TEMPLATE_DDL = """
+CREATE TABLE IF NOT EXISTS job_template (
+    id           BIGSERIAL PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT,
+    steps        JSONB NOT NULL DEFAULT '[]'::jsonb,     -- ordered [{type, params, label, continue_on_failure, run_on}]
+    defaults     JSONB NOT NULL DEFAULT '{}'::jsonb,     -- optional {retry_max, timeout_s} a new job starts with
+    version      INTEGER NOT NULL DEFAULT 1,             -- raised by every change to steps or defaults
+    created_by   TEXT,
+    modified_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    archived     BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_job_template_name ON job_template (lower(name)) WHERE NOT archived;
+"""
+
 # W3a columns and indexes on EXISTING job tables: startup hook + schema.sql mirror only (never a migration, which the
 # deploy gate allows to CREATE only). Runs after JOB_TARGET_DDL because job_run.batch_id references job_batch.
 JOB_COLUMN_DDL = """
@@ -156,6 +198,15 @@ ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS options JSONB;
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS last_fire_at TIMESTAMPTZ;
 -- W3b fix wave: the newest fire each arm saw, {plant: iso} ('*' = the schedule's plant-less arm), so catch-up baselines are per arm.
 ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS arm_fire_at JSONB;
+-- W4a: the template a job was made from (the job keeps its own copy of the steps) and the chain step a log line belongs to.
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_id BIGINT REFERENCES job_template (id);
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_version INTEGER;
+ALTER TABLE job_run_log    ADD COLUMN IF NOT EXISTS step_seq INTEGER;
+-- W4a fix wave: the template's steps as they were when the job was tied to it (so "edited locally" compares the job's
+-- steps with its own copy), and the stable key of a built-in template (seeded by key, never resurrected by name).
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_steps JSONB;
+ALTER TABLE job_template   ADD COLUMN IF NOT EXISTS builtin_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_job_template_builtin ON job_template (builtin_key) WHERE builtin_key IS NOT NULL;
 """
 
 # W3b: a catch-up fire is recorded as trigger 'catchup'. The original CHECK only allows schedule|manual|retry and a
@@ -188,7 +239,8 @@ MISSED_PREFIX = "missed:"          # record_skipped's reason for a fire that mis
 TERMINAL = ("succeeded", "warning", "failed", "cancelled", "skipped")
 SWEEP_LOCK_KEY = "nimbus:job-run-sweep"
 _DEF_COLS = ("id, plant, job_type, name, params, enabled, archived, retry_max, timeout_s, "
-             "created_by, created_at, modified_by, modified_at, fan_out, scope_plants")
+             "created_by, created_at, modified_by, modified_at, fan_out, scope_plants, template_id, template_version, "
+             "template_steps")
 _SCHED_COLS = ("id, job_id, kind, cron_expr, time_of_day, days_of_week, day_of_month, run_at, timezone, "
                "valid_from, valid_until, paused, retired, misfire_grace_s, skip_if_running, "
                "tz_mode, fixed_timezone, options, last_fire_at, created_by, created_at, modified_by, modified_at")
@@ -211,10 +263,16 @@ def ensure_job_tables() -> None:
         cur.execute(JOB_DDL)
         cur.execute(JOB_ARTIFACT_DDL)
         cur.execute(JOB_TARGET_DDL)
+        cur.execute(JOB_STEP_DDL)
+        cur.execute(JOB_TEMPLATE_DDL)
         cur.execute(JOB_COLUMN_DDL)
         cur.execute(JOB_TRIGGER_DDL)
         cur.execute(JOB_INDEX_DDL)
         conn.commit()
+    try:
+        seed_builtin_templates()
+    except Exception as exc:  # noqa: BLE001 - a seeding hiccup must never stop the app booting
+        log.warning("could not seed the built-in job templates: %s", exc)
 
 
 def plant_timezone(plant: str) -> str:
@@ -277,7 +335,8 @@ def plant_exists(plant: str) -> bool:
 def definition_to_wire(r: dict) -> dict:
     return {**{k: r[k] for k in ("id", "plant", "job_type", "name", "params", "enabled", "archived", "retry_max",
                                   "timeout_s", "created_by", "modified_by")},
-            "fan_out": r.get("fan_out"),
+            "fan_out": r.get("fan_out"), "template_id": r.get("template_id"),
+            "template_version": r.get("template_version"),
             "targets": [target_to_wire(t) for t in r.get("targets") or []],
             "created_at": _iso(r["created_at"]), "modified_at": _iso(r["modified_at"])}
 
@@ -385,17 +444,21 @@ def _insert_schedule(cur, job_id: int, s: dict, actor: str | None) -> int:
 
 def create_job(*, plant: str, job_type: str, name: str, params: dict, enabled: bool, retry_max: int,
                timeout_s: int | None, schedules: list[dict], actor: str | None, targets: list[dict] | None = None,
-               fan_out: dict | None = None, scope_plants: list[str] | None = None) -> int:
+               fan_out: dict | None = None, scope_plants: list[str] | None = None,
+               template_id: int | None = None, template_version: int | None = None,
+               template_steps: list[dict] | None = None) -> int:
     """`scope_plants` is the creator's allowed plant list (None = an unrestricted creator): fire-time expansion is
     intersected with it, so a job never reaches plants its creator could not."""
     with db._pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO job_definition (plant, job_type, name, params, enabled, retry_max, timeout_s,"
-                " created_by, modified_by, fan_out, scope_plants) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                " created_by, modified_by, fan_out, scope_plants, template_id, template_version, template_steps)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (plant, job_type, name, Jsonb(params), enabled, retry_max, timeout_s, actor, actor,
                  Jsonb(fan_out) if fan_out else None,
-                 Jsonb(sorted(scope_plants)) if scope_plants is not None else None))
+                 Jsonb(sorted(scope_plants)) if scope_plants is not None else None, template_id, template_version,
+                 Jsonb(template_steps) if template_steps is not None else None))
             job_id = cur.fetchone()[0]
             _insert_targets(cur, job_id, targets or [])
             for s in schedules:
@@ -405,7 +468,8 @@ def create_job(*, plant: str, job_type: str, name: str, params: dict, enabled: b
 
 
 _JOB_PATCHABLE = {"name": None, "params": Jsonb, "enabled": None, "archived": None, "retry_max": None,
-                  "timeout_s": None, "fan_out": Jsonb}
+                  "timeout_s": None, "fan_out": Jsonb, "template_id": None, "template_version": None,
+                  "template_steps": Jsonb}
 
 
 def patch_job(job_id: int, fields: dict, actor: str | None, *, targets: list[dict] | None = None,
@@ -417,7 +481,7 @@ def patch_job(job_id: int, fields: dict, actor: str | None, *, targets: list[dic
         if k not in _JOB_PATCHABLE:
             continue
         sets.append(f"{k} = %s")
-        vals.append(Jsonb(v) if k in ("params", "fan_out") and v is not None else v)
+        vals.append(Jsonb(v) if k in ("params", "fan_out", "template_steps") and v is not None else v)
     if set_scope:
         sets.append("scope_plants = %s")
         vals.append(Jsonb(sorted(scope_plants)) if scope_plants is not None else None)
@@ -773,17 +837,19 @@ def insert_run(*, job_id: int, schedule_id: int | None, plant: str, job_type: st
     return rid
 
 
-def insert_manual_run_if_idle(*, job: dict, triggered_by: str | None, scheduled_for: datetime) -> int | None:
+def insert_manual_run_if_idle(*, job: dict, triggered_by: str | None, scheduled_for: datetime,
+                              trigger: str = "manual", summary: dict | None = None) -> int | None:
     """A `scheduled` manual run, unless the job already has a scheduled|running one. The check and the insert share
     one transaction under a per-job advisory xact lock, so two clicks cannot both pass. None = already active."""
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"jobs:manual:{job['id']}",))
         cur.execute(
-            "INSERT INTO job_run (job_id, plant, job_type, status, trigger, scheduled_for, triggered_by)"
-            " SELECT %s, %s, %s, 'scheduled', 'manual', %s, %s"
+            "INSERT INTO job_run (job_id, plant, job_type, status, trigger, scheduled_for, triggered_by, summary)"
+            " SELECT %s, %s, %s, 'scheduled', %s, %s, %s, %s"
             "  WHERE NOT EXISTS (SELECT 1 FROM job_run WHERE job_id = %s AND status IN ('scheduled','running'))"
             " RETURNING id",
-            (job["id"], job["plant"], job["job_type"], scheduled_for, triggered_by, job["id"]))
+            (job["id"], job["plant"], job["job_type"], trigger, scheduled_for, triggered_by,
+             Jsonb(summary) if summary else None, job["id"]))
         row = cur.fetchone()
         conn.commit()
     clear_health_cache()
@@ -1140,21 +1206,22 @@ def write_log_rows(run_id: int, rows: list[dict]) -> None:
         return
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.executemany(
-            "INSERT INTO job_run_log (run_id, seq, at, level, step, msg, duration_ms, data)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (run_id, seq) DO NOTHING",
+            "INSERT INTO job_run_log (run_id, seq, at, level, step, msg, duration_ms, data, step_seq)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (run_id, seq) DO NOTHING",
             [(run_id, r["seq"], r["at"], r["level"], r["step"], r["msg"], r["duration_ms"],
-              Jsonb(r["data"]) if r["data"] is not None else None) for r in rows])
+              Jsonb(r["data"]) if r["data"] is not None else None, r.get("step_seq")) for r in rows])
         conn.commit()
 
 
-def list_log(run_id: int, *, after_seq: int, min_level: str, limit: int) -> list[dict]:
+def list_log(run_id: int, *, after_seq: int, min_level: str, limit: int, step_seq: int | None = None) -> list[dict]:
     from backend.jobs.context import LEVELS, LEVEL_RANK
     levels = [lv for lv in LEVELS if LEVEL_RANK[lv] >= LEVEL_RANK.get(min_level, 0)]
     with db._pool.connection() as conn, _cur(conn) as cur:
         cur.execute(
-            "SELECT seq, at, level, step, msg, duration_ms, data FROM job_run_log"
-            " WHERE run_id = %s AND seq > %s AND level = ANY(%s) ORDER BY seq LIMIT %s",
-            (run_id, after_seq, levels, limit))
+            "SELECT seq, at, level, step, msg, duration_ms, data, step_seq FROM job_run_log"
+            " WHERE run_id = %s AND seq > %s AND level = ANY(%s) AND (%s::int IS NULL OR step_seq = %s)"
+            " ORDER BY seq LIMIT %s",
+            (run_id, after_seq, levels, step_seq, step_seq, limit))
         rows = cur.fetchall()
     for r in rows:
         r["at"] = _iso(r["at"])
@@ -1220,10 +1287,207 @@ def last_success_watermark(job_id: int, before_run_id: int | None = None, plant:
         cur.execute("SELECT COALESCE(NULLIF(summary->'window'->>'end', '')::timestamptz, started_at) FROM job_run"
                     " WHERE job_id = %s AND trigger IN ('schedule','catchup') AND status IN ('succeeded','warning')"
                     " AND started_at IS NOT NULL AND (%s::bigint IS NULL OR id < %s::bigint)"
+                    " AND COALESCE(summary->>'watermark_ok', 'true') <> 'false'"     # a failed report did not cover its window
                     " AND (%s::text IS NULL OR plant = %s)"
                     " ORDER BY id DESC LIMIT 1", (job_id, before_run_id, before_run_id, plant, plant))
         r = cur.fetchone()
     return r[0] if r else None
+
+
+# ------------------------------------------------------------------------------------------------ chain steps
+STEP_STATUSES = ("pending", "running", "succeeded", "warning", "failed", "skipped", "cancelled")
+_STEP_COLS = ("seq, step_type, label, run_on, continue_on_failure, params, status, started_at, ended_at, summary, error,"
+              " error_kind, action_id")
+
+
+def step_to_wire(r: dict) -> dict:
+    started, ended = r["started_at"], r["ended_at"]
+    return {"seq": r["seq"], "step_type": r["step_type"], "label": r["label"], "run_on": r["run_on"],
+            "continue_on_failure": bool(r["continue_on_failure"]), "params": r["params"], "status": r["status"],
+            "started_at": _iso(started), "ended_at": _iso(ended),
+            "duration_ms": int((ended - started).total_seconds() * 1000) if started and ended else None,
+            "summary": r["summary"], "error": r["error"], "error_kind": r["error_kind"], "action_id": r["action_id"]}
+
+
+def insert_step_rows(run_id: int, rows: list[dict]) -> None:
+    """All of a chain run's step rows at once (pending, or already `skipped` for a resumed run's earlier steps), so the
+    timeline shows its full size from the first poll."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO job_step_run (run_id, seq, step_type, label, run_on, continue_on_failure, params, status,"
+            " summary, ended_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s, CASE WHEN %s = 'skipped' THEN clock_timestamp() END)"
+            " ON CONFLICT (run_id, seq) DO NOTHING",
+            [(run_id, r["seq"], r["step_type"], r.get("label"), r.get("run_on") or "success",
+              bool(r.get("continue_on_failure")), Jsonb(r.get("params") or {}), r.get("status") or "pending",
+              Jsonb(r["summary"]) if r.get("summary") is not None else None, r.get("status") or "pending")
+             for r in rows])
+        conn.commit()
+
+
+def start_step(run_id: int, seq: int) -> None:
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE job_step_run SET status = 'running', started_at = clock_timestamp()"
+                    " WHERE run_id = %s AND seq = %s AND status = 'pending'", (run_id, seq))
+        conn.commit()
+
+
+def finish_step(run_id: int, seq: int, status: str, summary: dict | None = None, error: str | None = None,
+                error_kind: str | None = None, action_id: str | None = None) -> None:
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE job_step_run SET status = %s, summary = %s, error = %s, error_kind = %s, action_id = %s,"
+                    " ended_at = clock_timestamp() WHERE run_id = %s AND seq = %s AND status IN ('pending','running')",
+                    (status, Jsonb(summary) if summary is not None else None, error, error_kind, action_id,
+                     run_id, seq))
+        conn.commit()
+
+
+def list_steps(run_id: int) -> list[dict]:
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute(f"SELECT {_STEP_COLS} FROM job_step_run WHERE run_id = %s ORDER BY seq", (run_id,))
+        return cur.fetchall()
+
+
+def close_open_steps(run_id: int, run_status: str, error: str | None) -> None:
+    """Safety net after a chain run ended: a step still `running` (an abandoned body, a timeout) takes the run's
+    outcome, one still `pending` was never reached and is `skipped`."""
+    step_status = "cancelled" if run_status == "cancelled" else "failed"
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE job_step_run SET status = %s, error = COALESCE(error, %s),"
+                    " error_kind = CASE WHEN %s = 'failed' THEN COALESCE(error_kind, 'system') END,"
+                    " ended_at = clock_timestamp() WHERE run_id = %s AND status = 'running'",
+                    (step_status, error or f"run {run_status}", step_status, run_id))
+        cur.execute("UPDATE job_step_run SET status = 'skipped', ended_at = clock_timestamp(),"
+                    " summary = COALESCE(summary, '{\"reason\": \"the run ended first\"}'::jsonb)"
+                    " WHERE run_id = %s AND status = 'pending'", (run_id,))
+        conn.commit()
+
+
+def run_resume(run_id: int) -> dict | None:
+    """`{from_run, from_seq}` when this run was started as 'restart from a failed step', else None."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT summary -> 'resume' FROM job_run WHERE id = %s", (run_id,))
+        row = cur.fetchone()
+    return row[0] if row and row[0] else None
+
+
+# ------------------------------------------------------------------------------------------------ job templates
+_TEMPLATE_COLS = "id, name, description, steps, defaults, version, created_by, modified_at, archived"
+
+
+def template_to_wire(r: dict) -> dict:
+    return {"id": r["id"], "name": r["name"], "description": r["description"], "steps": r["steps"] or [],
+            "defaults": r["defaults"] or {}, "version": r["version"], "created_by": r["created_by"],
+            "modified_at": _iso(r["modified_at"]), "archived": bool(r["archived"])}
+
+
+def list_templates(include_archived: bool = False) -> list[dict]:
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute(f"SELECT {_TEMPLATE_COLS} FROM job_template WHERE (%s OR NOT archived) ORDER BY lower(name), id",
+                    (include_archived,))
+        return cur.fetchall()
+
+
+def get_template(template_id: int) -> dict | None:
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute(f"SELECT {_TEMPLATE_COLS} FROM job_template WHERE id = %s", (template_id,))
+        return cur.fetchone()
+
+
+def template_briefs(ids: list[int]) -> dict[int, dict]:
+    """{id: {name, version, archived, steps}} for the templates the listed jobs were made from (one query)."""
+    if not ids:
+        return {}
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute("SELECT id, name, version, archived, steps FROM job_template WHERE id = ANY(%s)", (list(ids),))
+        return {r["id"]: r for r in cur.fetchall()}
+
+
+class TemplateNameTaken(ValueError):
+    """Another live template already uses this name."""
+
+
+def create_template(*, name: str, description: str | None, steps: list[dict], defaults: dict, actor: str | None) -> int:
+    from psycopg import errors as pgerr
+    try:
+        with db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO job_template (name, description, steps, defaults, created_by)"
+                        " VALUES (%s,%s,%s,%s,%s) RETURNING id",
+                        (name, description, Jsonb(steps), Jsonb(defaults or {}), actor))
+            tid = cur.fetchone()[0]
+            conn.commit()
+    except pgerr.UniqueViolation as e:
+        raise TemplateNameTaken(name) from e
+    return tid
+
+
+class TemplateVersionConflict(Exception):
+    """The template changed since the caller read it (`expected_version` no longer matches)."""
+
+    def __init__(self, current: int):
+        super().__init__(f"template is now at version {current}")
+        self.current = current
+
+
+def patch_template(template_id: int, fields: dict, actor: str | None, expected_version: int | None = None) -> dict | None:
+    """Change a template. The version rises only when `steps` or `defaults` really CHANGE (a rename, an archive or a save
+    of unchanged steps does not make the jobs made from it 'out of date'). `expected_version` is an If-Match: a
+    template saved by someone else since the caller read it raises TemplateVersionConflict (the route answers 409)."""
+    from psycopg import errors as pgerr
+    try:
+        with db._pool.connection() as conn, _cur(conn) as cur:
+            cur.execute(f"SELECT {_TEMPLATE_COLS} FROM job_template WHERE id = %s FOR UPDATE", (template_id,))
+            cur0 = cur.fetchone()
+            if cur0 is None:
+                return None
+            if expected_version is not None and int(cur0["version"]) != int(expected_version):
+                raise TemplateVersionConflict(int(cur0["version"]))
+            sets, vals = [], []
+            for k in ("name", "description", "archived"):
+                if k in fields and fields[k] != cur0[k]:
+                    sets.append(f"{k} = %s")
+                    vals.append(fields[k])
+            bump = False
+            for k in ("steps", "defaults"):
+                if k in fields and fields[k] != (cur0[k] or ({} if k == "defaults" else [])):
+                    sets.append(f"{k} = %s")
+                    vals.append(Jsonb(fields[k]))
+                    bump = True
+            if not sets:
+                return cur0
+            if bump:
+                sets.append("version = version + 1")
+            sets.append("modified_at = clock_timestamp()")
+            cur.execute(f"UPDATE job_template SET {', '.join(sets)} WHERE id = %s", (*vals, template_id))
+            conn.commit()
+    except pgerr.UniqueViolation as e:
+        raise TemplateNameTaken(str(fields.get("name"))) from e
+    return get_template(template_id)
+
+
+def seed_builtin_templates() -> None:
+    """The built-in templates, inserted once by their stable `builtin_key`: a built-in an admin renamed or archived is
+    never put back (the key stays on the row). A row seeded before the key existed (created by 'system', same name or
+    description) is adopted by the key instead of being inserted again."""
+    from backend.jobs.templates import BUILTIN_TEMPLATES
+    from backend.jobs.types.chain import normalize_steps
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext('nimbus:job-template-seed'))")
+        for t in BUILTIN_TEMPLATES:
+            cur.execute("SELECT 1 FROM job_template WHERE builtin_key = %s", (t["key"],))
+            if cur.fetchone():
+                continue
+            cur.execute("UPDATE job_template SET builtin_key = %s WHERE id = (SELECT id FROM job_template"
+                        " WHERE builtin_key IS NULL AND created_by = 'system'"
+                        " AND (lower(name) = lower(%s) OR description = %s) ORDER BY id LIMIT 1)",
+                        (t["key"], t["name"], t["description"]))
+            if cur.rowcount:
+                continue
+            steps = normalize_steps(t["steps"])           # full params, so a job's copy diffs cleanly against it
+            cur.execute("INSERT INTO job_template (name, description, steps, defaults, created_by, builtin_key)"
+                        " SELECT %s, %s, %s, %s, 'system', %s WHERE NOT EXISTS"
+                        " (SELECT 1 FROM job_template WHERE lower(name) = lower(%s) AND NOT archived)",
+                        (t["name"], t["description"], Jsonb(steps), Jsonb(t.get("defaults") or {}), t["key"], t["name"]))
+        conn.commit()
 
 
 # ------------------------------------------------------------------------------------------------- sweeps
@@ -1237,6 +1501,9 @@ def boot_sweep() -> int:
                     " summary = COALESCE(summary, '{}'::jsonb) || '{\"error_kind\": \"system\"}'::jsonb,"
                     " ended_at = clock_timestamp() WHERE status = 'scheduled' AND batch_id IN"
                     " (SELECT id FROM job_batch WHERE status = 'running')")
+        cur.execute("UPDATE job_step_run SET status = 'failed', error = 'interrupted by restart', error_kind = 'system',"
+                    " ended_at = clock_timestamp() WHERE status = 'running'")
+        cur.execute("UPDATE job_step_run SET status = 'skipped', ended_at = clock_timestamp() WHERE status = 'pending'")
         cur.execute("UPDATE job_run SET status = 'failed', error = 'interrupted by restart',"
                     " summary = COALESCE(summary, '{}'::jsonb) || '{\"error_kind\": \"system\"}'::jsonb,"
                     " ended_at = clock_timestamp() WHERE status IN ('scheduled','running')")
@@ -1255,7 +1522,7 @@ def sweep_job_runs(*, retention_days=None, chunk: int = 500, max_chunks: int = 2
     """Trim finished runs older than the retention window (log lines first, then the run rows) in chunks of
     `chunk` runs. Never raises. One transaction per chunk, opening with an advisory xact lock; another sweeper
     holding it yields {"locked": True}. Stores its result in DIAGNOSTICS["job_run_last_sweep"]."""
-    result = {"deleted_runs": 0, "deleted_log_lines": 0, "deleted_artifacts": 0, "deleted_batches": 0, "chunks": 0, "retention_days": None,
+    result = {"deleted_runs": 0, "deleted_log_lines": 0, "deleted_artifacts": 0, "deleted_steps": 0, "deleted_batches": 0, "chunks": 0, "retention_days": None,
               "locked": False, "error": None}
     try:
         days = md.get_job_run_retention_days() if retention_days is None else max(1, min(60, int(retention_days)))
@@ -1274,6 +1541,8 @@ def sweep_job_runs(*, retention_days=None, chunk: int = 500, max_chunks: int = 2
                             " AND status NOT IN ('scheduled','running') ORDER BY id LIMIT %s", (days, chunk))
                 ids = [r[0] for r in cur.fetchall()]
                 if ids:
+                    cur.execute("DELETE FROM job_step_run WHERE run_id = ANY(%s)", (ids,))
+                    result["deleted_steps"] += cur.rowcount
                     cur.execute("DELETE FROM job_run_artifact WHERE run_id = ANY(%s)", (ids,))
                     result["deleted_artifacts"] += cur.rowcount
                     cur.execute("DELETE FROM job_run_log WHERE run_id = ANY(%s)", (ids,))

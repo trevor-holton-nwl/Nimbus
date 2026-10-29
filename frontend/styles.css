@@ -8300,6 +8300,55 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .job-prop-list:focus-visible { outline: 2px solid var(--accent); }
 
 /* W2: date-window picker in the job dialog, and the report artifact viewer on the run detail. */
+/* W4a chains: the step builder in the dialog and the step timeline in the run detail (tokens only). */
+.job-chain { border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px 10px; margin: 0 0 10px; min-width: 0; }
+.job-chain legend { font-size: 11.5px; font-weight: 600; color: var(--fg-mute); padding: 0 6px; }
+.job-steps-edit { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 8px; }
+.job-step-card { border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px 4px; background: var(--bg-subtle); min-width: 0; }
+.job-step-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 6px; }
+.job-step-n { font-weight: 600; font-size: 12.5px; }
+.job-step-type { flex: 1 1 180px; min-width: 0; }
+.job-step-btns { display: inline-flex; gap: 4px; margin-left: auto; }
+.job-step-adv { margin: 0 0 6px; font-size: 12.5px; }
+.job-step-adv summary { cursor: pointer; color: var(--fg-mute); margin-bottom: 6px; }
+.job-step-empty { padding: 6px 2px; }
+.job-chain-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.job-chain-add .input { flex: 1 1 200px; min-width: 0; }
+.job-chain-tpl { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.job-chain-tpl .input { flex: 1 1 160px; min-width: 0; }
+.job-chain-run { margin-bottom: 12px; }
+.job-step-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.job-step-row { display: grid; grid-template-columns: 24px minmax(120px, 1.2fr) auto minmax(120px, 2fr) 70px; gap: 4px 10px; align-items: center; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-md); }
+.job-step-name { min-width: 0; overflow-wrap: anywhere; }
+.job-step-track { position: relative; display: block; height: 10px; border-radius: var(--r-sm); background: var(--bg-strong); overflow: hidden; }
+.job-step-bar { position: absolute; top: 0; bottom: 0; background: var(--fg-mute); border-radius: var(--r-sm); }
+.job-step-bar-failed { background: var(--err); }
+.job-step-bar-warning { background: var(--warn); }
+/* W4a fix wave: every step status has a style (tokens only). A step "done in an earlier run" reads quieter than one that ran here. */
+.job-step-bar-running { background: var(--accent); }
+.job-step-bar-succeeded { background: var(--fg-mute); }
+.job-step-bar-cancelled { background: var(--fg-faint); }
+.job-step-bar-skipped { background: var(--bg-strong); }
+.job-step-row.job-step-running { border-color: var(--accent); }
+.job-step-row.job-step-failed { border-color: var(--err); }
+.job-step-row.job-step-warning { border-color: var(--warn); }
+.job-step-row.job-step-pending, .job-step-row.job-step-skipped, .job-step-row.job-step-cancelled { border-style: dashed; }
+.job-step-row.job-step-earlier { background: var(--bg-subtle); }
+.job-step-row.job-step-earlier .job-step-name { color: var(--fg-mute); }
+.job-step-btns .icon-btn.job-step-act { width: 32px; height: 32px; }
+.job-warn-failed { color: var(--warn); }
+.job-step-dur { text-align: right; font-size: 12px; }
+.job-step-tiles, .job-step-err, .job-step-acts { grid-column: 2 / -1; }
+.job-step-tiles { display: flex; flex-wrap: wrap; gap: 6px; }
+.job-step-tiles .kpi-tile { padding: 4px 8px; display: inline-flex; gap: 6px; align-items: baseline; }
+.job-step-tiles .kpi-tile .v { font-size: 13px; }
+.job-step-err { padding: 6px 8px; background: var(--err-soft); color: var(--err); border-radius: var(--r-md); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.job-step-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.job-step-acts:empty { display: none; }
+@media (max-width: 640px) {
+  .job-step-row { grid-template-columns: 24px 1fr auto; }
+  .job-step-track, .job-step-dur { grid-column: 2 / -1; }
+}
 .job-window[hidden] { display: none; }
 .job-window { border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px 2px; margin: 0 0 8px; min-width: 0; }
 .job-window legend { font-size: 11.5px; font-weight: 600; color: var(--fg-mute); padding: 0 6px; }

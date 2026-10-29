@@ -2238,7 +2238,11 @@ def _purge_order_ids_on_cursor(cur, plant: str, ids: list[str], *, action: str,
     return {"deleted": deleted, "shares_purged": shares_purged, "headers_deleted": headers_deleted}
 
 
-def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -> dict:
+class PurgeLimitExceeded(RuntimeError):
+    """A guarded purge matched more orders than its `max_rows`; the transaction was rolled back, nothing was deleted."""
+
+
+def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None, max_rows=None, action_id=None) -> dict:
     """DELETE orders in one plant whose effective end date (scheduled_end,
     falling back to basic_finish_date) falls in [start, end]. Plant-scoped
     (unlike the prior unscoped version) so a plant-restricted admin can never
@@ -2266,14 +2270,20 @@ def purge_orders_by_date(plant, start, end, machines=None, *, user_email=None) -
     present in the admin_audit JSON (0 when nothing was touched), but are
     added to the RETURN value only when nonzero, keeping the return shape
     unchanged for every caller that never touches distribution.
+
+    `max_rows` (the unattended job's guard): when the delete matches more rows than that, PurgeLimitExceeded is raised
+    inside the transaction, so the rollback leaves every row in place. `action_id` lets the caller name the
+    schedule-event history entry (the job records it on its step).
     """
     where, params = _purge_scope_sql_params(plant, start, end, machines)
     sql = f"DELETE FROM orders WHERE {where} RETURNING {_PURGE_RETURNING}"
-    ev = sched_events.EventCtx(source="purge", actor=user_email, action_id=sched_events.new_action_id())
+    ev = sched_events.EventCtx(source="purge", actor=user_email, action_id=action_id or sched_events.new_action_id())
     with _pool.connection() as conn, conn.cursor() as cur:
         try:
             cur.execute(sql, params)
             deleted_rows = _purge_deleted_rows(cur)
+            if max_rows is not None and len(deleted_rows) > int(max_rows):
+                raise PurgeLimitExceeded(f"{len(deleted_rows)} orders match, more than the limit of {int(max_rows)}")
             ids = [r["id"] for r in deleted_rows]
             core = _purge_order_ids_on_cursor(
                 cur, plant, ids, action="purge_by_date_range", user_email=user_email,

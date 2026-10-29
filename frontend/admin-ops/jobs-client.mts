@@ -10,7 +10,8 @@
    ========================================================================== */
 
 import { Util, Config } from '../platform/foundation.mjs';
-import { buildJobsQuery, buildRunsQuery, buildBatchesQuery, buildLogQuery, normColumnType } from './jobs-model.mjs';
+import { buildJobsQuery, buildRunsQuery, buildBatchesQuery, buildLogQuery, normColumnType, DEFAULT_CHAIN_LIMITS } from './jobs-model.mjs';
+import type { ChainLimits, StepRow, JobTemplate, TemplateRef, StepDiff } from './jobs-model.mjs';
 import type { JobsQuery, RunsQuery, BatchesQuery, Batch, JobTarget, TzMode, Timeline, TimelineLane, TimelineRun, TimelineUpcoming, LogLine, RunSummary, HealthSummary, Proposal, TypeMeta, ParamMeta, DateWindow, Artifact, ArtifactSection } from './jobs-model.mjs';
 
 export interface JobSchedule {
@@ -76,6 +77,10 @@ export interface Job {
   targetCount: number;
   targetSkipped: number;
   fanOut: { stagger_s?: number; max_parallel?: number | null; fail_fast?: boolean } | null;
+  /** W4a: the template a chain job was made from (id + version it holds) and whether that template has changed since. */
+  templateId: number | null;
+  templateVersion: number | null;
+  template: TemplateRef | null;
 }
 
 /** A job type with its param metadata (GET /jobs/types): kind, whether it mutates data, and the params the generic form renders. */
@@ -174,7 +179,36 @@ export function normJob(r: Raw): Job {
     })() : null,
     targets: _arr(r, 'targets').map(normTarget), targetKind: String(r.target_kind ?? 'single'), targetCount: Number(r.target_count ?? 1),
     targetSkipped: Number(r.target_skipped ?? 0), fanOut: (r.fan_out as Job['fanOut']) ?? null,
+    templateId: r.template_id == null ? null : Number(r.template_id), templateVersion: r.template_version == null ? null : Number(r.template_version),
+    template: r.template ? normTemplateRef(r.template as Raw) : null,
   };
+}
+
+export function normTemplateRef(r: Raw): TemplateRef {
+  return { id: Number(r.id), name: String(r.name ?? ''), version: r.version == null ? null : Number(r.version),
+    currentVersion: Number(r.current_version ?? r.version ?? 0), archived: r.archived === true, changed: r.changed === true, editedLocally: r.edited_locally === true };
+}
+
+export function normTemplate(r: Raw): JobTemplate {
+  return { id: Number(r.id), name: String(r.name ?? ''), description: _s(r.description), steps: Array.isArray(r.steps) ? (r.steps as Array<Record<string, unknown>>) : [],
+    defaults: (r.defaults as Record<string, unknown> | null) ?? {}, version: Number(r.version ?? 1), createdBy: _s(r.created_by),
+    modifiedAt: _s(r.modified_at), archived: r.archived === true };
+}
+
+export function normStep(r: Raw): StepRow {
+  return {
+    seq: Number(r.seq), stepType: String(r.step_type ?? ''), label: _s(r.label), runOn: r.run_on === 'failure' || r.run_on === 'always' ? r.run_on : 'success',
+    continueOnFailure: r.continue_on_failure === true, params: (r.params as Record<string, unknown> | null) ?? {}, status: String(r.status ?? 'pending'),
+    startedAt: _s(r.started_at), endedAt: _s(r.ended_at), durationMs: typeof r.duration_ms === 'number' ? r.duration_ms : null,
+    summary: (r.summary as Record<string, unknown> | null) ?? null, error: _s(r.error), errorKind: _s(r.error_kind), actionId: _s(r.action_id),
+  };
+}
+
+export function normStepDiff(r: Raw): StepDiff {
+  const c = String(r.change);
+  return { seq: Number(r.seq), change: c === 'changed' || c === 'added' || c === 'removed' ? c : 'same',
+    job: (r.job as Record<string, unknown> | null) ?? null, template: (r.template as Record<string, unknown> | null) ?? null,
+    fields: Array.isArray(r.fields) ? (r.fields as unknown[]).map(String) : [] };
 }
 
 export function normTarget(r: Raw): JobTarget {
@@ -228,6 +262,7 @@ export function normLog(data: unknown): LogPage {
   const d = (data as Raw | null) ?? {};
   const lines = _arr(d, 'lines').map(r => ({
     seq: Number(r.seq), at: _s(r.at), level: String(r.level ?? 'info'), step: _s(r.step), msg: String(r.msg ?? ''),
+    step_seq: r.step_seq == null ? null : Number(r.step_seq),
     duration_ms: typeof r.duration_ms === 'number' ? r.duration_ms : null, data: r.data,
   }));
   return { lines, status: _s(d.status), done: d.done === true, lastSeq: Number(d.last_seq ?? 0), truncated: !!d.log_truncated };
@@ -282,6 +317,9 @@ export function normType(r: Raw): JobType {
   return {
     key: String(r.key), label: String(r.label ?? r.key), kind: r.kind === 'report' ? 'report' : 'action', mutates: r.mutates !== false,
     plantScoped: r.plant_scoped !== false, params: _arr(r, 'params').map(normParam), defaults: (r.defaults as Record<string, unknown> | null) ?? {},
+    idempotent: r.idempotent === true, composite: r.composite === true, estimateS: typeof r.estimate_s === 'number' ? r.estimate_s : null,
+    dryRun: r.dry_run && typeof r.dry_run === 'object' ? { param: String((r.dry_run as Raw).param), value: (r.dry_run as Raw).value } : null,
+    lockKeys: Array.isArray(r.lock_keys) ? (r.lock_keys as unknown[]).map(String) : [],
   };
 }
 
@@ -298,9 +336,56 @@ export function normArtifact(data: unknown): Artifact {
 
 const _cursor = (data: unknown): number | null => { const v = (data as Raw | null)?.next_before_id; return v == null ? null : Number(v); };
 
+let _limits: ChainLimits = { ...DEFAULT_CHAIN_LIMITS };
+export function normLimits(v: unknown): ChainLimits {
+  const l = (v as Raw | null) ?? {};
+  return { maxSteps: Number(l.chain_max_steps ?? DEFAULT_CHAIN_LIMITS.maxSteps), purgeMinAgeDays: Number(l.purge_min_age_days ?? DEFAULT_CHAIN_LIMITS.purgeMinAgeDays) };
+}
+
 export const JobsClient = {
   async types(): Promise<JobType[]> {
-    return _arr(await _req('GET', '/jobs/types'), 'types').map(normType);
+    const data = await _req('GET', '/jobs/types');
+    _limits = normLimits((data as Raw | null)?.limits);
+    return _arr(data, 'types').map(normType);
+  },
+  /** The chain limits the last `types()` call returned (max steps, the purge minimum age). */
+  limits(): ChainLimits { return _limits; },
+
+  /** Job templates (admin). */
+  async templates(includeArchived = false): Promise<JobTemplate[]> {
+    return _arr(await _req('GET', `/jobs/templates${includeArchived ? '?include_archived=true' : ''}`), 'templates').map(normTemplate);
+  },
+  async createTemplate(body: { name: string; description?: string | null; steps: Array<Record<string, unknown>>; defaults?: Record<string, unknown> }): Promise<JobTemplate> {
+    return normTemplate((((await _req('POST', '/jobs/templates', body)) as Raw).template) as Raw);
+  },
+  /** `expectedVersion` is the If-Match: the version the editor opened; a template saved by someone else since is a 409 (the message names its version). */
+  async updateTemplate(id: number, patch: { name?: string; description?: string | null; steps?: Array<Record<string, unknown>>; archived?: boolean; expectedVersion?: number }): Promise<JobTemplate> {
+    const { expectedVersion, ...rest } = patch;
+    const body: Raw = expectedVersion != null ? { ...rest, expected_version: expectedVersion } : rest;
+    return normTemplate((((await _req('PATCH', `/jobs/templates/${id}`, body)) as Raw).template) as Raw);
+  },
+  /** The job's copy of its steps against the template's current ones. */
+  async templateDiff(jobId: number): Promise<{ template: { id: number; name: string; version: number; archived: boolean }; jobVersion: number | null; changed: boolean; diff: StepDiff[] }> {
+    const d = await _req('GET', `/jobs/${jobId}/template-diff`) as Raw;
+    const tpl = (d.template as Raw) ?? {};
+    return { template: { id: Number(tpl.id), name: String(tpl.name ?? ''), version: Number(tpl.version), archived: tpl.archived === true },
+      jobVersion: d.job_version == null ? null : Number(d.job_version), changed: d.changed === true, diff: _arr(d, 'diff').map(normStepDiff) };
+  },
+  /** Replace the job's copy of the steps with the template's current ones. */
+  async updateFromTemplate(jobId: number): Promise<{ job: Job; overriddenPlants: string[] }> {
+    const r = await _req('POST', `/jobs/${jobId}/template/update`) as Raw;
+    return { job: normJob(r), overriddenPlants: Array.isArray(r.steps_overridden_plants) ? (r.steps_overridden_plants as unknown[]).map(String) : [] };
+  },
+  /** Restart a failed / cancelled chain run at `fromStep` (default: its first failed step); `confirm` for a step that is not safe to repeat. */
+  async restartFromStep(runId: number, o: { fromStep?: number; confirm?: boolean } = {}): Promise<JobRun> {
+    const body: Raw = { confirm: o.confirm === true };
+    if (o.fromStep) body.from_step = o.fromStep;
+    return normRun((((await _req('POST', `/jobs/runs/${runId}/restart-step`, body)) as Raw).run) as Raw);
+  },
+  /** A run with its chain step rows (empty for any other run). */
+  async getRunDetail(runId: number): Promise<{ run: JobRun; steps: StepRow[] }> {
+    const d = await _req('GET', `/jobs/runs/${runId}`) as Raw;
+    return { run: normRun((d.run as Raw) ?? {}), steps: _arr(d, 'steps').map(normStep) };
   },
 
   async list(q: JobsQuery): Promise<{ items: Job[]; nextBeforeId: number | null }> {
@@ -365,7 +450,9 @@ export const JobsClient = {
   /** Re-run only the failed, skipped or cancelled plants of a batch (admin); answers the first new run. */
   async restartBatch(id: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/batches/${id}/restart`)) as Raw).run) as Raw); },
   /** Run again the PLANT of this run only (admin); 409 while a run of that plant is active. */
-  async restartRun(runId: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/runs/${runId}/restart`)) as Raw).run) as Raw); },
+  async restartRun(runId: number, o: { confirm?: boolean } = {}): Promise<JobRun> {
+    return normRun((((await _req('POST', `/jobs/runs/${runId}/restart`, o.confirm ? { confirm: true } : undefined)) as Raw).run) as Raw);
+  },
   /** The job's CURRENT params (what a restart would run with). */
   async jobParams(jobId: number): Promise<Record<string, unknown>> {
     const jobs = await _req('GET', `/jobs?limit=1&before_id=${jobId + 1}&include_archived=true`);
