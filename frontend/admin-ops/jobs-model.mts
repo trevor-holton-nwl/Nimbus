@@ -493,6 +493,10 @@ export interface RunSummary {
   error_kind?: string | null; failed_step?: string | null;
   /** The optimizer's result mode: `apply` or `propose` (a dry run). */
   apply_mode?: string | null;
+  /** Report runs: rows per section (before the size cap), the stored artifact's facts and the window the run resolved. */
+  row_counts?: Record<string, number> | null;
+  artifact?: { size_bytes?: number; truncated?: boolean } | null;
+  window?: { start: string; end: string; label: string; timezone: string } | null;
 }
 export const RESULT_TILES = ['late', 'changeovers', 'moved', 'applied', 'dropped'] as const;
 
@@ -538,10 +542,201 @@ export function stripCompleteThrough(runs: UpcomingRun[], requested: number): st
 }
 
 /* ---------------------------------------------------------------------------
+   Job types and their params (GET /jobs/types)
+   ------------------------------------------------------------------------- */
+export type JobKind = 'action' | 'report';
+export type ParamType = 'string' | 'enum' | 'boolean' | 'integer' | 'number' | 'multi_enum' | 'date_window';
+
+/** One param as the server describes it (registry.describe_params): the generic form renders from this. */
+export interface ParamMeta {
+  key: string; type: ParamType; labelKey: string; title: string; default: unknown; required: boolean;
+  enum?: string[]; enumLabelKeys?: Record<string, string>; min?: number; max?: number; pattern?: string; widget?: string | null;
+}
+export interface TypeMeta {
+  key: string; label: string; kind: JobKind; mutates: boolean; plantScoped: boolean;
+  params: ParamMeta[]; defaults: Record<string, unknown>;
+}
+
+/** Strings the optimizer's params already had before the generic form: reused so no translation is duplicated. */
+export const LABEL_ALIASES: Record<string, string> = {
+  'jobs.p.optimizer.plant.mode': 'jobs.f_mode',
+  'jobs.p.optimizer.plant.mode.due_date': 'jobs.mode_due_date',
+  'jobs.p.optimizer.plant.mode.min_changeover': 'jobs.mode_min_changeover',
+  'jobs.p.optimizer.plant.mode.spt': 'jobs.mode_spt',
+  'jobs.p.optimizer.plant.search': 'jobs.f_search',
+  'jobs.p.optimizer.plant.search.normal': 'jobs.search_normal',
+  'jobs.p.optimizer.plant.search.exhaustive': 'jobs.search_exhaustive',
+  'jobs.p.optimizer.plant.search.hint': 'jobs.search_note',
+  'jobs.p.optimizer.plant.respect_firmed': 'jobs.f_firmed',
+  'jobs.p.optimizer.plant.apply_mode': 'jobs.f_result',
+  'jobs.p.optimizer.plant.apply_mode.apply': 'jobs.result_apply',
+  'jobs.p.optimizer.plant.apply_mode.propose': 'jobs.result_propose',
+  'jobs.type.optimizer.plant': 'jobs.type_optimizer',
+};
+
+/** The translation for `key` (or its legacy alias), or '' when neither exists. */
+export function tryKey(key: string, d: Pick<JobsDeps, 't'>): string {
+  for (const k of [key, LABEL_ALIASES[key]]) { if (k) { const v = d.t(k); if (v && v !== k) return v; } }
+  return '';
+}
+
+export const paramLabel = (m: ParamMeta, d: Pick<JobsDeps, 't'>): string => tryKey(m.labelKey, d) || m.title;
+export const enumLabel = (m: ParamMeta, v: string, d: Pick<JobsDeps, 't'>): string => tryKey(m.enumLabelKeys?.[v] ?? `${m.labelKey}.${v}`, d) || v;
+/** The hint under a param (`jobs.p.<type>.<param>.hint`, or an alias), '' when it has none. */
+export const paramHint = (m: ParamMeta, d: Pick<JobsDeps, 't'>): string => tryKey(`${m.labelKey}.hint`, d);
+export const typeLabel = (x: { key: string; label: string }, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.type.${x.key}`, d) || x.label;
+
+/** Dialog / filter groups: Optimization (actions) then Reports. */
+export function typeGroups(types: ReadonlyArray<TypeMeta>): Array<{ kind: JobKind; labelKey: string; types: TypeMeta[] }> {
+  return (['action', 'report'] as const)
+    .map(kind => ({ kind, labelKey: kind === 'report' ? 'jobs.group_reports' : 'jobs.group_optimization', types: types.filter(x => x.kind === kind) }))
+    .filter(g => g.types.length);
+}
+
+export const findType = (types: ReadonlyArray<TypeMeta>, key: string): TypeMeta | undefined => types.find(x => x.key === key);
+/** The Result control (Apply / Dry run) shows only for an action type that has an `apply_mode` param. */
+/** A report job, even when the types failed to load (every report key starts `report.`). */
+export const isReportType = (jobType: string, types: ReadonlyArray<TypeMeta>): boolean =>
+  findType(types, jobType)?.kind === 'report' || String(jobType).startsWith('report.');
+export const hasApplyMode = (m: TypeMeta | undefined | null): boolean => !!m && m.kind === 'action' && m.params.some(p => p.key === 'apply_mode');
+
+/* ---------------------------------------------------------------------------
+   DateWindow (mirror of backend/jobs/windows.py; the server resolves, this only shapes and validates)
+   ------------------------------------------------------------------------- */
+export const WINDOW_ANCHORS = ['now', 'start_of_day', 'start_of_week', 'start_of_month', 'last_success'] as const;
+export const WINDOW_UNITS = ['day', 'week', 'month'] as const;
+export const WINDOW_CHOICES = ['fixed', 'older_than', 'last', 'next', 'since_last_success', 'this_week', 'this_month', 'custom'] as const;
+export type WindowChoice = typeof WINDOW_CHOICES[number];
+export const WINDOW_OPEN_START = 3650;   // a day-unit from_offset at or below -3650 means "no lower bound"
+export const WINDOW_MAX_OFFSET = 3660;
+
+export interface DateWindow {
+  mode: 'fixed' | 'rolling';
+  fixed?: { from: string; to: string } | null;
+  rolling?: { anchor: string; from_offset: number; to_offset: number; unit: string } | null;
+}
+
+/** What the picker edits: one choice plus the fields that choice uses. */
+export interface WindowUi {
+  choice: WindowChoice; n: number; from: string; to: string;
+  anchor: string; fromOffset: number; toOffset: number; unit: string;
+}
+
+export const defaultWindowUi = (choice: WindowChoice = 'last', n = 7): WindowUi =>
+  ({ choice, n, from: '', to: '', anchor: 'start_of_day', fromOffset: -7, toOffset: 1, unit: 'day' });
+
+/** A stored window back into the picker, recognising the presets the picker writes (anything else is Custom). */
+export function windowToUi(w: DateWindow | null | undefined): WindowUi {
+  const ui = defaultWindowUi();
+  if (!w) return ui;
+  if (w.mode === 'fixed') return { ...ui, choice: 'fixed', from: w.fixed?.from ?? '', to: w.fixed?.to ?? '' };
+  const r = w.rolling;
+  if (!r) return ui;
+  const off = (x: unknown): number => (x === null || x === undefined || x === '' ? NaN : Number(x));   // a blank offset must fail validation, never read as 0
+  const custom = { ...ui, choice: 'custom' as const, anchor: r.anchor, fromOffset: off(r.from_offset), toOffset: off(r.to_offset), unit: r.unit };
+  if (r.anchor === 'last_success' && r.from_offset === 0 && r.to_offset === 0 && r.unit === 'day') return { ...custom, choice: 'since_last_success' };
+  if (r.anchor === 'start_of_week' && r.from_offset === 0 && r.to_offset === 1 && r.unit === 'week') return { ...custom, choice: 'this_week' };
+  if (r.anchor === 'start_of_month' && r.from_offset === 0 && r.to_offset === 1 && r.unit === 'month') return { ...custom, choice: 'this_month' };
+  if (r.anchor === 'start_of_day' && r.unit === 'day') {
+    // A preset only when its day count is inside the picker's range; the server accepts offsets up to 3660, those stay Custom.
+    if (r.from_offset <= -WINDOW_OPEN_START && r.to_offset <= 0 && -r.to_offset <= WINDOW_OPEN_START) return { ...custom, choice: 'older_than', n: -r.to_offset };
+    if (r.from_offset < 0 && -r.from_offset < WINDOW_OPEN_START && r.to_offset === 1) return { ...custom, choice: 'last', n: -r.from_offset };
+    if (r.from_offset === 0 && r.to_offset > 0 && r.to_offset <= WINDOW_OPEN_START) return { ...custom, choice: 'next', n: r.to_offset };
+  }
+  return custom;
+}
+
+const _roll = (anchor: string, f: number, t: number, unit = 'day'): DateWindow =>
+  ({ mode: 'rolling', fixed: null, rolling: { anchor, from_offset: f, to_offset: t, unit } });
+
+export function uiToWindow(ui: WindowUi): DateWindow {
+  const n = Math.trunc(Number(ui.n));
+  switch (ui.choice) {
+    case 'fixed': return { mode: 'fixed', fixed: { from: ui.from, to: ui.to }, rolling: null };
+    case 'older_than': return _roll('start_of_day', -WINDOW_OPEN_START, -n);
+    case 'last': return _roll('start_of_day', -n, 1);
+    case 'next': return _roll('start_of_day', 0, n);
+    case 'since_last_success': return _roll('last_success', 0, 0);
+    case 'this_week': return _roll('start_of_week', 0, 1, 'week');
+    case 'this_month': return _roll('start_of_month', 0, 1, 'month');
+    default: return _roll(ui.anchor, Math.trunc(Number(ui.fromOffset)), Math.trunc(Number(ui.toOffset)), ui.unit);
+  }
+}
+
+/** i18n key of the first problem with a picker state, '' when it is valid (the server re-checks and resolves it). */
+export function validateWindowUi(ui: WindowUi): string {
+  const isoDay = /^\d{4}-\d{2}-\d{2}$/;
+  if (ui.choice === 'fixed') {
+    if (!isoDay.test(ui.from) || !isoDay.test(ui.to)) return 'jobs.err_win_dates';
+    return ui.to < ui.from ? 'jobs.err_win_order' : '';
+  }
+  if (ui.choice === 'older_than' || ui.choice === 'last' || ui.choice === 'next') {
+    const n = Number(ui.n);
+    const min = ui.choice === 'older_than' ? 0 : 1;
+    return Number.isInteger(n) && n >= min && n <= WINDOW_OPEN_START ? '' : 'jobs.err_win_n';
+  }
+  if (ui.choice === 'custom') {
+    const f = Number(ui.fromOffset); const t = Number(ui.toOffset);
+    if (!Number.isInteger(f) || !Number.isInteger(t) || Math.abs(f) > WINDOW_MAX_OFFSET || Math.abs(t) > WINDOW_MAX_OFFSET) return 'jobs.err_win_offset';
+    if (!(WINDOW_ANCHORS as readonly string[]).includes(ui.anchor) || !(WINDOW_UNITS as readonly string[]).includes(ui.unit)) return 'jobs.err_win_offset';
+    // last_success anchors the start only (the end is the run's own now), so the order check applies to the other anchors.
+    if (ui.anchor !== 'last_success' && t < f) return 'jobs.err_win_order';
+  }
+  return '';
+}
+
+/* ---------------------------------------------------------------------------
+   Params: defaults, validation
+   ------------------------------------------------------------------------- */
+/** Server defaults first, then each param's own default for anything the defaults did not carry. */
+export function seedParams(meta: TypeMeta | undefined | null, defaults: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const p of meta?.params ?? []) if (p.default !== undefined && p.default !== null) out[p.key] = p.default;
+  return { ...out, ...(defaults ?? {}) };
+}
+
+/** Param key -> i18n key of its error. Empty object = valid. Client-side only: the server validates again. */
+export function validateParams(meta: ReadonlyArray<ParamMeta>, params: Record<string, unknown>): Record<string, string> {
+  const errs: Record<string, string> = {};
+  for (const m of meta) {
+    const v = params[m.key];
+    const blank = v === undefined || v === null || v === '';     // NaN (an unparsable number box) is NOT blank: it is an error below
+    switch (m.type) {
+      case 'boolean': break;
+      case 'integer': case 'number': {
+        if (blank) { if (m.required) errs[m.key] = 'jobs.err_param_required'; break; }
+        const n = Number(v);
+        if (!Number.isFinite(n) || (m.type === 'integer' && !Number.isInteger(n))) errs[m.key] = m.type === 'integer' ? 'jobs.err_param_int' : 'jobs.err_param_num';
+        else if ((m.min != null && n < m.min) || (m.max != null && n > m.max)) errs[m.key] = 'jobs.err_param_range';
+        break;
+      }
+      case 'enum':
+        if (blank ? m.required : !(m.enum ?? []).includes(String(v))) errs[m.key] = blank ? 'jobs.err_param_required' : 'jobs.err_param_enum';
+        break;
+      case 'multi_enum': {
+        const arr = Array.isArray(v) ? v.map(String) : [];
+        if (!arr.length) errs[m.key] = 'jobs.err_param_pick';
+        else if (arr.some(x => !(m.enum ?? []).includes(x))) errs[m.key] = 'jobs.err_param_enum';
+        break;
+      }
+      case 'date_window': {
+        // The aggregate window is not in use (and not shown) while its switch is off.
+        if (m.key === 'window' && meta.some(q => q.key === 'filter_by_window') && params.filter_by_window !== true) break;
+        const e = validateWindowUi(windowToUi(v as DateWindow | null));
+        if (e) errs[m.key] = e;
+        break;
+      }
+      default:
+        if (blank) { if (m.required) errs[m.key] = 'jobs.err_param_required'; }
+        else if (m.pattern && !new RegExp(m.pattern).test(String(v))) errs[m.key] = 'jobs.err_param_pattern';
+    }
+  }
+  return errs;
+}
+
+/* ---------------------------------------------------------------------------
    Job form: shape, validation, payload
    ------------------------------------------------------------------------- */
-export const JOB_MODES = ['due_date', 'min_changeover', 'spt'] as const;
-export const JOB_SEARCHES = ['normal', 'exhaustive'] as const;
 export const JOB_RESULTS = ['apply', 'propose'] as const;
 export const NAME_MAX = 80;
 
@@ -549,47 +744,44 @@ export interface JobForm {
   jobType: string;
   name: string;
   plant: string;
-  mode: string;
-  search: string;
-  respectFirmed: boolean;
-  /** 'apply' (default) = write the result to the schedule; 'propose' = a Dry run, shown but never applied; sent as params.apply_mode. */
-  result: string;
+  /** The type's params, keyed as the server names them (the generic form renders and reads these). `apply_mode`
+   *  'apply' (default) writes the result to the schedule; 'propose' is a Dry run, shown but never applied. */
+  params: Record<string, unknown>;
   recur: Recurrence;
   validFrom: string;
   validUntil: string;
   skipIfRunning: boolean;
 }
 
-/** A new job starts from the server's own parameter defaults (`GET /jobs/types` -> `defaults`) where they are valid
- *  choices; anything missing or unknown falls back to the product defaults. The result defaults to APPLY (SAP-style
- *  background job; owner ruling 2026-10-28, reversing the earlier Propose default); a Dry run is the alternative. */
-export function defaultJobForm(plant = '', jobType = 'optimizer.plant', defaults: Record<string, unknown> | null = null): JobForm {
-  const pick = (value: unknown, allowed: readonly string[], fallback: string): string =>
-    (typeof value === 'string' && allowed.includes(value) ? value : fallback);
-  return {
-    jobType, name: '', plant,
-    mode: pick(defaults?.mode, JOB_MODES, 'due_date'),
-    search: pick(defaults?.search, JOB_SEARCHES, 'exhaustive'),
-    respectFirmed: defaults?.respect_firmed !== false,
-    result: pick(defaults?.apply_mode, JOB_RESULTS, 'apply'),
-    recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true,
-  };
+/** A new job starts from the server's own param defaults (`GET /jobs/types` -> `defaults`, plus each param's default).
+ *  The Result defaults to APPLY (SAP-style background job; owner ruling 2026-10-28); a Dry run is the alternative. */
+export function defaultJobForm(plant = '', jobType = 'optimizer.plant', defaults: Record<string, unknown> | null = null, meta: TypeMeta | null = null): JobForm {
+  return { jobType, name: '', plant, params: seedParams(meta, defaults), recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true };
 }
 
-export type FormErrors = Partial<Record<'name' | 'plant' | 'mode' | 'search' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity', string>>;
+/** The result mode of a form or a stored params object ('apply' when the job never set one). */
+export const resultOf = (params: Record<string, unknown> | null | undefined): string => String(params?.apply_mode ?? 'apply');
 
-/** Field -> i18n key. Empty object = valid. `isAdmin` guards the auto-apply result (the server re-checks). */
-export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: string[] | null }): FormErrors {
+export type FormErrors = Partial<Record<'name' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity', string>>
+  & { params?: Record<string, string> };
+
+/** Field -> i18n key. Empty object = valid. `isAdmin` guards the auto-apply result (the server re-checks).
+ *  `meta` is the type's param list (for the generic checks); without it only the result gate runs. */
+export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: string[] | null; meta?: TypeMeta | null }): FormErrors {
   const e: FormErrors = {};
   const name = f.name.trim();
   if (!name) e.name = 'jobs.err_name';
   else if (name.length > NAME_MAX) e.name = 'jobs.err_name_long';
   if (!f.plant) e.plant = 'jobs.err_plant';
   else if (o.plants && !o.plants.includes(f.plant)) e.plant = 'jobs.err_plant_scope';
-  if (!(JOB_MODES as readonly string[]).includes(f.mode)) e.mode = 'jobs.err_mode';
-  if (!(JOB_SEARCHES as readonly string[]).includes(f.search)) e.search = 'jobs.err_search';
-  if (!(JOB_RESULTS as readonly string[]).includes(f.result)) e.result = 'jobs.err_result';
-  else if (f.result === 'apply' && !o.isAdmin) e.result = 'jobs.err_apply_admin';
+  const pe = o.meta ? validateParams(o.meta.params, f.params) : {};
+  if (o.meta ? hasApplyMode(o.meta) : 'apply_mode' in f.params) {
+    const r = resultOf(f.params);
+    if (!(JOB_RESULTS as readonly string[]).includes(r)) e.result = 'jobs.err_result';
+    else if (r === 'apply' && !o.isAdmin) e.result = 'jobs.err_apply_admin';
+    delete pe.apply_mode;
+  }
+  if (Object.keys(pe).length) e.params = pe;
   const r = f.recur;
   if (r.preset === 'once') {
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(r.runAt)) e.runAt = 'jobs.err_run_at';
@@ -606,16 +798,15 @@ export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: strin
   return e;
 }
 
-/** The request bodies for a valid form: the job (params carry apply_mode explicitly) and its ScheduleIn. The server owns the zone and the cron. */
+/** The request bodies for a valid form: the job (params as the form holds them) and its ScheduleIn. The server owns the zone and the cron. */
 export function buildJobPayload(f: JobForm): {
   job: { name: string; plant: string; job_type: string; params: Record<string, unknown> };
   schedule: ScheduleIn & { valid_from: string | null; valid_until: string | null; skip_if_running: boolean };
 } {
+  const params: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(f.params)) if (v !== undefined) params[k] = v;
   return {
-    job: {
-      name: f.name.trim(), plant: f.plant, job_type: f.jobType,
-      params: { mode: f.mode, search: f.search, respect_firmed: f.respectFirmed, apply_mode: f.result },
-    },
+    job: { name: f.name.trim(), plant: f.plant, job_type: f.jobType, params },
     schedule: {
       ...recurrenceToScheduleIn(f.recur),
       valid_from: f.validFrom || null,
@@ -629,20 +820,77 @@ export function buildJobPayload(f: JobForm): {
 export function jobToForm(job: {
   name?: string; plant?: string; job_type?: string; params?: Record<string, unknown> | null;
   schedule?: (ScheduleWire & { valid_from?: string | null; valid_until?: string | null; skip_if_running?: boolean | null }) | null;
-}): JobForm {
-  const base = defaultJobForm(job.plant ?? '', job.job_type ?? 'optimizer.plant');   // a saved job always carries its own params
-  const p = job.params ?? {};
+}, meta: TypeMeta | null = null): JobForm {
+  const base = defaultJobForm(job.plant ?? '', job.job_type ?? 'optimizer.plant', null, meta);
   const s = job.schedule;
   return {
     ...base,
     name: job.name ?? '',
-    mode: String(p.mode ?? base.mode),
-    search: String(p.search ?? base.search),
-    respectFirmed: p.respect_firmed !== false,
-    result: String(p.apply_mode ?? base.result),
+    params: { ...base.params, ...(job.params ?? {}) },     // a saved job always carries its own params
     recur: s ? scheduleToRecurrence(s) : base.recur,
     validFrom: String(s?.valid_from ?? '').slice(0, 10),
     validUntil: String(s?.valid_until ?? '').slice(0, 10),
     skipIfRunning: s?.skip_if_running !== false,
   };
 }
+
+/* ---------------------------------------------------------------------------
+   Report artifact (GET /jobs/runs/{id}/artifact)
+   ------------------------------------------------------------------------- */
+export const ARTIFACT_PAGE = 500;
+export type ArtifactColumnType = 'text' | 'number' | 'date' | 'datetime' | 'bool';
+/** `type` is absent on a column from an older run (a plain string column reads as text). */
+export interface ArtifactColumn { key: string; label: string; type?: ArtifactColumnType }
+export const normColumnType = (v: unknown): ArtifactColumnType =>
+  (v === 'number' || v === 'date' || v === 'datetime' || v === 'bool') ? v : 'text';
+export interface ArtifactSection {
+  key: string; title: string; columns: ArtifactColumn[]; rows: unknown[][];
+  /** Rows the report found (before the size cap) and rows actually stored; `offset` is where `rows` starts. */
+  rowCount: number; rowsStored: number; truncated: boolean; offset: number;
+}
+export interface Artifact { runId: number; sizeBytes: number; truncated: boolean; sections: ArtifactSection[] }
+
+/** Section titles and column labels fall back to the server's English when the locale has no `jobs.a.*` string. */
+export const sectionTitle = (s: { key: string; title: string }, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.a.sec.${s.key}`, d) || s.title;
+export const columnLabel = (c: ArtifactColumn, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.a.col.${c.key}`, d) || c.label;
+
+/** Formatters for date / datetime cells (the run viewer passes Util.fmtIsoDatePref and Util.fmtDTPref over the plant wall clock). */
+export interface CellFmt { date?: (s: string) => string; datetime?: (s: string) => string }
+/** Text columns whose values are stable server codes the client translates (`jobs.a.val.<column>.<code>`). */
+const CODE_COLUMNS = new Set(['reason', 'bucket', 'state', 'dimension', 'category']);
+
+/** One cell as text, by its column's type: null is empty, bool columns read Yes / No (a JS boolean always does; the
+ *  strings 'yes' / 'no' only in a bool or an untyped column), date / datetime cells go through `fmt` (plant wall clock),
+ *  numbers drop float noise, `__sentinel__` strings and the server's reason / bucket / state / category codes are
+ *  translated, and a report note (`code` column) reads its sentence with the row's `detail`. `row` is the whole row. */
+export function cellText(v: unknown, d: Pick<JobsDeps, 't'>, col?: { key: string; type?: string }, fmt?: CellFmt, row?: unknown[]): string {
+  if (v == null) return '';
+  const type = col?.type;
+  if (v === true || v === false || ((v === 'yes' || v === 'no') && (!col || type === 'bool'))) return d.t(v === 'yes' || v === true ? 'jobs.a.yes' : 'jobs.a.no');
+  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
+  const s = String(v);
+  if ((type === 'datetime' || type === 'date') && s) {
+    const f = type === 'date' ? fmt?.date : fmt?.datetime;
+    return f ? (f(s) || s) : s;
+  }
+  const sentinel = /^__(\w+)__$/.exec(s);
+  if (sentinel) return tryKey(`jobs.a.sentinel.${sentinel[1]}`, d) || s;
+  const k = col?.key ?? '';
+  if (CODE_COLUMNS.has(k) || (k === 'value' && row?.[0] === 'category')) return tryKey(`jobs.a.val.${k}.${s}`, d) || s;
+  if (k === 'code') { const key = `jobs.a.note.${s}`; const x = d.t(key, { detail: String(row?.[1] ?? '') }); return x && x !== key ? x : s; }
+  if (k === 'detail' && row && typeof row[0] === 'string' && d.t(`jobs.a.note.${row[0]}`) !== `jobs.a.note.${row[0]}`) return '';
+  return s;
+}
+
+/** Row-count tiles for a report run, in the report's own section order (summary.row_counts), zero counts kept. */
+export function artifactTiles(s: RunSummary | null | undefined): Array<{ key: string; value: number }> {
+  const rc = s?.row_counts;
+  if (!rc || typeof rc !== 'object') return [];
+  return Object.entries(rc).filter(([, v]) => typeof v === 'number' && Number.isFinite(v)).map(([key, value]) => ({ key, value: value as number }));
+}
+
+/** A run that produced a report artifact (the summary carries its row counts). */
+export const isReportRun = (s: RunSummary | null | undefined): boolean => !!s && (!!s.artifact || !!s.row_counts);
+
+/** The resolved window line: "Window: 2026-09-28 to 2026-10-28, plant time". */
+export const windowLine = (w: { label: string } | null | undefined, d: Pick<JobsDeps, 't'>): string => (w?.label ? d.t('jobs.run_window', { label: w.label }) : '');

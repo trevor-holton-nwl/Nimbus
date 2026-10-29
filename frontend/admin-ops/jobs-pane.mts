@@ -22,10 +22,11 @@ import type { MenuItem } from '../platform/overflow-menu.mjs';
 import { JobsClient } from './jobs-client.mjs';
 import type { Job, JobRun, JobType } from './jobs-client.mjs';
 import { JobsDialog, mkCombobox, allowedPlantList, jobsDeps, plantTimezone } from './jobs-dialog.mjs';
-import { JobsRunDetail, resultBadgeHtml } from './jobs-run-detail.mjs';
+import { JobsRunDetail, resultBadgeHtml, reportBadgeHtml } from './jobs-run-detail.mjs';
 import {
   RUN_STATUSES, PERIODICITIES, JOBS_PAGE, runStatusHtml, recurrenceText, durationText, weekStrip, isoDayKey, addDays, plantWall, stripOffset,
   mergeRuns, stripCompleteThrough, healthTiles, heartbeatState, ageText, shouldPollJobs, runSequential, isActiveRun, isLongerThanUsual, tzShort,
+  typeLabel, typeGroups, findType, isReportType,
 } from './jobs-model.mjs';
 import type { UpcomingRun, HealthSummary, RunsQuery } from './jobs-model.mjs';
 import type { UpcomingEntry } from './jobs-client.mjs';
@@ -244,10 +245,34 @@ async function _checkWatchedOnce(): Promise<void> {
 /* ---------------------------------------------------------------------------
    Jobs sub-tab
    ------------------------------------------------------------------------- */
+/** The type filter's options, grouped Optimization | Reports (every registered type is listed). */
+function _typeOptionsHtml(selected: string): string {
+  const d = jobsDeps();
+  return typeGroups(_types).map(g => `<optgroup label="${esc(t(g.labelKey))}">`
+    + g.types.map(x => `<option value="${esc(x.key)}"${x.key === selected ? ' selected' : ''}>${esc(typeLabel(x, d))}</option>`).join('') + `</optgroup>`).join('');
+}
+
+const _isReport = (jobType: string): boolean => isReportType(jobType, _types);
+
+/** New job: the dialog renders its params from the served types, so load them first when the first load failed. */
+async function _openNew(): Promise<void> {
+  if (!_types.length) { try { _types = await JobsClient.types(); } catch { /* the dialog opens with the type unnamed */ } }
+  JobsDialog.open({ plant: _plant, types: _types, onSaved: () => void _loadJobs() });
+}
+
+/** Under a job's name: the Result badge and search time for an optimizer job, the Report badge and type for a report. */
+function _jobSubHtml(j: Job): string {
+  const meta = findType(_types, j.job_type);
+  // A report whose type metadata failed to load is still a report (no Apply badge on it).
+  if (isReportType(j.job_type, _types)) return `${reportBadgeHtml()} ${esc(meta ? typeLabel(meta, jobsDeps()) : j.job_type)}`;
+  const search = j.params.search ? esc(j.params.search === 'normal' ? t('jobs.search_normal') : t('jobs.search_exhaustive')) : '';
+  return `${resultBadgeHtml({ summary: { apply_mode: String(j.params.apply_mode ?? 'apply') } })} ${search}`;
+}
+
 function _jobsToolbarHtml(): string {
   return `<div class="job-toolbar">${_plantFilterHtml('jobs')}`
     + `<div class="job-field"><label class="job-field-l" for="jobs-type">${esc(t('jobs.f_type'))}</label><select class="input" id="jobs-type"><option value="">${esc(t('jobs.type_any'))}</option>`
-    + _types.map(x => `<option value="${esc(x.key)}"${x.key === _type ? ' selected' : ''}>${esc(x.key === 'optimizer.plant' ? t('jobs.type_optimizer') : x.label)}</option>`).join('') + `</select></div>`
+    + _typeOptionsHtml(_type) + `</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-status">${esc(t('jobs.f_last_run'))}</label><select class="input" id="jobs-status">${_statusOptions(_status)}</select></div>`
     + `<div class="job-field job-grow"><label class="job-field-l" for="jobs-q">${esc(t('jobs.search'))}</label><input class="input" id="jobs-q" type="search" value="${esc(_q)}" placeholder="${esc(t('jobs.search_ph'))}" autocomplete="off"></div>`
     + (_isAdmin() ? `<button type="button" class="btn btn-primary" data-jobs-act="new">${esc(t('jobs.new'))}</button>` : '')
@@ -263,7 +288,7 @@ function _jobRowHtml(j: Job): string {
   return `<tr data-job-id="${j.id}">`
     + (admin ? `<td class="job-sel"><input type="checkbox" data-jobs-sel="${j.id}" aria-label="${esc(t('jobs.sel_row', { name: j.name }))}"${_selected.has(j.id) ? ' checked' : ''}></td>` : '')
     + `<td class="job-name"><button type="button" class="job-link" data-jobs-act="runs-of" data-job-id="${j.id}">${esc(j.name)}</button>`
-    + `<div class="job-sub">${resultBadgeHtml({ summary: { apply_mode: String(j.params.apply_mode ?? 'apply') } })} ${esc(j.params.search === 'normal' ? t('jobs.search_normal') : t('jobs.search_exhaustive'))}</div></td>`
+    + `<div class="job-sub">${_jobSubHtml(j)}</div></td>`
     + `<td class="job-mono">${esc(j.plant)}</td>`
     + `<td class="job-col-recur">${esc(recurrenceText(j.schedule, d, x => _fmt(x, j.plant)))}</td>`
     + `<td class="job-mono">${next}</td>`
@@ -342,8 +367,8 @@ function _menuItems(j: Job): MenuItem[] {
       { id: 'run', label: t('jobs.m_run_now'), disabled: paused, hint: paused ? t('jobs.m_paused_hint') : undefined, onSelect: () => void _runNow(j) },
       { id: 'restart', label: t('jobs.m_restart'), disabled: !j.last_run || paused, hint: !j.last_run ? t('jobs.m_restart_none') : undefined, onSelect: () => void _restartLast(j) },
       { id: 'pause', label: paused ? t('jobs.m_resume') : t('jobs.m_pause'), onSelect: () => void _setEnabled(j, paused) },
-      { id: 'edit', label: t('jobs.m_edit'), onSelect: () => JobsDialog.open({ job: j, onSaved: () => void _loadJobs() }) },
-      { id: 'dup', label: t('jobs.m_duplicate'), onSelect: () => JobsDialog.open({ job: j, duplicate: true, onSaved: () => void _loadJobs() }) },
+      { id: 'edit', label: t('jobs.m_edit'), onSelect: () => JobsDialog.open({ job: j, types: _types, onSaved: () => void _loadJobs() }) },
+      { id: 'dup', label: t('jobs.m_duplicate'), onSelect: () => JobsDialog.open({ job: j, duplicate: true, types: _types, onSaved: () => void _loadJobs() }) },
       { id: 'copy', label: t('jobs.m_copy'), onSelect: () => JobsDialog.openCopy(j, () => void _loadJobs()) },
       { id: 'del', label: t('jobs.m_delete'), danger: true, onSelect: () => void _delete(j) },
     );
@@ -422,7 +447,7 @@ function _runRowHtml(r: JobRun): string {
   const d = jobsDeps();
   const longer = isLongerThanUsual(r.id, _health?.longerThanUsual) ? ` <span class="badge badge-warn job-longer">${esc(t('jobs.longer_than_usual'))}</span>` : '';
   return `<tr class="job-run-row" data-run-id="${r.id}" tabindex="0"><td class="job-name">${esc(r.job_name)}</td><td class="job-mono">${esc(r.plant)}</td>`
-    + `<td>${runStatusHtml(r, d)}${longer}</td><td>${resultBadgeHtml(r)}</td><td class="job-mono">${esc(_fmt(r.scheduled_for ?? r.started_at, r.plant))}</td>`
+    + `<td>${runStatusHtml(r, d)}${longer}</td><td>${resultBadgeHtml(r) || (_isReport(r.job_type) ? reportBadgeHtml() : '')}</td><td class="job-mono">${esc(_fmt(r.scheduled_for ?? r.started_at, r.plant))}</td>`
     + `<td class="job-mono">${esc(durationText(r.duration_ms) || '—')}</td>`
     + `<td>${esc(r.trigger ? t(`jobs.trigger_${r.trigger}`) : '')}${r.triggered_by && r.triggered_by !== 'schedule' ? ` <span class="job-sub">${esc(r.triggered_by)}</span>` : ''}</td></tr>`;
 }
@@ -477,7 +502,7 @@ function _renderRunsTab(): void {
   host.innerHTML = `<div id="jobs-runs-main"><div class="job-toolbar">${_plantFilterHtml('jobs-runs')}`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-status">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-status">${_statusOptions(_runStatus)}</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-type">${esc(t('jobs.f_type'))}</label><select class="input" id="jobs-runs-type"><option value="">${esc(t('jobs.type_any'))}</option>`
-    + _types.map(x => `<option value="${esc(x.key)}"${x.key === _runType ? ' selected' : ''}>${esc(x.key === 'optimizer.plant' ? t('jobs.type_optimizer') : x.label)}</option>`).join('') + `</select></div>`
+    + _typeOptionsHtml(_runType) + `</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-period">${esc(t('jobs.f_periodicity'))}</label><select class="input" id="jobs-runs-period">${_periodicityOptions(_periodicity)}</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-by">${esc(t('jobs.f_scheduled_by'))}</label><select class="input" id="jobs-runs-by">${_byOptions(_scheduledBy)}</select></div>`
     + (_since ? `<button type="button" class="btn btn-ghost sm job-chip" data-jobs-act="clear-since">${esc(t('jobs.since_chip', { h: _since }))} ×</button>` : '')
@@ -654,7 +679,7 @@ function _wire(): void {
     if (act === 'retry-health') { void _loadHealth(); return; }
     if (act === 'retry') { if (_tab === 'jobs') void _loadJobs(); else if (_tab === 'runs') void _loadRuns(); else void _loadUpcoming(); return; }
     if (act === 'clear-since') { _since = 0; _renderRunsTab(); return; }
-    if (act === 'new') JobsDialog.open({ plant: _plant, defaults: _types.find(x => x.key === 'optimizer.plant')?.defaults, onSaved: () => void _loadJobs() });
+    if (act === 'new') void _openNew();
     else if (act === 'more-jobs') void _loadJobs(true);
     else if (act === 'more-runs') void _loadRuns('append');
     else if (act === 'refresh-runs') void _loadRuns();

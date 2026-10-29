@@ -1,0 +1,31 @@
+{
+  "_comment": "Twin vectors for the app's due rule: NimbusComputeCore.dueDateInstant (tests/js/compute-core.test.js) and backend/jobs/due.py (tests/test_jobs_due.py). Hours maps are keyed by JS weekday (0 = Sunday). due/finish are naive plant-local ISO strings.",
+  "calendars": {
+    "weekday_8_17": {
+      "plant_work_hours": {"0": null, "1": [8, 17], "2": [8, 17], "3": [8, 17], "4": [8, 17], "5": [8, 17], "6": null},
+      "plant_periods": [],
+      "line_work_hours": {"L2": {"0": null, "1": [6, 14], "2": [6, 14], "3": [6, 14], "4": [6, 14], "5": [6, 14], "6": null}}
+    },
+    "around_the_clock": {
+      "plant_work_hours": {"0": [0, 24], "1": [0, 24], "2": [0, 24], "3": [0, 24], "4": [0, 24], "5": [0, 24], "6": [0, 24]},
+      "plant_periods": [],
+      "line_work_hours": {}
+    },
+    "holiday_period": {
+      "plant_work_hours": {"0": null, "1": [8, 17], "2": [8, 17], "3": [8, 17], "4": [8, 17], "5": [8, 17], "6": null},
+      "plant_periods": [{"valid_from": "2026-10-28", "valid_to": "2026-10-29", "work_hours": {"0": null, "1": [8, 12], "2": [8, 12], "3": [8, 12], "4": [8, 12], "5": [8, 12], "6": null}}],
+      "line_work_hours": {}
+    }
+  },
+  "cases": [
+    {"name": "date-only due, finishes before the close of that day: NOT late", "calendar": "weekday_8_17", "machine": "L1", "due_raw": "2026-10-28T00:00:00", "finish": "2026-10-28T14:00:00", "due": "2026-10-28T17:00:00", "late": false},
+    {"name": "date-only due, finishes exactly at the close: on time", "calendar": "weekday_8_17", "machine": "L1", "due_raw": "2026-10-28T00:00:00", "finish": "2026-10-28T17:00:00", "due": "2026-10-28T17:00:00", "late": false},
+    {"name": "date-only due, finishes after the close: late", "calendar": "weekday_8_17", "machine": "L1", "due_raw": "2026-10-28T00:00:00", "finish": "2026-10-28T17:30:00", "due": "2026-10-28T17:00:00", "late": true},
+    {"name": "timed due is used as received", "calendar": "weekday_8_17", "machine": "L1", "due_raw": "2026-10-28T10:00:00", "finish": "2026-10-28T10:30:00", "due": "2026-10-28T10:00:00", "late": true},
+    {"name": "date-only due on a closed Saturday reads the previous open day's close", "calendar": "weekday_8_17", "machine": "L1", "due_raw": "2026-10-31T00:00:00", "finish": "2026-10-30T16:00:00", "due": "2026-10-30T17:00:00", "late": false},
+    {"name": "a line with its own hours closes with the intersection", "calendar": "weekday_8_17", "machine": "L2", "due_raw": "2026-10-28T00:00:00", "finish": "2026-10-28T14:30:00", "due": "2026-10-28T14:00:00", "late": true},
+    {"name": "an around-the-clock plant closes at the next midnight, so any finish that day is on time", "calendar": "around_the_clock", "machine": "L1", "due_raw": "2026-10-28T00:00:00", "finish": "2026-10-28T23:30:00", "due": "2026-10-29T00:00:00", "late": false},
+    {"name": "a finish after the next midnight is late", "calendar": "around_the_clock", "machine": "L1", "due_raw": "2026-10-28T00:00:00", "finish": "2026-10-29T00:30:00", "due": "2026-10-29T00:00:00", "late": true},
+    {"name": "an effective-dated plant period shortens the day", "calendar": "holiday_period", "machine": "L1", "due_raw": "2026-10-28T00:00:00", "finish": "2026-10-28T12:30:00", "due": "2026-10-28T12:00:00", "late": true}
+  ]
+}

@@ -2261,6 +2261,8 @@ CREATE TABLE IF NOT EXISTS schedule_event (
         autovacuum_analyze_scale_factor = 0.05);
 CREATE INDEX IF NOT EXISTS idx_schedule_event_order ON schedule_event (plant, order_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_event_at    ON schedule_event (at);
+-- Plant-level change listing in time order (also created by backend/schedule_events/data.py ensure_schedule_event_table).
+CREATE INDEX IF NOT EXISTS idx_schedule_event_plant_at ON schedule_event (plant, at DESC);
 
 -- job scheduler: definitions, schedules, runs and run logs (mirrors migrations/2026-10-29-1-job-scheduler.sql). Idempotent.
 CREATE TABLE IF NOT EXISTS job_definition (
@@ -2342,3 +2344,14 @@ CREATE TABLE IF NOT EXISTS job_run_log (
 -- Read-path indexes for GET /jobs/summary (also created by backend/jobs/data.py ensure_job_tables).
 CREATE INDEX IF NOT EXISTS idx_job_run_ended  ON job_run (ended_at) WHERE ended_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_job_run_active ON job_run (status) WHERE status IN ('scheduled','running');
+
+-- job run artifacts: stored report results (mirrors migrations/2026-10-30-1-job-artifacts.sql). Idempotent.
+CREATE TABLE IF NOT EXISTS job_run_artifact (
+    run_id        BIGINT PRIMARY KEY REFERENCES job_run (id),
+    content_type  TEXT NOT NULL DEFAULT 'application/json',
+    filename      TEXT,
+    body          TEXT NOT NULL,             -- JSON text: {sections:[{key,title,columns,rows}], summary}
+    row_count     INTEGER NOT NULL DEFAULT 0,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);

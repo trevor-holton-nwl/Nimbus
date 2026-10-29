@@ -261,6 +261,7 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
                     ctx.cancel_event.set()
         status, summary, error = _resolve(holder, ctx, th, timeout)
         summary = _describe_failure(status, summary, ctx)
+        summary = _store_artifact(run_id, ctx, holder, status, summary)
         if status == "failed" and error and not ctx.error_lines:
             ctx.log("error", error, step=(summary or {}).get("failed_step"))     # every failure leaves an error line
         ctx.log("info" if status in ("succeeded", "cancelled") else "warn", f"run finished: {status}"
@@ -271,6 +272,28 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
     finally:
         with _RUNNING_LOCK:
             _RUNNING.pop(run_id, None)
+
+
+def _store_artifact(run_id: int, ctx: JobContext, holder: dict, status: str, summary: dict | None) -> dict | None:
+    """A report body's artifact is stored BEFORE the run is finished (so a viewer that sees the run done always finds
+    it). A save failure never fails the run: the summary says so (`artifact_error`) and an error line is logged."""
+    art = getattr(holder.get("outcome"), "artifact", None)
+    if not art or status not in ("succeeded", "warning"):
+        return summary
+    out = dict(summary or {})
+    try:
+        info = data.save_artifact(run_id, art, filename=f"report-{ctx.plant}-run{run_id}.json")
+        out["artifact"] = info
+        out["row_counts"] = info["row_counts"]                 # counts BEFORE the size cap (what the report found)
+        if info.get("error"):
+            out["artifact_error"] = info["error"]
+        if info["truncated"]:
+            ctx.log("warn", f"report artifact exceeded the size cap and was truncated ({info['size_bytes']} bytes kept)")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not store the artifact for run %s: %s", run_id, exc)
+        ctx.log("error", f"could not store the report artifact: {exc}")
+        out["artifact_error"] = str(exc)[:200]
+    return out
 
 
 def _describe_failure(status: str, summary: dict | None, ctx: JobContext) -> dict | None:

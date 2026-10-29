@@ -16,12 +16,13 @@ import { Store } from '../platform/store.mjs';
 import { Util, Modal, Toast } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
 import { JobsClient } from './jobs-client.mjs';
-import type { Job } from './jobs-client.mjs';
+import type { Job, JobType } from './jobs-client.mjs';
 import {
-  RECUR_PRESETS, JOB_MODES, JOB_SEARCHES, JOB_RESULTS, NAME_MAX, defaultJobForm, jobToForm, validateJobForm, buildJobPayload,
-  recurrenceText, stripOffset, dowLabelKey,
+  RECUR_PRESETS, NAME_MAX, WINDOW_CHOICES, WINDOW_ANCHORS, WINDOW_UNITS, WINDOW_OPEN_START, defaultJobForm, jobToForm,
+  validateJobForm, buildJobPayload, recurrenceText, stripOffset, dowLabelKey, seedParams, resultOf, findType, hasApplyMode, typeGroups,
+  typeLabel, paramLabel, enumLabel, paramHint, windowToUi, uiToWindow, validateWindowUi,
 } from './jobs-model.mjs';
-import type { JobForm, FormErrors, Recurrence, JobsDeps } from './jobs-model.mjs';
+import type { JobForm, FormErrors, Recurrence, JobsDeps, TypeMeta, ParamMeta, DateWindow, WindowUi } from './jobs-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -116,6 +117,12 @@ interface DialogState {
   mode: DialogMode;
   job: Job | null;
   form: JobForm;
+  /** The job types (GET /jobs/types) and the one the form is for; the params block renders from `meta`. */
+  types: JobType[];
+  meta: TypeMeta | null;
+  /** Sequence + timer of the live "Resolves today to ..." lines (one debounce for every window widget). */
+  winSeq: number;
+  winTimer: ReturnType<typeof setTimeout> | null;
   /** Copy mode: target plants (checked) and the filter text. */
   targets: Set<string>;
   filter: string;
@@ -171,22 +178,121 @@ export function recurFieldsHtml(r: Recurrence): string {
   }
 }
 
-export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean): string {
+/** The type select: grouped Optimization | Reports; locked once a job exists (its type never changes). With no types
+ *  loaded it is a read-only line naming the current type. */
+function _typeHtml(f: JobForm, types: JobType[], locked: boolean): string {
+  const d = jobsDeps();
+  if (!types.length) return `<div class="form-row"><label>${esc(t('jobs.f_type'))}</label><div class="readonly" id="jb-type">${esc(typeLabel({ key: f.jobType, label: f.jobType }, d))}</div></div>`;
+  return `<div class="form-row"><label for="jb-jobtype">${esc(t('jobs.f_type'))}</label><select class="input" id="jb-jobtype"${locked ? ' disabled' : ''}>`
+    + typeGroups(types).map(g => `<optgroup label="${esc(t(g.labelKey))}">${g.types.map(x => _opt(x.key, typeLabel(x, d), f.jobType)).join('')}</optgroup>`).join('')
+    + `</select></div>`;
+}
+
+const _errP = (key: string): string => `<div class="ape-err" id="jb-err-p-${esc(key)}" role="alert" hidden></div>`;
+
+/** Number box, text box, select, checkbox(es) or the window picker for one param, from the server's metadata. */
+export function paramHtml(p: ParamMeta, v: unknown, isAdmin: boolean, hideWindow = false): string {
+  const d = jobsDeps();
+  const id = `jb-p-${p.key}`;
+  const label = esc(paramLabel(p, d));
+  // Apply / Dry run keeps its sentence that follows the value; every other hint is a translation (or none).
+  const hint = p.key === 'apply_mode' ? resultHint(resultOf({ apply_mode: v })) : paramHint(p, d);
+  const hintHtml = hint ? `<div class="ape-hint" id="${id}-hint">${esc(hint)}</div>` : '';
+  const desc = hint ? ` aria-describedby="${id}-hint"` : '';
+  switch (p.type) {
+    case 'boolean':
+      return `<div class="form-row job-checks"><label class="chk-inline"><input type="checkbox" id="${id}"${v === true ? ' checked' : ''}${desc}><span>${label}</span></label>${hintHtml}</div>`;
+    case 'enum': {
+      const locked = p.key === 'apply_mode' && !isAdmin;
+      return `<div class="form-row"><label for="${id}">${label}</label><select class="input" id="${id}"${desc}${locked ? ' disabled' : ''}>`
+        + (p.enum ?? []).map(o => _opt(o, enumLabel(p, o, d), String(v ?? ''))).join('') + `</select>${hintHtml}${_errP(p.key)}</div>`;
+    }
+    case 'multi_enum': {
+      const on = new Set(Array.isArray(v) ? v.map(String) : []);
+      return `<div class="form-row"><label id="${id}-l">${label}</label><div class="job-dows" role="group" aria-labelledby="${id}-l">`
+        + (p.enum ?? []).map(o => `<label class="chk-inline"><input type="checkbox" id="${id}-${esc(o)}"${on.has(o) ? ' checked' : ''}><span>${esc(enumLabel(p, o, d))}</span></label>`).join('')
+        + `</div>${hintHtml}${_errP(p.key)}</div>`;
+    }
+    case 'integer': case 'number':
+      return `<div class="form-row"><label for="${id}">${label}</label><input class="input job-num" id="${id}" type="number"`
+        + `${p.min != null ? ` min="${p.min}"` : ''}${p.max != null ? ` max="${p.max}"` : ''} step="${p.type === 'integer' ? 1 : 'any'}" value="${esc(v ?? '')}"${desc}>${hintHtml}${_errP(p.key)}</div>`;
+    case 'date_window':
+      return windowWidgetHtml(p, windowToUi(v as DateWindow | null), hideWindow);
+    default:
+      return `<div class="form-row"><label for="${id}">${label}</label><input class="input" id="${id}" type="text" value="${esc(v ?? '')}" autocomplete="off"${desc}>${hintHtml}${_errP(p.key)}</div>`;
+  }
+}
+
+export function paramsHtml(meta: TypeMeta | null, f: JobForm, isAdmin: boolean): string {
+  // The Result control (Apply / Dry run) belongs to action types only; a report never offers it.
+  // The aggregate window means nothing while "Limit the aggregate view to a date window" is off: hide it until it is on.
+  const gated = !!meta && meta.params.some(q => q.key === 'filter_by_window' && q.type === 'boolean');
+  return meta ? meta.params.filter(p => p.key !== 'apply_mode' || hasApplyMode(meta))
+    .map(p => paramHtml(p, f.params[p.key], isAdmin, gated && p.key === 'window' && f.params.filter_by_window !== true)).join('') : '';
+}
+
+/* ---------------------------------------------------------------------------
+   Window picker: ONE select (Fixed dates | rolling presets | Custom) plus the fields the choice uses, and a live
+   "Resolves today to ..." line from POST /jobs/windows/preview (the resolver a run uses).
+   ------------------------------------------------------------------------- */
+function _numBox(id: string, label: string, value: unknown, min: number, max: number): string {
+  return `<div class="form-row"><label for="${id}">${esc(label)}</label><input class="input job-num" id="${id}" type="number" min="${min}" max="${max}" step="1" value="${esc(value)}"></div>`;
+}
+
+export function windowFieldsHtml(id: string, ui: WindowUi): string {
+  switch (ui.choice) {
+    case 'fixed':
+      return `<div class="form-row-2"><div class="form-row"><label for="${id}-from">${esc(t('jobs.win_from'))}</label><input class="input" id="${id}-from" data-jb-wdate type="date" value="${esc(ui.from)}"></div>`
+        + `<div class="form-row"><label for="${id}-to">${esc(t('jobs.win_to'))}</label><input class="input" id="${id}-to" data-jb-wdate type="date" value="${esc(ui.to)}"></div></div>`;
+    case 'older_than':
+      return _numBox(`${id}-n`, t('jobs.win_days_older'), ui.n, 0, WINDOW_OPEN_START);
+    case 'last': case 'next':
+      return _numBox(`${id}-n`, t('jobs.win_days'), ui.n, 1, WINDOW_OPEN_START);
+    case 'custom':
+      return `<div class="form-row"><label for="${id}-anchor">${esc(t('jobs.win_anchor'))}</label><select class="input" id="${id}-anchor">`
+        + WINDOW_ANCHORS.map(a => _opt(a, t(`jobs.win_anchor_${a}`), ui.anchor)).join('') + `</select></div>`
+        + `<div class="form-row-2">${_numBox(`${id}-foff`, t('jobs.win_from_offset'), ui.fromOffset, -3660, 3660)}${_numBox(`${id}-toff`, t('jobs.win_to_offset'), ui.toOffset, -3660, 3660)}</div>`
+        + `<div class="form-row"><label for="${id}-unit">${esc(t('jobs.win_unit'))}</label><select class="input" id="${id}-unit">`
+        + WINDOW_UNITS.map(u => _opt(u, t(`jobs.win_unit_${u}`), ui.unit)).join('') + `</select></div>`
+        + `<div class="ape-hint">${esc(t('jobs.win_custom_hint'))}</div>`;
+    default:
+      return '';
+  }
+}
+
+export function windowWidgetHtml(p: ParamMeta, ui: WindowUi, hidden = false): string {
+  const id = `jb-p-${p.key}`;
+  return `<fieldset class="job-window" id="${id}"${hidden ? ' hidden' : ''}><legend>${esc(paramLabel(p, jobsDeps()))}</legend>`
+    + `<div class="form-row"><label for="${id}-choice">${esc(t('jobs.win_choice'))}</label><select class="input" id="${id}-choice">`
+    + WINDOW_CHOICES.map(c => _opt(c, t(`jobs.win_${c}`), ui.choice)).join('') + `</select></div>`
+    + `<div id="${id}-fields">${windowFieldsHtml(id, ui)}</div>`
+    + `<div class="ape-hint job-window-line" id="${id}-line" aria-live="polite"></div>${_errP(p.key)}</fieldset>`;
+}
+
+/** A number box's value; a blank box is NaN (an error), never 0. */
+const _numOrNaN = (v: string): number => (v.trim() === '' ? NaN : Number(v));
+
+/** The picker state read from the live fields (a field that is not on screen keeps its previous value). */
+function _readWindowUi(id: string, prev: WindowUi): WindowUi {
+  const has = (s: string): boolean => !!_el(`${id}-${s}`);
+  const choice = (_val(`${id}-choice`) || prev.choice) as WindowUi['choice'];
+  return {
+    choice,
+    n: has('n') ? _numOrNaN(_val(`${id}-n`)) : prev.n,
+    from: has('from') ? _val(`${id}-from`) : prev.from, to: has('to') ? _val(`${id}-to`) : prev.to,
+    anchor: has('anchor') ? _val(`${id}-anchor`) : prev.anchor, unit: has('unit') ? _val(`${id}-unit`) : prev.unit,
+    fromOffset: has('foff') ? _numOrNaN(_val(`${id}-foff`)) : prev.fromOffset, toOffset: has('toff') ? _numOrNaN(_val(`${id}-toff`)) : prev.toOffset,
+  };
+}
+
+export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: TypeMeta | null = null, types: JobType[] = []): string {
   const tz = plantTimezone(f.plant);
   return `<div class="job-form">`
     + `<div class="form-row"><label for="jb-name">${esc(t('jobs.f_name'))}</label>`
     + `<input class="input" id="jb-name" type="text" maxlength="${NAME_MAX}" value="${esc(f.name)}" autocomplete="off">${_err('name')}</div>`
-    + `<div class="form-row-2"><div class="form-row"><label>${esc(t('jobs.f_type'))}</label><div class="readonly" id="jb-type">${esc(t('jobs.type_optimizer'))}</div></div>`
+    + `<div class="form-row-2">${_typeHtml(f, types, mode === 'edit')}`
     + `<div class="form-row"><label for="jb-plant">${esc(t('jobs.f_plant'))}</label><div id="jb-plant-host"></div>${_err('plant')}</div></div>`
-    + `<div class="form-row-2"><div class="form-row"><label for="jb-mode">${esc(t('jobs.f_mode'))}</label><select class="input" id="jb-mode">`
-    + JOB_MODES.map(m => _opt(m, t('jobs.mode_' + m), f.mode)).join('') + `</select>${_err('mode')}</div>`
-    + `<div class="form-row"><label for="jb-search">${esc(t('jobs.f_search'))}</label><select class="input" id="jb-search">`
-    + JOB_SEARCHES.map(s => _opt(s, t(`jobs.search_${s}`), f.search)).join('') + `</select>${_err('search')}</div></div>`
-    + `<div class="ape-hint" id="jb-search-note">${esc(t('jobs.search_note'))}</div>`
-    + `<div class="form-row job-checks"><label class="chk-inline"><input type="checkbox" id="jb-firmed"${f.respectFirmed ? ' checked' : ''}><span>${esc(t('jobs.f_firmed'))}</span></label></div>`
-    + `<div class="form-row"><label for="jb-result">${esc(t('jobs.f_result'))}</label><select class="input" id="jb-result" aria-describedby="jb-result-hint"${isAdmin ? '' : ' disabled'}>`
-    + JOB_RESULTS.map(r => _opt(r, t(`jobs.result_${r}`), f.result)).join('') + `</select>`
-    + `<div class="ape-hint" id="jb-result-hint">${esc(resultHint(f.result))}</div>${_err('result')}</div>`
+    + `<div id="jb-params">${paramsHtml(meta, f, isAdmin)}${_err('result')}</div>`
     + `<fieldset class="job-recur"><legend>${esc(t('jobs.f_recurrence'))}</legend>`
     + `<div class="form-row"><label for="jb-recur">${esc(t('jobs.f_repeat'))}</label><select class="input" id="jb-recur">`
     + RECUR_PRESETS.map(p => _opt(p, t(`jobs.preset_${p}`), f.recur.preset)).join('') + `</select></div>`
@@ -254,13 +360,43 @@ function _initPickers(): void {
   mount('jb-runat', 'jobs.f_run_at', { enableTime: true, dateFormat: 'Y-m-d\\TH:i', altFormat: Util._fpAltFormat(), time_24hr: h24, minuteIncrement: 1 });
   mount('jb-from', 'jobs.f_valid_from', { dateFormat: 'Y-m-d', altFormat: Util._dateFormatPref() });
   mount('jb-until', 'jobs.f_valid_until', { dateFormat: 'Y-m-d', altFormat: Util._dateFormatPref() });
+  // The window picker's Fixed dates inputs (they come and go with the choice, so scan what is on screen).
+  for (const el of Array.from(document.querySelectorAll<HTMLInputElement>('input[data-jb-wdate]'))) {
+    mount(el.id, el.id.endsWith('-to') ? 'jobs.win_to' : 'jobs.win_from', { dateFormat: 'Y-m-d', altFormat: Util._dateFormatPref() });
+  }
 }
 
 /* ---------------------------------------------------------------------------
    Form <-> DOM
    ------------------------------------------------------------------------- */
+/** The type's params read from the live fields; a control that is not on screen keeps its previous value. */
+function _readParams(meta: TypeMeta, prev: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...prev };
+  for (const p of meta.params) {
+    const id = `jb-p-${p.key}`;
+    switch (p.type) {
+      case 'boolean': if (_el(id)) out[p.key] = _chk(id); break;
+      case 'enum': case 'string': if (_el(id)) out[p.key] = _val(id); break;
+      case 'integer': case 'number':
+        if (_el(id)) {
+          const raw = _val(id).trim();
+          // A blank box sends the param's own default (null for an optional one), never a null the server would refuse.
+          out[p.key] = raw === '' ? (p.required ? null : (p.default ?? null)) : Number(raw);
+        }
+        break;
+      case 'multi_enum': {
+        const live = (p.enum ?? []).filter(o => _el(`${id}-${o}`));
+        if (live.length) out[p.key] = live.filter(o => _chk(`${id}-${o}`));
+        break;
+      }
+      case 'date_window': if (_el(`${id}-choice`)) out[p.key] = uiToWindow(_readWindowUi(id, windowToUi(prev[p.key] as DateWindow | null))); break;
+    }
+  }
+  return out;
+}
+
 /** Read the live fields into a JobForm (plant and job type come from state: the combobox owns the plant). */
-export function readForm(prev: JobForm): JobForm {
+export function readForm(prev: JobForm, meta: TypeMeta | null = _s?.meta ?? null): JobForm {
   const preset = (_val('jb-recur') || prev.recur.preset) as Recurrence['preset'];
   const days = [0, 1, 2, 3, 4, 5, 6].filter(d => _chk(`jb-dow-${d}`));
   const recur: Recurrence = {
@@ -273,19 +409,24 @@ export function readForm(prev: JobForm): JobForm {
     runAt: _el('jb-runat') ? _val('jb-runat') : prev.recur.runAt,
   };
   return {
-    ...prev, name: _val('jb-name'), mode: _val('jb-mode') || prev.mode, search: _val('jb-search') || prev.search,
-    respectFirmed: _chk('jb-firmed'),
-    result: _val('jb-result') || prev.result, recur,
+    ...prev, name: _val('jb-name'), params: meta ? _readParams(meta, prev.params) : prev.params, recur,
     validFrom: _val('jb-from'), validUntil: _val('jb-until'), skipIfRunning: _chk('jb-overlap'),
   };
 }
 
 function _showErrors(errs: FormErrors): void {
-  for (const f of ['name', 'plant', 'mode', 'search', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity'] as const) {
+  for (const f of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity'] as const) {
     const el = _el(`jb-err-${f}`);
     if (!el) continue;
     el.textContent = errs[f] ? t(errs[f] as string) : '';
     el.hidden = !errs[f];
+  }
+  for (const p of _s?.meta?.params ?? []) {
+    const el = _el(`jb-err-p-${p.key}`);
+    const key = errs.params?.[p.key];
+    if (!el) continue;
+    el.textContent = key ? t(key, { min: p.min ?? '', max: p.max ?? '' }) : '';
+    el.hidden = !key;
   }
 }
 
@@ -326,6 +467,74 @@ async function _runPreview(): Promise<void> {
 }
 
 /* ---------------------------------------------------------------------------
+   Window preview: "Resolves today to <from> to <to> (<tz>, plant time)" for every window param, debounced, with a
+   stale-response guard (winSeq). The server resolves it with the same code a run uses.
+   ------------------------------------------------------------------------- */
+function _scheduleWindowPreview(): void {
+  const s = _s;
+  if (!s || s.mode === 'copy' || !s.meta?.params.some(p => p.type === 'date_window')) return;
+  if (s.winTimer) clearTimeout(s.winTimer);
+  for (const p of s.meta.params.filter(x => x.type === 'date_window')) {        // the old line is stale the moment the window changes
+    const l = _el(`jb-p-${p.key}-line`);
+    if (l) { l.textContent = ''; l.classList.remove('ape-err'); l.classList.add('ape-hint'); }
+  }
+  s.winTimer = setTimeout(() => void _runWindowPreviews(), 300);
+}
+
+async function _runWindowPreviews(): Promise<void> {
+  const s = _s;
+  if (!s || !s.meta) return;
+  s.form = readForm(s.form);
+  const seq = ++s.winSeq;
+  const lookback = Number(s.form.params.first_run_lookback_days) || undefined;
+  for (const p of s.meta.params.filter(x => x.type === 'date_window')) {
+    const line = _el(`jb-p-${p.key}-line`);
+    if (!line) continue;
+    const w = s.form.params[p.key] as DateWindow;
+    const setLine = (text: string, err: boolean): void => { line.textContent = text; line.classList.toggle('ape-err', err); line.classList.toggle('ape-hint', !err); };
+    if ((_el(`jb-p-${p.key}`) as HTMLElement | null)?.hidden) { setLine('', false); continue; }
+    const bad = validateWindowUi(windowToUi(w));
+    if (bad) { setLine(t(bad), true); continue; }                                  // an invalid window says why, inline
+    if (!s.form.plant) { setLine('', false); continue; }
+    try {
+      const r = await JobsClient.windowPreview(s.form.plant, w, { jobId: s.job?.id ?? null, lookbackDays: lookback });
+      if (_s !== s || seq !== s.winSeq) return;
+      setLine(t('jobs.win_resolves', { label: r.label, tz: r.timezone }), false);
+    } catch (e) {
+      if (_s !== s || seq !== s.winSeq) return;
+      setLine((e as Error).message, true);          // e.g. the plant has no timezone
+    }
+  }
+}
+
+/** A window picker's choice changed: swap the fields under it. Switching to Custom keeps the meaning of the preset it left. */
+function _windowChoiceChanged(s: DialogState, id: string, key: string): void {
+  const prevUi = windowToUi(s.form.params[key] as DateWindow | null);
+  const ui = _readWindowUi(id, prevUi);
+  if (ui.choice === 'custom' && prevUi.choice !== 'custom') {
+    const r = uiToWindow(prevUi).rolling;
+    if (r) { ui.anchor = r.anchor; ui.fromOffset = r.from_offset; ui.toOffset = r.to_offset; ui.unit = r.unit; }
+  }
+  if (['older_than', 'last', 'next'].includes(ui.choice) && !(Number(ui.n) >= (ui.choice === 'older_than' ? 0 : 1))) ui.n = 7;
+  const host = _el(`${id}-fields`);
+  if (host) host.innerHTML = windowFieldsHtml(id, ui);
+  s.form.params = { ...s.form.params, [key]: uiToWindow(ui) };
+  _initPickers();
+}
+
+/** New job only: another type swaps the params block for that type's own defaults (name, plant and recurrence stay). */
+function _changeType(s: DialogState, key: string): void {
+  const meta = findType(s.types, key);
+  if (!meta || s.mode !== 'new') return;
+  s.form = { ...readForm(s.form), jobType: key, params: seedParams(meta, meta.defaults) };
+  s.meta = meta;
+  const host = _el('jb-params');
+  if (host) host.innerHTML = paramsHtml(meta, s.form, Session.isAdmin()) + _err('result');
+  _initPickers();
+  _scheduleWindowPreview();
+}
+
+/* ---------------------------------------------------------------------------
    Wiring + lifecycle
    ------------------------------------------------------------------------- */
 function _wire(): void {
@@ -341,13 +550,18 @@ function _wire(): void {
       if (p) { if ((e.target as HTMLInputElement).checked) s.targets.add(p); else s.targets.delete(p); _copyCount(); }
       return;
     }
+    if (id === 'jb-jobtype') { _changeType(s, _val('jb-jobtype')); return; }
     if (id === 'jb-recur') {
       s.form = readForm(s.form);
       const host = _el('jb-recur-fields');
       if (host) host.innerHTML = recurFieldsHtml(s.form.recur);
       _initPickers();
     }
-    if (id === 'jb-result') { const hint = _el('jb-result-hint'); if (hint) hint.textContent = resultHint(_val('jb-result')); }
+    const wm = /^(jb-p-(.+))-choice$/.exec(id);
+    if (wm) _windowChoiceChanged(s, wm[1], wm[2]);
+    if (id === 'jb-p-filter_by_window') { const w = _el('jb-p-window'); if (w) w.hidden = !_chk(id); }
+    if (id === 'jb-p-apply_mode') { const hint = _el('jb-p-apply_mode-hint'); if (hint) hint.textContent = resultHint(_val('jb-p-apply_mode')); }
+    if (id.startsWith('jb-p-')) _scheduleWindowPreview();
     _schedulePreview();
   });
   body?.addEventListener('input', (e) => {
@@ -356,7 +570,10 @@ function _wire(): void {
       _s.filter = _val('jb-copy-filter');
       const list = _el('jb-copy-list');
       if (list) list.innerHTML = copyRowsHtml(_s.job, _s.targets, _s.filter);
-    } else if (_s && _s.mode !== 'copy' && id !== 'jb-name') _schedulePreview();
+    } else if (_s && _s.mode !== 'copy' && id !== 'jb-name') {
+      if (id.startsWith('jb-p-')) _scheduleWindowPreview();
+      else _schedulePreview();
+    }
   });
   body?.addEventListener('click', (e) => {
     const act = (e.target as HTMLElement | null)?.closest?.<HTMLElement>('[data-jb-act]')?.dataset.jbAct;
@@ -386,32 +603,37 @@ function _show(title: string): void {
 
 export const JobsDialog = {
   /** `job` edits it; `duplicate` seeds a new job from it (name cleared, same plant). */
-  open(opts: { job?: Job; duplicate?: boolean; plant?: string; defaults?: Record<string, unknown>; onSaved?: () => void }): void {
+  open(opts: { job?: Job; duplicate?: boolean; plant?: string; defaults?: Record<string, unknown>; types?: JobType[]; jobType?: string; onSaved?: () => void }): void {
     if (!Session.isAdmin()) return;
     const { job, duplicate } = opts;
     const mode: DialogMode = job && !duplicate ? 'edit' : 'new';
-    // A new job is seeded from the server's parameter defaults (GET /jobs/types), else the product defaults (apply).
-    const form = job ? jobToForm(job) : defaultJobForm(opts.plant ?? '', 'optimizer.plant', opts.defaults ?? null);
+    const types = opts.types ?? [];
+    // A new job starts as the first action type (the optimizer) unless the caller names one, seeded from that type's own
+    // param defaults (GET /jobs/types); a saved job renders with its own type and params.
+    const typeKey = job ? job.job_type : (opts.jobType ?? types.find(x => x.kind === 'action')?.key ?? types[0]?.key ?? 'optimizer.plant');
+    const meta = findType(types, typeKey) ?? null;
+    const form = job ? jobToForm(job, meta) : defaultJobForm(opts.plant ?? '', typeKey, opts.defaults ?? meta?.defaults ?? null, meta);
     if (duplicate) form.name = '';
-    _s = { mode, job: job && !duplicate ? job : null, form, targets: new Set(), filter: '', busy: false, baseline: JSON.stringify(form), previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
+    _s = { mode, job: job && !duplicate ? job : null, form, types, meta, winSeq: 0, winTimer: null, targets: new Set(), filter: '', busy: false, baseline: JSON.stringify(form), previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
     _wire();
     const body = _el('jb-body');
-    if (body) body.innerHTML = bodyHtml(form, mode, Session.isAdmin());
+    if (body) body.innerHTML = bodyHtml(form, mode, Session.isAdmin(), meta, types);
     _initPickers();
     mkCombobox(_el('jb-plant-host'), allowedPlantList(), {
       value: form.plant, placeholder: t('jobs.f_plant'), id: 'jb-plant', disabled: mode === 'edit',
-      onSelect: (v) => { if (!_s) return; _s.form.plant = v; const tz = _el('jb-tz'); if (tz) tz.textContent = plantTimezone(v) || t('jobs.tz_unknown'); _schedulePreview(); },
+      onSelect: (v) => { if (!_s) return; _s.form.plant = v; const tz = _el('jb-tz'); if (tz) tz.textContent = plantTimezone(v) || t('jobs.tz_unknown'); _schedulePreview(); _scheduleWindowPreview(); },
     });
     _show(mode === 'edit' ? t('jobs.title_edit') : t('jobs.title_new'));
     _s.baseline = JSON.stringify(readForm(form));   // read back from the rendered fields, so dirty = a real edit
     _el('jb-name')?.focus();
     void _runPreview();
+    void _runWindowPreviews();
   },
 
   /** Copy one job's definition and schedule to many plants (one POST /jobs + schedule per plant, each in its own plant timezone). */
   openCopy(job: Job, onSaved?: () => void): void {
     if (!Session.isAdmin()) return;
-    _s = { mode: 'copy', job, form: jobToForm(job), targets: new Set(), filter: '', busy: false, baseline: '', previewSeq: 0, previewTimer: null, onSaved: onSaved ?? null };
+    _s = { mode: 'copy', job, form: jobToForm(job), types: [], meta: null, winSeq: 0, winTimer: null, targets: new Set(), filter: '', busy: false, baseline: '', previewSeq: 0, previewTimer: null, onSaved: onSaved ?? null };
     _wire();
     const body = _el('jb-body');
     if (body) body.innerHTML = copyBodyHtml(job, _s.targets, '');
@@ -436,7 +658,7 @@ export const JobsDialog = {
     if (!s || s.busy) return;
     if (s.mode === 'copy') return _submitCopy(s);
     s.form = readForm(s.form);
-    const errs = validateJobForm(s.form, { isAdmin: Session.isAdmin(), plants: Session.allowedPlants() });
+    const errs = validateJobForm(s.form, { isAdmin: Session.isAdmin(), plants: Session.allowedPlants(), meta: s.meta });
     _showErrors(errs);
     if (Object.keys(errs).length) return;
     const { job, schedule } = buildJobPayload(s.form);
@@ -476,6 +698,7 @@ export const JobsDialog = {
 
   close(): void {
     if (_s?.previewTimer) clearTimeout(_s.previewTimer);
+    if (_s?.winTimer) clearTimeout(_s.winTimer);
     _s = null;
     _destroyPickers();
     Modal.close('modal-job-edit');

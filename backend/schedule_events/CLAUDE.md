@@ -16,7 +16,7 @@ Columns: `id BIGSERIAL PK`, `plant`, `order_id`, `production_order`, `material_n
 - **No FK to `orders`, on purpose**: history outlives a purge, and ids are MD5-derived.
 - **`op` is `create | modify | remove`** (CHECK constraint), not update/delete: the deploy runner's destructive regex (`\b(ALTER|DROP|DELETE|UPDATE|TRUNCATE|RENAME|GRANT|REVOKE)\b`, case-insensitive, whole file including comments) would flag those words. The same rule binds the migration text: say "sweep", "remove", "change". `source` has no CHECK (open set; `record()` coerces an unknown source to `unknown`).
 - **Ordering is `id DESC`.** `at` defaults to `clock_timestamp()` (insert time) and is cosmetic; `now()` is transaction-start and would invert causality between a planner save and a concurrent SAP chunk.
-- **No `(plant, id)` index yet.** It would be a fourth index on every insert for a feed that does not exist; add it (additive) when a plant-level listing or `/changes` ships.
+- **`idx_schedule_event_plant_at (plant, at DESC)`** (2026-10-29, Jobs W2 fix wave, `report.what_changed`, the plant-level time-window listing): created by `ensure_schedule_event_table()` from `SCHEDULE_EVENT_PLANT_INDEX_DDL` and mirrored in `schema.sql`, deliberately NOT in the pinned `SCHEDULE_EVENT_DDL` or the migration file (an index on an existing table goes through the startup hook). It replaces the first draft's `(plant, id DESC)` index, which a `plant = ? AND at in window` filter cannot use; the hook drops that one (`SCHEDULE_EVENT_OLD_PLANT_INDEX_SQL`). It is a third index on every insert. The report reads the table once (GROUPING SETS + top-N in one statement).
 
 ## Invariants
 

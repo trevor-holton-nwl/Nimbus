@@ -27,9 +27,23 @@
   },
   "types": {"types": [{
     "key": "optimizer.plant", "label": "Optimizer (one plant)", "plant_scoped": true, "default_timeout_s": 600, "stub": false,
+    "kind": "action", "mutates": true,
+    "params": [{"key": "mode", "type": "enum", "label_key": "jobs.p.optimizer.plant.mode", "title": "Mode", "default": "due_date",
+                "required": false, "widget": null, "enum": ["due_date", "min_changeover", "spt"],
+                "enum_label_keys": {"due_date": "jobs.p.optimizer.plant.mode.due_date"}}],
     "params_schema": {"type": "object"},
     "defaults": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"}
   }]},
+  "window_preview": {
+    "start": "2026-09-28T00:00:00-05:00", "end": "2026-10-29T00:00:00-05:00", "label": "2026-09-28 to 2026-10-28",
+    "timezone": "America/Chicago"
+  },
+  "artifact": {
+    "run_id": 42, "filename": "report-1008-run42.json", "size_bytes": 512, "created_at": "2026-10-29T12:03:40+00:00",
+    "summary": {"events": 3}, "truncated": false,
+    "sections": [{"key": "counts", "title": "Changes", "columns": [{"key": "value", "label": "value", "type": "text"}, {"key": "events", "label": "events", "type": "number"}],
+                  "rows": [["drag", 3]], "row_count": 1, "truncated": false, "offset": 0, "limit": 500, "rows_stored": 1}]
+  },
   "summary": {
     "running": 1, "queued": 0, "failed_24h": 2, "failed_config_24h": 1, "failed_system_24h": 0, "failed_transient_24h": 1, "missed_24h": 0, "warning_24h": 1,
     "next_fire": {"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "job_id": 5, "job_name": "Morning optimize", "plant": "1008"},

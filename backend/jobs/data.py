@@ -98,6 +98,20 @@ CREATE TABLE IF NOT EXISTS job_run_log (
 );
 """
 
+# Identical text lives in migrations/2026-10-30-1-job-artifacts.sql and the schema.sql mirror block (pinned verbatim
+# by tests/test_jobs.py). A separate constant so the W1 DDL pin above stays untouched.
+JOB_ARTIFACT_DDL = """
+CREATE TABLE IF NOT EXISTS job_run_artifact (
+    run_id        BIGINT PRIMARY KEY REFERENCES job_run (id),
+    content_type  TEXT NOT NULL DEFAULT 'application/json',
+    filename      TEXT,
+    body          TEXT NOT NULL,             -- JSON text: {sections:[{key,title,columns,rows}], summary}
+    row_count     INTEGER NOT NULL DEFAULT 0,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+"""
+
 # Read-path indexes for GET /jobs/summary (the run_health counts), run by the startup hook and mirrored in
 # schema.sql. They stay out of JOB_DDL and the migration file, which tests pin verbatim.
 JOB_INDEX_DDL = """
@@ -130,6 +144,7 @@ def ensure_job_tables() -> None:
     """Idempotent bootstrap (mirrors migrations/2026-10-29-1-job-scheduler.sql and schema.sql)."""
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute(JOB_DDL)
+        cur.execute(JOB_ARTIFACT_DDL)
         cur.execute(JOB_INDEX_DDL)
         conn.commit()
 
@@ -584,6 +599,68 @@ def list_log(run_id: int, *, after_seq: int, min_level: str, limit: int) -> list
     return rows
 
 
+# ------------------------------------------------------------------------------------------ report artifacts
+def save_artifact(run_id: int, artifact: dict, *, filename: str | None = None) -> dict:
+    """Cap and store a report artifact (one row per run, replaced on a re-save). Returns
+    {row_counts, size_bytes, truncated} for the run summary."""
+    import json
+    from backend.jobs import artifacts
+    capped, truncated = artifacts.cap_artifact(artifact)
+    body = artifacts._dumps(capped)
+    size = len(body.encode("utf-8"))
+    counts = artifacts.row_counts(capped)
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO job_run_artifact (run_id, content_type, filename, body, row_count, size_bytes)"
+            " VALUES (%s, 'application/json', %s, %s, %s, %s)"
+            " ON CONFLICT (run_id) DO UPDATE SET filename = EXCLUDED.filename, body = EXCLUDED.body,"
+            " row_count = EXCLUDED.row_count, size_bytes = EXCLUDED.size_bytes, created_at = clock_timestamp()",
+            (run_id, filename, body, sum(counts.values()), size))
+        conn.commit()
+    info = {"row_counts": counts, "size_bytes": size, "truncated": truncated}
+    if (capped.get("summary") or {}).get("artifact_error"):
+        info["error"] = str(capped["summary"]["artifact_error"])
+    return info
+
+
+def get_artifact(run_id: int) -> dict | None:
+    """{run_id, filename, content_type, row_count, size_bytes, created_at, artifact (parsed JSON)} or None."""
+    import json
+    with db._pool.connection() as conn, _cur(conn) as cur:
+        cur.execute("SELECT run_id, filename, content_type, body, row_count, size_bytes, created_at"
+                    " FROM job_run_artifact WHERE run_id = %s", (run_id,))
+        r = cur.fetchone()
+    if r is None:
+        return None
+    r["artifact"] = json.loads(r.pop("body"))
+    r["created_at"] = _iso(r["created_at"])
+    return r
+
+
+def last_success_started_at(job_id: int, before_run_id: int | None = None) -> datetime | None:
+    """started_at of the job's most recent finished (succeeded or warning) run: the `last_success` window anchor.
+    `before_run_id` excludes the current run and anything newer."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT started_at FROM job_run WHERE job_id = %s AND status IN ('succeeded','warning')"
+                    " AND started_at IS NOT NULL AND (%s::bigint IS NULL OR id < %s::bigint)"
+                    " ORDER BY id DESC LIMIT 1", (job_id, before_run_id, before_run_id))
+        r = cur.fetchone()
+    return r[0] if r else None
+
+
+def last_success_watermark(job_id: int, before_run_id: int | None = None) -> datetime | None:
+    """The `last_success` window anchor: the RESOLVED END of the previous SCHEDULED finished (succeeded or warning) run
+    (`summary.window.end`, so the next window starts exactly where the last one stopped and nothing is lost between
+    runs); a run without a stored window falls back to its started_at. Manual runs never move it."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT COALESCE(NULLIF(summary->'window'->>'end', '')::timestamptz, started_at) FROM job_run"
+                    " WHERE job_id = %s AND trigger = 'schedule' AND status IN ('succeeded','warning')"
+                    " AND started_at IS NOT NULL AND (%s::bigint IS NULL OR id < %s::bigint)"
+                    " ORDER BY id DESC LIMIT 1", (job_id, before_run_id, before_run_id))
+        r = cur.fetchone()
+    return r[0] if r else None
+
+
 # ------------------------------------------------------------------------------------------------- sweeps
 def boot_sweep() -> int:
     """Rows still `scheduled`/`running` when the process starts belong to a process that died: mark them failed.
@@ -602,7 +679,7 @@ def sweep_job_runs(*, retention_days=None, chunk: int = 500, max_chunks: int = 2
     """Trim finished runs older than the retention window (log lines first, then the run rows) in chunks of
     `chunk` runs. Never raises. One transaction per chunk, opening with an advisory xact lock; another sweeper
     holding it yields {"locked": True}. Stores its result in DIAGNOSTICS["job_run_last_sweep"]."""
-    result = {"deleted_runs": 0, "deleted_log_lines": 0, "chunks": 0, "retention_days": None,
+    result = {"deleted_runs": 0, "deleted_log_lines": 0, "deleted_artifacts": 0, "chunks": 0, "retention_days": None,
               "locked": False, "error": None}
     try:
         days = md.get_job_run_retention_days() if retention_days is None else max(1, min(60, int(retention_days)))
@@ -621,6 +698,8 @@ def sweep_job_runs(*, retention_days=None, chunk: int = 500, max_chunks: int = 2
                             " AND status NOT IN ('scheduled','running') ORDER BY id LIMIT %s", (days, chunk))
                 ids = [r[0] for r in cur.fetchall()]
                 if ids:
+                    cur.execute("DELETE FROM job_run_artifact WHERE run_id = ANY(%s)", (ids,))
+                    result["deleted_artifacts"] += cur.rowcount
                     cur.execute("DELETE FROM job_run_log WHERE run_id = ANY(%s)", (ids,))
                     result["deleted_log_lines"] += cur.rowcount
                     cur.execute("DELETE FROM job_run WHERE id = ANY(%s)", (ids,))

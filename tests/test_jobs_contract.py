@@ -118,6 +118,14 @@ def client(monkeypatch):
     monkeypatch.setattr(data, "list_log", lambda rid, **kw: [] if kw.get("after_seq") else [
         {"seq": 1, "at": "2026-10-29T12:00:01+00:00", "level": "info", "step": "load", "msg": "loaded 120 orders",
          "duration_ms": 850, "data": {}}])
+    monkeypatch.setattr(data, "last_success_watermark", lambda jid, before=None: None)
+    art = {"sections": [{"key": "counts", "title": "Changes", "columns": [{"key": "value", "label": "value", "type": "text"},
+                                                                          {"key": "events", "label": "events", "type": "number"}],
+                         "rows": [["drag", 3], ["=cmd", 1], ["note", 2]], "row_count": 3, "truncated": False}],
+           "summary": {"events": 6}}
+    monkeypatch.setattr(data, "get_artifact", lambda rid: (
+        {"run_id": rid, "filename": "report-1008-run42.json", "content_type": "application/json", "row_count": 3,
+         "size_bytes": 512, "created_at": "2026-10-29T12:03:40+00:00", "artifact": art} if rid == 42 else None))
     monkeypatch.setattr(data, "create_job", lambda **kw: 5)
     monkeypatch.setattr(data, "patch_job", lambda jid, fields, actor: True)
     monkeypatch.setattr(data, "add_schedule", lambda jid, s, actor: 11)
@@ -145,6 +153,51 @@ def test_types(client):
     props = set(opt["params_schema"]["properties"])
     assert props == {"mode", "search", "respect_firmed", "apply_mode"}
     assert set(opt["params_schema"]["properties"]["mode"]["enum"]) == {"due_date", "min_changeover", "spt"}
+
+
+def test_types_carry_kind_and_param_metadata(client):
+    by = {t["key"]: t for t in client.get("/jobs/types").json()["types"]}
+    assert by["optimizer.plant"]["kind"] == "action" and by["optimizer.plant"]["mutates"] is True
+    assert {k for k, t in by.items() if t["kind"] == "report"} == {
+        "report.what_changed", "report.late_orders", "report.missing_master_data", "report.coverage",
+        "report.distribution"}
+    assert all(t["mutates"] is False for t in by.values() if t["kind"] == "report")
+    pm = {p["key"]: p for p in by["report.late_orders"]["params"]}
+    assert pm["horizon"]["type"] == "date_window" and pm["horizon"]["widget"] == "date-window"
+    assert pm["horizon"]["label_key"] == "jobs.p.report.late_orders.horizon"
+    assert pm["min_days_late"]["type"] == "number" and pm["min_days_late"]["max"] == 365
+    opt = {p["key"]: p for p in by["optimizer.plant"]["params"]}
+    assert opt["search"]["type"] == "enum" and opt["search"]["enum"] == ["normal", "exhaustive"]
+    assert opt["respect_firmed"]["type"] == "boolean" and opt["apply_mode"]["default"] == "apply"
+    assert {p["type"] for p in by["report.coverage"]["params"]} == {"multi_enum", "integer"}
+
+
+def test_window_preview_matches_the_resolver(client):
+    from datetime import datetime, timezone
+    from backend.jobs import windows
+    win = windows.last_days(30)
+    body = client.post("/jobs/windows/preview", json={"plant": "1008", "window": win}).json()
+    _check(body, "window_preview")
+    start, end, label = windows.resolve_window(win, "America/New_York", datetime.now(timezone.utc))
+    assert body["label"] == label and body["timezone"] == "America/New_York"
+    assert body["start"] == start.isoformat(timespec="seconds")
+    assert client.post("/jobs/windows/preview", json={"plant": "NOTZ", "window": win}).status_code == 400
+    assert client.post("/jobs/windows/preview", json={"plant": "1008", "window": {"mode": "fixed"}}).status_code == 400
+
+
+def test_run_artifact_pages_and_csv(client):
+    body = client.get("/jobs/runs/42/artifact?offset=0&limit=500").json()
+    _check(body, "artifact")
+    page = client.get("/jobs/runs/42/artifact?section=counts&offset=1&limit=1").json()["sections"][0]
+    assert page["rows"] == [["=cmd", 1]] and page["rows_stored"] == 3 and page["offset"] == 1
+    r = client.get("/jobs/runs/42/artifact?section=counts&format=csv")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
+    assert "attachment" in r.headers["content-disposition"] and ".csv" in r.headers["content-disposition"]
+    assert r.content.startswith(b"\xef\xbb\xbf") and "'=cmd" in r.text, "formula guard applies"
+    assert client.get("/jobs/runs/42/artifact?format=csv").status_code == 400
+    assert client.get("/jobs/runs/42/artifact?section=nope").status_code == 404
+    assert client.get("/jobs/runs/43/artifact").status_code == 404
+    assert client.get("/jobs/runs/42/artifact?limit=501").status_code == 422
 
 
 def test_jobs_list_is_a_cursor_envelope(client):
@@ -245,3 +298,33 @@ def test_optimizer_schedule_for_a_plant_without_timezone_is_refused(client):
     assert r.status_code == 400 and "timezone" in r.json()["detail"]
     assert client.post("/jobs", json={**body, "schedules": []}).status_code == 200, "a job without a schedule is fine"
     assert client.post("/jobs/schedules/preview", json={"plant": "NOTZ", "n": 2, **SCHEDULE_BODY}).status_code == 200
+
+
+def test_committed_job_types_fixture_matches_the_registry():
+    """tests/fixtures/jobs_types.json feeds the frontend form tests; regenerate with scripts/dump_job_types.py."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dump_job_types", Path(__file__).parent.parent / "scripts" / "dump_job_types.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    committed = json.loads((Path(__file__).parent / "fixtures" / "jobs_types.json").read_text(encoding="utf-8"))
+    assert committed == mod.live(), "run: python scripts/dump_job_types.py"
+
+
+def test_every_param_and_type_label_key_is_translated_or_aliased():
+    """The server names `jobs.p.<type>.<param>[.<value>]` and `jobs.type.<key>`; the locale files (or the frontend's
+    legacy aliases for the optimizer) must answer every one, in all five locales."""
+    import re
+    root = Path(__file__).parent.parent / "frontend"
+    committed = json.loads((Path(__file__).parent / "fixtures" / "jobs_types.json").read_text(encoding="utf-8"))
+    model = (root / "admin-ops" / "jobs-model.mts").read_text(encoding="utf-8")
+    aliases = dict(re.findall(r"'(jobs\.[\w.]+)': '(jobs\.\w+)'", model))
+    for loc in ("en", "de", "es", "fr", "pt"):
+        text = (root / "locales" / f"{loc}.js").read_text(encoding="utf-8")
+        have = set(re.findall(r"^\s*'(jobs\.[\w.]+)':", text, re.M))
+        for t in committed["types"]:
+            keys = [f"jobs.type.{t['key']}"]
+            for p in t["params"]:
+                keys.append(p["label_key"])
+                keys += list((p.get("enum_label_keys") or {}).values())
+            missing = [k for k in keys if k not in have and aliases.get(k) not in have]
+            assert not missing, f"{loc}: {missing}"

@@ -1540,3 +1540,26 @@ test('toolIndexUpdate: moves the interval of one order inside the index without 
   Core.toolIndexUpdate(live, 'a', item('a', 'L1', 8, 9), null);
   assert.equal(live.groups.size, 0);
 });
+
+// --- due-rule twin vectors: the SAME cases run through backend/jobs/due.py (tests/test_jobs_due.py), so the
+// late-order digest and the app cannot disagree on what is late. Hours maps are keyed by JS weekday. ---
+const dueVectors = require('../fixtures/due_rule_vectors.json');
+const _localDate = (iso) => { const [d, t] = iso.split('T'); const [y, m, dd] = d.split('-').map(Number); const [h, mi, s] = t.split(':').map(Number); return new Date(y, m - 1, dd, h, mi, s); };
+for (const c of dueVectors.cases) {
+  test(`due-rule vector: ${c.name}`, () => {
+    const cal = dueVectors.calendars[c.calendar];
+    const periods = (cal.plant_periods || []).map(p => ({ validFrom: p.valid_from, validTo: p.valid_to, workHours: p.work_hours }));
+    const dayWindowFor = (date) => {
+      const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      const plantWin = Core._dayWindow(Core.activeWorkHours(cal.plant_work_hours, periods, key), date);
+      const own = cal.line_work_hours[c.machine];
+      const lineWin = own ? Core._dayWindow(own, date) : [new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0), new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1)];
+      if (!plantWin || !lineWin) return null;
+      const open = new Date(Math.max(+plantWin[0], +lineWin[0])), close = new Date(Math.min(+plantWin[1], +lineWin[1]));
+      return open < close ? { open, close } : null;
+    };
+    const due = Core.dueDateInstant(_localDate(c.due_raw), dayWindowFor);
+    assert.equal(+due, +_localDate(c.due));
+    assert.equal(_localDate(c.finish) > due, c.late);
+  });
+}

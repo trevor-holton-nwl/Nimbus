@@ -9,7 +9,10 @@ import {
   weekStrip, addDays, isoDayKey, mergeRuns, stripCompleteThrough, LOG_PAGE, defaultJobForm, validateJobForm, buildJobPayload, jobToForm, defaultRecurrence,
   displayStatus, runStatusHtml, errorKindOf, elapsedText, firstErrorIndex, lineDataText, errorsToText, elapsedMs, healthTiles, heartbeatState, ageText,
   shouldPollJobs, runSequential, deltaText, isDryRun, tzShort, isLongerThanUsual, RUN_STATUSES, JOB_RESULTS,
+  resultOf, seedParams, typeGroups, findType, hasApplyMode, paramLabel, enumLabel, paramHint, typeLabel, validateParams, defaultWindowUi,
+  uiToWindow, windowToUi, validateWindowUi, artifactTiles, isReportRun, cellText, windowLine, sectionTitle, columnLabel, isReportType,
 } from '../../../frontend/admin-ops/jobs-model.mjs';
+import { TYPES, OPT, byKey } from './jobs-types-fixture.mjs';
 
 const EN = {
   'jobs.cron_daily': 'Every day at {{time}}', 'jobs.cron_weekdays': 'Weekdays at {{time}}', 'jobs.cron_weekly': 'Every {{days}} at {{time}}',
@@ -172,12 +175,13 @@ test('weekStrip buckets naive ISO runs into 7 plant days from the text, ignoring
   assert.equal(days[6].runs.length, 1, 'day 7 included, day 8 and yesterday dropped');
 });
 
-test('a new job is seeded from the server defaults where valid; anything else falls back, and the result defaults to apply', () => {
-  const seeded = defaultJobForm('1008', 'optimizer.plant', { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' });
-  assert.deepEqual([seeded.mode, seeded.search, seeded.respectFirmed, seeded.result], ['spt', 'normal', false, 'propose']);
-  const junk = defaultJobForm('1008', 'optimizer.plant', { mode: 'backlog', search: 7, apply_mode: 'yolo' });
-  assert.deepEqual([junk.mode, junk.search, junk.respectFirmed, junk.result], ['due_date', 'exhaustive', true, 'apply']);
-  assert.equal(defaultJobForm('1008', 'optimizer.plant', {}).result, 'apply');
+test('a new job is seeded from the type\'s own param defaults, then the server defaults; the result defaults to apply', () => {
+  const seeded = defaultJobForm('1008', 'optimizer.plant', { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' }, OPT);
+  assert.deepEqual(seeded.params, { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' });
+  assert.deepEqual(defaultJobForm('1008', 'optimizer.plant', null, OPT).params, { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' });
+  assert.deepEqual(defaultJobForm('1008', 'optimizer.plant').params, {}, 'no hardcoded optimizer params: without metadata the server fills its own defaults');
+  assert.equal(resultOf(defaultJobForm('1008', 'optimizer.plant').params), 'apply');
+  assert.equal(seedParams(byKey('report.late_orders'), null).horizon.rolling.to_offset, 14);
 });
 
 test('mergeRuns folds page 1 into loaded pages (newest first, later pages kept); buildLogQuery can ask for a big page', () => {
@@ -194,13 +198,14 @@ test('stripCompleteThrough: null while the list is short of its cap, else the la
   assert.equal(stripCompleteThrough([], 0), null);
 });
 
-const ok = { isAdmin: true, plants: null };
-const good = () => ({ ...defaultJobForm('1008'), name: 'Morning optimize' });
+const ok = { isAdmin: true, plants: null, meta: OPT };
+const good = () => ({ ...defaultJobForm('1008', 'optimizer.plant', null, OPT), name: 'Morning optimize' });
+const withParams = (patch) => ({ ...good(), params: { ...good().params, ...patch } });
 
 test('defaults: 08:00 daily, Exhaustive, and the result is APPLY (a Dry run is the alternative)', () => {
-  const f = defaultJobForm('1008');
+  const f = defaultJobForm('1008', 'optimizer.plant', null, OPT);
   assert.equal(f.recur.preset, 'daily'); assert.equal(f.recur.time, '08:00');
-  assert.equal(f.search, 'exhaustive'); assert.equal(f.result, 'apply');
+  assert.equal(f.params.search, 'exhaustive'); assert.equal(resultOf(f.params), 'apply');
   assert.deepEqual(validateJobForm(good(), ok), {});
 });
 
@@ -209,11 +214,15 @@ test('validateJobForm: name, plant scope, result gate, recurrence fields and val
   assert.equal(validateJobForm({ ...good(), name: 'x'.repeat(81) }, ok).name, 'jobs.err_name_long');
   assert.equal(validateJobForm({ ...good(), plant: '' }, ok).plant, 'jobs.err_plant');
   assert.equal(validateJobForm(good(), { isAdmin: true, plants: ['2000'] }).plant, 'jobs.err_plant_scope');
-  assert.equal(validateJobForm({ ...good(), result: 'apply' }, { isAdmin: false, plants: null }).result, 'jobs.err_apply_admin');
-  assert.equal(validateJobForm(good(), { isAdmin: false, plants: null }).result, 'jobs.err_apply_admin', 'jobs are admin-only: the default (apply) needs an admin');
-  assert.equal(validateJobForm({ ...good(), result: 'propose' }, { isAdmin: false, plants: null }).result, undefined, 'a dry run changes nothing');
-  assert.equal(validateJobForm({ ...good(), mode: 'remove-backlog' }, ok).mode, 'jobs.err_mode');
-  assert.equal(validateJobForm({ ...good(), mode: 'due-date' }, ok).mode, 'jobs.err_mode', 'the backend names are due_date / min_changeover / spt');
+  const nonAdmin = { isAdmin: false, plants: null, meta: OPT };
+  assert.equal(validateJobForm(withParams({ apply_mode: 'apply' }), nonAdmin).result, 'jobs.err_apply_admin');
+  assert.equal(validateJobForm(good(), nonAdmin).result, 'jobs.err_apply_admin', 'jobs are admin-only: the default (apply) needs an admin');
+  assert.equal(validateJobForm(withParams({ apply_mode: 'propose' }), nonAdmin).result, undefined, 'a dry run changes nothing');
+  assert.equal(validateJobForm(withParams({ apply_mode: 'yolo' }), ok).result, 'jobs.err_result');
+  assert.equal(validateJobForm(withParams({ mode: 'remove-backlog' }), ok).params.mode, 'jobs.err_param_enum');
+  assert.equal(validateJobForm(withParams({ mode: 'due-date' }), ok).params.mode, 'jobs.err_param_enum', 'the backend names are due_date / min_changeover / spt');
+  assert.equal(validateJobForm(withParams({ search: 'forever' }), ok).params.search, 'jobs.err_param_enum');
+  assert.equal('params' in validateJobForm(good(), ok), false, 'a valid form carries no params key');
   const r = (patch) => ({ ...good(), recur: { ...defaultRecurrence(), ...patch } });
   assert.equal(validateJobForm(r({ time: '' }), ok).time, 'jobs.err_time');
   assert.equal(validateJobForm(r({ preset: 'weekly', days: [] }), ok).days, 'jobs.err_days');
@@ -226,7 +235,7 @@ test('validateJobForm: name, plant scope, result gate, recurrence fields and val
 });
 
 test('buildJobPayload: backend job params (apply_mode explicit) and a preset ScheduleIn, trimmed name, no zone', () => {
-  const p = buildJobPayload({ ...good(), result: 'apply', name: '  Morning optimize ', validFrom: '2026-11-01' });
+  const p = buildJobPayload({ ...withParams({ apply_mode: 'apply' }), name: '  Morning optimize ', validFrom: '2026-11-01' });
   assert.deepEqual(p.job, {
     name: 'Morning optimize', plant: '1008', job_type: 'optimizer.plant',
     params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' },
@@ -235,7 +244,8 @@ test('buildJobPayload: backend job params (apply_mode explicit) and a preset Sch
   const once = buildJobPayload({ ...good(), recur: { ...defaultRecurrence(), preset: 'once', runAt: '2026-11-02T08:00' } });
   assert.deepEqual([once.schedule.kind, once.schedule.cron_expr, once.schedule.run_at], ['once', undefined, '2026-11-02T08:00']);
   assert.doesNotMatch(JSON.stringify(p), /Z"|\+\d\d:\d\d|timezone/, 'no zone suffix, offset or timezone field');
-  assert.equal(buildJobPayload({ ...good(), result: 'propose' }).job.params.apply_mode, 'propose');
+  assert.equal(buildJobPayload(withParams({ apply_mode: 'propose' })).job.params.apply_mode, 'propose');
+  assert.equal('undefined' in buildJobPayload({ ...good(), params: { a: undefined, b: 1 } }).job.params, false);
 });
 
 test('jobToForm restores a saved job (preset schedule, once, params) for Edit and Duplicate', () => {
@@ -244,11 +254,106 @@ test('jobToForm restores a saved job (preset schedule, once, params) for Edit an
     params: { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' },
     schedule: { kind: 'weekly', time_of_day: '06:05', days_of_week: [0, 2, 4], cron_expr: '5 6 * * mon,wed,fri', valid_until: '2026-12-31T00:00:00', skip_if_running: false },
   });
-  assert.equal(f.mode, 'spt'); assert.equal(f.search, 'normal'); assert.equal(f.respectFirmed, false); assert.equal(f.result, 'propose');
+  assert.deepEqual(f.params, { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' });
   assert.equal(f.recur.preset, 'weekly'); assert.deepEqual(f.recur.days, [0, 2, 4]); assert.equal(f.validUntil, '2026-12-31'); assert.equal(f.skipIfRunning, false);
   const once = jobToForm({ name: 'O', plant: 'P', schedule: { kind: 'once', run_at: '2026-11-02T08:00:00' } });
   assert.equal(once.recur.preset, 'once'); assert.equal(once.recur.runAt, '2026-11-02T08:00');
   assert.equal(jobToForm({ name: 'bare', plant: 'P' }).recur.preset, 'daily');
+  const saved = jobToForm({ name: 'N', plant: 'P', job_type: 'optimizer.plant', params: { search: 'normal' } }, OPT);
+  assert.deepEqual(saved.params, { mode: 'due_date', search: 'normal', respect_firmed: true, apply_mode: 'apply' }, 'a saved job keeps its own values; missing keys take the type default');
+});
+
+// ---- W2: generic params, types, DateWindow, report artifact -----------------------------------------------------------
+test('typeGroups: Optimization then Reports, each only when it has types; findType and hasApplyMode', () => {
+  const g = typeGroups(TYPES);
+  assert.deepEqual(g.map(x => [x.kind, x.labelKey]), [['action', 'jobs.group_optimization'], ['report', 'jobs.group_reports']]);
+  assert.deepEqual(g[1].types.map(x => x.key), ['report.what_changed', 'report.late_orders', 'report.missing_master_data', 'report.coverage', 'report.distribution']);
+  assert.deepEqual(typeGroups(TYPES.filter(x => x.kind === 'report')).map(x => x.kind), ['report']);
+  assert.equal(findType(TYPES, 'report.coverage').kind, 'report');
+  assert.equal(hasApplyMode(OPT), true, 'the Result control shows for an action type with apply_mode');
+  assert.equal(hasApplyMode(byKey('report.late_orders')), false);
+  assert.equal(hasApplyMode(undefined), false);
+});
+
+test('labels: a translation wins, an optimizer alias keeps the old strings, else the server title or the raw value', () => {
+  const dict = { 'jobs.f_mode': 'Mode', 'jobs.mode_spt': 'SPT', 'jobs.p.report.late_orders.horizon': 'Orders finishing in', 'jobs.search_note': 'Exhaustive takes minutes' };
+  const d = { t: k => dict[k] ?? k };
+  const mode = OPT.params.find(p => p.key === 'mode'); const hz = byKey('report.late_orders').params[0]; const top = byKey('report.what_changed').params[2];
+  assert.equal(paramLabel(mode, d), 'Mode', 'alias jobs.f_mode');
+  assert.equal(enumLabel(mode, 'spt', d), 'SPT');
+  assert.equal(enumLabel(mode, 'due_date', d), 'due_date', 'no translation: the raw value');
+  assert.equal(paramLabel(hz, d), 'Orders finishing in');
+  assert.equal(paramLabel(top, d), 'Top N', 'no translation: the schema title');
+  assert.equal(paramHint(OPT.params.find(p => p.key === 'search'), d), 'Exhaustive takes minutes', 'the Exhaustive note survives as the search hint');
+  assert.equal(typeLabel({ key: 'report.late_orders', label: 'Late-order digest' }, d), 'Late-order digest');
+});
+
+test('validateParams: numbers, ranges, enums, multi-select and windows from the served metadata', () => {
+  const late = byKey('report.late_orders'); const wc = byKey('report.what_changed'); const cov = byKey('report.coverage');
+  assert.deepEqual(validateParams(late.params, late.defaults), {});
+  assert.equal(validateParams(late.params, { ...late.defaults, min_days_late: 400 }).min_days_late, 'jobs.err_param_range');
+  assert.equal(validateParams(late.params, { ...late.defaults, min_days_late: -1 }).min_days_late, 'jobs.err_param_range');
+  assert.equal(validateParams(late.params, { ...late.defaults, min_days_late: NaN }).min_days_late, 'jobs.err_param_num');
+  assert.equal(validateParams(wc.params, { ...wc.defaults, top_n: 2.5 }).top_n, 'jobs.err_param_int');
+  assert.equal(validateParams(wc.params, { ...wc.defaults, top_n: 201 }).top_n, 'jobs.err_param_range');
+  assert.equal(validateParams(wc.params, { ...wc.defaults, top_n: null }).top_n, undefined, 'blank is fine when not required (the server default applies)');
+  assert.equal(validateParams(cov.params, { sections: [] }).sections, 'jobs.err_param_pick');
+  assert.equal(validateParams(cov.params, { sections: ['tools', 'bogus'] }).sections, 'jobs.err_param_enum');
+  assert.deepEqual(validateParams(cov.params, { sections: ['setup'] }), {});
+  assert.equal(validateParams(late.params, { ...late.defaults, horizon: { mode: 'fixed', fixed: { from: '2026-10-31', to: '2026-10-01' } } }).horizon, 'jobs.err_win_order');
+  assert.equal(validateParams(late.params, { ...late.defaults, horizon: { mode: 'fixed', fixed: { from: '', to: '2026-10-01' } } }).horizon, 'jobs.err_win_dates');
+});
+
+const roll = (anchor, f, t, unit = 'day') => ({ mode: 'rolling', fixed: null, rolling: { anchor, from_offset: f, to_offset: t, unit } });
+
+test('DateWindow presets round-trip through the picker and match the backend presets (windows.py)', () => {
+  const cases = [
+    [defaultWindowUi('older_than', 30), roll('start_of_day', -3650, -30)],
+    [defaultWindowUi('last', 7), roll('start_of_day', -7, 1)],
+    [defaultWindowUi('next', 14), roll('start_of_day', 0, 14)],
+    [defaultWindowUi('since_last_success'), roll('last_success', 0, 0)],
+    [defaultWindowUi('this_week'), roll('start_of_week', 0, 1, 'week')],
+    [defaultWindowUi('this_month'), roll('start_of_month', 0, 1, 'month')],
+  ];
+  for (const [ui, win] of cases) {
+    assert.deepEqual(uiToWindow(ui), win, ui.choice);
+    const back = windowToUi(win);
+    assert.equal(back.choice, ui.choice);
+    if (['older_than', 'last', 'next'].includes(ui.choice)) assert.equal(back.n, ui.n);
+  }
+  const fixed = { mode: 'fixed', fixed: { from: '2026-10-01', to: '2026-10-31' }, rolling: null };
+  assert.deepEqual(uiToWindow(windowToUi(fixed)), fixed);
+  assert.equal(windowToUi(roll('now', -3, 0, 'month')).choice, 'custom', 'anything else is Custom');
+  assert.equal(windowToUi(null).choice, 'last');
+});
+
+test('validateWindowUi: dates, N, offsets and order; last_success may end at 0 whatever it starts at', () => {
+  const ui = (patch) => ({ ...defaultWindowUi(), ...patch });
+  assert.equal(validateWindowUi(ui({ choice: 'last', n: 7 })), '');
+  assert.equal(validateWindowUi(ui({ choice: 'last', n: 0 })), 'jobs.err_win_n');
+  assert.equal(validateWindowUi(ui({ choice: 'older_than', n: 0 })), '');
+  assert.equal(validateWindowUi(ui({ choice: 'next', n: 4000 })), 'jobs.err_win_n');
+  assert.equal(validateWindowUi(ui({ choice: 'next', n: 1.5 })), 'jobs.err_win_n');
+  assert.equal(validateWindowUi(ui({ choice: 'fixed', from: '2026-10-01', to: '2026-10-01' })), '');
+  assert.equal(validateWindowUi(ui({ choice: 'fixed', from: '2026-10-01', to: '' })), 'jobs.err_win_dates');
+  assert.equal(validateWindowUi(ui({ choice: 'custom', anchor: 'now', fromOffset: 2, toOffset: -1 })), 'jobs.err_win_order');
+  assert.equal(validateWindowUi(ui({ choice: 'custom', anchor: 'last_success', fromOffset: 2, toOffset: -1 })), '');
+  assert.equal(validateWindowUi(ui({ choice: 'custom', fromOffset: 5000, toOffset: 1 })), 'jobs.err_win_offset');
+  assert.equal(validateWindowUi(ui({ choice: 'custom', anchor: 'tomorrow' })), 'jobs.err_win_offset');
+  assert.equal(validateWindowUi(ui({ choice: 'custom', unit: 'year' })), 'jobs.err_win_offset');
+  assert.equal(validateWindowUi(ui({ choice: 'since_last_success' })), '');
+});
+
+test('artifact helpers: row-count tiles keep the report\'s order, cells read plainly, the window line', () => {
+  assert.deepEqual(artifactTiles({ row_counts: { counts: 12, top_orders: 0 } }), [{ key: 'counts', value: 12 }, { key: 'top_orders', value: 0 }]);
+  assert.deepEqual(artifactTiles({}), []); assert.deepEqual(artifactTiles(null), []);
+  assert.equal(isReportRun({ row_counts: { a: 1 } }), true); assert.equal(isReportRun({ late: 3 }), false); assert.equal(isReportRun(null), false);
+  const d = { t: k => ({ 'jobs.a.yes': 'Yes', 'jobs.a.no': 'No', 'jobs.run_window': 'Window: {{label}}, plant time' }[k] ?? k) };
+  assert.deepEqual([cellText(null, d), cellText(3, d), cellText(2.456, d), cellText('yes', d), cellText('no', d), cellText('x', d)], ['', '3', '2.46', 'Yes', 'No', 'x']);
+  assert.equal(windowLine(null, d), '');
+  assert.match(windowLine({ label: '2026-09-28 to 2026-10-28' }, { t: (k, v) => `Window: ${v.label}, plant time` }), /^Window: 2026-09-28 to 2026-10-28, plant time$/);
+  assert.equal(sectionTitle({ key: 'counts', title: 'Changes' }, { t: k => k }), 'Changes', 'no translation: the server title');
+  assert.equal(columnLabel({ key: 'x', label: 'Ex' }, { t: k => (k === 'jobs.a.col.x' ? 'Why' : k) }), 'Why');
 });
 
 // ---- W1: run status, health strip, error panel, log helpers, dry-run proposal --------------------------------------
@@ -346,4 +451,39 @@ test('tzShort reads the plant zone at the instant; blank zone gives nothing', ()
   assert.match(tzShort('America/Chicago', '2026-07-01T12:00:00+00:00'), /CDT|GMT-5/);
   assert.match(tzShort('America/Chicago', '2026-01-01T12:00:00+00:00'), /CST|GMT-6/);
   assert.equal(tzShort('', 'x'), '');
+});
+
+test('cellText by column type: bool, date / datetime through the formatter, sentinel and code translation, notes with detail', () => {
+  const tr = { 'jobs.a.yes': 'Yes', 'jobs.a.no': 'No', 'jobs.a.sentinel.plant_total': 'Plant total', 'jobs.a.val.reason.no_mp_row': 'No material-plant row',
+    'jobs.a.val.value.planner': 'Planner edits', 'jobs.a.note.no_list': 'No list for {{detail}}' };
+  const d = { t: (k, v) => (tr[k] ?? k).replace('{{detail}}', v?.detail ?? '') };
+  const fmt = { datetime: s => `DT(${s})`, date: s => `D(${s})` };
+  assert.equal(cellText('yes', d, { key: 'x', type: 'text' }), 'yes', 'yes/no words are only translated for bool (or untyped) columns');
+  assert.equal(cellText('yes', d, { key: 'x', type: 'bool' }), 'Yes');
+  assert.equal(cellText(false, d, { key: 'x', type: 'bool' }), 'No');
+  assert.equal(cellText('2026-10-28T09:00:00', d, { key: 'f', type: 'datetime' }, fmt), 'DT(2026-10-28T09:00:00)');
+  assert.equal(cellText('2026-10-28', d, { key: 'f', type: 'date' }, fmt), 'D(2026-10-28)');
+  assert.equal(cellText('__plant_total__', d, { key: 'machine', type: 'text' }), 'Plant total');
+  assert.equal(cellText('__unknown__', d, { key: 'machine', type: 'text' }), '__unknown__');
+  assert.equal(cellText('no_mp_row', d, { key: 'reason', type: 'text' }), 'No material-plant row');
+  assert.equal(cellText('planner', d, { key: 'value', type: 'text' }, undefined, ['category', 'planner', '', 3]), 'Planner edits');
+  assert.equal(cellText('planner', d, { key: 'value', type: 'text' }, undefined, ['source', 'planner', '', 3]), 'planner', 'value is a code only on category rows');
+  assert.equal(cellText('no_list', d, { key: 'code', type: 'text' }, undefined, ['no_list', 'colorWheel']), 'No list for colorWheel');
+  assert.equal(cellText('colorWheel', d, { key: 'detail', type: 'text' }, undefined, ['no_list', 'colorWheel']), '', 'the detail is already in the sentence');
+});
+
+test('windowToUi: a stored offset beyond the picker range stays Custom and validates; a blank offset fails validation', () => {
+  const far = windowToUi({ mode: 'rolling', rolling: { anchor: 'start_of_day', from_offset: -3655, to_offset: 1, unit: 'day' } });
+  assert.equal(far.choice, 'custom'); assert.equal(validateWindowUi(far), '');
+  const nextFar = windowToUi({ mode: 'rolling', rolling: { anchor: 'start_of_day', from_offset: 0, to_offset: 3660, unit: 'day' } });
+  assert.equal(nextFar.choice, 'custom'); assert.equal(validateWindowUi(nextFar), '');
+  assert.equal(windowToUi({ mode: 'rolling', rolling: { anchor: 'start_of_day', from_offset: -30, to_offset: 1, unit: 'day' } }).choice, 'last');
+  const blank = windowToUi({ mode: 'rolling', rolling: { anchor: 'now', from_offset: null, to_offset: 3, unit: 'day' } });
+  assert.equal(validateWindowUi(blank), 'jobs.err_win_offset');
+  assert.equal(validateWindowUi({ ...defaultWindowUi('custom'), anchor: 'now', fromOffset: NaN, toOffset: 1 }), 'jobs.err_win_offset');
+});
+
+test('isReportType: a report job is a report even when the type metadata failed to load', () => {
+  assert.equal(isReportType('report.late_orders', []), true);
+  assert.equal(isReportType('optimizer.plant', []), false);
 });

@@ -1,0 +1,342 @@
+{
+ "types": [
+  {
+   "key": "optimizer.plant",
+   "label": "Optimizer (one plant)",
+   "plant_scoped": true,
+   "kind": "action",
+   "mutates": true,
+   "params": [
+    {
+     "key": "mode",
+     "type": "enum",
+     "label_key": "jobs.p.optimizer.plant.mode",
+     "title": "Mode",
+     "default": "due_date",
+     "required": false,
+     "widget": null,
+     "enum": [
+      "due_date",
+      "min_changeover",
+      "spt"
+     ],
+     "enum_label_keys": {
+      "due_date": "jobs.p.optimizer.plant.mode.due_date",
+      "min_changeover": "jobs.p.optimizer.plant.mode.min_changeover",
+      "spt": "jobs.p.optimizer.plant.mode.spt"
+     }
+    },
+    {
+     "key": "search",
+     "type": "enum",
+     "label_key": "jobs.p.optimizer.plant.search",
+     "title": "Search",
+     "default": "exhaustive",
+     "required": false,
+     "widget": null,
+     "enum": [
+      "normal",
+      "exhaustive"
+     ],
+     "enum_label_keys": {
+      "normal": "jobs.p.optimizer.plant.search.normal",
+      "exhaustive": "jobs.p.optimizer.plant.search.exhaustive"
+     }
+    },
+    {
+     "key": "respect_firmed",
+     "type": "boolean",
+     "label_key": "jobs.p.optimizer.plant.respect_firmed",
+     "title": "Respect Firmed",
+     "default": true,
+     "required": false,
+     "widget": null
+    },
+    {
+     "key": "apply_mode",
+     "type": "enum",
+     "label_key": "jobs.p.optimizer.plant.apply_mode",
+     "title": "Apply Mode",
+     "default": "apply",
+     "required": false,
+     "widget": null,
+     "enum": [
+      "propose",
+      "apply"
+     ],
+     "enum_label_keys": {
+      "propose": "jobs.p.optimizer.plant.apply_mode.propose",
+      "apply": "jobs.p.optimizer.plant.apply_mode.apply"
+     }
+    }
+   ],
+   "defaults": {
+    "mode": "due_date",
+    "search": "exhaustive",
+    "respect_firmed": true,
+    "apply_mode": "apply"
+   }
+  },
+  {
+   "key": "report.what_changed",
+   "label": "What changed (schedule events)",
+   "plant_scoped": true,
+   "kind": "report",
+   "mutates": false,
+   "params": [
+    {
+     "key": "window",
+     "type": "date_window",
+     "label_key": "jobs.p.report.what_changed.window",
+     "title": "Window",
+     "default": {
+      "mode": "rolling",
+      "fixed": null,
+      "rolling": {
+       "anchor": "last_success",
+       "from_offset": 0,
+       "to_offset": 0,
+       "unit": "day"
+      }
+     },
+     "required": false,
+     "widget": "date-window"
+    },
+    {
+     "key": "first_run_lookback_days",
+     "type": "integer",
+     "label_key": "jobs.p.report.what_changed.first_run_lookback_days",
+     "title": "First Run Lookback Days",
+     "default": 1,
+     "required": false,
+     "widget": null,
+     "min": 1,
+     "max": 60
+    },
+    {
+     "key": "top_n",
+     "type": "integer",
+     "label_key": "jobs.p.report.what_changed.top_n",
+     "title": "Top N",
+     "default": 20,
+     "required": false,
+     "widget": null,
+     "min": 1,
+     "max": 200
+    }
+   ],
+   "defaults": {
+    "window": {
+     "mode": "rolling",
+     "fixed": null,
+     "rolling": {
+      "anchor": "last_success",
+      "from_offset": 0,
+      "to_offset": 0,
+      "unit": "day"
+     }
+    },
+    "first_run_lookback_days": 1,
+    "top_n": 20
+   }
+  },
+  {
+   "key": "report.late_orders",
+   "label": "Late-order digest",
+   "plant_scoped": true,
+   "kind": "report",
+   "mutates": false,
+   "params": [
+    {
+     "key": "horizon",
+     "type": "date_window",
+     "label_key": "jobs.p.report.late_orders.horizon",
+     "title": "Horizon",
+     "default": {
+      "mode": "rolling",
+      "fixed": null,
+      "rolling": {
+       "anchor": "start_of_day",
+       "from_offset": 0,
+       "to_offset": 14,
+       "unit": "day"
+      }
+     },
+     "required": false,
+     "widget": "date-window"
+    },
+    {
+     "key": "min_days_late",
+     "type": "number",
+     "label_key": "jobs.p.report.late_orders.min_days_late",
+     "title": "Min Days Late",
+     "default": 0.0,
+     "required": false,
+     "widget": null,
+     "min": 0,
+     "max": 365
+    },
+    {
+     "key": "warn_if_over",
+     "type": "integer",
+     "label_key": "jobs.p.report.late_orders.warn_if_over",
+     "title": "Warn If Over",
+     "default": null,
+     "required": false,
+     "widget": null,
+     "min": 0,
+     "max": 1000000
+    }
+   ],
+   "defaults": {
+    "horizon": {
+     "mode": "rolling",
+     "fixed": null,
+     "rolling": {
+      "anchor": "start_of_day",
+      "from_offset": 0,
+      "to_offset": 14,
+      "unit": "day"
+     }
+    },
+    "min_days_late": 0.0,
+    "warn_if_over": null
+   }
+  },
+  {
+   "key": "report.missing_master_data",
+   "label": "Missing master data",
+   "plant_scoped": true,
+   "kind": "report",
+   "mutates": false,
+   "params": [
+    {
+     "key": "warn_if_over",
+     "type": "integer",
+     "label_key": "jobs.p.report.missing_master_data.warn_if_over",
+     "title": "Warn If Over",
+     "default": null,
+     "required": false,
+     "widget": null,
+     "min": 0,
+     "max": 1000000
+    }
+   ],
+   "defaults": {
+    "warn_if_over": null
+   }
+  },
+  {
+   "key": "report.coverage",
+   "label": "Coverage (tools, priority lists, setup)",
+   "plant_scoped": true,
+   "kind": "report",
+   "mutates": false,
+   "params": [
+    {
+     "key": "sections",
+     "type": "multi_enum",
+     "label_key": "jobs.p.report.coverage.sections",
+     "title": "Sections",
+     "default": [
+      "tools",
+      "priority_lists",
+      "setup"
+     ],
+     "required": false,
+     "widget": null,
+     "enum": [
+      "tools",
+      "priority_lists",
+      "setup"
+     ],
+     "enum_label_keys": {
+      "tools": "jobs.p.report.coverage.sections.tools",
+      "priority_lists": "jobs.p.report.coverage.sections.priority_lists",
+      "setup": "jobs.p.report.coverage.sections.setup"
+     }
+    },
+    {
+     "key": "warn_if_over",
+     "type": "integer",
+     "label_key": "jobs.p.report.coverage.warn_if_over",
+     "title": "Warn If Over",
+     "default": null,
+     "required": false,
+     "widget": null,
+     "min": 0,
+     "max": 1000000
+    }
+   ],
+   "defaults": {
+    "sections": [
+     "tools",
+     "priority_lists",
+     "setup"
+    ],
+    "warn_if_over": null
+   }
+  },
+  {
+   "key": "report.distribution",
+   "label": "Distribution (unresolved and aggregate)",
+   "plant_scoped": true,
+   "kind": "report",
+   "mutates": false,
+   "params": [
+    {
+     "key": "filter_by_window",
+     "type": "boolean",
+     "label_key": "jobs.p.report.distribution.filter_by_window",
+     "title": "Filter By Window",
+     "default": false,
+     "required": false,
+     "widget": null
+    },
+    {
+     "key": "window",
+     "type": "date_window",
+     "label_key": "jobs.p.report.distribution.window",
+     "title": "Window",
+     "default": {
+      "mode": "rolling",
+      "fixed": null,
+      "rolling": {
+       "anchor": "start_of_day",
+       "from_offset": 0,
+       "to_offset": 14,
+       "unit": "day"
+      }
+     },
+     "required": false,
+     "widget": "date-window"
+    },
+    {
+     "key": "warn_if_over",
+     "type": "integer",
+     "label_key": "jobs.p.report.distribution.warn_if_over",
+     "title": "Warn If Over",
+     "default": null,
+     "required": false,
+     "widget": null,
+     "min": 0,
+     "max": 1000000
+    }
+   ],
+   "defaults": {
+    "filter_by_window": false,
+    "window": {
+     "mode": "rolling",
+     "fixed": null,
+     "rolling": {
+      "anchor": "start_of_day",
+      "from_offset": 0,
+      "to_offset": 14,
+      "unit": "day"
+     }
+    },
+    "warn_if_over": null
+   }
+  }
+ ]
+}
