@@ -2442,6 +2442,22 @@ def get_schedule_event_retention_days() -> int:
     return max(SCHEDULE_EVENT_RETENTION_MIN, min(SCHEDULE_EVENT_RETENTION_MAX, value))
 
 
+JOB_RUN_RETENTION_KEY = "job_run_retention_days"
+
+
+def get_job_run_retention_days() -> int:
+    """Typed getter for system_settings.job_run_retention_days (job run history + logs): int-coerced,
+    clamped 1-60, default 14. Never raises; a bad stored value falls back to the default."""
+    try:
+        raw = get_system_settings().get(JOB_RUN_RETENTION_KEY)
+        if raw is None or isinstance(raw, bool):
+            return SCHEDULE_EVENT_RETENTION_DEFAULT
+        value = int(float(raw)) if isinstance(raw, (int, float)) else int(str(raw).strip())
+    except Exception:  # noqa: BLE001 - a settings read must never break the sweep
+        return SCHEDULE_EVENT_RETENTION_DEFAULT
+    return max(SCHEDULE_EVENT_RETENTION_MIN, min(SCHEDULE_EVENT_RETENTION_MAX, value))
+
+
 def upsert_system_settings(patch: dict, user_email: str | None = None) -> dict:
     """Shallow-merge `patch`'s top-level keys into the global settings blob
     (e.g. patch={"orderFields": {...}} replaces just the 'orderFields' key,

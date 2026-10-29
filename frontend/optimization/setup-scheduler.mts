@@ -464,6 +464,8 @@ export interface EvaluationRequest {
   /** Caller-chosen primary search budget in ms (Normal 8000, Exhaustive 180000). Drives the
    *  iteration cap and the gap-fill budget through the engine's bounds builder; absent = 5000. */
   searchBudgetMs?: number;
+  /** Absolute iteration cap replacing the scaled default (deterministic headless runs and tests); absent = scaled default. */
+  iterationCap?: number;
   /** Exhaustive mode: also raises exactSearchThreshold / exactSearchLeafCap / convergenceWindow. */
   exhaustive?: boolean;
 }
