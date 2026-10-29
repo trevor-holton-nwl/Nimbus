@@ -22,6 +22,7 @@ colors:
   signal-ok-soft: "#dff0e6"
   signal-warn: "#93610a"
   signal-warn-soft: "#f8ecd0"
+  signal-warn-text: "#8a5c08"
   signal-warn-vivid: "#f39c12"
   signal-err: "#b02a20"
   signal-err-soft: "#f7ddd9"
@@ -36,6 +37,21 @@ colors:
   chrome-fg-faint: "#7e93ab"
   chrome-accent: "#4d9fff"
   chrome-accent-fg: "#0c1c30"
+  hover-wash: "#eef4fb"
+  stripe-mist: "#f9fafb"
+  row-hairline: "#e8eff3"
+  tab-master-data: "#f0fdf4"
+  tab-master-data-hover: "#dcfce7"
+  bar-standard: "#1f5fbf"
+  bar-firmed: "#b02a20"
+  bar-pm-capacity: "#e0a800"
+  bar-pm-conflicts: "#8750f0"
+  bar-pm-calendar: "#14b8a6"
+  bar-pm-setup: "#c8359a"
+  bar-pm-planning: "#e8602a"
+  bar-pm-exceptions: "#78716c"
+  zone-alert-edge: "#1a7a2e"
+  zone-frozen-edge: "#0f5c1f"
   line-0: "#89419f"
   line-1: "#2d5f8c"
   line-2: "#4f7a3c"
@@ -89,6 +105,22 @@ components:
     rounded: "{rounded.md}"
     padding: "5px 10px"
     height: "30px"
+  badge-warn:
+    backgroundColor: "{colors.signal-warn-soft}"
+    textColor: "{colors.signal-warn}"
+    rounded: "{rounded.sm}"
+  badge-err:
+    backgroundColor: "{colors.signal-err-soft}"
+    textColor: "{colors.signal-err}"
+    rounded: "{rounded.sm}"
+  kpi-tile:
+    backgroundColor: "{colors.panel-white}"
+    textColor: "{colors.ink-navy}"
+    rounded: "{rounded.lg}"
+  update-banner:
+    backgroundColor: "{colors.signal-info-soft}"
+    textColor: "{colors.ink-navy}"
+    height: "34px"
 ---
 
 # Design System: NIMBUS
@@ -132,12 +164,19 @@ The palette is a cool navy/blue console: a permanently-dark chrome layer (comman
 - **Hairline** (`--line` `#d5dce4` light / `#263850` dark) / **Hairline Strong** (`--line-strong` `#c6d0db` light / `#344965` dark): the default border — NIMBUS still separates regions with a 1px line, not a shadow.
 - **Ink Navy** (`--fg` `#1c2b3a` light / `#e8edf3` dark): body text.
 - **Mute Steel Blue** (`--fg-mute` `#5d7186` light / `#90a2b8` dark) / **Faint Steel Blue** (`--fg-faint` `#8fa1b3` light / `#56677c` dark): secondary and tertiary text.
+- **Hover Wash** (`--bg-hover` `#eef4fb` light / `#213146` dark): row/list hover tint. **Stripe Mist** (`--surface-2` `#f9fafb` light / `#182335` dark): zebra-stripe fill, distinct from Mist Subtle. **Row Hairline** (`--line-subtle` `#e8eff3` light / `#1f2e42` dark): the lighter divider between table/list rows. Compatibility aliases defined in both themes: `--surface` (= Panel White), `--text-muted` (= Mute Steel Blue), `--border`/`--border-subtle`, `--font-mono`; prefer the canonical names above in new CSS.
 
 ### Semantic
-- **Signal OK** (`--ok` `#1e7a4a` light / `#3d9962` dark), **Signal Warn** (`--warn` `#93610a` light / `#d09010` dark, with a vivid `#f39c12` light / `#e0a018` dark variant for higher-urgency warnings), **Signal Err** (`--err` `#b02a20` light / `#d94a3a` dark), **Signal Info** (`--info` `#1f5fbf` light / `#4a88c8` dark) — each paired with a `-soft` tint for badge/alert backgrounds. Note: in light mode, Signal Info is now byte-identical to Command Blue (both `#1f5fbf`) — a coincidence of the new palette, not a merge of the two concepts; dark mode keeps them distinct (`#4a88c8` vs `#4d9fff`). These remain the only places color carries meaning beyond chrome/CTA; keep new status colors inside this set rather than inventing a fifth.
+- **Signal OK** (`--ok` `#1e7a4a` light / `#3d9962` dark), **Signal Warn** (`--warn` `#93610a` light / `#d09010` dark, with a vivid `#f39c12` light / `#e0a018` dark variant for higher-urgency warnings; `--warn-text` `#8a5c08` light / `#d09010` dark is the AA-safe text/icon color, since `--warn` itself is only ~3.2:1 on white in light mode and is fill/border-only there), **Signal Err** (`--err` `#b02a20` light / `#d94a3a` dark), **Signal Info** (`--info` `#1f5fbf` light / `#4a88c8` dark) — each paired with a `-soft` tint for badge/alert backgrounds. Note: in light mode, Signal Info is now byte-identical to Command Blue (both `#1f5fbf`) — a coincidence of the new palette, not a merge of the two concepts; dark mode keeps them distinct (`#4a88c8` vs `#4d9fff`). These remain the only places color carries meaning beyond chrome/CTA; keep new status colors inside this set rather than inventing a fifth.
 
 ### Data / Line Palette
-- **line-0 … line-9**: a fixed 10-color qualitative palette (`#89419f #2d5f8c #4f7a3c #8b4c7e #b14a3e #3c6e7a #7a5a2a #5e498b #ae4268 #4a7a5e`) used exclusively to distinguish production lines in the Gantt, utilization strip, and dashboard charts. **Unchanged by the Command Band re-skin** — saturated but not neon, chosen to stay distinguishable under common color-vision deficiencies — treat this as a closed, ordered set; don't recolor a line outside it. (line-0 and line-8 were re-derived 2026-07-13, under the prior amber-accent system: line-0 was previously byte-identical to that system's single accent color, and line-8 was a near-duplicate of line-4. Both stay unchanged in this re-skin — line-0's now-purple value has no relationship to the new Command Blue accent, so there's nothing left to reconcile there.)
+- **line-0 … line-9** (`--l0`…`--l9`): a fixed 10-color qualitative palette (`#89419f #2d5f8c #4f7a3c #8b4c7e #b14a3e #3c6e7a #7a5a2a #5e498b #ae4268 #4a7a5e`) used exclusively to distinguish production lines in the Gantt, utilization strip, and dashboard charts. **Unchanged by the Command Band re-skin** — saturated but not neon, chosen to stay distinguishable under common color-vision deficiencies — treat this as a closed, ordered set; don't recolor a line outside it. (line-0 and line-8 were re-derived 2026-07-13, under the prior amber-accent system: line-0 was previously byte-identical to that system's single accent color, and line-8 was a near-duplicate of line-4. Both stay unchanged in this re-skin — line-0's now-purple value has no relationship to the new Command Blue accent, so there's nothing left to reconcile there.)
+
+### Gantt Bar-Mode and Zone Palette
+- **Order-bar status** (`--bar-standard` `#1f5fbf` / `--bar-firmed` `#b02a20`; dark `#4d9fff` / `#d94a3a`): the Gantt bar fill is a firming status, standard vs. firmed, not a per-line color. Line colors identify the machine row and utilization, not the bar.
+- **Alert Monitor category fills** (`--bar-pm-*`, each with a `-fg` label color, identical in both themes): capacity `#e0a800`, conflicts `#8750f0`, calendar `#14b8a6`, setup `#c8359a`, planning `#e8602a`, exceptions `#78716c`. They fill an order the active alert profile matches and draw the Overview strip and the Gantt legend; every fill/fg pair is at least 4.5:1. The set is closed; a seventh category needs a colorblind-separation check against the bar blue and red first.
+- **Board shading** (true-alpha washes that sit OVER colored bars, so they are not opaque hex): `--zone-past` (elapsed time, gray), `--zone-nonworking` (closed days and off-shift hours, steel-blue 35% light / 20% dark), `--zone-alert` with edge `#1a7a2e` (alert horizon, green), `--zone-frozen` with edge `#0f5c1f` (frozen horizon, deeper green), `--blackout-hatch` / `--blackout-edge` (red diagonal hatch), and `--alertcell-err-*` / `--alertcell-warn-bg` / `--alertcell-cal-*` (per-day severity cells keyed to Signal Err, Signal Warn and Signal Info). All re-tune through tokens in `body.dark`; the Gantt legend reads the same tokens so it cannot drift from the board.
+- **Master Data tab tint** (`--tab-md-bg` `#f0fdf4`, hover `#dcfce7`; dark `#1c3d28` / `#224830`): the green identity of the Master Data top-level tab.
 
 ### Named Rules
 **The CTA/Chrome Color Rule** (replaces the old One-Accent Rule below — this re-skin explicitly departs from "one accent color, never a fill"). Four zones, four jobs — a reader should be able to place any button from this alone:
@@ -152,7 +191,7 @@ To place any button: is it inside `.cmd-band`/`.nav-drawer` (dark chrome)? → b
 
 **The Hairline-Over-Shadow Rule.** Regions are separated by a 1px border by default. A shadow is a deliberate signal that something is floating above the page (a modal, a popover), not a decorative default on every card.
 
-**The Dark-Mode Remap, Not Reversal.** Dark mode re-lights the same navy/blue structure rather than inverting it: `--accent` brightens (`#1f5fbf` → `#4d9fff`) for legibility on a dark page, and `--primary` gets its own lighter navy (`#12263f` → `#2b4f78`) rather than reusing the light-mode value — so content-area CTAs still read as a distinct "action" color against a dark background (a change from the old system, where Deep Slate was literally the same hex in both themes). The `--chrome-*` tokens do not change between themes at all — the command band and drawer are fixed-dark chrome, a deliberate structural exception (see §4 Elevation). Dark-mode coverage elsewhere is still incomplete: some newer components hardcode light-mode colors, and a few token names may be referenced in dark-mode CSS without a matching `:root` definition. Check `:root` and `body.dark` in `styles.css` before assuming a token exists.
+**The Dark-Mode Remap, Not Reversal.** Dark mode re-lights the same navy/blue structure rather than inverting it: `--accent` brightens (`#1f5fbf` → `#4d9fff`) for legibility on a dark page, and `--primary` gets its own lighter navy (`#12263f` → `#2b4f78`) rather than reusing the light-mode value — so content-area CTAs still read as a distinct "action" color against a dark background (a change from the old system, where Deep Slate was literally the same hex in both themes). The `--chrome-*` tokens do not change between themes at all — the command band and drawer are fixed-dark chrome, a deliberate structural exception (see §4 Elevation). Every `:root` color token, including the bar-mode, zone and alert-cell groups and all the compatibility aliases, now has a `body.dark` counterpart (the horizon and elapsed-time washes keep their `:root` values by design). New CSS must add its dark value in the same change and use tokens only; check `:root` and `body.dark` in `styles.css` before assuming a token exists.
 
 ## 3. Typography
 
@@ -185,12 +224,14 @@ NIMBUS is flat by default in the content area. Depth is conveyed almost entirely
 - **md** (`0 2px 6px rgba(12,28,48,0.08), 0 1px 2px rgba(12,28,48,0.04)` light / `0 2px 6px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.28)` dark): dropdowns, tooltips, small floating panels.
 - **lg** (`0 24px 60px rgba(12,28,48,0.4), 0 12px 32px rgba(12,28,48,0.28)` light / `0 8px 24px rgba(0,0,0,0.5), 0 2px 6px rgba(0,0,0,0.3)` dark): modals — the only "clearly floating above everything" surface in the system. Light mode's `lg` step got noticeably deeper in this re-skin (a 24px/60px spread, vs. the old 8px/24px) to match the new chrome's modal depth; dark mode's `lg` did not change.
 
+The left nav drawer also casts a one-off navy shadow (`2px 0 16px rgba(12,28,48,0.35)`) and a scrim (`rgba(12,28,48,0.4)`) because it slides over the page; it is chrome and floats by definition.
+
 ### Named Rules
 **The Floating-Means-Floating Rule.** A shadow above the `sm` step is reserved for something the user should read as temporarily suspended over the interface (a modal, an overlay). Don't reach for `shadow-lg` on a static panel just to make it feel "premium" — that's the legacy-ERP-meets-consumer-SaaS mistake this system explicitly avoids.
 
 ## 5. Components
 
-Components are brisk and exact: 4px corner radius almost everywhere (8px for modals), 1px hairline borders, minimal or no shadow, and fast 0.12–0.18s transitions. Nothing bounces or lingers — a hover state should feel like a mechanical switch registering, not a soft fade.
+Components are brisk and exact: 4px corner radius almost everywhere (8px for modals), 1px hairline borders, minimal or no shadow, and fast 0.12–0.18s transitions (`--t-fast` 0.12s, `--t-med` 0.18s; the drawer slide is the one slower move at 0.22s). Chrome heights are tokens: command band 46px (`--band-h`), context bar 40px (`--context-h`). Entrance animations are disabled under reduced-motion. Nothing bounces or lingers — a hover state should feel like a mechanical switch registering, not a soft fade.
 
 ### Buttons
 - **Shape:** 4px radius (`--r-md`), 30px height by default, 38px for `.btn-lg`, 24px for `.btn.sm`.
@@ -226,8 +267,18 @@ Components are brisk and exact: 4px corner radius almost everywhere (8px for mod
 - **Toasts:** solid Signal color fill (`ok`/`err`/`warn`/`info`), white text, slide-and-fade transitions.
 - **Badges:** `-soft` tint background with the matching Signal text color — the soft/solid split is how NIMBUS distinguishes "a status label" (soft) from "an ephemeral notification" (solid toast).
 
+### Update Banner
+- **Style:** `.update-banner` is a single in-flow 34px strip under the context bar: Signal Info soft tint, a Signal Info bottom border, Control-size text, a leading info glyph, and the build id in mono. It is advisory ("a newer build is live"), not an alarm, so it never uses Signal Err. Fixed-top siblings step down by its height while it shows.
+
+### Stack-Count Badge
+- **Style:** `.row-stack-toggle` on a Gantt machine label is a 10px-radius pill, Signal Err soft tint with Signal Err text, 11px/700. It marks a collapsed row hiding overlapping orders; expanded, it inverts to a solid Signal Err fill and the row takes the Accent Wash. An invisible slot of the same width keeps label columns aligned when no badge is shown.
+
+### Inspector and Alert Monitor Surfaces
+- **Inspector cards** (`.insp-card`): Panel White, Hairline border, 4px radius, 12px padding; the heading is the plain uppercase Label (11px/700/0.07em), rows are a 110px label column plus a mono value separated by dashed hairlines.
+- **Alert Monitor rows** (`.am-row`): one 44px line per alert (severity glyph, mono prefix, message, mono "when" column, actions) separated by an inset hairline, hover Mist Subtle; no cards, no side stripes. The Overview band above them (When / Where / What) and the Top-fixes list reuse standard panels with hairlines and the `--bar-pm-*` fills.
+
 ### Signature Component: The Gantt (vis-timeline)
-The production timeline is a third-party vis-timeline instance re-skinned to the token system rather than left in its default library styling — panel backgrounds, the time axis, and line-group labels are all explicitly overridden (especially in dark mode, where the library's own white background is force-overridden). Blackout blocks render as a diagonal red hatch, not a solid fill, so they read as "unavailable" rather than "an order." This re-skinning discipline — never ship a third-party component in its default look — is itself a rule worth carrying forward for any future library integration (AG Grid, Flatpickr, etc.), and held true through this re-skin as well: the Gantt's own line-block coloring (`--l0`..`--l9`) was deliberately left untouched.
+The production timeline is a third-party vis-timeline instance re-skinned to the token system rather than left in its default library styling — panel backgrounds, the time axis, and line-group labels are all explicitly overridden (especially in dark mode, where the library's own white background is force-overridden). Blackout blocks render as a diagonal red hatch, not a solid fill, so they read as "unavailable" rather than "an order." Order bars fill by firming status (Bar-Mode palette in §2) and shading, horizons and alert cells are token washes over them. A Legend popup (`#modal-gantt-legend`) draws a miniature board from the same tokens, so its swatches always match the live board. Overlapping orders stack into one row with a count badge that expands on click. This re-skinning discipline — never ship a third-party component in its default look — is itself a rule worth carrying forward for any future library integration (AG Grid, Flatpickr, etc.), and held true through this re-skin as well: the Gantt's own line-block coloring (`--l0`..`--l9`) was deliberately left untouched.
 
 ## 6. Do's and Don'ts
 
@@ -246,5 +297,7 @@ The production timeline is a third-party vis-timeline instance re-skinned to the
 - **Don't** add gradient-hero sections, gradient text, or glassmorphism as a decorative default — that's the generic-consumer-SaaS gloss this system explicitly rejects.
 - **Don't** use dated grid-of-forms ERP layouts, oversized bordered table cells, or beige/gray corporate-form styling — that's the legacy-ERP clunk this system explicitly rejects.
 - **Don't** use `border-left`/`border-right` as a colored accent stripe on cards or list rows — full borders, background tints, or a leading icon instead. (The one sanctioned exception is the KPI-tile `border-top` severity pattern in §5 — top, not side, and only on `.kpi-tile`.)
-- **Don't** reference a CSS variable name that isn't defined in `:root` or `body.dark` without checking first. The specific tokens this used to warn about (`--border`, `--border-subtle`, `--font-mono`, `--nimbus-amber`/`--amber`, `--bg-float`) are now all defined in `:root` as of the Command Band re-skin — but dark-mode coverage is still not complete for every token (e.g. `--bg-hover` is only defined in `:root`, with no `body.dark` re-tune), so the caution still applies to anything new you introduce.
+- **Don't** reference a CSS variable name that isn't defined in `:root` or `body.dark` without checking first, and don't add a `:root` color without its `body.dark` value. The compatibility aliases (`--border`, `--border-subtle`, `--font-mono`, `--nimbus-amber`/`--amber`, `--bg-float`, `--surface`, `--text-muted`) are all defined, but prefer the canonical token names in new CSS.
+- **Don't** use `--warn` as small text or an icon color on a light surface (~3.2:1); use `--warn-text`. `--warn` is for fills, borders and tints.
+- **Don't** add a status or category color outside Signal OK/Warn/Err/Info and the six `--bar-pm-*` fills, and don't tint a Gantt bar by anything but firming status or the active alert category.
 - **Don't** reach for `--shadow-lg` on a static, non-floating panel just to make it feel more "premium" — see The Floating-Means-Floating Rule.
