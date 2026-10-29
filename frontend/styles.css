@@ -8350,3 +8350,35 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
   .job-log-at, .job-log-dur { display: none; }
   .job-col-recur { display: none; }
 }
+
+/* W3b: maintenance banner + toggle, Advanced scheduling rules, preview notes, runs timeline. Existing tokens only; no
+   element below is shown or hidden with the `hidden` attribute (they are rendered or omitted), so no [hidden] pairs. */
+.job-maint { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.job-maint-banner { flex: 1 1 320px; margin-bottom: 0; background: var(--warn-soft); color: var(--warn-text); }
+.job-maint-since { font-weight: 400; }
+.job-maint-btn { margin-left: auto; }
+.job-note { margin-left: 4px; font-weight: 500; }
+.job-skipped { margin-top: 6px; }
+.job-tl { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.job-tl-row { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 10px; align-items: center; min-width: 0; }
+.job-tl-name { display: flex; flex-direction: column; min-width: 0; font-size: 12px; line-height: 1.25; }
+.job-tl-name > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-tl-plant { font-weight: 600; }
+.job-tl-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--fg-mute); white-space: nowrap; }
+.job-tl-svg { width: 100%; height: 28px; display: block; background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-sm); }
+.job-tl-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.job-tl-nowline { stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.job-tl-bar { cursor: pointer; outline: none; }
+.job-tl-bar rect { fill: var(--fg-mute); vector-effect: non-scaling-stroke; }
+.job-tl-bar.s-succeeded rect { fill: var(--ok); }
+.job-tl-bar.s-warning rect, .job-tl-bar.s-missed rect { fill: var(--warn); }
+.job-tl-bar.s-failed rect { fill: var(--err); }
+.job-tl-bar.s-running rect, .job-tl-bar.s-scheduled rect { fill: var(--info); }
+.job-tl-bar.s-upcoming rect { fill: var(--bg-elev); stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 3 2; }
+.job-tl-bar:hover rect, .job-tl-bar:focus-visible rect { stroke: var(--fg); stroke-width: 2; stroke-dasharray: none; }
+.job-tl-list { margin-top: 8px; }
+.job-tl-list > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--fg-mute); margin-bottom: 6px; }
+@media (max-width: 640px) {
+  .job-tl-row { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .job-tl-axis-row > div:first-child { display: none; }
+}

@@ -11,7 +11,7 @@
 
 import { Util, Config } from '../platform/foundation.mjs';
 import { buildJobsQuery, buildRunsQuery, buildBatchesQuery, buildLogQuery, normColumnType } from './jobs-model.mjs';
-import type { JobsQuery, RunsQuery, BatchesQuery, Batch, JobTarget, TzMode, LogLine, RunSummary, HealthSummary, Proposal, TypeMeta, ParamMeta, DateWindow, Artifact, ArtifactSection } from './jobs-model.mjs';
+import type { JobsQuery, RunsQuery, BatchesQuery, Batch, JobTarget, TzMode, Timeline, TimelineLane, TimelineRun, TimelineUpcoming, LogLine, RunSummary, HealthSummary, Proposal, TypeMeta, ParamMeta, DateWindow, Artifact, ArtifactSection } from './jobs-model.mjs';
 
 export interface JobSchedule {
   id: number;
@@ -29,6 +29,9 @@ export interface JobSchedule {
   /** How the times are read: each plant's own zone (`plant`), one `fixed` zone (`fixedTimezone`) or `utc`. */
   tzMode: TzMode;
   fixedTimezone: string | null;
+  /** W3b policy as stored (null = every default) and the last fire the scheduler saw (UTC ISO). */
+  options: Record<string, unknown> | null;
+  lastFireAt: string | null;
 }
 
 export interface JobRun {
@@ -82,14 +85,18 @@ export type JobType = TypeMeta;
 export interface WindowPreview { start: string; end: string; label: string; timezone: string }
 
 /** One plant's fires in a multi-plant schedule preview (each in that plant's own zone). */
-export interface PlantPreview { plant: string; timezone: string; entries: UpcomingEntry[] }
-export interface SchedulePreview { timezone: string; cronExpr: string | null; entries: UpcomingEntry[]; plants: PlantPreview[]; totalPlants: number; warnings: string[] }
+export interface PlantPreview { plant: string; timezone: string; entries: UpcomingEntry[]; skipped: SkippedEntry[] }
+/** An occurrence the schedule's rules removed, with the reason code (closed_day | no_working_day | dst_gap | outside_run_window). */
+export interface SkippedEntry { atUtc: string; atLocal: string; reason: string }
+export interface SchedulePreview { timezone: string; cronExpr: string | null; entries: UpcomingEntry[]; skipped: SkippedEntry[]; plants: PlantPreview[]; totalPlants: number; warnings: string[] }
 /** POST /jobs/targets/preview: what a target selection runs for, in run order (paged). */
 export interface TargetsPreview { plants: Array<{ plant: string; timezone: string | null; warning: string | null }>; count: number; skipped: number; warnings: string[] }
 
 /** One upcoming fire: `atLocal` is the plant wall clock (offset kept on the wire, ignore it), `atUtc` the instant. */
 export interface UpcomingEntry {
   atUtc: string; atLocal: string; dstShifted: boolean;
+  /** dst_gap_shifted | dst_overlap_second | moved_next_working_day | moved_previous_working_day | deferred_to_window | null. */
+  policyNote?: string | null;
   jobId?: number; jobName?: string; plant?: string; scheduleId?: number; timezone?: string;
 }
 
@@ -137,6 +144,7 @@ export function normSchedule(r: Raw): JobSchedule {
     day_of_month: _n(r.day_of_month), run_at: _s(r.run_at), timezone: _s(r.timezone),
     valid_from: _s(r.valid_from), valid_until: _s(r.valid_until), paused: !!r.paused, skip_if_running: r.skip_if_running !== false,
     tzMode: r.tz_mode === 'fixed' || r.tz_mode === 'utc' ? r.tz_mode : 'plant', fixedTimezone: _s(r.fixed_timezone),
+    options: r.options && typeof r.options === 'object' ? (r.options as Record<string, unknown>) : null, lastFireAt: _s(r.last_fire_at),
   };
 }
 
@@ -186,11 +194,34 @@ export function normBatch(r: Raw): Batch {
 
 export function normEntry(r: Raw): UpcomingEntry {
   return {
-    atUtc: String(r.at_utc ?? ''), atLocal: String(r.at_local ?? ''), dstShifted: !!r.dst_shifted,
+    atUtc: String(r.at_utc ?? ''), atLocal: String(r.at_local ?? ''), dstShifted: !!r.dst_shifted, policyNote: _s(r.policy_note),
     jobId: r.job_id == null ? undefined : Number(r.job_id), jobName: r.job_name == null ? undefined : String(r.job_name),
     plant: r.plant == null ? undefined : String(r.plant), scheduleId: r.schedule_id == null ? undefined : Number(r.schedule_id),
     timezone: r.timezone == null ? undefined : String(r.timezone),
   };
+}
+
+export function normSkipped(r: Raw): SkippedEntry {
+  return { atUtc: String(r.at_utc ?? ''), atLocal: String(r.at_local ?? ''), reason: String(r.reason ?? '') };
+}
+
+export function normTimeline(data: unknown): Timeline {
+  const d = (data as Raw | null) ?? {};
+  const lanes: TimelineLane[] = _arr(d, 'lanes').map(l => ({
+    plant: String(l.plant), timezone: String(l.timezone ?? 'UTC'), nowLocal: String(l.now_local ?? ''),
+    runs: _arr(l, 'runs').map((r): TimelineRun => ({
+      id: Number(r.id), jobId: Number(r.job_id), jobName: String(r.job_name ?? ''), jobType: String(r.job_type ?? ''), status: String(r.status ?? ''),
+      trigger: _s(r.trigger), batchId: r.batch_id == null ? null : Number(r.batch_id), error: _s(r.error), scheduledFor: _s(r.scheduled_for),
+      startUtc: _s(r.start_utc), endUtc: _s(r.end_utc),
+    })),
+    upcoming: _arr(l, 'upcoming').map((u): TimelineUpcoming => ({
+      atUtc: String(u.at_utc ?? ''), atLocal: String(u.at_local ?? ''), jobId: Number(u.job_id), jobName: String(u.job_name ?? ''),
+      scheduleId: Number(u.schedule_id), dstShifted: !!u.dst_shifted, policyNote: _s(u.policy_note),
+    })),
+  }));
+  return { from: String(d.from ?? ''), to: String(d.to ?? ''), nowUtc: String(d.now_utc ?? ''), lanes, totalPlants: Number(d.total_plants ?? lanes.length),
+    plantOffset: Number(d.plant_offset ?? 0), plantLimit: Number(d.plant_limit ?? 20), truncated: d.truncated === true,
+    upcomingTruncated: d.upcoming_truncated === true };
 }
 
 export function normLog(data: unknown): LogPage {
@@ -214,7 +245,13 @@ export function normHealth(data: unknown): HealthSummary {
     nextFire: nf ? { atUtc: String(nf.at_utc ?? ''), atLocal: String(nf.at_local ?? ''), jobId: Number(nf.job_id), jobName: String(nf.job_name ?? ''), plant: String(nf.plant ?? '') } : null,
     scheduler: { ok: sch.ok === true, lastTickAt: _s(sch.last_tick_at) },
     longerThanUsual: Array.isArray(d.longer_than_usual) ? (d.longer_than_usual as unknown[]).map(Number) : [],
+    maintenance: normMaintenance(d.maintenance),
   };
+}
+
+export function normMaintenance(v: unknown): NonNullable<HealthSummary['maintenance']> {
+  const m = (v as Raw | null) ?? {};
+  return { enabled: m.enabled === true, since: _s(m.since), by: _s(m.by) };
 }
 
 export function normProposal(data: unknown): Proposal {
@@ -290,7 +327,8 @@ export const JobsClient = {
     const data = await _req('POST', '/jobs/schedules/preview', body) as Raw | null;
     return {
       timezone: String(data?.timezone ?? ''), cronExpr: _s(data?.cron_expr), entries: _arr(data, 'entries').map(normEntry),
-      plants: _arr(data, 'plants').map(p => ({ plant: String(p.plant), timezone: String(p.timezone ?? ''), entries: _arr(p, 'entries').map(normEntry) })),
+      skipped: _arr(data, 'skipped').map(normSkipped),
+      plants: _arr(data, 'plants').map(p => ({ plant: String(p.plant), timezone: String(p.timezone ?? ''), entries: _arr(p, 'entries').map(normEntry), skipped: _arr(p, 'skipped').map(normSkipped) })),
       totalPlants: Number(data?.total_plants ?? 1), warnings: Array.isArray(data?.warnings) ? (data?.warnings as unknown[]).map(String) : [],
     };
   },
@@ -337,6 +375,19 @@ export const JobsClient = {
   /** Health strip counts for one plant ('' = all the viewer's plants). */
   async summary(plant: string): Promise<HealthSummary> {
     return normHealth(await _req('GET', `/jobs/summary${plant ? `?plant=${encodeURIComponent(plant)}` : ''}`));
+  },
+  /** Maintenance mode on / off (admin; global): while on, scheduled and catch-up runs are recorded as skipped. */
+  async setMaintenance(enabled: boolean): Promise<NonNullable<HealthSummary['maintenance']>> {
+    return normMaintenance(await _req('POST', '/jobs/maintenance', { enabled }));
+  },
+  /** Runs and upcoming fires in [from, to) as one lane per plant (paged by plant); `plant` narrows to that plant's lane. */
+  async timeline(o: { from: string; to: string; plant?: string; plantOffset?: number; plantLimit?: number; limit?: number }): Promise<Timeline> {
+    const q = new URLSearchParams({ from: o.from, to: o.to });
+    if (o.plant) q.set('plant', o.plant);
+    if (o.plantOffset) q.set('plant_offset', String(o.plantOffset));
+    q.set('plant_limit', String(o.plantLimit ?? 20));
+    if (o.limit) q.set('limit', String(o.limit));
+    return normTimeline(await _req('GET', `/jobs/timeline?${q}`));
   },
   /** A dry run's proposal joined to the live orders (read-only). */
   async proposal(runId: number): Promise<Proposal> { return normProposal(await _req('GET', `/jobs/runs/${runId}/proposal`)); },

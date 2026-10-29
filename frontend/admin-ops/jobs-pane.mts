@@ -21,13 +21,14 @@ import { OverflowMenu } from '../platform/overflow-menu.mjs';
 import type { MenuItem } from '../platform/overflow-menu.mjs';
 import { JobsClient } from './jobs-client.mjs';
 import type { Job, JobRun, JobType } from './jobs-client.mjs';
-import type { Batch } from './jobs-model.mjs';
+import type { Batch, Timeline, TlRange } from './jobs-model.mjs';
 import { JobsDialog, mkCombobox, allowedPlantList, jobsDeps, plantTimezone } from './jobs-dialog.mjs';
 import { JobsRunDetail, resultBadgeHtml, reportBadgeHtml } from './jobs-run-detail.mjs';
 import {
   RUN_STATUSES, PERIODICITIES, JOBS_PAGE, runStatusHtml, recurrenceText, durationText, weekStrip, isoDayKey, addDays, plantWall, stripOffset,
   mergeRuns, stripCompleteThrough, healthTiles, heartbeatState, ageText, shouldPollJobs, runSequential, isActiveRun, isLongerThanUsual, tzShort,
   typeLabel, typeGroups, findType, isReportType, targetsLabel, batchTiles, statusBadgeHtml, statusLabel, BATCH_STATUSES, plural,
+  TL_RANGES, TL_W, timelineWindow, timelineBars, timelineTicks, timelineRows, policyNoteText, statusBadgeClass,
 } from './jobs-model.mjs';
 import type { UpcomingRun, HealthSummary, RunsQuery } from './jobs-model.mjs';
 import type { UpcomingEntry } from './jobs-client.mjs';
@@ -67,7 +68,11 @@ let _nextBeforeJob: number | null = null;
 let _runs: JobRun[] = [];
 let _nextBefore: number | null = null;
 let _runPages = 1;               // pages of the runs list loaded (the poll merges instead of replacing when > 1)
-let _runView: 'runs' | 'batches' = 'runs';   // Runs tab: every child run as one flat list, or one row per fan-out batch
+let _runView: 'runs' | 'batches' | 'timeline' = 'runs';   // Runs tab: every child run as one flat list, one row per fan-out batch, or the lanes timeline
+let _tlRange: TlRange = '24h';
+let _tlListOpen = false;         // the timeline's "list" <details> stays open across the 15 s repaints
+let _tlOffset = 0;               // first plant lane of the page (the server pages the lanes by plant)
+let _tlSeq = 0;                  // the newest timeline request wins
 let _batchStatus = '';           // batches view: rollup status filter
 let _batches: Batch[] = [];
 let _nextBeforeBatch: number | null = null;
@@ -103,7 +108,7 @@ function _busy(host: HTMLElement, on: boolean): void { host.setAttribute('aria-b
  *  rebuild the table: it would drop focus, text selection and scroll anchoring). */
 const _painted = new WeakMap<HTMLElement, string>();
 const _FOCUS_ATTRS = ['data-jobs-batch', 'data-jobs-batch-open', 'data-jobs-batch-restart', 'data-jobs-batch-cancel', 'data-jobs-batch-more',
-  'data-jobs-menu', 'data-jobs-sel', 'data-run-id', 'data-jobs-act'];
+  'data-jobs-menu', 'data-jobs-sel', 'data-run-id', 'data-jobs-act', 'data-tl-key'];
 /** A selector that finds the control that has focus again after a repaint (null when nothing in the host is focused). */
 function _focusSelector(host: HTMLElement): string | null {
   const a = document.activeElement as HTMLElement | null;
@@ -194,6 +199,7 @@ async function _loadHealth(): Promise<void> {
     const h = await JobsClient.summary(_plant);
     if (my !== _healthSeq) return;
     _health = h;
+    _renderMaint(h.maintenance);
     // The heartbeat age is computed from the clock, so the minute bucket is part of the signature.
     const sig = `${JSON.stringify(h)}|${Math.floor(Date.now() / 60000)}`;
     if (sig !== _healthSig) { host.innerHTML = _healthHtml(h); _healthSig = sig; }
@@ -706,13 +712,17 @@ function _renderRunsTab(): void {
   if (!host) return;
   JobsRunDetail.stop();
   const viewSel = `<div class="job-field"><label class="job-field-l" for="jobs-runs-view">${esc(t('jobs.f_view'))}</label><select class="input" id="jobs-runs-view">`
-    + (['runs', 'batches'] as const).map(v => `<option value="${v}"${v === _runView ? ' selected' : ''}>${esc(t(`jobs.view_${v}`))}</option>`).join('') + `</select></div>`;
+    + (['runs', 'batches', 'timeline'] as const).map(v => `<option value="${v}"${v === _runView ? ' selected' : ''}>${esc(t(`jobs.view_${v}`))}</option>`).join('') + `</select></div>`;
   const batchToolbar = `<div class="job-toolbar">${_plantFilterHtml('jobs-runs')}${viewSel}`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-bstatus">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-bstatus"><option value="">${esc(t('jobs.status_any'))}</option>`
     + BATCH_STATUSES.map(b => `<option value="${b}"${b === _batchStatus ? ' selected' : ''}>${esc(statusLabel(b === 'running' ? 'running' : b, jobsDeps()))}</option>`).join('') + `</select></div>`
     + `<button type="button" class="btn btn-ghost" data-jobs-act="refresh-runs">${esc(t('btn.refresh'))}</button></div>`;
-  host.innerHTML = `<div id="jobs-runs-main">${_runView === 'batches' ? batchToolbar : `<div class="job-toolbar">${_plantFilterHtml('jobs-runs')}${viewSel}`}`
-    + (_runView === 'batches' ? '' : `<div class="job-field"><label class="job-field-l" for="jobs-runs-status">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-status">${_statusOptions(_runStatus)}</select></div>`
+  const tlToolbar = `<div class="job-toolbar">${_plantFilterHtml('jobs-runs')}${viewSel}`
+    + `<div class="job-field"><label class="job-field-l" for="jobs-tl-range">${esc(t('jobs.tl_range'))}</label><select class="input" id="jobs-tl-range">`
+    + TL_RANGES.map(r => `<option value="${r}"${r === _tlRange ? ' selected' : ''}>${esc(t(`jobs.tl_${r}`))}</option>`).join('') + `</select></div>`
+    + `<button type="button" class="btn btn-ghost" data-jobs-act="refresh-runs">${esc(t('btn.refresh'))}</button></div>`;
+  host.innerHTML = `<div id="jobs-runs-main">${_runView === 'batches' ? batchToolbar : _runView === 'timeline' ? tlToolbar : `<div class="job-toolbar">${_plantFilterHtml('jobs-runs')}${viewSel}`}`
+    + (_runView !== 'runs' ? '' : `<div class="job-field"><label class="job-field-l" for="jobs-runs-status">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-status">${_statusOptions(_runStatus)}</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-type">${esc(t('jobs.f_type'))}</label><select class="input" id="jobs-runs-type"><option value="">${esc(t('jobs.type_any'))}</option>`
     + _typeOptionsHtml(_runType) + `</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-runs-period">${esc(t('jobs.f_periodicity'))}</label><select class="input" id="jobs-runs-period">${_periodicityOptions(_periodicity)}</select></div>`
@@ -721,9 +731,135 @@ function _renderRunsTab(): void {
     + `<button type="button" class="btn btn-ghost" data-jobs-act="refresh-runs">${esc(t('btn.refresh'))}</button></div>`)
     + `<div id="jobs-runs-list"></div><span class="job-sr" id="jobs-runs-live" role="status" aria-live="polite"></span></div><div id="jobs-run-detail" hidden></div>`;
   _announced = '';
-  _mountPlantCombo('jobs-runs', () => { void (_runView === 'batches' ? _loadBatches() : _loadRuns()); void _loadHealth(); });
-  void (_runView === 'batches' ? _loadBatches() : _loadRuns());
+  _mountPlantCombo('jobs-runs', () => { _tlOffset = 0; void _loadRunsView(); void _loadHealth(); });
+  void _loadRunsView();
   _armRunsPoll();
+}
+
+/* ---------------------------------------------------------------------------
+   Runs timeline (Runs tab, View = Timeline): one lane per plant on ONE shared time axis; plain SVG, no timeline library.
+   Bars are runs (colour from the status vocabulary; the label and title always say the status) and upcoming fires
+   (dashed outline) computed by the server's own occurrence stream. The same items are listed as a table below.
+   ------------------------------------------------------------------------- */
+const TL_PAGE = 20;              // plant lanes per page (the server's default)
+
+function _loadRunsView(mode: 'replace' | 'append' | 'refresh' = 'replace'): Promise<void> {
+  if (_runView === 'timeline') return _loadTimeline(mode);
+  return _runView === 'batches' ? _loadBatches(mode) : _loadRuns(mode);
+}
+
+async function _loadTimeline(mode: 'replace' | 'append' | 'refresh' = 'replace'): Promise<void> {
+  const my = ++_tlSeq;
+  const host = _el('jobs-runs-list');
+  if (!host) return;
+  if (mode === 'replace') { _busy(host, true); _setHtml(host, _skeletonHtml()); }
+  const now = Date.now();
+  const win = timelineWindow(_tlRange, now);
+  try {
+    const tl = await JobsClient.timeline({ from: win.from, to: win.to, plant: _plant, plantOffset: _tlOffset, plantLimit: TL_PAGE });
+    if (my !== _tlSeq || _runView !== 'timeline') return;          // a newer request, or the view changed meanwhile
+    if (_tlOffset > 0 && !tl.lanes.length) {                       // the page is past the end (plants went away): clamp, ask again
+      _tlOffset = tl.totalPlants > 0 ? Math.floor((tl.totalPlants - 1) / TL_PAGE) * TL_PAGE : 0;
+      if (_tlOffset !== tl.plantOffset) { void _loadTimeline(mode); return; }
+    }
+    _setHtml(host, _timelineHtml(tl, win.fromMs, win.toMs, now));
+    _busy(host, false);
+    _announce(t('jobs.tl_page', { from: tl.lanes.length ? tl.plantOffset + 1 : 0, to: tl.plantOffset + tl.lanes.length, total: tl.totalPlants }), 'jobs-runs-live');
+  } catch (e) {
+    if (my === _tlSeq && _runView === 'timeline') { _setHtml(host, _errorHtml(e as Error)); _busy(host, false); }
+  }
+}
+
+/** A bar's or row's one-line description: job, status, and the plant's own wall clock. */
+function _tlWhen(iso: string, tz: string): string {
+  const z = tzShort(tz, iso);
+  return `${Util.fmtDTPref(plantWall(iso, tz))}${z ? ` ${z}` : ''}`;
+}
+
+function _timelineHtml(tl: Timeline, fromMs: number, toMs: number, nowMs: number): string {
+  const d = jobsDeps();
+  const paging = tl.totalPlants > TL_PAGE || tl.plantOffset > 0
+    ? `<div class="job-pager"><span class="job-sub">${esc(t('jobs.tl_page', { from: tl.lanes.length ? tl.plantOffset + 1 : 0, to: tl.plantOffset + tl.lanes.length, total: tl.totalPlants }))}</span>`
+      + `<button type="button" class="btn btn-ghost sm" data-jobs-act="tl-prev"${tl.plantOffset <= 0 ? ' disabled' : ''}>${esc(t('jobs.tl_prev'))}</button>`
+      + `<button type="button" class="btn btn-ghost sm" data-jobs-act="tl-next"${tl.plantOffset + tl.lanes.length >= tl.totalPlants ? ' disabled' : ''}>${esc(t('jobs.tl_next'))}</button></div>`
+    : '';
+  if (!tl.lanes.length) return `<div class="empty-state job-empty">${esc(t('jobs.tl_empty'))}</div>${paging}`;
+  const ticks = timelineTicks(_tlRange, fromMs, toMs, nowMs);
+  const axis = `<div class="job-tl-row job-tl-axis-row"><div></div><div class="job-tl-axis" aria-hidden="true">${ticks.map(k => `<span>${esc(k.labelKey === 'jobs.tl_now_axis' ? t(k.labelKey) : t(k.labelKey, { n: k.n }))}</span>`).join('')}</div></div>`;
+  const nowX = ((nowMs - fromMs) / (toMs - fromMs)) * TL_W;
+  const lanes = tl.lanes.map(l => {
+    const bars = timelineBars(l, fromMs, toMs, nowMs).map(b => {
+      const iso = new Date(b.startMs).toISOString();
+      const label = b.kind === 'run'
+        ? `${b.jobName}: ${statusLabel(b.status, d)}, ${_tlWhen(iso, l.timezone)}`
+        : `${b.jobName}: ${t('jobs.tl_kind_upcoming')}, ${_tlWhen(iso, l.timezone)}${b.note ? ` (${policyNoteText(b.note, d)})` : b.shifted ? ` (${policyNoteText('dst_gap_shifted', d)})` : ''}`;
+      const target = b.runId != null ? `data-tl-run="${b.runId}"` : `data-tl-job="${b.jobId}" data-tl-name="${esc(b.jobName)}"`;
+      return `<g class="job-tl-bar s-${esc(b.status)}" tabindex="0" role="button" data-tl-key="${esc(b.key)}" ${target} aria-label="${esc(label)}"><title>${esc(label)}</title>`
+        + `<rect x="${b.x.toFixed(1)}" y="5" width="${b.w.toFixed(1)}" height="18" rx="3"/></g>`;
+    }).join('');
+    const grid = ticks.map(k => `<line class="job-tl-grid" x1="${(k.pct * TL_W / 100).toFixed(1)}" x2="${(k.pct * TL_W / 100).toFixed(1)}" y1="0" y2="28"/>`).join('');
+    const nowTxt = `${Util.fmtDTPref(stripOffset(l.nowLocal))} ${tzShort(l.timezone, tl.nowUtc)}`.trim();
+    return `<div class="job-tl-row"><div class="job-tl-name"><span class="job-mono job-tl-plant">${esc(l.plant)}</span>`
+      + `<span class="job-sub">${esc(l.timezone)}</span><span class="job-sub job-tl-now">${esc(t('jobs.tl_now', { time: nowTxt }))}</span></div>`
+      + `<svg class="job-tl-svg" viewBox="0 0 ${TL_W} 28" preserveAspectRatio="none" role="group" aria-label="${esc(t('jobs.tl_lane', { plant: l.plant }))}">`
+      + `${grid}<line class="job-tl-nowline" x1="${nowX.toFixed(1)}" x2="${nowX.toFixed(1)}" y1="0" y2="28"/>${bars}</svg></div>`;
+  }).join('');
+  const rows = timelineRows(tl);
+  const table = `<details class="job-tl-list"${_tlListOpen ? ' open' : ''}><summary id="jobs-tl-sum">${esc(t('jobs.tl_list'))}</summary><div class="job-table-wrap"><table class="job-table"><thead><tr>`
+    + [t('jobs.col_plant'), t('jobs.col_name'), t('jobs.tl_col_kind'), t('jobs.col_status'), t('jobs.tl_col_when')].map(h => `<th scope="col">${esc(h)}</th>`).join('')
+    + `</tr></thead><tbody>${rows.map((r, i) => {
+      const target = r.runId != null ? `data-tl-run="${r.runId}"` : `data-tl-job="${r.jobId}" data-tl-name="${esc(r.jobName)}"`;
+      const status = r.kind === 'run' ? `<span class="badge ${statusBadgeClass(r.status)} job-status">${esc(statusLabel(r.status, d))}</span>` : `<span class="badge badge-muted job-status">${esc(t('jobs.tl_kind_upcoming'))}</span>`;
+      const note = r.note ? ` <span class="job-sub">${esc(policyNoteText(r.note, d))}</span>` : '';
+      return `<tr class="job-run-row" tabindex="0" data-tl-key="row${i}" ${target}><td class="job-mono">${esc(r.plant)}</td><td class="job-name">${esc(r.jobName)}</td>`
+        + `<td>${esc(t(r.kind === 'run' ? 'jobs.tl_kind_run' : 'jobs.tl_kind_upcoming'))}</td><td>${status}</td><td class="job-mono">${esc(_tlWhen(r.whenUtc, r.timezone))}${note}</td></tr>`;
+    }).join('')}</tbody></table></div></details>`;
+  return `<div class="job-tl" role="region" aria-label="${esc(t('jobs.tl_label'))}">${axis}${lanes}</div>`
+    + `<div class="ape-hint">${esc(t('jobs.tl_note'))}</div>`
+    + (tl.truncated ? `<div class="ape-hint" role="note">${esc(t('jobs.tl_truncated'))}</div>` : '')
+    + (tl.upcomingTruncated ? `<div class="ape-hint" role="note">${esc(t('jobs.tl_upcoming_truncated'))}</div>` : '') + paging + table;
+}
+
+/** A bar or a table row of the timeline was activated: a run opens its detail, an upcoming fire opens its job in the Jobs tab. */
+function _tlActivate(el: HTMLElement): void {
+  if (el.dataset.tlRun) { void _openRun(Number(el.dataset.tlRun)); return; }
+  if (el.dataset.tlJob) { _q = el.dataset.tlName ?? ''; _plant = ''; _status = ''; _type = ''; _setTab('jobs'); }
+}
+
+/* ---------------------------------------------------------------------------
+   Maintenance mode: an admin toggle beside the sub-tabs and a persistent banner while it is on
+   ------------------------------------------------------------------------- */
+let _maintSig = '';
+/** The pause switch is global, so only a plant-unrestricted admin may use it (the server answers 403 to a scoped one):
+ *  a scoped admin sees the button disabled with the reason beside it. A plain button whose LABEL says the next action
+ *  (no aria-pressed: a pressed state plus a flipping label would be read twice). */
+function _renderMaint(m: HealthSummary['maintenance']): void {
+  const host = _el('jobs-maint');
+  if (!host) return;
+  const on = !!m?.enabled; const admin = _isAdmin(); const scoped = Session.allowedPlants() !== null;
+  const sig = `${on}|${m?.since ?? ''}|${m?.by ?? ''}|${admin}|${scoped}`;
+  if (sig === _maintSig) return;
+  _maintSig = sig;
+  const hadFocus = document.activeElement?.id === 'jobs-maint-btn';
+  const since = on && m?.since ? t('jobs.maint_since', { at: _fmt(m.since), who: m.by ?? '—' }) : '';
+  host.innerHTML = (on ? `<div class="job-banner job-maint-banner" role="status">${esc(t('jobs.maint_banner'))}${since ? ` <span class="job-maint-since">${esc(since)}</span>` : ''}</div>` : '')
+    + (admin ? `<button type="button" class="btn btn-ghost sm job-maint-btn" id="jobs-maint-btn" data-jobs-act="maint"${scoped ? ' disabled aria-describedby="jobs-maint-why"' : ''}>${esc(t(on ? 'jobs.maint_off_btn' : 'jobs.maint_on_btn'))}</button>`
+      + (scoped ? `<span class="ape-hint" id="jobs-maint-why">${esc(t('jobs.maint_scoped_hint'))}</span>` : '') : '');
+  if (hadFocus) _el('jobs-maint-btn')?.focus();
+}
+
+async function _toggleMaint(): Promise<void> {
+  if (Session.allowedPlants() !== null) return;          // global setting: the button is disabled for a scoped admin
+  const on = !!_health?.maintenance?.enabled;
+  const ok = await Modal.confirm({
+    title: t(on ? 'jobs.maint_confirm_off_title' : 'jobs.maint_confirm_on_title'), message: t(on ? 'jobs.maint_confirm_off_msg' : 'jobs.maint_confirm_on_msg'),
+    confirmLabel: t(on ? 'jobs.maint_off_btn' : 'jobs.maint_on_btn'), ...(on ? {} : { tone: 'warn' as const }),
+  });
+  if (!ok) return;
+  try { await JobsClient.setMaintenance(!on); } catch (e) { Toast.show(t('jobs.maint_failed', { msg: (e as Error).message }), 'error'); return; }
+  _healthSig = ''; _maintSig = '';
+  await _loadHealth();
+  _el('jobs-maint-btn')?.focus();                       // the button was rebuilt: put focus back on it
 }
 
 function _armRunsPoll(): void {
@@ -733,7 +869,7 @@ function _armRunsPoll(): void {
   _runsTimer = setTimeout(() => {
     _runsTimer = null;
     // Health and the watcher belong to _pollTimer (one owner), so the Runs tab never duplicates those requests.
-    if (_visible() && _tab === 'runs' && !JobsRunDetail.isOpen()) void (_runView === 'batches' ? _loadBatches('refresh') : _loadRuns('refresh'));
+    if (_visible() && _tab === 'runs' && !JobsRunDetail.isOpen()) void _loadRunsView('refresh');
     _armRunsPoll();
   }, RUNS_POLL_MS);
 }
@@ -749,7 +885,7 @@ async function _openRun(id: number): Promise<void> {
     visible: _visible,
     longer: () => isLongerThanUsual(run.id, _health?.longerThanUsual),
     tz: plantTimezone(run.plant),
-    onBack: () => { JobsRunDetail.stop(); det.hidden = true; main.hidden = false; void (_runView === 'batches' ? _loadBatches('refresh') : _loadRuns('refresh')); void _loadHealth(); },
+    onBack: () => { JobsRunDetail.stop(); det.hidden = true; main.hidden = false; void _loadRunsView('refresh'); void _loadHealth(); },
     // The open run changed state: fold page 1 into the list (never replace it, later pages stay loaded).
     onChanged: () => { void _loadHealth(); void JobsClient.runs(_runsQuery()).then(r => { if (r.items.some(x => x.id === id)) _runs = mergeRuns(_runs, r.items); }).catch(() => undefined); },
     // Restart started a new manual run: watch it and open it.
@@ -896,20 +1032,30 @@ function _wire(): void {
     if (bMore) { void _loadBatchKids(Number(bMore.dataset.jobsBatchMore), true); return; }
     const bTog = target.closest<HTMLElement>('[data-jobs-batch]');
     if (bTog) { _toggleBatch(Number(bTog.dataset.jobsBatch)); return; }
+    const tlEl = target.closest<HTMLElement>('[data-tl-key]');
+    if (tlEl) { _tlActivate(tlEl); return; }
     const runRow = target.closest<HTMLElement>('[data-run-id]');
     if (runRow) { void _openRun(Number(runRow.dataset.runId)); return; }
     const act = target.closest<HTMLElement>('[data-jobs-act]')?.dataset.jobsAct;
     if (act === 'retry-health') { void _loadHealth(); return; }
-    if (act === 'retry') { if (_tab === 'jobs') void _loadJobs(); else if (_tab === 'runs') void (_runView === 'batches' ? _loadBatches() : _loadRuns()); else void _loadUpcoming(); return; }
+    if (act === 'retry') { if (_tab === 'jobs') void _loadJobs(); else if (_tab === 'runs') void _loadRunsView(); else void _loadUpcoming(); return; }
     if (act === 'clear-since') { _since = 0; _renderRunsTab(); return; }
+    if (act === 'maint') { void _toggleMaint(); return; }
+    if (act === 'tl-prev' || act === 'tl-next') { _tlOffset = Math.max(0, _tlOffset + (act === 'tl-next' ? TL_PAGE : -TL_PAGE)); void _loadTimeline(); return; }
     if (act === 'new') void _openNew();
     else if (act === 'more-jobs') void _loadJobs(true);
     else if (act === 'more-runs') void _loadRuns('append');
     else if (act === 'more-batches') void _loadBatches('append');
-    else if (act === 'refresh-runs') void (_runView === 'batches' ? _loadBatches() : _loadRuns());
+    else if (act === 'refresh-runs') void _loadRunsView();
     else if (act === 'runs-of') { const j = _jobs.find(x => x.id === Number((target.closest<HTMLElement>('[data-job-id]'))?.dataset.jobId)); if (j) _gotoRuns(j); }
   });
+  pane.addEventListener('toggle', (e) => {                // `toggle` does not bubble: listen in the capture phase
+    const d = e.target as HTMLDetailsElement;
+    if (d?.classList?.contains('job-tl-list')) _tlListOpen = d.open;
+  }, true);
   pane.addEventListener('keydown', (e) => {
+    const tlRow = (e.target as HTMLElement).closest<HTMLElement>('[data-tl-key]');
+    if (tlRow && e.target === tlRow && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); _tlActivate(tlRow); return; }
     const row = (e.target as HTMLElement).closest<HTMLElement>('.job-run-row');
     if (row && e.target === row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void _openRun(Number(row.dataset.runId)); }
   });
@@ -918,7 +1064,8 @@ function _wire(): void {
     const v = (e.target as HTMLSelectElement).value;
     if (id === 'jobs-type') { _type = v; void _loadJobs(); }
     else if (id === 'jobs-status') { _status = v; void _loadJobs(); }
-    else if (id === 'jobs-runs-view') { _runView = v === 'batches' ? 'batches' : 'runs'; _renderRunsTab(); }
+    else if (id === 'jobs-runs-view') { _runView = v === 'batches' ? 'batches' : v === 'timeline' ? 'timeline' : 'runs'; _tlOffset = 0; _renderRunsTab(); }
+    else if (id === 'jobs-tl-range') { _tlRange = v === '7d' ? '7d' : '24h'; _tlOffset = 0; void _loadTimeline(); }
     else if (id === 'jobs-runs-bstatus') { _batchStatus = v; void _loadBatches(); }
     else if (id === 'jobs-runs-status') { _runStatus = v; _since = 0; void _loadRuns(); }
     else if (id === 'jobs-runs-type') { _runType = v; void _loadRuns(); }
@@ -934,7 +1081,7 @@ function _wire(): void {
   });
   document.addEventListener('visibilitychange', () => {
     if (_active && !document.hidden) { void _loadHealth().then(() => _armPoll()); }
-    if (_active && _tab === 'runs' && !document.hidden) { void (_runView === 'batches' ? _loadBatches('refresh') : _loadRuns('refresh')); _armRunsPoll(); JobsRunDetail.resume(); }
+    if (_active && _tab === 'runs' && !document.hidden) { void _loadRunsView('refresh'); _armRunsPoll(); JobsRunDetail.resume(); }
   });
 }
 

@@ -25,8 +25,10 @@ import {
   validateJobForm, buildJobPayload, recurrenceText, stripOffset, dowLabelKey, seedParams, resultOf, findType, hasApplyMode, typeGroups,
   typeLabel, paramLabel, enumLabel, paramHint, windowToUi, uiToWindow, validateWindowUi,
   TARGET_MODES, TZ_MODES, STAGGER_MAX, PARALLEL_MAX, buildTargetRows, filterPlants, targetsPreviewText, plural, TARGET_ROWS_MAX, targetRowCount, timeZoneList, tzShort,
+  DST_GAPS, DST_OVERLAPS, WINDOW_ACTIONS, MONTHLY_MODES, GRACE_MAX_MIN, closedDayChoices, policyToOptions, policyNoteText, skipReasonCodeText,
 } from './jobs-model.mjs';
-import type { JobForm, FormErrors, Recurrence, JobsDeps, TypeMeta, ParamMeta, DateWindow, WindowUi, TargetMode, TzMode } from './jobs-model.mjs';
+import type { JobForm, FormErrors, Recurrence, JobsDeps, TypeMeta, ParamMeta, DateWindow, WindowUi, TargetMode, TzMode, PolicyForm } from './jobs-model.mjs';
+import type { SkippedEntry } from './jobs-client.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -166,7 +168,7 @@ export const resultHint = (result: string): string => t(result === 'propose' ? '
 
 const _err = (field: string): string => `<div class="ape-err" id="jb-err-${field}" role="alert" hidden></div>`;
 
-export function recurFieldsHtml(r: Recurrence): string {
+export function recurFieldsHtml(r: Recurrence, monthlyMode: PolicyForm['monthly'] = 'day_of_month'): string {
   const time = `<div class="form-row"><label for="jb-time">${esc(t('jobs.f_time'))}</label>`
     + `<input class="input job-time" id="jb-time" type="time" value="${esc(r.time)}" step="60">${_err('time')}</div>`;
   switch (r.preset) {
@@ -181,8 +183,9 @@ export function recurFieldsHtml(r: Recurrence): string {
         + DOW_ORDER.map(d => `<label class="chk-inline"><input type="checkbox" id="jb-dow-${d}"${r.days.includes(d) ? ' checked' : ''}><span>${esc(t(dowLabelKey(d)))}</span></label>`).join('')
         + `</div>${_err('days')}</div>`;
     case 'monthly':
-      return time + `<div class="form-row"><label for="jb-dom">${esc(t('jobs.f_dom'))}</label>`
-        + `<input class="input job-num" id="jb-dom" type="number" min="1" max="31" value="${esc(r.dom)}">${_err('dom')}</div>`;
+      // The day box only exists for a fixed day; "last day" and the working-day modes (Advanced) have no day to enter.
+      return time + (monthlyMode === 'day_of_month' ? `<div class="form-row"><label for="jb-dom">${esc(t('jobs.f_dom'))}</label>`
+        + `<input class="input job-num" id="jb-dom" type="number" min="1" max="31" value="${esc(r.dom)}">${_err('dom')}</div>` : '');
     case 'cron':
       return `<div class="form-row"><label for="jb-cron">${esc(t('jobs.f_cron'))}</label>`
         + `<input class="input job-mono" id="jb-cron" type="text" value="${esc(r.cron)}" placeholder="0 8 * * 1-5" autocomplete="off" spellcheck="false">`
@@ -190,6 +193,44 @@ export function recurFieldsHtml(r: Recurrence): string {
     default:
       return time;
   }
+}
+
+/** A labelled select with its in-place hint (the hint is rewritten from the current value on every render). */
+function _polSelect(id: string, labelKey: string, values: readonly string[], cur: string, optKey: (v: string) => string, hintKey: string): string {
+  return `<div class="form-row"><label for="${id}">${esc(t(labelKey))}</label><select class="input" id="${id}">`
+    + values.map(v => _opt(v, t(optKey(v)), cur)).join('') + `</select><div class="ape-hint" id="${id}-hint">${esc(t(hintKey))}</div></div>`;
+}
+
+/** The Advanced rules, rendered from the form (re-rendered whole when a choice changes what else applies): DST handling,
+ *  closed days, run window, monthly mode, catch-up. Conditional parts are present or absent, never toggled with `hidden`. */
+export function policyInnerHtml(f: JobForm): string {
+  const p = f.policy; const preset = f.recur.preset;
+  const dst = preset === 'hourly'
+    ? `<div class="ape-hint">${esc(t('jobs.adv_dst_hourly'))}</div>`
+    : _polSelect('jb-pol-gap', 'jobs.adv_dst_gap', DST_GAPS, p.dstGap, v => `jobs.adv_dst_gap_${v}`, `jobs.adv_dst_gap_hint_${p.dstGap}`)
+      + _polSelect('jb-pol-overlap', 'jobs.adv_dst_overlap', DST_OVERLAPS, p.dstOverlap, v => `jobs.adv_dst_overlap_${v}`, `jobs.adv_dst_overlap_hint_${p.dstOverlap}`);
+  const closed = _polSelect('jb-pol-closed', 'jobs.adv_closed', closedDayChoices(preset), closedDayChoices(preset).includes(p.closedDay) ? p.closedDay : 'run',
+    v => `jobs.adv_closed_${v}`, `jobs.adv_closed_hint_${closedDayChoices(preset).includes(p.closedDay) ? p.closedDay : 'run'}`);
+  const win = `<div class="form-row"><label class="chk-inline"><input type="checkbox" id="jb-pol-win-on"${p.winOn ? ' checked' : ''}><span>${esc(t('jobs.adv_win_on'))}</span></label>`
+    + (p.winOn
+      ? `<div class="form-row-2"><div class="form-row"><label for="jb-pol-win-start">${esc(t('jobs.adv_win_start'))}</label><input class="input job-time" id="jb-pol-win-start" type="time" value="${esc(p.winStart)}" step="60"></div>`
+        + `<div class="form-row"><label for="jb-pol-win-end">${esc(t('jobs.adv_win_end'))}</label><input class="input job-time" id="jb-pol-win-end" type="time" value="${esc(p.winEnd)}" step="60"></div></div>`
+        + _polSelect('jb-pol-win-action', 'jobs.adv_win_action', WINDOW_ACTIONS, p.winAction, v => `jobs.adv_win_${v}`, 'jobs.adv_win_hint')
+      : '')
+    + `${_err('policyWin')}</div>`;
+  const monthly = preset === 'monthly'
+    ? _polSelect('jb-pol-monthly', 'jobs.adv_monthly', MONTHLY_MODES, p.monthly, v => `jobs.adv_monthly_${v}`, 'jobs.adv_monthly_hint')
+      + (p.monthly === 'day_of_month' ? `<label class="chk-inline"><input type="checkbox" id="jb-pol-clamp"${p.monthlyClamp ? ' checked' : ''}><span>${esc(t('jobs.adv_monthly_clamp'))}</span></label>` : '')
+    : '';
+  const catchUp = `<div class="form-row"><label class="chk-inline"><input type="checkbox" id="jb-pol-cu-on"${p.catchUp ? ' checked' : ''}><span>${esc(t('jobs.adv_catch_on'))}</span></label>`
+    + (p.catchUp ? `<div class="form-row"><label for="jb-pol-cu-min">${esc(t('jobs.adv_catch_min'))}</label><input class="input job-num" id="jb-pol-cu-min" type="number" min="1" max="${GRACE_MAX_MIN}" value="${esc(p.graceMin)}"></div>` : '')
+    + `<div class="ape-hint">${esc(t('jobs.adv_catch_hint'))}</div>${_err('policyGrace')}</div>`;
+  return dst + closed + `${_err('policyTz')}` + monthly + win + catchUp;
+}
+
+export function policyBlockHtml(f: JobForm): string {
+  const open = policyToOptions(f.policy, f.recur.preset) !== null;
+  return `<details class="job-adv" id="jb-sadv"${open ? ' open' : ''}><summary>${esc(t('jobs.adv_title'))}</summary><div id="jb-pol">${policyInnerHtml(f)}</div></details>`;
 }
 
 /** The type select: grouped Optimization | Reports; locked once a job exists (its type never changes). With no types
@@ -392,11 +433,12 @@ export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean, meta: T
     + `<fieldset class="job-recur"><legend>${esc(t('jobs.f_recurrence'))}</legend>`
     + `<div class="form-row"><label for="jb-recur">${esc(t('jobs.f_repeat'))}</label><select class="input" id="jb-recur">`
     + RECUR_PRESETS.map(p => _opt(p, t(`jobs.preset_${p}`), f.recur.preset)).join('') + `</select></div>`
-    + `<div id="jb-recur-fields">${recurFieldsHtml(f.recur)}</div>`
+    + `<div id="jb-recur-fields">${recurFieldsHtml(f.recur, f.policy.monthly)}</div>`
     + `<div id="jb-tz-block">${tzBlockHtml(f)}</div>`
     + `<div class="form-row-2"><div class="form-row"><label for="jb-from">${esc(t('jobs.f_valid_from'))}</label><input class="input" id="jb-from" type="date" value="${esc(f.validFrom)}"></div>`
     + `<div class="form-row"><label for="jb-until">${esc(t('jobs.f_valid_until'))}</label><input class="input" id="jb-until" type="date" value="${esc(f.validUntil)}"></div></div>${_err('validity')}`
     + `<label class="chk-inline"><input type="checkbox" id="jb-overlap"${f.skipIfRunning ? ' checked' : ''}><span>${esc(t('jobs.f_skip_overlap'))}</span></label>`
+    + policyBlockHtml(f)
     + `<div class="job-preview" id="jb-preview"></div><span class="job-sr" id="jb-preview-live" role="status" aria-live="polite"></span></fieldset></div>`;
 }
 
@@ -434,6 +476,10 @@ function _initPickers(): void {
     } catch { /* the native input stays usable */ }
   };
   mount('jb-time', 'jobs.f_time', { enableTime: true, noCalendar: true, dateFormat: 'H:i', altFormat: Util._fpTimeAltFormat(), time_24hr: h24, minuteIncrement: 1 });
+  // The run window's From / Until use the same picker (and 12 / 24 h preference) as the run time above.
+  const timeCfg = { enableTime: true, noCalendar: true, dateFormat: 'H:i', altFormat: Util._fpTimeAltFormat(), time_24hr: h24, minuteIncrement: 1 };
+  mount('jb-pol-win-start', 'jobs.adv_win_start', timeCfg);
+  mount('jb-pol-win-end', 'jobs.adv_win_end', timeCfg);
   mount('jb-runat', 'jobs.f_run_at', { enableTime: true, dateFormat: 'Y-m-d\\TH:i', altFormat: Util._fpAltFormat(), time_24hr: h24, minuteIncrement: 1 });
   mount('jb-from', 'jobs.f_valid_from', { dateFormat: 'Y-m-d', altFormat: Util._dateFormatPref() });
   mount('jb-until', 'jobs.f_valid_until', { dateFormat: 'Y-m-d', altFormat: Util._dateFormatPref() });
@@ -472,6 +518,21 @@ function _readParams(meta: TypeMeta, prev: Record<string, unknown>): Record<stri
   return out;
 }
 
+/** The Advanced rules from the live fields; a control that is not on screen keeps its previous value. */
+function _readPolicy(prev: PolicyForm, preset: Recurrence['preset']): PolicyForm {
+  const pick = <T extends string>(id: string, all: readonly T[], fb: T): T => (_el(id) && (all as readonly string[]).includes(_val(id)) ? (_val(id) as T) : fb);
+  const has = (id: string): boolean => !!_el(id);
+  return {
+    dstGap: pick('jb-pol-gap', DST_GAPS, prev.dstGap), dstOverlap: pick('jb-pol-overlap', DST_OVERLAPS, prev.dstOverlap),
+    closedDay: pick('jb-pol-closed', closedDayChoices(preset), prev.closedDay),
+    winOn: has('jb-pol-win-on') ? _chk('jb-pol-win-on') : prev.winOn,
+    winStart: has('jb-pol-win-start') ? _val('jb-pol-win-start') : prev.winStart, winEnd: has('jb-pol-win-end') ? _val('jb-pol-win-end') : prev.winEnd,
+    winAction: pick('jb-pol-win-action', WINDOW_ACTIONS, prev.winAction),
+    monthly: pick('jb-pol-monthly', MONTHLY_MODES, prev.monthly), monthlyClamp: has('jb-pol-clamp') ? _chk('jb-pol-clamp') : prev.monthlyClamp,
+    catchUp: has('jb-pol-cu-on') ? _chk('jb-pol-cu-on') : prev.catchUp, graceMin: has('jb-pol-cu-min') ? Number(_val('jb-pol-cu-min')) : prev.graceMin,
+  };
+}
+
 /** Read the live fields into a JobForm (plant and job type come from state: the combobox owns the plant). */
 export function readForm(prev: JobForm, meta: TypeMeta | null = _s?.meta ?? null): JobForm {
   const preset = (_val('jb-recur') || prev.recur.preset) as Recurrence['preset'];
@@ -489,7 +550,7 @@ export function readForm(prev: JobForm, meta: TypeMeta | null = _s?.meta ?? null
   const hasFan = !!_el('jb-fo-stagger');
   const par = _val('jb-fo-par').trim();
   return {
-    ...prev, name: _val('jb-name'), params: meta ? _readParams(meta, prev.params) : prev.params, recur,
+    ...prev, name: _val('jb-name'), params: meta ? _readParams(meta, prev.params) : prev.params, recur, policy: _readPolicy(prev.policy, preset),
     validFrom: _val('jb-from'), validUntil: _val('jb-until'), skipIfRunning: _chk('jb-overlap'),
     targetMode: radio(TARGET_MODES, 'jb-tmode-', prev.targetMode), tzMode: radio(TZ_MODES, 'jb-tzmode-', prev.tzMode),
     fanOut: hasFan ? { staggerS: _val('jb-fo-stagger').trim() === '' ? 0 : Number(_val('jb-fo-stagger')), maxParallel: par === '' ? null : Number(par), failFast: _chk('jb-fo-ff') } : prev.fanOut,
@@ -497,7 +558,7 @@ export function readForm(prev: JobForm, meta: TypeMeta | null = _s?.meta ?? null
 }
 
 function _showErrors(errs: FormErrors): void {
-  for (const f of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity', 'targets', 'fixedTz', 'fanOut'] as const) {
+  for (const f of ['name', 'plant', 'result', 'time', 'minute', 'days', 'dom', 'cron', 'runAt', 'validity', 'targets', 'fixedTz', 'fanOut', 'policyWin', 'policyGrace', 'policyTz'] as const) {
     const el = _el(`jb-err-${f}`);
     if (!el) continue;
     el.textContent = errs[f] ? t(errs[f] as string) : '';
@@ -528,6 +589,20 @@ function _fireText(e: { atLocal: string; atUtc: string }, tz: string): string {
   return `${Util.fmtDTPref(stripOffset(e.atLocal))}${zone ? ` ${zone}` : ''} · ${Util.fmtDTPref(stripOffset(e.atUtc))} UTC`;
 }
 
+/** A fire's rule note as a badge: a DST shift or a move (next / previous working day, deferred to the window). */
+function _noteBadge(e: { dstShifted: boolean; policyNote?: string | null }): string {
+  const code = e.policyNote ?? (e.dstShifted ? 'dst_gap_shifted' : null);
+  return code ? ` <span class="badge badge-warn job-note">${esc(policyNoteText(code, jobsDeps()))}</span>` : '';
+}
+
+/** The occurrences the rules removed, with the reason beside each (at most 10 are listed). */
+function _skippedHtml(list: SkippedEntry[], tz: string): string {
+  if (!list.length) return '';
+  const d = jobsDeps();
+  return `<div class="job-skipped" role="note"><div class="ape-hint">${esc(t('jobs.skipped_title'))}</div><ul class="job-preview-list">`
+    + list.slice(0, 10).map(x => `<li class="job-mono">${esc(_fireText(x, tz))} <span class="job-sub">${esc(skipReasonCodeText(x.reason, d))}</span></li>`).join('') + `</ul></div>`;
+}
+
 async function _runPreview(): Promise<void> {
   const s = _s;
   const box = _el('jb-preview');
@@ -538,8 +613,14 @@ async function _runPreview(): Promise<void> {
   const errs = validateJobForm({ ...s.form, name: s.form.name || 'x' }, { isAdmin: true, plants: null });
   const bad = r.preset === 'once' ? !!errs.runAt : r.preset === 'hourly' ? !!errs.minute : r.preset === 'cron' ? !!errs.cron
     : !!(errs.time || errs.days || errs.dom || errs.fixedTz || errs.targets);
+  const seq = ++s.previewSeq;                             // every path, early returns included, retires an older response
+  const polKey = errs.policyWin ?? errs.policyGrace ?? errs.policyTz;
+  for (const k of ['policyWin', 'policyGrace', 'policyTz'] as const) {   // the rule errors show in their own slots as soon as they exist
+    const slot = _el(`jb-err-${k}`);
+    if (slot) { slot.textContent = errs[k] ? t(errs[k] as string) : ''; slot.hidden = !errs[k]; }
+  }
   if (bad || !s.form.plant) { box.innerHTML = ''; return; }
-  const seq = ++s.previewSeq;
+  if (polKey) { box.innerHTML = `<div class="ape-err" role="alert">${esc(t(polKey))}</div>`; return; }
   try {
     const { job, schedule: p } = buildJobPayload(s.form);
     const prose = recurrenceText(p, jobsDeps(), x => Util.fmtDTPref(x));
@@ -550,7 +631,9 @@ async function _runPreview(): Promise<void> {
     const live = _el('jb-preview-live');
     if (live) live.textContent = multi ? t('jobs.preview_live', { shown: res.plants.length, total: res.totalPlants }) : '';
     const head = `<div class="job-preview-head">${esc(t('jobs.next_runs'))} <span class="ape-hint">${esc(prose)}</span></div>`;
-    const dst = (res.entries.some(x => x.dstShifted) || res.plants.some(pl => pl.entries.some(x => x.dstShifted))) ? `<div class="job-dst" role="note">${esc(t('jobs.dst_warning'))}</div>` : '';
+    // The generic warning only fits the default rules; with a DST choice made, each fire carries its own note instead.
+    const defaultDst = s.form.policy.dstGap === 'shift' && s.form.policy.dstOverlap === 'once';
+    const dst = defaultDst && (res.entries.some(x => x.dstShifted) || res.plants.some(pl => pl.entries.some(x => x.dstShifted))) ? `<div class="job-dst" role="note">${esc(t('jobs.dst_warning'))}</div>` : '';
     const skipped = res.warnings.length ? `<div class="ape-hint">${esc(plural('jobs.t_skipped_note', res.warnings.length, jobsDeps()))}</div>` : '';
     if (multi) {
       const more = res.totalPlants > res.plants.length
@@ -560,14 +643,14 @@ async function _runPreview(): Promise<void> {
         : '';
       box.innerHTML = head + `<div class="ape-hint">${esc(plural('jobs.t_preview_plants', res.totalPlants, jobsDeps()))}</div>` + skipped
         + (res.plants.length ? res.plants.map(pl => `<div class="job-pp"><span class="job-mono job-pp-plant">${esc(pl.plant)}</span> <span class="ape-hint">${esc(pl.timezone)}</span>`
-          + `<ol class="job-preview-list">${pl.entries.map(x => `<li class="job-mono">${esc(_fireText(x, pl.timezone))}</li>`).join('')}</ol></div>`).join('')
+          + `<ol class="job-preview-list">${pl.entries.map(x => `<li class="job-mono">${esc(_fireText(x, pl.timezone))}${_noteBadge(x)}</li>`).join('')}</ol>${_skippedHtml(pl.skipped, pl.timezone)}</div>`).join('')
           : `<div class="ape-hint">${esc(t('jobs.no_runs'))}</div>`) + more + dst;
       if (hadMoreFocus) (box.querySelector('[data-jb-act="plants-more"]') as HTMLElement | null)?.focus();
       return;
     }
     box.innerHTML = head + skipped
-      + (res.entries.length ? `<ol class="job-preview-list">${res.entries.map(x => `<li class="job-mono">${esc(s.form.tzMode === 'utc' ? `${Util.fmtDTPref(stripOffset(x.atUtc))} UTC` : _fireText(x, res.timezone))}</li>`).join('')}</ol>` : `<div class="ape-hint">${esc(t('jobs.no_runs'))}</div>`)
-      + dst;
+      + (res.entries.length ? `<ol class="job-preview-list">${res.entries.map(x => `<li class="job-mono">${esc(s.form.tzMode === 'utc' ? `${Util.fmtDTPref(stripOffset(x.atUtc))} UTC` : _fireText(x, res.timezone))}${_noteBadge(x)}</li>`).join('')}</ol>` : `<div class="ape-hint">${esc(t('jobs.no_runs'))}</div>`)
+      + _skippedHtml(res.skipped, res.timezone) + dst;
   } catch (e) {
     if (_s !== s || seq !== s.previewSeq) return;
     box.innerHTML = `<div class="ape-err">${esc((e as Error).message)}</div>`;
@@ -616,6 +699,33 @@ function _mountSubnetwork(s: DialogState): void {
     value: s.form.targetSubnetwork, placeholder: t('jobs.t_subnetwork'), id: 'jb-tsub',
     onSelect: (v) => { if (!_s) return; _s.form.targetSubnetwork = v; _scheduleTargetsPreview(); _schedulePreview(); },
   });
+}
+
+function _renderPolicy(s: DialogState): void {
+  const host = _el('jb-pol');
+  if (!host) return;
+  host.innerHTML = policyInnerHtml(s.form);
+  _initPickers();                                         // the window's From / Until inputs come and go with its checkbox
+}
+
+/** Focus a field by id; a picker field is focused through its visible alt input. */
+function _focusField(id: string): void {
+  const el = _el<HTMLInputElement & { _flatpickr?: PickerLike }>(id);
+  (el?._flatpickr?.altInput ?? el)?.focus();
+}
+
+/** An Advanced control changed: read it, rebuild the block (a choice can change what else applies), keep focus on it. */
+function _policyChanged(s: DialogState, id: string): void {
+  const prevMonthly = s.form.policy.monthly;
+  s.form = readForm(s.form);
+  _renderPolicy(s);
+  if (s.form.policy.monthly !== prevMonthly) {            // "last day" and the working-day modes have no day box
+    const host = _el('jb-recur-fields');
+    if (host) host.innerHTML = recurFieldsHtml(s.form.recur, s.form.policy.monthly);
+    _initPickers();
+  }
+  _focusField(id);
+  _schedulePreview();
 }
 
 function _renderTz(s: DialogState): void {
@@ -767,10 +877,12 @@ function _wire(): void {
     if (id.startsWith('jb-tzmode-')) { s.form = readForm(s.form); _renderTz(s); _schedulePreview(); return; }
     if (id.startsWith('jb-fo-')) { s.form = readForm(s.form); _scheduleTargetsPreview(); return; }
     if (id === 'jb-jobtype') { _changeType(s, _val('jb-jobtype')); return; }
+    if (id.startsWith('jb-pol-')) { _policyChanged(s, id); return; }
     if (id === 'jb-recur') {
       s.form = readForm(s.form);
       const host = _el('jb-recur-fields');
-      if (host) host.innerHTML = recurFieldsHtml(s.form.recur);
+      if (host) host.innerHTML = recurFieldsHtml(s.form.recur, s.form.policy.monthly);
+      _renderPolicy(s);                                    // hourly drops the DST rules, monthly adds its own, closed-day choices differ
       _initPickers();
     }
     const wm = /^(jb-p-(.+))-choice$/.exec(id);

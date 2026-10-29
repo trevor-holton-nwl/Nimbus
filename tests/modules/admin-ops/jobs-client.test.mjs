@@ -16,7 +16,7 @@ const resolve = v => (typeof v === 'string' && v.startsWith('$') ? resolve(FIX[v
   : Array.isArray(v) ? v.map(resolve) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, resolve(x)])) : v);
 const body = name => resolve(FIX[name]);
 
-const OPAQUE = new Set(['params', 'summary', 'data', 'params_schema', 'defaults']);
+const OPAQUE = new Set(['params', 'summary', 'data', 'params_schema', 'defaults', 'options']);
 let phantom;   // keys the client read that the wire body does not have
 function recording(obj, path = '$') {
   if (Array.isArray(obj)) return obj.map((x, i) => recording(x, `${path}[${i}]`));
@@ -312,4 +312,47 @@ test('W3a fix wave: health carries failed_batches_24h, a job carries last_batch,
   const r = await JobsClient.restartBatch(9);
   assert.match(calls.at(-1).url, /\/jobs\/batches\/9\/restart$/); assert.equal(r.id, 42);
   assert.deepEqual(phantom, [], 'the client read only keys the wire has');
+});
+
+
+// ---- W3b: policy options, skipped occurrences, maintenance mode, the runs timeline ----
+test('schedules carry their options and last fire; the preview lists skipped occurrences with their reason codes', async () => {
+  reply = body('jobs_list');
+  const s = (await JobsClient.list({})).items[0].schedule;
+  assert.equal(s.options.closed_day, 'run');
+  assert.equal(s.options.catch_up.grace_s, 3600);
+  assert.equal(s.lastFireAt, '2026-10-29T12:00:00+00:00');
+  reply = body('preview_multi');
+  const rows = [{ kind: 'explicit', value: '1008', excluded: false, params_override: null }];
+  const m = await JobsClient.preview('1008', { kind: 'daily', tz_mode: 'plant', options: { closed_day: 'skip' } }, 3, { targets: rows });
+  assert.equal(calls[1].body.options.closed_day, 'skip', 'options travel with the preview body');
+  assert.deepEqual(m.plants[0].skipped.map(x => [x.atUtc, x.reason]), [['2026-10-31T13:00:00+00:00', 'closed_day']]);
+  assert.deepEqual([m.skipped, m.plants[0].entries[0].policyNote], [[], null]);
+  reply = body('preview');
+  assert.deepEqual((await JobsClient.preview('1008', { kind: 'daily' }, 3)).skipped, []);
+});
+
+test('maintenance: POST /jobs/maintenance {enabled}, and the summary carries the state', async () => {
+  reply = body('maintenance');
+  const m = await JobsClient.setMaintenance(true);
+  assert.deepEqual([calls[0].method, path(0), calls[0].body], ['POST', '/jobs/maintenance', { enabled: true }]);
+  assert.deepEqual([m.enabled, m.by, m.since], [true, 'admin@example.com', '2026-10-29T12:00:00+00:00']);
+  reply = body('summary');
+  assert.deepEqual((await JobsClient.summary('')).maintenance, { enabled: false, since: null, by: null });
+  assert.deepEqual(phantom, []);
+});
+
+test('timeline: range, plant and plant paging go in the query; lanes with runs and upcoming fires come out typed', async () => {
+  reply = body('timeline');
+  const tl = await JobsClient.timeline({ from: '2026-10-29T00:00:00.000Z', to: '2026-10-30T00:00:00.000Z', plant: '1008', plantOffset: 20, plantLimit: 20 });
+  assert.equal(path(0), '/jobs/timeline?from=2026-10-29T00%3A00%3A00.000Z&to=2026-10-30T00%3A00%3A00.000Z&plant=1008&plant_offset=20&plant_limit=20');
+  assert.deepEqual([tl.totalPlants, tl.plantOffset, tl.plantLimit, tl.truncated, tl.nowUtc], [1, 0, 20, false, '2026-10-29T12:00:00+00:00']);
+  const l = tl.lanes[0];
+  assert.deepEqual([l.plant, l.timezone, l.nowLocal], ['1008', 'America/Chicago', '2026-10-29T07:00:00-05:00']);
+  assert.deepEqual([l.runs[0].id, l.runs[0].status, l.runs[0].startUtc, l.runs[0].endUtc, l.runs[0].batchId], [42, 'warning', '2026-10-29T12:00:01+00:00', '2026-10-29T12:03:40+00:00', null]);
+  assert.deepEqual([l.upcoming[0].atUtc, l.upcoming[0].jobName, l.upcoming[0].dstShifted, l.upcoming[0].policyNote], ['2026-10-29T13:00:00+00:00', 'Morning optimize', false, null]);
+  assert.deepEqual(phantom, []);
+  reply = body('timeline');
+  await JobsClient.timeline({ from: 'a', to: 'b' });
+  assert.equal(path(1), '/jobs/timeline?from=a&to=b&plant_limit=20', 'no plant filter, first page of 20 lanes');
 });

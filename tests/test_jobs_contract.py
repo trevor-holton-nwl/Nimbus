@@ -20,7 +20,7 @@ from backend.jobs import data, routes, runner
 from backend.security import auth
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "jobs_contract.json").read_text(encoding="utf-8"))
-OPAQUE = {"params", "summary", "data", "params_schema", "defaults"}
+OPAQUE = {"params", "summary", "data", "params_schema", "defaults", "options"}
 UTC = timezone.utc
 
 
@@ -61,7 +61,7 @@ def _sched_row(**kw):
     row = {"id": 11, "job_id": 5, "kind": "weekly", "cron_expr": "0 8 * * mon,wed,fri", "time_of_day": "08:00",
            "days_of_week": [0, 2, 4], "day_of_month": None, "run_at": None, "timezone": "America/New_York",
            "valid_from": datetime(2026, 11, 1), "valid_until": None, "paused": False, "retired": False,
-           "misfire_grace_s": 300, "skip_if_running": True, "tz_mode": "plant", "fixed_timezone": None,
+           "misfire_grace_s": 300, "skip_if_running": True, "tz_mode": "plant", "fixed_timezone": None, "options": None, "last_fire_at": None,
            "created_by": "a", "modified_by": "a",
            "created_at": datetime(2026, 10, 28, 14, tzinfo=UTC), "modified_at": datetime(2026, 10, 28, 14, tzinfo=UTC)}
     return {**row, **kw}
@@ -123,6 +123,9 @@ def client(monkeypatch):
         {"plant": "1008", "subnetworks": ["NA"], "timezone": "America/Chicago"},
         {"plant": "1021", "subnetworks": ["NA"], "timezone": None},
         {"plant": "NOTZ", "subnetworks": ["EU"], "timezone": None}])
+    monkeypatch.setattr(data, "maintenance_state", lambda fresh=False: {"enabled": False, "since": None, "by": None})
+    monkeypatch.setattr(data, "timeline_run_plants", lambda **kw: ["1008"])
+    monkeypatch.setattr(data, "timeline_runs", lambda **kw: [_run_row(created_at=datetime(2026, 10, 29, 12, tzinfo=UTC))])
     monkeypatch.setattr(data, "get_batch", lambda bid: _batch_row() if bid == 9 else None)
     monkeypatch.setattr(data, "batch_runs", lambda bid, allowed, limit=500, offset=0: [_run_row(batch_id=9)] if bid == 9 else [])
     monkeypatch.setattr(data, "list_batches", lambda **kw: {"batches": [_batch_row()], "next_before_id": 8})
@@ -221,6 +224,63 @@ def test_run_artifact_pages_and_csv(client):
     assert client.get("/jobs/runs/42/artifact?section=nope").status_code == 404
     assert client.get("/jobs/runs/43/artifact").status_code == 404
     assert client.get("/jobs/runs/42/artifact?limit=501").status_code == 422
+
+
+def test_timeline_shape_range_scope_and_paging(client, monkeypatch):
+    from datetime import timedelta
+    now = datetime.now(UTC)
+    q = f"from={(now - timedelta(hours=1)).isoformat().replace('+00:00', 'Z')}&to={(now + timedelta(days=6)).isoformat().replace('+00:00', 'Z')}"
+    body = client.get(f"/jobs/timeline?{q}").json()
+    _check(body, "timeline")
+    lane = body["lanes"][0]
+    assert lane["plant"] == "1008" and lane["timezone"] == "America/Chicago" and lane["upcoming"], "armed schedule shows upcoming"
+    assert [e["at_utc"] for e in lane["upcoming"]] == sorted(e["at_utc"] for e in lane["upcoming"])
+    assert client.get(f"/jobs/timeline?from={(now).isoformat()}&to={(now + timedelta(days=9)).isoformat()}").status_code == 400
+    assert client.get(f"/jobs/timeline?from={(now).isoformat()}&to={(now - timedelta(hours=1)).isoformat()}").status_code == 400
+    assert client.get("/jobs/timeline?from=garbage").status_code == 400
+    assert client.get("/jobs/timeline?plant_limit=51").status_code == 422
+    seen = {}
+    monkeypatch.setattr(data, "timeline_run_plants", lambda **kw: [f"P{i:02d}" for i in range(30)])
+    monkeypatch.setattr(data, "timeline_runs", lambda **kw: seen.setdefault("plants", kw["plants"]) and [])
+    body = client.get("/jobs/timeline").json()
+    assert body["total_plants"] == 31, "30 plants with runs plus 1008, which has an armed schedule"
+    assert len(body["lanes"]) == 20 and body["plant_limit"] == 20, "default page is the first 20 plants"
+    page2 = client.get("/jobs/timeline?plant_offset=20&plant_limit=20").json()
+    assert len(page2["lanes"]) >= 10 and page2["lanes"][0]["plant"] != body["lanes"][0]["plant"]
+    app_dep = client.app.dependency_overrides
+    app_dep[auth.get_allowed_plants_for_request] = lambda: ["1021"]
+    assert client.get("/jobs/timeline?plant=1008").status_code == 403, "a scoped user cannot ask for another plant"
+    assert client.get("/jobs/timeline?plants=1021,1008").status_code == 403
+    scoped = client.get("/jobs/timeline").json()
+    assert all(l["plant"] == "1021" or not l["upcoming"] for l in scoped["lanes"]) and seen["plants"] is not None
+
+
+def test_maintenance_toggle_is_admin_global_and_in_the_summary(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(data, "set_maintenance", lambda enabled, actor: calls.append((enabled, actor)) or
+                        {"enabled": enabled, "since": "2026-10-29T12:00:00+00:00", "by": actor})
+    monkeypatch.setattr(data, "maintenance_state", lambda fresh=False: {"enabled": False, "since": None, "by": None})
+    body = client.post("/jobs/maintenance", json={"enabled": True}).json()
+    _check(body, "maintenance")
+    assert calls == [(True, "admin@example.com")]
+    assert client.post("/jobs/maintenance", json={}).status_code == 422
+    assert client.get("/jobs/summary").json()["maintenance"] == {"enabled": False, "since": None, "by": None}
+    client.app.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["1008"]
+    assert client.post("/jobs/maintenance", json={"enabled": False}).status_code == 403, "global setting: unrestricted admins only"
+
+
+def test_schedule_options_round_trip_and_validate(client, monkeypatch):
+    sent = {}
+    monkeypatch.setattr(data, "add_schedule", lambda jid, s, actor: sent.update(s) or 11)
+    opts = {"closed_day": "next_working_day", "run_window": {"start": "06:00", "end": "18:00", "action": "defer"}}
+    assert client.post("/jobs/5/schedules", json={**SCHEDULE_BODY, "options": opts}).status_code == 200
+    assert sent["options"]["closed_day"] == "next_working_day" and sent["options"]["run_window"]["action"] == "defer"
+    assert client.post("/jobs/5/schedules", json={**SCHEDULE_BODY, "options": {"closed_day": "tomorrow"}}).status_code == 400
+    assert client.post("/jobs/5/schedules", json={**SCHEDULE_BODY, "options": {"closed_day": "skip"}, "tz_mode": "utc"}).status_code == 400, \
+        "a plant calendar rule needs plant time"
+    pv = client.post("/jobs/schedules/preview", json={"plant": "1008", "n": 3, **SCHEDULE_BODY, "options": {"dst_gap": "skip"}}).json()
+    assert "skipped" in pv and len(pv["entries"]) == 3
+    assert client.post("/jobs/schedules/preview", json={"plant": "1008", "n": 3, **SCHEDULE_BODY, "options": {"bogus": 1}}).status_code == 400
 
 
 def test_jobs_list_is_a_cursor_envelope(client):

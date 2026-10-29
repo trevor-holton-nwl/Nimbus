@@ -5,6 +5,8 @@
     "days_of_week": [0, 2, 4], "day_of_month": null, "run_at": null, "timezone": "America/New_York",
     "valid_from": "2026-11-01T00:00:00", "valid_until": null, "paused": false, "retired": false,
     "misfire_grace_s": 300, "skip_if_running": true, "tz_mode": "plant", "fixed_timezone": null,
+    "options": {"dst_gap": "shift", "dst_overlap": "once", "closed_day": "run", "run_window": null, "monthly": "day_of_month", "monthly_clamp": false, "catch_up": {"enabled": true, "grace_s": 3600}},
+    "last_fire_at": "2026-10-29T12:00:00+00:00",
     "created_by": "admin@example.com", "modified_by": "admin@example.com",
     "created_at": "2026-10-28T14:00:00+00:00", "modified_at": "2026-10-28T14:00:00+00:00"
   },
@@ -60,7 +62,19 @@
     "running": 1, "queued": 0, "failed_24h": 2, "failed_config_24h": 1, "failed_system_24h": 0, "failed_transient_24h": 1, "failed_batches_24h": 1, "missed_24h": 0, "warning_24h": 1,
     "next_fire": {"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "job_id": 5, "job_name": "Morning optimize", "plant": "1008"},
     "scheduler": {"ok": true, "last_tick_at": "2026-10-29T12:00:00+00:00"},
+    "maintenance": {"enabled": false, "since": null, "by": null},
     "longer_than_usual": [43]
+  },
+  "maintenance": {"enabled": true, "since": "2026-10-29T12:00:00+00:00", "by": "admin@example.com"},
+  "timeline": {
+    "from": "2026-10-29T00:00:00+00:00", "to": "2026-10-30T00:00:00+00:00", "now_utc": "2026-10-29T12:00:00+00:00",
+    "total_plants": 1, "plant_offset": 0, "plant_limit": 20, "truncated": false, "upcoming_truncated": false,
+    "lanes": [{"plant": "1008", "timezone": "America/Chicago", "now_local": "2026-10-29T07:00:00-05:00",
+               "runs": [{"id": 42, "job_id": 5, "job_name": "Morning optimize", "job_type": "optimizer.plant", "status": "warning",
+                         "trigger": "schedule", "batch_id": null, "error": null, "scheduled_for": "2026-10-29T12:00:00+00:00",
+                         "start_utc": "2026-10-29T12:00:01+00:00", "end_utc": "2026-10-29T12:03:40+00:00"}],
+               "upcoming": [{"at_utc": "2026-10-29T13:00:00+00:00", "at_local": "2026-10-29T08:00:00-05:00", "job_id": 5,
+                             "job_name": "Morning optimize", "schedule_id": 11, "dst_shifted": false, "policy_note": null}]}]
   },
   "proposal": {
     "run_id": 44, "plant": "1008", "total": 1, "shown": 1, "truncated": false, "pending": false, "board_matches": true,
@@ -85,9 +99,9 @@
     "count": 1, "skipped": 1, "warnings": ["1021: plant has no timezone"]
   },
   "preview_multi": {
-    "timezone": "America/New_York", "cron_expr": "0 8 * * mon,wed,fri", "entries": [],
-    "plants": [{"plant": "1008", "timezone": "America/Chicago",
-                "entries": [{"at_utc": "2026-10-30T13:00:00+00:00", "at_local": "2026-10-30T08:00:00-05:00", "dst_shifted": false}]}],
+    "timezone": "America/New_York", "cron_expr": "0 8 * * mon,wed,fri", "entries": [], "skipped": [],
+    "plants": [{"plant": "1008", "timezone": "America/Chicago", "skipped": [{"at_utc": "2026-10-31T13:00:00+00:00", "at_local": "2026-10-31T08:00:00-05:00", "dst_shifted": false, "dst_skipped": false, "policy_note": null, "reason": "closed_day"}],
+                "entries": [{"at_utc": "2026-10-30T13:00:00+00:00", "at_local": "2026-10-30T08:00:00-05:00", "dst_shifted": false, "dst_skipped": false, "policy_note": null}]}],
     "total_plants": 2, "warnings": []
   },
   "log": {
@@ -97,16 +111,16 @@
   },
   "preview": {
     "timezone": "America/New_York", "cron_expr": "0 8 * * mon,wed,fri",
-    "entries": [{"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "dst_shifted": false}],
-    "plants": [], "total_plants": 1, "warnings": []
+    "entries": [{"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "dst_shifted": false, "dst_skipped": false, "policy_note": null}],
+    "skipped": [], "plants": [], "total_plants": 1, "warnings": []
   },
   "upcoming_job": {
     "job_id": 5,
-    "entries": [{"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "dst_shifted": false,
+    "entries": [{"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "dst_shifted": false, "dst_skipped": false, "policy_note": null,
                  "job_id": 5, "job_name": "Morning optimize", "plant": "1008", "schedule_id": 11, "timezone": "America/New_York"}]
   },
   "upcoming_all": {
-    "entries": [{"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "dst_shifted": false,
+    "entries": [{"at_utc": "2026-10-30T12:00:00+00:00", "at_local": "2026-10-30T08:00:00-04:00", "dst_shifted": false, "dst_skipped": false, "policy_note": null,
                  "job_id": 5, "job_name": "Morning optimize", "plant": "1008", "schedule_id": 11, "timezone": "America/New_York"}]
   }
 }

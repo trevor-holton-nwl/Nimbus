@@ -5,6 +5,7 @@ require_api_key + require_admin and plant-scoped; reads are require_authenticate
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -53,9 +54,11 @@ class ScheduleIn(BaseModel):
     skip_if_running: bool = True
     tz_mode: Literal["plant", "fixed", "utc"] = "plant"
     fixed_timezone: str | None = Field(None, max_length=64)
+    options: dict | None = None          # W3b policy: dst_gap, dst_overlap, closed_day, run_window, monthly, catch_up
 
 
 class SchedulePatch(BaseModel):
+    options: dict | None = None
     tz_mode: Literal["plant", "fixed", "utc"] | None = None
     fixed_timezone: str | None = Field(None, max_length=64)
     kind: str | None = None
@@ -172,6 +175,8 @@ def _normalize(plant: str, payload: dict, *, check_past: bool = True, need_tz: b
         raise HTTPException(status_code=400, detail=f"plant {plant!r} has no timezone; set one in Plants before scheduling this job")
     zone = {"plant": lambda: data.plant_timezone(plant), "fixed": lambda: (fixed_timezone or "").strip(),
             "utc": lambda: "UTC"}[tz_mode]()
+    if tz_mode != "plant" and triggers.options_need_plant_time(payload.get("options")):
+        raise HTTPException(status_code=400, detail="closed-day and working-day rules follow a plant's calendar: use plant time")
     try:
         s = triggers.validate_schedule({**payload, "timezone": zone})
         if check_past and s["kind"] == "once":
@@ -235,7 +240,7 @@ def _target_kind(rows: list[dict]) -> str:
 def _timing_fields(model: BaseModel) -> dict:
     return {k: v for k, v in model.model_dump(exclude_unset=True).items()
             if k in ("kind", "time_of_day", "days_of_week", "day_of_month", "cron_expr", "run_at",
-                     "valid_from", "valid_until")}
+                     "valid_from", "valid_until", "options")}
 
 
 def _flags(model: BaseModel) -> dict:
@@ -261,7 +266,37 @@ UPCOMING_ARMS_MAX = 100          # arms one schedule contributes to an upcoming 
 def _arm_key(sid: int, a: dict, what) -> tuple:
     return (sid, what, a.get("kind"), a.get("cron_expr"), a.get("time_of_day"), tuple(a.get("days_of_week") or ()),
             a.get("day_of_month"), a.get("run_at"), a.get("timezone"), a.get("valid_from"), a.get("valid_until"),
-            a.get("arm_plant"))
+            a.get("arm_plant"), json.dumps(a.get("options"), sort_keys=True, default=str))
+
+
+def _cal_for(arms: list[dict], plants: list[dict]):
+    """The injected calendar view for the arms whose policy reads the plant calendar (None when none does)."""
+    need = {a.get("arm_plant") or a["plant"] for a in arms if triggers.policy_of(a).needs_calendar()}
+    if not need:
+        return None
+    memo = getattr(plants, "cal_memo", None)            # per request: each plant's calendar is read once
+    zones = {p["plant"]: p["timezone"] for p in plants if p["timezone"]}
+    if memo is None:
+        return data.load_calendar_view(need, zones)
+    missing = [p for p in sorted(need) if p not in memo]
+    if missing:
+        view = data.load_calendar_view(missing, zones)
+        for p in missing:
+            memo[p] = view
+    views = {id(memo[p]): memo[p] for p in need}
+    if len(views) == 1:
+        return next(iter(views.values()))
+    from backend.jobs.calview import PlantCalendarView
+    return PlantCalendarView({p: v.cals[p] for p in need for v in [memo[p]] if p in v.cals},
+                             {p: v.zones[p] for p in need for v in [memo[p]] if p in v.zones})
+
+
+def _fires_of(sid: int, a: dict, what, fn, cal):
+    """`fn()` memoised for 30 s, except for a calendar-driven policy: its answer follows the calendar, so it is computed
+    fresh (the preview must equal what the scheduler would arm right now)."""
+    if cal is not None and triggers.policy_of(a).needs_calendar():
+        return fn()
+    return _memo(_arm_key(sid, a, what), fn)
 
 
 def _memo(key: tuple, fn):
@@ -288,8 +323,10 @@ def _next_run(job: dict, plants: list[dict] | None = None) -> dict | None:
             continue
         try:
             arms, _ = _arms(s, job, plants)
+            cal = _cal_for(arms, plants)
             for a in arms:
-                fires = _memo(_arm_key(s["id"], a, "next"), lambda a=a: triggers.next_fire_times(a, 1))
+                who = a["arm_plant"] or job["plant"]
+                fires = _fires_of(s["id"], a, "next", lambda a=a, who=who: triggers.next_fire_times(a, 1, cal=cal, plant=who), cal)
                 if fires and (best is None or fires[0] < best[0]):
                     best = (fires[0], s["id"])
         except Exception:  # noqa: BLE001 - a broken row must not break the list
@@ -411,7 +448,22 @@ def jobs_summary(
     nxt = entries[0] if entries else None
     return {**health,
             "next_fire": ({k: nxt[k] for k in ("at_utc", "at_local", "job_id", "job_name", "plant")} if nxt else None),
-            "scheduler": scheduler.heartbeat()}
+            "scheduler": scheduler.heartbeat(), "maintenance": data.maintenance_state()}
+
+
+class MaintenanceIn(BaseModel):
+    enabled: bool
+
+
+@router.post("/jobs/maintenance", dependencies=_ADMIN)
+def set_maintenance(body: MaintenanceIn, actor: str | None = Depends(auth.require_admin),
+                    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
+    """Maintenance mode (system setting `jobs_paused`): while on, every scheduled and catch-up fire is recorded as a
+    skipped run 'maintenance mode' (counted Skipped, not Missed); a manual Run now still works. It is global, so only a
+    plant-unrestricted admin may flip it."""
+    if allowed_plants is not None:
+        raise HTTPException(status_code=403, detail="Maintenance mode is global; it needs an admin with access to every plant")
+    return data.set_maintenance(body.enabled, actor)
 
 
 @router.get("/jobs/upcoming", dependencies=[Depends(auth.require_authenticated)])
@@ -451,6 +503,10 @@ def _schedule_entries(s: dict, job: dict, plants: list[dict], n: int, allowed_pl
     except Exception:  # noqa: BLE001 - a broken row must not break the strip
         return []
     out = []
+    try:
+        cal = _cal_for(arms, plants)
+    except Exception:  # noqa: BLE001 - fail open, like the scheduler
+        cal = None
     for a in arms:
         arm_plant = a["arm_plant"] or job["plant"]
         job_level = a["arm_plant"] is None and bool(job.get("targets"))   # a fixed / UTC fan-out: one arm, many plants
@@ -461,12 +517,146 @@ def _schedule_entries(s: dict, job: dict, plants: list[dict], n: int, allowed_pl
         if len(out) >= UPCOMING_ARMS_MAX * n:
             break
         try:
-            fires = _memo(_arm_key(s["id"], a, ("preview", n)), lambda a=a: triggers.preview(a, n))
+            fires = _fires_of(s["id"], a, ("preview", n), lambda a=a, p=arm_plant: triggers.preview(a, n, cal=cal, plant=p), cal)
         except Exception:  # noqa: BLE001
             continue
         out += [{**e, "job_id": job["id"], "job_name": job["name"], "plant": arm_plant,
                  "schedule_id": s["id"], "timezone": a["timezone"]} for e in fires]
     return out
+
+
+TIMELINE_MAX_DAYS = 8
+TIMELINE_UPCOMING_PER_ARM = 100
+TIMELINE_UPCOMING_PER_LANE = 300
+
+
+def _parse_instant(v: str | None, default: datetime, name: str) -> datetime:
+    if not v:
+        return default
+    try:
+        t = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+        return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    except (ValueError, OverflowError) as e:           # a year-1 / year-9999 value overflows the UTC conversion
+        raise HTTPException(status_code=400, detail=f"{name} is not an ISO date-time") from e
+
+
+@router.get("/jobs/timeline", dependencies=[Depends(auth.require_authenticated)])
+def jobs_timeline(
+    response: Response,
+    plant: str | None = Query(None),
+    plants: str | None = Query(None, max_length=2000, description="comma-separated plant codes"),
+    start: str | None = Query(None, alias="from"),
+    end: str | None = Query(None, alias="to"),
+    limit: int = Query(500, ge=1, le=2000),
+    plant_offset: int = Query(0, ge=0, le=100000),
+    plant_limit: int = Query(20, ge=1, le=50),
+    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
+):
+    """Runs in [from, to) plus UPCOMING fires from the same occurrence stream the scheduler arms, grouped into one lane
+    per plant (a plant filter always yields its lane; otherwise only plants with a run or a fire in range). The range is
+    at most 8 days (default: 12 h either side of now). Lanes are paged by plant (`plant_offset`/`plant_limit`, default the
+    first 20); a scoped caller only ever sees their plants. Times are UTC (`*_utc`) with each lane's IANA zone and its
+    own `now_local`; `limit` caps run rows over the page (`truncated`)."""
+    now = datetime.now(timezone.utc)
+    t0 = _parse_instant(start, now - timedelta(hours=12), "from")
+    t1 = _parse_instant(end, now + timedelta(hours=12), "to")
+    if t1 <= t0:
+        raise HTTPException(status_code=400, detail="'to' must be after 'from'")
+    if t1 - t0 > timedelta(days=TIMELINE_MAX_DAYS):
+        raise HTTPException(status_code=400, detail=f"the range is at most {TIMELINE_MAX_DAYS} days")
+    asked = [p.strip() for p in (plants or "").split(",") if p.strip()]
+    if plant:
+        asked = [plant] + [p for p in asked if p != plant]
+    for p in asked:
+        _check_plant(p, allowed_plants)
+    response.headers["Cache-Control"] = "no-store"
+    plant_rows = data.load_plant_rows()
+    zones = {p["plant"]: p["timezone"] for p in plant_rows}
+    schedules = data.next_fire_schedules(allowed_plants=allowed_plants, plant=None)
+    # Armed arms (per schedule): which plants have upcoming fires, and the arms to expand for the page's lanes.
+    arm_sets: list[tuple[dict, dict, list[dict]]] = []
+    for s in schedules:
+        job = {"id": s["job_id"], "name": s["job_name"], "plant": s["plant"], "targets": s.get("targets") or [],
+               "scope_plants": s.get("scope_plants")}
+        try:
+            arms, _w = _arms(s, job, plant_rows)
+        except Exception:  # noqa: BLE001 - a broken row must not break the page
+            continue
+        arm_sets.append((s, job, arms))
+
+    def arm_lanes(job: dict, a: dict) -> list[str]:
+        if a["arm_plant"] is not None or not job.get("targets"):
+            return [a["arm_plant"] or job["plant"]]
+        exp = targets.expand_targets(job, plants=plant_rows, require_tz=False)        # fixed / UTC fan-out
+        return [e["plant"] for e in targets.runnable(exp)][:200]
+
+    def visible(p: str) -> bool:
+        return allowed_plants is None or p in allowed_plants
+
+    if asked:
+        lane_plants = sorted(set(asked))
+    else:
+        have = set(data.timeline_run_plants(allowed_plants=allowed_plants, start=t0, end=t1))
+        if t1 > now:
+            for _s, job, arms in arm_sets:
+                for a in arms:
+                    have.update(p for p in arm_lanes(job, a) if visible(p))
+        lane_plants = sorted(have)
+    total = len(lane_plants)
+    page = lane_plants[plant_offset:plant_offset + plant_limit]
+    lanes = {p: {"plant": p, "timezone": zones.get(p) or "UTC", "now_local": None, "runs": [], "upcoming": []} for p in page}
+    for p, lane in lanes.items():
+        try:
+            lane["now_local"] = now.astimezone(triggers.get_zone(lane["timezone"])).isoformat(timespec="seconds")
+        except triggers.ScheduleError:
+            lane["timezone"] = "UTC"
+            lane["now_local"] = now.isoformat(timespec="seconds")
+    rows = data.timeline_runs(allowed_plants=allowed_plants, plants=page, start=t0, end=t1, limit=limit) if page else []
+    truncated = len(rows) > limit
+    upcoming_truncated = False
+    for r in rows[:limit]:
+        started = r["started_at"] or r["scheduled_for"] or r["created_at"]
+        lanes[r["plant"]]["runs"].append({
+            "id": r["id"], "job_id": r["job_id"], "job_name": r["job_name"], "job_type": r["job_type"],
+            "status": r["status"], "trigger": r["trigger"], "batch_id": r["batch_id"], "error": r["error"],
+            "scheduled_for": data._iso(r["scheduled_for"]), "start_utc": data._iso(started),
+            "end_utc": data._iso(r["ended_at"])})
+    if t1 > now and page:
+        after = max(t0, now)
+        in_page = set(page)
+        for s, job, arms in arm_sets:
+            try:
+                cal = _cal_for(arms, plant_rows)
+            except Exception:  # noqa: BLE001
+                cal = None
+            for a in arms:
+                targets_in_page = [p for p in arm_lanes(job, a) if p in in_page and visible(p)]
+                if not targets_in_page:
+                    continue
+                try:
+                    fires = triggers.fires_between(a, start=after, end=t1, cap=TIMELINE_UPCOMING_PER_ARM, cal=cal,
+                                                   plant=a["arm_plant"] or job["plant"])
+                except Exception:  # noqa: BLE001
+                    continue
+                if len(fires) >= TIMELINE_UPCOMING_PER_ARM:
+                    upcoming_truncated = True            # the arm has more fires in range than the per-arm cap
+                for p in targets_in_page:
+                    lane = lanes[p]
+                    for o in fires:
+                        if len(lane["upcoming"]) >= TIMELINE_UPCOMING_PER_LANE:
+                            upcoming_truncated = True
+                            break
+                        w = triggers.occ_wire(o)
+                        lane["upcoming"].append({
+                            "at_utc": w["at_utc"], "at_local": o.at.astimezone(triggers.get_zone(lane["timezone"])).isoformat(timespec="seconds"),
+                            "job_id": job["id"], "job_name": job["name"], "schedule_id": s["id"],
+                            "dst_shifted": w["dst_shifted"], "policy_note": w["policy_note"]})
+        for lane in lanes.values():
+            lane["upcoming"].sort(key=lambda e: e["at_utc"])
+    return {"from": t0.isoformat(timespec="seconds"), "to": t1.isoformat(timespec="seconds"),
+            "now_utc": now.isoformat(timespec="seconds"), "lanes": [lanes[p] for p in page],
+            "total_plants": total, "plant_offset": plant_offset, "plant_limit": plant_limit, "truncated": truncated,
+            "upcoming_truncated": upcoming_truncated}
 
 
 UPCOMING_JOB_MAX = 200
@@ -588,7 +778,7 @@ def patch_schedule(schedule_id: int, body: SchedulePatch, actor: str | None = De
     flags = _flags(body)
     if timing or tz_set:
         merged = {k: cur[k] for k in ("kind", "time_of_day", "days_of_week", "day_of_month", "cron_expr", "run_at",
-                                      "valid_from", "valid_until")}
+                                      "valid_from", "valid_until", "options")}
         if "kind" in timing and timing["kind"] != cur["kind"]:
             merged = {"kind": timing["kind"]}          # a kind change starts clean; stale fields never leak
         merged.update(timing)
@@ -616,14 +806,20 @@ def preview_schedule(body: PreviewIn, response: Response,
                    fixed_timezone=body.fixed_timezone)
     response.headers["Cache-Control"] = "no-store"
     arms, _ = scheduler.plan_arms({**s, "id": 0, "plant": body.plant, "targets": rows}, plants)
-    out = {"timezone": s["timezone"], "cron_expr": s["cron_expr"], "entries": [], "plants": [],
+    out = {"timezone": s["timezone"], "cron_expr": s["cron_expr"], "entries": [], "skipped": [], "plants": [],
            "total_plants": 1 if exp["single"] else len(targets.runnable(exp)), "warnings": exp["warnings"] if rows else []}
+
+    def full(a: dict) -> tuple[list[dict], list[dict]]:
+        who = a["arm_plant"] or body.plant
+        return triggers.preview_full(a, body.n, cal=_cal_for([a], plants), plant=who)   # the scheduler's own stream
+
     if rows and body.tz_mode == "plant":
         out["total_plants"] = len(arms)
-        out["plants"] = [{"plant": a["arm_plant"], "timezone": a["timezone"], "entries": triggers.preview(a, body.n)}
-                         for a in arms[body.plant_offset:body.plant_offset + body.plant_limit]]
+        for a in arms[body.plant_offset:body.plant_offset + body.plant_limit]:
+            entries, skipped = full(a)
+            out["plants"].append({"plant": a["arm_plant"], "timezone": a["timezone"], "entries": entries, "skipped": skipped})
     else:
-        out["entries"] = triggers.preview(arms[0], body.n)
+        out["entries"], out["skipped"] = full(arms[0])
         out["timezone"] = arms[0]["timezone"]
     return out
 

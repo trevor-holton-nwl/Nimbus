@@ -8,6 +8,9 @@ plus a daily run-history retention sweep and a +90 s boot sweep.
 from __future__ import annotations
 
 import asyncio
+import collections
+import functools
+import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -30,10 +33,12 @@ _WARNED: set[tuple] = set()          # (schedule id, warning) already logged, so
 
 def _sig(r: dict) -> tuple:
     """What an armed job was built from. `r` is an ARM row (`plan_arms`): `timezone` is the EFFECTIVE zone resolved at
-    this reconcile, so a plant timezone edit, or a plant joining or leaving the target set, changes the signature."""
+    this reconcile, so a plant timezone edit, or a plant joining or leaving the target set, changes the signature.
+    W3b: the policy (`options`) and the plant's calendar version (`_cal_ver`, set only for a calendar-driven policy) are
+    part of it, so a calendar edit re-arms the schedule at the next tick without a restart."""
     return (r["modified_at"], r["kind"], r["cron_expr"], r["time_of_day"], tuple(r["days_of_week"] or ()),
             r["day_of_month"], r["run_at"], r["timezone"], r["valid_from"], r["valid_until"], r["misfire_grace_s"],
-            r.get("arm_plant"))
+            r.get("arm_plant"), json.dumps(r.get("options"), sort_keys=True, default=str), r.get("_cal_ver"))
 
 
 def arm_id(schedule_id: int, plant: str | None) -> str:
@@ -73,14 +78,50 @@ _FIRE_POOL = ThreadPoolExecutor(max_workers=FIRE_WORKERS, thread_name_prefix="jo
 async def _fire(schedule_id: int, plant: str | None = None) -> None:
     """APScheduler job body. Offloads the blocking run to the dedicated fire pool; never raises."""
     try:
-        args = (schedule_id,) if plant is None else (schedule_id, plant)
-        await asyncio.get_running_loop().run_in_executor(_FIRE_POOL, runner.fire_schedule, *args)
+        fired_at = datetime.now(timezone.utc)           # taken here, not in the pool: a queued fire keeps its fire time
+        await asyncio.get_running_loop().run_in_executor(
+            _FIRE_POOL, functools.partial(runner.fire_schedule, schedule_id, plant, fired_at=fired_at))
     except Exception as exc:  # noqa: BLE001
         _log_event("error", "jobs", "scheduled job fire raised", exc=exc, schedule_id=schedule_id)
 
 
+CATCHUP_PER_TICK = 20          # arms handed to catch-up per reconcile: a boot with hundreds of schedules is spread out
+_CATCHUP_QUEUE: collections.deque = collections.deque()      # (schedule id, arm plant) waiting for run_catch_up
+
+
+def _arm_plant(a: dict) -> str:
+    return a.get("arm_plant") or a["plant"]
+
+
+def _calendar_view(want: dict[str, dict], plants: list[dict]):
+    """One injected calendar view for every arm whose policy reads the calendar, and stamp each such arm's plant
+    calendar version into the arm (`_cal_ver`) for the signature. None when no arm needs a calendar."""
+    needing = {jid: a for jid, a in want.items() if triggers.policy_of(a).needs_calendar()}
+    if not needing:
+        return None
+    names = {_arm_plant(a) for a in needing.values()}
+    versions = data.calendar_versions(names)
+    for a in needing.values():
+        a["_cal_ver"] = versions.get(_arm_plant(a))
+    zones = {p["plant"]: p["timezone"] for p in plants if p["timezone"]}
+    return data.load_calendar_view(names, zones)
+
+
+def _drain_catchup(limit: int | None = None) -> int:
+    """Hand up to `limit` (default CATCHUP_PER_TICK) queued arms to catch-up on the bounded fire pool; never blocks the
+    reconcile."""
+    limit = CATCHUP_PER_TICK if limit is None else limit
+    n = 0
+    while _CATCHUP_QUEUE and n < limit:
+        sid, plant = _CATCHUP_QUEUE.popleft()
+        _FIRE_POOL.submit(runner.run_catch_up, sid, plant)
+        n += 1
+    return n
+
+
 def reconcile(scheduler) -> dict:
-    """Arm/replace/remove APScheduler jobs so they match the active schedules in the DB. Blocking."""
+    """Arm/replace/remove APScheduler jobs so they match the active schedules in the DB. Blocking. A (re)armed
+    schedule is queued for catch-up (fires lost to downtime), a bounded number per tick."""
     out = {"added": 0, "removed": 0, "skipped": 0}
     want: dict[str, dict] = {}
     plants = data.load_plant_rows()                        # fresh each time: a timezone edit is seen at once
@@ -107,12 +148,18 @@ def reconcile(scheduler) -> dict:
             pass
         _SIGS.pop(jid, None)
         out["removed"] += 1
+    try:
+        cal = _calendar_view(want, plants)                  # a failed calendar read leaves the policy fail-open
+    except Exception as exc:  # noqa: BLE001
+        _log_event("error", "jobs", "could not read plant calendars for job schedules", exc=exc)
+        cal = None
     for jid, r in want.items():
         if jid in have and _SIGS.get(jid) == _sig(r):
             continue
         try:
-            trig = triggers.build_trigger(r)
-            if not triggers.next_fire_times(r, 1):          # an exhausted trigger would be added paused
+            who = _arm_plant(r)
+            trig = triggers.build_trigger(r, cal=cal, plant=who)
+            if not triggers.next_fire_times(r, 1, cal=cal, plant=who):   # an exhausted trigger would be added paused
                 out["skipped"] += 1
                 _SIGS[jid] = _sig(r)
                 if jid in have:
@@ -122,8 +169,11 @@ def reconcile(scheduler) -> dict:
                               misfire_grace_time=int(r["misfire_grace_s"]), replace_existing=True)
             _SIGS[jid] = _sig(r)
             out["added"] += 1
+            if r["kind"] != "once" and (r["id"], r["arm_plant"]) not in _CATCHUP_QUEUE:
+                _CATCHUP_QUEUE.append((r["id"], r["arm_plant"]))
         except Exception as exc:  # noqa: BLE001 - one bad schedule must not block the others
             _log_event("error", "jobs", "could not arm schedule", exc=exc, schedule_id=r["id"])
+    out["catchup"] = _drain_catchup()
     return out
 
 

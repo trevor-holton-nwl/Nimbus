@@ -274,7 +274,7 @@ test('submit creates the job with its preset schedule inline, toasts, closes and
   assert.deepEqual(calls.create[0], {
     name: 'Morning optimize', plant: '1008', job_type: 'optimizer.plant',
     params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' }, targets: [], fan_out: null,
-    schedules: [{ kind: 'daily', time_of_day: '08:00', valid_from: null, valid_until: null, skip_if_running: true, tz_mode: 'plant', fixed_timezone: null }],
+    schedules: [{ kind: 'daily', time_of_day: '08:00', valid_from: null, valid_until: null, skip_if_running: true, tz_mode: 'plant', fixed_timezone: null, options: null }],
   });
   assert.equal(calls.addSch.length, 0, 'the schedule rides inside the create call');
   assert.deepEqual(calls.toast.at(-1)[1], 'success');

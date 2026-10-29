@@ -160,9 +160,10 @@ def test_scheduled_fires_use_their_own_bounded_pool():
     seen = {}
     orig = runner.fire_schedule
 
-    def probe(sid):
+    def probe(sid, plant=None, fired_at=None):
         import threading
         seen["thread"] = threading.current_thread().name
+        seen["fired_at"] = fired_at
         return None
 
     runner.fire_schedule = probe
@@ -170,5 +171,5 @@ def test_scheduled_fires_use_their_own_bounded_pool():
         asyncio.run(scheduler._fire(1))
     finally:
         runner.fire_schedule = orig
-    assert seen["thread"].startswith("job-fire")
+    assert seen["thread"].startswith("job-fire") and seen["fired_at"] is not None, "the fire time is taken before the pool"
     assert time.monotonic() > 0
