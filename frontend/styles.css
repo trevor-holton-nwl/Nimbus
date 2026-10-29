@@ -3002,12 +3002,6 @@ body.update-available .am-vl-scroll {
   margin: 0 auto;
   padding: 24px 28px 60px;
 }
-.admin-head {
-  display: flex; align-items: flex-end; justify-content: space-between;
-  gap: 16px; margin-bottom: 18px;
-}
-.admin-head h2 { font-size: 22px; }
-.admin-head .sub { color: var(--fg-mute); font-size: 12.5px; margin: 4px 0 0 0; }
 
 .admin-grid {
   display: grid;
@@ -5068,6 +5062,10 @@ body.dark .cw-active-card {
   flex-wrap: wrap;
 }
 .admin-subtabs > button { flex-shrink: 0; }
+/* Admin Cockpit: a sub-sub row sits flush under the sub-tab strip (margins collapse, so
+   the -20px cancels the strip's 20px bottom margin), like the Master Data page. */
+#admin-tab .admin-ov-tabs,
+#admin-tab .md-table-nav-row { margin-top: -20px; }
 .admin-subtab {
   padding: 8px 18px;
   border: none;
