@@ -192,7 +192,7 @@ def test_noop_runs_and_honours_cancel():
 
 def test_optimizer_params_defaults_and_timeout():
     p = optimizer.OptimizerParams()
-    assert (p.mode, p.search, p.respect_firmed, p.apply_mode) == ("due_date", "exhaustive", True, "propose")
+    assert (p.mode, p.search, p.respect_firmed, p.apply_mode) == ("due_date", "exhaustive", True, "apply")
     assert optimizer.OPTIMIZER.timeout_for(p) == 600
     assert optimizer.OPTIMIZER.timeout_for(optimizer.OptimizerParams(search="normal")) == 120
     with pytest.raises(Exception):
@@ -235,6 +235,46 @@ def test_resolve_status_transitions():
     assert res({}, c, T(alive=True), 60)[0] == "failed"
     c.timed_out = True
     assert res({"cancelled": "c"}, c, T(), 60) == ("failed", None, "timed out after 60s")
+
+
+def test_longer_than_usual_needs_history_and_a_floor():
+    from backend.jobs import data
+    assert not data.longer_than_usual(10_000, [60, 60])                       # fewer than 3 finished runs
+    assert not data.longer_than_usual(250, [60, 60, 60])                      # 2x median = 120 s, floor 300 s wins
+    assert data.longer_than_usual(301, [60, 60, 60])
+    assert not data.longer_than_usual(1000, [600, 500, 550, 700])             # median 575 -> 1150 s
+    assert data.longer_than_usual(1200, [600, 500, 550, 700])
+
+
+def test_failed_runs_carry_error_kind_step_and_steps():
+    from backend.jobs import runner
+    c, _, _ = _ctx()
+    assert runner._describe_failure("succeeded", {"a": 1}, c) == {"a": 1}
+    assert runner._describe_failure("failed", None, c) == {"error_kind": "system"}
+    try:
+        with c.step("load"):
+            raise ValueError("boom")
+    except ValueError:
+        pass
+    out = runner._describe_failure("failed", None, c)
+    assert out["failed_step"] == "load" and out["error_kind"] == "system" and out["steps"][0]["step"] == "load"
+    kept = runner._describe_failure("failed", {"error_kind": "config", "failed_step": "gather", "steps": [{"step": "x", "duration_ms": 1}]}, c)
+    assert (kept["error_kind"], kept["failed_step"], len(kept["steps"])) == ("config", "gather", 1)
+
+
+def test_scheduler_heartbeat_goes_stale():
+    from datetime import datetime, timedelta, timezone
+    from backend.jobs import scheduler
+    t = datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
+    scheduler.record_tick(t)
+    assert scheduler.heartbeat(t + timedelta(seconds=60))["ok"] is True
+    assert scheduler.heartbeat(t + timedelta(seconds=200))["ok"] is False
+    assert scheduler.heartbeat(t)["last_tick_at"] == "2026-10-29T12:00:00+00:00"
+
+
+def test_optimizer_defaults_to_apply():
+    from backend.jobs.types.optimizer import OptimizerParams
+    assert OptimizerParams().apply_mode == "apply"
 
 
 def test_retention_getter_clamps(monkeypatch):
@@ -416,6 +456,32 @@ def test_boot_sweep_marks_stale_runs_failed(api, jobs_pg):
     assert data.boot_sweep() >= 1
     run = api.get(f"/jobs/runs/{rid}").json()["run"]
     assert run["status"] == "failed" and run["error"] == "interrupted by restart" and run["ended_at"]
+    assert run["summary"]["error_kind"] == "system"
+
+
+@pytest.mark.pg
+def test_summary_counts_filters_and_restart(api, jobs_pg):
+    import backend.jobs.data as data
+    j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "daily", "time_of_day": "08:00"}])
+    sid = j["schedules"][0]["id"]
+    mk = lambda **kw: data.insert_run(job_id=j["id"], plant=jobs_pg.plant, job_type="noop", trigger="schedule", **kw)  # noqa: E731
+    mk(schedule_id=sid, status="failed", error="boom")
+    mk(schedule_id=sid, status="skipped", error="missed: fired after its grace time")
+    mk(schedule_id=None, status="skipped", error="previous run still running")
+    live = mk(schedule_id=None, status="scheduled")
+    s = api.get("/jobs/summary", params={"plant": jobs_pg.plant}).json()
+    assert (s["failed_24h"], s["missed_24h"], s["queued"], s["running"]) == (1, 1, 1, 0)
+    assert s["next_fire"]["job_id"] == j["id"] and "ok" in s["scheduler"]
+    missed = api.get("/jobs/runs", params={"plant": jobs_pg.plant, "status": "missed"}).json()["runs"]
+    assert [r["error"][:7] for r in missed] == ["missed:"]
+    daily = api.get("/jobs/runs", params={"plant": jobs_pg.plant, "periodicity": "daily"}).json()["runs"]
+    assert len(daily) == 2 and all(r["schedule_id"] == sid for r in daily)
+    assert len(api.get("/jobs/runs", params={"plant": jobs_pg.plant, "periodicity": "manual"}).json()["runs"]) == 2
+    assert api.post(f"/jobs/runs/{live}/restart").status_code == 409, "a run is still queued"
+    data.finish_run(live, "failed", None, "x", False)
+    r = api.post(f"/jobs/runs/{live}/restart")
+    assert r.status_code == 200 and r.json()["run"]["trigger"] == "manual"
+    _wait(api, r.json()["run"]["id"])
 
 
 @pytest.mark.pg
@@ -548,7 +614,115 @@ def test_system_settings_validates_job_run_retention(api):
 def test_admin_write_operations_registered():
     import brain
     for path in ("/jobs", "/jobs/{job_id}", "/jobs/{job_id}/schedules", "/jobs/schedules/{schedule_id}",
-                 "/jobs/{job_id}/run", "/jobs/runs/{run_id}/cancel"):
+                 "/jobs/{job_id}/run", "/jobs/runs/{run_id}/cancel", "/jobs/runs/{run_id}/restart"):
         assert path in brain._ADMIN_WRITE_OPERATIONS
     assert {"job_id", "schedule_id", "run_id"} <= brain._ADMIN_TARGET_PARAMS
+
+
+# ------------------------------------------------------------------------------------------------ W1 fix wave
+def test_optimizer_fail_logs_an_error_line_with_its_step():
+    from backend.jobs.types import optimizer_runner as orr
+    c, rows, _ = _ctx()
+    out = orr._fail(orr._Steps(c), "board changed", kind="transient", step="write")
+    assert out["error_kind"] == "transient" and out["failed_step"] == "write"
+    assert [(r["level"], r["step"], r["msg"]) for r in rows] == [("error", "write", "board changed")]
+    assert c.error_lines == 1
+    orr._fail(orr._Steps(c), "again", log=False)
+    assert c.error_lines == 1, "log=False leaves logging to the caller"
+
+
+def test_describe_failure_normalises_unknown_error_kinds():
+    from backend.jobs import runner
+    c, _, _ = _ctx()
+    assert runner._describe_failure("failed", {"error_kind": "transient"}, c)["error_kind"] == "transient"
+    assert runner._describe_failure("failed", {"error_kind": "bogus"}, c)["error_kind"] == "system"
+
+
+def test_begin_work_fires_the_hook_once():
+    c, _, _ = _ctx()
+    calls = []
+    c.on_work_start = lambda: calls.append(1)
+    c.begin_work()
+    c.begin_work()
+    assert calls == [1]
+
+
+@pytest.mark.pg
+def test_partial_params_patch_keeps_the_stored_dry_run(api, jobs_pg):
+    j = _mk_job(api, jobs_pg.plant, job_type="optimizer.plant", params={"apply_mode": "propose", "mode": "spt"})
+    p = api.patch(f"/jobs/{j['id']}", json={"params": {"search": "normal"}}).json()
+    assert p["params"]["apply_mode"] == "propose" and p["params"]["mode"] == "spt" and p["params"]["search"] == "normal"
+
+
+@pytest.mark.pg
+def test_summary_failure_split_next_fire_and_scope(api, jobs_pg):
+    import backend.jobs.data as data
+    j = _mk_job(api, jobs_pg.plant, schedules=[{"kind": "daily", "time_of_day": "08:00"}])
+    _mk_job(api, jobs_pg.other, schedules=[{"kind": "daily", "time_of_day": "08:00"}])
+    mk = lambda kind: data.finish_run(  # noqa: E731
+        data.insert_run(job_id=j["id"], schedule_id=None, plant=jobs_pg.plant, job_type="noop", trigger="manual",
+                        status="running"),
+        "failed", {"error_kind": kind} if kind else None, "x", False)
+    for kind in ("config", "system", "transient", "transient", None):
+        mk(kind)
+    s = api.get("/jobs/summary", params={"plant": jobs_pg.plant}).json()
+    assert (s["failed_24h"], s["failed_config_24h"], s["failed_system_24h"], s["failed_transient_24h"]) == (5, 1, 2, 2)
+    assert s["next_fire"]["plant"] == jobs_pg.plant, "the next fire only looks at the scoped plant"
+    assert api.get("/jobs/upcoming", params={"plant": jobs_pg.other}).json()["entries"][0]["plant"] == jobs_pg.other
+
+
+@pytest.mark.pg
+def test_run_blocked_on_the_optimizer_slot_counts_as_queued(api, jobs_pg, monkeypatch):
+    import threading
+    from backend.jobs.types import optimizer, optimizer_runner as orr
+    gate, entered = threading.Event(), threading.Event()
+
+    def fake_run(ctx, plant, params, steps):
+        entered.set()
+        gate.wait(15)
+        return {"applied": 0}
+
+    monkeypatch.setattr(orr, "_run", fake_run)
+    monkeypatch.setattr(orr, "_SLOTS", threading.BoundedSemaphore(1))
+    optimizer.set_runner(orr.run_optimizer)
+    try:
+        a = _mk_job(api, jobs_pg.plant, job_type="optimizer.plant", params={})
+        b = _mk_job(api, jobs_pg.other, job_type="optimizer.plant", params={})
+        ra = api.post(f"/jobs/{a['id']}/run").json()["run"]
+        assert entered.wait(10)
+        rb = api.post(f"/jobs/{b['id']}/run").json()["run"]
+        _wait(api, rb["id"], done=("running",))
+        s = api.get("/jobs/summary").json()
+        assert (s["running"], s["queued"]) == (1, 1)
+        assert api.get(f"/jobs/runs/{rb['id']}").json()["run"]["summary"]["waiting_for"] == "slot"
+        released = datetime.now(timezone.utc)
+        gate.set()
+        fa, fb = _wait(api, ra["id"]), _wait(api, rb["id"])
+        assert fa["status"] == fb["status"] == "succeeded"
+        assert "waiting_for" not in (fb["summary"] or {}), "the marker is cleared once work starts"
+        assert datetime.fromisoformat(fb["started_at"]) >= released, "the waiting run's clock starts at work start"
+    finally:
+        gate.set()
+        optimizer.set_runner(None)
+
+
+@pytest.mark.pg
+def test_proposal_pending_job_type_filter_and_atomic_restart(api, jobs_pg):
+    import backend.jobs.data as data
+    from backend.jobs import runner
+    j = _mk_job(api, jobs_pg.plant, job_type="optimizer.plant", params={"apply_mode": "propose"})
+    live = data.insert_run(job_id=j["id"], schedule_id=None, plant=jobs_pg.plant, job_type="optimizer.plant",
+                           trigger="manual", status="scheduled")
+    r = api.get(f"/jobs/runs/{live}/proposal")
+    assert r.status_code == 200 and r.json()["pending"] is True and r.json()["rows"] == []
+    assert runner.start_manual_run(data.get_job(j["id"]), "a@b.c") is None, "an active run blocks a second insert"
+    data.finish_run(live, "succeeded", {"apply_mode": "propose"}, None, False)
+    plain = _mk_job(api, jobs_pg.plant)
+    nid = data.insert_run(job_id=plain["id"], schedule_id=None, plant=jobs_pg.plant, job_type="noop",
+                          trigger="manual", status="succeeded")
+    done = api.post(f"/jobs/{plain['id']}/run").json()["run"]
+    _wait(api, done["id"])
+    assert api.get(f"/jobs/runs/{nid}/proposal").status_code == 400
+    only = api.get("/jobs/runs", params={"plant": jobs_pg.plant, "job_type": "noop"}).json()["runs"]
+    assert only and all(x["job_type"] == "noop" for x in only)
 

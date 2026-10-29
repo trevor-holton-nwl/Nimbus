@@ -129,6 +129,45 @@ test('writes: archive a job, retire a schedule, pause, schedule add / update sen
   assert.deepEqual(phantom, []);
 });
 
+test('summary: the health strip body (counts, next_fire, scheduler heartbeat, longer_than_usual)', async () => {
+  reply = body('summary');
+  const h = await JobsClient.summary('1008');
+  assert.equal(path(0), '/jobs/summary?plant=1008');
+  assert.deepEqual([h.running, h.queued, h.failed24h, h.missed24h, h.warning24h], [1, 0, 2, 0, 1]);
+  assert.deepEqual([h.failedConfig24h, h.failedSystem24h, h.failedTransient24h], [1, 0, 1], 'the failed split is read from the body');
+  assert.deepEqual([h.nextFire.jobId, h.nextFire.jobName, h.nextFire.plant, h.nextFire.atLocal], [5, 'Morning optimize', '1008', '2026-10-30T08:00:00-04:00']);
+  assert.deepEqual([h.scheduler.ok, h.scheduler.lastTickAt, h.longerThanUsual], [true, '2026-10-29T12:00:00+00:00', [43]]);
+  assert.deepEqual(phantom, []);
+  reply = { ...body('summary'), next_fire: null };
+  assert.equal((await JobsClient.summary('')).nextFire, null);
+  assert.equal(path(1), '/jobs/summary');
+});
+
+test('proposal: rows joined to live orders, count, findings, board match; restart posts and unwraps {run}', async () => {
+  reply = body('proposal');
+  const p = await JobsClient.proposal(44);
+  assert.equal(path(0), '/jobs/runs/44/proposal');
+  assert.deepEqual([p.total, p.shown, p.truncated, p.boardMatches, p.findings], [1, 1, false, true, 1]);
+  assert.deepEqual([p.rows[0].id, p.rows[0].machine, p.rows[0].finishBefore, p.rows[0].finishAfter, p.rows[0].deltaHours, p.rows[0].status, p.rows[0].changedSince],
+    ['1008-100', 'L1', '2026-10-30T10:00:00', '2026-10-30T14:00:00', 4, 'scheduled', false]);
+  assert.deepEqual(phantom, []);
+  reply = body('run_wrapped');
+  assert.equal((await JobsClient.restartRun(42)).id, 42);
+  assert.deepEqual([calls[1].method, path(1)], ['POST', '/jobs/runs/42/restart']);
+  assert.deepEqual(phantom, []);
+});
+
+test('runs: periodicity, scheduled_by and since_hours go on the query', async () => {
+  reply = body('runs_list');
+  await JobsClient.runs({ plant: '1008', status: 'missed', periodicity: 'daily', scheduledBy: 'schedule', sinceHours: 24 });
+  assert.equal(path(0), '/jobs/runs?plant=1008&status=missed&periodicity=daily&scheduled_by=schedule&since_hours=24&limit=50');
+});
+
+test('types: the optimizer default result is apply', async () => {
+  reply = body('types');
+  assert.equal((await JobsClient.types())[0].defaults.apply_mode, 'apply');
+});
+
 test('a non-2xx throws the server detail', async () => {
   Util.fetchTraced = async () => ({ ok: false, status: 409, json: async () => ({ detail: 'Run is already succeeded' }) });
   await assert.rejects(JobsClient.cancelRun(1), /Run is already succeeded/);

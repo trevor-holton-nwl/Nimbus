@@ -54,11 +54,11 @@ afterEach(() => {
   dom.restore();
 });
 
-test('body markup: every field has a label, defaults are 08:00 / Exhaustive / Propose, plant timezone is read-only text', () => {
+test('body markup: every field has a label, defaults are 08:00 / Exhaustive / Apply, plant timezone is read-only text', () => {
   const html = bodyHtml(defaultJobForm('1008'), 'new', true);
   for (const id of ['jb-name', 'jb-mode', 'jb-search', 'jb-result', 'jb-recur', 'jb-time', 'jb-from', 'jb-until', 'jb-overlap', 'jb-preview', 'jb-tz']) assert.match(html, new RegExp(`id="${id}"`), id);
   assert.match(html, /<option value="exhaustive" selected>/);
-  assert.match(html, /<option value="propose" selected>/);
+  assert.match(html, /<option value="apply" selected>/);
   assert.match(html, /id="jb-time"[^>]*value="08:00"/);
   assert.doesNotMatch(html, /<input[^>]*id="jb-tz"/, 'the timezone is not editable');
   assert.doesNotMatch(bodyHtml(defaultJobForm('1008'), 'new', true), /id="jb-result"[^>]*disabled/);
@@ -175,13 +175,13 @@ test('copy to plants creates one job (schedule inline) per ticked plant and repo
   assert.equal(calls.closed.length, 0);
 });
 
-test('a new job opens as a PROPOSAL, seeded from the server defaults; auto-apply is an explicit choice', () => {
+test('a new job defaults to APPLY, seeded from the server defaults; Dry run is the alternative', () => {
   JobsDialog.open({ plant: '1008' });
-  assert.equal(JobsDialog._state().form.result, 'propose');
+  assert.equal(JobsDialog._state().form.result, 'apply');
   JobsDialog.open({ plant: '1008', defaults: { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' } });
   const f = JobsDialog._state().form;
   assert.deepEqual([f.mode, f.search, f.respectFirmed, f.result], ['spt', 'normal', false, 'propose']);
-  assert.match(bodyHtml(defaultJobForm('1008'), 'new', true), /<option value="propose" selected>/);
+  assert.match(bodyHtml(defaultJobForm('1008'), 'new', true), /<option value="apply" selected>/);
 });
 
 test('Escape / X: a clean form closes at once, a dirty one asks first and stays open on Cancel', async () => {

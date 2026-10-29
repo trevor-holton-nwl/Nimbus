@@ -32,6 +32,21 @@ test('.job-pane[hidden] exists', () => {
   assert.ok(hiddenPairs.some(s => s.split(',').map(x => x.trim()).includes('.job-pane[hidden]')), 'missing .job-pane[hidden] { display: none }');
 });
 
+test('any single-class display rule used on a [hidden] element of the Jobs sources has a paired [hidden] rule', () => {
+  // Not only `job-*`: a shared class (btn, badge, kpi-tile ...) toggled with `hidden` in a Jobs template needs its pair too.
+  const sourceTags = [...jobsSrc.matchAll(/<[a-z0-9]+\b[^>]*\shidden(?=[\s>=])[^>]*>/gi)].map(m => m[0]);
+  const single = displaySetters.flatMap(r => r.sel.split(',').map(s => s.trim())).filter(s => /^\.[\w-]+$/.test(s));
+  const offenders = [];
+  for (const tag of sourceTags) {
+    for (const cls of tokensOf(tag).filter(c => c.startsWith('.'))) {
+      if (!single.includes(cls)) continue;
+      const paired = hiddenPairs.some(p => p.split(',').map(x => x.trim()).some(x => x.split(/\s+/).pop() === cls + '[hidden]'));   // a scoped pair (`.job-combobox .hps-clear[hidden]`) counts
+      if (!paired) offenders.push(`${cls}  <-  ${tag.slice(0, 80)}`);
+    }
+  }
+  assert.deepEqual([...new Set(offenders)], []);
+});
+
 test('every Jobs display-setting selector used on a [hidden] element has a paired [hidden] rule', () => {
   const offenders = [];
   for (const tag of hiddenTags) {

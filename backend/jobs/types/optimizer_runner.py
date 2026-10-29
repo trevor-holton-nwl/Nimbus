@@ -274,8 +274,15 @@ REFUSALS = {
 }
 
 
-def _fail(steps: _Steps, error: str, **extra) -> dict:
-    return {**extra, "status": "failed", "error": error, "steps": steps.items}
+def _fail(steps: _Steps, error: str, *, kind: str = "system", step: str | None = None, log: bool = True,
+          **extra) -> dict:
+    """`kind` is the run summary's error_kind: config = the job or its inputs need fixing, system = the platform
+    failed, transient = the board changed under the run (run again). The message is also logged at error level so
+    the run's Errors view shows it (`log=False` when the caller already logged a detailed error line)."""
+    if log:
+        steps.ctx.log("error", error, step=step)
+    return {**extra, "status": "failed", "error": error, "steps": steps.items, "error_kind": kind,
+            **({"failed_step": step} if step else {})}
 
 
 def run_optimizer(ctx, plant: str, params) -> dict:
@@ -291,9 +298,26 @@ def run_optimizer(ctx, plant: str, params) -> dict:
         raise
     except Exception as exc:  # noqa: BLE001
         ctx.log("error", f"optimizer run failed: {type(exc).__name__}: {exc}")
-        return _fail(steps, f"{type(exc).__name__}: {exc}")
+        return _fail(steps, f"{type(exc).__name__}: {exc}", log=False)
     finally:
         _SLOTS.release()
+
+
+def _with_stored_delta(patches: list, wire: dict) -> list:
+    """Each stored patch gets `delta_hours` (proposed finish minus the finish in the run's own snapshot) so the
+    proposal route can pick the largest moves without loading every live row. Best effort: absent when unknown."""
+    from datetime import datetime
+    before = {str(t.get("id")): t.get("end_date") for t in ((wire.get("tasks") or {}).get("data") or [])
+              if isinstance(t, dict)}
+    out = []
+    for p in patches:
+        try:
+            delta = round((datetime.fromisoformat(p["end_date"]) - datetime.fromisoformat(before[str(p["id"])]))
+                          .total_seconds() / 3600, 2)
+            out.append({**p, "delta_hours": delta})
+        except (KeyError, TypeError, ValueError):
+            out.append(p)
+    return out
 
 
 def _run(ctx, plant: str, params, steps: _Steps) -> dict:
@@ -302,7 +326,7 @@ def _run(ctx, plant: str, params, steps: _Steps) -> dict:
     wire = bundle["wire"]
     tz = plant_timezone(wire, plant)
     if not tz:
-        return _fail(steps, f"plant {plant} has no timezone; the optimizer cannot run")
+        return _fail(steps, f"plant {plant} has no timezone; the optimizer cannot run", kind="config", step="gather")
     node_params = {"mode": MODE_MAP[params.mode], "search": params.search, "respect_firmed": params.respect_firmed,
                    "serverNow": bundle["server_now"], "plantTimezone": tz}
     result = run_node(ctx, steps, "run", {"plant": plant, "wire": wire, "params": node_params},
@@ -314,11 +338,11 @@ def _run(ctx, plant: str, params, steps: _Steps) -> dict:
     out = {k: v for k, v in out.items() if v is not None}
     blockers = result.get("blockers") or []
     if result.get("status") not in (None, "completed"):
-        return _fail(steps, f"optimizer did not complete: {result.get('status')} {result.get('error') or ''}".strip(), **out)
+        return _fail(steps, f"optimizer did not complete: {result.get('status')} {result.get('error') or ''}".strip(), step="optimize", **out)
 
     if params.apply_mode == "propose":
-        patches = result.get("patches") or []
-        proposal = {"patches": patches, "base_versions": {p["id"]: p.get("base_version") for p in patches},
+        patches = _with_stored_delta(result.get("patches") or [], wire)
+        proposal = {"snapshot_version": bundle["snapshot_version"], "patches": patches, "base_versions": {p["id"]: p.get("base_version") for p in patches},
                     "findings": (result.get("findings") or [])[:50]}
         if len(json.dumps(proposal)) <= MAX_STORED_PATCH_BYTES:      # the whole object, not just the patches
             out["proposal"] = proposal
@@ -332,8 +356,7 @@ def _run(ctx, plant: str, params, steps: _Steps) -> dict:
 
     if blockers or not result.get("ok"):
         reason = ", ".join(blockers) or str(result.get("error") or "unknown")
-        ctx.log("error", f"result is not applicable: {reason}")
-        return _fail(steps, f"optimizer result blocked, nothing applied: {reason}", **out)
+        return _fail(steps, f"optimizer result blocked, nothing applied: {reason}", kind="config", step="optimize", **out)
     if not result.get("patches"):
         ctx.log("info", "no orders need to move; nothing to apply")
         return {**out, "applied": 0, "steps": steps.items}
@@ -348,7 +371,7 @@ def _apply(ctx, plant, steps, bundle, tz, node_params, result, out) -> dict:
     with steps.phase("gather_live"):
         live = gather_bundle(plant)
     if live["snapshot_version"] != bundle["snapshot_version"]:
-        return _fail(steps, "priority lists, setup, calendar or tool inventory changed since the run; nothing applied", **out)
+        return _fail(steps, "priority lists, setup, calendar or tool inventory changed since the run; nothing applied", kind="transient", step="gather_live", **out)
     plan = run_node(ctx, steps, "apply", {"plant": plant, "runWire": bundle["wire"], "liveWire": live["wire"],
                                           "state": result["state"], "jobId": ctx.job_id,
                                           # the live board is judged at the live clock, the run's own clock is for the run
@@ -361,7 +384,9 @@ def _apply(ctx, plant, steps, bundle, tz, node_params, result, out) -> dict:
     out["dropped"] = len(dropped)
     if not plan.get("ok"):
         reason = plan.get("refusal") or "unknown"
-        return _fail(steps, REFUSALS.get(reason, f"apply refused ({reason}); nothing applied"), **out)
+        changed = reason in REFUSALS or reason.startswith("inputs_changed")
+        return _fail(steps, REFUSALS.get(reason, f"apply refused ({reason}); nothing applied"),
+                     kind="transient" if changed else "config", step="guard", **out)
     items = plan.get("apply") or []
     if not items:
         ctx.log("warn" if dropped else "info", "nothing left to apply")
@@ -369,7 +394,7 @@ def _apply(ctx, plant, steps, bundle, tz, node_params, result, out) -> dict:
         return {**out, **warn, "applied": 0, "steps": steps.items}
     # Last guard before the write: a change that landed while the child ran.
     if sched.optimizer_snapshot_version(plant) != bundle["snapshot_version"]:
-        return _fail(steps, "inputs changed while applying; nothing applied", **out)
+        return _fail(steps, "inputs changed while applying; nothing applied", kind="transient", step="guard", **out)
     ctx.check_cancel()
     actor = f"job:{ctx.job_id}"
     ev = EventCtx(source="optimizer", actor=actor, action_id=new_action_id(), client_id=actor)
@@ -381,7 +406,8 @@ def _apply(ctx, plant, steps, bundle, tz, node_params, result, out) -> dict:
         ctx.log("error", "write refused; the batch is atomic so nothing was applied", step="write",
                 persisted=res.get("persisted"), stale=len(res.get("stale") or []),
                 conflicts=len(res.get("conflicts") or []), error_code=res.get("error_code"))
-        return _fail(steps, f"write refused ({res.get('error_code') or 'stale or conflicting rows'}); nothing applied", **out)
+        return _fail(steps, f"write refused ({res.get('error_code') or 'stale or conflicting rows'}); nothing applied", kind="transient", step="write",
+                     log=False, **out)
     out.update({"applied": res["persisted"], "action_id": ev.action_id, "steps": steps.items})
     if dropped:
         out["warnings"] = [f"{len(dropped)} order(s) changed during the run and were skipped"]

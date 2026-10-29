@@ -64,10 +64,21 @@ class JobContext:
         # until it actually has the resource: the runner sets `defer_clock`, the body calls `begin_work()`.
         self.defer_clock = False
         self.work_started = threading.Event()
+        self.on_work_start = None                    # runner hook: the run's clock restarts when work begins
+        self.error_lines = 0                         # error-level lines logged so far (Errors view needs >= 1 per failure)
+        self.failed_step: str | None = None          # the last `ctx.step` an exception escaped from
+        self.last_error_step: str | None = None      # the step of the most recent error-level line
+        self.step_timings: list[dict] = []           # [{step, duration_ms}] of every `ctx.step` that ended
 
     def begin_work(self) -> None:
         """The body holds its resource now: the run's hard-timeout clock starts (a no-op unless deferred)."""
+        first = not self.work_started.is_set()
         self.work_started.set()
+        if first and self.on_work_start:
+            try:
+                self.on_work_start()
+            except Exception:  # noqa: BLE001 - a bookkeeping failure must not fail the run
+                pass
 
     # ---- cancellation -------------------------------------------------------------------------------
     @property
@@ -86,6 +97,10 @@ class JobContext:
     # ---- logging ------------------------------------------------------------------------------------
     def log(self, level: str, msg, *, step: str | None = None, duration_ms: int | None = None, **data) -> None:
         level = level if level in LEVEL_RANK else "info"
+        if level == "error":
+            self.error_lines += 1
+            if step:
+                self.last_error_step = step
         if level in ("warn", "error") and self._mirror:
             try:
                 self._mirror(level, str(msg), self.run_id, self.plant)
@@ -121,10 +136,14 @@ class JobContext:
         try:
             yield
         except BaseException as exc:
-            self.log("error", f"{name}: failed ({type(exc).__name__}: {exc})", step=name,
-                     duration_ms=int((time.monotonic() - t0) * 1000))
+            ms = int((time.monotonic() - t0) * 1000)
+            self.failed_step = name
+            self.step_timings.append({"step": name, "duration_ms": ms})
+            self.log("error", f"{name}: failed ({type(exc).__name__}: {exc})", step=name, duration_ms=ms)
             raise
-        self.log("info", f"{name}: done", step=name, duration_ms=int((time.monotonic() - t0) * 1000), **data)
+        ms = int((time.monotonic() - t0) * 1000)
+        self.step_timings.append({"step": name, "duration_ms": ms})
+        self.log("info", f"{name}: done", step=name, duration_ms=ms, **data)
 
     def _arm_timer(self) -> None:
         with self._lock:

@@ -11,7 +11,7 @@
 
 import { Util, Config } from '../platform/foundation.mjs';
 import { buildJobsQuery, buildRunsQuery, buildLogQuery } from './jobs-model.mjs';
-import type { JobsQuery, RunsQuery, LogLine, RunSummary } from './jobs-model.mjs';
+import type { JobsQuery, RunsQuery, LogLine, RunSummary, HealthSummary, Proposal } from './jobs-model.mjs';
 
 export interface JobSchedule {
   id: number;
@@ -141,6 +141,34 @@ export function normLog(data: unknown): LogPage {
   return { lines, status: _s(d.status), done: d.done === true, lastSeq: Number(d.last_seq ?? 0), truncated: !!d.log_truncated };
 }
 
+export function normHealth(data: unknown): HealthSummary {
+  const d = (data as Raw | null) ?? {};
+  const nf = d.next_fire as Raw | null | undefined;
+  const sch = (d.scheduler as Raw | null | undefined) ?? {};
+  return {
+    running: Number(d.running ?? 0), queued: Number(d.queued ?? 0), failed24h: Number(d.failed_24h ?? 0),
+    missed24h: Number(d.missed_24h ?? 0), warning24h: Number(d.warning_24h ?? 0),
+    failedConfig24h: Number(d.failed_config_24h ?? 0), failedSystem24h: Number(d.failed_system_24h ?? 0),
+    failedTransient24h: Number(d.failed_transient_24h ?? 0),
+    nextFire: nf ? { atUtc: String(nf.at_utc ?? ''), atLocal: String(nf.at_local ?? ''), jobId: Number(nf.job_id), jobName: String(nf.job_name ?? ''), plant: String(nf.plant ?? '') } : null,
+    scheduler: { ok: sch.ok === true, lastTickAt: _s(sch.last_tick_at) },
+    longerThanUsual: Array.isArray(d.longer_than_usual) ? (d.longer_than_usual as unknown[]).map(Number) : [],
+  };
+}
+
+export function normProposal(data: unknown): Proposal {
+  const d = (data as Raw | null) ?? {};
+  const rows = _arr(d, 'rows').map(r => ({
+    id: String(r.id), machine: _s(r.machine), finishBefore: _s(r.finish_before), finishAfter: _s(r.finish_after),
+    deltaHours: typeof r.delta_hours === 'number' ? r.delta_hours : null, status: _s(r.status), changedSince: !!r.changed_since,
+  }));
+  return {
+    runId: Number(d.run_id), total: Number(d.total ?? rows.length), shown: Number(d.shown ?? rows.length), rows,
+    findings: _arr(d, 'findings').length, boardMatches: typeof d.board_matches === 'boolean' ? d.board_matches : null, truncated: !!d.truncated,
+    pending: d.pending === true,
+  };
+}
+
 const _cursor = (data: unknown): number | null => { const v = (data as Raw | null)?.next_before_id; return v == null ? null : Number(v); };
 
 export const JobsClient = {
@@ -179,6 +207,20 @@ export const JobsClient = {
   },
 
   async runNow(jobId: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/${jobId}/run`)) as Raw).run) as Raw); },
+  /** Run the same job again as a manual run (admin); 409 while a run of it is active. */
+  async restartRun(runId: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/runs/${runId}/restart`)) as Raw).run) as Raw); },
+  /** The job's CURRENT params (what a restart would run with). */
+  async jobParams(jobId: number): Promise<Record<string, unknown>> {
+    const jobs = await _req('GET', `/jobs?limit=1&before_id=${jobId + 1}&include_archived=true`);
+    const j = _arr(jobs, 'jobs').find(x => Number(x.id) === jobId);
+    return (j?.params as Record<string, unknown> | undefined) ?? {};
+  },
+  /** Health strip counts for one plant ('' = all the viewer's plants). */
+  async summary(plant: string): Promise<HealthSummary> {
+    return normHealth(await _req('GET', `/jobs/summary${plant ? `?plant=${encodeURIComponent(plant)}` : ''}`));
+  },
+  /** A dry run's proposal joined to the live orders (read-only). */
+  async proposal(runId: number): Promise<Proposal> { return normProposal(await _req('GET', `/jobs/runs/${runId}/proposal`)); },
   async cancelRun(runId: number): Promise<JobRun> { return normRun((((await _req('POST', `/jobs/runs/${runId}/cancel`)) as Raw).run) as Raw); },
 
   async runs(q: RunsQuery): Promise<{ items: JobRun[]; nextBeforeId: number | null }> {

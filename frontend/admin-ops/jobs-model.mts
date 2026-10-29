@@ -23,13 +23,15 @@ export interface JobsDeps {
 /* ---------------------------------------------------------------------------
    Status
    ------------------------------------------------------------------------- */
-export const RUN_STATUSES = ['scheduled', 'running', 'succeeded', 'warning', 'failed', 'cancelled', 'skipped'] as const;
+/** The wire statuses plus `missed` (a synthetic filter: a skipped run recorded for a misfire). Labels follow SAP's
+ *  job monitor: scheduled = Queued, succeeded = Finished, warning = Finished with warnings. */
+export const RUN_STATUSES = ['scheduled', 'running', 'succeeded', 'warning', 'failed', 'cancelled', 'skipped', 'missed'] as const;
 export type RunStatus = typeof RUN_STATUSES[number];
 
 /** Existing badge classes only; the label is always shown beside the colour. */
 const STATUS_BADGE: Record<RunStatus, string> = {
   scheduled: 'badge-muted', running: 'badge-info', succeeded: 'badge-ok', warning: 'badge-warn',
-  failed: 'badge-err', cancelled: 'badge-muted', skipped: 'badge-muted',
+  failed: 'badge-err', cancelled: 'badge-muted', skipped: 'badge-muted', missed: 'badge-warn',
 };
 
 export function statusBadgeClass(status: string | null | undefined): string {
@@ -40,9 +42,32 @@ export function statusLabel(status: string | null | undefined, d: JobsDeps): str
   return (RUN_STATUSES as readonly string[]).includes(String(status)) ? d.t(`jobs.status_${status}`) : String(status ?? '');
 }
 
+/** The backend records a misfire as `skipped` with an error starting `missed:`; the UI shows it as Missed. */
+export const MISSED_PREFIX = 'missed:';
+export function displayStatus(run: { status: string; error?: string | null } | null | undefined): string {
+  if (!run) return '';
+  return run.status === 'skipped' && String(run.error ?? '').startsWith(MISSED_PREFIX) ? 'missed' : run.status;
+}
+
 export function statusBadgeHtml(status: string | null | undefined, d: JobsDeps): string {
   if (!status) return '';
-  return `<span class="badge ${statusBadgeClass(status)} job-status">${d.esc(statusLabel(status, d))}</span>`;
+  // A static dot (no animation) marks a run that is going now; the text label always follows it.
+  const dot = status === 'running' ? '<i class="job-dot" aria-hidden="true"></i>' : '';
+  return `<span class="badge ${statusBadgeClass(status)} job-status">${dot}${d.esc(statusLabel(status, d))}</span>`;
+}
+
+/** A run's badge: Missed for a misfire, else its status; Skipped carries the reason beside it. */
+export function runStatusHtml(run: { status: string; error?: string | null }, d: JobsDeps): string {
+  const shown = displayStatus(run);
+  const reason = shown === 'skipped' && run.error ? ` <span class="job-sub">${d.esc(run.error)}</span>` : '';
+  return statusBadgeHtml(shown, d) + reason;
+}
+
+export type ErrorKind = 'config' | 'system' | 'transient';
+/** `error_kind` from a failed run's summary; anything else is unknown (no badge). `transient` = the board changed. */
+export function errorKindOf(summary: { error_kind?: string | null } | null | undefined): ErrorKind | null {
+  const k = summary?.error_kind;
+  return k === 'config' || k === 'system' || k === 'transient' ? k : null;
 }
 
 export function isActiveRun(status: string | null | undefined): boolean {
@@ -204,11 +229,20 @@ export function buildJobsQuery(o: JobsQuery): string {
   return _qs([['plant', o.plant], ['q', (o.q ?? '').trim()], ['status', o.status], ['job_type', o.type], ['before_id', o.beforeId], ['limit', limit]]);
 }
 
-export interface RunsQuery { plant?: string; status?: string; beforeId?: number | string | null; limit?: number; jobId?: number | string }
+export interface RunsQuery {
+  plant?: string; status?: string; beforeId?: number | string | null; limit?: number; jobId?: number | string;
+  /** Schedule kind (or `manual`), `triggered_by` ('schedule' or an admin email) and a look-back window in hours. */
+  periodicity?: string; scheduledBy?: string; sinceHours?: number;
+  /** Job type key (`optimizer.plant`). */
+  jobType?: string;
+}
 export function buildRunsQuery(o: RunsQuery): string {
   const limit = Math.max(1, Math.min(200, Math.floor(o.limit ?? RUNS_PAGE)));
-  return _qs([['plant', o.plant], ['status', o.status], ['job_id', o.jobId], ['before_id', o.beforeId], ['limit', limit]]);
+  return _qs([['plant', o.plant], ['status', o.status], ['job_id', o.jobId], ['job_type', o.jobType], ['periodicity', o.periodicity],
+    ['scheduled_by', (o.scheduledBy ?? '').trim()], ['since_hours', o.sinceHours], ['before_id', o.beforeId], ['limit', limit]]);
 }
+
+export const PERIODICITIES = ['once', 'hourly', 'daily', 'weekdays', 'weekly', 'monthly', 'cron', 'manual'] as const;
 
 /** The server's log page is 500 lines by default and 2000 at most; the viewer asks for the most so it pages less. */
 export const LOG_PAGE = 2000;
@@ -244,6 +278,18 @@ export function plantWall(iso: string | null | undefined, tz?: string | null): s
     const g = (k: string): string => parts.find(p => p.type === k)?.value ?? '00';
     return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}:${g('second')}`;
   } catch { return s; }
+}
+
+/** Short zone name for a time suffix ('CDT', 'GMT+1'), read at the instant when `iso` carries an offset (else now);
+ *  the IANA id when the zone has no short form; '' when the plant has no timezone. */
+export function tzShort(tz: string | null | undefined, iso?: string | null): string {
+  const z = String(tz ?? '').trim();
+  if (!z) return '';
+  try {
+    const s = String(iso ?? '');
+    const at = _OFFSET_RE.test(s) && Number.isFinite(Date.parse(s)) ? new Date(s) : new Date();
+    return new Intl.DateTimeFormat('en-US', { timeZone: z, timeZoneName: 'short' }).formatToParts(at).find(p => p.type === 'timeZoneName')?.value ?? z;
+  } catch { return z; }
 }
 
 /** An `at_local` value: the plant wall clock with its offset dropped. */
@@ -298,6 +344,122 @@ export function logToText(lines: LogLine[], fmtAt: (iso: string) => string): str
   return lines.map(l => formatLogLine(l, fmtAt)).join('\n');
 }
 
+/** Offset of a log line from the run's start, '+0:03.2' style; '' when either instant is missing. */
+export function elapsedText(at: string | null | undefined, startIso: string | null | undefined): string {
+  const a = Date.parse(String(at ?? '')); const s = Date.parse(String(startIso ?? ''));
+  if (!Number.isFinite(a) || !Number.isFinite(s)) return '';
+  const ms = Math.max(0, a - s);
+  const m = Math.floor(ms / 60000); const sec = (ms - m * 60000) / 1000;
+  return `+${m}:${sec < 10 ? '0' : ''}${sec.toFixed(1)}`;
+}
+
+/** Index (within `lines`) of the first error-level line, or -1. */
+export function firstErrorIndex(lines: LogLine[]): number {
+  return lines.findIndex(l => l.level === 'error');
+}
+
+/** A line's structured `data` as indented JSON for the collapsed detail under it; null when there is none. */
+export function lineDataText(data: unknown): string | null {
+  if (data == null) return null;
+  if (typeof data === 'object' && !Array.isArray(data) && !Object.keys(data as object).length) return null;
+  if (Array.isArray(data) && !data.length) return null;
+  try { return JSON.stringify(data, null, 2); } catch { return String(data); }
+}
+
+/** Plain text for "copy / download errors": error lines (and their data) of the whole log. */
+export function errorsToText(lines: LogLine[], fmtAt: (iso: string) => string): string {
+  return lines.filter(l => l.level === 'error').map(l => {
+    const d = lineDataText(l.data);
+    return formatLogLine(l, fmtAt) + (d ? `\n${d}` : '');
+  }).join('\n');
+}
+
+/** Whether a run is taking longer than usual: the server names the ids in `GET /jobs/summary`. */
+export const isLongerThanUsual = (runId: number, ids: ReadonlyArray<number> | null | undefined): boolean => !!ids && ids.includes(runId);
+
+/** Elapsed ms of a run that has not ended (now - started_at); null when it has not started. */
+export function elapsedMs(startedAt: string | null | undefined, endedAt: string | null | undefined, nowMs: number): number | null {
+  const s = Date.parse(String(startedAt ?? ''));
+  if (!Number.isFinite(s)) return null;
+  const e = endedAt ? Date.parse(endedAt) : nowMs;
+  return Math.max(0, (Number.isFinite(e) ? e : nowMs) - s);
+}
+
+/* ---------------------------------------------------------------------------
+   Health strip (GET /jobs/summary)
+   ------------------------------------------------------------------------- */
+export interface HealthSummary {
+  running: number; queued: number; failed24h: number; missed24h: number; warning24h: number;
+  /** The failed count split by `error_kind`: fix the job / platform error / the board changed under the run. */
+  failedConfig24h: number; failedSystem24h: number; failedTransient24h: number;
+  nextFire: { atUtc: string; atLocal: string; jobId: number; jobName: string; plant: string } | null;
+  scheduler: { ok: boolean; lastTickAt: string | null };
+  longerThanUsual: number[];
+}
+
+export type HealthKey = 'running' | 'queued' | 'failed' | 'missed' | 'next';
+export interface HealthTile {
+  key: HealthKey; value: number | null; tone: '' | 'warn' | 'err';
+  /** The filter a click applies: a run status (Runs tab, optionally last 24 h), or the Upcoming tab. */
+  status?: string; sinceHours?: number; tab: 'runs' | 'upcoming';
+}
+
+/** Five tiles in fixed order; Failed goes red and Missed amber only when above zero. */
+export function healthTiles(h: HealthSummary): HealthTile[] {
+  return [
+    { key: 'running', value: h.running, tone: '', status: 'running', tab: 'runs' },
+    { key: 'queued', value: h.queued, tone: '', status: 'scheduled', tab: 'runs' },
+    { key: 'failed', value: h.failed24h, tone: h.failed24h > 0 ? 'err' : '', status: 'failed', sinceHours: 24, tab: 'runs' },
+    { key: 'missed', value: h.missed24h, tone: h.missed24h > 0 ? 'warn' : '', status: 'missed', sinceHours: 24, tab: 'runs' },
+    { key: 'next', value: null, tone: '', tab: 'upcoming' },
+  ];
+}
+
+export const HEARTBEAT_STALE_S = 180;
+/** 'ok' while the server says so and the tick is under 3 min old (by the viewer's clock too); 'none' before the first tick. */
+export function heartbeatState(s: HealthSummary['scheduler'], nowMs: number): { state: 'ok' | 'stale' | 'none'; ageS: number } {
+  const at = Date.parse(String(s.lastTickAt ?? ''));
+  if (!Number.isFinite(at)) return { state: 'none', ageS: 0 };
+  const ageS = Math.max(0, Math.round((nowMs - at) / 1000));
+  return { state: s.ok && ageS <= HEARTBEAT_STALE_S ? 'ok' : 'stale', ageS };
+}
+
+/** 12 s / 3 min: language-neutral, for "last tick 12 s ago". */
+export function ageText(ageS: number): string {
+  return ageS < 60 ? `${ageS} s` : ageS < 3600 ? `${Math.floor(ageS / 60)} min` : `${Math.floor(ageS / 3600)} h`;
+}
+
+/** The Jobs list polls (30 s) while anything is going: the summary's live counts, or a loaded job whose last run is active. */
+export function shouldPollJobs(h: HealthSummary | null, jobs: ReadonlyArray<{ last_run: { status: string } | null }>): boolean {
+  return !!h && (h.running + h.queued > 0) || jobs.some(j => isActiveRun(j.last_run?.status));
+}
+
+/** Sequential bulk action over loaded rows: one failure never stops the rest; reports counts and the first message. */
+export async function runSequential<T>(items: T[], fn: (item: T) => Promise<unknown>): Promise<{ ok: number; failed: number; firstError: string }> {
+  let ok = 0; let failed = 0; let firstError = '';
+  for (const it of items) {
+    try { await fn(it); ok++; } catch (e) { failed++; if (!firstError) firstError = (e as Error).message; }
+  }
+  return { ok, failed, firstError };
+}
+
+/* ---------------------------------------------------------------------------
+   Dry-run proposal (GET /jobs/runs/{id}/proposal)
+   ------------------------------------------------------------------------- */
+export interface ProposalRow { id: string; machine: string | null; finishBefore: string | null; finishAfter: string | null; deltaHours: number | null; status: string | null; changedSince: boolean }
+export interface Proposal { runId: number; total: number; shown: number; rows: ProposalRow[]; findings: number; boardMatches: boolean | null; truncated: boolean; pending: boolean }
+
+/** +4.0 h / -1.5 h / 0 h; '' when unknown. */
+export function deltaText(h: number | null | undefined): string {
+  if (h == null || !Number.isFinite(h)) return '';
+  return `${h > 0 ? '+' : ''}${Number.isInteger(h) ? h : h.toFixed(1)} h`;
+}
+
+/** Whether a run is a dry run (an optimizer run whose result mode is Dry run); the proposal route 400s otherwise. */
+export function isDryRun(summary: { apply_mode?: string | null } | null | undefined): boolean {
+  return summary?.apply_mode === 'propose';
+}
+
 /* ---------------------------------------------------------------------------
    Run detail helpers
    ------------------------------------------------------------------------- */
@@ -327,6 +489,10 @@ export function stepSegments(steps: StepTiming[] | null | undefined): StepSegmen
 export interface RunSummary {
   late?: number | null; changeovers?: number | null; moved?: number | null; applied?: number | null; dropped?: number | null;
   action_id?: string | number | null; steps?: StepTiming[] | null;
+  /** Failed runs: config = fix the job or its inputs, system = fix the platform; the step the failure came from. */
+  error_kind?: string | null; failed_step?: string | null;
+  /** The optimizer's result mode: `apply` or `propose` (a dry run). */
+  apply_mode?: string | null;
 }
 export const RESULT_TILES = ['late', 'changeovers', 'moved', 'applied', 'dropped'] as const;
 
@@ -376,7 +542,7 @@ export function stripCompleteThrough(runs: UpcomingRun[], requested: number): st
    ------------------------------------------------------------------------- */
 export const JOB_MODES = ['due_date', 'min_changeover', 'spt'] as const;
 export const JOB_SEARCHES = ['normal', 'exhaustive'] as const;
-export const JOB_RESULTS = ['propose', 'apply'] as const;
+export const JOB_RESULTS = ['apply', 'propose'] as const;
 export const NAME_MAX = 80;
 
 export interface JobForm {
@@ -386,7 +552,7 @@ export interface JobForm {
   mode: string;
   search: string;
   respectFirmed: boolean;
-  /** 'propose' = leave the run's result as a proposal; 'apply' = write it to the schedule (admin only); sent as params.apply_mode. */
+  /** 'apply' (default) = write the result to the schedule; 'propose' = a Dry run, shown but never applied; sent as params.apply_mode. */
   result: string;
   recur: Recurrence;
   validFrom: string;
@@ -395,8 +561,8 @@ export interface JobForm {
 }
 
 /** A new job starts from the server's own parameter defaults (`GET /jobs/types` -> `defaults`) where they are valid
- *  choices; anything missing or unknown falls back to the product defaults. The result is always a PROPOSAL unless
- *  the server says otherwise: automatic apply is an explicit admin opt-in per job (owner ruling 2026-10-28). */
+ *  choices; anything missing or unknown falls back to the product defaults. The result defaults to APPLY (SAP-style
+ *  background job; owner ruling 2026-10-28, reversing the earlier Propose default); a Dry run is the alternative. */
 export function defaultJobForm(plant = '', jobType = 'optimizer.plant', defaults: Record<string, unknown> | null = null): JobForm {
   const pick = (value: unknown, allowed: readonly string[], fallback: string): string =>
     (typeof value === 'string' && allowed.includes(value) ? value : fallback);
@@ -405,7 +571,7 @@ export function defaultJobForm(plant = '', jobType = 'optimizer.plant', defaults
     mode: pick(defaults?.mode, JOB_MODES, 'due_date'),
     search: pick(defaults?.search, JOB_SEARCHES, 'exhaustive'),
     respectFirmed: defaults?.respect_firmed !== false,
-    result: pick(defaults?.apply_mode, JOB_RESULTS, 'propose'),
+    result: pick(defaults?.apply_mode, JOB_RESULTS, 'apply'),
     recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true,
   };
 }

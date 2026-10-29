@@ -41,7 +41,10 @@ class FakeData:
     def write_log_rows(self, run_id, rows):
         pass
 
-    def mark_running(self, run_id):
+    def mark_running(self, run_id, waiting_for=None):
+        pass
+
+    def mark_work_started(self, run_id):
         pass
 
     def get_run(self, run_id):
@@ -58,7 +61,7 @@ class FakeData:
 def fake(monkeypatch):
     f = FakeData()
     for name in ("get_job", "get_schedule", "plant_exists", "insert_run", "patch_job", "write_log_rows",
-                 "mark_running", "get_run", "finish_run", "retire_schedule"):
+                 "mark_running", "mark_work_started", "get_run", "finish_run", "retire_schedule"):
         monkeypatch.setattr(runner.data, name, getattr(f, name))
     monkeypatch.setattr(runner, "KILL_GRACE_S", 0.5)
     return f
