@@ -2433,6 +2433,11 @@ ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS arm_fire_at JSONB;
 ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_id BIGINT REFERENCES job_template (id);
 ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_version INTEGER;
 ALTER TABLE job_run_log    ADD COLUMN IF NOT EXISTS step_seq INTEGER;
+-- W4a fix wave: the template's steps as they were when the job was tied to it (so "edited locally" compares the job's
+-- steps with its own copy), and the stable key of a built-in template (seeded by key, never resurrected by name).
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_steps JSONB;
+ALTER TABLE job_template   ADD COLUMN IF NOT EXISTS builtin_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_job_template_builtin ON job_template (builtin_key) WHERE builtin_key IS NOT NULL;
 
 -- W3b: catch-up runs are trigger 'catchup' (also run by ensure_job_tables; not a migration).
 DO $job_trigger$

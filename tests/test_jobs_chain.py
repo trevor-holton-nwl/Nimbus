@@ -211,9 +211,10 @@ def test_cancel_mid_chain_skips_everything_left_including_cleanup(world):
     world.reg("t.cancel", cancelling)
     out, ctx, _l = run_chain(world, [S("t.ok", tag="a"), S("t.cancel"), S("t.ok", tag="b"),
                                      S("t.ok", tag="c", run_on="always")])
-    assert world.store.statuses() == ["succeeded", "cancelled", "skipped", "skipped"]
+    # the step that RETURNED committed: a cancel set while it ran does not relabel it (W4a fix wave); what is left is skipped
+    assert world.store.statuses() == ["succeeded", "succeeded", "skipped", "skipped"]
     assert world.committed == ["t.ok:a", "cancelling"]
-    assert ctx.cancelled and out.status != "failed", "the runner turns this into `cancelled`"
+    assert ctx.cancelled and out.status != "failed" and out.summary["cancelled"] is True, "the runner turns this into `cancelled`"
     assert world.store.rows[3]["summary"] == {"reason": "the run was cancelled"}
 
 
@@ -850,7 +851,7 @@ def test_templates_end_to_end_over_http_create_from_template_diff_update_and_res
     assert r.status_code == 200, r.text
     job = r.json()
     chain_pg.jobs.append(job["id"])
-    assert job["template"] == {"id": tpl["id"], "name": name, "version": 1, "current_version": 1, "archived": False, "changed": False}
+    assert job["template"] == {"id": tpl["id"], "name": name, "version": 1, "current_version": 1, "archived": False, "changed": False, "edited_locally": False}
     # the template moves on: the job keeps its copy and says so; the diff names the change; Update applies it
     new_steps = [steps[0], {"type": "noop", "params": {"steps": 1, "sleep_s": 0, "outcome": "succeeded"}}]
     assert capi.patch(f"/jobs/templates/{tpl['id']}", json={"steps": new_steps}).json()["template"]["version"] == 2
@@ -869,3 +870,232 @@ def test_templates_end_to_end_over_http_create_from_template_diff_update_and_res
     assert updated["template"]["changed"] is False
     run2 = capi.post(f"/jobs/{job['id']}/run").json()["run"]
     assert wait_run(run2["id"])["status"] == "succeeded", "after the update the job runs the template's new steps"
+
+
+# ============================================================================================ W4a fix wave
+def noop_spec():
+    return {"type": "noop", "params": {"steps": 1, "sleep_s": 0, "outcome": "succeeded"}}
+
+
+class _Dead:
+    @staticmethod
+    def is_alive():
+        return False
+
+
+def test_a_cancel_arriving_after_the_last_step_committed_does_not_cancel_the_run(world):
+    def late_cancel(ctx, p):
+        world.committed.append("last")
+        ctx.cancel_event.set()                        # the admin pressed Cancel just as the last step finished
+        return JobOutcome("succeeded", {"deleted": 4, "action_id": "act-9"})
+
+    world.reg("t.late", late_cancel)
+    out, ctx, _l = run_chain(world, [S("t.ok", tag="a"), S("t.late")])
+    assert world.store.statuses() == ["succeeded", "succeeded"] and out.status == "succeeded"
+    assert "cancelled" not in out.summary and out.summary["action_ids"][-1] == "act-9"
+    assert world.store.rows[2]["summary"]["deleted"] == 4, "deleted / action_id stay in the step summary"
+    status, summary, _e = runner._resolve({"outcome": out}, ctx, _Dead, 60)
+    assert status == "succeeded" and summary["action_ids"]
+
+
+def test_a_timeout_keeps_the_chain_summary_and_skips_the_rest_as_timed_out(world):
+    def slow(ctx, p):
+        ctx.timed_out = True
+        ctx.cancel_event.set()
+        ctx.check_cancel()
+
+    world.reg("t.slow", slow)
+    out, ctx, _l = run_chain(world, [S("t.ok", tag="a"), S("t.slow"), S("t.ok", tag="z")])
+    assert world.store.rows[3]["summary"] == {"reason": "timed out"}
+    status, summary, error = runner._resolve({"outcome": out}, ctx, _Dead, 60)
+    assert status == "failed" and error == "timed out after 60s" and summary["error_kind"] == "system"
+    assert summary["failed_step"] == "step 2: T.SLOW" and summary["step_counts"]["skipped"] == 1
+    assert summary["action_ids"], "the committed step's action id survives the timeout"
+
+
+def test_a_failed_chain_keeps_the_artifact_of_its_last_successful_report(world, monkeypatch):
+    art = {"sections": [{"key": "s", "title": "S", "columns": [], "rows": []}], "summary": {}}
+    world.reg("t.report", lambda ctx, p: JobOutcome("succeeded", {}, None, art), kind="report", mutates=False)
+    out, ctx, _l = run_chain(world, [S("t.report"), S("t.fail")])
+    assert out.status == "failed" and out.artifact is art
+    saved = {}
+    monkeypatch.setattr(data, "save_artifact", lambda rid, a, filename=None: saved.update(a=a) or
+                        {"row_counts": {}, "truncated": False, "size_bytes": 1})
+    res = runner._store_artifact(1, ctx, {"outcome": out}, "failed", out.summary)
+    assert saved["a"] is art and res["artifact"]["size_bytes"] == 1
+    out2, _c, _l = run_chain(world, [S("t.fail", continue_on_failure=True)])
+    assert out2.artifact is None
+
+
+class WinP(BaseModel):
+    window: dict = {}
+
+
+def test_a_failed_report_with_a_window_does_not_advance_the_watermark(world):
+    win = {"start": "a", "end": "b", "label": "l", "timezone": "x"}
+    world.reg("t.rep", lambda ctx, p: JobOutcome("succeeded", {"window": win}), kind="report", mutates=False, params=WinP)
+    world.reg("t.repfail", lambda ctx, p: JobOutcome("failed", {"window": win}, "boom"), kind="report", mutates=False,
+              params=WinP)
+    ok, _c, _l = run_chain(world, [S("t.rep")])
+    assert ok.summary["window"] == win and "watermark_ok" not in ok.summary
+    bad, _c, _l = run_chain(world, [S("t.repfail", continue_on_failure=True), S("t.ok")])
+    assert bad.status == "warning" and "window" not in bad.summary and bad.summary["watermark_ok"] is False
+    assert bad.summary["tolerated_failures"] == ["step 1: T.REPFAIL"]
+
+
+def test_the_watermark_query_ignores_a_run_flagged_watermark_not_ok():
+    import inspect
+    assert "watermark_ok" in inspect.getsource(data.last_success_watermark)
+
+
+def test_a_resume_after_an_earlier_failed_step_keeps_that_step_failed_and_fires_failure_cleanup(world):
+    prior = [{"step_type": "t.fail", "params": {}, "label": None, "continue_on_failure": True, "run_on": "success",
+              "status": "failed", "summary": None},
+             {"step_type": "t.ok", "params": {"tag": "two"}, "label": None, "continue_on_failure": False,
+              "run_on": "success", "status": "skipped", "summary": {"reason": "an earlier step failed"}},
+             {"step_type": "t.ok", "params": {"tag": "clean"}, "label": None, "continue_on_failure": False,
+              "run_on": "failure", "status": "skipped", "summary": None}]
+    world.store.resume, world.store.prior = {"from_run": 9, "from_seq": 2}, prior
+    run_chain(world, [S("t.ok")])
+    assert world.committed == ["t.ok:two", "t.ok:clean"], "the earlier failure seeds any_failed: run_on=failure fires"
+    first = world.store.rows[1]
+    assert first["status"] == "skipped" and "ran_in_run" not in first["summary"]
+    assert first["summary"]["reason"] == "failed in an earlier run"
+
+
+def test_every_failed_step_logs_its_own_error_line(world):
+    _out, _c, lines = run_chain(world, [S("t.fail", continue_on_failure=True), S("t.fail")])
+    assert {l["step_seq"] for l in lines if l["level"] == "error"} == {1, 2}
+
+
+def test_a_restart_takes_locks_slots_and_timeout_from_the_snapshot_not_the_edited_job(monkeypatch):
+    def row(seq, typ):
+        return {"seq": seq, "step_type": typ, "params": {}, "label": None, "continue_on_failure": False,
+                "run_on": "success"}
+
+    snapshot = [row(1, "noop"), row(2, "purge.orders"), row(3, "optimizer.plant")]
+    monkeypatch.setenv("NIMBUS_JOBS_STUBS", "1")
+    monkeypatch.setattr(data, "run_resume", lambda rid: {"from_run": 9, "from_seq": 2})
+    monkeypatch.setattr(data, "list_steps", lambda rid: snapshot)
+    jt = REGISTRY["chain"]
+    edited = chain.ChainParams.model_validate({"steps": [noop_spec()]})       # the admin dropped purge + optimizer
+    eff = runner._attempt_params(5, jt, edited)
+    keys = jt.lock_names("1008", eff)
+    assert "jobs:purge.orders:1008" in keys and "jobs:optimizer.plant:1008" in keys
+    assert jt.slot_list(eff), "the optimizer slot is still taken"
+    assert jt.lock_names("1008", edited) == ["jobs:noop:1008"]
+    assert jt.timeout_for(eff) > jt.timeout_for(edited)
+    assert not chain.all_idempotent(eff), "purge is not idempotent"
+    monkeypatch.setattr(data, "run_resume", lambda rid: None)
+    assert runner._attempt_params(5, jt, edited) is edited
+
+
+def test_try_locks_releases_the_keys_it_took_when_a_later_one_raises(monkeypatch):
+    taken, freed = [], []
+
+    def take(conn, key):
+        if key == "k2":
+            raise RuntimeError("db gone")
+        taken.append(key)
+        return True
+
+    monkeypatch.setattr(data, "try_session_lock", take)
+    monkeypatch.setattr(data, "release_session_lock", lambda conn, key: freed.append(key))
+    with pytest.raises(RuntimeError):
+        runner._try_locks(object(), ["k1", "k2", "k3"])
+    assert taken == ["k1"] and freed == ["k1"]
+
+
+def test_a_config_refusal_and_a_restarted_run_are_not_retried(monkeypatch):
+    rows = {1: {"summary": {"error_kind": "config"}}, 2: {"summary": {"error_kind": "transient"}}}
+    monkeypatch.setattr(data, "get_run", lambda rid: rows[rid])
+    monkeypatch.setattr(data, "run_resume", lambda rid: None)
+    assert runner._not_retryable(1) is True and runner._not_retryable(2) is False
+    monkeypatch.setattr(data, "run_resume", lambda rid: {"from_run": 1, "from_seq": 1})
+    assert runner._not_retryable(2) is True
+
+
+def test_a_fixed_purge_window_below_the_floor_is_refused_at_save():
+    young = date.today()
+    p = purge.PurgeParams.model_validate(
+        {"window": {"mode": "fixed", "fixed": {"from": "2020-01-01", "to": young.isoformat()}}})
+    with pytest.raises(ValueError, match="newest day a purge may touch"):
+        purge.check_for_plant(p, None)                                  # conservative: too young even at UTC+14
+    old = purge.PurgeParams.model_validate(
+        {"window": {"mode": "fixed", "fixed": {"from": "2020-01-01", "to": "2020-02-01"}}})
+    purge.check_for_plant(old, None)
+    cp = chain.ChainParams.model_validate({"steps": [{"type": "purge.orders", "params": p.model_dump(mode="json", by_alias=True)}]})
+    with pytest.raises(ValueError, match="step 1"):
+        chain.check_for_plant(cp, None)
+
+
+def test_builtin_templates_have_stable_keys():
+    assert [t["key"] for t in templates.BUILTIN_TEMPLATES] == ["purge_then_reoptimize", "optimize_then_report"]
+
+
+@pytest.mark.pg
+def test_templates_if_match_no_false_bump_and_builtin_keys(chain_pg):
+    name = f"zz fix tpl {chain_pg.plant}"
+    chain_pg.tpl_names.append(name)
+    steps = chain.normalize_steps([noop_spec()])
+    tid = data.create_template(name=name, description=None, steps=steps, defaults={}, actor="t")
+    assert data.patch_template(tid, {"steps": steps, "defaults": {}}, "t")["version"] == 1, "unchanged steps: no bump"
+    assert data.patch_template(tid, {"steps": steps}, "t", expected_version=1)["version"] == 1
+    new = chain.normalize_steps([noop_spec(), noop_spec()])
+    assert data.patch_template(tid, {"steps": new}, "t", expected_version=1)["version"] == 2
+    with pytest.raises(data.TemplateVersionConflict) as ei:
+        data.patch_template(tid, {"steps": steps}, "t", expected_version=1)
+    assert ei.value.current == 2
+    # built-ins are seeded by key: a renamed or archived one is never put back
+    data.seed_builtin_templates()
+    with chain_pg.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, name FROM job_template WHERE builtin_key = 'optimize_then_report'")
+        bid, bname = cur.fetchone()
+    data.patch_template(bid, {"name": bname + " (renamed)", "archived": True}, "t")
+    data.seed_builtin_templates()
+    with chain_pg.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM job_template WHERE builtin_key = 'optimize_then_report'")
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM job_template WHERE lower(name) = lower(%s) AND NOT archived", (bname,))
+        assert cur.fetchone()[0] == 0, "the renamed built-in was not resurrected"
+        cur.execute("UPDATE job_template SET name = %s, archived = FALSE WHERE id = %s", (bname, bid))   # leave as found
+        conn.commit()
+
+
+@pytest.mark.pg
+def test_job_template_version_edited_locally_and_the_dialog_flow_over_http(capi, chain_pg):
+    name = f"zz sync tpl {chain_pg.plant}"
+    chain_pg.tpl_names.append(name)
+    steps = [noop_spec()]
+    tpl = capi.post("/jobs/templates", json={"name": name, "steps": steps}).json()["template"]
+    job = capi.post("/jobs", json={"plant": chain_pg.plant, "job_type": "chain", "name": "sync",
+                                   "template_id": tpl["id"]}).json()
+    chain_pg.jobs.append(job["id"])
+    assert job["template"]["edited_locally"] is False
+    edited = [{**noop_spec(), "label": "mine"}]
+    j2 = capi.patch(f"/jobs/{job['id']}", json={"params": {"steps": edited}}).json()
+    assert j2["template"]["edited_locally"] is True and j2["template"]["changed"] is False
+    # 'Update the template with these steps': template PATCH with If-Match, then the job follows the new version
+    t2 = capi.patch(f"/jobs/templates/{tpl['id']}", json={"steps": edited, "expected_version": 1}).json()["template"]
+    assert t2["version"] == 2
+    stale = capi.patch(f"/jobs/templates/{tpl['id']}", json={"steps": steps, "expected_version": 1})
+    assert stale.status_code == 409 and stale.json()["current_version"] == 2
+    j3 = capi.patch(f"/jobs/{job['id']}", json={"template_version": 2}).json()
+    assert j3["template_version"] == 2 and j3["template"]["changed"] is False and j3["template"]["edited_locally"] is False
+    assert capi.patch(f"/jobs/templates/{tpl['id']}", json={"name": name}).json()["template"]["version"] == 2
+
+
+@pytest.mark.pg
+def test_a_restart_runs_after_the_job_was_edited_and_is_never_retried(chain_pg, monkeypatch):
+    monkeypatch.setattr(runner, "RETRY_DELAY_S", 0)
+    jid = make_chain(chain_pg, [noop(), noop("failed"), noop()])
+    first = runner.run_job(job_id=jid, trigger="manual")
+    data.patch_job(jid, {"params": {"steps": [noop()]}, "retry_max": 2}, "t@example.com")   # the edit drops steps 2 and 3
+    new_id = runner.start_manual_run(data.get_job(jid), "t@example.com", "restart",
+                                     resume={"from_run": first, "from_seq": 2})
+    run = wait_run(new_id)
+    assert len(data.list_steps(new_id)) == 3 and run["status"] == "failed"
+    time.sleep(0.5)
+    with chain_pg.db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM job_run WHERE job_id = %s AND trigger = 'retry'", (jid,))
+        assert cur.fetchone()[0] == 0, "a restart from a step is not retried (it would re-run the whole current chain)"

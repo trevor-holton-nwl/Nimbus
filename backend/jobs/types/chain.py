@@ -87,6 +87,15 @@ def _models(params: ChainParams) -> list[tuple[StepSpec, JobType, BaseModel]]:
             for st in params.steps]
 
 
+def snapshot_params(rows: list[dict]) -> ChainParams:
+    """The params of the steps a RESTART will run: the failed run's snapshot rows from the restart point on, built
+    without the save-time checks (they were valid when saved). The runner derives locks, slots, timeout and the retry
+    rule from these, so they describe what `run` executes, not today's edit of the job."""
+    return ChainParams.model_construct(steps=[
+        StepSpec(type=r["step_type"], params=r["params"] or {}, label=r["label"],
+                 continue_on_failure=bool(r["continue_on_failure"]), run_on=r["run_on"]) for r in rows])
+
+
 def timeout_s(params: ChainParams) -> int:
     """One timeout for the whole run: the sum of the step timeouts (plus a margin per step)."""
     return sum(jt.timeout_for(p) + STEP_TIMEOUT_MARGIN_S for _st, jt, p in _models(params)) or 60
@@ -106,6 +115,16 @@ def slots(params: ChainParams) -> list:
                 seen.add(id(s))
                 out.append(s)
     return out
+
+
+def check_for_plant(params: ChainParams, plant: str | None) -> None:
+    """Run every step type's own save-time plant check (a purge step's fixed window against the plant's today)."""
+    for i, (st, jt, p) in enumerate(_models(params), 1):
+        if jt.plant_check is not None:
+            try:
+                jt.plant_check(p, plant)
+            except ValueError as e:
+                raise ValueError(f"step {i} ({st.type}): {e}") from e
 
 
 def all_idempotent(params: ChainParams) -> bool:
@@ -130,11 +149,18 @@ def run(ctx, params: ChainParams) -> JobOutcome:
     steps = list(params.steps)
     resume = _store.run_resume(ctx.run_id)
     start_at = 1
+    carried: dict[int, dict] = {}              # seq -> the row a resumed run shows for a step it does not run
+    seed_failed = False
     if resume:                                # restart from a failed step: the ORIGINAL run's snapshot, never today's edit
+        old = _store.list_steps(int(resume["from_run"]))
         steps = [StepSpec(type=r["step_type"], params=r["params"], label=r["label"],
-                          continue_on_failure=r["continue_on_failure"], run_on=r["run_on"])
-                 for r in _store.list_steps(int(resume["from_run"]))]
+                          continue_on_failure=r["continue_on_failure"], run_on=r["run_on"]) for r in old]
         start_at = int(resume["from_seq"])
+        for i, r in enumerate(old, 1):
+            if i >= start_at:
+                break
+            carried[i] = _carried_row(r, resume["from_run"])
+            seed_failed = seed_failed or r.get("status") == "failed"     # a cleanup `run_on=failure` step still fires
     n = len(steps)
     if n == 0:
         return JobOutcome("failed", {"error_kind": "config", "failed_step": "validate"}, "the chain has no steps")
@@ -142,12 +168,14 @@ def run(ctx, params: ChainParams) -> JobOutcome:
     _store.insert_step_rows(ctx.run_id, [
         {"seq": i, "step_type": st.type, "label": st.label, "run_on": st.run_on,
          "continue_on_failure": st.continue_on_failure, "params": st.params,
-         **({"status": "skipped", "summary": {"reason": "ran in an earlier run", "ran_in_run": resume["from_run"]}}
-            if i < start_at else {})}
+         **({"status": "skipped", "summary": carried[i]} if i < start_at else {})}
         for i, st in enumerate(steps, 1)])
     ctx.log("info", f"chain of {n} step{'s' if n != 1 else ''} started"
             + (f" (resuming at step {start_at})" if start_at > 1 else ""))
-    stopped = any_failed = any_warning = cancelled = False
+    stopped = any_warning = cancelled = False
+    any_failed = seed_failed
+    window_failed = False                        # a report step that carries a window failed (tolerated): no watermark
+    tolerated: list[str] = []                    # steps that failed but did not stop the chain
     rows: list[dict] = []                       # one per step, for the run summary
     artifact = proposal = None
     window = None
@@ -159,7 +187,8 @@ def run(ctx, params: ChainParams) -> JobOutcome:
         info = {"seq": seq, "step": label, "type": st.type}
         if cancelled or ctx.cancelled:
             cancelled = True
-            _store.finish_step(ctx.run_id, seq, "skipped", {"reason": "the run was cancelled"})
+            _store.finish_step(ctx.run_id, seq, "skipped",
+                               {"reason": "timed out" if ctx.timed_out else "the run was cancelled"})
             rows.append({**info, "status": "skipped", "duration_ms": None})
             continue
         runs = (st.run_on == "always" or (st.run_on == "success" and not stopped)
@@ -172,16 +201,22 @@ def run(ctx, params: ChainParams) -> JobOutcome:
         status, summary, error, kind, action_id, art, ms = _run_step(ctx, seq, n, st, label)
         rows.append({**info, "status": status, "duration_ms": ms,
                      **({"action_id": action_id} if action_id else {})})
-        if art is not None:
-            artifact = art
+        if art is not None and status in ("succeeded", "warning"):
+            artifact = art                       # the last SUCCESSFUL report's: a chain that fails later keeps it
         if summary.get("proposal") is not None:
             proposal = {k: summary[k] for k in ("proposal", "proposal_truncated") if k in summary}
-        if summary.get("window") and REGISTRY[st.type].kind == "report":
-            window = summary["window"]       # only a report's window feeds the `since last success` watermark (last wins)
+        jt_s = REGISTRY[st.type]
+        if jt_s.kind == "report" and status in ("succeeded", "warning"):
+            if summary.get("window"):        # only a report's window feeds the `since last success` watermark; with two
+                window = summary["window"]   # window-bearing reports the LAST one wins
+        elif jt_s.kind == "report" and status == "failed" and "window" in jt_s.params_model.model_fields:
+            window_failed = True
         if status == "cancelled":
             cancelled = True
         elif status == "failed":
             any_failed = True
+            if st.continue_on_failure:
+                tolerated.append(f"step {seq}: {label}")
             if not st.continue_on_failure:
                 stopped = True
                 if first_error is None:
@@ -204,6 +239,10 @@ def run(ctx, params: ChainParams) -> JobOutcome:
         out["resume"] = resume
     if window:
         out["window"] = window                   # keeps a later `since last successful run` report contiguous
+    if window_failed:
+        out["watermark_ok"] = False              # a failed report did not cover its window: this run is no watermark
+    if tolerated:
+        out["tolerated_failures"] = tolerated    # a `warning` run that is a failed step the chain went on past
     if proposal:
         out.update(proposal)
     if first_error:
@@ -211,15 +250,31 @@ def run(ctx, params: ChainParams) -> JobOutcome:
         out["failed_step"] = f"step {seq}: {label}"
         out["error_kind"] = kind
         return JobOutcome("failed", out, f"step {seq} ({label}) failed: {error}", artifact)
-    if cancelled or ctx.cancelled:
+    if cancelled:                                # a step was cancelled, or one was skipped because of the cancel; a cancel
+        out["cancelled"] = True                  # arriving after the last step committed does not relabel the run
         return JobOutcome("warning", out, None, artifact)     # the runner turns this into `cancelled`
     return JobOutcome("warning" if (any_failed or any_warning) else "succeeded", out, None, artifact)
+
+
+def _carried_row(r: dict, from_run) -> dict:
+    """What a resumed run shows for a step before its restart point: done in the earlier run, or (never `ran in an
+    earlier run` for a step that did not run) failed / skipped there."""
+    prior = r.get("summary") or {}
+    status = r.get("status") or "succeeded"
+    if prior.get("ran_in_run"):
+        return {"reason": "ran in an earlier run", "ran_in_run": prior["ran_in_run"]}
+    if status in ("succeeded", "warning"):
+        return {"reason": "ran in an earlier run", "ran_in_run": from_run}
+    if status in ("failed", "cancelled"):
+        return {"reason": f"{status} in an earlier run", "not_run_in_run": from_run}
+    return {"reason": "skipped in an earlier run", "not_run_in_run": from_run}
 
 
 def _run_step(ctx, seq: int, n: int, st: StepSpec, label: str):
     """Run one step on its own step row. Returns (status, summary, error, error_kind, action_id, artifact, ms)."""
     jt = REGISTRY[st.type]
     ctx.step_seq = seq
+    errors_before = ctx.error_lines
     _store.start_step(ctx.run_id, seq)
     ctx.log("info", f"step {seq} of {n}: {label} started", step=f"step {seq}")
     t0 = time.monotonic()
@@ -230,9 +285,7 @@ def _run_step(ctx, seq: int, n: int, st: StepSpec, label: str):
     try:
         out = jt.run(ctx, jt.params_model.model_validate(st.params or {}))
         status = out.status if out.status in ("succeeded", "warning", "failed") else "succeeded"
-        err = out.error
-        if ctx.cancelled and status != "failed":
-            status = "cancelled"
+        err = out.error                          # a step that RETURNED completed: a late cancel never relabels it
     except JobCancelled:
         status = "cancelled"
     except BaseException as e:  # noqa: BLE001 - a step may raise anything; it fails the step, not the worker thread
@@ -244,7 +297,7 @@ def _run_step(ctx, seq: int, n: int, st: StepSpec, label: str):
     summary = dict(out.summary) if out and out.summary else {}
     kind = _kind_of(status, summary, exc)
     action_id = summary.get("action_id") if isinstance(summary.get("action_id"), str) else None
-    if status == "failed" and err and not ctx.error_lines:
+    if status == "failed" and err and ctx.error_lines == errors_before:     # per step: every failed step has an error line
         ctx.log("error", f"step {seq} ({label}) failed: {err}", step=f"step {seq}")
     ctx.log("info" if status in ("succeeded", "cancelled") else "warn",
             f"step {seq} of {n}: {label} finished: {status}" + (f" ({err})" if err and status == "failed" else ""),
@@ -259,4 +312,4 @@ def _run_step(ctx, seq: int, n: int, st: StepSpec, label: str):
 
 CHAIN = register(JobType(key="chain", label="Chain of steps", params_model=ChainParams, run=run, default_timeout_s=3600,
                          timeout_fn=timeout_s, needs_plant_timezone=True, composite=True, mutates=True,
-                         lock_keys=lock_keys, slots=slots, estimate_s=None))
+                         lock_keys=lock_keys, slots=slots, estimate_s=None, plant_check=check_for_plant))

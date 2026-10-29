@@ -40,6 +40,7 @@ class JobType:
     lock_keys: Callable[[str, BaseModel], list[str]] | None = None   # several locks (a chain: the union of its steps')
     composite: bool = False                                   # a chain: its params hold steps, it cannot nest
     slots: Callable[[BaseModel], list] | None = None          # several slots (a chain: those of its steps)
+    plant_check: Callable[[BaseModel, str | None], None] | None = None   # save-time check that needs the plant (ValueError)
 
     def timeout_for(self, params: BaseModel) -> int:
         return int(self.timeout_fn(params)) if self.timeout_fn else self.default_timeout_s

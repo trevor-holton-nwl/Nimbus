@@ -16,7 +16,7 @@ Guards (a scheduled job fires again and again, so a typo must not become "purge 
 from __future__ import annotations
 
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -55,6 +55,30 @@ class PurgeParams(BaseModel):
             if r.to_offset * _UNIT_DAYS[r.unit] > -floor:
                 raise ValueError(f"the window can reach orders younger than the {floor}-day minimum age")
         return w
+
+
+def check_for_plant(p: PurgeParams, plant: str | None) -> None:
+    """Save-time check of a FIXED window against the plant's today (a rolling one is checked statically by the model).
+    The plant's own timezone is used when it has one; otherwise the check is conservative: it refuses only a window that
+    is too young even where the calendar is furthest ahead (UTC+14). The run-time re-check stays."""
+    w = p.window
+    if w.mode != "fixed" or w.fixed is None:
+        return
+    floor = min_age_days()
+    today = None
+    if plant:
+        try:
+            from backend.jobs import data as _data, triggers
+            if _data.plant_has_timezone(plant):
+                today = datetime.now(triggers.get_zone(_data.plant_timezone(plant))).date()
+        except Exception:  # noqa: BLE001 - fall back to the conservative check
+            today = None
+    if today is None:
+        today = (datetime.now(timezone.utc) + timedelta(hours=14)).date()
+    newest_ok = today - timedelta(days=floor)
+    if w.fixed.to > newest_ok:
+        raise ValueError(f"the window reaches {w.fixed.to.isoformat()}; the newest day a purge may touch is "
+                         f"{newest_ok.isoformat()} (orders must be at least {floor} days old)")
 
 
 def _fail(ctx, kind: str, step: str, msg: str, summary: dict | None = None) -> JobOutcome:
@@ -115,6 +139,6 @@ def run(ctx, p: PurgeParams) -> JobOutcome:
 
 PURGE = register(JobType(key="purge.orders", label="Purge old orders", params_model=PurgeParams, run=run,
                          default_timeout_s=300, needs_plant_timezone=True, dry_run=("dry_run", True),
-                         estimate_s=30, idempotent=False,
+                         estimate_s=30, idempotent=False, plant_check=check_for_plant,
                          # also the optimizer's lock: a purge and an optimizer apply must not interleave on one plant
                          lock_keys=lambda plant, _p: [f"jobs:purge.orders:{plant}", f"jobs:optimizer.plant:{plant}"]))

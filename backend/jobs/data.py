@@ -202,6 +202,11 @@ ALTER TABLE job_schedule   ADD COLUMN IF NOT EXISTS arm_fire_at JSONB;
 ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_id BIGINT REFERENCES job_template (id);
 ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_version INTEGER;
 ALTER TABLE job_run_log    ADD COLUMN IF NOT EXISTS step_seq INTEGER;
+-- W4a fix wave: the template's steps as they were when the job was tied to it (so "edited locally" compares the job's
+-- steps with its own copy), and the stable key of a built-in template (seeded by key, never resurrected by name).
+ALTER TABLE job_definition ADD COLUMN IF NOT EXISTS template_steps JSONB;
+ALTER TABLE job_template   ADD COLUMN IF NOT EXISTS builtin_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_job_template_builtin ON job_template (builtin_key) WHERE builtin_key IS NOT NULL;
 """
 
 # W3b: a catch-up fire is recorded as trigger 'catchup'. The original CHECK only allows schedule|manual|retry and a
@@ -234,7 +239,8 @@ MISSED_PREFIX = "missed:"          # record_skipped's reason for a fire that mis
 TERMINAL = ("succeeded", "warning", "failed", "cancelled", "skipped")
 SWEEP_LOCK_KEY = "nimbus:job-run-sweep"
 _DEF_COLS = ("id, plant, job_type, name, params, enabled, archived, retry_max, timeout_s, "
-             "created_by, created_at, modified_by, modified_at, fan_out, scope_plants, template_id, template_version")
+             "created_by, created_at, modified_by, modified_at, fan_out, scope_plants, template_id, template_version, "
+             "template_steps")
 _SCHED_COLS = ("id, job_id, kind, cron_expr, time_of_day, days_of_week, day_of_month, run_at, timezone, "
                "valid_from, valid_until, paused, retired, misfire_grace_s, skip_if_running, "
                "tz_mode, fixed_timezone, options, last_fire_at, created_by, created_at, modified_by, modified_at")
@@ -439,18 +445,20 @@ def _insert_schedule(cur, job_id: int, s: dict, actor: str | None) -> int:
 def create_job(*, plant: str, job_type: str, name: str, params: dict, enabled: bool, retry_max: int,
                timeout_s: int | None, schedules: list[dict], actor: str | None, targets: list[dict] | None = None,
                fan_out: dict | None = None, scope_plants: list[str] | None = None,
-               template_id: int | None = None, template_version: int | None = None) -> int:
+               template_id: int | None = None, template_version: int | None = None,
+               template_steps: list[dict] | None = None) -> int:
     """`scope_plants` is the creator's allowed plant list (None = an unrestricted creator): fire-time expansion is
     intersected with it, so a job never reaches plants its creator could not."""
     with db._pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO job_definition (plant, job_type, name, params, enabled, retry_max, timeout_s,"
-                " created_by, modified_by, fan_out, scope_plants, template_id, template_version)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                " created_by, modified_by, fan_out, scope_plants, template_id, template_version, template_steps)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (plant, job_type, name, Jsonb(params), enabled, retry_max, timeout_s, actor, actor,
                  Jsonb(fan_out) if fan_out else None,
-                 Jsonb(sorted(scope_plants)) if scope_plants is not None else None, template_id, template_version))
+                 Jsonb(sorted(scope_plants)) if scope_plants is not None else None, template_id, template_version,
+                 Jsonb(template_steps) if template_steps is not None else None))
             job_id = cur.fetchone()[0]
             _insert_targets(cur, job_id, targets or [])
             for s in schedules:
@@ -460,7 +468,8 @@ def create_job(*, plant: str, job_type: str, name: str, params: dict, enabled: b
 
 
 _JOB_PATCHABLE = {"name": None, "params": Jsonb, "enabled": None, "archived": None, "retry_max": None,
-                  "timeout_s": None, "fan_out": Jsonb, "template_id": None, "template_version": None}
+                  "timeout_s": None, "fan_out": Jsonb, "template_id": None, "template_version": None,
+                  "template_steps": Jsonb}
 
 
 def patch_job(job_id: int, fields: dict, actor: str | None, *, targets: list[dict] | None = None,
@@ -472,7 +481,7 @@ def patch_job(job_id: int, fields: dict, actor: str | None, *, targets: list[dic
         if k not in _JOB_PATCHABLE:
             continue
         sets.append(f"{k} = %s")
-        vals.append(Jsonb(v) if k in ("params", "fan_out") and v is not None else v)
+        vals.append(Jsonb(v) if k in ("params", "fan_out", "template_steps") and v is not None else v)
     if set_scope:
         sets.append("scope_plants = %s")
         vals.append(Jsonb(sorted(scope_plants)) if scope_plants is not None else None)
@@ -1278,6 +1287,7 @@ def last_success_watermark(job_id: int, before_run_id: int | None = None, plant:
         cur.execute("SELECT COALESCE(NULLIF(summary->'window'->>'end', '')::timestamptz, started_at) FROM job_run"
                     " WHERE job_id = %s AND trigger IN ('schedule','catchup') AND status IN ('succeeded','warning')"
                     " AND started_at IS NOT NULL AND (%s::bigint IS NULL OR id < %s::bigint)"
+                    " AND COALESCE(summary->>'watermark_ok', 'true') <> 'false'"     # a failed report did not cover its window
                     " AND (%s::text IS NULL OR plant = %s)"
                     " ORDER BY id DESC LIMIT 1", (job_id, before_run_id, before_run_id, plant, plant))
         r = cur.fetchone()
@@ -1384,11 +1394,11 @@ def get_template(template_id: int) -> dict | None:
 
 
 def template_briefs(ids: list[int]) -> dict[int, dict]:
-    """{id: {name, version, archived}} for the templates the listed jobs were made from (one query)."""
+    """{id: {name, version, archived, steps}} for the templates the listed jobs were made from (one query)."""
     if not ids:
         return {}
     with db._pool.connection() as conn, _cur(conn) as cur:
-        cur.execute("SELECT id, name, version, archived FROM job_template WHERE id = ANY(%s)", (list(ids),))
+        cur.execute("SELECT id, name, version, archived, steps FROM job_template WHERE id = ANY(%s)", (list(ids),))
         return {r["id"]: r for r in cur.fetchall()}
 
 
@@ -1410,48 +1420,73 @@ def create_template(*, name: str, description: str | None, steps: list[dict], de
     return tid
 
 
-def patch_template(template_id: int, fields: dict, actor: str | None) -> dict | None:
-    """Change a template. The version rises only when `steps` or `defaults` change (a rename or an archive does not
-    make the jobs made from it 'out of date')."""
+class TemplateVersionConflict(Exception):
+    """The template changed since the caller read it (`expected_version` no longer matches)."""
+
+    def __init__(self, current: int):
+        super().__init__(f"template is now at version {current}")
+        self.current = current
+
+
+def patch_template(template_id: int, fields: dict, actor: str | None, expected_version: int | None = None) -> dict | None:
+    """Change a template. The version rises only when `steps` or `defaults` really CHANGE (a rename, an archive or a save
+    of unchanged steps does not make the jobs made from it 'out of date'). `expected_version` is an If-Match: a
+    template saved by someone else since the caller read it raises TemplateVersionConflict (the route answers 409)."""
     from psycopg import errors as pgerr
-    sets, vals = [], []
-    for k in ("name", "description", "archived"):
-        if k in fields:
-            sets.append(f"{k} = %s")
-            vals.append(fields[k])
-    bump = False
-    for k in ("steps", "defaults"):
-        if k in fields:
-            sets.append(f"{k} = %s")
-            vals.append(Jsonb(fields[k]))
-            bump = True
-    if not sets:
-        return get_template(template_id)
-    if bump:
-        sets.append("version = version + 1")
-    sets.append("modified_at = clock_timestamp()")
     try:
-        with db._pool.connection() as conn, conn.cursor() as cur:
+        with db._pool.connection() as conn, _cur(conn) as cur:
+            cur.execute(f"SELECT {_TEMPLATE_COLS} FROM job_template WHERE id = %s FOR UPDATE", (template_id,))
+            cur0 = cur.fetchone()
+            if cur0 is None:
+                return None
+            if expected_version is not None and int(cur0["version"]) != int(expected_version):
+                raise TemplateVersionConflict(int(cur0["version"]))
+            sets, vals = [], []
+            for k in ("name", "description", "archived"):
+                if k in fields and fields[k] != cur0[k]:
+                    sets.append(f"{k} = %s")
+                    vals.append(fields[k])
+            bump = False
+            for k in ("steps", "defaults"):
+                if k in fields and fields[k] != (cur0[k] or ({} if k == "defaults" else [])):
+                    sets.append(f"{k} = %s")
+                    vals.append(Jsonb(fields[k]))
+                    bump = True
+            if not sets:
+                return cur0
+            if bump:
+                sets.append("version = version + 1")
+            sets.append("modified_at = clock_timestamp()")
             cur.execute(f"UPDATE job_template SET {', '.join(sets)} WHERE id = %s", (*vals, template_id))
-            ok = cur.rowcount == 1
             conn.commit()
     except pgerr.UniqueViolation as e:
         raise TemplateNameTaken(str(fields.get("name"))) from e
-    return get_template(template_id) if ok else None
+    return get_template(template_id)
 
 
 def seed_builtin_templates() -> None:
-    """The built-in templates, inserted once by name (an archived or edited one is never put back)."""
+    """The built-in templates, inserted once by their stable `builtin_key`: a built-in an admin renamed or archived is
+    never put back (the key stays on the row). A row seeded before the key existed (created by 'system', same name or
+    description) is adopted by the key instead of being inserted again."""
     from backend.jobs.templates import BUILTIN_TEMPLATES
     from backend.jobs.types.chain import normalize_steps
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(hashtext('nimbus:job-template-seed'))")
         for t in BUILTIN_TEMPLATES:
+            cur.execute("SELECT 1 FROM job_template WHERE builtin_key = %s", (t["key"],))
+            if cur.fetchone():
+                continue
+            cur.execute("UPDATE job_template SET builtin_key = %s WHERE id = (SELECT id FROM job_template"
+                        " WHERE builtin_key IS NULL AND created_by = 'system'"
+                        " AND (lower(name) = lower(%s) OR description = %s) ORDER BY id LIMIT 1)",
+                        (t["key"], t["name"], t["description"]))
+            if cur.rowcount:
+                continue
             steps = normalize_steps(t["steps"])           # full params, so a job's copy diffs cleanly against it
-            cur.execute("INSERT INTO job_template (name, description, steps, defaults, created_by)"
-                        " SELECT %s, %s, %s, %s, 'system' WHERE NOT EXISTS"
-                        " (SELECT 1 FROM job_template WHERE lower(name) = lower(%s))",
-                        (t["name"], t["description"], Jsonb(steps), Jsonb(t.get("defaults") or {}), t["name"]))
+            cur.execute("INSERT INTO job_template (name, description, steps, defaults, created_by, builtin_key)"
+                        " SELECT %s, %s, %s, %s, 'system', %s WHERE NOT EXISTS"
+                        " (SELECT 1 FROM job_template WHERE lower(name) = lower(%s) AND NOT archived)",
+                        (t["name"], t["description"], Jsonb(steps), Jsonb(t.get("defaults") or {}), t["key"], t["name"]))
         conn.commit()
 
 

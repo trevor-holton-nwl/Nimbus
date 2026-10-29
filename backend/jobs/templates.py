@@ -6,9 +6,9 @@ edit to a template changes nothing silently, and a run always uses the steps its
 """
 from __future__ import annotations
 
-# Built-in templates (seeded once by name at startup; an admin can edit or archive them like any other).
+# Built-in templates (seeded once by `key` at startup; an admin can edit or archive them like any other).
 BUILTIN_TEMPLATES: list[dict] = [
-    {"name": "Purge then re-optimize",
+    {"key": "purge_then_reoptimize", "name": "Purge then re-optimize",
      "description": "Remove orders older than 90 days (refuses above 5000 orders), then re-optimize the plant.",
      "steps": [
          {"type": "purge.orders", "params": {"max_rows": 5000}, "label": None,
@@ -16,7 +16,7 @@ BUILTIN_TEMPLATES: list[dict] = [
          {"type": "optimizer.plant", "params": {"mode": "due_date", "search": "exhaustive", "apply_mode": "apply"},
           "label": None, "continue_on_failure": False, "run_on": "success"}],
      "defaults": {}},
-    {"name": "Optimize then report",
+    {"key": "optimize_then_report", "name": "Optimize then report",
      "description": "Re-optimize the plant, then report the orders that are still late.",
      "steps": [
          {"type": "optimizer.plant", "params": {"mode": "due_date", "search": "exhaustive", "apply_mode": "apply"},

@@ -36,7 +36,7 @@
     "schedules": ["$schedule"],
     "next_run_at": "2026-10-30T12:00:00+00:00", "next_run_local": "2026-10-30T08:00:00-04:00",
     "template_id": null, "template_version": null,
-    "template": {"id": 3, "name": "Purge then re-optimize", "version": 1, "current_version": 2, "archived": false, "changed": true},
+    "template": {"id": 3, "name": "Purge then re-optimize", "version": 1, "current_version": 2, "archived": false, "changed": true, "edited_locally": false},
     "target_kind": "selected", "target_count": 2, "target_skipped": 0,
     "last_run": "$run",
     "last_batch": {"id": 9, "status": "warning", "counts": {"total": 3, "succeeded": 1, "warning": 1, "skipped": 1}, "scheduled_for": "2026-10-29T12:00:00+00:00"}

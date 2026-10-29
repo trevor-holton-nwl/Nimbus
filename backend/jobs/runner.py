@@ -646,6 +646,9 @@ def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, schedu
             status = _execute(run_id, job, jt, params, skip_if_running)
             if status != "failed" or attempt > int(job["retry_max"] or 0):
                 return run_id
+            if _not_retryable(run_id):
+                log.info("job %s not retried: a configuration refusal or a restarted run", job_id)
+                return run_id
             if jt.composite and not chain_type.all_idempotent(params):
                 # A retry re-runs the WHOLE chain: only safe when every step may run twice.
                 log.info("job %s not retried: its chain has a step that is not safe to repeat", job_id)
@@ -658,6 +661,9 @@ def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, schedu
                 return run_id
             job = _apply_target(job, plant, override)
             jt, params, err = _prepare(job)
+            if jt is not None and params is not None and jt.composite and not chain_type.all_idempotent(params):
+                log.info("job %s not retried: the edited chain has a step that is not safe to repeat", job_id)
+                return run_id                             # the retry would run the CURRENT steps, not the failed ones
             attempt += 1
             trigger, run_id = "retry", None
     except Exception as exc:  # noqa: BLE001 - nothing may escape a worker thread
@@ -671,8 +677,39 @@ def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, schedu
         return run_id
 
 
+def _not_retryable(run_id: int) -> bool:
+    """A failure a retry cannot fix: the job or its inputs are wrong (`error_kind` config: a guard refused, bad
+    window), or the run was a restart from a step (a retry would re-run the whole CURRENT chain, not the failed steps).
+    Only `system` / `transient` failures are retried."""
+    try:
+        row = data.get_run(run_id)
+        if row and (row["summary"] or {}).get("error_kind") == "config":
+            return True
+        return bool(data.run_resume(run_id))
+    except Exception as exc:  # noqa: BLE001 - fall back to the old behaviour (retry)
+        log.warning("retry check failed for run %s: %s", run_id, exc)
+        return False
+
+
+def _attempt_params(run_id: int, jt, params):
+    """The params this attempt will actually RUN. Ordinary: the job's. A chain restarted from a step runs the failed
+    run's SNAPSHOT from the restart point, so its locks, slots, timeout and idempotency come from those steps."""
+    if not jt.composite:
+        return params
+    try:
+        resume = data.run_resume(run_id)
+        if not resume:
+            return params
+        seq = int(resume["from_seq"])
+        return chain_type.snapshot_params([r for r in data.list_steps(int(resume["from_run"])) if r["seq"] >= seq])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not read the restart snapshot of run %s: %s", run_id, exc)
+        return params
+
+
 def _execute(run_id: int, job: dict, jt, params, skip_if_running: bool) -> str:
     """Run one attempt on an existing run row; returns its final status."""
+    params = _attempt_params(run_id, jt, params)
     timeout = int(job["timeout_s"] or jt.timeout_for(params))
     lock_keys = jt.lock_names(job["plant"], params)      # one key for an ordinary type; a chain: the union of its steps'
     # LOCK ORDER (slot-gated types, the optimizer; a chain takes its steps' slots): the slots BEFORE the global
@@ -706,13 +743,21 @@ def _acquire_slot(slot, run_id: int) -> bool:
 def _try_locks(conn, keys: list[str]) -> bool:
     """Take every lock (already sorted) on this session, all or none: a failure releases the ones taken so far."""
     held: list[str] = []
-    for k in keys:
-        if data.try_session_lock(conn, k):
-            held.append(k)
-            continue
+    try:
+        for k in keys:
+            if data.try_session_lock(conn, k):
+                held.append(k)
+                continue
+            for h in reversed(held):
+                data.release_session_lock(conn, h)
+            return False
+    except BaseException:                       # a DB error midway must not leave the first keys held on the pooled connection
         for h in reversed(held):
-            data.release_session_lock(conn, h)
-        return False
+            try:
+                data.release_session_lock(conn, h)
+            except Exception:  # noqa: BLE001
+                pass
+        raise
     return True
 
 
@@ -837,7 +882,9 @@ def _store_artifact(run_id: int, ctx: JobContext, holder: dict, status: str, sum
     """A report body's artifact is stored BEFORE the run is finished (so a viewer that sees the run done always finds
     it). A save failure never fails the run: the summary says so (`artifact_error`) and an error line is logged."""
     art = getattr(holder.get("outcome"), "artifact", None)
-    if not art or status not in ("succeeded", "warning"):
+    # A chain keeps the artifact of its last successful report even when it failed or was cancelled afterwards.
+    keep = status in ("succeeded", "warning") or bool((summary or {}).get("chain") and status in ("failed", "cancelled"))
+    if not art or not keep:
         return summary
     out = dict(summary or {})
     try:
@@ -875,7 +922,13 @@ def _describe_failure(status: str, summary: dict | None, ctx: JobContext) -> dic
 
 def _resolve(holder: dict, ctx: JobContext, th: threading.Thread, timeout: int) -> tuple[str, dict | None, str | None]:
     if ctx.timed_out:
-        return "failed", None, f"timed out after {timeout}s"
+        # The body's own outcome (a chain's step list, action ids, step counts, failed step) survives a timeout once it
+        # has stopped; an abandoned body has none.
+        out = holder.get("outcome") if not th.is_alive() else None
+        summary = dict(out.summary) if out is not None and out.summary else None
+        if summary is not None:
+            summary["error_kind"] = "system"
+        return "failed", summary, f"timed out after {timeout}s"
     if th.is_alive():                                           # abandoned body (cancel ignored)
         return "failed", None, "run did not stop after cancel"
     if "cancelled" in holder:
@@ -884,6 +937,9 @@ def _resolve(holder: dict, ctx: JobContext, th: threading.Thread, timeout: int) 
         return "failed", None, holder["error"]
     out: JobOutcome = holder.get("outcome") or JobOutcome("succeeded")
     if ctx.cancelled and out.status != "failed":
-        return "cancelled", out.summary or None, None
+        if (out.summary or {}).get("chain") and not out.summary.get("cancelled"):
+            pass                       # a chain whose steps all committed before the cancel arrived: not `cancelled`
+        else:
+            return "cancelled", out.summary or None, None
     status = out.status if out.status in ("succeeded", "warning", "failed") else "succeeded"
     return status, out.summary or None, out.error

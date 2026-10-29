@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 import master_data as md
@@ -98,6 +99,8 @@ class JobPatch(BaseModel):
     timeout_s: int | None = Field(None, ge=10, le=21600)
     targets: list[TargetIn] | None = Field(None, max_length=500)       # [] clears them (single plant again)
     fan_out: FanOutIn | None = None
+    template_id: int | None = Field(None, ge=1, le=_BIGINT)            # (re-)tie a chain job to a template
+    template_version: int | None = Field(None, ge=1, le=2_000_000_000)  # the version its steps now match
 
 
 class PreviewIn(ScheduleIn):
@@ -359,9 +362,14 @@ def _job_wire(job: dict, plants: list[dict] | None = None) -> dict:
     if job.get("template_id") is not None:          # made from a template: is its copy out of date?
         t = data.template_briefs([job["template_id"]]).get(job["template_id"])
         if t:
+            copy = job.get("template_steps")        # the template's steps when this job was tied to it
+            if copy is None and job.get("template_version") == t["version"]:
+                copy = t["steps"]                   # an older job: its version is current, so the template IS its copy
+            mine = (job.get("params") or {}).get("steps")
             w["template"] = {"id": t["id"], "name": t["name"], "version": job.get("template_version"),
                              "current_version": t["version"], "archived": bool(t["archived"]),
-                             "changed": job.get("template_version") != t["version"]}
+                             "changed": job.get("template_version") != t["version"],
+                             "edited_locally": copy is not None and mine != copy}
     return w
 
 
@@ -375,6 +383,11 @@ def _validate_params(jt, params: dict, plant: str | None = None) -> dict:
                             f"{e.errors(include_url=False, include_context=False, include_input=False)}") from e
     if jt.composite and not out.get("steps"):
         raise HTTPException(status_code=400, detail="a chain needs at least one step")
+    if plant and jt.plant_check is not None:        # a check that needs the plant's today (a purge's fixed window)
+        try:
+            jt.plant_check(jt.params_model.model_validate(out), plant)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"invalid params for plant {plant}: {e}") from e
     return out
 
 
@@ -714,17 +727,17 @@ def create_job(body: JobCreate, actor: str | None = Depends(auth.require_admin),
         raise HTTPException(status_code=400, detail=f"unknown job type {body.job_type!r}")
     if not data.plant_exists(body.plant):
         raise HTTPException(status_code=400, detail=f"unknown plant {body.plant!r}")
-    tpl_version = None
+    tpl_version = tpl_steps = None
     if body.template_id is not None:
         tpl = data.get_template(body.template_id)
         if tpl is None or tpl["archived"]:
             raise HTTPException(status_code=400, detail="unknown or archived template")
         if not jt.composite:
             raise HTTPException(status_code=400, detail="only a chain can be made from a template")
-        tpl_version = tpl["version"]
+        tpl_version, tpl_steps = tpl["version"], tpl["steps"]
         if not (body.params or {}).get("steps"):          # no steps sent: start from the template's copy
             body.params = {**(body.params or {}), "steps": tpl["steps"]}
-    params = _validate_params(jt, body.params)
+    params = _validate_params(jt, body.params, plant=body.plant)
     rows, _exp = _resolve_targets(body.plant, body.targets, allowed_plants, jt, params)
     schedules = [{**_normalize(body.plant, _timing_fields(s), need_tz=jt.needs_plant_timezone and not rows,
                                tz_mode=s.tz_mode, fixed_timezone=s.fixed_timezone),
@@ -734,7 +747,8 @@ def create_job(body: JobCreate, actor: str | None = Depends(auth.require_admin),
                              enabled=body.enabled, retry_max=body.retry_max, timeout_s=body.timeout_s,
                              schedules=schedules, actor=actor, targets=rows,
                              fan_out=body.fan_out.model_dump() if body.fan_out else None,
-                             scope_plants=allowed_plants, template_id=body.template_id, template_version=tpl_version)
+                             scope_plants=allowed_plants, template_id=body.template_id, template_version=tpl_version,
+                             template_steps=tpl_steps)
     return _job_wire(data.get_job(job_id))
 
 
@@ -748,13 +762,14 @@ def patch_job(job_id: int, body: JobPatch, actor: str | None = Depends(auth.requ
         jt = get_type(job["job_type"]) or _registered(job["job_type"])
         # Merge over the stored params: a partial PATCH must not reset an omitted key (an old dry run's
         # apply_mode) to the model default.
-        fields["params"] = _validate_params(jt, {**(job["params"] or {}), **fields["params"]})
+        fields["params"] = _validate_params(jt, {**(job["params"] or {}), **fields["params"]}, plant=job["plant"])
         params_changed = True
     elif "params" in fields:
         fields.pop("params")
     for k in ("name", "enabled", "archived", "retry_max"):
         if k in fields and fields[k] is None:
             fields.pop(k)
+    _template_link_fields(job, fields)
     new_targets = None
     if fields.get("targets") is not None:
         jt = get_type(job["job_type"]) or _registered(job["job_type"])
@@ -774,6 +789,32 @@ def patch_job(job_id: int, body: JobPatch, actor: str | None = Depends(auth.requ
     data.patch_job(job_id, fields, actor, targets=new_targets, scope_plants=allowed_plants,
                    set_scope=allowed_plants is not None)
     return _job_wire(data.get_job(job_id))
+
+
+def _template_link_fields(job: dict, fields: dict) -> None:
+    """`template_id` / `template_version` in a PATCH keep a chain job in sync with its template: after 'update the template
+    with these steps' the job carries the new version (no false 'changed' flag), 'save as a new template' re-ties it.
+    The version may only be the template's CURRENT one, and the job stores that template's steps as its own copy."""
+    if fields.get("template_id") is None:
+        fields.pop("template_id", None)
+    if fields.get("template_version") is None:
+        fields.pop("template_version", None)
+    if "template_id" not in fields and "template_version" not in fields:
+        return
+    if job["job_type"] != "chain":
+        raise HTTPException(status_code=400, detail="only a chain can be tied to a template")
+    tid = fields.get("template_id", job.get("template_id"))
+    tpl = data.get_template(tid) if tid is not None else None
+    if tpl is None:
+        raise HTTPException(status_code=400, detail="unknown template")
+    if "template_id" in fields and tid != job.get("template_id") and tpl["archived"]:
+        raise HTTPException(status_code=400, detail="that template is archived")
+    ver = fields.get("template_version", tpl["version"])
+    if ver != tpl["version"]:
+        raise HTTPException(status_code=400, detail=f"the template is at version {tpl['version']}, not {ver}")
+    fields["template_version"] = ver
+    fields["template_id"] = tid
+    fields["template_steps"] = tpl["steps"]
 
 
 def _registered(key: str):
@@ -1037,6 +1078,23 @@ def _hours_between(a: str | None, b: str | None) -> float | None:
         return None
 
 
+_PROPOSAL_TYPES = ("optimizer.plant", "chain")      # a dry-run chain hoists its optimizer step's proposal onto the run
+
+
+def _may_be_dry_run(run: dict) -> bool:
+    """A run that has no summary yet: is it (going to be) a dry run? An optimizer job reads its params; a chain reads its
+    step rows (the restart snapshot is what runs), else the job's steps, for an optimizer step set to propose."""
+    if run["job_type"] == "optimizer.plant":
+        job = data.get_job(run["job_id"])
+        return bool(job and (job["params"] or {}).get("apply_mode") == "propose")
+    steps = [{"type": s["step_type"], "params": s["params"]} for s in data.list_steps(run["id"])]
+    if not steps:
+        job = data.get_job(run["job_id"])
+        steps = (job["params"] or {}).get("steps") or [] if job else []
+    return any(s.get("type") == "optimizer.plant" and (s.get("params") or {}).get("apply_mode") == "propose"
+               for s in steps)
+
+
 @router.get("/jobs/runs/{run_id}/proposal", dependencies=[Depends(auth.require_authenticated)])
 def run_proposal(run_id: int, response: Response,
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
@@ -1046,13 +1104,12 @@ def run_proposal(run_id: int, response: Response,
     run = _run_or_404(run_id, allowed_plants)
     summ = run["summary"] or {}
     response.headers["Cache-Control"] = "no-store"
-    if run["job_type"] == "optimizer.plant" and run["status"] in ("scheduled", "running") and not summ.get("apply_mode"):
-        # No summary yet: the job's current params say whether this run is a dry run.
-        job = data.get_job(run["job_id"])
-        if job and (job["params"] or {}).get("apply_mode") == "propose":
-            return {"run_id": run_id, "plant": run["plant"], "pending": True, "total": 0, "shown": 0, "rows": [],
-                    "findings": [], "board_matches": None, "truncated": False}
-    if run["job_type"] != "optimizer.plant" or summ.get("apply_mode") != "propose":
+    if (run["job_type"] in _PROPOSAL_TYPES and run["status"] in ("scheduled", "running")
+            and not summ.get("apply_mode") and _may_be_dry_run(run)):
+        # No summary yet: the job's (or the chain's step rows') params say whether this run is a dry run.
+        return {"run_id": run_id, "plant": run["plant"], "pending": True, "total": 0, "shown": 0, "rows": [],
+                "findings": [], "board_matches": None, "truncated": False}
+    if run["job_type"] not in _PROPOSAL_TYPES or summ.get("apply_mode") != "propose":
         raise HTTPException(status_code=400, detail="Only a dry run has a proposal")
     prop = summ.get("proposal")
     if not isinstance(prop, dict):
@@ -1159,8 +1216,25 @@ def run_artifact(
             "sections": [artifacts.page(s, offset, limit) for s in secs]}
 
 
+class RestartIn(BaseModel):
+    confirm: bool = False                                    # required when the job is a chain with a step not safe to repeat
+
+
+def _non_idempotent_steps(job: dict) -> list[str]:
+    """Labels of the steps of a chain job that are not safe to run twice (a failed run may have partly applied them)."""
+    if job["job_type"] != "chain":
+        return []
+    from backend.jobs.registry import REGISTRY
+    out = []
+    for st in (job["params"] or {}).get("steps") or []:
+        jt = REGISTRY.get(st.get("type"))
+        if jt is not None and not jt.idempotent:
+            out.append(st.get("label") or jt.label)
+    return out
+
+
 @router.post("/jobs/runs/{run_id}/restart", dependencies=_ADMIN)
-def restart_run(run_id: int, actor: str | None = Depends(auth.require_admin),
+def restart_run(run_id: int, body: RestartIn | None = None, actor: str | None = Depends(auth.require_admin),
                 allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Run the job again with its current params for THIS run's plant only (a new single run, or a batch of one for a
     multi-plant job); the old run is left as it was. The siblings of its batch are not touched: use
@@ -1169,6 +1243,11 @@ def restart_run(run_id: int, actor: str | None = Depends(auth.require_admin),
     job = _job_or_404(run["job_id"], allowed_plants, write=True)
     if job["archived"]:
         raise HTTPException(status_code=409, detail="Job is archived")
+    unsafe = _non_idempotent_steps(job)
+    if unsafe and not (body and body.confirm):         # the same confirm a restart from a step needs
+        raise HTTPException(status_code=409, detail=f"this chain has a step that is not safe to repeat "
+                                                    f"({', '.join(unsafe[:3])}): a restart runs every step again. "
+                                                    "Confirm to restart.")
     if job.get("targets"):
         _409_if_busy(job["id"], run["plant"])
         return _start(job, actor, "restart", {run["plant"]})
@@ -1227,6 +1306,11 @@ def restart_run_from_step(run_id: int, body: RestartStepIn | None = None,
         name = pick["label"] or jt.label
         raise HTTPException(status_code=409, detail=f"step {pick['seq']} ({name}) is not safe to repeat: it may have "
                                                     "partly applied. Confirm to restart from it.")
+    earlier = [s for s in steps if s["seq"] < pick["seq"] and s["status"] in ("failed", "cancelled")
+               and not carried(s)]
+    if earlier and pick["status"] == "skipped" and not body.confirm:
+        raise HTTPException(status_code=409, detail=f"step {earlier[0]['seq']} failed and will NOT run again: "
+                                                    "restarting from a later step skips it. Confirm to restart.")
     _409_if_busy(job["id"])
     try:
         new_id = runner.start_manual_run(job, actor, "restart", resume={"from_run": run_id, "from_seq": pick["seq"]})
@@ -1251,6 +1335,7 @@ class TemplatePatch(BaseModel):
     steps: list[dict] | None = Field(None, min_length=1, max_length=10)
     defaults: dict | None = None
     archived: bool | None = None
+    expected_version: int | None = Field(None, ge=1, le=2_000_000_000)   # If-Match: the version the editor opened
 
 
 def _template_defaults(raw: dict | None) -> dict:
@@ -1270,7 +1355,9 @@ def _template_defaults(raw: dict | None) -> dict:
 def _normalized_steps(raw: list[dict]) -> list[dict]:
     from backend.jobs.types import chain as chain_type
     try:
-        return chain_type.normalize_steps(raw)
+        out = chain_type.normalize_steps(raw)
+        chain_type.check_for_plant(chain_type.ChainParams.model_validate({"steps": out}), None)   # a fixed purge window
+        return out
     except (ValueError, ValidationError) as e:
         raise HTTPException(status_code=400, detail=f"invalid steps: {e}") from e
 
@@ -1295,6 +1382,7 @@ def create_template(body: TemplateIn, actor: str | None = Depends(auth.require_a
 @router.patch("/jobs/templates/{template_id}", dependencies=_ADMIN)
 def patch_template(template_id: int, body: TemplatePatch, actor: str | None = Depends(auth.require_admin)):
     fields = body.model_dump(exclude_unset=True)
+    expected = fields.pop("expected_version", None)
     for k in ("name", "archived"):
         if k in fields and fields[k] is None:
             fields.pop(k)
@@ -1309,9 +1397,13 @@ def patch_template(template_id: int, body: TemplatePatch, actor: str | None = De
     if "name" in fields:
         fields["name"] = fields["name"].strip()
     try:
-        row = data.patch_template(template_id, fields, actor)
+        row = data.patch_template(template_id, fields, actor, expected_version=expected)
     except data.TemplateNameTaken as e:
         raise HTTPException(status_code=409, detail="a template with this name already exists") from e
+    except data.TemplateVersionConflict as e:
+        return JSONResponse(status_code=409, content={
+            "detail": f"This template was changed by someone else (now version {e.current}). Reload it and try again.",
+            "current_version": e.current})
     if row is None:
         raise HTTPException(status_code=404, detail="Template not found")
     return {"template": data.template_to_wire(row)}
@@ -1349,6 +1441,17 @@ def job_template_update(job_id: int, actor: str | None = Depends(auth.require_ad
     if tpl is None:
         raise HTTPException(status_code=404, detail="Template not found")
     jt = get_type(job["job_type"]) or _registered(job["job_type"])
-    params = _validate_params(jt, {**(job["params"] or {}), "steps": tpl["steps"]})
-    data.patch_job(job_id, {"params": params, "template_version": tpl["version"]}, actor)
-    return _job_wire(data.get_job(job_id))
+    params = _validate_params(jt, {**(job["params"] or {}), "steps": tpl["steps"]}, plant=job["plant"])
+    # Per-plant overrides are merged over these params when a plant runs: each must still validate, and an override of
+    # `steps` means that plant keeps its own steps, so this update does nothing for it (reported, never silent).
+    overridden: list[str] = []
+    if job.get("targets"):
+        exp = targets.expand_targets(job, plants=data.load_plant_rows(), require_tz=False, apply_scope=False)
+        for e in exp["plants"]:
+            ov = e["params_override"]
+            if ov:
+                _validate_params(jt, targets.deep_merge(params, ov), plant=e["plant"])
+                if "steps" in ov:
+                    overridden.append(e["plant"])
+    data.patch_job(job_id, {"params": params, "template_version": tpl["version"], "template_steps": tpl["steps"]}, actor)
+    return {**_job_wire(data.get_job(job_id)), "steps_overridden_plants": overridden}
