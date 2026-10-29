@@ -794,6 +794,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.sap_stage_warn_empty_snapshot':              'El snapshot está vacío: aplicarlo eliminaría todas las filas sin referencias.',
   'ui.sap_stage_warn_incomplete_rows':             'El número de filas anunciado por Mulesoft no coincide con las filas recibidas, por lo que este lote no se puede aplicar. Pida a Mulesoft que lo reenvíe.',
   'ui.sap_stage_warn_lot_size_rounded':            'Algunos tamaños de lote se redondearon a números enteros.',
+  'ui.sap_stage_warn_value_truncated':             'Algunas descripciones o tipos de material eran demasiado largos y se acortaron.',
   'ui.sap_stage_col_reason': 'Motivo',
   'ui.sap_stage_reject_missing_key': 'Un campo clave está vacío.',
   'ui.sap_stage_reject_plant_mismatch': 'La planta de la fila difiere de la planta del lote.',

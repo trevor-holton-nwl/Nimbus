@@ -1375,6 +1375,8 @@ CREATE TABLE IF NOT EXISTS sap_stage_material_plant (
     ltinc                    NUMERIC(13,3),
     zz_subnet                TEXT,
     sauft                    TEXT,
+    maktx                    TEXT,
+    mtart                    TEXT,
     material_id              TEXT,
     plant                    TEXT
 );
@@ -1556,6 +1558,8 @@ INSERT INTO sap_field_map (object_key, sap_field, nimbus_column, transform, fiel
     ('stage_material_plants', 'MINLS', 'min_lot_size', 'decimal', 4),
     ('stage_material_plants', 'LTINC', 'incremental_lot_size', 'decimal', 5),
     ('stage_material_plants', 'ZZ_SUBNET', 'subnetwork', 'none', 6),
+    ('stage_material_plants', 'MAKTX', 'material_description', 'none', 7),
+    ('stage_material_plants', 'MTART', 'material_type', 'none', 8),
     ('stage_planned_orders', 'PLNUM', 'production_order', 'strip_zeros', 1),
     ('stage_planned_orders', 'MATNR', 'material_number', 'alpha_strip', 2),
     ('stage_planned_orders', 'PLWRK', 'plant', 'none', 3),

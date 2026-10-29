@@ -1807,6 +1807,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.sap_stage_warn_empty_snapshot':              'The snapshot is empty — applying it would remove every unreferenced row.',
   'ui.sap_stage_warn_incomplete_rows':             'The number of rows Mulesoft announced does not match the rows that arrived, so this batch cannot be applied. Ask Mulesoft to resend it.',
   'ui.sap_stage_warn_lot_size_rounded':            'Some lot sizes were rounded to whole numbers.',
+  'ui.sap_stage_warn_value_truncated':             'Some material descriptions or types were too long and were shortened.',
   'ui.sap_stage_col_reason': 'Reason',
   'ui.sap_stage_reject_missing_key': 'A key field is blank.',
   'ui.sap_stage_reject_plant_mismatch': 'The row\'s plant differs from the batch\'s plant.',

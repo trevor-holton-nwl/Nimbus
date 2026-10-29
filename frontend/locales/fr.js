@@ -790,6 +790,7 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.sap_stage_warn_empty_snapshot':              'L\'instantané est vide : l\'appliquer supprimerait toutes les lignes non référencées.',
   'ui.sap_stage_warn_incomplete_rows':             'Le nombre de lignes annoncé par Mulesoft ne correspond pas aux lignes reçues ; ce lot ne peut donc pas être appliqué. Demandez à Mulesoft de le renvoyer.',
   'ui.sap_stage_warn_lot_size_rounded':            'Certaines tailles de lot ont été arrondies à l\'entier.',
+  'ui.sap_stage_warn_value_truncated':             'Certaines descriptions ou certains types de matériau étaient trop longs et ont été raccourcis.',
   'ui.sap_stage_col_reason': 'Motif',
   'ui.sap_stage_reject_missing_key': 'Un champ clé est vide.',
   'ui.sap_stage_reject_plant_mismatch': 'Le site de la ligne diffère de celui du lot.',
