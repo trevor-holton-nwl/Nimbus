@@ -241,7 +241,7 @@ test('buildJobPayload: backend job params (apply_mode explicit) and a preset Sch
     name: 'Morning optimize', plant: '1008', job_type: 'optimizer.plant',
     params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' }, targets: [], fan_out: null,
   });
-  assert.deepEqual(p.schedule, { kind: 'daily', time_of_day: '08:00', valid_from: '2026-11-01', valid_until: null, skip_if_running: true, tz_mode: 'plant', fixed_timezone: null });
+  assert.deepEqual(p.schedule, { kind: 'daily', time_of_day: '08:00', valid_from: '2026-11-01', valid_until: null, skip_if_running: true, tz_mode: 'plant', fixed_timezone: null, options: null });
   const once = buildJobPayload({ ...good(), recur: { ...defaultRecurrence(), preset: 'once', runAt: '2026-11-02T08:00' } });
   assert.deepEqual([once.schedule.kind, once.schedule.cron_expr, once.schedule.run_at], ['once', undefined, '2026-11-02T08:00']);
   assert.doesNotMatch(JSON.stringify(p), /Z"|\+\d\d:\d\d|"timezone"/, 'no zone suffix, offset or timezone field (the server owns the zone; only tz_mode travels)');

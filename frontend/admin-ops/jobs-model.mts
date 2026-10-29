@@ -56,10 +56,20 @@ export function statusBadgeHtml(status: string | null | undefined, d: JobsDeps):
   return `<span class="badge ${statusBadgeClass(status)} job-status">${dot}${d.esc(statusLabel(status, d))}</span>`;
 }
 
+/** The server's skip reasons (run.error of a skipped run) that have a translation; any other text shows as it is. */
+const SKIP_REASON_KEYS: Record<string, string> = {
+  'maintenance mode': 'jobs.skip_maintenance', 'closed day': 'jobs.skip_closed_day',
+  'outside run window': 'jobs.skip_outside_window', 'schedule changed': 'jobs.skip_schedule_changed',
+};
+export function skipReasonText(error: string, d: Pick<JobsDeps, 't'>): string {
+  const key = SKIP_REASON_KEYS[error.trim()];
+  return key ? d.t(key) : error;
+}
+
 /** A run's badge: Missed for a misfire, else its status; Skipped carries the reason beside it. */
 export function runStatusHtml(run: { status: string; error?: string | null }, d: JobsDeps): string {
   const shown = displayStatus(run);
-  const reason = shown === 'skipped' && run.error ? ` <span class="job-sub">${d.esc(run.error)}</span>` : '';
+  const reason = shown === 'skipped' && run.error ? ` <span class="job-sub">${d.esc(skipReasonText(run.error, d))}</span>` : '';
   return statusBadgeHtml(shown, d) + reason;
 }
 
@@ -127,12 +137,13 @@ export interface ScheduleIn {
   cron_expr?: string;
   run_at?: string;
 }
-export function recurrenceToScheduleIn(r: Recurrence): ScheduleIn {
+export function recurrenceToScheduleIn(r: Recurrence, policy?: Pick<PolicyForm, 'monthly'>): ScheduleIn {
   switch (r.preset) {
     case 'once': return { kind: 'once', run_at: r.runAt };
     case 'hourly': return { kind: 'hourly', time_of_day: `00:${_pad2(Number(r.minute) || 0)}` };
     case 'weekly': return { kind: 'weekly', time_of_day: r.time, days_of_week: [...new Set(r.days)].sort((a, b) => a - b) };
-    case 'monthly': return { kind: 'monthly', time_of_day: r.time, day_of_month: Number(r.dom) };
+    case 'monthly': return (policy?.monthly ?? 'day_of_month') === 'day_of_month'
+      ? { kind: 'monthly', time_of_day: r.time, day_of_month: Number(r.dom) } : { kind: 'monthly', time_of_day: r.time };
     case 'cron': return { kind: 'cron', cron_expr: String(r.cron).trim().replace(/\s+/g, ' ') };
     default: return { kind: r.preset, time_of_day: r.time };
   }
@@ -145,6 +156,8 @@ export interface ScheduleWire {
   day_of_month?: number | null;
   cron_expr?: string | null;
   run_at?: string | null;
+  /** W3b policy as stored (null = every default). */
+  options?: Record<string, unknown> | null;
 }
 
 /** A saved schedule back into the editable recurrence. */
@@ -206,7 +219,10 @@ export function recurrenceText(s: ScheduleLike | null | undefined, d: JobsDeps, 
     case 'daily': return d.t('jobs.cron_daily', { time });
     case 'weekdays': return d.t('jobs.cron_weekdays', { time });
     case 'weekly': return d.t('jobs.cron_weekly', { days: [...(s.days_of_week ?? [])].sort((a, b) => a - b).map(x => d.t(dowLabelKey(x))).join(', '), time });
-    case 'monthly': return d.t('jobs.cron_monthly', { dom: s.day_of_month ?? '', time });
+    case 'monthly': {
+      const mode = policyFromOptions(s.options).monthly;
+      return mode === 'day_of_month' ? d.t('jobs.cron_monthly', { dom: s.day_of_month ?? '', time }) : d.t(`jobs.cron_monthly_${mode}`, { time });
+    }
     default: return cronProse(s.cron_expr, d) ?? String(s.cron_expr ?? d.t('jobs.no_schedule'));
   }
 }
@@ -403,6 +419,8 @@ export interface HealthSummary {
   nextFire: { atUtc: string; atLocal: string; jobId: number; jobName: string; plant: string } | null;
   scheduler: { ok: boolean; lastTickAt: string | null };
   longerThanUsual: number[];
+  /** Maintenance mode (system setting `jobs_paused`): scheduled and catch-up runs are skipped while it is on. */
+  maintenance?: { enabled: boolean; since: string | null; by: string | null };
 }
 
 export type HealthKey = 'running' | 'queued' | 'failed' | 'missed' | 'next';
@@ -774,6 +792,8 @@ export interface JobForm {
   /** How the schedule's times are read: each plant's own zone, one fixed zone, or UTC. */
   tzMode: TzMode;
   fixedTz: string;
+  /** W3b: the schedule's Advanced rules (DST, closed days, run window, monthly mode, catch-up). */
+  policy: PolicyForm;
 }
 
 export type TargetMode = 'single' | 'selected' | 'all' | 'subnetwork';
@@ -800,14 +820,94 @@ export function defaultJobForm(plant = '', jobType = 'optimizer.plant', defaults
   return {
     jobType, name: '', plant, params: seedParams(meta, defaults), recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true,
     targetMode: 'single', targetPlants: [], targetSubnetwork: '', excludedPlants: [], storedTargets: [], fanOut: { ...FAN_OUT_DEFAULT },
-    tzMode: 'plant', fixedTz: '',
+    tzMode: 'plant', fixedTz: '', policy: defaultPolicy(),
   };
+}
+
+/* ---------------------------------------------------------------------------
+   W3b schedule policy (the schedule's `options`): DST handling, closed days, run window, monthly mode, catch-up
+   ------------------------------------------------------------------------- */
+export const DST_GAPS = ['shift', 'skip'] as const;
+export const DST_OVERLAPS = ['once', 'twice'] as const;
+export const CLOSED_DAYS = ['run', 'skip', 'next_working_day', 'previous_working_day'] as const;
+export const WINDOW_ACTIONS = ['skip', 'defer'] as const;
+export const MONTHLY_MODES = ['day_of_month', 'last_day', 'first_working_day', 'last_working_day'] as const;
+export type ClosedDay = typeof CLOSED_DAYS[number];
+export type MonthlyMode = typeof MONTHLY_MODES[number];
+export const GRACE_MAX_MIN = 1440;
+
+export interface PolicyForm {
+  dstGap: 'shift' | 'skip'; dstOverlap: 'once' | 'twice'; closedDay: ClosedDay;
+  /** Run window (plant time, [start, end)); a window such as 22:00 to 05:00 crosses midnight. */
+  winOn: boolean; winStart: string; winEnd: string; winAction: 'skip' | 'defer';
+  monthly: MonthlyMode; monthlyClamp: boolean;
+  catchUp: boolean; graceMin: number;
+}
+
+export const defaultPolicy = (): PolicyForm => ({
+  dstGap: 'shift', dstOverlap: 'once', closedDay: 'run', winOn: false, winStart: '08:00', winEnd: '17:00', winAction: 'skip',
+  monthly: 'day_of_month', monthlyClamp: false, catchUp: true, graceMin: 60,
+});
+
+const _pick = <T extends string>(all: readonly T[], v: unknown, d: T): T => (all as readonly string[]).includes(String(v)) ? (v as T) : d;
+
+/** Stored `options` (null = every default) into the form. */
+export function policyFromOptions(o: Record<string, unknown> | null | undefined): PolicyForm {
+  const d = defaultPolicy();
+  if (!o || typeof o !== 'object') return d;
+  const rw = (o.run_window ?? null) as { start?: unknown; end?: unknown; action?: unknown } | null;
+  const cu = (o.catch_up ?? {}) as { enabled?: unknown; grace_s?: unknown };
+  const grace = Number(cu.grace_s);
+  return {
+    dstGap: _pick(DST_GAPS, o.dst_gap, d.dstGap), dstOverlap: _pick(DST_OVERLAPS, o.dst_overlap, d.dstOverlap),
+    closedDay: _pick(CLOSED_DAYS, o.closed_day, d.closedDay),
+    winOn: !!rw, winStart: parseTime(String(rw?.start ?? '')) ? String(rw?.start) : d.winStart,
+    winEnd: parseTime(String(rw?.end ?? '')) ? String(rw?.end) : d.winEnd, winAction: _pick(WINDOW_ACTIONS, rw?.action, d.winAction),
+    monthly: _pick(MONTHLY_MODES, o.monthly, d.monthly), monthlyClamp: o.monthly_clamp === true,
+    catchUp: cu.enabled !== false, graceMin: Number.isFinite(grace) && grace >= 60 ? Math.round(grace / 60) : d.graceMin,
+  };
+}
+
+/** The closed-day choices a preset can use: moving a run to another day needs a once-a-day shape. */
+export const closedDayChoices = (preset: RecurPreset): readonly ClosedDay[] =>
+  preset === 'hourly' || preset === 'cron' ? ['run', 'skip'] : CLOSED_DAYS;
+
+/** The form as the server's `options` (every key explicit), or null when it is all defaults, so an untouched schedule
+ *  stays exactly as it was. Rules that do not apply to the preset are dropped (hourly ignores DST; monthly rules need
+ *  monthly), so a leftover choice never travels. */
+export function policyToOptions(p: PolicyForm, preset: RecurPreset): Record<string, unknown> | null {
+  const d = defaultPolicy();
+  const monthly = preset === 'monthly';
+  const o = {
+    dst_gap: preset === 'hourly' ? d.dstGap : p.dstGap, dst_overlap: preset === 'hourly' ? d.dstOverlap : p.dstOverlap,
+    closed_day: closedDayChoices(preset).includes(p.closedDay) ? p.closedDay : 'run',
+    run_window: p.winOn ? { start: p.winStart, end: p.winEnd, action: p.winAction } : null,
+    monthly: monthly ? p.monthly : d.monthly, monthly_clamp: monthly && p.monthly === 'day_of_month' ? p.monthlyClamp : false,
+    catch_up: { enabled: p.catchUp, grace_s: Math.round(Number(p.graceMin) || d.graceMin) * 60 },
+  };
+  const base = { dst_gap: d.dstGap, dst_overlap: d.dstOverlap, closed_day: d.closedDay, run_window: null, monthly: d.monthly, monthly_clamp: false,
+    catch_up: { enabled: d.catchUp, grace_s: d.graceMin * 60 } };
+  return JSON.stringify(o) === JSON.stringify(base) ? null : o;
+}
+
+/** True when the rules read the plant's calendar, which only makes sense on the plant's own clock. */
+export const policyNeedsPlantTime = (o: Record<string, unknown> | null): boolean =>
+  !!o && (o.closed_day !== 'run' || o.monthly === 'first_working_day' || o.monthly === 'last_working_day');
+
+/** Field -> i18n key for the Advanced rules. Empty = valid. */
+export function validatePolicy(p: PolicyForm, preset: RecurPreset, tzMode: TzMode): Partial<Record<'policyWin' | 'policyGrace' | 'policyTz', string>> {
+  const e: Partial<Record<'policyWin' | 'policyGrace' | 'policyTz', string>> = {};
+  if (p.winOn && (!parseTime(p.winStart) || !parseTime(p.winEnd) || p.winStart === p.winEnd)) e.policyWin = 'jobs.err_win_same';
+  const g = Number(p.graceMin);
+  if (p.catchUp && (!Number.isInteger(g) || g < 1 || g > GRACE_MAX_MIN)) e.policyGrace = 'jobs.err_grace';
+  if (tzMode !== 'plant' && policyNeedsPlantTime(policyToOptions(p, preset))) e.policyTz = 'jobs.err_policy_tz';
+  return e;
 }
 
 /** The result mode of a form or a stored params object ('apply' when the job never set one). */
 export const resultOf = (params: Record<string, unknown> | null | undefined): string => String(params?.apply_mode ?? 'apply');
 
-export type FormErrors = Partial<Record<'name' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity' | 'targets' | 'fixedTz' | 'fanOut', string>>
+export type FormErrors = Partial<Record<'name' | 'plant' | 'result' | 'time' | 'minute' | 'days' | 'dom' | 'cron' | 'runAt' | 'validity' | 'targets' | 'fixedTz' | 'fanOut' | 'policyWin' | 'policyGrace' | 'policyTz', string>>
   & { params?: Record<string, string> };
 
 /** Field -> i18n key. Empty object = valid. `isAdmin` guards the auto-apply result (the server re-checks).
@@ -837,8 +937,9 @@ export function validateJobForm(f: JobForm, o: { isAdmin: boolean; plants: strin
   } else {
     if (!parseTime(r.time)) e.time = 'jobs.err_time';
     if (r.preset === 'weekly' && !r.days.length) e.days = 'jobs.err_days';
-    if (r.preset === 'monthly' && !(Number.isInteger(Number(r.dom)) && Number(r.dom) >= 1 && Number(r.dom) <= 31)) e.dom = 'jobs.err_dom';
+    if (r.preset === 'monthly' && f.policy.monthly === 'day_of_month' && !(Number.isInteger(Number(r.dom)) && Number(r.dom) >= 1 && Number(r.dom) <= 31)) e.dom = 'jobs.err_dom';
   }
+  Object.assign(e, validatePolicy(f.policy, r.preset, f.tzMode));
   if (f.validFrom && f.validUntil && f.validUntil < f.validFrom) e.validity = 'jobs.err_validity';
   if (f.targetMode === 'selected' && !f.targetPlants.length) e.targets = 'jobs.err_targets_none';
   if (!f.targetsLocked && targetRowCount(f) > TARGET_ROWS_MAX) e.targets = 'jobs.err_targets_cap';
@@ -928,7 +1029,7 @@ export function batchTiles(b: { counts: Record<string, number> }): Array<{ key: 
 /** The request bodies for a valid form: the job (params as the form holds them) and its ScheduleIn. The server owns the zone and the cron. */
 export function buildJobPayload(f: JobForm): {
   job: { name: string; plant: string; job_type: string; params: Record<string, unknown>; targets: JobTarget[]; fan_out: { stagger_s: number; max_parallel: number | null; fail_fast: boolean } | null };
-  schedule: ScheduleIn & { valid_from: string | null; valid_until: string | null; skip_if_running: boolean; tz_mode: TzMode; fixed_timezone: string | null };
+  schedule: ScheduleIn & { valid_from: string | null; valid_until: string | null; skip_if_running: boolean; tz_mode: TzMode; fixed_timezone: string | null; options: Record<string, unknown> | null };
 } {
   const targets = buildTargetRows(f);
   const params: Record<string, unknown> = {};
@@ -939,12 +1040,13 @@ export function buildJobPayload(f: JobForm): {
       fan_out: targets.length ? { stagger_s: f.fanOut.staggerS, max_parallel: f.fanOut.maxParallel, fail_fast: f.fanOut.failFast } : null,
     },
     schedule: {
-      ...recurrenceToScheduleIn(f.recur),
+      ...recurrenceToScheduleIn(f.recur, f.policy),
       valid_from: f.validFrom || null,
       valid_until: f.validUntil || null,
       skip_if_running: f.skipIfRunning,
       tz_mode: f.tzMode,
       fixed_timezone: f.tzMode === 'fixed' ? f.fixedTz.trim() : null,
+      options: policyToOptions(f.policy, f.recur.preset),     // null = all defaults; on a PATCH it clears stored rules
     },
   };
 }
@@ -968,6 +1070,7 @@ export function jobToForm(job: {
     ...targetsToForm(job.targets ?? [], job.fanOut ?? null),
     tzMode: s?.tzMode === 'fixed' || s?.tzMode === 'utc' ? s.tzMode : 'plant',
     fixedTz: s?.tzMode === 'fixed' ? String(s.fixedTimezone ?? '') : '',
+    policy: policyFromOptions(s?.options),
   };
 }
 
@@ -1049,3 +1152,94 @@ export const isReportRun = (s: RunSummary | null | undefined): boolean => !!s &&
 
 /** The resolved window line: "Window: 2026-09-28 to 2026-10-28, plant time". */
 export const windowLine = (w: { label: string } | null | undefined, d: Pick<JobsDeps, 't'>): string => (w?.label ? d.t('jobs.run_window', { label: w.label }) : '');
+
+
+/* ---------------------------------------------------------------------------
+   Runs timeline (GET /jobs/timeline): lanes per plant, bars for runs and upcoming fires on ONE shared time axis
+   ------------------------------------------------------------------------- */
+export const TL_RANGES = ['24h', '7d'] as const;
+export type TlRange = typeof TL_RANGES[number];
+/** SVG user units across one lane (the bars are placed in these; the SVG scales to its box). */
+export const TL_W = 1000;
+export const TL_MIN_BAR = 4;
+const HOUR_MS = 3600000;
+
+export interface TimelineRun {
+  id: number; jobId: number; jobName: string; jobType: string; status: string; trigger: string | null; batchId: number | null;
+  error: string | null; scheduledFor: string | null; startUtc: string | null; endUtc: string | null;
+}
+export interface TimelineUpcoming { atUtc: string; atLocal: string; jobId: number; jobName: string; scheduleId: number; dstShifted: boolean; policyNote: string | null }
+export interface TimelineLane { plant: string; timezone: string; nowLocal: string; runs: TimelineRun[]; upcoming: TimelineUpcoming[] }
+export interface Timeline { from: string; to: string; nowUtc: string; lanes: TimelineLane[]; totalPlants: number; plantOffset: number; plantLimit: number; truncated: boolean }
+
+/** The window the switch asks for: 24 h = 12 h either side of now, 7 d = 3 days back and 4 ahead (the server allows 8). */
+export function timelineWindow(range: TlRange, nowMs: number): { fromMs: number; toMs: number; from: string; to: string } {
+  const [back, ahead] = range === '7d' ? [3 * 24 * HOUR_MS, 4 * 24 * HOUR_MS] : [12 * HOUR_MS, 12 * HOUR_MS];
+  const fromMs = nowMs - back; const toMs = nowMs + ahead;
+  return { fromMs, toMs, from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString() };
+}
+
+export interface TlBar {
+  kind: 'run' | 'upcoming'; key: string; runId: number | null; jobId: number; jobName: string;
+  /** The shown status (Missed for a misfire); `upcoming` for a scheduled fire. */
+  status: string; x: number; w: number; startMs: number; endMs: number | null; note: string | null; shifted: boolean;
+}
+
+const _xOf = (ms: number, fromMs: number, toMs: number): number => ((ms - fromMs) / (toMs - fromMs)) * TL_W;
+
+/** One lane's bars in axis units, clipped to the window; a running run ends at now, a point (a skipped run, an upcoming fire)
+ *  gets the minimum width so it can be seen and clicked. */
+export function timelineBars(lane: Pick<TimelineLane, 'runs' | 'upcoming'>, fromMs: number, toMs: number, nowMs: number): TlBar[] {
+  const out: TlBar[] = [];
+  for (const r of lane.runs) {
+    const s = Date.parse(r.startUtc ?? r.scheduledFor ?? ''); if (!Number.isFinite(s)) continue;
+    const eRaw = r.endUtc ? Date.parse(r.endUtc) : (r.status === 'running' ? nowMs : null);
+    const e = eRaw != null && Number.isFinite(eRaw) ? Math.max(eRaw, s) : s;
+    if (e < fromMs || s > toMs) continue;
+    const x0 = Math.max(0, _xOf(s, fromMs, toMs)); const x1 = Math.min(TL_W, _xOf(e, fromMs, toMs));
+    const w = Math.max(TL_MIN_BAR, x1 - x0);
+    out.push({ kind: 'run', key: `r${r.id}`, runId: r.id, jobId: r.jobId, jobName: r.jobName, status: displayStatus(r), x: Math.min(x0, TL_W - w), w,
+      startMs: s, endMs: eRaw ?? null, note: null, shifted: false });
+  }
+  for (const u of lane.upcoming) {
+    const s = Date.parse(u.atUtc); if (!Number.isFinite(s) || s < fromMs || s > toMs) continue;
+    const x = Math.min(Math.max(0, _xOf(s, fromMs, toMs) - TL_MIN_BAR / 2), TL_W - TL_MIN_BAR);
+    out.push({ kind: 'upcoming', key: `u${u.scheduleId}-${s}`, runId: null, jobId: u.jobId, jobName: u.jobName, status: 'upcoming', x, w: TL_MIN_BAR, startMs: s, endMs: null, note: u.policyNote, shifted: u.dstShifted });
+  }
+  return out.sort((a, b) => a.startMs - b.startMs);
+}
+
+/** Axis ticks relative to NOW (the axis is shared; each lane's own clock is written beside its name): 24 h = every 4 h,
+ *  7 d = every day. `labelKey` is `jobs.tl_ago` / `jobs.tl_ahead` (hours) or the `_d` pair (days) with `n`; the middle tick is "now". */
+export function timelineTicks(range: TlRange, fromMs: number, toMs: number, nowMs: number): Array<{ pct: number; labelKey: string; n: number }> {
+  const step = range === '7d' ? 24 * HOUR_MS : 4 * HOUR_MS;
+  const unit = range === '7d' ? '_d' : '';
+  const out: Array<{ pct: number; labelKey: string; n: number }> = [];
+  for (let k = -Math.floor((nowMs - fromMs) / step); nowMs + k * step <= toMs + 1; k++) {
+    const at = nowMs + k * step;
+    if (at < fromMs) continue;
+    const n = Math.abs(k) * (range === '7d' ? 1 : 4);
+    out.push({ pct: ((at - fromMs) / (toMs - fromMs)) * 100, labelKey: k === 0 ? 'jobs.tl_now_axis' : k < 0 ? `jobs.tl_ago${unit}` : `jobs.tl_ahead${unit}`, n });
+  }
+  return out;
+}
+
+/** The same items as a flat table (the keyboard / screen-reader alternative to the chart): lane order, then time. */
+export interface TlRow { plant: string; timezone: string; kind: 'run' | 'upcoming'; runId: number | null; jobId: number; jobName: string; status: string; whenUtc: string; whenLocal: string; note: string | null }
+export function timelineRows(tl: Pick<Timeline, 'lanes'>): TlRow[] {
+  const out: TlRow[] = [];
+  for (const lane of tl.lanes) {
+    const rows: TlRow[] = [
+      ...lane.runs.map(r => ({ plant: lane.plant, timezone: lane.timezone, kind: 'run' as const, runId: r.id, jobId: r.jobId, jobName: r.jobName, status: displayStatus(r),
+        whenUtc: r.startUtc ?? r.scheduledFor ?? '', whenLocal: '', note: null })),
+      ...lane.upcoming.map(u => ({ plant: lane.plant, timezone: lane.timezone, kind: 'upcoming' as const, runId: null, jobId: u.jobId, jobName: u.jobName, status: 'upcoming',
+        whenUtc: u.atUtc, whenLocal: u.atLocal, note: u.policyNote })),
+    ];
+    out.push(...rows.sort((a, b) => Date.parse(a.whenUtc) - Date.parse(b.whenUtc)));
+  }
+  return out;
+}
+
+/** Preview wording for a policy note / skip reason code (jobs.note_<code> / jobs.skip_reason_<code>); unknown codes show as they are. */
+export const policyNoteText = (code: string | null | undefined, d: Pick<JobsDeps, 't'>): string => (code ? (tryKey(`jobs.note_${code}`, d) || code) : '');
+export const skipReasonCodeText = (code: string, d: Pick<JobsDeps, 't'>): string => tryKey(`jobs.skip_reason_${code}`, d) || code;
