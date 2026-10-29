@@ -54,11 +54,11 @@ afterEach(() => {
   dom.restore();
 });
 
-test('body markup: every field has a label, defaults are 08:00 / Exhaustive / Apply, plant timezone is read-only text', () => {
+test('body markup: every field has a label, defaults are 08:00 / Exhaustive / Propose, plant timezone is read-only text', () => {
   const html = bodyHtml(defaultJobForm('1008'), 'new', true);
   for (const id of ['jb-name', 'jb-mode', 'jb-search', 'jb-result', 'jb-recur', 'jb-time', 'jb-from', 'jb-until', 'jb-overlap', 'jb-preview', 'jb-tz']) assert.match(html, new RegExp(`id="${id}"`), id);
   assert.match(html, /<option value="exhaustive" selected>/);
-  assert.match(html, /<option value="apply" selected>/);
+  assert.match(html, /<option value="propose" selected>/);
   assert.match(html, /id="jb-time"[^>]*value="08:00"/);
   assert.doesNotMatch(html, /<input[^>]*id="jb-tz"/, 'the timezone is not editable');
   assert.doesNotMatch(bodyHtml(defaultJobForm('1008'), 'new', true), /id="jb-result"[^>]*disabled/);
@@ -120,7 +120,7 @@ test('submit creates the job with its preset schedule inline, toasts, closes and
     schedules: [{ kind: 'daily', time_of_day: '08:00', valid_from: null, valid_until: null, skip_if_running: true }],
   });
   assert.equal(calls.addSch.length, 0, 'the schedule rides inside the create call');
-  assert.deepEqual(calls.toast.at(-1)[1], 'ok');
+  assert.deepEqual(calls.toast.at(-1)[1], 'success');
   assert.deepEqual(calls.closed, ['modal-job-edit']);
   assert.equal(saved, 1);
 });
@@ -143,7 +143,7 @@ test('a server failure keeps the dialog open and toasts the error', async () => 
   fillForm();
   await JobsDialog.submit();
   assert.equal(calls.closed.length, 0);
-  assert.equal(calls.toast.at(-1)[1], 'err');
+  assert.equal(calls.toast.at(-1)[1], 'error');
   assert.match(calls.toast.at(-1)[0], /plant is read-only|jobs\.toast_save_failed/);
   assert.equal(JobsDialog._state().busy, false);
 });
@@ -173,4 +173,33 @@ test('copy to plants creates one job (schedule inline) per ticked plant and repo
   assert.equal(calls.toast.at(-1)[1], 'warn');
   assert.deepEqual([...JobsDialog._state().targets], ['3000'], 'the failed plant stays ticked for a retry');
   assert.equal(calls.closed.length, 0);
+});
+
+test('a new job opens as a PROPOSAL, seeded from the server defaults; auto-apply is an explicit choice', () => {
+  JobsDialog.open({ plant: '1008' });
+  assert.equal(JobsDialog._state().form.result, 'propose');
+  JobsDialog.open({ plant: '1008', defaults: { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' } });
+  const f = JobsDialog._state().form;
+  assert.deepEqual([f.mode, f.search, f.respectFirmed, f.result], ['spt', 'normal', false, 'propose']);
+  assert.match(bodyHtml(defaultJobForm('1008'), 'new', true), /<option value="propose" selected>/);
+});
+
+test('Escape / X: a clean form closes at once, a dirty one asks first and stays open on Cancel', async () => {
+  const asked = [];
+  const confirm = Modal.confirm;
+  let answer = false;
+  Modal.confirm = async o => { asked.push(o); return answer; };
+  try {
+    JobsDialog.open({ plant: '1008' });          // nothing edited (the stub renders no fields, so read-back equals the baseline)
+    await JobsDialog.requestClose();
+    assert.equal(asked.length, 0); assert.deepEqual(calls.closed, ['modal-job-edit']);
+    calls.closed.length = 0;
+    JobsDialog.open({ plant: '1008' });
+    fillForm({ 'jb-name': 'half typed' });
+    await JobsDialog.requestClose();
+    assert.equal(asked.length, 1); assert.equal(calls.closed.length, 0, 'Cancel keeps the form');
+    answer = true;
+    await JobsDialog.requestClose();
+    assert.deepEqual(calls.closed, ['modal-job-edit']);
+  } finally { Modal.confirm = confirm; }
 });

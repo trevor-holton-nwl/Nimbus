@@ -8166,7 +8166,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
   .job-copy-list { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
 }
 @media (max-width: 720px) {
-  .job-log-row { grid-template-columns: minmax(0, 1fr) 56px; }
+  .job-log-row { grid-template-columns: 56px minmax(0, 1fr); }
   .job-log-at, .job-log-dur { display: none; }
   .job-table th:nth-child(3), .job-table td:nth-child(3) { display: none; }
 }

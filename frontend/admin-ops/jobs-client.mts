@@ -188,7 +188,7 @@ export const JobsClient = {
   async getRun(runId: number): Promise<JobRun> { return normRun((((await _req('GET', `/jobs/runs/${runId}`)) as Raw).run) as Raw); },
 
   /** Lines after `afterSeq`; poll with `lastSeq` until `done`. */
-  async log(runId: number, o: { afterSeq?: number; level?: string }): Promise<LogPage> {
+  async log(runId: number, o: { afterSeq?: number; level?: string; limit?: number }): Promise<LogPage> {
     return normLog(await _req('GET', `/jobs/runs/${runId}/log${buildLogQuery(o)}`));
   },
 };

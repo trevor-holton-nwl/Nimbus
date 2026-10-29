@@ -23,6 +23,7 @@ import { JobsDialog, mkCombobox, allowedPlantList, jobsDeps, plantTimezone } fro
 import { JobsRunDetail } from './jobs-run-detail.mjs';
 import {
   RUN_STATUSES, JOBS_PAGE, statusBadgeHtml, recurrenceText, durationText, weekStrip, isoDayKey, addDays, plantWall, stripOffset,
+  mergeRuns, stripCompleteThrough,
 } from './jobs-model.mjs';
 import type { UpcomingRun } from './jobs-model.mjs';
 import type { UpcomingEntry } from './jobs-client.mjs';
@@ -45,6 +46,8 @@ let _jobs: Job[] = [];
 let _nextBeforeJob: number | null = null;
 let _runs: JobRun[] = [];
 let _nextBefore: number | null = null;
+let _runPages = 1;               // pages of the runs list loaded (the poll merges instead of replacing when > 1)
+let _upcomingRequested = 20;
 let _upcoming: UpcomingRun[] = [];
 let _stripPlant = '';
 let _runsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -60,13 +63,15 @@ const _visible = (): boolean => _active && !document.hidden && !!_el('admin-tab'
 /* ---------------------------------------------------------------------------
    Shared filter bar
    ------------------------------------------------------------------------- */
-function _plantFilterHtml(): string {
-  return `<div class="job-field job-plant-field"><span class="job-field-l">${esc(t('jobs.f_plant'))}</span><div id="jobs-plant-host"></div></div>`;
+// The three sub-views stay in the DOM side by side (only `hidden` toggles), so every control id is per view:
+// jobs-*, jobs-runs-*, jobs-up-*. A shared id would make getElementById answer with the first (hidden) copy.
+function _plantFilterHtml(prefix: string): string {
+  return `<div class="job-field job-plant-field"><span class="job-field-l">${esc(t('jobs.f_plant'))}</span><div id="${prefix}-plant-host"></div></div>`;
 }
 
-function _mountPlantCombo(onChange: () => void): void {
-  mkCombobox(_el('jobs-plant-host'), allowedPlantList(), {
-    value: _plant, placeholder: t('jobs.all_plants'), id: 'jobs-plant',
+function _mountPlantCombo(prefix: string, onChange: () => void): void {
+  mkCombobox(_el(`${prefix}-plant-host`), allowedPlantList(), {
+    value: _plant, placeholder: t('jobs.all_plants'), id: `${prefix}-plant`,
     onSelect: (v) => { _plant = v; onChange(); },
   });
 }
@@ -80,7 +85,7 @@ function _statusOptions(sel: string): string {
    Jobs sub-tab
    ------------------------------------------------------------------------- */
 function _jobsToolbarHtml(): string {
-  return `<div class="job-toolbar">${_plantFilterHtml()}`
+  return `<div class="job-toolbar">${_plantFilterHtml('jobs')}`
     + `<div class="job-field"><label class="job-field-l" for="jobs-type">${esc(t('jobs.f_type'))}</label><select class="input" id="jobs-type"><option value="">${esc(t('jobs.type_any'))}</option>`
     + _types.map(x => `<option value="${esc(x.key)}"${x.key === _type ? ' selected' : ''}>${esc(x.key === 'optimizer.plant' ? t('jobs.type_optimizer') : x.label)}</option>`).join('') + `</select></div>`
     + `<div class="job-field"><label class="job-field-l" for="jobs-status">${esc(t('jobs.f_last_run'))}</label><select class="input" id="jobs-status">${_statusOptions(_status)}</select></div>`
@@ -130,7 +135,7 @@ function _renderJobsTab(): void {
   const host = _el('jobs-view-jobs');
   if (!host) return;
   host.innerHTML = `${_jobsToolbarHtml()}<div id="jobs-table" aria-live="polite"></div>`;
-  _mountPlantCombo(() => void _loadJobs());
+  _mountPlantCombo('jobs', () => void _loadJobs());
   void _loadJobs();
 }
 
@@ -155,18 +160,18 @@ function _menuItems(j: Job): MenuItem[] {
 }
 
 async function _runNow(j: Job): Promise<void> {
-  try { await JobsClient.runNow(j.id); Toast.show(t('jobs.toast_run_started', { name: j.name }), 'ok'); void _loadJobs(); }
-  catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'err'); }
+  try { await JobsClient.runNow(j.id); Toast.show(t('jobs.toast_run_started', { name: j.name }), 'success'); void _loadJobs(); }
+  catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
 }
 async function _setEnabled(j: Job, enabled: boolean): Promise<void> {
   try { await JobsClient.setEnabled(j.id, enabled); void _loadJobs(); }
-  catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'err'); }
+  catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
 }
 async function _delete(j: Job): Promise<void> {
   const ok = await Modal.confirm({ title: t('jobs.confirm_delete', { name: j.name }), message: t('jobs.confirm_delete_msg'), confirmLabel: t('jobs.m_delete'), tone: 'danger' });
   if (!ok) return;
-  try { await JobsClient.remove(j.id); Toast.show(t('jobs.toast_deleted'), 'ok'); void _loadJobs(); }
-  catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'err'); }
+  try { await JobsClient.remove(j.id); Toast.show(t('jobs.toast_deleted'), 'success'); void _loadJobs(); }
+  catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); }
 }
 
 /* ---------------------------------------------------------------------------
@@ -188,15 +193,18 @@ function _runsListHtml(): string {
     + (_nextBefore != null ? `<div class="job-pager"><button type="button" class="btn btn-ghost sm" data-jobs-act="more-runs">${esc(t('jobs.load_more'))}</button></div>` : '');
 }
 
-async function _loadRuns(append = false): Promise<void> {
+/** 'replace' = a fresh first page (filters changed, Refresh); 'append' = Load more; 'refresh' = the poll: page 1 is
+ *  merged into what is loaded, so extra pages the viewer already pulled stay (and so does their cursor). */
+async function _loadRuns(mode: 'replace' | 'append' | 'refresh' = 'replace'): Promise<void> {
   const my = ++_seq;
   const host = _el('jobs-runs-list');
   if (!host) return;
   try {
-    const res = await JobsClient.runs({ plant: _plant, status: _status, beforeId: append ? _nextBefore : null });
+    const res = await JobsClient.runs({ plant: _plant, status: _status, beforeId: mode === 'append' ? _nextBefore : null });
     if (my !== _seq) return;
-    _runs = append ? [..._runs, ...res.items.filter(x => !_runs.some(y => y.id === x.id))] : res.items;
-    _nextBefore = res.nextBeforeId;
+    if (mode === 'append') { _runs = mergeRuns(_runs, res.items); _nextBefore = res.nextBeforeId; _runPages++; }
+    else if (mode === 'refresh' && _runPages > 1) _runs = mergeRuns(_runs, res.items);
+    else { _runs = res.items; _nextBefore = res.nextBeforeId; _runPages = 1; }
     host.innerHTML = _runsListHtml();
   } catch (e) {
     if (my === _seq) host.innerHTML = `<div class="empty-state job-empty" role="alert">${esc(t('jobs.load_failed', { msg: (e as Error).message }))}</div>`;
@@ -207,11 +215,11 @@ function _renderRunsTab(): void {
   const host = _el('jobs-view-runs');
   if (!host) return;
   JobsRunDetail.stop();
-  host.innerHTML = `<div id="jobs-runs-main"><div class="job-toolbar">${_plantFilterHtml()}`
-    + `<div class="job-field"><label class="job-field-l" for="jobs-status">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-status">${_statusOptions(_status)}</select></div>`
+  host.innerHTML = `<div id="jobs-runs-main"><div class="job-toolbar">${_plantFilterHtml('jobs-runs')}`
+    + `<div class="job-field"><label class="job-field-l" for="jobs-runs-status">${esc(t('jobs.col_status'))}</label><select class="input" id="jobs-runs-status">${_statusOptions(_status)}</select></div>`
     + `<button type="button" class="btn btn-ghost" data-jobs-act="refresh-runs">${esc(t('btn.refresh'))}</button></div>`
     + `<div id="jobs-runs-list" aria-live="polite"></div></div><div id="jobs-run-detail" hidden></div>`;
-  _mountPlantCombo(() => void _loadRuns());
+  _mountPlantCombo('jobs-runs', () => void _loadRuns());
   void _loadRuns();
   _armRunsPoll();
 }
@@ -222,7 +230,7 @@ function _armRunsPoll(): void {
   if (!_visible() || _tab !== 'runs') return;
   _runsTimer = setTimeout(() => {
     _runsTimer = null;
-    if (_visible() && _tab === 'runs' && !JobsRunDetail.isOpen()) void _loadRuns();
+    if (_visible() && _tab === 'runs' && !JobsRunDetail.isOpen()) void _loadRuns('refresh');
     _armRunsPoll();
   }, RUNS_POLL_MS);
 }
@@ -232,13 +240,14 @@ async function _openRun(id: number): Promise<void> {
   if (!main || !det) return;
   // The list row is the usual source; a run not in it (or not loaded yet) is read by id.
   let run = _runs.find(r => r.id === id);
-  if (!run) { try { run = await JobsClient.getRun(id); } catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'err'); return; } }
+  if (!run) { try { run = await JobsClient.getRun(id); } catch (e) { Toast.show(t('jobs.toast_action_failed', { msg: (e as Error).message }), 'error'); return; } }
   main.hidden = true; det.hidden = false;
   JobsRunDetail.show(det, run, {
     visible: _visible,
     tz: plantTimezone(run.plant),
-    onBack: () => { JobsRunDetail.stop(); det.hidden = true; main.hidden = false; void _loadRuns(); },
-    onChanged: () => { void JobsClient.runs({ plant: _plant, status: _status }).then(r => { const f = r.items.find(x => x.id === id); if (f) { _runs = r.items; } }).catch(() => undefined); },
+    onBack: () => { JobsRunDetail.stop(); det.hidden = true; main.hidden = false; void _loadRuns('refresh'); },
+    // The open run changed state: fold page 1 into the list (never replace it, later pages stay loaded).
+    onChanged: () => { void JobsClient.runs({ plant: _plant, status: _status }).then(r => { if (r.items.some(x => x.id === id)) _runs = mergeRuns(_runs, r.items); }).catch(() => undefined); },
   });
 }
 
@@ -258,7 +267,10 @@ async function _loadUpcoming(): Promise<void> {
   try {
     // One server call: GET /jobs/upcoming, soonest first across the viewer's visible jobs (a plant narrows it).
     // The 7-day strip needs the whole week, so a chosen plant asks for more entries than the list shows.
-    const entries: UpcomingEntry[] = await JobsClient.upcomingAll(_stripPlant, _stripPlant ? 50 : 20);
+    // The server caps the list at 50 soonest-first entries: a busy plant can fill it before the week ends, which
+    // the strip then says (stripCompleteThrough) instead of silently showing a short week.
+    _upcomingRequested = _stripPlant ? 50 : 20;
+    const entries: UpcomingEntry[] = await JobsClient.upcomingAll(_stripPlant, _upcomingRequested);
     if (my !== _seq) return;
     _upcoming = entries.map(e => ({ at: stripOffset(e.atLocal), jobId: e.jobId, jobName: e.jobName, plant: e.plant }));
     host.innerHTML = _upcomingHtml();
@@ -282,6 +294,10 @@ function _upcomingHtml(): string {
       + weekStrip(_upcoming, start).map(b => `<div class="job-strip-day" role="listitem"><div class="job-strip-h">${esc(Util.fmtDayLabelPref(b.day))}</div>`
         + (b.runs.length ? b.runs.map(r => `<div class="job-strip-run job-mono" title="${esc(r.jobName ?? '')}">${esc(Util._fmtTimePref(Util.parseDate(r.at) as Date))}</div>`).join('') : `<div class="job-strip-none">—</div>`)
         + `</div>`).join('') + `</div><div class="ape-hint">${esc(t('jobs.strip_note', { tz: plantTimezone(_stripPlant) || '—', end: addDays(start, 6) }))}</div>`;
+    const through = stripCompleteThrough(_upcoming, _upcomingRequested);
+    if (through && through < addDays(start, 6)) {
+      strip += `<div class="ape-hint" role="note">${esc(t('jobs.strip_truncated', { n: _upcomingRequested, day: through }))}</div>`;
+    }
   } else {
     strip = `<div class="ape-hint">${esc(t('jobs.strip_pick'))}</div>`;
   }
@@ -291,9 +307,9 @@ function _upcomingHtml(): string {
 function _renderUpcomingTab(): void {
   const host = _el('jobs-view-upcoming');
   if (!host) return;
-  host.innerHTML = `<div class="job-toolbar"><div class="job-field job-plant-field"><span class="job-field-l">${esc(t('jobs.f_plant'))}</span><div id="jobs-plant-host"></div></div></div><div id="jobs-upcoming-body"></div>`;
-  mkCombobox(_el('jobs-plant-host'), allowedPlantList(), {
-    value: _stripPlant, placeholder: t('jobs.pick_plant'), id: 'jobs-plant',
+  host.innerHTML = `<div class="job-toolbar">${_plantFilterHtml('jobs-up')}</div><div id="jobs-upcoming-body"></div>`;
+  mkCombobox(_el('jobs-up-plant-host'), allowedPlantList(), {
+    value: _stripPlant, placeholder: t('jobs.pick_plant'), id: 'jobs-up-plant',
     onSelect: (v) => { _stripPlant = v; void _loadUpcoming(); },
   });
   void _loadUpcoming();
@@ -335,9 +351,9 @@ function _wire(): void {
     const runRow = target.closest<HTMLElement>('[data-run-id]');
     if (runRow) { void _openRun(Number(runRow.dataset.runId)); return; }
     const act = target.closest<HTMLElement>('[data-jobs-act]')?.dataset.jobsAct;
-    if (act === 'new') JobsDialog.open({ plant: _plant, onSaved: () => void _loadJobs() });
+    if (act === 'new') JobsDialog.open({ plant: _plant, defaults: _types.find(x => x.key === 'optimizer.plant')?.defaults, onSaved: () => void _loadJobs() });
     else if (act === 'more-jobs') void _loadJobs(true);
-    else if (act === 'more-runs') void _loadRuns(true);
+    else if (act === 'more-runs') void _loadRuns('append');
     else if (act === 'refresh-runs') void _loadRuns();
     else if (act === 'runs-of') { const j = _jobs.find(x => x.id === Number((target.closest<HTMLElement>('[data-job-id]'))?.dataset.jobId)); if (j) _gotoRuns(j); }
   });
@@ -349,7 +365,8 @@ function _wire(): void {
     const id = (e.target as HTMLElement).id;
     const v = (e.target as HTMLSelectElement).value;
     if (id === 'jobs-type') { _type = v; void _loadJobs(); }
-    else if (id === 'jobs-status') { _status = v; if (_tab === 'runs') void _loadRuns(); else void _loadJobs(); }
+    else if (id === 'jobs-status') { _status = v; void _loadJobs(); }
+    else if (id === 'jobs-runs-status') { _status = v; void _loadRuns(); }
   });
   pane.addEventListener('input', (e) => {
     if ((e.target as HTMLElement).id !== 'jobs-q') return;
@@ -358,7 +375,7 @@ function _wire(): void {
     _qTimer = setTimeout(() => void _loadJobs(), 250);
   });
   document.addEventListener('visibilitychange', () => {
-    if (_active && _tab === 'runs' && !document.hidden) { void _loadRuns(); _armRunsPoll(); JobsRunDetail.resume(); }
+    if (_active && _tab === 'runs' && !document.hidden) { void _loadRuns('refresh'); _armRunsPoll(); JobsRunDetail.resume(); }
   });
 }
 
@@ -375,6 +392,9 @@ export const JobsAdmin = {
     if (!_types.length) { try { _types = await JobsClient.types(); } catch { /* the type filter just stays at Any */ } }
     _setTab(_tab);
   },
+
+  /** Test seam: switch the sub-view the way a tab click does. */
+  _setTab(tab: SubTab): void { _setTab(tab); },
 
   setActive(on: boolean): void {
     _active = on;

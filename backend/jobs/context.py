@@ -60,6 +60,14 @@ class JobContext:
         self._last_flush = 0.0
         self.truncated = False
         self.timed_out = False
+        # A job type that queues for a shared resource (the optimizer slot) keeps the hard-timeout clock stopped
+        # until it actually has the resource: the runner sets `defer_clock`, the body calls `begin_work()`.
+        self.defer_clock = False
+        self.work_started = threading.Event()
+
+    def begin_work(self) -> None:
+        """The body holds its resource now: the run's hard-timeout clock starts (a no-op unless deferred)."""
+        self.work_started.set()
 
     # ---- cancellation -------------------------------------------------------------------------------
     @property

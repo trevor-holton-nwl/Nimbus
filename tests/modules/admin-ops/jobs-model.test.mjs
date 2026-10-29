@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   statusBadgeClass, statusBadgeHtml, isActiveRun, recurrenceToScheduleIn, scheduleToRecurrence, cronProse, isValidCronShape, parseTime,
   recurrenceText, buildJobsQuery, buildRunsQuery, buildLogQuery, plantWall, stripOffset, dowLabelKey, durationText, stepSegments, resultTiles,
-  weekStrip, addDays, isoDayKey, defaultJobForm, validateJobForm, buildJobPayload, jobToForm, defaultRecurrence,
+  weekStrip, addDays, isoDayKey, mergeRuns, stripCompleteThrough, LOG_PAGE, defaultJobForm, validateJobForm, buildJobPayload, jobToForm, defaultRecurrence,
 } from '../../../frontend/admin-ops/jobs-model.mjs';
 
 const EN = {
@@ -170,13 +170,35 @@ test('weekStrip buckets naive ISO runs into 7 plant days from the text, ignoring
   assert.equal(days[6].runs.length, 1, 'day 7 included, day 8 and yesterday dropped');
 });
 
+test('a new job is seeded from the server defaults where valid; anything else falls back, and the result stays a proposal', () => {
+  const seeded = defaultJobForm('1008', 'optimizer.plant', { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' });
+  assert.deepEqual([seeded.mode, seeded.search, seeded.respectFirmed, seeded.result], ['spt', 'normal', false, 'propose']);
+  const junk = defaultJobForm('1008', 'optimizer.plant', { mode: 'backlog', search: 7, apply_mode: 'yolo' });
+  assert.deepEqual([junk.mode, junk.search, junk.respectFirmed, junk.result], ['due_date', 'exhaustive', true, 'propose']);
+  assert.equal(defaultJobForm('1008', 'optimizer.plant', {}).result, 'propose');
+});
+
+test('mergeRuns folds page 1 into loaded pages (newest first, later pages kept); buildLogQuery can ask for a big page', () => {
+  const loaded = [{ id: 90, s: 'x' }, { id: 60, s: 'a' }, { id: 59, s: 'a' }];
+  const merged = mergeRuns(loaded, [{ id: 95, s: 'new' }, { id: 90, s: 'done' }]);
+  assert.deepEqual(merged.map(r => [r.id, r.s]), [[95, 'new'], [90, 'done'], [60, 'a'], [59, 'a']]);
+  assert.equal(buildLogQuery({ afterSeq: 0, limit: LOG_PAGE }), '?after_seq=0&limit=2000');
+});
+
+test('stripCompleteThrough: null while the list is short of its cap, else the last returned day', () => {
+  const runs = [{ at: '2026-11-02T08:00:00' }, { at: '2026-11-03T08:00:00' }, { at: '2026-11-03T20:00:00' }];
+  assert.equal(stripCompleteThrough(runs, 4), null);
+  assert.equal(stripCompleteThrough(runs, 3), '2026-11-03');
+  assert.equal(stripCompleteThrough([], 0), null);
+});
+
 const ok = { isAdmin: true, plants: null };
 const good = () => ({ ...defaultJobForm('1008'), name: 'Morning optimize' });
 
-test('defaults: 08:00 daily, Exhaustive, apply automatically (owner decision)', () => {
+test('defaults: 08:00 daily, Exhaustive, and the result is a PROPOSAL (auto-apply is an explicit opt-in)', () => {
   const f = defaultJobForm('1008');
   assert.equal(f.recur.preset, 'daily'); assert.equal(f.recur.time, '08:00');
-  assert.equal(f.search, 'exhaustive'); assert.equal(f.result, 'apply');
+  assert.equal(f.search, 'exhaustive'); assert.equal(f.result, 'propose');
   assert.deepEqual(validateJobForm(good(), ok), {});
 });
 
@@ -185,7 +207,8 @@ test('validateJobForm: name, plant scope, result gate, recurrence fields and val
   assert.equal(validateJobForm({ ...good(), name: 'x'.repeat(81) }, ok).name, 'jobs.err_name_long');
   assert.equal(validateJobForm({ ...good(), plant: '' }, ok).plant, 'jobs.err_plant');
   assert.equal(validateJobForm(good(), { isAdmin: true, plants: ['2000'] }).plant, 'jobs.err_plant_scope');
-  assert.equal(validateJobForm(good(), { isAdmin: false, plants: null }).result, 'jobs.err_apply_admin');
+  assert.equal(validateJobForm({ ...good(), result: 'apply' }, { isAdmin: false, plants: null }).result, 'jobs.err_apply_admin');
+  assert.equal(validateJobForm(good(), { isAdmin: false, plants: null }).result, undefined, 'the default (propose) needs no admin');
   assert.equal(validateJobForm({ ...good(), result: 'propose' }, { isAdmin: false, plants: null }).result, undefined);
   assert.equal(validateJobForm({ ...good(), mode: 'remove-backlog' }, ok).mode, 'jobs.err_mode');
   assert.equal(validateJobForm({ ...good(), mode: 'due-date' }, ok).mode, 'jobs.err_mode', 'the backend names are due_date / min_changeover / spt');
@@ -201,7 +224,7 @@ test('validateJobForm: name, plant scope, result gate, recurrence fields and val
 });
 
 test('buildJobPayload: backend job params (apply_mode explicit) and a preset ScheduleIn, trimmed name, no zone', () => {
-  const p = buildJobPayload({ ...good(), name: '  Morning optimize ', validFrom: '2026-11-01' });
+  const p = buildJobPayload({ ...good(), result: 'apply', name: '  Morning optimize ', validFrom: '2026-11-01' });
   assert.deepEqual(p.job, {
     name: 'Morning optimize', plant: '1008', job_type: 'optimizer.plant',
     params: { mode: 'due_date', search: 'exhaustive', respect_firmed: true, apply_mode: 'apply' },

@@ -89,6 +89,8 @@ def client(monkeypatch):
     runs = {42: _run_row(), 43: _run_row(id=43, status="running", ended_at=None)}
     monkeypatch.setattr(data, "plant_timezone", lambda plant: "America/New_York")
     monkeypatch.setattr(data, "plant_exists", lambda plant: True)
+    monkeypatch.setattr(data, "plant_has_timezone", lambda plant: plant != "NOTZ")
+    monkeypatch.setattr(data, "has_active_run", lambda jid: False)
     monkeypatch.setattr(data, "get_job", lambda jid: jobs.get(jid))
     monkeypatch.setattr(data, "get_schedule", lambda sid: _sched_row() if sid == 11 else None)
     monkeypatch.setattr(data, "list_jobs", lambda **kw: {"jobs": list(jobs.values()), "next_before_id": 4})
@@ -174,3 +176,17 @@ def test_log_page_stops_on_done(client):
     assert body["done"] is True, "warning is terminal, so done tells the client to stop polling"
     running = client.get("/jobs/runs/43/log?after_seq=1").json()
     assert running["done"] is False and running["status"] == "running"
+
+
+def test_run_now_conflicts_while_a_run_is_active(client, monkeypatch):
+    monkeypatch.setattr(data, "has_active_run", lambda jid: True)
+    r = client.post("/jobs/5/run")
+    assert r.status_code == 409 and "already" in r.json()["detail"]
+
+
+def test_optimizer_schedule_for_a_plant_without_timezone_is_refused(client):
+    body = {"plant": "NOTZ", "job_type": "optimizer.plant", "name": "n", "params": {}, "schedules": [SCHEDULE_BODY]}
+    r = client.post("/jobs", json=body)
+    assert r.status_code == 400 and "timezone" in r.json()["detail"]
+    assert client.post("/jobs", json={**body, "schedules": []}).status_code == 200, "a job without a schedule is fine"
+    assert client.post("/jobs/schedules/preview", json={"plant": "NOTZ", "n": 2, **SCHEDULE_BODY}).status_code == 200

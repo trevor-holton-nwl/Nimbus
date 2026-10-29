@@ -43,6 +43,10 @@ export interface RunParams {
   plantTimezone?: string;
   /** The server's instant, ISO-8601 with zone: the one clock. */
   serverNow: string;
+  /** Apply phase only: the server's instant when the LIVE bundle was read. The live snapshot, its derived starts and
+   *  the "has it started running since" test use this clock; `serverNow` stays the run's clock and only rebuilds the
+   *  run snapshot. Defaults to `serverNow` (same-instant callers, tests). */
+  liveServerNow?: string;
   /** Planning horizon in days from now; default 28 (the Optimize dialog's default window). */
   horizonDays?: number;
   lines?: string[];
@@ -110,7 +114,7 @@ interface RunState {
 const isoOr = (value: Date | null | undefined): string | null => (value && Number.isFinite(value.getTime()) ? value.toISOString() : null);
 
 /** Install the compute core, the zone, the optional fake clock and the DOM stubs the engine's guards read. */
-async function bootstrapRuntime(params: Pick<RunParams, 'plantTimezone' | 'serverNow' | 'fakeClock'>, tzFromRow: string | null, warn: (msg: string) => void): Promise<void> {
+async function bootstrapRuntime(params: Pick<RunParams, 'plantTimezone' | 'serverNow' | 'fakeClock'>, tzFromRow: string | null): Promise<string | null> {
   const g = globalThis as unknown as Record<string, unknown> & { performance: { now(): number } };
   if (!g.NimbusComputeCore) {
     const { createRequire } = (await import('node:module' as string)) as { createRequire(url: string): (id: string) => unknown };
@@ -118,15 +122,31 @@ async function bootstrapRuntime(params: Pick<RunParams, 'plantTimezone' | 'serve
   }
   const wanted = params.plantTimezone || tzFromRow;
   if (!process.env.TZ && wanted) process.env.TZ = wanted;
-  else if (process.env.TZ && wanted && process.env.TZ !== wanted) {
-    warn(`process TZ ${process.env.TZ} differs from the plant timezone ${wanted}`);
-  }
   if (typeof g.window === 'undefined') g.window = {};
   if (typeof g.document === 'undefined') g.document = { getElementById: () => null };
   if (params.fakeClock) {
     const fixed = new Date(params.serverNow).getTime();
     Date.now = (): number => fixed;
     Object.defineProperty(g.performance, 'now', { value: (): number => 0, configurable: true, writable: true });
+  }
+  return timezoneMismatch(wanted);
+}
+
+/** The engine reads naive plant wall-clock values through local Date getters, so a process zone that is not the
+ *  plant's zone silently shifts every date: the run is refused, not warned. Compared through canonical IANA names
+ *  (an alias such as US/Central is not a mismatch); the zone Node actually resolved counts, not the env string. */
+function timezoneMismatch(wanted: string | null): string | null {
+  if (!wanted) return null;
+  try {
+    const canonical = (zone?: string): string => new Intl.DateTimeFormat('en-US', zone ? { timeZone: zone } : {}).resolvedOptions().timeZone;
+    const actual = canonical();
+    const expected = canonical(wanted);
+    // Runtimes spell UTC several ways; those are one zone.
+    const utc = (name: string): boolean => /^(UTC|Etc\/UTC|Etc\/GMT|GMT|Etc\/Universal|Universal|Zulu)$/.test(name);
+    if (actual === expected || (utc(actual) && utc(expected))) return null;
+    return `process timezone ${actual} differs from the plant timezone ${wanted}`;
+  } catch {
+    return `timezone ${wanted} is not valid`;
   }
 }
 
@@ -155,7 +175,8 @@ export async function runOptimizer(input: RunInput, sink: LogSink = () => undefi
   const tz = params.plantTimezone || plantTimezoneOf(wire, plant);
   if (!tz) return failure('plant_no_timezone', `plant ${plant} has no timezone`, log);
 
-  await bootstrapRuntime(params, tz, msg => emit('warn', 'bootstrap', msg));
+  const tzProblem = await bootstrapRuntime(params, tz);
+  if (tzProblem) { emit('error', 'bootstrap', tzProblem); return failure('tz_mismatch', tzProblem, log); }
   const { buildScheduleSnapshot } = await import('./headless-snapshot.mjs');
   const { deriveDisplayStarts, quiesceStore } = await import('./headless-runtime.mjs');
   const { patchesToUpdateItems } = await import('./headless-writer.mjs');
@@ -271,8 +292,10 @@ export async function planApplyFromState(input: ApplyInput, sink: LogSink = () =
   };
   const state = decodeTagged(input.state) as RunState;
   const serverNow = new Date(input.params.serverNow);
+  const liveNow = new Date(input.params.liveServerNow ?? input.params.serverNow);
   const tz = input.params.plantTimezone || plantTimezoneOf(input.runWire, input.plant) || '';
-  await bootstrapRuntime(input.params, tz, msg => emit('warn', 'bootstrap', msg));
+  const tzProblem = await bootstrapRuntime(input.params, tz || null);
+  if (tzProblem) emit('error', 'bootstrap', tzProblem);
   const { buildScheduleSnapshot } = await import('./headless-snapshot.mjs');
   const { deriveDisplayStarts, quiesceStore } = await import('./headless-runtime.mjs');
   const { patchesToUpdateItems, planApply, buildApplyBody } = await import('./headless-writer.mjs');
@@ -283,6 +306,9 @@ export async function planApplyFromState(input: ApplyInput, sink: LogSink = () =
     ok: false, refusal, apply: [], dropped: [], findings: [], body: null,
     versions: { calendar_changed: false, tool_inventory_changed: false }, log, ...extra,
   });
+  if (tzProblem) return empty('tz_mismatch');
+  if (!tz) return empty('plant_no_timezone');
+  if (!Number.isFinite(serverNow.getTime()) || !Number.isFinite(liveNow.getTime())) return empty('invalid_server_now');
   // The run's own bundle gives the run snapshot back exactly (same builder, same derivation, same clock).
   const runSnapshot: ScheduleSnapshot = deriveDisplayStarts(
     buildScheduleSnapshot(input.runWire, { plant: input.plant, serverNow }), { plant: input.plant, serverNow });
@@ -298,11 +324,13 @@ export async function planApplyFromState(input: ApplyInput, sink: LogSink = () =
   if (versions.calendar_changed) { emit('warn', 'guard', 'plant calendar changed since the run'); return empty('calendar_changed', { versions }); }
   if (versions.tool_inventory_changed) { emit('warn', 'guard', 'tool inventory changed since the run'); return empty('tool_inventory_changed', { versions }); }
 
+  // The live board is read at the live clock: an order that started running since the run must read as running.
   const liveSnapshot = deriveDisplayStarts(
-    buildScheduleSnapshot(input.liveWire, { plant: input.plant, serverNow }), { plant: input.plant, serverNow });
+    buildScheduleSnapshot(input.liveWire, { plant: input.plant, serverNow: liveNow }), { plant: input.plant, serverNow: liveNow });
   const core = (globalThis as unknown as { NimbusComputeCore: { plantWallClockFromInstant(tz: string, d: Date): Date | null } }).NimbusComputeCore;
-  const now = core.plantWallClockFromInstant(tz, serverNow) ?? serverNow;
-  const plan = planApply({ candidate, runSnapshot, liveSnapshot, now });
+  const now = core.plantWallClockFromInstant(tz, liveNow);
+  if (!now) return empty('plant_no_timezone');
+  const plan = planApply({ plant: input.plant, candidate, runSnapshot, liveSnapshot, now });
   emit(plan.ok ? 'info' : 'warn', 'guard', `apply ${plan.apply.length} of ${candidate.patches.length} patches, dropped ${plan.dropped.length}`,
     { dropped: plan.dropped.map(d => `${d.id}:${d.reason}`) });
   // Items carry the LIVE row version: that is the token the server compares, and a changed row was dropped above.

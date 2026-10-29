@@ -89,15 +89,53 @@ export interface ApplyPlan {
   refusal?: string;
 }
 
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v) => {
+    if (v instanceof Date) return v.toISOString();
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      return Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+    }
+    return v;
+  });
+}
+
+/** The first plant-level input that differs between the run's snapshot and the live one, or null. `stale_candidate`
+ *  (the validator's whole-snapshot diff) is deliberately not used for this: it also fires on every planner save, which
+ *  the per-row guard already handles. What the per-row guard cannot see are inputs that belong to no order: the plant
+ *  row (timezone, frozen horizon, order rules, setup policy), this plant's machine and work-center master rows, its
+ *  tool inventory rows and the calendar tables (own-hours lines, plant hours and periods, blackouts). The server's
+ *  `calendar_version` covers only the calendar tables; the rest is compared here. The rolling frozen horizon end
+ *  moves with the clock by design and is excluded. */
+export function plantInputsDiff(runSnapshot: ScheduleSnapshot, liveSnapshot: ScheduleSnapshot, plant: string): string | null {
+  const master = (snapshot: ScheduleSnapshot): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const [key, rows] of Object.entries((snapshot.masterData ?? {}) as unknown as Record<string, unknown>)) {
+      out[key] = Array.isArray(rows)
+        ? rows.filter(row => !row || typeof row !== 'object' || (row as { plant?: unknown }).plant === undefined || String((row as { plant?: unknown }).plant) === plant)
+        : rows;
+    }
+    return out;
+  };
+  const ownLines = (snapshot: ScheduleSnapshot): unknown =>
+    Object.fromEntries(Object.entries(snapshot.calendars).filter(([, entry]) => !entry.inherited));
+  const parts: Array<[string, (snapshot: ScheduleSnapshot) => unknown]> = [
+    ['master_data', master], ['plant_calendar', snapshot => snapshot.plants], ['line_calendars', ownLines],
+    ['blackouts', snapshot => snapshot.blocks], ['plant_blackouts', snapshot => snapshot.plantBlocks],
+  ];
+  for (const [name, pick] of parts) if (canonicalJson(pick(runSnapshot)) !== canonicalJson(pick(liveSnapshot))) return name;
+  return null;
+}
+
 /** Plan a stale-safe apply. `runSnapshot` is the snapshot the run optimized; `liveSnapshot` is built (and derived)
  *  from a freshly fetched bundle; `candidate` must carry its `validationContext`; `now` is the plant's wall clock. */
 export function planApply(args: {
+  plant: string;
   candidate: CandidateResult;
   runSnapshot: ScheduleSnapshot;
   liveSnapshot: ScheduleSnapshot;
   now: Date;
 }): ApplyPlan {
-  const { candidate, runSnapshot, liveSnapshot, now } = args;
+  const { plant, candidate, runSnapshot, liveSnapshot, now } = args;
   const patches = candidate.patches;
   const runById = new Map(runSnapshot.tasks.map(task => [String(task.id), task]));
   const liveById = new Map(liveSnapshot.tasks.map(task => [String(task.id), task]));
@@ -105,16 +143,19 @@ export function planApply(args: {
     task?.PARENT_ORDER ? `${task.PARENT_ORDER}\u0000${task.MATERIAL_NUMBER ?? ''}` : null;
 
   const dropped = new Map<string, DropReason>();
-  const familyOf = new Map<string, string[]>();
-  for (const patch of patches) {
-    const id = String(patch.id);
-    const key = parentKey(runById.get(id) ?? liveById.get(id));
-    if (key) familyOf.set(key, [...(familyOf.get(key) ?? []), id]);
+  // A distribution family is every order sharing PARENT_ORDER + MATERIAL_NUMBER, in the run AND the live board (a
+  // sibling the run did not patch, or one that appeared since, still belongs to it). The patched members of a family
+  // go together: when any member changed, vanished or is running, every patched member is dropped.
+  const patched = new Set(patches.map(patch => String(patch.id)));
+  const familyOf = new Map<string, Set<string>>();
+  for (const task of [...runSnapshot.tasks, ...liveSnapshot.tasks]) {
+    const key = parentKey(task);
+    if (key) { const set = familyOf.get(key) ?? new Set<string>(); set.add(String(task.id)); familyOf.set(key, set); }
   }
   const dropWithFamily = (id: string, reason: DropReason): void => {
     if (!dropped.has(id)) dropped.set(id, reason);
     const key = parentKey(runById.get(id) ?? liveById.get(id));
-    if (key) for (const sibling of familyOf.get(key) ?? []) if (!dropped.has(sibling)) dropped.set(sibling, 'family');
+    if (key) for (const sibling of familyOf.get(key) ?? []) if (patched.has(sibling) && !dropped.has(sibling)) dropped.set(sibling, 'family');
   };
 
   for (const patch of patches) {
@@ -126,12 +167,26 @@ export function planApply(args: {
     if ((live.row_version ?? null) !== (ran?.row_version ?? null)) { dropWithFamily(id, 'row_version_changed'); continue; }
     if (Engine.isInProgress(live, now)) dropWithFamily(id, 'running');
   }
+  // A family member the run did NOT patch can also have changed, vanished or started running since.
+  for (const members of familyOf.values()) {
+    const first = [...members].find(id => patched.has(id));
+    if (!first) continue;
+    for (const id of members) {
+      if (patched.has(id)) continue;
+      const live = liveById.get(id); const ran = runById.get(id);
+      if (!live || !ran || (live.row_version ?? null) !== (ran.row_version ?? null) || Engine.isInProgress(live, now)) {
+        dropWithFamily(first, 'family');
+      }
+    }
+  }
 
   const context = candidate.validationContext;
   const refuse = (refusal: string): ApplyPlan => ({
     apply: [], dropped: [...dropped].map(([id, reason]) => ({ id, reason })), findings: [], ok: false, refusal,
   });
   if (!context) return refuse('no_validation_context');
+  const inputsChanged = plantInputsDiff(runSnapshot, liveSnapshot, plant);
+  if (inputsChanged) return refuse(`inputs_changed:${inputsChanged}`);
 
   const keyOf = (finding: ValidationFinding): string => `${finding.code}|${finding.taskId}|${finding.message}`;
   const errorsFor = (set: SchedulePatch[]): ValidationFinding[] => {

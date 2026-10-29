@@ -133,6 +133,21 @@ def plant_timezone(plant: str) -> str:
     return (row[0] if row and row[0] else "UTC").strip()
 
 
+def plant_has_timezone(plant: str) -> bool:
+    """True when the plant row carries its own timezone (plant_timezone() falls back to UTC for a blank one)."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT MIN(NULLIF(timezone, '')) FROM plants WHERE plant = %s", (plant,))
+        row = cur.fetchone()
+    return bool(row and row[0] and str(row[0]).strip())
+
+
+def has_active_run(job_id: int) -> bool:
+    """A non-terminal (scheduled or running) run exists for the job."""
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM job_run WHERE job_id = %s AND status IN ('scheduled','running') LIMIT 1", (job_id,))
+        return cur.fetchone() is not None
+
+
 def plant_exists(plant: str) -> bool:
     with db._pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM plants WHERE plant = %s LIMIT 1", (plant,))

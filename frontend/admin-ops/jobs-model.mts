@@ -210,8 +210,19 @@ export function buildRunsQuery(o: RunsQuery): string {
   return _qs([['plant', o.plant], ['status', o.status], ['job_id', o.jobId], ['before_id', o.beforeId], ['limit', limit]]);
 }
 
-export function buildLogQuery(o: { afterSeq?: number | null; level?: string }): string {
-  return _qs([['after_seq', o.afterSeq ?? 0], ['level', o.level && o.level !== 'all' ? o.level : null]]);
+/** The server's log page is 500 lines by default and 2000 at most; the viewer asks for the most so it pages less. */
+export const LOG_PAGE = 2000;
+
+export function buildLogQuery(o: { afterSeq?: number | null; level?: string; limit?: number }): string {
+  return _qs([['after_seq', o.afterSeq ?? 0], ['level', o.level && o.level !== 'all' ? o.level : null], ['limit', o.limit ?? null]]);
+}
+
+/** Runs list: page 1 read again by the poll merged into whatever is already loaded (later pages stay), newest id first. */
+export function mergeRuns<T extends { id: number }>(existing: T[], firstPage: T[]): T[] {
+  const byId = new Map<number, T>();
+  for (const r of existing) byId.set(r.id, r);
+  for (const r of firstPage) byId.set(r.id, r);
+  return [...byId.values()].sort((a, b) => b.id - a.id);
 }
 
 /* ---------------------------------------------------------------------------
@@ -353,6 +364,13 @@ export function weekStrip(runs: UpcomingRun[], startDay: string): StripDay[] {
   return days;
 }
 
+/** `GET /jobs/upcoming` is soonest-first and capped at `requested` entries. When the cap was reached the week may be
+ *  incomplete: returns the day (of the last entry returned) up to which the list is complete, else null. */
+export function stripCompleteThrough(runs: UpcomingRun[], requested: number): string | null {
+  if (runs.length < requested || !runs.length) return null;
+  return isoDayKey(runs[runs.length - 1].at) || null;
+}
+
 /* ---------------------------------------------------------------------------
    Job form: shape, validation, payload
    ------------------------------------------------------------------------- */
@@ -376,10 +394,19 @@ export interface JobForm {
   skipIfRunning: boolean;
 }
 
-export function defaultJobForm(plant = '', jobType = 'optimizer.plant'): JobForm {
+/** A new job starts from the server's own parameter defaults (`GET /jobs/types` -> `defaults`) where they are valid
+ *  choices; anything missing or unknown falls back to the product defaults. The result is always a PROPOSAL unless
+ *  the server says otherwise: automatic apply is an explicit admin opt-in per job (owner ruling 2026-10-28). */
+export function defaultJobForm(plant = '', jobType = 'optimizer.plant', defaults: Record<string, unknown> | null = null): JobForm {
+  const pick = (value: unknown, allowed: readonly string[], fallback: string): string =>
+    (typeof value === 'string' && allowed.includes(value) ? value : fallback);
   return {
-    jobType, name: '', plant, mode: 'due_date', search: 'exhaustive', respectFirmed: true,
-    result: 'apply', recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true,
+    jobType, name: '', plant,
+    mode: pick(defaults?.mode, JOB_MODES, 'due_date'),
+    search: pick(defaults?.search, JOB_SEARCHES, 'exhaustive'),
+    respectFirmed: defaults?.respect_firmed !== false,
+    result: pick(defaults?.apply_mode, JOB_RESULTS, 'propose'),
+    recur: defaultRecurrence(), validFrom: '', validUntil: '', skipIfRunning: true,
   };
 }
 
@@ -437,7 +464,7 @@ export function jobToForm(job: {
   name?: string; plant?: string; job_type?: string; params?: Record<string, unknown> | null;
   schedule?: (ScheduleWire & { valid_from?: string | null; valid_until?: string | null; skip_if_running?: boolean | null }) | null;
 }): JobForm {
-  const base = defaultJobForm(job.plant ?? '', job.job_type ?? 'optimizer.plant');
+  const base = defaultJobForm(job.plant ?? '', job.job_type ?? 'optimizer.plant');   // a saved job always carries its own params
   const p = job.params ?? {};
   const s = job.schedule;
   return {

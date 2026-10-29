@@ -7,8 +7,10 @@ plus a daily run-history retention sweep and a +90 s boot sweep.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.events import EVENT_JOB_MISSED
@@ -30,11 +32,16 @@ def _sig(r: dict) -> tuple:
             r["day_of_month"], r["run_at"], r["timezone"], r["valid_from"], r["valid_until"], r["misfire_grace_s"])
 
 
+# Scheduled fires block for the whole run (minutes), so they get their own bounded pool: on the shared anyio
+# threadpool, a 50-plant 08:00 would take every worker the UI API needs. Surplus fires queue here, not there.
+FIRE_WORKERS = 6
+_FIRE_POOL = ThreadPoolExecutor(max_workers=FIRE_WORKERS, thread_name_prefix="job-fire")
+
+
 async def _fire(schedule_id: int) -> None:
-    """APScheduler job body. Offloads the blocking run to the threadpool; never raises."""
-    from fastapi.concurrency import run_in_threadpool
+    """APScheduler job body. Offloads the blocking run to the dedicated fire pool; never raises."""
     try:
-        await run_in_threadpool(runner.fire_schedule, schedule_id)
+        await asyncio.get_running_loop().run_in_executor(_FIRE_POOL, runner.fire_schedule, schedule_id)
     except Exception as exc:  # noqa: BLE001
         _log_event("error", "jobs", "scheduled job fire raised", exc=exc, schedule_id=schedule_id)
 
@@ -106,12 +113,26 @@ def _on_missed(event) -> None:
 
 
 def install(scheduler) -> None:
-    """Wire the jobs domain into an (unstarted) AsyncIOScheduler."""
-    from backend.jobs.types import optimizer, optimizer_runner
-    optimizer.set_runner(optimizer_runner.run_optimizer)
-    swept = data.boot_sweep()
-    if swept:
-        _log_event("warn", "jobs", "marked interrupted job runs failed on boot", count=swept)
+    """Wire the jobs domain into an (unstarted) AsyncIOScheduler. Never raises: brain.py's scheduler try block
+    would otherwise skip `scheduler.start()` and take the SAP and sweep jobs down with it."""
+    try:
+        _install(scheduler)
+    except Exception as exc:  # noqa: BLE001
+        _log_event("error", "jobs", "job scheduler install failed; scheduled jobs are not armed", exc=exc)
+
+
+def _install(scheduler) -> None:
+    try:
+        from backend.jobs.types import optimizer, optimizer_runner
+        optimizer.set_runner(optimizer_runner.run_optimizer)
+    except Exception as exc:  # noqa: BLE001 - an unwired optimizer fails its runs clearly; nothing else is affected
+        _log_event("error", "jobs", "optimizer runner could not be wired", exc=exc)
+    try:
+        swept = data.boot_sweep()
+        if swept:
+            _log_event("warn", "jobs", "marked interrupted job runs failed on boot", count=swept)
+    except Exception as exc:  # noqa: BLE001
+        _log_event("error", "jobs", "job boot sweep failed", exc=exc)
     try:
         res = reconcile(scheduler)
         _log_event("info", "jobs", "job schedules armed", **res)

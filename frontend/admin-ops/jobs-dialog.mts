@@ -116,6 +116,8 @@ interface DialogState {
   targets: Set<string>;
   filter: string;
   busy: boolean;
+  /** JSON of the form as opened; Escape / X ask before discarding when the live form differs. */
+  baseline: string;
   previewSeq: number;
   previewTimer: ReturnType<typeof setTimeout> | null;
   onSaved: (() => void) | null;
@@ -323,8 +325,8 @@ function _wire(): void {
     if (act === 'cancel') JobsDialog.close();
     else if (act === 'save') void JobsDialog.submit();
   });
-  _el('jb-close')?.addEventListener('click', () => JobsDialog.close());
-  shell.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) JobsDialog.close(); });
+  _el('jb-close')?.addEventListener('click', () => void JobsDialog.requestClose());
+  shell.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) void JobsDialog.requestClose(); });
 }
 
 function _copyCount(): void {
@@ -342,13 +344,14 @@ function _show(title: string): void {
 
 export const JobsDialog = {
   /** `job` edits it; `duplicate` seeds a new job from it (name cleared, same plant). */
-  open(opts: { job?: Job; duplicate?: boolean; plant?: string; onSaved?: () => void }): void {
+  open(opts: { job?: Job; duplicate?: boolean; plant?: string; defaults?: Record<string, unknown>; onSaved?: () => void }): void {
     if (!Session.isAdmin()) return;
     const { job, duplicate } = opts;
     const mode: DialogMode = job && !duplicate ? 'edit' : 'new';
-    const form = job ? jobToForm(job) : defaultJobForm(opts.plant ?? '');
+    // A new job is seeded from the server's parameter defaults (GET /jobs/types), else the product defaults (propose).
+    const form = job ? jobToForm(job) : defaultJobForm(opts.plant ?? '', 'optimizer.plant', opts.defaults ?? null);
     if (duplicate) form.name = '';
-    _s = { mode, job: job && !duplicate ? job : null, form, targets: new Set(), filter: '', busy: false, previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
+    _s = { mode, job: job && !duplicate ? job : null, form, targets: new Set(), filter: '', busy: false, baseline: JSON.stringify(form), previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
     _wire();
     const body = _el('jb-body');
     if (body) body.innerHTML = bodyHtml(form, mode, Session.isAdmin());
@@ -357,6 +360,7 @@ export const JobsDialog = {
       onSelect: (v) => { if (!_s) return; _s.form.plant = v; const tz = _el('jb-tz'); if (tz) tz.textContent = plantTimezone(v) || t('jobs.tz_unknown'); _schedulePreview(); },
     });
     _show(mode === 'edit' ? t('jobs.title_edit') : t('jobs.title_new'));
+    _s.baseline = JSON.stringify(readForm(form));   // read back from the rendered fields, so dirty = a real edit
     _el('jb-name')?.focus();
     void _runPreview();
   },
@@ -364,7 +368,7 @@ export const JobsDialog = {
   /** Copy one job's definition and schedule to many plants (one POST /jobs + schedule per plant, each in its own plant timezone). */
   openCopy(job: Job, onSaved?: () => void): void {
     if (!Session.isAdmin()) return;
-    _s = { mode: 'copy', job, form: jobToForm(job), targets: new Set(), filter: '', busy: false, previewSeq: 0, previewTimer: null, onSaved: onSaved ?? null };
+    _s = { mode: 'copy', job, form: jobToForm(job), targets: new Set(), filter: '', busy: false, baseline: '', previewSeq: 0, previewTimer: null, onSaved: onSaved ?? null };
     _wire();
     const body = _el('jb-body');
     if (body) body.innerHTML = copyBodyHtml(job, _s.targets, '');
@@ -404,16 +408,27 @@ export const JobsDialog = {
       } else {
         await JobsClient.create({ ...job, schedules: [schedule] });
       }
-      Toast.show(t('jobs.toast_saved'), 'ok');
+      Toast.show(t('jobs.toast_saved'), 'success');
       const cb = s.onSaved;
       JobsDialog.close();
       cb?.();
     } catch (e) {
-      Toast.show(t('jobs.toast_save_failed', { msg: (e as Error).message }), 'err');
+      Toast.show(t('jobs.toast_save_failed', { msg: (e as Error).message }), 'error');
     } finally {
       s.busy = false;
       if (btn) btn.disabled = false;
     }
+  },
+
+  /** Escape / X: close at once when nothing was changed, else ask first (Cancel is the default, the form stays open). */
+  async requestClose(): Promise<void> {
+    const s = _s;
+    if (!s) return;
+    if (s.mode !== 'copy' && s.baseline && JSON.stringify(readForm(s.form)) !== s.baseline) {
+      const discard = await Modal.confirm({ title: t('jobs.confirm_discard'), message: t('jobs.confirm_discard_msg'), confirmLabel: t('btn.discard'), tone: 'warn' });
+      if (!discard || _s !== s) return;
+    }
+    JobsDialog.close();
   },
 
   close(): void {
@@ -432,15 +447,16 @@ async function _submitCopy(s: DialogState): Promise<void> {
   const form = jobToForm(src);
   s.busy = true;
   let ok = 0; const failed: string[] = [];
+  let reason = '';   // the first failure's message: usually the same for every plant (e.g. no timezone)
   for (const plant of [...s.targets]) {
     try {
       const { job, schedule } = buildJobPayload({ ...form, plant });
       await JobsClient.create({ ...job, schedules: [schedule] });
       ok++;
-    } catch { failed.push(plant); }
+    } catch (e) { failed.push(plant); if (!reason) reason = (e as Error).message; }
   }
   s.busy = false;
-  Toast.show(failed.length ? t('jobs.toast_copy_partial', { ok, failed: failed.join(', ') }) : t('jobs.toast_copy_done', { n: ok }), failed.length ? 'warn' : 'ok');
+  Toast.show(failed.length ? t('jobs.toast_copy_partial', { ok, failed: failed.join(', '), reason }) : t('jobs.toast_copy_done', { n: ok }), failed.length ? 'warn' : 'success');
   const cb = s.onSaved;
   if (!failed.length) JobsDialog.close(); else s.targets = new Set(failed);
   if (ok) cb?.();

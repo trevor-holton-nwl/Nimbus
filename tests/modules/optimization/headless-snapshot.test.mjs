@@ -1,4 +1,4 @@
-import '../helpers/force-utc.mjs';
+import '../helpers/force-chicago.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { wireFixture, PLANT, SERVER_NOW } from '../helpers/headless-wire-fixture.mjs';

@@ -60,6 +60,14 @@ def fire_schedule(schedule_id: int) -> int | None:
     job = data.get_job(sched["job_id"])
     if job is None or job["archived"] or not job["enabled"]:
         return None
+    if not data.plant_exists(job["plant"]):
+        # The plant was removed from master data: leave a visible skipped run and stop firing this job.
+        data.insert_run(job_id=job["id"], schedule_id=schedule_id, plant=job["plant"], job_type=job["job_type"],
+                        status="skipped", trigger="schedule", scheduled_for=_now(), triggered_by="schedule",
+                        error=f"plant {job['plant']} no longer exists; job disabled")
+        data.patch_job(job["id"], {"enabled": False}, "schedule")
+        _log_event("warn", "jobs", "job disabled: its plant no longer exists", job_id=job["id"], plant=job["plant"])
+        return None
     if sched["kind"] == "once":
         data.retire_schedule(schedule_id)          # spent once it starts; never re-armed
     return run_job(job_id=job["id"], trigger="schedule", schedule_id=schedule_id, scheduled_for=_now(),
@@ -94,12 +102,29 @@ def cancel_run(run_id: int) -> dict | None:
 
 
 def cancel_all() -> None:
+    """Shutdown: wake every body and kill any live child process (it would otherwise outlive this process)."""
     with _RUNNING_LOCK:
         for ctx in _RUNNING.values():
             ctx.cancel_event.set()
+    try:
+        from backend.jobs.types import optimizer_runner
+        optimizer_runner.kill_children()
+    except Exception as exc:  # noqa: BLE001 - shutdown must finish
+        log.warning("could not kill optimizer children on shutdown: %s", exc)
 
 
 # ------------------------------------------------------------------------------------------------------ core
+def _prepare(job: dict):
+    """(job type, validated params, error) for one attempt."""
+    jt = REGISTRY.get(job["job_type"])
+    if jt is None:
+        return None, None, f"unknown job type {job['job_type']!r}"
+    try:
+        return jt, jt.params_model.model_validate(job["params"] or {}), None
+    except ValidationError as e:
+        return jt, None, f"invalid job parameters: {e.errors(include_url=False)[:3]}"
+
+
 def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, scheduled_for: datetime | None = None,
             triggered_by: str | None = None, run_id: int | None = None, skip_if_running: bool = True) -> int | None:
     """Execute one job (plus fixed-policy retries). Returns the id of the last run row. Never raises."""
@@ -107,16 +132,7 @@ def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, schedu
         job = data.get_job(job_id)
         if job is None:
             return None
-        jt = REGISTRY.get(job["job_type"])
-        err = None
-        params = None
-        if jt is None:
-            err = f"unknown job type {job['job_type']!r}"
-        else:
-            try:
-                params = jt.params_model.model_validate(job["params"] or {})
-            except ValidationError as e:
-                err = f"invalid job parameters: {e.errors(include_url=False)[:3]}"
+        jt, params, err = _prepare(job)
         attempt = 1
         while True:
             if run_id is None:
@@ -130,6 +146,12 @@ def run_job(*, job_id: int, trigger: str, schedule_id: int | None = None, schedu
             if status != "failed" or attempt > int(job["retry_max"] or 0):
                 return run_id
             time.sleep(RETRY_DELAY_S)
+            # The job may have been edited, disabled or archived while we waited: every attempt reads it afresh.
+            job = data.get_job(job_id)
+            if job is None or job["archived"] or not job["enabled"]:
+                log.info("job %s retry cancelled: it was archived, disabled or removed", job_id)
+                return run_id
+            jt, params, err = _prepare(job)
             attempt += 1
             trigger, run_id = "retry", None
     except Exception as exc:  # noqa: BLE001 - nothing may escape a worker thread
@@ -183,6 +205,7 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
             log.warning("job_run_log write failed for run %s: %s", run_id, exc)
 
     ctx = JobContext(run_id=run_id, plant=job["plant"], job_id=job["id"], sink=sink, mirror=_mirror)
+    ctx.defer_clock = bool(getattr(jt, "defer_clock", False))
     with _RUNNING_LOCK:
         _RUNNING[run_id] = ctx
     data.mark_running(run_id)
@@ -199,13 +222,16 @@ def _run_body(run_id: int, job: dict, jt, params, timeout: int) -> str:
 
     th = threading.Thread(target=target, name=f"job-body-{run_id}", daemon=True)
     th.start()
-    deadline = time.monotonic() + timeout
+    # A deferred clock stays off while the body waits for its resource (cancel still works); it starts at begin_work().
+    deadline = None if ctx.defer_clock else time.monotonic() + timeout
     next_poll = time.monotonic() + CANCEL_POLL_S
     try:
         while th.is_alive():
             th.join(0.25)
             now = time.monotonic()
-            if th.is_alive() and now >= deadline and not ctx.cancelled:
+            if deadline is None and ctx.work_started.is_set():
+                deadline = now + timeout
+            if th.is_alive() and deadline is not None and now >= deadline and not ctx.cancelled:
                 ctx.timed_out = True
                 ctx.cancel_event.set()
                 ctx.log("error", f"run exceeded its {timeout}s time limit; cancelling")

@@ -30,6 +30,8 @@ BUDGET_S = {"normal": 8, "exhaustive": 180}      # mirrors SETUP_AWARE_*_BUDGET_
 TIMEOUT_MARGIN_S = 60
 MAX_OLD_SPACE_MB = int(os.environ.get("NIMBUS_OPTIMIZER_NODE_MB", "1536") or 1536)
 MAX_STORED_PATCH_BYTES = 256 * 1024              # job_run.summary is JSONB: a bigger proposal keeps counts only
+MAX_CHILD_STDOUT_BYTES = 64 * 1024 * 1024        # a runaway child is killed past this (the answer is one JSON line)
+MAX_STDERR_LINE_BYTES = 64 * 1024                # a longer log line is cut and noted; the child is not trusted to be polite
 _ENV_KEEP = ("PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "LANG")
 
 
@@ -41,6 +43,17 @@ def _concurrency() -> int:
 
 
 _SLOTS = threading.BoundedSemaphore(_concurrency())
+_CHILDREN: set = set()                           # live node processes, so a shutdown can kill them (runner.cancel_all)
+_CHILDREN_LOCK = threading.Lock()
+
+
+def kill_children() -> int:
+    """Kill every live child process (shutdown path). Returns how many were signalled."""
+    with _CHILDREN_LOCK:
+        procs = list(_CHILDREN)
+    for proc in procs:
+        _kill(proc)
+    return len(procs)
 
 
 def node_bin() -> str | None:
@@ -76,7 +89,22 @@ class _Steps:
 
 # ------------------------------------------------------------------------------------------------ bundle
 def gather_bundle(plant: str) -> dict:
-    """The `HeadlessWire` bundle: the body each browser endpoint would serve, built from the same in-process code."""
+    """The `HeadlessWire` bundle plus its snapshot-version token. The token is read BEFORE the wire is built and
+    again after: an input that changed while building would otherwise pair a new token with an old wire. One retry;
+    if it still moves, the token read before the second build is kept (a later comparison then fails safely)."""
+    from backend.scheduling import routes as sched
+
+    for _attempt in (1, 2):
+        before = sched.optimizer_snapshot_version(plant)
+        bundle = _build_bundle(plant)
+        if sched.optimizer_snapshot_version(plant) == before:
+            break
+    bundle["snapshot_version"] = before
+    return bundle
+
+
+def _build_bundle(plant: str) -> dict:
+    """The body each browser endpoint would serve, built from the same in-process code."""
     from fastapi.encoders import jsonable_encoder
 
     import backend.setup.data as setup_data
@@ -112,8 +140,7 @@ def gather_bundle(plant: str) -> dict:
                      "tool_inventory_version": horizons.get("tool_inventory_version"),
                      "frozen_horizon_end": frozen.isoformat() if frozen else None},
     }
-    return {"wire": jsonable_encoder(bundle), "server_now": sched._server_now_iso(),
-            "snapshot_version": sched.optimizer_snapshot_version(plant)}
+    return {"wire": jsonable_encoder(bundle), "server_now": sched._server_now_iso()}
 
 
 def plant_timezone(wire: dict, plant: str) -> str:
@@ -140,8 +167,10 @@ def _log_child_line(ctx, steps: _Steps, line: str) -> None:
         if has_ms and step:
             steps.add(step, ms)
         extra = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+        # The child's own keys must never collide with ctx.log's parameters (a TypeError would end the reader thread).
+        extra = {k: v for k, v in extra.items() if k not in ("level", "msg", "step", "duration_ms")}
         ctx.log(level, str(entry.get("msg", "")), step=step, duration_ms=int(ms) if has_ms else None, **extra)
-    except ValueError:
+    except Exception:  # noqa: BLE001 - noise, a non-object line or a bad field: keep the text, never raise
         ctx.log("warn", f"node: {line}")
 
 
@@ -166,8 +195,11 @@ def run_node(ctx, steps: _Steps, phase: str, payload: dict, *, tz: str, timeout_
     heap = [f"--max-old-space-size={MAX_OLD_SPACE_MB}"] if MAX_OLD_SPACE_MB > 0 else []
     cmd = [exe, *heap, cli_path(), "--phase", phase, "--input", "-"]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    with _CHILDREN_LOCK:
+        _CHILDREN.add(proc)
     body = json.dumps(payload).encode("utf-8")
     out_chunks: list[bytes] = []
+    over = {"stdout": False}
 
     def feed():
         try:
@@ -177,10 +209,29 @@ def run_node(ctx, steps: _Steps, phase: str, payload: dict, *, tz: str, timeout_
             pass
 
     def read_out():
-        out_chunks.append(proc.stdout.read())
+        total = 0
+        while True:
+            chunk = proc.stdout.read1(65536)
+            if not chunk:
+                return
+            total += len(chunk)
+            if total > MAX_CHILD_STDOUT_BYTES:
+                over["stdout"] = True
+                return
+            out_chunks.append(chunk)
 
     def read_err():
-        for raw in iter(proc.stderr.readline, b""):
+        while True:
+            raw = proc.stderr.readline(MAX_STDERR_LINE_BYTES + 1)
+            if not raw:
+                return
+            if len(raw) > MAX_STDERR_LINE_BYTES and not raw.endswith(b"\n"):
+                while True:                      # drop the rest of an over-long line without holding it in memory
+                    rest = proc.stderr.readline(MAX_STDERR_LINE_BYTES)
+                    if not rest or rest.endswith(b"\n"):
+                        break
+                ctx.log("warn", f"node: log line over {MAX_STDERR_LINE_BYTES} bytes dropped")
+                continue
             _log_child_line(ctx, steps, raw.decode("utf-8", errors="replace"))
 
     threads = [threading.Thread(target=f, daemon=True) for f in (feed, read_out, read_err)]
@@ -189,6 +240,9 @@ def run_node(ctx, steps: _Steps, phase: str, payload: dict, *, tz: str, timeout_
     deadline = time.monotonic() + timeout_s
     try:
         while proc.poll() is None:
+            if over["stdout"]:
+                _kill(proc)
+                raise RuntimeError(f"optimizer process wrote more than {MAX_CHILD_STDOUT_BYTES} bytes and was killed")
             if ctx.cancelled:
                 _kill(proc)
                 ctx.check_cancel()
@@ -199,8 +253,12 @@ def run_node(ctx, steps: _Steps, phase: str, payload: dict, *, tz: str, timeout_
     finally:
         if proc.poll() is None:
             _kill(proc)
+        with _CHILDREN_LOCK:
+            _CHILDREN.discard(proc)
     for t in threads:
         t.join(5)
+    if over["stdout"]:
+        raise RuntimeError(f"optimizer process wrote more than {MAX_CHILD_STDOUT_BYTES} bytes and was killed")
     if proc.returncode != 0:
         raise RuntimeError(f"optimizer process exited with code {proc.returncode}")
     try:
@@ -226,6 +284,7 @@ def run_optimizer(ctx, plant: str, params) -> dict:
     ctx.log("info", "waiting for an optimizer slot", step="queue")
     while not _SLOTS.acquire(timeout=0.5):
         ctx.check_cancel()
+    getattr(ctx, "begin_work", lambda: None)()    # the run's time limit starts now, not while it queued for the slot
     try:
         return _run(ctx, plant, params, steps)
     except JobCancelled:
@@ -259,9 +318,10 @@ def _run(ctx, plant: str, params, steps: _Steps) -> dict:
 
     if params.apply_mode == "propose":
         patches = result.get("patches") or []
-        if len(json.dumps(patches)) <= MAX_STORED_PATCH_BYTES:
-            out["proposal"] = {"patches": patches, "base_versions": {p["id"]: p.get("base_version") for p in patches},
-                               "findings": (result.get("findings") or [])[:50]}
+        proposal = {"patches": patches, "base_versions": {p["id"]: p.get("base_version") for p in patches},
+                    "findings": (result.get("findings") or [])[:50]}
+        if len(json.dumps(proposal)) <= MAX_STORED_PATCH_BYTES:      # the whole object, not just the patches
+            out["proposal"] = proposal
         else:
             out["proposal_truncated"] = True
             ctx.log("warn", f"proposal of {len(patches)} patches is too large to store; counts kept only")
@@ -290,7 +350,9 @@ def _apply(ctx, plant, steps, bundle, tz, node_params, result, out) -> dict:
     if live["snapshot_version"] != bundle["snapshot_version"]:
         return _fail(steps, "priority lists, setup, calendar or tool inventory changed since the run; nothing applied", **out)
     plan = run_node(ctx, steps, "apply", {"plant": plant, "runWire": bundle["wire"], "liveWire": live["wire"],
-                                          "state": result["state"], "params": node_params, "jobId": ctx.job_id},
+                                          "state": result["state"], "jobId": ctx.job_id,
+                                          # the live board is judged at the live clock, the run's own clock is for the run
+                                          "params": {**node_params, "liveServerNow": live["server_now"]}},
                     tz=tz, timeout_s=TIMEOUT_MARGIN_S)
     dropped = plan.get("dropped") or []
     if dropped:

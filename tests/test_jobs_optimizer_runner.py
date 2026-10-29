@@ -24,6 +24,14 @@ if plant == "hang":
     time.sleep(60)
 if plant == "crash":
     sys.exit(3)
+if plant == "flood":
+    sys.stdout.write("x" * 5000)
+    sys.stdout.flush()
+    time.sleep(60)
+if plant == "longline":
+    sys.stderr.write("y" * 200000 + "\n")
+    sys.stderr.write(json.dumps({"level": "info", "step": "dup", "msg": "collide", "data": {"step": "other", "msg": "m", "level": "l", "duration_ms": 1, "ok": 1}}) + "\n")
+    sys.stderr.flush()
 items = [{"id": "1", "start_date": "2035-08-07T08:00:00", "end_date": "2035-08-07T10:00:00", "source": "optimizer", "base_version": 7, "force": False},
          {"id": "2", "start_date": "2035-08-07T10:00:00", "end_date": "2035-08-07T12:00:00", "source": "optimizer", "base_version": 8, "force": False}]
 if phase == "run":
@@ -196,3 +204,101 @@ def test_real_headless_cli_runs_the_synthetic_fixture():
     result = json.loads(run.stdout)
     assert result["status"] == "completed" and result["patches"] and result["state"]
     assert '"step":"snapshot"' in run.stderr
+
+
+def test_a_child_flooding_stdout_is_killed(fake, monkeypatch):
+    monkeypatch.setattr(orun, "MAX_CHILD_STDOUT_BYTES", 1000)
+    t0 = time.monotonic()
+    out = orun.run_optimizer(make_ctx()[0], "flood", Params())
+    assert out["status"] == "failed" and "bytes and was killed" in out["error"]
+    assert time.monotonic() - t0 < 15
+
+
+def test_overlong_stderr_line_is_dropped_and_colliding_keys_do_not_break_logging(fake):
+    ctx, rows = make_ctx()
+    out = orun.run_optimizer(ctx, "longline", Params("propose"))
+    assert "status" not in out, out
+    assert any("log line over" in r["msg"] for r in rows)
+    collide = next(r for r in rows if r["msg"] == "collide")
+    assert collide["step"] == "dup" and collide["data"] == {"ok": 1}
+    assert not any(len(r["msg"]) > 5000 for r in rows)
+
+
+def test_whole_proposal_is_measured_against_the_cap(fake, monkeypatch):
+    monkeypatch.setattr(orun, "MAX_STORED_PATCH_BYTES", 150)    # the patches alone would fit, the whole object does not
+    out = orun.run_optimizer(make_ctx()[0], "ok", Params("propose"))
+    assert out.get("proposal_truncated") is True and "proposal" not in out
+
+
+def test_apply_phase_gets_the_live_clock(fake, monkeypatch):
+    seen = {}
+    real = orun.run_node
+
+    def spy(ctx, steps, phase, payload, **kw):
+        seen[phase] = payload["params"]
+        return real(ctx, steps, phase, payload, **kw)
+
+    monkeypatch.setattr(orun, "run_node", spy)
+    calls = iter(["2035-08-06T13:00:00Z", "2035-08-06T16:00:00Z"])
+    monkeypatch.setattr(orun, "gather_bundle", lambda plant: {
+        "wire": {"masterData": {"plants": {"rows": [{"plant": plant, "timezone": "America/Chicago"}]}}},
+        "server_now": next(calls), "snapshot_version": "v1"})
+    orun.run_optimizer(make_ctx()[0], "ok", Params())
+    assert seen["run"]["serverNow"] == "2035-08-06T13:00:00Z" and "liveServerNow" not in seen["run"]
+    assert seen["apply"]["serverNow"] == "2035-08-06T13:00:00Z"
+    assert seen["apply"]["liveServerNow"] == "2035-08-06T16:00:00Z"
+
+
+def test_bundle_token_is_read_before_the_wire_and_retried_once(monkeypatch):
+    import backend.scheduling.routes as sched
+    built = []
+    monkeypatch.setattr(orun, "_build_bundle", lambda plant: built.append(1) or {"wire": {}, "server_now": "x"})
+    tokens = iter(["a", "b", "b", "b"])          # attempt 1: before a, after b (moved) -> attempt 2: before b, after b
+    monkeypatch.setattr(sched, "optimizer_snapshot_version", lambda plant: next(tokens))
+    assert orun.gather_bundle("P")["snapshot_version"] == "b" and len(built) == 2
+    tokens = iter(["a", "b", "c", "d"])          # never settles: the token read before the second build is kept
+    monkeypatch.setattr(sched, "optimizer_snapshot_version", lambda plant: next(tokens))
+    assert orun.gather_bundle("P")["snapshot_version"] == "c"
+
+
+def test_kill_children_stops_a_live_child(fake):
+    errors = []
+
+    def go():
+        try:
+            orun.run_optimizer(make_ctx()[0], "hang", Params())
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    th = threading.Thread(target=go)
+    th.start()
+    for _ in range(100):
+        if orun._CHILDREN:
+            break
+        time.sleep(0.05)
+    assert orun.kill_children() == 1
+    th.join(15)
+    assert not th.is_alive() and not orun._CHILDREN
+
+
+def test_a_cancel_that_lands_before_the_write_writes_nothing(fake, monkeypatch):
+    ctx, _ = make_ctx()
+    real = orun.run_node
+
+    def spy(c, steps, phase, payload, **kw):
+        out = real(c, steps, phase, payload, **kw)
+        if phase == "apply":
+            c.cancel_event.set()                 # e.g. the hard timeout fired while the child answered
+        return out
+
+    monkeypatch.setattr(orun, "run_node", spy)
+    with pytest.raises(JobCancelled):
+        orun.run_optimizer(ctx, "ok", Params())
+    assert fake["writes"] == []
+
+
+def test_the_run_clock_starts_once_the_slot_is_held(fake):
+    ctx, _ = make_ctx()
+    assert not ctx.work_started.is_set()
+    orun.run_optimizer(ctx, "ok", Params("propose"))
+    assert ctx.work_started.is_set()

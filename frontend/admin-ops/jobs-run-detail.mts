@@ -17,7 +17,7 @@ import { JobsClient } from './jobs-client.mjs';
 import type { JobRun } from './jobs-client.mjs';
 import {
   statusBadgeHtml, isActiveRun, durationText, stepSegments, resultTiles, mergeLog, lastSeq, filterLog, logToText,
-  LOG_LEVELS, plantWall,
+  LOG_LEVELS, LOG_PAGE, plantWall,
 } from './jobs-model.mjs';
 import type { LogLine } from './jobs-model.mjs';
 
@@ -133,12 +133,19 @@ async function _fetchLog(): Promise<void> {
   if (!s || s.inflight) return;
   s.inflight = true;
   try {
-    const res = await JobsClient.log(s.run.id, { afterSeq: s.lastSeq });
-    if (_d !== s) return;
-    if (res.lines.length) { s.lines = mergeLog(s.lines, res.lines); _paintLog(); }
-    s.lastSeq = Math.max(s.lastSeq, res.lastSeq, lastSeq(s.lines));
+    // A page is at most LOG_PAGE lines: keep reading while a page comes back full, so the viewer, Copy and Download
+    // hold the WHOLE log and not just its first page. (`done` is only trusted from the last, short page.)
+    let res = await JobsClient.log(s.run.id, { afterSeq: s.lastSeq, limit: LOG_PAGE });
+    for (;;) {
+      if (_d !== s) return;
+      if (res.lines.length) { s.lines = mergeLog(s.lines, res.lines); }
+      s.lastSeq = Math.max(s.lastSeq, res.lastSeq, lastSeq(s.lines));
+      if (res.lines.length < LOG_PAGE) break;
+      res = await JobsClient.log(s.run.id, { afterSeq: s.lastSeq, limit: LOG_PAGE });
+    }
+    _paintLog();
     s.done = res.done;
-    if (res.truncated && !s.run.log_truncated) s.run = { ...s.run, log_truncated: true };
+    if (res.truncated && !s.run.log_truncated) { s.run = { ...s.run, log_truncated: true }; const note = _q('#jr-trunc'); if (note) note.hidden = false; }
     if (res.done || (res.status && res.status !== s.run.status)) {
       // The run changed state: re-read it so ended_at, summary and error show (the log page only carries status).
       s.run = await JobsClient.getRun(s.run.id).catch(() => ({ ...s.run, status: res.status ?? s.run.status }));
@@ -186,7 +193,7 @@ export const JobsRunDetail = {
     _d = s;
     host.innerHTML = `<div id="jr-head"></div>${_toolbarHtml(s)}<div class="job-log" id="jr-log" tabindex="0" role="log" aria-label="${esc(t('jobs.log'))}"></div>`
       + `<div class="job-log-empty" id="jr-empty">${esc(t('jobs.log_empty'))}</div>`
-      + (run.log_truncated ? `<div class="ape-hint">${esc(t('jobs.log_truncated'))}</div>` : '');
+      + `<div class="ape-hint" id="jr-trunc"${run.log_truncated ? '' : ' hidden'}>${esc(t('jobs.log_truncated'))}</div>`;
     _paintHead();
     host.onclick = (e: MouseEvent) => {
       const act = (e.target as HTMLElement).closest<HTMLElement>('[data-jr-act]')?.dataset.jrAct;
@@ -194,12 +201,12 @@ export const JobsRunDetail = {
       if (act === 'back') { opts.onBack(); }
       else if (act === 'copy') {
         const txt = logToText(filterLog(s.lines, { level: s.level, q: s.q }), x => Util.fmtDTPref(plantWall(x, s.tz)));
-        navigator.clipboard?.writeText(txt).then(() => Toast.show(t('jobs.log_copied'), 'ok'), () => Toast.show(t('jobs.log_copy_failed'), 'err'));
+        navigator.clipboard?.writeText(txt).then(() => Toast.show(t('jobs.log_copied'), 'success'), () => Toast.show(t('jobs.log_copy_failed'), 'error'));
       }
       else if (act === 'download') _download(s);
       else if (act === 'cancel') {
-        void JobsClient.cancelRun(s.run.id).then(() => { Toast.show(t('jobs.toast_cancel_requested'), 'ok'); void _fetchLog(); opts.onChanged?.(); })
-          .catch((err: Error) => Toast.show(err.message, 'err'));
+        void JobsClient.cancelRun(s.run.id).then(() => { Toast.show(t('jobs.toast_cancel_requested'), 'success'); void _fetchLog(); opts.onChanged?.(); })
+          .catch((err: Error) => Toast.show(err.message, 'error'));
       } else if (act === 'history') {
         (globalThis as unknown as { NIMBUS?: { App?: { goto?(tab: string): void } } }).NIMBUS?.App?.goto?.('gantt');
         Toast.show(t('jobs.history_hint', { id: String(s.run.summary?.action_id ?? '') }), 'info');

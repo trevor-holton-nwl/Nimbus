@@ -2405,7 +2405,8 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 </div>
 
 <!-- =========================================================
-     MODAL: Alert profile editor (body/foot rendered by AlertProfileEditor)
+     MODAL: Job editor (body/foot rendered by JobsDialog, Admin > Jobs); data-no-backdrop-close so a stray
+     click cannot discard a half-built schedule.
      ========================================================= -->
 <div class="modal-backdrop" id="modal-job-edit" data-no-backdrop-close hidden>
   <div class="modal job-modal">
@@ -2418,7 +2419,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
   </div>
 </div>
 
-<!-- Job editor above: body/foot rendered by JobsDialog (Admin > Jobs); data-no-backdrop-close so a stray click cannot discard a half-built schedule. -->
+<!-- =========================================================
+     MODAL: Alert profile editor (body/foot rendered by AlertProfileEditor)
+     ========================================================= -->
 <div class="modal-backdrop" id="modal-alert-profile" hidden>
   <div class="modal ape-modal">
     <header class="modal-head">

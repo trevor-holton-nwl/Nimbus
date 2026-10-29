@@ -1,4 +1,4 @@
-import '../helpers/force-utc.mjs';
+import '../helpers/force-chicago.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

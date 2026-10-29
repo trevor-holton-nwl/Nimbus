@@ -27,6 +27,8 @@ class JobType:
     timeout_fn: Callable[[BaseModel], int] | None = None     # per-params timeout (search budget + margin)
     lock_key: Callable[[str, BaseModel], str] | None = None  # None -> one run at a time per (type, plant)
     stub: bool = False                                        # hidden from the types list unless stubs enabled
+    needs_plant_timezone: bool = False                        # a schedule cannot be saved for a plant with no timezone
+    defer_clock: bool = False                                 # the body starts the timeout clock itself (ctx.begin_work)
 
     def timeout_for(self, params: BaseModel) -> int:
         return int(self.timeout_fn(params)) if self.timeout_fn else self.default_timeout_s

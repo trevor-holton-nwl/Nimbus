@@ -536,7 +536,7 @@ def optimizer_snapshot_version(plant: str) -> str:
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
-@router.get("/optimizer/snapshot-version")
+@router.get("/optimizer/snapshot-version", dependencies=[Depends(auth.require_authenticated)])
 def get_optimizer_snapshot_version(plant: str,
                                    allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """Combined version token for one plant's optimizer inputs (priority lists, setup, calendar, tool inventory)."""

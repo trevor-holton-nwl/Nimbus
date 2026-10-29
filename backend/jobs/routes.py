@@ -96,8 +96,11 @@ def _job_or_404(job_id: int, allowed) -> dict:
     return job
 
 
-def _normalize(plant: str, payload: dict, *, check_past: bool = True) -> dict:
-    """Validate a schedule payload against the plant timezone; ScheduleError becomes a 400."""
+def _normalize(plant: str, payload: dict, *, check_past: bool = True, need_tz: bool = False) -> dict:
+    """Validate a schedule payload against the plant timezone; ScheduleError becomes a 400. `need_tz`: the job type
+    cannot run without a plant timezone (the optimizer), so a schedule for such a plant is refused up front."""
+    if need_tz and not data.plant_has_timezone(plant):
+        raise HTTPException(status_code=400, detail=f"plant {plant!r} has no timezone; set one in Plants before scheduling this job")
     try:
         s = triggers.validate_schedule({**payload, "timezone": data.plant_timezone(plant)})
         if check_past and s["kind"] == "once":
@@ -108,6 +111,12 @@ def _normalize(plant: str, payload: dict, *, check_past: bool = True) -> dict:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return s
 
+
+
+def _needs_tz(job: dict) -> bool:
+    from backend.jobs.registry import REGISTRY
+    jt = REGISTRY.get(job["job_type"])
+    return bool(jt and jt.needs_plant_timezone)
 
 
 def _timing_fields(model: BaseModel) -> dict:
@@ -248,7 +257,7 @@ def create_job(body: JobCreate, actor: str | None = Depends(auth.require_admin),
     if not data.plant_exists(body.plant):
         raise HTTPException(status_code=400, detail=f"unknown plant {body.plant!r}")
     params = _validate_params(jt, body.params)
-    schedules = [{**_normalize(body.plant, _timing_fields(s)), "paused": s.paused,
+    schedules = [{**_normalize(body.plant, _timing_fields(s), need_tz=jt.needs_plant_timezone), "paused": s.paused,
                   "misfire_grace_s": s.misfire_grace_s, "skip_if_running": s.skip_if_running}
                  for s in body.schedules]
     job_id = data.create_job(plant=body.plant, job_type=body.job_type, name=body.name.strip(), params=params,
@@ -286,7 +295,7 @@ def _registered(key: str):
 def add_schedule(job_id: int, body: ScheduleIn, actor: str | None = Depends(auth.require_admin),
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     job = _job_or_404(job_id, allowed_plants)
-    s = {**_normalize(job["plant"], _timing_fields(body)), "paused": body.paused,
+    s = {**_normalize(job["plant"], _timing_fields(body), need_tz=_needs_tz(job)), "paused": body.paused,
          "misfire_grace_s": body.misfire_grace_s, "skip_if_running": body.skip_if_running}
     sid = data.add_schedule(job_id, s, actor)
     return data.schedule_to_wire(data.get_schedule(sid))
@@ -307,7 +316,8 @@ def patch_schedule(schedule_id: int, body: SchedulePatch, actor: str | None = De
         if "kind" in timing and timing["kind"] != cur["kind"]:
             merged = {"kind": timing["kind"]}          # a kind change starts clean; stale fields never leak
         merged.update(timing)
-        normalized = _normalize(job["plant"], merged, check_past="run_at" in timing or "kind" in timing)
+        normalized = _normalize(job["plant"], merged, check_past="run_at" in timing or "kind" in timing,
+                                need_tz=_needs_tz(job))
     data.patch_schedule(schedule_id, normalized, _flags(body), actor)
     return data.schedule_to_wire(data.get_schedule(schedule_id))
 
@@ -328,6 +338,8 @@ def run_now(job_id: int, actor: str | None = Depends(auth.require_admin),
     job = _job_or_404(job_id, allowed_plants)
     if job["archived"]:
         raise HTTPException(status_code=409, detail="Job is archived")
+    if data.has_active_run(job_id):
+        raise HTTPException(status_code=409, detail="A run of this job is already scheduled or running")
     run_id = runner.start_manual_run(job, actor)
     return {"run": data.run_to_wire(data.get_run(run_id))}
 
