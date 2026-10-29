@@ -7,6 +7,8 @@ import {
   statusBadgeClass, statusBadgeHtml, isActiveRun, recurrenceToScheduleIn, scheduleToRecurrence, cronProse, isValidCronShape, parseTime,
   recurrenceText, buildJobsQuery, buildRunsQuery, buildLogQuery, plantWall, stripOffset, dowLabelKey, durationText, stepSegments, resultTiles,
   weekStrip, addDays, isoDayKey, mergeRuns, stripCompleteThrough, LOG_PAGE, defaultJobForm, validateJobForm, buildJobPayload, jobToForm, defaultRecurrence,
+  displayStatus, runStatusHtml, errorKindOf, elapsedText, firstErrorIndex, lineDataText, errorsToText, elapsedMs, healthTiles, heartbeatState, ageText,
+  shouldPollJobs, runSequential, deltaText, isDryRun, tzShort, isLongerThanUsual, RUN_STATUSES, JOB_RESULTS,
 } from '../../../frontend/admin-ops/jobs-model.mjs';
 
 const EN = {
@@ -170,12 +172,12 @@ test('weekStrip buckets naive ISO runs into 7 plant days from the text, ignoring
   assert.equal(days[6].runs.length, 1, 'day 7 included, day 8 and yesterday dropped');
 });
 
-test('a new job is seeded from the server defaults where valid; anything else falls back, and the result stays a proposal', () => {
+test('a new job is seeded from the server defaults where valid; anything else falls back, and the result defaults to apply', () => {
   const seeded = defaultJobForm('1008', 'optimizer.plant', { mode: 'spt', search: 'normal', respect_firmed: false, apply_mode: 'propose' });
   assert.deepEqual([seeded.mode, seeded.search, seeded.respectFirmed, seeded.result], ['spt', 'normal', false, 'propose']);
   const junk = defaultJobForm('1008', 'optimizer.plant', { mode: 'backlog', search: 7, apply_mode: 'yolo' });
-  assert.deepEqual([junk.mode, junk.search, junk.respectFirmed, junk.result], ['due_date', 'exhaustive', true, 'propose']);
-  assert.equal(defaultJobForm('1008', 'optimizer.plant', {}).result, 'propose');
+  assert.deepEqual([junk.mode, junk.search, junk.respectFirmed, junk.result], ['due_date', 'exhaustive', true, 'apply']);
+  assert.equal(defaultJobForm('1008', 'optimizer.plant', {}).result, 'apply');
 });
 
 test('mergeRuns folds page 1 into loaded pages (newest first, later pages kept); buildLogQuery can ask for a big page', () => {
@@ -195,10 +197,10 @@ test('stripCompleteThrough: null while the list is short of its cap, else the la
 const ok = { isAdmin: true, plants: null };
 const good = () => ({ ...defaultJobForm('1008'), name: 'Morning optimize' });
 
-test('defaults: 08:00 daily, Exhaustive, and the result is a PROPOSAL (auto-apply is an explicit opt-in)', () => {
+test('defaults: 08:00 daily, Exhaustive, and the result is APPLY (a Dry run is the alternative)', () => {
   const f = defaultJobForm('1008');
   assert.equal(f.recur.preset, 'daily'); assert.equal(f.recur.time, '08:00');
-  assert.equal(f.search, 'exhaustive'); assert.equal(f.result, 'propose');
+  assert.equal(f.search, 'exhaustive'); assert.equal(f.result, 'apply');
   assert.deepEqual(validateJobForm(good(), ok), {});
 });
 
@@ -208,8 +210,8 @@ test('validateJobForm: name, plant scope, result gate, recurrence fields and val
   assert.equal(validateJobForm({ ...good(), plant: '' }, ok).plant, 'jobs.err_plant');
   assert.equal(validateJobForm(good(), { isAdmin: true, plants: ['2000'] }).plant, 'jobs.err_plant_scope');
   assert.equal(validateJobForm({ ...good(), result: 'apply' }, { isAdmin: false, plants: null }).result, 'jobs.err_apply_admin');
-  assert.equal(validateJobForm(good(), { isAdmin: false, plants: null }).result, undefined, 'the default (propose) needs no admin');
-  assert.equal(validateJobForm({ ...good(), result: 'propose' }, { isAdmin: false, plants: null }).result, undefined);
+  assert.equal(validateJobForm(good(), { isAdmin: false, plants: null }).result, 'jobs.err_apply_admin', 'jobs are admin-only: the default (apply) needs an admin');
+  assert.equal(validateJobForm({ ...good(), result: 'propose' }, { isAdmin: false, plants: null }).result, undefined, 'a dry run changes nothing');
   assert.equal(validateJobForm({ ...good(), mode: 'remove-backlog' }, ok).mode, 'jobs.err_mode');
   assert.equal(validateJobForm({ ...good(), mode: 'due-date' }, ok).mode, 'jobs.err_mode', 'the backend names are due_date / min_changeover / spt');
   const r = (patch) => ({ ...good(), recur: { ...defaultRecurrence(), ...patch } });
@@ -247,4 +249,96 @@ test('jobToForm restores a saved job (preset schedule, once, params) for Edit an
   const once = jobToForm({ name: 'O', plant: 'P', schedule: { kind: 'once', run_at: '2026-11-02T08:00:00' } });
   assert.equal(once.recur.preset, 'once'); assert.equal(once.recur.runAt, '2026-11-02T08:00');
   assert.equal(jobToForm({ name: 'bare', plant: 'P' }).recur.preset, 'daily');
+});
+
+// ---- W1: run status, health strip, error panel, log helpers, dry-run proposal --------------------------------------
+test('SAP-style status model: a misfire shows as Missed, running has a static dot, text label always follows', () => {
+  assert.deepEqual([...RUN_STATUSES], ['scheduled', 'running', 'succeeded', 'warning', 'failed', 'cancelled', 'skipped', 'missed']);
+  assert.equal(displayStatus({ status: 'skipped', error: 'missed: fired after its grace time' }), 'missed');
+  assert.equal(displayStatus({ status: 'skipped', error: 'previous run still running' }), 'skipped');
+  assert.equal(displayStatus({ status: 'failed', error: 'missed: x' }), 'failed');
+  assert.equal(statusBadgeClass('missed'), 'badge-warn');
+  assert.match(statusBadgeHtml('running', deps), /<i class="job-dot" aria-hidden="true"><\/i>jobs\.status_running/);
+  assert.doesNotMatch(statusBadgeHtml('failed', deps), /job-dot/);
+  const skipped = runStatusHtml({ status: 'skipped', error: 'previous run still running' }, deps);
+  assert.match(skipped, /jobs\.status_skipped/); assert.match(skipped, /previous run still running/, 'Skipped(reason)');
+  assert.match(runStatusHtml({ status: 'skipped', error: 'missed: late' }, deps), /badge-warn[^>]*>jobs\.status_missed/);
+  assert.doesNotMatch(runStatusHtml({ status: 'skipped', error: '<b>x</b>' }, deps), /<b>/, 'reason is escaped');
+});
+
+test('error kind: only config and system are recognised', () => {
+  assert.equal(errorKindOf({ error_kind: 'config' }), 'config');
+  assert.equal(errorKindOf({ error_kind: 'system' }), 'system');
+  assert.equal(errorKindOf({ error_kind: 'other' }), null);
+  assert.equal(errorKindOf(null), null);
+});
+
+test('log helpers: elapsed from start, first error, collapsed data text, errors-only copy', () => {
+  assert.equal(elapsedText('2026-10-29T12:00:03.200+00:00', '2026-10-29T12:00:00+00:00'), '+0:03.2');
+  assert.equal(elapsedText('2026-10-29T12:03:09+00:00', '2026-10-29T12:00:00+00:00'), '+3:09.0');
+  assert.equal(elapsedText('2026-10-29T11:59:00+00:00', '2026-10-29T12:00:00+00:00'), '+0:00.0', 'never negative');
+  assert.equal(elapsedText(null, 'x'), '');
+  const lines = [{ seq: 1, level: 'info', msg: 'a' }, { seq: 2, level: 'warn', msg: 'b' }, { seq: 3, level: 'error', msg: 'boom', data: { orders: ['A1'] } }, { seq: 4, level: 'error', msg: 'again' }];
+  assert.equal(firstErrorIndex(lines), 2);
+  assert.equal(firstErrorIndex(lines.slice(0, 2)), -1);
+  assert.equal(lineDataText({}), null); assert.equal(lineDataText([]), null); assert.equal(lineDataText(null), null);
+  assert.match(lineDataText({ orders: ['A1'] }), /"orders": \[\s+"A1"\s+\]/);
+  const txt = errorsToText(lines, x => x);
+  assert.match(txt, /ERROR boom/); assert.match(txt, /"A1"/); assert.match(txt, /ERROR again/); assert.doesNotMatch(txt, /WARN|INFO/);
+});
+
+test('elapsed of a run that has not ended counts to now; unstarted runs have none', () => {
+  const now = Date.parse('2026-10-29T12:01:00+00:00');
+  assert.equal(elapsedMs('2026-10-29T12:00:00+00:00', null, now), 60000);
+  assert.equal(elapsedMs('2026-10-29T12:00:00+00:00', '2026-10-29T12:00:30+00:00', now), 30000);
+  assert.equal(elapsedMs(null, null, now), null);
+  assert.equal(isLongerThanUsual(43, [43]), true); assert.equal(isLongerThanUsual(42, [43]), false); assert.equal(isLongerThanUsual(1, null), false);
+});
+
+test('health tiles: Failed goes err and Missed warn only above zero; each tile names its filter', () => {
+  const h = { running: 1, queued: 2, failed24h: 0, missed24h: 0, warning24h: 0, nextFire: null, scheduler: { ok: true, lastTickAt: null }, longerThanUsual: [] };
+  const calm = healthTiles(h);
+  assert.deepEqual(calm.map(x => x.key), ['running', 'queued', 'failed', 'missed', 'next']);
+  assert.deepEqual(calm.map(x => x.tone), ['', '', '', '', '']);
+  const hot = healthTiles({ ...h, failed24h: 3, missed24h: 1 });
+  assert.deepEqual([hot[2].tone, hot[3].tone], ['err', 'warn']);
+  assert.deepEqual([hot[2].status, hot[2].sinceHours, hot[3].status, hot[3].sinceHours], ['failed', 24, 'missed', 24]);
+  assert.deepEqual([hot[0].status, hot[1].status, hot[4].tab], ['running', 'scheduled', 'upcoming']);
+});
+
+test('scheduler heartbeat: ok within 3 min, stale after, none before the first tick; age text is compact', () => {
+  const now = Date.parse('2026-10-29T12:00:12+00:00');
+  assert.deepEqual(heartbeatState({ ok: true, lastTickAt: '2026-10-29T12:00:00+00:00' }, now), { state: 'ok', ageS: 12 });
+  assert.equal(heartbeatState({ ok: true, lastTickAt: '2026-10-29T11:56:00+00:00' }, now).state, 'stale', 'the viewer clock also says stale');
+  assert.equal(heartbeatState({ ok: false, lastTickAt: '2026-10-29T12:00:00+00:00' }, now).state, 'stale', 'the server says stale');
+  assert.equal(heartbeatState({ ok: false, lastTickAt: null }, now).state, 'none');
+  assert.deepEqual([ageText(12), ageText(180), ageText(7200)], ['12 s', '3 min', '2 h']);
+});
+
+test('the list polls only while something is active', () => {
+  const idle = { running: 0, queued: 0, failed24h: 0, missed24h: 0, warning24h: 0, nextFire: null, scheduler: { ok: true, lastTickAt: null }, longerThanUsual: [] };
+  assert.equal(shouldPollJobs(idle, [{ last_run: { status: 'succeeded' } }, { last_run: null }]), false);
+  assert.equal(shouldPollJobs({ ...idle, running: 1 }, []), true);
+  assert.equal(shouldPollJobs({ ...idle, queued: 1 }, []), true);
+  assert.equal(shouldPollJobs(null, [{ last_run: { status: 'running' } }]), true);
+  assert.equal(shouldPollJobs(null, []), false);
+});
+
+test('bulk actions run one after another; a failure never stops the rest', async () => {
+  const order = [];
+  const res = await runSequential([1, 2, 3], async n => { order.push(n); if (n === 2) throw new Error('nope'); });
+  assert.deepEqual(order, [1, 2, 3]);
+  assert.deepEqual(res, { ok: 2, failed: 1, firstError: 'nope' });
+});
+
+test('proposal helpers and the Apply / Dry run result modes', () => {
+  assert.deepEqual([deltaText(4), deltaText(-1.5), deltaText(0), deltaText(null)], ['+4 h', '-1.5 h', '0 h', '']);
+  assert.equal(isDryRun({ apply_mode: 'propose' }), true); assert.equal(isDryRun({ apply_mode: 'apply' }), false); assert.equal(isDryRun(null), false);
+  assert.deepEqual([...JOB_RESULTS], ['apply', 'propose'], 'Apply is first and the default; propose is the stored value of Dry run');
+});
+
+test('tzShort reads the plant zone at the instant; blank zone gives nothing', () => {
+  assert.match(tzShort('America/Chicago', '2026-07-01T12:00:00+00:00'), /CDT|GMT-5/);
+  assert.match(tzShort('America/Chicago', '2026-01-01T12:00:00+00:00'), /CST|GMT-6/);
+  assert.equal(tzShort('', 'x'), '');
 });

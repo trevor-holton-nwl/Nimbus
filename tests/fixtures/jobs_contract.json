@@ -14,9 +14,7 @@
     "triggered_by": null,
     "summary": {"late": 3, "changeovers": 41, "moved": 120, "applied": 118, "dropped": 2, "action_id": "a-17", "mode": "due_date", "search": "exhaustive", "apply_mode": "apply"},
     "error": null, "log_truncated": false, "cancel_requested": false
-  },
-  "failed_run_summary_keys": ["error_kind", "failed_step", "steps"],
-  "job": {
+  },  "job": {
     "id": 5, "plant": "1008", "job_type": "optimizer.plant", "name": "Morning optimize",
     "params": {"mode": "due_date", "search": "exhaustive", "respect_firmed": true, "apply_mode": "apply"},
     "enabled": true, "archived": false, "retry_max": 0, "timeout_s": null,

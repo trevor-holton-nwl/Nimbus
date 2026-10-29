@@ -136,6 +136,9 @@ const DOW_ORDER = [0, 1, 2, 3, 4, 5, 6];   // backend numbering, Monday first
 function _opt(value: string, label: string, sel: string): string {
   return `<option value="${esc(value)}"${value === sel ? ' selected' : ''}>${esc(label)}</option>`;
 }
+/** What the chosen result mode does, in one sentence: Apply writes the plan, Dry run only shows it. */
+export const resultHint = (result: string): string => t(result === 'propose' ? 'jobs.result_hint_propose' : 'jobs.result_hint_apply');
+
 const _err = (field: string): string => `<div class="ape-err" id="jb-err-${field}" role="alert" hidden></div>`;
 
 export function recurFieldsHtml(r: Recurrence): string {
@@ -177,9 +180,9 @@ export function bodyHtml(f: JobForm, mode: DialogMode, isAdmin: boolean): string
     + JOB_SEARCHES.map(s => _opt(s, t(`jobs.search_${s}`), f.search)).join('') + `</select>${_err('search')}</div></div>`
     + `<div class="ape-hint" id="jb-search-note">${esc(t('jobs.search_note'))}</div>`
     + `<div class="form-row job-checks"><label class="chk-inline"><input type="checkbox" id="jb-firmed"${f.respectFirmed ? ' checked' : ''}><span>${esc(t('jobs.f_firmed'))}</span></label></div>`
-    + `<div class="form-row"><label for="jb-result">${esc(t('jobs.f_result'))}</label><select class="input" id="jb-result"${isAdmin ? '' : ' disabled'}>`
+    + `<div class="form-row"><label for="jb-result">${esc(t('jobs.f_result'))}</label><select class="input" id="jb-result" aria-describedby="jb-result-hint"${isAdmin ? '' : ' disabled'}>`
     + JOB_RESULTS.map(r => _opt(r, t(`jobs.result_${r}`), f.result)).join('') + `</select>`
-    + `<div class="ape-hint">${esc(t('jobs.result_hint'))}</div>${_err('result')}</div>`
+    + `<div class="ape-hint" id="jb-result-hint">${esc(resultHint(f.result))}</div>${_err('result')}</div>`
     + `<fieldset class="job-recur"><legend>${esc(t('jobs.f_recurrence'))}</legend>`
     + `<div class="form-row"><label for="jb-recur">${esc(t('jobs.f_repeat'))}</label><select class="input" id="jb-recur">`
     + RECUR_PRESETS.map(p => _opt(p, t(`jobs.preset_${p}`), f.recur.preset)).join('') + `</select></div>`
@@ -214,6 +217,39 @@ function _footHtml(): string {
   const label = _s?.mode === 'copy' ? t('jobs.copy_btn') : t('btn.save');
   return `<button type="button" class="btn btn-ghost" data-jb-act="cancel">${esc(t('btn.cancel'))}</button>`
     + `<button type="button" class="btn btn-primary" id="jb-save" data-jb-act="save">${esc(label)}</button>`;
+}
+
+/* ---------------------------------------------------------------------------
+   Flatpickr (time, date and date-time inputs; the native pickers ignore the viewer's date/time format).
+   The original input keeps the machine value ('HH:MM', 'YYYY-MM-DD', 'YYYY-MM-DDTHH:MM') that readForm reads;
+   flatpickr shows an alt input in the display format and fires `change` on the original, so the form's
+   existing change handler (preview, dirty check) still runs. Without flatpickr (tests) the native input stays.
+   ------------------------------------------------------------------------- */
+interface PickerLike { destroy(): void; altInput?: HTMLInputElement }
+let _pickers: PickerLike[] = [];
+
+function _destroyPickers(): void {
+  for (const p of _pickers) { try { p.destroy(); } catch { /* already gone */ } }
+  _pickers = [];
+}
+
+function _initPickers(): void {
+  _destroyPickers();
+  if (typeof flatpickr === 'undefined') return;
+  const h24 = Util._timeFormatPref() === '24h';
+  const mount = (id: string, labelKey: string, cfg: Record<string, unknown>): void => {
+    const el = _el<HTMLInputElement>(id);
+    if (!el) return;
+    try {
+      const p = flatpickr(el, { altInput: true, altInputClass: 'input', allowInput: false, ...cfg }) as unknown as PickerLike;
+      p.altInput?.setAttribute?.('aria-label', t(labelKey));
+      _pickers.push(p);
+    } catch { /* the native input stays usable */ }
+  };
+  mount('jb-time', 'jobs.f_time', { enableTime: true, noCalendar: true, dateFormat: 'H:i', altFormat: Util._fpTimeAltFormat(), time_24hr: h24, minuteIncrement: 1 });
+  mount('jb-runat', 'jobs.f_run_at', { enableTime: true, dateFormat: 'Y-m-d\\TH:i', altFormat: Util._fpAltFormat(), time_24hr: h24, minuteIncrement: 1 });
+  mount('jb-from', 'jobs.f_valid_from', { dateFormat: 'Y-m-d', altFormat: Util._dateFormatPref() });
+  mount('jb-until', 'jobs.f_valid_until', { dateFormat: 'Y-m-d', altFormat: Util._dateFormatPref() });
 }
 
 /* ---------------------------------------------------------------------------
@@ -305,7 +341,9 @@ function _wire(): void {
       s.form = readForm(s.form);
       const host = _el('jb-recur-fields');
       if (host) host.innerHTML = recurFieldsHtml(s.form.recur);
+      _initPickers();
     }
+    if (id === 'jb-result') { const hint = _el('jb-result-hint'); if (hint) hint.textContent = resultHint(_val('jb-result')); }
     _schedulePreview();
   });
   body?.addEventListener('input', (e) => {
@@ -348,13 +386,14 @@ export const JobsDialog = {
     if (!Session.isAdmin()) return;
     const { job, duplicate } = opts;
     const mode: DialogMode = job && !duplicate ? 'edit' : 'new';
-    // A new job is seeded from the server's parameter defaults (GET /jobs/types), else the product defaults (propose).
+    // A new job is seeded from the server's parameter defaults (GET /jobs/types), else the product defaults (apply).
     const form = job ? jobToForm(job) : defaultJobForm(opts.plant ?? '', 'optimizer.plant', opts.defaults ?? null);
     if (duplicate) form.name = '';
     _s = { mode, job: job && !duplicate ? job : null, form, targets: new Set(), filter: '', busy: false, baseline: JSON.stringify(form), previewSeq: 0, previewTimer: null, onSaved: opts.onSaved ?? null };
     _wire();
     const body = _el('jb-body');
     if (body) body.innerHTML = bodyHtml(form, mode, Session.isAdmin());
+    _initPickers();
     mkCombobox(_el('jb-plant-host'), allowedPlantList(), {
       value: form.plant, placeholder: t('jobs.f_plant'), id: 'jb-plant', disabled: mode === 'edit',
       onSelect: (v) => { if (!_s) return; _s.form.plant = v; const tz = _el('jb-tz'); if (tz) tz.textContent = plantTimezone(v) || t('jobs.tz_unknown'); _schedulePreview(); },
@@ -434,6 +473,7 @@ export const JobsDialog = {
   close(): void {
     if (_s?.previewTimer) clearTimeout(_s.previewTimer);
     _s = null;
+    _destroyPickers();
     Modal.close('modal-job-edit');
   },
 

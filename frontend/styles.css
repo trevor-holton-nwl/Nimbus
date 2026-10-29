@@ -8228,28 +8228,27 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .job-facts dd { margin: 0; font-size: 12.5px; }
 .job-run-error { padding: 8px 10px; margin-bottom: 10px; background: var(--err-soft); color: var(--err); border-radius: var(--r-md); font-size: 12.5px; white-space: pre-wrap; }
 .job-steps { margin-bottom: 10px; }
+/* One neutral fill for every step (width = share of the run); only the failed step takes the error colour. */
 .job-steps-bar { display: flex; height: 10px; gap: 2px; border-radius: var(--r-sm); overflow: hidden; background: var(--bg-strong); }
-.job-step { display: block; min-width: 2px; }
-.job-step-0 { background: var(--accent); }
-.job-step-1 { background: var(--info); opacity: 0.65; }
-.job-step-2 { background: var(--ok); }
-.job-step-3 { background: var(--fg-faint); }
+.job-step { display: block; min-width: 2px; background: var(--fg-mute); }
+.job-step-failed { background: var(--err); }
 .job-steps-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; }
-.job-step-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
-.job-tiles { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.job-tile { min-width: 96px; padding: 8px 12px; background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-lg); }
-.job-tile.warn { background: var(--warn-soft); }
-.job-tile-n { font-size: 14px; font-weight: 700; }
-.job-tile-l { font-size: 11.5px; color: var(--fg-mute); }
+.job-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.job-tiles .kpi-tile { padding: 10px 12px; }
+.job-tiles .kpi-tile .v { font-size: 18px; overflow-wrap: anywhere; }
 .job-log-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 6px; }
 .job-log-bar #jr-q { flex: 1 1 160px; min-width: 120px; }
-.job-log { height: 360px; overflow: auto; background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-md); font-size: 12px; }
+/* Flexible height: about half the viewport, never under 240 px nor over 60 vh. */
+.job-log { height: 50vh; min-height: 240px; max-height: 60vh; overflow: auto; background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-md); font-size: 12px; }
 .job-log:focus-visible { outline: 2px solid var(--accent); }
 .job-log-empty { padding: 16px; color: var(--fg-mute); font-size: 12.5px; }
 .job-log-empty[hidden] { display: none; }
-.job-log-row { display: grid; grid-template-columns: 112px 56px 110px minmax(0, 1fr) 72px; gap: 8px; min-height: 20px; line-height: 20px; padding: 0 8px; }
+.job-log-row { display: grid; grid-template-columns: 60px 112px 56px 110px minmax(0, 1fr) 72px; gap: 8px; min-height: 20px; line-height: 20px; padding: 0 8px; }
 .job-log-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
-.job-log-dur, .job-log-at { color: var(--fg-mute); }
+.job-log-dur, .job-log-at, .job-log-el { color: var(--fg-mute); }
+.job-log-toggle { background: none; border: 0; padding: 0 6px 0 0; color: var(--fg-mute); font: inherit; cursor: pointer; }
+.job-log-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.job-log-data { grid-column: 1 / -1; margin: 0 0 8px; padding: 4px 8px; max-height: 160px; overflow: auto; font-size: 11px; line-height: 16px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-subtle); border-radius: var(--r-sm); color: var(--fg); }
 .job-log-lv { font-weight: 600; }
 .job-lv-warn .job-log-lv, .job-lv-warn .job-log-msg { color: var(--warn-text); }
 .job-lv-error .job-log-lv, .job-lv-error .job-log-msg { color: var(--err); }
@@ -8263,8 +8262,43 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .job-strip-none { color: var(--fg-faint); }
 .job-upcoming { margin: 12px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 
+/* Health strip (above the three views): kpi-tile buttons that filter the Runs list, plus the scheduler heartbeat. */
+.job-health { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; }
+.job-health-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.job-health-tiles .kpi-tile { padding: 10px 14px; }
+.kpi-tile .v.job-kpi-text { font-size: 14px; line-height: 32px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-health-tiles .kpi-tile .d { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-heartbeat { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+/* A static dot (no animation) marks a running run; the text label always follows it. */
+.job-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 5px; vertical-align: middle; }
+.job-result { margin-right: 4px; }
+.job-longer[hidden] { display: none; }
+.job-chip { align-self: flex-end; }
+/* Loading placeholders keep the row height; the host carries aria-busy. */
+.job-skel { background: var(--bg-strong); border-radius: var(--r-sm); }
+.job-skel-row { height: 37px; margin-bottom: 4px; }
+.job-sel { width: 32px; }
+.job-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; margin-bottom: 8px; background: var(--bg-subtle); border: 1px solid var(--line); border-radius: var(--r-md); }
+.job-bulk[hidden] { display: none; }
+.job-bulk-n { font-size: 12.5px; font-weight: 600; margin-right: 4px; }
+/* Run detail: error panel, dry-run banner and proposal table. */
+.job-error-panel { padding: 10px 12px; margin-bottom: 10px; background: var(--err-soft); border: 1px solid var(--err); border-radius: var(--r-md); }
+.job-error-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--err); }
+.job-error-msg { margin-top: 6px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
+.job-error-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.job-banner { padding: 8px 12px; margin-bottom: 8px; background: var(--info-soft); color: var(--info); border-radius: var(--r-md); font-size: 12.5px; font-weight: 600; }
+.job-proposal { margin-bottom: 12px; }
+#jr-prop-body { overflow-x: auto; }
+.job-prop-note { font-size: 12px; color: var(--fg-mute); margin-bottom: 4px; }
+.job-prop-warn { padding: 6px 8px; margin-bottom: 6px; background: var(--warn-soft); color: var(--warn-text); border-radius: var(--r-md); font-size: 12.5px; }
+.job-prop-row { display: grid; grid-template-columns: minmax(120px, 1.3fr) 90px minmax(130px, 1fr) minmax(130px, 1fr) 80px minmax(110px, 1fr); gap: 8px; min-width: 680px; height: 28px; line-height: 28px; padding: 0 8px; font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.job-prop-head { font-size: 11.5px; font-weight: 600; color: var(--fg-mute); background: var(--bg-subtle); border: 1px solid var(--line); border-bottom: 0; border-radius: var(--r-md) var(--r-md) 0 0; }
+.job-prop-stale { color: var(--fg-mute); }
+.job-prop-list { height: 280px; max-height: 40vh; min-width: 680px; overflow: auto; background: var(--bg-elev); border: 1px solid var(--line); border-radius: 0 0 var(--r-md) var(--r-md); }
+.job-prop-list:focus-visible { outline: 2px solid var(--accent); }
+
 @media (max-width: 1100px) {
-  .job-log-row { grid-template-columns: 96px 52px minmax(0, 1fr) 64px; }
+  .job-log-row { grid-template-columns: 56px 96px 52px minmax(0, 1fr) 64px; }
   .job-log-step { display: none; }
 }
 @media (max-width: 900px) {
@@ -8275,7 +8309,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
   .job-copy-list { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
 }
 @media (max-width: 720px) {
-  .job-log-row { grid-template-columns: 56px minmax(0, 1fr); }
+  .job-log-row { grid-template-columns: 52px 48px minmax(0, 1fr); }
   .job-log-at, .job-log-dur { display: none; }
-  .job-table th:nth-child(3), .job-table td:nth-child(3) { display: none; }
+  .job-col-recur { display: none; }
 }
