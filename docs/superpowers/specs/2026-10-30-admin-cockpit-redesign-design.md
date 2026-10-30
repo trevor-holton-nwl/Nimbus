@@ -101,6 +101,7 @@ Pure modules `unified-log.mts` and `unified-log-pane.mts`:
   - `sources: Set<LogSource>`, multi-select; an empty set means all. Rendered as a checkbox group (`fieldset.ulog-sources`) with live counts per source; counts come from the level/user/plant/q-filtered set so they say what each box would add. All / None links.
   - `plant: '' | string`. Empty means no plant filter (default: the tab opens as a system-wide log). When set, keep entries whose `plant === plant` **or whose `plant` is null** (global entries: backend rows without a plant context, browser rows without one, scheduler heartbeat); entries carrying a different plant drop. Unticking Backend and Browser with a plant set therefore yields a pure plant log with no extra mode.
   - `user` exact, case-insensitive; `q` over text, user, rid, errorCode.
+  - `actionId?`, `orderId?`, `runId?`: optional exact (case-insensitive) matches on the entry's join key, applied when set; `q` semantics are unchanged. The rail's "Filter list to this" sets the matching field (request: `q = rid`; action: `actionId`; order: `orderId`; run: `runId`; user window: `user`). Each active exact field shows as a chip in `#ulog-note` with a clear (x); the fields persist with the rest of the filter and `sourceCounts` honours them.
 - `sourceCounts(entries, filterWithoutSources) -> Record<LogSource, number>`.
 - `relatedTo(entry, all) -> RelatedGroup[]`.
 

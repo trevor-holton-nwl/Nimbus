@@ -4015,6 +4015,7 @@ window.__NIMBUS_LOCALES.de = {
   'ulog.rel_run': 'Gleicher Job-Lauf #{{id}}',
   'ulog.rel_user_window': 'Gleicher Benutzer innerhalb von 5 Min. (möglich, über die Zeit verknüpft)',
   'ulog.filter_to_this': 'Liste darauf filtern',
+  'ulog.clear_exact': 'Diesen Filter entfernen',
   'btn.copy_json': 'JSON kopieren',
   'pipe.db_load': 'DB-Ladevorgang',
   'pipe.plant_filter': 'Werk {{plant}}',

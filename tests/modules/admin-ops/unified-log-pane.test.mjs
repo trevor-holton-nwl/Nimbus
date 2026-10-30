@@ -21,7 +21,7 @@ function mkEl(tag, id) {
     querySelector(sel) { return sel === '.ulog-count' ? (n._count ?? null) : null; },
     querySelectorAll(sel) { return sel.includes('input[data-src]') ? (n._boxes ?? []) : []; },
     get textContent() { return n._text; },
-    set textContent(v) { n._text = v; if (v === '') n.children = []; },
+    set textContent(v) { n._text = v; n.children = []; },
   };
   return n;
 }
@@ -173,6 +173,44 @@ test('Filter list to this sets q (or user for the time window)', async () => {
   UnifiedLogPane.select(UnifiedLogPane._state().entries.find((e) => e.source === 'backend' && e.level === 'error').key);
   btn('user_window').fire('click');
   assert.equal(UnifiedLogPane._state().filter.user, 'alice');
+});
+
+test('Filter list to this sets the exact id field, not q, for action / order', async () => {
+  const els = await boot();
+  selectErr(els).fire('click');
+  const btn = (kind) => els['ulog-rail-body'].children.find((c) => c.dataset.kind === kind).children.find((c) => c.attrs['data-rail-filter']);
+  btn('action').fire('click');
+  let f = UnifiedLogPane._state().filter;
+  assert.equal(f.actionId, 'a1'); assert.equal(f.q, '');
+  btn('order').fire('click');
+  f = UnifiedLogPane._state().filter;
+  assert.equal(f.orderId, 'o1'); assert.equal(f.q, '');
+  assert.ok(JSON.parse(store.get('nimbus.ulog.filter')).actionId === 'a1');
+});
+
+test('the exact-filter chip shows in the note and clears the field', async () => {
+  const els = await boot();
+  UnifiedLogPane.setFilter({ actionId: 'a1' });
+  const chip = els['ulog-note'].children.find((c) => c.attrs['data-exact-chip'] === 'actionId');
+  assert.ok(chip, 'chip rendered');
+  assert.ok(rowKeys(els).length > 0);
+  chip.fire('click');
+  assert.equal(UnifiedLogPane._state().filter.actionId, '');
+  assert.equal(els['ulog-note'].children.filter((c) => c.attrs['data-exact-chip']).length, 0);
+});
+
+test('the exact filter restores from localStorage', () => {
+  installDom();
+  store.set('nimbus.ulog.filter', JSON.stringify({ level: 'all', sources: [], user: '', plant: '', q: '', runId: '7' }));
+  UnifiedLogPane.init();
+  assert.equal(UnifiedLogPane._state().filter.runId, '7');
+});
+
+test('Space selects a row like Enter', async () => {
+  const els = await boot();
+  const row = selectErr(els);
+  row.fire('keydown', { key: ' ', target: row });
+  assert.ok(UnifiedLogPane._state().selectedKey);
 });
 
 test('selection survives a repaint by key', async () => {

@@ -157,7 +157,12 @@ export function mergeEntries(lists: UnifiedEntry[][], limit = 500): UnifiedEntry
   return all.slice(0, limit);
 }
 
-export interface LogFilter { level: 'all' | LogLevel; sources: Set<LogSource>; user: string; plant: string; q: string }
+/** actionId / orderId / runId are optional exact (case-insensitive) matches on the entry's join key; q keeps its
+ *  substring semantics (text / user / rid / errorCode). Unset or '' means no constraint. */
+export interface LogFilter {
+  level: 'all' | LogLevel; sources: Set<LogSource>; user: string; plant: string; q: string;
+  actionId?: string; orderId?: string; runId?: string;
+}
 
 const _LEVEL_OK: Record<'all' | LogLevel, (l: LogLevel) => boolean> = {
   all: () => true,
@@ -172,6 +177,10 @@ function _match(e: UnifiedEntry, f: LogFilter, useSources: boolean): boolean {
   if (f.plant !== '' && !(e.plant === f.plant || e.plant === null)) return false;
   const u = f.user.trim().toLowerCase();
   if (u && (e.user ?? '').toLowerCase() !== u) return false;
+  for (const [want, have] of [[f.actionId, e.actionId], [f.orderId, e.orderId], [f.runId, e.runId]] as const) {
+    const w = (want ?? '').trim().toLowerCase();
+    if (w && (have ?? '').toLowerCase() !== w) return false;
+  }
   const q = f.q.trim().toLowerCase();
   if (q) {
     const hay = [e.text, e.user, e.rid, e.errorCode].map(x => (x ?? '').toLowerCase());

@@ -125,3 +125,18 @@ test('relatedTo: group order, membership, possible flag, excludes self, empty', 
   assert.deepEqual(U.relatedTo(E({ key: 'lonely', user: null }), l), []);
   assert.equal(U.relatedTo(sel, l, 2_000_000).find(x => x.kind === 'user_window').entries.length, 2);
 });
+
+test('exact actionId / orderId / runId filters match whole ids, case-insensitively, and q is unchanged', () => {
+  const l = [E({ key: 'a', actionId: 'ACT-1', text: 'ACT-1 mention' }), E({ key: 'b', actionId: 'ACT-10' }), E({ key: 'c', orderId: 'o1' }), E({ key: 'd', runId: '7' }), E({ key: 'e', text: 'act-1 only in text' })];
+  assert.deepEqual(U.filterEntries(l, F({ actionId: 'act-1' })).map(x => x.key), ['a']);
+  assert.deepEqual(U.filterEntries(l, F({ orderId: 'O1' })).map(x => x.key), ['c']);
+  assert.deepEqual(U.filterEntries(l, F({ runId: '7' })).map(x => x.key), ['d']);
+  assert.deepEqual(U.filterEntries(l, F({ actionId: '' })).length, 5);
+  assert.deepEqual(U.filterEntries(l, F({ q: 'act-1' })).map(x => x.key), ['a', 'e']);
+});
+
+test('sourceCounts honours the exact id filters', () => {
+  const l = [E({ source: 'backend', actionId: 'a1' }), E({ source: 'events', actionId: 'a1' }), E({ source: 'events', actionId: 'a2' }), E({ source: 'sap' })];
+  const c = U.sourceCounts(l, F({ actionId: 'a1' }));
+  assert.equal(c.backend, 1); assert.equal(c.events, 1); assert.equal(c.sap, 0);
+});

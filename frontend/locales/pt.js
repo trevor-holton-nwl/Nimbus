@@ -3975,6 +3975,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ulog.rel_run': 'Mesma execução de tarefa #{{id}}',
   'ulog.rel_user_window': 'Mesmo utilizador em 5 min (possível, ligado pelo tempo)',
   'ulog.filter_to_this': 'Filtrar a lista por isto',
+  'ulog.clear_exact': 'Remover este filtro',
   'btn.copy_json': 'Copiar JSON',
   'pipe.db_load': 'Carga da BD',
   'pipe.plant_filter': 'Fábrica {{plant}}',

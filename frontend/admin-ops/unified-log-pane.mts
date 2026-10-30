@@ -5,6 +5,10 @@
 // Lifecycle (the JobsAdmin shape): AdminCockpit._setSub('logs') calls init() once, render() on every entry and
 // setActive(true); leaving the sub-tab calls setActive(false). The 30 s poll runs only while active and the
 // document is visible. Text is always written with textContent (log text is untrusted).
+//
+// Caps: each read is bounded server-side (200 backend/audit, 100 events, 50 runs); the merged set is capped at
+// MERGE_LIMIT = 2000 newest entries, and the list renders SHOW_FIRST = 500 rows, growing by SHOW_STEP = 200 per
+// "Show more" up to the merged set.
 
 import { Util, Toast, ErrorLog } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
@@ -28,6 +32,8 @@ const MERGE_LIMIT = 2000;
 const REL_CAP = 10;
 const ALL_SOURCES: LogSource[] = ['backend', 'frontend', 'audit', 'upload', 'jobs', 'events', 'sap'];
 const LEVELS = ['all', 'error', 'warn', 'info'];
+const EXACT_KEYS = ['actionId', 'orderId', 'runId'] as const;
+const EXACT_WHY = { actionId: 'ulog.rel_action', orderId: 'ulog.rel_order', runId: 'ulog.rel_run' } as const;
 
 type AdminFetch = <T>(path: string, timeoutMs: number, signal?: AbortSignal) => Promise<T>;
 
@@ -89,6 +95,7 @@ function _restore(): void {
     if (typeof o.user === 'string') f.user = o.user;
     if (typeof o.plant === 'string') f.plant = o.plant;
     if (typeof o.q === 'string') f.q = o.q;
+    for (const k of EXACT_KEYS) if (typeof o[k] === 'string' && o[k]) f[k] = o[k] as string;
     _filter = f;
   } catch { /* unreadable or blocked: keep the defaults */ }
 }
@@ -241,6 +248,14 @@ function _paintNote(total: number): void {
   const parts = [_t('ulog.showing', { shown: Math.min(_shown, total), total })];
   if (!_eventsHidden && _eventsPlant) parts.push(_t('ulog.events_for_plant', { plant: _eventsPlant }));
   note.textContent = parts.join(' · ');
+  for (const k of EXACT_KEYS) {
+    const v = _filter[k];
+    if (!v) continue;
+    const chip = _mk('button', 'btn btn-ghost sm ulog-exact-chip', `${_t(EXACT_WHY[k], { rid: v, id: v, order: v })} ×`);
+    chip.type = 'button'; chip.title = _t('ulog.clear_exact'); chip.setAttribute('data-exact-chip', k);
+    chip.addEventListener('click', () => setFilter({ [k]: '' }));
+    note.appendChild(chip);
+  }
 }
 
 function _fmtTs(e: UnifiedEntry): string { return e.ts ? Util.fmtDTPref(e.ts) || e.ts : ''; }
@@ -283,7 +298,7 @@ function _buildRow(e: UnifiedEntry): HTMLElement {
   if (open) row.appendChild(_mk('pre', 'admin-log-ctx ulog-raw', _json(e.raw)));
   row.addEventListener('click', () => select(e.key));
   row.addEventListener('keydown', (ev: KeyboardEvent) => {
-    if (ev.key === 'Enter' && ev.target === row) { ev.preventDefault(); select(e.key); }
+    if ((ev.key === 'Enter' || ev.key === ' ') && ev.target === row) { ev.preventDefault(); select(e.key); }
   });
   return row;
 }
@@ -323,7 +338,11 @@ function _paint(): void {
    Rail
    ------------------------------------------------------------------------- */
 function _filterToGroup(g: RelatedGroup): void {
-  if (g.kind === 'user_window') setFilter({ user: g.key }); else setFilter({ q: g.key });
+  if (g.kind === 'user_window') setFilter({ user: g.key });
+  else if (g.kind === 'action') setFilter({ actionId: g.key });
+  else if (g.kind === 'order') setFilter({ orderId: g.key });
+  else if (g.kind === 'run') setFilter({ runId: g.key });
+  else setFilter({ q: g.key });
 }
 
 function _copyText(text: string, pre: HTMLElement): void {
@@ -408,7 +427,10 @@ function setActive(on: boolean): void {
   if (_poll) { clearInterval(_poll); _poll = null; }
   if (!on) { _ctl?.abort(); return; }
   _poll = setInterval(() => {
-    if (_active && (typeof document === 'undefined' || document.visibilityState === 'visible')) void render();
+    if (!_active || typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+    const tab = document.getElementById('admin-tab');   // the Admin main tab itself must be showing
+    if (tab && !tab.classList.contains('active')) return;
+    void render();
   }, POLL_MS);
 }
 

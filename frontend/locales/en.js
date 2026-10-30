@@ -4218,6 +4218,7 @@ window.__NIMBUS_LOCALES.en = {
   'ulog.rel_run': 'Same job run #{{id}}',
   'ulog.rel_user_window': 'Same user within 5 min (possible, joined by time)',
   'ulog.filter_to_this': 'Filter list to this',
+  'ulog.clear_exact': 'Clear this filter',
   'btn.copy_json': 'Copy JSON',
   'pipe.db_load': 'DB load',
   'pipe.plant_filter': 'Plant {{plant}}',
