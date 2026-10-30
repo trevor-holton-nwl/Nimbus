@@ -244,12 +244,21 @@ test('_setSub dispatches diagnostics and order-maintenance to their renderers', 
 test('every getElementById admin- id used by admin-ui.mts exists in index.html', () => {
   const src = readFileSync(new URL('../../../frontend/admin-ops/admin-ui.mts', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
-  // Ids injected at runtime (not in index.html).
+  // Ids injected at runtime (not in index.html). admin-upload-detail is NOT injected anywhere: a pre-existing
+  // dead target (the distribution-warning zone is silently skipped), allowlisted only so this test pins the rest.
   const LAZY = new Set(['admin-upload-detail', 'admin-backend-log-q', 'admin-backend-log-user', 'admin-log-filter-code', 'admin-diag-refresh', 'admin-diag-storage']);
   const ids = new Set([...src.matchAll(/getElementById\('(admin-[\w-]+)'\)/g)].map(m => m[1]).filter(id => !LAZY.has(id)));
   const missing = [...ids].filter(id => !html.includes(`id="${id}"`));
   assert.deepEqual(missing, []);
   for (const id of ids) assert.equal(html.split(`id="${id}"`).length - 1, 1, `${id} appears once`);
+});
+
+test('_setSub with an unknown sub falls back to overview', () => {
+  const calls = [];
+  const restore = stubAll(ALL_RENDERERS, calls);
+  try { withEmptyDom(() => AdminCockpit._setSub('bogus')); } finally { restore(); }
+  assert.equal(AdminCockpit._activeSub, 'overview');
+  assert.ok(calls.includes('_renderOverview'));
 });
 
 test('no gotoOvTab anywhere in frontend', () => {

@@ -278,6 +278,10 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 
 - [ ] **Step 1: Write the failing test:** `test('delegated click on [data-fix] calls _onSignalFix once with parsed args')`; `test('rerun_now asks for confirmation before restartRun')`; `test('vacuum_analyze calls _runMaintenance("vacuum-analyze", null, ...) after confirm')`; `test('view_logs calls gotoSub("logs") then UnifiedLogPane.setFilter')`; `test('admin-only fix is disabled and non-admin click does nothing')`.
 - [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
+- **Ordering requirement (W1 review):** `JobsAdmin.openRun(id)` assumes the Jobs pane has rendered. `gotoSub('jobs')` starts `JobsAdmin.render()`, which is async (it awaits `JobsClient.types()` on first use, then calls `_setTab(_tab)`), so an `openRun` issued right after `gotoSub('jobs')` can be overwritten when `render` resumes. In `open_run`, call `AdminCockpit.gotoSub('jobs')`, then `await JobsAdmin.render()` (idempotent), then `JobsAdmin.openRun(id)`. Do not fix this inside `jobs-pane.mts`.
+- **W1 settled decision:** the `#admin-tab .admin-ov-tabs` CSS rule in `styles.css` stays, because the Jobs pane's inner nav (`#admin-jobs-pane .admin-ov-tabs`) uses that class; the Step in W1.3 that drops it is superseded.
+- **W1 finding (pre-existing, deferred):** `#admin-upload-detail` is read in the upload-success path but exists neither in `index.html` nor at runtime, so the distribution warning there is silently skipped.
+
 - [ ] **Step 3: Implement** `_onSignalFix` and detail strips (last 3 runs; tables by dead % desc cap 8 with per-row Vacuum; pipeline step counts with the existing deltas).
 - [ ] **Step 4: Run and expect pass.** Same command.
 - [ ] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): quick-fix dispatch and Details strips on the Signal board" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.

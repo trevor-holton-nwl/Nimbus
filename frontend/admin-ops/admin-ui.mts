@@ -474,7 +474,8 @@ export const AdminCockpit = {
   gotoSub(sub: AdminSub): void { AdminCockpit._setSub(sub); },
 
   _setSub(sub: string | undefined): void {
-    const cur = sub ?? 'overview';
+    const known = ['overview', 'logs', 'diagnostics', 'order-maintenance', 'jobs', 'manage', 'interface', 'security', 'system-config', 'table-browser'];
+    const cur = sub && known.includes(sub) ? sub : 'overview';
     AdminCockpit._activeSub = cur;
     document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) => {
       b.classList.toggle('active', b.dataset.sub === cur);
@@ -2856,7 +2857,7 @@ export const AdminCockpit = {
 
   /* ---------------------------------------------------------------------
      THREAD PROFILER PANEL — PerfMonitor ring-buffer stats table.
-     Rendered into #admin-ov-thread on tab activation and on each
+     Rendered into #admin-perf-tbody (Diagnostics pane) on tab activation and on each
      PerfMonitor notification (debounced 250 ms by PerfMonitor itself).
      --------------------------------------------------------------------- */
   _refreshThreadPane(): void {
