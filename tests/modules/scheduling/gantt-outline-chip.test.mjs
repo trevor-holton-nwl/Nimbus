@@ -21,9 +21,19 @@ test('the shell shows the chip only while focusTaskIds() is set and Clear calls 
   assert.match(src, /setFocusTaskIds\(null\)/);
 });
 
+test('legend swatch uses lg-outlined; lg-focus stays the scene hover class only', () => {
+  const html = read('index.html');
+  const css = read('styles.css');
+  assert.doesNotMatch(html, /class="[^"]*\blg-focus\b/, 'no legend element may carry the scene class lg-focus');
+  assert.match(html, /lg-order-standard lg-outlined/);
+  assert.match(css, /\.lg-outlined\s*\{\s*outline:\s*2px dashed/);
+  assert.doesNotMatch(css, /^\.lg-focus\s*\{/m);
+  assert.match(css, /\.lg-scene\.lg-focus \.lg-el:not\(\.is-on\)/);
+});
+
 test('CSS: alert-focus is a dashed ink outline; the red conflict outline and its legend names are gone', () => {
   const css = read('styles.css');
   assert.match(css, /\.vis-item\.alert-focus\s*\{[^}]*outline:\s*2px dashed var\(--fg\) !important/);
   assert.doesNotMatch(css, /conflict-order|\.lg-conflict|\.lg-nav-bar\.conflict/);
-  assert.match(css, /\.row-expanded \.vis-item\.vis-range\s*\{\s*outline:\s*1px solid var\(--bg-elev\)/);
+  assert.match(css, /\.row-expanded \.vis-item\.vis-range:is\(\.order-standard, \.order-firmed\)\s*\{\s*outline:\s*1px solid var\(--bg-elev\)/);
 });

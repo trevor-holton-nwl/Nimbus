@@ -190,7 +190,7 @@ export function recompute(): void {
     const prefId = resolveActiveProfileId(plant, Store.userSettings as ProfileSettingsArg, Store.roleDefaults as ProfileSettingsArg, available);
     set = _buildSet(plant, prefId, available, acks);
     // "View as" builds a second set only when it differs from the default; otherwise the view shares the default's
-    // content (a shallow copy, taken before the focus overrides below replace the task maps on `set` only).
+    // content (a shallow copy, taken before the focus is resolved into each set).
     view = _sessionProfile && _sessionProfile !== prefId
       ? _buildSet(plant, _sessionProfile, available, acks)
       : { ...set };
@@ -259,12 +259,12 @@ export const AlertProfileMatches = {
    * the set's own alerts name (and are not fully acknowledged); the Gantt outlines them while the fills stay profile-based.
    * null clears it. Fires the fanout; a plant change clears it.
    */
-  /** The orders the Gantt outlines (`current().focusIds`), or null when no focus is requested. */
-  focusTaskIds(): ReadonlySet<string> | null { return _current.focusIds; },
   setFocusTaskIds(ids: Iterable<string> | null): void {
     const next = ids ? new Set(ids) : null;
     if (!next && !_focusTaskIds) return;   // nothing to clear: no recompute, no fanout
     _focusTaskIds = next;
     recompute();
   },
+  /** The orders the Gantt outlines (`current().focusIds`), or null when no focus is requested. */
+  focusTaskIds(): ReadonlySet<string> | null { return _current.focusIds; },
 };

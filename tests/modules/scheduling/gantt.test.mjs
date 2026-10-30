@@ -1107,6 +1107,20 @@ test('Timeline._profileMatchClasses: D8 under the built-in profile, error orders
   assert.deepEqual(Timeline._profileMatchClasses('pm-a'), [], 'a custom profile with no category stays plain');
 });
 
+test('Timeline._profileMatchClasses: D8 ring follows the acknowledgement rule', (t) => {
+  const m = _pmHarness(t);
+  const prior = { profile: m.profile };
+  t.after(() => { m.profile = prior.profile; });
+  m.categoryByTask = new Map();
+  m.sevByTask = new Map([['pm-a', 'err']]);
+  m.profile = { ...m.profile, builtIn: true };
+  Store._state.alerts = [{ id: 'al-1', taskId: 'pm-a', type: 'overload', sev: 'err' }];
+  m.acked = new Map([['al-1', { alertId: 'al-1' }]]);
+  assert.deepEqual(Timeline._profileMatchClasses('pm-a'), [], 'every alert acked: no ring');
+  Store._state.userSettings = { ...Store._state.userSettings, alertsShowAcknowledged: true };
+  assert.deepEqual(Timeline._profileMatchClasses('pm-a'), ['profile-match', 'profile-match-err'], 'show-acknowledged restores the ring');
+});
+
 test('navBarStyle: profile-match sits between focus and firmed', () => {
   assert.equal(navBarStyle('order-standard profile-match profile-match-setup'), 'profile');
   assert.equal(navBarStyle('order-firmed profile-match'), 'profile');

@@ -1197,11 +1197,13 @@ export const Timeline = {
     const m = AlertProfileMatches.current();
     const cat = m.categoryByTask.get(taskId);
     // D8: the built-in All alerts profile has no categories (no fill); error orders still get the inner ring.
-    if (!cat) return m.profile.builtIn && m.sevByTask.get(taskId) === 'err' ? ['profile-match', 'profile-match-err'] : [];
+    const ringOnly = !cat && m.profile.builtIn && m.sevByTask.get(taskId) === 'err';
+    if (!cat && !ringOnly) return [];
     if (Store.pref('alertsShowAcknowledged') !== true && m.acked.size) {
       const own = Store.alertsByTask().get(taskId);
       if (own && own.length && own.every(a => m.acked.has(a.id))) return [];
     }
+    if (ringOnly) return ['profile-match', 'profile-match-err'];
     return ['profile-match', `profile-match-${cat}`, `profile-match-${m.sevByTask.get(taskId) === 'err' ? 'err' : 'warn'}`];
   },
 
