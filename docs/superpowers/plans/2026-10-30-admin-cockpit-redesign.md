@@ -317,7 +317,7 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: `unified-log.mts` exports (W0.2), `JobsClient.runs`, `ErrorLog.entries()`, `AdminCockpit._fetchJson` (W2.1), `Store.selectedPlant`.
 - Produces: `UnifiedLogPane = { init(): void; render(): Promise<void>; setActive(on: boolean): void; setFilter(f: Partial<LogFilter>): void; _state(): { entries: UnifiedEntry[]; filter: LogFilter; notices: string[] } }`.
 
-- [ ] **Step 1: Write the failing test** (fake DOM, stubbed fetch):
+- [x] **Step 1: Write the failing test** (fake DOM, stubbed fetch):
   - `test('render fetches six sources plus events for the selected plant only')`: assert URLs requested; no per-plant fan-out.
   - `test('a failed source becomes a notice chip, others still render')`; `test('401 on /audit/log is a notice, not an error')` (review focus 1).
   - `test('default plant filter is blank, never prefilled')`.
@@ -326,10 +326,10 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
   - `test('render cap 500 with Show more')`.
   - `test('setActive(false) clears the 30 s poll')`.
   - `test('request-id chip sets q to the rid')`.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/unified-log-pane.test.mjs`.
-- [ ] **Step 3: Implement** the pane: `allSettled` over sources, `/schedule-events/{plant}/recent` hidden with `ulog.events_for_plant` note or a notice on 404, 250 ms debounce for text, Clear row reusing the four existing button ids, Export JSON and Copy filtered, expandable raw rows reusing `.admin-log-row` with `.ulog-src` badge.
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/unified-log-pane.mts frontend/index.html frontend/styles.css frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/unified-log-pane.test.mjs` then `git commit -m "feat(admin): Logs sub-tab with merged timeline, source checkboxes and persisted filter" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/unified-log-pane.test.mjs`.
+- [x] **Step 3: Implement** the pane: `allSettled` over sources, `/schedule-events/{plant}/recent` hidden with `ulog.events_for_plant` note or a notice on 404, 250 ms debounce for text, Clear row reusing the four existing button ids, Export JSON and Copy filtered, expandable raw rows reusing `.admin-log-row` with `.ulog-src` badge.
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/unified-log-pane.mts frontend/index.html frontend/styles.css frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/unified-log-pane.test.mjs` then `git commit -m "feat(admin): Logs sub-tab with merged timeline, source checkboxes and persisted filter" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W3.2: context rail
 
@@ -341,11 +341,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: `relatedTo(entry, all): RelatedGroup[]` (W0.2).
 - Produces: `UnifiedLogPane.select(key: string | null): void`; rail DOM with one section per `RelatedGroup` (why-line, "Filter list to this" button, entries) and a footer `<pre>` plus Copy JSON.
 
-- [ ] **Step 1: Write the failing test:** `test('clicking a row or pressing Enter selects it and fills the rail')`; `test('rail groups render in order request, action, order, job_run, user_window')`; `test('possible label only on the user-window group')`; `test('Filter list to this applies the group filter')`; `test('selection survives the 30 s repaint by key')`; `test('rail shows empty-state text until a row is selected')`; `test('rail footer pre shows raw ctx/exc/changes via textContent')`.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/unified-log-pane.test.mjs`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/unified-log-pane.mts frontend/admin-ops/unified-log.mts frontend/styles.css tests/modules/admin-ops/unified-log-pane.test.mjs` then `git commit -m "feat(admin): Logs context rail (same request, action, order, job run, user window)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('clicking a row or pressing Enter selects it and fills the rail')`; `test('rail groups render in order request, action, order, job_run, user_window')`; `test('possible label only on the user-window group')`; `test('Filter list to this applies the group filter')`; `test('selection survives the 30 s repaint by key')`; `test('rail shows empty-state text until a row is selected')`; `test('rail footer pre shows raw ctx/exc/changes via textContent')`.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/unified-log-pane.test.mjs`.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/unified-log-pane.mts frontend/admin-ops/unified-log.mts frontend/styles.css tests/modules/admin-ops/unified-log-pane.test.mjs` then `git commit -m "feat(admin): Logs context rail (same request, action, order, job run, user window)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W3.3: remove the three old log cards
 
@@ -357,11 +357,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: `UnifiedLogPane` (W3.1).
 - Produces: removal only; the four Clear button ids resolve inside `#admin-logs-pane`.
 
-- [ ] **Step 1: Write the failing test:** `test('old log renderers are removed')` (keys absent on `AdminCockpit`); `test('the four Clear button ids exist exactly once in index.html')`; `test('no remaining reference to a removed element id')` (reuse the W1.1 id-vs-HTML check).
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
-- [ ] **Step 3: Implement the removals.**
-- [ ] **Step 4: Run and expect pass.** Same command plus `npm run lint && npm run typecheck`.
-- [ ] **Step 5: Commit.** `git add frontend/index.html frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "refactor(admin): remove the three old log cards superseded by the Logs sub-tab" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('old log renderers are removed')` (keys absent on `AdminCockpit`); `test('the four Clear button ids exist exactly once in index.html')`; `test('no remaining reference to a removed element id')` (reuse the W1.1 id-vs-HTML check).
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
+- [x] **Step 3: Implement the removals.**
+- [x] **Step 4: Run and expect pass.** Same command plus `npm run lint && npm run typecheck`.
+- [x] **Step 5: Commit.** `git add frontend/index.html frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "refactor(admin): remove the three old log cards superseded by the Logs sub-tab" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W3.4: Fable design pass + Sonnet fix wave
 
