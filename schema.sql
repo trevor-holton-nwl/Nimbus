@@ -2240,6 +2240,15 @@ CREATE TABLE IF NOT EXISTS alert_profile (
     CONSTRAINT chk_alert_profile_rules CHECK (jsonb_typeof(rules) = 'array'),
     CONSTRAINT uq_alert_profile_plant_name UNIQUE (plant, name));
 CREATE INDEX IF NOT EXISTS idx_alert_profile_plant ON alert_profile(plant, name);
+-- Per-group on/off + colour (mirrors migrations/2026-10-30-2-alert-profile-categories.sql). NULL = derive from rules.
+ALTER TABLE alert_profile ADD COLUMN IF NOT EXISTS categories JSONB NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_alert_profile_categories') THEN
+    ALTER TABLE alert_profile ADD CONSTRAINT chk_alert_profile_categories
+      CHECK (categories IS NULL OR jsonb_typeof(categories) = 'object');
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS alert_ack (
     plant TEXT NOT NULL, alert_id TEXT NOT NULL, acknowledged_by TEXT NOT NULL,

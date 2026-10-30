@@ -39,7 +39,7 @@ const GATE = {
   labelContrast: 4.5,
   pairDE: 15,
   barDE: 15,
-  barCvdDE: 6,           // measured floor: light magenta vs --bar-standard (protan/deutan) 6.01
+  barCvdDE: 6,           // measured floor: light magenta vs --bar-standard (protan/deutan) 6.01; the 6.0 gate is 8-bit quantised (light magenta vs blue is 6.0059)
   lightBgContrast: 1.8,  // measured floor: light amber vs --bg 1.83
   ringContrast: 2,
 };

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { AlertProfileClient } from '../../../frontend/insights/alert-profile-client.mjs';
 import { AlertAcksClient } from '../../../frontend/insights/alert-acks-client.mjs';
-import { AlertProfileMatches as M, applyCategoryColors, categoryColorSignature } from '../../../frontend/insights/alert-profile-matches.mjs';
+import { AlertProfileMatches as M, applyCategoryColors, categoryColorSignature, _resetColorSignature } from '../../../frontend/insights/alert-profile-matches.mjs';
 import {
   categoryColorDecls, ALL_ALERTS_PROFILE, PALETTE, DEFAULT_CATEGORY_COLORS, ALERT_CATEGORY_ORDER,
 } from '../../../frontend/insights/alert-profiles.mjs';
@@ -134,7 +134,9 @@ test('"View as" does not recolour the body (the page paints its own #alerts-tab)
   const body = fakeEl();
   globalThis.document = { body };
   profiles = [colored({ capacity: 'sky' })];
+  _resetColorSignature();                           // the module-level signature carries over from earlier tests
   M.recompute();
+  assert.equal(body.props.get('--bar-pm-capacity'), 'var(--pal-amber)', 'the default (All alerts) colours were written');
   M.setSessionProfile('p1');
   assert.notEqual(body.props.get('--bar-pm-capacity'), 'var(--pal-sky)');
   assert.equal(M.view().profile.id, 'p1');

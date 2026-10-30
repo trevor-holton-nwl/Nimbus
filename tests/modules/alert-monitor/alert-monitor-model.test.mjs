@@ -5,7 +5,7 @@ import {
   profileWindow, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   MONITOR_GROUP_BYS, MONITOR_SORTS, groupCounts, rowActionsFor,
 } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
-import { ALL_ALERTS_PROFILE } from '../../../frontend/insights/alert-profiles.mjs';
+import { ALL_ALERTS_PROFILE, ALERT_CATEGORY_ORDER, DEFAULT_CATEGORY_COLORS } from '../../../frontend/insights/alert-profiles.mjs';
 
 const EN = {
   'am.window_rule': '{{types}} · D{{from}}–{{to}} · {{sev}}',
@@ -121,7 +121,7 @@ test('windowSummary: a single rule renders types, day window and severity', () =
 test('windowSummary: no day bounds reads "any day"; many types collapse to categories; rules are joined', () => {
   const many = rule({ types: ['overlap', 'tool-conflict', 'overload'], minSev: 'warn' });
   const s = windowSummary(prof([many, rule({ types: ['overlap'], dayFrom: 8, dayTo: null })]), t);
-  assert.equal(s, 'Capacity, Scheduling conflicts · any day · warnings and errors | Order overlap · D8–… · all severities');
+  assert.equal(s, 'Capacity, Scheduling conflicts · any day · all severities | Order overlap · D8–… · all severities');
 });
 
 test('windowSummary names Planning when a rule spans the planning types', () => {
@@ -195,4 +195,29 @@ test('a tool conflict with zero available copies is not movable and offers no Fi
   assert.equal(rowActionsFor(zero).fix, false);
   assert.equal(rowActionsFor(some).fix, true);
   assert.equal(rowActionsFor(ovl).fix, true);
+});
+
+// ---- W3: category-aware window + summary ----
+const cats = (on) => Object.fromEntries(ALERT_CATEGORY_ORDER.map(c => [c, { on: on.includes(c), color: DEFAULT_CATEGORY_COLORS[c] }]));
+const cprof = (rules, on) => ({ ...prof(rules), categories: cats(on) });
+
+test('profileWindow (categories): every ON category needs an applicable rule, all sharing one window; OFF-only rules are ignored', () => {
+  const w = { dayFrom: 0, dayTo: 7 };
+  assert.deepEqual(profileWindow(cprof([rule({ types: ['late'], ...w }), rule({ types: ['overlap'], ...w })], ['late', 'conflicts'])), { from: 0, to: 7 });
+  assert.equal(profileWindow(cprof([rule({ types: ['late'], ...w })], ['late', 'conflicts'])), null, 'conflicts has no applicable rule');
+  assert.equal(profileWindow(cprof([rule({ types: ['late'], ...w }), rule({ types: ['overlap'], dayFrom: 1, dayTo: 7 })], ['late', 'conflicts'])), null, 'differing windows');
+  assert.deepEqual(profileWindow(cprof([rule({ types: ['late'], ...w }), rule({ types: ['overlap'], dayFrom: 9, dayTo: 12 })], ['late'])), { from: 0, to: 7 }, 'a rule for an OFF category is ignored');
+  assert.equal(profileWindow(cprof([], ['late'])), null);
+  assert.equal(profileWindow(cprof([rule({ types: ['late'], dayFrom: 0 })], ['late'])), null, 'open bound');
+});
+
+test('windowSummary (categories): lists the ON category labels, not rule types', () => {
+  const s = windowSummary(cprof([rule({ types: ['overlap'], dayFrom: 0, dayTo: 7, minSev: 'err' })], ['conflicts', 'late']), t);
+  assert.equal(s, 'Late · any day · all severities | Scheduling conflicts · D0–7 · errors only');
+  assert.equal(windowSummary(cprof([], ALERT_CATEGORY_ORDER), t), 'All alerts · any day · all severities');
+  assert.equal(windowSummary(cprof([rule({ types: ['overlap'] })], ['late']), t), 'Late · any day · all severities', 'a rule for an OFF category adds no line');
+});
+
+test('windowSummary: a stored minSev warn reads as all severities', () => {
+  assert.equal(windowSummary(prof([rule({ types: ['overlap'], minSev: 'warn' })]), t), 'Order overlap · any day · all severities');
 });

@@ -2738,6 +2738,8 @@ window.__NIMBUS_LOCALES.es = {
   'ape.err_name_dup': 'Otro perfil de esta planta tiene este nombre',
   'ape.err_name_long': 'El nombre debe tener 60 caracteres o menos',
   'ape.err_no_rules': 'Añada al menos una regla',
+  'ape.err_no_categories': 'Active al menos un grupo de alertas',
+  'ape.err_color': 'Elija uno de los colores de la lista',
   'ape.err_too_many_rules': 'Un perfil puede tener como máximo 20 reglas',
   'ape.err_rule_no_types': 'Elija al menos un tipo de alerta',
   'ape.err_days_range': 'Los días deben ser números enteros de −365 a 365',

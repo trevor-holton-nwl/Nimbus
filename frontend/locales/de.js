@@ -2777,6 +2777,8 @@ window.__NIMBUS_LOCALES.de = {
   'ape.err_name_dup': 'Ein anderes Profil in diesem Werk hat diesen Namen',
   'ape.err_name_long': 'Der Name darf höchstens 60 Zeichen lang sein',
   'ape.err_no_rules': 'Mindestens eine Regel hinzufügen',
+  'ape.err_no_categories': 'Mindestens eine Alarmgruppe einschalten',
+  'ape.err_color': 'Eine der angebotenen Farben wählen',
   'ape.err_too_many_rules': 'Ein Profil kann höchstens 20 Regeln enthalten',
   'ape.err_rule_no_types': 'Mindestens einen Warnungstyp auswählen',
   'ape.err_days_range': 'Tage müssen ganze Zahlen von −365 bis 365 sein',

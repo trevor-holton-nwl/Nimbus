@@ -4,7 +4,7 @@
 import { Config, Util } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
-import type { AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
+import type { AlertProfile, AlertProfileRule, AlertRanking, ProfileCategories } from '../platform/types.mjs';
 import { createPlantLru, AlertApiError } from './plant-lru.mjs';
 
 export interface AlertProfileInput {
@@ -13,6 +13,7 @@ export interface AlertProfileInput {
   description?: string;
   rules: AlertProfileRule[];
   ranking?: AlertRanking;
+  categories?: ProfileCategories | null;
 }
 
 export interface AlertProfilePatch {
@@ -21,6 +22,8 @@ export interface AlertProfilePatch {
   description?: string;
   rules?: AlertProfileRule[];
   ranking?: AlertRanking;
+  /** Explicit null reverts the profile to derived-from-rules categories. */
+  categories?: ProfileCategories | null;
   expected_updated_at?: string | null;
 }
 

@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, ALERT_CATEGORY_ORDER,alertOrderIds, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -67,13 +67,33 @@ const _SCORE_MARK = '\u0002';
  * else null (an open bound, differing windows, no rules, or the built-in All alerts).
  */
 export function profileWindow(profile: AlertProfile | null | undefined): { from: number; to: number } | null {
-  if (!profile || profile.builtIn || !profile.rules?.length) return null;
+  if (!profile || profile.builtIn) return null;
+  if (profile.categories) return _categoryWindow(profile);
+  if (!profile.rules?.length) return null;
   let win: { from: number; to: number } | null = null;
   for (const rule of profile.rules) {
     const from = rule.dayFrom, to = rule.dayTo;
     if (typeof from !== 'number' || typeof to !== 'number') return null;
     if (!win) win = { from, to };
     else if (win.from !== from || win.to !== to) return null;
+  }
+  return win;
+}
+
+/** Stored-categories form: every ON group needs at least one applicable rule and all applicable rules share one whole-day window. */
+function _categoryWindow(profile: AlertProfile): { from: number; to: number } | null {
+  const eff = effectiveCategories(profile);
+  let win: { from: number; to: number } | null = null;
+  for (const cat of ALERT_CATEGORY_ORDER) {
+    if (!eff[cat].on) continue;
+    const applicable = (profile.rules ?? []).filter(r => ruleAppliesTo(r, cat));
+    if (!applicable.length) return null;
+    for (const rule of applicable) {
+      const from = rule.dayFrom, to = rule.dayTo;
+      if (typeof from !== 'number' || typeof to !== 'number') return null;
+      if (!win) win = { from, to };
+      else if (win.from !== from || win.to !== to) return null;
+    }
   }
   return win;
 }
@@ -137,17 +157,41 @@ function _typesText(rule: AlertProfileRule, t: Translate): string {
 }
 
 function _sevText(rule: AlertProfileRule, t: Translate): string {
-  return t(rule.minSev === 'err' ? 'am.window_sev_err' : rule.minSev === 'warn' ? 'am.window_sev_warn' : 'am.window_sev_any');
+  // A stored 'warn' is the same as no limit (every alert is a warning or an error).
+  return t(rule.minSev === 'err' ? 'am.window_sev_err' : 'am.window_sev_any');
 }
 
 /** One-line description of a profile's rules, e.g. "Order overlap · D0–7 · errors only". */
 export function windowSummary(profile: AlertProfile | null | undefined, t: Translate): string {
-  if (!profile || profile.builtIn || !profile.rules?.length) return t('am.window_all');
-  return profile.rules.map(rule => {
+  if (!profile || profile.builtIn) return t('am.window_all');
+  if (profile.categories) return _categorySummary(profile, t);
+  if (!profile.rules?.length) return t('am.window_all');
+  return profile.rules.map(rule => _ruleLine(rule, _typesText(rule, t), t)).join(' | ');
+}
+
+/** Stored-categories form: one line per narrowing rule (named by the ON groups it applies to), plus one for ON groups no rule narrows. */
+function _categorySummary(profile: AlertProfile, t: Translate): string {
+  const eff = effectiveCategories(profile);
+  const on = ALERT_CATEGORY_ORDER.filter(c => eff[c].on);
+  if (!on.length) return t('am.window_all');
+  const label = (cats: readonly AlertCategory[]): string => cats.length === ALERT_CATEGORY_ORDER.length ? t('am.profile_all') : cats.map(c => t(`ape.cat_${c}`)).join(', ');
+  const rules = profile.rules ?? [];
+  const lines: string[] = [];
+  const open = on.filter(c => !rules.some(r => ruleAppliesTo(r, c)));
+  if (open.length) lines.push(_ruleLine({ types: null, dayFrom: null, dayTo: null, minSev: null, minLateHours: null }, label(open), t));
+  for (const rule of rules) {
+    const names = on.filter(c => ruleAppliesTo(rule, c));
+    if (names.length) lines.push(_ruleLine(rule, label(names), t));
+  }
+  return lines.join(' | ');
+}
+
+function _ruleLine(rule: AlertProfileRule, typesText: string, t: Translate): string {
+  {
     const from = rule.dayFrom, to = rule.dayTo;
     const anyDays = from == null && to == null;
     const line = t('am.window_rule', {
-      types: _typesText(rule, t),
+      types: typesText,
       from: anyDays ? _DAY_MARK : (from == null ? '…' : from),
       to: anyDays ? _DAY_MARK : (to == null ? '…' : to),
       sev: _sevText(rule, t),
@@ -155,7 +199,7 @@ export function windowSummary(profile: AlertProfile | null | undefined, t: Trans
     if (!anyDays) return line;
     // Replace the whole "D{from}–{to}" segment (bounded by the template's own separators) with "any day".
     return line.split(' · ').map(seg => seg.includes(_DAY_MARK) ? t('am.window_any_days') : seg).join(' · ');
-  }).join(' | ');
+  }
 }
 
 /**

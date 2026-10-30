@@ -2980,6 +2980,8 @@ window.__NIMBUS_LOCALES.en = {
   'ape.err_name_dup': 'Another profile in this plant has this name',
   'ape.err_name_long': 'Name must be 60 characters or fewer',
   'ape.err_no_rules': 'Add at least one rule',
+  'ape.err_no_categories': 'Turn on at least one alert group',
+  'ape.err_color': 'Pick one of the listed colors',
   'ape.err_too_many_rules': 'A profile can have at most 20 rules',
   'ape.err_rule_no_types': 'Pick at least one alert type',
   'ape.err_days_range': 'Days must be whole numbers from −365 to 365',

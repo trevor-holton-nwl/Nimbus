@@ -2738,6 +2738,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ape.err_name_dup': 'Un autre profil de cette usine porte ce nom',
   'ape.err_name_long': 'Le nom doit comporter 60 caractères au maximum',
   'ape.err_no_rules': 'Ajoutez au moins une règle',
+  'ape.err_no_categories': 'Activez au moins un groupe d\'alertes',
+  'ape.err_color': 'Choisissez l\'une des couleurs proposées',
   'ape.err_too_many_rules': 'Un profil peut comporter 20 règles au maximum',
   'ape.err_rule_no_types': 'Choisissez au moins un type d’alerte',
   'ape.err_days_range': 'Les jours doivent être des nombres entiers de −365 à 365',

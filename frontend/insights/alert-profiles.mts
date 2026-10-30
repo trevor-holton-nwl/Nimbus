@@ -23,7 +23,7 @@
    `plantToday` is always passed in by the caller (start of the plant-local day).
    ========================================================================== */
 
-import type { AlertType, AlertCategory, AlertProfile, AlertProfileRule, AlertRanking, NimbusTask, PaletteName } from '../platform/types.mjs';
+import type { AlertType, AlertCategory, AlertProfile, AlertProfileRule, AlertRanking, NimbusTask, PaletteName, ProfileCategories } from '../platform/types.mjs';
 
 // ---- Dependencies ---------------------------------------------------------------------------
 
@@ -211,10 +211,87 @@ export function ruleMatches(
   return true;
 }
 
+/**
+ * Whether a rule narrows the alerts of `cat`: no type list (applies everywhere) or a list naming at least one type of that
+ * category. Category-level on purpose: a rule `{types:['setup-violated'], dayFrom:0, dayTo:3}` narrows the whole Setup group,
+ * so under a profile that switches Setup on it never lets a `setup-uncovered` alert through (the rule names another type).
+ */
+export function ruleAppliesTo(rule: AlertProfileRule, cat: AlertCategory): boolean {
+  if (rule.types == null) return true;
+  return (rule.types as string[]).some(t => categoryOf(t) === cat);
+}
+
+function _isPaletteName(v: unknown): v is PaletteName {
+  return typeof v === 'string' && (PALETTE as readonly string[]).includes(v);
+}
+
+/**
+ * A profile's seven groups, each `{on, color}`. A stored `categories` map wins; a legacy profile (null/absent) derives it:
+ * a group is on when some rule applies to it, its colour is the default. Within a stored map a missing key is derived the
+ * same way and an unknown colour is replaced by the default. Always a fresh object; the frozen built-in is never written to.
+ */
+export function effectiveCategories(p: AlertProfile): ProfileCategories {
+  const stored = p.categories && typeof p.categories === 'object' ? p.categories : null;
+  const rules = p.rules ?? [];
+  const out = {} as ProfileCategories;
+  for (const cat of ALERT_CATEGORY_ORDER) {
+    const s = stored?.[cat];
+    if (s && typeof s === 'object') {
+      out[cat] = { on: s.on === true, color: _isPaletteName(s.color) ? s.color : DEFAULT_CATEGORY_COLORS[cat] };
+    } else {
+      out[cat] = { on: rules.some(r => ruleAppliesTo(r, cat)), color: DEFAULT_CATEGORY_COLORS[cat] };
+    }
+  }
+  return out;
+}
+
+interface CompiledProfile {
+  rules: AlertProfileRule[];
+  categories: AlertProfile['categories'];
+  cats: ProfileCategories;
+  byCat: Record<AlertCategory, AlertProfileRule[]>;
+}
+
+// Memoised per profile object (never a property on the frozen built-in); re-compiled when rules/categories are replaced.
+const _compiled = new WeakMap<AlertProfile, CompiledProfile>();
+
+function _compile(profile: AlertProfile): CompiledProfile {
+  const hit = _compiled.get(profile);
+  if (hit && hit.rules === profile.rules && hit.categories === profile.categories) return hit;
+  const byCat = {} as Record<AlertCategory, AlertProfileRule[]>;
+  for (const cat of ALERT_CATEGORY_ORDER) byCat[cat] = (profile.rules ?? []).filter(r => ruleAppliesTo(r, cat));
+  const next: CompiledProfile = { rules: profile.rules, categories: profile.categories, cats: effectiveCategories(profile), byCat };
+  _compiled.set(profile, next);
+  return next;
+}
+
+function _narrowMatches(
+  alert: NimbusAlert, task: NimbusTask | undefined, applicable: AlertProfileRule[], plantToday: Date, deps?: ProfileDeps,
+): boolean {
+  return applicable.length === 0 || applicable.some(r => ruleMatches(alert, task, r, plantToday, deps));
+}
+
+/** The group's switch is on AND (no rule narrows the group OR some narrowing rule matches). */
 export function profileMatches(
   alert: NimbusAlert, task: NimbusTask | undefined, profile: AlertProfile, plantToday: Date, deps?: ProfileDeps,
 ): boolean {
-  return profile.rules.some(r => ruleMatches(alert, task, r, plantToday, deps));
+  const c = _compile(profile);
+  const cat = categoryOf(alert.type);
+  return c.cats[cat].on && _narrowMatches(alert, task, c.byCat[cat], plantToday, deps);
+}
+
+/** Per-group alert counts for the editor's live numbers: every switch treated as on, the per-group rules still narrowing. One pass. */
+export function profileCategoryCounts(
+  alerts: NimbusAlert[], tasksById: TaskLookup, profile: AlertProfile, plantToday: Date, deps?: ProfileDeps,
+): Record<AlertCategory, number> {
+  const c = _compile(profile);
+  const out = {} as Record<AlertCategory, number>;
+  for (const cat of ALERT_CATEGORY_ORDER) out[cat] = 0;
+  for (const a of alerts) {
+    const cat = categoryOf(a.type);
+    if (_narrowMatches(a, a.taskId ? tasksById?.[a.taskId] : undefined, c.byCat[cat], plantToday, deps)) out[cat]++;
+  }
+  return out;
 }
 
 export function filterByProfile(
@@ -373,11 +450,13 @@ export interface AlertProfileDraft {
   plant: string;
   name: string;
   rules: AlertProfileRule[];
+  /** Per-group switch + colour; when present it is validated and `rules` may be empty. */
+  categories?: ProfileCategories | null;
 }
 
 export interface ProfileValidation {
   ok: boolean;
-  /** field path -> i18n key. Paths: `name`, `rules`, `rules.<i>.{types|dayFrom|dayTo|days|minLateHours|dup}`. */
+  /** field path -> i18n key. Paths: `name`, `rules`, `categories`, `categories.<cat>.color`, `rules.<i>.{types|dayFrom|dayTo|days|minLateHours|dup}`. */
   errors: Record<string, string>;
 }
 
@@ -401,8 +480,24 @@ export function validateProfile(draft: AlertProfileDraft, existing: AlertProfile
     errors.name = 'ape.err_name_dup';
   }
 
+  const hasCategories = draft.categories != null;
+  if (hasCategories) {
+    const c = draft.categories as unknown;
+    if (typeof c !== 'object' || Array.isArray(c)) errors.categories = 'ape.err_no_categories';
+    else {
+      let anyOn = false;
+      for (const cat of ALERT_CATEGORY_ORDER) {
+        const e = (c as Record<string, unknown>)[cat] as { on?: unknown; color?: unknown } | undefined;
+        if (!e || typeof e !== 'object' || typeof e.on !== 'boolean') { errors.categories = 'ape.err_no_categories'; continue; }
+        if (e.on) anyOn = true;
+        if (!_isPaletteName(e.color)) errors[`categories.${cat}.color`] = 'ape.err_color';
+      }
+      if (!anyOn) errors.categories = 'ape.err_no_categories';
+    }
+  }
+
   const rules = draft.rules ?? [];
-  if (!rules.length) errors.rules = 'ape.err_no_rules';
+  if (!rules.length) { if (!hasCategories) errors.rules = 'ape.err_no_rules'; }
   else if (rules.length > MAX_RULES) errors.rules = 'ape.err_too_many_rules';
 
   const seen = new Set<string>();

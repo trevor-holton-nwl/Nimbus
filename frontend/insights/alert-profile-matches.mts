@@ -164,6 +164,9 @@ export function categoryColorSignature(profile: AlertProfile | null | undefined)
 
 let _colorSig = '';
 
+/** Test hook: forget the last written colour signature so the next recompute writes again. */
+export function _resetColorSignature(): void { _colorSig = ''; }
+
 export function recompute(): void {
   const plant = Store.selectedPlant ?? null;
   let set = _emptySet();

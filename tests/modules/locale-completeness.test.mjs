@@ -869,7 +869,7 @@ const ALERT_MONITOR_KEYS = [
   'ape.day_from', 'ape.day_to', 'ape.days_hint', 'ape.min_sev', 'ape.sev_any', 'ape.sev_warn', 'ape.sev_err',
   'ape.set_mine', 'ape.new_profile', 'ape.duplicate', 'ape.copy_to_plants', 'ape.late_hours', 'ape.err_late_hours',
   'ape.live_range', 'ape.live_matches', 'ape.err_name_required', 'ape.err_name_dup', 'ape.err_name_long',
-  'ape.err_no_rules', 'ape.err_too_many_rules', 'ape.err_rule_no_types', 'ape.err_days_range', 'ape.err_days_order',
+  'ape.err_no_rules', 'ape.err_no_categories', 'ape.err_color', 'ape.err_too_many_rules', 'ape.err_rule_no_types', 'ape.err_days_range', 'ape.err_days_order',
   'ape.err_min_sev', 'ape.err_rule_dup', 'ape.err_stale', 'ape.discard_title', 'ape.discard_confirm',
   'ape.err_save_failed', 'ape.delete_confirm_title', 'ape.delete_confirm_msg', 'ape.delete', 'ape.copy_go',
   'ape.copy_selected', 'ape.not_editable', 'toast.alert_profile_saved', 'toast.alert_profile_deleted',
