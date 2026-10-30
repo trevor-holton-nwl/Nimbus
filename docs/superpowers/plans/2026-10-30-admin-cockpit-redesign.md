@@ -222,17 +222,17 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
   - `_fetchJson<T>(url: string, timeoutMs: number, signal?: AbortSignal): Promise<T>` (throws a typed error carrying `status`).
   - `_refreshOverview(o?: { force?: boolean; clientOnly?: boolean }): Promise<void>`; fields `_ovSeq: number`, `_ovAbort: AbortController | null`, `_ovPaused: boolean`, `_ovSlowAt: number`, `_ovInputs`.
 
-- [ ] **Step 1: Write the failing test:**
+- [x] **Step 1: Write the failing test:**
   - `test('stale overview response is discarded')`: two overlapping refreshes, resolve the first last; assert inputs reflect the second.
   - `test('rejected fetch yields sig.unavailable')`: stub `_fetchJson` to reject for `/health`; assert the Database signal is `err` with `reasonKey 'sig.unavailable'`.
   - `test('401 yields sig.admin_only not err')` (review focus 1).
   - `test('slow tier only on force or older than 5 min')`: count `/diagnostics/db` calls across two non-forced ticks (1 call), then force (2), then advance the clock past 5 min (3).
   - `test('clientOnly does not fetch')`.
   - `test('no plant: Jobs runs and SAP reads skipped')`.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
-- [ ] **Step 3: Implement** per the spec 4.9: one `Promise.allSettled` per tier with per-request timeouts; Jobs and SAP for `Store.selectedPlant` only; keep the last good slow-tier data on failure (review focus 4).
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): two-tier Overview refresh with _fetchJson and stale guard" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
+- [x] **Step 3: Implement** per the spec 4.9: one `Promise.allSettled` per tier with per-request timeouts; Jobs and SAP for `Store.selectedPlant` only; keep the last good slow-tier data on failure (review focus 4).
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): two-tier Overview refresh with _fetchJson and stale guard" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W2.2: polling, pause, refresh, ticker
 
@@ -244,11 +244,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: `_refreshOverview` (W2.1).
 - Produces: `_startHealthPolling(): void` and `_stopHealthPolling(): void` (names unchanged) driving a 30 s tick and a 1 s ticker (`_ovTickTimer`); `_setPaused(on: boolean): void`; Refresh button handler calling `_refreshOverview({force:true})`; Store plant-change event triggers a refresh.
 
-- [ ] **Step 1: Write the failing test:** `test('start is idempotent and stop clears both timers')`; `test('pause skips the tick')` (fake timers: paused -> `_refreshOverview` not called; resumed -> called); `test('refresh forces both tiers')`; `test('leaving overview stops polling')` (already in W1.2; assert both timers).
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): Overview 30 s polling with pause, refresh and refreshed-ago ticker" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('start is idempotent and stop clears both timers')`; `test('pause skips the tick')` (fake timers: paused -> `_refreshOverview` not called; resumed -> called); `test('refresh forces both tiers')`; `test('leaving overview stops polling')` (already in W1.2; assert both timers).
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): Overview 30 s polling with pause, refresh and refreshed-ago ticker" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W2.3: Signal board markup, CSS and renderers
 
@@ -260,11 +260,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: `Signal[]`, `AttentionItem[]`, `mergeEntries`, `filterEntries` (W0), `Util.t`.
 - Produces: `_renderSignals(signals: Signal[]): void`, `_renderAttention(items: AttentionItem[]): void`, `_renderRecent(): void`, `_renderOvHead(): void`; `_ovOpenDetail: string | null` preserved across repaints with focus; rows `.sig-row[data-sig][data-sev]` with `.sig-reason` (`overflow-wrap:anywhere`) and fix buttons carrying `data-fix` + `data-args`.
 
-- [ ] **Step 1: Write the failing test:** `test('_renderSignals builds seven rows via createElement with data-sig and data-sev')`; `test('server strings are set with textContent')` (a reason arg containing `<b>` appears as text, not markup); `test('open detail strip survives repaint')`; `test('_renderAttention empty shows nothing-needs-attention key')`; `test('_renderRecent shows at most 10 rows and applies this-plant-plus-global')` with fake entries; a CSS text test `test('severity rows use no border-left and warn text uses --warn-text')` reading `styles.css` for the `.sig-row` rules.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
-- [ ] **Step 3: Implement** markup, CSS (grid `14px minmax(140px,180px) 1fr auto auto`; narrow <= 720 px stack; `.ov-grid` one column <= 900 px; `.attn-row` 44 px) and renderers.
-- [ ] **Step 4: Run and expect pass.** Same command plus `npm run lint`.
-- [ ] **Step 5: Commit.** `git add frontend/index.html frontend/styles.css frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): Signal board, Needs attention and Recent activity renderers and styles" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('_renderSignals builds seven rows via createElement with data-sig and data-sev')`; `test('server strings are set with textContent')` (a reason arg containing `<b>` appears as text, not markup); `test('open detail strip survives repaint')`; `test('_renderAttention empty shows nothing-needs-attention key')`; `test('_renderRecent shows at most 10 rows and applies this-plant-plus-global')` with fake entries; a CSS text test `test('severity rows use no border-left and warn text uses --warn-text')` reading `styles.css` for the `.sig-row` rules.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
+- [x] **Step 3: Implement** markup, CSS (grid `14px minmax(140px,180px) 1fr auto auto`; narrow <= 720 px stack; `.ov-grid` one column <= 900 px; `.attn-row` 44 px) and renderers.
+- [x] **Step 4: Run and expect pass.** Same command plus `npm run lint`.
+- [x] **Step 5: Commit.** `git add frontend/index.html frontend/styles.css frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): Signal board, Needs attention and Recent activity renderers and styles" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W2.4: fix dispatch and detail strips
 
@@ -276,15 +276,15 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: `Fix` (W0.1), `JobsClient.restartRun`, `JobsAdmin.openRun` (W1.4), `_runMaintenance`, `_resetClientState`, `gotoSub`, `UnifiedLogPane.setFilter`.
 - Produces: `_onSignalFix(fix: Fix): void` handling fix ids `rerun_now`, `open_run`, `vacuum_analyze`, `vacuum_table`, `view_logs`, `reload`, `open_color_wheel`, `reset_client`, `open_diagnostics`, `open_interface`; admin-only fixes disabled for non-admins.
 
-- [ ] **Step 1: Write the failing test:** `test('delegated click on [data-fix] calls _onSignalFix once with parsed args')`; `test('rerun_now asks for confirmation before restartRun')`; `test('vacuum_analyze calls _runMaintenance("vacuum-analyze", null, ...) after confirm')`; `test('view_logs calls gotoSub("logs") then UnifiedLogPane.setFilter')`; `test('admin-only fix is disabled and non-admin click does nothing')`.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
+- [x] **Step 1: Write the failing test:** `test('delegated click on [data-fix] calls _onSignalFix once with parsed args')`; `test('rerun_now asks for confirmation before restartRun')`; `test('vacuum_analyze calls _runMaintenance("vacuum-analyze", null, ...) after confirm')`; `test('view_logs calls gotoSub("logs") then UnifiedLogPane.setFilter')`; `test('admin-only fix is disabled and non-admin click does nothing')`.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
 - **Ordering requirement (W1 review):** `JobsAdmin.openRun(id)` assumes the Jobs pane has rendered. `gotoSub('jobs')` starts `JobsAdmin.render()`, which is async (it awaits `JobsClient.types()` on first use, then calls `_setTab(_tab)`), so an `openRun` issued right after `gotoSub('jobs')` can be overwritten when `render` resumes. In `open_run`, call `AdminCockpit.gotoSub('jobs')`, then `await JobsAdmin.render()` (idempotent), then `JobsAdmin.openRun(id)`. Do not fix this inside `jobs-pane.mts`.
 - **W1 settled decision:** the `#admin-tab .admin-ov-tabs` CSS rule in `styles.css` stays, because the Jobs pane's inner nav (`#admin-jobs-pane .admin-ov-tabs`) uses that class; the Step in W1.3 that drops it is superseded.
 - **W1 finding (pre-existing, deferred):** `#admin-upload-detail` is read in the upload-success path but exists neither in `index.html` nor at runtime, so the distribution warning there is silently skipped.
 
-- [ ] **Step 3: Implement** `_onSignalFix` and detail strips (last 3 runs; tables by dead % desc cap 8 with per-row Vacuum; pipeline step counts with the existing deltas).
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): quick-fix dispatch and Details strips on the Signal board" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 3: Implement** `_onSignalFix` and detail strips (last 3 runs; tables by dead % desc cap 8 with per-row Vacuum; pipeline step counts with the existing deltas).
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): quick-fix dispatch and Details strips on the Signal board" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W2.5: delete _renderHealth and health bar; pipeline strings to i18n
 
@@ -296,11 +296,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: existing `_renderPipeline`.
 - Produces: `pipe.*` family in all five locales; `_renderHealth` removed from the object.
 
-- [ ] **Step 1: Write the failing test:** `test('_renderHealth is gone and #admin-health-bar is absent')` (object key check and HTML text check); `test('_exportDiagnostics still includes cached health and deep data')`; locales: extend the family-pin test so every `pipe.*` key in en exists in the other four with equal placeholders and every `Util.t('pipe.` call in `admin-ui.mts` resolves.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/overview-locales.test.mjs`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run and expect pass.** Same command plus `node --test tests/js/locale-keys.test.js tests/modules/locale-completeness.test.mjs`.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts frontend/index.html frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/overview-locales.test.mjs` then `git commit -m "refactor(admin): remove health bar; pipeline labels through i18n" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('_renderHealth is gone and #admin-health-bar is absent')` (object key check and HTML text check); `test('_exportDiagnostics still includes cached health and deep data')`; locales: extend the family-pin test so every `pipe.*` key in en exists in the other four with equal placeholders and every `Util.t('pipe.` call in `admin-ui.mts` resolves.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/overview-locales.test.mjs`.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run and expect pass.** Same command plus `node --test tests/js/locale-keys.test.js tests/modules/locale-completeness.test.mjs`.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts frontend/index.html frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/overview-locales.test.mjs` then `git commit -m "refactor(admin): remove health bar; pipeline labels through i18n" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ---
 
