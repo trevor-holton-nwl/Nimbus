@@ -2244,6 +2244,22 @@ const App = {
       ganttLegendBtn.setAttribute('aria-label', Util.t('tip.legend'));
       ganttLegendBtn.addEventListener('click', () => GanttLegend.open());
     }
+    // "Outlined: N · Clear" chip: visible only while the Alert Monitor focus outlines orders on the Gantt.
+    const outlineBtn = document.getElementById('btn-gantt-outline-clear');
+    const outlineLabel = document.getElementById('gantt-outline-label');
+    const syncOutlineChip = (): void => {
+      if (!outlineBtn) return;
+      const ids = AlertProfileMatches.focusTaskIds();
+      outlineBtn.hidden = !ids;
+      if (ids && outlineLabel) {
+        outlineLabel.textContent = Util.t(ids.size === 1 ? 'ui.gantt_outlined_one' : 'ui.gantt_outlined', { n: ids.size });
+      }
+    };
+    if (outlineBtn) {
+      outlineBtn.addEventListener('click', () => AlertProfileMatches.setFocusTaskIds(null));
+      AlertProfileMatches.subscribe(syncOutlineChip);
+      syncOutlineChip();
+    }
     // Gantt nav-group chevron — manual expand/collapse of the sub-list,
     // independent of the parent button's own navigate-and-expand click.
     const navGanttChevron = document.getElementById('nav-gantt-chevron');

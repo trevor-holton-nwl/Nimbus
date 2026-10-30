@@ -1508,7 +1508,11 @@ function _renderFocusChip(s: PaintState): void {
   const text = s.focusOutside > 0
     ? t('am.focus_chip_outside', { n, title: _focusTitle, k: s.focusOutside })
     : t('am.focus_chip', { n, title: _focusTitle });
-  _setHtml('am-focus-chip', `<span>${esc(text)}</span>`
+  // Interim until the new monitor: only orders inside the viewed profile get the Gantt outline.
+  const outlined = AlertProfileMatches.view().focusIds?.size;
+  const partial = outlined !== undefined && outlined !== _focusIds.size
+    ? ` · ${t('am.focus_partial', { n: outlined, total: _focusIds.size })}` : '';
+  _setHtml('am-focus-chip', `<span>${esc(text + partial)}</span>`
     + `<button type="button" class="btn sm btn-ghost" data-am-action="clear-focus">${esc(t('am.focus_clear'))}</button>`);
   el.hidden = false;
 }

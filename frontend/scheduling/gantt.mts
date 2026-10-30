@@ -185,8 +185,7 @@ export function alertCellMapFor(
 
 /** Everything the Gantt paints from `Store.alerts`, as one comparable string: the alert day cells (line, day,
  *  severity and `hasConflictErr`, which picks `alertcell-err` over `alertcell-calendar`, filtered by the SAME
- *  `lineVisible` the rebuild used) plus the ids of EVERY alert that carries a `taskId` (the `conflict-order` class;
- *  that set is deliberately not line-filtered). Equal strings mean an alerts-driven rebuild has nothing to repaint
+ *  `lineVisible` the rebuild used). Equal strings mean an alerts-driven rebuild has nothing to repaint
  *  from the alerts side; `Timeline._onStore` also requires that no task data changed (see `_taskDataDirty`). */
 export function alertSig(
   alerts: ReadonlyArray<NimbusAlert>, lineVisible: (line: string) => boolean,
@@ -194,9 +193,7 @@ export function alertSig(
   const cells = Object.values(alertCellMapFor(alerts, lineVisible))
     .map(c => `${c.line}|${c.dayKey}|${c.sev}|${c.hasConflictErr ? 1 : 0}`)
     .sort();
-  const taskIds = new Set<string>();
-  for (const a of alerts) if (a.taskId != null) taskIds.add(String(a.taskId));
-  return `${cells.join(',')}#${[...taskIds].sort().join(',')}`;
+  return cells.join(',');
 }
 
 /* =============================================================================
@@ -247,8 +244,6 @@ export const Timeline = {
   _gotoMarkSeq: 0,              // _gotoSeq value when the current Go To target was marked (a stale target is never spotlit)
   _gotoSettling: false,        // true from gotoLineDay until its final scroll: markGoto* hold the spotlight until then
   _gotoWin: null as { start: number; end: number } | null, // the window a running Go To is animating to; _rebuildPass restores this instead of getWindow() while set, because a rebuild's saved-window restore cancels the vis animation and would otherwise pin a half-way frame
-  _conflictSrc: null as NimbusAlert[] | null,           // alerts array reference — invalidates cache when it changes
-  _conflictSet: null as Set<string> | null,           // Set<String(taskId)> built once per alerts array identity
   _visEl:       null as HTMLElement | null,           // cached #vis-timeline element (set in init)
   _ganttTab:    null as HTMLElement | null,           // cached #gantt-tab element (see _ganttActive)
   _cachedRowH:  null as number | null,
@@ -884,11 +879,9 @@ export const Timeline = {
       // just re-render those items' className
       for (const id of (evt.ids as Array<string | number>)) Timeline._applyTaskPatch(String(id));
     } else if (evt.type === 'alerts:change') {
-      Timeline._conflictSrc = null; // invalidate conflict-set cache; rebuild() will repopulate
       if (Timeline._ganttActive()) {
-        // rebuild() already recomputes the conflict-order className for every task
-        // via its desired-map diff AND reconciles the alert-cell background items, so
-        // the old per-task _applyTaskPatch loop here was pure duplicate work. Run the
+        // rebuild() reconciles the alert-cell background items, so a per-task
+        // _applyTaskPatch loop here would be duplicate work. Run the
         // (coalesced) diff rebuild, unless it provably has nothing to do: no task data
         // changed since the last clean pass and the painted alert signature is the same.
         // A skipped rebuild still re-derives the profile-match classes (they follow the
@@ -1045,19 +1038,6 @@ export const Timeline = {
     return item;
   },
 
-  // Returns a Set of String task IDs that have an active alert. Memoized on the
-  // Store.alerts array identity — rebuilt O(alerts) once, then O(1) per task lookup.
-  _conflictIds(): Set<string> {
-    const src = Store.alerts;
-    if (Timeline._conflictSrc !== src) {
-      const s = new Set<string>();
-      for (const a of src) if (a.taskId != null) s.add(String(a.taskId));
-      Timeline._conflictSrc = src;
-      Timeline._conflictSet = s;
-    }
-    return Timeline._conflictSet!;
-  },
-
   _segmentItemId(taskId: string, sequence: number): string {
     return `order-segment:${encodeURIComponent(taskId)}:${sequence}`;
   },
@@ -1209,14 +1189,15 @@ export const Timeline = {
   },
 
   /** `profile-match profile-match-<category> profile-match-<sev>` for an order the active alert profile
-   *  matches (AlertProfileMatches follows the Alert Monitor's focused card too), else []. Off when the
+   *  matches, else []. Under the built-in All alerts profile: ring only (`profile-match profile-match-err`) for error orders. Off when the
    *  `alertProfileGanttHighlight` pref is false; an order whose every alert is acknowledged stays plain
    *  unless `alertsShowAcknowledged`. */
   _profileMatchClasses(taskId: string): string[] {
     if (Store.pref('alertProfileGanttHighlight') === false) return [];
     const m = AlertProfileMatches.current();
     const cat = m.categoryByTask.get(taskId);
-    if (!cat) return [];
+    // D8: the built-in All alerts profile has no categories (no fill); error orders still get the inner ring.
+    if (!cat) return m.profile.builtIn && m.sevByTask.get(taskId) === 'err' ? ['profile-match', 'profile-match-err'] : [];
     if (Store.pref('alertsShowAcknowledged') !== true && m.acked.size) {
       const own = Store.alertsByTask().get(taskId);
       if (own && own.length && own.every(a => m.acked.has(a.id))) return [];
@@ -1224,21 +1205,23 @@ export const Timeline = {
     return ['profile-match', `profile-match-${cat}`, `profile-match-${m.sevByTask.get(taskId) === 'err' ? 'err' : 'warn'}`];
   },
 
-  /** className-only diff of the profile-match classes over the plant's live items (GanttFilter._doApply
+  /** className-only diff of the profile-match classes and `alert-focus` over the plant's live items (GanttFilter._doApply
    *  pattern): only items whose classes changed are written, in one batch inside _suppressEvents. */
   _applyProfileMatchClasses(): void {
     if (!Timeline._items) return;
     const updates: Array<{ id: string; className: string }> = [];
     const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
+    const focus = AlertProfileMatches.current().focusIds;
     for (const task of scoped) {
       if (!task.start_date || !task.end_date) continue;
       const id = String(task.id);
       const want = Timeline._profileMatchClasses(id);
+      if (focus?.has(id)) want.push('alert-focus');
       for (const itemId of Timeline.itemIdsForTask(id)) {
         const item = Timeline._items.get(itemId) as TimelineVisItem | null;
         if (!item) continue;
         const parts = (item.className || '').split(' ').filter(Boolean);
-        const base = parts.filter(c => c !== 'profile-match' && !c.startsWith('profile-match-'));
+        const base = parts.filter(c => c !== 'profile-match' && c !== 'alert-focus' && !c.startsWith('profile-match-'));
         const had = parts.length - base.length;
         if (!had && !want.length) continue;
         const next = [...base, ...want].join(' ');
@@ -1255,10 +1238,10 @@ export const Timeline = {
   _itemForTask(t: NimbusTask): TimelineVisItem {
     const line = t.MACHINE || 'Unknown';
     const firmed = Engine.firmingStatus(t, Timeline._nowFor(t)).firmed;
-    const conflict = Timeline._conflictIds().has(String(t.id));
     const label = t.text || t.ORDER || String(t.id);
     const cls = [firmed ? 'order-firmed' : 'order-standard'];
-    if (conflict) cls.push('conflict-order');
+    // Focus outline: only orders the planner chose to show from the Alert Monitor (not gated on the highlight pref).
+    if (AlertProfileMatches.current().focusIds?.has(String(t.id))) cls.push('alert-focus');
     // "Go To" marker (markGotoTask): lives in className like the dimming below, so a rebuild
     // or single-item patch that rebuilds the item keeps it until the planner moves on.
     const goto = Timeline._gotoTarget;
@@ -1639,9 +1622,6 @@ export const Timeline = {
     const scopedTasks = lineFilterActive
       ? tasks.filter(t => visibleSet.has(t.MACHINE || 'Unknown'))
       : tasks;
-    // Compute alert-per-task set ONCE (fixes snapshot inconsistency during rebuild).
-    const conflictIds = new Set<string>();
-    for (const a of Store.alerts) if (a.taskId != null) conflictIds.add(String(a.taskId));
     // The alerts this pass paints, as the alerts-change gate's signature (stored only if the pass ends clean).
     const lineVisible = Timeline._lineVisiblePredicate(visibleSet);
     const passAlertSig = alertSig(Store.alerts, lineVisible);
@@ -1697,12 +1677,6 @@ export const Timeline = {
       const items = Timeline._itemsForTask(t);
       itemIdsByTask[taskId] = items.map(item => String(item.id));
       for (const item of items) {
-        // Apply the pre-computed conflict flag without walking alerts again.
-        if (conflictIds.has(taskId)) {
-          const cls = (item.className || '').split(' ').filter(Boolean);
-          if (!cls.includes('conflict-order')) cls.push('conflict-order');
-          item.className = cls.join(' ');
-        }
         desired.set(String(item.id), Timeline._decorateLane(item));
       }
     }
@@ -2803,7 +2777,7 @@ export interface NavRangeInput {
   windowStartMs: number; windowEndMs: number;
   nowMs: number; horizonEndMs: number | null;
 }
-export type NavBarStyle = 'standard' | 'firmed' | 'conflict' | 'dimmed' | 'profile';
+export type NavBarStyle = 'standard' | 'firmed' | 'focus' | 'dimmed' | 'profile';
 export interface NavLayout { mode: 'rows' | 'histogram'; stripH: number; bodyH: number; rowH: number }
 
 function _navLocalMidnight(ms: number): number {
@@ -3034,7 +3008,7 @@ export function navLayout(lineCount: number): NavLayout {
 export function navBarStyle(className: string | undefined): NavBarStyle {
   const cls = (className || '').split(/\s+/);
   if (cls.includes('dimmed')) return 'dimmed';
-  if (cls.includes('conflict-order')) return 'conflict';
+  if (cls.includes('alert-focus')) return 'focus';
   if (cls.includes('profile-match')) return 'profile';
   if (cls.includes('order-firmed')) return 'firmed';
   return 'standard';
@@ -3616,19 +3590,16 @@ export const TimelineNav = {
           ctx.globalAlpha = 0.35;
           ctx.fillStyle = theme.dimFill;
           ctx.fillRect(x1, y, w, h);
-        } else if (bar.style === 'conflict') {
+        } else if (bar.style === 'focus') {
+          // Focused from the Alert Monitor: its category fill (else the standard / firmed colour) plus the ink keyline.
+          ctx.globalAlpha = bar.cat ? 1 : 0.9;
+          ctx.fillStyle = (bar.cat && theme.pm[bar.cat]) || baseColor;
+          ctx.fillRect(x1, y, w, h);
+          ctx.globalAlpha = 1;
           if (layout.rowH >= 4) {
-            ctx.globalAlpha = 0.9;
-            ctx.fillStyle = baseColor;
-            ctx.fillRect(x1, y, w, h);
-            ctx.globalAlpha = 1;
-            ctx.strokeStyle = theme.errFill;
+            ctx.strokeStyle = theme.fg;
             ctx.lineWidth = 1;
             ctx.strokeRect(x1 + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
-          } else {
-            ctx.globalAlpha = 1;
-            ctx.fillStyle = theme.errFill;
-            ctx.fillRect(x1, y, w, h);
           }
         } else if (bar.style === 'profile') {
           // Alert-profile match: the category's own colour with an ink keyline (the warn/err colours keep
@@ -6274,7 +6245,9 @@ export const Interaction = {
     // Escape → clear
     if (e.key === 'Escape') {
       if (Timeline._gotoTarget) Timeline.clearGotoTarget();
-      if (Selection.size()) { e.preventDefault(); Selection.clear(); }
+      if (Selection.size()) { e.preventDefault(); Selection.clear(); return; }
+      // Nothing selected and no dialog open: Escape also clears the Alert Monitor outline.
+      if (AlertProfileMatches.focusTaskIds() && !Modal.anyOpen()) AlertProfileMatches.setFocusTaskIds(null);
       return;
     }
 

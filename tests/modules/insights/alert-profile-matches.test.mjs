@@ -67,13 +67,14 @@ test('categoryByTask ranks planning ahead of late at equal severity', () => {
   assert.equal(c.categoryByTask.get('t3'), 'planning', 'err tie: planning beats late');
 });
 
-test("'__all__' keeps every alert id but highlights nothing", () => {
+test("'__all__' keeps every alert id but fills nothing (error orders keep the ring)", () => {
   M.recompute();
   const c = M.current();
   assert.equal(c.profileId, '__all__');
   assert.equal(c.alertIds.size, 6);
   assert.equal(c.taskIds.size, 0);
-  assert.equal(c.sevByTask.size, 0);
+  assert.deepEqual([...c.sevByTask.keys()].sort(), ["t1", "t3"], "D8: err-severity orders only");
+  assert.ok(c.orderIds.has("t2") && c.orderIds.has("t3"), "orderIds filled under __all__");
   assert.equal(c.categoryByTask.size, 0);
 });
 
@@ -128,13 +129,14 @@ test('the session override changes view() only; current() keeps following the sa
   assert.equal(M.view().profileId, 'p1', 'a plant change clears the override');
 });
 
-test('the focus set overrides current() but not view()', () => {
+test('the focus set resolves per set and leaves the fills alone', () => {
   Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
   profiles = [prof('p1', ['overload'])];
   M.recompute();
-  M.setFocusTaskIds(['t2']);
-  assert.deepEqual([...M.current().taskIds], ['t2']);
-  assert.deepEqual([...M.view().taskIds].sort(), ['t1', 't3']);
+  M.setFocusTaskIds(['t2', 't1']);
+  assert.deepEqual([...M.current().taskIds].sort(), ['t1', 't3'], 'fills stay ambient');
+  assert.deepEqual([...M.current().focusIds], ['t1'], 't2 is outside the profile: no outline');
+  assert.deepEqual([...M.view().focusIds], ['t1']);
   M.setFocusTaskIds(null);
 });
 

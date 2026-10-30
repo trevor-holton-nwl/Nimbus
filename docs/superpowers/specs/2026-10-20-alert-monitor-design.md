@@ -550,3 +550,7 @@ Owner screenshots showed the When bars using about 45 percent of the card height
 - The weekday visibility threshold is language-agnostic (26 px covers the 24 px fr / pt names); an en / de / es-only threshold of about 20 px would keep weekdays on at the 936-1,000 px widths.
 - Browser checks owed on the real page (the prototype used synthetic alerts and the real CSS): the band in the live app at 1,280 / 1,024 / 900 px, dark mode, and the header "Plant confidence" link and top-bar chip still opening the breakdown (their code is untouched).
 - The stride assumes a 436 px chart; between 560 and 935 px band width a 62-column chart (535 px at the narrowest) is always wider than that, so only the three-column band sets the floor.
+
+## Rev 4 note (2026-10-30, Alert Profiles revamp W4)
+
+D11 (the plant-wide red outline on every alerted Gantt bar) is reversed. The ambient `conflict-order` outline is gone: profile fills are the ambient layer, and an outline (`alert-focus`, 2 px dashed ink) appears only on orders the planner explicitly shows from the Alert Monitor, limited to orders inside the profile being viewed and excluding fully acknowledged ones (unless "Show acknowledged"). Under the built-in All alerts profile only error-severity orders get the inner ring (no fill). "Outlined: N · Clear" on the Gantt toolbar, or Escape with nothing selected, clears the outline.

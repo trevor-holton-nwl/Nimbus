@@ -787,11 +787,11 @@ test('T15: acknowledged alerts are hidden unless the pref is on; shown rows carr
   }, { alerts, matches: fakeSet('__all__', ['a1', 'a2', 'a3'], acked, 'All'), showAcked: true });
 });
 
-test('T15: the Gantt conflict ids and Store.alertsByTask stay plant-wide (profile and acks do not filter them)', () => {
+test('T15: the Gantt outline is focus-only (no ambient set); Store.alertsByTask stays plant-wide', () => {
   const acked = new Map([['a2', { alert_id: 'a2', acknowledged_by: 'pat', until: null }]]);
   withProfileFixture(() => {
     assert.deepEqual(AlertsUIAdapter._visibleAlerts().alerts.map(a => a.id), ['a1']);
-    assert.deepEqual([...Timeline._conflictIds()].sort(), ['a1', 'a2', 'a3']);
+    assert.equal(Timeline._conflictIds, undefined, 'the ambient conflict set is gone');
     assert.deepEqual([...Store.alertsByTask().keys()].sort(), ['a1', 'a2', 'a3']);
   }, { alerts: [t15('a1'), t15('a2'), t15('a3')], matches: fakeSet('p1', ['a1'], acked) });
 });

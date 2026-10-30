@@ -95,7 +95,7 @@ Every `.vis-item` state class becomes a **draw state** composed in CSS cascade o
 |---|---|---|
 | Base bar shape | 1174-1181 (`.vis-item.vis-range`: radius 4, 11 px / 600) | Rounded rect, clipped text |
 | Standard / firmed fill (`order-standard`, `order-firmed`; firmed text carries a lock emoji prefix) | 1252-1253 | Fill from `--bar-standard` / `--bar-firmed` |
-| Conflict outline (`conflict-order`) | 1183-1186 | 2 px `--err` inset stroke |
+| Focus outline (`alert-focus`) | 1183-1186 | 2 px dashed `--fg` outline (rev 4, 2026-10-30; was the red `conflict-order`) |
 | Split segment, continuation, last | 1258-1266, pill 1267-1271 | Inner keyline; dashed left edge; solid right edge; mono pill |
 | Distribution child, pill, sibling highlight | 1281-1290 | Inner keyline; letter-and-count pill; 2 px accent ring outside |
 | Selected | 1294-1296 | Two-tone ring. Live DOM item up to the cap; canvas-drawn only beyond it |

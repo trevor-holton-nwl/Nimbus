@@ -645,6 +645,7 @@ body[data-tab="gantt"][data-gantt-sub="distribution"] #context-sched-actions { d
   }
   #context-sched-actions .sa-label { display: none; }
   #context-sched-actions .seg-btn { padding: 0 7px; }
+  #context-sched-actions .seg-btn[hidden] { display: none; }
   #context-sched-actions { gap: 6px; }
 }
 .icon-btn .badge {
@@ -1199,10 +1200,13 @@ details.line-group > summary::-webkit-details-marker { display: none; }
   overflow: hidden;
 }
 /* Selection ring: see the .vis-item.vis-selected rule after .dist-sibling (it must follow that !important rule). */
-.vis-item.conflict-order {
-  outline: 2px solid var(--err) !important;
-  outline-offset: -2px;
+.vis-item.alert-focus {
+  outline: 2px dashed var(--fg) !important;
+  outline-offset: 1px;
 }
+/* Stacked lanes stay separable without a red edge: a 1px keyline in the row background colour (outline, never border/box-shadow). */
+.vis-foreground .vis-group.row-expanded .vis-item.vis-range { outline: 1px solid var(--bg-elev); }
+#btn-gantt-outline-clear[hidden] { display: none; }
 .vis-label { font-size: 12px; font-weight: 600; padding: 0 10px; color: var(--fg); }
 .vis-time-axis .vis-text { font-size: 11px; color: var(--fg-mute); }
 .vis-time-axis .vis-grid.vis-minor { border-color: var(--line); }
@@ -7665,7 +7669,7 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 .lg-nav-bar, .lg-nav-blk.row { top: calc(var(--r) * 5px); height: 5px; bottom: auto; }
 .lg-nav-bar { background: var(--bar-standard); opacity: .9; min-width: 1px; }
 .lg-nav-bar.firmed { background: var(--bar-firmed); }
-.lg-nav-bar.conflict { box-shadow: inset 0 0 0 1px var(--err); opacity: 1; }
+.lg-nav-bar.focus { box-shadow: inset 0 0 0 1px var(--fg); opacity: 1; }
 .lg-nav-div { top: 0; bottom: 0; width: 1px; background: var(--line); opacity: .6; left: calc(100% * var(--s) / var(--lg-days)); }
 .lg-nav-scrim { left: 0; right: 0; bottom: 0; height: 12px; background: var(--bg-subtle); opacity: .85; }
 .lg-nav-lbl {
@@ -7747,7 +7751,7 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 .lg-order-standard { background: var(--bar-standard); color: #fff; }
 .lg-order-firmed   { background: var(--bar-firmed);   color: #fff; }
 .lg-selected { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.95), 0 0 0 1px var(--bg-elev), 0 0 0 3px var(--fg); }   /* .vis-selected */
-.lg-conflict { outline: 2px solid var(--err); outline-offset: -2px; }                        /* .conflict-order */
+.lg-focus { outline: 2px dashed var(--fg); outline-offset: -2px; }  /* .alert-focus */
 .lg-dimmed   { opacity: .12; filter: saturate(0); }                                          /* .dimmed */
 .lg-split    { box-shadow: inset 0 0 0 1px rgba(255,255,255,.62); border-left: 2px dashed rgba(255,255,255,.82); } /* .split-order-segment(-continuation) */
 .lg-dist     { box-shadow: inset 0 0 0 1px rgba(255,255,255,.62); }                          /* .dist-child */
