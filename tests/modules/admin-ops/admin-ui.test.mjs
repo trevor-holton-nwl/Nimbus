@@ -17,7 +17,8 @@ test('AdminCockpit exposes its documented public API', () => {
   assert.equal(typeof AdminCockpit.render, 'function');
   assert.equal(typeof AdminCockpit._startHealthPolling, 'function');
   assert.equal(typeof AdminCockpit._stopHealthPolling, 'function');
-  assert.equal(typeof AdminCockpit.gotoOvTab, 'function');
+  assert.equal(typeof AdminCockpit.gotoSub, 'function');
+  assert.equal(AdminCockpit.gotoOvTab, undefined);
   assert.equal(typeof AdminCockpit._setSub, 'function');
 });
 
@@ -177,5 +178,82 @@ test('_getFilteredEntries applies the exact-match user filter', async () => {
     assert.equal(AdminCockpit._getFilteredEntries().length, 2);
   } finally {
     AdminCockpit._logFilter = prior;
+  }
+});
+
+// ---- W1: sub-tab shell ----
+import { readFileSync } from 'node:fs';
+
+function stubAll(names, calls) {
+  const prior = {};
+  for (const n of names) { prior[n] = AdminCockpit[n]; AdminCockpit[n] = () => { calls.push(n); }; }
+  return () => { for (const n of names) AdminCockpit[n] = prior[n]; };
+}
+function withEmptyDom(fn) {
+  const prior = globalThis.document;
+  globalThis.document = { querySelectorAll() { return []; }, getElementById() { return null; } };
+  try { return fn(); } finally { if (prior === undefined) delete globalThis.document; else globalThis.document = prior; }
+}
+const ALL_RENDERERS = ['_renderOverview', '_renderLogsPane', '_renderDiagnosticsPane', '_renderOrderMaintenance',
+  '_renderHealth', '_renderBackendLog', '_renderLogs', '_renderAuditLog', '_renderDiagnostics', '_renderPipeline',
+  '_renderDbDeep', '_refreshThreadPane', '_renderPurgeMeta', '_renderAudit', '_startHealthPolling', '_stopHealthPolling'];
+
+test('render() calls _setSub once and renders Overview exactly once', () => {
+  const calls = [];
+  const restore = stubAll(['_renderHealth', '_startHealthPolling', '_stopHealthPolling', '_renderLogsPane'], calls);
+  const realOv = AdminCockpit._renderOverview; let ov = 0;
+  AdminCockpit._renderOverview = function () { ov++; return realOv.call(AdminCockpit); };
+  const realSet = AdminCockpit._setSub; let set = 0;
+  AdminCockpit._setSub = function (s) { set++; return realSet.call(AdminCockpit, s); };
+  try { withEmptyDom(() => AdminCockpit.render()); }
+  finally { AdminCockpit._renderOverview = realOv; AdminCockpit._setSub = realSet; restore(); }
+  assert.equal(set, 1);
+  assert.equal(ov, 1);
+  assert.equal(calls.filter(c => c === '_renderHealth').length, 1);
+});
+
+test('_setSub("logs") stops health polling and renders the logs pane only', () => {
+  const calls = [];
+  const restore = stubAll(ALL_RENDERERS, calls);
+  try { withEmptyDom(() => AdminCockpit._setSub('logs')); } finally { restore(); }
+  assert.ok(calls.includes('_stopHealthPolling'));
+  assert.ok(calls.includes('_renderLogsPane'));
+  assert.ok(!calls.includes('_renderOverview'));
+});
+
+test('_setSub("overview") does not call the diagnostics or log renderers', () => {
+  const calls = [];
+  const restore = stubAll(['_renderHealth', '_startHealthPolling', '_stopHealthPolling', '_renderBackendLog', '_renderLogs',
+    '_renderAuditLog', '_renderDiagnostics', '_renderPipeline', '_renderDbDeep', '_refreshThreadPane', '_renderPurgeMeta', '_renderAudit'], calls);
+  try { withEmptyDom(() => AdminCockpit._setSub('overview')); } finally { restore(); }
+  assert.deepEqual(calls.sort(), ['_renderHealth', '_startHealthPolling']);
+});
+
+test('_setSub dispatches diagnostics and order-maintenance to their renderers', () => {
+  const calls = [];
+  const restore = stubAll(ALL_RENDERERS.filter(n => !n.startsWith('_renderDiagnosticsPane') && n !== '_renderOrderMaintenance'), calls);
+  try {
+    withEmptyDom(() => AdminCockpit._setSub('diagnostics'));
+    assert.deepEqual(calls.filter(c => c !== '_stopHealthPolling'), ['_renderDiagnostics', '_renderPipeline', '_renderDbDeep', '_refreshThreadPane']);
+    calls.length = 0;
+    withEmptyDom(() => AdminCockpit._setSub('order-maintenance'));
+    assert.deepEqual(calls.filter(c => c !== '_stopHealthPolling'), ['_renderPurgeMeta', '_renderAudit']);
+  } finally { restore(); }
+});
+
+test('every getElementById admin- id used by admin-ui.mts exists in index.html', () => {
+  const src = readFileSync(new URL('../../../frontend/admin-ops/admin-ui.mts', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
+  // Ids injected at runtime (not in index.html).
+  const LAZY = new Set(['admin-upload-detail', 'admin-backend-log-q', 'admin-backend-log-user', 'admin-log-filter-code', 'admin-diag-refresh', 'admin-diag-storage']);
+  const ids = new Set([...src.matchAll(/getElementById\('(admin-[\w-]+)'\)/g)].map(m => m[1]).filter(id => !LAZY.has(id)));
+  const missing = [...ids].filter(id => !html.includes(`id="${id}"`));
+  assert.deepEqual(missing, []);
+  for (const id of ids) assert.equal(html.split(`id="${id}"`).length - 1, 1, `${id} appears once`);
+});
+
+test('no gotoOvTab anywhere in frontend', () => {
+  for (const f of ['app.js', 'index.html']) {
+    assert.ok(!readFileSync(new URL('../../../frontend/' + f, import.meta.url), 'utf8').includes('gotoOvTab'), f);
   }
 });

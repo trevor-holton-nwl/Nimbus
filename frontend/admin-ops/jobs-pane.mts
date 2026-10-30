@@ -1189,6 +1189,9 @@ export const JobsAdmin = {
     _setTab(_tab);
   },
 
+  /** Open one run in the Runs tab (deep-link from the Overview and Logs panes). */
+  openRun(id: number): void { _setTab('runs'); void _openRun(id); },
+
   /** Test seam: switch the sub-view the way a tab click does. */
   _setTab(tab: SubTab): void { _setTab(tab); },
 

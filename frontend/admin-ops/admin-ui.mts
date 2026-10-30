@@ -19,6 +19,7 @@ import { MasterData } from '../master-data/admin-ui.mjs';
 import { Interface } from '../integration/sap-interface-ui.mjs';
 import { Security } from '../security/security-admin.mjs';
 import { JobsAdmin } from './jobs-pane.mjs';
+import type { AdminSub } from './signals.mjs';
 
 /* =============================================================================
    AdminCockpit backend response shapes — local interfaces for endpoints
@@ -458,7 +459,6 @@ export const AdminCockpit = {
   _healthTimer: null as ReturnType<typeof setInterval> | null,
   _pipelineOpen: null as string | null,
   _activeSub: 'overview',
-  _activeOvTab: 'diagnostics' as 'diagnostics' | 'data-ops' | 'logs' | 'thread',
   _dbDeepAbort: null as AbortController | null,
   _backendLogAbort: null as AbortController | null,
   _healthAbort: null as AbortController | null,
@@ -471,44 +471,36 @@ export const AdminCockpit = {
   _purgePreview: null as AdminPurgePreview | null,
   _purgePreviewSeq: 0,
 
-  gotoOvTab(tab: 'diagnostics' | 'data-ops' | 'logs' | 'thread'): void {
-    AdminCockpit._activeOvTab = tab;
-    document.querySelectorAll<HTMLElement>('.admin-ov-tabs .sub-subtab').forEach((b) => {
-      b.classList.toggle('active', b.dataset.ovTab === tab);
-    });
-    (['diagnostics', 'data-ops', 'logs', 'thread'] as const).forEach(t => {
-      const el = document.getElementById(`admin-ov-${t}`);
-      if (el) el.hidden = (t !== tab);
-    });
-    if (tab === 'thread') AdminCockpit._refreshThreadPane();
-  },
+  gotoSub(sub: AdminSub): void { AdminCockpit._setSub(sub); },
 
   _setSub(sub: string | undefined): void {
-    AdminCockpit._activeSub = sub ?? 'overview';
+    const cur = sub ?? 'overview';
+    AdminCockpit._activeSub = cur;
     document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) => {
-      b.classList.toggle('active', b.dataset.sub === sub);
+      b.classList.toggle('active', b.dataset.sub === cur);
     });
-    const ov = document.getElementById('admin-overview-pane');
-    const mg = document.getElementById('admin-manage-pane');
-    const ifc = document.getElementById('admin-interface-pane');
-    const sec = document.getElementById('admin-security-pane');
-    const sc  = document.getElementById('admin-system-config-pane');
-    const tbl = document.getElementById('admin-table-browser-pane');
-    const jobs = document.getElementById('admin-jobs-pane');
-    if (ov) ov.hidden = (sub !== 'overview');
-    if (mg) mg.hidden = (sub !== 'manage');
-    if (ifc) ifc.hidden = (sub !== 'interface');
-    if (sec) sec.hidden = (sub !== 'security');
-    if (sc) sc.hidden = (sub !== 'system-config');
-    if (tbl) tbl.hidden = (sub !== 'table-browser');
-    if (jobs) jobs.hidden = (sub !== 'jobs');
-    if (sub !== 'jobs') JobsAdmin.setActive(false);
-    if (sub === 'manage') MasterData.render();
-    else if (sub === 'interface') Interface.render();
-    else if (sub === 'security') Security.render();
-    else if (sub === 'system-config') SystemConfig.render();
-    else if (sub === 'table-browser') AdminTables.render();
-    else if (sub === 'jobs') void JobsAdmin.render();
+    const panes: Record<string, string> = {
+      'admin-overview-pane': 'overview', 'admin-logs-pane': 'logs', 'admin-diag-pane': 'diagnostics',
+      'admin-order-maint-pane': 'order-maintenance', 'admin-manage-pane': 'manage',
+      'admin-interface-pane': 'interface', 'admin-security-pane': 'security',
+      'admin-system-config-pane': 'system-config', 'admin-table-browser-pane': 'table-browser',
+      'admin-jobs-pane': 'jobs',
+    };
+    for (const id of Object.keys(panes)) {
+      const el = document.getElementById(id);
+      if (el) el.hidden = (panes[id] !== cur);
+    }
+    if (cur !== 'overview') AdminCockpit._stopHealthPolling();
+    if (cur !== 'jobs') JobsAdmin.setActive(false);
+    if (cur === 'manage') MasterData.render();
+    else if (cur === 'interface') Interface.render();
+    else if (cur === 'security') Security.render();
+    else if (cur === 'system-config') SystemConfig.render();
+    else if (cur === 'table-browser') AdminTables.render();
+    else if (cur === 'jobs') void JobsAdmin.render();
+    else if (cur === 'logs') AdminCockpit._renderLogsPane();
+    else if (cur === 'diagnostics') AdminCockpit._renderDiagnosticsPane();
+    else if (cur === 'order-maintenance') AdminCockpit._renderOrderMaintenance();
     else AdminCockpit._renderOverview();
   },
 
@@ -594,7 +586,7 @@ export const AdminCockpit = {
 
     ErrorLog.subscribe(() => {
       const panel = document.getElementById('admin-tab');
-      if (panel?.classList.contains('active')) {
+      if (panel?.classList.contains('active') && AdminCockpit._activeSub === 'logs') {
         AdminCockpit._renderLogs();
       }
     });
@@ -605,13 +597,13 @@ export const AdminCockpit = {
     });
 
     PerfMonitor.subscribe(() => {
-      if (AdminCockpit._activeOvTab === 'thread') AdminCockpit._refreshThreadPane();
+      if (AdminCockpit._activeSub === 'diagnostics') AdminCockpit._refreshThreadPane();
     });
 
     Store.subscribe((evt: StoreEvent) => {
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate') {
         const panel = document.getElementById('admin-tab');
-        if (panel?.classList.contains('active')) {
+        if (panel?.classList.contains('active') && AdminCockpit._activeSub === 'diagnostics') {
           // Defer so Persistence._lastLoad stats are fully written before rendering.
           setTimeout(() => AdminCockpit._renderPipeline(), 50);
         }
@@ -621,20 +613,29 @@ export const AdminCockpit = {
 
   render(): void {
     AdminCockpit._setSub('overview');
-    AdminCockpit._renderOverview();
   },
 
   _renderOverview(): void {
-    AdminCockpit._renderPurgeMeta();
     AdminCockpit._renderHealth();
+    AdminCockpit._startHealthPolling();
+  },
+
+  _renderLogsPane(): void {
+    AdminCockpit._renderBackendLog();
+    AdminCockpit._renderLogs();
+    AdminCockpit._renderAuditLog();
+  },
+
+  _renderDiagnosticsPane(): void {
     AdminCockpit._renderDiagnostics();
     AdminCockpit._renderPipeline();
     AdminCockpit._renderDbDeep();
-    AdminCockpit._renderBackendLog();
-    AdminCockpit._renderLogs();
+    AdminCockpit._refreshThreadPane();
+  },
+
+  _renderOrderMaintenance(): void {
+    AdminCockpit._renderPurgeMeta();
     AdminCockpit._renderAudit();
-    AdminCockpit._renderAuditLog();
-    AdminCockpit._startHealthPolling();
   },
 
   /** Started by _renderOverview; called from application-shell.mjs's
