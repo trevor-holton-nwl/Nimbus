@@ -1871,31 +1871,19 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <!-- ADMIN SUB-TAB STRIP -->
         <nav class="admin-subtabs" role="tablist">
           <button class="admin-subtab active" data-sub="overview" role="tab" data-i18n="tab.overview">Overview</button>
+          <button class="admin-subtab" data-sub="logs" role="tab" data-i18n="tab.logs">Logs</button>
+          <button class="admin-subtab" data-sub="diagnostics" role="tab" data-i18n="tab.diagnostics">Diagnostics</button>
+          <button class="admin-subtab" data-sub="order-maintenance" role="tab" data-i18n="tab.order_maintenance">Order Maintenance</button>
+          <button class="admin-subtab" data-sub="jobs" role="tab" data-i18n="tab.jobs">Jobs</button>
           <button class="admin-subtab" data-sub="manage" role="tab" data-i18n="tab.manage_data_tables">Manage Data Tables</button>
           <button class="admin-subtab" data-sub="interface" role="tab" data-i18n="tab.interface">Interface</button>
           <button class="admin-subtab" data-sub="security" role="tab" data-i18n="tab.security">Security</button>
           <button class="admin-subtab" data-sub="system-config" role="tab" data-i18n="tab.system_config">System Configuration</button>
           <button class="admin-subtab" data-sub="table-browser" role="tab" data-i18n="tab.table_browser">Table Browser</button>
-          <button class="admin-subtab" data-sub="jobs" role="tab" data-i18n="tab.jobs">Jobs</button>
         </nav>
 
         <!-- OVERVIEW PANE -->
         <div id="admin-overview-pane">
-
-          <!-- OVERVIEW SUB-SUBTAB STRIP -->
-          <nav class="admin-subtabs admin-ov-tabs" role="tablist">
-            <button class="sub-subtab active" data-ov-tab="diagnostics" role="tab"
-                    onclick="NIMBUS.AdminCockpit.gotoOvTab('diagnostics')" data-i18n="tab.diagnostics">Diagnostics</button>
-            <button class="sub-subtab" data-ov-tab="data-ops" role="tab"
-                    onclick="NIMBUS.AdminCockpit.gotoOvTab('data-ops')" data-i18n="tab.data_operations">Data Operations</button>
-            <button class="sub-subtab" data-ov-tab="logs" role="tab"
-                    onclick="NIMBUS.AdminCockpit.gotoOvTab('logs')" data-i18n="tab.logs_audit">Logs &amp; Audit</button>
-            <button class="sub-subtab" data-ov-tab="thread" role="tab"
-                    onclick="NIMBUS.AdminCockpit.gotoOvTab('thread')">Thread</button>
-          </nav>
-
-          <!-- PANE: DIAGNOSTICS -->
-          <div id="admin-ov-diagnostics">
 
             <!-- HEALTH STATUS BAR — scoped to Diagnostics -->
             <div class="admin-health-bar" id="admin-health-bar">
@@ -1929,9 +1917,113 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <button class="btn btn-ghost sm" id="admin-health-refresh" data-i18n="btn.health_refresh" data-i18n-title="tip.health_refresh" title="Refresh health">↻ Health</button>
             </div>
 
+        </div><!-- /admin-overview-pane -->
 
+        <!-- LOGS PANE -->
+        <div id="admin-logs-pane" hidden>
+            <div class="admin-grid">
+
+              <!-- BACKEND EVENT LOG -->
+              <div class="panel admin-card admin-card-wide" id="admin-backend-log-card">
+                <header class="panel-head">
+                  <h3 data-i18n="ui.backend_event_log">Backend event log</h3>
+                  <span class="panel-hint" id="admin-backend-log-count" data-i18n="ui.backend_log_hint">Server-side structured events — loads, errors, DB issues, slow requests</span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="admin-backend-log-refresh" data-i18n="btn.refresh">↻ Refresh</button>
+                  <button class="btn btn-ghost sm" id="admin-backend-log-clear" data-i18n="btn.clear">✕ Clear</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div class="admin-log-filter">
+                    <select id="admin-backend-log-filter-level" title="Filter by level" data-i18n-title="tip.filter_by_level">
+                      <option value="all" data-i18n="ui.all_levels">All levels</option>
+                      <option value="error" data-i18n="ui.level_error">Error</option>
+                      <option value="warn" data-i18n="ui.level_warn">Warn</option>
+                      <option value="info" data-i18n="ui.level_info">Info</option>
+                    </select>
+                  </div>
+                  <div id="admin-backend-log-list" class="admin-log-list"></div>
+                </div>
+              </div>
+
+              <!-- APPLICATION LOG -->
+              <div class="panel admin-card admin-card-wide" id="admin-logs">
+                <header class="panel-head">
+                  <h3 data-i18n="ui.app_log">Application log</h3>
+                  <span class="panel-hint" id="admin-log-counts" data-i18n="ui.loading">0 entries</span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="admin-log-reload" data-i18n="btn.reload_data">↻ Reload data</button>
+                  <button class="btn btn-ghost sm" id="admin-log-cache" data-i18n="btn.clear_cache">⊘ Clear cache</button>
+                  <button class="btn btn-ghost sm" id="admin-log-copy" data-i18n="btn.copy_all">⎘ Copy all</button>
+                  <button class="btn btn-ghost sm" id="admin-log-export-json" data-i18n="btn.export_json">Export JSON</button>
+                  <button class="btn btn-ghost sm" id="admin-log-copy-filtered" data-i18n="btn.copy_filtered">⎘ Copy filtered</button>
+                  <button class="btn btn-ghost sm" id="admin-log-clear" data-i18n="btn.clear">✕ Clear</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div class="admin-log-filter">
+                    <select id="admin-log-filter-level" title="Filter by level" data-i18n-title="tip.filter_by_level">
+                      <option value="all" data-i18n="ui.all_levels">All levels</option>
+                      <option value="error" data-i18n="ui.level_error">Error</option>
+                      <option value="warn" data-i18n="ui.level_warn">Warn</option>
+                      <option value="info" data-i18n="ui.level_info">Info</option>
+                    </select>
+                    <select id="admin-log-filter-scope" title="Filter by scope" data-i18n-title="tip.filter_by_scope">
+                      <option value="all" data-i18n="ui.all_scopes">All scopes</option>
+                    </select>
+                    <input type="search" id="admin-log-search" class="admin-log-search" placeholder="Search messages…" data-i18n-placeholder="ph.search_messages">
+                    <input type="search" id="admin-log-user" class="admin-log-search" placeholder="Filter by user…" data-i18n-placeholder="ph.filter_user">
+                  </div>
+                  <div id="admin-log-list" class="admin-log-list"></div>
+                </div>
+              </div>
+
+              <!-- OPTIMIZATION & COLOR WHEEL AUDIT LOG -->
+              <div class="panel admin-card admin-card-wide" id="admin-audit-log">
+                <header class="panel-head">
+                  <h3 data-i18n="ui.opt_audit_log">Optimization &amp; Color Wheel log</h3>
+                  <span class="panel-hint" data-i18n="ui.opt_audit_hint">Color wheel uploads, replacements, deletes, and optimization runs — persisted on disk</span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="admin-audit-log-clear" data-i18n="btn.clear_log">✕ Clear log</button>
+                  <button class="btn btn-ghost sm" id="admin-audit-log-reload" data-i18n="btn.refresh">↻ Refresh</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div id="admin-audit-log-list" class="admin-audit-list"></div>
+                </div>
+              </div>
+
+            </div><!-- /admin-grid logs -->
+        </div><!-- /admin-logs-pane -->
+
+        <!-- DIAGNOSTICS PANE -->
+        <div id="admin-diag-pane" hidden>
             <!-- CLIENT DIAGNOSTICS -->
             <div id="admin-diagnostics-pane" class="admin-section"></div>
+
+            <div class="panel admin-card admin-card-wide" style="margin:12px 0;">
+              <header class="panel-head">
+                <h3>Main Thread Profiler</h3>
+                <span class="panel-hint">Per-operation timing — last/P50/P95/max over the last 100 samples. Red ≥ 50 ms, yellow ≥ 16 ms (one frame).</span>
+                <div class="spacer"></div>
+                <button class="btn btn-ghost sm" id="admin-thread-clear">✕ Clear</button>
+              </header>
+              <div class="panel-body panel-body-flush">
+                <table class="admin-perf-table">
+                  <thead>
+                    <tr>
+                      <th>Operation</th>
+                      <th>Last</th>
+                      <th>P50</th>
+                      <th>P95</th>
+                      <th>Max</th>
+                      <th>Calls</th>
+                      <th>Last run</th>
+                    </tr>
+                  </thead>
+                  <tbody id="admin-perf-tbody">
+                    <tr><td colspan="7" class="admin-perf-empty">No data yet — interact with the app to record operations.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
 
             <div class="admin-grid">
 
@@ -1974,10 +2066,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               </div>
 
             </div><!-- /admin-grid diagnostics -->
-          </div><!-- /admin-ov-diagnostics -->
+        </div><!-- /admin-diag-pane -->
 
-          <!-- PANE: DATA OPERATIONS -->
-          <div id="admin-ov-data-ops" hidden>
+        <!-- ORDER MAINTENANCE PANE -->
+        <div id="admin-order-maint-pane" hidden>
             <div class="admin-grid">
 
               <!-- UPLOAD -->
@@ -2052,113 +2144,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               </div>
 
             </div><!-- /admin-grid data-ops -->
-          </div><!-- /admin-ov-data-ops -->
-
-          <!-- PANE: LOGS & AUDIT -->
-          <div id="admin-ov-logs" hidden>
-            <div class="admin-grid">
-
-              <!-- BACKEND EVENT LOG -->
-              <div class="panel admin-card admin-card-wide" id="admin-backend-log-card">
-                <header class="panel-head">
-                  <h3 data-i18n="ui.backend_event_log">Backend event log</h3>
-                  <span class="panel-hint" id="admin-backend-log-count" data-i18n="ui.backend_log_hint">Server-side structured events — loads, errors, DB issues, slow requests</span>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-backend-log-refresh" data-i18n="btn.refresh">↻ Refresh</button>
-                  <button class="btn btn-ghost sm" id="admin-backend-log-clear" data-i18n="btn.clear">✕ Clear</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div class="admin-log-filter">
-                    <select id="admin-backend-log-filter-level" title="Filter by level" data-i18n-title="tip.filter_by_level">
-                      <option value="all" data-i18n="ui.all_levels">All levels</option>
-                      <option value="error" data-i18n="ui.level_error">Error</option>
-                      <option value="warn" data-i18n="ui.level_warn">Warn</option>
-                      <option value="info" data-i18n="ui.level_info">Info</option>
-                    </select>
-                  </div>
-                  <div id="admin-backend-log-list" class="admin-log-list"></div>
-                </div>
-              </div>
-
-              <!-- APPLICATION LOG -->
-              <div class="panel admin-card admin-card-wide" id="admin-logs">
-                <header class="panel-head">
-                  <h3 data-i18n="ui.app_log">Application log</h3>
-                  <span class="panel-hint" id="admin-log-counts" data-i18n="ui.loading">0 entries</span>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-log-reload" data-i18n="btn.reload_data">↻ Reload data</button>
-                  <button class="btn btn-ghost sm" id="admin-log-cache" data-i18n="btn.clear_cache">⊘ Clear cache</button>
-                  <button class="btn btn-ghost sm" id="admin-log-copy" data-i18n="btn.copy_all">⎘ Copy all</button>
-                  <button class="btn btn-ghost sm" id="admin-log-export-json" data-i18n="btn.export_json">Export JSON</button>
-                  <button class="btn btn-ghost sm" id="admin-log-copy-filtered" data-i18n="btn.copy_filtered">⎘ Copy filtered</button>
-                  <button class="btn btn-ghost sm" id="admin-log-clear" data-i18n="btn.clear">✕ Clear</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div class="admin-log-filter">
-                    <select id="admin-log-filter-level" title="Filter by level" data-i18n-title="tip.filter_by_level">
-                      <option value="all" data-i18n="ui.all_levels">All levels</option>
-                      <option value="error" data-i18n="ui.level_error">Error</option>
-                      <option value="warn" data-i18n="ui.level_warn">Warn</option>
-                      <option value="info" data-i18n="ui.level_info">Info</option>
-                    </select>
-                    <select id="admin-log-filter-scope" title="Filter by scope" data-i18n-title="tip.filter_by_scope">
-                      <option value="all" data-i18n="ui.all_scopes">All scopes</option>
-                    </select>
-                    <input type="search" id="admin-log-search" class="admin-log-search" placeholder="Search messages…" data-i18n-placeholder="ph.search_messages">
-                    <input type="search" id="admin-log-user" class="admin-log-search" placeholder="Filter by user…" data-i18n-placeholder="ph.filter_user">
-                  </div>
-                  <div id="admin-log-list" class="admin-log-list"></div>
-                </div>
-              </div>
-
-              <!-- OPTIMIZATION & COLOR WHEEL AUDIT LOG -->
-              <div class="panel admin-card admin-card-wide" id="admin-audit-log">
-                <header class="panel-head">
-                  <h3 data-i18n="ui.opt_audit_log">Optimization &amp; Color Wheel log</h3>
-                  <span class="panel-hint" data-i18n="ui.opt_audit_hint">Color wheel uploads, replacements, deletes, and optimization runs — persisted on disk</span>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-audit-log-clear" data-i18n="btn.clear_log">✕ Clear log</button>
-                  <button class="btn btn-ghost sm" id="admin-audit-log-reload" data-i18n="btn.refresh">↻ Refresh</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div id="admin-audit-log-list" class="admin-audit-list"></div>
-                </div>
-              </div>
-
-            </div><!-- /admin-grid logs -->
-          </div><!-- /admin-ov-logs -->
-
-          <!-- PANE: THREAD PROFILER -->
-          <div id="admin-ov-thread" hidden>
-            <div class="panel admin-card admin-card-wide" style="margin:12px 0;">
-              <header class="panel-head">
-                <h3>Main Thread Profiler</h3>
-                <span class="panel-hint">Per-operation timing — last/P50/P95/max over the last 100 samples. Red ≥ 50 ms, yellow ≥ 16 ms (one frame).</span>
-                <div class="spacer"></div>
-                <button class="btn btn-ghost sm" id="admin-thread-clear">✕ Clear</button>
-              </header>
-              <div class="panel-body panel-body-flush">
-                <table class="admin-perf-table">
-                  <thead>
-                    <tr>
-                      <th>Operation</th>
-                      <th>Last</th>
-                      <th>P50</th>
-                      <th>P95</th>
-                      <th>Max</th>
-                      <th>Calls</th>
-                      <th>Last run</th>
-                    </tr>
-                  </thead>
-                  <tbody id="admin-perf-tbody">
-                    <tr><td colspan="7" class="admin-perf-empty">No data yet — interact with the app to record operations.</td></tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div><!-- /admin-ov-thread -->
-
-        </div><!-- /admin-overview-pane -->
+        </div><!-- /admin-order-maint-pane -->
 
         <!-- MANAGE PLANT DATA PANE -->
         <div id="admin-manage-pane" hidden>
