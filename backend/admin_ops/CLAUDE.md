@@ -10,6 +10,8 @@
 
 Frontend half: `frontend/admin-ops/admin-ui.mts` (`AdminCockpit` — the ops console, Postgres diagnostics panel, log viewer, PerfMonitor thread tab).
 
+**Overview polling cadence (2026-10-30).** The Admin Overview signal board polls `GET /health` and `GET /logs/backend` (counts) every 30 s while it is the active sub-tab and the Admin tab is showing, and `GET /diagnostics/db` every 5 minutes (or on a forced Refresh); Pause stops the timer only. This is a steady admin-only load on those routes, so keep them cheap. `db.get_db_table_stats` never reports an empty table as needing vacuum: `dead_pct` is 0 when live plus dead rows is 0, and `needs_vacuum` requires at least one dead row (`tests/test_api_admin_ops_coverage.py`). Details: `frontend/admin-ops/CLAUDE.md`, "Admin sub-tabs (2026-10-30)".
+
 No deferred-split root-file line ranges to cite for this domain's *own* logic — `logbuffer.py`/`diagnostics_state.py` were extracted whole from `brain.py` in Phase P5 and are complete here. This domain's routes do call into root `db.py`'s DB-maintenance allowlist: `db._get_maint_table_allowlist()` / `run_vacuum_analyze()` / `run_analyze()` (`db.py` lines 2363–2404), which validate the requested table against `pg_stat_user_tables`, fetched fresh (with a lazy process-level cache for the allowlist itself — distinct from `backend/master_data/browser.py`'s deliberately *never*-cached catalog reads).
 
 ## Key invariants & hazards

@@ -316,7 +316,7 @@ const NIMBUS = (function () {
   ErrorLog.setPlantResolver(() => Store.selectedPlant);
   ErrorLog.setRouteResolver(() => ({ tab: App._currentTab, ganttSub: App._ganttSub }));
   ErrorLog.setAdminGate(() => Session.isAdmin());
-  ErrorLog.setBadgeClickHandler(() => { App.goto('admin'); AdminCockpit.gotoOvTab('logs'); });
+  ErrorLog.setBadgeClickHandler(() => { App.goto('admin'); AdminCockpit.gotoSub('logs'); });
   Store.setAllowedPlantsResolver(() => Session.allowedPlants());
   Store.setSettingsDefaultsResolver(() => Settings.DEFAULTS);
 
@@ -574,7 +574,7 @@ const NIMBUS = (function () {
       if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'l') {
         e.preventDefault();
         if (!Session.canAccessTab('admin')) return;
-        App.goto('admin'); AdminCockpit.gotoOvTab('logs');
+        App.goto('admin'); AdminCockpit.gotoSub('logs');
       }
     });
 

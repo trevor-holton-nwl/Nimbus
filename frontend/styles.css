@@ -3949,39 +3949,7 @@ span.flatpickr-weekday {
    Health bar, pipeline inspector, backend warnings, filterable logs.
    ========================================================================== */
 
-/* ── Health bar ── */
-.admin-health-bar {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  padding: 9px 16px;
-  margin-bottom: 16px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  font-size: 12px;
-  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
-  overflow-x: auto;
-}
-.admin-health-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-  padding: 3px 12px;
-  border-radius: 10px;
-}
-/* Soft-tint the chip pill from its own dot's state — no JS change needed to
-   tag the chip itself, :has() reads the state already set on the child dot. */
-.admin-health-chip:has(.admin-health-dot.ok)   { background: var(--ok-soft); }
-.admin-health-chip:has(.admin-health-dot.warn) { background: var(--warn-soft); }
-.admin-health-chip:has(.admin-health-dot.err)  { background: var(--err-soft); }
-.admin-health-sep {
-  width: 1px;
-  height: 16px;
-  background: var(--line);
-  flex-shrink: 0;
-}
+/* ── Health dot (shared by the Overview Signal board) ── */
 .admin-health-dot {
   width: 8px;
   height: 8px;
@@ -3993,7 +3961,6 @@ span.flatpickr-weekday {
 .admin-health-dot.ok   { background: var(--ok);   box-shadow: 0 0 4px rgba(30,122,74,0.5); }
 .admin-health-dot.warn { background: var(--warn-vivid); box-shadow: 0 0 4px rgba(243,156,18,0.5); }
 .admin-health-dot.err  { background: var(--err);  box-shadow: 0 0 4px rgba(176,42,32,0.5); }
-.admin-health-label { color: var(--fg); }
 
 /* ── Pipeline ── */
 .admin-pipeline {
@@ -6310,6 +6277,174 @@ body.dark .flatpickr-next-month:hover svg { fill: var(--accent); }
 body.dark .tab-btn[data-tab="masterdata"].active { color: #ffffff; }
 body.dark .admin-subtab.active,
 body.dark .sub-subtab.active { color: #ffffff; }
+
+/* =============================================================================
+   ADMIN OVERVIEW — Signal board, Needs attention, Recent activity
+   Hairline rows over shadow; severity is a tinted row plus the dot and the name
+   color (never a side stripe). Warn text uses --warn-text (AA); --warn is a
+   background color only.
+   ========================================================================== */
+.ov-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.ov-head h2 { margin: 0; font-size: 18px; font-weight: 700; }
+.ov-meta {
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+.ov-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-top: 18px;
+  align-items: start;
+}
+@media (max-width: 900px) { .ov-grid { grid-template-columns: 1fr; } }
+
+.sig-board { display: block; }
+.sig-row {
+  display: grid;
+  grid-template-columns: 14px minmax(140px, 180px) 1fr auto auto;
+  column-gap: 12px;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.sig-row:last-child { border-bottom: 0; }
+.sig-row[data-sev="err"]  { background: var(--err-soft); }
+.sig-row[data-sev="warn"] { background: var(--warn-soft); }
+.sig-name { font-size: 13px; font-weight: 600; color: var(--fg); }
+.sig-row[data-sev="err"]  .sig-name { color: var(--err); }
+.sig-row[data-sev="warn"] .sig-name { color: var(--warn-text); }
+.sig-reason { font-size: 12px; color: var(--fg-mute); overflow-wrap: anywhere; min-width: 0; }
+.sig-num { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; }
+.sig-fixes { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.sig-details {
+  background: none;
+  border: 0;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.sig-details:hover { text-decoration: underline; }
+.sig-detail {
+  grid-column: 1 / -1;
+  background: var(--bg-subtle);
+  border-top: 1px solid var(--line);
+  margin: 10px -16px -10px;
+  padding: 10px 16px 12px 42px;
+}
+.sig-detail[hidden] { display: none; }
+.sig-dt-wrap { overflow-x: auto; margin-bottom: 8px; }
+.sig-dt { border-collapse: collapse; font-size: 12px; width: 100%; }
+.sig-dt th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--fg-mute);
+  padding: 3px 12px 3px 0;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.sig-dt td { padding: 4px 12px 4px 0; vertical-align: top; overflow-wrap: anywhere; }
+.sig-dt td.num { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; text-align: right; }
+
+.attn-list { display: block; }
+.attn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.attn-row:last-child { border-bottom: 0; }
+.attn-text { flex: 1 1 auto; font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.attn-row .btn { flex: 0 0 auto; }
+.attn-empty { padding: 14px 16px; font-size: 13px; color: var(--fg-mute); }
+
+.ov-recent { max-height: none; overflow: visible; }
+.ov-recent .admin-log-row.ov-recent-row {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  padding: 6px 16px; border-left-color: transparent; font-size: 12px;
+}
+.ov-recent-row::before { content: ''; flex: none; align-self: center; width: 6px; height: 6px; border-radius: 50%; background: var(--info); }
+.ov-recent-row.admin-log-warn::before { background: var(--warn); }
+.ov-recent-row.admin-log-error::before { background: var(--err); }
+.ov-recent-row .admin-log-ts, .ov-recent-row .admin-log-scope { flex: none; white-space: nowrap; }
+.ov-recent-row .admin-log-msg { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-acts { display: flex; gap: 6px; flex: none; }
+.sig-dt th.num { text-align: right; }
+
+@media (max-width: 720px) {
+  .sig-row { grid-template-columns: 14px 1fr auto; row-gap: 4px; }
+  .sig-reason, .sig-fixes { grid-column: 2 / -1; }
+  .sig-fixes { grid-column: 2 / -1; display: flex; flex-wrap: wrap; justify-content: flex-start; }
+  .sig-details { grid-column: auto; justify-self: start; }
+  .sig-detail { margin: 10px -16px -10px; padding-left: 16px; }
+}
+
+/* Admin Logs: merged timeline + context rail */
+.ulog-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.ulog-toolbar > * { min-width: 0; }
+.ulog-toolbar-label { font-size: 12px; color: var(--fg-mute); }
+.ulog-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ulog-filter > * { min-width: 0; }
+.ulog-plant { min-width: 160px; flex: 0 1 200px; }
+.ulog-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 0; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.ulog-sources legend { font-size: 11px; color: var(--fg-mute); padding: 0 4px; }
+.ulog-sources label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.ulog-sources label[hidden] { display: none; }
+.ulog-count { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 11px; color: var(--fg-mute); }
+.ulog-notices { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.ulog-notices[hidden] { display: none; }
+.ulog-notice { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--warn-soft); color: var(--warn-text); overflow-wrap: anywhere; }
+.ulog-note { font-size: 12px; color: var(--fg-mute); margin-bottom: 8px; }
+.ulog-split { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; }
+.ulog-list { max-height: 70vh; border: 1px solid var(--line); border-radius: 6px; }
+#ulog-list { max-height: calc(100vh - 340px); min-height: 320px; overflow: auto; }
+#ulog-list .admin-log-row { border-left-color: transparent; }
+.ulog-rail { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; min-width: 0; }
+.ulog-row { cursor: pointer; }
+.ulog-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ulog-row.is-selected, .ulog-rel-row.is-selected { background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent); }
+.ulog-head { flex-wrap: wrap; }
+.ulog-src { font-size: 10.5px; padding: 0 6px; border-radius: 4px; background: var(--bg-subtle); color: var(--fg-mute); white-space: nowrap; }
+.ulog-user, .ulog-plant { color: var(--fg-mute); overflow-wrap: anywhere; }
+.ulog-head .spacer { flex: 1 1 0; }
+.ulog-head button.admin-log-reqid, .ulog-head button.admin-log-code { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
+.ulog-chevron { background: none; border: 0; padding: 0 4px; cursor: pointer; color: var(--fg-mute); font: inherit; }
+.ulog-more { margin: 8px 14px; }
+.ulog-raw { overflow: auto; max-height: 240px; margin: 8px 0 0; padding: 6px 8px; background: var(--bg-elev); border: 1px solid var(--line); border-radius: 4px; font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ulog-group { border-top: 1px solid var(--line); padding: 8px 0; }
+.ulog-group-sum { display: flex; gap: 8px; align-items: baseline; cursor: pointer; font-size: 12px; font-weight: 600; }
+.ulog-group-why { min-width: 0; overflow-wrap: anywhere; }
+.ulog-group-key { color: var(--fg-mute); font-weight: 400; overflow-wrap: anywhere; }
+.ulog-possible .ulog-group-sum { color: var(--fg-mute); font-style: italic; }
+.ulog-rel-row { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; background: none; border: 0; border-left: 3px solid transparent; padding: 4px 6px; cursor: pointer; font-size: 12px; color: var(--fg); }
+.ulog-rel-row:hover { background: var(--bg-subtle); }
+.ulog-rel-text { min-width: 0; overflow-wrap: anywhere; }
+.ulog-rail-sel { margin: 0 0 8px; }
+.ulog-clear-menu { display: none; }
+@media (max-width: 720px) {
+  #admin-logs-pane .panel-hint { display: none; }
+  .ulog-clear-menu { display: inline-flex; }
+  .ulog-toolbar > .ulog-clear-btn { display: none; }
+  .ulog-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; width: 100%; }
+  .ulog-sources legend { grid-column: 1 / -1; }
+  .admin-subtabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+}
+@media (max-width: 1000px) {
+  .ulog-split { grid-template-columns: minmax(0, 1fr); }
+  .ulog-rail { position: static; max-height: none; }
+}
 
 /* =============================================================================
    ORDERS TAB — Notes popover (📝 column)

@@ -276,6 +276,7 @@ CREATE TABLE IF NOT EXISTS upload_audit (
     uploaded_at     TIMESTAMP NOT NULL DEFAULT NOW(),
     warnings        JSONB
 );
+ALTER TABLE upload_audit ADD COLUMN IF NOT EXISTS rid TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_audit_uploaded_at ON upload_audit(uploaded_at DESC);
 

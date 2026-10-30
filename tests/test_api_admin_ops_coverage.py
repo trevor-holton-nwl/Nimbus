@@ -329,3 +329,24 @@ def test_diagnostics_deep_includes_schedule_event_block(ops, monkeypatch):
     block = response.json()["db_stats"]["schedule_event"]
     assert block == {"rows_estimate": 5, "oldest_at": "2026-10-01T00:00:00+00:00", "newest_at": "2026-10-23T00:00:00+00:00",
                      "last_sweep": {"deleted": 2}, "write_failures": 4}
+
+
+def test_table_stats_empty_table_never_needs_vacuum(monkeypatch):
+    """An empty table (no live, no dead rows) reports dead_pct 0 and no vacuum; a table with dead rows still flags."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 10, 30, tzinfo=timezone.utc)
+
+    def row(name, live, dead, pct):
+        return (name, live, dead, pct, None, now, None, now, "8 kB", 0)
+
+    cur = MagicMock()
+    cur.fetchall.return_value = [row("empty_t", 0, 0, 100.0), row("tiny_t", 0, 3, 100.0), row("busy_t", 70, 30, 30.0)]
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    pool = MagicMock()
+    pool.connection.return_value.__enter__.return_value = conn
+    monkeypatch.setattr(db, "_pool", pool)
+    out = {r["table"]: r for r in db.get_db_table_stats()}
+    assert out["empty_t"]["dead_pct"] == 0.0 and out["empty_t"]["needs_vacuum"] is False
+    assert out["busy_t"]["needs_vacuum"] is True
+    assert out["tiny_t"]["needs_vacuum"] is True   # dead rows exist and the share is over 20%

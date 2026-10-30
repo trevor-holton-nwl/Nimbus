@@ -49,26 +49,6 @@
     {
       "file": "index.html",
       "attribute": "onclick",
-      "expression": "NIMBUS.AdminCockpit.gotoOvTab('data-ops')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.AdminCockpit.gotoOvTab('diagnostics')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.AdminCockpit.gotoOvTab('logs')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
-      "expression": "NIMBUS.AdminCockpit.gotoOvTab('thread')"
-    },
-    {
-      "file": "index.html",
-      "attribute": "onclick",
       "expression": "NIMBUS.AlertsUIAdapter.toggleDrawer()"
     },
     {
@@ -508,7 +488,6 @@
     }
   ],
   "htmlCommands": [
-    "AdminCockpit.gotoOvTab",
     "AlertsUIAdapter.toggleDrawer",
     "ColorWheelViewer.close",
     "ColorWheelViewer.search",
