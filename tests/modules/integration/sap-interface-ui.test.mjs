@@ -256,3 +256,13 @@ for (const failure of [false, true]) {
     assert.equal(requests.length, 1, 'obsolete success does not start a second audit request');
   });
 }
+
+test('Interface.showTab exists and is safe before the console is on screen (selection kept, no throw)', () => {
+  assert.equal(typeof Interface.showTab, 'function');
+  const prior = globalThis.document;
+  globalThis.document = { getElementById() { return null; } };
+  try {
+    assert.doesNotThrow(() => Interface.showTab('staging'));
+    assert.doesNotThrow(() => Interface.showTab('history', 'stage_planned_orders'));
+  } finally { if (prior === undefined) delete globalThis.document; else globalThis.document = prior; }
+});
