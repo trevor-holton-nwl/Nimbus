@@ -20,6 +20,7 @@ import { Interface } from '../integration/sap-interface-ui.mjs';
 import { Security } from '../security/security-admin.mjs';
 import { JobsAdmin } from './jobs-pane.mjs';
 import { JobsClient } from './jobs-client.mjs';
+import { UnifiedLogPane } from './unified-log-pane.mjs';
 import type { JobRun } from './jobs-client.mjs';
 import { buildSignals, buildAttention, FORBIDDEN, NOT_FOUND } from './signals.mjs';
 import type {
@@ -317,15 +318,6 @@ interface BackendLogEntry {
   source?: 'frontend';
 }
 
-/** GET /logs/backend. `dropped` is read by _renderBackendLog but the backend
- *  does not actually return it — always undefined; kept optional so the type
- *  matches that pre-existing (unchanged) runtime behavior exactly. */
-interface BackendLogResponse {
-  entries: BackendLogEntry[];
-  total: number;
-  dropped?: number;
-}
-
 /** POST /maintenance/vacuum-analyze | /maintenance/analyze. */
 interface AdminMaintenanceResult {
   ok: boolean;
@@ -424,15 +416,6 @@ interface AdminAuditLogItem {
   details?: Record<string, unknown>;
 }
 
-interface AdminAuditLogResponse {
-  entries: AdminAuditLogItem[];
-}
-
-/** Frontend ErrorLog entry, named via the ReturnType<typeof ...> precedent
- *  (see e.g. schedule-workbench.mts's OptimizerKpis) rather than duplicating
- *  application-foundation.mts's unexported LogEntry shape. */
-type AdminFrontendLogEntry = ReturnType<typeof ErrorLog.entries>[number];
-
 /** Persistence._lastLoad snapshot (schedule-data.mts's unexported LoadStats),
  *  named the same ReturnType<typeof ...> way. */
 type AdminPersistenceStats = ReturnType<typeof Persistence.stats>;
@@ -480,8 +463,6 @@ interface AdminPipelineStep {
 export const AdminCockpit = {
   _initialized: false,
   _pendingFile: null as File | null,
-  _logFilter: { level: 'all', scope: 'all', search: '', errorCode: 'all', reqId: '', user: '' },
-  _backendLogFilter: { level: 'all', category: 'all', since: '', q: '', reqId: '', user: '' },
   _healthData: null as AdminHealthResponse | null,
   _deepData: null as AdminDiagnosticsDeepResponse | null,
   _ovTimer: null as ReturnType<typeof setInterval> | null,
@@ -500,10 +481,8 @@ export const AdminCockpit = {
   _pipelineOpen: null as string | null,
   _activeSub: 'overview',
   _dbDeepAbort: null as AbortController | null,
-  _backendLogAbort: null as AbortController | null,
   _pipelineAbort: null as AbortController | null,
   _auditAbort: null as AbortController | null,
-  _auditLogAbort: null as AbortController | null,
   _fpPurgeStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpPurgeEnd: null as NimbusVendor.FlatpickrInstance | null,
   _purgePlant: null as string | null,
@@ -532,6 +511,7 @@ export const AdminCockpit = {
     }
     if (cur !== 'overview') AdminCockpit._stopHealthPolling();
     if (cur !== 'jobs') JobsAdmin.setActive(false);
+    if (cur !== 'logs') UnifiedLogPane.setActive(false);
     if (cur === 'manage') MasterData.render();
     else if (cur === 'interface') Interface.render();
     else if (cur === 'security') Security.render();
@@ -571,19 +551,16 @@ export const AdminCockpit = {
     document.getElementById('admin-upload-btn')?.addEventListener('click', AdminCockpit._upload);
     document.getElementById('admin-purge-btn')?.addEventListener('click', AdminCockpit._purge);
 
-    document.getElementById('admin-log-reload')?.addEventListener('click', () => Persistence.reload());
-    document.getElementById('admin-log-cache')?.addEventListener('click', () => Persistence.clearCache());
-    document.getElementById('admin-log-copy')?.addEventListener('click', () => ErrorLog.copy());
     document.getElementById('admin-log-export-json')?.addEventListener('click', () => ErrorLog.exportJson());
     document.getElementById('admin-log-copy-filtered')?.addEventListener('click', () => AdminCockpit._copyFiltered());
     document.getElementById('admin-log-clear')?.addEventListener('click', () => {
       ErrorLog.clear();
-      AdminCockpit._renderLogs();
+      UnifiedLogPane.refreshFrontend();
     });
 
     document.getElementById('admin-audit-reload')?.addEventListener('click', AdminCockpit._renderAudit);
     document.getElementById('admin-audit-clear')?.addEventListener('click', AdminCockpit._clearAudit);
-    document.getElementById('admin-audit-log-reload')?.addEventListener('click', AdminCockpit._renderAuditLog);
+    document.getElementById('ulog-clear-upload')?.addEventListener('click', AdminCockpit._clearAudit);
     document.getElementById('admin-audit-log-clear')?.addEventListener('click', AdminCockpit._clearAuditLog);
     document.getElementById('ov-pause')?.addEventListener('click', () => AdminCockpit._setPaused(!AdminCockpit._ovPaused));
     document.getElementById('ov-refresh')?.addEventListener('click', () => { void AdminCockpit._refreshOverview({ force: true }); });
@@ -617,35 +594,12 @@ export const AdminCockpit = {
       }
       AdminCockpit._runMaintenance(action, table, btn);
     });
-    document.getElementById('admin-backend-log-refresh')?.addEventListener('click', AdminCockpit._renderBackendLog);
     document.getElementById('admin-backend-log-clear')?.addEventListener('click', AdminCockpit._clearBackendLog);
-    document.getElementById('admin-backend-log-filter-level')?.addEventListener('change', (e: Event) => {
-      AdminCockpit._backendLogFilter.level = (e.target as HTMLSelectElement).value;
-      AdminCockpit._renderBackendLog();
-    });
-
-    // Filter controls
-    document.getElementById('admin-log-filter-level')?.addEventListener('change', (e: Event) => {
-      AdminCockpit._logFilter.level = (e.target as HTMLSelectElement).value;
-      AdminCockpit._renderLogs();
-    });
-    document.getElementById('admin-log-filter-scope')?.addEventListener('change', (e: Event) => {
-      AdminCockpit._logFilter.scope = (e.target as HTMLSelectElement).value;
-      AdminCockpit._renderLogs();
-    });
-    document.getElementById('admin-log-search')?.addEventListener('input', (e: Event) => {
-      AdminCockpit._logFilter.search = (e.target as HTMLInputElement).value.toLowerCase();
-      AdminCockpit._renderLogs();
-    });
-    document.getElementById('admin-log-user')?.addEventListener('input', (e: Event) => {
-      AdminCockpit._logFilter.user = (e.target as HTMLInputElement).value.trim();
-      AdminCockpit._renderLogs();
-    });
 
     ErrorLog.subscribe(() => {
       const panel = document.getElementById('admin-tab');
       if (panel?.classList.contains('active') && AdminCockpit._activeSub === 'logs') {
-        AdminCockpit._renderLogs();
+        UnifiedLogPane.refreshFrontend();
       }
       AdminCockpit._queueClientRefresh();
     });
@@ -685,9 +639,9 @@ export const AdminCockpit = {
   },
 
   _renderLogsPane(): void {
-    AdminCockpit._renderBackendLog();
-    AdminCockpit._renderLogs();
-    AdminCockpit._renderAuditLog();
+    UnifiedLogPane.init();
+    void UnifiedLogPane.render();
+    UnifiedLogPane.setActive(true);
   },
 
   _renderDiagnosticsPane(): void {
@@ -1187,7 +1141,7 @@ export const AdminCockpit = {
         await A._runMaintenance('vacuum-analyze', String(a.table ?? '') || null, btn);
         again();
         return;
-      case 'logs.open': A.gotoSub('logs'); return;   // W3: preset filter from fix.args (source, level)
+      case 'logs.open': A.gotoSub('logs'); UnifiedLogPane.setFilter({ level: 'warn', sources: new Set(['backend']) }); return;
       case 'data.reload': void Persistence.reload(); return;
       case 'data.color_wheel': {
         const nb = (globalThis as unknown as { NIMBUS?: { ColorWheelViewer?: { open?: () => void } } }).NIMBUS;
@@ -2042,62 +1996,6 @@ export const AdminCockpit = {
       if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = label; }
     }
   },
-
-  /* FE↔BE correlation: clicking a reqId pins it as a filter on BOTH panes and
-     refreshes them so the operator sees the matching frontend + backend events. */
-  _correlateReqId(reqId: string | undefined): void {
-    if (!reqId) return;
-    AdminCockpit._logFilter.reqId        = reqId;
-    AdminCockpit._backendLogFilter.reqId = reqId;
-    AdminCockpit._renderLogs();
-    AdminCockpit._renderBackendLog();
-  },
-
-  /* Render (or clear) a small "filtering by request <id>" chip at the top of a
-     log list. `onClear` removes the filter. Self-contained: builds the chip if
-     a reqId is set, removes any prior chip otherwise. */
-  _renderReqIdChip(listId: string, reqId: string, onClear: () => void): void {
-    const list = document.getElementById(listId);
-    if (!list || !list.parentElement) return;
-    const chipId = `${listId}-reqid-chip`;
-    let chip = document.getElementById(chipId);
-    if (!reqId) { if (chip) chip.remove(); return; }
-    if (!chip) {
-      chip = document.createElement('div');
-      chip.id = chipId;
-      chip.className = 'admin-log-reqid-chip';
-      list.parentElement.insertBefore(chip, list);
-    }
-    chip.textContent = '';
-    const label = document.createElement('span');
-    label.textContent = `req ${String(reqId).slice(0, 8)}…`;
-    const x = document.createElement('button');
-    x.type = 'button';
-    x.className = 'admin-log-reqid-chip-x';
-    x.textContent = '✕';
-    x.title = 'Clear request filter';
-    x.addEventListener('click', () => { onClear(); });
-    chip.appendChild(document.createTextNode('Filtering: '));
-    chip.appendChild(label);
-    chip.appendChild(x);
-  },
-
-  _getFilteredEntries(): AdminFrontendLogEntry[] {
-    const { level, scope, search, errorCode, reqId, user } = AdminCockpit._logFilter;
-    return ErrorLog.entries().filter(e => {
-      if (level !== 'all' && e.level !== level) return false;
-      if (scope !== 'all' && e.scope !== scope) return false;
-      if (errorCode && errorCode !== 'all' && e.errorCode !== errorCode) return false;
-      if (reqId && e.reqId !== reqId) return false;
-      if (user && e.user !== user) return false;
-      if (search) {
-        const haystack = `${e.scope} ${e.msg} ${e.ts} ${e.errorCode || ''} ${e.reqId || ''}`.toLowerCase();
-        if (!haystack.includes(search)) return false;
-      }
-      return true;
-    });
-  },
-
   /* -----------------------------------------------------------------------
      DB DEEP DIVE — fetches /diagnostics/db on demand, renders sections
      ----------------------------------------------------------------------- */
@@ -2671,205 +2569,6 @@ export const AdminCockpit = {
     return tbl;
   },
 
-  /* -----------------------------------------------------------------------
-     BACKEND EVENT LOG — fetches /logs/backend, renders like the front-end log
-     ----------------------------------------------------------------------- */
-  _renderBackendLog(): void {
-    const host = document.getElementById('admin-backend-log-list');
-    const countEl = document.getElementById('admin-backend-log-count');
-    if (!host) return;
-    host.innerHTML = `<div class="admin-log-empty">${Util.t('ui.loading')}</div>`;
-
-    AdminCockpit._backendLogAbort?.abort();
-    AdminCockpit._backendLogAbort = new AbortController();
-    const sig = AbortSignal.any
-      ? AbortSignal.any([AdminCockpit._backendLogAbort.signal, AbortSignal.timeout(8000)])
-      : AdminCockpit._backendLogAbort.signal;
-
-    const bf = AdminCockpit._backendLogFilter || {};
-    // Lazily inject a free-text query input beside the level select (markup is in
-    // index.html which we don't own). Drives the server-side ?q= filter.
-    const lvlSel = document.getElementById('admin-backend-log-filter-level');
-    if (lvlSel && lvlSel.parentElement && !document.getElementById('admin-backend-log-q')) {
-      const qIn = document.createElement('input');
-      qIn.id = 'admin-backend-log-q';
-      qIn.type = 'search';
-      qIn.className = 'input';
-      qIn.placeholder = 'Filter backend (msg / code / category)';
-      qIn.title = 'Server-side free-text filter';
-      qIn.addEventListener('input', Util.debounce((ev: Event) => {
-        AdminCockpit._backendLogFilter.q = (ev.target as HTMLInputElement).value.trim();
-        AdminCockpit._renderBackendLog();
-      }, 350));
-      lvlSel.insertAdjacentElement('afterend', qIn);
-    }
-    if (lvlSel && lvlSel.parentElement && !document.getElementById('admin-backend-log-user')) {
-      const uIn = document.createElement('input');
-      uIn.id = 'admin-backend-log-user';
-      uIn.type = 'search';
-      uIn.className = 'input';
-      uIn.placeholder = Util.t('ph.filter_user');
-      uIn.addEventListener('input', Util.debounce((ev: Event) => {
-        AdminCockpit._backendLogFilter.user = (ev.target as HTMLInputElement).value.trim();
-        AdminCockpit._renderBackendLog();
-      }, 350));
-      (document.getElementById('admin-backend-log-q') || lvlSel).insertAdjacentElement('afterend', uIn);
-    }
-    const lvl = bf.level || 'all';
-    const qp = [`limit=200`];
-    if (lvl !== 'all')                  qp.push('level='    + encodeURIComponent(lvl));
-    if (bf.category && bf.category !== 'all') qp.push('category=' + encodeURIComponent(bf.category));
-    if (bf.since)                       qp.push('since='    + encodeURIComponent(bf.since));
-    if (bf.q)                           qp.push('q='        + encodeURIComponent(bf.q));
-    if (bf.user)                        qp.push('user='     + encodeURIComponent(bf.user));
-    const params = `?${qp.join('&')}`;
-    const reqIdFilter = bf.reqId || '';
-
-    // Reqid-correlation chip on the backend pane.
-    AdminCockpit._renderReqIdChip('admin-backend-log-list', reqIdFilter, () => {
-      AdminCockpit._backendLogFilter.reqId = '';
-      AdminCockpit._renderBackendLog();
-    });
-
-    Util.fetchTraced(`${Config.API_BASE}/logs/backend${params}`, { signal: sig })
-      .then((r) => r.json() as Promise<BackendLogResponse>)
-      .then(({ entries: rawEntries, total, dropped }) => {
-        host.textContent = '';
-        // Client-side reqId correlation filter (server filters category/since/q/level).
-        let entries = rawEntries || [];
-        if (reqIdFilter) entries = entries.filter((e) => e.rid === reqIdFilter);
-        if (countEl) countEl.textContent = Util.t('ui.backend_log_count', { total, shown: entries.length });
-
-        // Overflow marker if the backend reports a dropped count.
-        if (dropped && dropped > 0) {
-          const ov = document.createElement('div');
-          ov.className = 'admin-log-older';
-          ov.textContent = `${dropped} older backend entr${dropped === 1 ? 'y' : 'ies'} dropped`;
-          host.appendChild(ov);
-        }
-
-        if (!entries.length) {
-          const empty = document.createElement('div');
-          empty.className = 'admin-log-empty';
-          empty.textContent = lvl !== 'all' ? Util.t('ui.diag_no_level_events', {level: lvl}) : Util.t('empty.no_backend_events');
-          host.appendChild(empty);
-          return;
-        }
-
-        for (const e of entries) {
-          const row = document.createElement('div');
-          row.className = `admin-log-row admin-log-${e.level || 'info'}`;
-
-          const head = document.createElement('div');
-          head.className = 'admin-log-head';
-
-          const lvlEl = document.createElement('span');
-          lvlEl.className = 'admin-log-lvl';
-          lvlEl.textContent = (e.level || 'info').toUpperCase();
-
-          const tsEl = document.createElement('span');
-          tsEl.className = 'admin-log-ts';
-          const d = e.ts ? new Date(e.ts) : null;
-          tsEl.textContent = d ? AdminCockpit._relTime(d) : '';
-          tsEl.title = e.ts || '';
-
-          const scopeEl = document.createElement('span');
-          scopeEl.className = 'admin-log-scope';
-          scopeEl.textContent = e.category || '';
-
-          head.appendChild(lvlEl);
-          head.appendChild(tsEl);
-          head.appendChild(scopeEl);
-          if (e.source === 'frontend') {
-            const src = document.createElement('span');
-            src.className = 'admin-log-src';
-            src.textContent = 'FE';
-            src.title = 'Forwarded from a frontend client';
-            head.appendChild(src);
-          }
-          const code = e.error_code;
-          if (code) {
-            const codeEl = document.createElement('span');
-            codeEl.className = 'admin-log-code';
-            codeEl.textContent = code;
-            codeEl.title = 'Filter by this error code';
-            codeEl.addEventListener('click', ev => {
-              ev.stopPropagation();
-              AdminCockpit._backendLogFilter.q = code;
-              AdminCockpit._renderBackendLog();
-            });
-            head.appendChild(codeEl);
-          }
-          const rid = e.rid;
-          if (rid) {
-            const ridEl = document.createElement('span');
-            ridEl.className = 'admin-log-reqid';
-            ridEl.textContent = `req ${String(rid).slice(0, 8)}`;
-            ridEl.title = `Correlate request ${rid} across the frontend log`;
-            ridEl.addEventListener('click', ev => {
-              ev.stopPropagation();
-              AdminCockpit._correlateReqId(rid);
-            });
-            head.appendChild(ridEl);
-          }
-          if (e.error_type) {
-            const typeEl = document.createElement('span');
-            typeEl.className = 'admin-log-etype';
-            typeEl.textContent = e.error_type;
-            head.appendChild(typeEl);
-          }
-          row.appendChild(head);
-
-          const msg = document.createElement('div');
-          msg.className = 'admin-log-msg';
-          msg.textContent = e.msg || '';
-          row.appendChild(msg);
-
-          const hasCtx = !!(e.ctx && Object.keys(e.ctx).length);
-          if (hasCtx) {
-            const pre = document.createElement('pre');
-            pre.className = 'admin-log-ctx';
-            pre.textContent = JSON.stringify(e.ctx, null, 2);
-            row.appendChild(pre);
-          }
-          if (e.exc) {
-            const excPre = document.createElement('pre');
-            excPre.className = 'admin-log-ctx admin-log-exc';
-            excPre.textContent = e.exc;
-            row.appendChild(excPre);
-
-            const copyBtn = document.createElement('button');
-            copyBtn.type = 'button';
-            copyBtn.className = 'admin-log-copy';
-            copyBtn.textContent = Util.t('ui.log_copy');
-            copyBtn.title = Util.t('ui.log_copy_title');
-            copyBtn.addEventListener('click', ev => {
-              ev.stopPropagation();
-              const text = [e.rid ? `rid: ${e.rid}` : '', e.msg || '', e.exc].filter(Boolean).join('\n');
-              void navigator.clipboard?.writeText(text).then(() => {
-                copyBtn.textContent = Util.t('ui.log_copied');
-                setTimeout(() => { copyBtn.textContent = Util.t('ui.log_copy'); }, 1500);
-              }, () => { /* clipboard unavailable: leave the button as is */ });
-            });
-            row.appendChild(copyBtn);
-          }
-          if (hasCtx || e.exc) {
-            row.style.cursor = 'pointer';
-            row.addEventListener('click', () => row.classList.toggle('expanded'));
-          }
-
-          host.appendChild(row);
-        }
-      })
-      .catch((e: Error) => {
-        host.textContent = '';
-        const err = document.createElement('div');
-        err.className = 'admin-log-empty';
-        err.textContent = Util.t('ui.failed_load_backend_log', { error: e.message });
-        host.appendChild(err);
-      });
-  },
-
   async _clearBackendLog(): Promise<void> {
     // The server ring buffer is shared diagnostics evidence and cannot be restored.
     const ok = await Modal.confirm({
@@ -2882,195 +2581,21 @@ export const AdminCockpit = {
     try {
       const r = await Util.fetchTraced(`${Config.API_BASE}/logs/backend/clear`, { method: 'POST' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      AdminCockpit._renderBackendLog();
+      void UnifiedLogPane.render();
     } catch (e) {
       Toast.show(Util.t('toast.backend_log_clear_failed', { msg: (e as Error).message }), 'error');
     }
   },
 
   _copyFiltered(): void {
-    const entries = AdminCockpit._getFilteredEntries();
+    const entries = UnifiedLogPane.filteredEntries();
     const txt = entries.map((e) =>
-      `${e.ts} [${e.level.toUpperCase()}]${e.user ? ' <' + e.user + '>' : ''} ${e.scope}: ${e.msg}${e.ctx ? ' :: ' + JSON.stringify(e.ctx) : ''}`
+      `${e.ts ?? ''} [${e.level.toUpperCase()}] [${e.source}]${e.user ? ' <' + e.user + '>' : ''}${e.plant ? ' (' + e.plant + ')' : ''} ${e.text}`
     ).join('\n');
     navigator.clipboard?.writeText(txt).then(
       () => Toast.show(Util.t('toast.copied_filtered', { count: entries.length }), 'success'),
       () => Toast.show(Util.t('toast.copy_failed'), 'error')
     );
-  },
-
-  _renderLogs(): void {
-    const list = document.getElementById('admin-log-list');
-    if (!list) return;
-
-    // Rebuild scope filter options
-    const allEntries = ErrorLog.entries();
-    const scopeEl = document.getElementById('admin-log-filter-scope') as HTMLSelectElement | null;
-    if (scopeEl) {
-      const currentScope = AdminCockpit._logFilter.scope;
-      const scopes = [...new Set(allEntries.map(e => e.scope).filter(Boolean))].sort();
-      scopeEl.textContent = '';
-      const allOpt = document.createElement('option');
-      allOpt.value = 'all';
-      allOpt.textContent = Util.t('ui.all_scopes');
-      scopeEl.appendChild(allOpt);
-      for (const s of scopes) {
-        const opt = document.createElement('option');
-        opt.value = s;
-        opt.textContent = s;
-        if (s === currentScope) opt.selected = true;
-        scopeEl.appendChild(opt);
-      }
-      // Lazily inject an errorCode filter select beside the scope select (the
-      // markup lives in index.html which we don't own — build it on demand).
-      let codeEl = document.getElementById('admin-log-filter-code') as HTMLSelectElement | null;
-      if (!codeEl && scopeEl.parentElement) {
-        codeEl = document.createElement('select');
-        codeEl.id = 'admin-log-filter-code';
-        codeEl.className = scopeEl.className || '';
-        codeEl.title = 'Filter by error code';
-        codeEl.addEventListener('change', (ev: Event) => {
-          AdminCockpit._logFilter.errorCode = (ev.target as HTMLSelectElement).value;
-          AdminCockpit._renderLogs();
-        });
-        scopeEl.insertAdjacentElement('afterend', codeEl);
-      }
-      if (codeEl) {
-        const curCode = AdminCockpit._logFilter.errorCode;
-        const codes = [...new Set(allEntries.map(e => e.errorCode).filter((c): c is string => Boolean(c)))].sort();
-        codeEl.textContent = '';
-        const cAll = document.createElement('option');
-        cAll.value = 'all'; cAll.textContent = 'All codes';
-        codeEl.appendChild(cAll);
-        for (const c of codes) {
-          const opt = document.createElement('option');
-          opt.value = c; opt.textContent = c;
-          if (c === curCode) opt.selected = true;
-          codeEl.appendChild(opt);
-        }
-      }
-    }
-
-    // Active reqId-correlation chip (set by clicking a reqId in either pane).
-    AdminCockpit._renderReqIdChip('admin-log-list', AdminCockpit._logFilter.reqId, () => {
-      AdminCockpit._logFilter.reqId = '';
-      AdminCockpit._renderLogs();
-    });
-
-    const filtered = AdminCockpit._getFilteredEntries();
-    const visible = filtered.slice().reverse();
-
-    list.textContent = '';
-
-    // Overflow marker — N entries evicted past MAX since last clear.
-    const dropped = ErrorLog.droppedCount();
-    if (dropped > 0) {
-      const ov = document.createElement('div');
-      ov.className = 'admin-log-older';
-      ov.textContent = `${dropped} older entr${dropped === 1 ? 'y' : 'ies'} dropped (ring at ${ErrorLog.MAX})`;
-      list.appendChild(ov);
-    }
-
-    if (visible.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'admin-log-empty';
-      empty.textContent = filtered.length === 0 && allEntries.length > 0
-        ? Util.t('empty.no_entries_filter')
-        : Util.t('empty.no_log_entries');
-      list.appendChild(empty);
-    }
-
-    const SCOPE_COLORS: Record<string, string> = {
-      persistence: 'var(--info,#3498db)',
-      engine:      '#9b59b6',
-      admin:       'var(--accent,#b8791a)',
-      alerts:      'var(--err,#c0392b)',
-      store:       '#16a085',
-      calendar:    '#2ecc71',
-      interaction: '#e67e22',
-    };
-
-    for (const e of visible) {
-      const row = document.createElement('div');
-      row.className = `admin-log-row admin-log-${e.level}`;
-      row.style.cursor = e.ctx != null ? 'pointer' : '';
-
-      const head = document.createElement('div');
-      head.className = 'admin-log-head';
-
-      const lvl = document.createElement('span');
-      lvl.className = 'admin-log-lvl';
-      lvl.textContent = e.level;
-
-      const ts = document.createElement('span');
-      ts.className = 'admin-log-ts';
-      const d = e.ts ? new Date(e.ts) : null;
-      ts.textContent = d ? AdminCockpit._relTime(d) : '';
-      ts.title = e.ts || '';
-
-      const scope = document.createElement('span');
-      scope.className = 'admin-log-scope';
-      scope.textContent = e.scope || '';
-      if (SCOPE_COLORS[e.scope]) scope.style.color = SCOPE_COLORS[e.scope];
-
-      head.appendChild(lvl);
-      head.appendChild(ts);
-      head.appendChild(scope);
-      const errorCode = e.errorCode;
-      if (errorCode) {
-        const code = document.createElement('span');
-        code.className = 'admin-log-code';
-        code.textContent = errorCode;
-        code.title = 'Filter by this error code';
-        code.addEventListener('click', ev => {
-          ev.stopPropagation();
-          AdminCockpit._logFilter.errorCode = errorCode;
-          AdminCockpit._renderLogs();
-        });
-        head.appendChild(code);
-      }
-      const reqId = e.reqId;
-      if (reqId) {
-        const rid = document.createElement('span');
-        rid.className = 'admin-log-reqid';
-        rid.textContent = `req ${String(reqId).slice(0, 8)}`;
-        rid.title = `Correlate request ${reqId} across the backend log`;
-        rid.addEventListener('click', ev => {
-          ev.stopPropagation();
-          AdminCockpit._correlateReqId(reqId);
-        });
-        head.appendChild(rid);
-      }
-      row.appendChild(head);
-
-      const msg = document.createElement('div');
-      msg.className = 'admin-log-msg';
-      msg.textContent = e.msg || '';
-      row.appendChild(msg);
-
-      if (e.ctx != null) {
-        const pre = document.createElement('pre');
-        pre.className = 'admin-log-ctx';
-        pre.textContent = typeof e.ctx === 'string' ? e.ctx : JSON.stringify(e.ctx, null, 2);
-        row.appendChild(pre);
-        row.addEventListener('click', () => row.classList.toggle('expanded'));
-      }
-
-      list.appendChild(row);
-    }
-
-    const counts = document.getElementById('admin-log-counts');
-    if (counts) {
-      const errs  = ErrorLog.countBy('error');
-      const warns = ErrorLog.countBy('warn');
-      const show  = filtered.length !== allEntries.length ? Util.t('ui.log_shown', { count: filtered.length }) : '';
-      counts.textContent = Util.t('ui.log_count_summary', {
-        total: allEntries.length,
-        errs, errp: errs === 1 ? '' : 's',
-        warns, warnp: warns === 1 ? '' : 's',
-        shown: show,
-      });
-    }
   },
 
   _relTime(d: Date | string | number): string {
@@ -3091,6 +2616,7 @@ export const AdminCockpit = {
         if (body.status !== 'ok') { Toast.show(Util.t('toast.clear_history_failed'), 'error'); return; }
         Toast.show(Util.t('toast.history_cleared', { count: body.deleted }), 'success');
         AdminCockpit._renderAudit();
+        void UnifiedLogPane.render();
       })
       .catch((e: Error) => Toast.show(Util.t('toast.clear_history_failed') + ': ' + e.message, 'error'));
   },
@@ -3210,103 +2736,9 @@ export const AdminCockpit = {
       .then((body: { status: string }) => {
         if (body.status !== 'ok') { Toast.show(Util.t('toast.clear_failed'), 'error'); return; }
         Toast.show(Util.t('toast.audit_log_cleared'), 'success');
-        AdminCockpit._renderAuditLog();
+        void UnifiedLogPane.render();
       })
       .catch((e: Error) => Toast.show(Util.t('toast.clear_failed') + ': ' + e.message, 'error'));
-  },
-
-  _renderAuditLog(): void {
-    const host = document.getElementById('admin-audit-log-list');
-    if (!host) return;
-    host.textContent = Util.t('ui.loading');
-    AdminCockpit._auditLogAbort?.abort();
-    AdminCockpit._auditLogAbort = new AbortController();
-    const sig = AbortSignal.any
-      ? AbortSignal.any([AdminCockpit._auditLogAbort.signal, AbortSignal.timeout(8000)])
-      : AdminCockpit._auditLogAbort.signal;
-    Util.fetchTraced(`${Config.API_BASE}/audit/log?limit=200`, { signal: sig })
-      .then(r => r.json() as Promise<AdminAuditLogResponse>)
-      .then(body => {
-        host.textContent = '';
-        const items = body?.entries || [];
-        if (!items.length) {
-          const e = document.createElement('div');
-          e.className = 'admin-log-empty';
-          e.textContent = Util.t('empty.no_audit_events');
-          host.appendChild(e);
-          return;
-        }
-        const tbl = document.createElement('table');
-        tbl.className = 'admin-audit-tbl';
-        const thead = document.createElement('thead');
-        const htr   = document.createElement('tr');
-        for (const h of [Util.t('ui.audit_log_col_when'), Util.t('ui.audit_log_col_user'), Util.t('ui.audit_log_col_action'), Util.t('ui.audit_log_col_plant'), Util.t('ui.audit_log_col_details')]) {
-          const th = document.createElement('th');
-          th.textContent = h;
-          htr.appendChild(th);
-        }
-        thead.appendChild(htr);
-        tbl.appendChild(thead);
-
-        const ACTION_ICONS: Record<string, string> = {
-          color_wheel_upload:  '⬆',
-          color_wheel_replace: '↻',
-          color_wheel_delete:  '⌫',
-          optimization_run:    '📈',
-        };
-        const ACTION_COLORS: Record<string, string> = {
-          color_wheel_upload:  'var(--ok,#2f7a4d)',
-          color_wheel_replace: 'var(--info,#2d5f8c)',
-          color_wheel_delete:  'var(--err,#c0392b)',
-          optimization_run:    'var(--accent,#b8791a)',
-        };
-
-        const tb = document.createElement('tbody');
-        for (const it of items) {
-          const tr = document.createElement('tr');
-          const action = it.action || '—';
-          const icon   = ACTION_ICONS[action] || '•';
-          const color  = ACTION_COLORS[action] || 'inherit';
-          const details = it.details
-            ? Object.entries(it.details).map(([k, v]) => `${k}: ${v}`).join(' · ')
-            : '—';
-          const cells = [
-            Util.fmtIsoStampPref(it.ts || '', true).trim(),
-            it.user || '—',
-            '',
-            it.plant || '—',
-            details,
-          ];
-          cells.forEach((c, i) => {
-            const td = document.createElement('td');
-            if (i === 2) {
-              // `action` is server-stored and not whitelisted, so render it as inert
-              // text — never innerHTML — to avoid a stored-XSS sink (R1). icon is from
-              // the fixed ACTION_ICONS map; color is a CSS var, set via style only.
-              const span = document.createElement('span');
-              span.style.color = color;
-              span.style.fontWeight = '600';
-              span.textContent = `${icon} ${action}`;
-              td.appendChild(span);
-            } else {
-              td.textContent = c;
-            }
-            if (i === 3 && it.plant) td.style.fontWeight = '600';
-            tr.appendChild(td);
-          });
-          tb.appendChild(tr);
-        }
-        tbl.appendChild(tb);
-        host.appendChild(tbl);
-      })
-      .catch((e: Error) => {
-        if (e?.name === 'AbortError') return;
-        host.textContent = '';
-        const err = document.createElement('div');
-        err.className = 'admin-status error';
-        err.textContent = Util.t('ui.failed_load_audit_log', { error: e.message });
-        host.appendChild(err);
-      });
   },
 
   /* ---------------------------------------------------------------------

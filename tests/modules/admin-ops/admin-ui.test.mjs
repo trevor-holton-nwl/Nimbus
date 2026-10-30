@@ -160,25 +160,11 @@ test('purge preview sends the whole-day range (T00:00:00 start, T23:59:59 end), 
   }
 });
 
-test('_getFilteredEntries applies the exact-match user filter', async () => {
-  const { ErrorLog } = await import('../../../frontend/platform/foundation.mjs');
-  ErrorLog.clear?.();
-  ErrorLog.info('t', 'from alice');
-  ErrorLog.info('t', 'from bob');
-  const all = ErrorLog.entries();
-  all[0].user = 'alice@x.com';
-  all[1].user = 'bob@x.com';
-  const prior = { ...AdminCockpit._logFilter };
-  try {
-    AdminCockpit._logFilter = { ...prior, level: 'all', scope: 'all', search: '', errorCode: 'all', reqId: '', user: 'alice@x.com' };
-    const out = AdminCockpit._getFilteredEntries();
-    assert.equal(out.length, 1);
-    assert.equal(out[0].user, 'alice@x.com');
-    AdminCockpit._logFilter.user = '';
-    assert.equal(AdminCockpit._getFilteredEntries().length, 2);
-  } finally {
-    AdminCockpit._logFilter = prior;
+test('the three old log renderers and their filter state are gone (the Logs sub-tab is UnifiedLogPane)', () => {
+  for (const k of ['_renderBackendLog', '_renderLogs', '_renderAuditLog', '_getFilteredEntries', '_correlateReqId', '_renderReqIdChip', '_logFilter', '_backendLogFilter']) {
+    assert.equal(AdminCockpit[k], undefined, k);
   }
+  assert.equal(typeof AdminCockpit._copyFiltered, 'function');
 });
 
 // ---- W1: sub-tab shell ----
@@ -195,7 +181,7 @@ function withEmptyDom(fn) {
   try { return fn(); } finally { if (prior === undefined) delete globalThis.document; else globalThis.document = prior; }
 }
 const ALL_RENDERERS = ['_renderOverview', '_renderLogsPane', '_renderDiagnosticsPane', '_renderOrderMaintenance',
-  '_refreshOverview', '_renderBackendLog', '_renderLogs', '_renderAuditLog', '_renderDiagnostics', '_renderPipeline',
+  '_refreshOverview', '_renderDiagnostics', '_renderPipeline',
   '_renderDbDeep', '_refreshThreadPane', '_renderPurgeMeta', '_renderAudit', '_startHealthPolling', '_stopHealthPolling'];
 
 test('render() calls _setSub once and renders Overview exactly once', () => {
@@ -223,8 +209,7 @@ test('_setSub("logs") stops health polling and renders the logs pane only', () =
 
 test('_setSub("overview") does not call the diagnostics or log renderers', () => {
   const calls = [];
-  const restore = stubAll(['_refreshOverview', '_startHealthPolling', '_stopHealthPolling', '_renderBackendLog', '_renderLogs',
-    '_renderAuditLog', '_renderDiagnostics', '_renderPipeline', '_renderDbDeep', '_refreshThreadPane', '_renderPurgeMeta', '_renderAudit'], calls);
+  const restore = stubAll(['_refreshOverview', '_startHealthPolling', '_stopHealthPolling', '_renderDiagnostics', '_renderPipeline', '_renderDbDeep', '_refreshThreadPane', '_renderPurgeMeta', '_renderAudit'], calls);
   try { withEmptyDom(() => AdminCockpit._setSub('overview')); } finally { restore(); }
   assert.deepEqual(calls.sort(), ['_refreshOverview', '_startHealthPolling']);
 });
@@ -246,7 +231,7 @@ test('every getElementById admin- id used by admin-ui.mts exists in index.html',
   const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
   // Ids injected at runtime (not in index.html). admin-upload-detail is NOT injected anywhere: a pre-existing
   // dead target (the distribution-warning zone is silently skipped), allowlisted only so this test pins the rest.
-  const LAZY = new Set(['admin-upload-detail', 'admin-backend-log-q', 'admin-backend-log-user', 'admin-log-filter-code', 'admin-diag-refresh', 'admin-diag-storage']);
+  const LAZY = new Set(['admin-upload-detail', 'admin-diag-refresh', 'admin-diag-storage']);
   const ids = new Set([...src.matchAll(/getElementById\('(admin-[\w-]+)'\)/g)].map(m => m[1]).filter(id => !LAZY.has(id)));
   const missing = [...ids].filter(id => !html.includes(`id="${id}"`));
   assert.deepEqual(missing, []);
@@ -582,4 +567,20 @@ test('_exportDiagnostics reads the cached health and deep data', () => {
   const src = readFileSync(new URL('../../../frontend/admin-ops/admin-ui.mts', import.meta.url), 'utf8');
   assert.match(src, /health:\s+AdminCockpit\._healthData/);
   assert.match(src, /deep:\s+AdminCockpit\._deepData/);
+});
+
+test('_renderLogsPane initialises, renders and activates the unified pane; leaving Logs deactivates it', async () => {
+  const { UnifiedLogPane } = await import('../../../frontend/admin-ops/unified-log-pane.mjs');
+  const real = { i: UnifiedLogPane.init, r: UnifiedLogPane.render, s: UnifiedLogPane.setActive };
+  const seen = [];
+  UnifiedLogPane.init = () => seen.push('init'); UnifiedLogPane.render = () => { seen.push('render'); return Promise.resolve(); };
+  UnifiedLogPane.setActive = (on) => seen.push(`active:${on}`);
+  try {
+    AdminCockpit._renderLogsPane();
+    assert.deepEqual(seen, ['init', 'render', 'active:true']);
+    seen.length = 0;
+    const restore = stubAll(['_refreshOverview', '_startHealthPolling', '_stopHealthPolling'], []);
+    try { withEmptyDom(() => AdminCockpit._setSub('overview')); } finally { restore(); }
+    assert.ok(seen.includes('active:false'));
+  } finally { UnifiedLogPane.init = real.i; UnifiedLogPane.render = real.r; UnifiedLogPane.setActive = real.s; }
 });
