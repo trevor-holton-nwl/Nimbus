@@ -51,8 +51,9 @@ test('old tab keys are absent (removed in W1)', () => {
 });
 
 test('every literal pipe./ov./sig./attn. key admin-ui.mts passes to Util.t resolves in all five locales', () => {
-  const src = readFileSync(new URL('admin-ops/admin-ui.mts', root), 'utf8');
-  const used = [...new Set([...src.matchAll(/Util\.t\('((?:pipe|ov|sig|attn)\.[\w.]+)'/g)].map(m => m[1]))];
+  // signals.mts keys (labelKey, headKeys, reasonKey...) reach Util.t through variables, so scan every literal key in both files.
+  const src = ['admin-ops/admin-ui.mts', 'admin-ops/signals.mts'].map(f => readFileSync(new URL(f, root), 'utf8')).join('\n');
+  const used = [...new Set([...src.matchAll(/'((?:pipe|ov|sig|attn|btn)\.[\w.]+)'/g)].map(m => m[1]))];
   assert.ok(used.some(k => k.startsWith('pipe.')) && used.some(k => k.startsWith('ov.')));
   for (const k of used) for (const l of LOCALES) assert.ok(T[l][k], `${l}.js is missing ${k}`);
 });

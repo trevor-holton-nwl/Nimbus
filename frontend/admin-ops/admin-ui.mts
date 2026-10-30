@@ -785,10 +785,13 @@ export const AdminCockpit = {
    *  data when a slow read fails. `clientOnly` rebuilds from the cached payloads plus this browser's live counters. */
   async _refreshOverview(o: { force?: boolean; clientOnly?: boolean } = {}): Promise<void> {
     const A = AdminCockpit;
-    const seq = ++A._ovSeq;
-    A._ovAbort?.abort();
-    const ctl = new AbortController();
-    A._ovAbort = ctl;
+    // A client-only rebuild must not cancel an in-flight fetch refresh (ErrorLog events would starve the board).
+    const seq = o.clientOnly ? A._ovSeq : ++A._ovSeq;
+    if (!o.clientOnly) A._ovAbort?.abort();
+    const ctl = o.clientOnly ? (A._ovAbort ?? new AbortController()) : new AbortController();
+    if (!o.clientOnly) A._ovAbort = ctl;
+    // Jobs reads take no abort signal: bound each by a timeout so one hung request cannot stall the whole settle.
+    const bound = <T,>(p: Promise<T>): Promise<T> => Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000))]);
     const plant = Store.selectedPlant ?? '';
     const isAdmin = Session.isAdmin();
     const ok = <T,>(r: PromiseSettledResult<T>): T | null => (r.status === 'fulfilled' ? r.value : null);
@@ -800,26 +803,25 @@ export const AdminCockpit = {
         A._fetchJson<BackendCountLike>(`/logs/backend?level=${lvl}&since=${since}&limit=5`, 6000, ctl.signal);
       const sapOn = !!plant && isAdmin;
       const empty = { items: [] as JobRun[], nextBeforeId: null };
+      const slowDue = !!o.force || !A._ovSlow.at || Date.now() - A._ovSlow.at > OV_SLOW_MS;
+      const slowP = slowDue ? Promise.allSettled([
+        A._fetchJson<DbDeepLike>('/diagnostics/db', 10_000, ctl.signal),
+        A._fetchJson<{ entries?: AdminAuditLogItem[] }>('/audit/log?limit=20', 10_000, ctl.signal),
+        A._fetchJson<{ audit?: AdminUploadAuditItem[] }>('/upload/audit', 10_000, ctl.signal),
+      ]) : null;
       const [health, be, bw, jsum, jfail, jrecent, sst, sbat, srun] = await Promise.allSettled([
         A._fetchJson<HealthLike>('/health', 6000, ctl.signal),
         bl('error'), bl('warn'),
-        JobsClient.summary(plant),
-        plant ? JobsClient.runs({ plant, status: 'failed', sinceHours: 24, limit: 1 }) : Promise.resolve(empty),
-        plant ? JobsClient.runs({ plant, limit: 3 }) : Promise.resolve(empty),
+        bound(JobsClient.summary(plant)),
+        plant ? bound(JobsClient.runs({ plant, status: 'failed', sinceHours: 24, limit: 1 })) : Promise.resolve(empty),
+        plant ? bound(JobsClient.runs({ plant, limit: 3 })) : Promise.resolve(empty),
         sapOn ? A._fetchJson<SapSendStatus>(`/sap/staging/send/${encodeURIComponent(plant)}/status`, 6000, ctl.signal) : Promise.resolve(null),
         sapOn ? A._fetchJson<{ batches: SapBatchHeader[] }>(`/sap/staging/batches?plant=${encodeURIComponent(plant)}&limit=20`, 6000, ctl.signal) : Promise.resolve(null),
         sapOn ? A._fetchJson<{ runs: SapRunLike[] }>('/sap/interface/runs?limit=1', 6000, ctl.signal) : Promise.resolve(null),
       ]);
-      const slowDue = !!o.force || !A._ovSlow.at || Date.now() - A._ovSlow.at > OV_SLOW_MS;
-      let slow: PromiseSettledResult<unknown>[] | null = null;
-      if (slowDue) {
-        slow = await Promise.allSettled([
-          A._fetchJson<DbDeepLike>('/diagnostics/db', 10_000, ctl.signal),
-          A._fetchJson<{ entries?: AdminAuditLogItem[] }>('/audit/log?limit=20', 10_000, ctl.signal),
-          A._fetchJson<{ audit?: AdminUploadAuditItem[] }>('/upload/audit', 10_000, ctl.signal),
-        ]);
-      }
-      if (seq !== A._ovSeq) return;   // a newer refresh started: drop this response
+      const slow: PromiseSettledResult<unknown>[] | null = slowP ? await slowP : null;
+      // A newer refresh started, or polling was stopped (abort): drop this response, never paint aborted errors.
+      if (seq !== A._ovSeq || ctl.signal.aborted) return;   // a newer refresh started: drop this response
 
       const f: OvFast = { health: ok(health), healthErr: er(health), backendErrors: ok(be), backendWarns: ok(bw), backendErr: er(be) ?? er(bw), jobs: null, plant, sap: null };
       const sum = ok(jsum);
@@ -1193,7 +1195,7 @@ export const AdminCockpit = {
         return;
       }
       case 'client.reset': void A._resetClientState(); return;
-      default: return;
+      default: console.warn(`AdminCockpit: unknown fix id '${fix.id}'`); return;
     }
   },
 
