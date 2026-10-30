@@ -1,6 +1,6 @@
 # Alert Profiles revamp: Matrix | Inbox monitor, two-tier editor, profile-owned Gantt colors
 
-Status: design settled 2026-10-30 (plan rev 3). Research, three adversarial reviews and three mockup rounds with the owner are done. Mockup of record: https://claude.ai/artifact/V5dMeUrzrVwRcWP9vv6QXF (version 6); repo copy `docs/superpowers/specs/assets/2026-10-30-alert-profiles-mockup.html` (throwaway design reference, not product code). Builds on `docs/superpowers/specs/2026-10-20-alert-monitor-design.md`. Branch `feature/alert-profiles-revamp`; ledger `docs/superpowers/plans/2026-10-30-alert-profiles-revamp-progress.md`.
+Status: design settled 2026-10-30 (plan rev 3). Mockup of record: https://claude.ai/artifact/V5dMeUrzrVwRcWP9vv6QXF (version 6); repo copy `docs/superpowers/specs/assets/2026-10-30-alert-profiles-mockup.html` (throwaway design reference, not product code). Builds on `docs/superpowers/specs/2026-10-20-alert-monitor-design.md`. Branch `feature/alert-profiles-revamp`; ledger `docs/superpowers/plans/2026-10-30-alert-profiles-revamp-progress.md`.
 
 ## Context
 
@@ -58,7 +58,7 @@ Anti-goals (things this must not become)
 - **Short tags are new locale keys** `alert.tag.<type>` (about 32 types × 5 locales) with the same `msgVars` as the message; the full message stays in the expanded row and the Gantt hover. Vocabulary gate applies.
 - **Material on a row** comes from the order (`Store.tasks[id]`'s material description field; queued alerts carry `taskId` too). An alert with no order (machine/day `overload`, `closed`, `plant_no_timezone`) shows the machine/day instead.
 - **Day presets:** Any · Overdue · Next 3 · Next 7 · Next 14 · Custom.
-- **W0 is a checkpoint that already happened** (three mockup rounds). W0 now only commits this design doc and the mockup HTML.
+- **W0 produced this document and the mockup of record; no further checkpoint precedes W1.**
 - **Branch from the current `main` tip**; W3 and W4 sequential (both touch the five locale files).
 - **Top fixes empty state** says "No fixes touch the alerts in view" (reverses spec D10; D11 reversed by W4; both in the rev-4 note).
 
@@ -153,8 +153,8 @@ Things learned during research and mockup rounds that a builder should not have 
 - **A `var()` inside an inline custom property resolves on the element it is declared on.** So profile color overrides must be written on `body` (not `html`/`#alerts-tab` alone) for them to follow `body.dark`; the `--bar-pm-<cat>` indirection through `--pal-*` depends on this.
 - **`machine.wc_group` already groups rows on the Labor grid**, with sticky group headers: the Matrix Machine lens reuses that precedent and the `Store.masterLinesForPlant(plant)` accessor.
 - **No "collapse quiet rows" behaviour exists anywhere yet.** The quiet-machine fold is the single interaction without precedent; keep it small and measure it.
-- **The migration runner's destructive-word filter trips on ALTER, and `-AllowDestructive` applies to every pending file.** Hence `promote-azure -Only 2026-10-30-2 -AllowDestructive` after a dry run, so unrelated pending ALTER files are not swept in.
-- **`2026-10-30-1` is already used by two migrations**, which is why the new one is `2026-10-30-2`.
+- **The migration runner's destructive-word filter trips on ALTER, and `-AllowDestructive` applies to every pending file** (`.claude/skills/promote-azure/scripts/apply-migrations.ps1`: `$DESTRUCTIVE` regex at line 78 matches ALTER/DROP/DELETE/UPDATE/TRUNCATE/RENAME/GRANT/REVOKE; the block at line 164 is per file and the switch is global; `-Only` limits the run to named files). Hence `promote-azure -Only 2026-10-30-2 -AllowDestructive` after a dry run, so unrelated pending ALTER files are not swept in.
+- **`2026-10-30-1` is already used by two migrations** (`migrations/2026-10-30-1-job-artifacts.sql` and `migrations/2026-10-30-1-upload-audit-rid.sql`), which is why the new one is `2026-10-30-2`.
 - The Overview band's charts are not lost: they become the Matrix row bars (Where / When / What) and the Inbox facets; only its pure data helpers (`overviewData` buckets, `dayKeyOf`, `NONE_KEY`) survive.
 - No perceptual palette of 8 to 10 fills can be 3:1 apart from each other and from the blue/red bars, hence the ΔE2000 plus CVD gate instead of a WCAG 3:1 rule.
-- Mockup history: three rounds with the owner; version 6 of the artifact is the record (the plan text still said version 5).
+- The mockup of record is artifact version 6 at the linked URL, mirrored in the repo asset.
