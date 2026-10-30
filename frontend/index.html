@@ -1923,76 +1923,58 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
 
         <!-- LOGS PANE -->
         <div id="admin-logs-pane" hidden>
-            <div class="admin-grid">
-
-              <!-- BACKEND EVENT LOG -->
-              <div class="panel admin-card admin-card-wide" id="admin-backend-log-card">
-                <header class="panel-head">
-                  <h3 data-i18n="ui.backend_event_log">Backend event log</h3>
-                  <span class="panel-hint" id="admin-backend-log-count" data-i18n="ui.backend_log_hint">Server-side structured events — loads, errors, DB issues, slow requests</span>
+            <div class="panel admin-card admin-card-wide" id="ulog-panel">
+              <header class="panel-head">
+                <h3 data-i18n="tab.logs">Logs</h3>
+                <span class="panel-hint" data-i18n="ulog.hint">One timeline over the backend ring, this browser, optimization &amp; color-wheel audit, uploads, job runs, SAP runs and order changes</span>
+                <div class="spacer"></div>
+                <button class="btn btn-ghost sm" id="ulog-refresh" data-i18n="btn.refresh">↻ Refresh</button>
+              </header>
+              <div class="panel-body">
+                <div class="ulog-toolbar">
+                  <span class="ulog-toolbar-label" data-i18n="ulog.clear_label">Clear:</span>
+                  <button class="btn btn-ghost sm" id="admin-backend-log-clear" data-i18n="ulog.src_backend">Backend</button>
+                  <button class="btn btn-ghost sm" id="admin-log-clear" data-i18n="ulog.src_frontend">This browser</button>
+                  <button class="btn btn-ghost sm" id="admin-audit-log-clear" data-i18n="ulog.src_audit">Optimization &amp; color wheel</button>
+                  <button class="btn btn-ghost sm" id="ulog-clear-upload" data-i18n="ulog.src_upload">Uploads</button>
                   <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-backend-log-refresh" data-i18n="btn.refresh">↻ Refresh</button>
-                  <button class="btn btn-ghost sm" id="admin-backend-log-clear" data-i18n="btn.clear">✕ Clear</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div class="admin-log-filter">
-                    <select id="admin-backend-log-filter-level" title="Filter by level" data-i18n-title="tip.filter_by_level">
-                      <option value="all" data-i18n="ui.all_levels">All levels</option>
-                      <option value="error" data-i18n="ui.level_error">Error</option>
-                      <option value="warn" data-i18n="ui.level_warn">Warn</option>
-                      <option value="info" data-i18n="ui.level_info">Info</option>
-                    </select>
-                  </div>
-                  <div id="admin-backend-log-list" class="admin-log-list"></div>
-                </div>
-              </div>
-
-              <!-- APPLICATION LOG -->
-              <div class="panel admin-card admin-card-wide" id="admin-logs">
-                <header class="panel-head">
-                  <h3 data-i18n="ui.app_log">Application log</h3>
-                  <span class="panel-hint" id="admin-log-counts" data-i18n="ui.loading">0 entries</span>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-log-reload" data-i18n="btn.reload_data">↻ Reload data</button>
-                  <button class="btn btn-ghost sm" id="admin-log-cache" data-i18n="btn.clear_cache">⊘ Clear cache</button>
-                  <button class="btn btn-ghost sm" id="admin-log-copy" data-i18n="btn.copy_all">⎘ Copy all</button>
                   <button class="btn btn-ghost sm" id="admin-log-export-json" data-i18n="btn.export_json">Export JSON</button>
                   <button class="btn btn-ghost sm" id="admin-log-copy-filtered" data-i18n="btn.copy_filtered">⎘ Copy filtered</button>
-                  <button class="btn btn-ghost sm" id="admin-log-clear" data-i18n="btn.clear">✕ Clear</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div class="admin-log-filter">
-                    <select id="admin-log-filter-level" title="Filter by level" data-i18n-title="tip.filter_by_level">
-                      <option value="all" data-i18n="ui.all_levels">All levels</option>
-                      <option value="error" data-i18n="ui.level_error">Error</option>
-                      <option value="warn" data-i18n="ui.level_warn">Warn</option>
-                      <option value="info" data-i18n="ui.level_info">Info</option>
-                    </select>
-                    <select id="admin-log-filter-scope" title="Filter by scope" data-i18n-title="tip.filter_by_scope">
-                      <option value="all" data-i18n="ui.all_scopes">All scopes</option>
-                    </select>
-                    <input type="search" id="admin-log-search" class="admin-log-search" placeholder="Search messages…" data-i18n-placeholder="ph.search_messages">
-                    <input type="search" id="admin-log-user" class="admin-log-search" placeholder="Filter by user…" data-i18n-placeholder="ph.filter_user">
-                  </div>
-                  <div id="admin-log-list" class="admin-log-list"></div>
+                </div>
+                <div class="ulog-filter">
+                  <select id="ulog-level" title="Filter by level" data-i18n-title="tip.filter_by_level">
+                    <option value="all" data-i18n="ui.all_levels">All levels</option>
+                    <option value="error" data-i18n="ui.level_error">Error</option>
+                    <option value="warn" data-i18n="ui.level_warn">Warn</option>
+                    <option value="info" data-i18n="ui.level_info">Info</option>
+                  </select>
+                  <fieldset class="ulog-sources" id="ulog-sources">
+                    <legend data-i18n="ulog.sources">Sources</legend>
+                    <label><input type="checkbox" data-src="backend"> <span data-i18n="ulog.src_backend">Backend</span> <span class="ulog-count"></span></label>
+                    <label><input type="checkbox" data-src="frontend"> <span data-i18n="ulog.src_frontend">This browser</span> <span class="ulog-count"></span></label>
+                    <label><input type="checkbox" data-src="audit"> <span data-i18n="ulog.src_audit">Optimization &amp; color wheel</span> <span class="ulog-count"></span></label>
+                    <label><input type="checkbox" data-src="upload"> <span data-i18n="ulog.src_upload">Uploads</span> <span class="ulog-count"></span></label>
+                    <label><input type="checkbox" data-src="jobs"> <span data-i18n="ulog.src_jobs">Job runs</span> <span class="ulog-count"></span></label>
+                    <label><input type="checkbox" data-src="events"> <span data-i18n="ulog.src_events">Order changes</span> <span class="ulog-count"></span></label>
+                    <label><input type="checkbox" data-src="sap"> <span data-i18n="ulog.src_sap">SAP</span> <span class="ulog-count"></span></label>
+                    <button type="button" class="btn btn-ghost sm" id="ulog-sources-all" data-i18n="ulog.sources_all">All</button>
+                    <button type="button" class="btn btn-ghost sm" id="ulog-sources-none" data-i18n="ulog.sources_none">None</button>
+                  </fieldset>
+                  <input type="search" id="ulog-user" class="admin-log-search" placeholder="Filter by user…" data-i18n-placeholder="ph.filter_user">
+                  <div id="ulog-plant" class="ulog-plant"></div>
+                  <input type="search" id="ulog-q" class="admin-log-search" placeholder="Search…" data-i18n-placeholder="ph.search_logs">
+                </div>
+                <div id="ulog-notices" class="ulog-notices" hidden></div>
+                <div id="ulog-note" class="ulog-note"></div>
+                <div class="ulog-split">
+                  <div id="ulog-list" class="admin-log-list ulog-list" role="list"></div>
+                  <aside id="ulog-rail" class="panel ulog-rail">
+                    <header class="panel-head"><h3 data-i18n="ulog.related">Related</h3></header>
+                    <div class="panel-body" id="ulog-rail-body"><div class="admin-log-empty" data-i18n="ulog.related_empty">Select a row to see what it relates to</div></div>
+                  </aside>
                 </div>
               </div>
-
-              <!-- OPTIMIZATION & COLOR WHEEL AUDIT LOG -->
-              <div class="panel admin-card admin-card-wide" id="admin-audit-log">
-                <header class="panel-head">
-                  <h3 data-i18n="ui.opt_audit_log">Optimization &amp; Color Wheel log</h3>
-                  <span class="panel-hint" data-i18n="ui.opt_audit_hint">Color wheel uploads, replacements, deletes, and optimization runs — persisted on disk</span>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-audit-log-clear" data-i18n="btn.clear_log">✕ Clear log</button>
-                  <button class="btn btn-ghost sm" id="admin-audit-log-reload" data-i18n="btn.refresh">↻ Refresh</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div id="admin-audit-log-list" class="admin-audit-list"></div>
-                </div>
-              </div>
-
-            </div><!-- /admin-grid logs -->
+            </div>
         </div><!-- /admin-logs-pane -->
 
         <!-- DIAGNOSTICS PANE -->

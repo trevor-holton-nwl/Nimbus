@@ -90,6 +90,7 @@ frontend/admin-ops/jobs-pane.mjs
 frontend/admin-ops/jobs-run-detail.mjs
 frontend/admin-ops/signals.mjs
 frontend/admin-ops/unified-log.mjs
+frontend/admin-ops/unified-log-pane.mjs
 frontend/integration/sap-interface-ui.mjs
 frontend/security/security-admin.mjs
 frontend/distribution/distribution-pane.mjs

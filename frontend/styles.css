@@ -6380,6 +6380,50 @@ body.dark .sub-subtab.active { color: #ffffff; }
   .sig-detail { margin: 10px -16px -10px; padding-left: 16px; }
 }
 
+/* Admin Logs: merged timeline + context rail */
+.ulog-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.ulog-toolbar > * { min-width: 0; }
+.ulog-toolbar-label { font-size: 12px; color: var(--fg-mute); }
+.ulog-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ulog-filter > * { min-width: 0; }
+.ulog-plant { min-width: 160px; flex: 0 1 200px; }
+.ulog-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 0; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.ulog-sources legend { font-size: 11px; color: var(--fg-mute); padding: 0 4px; }
+.ulog-sources label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.ulog-sources label[hidden] { display: none; }
+.ulog-count { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 11px; color: var(--fg-mute); }
+.ulog-notices { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.ulog-notices[hidden] { display: none; }
+.ulog-notice { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--warn-soft); color: var(--warn-text); overflow-wrap: anywhere; }
+.ulog-note { font-size: 12px; color: var(--fg-mute); margin-bottom: 8px; }
+.ulog-split { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; }
+.ulog-list { max-height: 70vh; border: 1px solid var(--line); border-radius: 6px; }
+.ulog-rail { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; min-width: 0; }
+.ulog-row { cursor: pointer; }
+.ulog-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ulog-row.is-selected, .ulog-rel-row.is-selected { background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent); }
+.ulog-head { flex-wrap: wrap; }
+.ulog-src { font-size: 10.5px; padding: 0 6px; border-radius: 4px; background: var(--bg-subtle); color: var(--fg-mute); white-space: nowrap; }
+.ulog-user, .ulog-plant { color: var(--fg-mute); overflow-wrap: anywhere; }
+.ulog-head .spacer { flex: 1 1 0; }
+.ulog-head button.admin-log-reqid, .ulog-head button.admin-log-code { background: none; border: 0; padding: 0; font: inherit; cursor: pointer; }
+.ulog-chevron { background: none; border: 0; padding: 0 4px; cursor: pointer; color: var(--fg-mute); font: inherit; }
+.ulog-more { margin: 8px 14px; }
+.ulog-raw { overflow: auto; max-height: 240px; margin: 8px 0 0; padding: 6px 8px; background: var(--bg-elev); border: 1px solid var(--line); border-radius: 4px; font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ulog-group { border-top: 1px solid var(--line); padding: 8px 0; }
+.ulog-group-sum { display: flex; gap: 8px; align-items: baseline; cursor: pointer; font-size: 12px; font-weight: 600; }
+.ulog-group-why { min-width: 0; overflow-wrap: anywhere; }
+.ulog-group-key { color: var(--fg-mute); font-weight: 400; overflow-wrap: anywhere; }
+.ulog-possible .ulog-group-sum { color: var(--fg-mute); font-style: italic; }
+.ulog-rel-row { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; background: none; border: 0; border-left: 3px solid transparent; padding: 4px 6px; cursor: pointer; font-size: 12px; color: var(--fg); }
+.ulog-rel-row:hover { background: var(--bg-subtle); }
+.ulog-rel-text { min-width: 0; overflow-wrap: anywhere; }
+.ulog-rail-sel { margin: 0 0 8px; }
+@media (max-width: 1000px) {
+  .ulog-split { grid-template-columns: minmax(0, 1fr); }
+  .ulog-rail { position: static; max-height: none; }
+}
+
 /* =============================================================================
    ORDERS TAB — Notes popover (📝 column)
    ============================================================================= */
