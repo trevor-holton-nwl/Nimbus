@@ -2660,14 +2660,14 @@ def get_db_table_stats() -> list:
                 "table":             r[0],
                 "live_rows":         int(r[1]),
                 "dead_rows":         int(r[2]),
-                "dead_pct":          float(r[3]),
+                "dead_pct":          float(r[3]) if (int(r[1]) + int(r[2])) > 0 else 0.0,
                 "last_vacuum":       r[4].isoformat()     if r[4] else None,
                 "last_autovacuum":   r[5].isoformat()     if r[5] else None,
                 "last_analyze":      r[6].isoformat()     if r[6] else None,
                 "last_autoanalyze":  r[7].isoformat()     if r[7] else None,
                 "total_size":        r[8],
                 "mods_since_analyze": int(r[9]),
-                "needs_vacuum":      float(r[3]) > 20,
+                "needs_vacuum":      int(r[2]) > 0 and float(r[3]) > 20,
                 "needs_analyze":     int(r[9]) > max(int(r[1]) * 0.1, 100),
             }
             for r in rows
