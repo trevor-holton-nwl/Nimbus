@@ -9,3 +9,5 @@ Each wave appends its own line below.
 W0: design doc + mockup committed (558a6e5)
 
 W1: late category (79c6d88) — late split out of Other into its own seventh category (ALERT_CATEGORY_ORDER, aliases, locales x5, --bar-pm-late stone placeholder, legend, briefing fallback); tests: 962 targeted (960 pass, 2 skipped bench), full modules 5747 (1 unrelated failure: frozen-horizon-rolling)
+
+W2: palette + tokens (0019fc1) — nine-swatch --pal-* tokens in :root and body.dark, --bar-pm-<cat> re-pointed, generic warn ring, categoryColorDecls/applyCategoryColors, minimap per-category colour + _cssVar on body; light sky #30b0ec, sand #bfa57a; tests: 1278 targeted (1276 pass, 2 skipped bench), full modules 5772 (1 unrelated failure: frozen-horizon-rolling)
