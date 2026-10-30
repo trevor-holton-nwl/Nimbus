@@ -141,3 +141,10 @@ test('sourceCounts honours the exact id filters', () => {
   const c = U.sourceCounts(l, F({ actionId: 'a1' }));
   assert.equal(c.backend, 1); assert.equal(c.events, 1); assert.equal(c.sap, 0);
 });
+
+test('relatedTo: an upload row links to backend rows with the same rid (exact, not possible)', () => {
+  const up = U.fromUpload({ batch_id: 'b1', filename: 'f.xlsx', row_count: 1, inserted: 1, updated: 0, uploaded_at: '2026-10-30T10:00:00Z', warnings: [], rid: 'rq1' });
+  const be = E({ key: 'be', rid: 'rq1', source: 'backend' });
+  const g = U.relatedTo(up, [up, be, E({ key: 'other', rid: 'zz' })]);
+  assert.deepEqual(g.map(x => [x.kind, x.possible, x.entries.map(e => e.key)]), [['request', false, ['be']]]);
+});
