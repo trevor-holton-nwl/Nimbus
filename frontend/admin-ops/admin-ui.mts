@@ -868,6 +868,7 @@ export const AdminCockpit = {
     el.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' });
     if (A._flashEl) A._flashEl.classList.remove('is-target');
     if (A._flashTimer) clearTimeout(A._flashTimer);
+    void el.offsetWidth;   // re-revealing the same section restarts its flash
     el.classList.add('is-target');
     const done = (): void => { el.classList.remove('is-target'); if (A._flashEl === el) A._flashEl = null; };
     A._flashEl = el;
@@ -3190,7 +3191,7 @@ export const AdminCockpit = {
       persistence: (Persistence.stats && Persistence.stats()) || null,
       health:      AdminCockpit._healthData || null,
       deep:        AdminCockpit._deepData   || null,
-      dbDeep:      AdminCockpit._ovSlow.dbDeep,
+      dbDeep:      AdminCockpit._diagInputs().dbDeep,   // the freshest of this page's read and the Overview's
       storeCounts: {
         tasks:        Store.tasksArr.length,
         blocks:       (Store.blocks || []).length,

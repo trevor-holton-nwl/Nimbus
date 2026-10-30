@@ -885,3 +885,36 @@ test('CSS pins: diag rail is sticky, sections carry scroll-margin, the flash is 
   assert.ok(!src.includes('_dbSummaryStrip') && !src.includes('admin-db-fetched'));
   for (const lit of ["'VACUUM ANALYZE'", "'BLOCKING'", '`BLOCKED ', ' calls`', 'aria-label="Help"', '<em>none</em>']) assert.ok(!src.includes(lit), lit);
 });
+
+test('a second _revealAnchor clears the first flash so only one section flashes', () => {
+  const a = dnode('details', { id: 'diag-client', cls: 'diag-sec' });
+  const b = dnode('details', { id: 'diag-pipe', cls: 'diag-sec' });
+  const priorMM = globalThis.matchMedia, priorST = globalThis.setTimeout, priorCT = globalThis.clearTimeout;
+  const cleared = [];
+  globalThis.matchMedia = () => ({ matches: false });
+  globalThis.setTimeout = () => 7;
+  globalThis.clearTimeout = (t) => { cleared.push(t); };
+  try {
+    AdminCockpit._revealAnchor(a);
+    AdminCockpit._revealAnchor(b);
+    assert.equal(a.classList.contains('is-target'), false);
+    assert.equal(b.classList.contains('is-target'), true);
+    assert.deepEqual(cleared, [7], 'the first flash timer is cancelled');
+  } finally {
+    globalThis.matchMedia = priorMM; globalThis.setTimeout = priorST; globalThis.clearTimeout = priorCT;
+    if (priorMM === undefined) delete globalThis.matchMedia;
+    AdminCockpit._flashEl = null; AdminCockpit._flashTimer = null;
+  }
+});
+
+test('_renderDiagnosticsPane (head Refresh) re-reads the pipeline and the database once each and repaints heads', () => {
+  const names = ['_computeClientStats', '_ensureDbSubs', '_repaintHeads', '_renderDiagnostics', '_renderPipeline', '_renderDbDeep', '_refreshThreadPane'];
+  const real = {}; const calls = [];
+  for (const n of names) { real[n] = AdminCockpit[n]; AdminCockpit[n] = () => { calls.push(n); }; }
+  try {
+    AdminCockpit._renderDiagnosticsPane({ force: true });
+    assert.equal(calls.filter((c) => c === '_renderPipeline').length, 1);
+    assert.equal(calls.filter((c) => c === '_renderDbDeep').length, 1);
+    assert.ok(calls.includes('_repaintHeads'));
+  } finally { for (const n of names) AdminCockpit[n] = real[n]; }
+});

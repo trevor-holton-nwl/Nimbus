@@ -5798,8 +5798,8 @@ tr:last-child .md-td { border-bottom: none; }
    Severity is data-sev on the <details>: the dot takes the severity color, a warn title uses
    --warn-text (AA on white; --warn is background-only), an err title uses --err. No side stripes. */
 .diag-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
-.diag-h2 { margin: 0; font-size: 13px; font-weight: 700; font-family: var(--font-display, inherit); color: var(--fg); }
-.diag-ts { font-size: 11px; color: var(--fg-mute); min-width: 0; overflow-wrap: anywhere; }
+.diag-h2 { margin: 0; font-size: 18px; font-weight: 700; }   /* same as .ov-head h2 */
+.diag-ts { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 11px; color: var(--fg-mute); min-width: 0; overflow-wrap: anywhere; }
 .diag-head .spacer { flex: 1 1 0; }
 .diag-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; align-items: start; }
 .diag-main { min-width: 0; }
