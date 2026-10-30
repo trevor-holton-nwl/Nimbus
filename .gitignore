@@ -88,6 +88,8 @@ frontend/admin-ops/jobs-dialog.mjs
 frontend/admin-ops/jobs-model.mjs
 frontend/admin-ops/jobs-pane.mjs
 frontend/admin-ops/jobs-run-detail.mjs
+frontend/admin-ops/signals.mjs
+frontend/admin-ops/unified-log.mjs
 frontend/integration/sap-interface-ui.mjs
 frontend/security/security-admin.mjs
 frontend/distribution/distribution-pane.mjs
