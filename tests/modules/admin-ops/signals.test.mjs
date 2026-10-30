@@ -233,14 +233,15 @@ test('every emitted locale key exists in en.js', () => {
   fixtures.push(d);
   const lg = base(); lg.dbDeep = { ...lg.dbDeep, connections: { total: 1, long_running: [{ duration_s: 99 }] } }; fixtures.push(lg);
   const hp = base(); hp.client = { ...hp.client, heapUsed: 900, heapLimit: 1000 }; fixtures.push(hp);
-  const ah = base(); ah.sap = { ...ah.sap, batches: [{ batch_id: 'h', status: 'held' }] }; ah.uploadWarnings = { distribution: 1, batchId: 'b' }; fixtures.push(ah);
+  const ah = base(); ah.sap = { ...ah.sap, batches: [{ batch_id: 'h', status: 'held' }] }; ah.uploadWarnings = { distribution: 3, batchId: 'b' }; fixtures.push(ah);
+  const ah1 = base(); ah1.uploadWarnings = { distribution: 1, batchId: 'b' }; fixtures.push(ah1);
   const e = base();
   e.sap = { ...e.sap, status: { ...e.sap.status, last_sent_at: null }, lastRun: { id: 1, object_key: 'o', started_at: '2026-10-30T08:00:00Z', ended_at: null, status: 's', rows_read: 0, rows_failed: 0, error: null } };
   e.client = { ...e.client, errRate: 99, errors: 99 };
   fixtures.push(e);
   for (const f of fixtures) take(buildSignals(f), f);
   for (const k of keys) assert.ok(typeof en[k] === 'string' && en[k], `en.js is missing ${k}`);
-  for (const k of ['sig.jobs_ok', 'sig.jobs_none', 'sig.db_vacuum', 'sig.conn_long', 'sig.sap_last_pull', 'sig.browser_heap', 'attn.sap_held', 'attn.distribution']) assert.ok(keys.has(k), `fixtures never emit ${k}`);
+  for (const k of ['sig.jobs_ok', 'sig.jobs_none', 'sig.db_vacuum', 'sig.conn_long', 'sig.sap_last_pull', 'sig.browser_heap', 'attn.sap_held', 'attn.distribution', 'attn.distribution_one']) assert.ok(keys.has(k), `fixtures never emit ${k}`);
 });
 
 test('data_load never depends on the deep diagnostics read', () => {

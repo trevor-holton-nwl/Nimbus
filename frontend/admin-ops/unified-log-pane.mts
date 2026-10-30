@@ -10,7 +10,7 @@
 // MERGE_LIMIT = 2000 newest entries, and the list renders SHOW_FIRST = 500 rows, growing by SHOW_STEP = 200 per
 // "Show more" up to the merged set.
 
-import { Util, Toast, ErrorLog } from '../platform/foundation.mjs';
+import { Util, Toast, ErrorLog, Modal } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
 import { Session } from '../security/session.mjs';
 import { JobsClient } from './jobs-client.mjs';
@@ -52,6 +52,13 @@ let _seq = 0;
 let _ctl: AbortController | null = null;
 let _poll: ReturnType<typeof setInterval> | null = null;
 let _qTimer: ReturnType<typeof setTimeout> | null = null;
+let _feTimer: ReturnType<typeof setTimeout> | null = null;
+const FE_DEBOUNCE_MS = 300;
+const CLEAR_BUTTONS: Array<[string, LogSource]> = [
+  ['admin-backend-log-clear', 'backend'], ['admin-log-clear', 'frontend'],
+  ['admin-audit-log-clear', 'audit'], ['ulog-clear-upload', 'upload'],
+];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 let _notices = new Map<LogSource, string>();
 let _eventsHidden = false;
 let _eventsPlant = '';
@@ -214,6 +221,17 @@ function _bind(): void {
   }
   _el('ulog-sources-all')?.addEventListener('click', () => _apply({ sources: new Set(ALL_SOURCES) }, true));
   _el('ulog-sources-none')?.addEventListener('click', () => _apply({ sources: new Set() }, true));
+  // Narrow widths: the four Clear buttons collapse behind one "Clear..." chooser that triggers the same buttons
+  // (so every existing confirm flow stays the single source of the clear behaviour).
+  _el('ulog-clear-menu')?.addEventListener('click', () => {
+    void Modal.choose({
+      title: _t('btn.clear_menu'),
+      options: CLEAR_BUTTONS.map(([, src]) => ({ value: src, label: _t(`ulog.src_${src}`) })),
+    }).then((pick) => {
+      const id = CLEAR_BUTTONS.find(([, src]) => src === pick)?.[0];
+      if (id) _el(id)?.click();
+    });
+  });
 }
 
 /* ---------------------------------------------------------------------------
@@ -328,6 +346,7 @@ function _paintList(): void {
 }
 
 function _paint(): void {
+  if (_selectedKey && !_filtered().some(e => e.key === _selectedKey)) _selectedKey = null;
   _paintSources();
   _paintNotices();
   _paintList();
@@ -372,7 +391,10 @@ function _paintRail(): void {
     det.dataset.kind = g.kind;
     det.setAttribute('open', '');
     const sum = _mk('summary', 'ulog-group-sum');
-    sum.appendChild(_mk('span', 'ulog-group-why', _t(g.whyKey, { rid: g.key, id: g.key, order: g.key })));
+    const shortKey = UUID_RE.test(g.key) ? g.key.slice(0, 8) : g.key;
+    const why = _mk('span', 'ulog-group-why', _t(g.whyKey, { rid: shortKey, id: shortKey, order: g.key }));
+    if (shortKey !== g.key) why.title = g.key;
+    sum.appendChild(why);
     if (g.kind === 'user_window') sum.appendChild(_mk('span', 'ulog-group-key', g.key));
     sum.appendChild(_mk('span', 'ulog-count', String(g.entries.length)));
     det.appendChild(sum);
@@ -450,9 +472,13 @@ export const UnifiedLogPane = {
   select,
   /** Re-read this browser's ErrorLog ring only (the ErrorLog.subscribe hook): no network. */
   refreshFrontend(): void {
-    _bySource.frontend = (ErrorLog.entries() as unknown as LogEntry[]).map(fromFrontend);
-    _entries = mergeEntries(Object.values(_bySource) as UnifiedEntry[][], MERGE_LIMIT);
-    if (_loaded) _paint();
+    if (_feTimer) clearTimeout(_feTimer);
+    _feTimer = setTimeout(() => {
+      _feTimer = null;
+      _bySource.frontend = (ErrorLog.entries() as unknown as LogEntry[]).map(fromFrontend);
+      _entries = mergeEntries(Object.values(_bySource) as UnifiedEntry[][], MERGE_LIMIT);
+      if (_loaded) _paint();
+    }, FE_DEBOUNCE_MS);
   },
   /** The list as the planner sees it (every filter applied): what Copy filtered copies. */
   filteredEntries(): UnifiedEntry[] { return _filtered(); },
@@ -466,6 +492,7 @@ export const UnifiedLogPane = {
   _reset(): void {
     if (_poll) clearInterval(_poll);
     if (_qTimer) clearTimeout(_qTimer);
+    if (_feTimer) { clearTimeout(_feTimer); _feTimer = null; }
     _ctl?.abort();
     _initialized = false; _active = false; _entries = []; _bySource = {}; _filter = _defaultFilter(); _selectedKey = null;
     _expanded = new Set(); _relAll = new Set(); _shown = SHOW_FIRST; _seq++; _ctl = null; _poll = null; _qTimer = null;

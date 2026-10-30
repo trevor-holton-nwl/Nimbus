@@ -6370,13 +6370,24 @@ body.dark .sub-subtab.active { color: #ffffff; }
 .attn-row .btn { flex: 0 0 auto; }
 .attn-empty { padding: 14px 16px; font-size: 13px; color: var(--fg-mute); }
 
-.ov-recent .admin-log-row { padding: 6px 16px; border-left-color: transparent; }
-.ov-recent .admin-log-msg { overflow-wrap: anywhere; }
+.ov-recent { max-height: none; overflow: visible; }
+.ov-recent .admin-log-row.ov-recent-row {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  padding: 6px 16px; border-left-color: transparent; font-size: 12px;
+}
+.ov-recent-row::before { content: ''; flex: none; align-self: center; width: 6px; height: 6px; border-radius: 50%; background: var(--info); }
+.ov-recent-row.admin-log-warn::before { background: var(--warn); }
+.ov-recent-row.admin-log-error::before { background: var(--err); }
+.ov-recent-row .admin-log-ts, .ov-recent-row .admin-log-scope { flex: none; white-space: nowrap; }
+.ov-recent-row .admin-log-msg { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-acts { display: flex; gap: 6px; flex: none; }
+.sig-dt th.num { text-align: right; }
 
 @media (max-width: 720px) {
   .sig-row { grid-template-columns: 14px 1fr auto; row-gap: 4px; }
   .sig-reason, .sig-fixes { grid-column: 2 / -1; }
-  .sig-fixes { justify-content: flex-start; }
+  .sig-fixes { grid-column: 2 / -1; display: flex; flex-wrap: wrap; justify-content: flex-start; }
+  .sig-details { grid-column: auto; justify-self: start; }
   .sig-detail { margin: 10px -16px -10px; padding-left: 16px; }
 }
 
@@ -6398,6 +6409,8 @@ body.dark .sub-subtab.active { color: #ffffff; }
 .ulog-note { font-size: 12px; color: var(--fg-mute); margin-bottom: 8px; }
 .ulog-split { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; }
 .ulog-list { max-height: 70vh; border: 1px solid var(--line); border-radius: 6px; }
+#ulog-list { max-height: calc(100vh - 340px); min-height: 320px; overflow: auto; }
+#ulog-list .admin-log-row { border-left-color: transparent; }
 .ulog-rail { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; min-width: 0; }
 .ulog-row { cursor: pointer; }
 .ulog-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -6419,6 +6432,15 @@ body.dark .sub-subtab.active { color: #ffffff; }
 .ulog-rel-row:hover { background: var(--bg-subtle); }
 .ulog-rel-text { min-width: 0; overflow-wrap: anywhere; }
 .ulog-rail-sel { margin: 0 0 8px; }
+.ulog-clear-menu { display: none; }
+@media (max-width: 720px) {
+  #admin-logs-pane .panel-hint { display: none; }
+  .ulog-clear-menu { display: inline-flex; }
+  .ulog-toolbar > .ulog-clear-btn { display: none; }
+  .ulog-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; width: 100%; }
+  .ulog-sources legend { grid-column: 1 / -1; }
+  .admin-subtabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+}
 @media (max-width: 1000px) {
   .ulog-split { grid-template-columns: minmax(0, 1fr); }
   .ulog-rail { position: static; max-height: none; }

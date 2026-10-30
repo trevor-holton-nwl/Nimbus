@@ -412,7 +412,7 @@ export function buildAttention(signals: Signal[], i: SignalInputs): AttentionIte
   }
   if (i.client.inv.autosaveDisabled) add({ id: 'autosave', severity: 'err', textKey: 'attn.autosave', args: {}, fix: _fix('client.reset', 'btn.reset_client') });
   if (i.uploadWarnings && i.uploadWarnings.distribution > 0) {
-    add({ id: 'distribution', severity: 'warn', textKey: 'attn.distribution', args: { n: i.uploadWarnings.distribution, batchId: i.uploadWarnings.batchId }, fix: _nav('nav.order_maintenance', 'btn.open_history') });
+    add({ id: 'distribution', severity: 'warn', textKey: i.uploadWarnings.distribution === 1 ? 'attn.distribution_one' : 'attn.distribution', args: { n: i.uploadWarnings.distribution, batchId: i.uploadWarnings.batchId }, fix: _nav('nav.order_maintenance', 'btn.open_history') });
   }
 
   return out
