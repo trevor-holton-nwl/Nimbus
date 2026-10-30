@@ -151,3 +151,37 @@ def list_order_events(plant: str, order_id: str, *, limit: int = 50, before_id: 
         "events": page,
         "next_before_id": page[-1]["id"] if len(rows) > limit and page else None,
     }
+
+
+_RECENT_SQL = """
+SELECT e.id, e.at, e.actor, u.first_name, u.last_name, e.source, e.op, e.action_id, e.client_id, e.changes,
+       e.order_id, e.production_order, e.material_number
+  FROM schedule_event e
+  LEFT JOIN user_security u ON lower(u.username) = lower(e.actor)
+ WHERE e.plant = %s AND (%s::timestamptz IS NULL OR e.at >= %s) AND (%s::bigint IS NULL OR e.id < %s)
+ ORDER BY e.at DESC, e.id DESC LIMIT %s
+"""
+
+
+def _recent_row_to_wire(r) -> dict:
+    wire = _row_to_wire(r[:10])
+    changes = wire.pop("changes")
+    wire["order_id"] = r[10]
+    wire["production_order"] = r[11]
+    wire["material_number"] = r[12]
+    wire["fields"] = sorted(str(k) for k in changes)
+    return wire
+
+
+def list_plant_events(plant: str, *, limit: int, before_id: int | None = None, since: str | None = None) -> dict:
+    """Newest-first plant-wide timeline (at DESC, id DESC); rows carry changed field names, not the diff."""
+    limit = max(1, min(200, int(limit)))
+    with db._pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(_RECENT_SQL, (plant, since, since, before_id, before_id, limit + 1))
+        rows = cur.fetchall()
+    page = [_recent_row_to_wire(r) for r in rows[:limit]]
+    return {
+        "plant": plant,
+        "events": page,
+        "next_before_id": page[-1]["id"] if len(rows) > limit and page else None,
+    }

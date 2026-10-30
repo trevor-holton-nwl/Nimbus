@@ -395,16 +395,16 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
   - `data.list_plant_events(plant: str, *, limit: int, before_id: int | None, since: str | None) -> dict` (rows with `fields`, not full `changes`; next-page cursor from the `limit+1` fetch).
   - `_RECENT_SQL`: filtered by plant, `ORDER BY e.at DESC, e.id DESC`, `LIMIT` param.
 
-- [ ] **Step 1: Write the failing tests** in `tests/test_schedule_events.py`:
+- [x] **Step 1: Write the failing tests** in `tests/test_schedule_events.py`:
   - `test_recent_sql_shape`: `_RECENT_SQL` contains `e.plant = %s`, `ORDER BY e.at DESC, e.id DESC` and `LIMIT`; does not select the full `e.changes` as a wire field.
   - `@pytest.mark.pg test_list_plant_events_newest_first`: insert three events, assert order.
   - `@pytest.mark.pg test_list_plant_events_since_and_before_id`: `since` cuts older rows; `before_id` pages.
   - `@pytest.mark.pg test_list_plant_events_rows_carry_fields_not_changes`.
   - No-DB TestClient (pattern `tests/test_logs_endpoints.py:23-48`): `test_recent_route_403_when_plant_not_allowed`, `test_recent_route_400_invalid_plant`, `test_recent_route_422_for_limit_0_and_201`, `test_recent_route_sets_no_store`.
-- [ ] **Step 2: Run and expect failure.** `python -m pytest tests/test_schedule_events.py -q -k "recent or plant_events"` (with `NIMBUS_TEST_DB=1` and a local `PG_HOST` for the pg tests).
-- [ ] **Step 3: Implement** the route and data function; add the route to `tests/test_rbac_plant_scoping.py` only if that file enumerates scoped routes.
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add backend/schedule_events/routes.py backend/schedule_events/data.py tests/test_schedule_events.py` (plus `tests/test_rbac_plant_scoping.py` if changed) then `git commit -m "feat(schedule-events): plant-wide recent route GET /schedule-events/{plant}/recent" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 2: Run and expect failure.** `python -m pytest tests/test_schedule_events.py -q -k "recent or plant_events"` (with `NIMBUS_TEST_DB=1` and a local `PG_HOST` for the pg tests).
+- [x] **Step 3: Implement** the route and data function; add the route to `tests/test_rbac_plant_scoping.py` only if that file enumerates scoped routes.
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add backend/schedule_events/routes.py backend/schedule_events/data.py tests/test_schedule_events.py` (plus `tests/test_rbac_plant_scoping.py` if changed) then `git commit -m "feat(schedule-events): plant-wide recent route GET /schedule-events/{plant}/recent" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W4a.2: Logs adapter wiring and contract note
 

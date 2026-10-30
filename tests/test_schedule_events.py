@@ -1256,3 +1256,118 @@ def test_run_time_cap_release_records_status_change_row():
     (insert,) = [c for c in cur.calls if c[0].startswith("INSERT INTO schedule_event")]
     assert insert[1]["changes"] == ['{"planning_status":["needs_planning:run_time_over_cap","scheduled"]}']
     assert insert[1]["sources"] == ["routing_hold"] and insert[1]["order_ids"] == ["o1"]
+
+
+# --------------------------------------------------------------------------- W4a plant-wide recent read
+
+def test_recent_sql_shape():
+    from backend.schedule_events import data
+    sql = " ".join(data._RECENT_SQL.split())
+    assert "e.plant = %s" in sql
+    assert "ORDER BY e.at DESC, e.id DESC" in sql
+    assert "LIMIT %s" in sql
+
+
+@pytest.fixture
+def recent_client(monkeypatch):
+    from starlette.testclient import TestClient
+    import brain
+    from backend.schedule_events import routes
+    from backend.security import auth
+    calls = []
+
+    def fake(plant, *, limit, before_id=None, since=None):
+        calls.append((plant, limit, before_id, since))
+        return {"plant": plant, "next_before_id": 7, "events": [
+            {"id": 9, "at": "2026-10-30T10:00:00+00:00", "actor": "a@x", "actor_name": None, "source": "drag",
+             "op": "modify", "action_id": "x", "client_id": None, "order_id": "o1", "production_order": "PO1",
+             "material_number": "M1", "fields": ["machine", "start_date"]}]}
+
+    monkeypatch.setattr(routes.data, "list_plant_events", fake)
+    brain.api.dependency_overrides[auth.require_authenticated] = lambda: "tester"
+    brain.api.dependency_overrides[auth.get_allowed_plants_for_request] = lambda: ["P1"]
+    try:
+        yield TestClient(brain.api), calls
+    finally:
+        brain.api.dependency_overrides.pop(auth.require_authenticated, None)
+        brain.api.dependency_overrides.pop(auth.get_allowed_plants_for_request, None)
+
+
+def test_recent_route_403_when_plant_not_allowed(recent_client):
+    client, calls = recent_client
+    assert client.get("/schedule-events/P2/recent").status_code == 403
+    assert calls == []
+
+
+def test_recent_route_400_invalid_plant(recent_client):
+    client, _ = recent_client
+    assert client.get("/schedule-events/%20/recent").status_code == 400
+
+
+def test_recent_route_400_bad_since(recent_client):
+    client, calls = recent_client
+    assert client.get("/schedule-events/P1/recent?since=yesterday").status_code == 400
+    assert calls == []
+
+
+def test_recent_route_422_for_limit_out_of_range(recent_client):
+    client, _ = recent_client
+    assert client.get("/schedule-events/P1/recent?limit=0").status_code == 422
+    assert client.get("/schedule-events/P1/recent?limit=201").status_code == 422
+
+
+def test_recent_route_sets_no_store_and_returns_shape(recent_client):
+    client, calls = recent_client
+    r = client.get("/schedule-events/P1/recent?limit=5&before_id=20&since=2026-10-29T00:00:00Z")
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
+    body = r.json()
+    assert body["next_before_id"] == 7
+    assert body["events"][0]["fields"] == ["machine", "start_date"] and "changes" not in body["events"][0]
+    assert calls == [("P1", 5, 20, "2026-10-29T00:00:00Z")]
+
+
+@pytest.mark.pg
+class TestListPlantEvents:
+    def _seed(self, se):
+        import time
+        for i in range(3):
+            _write(se, [EventRow(plant=se.plant, order_id=f"o{i}", production_order=f"PO{i}", material_number="M",
+                                 op="modify", changes={"machine": ["a", "b"], "start_date": ["x", "y"]})])
+            time.sleep(0.01)
+        _write(se, [EventRow(plant=se.other, order_id="other", production_order="POX", material_number="M",
+                             op="modify", changes={"machine": ["a", "b"]})])
+
+    def test_newest_first_and_plant_scoped(self, se):
+        from backend.schedule_events import data
+        self._seed(se)
+        out = data.list_plant_events(se.plant, limit=50)
+        assert [e["order_id"] for e in out["events"]] == ["o2", "o1", "o0"]
+        assert out["next_before_id"] is None and out["plant"] == se.plant
+
+    def test_fields_are_sorted_keys_not_changes(self, se):
+        from backend.schedule_events import data
+        self._seed(se)
+        ev = data.list_plant_events(se.plant, limit=1)["events"][0]
+        assert ev["fields"] == ["machine", "start_date"] and "changes" not in ev
+        assert ev["production_order"] == "PO2" and ev["material_number"] == "M"
+
+    def test_before_id_pages(self, se):
+        from backend.schedule_events import data
+        self._seed(se)
+        p1 = data.list_plant_events(se.plant, limit=2)
+        assert len(p1["events"]) == 2 and p1["next_before_id"] == p1["events"][-1]["id"]
+        p2 = data.list_plant_events(se.plant, limit=2, before_id=p1["next_before_id"])
+        assert [e["order_id"] for e in p2["events"]] == ["o0"] and p2["next_before_id"] is None
+
+    def test_since_cuts_older_rows(self, se):
+        from backend.schedule_events import data
+        self._seed(se)
+        with se.db._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE schedule_event SET at = at - interval '2 days' WHERE plant = %s AND order_id = 'o0'",
+                        (se.plant,))
+            conn.commit()
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat()
+        out = data.list_plant_events(se.plant, limit=50, since=since)
+        assert [e["order_id"] for e in out["events"]] == ["o2", "o1"]
+
