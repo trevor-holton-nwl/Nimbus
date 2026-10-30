@@ -148,11 +148,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: existing element ids.
 - Produces: element ids `admin-overview-pane`, `admin-logs-pane`, `admin-diag-pane`, `admin-order-maint-pane`; strip buttons `data-sub="logs|diagnostics|order-maintenance"` with `data-i18n="tab.logs|tab.diagnostics|tab.order_maintenance"`.
 
-- [ ] **Step 1: Write the failing test** (appended to `admin-ui.test.mjs`): `test('every getElementById admin- id used by admin-ui.mts exists in index.html')`: read `frontend/admin-ops/admin-ui.mts` and `frontend/index.html` as text, extract static `getElementById('admin-...')` ids, assert each is present in the HTML as `id="..."` (lazily injected ids listed in an allowlist in the test). This is the grep the plan requires before W1 merges.
-- [ ] **Step 2: Run and expect failure** only if an id is orphaned by the move; before editing HTML it passes, so first move the markup then run. (State this in the ledger; the test guards the move.) `node --test tests/modules/admin-ops/admin-ui.test.mjs`.
-- [ ] **Step 3: Implement** the markup move (cut and paste verbatim; panes `hidden` except overview).
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/index.html tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "refactor(admin): split Overview into Logs, Diagnostics, Order Maintenance panes (markup moved verbatim)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test** (appended to `admin-ui.test.mjs`): `test('every getElementById admin- id used by admin-ui.mts exists in index.html')`: read `frontend/admin-ops/admin-ui.mts` and `frontend/index.html` as text, extract static `getElementById('admin-...')` ids, assert each is present in the HTML as `id="..."` (lazily injected ids listed in an allowlist in the test). This is the grep the plan requires before W1 merges.
+- [x] **Step 2: Run and expect failure** only if an id is orphaned by the move; before editing HTML it passes, so first move the markup then run. (State this in the ledger; the test guards the move.) `node --test tests/modules/admin-ops/admin-ui.test.mjs`.
+- [x] **Step 3: Implement** the markup move (cut and paste verbatim; panes `hidden` except overview).
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/index.html tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "refactor(admin): split Overview into Logs, Diagnostics, Order Maintenance panes (markup moved verbatim)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W1.2: _setSub dispatch, gotoSub, double-render fix, gated subscriptions
 
@@ -164,15 +164,15 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: `JobsAdmin.setActive(false)` (existing), `UnifiedLogPane.render()` / `UnifiedLogPane.setActive(on: boolean)` (stub exported now from a minimal `unified-log-pane.mts`, filled in W3).
 - Produces: `AdminCockpit.gotoSub(sub: string): void`; `_setSub(sub)` dispatch: overview -> `_renderOverview()`, logs -> `UnifiedLogPane.render()`, diagnostics -> `_renderDiagnostics(); _renderPipeline(); _renderDbDeep(); _refreshThreadPane()`, order-maintenance -> `_renderPurgeMeta(); _renderAudit()`; leaving overview -> `_stopHealthPolling()`; leaving logs -> `UnifiedLogPane.setActive(false)`; `render()` -> `_setSub('overview')` only.
 
-- [ ] **Step 1: Write the failing test** in `admin-ui.test.mjs`:
+- [x] **Step 1: Write the failing test** in `admin-ui.test.mjs`:
   - Change the surface test: `assert.equal(typeof AdminCockpit.gotoSub, 'function')` and `assert.equal(AdminCockpit.gotoOvTab, undefined)`; keep the `_startHealthPolling` / `_stopHealthPolling` / `_setSub` assertions.
   - `test('render() calls _setSub once and _renderOverview once')`: stub `_setSub` and `_renderOverview` counters on `AdminCockpit`; call `render()`; with the stub on `_setSub` only, assert `_renderOverview` is not called directly by `render()`; with a real `_setSub` over the fake DOM assert exactly one `_renderOverview`.
   - `test('_setSub("logs") stops the overview timer')`: start polling, `_setSub('logs')`, assert `_healthTimer === null`.
   - `test('_setSub dispatch per sub')`: spies prove diagnostics calls the four renderers and order-maintenance calls the two.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
-- [ ] **Step 3: Implement** the changes at the listed lines; subscriptions at 595-619 gate on `_activeSub` (ErrorLog -> logs pane refresh or overview `clientOnly` refresh; PerfMonitor -> diagnostics; Store `tasks:bulk` / `tasks:bulkUpdate` -> pipeline on diagnostics, `clientOnly` refresh on overview). Overview's old four-tab body is trimmed to what stays in the Overview pane until W2.
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts frontend/admin-ops/unified-log-pane.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "refactor(admin): gotoSub replaces gotoOvTab; _setSub dispatch; fix double Overview render" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
+- [x] **Step 3: Implement** the changes at the listed lines; subscriptions at 595-619 gate on `_activeSub` (ErrorLog -> logs pane refresh or overview `clientOnly` refresh; PerfMonitor -> diagnostics; Store `tasks:bulk` / `tasks:bulkUpdate` -> pipeline on diagnostics, `clientOnly` refresh on overview). Overview's old four-tab body is trimmed to what stays in the Overview pane until W2.
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts frontend/admin-ops/unified-log-pane.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "refactor(admin): gotoSub replaces gotoOvTab; _setSub dispatch; fix double Overview render" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W1.3: app.js callers, CSS rule, legacy contract, old locale keys
 
@@ -184,11 +184,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: `AdminCockpit.gotoSub`.
 - Produces: contract with no `gotoOvTab` entries (`cq1-legacy-surface.json` lines 52-67 and 511 disappear).
 
-- [ ] **Step 1: Write the failing test:** remove `{ todo }` from `test('old tab keys absent')` so it asserts `tab.logs_audit` / `tab.data_operations` are gone; the legacy-surface check currently passes, so also add `test('no gotoOvTab anywhere in frontend')` reading `frontend/app.js` and `frontend/index.html` as text and asserting no match.
-- [ ] **Step 2: Run and expect failure.** `node --test tests/modules/admin-ops/overview-locales.test.mjs tests/modules/admin-ops/admin-ui.test.mjs`.
-- [ ] **Step 3: Implement** the edits, then `node scripts/legacy-surface.mjs --write` (shrink is accepted by the ratchet).
-- [ ] **Step 4: Run and expect pass.** `npm run build && node --test tests/modules/admin-ops/overview-locales.test.mjs tests/modules/admin-ops/admin-ui.test.mjs && npm run check:legacy-surface && node --test tests/js/locale-keys.test.js tests/modules/locale-completeness.test.mjs`.
-- [ ] **Step 5: Commit.** `git add frontend/app.js frontend/styles.css tests/contracts/cq1-legacy-surface.json frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js tests/modules/admin-ops/overview-locales.test.mjs tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "refactor(admin): route Logs entry points to gotoSub; drop inner-tab CSS, contract entries and keys" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** remove `{ todo }` from `test('old tab keys absent')` so it asserts `tab.logs_audit` / `tab.data_operations` are gone; the legacy-surface check currently passes, so also add `test('no gotoOvTab anywhere in frontend')` reading `frontend/app.js` and `frontend/index.html` as text and asserting no match.
+- [x] **Step 2: Run and expect failure.** `node --test tests/modules/admin-ops/overview-locales.test.mjs tests/modules/admin-ops/admin-ui.test.mjs`.
+- [x] **Step 3: Implement** the edits, then `node scripts/legacy-surface.mjs --write` (shrink is accepted by the ratchet).
+- [x] **Step 4: Run and expect pass.** `npm run build && node --test tests/modules/admin-ops/overview-locales.test.mjs tests/modules/admin-ops/admin-ui.test.mjs && npm run check:legacy-surface && node --test tests/js/locale-keys.test.js tests/modules/locale-completeness.test.mjs`.
+- [x] **Step 5: Commit.** `git add frontend/app.js frontend/styles.css tests/contracts/cq1-legacy-surface.json frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js tests/modules/admin-ops/overview-locales.test.mjs tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "refactor(admin): route Logs entry points to gotoSub; drop inner-tab CSS, contract entries and keys" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W1.4: JobsAdmin.openRun
 
@@ -200,11 +200,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: existing `_setTab` and run-detail opener (`JobsRunDetail`) inside `jobs-pane.mts`.
 - Produces: `JobsAdmin.openRun(runId: number): void` (switch to the Jobs runs tab and open that run's detail; safe when the pane is not rendered yet).
 
-- [ ] **Step 1: Write the failing test:** `test('JobsAdmin.openRun is a public function and selects the runs view')` asserting `typeof JobsAdmin.openRun === 'function'` and that calling it with a run id does not throw in the fake-DOM harness already used by that file.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/jobs-pane.test.mjs`.
-- [ ] **Step 3: Implement** `openRun(runId: number): void` beside `setActive`.
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/jobs-pane.mts tests/modules/admin-ops/jobs-pane.test.mjs` then `git commit -m "feat(jobs): public JobsAdmin.openRun(id)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('JobsAdmin.openRun is a public function and selects the runs view')` asserting `typeof JobsAdmin.openRun === 'function'` and that calling it with a run id does not throw in the fake-DOM harness already used by that file.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/jobs-pane.test.mjs`.
+- [x] **Step 3: Implement** `openRun(runId: number): void` beside `setActive`.
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/jobs-pane.mts tests/modules/admin-ops/jobs-pane.test.mjs` then `git commit -m "feat(jobs): public JobsAdmin.openRun(id)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ---
 
