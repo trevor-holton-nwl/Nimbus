@@ -5814,7 +5814,7 @@ tr:last-child .md-td { border-bottom: none; }
 .diag-rail-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .diag-rail-link.is-on { background: var(--accent-wash); }
 .diag-rail-link.is-sub { padding-left: 26px; font-weight: 400; }
-.diag-rail-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diag-rail-title { min-width: 0; overflow-wrap: anywhere; }   /* wraps: long es/fr/pt titles stay identifiable */
 .diag-rail-short { grid-column: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 11px; font-weight: 400; color: var(--fg-mute); font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; }
 .diag-rail-link[data-sev="warn"] .diag-rail-title { color: var(--warn-text); }
@@ -5881,7 +5881,7 @@ tr:last-child .md-td { border-bottom: none; }
   .diag-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .diag-rail { position: static; max-height: none; display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; }
   .diag-rail-link { display: inline-flex; gap: 7px; padding: 5px 9px; }
-  .diag-rail-short, .diag-rail-cap { display: none; }
+  .diag-rail-short, .diag-rail-cap, .diag-rail-link.is-sub { display: none; }
 }
 @media (max-width: 760px) {
   .diag-sec-sum { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 4px; }
@@ -5890,6 +5890,14 @@ tr:last-child .md-td { border-bottom: none; }
   .diag-sec-sum .diag-chev { grid-column: 3; grid-row: 1; }
   .diag-sub > .diag-sec-sum { grid-template-columns: auto minmax(0, 1fr) auto; }
   .diag-sub > .diag-body { padding-left: 0; }
+  /* Database cards/bars: let fixed columns wrap so the pane never scrolls sideways at phone width. */
+  #admin-diag-pane .admin-db-tbl-card-row1 { flex-wrap: wrap; }
+  #admin-diag-pane .admin-db-tbl-card-name { min-width: 0; overflow-wrap: anywhere; }
+  #admin-diag-pane .admin-db-hbar-row,
+  #admin-diag-pane .admin-db-progress-row { flex-wrap: wrap; }
+  #admin-diag-pane .admin-db-hbar-names,
+  #admin-diag-pane .admin-db-progress-name { width: 100%; }
+  #admin-diag-pane .admin-db-hbar-track { flex: 1 1 120px; }
 }
 
 /* Health-state badge dots on the top-level Admin tab button (set by AdminCockpit). */

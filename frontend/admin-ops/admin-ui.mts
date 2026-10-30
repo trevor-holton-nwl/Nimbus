@@ -962,6 +962,13 @@ export const AdminCockpit = {
       l.classList.toggle('is-on', isOn);
       if (isOn) l.setAttribute('aria-current', 'true'); else l.removeAttribute('aria-current');
     }
+    // Keep the lit link inside the rail's own scroll box when the rail is shorter than its content (short windows).
+    const rail = document.getElementById('diag-rail');
+    if (on && rail && rail.scrollHeight > rail.clientHeight) {
+      const top = on.offsetTop - rail.offsetTop;
+      if (top < rail.scrollTop) rail.scrollTop = top - 8;
+      else if (top + on.offsetHeight > rail.scrollTop + rail.clientHeight) rail.scrollTop = top + on.offsetHeight - rail.clientHeight + 8;
+    }
   },
 
   /** Build the rail once (dot, title, mono figure per section; the eight db-* links indented), then update it in place. */
