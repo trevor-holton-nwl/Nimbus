@@ -243,16 +243,12 @@ test('every T2 key is present, non-empty and placeholder-identical in all five l
 });
 
 test('rail strings stay within 24 characters in all five locales', () => {
+  // The figures (diag.short_*) and the rail caption must fit the 220 px rail without wrapping. The section
+  // titles are existing keys and truncate with an ellipsis plus a title attribute (T3/T5), so they are not capped here.
   const shorts = Object.keys(T.en).filter(k => k.startsWith('diag.short_'));
   assert.ok(shorts.length >= 13);
   const fill = s => String(s).replace(/\{\{\w+\}\}/g, '000');   // a typical figure width
-  const titles = new Set(emittedAll().map(s => s.titleKey));
   for (const l of LOCALES) {
-    for (const k of shorts) assert.ok(fill(T[l][k]).length <= 24, `${l} ${k}: ${T[l][k]}`);
-    // rail titles: the section title without its "(N tables)" count tail
-    for (const k of titles) {
-      const title = String(T[l][k]).replace(/\s*\(.*\)\s*$/, '');
-      assert.ok(title.length <= 24, `${l} ${k}: ${title}`);
-    }
+    for (const k of [...shorts, 'diag.rail_sections']) assert.ok(fill(T[l][k]).length <= 24, `${l} ${k}: ${T[l][k]}`);
   }
 });
