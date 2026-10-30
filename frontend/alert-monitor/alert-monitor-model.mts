@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, alertOrderIds, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, ALERT_CATEGORY_ORDER,alertOrderIds, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -33,7 +33,7 @@ export type MonitorGroupBy = 'category' | 'type' | 'line' | 'day' | 'order' | 'n
 export const MONITOR_GROUP_BYS: MonitorGroupBy[] = ['line', 'day', 'type', 'category', 'order', 'none'];
 /** The two sorts the page offers (Priority / Date); the stored `severity` / `orders` of earlier builds read as `impact`. */
 export const MONITOR_SORTS: AlertRanking[] = ['impact', 'time'];
-export const MONITOR_CATEGORIES: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions'];
+export const MONITOR_CATEGORIES: AlertCategory[] = ALERT_CATEGORY_ORDER;
 export const DEFAULT_GROUP_BY: MonitorGroupBy = 'line';
 
 export interface MonitorView { groupBy: MonitorGroupBy; sort: AlertRanking }

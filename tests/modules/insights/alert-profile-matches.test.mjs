@@ -46,11 +46,11 @@ test('recompute yields worst severity and most severe category per task', () => 
   assert.equal(c.sevByTask.get('t1'), 'err');
   assert.equal(c.sevByTask.get('t2'), 'warn');
   assert.equal(c.categoryByTask.get('t1'), 'conflicts');   // err (overlap) beats warn (overload)
-  assert.equal(c.categoryByTask.get('t2'), 'exceptions');
+  assert.equal(c.categoryByTask.get('t2'), 'late');
   assert.equal(c.categoryByTask.get('t3'), 'capacity');    // err tie: capacity > conflicts
 });
 
-test('categoryByTask ranks planning ahead of exceptions at equal severity', () => {
+test('categoryByTask ranks planning ahead of late at equal severity', () => {
   profiles = [prof('p1', ['late', 'needs_planning'])];
   Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
   Store._state.alerts = [
@@ -62,9 +62,9 @@ test('categoryByTask ranks planning ahead of exceptions at equal severity', () =
   ];
   M.recompute();
   const c = M.current();
-  assert.equal(c.categoryByTask.get('t1'), 'planning', 'warn tie: planning beats exceptions');
-  assert.equal(c.categoryByTask.get('t2'), 'exceptions');
-  assert.equal(c.categoryByTask.get('t3'), 'planning', 'err tie: planning beats exceptions');
+  assert.equal(c.categoryByTask.get('t1'), 'planning', 'warn tie: planning beats late');
+  assert.equal(c.categoryByTask.get('t2'), 'late');
+  assert.equal(c.categoryByTask.get('t3'), 'planning', 'err tie: planning beats late');
 });
 
 test("'__all__' keeps every alert id but highlights nothing", () => {

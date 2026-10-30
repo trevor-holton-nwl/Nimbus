@@ -74,7 +74,7 @@ test('Gantt legend popup keys (btn.legend, tip.legend, legend.*) exist in all 5 
     'legend.nav_now_d',
     'legend.pm_capacity_t', 'legend.pm_capacity_d', 'legend.pm_conflicts_t', 'legend.pm_conflicts_d',
     'legend.pm_calendar_t', 'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d',
-    'legend.pm_planning_t', 'legend.pm_planning_d',
+    'legend.pm_planning_t', 'legend.pm_planning_d', 'legend.pm_late_t', 'legend.pm_late_d',
     'legend.pm_exceptions_t', 'legend.pm_exceptions_d', 'legend.pm_ring_d', 'tbl.status_profile', 'tbl.status_profile_desc',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
@@ -865,7 +865,7 @@ const ALERT_MONITOR_KEYS = [
   'leverage.action.routing-gap', 'leverage.action.routing-gap.workcenter_unmapped', 'leverage.action.tool',
   'leverage.action.machine-state', 'leverage.action.optimize-window', 'leverage.action.needs-planning', 'ape.title_new', 'ape.title_edit', 'ape.name',
   'ape.name_ph', 'ape.rules', 'ape.rule_n', 'ape.add_rule', 'ape.remove_rule', 'ape.types', 'ape.cat_capacity',
-  'ape.cat_conflicts', 'ape.cat_calendar', 'ape.cat_setup', 'ape.cat_planning', 'ape.cat_exceptions', 'ape.select_category',
+  'ape.cat_conflicts', 'ape.cat_calendar', 'ape.cat_setup', 'ape.cat_planning', 'ape.cat_late', 'ape.cat_exceptions', 'ape.select_category',
   'ape.day_from', 'ape.day_to', 'ape.days_hint', 'ape.min_sev', 'ape.sev_any', 'ape.sev_warn', 'ape.sev_err',
   'ape.set_mine', 'ape.new_profile', 'ape.duplicate', 'ape.copy_to_plants', 'ape.late_hours', 'ape.err_late_hours',
   'ape.live_range', 'ape.live_matches', 'ape.err_name_required', 'ape.err_name_dup', 'ape.err_name_long',
@@ -877,7 +877,7 @@ const ALERT_MONITOR_KEYS = [
   'us.alert_profile_manage', 'us.alert_gantt_highlight', 'us.alert_gantt_highlight_hint', 'legend.pm_capacity_t',
   'legend.pm_capacity_d', 'legend.pm_conflicts_t', 'legend.pm_conflicts_d', 'legend.pm_calendar_t',
   'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d', 'legend.pm_planning_t',
-  'legend.pm_planning_d', 'legend.pm_exceptions_t',
+  'legend.pm_planning_d', 'legend.pm_late_t', 'legend.pm_late_d', 'legend.pm_exceptions_t',
   'legend.pm_exceptions_d', 'legend.pm_ring_d',
   'am.ov_title', 'am.ov_expand', 'am.ov_collapse', 'am.ov_strip', 'am.ov_when',
   'am.ov_where', 'am.ov_what', 'am.ov_conf', 'am.ov_overdue', 'am.ov_today',

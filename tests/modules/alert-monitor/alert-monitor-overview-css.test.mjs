@@ -209,7 +209,7 @@ test('every class the builders emit is styled (or deliberately owned by an exist
   const v = { t, esc, fmtDay: k => k, fmtTick: k => ({ wd: 'Mon', day: k.slice(8), mo: 'Oct' }), unassigned: 'Unassigned' };
   const today = new Date(2026, 9, 20);
   const at = off => new Date(2026, 9, 20 + off, 9);
-  const types = ['overload', 'overlap', 'blackout', 'setup-violated', 'needs_planning', 'late'];
+  const types = ['overload', 'overlap', 'blackout', 'setup-violated', 'needs_planning', 'late', 'runtime-unknown'];
   const listed = [];
   let n = 0;
   for (let i = 0; i < 12; i++) {
@@ -238,7 +238,7 @@ test('every class the builders emit is styled (or deliberately owned by an exist
   const missing = [...classes].filter(c => !external.has(c) && !hooks.has(c) && !new RegExp(`\\.${c.replace(/[-]/g, '\\-')}(?![\\w-])`).test(CODE));
   assert.deepEqual(missing, [], `unstyled emitted classes: ${missing.join(', ')}`);
   for (const c of external) assert.ok(new RegExp(`\\.${c}(?![\\w-])`).test(CSS), `${c} is styled somewhere in styles.css`);
-  for (const cat of ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions']) {
+  for (const cat of ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'late', 'exceptions']) {
     assert.ok(classes.has(`am-ov-cat-${cat}`) && classes.has(`am-ov-sw-${cat}`), `fixture emits ${cat}`);
   }
 });

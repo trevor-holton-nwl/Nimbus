@@ -1396,11 +1396,12 @@ export const AlertsUIAdapter = {
 
     // -------- Categorize alerts
     const byCat: Record<string, NimbusAlert[]> = { capacity: [], conflicts: [], calendar: [], exceptions: [] };
-    // The shared ALERT_CATEGORIES (./alert-profiles) carries 'setup' and 'planning' groups, but this briefing
-    // renders four fixed sections: both keep filing under 'exceptions' ("Other"); a missing key would throw.
+    // The shared ALERT_CATEGORIES (./alert-profiles) carries 'setup', 'planning' and 'late' groups, but this
+    // briefing renders four fixed sections: those keep filing under 'exceptions' ("Other"); a missing key
+    // would throw, so any category without its own bucket falls back to Other.
     for (const a of matches) {
       const cat = categoryOf(a.type);
-      byCat[cat === 'setup' || cat === 'planning' ? 'exceptions' : cat].push(a);
+      (byCat[cat] ?? byCat.exceptions).push(a);
     }
 
     const errCt  = matches.filter(a => a.sev === 'err').length;

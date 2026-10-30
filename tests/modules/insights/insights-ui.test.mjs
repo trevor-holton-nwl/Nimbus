@@ -394,6 +394,29 @@ test('showForCell files a planning alert under Other and does not throw', () => 
   }
 });
 
+test('showForCell files a late alert under Other and does not throw', () => {
+  const prior = { doc: globalThis.document, alerts: Store.alerts };
+  let html = '';
+  const dlg = {
+    className: '', open: false,
+    set innerHTML(v) { html = v; }, get innerHTML() { return html; },
+    showModal() {}, close() {}, addEventListener() {}, querySelectorAll() { return []; },
+  };
+  try {
+    globalThis.document = { ...prior.doc, createElement: () => dlg, body: { appendChild() {} } };
+    const time = new Date(2026, 9, 21, 9);
+    Store._state.alerts = [
+      { id: 'late-q1', sev: 'warn', type: 'late', line: 'L1', time, msg: 'Order q1 finishes late' },
+    ];
+    assert.doesNotThrow(() => AlertsUIAdapter.showForCell('L1', Util.dayKey(time)));
+    assert.match(html, /data-cat="exceptions"/, 'late files under the Other section of the four-bucket briefing');
+    assert.doesNotMatch(html, /data-cat="late"/, 'the briefing has no Late section');
+    assert.match(html, /Order q1 finishes late/);
+  } finally {
+    globalThis.document = prior.doc; Store._state.alerts = prior.alerts;
+  }
+});
+
 test('alert drawer renders tool-conflict alerts with localized text and a fix button', () => {
   const row = AlertsUIAdapter._renderAlertRow({
     id: 'tool-conflict|task-b|task-a', type: 'tool-conflict', sev: 'err',

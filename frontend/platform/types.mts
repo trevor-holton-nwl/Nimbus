@@ -541,7 +541,7 @@ export type AlertType =
 export type AlertSev = 'err' | 'warn';
 
 /** UI grouping of alert types (cell briefing, Alert Monitor). */
-export type AlertCategory = 'capacity' | 'conflicts' | 'calendar' | 'setup' | 'planning' | 'exceptions';
+export type AlertCategory = 'capacity' | 'conflicts' | 'calendar' | 'setup' | 'planning' | 'late' | 'exceptions';
 
 /** One rule of an alert profile; null means "no restriction". Mirrors backend/alert_profiles/data.py validate_rules. */
 export interface AlertProfileRule {

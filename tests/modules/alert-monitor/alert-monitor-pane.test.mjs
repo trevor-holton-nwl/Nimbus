@@ -848,7 +848,7 @@ test('Open in table falls back to a toast when the table filter is unavailable',
     Store.setTasks([task('1')], 'test');
     seed([alert('a1', { type: 'late', taskId: '1', line: 'L1' })]);
     AlertMonitorPane.render();
-    openMenu('.am-group-menu', { groupKey: 'exceptions' })[0].items.find(i => i.id === 'open-table').onSelect({});
+    openMenu('.am-group-menu', { groupKey: 'late' })[0].items.find(i => i.id === 'open-table').onSelect({});
     assert.deepEqual(toasts, [['am.table_unavailable', 'warn']]);
   } finally { undo(); }
 });

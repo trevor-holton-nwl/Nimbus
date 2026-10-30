@@ -18,7 +18,7 @@ const EN = {
   'alert.type.overlap': 'Order overlap',
   'alert.type.overload': 'Overload',
   'ape.cat_capacity': 'Capacity', 'ape.cat_conflicts': 'Scheduling conflicts', 'ape.cat_calendar': 'Calendar',
-  'ape.cat_setup': 'Setup', 'ape.cat_planning': 'Planning', 'ape.cat_exceptions': 'Other',
+  'ape.cat_setup': 'Setup', 'ape.cat_planning': 'Planning', 'ape.cat_late': 'Late', 'ape.cat_exceptions': 'Other',
 };
 const t = (k, v) => (EN[k] ?? k).replace(/\{\{(\w+)\}\}/g, (_, n) => String(v?.[n] ?? ''));
 const rule = (o = {}) => ({ types: null, dayFrom: null, dayTo: null, minSev: null, minLateHours: null, ...o });

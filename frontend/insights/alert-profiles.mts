@@ -98,14 +98,18 @@ export const ALERT_CATEGORIES: Record<AlertCategory, AlertType[]> = {
     'override-inactive', 'predecessor-state-unknown', 'successor-state-unknown',
   ],
   planning: ['queued_now_fits', 'needs_planning'],
+  late: ['late'],
   exceptions: [
     'runtime-schedule-mismatch', 'runtime-unknown', 'pv-lot-size',
-    'late', 'reversal_forward', 'placement_exception', 'frozen_window_crossed',
+    'reversal_forward', 'placement_exception', 'frozen_window_crossed',
     'pull_floor_crossed', 'setup_override_orphaned', 'no_anchor', 'derivation_issue', 'run_time_zero',
   ],
 };
 
-const _categoryByType = new Map<string, AlertCategory>();
+/** The one category order (capacity first, Other last); CATEGORY_ORDER and MONITOR_CATEGORIES alias it. */
+export const ALERT_CATEGORY_ORDER = Object.keys(ALERT_CATEGORIES) as AlertCategory[];
+
+const _categoryByType =new Map<string, AlertCategory>();
 for (const [cat, types] of Object.entries(ALERT_CATEGORIES) as Array<[AlertCategory, AlertType[]]>) {
   for (const t of types) _categoryByType.set(t, cat);
 }

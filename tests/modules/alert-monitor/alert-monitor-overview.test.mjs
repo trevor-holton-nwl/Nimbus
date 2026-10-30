@@ -97,8 +97,8 @@ test('overviewData: err/warn split, overload flag, line sort, category order wit
   assert.equal(d.lines[0].overload, true);
   assert.equal(d.lines[1].overload, false);
   assert.deepEqual(d.days[0], { ...d.days[0], err: 2, warn: 4 });
-  assert.deepEqual(d.categories.map(c => c.cat), ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions']);
-  assert.deepEqual(d.categories.map(c => c.count), [1, 3, 1, 1, 0, 0]);
+  assert.deepEqual(d.categories.map(c => c.cat), ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'late', 'exceptions']);
+  assert.deepEqual(d.categories.map(c => c.count), [1, 3, 1, 1, 0, 0, 0]);
   assert.equal(d.maxDay, 6);
 });
 
@@ -183,7 +183,7 @@ const EN = {
   'am.ov_conf_after': '→ {{n}}', 'am.ov_conf_after_aria': 'After the top fix: {{n}}',
   'am.ov_showing': 'Showing {{n}} of {{total}}', 'am.ov_clear': 'Clear', 'am.ov_remove': 'Remove filter: {{name}}',
   'ape.cat_capacity': 'Capacity', 'ape.cat_conflicts': 'Scheduling conflicts', 'ape.cat_calendar': 'Calendar',
-  'ape.cat_setup': 'Setup', 'ape.cat_planning': 'Planning', 'ape.cat_exceptions': 'Other',
+  'ape.cat_setup': 'Setup', 'ape.cat_planning': 'Planning', 'ape.cat_late': 'Late', 'ape.cat_exceptions': 'Other',
 };
 const t = (k, v) => (EN[k] ?? k).replace(/\{\{(\w+)\}\}/g, (_, n) => String(v?.[n] ?? ''));
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -264,7 +264,7 @@ test('whereHtml: unassigned label, overload dot, every row carries data-am-narro
   assert.doesNotMatch(h, /\+\d+ more/);
 });
 
-test('whatHtml: strip omits zero categories, legend lists all six with zeros disabled at the foot', () => {
+test('whatHtml: strip omits zero categories, legend lists all seven with zeros disabled at the foot', () => {
   const d = sample();
   const h = whatHtml(d, {}, v);
   assert.match(h, /class="am-ov-strip" role="group"/);
@@ -274,7 +274,7 @@ test('whatHtml: strip omits zero categories, legend lists all six with zeros dis
   assert.doesNotMatch(strip, /category:exceptions/);
   assert.doesNotMatch(strip, /tabindex="-1"/);
   assert.match(strip, /<button type="button" class="am-ov-cat am-ov-cat-capacity"[^>]*data-am-narrow="category:capacity" aria-pressed="false" aria-label=/);
-  assert.equal((h.match(/class="am-ov-catrow/g) || []).length, 6);
+  assert.equal((h.match(/class="am-ov-catrow/g) || []).length, 7);
   assert.match(h, /class="am-ov-catrow[^"]*"[^>]*disabled/);
   const sel = whatHtml(d, { category: 'setup' }, v);
   assert.match(sel, /has-sel/);

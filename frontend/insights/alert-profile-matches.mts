@@ -20,7 +20,7 @@ import type { AlertAck, AlertCategory, AlertProfile } from '../platform/types.mj
 import { AlertProfileClient } from './alert-profile-client.mjs';
 import { AlertAcksClient } from './alert-acks-client.mjs';
 import {
-  ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID, categoryOf, alertOrderIds, profileMatches, resolveActiveProfileId,
+  ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID, ALERT_CATEGORY_ORDER, categoryOf,alertOrderIds, profileMatches, resolveActiveProfileId,
 } from './alert-profiles.mjs';
 
 export interface AlertProfileMatchSet {
@@ -38,7 +38,7 @@ export interface AlertProfileMatchSet {
 
 type ProfileSettingsArg = Parameters<typeof resolveActiveProfileId>[1];
 
-const CATEGORY_ORDER: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions'];
+const CATEGORY_ORDER: AlertCategory[] = ALERT_CATEGORY_ORDER;
 const RELEVANT_PREFS = ['alertProfileByPlant', 'alertProfileGanttHighlight', 'alertsShowAcknowledged'] as const;
 const DEBOUNCE_MS = 120;
 
