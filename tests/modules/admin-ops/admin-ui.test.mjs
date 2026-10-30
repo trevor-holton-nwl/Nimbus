@@ -231,7 +231,7 @@ test('every getElementById admin- id used by admin-ui.mts exists in index.html',
   const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
   // Ids injected at runtime (not in index.html). admin-upload-detail is NOT injected anywhere: a pre-existing
   // dead target (the distribution-warning zone is silently skipped), allowlisted only so this test pins the rest.
-  const LAZY = new Set(['admin-upload-detail', 'admin-diag-refresh', 'admin-diag-storage']);
+  const LAZY = new Set(['admin-upload-detail', 'admin-diag-storage']);   // admin-diag-refresh / -export are static page-head buttons now
   const ids = new Set([...src.matchAll(/getElementById\('(admin-[\w-]+)'\)/g)].map(m => m[1]).filter(id => !LAZY.has(id)));
   const missing = [...ids].filter(id => !html.includes(`id="${id}"`));
   assert.deepEqual(missing, []);
@@ -610,14 +610,23 @@ test('_capList shows only cap items plus a Show all toggle over the cap, none at
   } finally { globalThis.document = prior; }
 });
 
-test('thread card sits last in Diagnostics, collapsed, and uses data-i18n; upload-detail host exists', () => {
+test('Diagnostics: thread section sits last, collapsed, data-i18n; the five static sections and the rail exist; upload-detail host exists', () => {
   const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
   const pane = html.slice(html.indexOf('id="admin-diag-pane"'), html.indexOf('/admin-diag-pane'));
-  const t = pane.indexOf('id="admin-thread-card"');
-  assert.ok(t > pane.indexOf('admin-db-deep-card'));
-  assert.match(pane.slice(t - 80, t), /<details class="admin-db-section"/);
-  assert.ok(!/<details[^>]*id="admin-thread-card"[^>]*\sopen/.test(pane));
-  assert.ok(!pane.slice(t).includes('Main Thread Profiler</h3>'));
+  const order = ['diag-client', 'diag-pipe', 'diag-bwarn', 'diag-db', 'diag-thread'].map(id => pane.indexOf(`id="${id}"`));
+  assert.ok(order.every(i => i > 0), 'five static sections');
+  assert.deepEqual([...order].sort((x, y) => x - y), order, 'page order: client, pipe, bwarn, db, thread (thread last)');
+  assert.equal((pane.match(/<details class="diag-sec"/g) || []).length, 5);
+  assert.ok(pane.includes('<nav class="diag-rail" id="diag-rail"'));
+  const t = pane.indexOf('id="diag-thread"');
+  assert.ok(!/<details[^>]*id="diag-thread"[^>]*\sopen/.test(pane.slice(t - 60, t + 80)), 'thread collapsed');
+  assert.ok(!pane.includes('Main Thread Profiler</h3>'));
+  assert.match(pane, /<th data-i18n="thread.col_p50">/);
+  assert.match(pane, /<th data-i18n="thread.col_p95">/);
+  for (const gone of ['admin-pipeline-refresh', 'admin-db-deep-refresh']) {
+    assert.ok(!html.includes(gone), gone + ' is gone from the markup');
+    assert.ok(!readFileSync(new URL('../../../frontend/admin-ops/admin-ui.mts', import.meta.url), 'utf8').includes(gone), gone + ' is gone from the code');
+  }
   assert.ok(html.includes('id="admin-upload-detail"'));
   assert.ok(html.includes('data-i18n-aria-label="aria.upload_zone"'));
 });
@@ -630,4 +639,249 @@ test('design-pass CSS pins: no side stripe in Logs, one-line recent rows, subtab
   assert.match(css, /\.ov-acts\s*\{/);
   assert.match(css, /\.sig-dt th\.num\s*\{\s*text-align:\s*right/);
   assert.match(css, /\.admin-subtabs\s*\{\s*flex-wrap:\s*nowrap;\s*overflow-x:\s*auto/);
+});
+
+// ---- W2: Diagnostics jump-rail sections ------------------------------------------------------------------
+// A small tree-shaped fake DOM: parent links, a real class set, dataset, <details>.open, focus/scroll recording.
+function dnode(tag, { id = '', cls = '' } = {}) {
+  const classes = new Set(cls.split(' ').filter(Boolean));
+  const n = {
+    tagName: tag.toUpperCase(), id, parentElement: null, children: [], dataset: {}, attrs: {}, open: false, hidden: false,
+    style: {}, title: '', href: '', tabIndex: 0, _text: '', listeners: {}, focused: null, scrolled: null,
+    classList: {
+      add: (c) => classes.add(c), remove: (c) => classes.delete(c), contains: (c) => classes.has(c),
+      toggle: (c, on) => { if (on === undefined ? !classes.has(c) : on) classes.add(c); else classes.delete(c); },
+    },
+    get className() { return [...classes].join(' '); },
+    set className(v) { classes.clear(); for (const c of String(v).split(' ').filter(Boolean)) classes.add(c); },
+    appendChild(c) { c.parentElement = n; n.children.push(c); return c; },
+    setAttribute(k, v) { n.attrs[k] = v; },
+    getAttribute(k) { return n.attrs[k] ?? null; },
+    removeAttribute(k) { delete n.attrs[k]; },
+    addEventListener(t, fn) { (n.listeners[t] ||= []).push(fn); },
+    focus(o) { n.focused = o ?? {}; },
+    scrollIntoView(o) { n.scrolled = o; },
+    get textContent() { return n._text; },
+    set textContent(v) { n._text = v; if (v === '') n.children = []; },
+    querySelector(sel) {
+      const hit = (x) => (sel.startsWith('.') ? x.classList.contains(sel.slice(1))
+        : sel.startsWith('[data-sec="') ? x.dataset.sec === sel.slice(11, -2) : x.tagName === sel.toUpperCase());
+      const walk = (x) => { for (const c of x.children) { if (hit(c)) return c; const r = walk(c); if (r) return r; } return null; };
+      return walk(n);
+    },
+  };
+  return n;
+}
+function diagSec(id, sev = 'ok') {
+  return { id, severity: sev, titleKey: 'ui.data_pipeline', lineKey: 'diag.line_bwarn', lineArgs: {}, shortKey: 'diag.short_bwarn', shortArgs: { n: 1 } };
+}
+function withDiagDom(els, fn, extra = {}) {
+  const prior = globalThis.document;
+  globalThis.document = { getElementById: (id) => els[id] ?? null, createElement: (t) => dnode(t), querySelectorAll: () => [], ...extra };
+  try { return fn(); } finally { if (prior === undefined) delete globalThis.document; else globalThis.document = prior; }
+}
+
+test('_revealAnchor opens the element and every <details> above it, flashes it, scrolls and focuses the summary', () => {
+  const outer = dnode('details', { id: 'diag-db', cls: 'diag-sec' });
+  const inner = dnode('details', { id: 'diag-db-conn', cls: 'diag-sub' });
+  const sum = dnode('summary');
+  outer.appendChild(inner); inner.appendChild(sum);
+  const priorMM = globalThis.matchMedia;
+  const timers = [];
+  const priorST = globalThis.setTimeout;
+  globalThis.matchMedia = () => ({ matches: false });
+  globalThis.setTimeout = (fn) => { timers.push(fn); return timers.length; };
+  try {
+    AdminCockpit._revealAnchor(inner);
+    assert.equal(inner.open, true);
+    assert.equal(outer.open, true, 'the closed Database parent opens too');
+    assert.equal(inner.classList.contains('is-target'), true);
+    assert.deepEqual(inner.scrolled, { block: 'start', behavior: 'smooth' });
+    assert.deepEqual(sum.focused, { preventScroll: true }, 'focus goes to the summary without scrolling again');
+    // animationend never fires under reduced motion: the fallback timer clears the class
+    timers[0]();
+    assert.equal(inner.classList.contains('is-target'), false);
+  } finally { globalThis.matchMedia = priorMM; globalThis.setTimeout = priorST; if (priorMM === undefined) delete globalThis.matchMedia; }
+});
+
+test('_revealAnchor under prefers-reduced-motion scrolls with behavior auto', () => {
+  const det = dnode('details', { id: 'diag-pipe', cls: 'diag-sec' });
+  det.appendChild(dnode('summary'));
+  const priorMM = globalThis.matchMedia, priorST = globalThis.setTimeout;
+  globalThis.matchMedia = (q) => ({ matches: /reduce/.test(q) });
+  globalThis.setTimeout = () => 0;
+  try {
+    AdminCockpit._revealAnchor(det);
+    assert.equal(det.scrolled.behavior, 'auto');
+  } finally { globalThis.matchMedia = priorMM; globalThis.setTimeout = priorST; if (priorMM === undefined) delete globalThis.matchMedia; }
+});
+
+test('_diagOpen wins over the severity default on repaint (closed-while-warn stays closed, opened-while-ok stays open)', () => {
+  AdminCockpit._diagOpen.clear();
+  const warn = dnode('details', { id: 'diag-pipe', cls: 'diag-sec' });
+  const ok = dnode('details', { id: 'diag-bwarn', cls: 'diag-sec' });
+  const toggle = (d) => AdminCockpit._onDiagToggle({ target: d });
+  try {
+    AdminCockpit._syncOpen(warn, diagSec('pipe', 'warn'));
+    AdminCockpit._syncOpen(ok, diagSec('bwarn', 'ok'));
+    assert.equal(warn.open, true, 'warn opens by default');
+    assert.equal(ok.open, false, 'ok stays closed by default');
+    toggle(warn);                                  // the echo of our own programmatic open (ok never changed: no event): not a user choice
+    assert.equal(AdminCockpit._diagOpen.size, 0, 'a programmatic open/close is not remembered as a user choice');
+    warn.open = false; toggle(warn);               // the user closes the warn section
+    ok.open = true; toggle(ok);                    // and opens the ok one
+    assert.equal(AdminCockpit._diagOpen.get('diag-pipe'), false);
+    assert.equal(AdminCockpit._diagOpen.get('diag-bwarn'), true);
+    AdminCockpit._syncOpen(warn, diagSec('pipe', 'err'));   // a repaint, now even worse
+    AdminCockpit._syncOpen(ok, diagSec('bwarn', 'ok'));
+    assert.equal(warn.open, false, 'closed by the user: stays closed');
+    assert.equal(ok.open, true, 'opened by the user: stays open');
+  } finally { AdminCockpit._diagOpen.clear(); }
+});
+
+test('_paintSectionHead updates the head in place and never replaces the <details>', () => {
+  AdminCockpit._diagOpen.clear();
+  const det = dnode('details', { id: 'diag-bwarn', cls: 'diag-sec' });
+  const sum = dnode('summary');
+  for (const c of ['diag-title-text', 'diag-count', 'diag-line']) sum.appendChild(dnode('span', { cls: c }));
+  det.appendChild(sum);
+  const host = { 'diag-bwarn': det };
+  withDiagDom(host, () => {
+    AdminCockpit._paintSectionHead({ ...diagSec('bwarn', 'warn'), count: 3 });
+    assert.equal(det.dataset.sev, 'warn');
+    assert.equal(sum.querySelector('.diag-count').textContent, '3');
+    assert.equal(sum.querySelector('.diag-line').textContent, 'diag.line_bwarn');
+    AdminCockpit._paintSectionHead({ ...diagSec('bwarn', 'ok'), count: 0 });
+    assert.equal(host['diag-bwarn'], det);
+    assert.equal(det.dataset.sev, 'ok');
+  });
+  AdminCockpit._diagOpen.clear();
+});
+
+test('_ensureDbSubs builds the eight Database sub-sections once; _mkSection reuses the element on repaint', () => {
+  const dbHost = dnode('div', { id: 'admin-db-deep' });
+  const els = { 'admin-db-deep': dbHost };
+  const reg = (n) => { els[n.id] = n; };
+  const prior = globalThis.document;
+  globalThis.document = { getElementById: (id) => els[id] ?? null, createElement: (t) => dnode(t), querySelectorAll: () => [] };
+  try {
+    // register sub-sections as they are appended (the real DOM does this by id lookup)
+    const append = dbHost.appendChild.bind(dbHost);
+    dbHost.appendChild = (c) => { reg(c); return append(c); };
+    AdminCockpit._ensureDbSubs();
+    const ids = dbHost.children.map(c => c.id);
+    assert.deepEqual(ids, ['diag-db-pool', 'diag-db-server', 'diag-db-tables', 'diag-db-conn', 'diag-db-locks', 'diag-db-idx', 'diag-db-slow', 'diag-db-seq']);
+    const pool = els['diag-db-pool'];
+    AdminCockpit._ensureDbSubs();
+    assert.equal(dbHost.children.length, 8, 'no duplicates');
+    assert.equal(els['diag-db-pool'], pool, 'same element');
+    AdminCockpit._fillSub('db-pool', (body) => { body.textContent = 'x'; });
+    assert.equal(pool.querySelector('.diag-body').textContent, 'x');
+    assert.equal(els['diag-db-pool'], pool, 'a body refill keeps the <details>');
+  } finally { if (prior === undefined) delete globalThis.document; else globalThis.document = prior; }
+});
+
+test('_renderDiagRail builds 13 links once (db-* indented) and then updates them in place', () => {
+  const rail = dnode('nav', { id: 'diag-rail' });
+  rail.querySelector = ((orig) => (sel) => (sel === '.diag-rail-link' ? (rail.children.find(c => c.classList.contains('diag-rail-link')) ?? null) : orig(sel)))(rail.querySelector);
+  const ids = ['client', 'pipe', 'bwarn', 'db', 'db-pool', 'db-server', 'db-tables', 'db-conn', 'db-locks', 'db-idx', 'db-slow', 'db-seq', 'thread'];
+  const secs = ids.map(id => ({ ...diagSec(id), titleKey: 'thread.title' }));
+  withDiagDom({ 'diag-rail': rail }, () => {
+    AdminCockpit._renderDiagRail(secs);
+    const links = rail.children.filter(c => c.classList.contains('diag-rail-link'));
+    assert.equal(links.length, 13);
+    assert.equal(links.filter(l => l.classList.contains('is-sub')).length, 8);
+    assert.equal(links[0].dataset.anchor, 'diag-client');
+    assert.equal(links[4].dataset.anchor, 'diag-db-pool');
+    AdminCockpit._renderDiagRail(secs.map(s => ({ ...s, severity: 'err' })));
+    assert.equal(rail.children.filter(c => c.classList.contains('diag-rail-link'))[0], links[0], 'same link element');
+    assert.equal(links[0].dataset.sev, 'err');
+  });
+});
+
+test('rail links and [data-anchor] buttons go through _revealAnchor; a help dot in a head does not toggle it', () => {
+  const target = dnode('details', { id: 'diag-bwarn', cls: 'diag-sec' });
+  const seen = [];
+  const real = AdminCockpit._revealAnchor;
+  AdminCockpit._revealAnchor = (el) => seen.push(el.id);
+  try {
+    withDiagDom({ 'diag-bwarn': target }, () => {
+      let prevented = 0;
+      const btn = { closest: (s) => (s === '[data-anchor]' ? btn : null), dataset: { anchor: 'diag-bwarn' } };
+      AdminCockpit._onDiagClick({ target: btn, preventDefault() { prevented++; } });
+      assert.deepEqual(seen, ['diag-bwarn']);
+      assert.equal(prevented, 1);
+      const help = { closest: (s) => (s === '.diag-sec-sum .adm-help' ? help : null), dataset: {} };
+      AdminCockpit._onDiagClick({ target: help, preventDefault() { prevented++; } });
+      assert.equal(prevented, 2);
+      assert.equal(seen.length, 1);
+    });
+  } finally { AdminCockpit._revealAnchor = real; }
+});
+
+test('_setSub("diagnostics") creates the scroll-spy observer and renders the pane once; leaving disconnects it', () => {
+  const made = [];
+  const priorIO = globalThis.IntersectionObserver;
+  globalThis.IntersectionObserver = class { constructor(cb, o) { this.cb = cb; this.o = o; this.disconnected = false; made.push(this); } observe() {} disconnect() { this.disconnected = true; } };
+  const calls = [];
+  const restore = stubAll(ALL_RENDERERS.filter(n => n !== '_renderDiagnosticsPane'), []);
+  const realPane = AdminCockpit._renderDiagnosticsPane;
+  AdminCockpit._renderDiagnosticsPane = () => { calls.push('pane'); };
+  try {
+    withEmptyDom(() => AdminCockpit._setSub('diagnostics'));
+    assert.deepEqual(calls, ['pane'], 'rendered exactly once');
+    assert.equal(made.length, 1);
+    assert.equal(made[0].o.rootMargin, '-80px 0px -60% 0px');
+    assert.ok(AdminCockpit._spy);
+    withEmptyDom(() => AdminCockpit._setSub('overview'));
+    assert.equal(made[0].disconnected, true);
+    assert.equal(AdminCockpit._spy, null);
+  } finally {
+    AdminCockpit._renderDiagnosticsPane = realPane; restore();
+    if (priorIO === undefined) delete globalThis.IntersectionObserver; else globalThis.IntersectionObserver = priorIO;
+  }
+});
+
+test('init wires the page-head Refresh to a forced repaint, Export, and the pane delegates; the removed refresh ids are never looked up', () => {
+  const wired = {}; const asked = [];
+  const priorDoc = globalThis.document, priorInit = AdminCockpit._initialized;
+  const node = (id) => ({ id, addEventListener(t, fn, cap) { (wired[id] ||= []).push([t, fn, cap]); }, classList: { contains() { return false; } }, closest() { return null; } });
+  globalThis.document = {
+    getElementById(id) { asked.push(id); return node(id); },
+    querySelectorAll() { return []; },
+  };
+  const realPane = AdminCockpit._renderDiagnosticsPane, realExport = AdminCockpit._exportDiagnostics;
+  const paneCalls = []; let exported = 0;
+  AdminCockpit._renderDiagnosticsPane = (o) => { paneCalls.push(o); };
+  AdminCockpit._exportDiagnostics = () => { exported++; };
+  try {
+    AdminCockpit._initialized = false;
+    AdminCockpit.init();
+    assert.ok(!asked.includes('admin-pipeline-refresh'));
+    assert.ok(!asked.includes('admin-db-deep-refresh'));
+    wired['admin-diag-refresh'][0][1]();
+    assert.deepEqual(paneCalls, [{ force: true }]);
+    wired['admin-diag-export'][0][1]();
+    assert.equal(exported, 1);
+    const pane = wired['admin-diag-pane'];
+    assert.ok(pane.some(([t, , cap]) => t === 'toggle' && cap === true), 'one capture-phase toggle listener');
+    assert.ok(pane.some(([t]) => t === 'click'));
+  } finally {
+    AdminCockpit._renderDiagnosticsPane = realPane; AdminCockpit._exportDiagnostics = realExport;
+    AdminCockpit._initialized = priorInit;
+    if (priorDoc === undefined) delete globalThis.document; else globalThis.document = priorDoc;
+  }
+});
+
+test('CSS pins: diag rail is sticky, sections carry scroll-margin, the flash is disabled under reduced motion, dead db tile rules are gone', () => {
+  const css = readFileSync(new URL('../../../frontend/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.diag-rail\s*\{\s*position:\s*sticky;\s*top:\s*12px;\s*max-height:\s*calc\(100vh - 24px\);\s*overflow:\s*auto/);
+  assert.match(css, /\.diag-sec\s*\{[^}]*scroll-margin-top:\s*12px/);
+  assert.match(css, /@keyframes diag-flash/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.diag-sec\.is-target\s*\{\s*animation:\s*none/);
+  assert.match(css, /\.diag-sec\[data-sev="warn"\]\s*>\s*\.diag-sec-sum \.diag-title\s*\{\s*color:\s*var\(--warn-text\)/);
+  assert.ok(!/\.admin-db-summary|\.admin-db-stat-tile|\.admin-db-section\b|\.admin-db-fetched/.test(css));
+  const src = readFileSync(new URL('../../../frontend/admin-ops/admin-ui.mts', import.meta.url), 'utf8');
+  assert.ok(!src.includes('_dbSummaryStrip') && !src.includes('admin-db-fetched'));
+  for (const lit of ["'VACUUM ANALYZE'", "'BLOCKING'", '`BLOCKED ', ' calls`', 'aria-label="Help"', '<em>none</em>']) assert.ok(!src.includes(lit), lit);
 });

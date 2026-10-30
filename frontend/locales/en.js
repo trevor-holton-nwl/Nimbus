@@ -1266,12 +1266,9 @@ window.__NIMBUS_LOCALES.en = {
 
   /* ── Admin diagnostic panel headers / hints ──────────────────────────────── */
   'ui.data_pipeline':                  'Data pipeline',
-  'ui.pipeline_hint':                  'Click any step for details',
   'ui.backend_warnings':               'Backend warnings',
-  'ui.bwarn_hint':                     'from last data load',
   'ui.bwarn_count':                    '{{count}} from last data load',
   'ui.db_deep_dive':                   'Database deep dive',
-  'ui.db_deep_hint':                   'Pool · Server · Table health · Connections · Lock waits · Indexes · Slow queries · Sequences',
 
   /* ── Dynamic log count strings ───────────────────────────────────────────── */
   'ui.backend_log_count':              '{{total}} buffered · showing {{shown}}',

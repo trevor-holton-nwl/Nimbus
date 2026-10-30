@@ -1034,12 +1034,9 @@ window.__NIMBUS_LOCALES.pt = {
 
   /* ── Cabeçalhos / dicas do painel de diagnóstico ─────────────────────────── */
   'ui.data_pipeline':                  'Pipeline de dados',
-  'ui.pipeline_hint':                  'Clique em qualquer etapa para detalhes',
   'ui.backend_warnings':               'Avisos do servidor',
-  'ui.bwarn_hint':                     'do último carregamento de dados',
   'ui.bwarn_count':                    '{{count}} do último carregamento de dados',
   'ui.db_deep_dive':                   'Análise profunda do banco de dados',
-  'ui.db_deep_hint':                   'Pool · Servidor · Saúde de tabelas · Conexões · Esperas de bloqueio · Índices · Consultas lentas · Sequências',
 
   /* ── Strings de contagem dinâmica ────────────────────────────────────────── */
   'ui.backend_log_count':              '{{total}} em buffer · exibindo {{shown}}',

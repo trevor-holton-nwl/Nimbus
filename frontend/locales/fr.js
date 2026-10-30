@@ -1034,12 +1034,9 @@ window.__NIMBUS_LOCALES.fr = {
 
   /* ── En-têtes / conseils du panneau de diagnostic ────────────────────────── */
   'ui.data_pipeline':                  'Pipeline de données',
-  'ui.pipeline_hint':                  'Cliquez sur une étape pour les détails',
   'ui.backend_warnings':               'Avertissements serveur',
-  'ui.bwarn_hint':                     'du dernier chargement',
   'ui.bwarn_count':                    '{{count}} du dernier chargement',
   'ui.db_deep_dive':                   'Analyse approfondie de la base de données',
-  'ui.db_deep_hint':                   'Pool · Serveur · Santé des tables · Connexions · Attentes de verrouillage · Index · Requêtes lentes · Séquences',
 
   /* ── Chaînes de comptage dynamiques ──────────────────────────────────────── */
   'ui.backend_log_count':              '{{total}} en tampon · {{shown}} affichés',

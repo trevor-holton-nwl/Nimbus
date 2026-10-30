@@ -1034,12 +1034,9 @@ window.__NIMBUS_LOCALES.de = {
 
   /* ── Admin-Diagnose-Panel-Überschriften / Hinweise ────────────────────────── */
   'ui.data_pipeline':                  'Datenpipeline',
-  'ui.pipeline_hint':                  'Klicken Sie auf einen Schritt für Details',
   'ui.backend_warnings':               'Server-Warnungen',
-  'ui.bwarn_hint':                     'aus letztem Datenladen',
   'ui.bwarn_count':                    '{{count}} aus letztem Datenladen',
   'ui.db_deep_dive':                   'Datenbank-Tiefenanalyse',
-  'ui.db_deep_hint':                   'Pool · Server · Tabellengesundheit · Verbindungen · Sperr-Konflikte · Indizes · Langsame Abfragen · Sequenzen',
 
   /* ── Dynamische Protokollzählstrings ─────────────────────────────────────── */
   'ui.backend_log_count':              '{{total}} gepuffert · {{shown}} angezeigt',

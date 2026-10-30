@@ -1981,7 +1981,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         </div><!-- /admin-logs-pane -->
 
         <!-- DIAGNOSTICS PANE: page head + sticky jump rail + 13 collapsible sections (2026-10-30).
-             Section heads (dot, count, one-line state) are painted by AdminCockpit._paintSectionHead from
+             Section heads (dot, count, one-line state) are painted by the admin-ui module (paint-section-head) from
              diag-sections.mts; the eight diag-db-* sub-sections are built by JS inside #admin-db-deep. -->
         <div id="admin-diag-pane" hidden>
             <div class="diag-head">
@@ -2037,7 +2037,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
                   </div>
                 </details>
 
-                <!-- DATABASE: the eight diag-db-* sub-sections are created by AdminCockpit._ensureDbSubs -->
+                <!-- DATABASE: the eight diag-db-* sub-sections are created by the admin-ui module (ensure-db-subs) -->
                 <details class="diag-sec" id="diag-db" data-sev="info">
                   <summary class="diag-sec-sum">
                     <span class="diag-dot" aria-hidden="true"></span>
