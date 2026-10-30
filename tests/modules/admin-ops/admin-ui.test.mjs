@@ -918,3 +918,122 @@ test('_renderDiagnosticsPane (head Refresh) re-reads the pipeline and the databa
     assert.ok(calls.includes('_repaintHeads'));
   } finally { for (const n of names) AdminCockpit[n] = real[n]; }
 });
+
+// ---- W3: deep-link anchors ------------------------------------------------------------------------------
+test('gotoSub(sub, { anchor }) forwards the anchor to _setSub once; the zero-arg form passes none', () => {
+  const A = AdminCockpit; const seen = []; const real = A._setSub;
+  A._setSub = (...args) => { seen.push(args); };
+  try { A.gotoSub('diagnostics', { anchor: 'diag-db-conn' }); A.gotoSub('logs'); } finally { A._setSub = real; }
+  assert.deepEqual(seen, [['diagnostics', 'diag-db-conn'], ['logs', undefined]]);
+});
+
+test('_setSub keeps a pending anchor whose element is not in the DOM yet, and the next _repaintHeads consumes it', () => {
+  const A = AdminCockpit;
+  const restore = stubAll(ALL_RENDERERS.concat(['_startSpy', '_stopSpy']), []);
+  const names = ['_renderDiagRail', '_paintSectionHead', '_paintDiagStamp', '_observeSections'];
+  const real = {}; for (const n of names) { real[n] = A[n]; A[n] = () => {}; }
+  const realInputs = A._diagInputs; A._diagInputs = () => ({});
+  const revealed = []; const realReveal = A._revealAnchor; A._revealAnchor = (el) => revealed.push(el.id);
+  const els = {};
+  try {
+    withDiagDom(els, () => {
+      A._setSub('diagnostics', 'diag-db-conn');
+      assert.equal(A._pendingAnchor, 'diag-db-conn', 'element absent: kept, not consumed');
+      assert.deepEqual(revealed, []);
+      els['admin-diag-pane'] = dnode('div', { id: 'admin-diag-pane' });
+      A._revealPendingAnchor();
+      assert.equal(A._pendingAnchor, 'diag-db-conn', 'still absent after a no-op reveal');
+      els['diag-db-conn'] = dnode('details', { id: 'diag-db-conn' });   // the paint that creates the section
+      try { A._repaintHeads(); } catch { /* the section model on stub inputs may throw; the reveal below is the direct check */ }
+      if (A._pendingAnchor !== null) A._revealPendingAnchor();
+      assert.equal(A._pendingAnchor, null, 'consumed once the element exists');
+      assert.deepEqual(revealed, ['diag-db-conn']);
+    });
+  } finally { A._revealAnchor = realReveal; A._diagInputs = realInputs; for (const n of names) A[n] = real[n]; restore(); A._pendingAnchor = null; }
+});
+
+// withDiagDom restores `document` when its callback returns, which is before an async reveal resumes: this one waits.
+async function withDiagDomAsync(els, fn) {
+  const prior = globalThis.document;
+  globalThis.document = { getElementById: (id) => els[id] ?? null, createElement: (t) => dnode(t), querySelectorAll: () => [] };
+  try { return await fn(); } finally { if (prior === undefined) delete globalThis.document; else globalThis.document = prior; }
+}
+
+test('a new _setSub clears a stale pending anchor', () => {
+  const A = AdminCockpit; const restore = stubAll(ALL_RENDERERS.concat(['_startSpy', '_stopSpy']), []);
+  try {
+    withEmptyDom(() => {
+      A._setSub('diagnostics', 'diag-db-locks');
+      assert.equal(A._pendingAnchor, 'diag-db-locks');
+      A._setSub('overview');
+      assert.equal(A._pendingAnchor, null);
+    });
+  } finally { restore(); A._pendingAnchor = null; }
+});
+
+test('_setSub publishes the pending anchor before the pane renders (so _syncOpen sees it)', () => {
+  const A = AdminCockpit; let seen = 'unset';
+  const restore = stubAll(ALL_RENDERERS.filter((n) => n !== '_renderDiagnosticsPane').concat(['_startSpy', '_stopSpy']), []);
+  const realPane = A._renderDiagnosticsPane; A._renderDiagnosticsPane = () => { seen = A._pendingAnchor; };
+  try { withEmptyDom(() => A._setSub('diagnostics', 'diag-pipe')); } finally { A._renderDiagnosticsPane = realPane; restore(); A._pendingAnchor = null; }
+  assert.equal(seen, 'diag-pipe');
+});
+
+test('nav.* fixes pass fix.args.anchor to gotoSub; the Details link anchor is forwarded by the Overview click handler', async () => {
+  const A = AdminCockpit; const seen = []; const real = A.gotoSub;
+  A.gotoSub = (s, o) => { seen.push([s, o?.anchor]); };
+  try {
+    await A._onSignalFix({ id: 'nav.diagnostics', labelKey: 'x', args: { anchor: 'diag-db-pool' } });
+    await A._onSignalFix({ id: 'nav.order_maintenance', labelKey: 'x', args: { anchor: 'admin-audit' } });
+    await A._onSignalFix({ id: 'nav.interface', labelKey: 'x' });
+  } finally { A.gotoSub = real; }
+  assert.deepEqual(seen, [['diagnostics', 'diag-db-pool'], ['order-maintenance', 'admin-audit'], ['interface', undefined]]);
+  const src = (await import('node:fs')).readFileSync(new URL('../../../frontend/admin-ops/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(src, /b\.dataset\.anchor = d\.linkAnchor/);
+  assert.match(src, /nav\.dataset\.anchor \? \{ anchor: nav\.dataset\.anchor \}/);
+});
+
+test('logs.open honours args.level and args.source, defaulting to warn / backend', async () => {
+  const A = AdminCockpit; const { UnifiedLogPane } = await import('../../../frontend/admin-ops/unified-log-pane.mjs');
+  const real = UnifiedLogPane.setFilter; const realGo = A.gotoSub; const got = [];
+  UnifiedLogPane.setFilter = (f) => got.push(f); A.gotoSub = () => {};
+  try {
+    await A._onSignalFix({ id: 'logs.open', labelKey: 'x', args: { level: 'error', source: 'frontend' } });
+    await A._onSignalFix({ id: 'logs.open', labelKey: 'x' });
+  } finally { UnifiedLogPane.setFilter = real; A.gotoSub = realGo; }
+  assert.equal(got[0].level, 'error'); assert.deepEqual([...got[0].sources], ['frontend']);
+  assert.equal(got[1].level, 'warn'); assert.deepEqual([...got[1].sources], ['backend']);
+});
+
+test('jobs:runs renders the Jobs pane, then switches to Runs, then reveals #jobs-view-runs', async () => {
+  const A = AdminCockpit; const { JobsAdmin } = await import('../../../frontend/admin-ops/jobs-pane.mjs');
+  const order = []; const realR = JobsAdmin.render, realT = JobsAdmin.showTab, realReveal = A._revealAnchor;
+  JobsAdmin.render = async () => { order.push('render'); };
+  JobsAdmin.showTab = (t) => { order.push('tab:' + t); };
+  A._revealAnchor = (el) => order.push('reveal:' + el.id);
+  const restore = stubAll(ALL_RENDERERS.concat(['_startSpy', '_stopSpy']), []);
+  const els = { 'jobs-view-runs': dnode('div', { id: 'jobs-view-runs' }) };
+  try {
+    await withDiagDomAsync(els, async () => {
+      A._setSub('jobs', 'jobs:runs');
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  } finally { JobsAdmin.render = realR; JobsAdmin.showTab = realT; A._revealAnchor = realReveal; restore(); A._pendingAnchor = null; A._activeSub = 'overview'; }
+  assert.deepEqual(order, ['render', 'tab:runs', 'reveal:jobs-view-runs']);
+});
+
+test('sap:staging renders the Interface, selects the tab, reveals #sap-stage-batches (falls back to #sap-tabbody)', async () => {
+  const A = AdminCockpit; const { Interface } = await import('../../../frontend/integration/sap-interface-ui.mjs');
+  const realR = Interface.render, realT = Interface.showTab, realReveal = A._revealAnchor;
+  const order = [];
+  Interface.render = async () => { order.push('render'); };
+  Interface.showTab = (t) => { order.push('tab:' + t); };
+  A._revealAnchor = (el) => order.push('reveal:' + el.id);
+  const restore = stubAll(ALL_RENDERERS.concat(['_startSpy', '_stopSpy']), []);
+  try {
+    for (const els of [{ 'sap-stage-batches': dnode('div', { id: 'sap-stage-batches' }), 'sap-tabbody': dnode('div', { id: 'sap-tabbody' }) }, { 'sap-tabbody': dnode('div', { id: 'sap-tabbody' }) }]) {
+      await withDiagDomAsync(els, async () => { A._setSub('interface', 'sap:staging'); await new Promise((r) => setTimeout(r, 0)); });
+    }
+  } finally { Interface.render = realR; Interface.showTab = realT; A._revealAnchor = realReveal; restore(); A._pendingAnchor = null; A._activeSub = 'overview'; }
+  assert.deepEqual(order, ['render', 'tab:staging', 'reveal:sap-stage-batches', 'render', 'tab:staging', 'reveal:sap-tabbody']);
+});

@@ -499,6 +499,8 @@ export const AdminCockpit = {
   _ovSigKey: '',
   _pipelineOpen: null as string | null,
   _activeSub: 'overview',
+  /** Deep-link target waiting for its element (a DOM id, or `jobs:<tab>` / `sap:<tab>`); cleared by every _setSub and once revealed. */
+  _pendingAnchor: null as string | null,
   _dbDeepAbort: null as AbortController | null,
   _pipelineAbort: null as AbortController | null,
   // ── Diagnostics page (2026-10-30) ──
@@ -524,12 +526,16 @@ export const AdminCockpit = {
   _purgePreview: null as AdminPurgePreview | null,
   _purgePreviewSeq: 0,
 
-  gotoSub(sub: AdminSub): void { AdminCockpit._setSub(sub); },
+  gotoSub(sub: AdminSub, opts?: { anchor?: string }): void { AdminCockpit._setSub(sub, opts?.anchor); },
 
-  _setSub(sub: string | undefined): void {
+  _setSub(sub: string | undefined, anchor?: string): void {
     const known = ['overview', 'logs', 'diagnostics', 'order-maintenance', 'jobs', 'manage', 'interface', 'security', 'system-config', 'table-browser'];
     const cur = sub && known.includes(sub) ? sub : 'overview';
     AdminCockpit._activeSub = cur;
+    // Set BEFORE the pane renders so _syncOpen sees it; always replaced, so a stale anchor never outlives a navigation.
+    AdminCockpit._pendingAnchor = anchor ?? null;
+    // An inner-tab anchor (jobs:<tab>, sap:<tab>) is resolved by _revealPendingAnchor, which renders the pane itself.
+    const paneAnchor = /^(jobs|sap):/.test(anchor ?? '');
     document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) => {
       b.classList.toggle('active', b.dataset.sub === cur);
     });
@@ -549,15 +555,16 @@ export const AdminCockpit = {
     if (cur !== 'logs') UnifiedLogPane.setActive(false);
     if (cur !== 'diagnostics') AdminCockpit._stopSpy();
     if (cur === 'manage') MasterData.render();
-    else if (cur === 'interface') Interface.render();
+    else if (cur === 'interface') { if (!paneAnchor) void Interface.render(); }
     else if (cur === 'security') Security.render();
     else if (cur === 'system-config') SystemConfig.render();
     else if (cur === 'table-browser') AdminTables.render();
-    else if (cur === 'jobs') void JobsAdmin.render();
+    else if (cur === 'jobs') { if (!paneAnchor) void JobsAdmin.render(); }
     else if (cur === 'logs') AdminCockpit._renderLogsPane();
     else if (cur === 'diagnostics') { AdminCockpit._startSpy(); AdminCockpit._renderDiagnosticsPane(); }
     else if (cur === 'order-maintenance') AdminCockpit._renderOrderMaintenance();
     else AdminCockpit._renderOverview();
+    AdminCockpit._revealPendingAnchor();
   },
 
   init(): void {
@@ -611,7 +618,7 @@ export const AdminCockpit = {
         return;
       }
       const nav = t?.closest<HTMLElement>('[data-nav]');
-      if (nav?.dataset.nav) { AdminCockpit.gotoSub(nav.dataset.nav as AdminSub); return; }
+      if (nav?.dataset.nav) { AdminCockpit.gotoSub(nav.dataset.nav as AdminSub, nav.dataset.anchor ? { anchor: nav.dataset.anchor } : undefined); return; }
       const det = t?.closest<HTMLElement>('.sig-details');
       if (det) AdminCockpit._toggleDetail(det);
     };
@@ -767,13 +774,49 @@ export const AdminCockpit = {
     for (const s of secs) A._paintSectionHead(s);
     A._paintDiagStamp();
     A._observeSections();
-    // W3 defines _revealPendingAnchor: a link that arrived before its section existed is revealed by the paint that creates it.
-    (A as unknown as { _revealPendingAnchor?: () => void })._revealPendingAnchor?.();
+    // A link that arrived before its section existed is revealed by the paint that creates it.
+    A._revealPendingAnchor();
   },
 
-  /** Pending deep-link target (W3 defines the field); read defensively so this file stands alone. */
-  _pendingAnchorValue(): string | null {
-    return (AdminCockpit as unknown as { _pendingAnchor?: string | null })._pendingAnchor ?? null;
+  /** Pending deep-link target, or null. */
+  _pendingAnchorValue(): string | null { return AdminCockpit._pendingAnchor; },
+
+  /** Resolve the pending anchor if its target exists now. No-op (anchor kept) while the element is not in the DOM yet,
+   *  so the paint that creates it reveals it; cleared on success, never throws. Anchor grammar: spec 6.7. */
+  _revealPendingAnchor(): void {
+    const A = AdminCockpit;
+    const a = A._pendingAnchor;
+    if (a === null || typeof document === 'undefined') return;
+    const m = /^(jobs|sap):(.+)$/.exec(a);
+    if (m) {
+      // The inner-tab panes render themselves: act only while their sub-tab is the one showing, and only once.
+      if (A._activeSub !== (m[1] === 'jobs' ? 'jobs' : 'interface')) return;
+      A._pendingAnchor = null;
+      void A._revealPaneTab(m[1] as 'jobs' | 'sap', m[2]);
+      return;
+    }
+    const el = document.getElementById(a);
+    if (!el) return;
+    A._pendingAnchor = null;
+    A._revealAnchor(el);
+  },
+
+  /** jobs:<tab> / sap:<tab>: render the pane, switch its inner view, then reveal the inner element. */
+  async _revealPaneTab(pane: 'jobs' | 'sap', tab: string): Promise<void> {
+    const A = AdminCockpit;
+    try {
+      let el: HTMLElement | null;
+      if (pane === 'jobs') {
+        await JobsAdmin.render();   // async: the first render awaits the type list
+        JobsAdmin.showTab(tab as 'jobs' | 'runs' | 'upcoming' | 'templates');
+        el = document.getElementById(`jobs-view-${tab}`);
+      } else {
+        await Interface.render();
+        Interface.showTab(tab as 'overview' | 'staging' | 'mapping' | 'history');
+        el = document.getElementById('sap-stage-batches') ?? document.getElementById('sap-tabbody');
+      }
+      if (el && A._activeSub === (pane === 'jobs' ? 'jobs' : 'interface')) A._revealAnchor(el);
+    } catch { /* a failed pane render already reports itself; the link just lands on the sub-tab */ }
   },
 
   /** Section title without the "(N tables)" tail the legacy keys carry: the count is its own mono figure in the head. */
@@ -1346,6 +1389,7 @@ export const AdminCockpit = {
       b.type = 'button';
       b.className = 'btn btn-ghost sm';
       b.dataset.nav = d.linkSub;
+      if (d.linkAnchor) b.dataset.anchor = d.linkAnchor;
       b.textContent = Util.t(d.linkKey);
       box.appendChild(b);
     }
@@ -1478,6 +1522,9 @@ export const AdminCockpit = {
     }
   },
 
+  /** The anchor a nav.* fix carries in its args (undefined when absent or not a string). */
+  _fixAnchor(a: Record<string, unknown>): string | undefined { return typeof a.anchor === 'string' ? a.anchor : undefined; },
+
   /** Quick-fix dispatch for the Signal board and Needs attention buttons. */
   async _onSignalFix(fix: Fix, btn: HTMLButtonElement | null = null): Promise<void> {
     const A = AdminCockpit;
@@ -1500,10 +1547,10 @@ export const AdminCockpit = {
         JobsAdmin.openRun(Number(a.runId));
         return;
       }
-      case 'nav.jobs': A.gotoSub('jobs'); return;
-      case 'nav.diagnostics': A.gotoSub('diagnostics'); return;
-      case 'nav.interface': A.gotoSub('interface'); return;
-      case 'nav.order_maintenance': A.gotoSub('order-maintenance'); return;
+      case 'nav.jobs': A.gotoSub('jobs', { anchor: A._fixAnchor(a) }); return;
+      case 'nav.diagnostics': A.gotoSub('diagnostics', { anchor: A._fixAnchor(a) }); return;
+      case 'nav.interface': A.gotoSub('interface', { anchor: A._fixAnchor(a) }); return;
+      case 'nav.order_maintenance': A.gotoSub('order-maintenance', { anchor: A._fixAnchor(a) }); return;
       case 'db.vacuum_all': {
         if (!(await Modal.confirm({ title: Util.t('ui.maint_vacuum_all_confirm'), confirmLabel: Util.t('btn.run') }))) return;
         await A._runMaintenance('vacuum-analyze', null, btn);
@@ -1514,7 +1561,11 @@ export const AdminCockpit = {
         await A._runMaintenance('vacuum-analyze', String(a.table ?? '') || null, btn);
         again();
         return;
-      case 'logs.open': A.gotoSub('logs'); UnifiedLogPane.setFilter({ level: 'warn', sources: new Set(['backend']) }); return;
+      case 'logs.open': {
+        A.gotoSub('logs');
+        UnifiedLogPane.setFilter({ level: (a.level as 'error' | 'warn' | undefined) ?? 'warn', sources: new Set([(a.source as string | undefined) ?? 'backend']) } as Parameters<typeof UnifiedLogPane.setFilter>[0]);
+        return;
+      }
       case 'data.reload': void Persistence.reload(); return;
       case 'data.color_wheel': {
         const nb = (globalThis as unknown as { NIMBUS?: { ColorWheelViewer?: { open?: () => void } } }).NIMBUS;
