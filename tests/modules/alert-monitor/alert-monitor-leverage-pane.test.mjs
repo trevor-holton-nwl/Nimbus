@@ -30,7 +30,7 @@ function makeEl(id) {
     setAttribute() {}, addEventListener(type, fn) { handlers[type] = fn; },
     querySelectorAll() { return []; }, querySelector() { return null; },
     scrollIntoView() { this.scrolled++; }, blur() {}, focus() {}, closest() { return null; },
-    appendChild() {}, remove() {}, removeEventListener() {}, style: {}, clientHeight: 600, scrollTop: 0,
+    appendChild() {}, remove() {}, removeEventListener() {}, style: { setProperty() {}, getPropertyValue() { return ''; } }, clientHeight: 600, scrollTop: 0,
   };
 }
 

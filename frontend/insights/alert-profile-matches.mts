@@ -20,7 +20,7 @@ import type { AlertAck, AlertCategory, AlertProfile } from '../platform/types.mj
 import { AlertProfileClient } from './alert-profile-client.mjs';
 import { AlertAcksClient } from './alert-acks-client.mjs';
 import {
-  ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID, ALERT_CATEGORY_ORDER, categoryOf,alertOrderIds, profileMatches, resolveActiveProfileId,
+  ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID, ALERT_CATEGORY_ORDER, categoryOf, alertOrderIds, categoryColorDecls, profileMatches, resolveActiveProfileId,
 } from './alert-profiles.mjs';
 
 export interface AlertProfileMatchSet {
@@ -38,7 +38,7 @@ export interface AlertProfileMatchSet {
 
 type ProfileSettingsArg = Parameters<typeof resolveActiveProfileId>[1];
 
-const CATEGORY_ORDER: AlertCategory[] = ALERT_CATEGORY_ORDER;
+const CATEGORY_ORDER: readonly AlertCategory[] = ALERT_CATEGORY_ORDER;
 const RELEVANT_PREFS = ['alertProfileByPlant', 'alertProfileGanttHighlight', 'alertsShowAcknowledged'] as const;
 const DEBOUNCE_MS = 120;
 
@@ -145,6 +145,25 @@ function _buildSet(plant: string, wanted: string, available: AlertProfile[], ack
   return set;
 }
 
+/** Write a profile's category colours as inline custom properties on `el`: the `--bar-pm-*` tokens every consumer reads
+ *  (Gantt fills, legend, minimap, Alert Monitor) re-point at the profile's swatches with no other CSS. Writes only the
+ *  keys that differ, never `setAttribute('style')`. The values are `var(--pal-...)`, resolved on `el`, so `el` must be
+ *  `document.body` (where `body.dark` declares the dark swatches) or a descendant. No-op without a document or element. */
+export function applyCategoryColors(el: HTMLElement | null | undefined, profile: AlertProfile | null | undefined): void {
+  if (typeof document === 'undefined' || !el?.style) return;
+  const decls = categoryColorDecls(profile);
+  for (const key of Object.keys(decls)) {
+    if (el.style.getPropertyValue(key) !== decls[key]) el.style.setProperty(key, decls[key]);
+  }
+}
+
+/** JSON signature of a profile's decl map: `recompute` and the minimap compare it to skip redundant work. */
+export function categoryColorSignature(profile: AlertProfile | null | undefined): string {
+  return JSON.stringify(categoryColorDecls(profile));
+}
+
+let _colorSig = '';
+
 export function recompute(): void {
   const plant = Store.selectedPlant ?? null;
   let set = _emptySet();
@@ -168,6 +187,11 @@ export function recompute(): void {
   view.rev = set.rev;
   _current = set;
   _view = view;
+  const sig = categoryColorSignature(set.profile);
+  if (sig !== _colorSig) {
+    _colorSig = sig;
+    applyCategoryColors(typeof document === 'undefined' ? null : document.body, set.profile);
+  }
   for (const fn of Array.from(_subs)) { try { fn(); } catch { /* isolate subscribers */ } }
 }
 

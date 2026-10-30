@@ -23,7 +23,7 @@
    `plantToday` is always passed in by the caller (start of the plant-local day).
    ========================================================================== */
 
-import type { AlertType, AlertCategory, AlertProfile, AlertProfileRule, AlertRanking, NimbusTask } from '../platform/types.mjs';
+import type { AlertType, AlertCategory, AlertProfile, AlertProfileRule, AlertRanking, NimbusTask, PaletteName } from '../platform/types.mjs';
 
 // ---- Dependencies ---------------------------------------------------------------------------
 
@@ -107,9 +107,35 @@ export const ALERT_CATEGORIES: Record<AlertCategory, AlertType[]> = {
 };
 
 /** The one category order (capacity first, Other last); CATEGORY_ORDER and MONITOR_CATEGORIES alias it. */
-export const ALERT_CATEGORY_ORDER = Object.keys(ALERT_CATEGORIES) as AlertCategory[];
+export const ALERT_CATEGORY_ORDER: readonly AlertCategory[] = Object.keys(ALERT_CATEGORIES) as AlertCategory[];
 
-const _categoryByType =new Map<string, AlertCategory>();
+/** The nine fixed swatches a profile colours its alert groups from (CSS tokens --pal-<name>, -fg, -ring). */
+export const PALETTE: readonly PaletteName[] = ['amber', 'orange', 'magenta', 'violet', 'teal', 'sky', 'slate', 'sand', 'stone'];
+
+/** The colour each group wears unless a profile says otherwise (also the built-in "All alerts" and legacy profiles). */
+export const DEFAULT_CATEGORY_COLORS: Readonly<Record<AlertCategory, PaletteName>> = Object.freeze({
+  capacity: 'amber', conflicts: 'violet', calendar: 'teal', setup: 'magenta', planning: 'orange', late: 'slate', exceptions: 'stone',
+});
+
+/**
+ * The full 21-key custom-property map for a profile: `--bar-pm-<cat>`, `-fg` and `-ring` for every group, each pointing
+ * at the group's palette swatch. A built-in or legacy (no `categories`) profile yields the defaults, never `{}`, so
+ * writing it always restores the stylesheet's own colours. The values are `var(--pal-...)` references, written inline
+ * on `document.body` (or a descendant), where they resolve against the theme's swatches (see applyCategoryColors).
+ */
+export function categoryColorDecls(p: AlertProfile | null | undefined): Record<string, string> {
+  const cats = p && !p.builtIn ? p.categories ?? null : null;
+  const out: Record<string, string> = {};
+  for (const cat of ALERT_CATEGORY_ORDER) {
+    const name = cats?.[cat]?.color ?? DEFAULT_CATEGORY_COLORS[cat];
+    out[`--bar-pm-${cat}`] = `var(--pal-${name})`;
+    out[`--bar-pm-${cat}-fg`] = `var(--pal-${name}-fg)`;
+    out[`--bar-pm-${cat}-ring`] = `var(--pal-${name}-ring)`;
+  }
+  return out;
+}
+
+const _categoryByType = new Map<string, AlertCategory>();
 for (const [cat, types] of Object.entries(ALERT_CATEGORIES) as Array<[AlertCategory, AlertType[]]>) {
   for (const t of types) _categoryByType.set(t, cat);
 }

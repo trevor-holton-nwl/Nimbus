@@ -28,14 +28,14 @@ import { dayStepKeys, dayStepActive, dayStepNext, dayStepLabel } from '../platfo
 import { Selection } from './selection.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Utilization, Alerts } from '../insights/services.mjs';
-import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
-import { CALENDAR_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { AlertProfileMatches, categoryColorSignature } from '../insights/alert-profile-matches.mjs';
+import { CALENDAR_ALERT_TYPES, ALERT_CATEGORY_ORDER } from '../insights/alert-profiles.mjs';
 import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { Persistence } from './persistence.mjs';
 import { Table, Inspector, ContextMenu, notifyResidualFirming } from './orders.mjs';
 import type { AgGridRowNode } from './orders.mjs';
-import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';
+import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertCategory, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import type { DropDecision } from '../routing/runtime-client.mjs';
@@ -3040,6 +3040,16 @@ export function navBarStyle(className: string | undefined): NavBarStyle {
   return 'standard';
 }
 
+/** The alert category a profile-matched bar wears (its `profile-match-<category>` class), else null. */
+export function navBarCategory(className: string | undefined): AlertCategory | null {
+  for (const c of (className || '').split(/\s+/)) {
+    if (!c.startsWith('profile-match-')) continue;
+    const cat = c.slice('profile-match-'.length) as AlertCategory;
+    if ((ALERT_CATEGORY_ORDER as readonly string[]).includes(cat)) return cat;
+  }
+  return null;
+}
+
 export function navClampRect(x1: number, x2: number, cssW: number): { x1: number; x2: number } {
   if (x2 < x1) [x1, x2] = [x2, x1];
   if (x2 <= 0) return { x1: 0, x2: 0 };
@@ -3085,6 +3095,7 @@ interface _NavBarModel {
   endMs: number;
   style: NavBarStyle;
   firmed: boolean;   // independent of `style` — a conflict bar still needs to know its base color
+  cat: AlertCategory | null;   // profile-matched bars only: which category colour to draw
 }
 interface _NavBlackoutModel {
   rowIdx: number | 'all';
@@ -3095,6 +3106,8 @@ interface _NavTheme {
   bg: string; closedFill: string; warnFill: string; errFill: string;
   barStandard: string; barFirmed: string; dimFill: string; dividerColor: string;
   labelScrim: string; labelText: string; fontMono: string; accent: string; fg: string;
+  /** `--bar-pm-<category>` per alert category: the active profile's colours (inline on body) or the stylesheet defaults. */
+  pm: Record<AlertCategory, string>;
 }
 interface _NavModel {
   range: NavRange;
@@ -3128,6 +3141,8 @@ export const TimelineNav = {
   _itemsSubAttached: false,
   _tlHooked:  false,
   _unsubStore: null as (() => void) | null,
+  _unsubMatches: null as (() => void) | null,
+  _colorSig: '',
   _resizeObserver: null as ResizeObserver | null,
   _tickInterval: null as ReturnType<typeof setInterval> | null,
   _gesture:     null as _NavGesture | null,
@@ -3164,6 +3179,11 @@ export const TimelineNav = {
       }
     }, 'TimelineNav');
 
+    // A profile with different category colours: the producer has already rewritten the body's inline tokens
+    // by the time it fans out, so a repaint here re-reads the new colours. Skipped when the decl map is unchanged.
+    TimelineNav._colorSig = categoryColorSignature(AlertProfileMatches.current().profile);
+    TimelineNav._unsubMatches = AlertProfileMatches.subscribe(() => TimelineNav._onProfileMatches());
+
     if (typeof ResizeObserver !== 'undefined') {
       TimelineNav._resizeObserver = new ResizeObserver(() => TimelineNav._scheduleFrame());
       TimelineNav._resizeObserver.observe(el);
@@ -3185,6 +3205,14 @@ export const TimelineNav = {
   render(): void {
     TimelineNav._dirty = true;
     TimelineNav._scheduleFrame();
+  },
+
+  /** AlertProfileMatches fanout: repaint only when the active profile's category colours changed. */
+  _onProfileMatches(): void {
+    const sig = categoryColorSignature(AlertProfileMatches.current().profile);
+    if (sig === TimelineNav._colorSig) return;
+    TimelineNav._colorSig = sig;
+    TimelineNav.render();
   },
 
   _scheduleFrame(): void {
@@ -3406,6 +3434,7 @@ export const TimelineNav = {
           startMs, endMs,
           style: navBarStyle(item.className),
           firmed: cls.includes('order-firmed'),
+          cat: navBarCategory(item.className),
         });
         if (dataMinMs == null || startMs < dataMinMs) dataMinMs = startMs;
         if (dataMaxMs == null || endMs   > dataMaxMs) dataMaxMs = endMs;
@@ -3486,15 +3515,21 @@ export const TimelineNav = {
 
   // Copy of Dashboard._cssVar (insights-ui.mts) — not imported, to avoid a
   // cross-domain edge for a 3-line helper; canvas can't use CSS var() so
-  // colors are read from the real custom properties once per paint.
+  // colors are read from the real custom properties once per paint. Reads
+  // document.body (not documentElement): `body.dark` and the inline profile
+  // colours both live on the body, so the root element never sees them.
   _cssVar(name: string, fallback: string): string {
-    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const v = getComputedStyle(document.body).getPropertyValue(name).trim();
     return v || fallback;
   },
 
   _readTheme(): _NavTheme {
     // Read once per data repaint (when _dirty) and cached on the model — never per frame; render() marks dirty so DarkMode's repaint hook still re-reads.
+    const accent = TimelineNav._cssVar('--accent', '#1f5fbf');
+    const pm = {} as Record<AlertCategory, string>;
+    for (const cat of ALERT_CATEGORY_ORDER) pm[cat] = TimelineNav._cssVar(`--bar-pm-${cat}`, accent);
     return {
+      pm,
       bg: TimelineNav._cssVar('--bg-subtle', '#f4f7fa'),
       closedFill: TimelineNav._cssVar('--fg-faint', '#7d8da0'),
       warnFill: TimelineNav._cssVar('--warn', '#93610a'),
@@ -3596,10 +3631,10 @@ export const TimelineNav = {
             ctx.fillRect(x1, y, w, h);
           }
         } else if (bar.style === 'profile') {
-          // Alert-profile match: accent fill with an ink keyline (per-category fills are the Gantt's job;
-          // the warn/err colours keep their own meaning here).
+          // Alert-profile match: the category's own colour with an ink keyline (the warn/err colours keep
+          // their own meaning here); accent only when the class names no known category.
           ctx.globalAlpha = 1;
-          ctx.fillStyle = theme.accent;
+          ctx.fillStyle = (bar.cat && theme.pm[bar.cat]) || theme.accent;
           ctx.fillRect(x1, y, w, h);
           if (layout.rowH >= 4) {
             ctx.strokeStyle = theme.fg;

@@ -79,6 +79,51 @@
         "displayName": "Bar Firmed",
         "canonical": "#b02a20"
       },
+      "pal-amber": {
+        "role": "data",
+        "displayName": "Alert Palette: Amber",
+        "canonical": "#e0a800"
+      },
+      "pal-orange": {
+        "role": "data",
+        "displayName": "Alert Palette: Orange",
+        "canonical": "#e8602a"
+      },
+      "pal-magenta": {
+        "role": "data",
+        "displayName": "Alert Palette: Magenta",
+        "canonical": "#c8359a"
+      },
+      "pal-violet": {
+        "role": "data",
+        "displayName": "Alert Palette: Violet",
+        "canonical": "#8750f0"
+      },
+      "pal-teal": {
+        "role": "data",
+        "displayName": "Alert Palette: Teal",
+        "canonical": "#14b8a6"
+      },
+      "pal-sky": {
+        "role": "data",
+        "displayName": "Alert Palette: Sky",
+        "canonical": "#30b0ec"
+      },
+      "pal-slate": {
+        "role": "data",
+        "displayName": "Alert Palette: Slate",
+        "canonical": "#334155"
+      },
+      "pal-sand": {
+        "role": "data",
+        "displayName": "Alert Palette: Sand",
+        "canonical": "#bfa57a"
+      },
+      "pal-stone": {
+        "role": "data",
+        "displayName": "Alert Palette: Stone",
+        "canonical": "#78716c"
+      },
       "bar-pm-capacity": {
         "role": "data",
         "displayName": "Alert Fill: Capacity",
@@ -103,6 +148,11 @@
         "role": "data",
         "displayName": "Alert Fill: Planning",
         "canonical": "#e8602a"
+      },
+      "bar-pm-late": {
+        "role": "data",
+        "displayName": "Alert Fill: Late",
+        "canonical": "#334155"
       },
       "bar-pm-exceptions": {
         "role": "data",
@@ -349,7 +399,7 @@
       "Don't use border-left/border-right as a colored accent stripe on cards or list rows — full borders, background tints, or a leading icon instead. (The one sanctioned exception is the KPI-tile border-top severity pattern in §5 — top, not side, and only on .kpi-tile.)",
       "Don't reference a CSS variable name that isn't defined in :root or body.dark without checking first, and don't add a :root color without its body.dark value. The compatibility aliases (--border, --border-subtle, --font-mono, --nimbus-amber/--amber, --bg-float, --surface, --text-muted) are all defined, but prefer the canonical token names in new CSS.",
       "Don't use --warn as small text or an icon color on a light surface (~3.2:1); use --warn-text. --warn is for fills, borders and tints.",
-      "Don't add a status or category color outside Signal OK/Warn/Err/Info and the six --bar-pm-* fills, and don't tint a Gantt bar by anything but firming status or the active alert category.",
+      "Don't add a status or category color outside Signal OK/Warn/Err/Info and the nine --pal-* swatches, and don't tint a Gantt bar by anything but firming status or the active profile's category color.",
       "Don't reach for --shadow-lg on a static, non-floating panel just to make it feel more \"premium\" — see The Floating-Means-Floating Rule."
     ]
   }

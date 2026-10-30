@@ -21,7 +21,7 @@ import type { StoreEvent } from '../platform/store.mjs';
 import { Util, Config, Modal, Toast, VirtualList, ErrorLog } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
 import type { AlertAck, AlertProfile, NimbusTask } from '../platform/types.mjs';
-import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
+import { AlertProfileMatches, applyCategoryColors } from '../insights/alert-profile-matches.mjs';
 import type { AlertProfileMatchSet } from '../insights/alert-profile-matches.mjs';
 import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
 import { AlertProfileEditor, canDeleteProfile } from './alert-profile-editor.mjs';
@@ -1544,6 +1544,8 @@ function _paint(): void {
   _ensureShell();
   if ((Store.selectedPlant ?? null) !== _lastPlant) { _lastPlant = Store.selectedPlant ?? null; AlertMonitorPane.resetView(); }
   const pid = AlertProfileMatches.view().profileId;
+  // "View as" colours this page with the viewed profile's swatches (body keeps the saved default's for the Gantt).
+  applyCategoryColors(document.getElementById('alerts-tab'), AlertProfileMatches.view().profile);
   if (pid !== _lastProfileId) { _lastProfileId = pid; _narrow = {}; _ovLinesAll = false; }   // a narrow belongs to one profile's list
   const s = _gatherState();
   _syncHeader(s);
