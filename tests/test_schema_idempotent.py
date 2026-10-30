@@ -164,6 +164,7 @@ def test_schema_bootstrap_smoke_skips_current_schema_incompatible_migrations():
         "2026-10-29-1-job-scheduler.sql",
         "2026-10-29-2-sap-stage-material-desc-type.sql",
         "2026-10-30-1-job-artifacts.sql",
+        "2026-10-30-1-upload-audit-rid.sql",
         "2026-10-31-1-job-targets.sql",
         "2026-11-01-1-job-step-run.sql",
         "2026-11-01-2-job-template.sql",
