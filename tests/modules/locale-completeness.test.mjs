@@ -837,7 +837,7 @@ test('U33: the new es rows use "pedido" and the new fr rows "commande" (no ordre
 // the profile toasts / User Settings rows and the Gantt-legend profile-match rows, with identical {{placeholders}}.
 const ALERT_MONITOR_KEYS = [
   'tab.alerts', 'am.profile_all', 'am.profile_ph', 'am.profile_none', 'am.window_rule', 'am.window_any_days',
-  'am.window_sev_any', 'am.window_sev_warn', 'am.window_sev_err', 'am.window_all', 'am.gantt_highlight',
+  'am.window_sev_any', 'am.window_sev_err', 'am.window_all', 'am.gantt_highlight',
   'am.group_by', 'am.group_type', 'am.group_category', 'am.group_line', 'am.group_day', 'am.group_order',
   'am.group_none', 'am.sort_impact', 'am.sort_time', 'am.lev_show_alerts', 'am.lev_computing', 'am.lev_none',
   'am.lev_headroom', 'am.lev_no_headroom', 'am.lev_remaining', 'am.lev_admin_fix', 'am.lev_copy_summary',
@@ -866,7 +866,14 @@ const ALERT_MONITOR_KEYS = [
   'leverage.action.machine-state', 'leverage.action.optimize-window', 'leverage.action.needs-planning', 'ape.title_new', 'ape.title_edit', 'ape.name',
   'ape.name_ph', 'ape.rules', 'ape.rule_n', 'ape.add_rule', 'ape.remove_rule', 'ape.types', 'ape.cat_capacity',
   'ape.cat_conflicts', 'ape.cat_calendar', 'ape.cat_setup', 'ape.cat_planning', 'ape.cat_late', 'ape.cat_exceptions', 'ape.select_category',
-  'ape.day_from', 'ape.day_to', 'ape.days_hint', 'ape.min_sev', 'ape.sev_any', 'ape.sev_warn', 'ape.sev_err',
+  'ape.day_from', 'ape.day_to', 'ape.days_hint', 'ape.sev_err',
+  // W5 two-tier editor: groups tier, palette popover, Fine-tune tier.
+  'ape.groups', 'ape.groups_hint', 'ape.cat_capacity_desc', 'ape.cat_conflicts_desc', 'ape.cat_calendar_desc', 'ape.cat_setup_desc',
+  'ape.cat_planning_desc', 'ape.cat_late_desc', 'ape.cat_exceptions_desc', 'ape.grp_tuned', 'ape.grp_tuned_tip', 'ape.color_for',
+  'ape.color_shared', 'ape.color_amber', 'ape.color_orange', 'ape.color_magenta', 'ape.color_violet', 'ape.color_teal', 'ape.color_sky',
+  'ape.color_slate', 'ape.color_sand', 'ape.color_stone', 'ape.tune', 'ape.tune_hint', 'ape.days', 'ape.day_preset_any',
+  'ape.day_preset_overdue', 'ape.day_preset_next3', 'ape.day_preset_next7', 'ape.day_preset_next14', 'ape.day_preset_custom',
+  'ape.groups_off', 'ape.rule_inert', 'ape.switch_label', 'ape.err_categories_shape',
   'ape.set_mine', 'ape.new_profile', 'ape.duplicate', 'ape.copy_to_plants', 'ape.late_hours', 'ape.err_late_hours',
   'ape.live_range', 'ape.live_matches', 'ape.err_name_required', 'ape.err_name_dup', 'ape.err_name_long',
   'ape.err_no_rules', 'ape.err_no_categories', 'ape.err_color', 'ape.err_too_many_rules', 'ape.err_rule_no_types', 'ape.err_days_range', 'ape.err_days_order',
@@ -995,4 +1002,18 @@ test('universal firm: removed keys are gone from all 5 locales; cmdp.intent_free
     assert.ok(m[1] !== en[1], `${loc} must translate cmdp.intent_freeze_sub`);
     assert.doesNotMatch(m[2], /MISSING TRANSLATION/);
   }
+});
+
+test('W5 editor wording: retired severity keys are gone, es/pt/fr call an order a pedido/commande (never ordre), no estimate vocabulary', () => {
+  const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
+  for (const l of LOCALES) {
+    for (const k of ['ape.sev_warn', 'ape.sev_any', 'ape.min_sev', 'am.window_sev_warn']) assert.equal(k in dicts[l], false, `${l} no longer has ${k}`);
+    for (const k of Object.keys(dicts[l]).filter(x => /^ape\.(cat_\w+_desc|groups|groups_hint|grp_tuned_tip|tune_hint|rule_inert)$/.test(x))) {
+      assert.doesNotMatch(dicts[l][k], /\b(exact|points|estimate)/i, `${l} ${k}`);
+    }
+  }
+  assert.doesNotMatch(dicts.fr['ape.cat_conflicts_desc'] + dicts.fr['ape.cat_calendar_desc'] + dicts.fr['ape.cat_planning_desc'], /\bordres?\b/i);
+  assert.match(dicts.es['ape.cat_conflicts_desc'], /pedidos/);
+  assert.match(dicts.fr['ape.cat_conflicts_desc'], /commandes/);
+  assert.match(dicts.pt['ape.cat_conflicts_desc'], /pedidos/);
 });

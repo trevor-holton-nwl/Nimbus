@@ -174,6 +174,8 @@ function _categorySummary(profile: AlertProfile, t: Translate): string {
   const eff = effectiveCategories(profile);
   const on = ALERT_CATEGORY_ORDER.filter(c => eff[c].on);
   if (!on.length) return t('am.window_all');
+  // Every group on and no rule narrowing any of them is the whole horizon, the same sentence as All alerts.
+  if (on.length === ALERT_CATEGORY_ORDER.length && !(profile.rules ?? []).some(r => on.some(c => ruleAppliesTo(r, c)))) return t('am.window_all');
   const label = (cats: readonly AlertCategory[]): string => cats.length === ALERT_CATEGORY_ORDER.length ? t('am.profile_all') : cats.map(c => t(`ape.cat_${c}`)).join(', ');
   const rules = profile.rules ?? [];
   const lines: string[] = [];

@@ -142,6 +142,18 @@ test('validateProfile: needs one category on and valid palette colours', () => {
   assert.equal(validateProfile(draft({ categories: 'x' }), []).ok, false);
 });
 
+test('validateProfile: an extra key in categories is a shape error, like the server (ape.err_categories_shape)', () => {
+  const extra = cats();
+  extra.bogus = { on: true, color: 'sky' };
+  const v = validateProfile(draft({ categories: extra }), []);
+  assert.equal(v.ok, false);
+  assert.equal(v.errors.categories, 'ape.err_categories_shape');
+  const both = cats([]);
+  both.bogus = { on: true, color: 'sky' };
+  assert.equal(validateProfile(draft({ categories: both }), []).errors.categories, 'ape.err_categories_shape', 'the shape error wins');
+  assert.equal(validateProfile(draft({ categories: cats() }), []).ok, true);
+});
+
 // ---- back-compat property test -----------------------------------------------------------------
 
 function mulberry32(a) {

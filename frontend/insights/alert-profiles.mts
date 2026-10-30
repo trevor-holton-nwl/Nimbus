@@ -493,6 +493,10 @@ export function validateProfile(draft: AlertProfileDraft, existing: AlertProfile
         if (!_isPaletteName(e.color)) errors[`categories.${cat}.color`] = 'ape.err_color';
       }
       if (!anyOn) errors.categories = 'ape.err_no_categories';
+      // The server insists on exactly the seven keys: an extra one is a shape error (and wins over the others).
+      if (Object.keys(c as Record<string, unknown>).some(k => !(ALERT_CATEGORY_ORDER as readonly string[]).includes(k))) {
+        errors.categories = 'ape.err_categories_shape';
+      }
     }
   }
 

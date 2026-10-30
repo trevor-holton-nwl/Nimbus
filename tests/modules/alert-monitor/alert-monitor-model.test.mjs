@@ -11,7 +11,6 @@ const EN = {
   'am.window_rule': '{{types}} · D{{from}}–{{to}} · {{sev}}',
   'am.window_any_days': 'any day',
   'am.window_sev_any': 'all severities',
-  'am.window_sev_warn': 'warnings and errors',
   'am.window_sev_err': 'errors only',
   'am.window_all': 'Showing every alert in the horizon',
   'am.profile_all': 'All alerts',
@@ -111,6 +110,13 @@ test('summaryLine never uses the words points, pts, exact or estimate', () => {
 test('windowSummary: All alerts and empty profiles read as the whole horizon', () => {
   assert.equal(windowSummary(ALL_ALERTS_PROFILE, t), 'Showing every alert in the horizon');
   assert.equal(windowSummary(null, t), 'Showing every alert in the horizon');
+});
+
+test('windowSummary: a stored profile with every group on and no narrowing rule reads the whole-horizon sentence, not the label', () => {
+  const categories = Object.fromEntries(ALERT_CATEGORY_ORDER.map(c => [c, { on: true, color: DEFAULT_CATEGORY_COLORS[c] }]));
+  assert.equal(windowSummary({ ...prof([]), categories }, t), 'Showing every alert in the horizon');
+  // A narrowing rule keeps the per-rule line.
+  assert.notEqual(windowSummary({ ...prof([rule({ types: ['late'], dayFrom: 0, dayTo: 6 })]), categories }, t), 'Showing every alert in the horizon');
 });
 
 test('windowSummary: a single rule renders types, day window and severity', () => {
@@ -214,7 +220,7 @@ test('profileWindow (categories): every ON category needs an applicable rule, al
 test('windowSummary (categories): lists the ON category labels, not rule types', () => {
   const s = windowSummary(cprof([rule({ types: ['overlap'], dayFrom: 0, dayTo: 7, minSev: 'err' })], ['conflicts', 'late']), t);
   assert.equal(s, 'Late · any day · all severities | Scheduling conflicts · D0–7 · errors only');
-  assert.equal(windowSummary(cprof([], ALERT_CATEGORY_ORDER), t), 'All alerts · any day · all severities');
+  assert.equal(windowSummary(cprof([], ALERT_CATEGORY_ORDER), t), 'Showing every alert in the horizon', 'all ON, nothing narrowing: the whole-horizon sentence (W5)');
   assert.equal(windowSummary(cprof([rule({ types: ['overlap'] })], ['late']), t), 'Late · any day · all severities', 'a rule for an OFF category adds no line');
 });
 
