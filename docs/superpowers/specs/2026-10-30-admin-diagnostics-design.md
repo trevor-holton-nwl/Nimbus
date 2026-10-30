@@ -171,5 +171,5 @@ W0 docs (Sonnet); W1 module + locales (Sonnet); W2 Diagnostics restructure (Sonn
 - An instant jump still drifts when the bodies above grow, and native scroll anchoring did not hold it, so `_settleReveal` re-scrolls once after each read, guarded by age (5 s), connection and unchanged scrollTop. A target near page end is clamped by max scroll.
 - Section skeletons must exist before any fetch, otherwise a pending anchor finds nothing; `_repaintHeads` also calls `_revealPendingAnchor` for links that arrive early.
 - The narrow-width rail needed a chip row (1000 px and under); five chips plus the one-line header summaries in five locales were only checked at 1280 px, so the narrower fits stay owner-owed.
-- Section titles carrying a "(N tables)" tail and long one-liners wrapped the head; the count became its own mono figure and the line is one row with a `title` tooltip.
+- Section titles carrying a "(N tables)" tail and long one-liners wrapped the head; `_diagTitle` strips the tail and the count is its own mono figure (`.diag-count`); title and one-liner wrap (`overflow-wrap: anywhere`) rather than truncate, and the one-liner carries its full text in a `title` tooltip.
 - Open/closed memory (`_diagOpen`) must be written only by real user toggles; our programmatic opens echo a `toggle` event and needed a `data-diag-auto` marker.

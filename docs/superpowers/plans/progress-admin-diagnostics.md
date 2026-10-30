@@ -50,3 +50,14 @@ Punch list (written before any change):
 Verified OK: 1280 layout, rail 220 px sticky, lights, mono figures, warn/err title colours, dark mode tokens and flash halo, 760 header-grid collapse, five locale header one-liners on one row (line height 18 px everywhere), Overview "Open Diagnostics" buttons (diag-pipe, diag-db-tables, diag-client, diag-db-conn) open, scroll to top, flash; Jobs link lands on Runs view; Interface link lands on Staging; Backend warnings link absent (no warnings in this data state); console clean for diag/Diagnostics/admin-ui/TypeError.
 9. [applied] Settle after async reads: `_revealPendingAnchor` records `_lastReveal` ({el, scrollTop, at}); `_settleReveal()` runs after the Pipeline and Database paints (success and failure) and re-scrolls once with `behavior:'auto'` only while the record is under 5 s old, the target is connected and `.admin-scroll` scrollTop is unchanged (else the record is dropped; `_setSub` clears it). No flash, no focus. Chrome: diag-db-conn holds at 127 px (the page's max scroll clamps it below the top), diag-db-tables at 12 px, a user scroll during the reads is not overridden. Test added (336 pass).
 10. [applied] W5 docs: admin-ops CLAUDE.md (Diagnostics structure, Anchor contract, fit list), integration CLAUDE.md (Interface.showTab), root Admin Ops row, spec Appendix B learnings.
+
+2026-10-30 | Final review | fix: final branch review | no .py/schema.sql/migrations in diff; anchors, thresholds (only signals.mts THRESHOLDS; admin-ui has just the 5 s settle age), no new server-string innerHTML, 40 new locale keys x5 identical placeholders, .gitignore twin, _exportDiagnostics, app.js untouched, W5 doc names all verified against code; spec Appendix B title/count bullet corrected (line wraps, not forced to one row) | resolved: 1 doc fix | deferred: none
+
+| Gate | Result |
+|---|---|
+| build | pass |
+| typecheck | pass |
+| lint | 0 errors, 44 warnings (none in files this branch added; pre-existing) |
+| test | tests/js 139/139; tests/modules 5796 total, 5789 pass, 1 fail (frozen-horizon-rolling, known pre-existing on main), 2 skipped, 4 todo |
+| check:legacy-surface | pass |
+| check:static-assets | pass |
