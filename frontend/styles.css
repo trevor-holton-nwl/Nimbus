@@ -5774,22 +5774,7 @@ tr:last-child .md-td { border-bottom: none; }
 }
 
 /* ── Admin Cockpit · Diagnostics panel ──────────────────────────── */
-#admin-diagnostics-pane { margin: 14px 0; }
-#admin-diagnostics-pane .admin-card {
-  background: var(--bg-elev, #fff);
-  border: 1px solid var(--border, #e5dfd2);
-  border-radius: 8px;
-  padding: 14px 16px;
-  box-shadow: 0 1px 2px rgba(0,0,0,.04);
-}
-#admin-diagnostics-pane .admin-card-hd {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; margin-bottom: 10px; flex-wrap: wrap;
-}
-#admin-diagnostics-pane .admin-card-hd h3 {
-  margin: 0; font-size: 14px; font-weight: 600;
-}
-#admin-diagnostics-pane .admin-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+#admin-diagnostics-pane { margin: 0; }
 #admin-diagnostics-pane .admin-kv {
   display: grid;
   grid-template-columns: max-content 1fr;
@@ -5806,6 +5791,106 @@ tr:last-child .md-td { border-bottom: none; }
 #admin-diagnostics-pane .admin-good { color: var(--ok, #2f7a4d); font-weight: 600; }
 #admin-diagnostics-pane .admin-warn { color: var(--warn, #b57a0a); font-weight: 600; }
 #admin-diagnostics-pane .admin-bad  { color: var(--err, #c0392b);  font-weight: 600; }
+
+/* ── Diagnostics: page head, sticky jump rail, collapsible sections (2026-10-30) ──
+   One scrolling page inside .admin-scroll (the scroll container is not the window). The rail is
+   sticky like .ulog-rail; every section carries scroll-margin-top so a jump lands clear of the edge.
+   Severity is data-sev on the <details>: the dot takes the severity color, a warn title uses
+   --warn-text (AA on white; --warn is background-only), an err title uses --err. No side stripes. */
+.diag-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
+.diag-h2 { margin: 0; font-size: 13px; font-weight: 700; font-family: var(--font-display, inherit); color: var(--fg); }
+.diag-ts { font-size: 11px; color: var(--fg-mute); min-width: 0; overflow-wrap: anywhere; }
+.diag-head .spacer { flex: 1 1 0; }
+.diag-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; align-items: start; }
+.diag-main { min-width: 0; }
+
+.diag-rail { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; min-width: 0;
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.diag-rail-cap { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--fg-mute); padding: 6px 9px 2px; }
+.diag-rail-link { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 9px; align-items: baseline;
+  padding: 7px 9px; border-radius: 4px; text-decoration: none; color: var(--fg); font-size: 12.5px; font-weight: 500; }
+.diag-rail-link:hover { background: var(--bg-hover); }
+.diag-rail-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.diag-rail-link.is-on { background: var(--accent-wash); }
+.diag-rail-link.is-sub { padding-left: 26px; font-weight: 400; }
+.diag-rail-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diag-rail-short { grid-column: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; font-weight: 400; color: var(--fg-mute); font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; }
+.diag-rail-link[data-sev="warn"] .diag-rail-title { color: var(--warn-text); }
+.diag-rail-link[data-sev="err"] .diag-rail-title { color: var(--err); }
+
+.diag-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--fg-faint); flex: none; position: relative; top: 1px; }
+[data-sev="ok"] > .diag-dot, [data-sev="ok"] > summary > .diag-dot { background: var(--ok); }
+[data-sev="warn"] > .diag-dot, [data-sev="warn"] > summary > .diag-dot { background: var(--warn-vivid); }
+[data-sev="err"] > .diag-dot, [data-sev="err"] > summary > .diag-dot { background: var(--err); }
+.diag-rail-link[data-sev="ok"] > .diag-dot { background: var(--ok); }
+.diag-rail-link[data-sev="warn"] > .diag-dot { background: var(--warn-vivid); }
+.diag-rail-link[data-sev="err"] > .diag-dot { background: var(--err); }
+
+.diag-sec { background: var(--bg-elev); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; min-width: 0; scroll-margin-top: 12px; }
+.diag-sec-sum { list-style: none; display: grid; grid-template-columns: auto minmax(120px, 200px) 1fr auto auto;
+  align-items: center; column-gap: 14px; padding: 11px 16px; cursor: pointer; min-height: 44px; }
+.diag-sec-sum::-webkit-details-marker { display: none; }
+.diag-sec-sum:hover { background: var(--bg-hover); border-radius: 8px; }
+.diag-sec-sum:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.diag-sec[open] > .diag-sec-sum { border-bottom: 1px solid var(--line-subtle); border-radius: 8px 8px 0 0; }
+.diag-title { font-weight: 600; font-size: 13px; color: var(--fg); min-width: 0; overflow-wrap: anywhere; }
+.diag-count { font-weight: 400; color: var(--fg-mute); margin-left: 6px; font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 11px; }
+.diag-line { color: var(--fg-mute); font-size: 12.5px; min-width: 0; overflow-wrap: anywhere; }
+.diag-sec[data-sev="warn"] > .diag-sec-sum .diag-title { color: var(--warn-text); }
+.diag-sec[data-sev="err"] > .diag-sec-sum .diag-title { color: var(--err); }
+.diag-actions { display: flex; gap: 6px; }
+.diag-chev { width: 7px; height: 7px; border-right: 1.5px solid var(--fg-faint); border-bottom: 1.5px solid var(--fg-faint);
+  transform: rotate(-45deg); transition: transform .15s; margin-right: 4px; }
+.diag-sec[open] > .diag-sec-sum > .diag-chev, .diag-sub[open] > .diag-sec-sum > .diag-chev { transform: rotate(45deg); }
+.diag-body { padding: 12px 16px 14px; min-width: 0; }
+.diag-note { font-size: 11px; color: var(--fg-mute); margin: 0 0 8px; }
+.diag-note:empty { display: none; }
+.diag-client-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
+
+/* Database sub-sections: flat rows inside the Database body, the same grammar one level down */
+.diag-sub { border: 0; border-top: 1px solid var(--line-subtle); border-radius: 0; margin: 0; scroll-margin-top: 12px; }
+.diag-sub:first-child { border-top: 0; }
+.diag-sub > .diag-sec-sum { grid-template-columns: auto minmax(110px, 170px) 1fr auto; padding: 9px 0; min-height: 38px; }
+.diag-sub > .diag-sec-sum:hover { background: transparent; }
+.diag-sub[open] > .diag-sec-sum { border-bottom: 0; }
+.diag-sub .diag-title { font-size: 12.5px; }
+.diag-sub[data-sev="warn"] > .diag-sec-sum .diag-title { color: var(--warn-text); }
+.diag-sub[data-sev="err"] > .diag-sec-sum .diag-title { color: var(--err); }
+.diag-sub > .diag-body { padding: 4px 0 12px 23px; }
+
+/* Deep-link target: outline + a one-shot wash, removed by script on animationend (or a 2.6 s timer). */
+.diag-sec.is-target { outline: 2px solid var(--accent); outline-offset: 0; animation: diag-flash 2.4s ease-out forwards; }
+.diag-sub.is-target { outline: 0; animation: none; }
+.diag-sub.is-target > .diag-sec-sum { background: var(--accent-wash); margin: 0 -16px; padding-left: 16px; padding-right: 16px; border-radius: 4px; animation: diag-fade 2.4s ease-out forwards; }
+@keyframes diag-flash { 0% { box-shadow: 0 0 0 6px var(--accent-wash); } 70% { box-shadow: 0 0 0 6px var(--accent-wash); outline-color: var(--accent); } 100% { box-shadow: none; outline-color: transparent; } }
+@keyframes diag-fade { 0%, 60% { background: var(--accent-wash); } 100% { background: transparent; } }
+@media (prefers-reduced-motion: reduce) {
+  .diag-sec.is-target { animation: none; }
+  .diag-sub.is-target > .diag-sec-sum { animation: none; }
+  .diag-chev { transition: none; }
+}
+
+/* Client key/value grid: two columns of pairs once there is room */
+@media (min-width: 860px) {
+  #admin-diagnostics-pane .admin-kv.diag-kv2 { grid-template-columns: max-content 1fr max-content 1fr; column-gap: 14px; }
+}
+
+@media (max-width: 1000px) {
+  .diag-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .diag-rail { position: static; max-height: none; display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; }
+  .diag-rail-link { display: inline-flex; gap: 7px; padding: 5px 9px; }
+  .diag-rail-short, .diag-rail-cap { display: none; }
+}
+@media (max-width: 760px) {
+  .diag-sec-sum { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 4px; }
+  .diag-sec-sum .diag-line { grid-column: 2 / -1; }
+  .diag-sec-sum .diag-actions { grid-column: 2; justify-self: start; }
+  .diag-sec-sum .diag-chev { grid-column: 3; grid-row: 1; }
+  .diag-sub > .diag-sec-sum { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .diag-sub > .diag-body { padding-left: 0; }
+}
 
 /* Health-state badge dots on the top-level Admin tab button (set by AdminCockpit). */
 .tab-btn.badge-warn::after,
@@ -5958,43 +6043,7 @@ body.dark .flatpickr-next-month:hover svg { fill: var(--accent); }
 /* ── DB Deep Dive panel ── */
 .admin-db-deep { padding: 8px 0; }
 .admin-db-loading { padding: 14px 16px; color: var(--fg-mute); font-style: italic; font-size: 12px; }
-.admin-db-fetched { padding: 4px 16px 8px; font-size: 11px; color: var(--fg-faint); }
 .admin-db-error   { padding: 14px 16px; color: var(--err); font-size: 12px; }
-
-.admin-db-section {
-  border-top: 1px solid var(--line);
-}
-.admin-db-section:first-of-type { border-top: none; }
-
-.admin-db-section > summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 16px;
-  cursor: pointer;
-  user-select: none;
-  list-style: none;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--fg);
-  transition: background 0.15s;
-}
-.admin-db-section > summary::-webkit-details-marker { display: none; }
-.admin-db-section > summary::before {
-  content: '▶';
-  font-size: 9px;
-  color: var(--fg-faint);
-  transition: transform 0.15s;
-  flex-shrink: 0;
-}
-.admin-db-section[open] > summary::before { transform: rotate(90deg); }
-.admin-db-section > summary:hover { background: var(--accent-wash); }
-
-.admin-db-section-title { flex: 1; }
-
-.admin-db-section-body {
-  padding: 6px 16px 14px 16px;
-}
 
 .admin-db-banner {
   margin-bottom: 8px;
@@ -6041,37 +6090,6 @@ body.dark .flatpickr-next-month:hover svg { fill: var(--accent); }
 /* ═══════════════════════════════════════════════════════════════
    DB Deep Dive — visual components
    ═══════════════════════════════════════════════════════════════ */
-
-/* Summary stat tiles ─────────────────────────────────────────── */
-.admin-db-summary {
-  display: flex;
-  gap: 10px;
-  padding: 14px 16px 12px;
-  overflow-x: auto;
-  flex-wrap: nowrap;
-  border-bottom: 1px solid var(--line);
-}
-.admin-db-stat-tile {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 120px;
-  max-width: 180px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg-elev);
-  gap: 5px;
-  cursor: default;
-  flex-shrink: 0;
-}
-.admin-db-stat-tile.ok   { border-color: rgba(39,174,96,0.35); }
-.admin-db-stat-tile.warn { border-color: rgba(243,156,18,0.45); background: rgba(243,156,18,0.03); }
-.admin-db-stat-tile.err  { border-color: rgba(192,57,43,0.45);  background: rgba(192,57,43,0.03);  }
-.admin-db-stat-tile-top  { display: flex; align-items: center; gap: 6px; }
-.admin-db-stat-tile-lbl  { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-mute); }
-.admin-db-stat-tile-num  { font-size: 24px; font-weight: 700; color: var(--fg); line-height: 1.1; }
-.admin-db-stat-tile-sub  { font-size: 11px; color: var(--fg-mute); }
 
 /* Fill bars (pool gauge, sequences) ──────────────────────────── */
 .admin-db-fillbar { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
