@@ -250,3 +250,96 @@ test('data_load never depends on the deep diagnostics read', () => {
   const c = sig(buildSignals(base({ dbDeep: null, dbDeepErr: 'boom' })), 'data_load');
   for (const s of [b, c]) { assert.equal(s.severity, a.severity); assert.equal(s.reasonKey, a.reasonKey); }
 });
+
+// ---- W3: deep-link anchors (spec 6.6 Anchor map): every nav.* fix and every detail link carries its target ----
+const navFix = (s) => s.fixes.find((f) => f.id.startsWith('nav.'));
+const withHealth = (h = {}, pool = {}) => { const b = base(); return { health: { ...b.health, ...h, pool: { ...b.health.pool, ...pool } } }; };
+const withDeep = (d) => ({ dbDeep: { ...base().dbDeep, ...d } });
+const withJobs = (sum, extra = {}) => { const b = base().jobs; return { jobs: { ...b, ...extra, summary: { ...b.summary, ...sum } } }; };
+const withClient = (c) => ({ client: { ...base().client, ...c } });
+
+test('anchors: Database and Connections emitters', () => {
+  const at = (o, id) => sig(buildSignals(base(o)), id);
+  assert.equal(navFix(at(withHealth({ db: { connected: false, ping_ms: 0 } }), 'database')).args.anchor, 'diag-db');
+  assert.equal(navFix(at(withHealth({ db: { connected: true, ping_ms: 600 } }), 'database')).args.anchor, 'diag-db-server');
+  const vac = at(withDeep({ tables: [table({ needs_vacuum: true, dead_pct: 40 })] }), 'database');
+  assert.equal(vac.detail.linkAnchor, 'diag-db-tables');
+  assert.equal(at({}, 'database').detail.linkAnchor, 'diag-db-tables');
+  assert.equal(navFix(at(withDeep({ locks: [{ blocked_pid: 1 }] }), 'connections')).args.anchor, 'diag-db-locks');
+  assert.equal(navFix(at(withHealth({}, { pool_size: 10, pool_available: 0 }), 'connections')).args.anchor, 'diag-db-pool');
+  assert.equal(navFix(at(withHealth({}, { requests_waiting: 2 }), 'connections')).args.anchor, 'diag-db-pool');
+  assert.equal(navFix(at(withDeep({ connections: { total: 3, long_running: [{ duration_s: 99 }] } }), 'connections')).args.anchor, 'diag-db-conn');
+  assert.equal(navFix(at(withDeep({ slow_queries: { available: true, queries: [{ mean_ms: 600 }] } }), 'connections')).args.anchor, 'diag-db-slow');
+  assert.equal(at({}, 'connections').detail.linkAnchor, 'diag-db-conn');
+  assert.equal(at({}, 'browser').detail.linkAnchor, 'diag-client');
+});
+
+test('anchors: Data load carries a secondary nav.diagnostics fix to diag-pipe, plus a detail link', () => {
+  const at = (o) => sig(buildSignals(base(o)), 'data_load');
+  const cases = [
+    withClient({ stats: { source: 'backend', raw_received: 100, rendered: 90 } }),
+    withClient({ tasks: 0 }),
+    withHealth({ color_wheel: { misses: 2 } }),
+    withClient({ stats: { source: 'cache', raw_received: 100, rendered: 100 } }),
+  ];
+  for (const c of cases) {
+    const s = at(c);
+    const nav = navFix(s);
+    assert.ok(nav, s.reasonKey);
+    assert.equal(nav.labelKey, 'btn.open_diagnostics');
+    assert.equal(nav.args.anchor, 'diag-pipe');
+    assert.notEqual(s.fixes[0].id, 'nav.diagnostics', 'the primary fix stays first');
+  }
+  assert.equal(at({}).detail.linkAnchor, 'diag-pipe');
+});
+
+test('anchors: SAP, Distribution and Jobs emitters', () => {
+  const at = (o, id) => sig(buildSignals(base(o)), id);
+  const sap = base().sap;
+  assert.equal(navFix(at({ sap: { ...sap, status: { ...sap.status, error: 2 } } }, 'sap')).args.anchor, 'sap:staging');
+  assert.equal(navFix(at({ sap: { ...sap, batches: [{ status: 'ready' }] } }, 'sap')).args.anchor, 'sap:staging');
+  assert.equal(at({}, 'sap').detail.linkAnchor, 'sap:staging');
+  const runs = [{ missed24h: 1 }, { warning24h: 1 }, { longerThanUsual: [{}] }, { failed24h: 1 }];
+  for (const r of runs) assert.equal(navFix(at(withJobs(r), 'jobs')).args.anchor, 'jobs:runs', JSON.stringify(r));
+  assert.equal(navFix(at(withJobs({ scheduler: { ok: false } }), 'jobs')).args.anchor, 'jobs:jobs');
+  assert.equal(navFix(at(withJobs({ maintenance: { enabled: true } }), 'jobs')).args.anchor, 'jobs:jobs');
+  assert.equal(at({}, 'jobs').detail.linkAnchor, 'jobs:runs');
+});
+
+test('anchors: attention items', () => {
+  const att = (o) => { const i = base(o); return buildAttention(buildSignals(i), i); };
+  const one = (list, id) => list.find((x) => x.id === id);
+  assert.equal(one(att(withDeep({ locks: [{ blocked_pid: 1 }] })), 'locks').fix.args.anchor, 'diag-db-locks');
+  const sap = base().sap;
+  const a = att({ sap: { ...sap, status: { ...sap.status, error: 1 }, batches: [{ status: 'held' }] } });
+  assert.equal(one(a, 'sap_errors').fix.args.anchor, 'sap:staging');
+  assert.equal(one(a, 'sap_held').fix.args.anchor, 'sap:staging');
+  assert.equal(one(att({ uploadWarnings: { distribution: 2, batchId: 'b1' } }), 'distribution').fix.args.anchor, 'admin-audit');
+  assert.equal(one(att(withJobs({ failed24h: 1 })), 'job_failed').fix.args.anchor, 'jobs:runs');
+  assert.equal(one(att(withJobs({ scheduler: { ok: false } })), 'scheduler_stale').fix.args.anchor, 'jobs:jobs');
+  // a failed run with a known id keeps jobs.open_run (no anchor needed)
+  const lf = { id: 9, job_name: 'J', plant: '1008', status: 'failed', started_at: '2026-10-30T10:00:00Z', scheduled_for: null, duration_ms: 1, error: 'x' };
+  assert.equal(one(att(withJobs({ failed24h: 1 }, { lastFailed: [lf] })), 'job_failed').fix.id, 'jobs.open_run');
+});
+
+test('anchors: every nav.* fix and every linkSub in a worst-case input carries an anchor; logs.open carries level and source', () => {
+  const sap = base().sap;
+  const i = base({
+    ...withHealth({ db: { connected: true, ping_ms: 3000 }, color_wheel: { misses: 3 } }, { pool_size: 10, pool_available: 0, requests_waiting: 4 }),
+    ...withDeep({ locks: [{ blocked_pid: 1 }], tables: [table({ needs_vacuum: true })], connections: { total: 9, long_running: [{ duration_s: 99 }] }, slow_queries: { available: true, queries: [{ mean_ms: 900 }] } }),
+    ...withJobs({ failed24h: 2, missed24h: 1, warning24h: 1, longerThanUsual: [{}], scheduler: { ok: false }, maintenance: { enabled: true } }),
+    ...withClient({ tasks: 0, stats: { source: 'cache', raw_received: 100, rendered: 80 } }),
+    sap: { ...sap, status: { ...sap.status, error: 3 }, batches: [{ status: 'held' }] },
+    backendErrors: { total: 12, entries: [] }, backendWarns: { total: 40, entries: [] },
+    uploadWarnings: { distribution: 1, batchId: 'b' },
+  });
+  const sigs = buildSignals(i);
+  const fixes = [...sigs.flatMap((s) => s.fixes), ...buildAttention(sigs, i).map((a) => a.fix)];
+  const navs = fixes.filter((f) => f.id.startsWith('nav.'));
+  assert.ok(navs.length >= 8);
+  for (const f of navs) assert.equal(typeof f.args?.anchor, 'string', f.id);
+  for (const s of sigs) if (s.detail?.linkSub && s.id !== 'backend') assert.equal(typeof s.detail.linkAnchor, 'string', s.id);
+  const logs = fixes.filter((f) => f.id === 'logs.open');
+  assert.ok(logs.length >= 2);
+  for (const f of logs) { assert.ok(['error', 'warn'].includes(f.args.level)); assert.equal(f.args.source, 'backend'); }
+});

@@ -127,3 +127,21 @@ test('batch rows offer Cancel while running and Restart failed plants once finis
   assert.doesNotMatch(list(), /data-jobs-batch-restart|data-jobs-batch-cancel/, 'read-only users get no batch actions');
   Session.isAdmin = () => true;
 });
+
+test('JobsAdmin.showTab switches the inner view like a tab click (deep link target for jobs:<tab> anchors)', async () => {
+  JobsClient.types = async () => TYPES;
+  JobsClient.list = async () => ({ items: [], nextBeforeId: null });
+  JobsClient.runs = async () => ({ items: [], nextBeforeId: null });
+  JobsClient.upcomingAll = async () => [];
+  const runsView = dom.doc.getElementById('jobs-view-runs');
+  await JobsAdmin.render();
+  assert.equal(typeof JobsAdmin.showTab, 'function');
+  JobsAdmin.showTab('runs');
+  assert.equal(runsView.hidden, false, 'showTab("runs") shows the Runs view as a tab click does');
+  JobsAdmin.showTab('jobs');
+  assert.equal(runsView.hidden, true);
+});
+
+test('JobsAdmin.showTab ignores an unknown tab without throwing', () => {
+  assert.doesNotThrow(() => JobsAdmin.showTab('nope'));
+});

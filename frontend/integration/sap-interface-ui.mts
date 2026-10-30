@@ -1758,6 +1758,14 @@ export const Interface = (() => {
 
   return {
     render,
+    /** Deep link from the Admin Overview ('sap:<tab>' anchors): select an object and a tab, then repaint the detail.
+     *  The default object is the planned-orders staging object (the only staging object today). If the console
+     *  has not loaded yet the choice is kept and _reload honours it. Repaints only when the console is on screen. */
+    showTab(tab: SapTab, objectKey = 'stage_planned_orders'): void {
+      _selected = objectKey; _tab = tab;
+      if (!document.getElementById('sap-detail')) return;
+      _renderRail(); _renderDetail();
+    },
     // Test-only hook (ForTest precedent: setup-scheduler.mts's
     // fragmentObjectiveFactsForTest/checkDistributionSeparationForTest) —
     // _renderSapDistributionWarning itself stays closure-private; this just

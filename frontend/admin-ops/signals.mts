@@ -35,6 +35,8 @@ export interface DetailTable {
   rowFixes?: Array<Fix | null>;
   linkKey?: string;
   linkSub?: AdminSub;
+  /** Deep-link target inside linkSub (DOM id, or `jobs:<tab>` / `sap:<tab>`); see the Anchor grammar in the diagnostics design spec. */
+  linkAnchor?: string;
 }
 
 export interface Signal {
@@ -162,7 +164,7 @@ const _fix = (id: string, labelKey: string, args?: Record<string, unknown>, admi
   if (adminOnly) f.adminOnly = true;
   return f;
 };
-const _nav = (id: string, labelKey: string): Fix => _fix(id, labelKey);
+const _nav = (id: string, labelKey: string, anchor: string): Fix => _fix(id, labelKey, { anchor });
 
 function _unavailable(id: SignalId, msg: string): Signal {
   return { id, severity: 'err', reasonKey: 'sig.unavailable', reasonArgs: { msg }, fixes: [], detail: null };
@@ -200,14 +202,14 @@ function _jobs(i: SignalInputs): Signal {
     conds.push({
       sev: 'err', key: 'sig.jobs_failed',
       args: { n: s.failed24h, job: lf?.job_name ?? '', plant: lf?.plant ?? '', ago: _ms(lf?.started_at ?? lf?.scheduled_for ?? lf?.ended_at) || i.now, reason: lf?.error ?? '' },
-      fixes: lf ? [_fix('jobs.rerun', 'btn.rerun_now', { runId: lf.id }, true), _fix('jobs.open_run', 'btn.open_run', { runId: lf.id })] : [_nav('nav.jobs', 'ov.details')],
+      fixes: lf ? [_fix('jobs.rerun', 'btn.rerun_now', { runId: lf.id }, true), _fix('jobs.open_run', 'btn.open_run', { runId: lf.id })] : [_nav('nav.jobs', 'ov.details', 'jobs:runs')],
     });
   }
-  if (!s.scheduler.ok) conds.push({ sev: 'err', key: 'sig.jobs_scheduler_stale', args: {}, fixes: [_nav('nav.jobs', 'ov.details')] });
-  if (s.missed24h > 0) conds.push({ sev: 'warn', key: 'sig.jobs_missed', args: { n: s.missed24h }, fixes: [_nav('nav.jobs', 'ov.details')] });
-  if (s.warning24h > 0) conds.push({ sev: 'warn', key: 'sig.jobs_warning', args: { n: s.warning24h }, fixes: [_nav('nav.jobs', 'ov.details')] });
-  if (s.maintenance?.enabled) conds.push({ sev: 'warn', key: 'sig.jobs_maint', args: {}, fixes: [_nav('nav.jobs', 'ov.details')] });
-  if (s.longerThanUsual.length > 0) conds.push({ sev: 'warn', key: 'sig.jobs_slow', args: { n: s.longerThanUsual.length }, fixes: [_nav('nav.jobs', 'ov.details')] });
+  if (!s.scheduler.ok) conds.push({ sev: 'err', key: 'sig.jobs_scheduler_stale', args: {}, fixes: [_nav('nav.jobs', 'ov.details', 'jobs:jobs')] });
+  if (s.missed24h > 0) conds.push({ sev: 'warn', key: 'sig.jobs_missed', args: { n: s.missed24h }, fixes: [_nav('nav.jobs', 'ov.details', 'jobs:runs')] });
+  if (s.warning24h > 0) conds.push({ sev: 'warn', key: 'sig.jobs_warning', args: { n: s.warning24h }, fixes: [_nav('nav.jobs', 'ov.details', 'jobs:runs')] });
+  if (s.maintenance?.enabled) conds.push({ sev: 'warn', key: 'sig.jobs_maint', args: {}, fixes: [_nav('nav.jobs', 'ov.details', 'jobs:jobs')] });
+  if (s.longerThanUsual.length > 0) conds.push({ sev: 'warn', key: 'sig.jobs_slow', args: { n: s.longerThanUsual.length }, fixes: [_nav('nav.jobs', 'ov.details', 'jobs:runs')] });
   const nextMs = s.nextFire ? _ms(s.nextFire.atUtc) : 0;
   const okCond: Cond = recent.length === 0 && !s.nextFire
     ? { sev: 'info', key: 'sig.jobs_none', args: {} }
@@ -216,7 +218,7 @@ function _jobs(i: SignalInputs): Signal {
     headKeys: ['sig.d_job', 'sig.d_plant', 'sig.d_status', 'sig.d_started', 'sig.d_duration', 'sig.d_error'],
     rows: recent.slice(0, 3).map(r => [r.job_name, r.plant, r.status, r.started_at ?? r.scheduled_for, r.duration_ms, r.error]),
     rowFixes: recent.slice(0, 3).map(r => (r.status === 'failed' ? _fix('jobs.open_run', 'btn.open_run', { runId: r.id }) : null)),
-    linkKey: 'ov.details', linkSub: 'jobs',
+    linkKey: 'ov.details', linkSub: 'jobs', linkAnchor: 'jobs:runs',
   };
   return _pick('jobs', conds, okCond, detail);
 }
@@ -225,7 +227,7 @@ function _database(i: SignalInputs, t: Thresholds): Signal {
   if (i.healthErr || !i.health) return _failedRead('database', i.healthErr, i.isAdmin, false) ?? _unavailable('database', 'no data');
   const h = i.health;
   if (!h.db.connected) {
-    return { id: 'database', severity: 'err', reasonKey: 'sig.db_offline', reasonArgs: {}, fixes: [_nav('nav.diagnostics', 'btn.open_diagnostics')], detail: null };
+    return { id: 'database', severity: 'err', reasonKey: 'sig.db_offline', reasonArgs: {}, fixes: [_nav('nav.diagnostics', 'btn.open_diagnostics', 'diag-db')], detail: null };
   }
   if (!i.dbDeep) {
     // The slow tier is admin-only. Not an admin (or 403): ping is all we may show.
@@ -238,8 +240,8 @@ function _database(i: SignalInputs, t: Thresholds): Signal {
   }
   const conds: Cond[] = [];
   const ping = Math.round(h.db.ping_ms);
-  if (h.db.ping_ms > t.dbPingErrMs) conds.push({ sev: 'err', key: 'sig.db_slow', args: { ms: ping }, fixes: [_nav('nav.diagnostics', 'btn.open_diagnostics')] });
-  else if (h.db.ping_ms > t.dbPingWarnMs) conds.push({ sev: 'warn', key: 'sig.db_slow', args: { ms: ping }, fixes: [_nav('nav.diagnostics', 'btn.open_diagnostics')] });
+  if (h.db.ping_ms > t.dbPingErrMs) conds.push({ sev: 'err', key: 'sig.db_slow', args: { ms: ping }, fixes: [_nav('nav.diagnostics', 'btn.open_diagnostics', 'diag-db-server')] });
+  else if (h.db.ping_ms > t.dbPingWarnMs) conds.push({ sev: 'warn', key: 'sig.db_slow', args: { ms: ping }, fixes: [_nav('nav.diagnostics', 'btn.open_diagnostics', 'diag-db-server')] });
   const tables = i.dbDeep ? _rows<TableStatLike>(i.dbDeep.tables) : [];
   const sorted = [...tables].sort((a, b) => b.dead_pct - a.dead_pct);
   const need = sorted.filter(x => x.needs_vacuum);
@@ -259,7 +261,7 @@ function _database(i: SignalInputs, t: Thresholds): Signal {
     headKeys: ['sig.d_table', 'sig.d_live', 'sig.d_dead_pct', 'sig.d_last_vacuum', 'sig.d_last_analyze'],
     rows: top.map(x => [x.table, x.live_rows, x.dead_pct, x.last_vacuum ?? x.last_autovacuum, x.last_analyze ?? x.last_autoanalyze]),
     rowFixes: top.map(x => (x.needs_vacuum ? _fix('db.vacuum_table', 'btn.vacuum', { table: x.table }, true) : null)),
-    linkKey: 'btn.open_diagnostics', linkSub: 'diagnostics',
+    linkKey: 'btn.open_diagnostics', linkSub: 'diagnostics', linkAnchor: 'diag-db-tables',
   } : null;
   const sig = _pick('database', conds, okCond, detail);
   if (i.dbDeepAt !== undefined) sig.measuredAt = i.dbDeepAt;
@@ -289,10 +291,11 @@ function _dataLoad(i: SignalInputs): Signal {
   const st = i.client.stats;
   const conds: Cond[] = [];
   const reload = _fix('data.reload', 'btn.reload_data');
-  if (st && st.rendered < st.raw_received) conds.push({ sev: 'err', key: 'sig.data_gap', args: { n: st.raw_received - st.rendered }, fixes: [reload] });
-  if (h.db.connected && i.client.tasks === 0) conds.push({ sev: 'err', key: 'sig.data_none', args: {}, fixes: [reload] });
-  if (h.color_wheel.misses > 0) conds.push({ sev: 'warn', key: 'sig.data_misses', args: { n: h.color_wheel.misses }, fixes: [_fix('data.color_wheel', 'btn.open_color_wheel')] });
-  if (st && (st.source === 'cache' || st.source === 'demo')) conds.push({ sev: 'warn', key: 'sig.data_cached', args: {}, fixes: [reload] });
+  const pipe = _nav('nav.diagnostics', 'btn.open_diagnostics', 'diag-pipe');
+  if (st && st.rendered < st.raw_received) conds.push({ sev: 'err', key: 'sig.data_gap', args: { n: st.raw_received - st.rendered }, fixes: [reload, pipe] });
+  if (h.db.connected && i.client.tasks === 0) conds.push({ sev: 'err', key: 'sig.data_none', args: {}, fixes: [reload, pipe] });
+  if (h.color_wheel.misses > 0) conds.push({ sev: 'warn', key: 'sig.data_misses', args: { n: h.color_wheel.misses }, fixes: [_fix('data.color_wheel', 'btn.open_color_wheel'), pipe] });
+  if (st && (st.source === 'cache' || st.source === 'demo')) conds.push({ sev: 'warn', key: 'sig.data_cached', args: {}, fixes: [reload, pipe] });
   const ago = _ms(h.memory?.loaded_at) || i.now;
   return _pick('data_load', conds, { sev: 'ok', key: 'sig.data_ok', args: { orders: i.client.tasks, ago } }, {
     headKeys: ['sig.d_step', 'sig.d_count'],
@@ -302,29 +305,30 @@ function _dataLoad(i: SignalInputs): Signal {
       ['pipe.emitted', st ? st.raw_received : null],
       ['pipe.rendered', st ? st.rendered : null],
     ],
+    linkKey: 'btn.open_diagnostics', linkSub: 'diagnostics', linkAnchor: 'diag-pipe',
   });
 }
 
 function _connections(i: SignalInputs, t: Thresholds): Signal {
   if (i.healthErr || !i.health) return _failedRead('connections', i.healthErr, i.isAdmin, false) ?? _unavailable('connections', 'no data');
   const p = _poolUsed(i.health.pool);
-  const diag = _nav('nav.diagnostics', 'btn.open_diagnostics');
+  const diagAt = (anchor: string): Fix => _nav('nav.diagnostics', 'btn.open_diagnostics', anchor);
   const conds: Cond[] = [];
   const locks = _rows<{ blocked_pid: number }>(i.dbDeep?.locks).length;
-  if (locks > 0) conds.push({ sev: 'err', key: 'sig.conn_locks', args: { n: locks }, fixes: [diag] });
+  if (locks > 0) conds.push({ sev: 'err', key: 'sig.conn_locks', args: { n: locks }, fixes: [diagAt('diag-db-locks')] });
   const poolArgs = { used: p.used, max: p.max, pct: p.pct };
-  if (p.pct >= t.poolErrPct) conds.push({ sev: 'err', key: 'sig.conn_pool', args: poolArgs, fixes: [diag] });
+  if (p.pct >= t.poolErrPct) conds.push({ sev: 'err', key: 'sig.conn_pool', args: poolArgs, fixes: [diagAt('diag-db-pool')] });
   const slowest = Math.max(0, ...(i.dbDeep?.slow_queries.available ? i.dbDeep.slow_queries.queries.map(q => q.mean_ms) : [0]));
-  if (slowest > t.slowQueryErrMs) conds.push({ sev: 'err', key: 'sig.conn_slow', args: { ms: Math.round(slowest) }, fixes: [diag] });
-  if (p.pct >= t.poolWarnPct) conds.push({ sev: 'warn', key: 'sig.conn_pool', args: poolArgs, fixes: [diag] });
+  if (slowest > t.slowQueryErrMs) conds.push({ sev: 'err', key: 'sig.conn_slow', args: { ms: Math.round(slowest) }, fixes: [diagAt('diag-db-slow')] });
+  if (p.pct >= t.poolWarnPct) conds.push({ sev: 'warn', key: 'sig.conn_pool', args: poolArgs, fixes: [diagAt('diag-db-pool')] });
   const waiting = i.health.pool.requests_waiting ?? 0;
-  if (waiting > 0) conds.push({ sev: 'warn', key: 'sig.conn_waiting', args: { n: waiting }, fixes: [diag] });
+  if (waiting > 0) conds.push({ sev: 'warn', key: 'sig.conn_waiting', args: { n: waiting }, fixes: [diagAt('diag-db-pool')] });
   const long = (i.dbDeep?.connections.long_running ?? []).filter(q => (q.duration_s ?? 0) > t.longQueryWarnS).length;
-  if (long > 0) conds.push({ sev: 'warn', key: 'sig.conn_long', args: { n: long, s: t.longQueryWarnS }, fixes: [diag] });
-  if (slowest > t.slowQueryWarnMs) conds.push({ sev: 'warn', key: 'sig.conn_slow', args: { ms: Math.round(slowest) }, fixes: [diag] });
+  if (long > 0) conds.push({ sev: 'warn', key: 'sig.conn_long', args: { n: long, s: t.longQueryWarnS }, fixes: [diagAt('diag-db-conn')] });
+  if (slowest > t.slowQueryWarnMs) conds.push({ sev: 'warn', key: 'sig.conn_slow', args: { ms: Math.round(slowest) }, fixes: [diagAt('diag-db-slow')] });
   return _pick('connections', conds,
     { sev: 'ok', key: 'sig.conn_ok', args: { used: p.used, max: p.max, sessions: i.dbDeep?.connections.total ?? '–' } },
-    { headKeys: [], rows: [], linkKey: 'btn.open_diagnostics', linkSub: 'diagnostics' });
+    { headKeys: [], rows: [], linkKey: 'btn.open_diagnostics', linkSub: 'diagnostics', linkAnchor: 'diag-db-conn' });
 }
 
 function _sap(i: SignalInputs): Signal {
@@ -333,7 +337,7 @@ function _sap(i: SignalInputs): Signal {
   if (i.sapErr) return _unavailable('sap', i.sapErr);
   if (!i.sap) return { id: 'sap', severity: 'info', reasonKey: 'sig.sap_no_plant', reasonArgs: {}, fixes: [], detail: null };
   const { status, batches, lastRun } = i.sap;
-  const nav = _nav('nav.interface', 'btn.open_interface');
+  const nav = _nav('nav.interface', 'btn.open_interface', 'sap:staging');
   const conds: Cond[] = [];
   if (status.error > 0) conds.push({ sev: 'err', key: 'sig.sap_errors', args: { n: status.error }, fixes: [nav] });
   const pending = batches.filter(b => b.status === 'ready' || b.status === 'validated' || b.status === 'held').length;
@@ -344,7 +348,7 @@ function _sap(i: SignalInputs): Signal {
     : lastRun?.started_at
       ? { sev: 'ok', key: 'sig.sap_last_pull', args: { ago: _ms(lastRun.started_at) } }
       : { sev: 'ok', key: 'sig.sap_never', args: {} };
-  return _pick('sap', conds, okCond, { headKeys: [], rows: [], linkKey: 'btn.open_interface', linkSub: 'interface' });
+  return _pick('sap', conds, okCond, { headKeys: [], rows: [], linkKey: 'btn.open_interface', linkSub: 'interface', linkAnchor: 'sap:staging' });
 }
 
 function _browser(i: SignalInputs, t: Thresholds): Signal {
@@ -359,7 +363,7 @@ function _browser(i: SignalInputs, t: Thresholds): Signal {
   if (c.errors > 0) conds.push({ sev: 'warn', key: 'sig.browser_errors', args: { n: c.errors }, fixes: [reset] });
   const heap = c.heapUsed !== undefined ? `${Math.round(c.heapUsed / 1048576)} MB` : '–';
   return _pick('browser', conds, { sev: 'ok', key: 'sig.browser_ok', args: { build: c.build, schema: c.schema, heap } },
-    { headKeys: [], rows: [], linkKey: 'btn.open_diagnostics', linkSub: 'diagnostics' });
+    { headKeys: [], rows: [], linkKey: 'btn.open_diagnostics', linkSub: 'diagnostics', linkAnchor: 'diag-client' });
 }
 
 /** Seven signals, worst first; ties keep the fixed id order. */
@@ -385,10 +389,10 @@ export function buildAttention(signals: Signal[], i: SignalInputs): AttentionIte
     add({
       id: 'job_failed', severity: 'err', textKey: 'attn.job_failed',
       args: { job: lf?.job_name ?? '', plant: lf?.plant ?? '', ago: _ms(lf?.started_at ?? lf?.scheduled_for ?? lf?.ended_at) || i.now },
-      fix: lf ? _fix('jobs.open_run', 'btn.open_run', { runId: lf.id }) : _nav('nav.jobs', 'ov.details'),
+      fix: lf ? _fix('jobs.open_run', 'btn.open_run', { runId: lf.id }) : _nav('nav.jobs', 'ov.details', 'jobs:runs'),
     });
   }
-  if (i.jobs && !i.jobs.summary.scheduler.ok) add({ id: 'scheduler_stale', severity: 'err', textKey: 'attn.scheduler_stale', args: {}, fix: _nav('nav.jobs', 'ov.details') });
+  if (i.jobs && !i.jobs.summary.scheduler.ok) add({ id: 'scheduler_stale', severity: 'err', textKey: 'attn.scheduler_stale', args: {}, fix: _nav('nav.jobs', 'ov.details', 'jobs:jobs') });
 
   const be = i.backendErrors?.total ?? 0;
   const beSig = byId.get('backend');
@@ -398,7 +402,7 @@ export function buildAttention(signals: Signal[], i: SignalInputs): AttentionIte
   const vac = tables.filter(x => x.needs_vacuum).length;
   if (vac > 0) add({ id: 'vacuum', severity: 'warn', textKey: 'attn.vacuum', args: { n: vac }, fix: _fix('db.vacuum_all', 'btn.vacuum_analyze', undefined, true) });
   const locks = _rows<{ blocked_pid: number }>(i.dbDeep?.locks).length;
-  if (locks > 0) add({ id: 'locks', severity: 'err', textKey: 'attn.locks', args: { n: locks }, fix: _nav('nav.diagnostics', 'btn.open_diagnostics') });
+  if (locks > 0) add({ id: 'locks', severity: 'err', textKey: 'attn.locks', args: { n: locks }, fix: _nav('nav.diagnostics', 'btn.open_diagnostics', 'diag-db-locks') });
 
   const misses = i.health?.color_wheel.misses ?? 0;
   if (misses > 0) add({ id: 'color_misses', severity: 'warn', textKey: 'attn.color_misses', args: { n: misses }, fix: _fix('data.color_wheel', 'btn.open_color_wheel') });
@@ -406,13 +410,13 @@ export function buildAttention(signals: Signal[], i: SignalInputs): AttentionIte
   if (st && st.rendered < st.raw_received) add({ id: 'gap', severity: 'err', textKey: 'attn.gap', args: { n: st.raw_received - st.rendered }, fix: _fix('data.reload', 'btn.reload_data') });
 
   if (i.sap) {
-    if (i.sap.status.error > 0) add({ id: 'sap_errors', severity: 'err', textKey: 'attn.sap_errors', args: { n: i.sap.status.error }, fix: _nav('nav.interface', 'btn.open_interface') });
+    if (i.sap.status.error > 0) add({ id: 'sap_errors', severity: 'err', textKey: 'attn.sap_errors', args: { n: i.sap.status.error }, fix: _nav('nav.interface', 'btn.open_interface', 'sap:staging') });
     const held = i.sap.batches.filter(b => b.status === 'held').length;
-    if (held > 0) add({ id: 'sap_held', severity: 'warn', textKey: 'attn.sap_held', args: { n: held }, fix: _nav('nav.interface', 'btn.open_interface') });
+    if (held > 0) add({ id: 'sap_held', severity: 'warn', textKey: 'attn.sap_held', args: { n: held }, fix: _nav('nav.interface', 'btn.open_interface', 'sap:staging') });
   }
   if (i.client.inv.autosaveDisabled) add({ id: 'autosave', severity: 'err', textKey: 'attn.autosave', args: {}, fix: _fix('client.reset', 'btn.reset_client') });
   if (i.uploadWarnings && i.uploadWarnings.distribution > 0) {
-    add({ id: 'distribution', severity: 'warn', textKey: i.uploadWarnings.distribution === 1 ? 'attn.distribution_one' : 'attn.distribution', args: { n: i.uploadWarnings.distribution, batchId: i.uploadWarnings.batchId }, fix: _nav('nav.order_maintenance', 'btn.open_history') });
+    add({ id: 'distribution', severity: 'warn', textKey: i.uploadWarnings.distribution === 1 ? 'attn.distribution_one' : 'attn.distribution', args: { n: i.uploadWarnings.distribution, batchId: i.uploadWarnings.batchId }, fix: _nav('nav.order_maintenance', 'btn.open_history', 'admin-audit') });
   }
 
   return out

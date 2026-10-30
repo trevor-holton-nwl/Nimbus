@@ -1980,79 +1980,108 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             </div>
         </div><!-- /admin-logs-pane -->
 
-        <!-- DIAGNOSTICS PANE -->
+        <!-- DIAGNOSTICS PANE: page head + sticky jump rail + 13 collapsible sections (2026-10-30).
+             Section heads (dot, count, one-line state) are painted by the admin-ui module (paint-section-head) from
+             diag-sections.mts; the eight diag-db-* sub-sections are built by JS inside #admin-db-deep. -->
         <div id="admin-diag-pane" hidden>
-            <!-- CLIENT DIAGNOSTICS -->
-            <div id="admin-diagnostics-pane" class="admin-section"></div>
+            <div class="diag-head">
+              <h2 class="diag-h2" data-i18n="tab.diagnostics">Diagnostics</h2>
+              <span class="diag-ts" id="admin-diag-ts"></span>
+              <div class="spacer"></div>
+              <button class="btn btn-ghost sm" id="admin-diag-refresh" type="button" data-i18n="btn.refresh" data-i18n-title="tip.refresh" title="Refresh">&#8635; Refresh</button>
+              <button class="btn btn-ghost sm" id="admin-diag-export" type="button" data-i18n="btn.export_bundle" data-i18n-title="tip.diag_export_bundle" title="Download diagnostics bundle for support">&#11015; Export bundle</button>
+            </div>
+            <div class="diag-layout">
+              <nav class="diag-rail" id="diag-rail" data-i18n-aria-label="diag.rail_sections" aria-label="Sections"></nav>
+              <div class="diag-main">
 
-            <div class="admin-grid">
+                <!-- CLIENT -->
+                <details class="diag-sec" id="diag-client" data-sev="info">
+                  <summary class="diag-sec-sum">
+                    <span class="diag-dot" aria-hidden="true"></span>
+                    <span class="diag-title"><span class="diag-title-text" data-i18n="ui.diag_client_title">Client diagnostics</span><span class="diag-count"></span><span class="adm-help" tabindex="0" data-i18n-aria-label="aria.help" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="ui.diag_client_help">Client-side health snapshot.</span></span></span>
+                    <span class="diag-line"></span>
+                    <span class="diag-actions"></span>
+                    <span class="diag-chev" aria-hidden="true"></span>
+                  </summary>
+                  <div class="diag-body"><div id="admin-diagnostics-pane" class="admin-section"></div></div>
+                </details>
 
-              <!-- DATA PIPELINE -->
-              <div class="panel admin-card admin-card-wide" id="admin-pipeline-card">
-                <header class="panel-head">
-                  <h3><span data-i18n="ui.data_pipeline">Data pipeline</span><span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.pipeline_help">End-to-end path from database load to rendered Gantt tasks. Click any step to expand details. High drop counts between stages indicate data quality issues; color misses mean SKUs not mapped in the color wheel. If drops grow after a reload, investigate the source data.</span></span></h3>
-                  <span class="panel-hint" data-i18n="ui.pipeline_hint">Click any step for details</span>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-pipeline-refresh" data-i18n="btn.refresh">↻ Refresh</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div id="admin-pipeline" class="admin-pipeline"></div>
-                  <div id="admin-pipeline-detail" class="admin-pipeline-detail"></div>
-                </div>
-              </div>
+                <!-- DATA PIPELINE -->
+                <details class="diag-sec" id="diag-pipe" data-sev="info">
+                  <summary class="diag-sec-sum">
+                    <span class="diag-dot" aria-hidden="true"></span>
+                    <span class="diag-title"><span class="diag-title-text" data-i18n="ui.data_pipeline">Data pipeline</span><span class="diag-count"></span><span class="adm-help" tabindex="0" data-i18n-aria-label="aria.help" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.pipeline_help">End-to-end path from database load to rendered Gantt tasks. Click any step to expand details. High drop counts between stages indicate data quality issues; color misses mean SKUs not mapped in the color wheel. If drops grow after a reload, investigate the source data.</span></span></span>
+                    <span class="diag-line"></span>
+                    <span class="diag-actions"></span>
+                    <span class="diag-chev" aria-hidden="true"></span>
+                  </summary>
+                  <div class="diag-body">
+                    <div id="admin-pipeline" class="admin-pipeline"></div>
+                    <div id="admin-pipeline-detail" class="admin-pipeline-detail"></div>
+                  </div>
+                </details>
 
-              <!-- BACKEND WARNINGS -->
-              <div class="panel admin-card admin-card-wide" id="admin-bwarn-card">
-                <header class="panel-head">
-                  <h3><span data-i18n="ui.backend_warnings">Backend warnings</span><span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.backend_warn_help">Non-fatal messages logged by the backend during the last data load — e.g. missing fields or unparseable dates. A growing list signals worsening upstream data quality. Forward recurring warnings to the data team, then use POST /reload after fixing the source file to clear them.</span></span></h3>
-                  <span class="panel-hint" id="admin-bwarn-count" data-i18n="ui.bwarn_hint">from last data load</span>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div id="admin-backend-warnings" class="admin-bwarn-list"></div>
-                </div>
-              </div>
+                <!-- BACKEND WARNINGS -->
+                <details class="diag-sec" id="diag-bwarn" data-sev="info">
+                  <summary class="diag-sec-sum">
+                    <span class="diag-dot" aria-hidden="true"></span>
+                    <span class="diag-title"><span class="diag-title-text" data-i18n="ui.backend_warnings">Backend warnings</span><span class="diag-count"></span><span class="adm-help" tabindex="0" data-i18n-aria-label="aria.help" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.backend_warn_help">Non-fatal messages logged by the backend during the last data load.</span></span></span>
+                    <span class="diag-line"></span>
+                    <span class="diag-actions"></span>
+                    <span class="diag-chev" aria-hidden="true"></span>
+                  </summary>
+                  <div class="diag-body">
+                    <div class="diag-note" id="admin-bwarn-count"></div>
+                    <div id="admin-backend-warnings" class="admin-bwarn-list"></div>
+                  </div>
+                </details>
 
-              <!-- DB DEEP DIVE -->
-              <div class="panel admin-card admin-card-wide" id="admin-db-deep-card">
-                <header class="panel-head">
-                  <h3><span data-i18n="ui.db_deep_dive">Database deep dive</span><span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.db_deep_help">Live introspection of the Postgres database. Requires a healthy DB connection. Expand any section to drill into pool health, query performance, lock contention, index efficiency, and sequence capacity.</span></span></h3>
-                  <span class="panel-hint" data-i18n="ui.db_deep_hint">Pool · Server · Table health · Connections · Lock waits · Indexes · Slow queries · Sequences</span>
-                  <div class="spacer"></div>
-                  <button class="btn btn-ghost sm" id="admin-db-deep-refresh" data-i18n="btn.refresh">↻ Refresh</button>
-                </header>
-                <div class="panel-body panel-body-flush">
-                  <div id="admin-db-deep" class="admin-db-deep"></div>
-                </div>
-              </div>
+                <!-- DATABASE: the eight diag-db-* sub-sections are created by the admin-ui module (ensure-db-subs) -->
+                <details class="diag-sec" id="diag-db" data-sev="info">
+                  <summary class="diag-sec-sum">
+                    <span class="diag-dot" aria-hidden="true"></span>
+                    <span class="diag-title"><span class="diag-title-text" data-i18n="ui.db_deep_dive">Database deep dive</span><span class="diag-count"></span><span class="adm-help" tabindex="0" data-i18n-aria-label="aria.help" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="adm.db_deep_help">Live introspection of the Postgres database.</span></span></span>
+                    <span class="diag-line"></span>
+                    <span class="diag-actions"></span>
+                    <span class="diag-chev" aria-hidden="true"></span>
+                  </summary>
+                  <div class="diag-body">
+                    <div id="admin-db-deep" class="admin-db-deep"></div>
+                  </div>
+                </details>
 
-            </div><!-- /admin-grid diagnostics -->
+                <!-- MAIN THREAD PROFILER (last) -->
+                <details class="diag-sec" id="diag-thread" data-sev="info">
+                  <summary class="diag-sec-sum">
+                    <span class="diag-dot" aria-hidden="true"></span>
+                    <span class="diag-title"><span class="diag-title-text" data-i18n="thread.title">Main Thread Profiler</span><span class="diag-count"></span><span class="adm-help" tabindex="0" data-i18n-aria-label="aria.help" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip" data-i18n="thread.hint">Per-operation timing: last/P50/P95/max over the last 100 samples. Red at 50 ms or more, yellow at 16 ms or more (one frame).</span></span></span>
+                    <span class="diag-line"></span>
+                    <span class="diag-actions"><button class="btn btn-ghost sm" id="admin-thread-clear" type="button" data-i18n="btn.clear">&#10005; Clear</button></span>
+                    <span class="diag-chev" aria-hidden="true"></span>
+                  </summary>
+                  <div class="diag-body">
+                    <table class="admin-perf-table">
+                      <thead>
+                        <tr>
+                          <th data-i18n="thread.col_op">Operation</th>
+                          <th data-i18n="thread.col_last">Last</th>
+                          <th data-i18n="thread.col_p50">P50</th>
+                          <th data-i18n="thread.col_p95">P95</th>
+                          <th data-i18n="thread.col_max">Max</th>
+                          <th data-i18n="thread.col_calls">Calls</th>
+                          <th data-i18n="thread.col_last_run">Last run</th>
+                        </tr>
+                      </thead>
+                      <tbody id="admin-perf-tbody">
+                        <tr><td colspan="7" class="admin-perf-empty" data-i18n="thread.empty">No data yet. Interact with the app to record operations.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
 
-            <!-- MAIN THREAD PROFILER (last, collapsed by default) -->
-            <details class="admin-db-section" id="admin-thread-card">
-              <summary>
-                <span class="admin-db-section-title" data-i18n="thread.title">Main Thread Profiler</span>
-                <span class="panel-hint" data-i18n="thread.hint">Per-operation timing: last/P50/P95/max over the last 100 samples. Red at 50 ms or more, yellow at 16 ms or more (one frame).</span>
-                <button class="btn btn-ghost sm" id="admin-thread-clear" type="button" data-i18n="btn.clear">✕ Clear</button>
-              </summary>
-              <div class="admin-db-section-body">
-                <table class="admin-perf-table">
-                  <thead>
-                    <tr>
-                      <th data-i18n="thread.col_op">Operation</th>
-                      <th data-i18n="thread.col_last">Last</th>
-                      <th>P50</th>
-                      <th>P95</th>
-                      <th data-i18n="thread.col_max">Max</th>
-                      <th data-i18n="thread.col_calls">Calls</th>
-                      <th data-i18n="thread.col_last_run">Last run</th>
-                    </tr>
-                  </thead>
-                  <tbody id="admin-perf-tbody">
-                    <tr><td colspan="7" class="admin-perf-empty" data-i18n="thread.empty">No data yet. Interact with the app to record operations.</td></tr>
-                  </tbody>
-                </table>
-              </div>
-            </details>
+              </div><!-- /diag-main -->
+            </div><!-- /diag-layout -->
         </div><!-- /admin-diag-pane -->
 
         <!-- ORDER MAINTENANCE PANE -->

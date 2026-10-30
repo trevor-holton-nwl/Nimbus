@@ -22,13 +22,24 @@ import { JobsAdmin } from './jobs-pane.mjs';
 import { JobsClient } from './jobs-client.mjs';
 import { UnifiedLogPane } from './unified-log-pane.mjs';
 import type { JobRun } from './jobs-client.mjs';
-import { buildSignals, buildAttention, FORBIDDEN, NOT_FOUND } from './signals.mjs';
+import { buildSignals, buildAttention, FORBIDDEN, NOT_FOUND, THRESHOLDS } from './signals.mjs';
+import { buildDiagSections, defaultOpen, ANCHOR_IDS } from './diag-sections.mjs';
+import type { ClientStats, DbDeep, DeepData, DiagInputs, DiagSection, DiagSectionId, PerfSample } from './diag-sections.mjs';
 import type {
   AdminSub, AttentionItem, BackendCountLike, DbDeepLike, DetailTable, Fix, HealthLike, SapBatchHeader,
   SapRunLike, SapSendStatus, Signal, SignalId, SignalInputs,
 } from './signals.mjs';
 import { fromAudit, fromBackend, fromFrontend, fromJobRun, fromUpload, filterEntries, mergeEntries } from './unified-log.mjs';
-import type { LogEntry as FrontendLogEntry, UnifiedEntry } from './unified-log.mjs';
+import type { LogEntry as FrontendLogEntry, UnifiedEntry, LogFilter, LogSource } from './unified-log.mjs';
+
+/** The eight Database sub-sections of the Diagnostics page, in page order, with the key of the help text each carries.
+ *  Created as skeletons by AdminCockpit._ensureDbSubs and filled by _renderDbDeep (heads come from diag-sections.mts). */
+const DB_SUBS: Array<{ id: DiagSectionId; help: string }> = [
+  { id: 'db-pool', help: 'ui.diag_desc_pool' }, { id: 'db-server', help: 'ui.diag_desc_server' },
+  { id: 'db-tables', help: 'ui.diag_desc_table_health' }, { id: 'db-conn', help: 'ui.diag_desc_connections' },
+  { id: 'db-locks', help: 'ui.diag_desc_lock_waits' }, { id: 'db-idx', help: 'ui.diag_desc_index_usage' },
+  { id: 'db-slow', help: 'ui.diag_desc_slow_queries' }, { id: 'db-seq', help: 'ui.diag_desc_sequences' },
+];
 
 /** Overview refresh cadence: the fast tier (health, backend counts, Jobs, SAP) and the slow tier (DB deep-dive, audit, uploads). */
 const OV_FAST_MS = 30_000;
@@ -488,8 +499,28 @@ export const AdminCockpit = {
   _ovSigKey: '',
   _pipelineOpen: null as string | null,
   _activeSub: 'overview',
+  /** Deep-link target waiting for its element (a DOM id, or `jobs:<tab>` / `sap:<tab>`); cleared by every _setSub and once revealed. */
+  _pendingAnchor: null as string | null,
   _dbDeepAbort: null as AbortController | null,
   _pipelineAbort: null as AbortController | null,
+  // ── Diagnostics page (2026-10-30) ──
+  /** Open/closed memory per section id. Written only by a user toggle (the capture-phase `toggle` listener on
+   *  #admin-diag-pane) or an anchor reveal; it wins over the severity default (defaultOpen) on every repaint. */
+  _diagOpen: new Map<string, boolean>(),
+  /** The last buildDiagSections() result (13 sections, page order). */
+  _diagSecs: [] as DiagSection[],
+  _diagClient: null as ClientStats | null,
+  _deepAt: 0,
+  _deepForbidden: false,
+  _dbDeepData: null as DbDeep | null,
+  _dbDeepAt: 0,
+  /** Rail scroll-spy: one IntersectionObserver, alive only while the Diagnostics sub-tab is showing. */
+  _spy: null as IntersectionObserver | null,
+  _spyVisible: new Set<string>(),
+  _flashEl: null as HTMLElement | null,
+  _flashTimer: null as ReturnType<typeof setTimeout> | null,
+  /** The last pending-anchor reveal, kept so the first async paints can settle it once (see _settleReveal). */
+  _lastReveal: null as { el: HTMLElement; scrollTop: number; at: number } | null,
   _auditAbort: null as AbortController | null,
   _fpPurgeStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpPurgeEnd: null as NimbusVendor.FlatpickrInstance | null,
@@ -497,12 +528,17 @@ export const AdminCockpit = {
   _purgePreview: null as AdminPurgePreview | null,
   _purgePreviewSeq: 0,
 
-  gotoSub(sub: AdminSub): void { AdminCockpit._setSub(sub); },
+  gotoSub(sub: AdminSub, opts?: { anchor?: string }): void { AdminCockpit._setSub(sub, opts?.anchor); },
 
-  _setSub(sub: string | undefined): void {
+  _setSub(sub: string | undefined, anchor?: string): void {
     const known = ['overview', 'logs', 'diagnostics', 'order-maintenance', 'jobs', 'manage', 'interface', 'security', 'system-config', 'table-browser'];
     const cur = sub && known.includes(sub) ? sub : 'overview';
     AdminCockpit._activeSub = cur;
+    // Set BEFORE the pane renders so _syncOpen sees it; always replaced, so a stale anchor never outlives a navigation.
+    AdminCockpit._pendingAnchor = anchor ?? null;
+    AdminCockpit._lastReveal = null;
+    // An inner-tab anchor (jobs:<tab>, sap:<tab>) is resolved by _revealPendingAnchor, which renders the pane itself.
+    const paneAnchor = /^(jobs|sap):/.test(anchor ?? '');
     document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) => {
       b.classList.toggle('active', b.dataset.sub === cur);
     });
@@ -520,16 +556,18 @@ export const AdminCockpit = {
     if (cur !== 'overview') AdminCockpit._stopHealthPolling();
     if (cur !== 'jobs') JobsAdmin.setActive(false);
     if (cur !== 'logs') UnifiedLogPane.setActive(false);
+    if (cur !== 'diagnostics') AdminCockpit._stopSpy();
     if (cur === 'manage') MasterData.render();
-    else if (cur === 'interface') Interface.render();
+    else if (cur === 'interface') { if (!paneAnchor) void Interface.render(); }
     else if (cur === 'security') Security.render();
     else if (cur === 'system-config') SystemConfig.render();
     else if (cur === 'table-browser') AdminTables.render();
-    else if (cur === 'jobs') void JobsAdmin.render();
+    else if (cur === 'jobs') { if (!paneAnchor) void JobsAdmin.render(); }
     else if (cur === 'logs') AdminCockpit._renderLogsPane();
-    else if (cur === 'diagnostics') AdminCockpit._renderDiagnosticsPane();
+    else if (cur === 'diagnostics') { AdminCockpit._startSpy(); AdminCockpit._renderDiagnosticsPane(); }
     else if (cur === 'order-maintenance') AdminCockpit._renderOrderMaintenance();
     else AdminCockpit._renderOverview();
+    AdminCockpit._revealPendingAnchor();
   },
 
   init(): void {
@@ -583,14 +621,18 @@ export const AdminCockpit = {
         return;
       }
       const nav = t?.closest<HTMLElement>('[data-nav]');
-      if (nav?.dataset.nav) { AdminCockpit.gotoSub(nav.dataset.nav as AdminSub); return; }
+      if (nav?.dataset.nav) { AdminCockpit.gotoSub(nav.dataset.nav as AdminSub, nav.dataset.anchor ? { anchor: nav.dataset.anchor } : undefined); return; }
       const det = t?.closest<HTMLElement>('.sig-details');
       if (det) AdminCockpit._toggleDetail(det);
     };
     document.getElementById('ov-signals')?.addEventListener('click', onOvClick);
     document.getElementById('ov-attention')?.addEventListener('click', onOvClick);
-    document.getElementById('admin-pipeline-refresh')?.addEventListener('click', AdminCockpit._renderPipeline);
-    document.getElementById('admin-db-deep-refresh')?.addEventListener('click', AdminCockpit._renderDbDeep);
+    // Diagnostics page head: one Refresh re-reads everything (the old per-card refresh buttons are gone).
+    document.getElementById('admin-diag-refresh')?.addEventListener('click', () => AdminCockpit._renderDiagnosticsPane({ force: true }));
+    document.getElementById('admin-diag-export')?.addEventListener('click', () => AdminCockpit._exportDiagnostics());
+    const diagPane = document.getElementById('admin-diag-pane');
+    diagPane?.addEventListener('toggle', (e: Event) => AdminCockpit._onDiagToggle(e), true);   // toggle does not bubble: capture
+    diagPane?.addEventListener('click', (e: Event) => AdminCockpit._onDiagClick(e));
     document.getElementById('admin-db-deep')?.addEventListener('click', async (e: MouseEvent) => {
       const btn = (e.target as HTMLElement).closest('[data-maint-action]') as HTMLButtonElement | null;
       if (!btn) return;
@@ -653,11 +695,405 @@ export const AdminCockpit = {
     UnifiedLogPane.setActive(true);
   },
 
-  _renderDiagnosticsPane(): void {
+  /** Entry for the Diagnostics sub-tab and the head Refresh. Paints the rail and the 13 section heads from what is
+   *  already cached (so the page never opens blank), then lets each body renderer re-read and repaint its own heads.
+   *  `force` is accepted for the head Refresh; the body renderers always re-read, so it changes nothing today. */
+  _renderDiagnosticsPane(opts: { force?: boolean } = {}): void {
+    void opts.force;
+    AdminCockpit._computeClientStats();
+    // Skeletons and heads exist synchronously, so a deep link is revealed here, before any read starts. The later
+    // _repaintHeads calls find the anchor already cleared (no re-scroll) and keep the target open through _diagOpen.
+    AdminCockpit._ensureDbSubs();
+    AdminCockpit._repaintHeads();
+    AdminCockpit._revealPendingAnchor();
     AdminCockpit._renderDiagnostics();
     AdminCockpit._renderPipeline();
     AdminCockpit._renderDbDeep();
     AdminCockpit._refreshThreadPane();
+  },
+
+  /* -----------------------------------------------------------------------
+     DIAGNOSTICS PAGE MODEL -> DOM. diag-sections.mts (pure) decides severity, count, one-liner and rail
+     figure for the 13 sections; the functions below only paint that result. Heads are updated in place:
+     a <details> element is created once and never replaced, so a repaint cannot collapse what the user opened.
+     ----------------------------------------------------------------------- */
+
+  /** This browser's counters (cached: the thread profiler repaints often and must not walk localStorage each time). */
+  _computeClientStats(): ClientStats | null {
+    try {
+      const inv = Persistence.storageInventory();
+      const mem = (performance as Performance & { memory?: ChromePerformanceMemory }).memory;
+      const c: ClientStats = {
+        build: Config.BUILD_ID,
+        autosave: inv.autosaveDisabled ? Util.t('ui.ls_quota_disabled') : inv.degraded ? Util.t('ui.ls_degraded') : Util.t('ui.ls_healthy'),
+        autosaveDisabled: !!inv.autosaveDisabled, degraded: !!inv.degraded,
+        errRate: ErrorLog.errorRatePerMin(),
+      };
+      if (mem) { c.heapUsed = mem.usedJSHeapSize; c.heapLimit = mem.jsHeapSizeLimit; }
+      AdminCockpit._diagClient = c;
+      return c;
+    } catch { return null; }
+  },
+
+  /** The pipeline strip's counts, from the cached /diagnostics/deep read and this browser's last load. */
+  _diagDeep(): DeepData | null {
+    const A = AdminCockpit;
+    if (A._deepForbidden) return { forbidden: true, loaded: 0, plant: 0, received: 0, rendered: 0, misses: 0, warnings: 0 };
+    const d = A._deepData;
+    if (!d) return null;
+    const p = (d.pipeline || {}) as AdminPipelineSnapshot;
+    const dbSt = (d.db_stats || {}) as AdminDbStatsDeep;
+    const st: AdminPersistenceStats = Persistence.stats ? Persistence.stats() : ({} as AdminPersistenceStats);
+    const received = st.raw_received ?? 0;
+    const misses = st.color_merge_misses ?? 0;
+    return {
+      loaded: p.raw_row_count ?? dbSt.total ?? 0,
+      plant: st.pre_color_merge_count ?? (received + misses),
+      received, rendered: st.rendered ?? 0, misses,
+      warnings: (p.warnings || []).length,
+    };
+  },
+
+  /** Everything buildDiagSections reads. The Database deep dive comes from the freshest of this page's own read and the Overview's slow tier. */
+  _diagInputs(): DiagInputs {
+    const A = AdminCockpit;
+    let perf: PerfSample[] = [];
+    try { perf = PerfMonitor.all().map((r) => ({ name: r.name, last: r.last, p50: r.p50, p95: r.p95, max: r.max })); } catch { perf = []; }
+    const own = A._dbDeepData;
+    const ov = A._ovSlow.dbDeep as unknown as DbDeep | null;
+    const useOwn = own !== null && (A._dbDeepAt >= A._ovSlow.dbDeepAt || ov === null);
+    const ping = A._healthData?.db?.ping_ms;
+    return {
+      client: A._diagClient, deep: A._diagDeep(), dbDeep: useOwn ? own : ov, perf,
+      dbStatsAt: useOwn ? A._dbDeepAt : (A._ovSlow.dbDeepAt || null),
+      now: Date.now(), pingMs: typeof ping === 'number' ? ping : null,
+    };
+  },
+
+  /** Recompute all 13 sections and repaint the rail, every head and the page stamp. Cheap; every body renderer calls it when it finishes. */
+  _repaintHeads(): void {
+    const A = AdminCockpit;
+    if (typeof document === 'undefined' || !document.getElementById('admin-diag-pane')) return;
+    const secs = buildDiagSections(A._diagInputs());
+    A._diagSecs = secs;
+    A._renderDiagRail(secs);
+    for (const s of secs) A._paintSectionHead(s);
+    A._paintDiagStamp();
+    A._observeSections();
+    // A link that arrived before its section existed is revealed by the paint that creates it.
+    A._revealPendingAnchor();
+  },
+
+  /** Pending deep-link target, or null. */
+  _pendingAnchorValue(): string | null { return AdminCockpit._pendingAnchor; },
+
+  /** Resolve the pending anchor if its target exists now. No-op (anchor kept) while the element is not in the DOM yet,
+   *  so the paint that creates it reveals it; cleared on success, never throws. Anchor grammar: spec 6.7. */
+  _revealPendingAnchor(): void {
+    const A = AdminCockpit;
+    const a = A._pendingAnchor;
+    if (a === null || typeof document === 'undefined') return;
+    const m = /^(jobs|sap):(.+)$/.exec(a);
+    if (m) {
+      // The inner-tab panes render themselves: act only while their sub-tab is the one showing, and only once.
+      if (A._activeSub !== (m[1] === 'jobs' ? 'jobs' : 'interface')) return;
+      A._pendingAnchor = null;
+      void A._revealPaneTab(m[1] as 'jobs' | 'sap', m[2]);
+      return;
+    }
+    const el = document.getElementById(a);
+    if (!el) return;
+    A._pendingAnchor = null;
+    // A deep link jumps (no smooth scroll): a smooth scroll is computed against the skeleton layout, then stalls or lands
+    // wrong when the reads fill the bodies above the target. Native scroll anchoring keeps the target put afterwards.
+    A._revealAnchor(el, false);
+    const sc = el.closest?.('.admin-scroll') ?? document.querySelector?.('.admin-scroll');
+    A._lastReveal = sc ? { el, scrollTop: sc.scrollTop, at: Date.now() } : null;
+  },
+
+  /** After an async read paints (bodies above the target grew): re-scroll the deep-link target to the top once, but only
+   *  while the reveal is under 5 s old, the target is still attached and the user has not scrolled (scrollTop unchanged).
+   *  No flash, no focus change. Any other case drops the record. */
+  _settleReveal(): void {
+    const A = AdminCockpit;
+    const r = A._lastReveal;
+    if (!r) return;
+    const sc = r.el.isConnected ? (r.el.closest?.('.admin-scroll') ?? document.querySelector?.('.admin-scroll')) : null;
+    if (!sc || Date.now() - r.at > 5000 || sc.scrollTop !== r.scrollTop) { A._lastReveal = null; return; }
+    r.el.scrollIntoView({ block: 'start', behavior: 'auto' });
+    r.scrollTop = sc.scrollTop;
+  },
+
+  /** jobs:<tab> / sap:<tab>: render the pane, switch its inner view, then reveal the inner element. */
+  async _revealPaneTab(pane: 'jobs' | 'sap', tab: string): Promise<void> {
+    const A = AdminCockpit;
+    try {
+      let el: HTMLElement | null;
+      if (pane === 'jobs') {
+        await JobsAdmin.render();   // async: the first render awaits the type list
+        JobsAdmin.showTab(tab as 'jobs' | 'runs' | 'upcoming' | 'templates');
+        el = document.getElementById(`jobs-view-${tab}`);
+      } else {
+        await Interface.render();
+        Interface.showTab(tab as 'overview' | 'staging' | 'mapping' | 'history');
+        el = document.getElementById('sap-stage-batches') ?? document.getElementById('sap-tabbody');
+      }
+      if (el && A._activeSub === (pane === 'jobs' ? 'jobs' : 'interface')) A._revealAnchor(el);
+    } catch { /* a failed pane render already reports itself; the link just lands on the sub-tab */ }
+  },
+
+  /** Section title without the "(N tables)" tail the legacy keys carry: the count is its own mono figure in the head. */
+  _diagTitle(sec: DiagSection): string {
+    const raw = Util.t(sec.titleKey, { count: sec.count ?? '' });
+    return raw.replace(/\s*\([^)]*\)\s*$/, '') || raw;
+  },
+
+  /** Compact elapsed time for an uptime ("3d", "4h"); the unit letters are not localised (same as the ms / MB figures). */
+  _diagDur(ms: number): string {
+    if (!(ms > 0)) return '–';
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
+  },
+
+  /** The header one-liner: raw ages and uptimes from the model become words here. */
+  _diagLine(sec: DiagSection): string {
+    const a: Record<string, unknown> = { ...sec.lineArgs };
+    if ('age' in a) a.age = typeof a.age === 'number' ? AdminCockpit._relTime(Date.now() - a.age) : '–';
+    if ('uptime' in a) a.uptime = AdminCockpit._diagDur(Number(a.uptime));
+    return Util.t(sec.lineKey, a as Record<string, string | number>);
+  },
+
+  /** Paint one section head (severity, title, count, line) and apply the open/closed rule. No-op if the section is not in the DOM. */
+  _paintSectionHead(sec: DiagSection): void {
+    const A = AdminCockpit;
+    const det = document.getElementById(ANCHOR_IDS[sec.id]) as HTMLDetailsElement | null;
+    if (!det) return;
+    det.dataset.sev = sec.severity;
+    const set = (sel: string, text: string): HTMLElement | null => {
+      const n = det.querySelector<HTMLElement>(sel);   // first match is this section's own head (the summary precedes any nested section)
+      if (n && n.textContent !== text) n.textContent = text;
+      return n;
+    };
+    set('.diag-title-text', A._diagTitle(sec));
+    set('.diag-count', sec.count !== undefined ? String(sec.count) : '');
+    const line = A._diagLine(sec);
+    set('.diag-line', line)?.setAttribute('title', line);
+    A._syncOpen(det, sec);
+  },
+
+  /** Open state: the user's memory first, the severity default second (warn/err open, deep-link target open). */
+  _syncOpen(det: HTMLDetailsElement, sec: DiagSection): void {
+    const A = AdminCockpit;
+    const pending = A._pendingAnchorValue();
+    let want = A._diagOpen.get(det.id);
+    if (want === undefined) {
+      want = defaultOpen(sec, pending);
+      // Opened only because of a deep link: remember it, or the repaint after the anchor clears would close it again.
+      if (want && pending !== null && !defaultOpen(sec, null)) A._diagOpen.set(det.id, true);
+    }
+    if (det.open !== want) {
+      det.dataset.diagAuto = want ? '1' : '0';   // marks the toggle event this change will fire as ours, not the user's
+      det.open = want;
+    }
+  },
+
+  _onDiagToggle(e: Event): void {
+    const det = e.target as HTMLDetailsElement | null;
+    if (!det || det.tagName !== 'DETAILS' || !det.id) return;
+    if (!det.classList.contains('diag-sec') && !det.classList.contains('diag-sub')) return;
+    const auto = det.dataset.diagAuto;
+    if (auto !== undefined) {
+      delete det.dataset.diagAuto;
+      if (auto === (det.open ? '1' : '0')) return;   // the echo of our own programmatic change
+    }
+    AdminCockpit._diagOpen.set(det.id, det.open);
+  },
+
+  /** Delegated clicks inside the pane: rail links and any [data-anchor] button jump to a section; a help dot inside a head must not toggle it. */
+  _onDiagClick(e: Event): void {
+    const t = e.target as HTMLElement | null;
+    if (t?.closest('.diag-sec-sum .adm-help')) { e.preventDefault(); return; }
+    const link = t?.closest<HTMLElement>('[data-anchor]');
+    if (!link) return;
+    e.preventDefault();
+    const el = document.getElementById(link.dataset.anchor || '');
+    if (el) AdminCockpit._revealAnchor(el);
+  },
+
+  /** Open `el` and every <details> above it, scroll it into view (the scroller is .admin-scroll, found by the browser),
+   *  flash it once, and put keyboard focus on its summary. Reduced motion: no smooth scroll, outline only (CSS). */
+  _revealAnchor(el: HTMLElement, smooth: boolean = true): void {
+    const A = AdminCockpit;
+    for (let n: HTMLElement | null = el; n; n = n.parentElement) {
+      if (n.tagName === 'DETAILS') (n as HTMLDetailsElement).open = true;
+    }
+    const reduced = !smooth || (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches);
+    el.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' });
+    if (A._flashEl) A._flashEl.classList.remove('is-target');
+    if (A._flashTimer) clearTimeout(A._flashTimer);
+    void el.offsetWidth;   // re-revealing the same section restarts its flash
+    el.classList.add('is-target');
+    const done = (): void => { el.classList.remove('is-target'); if (A._flashEl === el) A._flashEl = null; };
+    A._flashEl = el;
+    el.addEventListener('animationend', done, { once: true });
+    A._flashTimer = setTimeout(done, 2600);   // reduced motion: animationend never fires
+    const focusTarget = el.tagName === 'DETAILS' ? el.querySelector<HTMLElement>('summary') : (el.getAttribute('tabindex') === '-1' ? el : null);
+    focusTarget?.focus({ preventScroll: true });
+  },
+
+  /** Scroll-spy: lights the rail link of the section crossing the top band of .admin-scroll. */
+  _startSpy(): void {
+    const A = AdminCockpit;
+    A._stopSpy();
+    if (typeof IntersectionObserver === 'undefined') return;
+    const root = document.getElementById('admin-diag-pane')?.closest?.('.admin-scroll') ?? null;
+    A._spy = new IntersectionObserver((entries) => {
+      for (const en of entries) {
+        const id = (en.target as HTMLElement).id;
+        if (en.isIntersecting) A._spyVisible.add(id); else A._spyVisible.delete(id);
+      }
+      A._paintSpy();
+    }, { root, rootMargin: '-80px 0px -60% 0px' });
+    A._observeSections();
+  },
+
+  _stopSpy(): void {
+    const A = AdminCockpit;
+    A._spy?.disconnect();
+    A._spy = null;
+    A._spyVisible.clear();
+  },
+
+  /** Observe every section and sub-section now in the DOM (the Database sub-sections appear after the first paint). */
+  _observeSections(): void {
+    const spy = AdminCockpit._spy;
+    if (!spy) return;
+    document.querySelectorAll<HTMLElement>('.diag-sec[id], .diag-sub[id]').forEach((el) => spy.observe(el));
+  },
+
+  _paintSpy(): void {
+    const A = AdminCockpit;
+    const links = Array.from(document.querySelectorAll<HTMLElement>('#diag-rail .diag-rail-link'));
+    let on = links.find((l) => A._spyVisible.has(l.dataset.anchor ?? ''));
+    // Database and one of its sub-sections both cross the band: the sub-section is the more exact answer.
+    if (on?.dataset.anchor === 'diag-db') on = links.find((l) => l.classList.contains('is-sub') && A._spyVisible.has(l.dataset.anchor ?? '')) ?? on;
+    for (const l of links) {
+      const isOn = l === on;
+      l.classList.toggle('is-on', isOn);
+      if (isOn) l.setAttribute('aria-current', 'true'); else l.removeAttribute('aria-current');
+    }
+    // Keep the lit link inside the rail's own scroll box when the rail is shorter than its content (short windows).
+    const rail = document.getElementById('diag-rail');
+    if (on && rail && rail.scrollHeight > rail.clientHeight) {
+      const top = on.offsetTop - rail.offsetTop;
+      if (top < rail.scrollTop) rail.scrollTop = top - 8;
+      else if (top + on.offsetHeight > rail.scrollTop + rail.clientHeight) rail.scrollTop = top + on.offsetHeight - rail.clientHeight + 8;
+    }
+  },
+
+  /** Build the rail once (dot, title, mono figure per section; the eight db-* links indented), then update it in place. */
+  _renderDiagRail(sections: DiagSection[]): void {
+    const A = AdminCockpit;
+    const rail = document.getElementById('diag-rail');
+    if (!rail) return;
+    if (!rail.querySelector('.diag-rail-link')) {
+      rail.textContent = '';
+      const cap = document.createElement('div');
+      cap.className = 'diag-rail-cap';
+      cap.textContent = Util.t('diag.rail_sections');
+      rail.appendChild(cap);
+      for (const sec of sections) {
+        const a = document.createElement('a');
+        a.className = sec.id.startsWith('db-') ? 'diag-rail-link is-sub' : 'diag-rail-link';
+        a.href = `#${ANCHOR_IDS[sec.id]}`;
+        a.dataset.anchor = ANCHOR_IDS[sec.id];
+        a.dataset.sec = sec.id;
+        const dot = document.createElement('span'); dot.className = 'diag-dot'; dot.setAttribute('aria-hidden', 'true');
+        const ttl = document.createElement('span'); ttl.className = 'diag-rail-title';
+        const sh = document.createElement('span'); sh.className = 'diag-rail-short';
+        a.appendChild(dot); a.appendChild(ttl); a.appendChild(sh);
+        rail.appendChild(a);
+      }
+    }
+    for (const sec of sections) {
+      const a = rail.querySelector<HTMLElement>(`[data-sec="${sec.id}"]`);
+      if (!a) continue;
+      a.dataset.sev = sec.severity;
+      const title = A._diagTitle(sec);
+      const ttl = a.querySelector<HTMLElement>('.diag-rail-title');
+      if (ttl && ttl.textContent !== title) ttl.textContent = title;
+      const short = Util.t(sec.shortKey, sec.shortArgs as Record<string, string | number>);
+      const sh = a.querySelector<HTMLElement>('.diag-rail-short');
+      if (sh && sh.textContent !== short) sh.textContent = short;
+      a.title = `${title} · ${short}`;   // the label truncates with an ellipsis at 220 px
+    }
+  },
+
+  /** Page head stamp: how old the two reads behind this page are. */
+  _paintDiagStamp(): void {
+    const A = AdminCockpit;
+    const el = document.getElementById('admin-diag-ts');
+    if (!el) return;
+    const dbAt = A._dbDeepAt || A._ovSlow.dbDeepAt;
+    const rel = (ms: number): string => (ms > 0 ? A._relTime(ms) : '–');
+    el.textContent = Util.t('diag.stats_age', { db: rel(dbAt), pipe: rel(A._deepAt) });
+  },
+
+  /** Create the eight Database sub-section skeletons (once). Later calls find them by id and leave them alone. */
+  _ensureDbSubs(): void {
+    const A = AdminCockpit;
+    const host = document.getElementById('admin-db-deep');
+    if (!host) return;
+    for (const s of DB_SUBS) A._mkSection(s.id, s.help, host);
+  },
+
+  /** One Database sub-section: <details class="diag-sub" id="diag-db-…"> with the same head grammar as a page section.
+   *  Returns the existing element when there is one (repaint = update head and body in place, never replace the <details>). */
+  _mkSection(id: DiagSectionId, helpKey: string | null, host: HTMLElement): HTMLDetailsElement {
+    const existing = document.getElementById(ANCHOR_IDS[id]) as HTMLDetailsElement | null;
+    if (existing) return existing;
+    const det = document.createElement('details');
+    det.className = 'diag-sub';
+    det.id = ANCHOR_IDS[id];
+    det.dataset.sev = 'info';
+    const sum = document.createElement('summary');
+    sum.className = 'diag-sec-sum';
+    const dot = document.createElement('span'); dot.className = 'diag-dot'; dot.setAttribute('aria-hidden', 'true');
+    const ttl = document.createElement('span'); ttl.className = 'diag-title';
+    const tt = document.createElement('span'); tt.className = 'diag-title-text';
+    const cnt = document.createElement('span'); cnt.className = 'diag-count';
+    ttl.appendChild(tt); ttl.appendChild(cnt);
+    if (helpKey) {
+      const hEl = document.createElement('span');
+      hEl.className = 'adm-help';
+      hEl.tabIndex = 0;
+      hEl.setAttribute('aria-label', Util.t('aria.help'));
+      const hDot = document.createElement('span'); hDot.className = 'adm-help-dot'; hDot.textContent = '?';
+      const hTip = document.createElement('span'); hTip.className = 'adm-help-tip'; hTip.textContent = Util.t(helpKey);
+      hEl.appendChild(hDot); hEl.appendChild(hTip);
+      ttl.appendChild(hEl);
+    }
+    const line = document.createElement('span'); line.className = 'diag-line';
+    const chev = document.createElement('span'); chev.className = 'diag-chev'; chev.setAttribute('aria-hidden', 'true');
+    sum.appendChild(dot); sum.appendChild(ttl); sum.appendChild(line); sum.appendChild(chev);
+    det.appendChild(sum);
+    const body = document.createElement('div');
+    body.className = 'diag-body';
+    body.textContent = Util.t('ui.diag_loading');
+    det.appendChild(body);
+    host.appendChild(det);
+    return det;
+  },
+
+  /** Replace one sub-section's body (the head is repainted by _repaintHeads). */
+  _fillSub(id: DiagSectionId, build: (body: HTMLElement) => void): void {
+    const body = document.getElementById(ANCHOR_IDS[id])?.querySelector<HTMLElement>('.diag-body');
+    if (!body) return;
+    body.textContent = '';
+    build(body);
   },
 
   _renderOrderMaintenance(): void {
@@ -983,6 +1419,7 @@ export const AdminCockpit = {
       b.type = 'button';
       b.className = 'btn btn-ghost sm';
       b.dataset.nav = d.linkSub;
+      if (d.linkAnchor) b.dataset.anchor = d.linkAnchor;
       b.textContent = Util.t(d.linkKey);
       box.appendChild(b);
     }
@@ -1115,6 +1552,9 @@ export const AdminCockpit = {
     }
   },
 
+  /** The anchor a nav.* fix carries in its args (undefined when absent or not a string). */
+  _fixAnchor(a: Record<string, unknown>): string | undefined { return typeof a.anchor === 'string' ? a.anchor : undefined; },
+
   /** Quick-fix dispatch for the Signal board and Needs attention buttons. */
   async _onSignalFix(fix: Fix, btn: HTMLButtonElement | null = null): Promise<void> {
     const A = AdminCockpit;
@@ -1137,10 +1577,10 @@ export const AdminCockpit = {
         JobsAdmin.openRun(Number(a.runId));
         return;
       }
-      case 'nav.jobs': A.gotoSub('jobs'); return;
-      case 'nav.diagnostics': A.gotoSub('diagnostics'); return;
-      case 'nav.interface': A.gotoSub('interface'); return;
-      case 'nav.order_maintenance': A.gotoSub('order-maintenance'); return;
+      case 'nav.jobs': A.gotoSub('jobs', { anchor: A._fixAnchor(a) }); return;
+      case 'nav.diagnostics': A.gotoSub('diagnostics', { anchor: A._fixAnchor(a) }); return;
+      case 'nav.interface': A.gotoSub('interface', { anchor: A._fixAnchor(a) }); return;
+      case 'nav.order_maintenance': A.gotoSub('order-maintenance', { anchor: A._fixAnchor(a) }); return;
       case 'db.vacuum_all': {
         if (!(await Modal.confirm({ title: Util.t('ui.maint_vacuum_all_confirm'), confirmLabel: Util.t('btn.run') }))) return;
         await A._runMaintenance('vacuum-analyze', null, btn);
@@ -1151,7 +1591,12 @@ export const AdminCockpit = {
         await A._runMaintenance('vacuum-analyze', String(a.table ?? '') || null, btn);
         again();
         return;
-      case 'logs.open': A.gotoSub('logs'); UnifiedLogPane.setFilter({ level: 'warn', sources: new Set(['backend']) }); return;
+      case 'logs.open': {
+        A.gotoSub('logs');
+        const f: Partial<LogFilter> = { level: (a.level as LogFilter['level'] | undefined) ?? 'warn', sources: new Set<LogSource>([(a.source as LogSource | undefined) ?? 'backend']) };
+        UnifiedLogPane.setFilter(f);
+        return;
+      }
       case 'data.reload': void Persistence.reload(); return;
       case 'data.color_wheel': {
         const nb = (globalThis as unknown as { NIMBUS?: { ColorWheelViewer?: { open?: () => void } } }).NIMBUS;
@@ -1173,9 +1618,20 @@ export const AdminCockpit = {
       ? AbortSignal.any([AdminCockpit._pipelineAbort.signal, AbortSignal.timeout(8000)])
       : AdminCockpit._pipelineAbort.signal;
     Util.fetchTraced(`${Config.API_BASE}/diagnostics/deep`, { signal: sig })
-      .then((r) => r.json() as Promise<AdminDiagnosticsDeepResponse>)
+      .then((r) => { AdminCockpit._deepForbidden = r.status === 403; return r.json() as Promise<AdminDiagnosticsDeepResponse>; })
       .then((data) => {
         AdminCockpit._deepData = data;
+        AdminCockpit._deepAt = Date.now();
+        if (AdminCockpit._deepForbidden) {
+          // A viewer without the admin read: say so, never paint zeros that look healthy.
+          wrap.textContent = '';
+          const m = document.createElement('div');
+          m.className = 'admin-log-empty';
+          m.textContent = Util.t('sig.admin_only');
+          wrap.appendChild(m);
+          AdminCockpit._repaintHeads();
+          return;
+        }
         const p = (data.pipeline || {}) as AdminPipelineSnapshot;
         const dbSt = (data.db_stats || {}) as AdminDbStatsDeep;
         const cw = (data.color_wheel || {}) as AdminColorWheelStats;
@@ -1290,11 +1746,15 @@ export const AdminCockpit = {
 
         // Backend warnings
         AdminCockpit._renderBackendWarnings(p.warnings || []);
+        AdminCockpit._repaintHeads();   // Data pipeline and Backend warnings heads
+        AdminCockpit._settleReveal();
       })
       .catch((e: Error) => {
         if (e.name === 'AbortError') return;
         wrap.innerHTML = `<div class="admin-log-empty">${Util.escapeHtml(Util.t('pipe.load_failed', { msg: e.message }))}</div>`;
         ErrorLog.warn('admin', `Pipeline fetch failed: ${e.message}`);
+        AdminCockpit._repaintHeads();
+        AdminCockpit._settleReveal();
       });
   },
 
@@ -1407,7 +1867,13 @@ export const AdminCockpit = {
       sub.className = 'admin-pdtl-sub';
       sub.textContent = Util.t('ui.diag_backend_load_warnings', { count: warnings.length });
       frag.appendChild(sub);
-      frag.appendChild(AdminCockpit._warningList(warnings));
+      // The full list lives in the Backend warnings section; this step links there (delegated [data-anchor] click -> _revealAnchor).
+      const see = document.createElement('button');
+      see.type = 'button';
+      see.className = 'btn btn-ghost sm';
+      see.dataset.anchor = 'diag-bwarn';
+      see.textContent = Util.t('diag.see_bwarn', { n: warnings.length });
+      frag.appendChild(see);
     }
     return frag;
   },
@@ -1528,6 +1994,7 @@ export const AdminCockpit = {
     return wrap;
   },
 
+  /** Flat list of load/upload warnings. Still used by the Order Maintenance upload history; the Emitted step now links to the Backend warnings section instead. */
   _warningList(warnings: AdminPipelineWarning[]): HTMLDivElement {
     const ul = document.createElement('div');
     ul.className = 'admin-bwarn-list';
@@ -2028,77 +2495,36 @@ export const AdminCockpit = {
      DB DEEP DIVE — fetches /diagnostics/db on demand, renders sections
      ----------------------------------------------------------------------- */
   _renderDbDeep(): void {
+    const A = AdminCockpit;
     const wrap = document.getElementById('admin-db-deep');
     if (!wrap) return;
-    wrap.innerHTML = `<div class="admin-db-loading">${Util.t('ui.diag_loading')}</div>`;
+    A._ensureDbSubs();   // the eight sub-sections persist across repaints: only their bodies are replaced, so open state survives
 
-    AdminCockpit._dbDeepAbort?.abort();
-    AdminCockpit._dbDeepAbort = new AbortController();
+    A._dbDeepAbort?.abort();
+    A._dbDeepAbort = new AbortController();
     const sig = AbortSignal.any
-      ? AbortSignal.any([AdminCockpit._dbDeepAbort.signal, AbortSignal.timeout(12000)])
-      : AdminCockpit._dbDeepAbort.signal;
+      ? AbortSignal.any([A._dbDeepAbort.signal, AbortSignal.timeout(12000)])
+      : A._dbDeepAbort.signal;
 
     Util.fetchTraced(`${Config.API_BASE}/diagnostics/db`, { signal: sig })
-      .then(r => r.json() as Promise<AdminDbDeepResponse>)
-      .then(d => {
-        wrap.textContent = '';
-
-        // ── Top: summary tiles strip ──────────────────────────────────────────────
-        AdminCockpit._dbSummaryStrip(d, wrap);
-
-        if (d.fetched_at) {
-          const tsEl = document.createElement('div');
-          tsEl.className = 'admin-db-fetched';
-          tsEl.textContent = Util.t('ui.diag_last_refreshed', { time: AdminCockpit._relTime(new Date(d.fetched_at)) });
-          wrap.appendChild(tsEl);
+      .then((r) => (r.status === 403 ? ({ forbidden: true } as unknown as AdminDbDeepResponse) : (r.json() as Promise<AdminDbDeepResponse>)))
+      .then((d) => {
+        A._dbDeepData = d as unknown as DbDeep;
+        A._dbDeepAt = Date.now();
+        if ((d as unknown as DbDeep).forbidden) {
+          for (const s of DB_SUBS) A._fillSub(s.id, (body) => { body.textContent = Util.t('sig.admin_only'); });
+          A._repaintHeads();
+          return;
         }
-
-        const mkSection = (title: string, statusCls: string, buildFn: (body: HTMLDivElement) => void, openByDefault: boolean, helpText?: string): void => {
-          const det = document.createElement('details');
-          det.className = 'admin-db-section';
-          if (openByDefault) det.open = true;
-          const sum = document.createElement('summary');
-          sum.className = 'admin-db-section-sum';
-          const dot = document.createElement('span');
-          dot.className = `admin-health-dot ${statusCls}`;
-          const ttl = document.createElement('span');
-          ttl.className = 'admin-db-section-title';
-          ttl.textContent = title;
-          sum.appendChild(dot);
-          sum.appendChild(ttl);
-          if (helpText) {
-            const hEl = document.createElement('span');
-            hEl.className = 'adm-help';
-            hEl.tabIndex = 0;
-            hEl.setAttribute('aria-label', Util.t('aria.help'));
-            hEl.addEventListener('click', (e: Event) => e.stopPropagation());
-            const hDot = document.createElement('span');
-            hDot.className = 'adm-help-dot';
-            hDot.textContent = '?';
-            const hTip = document.createElement('span');
-            hTip.className = 'adm-help-tip';
-            hTip.textContent = helpText;
-            hEl.appendChild(hDot);
-            hEl.appendChild(hTip);
-            sum.appendChild(hEl);
-          }
-          det.appendChild(sum);
-          const body = document.createElement('div');
-          body.className = 'admin-db-section-body';
-          buildFn(body);
-          det.appendChild(body);
-          wrap.appendChild(det);
-        };
 
         // ── 1. Connection Pool
         const pool = d.pool || ({} as AdminPoolStats);
         const poolUsed = (pool.pool_size ?? 0) - (pool.pool_available ?? 0);
         const poolMax  = pool.pool_max || 1;
-        const poolSt   = pool.error ? 'err' : ((pool.requests_waiting ?? 0) > 0 || (pool.requests_errors ?? 0) > 0 ? 'warn' : 'ok');
-        mkSection(Util.t('ui.diag_section_pool'), poolSt, (body) => {
+        A._fillSub('db-pool', (body) => {
           if (pool.error) { body.textContent = pool.error; return; }
-          body.appendChild(AdminCockpit._dbFillBar(poolUsed, poolMax, Util.t('ui.diag_pool_utilization')));
-          body.appendChild(AdminCockpit._kvTable([
+          body.appendChild(A._dbFillBar(poolUsed, poolMax, Util.t('ui.diag_pool_utilization')));
+          body.appendChild(A._kvTable([
             [Util.t('ui.diag_pool_min_max'),         `${pool.pool_min ?? '—'} / ${pool.pool_max ?? '—'}`],
             [Util.t('ui.diag_pool_in_use'),           `${poolUsed} / ${pool.pool_available ?? '—'}`],
             [Util.t('ui.diag_requests_waiting'),      pool.requests_waiting ?? 0],
@@ -2107,31 +2533,29 @@ export const AdminCockpit = {
             [Util.t('ui.diag_bad_returns'),           pool.returns_bad ?? 0],
           ]));
           if ((pool.requests_waiting ?? 0) > 0)
-            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_pool_queued', { count: pool.requests_waiting ?? 0 }));
+            A._dbWarnBanner(body, Util.t('ui.diag_pool_queued', { count: pool.requests_waiting ?? 0 }));
           if ((pool.requests_errors ?? 0) > 0)
-            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_pool_errors', { count: pool.requests_errors ?? 0 }), true);
-        }, true, Util.t('ui.diag_desc_pool'));
+            A._dbWarnBanner(body, Util.t('ui.diag_pool_errors', { count: pool.requests_errors ?? 0 }), true);
+        });
 
         // ── 2. Server Info
         const srv = d.server || ({} as AdminServerInfo);
-        mkSection(Util.t('ui.diag_section_server'), srv.error ? 'err' : 'ok', (body) => {
+        A._fillSub('db-server', (body) => {
           if (srv.error) { body.textContent = srv.error; return; }
-          body.appendChild(AdminCockpit._kvTable([
+          body.appendChild(A._kvTable([
             [Util.t('ui.diag_database'),        srv.database ?? '—'],
             [Util.t('ui.diag_database_size'),   srv.db_size   ?? '—'],
             [Util.t('ui.diag_max_connections'), srv.max_connections ?? '—'],
-            [Util.t('ui.diag_up_since'),        srv.started_at ? AdminCockpit._relTime(new Date(srv.started_at)) : '—'],
+            [Util.t('ui.diag_up_since'),        srv.started_at ? A._relTime(new Date(srv.started_at)) : '—'],
             [Util.t('ui.diag_version'),         (srv.version || '').split(' (')[0]],
           ]));
-        }, true, Util.t('ui.diag_desc_server'));
+        });
 
         // ── 3. Table Health
         const tablesRaw: AdminTableStat[] = Array.isArray(d.tables) ? d.tables : [];
         const tableErr = _adminListError(tablesRaw);
         const tables = _adminListRows(tablesRaw);
-        const tablesNeedWork = !tableErr && tables.some((t) => t.needs_vacuum || t.needs_analyze);
-        mkSection(Util.t('ui.diag_section_table_health', { count: tableErr ? '?' : tables.length }),
-            tableErr ? 'err' : (tablesNeedWork ? 'warn' : 'ok'), (body) => {
+        A._fillSub('db-tables', (body) => {
           if (tableErr) { body.textContent = tableErr; return; }
           if (!tables.length) { body.textContent = Util.t('empty.no_user_tables'); return; }
           const strip = document.createElement('div');
@@ -2143,39 +2567,37 @@ export const AdminCockpit = {
           vacAllBtn.textContent = Util.t('ui.maint_vacuum_all');
           strip.appendChild(vacAllBtn);
           body.appendChild(strip);
-          body.appendChild(AdminCockpit._dbTableCards(tables));
-        }, false, Util.t('ui.diag_desc_table_health'));
+          body.appendChild(A._dbTableCards(tables));
+        });
 
         // ── 4. Active Connections
         const conn = d.connections || ({} as AdminConnectionActivity);
         const hasLong = (conn.long_running || []).length > 0;
-        mkSection(Util.t('ui.diag_section_connections', { count: conn.total ?? '?' }),
-            conn.error ? 'err' : (hasLong ? 'warn' : 'ok'), (body) => {
+        A._fillSub('db-conn', (body) => {
           if (conn.error) { body.textContent = conn.error; return; }
-          body.appendChild(AdminCockpit._dbStackBar(conn.by_state || {}));
+          body.appendChild(A._dbStackBar(conn.by_state || {}));
           if (hasLong) {
             const sub = document.createElement('div');
             sub.className = 'admin-pdtl-sub';
             sub.textContent = Util.t('ui.non_idle_queries');
             body.appendChild(sub);
-            body.appendChild(AdminCockpit._dbTable(
+            body.appendChild(A._dbTable(
               [Util.t('diag.col_pid'), Util.t('diag.col_state'), Util.t('diag.col_dur'), Util.t('diag.col_wait'), Util.t('diag.col_query')],
               (conn.long_running || []).map((q): AdminDbTableRow => ({
                 cells: [q.pid, q.state || '—', q.duration_s ?? '—', q.wait_event || '—', (q.query || '').slice(0, 120)],
-                rowWarn: (q.duration_s || 0) > 30,
+                rowWarn: (q.duration_s || 0) > THRESHOLDS.longQueryWarnS,
                 cellWarn: [],
               }))
             ));
           }
-        }, false, Util.t('ui.diag_desc_connections'));
+        });
 
         // ── 5. Lock Waits
         const locksRaw: AdminLockWait[] = Array.isArray(d.locks) ? d.locks : [];
         const lockErr = _adminListError(locksRaw);
         const locks = _adminListRows(locksRaw);
         const activeLocks = !lockErr && locks.length > 0;
-        mkSection(Util.t('ui.diag_section_lock_waits', { count: lockErr ? '?' : locks.length }),
-            lockErr ? 'err' : (activeLocks ? 'err' : 'ok'), (body) => {
+        A._fillSub('db-locks', (body) => {
           if (lockErr) { body.textContent = lockErr; return; }
           if (!activeLocks) {
             const ok = document.createElement('div');
@@ -2184,30 +2606,26 @@ export const AdminCockpit = {
             body.appendChild(ok);
             return;
           }
-          AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_blocking_locks', { count: locks.length }), true);
-          body.appendChild(AdminCockpit._dbLockChain(locks));
-        }, false, Util.t('ui.diag_desc_lock_waits'));
+          A._dbWarnBanner(body, Util.t('ui.diag_blocking_locks', { count: locks.length }), true);
+          body.appendChild(A._dbLockChain(locks));
+        });
 
-        // ── 6. Index Usage
+        // ── 6. Index Usage (unused indexes are advice: the banner says so, the light stays green)
         const indexesRaw: AdminIndexUsage[] = Array.isArray(d.indexes) ? d.indexes : [];
         const idxErr = _adminListError(indexesRaw);
         const indexes = _adminListRows(indexesRaw);
         const unusedCount = !idxErr ? indexes.filter((ix) => ix.unused).length : 0;
-        mkSection(unusedCount
-            ? Util.t('ui.diag_section_index_unused', { count: idxErr ? '?' : indexes.length, unused: unusedCount })
-            : Util.t('ui.diag_section_index_usage', { count: idxErr ? '?' : indexes.length }),
-            idxErr ? 'err' : (unusedCount > 0 ? 'warn' : 'ok'), (body) => {
+        A._fillSub('db-idx', (body) => {
           if (idxErr) { body.textContent = idxErr; return; }
           if (!indexes.length) { body.textContent = Util.t('empty.no_indexes'); return; }
           if (unusedCount > 0)
-            AdminCockpit._dbWarnBanner(body, Util.t('ui.diag_unused_indexes_warn', { count: unusedCount }));
-          body.appendChild(AdminCockpit._dbHBarChart(indexes));
-        }, false, Util.t('ui.diag_desc_index_usage'));
+            A._dbWarnBanner(body, Util.t('ui.diag_unused_indexes_warn', { count: unusedCount }));
+          body.appendChild(A._dbHBarChart(indexes));
+        });
 
         // ── 7. Slow Queries
         const sq = d.slow_queries || ({} as AdminSlowQueriesResult);
-        mkSection(Util.t('ui.diag_section_slow_queries'),
-            !sq.available ? 'warn' : ((sq.queries || []).length ? 'warn' : 'ok'), (body) => {
+        A._fillSub('db-slow', (body) => {
           if (!sq.available) {
             const msg = document.createElement('div');
             msg.className = 'admin-db-na-msg';
@@ -2224,29 +2642,34 @@ export const AdminCockpit = {
             body.appendChild(ok);
             return;
           }
-          body.appendChild(AdminCockpit._dbSlowQueryBars(sq.queries));
-        }, false, Util.t('ui.diag_desc_slow_queries'));
+          body.appendChild(A._dbSlowQueryBars(sq.queries));
+        });
 
         // ── 8. Sequences
         const seqsRaw: AdminSequenceHealth[] = Array.isArray(d.sequences) ? d.sequences : [];
         const seqErr = _adminListError(seqsRaw);
         const seqs = _adminListRows(seqsRaw);
-        const seqIssues = !seqErr ? seqs.filter((s) => s.status !== 'ok').length : 0;
-        mkSection(Util.t('ui.diag_section_sequences', { count: seqErr ? '?' : seqs.length }),
-            seqErr ? 'err' : (seqIssues > 0 ? 'warn' : 'ok'), (body) => {
+        A._fillSub('db-seq', (body) => {
           if (seqErr) { body.textContent = seqErr; return; }
           if (!seqs.length) { body.textContent = Util.t('empty.no_sequences'); return; }
-          body.appendChild(AdminCockpit._dbProgressBars(seqs));
-        }, false, Util.t('ui.diag_desc_sequences'));
+          body.appendChild(A._dbProgressBars(seqs));
+        });
+
+        A._repaintHeads();   // the Database head and its eight sub-section heads
+        A._settleReveal();
       })
       .catch((e: Error) => {
         if (e.name === 'AbortError') return;
-        wrap.textContent = '';
-        const err = document.createElement('div');
-        err.className = 'admin-db-error';
-        err.textContent = Util.t('ui.failed_load_db_diag', { error: e.message });
-        wrap.appendChild(err);
+        A._dbDeepData = null;
+        for (const s of DB_SUBS) A._fillSub(s.id, (body) => {
+          const err = document.createElement('div');
+          err.className = 'admin-db-error';
+          err.textContent = Util.t('ui.failed_load_db_diag', { error: e.message });
+          body.appendChild(err);
+        });
         ErrorLog.warn('admin', `DB deep dive failed: ${e.message}`);
+        A._repaintHeads();
+        A._settleReveal();
       });
   },
 
@@ -2254,75 +2677,9 @@ export const AdminCockpit = {
      DB visual helpers
      ----------------------------------------------------------------------- */
 
-  _dbSummaryStrip(d: AdminDbDeepResponse, wrap: HTMLElement): void {
-    const strip = document.createElement('div');
-    strip.className = 'admin-db-summary';
-    const mkTile = (label: string, num: string, sub: string, status: string, extra: HTMLElement | null): HTMLDivElement => {
-      const tile = document.createElement('div');
-      tile.className = `admin-db-stat-tile ${status}`;
-      const top = document.createElement('div');
-      top.className = 'admin-db-stat-tile-top';
-      const dot = document.createElement('span');
-      dot.className = `admin-health-dot ${status}`;
-      const lbl = document.createElement('span');
-      lbl.className = 'admin-db-stat-tile-lbl';
-      lbl.textContent = label;
-      top.appendChild(dot); top.appendChild(lbl);
-      tile.appendChild(top);
-      const numEl = document.createElement('div');
-      numEl.className = 'admin-db-stat-tile-num';
-      numEl.innerHTML = num;
-      tile.appendChild(numEl);
-      if (extra) tile.appendChild(extra);
-      if (sub) {
-        const subEl = document.createElement('div');
-        subEl.className = 'admin-db-stat-tile-sub';
-        subEl.textContent = sub;
-        tile.appendChild(subEl);
-      }
-      return tile;
-    };
-    const pool = d.pool || ({} as AdminPoolStats);
-    const poolUsed = (pool.pool_size ?? 0) - (pool.pool_available ?? 0);
-    const poolMax  = pool.pool_max || 1;
-    const poolPct  = Math.round(100 * poolUsed / poolMax);
-    const poolSt   = pool.error ? 'err' : (poolPct >= 85 || (pool.requests_waiting ?? 0) > 0 ? 'warn' : 'ok');
-    strip.appendChild(mkTile(Util.t('ui.diag_tile_pool'),
-      `${poolUsed}<span style="font-size:14px;font-weight:400;color:var(--fg-mute)">/${poolMax}</span>`,
-      Util.t('ui.diag_tile_pct_utilized', {pct: poolPct}), poolSt,
-      pool.error ? null : AdminCockpit._dbFillBar(poolUsed, poolMax, null)));
-    const conn = d.connections || ({} as AdminConnectionActivity);
-    const activeConn = (conn.by_state || {})['active'] ?? 0;
-    strip.appendChild(mkTile(Util.t('ui.diag_tile_sessions'), String(conn.total ?? '—'), Util.t('ui.diag_tile_active', {count: activeConn}),
-      conn.error ? 'err' : ((conn.long_running || []).length > 0 ? 'warn' : 'ok'), null));
-    const locks = _adminListRows<AdminLockWaitData>(Array.isArray(d.locks) ? d.locks : []);
-    strip.appendChild(mkTile(Util.t('ui.diag_tile_lock_waits'),
-      locks.length > 0 ? `<span style="color:var(--err)">${locks.length}</span>` : '0',
-      locks.length > 0 ? Util.t('ui.diag_tile_contention') : Util.t('ui.diag_tile_clear'),
-      locks.length > 0 ? 'err' : 'ok', null));
-    const tables = _adminListRows<AdminTableStatData>(Array.isArray(d.tables) ? d.tables : []);
-    const tblIssues = tables.filter((t) => t.needs_vacuum || t.needs_analyze).length;
-    strip.appendChild(mkTile(Util.t('ui.diag_tile_table_issues'),
-      tblIssues > 0 ? `<span style="color:var(--warn)">${tblIssues}</span>` : '0',
-      tblIssues > 0 ? Util.t('ui.diag_tables_need_work', {total: tables.length, issues: tblIssues}) : Util.t('ui.diag_tables_healthy', {count: tables.length}),
-      tblIssues > 0 ? 'warn' : 'ok', null));
-    const sq = d.slow_queries || ({} as AdminSlowQueriesResult);
-    let sqNum = '—', sqSub = Util.t('ui.diag_not_tracked'), sqSt = 'warn';
-    if (sq.available && (sq.queries || []).length) {
-      const top = sq.queries[0];
-      sqNum = `${top.mean_ms}<span style="font-size:12px;font-weight:400;color:var(--fg-mute)">ms</span>`;
-      sqSub = Util.t('ui.diag_avg_calls', {calls: top.calls.toLocaleString()});
-      sqSt  = top.mean_ms > 500 ? 'err' : (top.mean_ms > 100 ? 'warn' : 'ok');
-    } else if (sq.available) {
-      sqNum = '0'; sqSub = Util.t('ui.diag_no_queries'); sqSt = 'ok';
-    }
-    strip.appendChild(mkTile(Util.t('ui.diag_tile_slowest_query'), sqNum, sqSub, sqSt, null));
-    wrap.appendChild(strip);
-  },
-
   _dbFillBar(used: number, max: number, label: string | null): HTMLDivElement {
     const pct = max > 0 ? Math.min(100, Math.round(100 * used / max)) : 0;
-    const cls = pct >= 85 ? 'err' : (pct >= 60 ? 'warn' : 'ok');
+    const cls = pct >= THRESHOLDS.poolErrPct ? 'err' : (pct >= THRESHOLDS.poolWarnPct ? 'warn' : 'ok');
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-fillbar';
     const track = document.createElement('div');
@@ -2429,12 +2786,12 @@ export const AdminCockpit = {
       vaBtn.className = `db-maint-btn${urgentVA ? ' db-maint-btn--urgent' : ''}`;
       vaBtn.dataset.maintAction = 'vacuum-analyze';
       vaBtn.dataset.maintTable = tbl.table;
-      vaBtn.textContent = 'VACUUM ANALYZE';
+      vaBtn.textContent = Util.t('btn.vacuum_analyze');
       const aBtn = document.createElement('button');
       aBtn.className = `db-maint-btn${urgentA ? ' db-maint-btn--urgent' : ''}`;
       aBtn.dataset.maintAction = 'analyze';
       aBtn.dataset.maintTable = tbl.table;
-      aBtn.textContent = 'ANALYZE';
+      aBtn.textContent = Util.t('btn.analyze');
       actions.appendChild(vaBtn);
       actions.appendChild(aBtn);
       card.appendChild(actions);
@@ -2483,9 +2840,9 @@ export const AdminCockpit = {
     const maxMs = Math.max(...queries.map((q) => q.mean_ms ?? 0), 1);
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-hbar-chart';
-    for (const q of queries) {
+    AdminCockpit._capList(queries, 10, (vis) => { for (const q of vis) {
       const pct = Math.max(1, Math.round(100 * (q.mean_ms ?? 0) / maxMs));
-      const cls = (q.mean_ms ?? 0) > 500 ? 'err' : ((q.mean_ms ?? 0) > 100 ? 'warn' : '');
+      const cls = (q.mean_ms ?? 0) > THRESHOLDS.slowQueryErrMs ? 'err' : ((q.mean_ms ?? 0) > THRESHOLDS.slowQueryWarnMs ? 'warn' : '');
       const row = document.createElement('div');
       row.className = 'admin-db-hbar-row';
       const names = document.createElement('div');
@@ -2507,10 +2864,10 @@ export const AdminCockpit = {
       if (cls) val.style.color = `var(--${cls})`;
       const callChip = document.createElement('span');
       callChip.className = 'admin-db-hbar-size';
-      callChip.textContent = `${q.calls.toLocaleString()} calls`;
+      callChip.textContent = `${q.calls.toLocaleString()} ${Util.t('diag.calls')}`;
       row.appendChild(names); row.appendChild(track); row.appendChild(val); row.appendChild(callChip);
       wrap.appendChild(row);
-    }
+    } }, wrap);
     return wrap;
   },
 
@@ -2555,12 +2912,12 @@ export const AdminCockpit = {
           + `<div class="admin-db-lock-query">${Util.escapeHtml((query || '—').slice(0, 90))}</div>`;
         return node;
       };
-      chain.appendChild(mkNode(lk.blocking_pid, 'BLOCKING', lk.blocking_query, 'blocking'));
+      chain.appendChild(mkNode(lk.blocking_pid, Util.t('diag.lock_blocking'), lk.blocking_query, 'blocking'));
       const arrow = document.createElement('div');
       arrow.className = 'admin-db-lock-arrow';
       arrow.innerHTML = `<span class="admin-db-lock-type">${Util.escapeHtml(lk.lock_type || '')}</span> ▼`;
       chain.appendChild(arrow);
-      chain.appendChild(mkNode(lk.blocked_pid, `BLOCKED ${lk.blocked_for_s}s`, lk.blocked_query, 'blocked'));
+      chain.appendChild(mkNode(lk.blocked_pid, `${Util.t('diag.lock_blocked')} ${lk.blocked_for_s}s`, lk.blocked_query, 'blocked'));
       wrap.appendChild(chain);
     }
     return wrap;
@@ -2780,6 +3137,7 @@ export const AdminCockpit = {
     const rows = PerfMonitor.all();
     if (!rows.length) {
       tbody.innerHTML = `<tr><td colspan="7" class="admin-perf-empty">${Util.escapeHtml(Util.t('thread.empty'))}</td></tr>`;
+      AdminCockpit._repaintHeads();
       return;
     }
     rows.sort((a, b) => b.last - a.last);
@@ -2804,6 +3162,7 @@ export const AdminCockpit = {
         <td class="perf-ago">${ago(r.lastTs)}</td>
       </tr>`;
     }).join('');
+    AdminCockpit._repaintHeads();
   },
 
   /* ---------------------------------------------------------------------
@@ -2833,24 +3192,20 @@ export const AdminCockpit = {
       : inv.degraded
         ? `<span class="admin-warn">${Util.t('ui.ls_degraded')}</span>`
         : `<span class="admin-good">${Util.t('ui.ls_healthy')}</span>`;
-    const errTxt = errRate > 10
+    const errTxt = errRate > THRESHOLDS.errRateErrPerMin
       ? `<span class="admin-bad">${Util.t('ui.diag_err_rate_spike', { count: errCount, rate: errRate })}</span>`
       : errRate > 0
         ? `<span class="admin-warn">${Util.t('ui.diag_err_rate_warn', { count: errCount, rate: errRate })}</span>`
         : `${errCount}`;
 
+    // The body of the Client section: the head (title, help, light, one-liner) is the section's own summary.
+    // Refresh and Export bundle live in the page head now; Inspect storage and Reset stay with the data they act on.
     host.innerHTML = `
-      <div class="admin-card">
-        <div class="admin-card-hd">
-          <h3>${Util.t('ui.diag_client_title')}<span class="adm-help" tabindex="0" aria-label="Help"><span class="adm-help-dot">?</span><span class="adm-help-tip">${Util.t('ui.diag_client_help')}</span></span></h3>
-          <div class="admin-card-actions">
-            <button class="btn btn-ghost sm" id="admin-diag-refresh" title="${Util.t('tip.refresh')}">${Util.t('btn.refresh')}</button>
-            <button class="btn btn-ghost sm" id="admin-diag-storage" title="${Util.t('tip.inspect_storage')}">${Util.t('btn.inspect_storage')}</button>
-            <button class="btn btn-ghost sm" id="admin-diag-export" title="${Util.t('tip.diag_export_bundle')}">${Util.t('btn.export_bundle')}</button>
-            <button class="btn btn-warn  sm" id="admin-diag-reset"   title="${Util.t('tip.diag_clear_cache')}">${Util.t('btn.reset_client')}</button>
-          </div>
+        <div class="diag-client-actions">
+          <button class="btn btn-ghost sm" id="admin-diag-storage" title="${Util.t('tip.inspect_storage')}">${Util.t('btn.inspect_storage')}</button>
+          <button class="btn btn-warn  sm" id="admin-diag-reset"   title="${Util.t('tip.diag_clear_cache')}">${Util.t('btn.reset_client')}</button>
         </div>
-        <div class="admin-kv">
+        <div class="admin-kv diag-kv2">
           <span>${Util.t('ui.diag_kv_build')}</span><span>${Config.BUILD_ID}</span>
           <span>${Util.t('ui.diag_kv_schema')}</span><span>${Config.SCHEMA_VERSION}</span>
           <span>${Util.t('ui.diag_kv_cache')}</span><span>${Util.t('ui.diag_cache_val', { size: lastK, when: lastWhen })}</span>
@@ -2861,14 +3216,13 @@ export const AdminCockpit = {
           <span>${Util.t('ui.diag_kv_warnings')}</span><span>${warnCount} (${warnRate}/min)</span>
           <span>${Util.t('ui.diag_kv_tasks')}</span><span>${Store.tasksArr.length}</span>
           <span>${Util.t('ui.diag_kv_source')}</span><span>${stats.source || '—'}</span>
-          <span>${Util.t('ui.diag_kv_plant')}</span><span>${Store.selectedPlant ? Util.escapeHtml(Store.selectedPlant) : '<em>none</em>'}</span>
-        </div>
-      </div>`;
+          <span>${Util.t('ui.diag_kv_plant')}</span><span>${Store.selectedPlant ? Util.escapeHtml(Store.selectedPlant) : `<em>${Util.t('ui.none')}</em>`}</span>
+        </div>`;
 
-    document.getElementById('admin-diag-refresh')!.addEventListener('click', () => AdminCockpit._renderDiagnostics());
     document.getElementById('admin-diag-storage')!.addEventListener('click', () => AdminCockpit._showStorageInventory(inv));
-    document.getElementById('admin-diag-export' )!.addEventListener('click', () => AdminCockpit._exportDiagnostics());
     document.getElementById('admin-diag-reset'  )!.addEventListener('click', () => AdminCockpit._resetClientState());
+    AdminCockpit._computeClientStats();
+    AdminCockpit._repaintHeads();
   },
 
   async _resetClientState(): Promise<void> {
@@ -2923,7 +3277,7 @@ export const AdminCockpit = {
       persistence: (Persistence.stats && Persistence.stats()) || null,
       health:      AdminCockpit._healthData || null,
       deep:        AdminCockpit._deepData   || null,
-      dbDeep:      AdminCockpit._ovSlow.dbDeep,
+      dbDeep:      AdminCockpit._diagInputs().dbDeep,   // the freshest of this page's read and the Overview's
       storeCounts: {
         tasks:        Store.tasksArr.length,
         blocks:       (Store.blocks || []).length,
