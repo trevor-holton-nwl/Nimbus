@@ -1061,3 +1061,35 @@ test('_setSub(diagnostics, anchor) reveals the target before the Database read r
     A._renderDbDeep = realDb; A._revealAnchor = realReveal; A._diagInputs = realInputs; A._pendingAnchor = null;
   }
 });
+
+test('_settleReveal re-scrolls the deep-link target once when scrollTop is unchanged, and drops it when the user scrolled', () => {
+  const A = AdminCockpit;
+  const names = ['_startSpy', '_stopSpy', '_computeClientStats', '_ensureDbSubs', '_renderDiagnostics', '_renderPipeline', '_refreshThreadPane',
+    '_renderDiagRail', '_paintSectionHead', '_paintDiagStamp', '_observeSections', '_stopHealthPolling'];
+  const real = {}; for (const n of names) { real[n] = A[n]; A[n] = () => {}; }
+  const realDb = A._renderDbDeep; A._renderDbDeep = () => new Promise(() => {});
+  const realReveal = A._revealAnchor; A._revealAnchor = () => {};
+  const realInputs = A._diagInputs; A._diagInputs = () => ({ client: null, deep: null, dbDeep: null, perf: [], dbStatsAt: null, now: 0, pingMs: null });
+  const sc = { scrollTop: 40 };
+  const target = dnode('details', { id: 'diag-db-conn' });
+  target.isConnected = true; target.closest = () => sc;
+  let scrolls = 0; target.scrollIntoView = () => { scrolls++; };
+  const els = { 'admin-diag-pane': dnode('div', { id: 'admin-diag-pane' }), 'diag-db-conn': target };
+  try {
+    withDiagDom(els, () => {
+      A._setSub('diagnostics', 'diag-db-conn');
+      assert.equal(A._lastReveal.scrollTop, 40, 'recorded after the instant scroll');
+      A._settleReveal();
+      assert.equal(scrolls, 1, 'unchanged scrollTop: one more scroll');
+      A._settleReveal();
+      assert.equal(scrolls, 2, 'still settled while the user has not scrolled');
+      sc.scrollTop = 300;   // user scrolled
+      A._settleReveal();
+      assert.equal(scrolls, 2, 'no scroll after the user moved');
+      assert.equal(A._lastReveal, null, 'record dropped');
+    });
+  } finally {
+    for (const n of names) A[n] = real[n];
+    A._renderDbDeep = realDb; A._revealAnchor = realReveal; A._diagInputs = realInputs; A._pendingAnchor = null; A._lastReveal = null; A._activeSub = 'overview';
+  }
+});

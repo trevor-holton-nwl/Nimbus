@@ -519,6 +519,8 @@ export const AdminCockpit = {
   _spyVisible: new Set<string>(),
   _flashEl: null as HTMLElement | null,
   _flashTimer: null as ReturnType<typeof setTimeout> | null,
+  /** The last pending-anchor reveal, kept so the first async paints can settle it once (see _settleReveal). */
+  _lastReveal: null as { el: HTMLElement; scrollTop: number; at: number } | null,
   _auditAbort: null as AbortController | null,
   _fpPurgeStart: null as NimbusVendor.FlatpickrInstance | null,
   _fpPurgeEnd: null as NimbusVendor.FlatpickrInstance | null,
@@ -534,6 +536,7 @@ export const AdminCockpit = {
     AdminCockpit._activeSub = cur;
     // Set BEFORE the pane renders so _syncOpen sees it; always replaced, so a stale anchor never outlives a navigation.
     AdminCockpit._pendingAnchor = anchor ?? null;
+    AdminCockpit._lastReveal = null;
     // An inner-tab anchor (jobs:<tab>, sap:<tab>) is resolved by _revealPendingAnchor, which renders the pane itself.
     const paneAnchor = /^(jobs|sap):/.test(anchor ?? '');
     document.querySelectorAll<HTMLElement>('.admin-subtab').forEach((b) => {
@@ -804,6 +807,21 @@ export const AdminCockpit = {
     // A deep link jumps (no smooth scroll): a smooth scroll is computed against the skeleton layout, then stalls or lands
     // wrong when the reads fill the bodies above the target. Native scroll anchoring keeps the target put afterwards.
     A._revealAnchor(el, false);
+    const sc = el.closest?.('.admin-scroll') ?? document.querySelector?.('.admin-scroll');
+    A._lastReveal = sc ? { el, scrollTop: sc.scrollTop, at: Date.now() } : null;
+  },
+
+  /** After an async read paints (bodies above the target grew): re-scroll the deep-link target to the top once, but only
+   *  while the reveal is under 5 s old, the target is still attached and the user has not scrolled (scrollTop unchanged).
+   *  No flash, no focus change. Any other case drops the record. */
+  _settleReveal(): void {
+    const A = AdminCockpit;
+    const r = A._lastReveal;
+    if (!r) return;
+    const sc = r.el.isConnected ? (r.el.closest?.('.admin-scroll') ?? document.querySelector?.('.admin-scroll')) : null;
+    if (!sc || Date.now() - r.at > 5000 || sc.scrollTop !== r.scrollTop) { A._lastReveal = null; return; }
+    r.el.scrollIntoView({ block: 'start', behavior: 'auto' });
+    r.scrollTop = sc.scrollTop;
   },
 
   /** jobs:<tab> / sap:<tab>: render the pane, switch its inner view, then reveal the inner element. */
@@ -1729,12 +1747,14 @@ export const AdminCockpit = {
         // Backend warnings
         AdminCockpit._renderBackendWarnings(p.warnings || []);
         AdminCockpit._repaintHeads();   // Data pipeline and Backend warnings heads
+        AdminCockpit._settleReveal();
       })
       .catch((e: Error) => {
         if (e.name === 'AbortError') return;
         wrap.innerHTML = `<div class="admin-log-empty">${Util.escapeHtml(Util.t('pipe.load_failed', { msg: e.message }))}</div>`;
         ErrorLog.warn('admin', `Pipeline fetch failed: ${e.message}`);
         AdminCockpit._repaintHeads();
+        AdminCockpit._settleReveal();
       });
   },
 
@@ -2636,6 +2656,7 @@ export const AdminCockpit = {
         });
 
         A._repaintHeads();   // the Database head and its eight sub-section heads
+        A._settleReveal();
       })
       .catch((e: Error) => {
         if (e.name === 'AbortError') return;
@@ -2648,6 +2669,7 @@ export const AdminCockpit = {
         });
         ErrorLog.warn('admin', `DB deep dive failed: ${e.message}`);
         A._repaintHeads();
+        A._settleReveal();
       });
   },
 
