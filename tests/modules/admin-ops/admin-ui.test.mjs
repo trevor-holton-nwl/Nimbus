@@ -195,12 +195,12 @@ function withEmptyDom(fn) {
   try { return fn(); } finally { if (prior === undefined) delete globalThis.document; else globalThis.document = prior; }
 }
 const ALL_RENDERERS = ['_renderOverview', '_renderLogsPane', '_renderDiagnosticsPane', '_renderOrderMaintenance',
-  '_renderHealth', '_renderBackendLog', '_renderLogs', '_renderAuditLog', '_renderDiagnostics', '_renderPipeline',
+  '_refreshOverview', '_renderBackendLog', '_renderLogs', '_renderAuditLog', '_renderDiagnostics', '_renderPipeline',
   '_renderDbDeep', '_refreshThreadPane', '_renderPurgeMeta', '_renderAudit', '_startHealthPolling', '_stopHealthPolling'];
 
 test('render() calls _setSub once and renders Overview exactly once', () => {
   const calls = [];
-  const restore = stubAll(['_renderHealth', '_startHealthPolling', '_stopHealthPolling', '_renderLogsPane'], calls);
+  const restore = stubAll(['_refreshOverview', '_startHealthPolling', '_stopHealthPolling', '_renderLogsPane'], calls);
   const realOv = AdminCockpit._renderOverview; let ov = 0;
   AdminCockpit._renderOverview = function () { ov++; return realOv.call(AdminCockpit); };
   const realSet = AdminCockpit._setSub; let set = 0;
@@ -209,7 +209,7 @@ test('render() calls _setSub once and renders Overview exactly once', () => {
   finally { AdminCockpit._renderOverview = realOv; AdminCockpit._setSub = realSet; restore(); }
   assert.equal(set, 1);
   assert.equal(ov, 1);
-  assert.equal(calls.filter(c => c === '_renderHealth').length, 1);
+  assert.equal(calls.filter(c => c === '_refreshOverview').length, 1);
 });
 
 test('_setSub("logs") stops health polling and renders the logs pane only', () => {
@@ -223,10 +223,10 @@ test('_setSub("logs") stops health polling and renders the logs pane only', () =
 
 test('_setSub("overview") does not call the diagnostics or log renderers', () => {
   const calls = [];
-  const restore = stubAll(['_renderHealth', '_startHealthPolling', '_stopHealthPolling', '_renderBackendLog', '_renderLogs',
+  const restore = stubAll(['_refreshOverview', '_startHealthPolling', '_stopHealthPolling', '_renderBackendLog', '_renderLogs',
     '_renderAuditLog', '_renderDiagnostics', '_renderPipeline', '_renderDbDeep', '_refreshThreadPane', '_renderPurgeMeta', '_renderAudit'], calls);
   try { withEmptyDom(() => AdminCockpit._setSub('overview')); } finally { restore(); }
-  assert.deepEqual(calls.sort(), ['_renderHealth', '_startHealthPolling']);
+  assert.deepEqual(calls.sort(), ['_refreshOverview', '_startHealthPolling']);
 });
 
 test('_setSub dispatches diagnostics and order-maintenance to their renderers', () => {
@@ -265,4 +265,321 @@ test('no gotoOvTab anywhere in frontend', () => {
   for (const f of ['app.js', 'index.html']) {
     assert.ok(!readFileSync(new URL('../../../frontend/' + f, import.meta.url), 'utf8').includes('gotoOvTab'), f);
   }
+});
+
+// ---- W2: Signal board refresh, polling, fixes ----
+import { JobsClient } from '../../../frontend/admin-ops/jobs-client.mjs';
+import { Session } from '../../../frontend/security/session.mjs';
+import { Store } from '../../../frontend/platform/store.mjs';
+
+const HEALTH = (ping = 12) => ({ db: { connected: true, ping_ms: ping, total_orders: 100 }, pool: { pool_max: 10, pool_size: 2, pool_available: 2 }, memory: { loaded: true, loaded_at: null }, color_wheel: { misses: 0 } });
+const COUNT = { total: 0, entries: [] };
+const DEEP = { tables: [], connections: { total: 1, long_running: [] }, locks: [], slow_queries: { available: false, queries: [] } };
+const SUMMARY = { failed24h: 0, missed24h: 0, warning24h: 0, longerThanUsual: [], nextFire: null, scheduler: { ok: true } };
+
+/** Stub _fetchJson (by path prefix), JobsClient, admin role and plant; returns the call log and a restore(). */
+function stubOverview({ routes = {}, admin = true, plant = 'P1' } = {}) {
+  const A = AdminCockpit;
+  const saved = {
+    fetch: A._fetchJson, sum: JobsClient.summary, runs: JobsClient.runs, isAdmin: Session.isAdmin,
+    plant: Store._state.selectedPlant, slow: A._ovSlow, fast: A._ovFast, seq: A._ovSeq, sigKey: A._ovSigKey,
+  };
+  const calls = [];
+  A._fetchJson = async (path) => {
+    calls.push(path);
+    const key = Object.keys(routes).find(k => path.startsWith(k));
+    const r = key ? routes[key] : undefined;
+    if (typeof r === 'function') return r(path);
+    if (r instanceof Error) throw r;
+    if (r !== undefined) return r;
+    if (path.startsWith('/health')) return HEALTH();
+    if (path.startsWith('/logs/backend')) return COUNT;
+    if (path.startsWith('/diagnostics/db')) return DEEP;
+    if (path.startsWith('/audit/log')) return { entries: [] };
+    if (path.startsWith('/upload/audit')) return { audit: [] };
+    if (path.startsWith('/sap/staging/send')) return { ready: 0, sent: 0, error: 0, last_queued_at: null, last_sent_at: null };
+    if (path.startsWith('/sap/staging/batches')) return { batches: [] };
+    if (path.startsWith('/sap/interface/runs')) return { runs: [] };
+    throw new Error('unexpected ' + path);
+  };
+  JobsClient.summary = async () => { calls.push('jobs.summary'); return SUMMARY; };
+  JobsClient.runs = async () => { calls.push('jobs.runs'); return { items: [], nextBeforeId: null }; };
+  Session.isAdmin = () => admin;
+  Store._state.selectedPlant = plant;
+  A._ovSlow = { dbDeep: null, dbDeepAt: 0, auditLog: [], uploadAudit: [], at: 0 };
+  A._ovFast = { health: null, backendErrors: null, backendWarns: null, jobs: null, sap: null, plant: '' };
+  A._ovSigKey = '';
+  const restore = () => {
+    A._fetchJson = saved.fetch; JobsClient.summary = saved.sum; JobsClient.runs = saved.runs; Session.isAdmin = saved.isAdmin;
+    Store._state.selectedPlant = saved.plant; A._ovSlow = saved.slow; A._ovFast = saved.fast; A._ovSeq = saved.seq; A._ovSigKey = saved.sigKey;
+  };
+  return { calls, restore };
+}
+const sigOf = id => AdminCockpit._ovSignals.find(s => s.id === id);
+
+test('stale overview response is discarded', async () => {
+  let n = 0; let release;
+  const gate = new Promise(r => { release = r; });
+  const { restore } = stubOverview({ routes: { '/health': async () => (++n === 1 ? (await gate, HEALTH(9999)) : HEALTH(12)) } });
+  try {
+    const first = AdminCockpit._refreshOverview({ force: true });
+    const second = AdminCockpit._refreshOverview({ force: true });
+    await second;
+    release();
+    await first;
+    assert.equal(AdminCockpit._ovFast.health.db.ping_ms, 12);
+    assert.equal(sigOf('database').reasonKey, 'sig.db_ok');
+  } finally { restore(); }
+});
+
+test('rejected fast-tier fetch yields sig.unavailable, not a silent ok', async () => {
+  const { restore } = stubOverview({ routes: { '/health': new Error('boom') } });
+  try {
+    await AdminCockpit._refreshOverview({ force: true });
+    const db = sigOf('database');
+    assert.equal(db.severity, 'err');
+    assert.equal(db.reasonKey, 'sig.unavailable');
+  } finally { restore(); }
+});
+
+test('a 403 yields sig.admin_only, not err', async () => {
+  const { restore } = stubOverview({ routes: { '/health': Object.assign(new Error('forbidden'), { status: 403 }) } });
+  try {
+    await AdminCockpit._refreshOverview({ force: true });
+    const db = sigOf('database');
+    assert.equal(db.severity, 'info');
+    assert.equal(db.reasonKey, 'sig.admin_only');
+  } finally { restore(); }
+});
+
+test('slow tier runs on force or when older than 5 minutes, not on every tick', async () => {
+  const { calls, restore } = stubOverview();
+  const deep = () => calls.filter(c => c.startsWith('/diagnostics/db')).length;
+  try {
+    await AdminCockpit._refreshOverview();           // first read: nothing cached yet
+    assert.equal(deep(), 1);
+    await AdminCockpit._refreshOverview();           // fresh: skipped
+    assert.equal(deep(), 1);
+    await AdminCockpit._refreshOverview({ force: true });
+    assert.equal(deep(), 2);
+    AdminCockpit._ovSlow.at = Date.now() - 300_001;  // older than OV_SLOW_MS
+    await AdminCockpit._refreshOverview();
+    assert.equal(deep(), 3);
+  } finally { restore(); }
+});
+
+test('a failed slow read keeps the last good deep-dive', async () => {
+  const { restore } = stubOverview();
+  try {
+    await AdminCockpit._refreshOverview({ force: true });
+    assert.ok(AdminCockpit._ovSlow.dbDeep);
+    AdminCockpit._fetchJson = async (p) => {
+      if (p.startsWith('/diagnostics/db')) throw new Error('slow fail');
+      return p.startsWith('/health') ? HEALTH() : p.startsWith('/logs') ? COUNT : { entries: [], audit: [], batches: [], runs: [] };
+    };
+    await AdminCockpit._refreshOverview({ force: true });
+    assert.ok(AdminCockpit._ovSlow.dbDeep, 'kept');
+  } finally { restore(); }
+});
+
+test('clientOnly does not fetch', async () => {
+  const { calls, restore } = stubOverview();
+  try {
+    await AdminCockpit._refreshOverview({ force: true });
+    const n = calls.length;
+    await AdminCockpit._refreshOverview({ clientOnly: true });
+    assert.equal(calls.length, n);
+    assert.equal(AdminCockpit._ovSignals.length, 7);
+  } finally { restore(); }
+});
+
+test('no plant: Jobs runs and SAP reads are skipped', async () => {
+  const { calls, restore } = stubOverview({ plant: null });
+  try {
+    await AdminCockpit._refreshOverview({ force: true });
+    assert.ok(!calls.includes('jobs.runs'));
+    assert.ok(!calls.some(c => c.startsWith('/sap/')));
+    assert.equal(sigOf('sap').reasonKey, 'sig.sap_no_plant');
+  } finally { restore(); }
+});
+
+test('with a plant and admin the SAP reads and Jobs runs happen', async () => {
+  const { calls, restore } = stubOverview();
+  try {
+    await AdminCockpit._refreshOverview({ force: true });
+    assert.equal(calls.filter(c => c === 'jobs.runs').length, 2);
+    assert.ok(calls.some(c => c.startsWith('/sap/staging/send/P1/status')));
+    assert.ok(calls.some(c => c.startsWith('/sap/staging/batches?plant=P1&limit=20')));
+    assert.ok(calls.some(c => c.startsWith('/sap/interface/runs?limit=1')));
+  } finally { restore(); }
+});
+
+function withTabDom(active, fn) {
+  const prior = globalThis.document;
+  globalThis.document = {
+    querySelectorAll() { return []; },
+    getElementById(id) { return id === 'admin-tab' ? { classList: { contains: () => active } } : null; },
+  };
+  try { return fn(); } finally { if (prior === undefined) delete globalThis.document; else globalThis.document = prior; }
+}
+
+test('pause skips the tick; resume runs it', () => {
+  const A = AdminCockpit; let n = 0;
+  const real = A._refreshOverview; const priorSub = A._activeSub; const priorPaused = A._ovPaused;
+  A._refreshOverview = async () => { n++; };
+  try {
+    withTabDom(true, () => {
+      A._activeSub = 'overview';
+      A._ovPaused = true; A._ovPoll(); assert.equal(n, 0);
+      A._ovPaused = false; A._ovPoll(); assert.equal(n, 1);
+      A._activeSub = 'logs'; A._ovPoll(); assert.equal(n, 1, 'other sub-tab: no tick');
+    });
+    withTabDom(false, () => { A._activeSub = 'overview'; A._ovPoll(); assert.equal(n, 1, 'Admin tab hidden: no tick'); });
+  } finally { A._refreshOverview = real; A._activeSub = priorSub; A._ovPaused = priorPaused; }
+});
+
+test('start is idempotent and _setSub("logs") stops both timers', () => {
+  const A = AdminCockpit;
+  const restore = stubAll(ALL_RENDERERS.filter(n => n !== '_stopHealthPolling' && n !== '_startHealthPolling'), []);
+  try {
+    withEmptyDom(() => {
+      A._startHealthPolling();
+      const t = A._ovTimer, k = A._ovTick;
+      A._startHealthPolling();
+      assert.ok(t && k);
+      assert.equal(A._ovTimer, t); assert.equal(A._ovTick, k);
+      A._setSub('logs');
+      assert.equal(A._ovTimer, null); assert.equal(A._ovTick, null);
+    });
+  } finally { A._stopHealthPolling(); restore(); }
+});
+
+test('_onSignalFix("nav.jobs") goes to the Jobs sub-tab', async () => {
+  const A = AdminCockpit; const seen = []; const real = A.gotoSub;
+  A.gotoSub = (s) => { seen.push(s); };
+  try { await A._onSignalFix({ id: 'nav.jobs', labelKey: 'ov.details' }); } finally { A.gotoSub = real; }
+  assert.deepEqual(seen, ['jobs']);
+});
+
+test('jobs.open_run renders the Jobs pane before opening the run', async () => {
+  const A = AdminCockpit; const { JobsAdmin } = await import('../../../frontend/admin-ops/jobs-pane.mjs');
+  const order = []; const realGo = A.gotoSub; const realRender = JobsAdmin.render; const realOpen = JobsAdmin.openRun;
+  A.gotoSub = (s) => { order.push('goto:' + s); };
+  JobsAdmin.render = async () => { order.push('render'); };
+  JobsAdmin.openRun = (id) => { order.push('open:' + id); };
+  try { await A._onSignalFix({ id: 'jobs.open_run', labelKey: 'btn.open_run', args: { runId: 7 } }); }
+  finally { A.gotoSub = realGo; JobsAdmin.render = realRender; JobsAdmin.openRun = realOpen; }
+  assert.deepEqual(order, ['goto:jobs', 'render', 'open:7']);
+});
+
+test('admin-only fixes do nothing for a non-admin', async () => {
+  const A = AdminCockpit; const real = A._runMaintenance; let ran = 0; const priorAdmin = Session.isAdmin;
+  A._runMaintenance = async () => { ran++; };
+  Session.isAdmin = () => false;
+  try {
+    await A._onSignalFix({ id: 'db.vacuum_table', labelKey: 'btn.vacuum', args: { table: 'orders' }, adminOnly: true });
+    await A._onSignalFix({ id: 'db.vacuum_table', labelKey: 'btn.vacuum', args: { table: 'orders' } });
+  } finally { A._runMaintenance = real; Session.isAdmin = priorAdmin; }
+  assert.equal(ran, 0);
+});
+
+test('db.vacuum_table calls _runMaintenance("vacuum-analyze", table) and refreshes', async () => {
+  const A = AdminCockpit; const real = A._runMaintenance; const realRef = A._refreshOverview; const priorAdmin = Session.isAdmin;
+  const seen = []; let refreshed = 0;
+  A._runMaintenance = async (...a) => { seen.push(a); };
+  A._refreshOverview = async () => { refreshed++; };
+  Session.isAdmin = () => true;
+  try { await A._onSignalFix({ id: 'db.vacuum_table', labelKey: 'btn.vacuum', args: { table: 'orders' } }); }
+  finally { A._runMaintenance = real; A._refreshOverview = realRef; Session.isAdmin = priorAdmin; }
+  assert.deepEqual(seen, [['vacuum-analyze', 'orders', null]]);
+  assert.equal(refreshed, 1);
+});
+
+// A tiny fake DOM for the renderers (createElement-only construction).
+function fakeEl(tag) {
+  const n = {
+    tag, children: [], dataset: {}, attrs: {}, className: '', _text: '', hidden: false, title: '', disabled: false, type: '',
+    appendChild(c) { n.children.push(c); return c; },
+    append(...cs) { for (const c of cs) n.children.push(c); },
+    setAttribute(k, v) { n.attrs[k] = v; },
+    contains() { return false; },
+    querySelector() { return null; },
+    closest() { return null; },
+    get textContent() { return n._text; },
+    set textContent(v) { n._text = v; if (v === '') n.children = []; },
+  };
+  return n;
+}
+function withRenderDom(hosts, fn) {
+  const prior = globalThis.document;
+  globalThis.document = {
+    activeElement: null,
+    createElement: fakeEl,
+    createTextNode(t) { return { text: t, _text: t }; },
+    getElementById(id) { return hosts[id] ?? null; },
+    querySelectorAll() { return []; },
+  };
+  try { return fn(); } finally { if (prior === undefined) delete globalThis.document; else globalThis.document = prior; }
+}
+
+test('_renderSignals builds one row per signal with data-sig and data-sev, and repaints only on change', async () => {
+  const { restore } = stubOverview();
+  try {
+    await AdminCockpit._refreshOverview({ force: true });
+    const host = fakeEl('div');
+    withRenderDom({ 'ov-signals': host }, () => {
+      AdminCockpit._ovSigKey = '';
+      AdminCockpit._renderSignals(AdminCockpit._ovSignals);
+      assert.equal(host.children.length, 7);
+      for (const row of host.children) {
+        assert.ok(row.dataset.sig && row.dataset.sev);
+        assert.equal(row.attrs.role, 'listitem');
+      }
+      const first = host.children[0];
+      AdminCockpit._renderSignals(AdminCockpit._ovSignals);
+      assert.equal(host.children[0], first, 'unchanged signals: no repaint');
+    });
+  } finally { restore(); }
+});
+
+test('_renderAttention with nothing to flag shows the all-clear key', () => {
+  const host = fakeEl('div');
+  withRenderDom({ 'ov-attention': host }, () => AdminCockpit._renderAttention([]));
+  assert.equal(host.children.length, 1);
+  assert.equal(host.children[0]._text, 'ov.attention_clear');
+});
+
+test('_renderRecent shows at most 10 rows', async () => {
+  const { restore } = stubOverview();
+  try {
+    await AdminCockpit._refreshOverview({ force: true });
+    AdminCockpit._ovSlow.auditLog = Array.from({ length: 25 }, (_, i) => ({ ts: new Date(Date.now() - i * 1000).toISOString(), user: 'u', action: 'a' + i }));
+    const host = fakeEl('div');
+    withRenderDom({ 'ov-recent': host }, () => AdminCockpit._renderRecent());
+    assert.equal(host.children.length, 10);
+  } finally { restore(); }
+});
+
+test('markup, CSS and source: health bar gone, signal board present, no innerHTML in the Overview renderers', () => {
+  const read = f => readFileSync(new URL('../../../frontend/' + f, import.meta.url), 'utf8');
+  const html = read('index.html'); const css = read('styles.css'); const src = read('admin-ops/admin-ui.mts');
+  assert.ok(!html.includes('admin-health-bar'));
+  assert.equal(AdminCockpit._renderHealth, undefined);
+  for (const id of ['ov-meta', 'ov-pause', 'ov-refresh', 'ov-signals-card', 'ov-signals', 'ov-attention', 'ov-recent', 'ov-open-logs']) {
+    assert.ok(html.includes(`id="${id}"`), id);
+  }
+  const rows = css.split('\n').filter(l => /^\.sig-row/.test(l) || /^\.attn-row/.test(l)).join('\n');
+  assert.ok(!/border-left/.test(rows));
+  assert.match(css, /\.sig-row\[data-sev="warn"\]\s+\.sig-name\s*\{\s*color:\s*var\(--warn-text\)/);
+  assert.match(css, /\.sig-detail\[hidden\]\s*\{\s*display:\s*none/);
+  const a = src.indexOf('_renderOvMeta(): void'); const b = src.indexOf("case 'client.reset'");
+  assert.ok(a > 0 && b > a);
+  assert.ok(!src.slice(a, b).includes('innerHTML'));
+  assert.ok(!/label: '(DB Load|Color Merge|Emitted|Rendered)'/.test(src));
+});
+
+test('_exportDiagnostics reads the cached health and deep data', () => {
+  const src = readFileSync(new URL('../../../frontend/admin-ops/admin-ui.mts', import.meta.url), 'utf8');
+  assert.match(src, /health:\s+AdminCockpit\._healthData/);
+  assert.match(src, /deep:\s+AdminCockpit\._deepData/);
 });

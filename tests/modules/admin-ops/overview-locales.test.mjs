@@ -49,3 +49,10 @@ test('pinned spot values', () => {
 test('old tab keys are absent (removed in W1)', () => {
   for (const l of LOCALES) { assert.equal(T[l]['tab.logs_audit'], undefined, `${l} tab.logs_audit`); assert.equal(T[l]['tab.data_operations'], undefined, `${l} tab.data_operations`); }
 });
+
+test('every literal pipe./ov./sig./attn. key admin-ui.mts passes to Util.t resolves in all five locales', () => {
+  const src = readFileSync(new URL('admin-ops/admin-ui.mts', root), 'utf8');
+  const used = [...new Set([...src.matchAll(/Util\.t\('((?:pipe|ov|sig|attn)\.[\w.]+)'/g)].map(m => m[1]))];
+  assert.ok(used.some(k => k.startsWith('pipe.')) && used.some(k => k.startsWith('ov.')));
+  for (const k of used) for (const l of LOCALES) assert.ok(T[l][k], `${l}.js is missing ${k}`);
+});

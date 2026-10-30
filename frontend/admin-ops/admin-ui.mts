@@ -19,7 +19,35 @@ import { MasterData } from '../master-data/admin-ui.mjs';
 import { Interface } from '../integration/sap-interface-ui.mjs';
 import { Security } from '../security/security-admin.mjs';
 import { JobsAdmin } from './jobs-pane.mjs';
-import type { AdminSub } from './signals.mjs';
+import { JobsClient } from './jobs-client.mjs';
+import type { JobRun } from './jobs-client.mjs';
+import { buildSignals, buildAttention, FORBIDDEN, NOT_FOUND } from './signals.mjs';
+import type {
+  AdminSub, AttentionItem, BackendCountLike, DbDeepLike, DetailTable, Fix, HealthLike, SapBatchHeader,
+  SapRunLike, SapSendStatus, Signal, SignalId, SignalInputs,
+} from './signals.mjs';
+import { fromAudit, fromBackend, fromFrontend, fromJobRun, fromUpload, filterEntries, mergeEntries } from './unified-log.mjs';
+import type { LogEntry as FrontendLogEntry, UnifiedEntry } from './unified-log.mjs';
+
+/** Overview refresh cadence: the fast tier (health, backend counts, Jobs, SAP) and the slow tier (DB deep-dive, audit, uploads). */
+const OV_FAST_MS = 30_000;
+const OV_SLOW_MS = 300_000;
+/** Fixes only an admin may run (the buttons are disabled for everyone else). */
+const ADMIN_FIXES = new Set(['jobs.rerun', 'db.vacuum_all', 'db.vacuum_table']);
+
+/** The last fast-tier read, cached so a client-only rebuild and the Recent panel can reuse it. */
+interface OvFast {
+  health: HealthLike | null; healthErr?: string | undefined;
+  backendErrors: BackendCountLike | null; backendWarns: BackendCountLike | null; backendErr?: string | undefined;
+  jobs: SignalInputs['jobs']; jobsErr?: string | undefined;
+  sap: SignalInputs['sap']; sapErr?: string | undefined;
+  plant: string;
+}
+/** The last slow-tier read; a failed read keeps the previous good data. */
+interface OvSlow {
+  dbDeep: DbDeepLike | null; dbDeepErr?: string | undefined; dbDeepAt: number;
+  auditLog: AdminAuditLogItem[]; uploadAudit: AdminUploadAuditItem[]; at: number;
+}
 
 /* =============================================================================
    AdminCockpit backend response shapes — local interfaces for endpoints
@@ -456,12 +484,23 @@ export const AdminCockpit = {
   _backendLogFilter: { level: 'all', category: 'all', since: '', q: '', reqId: '', user: '' },
   _healthData: null as AdminHealthResponse | null,
   _deepData: null as AdminDiagnosticsDeepResponse | null,
-  _healthTimer: null as ReturnType<typeof setInterval> | null,
+  _ovTimer: null as ReturnType<typeof setInterval> | null,
+  _ovTick: null as ReturnType<typeof setInterval> | null,
+  _ovClientTimer: null as ReturnType<typeof setTimeout> | null,
+  _ovPaused: false,
+  _ovSeq: 0,
+  _ovAbort: null as AbortController | null,
+  _ovLastAt: 0,
+  _ovFast: { health: null, backendErrors: null, backendWarns: null, jobs: null, sap: null, plant: '' } as OvFast,
+  _ovSlow: { dbDeep: null, dbDeepAt: 0, auditLog: [], uploadAudit: [], at: 0 } as OvSlow,
+  _ovOpenDetail: null as SignalId | null,
+  _ovSignals: [] as Signal[],
+  _ovAttention: [] as AttentionItem[],
+  _ovSigKey: '',
   _pipelineOpen: null as string | null,
   _activeSub: 'overview',
   _dbDeepAbort: null as AbortController | null,
   _backendLogAbort: null as AbortController | null,
-  _healthAbort: null as AbortController | null,
   _pipelineAbort: null as AbortController | null,
   _auditAbort: null as AbortController | null,
   _auditLogAbort: null as AbortController | null,
@@ -546,7 +585,25 @@ export const AdminCockpit = {
     document.getElementById('admin-audit-clear')?.addEventListener('click', AdminCockpit._clearAudit);
     document.getElementById('admin-audit-log-reload')?.addEventListener('click', AdminCockpit._renderAuditLog);
     document.getElementById('admin-audit-log-clear')?.addEventListener('click', AdminCockpit._clearAuditLog);
-    document.getElementById('admin-health-refresh')?.addEventListener('click', AdminCockpit._renderHealth);
+    document.getElementById('ov-pause')?.addEventListener('click', () => AdminCockpit._setPaused(!AdminCockpit._ovPaused));
+    document.getElementById('ov-refresh')?.addEventListener('click', () => { void AdminCockpit._refreshOverview({ force: true }); });
+    document.getElementById('ov-open-logs')?.addEventListener('click', () => AdminCockpit.gotoSub('logs'));
+    const onOvClick = (e: Event): void => {
+      const t = e.target as HTMLElement | null;
+      const fixBtn = t?.closest<HTMLButtonElement>('[data-fix]');
+      if (fixBtn && !fixBtn.disabled) {
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(fixBtn.dataset.args || '{}') as Record<string, unknown>; } catch { args = {}; }
+        void AdminCockpit._onSignalFix({ id: fixBtn.dataset.fix || '', labelKey: '', args, adminOnly: fixBtn.dataset.admin === '1' }, fixBtn);
+        return;
+      }
+      const nav = t?.closest<HTMLElement>('[data-nav]');
+      if (nav?.dataset.nav) { AdminCockpit.gotoSub(nav.dataset.nav as AdminSub); return; }
+      const det = t?.closest<HTMLElement>('.sig-details');
+      if (det) AdminCockpit._toggleDetail(det);
+    };
+    document.getElementById('ov-signals')?.addEventListener('click', onOvClick);
+    document.getElementById('ov-attention')?.addEventListener('click', onOvClick);
     document.getElementById('admin-pipeline-refresh')?.addEventListener('click', AdminCockpit._renderPipeline);
     document.getElementById('admin-db-deep-refresh')?.addEventListener('click', AdminCockpit._renderDbDeep);
     document.getElementById('admin-db-deep')?.addEventListener('click', async (e: MouseEvent) => {
@@ -590,6 +647,7 @@ export const AdminCockpit = {
       if (panel?.classList.contains('active') && AdminCockpit._activeSub === 'logs') {
         AdminCockpit._renderLogs();
       }
+      AdminCockpit._queueClientRefresh();
     });
 
     document.getElementById('admin-thread-clear')?.addEventListener('click', () => {
@@ -602,12 +660,17 @@ export const AdminCockpit = {
     });
 
     Store.subscribe((evt: StoreEvent) => {
+      if (evt.type === 'plant:selected') {
+        // Jobs and SAP are read for the selected plant only: re-read when it changes.
+        if (AdminCockpit._isOverviewActive()) void AdminCockpit._refreshOverview();
+      }
       if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate') {
         const panel = document.getElementById('admin-tab');
         if (panel?.classList.contains('active') && AdminCockpit._activeSub === 'diagnostics') {
           // Defer so Persistence._lastLoad stats are fully written before rendering.
           setTimeout(() => AdminCockpit._renderPipeline(), 50);
         }
+        AdminCockpit._queueClientRefresh();
       }
     }, 'AdminCockpit');
   },
@@ -617,7 +680,7 @@ export const AdminCockpit = {
   },
 
   _renderOverview(): void {
-    AdminCockpit._renderHealth();
+    void AdminCockpit._refreshOverview({ force: true });
     AdminCockpit._startHealthPolling();
   },
 
@@ -641,108 +704,497 @@ export const AdminCockpit = {
 
   /** Started by _renderOverview; called from application-shell.mjs's
    *  visibility-change handler once that file is converted (Phase 5) so this
-   *  public start/stop pair's signature is load-bearing beyond this module. */
+   *  public start/stop pair's signature is load-bearing beyond this module.
+   *  Runs the 30 s refresh tick (skipped while paused, the tab hidden or another
+   *  sub-tab open) and a 1 s ticker that keeps "refreshed N s ago" honest. */
   _startHealthPolling(): void {
-    if (AdminCockpit._healthTimer) return;
-    AdminCockpit._healthTimer = setInterval(() => {
-      if (document.getElementById('admin-tab')?.classList.contains('active')) {
-        AdminCockpit._renderHealth();
-      }
-    }, 30_000);
+    if (!AdminCockpit._ovTimer) {
+      AdminCockpit._ovTimer = setInterval(() => AdminCockpit._ovPoll(), OV_FAST_MS);
+    }
+    if (!AdminCockpit._ovTick) {
+      AdminCockpit._ovTick = setInterval(() => AdminCockpit._renderOvMeta(), 1000);
+    }
+    AdminCockpit._renderOvMeta();
   },
 
   _stopHealthPolling(): void {
-    if (AdminCockpit._healthTimer) {
-      clearInterval(AdminCockpit._healthTimer);
-      AdminCockpit._healthTimer = null;
+    if (AdminCockpit._ovTimer) { clearInterval(AdminCockpit._ovTimer); AdminCockpit._ovTimer = null; }
+    if (AdminCockpit._ovTick) { clearInterval(AdminCockpit._ovTick); AdminCockpit._ovTick = null; }
+    if (AdminCockpit._ovClientTimer) { clearTimeout(AdminCockpit._ovClientTimer); AdminCockpit._ovClientTimer = null; }
+    AdminCockpit._ovAbort?.abort();
+    AdminCockpit._ovAbort = null;
+  },
+
+  /** One tick of the 30 s timer. */
+  _ovPoll(): void {
+    if (AdminCockpit._ovPaused || AdminCockpit._activeSub !== 'overview') return;
+    if (!document.getElementById('admin-tab')?.classList.contains('active')) return;
+    void AdminCockpit._refreshOverview();
+  },
+
+  _isOverviewActive(): boolean {
+    return AdminCockpit._activeSub === 'overview'
+      && !!document.getElementById('admin-tab')?.classList.contains('active');
+  },
+
+  /** A burst of ErrorLog / Store events becomes one client-only rebuild. */
+  _queueClientRefresh(): void {
+    if (AdminCockpit._ovClientTimer || !AdminCockpit._isOverviewActive()) return;
+    AdminCockpit._ovClientTimer = setTimeout(() => {
+      AdminCockpit._ovClientTimer = null;
+      if (AdminCockpit._isOverviewActive()) void AdminCockpit._refreshOverview({ clientOnly: true });
+    }, 300);
+  },
+
+  _setPaused(on: boolean): void {
+    AdminCockpit._ovPaused = on;
+    const btn = document.getElementById('ov-pause');
+    if (btn) {
+      btn.textContent = Util.t(on ? 'btn.resume' : 'btn.pause');
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+    AdminCockpit._renderOvMeta();
+    if (!on && AdminCockpit._activeSub === 'overview') void AdminCockpit._refreshOverview();
+  },
+
+  /** GET a JSON path under the API base with a timeout and an optional caller abort.
+   *  401/403 throw Error('forbidden') and 404 Error('not_found') (the signal model's FORBIDDEN / NOT_FOUND);
+   *  any other non-2xx throws Error('HTTP <status>'). The error carries `status`. */
+  async _fetchJson<T>(path: string, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+    const parts: AbortSignal[] = [AbortSignal.timeout(timeoutMs)];
+    if (signal) parts.push(signal);
+    const sig = AbortSignal.any ? AbortSignal.any(parts) : (signal ?? parts[0]);
+    const r = await Util.fetchTraced(`${Config.API_BASE}${path}`, { signal: sig });
+    if (!r.ok) {
+      const msg = r.status === 401 || r.status === 403 ? FORBIDDEN : r.status === 404 ? NOT_FOUND : `HTTP ${r.status}`;
+      throw Object.assign(new Error(msg), { status: r.status });
+    }
+    return await r.json() as T;
+  },
+
+  /** A rejected read as the string the signal model expects ('forbidden', 'not_found' or a message). */
+  _ovErr(e: unknown): string {
+    const m = (e as Error | null)?.message ?? String(e);
+    if (m === FORBIDDEN || /HTTP 40[13]\b/.test(m)) return FORBIDDEN;
+    if (m === NOT_FOUND || /HTTP 404\b/.test(m)) return NOT_FOUND;
+    return m || 'error';
+  },
+
+  /** Read the Overview sources and rebuild the board. Fast tier every call (health, backend counts, Jobs, SAP);
+   *  slow tier (DB deep-dive, audit, uploads) only on `force` or when older than OV_SLOW_MS, keeping the last good
+   *  data when a slow read fails. `clientOnly` rebuilds from the cached payloads plus this browser's live counters. */
+  async _refreshOverview(o: { force?: boolean; clientOnly?: boolean } = {}): Promise<void> {
+    const A = AdminCockpit;
+    const seq = ++A._ovSeq;
+    A._ovAbort?.abort();
+    const ctl = new AbortController();
+    A._ovAbort = ctl;
+    const plant = Store.selectedPlant ?? '';
+    const isAdmin = Session.isAdmin();
+    const ok = <T,>(r: PromiseSettledResult<T>): T | null => (r.status === 'fulfilled' ? r.value : null);
+    const er = <T,>(r: PromiseSettledResult<T>): string | undefined => (r.status === 'rejected' ? A._ovErr(r.reason) : undefined);
+
+    if (!o.clientOnly) {
+      const since = encodeURIComponent(new Date(Date.now() - 3_600_000).toISOString());
+      const bl = (lvl: string): Promise<BackendCountLike> =>
+        A._fetchJson<BackendCountLike>(`/logs/backend?level=${lvl}&since=${since}&limit=5`, 6000, ctl.signal);
+      const sapOn = !!plant && isAdmin;
+      const empty = { items: [] as JobRun[], nextBeforeId: null };
+      const [health, be, bw, jsum, jfail, jrecent, sst, sbat, srun] = await Promise.allSettled([
+        A._fetchJson<HealthLike>('/health', 6000, ctl.signal),
+        bl('error'), bl('warn'),
+        JobsClient.summary(plant),
+        plant ? JobsClient.runs({ plant, status: 'failed', sinceHours: 24, limit: 1 }) : Promise.resolve(empty),
+        plant ? JobsClient.runs({ plant, limit: 3 }) : Promise.resolve(empty),
+        sapOn ? A._fetchJson<SapSendStatus>(`/sap/staging/send/${encodeURIComponent(plant)}/status`, 6000, ctl.signal) : Promise.resolve(null),
+        sapOn ? A._fetchJson<{ batches: SapBatchHeader[] }>(`/sap/staging/batches?plant=${encodeURIComponent(plant)}&limit=20`, 6000, ctl.signal) : Promise.resolve(null),
+        sapOn ? A._fetchJson<{ runs: SapRunLike[] }>('/sap/interface/runs?limit=1', 6000, ctl.signal) : Promise.resolve(null),
+      ]);
+      const slowDue = !!o.force || !A._ovSlow.at || Date.now() - A._ovSlow.at > OV_SLOW_MS;
+      let slow: PromiseSettledResult<unknown>[] | null = null;
+      if (slowDue) {
+        slow = await Promise.allSettled([
+          A._fetchJson<DbDeepLike>('/diagnostics/db', 10_000, ctl.signal),
+          A._fetchJson<{ entries?: AdminAuditLogItem[] }>('/audit/log?limit=20', 10_000, ctl.signal),
+          A._fetchJson<{ audit?: AdminUploadAuditItem[] }>('/upload/audit', 10_000, ctl.signal),
+        ]);
+      }
+      if (seq !== A._ovSeq) return;   // a newer refresh started: drop this response
+
+      const f: OvFast = { health: ok(health), healthErr: er(health), backendErrors: ok(be), backendWarns: ok(bw), backendErr: er(be) ?? er(bw), jobs: null, plant, sap: null };
+      const sum = ok(jsum);
+      if (sum) f.jobs = { summary: sum, lastFailed: ok(jfail)?.items ?? [], recent: ok(jrecent)?.items ?? [] };
+      else f.jobsErr = er(jsum);
+      if (sapOn) {
+        const s = ok(sst);
+        if (s) f.sap = { status: s, batches: ok(sbat)?.batches ?? [], lastRun: ok(srun)?.runs?.[0] ?? null, plant };
+        else f.sapErr = er(sst);
+      }
+      A._ovFast = f;
+      if (slow) {
+        const now = Date.now();
+        const [deep, audit, upl] = slow as [PromiseSettledResult<DbDeepLike>, PromiseSettledResult<{ entries?: AdminAuditLogItem[] }>, PromiseSettledResult<{ audit?: AdminUploadAuditItem[] }>];
+        const s = A._ovSlow;
+        const d = ok(deep);
+        if (d) { s.dbDeep = d; s.dbDeepAt = now; s.dbDeepErr = undefined; s.at = now; }
+        else if (!s.dbDeep) s.dbDeepErr = er(deep);   // keep the last good deep-dive when a later read fails
+        const a = ok(audit); if (a) s.auditLog = a.entries ?? [];
+        const u = ok(upl); if (u) s.uploadAudit = u.audit ?? [];
+      }
+    } else if (seq !== A._ovSeq) {
+      return;
+    }
+
+    if (!o.clientOnly) A._ovLastAt = Date.now();
+    const inputs = A._buildOvInputs(isAdmin);
+    const signals = buildSignals(inputs);
+    A._ovSignals = signals;
+    A._ovAttention = buildAttention(signals, inputs);
+    if (A._ovFast.health) A._healthData = A._ovFast.health as unknown as AdminHealthResponse;
+    if (typeof document === 'undefined') return;
+    A._renderSignals(signals);
+    A._renderAttention(A._ovAttention);
+    A._renderRecent();
+    A._renderOvMeta();
+  },
+
+  _buildOvInputs(isAdmin: boolean): SignalInputs {
+    const A = AdminCockpit;
+    const f = A._ovFast;
+    const s = A._ovSlow;
+    let st: ReturnType<typeof Persistence.stats> | null = null;
+    try { st = Persistence.stats ? Persistence.stats() : null; } catch { st = null; }
+    let inv: { autosaveDisabled?: boolean; degraded?: boolean } = {};
+    try { inv = Persistence.storageInventory(); } catch { inv = {}; }
+    const mem = (typeof performance !== 'undefined'
+      ? (performance as Performance & { memory?: ChromePerformanceMemory }).memory : undefined);
+    const newestUpload = s.uploadAudit[0];
+    const distribution = (newestUpload?.warnings ?? []).filter(w => w.category === 'distribution').length;
+    const out: SignalInputs = {
+      now: Date.now(),
+      health: f.health, backendErrors: f.backendErrors, backendWarns: f.backendWarns,
+      jobs: f.jobs, sap: f.sap,
+      dbDeep: s.dbDeep,
+      client: {
+        stats: st ? { source: st.source, raw_received: st.raw_received, rendered: st.rendered } : null,
+        inv,
+        errors: ErrorLog.countBy('error'), warns: ErrorLog.countBy('warn'),
+        errRate: ErrorLog.errorRatePerMin(),
+        build: Config.BUILD_ID, schema: Config.SCHEMA_VERSION,
+        tasks: Store.tasksArr.length,
+      },
+      isAdmin,
+    };
+    if (s.dbDeepAt) out.dbDeepAt = s.dbDeepAt;
+    if (f.healthErr) out.healthErr = f.healthErr;
+    if (s.dbDeepErr) out.dbDeepErr = s.dbDeepErr;
+    if (f.backendErr) out.backendErr = f.backendErr;
+    if (f.jobsErr) out.jobsErr = f.jobsErr;
+    if (f.sapErr) out.sapErr = f.sapErr;
+    if (mem) { out.client.heapUsed = mem.usedJSHeapSize; out.client.heapLimit = mem.jsHeapSizeLimit; }
+    if (newestUpload && distribution > 0) out.uploadWarnings = { distribution, batchId: newestUpload.batch_id };
+    return out;
+  },
+
+  /* ----- Overview rendering (DOM nodes + textContent only: server strings never reach innerHTML) ----- */
+
+  _renderOvMeta(): void {
+    const el = typeof document !== 'undefined' ? document.getElementById('ov-meta') : null;
+    if (!el) return;
+    const A = AdminCockpit;
+    const parts: string[] = [];
+    if (A._ovLastAt) parts.push(Util.t('ov.refreshed_ago', { n: Math.max(0, Math.round((Date.now() - A._ovLastAt) / 1000)) }));
+    parts.push(A._ovPaused ? Util.t('ov.paused') : Util.t('ov.auto_every', { n: OV_FAST_MS / 1000 }));
+    el.textContent = parts.join(' · ');
+  },
+
+  /** A future time ("in 5 min"), or the past form when it already happened. */
+  _relFuture(ms: number): string {
+    const diff = ms - Date.now();
+    if (diff <= 0) return AdminCockpit._relTime(ms);
+    const mins = Math.round(diff / 60_000);
+    let loc = 'en';
+    try { loc = Util.locale() || 'en'; } catch { /* default */ }
+    try {
+      const rtf = new Intl.RelativeTimeFormat(loc, { numeric: 'auto', style: 'short' });
+      if (mins < 60) return rtf.format(Math.max(1, mins), 'minute');
+      if (mins < 1440) return rtf.format(Math.round(mins / 60), 'hour');
+      return rtf.format(Math.round(mins / 1440), 'day');
+    } catch { return new Date(ms).toLocaleString(); }
+  },
+
+  /** Raw model args to display strings: epoch-ms ago / measuredAt as relative past, next as relative future. */
+  _ovArgs(args: Record<string, unknown>): Record<string, string | number> {
+    const out: Record<string, string | number> = {};
+    for (const [k, v] of Object.entries(args)) {
+      if (k === 'ago' && typeof v === 'number') out[k] = v > 0 ? AdminCockpit._relTime(v) : Util.t('ui.diag_vacuum_never');
+      else if (k === 'next' && typeof v === 'number') out[k] = v > 0 ? AdminCockpit._relFuture(v) : Util.t('sig.next_none');
+      else out[k] = typeof v === 'number' || typeof v === 'string' ? v : String(v ?? '');
+    }
+    return out;
+  },
+
+  /** Text into `el` with each run of digits in a mono span. */
+  _setNumText(el: HTMLElement, text: string): void {
+    el.textContent = '';
+    for (const part of text.split(/(\d[\d.,:]*)/)) {
+      if (!part) continue;
+      if (/^\d/.test(part)) {
+        const s = document.createElement('span');
+        s.className = 'sig-num';
+        s.textContent = part;
+        el.appendChild(s);
+      } else {
+        el.appendChild(document.createTextNode(part));
+      }
     }
   },
 
-  _renderHealth(): void {
-    AdminCockpit._healthAbort?.abort();
-    AdminCockpit._healthAbort = new AbortController();
-    const sig = AbortSignal.any
-      ? AbortSignal.any([AdminCockpit._healthAbort.signal, AbortSignal.timeout(6000)])
-      : AdminCockpit._healthAbort.signal;
-    Util.fetchTraced(`${Config.API_BASE}/health`, { signal: sig })
-      .then((r) => r.json() as Promise<AdminHealthResponse>)
-      .then((data) => {
-        AdminCockpit._healthData = data;
-        const db = data.db || {};
-        const mem = data.memory || {};
-        const cw = data.color_wheel || {};
+  _fixButton(fix: Fix, isAdmin: boolean): HTMLButtonElement {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-ghost sm';
+    b.dataset.fix = fix.id;
+    b.dataset.args = JSON.stringify(fix.args ?? {});
+    b.textContent = Util.t(fix.labelKey);
+    if (fix.adminOnly || ADMIN_FIXES.has(fix.id)) {
+      b.dataset.admin = '1';
+      if (!isAdmin) { b.disabled = true; b.title = Util.t('ov.admin_only'); }
+    }
+    return b;
+  },
 
-        const dbEl = document.getElementById('admin-health-db');
-        if (dbEl) {
-          const dot = dbEl.querySelector<HTMLElement>('.admin-health-dot')!;
-          const lbl = dbEl.querySelector<HTMLElement>('.admin-health-label')!;
-          const cls = !db.connected ? 'err' : (db.ping_ms ?? 0) > 500 ? 'warn' : 'ok';
-          dot.className = `admin-health-dot ${cls}`;
-          lbl.textContent = db.connected
-            ? `DB ${db.ping_ms}ms`
-            : `DB offline${db.error ? ': ' + db.error.slice(0, 60) : ''}`;
-        }
+  _detailCell(v: string | number | null, headKey: string): string {
+    if (v === null || v === undefined || v === '') return '–';
+    if (typeof v === 'number') {
+      if (headKey === 'sig.d_duration') return `${(v / 1000).toFixed(1)} s`;
+      if (headKey === 'sig.d_dead_pct') return `${v}%`;
+      return v.toLocaleString();
+    }
+    if (/^(pipe|sig)\.[\w.]+$/.test(v)) return Util.t(v);
+    if (/^\d{4}-\d\d-\d\dT/.test(v)) return AdminCockpit._relTime(v);
+    return v;
+  },
 
-        const ordEl = document.getElementById('admin-health-orders');
-        if (ordEl) {
-          ordEl.querySelector<HTMLElement>('.admin-health-label')!.textContent =
-            `${(db.total_orders ?? 0).toLocaleString()} orders`;
+  _buildDetail(d: DetailTable, isAdmin: boolean): HTMLElement {
+    const box = document.createElement('div');
+    box.className = 'sig-detail';
+    box.hidden = true;
+    if (d.headKeys.length && d.rows.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'sig-dt-wrap';
+      const tbl = document.createElement('table');
+      tbl.className = 'sig-dt';
+      const hasFix = (d.rowFixes ?? []).some(Boolean);
+      const hr = document.createElement('tr');
+      for (const k of d.headKeys) { const th = document.createElement('th'); th.textContent = Util.t(k); hr.appendChild(th); }
+      if (hasFix) hr.appendChild(document.createElement('th'));
+      const thead = document.createElement('thead'); thead.appendChild(hr); tbl.appendChild(thead);
+      const tb = document.createElement('tbody');
+      d.rows.forEach((row, i) => {
+        const tr = document.createElement('tr');
+        row.forEach((cell, c) => {
+          const td = document.createElement('td');
+          td.textContent = AdminCockpit._detailCell(cell, d.headKeys[c] ?? '');
+          if (typeof cell === 'number') td.className = 'num';
+          tr.appendChild(td);
+        });
+        if (hasFix) {
+          const td = document.createElement('td');
+          const rf = d.rowFixes?.[i];
+          if (rf) td.appendChild(AdminCockpit._fixButton(rf, isAdmin));
+          tr.appendChild(td);
         }
-
-        const ovEl = document.getElementById('admin-health-overrides');
-        if (ovEl) {
-          ovEl.querySelector<HTMLElement>('.admin-health-label')!.textContent =
-            `${(db.user_overrides ?? 0).toLocaleString()} user overrides`;
-        }
-
-        const cwEl = document.getElementById('admin-health-color');
-        if (cwEl) {
-          const dot = cwEl.querySelector<HTMLElement>('.admin-health-dot')!;
-          const lbl = cwEl.querySelector<HTMLElement>('.admin-health-label')!;
-          const misses = cw.misses ?? 0;
-          dot.className = `admin-health-dot ${misses > 0 ? 'warn' : 'ok'}`;
-          lbl.textContent = misses > 0
-            ? Util.t('ui.color_wheel_miss', { count: misses, plural: misses === 1 ? '' : 'es' })
-            : Util.t('ui.color_wheel_all_matched');
-        }
-
-        const poolChip = document.getElementById('admin-health-pool');
-        if (poolChip) {
-          const pPool = data.pool || {};
-          const dot  = poolChip.querySelector<HTMLElement>('.admin-health-dot');
-          const plbl = poolChip.querySelector<HTMLElement>('.admin-health-label');
-          if (pPool.error) {
-            if (dot) dot.className = 'admin-health-dot warn';
-            if (plbl) plbl.textContent = Util.t('ui.pool_unavailable');
-          } else {
-            const used = (pPool.pool_size ?? 0) - (pPool.pool_available ?? 0);
-            const max  = pPool.pool_max || 1;
-            const pct  = Math.round(100 * used / max);
-            const cls  = pct >= 85 ? 'err' : (pct >= 60 ? 'warn' : 'ok');
-            if (dot) dot.className = `admin-health-dot ${cls}`;
-            if (plbl) plbl.textContent = `Pool ${used}/${max}`;
-          }
-        }
-
-        const ldEl = document.getElementById('admin-health-loaded');
-        if (ldEl) {
-          const lbl = ldEl.querySelector<HTMLElement>('.admin-health-label')!;
-          const loadedAt = mem.loaded_at ? new Date(mem.loaded_at) : null;
-          lbl.textContent = loadedAt
-            ? `Loaded ${AdminCockpit._relTime(loadedAt)}${mem.load_ms != null ? ' · ' + mem.load_ms + 'ms' : ''}`
-            : Util.t('ui.not_loaded');
-        }
-      })
-      .catch((e: Error) => {
-        const dbEl = document.getElementById('admin-health-db');
-        if (dbEl) {
-          const dot = dbEl.querySelector<HTMLElement>('.admin-health-dot')!;
-          const lbl = dbEl.querySelector<HTMLElement>('.admin-health-label')!;
-          dot.className = 'admin-health-dot err';
-          lbl.textContent = Util.t('ui.backend_unreachable');
-        }
-        if (e.name !== 'AbortError') ErrorLog.warn('admin', `Health check failed: ${e.message}`);
+        tb.appendChild(tr);
       });
+      tbl.appendChild(tb); wrap.appendChild(tbl); box.appendChild(wrap);
+    }
+    if (d.linkKey && d.linkSub) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn btn-ghost sm';
+      b.dataset.nav = d.linkSub;
+      b.textContent = Util.t(d.linkKey);
+      box.appendChild(b);
+    }
+    return box;
+  },
+
+  _renderSignals(signals: Signal[]): void {
+    const host = document.getElementById('ov-signals');
+    if (!host) return;
+    const A = AdminCockpit;
+    const isAdmin = Session.isAdmin();
+    const key = JSON.stringify([signals, isAdmin, A._ovOpenDetail, Math.floor(Date.now() / 60_000)]);
+    if (key === A._ovSigKey) return;   // nothing the planner could see has changed: no repaint
+    A._ovSigKey = key;
+    const act = document.activeElement as HTMLElement | null;
+    const focus = act && host.contains(act)
+      ? { sig: act.closest<HTMLElement>('.sig-row')?.dataset.sig ?? '', fix: act.dataset.fix ?? '' }
+      : null;
+    host.textContent = '';
+    for (const sig of signals) {
+      const row = document.createElement('div');
+      row.className = 'sig-row';
+      row.dataset.sig = sig.id;
+      row.dataset.sev = sig.severity;
+      row.setAttribute('role', 'listitem');
+
+      const dot = document.createElement('span');
+      dot.className = `admin-health-dot ${sig.severity}`;
+      const name = document.createElement('span');
+      name.className = 'sig-name';
+      name.textContent = Util.t(`sig.${sig.id}`);
+      const reason = document.createElement('span');
+      reason.className = 'sig-reason';
+      let text = Util.t(sig.reasonKey, A._ovArgs(sig.reasonArgs));
+      if (sig.measuredAt) text += ` · ${Util.t('ov.measured_ago', { ago: A._relTime(sig.measuredAt) })}`;
+      A._setNumText(reason, text);
+      const fixes = document.createElement('div');
+      fixes.className = 'sig-fixes';
+      for (const fx of sig.fixes) fixes.appendChild(A._fixButton(fx, isAdmin));
+      row.append(dot, name, reason, fixes);
+
+      if (sig.detail) {
+        const open = A._ovOpenDetail === sig.id;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'sig-details';
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        btn.textContent = Util.t(open ? 'ov.details_hide' : 'ov.details');
+        row.appendChild(btn);
+        const detail = A._buildDetail(sig.detail, isAdmin);
+        detail.hidden = !open;
+        row.appendChild(detail);
+      }
+      host.appendChild(row);
+    }
+    if (focus && focus.sig) {
+      const sel = focus.fix ? `.sig-row[data-sig="${focus.sig}"] [data-fix="${focus.fix}"]` : `.sig-row[data-sig="${focus.sig}"] .sig-details`;
+      (host.querySelector<HTMLElement>(sel) ?? host.querySelector<HTMLElement>(`.sig-row[data-sig="${focus.sig}"] .sig-details`))?.focus();
+    }
+  },
+
+  /** Open or close one Details strip in place (no repaint, so focus stays on the button). */
+  _toggleDetail(btn: HTMLElement): void {
+    const row = btn.closest<HTMLElement>('.sig-row');
+    if (!row) return;
+    const id = row.dataset.sig as SignalId;
+    const A = AdminCockpit;
+    A._ovOpenDetail = A._ovOpenDetail === id ? null : id;
+    document.querySelectorAll<HTMLElement>('#ov-signals .sig-row').forEach((r) => {
+      const isThis = r.dataset.sig === A._ovOpenDetail;
+      const b = r.querySelector<HTMLElement>('.sig-details');
+      const d = r.querySelector<HTMLElement>('.sig-detail');
+      if (b) { b.setAttribute('aria-expanded', isThis ? 'true' : 'false'); b.textContent = Util.t(isThis ? 'ov.details_hide' : 'ov.details'); }
+      if (d) d.hidden = !isThis;
+    });
+    A._ovSigKey = '';   // the next refresh repaints once with the new open state
+  },
+
+  _renderAttention(items: AttentionItem[]): void {
+    const host = document.getElementById('ov-attention');
+    if (!host) return;
+    const isAdmin = Session.isAdmin();
+    host.textContent = '';
+    if (!items.length) {
+      const e = document.createElement('div');
+      e.className = 'attn-empty';
+      e.textContent = Util.t('ov.attention_clear');
+      host.appendChild(e);
+      return;
+    }
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.className = 'attn-row';
+      row.dataset.sev = it.severity;
+      const dot = document.createElement('span');
+      dot.className = `admin-health-dot ${it.severity}`;
+      const txt = document.createElement('span');
+      txt.className = 'attn-text';
+      AdminCockpit._setNumText(txt, Util.t(it.textKey, AdminCockpit._ovArgs(it.args)));
+      row.append(dot, txt, AdminCockpit._fixButton(it.fix, isAdmin));
+      host.appendChild(row);
+    }
+  },
+
+  _renderRecent(): void {
+    const host = document.getElementById('ov-recent');
+    if (!host) return;
+    const A = AdminCockpit;
+    const f = A._ovFast;
+    const lists: UnifiedEntry[][] = [
+      [...(f.backendErrors?.entries ?? []), ...(f.backendWarns?.entries ?? [])].map(e => fromBackend(e as unknown as BackendLogEntry)),
+      ErrorLog.entries().slice(-20).map(e => fromFrontend(e as unknown as FrontendLogEntry)),
+      (f.jobs?.recent ?? []).map(r => fromJobRun(r as unknown as JobRun)),
+      A._ovSlow.auditLog.map(fromAudit),
+      A._ovSlow.uploadAudit.map(fromUpload),
+    ];
+    const rows = filterEntries(mergeEntries(lists), { level: 'all', sources: new Set(), user: '', plant: Store.selectedPlant ?? '', q: '' }).slice(0, 10);
+    host.textContent = '';
+    for (const e of rows) {
+      const row = document.createElement('div');
+      row.className = `admin-log-row admin-log-${e.level}`;
+      const head = document.createElement('div');
+      head.className = 'admin-log-head';
+      const lvl = document.createElement('span'); lvl.className = 'admin-log-lvl'; lvl.textContent = e.level;
+      const ts = document.createElement('span'); ts.className = 'admin-log-ts'; ts.textContent = e.tsMs ? A._relTime(e.tsMs) : ''; ts.title = e.ts ?? '';
+      const src = document.createElement('span'); src.className = 'admin-log-scope'; src.textContent = e.source;
+      head.append(lvl, ts, src);
+      const msg = document.createElement('div');
+      msg.className = 'admin-log-msg';
+      msg.textContent = e.text.length > 240 ? `${e.text.slice(0, 240)}…` : e.text;
+      row.append(head, msg);
+      host.appendChild(row);
+    }
+  },
+
+  /** Quick-fix dispatch for the Signal board and Needs attention buttons. */
+  async _onSignalFix(fix: Fix, btn: HTMLButtonElement | null = null): Promise<void> {
+    const A = AdminCockpit;
+    if ((fix.adminOnly || ADMIN_FIXES.has(fix.id)) && !Session.isAdmin()) return;
+    const a = (fix.args ?? {}) as Record<string, unknown>;
+    const again = (): void => { A._ovSigKey = ''; void A._refreshOverview({ force: true }); };
+    switch (fix.id) {
+      case 'jobs.rerun': {
+        const runId = Number(a.runId);
+        const name = A._ovFast.jobs?.lastFailed.find(r => r.id === runId)?.job_name ?? `#${runId}`;
+        if (!(await Modal.confirm({ title: Util.t('jobs.confirm_restart', { name }), confirmLabel: Util.t('btn.rerun_now') }))) return;
+        try { await JobsClient.restartRun(runId); } catch (e) { Toast.show((e as Error).message, 'error'); }
+        again();
+        return;
+      }
+      case 'jobs.open_run': {
+        // JobsAdmin.render() is async (first use awaits the type list); openRun before it resumes would be overwritten.
+        A.gotoSub('jobs');
+        await JobsAdmin.render();
+        JobsAdmin.openRun(Number(a.runId));
+        return;
+      }
+      case 'nav.jobs': A.gotoSub('jobs'); return;
+      case 'nav.diagnostics': A.gotoSub('diagnostics'); return;
+      case 'nav.interface': A.gotoSub('interface'); return;
+      case 'nav.order_maintenance': A.gotoSub('order-maintenance'); return;
+      case 'db.vacuum_all': {
+        if (!(await Modal.confirm({ title: Util.t('ui.maint_vacuum_all_confirm'), confirmLabel: Util.t('btn.run') }))) return;
+        await A._runMaintenance('vacuum-analyze', null, btn);
+        again();
+        return;
+      }
+      case 'db.vacuum_table':
+        await A._runMaintenance('vacuum-analyze', String(a.table ?? '') || null, btn);
+        again();
+        return;
+      case 'logs.open': A.gotoSub('logs'); return;   // W3: preset filter from fix.args (source, level)
+      case 'data.reload': void Persistence.reload(); return;
+      case 'data.color_wheel': {
+        const nb = (globalThis as unknown as { NIMBUS?: { ColorWheelViewer?: { open?: () => void } } }).NIMBUS;
+        if (nb?.ColorWheelViewer?.open) nb.ColorWheelViewer.open(); else A.gotoSub('interface');
+        return;
+      }
+      case 'client.reset': void A._resetClientState(); return;
+      default: return;
+    }
   },
 
   _renderPipeline(): void {
@@ -783,7 +1235,7 @@ export const AdminCockpit = {
         const steps: AdminPipelineStep[] = [
           {
             key: 'db',
-            label: 'DB Load',
+            label: Util.t('pipe.db_load'),
             count: rawDb,
             delta: null,
             status: (p.unreadable_start_date > 0 || p.dropped_no_finish_date > 0) ? 'warn' : 'ok',
@@ -791,23 +1243,23 @@ export const AdminCockpit = {
           },
           ...(activePlant ? [{
             key: 'plant-filter',
-            label: `Plant ${activePlant}`,
+            label: Util.t('pipe.plant_filter', { plant: activePlant }),
             count: preMerge,
-            delta: plantFiltered > 0 ? `-${plantFiltered} (other plants)` : null,
+            delta: plantFiltered > 0 ? Util.t('pipe.delta_other_plants', { n: plantFiltered }) : null,
             status: 'ok' as const,
             detail: () => AdminCockpit._pipelineDetailPlantFilter(st, plantFiltered, rawDb),
           }] : []),
           {
             key: 'color',
-            label: 'Color Merge',
+            label: Util.t('pipe.color_merge'),
             count: received,
-            delta: colorMiss > 0 ? `-${colorMiss} miss${colorMiss === 1 ? '' : 'es'}` : null,
+            delta: colorMiss > 0 ? Util.t('pipe.delta_misses', { n: colorMiss }) : null,
             status: colorMiss > 0 ? 'warn' : 'ok',
             detail: () => AdminCockpit._pipelineDetailColor(p, cw, st),
           },
           {
             key: 'emitted',
-            label: 'Emitted',
+            label: Util.t('pipe.emitted'),
             count: received,
             delta: null,
             status: (p.warnings?.length ?? 0) > 0 ? 'warn' : 'ok',
@@ -815,9 +1267,9 @@ export const AdminCockpit = {
           },
           {
             key: 'rendered',
-            label: 'Rendered',
+            label: Util.t('pipe.rendered'),
             count: rendered,
-            delta: gap > 0 ? `-${gap} gap` : null,
+            delta: gap > 0 ? Util.t('pipe.delta_gap', { n: gap }) : null,
             status: gap > 0 ? 'err' : 'ok',
             detail: () => AdminCockpit._pipelineDetailRendered(st, p),
           },
@@ -875,7 +1327,7 @@ export const AdminCockpit = {
       })
       .catch((e: Error) => {
         if (e.name === 'AbortError') return;
-        wrap.innerHTML = `<div class="admin-log-empty">Could not load pipeline: ${Util.escapeHtml(e.message)}</div>`;
+        wrap.innerHTML = `<div class="admin-log-empty">${Util.escapeHtml(Util.t('pipe.load_failed', { msg: e.message }))}</div>`;
         ErrorLog.warn('admin', `Pipeline fetch failed: ${e.message}`);
       });
   },
@@ -1473,7 +1925,7 @@ export const AdminCockpit = {
         Toast.show(Util.t('toast.upload_ok', { count: body.inserted + body.updated }), 'success');
         setTimeout(() => AdminCockpit._clearUpload(), 2000);
         Persistence.reload().then(() => {
-          AdminCockpit._renderHealth();
+          void AdminCockpit._refreshOverview({ force: true });
           AdminCockpit._renderPipeline();
         });
         AdminCockpit._renderAudit();
@@ -1556,7 +2008,7 @@ export const AdminCockpit = {
         AdminCockpit._setPurgeButtonEnabled(false);
         AdminCockpit._updatePurgeCount();
         Persistence.reload().then(() => {
-          AdminCockpit._renderHealth();
+          void AdminCockpit._refreshOverview({ force: true });
           AdminCockpit._renderPipeline();
         });
       })
@@ -3009,6 +3461,7 @@ export const AdminCockpit = {
       persistence: (Persistence.stats && Persistence.stats()) || null,
       health:      AdminCockpit._healthData || null,
       deep:        AdminCockpit._deepData   || null,
+      dbDeep:      AdminCockpit._ovSlow.dbDeep,
       storeCounts: {
         tasks:        Store.tasksArr.length,
         blocks:       (Store.blocks || []).length,
