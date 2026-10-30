@@ -80,6 +80,12 @@ Five input classes the plan does not otherwise pin down and that most likely bit
   - `function buildSignals(inputs: SignalInputs, thresholds?: Partial<typeof THRESHOLDS>): Signal[]`
   - `function buildAttention(signals: Signal[], inputs: SignalInputs): AttentionItem[]`
 
+- [x] **Step 1: Write the failing test.** In `tests/modules/admin-ops/signals.test.mjs`, importing from `../../../frontend/admin-ops/signals.mjs`: all green gives seven `ok` signals in id order and empty attention; the severity ladder per subsystem (jobs, database, backend, data_load, connections, sap, browser) at each `THRESHOLDS` boundary; failed reads give `err` + `sig.unavailable`, `forbidden` / non-admin give `info` + `sig.admin_only`, `sapErr === NOT_FOUND` gives `sig.sap_not_live`; worst-first ordering with stable ties and a threshold override; `buildAttention` is worst-first, capped at 8, one item per cause; every emitted locale key exists in `en.js`; `data_load` never depends on the deep diagnostics read.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/signals.test.mjs` -> fails, module not found.
+- [x] **Step 3: Implement** `signals.mts` with the exports above (no DOM, no fetch, no `Util`). Keep the pool rule 60/85 and trust `needs_vacuum`.
+- [x] **Step 4: Run and expect pass.** `npm run build && node --test tests/modules/admin-ops/signals.test.mjs` (the en.js key test passes only after Task W0.3; run it last or temporarily expect that single failure and note it in the ledger).
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/signals.mts tests/modules/admin-ops/signals.test.mjs` then `git commit -m "feat(admin-ops): pure signal model (buildSignals, buildAttention)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+
 ### Task W0.2: unified-log.mts (adapters, merge, filter, counts, relatedTo)
 
 **Files:**
@@ -97,6 +103,12 @@ Five input classes the plan does not otherwise pin down and that most likely bit
   - `mergeEntries(lists: UnifiedEntry[][], limit = 500): UnifiedEntry[]`
   - `filterEntries(entries, f: LogFilter)`, `sourceCounts(entries, f: LogFilter)` (ignores `f.sources` only), `relatedTo(entry, all, windowMs = 300000): RelatedGroup[]`
   - Local structural copies `BackendLogEntry`, `AdminAuditLogItem`, `AdminUploadAuditItem`, `LogEntry` (originals unexported). Cleanup for W5: export the originals and drop the copies.
+
+- [x] **Step 1: Write the failing test.** In `tests/modules/admin-ops/unified-log.test.mjs`: each adapter (level mapping, `plant` null when absent, `fromFrontend` carries `rid` from `reqId`, upload warns only for non-`upload_counts` warnings, job `failed` is error and `warning` / `skipped` / `missed` are warn); `mergeEntries` newest first, missing ts last, stable ties, limit; `filterEntries` level ladder, empty `sources` = all, plant plus global, user exact case-insensitive, `q` over text / user / rid / errorCode; `sourceCounts` ignores only the sources filter; `relatedTo` group order, membership, `possible` flag on `user_window` only, excludes the entry itself, empty groups omitted, window honoured.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/unified-log.test.mjs` -> module not found.
+- [x] **Step 3: Implement** `unified-log.mts` with the exports above. Pure; no `Util.t`, no DOM.
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/unified-log.mts tests/modules/admin-ops/unified-log.test.mjs` then `git commit -m "feat(admin-ops): pure unified-log module (adapters, merge, filter, relatedTo)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W0.3: locale keys, family-pin test, gitignore
 
