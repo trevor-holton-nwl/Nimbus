@@ -372,11 +372,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: the live app in Chrome (`uvicorn brain:api --port 8000`), `DESIGN.md`, the two mockups (Overview A https://claude.ai/artifact/RKbwrhVxf2GDp4vdtxTLFD; Logs 2 https://claude.ai/artifact/8yX26a3ECo8YDptPDVGJjA), the fit-to-measure list from the plan of record.
 - Produces: a short punch list (not code) from the Fable agent; then one Sonnet fix wave applying it.
 
-- [ ] **Step 1: Fable design pass (one pass, no code).** A Fable agent, "Fable, design pass only", reviews Overview and Logs on the live app: spacing, hierarchy, dark mode, narrow widths (375 / 640 / 1024 / 1440), reason-line and attention-sentence copy, the fit-to-measure list (10-label strip; source checkboxes at 640 px; `.sig-name` column with fr `Chargement des données` and de `SAP-Schnittstelle`; fix buttons on one row with de `Jetzt erneut ausführen` and fr `Ouvrir la roue des couleurs`; Jobs reason with a long job name at 375 px; `ov.refreshed_ago` + `ov.auto_every` beside two buttons at 375 px; Logs filter bar at 640 px; attention sentence + button in fr). Returns the punch list.
-- [ ] **Step 2: Write a failing test per mechanical item** where one is testable (for example a CSS text assertion that a rule exists); copy and spacing items are verified visually and logged.
-- [ ] **Step 3: Sonnet fix wave** applies the punch list, nothing else.
-- [ ] **Step 4: Run** `npm run build && npm run lint && node --test tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/unified-log-pane.test.mjs tests/modules/admin-ops/overview-locales.test.mjs`; expect pass.
-- [ ] **Step 5: Commit.** `git add frontend/styles.css frontend/index.html frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js` (plus any `.mts` the punch list touched, named explicitly) then `git commit -m "style(admin): design pass fixes for Overview and Logs" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Fable design pass (one pass, no code).** A Fable agent, "Fable, design pass only", reviews Overview and Logs on the live app: spacing, hierarchy, dark mode, narrow widths (375 / 640 / 1024 / 1440), reason-line and attention-sentence copy, the fit-to-measure list (10-label strip; source checkboxes at 640 px; `.sig-name` column with fr `Chargement des données` and de `SAP-Schnittstelle`; fix buttons on one row with de `Jetzt erneut ausführen` and fr `Ouvrir la roue des couleurs`; Jobs reason with a long job name at 375 px; `ov.refreshed_ago` + `ov.auto_every` beside two buttons at 375 px; Logs filter bar at 640 px; attention sentence + button in fr). Returns the punch list.
+- [x] **Step 2: Write a failing test per mechanical item** where one is testable (for example a CSS text assertion that a rule exists); copy and spacing items are verified visually and logged.
+- [x] **Step 3: Sonnet fix wave** applies the punch list, nothing else.
+- [x] **Step 4: Run** `npm run build && npm run lint && node --test tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/unified-log-pane.test.mjs tests/modules/admin-ops/overview-locales.test.mjs`; expect pass.
+- [x] **Step 5: Commit.** `git add frontend/styles.css frontend/index.html frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js` (plus any `.mts` the punch list touched, named explicitly) then `git commit -m "style(admin): design pass fixes for Overview and Logs" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ---
 
@@ -489,11 +489,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: `Util.t('btn.show_all_n', {n})`, `Util.t('btn.show_fewer')`.
 - Produces: `_capList<T>(items: T[], cap: number, render: (visible: T[]) => void, host: HTMLElement): void` (toggle button appears only when `items.length > cap`); caps: `_dbTableCards` 10, `_dbHBarChart` 15, `_renderBackendWarnings` 20, `_lineBar` 15 machines.
 
-- [ ] **Step 1: Write the failing test:** `test('_capList shows only cap items and a Show all button when over cap')`; `test('no button at or under the cap')`; `test('Show all expands and Show fewer collapses')`; per-list tests that feed 30 tables, 30 bars, 40 warnings and 40 machines and count rendered rows (10, 15, 20, 15).
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): cap Diagnostics lists with Show all / Show fewer" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('_capList shows only cap items and a Show all button when over cap')`; `test('no button at or under the cap')`; `test('Show all expands and Show fewer collapses')`; per-list tests that feed 30 tables, 30 bars, 40 warnings and 40 machines and count rendered rows (10, 15, 20, 15).
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs`.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts tests/modules/admin-ops/admin-ui.test.mjs` then `git commit -m "feat(admin): cap Diagnostics lists with Show all / Show fewer" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W5.2: Thread fold-in and i18n
 
@@ -505,11 +505,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: existing `_refreshThreadPane`, `PerfMonitor`.
 - Produces: `thread.*` family in all five locales; Thread card inside Diagnostics as a Client section; `admin-thread-clear` id unchanged.
 
-- [ ] **Step 1: Write the failing test:** `test('thread card sits inside #admin-diag-pane directly after the client card')` (HTML order check); `test('thread card text uses data-i18n, no hardcoded English')`; locales family pin for `thread.*`; `test('_refreshThreadPane uses Util.t for its labels')`.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/overview-locales.test.mjs`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run and expect pass.** Same command plus the two locale gate tests.
-- [ ] **Step 5: Commit.** `git add frontend/index.html frontend/admin-ops/admin-ui.mts frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/overview-locales.test.mjs` then `git commit -m "feat(admin): fold Thread profiler into Diagnostics Client section; i18n" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('thread card sits inside #admin-diag-pane directly after the client card')` (HTML order check); `test('thread card text uses data-i18n, no hardcoded English')`; locales family pin for `thread.*`; `test('_refreshThreadPane uses Util.t for its labels')`.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/overview-locales.test.mjs`.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run and expect pass.** Same command plus the two locale gate tests.
+- [x] **Step 5: Commit.** `git add frontend/index.html frontend/admin-ops/admin-ui.mts frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js tests/modules/admin-ops/admin-ui.test.mjs tests/modules/admin-ops/overview-locales.test.mjs` then `git commit -m "feat(admin): fold Thread profiler into Diagnostics Client section; i18n" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W5.3: remaining hardcoded strings
 
@@ -521,11 +521,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: surviving call sites after W3.3.
 - Produces: keys `diag.col_*`, `ui.all_codes`, `diag.error_prefix`, `ph.filter_backend`, `ulog.older_dropped`, `ulog.filter_by_code`, `ulog.correlate` in all five locales (only those still referenced; unreferenced ones are not added).
 
-- [ ] **Step 1: Write the failing test:** `test('every static Util.t key in admin-ops sources resolves in en.js')` (scan `admin-ui.mts`, `unified-log-pane.mts`, `signals.mts`); `test('diag.col_* keys exist in all five locales with equal placeholders')`.
-- [ ] **Step 2: Run and expect failure.** `node --test tests/modules/admin-ops/overview-locales.test.mjs`.
-- [ ] **Step 3: Implement** the conversions and keys.
-- [ ] **Step 4: Run and expect pass.** Same command plus `node --test tests/js/locale-keys.test.js tests/modules/locale-completeness.test.mjs`.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js tests/modules/admin-ops/overview-locales.test.mjs` then `git commit -m "refactor(admin): route remaining hardcoded Admin strings through i18n" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('every static Util.t key in admin-ops sources resolves in en.js')` (scan `admin-ui.mts`, `unified-log-pane.mts`, `signals.mts`); `test('diag.col_* keys exist in all five locales with equal placeholders')`.
+- [x] **Step 2: Run and expect failure.** `node --test tests/modules/admin-ops/overview-locales.test.mjs`.
+- [x] **Step 3: Implement** the conversions and keys.
+- [x] **Step 4: Run and expect pass.** Same command plus `node --test tests/js/locale-keys.test.js tests/modules/locale-completeness.test.mjs`.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/admin-ui.mts frontend/locales/en.js frontend/locales/de.js frontend/locales/es.js frontend/locales/fr.js frontend/locales/pt.js tests/modules/admin-ops/overview-locales.test.mjs` then `git commit -m "refactor(admin): route remaining hardcoded Admin strings through i18n" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W5.4: docs
 
@@ -537,11 +537,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: the shipped behaviour of W0 to W5.3 and the spec.
 - Produces: updated docs; no code.
 
-- [ ] **Step 1: Write the check.** A short shell check listing that each of the three files mentions `gotoSub`, `nimbus.ulog.filter` (frontend doc), `/schedule-events/{plant}/recent` (root and schedule-events docs) and `upload_audit.rid`; expect it to fail before the edit: `grep -c "gotoSub" frontend/admin-ops/CLAUDE.md` returns 0.
-- [ ] **Step 2: Run and expect failure.** The grep above prints 0.
-- [ ] **Step 3: Implement** the doc edits (business terms only, no SAP field codes, no emojis).
-- [ ] **Step 4: Run and expect pass.** `grep -c "gotoSub" frontend/admin-ops/CLAUDE.md` is at least 1; `grep -c "recent" CLAUDE.md` finds the Schedule Events mention.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/CLAUDE.md backend/admin_ops/CLAUDE.md CLAUDE.md` then `git commit -m "docs(admin): Admin sub-tabs 2026-10-30, polling cadence, domain table rows" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the check.** A short shell check listing that each of the three files mentions `gotoSub`, `nimbus.ulog.filter` (frontend doc), `/schedule-events/{plant}/recent` (root and schedule-events docs) and `upload_audit.rid`; expect it to fail before the edit: `grep -c "gotoSub" frontend/admin-ops/CLAUDE.md` returns 0.
+- [x] **Step 2: Run and expect failure.** The grep above prints 0.
+- [x] **Step 3: Implement** the doc edits (business terms only, no SAP field codes, no emojis).
+- [x] **Step 4: Run and expect pass.** `grep -c "gotoSub" frontend/admin-ops/CLAUDE.md` is at least 1; `grep -c "recent" CLAUDE.md` finds the Schedule Events mention.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/CLAUDE.md backend/admin_ops/CLAUDE.md CLAUDE.md` then `git commit -m "docs(admin): Admin sub-tabs 2026-10-30, polling cadence, domain table rows" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ---
 
