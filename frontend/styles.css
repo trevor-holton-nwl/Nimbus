@@ -3949,39 +3949,7 @@ span.flatpickr-weekday {
    Health bar, pipeline inspector, backend warnings, filterable logs.
    ========================================================================== */
 
-/* ── Health bar ── */
-.admin-health-bar {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  padding: 9px 16px;
-  margin-bottom: 16px;
-  background: var(--bg-elev);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  font-size: 12px;
-  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
-  overflow-x: auto;
-}
-.admin-health-chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-  padding: 3px 12px;
-  border-radius: 10px;
-}
-/* Soft-tint the chip pill from its own dot's state — no JS change needed to
-   tag the chip itself, :has() reads the state already set on the child dot. */
-.admin-health-chip:has(.admin-health-dot.ok)   { background: var(--ok-soft); }
-.admin-health-chip:has(.admin-health-dot.warn) { background: var(--warn-soft); }
-.admin-health-chip:has(.admin-health-dot.err)  { background: var(--err-soft); }
-.admin-health-sep {
-  width: 1px;
-  height: 16px;
-  background: var(--line);
-  flex-shrink: 0;
-}
+/* ── Health dot (shared by the Overview Signal board) ── */
 .admin-health-dot {
   width: 8px;
   height: 8px;
@@ -3993,7 +3961,6 @@ span.flatpickr-weekday {
 .admin-health-dot.ok   { background: var(--ok);   box-shadow: 0 0 4px rgba(30,122,74,0.5); }
 .admin-health-dot.warn { background: var(--warn-vivid); box-shadow: 0 0 4px rgba(243,156,18,0.5); }
 .admin-health-dot.err  { background: var(--err);  box-shadow: 0 0 4px rgba(176,42,32,0.5); }
-.admin-health-label { color: var(--fg); }
 
 /* ── Pipeline ── */
 .admin-pipeline {
@@ -6310,6 +6277,108 @@ body.dark .flatpickr-next-month:hover svg { fill: var(--accent); }
 body.dark .tab-btn[data-tab="masterdata"].active { color: #ffffff; }
 body.dark .admin-subtab.active,
 body.dark .sub-subtab.active { color: #ffffff; }
+
+/* =============================================================================
+   ADMIN OVERVIEW — Signal board, Needs attention, Recent activity
+   Hairline rows over shadow; severity is a tinted row plus the dot and the name
+   color (never a side stripe). Warn text uses --warn-text (AA); --warn is a
+   background color only.
+   ========================================================================== */
+.ov-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.ov-head h2 { margin: 0; font-size: 18px; font-weight: 700; }
+.ov-meta {
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+.ov-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-top: 18px;
+  align-items: start;
+}
+@media (max-width: 900px) { .ov-grid { grid-template-columns: 1fr; } }
+
+.sig-board { display: block; }
+.sig-row {
+  display: grid;
+  grid-template-columns: 14px minmax(140px, 180px) 1fr auto auto;
+  column-gap: 12px;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.sig-row:last-child { border-bottom: 0; }
+.sig-row[data-sev="err"]  { background: var(--err-soft); }
+.sig-row[data-sev="warn"] { background: var(--warn-soft); }
+.sig-name { font-size: 13px; font-weight: 600; color: var(--fg); }
+.sig-row[data-sev="err"]  .sig-name { color: var(--err); }
+.sig-row[data-sev="warn"] .sig-name { color: var(--warn-text); }
+.sig-reason { font-size: 12px; color: var(--fg-mute); overflow-wrap: anywhere; min-width: 0; }
+.sig-num { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; }
+.sig-fixes { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.sig-details {
+  background: none;
+  border: 0;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.sig-details:hover { text-decoration: underline; }
+.sig-detail {
+  grid-column: 1 / -1;
+  background: var(--bg-subtle);
+  border-top: 1px solid var(--line);
+  margin: 10px -16px -10px;
+  padding: 10px 16px 12px 42px;
+}
+.sig-detail[hidden] { display: none; }
+.sig-dt-wrap { overflow-x: auto; margin-bottom: 8px; }
+.sig-dt { border-collapse: collapse; font-size: 12px; width: 100%; }
+.sig-dt th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--fg-mute);
+  padding: 3px 12px 3px 0;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.sig-dt td { padding: 4px 12px 4px 0; vertical-align: top; overflow-wrap: anywhere; }
+.sig-dt td.num { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; text-align: right; }
+
+.attn-list { display: block; }
+.attn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.attn-row:last-child { border-bottom: 0; }
+.attn-text { flex: 1 1 auto; font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.attn-row .btn { flex: 0 0 auto; }
+.attn-empty { padding: 14px 16px; font-size: 13px; color: var(--fg-mute); }
+
+.ov-recent .admin-log-row { padding: 6px 16px; border-left-color: transparent; }
+.ov-recent .admin-log-msg { overflow-wrap: anywhere; }
+
+@media (max-width: 720px) {
+  .sig-row { grid-template-columns: 14px 1fr auto; row-gap: 4px; }
+  .sig-reason, .sig-fixes { grid-column: 2 / -1; }
+  .sig-fixes { justify-content: flex-start; }
+  .sig-detail { margin: 10px -16px -10px; padding-left: 16px; }
+}
 
 /* =============================================================================
    ORDERS TAB — Notes popover (📝 column)

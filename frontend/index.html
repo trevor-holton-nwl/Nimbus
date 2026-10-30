@@ -1885,36 +1885,38 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
         <!-- OVERVIEW PANE -->
         <div id="admin-overview-pane">
 
-            <!-- HEALTH STATUS BAR — scoped to Diagnostics -->
-            <div class="admin-health-bar" id="admin-health-bar">
-              <div class="admin-health-chip" id="admin-health-db">
-                <span class="admin-health-dot"></span>
-                <span class="admin-health-label" data-i18n="ui.health_db">DB —</span>
-              </div>
-              <div class="admin-health-sep"></div>
-              <div class="admin-health-chip" id="admin-health-orders">
-                <span class="admin-health-label" data-i18n="ui.health_orders">— orders</span>
-              </div>
-              <div class="admin-health-sep"></div>
-              <div class="admin-health-chip" id="admin-health-overrides">
-                <span class="admin-health-label" data-i18n="ui.health_overrides">— user overrides</span>
-              </div>
-              <div class="admin-health-sep"></div>
-              <div class="admin-health-chip" id="admin-health-color">
-                <span class="admin-health-dot"></span>
-                <span class="admin-health-label" data-i18n="ui.health_color">Color wheel —</span>
-              </div>
-              <div class="admin-health-sep"></div>
-              <div class="admin-health-chip" id="admin-health-loaded">
-                <span class="admin-health-label">—</span>
-              </div>
-              <div class="admin-health-sep"></div>
-              <div class="admin-health-chip" id="admin-health-pool">
-                <span class="admin-health-dot"></span>
-                <span class="admin-health-label" data-i18n="ui.health_pool">Pool —</span>
-              </div>
+            <div class="ov-head">
+              <h2 data-i18n="ov.title">Overview</h2>
+              <span class="ov-meta" id="ov-meta" role="status"></span>
               <div class="spacer"></div>
-              <button class="btn btn-ghost sm" id="admin-health-refresh" data-i18n="btn.health_refresh" data-i18n-title="tip.health_refresh" title="Refresh health">↻ Health</button>
+              <button class="btn btn-ghost sm" id="ov-pause" type="button" aria-pressed="false" data-i18n="btn.pause">Pause</button>
+              <button class="btn btn-ghost sm" id="ov-refresh" type="button" data-i18n="btn.refresh">↻ Refresh</button>
+            </div>
+
+            <div class="panel" id="ov-signals-card">
+              <header class="panel-head"><h3 data-i18n="ov.signals">Signals</h3></header>
+              <div class="panel-body panel-body-flush">
+                <div class="sig-board" id="ov-signals" role="list"></div>
+              </div>
+            </div>
+
+            <div class="ov-grid">
+              <div class="panel" id="ov-attention-card">
+                <header class="panel-head"><h3 data-i18n="ov.attention">Needs attention</h3></header>
+                <div class="panel-body panel-body-flush">
+                  <div class="attn-list" id="ov-attention"></div>
+                </div>
+              </div>
+              <div class="panel" id="ov-recent-card">
+                <header class="panel-head">
+                  <h3 data-i18n="ov.recent">Recent activity</h3>
+                  <div class="spacer"></div>
+                  <button class="btn btn-ghost sm" id="ov-open-logs" type="button" data-i18n="ov.open_logs">Open Logs ›</button>
+                </header>
+                <div class="panel-body panel-body-flush">
+                  <div class="admin-log-list ov-recent" id="ov-recent"></div>
+                </div>
+              </div>
             </div>
 
         </div><!-- /admin-overview-pane -->
