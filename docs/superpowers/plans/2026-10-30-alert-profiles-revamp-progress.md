@@ -7,3 +7,5 @@
 Each wave appends its own line below.
 
 W0: design doc + mockup committed (558a6e5)
+
+W1: late category (79c6d88) — late split out of Other into its own seventh category (ALERT_CATEGORY_ORDER, aliases, locales x5, --bar-pm-late stone placeholder, legend, briefing fallback); tests: 962 targeted (960 pass, 2 skipped bench), full modules 5747 (1 unrelated failure: frozen-horizon-rolling)
