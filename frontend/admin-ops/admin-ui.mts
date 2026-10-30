@@ -698,8 +698,11 @@ export const AdminCockpit = {
   _renderDiagnosticsPane(opts: { force?: boolean } = {}): void {
     void opts.force;
     AdminCockpit._computeClientStats();
+    // Skeletons and heads exist synchronously, so a deep link is revealed here, before any read starts. The later
+    // _repaintHeads calls find the anchor already cleared (no re-scroll) and keep the target open through _diagOpen.
     AdminCockpit._ensureDbSubs();
     AdminCockpit._repaintHeads();
+    AdminCockpit._revealPendingAnchor();
     AdminCockpit._renderDiagnostics();
     AdminCockpit._renderPipeline();
     AdminCockpit._renderDbDeep();
@@ -798,7 +801,9 @@ export const AdminCockpit = {
     const el = document.getElementById(a);
     if (!el) return;
     A._pendingAnchor = null;
-    A._revealAnchor(el);
+    // A deep link jumps (no smooth scroll): a smooth scroll is computed against the skeleton layout, then stalls or lands
+    // wrong when the reads fill the bodies above the target. Native scroll anchoring keeps the target put afterwards.
+    A._revealAnchor(el, false);
   },
 
   /** jobs:<tab> / sap:<tab>: render the pane, switch its inner view, then reveal the inner element. */
@@ -902,12 +907,12 @@ export const AdminCockpit = {
 
   /** Open `el` and every <details> above it, scroll it into view (the scroller is .admin-scroll, found by the browser),
    *  flash it once, and put keyboard focus on its summary. Reduced motion: no smooth scroll, outline only (CSS). */
-  _revealAnchor(el: HTMLElement): void {
+  _revealAnchor(el: HTMLElement, smooth: boolean = true): void {
     const A = AdminCockpit;
     for (let n: HTMLElement | null = el; n; n = n.parentElement) {
       if (n.tagName === 'DETAILS') (n as HTMLDetailsElement).open = true;
     }
-    const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const reduced = !smooth || (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches);
     el.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' });
     if (A._flashEl) A._flashEl.classList.remove('is-target');
     if (A._flashTimer) clearTimeout(A._flashTimer);

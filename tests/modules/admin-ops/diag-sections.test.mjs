@@ -188,6 +188,17 @@ test('server: ping ladder, version and uptime', () => {
   assert.equal(s.lineArgs.uptime, 24 * 60 * MIN);
 });
 
+test('server: with no ping reading the line and rail figure use the keys without the ms unit', () => {
+  for (const pingMs of [null, undefined]) {
+    const s = sec(base({ pingMs }), 'db-server');
+    assert.equal(s.lineKey, 'diag.line_server_noping');
+    assert.equal(s.shortKey, 'diag.short_server_noping');
+    assert.equal('ping' in s.lineArgs, false);
+    assert.equal(s.severity, 'ok');
+  }
+  assert.equal(sec(base({ pingMs: 20 }), 'db-server').lineKey, 'diag.line_server');
+});
+
 test('thresholds can be overridden', () => {
   const s = buildDiagSections(base({ client: { build: 'b', autosave: 'on', errRate: 0, heapUsed: 50, heapLimit: 100 } }), { ...THRESHOLDS, heapWarnPct: 50 });
   assert.equal(s.find(x => x.id === 'client').severity, 'warn');
@@ -209,9 +220,9 @@ test('defaultOpen: warn/err open, ok closed, the pending anchor opens its sectio
 });
 
 /* ---- locale contract ---- */
-const T2_KEYS = ['diag.rail_sections', 'diag.stats_age', 'diag.line_client', 'diag.line_pipe', 'diag.line_bwarn', 'diag.line_db', 'diag.line_pool', 'diag.line_server',
+const T2_KEYS = ['diag.rail_sections', 'diag.stats_age', 'diag.line_client', 'diag.line_pipe', 'diag.line_bwarn', 'diag.line_db', 'diag.line_pool', 'diag.line_server', 'diag.line_server_noping',
   'diag.line_tables', 'diag.line_conn', 'diag.line_locks_ok', 'diag.line_locks_n', 'diag.line_idx', 'diag.line_slow', 'diag.line_slow_ok', 'diag.line_seq', 'diag.line_thread',
-  'diag.line_thread_empty', 'diag.line_unavailable', 'diag.short_client', 'diag.short_pipe', 'diag.short_bwarn', 'diag.short_db', 'diag.short_pool', 'diag.short_server',
+  'diag.line_thread_empty', 'diag.line_unavailable', 'diag.short_client', 'diag.short_pipe', 'diag.short_bwarn', 'diag.short_db', 'diag.short_pool', 'diag.short_server', 'diag.short_server_noping',
   'diag.short_tables', 'diag.short_conn', 'diag.short_locks', 'diag.short_idx', 'diag.short_slow', 'diag.short_seq', 'diag.short_thread', 'diag.see_bwarn', 'diag.lock_blocking',
   'diag.lock_blocked', 'diag.calls', 'btn.analyze', 'btn.export_bundle', 'aria.help', 'ui.none'];
 
@@ -220,7 +231,7 @@ function emittedAll() {
   const out = [];
   const variants = [
     base(), base({ client: null, deep: null, dbDeep: null, perf: [] }), base({ dbDeep: { forbidden: true } }),
-    withDb({ locks: [{ blocked_pid: 1 }], slow_queries: { available: true, queries: [] } }), base({ perf: [] }),
+    withDb({ locks: [{ blocked_pid: 1 }], slow_queries: { available: true, queries: [] } }), base({ perf: [] }), base({ pingMs: null }),
   ];
   for (const v of variants) out.push(...buildDiagSections(v));
   return out;

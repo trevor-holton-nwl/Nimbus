@@ -162,6 +162,10 @@ function _server(db: DbDeep, now: number, ping: number | null | undefined, t: Th
   const uptime = Number.isFinite(started) ? Math.max(0, now - started) : 0;
   const pingMs = typeof ping === 'number' ? Math.round(ping) : NA;
   const sev: Severity = typeof ping !== 'number' ? 'ok' : ping > t.dbPingErrMs ? 'err' : ping > t.dbPingWarnMs ? 'warn' : 'ok';
+  if (typeof ping !== 'number') {
+    // No reading: use the keys without the "ping {{ping}} ms" tail, so the unit never trails a dash.
+    return { ..._sec('db-server', sev, 'diag.line_server_noping', { version: _fmtVersion(s.version), uptime }, {}), shortKey: 'diag.short_server_noping' };
+  }
   return _sec('db-server', sev, 'diag.line_server', { version: _fmtVersion(s.version), uptime, ping: pingMs }, { ping: pingMs });
 }
 

@@ -1036,3 +1036,28 @@ test('sap:staging renders the Interface, selects the tab, reveals #sap-stage-bat
   } finally { Interface.render = realR; Interface.showTab = realT; A._revealAnchor = realReveal; restore(); A._pendingAnchor = null; A._activeSub = 'overview'; }
   assert.deepEqual(order, ['render', 'tab:staging', 'reveal:sap-stage-batches', 'render', 'tab:staging', 'reveal:sap-tabbody']);
 });
+
+test('_setSub(diagnostics, anchor) reveals the target before the Database read resolves, and a later repaint neither re-scrolls nor closes it', () => {
+  const A = AdminCockpit;
+  const order = [];
+  // Keep the real _setSub, _renderDiagnosticsPane, _repaintHeads and _revealPendingAnchor; stub only what touches the network or the rest of the DOM.
+  const names = ['_startSpy', '_stopSpy', '_computeClientStats', '_ensureDbSubs', '_renderDiagnostics', '_renderPipeline', '_refreshThreadPane',
+    '_renderDiagRail', '_paintSectionHead', '_paintDiagStamp', '_observeSections', '_stopHealthPolling'];
+  const real = {}; for (const n of names) { real[n] = A[n]; A[n] = () => {}; }
+  const realDb = A._renderDbDeep; A._renderDbDeep = () => { order.push('db-read'); return new Promise(() => {}); };   // never resolves
+  const realReveal = A._revealAnchor; A._revealAnchor = (el, smooth) => order.push(`reveal:${el.id}:${smooth}`);
+  const realInputs = A._diagInputs; A._diagInputs = () => ({ client: null, deep: null, dbDeep: null, perf: [], dbStatsAt: null, now: 0, pingMs: null });
+  const els = { 'admin-diag-pane': dnode('div', { id: 'admin-diag-pane' }), 'diag-db-conn': dnode('details', { id: 'diag-db-conn' }) };
+  try {
+    withDiagDom(els, () => {
+      A._setSub('diagnostics', 'diag-db-conn');
+      assert.deepEqual(order.slice(0, 2), ['reveal:diag-db-conn:false', 'db-read'], 'revealed first, instant jump, before the read starts');
+      assert.equal(A._pendingAnchor, null, 'anchor consumed');
+      A._repaintHeads();   // what the landing read triggers
+      assert.equal(order.filter(x => x.startsWith('reveal')).length, 1, 'the later repaint does not scroll again');
+    });
+  } finally {
+    for (const n of names) A[n] = real[n];
+    A._renderDbDeep = realDb; A._revealAnchor = realReveal; A._diagInputs = realInputs; A._pendingAnchor = null;
+  }
+});
