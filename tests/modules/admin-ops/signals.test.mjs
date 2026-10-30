@@ -242,3 +242,10 @@ test('every emitted locale key exists in en.js', () => {
   for (const k of keys) assert.ok(typeof en[k] === 'string' && en[k], `en.js is missing ${k}`);
   for (const k of ['sig.jobs_ok', 'sig.jobs_none', 'sig.db_vacuum', 'sig.conn_long', 'sig.sap_last_pull', 'sig.browser_heap', 'attn.sap_held', 'attn.distribution']) assert.ok(keys.has(k), `fixtures never emit ${k}`);
 });
+
+test('data_load never depends on the deep diagnostics read', () => {
+  const a = sig(buildSignals(base()), 'data_load');
+  const b = sig(buildSignals(base({ dbDeep: null, dbDeepErr: 'forbidden', isAdmin: false })), 'data_load');
+  const c = sig(buildSignals(base({ dbDeep: null, dbDeepErr: 'boom' })), 'data_load');
+  for (const s of [b, c]) { assert.equal(s.severity, a.severity); assert.equal(s.reasonKey, a.reasonKey); }
+});
