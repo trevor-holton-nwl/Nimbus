@@ -36,6 +36,7 @@ frontend/alert-monitor/alert-ack-modal.mjs
 frontend/alert-monitor/alert-slot-modal.mjs
 frontend/alert-monitor/alert-profile-editor.mjs
 frontend/alert-monitor/alert-monitor-overview.mjs
+frontend/alert-monitor/alert-monitor-matrix.mjs
 frontend/insights/plant-lru.mjs
 frontend/scheduling/persistence.mjs
 frontend/calendar/calendar-sync.mjs

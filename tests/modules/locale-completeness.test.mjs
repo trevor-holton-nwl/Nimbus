@@ -981,6 +981,55 @@ test('Alert Monitor: every firing alert type has an alert.help.<type> sentence i
   }
 });
 
+test('Alert Monitor: every firing alert type has a short alert.tag.<type> in all five locales (same placeholders, only vars the alert carries, en <= 24 chars)', async () => {
+  const { FIRING_ALERT_TYPES } = await import('../../frontend/insights/alert-profiles.mjs');
+  // The msgVars each type's alert actually carries (nimbus-compute-core.js); types absent here carry none, so their tag is static.
+  const CARRIES = {
+    'tool-conflict': ['tool', 'available', 'inUse', 'holders'],
+    'distribution-separation': ['parent', 'scope'],
+    late: ['order', 'hours', 'days'],
+    'setup-violated': ['order', 'line', 'required', 'available', 'short'],
+  };
+  const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
+  const banned = /\b(points?|pts|exact(ly)?|estimates?|estimated)\b/i;
+  for (const type of FIRING_ALERT_TYPES) {
+    const en = dicts.en[`alert.tag.${type}`];
+    assert.ok(typeof en === 'string' && en.trim(), `en.js has no alert.tag.${type}`);
+    assert.ok(en.length <= 24, `en alert.tag.${type} is ${en.length} chars (max 24): "${en}"`);
+    assert.doesNotMatch(en, banned, `en alert.tag.${type} vocabulary`);
+    const allowed = new Set(CARRIES[type] ?? []);
+    for (const m of en.matchAll(/\{\{(\w+)\}\}/g)) assert.ok(allowed.has(m[1]), `alert.tag.${type} uses {{${m[1]}}}, which the ${type} alert does not carry`);
+    for (const locale of LOCALES) {
+      const v = dicts[locale][`alert.tag.${type}`];
+      assert.ok(typeof v === 'string' && v.trim(), `${locale}.js has no alert.tag.${type}`);
+      assert.equal(placeholdersOf(v), placeholdersOf(en), `${locale} alert.tag.${type} placeholders`);
+    }
+    assert.doesNotMatch(dicts.es[`alert.tag.${type}`], /\b[Oo]rden(es)?\b/, `es alert.tag.${type} says pedido`);
+    assert.doesNotMatch(dicts.fr[`alert.tag.${type}`], /\b[Oo]rdres?\b/, `fr alert.tag.${type} says commande`);
+  }
+});
+
+test('Alert Monitor W6a: the Matrix / row / summary model keys exist in all five locales with the English placeholders', () => {
+  const keys = [
+    'am.summary_machines', 'am.summary_showing', 'am.detail_alert', 'am.detail_material', 'am.detail_due', 'am.detail_finish', 'am.detail_firming',
+    'am.ungrouped', 'am.mx_corner_machine', 'am.mx_corner_day', 'am.mx_corner_group', 'am.mx_cell_aria', 'am.mx_cell_aria_one',
+    'am.quiet_show', 'am.quiet_show_one', 'am.quiet_hide', 'am.quiet_hide_one',
+    'am.mx_legend_err', 'am.mx_legend_warn', 'am.mx_legend_dots', 'am.mx_legend_hint',
+  ];
+  const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
+  const banned = /\b(points?|pts|exact(ly)?|estimates?|estimated)\b/i;
+  for (const key of keys) {
+    assert.doesNotMatch(dicts.en[key], banned, `en ${key} vocabulary`);
+    for (const locale of LOCALES) {
+      const v = dicts[locale][key];
+      assert.ok(typeof v === 'string' && v.trim(), `${locale}.js is missing "${key}"`);
+      assert.equal(placeholdersOf(v), placeholdersOf(dicts.en[key]), `${locale} ${key} placeholders`);
+    }
+    assert.doesNotMatch(dicts.es[key], /\b[Oo]rden(es)?\b/);
+    assert.doesNotMatch(dicts.fr[key], /\b[Oo]rdres?\b/);
+  }
+});
+
 test('Alert Monitor: es says pedido and fr says commande (no orden/ordre)', () => {
   const es = localeDict('es'), fr = localeDict('fr');
   for (const key of ALERT_MONITOR_KEYS) {

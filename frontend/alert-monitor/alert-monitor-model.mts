@@ -6,8 +6,9 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, NONE_KEY, alertDayOffset, dayKeyOf, FIXABLE_ALERT_TYPES, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
+import { dayBucketKey, horizonDayKeys } from './alert-monitor-overview.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -36,7 +37,7 @@ export const MONITOR_SORTS: AlertRanking[] = ['impact', 'time'];
 export const MONITOR_CATEGORIES: readonly AlertCategory[] = ALERT_CATEGORY_ORDER;
 export const DEFAULT_GROUP_BY: MonitorGroupBy = 'line';
 
-export interface MonitorView { groupBy: MonitorGroupBy; sort: AlertRanking }
+export interface LegacyMonitorView { groupBy: MonitorGroupBy; sort: AlertRanking }
 
 /** What the summary line says about the alerts the list shows. */
 export interface SummaryInput {
@@ -49,8 +50,13 @@ export interface SummaryInput {
   profile: AlertProfile | null | undefined;
   /** A leverage card's "Show alerts" is active: its chip text replaces the first clause. */
   focus: { title: string; outside: number } | null;
-  /** The plant confidence score now (null until computed). */
-  confidence: number | null | undefined;
+  /** @deprecated The page drops the confidence link in W6b; the legacy pane still passes it. Absent = no link. */
+  confidence?: number | null | undefined;
+  /** Machines carrying at least one alert in the list, and the plant's machine count; both set = "M of N machines". */
+  machinesNoisy?: number;
+  machinesTotal?: number;
+  /** The filtered count; set only while a filter is active ("showing V"). */
+  showing?: number | null;
 }
 
 export interface SummaryLine {
@@ -129,6 +135,10 @@ export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
   if (errors > 0) parts.push(_plural(errors, 'am.summary_errors', { e: errors }, t));
   if (warnings > 0) parts.push(_plural(warnings, 'am.summary_warnings', { w: warnings }, t));
   if (orders.size > 0) parts.push(_plural(orders.size, 'am.summary_orders', { o: orders.size }, t));
+  if (typeof input.machinesNoisy === 'number' && typeof input.machinesTotal === 'number' && input.machinesTotal > 0) {
+    parts.push(t('am.summary_machines', { m: input.machinesNoisy, total: input.machinesTotal }));
+  }
+  if (typeof input.showing === 'number') parts.push(t('am.summary_showing', { v: input.showing }));
   let conf: SummaryLine['conf'] = null;
   const c = input.confidence;
   if (typeof c === 'number' && isFinite(c)) {
@@ -209,11 +219,11 @@ function _ruleLine(rule: AlertProfileRule, typesText: string, t: Translate): str
  * Machine grouping and the profile's own default ranking (`time` -> Date, anything else -> Priority).
  * A stored `severity` / `orders` sort (earlier builds) reads as Priority.
  */
-export function viewFor(
+export function legacyViewFor(
   profileId: string,
   pref: Record<string, { groupBy?: unknown; sort?: unknown } | undefined> | null | undefined,
   profile: Pick<AlertProfile, 'ranking'> | null | undefined,
-): MonitorView {
+): LegacyMonitorView {
   const stored = pref && typeof pref === 'object' ? pref[profileId] : undefined;
   const groupBy = MONITOR_GROUP_BYS.includes(stored?.groupBy as MonitorGroupBy)
     ? stored!.groupBy as MonitorGroupBy : DEFAULT_GROUP_BY;
@@ -476,7 +486,7 @@ function _glyphBtnInner(label: string): string {
 }
 
 /** One alert row (and, when open, its inline diagnose panel): 44 px, one line. */
-export function rowHtml(v: RowView, t: Translate): string {
+export function legacyRowHtml(v: RowView, t: Translate): string {
   const acts = rowActionsFor(v);
   const p = rowPrimaryActions(v, null, { whatIf: v.whatIf, acked: !!v.ackLabel });
   const id = _esc(v.id);
@@ -880,4 +890,258 @@ export function levPairsForReview(pairs: ReadonlyArray<LeveragePair>, remedy: st
     line: p.line, predecessorOrderId: p.predecessorOrderId ?? null, successorOrderId: p.successorOrderId ?? null,
     fromState: text(p.fromState), toState: text(p.toState), reason: p.reason, remedy,
   }));
+}
+
+/* ---------------------------------------------------------------------------
+   W6a — the Inbox | Matrix model: view + lens, the shared filter, day buckets, the
+   compact 32 px row, the short tag and Top-fixes scoping. All pure; W6b wires them.
+   ------------------------------------------------------------------------- */
+
+export type MonitorViewKind = 'matrix' | 'inbox';
+export type MonitorLens = 'machine' | 'day' | 'group';
+/** What `alertMonitorView['*']` stores. */
+export interface MonitorView { view: MonitorViewKind; lens: MonitorLens }
+export const DEFAULT_VIEW: MonitorView = { view: 'matrix', lens: 'machine' };
+
+const _isView = (v: unknown): v is MonitorViewKind => v === 'matrix' || v === 'inbox';
+const _isLens = (v: unknown): v is MonitorLens => v === 'machine' || v === 'day' || v === 'group';
+
+/**
+ * The page's view and lens. `settings['*']` wins; a lens it lacks falls back to the stored per-profile `groupBy`
+ * of earlier builds (`type` / `category` -> group, `day` -> day, anything else -> machine); the view defaults to matrix.
+ */
+export function viewFor(
+  settings: Record<string, { view?: unknown; lens?: unknown; groupBy?: unknown } | undefined> | null | undefined,
+  profileId: string,
+): MonitorView {
+  const map = settings && typeof settings === 'object' ? settings : {};
+  const star = map['*'];
+  const per = map[profileId];
+  const migrated = (g: unknown): MonitorLens | null =>
+    g === 'type' || g === 'category' ? 'group' : g === 'day' ? 'day' : typeof g === 'string' && g ? 'machine' : null;
+  const view = _isView(star?.view) ? star!.view : _isView(per?.view) ? per!.view : DEFAULT_VIEW.view;
+  const lens = _isLens(star?.lens) ? star!.lens
+    : _isLens(per?.lens) ? per!.lens
+      : migrated(per?.groupBy) ?? DEFAULT_VIEW.lens;
+  return { view: view as MonitorViewKind, lens: lens as MonitorLens };
+}
+
+/** The filter's dimensions both views read (session-only). */
+export interface MonitorFilter {
+  machines: Set<string>;
+  wcGroups: Set<string>;
+  days: Set<string>;
+  categories: Set<AlertCategory>;
+  q: string;
+}
+export type FilterDim = 'machines' | 'wcGroups' | 'days' | 'categories' | 'q';
+
+export function emptyFilter(): MonitorFilter {
+  return { machines: new Set(), wcGroups: new Set(), days: new Set(), categories: new Set(), q: '' };
+}
+export function filterIsEmpty(f: MonitorFilter): boolean {
+  return !f.machines.size && !f.wcGroups.size && !f.days.size && !f.categories.size && !f.q.trim();
+}
+
+export interface FilterChipLabels {
+  machine?: (key: string) => string;
+  wc?: (key: string) => string;
+  day?: (key: string) => string;
+  category?: (cat: AlertCategory) => string;
+  q?: (q: string) => string;
+}
+/** One removable chip per active value, in a stable dimension order. */
+export function filterChips(f: MonitorFilter, labels: FilterChipLabels = {}): Array<{ dim: FilterDim; key: string; label: string }> {
+  const out: Array<{ dim: FilterDim; key: string; label: string }> = [];
+  for (const k of f.wcGroups) out.push({ dim: 'wcGroups', key: k, label: labels.wc ? labels.wc(k) : k });
+  for (const k of f.machines) out.push({ dim: 'machines', key: k, label: labels.machine ? labels.machine(k) : k });
+  for (const k of f.days) out.push({ dim: 'days', key: k, label: labels.day ? labels.day(k) : k });
+  for (const k of f.categories) out.push({ dim: 'categories', key: k, label: labels.category ? labels.category(k) : k });
+  const q = f.q.trim();
+  if (q) out.push({ dim: 'q', key: q, label: labels.q ? labels.q(q) : q });
+  return out;
+}
+
+/** The key of the bucket holding lines with no work-center group. */
+export const UNGROUPED_KEY = '__ungrouped__';
+
+export interface MonitorMachine { id: string; name?: string; wc_group?: string }
+
+/** A line's work-center group key (`wc_group` of the master line; blank or unknown -> UNGROUPED_KEY). */
+export function wcGroupOf(line: string | null | undefined, masterLines: ReadonlyArray<{ machine?: string; id?: string; wc_group?: string }>): string {
+  if (!line) return UNGROUPED_KEY;
+  for (const m of masterLines) {
+    if ((m.id ?? m.machine) === line) return m.wc_group ? String(m.wc_group) : UNGROUPED_KEY;
+  }
+  return UNGROUPED_KEY;
+}
+
+/** What the filter and the matrix need from the page. The pane builds it from the Store (W6b). */
+export interface MonitorCtx {
+  plantToday: Date;
+  /** Day columns: the alert horizon in days (`horizonDays`). */
+  horizonDays: number;
+  /** The anchor instant of an alert (its order's due, else its own time): built from the overview module's `_memoAnchor(deps)`. */
+  anchorOf?: (a: NimbusAlert) => Date | null;
+  machines: ReadonlyArray<MonitorMachine>;
+  /** Search text sources; blank when absent. */
+  orderNoOf?: (a: NimbusAlert) => string;
+  materialOf?: (a: NimbusAlert) => string;
+  tagOf?: (a: NimbusAlert) => string;
+}
+
+/** An alert's anchor, with the plain own-time fallback when the ctx gives no resolver. */
+function _anchor(a: NimbusAlert, ctx: Pick<MonitorCtx, 'anchorOf'>): Date | null {
+  if (ctx.anchorOf) return ctx.anchorOf(a);
+  return a.time instanceof Date && !isNaN(a.time.getTime()) ? a.time : null;
+}
+
+/**
+ * `'overdue'`, a `YYYY-MM-DD` day key, `'later'` or `'none'`: the Overview band's own bucket rule (`dayBucketKey`),
+ * so a Matrix column and an Inbox facet never disagree on what a day is.
+ */
+export function dayBucketOf(alert: NimbusAlert, plantToday: Date, horizonDays: number, anchorOf?: (a: NimbusAlert) => Date | null): string {
+  return dayBucketKey(_anchor(alert, { anchorOf }), plantToday, horizonDays);
+}
+
+/** A cached bucketer for one pass (the day keys are built once); same result as `dayBucketOf`. */
+export function makeBucketer(ctx: Pick<MonitorCtx, 'plantToday' | 'horizonDays' | 'anchorOf'>): (a: NimbusAlert) => string {
+  const keys = horizonDayKeys(ctx.plantToday, ctx.horizonDays);
+  return a => {
+    const anchor = _anchor(a, ctx);
+    if (!anchor) return NONE_KEY;
+    const off = alertDayOffset(anchor, ctx.plantToday);
+    return off < 0 ? 'overdue' : off >= ctx.horizonDays ? 'later' : keys[off]!;
+  };
+}
+
+/** The alerts matching every active dimension (AND) and the search text. An empty filter returns the same array. */
+export function filterAlerts<A extends NimbusAlert>(alerts: ReadonlyArray<A>, f: MonitorFilter, ctx: MonitorCtx): A[] {
+  if (filterIsEmpty(f)) return alerts as A[];
+  const wcByLine = new Map<string, string>();
+  if (f.wcGroups.size) for (const m of ctx.machines) wcByLine.set(m.id, m.wc_group ? String(m.wc_group) : UNGROUPED_KEY);
+  const bucket = f.days.size ? makeBucketer(ctx) : null;
+  const q = f.q.trim().toLowerCase();
+  return alerts.filter(a => {
+    if (f.machines.size && !f.machines.has(a.line || NONE_KEY)) return false;
+    if (f.wcGroups.size && !f.wcGroups.has(a.line ? (wcByLine.get(a.line) ?? UNGROUPED_KEY) : UNGROUPED_KEY)) return false;
+    if (f.categories.size && !f.categories.has(_catOf(a.type))) return false;
+    if (bucket && !f.days.has(bucket(a))) return false;
+    if (q) {
+      const hay = [a.taskId ?? '', ctx.orderNoOf?.(a) ?? (a.msgVars?.order ?? ''), a.line ?? '', ctx.materialOf?.(a) ?? '', ctx.tagOf?.(a) ?? '']
+        .join('\u0001').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+/** The order's material description (else its number); an alert with no order reads "machine · day". */
+export function materialOf(
+  a: Pick<NimbusAlert, 'taskId' | 'line' | 'time'>,
+  tasksById: Record<string, { MATERIAL_DESCRIPTION?: string; MATERIAL_NUMBER?: string } | undefined> | null | undefined,
+  dayLabel?: (a: Pick<NimbusAlert, 'time'>) => string,
+): string {
+  const task = a.taskId ? tasksById?.[a.taskId] : undefined;
+  if (task) {
+    const desc = String(task.MATERIAL_DESCRIPTION ?? '').trim();
+    if (desc) return desc;
+    const no = String(task.MATERIAL_NUMBER ?? '').trim();
+    if (no) return no;
+  }
+  const day = dayLabel ? dayLabel(a) : (a.time instanceof Date && !isNaN(a.time.getTime()) ? dayKeyOf(a.time) : '');
+  return [a.line ?? '', day].filter(Boolean).join(' · ');
+}
+
+/** The short tag: `alert.tag.<type>` with the alert's own message variables. */
+export function tagOf(a: { type: string; msgVars?: Record<string, string | number> }, t: Translate): string {
+  return t('alert.tag.' + a.type, a.msgVars);
+}
+
+export interface CompactRowOpts {
+  /** The machine column is dropped (the filter is one machine). */
+  hideMachine: boolean;
+  /** Open: the detail block follows the row. */
+  open: boolean;
+  material: string;
+  tag: string;
+  t: Translate;
+  /** Order number shown mono; falls back to `msgVars.order`, then `taskId`. */
+  orderNo?: string;
+  /** Category name shown muted before the tag; its color dot reads `--bar-pm-<category>`. */
+  groupLabel?: string;
+  /** The due column text and whether it is overdue. */
+  dueText?: string;
+  overdue?: boolean;
+  /** What-If is active: Fix / Override / Move render disabled. */
+  whatIf?: boolean;
+  /** `rowDetailHtml(...)` output, appended when `open`. */
+  detailHtml?: string;
+}
+
+/** One 32 px Inbox / side-list row: grid `14px 10px 92px minmax(0,1fr) 54px 150px 58px auto`; actions show on hover / focus (CSS). */
+export function rowHtml(a: NimbusAlert, o: CompactRowOpts): string {
+  const t = o.t;
+  const id = _esc(a.id);
+  const cat = _catOf(a.type);
+  const acts = rowActionsFor(a);
+  const lock = o.whatIf ? ` disabled aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : '';
+  const btns: string[] = [];
+  if (acts.goto) btns.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${id}">${_esc(t('btn.go_to'))}</button>`);
+  const second = acts.fix ? 'fix' : acts.override ? 'override' : acts.slot ? 'slot' : acts.diagnose !== 'none' ? 'diagnose' : null;
+  if (second) {
+    const label = second === 'fix' ? _splitGlyph(t('btn.fix_it')).text
+      : second === 'override' ? _splitGlyph(t('btn.override')).text
+        : second === 'slot' ? t('am.slot') : t('am.diagnose');
+    const locked = second === 'diagnose' ? '' : lock;
+    btns.push(`<button type="button" class="btn sm${second === 'fix' ? ' btn-fix' : ' btn-ghost'} am-act-2" data-alert-action="${second}" data-alert-id="${id}"`
+      + (a.taskId ? ` data-task-id="${_esc(a.taskId)}"` : '') + `${locked}>${_esc(label)}</button>`);
+  }
+  btns.push(`<button type="button" class="icon-btn sm am-row-menu" data-alert-id="${id}" data-ovf-key="${id}" aria-haspopup="menu" aria-expanded="false"`
+    + ` aria-label="${_esc(t('am.more_actions'))}" title="${_esc(t('am.more_actions'))}">⋯</button>`);
+  const orderNo = o.orderNo ?? String(a.msgVars?.order ?? a.taskId ?? '');
+  const grp = o.groupLabel ? `<b>${_esc(o.groupLabel)}</b> ` : '';
+  return `<div class="am-xwrap" role="listitem" data-alert-id="${id}">`
+    + `<div class="am-xrow am-xrow-${a.sev}${o.hideMachine ? ' am-xrow-nomc' : ''}${o.open ? ' open' : ''}" tabindex="0" data-alert-id="${id}" aria-expanded="${o.open}">`
+    + `<span class="am-sev am-sev-${a.sev}" aria-hidden="true">${_sevGlyph(a.type, a.sev)}</span>`
+    + `<span class="am-gdot" style="--c:var(--bar-pm-${cat})" title="${_esc(o.groupLabel ?? cat)}"></span>`
+    + `<span class="am-oid">${_esc(orderNo)}</span>`
+    + `<span class="am-mat" title="${_esc(o.material)}">${_esc(o.material)}</span>`
+    + (o.hideMachine ? '' : `<span class="am-mc">${_esc(a.line ?? '')}</span>`)
+    + `<span class="am-tag" title="${_esc(o.tag)}">${grp}${_esc(o.tag)}</span>`
+    + `<span class="am-due${o.overdue ? ' am-when-overdue' : ''}">${_esc(o.dueText ?? '')}</span>`
+    + `<span class="am-acts">${btns.join('')}</span>`
+    + `</div>`
+    + (o.open && o.detailHtml ? o.detailHtml : '')
+    + `</div>`;
+}
+
+export interface RowDetailCtx {
+  /** The full message (the Gantt-hover sentence). */
+  message: string;
+  material: string;
+  due: string;
+  plannedFinish: string;
+  firming: string;
+  t: Translate;
+}
+/** The expanded row: full message, material, due, planned finish, firming. */
+export function rowDetailHtml(a: Pick<NimbusAlert, 'id'>, c: RowDetailCtx): string {
+  const f = (cls: string, key: string, v: string) =>
+    `<div${cls ? ` class="${cls}"` : ''}><b>${_esc(c.t(key))}</b>${_esc(v)}</div>`;
+  return `<div class="am-xdetail" data-alert-id="${_esc(a.id)}">`
+    + f('am-xfull', 'am.detail_alert', c.message) + f('', 'am.detail_material', c.material) + f('', 'am.detail_due', c.due)
+    + f('', 'am.detail_finish', c.plannedFinish) + f('', 'am.detail_firming', c.firming)
+    + `</div>`;
+}
+
+/** Top fixes scoped to the alerts in view: keeps an item when any of its alerts is in `viewIds`, in rank order, with how many are. */
+export function fixesInView<I extends { alertIds: ReadonlyArray<string> }>(items: ReadonlyArray<I>, viewIds: ReadonlySet<string>): Array<{ item: I; inView: number }> {
+  const out: Array<{ item: I; inView: number }> = [];
+  for (const item of items) {
+    let n = 0;
+    for (const id of item.alertIds) if (viewIds.has(id)) n++;
+    if (n > 0) out.push({ item, inView: n });
+  }
+  return out;
 }

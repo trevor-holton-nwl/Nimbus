@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  profileWindow, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  profileWindow, summaryLine, windowSummary, legacyViewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   MONITOR_GROUP_BYS, MONITOR_SORTS, groupCounts, rowActionsFor,
 } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 import { ALL_ALERTS_PROFILE, ALERT_CATEGORY_ORDER, DEFAULT_CATEGORY_COLORS } from '../../../frontend/insights/alert-profiles.mjs';
@@ -135,21 +135,21 @@ test('windowSummary names Planning when a rule spans the planning types', () => 
   assert.equal(s, 'Scheduling conflicts, Planning · any day · all severities');
 });
 
-test('viewFor: stored choice wins, else Machine + the profile ranking, junk is ignored', () => {
-  assert.deepEqual(viewFor('p1', null, prof([], 'time')), { groupBy: 'line', sort: 'time' });
-  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'day', sort: 'time' } }, prof([], 'impact')), { groupBy: 'day', sort: 'time' });
-  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'bogus', sort: 7 } }, prof([], 'orders')), { groupBy: 'line', sort: 'impact' });
-  assert.deepEqual(viewFor('p2', { p1: { groupBy: 'category', sort: 'time' } }, null), { groupBy: 'line', sort: 'impact' });
-  assert.deepEqual(viewFor('__all__', null, ALL_ALERTS_PROFILE), { groupBy: 'line', sort: 'impact' });
+test('legacyViewFor: stored choice wins, else Machine + the profile ranking, junk is ignored', () => {
+  assert.deepEqual(legacyViewFor('p1', null, prof([], 'time')), { groupBy: 'line', sort: 'time' });
+  assert.deepEqual(legacyViewFor('p1', { p1: { groupBy: 'day', sort: 'time' } }, prof([], 'impact')), { groupBy: 'day', sort: 'time' });
+  assert.deepEqual(legacyViewFor('p1', { p1: { groupBy: 'bogus', sort: 7 } }, prof([], 'orders')), { groupBy: 'line', sort: 'impact' });
+  assert.deepEqual(legacyViewFor('p2', { p1: { groupBy: 'category', sort: 'time' } }, null), { groupBy: 'line', sort: 'impact' });
+  assert.deepEqual(legacyViewFor('__all__', null, ALL_ALERTS_PROFILE), { groupBy: 'line', sort: 'impact' });
 });
 
-test('viewFor: a stored severity / orders sort reads as impact, even when the profile ranks by time', () => {
-  assert.equal(viewFor('p1', { p1: { sort: 'severity' } }, prof([], 'time')).sort, 'impact');
-  assert.equal(viewFor('p1', { p1: { sort: 'orders' } }, prof([], 'time')).sort, 'impact');
+test('legacyViewFor: a stored severity / orders sort reads as impact, even when the profile ranks by time', () => {
+  assert.equal(legacyViewFor('p1', { p1: { sort: 'severity' } }, prof([], 'time')).sort, 'impact');
+  assert.equal(legacyViewFor('p1', { p1: { sort: 'orders' } }, prof([], 'time')).sort, 'impact');
 });
 
-test('viewFor: a stored groupBy survives without a stored sort, and the profile ranking time gives Date', () => {
-  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'category' } }, prof([], 'time')), { groupBy: 'category', sort: 'time' });
+test('legacyViewFor: a stored groupBy survives without a stored sort, and the profile ranking time gives Date', () => {
+  assert.deepEqual(legacyViewFor('p1', { p1: { groupBy: 'category' } }, prof([], 'time')), { groupBy: 'category', sort: 'time' });
 });
 
 test('MONITOR_GROUP_BYS lists Machine first and MONITOR_SORTS only Priority and Date', () => {

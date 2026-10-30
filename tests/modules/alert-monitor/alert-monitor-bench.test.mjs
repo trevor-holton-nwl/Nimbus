@@ -5,7 +5,9 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Util } from '../../../frontend/platform/foundation.mjs';
 import { groupAlerts } from '../../../frontend/insights/alert-profiles.mjs';
-import { rowHtml, GROUP_ROW_CAP } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
+import { legacyRowHtml, GROUP_ROW_CAP } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
+import { emptyFilter, filterAlerts } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
+import { matrixModel, matrixHtml } from '../../../frontend/alert-monitor/alert-monitor-matrix.mjs';
 import { overviewData, applyNarrow } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
 
 const BENCH = process.env.NIMBUS_BENCH === '1';
@@ -47,7 +49,7 @@ test('bench: groupAlerts + row building at 15,000 alerts across 70 lines', { ski
   });
   const build = (dateOf) => {
     let n = 0;
-    for (const g of byLine) for (const a of g.alerts.slice(0, GROUP_ROW_CAP)) n += rowHtml(view(a, dateOf(a.time)), t).length;
+    for (const g of byLine) for (const a of g.alerts.slice(0, GROUP_ROW_CAP)) n += legacyRowHtml(view(a, dateOf(a.time)), t).length;
     return n;
   };
   const [rowsCached] = ms(() => build(d => fmt.format(d)));
@@ -86,4 +88,26 @@ test('bench: overviewData + applyNarrow at 15,000 alerts across 70 lines (the re
     globalThis.NimbusComputeCore = prevCore;
     globalThis.NIMBUS = prevNimbus;
   }
+});
+
+test('bench: matrixModel + matrixHtml + filterAlerts at 15,000 alerts across 70 machines (W6a)', { skip: !BENCH && 'set NIMBUS_BENCH=1 to run' }, () => {
+  const alerts = synth();
+  const machines = Array.from({ length: N_LINES }, (_, i) => ({ id: `L${String(i).padStart(2, '0')}`, name: `Machine ${i}`, wc_group: `WC${i % 7}` }));
+  const labels = { day: k => k, category: c => c, ungrouped: 'Ungrouped', noMachine: 'No machine', machinesCount: n => `${n} machines` };
+  const ctx = { plantToday: day0, horizonDays: 7, machines, labels, pinned: new Set(['L03']) };
+  const tr = (k, v) => k;
+  const out = {};
+  for (const lens of ['machine', 'day', 'group']) {
+    const [tModel, model] = ms(() => matrixModel(alerts, lens, ctx));
+    const [tHtml, html] = ms(() => matrixHtml(model, emptyFilter(), tr));
+    out[lens] = [tModel, tHtml, html.length];
+    assert.equal(model.total, N_ALERTS);
+  }
+  const f = emptyFilter(); f.wcGroups.add('WC1'); f.days.add('overdue'); f.days.add('later'); f.q = 'l0';
+  const [tFilter, shown] = ms(() => filterAlerts(alerts, f, { ...ctx, tagOf: a => a.type }));
+  assert.ok(shown.length > 0 && shown.length < N_ALERTS);
+  const [tEmpty] = ms(() => filterAlerts(alerts, emptyFilter(), ctx));
+  console.log(`[bench] ${N_ALERTS} alerts / ${N_LINES} machines: `
+    + Object.entries(out).map(([l, [a, b, len]]) => `matrixModel(${l}) ${a.toFixed(1)} ms + matrixHtml ${b.toFixed(1)} ms (${len} chars)`).join(', ')
+    + `; filterAlerts(wc+days+q) ${tFilter.toFixed(1)} ms, filterAlerts(empty) ${tEmpty.toFixed(2)} ms`);
 });

@@ -350,14 +350,14 @@ test('AlertsUIAdapter.focus: Go To selects via Selection, marks the target, and 
 });
 
 test('drawer and Alert Monitor rows agree on Fix / Override / calendar glyph for every firing alert type', async () => {
-  const { rowHtml } = await import('../../../frontend/alert-monitor/alert-monitor-model.mjs');
+  const { legacyRowHtml } = await import('../../../frontend/alert-monitor/alert-monitor-model.mjs');
   const { FIRING_ALERT_TYPES } = await import('../../../frontend/insights/alert-profiles.mjs');
   const t = k => k;
   for (const type of FIRING_ALERT_TYPES) {
     for (const taskId of ['T1', undefined]) {
       const a = { id: `x-${type}`, type, sev: 'err', msg: 'm', taskId, line: 'L1', time: new Date('2026-10-21T08:00:00') };
       const drawer = AlertsUIAdapter._renderAlertRow(a);
-      const mon = rowHtml({
+      const mon = legacyRowHtml({
         id: a.id, type, sev: 'err', taskId, line: 'L1', time: a.time, headline: 'h', message: 'm', help: '', orderNo: '',
         dateText: '', relText: '', anchorTip: '', points: 1, orders: 1, lateH: 0, whatIf: false, ackLabel: null, diagOpen: false, diagHtml: '',
       }, t);

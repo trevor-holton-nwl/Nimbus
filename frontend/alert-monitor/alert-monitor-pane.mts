@@ -41,12 +41,12 @@ import { Sandbox } from '../optimization/sandbox.mjs';
 import { Engine } from '../optimization/engine.mjs';
 import {
   MONITOR_GROUP_BYS, MONITOR_SORTS, GROUP_ROW_CAP, ROW_H, DIAG_H, GROUP_MOVE_CONFIRM_ABOVE,
-  summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
-  rowActionsFor, rowHtml, rowPrimaryActions, diagnoseHtml, groupHeadHtml, groupMenuItems, groupCounts, groupLabel,
+  summaryLine, windowSummary, legacyViewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  rowActionsFor, legacyRowHtml, rowPrimaryActions, diagnoseHtml, groupHeadHtml, groupMenuItems, groupCounts, groupLabel,
   relativeDaysText, formatPairKey, fmtNum, profileWindow,
   fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
-import type { MonitorView, EmptyKind, RowView, LevCtx, GroupHeadView, GroupCounts } from './alert-monitor-model.mjs';
+import type { LegacyMonitorView, EmptyKind, RowView, LevCtx, GroupHeadView, GroupCounts } from './alert-monitor-model.mjs';
 import {
   overviewData, applyNarrow, narrowActive, toggleNarrow, pruneNarrow, parseNarrowAttr, overviewHtml, narrowChipHtml,
 } from './alert-monitor-overview.mjs';
@@ -60,7 +60,7 @@ interface PaintState {
   m: AlertProfileMatchSet;
   profiles: AlertProfile[];
   profilesLoaded: boolean;
-  view: MonitorView;
+  view: LegacyMonitorView;
   defaultId: string;
   showAcked: boolean;
   /** Every alert of the plant's lines (profile and acknowledgement ignored) — what the leverage panel works on (D10). */
@@ -320,7 +320,7 @@ function _wireCombo(): void {
    Actions
    ------------------------------------------------------------------------- */
 /** Writes only the changed key: the other one keeps following its default (Machine / the profile's ranking) until the user sets it. */
-function _persistView(patch: Partial<MonitorView>): void {
+function _persistView(patch: Partial<LegacyMonitorView>): void {
   const m = AlertProfileMatches.view();
   const stored = (Store.pref('alertMonitorView') as Record<string, Record<string, unknown> | undefined> | null | undefined) ?? {};
   Session.setPref('alertMonitorView', { ...stored, [m.profileId]: { ...(stored[m.profileId] ?? {}), ...patch } });
@@ -430,7 +430,7 @@ function _onClick(e: Event): void {
     return;
   }
   const seg = target?.closest?.('[data-am-sort]') as HTMLElement | null;
-  const sortId = seg?.dataset.amSort as MonitorView['sort'] | undefined;
+  const sortId = seg?.dataset.amSort as LegacyMonitorView['sort'] | undefined;
   if (sortId && MONITOR_SORTS.includes(sortId)) { _persistView({ sort: sortId }); return; }
   const lev = target?.closest?.('[data-lev-action]') as HTMLElement | null;
   if (lev?.dataset.levAction) { _onLevAction(lev.dataset.levAction, lev.dataset.levKey ?? ''); return; }
@@ -715,7 +715,7 @@ function _onChange(e: Event): void {
   const mins = target?.closest?.('[data-lev-minutes]') as HTMLInputElement | null;
   if (mins?.dataset.levMinutes) { void _levMinutesEntered(mins.dataset.levMinutes, String(mins.value ?? '')); return; }
   const group = target?.closest?.('[data-am-group-sel]') as HTMLSelectElement | null;
-  if (group && MONITOR_GROUP_BYS.includes(group.value as MonitorView['groupBy'])) _persistView({ groupBy: group.value as MonitorView['groupBy'] });
+  if (group && MONITOR_GROUP_BYS.includes(group.value as LegacyMonitorView['groupBy'])) _persistView({ groupBy: group.value as LegacyMonitorView['groupBy'] });
 }
 
 /* ---------------------------------------------------------------------------
@@ -726,8 +726,8 @@ function _gatherState(): PaintState {
   const m = AlertProfileMatches.view();
   const profilesRaw = plant ? AlertProfileClient.cached(plant) : null;
   const profiles = profilesRaw ?? [];
-  const stored = Store.pref('alertMonitorView') as Parameters<typeof viewFor>[1];
-  const view = viewFor(m.profileId, stored, m.profile);
+  const stored = Store.pref('alertMonitorView') as Parameters<typeof legacyViewFor>[1];
+  const view = legacyViewFor(m.profileId, stored, m.profile);
   const showAcked = Store.pref('alertsShowAcknowledged') === true;
 
   const plantRow = plant ? Store.masterPlant(plant) : null;
@@ -1341,7 +1341,7 @@ function _rowView(a: NimbusAlert, rc: RowCtx): RowView {
   };
 }
 
-function _groupLabel(by: MonitorView['groupBy'], key: string, rc: RowCtx): string {
+function _groupLabel(by: LegacyMonitorView['groupBy'], key: string, rc: RowCtx): string {
   return groupLabel(by, key, {
     headlineFor: _headline,
     orderLabel: id => {
@@ -1469,7 +1469,7 @@ function _groupCardHtml(g: AlertGroup, rc: RowCtx): string {
   if (open) {
     const capped = !_showAll.has(g.key) && g.alerts.length > GROUP_ROW_CAP;
     const shown = capped ? g.alerts.slice(0, GROUP_ROW_CAP) : g.alerts;
-    body = `<div class="am-gbody" role="list">${shown.map(a => rowHtml(_rowView(a, rc), t)).join('')}</div>`
+    body = `<div class="am-gbody" role="list">${shown.map(a => legacyRowHtml(_rowView(a, rc), t)).join('')}</div>`
       + (capped
         ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="show-all" data-group-key="${esc(g.key)}">${esc(t('am.show_all_n', { n: g.alerts.length }))}</button></div>`
         : '');
@@ -1493,7 +1493,7 @@ function _renderNone(g: AlertGroup | undefined, rc: RowCtx): void {
     _vlEl = mount;
     _vl = new VirtualList<NimbusAlert>(mount, {
       getRowH: a => ROW_H + (_diagOpen.has(a.id) && rowActionsFor(a).diagnose === 'order' ? DIAG_H : 0),
-      renderFn: a => rowHtml(_rowView(a, _rowCtx!), t),
+      renderFn: a => legacyRowHtml(_rowView(a, _rowCtx!), t),
       mountEl: mount,
     });
   }

@@ -12,8 +12,7 @@
    ========================================================================== */
 
 import type { AlertCategory, NimbusTask } from '../platform/types.mjs';
-import { MONITOR_CATEGORIES } from './alert-monitor-model.mjs';
-import { anchorTime, alertDayOffset, categoryOf, dayKeyOf, NONE_KEY } from '../insights/alert-profiles.mjs';
+import { anchorTime, alertDayOffset, categoryOf, dayKeyOf, ALERT_CATEGORY_ORDER, NONE_KEY } from '../insights/alert-profiles.mjs';
 import type { ProfileDeps } from '../insights/alert-profiles.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -61,7 +60,7 @@ const MAX_DAYS = 60;
  * production due path (date-only due -> calendar window walk) costs microseconds per call. Same result as `anchorTime`:
  * the due when the order carries one and it resolves, else the alert's own time.
  */
-function _memoAnchor(d: OverviewDeps): (a: NimbusAlert, task: NimbusTask | undefined) => Date | null {
+export function _memoAnchor(d: OverviewDeps): (a: NimbusAlert, task: NimbusTask | undefined) => Date | null {
   const dueBy = new Map<NimbusTask, Date | null>();
   const valid = (x: unknown): x is Date => x instanceof Date && !isNaN(x.getTime());
   return (a, task) => {
@@ -75,6 +74,27 @@ function _memoAnchor(d: OverviewDeps): (a: NimbusAlert, task: NimbusTask | undef
     }
     return valid(a.time) ? a.time : null;
   };
+}
+
+// ---- Day buckets (shared with the Matrix and the Inbox facets) --------------------------------
+
+/**
+ * The bucket of one anchor instant: `'none'` (no anchor), `'overdue'` (before today), `'later'` (past the `n`-day horizon),
+ * else the `YYYY-MM-DD` key of its day. The same rule `overviewData` applies, so a Matrix column and a facet never disagree.
+ */
+export function dayBucketKey(anchor: Date | null, plantToday: Date, n: number): string {
+  if (!anchor) return NONE_KEY;
+  const off = alertDayOffset(anchor, plantToday);
+  if (off < 0) return 'overdue';
+  if (off >= n) return 'later';
+  return dayKeyOf(new Date(plantToday.getFullYear(), plantToday.getMonth(), plantToday.getDate() + off));
+}
+
+/** The horizon's day keys, today first (the same keys `overviewData` builds). */
+export function horizonDayKeys(plantToday: Date, n: number): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) out.push(dayKeyOf(new Date(plantToday.getFullYear(), plantToday.getMonth(), plantToday.getDate() + i)));
+  return out;
 }
 
 // ---- Data -----------------------------------------------------------------------------------
@@ -132,7 +152,7 @@ export function overviewData(listed: ReadonlyArray<NimbusAlert>, d: OverviewDeps
     (q.err + q.warn) - (p.err + p.warn) || (p.line < q.line ? -1 : p.line > q.line ? 1 : 0));
   return {
     total: listed.length, undated, overdue, days, later, maxDay, lines,
-    categories: MONITOR_CATEGORIES.map(cat => ({ cat, count: catCount.get(cat) ?? 0 })),
+    categories: ALERT_CATEGORY_ORDER.map(cat => ({ cat, count: catCount.get(cat) ?? 0 })),
   };
 }
 
