@@ -68,20 +68,21 @@ test('pool ladder 59 / 60 / 85 percent and waiting', () => {
   assert.equal(sec(pool(42), 'db-pool').shortArgs.pct, 42);
 });
 
-test('long-running query ladder at 30 s, counted on the Database line', () => {
+test('long-running query ladder: strict > 30 s (same as Overview), counted on the Database line', () => {
   const conn = s => withDb({ connections: { total: 4, long_running: [{ duration_s: s }] } });
   assert.equal(sev(conn(29), 'db-conn'), 'ok');
-  assert.equal(sev(conn(30), 'db-conn'), 'warn');
+  assert.equal(sev(conn(30), 'db-conn'), 'ok');
+  assert.equal(sev(conn(31), 'db-conn'), 'warn');
   assert.equal(sec(conn(45), 'db').lineArgs.slow, 1);
   assert.equal(sec(conn(45), 'db-conn').lineArgs.longest, 45);
 });
 
-test('slow query ladder 99 / 100 / 500 ms; unavailable is info', () => {
+test('slow query ladder strict > 100 / > 500 ms (same as Overview); unavailable is info', () => {
   const slow = ms => withDb({ slow_queries: { available: true, queries: [{ mean_ms: ms }, { mean_ms: 1 }] } });
-  assert.equal(sev(slow(99), 'db-slow'), 'ok');
-  assert.equal(sev(slow(100), 'db-slow'), 'warn');
-  assert.equal(sev(slow(499), 'db-slow'), 'warn');
-  assert.equal(sev(slow(500), 'db-slow'), 'err');
+  assert.equal(sev(slow(100), 'db-slow'), 'ok');
+  assert.equal(sev(slow(101), 'db-slow'), 'warn');
+  assert.equal(sev(slow(500), 'db-slow'), 'warn');
+  assert.equal(sev(slow(501), 'db-slow'), 'err');
   assert.equal(sec(slow(250), 'db-slow').lineArgs.n, 1);
   const none = sec(withDb({ slow_queries: { available: true, queries: [] } }), 'db-slow');
   assert.equal(none.severity, 'ok');
@@ -91,7 +92,7 @@ test('slow query ladder 99 / 100 / 500 ms; unavailable is info', () => {
   assert.equal(na.lineKey, 'diag.line_unavailable');
 });
 
-test('browser: heap 79 / 80 percent and errors per minute 0 / 1 / 10', () => {
+test('browser: heap 79 / 80 percent and errors per minute 0 / 1 / 10 / 11', () => {
   const heap = pct => base({ client: { build: 'b', autosave: 'on', errRate: 0, heapUsed: pct, heapLimit: 100 } });
   assert.equal(sev(heap(79), 'client'), 'ok');
   assert.equal(sev(heap(80), 'client'), 'warn');
@@ -99,20 +100,23 @@ test('browser: heap 79 / 80 percent and errors per minute 0 / 1 / 10', () => {
   assert.equal(sev(errs(0), 'client'), 'ok');
   assert.equal(sev(errs(1), 'client'), 'warn');
   assert.equal(sev(errs(9), 'client'), 'warn');
-  assert.equal(sev(errs(10), 'client'), 'err');
+  assert.equal(sev(errs(10), 'client'), 'warn');
+  assert.equal(sev(errs(11), 'client'), 'err');
   assert.equal(sev(base({ client: { build: 'b', autosave: 'off', autosaveDisabled: true, errRate: 0 } }), 'client'), 'err');
   assert.equal(sec(heap(55), 'client').shortArgs.heap, 55);
 });
 
-test('tables: any needs_vacuum warns; locks: any wait is an error; indexes: unused is info', () => {
+test('tables: any needs_vacuum warns; locks: any wait is an error; indexes: unused stays ok', () => {
   assert.equal(sev(withDb({ tables: [{ needs_vacuum: false }, { needs_vacuum: true }] }), 'db-tables'), 'warn');
   assert.equal(sec(withDb({ tables: [{ needs_vacuum: true }, { needs_vacuum: true }, { needs_vacuum: false }] }), 'db').lineArgs.vacuum, 2);
   const locks = withDb({ locks: [{ blocked_pid: 1 }] });
   assert.equal(sev(locks, 'db-locks'), 'err');
   assert.equal(sec(locks, 'db-locks').lineKey, 'diag.line_locks_n');
   assert.equal(sec(base(), 'db-locks').lineKey, 'diag.line_locks_ok');
-  assert.equal(sev(withDb({ indexes: [{ unused: true }, { unused: true }] }), 'db-idx'), 'info');
-  assert.notEqual(sev(withDb({ indexes: [{ unused: true }] }), 'db'), 'warn');
+  const idx = sec(withDb({ indexes: [{ unused: true }, { unused: true }] }), 'db-idx');
+  assert.equal(idx.severity, 'ok');
+  assert.equal(idx.lineArgs.n, 2);
+  assert.equal(sev(withDb({ indexes: [{ unused: true }] }), 'db'), 'ok');
 });
 
 test('sequences ladder 80 / 81 / 95 / 96 percent', () => {
@@ -173,6 +177,10 @@ test('a list error sentinel is an error, not ok', () => {
 
 test('server: ping ladder, version and uptime', () => {
   assert.equal(sev(base({ pingMs: 400 }), 'db-server'), 'ok');
+  assert.equal(sev(base({ pingMs: 500 }), 'db-server'), 'ok');
+  assert.equal(sev(base({ pingMs: 501 }), 'db-server'), 'warn');
+  assert.equal(sev(base({ pingMs: 2000 }), 'db-server'), 'warn');
+  assert.equal(sev(base({ pingMs: 2001 }), 'db-server'), 'err');
   assert.equal(sev(base({ pingMs: 600 }), 'db-server'), 'warn');
   assert.equal(sev(base({ pingMs: 2500 }), 'db-server'), 'err');
   const s = sec(base(), 'db-server');

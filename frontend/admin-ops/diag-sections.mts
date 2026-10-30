@@ -7,11 +7,13 @@
 //
 // Rules:
 //  - Thresholds come from signals.mts (THRESHOLDS), imported, never re-declared, so Diagnostics and the
-//    Overview signal board agree. The boundary values are inclusive (>=) except sequences (> 80 / > 95)
+//    Overview signal board agree. Operators match signals.mts exactly (pool, heap >=; long query, slow query, errors/min, ping >) so a value at a
+//    threshold reads the same on Overview and here; sequences are > 80 / > 95
 //    and "any" rules (any needs_vacuum, any lock wait, any waiting request).
 //  - Missing input is never a silent ok: a failed or absent read is severity 'info' with
 //    'diag.line_unavailable' (or 'sig.admin_only' for a 403 marker); a server-side list error sentinel
-//    is 'err'. Unused indexes are advice only: they cap at 'info'.
+//    is 'err'. Unused indexes are advice only: the section stays 'ok' and the line carries the count; 'info' is for
+//    unavailable / forbidden / empty inputs.
 //  - defaultOpen: warn/err sections, the deep-link target, and the Database parent of a db-* target open.
 
 import { THRESHOLDS, type Severity, SEVERITY_RANK } from './signals.mjs';
@@ -116,7 +118,7 @@ function _client(c: ClientStats | null, t: Thresholds): DiagSection {
   if (!c) return _unavailable('client');
   const heapPct = c.heapUsed !== undefined && c.heapLimit ? Math.round((c.heapUsed / c.heapLimit) * 100) : null;
   let sev: Severity = 'ok';
-  if (c.autosaveDisabled || c.errRate >= t.errRateErrPerMin) sev = 'err';
+  if (c.autosaveDisabled || c.errRate > t.errRateErrPerMin) sev = 'err';
   else if (c.degraded || (heapPct !== null && heapPct >= t.heapWarnPct) || c.errRate > 0) sev = 'warn';
   const heap = heapPct ?? NA;
   return _sec('client', sev, 'diag.line_client', { build: c.build, heap, autosave: c.autosave, errs: _round1(c.errRate) }, { heap });
@@ -177,7 +179,7 @@ function _conn(db: DbDeep, t: Thresholds): DiagSection & { over: number } {
   if (c.error) return { ..._unavailable('db-conn', 'err'), over: 0 };
   const durations = (c.long_running ?? []).map(q => q.duration_s ?? 0);
   const longest = durations.length ? Math.max(...durations) : 0;
-  const over = durations.filter(s => s >= t.longQueryWarnS).length;
+  const over = durations.filter(s => s > t.longQueryWarnS).length;
   const n = c.total ?? 0;
   return { ..._sec('db-conn', over > 0 ? 'warn' : 'ok', 'diag.line_conn', { n, longest: Math.round(longest) }, { n }, n), over };
 }
@@ -196,7 +198,7 @@ function _idx(db: DbDeep): DiagSection {
   if (_listError(db.indexes)) return _unavailable('db-idx', 'err');
   const rows = _rows(db.indexes);
   const n = rows.filter(r => r.unused).length;
-  return _sec('db-idx', n > 0 ? 'info' : 'ok', 'diag.line_idx', { n }, { n }, rows.length);
+  return _sec('db-idx', 'ok', 'diag.line_idx', { n }, { n }, rows.length);
 }
 
 function _slow(db: DbDeep, t: Thresholds): DiagSection {
@@ -206,8 +208,8 @@ function _slow(db: DbDeep, t: Thresholds): DiagSection {
   if (!means.length) return _sec('db-slow', 'ok', 'diag.line_slow_ok', {}, { ms: 0 });
   const ms = Math.round(Math.max(...means));
   const raw = Math.max(...means);
-  const n = means.filter(m => m >= t.slowQueryWarnMs).length;
-  const sev: Severity = raw >= t.slowQueryErrMs ? 'err' : raw >= t.slowQueryWarnMs ? 'warn' : 'ok';
+  const n = means.filter(m => m > t.slowQueryWarnMs).length;
+  const sev: Severity = raw > t.slowQueryErrMs ? 'err' : raw > t.slowQueryWarnMs ? 'warn' : 'ok';
   return _sec('db-slow', sev, 'diag.line_slow', { ms, n }, { ms });
 }
 
