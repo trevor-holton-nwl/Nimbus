@@ -1534,6 +1534,40 @@ test('WorkCenters.refresh keeps the selected work center when it is still in the
   });
 });
 
+test('WorkCenters._renderPane defaults to the first row when nothing is selected or the selection is stale, like Machines', async () => {
+  await _withWcRefreshState(async () => {
+    Store.setSelectedPlant('1006', 'test');
+    const pane = { innerHTML: '' };
+    globalThis.document = {
+      getElementById: (id) => (id === 'md-master-work-centers-pane' || id === 'wc-search' ? pane : null),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    };
+    WorkCenters._shellPlant = '1006'; // shell already built: skip the innerHTML/_wireShell branch
+    WorkCenters._rows = [_wcRow('WC-1', 'first'), _wcRow('WC-2', 'second')];
+    WorkCenters._selected = null;
+    WorkCenters._staged = null;
+    WorkCenters._baseline = null;
+    WorkCenters._dirty = false;
+    WorkCenters._renderPane();
+    assert.equal(WorkCenters._selected, 'WC-1', 'first row selected on open');
+    assert.equal(WorkCenters._staged.description, 'first', 'staged together with the selection');
+
+    WorkCenters._selected = 'WC-GONE'; // stale: no longer in the list
+    WorkCenters._renderPane();
+    assert.equal(WorkCenters._selected, 'WC-1', 'stale selection falls back to the first row');
+
+    WorkCenters._selected = 'WC-2'; // still present: untouched
+    WorkCenters._renderPane();
+    assert.equal(WorkCenters._selected, 'WC-2', 'a valid selection is kept');
+
+    WorkCenters._rows = [];
+    WorkCenters._selected = null;
+    WorkCenters._renderPane();
+    assert.equal(WorkCenters._selected, null, 'empty list selects nothing');
+  });
+});
+
 test('WorkCenters.refresh clears the selection when the selected work center vanished from the fresh rows', async () => {
   await _withWcRefreshState(async () => {
     const h = _wcRefreshHarness({ rows: [_wcRow('WC-2', 'other')] });
