@@ -418,7 +418,7 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 
 - [ ] **Step 1: Write the failing test:** `test('events source fetches /schedule-events/{plant}/recent for the filter plant, else the selected plant')`; `test('404 hides the Order changes source with a notice')`; `test('rows carry action_id for the Same action group')`.
 - [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/unified-log-pane.test.mjs`.
-- [ ] **Step 3: Implement** and add the CLAUDE.md contract line.
+- [x] **Step 3: Implement** and add the CLAUDE.md contract line. (W4a review 2026-10-30: wiring already present from W3; `fromScheduleEvent` / `RecentScheduleEvent` fields match the route wire shape one-to-one, `at` is ISO with offset; pane tests not run in this review.)
 - [ ] **Step 4: Run and expect pass.** Same command.
 - [ ] **Step 5: Commit.** `git add frontend/admin-ops/unified-log-pane.mts backend/schedule_events/CLAUDE.md tests/modules/admin-ops/unified-log-pane.test.mjs` then `git commit -m "feat(admin): Logs reads plant-wide schedule events; document route contract" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
