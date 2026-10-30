@@ -5799,6 +5799,13 @@ export const WorkCenters = {
       WorkCenters._wireShell(pane);
     }
 
+    // Default to the first row (like Machines), also when the selection went stale.
+    if (WorkCenters._rows.length &&
+        (!WorkCenters._selected || !WorkCenters._rows.some(r => r.sap_workcenter === WorkCenters._selected))) {
+      WorkCenters._flushPending();
+      WorkCenters._stageRow(WorkCenters._rows[0].sap_workcenter);
+    }
+
     WorkCenters._renderSidebarList();
     WorkCenters._renderDetailOnly();
   },
