@@ -1,0 +1,2 @@
+2026-10-30 | W0 | e95515b | 163 locale keys x5 (tab, ov, sig, attn, ulog, pipe, thread, diag, btn, ph) + gitignore twins for signals.mjs/unified-log.mjs; btn.show_all already existed (calendar) so counted variant is btn.show_all_n; also added sig.jobs_warning, sig.jobs_slow, sig.conn_long | deferred: none
+2026-10-30 | W0 | 20868b8 | frontend/admin-ops/signals.mts + unified-log.mts (pure) with signals/unified-log/overview-locales tests (build, eslint, 67 node tests green) | deferred: pane wiring (W1+), nav.jobs fix id used for jobs scheduler/missed rows
