@@ -30,7 +30,7 @@ import type {
   SapRunLike, SapSendStatus, Signal, SignalId, SignalInputs,
 } from './signals.mjs';
 import { fromAudit, fromBackend, fromFrontend, fromJobRun, fromUpload, filterEntries, mergeEntries } from './unified-log.mjs';
-import type { LogEntry as FrontendLogEntry, UnifiedEntry } from './unified-log.mjs';
+import type { LogEntry as FrontendLogEntry, UnifiedEntry, LogFilter, LogSource } from './unified-log.mjs';
 
 /** The eight Database sub-sections of the Diagnostics page, in page order, with the key of the help text each carries.
  *  Created as skeletons by AdminCockpit._ensureDbSubs and filled by _renderDbDeep (heads come from diag-sections.mts). */
@@ -1563,7 +1563,8 @@ export const AdminCockpit = {
         return;
       case 'logs.open': {
         A.gotoSub('logs');
-        UnifiedLogPane.setFilter({ level: (a.level as 'error' | 'warn' | undefined) ?? 'warn', sources: new Set([(a.source as string | undefined) ?? 'backend']) } as Parameters<typeof UnifiedLogPane.setFilter>[0]);
+        const f: Partial<LogFilter> = { level: (a.level as LogFilter['level'] | undefined) ?? 'warn', sources: new Set<LogSource>([(a.source as LogSource | undefined) ?? 'backend']) };
+        UnifiedLogPane.setFilter(f);
         return;
       }
       case 'data.reload': void Persistence.reload(); return;

@@ -1193,7 +1193,7 @@ export const JobsAdmin = {
   openRun(id: number): void { _setTab('runs'); void _openRun(id); },
 
   /** Switch the sub-view (deep-link target for 'jobs:<tab>' anchors from the Overview). Call after render(). */
-  showTab(tab: SubTab): void { _setTab(tab); },
+  showTab(tab: SubTab): void { if ((['jobs', 'runs', 'upcoming', 'templates'] as string[]).includes(tab)) _setTab(tab); },
 
   /** Test seam: switch the sub-view the way a tab click does. */
   _setTab(tab: SubTab): void { _setTab(tab); },

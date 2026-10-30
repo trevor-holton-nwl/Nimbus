@@ -141,3 +141,7 @@ test('JobsAdmin.showTab switches the inner view like a tab click (deep link targ
   JobsAdmin.showTab('jobs');
   assert.equal(runsView.hidden, true);
 });
+
+test('JobsAdmin.showTab ignores an unknown tab without throwing', () => {
+  assert.doesNotThrow(() => JobsAdmin.showTab('nope'));
+});

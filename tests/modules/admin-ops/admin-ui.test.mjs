@@ -932,7 +932,7 @@ test('_setSub keeps a pending anchor whose element is not in the DOM yet, and th
   const restore = stubAll(ALL_RENDERERS.concat(['_startSpy', '_stopSpy']), []);
   const names = ['_renderDiagRail', '_paintSectionHead', '_paintDiagStamp', '_observeSections'];
   const real = {}; for (const n of names) { real[n] = A[n]; A[n] = () => {}; }
-  const realInputs = A._diagInputs; A._diagInputs = () => ({});
+  const realInputs = A._diagInputs; A._diagInputs = () => ({ client: null, deep: null, dbDeep: null, perf: [], dbStatsAt: null, now: 0, pingMs: null });
   const revealed = []; const realReveal = A._revealAnchor; A._revealAnchor = (el) => revealed.push(el.id);
   const els = {};
   try {
@@ -944,8 +944,7 @@ test('_setSub keeps a pending anchor whose element is not in the DOM yet, and th
       A._revealPendingAnchor();
       assert.equal(A._pendingAnchor, 'diag-db-conn', 'still absent after a no-op reveal');
       els['diag-db-conn'] = dnode('details', { id: 'diag-db-conn' });   // the paint that creates the section
-      try { A._repaintHeads(); } catch { /* the section model on stub inputs may throw; the reveal below is the direct check */ }
-      if (A._pendingAnchor !== null) A._revealPendingAnchor();
+      A._repaintHeads();   // the real repaint hook, not a direct reveal call
       assert.equal(A._pendingAnchor, null, 'consumed once the element exists');
       assert.deepEqual(revealed, ['diag-db-conn']);
     });
