@@ -39,6 +39,7 @@ test('fromAudit / fromUpload', () => {
   assert.equal(U.fromUpload({ ...base, warnings: [{ category: 'upload_counts' }] }).level, 'info');
   assert.equal(U.fromUpload({ ...base, warnings: [{ category: 'upload_counts' }, { category: 'x', msg: 'm' }], rid: 'r3' }).level, 'warn');
   assert.equal(U.fromUpload({ ...base, warnings: [], rid: 'r3' }).rid, 'r3');
+  assert.equal(U.fromUpload({ ...base, warnings: [], rid: null }).rid, undefined);
 });
 
 test('fromJobRun levels, ts, user, runId', () => {

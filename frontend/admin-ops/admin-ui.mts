@@ -401,6 +401,8 @@ interface AdminUploadAuditItem {
   updated: number;
   uploaded_at: string | null;
   warnings: AdminUploadWarning[];
+  /** Request id of the upload call (null on rows written before 2026-10-30). */
+  rid?: string | null;
 }
 
 interface AdminUploadAuditResponse {

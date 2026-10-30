@@ -122,6 +122,14 @@ def append_audit_log(entry: dict, request: Request):
         raise HTTPException(status_code=413, detail="audit entry too large")
     entry.setdefault("ts", datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z")
     entry.setdefault("user", request.headers.get("X-User", "system"))
+    plant = entry.get("plant")
+    if plant is not None and (not isinstance(plant, str) or len(plant) > 32):
+        raise HTTPException(status_code=400, detail="plant must be a string of at most 32 characters")
+    rid = _current_rid()
+    if rid:
+        entry["rid"] = rid  # server-stamped; the caller cannot forge it
+    else:
+        entry.pop("rid", None)
     _cw_append_audit(entry)
     return {"status": "ok"}
 

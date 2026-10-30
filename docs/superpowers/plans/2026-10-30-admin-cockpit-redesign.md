@@ -437,11 +437,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: the request id contextvar from `backend/admin_ops/logbuffer.py:45-87`.
 - Produces: column `upload_audit.rid TEXT NULL` (and `user` only if absent); `GET /upload/audit` rows include `rid`.
 
-- [ ] **Step 1: Write the failing test:** `test_migration_is_additive_and_idempotent` (file text contains `ADD COLUMN IF NOT EXISTS rid` and no `DROP`/`ALTER ... TYPE`); `test_schema_sql_mirrors_rid_column`; `@pytest.mark.pg test_upload_stamps_request_id_and_audit_returns_it` (post an upload with `x-request-id: abc123`, then `GET /upload/audit` first row has `rid == 'abc123'`); `test_audit_row_without_rid_returns_null` (old rows).
-- [ ] **Step 2: Run and expect failure.** `python -m pytest tests/test_upload_audit_rid.py -q`.
-- [ ] **Step 3: Implement** migration, `schema.sql` mirror, route stamp and read field.
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add migrations/2026-10-30-1-upload-audit-rid.sql schema.sql backend/integration/routes.py tests/test_upload_audit_rid.py` (plus the data-layer file the INSERT lives in, named explicitly) then `git commit -m "feat(upload): stamp request id on upload_audit (additive migration)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test_migration_is_additive_and_idempotent` (file text contains `ADD COLUMN IF NOT EXISTS rid` and no `DROP`/`ALTER ... TYPE`); `test_schema_sql_mirrors_rid_column`; `@pytest.mark.pg test_upload_stamps_request_id_and_audit_returns_it` (post an upload with `x-request-id: abc123`, then `GET /upload/audit` first row has `rid == 'abc123'`); `test_audit_row_without_rid_returns_null` (old rows).
+- [x] **Step 2: Run and expect failure.** `python -m pytest tests/test_upload_audit_rid.py -q`.
+- [x] **Step 3: Implement** migration, `schema.sql` mirror, route stamp and read field.
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add migrations/2026-10-30-1-upload-audit-rid.sql schema.sql backend/integration/routes.py tests/test_upload_audit_rid.py` (plus the data-layer file the INSERT lives in, named explicitly) then `git commit -m "feat(upload): stamp request id on upload_audit (additive migration)" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W4b.2: rid and plant on audit-log rows
 
@@ -453,11 +453,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: request id contextvar.
 - Produces: audit entries carrying `rid` (server-stamped, `setdefault` semantics so a caller cannot forge over an existing server value is not required; server value wins) and `plant` (caller-supplied).
 
-- [ ] **Step 1: Write the failing test:** `test_post_audit_log_stamps_rid` (TestClient with `x-request-id`, then read back through the audit path with a temp audit file); `test_post_audit_log_keeps_caller_plant`; `test_get_audit_log_returns_rid_and_plant`; frontend: `test('audit writers pass plant from Store.selectedPlant')`.
-- [ ] **Step 2: Run and expect failure.** `python -m pytest tests -q -k "audit_log and (rid or plant)"` and `node --test <the frontend writer test file>`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run and expect pass.** Same commands.
-- [ ] **Step 5: Commit.** `git add backend/master_data/routes.py` plus the exact frontend writer files and tests changed, then `git commit -m "feat(audit): stamp rid and plant on audit-log rows" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test_post_audit_log_stamps_rid` (TestClient with `x-request-id`, then read back through the audit path with a temp audit file); `test_post_audit_log_keeps_caller_plant`; `test_get_audit_log_returns_rid_and_plant`; frontend: `test('audit writers pass plant from Store.selectedPlant')`.
+- [x] **Step 2: Run and expect failure.** `python -m pytest tests -q -k "audit_log and (rid or plant)"` and `node --test <the frontend writer test file>`.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run and expect pass.** Same commands.
+- [x] **Step 5: Commit.** `git add backend/master_data/routes.py` plus the exact frontend writer files and tests changed, then `git commit -m "feat(audit): stamp rid and plant on audit-log rows" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ### Task W4b.3: adapters carry rid/plant; deploy note
 
@@ -469,11 +469,11 @@ W1 reminder: flip the `old tab keys are still present` assertion in `tests/modul
 - Consumes: new fields from W4b.1 and W4b.2.
 - Produces: `fromUpload(raw).rid`, `fromAudit(raw).rid` and `.plant`; `relatedTo` places an upload and its backend rows in "Same request", not "possible".
 
-- [ ] **Step 1: Write the failing test:** `test('fromUpload and fromAudit carry rid and plant')`; `test('an upload with rid groups with its backend rows under request, not user_window')`; `test('rows without rid still appear in the user window as possible')`.
-- [ ] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/unified-log.test.mjs`.
-- [ ] **Step 3: Implement** adapter fields and the MIGRATION.md note.
-- [ ] **Step 4: Run and expect pass.** Same command.
-- [ ] **Step 5: Commit.** `git add frontend/admin-ops/unified-log.mts docs/MIGRATION.md tests/modules/admin-ops/unified-log.test.mjs` then `git commit -m "feat(admin): upload and audit rows join by request id; deploy note" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
+- [x] **Step 1: Write the failing test:** `test('fromUpload and fromAudit carry rid and plant')`; `test('an upload with rid groups with its backend rows under request, not user_window')`; `test('rows without rid still appear in the user window as possible')`.
+- [x] **Step 2: Run and expect failure.** `npm run build && node --test tests/modules/admin-ops/unified-log.test.mjs`.
+- [x] **Step 3: Implement** adapter fields and the MIGRATION.md note.
+- [x] **Step 4: Run and expect pass.** Same command.
+- [x] **Step 5: Commit.** `git add frontend/admin-ops/unified-log.mts docs/MIGRATION.md tests/modules/admin-ops/unified-log.test.mjs` then `git commit -m "feat(admin): upload and audit rows join by request id; deploy note" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"`.
 
 ---
 

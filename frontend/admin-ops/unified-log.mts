@@ -51,7 +51,7 @@ export interface AdminAuditLogItem { ts: string; user?: string; action?: string;
 /** One row of GET /upload/audit (rid / user arrive with the W4b join keys). */
 export interface AdminUploadAuditItem {
   batch_id: string; filename: string | null; row_count: number; inserted: number; updated: number; uploaded_at: string | null;
-  warnings: Array<{ level?: string; category?: string; msg?: string }>; rid?: string; user?: string; plant?: string;
+  warnings: Array<{ level?: string; category?: string; msg?: string }>; rid?: string | null; user?: string; plant?: string;
 }
 /** One row of GET /schedule-events/{plant}/recent. */
 export interface RecentScheduleEvent {
@@ -113,7 +113,7 @@ export function fromUpload(e: AdminUploadAuditItem): UnifiedEntry {
   const warns = (e.warnings ?? []).filter(w => w.category !== 'upload_counts');
   const text = `${e.filename ?? 'upload'}: ${e.row_count} rows (${e.inserted} new, ${e.updated} updated)${warns.length ? `, ${warns.length} warning${warns.length === 1 ? '' : 's'}` : ''}`;
   const out = _base(`upload|${e.batch_id}`, e.uploaded_at, 'upload', warns.length ? 'warn' : 'info', text, e, _s(e.user), _s(e.plant));
-  return _opt(out, { rid: e.rid });
+  return _opt(out, { rid: e.rid ?? undefined });
 }
 
 export function fromJobRun(r: JobRun): UnifiedEntry {

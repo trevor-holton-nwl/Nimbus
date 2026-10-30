@@ -1560,3 +1560,5 @@ Apart from `Persistence.refreshHorizons` (Gantt tab entry, 10 s throttle), nothi
 ## Save path: "unmoved" width-check skip lets a rejoined bar through unchecked (found 2026-10-28)
 
 Pre-existing server hardening item. The save path's "unmoved" width-check skip (`db.py` ~1915) lets a one-bar save whose start and end equal a split order's stored envelope through with the segment rows deleted and no width check. Verified 2026-10-28 on a scratch DB: a 10 h bar against a 4 h run was stored and the run-time mismatch flag stayed TRUE. Fix: do not apply the unmoved skip when the segment count drops. It is not reachable from the client's rejoin, whose bar width equals the run time.
+
+- **Admin Cockpit exact join keys (migration dated 2026-10-30).** `migrations/2026-10-30-1-upload-audit-rid.sql` adds the nullable `upload_audit.rid TEXT` column (`ADD COLUMN IF NOT EXISTS`, no backfill, no data touched). It is additive and does not trip the runner's destructive filter, so it needs no `-AllowDestructive`; apply it before the image that reads `rid` rolls.

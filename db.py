@@ -1089,6 +1089,16 @@ def get_upload_audit_warnings(batch_id: str) -> list[dict] | None:
     return row[0] or []
 
 
+def _audit_rid() -> str | None:
+    """Current request id for an upload_audit row (None outside a request).
+    Lazy import: backend.admin_ops.logbuffer imports db at module load."""
+    try:
+        from backend.admin_ops.logbuffer import _current_rid
+        return _current_rid()
+    except Exception:
+        return None
+
+
 UPLOAD_AUDIT_SOURCES = ("sap", "excel")
 
 
@@ -1105,7 +1115,7 @@ def upload_audit_log(limit: int = 50, source: str | None = None) -> list[dict]:
              "excel": "WHERE filename IS DISTINCT FROM 'sap:sap'"}[source]
     sql = f"""
         SELECT batch_id, filename, row_count,
-               inserted_count, updated_count, uploaded_at, warnings
+               inserted_count, updated_count, uploaded_at, warnings, rid
         FROM upload_audit
         {where}
         ORDER BY uploaded_at DESC
@@ -1123,6 +1133,7 @@ def upload_audit_log(limit: int = 50, source: str | None = None) -> list[dict]:
             "updated": r[4],
             "uploaded_at": r[5].isoformat() if r[5] else None,
             "warnings": r[6] or [],
+            "rid": r[7],
         }
         for r in rows
     ]
@@ -4221,11 +4232,11 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
                 cur.execute(
                     """
                     INSERT INTO upload_audit
-                        (batch_id, filename, row_count, inserted_count, updated_count, warnings)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (batch_id, filename, row_count, inserted_count, updated_count, warnings, rid)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     (batch_id, filename_v, row_count_v, 0, 0,
-                     Jsonb([{"level": "error", "status": "failed", "msg": error_msg}])),
+                     Jsonb([{"level": "error", "status": "failed", "msg": error_msg}]), _audit_rid()),
                 )
                 conn.commit()
         except Exception:
@@ -4745,10 +4756,10 @@ def upsert_orders(rows: list[dict], *, batch_id: str | None = None, source: str 
             cur.execute(
                 """
                 INSERT INTO upload_audit
-                    (batch_id, filename, row_count, inserted_count, updated_count, warnings)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (batch_id, filename, row_count, inserted_count, updated_count, warnings, rid)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (batch_id, filename, raw_row_count, inserted, updated, Jsonb(warnings)),
+                (batch_id, filename, raw_row_count, inserted, updated, Jsonb(warnings), _audit_rid()),
             )
             conn.commit()
     except Exception as e:
@@ -4987,11 +4998,11 @@ def ingest_orders_from_excel(file_bytes: bytes, filename: str, diag: dict | None
                 cur.execute(
                     """
                     INSERT INTO upload_audit
-                        (batch_id, filename, row_count, inserted_count, updated_count, warnings)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (batch_id, filename, row_count, inserted_count, updated_count, warnings, rid)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     (batch_id, filename_v, row_count_v, 0, 0,
-                     Jsonb([{"level": "error", "status": "failed", "msg": error_msg}])),
+                     Jsonb([{"level": "error", "status": "failed", "msg": error_msg}]), _audit_rid()),
                 )
                 conn.commit()
         except Exception:
