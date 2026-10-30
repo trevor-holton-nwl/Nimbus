@@ -165,4 +165,11 @@ W0 docs (Sonnet); W1 module + locales (Sonnet); W2 Diagnostics restructure (Sonn
 
 ## Appendix B: Learnings
 
-(Empty; filled at the end of the run.)
+- `mkSection` in the plan did not match the code: the real helper is `_mkSection(id, helpKey, host)` and builds a `<details>` per `DiagSectionId`; the plan's signature would have broken the db sub-sections.
+- The plan's `'orders'` SAP object key was wrong: the staging object is `stage_planned_orders`, so `Interface.showTab` defaults `objectKey` to that.
+- Smooth scroll against a skeleton layout stalls or lands wrong when the reads fill bodies above the target; deep links now jump instantly (`_revealAnchor(el, false)`) and the pane reveals before the async reads.
+- An instant jump still drifts when the bodies above grow, and native scroll anchoring did not hold it, so `_settleReveal` re-scrolls once after each read, guarded by age (5 s), connection and unchanged scrollTop. A target near page end is clamped by max scroll.
+- Section skeletons must exist before any fetch, otherwise a pending anchor finds nothing; `_repaintHeads` also calls `_revealPendingAnchor` for links that arrive early.
+- The narrow-width rail needed a chip row (1000 px and under); five chips plus the one-line header summaries in five locales were only checked at 1280 px, so the narrower fits stay owner-owed.
+- Section titles carrying a "(N tables)" tail and long one-liners wrapped the head; the count became its own mono figure and the line is one row with a `title` tooltip.
+- Open/closed memory (`_diagOpen`) must be written only by real user toggles; our programmatic opens echo a `toggle` event and needed a `data-diag-auto` marker.
