@@ -81,7 +81,7 @@ interface LogOpts {
   stack?: string;
 }
 
-interface LogEntry {
+export interface LogEntry {
   ts: string;
   level: LogLevel;
   scope: string;

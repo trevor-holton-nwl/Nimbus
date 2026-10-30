@@ -303,7 +303,7 @@ interface AdminDbDeepResponse {
  *  ingest_frontend_logs (the only two writers of the ring buffer this
  *  endpoint reads) never write camelCase reqId/errorCode, so those aliases
  *  were dropped rather than kept as permanently-undefined dead fields. */
-interface BackendLogEntry {
+export interface BackendLogEntry {
   ts: string;
   level: 'info' | 'warn' | 'error';
   category: string;
@@ -316,6 +316,9 @@ interface BackendLogEntry {
   exc?: string;
   ctx?: Record<string, unknown>;
   source?: 'frontend';
+  /** Acting user, when the event carries one (alias of actor). */
+  user?: string;
+  actor?: string;
 }
 
 /** POST /maintenance/vacuum-analyze | /maintenance/analyze. */
@@ -393,7 +396,7 @@ interface AdminPurgeResult {
 }
 
 /** One row of GET /upload/audit (db.upload_audit_log). */
-interface AdminUploadAuditItem {
+export interface AdminUploadAuditItem {
   batch_id: string;
   filename: string | null;
   row_count: number;
@@ -403,6 +406,8 @@ interface AdminUploadAuditItem {
   warnings: AdminUploadWarning[];
   /** Request id of the upload call (null on rows written before 2026-10-30). */
   rid?: string | null;
+  user?: string;
+  plant?: string;
 }
 
 interface AdminUploadAuditResponse {
@@ -410,11 +415,12 @@ interface AdminUploadAuditResponse {
 }
 
 /** One row of GET /audit/log (JSONL-backed color-wheel/optimizer audit trail). */
-interface AdminAuditLogItem {
+export interface AdminAuditLogItem {
   ts: string;
   user?: string;
   action?: string;
   plant?: string;
+  rid?: string;
   details?: Record<string, unknown>;
 }
 
@@ -606,7 +612,8 @@ export const AdminCockpit = {
       AdminCockpit._queueClientRefresh();
     });
 
-    document.getElementById('admin-thread-clear')?.addEventListener('click', () => {
+    document.getElementById('admin-thread-clear')?.addEventListener('click', (ev) => {
+      ev.preventDefault(); ev.stopPropagation();   // the button sits inside the <summary>: do not toggle the section
       PerfMonitor.clear();
       AdminCockpit._refreshThreadPane();
     });
@@ -945,7 +952,11 @@ export const AdminCockpit = {
       tbl.className = 'sig-dt';
       const hasFix = (d.rowFixes ?? []).some(Boolean);
       const hr = document.createElement('tr');
-      for (const k of d.headKeys) { const th = document.createElement('th'); th.textContent = Util.t(k); hr.appendChild(th); }
+      d.headKeys.forEach((k, c) => {
+        const th = document.createElement('th'); th.textContent = Util.t(k);
+        if (d.rows.some(r => typeof r[c] === 'number')) th.className = 'num';
+        hr.appendChild(th);
+      });
       if (hasFix) hr.appendChild(document.createElement('th'));
       const thead = document.createElement('thead'); thead.appendChild(hr); tbl.appendChild(thead);
       const tb = document.createElement('tbody');
@@ -1006,7 +1017,7 @@ export const AdminCockpit = {
       const reason = document.createElement('span');
       reason.className = 'sig-reason';
       let text = Util.t(sig.reasonKey, A._ovArgs(sig.reasonArgs));
-      if (sig.measuredAt) text += ` · ${Util.t('ov.measured_ago', { ago: A._relTime(sig.measuredAt) })}`;
+      if (sig.measuredAt && Date.now() - sig.measuredAt >= 60_000) text += ` · ${Util.t('ov.measured_ago', { ago: A._relTime(sig.measuredAt) })}`;
       A._setNumText(reason, text);
       const fixes = document.createElement('div');
       fixes.className = 'sig-fixes';
@@ -1092,17 +1103,14 @@ export const AdminCockpit = {
     host.textContent = '';
     for (const e of rows) {
       const row = document.createElement('div');
-      row.className = `admin-log-row admin-log-${e.level}`;
-      const head = document.createElement('div');
-      head.className = 'admin-log-head';
-      const lvl = document.createElement('span'); lvl.className = 'admin-log-lvl'; lvl.textContent = e.level;
+      row.className = `admin-log-row ov-recent-row admin-log-${e.level}`;
       const ts = document.createElement('span'); ts.className = 'admin-log-ts'; ts.textContent = e.tsMs ? A._relTime(e.tsMs) : ''; ts.title = e.ts ?? '';
-      const src = document.createElement('span'); src.className = 'admin-log-scope'; src.textContent = e.source;
-      head.append(lvl, ts, src);
-      const msg = document.createElement('div');
+      const src = document.createElement('span'); src.className = 'admin-log-scope'; src.textContent = Util.t(`ulog.src_${e.source}`);
+      const msg = document.createElement('span');
       msg.className = 'admin-log-msg';
-      msg.textContent = e.text.length > 240 ? `${e.text.slice(0, 240)}…` : e.text;
-      row.append(head, msg);
+      msg.textContent = e.text;
+      msg.title = e.text;
+      row.append(ts, src, msg);
       host.appendChild(row);
     }
   },
@@ -1475,11 +1483,29 @@ export const AdminCockpit = {
     return tbl;
   },
 
+  /** Render at most `cap` of `items` into `host` (render appends the visible slice to host); over the cap a
+   *  "Show all N" / "Show fewer" toggle follows the list. At or under the cap there is no button. */
+  _capList<T>(items: T[], cap: number, render: (visible: T[]) => void, host: HTMLElement): void {
+    let all = false;
+    const paint = (): void => {
+      host.textContent = '';
+      render(all || items.length <= cap ? items : items.slice(0, cap));
+      if (items.length <= cap) return;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn btn-ghost sm admin-cap-toggle';
+      b.textContent = all ? Util.t('btn.show_fewer') : Util.t('btn.show_all_n', { n: items.length });
+      b.addEventListener('click', () => { all = !all; paint(); });
+      host.appendChild(b);
+    };
+    paint();
+  },
+
   _lineBar(byLine: Record<string, number>): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'admin-pdtl-linebars';
     const max = Math.max(...Object.values(byLine));
-    for (const [line, cnt] of Object.entries(byLine)) {
+    AdminCockpit._capList(Object.entries(byLine), 15, (vis) => { for (const [line, cnt] of vis) {
       const row = document.createElement('div');
       row.className = 'admin-pdtl-linebar-row';
       const lbl = document.createElement('span');
@@ -1498,7 +1524,7 @@ export const AdminCockpit = {
       row.appendChild(bar);
       row.appendChild(num);
       wrap.appendChild(row);
-    }
+    } }, wrap);
     return wrap;
   },
 
@@ -1644,7 +1670,7 @@ export const AdminCockpit = {
       return;
     }
 
-    for (const w of warnings) {
+    AdminCockpit._capList(warnings, 20, (vis) => { for (const w of vis) {
       const row = document.createElement('div');
       row.className = `admin-bwarn-row admin-bwarn-${w.level || 'warn'}`;
       row.style.cursor = w.context && Object.keys(w.context).length ? 'pointer' : '';
@@ -1679,7 +1705,7 @@ export const AdminCockpit = {
       }
 
       host.appendChild(row);
-    }
+    } }, host);
   },
 
   // Server-backed preview (replaces a former client-side count over Store.tasksArr,
@@ -2133,7 +2159,7 @@ export const AdminCockpit = {
             sub.textContent = Util.t('ui.non_idle_queries');
             body.appendChild(sub);
             body.appendChild(AdminCockpit._dbTable(
-              ['PID', 'State', 'Dur (s)', 'Wait event', 'Query'],
+              [Util.t('diag.col_pid'), Util.t('diag.col_state'), Util.t('diag.col_dur'), Util.t('diag.col_wait'), Util.t('diag.col_query')],
               (conn.long_running || []).map((q): AdminDbTableRow => ({
                 cells: [q.pid, q.state || '—', q.duration_s ?? '—', q.wait_event || '—', (q.query || '').slice(0, 120)],
                 rowWarn: (q.duration_s || 0) > 30,
@@ -2186,7 +2212,7 @@ export const AdminCockpit = {
             const msg = document.createElement('div');
             msg.className = 'admin-db-na-msg';
             msg.textContent = sq.error
-              ? `Error: ${sq.error}`
+              ? `${Util.t('diag.error_prefix', { msg: sq.error })}`
               : Util.t('ui.diag_pg_stat_missing');
             body.appendChild(msg);
             return;
@@ -2350,7 +2376,7 @@ export const AdminCockpit = {
   _dbTableCards(tables: AdminTableStatData[]): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-tbl-cards';
-    for (const tbl of tables) {
+    AdminCockpit._capList(tables, 10, (vis) => { for (const tbl of vis) {
       const card = document.createElement('div');
       card.className = 'admin-db-tbl-card';
       const issues: string[] = [];
@@ -2414,7 +2440,7 @@ export const AdminCockpit = {
       card.appendChild(actions);
 
       wrap.appendChild(card);
-    }
+    } }, wrap);
     return wrap;
   },
 
@@ -2422,7 +2448,7 @@ export const AdminCockpit = {
     const maxScans = Math.max(...indexes.map((ix) => ix.scans ?? 0), 1);
     const wrap = document.createElement('div');
     wrap.className = 'admin-db-hbar-chart';
-    for (const ix of indexes) {
+    AdminCockpit._capList(indexes, 15, (vis) => { for (const ix of vis) {
       const pct = Math.max(ix.unused ? 0 : 1, Math.round(100 * (ix.scans ?? 0) / maxScans));
       const row = document.createElement('div');
       row.className = 'admin-db-hbar-row';
@@ -2449,7 +2475,7 @@ export const AdminCockpit = {
       sizeChip.textContent = ix.index_size || '';
       row.appendChild(names); row.appendChild(track); row.appendChild(val); row.appendChild(sizeChip);
       wrap.appendChild(row);
-    }
+    } }, wrap);
     return wrap;
   },
 
@@ -2753,7 +2779,7 @@ export const AdminCockpit = {
     if (!tbody) return;
     const rows = PerfMonitor.all();
     if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="admin-perf-empty">No data yet — interact with the app to record operations.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="admin-perf-empty">${Util.escapeHtml(Util.t('thread.empty'))}</td></tr>`;
       return;
     }
     rows.sort((a, b) => b.last - a.last);
@@ -2762,18 +2788,18 @@ export const AdminCockpit = {
     const ago = (ts: number): string => {
       if (!ts) return '—';
       const s = Math.round((Date.now() - ts) / 1000);
-      if (s < 2)  return 'just now';
-      if (s < 60) return `${s}s ago`;
-      return `${Math.round(s / 60)}m ago`;
+      if (s < 2)  return Util.t('thread.just_now');
+      if (s < 60) return Util.t('thread.s_ago', { s });
+      return Util.t('thread.m_ago', { m: Math.round(s / 60) });
     };
     tbody.innerHTML = rows.map(r => {
       const c = cls(r.last);
       return `<tr>
         <td class="perf-name">${Util.escapeHtml(r.name)}</td>
-        <td class="${c}">${fmt(r.last)} ms</td>
-        <td class="${cls(r.p50)}">${fmt(r.p50)} ms</td>
-        <td class="${cls(r.p95)}">${fmt(r.p95)} ms</td>
-        <td class="${cls(r.max)}">${fmt(r.max)} ms</td>
+        <td class="${c}">${fmt(r.last)} ${'ms'}</td>
+        <td class="${cls(r.p50)}">${fmt(r.p50)} ${'ms'}</td>
+        <td class="${cls(r.p95)}">${fmt(r.p95)} ${'ms'}</td>
+        <td class="${cls(r.max)}">${fmt(r.max)} ${'ms'}</td>
         <td>${r.count}</td>
         <td class="perf-ago">${ago(r.lastTs)}</td>
       </tr>`;

@@ -12,6 +12,10 @@
 // always labelled "possible" because it is joined by time only.
 
 import type { JobRun } from './jobs-client.mjs';
+import type { LogEntry } from '../platform/foundation.mjs';
+import type { BackendLogEntry, AdminAuditLogItem, AdminUploadAuditItem } from './admin-ui.mjs';
+
+export type { LogEntry, BackendLogEntry, AdminAuditLogItem, AdminUploadAuditItem };
 
 export type LogSource = 'backend' | 'frontend' | 'audit' | 'upload' | 'jobs' | 'events' | 'sap';
 export type LogLevel = 'error' | 'warn' | 'info';
@@ -34,25 +38,9 @@ export interface UnifiedEntry {
 }
 
 /* ---------------------------------------------------------------------------
-   Source row shapes (structural copies of what each endpoint returns; the originals are not exported)
+   Source row shapes: BackendLogEntry / AdminAuditLogItem / AdminUploadAuditItem come from admin-ui.mts and
+   LogEntry (the browser ErrorLog row) from foundation.mts; only the two shapes below are local.
    ------------------------------------------------------------------------- */
-/** One row of GET /logs/backend. */
-export interface BackendLogEntry {
-  ts: string; level: LogLevel; category: string; msg: string; rid?: string; error_code?: string;
-  user?: string; actor?: string; ctx?: Record<string, unknown>; exc?: string; source?: 'frontend';
-}
-/** One entry of the browser ErrorLog ring. */
-export interface LogEntry {
-  ts: string; level: LogLevel; scope: string; msg: string; ctx?: unknown; reqId?: string; errorCode?: string;
-  plant?: string; user?: string; seq?: number;
-}
-/** One row of GET /audit/log (rid / plant arrive with the W4b join keys). */
-export interface AdminAuditLogItem { ts: string; user?: string; action?: string; plant?: string; rid?: string; details?: Record<string, unknown> }
-/** One row of GET /upload/audit (rid / user arrive with the W4b join keys). */
-export interface AdminUploadAuditItem {
-  batch_id: string; filename: string | null; row_count: number; inserted: number; updated: number; uploaded_at: string | null;
-  warnings: Array<{ level?: string; category?: string; msg?: string }>; rid?: string | null; user?: string; plant?: string;
-}
 /** One row of GET /schedule-events/{plant}/recent. */
 export interface RecentScheduleEvent {
   id: number; at: string; actor: string | null; actor_name: string | null; source: string; op: string;

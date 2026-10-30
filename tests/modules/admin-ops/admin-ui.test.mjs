@@ -487,6 +487,8 @@ function fakeEl(tag) {
     appendChild(c) { n.children.push(c); return c; },
     append(...cs) { for (const c of cs) n.children.push(c); },
     setAttribute(k, v) { n.attrs[k] = v; },
+    handlers: {},
+    addEventListener(t, fn) { n.handlers[t] = fn; },
     contains() { return false; },
     querySelector() { return null; },
     closest() { return null; },
@@ -583,4 +585,49 @@ test('_renderLogsPane initialises, renders and activates the unified pane; leavi
     try { withEmptyDom(() => AdminCockpit._setSub('overview')); } finally { restore(); }
     assert.ok(seen.includes('active:false'));
   } finally { UnifiedLogPane.init = real.i; UnifiedLogPane.render = real.r; UnifiedLogPane.setActive = real.s; }
+});
+
+// ---- W5: _capList + the design-pass markup/CSS pins -------------------------------------------------------
+test('_capList shows only cap items plus a Show all toggle over the cap, none at or under it', () => {
+  const prior = globalThis.document;
+  globalThis.document = { createElement: fakeEl, createTextNode: t => ({ _text: t }) };
+  try {
+    const items = Array.from({ length: 30 }, (_, i) => i);
+    const host = fakeEl('div');
+    AdminCockpit._capList(items, 10, vis => { for (const i of vis) host.appendChild(Object.assign(fakeEl('span'), { _text: String(i) })); }, host);
+    assert.equal(host.children.length, 11);                       // 10 rows + the toggle
+    const btn = host.children[10];
+    assert.equal(btn.tag, 'button');
+    assert.equal(btn._text, 'btn.show_all_n');
+    btn.handlers.click();
+    assert.equal(host.children.length, 31);                       // all rows + Show fewer
+    assert.equal(host.children[30]._text, 'btn.show_fewer');
+    host.children[30].handlers.click();
+    assert.equal(host.children.length, 11);
+    const small = fakeEl('div');
+    AdminCockpit._capList([1, 2, 3], 10, vis => { vis.forEach(() => small.appendChild(fakeEl("i"))); }, small);
+    assert.equal(small.children.length, 3);
+  } finally { globalThis.document = prior; }
+});
+
+test('thread card sits last in Diagnostics, collapsed, and uses data-i18n; upload-detail host exists', () => {
+  const html = readFileSync(new URL('../../../frontend/index.html', import.meta.url), 'utf8');
+  const pane = html.slice(html.indexOf('id="admin-diag-pane"'), html.indexOf('/admin-diag-pane'));
+  const t = pane.indexOf('id="admin-thread-card"');
+  assert.ok(t > pane.indexOf('admin-db-deep-card'));
+  assert.match(pane.slice(t - 80, t), /<details class="admin-db-section"/);
+  assert.ok(!/<details[^>]*id="admin-thread-card"[^>]*\sopen/.test(pane));
+  assert.ok(!pane.slice(t).includes('Main Thread Profiler</h3>'));
+  assert.ok(html.includes('id="admin-upload-detail"'));
+  assert.ok(html.includes('data-i18n-aria-label="aria.upload_zone"'));
+});
+
+test('design-pass CSS pins: no side stripe in Logs, one-line recent rows, subtab scroll, ov-acts', () => {
+  const css = readFileSync(new URL('../../../frontend/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /#ulog-list \.admin-log-row\s*\{\s*border-left-color:\s*transparent/);
+  assert.match(css, /#ulog-list\s*\{[^}]*calc\(100vh - 340px\)[^}]*min-height:\s*320px/);
+  assert.match(css, /\.ov-recent-row \.admin-log-msg\s*\{[^}]*text-overflow:\s*ellipsis/);
+  assert.match(css, /\.ov-acts\s*\{/);
+  assert.match(css, /\.sig-dt th\.num\s*\{\s*text-align:\s*right/);
+  assert.match(css, /\.admin-subtabs\s*\{\s*flex-wrap:\s*nowrap;\s*overflow-x:\s*auto/);
 });

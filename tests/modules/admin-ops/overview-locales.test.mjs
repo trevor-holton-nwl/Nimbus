@@ -17,8 +17,8 @@ const ph = s => [...String(s).matchAll(/\{\{(\w+)\}\}/g)].map(m => m[1]).sort().
 
 const FAMILIES = /^(ov|sig|attn|ulog|pipe|thread)\./;
 const EXTRA = ['tab.logs', 'tab.order_maintenance', 'btn.pause', 'btn.resume', 'btn.rerun_now', 'btn.open_run', 'btn.vacuum_analyze', 'btn.vacuum', 'btn.view_logs',
-  'btn.open_color_wheel', 'btn.open_diagnostics', 'btn.open_interface', 'btn.open_history', 'btn.show_all_n', 'btn.show_fewer', 'btn.copy_json',
-  'ph.filter_plant', 'ph.search_logs', 'ph.filter_backend', 'ui.all_codes', 'diag.error_prefix', 'aria.upload_zone'];
+  'btn.open_color_wheel', 'btn.open_diagnostics', 'btn.open_interface', 'btn.open_history', 'btn.show_all_n', 'btn.show_fewer', 'btn.copy_json', 'btn.clear_menu',
+  'ph.filter_plant', 'ph.search_logs', 'diag.error_prefix', 'aria.upload_zone'];
 const keys = [...new Set([...Object.keys(T.en).filter(k => FAMILIES.test(k) || /^diag\.col_/.test(k)), ...EXTRA])];
 
 test('the families are populated', () => {

@@ -1889,8 +1889,10 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <h2 data-i18n="ov.title">Overview</h2>
               <span class="ov-meta" id="ov-meta" role="status"></span>
               <div class="spacer"></div>
-              <button class="btn btn-ghost sm" id="ov-pause" type="button" aria-pressed="false" data-i18n="btn.pause">Pause</button>
-              <button class="btn btn-ghost sm" id="ov-refresh" type="button" data-i18n="btn.refresh">↻ Refresh</button>
+              <div class="ov-acts">
+                <button class="btn btn-ghost sm" id="ov-pause" type="button" aria-pressed="false" data-i18n="btn.pause">Pause</button>
+                <button class="btn btn-ghost sm" id="ov-refresh" type="button" data-i18n="btn.refresh">↻ Refresh</button>
+              </div>
             </div>
 
             <div class="panel" id="ov-signals-card">
@@ -1932,11 +1934,12 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               </header>
               <div class="panel-body">
                 <div class="ulog-toolbar">
-                  <span class="ulog-toolbar-label" data-i18n="ulog.clear_label">Clear:</span>
-                  <button class="btn btn-ghost sm" id="admin-backend-log-clear" data-i18n="ulog.src_backend">Backend</button>
-                  <button class="btn btn-ghost sm" id="admin-log-clear" data-i18n="ulog.src_frontend">This browser</button>
-                  <button class="btn btn-ghost sm" id="admin-audit-log-clear" data-i18n="ulog.src_audit">Optimization &amp; color wheel</button>
-                  <button class="btn btn-ghost sm" id="ulog-clear-upload" data-i18n="ulog.src_upload">Uploads</button>
+                  <span class="ulog-toolbar-label ulog-clear-btn" data-i18n="ulog.clear_label">Clear:</span>
+                  <button class="btn btn-ghost sm ulog-clear-btn" id="admin-backend-log-clear" data-i18n="ulog.src_backend">Backend</button>
+                  <button class="btn btn-ghost sm ulog-clear-btn" id="admin-log-clear" data-i18n="ulog.src_frontend">This browser</button>
+                  <button class="btn btn-ghost sm ulog-clear-btn" id="admin-audit-log-clear" data-i18n="ulog.src_audit">Optimization &amp; color wheel</button>
+                  <button class="btn btn-ghost sm ulog-clear-btn" id="ulog-clear-upload" data-i18n="ulog.src_upload">Uploads</button>
+                  <button class="btn btn-ghost sm ulog-clear-menu" id="ulog-clear-menu" type="button" data-i18n="btn.clear_menu">Clear…</button>
                   <div class="spacer"></div>
                   <button class="btn btn-ghost sm" id="admin-log-export-json" data-i18n="btn.export_json">Export JSON</button>
                   <button class="btn btn-ghost sm" id="admin-log-copy-filtered" data-i18n="btn.copy_filtered">⎘ Copy filtered</button>
@@ -1982,33 +1985,6 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
             <!-- CLIENT DIAGNOSTICS -->
             <div id="admin-diagnostics-pane" class="admin-section"></div>
 
-            <div class="panel admin-card admin-card-wide" style="margin:12px 0;">
-              <header class="panel-head">
-                <h3>Main Thread Profiler</h3>
-                <span class="panel-hint">Per-operation timing — last/P50/P95/max over the last 100 samples. Red ≥ 50 ms, yellow ≥ 16 ms (one frame).</span>
-                <div class="spacer"></div>
-                <button class="btn btn-ghost sm" id="admin-thread-clear">✕ Clear</button>
-              </header>
-              <div class="panel-body panel-body-flush">
-                <table class="admin-perf-table">
-                  <thead>
-                    <tr>
-                      <th>Operation</th>
-                      <th>Last</th>
-                      <th>P50</th>
-                      <th>P95</th>
-                      <th>Max</th>
-                      <th>Calls</th>
-                      <th>Last run</th>
-                    </tr>
-                  </thead>
-                  <tbody id="admin-perf-tbody">
-                    <tr><td colspan="7" class="admin-perf-empty">No data yet — interact with the app to record operations.</td></tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
             <div class="admin-grid">
 
               <!-- DATA PIPELINE -->
@@ -2050,6 +2026,33 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               </div>
 
             </div><!-- /admin-grid diagnostics -->
+
+            <!-- MAIN THREAD PROFILER (last, collapsed by default) -->
+            <details class="admin-db-section" id="admin-thread-card">
+              <summary>
+                <span class="admin-db-section-title" data-i18n="thread.title">Main Thread Profiler</span>
+                <span class="panel-hint" data-i18n="thread.hint">Per-operation timing: last/P50/P95/max over the last 100 samples. Red at 50 ms or more, yellow at 16 ms or more (one frame).</span>
+                <button class="btn btn-ghost sm" id="admin-thread-clear" type="button" data-i18n="btn.clear">✕ Clear</button>
+              </summary>
+              <div class="admin-db-section-body">
+                <table class="admin-perf-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="thread.col_op">Operation</th>
+                      <th data-i18n="thread.col_last">Last</th>
+                      <th>P50</th>
+                      <th>P95</th>
+                      <th data-i18n="thread.col_max">Max</th>
+                      <th data-i18n="thread.col_calls">Calls</th>
+                      <th data-i18n="thread.col_last_run">Last run</th>
+                    </tr>
+                  </thead>
+                  <tbody id="admin-perf-tbody">
+                    <tr><td colspan="7" class="admin-perf-empty" data-i18n="thread.empty">No data yet. Interact with the app to record operations.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
         </div><!-- /admin-diag-pane -->
 
         <!-- ORDER MAINTENANCE PANE -->
@@ -2063,7 +2066,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
                 </header>
                 <div class="panel-body">
                   <div class="ord-dropzone" id="admin-upload-zone" tabindex="0" role="button"
-                       aria-label="Click or drag an xlsx file to upload">
+                       aria-label="Click or drag an xlsx file to upload" data-i18n-aria-label="aria.upload_zone">
                     <input type="file" id="admin-upload-file" accept=".xlsx,.xls" hidden>
                     <div class="ord-drop-inner">
                       <div class="ord-drop-icon">📥</div>
@@ -2081,6 +2084,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
                     <button class="btn btn-primary" id="admin-upload-btn" data-i18n="btn.upload_ingest">⬆ Upload &amp; Ingest</button>
                   </div>
                   <div class="admin-status" id="admin-upload-status"></div>
+                  <div id="admin-upload-detail"></div>
                 </div>
               </div>
 
