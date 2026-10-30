@@ -868,8 +868,6 @@ window.__NIMBUS_LOCALES.es = {
   'tab.overview':                      'Resumen',
   'tab.manage_data_tables':            'Gestionar tablas de datos',
   'tab.diagnostics':                   'Diagnóstico',
-  'tab.data_operations':               'Operaciones de datos',
-  'tab.logs_audit':                    'Registros y auditoría',
   'tab.security':                      'Seguridad',
   'tab.system_config':                 'Configuración del Sistema',
   'tab.table_browser':                 'Explorador de Tablas',

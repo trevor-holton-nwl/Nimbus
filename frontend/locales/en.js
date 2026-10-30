@@ -1095,8 +1095,6 @@ window.__NIMBUS_LOCALES.en = {
   'tab.overview':                      'Overview',
   'tab.manage_data_tables':            'Manage Data Tables',
   'tab.diagnostics':                   'Diagnostics',
-  'tab.data_operations':               'Data Operations',
-  'tab.logs_audit':                    'Logs & Audit',
   'tab.security':                      'Security',
   'tab.system_config':                 'System Configuration',
   'tab.table_browser':                 'Table Browser',

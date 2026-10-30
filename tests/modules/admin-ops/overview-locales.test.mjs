@@ -1,5 +1,5 @@
 // Every key family the Admin cockpit redesign adds exists in all five locales with identical {{placeholders}}.
-// tab.logs_audit / tab.data_operations still exist in W0; W1 removes them and flips that assertion.
+// tab.logs_audit / tab.data_operations were removed in W1.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -46,6 +46,6 @@ test('pinned spot values', () => {
   assert.equal(T.en['btn.show_all'], '← Show all');    // pre-existing calendar string is untouched
 });
 
-test('old tab keys are still present until W1 removes them', () => {
-  for (const l of LOCALES) { assert.ok(T[l]['tab.logs_audit'], `${l} tab.logs_audit`); assert.ok(T[l]['tab.data_operations'], `${l} tab.data_operations`); }
+test('old tab keys are absent (removed in W1)', () => {
+  for (const l of LOCALES) { assert.equal(T[l]['tab.logs_audit'], undefined, `${l} tab.logs_audit`); assert.equal(T[l]['tab.data_operations'], undefined, `${l} tab.data_operations`); }
 });
