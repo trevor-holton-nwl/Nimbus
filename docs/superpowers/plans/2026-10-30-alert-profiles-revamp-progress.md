@@ -6,4 +6,4 @@
 
 Each wave appends its own line below.
 
-W0: design doc + mockup committed (PENDING_HASH)
+W0: design doc + mockup committed (558a6e5)
