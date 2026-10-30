@@ -179,16 +179,26 @@ function _isNoop(w: AlertProfileRule): boolean {
  */
 export function normalizeRules(drafts: readonly RuleDraft[]): { rules: AlertProfileRule[]; src: number[] } {
   const seen = new Set<string>();
-  const rules: AlertProfileRule[] = [];
-  const src: number[] = [];
+  const all: AlertProfileRule[] = [];
+  const idx: number[] = [];
   drafts.forEach((r, i) => {
     const w = _wireRule(r);
-    if (_isNoop(w)) return;
     const sig = JSON.stringify([w.types == null ? null : [...new Set(w.types)].sort(), w.dayFrom, w.dayTo, w.minSev, w.minLateHours]);
     if (seen.has(sig)) return;
     seen.add(sig);
+    all.push(w);
+    idx.push(i);
+  });
+  // Under any-of matching a no-op rule beside a narrowing rule makes the whole group match, so it is dropped only when it
+  // is the SOLE rule applying to every group it names (then zero rules means the same thing). Otherwise it stays on the wire.
+  const touches = (w: AlertProfileRule): AlertCategory[] =>
+    w.types == null ? [...ALERT_CATEGORY_ORDER] : [...new Set((w.types as string[]).map(categoryOf))];
+  const rules: AlertProfileRule[] = [];
+  const src: number[] = [];
+  all.forEach((w, k) => {
+    if (_isNoop(w) && touches(w).every(cat => !all.some((o, j) => j !== k && touches(o).includes(cat)))) return;
     rules.push(w);
-    src.push(i);
+    src.push(idx[k]!);
   });
   return { rules, src };
 }
@@ -416,7 +426,7 @@ function _groupRowHtml(s: EditorState, cat: AlertCategory, editable: boolean): s
     + `<input type="checkbox" role="switch" aria-checked="${c.on}" aria-label="${esc(name)}" data-ape-grp-on="${cat}" data-ape-key="sw:${cat}"${c.on ? ' checked' : ''}${dis}>`
     + `<span class="cal-toggle-track"></span><span class="cal-toggle-thumb"></span></label>`
     + `<div class="ape-grp-text"><div class="ape-grp-name"><span class="ape-grp-label">${esc(name)}</span>`
-    + (tuned ? `<span class="ape-badge" title="${esc(t('ape.grp_tuned_tip'))}">${esc(t('ape.grp_tuned'))}</span>` : '')
+    + `<span class="ape-badge" id="ape-badge-${cat}" title="${esc(t('ape.grp_tuned_tip'))}"${tuned ? '' : ' hidden'}>${esc(t('ape.grp_tuned'))}</span>`
     + `</div><span class="ape-grp-desc">${esc(t(`ape.cat_${cat}_desc`))}</span>${_err(err)}</div>`
     + `<span class="ape-grp-cnt" id="ape-cnt-${cat}">${s.counts[cat] ?? 0}</span>`
     + `<button type="button" class="ape-swbtn" data-ape-act="color" data-ape-cat="${cat}" data-color="${c.color}" data-ape-key="sw-color:${cat}"`
@@ -439,7 +449,8 @@ function _ruleHtml(s: EditorState, cat: AlertCategory, r: RuleDraft, i: number, 
     `<option value="${p}"${p === preset ? ' selected' : ''}>${esc(t(`ape.day_preset_${p}`))}</option>`).join('');
   const boxes = types.map(x =>
     `<label class="chk-inline"><input type="checkbox" data-ape-type="${esc(x)}" data-ape-rule="${i}" data-ape-cat="${cat}" ${key('ty-' + x)}`
-    + `${r.types.includes(x) ? ' checked' : ''}${!editable || (ticked.length === 1 && r.types.includes(x)) ? ' disabled' : ''}>`
+    + `${r.types.includes(x) ? ' checked' : ''}${!editable || (ticked.length === 1 && r.types.includes(x)) ? ' disabled' : ''}`
+    + `${editable && ticked.length === 1 && r.types.includes(x) ? ` title="${esc(t('ape.type_keep_one'))}"` : ''}>`
     + `<span>${esc(_headline(x))}</span></label>`).join('');
   const range = liveRange(r.dayFrom, r.dayTo, _plantToday(s.plant));
   const custom = preset === 'custom'
@@ -466,7 +477,9 @@ function _ruleHtml(s: EditorState, cat: AlertCategory, r: RuleDraft, i: number, 
     + `<span>${esc(t('ape.sev_err'))}</span></label></div>`
     + `<div class="ape-range" id="ape-range-${cat}-${i}">${preset === 'custom' && range ? esc(t('ape.live_range', range)) : ''}</div>`
     + custom + late
-    + `<div class="ape-types" data-state="${state}"><span class="ape-types-label">${esc(t('ape.types'))}</span><div class="ape-types-boxes">${boxes}</div></div>`
+    + (rows > 1 && !_ruleNarrows(r, cat) ? `<div class="ape-muted">${esc(t('ape.rule_matches_all'))}</div>` : '')
+    + (types.length > 1
+      ? `<div class="ape-types" data-state="${state}"><span class="ape-types-label">${esc(t('ape.types'))}</span><div class="ape-types-boxes">${boxes}</div></div>` : '')
     + _err(e[`rules.${i}.types`]) + _err(e[`rules.${i}.dup`])
     + `</div>`;
 }
@@ -575,9 +588,12 @@ function _refreshLive(): void {
   if (!s || s.copy) return;
   const today = _plantToday(s.plant);
   s.counts = _computeCounts(s);
+  const tuned = tunedCategories(s.draft);
   for (const cat of ALERT_CATEGORY_ORDER) {
     const cell = document.getElementById(`ape-cnt-${cat}`);
     if (cell) cell.textContent = String(s.counts[cat] ?? 0);
+    const badge = document.getElementById(`ape-badge-${cat}`);
+    if (badge) badge.hidden = !tuned.includes(cat);
     if (!s.draft.categories[cat].on) continue;
     s.draft.rules.forEach((r, i) => {
       if (!_ruleApplies(r, cat)) return;
@@ -833,6 +849,7 @@ function _onField(e: Event, kind: 'input' | 'change'): void {
     const cat = ds.apeGrpOn as AlertCategory;
     if (!s.draft.categories[cat]) return;
     s.draft.categories[cat].on = !!el.checked;
+    el.setAttribute?.('aria-checked', String(!!el.checked));   // the markup can never disagree with the input
     _afterEdit(s); _render();
     return;
   }

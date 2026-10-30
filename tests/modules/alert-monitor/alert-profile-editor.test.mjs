@@ -61,8 +61,8 @@ test('draftFromProfile / profileFromDraft round trip keeps every rule field incl
   draft.rules[0].types.pop();
 
   const back = profileFromDraft(draft);
-  // The unrestricted second rule narrows nothing, so it is not saved.
-  assert.deepEqual(back.rules, [profile.rules[0]]);
+  // The unrestricted second rule sits beside a narrowing one (any-of matching), so it is kept: dropping it would narrow the profile.
+  assert.deepEqual(back.rules, profile.rules);
   assert.equal(back.name, 'Mine');
   assert.equal(profileFromDraft(draft, profile).ranking, 'time');
   assert.equal(back.expected_updated_at, '2026-10-20T10:00:00Z');
@@ -487,6 +487,69 @@ test('Fine-tune edits: a preset sets the window, Custom reveals the numbers, Err
   const sent = calls.create[0];
   assert.deepEqual(sent.rules.map(r => r.types), [['overlap'], ['late']]);
   assert.equal(sent.rules[1].dayTo, -1);
+});
+
+test('a no-op rule beside a narrowing rule of the same group is kept on the wire and shown with the matches-everything note', async () => {
+  const both = { ...mine, id: 'p6', name: 'Both', rules: [
+    { types: ['late'], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null },
+    { types: ['late'], dayFrom: null, dayTo: null, minSev: null, minLateHours: null },
+  ] };
+  assert.deepEqual(profileFromDraft(draftFromProfile(both)).rules, both.rules, 'both rules round-trip unchanged');
+  AlertProfileClient.cached = () => [both];
+  AlertProfileClient.list = async () => [both];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p6' });
+  assert.match(els['ape-body'].innerHTML, /ape\.rule_matches_all/);
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.update[0][1].rules, both.rules);
+});
+
+test('Add rule beside a narrowing rule shows the matches-everything note at once', () => {
+  const one = { ...mine, id: 'p7', name: 'One', rules: [{ types: ['late'], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null }] };
+  AlertProfileClient.cached = () => [one];
+  AlertProfileClient.list = async () => [one];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p7' });
+  assert.doesNotMatch(els['ape-body'].innerHTML, /ape\.rule_matches_all/);
+  click('ape-body', { apeAct: 'add-rule', apeCat: 'late' });
+  assert.match(els['ape-body'].innerHTML, /ape\.rule_matches_all/);
+  assert.match(els['ape-body'].innerHTML, /data-ape-act="rm-rule"/);
+});
+
+test('all-ON with no rules still saves []; Next 7 days on Late alone saves one narrowed rule', async () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Plain' }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.create[0].rules, []);
+
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Late week' }));
+  const s = AlertProfileEditor._test.state();
+  const i = String(s.draft.rules.findIndex(r => r.types.includes('late')));
+  fire('ape-body', 'change', tgt({ apeField: 'dayPreset', apeRule: i }, { value: 'next7' }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.create[1].rules, [{ types: ['late'], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null }]);
+});
+
+test('the Fine-tuned badge follows live edits; single-type groups render no type row; the disabled last type explains itself; the switch aria-checked tracks the input', () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  assert.match(els['ape-body'].innerHTML, /id="ape-badge-late"[^>]* hidden>/);
+  const s = AlertProfileEditor._test.state();
+  const i = String(s.draft.rules.findIndex(r => r.types.includes('overlap')));
+  fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: i }, { checked: true }));
+  assert.equal(els['ape-badge-conflicts'].hidden, false, 'badge shows after Errors only');
+  fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: i }, { checked: false }));
+  assert.equal(els['ape-badge-conflicts'].hidden, true, 'and hides again');
+  // Late has one type: no type checkboxes at all.
+  assert.doesNotMatch(els['ape-body'].innerHTML, /data-ape-type="late"/);
+  // Conflicts reduced to one type: the disabled box carries the explanation.
+  fire('ape-body', 'change', tgt({ apeType: 'tool-conflict', apeRule: i, apeCat: 'conflicts' }, { checked: false }));
+  fire('ape-body', 'change', tgt({ apeType: 'distribution-separation', apeRule: i, apeCat: 'conflicts' }, { checked: false }));
+  assert.match(els['ape-body'].innerHTML, /data-ape-type="overlap"[^>]*disabled[^>]*title="ape\.type_keep_one"/);
+  const attrs = {};
+  fire('ape-body', 'change', tgt({ apeGrpOn: 'setup' }, { checked: false, setAttribute(k, v) { attrs[k] = v; } }));
+  assert.equal(attrs['aria-checked'], 'false');
 });
 
 test('the Off line and the inert line name the switched-off groups and rules that only touch them', () => {

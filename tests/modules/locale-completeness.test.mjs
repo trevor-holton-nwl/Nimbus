@@ -874,6 +874,7 @@ const ALERT_MONITOR_KEYS = [
   'ape.color_slate', 'ape.color_sand', 'ape.color_stone', 'ape.tune', 'ape.tune_hint', 'ape.days', 'ape.day_preset_any',
   'ape.day_preset_overdue', 'ape.day_preset_next3', 'ape.day_preset_next7', 'ape.day_preset_next14', 'ape.day_preset_custom',
   'ape.groups_off', 'ape.rule_inert', 'ape.switch_label', 'ape.err_categories_shape',
+  'ape.type_keep_one', 'ape.rule_matches_all',
   'ape.set_mine', 'ape.new_profile', 'ape.duplicate', 'ape.copy_to_plants', 'ape.late_hours', 'ape.err_late_hours',
   'ape.live_range', 'ape.live_matches', 'ape.err_name_required', 'ape.err_name_dup', 'ape.err_name_long',
   'ape.err_no_rules', 'ape.err_no_categories', 'ape.err_color', 'ape.err_too_many_rules', 'ape.err_rule_no_types', 'ape.err_days_range', 'ape.err_days_order',
