@@ -5040,7 +5040,8 @@ body.dark .cw-active-card {
 }
 
 /* =============================================================================
-   ADMIN COCKPIT — sub-tab strip (Overview / Manage Data Tables) — also reused by Manage Master Data ribbon tab via .md-master-subtabs
+   ADMIN COCKPIT — sub-tab strip. The Admin strip lives in a .tab-strip-row outside .admin-scroll
+   (pinned like Master Data); .admin-subtabs is still shared by inner rows and Master Data (.md-master-subtabs)
    ============================================================================= */
 .admin-subtabs {
   display: flex;
@@ -5051,10 +5052,13 @@ body.dark .cw-active-card {
   flex-wrap: wrap;
 }
 .admin-subtabs > button { flex-shrink: 0; }
-/* Admin Cockpit: a sub-sub row sits flush under the sub-tab strip (margins collapse, so
-   the -20px cancels the strip's 20px bottom margin), like the Master Data page. */
+/* Admin Cockpit: the main strip is a .tab-strip-row above .admin-scroll, so a sub-sub row
+   (Jobs .admin-ov-tabs, Manage Data Tables .md-table-nav-row) is the first thing inside
+   .admin-container's 24px top padding. -24px pulls it flush under the strip (block panes
+   collapse the margin up to the padding; the flex .job-pane gets 24 - 24 = 0 by arithmetic).
+   Other panes keep the 24px of breathing room. */
 #admin-tab .admin-ov-tabs,
-#admin-tab .md-table-nav-row { margin-top: -20px; }
+#admin-tab .md-table-nav-row { margin-top: -24px; }
 .admin-subtab {
   padding: 8px 18px;
   border: none;
@@ -5137,6 +5141,7 @@ body.dark .cw-active-card {
    this ancestor; the other three panes don't need it. */
 #md-master-plant-pane { overflow: hidden; }
 .md-master-subtabs { margin: 0; flex: 0 0 auto; }
+.admin-main-subtabs { margin: 0; flex: 0 0 auto; }
 /* The row owns the underline so it runs the full width, under the trailing button too. The nav
    drops its own line and stretches, so the active tab's negative margin lands on the row border.
    --tab-strip-line keeps each row's own weight (Manage Plant Data uses 1px). */

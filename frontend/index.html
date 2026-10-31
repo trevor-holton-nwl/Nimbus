@@ -1867,10 +1867,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
        TAB: ADMIN COCKPIT — upload orders, purge data, view logs + upload history
        ========================================================= -->
   <section class="tab-panel" id="admin-tab" role="tabpanel">
-    <div class="admin-scroll">
-      <div class="admin-container">
-        <!-- ADMIN SUB-TAB STRIP -->
-        <nav class="admin-subtabs" role="tablist">
+    <div class="tab-strip-row">
+        <!-- ADMIN SUB-TAB STRIP (pinned: sits outside .admin-scroll like Master Data) -->
+        <nav class="admin-subtabs admin-main-subtabs" role="tablist">
           <button class="admin-subtab active" data-sub="overview" role="tab" data-i18n="tab.overview">Overview</button>
           <button class="admin-subtab" data-sub="logs" role="tab" data-i18n="tab.logs">Logs</button>
           <button class="admin-subtab" data-sub="diagnostics" role="tab" data-i18n="tab.diagnostics">Diagnostics</button>
@@ -1882,7 +1881,9 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           <button class="admin-subtab" data-sub="system-config" role="tab" data-i18n="tab.system_config">System Configuration</button>
           <button class="admin-subtab" data-sub="table-browser" role="tab" data-i18n="tab.table_browser">Table Browser</button>
         </nav>
-
+    </div>
+    <div class="admin-scroll">
+      <div class="admin-container">
         <!-- OVERVIEW PANE -->
         <div id="admin-overview-pane">
 
