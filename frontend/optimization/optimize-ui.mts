@@ -123,19 +123,41 @@ export const OptimizeDialog = (() => {
   let _wheelFetchToken = 0;          // monotonic token to ignore stale responses
   let _startDirty = false;
   let _endDirty = false;
+  // Custom window mode. Off (default): the pickers are date-only and the window is the inclusive day range
+  // [From 00:00, To+1 00:00). On ("Adjust times"): date+time pickers and raw instants. Reset on every open().
+  let _timeMode = false;
 
   const PRESET_DAYS: Record<string, number> = { '2w': 14 }; // UI only exposes '2w' and 'custom'
 
   function _initPickers() {
     if (_fpStart) return;
     _fpStart = flatpickr('#opt-from-cal', {
-      inline: true, enableTime: true, minuteIncrement: 1,
+      inline: true, enableTime: _timeMode, minuteIncrement: 1,
       dateFormat: 'Y-m-d\\TH:i',
     });
     _fpEnd = flatpickr('#opt-to-cal', {
-      inline: true, enableTime: true, minuteIncrement: 1,
+      inline: true, enableTime: _timeMode, minuteIncrement: 1,
       dateFormat: 'Y-m-d\\TH:i',
     });
+  }
+
+  /** Midnight of d's calendar day (a clone). */
+  function _dayStart(d: Date): Date { const r = new Date(d); r.setHours(0, 0, 0, 0); return r; }
+  /** Midnight of the day after d's calendar day. setDate (not + MS_DAY) keeps DST days midnight-aligned. */
+  function _dayAfter(d: Date): Date { const r = _dayStart(d); r.setDate(r.getDate() + 1); return r; }
+  function _isMidnight(d: Date): boolean { return d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0; }
+
+  /** The flatpickr option bag differs by mode (enableTime cannot be flipped reliably with set()), so a mode
+   *  change destroys both instances and builds them again from the current window. */
+  function _rebuildPickers() {
+    try { _fpStart?.destroy(); } catch { /* already gone */ }
+    try { _fpEnd?.destroy(); } catch { /* already gone */ }
+    _fpStart = null;
+    _fpEnd = null;
+    _initPickers();
+    if (_start) (_fpStart as NimbusVendor.FlatpickrInstance | null)?.setDate(_start, false);
+    if (_end) (_fpEnd as NimbusVendor.FlatpickrInstance | null)?.setDate(_end, false);
+    if (_start) (_fpEnd as NimbusVendor.FlatpickrInstance | null)?.set('minDate', _timeMode ? _start : _dayStart(_start));
   }
 
   /** Plant scope is owned by the header selector: the dialog shows it read-only
@@ -281,11 +303,7 @@ export const OptimizeDialog = (() => {
     if (!_endDirty) _end = computedEnd;
     _fpStart?.setDate(_start!, false);
     _fpEnd?.setDate(_end!, false);
-    const sb = document.getElementById('opt-start-btn');
-    const eb = document.getElementById('opt-end-btn');
-    if (sb && _start) sb.textContent = _displayDate(_start);
-    if (eb && _end) eb.textContent = _displayDate(_end);
-    _updateSummary();
+    _updateButtons();
     _updateBacklogRuntimeNote(tasks);
   }
 
@@ -313,8 +331,30 @@ export const OptimizeDialog = (() => {
     if (calendarLabel) calendarLabel.title = backlog ? 'Calendar adherence is required for Remove Backlog.' : '';
   }
 
+  /** Date-only display applies when the window is whole days (the Custom default); anything else, including
+   *  the presets' now-based window and Remove Backlog's computed bounds, shows its time so it stays truthful. */
+  function _dateOnlyDisplay(): boolean {
+    return !_timeMode && !!_start && !!_end && _isMidnight(_start) && _isMidnight(_end);
+  }
+
   function _displayDate(d: Date) {
-    return Util.fmtDTPref(d);
+    return _dateOnlyDisplay() ? Util._fmtDatePref(d) : Util.fmtDTPref(d);
+  }
+
+  /** The To end is exclusive; date mode shows the inclusive picked day. */
+  function _displayEnd(d: Date) {
+    if (!_dateOnlyDisplay()) return Util.fmtDTPref(d);
+    const last = new Date(d);
+    last.setDate(last.getDate() - 1);
+    return Util._fmtDatePref(last);
+  }
+
+  function _updateButtons() {
+    const sb = document.getElementById('opt-start-btn');
+    const eb = document.getElementById('opt-end-btn');
+    if (sb && _start) sb.textContent = _displayDate(_start);
+    if (eb && _end) eb.textContent = _displayEnd(_end);
+    _updateSummary();
   }
 
   function _updateSummary() {
@@ -322,11 +362,12 @@ export const OptimizeDialog = (() => {
     if (!el || !_start || !_end) return;
     const days = Math.round((_end.getTime() - _start.getTime()) / Config.MS_DAY);
     el.innerHTML =
-      `<span class="opt-date-summary-range">${_displayDate(_start)} → ${_displayDate(_end)}</span>` +
-      `<span class="opt-date-summary-days">&nbsp;· ${days} days</span>`;
+      `<span class="opt-date-summary-range">${_displayDate(_start)} → ${_displayEnd(_end)}</span>` +
+      `<span class="opt-date-summary-days">&nbsp;· ${days} ${days === 1 ? 'day' : 'days'}</span>`;
   }
 
   function applyPreset(key: string) {
+    const prevPreset = _preset;
     _preset = key;
     document.querySelectorAll<HTMLElement>('.opt-preset-chip').forEach((c) =>
       c.classList.toggle('active', c.dataset.preset === key)
@@ -334,7 +375,18 @@ export const OptimizeDialog = (() => {
     const row = document.getElementById('opt-date-row');
     if (row) row.classList.toggle('visible', key === 'custom');
 
-    if (key !== 'custom') {
+    if (key === 'custom') {
+      // Choosing Custom from a preset (or with nothing picked yet) starts as today -> today, one whole day,
+      // so Run is never blocked on an empty picker. Re-clicking Custom keeps what the planner picked. In time
+      // mode the existing instants are kept, as before.
+      if (_mode !== 'backlog' && !_timeMode && (!_start || !_end || prevPreset !== 'custom')) {
+        const today = Store.plantNow(_plant) ?? Store.serverNow();
+        _start = _dayStart(today);
+        _end = _dayAfter(today);
+        _fpStart?.setDate(_start, false);
+        _fpEnd?.setDate(_end, false);
+      }
+    } else {
       let days: number;
       if (key === 'horizon') {
         // Store._state.masterData direct touch — deliberate, out of scope for this
@@ -351,16 +403,30 @@ export const OptimizeDialog = (() => {
       _end   = new Date(now.getTime() + days * Config.MS_DAY);
       _fpStart?.setDate(_start, false);
       _fpEnd?.setDate(_end, false);
-      const sb = document.getElementById('opt-start-btn');
-      const eb = document.getElementById('opt-end-btn');
-      if (sb) sb.textContent = _displayDate(_start);
-      if (eb) eb.textContent = _displayDate(_end);
     }
     if (_mode === 'backlog' && key !== 'custom') {
       _startDirty = true;
       _endDirty = true;
     }
-    _updateSummary();
+    _updateButtons();
+  }
+
+  /** The "Adjust times" toggle: on = date+time pickers and raw instants; off = whole-day range again, the
+   *  current window re-snapped to day bounds (To's day is the day holding the last instant). */
+  function setTimeMode(on: boolean) {
+    on = !!on;
+    const chk = document.getElementById('opt-chk-times') as HTMLInputElement | null;
+    if (chk) chk.checked = on;
+    if (on === _timeMode) return;
+    _timeMode = on;
+    if (!on && _start && _end) {
+      const lastDay = new Date(_end.getTime() - 1);
+      _start = _dayStart(_start);
+      _end = _dayAfter(lastDay);
+      if (_end.getTime() <= _start.getTime()) _end = _dayAfter(_start);
+    }
+    _rebuildPickers();
+    _updateButtons();
   }
 
   function selectMode(mode: OptimizerMode) {
@@ -499,13 +565,11 @@ export const OptimizeDialog = (() => {
       _end = new Date(e);
       _startDirty = true;
       _endDirty = true;
+      // Exact instants are kept. A window that is not whole days needs the time controls to display truthfully.
+      if (!_isMidnight(_start) || !_isMidnight(_end)) setTimeMode(true);
       _fpStart?.setDate(_start, false);
       _fpEnd?.setDate(_end, false);
-      const sb = document.getElementById('opt-start-btn');
-      const eb = document.getElementById('opt-end-btn');
-      if (sb) sb.textContent = _displayDate(_start);
-      if (eb) eb.textContent = _displayDate(_end);
-      _updateSummary();
+      _updateButtons();
     }
   }
 
@@ -543,6 +607,14 @@ export const OptimizeDialog = (() => {
       if (ofEl && typeof _respectFirmed === 'boolean')      ofEl.checked = _respectFirmed;
       if (ocEl && typeof _od.respectCalendar === 'boolean') ocEl.checked = _od.respectCalendar;
     }
+    // "Adjust times" always opens off; a dialog left in time mode gets its date-only pickers back.
+    const wasTimeMode = _timeMode;
+    _timeMode = false;
+    const timesChk = document.getElementById('opt-chk-times') as HTMLInputElement | null;
+    if (timesChk) timesChk.checked = false;
+    if (wasTimeMode) _rebuildPickers();
+    // A From left over from a previous session must not restrict the To picker.
+    (_fpEnd as NimbusVendor.FlatpickrInstance | null)?.set('minDate', undefined as unknown as Date);
     _initPickers();
     _buildPlantSelect();
     _initStrategySelectListener();
@@ -813,12 +885,12 @@ export const OptimizeDialog = (() => {
   function commitFrom() {
     const d = _fpStart && _fpStart.selectedDates[0];
     if (d) {
-      _start = new Date(d);
+      _start = _timeMode ? new Date(d) : _dayStart(d);
       _startDirty = true;
-      if (_fpEnd && _start) _fpEnd.set('minDate', _start);
-      const sb = document.getElementById('opt-start-btn');
-      if (sb) sb.textContent = _displayDate(_start);
-      _updateSummary();
+      // Date mode: the From DAY is the floor, so a same-day To stays selectable.
+      if (_fpEnd) _fpEnd.set('minDate', _timeMode ? _start : _dayStart(_start));
+      if (!_timeMode && _end && _end.getTime() <= _start.getTime()) _end = _dayAfter(_start);
+      _updateButtons();
     }
     Modal.close('modal-opt-from');
   }
@@ -834,16 +906,15 @@ export const OptimizeDialog = (() => {
   function commitTo() {
     const d = _fpEnd && _fpEnd.selectedDates[0];
     if (d) {
-      _end = new Date(d);
+      _end = _timeMode ? new Date(d) : _dayAfter(d);
       _endDirty = true;
-      const eb = document.getElementById('opt-end-btn');
-      if (eb) eb.textContent = _displayDate(_end);
-      _updateSummary();
+      if (!_timeMode && _start && _end.getTime() <= _start.getTime()) _end = _dayAfter(_start);
+      _updateButtons();
     }
     Modal.close('modal-opt-to');
   }
 
-  return { open, close, run, applyPreset, selectMode, _buildPlantSelect, _updatePlantBadge, setScope, filterLines, selectAllLines, _onLineToggle, openFromPicker, cancelFromPicker, commitFrom, openToPicker, cancelToPicker, commitTo };
+  return { open, close, run, applyPreset, selectMode, _buildPlantSelect, _updatePlantBadge, setScope, filterLines, selectAllLines, _onLineToggle, openFromPicker, cancelFromPicker, commitFrom, openToPicker, cancelToPicker, commitTo, setTimeMode };
 })();
 
 /** Return shape of Util.scheduleKpis — same ReturnType<typeof ...> precedent as

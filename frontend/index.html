@@ -2907,16 +2907,21 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
           </div>
           <div class="opt-date-row" id="opt-date-row">
             <div class="opt-date-field">
-              <label>From</label>
+              <label data-i18n="ui.opt_from">From</label>
               <button type="button" class="opt-date-btn" id="opt-start-btn"
-                      onclick="NIMBUS.OptimizeDialog.openFromPicker()">Select date…</button>
+                      onclick="NIMBUS.OptimizeDialog.openFromPicker()" data-i18n="ui.opt_select_date">Select date…</button>
             </div>
             <div class="opt-date-arrow">→</div>
             <div class="opt-date-field">
-              <label>To</label>
+              <label data-i18n="ui.opt_to">To</label>
               <button type="button" class="opt-date-btn" id="opt-end-btn"
-                      onclick="NIMBUS.OptimizeDialog.openToPicker()">Select date…</button>
+                      onclick="NIMBUS.OptimizeDialog.openToPicker()" data-i18n="ui.opt_select_date">Select date…</button>
             </div>
+            <label class="opt-check opt-date-times" id="opt-times-label">
+              <input type="checkbox" id="opt-chk-times" onchange="NIMBUS.OptimizeDialog.setTimeMode(this.checked)">
+              <span class="opt-check-box"></span>
+              <span data-i18n="ui.opt_adjust_times">Adjust times</span>
+            </label>
           </div>
         </div>
       </div>
@@ -3004,7 +3009,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
      onclick="if(event.target===this)NIMBUS.OptimizeDialog.cancelFromPicker()">
   <div class="modal" style="max-width:340px">
     <header class="modal-head">
-      <h3>From Date</h3>
+      <h3 data-i18n="ui.opt_from_date">From Date</h3>
       <button class="icon-btn sm" onclick="NIMBUS.OptimizeDialog.cancelFromPicker()" aria-label="Close">✕</button>
     </header>
     <div class="modal-body" style="padding:12px">
@@ -3024,7 +3029,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
      onclick="if(event.target===this)NIMBUS.OptimizeDialog.cancelToPicker()">
   <div class="modal" style="max-width:340px">
     <header class="modal-head">
-      <h3>To Date</h3>
+      <h3 data-i18n="ui.opt_to_date">To Date</h3>
       <button class="icon-btn sm" onclick="NIMBUS.OptimizeDialog.cancelToPicker()" aria-label="Close">✕</button>
     </header>
     <div class="modal-body" style="padding:12px">
