@@ -221,10 +221,11 @@ export const EditCalendar = (() => {
     }
   }
 
-  /** 00:00 as an end time means end of day (24:00); the picker cannot express 24. */
+  /** 00:00 as an end time means end of day (24:00); the picker cannot express 24. 23:59 reads the same: a day that closes
+   *  at 23:59 is 23.98 h, so a "24 hour" calendar would never read exactly full. */
   function _endHours(t: string): number {
     const h = Util.timeStringToHours(t);
-    return h === 0 ? 24 : h;
+    return h === 0 || h >= 23.98 ? 24 : h;
   }
 
   function _initPickers() {
@@ -264,8 +265,8 @@ export const EditCalendar = (() => {
       const hrs = _endHours(e) - Util.timeStringToHours(s);
       if (hrs > 0) {
         const h = `${hrs % 1 === 0 ? hrs : hrs.toFixed(1)}h`;
-        // A 00:00 end reads as midnight (24:00); say so, since the picker shows 12:00 AM.
-        badge.textContent = Util.timeStringToHours(e) === 0 ? `${h} · ${Util.t('ui.cal_to_midnight')}` : h;
+        // A 00:00 (or 23:59) end reads as midnight (24:00); say so, since the picker shows 12:00 AM.
+        badge.textContent = _endHours(e) === 24 ? `${h} · ${Util.t('ui.cal_to_midnight')}` : h;
       } else {
         badge.textContent = '—';
       }

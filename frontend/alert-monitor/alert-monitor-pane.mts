@@ -44,7 +44,7 @@ import {
   GROUP_MOVE_CONFIRM_ABOVE, SIDE_W_DEFAULT, SIDE_W_MIN, SIDE_W_MAX, clampSideWidth, ROW_H, ROW_H_NARROW, NARROW_AT, detailHeightFor, fixPrimaryAction, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowPrimaryActions, groupCounts, rowHtml, rowDetailHtml, materialOf, tagOf, filterAlerts, filterChips, emptyFilter,
   filterIsEmpty, makeBucketer, UNGROUPED_KEY, fixesInView, profileWindow,
-  fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
+  fixesSectionHtml, plantCalendarTarget, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
 import type { MonitorView, MonitorFilter, MonitorCtx, EmptyKind, LevCtx, FilterDim, RowDetailCtx } from './alert-monitor-model.mjs';
 import { matrixModel, matrixHtml, cellFilter, rowFilter, colFilter, filterMatches, clearDims } from './alert-monitor-matrix.mjs';
@@ -1054,6 +1054,12 @@ function _levFieldLabel(fieldKey: string): string {
   return v === key ? fieldKey : v;
 }
 
+/** A YYYY-MM-DD key in the user's date format. */
+function _fmtDayKey(day: string): string {
+  const [y, m, d] = day.split('-').map(Number);
+  return y && m && d ? Util._fmtDatePref(new Date(y, m - 1, d)) : day;
+}
+
 function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
   const remaining = _levAttempted.size ? item.alertIds.filter(id => _levAttempted.has(id)).length : 0;
   return {
@@ -1064,6 +1070,7 @@ function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
     whatIf: Sandbox.active === true,
     fieldLabel: _levFieldLabel,
     alertsById: _alertsById(),
+    fmtDay: _fmtDayKey,
   };
 }
 
@@ -1317,6 +1324,13 @@ function _onLevAction(act: string, key: string): void {
     case 'edit-calendar':
       if (action.kind === 'calendar-day') {
         void import('../calendar/edit-calendar.mjs').then(m => m.EditCalendar.open(action.line));
+      }
+      break;
+    case 'edit-plant-calendar':
+      if (Session.isAdmin() && action.kind === 'optimize-window') {
+        // The period that governs the window's first day when one exists (that is where its hours live), else the plant's base hours.
+        const target = plantCalendarTarget(Store.getPlantPeriods(plant), action.startDate);
+        void import('../calendar/edit-calendar.mjs').then(m => (target.kind === 'period' ? m.EditCalendar.openPeriod(plant, target.id) : m.EditCalendar.openPlant(plant)));
       }
       break;
     case 'rg-workcenters':

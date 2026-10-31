@@ -80,6 +80,13 @@ test('EditCalendar plant mode saves an end time of 00:00 as 24 (end of day)', ()
     EditCalendar.onToggle(1, true);
     assert.equal(badge.textContent, '18h · ui.cal_to_midnight', '06:00 -> 00:00 is an 18 hour day that runs to midnight');
 
+    // 23:59 reads as midnight too (a 23:59 close is 23.98 h, not a full day).
+    fakes['#cal-edit-end-1'].element.value = '23:59';
+    EditCalendar.onToggle(1, true);
+    assert.equal(badge.textContent, '18h · ui.cal_to_midnight', '06:00 -> 23:59 reads as 18 h to midnight');
+    fakes['#cal-edit-end-1'].element.value = '00:00';
+    EditCalendar.onToggle(1, true);
+
     EditCalendar.save();
     assert.deepEqual(Store.plants['1006'].workHours[1], [6, 24]);
     assert.equal(persisted.length, 1, 'plant hours persisted exactly once');

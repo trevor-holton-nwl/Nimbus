@@ -70,8 +70,19 @@ export interface LeverageItem {
   minutesSource?: 'plantDefault' | 'user' | null;
   capped?: boolean;
   adminOnly?: boolean;
-  /** optimize-window only: sum of (effective capacity - scheduled) hours over the window; <= 0 means optimizing cannot help. */
+  /** optimize-window only: sum of (effective capacity - scheduled) hours over the window, snapped to 0 when within the
+   *  overload tolerance (x days in the window). 0 = full, < 0 = over, > 0 = free hours. */
   headroomHours?: number;
+  /** optimize-window only: member alerts per type (late / overlap / overload / setup-violated). */
+  typeCounts?: Record<string, number>;
+  /** optimize-window only: window days whose cell is over capacity by more than the overload tolerance. */
+  overloadDays?: number;
+  /** optimize-window only: window days with capacity whose scheduled hours sit within the tolerance of it (exactly full). */
+  fullDays?: number;
+  /** optimize-window only: hours over capacity summed over the overloaded days only (> 0 when overloadDays > 0). */
+  overHours?: number;
+  /** optimize-window only: free hours summed over the days that have any (not a net figure). */
+  freeHours?: number;
   /** needs-planning only: the run-time hours of the queued orders still needing a slot (one decimal). */
   unplacedHours?: number;
   action: LeverageAction;
@@ -111,7 +122,7 @@ const MAX_WINDOW_DAYS = 14;
 const MAX_ACTION_PAIRS = 12;
 const DAY_MS = 86400000;
 
-const OPTIMIZE_TYPES = new Set(['overlap', 'late', 'overload', 'setup-violated']);
+export const OPTIMIZE_TYPES = new Set(['overlap', 'late', 'overload', 'setup-violated']);
 const CALENDAR_TYPES = new Set(['closed', 'blackout', 'firmed-closed']);
 const MACHINE_STATE_TYPES = new Set(['initial-state-unknown', 'current-state-diverged']);
 const ROUTING_UPLOAD_STEPS = new Set(['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter', 'pv_workcenter_mismatch']);
@@ -426,13 +437,28 @@ function _optimizeItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
         _push(b, a, a.type === 'overload' ? [...(a.taskId ? [a.taskId] : []), ..._rowOrders(matrix, line, _dayKeyOfNum(n))] : _alertOrders(a));
       }
       let headroom = 0;
+      let overloadDays = 0;
+      let fullDays = 0;
+      let overHours = 0;
+      let freeHours = 0;
       for (let n = start; n <= prev; n++) {
         const row = matrix?.[line]?.[_dayKeyOfNum(n)];
-        if (row) headroom += (Number(row.effectiveCapacity) || 0) - (Number(row.scheduled) || 0);
+        if (!row) continue;
+        const cap = Number(row.effectiveCapacity) || 0;
+        const sch = Number(row.scheduled) || 0;
+        headroom += cap - sch;
+        const over = sch - cap;
+        if (core.isOverloaded(sch, cap)) { overloadDays++; overHours += over; }
+        else if (cap > 0 && Math.abs(over) <= core.OVERLOAD_TOLERANCE_H) fullDays++;
+        if (-over > core.OVERLOAD_TOLERANCE_H) freeHours += -over;   // a day within the tolerance is full, not free
       }
+      // Exactly-full days leave float noise around zero: snap it with the same tolerance the overload rule uses.
+      if (Math.abs(headroom) <= core.OVERLOAD_TOLERANCE_H * (prev - start + 1)) headroom = 0;
+      const typeCounts: Record<string, number> = {};
+      for (const a of b.alerts) typeCounts[a.type] = (typeCounts[a.type] ?? 0) + 1;
       items.push(_finish(ctx, 'optimize-window', `optimize-window:${line}|${from}|${to}`, 'leverage.title.optimize-window',
         { line, from, to, n: b.alerts.length }, b,
-        { kind: 'optimize-window', line, startDate: from, endDate: to }, { headroomHours: headroom }));
+        { kind: 'optimize-window', line, startDate: from, endDate: to }, { headroomHours: headroom, typeCounts, overloadDays, fullDays, overHours, freeHours }));
       members = [];
     };
     for (const n of sorted) {

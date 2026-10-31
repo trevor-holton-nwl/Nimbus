@@ -5,7 +5,8 @@
    through an injected `t`, so the node tests exercise it directly.
    ========================================================================== */
 
-import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
+import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking, PlantPeriod } from '../platform/types.mjs';
+import { activePeriodOn } from '../calendar/calendar-periods.mjs';
 import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, NONE_KEY, alertDayOffset, dayKeyOf, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 import { dayBucketKey, horizonDayKeys } from './alert-monitor-overview.mjs';
@@ -425,6 +426,8 @@ export interface LevCtx {
   inView?: number;
   /** Live alerts by id: lets `levActions` tell a queued fix (no bar to show) from a placed one. */
   alertsById?: ReadonlyMap<string, { type: string }>;
+  /** A YYYY-MM-DD day key in the user's date format (the pane passes the date-preference formatter). Absent: the key itself. */
+  fmtDay?: (dayKey: string) => string;
 }
 
 export interface LevAction {
@@ -453,7 +456,27 @@ export function levTitle(item: LeverageItem, ctx: LevCtx, t: Translate): string 
       vars = { ...vars, from: _stateText(p.fromState, ctx.fieldLabel), to: _stateText(p.toState, ctx.fieldLabel), lines: names || vars.lines };
     }
   }
+  if (item.family === 'optimize-window') {
+    const fmt = ctx.fmtDay ?? ((k: string) => k);
+    vars = { ...vars, from: fmt(String(vars.from)), to: fmt(String(vars.to)), breakdown: _windowBreakdown(item, t) };
+  }
   return t(item.titleKey, vars);
+}
+
+/** "13 late · 2 overlapping": the member alerts of an optimize window by type, in a fixed order. */
+const _WINDOW_TYPES: ReadonlyArray<readonly [string, string]> = [
+  ['late', 'am.lev_type_late'], ['overlap', 'am.lev_type_overlap'],
+  ['overload', 'am.lev_type_overload'], ['setup-violated', 'am.lev_type_setup'],
+];
+function _windowBreakdown(item: LeverageItem, t: Translate): string {
+  const counts = item.typeCounts ?? {};
+  const out: string[] = [];
+  for (const [type, key] of _WINDOW_TYPES) {
+    const n = counts[type] ?? 0;
+    if (n > 0) out.push(_plural(n, key, { n }, t));
+  }
+  const n = item.alertIds.length;
+  return out.length ? out.join(' · ') : _plural(n, 'am.lev_type_alerts', { n }, t);
 }
 
 /**
@@ -496,9 +519,12 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
       add('focus-first', 'leverage.action.machine-state', true);
       break;
     case 'optimize-window': {
-      const room = (item.headroomHours ?? 1) > 0;
-      if (room) { add('optimize', 'leverage.action.optimize-window', true); add('diagnose-worst', 'am.diagnose'); }
+      // Full (0) still lets re-sequencing change which orders are late; only a genuinely over window sends the planner to Diagnose first.
+      const over = _windowOverNoRoom(item);
+      if (!over) { add('optimize', 'leverage.action.optimize-window', true); add('diagnose-worst', 'am.diagnose'); }
       else { add('diagnose-worst', 'am.diagnose', true); add('optimize', 'leverage.action.optimize-window'); }
+      // Hours are added on the plant calendar (the calendar-day card's edit-calendar opens a machine's hours instead).
+      if (((item.headroomHours ?? 1) <= 0 || (item.overloadDays ?? 0) > 0) && ctx.isAdmin) add('edit-plant-calendar', 'btn.edit_calendar', false, { admin: true });
       break;
     }
     case 'needs-planning':
@@ -525,6 +551,56 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
   }
   const primary = out.find(x => x.primary) ?? null;
   return { primary, menu: out.filter(x => x !== primary) };
+}
+
+/** "13 alerts on 13 orders": what an optimize window touches (re-sequencing promises no clears), same plural forms as `fixClearsText`. */
+export function fixAffectsText(item: LeverageItem, t: Translate): string {
+  const n = item.alertIds.length;
+  const m = item.orderIds.length;
+  if (n === 1 && m === 1) return t('am.lev_affects_one');
+  if (n === 1) return t('am.lev_affects_one_alert', { m });
+  if (m === 1) return t('am.lev_affects_one_order', { n });
+  return t('am.lev_affects', { n, m });
+}
+
+/** Days in an optimize window from its inclusive YYYY-MM-DD bounds. */
+function _windowDays(item: LeverageItem): number {
+  if (item.action.kind !== 'optimize-window') return 0;
+  const a = Date.parse(item.action.startDate + 'T00:00:00Z');
+  const b = Date.parse(item.action.endDate + 'T00:00:00Z');
+  return Number.isFinite(a) && Number.isFinite(b) ? Math.round((b - a) / 86400000) + 1 : 0;
+}
+
+/** Free hours on days other than the overloaded ones (a net-zero window can still have some). */
+const _freeHours = (item: LeverageItem): number => item.freeHours ?? Math.max(0, item.headroomHours ?? 0);
+
+/** Whether the window has a day over capacity AND no free hours elsewhere to absorb it (Diagnose first, Optimize cannot help). */
+function _windowOverNoRoom(item: LeverageItem): boolean {
+  return (item.overloadDays ?? 0) > 0 && _freeHours(item) <= 0;
+}
+
+/** The capacity clause and its consequence for an optimize window. Decided per day, not by the net sum: over (some day is
+ *  overloaded by the shared rule), free (hours left, no overloaded day), or full (neither). Never prints a zero quantity. */
+function _windowCapacityParts(item: LeverageItem, t: Translate): string[] {
+  const h = item.headroomHours;
+  if (h == null) return [];
+  const overDays = item.overloadDays ?? 0;
+  if (overDays > 0) {
+    const clause = _plural(overDays, 'am.lev_over_window', { h: fmtNum(item.overHours ?? 0), days: overDays }, t);
+    const free = _freeHours(item);
+    return [clause, free > 0 ? t('am.lev_over_room', { h: fmtNum(free) }) : t('am.lev_over_note')];
+  }
+  if (h > 0) return [t('am.lev_headroom', { h: fmtNum(h) })];
+  const days = _windowDays(item);
+  const all = days > 0 && item.fullDays === days;
+  const clause = !all ? t('am.lev_full_window_some') : _plural(days, 'am.lev_full_window', { days }, t);
+  return [clause, t('am.lev_full_note')];
+}
+
+/** Which calendar the "Add hours" action opens: the period governing the window's first day, else the plant's base hours. */
+export function plantCalendarTarget(periods: ReadonlyArray<PlantPeriod> | null | undefined, startDate: string): { kind: 'period'; id: string } | { kind: 'plant' } {
+  const p = activePeriodOn(periods as PlantPeriod[] | null | undefined, startDate);
+  return p ? { kind: 'period', id: p.id } : { kind: 'plant' };
 }
 
 /** "Clears 6 alerts on 4 orders", in the plural form the counts call for. */
@@ -554,27 +630,23 @@ export function fixConfidenceChanged(item: LeverageItem): boolean {
  */
 export function fixLineParts(item: LeverageItem, ctx: LevCtx, t: Translate): string[] {
   // needs-planning: one alert per order, so "Clears N alerts on N orders" would only repeat the title's count.
-  const parts: string[] = item.family === 'needs-planning' ? [] : [_esc(fixClearsText(item, t))];
+  const parts: string[] = item.family === 'needs-planning' ? []
+    : [_esc(item.family === 'optimize-window' ? fixAffectsText(item, t) : fixClearsText(item, t))];
   const after = item.confidenceAfter;
   if (after != null && fixConfidenceChanged(item)) {
     const d = after - item.confidenceBefore;
     const delta = d < 0 ? ` <span class="am-fix-down">${_esc(`−${Math.abs(d)}`)}</span>` : '';
     parts.push(`<span class="am-fix-conf">${_esc(t('am.fix_conf', { before: item.confidenceBefore, after }))}</span>${delta}`);
   }
-  if (item.family === 'optimize-window' && item.headroomHours != null && item.headroomHours <= 0) {
-    parts.push(_esc(t('am.lev_no_headroom', { h: fmtNum(Math.abs(item.headroomHours)) })));
-  }
+  if (item.family === 'optimize-window') for (const p of _windowCapacityParts(item, t)) parts.push(_esc(p));
   if (ctx.inView != null) parts.push(_esc(t('am.lev_in_view', { n: ctx.inView })));
   if (ctx.remaining > 0) parts.push(`<span class="am-fix-left">${_esc(_plural(ctx.remaining, 'am.lev_remaining', { n: ctx.remaining }, t))}</span>`);
   return parts;
 }
 
-/** The row tooltip: free hours in an optimize window, and the setup-tracking-off note. */
+/** The row tooltip: the setup-tracking-off note (an optimize window's capacity state is on the row itself). */
 function _fixTip(item: LeverageItem, ctx: LevCtx, t: Translate): string {
   const tips: string[] = [];
-  if (item.family === 'optimize-window' && item.headroomHours != null && item.headroomHours > 0) {
-    tips.push(t('am.lev_headroom', { h: fmtNum(item.headroomHours) }));
-  }
   if (item.family === 'setup-pair' && !ctx.setupActive) tips.push(t('am.lev_setup_inactive'));
   return tips.join(' · ');
 }
