@@ -910,7 +910,7 @@ function _renderGanttChip(): void {
 }
 
 /** Header row 2: one sentence in mono counts over the profile's alerts (alerts, errors, warnings). */
-function _summaryHtml(s: PaintState, d: Derived | null): string {
+function _summaryHtml(s: PaintState): string {
   const line = summaryLine({
     hasPlant: !!s.plant, alerts: s.listed, profileId: s.m.profileId, profileName: s.m.profile.name, profile: s.m.profile, focus: null,
     linesSelected: Store.selectedLines.size,
@@ -1730,14 +1730,14 @@ function _paint(): void {
   if (!(s.plant && s.m.plant !== s.plant)) {
     const d = s.plant && s.empty === null ? _derive(s) : null;
     _d = d;
-    _setHtml('am-summary', _summaryHtml(s, d));
+    _setHtml('am-summary', _summaryHtml(s));
     _renderChips(s);
     _setHtml('am-banner', _bannerHtml(s));
     _setHtml('am-prompt', _promptHtml(s));
     _renderLeverage(s, d);
     _renderBody(s, d);
   } else {
-    _setHtml('am-summary', _summaryHtml(s, null));
+    _setHtml('am-summary', _summaryHtml(s));
   }
   OverflowMenu.reconcile();   // an open ⋯ menu whose trigger a repaint replaced closes (or follows its data-ovf-key)
 }
