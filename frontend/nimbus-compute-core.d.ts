@@ -309,7 +309,9 @@ declare global {
     MS_DAY: number;
     MS_HOUR: number;
     OVERLOAD_THRESHOLD: number;
+    OVERLOAD_TOLERANCE_H: number;
     WARN_THRESHOLD: number;
+    isOverloaded(scheduledH: number, effCapH: number): boolean;
     SHOW_NEAR_CAPACITY_ALERTS: boolean;
     DEFAULT_SHIFT: [number, number];
     WEEKEND_OFF: boolean;

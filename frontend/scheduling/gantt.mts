@@ -4063,7 +4063,11 @@ export const Hierarchy = {
       const u   = _utilDay[name]?.[_dayKey];
       const pct = (u && u.scheduled > 0) ? Math.round(u.pct! * 100) : null;
       const sev: UtilSevBucket = u
-        ? Utilization.sev(u.pct!, u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD)
+        ? Utilization.sev(
+            u.pct!,
+            u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD,
+            u.capacity > 0 ? globalThis.NimbusComputeCore!.OVERLOAD_TOLERANCE_H / u.capacity : 0,
+          )
         : 'ok';
       return { name, tasks, color, pct, sev, pinned: _pinnedLines.has(name) };
     });

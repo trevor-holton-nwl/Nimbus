@@ -42,9 +42,18 @@
   const MS_HOUR                    = 60 * 60 * 1000;
   const OVERLOAD_THRESHOLD         = 1.0;
   const WARN_THRESHOLD             = 0.8;
+  // Slack on the overload rule, in hours: 0.05 h = 3 min, the one-decimal resolution the alert message prints.
+  // Absorbs float drift in the per-day minutes/60 sums and a real sub-3-minute overrun, so a day that reads
+  // "24.0h vs 24.0h" is not flagged. The heatmap's red at >= 100% is deliberately unaffected.
+  const OVERLOAD_TOLERANCE_H       = 0.05;
   const SHOW_NEAR_CAPACITY_ALERTS  = false;
   const DEFAULT_SHIFT              = [7, 19];
   const WEEKEND_OFF                = true;
+
+  // The overload rule: scheduled hours beat effective capacity by more than the tolerance. Pure.
+  function isOverloaded(scheduledH, effCapH) {
+    return effCapH > 0 && scheduledH > effCapH * OVERLOAD_THRESHOLD + OVERLOAD_TOLERANCE_H;
+  }
 
   // ── Util helpers ────────────────────────────────────────────────────────────
 
@@ -1112,7 +1121,7 @@
       const cap = dailyCapacityHours(line, dateObj, calendars, plants, lineSettings, masterData, blocks, plantBlocks, _capIdx);
       const effCap = effectiveFromCapacity(line, cap, lineSettings);
 
-      if (effCap > 0 && hours > effCap * OVERLOAD_THRESHOLD) {
+      if (isOverloaded(hours, effCap)) {
         alerts.push({
           id:  `ovl-day-${line}-${day}`, sev: 'err', type: 'overload',
           msg: `${line} is overloaded on ${day}: ${hours.toFixed(1)}h scheduled vs ${effCap.toFixed(1)}h effective capacity (${cap.toFixed(1)}h total).`,
@@ -1734,7 +1743,8 @@
   return {
     // constants
     CONFIDENCE_WEIGHTS,
-    MS_DAY, MS_HOUR, OVERLOAD_THRESHOLD, WARN_THRESHOLD, SHOW_NEAR_CAPACITY_ALERTS, DEFAULT_SHIFT, WEEKEND_OFF,
+    MS_DAY, MS_HOUR, OVERLOAD_THRESHOLD, OVERLOAD_TOLERANCE_H, WARN_THRESHOLD, SHOW_NEAR_CAPACITY_ALERTS, DEFAULT_SHIFT, WEEKEND_OFF,
+    isOverloaded,
     // date/time helpers
     parseDate, dayKey, startOfDay, separationBucketKey, runHours, scheduleIntervals, setupIntervals, mergedOverlapHours, fmtDTReadable, toLocalSeconds, toLocalInput,
     // tool inventory (shared by the alert rule and the optimizer)

@@ -173,7 +173,7 @@ export const Config = {
     '#b8791a', '#2d5f8c', '#4f7a3c', '#8b4c7e', '#b14a3e',
     '#3c6e7a', '#7a5a2a', '#5e498b', '#a8493a', '#4a7a5e'
   ],
-  OVERLOAD_THRESHOLD: 1.0,                    // >100% → error, >80% → warn
+  OVERLOAD_THRESHOLD: 1.0,                    // >100% + 3 min tolerance → error, >80% → warn
   WARN_THRESHOLD:     0.8,
   SHOW_NEAR_CAPACITY_ALERTS: false,           // set true to re-enable near-capacity warnings
   LS_KEY:             'nimbus.state.v3',          // do NOT bump for shape changes — use SCHEMA_VERSION

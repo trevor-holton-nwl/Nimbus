@@ -857,6 +857,40 @@ test('worked example: the matrix, the overload alert and the briefing helper all
   assert.equal(Core.workingMinutesByDay(task, windowFor0818(open0818))['2026-10-15'] / 60, 14);
 });
 
+// Overload tolerance: exactly-full (or float-drifted, or sub-3-minute) days are not an alert.
+const fullDay = (runTimes) => runTimes.map((rt, i) => ({
+  id: 'f' + i, MACHINE: 'L', PLANT: 'P', RUN_TIME: rt, start_date: D(15, 8), end_date: D(15, 18),
+}));
+const dayScheduled = (tasks) => Core.computeUtilization({
+  tasks, lineSettings: { L: { plant: 'P' } }, calendars: { L: open0818 }, plants: {}, blocks: [], plantBlocks: [],
+  masterData: { lines: [{ machine: 'L', plant: 'P' }] }, startMs: +D(14), days: 3, lines: ['L'],
+}).matrix.L['2026-10-15'].scheduled;
+const overloadsOf = (tasks) => Core.computeAlerts(alertBase(tasks)).alerts.filter(a => a.type === 'overload');
+
+test('overload tolerance: float drift in the per-day sum (10 h of orders in a 10 h window) is not an alert', () => {
+  // The plain sum of these RUN_TIMEs is exactly 10, but the engine sums minutes/60 per task and lands a hair above 10.
+  const tasks = fullDay([5.82, 1.49, 2.69]);
+  const scheduled = dayScheduled(tasks);
+  assert.ok(scheduled > 10 && scheduled !== 10, 'engine sum drifts above 10 (' + scheduled + ')');
+  assert.ok(Math.abs(scheduled - 10) < 1e-9);
+  assert.deepEqual(overloadsOf(tasks), []);
+});
+
+test('overload tolerance: exactly full is not an alert; 10.04 h is inside the tolerance; 10.1 h alerts', () => {
+  assert.deepEqual(overloadsOf(fullDay([10])), []);
+  assert.deepEqual(overloadsOf(fullDay([10.04])), []);
+  const over = overloadsOf(fullDay([10.1]));
+  assert.equal(over.length, 1);
+  assert.match(over[0].msg, /10.1h scheduled/);
+});
+
+test('Core.isOverloaded: threshold plus the 0.05 h tolerance, never on zero capacity', () => {
+  assert.equal(Core.isOverloaded(10, 10), false);
+  assert.equal(Core.isOverloaded(10.04, 10), false);
+  assert.equal(Core.isOverloaded(10.06, 10), true);
+  assert.equal(Core.isOverloaded(1, 0), false);
+});
+
 test('overload rule no longer buckets a multi-day bar wholly on its start day', () => {
   // 10 h order Wed 17:00 -> Thu 13:00 on 08-18: 1 h of Wed window, 5 h of Thu window -> 1/6 and 5/6 of 10 h.
   const task = { id: 'm', MACHINE: 'L', PLANT: 'P', RUN_TIME: 12, start_date: D(14, 17), end_date: D(15, 13) };

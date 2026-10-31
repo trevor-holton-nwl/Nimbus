@@ -1417,9 +1417,11 @@ export const Utilization = {
 
   /** Severity bucket from a utilisation ratio.
    *  overloadAt defaults to OVERLOAD_THRESHOLD but callers should pass
-   *  effectiveCapacity/capacity so the buffer limit is respected. */
-  sev(pct: number, overloadAt: number = Config.OVERLOAD_THRESHOLD): 'err' | 'warn' | 'ok' {
-    if (pct > overloadAt)               return 'err';
+   *  effectiveCapacity/capacity so the buffer limit is respected. tolerance is a
+   *  RATIO slack on overloadAt; callers pass OVERLOAD_TOLERANCE_H / capacity so an
+   *  exactly-full day agrees with the overload alert rule. */
+  sev(pct: number, overloadAt: number = Config.OVERLOAD_THRESHOLD, tolerance: number = 0): 'err' | 'warn' | 'ok' {
+    if (pct > overloadAt + tolerance)   return 'err';
     if (pct > Config.WARN_THRESHOLD)    return 'warn';
     return 'ok';
   },
