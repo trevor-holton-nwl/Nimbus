@@ -117,9 +117,9 @@ h1, h2, h3, h4 {
      on --bg / --bg-elev. Defaults: capacity amber, conflicts violet, calendar teal, setup magenta, planning orange,
      late slate, other stone. */
   --pal-amber: #e0a800; --pal-amber-fg: #0c1c30;    --pal-amber-ring: var(--pal-amber-fg);
-  --pal-orange: #e8602a;--pal-orange-fg: #0c1c30;   --pal-orange-ring: var(--pal-orange-fg);
-  --pal-magenta: #c8359a;--pal-magenta-fg: #ffffff;  --pal-magenta-ring: var(--warn-vivid);
-  --pal-violet: #8750f0;--pal-violet-fg: #ffffff;   --pal-violet-ring: var(--warn-vivid);
+  --pal-orange: #e8602a; --pal-orange-fg: #0c1c30;   --pal-orange-ring: var(--pal-orange-fg);
+  --pal-magenta: #c8359a; --pal-magenta-fg: #ffffff;  --pal-magenta-ring: var(--warn-vivid);
+  --pal-violet: #8750f0; --pal-violet-fg: #ffffff;   --pal-violet-ring: var(--warn-vivid);
   --pal-teal: #14b8a6;  --pal-teal-fg: #0c1c30;     --pal-teal-ring: var(--pal-teal-fg);
   --pal-sky: #30b0ec;   --pal-sky-fg: #0c1c30;      --pal-sky-ring: var(--pal-sky-fg);
   --pal-slate: #334155; --pal-slate-fg: #ffffff;    --pal-slate-ring: var(--warn-vivid);
@@ -5897,9 +5897,9 @@ body.dark {
      The whole set is restated here, --bar-pm-<category> included, because var() inside a custom property resolves
      where it is declared: a body.dark override of --pal-* alone would never reach a --bar-pm-* declared on :root. */
   --pal-amber: #e0a800; --pal-amber-fg: #0c1c30;    --pal-amber-ring: var(--pal-amber-fg);
-  --pal-orange: #f5874f;--pal-orange-fg: #0c1c30;   --pal-orange-ring: var(--pal-orange-fg);
-  --pal-magenta: #c8359a;--pal-magenta-fg: #ffffff;  --pal-magenta-ring: var(--warn-vivid);
-  --pal-violet: #8750f0;--pal-violet-fg: #ffffff;   --pal-violet-ring: var(--warn-vivid);
+  --pal-orange: #f5874f; --pal-orange-fg: #0c1c30;   --pal-orange-ring: var(--pal-orange-fg);
+  --pal-magenta: #c8359a; --pal-magenta-fg: #ffffff;  --pal-magenta-ring: var(--warn-vivid);
+  --pal-violet: #8750f0; --pal-violet-fg: #ffffff;   --pal-violet-ring: var(--warn-vivid);
   --pal-teal: #14b8a6;  --pal-teal-fg: #0c1c30;     --pal-teal-ring: var(--pal-teal-fg);
   --pal-sky: #7dd3fc;   --pal-sky-fg: #0c1c30;      --pal-sky-ring: var(--pal-sky-fg);
   --pal-slate: #cbd5e1; --pal-slate-fg: #0c1c30;    --pal-slate-ring: var(--pal-slate-fg);

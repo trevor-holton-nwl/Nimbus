@@ -122,7 +122,7 @@ export function matrixModel(alerts: ReadonlyArray<NimbusAlert>, lens: MonitorLen
   } else {
     colKeys = bucketCols;
     colKeyOf = bucket;
-    rowKeyOf = lens === 'group' ? (a => categoryOf(a.type)) : (a => a.line || NONE_KEY);
+    rowKeyOf = lens === 'group' ? (a => categoryOf(a.type)) : (a => (a.line && !a.line.startsWith(GROUP_ROW_PREFIX) ? a.line : NONE_KEY));   // a machine id shaped like a group row key ("wc:") would collide with it: it files under no-machine
   }
   const colIdx = new Map<string, number>();
   colKeys.forEach((k, i) => colIdx.set(k, i));

@@ -209,6 +209,14 @@ test('matrixHtml: day and group lenses render rows without roll-ups; every dynam
   assert.match(html, /&lt;img src=x onerror=1&gt;/);
 });
 
+test('machine lens: a machine id shaped like a group row key files under no-machine', () => {
+  const m = matrixModel([al('wc:A', 'warn', 'late', at(0)), al('M1', 'warn', 'late', at(0))], 'machine', ctx());
+  const rowKeys = m.groups.flatMap(g => [...g.rows, ...g.quiet]).map(r => r.head.key);
+  assert.ok(!rowKeys.some(k => k.startsWith(GROUP_ROW_PREFIX)), 'no machine row carries the group prefix');
+  assert.ok(rowKeys.includes('none'), 'the stray id lands on the no-machine row');
+  assert.equal(m.total, 2);
+});
+
 test('empty input still builds a model and HTML', () => {
   const m = matrixModel([], 'machine', ctx());
   assert.equal(m.total, 0);

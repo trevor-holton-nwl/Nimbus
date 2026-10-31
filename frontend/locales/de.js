@@ -2818,7 +2818,7 @@ window.__NIMBUS_LOCALES.de = {
   'legend.pm_setup_d': 'Dieser Auftrag hat eine Rüstwarnung, die Ihr aktives Profil verfolgt.',
   'legend.pm_planning_t': 'Planungswarnung',
   'legend.pm_planning_d': 'Aufträge, die auf einen Platz warten, haben im Gantt keinen Balken; diese Farbe kennzeichnet sie im Warnungsmonitor.',
-  'legend.pm_late_t': 'Verspätet',
+  'legend.pm_late_t': 'Verspätungswarnung',
   'legend.pm_late_d': 'Dieser Auftrag wird nach seinem Fälligkeitstermin fertig.',
   'legend.pm_exceptions_t': 'Sonstige Warnung',
   'legend.pm_exceptions_d': 'Dieser Auftrag hat eine andere Warnung, die Ihr aktives Profil verfolgt.',

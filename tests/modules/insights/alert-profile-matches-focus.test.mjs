@@ -104,3 +104,11 @@ test('acknowledged: an order whose every matched alert is acked is not outlined 
   M.recompute();
   assert.deepEqual([...M.current().focusIds], ['t1']);
 });
+
+test('acknowledged: a mixed order (one alert acked, one live) is still outlined', () => {
+  Store._state.alerts = [...Store._state.alerts, alert('a4', 'overload', 'warn', 't1')];
+  acks.set('a1', { alertId: 'a1' });
+  M.recompute();
+  M.setFocusTaskIds(new Set(['t1']));
+  assert.deepEqual([...M.current().focusIds], ['t1'], 'a4 is unacked, so t1 keeps its outline');
+});

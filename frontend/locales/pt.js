@@ -2778,7 +2778,7 @@ window.__NIMBUS_LOCALES.pt = {
   'legend.pm_setup_d': 'Este pedido tem um alerta de troca que o seu perfil ativo está acompanhando.',
   'legend.pm_planning_t': 'Alerta de planejamento',
   'legend.pm_planning_d': 'Ordens que aguardam uma janela não desenham barra no Gantt; esta cor as marca no Monitor de alertas.',
-  'legend.pm_late_t': 'Atrasado',
+  'legend.pm_late_t': 'Alerta de atraso',
   'legend.pm_late_d': 'Este pedido termina depois da data de vencimento.',
   'legend.pm_exceptions_t': 'Outro alerta',
   'legend.pm_exceptions_d': 'Este pedido tem outro tipo de alerta que o seu perfil ativo está acompanhando.',

@@ -3021,7 +3021,7 @@ window.__NIMBUS_LOCALES.en = {
   'legend.pm_setup_d': 'This order has a setup alert your active profile is tracking.',
   'legend.pm_planning_t': 'Planning alert',
   'legend.pm_planning_d': 'Orders waiting for a slot draw no bar on the Gantt; this colour marks them in the Alert Monitor.',
-  'legend.pm_late_t': 'Late',
+  'legend.pm_late_t': 'Late alert',
   'legend.pm_late_d': 'This order finishes after its due date.',
   'legend.pm_exceptions_t': 'Other alert',
   'legend.pm_exceptions_d': 'This order has another kind of alert your active profile is tracking.',

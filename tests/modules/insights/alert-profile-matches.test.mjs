@@ -181,3 +181,18 @@ test('a failed profile fetch is not retried on every recompute: 30 s backoff, re
   assert.equal(listCalls, before + 2, 'retried after the plant change');
   Store.emit({ type: 'plant:selected', plant: 'P1' });   // leave a clean slate for later tests
 });
+
+test('categoryByTask ranks late ahead of exceptions at equal severity (pinned)', () => {
+  profiles = [prof('p1', ['late', 'no_anchor'])];
+  Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
+  Store._state.alerts = [
+    alert('a1', 'no_anchor', 'warn', 't1'),
+    alert('a2', 'late', 'warn', 't1'),
+    alert('a3', 'no_anchor', 'err', 't2'),
+    alert('a4', 'late', 'err', 't2'),
+  ];
+  M.recompute();
+  const c = M.current();
+  assert.equal(c.categoryByTask.get('t1'), 'late', 'warn tie: late beats exceptions');
+  assert.equal(c.categoryByTask.get('t2'), 'late', 'err tie: late beats exceptions');
+});

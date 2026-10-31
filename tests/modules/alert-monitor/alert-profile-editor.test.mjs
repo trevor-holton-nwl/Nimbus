@@ -426,18 +426,21 @@ test('read-only: switches, swatches, selects and inputs are disabled and the pal
   } finally { OverflowMenu.open = priorOpen; }
 });
 
-test('the live counts are one pass per draft change and never on a Name keystroke', () => {
+test('the live counts are one pass per draft change and never on a Name keystroke', async () => {
   let passes = 0;
   const priorCounts = editorSeams.categoryCounts;
   editorSeams.categoryCounts = (...a) => { passes++; return priorCounts(...a); };
   try {
     AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+    await new Promise(r => setTimeout(r, 20));   // let open()'s async profile load settle its own re-render
     const afterOpen = passes;
     assert.ok(afterOpen >= 1);
     for (const v of ['A', 'Ab', 'Abc']) fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: v }));
     assert.equal(passes, afterOpen, 'typing a name recounts nothing');
-    fire('ape-body', 'input', tgt({ apeField: 'dayTo', apeRule: '0' }, { value: '3' }));
-    assert.equal(passes, afterOpen + 1, 'a day edit recounts once');
+    for (const v of ['1', '2', '3']) fire('ape-body', 'input', tgt({ apeField: 'dayTo', apeRule: '0' }, { value: v }));
+    assert.equal(passes, afterOpen, 'number keystrokes are debounced (120 ms)');
+    await new Promise(r => setTimeout(r, 200));
+    assert.equal(passes, afterOpen + 1, 'a burst of day edits recounts once');
     fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: '0' }, { checked: true }));
     assert.equal(passes, afterOpen + 2);
   } finally { editorSeams.categoryCounts = priorCounts; }

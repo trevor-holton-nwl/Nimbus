@@ -559,3 +559,11 @@ D11 (the plant-wide red outline on every alerted Gantt bar) is reversed. The amb
 ## Rev 4 (2026-10-30): Matrix | Inbox
 
 The page became two toggleable views of one filtered set, Matrix (default) and Inbox, with a Machine / Day / Group lens on the matrix. **D10 is reversed for display:** Top fixes are still scored plant-wide, but while a filter is on only the fixes that touch the alerts in view are listed (with an "N in view" clause and a scoped empty state). The Overview band is retired (its charts became the matrix row bars and the Inbox facets), plant confidence left the page, the Group-by select and the Priority / Date header switch are gone, and "Show on Gantt" outlines orders on the Gantt instead of focusing the list. The filter is session-only; `alertMonitorView['*'] = {view, lens}` persists the two choices. See `frontend/alert-monitor/CLAUDE.md`.
+
+### Rev 4 summary (2026-10-30, W7): what this section supersedes
+
+- **D10 reversed:** Top fixes are scored plant-wide but listed only for the view (the W6b rule above).
+- **D11 reversed:** the outline is focus-only (see the W4 note above); fills are the only ambient layer.
+- **Matrix | Inbox replaces the group cards;** the Overview band is retired (rev 3 and its follow-up are history).
+- **The profile editor has two tiers:** seven category rows (switch, name, "Fine-tuned" badge, count, colour swatch) and a collapsed Fine-tune section (day presets, Errors only, the group's types, late hours). Profiles store a per-category `categories` map (migration 2026-10-30-2).
+- Full design and decisions D1-D9: `docs/superpowers/specs/2026-10-30-alert-profiles-revamp-design.md`; browser checklist: `docs/superpowers/specs/2026-10-30-alert-profiles-revamp-qa.md`.

@@ -607,6 +607,13 @@ function _refreshLive(): void {
   if (m) m.textContent = t('ape.live_matches', { n: total });
 }
 
+let _liveTimer: ReturnType<typeof setTimeout> | null = null;
+/** Number inputs fire per keystroke: coalesce the recount into one pass 120 ms after the last one. */
+function _refreshLiveSoon(): void {
+  if (_liveTimer) clearTimeout(_liveTimer);
+  _liveTimer = setTimeout(() => { _liveTimer = null; _refreshLive(); }, 120);
+}
+
 // ---- Actions --------------------------------------------------------------------------------
 
 function _revalidate(s: EditorState): boolean {
@@ -879,9 +886,9 @@ function _onField(e: Event, kind: 'input' | 'change'): void {
   switch (ds.apeField) {
     // Name never recounts: only the saved/unsaved comparison and (when shown) the validation message depend on it.
     case 'name': s.draft.name = el.value; _afterEdit(s); break;
-    case 'dayFrom': { const r = _rule(s, ds); if (r) { r.dayFrom = _parseNum(el.value); _afterEdit(s); _refreshLive(); } break; }
-    case 'dayTo': { const r = _rule(s, ds); if (r) { r.dayTo = _parseNum(el.value); _afterEdit(s); _refreshLive(); } break; }
-    case 'minLateHours': { const r = _rule(s, ds); if (r) { r.minLateHours = _parseNum(el.value); _afterEdit(s); _refreshLive(); } break; }
+    case 'dayFrom': { const r = _rule(s, ds); if (r) { r.dayFrom = _parseNum(el.value); _afterEdit(s); _refreshLiveSoon(); } break; }
+    case 'dayTo': { const r = _rule(s, ds); if (r) { r.dayTo = _parseNum(el.value); _afterEdit(s); _refreshLiveSoon(); } break; }
+    case 'minLateHours': { const r = _rule(s, ds); if (r) { r.minLateHours = _parseNum(el.value); _afterEdit(s); _refreshLiveSoon(); } break; }
     case 'dayPreset': {
       if (kind !== 'change') break;
       const r = _rule(s, ds);
@@ -936,6 +943,7 @@ export const AlertProfileEditor = {
   open(opts: { plant: string; profileId?: string; fromPicker?: boolean }): void {
     const plant = opts.plant;
     if (!plant) return;
+    if (_liveTimer) { clearTimeout(_liveTimer); _liveTimer = null; }
     const profiles = AlertProfileClient.cached(plant) ?? [];
     const found = opts.profileId ? profiles.find(p => p.id === opts.profileId) : undefined;
     const draft = found ? draftFromProfile(found) : blankDraft(plant);
@@ -965,6 +973,7 @@ export const AlertProfileEditor = {
   close(): void {
     if (!_s) return;
     _s = null;
+    if (_liveTimer) { clearTimeout(_liveTimer); _liveTimer = null; }
     OverflowMenu.closeAll();
     Modal.close('modal-alert-profile');
   },

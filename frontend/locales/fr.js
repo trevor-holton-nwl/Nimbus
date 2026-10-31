@@ -2779,7 +2779,7 @@ window.__NIMBUS_LOCALES.fr = {
   'legend.pm_setup_d': 'Cette commande a une alerte de changement suivie par votre profil actif.',
   'legend.pm_planning_t': 'Alerte de planification',
   'legend.pm_planning_d': 'Les commandes en attente d’un créneau n’ont pas de barre sur le Gantt ; cette couleur les repère dans le Moniteur d’alertes.',
-  'legend.pm_late_t': 'En retard',
+  'legend.pm_late_t': 'Alerte de retard',
   'legend.pm_late_d': 'Cette commande se termine après son échéance.',
   'legend.pm_exceptions_t': 'Autre alerte',
   'legend.pm_exceptions_d': 'Cette commande a un autre type d’alerte suivi par votre profil actif.',

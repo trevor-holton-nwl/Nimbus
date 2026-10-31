@@ -2779,7 +2779,7 @@ window.__NIMBUS_LOCALES.es = {
   'legend.pm_setup_d': 'Este pedido tiene una alerta de cambio que su perfil activo está siguiendo.',
   'legend.pm_planning_t': 'Alerta de planificación',
   'legend.pm_planning_d': 'Los pedidos que esperan un hueco no dibujan barra en el Gantt; este color los marca en el Monitor de alertas.',
-  'legend.pm_late_t': 'Retraso',
+  'legend.pm_late_t': 'Alerta de retraso',
   'legend.pm_late_d': 'Este pedido termina después de su fecha de vencimiento.',
   'legend.pm_exceptions_t': 'Otra alerta',
   'legend.pm_exceptions_d': 'Este pedido tiene otro tipo de alerta que su perfil activo está siguiendo.',
