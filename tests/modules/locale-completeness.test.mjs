@@ -851,7 +851,7 @@ const ALERT_MONITOR_KEYS = [
   'am.group_unassigned', 'am.table_unavailable', 'am.set_default', 'am.edit_profile', 'am.view_profile',
   'am.page_menu', 'am.summary_window', 'am.summary_profile', 'am.summary_all', 'am.summary_window_one',
   'am.summary_profile_one', 'am.summary_all_one', 'am.summary_errors', 'am.summary_errors_one', 'am.summary_warnings',
-  'am.summary_warnings_one', 'am.summary_orders', 'am.summary_orders_one', 'am.sort_by',
+  'am.summary_warnings_one', 'am.sort_by',
   'am.fixes_title', 'am.fixes_hint', 'am.fixes_admin_divider', 'am.fix_clears', 'am.fix_clears_one',
   'am.fix_clears_one_alert', 'am.fix_clears_one_order', 'am.fix_conf', 'am.fix_minutes', 'am.fix_replay',
   'am.fixes_more', 'am.detail_machine_day', 'am.detail_orders_on_day', 'am.day_details', 'am.open_in_orders', 'am.fixes_collapse', 'am.fixes_expand', 'am.more_actions', 'am.rank_n', 'am.group_fix_n', 'am.group_fix_n_one', 'am.lev_remaining_one', 'am.group_fix_confirm', 'am.group_fix_done',
@@ -886,7 +886,7 @@ const ALERT_MONITOR_KEYS = [
   'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d', 'legend.pm_planning_t',
   'legend.pm_planning_d', 'legend.pm_late_t', 'legend.pm_late_d', 'legend.pm_exceptions_t',
   'legend.pm_exceptions_d', 'legend.pm_ring_d',
-  'ui.gantt_outlined', 'ui.gantt_outlined_one', 'ui.gantt_outline_clear', 'ui.gantt_outline_clear_tip', 'am.slot', 'am.view_label', 'am.view_inbox', 'am.view_matrix', 'am.lens_label', 'am.lens_machine', 'am.lens_day', 'am.lens_group', 'am.search_ph', 'am.in_view', 'am.open_in_inbox', 'am.facet_where', 'am.facet_when', 'am.facet_what', 'am.show_on_gantt', 'am.gantt_outline', 'am.gantt_outline_one', 'am.gantt_outline_clear', 'am.lev_none_in_view', 'am.lev_in_view', 'am.mx_machines', 'am.mx_machines_one', 'am.bucket_overdue', 'am.bucket_later', 'am.bucket_none', 'am.filter_clear', 'am.filter_remove', 'am.filter_none', 'am.lines_selected', 'am.lines_selected_one',
+  'ui.gantt_outlined', 'ui.gantt_outlined_one', 'ui.gantt_outline_clear', 'ui.gantt_outline_clear_tip', 'am.slot', 'am.view_label', 'am.view_inbox', 'am.view_matrix', 'am.lens_label', 'am.lens_machine', 'am.lens_day', 'am.lens_group', 'am.search_ph', 'am.in_view', 'am.open_in_inbox', 'am.facet_where', 'am.facet_when', 'am.facet_what', 'am.show_on_gantt', 'am.gantt_outline', 'am.gantt_outline_one', 'am.gantt_outline_clear', 'am.lev_none_in_view', 'am.lev_in_view', 'am.mx_machines', 'am.mx_machines_one', 'am.bucket_overdue', 'am.bucket_later', 'am.bucket_none', 'am.filter_clear', 'am.profile_label', 'am.search_label', 'am.filter_lead', 'am.filter_remove', 'am.filter_none', 'am.lines_selected', 'am.lines_selected_one',
   'am.slot_title', 'am.slot_day', 'am.slot_pair', 'am.slot_hint', 'am.slot_option', 'am.slot_option_short',
   'am.slot_option_closed', 'am.slot_option_unknown', 'am.slot_none', 'am.slot_suggested', 'am.slot_place',
   'am.slot_confirm_title', 'am.slot_confirm_short', 'am.slot_confirm_closed', 'am.slot_confirm_place',
@@ -1004,7 +1004,7 @@ test('Alert Monitor: every firing alert type has a short alert.tag.<type> in all
 
 test('Alert Monitor W6a: the Matrix / row / summary model keys exist in all five locales with the English placeholders', () => {
   const keys = [
-    'am.summary_machines', 'am.summary_showing', 'am.detail_alert', 'am.detail_material', 'am.detail_due', 'am.detail_finish', 'am.detail_firming',
+    'am.detail_alert', 'am.detail_material', 'am.detail_due', 'am.detail_finish', 'am.detail_firming',
     'am.detail_machine_day', 'am.detail_orders_on_day', 'am.day_details', 'am.open_in_orders', 'am.fixes_collapse', 'am.fixes_expand',
     'am.ungrouped', 'am.mx_corner_machine', 'am.mx_corner_day', 'am.mx_corner_group', 'am.mx_cell_aria', 'am.mx_cell_aria_one',
     'am.quiet_show', 'am.quiet_show_one', 'am.quiet_hide', 'am.quiet_hide_one',

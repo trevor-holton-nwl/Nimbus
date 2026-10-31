@@ -152,43 +152,56 @@ function _setText(id: string, text: string): void {
    shown / hidden; only `#am-body` and the side list are re-rendered, so typing in the search box never loses focus.
    ------------------------------------------------------------------------- */
 function _shellHtml(): string {
-  const seg = (attr: string, id: string, labelKey: string, items: Array<[string, string]>): string =>
+  const seg = (attr: string, id: string, labelKey: string, items: Array<[string, string]>, btnClass = ''): string =>
     `<div class="am-seg" id="${id}" role="group" aria-label="${esc(t(labelKey))}">`
-    + items.map(([v, key]) => `<button type="button" class="seg-btn" data-am-${attr}="${v}" aria-pressed="false">${esc(t(key))}</button>`).join('')
+    + items.map(([v, key]) => `<button type="button" class="seg-btn${btnClass ? ' ' + btnClass : ''}" data-am-${attr}="${v}" aria-pressed="false">${esc(t(key))}</button>`).join('')
     + `</div>`;
   return `
 <div class="am-head" id="am-head">
   <div class="am-head-row">
     <h2 class="am-title">${esc(t('tab.alerts'))}</h2>
     <span class="spacer"></span>
-    <div class="am-profile-wrap">
-      <div class="us-combo" id="am-profile-combo">
-        <input type="text" id="am-profile-input" class="us-combo-input" role="combobox" autocomplete="off"
-               aria-autocomplete="list" aria-expanded="false" aria-controls="am-profile-dropdown"
-               aria-label="${esc(t('am.view_as'))}" title="${esc(t('am.view_as'))}" placeholder="${esc(t('am.profile_ph'))}">
-        <div class="us-combo-dropdown" id="am-profile-dropdown" role="listbox" hidden></div>
+    <div class="am-profile-blk">
+      <span class="am-eyebrow">${esc(t('am.profile_label'))}</span>
+      <div class="am-profile-wrap">
+        <div class="us-combo" id="am-profile-combo">
+          <input type="text" id="am-profile-input" class="us-combo-input" role="combobox" autocomplete="off"
+                 aria-autocomplete="list" aria-expanded="false" aria-controls="am-profile-dropdown"
+                 aria-label="${esc(t('am.view_as'))}" title="${esc(t('am.view_as'))}" placeholder="${esc(t('am.profile_ph'))}">
+          <div class="us-combo-dropdown" id="am-profile-dropdown" role="listbox" hidden></div>
+        </div>
       </div>
+      <span class="am-badge-default" id="am-is-default" hidden>${esc(t('am.is_default'))}</span>
+      <button type="button" class="btn sm btn-ghost" id="am-make-default" data-am-action="make-default" hidden>${esc(t('am.set_default'))}</button>
+      <button type="button" class="btn sm btn-ghost" id="am-edit" data-am-action="edit-profile" hidden>${esc(t('am.edit_profile'))}</button>
+      <button type="button" class="icon-btn" id="am-page-menu" data-am-action="page-menu" data-ovf-key="page"
+              aria-label="${esc(t('am.page_menu'))}" title="${esc(t('am.page_menu'))}" aria-haspopup="menu" aria-expanded="false">⋯</button>
     </div>
-    <button type="button" class="btn btn-ghost" id="am-edit" data-am-action="edit-profile" hidden>${esc(t('am.edit_profile'))}</button>
-    <span class="am-default-note" id="am-is-default" hidden>${esc(t('am.is_default'))}</span>
-    <button type="button" class="btn btn-ghost" id="am-make-default" data-am-action="make-default" hidden>${esc(t('am.set_default'))}</button>
-    <button type="button" class="icon-btn" id="am-page-menu" data-am-action="page-menu" data-ovf-key="page"
-            aria-label="${esc(t('am.page_menu'))}" title="${esc(t('am.page_menu'))}" aria-haspopup="menu" aria-expanded="false">⋯</button>
   </div>
   <div class="am-head-row am-sum-row">
     <div class="am-summary" id="am-summary"></div>
     <div class="am-gantt-chip" id="am-gantt-chip" hidden></div>
   </div>
   <div class="am-head-row am-ctl-row">
-    ${seg('set-view', 'am-view-seg', 'am.view_label', [['inbox', 'am.view_inbox'], ['matrix', 'am.view_matrix']])}
+    <div class="am-field">
+      <span class="am-eyebrow">${esc(t('am.view_label'))}</span>
+      ${seg('set-view', 'am-view-seg', 'am.view_label', [['inbox', 'am.view_inbox'], ['matrix', 'am.view_matrix']])}
+    </div>
+    <span class="am-vsep"></span>
     <span class="am-lens-wrap" id="am-lens-wrap">
-      <span class="am-ctl-label" id="am-lens-label">${esc(t('am.lens_label'))}</span>
-      ${seg('set-lens', 'am-lens-seg', 'am.lens_label', [['machine', 'am.lens_machine'], ['day', 'am.lens_day'], ['group', 'am.lens_group']])}
+      <div class="am-field">
+        <span class="am-eyebrow">${esc(t('am.lens_label'))}</span>
+        ${seg('set-lens', 'am-lens-seg', 'am.lens_label', [['machine', 'am.lens_machine'], ['day', 'am.lens_day'], ['group', 'am.lens_group']], 'am-seg-outline')}
+      </div>
+      <span class="am-vsep"></span>
     </span>
-    <input type="search" class="input am-search" id="am-search" data-am-search autocomplete="off"
-           placeholder="${esc(t('am.search_ph'))}" aria-label="${esc(t('am.search_ph'))}">
-    <div class="am-chips" id="am-chips" hidden></div>
+    <div class="am-field">
+      <span class="am-eyebrow">${esc(t('am.search_label'))}</span>
+      <input type="search" class="input am-search" id="am-search" data-am-search autocomplete="off"
+             placeholder="${esc(t('am.search_ph'))}" aria-label="${esc(t('am.search_ph'))}">
+    </div>
   </div>
+  <div class="am-filter-strip" id="am-chips" hidden></div>
 </div>
 <div class="am-scroll" id="am-scroll">
   <div id="am-banner"></div>
@@ -879,9 +892,9 @@ function _renderChips(s: PaintState): void {
     wc: k => (k === UNGROUPED_KEY ? t('am.ungrouped') : k), day, category: c => t(`ape.cat_${c}`),
   });
   if (!s.plant || !chips.length) { _setHtml('am-chips', ''); el.hidden = true; return; }
-  _setHtml('am-chips', chips.map(c => `<span class="am-chip"><span class="am-chip-lbl">${esc(c.label)}</span>`
+  _setHtml('am-chips', `<span class="am-eyebrow am-filt-lead">${esc(t('am.filter_lead'))}</span>` + chips.map(c => `<span class="am-chip"><span class="am-chip-lbl">${esc(c.label)}</span>`
     + `<button type="button" class="am-chip-x" data-am-chip="${esc(c.dim)}:${esc(c.key)}" aria-label="${esc(t('am.filter_remove', { name: c.label }))}">✕</button></span>`).join('')
-    + `<button type="button" class="btn sm btn-ghost" data-am-action="clear-filter">${esc(t('am.filter_clear'))}</button>`);
+    + `<button type="button" class="btn sm am-filt-clear" data-am-action="clear-filter">${esc(t('am.filter_clear'))}</button>`);
   el.hidden = false;
 }
 
@@ -896,14 +909,10 @@ function _renderGanttChip(): void {
   el.hidden = false;
 }
 
-/** Header row 2: one sentence in mono counts over the profile's alerts, "showing V" while a filter is on. */
+/** Header row 2: one sentence in mono counts over the profile's alerts (alerts, errors, warnings). */
 function _summaryHtml(s: PaintState, d: Derived | null): string {
-  const noisy = new Set<string>();
-  for (const a of s.listed) noisy.add(a.line || '');
-  noisy.delete('');
   const line = summaryLine({
     hasPlant: !!s.plant, alerts: s.listed, profileId: s.m.profileId, profileName: s.m.profile.name, profile: s.m.profile, focus: null,
-    machinesNoisy: noisy.size, machinesTotal: d ? d.ctx.machines.length : 0, showing: d?.active ? d.filtered.length : null,
     linesSelected: Store.selectedLines.size,
   }, t);
   return `<span>${esc(line.text)}</span>`;

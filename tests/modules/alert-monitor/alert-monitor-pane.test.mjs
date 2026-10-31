@@ -64,7 +64,6 @@ beforeEach(() => {
     'am.summary_window': '{{n}} alerts in D{{from}}–{{to}} match {{name}}', 'am.summary_profile': '{{n}} alerts match {{name}}',
     'am.summary_all': '{{n}} alerts at this plant', 'am.summary_all_one': '1 alert at this plant', 'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
     'am.summary_warnings': '{{w}} warnings', 'am.summary_warnings_one': '1 warning',
-    'am.summary_orders': '{{o}} orders affected', 'am.summary_orders_one': '1 order affected',
     'am.edit_profile': 'Edit', 'am.view_profile': 'View rules',
   } };
   calls.session = []; calls.prefs = [];
@@ -138,6 +137,11 @@ test('the shell renders an h2 title, no KPI tiles, no category legend and no Man
   for (const l of ['machine', 'day', 'group']) assert.match(shell, new RegExp(`data-am-set-lens="${l}"[^>]*>am\\.lens_${l}<`));
   assert.match(shell, /id="am-search" data-am-search/);
   assert.match(shell, /id="am-chips"[^>]* hidden/);
+  assert.match(shell, /class="am-profile-blk"/);
+  assert.match(shell, /am\.profile_label/);
+  assert.match(shell, /am-filter-strip" id="am-chips" hidden/);
+  for (const l of ['machine', 'day', 'group']) assert.match(shell, new RegExp(`class="seg-btn am-seg-outline" data-am-set-lens="${l}"`));
+  for (const v of ['inbox', 'matrix']) assert.doesNotMatch(shell, new RegExp(`class="seg-btn[^"]*am-seg-outline[^"]*" data-am-set-view="${v}"`));
   assert.match(shell, /id="am-body"/);
 });
 

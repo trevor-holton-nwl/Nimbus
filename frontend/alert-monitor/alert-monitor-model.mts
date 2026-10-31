@@ -45,11 +45,6 @@ export interface SummaryInput {
   profile: AlertProfile | null | undefined;
   /** A leverage card's "Show alerts" is active: its chip text replaces the first clause. */
   focus: { title: string; outside: number } | null;
-  /** Machines carrying at least one alert in the list, and the plant's machine count; both set = "M of N machines". */
-  machinesNoisy?: number;
-  machinesTotal?: number;
-  /** The filtered count; set only while a filter is active ("showing V"). */
-  showing?: number | null;
   /** Lines picked in the global machine filter (read-only clause "N lines selected"); absent or 0 = none. */
   linesSelected?: number;
 }
@@ -103,10 +98,8 @@ const _plural = (n: number, key: string, vars: Record<string, string | number>, 
 export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
   if (!input.hasPlant) return { text: t('am.empty_no_plant') };
   let errors = 0, warnings = 0;
-  const orders = new Set<string>();
   for (const a of input.alerts) {
     if (a.sev === 'err') errors++; else warnings++;
-    for (const id of alertOrderIds(a)) orders.add(id);   // an overlap affects both orders; a tool conflict every holder
   }
   const n = input.alerts.length;
   let lead: string;
@@ -125,11 +118,6 @@ export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
   const parts = [lead];
   if (errors > 0) parts.push(_plural(errors, 'am.summary_errors', { e: errors }, t));
   if (warnings > 0) parts.push(_plural(warnings, 'am.summary_warnings', { w: warnings }, t));
-  if (orders.size > 0) parts.push(_plural(orders.size, 'am.summary_orders', { o: orders.size }, t));
-  if (typeof input.machinesNoisy === 'number' && typeof input.machinesTotal === 'number' && input.machinesTotal > 0) {
-    parts.push(t('am.summary_machines', { m: input.machinesNoisy, total: input.machinesTotal }));
-  }
-  if (typeof input.showing === 'number') parts.push(t('am.summary_showing', { v: input.showing }));
   if (typeof input.linesSelected === 'number' && input.linesSelected > 0) parts.push(t(input.linesSelected === 1 ? 'am.lines_selected_one' : 'am.lines_selected', { n: input.linesSelected }));
   return { text: parts.join(' · ') };
 }

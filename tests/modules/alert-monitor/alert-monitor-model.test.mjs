@@ -49,7 +49,6 @@ const SUM = {
   'am.summary_all_one': '1 alert at this plant',
   'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
   'am.summary_warnings': '{{w}} warnings', 'am.summary_warnings_one': '1 warning',
-  'am.summary_orders': '{{o}} orders affected', 'am.summary_orders_one': '1 order affected',
   'am.focus_chip': 'Showing {{n}} alerts for: {{title}}',
   'am.focus_chip_outside': 'Showing {{n}} alerts for: {{title}} ({{k}} outside your profile)',
   'am.empty_no_plant': 'Select a plant',
@@ -63,7 +62,7 @@ const sumIn = (o = {}) => ({
 
 test('summaryLine: the lead is the window, profile, all-alerts or focus variant', () => {
   const alerts = [al('a', 'err', '1')];
-  assert.equal(summaryLine(sumIn({ alerts }), ts).text, '1 alert in D8–30 matches Overlaps · 1 error · 1 order affected');
+  assert.equal(summaryLine(sumIn({ alerts }), ts).text, '1 alert in D8–30 matches Overlaps · 1 error');
   assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: 8, dayTo: null })]) }), ts).text, /^1 alert matches Overlaps · /);
   assert.match(summaryLine(sumIn({ alerts, profileId: '__all__', profile: ALL_ALERTS_PROFILE }), ts).text, /^1 alert at this plant · /);
   assert.match(summaryLine(sumIn({ alerts, focus: { title: 'Setup pair', outside: 0 } }), ts).text, /^Showing 1 alerts for: Setup pair · /);
@@ -76,7 +75,7 @@ test('summaryLine: zero-valued clauses are omitted and _one forms apply at exact
   const warnOnly = summaryLine(sumIn({ alerts: [al('a', 'warn', undefined)] }), ts).text;
   assert.equal(warnOnly, '1 alert in D8–30 matches Overlaps · 1 warning');
   const many = summaryLine(sumIn({ alerts: [al('a', 'err', '1', '2'), al('b', 'err', '3'), al('c', 'warn', '1')] }), ts).text;
-  assert.equal(many, '3 alerts in D8–30 match Overlaps · 2 errors · 1 warning · 3 orders affected');
+  assert.equal(many, '3 alerts in D8–30 match Overlaps · 2 errors · 1 warning');
 });
 
 test('summaryLine: the lead uses the singular _one key at exactly 1 and the plural key otherwise (window, profile, all)', () => {

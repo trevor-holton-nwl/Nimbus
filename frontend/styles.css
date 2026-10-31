@@ -2937,7 +2937,7 @@ body.update-available .lp-card-scroll {
   max-height: calc(100vh - var(--chrome-h) - 153px - var(--update-banner-h));
 }
 body.update-available .am-mx-scroll {
-  max-height: calc(100vh - var(--chrome-h) - 250px - var(--update-banner-h));
+  max-height: calc(100vh - var(--chrome-h) - 280px - var(--update-banner-h));
 }
 
 @media print { .update-banner { display: none !important; } }
@@ -7992,11 +7992,20 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-head-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .am-title { font-size: 22px; line-height: 1.2; white-space: nowrap; margin-right: 4px; }
 .am-summary { font-size: 12.5px; line-height: 1.4; color: var(--fg); min-height: 1.4em; }
-.am-ctl-label { font-size: 12px; color: var(--fg-mute); white-space: nowrap; }
-.am-default-note { font-size: 12px; color: var(--fg-mute); white-space: nowrap; }
-.am-profile-wrap { flex: 0 0 220px; width: 220px; }
-/* The viewed option's rule summary is a second muted line, so the list is wider than the 220 px input. */
-.am-profile-wrap .us-combo-dropdown { right: auto; width: 340px; max-width: calc(100vw - 48px); }
+.am-profile-blk {
+  display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 4px 0 12px;
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-subtle);
+}
+.am-profile-blk > .am-eyebrow { padding-right: 10px; border-right: 1px solid var(--line); line-height: 22px; }
+.am-badge-default {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 6px; white-space: nowrap;
+  font: 600 10px 'JetBrains Mono', monospace; letter-spacing: .06em; text-transform: uppercase;
+  background: var(--accent-wash); color: var(--accent-hot); border: 1px solid var(--accent-soft); border-radius: var(--r-sm);
+}
+.am-badge-default[hidden] { display: none; }
+.am-profile-wrap { flex: 0 0 200px; width: 200px; }
+/* The viewed option's rule summary is a second muted line, so the list is wider than the 200 px input; it grows leftward from the block's right edge. */
+.am-profile-wrap .us-combo-dropdown { left: auto; right: 0; width: 340px; max-width: calc(100vw - 48px); }
 .am-opt-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .am-opt-name, .am-opt-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .am-opt-sub { font-size: 11px; font-weight: 400; color: var(--fg-mute); }
@@ -8081,19 +8090,33 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 }
 .am-gantt-chip[hidden] { display: none; }
 .am-ctl-row { padding-top: 8px; border-top: 1px solid var(--line); gap: 8px 12px; }
-.am-lens-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.am-lens-wrap { display: inline-flex; align-items: center; gap: 12px; }
 .am-lens-wrap[hidden] { display: none; }
-.am-search { flex: 0 1 260px; width: 260px; min-width: 160px; height: 28px; padding: 3px 8px; font-size: 12px; }
-.am-chips { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
-.am-chips[hidden] { display: none; }
+.am-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.am-vsep { width: 1px; height: 36px; background: var(--line); flex: 0 0 auto; }
+.am-eyebrow { font: 600 9.5px 'JetBrains Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--fg-mute); white-space: nowrap; }
+.am-search { flex: 0 1 300px; width: 300px; min-width: 160px; height: 28px; padding: 3px 8px; font-size: 12px; }
+/* Lens reads as a tab (outline ring), View keeps the filled navy seg-btn; scoped by id so the Inbox sort .am-seg is untouched. */
+#am-lens-seg .seg-btn.am-seg-outline.active {
+  background: var(--bg-subtle); color: var(--fg); border-color: var(--line);
+  outline: 2px solid var(--accent); outline-offset: -1px; font-weight: 600;
+}
+/* Active matrix filter: a full-width Signal Err strip under the controls. */
+.am-filter-strip {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-height: 30px; margin: 0 -24px -10px; padding: 2px 24px;
+  background: var(--err-soft); border-top: 1px solid var(--err); color: var(--err); font-size: 12px;
+}
+.am-filter-strip[hidden] { display: none; }
+.am-filt-lead { color: var(--err); font-weight: 700; }
 .am-chip {
-  display: inline-flex; align-items: center; gap: 2px; max-width: 220px; padding: 1px 2px 1px 8px; font-size: 11.5px;
-  background: var(--bg-subtle); border: 1px solid var(--line); border-radius: var(--r-md); color: var(--fg);
+  display: inline-flex; align-items: center; gap: 2px; max-width: 220px; padding: 1px 2px 1px 8px; font-size: 11.5px; font-weight: 600;
+  background: var(--bg-elev); border: 1px solid var(--err); border-radius: var(--r-md); color: var(--err);
 }
 .am-chip-lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.am-chip-x { border: 0; background: none; color: var(--fg-mute); cursor: pointer; padding: 0 5px; font-size: 11px; line-height: 20px; border-radius: var(--r-sm); }
-.am-chip-x:hover { color: var(--fg); background: var(--bg-strong); }
+.am-chip-x { border: 0; background: none; color: var(--err); cursor: pointer; padding: 0 5px; font-size: 11px; line-height: 20px; border-radius: var(--r-sm); }
+.am-chip-x:hover { background: var(--err-soft); }
 .am-chip-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.am-filt-clear { margin-left: auto; height: 22px; border: 1px solid var(--err); color: var(--err); background: transparent; font-weight: 600; }
 .am-body { min-width: 0; }
 
 /* Shared by the Inbox and the matrix side list: severity glyph, group dot, order, material, machine, tag, due, actions. */
@@ -8174,7 +8197,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 body.am-side-resizing { user-select: none; cursor: col-resize; }
 .am-mx-main { min-width: 0; }
 .am-mx-scroll {
-  overflow: auto; max-height: calc(100vh - var(--chrome-h) - 250px);
+  overflow: auto; max-height: calc(100vh - var(--chrome-h) - 280px);
   border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-elev);
 }
 .am-mx-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; }
@@ -8226,7 +8249,7 @@ button.am-mx-cell[aria-pressed="true"] { outline: 2px solid var(--accent); outli
 .am-mx-lg-err { background: var(--err-soft) !important; }
 .am-mx-lg-warn { background: var(--warn-soft) !important; }
 .am-mx-lg-dots { background: var(--fg-mute) !important; border-radius: 50% !important; width: 6px !important; height: 6px !important; }
-.am-side { padding: 0; min-width: 0; position: sticky; top: 0; max-height: calc(100vh - var(--chrome-h) - 250px); overflow: auto; container-type: inline-size; }
+.am-side { padding: 0; min-width: 0; position: sticky; top: 0; max-height: calc(100vh - var(--chrome-h) - 280px); overflow: auto; container-type: inline-size; }
 .am-side[hidden] { display: none; }
 .am-side-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--bg-subtle); }
 .am-side-head h3 { font-size: 13px; margin: 0; font-family: var(--font-mono); }
@@ -8234,8 +8257,8 @@ button.am-mx-cell[aria-pressed="true"] { outline: 2px solid var(--accent); outli
 .am-side-more { margin: 8px 12px; }
 
 /* Inbox */
-.am-ib { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 12px; align-items: stretch; min-height: calc(100vh - var(--chrome-h) - 300px); }
-body.update-available .am-ib { min-height: calc(100vh - var(--chrome-h) - 300px - var(--update-banner-h)); }
+.am-ib { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 12px; align-items: stretch; min-height: calc(100vh - var(--chrome-h) - 330px); }
+body.update-available .am-ib { min-height: calc(100vh - var(--chrome-h) - 330px - var(--update-banner-h)); }
 @media (max-width: 979px) { .am-ib { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(240px, 1fr); } }
 .am-ib-facets { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .am-facet { padding: 8px 6px; }
