@@ -8055,6 +8055,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-fixes-collapsed .panel-head { border-bottom: 0; }
 .am-fixes .panel-head { justify-content: flex-start; align-items: center; }
 .am-fixes .panel-hint { margin-left: auto; }
+@media (max-width: 720px) { .am-fixes .panel-hint { margin-left: 0; flex-basis: 100%; } }
 .am-lev-adm { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.8; }
 .am-lev-admin { margin-left: 6px; vertical-align: middle; }
 .am-lev-skeleton, .am-lev-empty { padding: 14px 18px; font-size: 12.5px; color: var(--fg-mute); }
@@ -8149,7 +8150,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
   }
   .am-xdetail .am-xfull { grid-column: auto; max-height: none; }
   .am-xdetail > .am-xact { display: block; height: auto; }
-  /* The virtualized Inbox needs a known height: one 32 px line per row (detailHeightFor(..., true)). */
+  /* The virtualized Inbox needs a known height: one 32 px nowrap line per row (detailHeightFor(..., true)); long values ellipsise here and show in full in the side list, which wraps. */
   .am-ib-main .am-xdetail { height: var(--am-xd-hn); overflow: hidden; padding: 8px 12px; }
   .am-ib-main .am-xdetail > div { height: 32px; padding: 0; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 }
@@ -8218,7 +8219,7 @@ button.am-mx-cell[aria-pressed="true"] { outline: 2px solid var(--accent); outli
 /* Inbox */
 .am-ib { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 12px; align-items: stretch; min-height: calc(100vh - var(--chrome-h) - 300px); }
 body.update-available .am-ib { min-height: calc(100vh - var(--chrome-h) - 300px - var(--update-banner-h)); }
-@media (max-width: 979px) { .am-ib { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 979px) { .am-ib { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(240px, 1fr); } }
 .am-ib-facets { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .am-facet { padding: 8px 6px; }
 .am-facet-h { margin: 0 6px 4px; font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-mute); }
@@ -8241,7 +8242,7 @@ body.update-available .am-ib { min-height: calc(100vh - var(--chrome-h) - 300px 
 .am-facet-q { width: 100%; height: 26px; margin: 2px 0 4px; font-size: 12px; }
 .am-facet-empty { padding: 4px 8px; color: var(--fg-mute); font-size: 12px; }
 /* The list panel is as tall as the facet column (grid stretch); size containment keeps the virtual list's own height out of that row. */
-.am-ib-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-elev); overflow: hidden; container-type: inline-size; contain: size; }
+.am-ib-main { display: flex; flex-direction: column; min-width: 0; min-height: 240px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-elev); overflow: hidden; container-type: inline-size; contain: size; }
 .am-ib-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--bg-subtle); }
 .am-ib-count { font-family: var(--font-mono); font-size: 12px; color: var(--fg); }
 .am-ib-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }

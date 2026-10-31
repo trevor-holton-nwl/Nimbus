@@ -168,3 +168,8 @@ test('rowHtml still renders the 5 spans the narrow grid areas address', () => {
   const html = rowHtml(a, { hideMachine: false, open: false, material: 'Widget', tag: 'Overlap', t, orderNo: 'O1', dueText: 'Fri' });
   for (const c of ['am-sev', 'am-gdot', 'am-oid', 'am-mat', 'am-mc', 'am-tag', 'am-due', 'am-acts']) assert.match(html, new RegExp(`class="${c}[ "]`));
 });
+
+test('CSS: the Inbox list panel keeps a 240 px floor and the single-column layout gives it a real row (no 0 px collapse)', () => {
+  assert.match(block('.am-ib-main {'), /min-height:\s*240px/);
+  assert.match(CSS, /@media \(max-width: 979px\) \{ \.am-ib \{[^}]*grid-template-rows:\s*auto minmax\(240px, 1fr\)/);
+});

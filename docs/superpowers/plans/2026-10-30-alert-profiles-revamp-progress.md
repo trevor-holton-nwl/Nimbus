@@ -24,3 +24,4 @@ F1
 92a247d: locale keys x5 (am.detail_machine_day, am.detail_orders_on_day, am.day_details, am.open_in_orders, am.fixes_collapse/expand) + pinned lists
 bdd560d: alertMonitorFixes user setting in Settings.CATALOG and ALLOWED_SETTINGS_KEYS
 36b9f66: order-less detail rows (optional trio, Machine · day, overload orders-on-day + Day details), narrow @container layout (two-line row, key/value detail, detailHeightFor replaces DETAIL_H), Inbox list height = facet column, collapsible Top fixes, fixPrimaryAction + Open in Orders, 64 px matrix columns; 40 tests
+F1 fix round 1: .am-ib-main min-height 240px + single-column grid-template-rows auto minmax(240px, 1fr) (no 0 px collapse), narrow Top fixes hint wraps left, CSS pin test
