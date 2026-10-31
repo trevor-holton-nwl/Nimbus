@@ -161,6 +161,12 @@ test('Store "schedule:hydrated" event triggers Alerts.scheduleRecompute (schedul
 });
 
 
+test('Utilization.sev: an optional ratio tolerance keeps an exactly-full day out of err', () => {
+  assert.equal(Utilization.sev(1.0, 1.0), 'warn');
+  assert.equal(Utilization.sev(1.004, 1.0, 0.005), 'warn');
+  assert.equal(Utilization.sev(1.01, 1.0, 0.005), 'err');
+});
+
 test('Utilization.computeMatrix memoizes on (startMs, days, Store.rev(), plant scope)', () => {
   Store.setTasks([], 'unit-test');
   Store.setSelectedPlant('5512', 'unit-test');

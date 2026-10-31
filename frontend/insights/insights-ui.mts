@@ -863,9 +863,10 @@ export const Dashboard = {
       const effCap  = u ? (u.effectiveCapacity ?? u.capacity).toFixed(2) : cap;
       const pct     = u ? Math.round((u.pct ?? 0) * 100)                 : 0;
       const overloadAt = u && u.capacity > 0 ? u.effectiveCapacity / u.capacity : Config.OVERLOAD_THRESHOLD;
-      const sev     = u ? Utilization.sev(u.pct ?? 0, overloadAt) : 'ok';
+      const overloadTol = u && u.capacity > 0 ? globalThis.NimbusComputeCore!.OVERLOAD_TOLERANCE_H / u.capacity : 0;
+      const sev     = u ? Utilization.sev(u.pct ?? 0, overloadAt, overloadTol) : 'ok';
       const barW    = Math.min(pct, 100);
-      const isOver  = u ? u.scheduled > (u.effectiveCapacity ?? u.capacity) : false;
+      const isOver  = u ? globalThis.NimbusComputeCore!.isOverloaded(u.scheduled, u.effectiveCapacity ?? u.capacity) : false;
       const sorted  = (byLine[line] || []).slice().sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
       // Next changeover is "from now" — meaningless for a future day, so show a dash.
       const nxtCO   = isToday ? Dashboard._fmtNextCO(Dashboard._nextChangeover(sorted, now), now) : '—';
