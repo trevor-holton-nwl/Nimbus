@@ -66,7 +66,7 @@ test('open(prefill) preselects the lines and the custom window', () => {
     assert.match(list, /<input type="checkbox" checked data-line="L1">/, 'L1 is ticked');
     assert.match(list, /<input type="checkbox"  data-line="L2">/, 'L2 is not');
     assert.match(fx.el('opt-start-btn').textContent, /10\/21\/2026/);
-    assert.match(fx.el('opt-end-btn').textContent, /10\/24\/2026/);
+    assert.match(fx.el('opt-end-btn').textContent, /10\/23\/2026/, 'whole-day window: To shows the inclusive last day');
     assert.ok(fx.el('opt-date-row').classList.contains('visible'), 'the custom window row is shown');
     assert.match(fx.el('opt-date-summary').innerHTML, /3 days/);
   } finally { fx.restore(); }
