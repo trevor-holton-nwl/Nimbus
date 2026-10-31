@@ -554,6 +554,18 @@ test('optimize-window per-day over: overHours and freeHours cover only their own
   assert.deepEqual([...OPTIMIZE_TYPES].sort(), ['late', 'overlap', 'overload', 'setup-violated'], 'the four types the card labels (_WINDOW_TYPES in alert-monitor-model.mts)');
 });
 
+test('optimize-window free hours skip a day within the tolerance of full', () => {
+  const matrix = { L1: {
+    [dk(1)]: { scheduled: 26, effectiveCapacity: 23.98 },
+    [dk(2)]: { scheduled: 23.976, effectiveCapacity: 23.98 },
+  } };
+  const alerts = [al('a', 'overload', 'err', 1), al('b', 'late', 'warn', 2)];
+  const [w] = byFamily(groupLeverage(mkInput({ alerts, baselineMatrix: matrix })), 'optimize-window');
+  assert.equal(w.freeHours, 0);
+  assert.equal(w.overloadDays, 1);
+  assert.equal(w.fullDays, 1);
+});
+
 test('optimize-window overloadDays counts only days over by more than the tolerance', () => {
   const matrix = { L1: {
     [dk(1)]: { scheduled: 20, effectiveCapacity: 12 },

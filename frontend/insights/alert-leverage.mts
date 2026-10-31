@@ -450,7 +450,7 @@ function _optimizeItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
         const over = sch - cap;
         if (core.isOverloaded(sch, cap)) { overloadDays++; overHours += over; }
         else if (cap > 0 && Math.abs(over) <= core.OVERLOAD_TOLERANCE_H) fullDays++;
-        if (over < 0) freeHours += -over;
+        if (-over > core.OVERLOAD_TOLERANCE_H) freeHours += -over;   // a day within the tolerance is full, not free
       }
       // Exactly-full days leave float noise around zero: snap it with the same tolerance the overload rule uses.
       if (Math.abs(headroom) <= core.OVERLOAD_TOLERANCE_H * (prev - start + 1)) headroom = 0;

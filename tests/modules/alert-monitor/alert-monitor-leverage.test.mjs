@@ -178,6 +178,14 @@ test('optimize-window per-day over rule: a net-zero window with one overloaded d
   assert.ok(acts(it, ctx({ isAdmin: true })).includes('edit-plant-calendar'));
 });
 
+test('optimize-window over day with zero free hours: over note, Diagnose primary, no free-on-other-days clause', () => {
+  const it = optItem({ headroomHours: -2, overloadDays: 1, overHours: 2.02, freeHours: 0, fullDays: 1, typeCounts: { overload: 1, late: 1 } });
+  const h = fixRowHtml(it, 1, ctx(), t);
+  assert.ok(plain(h).includes('am.lev_over_note'));
+  assert.ok(!h.includes('am.lev_over_room'));
+  assert.equal(primaryOf(it).act, 'diagnose-worst');
+});
+
 test('optimize-window spread overshoot with no overloaded day is full or free, never over', () => {
   const full = optItem({ headroomHours: -0.1, overloadDays: 0, overHours: 0, freeHours: 0, fullDays: 3 });
   const pf = plain(fixRowHtml(full, 1, ctx(), t));
