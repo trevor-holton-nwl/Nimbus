@@ -275,10 +275,17 @@ function _cellHtml(c: Cell, rowLabel: string, colLabel: string, lens: MonitorLen
     + ` data-am-row="${_esc(c.rowKey)}" data-am-col="${_esc(c.colKey)}" aria-pressed="${pressed}" aria-label="${_esc(aria)}">${c.count}${dots}</button></td>`;
 }
 
-function _rowHeadHtml(h: RowHeader, lens: MonitorLens, f: MonitorFilter, lead = '', cls = ''): string {
+function _rowHeadHtml(h: RowHeader, lens: MonitorLens, f: MonitorFilter, lead = '', cls = '', twoLine = false): string {
   const pressed = filterMatches(f, rowFilter(lens, h.key));
   const bar = h.total > 0
     ? `<span class="am-mx-bar" aria-hidden="true"><i class="am-mx-bar-${h.worst === 'err' ? 'err' : 'warn'}" style="--w:${h.barPct}%"></i></span>` : '';
+  if (twoLine) {
+    const l2 = (h.sub ? `<span class="am-mx-sub">${_esc(h.sub)}</span>` : '') + bar;
+    return `<th scope="row" class="am-mx-rh${cls}"><div class="am-mx-rhc am-mx-rhc2"><div class="am-mx-rhl1">${lead}`
+      + `<button type="button" class="am-mx-rowh" data-am-row="${_esc(h.key)}" aria-pressed="${pressed}">${_esc(h.label)}</button>`
+      + `<span class="am-mx-tot">${h.total}</span></div>`
+      + (l2 ? `<div class="am-mx-rhl2">${l2}</div>` : '') + `</div></th>`;
+  }
   return `<th scope="row" class="am-mx-rh${cls}"><div class="am-mx-rhc">${lead}`
     + `<button type="button" class="am-mx-rowh" data-am-row="${_esc(h.key)}" aria-pressed="${pressed}">${_esc(h.label)}</button>`
     + (h.sub ? `<span class="am-mx-sub">${_esc(h.sub)}</span>` : '')
@@ -302,7 +309,7 @@ export function matrixHtml(m: MatrixModel, f: MonitorFilter, t: Translate): stri
     const labels = m.columns.map(c => c.label);
     for (const g of m.groups) {
       const caret = `<button type="button" class="am-mx-caret" data-am-group="${_esc(g.key)}" aria-expanded="${!g.collapsed}" aria-label="${_esc(g.label)}">${g.collapsed ? '▸' : '▾'}</button>`;
-      body += `<tr class="am-mx-ghead">${_rowHeadHtml(g.head, 'machine', f, caret, ' am-mx-ghead-rh')}`
+      body += `<tr class="am-mx-ghead">${_rowHeadHtml(g.head, 'machine', f, caret, ' am-mx-ghead-rh', true)}`
         + g.cells.map((c, i) => _cellHtml(c, g.label, labels[i]!, 'machine', f, t)).join('') + `</tr>`;
       if (g.collapsed) continue;
       for (const r of g.rows) body += _rowHtml(r, m, f, t);

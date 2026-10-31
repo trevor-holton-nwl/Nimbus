@@ -8112,7 +8112,6 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-mat { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
 .am-mc { font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .am-tag { min-width: 0; font-size: 11.5px; color: var(--fg-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.am-tag b { font-weight: 600; color: var(--fg); }
 .am-due { font-family: var(--font-mono); font-size: 11px; color: var(--fg-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .am-when-overdue { color: var(--err); }
 .am-acts { display: flex; justify-content: flex-end; align-items: center; gap: 4px; min-width: 0; visibility: hidden; }
@@ -8128,7 +8127,7 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-xdetail > div { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11.5px; }
 .am-xdetail b { display: block; font-size: 9.5px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-mute); }
 .am-xdetail .am-xfull { grid-column: 1 / -1; white-space: normal; font-family: inherit; font-size: 12px; max-height: 36px; overflow: hidden; }
-/* Narrow lists (the 380 px matrix side list, an Inbox under 520 px): two-line rows, a one-column key/value detail. Breakpoint = NARROW_AT. */
+/* Narrow lists (a matrix side list dragged under 520 px, an Inbox under 520 px): two-line rows, a one-column key/value detail. Breakpoint = NARROW_AT. */
 @container (max-width: 520px) {
   .am-xrow, .am-xrow-nomc {
     grid-template-columns: 14px 10px minmax(0, 1fr) auto; grid-template-rows: 32px 20px; align-content: start; row-gap: 0; height: 52px;
@@ -8157,10 +8156,17 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 
 /* Matrix */
 .am-mx-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
-.am-mx-layout:has(.am-side:not([hidden])) { grid-template-columns: minmax(0, 1fr) 380px; }
+.am-mx-layout:has(.am-side:not([hidden])) { grid-template-columns: minmax(0, 1fr) 8px var(--am-side-w, 660px); }
 @media (max-width: 979px) {
   .am-mx-layout:has(.am-side:not([hidden])) { grid-template-columns: minmax(0, 1fr); }
+  .am-side-rh { display: none; }
 }
+.am-side-rh { align-self: stretch; cursor: col-resize; border-radius: 2px; background: linear-gradient(var(--line), var(--line)) center / 1px 100% no-repeat; touch-action: none; }
+.am-side-rh:hover, .am-side-rh:focus-visible { background: var(--accent-soft); outline: none; }
+.am-side-rh:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+.am-mx-layout.am-resizing .am-side-rh { background: var(--accent); }
+.am-side-rh[hidden] { display: none; }
+body.am-side-resizing { user-select: none; cursor: col-resize; }
 .am-mx-main { min-width: 0; }
 .am-mx-scroll {
   overflow: auto; max-height: calc(100vh - var(--chrome-h) - 250px);
@@ -8169,14 +8175,20 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-mx-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; }
 .am-mx-table th, .am-mx-table td { padding: 0; border-bottom: 1px solid var(--line); text-align: center; }
 .am-mx-head { position: sticky; top: 0; z-index: 3; background: var(--bg-elev); padding: 4px 2px; font-weight: 600; font-size: 11px; color: var(--fg-mute); }
-.am-mx-table th.am-mx-rh { position: sticky; left: 0; z-index: 2; background: var(--bg-elev); text-align: left; width: 200px; min-width: 200px; max-width: 200px; font-weight: 400; }
-/* Every data column is 64 px: Overdue + the 7 horizon days sit beside the 380 px side list, Later / None / extra work centers scroll. */
+.am-mx-table th.am-mx-rh { position: sticky; left: 0; z-index: 2; background: var(--bg-elev); text-align: left; width: 240px; min-width: 240px; max-width: 240px; font-weight: 400; }
+/* Every data column is 64 px beside the resizable side list (default 660 px): at 1366 Overdue + 4 days show, the rest scroll; at 1920 every column fits. */
 .am-mx-table th:not(.am-mx-rh), .am-mx-table td:not(.am-mx-rh) { width: 64px; min-width: 64px; }
 .am-mx-table th.am-mx-head.am-mx-rh { z-index: 4; padding-left: 10px; }
 .am-mx-ghead th.am-mx-rh, .am-mx-ghead td { background: var(--bg-subtle); }
 .am-mx-ghead th, .am-mx-ghead td { position: sticky; top: var(--am-mx-head-h, 29px); z-index: 2; }
 .am-mx-ghead th { font-weight: 700; }
 .am-mx-rhc { display: flex; align-items: center; gap: 6px; padding: 3px 8px; min-width: 0; }
+.am-mx-rhc2 { flex-direction: column; align-items: stretch; gap: 2px; padding: 4px 8px; }
+.am-mx-rhl1, .am-mx-rhl2 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.am-mx-rhl1 .am-mx-rowh { flex: 1 1 auto; }
+.am-mx-rhl2 { padding-left: 26px; }
+.am-mx-rhl2 .am-mx-bar { flex: 1 1 60px; width: auto; max-width: 120px; }
+.am-mx-rhl2 .am-mx-sub { flex: 0 0 auto; }
 .am-mx-rowh, .am-mx-colh, .am-mx-caret, .am-mx-quiet-btn { border: 0; background: none; font: inherit; color: var(--fg); cursor: pointer; padding: 2px 4px; border-radius: var(--r-sm); }
 .am-mx-rowh { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-weight: 600; }
 .am-mx-colh { width: 100%; font-size: 11px; font-weight: 600; color: var(--fg-mute); white-space: nowrap; }

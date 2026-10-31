@@ -329,3 +329,89 @@ test('Move N acts on the alerts in view: quiet sequential fixes, one summary toa
     assert.equal(toasts.length, 1);
   } finally { Alerts.applyFix = prevFix; Toast.show = prevToast; }
 });
+
+// ---- the resizable side list ----------------------------------------------------------------------------------
+
+function trackWidth() {
+  const calls = [];
+  els['am-body'] = makeEl('am-body');
+  els['am-body'].style.setProperty = (k, v) => calls.push([k, v]);
+  return calls;
+}
+const lastVar = calls => calls.filter(c => c[0] === '--am-side-w').at(-1)?.[1];
+
+test('the side list handle: in the shell, hidden until a filter shows the list', () => {
+  setup(ALERTS(), { settings: { alertMonitorSideWidth: null } });
+  trackWidth();
+  AlertMonitorPane.render();
+  assert.match(els['am-body'].innerHTML, /id="am-side-rh" role="separator" aria-orientation="vertical"/);
+  assert.equal(els['am-side-rh'].hidden, true);
+  clickCell('M1', D1);
+  assert.equal(els['am-side-rh'].hidden, false);
+  clickCell('M1', D1);
+  assert.equal(els['am-side-rh'].hidden, true);
+});
+
+test('the side width comes from alertMonitorSideWidth, clamped, default 660', () => {
+  for (const [stored, want] of [[700, '700px'], [5000, '900px'], [undefined, '660px']]) {
+    els = {};
+    setup(ALERTS(), { settings: { alertMonitorSideWidth: stored ?? null } });
+    const calls = trackWidth();
+    AlertMonitorPane.render();
+    assert.equal(lastVar(calls), want);
+    assert.equal(els['am-side-rh'].getAttribute('aria-valuenow'), want.replace('px', ''));
+  }
+});
+
+test('keyboard: Shift+ArrowLeft widens by 64, Home / End jump, double-click resets to the default', () => {
+  setup(ALERTS(), { settings: { alertMonitorSideWidth: null } });
+  const calls = trackWidth();
+  AlertMonitorPane.render();
+  const h = els['am-side-rh'];
+  h.handlers.keydown({ key: 'ArrowLeft', shiftKey: true, preventDefault() {} });
+  assert.deepEqual(prefs.at(-1), ['alertMonitorSideWidth', 724]);
+  assert.equal(lastVar(calls), '724px');
+  h.handlers.keydown({ key: 'Home', preventDefault() {} });
+  assert.deepEqual(prefs.at(-1), ['alertMonitorSideWidth', 380]);
+  h.handlers.keydown({ key: 'End', preventDefault() {} });
+  assert.deepEqual(prefs.at(-1), ['alertMonitorSideWidth', 900]);
+  h.handlers.dblclick({});
+  assert.deepEqual(prefs.at(-1), ['alertMonitorSideWidth', null]);
+  assert.equal(lastVar(calls), '660px');
+});
+
+test('drag: live width while moving, exactly one saved write on release', () => {
+  setup(ALERTS(), { settings: { alertMonitorSideWidth: null } });
+  const calls = trackWidth();
+  AlertMonitorPane.render();
+  const h = els['am-side-rh'];
+  const before = prefs.length;
+  h.handlers.pointerdown({ clientX: 1000, pointerId: 1, preventDefault() {} });
+  h.handlers.pointermove({ clientX: 900 });
+  assert.equal(lastVar(calls), '760px');
+  assert.equal(prefs.length, before, 'no write while dragging');
+  h.handlers.pointerup({ pointerId: 1 });
+  assert.deepEqual(prefs.slice(before), [['alertMonitorSideWidth', 760]]);
+});
+
+test('a click on the handle without a move writes nothing', () => {
+  setup(ALERTS(), { settings: { alertMonitorSideWidth: null } });
+  trackWidth();
+  AlertMonitorPane.render();
+  const h = els['am-side-rh'];
+  const before = prefs.length;
+  h.handlers.pointerdown({ clientX: 1000, pointerId: 1, preventDefault() {} });
+  h.handlers.pointerup({ pointerId: 1 });
+  assert.equal(prefs.length, before);
+});
+
+test('Inbox then Matrix re-applies the stored width', () => {
+  setup(ALERTS(), { settings: { alertMonitorSideWidth: 700 } });
+  const calls = trackWidth();
+  AlertMonitorPane.render();
+  click({ '[data-am-set-view]': { dataset: { amSetView: 'inbox' } } });
+  setup(ALERTS(), { settings: { alertMonitorSideWidth: 700, alertMonitorView: { '*': { view: 'matrix' } } } });
+  calls.length = 0;
+  AlertMonitorPane.render();
+  assert.equal(lastVar(calls), '700px');
+});

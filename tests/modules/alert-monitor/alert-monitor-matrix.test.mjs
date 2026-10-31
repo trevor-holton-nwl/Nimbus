@@ -164,6 +164,10 @@ test('matrixHtml: sticky header and first column, rollups with caret, inert empt
   assert.match(html, /<th class="am-mx-head"><button[^>]*data-am-col="overdue"/);
   assert.match(html, /<th scope="row" class="am-mx-rh">/);
   assert.match(html, /<tr class="am-mx-ghead">/);
+  assert.match(html, /<tr class="am-mx-ghead"><th scope="row" class="am-mx-rh am-mx-ghead-rh"><div class="am-mx-rhc am-mx-rhc2"><div class="am-mx-rhl1"><button[^>]*class="am-mx-caret"/);
+  assert.match(html, /<div class="am-mx-rhl2"><span class="am-mx-sub">\d+ machines/);
+  const mrow = html.slice(html.indexOf('data-am-row="M1"') - 200, html.indexOf('data-am-row="M1"') + 200);
+  assert.doesNotMatch(mrow, /am-mx-rhl1/, 'a machine row keeps the single-line head');
   assert.match(html, /data-am-group="A" aria-expanded="true"/);
   assert.match(html, /data-am-cell="M1\|2026-10-30"[^>]*aria-label="am\.mx_cell_aria\|row=M1,col=d:2026-10-30,n=2"/);
   assert.match(html, /<div class="am-mx-cell am-mx-zero" aria-hidden="true">·<\/div>/);

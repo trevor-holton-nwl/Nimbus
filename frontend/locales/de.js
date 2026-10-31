@@ -2901,6 +2901,7 @@ window.__NIMBUS_LOCALES.de = {
   'am.lev_in_view': '{{n}} in der Ansicht',
   'am.mx_machines': '{{n}} Maschinen',
   'am.mx_machines_one': '1 Maschine',
+  'am.side_resize': 'Alarmliste verbreitern oder verschmälern',
   'am.bucket_overdue': 'Überfällig',
   'am.bucket_later': 'Später',
   'am.bucket_none': 'Ohne Datum',

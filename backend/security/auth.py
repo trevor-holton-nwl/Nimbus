@@ -439,6 +439,7 @@ ALLOWED_SETTINGS_KEYS = frozenset({
     "firstDayOfWeek", "optimizerDefaults", "distributionFilters",
     "alertProfileByPlant", "alertProfileGanttHighlight", "alertMonitorView",
     "alertsShowAcknowledged", "alertMonitorOverview", "alertMonitorFixes",
+    "alertMonitorSideWidth",
 })
 SETTINGS_PATCH_MAX_BYTES = 64 * 1024
 SETTINGS_BLOB_MAX_BYTES = 256 * 1024

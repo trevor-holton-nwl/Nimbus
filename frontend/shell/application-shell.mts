@@ -204,6 +204,8 @@ const Settings = (() => {
     { key: 'alertMonitorOverview',      category: 'workflow', type: 'enum',    default: 'open', tier: 'user', region: false },
     // Alert Monitor Top fixes panel: 'open' | 'collapsed' (the head and its count stay; the leverage run still executes).
     { key: 'alertMonitorFixes',         category: 'workflow', type: 'enum',    default: 'open', tier: 'user', region: false },
+    // Alert Monitor Matrix side list width in px (null = 660); clamped by clampSideWidth.
+    { key: 'alertMonitorSideWidth',     category: 'workflow', type: 'number',  default: null,  tier: 'user', region: false },
   ];
 
   // { key: default } map derived from CATALOG (last link in Store.pref precedence).
