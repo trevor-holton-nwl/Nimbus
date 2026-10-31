@@ -854,7 +854,7 @@ const ALERT_MONITOR_KEYS = [
   'am.summary_warnings_one', 'am.summary_orders', 'am.summary_orders_one', 'am.sort_by',
   'am.fixes_title', 'am.fixes_hint', 'am.fixes_admin_divider', 'am.fix_clears', 'am.fix_clears_one',
   'am.fix_clears_one_alert', 'am.fix_clears_one_order', 'am.fix_conf', 'am.fix_minutes', 'am.fix_replay',
-  'am.fixes_more', 'am.more_actions', 'am.rank_n', 'am.group_fix_n', 'am.group_fix_n_one', 'am.lev_remaining_one', 'am.group_fix_confirm', 'am.group_fix_done',
+  'am.fixes_more', 'am.detail_machine_day', 'am.detail_orders_on_day', 'am.day_details', 'am.open_in_orders', 'am.fixes_collapse', 'am.fixes_expand', 'am.more_actions', 'am.rank_n', 'am.group_fix_n', 'am.group_fix_n_one', 'am.lev_remaining_one', 'am.group_fix_confirm', 'am.group_fix_done',
   'am.group_fix_done_one', 'am.group_ack_n', 'am.ack_title_n', 'am.ack_bulk_done', 'am.ack_bulk_partial',
   'am.copy_lines', 'am.copy_orders', 'leverage.title.setup-pair', 'leverage.title.calendar-day',
   'leverage.title.tool', 'leverage.title.machine-state', 'leverage.title.optimize-window', 'leverage.title.needs-planning',
@@ -1005,6 +1005,7 @@ test('Alert Monitor: every firing alert type has a short alert.tag.<type> in all
 test('Alert Monitor W6a: the Matrix / row / summary model keys exist in all five locales with the English placeholders', () => {
   const keys = [
     'am.summary_machines', 'am.summary_showing', 'am.detail_alert', 'am.detail_material', 'am.detail_due', 'am.detail_finish', 'am.detail_firming',
+    'am.detail_machine_day', 'am.detail_orders_on_day', 'am.day_details', 'am.open_in_orders', 'am.fixes_collapse', 'am.fixes_expand',
     'am.ungrouped', 'am.mx_corner_machine', 'am.mx_corner_day', 'am.mx_corner_group', 'am.mx_cell_aria', 'am.mx_cell_aria_one',
     'am.quiet_show', 'am.quiet_show_one', 'am.quiet_hide', 'am.quiet_hide_one',
     'am.mx_legend_err', 'am.mx_legend_warn', 'am.mx_legend_dots', 'am.mx_legend_hint',
