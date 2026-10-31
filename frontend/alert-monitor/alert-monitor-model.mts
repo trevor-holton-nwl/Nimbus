@@ -250,6 +250,22 @@ export const ROW_H = 32;
 export const ROW_H_NARROW = 52;
 /** Container width (px) at or below which the compact row and its detail switch to the narrow layout (the CSS `@container` query has the same breakpoint). */
 export const NARROW_AT = 520;
+/** Matrix side list width (px): default, bounds, and the matrix floor the clamp protects. */
+export const SIDE_W_DEFAULT = 660, SIDE_W_MIN = 380, SIDE_W_MAX = 900;
+/** Row-head column (240) + two 64 px data columns: the least matrix width beside the side list. */
+export const MATRIX_MIN_W = 240 + 2 * 64;
+/** Layout gap (12) + resize handle column (8). */
+export const SIDE_GAP_W = 12 + 8;
+/** Clamp a stored or dragged side-list width; non-numbers fall back to the default, and a known layout width keeps the matrix at `MATRIX_MIN_W` (never below `SIDE_W_MIN`). */
+export function clampSideWidth(px: unknown, layoutW?: number): number {
+  const n = typeof px === 'number' ? px : (px == null || px === '' ? NaN : Number(px));
+  let w = Number.isFinite(n) ? Math.round(n) : SIDE_W_DEFAULT;
+  w = Math.min(SIDE_W_MAX, Math.max(SIDE_W_MIN, w));
+  if (typeof layoutW === 'number' && Number.isFinite(layoutW) && layoutW > 0) {
+    w = Math.max(SIDE_W_MIN, Math.min(w, Math.round(layoutW) - SIDE_GAP_W - MATRIX_MIN_W));
+  }
+  return w;
+}
 /** The alert types a group's "Move N orders" moves: `overload` is excluded, its fix runs the line-day changeover optimizer. */
 export const MOVABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'tool-conflict']);
 /** Above this many orders "Move N orders" asks first. */
@@ -863,7 +879,7 @@ export interface CompactRowOpts {
   t: Translate;
   /** Order number shown mono; falls back to `msgVars.order`, then `taskId`. */
   orderNo?: string;
-  /** Category name shown muted before the tag; its color dot reads `--bar-pm-<category>`. */
+  /** Category name; it is the severity dot's `title` (the dot color reads `--bar-pm-<category>`). */
   groupLabel?: string;
   /** The due column text and whether it is overdue. */
   dueText?: string;
@@ -895,7 +911,6 @@ export function rowHtml(a: NimbusAlert, o: CompactRowOpts): string {
   btns.push(`<button type="button" class="icon-btn sm am-row-menu" data-alert-id="${id}" data-ovf-key="${id}" aria-haspopup="menu" aria-expanded="false"`
     + ` aria-label="${_esc(t('am.more_actions'))}" title="${_esc(t('am.more_actions'))}">⋯</button>`);
   const orderNo = o.orderNo ?? String(a.msgVars?.order ?? a.taskId ?? '');
-  const grp = o.groupLabel ? `<b>${_esc(o.groupLabel)}</b> ` : '';
   return `<div class="am-xwrap" role="listitem" data-alert-id="${id}">`
     + `<div class="am-xrow am-xrow-${a.sev}${o.hideMachine ? ' am-xrow-nomc' : ''}${o.open ? ' open' : ''}" tabindex="0" data-alert-id="${id}" aria-expanded="${o.open}">`
     + `<span class="am-sev am-sev-${a.sev}" aria-hidden="true">${_sevGlyph(a.type, a.sev)}</span>`
@@ -904,7 +919,7 @@ export function rowHtml(a: NimbusAlert, o: CompactRowOpts): string {
     + `<span class="am-sub">`
     + `<span class="am-mat" title="${_esc(o.material)}">${_esc(o.material)}</span>`
     + (o.hideMachine ? '' : `<span class="am-mc">${_esc(a.line ?? '')}</span>`)
-    + `<span class="am-tag" title="${_esc(o.tag)}">${grp}${_esc(o.tag)}</span>`
+    + `<span class="am-tag" title="${_esc(o.tag)}">${_esc(o.tag)}</span>`
     + `<span class="am-due${o.overdue ? ' am-when-overdue' : ''}">${_esc(o.dueText ?? '')}</span>`
     + `</span>`
     + `<span class="am-acts">${btns.join('')}</span>`
