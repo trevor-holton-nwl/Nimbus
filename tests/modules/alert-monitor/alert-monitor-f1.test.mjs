@@ -102,6 +102,7 @@ test('CSS: matrix data columns are 64 px and the box scrolls in both axes', () =
   assert.match(CSS, /\.am-mx-table th:not\(\.am-mx-rh\), \.am-mx-table td:not\(\.am-mx-rh\)\s*\{[^}]*width:\s*64px;[^}]*min-width:\s*64px/);
   assert.match(block('.am-mx-scroll {'), /overflow:\s*auto/);
   assert.match(CSS, /th\.am-mx-rh\s*\{[^}]*min-width:\s*240px/);
+  assert.match(CSS, /\.am-mx-ghead th\.am-mx-rh\s*\{[^}]*z-index:\s*3/);
 });
 
 test('clampSideWidth: default, bounds and the matrix floor', () => {

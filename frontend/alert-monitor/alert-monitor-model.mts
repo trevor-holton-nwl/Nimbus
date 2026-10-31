@@ -878,7 +878,7 @@ export interface CompactRowOpts {
   detailHtml?: string;
 }
 
-/** One 32 px Inbox / side-list row: grid `14px 10px 92px minmax(0,1fr) 54px 150px 58px auto`; actions show on hover / focus (CSS). */
+/** One 32 px Inbox / side-list row: grid `14px 10px 92px minmax(0,1fr) 54px 104px 76px auto`; actions show on hover / focus (CSS). */
 export function rowHtml(a: NimbusAlert, o: CompactRowOpts): string {
   const t = o.t;
   const id = _esc(a.id);
