@@ -195,7 +195,7 @@ function _shellHtml(): string {
       </div>
       <span class="am-vsep"></span>
     </span>
-    <div class="am-field">
+    <div class="am-field am-field-search">
       <span class="am-eyebrow">${esc(t('am.search_label'))}</span>
       <input type="search" class="input am-search" id="am-search" data-am-search autocomplete="off"
              placeholder="${esc(t('am.search_ph'))}" aria-label="${esc(t('am.search_ph'))}">

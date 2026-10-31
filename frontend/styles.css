@@ -8095,7 +8095,9 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .am-vsep { width: 1px; height: 36px; background: var(--line); flex: 0 0 auto; }
 .am-eyebrow { font: 600 9.5px 'JetBrains Mono', monospace; letter-spacing: .1em; text-transform: uppercase; color: var(--fg-mute); white-space: nowrap; }
-.am-search { flex: 0 1 300px; width: 300px; min-width: 160px; height: 28px; padding: 3px 8px; font-size: 12px; }
+.am-search { width: 300px; min-width: 160px; height: 28px; padding: 3px 8px; font-size: 12px; }
+.am-field-search { flex: 0 1 300px; min-width: 160px; }
+.am-field-search .am-search { width: 100%; }
 /* Lens reads as a tab (outline ring), View keeps the filled navy seg-btn; scoped by id so the Inbox sort .am-seg is untouched. */
 #am-lens-seg .seg-btn.am-seg-outline.active {
   background: var(--bg-subtle); color: var(--fg); border-color: var(--line);
