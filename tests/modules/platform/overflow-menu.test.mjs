@@ -322,5 +322,5 @@ test('stylesheet puts .ovf-menu above the modal layers', async () => {
   const { readFileSync } = await import('node:fs');
   const css = readFileSync(new URL('../../../frontend/styles.css', import.meta.url), 'utf8');
   const block = /\.ovf-menu \{[^}]*\}/.exec(css)[0];
-  assert.ok(Number(/z-index:\s*(\d+)/.exec(block)[1]) >= 1500);
+  assert.ok(Number(/z-index:\s*(\d+)/.exec(block)[1]) >= 2100);
 });

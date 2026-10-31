@@ -28,14 +28,16 @@ const alert = (o = {}) => ({ id: 'a1', sev: 'warn', type: 'overlap', line: 'L1',
 // ---- categories -----------------------------------------------------------------------------
 
 test('ALERT_CATEGORIES keeps the four legacy groups and adds setup and planning', () => {
-  assert.deepEqual(Object.keys(ALERT_CATEGORIES).sort(), ['calendar', 'capacity', 'conflicts', 'exceptions', 'planning', 'setup']);
-  assert.deepEqual(Object.keys(ALERT_CATEGORIES), ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions'], 'planning sits between setup and exceptions');
+  assert.deepEqual(Object.keys(ALERT_CATEGORIES).sort(), ['calendar', 'capacity', 'conflicts', 'exceptions', 'late', 'planning', 'setup']);
+  assert.deepEqual(Object.keys(ALERT_CATEGORIES), ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'late', 'exceptions'], 'late sits between planning and exceptions');
   assert.deepEqual(ALERT_CATEGORIES.planning, ['queued_now_fits', 'needs_planning']);
   assert.ok(!ALERT_CATEGORIES.exceptions.includes('queued_now_fits'), 'queued_now_fits moved to planning');
   assert.deepEqual(ALERT_CATEGORIES.capacity, ['overload', 'near-capacity']);
   assert.deepEqual(ALERT_CATEGORIES.conflicts, ['overlap', 'tool-conflict', 'distribution-separation']);
   assert.ok(ALERT_CATEGORIES.calendar.includes('finish_moved_earlier'));
-  assert.ok(ALERT_CATEGORIES.exceptions.includes('late'));
+  assert.deepEqual(ALERT_CATEGORIES.late, ['late']);
+  assert.ok(!ALERT_CATEGORIES.exceptions.includes('late'), 'late left Other');
+  assert.ok(ALERT_CATEGORIES.exceptions.includes('reversal_forward'), 'reversal_forward stays in Other');
   assert.deepEqual(ALERT_CATEGORIES.setup, [
     'setup-violated', 'setup-uncovered', 'initial-state-unknown', 'current-state-diverged',
     'override-inactive', 'predecessor-state-unknown', 'successor-state-unknown',
@@ -47,7 +49,7 @@ test('categoryOf maps every listed type and falls back to exceptions', () => {
   assert.equal(categoryOf('tool-conflict'), 'conflicts');
   assert.equal(categoryOf('blackout'), 'calendar');
   assert.equal(categoryOf('setup-uncovered'), 'setup');
-  assert.equal(categoryOf('late'), 'exceptions');
+  assert.equal(categoryOf('late'), 'late');
   assert.equal(categoryOf('needs_planning'), 'planning');
   assert.equal(categoryOf('queued_now_fits'), 'planning');
   assert.equal(categoryOf('not-a-type'), 'exceptions');
@@ -384,7 +386,7 @@ const GA = [
 
 test('groupAlerts by category', () => {
   const g = groupAlerts(GA, 'category', ctx());
-  assert.deepEqual(g.map(x => x.key), ['conflicts', 'exceptions', 'setup']);
+  assert.deepEqual(g.map(x => x.key), ['conflicts', 'late', 'setup']);
   assert.equal(g[0].points, 10.5);
   assert.deepEqual(g[0].alerts.map(a => a.id), ['a', 'b']);
   assert.deepEqual(g[0].vars, { category: 'conflicts' });

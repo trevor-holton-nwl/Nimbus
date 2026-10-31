@@ -20,37 +20,35 @@ import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Util, Config, Modal, Toast, VirtualList, ErrorLog } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
-import type { AlertAck, AlertProfile, NimbusTask } from '../platform/types.mjs';
-import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
+import type { AlertProfile, NimbusTask } from '../platform/types.mjs';
+import { AlertProfileMatches, applyCategoryColors } from '../insights/alert-profile-matches.mjs';
 import type { AlertProfileMatchSet } from '../insights/alert-profile-matches.mjs';
 import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
 import { AlertProfileEditor, canDeleteProfile } from './alert-profile-editor.mjs';
 import { OverflowMenu } from '../platform/overflow-menu.mjs';
 import type { MenuItem } from '../platform/overflow-menu.mjs';
 import { AlertAckModal } from './alert-ack-modal.mjs';
-import { AlertSlotModal, formatSlotOption } from './alert-slot-modal.mjs';
+import { AlertSlotModal } from './alert-slot-modal.mjs';
 import { AlertAcksClient } from '../insights/alert-acks-client.mjs';
 import {
-  ALL_ALERTS_PROFILE_ID, SLOT_ALERT_TYPES, alertOrderIds, resolveActiveProfileId, ackLabel, impactPoints, compareAlerts, groupAlerts, anchorTime, alertDayOffset,
+  ALL_ALERTS_PROFILE_ID, alertOrderIds, resolveActiveProfileId, impactPoints, compareAlerts, anchorTime, alertDayOffset, ALERT_CATEGORY_ORDER, effectiveCategories, categoryOf,
 } from '../insights/alert-profiles.mjs';
-import type { AlertGroup, GroupContext } from '../insights/alert-profiles.mjs';
+import type { GroupContext } from '../insights/alert-profiles.mjs';
 import { Alerts, Compute, Utilization, buildPlantSnapshot } from '../insights/services.mjs';
 import { groupLeverage, analyzeLeverage, replayWithMinutes } from '../insights/alert-leverage.mjs';
 import type { LeverageItem, LeverageInput, LeverageRunner } from '../insights/alert-leverage.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { Engine } from '../optimization/engine.mjs';
+
 import {
-  MONITOR_GROUP_BYS, MONITOR_SORTS, GROUP_ROW_CAP, ROW_H, DIAG_H, GROUP_MOVE_CONFIRM_ABOVE,
-  summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
-  rowActionsFor, rowHtml, rowPrimaryActions, diagnoseHtml, groupHeadHtml, groupMenuItems, groupCounts, groupLabel,
-  relativeDaysText, formatPairKey, fmtNum, profileWindow,
+  GROUP_MOVE_CONFIRM_ABOVE, ROW_H, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  rowActionsFor, rowPrimaryActions, groupCounts, rowHtml, rowDetailHtml, materialOf, tagOf, filterAlerts, filterChips, emptyFilter,
+  filterIsEmpty, makeBucketer, UNGROUPED_KEY, fixesInView, profileWindow,
   fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
-import type { MonitorView, EmptyKind, RowView, LevCtx, GroupHeadView, GroupCounts } from './alert-monitor-model.mjs';
-import {
-  overviewData, applyNarrow, narrowActive, toggleNarrow, pruneNarrow, parseNarrowAttr, overviewHtml, narrowChipHtml,
-} from './alert-monitor-overview.mjs';
-import type { Narrow, NarrowDim, OverviewData, OverviewDeps, OverviewViewDeps, TickParts } from './alert-monitor-overview.mjs';
+import type { MonitorView, MonitorFilter, MonitorCtx, EmptyKind, LevCtx, FilterDim } from './alert-monitor-model.mjs';
+import { matrixModel, matrixHtml, cellFilter, rowFilter, colFilter, filterMatches, clearDims } from './alert-monitor-matrix.mjs';
+import { horizonDays, horizonDayKeys, _memoAnchor } from './alert-monitor-overview.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -65,20 +63,26 @@ interface PaintState {
   showAcked: boolean;
   /** Every alert of the plant's lines (profile and acknowledgement ignored) — what the leverage panel works on (D10). */
   scoped: NimbusAlert[];
-  /** What the profile matched (acknowledged hidden unless asked). */
-  visible: NimbusAlert[];
-  /** What the groups list: `visible`, or the focus set (which bypasses the profile). */
+  /** What the profile matched (acknowledged hidden unless asked): the set both views draw from. */
   listed: NimbusAlert[];
-  /** Focused alerts the profile did not match (the focus chip says so). */
-  focusOutside: number;
-  /** The plant confidence score now (null until computed). */
-  confidence: number | null;
   empty: EmptyKind;
   scopedCount: number;
   /** The plant clock now — the start of the impact horizon. */
   horizonStart: Date;
   horizonMinutes: number;
   plantToday: Date;
+}
+
+/** What the filter produced this paint (derived, never stored). */
+interface Derived {
+  ctx: MonitorCtx;
+  /** The filter both views read: the page's own, or the global machine filter (`Store.selectedLines`) when no machine is chosen. */
+  eff: MonitorFilter;
+  active: boolean;
+  filtered: NimbusAlert[];
+  viewIds: Set<string>;
+  wcByLine: Map<string, string>;
+  bucketOf: (a: NimbusAlert) => string;
 }
 
 /** The ambient `NIMBUS` members this pane reaches (the classic-script bridge; never a real import). */
@@ -89,24 +93,17 @@ interface AmNimbus {
   Timeline?: { gotoLineDay?(line: string, dateStr: string): void };
   OptimizerPreview?: { active?: boolean };
   Inspector?: { _formatRuntimeBasis?(task: NimbusTask): string };
-  Confidence?: { _score?: number; showBreakdown?: () => void };
 }
 const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NIMBUS ?? {};
 
-/** Everything a row / group card needs that is derived once per paint. */
-interface RowCtx {
-  s: PaintState;
-  ctx: GroupContext;
-}
-
-const GROUP_LABEL_KEY: Record<string, string> = {
-  category: 'am.group_category', type: 'am.group_type', line: 'am.group_line',
-  day: 'am.group_day', order: 'am.group_order', none: 'am.group_none',
-};
-const SORT_LABEL_KEY: Record<string, string> = { impact: 'am.sort_impact', time: 'am.sort_time' };
-
 /** Sentinel option id of the picker's "+ New profile…" row; it never reaches setSessionProfile. */
 const NEW_PROFILE_ID = '__new__';
+/** Rows the matrix side list renders before "Open all N in Inbox →". */
+const SIDE_CAP = 80;
+/** Height (px) added under the open Inbox row: 4 detail lines of 18 px plus 12 px of padding and gaps (measured against `.am-xdetail`; keep in step with it). */
+const DETAIL_H = 96;
+/** Machine facet entries before its search box appears. */
+const FACET_SEARCH_ABOVE = 10;
 
 let _wired = false;
 let _active = false;
@@ -115,20 +112,19 @@ const _lastHtml = new Map<string, string>();
 let _comboFiltered: Array<{ id: string; label: string }> = [];
 let _comboActive = -1;
 
-// Transient view state — reset on plant change (and by resetView()).
-const _collapsed = new Set<string>();     // group keys the user folded
-const _showAll = new Set<string>();       // group keys expanded past the row cap
-const _diagOpen = new Set<string>();      // alert ids whose inline diagnose panel is open
-let _focusIds: Set<string> | null = null; // "Show alerts" focus: list only these, bypassing the profile
-let _focusTitle = '';
-let _narrow: Narrow = {};                 // Overview band click-to-narrow (view-only AND filter; never persisted)
-let _ovLinesAll = false;                  // the Where panel's "+N more" expansion
-let _lastProfileId: string | undefined;
+// Transient view state — reset on plant change (and by resetView()). The filter is session-only: never persisted.
+let _filter: MonitorFilter = emptyFilter();
+let _openRow: string | null = null;           // the one Inbox row whose detail is open
+let _sort: 'impact' | 'time' = 'impact';      // the Inbox toolbar's Priority / Date sort
+let _facetQ = '';                              // the machine facet's search box
+const _collapsed = new Set<string>();         // `${lens}|${group}`: machine-lens groups the user folded
+const _quietOpen = new Set<string>();         // work-center groups whose quiet machines are shown
 let _lastPlant: string | null | undefined;
-let _groupsByKey = new Map<string, AlertGroup>();
-let _vl: VirtualList<NimbusAlert> | null = null;   // group-by none only
+let _vl: VirtualList<NimbusAlert> | null = null;   // the Inbox list
 let _vlEl: HTMLElement | null = null;
-let _rowCtx: RowCtx | null = null;
+let _scrollInboxTop = false;                  // set by a filter change: the Inbox list returns to its first row on the next paint
+let _d: Derived | null = null;                // the last paint's derived set (actions read it)
+let _s: PaintState | null = null;
 
 /* ---------------------------------------------------------------------------
    DOM helpers
@@ -152,13 +148,16 @@ function _setText(id: string, text: string): void {
 }
 
 
+
 /* ---------------------------------------------------------------------------
-   Shell — built once into #alerts-tab
+   Shell — built once into #alerts-tab. Every control (search, the two segmented controls, the chips) lives here and is
+   shown / hidden; only `#am-body` and the side list are re-rendered, so typing in the search box never loses focus.
    ------------------------------------------------------------------------- */
 function _shellHtml(): string {
-  const groupOpts = MONITOR_GROUP_BYS.map(g => `<option value="${g}">${esc(t(GROUP_LABEL_KEY[g]))}</option>`).join('');
-  const sortBtns = MONITOR_SORTS.map(s =>
-    `<button type="button" class="seg-btn" data-am-sort="${s}" aria-pressed="false">${esc(t(SORT_LABEL_KEY[s]))}</button>`).join('');
+  const seg = (attr: string, id: string, labelKey: string, items: Array<[string, string]>): string =>
+    `<div class="am-seg" id="${id}" role="group" aria-label="${esc(t(labelKey))}">`
+    + items.map(([v, key]) => `<button type="button" class="seg-btn" data-am-${attr}="${v}" aria-pressed="false">${esc(t(key))}</button>`).join('')
+    + `</div>`;
   return `
 <div class="am-head" id="am-head">
   <div class="am-head-row">
@@ -178,23 +177,26 @@ function _shellHtml(): string {
     <button type="button" class="icon-btn" id="am-page-menu" data-am-action="page-menu" data-ovf-key="page"
             aria-label="${esc(t('am.page_menu'))}" title="${esc(t('am.page_menu'))}" aria-haspopup="menu" aria-expanded="false">⋯</button>
   </div>
-  <div class="am-summary" id="am-summary"></div>
-  <div class="am-head-row am-controls">
-    <label class="am-ctl-label" for="am-group-sel">${esc(t('am.group_by'))}</label>
-    <select class="input am-group-sel" id="am-group-sel" data-am-group-sel>${groupOpts}</select>
-    <span class="am-ctl-label" id="am-sort-label">${esc(t('am.sort_by'))}</span>
-    <div class="am-seg" id="am-seg" role="group" aria-labelledby="am-sort-label">${sortBtns}</div>
-    <div class="am-narrow-chip" id="am-narrow-chip" hidden></div>
+  <div class="am-head-row am-sum-row">
+    <div class="am-summary" id="am-summary"></div>
+    <div class="am-gantt-chip" id="am-gantt-chip" hidden></div>
+  </div>
+  <div class="am-head-row am-ctl-row">
+    ${seg('set-view', 'am-view-seg', 'am.view_label', [['inbox', 'am.view_inbox'], ['matrix', 'am.view_matrix']])}
+    <span class="am-lens-wrap" id="am-lens-wrap">
+      <span class="am-ctl-label" id="am-lens-label">${esc(t('am.lens_label'))}</span>
+      ${seg('set-lens', 'am-lens-seg', 'am.lens_label', [['machine', 'am.lens_machine'], ['day', 'am.lens_day'], ['group', 'am.lens_group']])}
+    </span>
+    <input type="search" class="input am-search" id="am-search" data-am-search autocomplete="off"
+           placeholder="${esc(t('am.search_ph'))}" aria-label="${esc(t('am.search_ph'))}">
+    <div class="am-chips" id="am-chips" hidden></div>
   </div>
 </div>
 <div class="am-scroll" id="am-scroll">
   <div id="am-banner"></div>
   <div id="am-prompt"></div>
-  <div id="am-overview" hidden></div>
   <div id="am-leverage"></div>
-  <div class="am-focus-chip" id="am-focus-chip" hidden></div>
-  <div class="am-sr-only" id="am-narrow-status" role="status" aria-live="polite" aria-atomic="true"></div>
-  <div id="am-groups"></div>
+  <div id="am-body" class="am-body"></div>
 </div>`;
 }
 
@@ -206,6 +208,8 @@ function _ensureShell(): void {
   root.innerHTML = _shellHtml();
   root.addEventListener('click', _onClick);
   root.addEventListener('change', _onChange);
+  root.addEventListener('input', _onInput);
+  root.addEventListener('keydown', _onKeydown);
   _wireCombo();
 }
 
@@ -316,14 +320,14 @@ function _wireCombo(): void {
   input.addEventListener('blur', () => setTimeout(() => { close(); reflect(); }, 120));
 }
 
+
 /* ---------------------------------------------------------------------------
    Actions
    ------------------------------------------------------------------------- */
-/** Writes only the changed key: the other one keeps following its default (Machine / the profile's ranking) until the user sets it. */
+/** Read-modify-write of `alertMonitorView['*'] = {view, lens}` (one page-wide choice; earlier per-profile `groupBy` entries are ignored once it exists). */
 function _persistView(patch: Partial<MonitorView>): void {
-  const m = AlertProfileMatches.view();
   const stored = (Store.pref('alertMonitorView') as Record<string, Record<string, unknown> | undefined> | null | undefined) ?? {};
-  Session.setPref('alertMonitorView', { ...stored, [m.profileId]: { ...(stored[m.profileId] ?? {}), ...patch } });
+  Session.setPref('alertMonitorView', { ...stored, '*': { ...(stored['*'] ?? {}), ...patch } });
   _paint();
 }
 
@@ -358,89 +362,147 @@ function _makeDefault(): void {
   AlertProfileMatches.setSessionProfile(null);   // the pref now says the same thing
 }
 
-/** Click a band bar / a chip's ×: change the narrow, repaint, then put focus on the control that took the click's place. */
-function _setNarrow(next: Narrow, refocusAttr: string, opts: { scroll?: boolean; fromStrip?: boolean } = {}): void {
-  _narrow = next;
+/* ---- Filter state (session-only) ---- */
+const _DIMS = ['machines', 'wcGroups', 'days', 'categories'] as const;
+
+/** A filter change: the fixes list rewinds to its first page, then one repaint and the caller's focus restore. */
+function _filterChanged(refocus?: () => void): void {
+  _levShown = LEV_TOP_N;
+  _scrollInboxTop = true;
   _paint();
-  _refocusNarrow(refocusAttr, opts.fromStrip === true);
-  if (opts.scroll) _scrollListIntoView();
+  refocus?.();
 }
 
-/** After a chart click activates a narrow the list sits below the band: bring it into view (never smooth under reduced motion). */
-function _scrollListIntoView(): void {
-  const list = _el('am-groups');
-  if (!list?.scrollIntoView) return;
-  const reduce = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
-  list.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
-}
-
-/** Not inside a `hidden` ancestor (the collapsed band body) or an `aria-hidden="true"` one (the What strip) and, where layout exists, not display:none. Stub-safe. */
-function _isVisible(el: HTMLElement): boolean {
-  for (let n: HTMLElement | null = el; n; n = n.parentElement ?? (n.parentNode as HTMLElement | null)) {
-    if (n.nodeType === 1 && (n.hidden === true || n.hasAttribute?.('hidden'))) return false;
-    if (n.getAttribute?.('aria-hidden') === 'true') return false;
+/** A matrix click: the filter this part names replaces those dimensions; clicking the filter that is already set clears exactly them. */
+function _applyPart(part: Partial<MonitorFilter>, refocus?: () => void): void {
+  if (filterMatches(_filter, part)) { _filter = clearDims(_filter, part); } else {
+    const next = { ..._filter } as unknown as Record<string, unknown>;
+    for (const dim of _DIMS) if (part[dim]) next[dim] = new Set(part[dim] as Set<string>);
+    _filter = next as unknown as MonitorFilter;
   }
-  return !('offsetParent' in el) || (el as HTMLElement).offsetParent !== null || el.getClientRects?.().length > 0;
+  _filterChanged(refocus);
 }
 
-/** Match by attribute value, never by building a selector from it (line names may hold spaces or quotes). */
-function _findNarrowBar(attr: string, fromStrip = false): HTMLElement | undefined {
-  const bars = Array.from(_el('am-overview')?.querySelectorAll?.<HTMLElement>('[data-am-narrow]') ?? []);
-  const hits = bars.filter(el => el.getAttribute('data-am-narrow') === attr && _isVisible(el));
-  // A category has two controls (strip segment, legend row): land on the kind that took the click.
-  return hits.find(el => (el.classList?.contains?.('am-ov-cat') === true) === fromStrip) ?? hits[0];
+/** An Inbox facet toggle (`dim:key`); the machine facet belongs to exactly one work-center group, so it clears when that stops being true. */
+function _toggleFacet(dim: FilterDim, key: string): void {
+  if (dim === 'q') return;
+  const set = new Set(_filter[dim] as Set<string>);
+  if (set.has(key)) set.delete(key); else set.add(key);
+  const next = { ..._filter, [dim]: set } as MonitorFilter;
+  if (dim === 'wcGroups') { _facetQ = ''; if (set.size !== 1) next.machines = new Set(); }
+  _filter = next;
+  _filterChanged();
 }
 
-function _refocusNarrow(attr: string, fromStrip = false): void {
-  const next = _findNarrowBar(attr, fromStrip);
-  if (next) { next.focus?.({ preventScroll: true }); return; }
-  const chip = _el('am-narrow-chip');
-  const clear = chip?.querySelector?.<HTMLElement>('[data-am-action="clear-narrow"]');
-  if (clear) { clear.focus?.(); return; }
-  const toggle = _el('am-overview')?.querySelector?.<HTMLElement>('[data-am-action="ov-toggle"]');
-  toggle?.focus?.();
+function _removeChip(dim: FilterDim, key: string): void {
+  if (dim === 'q') {
+    _filter = { ..._filter, q: '' };
+    const box = _el<HTMLInputElement>('am-search');
+    if (box) box.value = '';
+  } else {
+    const set = new Set(_filter[dim] as Set<string>);
+    set.delete(key);
+    _filter = { ..._filter, [dim]: set } as MonitorFilter;
+    if (dim === 'wcGroups' && set.size !== 1) _filter.machines = new Set();
+  }
+  _filterChanged();
 }
 
-function _refocusAction(action: string): void {
-  const els = Array.from(_el('am-overview')?.querySelectorAll?.<HTMLElement>('[data-am-action]') ?? []);
-  els.find(el => el.getAttribute('data-am-action') === action)?.focus?.();
+function _clearFilter(): void {
+  _filter = emptyFilter();
+  _facetQ = '';
+  const box = _el<HTMLInputElement>('am-search');
+  if (box) box.value = '';
+  _filterChanged();
+}
+
+function _refocusWhere(selector: string, match: (el: HTMLElement) => boolean): void {
+  const els = Array.from(document.querySelectorAll?.<HTMLElement>(selector) ?? []);
+  els.find(match)?.focus?.({ preventScroll: true });
+}
+
+const _isParsedDim = (d: string): d is FilterDim => d === 'machines' || d === 'wcGroups' || d === 'days' || d === 'categories' || d === 'q';
+
+function _toggleRow(id: string): void {
+  _openRow = _openRow === id ? null : id;
+  _paint();
+  _refocusWhere('.am-xrow', el => el.getAttribute('data-alert-id') === id);
 }
 
 function _onClick(e: Event): void {
   const target = e.target as HTMLElement | null;
-  const bar = target?.closest?.('[data-am-narrow]') as HTMLElement | null;
-  if (bar) {
-    const attr = bar.getAttribute?.('data-am-narrow') ?? '';
-    const p = parseNarrowAttr(attr);
-    if (p) {
-      const next = toggleNarrow(_narrow, p.dim, p.value);
-      _setNarrow(next, attr, { scroll: next[p.dim] === p.value, fromStrip: bar.classList?.contains?.('am-ov-cat') === true });
+  const q = (sel: string): HTMLElement | null => (target?.closest?.(sel) as HTMLElement | null) ?? null;
+  const chip = q('[data-am-chip]');
+  if (chip) {
+    const [dim, ...rest] = (chip.getAttribute?.('data-am-chip') ?? chip.dataset?.amChip ?? '').split(':');
+    if (dim && _isParsedDim(dim)) _removeChip(dim, rest.join(':'));
+    return;
+  }
+  const viewBtn = q('[data-am-set-view]');
+  const viewId = viewBtn?.dataset.amSetView;
+  if (viewId === 'inbox' || viewId === 'matrix') { _persistView({ view: viewId }); return; }
+  const lensBtn = q('[data-am-set-lens]');
+  const lensId = lensBtn?.dataset.amSetLens;
+  if (lensId === 'machine' || lensId === 'day' || lensId === 'group') { _persistView({ lens: lensId }); return; }
+  const sortBtn = q('[data-am-sort]');
+  const sortId = sortBtn?.dataset.amSort;
+  if (sortId === 'impact' || sortId === 'time') { _sort = sortId; _paint(); return; }
+  const facet = q('[data-am-facet]');
+  if (facet) {
+    const raw = facet.getAttribute?.('data-am-facet') ?? facet.dataset?.amFacet ?? '';
+    const i = raw.indexOf(':');
+    const dim = raw.slice(0, i);
+    if (i > 0 && _isParsedDim(dim)) {
+      _toggleFacet(dim, raw.slice(i + 1));
+      _refocusWhere('[data-am-facet]', el => (el.getAttribute('data-am-facet') ?? '') === raw);
     }
     return;
   }
-  const x = target?.closest?.('[data-am-narrow-clear]') as HTMLElement | null;
-  if (x) {
-    const dim = (x.getAttribute?.('data-am-narrow-clear') ?? x.dataset?.amNarrowClear) as NarrowDim | undefined;
-    if (dim === 'day' || dim === 'line' || dim === 'category') {
-      const was = _narrow[dim];
-      const next = { ..._narrow };
-      delete next[dim];
-      _setNarrow(next, was ? `${dim}:${was}` : '');
-    }
+  const lens = _s?.view.lens ?? 'machine';
+  const cell = q('[data-am-cell]');
+  if (cell) {
+    const row = cell.getAttribute?.('data-am-row') ?? cell.dataset?.amRow ?? '';
+    const col = cell.getAttribute?.('data-am-col') ?? cell.dataset?.amCol ?? '';
+    const key = cell.getAttribute?.('data-am-cell') ?? cell.dataset?.amCell ?? '';
+    _applyPart(cellFilter(lens, row, col), () => _refocusWhere('[data-am-cell]', el => (el.getAttribute('data-am-cell') ?? '') === key));
     return;
   }
-  const seg = target?.closest?.('[data-am-sort]') as HTMLElement | null;
-  const sortId = seg?.dataset.amSort as MonitorView['sort'] | undefined;
-  if (sortId && MONITOR_SORTS.includes(sortId)) { _persistView({ sort: sortId }); return; }
-  const lev = target?.closest?.('[data-lev-action]') as HTMLElement | null;
+  const rowh = q('.am-mx-rowh');
+  if (rowh) {
+    const row = rowh.getAttribute?.('data-am-row') ?? rowh.dataset?.amRow ?? '';
+    _applyPart(rowFilter(lens, row), () => _refocusWhere('.am-mx-rowh', el => el.getAttribute('data-am-row') === row));
+    return;
+  }
+  const colh = q('.am-mx-colh');
+  if (colh) {
+    const col = colh.getAttribute?.('data-am-col') ?? colh.dataset?.amCol ?? '';
+    _applyPart(colFilter(lens, col), () => _refocusWhere('.am-mx-colh', el => el.getAttribute('data-am-col') === col));
+    return;
+  }
+  const caret = q('.am-mx-caret');
+  if (caret) {
+    const g = caret.getAttribute?.('data-am-group') ?? caret.dataset?.amGroup ?? '';
+    const k = `${lens}|${g}`;
+    if (_collapsed.has(k)) _collapsed.delete(k); else _collapsed.add(k);
+    _paint();
+    _refocusWhere('.am-mx-caret', el => el.getAttribute('data-am-group') === g);
+    return;
+  }
+  const quiet = q('[data-am-quiet]');
+  if (quiet) {
+    const g = quiet.getAttribute?.('data-am-quiet') ?? quiet.dataset?.amQuiet ?? '';
+    if (_quietOpen.has(g)) _quietOpen.delete(g); else _quietOpen.add(g);
+    _paint();
+    _refocusWhere('[data-am-quiet]', el => el.getAttribute('data-am-quiet') === g);
+    return;
+  }
+  const lev = q('[data-lev-action]');
   if (lev?.dataset.levAction) { _onLevAction(lev.dataset.levAction, lev.dataset.levKey ?? ''); return; }
-  const levMenu = target?.closest?.('[data-lev-menu]') as HTMLElement | null;
+  const levMenu = q('[data-lev-menu]');
   if (levMenu?.dataset.levMenu) { _openFixMenu(levMenu, levMenu.dataset.levMenu); return; }
-  const rowMenu = target?.closest?.('.am-row-menu') as HTMLElement | null;
+  const rowMenu = q('.am-row-menu');
   if (rowMenu?.dataset.alertId) { _openRowMenu(rowMenu, rowMenu.dataset.alertId); return; }
-  const groupMenu = target?.closest?.('.am-group-menu') as HTMLElement | null;
-  if (groupMenu?.dataset.groupKey) { _openGroupMenu(groupMenu, groupMenu.dataset.groupKey); return; }
-  const btn = target?.closest?.('[data-am-action]') as HTMLElement | null;
+  const btn = q('[data-am-action]');
   switch (btn?.dataset.amAction) {
     case 'make-default': _makeDefault(); break;
     case 'switch-all':   AlertProfileMatches.setSessionProfile(ALL_ALERTS_PROFILE_ID); break;
@@ -451,40 +513,53 @@ function _onClick(e: Event): void {
       break;
     }
     case 'page-menu': if (btn) _openPageMenu(btn); break;
-    case 'summary-conf':
-      _nim().Confidence?.showBreakdown?.();
-      break;
-    case 'ov-toggle': {
-      Session.setPref('alertMonitorOverview', Store.pref('alertMonitorOverview') === 'collapsed' ? 'open' : 'collapsed');
-      _paint();
-      _refocusAction('ov-toggle');
-      break;
-    }
-    case 'ov-lines-more': _ovLinesAll = !_ovLinesAll; _paint(); _refocusAction('ov-lines-more'); break;
-    case 'clear-narrow': _setNarrow({}, ''); break;
-    case 'toggle-group': _toggleGroup(btn!.dataset.groupKey ?? ''); break;
-    case 'show-all':
-      if (btn!.dataset.groupKey) { _showAll.add(btn!.dataset.groupKey); _paint(); }
-      break;
-    case 'group-move': _moveGroup(btn!.dataset.groupKey ?? ''); break;
-    case 'clear-focus': AlertMonitorPane.clearFocus(); break;
+    case 'clear-filter': _clearFilter(); break;
+    case 'clear-outline': AlertProfileMatches.setFocusTaskIds(null); break;   // the subscription repaints the chip
+    case 'open-inbox': _persistView({ view: 'inbox' }); break;
+    case 'show-gantt': if (_d) _showOnGantt(_d.filtered); break;
+    case 'move-view': _moveView(); break;
+    case 'ack-view': _ackView(); break;
     case 'fixes-show-more': _showMoreFixes(); break;
     case 'fixes-admin-toggle':
       _levAdminOpen = !_levAdminOpen; _paint();
       document.querySelector?.<HTMLElement>('[data-am-action="fixes-admin-toggle"]')?.focus?.();   // the repaint replaced the button
       break;
     default: {
-      const act = target?.closest?.('[data-alert-action]') as HTMLElement | null;
-      if (act?.dataset.alertAction) _onAlertAction(act);
+      const act = q('[data-alert-action]');
+      if (act?.dataset.alertAction) { _onAlertAction(act); break; }
+      const row = q('.am-xrow');
+      const rid = row?.getAttribute?.('data-alert-id') ?? row?.dataset?.alertId;
+      if (rid) _toggleRow(rid);
       break;
     }
   }
 }
 
-function _toggleGroup(key: string): void {
-  if (!key) return;
-  if (_collapsed.has(key)) _collapsed.delete(key); else _collapsed.add(key);
-  _paint();
+/** Enter on a focused row (the row itself, not a button inside it) opens or closes its detail. */
+function _onKeydown(e: Event): void {
+  const ke = e as KeyboardEvent;
+  if (ke.key !== 'Enter') return;
+  const target = ke.target as HTMLElement | null;
+  const row = target?.closest?.('.am-xrow') as HTMLElement | null;
+  if (!row || target !== row) return;
+  const rid = row.getAttribute?.('data-alert-id') ?? row.dataset?.alertId;
+  if (!rid) return;
+  ke.preventDefault?.();
+  _toggleRow(rid);
+}
+
+function _onInput(e: Event): void {
+  const target = e.target as HTMLInputElement | null;
+  const box = target?.closest?.('[data-am-search]') as HTMLInputElement | null;
+  if (box) { _filter = { ..._filter, q: String(box.value ?? '') }; _filterChanged(); return; }
+  const fq = target?.closest?.('[data-am-facet-q]') as HTMLInputElement | null;
+  if (fq) {
+    _facetQ = String(fq.value ?? '');
+    _paint();
+    const next = _el<HTMLInputElement>('am-facet-q');
+    next?.focus?.({ preventScroll: true });
+    try { next?.setSelectionRange?.(_facetQ.length, _facetQ.length); } catch { /* not a text input in a stub */ }
+  }
 }
 
 const _isAcked = (id: string): boolean => AlertProfileMatches.view().acked.has(id);
@@ -497,25 +572,16 @@ function _refocusKey(key: string): boolean {
   return true;
 }
 
-/** Where focus goes when a row's own trigger is gone after an action: the next (else previous) row of its group, else the group head. */
-function _rowNeighbours(alertId: string): { groupKey: string | null; near: string[] } {
-  for (const g of _groupsByKey.values()) {
-    const i = g.alerts.findIndex(a => a.id === alertId);
-    if (i < 0) continue;
-    return { groupKey: g.key, near: [g.alerts[i + 1]?.id, g.alerts[i - 1]?.id].filter((x): x is string => !!x) };
-  }
-  return { groupKey: null, near: [] };
+/** The rows next to an alert in the current view: where focus goes when its own trigger is gone after an action. */
+function _rowNear(alertId: string): string[] {
+  const list = _d?.filtered ?? [];
+  const i = list.findIndex(a => a.id === alertId);
+  return i < 0 ? [] : [list[i + 1]?.id, list[i - 1]?.id].filter((x): x is string => !!x);
 }
 
-function _restoreRowFocus(alertId: string, nav: { groupKey: string | null; near: string[] }): void {
+function _restoreRowFocus(alertId: string, near: string[]): void {
   if (_refocusKey(alertId)) return;
-  for (const id of nav.near) if (_refocusKey(id)) return;
-  if (nav.groupKey) _focusGroupHead(nav.groupKey);
-}
-
-function _focusGroupHead(key: string): void {
-  const heads = Array.from(document.querySelectorAll?.<HTMLElement>('[data-am-action="toggle-group"]') ?? []);
-  heads.find(el => el.dataset.groupKey === key)?.focus?.();
+  for (const id of near) if (_refocusKey(id)) return;
 }
 
 /** The ⋯ menu of a row: its items carry the same data-alert-action / data-alert-id as the buttons and run through the same dispatcher. */
@@ -538,9 +604,9 @@ function _openRowMenu(anchor: HTMLElement, alertId: string): void {
         _runAlertAction(m.action, alertId, taskId);
         return;
       }
-      // fix / diagnose / unack change what the list shows: repaint now, then put focus on this row's new trigger (or its neighbour).
-      const nav = _rowNeighbours(alertId);
-      const done = (): void => { if (_active) _paint(); _restoreRowFocus(alertId, nav); };
+      // fix / diagnose / unack change what the view shows: repaint now, then put focus on this row's new trigger (or its neighbour).
+      const near = _rowNear(alertId);
+      const done = (): void => { if (_active) _paint(); _restoreRowFocus(alertId, near); };
       const pending = _runAlertAction(m.action, alertId, taskId);
       if (pending) void pending.then(done); else done();
     },
@@ -548,53 +614,24 @@ function _openRowMenu(anchor: HTMLElement, alertId: string): void {
   OverflowMenu.open(anchor, items, { align: 'end', key: alertId });
 }
 
-/** The ⋯ menu of a group head: Go to (first alert), Move N orders, Open these N orders in the table, Acknowledge N…. */
-function _openGroupMenu(anchor: HTMLElement, key: string): void {
-  const g = _groupsByKey.get(key);
-  if (!g || !_rowCtx) return;
-  const head = _headView(g, _rowCtx, !_collapsed.has(key));
-  const items: MenuItem[] = groupMenuItems(head).map(m => ({
-    id: m.id,
-    label: t(m.labelKey, m.vars),
-    disabled: m.disabled === true,
-    hint: m.hintKey ? t(m.hintKey) : undefined,
-    data: (m.id === 'goto' ? { alertAction: 'focus', alertId: head.firstAlertId ?? '' } : { amAction: `group-${m.id}`, groupKey: key }) as Record<string, string>,
-    onSelect: () => {
-      switch (m.id) {
-        case 'goto': if (head.firstAlertId) _runAlertAction('focus', head.firstAlertId); break;
-        case 'move': _moveGroup(key); break;
-        case 'open-table': _openGroupInTable(key); break;
-        case 'ack': _ackGroup(key); break;
-      }
-    },
-  }));
-  OverflowMenu.open(anchor, items, { align: 'end', key });
-}
-
-/** "Acknowledge N…": one reason / end date for every not-yet-acknowledged alert of the whole group (not just the rendered rows). */
-function _ackGroup(key: string): void {
-  const g = _groupsByKey.get(key);
-  const plant = Store.selectedPlant;
-  if (!g || !plant) return;
-  const ids = groupCounts(g.alerts, _isAcked).unackedIds;
-  if (ids.length) AlertAckModal.open({ plant, alertIds: ids });
-}
-
-/**
- * "Move N orders": confirms above GROUP_MOVE_CONFIRM_ABOVE, then runs the one-click fix on each movable alert of the
- * whole group in turn. Not available in What-If (the plan is a sandbox there).
- */
-function _moveGroup(key: string): void {
-  if (Sandbox.active) return;
-  const g = _groupsByKey.get(key);
-  if (!g) return;
-  const counts = groupCounts(g.alerts, () => false);
-  const ids = counts.movableIds;
+/** "Move N…": confirms above GROUP_MOVE_CONFIRM_ABOVE, then runs the one-click fix on each movable alert in view in turn. Not available in What-If. */
+function _moveView(): void {
+  if (Sandbox.active || !_d) return;
+  const counts = groupCounts(_d.filtered, () => false);
   const n = counts.movableOrders;   // distinct orders, as the button says
   if (n === 0) return;
-  if (n <= GROUP_MOVE_CONFIRM_ABOVE) { void _runBatchMove(key, ids); return; }
+  const ids = counts.movableIds;
+  if (n <= GROUP_MOVE_CONFIRM_ABOVE) { void _runBatchMove(ids); return; }
   void Modal.confirm({ title: t('am.group_fix_n', { n }), message: t('am.group_fix_confirm', { n }) })
-    .then(ok => { if (ok) void _runBatchMove(key, ids); });
+    .then(ok => { if (ok) void _runBatchMove(ids); });
+}
+
+/** "Acknowledge N…": one reason / end date for every not-yet-acknowledged alert in view (not just the rendered rows). */
+function _ackView(): void {
+  const plant = Store.selectedPlant;
+  if (!_d || !plant) return;
+  const ids = groupCounts(_d.filtered, _isAcked).unackedIds;
+  if (ids.length) AlertAckModal.open({ plant, alertIds: ids });
 }
 
 /**
@@ -602,9 +639,9 @@ function _moveGroup(key: string): void {
  * nothing changed and the alert stays, e.g. a Fix overload that would leave an error or was cancelled at the tooling confirm; the
  * batch then simply continues with the next alert), so an id that has left Store.alerts afterwards means that order moved. The moved order's other alerts (and its peers' alerts) stay in
  * Store.alerts until the debounced recompute, so any alert naming an already-moved order is skipped: it describes a
- * position that no longer exists. One summary toast; focus returns to the group head.
+ * position that no longer exists. One summary toast.
  */
-async function _runBatchMove(key: string, ids: string[]): Promise<void> {
+async function _runBatchMove(ids: string[]): Promise<void> {
   if (Sandbox.active) return;
   const movedOrders = new Set<string>();
   let blocked = 0;
@@ -624,17 +661,20 @@ async function _runBatchMove(key: string, ids: string[]): Promise<void> {
     // Refused fixes are quiet inside the batch; one summary here instead of one toast per refused alert.
     if (blocked > 0) Toast.show(t('toast.fix_overload_blocked_batch', { n: blocked }), 'warn', 7000);
     if (_active) _paint();
-    _focusGroupHead(key);
+    _refocusWhere('[data-am-action]', el => el.getAttribute('data-am-action') === 'move-view');
   }
 }
 
 /**
- * "Open these N orders in the table": there is no scroll-to-row API, so the PO/Material paste
- * filter stands in — fill it with the order numbers, apply it, then show the Orders sub-tab.
+ * "Show on Gantt": the outline request goes FIRST (the Gantt follows `focusIds`), then the Gantt jumps to the first alert that has
+ * a line and a time. `AlertsUIAdapter.focus` returns early for an alert with neither, which is fine: the outline still stands.
  */
-function _openGroupInTable(key: string): void {
-  const g = _groupsByKey.get(key);
-  if (g) _openOrdersInTable(g.orderIds);
+function _showOnGantt(alerts: ReadonlyArray<NimbusAlert>): void {
+  const taskIds = new Set<string>();
+  for (const a of alerts) for (const oid of alertOrderIds(a)) taskIds.add(oid);
+  AlertProfileMatches.setFocusTaskIds(taskIds);
+  const first = alerts.find(a => rowActionsFor(a).goto);
+  if (first) _nim().AlertsUIAdapter?.focus?.(first.id);
 }
 
 /** Shared by the group heads and the leverage cards: filter the Orders table to these order ids. */
@@ -683,7 +723,7 @@ function _runAlertAction(action: string | undefined, alertId: string, taskId?: s
       if (kind === 'cell' && a.line && a.time) {
         nim.AlertsUIAdapter?.showForCell?.(a.line, Util.dayKey(a.time));
       } else if (kind === 'order') {
-        if (_diagOpen.has(alertId)) _diagOpen.delete(alertId); else _diagOpen.add(alertId);
+        _openRow = _openRow === alertId ? null : alertId;   // the detail block of this row
         _paint();
       }
       break;
@@ -713,9 +753,7 @@ function _runAlertAction(action: string | undefined, alertId: string, taskId?: s
 function _onChange(e: Event): void {
   const target = e.target as HTMLInputElement | null;
   const mins = target?.closest?.('[data-lev-minutes]') as HTMLInputElement | null;
-  if (mins?.dataset.levMinutes) { void _levMinutesEntered(mins.dataset.levMinutes, String(mins.value ?? '')); return; }
-  const group = target?.closest?.('[data-am-group-sel]') as HTMLSelectElement | null;
-  if (group && MONITOR_GROUP_BYS.includes(group.value as MonitorView['groupBy'])) _persistView({ groupBy: group.value as MonitorView['groupBy'] });
+  if (mins?.dataset.levMinutes) void _levMinutesEntered(mins.dataset.levMinutes, String(mins.value ?? ''));
 }
 
 /* ---------------------------------------------------------------------------
@@ -726,41 +764,62 @@ function _gatherState(): PaintState {
   const m = AlertProfileMatches.view();
   const profilesRaw = plant ? AlertProfileClient.cached(plant) : null;
   const profiles = profilesRaw ?? [];
-  const stored = Store.pref('alertMonitorView') as Parameters<typeof viewFor>[1];
-  const view = viewFor(m.profileId, stored, m.profile);
+  const view = viewFor(Store.pref('alertMonitorView') as Parameters<typeof viewFor>[0], m.profileId);
   const showAcked = Store.pref('alertsShowAcknowledged') === true;
 
   const plantRow = plant ? Store.masterPlant(plant) : null;
   const clock = plant ? Util.plantClock(plant) : new Date();
   const lines = new Set(plant ? Store.linesForSelectedPlant() : []);
   const scoped = horizonAlerts(Store.alerts, lines, null);
-  const visible = visibleAlertsFor(scoped, m.alertIds, m.acked, showAcked);
-  const focus = _focusIds;
-  const listed = focus ? scoped.filter(a => focus.has(a.id) && (showAcked || !m.acked.has(a.id))) : visible;
-  const focusOutside = focus ? listed.filter(a => !m.alertIds.has(a.id)).length : 0;
+  const listed = visibleAlertsFor(scoped, m.alertIds, m.acked, showAcked);
 
   const confMin = plantRow?.conf_score_horizon ?? (Store.userSettings?.confidenceHorizonMinutes as number | undefined) ?? 20160;
-  const score = _nim().Confidence?._score;
-
   const matchedCount = scoped.filter(a => m.alertIds.has(a.id)).length;
   return {
     plant, m, profiles, profilesLoaded: profilesRaw != null, view,
     defaultId: plant ? _defaultProfileId(plant, profiles) : ALL_ALERTS_PROFILE_ID,
-    showAcked, scoped, visible, listed, focusOutside, scopedCount: scoped.length,
-    confidence: typeof score === 'number' && isFinite(score) ? score : null,
-    // A focus set always lists something or says nothing is left; the profile empty states don't apply to it.
-    empty: focus
-      ? (listed.length ? null : 'no-alerts')
-      : emptyStateFor({
-        plant, scopedCount: scoped.length, matchedCount, visibleCount: visible.length,
-        isAllAlerts: m.profileId === ALL_ALERTS_PROFILE_ID,
-      }),
+    showAcked, scoped, listed, scopedCount: scoped.length,
+    empty: emptyStateFor({
+      plant, scopedCount: scoped.length, matchedCount, visibleCount: listed.length,
+      isAllAlerts: m.profileId === ALL_ALERTS_PROFILE_ID,
+    }),
     horizonStart: clock, horizonMinutes: confMin,
     plantToday: plant ? Util.plantToday(plant) : (Util.startOfDay(clock) as Date),
   };
 }
 
-/** Header rows 1 and 3: the combobox, Edit / View rules, the default control, the plant badge and the two view controls. */
+const _orderNoOf = (a: NimbusAlert): string => {
+  const task = a.taskId ? Store.tasks[a.taskId] : undefined;
+  return task ? String(task.ORDER ?? task.PRODUCTION_ORDER ?? '') : String(a.msgVars?.order ?? '');
+};
+
+/** The filter's context: the day columns, the due anchor memo, the plant's machines with their work-center group, and the search text sources. */
+function _ctxFor(s: PaintState): MonitorCtx {
+  const anchor = _memoAnchor({ tasksById: Store.tasks, plantToday: s.plantToday, horizonMinutes: s.horizonMinutes, window: profileWindow(s.m.profile) });
+  const lines = s.plant ? Store.masterLinesForPlant(s.plant) : [];
+  return {
+    plantToday: s.plantToday,
+    horizonDays: horizonDays(s.horizonMinutes, profileWindow(s.m.profile)),
+    anchorOf: a => anchor(a, a.taskId ? Store.tasks[a.taskId] : undefined),
+    machines: lines.map(l => ({ id: l.machine, wc_group: l.wc_group })),
+    orderNoOf: _orderNoOf,
+    materialOf: a => materialOf(a, Store.tasks),
+    tagOf: a => tagOf(a, t),
+  };
+}
+
+function _derive(s: PaintState): Derived {
+  const ctx = _ctxFor(s);
+  const sel = Store.selectedLines;   // the global machine filter: read, never replaced
+  const eff: MonitorFilter = _filter.machines.size || !sel.size ? _filter : { ..._filter, machines: new Set(sel) };
+  const active = !filterIsEmpty(eff);
+  const filtered = active ? filterAlerts(s.listed, eff, ctx) : s.listed;
+  const wcByLine = new Map<string, string>();
+  for (const mc of ctx.machines) wcByLine.set(mc.id, mc.wc_group ? String(mc.wc_group) : UNGROUPED_KEY);
+  return { ctx, eff, active, filtered, viewIds: new Set(filtered.map(a => a.id)), wcByLine, bucketOf: makeBucketer(ctx) };
+}
+
+/** Header rows 1 and 3: the combobox, Edit / View rules, the default control, and the static view / lens / search / chip controls. */
 function _syncHeader(s: PaintState): void {
   const input = _el<HTMLInputElement>('am-profile-input');
   if (input) {
@@ -783,29 +842,62 @@ function _syncHeader(s: PaintState): void {
   const note = _el('am-is-default');
   if (note) note.hidden = !isDefault;
 
-  const grp = _el<HTMLSelectElement>('am-group-sel');
-  if (grp) { grp.value = s.view.groupBy; grp.disabled = !s.plant; }
-  document.querySelectorAll<HTMLElement>('[data-am-sort]').forEach(b => {
-    const on = b.dataset.amSort === s.view.sort;
-    b.classList.toggle('active', on);
-    b.setAttribute('aria-pressed', String(on));
-    (b as HTMLButtonElement).disabled = !s.plant;
-  });
+  const press = (attr: 'amSetView' | 'amSetLens', now: string): void => {
+    document.querySelectorAll<HTMLElement>(attr === 'amSetView' ? '[data-am-set-view]' : '[data-am-set-lens]').forEach(b => {
+      const on = b.dataset[attr] === now;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', String(on));
+      (b as HTMLButtonElement).disabled = !s.plant;
+    });
+  };
+  press('amSetView', s.view.view);
+  press('amSetLens', s.view.lens);
+  const lensWrap = _el('am-lens-wrap');
+  if (lensWrap) lensWrap.hidden = s.view.view !== 'matrix';   // the lens belongs to the matrix; the Inbox facets are the three charts at once
+  const box = _el<HTMLInputElement>('am-search');
+  if (box) {
+    box.disabled = !s.plant;
+    if (document.activeElement !== box && box.value !== _filter.q) box.value = _filter.q;
+  }
 }
 
-/** Header row 2: one sentence over the alerts the list shows, ending in the plant-confidence link. */
-function _summaryHtml(s: PaintState): string {
+/** The active filter as removable chips (one per value) plus Clear; empty and hidden when nothing is filtered. */
+function _renderChips(s: PaintState): void {
+  const el = _el('am-chips');
+  if (!el) return;
+  const day = (k: string): string => _dayLabel(k);
+  const chips = filterChips(_filter, {
+    wc: k => (k === UNGROUPED_KEY ? t('am.ungrouped') : k), day, category: c => t(`ape.cat_${c}`),
+  });
+  if (!s.plant || !chips.length) { _setHtml('am-chips', ''); el.hidden = true; return; }
+  _setHtml('am-chips', chips.map(c => `<span class="am-chip"><span class="am-chip-lbl">${esc(c.label)}</span>`
+    + `<button type="button" class="am-chip-x" data-am-chip="${esc(c.dim)}:${esc(c.key)}" aria-label="${esc(t('am.filter_remove', { name: c.label }))}">✕</button></span>`).join('')
+    + `<button type="button" class="btn sm btn-ghost" data-am-action="clear-filter">${esc(t('am.filter_clear'))}</button>`);
+  el.hidden = false;
+}
+
+/** The R2 chip: "◎ N outlined · Clear", read from what the Gantt actually outlines. */
+function _renderGanttChip(): void {
+  const el = _el('am-gantt-chip');
+  if (!el) return;
+  const n = AlertProfileMatches.view().focusIds?.size ?? 0;
+  if (!n) { _setHtml('am-gantt-chip', ''); el.hidden = true; return; }
+  _setHtml('am-gantt-chip', `<span class="am-gantt-n">◎ ${esc(t(n === 1 ? 'am.gantt_outline_one' : 'am.gantt_outline', { n }))}</span>`
+    + `<button type="button" class="btn sm btn-ghost" data-am-action="clear-outline">${esc(t('am.gantt_outline_clear'))}</button>`);
+  el.hidden = false;
+}
+
+/** Header row 2: one sentence in mono counts over the profile's alerts, "showing V" while a filter is on. */
+function _summaryHtml(s: PaintState, d: Derived | null): string {
+  const noisy = new Set<string>();
+  for (const a of s.listed) noisy.add(a.line || '');
+  noisy.delete('');
   const line = summaryLine({
-    hasPlant: !!s.plant, alerts: s.listed, profileId: s.m.profileId, profileName: s.m.profile.name, profile: s.m.profile,
-    focus: _focusIds ? { title: _focusTitle, outside: s.focusOutside } : null, confidence: s.confidence,
+    hasPlant: !!s.plant, alerts: s.listed, profileId: s.m.profileId, profileName: s.m.profile.name, profile: s.m.profile, focus: null,
+    machinesNoisy: noisy.size, machinesTotal: d ? d.ctx.machines.length : 0, showing: d?.active ? d.filtered.length : null,
+    linesSelected: Store.selectedLines.size,
   }, t);
-  let html = `<span>${esc(line.text)}</span>`;
-  if (line.conf) {
-    const { prefix, score, suffix } = line.conf;
-    html += ` · <button type="button" class="am-summary-conf" data-am-action="summary-conf">${esc(prefix)}`
-      + (score ? `<span class="am-summary-num">${esc(score)}</span>` : '') + `${esc(suffix)}</button>`;
-  }
-  return html;
+  return `<span>${esc(line.text)}</span>`;
 }
 
 function _bannerHtml(s: PaintState): string {
@@ -835,6 +927,7 @@ function _emptyHtml(s: PaintState): string {
       return '';
   }
 }
+
 
 /* ---------------------------------------------------------------------------
    High-leverage fixes (#am-leverage) — two phases, one in flight, stale results dropped.
@@ -898,6 +991,7 @@ const _isAbortOrTimeout = (e: unknown): 'abort' | 'timeout' | null => {
 function _levPlanMoved(): void { _levAbortAll(); _levDebounced(); }
 
 let _levItems: LeverageItem[] = [];
+let _levShownItems: LeverageItem[] = [];   // what the panel lists now: _levItems, or only the fixes that touch the filtered view
 let _levInput: LeverageInput | null = null;
 let _levPlant: string | null = null;      // the plant the items belong to
 let _levHave = false;                     // a first pass has produced results for _levPlant
@@ -954,9 +1048,10 @@ function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
   };
 }
 
-function _renderLeverage(s: PaintState): void {
+function _renderLeverage(s: PaintState, d: Derived | null): void {
   if (!s.plant || s.scopedCount === 0) {
     _levReset(null);
+    _levShownItems = [];
     _setHtml('am-leverage', '');
     return;
   }
@@ -967,8 +1062,14 @@ function _renderLeverage(s: PaintState): void {
   if (!_levForcePaint && (document.activeElement as HTMLElement | null)?.classList?.contains('am-fix-min-input')) return;
   const plant = s.plant;
   if (_levItems.some(i => i.family === 'setup-pair')) _ensureSetupAdmin();
-  _setHtml('am-leverage', fixesSectionHtml(_levItems, {
-    isAdmin: Session.isAdmin(), adminOpen: _levAdminOpen, limit: _levShown, computing: !_levHave, ctxFor: it => _levCtxFor(it, plant),
+  // Scoring stays plant-wide (D10 reversed for DISPLAY only): while a filter is on, only the fixes that touch the view are listed.
+  const scopedFixes = d && d.active ? fixesInView(_levItems, d.viewIds) : null;
+  _levShownItems = scopedFixes ? scopedFixes.map(x => x.item) : _levItems;
+  const inView = new Map((scopedFixes ?? []).map(x => [x.item.key, x.inView] as const));
+  _setHtml('am-leverage', fixesSectionHtml(_levShownItems, {
+    isAdmin: Session.isAdmin(), adminOpen: _levAdminOpen, limit: _levShown, computing: !_levHave,
+    noneInView: !!scopedFixes && _levItems.length > 0 && _levShownItems.length === 0,
+    ctxFor: it => (scopedFixes ? { ..._levCtxFor(it, plant), inView: inView.get(it.key) } : _levCtxFor(it, plant)),
   }, t));
 }
 
@@ -1074,7 +1175,7 @@ async function _levMinutesEntered(key: string, raw: string): Promise<void> {
  * is gone (the cap or the end of the list), on the primary button of the first newly revealed row.
  */
 function _showMoreFixes(): void {
-  const main = Session.isAdmin() ? _levItems : _levItems.filter(i => !i.adminOnly);
+  const main = Session.isAdmin() ? _levShownItems : _levShownItems.filter(i => !i.adminOnly);
   const firstNew = main[Math.min(Math.max(_levShown, LEV_TOP_N), LEV_MAX_RENDER)];
   _levShown = Math.min(_levShown + LEV_STEP, LEV_MAX_RENDER);
   _paint();
@@ -1108,18 +1209,10 @@ function _openFixMenu(anchor: HTMLElement, key: string): void {
   OverflowMenu.open(anchor, items, { align: 'end', key });
 }
 
+
 function _levShowAlerts(item: LeverageItem): void {
-  const plant = Store.selectedPlant ?? '';
-  const title = levTitle(item, _levCtxFor(item, plant), t);
   const byId = new Map(Store.alerts.map(a => [a.id, a]));
-  const taskIds = new Set<string>();
-  for (const id of item.alertIds) {
-    const a = byId.get(id);
-    if (a) for (const oid of alertOrderIds(a)) taskIds.add(oid);
-  }
-  AlertMonitorPane.setFocus(item.alertIds, title);
-  AlertProfileMatches.setFocusTaskIds(taskIds);   // the Gantt follows the focused card, not the profile
-  _el('am-groups')?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+  _showOnGantt(item.alertIds.map(id => byId.get(id)).filter((a): a is NimbusAlert => !!a));
 }
 
 async function _copyText(text: string): Promise<void> {
@@ -1248,112 +1341,16 @@ function _levOptimize(item: LeverageItem, line: string, startDay: string, endDay
   void import('../optimization/optimize-ui.mjs').then(m => { m.OptimizeDialog.open({ lines: [line], startDate: start, endDate: end }); });
 }
 
+
 /* ---------------------------------------------------------------------------
-   Groups, rows, diagnose
+   Views: Matrix | Inbox over one filtered set
    ------------------------------------------------------------------------- */
 function _teardownVl(): void {
   if (_vl) { _vl.destroy(); _vl = null; }
   _vlEl = null;
 }
 
-function _makeRowCtx(s: PaintState): RowCtx {
-  const ctx: GroupContext = {
-    tasksById: Store.tasks, horizonStart: s.horizonStart, horizonMinutes: s.horizonMinutes, plantToday: s.plantToday,
-  };
-  return { s, ctx };
-}
-
-function _headline(type: string): string {
-  return _nim().AlertsUIAdapter?.headlineFor?.(type) ?? t(`alert.type.${type}`);
-}
-
-function _ackLabel(ack: AlertAck | undefined): string | null {
-  return ackLabel(ack, t);
-}
-
-/** The inline "why is this late / blocked" panel of an order alert: facts about the order, nothing computed anew. */
-function _diagnoseFor(a: NimbusAlert, task: NimbusTask | undefined, plant: string | null): string {
-  const fields: Array<{ label: string; value: string }> = [];
-  if (task) {
-    const due = Util.dueInstant(task);
-    if (due) fields.push({ label: t('ui.insp_due_date'), value: Util.fmtDTPref(due) });
-    const end = Util.scheduledEnd(task);
-    if (end) fields.push({ label: t('ui.insp_planned_finish'), value: Util.fmtDTPref(end) });
-    const late = Util.latenessHours(task);
-    fields.push({ label: t('ui.late'), value: late > 0 ? `${fmtNum(late)} h` : '—' });
-    const run = Number(task.RUN_TIME);
-    if (task.RUN_TIME != null && task.RUN_TIME !== '' && isFinite(run)) {
-      const basis = _nim().Inspector?._formatRuntimeBasis?.(task) ?? '';
-      fields.push({ label: t('ui.insp_run_time'), value: `${fmtNum(run)} h${basis ? ` · ${basis}` : ''}` });
-    }
-    fields.push({ label: t('ui.insp_firming'), value: Engine.firmingStatus(task).firmed ? Engine.firmStatusText(task) : t('am.diag_not_firmed') });
-  }
-  const pair = formatPairKey(a.pairKey);
-  if (pair) fields.push({ label: t('am.diag_setup'), value: pair });
-  const reason = task?.planning_reason;
-  if (reason) {
-    fields.push({ label: t('am.diag_reason'), value: [reason.code, reason.message, reason.step].filter(Boolean).join(' · ') });
-  }
-  // A queued order's best (machine, day) for the Slot dialog. `suggest` is synchronous and memoised per order and data revision,
-  // and only an open panel gets here, so a paint never ranks more than the few orders being looked at.
-  if (task && plant && SLOT_ALERT_TYPES.has(a.type)) {
-    // The suggestion is for the dialog's default day, so the line names it: "Oct 28 · M2 — 9 of 10 h free ...".
-    const top = AlertSlotModal.suggest(task, plant);
-    const option = formatSlotOption(top, t);
-    fields.push({
-      label: t('am.slot_suggested'),
-      value: top ? t('am.slot_suggested_on', { day: _fmtDay(_noonOf(AlertSlotModal.suggestedDay(task, plant))), option }) : option,
-    });
-  }
-  const helpKey = `alert.help.${a.type}`;
-  const help = t(helpKey);
-  return diagnoseHtml(fields, help === helpKey ? '' : help);
-}
-
-function _rowView(a: NimbusAlert, rc: RowCtx): RowView {
-  const task = a.taskId ? Store.tasks[a.taskId] : undefined;
-  const anchor = anchorTime(a, task);
-  // anchorTime hands back the alert's own time object when the order has no usable due date.
-  const fromDue = !!anchor && anchor !== a.time;
-  const open = _diagOpen.has(a.id);
-  const helpKey = `alert.help.${a.type}`;
-  const help = t(helpKey);
-  const no = task ? String(task.ORDER ?? task.PRODUCTION_ORDER ?? '') : String(a.msgVars?.order ?? '');
-  const offset = anchor ? alertDayOffset(anchor, rc.s.plantToday) : 0;
-  const msgLine = a.msgVars?.line;
-  return {
-    id: a.id, type: a.type, sev: a.sev, taskId: a.taskId, line: a.line, time: a.time,
-    headline: _headline(a.type),
-    message: Util.alertMessage(a),
-    help: help === helpKey ? '' : help,
-    orderNo: no,
-    msgLine: msgLine != null && msgLine !== '' ? String(msgLine) : undefined,
-    groupBy: rc.s.view.groupBy,
-    // The short day label fits the 240 px column; the exact date and time are in the tooltip next to the anchor's name.
-    dateText: anchor ? _fmtDay(anchor) : '',
-    relText: anchor ? relativeDaysText(offset, t) : '',
-    overdue: !!anchor && offset < 0,
-    anchorTip: anchor ? `${t(fromDue ? 'am.anchor_due' : 'am.anchor_time')}: ${Util.fmtDTPref(anchor)}` : t(fromDue ? 'am.anchor_due' : 'am.anchor_time'),
-    whatIf: Sandbox.active === true,
-    ackLabel: _ackLabel(rc.s.m.acked.get(a.id)),
-    diagOpen: open,
-    diagHtml: open ? _diagnoseFor(a, task, Store.selectedPlant ?? null) : '',
-  };
-}
-
-function _groupLabel(by: MonitorView['groupBy'], key: string, rc: RowCtx): string {
-  return groupLabel(by, key, {
-    headlineFor: _headline,
-    orderLabel: id => {
-      const task = Store.tasks[id];
-      return task ? [task.ORDER ?? task.PRODUCTION_ORDER, task.MATERIAL_NUMBER].filter(Boolean).join(' · ') : '';
-    },
-    dayOffset: k => alertDayOffset(new Date(`${k}T12:00:00`), rc.s.plantToday),
-    fmtDay: k => _fmtDay(new Date(`${k}T12:00:00`)),
-  }, t);
-}
-
-/** "Thu 10/23" (weekday in the page language, date per the dateFormat pref): the day label of group heads and of a row's when column. */
+/** "Thu 10/23" (weekday in the page language, date per the dateFormat pref): a day label. */
 function _fmtDay(d: Date): string {
   const lang = document.documentElement?.lang || 'en-US';
   let f = _dayFmt.get(lang);
@@ -1366,197 +1363,238 @@ function _fmtDay(d: Date): string {
 }
 /** One formatter per page language: constructing an Intl.DateTimeFormat per row dominated the row-building cost. */
 const _dayFmt = new Map<string, Intl.DateTimeFormat>();
-
-/** Short weekday / day number / short month in the page language: the stacked day label under each When bar. */
-function _fmtTick(d: Date): TickParts {
-  const lang = document.documentElement?.lang || 'en-US';
-  let f = _tickFmt.get(lang);
-  if (!f) {
-    const mk = (o: Intl.DateTimeFormatOptions): Intl.DateTimeFormat => {
-      try { return new Intl.DateTimeFormat(lang, o); } catch { return new Intl.DateTimeFormat('en-US', o); }
-    };
-    f = { wd: mk({ weekday: 'short' }), day: mk({ day: 'numeric' }), mo: mk({ month: 'short' }) };
-    _tickFmt.set(lang, f);
-  }
-  return { wd: f.wd.format(d), day: f.day.format(d), mo: f.mo.format(d) };
-}
-const _tickFmt = new Map<string, { wd: Intl.DateTimeFormat; day: Intl.DateTimeFormat; mo: Intl.DateTimeFormat }>();
-
-/* ---------------------------------------------------------------------------
-   Overview band (#am-overview) and the narrow chip (#am-narrow-chip)
-   ------------------------------------------------------------------------- */
-interface OverviewState { data: OverviewData; narrow: Narrow; shown: NimbusAlert[]; deps: OverviewDeps }
-
 const _noonOf = (k: string): Date => new Date(`${k}T12:00:00`);
 
-function _ovViewDeps(): OverviewViewDeps {
-  return {
-    t, esc, fmtDay: k => _fmtDay(_noonOf(k)), fmtTick: k => _fmtTick(_noonOf(k)), unassigned: t('am.group_unassigned'),
-  };
+/** A day bucket's label: `overdue` / `later` / `none` or a day key. */
+function _dayLabel(key: string): string {
+  if (key === 'overdue') return t('am.bucket_overdue');
+  if (key === 'later') return t('am.bucket_later');
+  if (key === 'none') return t('am.bucket_none');
+  return _fmtDay(_noonOf(key));
 }
 
-/** The band is shown only over a non-empty list; under any empty state it (and the narrow) is gone. */
-const _bandHidden = (s: PaintState): boolean => s.empty !== null || !s.plant || s.listed.length === 0;
-
-/** Paint-only (never from `_gatherState`): one O(n) pass for the band data, then the narrowed list. Prunes `_narrow`. */
-function _overviewState(s: PaintState): OverviewState | null {
-  if (_bandHidden(s)) return null;   // _narrow stays; the next non-empty paint re-prunes it
-  const deps: OverviewDeps = {
-    tasksById: Store.tasks, plantToday: s.plantToday, horizonMinutes: s.horizonMinutes, window: _focusIds ? null : profileWindow(s.m.profile),
-  };
-  const data = overviewData(s.listed, deps);
-  _narrow = pruneNarrow(_narrow, data);
-  const shown = narrowActive(_narrow) ? applyNarrow(s.listed, _narrow, deps) : s.listed;
-  return { data, narrow: _narrow, shown, deps };
+/** One compact row (Inbox and the matrix side list); the open row carries its detail block. */
+function _rowHtmlFor(a: NimbusAlert, s: PaintState, d: Derived): string {
+  const task = a.taskId ? Store.tasks[a.taskId] : undefined;
+  const anchor = anchorTime(a, task);
+  const offset = anchor ? alertDayOffset(anchor, s.plantToday) : 0;
+  const material = materialOf(a, Store.tasks, x => (x.time ? _fmtDay(x.time) : ''));
+  const open = _openRow === a.id;
+  let detailHtml = '';
+  if (open) {
+    const due = task ? Util.dueInstant(task) : null;
+    const end = task ? Util.scheduledEnd(task) : null;
+    detailHtml = rowDetailHtml(a, {
+      message: Util.alertMessage(a), material,
+      due: due ? Util.fmtDTPref(due) : '—', plannedFinish: end ? Util.fmtDTPref(end) : '—',
+      firming: task ? (Engine.firmingStatus(task).firmed ? Engine.firmStatusText(task) : t('am.diag_not_firmed')) : '—', t,
+    });
+  }
+  return rowHtml(a, {
+    hideMachine: d.eff.machines.size === 1, open, material, tag: tagOf(a, t), t, orderNo: _orderNoOf(a),
+    groupLabel: t(`ape.cat_${categoryOf(a.type)}`), dueText: anchor ? _fmtDay(anchor) : '', overdue: !!anchor && offset < 0,
+    whatIf: Sandbox.active === true, detailHtml,
+  });
 }
 
-function _renderOverview(ov: OverviewState | null): void {
-  const el = _el('am-overview');
+/** "Move N" and "Show on Gantt" (and "Acknowledge N…" in the Inbox) for the alerts in view. */
+function _viewButtons(d: Derived, withAck: boolean): string {
+  const counts = groupCounts(d.filtered, _isAcked);
+  const n = counts.movableOrders;
+  const lock = Sandbox.active === true ? ` disabled aria-disabled="true" title="${esc(t('am.whatif_blocked'))}"` : (n === 0 ? ' disabled' : '');
+  return `<button type="button" class="btn sm" data-am-action="move-view"${lock}>${esc(t(n === 1 ? 'am.group_fix_n_one' : 'am.group_fix_n', { n }))}</button>`
+    + `<button type="button" class="btn sm btn-ghost" data-am-action="show-gantt"${d.filtered.length ? '' : ' disabled'}>${esc(t('am.show_on_gantt'))}</button>`
+    + (withAck && counts.unackedIds.length
+      ? `<button type="button" class="btn sm btn-ghost" data-am-action="ack-view">${esc(t('am.group_ack_n', { n: counts.unackedIds.length }))}</button>` : '');
+}
+
+const MATRIX_SHELL = '<div class="am-mx-layout"><div class="am-mx-main" id="am-mx"></div><aside class="am-side panel" id="am-side" hidden></aside></div>';
+const INBOX_SHELL = '<div class="am-ib"><aside class="am-ib-facets" id="am-ib-facets"></aside><section class="am-ib-main">'
+  + '<div class="am-ib-bar" id="am-ib-bar"></div><div class="am-ib-scroll" id="am-ib-vl" role="list"></div></section></div>';
+
+function _renderMatrix(s: PaintState, d: Derived): void {
+  if (_setHtml('am-body', MATRIX_SHELL)) { _teardownVl(); _lastHtml.delete('am-mx'); _lastHtml.delete('am-side'); }
+  const lens = s.view.lens;
+  const cats = s.m.profileId === ALL_ALERTS_PROFILE_ID ? undefined
+    : (() => { const ec = effectiveCategories(s.m.profile); return ALERT_CATEGORY_ORDER.filter(c => ec[c]?.on === true); })();
+  const model = matrixModel(s.listed, lens, {
+    ...d.ctx,
+    pinned: new Set((Store.pref('pinnedLines') as string[] | undefined) ?? []),
+    categoryOrder: cats,
+    collapsed: new Set([..._collapsed].filter(k => k.startsWith('machine|')).map(k => k.slice(8))),
+    quietOpen: _quietOpen,
+    labels: {
+      day: _dayLabel, category: c => t(`ape.cat_${c}`), ungrouped: t('am.ungrouped'), noMachine: t('am.group_unassigned'),
+      machinesCount: n => t(n === 1 ? 'am.mx_machines_one' : 'am.mx_machines', { n }),
+    },
+  });
+  _setHtml('am-mx', matrixHtml(model, d.eff, t));
+  _measureMatrixHead();
+  _renderSide(s, d);
+}
+
+/**
+ * The roll-up rows pin under the sticky header: write the header row's measured height on the scroll box as `--am-mx-head-h`
+ * (the Labor grid does the same for its group rows). Skipped while the tab is hidden (a zero height would pin them at 0).
+ */
+function _measureMatrixHead(): void {
+  const host = _el('am-mx');
+  const h = (host?.querySelector?.('thead tr') as HTMLElement | null)?.offsetHeight ?? 0;
+  const box = host?.querySelector?.('.am-mx-scroll') as HTMLElement | null;
+  if (h > 0 && box) box.style.setProperty('--am-mx-head-h', `${h}px`);
+}
+
+/** The matrix side list: hidden until any filter is set; the first 80 alerts in view, then a way into the Inbox. */
+function _renderSide(s: PaintState, d: Derived): void {
+  const el = _el('am-side');
   if (!el) return;
-  if (!ov) { _setHtml('am-overview', ''); el.hidden = true; return; }
-  // Remember which control inside the band has focus: a repaint replaces the nodes and would drop it to body.
-  const active = (globalThis.document?.activeElement ?? null) as HTMLElement | null;
-  const inBand = !!active && el.contains?.(active) === true;
-  const heldNarrow = inBand ? active.getAttribute?.('data-am-narrow') ?? null : null;
-  const heldStrip = inBand && active.classList?.contains?.('am-ov-cat') === true;
-  const heldAction = inBand && heldNarrow == null ? active.getAttribute?.('data-am-action') ?? null : null;
-  _setHtml('am-overview', overviewHtml({
-    data: ov.data, narrow: ov.narrow, showAll: _ovLinesAll,
-    collapsed: Store.pref('alertMonitorOverview') === 'collapsed',
-  }, _ovViewDeps()));
+  if (!d.active) { _setHtml('am-side', ''); el.hidden = true; return; }
+  const n = d.filtered.length;
+  const sorted = [...d.filtered].sort(compareAlerts('impact', _groupCtx(s)));
+  const rows = sorted.slice(0, SIDE_CAP).map(a => _rowHtmlFor(a, s, d)).join('');
+  _setHtml('am-side', `<header class="am-side-head"><h3>${esc(t('am.in_view', { n }))}</h3><div class="am-side-acts">${_viewButtons(d, false)}</div></header>`
+    + (n ? `<div class="am-side-rows" role="list">${rows}</div>` : `<div class="empty-state">${esc(t('am.filter_none'))}</div>`)
+    + (n > SIDE_CAP ? `<button type="button" class="btn sm btn-ghost am-side-more" data-am-action="open-inbox">${esc(t('am.open_in_inbox', { n }))}</button>` : ''));
   el.hidden = false;
-  if (heldNarrow != null) _findNarrowBar(heldNarrow, heldStrip)?.focus?.();
-  else if (heldAction != null) _refocusAction(heldAction);
 }
 
-function _narrowLabel(dim: NarrowDim, value: string): string {
-  if (dim === 'day') return value === 'overdue' ? t('am.ov_overdue') : value === 'later' ? t('am.ov_later') : _fmtDay(_noonOf(value));
-  if (dim === 'line') return value === 'none' ? t('am.group_unassigned') : value;
-  return t(`ape.cat_${value}`);
+const _groupCtx = (s: PaintState): GroupContext => ({
+  tasksById: Store.tasks, horizonStart: s.horizonStart, horizonMinutes: s.horizonMinutes, plantToday: s.plantToday,
+});
+
+/** One facet item: label, count, severity bar (errors share of the count). */
+function _facetItem(dim: FilterDim, key: string, label: string, count: number, err: number, max: number, on: boolean, dot?: string): string {
+  const w = max > 0 ? Math.round((100 * count) / max) : 0;
+  const ew = count > 0 ? Math.round((w * err) / count) : 0;
+  return `<button type="button" class="am-facet-item" data-am-facet="${dim}:${esc(key)}" aria-pressed="${on}"${count === 0 && !on ? ' disabled' : ''}>`
+    + (dot ? `<span class="am-gdot" style="--c:${dot}"></span>` : '')
+    + `<span class="am-facet-lbl">${esc(label)}</span><span class="am-facet-n">${count}</span>`
+    + `<i class="am-facet-bar" style="--w:${w}%;--ew:${ew}%"></i></button>`;
 }
 
-function _renderNarrowChip(s: PaintState, ov: OverviewState | null): void {
-  const el = _el('am-narrow-chip');
-  if (!el) return;
-  // The persistent live region: a node that already exists announces its text change; a freshly inserted one does not.
-  const status = _el('am-narrow-status');
-  if (!ov || !narrowActive(ov.narrow)) {
-    _setHtml('am-narrow-chip', ''); el.hidden = true;
-    if (status) status.textContent = '';
+/** Counts for one facet over the profile's alerts, narrowed by every OTHER dimension of the filter (so choosing a day does not zero its siblings). */
+function _facetCounts<K extends string>(s: PaintState, d: Derived, drop: FilterDim[], keyOf: (a: NimbusAlert) => K): Map<K, { n: number; err: number }> {
+  const f = { ...d.eff } as unknown as Record<string, unknown>;
+  for (const dim of drop) f[dim] = dim === 'q' ? '' : new Set();
+  const base = filterAlerts(s.listed, f as unknown as MonitorFilter, d.ctx);
+  const out = new Map<K, { n: number; err: number }>();
+  for (const a of base) {
+    const k = keyOf(a);
+    const c = out.get(k) ?? { n: 0, err: 0 };
+    c.n++; if (a.sev === 'err') c.err++;
+    out.set(k, c);
+  }
+  return out;
+}
+
+function _facetsHtml(s: PaintState, d: Derived): string {
+  const f = d.eff;
+  const wcOf = (a: NimbusAlert): string => d.wcByLine.get(a.line || '') ?? UNGROUPED_KEY;
+  const wc = _facetCounts(s, d, ['wcGroups', 'machines'], wcOf);
+  const wcKeys = [...new Set([...wc.keys(), ...f.wcGroups])].sort((a, b) =>
+    (wc.get(b)?.n ?? 0) - (wc.get(a)?.n ?? 0) || (a === UNGROUPED_KEY ? 1 : 0) - (b === UNGROUPED_KEY ? 1 : 0) || (a < b ? -1 : 1));
+  const wcMax = Math.max(0, ...[...wc.values()].map(c => c.n));
+  let where = wcKeys.map(k => _facetItem('wcGroups', k, k === UNGROUPED_KEY ? t('am.ungrouped') : k, wc.get(k)?.n ?? 0, wc.get(k)?.err ?? 0, wcMax, f.wcGroups.has(k))).join('');
+  if (f.wcGroups.size === 1) {
+    const g = [...f.wcGroups][0]!;
+    const mc = _facetCounts(s, d, ['machines'], a => a.line || 'none');
+    let keys = [...mc.keys()].filter(k => (d.wcByLine.get(k) ?? UNGROUPED_KEY) === g);
+    keys = [...new Set([...keys, ...f.machines])].sort((a, b) => (mc.get(b)?.n ?? 0) - (mc.get(a)?.n ?? 0) || (a < b ? -1 : 1));
+    const q = _facetQ.trim().toLowerCase();
+    const shown = q ? keys.filter(k => k.toLowerCase().includes(q)) : keys;
+    const mMax = Math.max(0, ...keys.map(k => mc.get(k)?.n ?? 0));
+    where += `<div class="am-facet-sub">`
+      + (keys.length > FACET_SEARCH_ABOVE
+        ? `<input type="search" class="input am-facet-q" id="am-facet-q" data-am-facet-q autocomplete="off" value="${esc(_facetQ)}" placeholder="${esc(t('am.search_ph'))}" aria-label="${esc(t('am.search_ph'))}">` : '')
+      + shown.map(k => _facetItem('machines', k, k === 'none' ? t('am.group_unassigned') : k, mc.get(k)?.n ?? 0, mc.get(k)?.err ?? 0, mMax, f.machines.has(k))).join('')
+      + `</div>`;
+  }
+  const dayKeys = ['overdue', ...horizonDayKeys(s.plantToday, d.ctx.horizonDays), 'later', 'none'];
+  const day = _facetCounts(s, d, ['days'], a => d.bucketOf(a));
+  const dMax = Math.max(0, ...[...day.values()].map(c => c.n));
+  const when = dayKeys.filter(k => (day.get(k)?.n ?? 0) > 0 || f.days.has(k))
+    .map(k => _facetItem('days', k, _dayLabel(k), day.get(k)?.n ?? 0, day.get(k)?.err ?? 0, dMax, f.days.has(k))).join('');
+  const cat = _facetCounts(s, d, ['categories'], a => categoryOf(a.type));
+  const cMax = Math.max(0, ...[...cat.values()].map(c => c.n));
+  const what = ALERT_CATEGORY_ORDER.filter(c => (cat.get(c)?.n ?? 0) > 0 || f.categories.has(c))
+    .map(c => _facetItem('categories', c, t(`ape.cat_${c}`), cat.get(c)?.n ?? 0, cat.get(c)?.err ?? 0, cMax, f.categories.has(c), `var(--bar-pm-${c})`)).join('');
+  const panel = (key: string, body: string): string => `<section class="am-facet panel"><h3 class="am-facet-h">${esc(t(key))}</h3>${body || `<div class="am-facet-empty">—</div>`}</section>`;
+  return panel('am.facet_where', where) + panel('am.facet_when', when) + panel('am.facet_what', what);
+}
+
+/** 32 px, plus the detail block under the one open row: variable heights are supported, so an open row never overlaps the next. */
+const _inboxRowH = (a: NimbusAlert): number => ROW_H + (_openRow === a.id ? DETAIL_H : 0);
+
+function _renderInbox(s: PaintState, d: Derived): void {
+  if (_setHtml('am-body', INBOX_SHELL)) { _teardownVl(); _lastHtml.delete('am-ib-facets'); _lastHtml.delete('am-ib-bar'); }
+  const held = (globalThis.document?.activeElement ?? null) as HTMLElement | null;
+  const heldFacetQ = held?.id === 'am-facet-q';
+  _setHtml('am-ib-facets', _facetsHtml(s, d));
+  if (heldFacetQ) {
+    const next = _el<HTMLInputElement>('am-facet-q');
+    next?.focus?.({ preventScroll: true });
+  }
+  const sortBtn = (id: 'impact' | 'time', key: string): string =>
+    `<button type="button" class="seg-btn${_sort === id ? ' active' : ''}" data-am-sort="${id}" aria-pressed="${_sort === id}">${esc(t(key))}</button>`;
+  _setHtml('am-ib-bar', `<span class="am-ib-count">${esc(t('am.in_view', { n: d.filtered.length }))}</span>`
+    + `<div class="am-seg" role="group" aria-label="${esc(t('am.sort_by'))}">${sortBtn('impact', 'am.sort_impact')}${sortBtn('time', 'am.sort_time')}</div>`
+    + `<span class="spacer"></span>${_viewButtons(d, true)}`);
+  const mount = _el('am-ib-vl');
+  if (!mount) return;
+  const sorted = d.filtered.length > 1 ? [...d.filtered].sort(compareAlerts(_sort, _groupCtx(s))) : d.filtered;
+  if (!sorted.length) {
+    _teardownVl();
+    _setHtml('am-ib-vl', `<div class="empty-state">${esc(t('am.filter_none'))}</div>`);
     return;
   }
-  if (status) status.textContent = t('am.ov_showing', { n: ov.shown.length, total: s.listed.length });
-  _setHtml('am-narrow-chip', narrowChipHtml({ shown: ov.shown.length, total: s.listed.length, narrow: ov.narrow, labelOf: _narrowLabel }, t));
-  el.hidden = false;
-}
-
-function _headView(g: AlertGroup, rc: RowCtx, expanded: boolean): GroupHeadView {
-  const first = g.alerts.find(a => rowActionsFor(a).goto) ?? null;
-  const counts: GroupCounts = groupCounts(g.alerts, _isAcked);
-  return {
-    key: g.key, expanded,
-    label: _groupLabel(rc.s.view.groupBy, g.key, rc),
-    errors: counts.errors, warnings: counts.warnings, orders: counts.orders,
-    movable: counts.movableOrders, unacked: counts.unackedIds.length,
-    firstAlertId: first?.id ?? null, firstGoto: !!first,
-    whatIf: Sandbox.active === true,
-  };
-}
-
-function _groupCardHtml(g: AlertGroup, rc: RowCtx): string {
-  const open = !_collapsed.has(g.key);
-  let body = '';
-  if (open) {
-    const capped = !_showAll.has(g.key) && g.alerts.length > GROUP_ROW_CAP;
-    const shown = capped ? g.alerts.slice(0, GROUP_ROW_CAP) : g.alerts;
-    body = `<div class="am-gbody" role="list">${shown.map(a => rowHtml(_rowView(a, rc), t)).join('')}</div>`
-      + (capped
-        ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="show-all" data-group-key="${esc(g.key)}">${esc(t('am.show_all_n', { n: g.alerts.length }))}</button></div>`
-        : '');
-  }
-  return `<section class="am-group panel" data-group-key="${esc(g.key)}">${groupHeadHtml(_headView(g, rc, open), t)}${body}</section>`;
-}
-
-/** Group-by none: one card whose rows live in a single VirtualList (fixed ROW_H = 44 px, DIAG_H taller under an open diagnose). */
-function _renderNone(g: AlertGroup | undefined, rc: RowCtx): void {
-  if (!g) { _teardownVl(); _setHtml('am-groups', ''); return; }
-  const shell = `<section class="am-group panel" data-group-key="${esc(g.key)}"><div id="am-none-head"></div>`
-    + `<div id="am-none-body"><div class="am-vl-scroll" id="am-vl" role="list"></div></div></section>`;
-  if (_setHtml('am-groups', shell)) { _teardownVl(); _lastHtml.delete('am-none-head'); }
-  _setHtml('am-none-head', groupHeadHtml(_headView(g, rc, !_collapsed.has(g.key)), t));
-  const body = _el('am-none-body');
-  if (body) body.hidden = _collapsed.has(g.key);
-  const mount = _el('am-vl');
-  if (!mount) return;
+  if (_lastHtml.get('am-ib-vl')) { _lastHtml.delete('am-ib-vl'); _teardownVl(); mount.innerHTML = ''; }
   if (!_vl || _vlEl !== mount) {
     _teardownVl();
     _vlEl = mount;
     _vl = new VirtualList<NimbusAlert>(mount, {
-      getRowH: a => ROW_H + (_diagOpen.has(a.id) && rowActionsFor(a).diagnose === 'order' ? DIAG_H : 0),
-      renderFn: a => rowHtml(_rowView(a, _rowCtx!), t),
+      // 32 px, plus the detail block under the one open row: variable heights are supported, so an open row never overlaps the next.
+      getRowH: _inboxRowH,
+      renderFn: a => _rowHtmlFor(a, _s!, _d!),
       mountEl: mount,
     });
   }
-  _vl.update(g.alerts);
+  if (_openRow && !d.viewIds.has(_openRow)) _openRow = null;   // the open row left the view
+  _vl.update(sorted);
+  if (_scrollInboxTop) { _vl.scrollToTop(); _scrollInboxTop = false; }
 }
 
-function _renderFocusChip(s: PaintState): void {
-  const el = _el('am-focus-chip');
-  if (!el) return;
-  if (!_focusIds) { _setHtml('am-focus-chip', ''); el.hidden = true; return; }
-  const n = s.listed.length;
-  const text = s.focusOutside > 0
-    ? t('am.focus_chip_outside', { n, title: _focusTitle, k: s.focusOutside })
-    : t('am.focus_chip', { n, title: _focusTitle });
-  _setHtml('am-focus-chip', `<span>${esc(text)}</span>`
-    + `<button type="button" class="btn sm btn-ghost" data-am-action="clear-focus">${esc(t('am.focus_clear'))}</button>`);
-  el.hidden = false;
-}
-
-function _renderGroups(s: PaintState, shown: NimbusAlert[]): void {
-  _renderFocusChip(s);
-  if (s.empty !== null || !s.plant) {
+function _renderBody(s: PaintState, d: Derived | null): void {
+  if (s.empty !== null || !s.plant || !d) {
     _teardownVl();
-    _groupsByKey = new Map();
-    _rowCtx = null;
-    _setHtml('am-groups', _emptyHtml(s));
+    _setHtml('am-body', _emptyHtml(s));
     return;
   }
-  if (shown.length === 0) {   // the narrow matches nothing: the chip row carries Clear
-    _teardownVl();
-    _groupsByKey = new Map();
-    _rowCtx = null;
-    _setHtml('am-groups', `<div class="empty-state">${esc(t('am.ov_narrow_empty'))}</div>`);
-    return;
-  }
-  const rc = _makeRowCtx(s);
-  _rowCtx = rc;
-  const sorted = [...shown].sort(compareAlerts(s.view.sort, rc.ctx));
-  const groups = groupAlerts(sorted, s.view.groupBy, rc.ctx);
-  _groupsByKey = new Map(groups.map(g => [g.key, g]));
-  if (s.view.groupBy === 'none') { _renderNone(groups[0], rc); return; }
-  _teardownVl();
-  _setHtml('am-groups', groups.map(g => _groupCardHtml(g, rc)).join(''));
+  if (s.view.view === 'inbox') _renderInbox(s, d); else _renderMatrix(s, d);
 }
 
 function _paint(): void {
   if (!_active) return;
   _ensureShell();
   if ((Store.selectedPlant ?? null) !== _lastPlant) { _lastPlant = Store.selectedPlant ?? null; AlertMonitorPane.resetView(); }
-  const pid = AlertProfileMatches.view().profileId;
-  if (pid !== _lastProfileId) { _lastProfileId = pid; _narrow = {}; _ovLinesAll = false; }   // a narrow belongs to one profile's list
+  // "View as" colours this page with the viewed profile's swatches (body keeps the saved default's for the Gantt).
+  applyCategoryColors(document.getElementById('alerts-tab'), AlertProfileMatches.view().profile);
+  // A profile change keeps the filter: the same machines / days stay narrowed under the new rules.
   const s = _gatherState();
+  _s = s;
   _syncHeader(s);
-  _setHtml('am-summary', _summaryHtml(s));
+  _renderGanttChip();
   // The producer follows plant:selected itself; until it has caught up, leave the body alone.
   if (!(s.plant && s.m.plant !== s.plant)) {
+    const d = s.plant && s.empty === null ? _derive(s) : null;
+    _d = d;
+    _setHtml('am-summary', _summaryHtml(s, d));
+    _renderChips(s);
     _setHtml('am-banner', _bannerHtml(s));
     _setHtml('am-prompt', _promptHtml(s));
-    _renderLeverage(s);
-    const ov = _overviewState(s);
-    _renderOverview(ov);
-    _renderNarrowChip(s, ov);
-    _renderGroups(s, ov ? ov.shown : s.listed);
+    _renderLeverage(s, d);
+    _renderBody(s, d);
+  } else {
+    _setHtml('am-summary', _summaryHtml(s, null));
   }
   OverflowMenu.reconcile();   // an open ⋯ menu whose trigger a repaint replaced closes (or follows its data-ovf-key)
 }
@@ -1589,6 +1627,7 @@ export const AlertMonitorPane = {
     }, 'alert-monitor-pane');
     AlertProfileMatches.subscribe(() => { if (_active) _paint(); });
     AlertProfileClient.subscribe(() => { if (_active) _paint(); });
+    globalThis.window?.addEventListener?.('resize', () => { if (_active) _measureMatrixHead(); });
   },
   /** Called by the shell on every entry to the tab. */
   render(): void {
@@ -1596,32 +1635,16 @@ export const AlertMonitorPane = {
     _levStale = true;   // events were ignored while the tab was hidden: refresh the leverage cards once
     _paint();
   },
-  /**
-   * List only these alerts (they bypass the profile) under a "Showing N alerts for: title" chip —
-   * the entry point for the leverage cards' "Show alerts" (Task 13).
-   */
-  setFocus(alertIds: Iterable<string>, title: string): void {
-    _focusIds = new Set(alertIds);
-    _focusTitle = title;
-    _narrow = {};
-    _paint();
-  },
-  clearFocus(): void {
-    _focusIds = null;
-    _focusTitle = '';
-    _narrow = {};
-    AlertProfileMatches.setFocusTaskIds(null);   // the Gantt goes back to the profile
-    _paint();
-  },
-  /** Forget folded groups, open diagnose panels, "Show all" and the focus set (plant change). Does not paint. */
+  /** Forget the filter, the open row, folds and the fixes state (plant change). Does not paint. */
   resetView(): void {
-    _collapsed.clear(); _showAll.clear(); _diagOpen.clear();
-    _focusIds = null; _focusTitle = '';
-    _narrow = {}; _ovLinesAll = false;
+    _filter = emptyFilter(); _facetQ = ''; _openRow = null; _sort = 'impact';
+    _collapsed.clear(); _quietOpen.clear();
     _levReset(null);
   },
   /** The engine / input seams of the leverage panel; tests replace members, production never does. */
   _levDeps,
+  /** The Inbox's per-row height (32, or 32 + the detail block for the open row); a test seam. */
+  _rowH: _inboxRowH,
   setActive(active: boolean): void { _active = active; if (!active) _levAbortAll(); },
   isActive(): boolean { return _active; },
 };

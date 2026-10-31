@@ -11,7 +11,7 @@
    default > All alerts, via resolveActiveProfileId over AlertProfileClient.cached) and
    AlertAcksClient.cached. `current()` ignores the session "View as" override (the Gantt, bell,
    drawer and Orders follow the saved default); `view()` applies it (the Alert Monitor page only). `'__all__'` matches every plant
-   alert but highlights nothing (taskIds / sevByTask / categoryByTask stay empty).
+   alert and fills nothing (taskIds / categoryByTask stay empty; sevByTask holds error orders only, for the inner ring).
    ========================================================================== */
 
 import { Store } from '../platform/store.mjs';
@@ -20,7 +20,7 @@ import type { AlertAck, AlertCategory, AlertProfile } from '../platform/types.mj
 import { AlertProfileClient } from './alert-profile-client.mjs';
 import { AlertAcksClient } from './alert-acks-client.mjs';
 import {
-  ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID, categoryOf, alertOrderIds, profileMatches, resolveActiveProfileId,
+  ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID, ALERT_CATEGORY_ORDER, categoryOf, alertOrderIds, categoryColorDecls, profileMatches, resolveActiveProfileId,
 } from './alert-profiles.mjs';
 
 export interface AlertProfileMatchSet {
@@ -32,20 +32,25 @@ export interface AlertProfileMatchSet {
   sevByTask: Map<string, 'err' | 'warn'>;
   /** Most severe matching category per task (err beats warn; tie → CATEGORY_ORDER). */
   categoryByTask: Map<string, AlertCategory>;
+  /** Every order named by a matched alert (`alertOrderIds` union, so peers and holders count); filled under `__all__` too. */
+  orderIds: Set<string>;
+  /** The requested focus ∩ `orderIds` of THIS set, minus orders whose matched alerts are all acknowledged (unless
+   *  `alertsShowAcknowledged`). null when no focus is requested. The Gantt outlines exactly these. */
+  focusIds: Set<string> | null;
   acked: Map<string, AlertAck>;
   rev: number;
 }
 
 type ProfileSettingsArg = Parameters<typeof resolveActiveProfileId>[1];
 
-const CATEGORY_ORDER: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions'];
+const CATEGORY_ORDER: readonly AlertCategory[] = ALERT_CATEGORY_ORDER;
 const RELEVANT_PREFS = ['alertProfileByPlant', 'alertProfileGanttHighlight', 'alertsShowAcknowledged'] as const;
 const DEBOUNCE_MS = 120;
 
 let _inited = false;
 let _rev = 0;
 let _sessionProfile: string | null = null;
-/** "Show alerts" focus from the Alert Monitor: the Gantt follows these orders instead of the profile. */
+/** The requested "Show on Gantt" focus (resolved into `focusIds` per set). */
 let _focusTaskIds: Set<string> | null = null;
 let _prefSnapshot = '';
 let _timer: ReturnType<typeof setTimeout> | null = null;
@@ -58,13 +63,13 @@ const FETCH_BACKOFF_MS = 30_000;
 function _emptySet(): AlertProfileMatchSet {
   return {
     plant: null, profileId: ALL_ALERTS_PROFILE_ID, profile: ALL_ALERTS_PROFILE,
-    alertIds: new Set(), taskIds: new Set(), sevByTask: new Map(), categoryByTask: new Map(),
+    alertIds: new Set(), taskIds: new Set(), sevByTask: new Map(), categoryByTask: new Map(), orderIds: new Set(), focusIds: null,
     acked: new Map(), rev: 0,
   };
 }
 
 let _current: AlertProfileMatchSet = _emptySet();
-/** The set with the session "View as" override applied (same object shape; equals `_current` minus focus when no override). */
+/** The set with the session "View as" override applied (a copy of `_current` when no override). */
 let _view: AlertProfileMatchSet = _current;
 
 function _prefs(): string {
@@ -88,26 +93,24 @@ function _ensureLoaded(key: string, cached: unknown, load: () => Promise<unknown
   );
 }
 
-/** Replace the highlighted orders with the focused ones: severity / category come from the alerts that name them
- *  (as the order or as a peer / holder of a multi-order alert). `alertIds` stays profile-based. */
+/** Resolve the requested focus against one set: only orders the set's matched alerts name, and (unless the pref shows
+ *  acknowledged alerts) only those with at least one unacknowledged matched alert. Fills stay ambient: `taskIds`,
+ *  `sevByTask` and `categoryByTask` are not touched. */
 function _applyFocus(set: AlertProfileMatchSet, focus: ReadonlySet<string>): void {
-  set.taskIds = new Set(focus);
-  set.sevByTask = new Map();
-  set.categoryByTask = new Map();
-  const catSev = new Map<string, 'err' | 'warn'>();
-  for (const a of Store.alerts) {
-    const sev: 'err' | 'warn' = a.sev === 'err' ? 'err' : 'warn';
-    const cat = categoryOf(a.type);
-    for (const id of alertOrderIds(a)) {
-      if (!focus.has(id)) continue;
-      if (set.sevByTask.get(id) !== 'err') set.sevByTask.set(id, sev);
-      const prev = set.categoryByTask.get(id);
-      const prevSev = catSev.get(id);
-      const better = !prev || (sev === 'err' && prevSev !== 'err')
-        || (sev === prevSev && CATEGORY_ORDER.indexOf(cat) < CATEGORY_ORDER.indexOf(prev));
-      if (better) { set.categoryByTask.set(id, cat); catSev.set(id, sev); }
+  const showAcked = Store.pref('alertsShowAcknowledged') === true;
+  let live: Set<string> | null = null;
+  if (!showAcked && set.acked.size) {
+    live = new Set();
+    for (const a of Store.alerts) {
+      if (!set.alertIds.has(a.id) || set.acked.has(a.id)) continue;
+      for (const id of alertOrderIds(a)) live.add(id);
     }
   }
+  const out = new Set<string>();
+  for (const id of focus) {
+    if (set.orderIds.has(id) && (!live || live.has(id))) out.add(id);
+  }
+  set.focusIds = out;
 }
 
 /** Match the plant's alerts against `wanted` (a profile id, or '__all__'); `available` are the plant's profiles. */
@@ -125,9 +128,16 @@ function _buildSet(plant: string, wanted: string, available: AlertProfile[], ack
   const catSev = new Map<string, 'err' | 'warn'>();   // severity of the alert that owns each task's category
   for (const a of Store.alerts) {
     const task = a.taskId ? tasks[a.taskId] : undefined;
-    if (all) { set.alertIds.add(a.id); continue; }
+    if (all) {
+      set.alertIds.add(a.id);
+      for (const id of alertOrderIds(a)) set.orderIds.add(id);
+      // D8: under All alerts only error-severity orders carry the inner ring; no category, so no fill.
+      if (a.taskId && a.sev === 'err') set.sevByTask.set(a.taskId, 'err');
+      continue;
+    }
     if (!profileMatches(a, task, set.profile, today)) continue;
     set.alertIds.add(a.id);
+    for (const id of alertOrderIds(a)) set.orderIds.add(id);
     if (!a.taskId) continue;
     set.taskIds.add(a.taskId);
     const sev: 'err' | 'warn' = a.sev === 'err' ? 'err' : 'warn';
@@ -145,6 +155,28 @@ function _buildSet(plant: string, wanted: string, available: AlertProfile[], ack
   return set;
 }
 
+/** Write a profile's category colours as inline custom properties on `el`: the `--bar-pm-*` tokens every consumer reads
+ *  (Gantt fills, legend, minimap, Alert Monitor) re-point at the profile's swatches with no other CSS. Writes only the
+ *  keys that differ, never `setAttribute('style')`. The values are `var(--pal-...)`, resolved on `el`, so `el` must be
+ *  `document.body` (where `body.dark` declares the dark swatches) or a descendant. No-op without a document or element. */
+export function applyCategoryColors(el: HTMLElement | null | undefined, profile: AlertProfile | null | undefined): void {
+  if (typeof document === 'undefined' || !el?.style) return;
+  const decls = categoryColorDecls(profile);
+  for (const key of Object.keys(decls)) {
+    if (el.style.getPropertyValue(key) !== decls[key]) el.style.setProperty(key, decls[key]);
+  }
+}
+
+/** JSON signature of a profile's decl map: `recompute` and the minimap compare it to skip redundant work. */
+export function categoryColorSignature(profile: AlertProfile | null | undefined): string {
+  return JSON.stringify(categoryColorDecls(profile));
+}
+
+let _colorSig = '';
+
+/** Test hook: forget the last written colour signature so the next recompute writes again. */
+export function _resetColorSignature(): void { _colorSig = ''; }
+
 export function recompute(): void {
   const plant = Store.selectedPlant ?? null;
   let set = _emptySet();
@@ -158,16 +190,21 @@ export function recompute(): void {
     const prefId = resolveActiveProfileId(plant, Store.userSettings as ProfileSettingsArg, Store.roleDefaults as ProfileSettingsArg, available);
     set = _buildSet(plant, prefId, available, acks);
     // "View as" builds a second set only when it differs from the default; otherwise the view shares the default's
-    // content (a shallow copy, taken before the focus overrides below replace the task maps on `set` only).
+    // content (a shallow copy, taken before the focus is resolved into each set).
     view = _sessionProfile && _sessionProfile !== prefId
       ? _buildSet(plant, _sessionProfile, available, acks)
       : { ...set };
   }
-  if (_focusTaskIds) _applyFocus(set, _focusTaskIds);
+  if (_focusTaskIds) { _applyFocus(set, _focusTaskIds); if (view !== set) _applyFocus(view, _focusTaskIds); }
   set.rev = ++_rev;
   view.rev = set.rev;
   _current = set;
   _view = view;
+  const sig = categoryColorSignature(set.profile);
+  if (sig !== _colorSig) {
+    _colorSig = sig;
+    applyCategoryColors(typeof document === 'undefined' ? null : document.body, set.profile);
+  }
   for (const fn of Array.from(_subs)) { try { fn(); } catch { /* isolate subscribers */ } }
 }
 
@@ -218,9 +255,9 @@ export const AlertProfileMatches = {
   },
   sessionProfile(): string | null { return _sessionProfile; },
   /**
-   * The Alert Monitor's "Show alerts" focus: while set, `taskIds` / `sevByTask` / `categoryByTask` describe these
-   * orders (task ids and peers of the focused alerts) rather than the profile, so the Gantt follows the focused card.
-   * null restores the profile. Fires the fanout; a plant change clears it.
+   * The "Show on Gantt" focus request: while set, `focusIds` on `current()` / `view()` holds the requested orders that
+   * the set's own alerts name (and are not fully acknowledged); the Gantt outlines them while the fills stay profile-based.
+   * null clears it. Fires the fanout; a plant change clears it.
    */
   setFocusTaskIds(ids: Iterable<string> | null): void {
     const next = ids ? new Set(ids) : null;
@@ -228,4 +265,6 @@ export const AlertProfileMatches = {
     _focusTaskIds = next;
     recompute();
   },
+  /** The orders the Gantt outlines (`view().focusIds`: the profile being viewed), or null when no focus is requested. */
+  focusTaskIds(): ReadonlySet<string> | null { return _view.focusIds; },
 };

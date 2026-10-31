@@ -26,6 +26,14 @@ ALERT_TYPES: frozenset[str] = frozenset({
     "frozen_window_crossed", "run_time_zero", "no_operating_window", "no_anchor",
     "derivation_issue", "queued_now_fits", "needs_planning",
 })
+# Mirrors ALERT_CATEGORY_ORDER in frontend/insights/alert-profiles.mts (a pytest parses that literal and asserts equality).
+CATEGORIES: frozenset[str] = frozenset({
+    "capacity", "conflicts", "calendar", "setup", "planning", "late", "exceptions",
+})
+# Mirrors PALETTE in frontend/insights/alert-profiles.mts (same pytest).
+PALETTE: frozenset[str] = frozenset({
+    "amber", "orange", "magenta", "violet", "teal", "sky", "slate", "sand", "stone",
+})
 RANKINGS: frozenset[str] = frozenset({"impact", "time", "severity", "orders"})
 MAX_RULES = 20
 MAX_NAME_LEN = 60
@@ -51,6 +59,17 @@ def ensure_alert_profile_tables() -> None:
                 CONSTRAINT uq_alert_profile_plant_name UNIQUE (plant, name))
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_alert_profile_plant ON alert_profile(plant, name)")
+        # Per-group on/off + colour (mirrors migrations/2026-10-30-2-alert-profile-categories.sql and schema.sql).
+        cur.execute("ALTER TABLE alert_profile ADD COLUMN IF NOT EXISTS categories JSONB NULL")
+        cur.execute("""
+            DO $$
+            BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_alert_profile_categories') THEN
+                ALTER TABLE alert_profile ADD CONSTRAINT chk_alert_profile_categories
+                  CHECK (categories IS NULL OR jsonb_typeof(categories) = 'object');
+              END IF;
+            END $$
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS alert_ack (
                 plant TEXT NOT NULL, alert_id TEXT NOT NULL, acknowledged_by TEXT NOT NULL,
@@ -77,11 +96,37 @@ def _day(rule: dict, key: str, idx: int):
     return v
 
 
-def validate_rules(rules) -> list[dict]:
-    """Return the normalised rule list or raise ValueError."""
+def validate_categories(categories) -> dict:
+    """Return the normalised {category: {on, color}} map or raise ValueError.
+
+    Mirrors validateProfile in frontend/insights/alert-profiles.mts: a complete map (every category, no extras),
+    each entry {on: bool, color in PALETTE}, at least one category on."""
+    if not isinstance(categories, dict):
+        raise ValueError("categories must be an object")
+    if set(categories) != CATEGORIES:
+        raise ValueError(f"categories must have exactly the keys {sorted(CATEGORIES)}")
+    out = {}
+    for cat in sorted(CATEGORIES):
+        entry = categories[cat]
+        if not isinstance(entry, dict):
+            raise ValueError(f"categories.{cat} must be an object")
+        on, color = entry.get("on"), entry.get("color")
+        if not isinstance(on, bool):
+            raise ValueError(f"categories.{cat}.on must be true or false")
+        if not isinstance(color, str) or color not in PALETTE:
+            raise ValueError(f"categories.{cat}.color must be one of {sorted(PALETTE)}")
+        out[cat] = {"on": on, "color": color}
+    if not any(e["on"] for e in out.values()):
+        raise ValueError("At least one alert group must be on")
+    return out
+
+
+def validate_rules(rules, allow_empty: bool = False) -> list[dict]:
+    """Return the normalised rule list or raise ValueError. `allow_empty` is for profiles that carry `categories`
+    (the groups alone can define the profile); a rules-only profile still needs one rule."""
     if not isinstance(rules, list):
         raise ValueError("rules must be a list")
-    if not rules:
+    if not rules and not allow_empty:
         raise ValueError("A profile needs at least one rule")
     if len(rules) > MAX_RULES:
         raise ValueError(f"A profile may have at most {MAX_RULES} rules")
@@ -136,7 +181,11 @@ def _require_plant(plant) -> str:
 
 # --------------------------------------------------------------------------- profiles
 
-_PROFILE_COLS = "id, plant, name, description, rules, ranking, created_by, updated_by, created_at, updated_at"
+_PROFILE_COLS = ("id, plant, name, description, rules, ranking, created_by, updated_by, created_at, updated_at,"
+                 " categories")
+
+# update_alert_profile: "field not supplied" (keep the stored value) is distinct from an explicit None (revert to derived).
+_UNSET = object()
 
 
 def _iso(v):
@@ -146,7 +195,7 @@ def _iso(v):
 def _profile_row(r) -> dict:
     return {"id": r[0], "plant": r[1], "name": r[2], "description": r[3], "rules": r[4],
             "ranking": r[5], "created_by": r[6], "updated_by": r[7],
-            "created_at": _iso(r[8]), "updated_at": _iso(r[9])}
+            "created_at": _iso(r[8]), "updated_at": _iso(r[9]), "categories": r[10]}
 
 
 def _audit(cur, table: str, action: str, details: dict, actor) -> None:
@@ -169,19 +218,22 @@ def get_alert_profile(profile_id: str) -> dict | None:
         return _profile_row(r) if r else None
 
 
-def create_alert_profile(*, plant, name, rules, ranking, description="", actor) -> dict:
+def create_alert_profile(*, plant, name, rules, ranking, description="", actor, categories=None) -> dict:
     plant = _require_plant(plant)
     name = _validate_name(name)
-    rules = validate_rules(rules)
+    categories = validate_categories(categories) if categories is not None else None
+    rules = validate_rules(rules, allow_empty=categories is not None)
     ranking = validate_ranking(ranking)
     description = (description or "").strip() if isinstance(description, (str, type(None))) else str(description)
     pid = uuid.uuid4().hex
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO alert_profile (id, plant, name, description, rules, ranking, created_by, updated_by)"
-                f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_PROFILE_COLS}",
-                (pid, plant, name, description, Jsonb(rules), ranking, actor, actor),
+                "INSERT INTO alert_profile (id, plant, name, description, rules, ranking, created_by, updated_by,"
+                " categories)"
+                f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_PROFILE_COLS}",
+                (pid, plant, name, description, Jsonb(rules), ranking, actor, actor,
+                 Jsonb(categories) if categories is not None else None),
             )
             row = _profile_row(cur.fetchone())
             _audit(cur, "alert_profile", "create", {"plant": plant, "id": pid, "name": name}, actor)
@@ -192,11 +244,18 @@ def create_alert_profile(*, plant, name, rules, ranking, description="", actor) 
 
 
 def update_alert_profile(profile_id, *, name=None, rules=None, ranking=None, description=None,
-                         actor, expected_updated_at: str | None = None) -> dict | None:
+                         actor, expected_updated_at: str | None = None, categories=_UNSET) -> dict | None:
     """Patch the supplied fields. Returns None if the profile does not exist; raises
-    ValueError('stale') when expected_updated_at no longer matches the row."""
+    ValueError('stale') when expected_updated_at no longer matches the row.
+
+    `categories`: omitted keeps the stored value; an explicit None reverts the profile to groups derived from its
+    rules (which then needs at least one rule); a map replaces it (and lets `rules` be empty)."""
     new_name = _validate_name(name) if name is not None else None
-    new_rules = validate_rules(rules) if rules is not None else None
+    new_categories = _UNSET if categories is _UNSET else (
+        validate_categories(categories) if categories is not None else None)
+    # Whether an empty list is acceptable depends on the merged row's categories; the merged check below decides.
+    new_rules = validate_rules(rules, allow_empty=new_categories is not None or new_categories is _UNSET) \
+        if rules is not None else None
     new_ranking = validate_ranking(ranking) if ranking is not None else None
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
@@ -212,12 +271,16 @@ def update_alert_profile(profile_id, *, name=None, rules=None, ranking=None, des
                 "rules": new_rules if new_rules is not None else current["rules"],
                 "ranking": new_ranking if new_ranking is not None else current["ranking"],
                 "description": (description or "").strip() if description is not None else current["description"],
+                "categories": current["categories"] if new_categories is _UNSET else new_categories,
             }
+            if merged["categories"] is None and not merged["rules"]:
+                raise ValueError("A profile needs at least one rule")
             cur.execute(
-                "UPDATE alert_profile SET name = %s, description = %s, rules = %s, ranking = %s,"
+                "UPDATE alert_profile SET name = %s, description = %s, rules = %s, ranking = %s, categories = %s,"
                 " updated_by = %s, updated_at = NOW() WHERE id = %s"
                 f" RETURNING {_PROFILE_COLS}",
-                (merged["name"], merged["description"], Jsonb(merged["rules"]), merged["ranking"], actor, profile_id),
+                (merged["name"], merged["description"], Jsonb(merged["rules"]), merged["ranking"],
+                 Jsonb(merged["categories"]) if merged["categories"] is not None else None, actor, profile_id),
             )
             row = _profile_row(cur.fetchone())
             _audit(cur, "alert_profile", "update",

@@ -58,7 +58,7 @@ export function makeEl(id, doc = activeDoc, tagName = 'div') {
   const el = {
     nodeType: 1, tagName: tagName.toUpperCase(), id: id || '', _doc: doc, _html: '', writes: 0, handlers, listeners,
     textContent: '', hidden: false, value: '', checked: false, title: '', disabled: false, dataset: {},
-    parentNode: null, children: [], style: {}, clientHeight: 600, scrollTop: 0, rect: null, _root: false,
+    parentNode: null, children: [], style: { setProperty() {}, getPropertyValue() { return ''; } }, clientHeight: 600, scrollTop: 0, rect: null, _root: false,
     get className() { return [...classes].join(' '); },
     set className(v) { classes.clear(); String(v).split(/\s+/).filter(Boolean).forEach(c => classes.add(c)); },
     get innerHTML() { return this._html; },

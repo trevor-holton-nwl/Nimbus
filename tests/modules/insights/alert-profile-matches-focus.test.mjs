@@ -1,4 +1,4 @@
-// AlertProfileMatches.setFocusTaskIds — the Gantt follows a focused leverage card instead of the profile.
+// AlertProfileMatches.setFocusTaskIds — the "Show on Gantt" focus: fills stay profile-based, focusIds is the outline set.
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { Store } from '../../../frontend/platform/store.mjs';
@@ -10,12 +10,14 @@ const rule = types => ({ types, dayFrom: null, dayTo: null, minSev: null, minLat
 const prof = (id, types) => ({ id, plant: 'P1', name: id, description: '', rules: [rule(types)], ranking: 'impact' });
 const alert = (id, type, sev, taskId, extra = {}) => ({ id, type, sev, taskId, time: new Date(2026, 9, 20, 8), ...extra });
 
+let acks;
 beforeEach(t => {
-  const profiles = [prof('p1', ['overload'])];
+  acks = new Map();
+  const profiles = [prof('p1', ['overload']), prof('p2', ['overlap'])];
   t.mock.method(AlertProfileClient, 'cached', () => profiles);
   t.mock.method(AlertProfileClient, 'list', async () => profiles);
-  t.mock.method(AlertAcksClient, 'cached', () => new Map());
-  t.mock.method(AlertAcksClient, 'load', async () => new Map());
+  t.mock.method(AlertAcksClient, 'cached', () => acks);
+  t.mock.method(AlertAcksClient, 'load', async () => acks);
   Store._state.selectedPlant = 'P1';
   Store._state.tasks = { t1: { id: 't1' }, t2: { id: 't2' }, t3: { id: 't3' } };
   Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
@@ -30,33 +32,90 @@ beforeEach(t => {
   M.setSessionProfile(null);
 });
 
-test('without a focus the profile decides the highlighted orders', () => {
+test('without a focus: focusIds is null and focusTaskIds() is null', () => {
+  assert.equal(M.current().focusIds, null);
+  assert.equal(M.focusTaskIds(), null);
   assert.deepEqual([...M.current().taskIds], ['t1']);
 });
 
-test('a focus replaces taskIds / sevByTask / categoryByTask with the focused orders and fans out', () => {
+test('orderIds is the union of alertOrderIds over matched alerts (peers included)', () => {
+  assert.deepEqual([...M.current().orderIds], ['t1']);
+  M.setSessionProfile('p2');
+  assert.deepEqual([...M.view().orderIds].sort(), ['t2', 't3']);
+});
+
+test('a focus keeps the fills ambient and sets focusIds = focus ∩ orderIds; fans out', () => {
   let fired = 0;
   const off = M.subscribe(() => { fired++; });
-  M.setFocusTaskIds(new Set(['t2', 't3']));
+  M.setFocusTaskIds(new Set(['t1', 't2']));
   const c = M.current();
-  assert.deepEqual([...c.taskIds].sort(), ['t2', 't3']);
-  assert.equal(c.sevByTask.get('t2'), 'err');
-  assert.equal(c.sevByTask.get('t3'), 'err', 'the overlap names t3 as the peer, so its worst severity is err');
-  assert.equal(c.categoryByTask.get('t2'), 'conflicts');
-  assert.ok(!c.taskIds.has('t1'), 'the profile match is not highlighted while focused');
-  assert.ok(fired >= 1, 'subscribers are told');
+  assert.deepEqual([...c.taskIds], ['t1'], 'taskIds unchanged');
+  assert.equal(c.sevByTask.get('t1'), 'warn');
+  assert.equal(c.categoryByTask.get('t1'), 'capacity');
+  assert.deepEqual([...c.focusIds], ['t1'], 't2 is outside the viewed profile: no outline');
+  assert.deepEqual([...M.focusTaskIds()], ['t1']);
+  assert.ok(fired >= 1);
   off();
 });
 
-test('clearing the focus restores the profile match', () => {
-  M.setFocusTaskIds(new Set(['t2']));
+test('clearing the focus restores null', () => {
+  M.setFocusTaskIds(new Set(['t1']));
   M.setFocusTaskIds(null);
-  assert.deepEqual([...M.current().taskIds], ['t1']);
+  assert.equal(M.current().focusIds, null);
 });
 
 test('a plant change drops the focus', () => {
-  M.setFocusTaskIds(new Set(['t2']));
+  M.setFocusTaskIds(new Set(['t1']));
   Store.setSelectedPlant('P2', 'test');
   Store.setSelectedPlant('P1', 'test');
-  assert.deepEqual([...M.current().taskIds], ['t1']);
+  assert.equal(M.current().focusIds, null);
+});
+
+test('View-as: view() intersects with the viewed profile, current() with the saved one', () => {
+  M.setSessionProfile('p2');
+  M.setFocusTaskIds(new Set(['t1', 't3']));
+  assert.deepEqual([...M.view().focusIds], ['t3'], 'the peer t3 is in the viewed profile via alertOrderIds');
+  assert.deepEqual([...M.current().focusIds], ['t1']);
+});
+
+test('focus works under All alerts (orderIds filled there), fills stay empty', () => {
+  Store._state.userSettings = { alertProfileByPlant: { P1: '__all__' } };
+  M.recompute();
+  const c = M.current();
+  assert.deepEqual([...c.orderIds].sort(), ['t1', 't2', 't3']);
+  assert.equal(c.taskIds.size, 0);
+  assert.equal(c.categoryByTask.size, 0);
+  M.setFocusTaskIds(new Set(['t3', 'zz']));
+  assert.deepEqual([...M.current().focusIds], ['t3']);
+});
+
+test('D8: under All alerts sevByTask holds error orders only', () => {
+  Store._state.userSettings = { alertProfileByPlant: { P1: '__all__' } };
+  M.recompute();
+  assert.deepEqual([...M.current().sevByTask.entries()], [['t2', 'err']]);
+});
+
+test('acknowledged: an order whose every matched alert is acked is not outlined unless the pref', () => {
+  acks.set('a1', { alertId: 'a1' });
+  M.recompute();
+  M.setFocusTaskIds(new Set(['t1']));
+  assert.deepEqual([...M.current().focusIds], []);
+  Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' }, alertsShowAcknowledged: true };
+  M.recompute();
+  assert.deepEqual([...M.current().focusIds], ['t1']);
+});
+
+test('focusTaskIds() follows the VIEWED profile: a focus matching only profile B is returned under View-as B', () => {
+  M.setSessionProfile('p2');
+  M.setFocusTaskIds(new Set(['t2']));
+  assert.equal(M.current().focusIds?.size ?? 0, 0, 'the saved profile p1 does not name t2');
+  assert.deepEqual([...M.focusTaskIds()], ['t2'], 'the outline follows view()');
+});
+
+test('acknowledged: a mixed order (one alert acked, one live) is still outlined', () => {
+  Store._state.alerts = [...Store._state.alerts, alert('a4', 'overload', 'warn', 't1')];
+  acks.set('a1', { alertId: 'a1' });
+  M.recompute();
+  M.setFocusTaskIds(new Set(['t1']));
+  assert.deepEqual([...M.current().focusIds], ['t1'], 'a4 is unacked, so t1 keeps its outline');
 });

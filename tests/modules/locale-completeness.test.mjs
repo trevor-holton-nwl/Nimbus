@@ -59,7 +59,7 @@ test('Gantt legend popup keys (btn.legend, tip.legend, legend.*) exist in all 5 
     'legend.day_tomorrow', 'legend.scene_blackout_reason', 'legend.group_orders', 'legend.group_setup',
     'legend.group_shading', 'legend.group_markers', 'legend.group_nav', 'legend.standard_t',
     'legend.standard_d', 'legend.firmed_t', 'legend.firmed_d', 'legend.selected_t', 'legend.selected_d',
-    'legend.conflict_t', 'legend.conflict_d', 'legend.dimmed_t', 'legend.dimmed_d', 'legend.split_t',
+    'legend.focus_t', 'legend.focus_d', 'legend.dimmed_t', 'legend.dimmed_d', 'legend.split_t',
     'legend.split_d', 'legend.dist_t', 'legend.dist_d', 'legend.dist_sibling_t', 'legend.dist_sibling_d',
     'legend.ghost_t', 'legend.ghost_d', 'legend.ghost_conflict_t', 'legend.ghost_conflict_d', 'legend.setup_t',
     'legend.setup_d', 'legend.setup_conflict_t', 'legend.setup_conflict_d', 'legend.setup_missing_t',
@@ -74,7 +74,7 @@ test('Gantt legend popup keys (btn.legend, tip.legend, legend.*) exist in all 5 
     'legend.nav_now_d',
     'legend.pm_capacity_t', 'legend.pm_capacity_d', 'legend.pm_conflicts_t', 'legend.pm_conflicts_d',
     'legend.pm_calendar_t', 'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d',
-    'legend.pm_planning_t', 'legend.pm_planning_d',
+    'legend.pm_planning_t', 'legend.pm_planning_d', 'legend.pm_late_t', 'legend.pm_late_d',
     'legend.pm_exceptions_t', 'legend.pm_exceptions_d', 'legend.pm_ring_d', 'tbl.status_profile', 'tbl.status_profile_desc',
   ];
   const perLocale = Object.fromEntries(LOCALES.map(l => [l, keysOf(l)]));
@@ -837,9 +837,8 @@ test('U33: the new es rows use "pedido" and the new fr rows "commande" (no ordre
 // the profile toasts / User Settings rows and the Gantt-legend profile-match rows, with identical {{placeholders}}.
 const ALERT_MONITOR_KEYS = [
   'tab.alerts', 'am.profile_all', 'am.profile_ph', 'am.profile_none', 'am.window_rule', 'am.window_any_days',
-  'am.window_sev_any', 'am.window_sev_warn', 'am.window_sev_err', 'am.window_all', 'am.gantt_highlight',
-  'am.group_by', 'am.group_type', 'am.group_category', 'am.group_line', 'am.group_day', 'am.group_order',
-  'am.group_none', 'am.sort_impact', 'am.sort_time', 'am.lev_show_alerts', 'am.lev_computing', 'am.lev_none',
+  'am.window_sev_any', 'am.window_sev_err', 'am.window_all', 'am.gantt_highlight',
+  'am.sort_impact', 'am.sort_time', 'am.lev_show_alerts', 'am.lev_computing', 'am.lev_none',
   'am.lev_headroom', 'am.lev_no_headroom', 'am.lev_remaining', 'am.lev_admin_fix', 'am.lev_copy_summary',
   'am.lev_copied', 'am.lev_setup_inactive', 'am.focus_chip', 'am.focus_chip_outside', 'am.focus_clear',
   'alert.profile_hidden', 'alert.profile_show_all', 'alert.profile_override_on', 'alert.profile_back',
@@ -852,7 +851,7 @@ const ALERT_MONITOR_KEYS = [
   'am.group_unassigned', 'am.table_unavailable', 'am.set_default', 'am.edit_profile', 'am.view_profile',
   'am.page_menu', 'am.summary_window', 'am.summary_profile', 'am.summary_all', 'am.summary_window_one',
   'am.summary_profile_one', 'am.summary_all_one', 'am.summary_errors', 'am.summary_errors_one', 'am.summary_warnings',
-  'am.summary_warnings_one', 'am.summary_orders', 'am.summary_orders_one', 'am.summary_conf', 'am.sort_by',
+  'am.summary_warnings_one', 'am.summary_orders', 'am.summary_orders_one', 'am.sort_by',
   'am.fixes_title', 'am.fixes_hint', 'am.fixes_admin_divider', 'am.fix_clears', 'am.fix_clears_one',
   'am.fix_clears_one_alert', 'am.fix_clears_one_order', 'am.fix_conf', 'am.fix_minutes', 'am.fix_replay',
   'am.fixes_more', 'am.more_actions', 'am.rank_n', 'am.group_fix_n', 'am.group_fix_n_one', 'am.lev_remaining_one', 'am.group_fix_confirm', 'am.group_fix_done',
@@ -865,11 +864,19 @@ const ALERT_MONITOR_KEYS = [
   'leverage.action.routing-gap', 'leverage.action.routing-gap.workcenter_unmapped', 'leverage.action.tool',
   'leverage.action.machine-state', 'leverage.action.optimize-window', 'leverage.action.needs-planning', 'ape.title_new', 'ape.title_edit', 'ape.name',
   'ape.name_ph', 'ape.rules', 'ape.rule_n', 'ape.add_rule', 'ape.remove_rule', 'ape.types', 'ape.cat_capacity',
-  'ape.cat_conflicts', 'ape.cat_calendar', 'ape.cat_setup', 'ape.cat_planning', 'ape.cat_exceptions', 'ape.select_category',
-  'ape.day_from', 'ape.day_to', 'ape.days_hint', 'ape.min_sev', 'ape.sev_any', 'ape.sev_warn', 'ape.sev_err',
+  'ape.cat_conflicts', 'ape.cat_calendar', 'ape.cat_setup', 'ape.cat_planning', 'ape.cat_late', 'ape.cat_exceptions', 'ape.select_category',
+  'ape.day_from', 'ape.day_to', 'ape.days_hint', 'ape.sev_err',
+  // W5 two-tier editor: groups tier, palette popover, Fine-tune tier.
+  'ape.groups', 'ape.groups_hint', 'ape.cat_capacity_desc', 'ape.cat_conflicts_desc', 'ape.cat_calendar_desc', 'ape.cat_setup_desc',
+  'ape.cat_planning_desc', 'ape.cat_late_desc', 'ape.cat_exceptions_desc', 'ape.grp_tuned', 'ape.grp_tuned_tip', 'ape.color_for',
+  'ape.color_shared', 'ape.color_amber', 'ape.color_orange', 'ape.color_magenta', 'ape.color_violet', 'ape.color_teal', 'ape.color_sky',
+  'ape.color_slate', 'ape.color_sand', 'ape.color_stone', 'ape.tune', 'ape.tune_hint', 'ape.days', 'ape.day_preset_any',
+  'ape.day_preset_overdue', 'ape.day_preset_next3', 'ape.day_preset_next7', 'ape.day_preset_next14', 'ape.day_preset_custom',
+  'ape.groups_off', 'ape.rule_inert', 'ape.switch_label', 'ape.err_categories_shape',
+  'ape.type_keep_one', 'ape.rule_matches_all',
   'ape.set_mine', 'ape.new_profile', 'ape.duplicate', 'ape.copy_to_plants', 'ape.late_hours', 'ape.err_late_hours',
   'ape.live_range', 'ape.live_matches', 'ape.err_name_required', 'ape.err_name_dup', 'ape.err_name_long',
-  'ape.err_no_rules', 'ape.err_too_many_rules', 'ape.err_rule_no_types', 'ape.err_days_range', 'ape.err_days_order',
+  'ape.err_no_rules', 'ape.err_no_categories', 'ape.err_color', 'ape.err_too_many_rules', 'ape.err_rule_no_types', 'ape.err_days_range', 'ape.err_days_order',
   'ape.err_min_sev', 'ape.err_rule_dup', 'ape.err_stale', 'ape.discard_title', 'ape.discard_confirm',
   'ape.err_save_failed', 'ape.delete_confirm_title', 'ape.delete_confirm_msg', 'ape.delete', 'ape.copy_go',
   'ape.copy_selected', 'ape.not_editable', 'toast.alert_profile_saved', 'toast.alert_profile_deleted',
@@ -877,14 +884,9 @@ const ALERT_MONITOR_KEYS = [
   'us.alert_profile_manage', 'us.alert_gantt_highlight', 'us.alert_gantt_highlight_hint', 'legend.pm_capacity_t',
   'legend.pm_capacity_d', 'legend.pm_conflicts_t', 'legend.pm_conflicts_d', 'legend.pm_calendar_t',
   'legend.pm_calendar_d', 'legend.pm_setup_t', 'legend.pm_setup_d', 'legend.pm_planning_t',
-  'legend.pm_planning_d', 'legend.pm_exceptions_t',
+  'legend.pm_planning_d', 'legend.pm_late_t', 'legend.pm_late_d', 'legend.pm_exceptions_t',
   'legend.pm_exceptions_d', 'legend.pm_ring_d',
-  'am.ov_title', 'am.ov_expand', 'am.ov_collapse', 'am.ov_strip', 'am.ov_when',
-  'am.ov_where', 'am.ov_what', 'am.ov_conf', 'am.ov_overdue', 'am.ov_today',
-  'am.ov_later', 'am.ov_err', 'am.ov_warn', 'am.ov_window', 'am.ov_day_aria',
-  'am.ov_line_aria', 'am.ov_overload', 'am.ov_more', 'am.ov_fewer', 'am.ov_cat_aria',
-  'am.ov_conf_aria', 'am.ov_conf_after', 'am.ov_conf_after_aria', 'am.ov_showing', 'am.ov_clear',
-  'am.ov_remove', 'am.ov_narrow_empty', 'am.slot',
+  'ui.gantt_outlined', 'ui.gantt_outlined_one', 'ui.gantt_outline_clear', 'ui.gantt_outline_clear_tip', 'am.slot', 'am.view_label', 'am.view_inbox', 'am.view_matrix', 'am.lens_label', 'am.lens_machine', 'am.lens_day', 'am.lens_group', 'am.search_ph', 'am.in_view', 'am.open_in_inbox', 'am.facet_where', 'am.facet_when', 'am.facet_what', 'am.show_on_gantt', 'am.gantt_outline', 'am.gantt_outline_one', 'am.gantt_outline_clear', 'am.lev_none_in_view', 'am.lev_in_view', 'am.mx_machines', 'am.mx_machines_one', 'am.bucket_overdue', 'am.bucket_later', 'am.bucket_none', 'am.filter_clear', 'am.filter_remove', 'am.filter_none', 'am.lines_selected', 'am.lines_selected_one',
   'am.slot_title', 'am.slot_day', 'am.slot_pair', 'am.slot_hint', 'am.slot_option', 'am.slot_option_short',
   'am.slot_option_closed', 'am.slot_option_unknown', 'am.slot_none', 'am.slot_suggested', 'am.slot_place',
   'am.slot_confirm_title', 'am.slot_confirm_short', 'am.slot_confirm_closed', 'am.slot_confirm_place',
@@ -972,6 +974,55 @@ test('Alert Monitor: every firing alert type has an alert.help.<type> sentence i
   }
 });
 
+test('Alert Monitor: every firing alert type has a short alert.tag.<type> in all five locales (same placeholders, only vars the alert carries, en <= 24 chars)', async () => {
+  const { FIRING_ALERT_TYPES } = await import('../../frontend/insights/alert-profiles.mjs');
+  // The msgVars each type's alert actually carries (nimbus-compute-core.js); types absent here carry none, so their tag is static.
+  const CARRIES = {
+    'tool-conflict': ['tool', 'available', 'inUse', 'holders'],
+    'distribution-separation': ['parent', 'scope'],
+    late: ['order', 'hours', 'days'],
+    'setup-violated': ['order', 'line', 'required', 'available', 'short'],
+  };
+  const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
+  const banned = /\b(points?|pts|exact(ly)?|estimates?|estimated)\b/i;
+  for (const type of FIRING_ALERT_TYPES) {
+    const en = dicts.en[`alert.tag.${type}`];
+    assert.ok(typeof en === 'string' && en.trim(), `en.js has no alert.tag.${type}`);
+    assert.ok(en.length <= 24, `en alert.tag.${type} is ${en.length} chars (max 24): "${en}"`);
+    assert.doesNotMatch(en, banned, `en alert.tag.${type} vocabulary`);
+    const allowed = new Set(CARRIES[type] ?? []);
+    for (const m of en.matchAll(/\{\{(\w+)\}\}/g)) assert.ok(allowed.has(m[1]), `alert.tag.${type} uses {{${m[1]}}}, which the ${type} alert does not carry`);
+    for (const locale of LOCALES) {
+      const v = dicts[locale][`alert.tag.${type}`];
+      assert.ok(typeof v === 'string' && v.trim(), `${locale}.js has no alert.tag.${type}`);
+      assert.equal(placeholdersOf(v), placeholdersOf(en), `${locale} alert.tag.${type} placeholders`);
+    }
+    assert.doesNotMatch(dicts.es[`alert.tag.${type}`], /\b[Oo]rden(es)?\b/, `es alert.tag.${type} says pedido`);
+    assert.doesNotMatch(dicts.fr[`alert.tag.${type}`], /\b[Oo]rdres?\b/, `fr alert.tag.${type} says commande`);
+  }
+});
+
+test('Alert Monitor W6a: the Matrix / row / summary model keys exist in all five locales with the English placeholders', () => {
+  const keys = [
+    'am.summary_machines', 'am.summary_showing', 'am.detail_alert', 'am.detail_material', 'am.detail_due', 'am.detail_finish', 'am.detail_firming',
+    'am.ungrouped', 'am.mx_corner_machine', 'am.mx_corner_day', 'am.mx_corner_group', 'am.mx_cell_aria', 'am.mx_cell_aria_one',
+    'am.quiet_show', 'am.quiet_show_one', 'am.quiet_hide', 'am.quiet_hide_one',
+    'am.mx_legend_err', 'am.mx_legend_warn', 'am.mx_legend_dots', 'am.mx_legend_hint',
+  ];
+  const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
+  const banned = /\b(points?|pts|exact(ly)?|estimates?|estimated)\b/i;
+  for (const key of keys) {
+    assert.doesNotMatch(dicts.en[key], banned, `en ${key} vocabulary`);
+    for (const locale of LOCALES) {
+      const v = dicts[locale][key];
+      assert.ok(typeof v === 'string' && v.trim(), `${locale}.js is missing "${key}"`);
+      assert.equal(placeholdersOf(v), placeholdersOf(dicts.en[key]), `${locale} ${key} placeholders`);
+    }
+    assert.doesNotMatch(dicts.es[key], /\b[Oo]rden(es)?\b/);
+    assert.doesNotMatch(dicts.fr[key], /\b[Oo]rdres?\b/);
+  }
+});
+
 test('Alert Monitor: es says pedido and fr says commande (no orden/ordre)', () => {
   const es = localeDict('es'), fr = localeDict('fr');
   for (const key of ALERT_MONITOR_KEYS) {
@@ -994,4 +1045,18 @@ test('universal firm: removed keys are gone from all 5 locales; cmdp.intent_free
     assert.ok(m[1] !== en[1], `${loc} must translate cmdp.intent_freeze_sub`);
     assert.doesNotMatch(m[2], /MISSING TRANSLATION/);
   }
+});
+
+test('W5 editor wording: retired severity keys are gone, es/pt/fr call an order a pedido/commande (never ordre), no estimate vocabulary', () => {
+  const dicts = Object.fromEntries(LOCALES.map(l => [l, localeDict(l)]));
+  for (const l of LOCALES) {
+    for (const k of ['ape.sev_warn', 'ape.sev_any', 'ape.min_sev', 'am.window_sev_warn']) assert.equal(k in dicts[l], false, `${l} no longer has ${k}`);
+    for (const k of Object.keys(dicts[l]).filter(x => /^ape\.(cat_\w+_desc|groups|groups_hint|grp_tuned_tip|tune_hint|rule_inert)$/.test(x))) {
+      assert.doesNotMatch(dicts[l][k], /\b(exact|points|estimate)/i, `${l} ${k}`);
+    }
+  }
+  assert.doesNotMatch(dicts.fr['ape.cat_conflicts_desc'] + dicts.fr['ape.cat_calendar_desc'] + dicts.fr['ape.cat_planning_desc'], /\bordres?\b/i);
+  assert.match(dicts.es['ape.cat_conflicts_desc'], /pedidos/);
+  assert.match(dicts.fr['ape.cat_conflicts_desc'], /commandes/);
+  assert.match(dicts.pt['ape.cat_conflicts_desc'], /pedidos/);
 });

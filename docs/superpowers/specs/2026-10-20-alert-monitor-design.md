@@ -203,7 +203,7 @@ Files: `alert-monitor-pane.mts` (`AlertMonitorPane` — `init()/render()/setActi
 
 - `AlertsUIAdapter._visibleAlerts()` (`insights-ui.mts:1606-1615`) gains one step after the plant/horizon filters: when `AlertProfileMatches.current().profileId !== '__all__'` and no session override is active, keep only ids in `current().alertIds`. The bell badge (`renderBell`), drawer (`renderDrawer`) and `Dashboard._renderAlertSummary` all go through this function, so they follow automatically. `insights-ui.mts` subscribes to `AlertProfileMatches.subscribe` to re-render the bell/drawer on a profile change (the shell already re-renders them on `alerts:change`).
 - Drawer footer: alongside the existing `alert.horizon_hidden_duration` note, add `alert.profile_hidden` ("{{n}} more hidden by profile {{name}}") with a `btn.show_all`-style link that sets a session-only `AlertsUIAdapter._profileOverride = true` (cleared on plant change) and re-renders; the footer then reads `alert.profile_override_on` ("Showing all alerts · Back to profile").
-- Not filtered: the Gantt `conflict-order` outline / `_conflictIds()`, alert day-cells, `Store.alertsByTask()` consumers in the Orders table (`status: conflict/atrisk` filters), `NeedsEngine` (command palette) and `Confidence` — these are plant-wide truth by design. Record this boundary in `frontend/insights/CLAUDE.md`.
+- Not filtered: the Gantt `conflict-order` outline / `_conflictIds()` (superseded by rev 4: the outline is now focus-only, `alert-focus`), alert day-cells, `Store.alertsByTask()` consumers in the Orders table (`status: conflict/atrisk` filters), `NeedsEngine` (command palette) and `Confidence` — these are plant-wide truth by design. Record this boundary in `frontend/insights/CLAUDE.md`.
 - Tests: `tests/modules/insights/insights-ui.test.mjs` — `_visibleAlerts` with a stubbed matched set hides non-matching ids, `'__all__'` leaves the list unchanged, override restores it, bell count follows; Dashboard summary parity.
 
 ### E. Gantt integration
@@ -550,3 +550,20 @@ Owner screenshots showed the When bars using about 45 percent of the card height
 - The weekday visibility threshold is language-agnostic (26 px covers the 24 px fr / pt names); an en / de / es-only threshold of about 20 px would keep weekdays on at the 936-1,000 px widths.
 - Browser checks owed on the real page (the prototype used synthetic alerts and the real CSS): the band in the live app at 1,280 / 1,024 / 900 px, dark mode, and the header "Plant confidence" link and top-bar chip still opening the breakdown (their code is untouched).
 - The stride assumes a 436 px chart; between 560 and 935 px band width a 62-column chart (535 px at the narrowest) is always wider than that, so only the three-column band sets the floor.
+
+## Rev 4 note (2026-10-30, Alert Profiles revamp W4)
+
+D11 (the plant-wide red outline on every alerted Gantt bar) is reversed. The ambient `conflict-order` outline is gone: profile fills are the ambient layer, and an outline (`alert-focus`, 2 px dashed ink) appears only on orders the planner explicitly shows from the Alert Monitor, limited to orders inside the profile being viewed and excluding fully acknowledged ones (unless "Show acknowledged"). Under the built-in All alerts profile only error-severity orders get the inner ring (no fill). "Outlined: N · Clear" on the Gantt toolbar, or Escape with nothing selected, clears the outline.
+
+
+## Rev 4 (2026-10-30): Matrix | Inbox
+
+The page became two toggleable views of one filtered set, Matrix (default) and Inbox, with a Machine / Day / Group lens on the matrix. **D10 is reversed for display:** Top fixes are still scored plant-wide, but while a filter is on only the fixes that touch the alerts in view are listed (with an "N in view" clause and a scoped empty state). The Overview band is retired (its charts became the matrix row bars and the Inbox facets), plant confidence left the page, the Group-by select and the Priority / Date header switch are gone, and "Show on Gantt" outlines orders on the Gantt instead of focusing the list. The filter is session-only; `alertMonitorView['*'] = {view, lens}` persists the two choices. See `frontend/alert-monitor/CLAUDE.md`.
+
+### Rev 4 summary (2026-10-30, W7): what this section supersedes
+
+- **D10 reversed:** Top fixes are scored plant-wide but listed only for the view (the W6b rule above).
+- **D11 reversed:** the outline is focus-only (see the W4 note above); fills are the only ambient layer.
+- **Matrix | Inbox replaces the group cards;** the Overview band is retired (rev 3 and its follow-up are history).
+- **The profile editor has two tiers:** seven category rows (switch, name, "Fine-tuned" badge, count, colour swatch) and a collapsed Fine-tune section (day presets, Errors only, the group's types, late hours). Profiles store a per-category `categories` map (migration 2026-10-30-2).
+- Full design and decisions D1-D9: `docs/superpowers/specs/2026-10-30-alert-profiles-revamp-design.md`; browser checklist: `docs/superpowers/specs/2026-10-30-alert-profiles-revamp-qa.md`.

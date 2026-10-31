@@ -34,9 +34,15 @@ PUT/DELETE check the plant of the **stored** row (the `plant` query param on DEL
 
 Profiles are shared across a plant; any authenticated user with plant access can read, create and use them. Edit/delete is limited to the creator (`created_by`, case-insensitive) or an admin (`auth.get_user_role(actor) == 'admin'`). Acks follow the same rule against `acknowledged_by`. `until` expiry is enforced by `list_alert_acks` (expired rows are hidden and purged on the next upsert).
 
+## Categories (2026-10-30, Alert Profiles revamp W3)
+
+`alert_profile.categories JSONB NULL` (`CHECK jsonb_typeof = 'object'`; `migrations/2026-10-30-2-alert-profile-categories.sql`, mirrored in `schema.sql` and the `ensure_alert_profile_tables` bootstrap). NULL = a legacy profile: the frontend derives each group from its rules. When present it is a complete map of the seven groups, each `{on: bool, color: <PALETTE name>}`, at least one on (`validate_categories`; `CATEGORIES` / `PALETTE` frozensets mirror `ALERT_CATEGORY_ORDER` / `PALETTE` in `frontend/insights/alert-profiles.mts`, pinned by `tests/test_alert_profile_categories.py`). With `categories`, `rules` may be `[]` (`validate_rules(allow_empty=True)`); without, one rule is still required. Matching rule (frontend): group switch on AND (no rule applies to the group OR some applicable rule matches); rules only narrow.
+
+`PUT` semantics: `categories` omitted keeps the stored map; an explicit `null` reverts to derived (the merged row must then have at least one rule, checked after `FOR UPDATE`; `_UNSET` sentinel in `update_alert_profile`); a map replaces it. `POST`/`PUT` bodies and responses carry `categories`. Rollback hazard: rows saved with `rules: []` match nothing on the previous image. Deploy: `promote-azure -Only 2026-10-30-2 -AllowDestructive` after a dry run.
+
 ## Rule schema
 
-`rules` is a non-empty list (max 20) of `{types: string[]|null, dayFrom: int|null, dayTo: int|null, minSev: null|'warn'|'err', minLateHours: number|null}`. `types` are alert-type names from `ALERT_TYPES` in `data.py` (mirrors the `AlertType` union minus never-firing types); day offsets are within +/-365 and `dayFrom <= dayTo`. Alerts matching any rule are in the profile. Name: 1-60 chars after trim.
+`rules` is a non-empty list (max 20; may be empty when `categories` is present) of `{types: string[]|null, dayFrom: int|null, dayTo: int|null, minSev: null|'warn'|'err', minLateHours: number|null}`. `types` are alert-type names from `ALERT_TYPES` in `data.py` (mirrors the `AlertType` union minus never-firing types); day offsets are within +/-365 and `dayFrom <= dayTo`. Alerts matching any rule are in the profile. Name: 1-60 chars after trim.
 
 ## Conventions and hazards
 

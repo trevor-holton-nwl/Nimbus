@@ -357,10 +357,7 @@ test('drawer and Alert Monitor rows agree on Fix / Override / calendar glyph for
     for (const taskId of ['T1', undefined]) {
       const a = { id: `x-${type}`, type, sev: 'err', msg: 'm', taskId, line: 'L1', time: new Date('2026-10-21T08:00:00') };
       const drawer = AlertsUIAdapter._renderAlertRow(a);
-      const mon = rowHtml({
-        id: a.id, type, sev: 'err', taskId, line: 'L1', time: a.time, headline: 'h', message: 'm', help: '', orderNo: '',
-        dateText: '', relText: '', anchorTip: '', points: 1, orders: 1, lateH: 0, whatIf: false, ackLabel: null, diagOpen: false, diagHtml: '',
-      }, t);
+      const mon = rowHtml(a, { hideMachine: false, open: false, material: '', tag: '', t });
       assert.equal(/data-alert-action="fix"/.test(mon), /data-alert-action="fix"/.test(drawer), `fix ${type}`);
       assert.equal(/data-alert-action="override"/.test(mon), /data-alert-action="override"/.test(drawer), `override ${type}/${taskId}`);
       assert.equal(mon.includes('⊘'), drawer.includes('⊘'), `calendar glyph ${type}`);
@@ -389,6 +386,29 @@ test('showForCell files a planning alert under Other and does not throw', () => 
     assert.match(html, /Order q1 now fits/);
     assert.match(html, /Order q2 has no slot yet/);
     assert.match(html, /\(2\)/, 'one Other section holding both alerts');
+  } finally {
+    globalThis.document = prior.doc; Store._state.alerts = prior.alerts;
+  }
+});
+
+test('showForCell files a late alert under Other and does not throw', () => {
+  const prior = { doc: globalThis.document, alerts: Store.alerts };
+  let html = '';
+  const dlg = {
+    className: '', open: false,
+    set innerHTML(v) { html = v; }, get innerHTML() { return html; },
+    showModal() {}, close() {}, addEventListener() {}, querySelectorAll() { return []; },
+  };
+  try {
+    globalThis.document = { ...prior.doc, createElement: () => dlg, body: { appendChild() {} } };
+    const time = new Date(2026, 9, 21, 9);
+    Store._state.alerts = [
+      { id: 'late-q1', sev: 'warn', type: 'late', line: 'L1', time, msg: 'Order q1 finishes late' },
+    ];
+    assert.doesNotThrow(() => AlertsUIAdapter.showForCell('L1', Util.dayKey(time)));
+    assert.match(html, /data-cat="exceptions"/, 'late files under the Other section of the four-bucket briefing');
+    assert.doesNotMatch(html, /data-cat="late"/, 'the briefing has no Late section');
+    assert.match(html, /Order q1 finishes late/);
   } finally {
     globalThis.document = prior.doc; Store._state.alerts = prior.alerts;
   }
@@ -764,11 +784,11 @@ test('T15: acknowledged alerts are hidden unless the pref is on; shown rows carr
   }, { alerts, matches: fakeSet('__all__', ['a1', 'a2', 'a3'], acked, 'All'), showAcked: true });
 });
 
-test('T15: the Gantt conflict ids and Store.alertsByTask stay plant-wide (profile and acks do not filter them)', () => {
+test('T15: the Gantt outline is focus-only (no ambient set); Store.alertsByTask stays plant-wide', () => {
   const acked = new Map([['a2', { alert_id: 'a2', acknowledged_by: 'pat', until: null }]]);
   withProfileFixture(() => {
     assert.deepEqual(AlertsUIAdapter._visibleAlerts().alerts.map(a => a.id), ['a1']);
-    assert.deepEqual([...Timeline._conflictIds()].sort(), ['a1', 'a2', 'a3']);
+    assert.equal(Timeline._conflictIds, undefined, 'the ambient conflict set is gone');
     assert.deepEqual([...Store.alertsByTask().keys()].sort(), ['a1', 'a2', 'a3']);
   }, { alerts: [t15('a1'), t15('a2'), t15('a3')], matches: fakeSet('p1', ['a1'], acked) });
 });

@@ -1059,7 +1059,7 @@ export const Store = {
     const next = this._state.alerts.filter(a => a.id !== alertId);
     if (next.length !== this._state.alerts.length) {
       // Reassign (not splice-in-place) so the array identity changes and the
-      // alertsByTask()/Timeline._conflictIds() memos invalidate correctly.
+      // alertsByTask() memo invalidates correctly.
       this._state.alerts = next;
       this.emit({ type: 'alerts:change', source });
     }

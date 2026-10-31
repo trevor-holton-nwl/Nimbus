@@ -541,7 +541,14 @@ export type AlertType =
 export type AlertSev = 'err' | 'warn';
 
 /** UI grouping of alert types (cell briefing, Alert Monitor). */
-export type AlertCategory = 'capacity' | 'conflicts' | 'calendar' | 'setup' | 'planning' | 'exceptions';
+export type AlertCategory = 'capacity' | 'conflicts' | 'calendar' | 'setup' | 'planning' | 'late' | 'exceptions';
+
+/** The fixed nine-swatch palette a profile picks each alert group's colour from (CSS: --pal-<name>). */
+export type PaletteName = 'amber' | 'orange' | 'magenta' | 'violet' | 'teal' | 'sky' | 'slate' | 'sand' | 'stone';
+
+/** One alert group of a profile: switched on or off, drawn in a palette colour. */
+export interface ProfileCategory { on: boolean; color: PaletteName }
+export type ProfileCategories = Record<AlertCategory, ProfileCategory>;
 
 /** One rule of an alert profile; null means "no restriction". Mirrors backend/alert_profiles/data.py validate_rules. */
 export interface AlertProfileRule {
@@ -564,6 +571,8 @@ export interface AlertProfile {
   ranking: AlertRanking;
   created_by: string | null;
   updated_at: string | null;
+  /** Per-group switch + colour. Null / absent = a legacy profile: the groups derive from `rules`, colours are the defaults. */
+  categories?: ProfileCategories | null;
   /** True only for the client-side "All alerts" pseudo-profile (never a stored row). */
   builtIn?: boolean;
 }

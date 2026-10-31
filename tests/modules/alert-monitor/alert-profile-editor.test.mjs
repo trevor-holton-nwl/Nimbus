@@ -7,8 +7,10 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import {
   AlertProfileEditor, categoryCheckState, canDeleteProfile, draftFromProfile, profileFromDraft,
-  uniqueCopyName, liveRange, liveMatchCount,
+  uniqueCopyName, liveRange, liveMatchCount, blankDraft, tunedCategories, dayPresetOf, dayPresetRange, editorSeams,
 } from '../../../frontend/alert-monitor/alert-profile-editor.mjs';
+import { OverflowMenu } from '../../../frontend/platform/overflow-menu.mjs';
+import { ALERT_CATEGORY_ORDER, DEFAULT_CATEGORY_COLORS, PALETTE } from '../../../frontend/insights/alert-profiles.mjs';
 import { AlertProfileClient } from '../../../frontend/insights/alert-profile-client.mjs';
 import { AlertProfileMatches } from '../../../frontend/insights/alert-profile-matches.mjs';
 import { AlertApiError } from '../../../frontend/insights/plant-lru.mjs';
@@ -59,6 +61,7 @@ test('draftFromProfile / profileFromDraft round trip keeps every rule field incl
   draft.rules[0].types.pop();
 
   const back = profileFromDraft(draft);
+  // The unrestricted second rule sits beside a narrowing one (any-of matching), so it is kept: dropping it would narrow the profile.
   assert.deepEqual(back.rules, profile.rules);
   assert.equal(back.name, 'Mine');
   assert.equal(profileFromDraft(draft, profile).ranking, 'time');
@@ -190,26 +193,397 @@ afterEach(() => {
   Modal.open = prior.open; Modal.close = prior.close; Modal.confirm = prior.confirm; Toast.show = prior.toast;
 });
 
-test('picker lists only firing types, grouped, with a category checkbox each', () => {
+test('the Fine-tune tier lists only firing types, per ON group, and the late-hours input for the Late group', () => {
   AlertProfileEditor.open({ plant: 'P1' });
   const body = els['ape-body'].innerHTML;
   assert.match(body, /data-ape-type="overlap"/);
   assert.doesNotMatch(body, /data-ape-type="near-capacity"/);
   assert.doesNotMatch(body, /data-ape-type="line_no_calendar"/);
-  for (const cat of ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions']) assert.match(body, new RegExp(`data-ape-cat="${cat}"`));
-  assert.match(body, /type="number" min="-365" max="365" step="1"/);
+  for (const cat of ALERT_CATEGORY_ORDER) assert.match(body, new RegExp(`data-ape-block="${cat}"`));
   assert.match(body, /ape\.late_hours/);
+  assert.doesNotMatch(body, /ape\.min_sev|ape\.sev_warn|ape\.sev_any/);
   assert.equal(els['modal-alert-profile'].hidden, false);
 });
 
-test('Save on an empty draft renders the validation keys under the fields and does not call the server', async () => {
+test('the groups tier has seven switch rows, each a role=switch with the group name as its label', () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  const body = els['ape-body'].innerHTML;
+  const rows = body.match(/<input type="checkbox" role="switch"[^>]*>/g) ?? [];
+  assert.equal(rows.length, 7);
+  for (const cat of ALERT_CATEGORY_ORDER) {
+    const row = rows.find(r => r.includes(`data-ape-grp-on="${cat}"`));
+    assert.ok(row, `${cat} switch`);
+    assert.match(row, new RegExp(`aria-label="ape\\.cat_${cat}"`));
+    assert.match(row, /aria-checked="true"/);
+    assert.match(row, /checked/);
+  }
+  assert.match(body, /cal-day-toggle-wrap/);
+  for (const cat of ALERT_CATEGORY_ORDER) assert.match(body, new RegExp(`id="ape-cnt-${cat}"`));
+});
+
+test('blankDraft is all seven groups on in their default colours with no rules', () => {
+  const d = blankDraft('P1');
+  assert.equal(d.plant, 'P1');
+  assert.deepEqual(d.rules, []);
+  assert.deepEqual(Object.keys(d.categories), [...ALERT_CATEGORY_ORDER]);
+  for (const cat of ALERT_CATEGORY_ORDER) assert.deepEqual(d.categories[cat], { on: true, color: DEFAULT_CATEGORY_COLORS[cat] });
+});
+
+test('dayPresetOf / dayPresetRange: Next N is day 0 to N-1, Overdue is before today, the rest is Custom', () => {
+  assert.equal(dayPresetOf(null, null), 'any');
+  assert.equal(dayPresetOf(null, -1), 'overdue');
+  assert.equal(dayPresetOf(0, 2), 'next3');
+  assert.equal(dayPresetOf(0, 6), 'next7');
+  assert.equal(dayPresetOf(0, 13), 'next14');
+  assert.equal(dayPresetOf(1, 6), 'custom');
+  assert.equal(dayPresetOf(0, 4), 'custom');
+  assert.equal(dayPresetOf(null, 6), 'custom');
+  assert.deepEqual(dayPresetRange('any'), { dayFrom: null, dayTo: null });
+  assert.deepEqual(dayPresetRange('overdue'), { dayFrom: null, dayTo: -1 });
+  assert.deepEqual(dayPresetRange('next3'), { dayFrom: 0, dayTo: 2 });
+  assert.deepEqual(dayPresetRange('next7'), { dayFrom: 0, dayTo: 6 });
+  assert.deepEqual(dayPresetRange('next14'), { dayFrom: 0, dayTo: 13 });
+  assert.equal(dayPresetRange('custom'), null);
+  for (const p of ['any', 'overdue', 'next3', 'next7', 'next14']) {
+    const r = dayPresetRange(p);
+    assert.equal(dayPresetOf(r.dayFrom, r.dayTo), p, `${p} round trips`);
+  }
+});
+
+test('tunedCategories: ON groups with a real narrowing rule only', () => {
+  const rule = o => ({ types: ['late'], dayFrom: null, dayTo: null, minSev: null, minLateHours: null, ...o });
+  const cats = blankDraft('P1').categories;
+  assert.deepEqual(tunedCategories({ categories: cats, rules: [] }), []);
+  assert.deepEqual(tunedCategories({ categories: cats, rules: [rule()] }), [], 'every type of the group, nothing else: not tuned');
+  assert.deepEqual(tunedCategories({ categories: cats, rules: [rule({ dayFrom: 0, dayTo: 2 })] }), ['late']);
+  assert.deepEqual(tunedCategories({ categories: cats, rules: [rule({ minSev: 'err' })] }), ['late']);
+  assert.deepEqual(tunedCategories({ categories: cats, rules: [rule({ types: ['overlap'] })] }), ['conflicts'], 'a type left unticked');
+  const off = { ...cats, late: { on: false, color: 'slate' } };
+  assert.deepEqual(tunedCategories({ categories: off, rules: [rule({ dayFrom: 0, dayTo: 2 })] }), [], 'an OFF group is never tuned');
+  assert.deepEqual(
+    tunedCategories({ categories: cats, rules: [{ types: [...FIRING_ALERT_TYPES], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null }] }),
+    [...ALERT_CATEGORY_ORDER], 'a rule over every type narrows every group');
+});
+
+test('draftFromProfile deep-copies rules and categories; a stored warn reads as unchecked and saves as null', () => {
+  const cats = Object.fromEntries(ALERT_CATEGORY_ORDER.map(c => [c, { on: true, color: 'sky' }]));
+  const stored = { id: 'p1', plant: 'P1', name: 'N', description: '', ranking: 'impact', created_by: 'me', updated_at: 'T', categories: cats,
+    rules: [{ types: ['late'], dayFrom: 0, dayTo: 6, minSev: 'warn', minLateHours: null }] };
+  const d = draftFromProfile(stored);
+  assert.equal(d.rules[0].minSev, null);
+  assert.notEqual(d.categories, stored.categories);
+  assert.notEqual(d.categories.late, stored.categories.late);
+  d.categories.late.color = 'amber';
+  d.rules[0].types.push('closed');
+  assert.equal(stored.categories.late.color, 'sky');
+  assert.deepEqual(stored.rules[0].types, ['late']);
+  d.rules[0].types.pop();
+  assert.equal(profileFromDraft(d).rules[0].minSev, null);
+  assert.notEqual(profileFromDraft(d).categories, d.categories);
+});
+
+test('two rules that differ only by warn vs none collapse to one on save', () => {
+  const stored = { id: 'p1', plant: 'P1', name: 'N', description: '', ranking: 'impact', created_by: 'me', updated_at: 'T',
+    rules: [
+      { types: ['late'], dayFrom: 0, dayTo: 6, minSev: 'warn', minLateHours: null },
+      { types: ['late'], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null },
+      { types: ['late'], dayFrom: 0, dayTo: 6, minSev: 'err', minLateHours: null },
+    ] };
+  const out = profileFromDraft(draftFromProfile(stored)).rules;
+  assert.equal(out.length, 2);
+  assert.deepEqual(out.map(r => r.minSev), [null, 'err']);
+});
+
+test('Save on a blank draft with no name shows only the name error (the groups alone make a valid profile) and does not call the server', async () => {
   AlertProfileEditor.open({ plant: 'P1' });
   click('ape-foot', { apeAct: 'save' });
   await flush();
   const body = els['ape-body'].innerHTML;
   assert.match(body, /ape-err[^>]*>[^<]*ape\.err_name_required/);
-  assert.match(body, /ape\.err_rule_no_types/);
+  assert.doesNotMatch(body, /ape\.err_rule_no_types|ape\.err_no_categories/);
   assert.equal(calls.create.length, 0);
+});
+
+test('all seven switches off renders ape.err_no_categories on Save and sends nothing', async () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Quiet' }));
+  for (const cat of ALERT_CATEGORY_ORDER) fire('ape-body', 'change', tgt({ apeGrpOn: cat }, { checked: false }));
+  assert.match(els['ape-body'].innerHTML, /ape-grp-off/);
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.match(els['ape-body'].innerHTML, /ape-err[^>]*>[^<]*ape\.err_no_categories/);
+  assert.equal(calls.create.length, 0);
+});
+
+test('an err_categories_shape error renders under the groups', () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  const s = AlertProfileEditor._test.state();
+  s.errors = { categories: 'ape.err_categories_shape' };
+  AlertProfileEditor._test.render();
+  assert.match(els['ape-body'].innerHTML, /ape-err[^>]*>[^<]*ape\.err_categories_shape/);
+});
+
+const FINE_OPEN = /<details class="ape-tune" data-ape-tune open>/;
+const FINE_SHUT = /<details class="ape-tune" data-ape-tune>/;
+const toggle = open => els['ape-body'].handlers.toggle({ target: { dataset: { apeTune: '' }, open } });
+
+test('Fine-tune opens by itself only for a tuned profile; the planner\'s toggle wins afterwards; a rule error forces it open', async () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  assert.match(els['ape-body'].innerHTML, FINE_SHUT, 'blank: collapsed');
+  toggle(true);                                                       // the planner opens it
+  fire('ape-body', 'change', tgt({ apeGrpOn: 'setup' }, { checked: false }));   // a structural re-render
+  assert.match(els['ape-body'].innerHTML, FINE_OPEN, 'the planner\'s choice survives a re-render');
+
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  assert.match(els['ape-body'].innerHTML, FINE_OPEN, 'a tuned profile opens on load');
+  toggle(false);                                                      // the planner collapses it
+  fire('ape-body', 'change', tgt({ apeGrpOn: 'late' }, { checked: true }));
+  assert.match(els['ape-body'].innerHTML, FINE_SHUT, 'and stays collapsed through a re-render');
+  fire('ape-body', 'input', tgt({ apeField: 'dayTo', apeRule: '0' }, { value: '999' }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.match(els['ape-body'].innerHTML, FINE_OPEN, 'a rules.* validation error on save forces it open');
+  assert.match(els['ape-body'].innerHTML, /ape\.err_days_range/);
+
+  click('ape-body', { apeAct: 'select', apeId: 'p2' });               // switching profile re-decides
+  assert.match(els['ape-body'].innerHTML, FINE_OPEN);
+  const plain = { ...mine, id: 'p3', name: 'Plain', rules: [{ types: null, dayFrom: null, dayTo: null, minSev: null, minLateHours: null }] };
+  AlertProfileClient.cached = () => [plain];
+  AlertProfileClient.list = async () => [plain];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p3' });
+  assert.match(els['ape-body'].innerHTML, FINE_SHUT, 'an untuned legacy profile opens collapsed');
+});
+
+test('more than one saved rule opens Fine-tune', () => {
+  const two = { ...mine, id: 'p4', name: 'Two', rules: [
+    { types: ['late'], dayFrom: null, dayTo: null, minSev: null, minLateHours: null },
+    { types: ['overlap'], dayFrom: null, dayTo: null, minSev: null, minLateHours: null },
+  ] };
+  AlertProfileClient.cached = () => [two];
+  AlertProfileClient.list = async () => [two];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p4' });
+  assert.match(els['ape-body'].innerHTML, FINE_OPEN);
+});
+
+test('a colour pick patches the draft and the swatch in place: no re-render, no recount; the item marks the current colour', async () => {
+  const opened = [];
+  const priorOpen = OverflowMenu.open;
+  OverflowMenu.open = (anchor, items, opts) => { opened.push({ anchor, items, opts }); return { close() {} }; };
+  try {
+    AlertProfileEditor.open({ plant: 'P1' });
+    const attrs = {};
+    const anchor = tgt({ apeAct: 'color', apeCat: 'capacity' }, { setAttribute(k, v) { attrs[k] = v; } });
+    let counts = 0;
+    const priorCounts = editorSeams.categoryCounts;
+    editorSeams.categoryCounts = (...a) => { counts++; return priorCounts(...a); };
+    const htmlBefore = els['ape-body'].innerHTML;
+    try {
+      els['ape-body'].handlers.click({ target: anchor });
+      assert.equal(opened.length, 1);
+      assert.equal(opened[0].opts.key, 'ape-color-capacity');
+      assert.equal(opened[0].opts.align, 'end');
+      const items = opened[0].items;
+      assert.deepEqual(items.map(i => i.data.apColor), [...PALETTE]);
+      assert.ok(items.every(i => i.checked === undefined), 'never a checkbox item');
+      const cur = items.filter(i => i.data.current);
+      assert.equal(cur.length, 1);
+      assert.equal(cur[0].data.apColor, DEFAULT_CATEGORY_COLORS.capacity);
+      assert.match(cur[0].label, /✓/);
+      assert.ok(items.find(i => i.data.apColor === 'violet').hint, 'violet is already worn by Conflicts: the hint names it');
+      assert.equal(items.find(i => i.data.apColor === 'sky').hint, undefined);
+
+      items.find(i => i.data.apColor === 'sky').onSelect({});
+      assert.equal(attrs['data-color'], 'sky');
+      assert.match(attrs['aria-label'], /ape\.color_for/);
+      assert.equal(AlertProfileEditor._test.state().draft.categories.capacity.color, 'sky');
+      assert.equal(counts, 0, 'no recount');
+      assert.equal(els['ape-body'].innerHTML, htmlBefore, 'no re-render');
+    } finally { editorSeams.categoryCounts = priorCounts; }
+    click('ape-foot', { apeAct: 'save' });
+    fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Colourful' }));
+    click('ape-foot', { apeAct: 'save' });
+    await flush();
+    assert.equal(calls.create[0].categories.capacity.color, 'sky');
+  } finally { OverflowMenu.open = priorOpen; }
+});
+
+test('the live-recount timer is cleared on close: no recount fires after close(); an open editor does recount', async () => {
+  const priorCounts = editorSeams.categoryCounts;
+  let counts = 0;
+  editorSeams.categoryCounts = (...a) => { counts++; return priorCounts(...a); };
+  try {
+    AlertProfileEditor.open({ plant: 'P1' });
+    AlertProfileEditor._test.state().draft.rules.push({ types: [], dayFrom: null, dayTo: null, minSev: null, minLateHours: null });
+    const before = counts;
+    fire('ape-body', 'input', tgt({ apeField: 'dayFrom', apeRule: '0' }, { value: '2' }));
+    await new Promise(r => setTimeout(r, 250));
+    assert.ok(counts > before, 'control: the debounced recount fires while open');
+    const mid = counts;
+    fire('ape-body', 'input', tgt({ apeField: 'dayTo', apeRule: '0' }, { value: '5' }));
+    AlertProfileEditor.close();
+    await new Promise(r => setTimeout(r, 250));
+    assert.equal(counts, mid, 'close() cancelled the pending recount');
+  } finally { editorSeams.categoryCounts = priorCounts; }
+});
+
+test('read-only: switches, swatches, selects and inputs are disabled and the palette does not open', () => {
+  setUser('sam@newell.com');
+  let opened = 0;
+  const priorOpen = OverflowMenu.open;
+  OverflowMenu.open = () => { opened++; return { close() {} }; };
+  try {
+    AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+    const body = els['ape-body'].innerHTML;
+    for (const re of [/<input[^>]*data-ape-grp-on[^>]*>/g, /<button[^>]*ape-swbtn[^>]*>/g, /<select[^>]*>/g,
+      /<input[^>]*data-ape-field="(?:name|dayFrom|dayTo|minLateHours)"[^>]*>/g, /<input[^>]*data-ape-type[^>]*>/g, /<input[^>]*data-ape-field="errOnly"[^>]*>/g]) {
+      const found = body.match(re) ?? [];
+      assert.ok(found.length > 0, String(re));
+      for (const f of found) assert.match(f, /\sdisabled/, f);
+    }
+    click('ape-body', { apeAct: 'color', apeCat: 'late' });
+    assert.equal(opened, 0);
+  } finally { OverflowMenu.open = priorOpen; }
+});
+
+test('the live counts are one pass per draft change and never on a Name keystroke', async () => {
+  let passes = 0;
+  const priorCounts = editorSeams.categoryCounts;
+  editorSeams.categoryCounts = (...a) => { passes++; return priorCounts(...a); };
+  try {
+    AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+    await new Promise(r => setTimeout(r, 20));   // let open()'s async profile load settle its own re-render
+    const afterOpen = passes;
+    assert.ok(afterOpen >= 1);
+    for (const v of ['A', 'Ab', 'Abc']) fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: v }));
+    assert.equal(passes, afterOpen, 'typing a name recounts nothing');
+    for (const v of ['1', '2', '3']) fire('ape-body', 'input', tgt({ apeField: 'dayTo', apeRule: '0' }, { value: v }));
+    assert.equal(passes, afterOpen, 'number keystrokes are debounced (120 ms)');
+    await new Promise(r => setTimeout(r, 200));
+    assert.equal(passes, afterOpen + 1, 'a burst of day edits recounts once');
+    fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: '0' }, { checked: true }));
+    assert.equal(passes, afterOpen + 2);
+  } finally { editorSeams.categoryCounts = priorCounts; }
+});
+
+test('an OFF group still shows the count it would match, and the header sums only the ON groups', () => {
+  const alert = (id, type) => ({ id, type, sev: 'err', msg: '', line: '', taskId: null, time: new Date() });
+  Store.setAlerts([alert('a', 'late'), alert('b', 'late'), alert('c', 'overlap')], 'test');
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'change', tgt({ apeGrpOn: 'late' }, { checked: false }));
+  const html = els['ape-body'].innerHTML;
+  assert.match(html, /id="ape-cnt-late">2</);
+  assert.match(html, /id="ape-cnt-conflicts">1</);
+  assert.match(html, /id="ape-matches">ape\.live_matches/);
+  assert.equal(AlertProfileEditor._test.state().counts.late, 2);
+});
+
+test('Fine-tune edits: a preset sets the window, Custom reveals the numbers, Errors only maps to err/null, the last type of a group cannot be unticked', async () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  const s = () => AlertProfileEditor._test.state();
+  const lateRule = () => s().draft.rules.find(r => r.types.includes('late'));
+  const idx = () => String(s().draft.rules.indexOf(lateRule()));
+  fire('ape-body', 'change', tgt({ apeField: 'dayPreset', apeRule: idx() }, { value: 'next7' }));
+  assert.equal(lateRule().dayFrom, 0); assert.equal(lateRule().dayTo, 6);
+  assert.doesNotMatch(els['ape-body'].innerHTML, /data-ape-field="dayFrom"/);
+  fire('ape-body', 'change', tgt({ apeField: 'dayPreset', apeRule: idx() }, { value: 'custom' }));
+  assert.match(els['ape-body'].innerHTML, /data-ape-field="dayFrom"/);
+  assert.equal(lateRule().dayTo, 6, 'Custom keeps the numbers');
+  fire('ape-body', 'change', tgt({ apeField: 'dayPreset', apeRule: idx() }, { value: 'overdue' }));
+  assert.equal(lateRule().dayFrom, null); assert.equal(lateRule().dayTo, -1);
+  fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: idx() }, { checked: true }));
+  assert.equal(lateRule().minSev, 'err');
+  fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: idx() }, { checked: false }));
+  assert.equal(lateRule().minSev, null);
+  // Conflicts: untick two of three types, then the last ticked one is refused.
+  const cr = () => s().draft.rules.find(r => r.types.includes('overlap'));
+  const ci = () => String(s().draft.rules.indexOf(cr()));
+  fire('ape-body', 'change', tgt({ apeType: 'tool-conflict', apeRule: ci(), apeCat: 'conflicts' }, { checked: false }));
+  fire('ape-body', 'change', tgt({ apeType: 'distribution-separation', apeRule: ci(), apeCat: 'conflicts' }, { checked: false }));
+  assert.deepEqual(cr().types, ['overlap']);
+  fire('ape-body', 'change', tgt({ apeType: 'overlap', apeRule: ci(), apeCat: 'conflicts' }, { checked: false }));
+  assert.deepEqual(cr().types, ['overlap'], 'the last type stays ticked');
+  assert.match(els['ape-body'].innerHTML, /<input[^>]*data-ape-type="overlap"[^>]*disabled/);
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Tuned' }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  const sent = calls.create[0];
+  assert.deepEqual(sent.rules.map(r => r.types), [['overlap'], ['late']]);
+  assert.equal(sent.rules[1].dayTo, -1);
+});
+
+test('a no-op rule beside a narrowing rule of the same group is kept on the wire and shown with the matches-everything note', async () => {
+  const both = { ...mine, id: 'p6', name: 'Both', rules: [
+    { types: ['late'], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null },
+    { types: ['late'], dayFrom: null, dayTo: null, minSev: null, minLateHours: null },
+  ] };
+  assert.deepEqual(profileFromDraft(draftFromProfile(both)).rules, both.rules, 'both rules round-trip unchanged');
+  AlertProfileClient.cached = () => [both];
+  AlertProfileClient.list = async () => [both];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p6' });
+  assert.match(els['ape-body'].innerHTML, /ape\.rule_matches_all/);
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.update[0][1].rules, both.rules);
+});
+
+test('Add rule beside a narrowing rule shows the matches-everything note at once', () => {
+  const one = { ...mine, id: 'p7', name: 'One', rules: [{ types: ['late'], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null }] };
+  AlertProfileClient.cached = () => [one];
+  AlertProfileClient.list = async () => [one];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p7' });
+  assert.doesNotMatch(els['ape-body'].innerHTML, /ape\.rule_matches_all/);
+  click('ape-body', { apeAct: 'add-rule', apeCat: 'late' });
+  assert.match(els['ape-body'].innerHTML, /ape\.rule_matches_all/);
+  assert.match(els['ape-body'].innerHTML, /data-ape-act="rm-rule"/);
+});
+
+test('all-ON with no rules still saves []; Next 7 days on Late alone saves one narrowed rule', async () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Plain' }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.create[0].rules, []);
+
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Late week' }));
+  const s = AlertProfileEditor._test.state();
+  const i = String(s.draft.rules.findIndex(r => r.types.includes('late')));
+  fire('ape-body', 'change', tgt({ apeField: 'dayPreset', apeRule: i }, { value: 'next7' }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.create[1].rules, [{ types: ['late'], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null }]);
+});
+
+test('the Fine-tuned badge follows live edits; single-type groups render no type row; the disabled last type explains itself; the switch aria-checked tracks the input', () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  assert.match(els['ape-body'].innerHTML, /id="ape-badge-late"[^>]* hidden>/);
+  const s = AlertProfileEditor._test.state();
+  const i = String(s.draft.rules.findIndex(r => r.types.includes('overlap')));
+  fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: i }, { checked: true }));
+  assert.equal(els['ape-badge-conflicts'].hidden, false, 'badge shows after Errors only');
+  fire('ape-body', 'change', tgt({ apeField: 'errOnly', apeRule: i }, { checked: false }));
+  assert.equal(els['ape-badge-conflicts'].hidden, true, 'and hides again');
+  // Late has one type: no type checkboxes at all.
+  assert.doesNotMatch(els['ape-body'].innerHTML, /data-ape-type="late"/);
+  // Conflicts reduced to one type: the disabled box carries the explanation.
+  fire('ape-body', 'change', tgt({ apeType: 'tool-conflict', apeRule: i, apeCat: 'conflicts' }, { checked: false }));
+  fire('ape-body', 'change', tgt({ apeType: 'distribution-separation', apeRule: i, apeCat: 'conflicts' }, { checked: false }));
+  assert.match(els['ape-body'].innerHTML, /data-ape-type="overlap"[^>]*disabled[^>]*title="ape\.type_keep_one"/);
+  const attrs = {};
+  fire('ape-body', 'change', tgt({ apeGrpOn: 'setup' }, { checked: false, setAttribute(k, v) { attrs[k] = v; } }));
+  assert.equal(attrs['aria-checked'], 'false');
+});
+
+test('the Off line and the inert line name the switched-off groups and rules that only touch them', () => {
+  const p = { ...mine, id: 'p5', name: 'Late only', rules: [{ types: ['late'], dayFrom: 0, dayTo: 6, minSev: null, minLateHours: null }] };
+  AlertProfileClient.cached = () => [p];
+  AlertProfileClient.list = async () => [p];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p5' });
+  assert.match(els['ape-body'].innerHTML, /ape\.groups_off/);
+  assert.doesNotMatch(els['ape-body'].innerHTML, /ape\.rule_inert/);
+  fire('ape-body', 'change', tgt({ apeGrpOn: 'conflicts' }, { checked: true }));
+  fire('ape-body', 'change', tgt({ apeGrpOn: 'late' }, { checked: false }));
+  assert.match(els['ape-body'].innerHTML, /ape\.rule_inert/, 'the late rule now only touches an OFF group');
 });
 
 test('Delete is hidden for a non-creator non-admin and shown for the creator and for an admin', () => {
@@ -235,14 +609,14 @@ test('Delete is hidden for a non-creator non-admin and shown for the creator and
 test('a new draft saves through create with the plant, toasts, and closes', async () => {
   AlertProfileEditor.open({ plant: 'P1' });
   fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: '  Fresh one  ' }));
-  fire('ape-body', 'change', tgt({ apeType: 'late', apeRule: '0' }, { checked: true }));
   click('ape-foot', { apeAct: 'save' });
   await flush();
   assert.equal(calls.create.length, 1);
   const sent = calls.create[0];
   assert.equal(sent.plant, 'P1');
   assert.equal(sent.name, 'Fresh one');
-  assert.deepEqual(sent.rules, [{ types: ['late'], dayFrom: null, dayTo: null, minSev: null, minLateHours: null }]);
+  assert.deepEqual(sent.rules, [], 'a blank draft narrows nothing');
+  assert.deepEqual(sent.categories, blankDraft('P1').categories, 'all seven groups on in their default colours');
   assert.equal(sent.ranking, 'impact');
   assert.equal(calls.update.length, 0);
   assert.match(calls.toast[0][0], /toast\.alert_profile_saved/);
@@ -269,7 +643,6 @@ test('server 409 name_taken renders ape.err_name_dup under Name; stale renders a
   AlertProfileClient.create = async () => { throw new AlertApiError('dup', 'name_taken', 409); };
   AlertProfileEditor.open({ plant: 'P1' });
   fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Fresh' }));
-  fire('ape-body', 'change', tgt({ apeType: 'late', apeRule: '0' }, { checked: true }));
   click('ape-foot', { apeAct: 'save' });
   await flush();
   assert.match(els['ape-body'].innerHTML, /ape-err[^>]*>[^<]*ape\.err_name_dup/);
@@ -328,7 +701,6 @@ test('saving an existing profile keeps its stored ranking', async () => {
 test('fromPicker: a successful create makes the page view the new profile; a plain create does not', async () => {
   AlertProfileEditor.open({ plant: 'P1', fromPicker: true });
   fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Fresh' }));
-  fire('ape-body', 'change', tgt({ apeType: 'late', apeRule: '0' }, { checked: true }));
   click('ape-foot', { apeAct: 'save' });
   await flush();
   assert.deepEqual(calls.session, ['new1']);
@@ -336,7 +708,6 @@ test('fromPicker: a successful create makes the page view the new profile; a pla
   calls.session.length = 0;
   AlertProfileEditor.open({ plant: 'P1' });
   fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Fresh two' }));
-  fire('ape-body', 'change', tgt({ apeType: 'late', apeRule: '0' }, { checked: true }));
   click('ape-foot', { apeAct: 'save' });
   await flush();
   assert.deepEqual(calls.session, []);
@@ -374,7 +745,6 @@ test('a non-409 save failure shows the real error, never the stale-edit text', a
   AlertProfileClient.create = async () => { throw new Error(''); };
   AlertProfileEditor.open({ plant: 'P1' });
   fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Fresh' }));
-  fire('ape-body', 'change', tgt({ apeType: 'late', apeRule: '0' }, { checked: true }));
   click('ape-foot', { apeAct: 'save' });
   await flush();
   assert.equal(calls.toast.at(-1)[0], 'ape.err_save_failed');
@@ -415,6 +785,61 @@ test('switching, New, Duplicate and Copy confirm first when edits are unsaved; a
   assert.doesNotMatch(els['ape-body'].innerHTML, /Edited name/);
   click('ape-body', { apeAct: 'new' });   // clean again after the switch
   assert.equal(calls.confirm.length, 5, 'a clean form after the discard does not ask again');
+});
+
+const withCats = (p, mut = {}) => {
+  const categories = Object.fromEntries(ALERT_CATEGORY_ORDER.map(c => [c, { on: c === 'late' || c === 'conflicts', color: c === 'late' ? 'sky' : 'sand' }]));
+  return { ...p, categories: { ...categories, ...mut } };
+};
+
+test('Duplicate, Save and Copy to plants all carry the full categories map', async () => {
+  const src = withCats(mine);
+  AlertProfileClient.cached = () => [src, theirs];
+  AlertProfileClient.list = async () => [src, theirs];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-body', { apeAct: 'dup', apeId: 'p1' });
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.create[0].categories, src.categories, 'Duplicate');
+
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.deepEqual(calls.update[0][1].categories, src.categories, 'Save (update)');
+
+  Store.setMasterData({ plants: [{ plant: 'P1' }, { plant: 'P2' }], lines: [] }, 'test');
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-body', { apeAct: 'copy', apeId: 'p1' });
+  fire('ape-body', 'change', tgt({ apeCopyPlant: 'P2' }, { checked: true }));
+  click('ape-body', { apeAct: 'copy-go' });
+  await flush(); await flush();
+  const copy = calls.create.find(c => c.plant === 'P2');
+  assert.deepEqual(copy.categories, src.categories, 'Copy to plants');
+  assert.notEqual(copy.categories, src.categories, 'a copy, not the cached object');
+});
+
+test('_revalidate sees the categories: switching every group off on a stored profile fails validation', async () => {
+  const src = withCats(mine);
+  AlertProfileClient.cached = () => [src];
+  AlertProfileClient.list = async () => [src];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  for (const cat of ['late', 'conflicts']) fire('ape-body', 'change', tgt({ apeGrpOn: cat }, { checked: false }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.match(els['ape-body'].innerHTML, /ape\.err_no_categories/);
+  assert.equal(calls.update.length, 0);
+  fire('ape-body', 'change', tgt({ apeGrpOn: 'late' }, { checked: true }));   // showErrors is on: the error clears live
+  assert.doesNotMatch(els['ape-body'].innerHTML, /ape\.err_no_categories/);
+});
+
+test('liveMatchCount passes the categories: an OFF group contributes nothing', () => {
+  const today = new Date(2026, 9, 20);
+  const alert = (id, type) => ({ id, type, sev: 'err', msg: '', line: '', taskId: null, time: new Date(2026, 9, 21, 8) });
+  const alerts = [alert('a', 'late'), alert('b', 'overlap')];
+  const categories = blankDraft('P1').categories;
+  assert.equal(liveMatchCount({ plant: 'P1', rules: [], categories }, alerts, {}, today), 2);
+  categories.late.on = false;
+  assert.equal(liveMatchCount({ plant: 'P1', rules: [], categories }, alerts, {}, today), 1);
 });
 
 test('Duplicate opens a new unsaved draft named "<name> (copy)"', async () => {

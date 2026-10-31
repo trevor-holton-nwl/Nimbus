@@ -46,11 +46,11 @@ test('recompute yields worst severity and most severe category per task', () => 
   assert.equal(c.sevByTask.get('t1'), 'err');
   assert.equal(c.sevByTask.get('t2'), 'warn');
   assert.equal(c.categoryByTask.get('t1'), 'conflicts');   // err (overlap) beats warn (overload)
-  assert.equal(c.categoryByTask.get('t2'), 'exceptions');
+  assert.equal(c.categoryByTask.get('t2'), 'late');
   assert.equal(c.categoryByTask.get('t3'), 'capacity');    // err tie: capacity > conflicts
 });
 
-test('categoryByTask ranks planning ahead of exceptions at equal severity', () => {
+test('categoryByTask ranks planning ahead of late at equal severity', () => {
   profiles = [prof('p1', ['late', 'needs_planning'])];
   Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
   Store._state.alerts = [
@@ -62,18 +62,19 @@ test('categoryByTask ranks planning ahead of exceptions at equal severity', () =
   ];
   M.recompute();
   const c = M.current();
-  assert.equal(c.categoryByTask.get('t1'), 'planning', 'warn tie: planning beats exceptions');
-  assert.equal(c.categoryByTask.get('t2'), 'exceptions');
-  assert.equal(c.categoryByTask.get('t3'), 'planning', 'err tie: planning beats exceptions');
+  assert.equal(c.categoryByTask.get('t1'), 'planning', 'warn tie: planning beats late');
+  assert.equal(c.categoryByTask.get('t2'), 'late');
+  assert.equal(c.categoryByTask.get('t3'), 'planning', 'err tie: planning beats late');
 });
 
-test("'__all__' keeps every alert id but highlights nothing", () => {
+test("'__all__' keeps every alert id but fills nothing (error orders keep the ring)", () => {
   M.recompute();
   const c = M.current();
   assert.equal(c.profileId, '__all__');
   assert.equal(c.alertIds.size, 6);
   assert.equal(c.taskIds.size, 0);
-  assert.equal(c.sevByTask.size, 0);
+  assert.deepEqual([...c.sevByTask.keys()].sort(), ["t1", "t3"], "D8: err-severity orders only");
+  assert.ok(c.orderIds.has("t2") && c.orderIds.has("t3"), "orderIds filled under __all__");
   assert.equal(c.categoryByTask.size, 0);
 });
 
@@ -128,13 +129,14 @@ test('the session override changes view() only; current() keeps following the sa
   assert.equal(M.view().profileId, 'p1', 'a plant change clears the override');
 });
 
-test('the focus set overrides current() but not view()', () => {
+test('the focus set resolves per set and leaves the fills alone', () => {
   Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
   profiles = [prof('p1', ['overload'])];
   M.recompute();
-  M.setFocusTaskIds(['t2']);
-  assert.deepEqual([...M.current().taskIds], ['t2']);
-  assert.deepEqual([...M.view().taskIds].sort(), ['t1', 't3']);
+  M.setFocusTaskIds(['t2', 't1']);
+  assert.deepEqual([...M.current().taskIds].sort(), ['t1', 't3'], 'fills stay ambient');
+  assert.deepEqual([...M.current().focusIds], ['t1'], 't2 is outside the profile: no outline');
+  assert.deepEqual([...M.view().focusIds], ['t1']);
   M.setFocusTaskIds(null);
 });
 
@@ -178,4 +180,19 @@ test('a failed profile fetch is not retried on every recompute: 30 s backoff, re
   await new Promise(r => setTimeout(r, 5));
   assert.equal(listCalls, before + 2, 'retried after the plant change');
   Store.emit({ type: 'plant:selected', plant: 'P1' });   // leave a clean slate for later tests
+});
+
+test('categoryByTask ranks late ahead of exceptions at equal severity (pinned)', () => {
+  profiles = [prof('p1', ['late', 'no_anchor'])];
+  Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
+  Store._state.alerts = [
+    alert('a1', 'no_anchor', 'warn', 't1'),
+    alert('a2', 'late', 'warn', 't1'),
+    alert('a3', 'no_anchor', 'err', 't2'),
+    alert('a4', 'late', 'err', 't2'),
+  ];
+  M.recompute();
+  const c = M.current();
+  assert.equal(c.categoryByTask.get('t1'), 'late', 'warn tie: late beats exceptions');
+  assert.equal(c.categoryByTask.get('t2'), 'late', 'err tie: late beats exceptions');
 });

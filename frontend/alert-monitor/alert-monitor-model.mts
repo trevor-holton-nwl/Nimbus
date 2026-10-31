@@ -6,8 +6,9 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, alertOrderIds, ALL_ALERTS_PROFILE_ID, FIXABLE_ALERT_TYPES, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, NONE_KEY, alertDayOffset, dayKeyOf, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
+import { dayBucketKey, horizonDayKeys } from './alert-monitor-overview.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -29,14 +30,9 @@ export interface AlertLike {
 
 export type MonitorGroupBy = 'category' | 'type' | 'line' | 'day' | 'order' | 'none';
 
-/** Machine first: it is the default grouping and the order the Group by select lists. */
-export const MONITOR_GROUP_BYS: MonitorGroupBy[] = ['line', 'day', 'type', 'category', 'order', 'none'];
 /** The two sorts the page offers (Priority / Date); the stored `severity` / `orders` of earlier builds read as `impact`. */
 export const MONITOR_SORTS: AlertRanking[] = ['impact', 'time'];
-export const MONITOR_CATEGORIES: AlertCategory[] = ['capacity', 'conflicts', 'calendar', 'setup', 'planning', 'exceptions'];
-export const DEFAULT_GROUP_BY: MonitorGroupBy = 'line';
-
-export interface MonitorView { groupBy: MonitorGroupBy; sort: AlertRanking }
+export const MONITOR_CATEGORIES: readonly AlertCategory[] = ALERT_CATEGORY_ORDER;
 
 /** What the summary line says about the alerts the list shows. */
 export interface SummaryInput {
@@ -49,25 +45,28 @@ export interface SummaryInput {
   profile: AlertProfile | null | undefined;
   /** A leverage card's "Show alerts" is active: its chip text replaces the first clause. */
   focus: { title: string; outside: number } | null;
-  /** The plant confidence score now (null until computed). */
-  confidence: number | null | undefined;
+  /** Machines carrying at least one alert in the list, and the plant's machine count; both set = "M of N machines". */
+  machinesNoisy?: number;
+  machinesTotal?: number;
+  /** The filtered count; set only while a filter is active ("showing V"). */
+  showing?: number | null;
+  /** Lines picked in the global machine filter (read-only clause "N lines selected"); absent or 0 = none. */
+  linesSelected?: number;
 }
 
 export interface SummaryLine {
   /** The sentence up to (not including) the confidence link. */
   text: string;
-  /** "Plant confidence 71" split around the score so the pane can set the number in mono; null when there is no score. */
-  conf: { prefix: string; score: string; suffix: string } | null;
 }
-
-const _SCORE_MARK = '\u0002';
 
 /**
  * The whole-day window a profile covers when every rule shares the same `dayFrom` and `dayTo` (both set),
  * else null (an open bound, differing windows, no rules, or the built-in All alerts).
  */
 export function profileWindow(profile: AlertProfile | null | undefined): { from: number; to: number } | null {
-  if (!profile || profile.builtIn || !profile.rules?.length) return null;
+  if (!profile || profile.builtIn) return null;
+  if (profile.categories) return _categoryWindow(profile);
+  if (!profile.rules?.length) return null;
   let win: { from: number; to: number } | null = null;
   for (const rule of profile.rules) {
     const from = rule.dayFrom, to = rule.dayTo;
@@ -78,13 +77,31 @@ export function profileWindow(profile: AlertProfile | null | undefined): { from:
   return win;
 }
 
+/** Stored-categories form: every ON group needs at least one applicable rule and all applicable rules share one whole-day window. */
+function _categoryWindow(profile: AlertProfile): { from: number; to: number } | null {
+  const eff = effectiveCategories(profile);
+  let win: { from: number; to: number } | null = null;
+  for (const cat of ALERT_CATEGORY_ORDER) {
+    if (!eff[cat].on) continue;
+    const applicable = (profile.rules ?? []).filter(r => ruleAppliesTo(r, cat));
+    if (!applicable.length) return null;
+    for (const rule of applicable) {
+      const from = rule.dayFrom, to = rule.dayTo;
+      if (typeof from !== 'number' || typeof to !== 'number') return null;
+      if (!win) win = { from, to };
+      else if (win.from !== from || win.to !== to) return null;
+    }
+  }
+  return win;
+}
+
 /** `_one` form at exactly 1 (Util.t has no plural support). */
 const _plural = (n: number, key: string, vars: Record<string, string | number>, t: Translate): string =>
   t(n === 1 ? `${key}_one` : key, vars);
 
 /** The one-sentence page summary (row 2 of the header). Counts are over the alerts the list shows. */
 export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
-  if (!input.hasPlant) return { text: t('am.empty_no_plant'), conf: null };
+  if (!input.hasPlant) return { text: t('am.empty_no_plant') };
   let errors = 0, warnings = 0;
   const orders = new Set<string>();
   for (const a of input.alerts) {
@@ -109,16 +126,12 @@ export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
   if (errors > 0) parts.push(_plural(errors, 'am.summary_errors', { e: errors }, t));
   if (warnings > 0) parts.push(_plural(warnings, 'am.summary_warnings', { w: warnings }, t));
   if (orders.size > 0) parts.push(_plural(orders.size, 'am.summary_orders', { o: orders.size }, t));
-  let conf: SummaryLine['conf'] = null;
-  const c = input.confidence;
-  if (typeof c === 'number' && isFinite(c)) {
-    const score = String(Math.round(c));
-    const [prefix, suffix] = t('am.summary_conf', { score: _SCORE_MARK }).split(_SCORE_MARK);
-    conf = prefix !== undefined && suffix !== undefined
-      ? { prefix, score, suffix }
-      : { prefix: t('am.summary_conf', { score }), score: '', suffix: '' };
+  if (typeof input.machinesNoisy === 'number' && typeof input.machinesTotal === 'number' && input.machinesTotal > 0) {
+    parts.push(t('am.summary_machines', { m: input.machinesNoisy, total: input.machinesTotal }));
   }
-  return { text: parts.join(' · '), conf };
+  if (typeof input.showing === 'number') parts.push(t('am.summary_showing', { v: input.showing }));
+  if (typeof input.linesSelected === 'number' && input.linesSelected > 0) parts.push(t(input.linesSelected === 1 ? 'am.lines_selected_one' : 'am.lines_selected', { n: input.linesSelected }));
+  return { text: parts.join(' · ') };
 }
 
 const _DAY_MARK = '\u0001';
@@ -137,17 +150,43 @@ function _typesText(rule: AlertProfileRule, t: Translate): string {
 }
 
 function _sevText(rule: AlertProfileRule, t: Translate): string {
-  return t(rule.minSev === 'err' ? 'am.window_sev_err' : rule.minSev === 'warn' ? 'am.window_sev_warn' : 'am.window_sev_any');
+  // A stored 'warn' is the same as no limit (every alert is a warning or an error).
+  return t(rule.minSev === 'err' ? 'am.window_sev_err' : 'am.window_sev_any');
 }
 
 /** One-line description of a profile's rules, e.g. "Order overlap · D0–7 · errors only". */
 export function windowSummary(profile: AlertProfile | null | undefined, t: Translate): string {
-  if (!profile || profile.builtIn || !profile.rules?.length) return t('am.window_all');
-  return profile.rules.map(rule => {
+  if (!profile || profile.builtIn) return t('am.window_all');
+  if (profile.categories) return _categorySummary(profile, t);
+  if (!profile.rules?.length) return t('am.window_all');
+  return profile.rules.map(rule => _ruleLine(rule, _typesText(rule, t), t)).join(' | ');
+}
+
+/** Stored-categories form: one line per narrowing rule (named by the ON groups it applies to), plus one for ON groups no rule narrows. */
+function _categorySummary(profile: AlertProfile, t: Translate): string {
+  const eff = effectiveCategories(profile);
+  const on = ALERT_CATEGORY_ORDER.filter(c => eff[c].on);
+  if (!on.length) return t('am.window_all');
+  // Every group on and no rule narrowing any of them is the whole horizon, the same sentence as All alerts.
+  if (on.length === ALERT_CATEGORY_ORDER.length && !(profile.rules ?? []).some(r => on.some(c => ruleAppliesTo(r, c)))) return t('am.window_all');
+  const label = (cats: readonly AlertCategory[]): string => cats.length === ALERT_CATEGORY_ORDER.length ? t('am.profile_all') : cats.map(c => t(`ape.cat_${c}`)).join(', ');
+  const rules = profile.rules ?? [];
+  const lines: string[] = [];
+  const open = on.filter(c => !rules.some(r => ruleAppliesTo(r, c)));
+  if (open.length) lines.push(_ruleLine({ types: null, dayFrom: null, dayTo: null, minSev: null, minLateHours: null }, label(open), t));
+  for (const rule of rules) {
+    const names = on.filter(c => ruleAppliesTo(rule, c));
+    if (names.length) lines.push(_ruleLine(rule, label(names), t));
+  }
+  return lines.join(' | ');
+}
+
+function _ruleLine(rule: AlertProfileRule, typesText: string, t: Translate): string {
+  {
     const from = rule.dayFrom, to = rule.dayTo;
     const anyDays = from == null && to == null;
     const line = t('am.window_rule', {
-      types: _typesText(rule, t),
+      types: typesText,
       from: anyDays ? _DAY_MARK : (from == null ? '…' : from),
       to: anyDays ? _DAY_MARK : (to == null ? '…' : to),
       sev: _sevText(rule, t),
@@ -155,27 +194,7 @@ export function windowSummary(profile: AlertProfile | null | undefined, t: Trans
     if (!anyDays) return line;
     // Replace the whole "D{from}–{to}" segment (bounded by the template's own separators) with "any day".
     return line.split(' · ').map(seg => seg.includes(_DAY_MARK) ? t('am.window_any_days') : seg).join(' · ');
-  }).join(' | ');
-}
-
-/**
- * The group-by / sort for a profile: the user's stored choice (`alertMonitorView[profileId]`) wins, else
- * Machine grouping and the profile's own default ranking (`time` -> Date, anything else -> Priority).
- * A stored `severity` / `orders` sort (earlier builds) reads as Priority.
- */
-export function viewFor(
-  profileId: string,
-  pref: Record<string, { groupBy?: unknown; sort?: unknown } | undefined> | null | undefined,
-  profile: Pick<AlertProfile, 'ranking'> | null | undefined,
-): MonitorView {
-  const stored = pref && typeof pref === 'object' ? pref[profileId] : undefined;
-  const groupBy = MONITOR_GROUP_BYS.includes(stored?.groupBy as MonitorGroupBy)
-    ? stored!.groupBy as MonitorGroupBy : DEFAULT_GROUP_BY;
-  const fallback: AlertRanking = profile?.ranking === 'time' ? 'time' : 'impact';
-  const raw = stored?.sort;
-  const sort: AlertRanking = raw === 'time' ? 'time'
-    : (raw === 'impact' || raw === 'severity' || raw === 'orders') ? 'impact' : fallback;
-  return { groupBy, sort };
+  }
 }
 
 /** What the monitor lists: alerts the profile matched, minus acknowledged ones unless asked. */
@@ -217,22 +236,16 @@ export function emptyStateFor(input: {
 }
 
 /* ---------------------------------------------------------------------------
-   Rows, group heads and diagnose — pure HTML builders (Task 12).
+   Row helpers — shared constants and pure HTML builders.
 
    Every dynamic string is escaped here; every label comes through the injected `t`. The pane
-   computes a RowView (Store / Util / NIMBUS reads) and hands it in, so these stay DOM-free.
+   resolves Store / Util / NIMBUS reads and hands them in, so these stay DOM-free.
    ------------------------------------------------------------------------- */
 
 /** Rows shown per group before "Show all N". */
 export const GROUP_ROW_CAP = 40;
-/** Fixed row height (px) — also the VirtualList rowH in group-by none. */
-export const ROW_H = 44;
-/**
- * Height (px) of the inline diagnose panel under an order row: 20 padding + the help sentence (two 17 px
- * lines at most, clamped) + 6 gap + three rows of the field grid (3 x 28 + 2 x 6; a queued order's Suggested slot
- * field makes the third) + slack. Keep `.am-diag` in styles.css in step.
- */
-export const DIAG_H = 166;
+/** Compact Inbox / side-list row height (px); an open row adds its detail block (the pane's `DETAIL_H`). */
+export const ROW_H = 32;
 /** The alert types a group's "Move N orders" moves: `overload` is excluded, its fix runs the line-day changeover optimizer. */
 export const MOVABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'tool-conflict']);
 /** Above this many orders "Move N orders" asks first. */
@@ -317,54 +330,11 @@ export function fmtNum(n: number): string {
   return Number.isInteger(r) ? String(r) : r.toFixed(1);
 }
 
-export interface RowView {
-  id: string;
-  type: string;
-  sev: 'err' | 'warn';
-  taskId?: string;
-  line?: string;
-  time?: Date | null;
-  headline: string;
-  message: string;
-  help: string;
-  orderNo: string;
-  /** `msgVars.line` of the alert: when the message already names the line the prefix does not repeat it. */
-  msgLine?: string;
-  /** The page's active grouping: the prefix part the group head already says is dropped. */
-  groupBy: MonitorGroupBy;
-  /** "Thu 23 Oct" and "in 3 days" (the when column joins them). */
-  dateText: string;
-  relText: string;
-  /** The anchor is in the past: the when column reads in the error colour. */
-  overdue: boolean;
-  /** Names the anchor and its exact time (title of the when column). */
-  anchorTip: string;
-  /** What-If is active: Fix / Override render disabled. */
-  whatIf: boolean;
-  /** Set when an acknowledged row is shown ("Acknowledged by …"). */
-  ackLabel: string | null;
-  diagOpen: boolean;
-  diagHtml: string;
-}
 
 const _SEV_GLYPH = { err: '✖', warn: '⚠' } as const;
 
 function _sevGlyph(type: string, sev: 'err' | 'warn'): string {
   return CALENDAR_ALERT_TYPES.has(type) ? '⊘' : _SEV_GLYPH[sev];
-}
-
-/**
- * The mono prefix of a row: the non-empty parts of [line, order number] joined by " · ", minus the part the active
- * grouping already says (line under Machine, order under Order) and minus the line when the message names it.
- * Empty when nothing remains (the row then shows no prefix and no separator).
- */
-export function rowPrefix(v: Pick<RowView, 'line' | 'orderNo' | 'message' | 'msgLine' | 'groupBy'>): string {
-  const parts: string[] = [];
-  const line = v.line ? String(v.line) : '';
-  const named = !!v.msgLine && v.message.includes(String(v.msgLine));
-  if (line && v.groupBy !== 'line' && !named) parts.push(line);
-  if (v.orderNo && v.groupBy !== 'order') parts.push(String(v.orderNo));
-  return parts.join(' · ');
 }
 
 export type RowActionId = 'focus' | 'fix' | 'override' | 'slot' | 'diagnose' | 'ack' | 'unack';
@@ -409,156 +379,10 @@ export function rowPrimaryActions(
   return { goto: acts.goto, second, menu };
 }
 
-/** Label/value pairs as a compact definition grid, headed by the alert type's help sentence (when there is one). */
-export function diagnoseHtml(fields: ReadonlyArray<{ label: string; value: string }>, help = ''): string {
-  const cells = fields.filter(f => f.value !== '' && f.value != null)
-    .map(f => `<div class="am-diag-f"><dt>${_esc(f.label)}</dt><dd title="${_esc(f.value)}">${_esc(f.value)}</dd></div>`).join('');
-  const lead = help ? `<p class="am-diag-help" title="${_esc(help)}">${_esc(help)}</p>` : '';
-  return `${lead}<dl class="am-diag-grid">${cells}</dl>`;
-}
-
 /** "⚙ Fix" -> glyph "⚙" + text "Fix"; a label with no leading glyph is all text. */
 function _splitGlyph(label: string): { glyph: string; text: string } {
   const m = /^([^\p{L}\p{N}\s]+)\s+(.+)$/u.exec(label);
   return m ? { glyph: m[1]!, text: m[2]! } : { glyph: '', text: label };
-}
-
-/** The glyph stays; the text sits in `.lbl`, which the stylesheet hides below 1,200 px (the button's aria-label / title keep it). */
-function _glyphBtnInner(label: string): string {
-  const { glyph, text } = _splitGlyph(label);
-  return (glyph ? `<span class="am-glyph" aria-hidden="true">${_esc(glyph)}</span>` : '') + `<span class="lbl">${_esc(text)}</span>`;
-}
-
-/** One alert row (and, when open, its inline diagnose panel): 44 px, one line. */
-export function rowHtml(v: RowView, t: Translate): string {
-  const acts = rowActionsFor(v);
-  const p = rowPrimaryActions(v, null, { whatIf: v.whatIf, acked: !!v.ackLabel });
-  const id = _esc(v.id);
-  const lock = v.whatIf ? ` disabled aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : '';
-  const buttons: string[] = [];
-  if (p.goto) {
-    buttons.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${id}">${_esc(t('btn.go_to'))}</button>`);
-  }
-  if (p.second === 'fix') {
-    const label = t('btn.fix_it');
-    const text = _splitGlyph(label).text;
-    buttons.push(`<button type="button" class="btn sm btn-fix am-act-2" data-alert-action="fix" data-alert-id="${id}" aria-label="${_esc(text)}"`
-      + (v.whatIf ? lock : ` title="${_esc(`${text} · ${t('tip.fix_alert')}`)}"`) + `>${_glyphBtnInner(label)}</button>`);
-  } else if (p.second === 'override') {
-    const label = t('btn.override');
-    const text = _splitGlyph(label).text;
-    buttons.push(`<button type="button" class="btn btn-ghost sm am-act-2" data-alert-action="override" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}" aria-label="${_esc(text)}"`
-      + (v.whatIf ? lock : ` title="${_esc(text)}"`) + `>${_glyphBtnInner(label)}</button>`);
-  } else if (p.second === 'slot') {
-    const label = t('am.slot');
-    const text = _splitGlyph(label).text;
-    buttons.push(`<button type="button" class="btn btn-ghost sm am-act-2" data-alert-action="slot" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}" aria-label="${_esc(text)}"`
-      + (v.whatIf ? lock : ` title="${_esc(text)}"`) + `>${_glyphBtnInner(label)}</button>`);
-  }
-  buttons.push(`<button type="button" class="icon-btn sm am-row-menu" data-alert-id="${id}" data-ovf-key="${id}" aria-haspopup="menu" aria-expanded="false"`
-    + ` aria-label="${_esc(t('am.more_actions'))}" title="${_esc(t('am.more_actions'))}">⋯</button>`);
-
-  const prefix = rowPrefix(v);
-  const pfx = prefix ? `<span class="am-pfx">${_esc(prefix)} ·</span>` : '';
-  const ack = v.ackLabel ? `<span class="badge badge-info am-ack-badge" title="${_esc(v.ackLabel)}">${_esc(v.ackLabel)}</span>` : '';
-  const when = [v.dateText, v.relText].filter(Boolean).join(' · ');
-  const tip = [v.headline, v.help].filter(Boolean).join(' — ');
-
-  return `<div class="am-rowwrap" role="listitem" data-alert-id="${id}">`
-    + `<div class="am-row am-row-${v.sev}" title="${_esc(tip)}">`
-    + `<span class="am-sev am-sev-${v.sev}" aria-hidden="true">${_sevGlyph(v.type, v.sev)}</span>`
-    + `<div class="am-main">${pfx}<span class="am-msg" title="${_esc(v.message)}">${_esc(v.message)}</span>${ack}</div>`
-    + `<span class="am-when${v.overdue ? ' am-when-overdue' : ''}" title="${_esc(v.anchorTip)}">${_esc(when)}</span>`
-    + `<div class="am-acts">${buttons.join('')}</div>`
-    + `</div>`
-    + (v.diagOpen && acts.diagnose === 'order' ? `<div class="am-diag">${v.diagHtml}</div>` : '')
-    + `</div>`;
-}
-
-export interface GroupHeadView {
-  key: string;
-  label: string;
-  expanded: boolean;
-  errors: number;
-  warnings: number;
-  /** First alert of the group, for the head's Go to. */
-  firstAlertId: string | null;
-  firstGoto: boolean;
-  /** Distinct orders the group touches ("Open these N orders in the table"). */
-  orders: number;
-  /** Distinct orders the group's movable alerts sit on ("Move N orders"). */
-  movable: number;
-  /** The group's not-yet-acknowledged alerts ("Acknowledge N…"). */
-  unacked: number;
-  /** What-If is active: Move N orders is disabled. */
-  whatIf: boolean;
-}
-
-export type GroupMenuId = 'goto' | 'move' | 'open-table' | 'ack';
-
-export interface GroupMenuItem {
-  id: GroupMenuId;
-  labelKey: string;
-  vars?: Record<string, string | number>;
-  disabled?: boolean;
-  hintKey?: string;
-}
-
-/** The group head's ⋯ menu, in order: Go to (first alert), Move N orders (also for a single movable order), Open these N orders, Acknowledge N…. */
-export function groupMenuItems(v: GroupHeadView): GroupMenuItem[] {
-  const out: GroupMenuItem[] = [];
-  if (v.firstAlertId && v.firstGoto) out.push({ id: 'goto', labelKey: 'btn.go_to' });
-  if (v.movable > 0) {
-    out.push({ id: 'move', labelKey: v.movable === 1 ? 'am.group_fix_n_one' : 'am.group_fix_n', vars: { n: v.movable }, ...(v.whatIf ? { disabled: true, hintKey: 'am.whatif_blocked' } : {}) });
-  }
-  if (v.orders > 0) out.push({ id: 'open-table', labelKey: 'am.open_in_table', vars: { n: v.orders } });
-  if (v.unacked > 0) out.push({ id: 'ack', labelKey: 'am.group_ack_n', vars: { n: v.unacked } });
-  return out;
-}
-
-/** The card head (36 px): toggle button (caret, glyph, label, counts), then "Move N orders" and the ⋯ menu. No totals. */
-export function groupHeadHtml(v: GroupHeadView, t: Translate): string {
-  const key = _esc(v.key);
-  const worst: 'err' | 'warn' = v.errors > 0 ? 'err' : 'warn';
-  const badges = (v.errors ? `<span class="badge badge-err">${v.errors}</span>` : '')
-    + (v.warnings ? `<span class="badge badge-warn">${v.warnings}</span>` : '');
-  const lock = v.whatIf ? ` aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : '';
-  const move = v.movable >= 2
-    ? `<button type="button" class="btn sm am-group-move" data-am-action="group-move" data-group-key="${key}"${lock}>${_esc(t('am.group_fix_n', { n: v.movable }))}</button>` : '';
-  const more = groupMenuItems(v).length
-    ? `<button type="button" class="icon-btn sm am-group-menu" data-group-key="${key}" data-ovf-key="${key}" aria-haspopup="menu" aria-expanded="false"`
-      + ` aria-label="${_esc(t('am.more_actions'))}" title="${_esc(t('am.more_actions'))}">⋯</button>` : '';
-  return `<div class="am-ghead">`
-    + `<button type="button" class="am-gtoggle" aria-expanded="${v.expanded}" data-am-action="toggle-group" data-group-key="${key}">`
-    + `<span class="am-caret" aria-hidden="true">${v.expanded ? '▾' : '▸'}</span>`
-    + `<span class="am-sev am-sev-${worst}" aria-hidden="true">${_SEV_GLYPH[worst]}</span>`
-    + `<span class="am-glabel" title="${_esc(v.label)}">${_esc(v.label)}</span>${badges}`
-    + `</button>`
-    + `<div class="am-gacts">${move}${more}</div></div>`;
-}
-
-export interface GroupLabelDeps {
-  headlineFor: (type: string) => string;
-  /** Order number + material for a task id (empty when the task is unknown). */
-  orderLabel: (taskId: string) => string;
-  /** Whole-day offset of a `YYYY-MM-DD` key from the plant's today. */
-  dayOffset: (dayKey: string) => number;
-  /** "Thu 23 Oct" for a `YYYY-MM-DD` key. */
-  fmtDay: (dayKey: string) => string;
-}
-
-/** Display label of a group. `none` is the single "everything" group. */
-export function groupLabel(by: MonitorGroupBy, key: string, d: GroupLabelDeps, t: Translate): string {
-  const unassigned = t('am.group_unassigned');
-  switch (by) {
-    case 'category': return t(`ape.cat_${key}`);
-    case 'type': return d.headlineFor(key);
-    case 'line': return key === 'none' ? unassigned : key;
-    case 'order': return key === 'none' ? unassigned : (d.orderLabel(key) || key);
-    case 'day': return key === 'none' ? unassigned : `${d.fmtDay(key)} · ${relativeDaysText(d.dayOffset(key), t)}`;
-    case 'none':
-    default: return t('am.group_none');
-  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -589,6 +413,8 @@ export interface LevCtx {
   whatIf: boolean;
   /** Localised label of a setup-definition field (`colorWheel` → "Color"). */
   fieldLabel: (fieldKey: string) => string;
+  /** How many of this fix's alerts are in the current view; set only while the view is a partial one (adds the `am.lev_in_view` clause). */
+  inView?: number;
 }
 
 export interface LevAction {
@@ -720,6 +546,7 @@ export function fixLineParts(item: LeverageItem, ctx: LevCtx, t: Translate): str
   if (item.family === 'optimize-window' && item.headroomHours != null && item.headroomHours <= 0) {
     parts.push(_esc(t('am.lev_no_headroom', { h: fmtNum(Math.abs(item.headroomHours)) })));
   }
+  if (ctx.inView != null) parts.push(_esc(t('am.lev_in_view', { n: ctx.inView })));
   if (ctx.remaining > 0) parts.push(`<span class="am-fix-left">${_esc(_plural(ctx.remaining, 'am.lev_remaining', { n: ctx.remaining }, t))}</span>`);
   return parts;
 }
@@ -777,6 +604,8 @@ export interface FixesSectionOpts {
   /** The first pass has not produced results yet. */
   computing: boolean;
   ctxFor: (item: LeverageItem) => LevCtx;
+  /** The list was narrowed to the current view and nothing in it is left: say so instead of the plant-wide empty copy. */
+  noneInView?: boolean;
 }
 
 /**
@@ -792,7 +621,7 @@ export function fixesSectionHtml(items: ReadonlyArray<LeverageItem>, o: FixesSec
   if (o.computing && !items.length) {
     body = `<div class="am-lev-skeleton" aria-busy="true">${_esc(t('am.lev_computing'))}</div>`;
   } else if (!items.length) {
-    body = `<div class="am-lev-empty">${_esc(t('am.lev_none'))}</div>`;
+    body = `<div class="am-lev-empty">${_esc(t(o.noneInView ? 'am.lev_none_in_view' : 'am.lev_none'))}</div>`;
   } else {
     const limit = Math.min(Math.max(o.limit, LEV_TOP_N), LEV_MAX_RENDER);
     const shown = main.slice(0, limit);
@@ -834,4 +663,259 @@ export function levPairsForReview(pairs: ReadonlyArray<LeveragePair>, remedy: st
     line: p.line, predecessorOrderId: p.predecessorOrderId ?? null, successorOrderId: p.successorOrderId ?? null,
     fromState: text(p.fromState), toState: text(p.toState), reason: p.reason, remedy,
   }));
+}
+
+/* ---------------------------------------------------------------------------
+   W6a — the Inbox | Matrix model: view + lens, the shared filter, day buckets, the
+   compact 32 px row, the short tag and Top-fixes scoping. All pure; W6b wires them.
+   ------------------------------------------------------------------------- */
+
+export type MonitorViewKind = 'matrix' | 'inbox';
+export type MonitorLens = 'machine' | 'day' | 'group';
+/** What `alertMonitorView['*']` stores. */
+export interface MonitorView { view: MonitorViewKind; lens: MonitorLens }
+export const DEFAULT_VIEW: MonitorView = { view: 'matrix', lens: 'machine' };
+
+const _isView = (v: unknown): v is MonitorViewKind => v === 'matrix' || v === 'inbox';
+const _isLens = (v: unknown): v is MonitorLens => v === 'machine' || v === 'day' || v === 'group';
+
+/**
+ * The page's view and lens. `settings['*']` wins; a lens it lacks falls back to the stored per-profile `groupBy`
+ * of earlier builds (`type` / `category` -> group, `day` -> day, anything else -> machine); the view defaults to matrix.
+ */
+export function viewFor(
+  settings: Record<string, { view?: unknown; lens?: unknown; groupBy?: unknown } | undefined> | null | undefined,
+  profileId: string,
+): MonitorView {
+  const map = settings && typeof settings === 'object' ? settings : {};
+  const star = map['*'];
+  const per = map[profileId];
+  const migrated = (g: unknown): MonitorLens | null =>
+    g === 'type' || g === 'category' ? 'group' : g === 'day' ? 'day' : typeof g === 'string' && g ? 'machine' : null;
+  const view = _isView(star?.view) ? star!.view : _isView(per?.view) ? per!.view : DEFAULT_VIEW.view;
+  const lens = _isLens(star?.lens) ? star!.lens
+    : _isLens(per?.lens) ? per!.lens
+      : migrated(per?.groupBy) ?? DEFAULT_VIEW.lens;
+  return { view: view as MonitorViewKind, lens: lens as MonitorLens };
+}
+
+/** The filter's dimensions both views read (session-only). */
+export interface MonitorFilter {
+  machines: Set<string>;
+  wcGroups: Set<string>;
+  days: Set<string>;
+  categories: Set<AlertCategory>;
+  q: string;
+}
+export type FilterDim = 'machines' | 'wcGroups' | 'days' | 'categories' | 'q';
+
+export function emptyFilter(): MonitorFilter {
+  return { machines: new Set(), wcGroups: new Set(), days: new Set(), categories: new Set(), q: '' };
+}
+export function filterIsEmpty(f: MonitorFilter): boolean {
+  return !f.machines.size && !f.wcGroups.size && !f.days.size && !f.categories.size && !f.q.trim();
+}
+
+export interface FilterChipLabels {
+  machine?: (key: string) => string;
+  wc?: (key: string) => string;
+  day?: (key: string) => string;
+  category?: (cat: AlertCategory) => string;
+  q?: (q: string) => string;
+}
+/** One removable chip per active value, in a stable dimension order. */
+export function filterChips(f: MonitorFilter, labels: FilterChipLabels = {}): Array<{ dim: FilterDim; key: string; label: string }> {
+  const out: Array<{ dim: FilterDim; key: string; label: string }> = [];
+  for (const k of f.wcGroups) out.push({ dim: 'wcGroups', key: k, label: labels.wc ? labels.wc(k) : k });
+  for (const k of f.machines) out.push({ dim: 'machines', key: k, label: labels.machine ? labels.machine(k) : k });
+  for (const k of f.days) out.push({ dim: 'days', key: k, label: labels.day ? labels.day(k) : k });
+  for (const k of f.categories) out.push({ dim: 'categories', key: k, label: labels.category ? labels.category(k) : k });
+  const q = f.q.trim();
+  if (q) out.push({ dim: 'q', key: q, label: labels.q ? labels.q(q) : q });
+  return out;
+}
+
+/** The key of the bucket holding lines with no work-center group. */
+export const UNGROUPED_KEY = '__ungrouped__';
+
+export interface MonitorMachine { id: string; name?: string; wc_group?: string }
+
+/** A line's work-center group key (`wc_group` of the master line; blank or unknown -> UNGROUPED_KEY). */
+export function wcGroupOf(line: string | null | undefined, masterLines: ReadonlyArray<{ machine?: string; id?: string; wc_group?: string }>): string {
+  if (!line) return UNGROUPED_KEY;
+  for (const m of masterLines) {
+    if ((m.id ?? m.machine) === line) return m.wc_group ? String(m.wc_group) : UNGROUPED_KEY;
+  }
+  return UNGROUPED_KEY;
+}
+
+/** What the filter and the matrix need from the page. The pane builds it from the Store (W6b). */
+export interface MonitorCtx {
+  plantToday: Date;
+  /** Day columns: the alert horizon in days (`horizonDays`). */
+  horizonDays: number;
+  /** The anchor instant of an alert (its order's due, else its own time): built from the overview module's `_memoAnchor(deps)`. */
+  anchorOf?: (a: NimbusAlert) => Date | null;
+  machines: ReadonlyArray<MonitorMachine>;
+  /** Search text sources; blank when absent. */
+  orderNoOf?: (a: NimbusAlert) => string;
+  materialOf?: (a: NimbusAlert) => string;
+  tagOf?: (a: NimbusAlert) => string;
+}
+
+/** An alert's anchor, with the plain own-time fallback when the ctx gives no resolver. */
+function _anchor(a: NimbusAlert, ctx: Pick<MonitorCtx, 'anchorOf'>): Date | null {
+  if (ctx.anchorOf) return ctx.anchorOf(a);
+  return a.time instanceof Date && !isNaN(a.time.getTime()) ? a.time : null;
+}
+
+/**
+ * `'overdue'`, a `YYYY-MM-DD` day key, `'later'` or `'none'`: the Overview band's own bucket rule (`dayBucketKey`),
+ * so a Matrix column and an Inbox facet never disagree on what a day is.
+ */
+export function dayBucketOf(alert: NimbusAlert, plantToday: Date, horizonDays: number, anchorOf?: (a: NimbusAlert) => Date | null): string {
+  return dayBucketKey(_anchor(alert, { anchorOf }), plantToday, horizonDays);
+}
+
+/** A cached bucketer for one pass (the day keys are built once); same result as `dayBucketOf`. */
+export function makeBucketer(ctx: Pick<MonitorCtx, 'plantToday' | 'horizonDays' | 'anchorOf'>): (a: NimbusAlert) => string {
+  const keys = horizonDayKeys(ctx.plantToday, ctx.horizonDays);
+  return a => {
+    const anchor = _anchor(a, ctx);
+    if (!anchor) return NONE_KEY;
+    const off = alertDayOffset(anchor, ctx.plantToday);
+    return off < 0 ? 'overdue' : off >= ctx.horizonDays ? 'later' : keys[off]!;
+  };
+}
+
+/** The alerts matching every active dimension (AND) and the search text. An empty filter returns the same array. */
+export function filterAlerts<A extends NimbusAlert>(alerts: ReadonlyArray<A>, f: MonitorFilter, ctx: MonitorCtx): A[] {
+  if (filterIsEmpty(f)) return alerts as A[];
+  const wcByLine = new Map<string, string>();
+  if (f.wcGroups.size) for (const m of ctx.machines) wcByLine.set(m.id, m.wc_group ? String(m.wc_group) : UNGROUPED_KEY);
+  const bucket = f.days.size ? makeBucketer(ctx) : null;
+  const q = f.q.trim().toLowerCase();
+  return alerts.filter(a => {
+    // Same file-under rule as matrixModel: a `wc:`-prefixed id would collide with a group row key, so it counts as no machine.
+    if (f.machines.size && !f.machines.has(a.line && !a.line.startsWith('wc:') ? a.line : NONE_KEY)) return false;
+    if (f.wcGroups.size && !f.wcGroups.has(a.line ? (wcByLine.get(a.line) ?? UNGROUPED_KEY) : UNGROUPED_KEY)) return false;
+    if (f.categories.size && !f.categories.has(_catOf(a.type))) return false;
+    if (bucket && !f.days.has(bucket(a))) return false;
+    if (q) {
+      const hay = [a.taskId ?? '', ctx.orderNoOf?.(a) ?? (a.msgVars?.order ?? ''), a.line ?? '', ctx.materialOf?.(a) ?? '', ctx.tagOf?.(a) ?? '']
+        .join('\u0001').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+/** The order's material description (else its number); an alert with no order reads "machine · day". */
+export function materialOf(
+  a: Pick<NimbusAlert, 'taskId' | 'line' | 'time'>,
+  tasksById: Record<string, { MATERIAL_DESCRIPTION?: string; MATERIAL_NUMBER?: string } | undefined> | null | undefined,
+  dayLabel?: (a: Pick<NimbusAlert, 'time'>) => string,
+): string {
+  const task = a.taskId ? tasksById?.[a.taskId] : undefined;
+  if (task) {
+    const desc = String(task.MATERIAL_DESCRIPTION ?? '').trim();
+    if (desc) return desc;
+    const no = String(task.MATERIAL_NUMBER ?? '').trim();
+    if (no) return no;
+  }
+  const day = dayLabel ? dayLabel(a) : (a.time instanceof Date && !isNaN(a.time.getTime()) ? dayKeyOf(a.time) : '');
+  return [a.line ?? '', day].filter(Boolean).join(' · ');
+}
+
+/** The short tag: `alert.tag.<type>` with the alert's own message variables. */
+export function tagOf(a: { type: string; msgVars?: Record<string, string | number> }, t: Translate): string {
+  return t('alert.tag.' + a.type, a.msgVars);
+}
+
+export interface CompactRowOpts {
+  /** The machine column is dropped (the filter is one machine). */
+  hideMachine: boolean;
+  /** Open: the detail block follows the row. */
+  open: boolean;
+  material: string;
+  tag: string;
+  t: Translate;
+  /** Order number shown mono; falls back to `msgVars.order`, then `taskId`. */
+  orderNo?: string;
+  /** Category name shown muted before the tag; its color dot reads `--bar-pm-<category>`. */
+  groupLabel?: string;
+  /** The due column text and whether it is overdue. */
+  dueText?: string;
+  overdue?: boolean;
+  /** What-If is active: Fix / Override / Move render disabled. */
+  whatIf?: boolean;
+  /** `rowDetailHtml(...)` output, appended when `open`. */
+  detailHtml?: string;
+}
+
+/** One 32 px Inbox / side-list row: grid `14px 10px 92px minmax(0,1fr) 54px 150px 58px auto`; actions show on hover / focus (CSS). */
+export function rowHtml(a: NimbusAlert, o: CompactRowOpts): string {
+  const t = o.t;
+  const id = _esc(a.id);
+  const cat = _catOf(a.type);
+  const acts = rowActionsFor(a);
+  const lock = o.whatIf ? ` disabled aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : '';
+  const btns: string[] = [];
+  if (acts.goto) btns.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${id}">${_esc(t('btn.go_to'))}</button>`);
+  const second = acts.fix ? 'fix' : acts.override ? 'override' : acts.slot ? 'slot' : acts.diagnose !== 'none' ? 'diagnose' : null;
+  if (second) {
+    const label = second === 'fix' ? _splitGlyph(t('btn.fix_it')).text
+      : second === 'override' ? _splitGlyph(t('btn.override')).text
+        : second === 'slot' ? t('am.slot') : t('am.diagnose');
+    const locked = second === 'diagnose' ? '' : lock;
+    btns.push(`<button type="button" class="btn sm${second === 'fix' ? ' btn-fix' : ' btn-ghost'} am-act-2" data-alert-action="${second}" data-alert-id="${id}"`
+      + (a.taskId ? ` data-task-id="${_esc(a.taskId)}"` : '') + `${locked}>${_esc(label)}</button>`);
+  }
+  btns.push(`<button type="button" class="icon-btn sm am-row-menu" data-alert-id="${id}" data-ovf-key="${id}" aria-haspopup="menu" aria-expanded="false"`
+    + ` aria-label="${_esc(t('am.more_actions'))}" title="${_esc(t('am.more_actions'))}">⋯</button>`);
+  const orderNo = o.orderNo ?? String(a.msgVars?.order ?? a.taskId ?? '');
+  const grp = o.groupLabel ? `<b>${_esc(o.groupLabel)}</b> ` : '';
+  return `<div class="am-xwrap" role="listitem" data-alert-id="${id}">`
+    + `<div class="am-xrow am-xrow-${a.sev}${o.hideMachine ? ' am-xrow-nomc' : ''}${o.open ? ' open' : ''}" tabindex="0" data-alert-id="${id}" aria-expanded="${o.open}">`
+    + `<span class="am-sev am-sev-${a.sev}" aria-hidden="true">${_sevGlyph(a.type, a.sev)}</span>`
+    + `<span class="am-gdot" style="--c:var(--bar-pm-${cat})" title="${_esc(o.groupLabel ?? cat)}"></span>`
+    + `<span class="am-oid">${_esc(orderNo)}</span>`
+    + `<span class="am-mat" title="${_esc(o.material)}">${_esc(o.material)}</span>`
+    + (o.hideMachine ? '' : `<span class="am-mc">${_esc(a.line ?? '')}</span>`)
+    + `<span class="am-tag" title="${_esc(o.tag)}">${grp}${_esc(o.tag)}</span>`
+    + `<span class="am-due${o.overdue ? ' am-when-overdue' : ''}">${_esc(o.dueText ?? '')}</span>`
+    + `<span class="am-acts">${btns.join('')}</span>`
+    + `</div>`
+    + (o.open && o.detailHtml ? o.detailHtml : '')
+    + `</div>`;
+}
+
+export interface RowDetailCtx {
+  /** The full message (the Gantt-hover sentence). */
+  message: string;
+  material: string;
+  due: string;
+  plannedFinish: string;
+  firming: string;
+  t: Translate;
+}
+/** The expanded row: full message, material, due, planned finish, firming. */
+export function rowDetailHtml(a: Pick<NimbusAlert, 'id'>, c: RowDetailCtx): string {
+  const f = (cls: string, key: string, v: string) =>
+    `<div${cls ? ` class="${cls}"` : ''}><b>${_esc(c.t(key))}</b>${_esc(v)}</div>`;
+  return `<div class="am-xdetail" data-alert-id="${_esc(a.id)}">`
+    + f('am-xfull', 'am.detail_alert', c.message) + f('', 'am.detail_material', c.material) + f('', 'am.detail_due', c.due)
+    + f('', 'am.detail_finish', c.plannedFinish) + f('', 'am.detail_firming', c.firming)
+    + `</div>`;
+}
+
+/** Top fixes scoped to the alerts in view: keeps an item when any of its alerts is in `viewIds`, in rank order, with how many are. */
+export function fixesInView<I extends { alertIds: ReadonlyArray<string> }>(items: ReadonlyArray<I>, viewIds: ReadonlySet<string>): Array<{ item: I; inView: number }> {
+  const out: Array<{ item: I; inView: number }> = [];
+  for (const item of items) {
+    let n = 0;
+    for (const id of item.alertIds) if (viewIds.has(id)) n++;
+    if (n > 0) out.push({ item, inView: n });
+  }
+  return out;
 }

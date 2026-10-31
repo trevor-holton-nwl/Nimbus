@@ -44,11 +44,21 @@ colors:
   tab-master-data-hover: "#dcfce7"
   bar-standard: "#1f5fbf"
   bar-firmed: "#b02a20"
+  pal-amber: "#e0a800"
+  pal-orange: "#e8602a"
+  pal-magenta: "#c8359a"
+  pal-violet: "#8750f0"
+  pal-teal: "#14b8a6"
+  pal-sky: "#30b0ec"
+  pal-slate: "#334155"
+  pal-sand: "#bfa57a"
+  pal-stone: "#78716c"
   bar-pm-capacity: "#e0a800"
   bar-pm-conflicts: "#8750f0"
   bar-pm-calendar: "#14b8a6"
   bar-pm-setup: "#c8359a"
   bar-pm-planning: "#e8602a"
+  bar-pm-late: "#334155"
   bar-pm-exceptions: "#78716c"
   zone-alert-edge: "#1a7a2e"
   zone-frozen-edge: "#0f5c1f"
@@ -174,7 +184,8 @@ The palette is a cool navy/blue console: a permanently-dark chrome layer (comman
 
 ### Gantt Bar-Mode and Zone Palette
 - **Order-bar status** (`--bar-standard` `#1f5fbf` / `--bar-firmed` `#b02a20`; dark `#4d9fff` / `#d94a3a`): the Gantt bar fill is a firming status, standard vs. firmed, not a per-line color. Line colors identify the machine row and utilization, not the bar.
-- **Alert Monitor category fills** (`--bar-pm-*`, each with a `-fg` label color, identical in both themes): capacity `#e0a800`, conflicts `#8750f0`, calendar `#14b8a6`, setup `#c8359a`, planning `#e8602a`, exceptions `#78716c`. They fill an order the active alert profile matches and draw the Overview strip and the Gantt legend; every fill/fg pair is at least 4.5:1. The set is closed; a seventh category needs a colorblind-separation check against the bar blue and red first.
+- **Alert palette** (`--pal-<name>`, each with `-fg` label ink and `-ring` warn-ring color, declared in both `:root` and `body.dark`): a closed set of nine named swatches an alert profile colors its groups from. Light / dark: amber `#e0a800` / same, orange `#e8602a` / `#f5874f`, magenta `#c8359a` / same, violet `#8750f0` / same, teal `#14b8a6` / same, sky `#30b0ec` / `#7dd3fc`, slate `#334155` / `#cbd5e1`, sand `#bfa57a` / `#d6c3a5`, stone `#78716c` / same. Label ink is `#0c1c30` except white on magenta, violet, stone and light slate. The ring is the label ink on the dark-ink swatches and `--warn-vivid` on the white-ink ones. The set is validated by `tests/modules/platform/alert-palette.test.mjs`: fill/ink at least 4.5:1, every pair at least dE2000 15, each fill at least dE 15 from `--bar-standard` and `--bar-firmed` (at least dE 6 under Machado 2009 protan and deutan), light fills at least 1.8:1 against `--bg` and `--bg-elev` (light sky and sand were darkened to pass), each ring at least 2:1 on its fill or equal to the ink. Add or recolor a swatch only through that gate.
+- **Alert Monitor category fills** (`--bar-pm-<category>`, with `-fg` and `-ring`, declared in both blocks as `var(--pal-…)`): defaults are capacity amber, conflicts violet, calendar teal, setup magenta, planning orange, late slate, exceptions stone. They fill an order the active alert profile matches and draw the Gantt legend and minimap. A profile re-points them at runtime by writing the custom property inline on `document.body` (`applyCategoryColors`), and on `#alerts-tab` for "View as"; this is why the `var()` chain is restated in `body.dark` (a `var()` inside a custom property resolves where it is declared). The set of categories is closed at seven.
 - **Board shading** (true-alpha washes that sit OVER colored bars, so they are not opaque hex): `--zone-past` (elapsed time, gray), `--zone-nonworking` (closed days and off-shift hours, steel-blue 35% light / 20% dark), `--zone-alert` with edge `#1a7a2e` (alert horizon, green), `--zone-frozen` with edge `#0f5c1f` (frozen horizon, deeper green), `--blackout-hatch` / `--blackout-edge` (red diagonal hatch), and `--alertcell-err-*` / `--alertcell-warn-bg` / `--alertcell-cal-*` (per-day severity cells keyed to Signal Err, Signal Warn and Signal Info). All re-tune through tokens in `body.dark`; the Gantt legend reads the same tokens so it cannot drift from the board.
 - **Master Data tab tint** (`--tab-md-bg` `#f0fdf4`, hover `#dcfce7`; dark `#1c3d28` / `#224830`): the green identity of the Master Data top-level tab.
 
@@ -275,7 +286,7 @@ Components are brisk and exact: 4px corner radius almost everywhere (8px for mod
 
 ### Inspector and Alert Monitor Surfaces
 - **Inspector cards** (`.insp-card`): Panel White, Hairline border, 4px radius, 12px padding; the heading is the plain uppercase Label (11px/700/0.07em), rows are a 110px label column plus a mono value separated by dashed hairlines.
-- **Alert Monitor rows** (`.am-row`): one 44px line per alert (severity glyph, mono prefix, message, mono "when" column, actions) separated by an inset hairline, hover Mist Subtle; no cards, no side stripes. The Overview band above them (When / Where / What) and the Top-fixes list reuse standard panels with hairlines and the `--bar-pm-*` fills.
+- **Alert Monitor rows** (`.am-row`): one 44px line per alert (severity glyph, mono prefix, message, mono "when" column, actions) separated by an inset hairline, hover Mist Subtle; no cards, no side stripes. The page is a `Matrix | Inbox` pair over one filtered set. **Matrix cells** are real buttons on a sticky header row and first column: a count tinted by worst severity (warn amber, err red wash) with the category dots in profile colours, work-center roll-up rows pinned under the header, quiet machines folded behind a "Show N quiet machines" line. **Inbox facets** (Where, When, What) are hairline panels with severity bars and category colour dots, beside a virtualised list of compact 32px rows with short tags; the one open row grows a 96px detail strip. The Top-fixes list reuses standard panels with hairlines. **On the Gantt**, a profile fill (`--bar-pm-*`) is the ambient layer with an inner warn or err ring; the only outline is the 2px dashed ink `alert-focus` on orders the planner chose with "Show on Gantt", cleared by the "Outlined: N · Clear" chip or Escape.
 
 ### Signature Component: The Gantt (vis-timeline)
 The production timeline is a third-party vis-timeline instance re-skinned to the token system rather than left in its default library styling — panel backgrounds, the time axis, and line-group labels are all explicitly overridden (especially in dark mode, where the library's own white background is force-overridden). Blackout blocks render as a diagonal red hatch, not a solid fill, so they read as "unavailable" rather than "an order." Order bars fill by firming status (Bar-Mode palette in §2) and shading, horizons and alert cells are token washes over them. A Legend popup (`#modal-gantt-legend`) draws a miniature board from the same tokens, so its swatches always match the live board. Overlapping orders stack into one row with a count badge that expands on click. This re-skinning discipline — never ship a third-party component in its default look — is itself a rule worth carrying forward for any future library integration (AG Grid, Flatpickr, etc.), and held true through this re-skin as well: the Gantt's own line-block coloring (`--l0`..`--l9`) was deliberately left untouched.
@@ -299,5 +310,5 @@ The production timeline is a third-party vis-timeline instance re-skinned to the
 - **Don't** use `border-left`/`border-right` as a colored accent stripe on cards or list rows — full borders, background tints, or a leading icon instead. (The one sanctioned exception is the KPI-tile `border-top` severity pattern in §5 — top, not side, and only on `.kpi-tile`.)
 - **Don't** reference a CSS variable name that isn't defined in `:root` or `body.dark` without checking first, and don't add a `:root` color without its `body.dark` value. The compatibility aliases (`--border`, `--border-subtle`, `--font-mono`, `--nimbus-amber`/`--amber`, `--bg-float`, `--surface`, `--text-muted`) are all defined, but prefer the canonical token names in new CSS.
 - **Don't** use `--warn` as small text or an icon color on a light surface (~3.2:1); use `--warn-text`. `--warn` is for fills, borders and tints.
-- **Don't** add a status or category color outside Signal OK/Warn/Err/Info and the six `--bar-pm-*` fills, and don't tint a Gantt bar by anything but firming status or the active alert category.
+- **Don't** add a status or category color outside Signal OK/Warn/Err/Info and the nine `--pal-*` swatches, and don't tint a Gantt bar by anything but firming status or the active profile's category color.
 - **Don't** reach for `--shadow-lg` on a static, non-floating panel just to make it feel more "premium" — see The Floating-Means-Floating Rule.

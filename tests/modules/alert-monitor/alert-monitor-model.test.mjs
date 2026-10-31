@@ -2,23 +2,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  profileWindow, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
-  MONITOR_GROUP_BYS, MONITOR_SORTS, groupCounts, rowActionsFor,
+  profileWindow, summaryLine, windowSummary, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  MONITOR_SORTS, groupCounts, rowActionsFor,
 } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
-import { ALL_ALERTS_PROFILE } from '../../../frontend/insights/alert-profiles.mjs';
+import { ALL_ALERTS_PROFILE, ALERT_CATEGORY_ORDER, DEFAULT_CATEGORY_COLORS } from '../../../frontend/insights/alert-profiles.mjs';
 
 const EN = {
   'am.window_rule': '{{types}} · D{{from}}–{{to}} · {{sev}}',
   'am.window_any_days': 'any day',
   'am.window_sev_any': 'all severities',
-  'am.window_sev_warn': 'warnings and errors',
   'am.window_sev_err': 'errors only',
   'am.window_all': 'Showing every alert in the horizon',
   'am.profile_all': 'All alerts',
   'alert.type.overlap': 'Order overlap',
   'alert.type.overload': 'Overload',
   'ape.cat_capacity': 'Capacity', 'ape.cat_conflicts': 'Scheduling conflicts', 'ape.cat_calendar': 'Calendar',
-  'ape.cat_setup': 'Setup', 'ape.cat_planning': 'Planning', 'ape.cat_exceptions': 'Other',
+  'ape.cat_setup': 'Setup', 'ape.cat_planning': 'Planning', 'ape.cat_late': 'Late', 'ape.cat_exceptions': 'Other',
 };
 const t = (k, v) => (EN[k] ?? k).replace(/\{\{(\w+)\}\}/g, (_, n) => String(v?.[n] ?? ''));
 const rule = (o = {}) => ({ types: null, dayFrom: null, dayTo: null, minSev: null, minLateHours: null, ...o });
@@ -51,7 +50,6 @@ const SUM = {
   'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
   'am.summary_warnings': '{{w}} warnings', 'am.summary_warnings_one': '1 warning',
   'am.summary_orders': '{{o}} orders affected', 'am.summary_orders_one': '1 order affected',
-  'am.summary_conf': 'Plant confidence {{score}}',
   'am.focus_chip': 'Showing {{n}} alerts for: {{title}}',
   'am.focus_chip_outside': 'Showing {{n}} alerts for: {{title}} ({{k}} outside your profile)',
   'am.empty_no_plant': 'Select a plant',
@@ -93,24 +91,25 @@ test('summaryLine: the lead uses the singular _one key at exactly 1 and the plur
   assert.equal(lead({ alerts: two, profileId: '__all__', profile: ALL_ALERTS_PROFILE }), '2 alerts at this plant');
 });
 
-test('summaryLine: the confidence link splits around the score; no score, no link', () => {
-  assert.deepEqual(summaryLine(sumIn({ confidence: 71.4 }), ts).conf, { prefix: 'Plant confidence ', score: '71', suffix: '' });
-  assert.equal(summaryLine(sumIn({ confidence: null }), ts).conf, null);
-  assert.equal(summaryLine(sumIn({ confidence: NaN }), ts).conf, null);
-});
-
 test('summaryLine: no plant says only the select-a-plant message', () => {
-  assert.deepEqual(summaryLine(sumIn({ hasPlant: false }), ts), { text: 'Select a plant', conf: null });
+  assert.deepEqual(summaryLine(sumIn({ hasPlant: false }), ts), { text: 'Select a plant' });
 });
 
 test('summaryLine never uses the words points, pts, exact or estimate', () => {
   const s = summaryLine(sumIn({ alerts: [al('a', 'err', '1', '2'), al('b', 'warn', '3')] }), ts);
-  assert.doesNotMatch(`${s.text} ${s.conf?.prefix}`, /points|pts|exact|estimate/i);
+  assert.doesNotMatch(s.text, /points|pts|exact|estimate/i);
 });
 
 test('windowSummary: All alerts and empty profiles read as the whole horizon', () => {
   assert.equal(windowSummary(ALL_ALERTS_PROFILE, t), 'Showing every alert in the horizon');
   assert.equal(windowSummary(null, t), 'Showing every alert in the horizon');
+});
+
+test('windowSummary: a stored profile with every group on and no narrowing rule reads the whole-horizon sentence, not the label', () => {
+  const categories = Object.fromEntries(ALERT_CATEGORY_ORDER.map(c => [c, { on: true, color: DEFAULT_CATEGORY_COLORS[c] }]));
+  assert.equal(windowSummary({ ...prof([]), categories }, t), 'Showing every alert in the horizon');
+  // A narrowing rule keeps the per-rule line.
+  assert.notEqual(windowSummary({ ...prof([rule({ types: ['late'], dayFrom: 0, dayTo: 6 })]), categories }, t), 'Showing every alert in the horizon');
 });
 
 test('windowSummary: a single rule renders types, day window and severity', () => {
@@ -121,35 +120,12 @@ test('windowSummary: a single rule renders types, day window and severity', () =
 test('windowSummary: no day bounds reads "any day"; many types collapse to categories; rules are joined', () => {
   const many = rule({ types: ['overlap', 'tool-conflict', 'overload'], minSev: 'warn' });
   const s = windowSummary(prof([many, rule({ types: ['overlap'], dayFrom: 8, dayTo: null })]), t);
-  assert.equal(s, 'Capacity, Scheduling conflicts · any day · warnings and errors | Order overlap · D8–… · all severities');
+  assert.equal(s, 'Capacity, Scheduling conflicts · any day · all severities | Order overlap · D8–… · all severities');
 });
 
 test('windowSummary names Planning when a rule spans the planning types', () => {
   const s = windowSummary(prof([rule({ types: ['overlap', 'needs_planning', 'queued_now_fits'] })]), t);
   assert.equal(s, 'Scheduling conflicts, Planning · any day · all severities');
-});
-
-test('viewFor: stored choice wins, else Machine + the profile ranking, junk is ignored', () => {
-  assert.deepEqual(viewFor('p1', null, prof([], 'time')), { groupBy: 'line', sort: 'time' });
-  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'day', sort: 'time' } }, prof([], 'impact')), { groupBy: 'day', sort: 'time' });
-  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'bogus', sort: 7 } }, prof([], 'orders')), { groupBy: 'line', sort: 'impact' });
-  assert.deepEqual(viewFor('p2', { p1: { groupBy: 'category', sort: 'time' } }, null), { groupBy: 'line', sort: 'impact' });
-  assert.deepEqual(viewFor('__all__', null, ALL_ALERTS_PROFILE), { groupBy: 'line', sort: 'impact' });
-});
-
-test('viewFor: a stored severity / orders sort reads as impact, even when the profile ranks by time', () => {
-  assert.equal(viewFor('p1', { p1: { sort: 'severity' } }, prof([], 'time')).sort, 'impact');
-  assert.equal(viewFor('p1', { p1: { sort: 'orders' } }, prof([], 'time')).sort, 'impact');
-});
-
-test('viewFor: a stored groupBy survives without a stored sort, and the profile ranking time gives Date', () => {
-  assert.deepEqual(viewFor('p1', { p1: { groupBy: 'category' } }, prof([], 'time')), { groupBy: 'category', sort: 'time' });
-});
-
-test('MONITOR_GROUP_BYS lists Machine first and MONITOR_SORTS only Priority and Date', () => {
-  assert.equal(MONITOR_GROUP_BYS[0], 'line');
-  assert.deepEqual([...MONITOR_GROUP_BYS].sort(), ['category', 'day', 'line', 'none', 'order', 'type']);
-  assert.deepEqual(MONITOR_SORTS, ['impact', 'time']);
 });
 
 test('visibleAlertsFor keeps matched alerts and hides acknowledged ones unless asked', () => {
@@ -195,4 +171,33 @@ test('a tool conflict with zero available copies is not movable and offers no Fi
   assert.equal(rowActionsFor(zero).fix, false);
   assert.equal(rowActionsFor(some).fix, true);
   assert.equal(rowActionsFor(ovl).fix, true);
+});
+
+// ---- W3: category-aware window + summary ----
+const cats = (on) => Object.fromEntries(ALERT_CATEGORY_ORDER.map(c => [c, { on: on.includes(c), color: DEFAULT_CATEGORY_COLORS[c] }]));
+const cprof = (rules, on) => ({ ...prof(rules), categories: cats(on) });
+
+test('profileWindow (categories): every ON category needs an applicable rule, all sharing one window; OFF-only rules are ignored', () => {
+  const w = { dayFrom: 0, dayTo: 7 };
+  assert.deepEqual(profileWindow(cprof([rule({ types: ['late'], ...w }), rule({ types: ['overlap'], ...w })], ['late', 'conflicts'])), { from: 0, to: 7 });
+  assert.equal(profileWindow(cprof([rule({ types: ['late'], ...w })], ['late', 'conflicts'])), null, 'conflicts has no applicable rule');
+  assert.equal(profileWindow(cprof([rule({ types: ['late'], ...w }), rule({ types: ['overlap'], dayFrom: 1, dayTo: 7 })], ['late', 'conflicts'])), null, 'differing windows');
+  assert.deepEqual(profileWindow(cprof([rule({ types: ['late'], ...w }), rule({ types: ['overlap'], dayFrom: 9, dayTo: 12 })], ['late'])), { from: 0, to: 7 }, 'a rule for an OFF category is ignored');
+  assert.equal(profileWindow(cprof([], ['late'])), null);
+  assert.equal(profileWindow(cprof([rule({ types: ['late'], dayFrom: 0 })], ['late'])), null, 'open bound');
+});
+
+test('windowSummary (categories): lists the ON category labels, not rule types', () => {
+  const s = windowSummary(cprof([rule({ types: ['overlap'], dayFrom: 0, dayTo: 7, minSev: 'err' })], ['conflicts', 'late']), t);
+  assert.equal(s, 'Late · any day · all severities | Scheduling conflicts · D0–7 · errors only');
+  assert.equal(windowSummary(cprof([], ALERT_CATEGORY_ORDER), t), 'Showing every alert in the horizon', 'all ON, nothing narrowing: the whole-horizon sentence (W5)');
+  assert.equal(windowSummary(cprof([rule({ types: ['overlap'] })], ['late']), t), 'Late · any day · all severities', 'a rule for an OFF category adds no line');
+});
+
+test('windowSummary: a stored minSev warn reads as all severities', () => {
+  assert.equal(windowSummary(prof([rule({ types: ['overlap'], minSev: 'warn' })]), t), 'Order overlap · any day · all severities');
+});
+
+test('MONITOR_SORTS lists only Priority and Date', () => {
+  assert.deepEqual([...MONITOR_SORTS], ['impact', 'time']);
 });

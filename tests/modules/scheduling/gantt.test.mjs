@@ -994,6 +994,16 @@ function _pmHarness(t, { highlight = true, showAcked = false } = {}) {
   return m;
 }
 
+test('Timeline._itemForTask: alert-focus reads view().focusIds (the viewed profile); fills keep reading current()', (t) => {
+  _pmHarness(t);
+  const priorView = AlertProfileMatches.view;
+  t.after(() => { AlertProfileMatches.view = priorView; });
+  AlertProfileMatches.view = () => ({ ...priorView.call(AlertProfileMatches), focusIds: new Set(['pm-c']) });
+  assert.match(Timeline._itemForTask(Store.tasks['pm-c']).className, /\balert-focus\b/);
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-c']).className, /profile-match/, 'no fill: outside the current() profile');
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /alert-focus/);
+});
+
 test('Timeline._itemForTask: a profile-matched order gets profile-match + category + severity classes', (t) => {
   _pmHarness(t);
   const a = Timeline._itemForTask(Store.tasks['pm-a']).className;
@@ -1052,23 +1062,92 @@ test('Timeline._applyProfileMatchClasses: updates only changed items, inside _su
   assert.equal(calls.length, 2, 'no-op when nothing changed');
 });
 
-test('navBarStyle: profile-match sits between conflict and firmed', () => {
+test('Timeline._itemForTask: alert-focus follows focusIds, with or without the highlight pref; no alert means no outline', (t) => {
+  const m = _pmHarness(t, { highlight: false });
+  const priorFocus = m.focusIds;
+  t.after(() => { m.focusIds = priorFocus; });
+  m.focusIds = null;
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /alert-focus|conflict-order/);
+  Store._state.alerts = [{ id: 'al-1', taskId: 'pm-c', type: 'overload', sev: 'err' }];
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-c']).className, /alert-focus|conflict-order/, 'an alerted order is no longer outlined');
+  m.focusIds = new Set(['pm-c']);
+  assert.match(Timeline._itemForTask(Store.tasks['pm-c']).className, /\balert-focus\b/, 'focus outlines even with the highlight pref off');
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /alert-focus/);
+});
+
+test('Timeline._applyProfileMatchClasses: adds and clears alert-focus alongside the profile classes', (t) => {
+  const m = _pmHarness(t);
+  const priorFocus = m.focusIds;
+  const priorItems = Timeline._items;
+  const priorPlantState = Store._state.selectedPlant;
+  const priorScoped = Store.tasksForSelectedPlant;
+  Store._state.selectedPlant = '5512';
+  Store.tasksForSelectedPlant = () => ['pm-a', 'pm-b', 'pm-c'].map(id => Store.tasks[id]);
+  const rows = new Map();
+  for (const id of ['pm-a', 'pm-b', 'pm-c']) rows.set(id, { id, className: 'order-standard' });
+  rows.get('pm-a').className = 'order-standard profile-match profile-match-capacity profile-match-err';
+  rows.get('pm-b').className = 'order-standard profile-match profile-match-setup profile-match-warn';
+  Timeline._items = {
+    get: id => rows.get(id) || null,
+    update(arr) { for (const u of [].concat(arr)) rows.set(u.id, { ...rows.get(u.id), ...u }); },
+  };
+  t.after(() => { m.focusIds = priorFocus; Timeline._items = priorItems; Store._state.selectedPlant = priorPlantState; Store.tasksForSelectedPlant = priorScoped; });
+  m.focusIds = new Set(['pm-c', 'pm-a']);
+  Timeline._applyProfileMatchClasses();
+  assert.match(rows.get('pm-c').className, /\balert-focus\b/, 'an unmatched order is early-continued only when it has neither');
+  assert.match(rows.get('pm-a').className, /profile-match-capacity.*alert-focus|alert-focus.*profile-match-capacity/);
+  assert.doesNotMatch(rows.get('pm-b').className, /alert-focus/);
+  m.focusIds = null;
+  Timeline._applyProfileMatchClasses();
+  assert.doesNotMatch(rows.get('pm-c').className, /alert-focus/, 'cleared');
+  assert.doesNotMatch(rows.get('pm-a').className, /alert-focus/);
+  assert.match(rows.get('pm-a').className, /profile-match-capacity/, 'the fill stays');
+});
+
+test('Timeline._profileMatchClasses: D8 under the built-in profile, error orders get the ring only, warnings nothing', (t) => {
+  const m = _pmHarness(t);
+  const prior = { profile: m.profile };
+  t.after(() => { m.profile = prior.profile; });
+  m.categoryByTask = new Map();
+  m.sevByTask = new Map([['pm-a', 'err'], ['pm-b', 'warn']]);
+  m.profile = { ...m.profile, builtIn: true };
+  assert.deepEqual(Timeline._profileMatchClasses('pm-a'), ['profile-match', 'profile-match-err']);
+  assert.deepEqual(Timeline._profileMatchClasses('pm-b'), []);
+  m.profile = { ...m.profile, builtIn: false };
+  assert.deepEqual(Timeline._profileMatchClasses('pm-a'), [], 'a custom profile with no category stays plain');
+});
+
+test('Timeline._profileMatchClasses: D8 ring follows the acknowledgement rule', (t) => {
+  const m = _pmHarness(t);
+  const prior = { profile: m.profile };
+  t.after(() => { m.profile = prior.profile; });
+  m.categoryByTask = new Map();
+  m.sevByTask = new Map([['pm-a', 'err']]);
+  m.profile = { ...m.profile, builtIn: true };
+  Store._state.alerts = [{ id: 'al-1', taskId: 'pm-a', type: 'overload', sev: 'err' }];
+  m.acked = new Map([['al-1', { alertId: 'al-1' }]]);
+  assert.deepEqual(Timeline._profileMatchClasses('pm-a'), [], 'every alert acked: no ring');
+  Store._state.userSettings = { ...Store._state.userSettings, alertsShowAcknowledged: true };
+  assert.deepEqual(Timeline._profileMatchClasses('pm-a'), ['profile-match', 'profile-match-err'], 'show-acknowledged restores the ring');
+});
+
+test('navBarStyle: profile-match sits between focus and firmed', () => {
   assert.equal(navBarStyle('order-standard profile-match profile-match-setup'), 'profile');
   assert.equal(navBarStyle('order-firmed profile-match'), 'profile');
-  assert.equal(navBarStyle('order-standard profile-match conflict-order'), 'conflict');
+  assert.equal(navBarStyle('order-standard profile-match alert-focus'), 'focus');
   assert.equal(navBarStyle('order-standard profile-match dimmed'), 'dimmed');
 });
 
-test('navBarStyle precedence: dimmed > conflict > firmed > standard', () => {
+test('navBarStyle precedence: dimmed > focus > profile > firmed > standard', () => {
   assert.equal(
-    navBarStyle('order-firmed conflict-order dimmed'),
+    navBarStyle('order-firmed alert-focus dimmed'),
     'dimmed',
     'dimmed takes highest precedence'
   );
   assert.equal(
-    navBarStyle('order-standard conflict-order'),
-    'conflict',
-    'conflict takes precedence over standard'
+    navBarStyle('order-standard alert-focus'),
+    'focus',
+    'focus takes precedence over standard'
   );
   assert.equal(
     navBarStyle('order-firmed split-order-segment'),
@@ -3547,12 +3626,12 @@ test('alertSig: hasConflictErr flips the signature (same line/day/sev, a conflic
   assert.notEqual(alertSig(conflict, () => true), alertSig(calendar, () => true));
 });
 
-test('alertSig: an alert with a taskId changes the signature even when the cells are identical', () => {
+test('alertSig: task ids no longer count (the plant-wide outline is gone); only the painted cells do', () => {
   const plain = [_sigAlert()];
   const withTask = [_sigAlert({ taskId: 't-1' })];
   assert.deepEqual(alertCellMapFor(plain, () => true), alertCellMapFor(withTask, () => true));
-  assert.notEqual(alertSig(plain, () => true), alertSig(withTask, () => true));
-  assert.notEqual(alertSig(withTask, () => true), alertSig([_sigAlert({ taskId: 't-2' })], () => true), 'a different task id is a different signature');
+  assert.equal(alertSig(plain, () => true), alertSig(withTask, () => true));
+  assert.equal(alertSig(withTask, () => true), alertSig([_sigAlert({ taskId: 't-2' })], () => true), 'a different task id is the same signature');
 });
 
 test('alertSig: order independent', () => {
@@ -3566,18 +3645,18 @@ test('alertSig: order independent', () => {
   assert.equal(alertSig([list[1], list[2], list[0]], () => true), a);
 });
 
-test('alertSig: a hidden line\'s alerts add nothing to the cell part, but its taskId alerts still count (the cell filter and the conflict set differ)', () => {
+test('alertSig: a hidden line\'s alerts add nothing, with or without a taskId', () => {
   const visibleOnly = line => line === 'L1';
   const base = [_sigAlert({ line: 'L1' })];
   const withHidden = [...base, _sigAlert({ id: 'h', line: 'L2' })];
   assert.equal(alertSig(withHidden, visibleOnly), alertSig(base, visibleOnly), 'a hidden line paints no cell and carries no task: no change');
   const hiddenWithTask = [...base, _sigAlert({ id: 'h', line: 'L2', taskId: 't-hidden' })];
-  assert.notEqual(alertSig(hiddenWithTask, visibleOnly), alertSig(base, visibleOnly), 'a hidden-line alert with a taskId still toggles conflict-order, so it must count');
+  assert.equal(alertSig(hiddenWithTask, visibleOnly), alertSig(base, visibleOnly), 'no outline depends on a hidden-line task id any more');
 });
 
 // Saves and restores every Timeline field the gate and the deferral touch, and the globals around them.
 function gateRig(t, { active = true } = {}) {
-  const keys = ['_taskDataDirty', '_lastAlertSig', '_alertsRebuildPending', '_panActive', '_panGesture', '_panWatchdog', '_conflictSrc',
+  const keys = ['_taskDataDirty', '_lastAlertSig', '_alertsRebuildPending', '_panActive', '_panGesture', '_panWatchdog',
     '_scheduleRebuild', '_ganttActive', '_applyProfileMatchClasses', '_applyTaskPatch'];
   const prior = Object.fromEntries(keys.map(k => [k, Timeline[k]]));
   const priorAlerts = Store.alerts, priorNimbus = globalThis.NIMBUS;
@@ -3621,7 +3700,6 @@ test('Timeline._onStore alerts:change: skips the rebuild only when nothing is di
   Timeline._taskDataDirty = false; Timeline._lastAlertSig = null;
   fire();
   assert.equal(rig.scheduled, 3, 'no stored signature: always schedules');
-  assert.equal(Timeline._conflictSrc, null, 'the conflict-set cache is still invalidated on every event');
 });
 
 test('Timeline._onStore alerts:change: a hidden Gantt neither rebuilds nor runs the class diff', (t) => {
@@ -3690,7 +3768,7 @@ test('Timeline._rebuildPass: a clean pass clears _taskDataDirty and stores the s
 }));
 
 test('Timeline._onStore alerts:change with an active line filter: the gate signature equals the one a _rebuildPass stores under the same filter', () => laneRebuildHarness(() => {
-  const keys = ['_taskDataDirty', '_lastAlertSig', '_alertsRebuildPending', '_panActive', '_conflictSrc', '_ganttActive', '_applyProfileMatchClasses', '_scheduleRebuild'];
+  const keys = ['_taskDataDirty', '_lastAlertSig', '_alertsRebuildPending', '_panActive', '_ganttActive', '_applyProfileMatchClasses', '_scheduleRebuild'];
   const prior = Object.fromEntries(keys.map(k => [k, Timeline[k]]));
   const priorAlerts = Store.alerts, hadFilter = 'GanttFilter' in globalThis.NIMBUS, priorFilter = globalThis.NIMBUS.GanttFilter;
   const rig = { scheduled: 0, profile: 0 };

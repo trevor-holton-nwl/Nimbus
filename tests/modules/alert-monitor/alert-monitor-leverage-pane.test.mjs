@@ -30,7 +30,7 @@ function makeEl(id) {
     setAttribute() {}, addEventListener(type, fn) { handlers[type] = fn; },
     querySelectorAll() { return []; }, querySelector() { return null; },
     scrollIntoView() { this.scrolled++; }, blur() {}, focus() {}, closest() { return null; },
-    appendChild() {}, remove() {}, removeEventListener() {}, style: {}, clientHeight: 600, scrollTop: 0,
+    appendChild() {}, remove() {}, removeEventListener() {}, style: { setProperty() {}, getPropertyValue() { return ''; } }, clientHeight: 600, scrollTop: 0,
   };
 }
 
@@ -219,21 +219,19 @@ test('a result that finishes after the Store moved on is dropped', async () => {
   assert.ok(counts.analyze >= 2, 'a fresh analysis was scheduled for the new revision');
 });
 
-test('Show alerts focuses the list, points the Gantt at the same orders, and scrolls to the groups', async () => {
+test('Show alerts points the Gantt at the same orders (the list is not focused); the outline chip clears it', async () => {
   seed([alert('a1'), alert('a2', { peerId: 'T-a3' })]);
   groupItems = [item('k1', { alertIds: ['a1', 'a2'] })];
   AlertMonitorPane.render();
   await sleep(40);
   clickLev('show-alerts', 'k1');
-  assert.equal(els['am-focus-chip'].hidden, false);
   assert.deepEqual(calls.focusTasks.at(-1), ['T-a1', 'T-a2', 'T-a3'], 'taskIds and peerIds of the focused alerts');
-  assert.ok(els['am-groups'].scrolled > 0);
-  clickAm('clear-focus');
+  assert.equal(els['am-gantt-chip'].hidden, true, 'the chip reads view().focusIds, which this stub does not set');
+  clickAm('clear-outline');
   assert.equal(calls.focusTasks.at(-1), null);
-  assert.equal(els['am-focus-chip'].hidden, true);
 });
 
-test('needs-planning: Show these focuses exactly its alert ids, bypassing the profile, and the Gantt follows the same orders', async () => {
+test('needs-planning: Show these outlines exactly its orders on the Gantt', async () => {
   seed([alert('n1', { type: 'needs_planning', sev: 'warn', taskId: 'Q1' }), alert('n2', { type: 'needs_planning', sev: 'warn', taskId: 'Q2' }), alert('a9')]);
   groupItems = [item('needs-planning', {
     family: 'needs-planning', titleKey: 'leverage.title.needs-planning', titleVars: { n: 2, h: 3.5 },
@@ -244,11 +242,8 @@ test('needs-planning: Show these focuses exactly its alert ids, bypassing the pr
   await sleep(40);
   assert.match(els['am-leverage'].innerHTML, /data-lev-action="show-alerts"[^>]*data-lev-key="needs-planning"/, 'Show these is the row button');
   clickLev('show-alerts', 'needs-planning');
-  assert.equal(els['am-focus-chip'].hidden, false);
   assert.deepEqual(calls.focusTasks.at(-1), ['Q1', 'Q2'], 'only the family\'s own orders, not a9\'s');
-  assert.doesNotMatch(els['am-groups'].innerHTML, /T-a9/, 'the unrelated alert is not listed under the focus');
-  assert.ok(els['am-groups'].scrolled > 0);
-  clickAm('clear-focus');
+  clickAm('clear-outline');
   assert.equal(calls.focusTasks.at(-1), null);
 });
 
@@ -430,7 +425,7 @@ test('the ⋯ trigger opens the overflow menu with the non-primary actions, disp
     assert.ok(!ids.includes('diagnose-cell'), 'diagnose is this row\'s primary, so it is not repeated in the menu');
     assert.deepEqual(opened.items.find(i => i.id === 'show-alerts').data, { levAction: 'show-alerts', levKey: 'k1' });
     opened.items.find(i => i.id === 'show-alerts').onSelect();
-    assert.equal(els['am-focus-chip'].hidden, false, 'Show alerts keeps the focus-chip behaviour');
+    assert.ok(calls.focusTasks.at(-1)?.length > 0, 'Show alerts asks the Gantt to outline the orders');
   } finally { OverflowMenu.open = priorOpen; }
 });
 
@@ -619,4 +614,32 @@ test('tool card "Open tool inventory" goes to Master Data > Tool Inventory, then
   } finally {
     ToolInventory.openForTool = priorOpen;
   }
+});
+
+const typeSearch = q => els['alerts-tab'].handlers.input({ target: { closest: sel => (sel === '[data-am-search]' ? { value: q } : null) } });
+
+test('W6b: a filter scopes the listed fixes to the view (with the in-view clause) and rewinds "Show 10 more"', async () => {
+  seed([alert('a1'), alert('a2', { type: 'late', sev: 'warn' })]);
+  groupItems = Array.from({ length: 8 }, (_, i) => item(`k${i}`, { alertIds: i < 6 ? ['a1'] : ['a2'] }));
+  AlertMonitorPane.render();
+  await sleep(40);
+  const cards = () => (els['am-leverage'].innerHTML.match(/class="am-fix"/g) || []).length;
+  assert.equal(cards(), 5);
+  clickAm('fixes-show-more');
+  assert.equal(cards(), 8);
+  typeSearch('overlap');                       // a1 only (its tag is "alert.tag.overlap")
+  assert.equal(cards(), 5, 'the page rewinds to the first five; six fixes touch the view');
+  assert.match(els['am-leverage'].innerHTML, /am\.lev_in_view/);
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /data-lev-key="k7"/);
+});
+
+test('W6b: no fix touches the view: the scoped empty state, not the plant-wide one', async () => {
+  seed([alert('a1'), alert('a2', { type: 'late', sev: 'warn' })]);
+  groupItems = [item('k1', { alertIds: ['a1'] })];
+  AlertMonitorPane.render();
+  await sleep(40);
+  typeSearch('late');                          // a2 only
+  assert.match(els['am-leverage'].innerHTML, /am\.lev_none_in_view/);
+  typeSearch('');
+  assert.match(els['am-leverage'].innerHTML, /data-lev-key="k1"/);
 });
