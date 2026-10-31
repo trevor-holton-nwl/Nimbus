@@ -264,3 +264,68 @@ test('the global machine filter (Store.selectedLines) narrows the view without b
     assert.deepEqual(ids(vl.innerHTML), ['a4']);
   } finally { set.clear(); }
 });
+
+// ---- Fix round 1 ----
+import { VirtualList, Toast } from '../../../frontend/platform/foundation.mjs';
+import { Alerts } from '../../../frontend/insights/services.mjs';
+
+test('the matrix scroll box receives --am-mx-head-h (the measured header height) after a paint', () => {
+  setup(ALERTS());
+  const props = {};
+  const box = makeEl('box');
+  box.style = { setProperty: (k, v) => { props[k] = v; } };
+  els['am-mx'] = makeEl('am-mx');
+  els['am-mx'].querySelector = sel => (sel === 'thead tr' ? { offsetHeight: 31 } : sel === '.am-mx-scroll' ? box : null);
+  AlertMonitorPane.render();
+  assert.equal(props['--am-mx-head-h'], '31px');
+});
+
+test('the summary says "N lines selected" while the global line filter is active, and not otherwise', () => {
+  setup(ALERTS());
+  AlertMonitorPane.render();
+  assert.doesNotMatch(els['am-summary'].innerHTML, /lines_selected/);
+  const set = Store.selectedLines;
+  set.add('M1');
+  try {
+    AlertMonitorPane.render();
+    assert.match(els['am-summary'].innerHTML, /am\.lines_selected_one/);
+    set.add('M2');
+    AlertMonitorPane.render();
+    assert.match(els['am-summary'].innerHTML, /am\.lines_selected(?!_one)/);
+    assert.doesNotMatch(els['am-summary'].innerHTML, /<button/, 'read-only: no remove control');
+  } finally { set.clear(); }
+});
+
+test('Inbox: a filter change scrolls the list to the top and closes a detail whose alert left the view', () => {
+  setup(ALERTS(), { settings: INBOX });
+  const proto = VirtualList.prototype;
+  const prev = proto.scrollToTop;
+  let tops = 0;
+  proto.scrollToTop = function () { tops++; };
+  try {
+    AlertMonitorPane.render();
+    const rowEl = { dataset: { alertId: 'a1' }, getAttribute: () => 'a1', closest: s => (s === '.am-xrow' ? rowEl : null) };
+    els['alerts-tab'].handlers.keydown({ key: 'Enter', preventDefault() {}, target: rowEl });
+    assert.equal(AlertMonitorPane._rowH({ id: 'a1' }), 128);
+    const before = tops;
+    els['alerts-tab'].handlers.input({ target: { closest: sel => (sel === '[data-am-search]' ? { value: 'overload' } : null) } });
+    assert.equal(tops, before + 1);
+    assert.equal(AlertMonitorPane._rowH({ id: 'a1' }), 32, 'a1 is not in the view any more: its detail is closed');
+  } finally { proto.scrollToTop = prev; }
+});
+
+test('Move N acts on the alerts in view: quiet sequential fixes, one summary toast', async () => {
+  setup(ALERTS());
+  const toasts = [];
+  const prevFix = Alerts.applyFix, prevToast = Toast.show;
+  Alerts.applyFix = async (id, opts) => { log.push(['fix', id, opts?.quiet]); Store.setAlerts(Store.alerts.filter(x => x.id !== id), 'test'); return true; };
+  Toast.show = (m) => { toasts.push(m); };
+  try {
+    AlertMonitorPane.render();
+    clickRowh('M1');                                  // a1 (overlap, movable) and a2 (late)
+    clickAm('move-view');
+    for (let i = 0; i < 25; i++) await Promise.resolve();
+    assert.deepEqual(log.filter(x => x[0] === 'fix'), [['fix', 'a1', true]]);
+    assert.equal(toasts.length, 1);
+  } finally { Alerts.applyFix = prevFix; Toast.show = prevToast; }
+});

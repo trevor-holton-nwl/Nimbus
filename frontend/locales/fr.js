@@ -2865,6 +2865,8 @@ window.__NIMBUS_LOCALES.fr = {
   'am.filter_clear': 'Effacer',
   'am.filter_remove': 'Retirer le filtre : {{name}}',
   'am.filter_none': 'Rien ne correspond à ces filtres.',
+  'am.lines_selected': '{{n}} lignes sélectionnées',
+  'am.lines_selected_one': '1 ligne sélectionnée',
   'alert.tag.overload': 'Surcapacité',
   'alert.tag.overlap': 'Chevauchement',
   'alert.tag.tool-conflict': 'Outil {{tool}} dépassé',

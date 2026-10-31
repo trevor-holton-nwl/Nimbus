@@ -122,6 +122,7 @@ const _quietOpen = new Set<string>();         // work-center groups whose quiet 
 let _lastPlant: string | null | undefined;
 let _vl: VirtualList<NimbusAlert> | null = null;   // the Inbox list
 let _vlEl: HTMLElement | null = null;
+let _scrollInboxTop = false;                  // set by a filter change: the Inbox list returns to its first row on the next paint
 let _d: Derived | null = null;                // the last paint's derived set (actions read it)
 let _s: PaintState | null = null;
 
@@ -367,6 +368,7 @@ const _DIMS = ['machines', 'wcGroups', 'days', 'categories'] as const;
 /** A filter change: the fixes list rewinds to its first page, then one repaint and the caller's focus restore. */
 function _filterChanged(refocus?: () => void): void {
   _levShown = LEV_TOP_N;
+  _scrollInboxTop = true;
   _paint();
   refocus?.();
 }
@@ -893,6 +895,7 @@ function _summaryHtml(s: PaintState, d: Derived | null): string {
   const line = summaryLine({
     hasPlant: !!s.plant, alerts: s.listed, profileId: s.m.profileId, profileName: s.m.profile.name, profile: s.m.profile, focus: null,
     machinesNoisy: noisy.size, machinesTotal: d ? d.ctx.machines.length : 0, showing: d?.active ? d.filtered.length : null,
+    linesSelected: Store.selectedLines.size,
   }, t);
   return `<span>${esc(line.text)}</span>`;
 }
@@ -1426,7 +1429,19 @@ function _renderMatrix(s: PaintState, d: Derived): void {
     },
   });
   _setHtml('am-mx', matrixHtml(model, d.eff, t));
+  _measureMatrixHead();
   _renderSide(s, d);
+}
+
+/**
+ * The roll-up rows pin under the sticky header: write the header row's measured height on the scroll box as `--am-mx-head-h`
+ * (the Labor grid does the same for its group rows). Skipped while the tab is hidden (a zero height would pin them at 0).
+ */
+function _measureMatrixHead(): void {
+  const host = _el('am-mx');
+  const h = (host?.querySelector?.('thead tr') as HTMLElement | null)?.offsetHeight ?? 0;
+  const box = host?.querySelector?.('.am-mx-scroll') as HTMLElement | null;
+  if (h > 0 && box) box.style.setProperty('--am-mx-head-h', `${h}px`);
 }
 
 /** The matrix side list: hidden until any filter is set; the first 80 alerts in view, then a way into the Inbox. */
@@ -1543,7 +1558,9 @@ function _renderInbox(s: PaintState, d: Derived): void {
       mountEl: mount,
     });
   }
+  if (_openRow && !d.viewIds.has(_openRow)) _openRow = null;   // the open row left the view
   _vl.update(sorted);
+  if (_scrollInboxTop) { _vl.scrollToTop(); _scrollInboxTop = false; }
 }
 
 function _renderBody(s: PaintState, d: Derived | null): void {
@@ -1610,6 +1627,7 @@ export const AlertMonitorPane = {
     }, 'alert-monitor-pane');
     AlertProfileMatches.subscribe(() => { if (_active) _paint(); });
     AlertProfileClient.subscribe(() => { if (_active) _paint(); });
+    globalThis.window?.addEventListener?.('resize', () => { if (_active) _measureMatrixHead(); });
   },
   /** Called by the shell on every entry to the tab. */
   render(): void {

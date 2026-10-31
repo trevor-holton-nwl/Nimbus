@@ -18,7 +18,6 @@ globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(imp
 globalThis.window = globalThis.window || {};
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const flush = async () => { for (let i = 0; i < 25; i++) await Promise.resolve(); };   // microtasks only: the batch awaits stubs, no timers
 
 const prior = {};
 let els;
@@ -124,8 +123,6 @@ test('setActive(false) suppresses the render that alerts:change would trigger', 
 /* ---------------------------------------------------------------------------
    Task 22 — page header: title, summary line, controls row
    ------------------------------------------------------------------------- */
-const evt = map => ({ target: { closest: s => map[s] ?? null } });
-const fire = (type, map) => els['alerts-tab'].handlers[type](evt(map));
 
 test('the shell renders an h2 title, no KPI tiles, no category legend and no Manage profiles control', () => {
   useProfiles([P1], fakeMatches());
@@ -349,7 +346,6 @@ test('no alerts at all shows the all-clear state; no profiles adds the create-pr
    ------------------------------------------------------------------------- */
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Sandbox } from '../../../frontend/optimization/sandbox.mjs';
-import { Modal, Toast } from '../../../frontend/platform/foundation.mjs';
 
 const task = (id, o = {}) => ({
   id, ORDER: `47${id}`, PLANT: 'P1', MACHINE: 'L1', MATERIAL_NUMBER: `M${id}`,
@@ -392,10 +388,8 @@ test('nothing the page renders says points, pts, exact or estimate', () => {
    ------------------------------------------------------------------------- */
 import { AlertAckModal } from '../../../frontend/alert-monitor/alert-ack-modal.mjs';
 import { AlertAcksClient } from '../../../frontend/insights/alert-acks-client.mjs';
-import { VirtualList } from '../../../frontend/platform/foundation.mjs';
 
 const clickMenu = (selector, dataset) => els['alerts-tab'].handlers.click({ target: { closest: sel => (sel === selector ? { dataset } : null) } });
-const section = key => els['am-body'].innerHTML.match(new RegExp(`<section class="am-group panel" data-group-key="${key}">[\\s\\S]*?</section>`))[0];
 
 /** Click a ⋯ trigger through the delegated handler and return what OverflowMenu.open was called with. */
 function openMenu(selector, dataset) {
@@ -479,30 +473,8 @@ test('under What-If the ⋯ menu disables Fix and Override with the hint, and th
 
 
 /** Seven movable alerts in one group (ids sort a1..a7 under the Date ranking, which breaks equal times by id). */
-function seedBatch() {
-  Store.setTasks([], 'test');
-  seed([
-    alert('a1', { type: 'overlap', taskId: '1', peerId: '2' }),
-    alert('a2', { type: 'overlap', taskId: '3', peerId: '1' }),        // its peer (1) moves first: skipped
-    alert('a3', { type: 'tool-conflict', taskId: '2', peerId: '4' }),
-    alert('a4', { type: 'overlap', taskId: '5', peerId: '6' }),        // applyFix refuses (firmed): not counted
-    alert('a5', { type: 'overlap', taskId: '4', peerId: '9' }),
-    alert('a6', { type: 'overlap', taskId: '7', peerId: '8' }),        // leaves Store.alerts while a1 is fixed: skipped
-    alert('a7', { type: 'overlap', taskId: '1', peerId: '8' }),        // the same order as a1: skipped
-  ], { view: { groupBy: 'category', sort: 'time' } });
-}
 
-/** Util.t that keeps the {{n}} count visible ("key|n=3"), so toast and confirm counts can be asserted. */
-const nT = () => patched(Util, 't', (k, v) => (v && v.n !== undefined ? `${k}|n=${v.n}` : k));
 
-function stubFix(fixes, { refuse = [], alsoGone = {} } = {}) {
-  return patched(Alerts, 'applyFix', (id, opts) => {
-    fixes.push([id, opts]);
-    if (refuse.includes(id)) return;
-    const gone = new Set([id, ...(alsoGone[id] ?? [])]);
-    Store.setAlerts(Store.alerts.filter(a => !gone.has(a.id)), 'test');
-  });
-}
 
 
 /** A document whose ⋯ triggers are the given ids (focus calls are logged), plus the group head. */
@@ -569,7 +541,6 @@ test('row Acknowledge and Remove acknowledgement live in the ⋯ menu; the row h
 import { AlertSlotModal } from '../../../frontend/alert-monitor/alert-slot-modal.mjs';
 
 const npTask = id => task(id, { planning_status: 'needs_planning' });
-const cand = (o = {}) => ({ label: '1001|L1', closed: false, needHours: 2, freeHours: 5, capHours: 8, fits: true, ...o });
 
 test('Slot from the row button opens the dialog with the plant, the order and the alert id', () => {
   const opened = [];

@@ -8117,7 +8117,8 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-mx-table th.am-mx-rh { position: sticky; left: 0; z-index: 2; background: var(--bg-elev); text-align: left; min-width: 220px; max-width: 280px; font-weight: 400; }
 .am-mx-table th.am-mx-head.am-mx-rh { z-index: 4; padding-left: 10px; }
 .am-mx-ghead th.am-mx-rh, .am-mx-ghead td { background: var(--bg-subtle); }
-.am-mx-ghead th { top: 0; font-weight: 700; }
+.am-mx-ghead th, .am-mx-ghead td { position: sticky; top: var(--am-mx-head-h, 29px); z-index: 2; }
+.am-mx-ghead th { font-weight: 700; }
 .am-mx-rhc { display: flex; align-items: center; gap: 6px; padding: 3px 8px; min-width: 0; }
 .am-mx-rowh, .am-mx-colh, .am-mx-caret, .am-mx-quiet-btn { border: 0; background: none; font: inherit; color: var(--fg); cursor: pointer; padding: 2px 4px; border-radius: var(--r-sm); }
 .am-mx-rowh { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-weight: 600; }

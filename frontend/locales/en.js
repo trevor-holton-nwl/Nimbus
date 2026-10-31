@@ -3107,6 +3107,8 @@ window.__NIMBUS_LOCALES.en = {
   'am.filter_clear': 'Clear',
   'am.filter_remove': 'Remove filter: {{name}}',
   'am.filter_none': 'Nothing matches these filters.',
+  'am.lines_selected': '{{n}} lines selected',
+  'am.lines_selected_one': '1 line selected',
   'alert.tag.overload': 'Over capacity',
   'alert.tag.overlap': 'Overlap',
   'alert.tag.tool-conflict': 'Tool {{tool}} over',

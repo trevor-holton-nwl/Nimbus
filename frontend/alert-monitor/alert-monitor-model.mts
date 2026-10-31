@@ -50,6 +50,8 @@ export interface SummaryInput {
   machinesTotal?: number;
   /** The filtered count; set only while a filter is active ("showing V"). */
   showing?: number | null;
+  /** Lines picked in the global machine filter (read-only clause "N lines selected"); absent or 0 = none. */
+  linesSelected?: number;
 }
 
 export interface SummaryLine {
@@ -128,6 +130,7 @@ export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
     parts.push(t('am.summary_machines', { m: input.machinesNoisy, total: input.machinesTotal }));
   }
   if (typeof input.showing === 'number') parts.push(t('am.summary_showing', { v: input.showing }));
+  if (typeof input.linesSelected === 'number' && input.linesSelected > 0) parts.push(t(input.linesSelected === 1 ? 'am.lines_selected_one' : 'am.lines_selected', { n: input.linesSelected }));
   return { text: parts.join(' · ') };
 }
 
@@ -233,10 +236,10 @@ export function emptyStateFor(input: {
 }
 
 /* ---------------------------------------------------------------------------
-   Rows, group heads and diagnose — pure HTML builders (Task 12).
+   Row helpers — shared constants and pure HTML builders.
 
    Every dynamic string is escaped here; every label comes through the injected `t`. The pane
-   computes a RowView (Store / Util / NIMBUS reads) and hands it in, so these stay DOM-free.
+   resolves Store / Util / NIMBUS reads and hands them in, so these stay DOM-free.
    ------------------------------------------------------------------------- */
 
 /** Rows shown per group before "Show all N". */
@@ -327,54 +330,11 @@ export function fmtNum(n: number): string {
   return Number.isInteger(r) ? String(r) : r.toFixed(1);
 }
 
-export interface RowView {
-  id: string;
-  type: string;
-  sev: 'err' | 'warn';
-  taskId?: string;
-  line?: string;
-  time?: Date | null;
-  headline: string;
-  message: string;
-  help: string;
-  orderNo: string;
-  /** `msgVars.line` of the alert: when the message already names the line the prefix does not repeat it. */
-  msgLine?: string;
-  /** The page's active grouping: the prefix part the group head already says is dropped. */
-  groupBy: MonitorGroupBy;
-  /** "Thu 23 Oct" and "in 3 days" (the when column joins them). */
-  dateText: string;
-  relText: string;
-  /** The anchor is in the past: the when column reads in the error colour. */
-  overdue: boolean;
-  /** Names the anchor and its exact time (title of the when column). */
-  anchorTip: string;
-  /** What-If is active: Fix / Override render disabled. */
-  whatIf: boolean;
-  /** Set when an acknowledged row is shown ("Acknowledged by …"). */
-  ackLabel: string | null;
-  diagOpen: boolean;
-  diagHtml: string;
-}
 
 const _SEV_GLYPH = { err: '✖', warn: '⚠' } as const;
 
 function _sevGlyph(type: string, sev: 'err' | 'warn'): string {
   return CALENDAR_ALERT_TYPES.has(type) ? '⊘' : _SEV_GLYPH[sev];
-}
-
-/**
- * The mono prefix of a row: the non-empty parts of [line, order number] joined by " · ", minus the part the active
- * grouping already says (line under Machine, order under Order) and minus the line when the message names it.
- * Empty when nothing remains (the row then shows no prefix and no separator).
- */
-export function rowPrefix(v: Pick<RowView, 'line' | 'orderNo' | 'message' | 'msgLine' | 'groupBy'>): string {
-  const parts: string[] = [];
-  const line = v.line ? String(v.line) : '';
-  const named = !!v.msgLine && v.message.includes(String(v.msgLine));
-  if (line && v.groupBy !== 'line' && !named) parts.push(line);
-  if (v.orderNo && v.groupBy !== 'order') parts.push(String(v.orderNo));
-  return parts.join(' · ');
 }
 
 export type RowActionId = 'focus' | 'fix' | 'override' | 'slot' | 'diagnose' | 'ack' | 'unack';
@@ -419,82 +379,11 @@ export function rowPrimaryActions(
   return { goto: acts.goto, second, menu };
 }
 
-/** Label/value pairs as a compact definition grid, headed by the alert type's help sentence (when there is one). */
-export function diagnoseHtml(fields: ReadonlyArray<{ label: string; value: string }>, help = ''): string {
-  const cells = fields.filter(f => f.value !== '' && f.value != null)
-    .map(f => `<div class="am-diag-f"><dt>${_esc(f.label)}</dt><dd title="${_esc(f.value)}">${_esc(f.value)}</dd></div>`).join('');
-  const lead = help ? `<p class="am-diag-help" title="${_esc(help)}">${_esc(help)}</p>` : '';
-  return `${lead}<dl class="am-diag-grid">${cells}</dl>`;
-}
-
 /** "⚙ Fix" -> glyph "⚙" + text "Fix"; a label with no leading glyph is all text. */
 function _splitGlyph(label: string): { glyph: string; text: string } {
   const m = /^([^\p{L}\p{N}\s]+)\s+(.+)$/u.exec(label);
   return m ? { glyph: m[1]!, text: m[2]! } : { glyph: '', text: label };
 }
-
-export interface GroupHeadView {
-  key: string;
-  label: string;
-  expanded: boolean;
-  errors: number;
-  warnings: number;
-  /** First alert of the group, for the head's Go to. */
-  firstAlertId: string | null;
-  firstGoto: boolean;
-  /** Distinct orders the group touches ("Open these N orders in the table"). */
-  orders: number;
-  /** Distinct orders the group's movable alerts sit on ("Move N orders"). */
-  movable: number;
-  /** The group's not-yet-acknowledged alerts ("Acknowledge N…"). */
-  unacked: number;
-  /** What-If is active: Move N orders is disabled. */
-  whatIf: boolean;
-}
-
-export type GroupMenuId = 'goto' | 'move' | 'open-table' | 'ack';
-
-export interface GroupMenuItem {
-  id: GroupMenuId;
-  labelKey: string;
-  vars?: Record<string, string | number>;
-  disabled?: boolean;
-  hintKey?: string;
-}
-
-/** The group head's ⋯ menu, in order: Go to (first alert), Move N orders (also for a single movable order), Open these N orders, Acknowledge N…. */
-export function groupMenuItems(v: GroupHeadView): GroupMenuItem[] {
-  const out: GroupMenuItem[] = [];
-  if (v.firstAlertId && v.firstGoto) out.push({ id: 'goto', labelKey: 'btn.go_to' });
-  if (v.movable > 0) {
-    out.push({ id: 'move', labelKey: v.movable === 1 ? 'am.group_fix_n_one' : 'am.group_fix_n', vars: { n: v.movable }, ...(v.whatIf ? { disabled: true, hintKey: 'am.whatif_blocked' } : {}) });
-  }
-  if (v.orders > 0) out.push({ id: 'open-table', labelKey: 'am.open_in_table', vars: { n: v.orders } });
-  if (v.unacked > 0) out.push({ id: 'ack', labelKey: 'am.group_ack_n', vars: { n: v.unacked } });
-  return out;
-}
-
-/** The card head (36 px): toggle button (caret, glyph, label, counts), then "Move N orders" and the ⋯ menu. No totals. */
-export function groupHeadHtml(v: GroupHeadView, t: Translate): string {
-  const key = _esc(v.key);
-  const worst: 'err' | 'warn' = v.errors > 0 ? 'err' : 'warn';
-  const badges = (v.errors ? `<span class="badge badge-err">${v.errors}</span>` : '')
-    + (v.warnings ? `<span class="badge badge-warn">${v.warnings}</span>` : '');
-  const lock = v.whatIf ? ` aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : '';
-  const move = v.movable >= 2
-    ? `<button type="button" class="btn sm am-group-move" data-am-action="group-move" data-group-key="${key}"${lock}>${_esc(t('am.group_fix_n', { n: v.movable }))}</button>` : '';
-  const more = groupMenuItems(v).length
-    ? `<button type="button" class="icon-btn sm am-group-menu" data-group-key="${key}" data-ovf-key="${key}" aria-haspopup="menu" aria-expanded="false"`
-      + ` aria-label="${_esc(t('am.more_actions'))}" title="${_esc(t('am.more_actions'))}">⋯</button>` : '';
-  return `<div class="am-ghead">`
-    + `<button type="button" class="am-gtoggle" aria-expanded="${v.expanded}" data-am-action="toggle-group" data-group-key="${key}">`
-    + `<span class="am-caret" aria-hidden="true">${v.expanded ? '▾' : '▸'}</span>`
-    + `<span class="am-sev am-sev-${worst}" aria-hidden="true">${_SEV_GLYPH[worst]}</span>`
-    + `<span class="am-glabel" title="${_esc(v.label)}">${_esc(v.label)}</span>${badges}`
-    + `</button>`
-    + `<div class="am-gacts">${move}${more}</div></div>`;
-}
-
 
 /* ---------------------------------------------------------------------------
    Top fixes (Task 13, reworked as a ranked list in Task 23) — pure row / section builders.

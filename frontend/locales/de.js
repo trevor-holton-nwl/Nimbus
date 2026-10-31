@@ -2904,6 +2904,8 @@ window.__NIMBUS_LOCALES.de = {
   'am.filter_clear': 'Zurücksetzen',
   'am.filter_remove': 'Filter entfernen: {{name}}',
   'am.filter_none': 'Nichts entspricht diesen Filtern.',
+  'am.lines_selected': '{{n}} Linien gewählt',
+  'am.lines_selected_one': '1 Linie gewählt',
   'alert.tag.overload': 'Überlastet',
   'alert.tag.overlap': 'Überschneidung',
   'alert.tag.tool-conflict': 'Werkzeug {{tool}} überbelegt',
