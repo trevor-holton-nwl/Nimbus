@@ -157,6 +157,7 @@ export const OptimizeDialog = (() => {
     _initPickers();
     if (_start) (_fpStart as NimbusVendor.FlatpickrInstance | null)?.setDate(_start, false);
     if (_end) (_fpEnd as NimbusVendor.FlatpickrInstance | null)?.setDate(_end, false);
+    if (_start) (_fpEnd as NimbusVendor.FlatpickrInstance | null)?.set('minDate', _timeMode ? _start : _dayStart(_start));
   }
 
   /** Plant scope is owned by the header selector: the dialog shows it read-only
@@ -378,7 +379,7 @@ export const OptimizeDialog = (() => {
       // Choosing Custom from a preset (or with nothing picked yet) starts as today -> today, one whole day,
       // so Run is never blocked on an empty picker. Re-clicking Custom keeps what the planner picked. In time
       // mode the existing instants are kept, as before.
-      if (!_timeMode && (!_start || !_end || prevPreset !== 'custom')) {
+      if (_mode !== 'backlog' && !_timeMode && (!_start || !_end || prevPreset !== 'custom')) {
         const today = Store.plantNow(_plant) ?? Store.serverNow();
         _start = _dayStart(today);
         _end = _dayAfter(today);
@@ -612,6 +613,8 @@ export const OptimizeDialog = (() => {
     const timesChk = document.getElementById('opt-chk-times') as HTMLInputElement | null;
     if (timesChk) timesChk.checked = false;
     if (wasTimeMode) _rebuildPickers();
+    // A From left over from a previous session must not restrict the To picker.
+    (_fpEnd as NimbusVendor.FlatpickrInstance | null)?.set('minDate', undefined as unknown as Date);
     _initPickers();
     _buildPlantSelect();
     _initStrategySelectListener();
@@ -876,7 +879,7 @@ export const OptimizeDialog = (() => {
     Modal.open('modal-opt-from');
   }
   function cancelFromPicker() {
-    if (_start) (_fpStart as NimbusVendor.FlatpickrInstance | null)?.setDate(_start, false);
+    if (_start) _fpStart?.setDate(_start, false);
     Modal.close('modal-opt-from');
   }
   function commitFrom() {
@@ -897,7 +900,7 @@ export const OptimizeDialog = (() => {
     Modal.open('modal-opt-to');
   }
   function cancelToPicker() {
-    if (_end) (_fpEnd as NimbusVendor.FlatpickrInstance | null)?.setDate(_end, false);
+    if (_end) _fpEnd?.setDate(_end, false);
     Modal.close('modal-opt-to');
   }
   function commitTo() {

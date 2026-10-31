@@ -143,7 +143,7 @@ test('date mode: a To before From is pushed to the day after From', () => {
   } finally { fx.restore(); }
 });
 
-test('date mode: a DST fall-back day is still one midnight-aligned day', () => {
+test('date mode: a DST fall-back day is still one midnight-aligned day', async () => {
   const fx = fixture();
   try {
     OptimizeDialog.open();
@@ -151,6 +151,9 @@ test('date mode: a DST fall-back day is still one midnight-aligned day', () => {
     fx.pickFrom(at(11, 1));   // US fall-back day in 2026 (25 h)
     fx.pickTo(at(11, 1));
     assert.match(fx.el('opt-date-summary').innerHTML, /\b1 day\b(?!s)/);
+    const opts = await runAndCapture();
+    assert.equal(opts.startDate.getTime(), new Date(2026, 10, 1).getTime());
+    assert.equal(opts.endDate.getTime(), new Date(2026, 10, 2).getTime(), 'end is midnight of the next day');
   } finally { fx.restore(); }
 });
 
@@ -217,5 +220,29 @@ test('prefill with non-midnight instants turns time mode on; midnight bounds kee
     assert.match(fx.el('opt-start-btn').textContent, /10\/21\/2026/);
     assert.match(fx.el('opt-end-btn').textContent, /10\/23\/2026/, 'To shows the inclusive last day');
     assert.match(fx.el('opt-date-summary').innerHTML, /3 days/);
+  } finally { fx.restore(); }
+});
+
+test('Remove Backlog: switching to Custom keeps the computed backlog bounds', () => {
+  const fx = fixture();
+  try {
+    OptimizeDialog.open();
+    OptimizeDialog.selectMode('backlog');
+    const before = fx.el('opt-start-btn').textContent;
+    assert.match(before, /:/, 'backlog bounds carry a time of day');
+    OptimizeDialog.applyPreset('custom');
+    assert.equal(fx.el('opt-start-btn').textContent, before, 'the seed did not overwrite the backlog start');
+    assert.doesNotMatch(fx.el('opt-date-summary').innerHTML, /\b1 day\b(?!s)/);
+  } finally { fx.restore(); }
+});
+
+test('the 2 Weeks preset still shows date and time with the toggle off', () => {
+  const fx = fixture();
+  try {
+    OptimizeDialog.open();
+    OptimizeDialog.applyPreset('2w');
+    assert.match(fx.el('opt-start-btn').textContent, /11\/03\/2026.*:/);
+    assert.match(fx.el('opt-end-btn').textContent, /11\/17\/2026.*:/, 'exclusive end shown as is');
+    assert.match(fx.el('opt-date-summary').innerHTML, /14 days/);
   } finally { fx.restore(); }
 });
