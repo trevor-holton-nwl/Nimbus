@@ -1603,6 +1603,6 @@ test('overload message prints two decimals when one decimal would show the same 
   const tasks = [{ id: 'n1', MACHINE: 'L', PLANT: 'P', RUN_TIME: 24.04, start_date: D(15, 0, 1), end_date: D(15, 23, 59) }];
   const over = Core.computeAlerts(alertBase(tasks, { calendars: { L: near24 }, plants: { P: near24 } })).alerts.filter(a => a.type === 'overload');
   assert.equal(over.length, 1);
-  assert.match(over[0].msg, /24\.04h scheduled vs 23\.98h effective capacity/);
+  assert.match(over[0].msg, /24\.04h scheduled vs 23\.98h effective capacity \(23\.98h total\)/);
   assert.doesNotMatch(over[0].msg, /24\.0h scheduled vs 24\.0h/);
 });

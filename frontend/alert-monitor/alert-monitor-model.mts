@@ -5,7 +5,8 @@
    through an injected `t`, so the node tests exercise it directly.
    ========================================================================== */
 
-import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
+import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking, PlantPeriod } from '../platform/types.mjs';
+import { activePeriodOn } from '../calendar/calendar-periods.mjs';
 import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, NONE_KEY, alertDayOffset, dayKeyOf, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 import { dayBucketKey, horizonDayKeys } from './alert-monitor-overview.mjs';
@@ -519,11 +520,11 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
       break;
     case 'optimize-window': {
       // Full (0) still lets re-sequencing change which orders are late; only a genuinely over window sends the planner to Diagnose first.
-      const over = (item.headroomHours ?? 1) < 0;
+      const over = _windowOverNoRoom(item);
       if (!over) { add('optimize', 'leverage.action.optimize-window', true); add('diagnose-worst', 'am.diagnose'); }
       else { add('diagnose-worst', 'am.diagnose', true); add('optimize', 'leverage.action.optimize-window'); }
       // Hours are added on the plant calendar (the calendar-day card's edit-calendar opens a machine's hours instead).
-      if ((item.headroomHours ?? 1) <= 0 && ctx.isAdmin) add('edit-plant-calendar', 'btn.edit_calendar', false, { admin: true });
+      if (((item.headroomHours ?? 1) <= 0 || (item.overloadDays ?? 0) > 0) && ctx.isAdmin) add('edit-plant-calendar', 'btn.edit_calendar', false, { admin: true });
       break;
     }
     case 'needs-planning':
@@ -552,7 +553,6 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
   return { primary, menu: out.filter(x => x !== primary) };
 }
 
-/** "Clears 6 alerts on 4 orders", in the plural form the counts call for. */
 /** "13 alerts on 13 orders": what an optimize window touches (re-sequencing promises no clears), same plural forms as `fixClearsText`. */
 export function fixAffectsText(item: LeverageItem, t: Translate): string {
   const n = item.alertIds.length;
@@ -571,21 +571,39 @@ function _windowDays(item: LeverageItem): number {
   return Number.isFinite(a) && Number.isFinite(b) ? Math.round((b - a) / 86400000) + 1 : 0;
 }
 
-/** The capacity clause and its consequence for an optimize window: free, full (within tolerance) or over. Never prints a zero quantity. */
+/** Free hours on days other than the overloaded ones (a net-zero window can still have some). */
+const _freeHours = (item: LeverageItem): number => item.freeHours ?? Math.max(0, item.headroomHours ?? 0);
+
+/** Whether the window has a day over capacity AND no free hours elsewhere to absorb it (Diagnose first, Optimize cannot help). */
+function _windowOverNoRoom(item: LeverageItem): boolean {
+  return (item.overloadDays ?? 0) > 0 && _freeHours(item) <= 0;
+}
+
+/** The capacity clause and its consequence for an optimize window. Decided per day, not by the net sum: over (some day is
+ *  overloaded by the shared rule), free (hours left, no overloaded day), or full (neither). Never prints a zero quantity. */
 function _windowCapacityParts(item: LeverageItem, t: Translate): string[] {
   const h = item.headroomHours;
   if (h == null) return [];
-  if (h > 0) return [t('am.lev_headroom', { h: fmtNum(h) })];
-  if (h === 0) {
-    const days = _windowDays(item);
-    const all = days > 0 && item.fullDays === days;
-    return [all ? t('am.lev_full_window', { days }) : t('am.lev_full_window_some'), t('am.lev_full_note')];
+  const overDays = item.overloadDays ?? 0;
+  if (overDays > 0) {
+    const clause = _plural(overDays, 'am.lev_over_window', { h: fmtNum(item.overHours ?? 0), days: overDays }, t);
+    const free = _freeHours(item);
+    return [clause, free > 0 ? t('am.lev_over_room', { h: fmtNum(free) }) : t('am.lev_over_note')];
   }
-  const days = Math.max(1, item.overloadDays ?? 0);
-  const clause = _plural(days, 'am.lev_over_window', { h: fmtNum(Math.abs(h)), days }, t);
-  return (item.typeCounts?.overload ?? 0) > 0 ? [clause, t('am.lev_over_note')] : [clause];
+  if (h > 0) return [t('am.lev_headroom', { h: fmtNum(h) })];
+  const days = _windowDays(item);
+  const all = days > 0 && item.fullDays === days;
+  const clause = !all ? t('am.lev_full_window_some') : _plural(days, 'am.lev_full_window', { days }, t);
+  return [clause, t('am.lev_full_note')];
 }
 
+/** Which calendar the "Add hours" action opens: the period governing the window's first day, else the plant's base hours. */
+export function plantCalendarTarget(periods: ReadonlyArray<PlantPeriod> | null | undefined, startDate: string): { kind: 'period'; id: string } | { kind: 'plant' } {
+  const p = activePeriodOn(periods as PlantPeriod[] | null | undefined, startDate);
+  return p ? { kind: 'period', id: p.id } : { kind: 'plant' };
+}
+
+/** "Clears 6 alerts on 4 orders", in the plural form the counts call for. */
 export function fixClearsText(item: LeverageItem, t: Translate): string {
   const n = item.alertIds.length;
   const m = item.orderIds.length;

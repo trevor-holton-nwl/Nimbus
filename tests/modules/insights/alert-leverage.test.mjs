@@ -9,7 +9,7 @@ import { buildPlantSnapshot, runLeverageBatchSync } from '../../../frontend/insi
 import { deriveSetupObservation } from '../../../frontend/optimization/engine.mjs';
 import { resolveSetup } from '../../../frontend/setup/setup-domain.mjs';
 import {
-  groupLeverage, analyzeLeverage, replayWithMinutes, parsePairKey, hypotheticalSetupSnapshot,
+  OPTIMIZE_TYPES, groupLeverage, analyzeLeverage, replayWithMinutes, parsePairKey, hypotheticalSetupSnapshot,
 } from '../../../frontend/insights/alert-leverage.mjs';
 
 const Core = createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
@@ -524,6 +524,34 @@ test('optimize-window snaps float-noise headroom to 0 inside the tolerance and c
   assert.equal(w2.headroomHours, 0);
   assert.deepEqual(w2.typeCounts, { late: 2, overlap: 1 });
   assert.equal(w2.overloadDays, 0);
+});
+
+test('optimize-window per-day over: overHours and freeHours cover only their own days; every optimize type has a title label', () => {
+  const matrix = { L1: {
+    [dk(1)]: { scheduled: 14, effectiveCapacity: 12 },
+    [dk(2)]: { scheduled: 10, effectiveCapacity: 12 },
+  } };
+  const alerts = [al('a', 'overload', 'err', 1), al('b', 'late', 'warn', 2)];
+  const [w] = byFamily(groupLeverage(mkInput({ alerts, baselineMatrix: matrix })), 'optimize-window');
+  assert.equal(w.headroomHours, 0, 'net zero');
+  assert.equal(w.overloadDays, 1);
+  assert.equal(w.overHours, 2);
+  assert.equal(w.freeHours, 2);
+  assert.deepEqual([...OPTIMIZE_TYPES].sort(), ['late', 'overlap', 'overload', 'setup-violated'], 'the four types the card labels (_WINDOW_TYPES in alert-monitor-model.mts)');
+});
+
+test('optimize-window per-day over: overHours and freeHours cover only their own days; every optimize type has a title label', () => {
+  const matrix = { L1: {
+    [dk(1)]: { scheduled: 14, effectiveCapacity: 12 },
+    [dk(2)]: { scheduled: 10, effectiveCapacity: 12 },
+  } };
+  const alerts = [al('a', 'overload', 'err', 1), al('b', 'late', 'warn', 2)];
+  const [w] = byFamily(groupLeverage(mkInput({ alerts, baselineMatrix: matrix })), 'optimize-window');
+  assert.equal(w.headroomHours, 0, 'net zero');
+  assert.equal(w.overloadDays, 1);
+  assert.equal(w.overHours, 2);
+  assert.equal(w.freeHours, 2);
+  assert.deepEqual([...OPTIMIZE_TYPES].sort(), ['late', 'overlap', 'overload', 'setup-violated'], 'the four types the card labels (_WINDOW_TYPES in alert-monitor-model.mts)');
 });
 
 test('optimize-window overloadDays counts only days over by more than the tolerance', () => {

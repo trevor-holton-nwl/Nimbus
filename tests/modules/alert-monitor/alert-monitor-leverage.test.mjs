@@ -155,7 +155,7 @@ test('optimize-window exactly full: says at capacity on all days, the note, Opti
 });
 
 test('optimize-window over capacity: hours over on N days, the overload note only with overload members, Diagnose primary', () => {
-  const it = optItem({ headroomHours: -3.2, overloadDays: 2, typeCounts: { overload: 2, late: 1 } });
+  const it = optItem({ headroomHours: -3.2, overloadDays: 2, overHours: 3.2, freeHours: 0, typeCounts: { overload: 2, late: 1 } });
   const p = plain(fixRowHtml(it, 1, ctx(), t));
   assert.ok(p.includes('am.lev_over_window|{"h":"3.2","days":2}'));
   assert.ok(p.includes('am.lev_over_note'));
@@ -163,9 +163,46 @@ test('optimize-window over capacity: hours over on N days, the overload note onl
   assert.equal(primaryOf(it).act, 'diagnose-worst');
   assert.ok(levActions(it, ctx()).menu.some(x => x.act === 'optimize'), 'Optimize is still offered in the menu');
   assert.ok(acts(it, ctx({ isAdmin: true })).includes('edit-plant-calendar'));
-  const one = plain(fixRowHtml(optItem({ headroomHours: -1, overloadDays: 1, typeCounts: { late: 2 } }), 1, ctx(), t));
+  const one = plain(fixRowHtml(optItem({ headroomHours: -1, overloadDays: 1, overHours: 1, freeHours: 0, typeCounts: { late: 2 } }), 1, ctx(), t));
   assert.ok(one.includes('am.lev_over_window_one|'), 'one day uses the singular key');
-  assert.doesNotMatch(one, /am.lev_over_note/, 'no overload member: no note');
+  assert.ok(one.includes('am.lev_over_note'), 'no free hours elsewhere: the overload note');
+});
+
+test('optimize-window per-day over rule: a net-zero window with one overloaded day and one free day is over, Optimize leads', () => {
+  const it = optItem({ headroomHours: 0, overloadDays: 1, overHours: 2, freeHours: 2, fullDays: 0, typeCounts: { overload: 1, late: 1 } });
+  const p = plain(fixRowHtml(it, 1, ctx(), t));
+  assert.ok(p.includes('am.lev_over_window_one|{"h":"2","days":1}'));
+  assert.ok(p.includes('am.lev_over_room|{"h":"2"}'), 'free hours on other days');
+  for (const k of ['am.lev_full_window', 'am.lev_full_note', 'am.lev_over_note']) assert.ok(!p.includes(k), k);
+  assert.equal(primaryOf(it).act, 'optimize');
+  assert.ok(acts(it, ctx({ isAdmin: true })).includes('edit-plant-calendar'));
+});
+
+test('optimize-window spread overshoot with no overloaded day is full or free, never over', () => {
+  const full = optItem({ headroomHours: -0.1, overloadDays: 0, overHours: 0, freeHours: 0, fullDays: 3 });
+  const pf = plain(fixRowHtml(full, 1, ctx(), t));
+  assert.ok(pf.includes('am.lev_full_window|{"days":3}'));
+  assert.ok(!pf.includes('am.lev_over_window'));
+  assert.equal(primaryOf(full).act, 'optimize');
+  const free = optItem({ headroomHours: 1.5, overloadDays: 0, overHours: 0, freeHours: 1.5, fullDays: 1 });
+  const pr = plain(fixRowHtml(free, 1, ctx(), t));
+  assert.ok(pr.includes('am.lev_headroom|{"h":"1.5"}') && !pr.includes('am.lev_over_window'));
+  assert.equal(primaryOf(free).act, 'optimize');
+});
+
+test('optimize-window one-day full window uses the singular clause', () => {
+  const it = optItem({ headroomHours: 0, overloadDays: 0, fullDays: 1, action: { kind: 'optimize-window', line: 'L1', startDate: '2026-10-21', endDate: '2026-10-21' } });
+  const p = plain(fixRowHtml(it, 1, ctx(), t));
+  assert.ok(p.includes('am.lev_full_window_one|'));
+  assert.ok(!p.includes('am.lev_full_window|'));
+});
+
+test('plantCalendarTarget: the period governing the first day when there is one, else the plant hours', () => {
+  const periods = [{ id: 'p1', validFrom: '2026-10-01', validTo: '2026-12-31', workHours: {} }];
+  assert.deepEqual(M.plantCalendarTarget(periods, '2026-11-09'), { kind: 'period', id: 'p1' });
+  assert.deepEqual(M.plantCalendarTarget(periods, '2027-01-05'), { kind: 'plant' });
+  assert.deepEqual(M.plantCalendarTarget([], '2026-11-09'), { kind: 'plant' });
+  assert.deepEqual(M.plantCalendarTarget(undefined, '2026-11-09'), { kind: 'plant' });
 });
 
 test('optimize-window title: breakdown by member type, dates through ctx.fmtDay, no ISO on the card', () => {
