@@ -70,8 +70,13 @@ export interface LeverageItem {
   minutesSource?: 'plantDefault' | 'user' | null;
   capped?: boolean;
   adminOnly?: boolean;
-  /** optimize-window only: sum of (effective capacity - scheduled) hours over the window; <= 0 means optimizing cannot help. */
+  /** optimize-window only: sum of (effective capacity - scheduled) hours over the window, snapped to 0 when within the
+   *  overload tolerance (x days in the window). 0 = full, < 0 = over, > 0 = free hours. */
   headroomHours?: number;
+  /** optimize-window only: member alerts per type (late / overlap / overload / setup-violated). */
+  typeCounts?: Record<string, number>;
+  /** optimize-window only: window days whose cell is over capacity by more than the overload tolerance. */
+  overloadDays?: number;
   /** needs-planning only: the run-time hours of the queued orders still needing a slot (one decimal). */
   unplacedHours?: number;
   action: LeverageAction;
@@ -426,13 +431,22 @@ function _optimizeItems(ctx: Ctx, alerts: NimbusAlert[]): LeverageItem[] {
         _push(b, a, a.type === 'overload' ? [...(a.taskId ? [a.taskId] : []), ..._rowOrders(matrix, line, _dayKeyOfNum(n))] : _alertOrders(a));
       }
       let headroom = 0;
+      let overloadDays = 0;
       for (let n = start; n <= prev; n++) {
         const row = matrix?.[line]?.[_dayKeyOfNum(n)];
-        if (row) headroom += (Number(row.effectiveCapacity) || 0) - (Number(row.scheduled) || 0);
+        if (!row) continue;
+        const cap = Number(row.effectiveCapacity) || 0;
+        const sch = Number(row.scheduled) || 0;
+        headroom += cap - sch;
+        if (core.isOverloaded(sch, cap)) overloadDays++;
       }
+      // Exactly-full days leave float noise around zero: snap it with the same tolerance the overload rule uses.
+      if (Math.abs(headroom) <= core.OVERLOAD_TOLERANCE_H * (prev - start + 1)) headroom = 0;
+      const typeCounts: Record<string, number> = {};
+      for (const a of b.alerts) typeCounts[a.type] = (typeCounts[a.type] ?? 0) + 1;
       items.push(_finish(ctx, 'optimize-window', `optimize-window:${line}|${from}|${to}`, 'leverage.title.optimize-window',
         { line, from, to, n: b.alerts.length }, b,
-        { kind: 'optimize-window', line, startDate: from, endDate: to }, { headroomHours: headroom }));
+        { kind: 'optimize-window', line, startDate: from, endDate: to }, { headroomHours: headroom, typeCounts, overloadDays }));
       members = [];
     };
     for (const n of sorted) {

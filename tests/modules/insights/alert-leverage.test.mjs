@@ -507,6 +507,38 @@ test('optimize-window headroom goes negative on a saturated window', () => {
   assert.equal(w.headroomHours, -11);
 });
 
+test('optimize-window snaps float-noise headroom to 0 inside the tolerance and counts types and overload days', async () => {
+  const matrix = { L1: {
+    [dk(1)]: { scheduled: 23.98 + 0.004, effectiveCapacity: 23.98 },
+    [dk(2)]: { scheduled: 23.98 - 0.003, effectiveCapacity: 23.98 },
+  } };
+  const alerts = [al('a', 'late', 'warn', 1), al('b', 'late', 'warn', 2), al('c', 'overlap', 'err', 2)];
+  const input = mkInput({ alerts, baselineMatrix: matrix });
+  const [w] = byFamily(groupLeverage(input), 'optimize-window');
+  assert.equal(w.headroomHours, 0);
+  assert.deepEqual(w.typeCounts, { late: 2, overlap: 1 });
+  assert.equal(w.overloadDays, 0);
+  // Survives the phase-2 copy analyzeLeverage makes of the phase-1 groups.
+  const groups = groupLeverage(input);
+  const [w2] = byFamily(await analyzeLeverage(input, async () => [], groups), 'optimize-window');
+  assert.equal(w2.headroomHours, 0);
+  assert.deepEqual(w2.typeCounts, { late: 2, overlap: 1 });
+  assert.equal(w2.overloadDays, 0);
+});
+
+test('optimize-window overloadDays counts only days over by more than the tolerance', () => {
+  const matrix = { L1: {
+    [dk(1)]: { scheduled: 20, effectiveCapacity: 12 },
+    [dk(2)]: { scheduled: 12.04, effectiveCapacity: 12 },
+    [dk(3)]: { scheduled: 5, effectiveCapacity: 12 },
+  } };
+  const alerts = [al('a', 'overload', 'err', 1), al('c', 'late', 'warn', 2), al('b', 'late', 'warn', 3)];
+  const [w] = byFamily(groupLeverage(mkInput({ alerts, baselineMatrix: matrix })), 'optimize-window');
+  assert.equal(w.overloadDays, 1);
+  assert.equal(w.typeCounts.overload, 1);
+  assert.ok(Math.abs(w.headroomHours - (-8 - 0.04 + 7)) < 1e-9);
+});
+
 test('optimize-window caps a window at 14 days', () => {
   const alerts = Array.from({ length: 16 }, (_, i) => al(`ov${i}`, 'overload', 'err', 1 + i));
   const items = byFamily(groupLeverage(mkInput({ alerts })), 'optimize-window')

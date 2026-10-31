@@ -1122,9 +1122,11 @@
       const effCap = effectiveFromCapacity(line, cap, lineSettings);
 
       if (isOverloaded(hours, effCap)) {
+        // Two decimals when one decimal would print the same figure twice ("24.0h vs 24.0h" reads as no overload).
+        const dp = hours.toFixed(1) === effCap.toFixed(1) ? 2 : 1;
         alerts.push({
           id:  `ovl-day-${line}-${day}`, sev: 'err', type: 'overload',
-          msg: `${line} is overloaded on ${day}: ${hours.toFixed(1)}h scheduled vs ${effCap.toFixed(1)}h effective capacity (${cap.toFixed(1)}h total).`,
+          msg: `${line} is overloaded on ${day}: ${hours.toFixed(dp)}h scheduled vs ${effCap.toFixed(dp)}h effective capacity (${cap.toFixed(1)}h total).`,
           line, time: dateObj
         });
       } else if (effCap > 0 && hours > effCap * WARN_THRESHOLD) {

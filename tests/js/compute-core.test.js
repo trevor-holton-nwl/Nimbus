@@ -1597,3 +1597,12 @@ for (const c of dueVectors.cases) {
     assert.equal(_localDate(c.finish) > due, c.late);
   });
 }
+
+test('overload message prints two decimals when one decimal would show the same figure twice', () => {
+  const near24 = { workHours: allDays([1 / 60, 24]) };   // a "24h" day that opens at 00:01 (23.98 h)
+  const tasks = [{ id: 'n1', MACHINE: 'L', PLANT: 'P', RUN_TIME: 24.04, start_date: D(15, 0, 1), end_date: D(15, 23, 59) }];
+  const over = Core.computeAlerts(alertBase(tasks, { calendars: { L: near24 }, plants: { P: near24 } })).alerts.filter(a => a.type === 'overload');
+  assert.equal(over.length, 1);
+  assert.match(over[0].msg, /24\.04h scheduled vs 23\.98h effective capacity/);
+  assert.doesNotMatch(over[0].msg, /24\.0h scheduled vs 24\.0h/);
+});
