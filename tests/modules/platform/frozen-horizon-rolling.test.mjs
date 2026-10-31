@@ -32,7 +32,10 @@ test('Store.frozenHorizonEnd is plant now + N days and advances with the clock (
   Store.setMasterData({ plants: [plantRow(2)], lines: [] }, 'unit-test');
   const t0 = Store.plantNow('FZ1').getTime();
   const end0 = Store.frozenHorizonEnd.getTime();
-  assert.ok(Math.abs((end0 - t0) - 48 * HOUR) < 5_000, 'end is plant now + 2 days (UTC plant, no DST)');
+  // Wall-clock days (production uses setDate on the plant-local clock Date), so across a local DST change the
+  // gap is 47/49 h, not 48 h. Compute the expectation the same tz-independent way instead of assuming 48 h.
+  const expected = new Date(t0); expected.setDate(expected.getDate() + 2);
+  assert.ok(Math.abs(end0 - expected.getTime()) < 5_000, 'end is plant now + 2 wall-clock days');
   Store.serverOffsetMs = HOUR;   // the server clock is an hour later
   const end1 = Store.frozenHorizonEnd.getTime();
   assert.ok(Math.abs((end1 - end0) - HOUR) < 5_000, 'clocks an hour apart give ends an hour apart');

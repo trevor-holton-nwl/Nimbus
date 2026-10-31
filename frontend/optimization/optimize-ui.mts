@@ -454,6 +454,9 @@ export const OptimizeDialog = (() => {
     _strategySelectListenerSet = true;
     const sel = document.getElementById('opt-strategy-select') as HTMLSelectElement | null;
     sel?.addEventListener('change', () => selectMode(sel.value as OptimizerMode));
+    // "Adjust times" toggle: bound here (once) instead of an inline onchange, which would grow the legacy surface.
+    const timesChk = document.getElementById('opt-chk-times') as HTMLInputElement | null;
+    timesChk?.addEventListener('change', () => setTimeMode(timesChk.checked));
   }
 
   /** Does this plant have any colorWheel ranks the optimizer could apply?
