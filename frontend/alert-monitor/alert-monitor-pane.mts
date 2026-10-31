@@ -1054,6 +1054,12 @@ function _levFieldLabel(fieldKey: string): string {
   return v === key ? fieldKey : v;
 }
 
+/** A YYYY-MM-DD key in the user's date format. */
+function _fmtDayKey(day: string): string {
+  const [y, m, d] = day.split('-').map(Number);
+  return y && m && d ? Util._fmtDatePref(new Date(y, m - 1, d)) : day;
+}
+
 function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
   const remaining = _levAttempted.size ? item.alertIds.filter(id => _levAttempted.has(id)).length : 0;
   return {
@@ -1064,6 +1070,7 @@ function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
     whatIf: Sandbox.active === true,
     fieldLabel: _levFieldLabel,
     alertsById: _alertsById(),
+    fmtDay: _fmtDayKey,
   };
 }
 
@@ -1318,6 +1325,9 @@ function _onLevAction(act: string, key: string): void {
       if (action.kind === 'calendar-day') {
         void import('../calendar/edit-calendar.mjs').then(m => m.EditCalendar.open(action.line));
       }
+      break;
+    case 'edit-plant-calendar':
+      if (Session.isAdmin()) void import('../calendar/edit-calendar.mjs').then(m => m.EditCalendar.openPlant(plant));
       break;
     case 'rg-workcenters':
       nim.App?.goto?.('masterdata');

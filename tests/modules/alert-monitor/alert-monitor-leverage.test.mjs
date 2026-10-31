@@ -125,23 +125,56 @@ test('a lower after-score is shown, with the delta in the error colour (D9)', ()
   assert.match(p, /<span class="am-fix-down">−3<\/span>/);
 });
 
-test('optimize-window with headroom leads with Optimize and puts the free hours in the tooltip', () => {
+const plain = h => unq(h.replace(/<[^>]+>/g, '|'));
+
+test('optimize-window with free hours: the free-hours clause is on the row, Optimize leads, no Add hours', () => {
   const it = optItem();
   const h = fixRowHtml(it, 1, ctx(), t);
-  assert.match(h, /title="am\.lev_headroom\|\{"h":"6\.5"\}"/);
-  assert.doesNotMatch(h, /am\.lev_no_headroom/);
+  assert.ok(plain(h).includes('am.lev_headroom|{"h":"6.5"}'));
+  assert.doesNotMatch(h, /title="am.lev_headroom/);
+  assert.doesNotMatch(h, /am.fix_clears/);
+  assert.ok(plain(h).includes('am.lev_affects|{"n":3,"m":2}'));
   assert.equal(primaryOf(it).act, 'optimize');
   assert.ok(levActions(it, ctx()).menu.some(x => x.act === 'diagnose-worst'));
+  assert.ok(!acts(it, ctx({ isAdmin: true })).includes('edit-plant-calendar'));
 });
 
-test('optimize-window with no headroom: Diagnose is primary and the clause says why', () => {
-  const it = optItem({ headroomHours: -3.2 });
-  const h = fixRowHtml(it, 1, ctx(), t);
-  assert.match(h, /am\.lev_no_headroom\|\{"h":"3\.2"\}/);
-  assert.doesNotMatch(h, /am\.lev_headroom\|/);
+test('optimize-window exactly full: says at capacity on all days, the note, Optimize primary, Add hours for admin only', () => {
+  const it = optItem({ headroomHours: 0, fullDays: 3, typeCounts: { late: 3 }, overloadDays: 0 });
+  const p = plain(fixRowHtml(it, 1, ctx(), t));
+  assert.ok(p.includes('am.lev_full_window|{"days":3}'));
+  assert.ok(p.includes('am.lev_full_note'));
+  for (const k of ['am.lev_over_window', 'am.lev_headroom', 'am.lev_no_headroom', 'am.lev_over_note']) assert.ok(!p.includes(k), k);
+  assert.equal(primaryOf(it).act, 'optimize', 'zero headroom keeps Optimize primary');
+  const adm = levActions(it, ctx({ isAdmin: true }));
+  const add = adm.menu.find(x => x.act === 'edit-plant-calendar');
+  assert.ok(add && add.labelKey === 'btn.edit_calendar' && add.admin === true && add.primary === false);
+  assert.ok(!acts(it, ctx({ isAdmin: false })).includes('edit-plant-calendar'), 'non-admin does not see Add hours');
+  const some = plain(fixRowHtml(optItem({ headroomHours: 0, fullDays: 2, typeCounts: { late: 3 } }), 1, ctx(), t));
+  assert.match(some, /am.lev_full_window_some/);
+});
+
+test('optimize-window over capacity: hours over on N days, the overload note only with overload members, Diagnose primary', () => {
+  const it = optItem({ headroomHours: -3.2, overloadDays: 2, typeCounts: { overload: 2, late: 1 } });
+  const p = plain(fixRowHtml(it, 1, ctx(), t));
+  assert.ok(p.includes('am.lev_over_window|{"h":"3.2","days":2}'));
+  assert.ok(p.includes('am.lev_over_note'));
+  for (const k of ['am.lev_headroom', 'am.lev_no_headroom', 'am.lev_full_note']) assert.ok(!p.includes(k), k);
   assert.equal(primaryOf(it).act, 'diagnose-worst');
   assert.ok(levActions(it, ctx()).menu.some(x => x.act === 'optimize'), 'Optimize is still offered in the menu');
-  assert.equal(primaryOf(optItem({ headroomHours: 0 })).act, 'diagnose-worst', 'zero counts as no headroom');
+  assert.ok(acts(it, ctx({ isAdmin: true })).includes('edit-plant-calendar'));
+  const one = plain(fixRowHtml(optItem({ headroomHours: -1, overloadDays: 1, typeCounts: { late: 2 } }), 1, ctx(), t));
+  assert.ok(one.includes('am.lev_over_window_one|'), 'one day uses the singular key');
+  assert.doesNotMatch(one, /am.lev_over_note/, 'no overload member: no note');
+});
+
+test('optimize-window title: breakdown by member type, dates through ctx.fmtDay, no ISO on the card', () => {
+  const it = optItem({ typeCounts: { late: 13, 'setup-violated': 1, overlap: 0 } });
+  const title = levTitle(it, ctx({ fmtDay: k => `<${k}>` }), t);
+  assert.match(title, /"from":"<2026-10-21>","to":"<2026-10-23>"/);
+  assert.equal(levTitle(it, ctx(), (k, v) => (k === 'leverage.title.optimize-window' ? v.breakdown : `${k}|${JSON.stringify(v)}`)),
+    'am.lev_type_late|{"n":13} · am.lev_type_setup_one|{"n":1}');
+  assert.doesNotMatch(title, /overlap/, 'zero counts are skipped');
 });
 
 test('remaining count shows after a fix attempt', () => {
