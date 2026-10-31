@@ -202,6 +202,8 @@ const Settings = (() => {
     { key: 'alertMonitorView',          category: 'workflow', type: 'object',  default: null,  tier: 'user', region: false },
     { key: 'alertsShowAcknowledged',    category: 'workflow', type: 'boolean', default: false, tier: 'user', region: false },
     { key: 'alertMonitorOverview',      category: 'workflow', type: 'enum',    default: 'open', tier: 'user', region: false },
+    // Alert Monitor Top fixes panel: 'open' | 'collapsed' (the head and its count stay; the leverage run still executes).
+    { key: 'alertMonitorFixes',         category: 'workflow', type: 'enum',    default: 'open', tier: 'user', region: false },
   ];
 
   // { key: default } map derived from CATALOG (last link in Store.pref precedence).
