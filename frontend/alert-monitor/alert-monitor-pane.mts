@@ -1495,10 +1495,11 @@ function _wireSideResize(): void {
   const finish = (e: PointerEvent): void => {
     if (!dragging) return;
     dragging = false;
+    const moved = curW !== startW;
     layout()?.classList?.remove('am-resizing');
     document.body?.classList?.remove('am-side-resizing');
     try { h.releasePointerCapture?.(e.pointerId); } catch { /* not captured */ }
-    Session.setPref('alertMonitorSideWidth', curW);
+    if (moved) Session.setPref('alertMonitorSideWidth', curW);
   };
   h.addEventListener('pointerdown', (e: PointerEvent) => {
     e.preventDefault();

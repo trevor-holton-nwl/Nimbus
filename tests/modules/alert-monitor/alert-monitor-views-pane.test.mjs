@@ -394,6 +394,17 @@ test('drag: live width while moving, exactly one saved write on release', () => 
   assert.deepEqual(prefs.slice(before), [['alertMonitorSideWidth', 760]]);
 });
 
+test('a click on the handle without a move writes nothing', () => {
+  setup(ALERTS(), { settings: { alertMonitorSideWidth: null } });
+  trackWidth();
+  AlertMonitorPane.render();
+  const h = els['am-side-rh'];
+  const before = prefs.length;
+  h.handlers.pointerdown({ clientX: 1000, pointerId: 1, preventDefault() {} });
+  h.handlers.pointerup({ pointerId: 1 });
+  assert.equal(prefs.length, before);
+});
+
 test('Inbox then Matrix re-applies the stored width', () => {
   setup(ALERTS(), { settings: { alertMonitorSideWidth: 700 } });
   const calls = trackWidth();

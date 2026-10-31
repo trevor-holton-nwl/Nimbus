@@ -254,8 +254,8 @@ export const NARROW_AT = 520;
 export const SIDE_W_DEFAULT = 660, SIDE_W_MIN = 380, SIDE_W_MAX = 900;
 /** Row-head column (240) + two 64 px data columns: the least matrix width beside the side list. */
 export const MATRIX_MIN_W = 240 + 2 * 64;
-/** Layout gap (12) + resize handle column (8). */
-export const SIDE_GAP_W = 12 + 8;
+/** Two 12 px grid gaps (three columns: matrix, handle, list) + the 8 px handle column. */
+export const SIDE_GAP_W = 24 + 8;
 /** Clamp a stored or dragged side-list width; non-numbers fall back to the default, and a known layout width keeps the matrix at `MATRIX_MIN_W` (never below `SIDE_W_MIN`). */
 export function clampSideWidth(px: unknown, layoutW?: number): number {
   const n = typeof px === 'number' ? px : (px == null || px === '' ? NaN : Number(px));

@@ -108,7 +108,7 @@ test('clampSideWidth: default, bounds and the matrix floor', () => {
   assert.equal(clampSideWidth(null), 660);
   assert.equal(clampSideWidth(0), 380);
   assert.equal(clampSideWidth(5000), 900);
-  assert.equal(clampSideWidth(700, 1000), 612);
+  assert.equal(clampSideWidth(700, 1000), 600);
   assert.equal(clampSideWidth(700, 500), 380);
   assert.equal(clampSideWidth('abc'), 660);
 });
