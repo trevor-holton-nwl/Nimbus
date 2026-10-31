@@ -5,10 +5,9 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Util } from '../../../frontend/platform/foundation.mjs';
 import { groupAlerts } from '../../../frontend/insights/alert-profiles.mjs';
-import { legacyRowHtml, GROUP_ROW_CAP } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
-import { emptyFilter, filterAlerts } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
+import { rowHtml, emptyFilter, filterAlerts } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 import { matrixModel, matrixHtml } from '../../../frontend/alert-monitor/alert-monitor-matrix.mjs';
-import { overviewData, applyNarrow } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
+import { overviewData } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
 
 const BENCH = process.env.NIMBUS_BENCH === '1';
 const t = (k, v) => `${k}${v ? '|' + Object.entries(v).map(([a, b]) => `${a}=${b}`).join(',') : ''}`;
@@ -42,24 +41,21 @@ test('bench: groupAlerts + row building at 15,000 alerts across 70 lines', { ski
   assert.equal(byNone[0].orderIds.length, N_ORDERS);
   assert.equal(new Set(byNone[0].orderIds).size, N_ORDERS, 'orderIds stay de-duplicated');
 
-  const view = (a, dateText) => ({
-    id: a.id, type: a.type, sev: a.sev, taskId: a.taskId, line: a.line, time: a.time, headline: 'Order overlap',
-    message: 'Overlaps 4500118 by 2 h', help: '', orderNo: a.taskId, groupBy: 'line', dateText, relText: 'in 1 days', overdue: false,
-    anchorTip: 'am.anchor_time: x', whatIf: false, ackLabel: null, diagOpen: false, diagHtml: '',
-  });
-  const build = (dateOf) => {
-    let n = 0;
-    for (const g of byLine) for (const a of g.alerts.slice(0, GROUP_ROW_CAP)) n += legacyRowHtml(view(a, dateOf(a.time)), t).length;
-    return n;
+  const build = (n, dateOf) => {
+    let len = 0;
+    for (const a of alerts.slice(0, n)) {
+      len += rowHtml(a, { hideMachine: false, open: false, material: 'Material ' + a.taskId, tag: 'Overlap', t, orderNo: a.taskId, groupLabel: 'Conflicts', dueText: dateOf(a.time), overdue: false }).length;
+    }
+    return len;
   };
-  const [rowsCached] = ms(() => build(d => fmt.format(d)));
-  const [rowsPerCall] = ms(() => build(d => d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' })));
+  const [rowsCached] = ms(() => build(80, d => fmt.format(d)));
+  const [rowsPerCall] = ms(() => build(80, d => d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' })));
 
   console.log(`[bench] ${N_ALERTS} alerts / ${N_LINES} lines: groupAlerts(line) ${gLine.toFixed(1)} ms, groupAlerts(none) ${gNone.toFixed(1)} ms; `
-    + `rows (${N_LINES}x${GROUP_ROW_CAP} = ${N_LINES * GROUP_ROW_CAP}) cached formatter ${rowsCached.toFixed(1)} ms vs per-call toLocaleDateString ${rowsPerCall.toFixed(1)} ms`);
+    + `rowHtml x80 (side list cap) cached formatter ${rowsCached.toFixed(1)} ms vs per-call toLocaleDateString ${rowsPerCall.toFixed(1)} ms`);
 });
 
-test('bench: overviewData + applyNarrow at 15,000 alerts across 70 lines (the real Util.dueInstant path)', { skip: !BENCH && 'set NIMBUS_BENCH=1 to run' }, () => {
+test('bench: overviewData at 15,000 alerts across 70 lines (the real Util.dueInstant path)', { skip: !BENCH && 'set NIMBUS_BENCH=1 to run' }, () => {
   const alerts = synth();
   // Production wiring: no `deps` (anchorTime resolves NIMBUS.Util.dueInstant -> sapDueDate -> NimbusComputeCore.dueDateInstant
   // -> Util._dueWindowForLine over the calendar resolver). Every due is a date-only midnight, one in seven lands on a closed Sunday.
@@ -78,11 +74,8 @@ test('bench: overviewData + applyNarrow at 15,000 alerts across 70 lines (the re
     assert.equal(data.lines.length, N_LINES);
     const binned = data.days.reduce((n, b) => n + b.err + b.warn, 0) + data.overdue.err + data.overdue.warn + data.later.err + data.later.warn + data.undated;
     assert.equal(binned, N_ALERTS, 'every alert lands in exactly one day bucket (or is undated)');
-    const [tNarrow, shown] = ms(() => applyNarrow(alerts, { day: data.days[3].key, line: 'L03', category: 'conflicts' }, d));
-    assert.ok(shown.length < N_ALERTS);
-    const [tDay] = ms(() => applyNarrow(alerts, { day: 'overdue' }, d));
 
-    console.log(`[bench] ${N_ALERTS} alerts / ${N_LINES} lines, real Util.dueInstant: overviewData ${tData.toFixed(1)} ms, applyNarrow(day+line+category) ${tNarrow.toFixed(1)} ms, applyNarrow(day only) ${tDay.toFixed(1)} ms`);
+    console.log(`[bench] ${N_ALERTS} alerts / ${N_LINES} lines, real Util.dueInstant: overviewData ${tData.toFixed(1)} ms`);
   } finally {
     Util.setDueCalendarResolver(null);
     globalThis.NimbusComputeCore = prevCore;

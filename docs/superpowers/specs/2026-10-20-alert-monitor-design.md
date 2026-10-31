@@ -554,3 +554,8 @@ Owner screenshots showed the When bars using about 45 percent of the card height
 ## Rev 4 note (2026-10-30, Alert Profiles revamp W4)
 
 D11 (the plant-wide red outline on every alerted Gantt bar) is reversed. The ambient `conflict-order` outline is gone: profile fills are the ambient layer, and an outline (`alert-focus`, 2 px dashed ink) appears only on orders the planner explicitly shows from the Alert Monitor, limited to orders inside the profile being viewed and excluding fully acknowledged ones (unless "Show acknowledged"). Under the built-in All alerts profile only error-severity orders get the inner ring (no fill). "Outlined: N · Clear" on the Gantt toolbar, or Escape with nothing selected, clears the outline.
+
+
+## Rev 4 (2026-10-30): Matrix | Inbox
+
+The page became two toggleable views of one filtered set, Matrix (default) and Inbox, with a Machine / Day / Group lens on the matrix. **D10 is reversed for display:** Top fixes are still scored plant-wide, but while a filter is on only the fixes that touch the alerts in view are listed (with an "N in view" clause and a scoped empty state). The Overview band is retired (its charts became the matrix row bars and the Inbox facets), plant confidence left the page, the Group-by select and the Priority / Date header switch are gone, and "Show on Gantt" outlines orders on the Gantt instead of focusing the list. The filter is session-only; `alertMonitorView['*'] = {view, lens}` persists the two choices. See `frontend/alert-monitor/CLAUDE.md`.

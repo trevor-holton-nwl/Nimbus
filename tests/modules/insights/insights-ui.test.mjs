@@ -350,17 +350,14 @@ test('AlertsUIAdapter.focus: Go To selects via Selection, marks the target, and 
 });
 
 test('drawer and Alert Monitor rows agree on Fix / Override / calendar glyph for every firing alert type', async () => {
-  const { legacyRowHtml } = await import('../../../frontend/alert-monitor/alert-monitor-model.mjs');
+  const { rowHtml } = await import('../../../frontend/alert-monitor/alert-monitor-model.mjs');
   const { FIRING_ALERT_TYPES } = await import('../../../frontend/insights/alert-profiles.mjs');
   const t = k => k;
   for (const type of FIRING_ALERT_TYPES) {
     for (const taskId of ['T1', undefined]) {
       const a = { id: `x-${type}`, type, sev: 'err', msg: 'm', taskId, line: 'L1', time: new Date('2026-10-21T08:00:00') };
       const drawer = AlertsUIAdapter._renderAlertRow(a);
-      const mon = legacyRowHtml({
-        id: a.id, type, sev: 'err', taskId, line: 'L1', time: a.time, headline: 'h', message: 'm', help: '', orderNo: '',
-        dateText: '', relText: '', anchorTip: '', points: 1, orders: 1, lateH: 0, whatIf: false, ackLabel: null, diagOpen: false, diagHtml: '',
-      }, t);
+      const mon = rowHtml(a, { hideMachine: false, open: false, material: '', tag: '', t });
       assert.equal(/data-alert-action="fix"/.test(mon), /data-alert-action="fix"/.test(drawer), `fix ${type}`);
       assert.equal(/data-alert-action="override"/.test(mon), /data-alert-action="override"/.test(drawer), `override ${type}/${taskId}`);
       assert.equal(mon.includes('⊘'), drawer.includes('⊘'), `calendar glyph ${type}`);

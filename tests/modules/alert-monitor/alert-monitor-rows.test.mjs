@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  rowActionsFor, legacyRowHtml, rowPrefix, rowPrimaryActions, groupHeadHtml, groupMenuItems, groupCounts, groupLabel, diagnoseHtml,
-  relativeDaysText, formatPairKey, fmtNum, GROUP_ROW_CAP, ROW_H, DIAG_H, MOVABLE_ALERT_TYPES,
+  rowActionsFor, rowPrefix, rowPrimaryActions, groupHeadHtml, groupMenuItems, groupCounts, diagnoseHtml,
+  relativeDaysText, ROW_H, MOVABLE_ALERT_TYPES,
 } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 
 const t = (k, v) => `${k}${v ? '|' + Object.entries(v).map(([a, b]) => `${a}=${b}`).join(',') : ''}`;
@@ -21,44 +21,6 @@ const head = (o = {}) => ({
   orders: 4, movable: 3, unacked: 6, whatIf: false, ...o,
 });
 
-test('row builder escapes every dynamic string', () => {
-  const html = legacyRowHtml(view({
-    id: 'x"><img src=x onerror=alert(1)>', headline: '<img onerror=alert(1)>', message: '<script>x</script>',
-    orderNo: '<b>1</b>', line: '"><i>', taskId: '1"><u>', type: 'closed', help: '<svg onload=1>',
-    dateText: '<em>d</em>', relText: '<s>r</s>', anchorTip: '<q>tip</q>', ackLabel: '<mark>ack</mark>',
-  }), t);
-  assert.doesNotMatch(html, /<img|<script|<svg|<b>|<u>|<i>|<em>|<s>|<q>|<mark>/);
-  assert.match(html, /&lt;img onerror=alert\(1\)&gt;/);
-});
-
-test('a row is one line: a single .am-when, the prefix and message, and no number columns or meta block', () => {
-  const html = legacyRowHtml(view(), t);
-  assert.equal((html.match(/class="am-when/g) ?? []).length, 1);
-  assert.match(html, /<span class="am-when" title="am\.anchor_time: 10\/21\/2026 08:00">Wed 21 Oct · in 1 days<\/span>/);
-  assert.doesNotMatch(html, /am-imp|am-num|am-meta|am-help|am-headline|am-hl\b|ⓘ/);
-  assert.match(html, /<div class="am-main"><span class="am-pfx">L1 · 4711 ·<\/span><span class="am-msg" title="Overlaps 4500118 by 2 h">Overlaps 4500118 by 2 h<\/span><\/div>/);
-  assert.equal(ROW_H, 44);
-});
-
-test('an overdue anchor carries .am-when-overdue; the row tooltip is the headline and the help sentence', () => {
-  assert.match(legacyRowHtml(view({ overdue: true, relText: '3 days overdue' }), t), /class="am-when am-when-overdue"/);
-  assert.doesNotMatch(legacyRowHtml(view(), t), /am-when-overdue/);
-  assert.match(legacyRowHtml(view(), t), /<div class="am-row am-row-err" title="Order overlap — help text">/);
-  assert.match(legacyRowHtml(view({ help: '' }), t), /title="Order overlap">/);
-});
-
-test('prefix: line + order, line only (overload), neither (no stray separator)', () => {
-  assert.equal(rowPrefix(view()), 'L1 · 4711');
-  assert.equal(rowPrefix(view({ orderNo: '' })), 'L1');
-  assert.equal(rowPrefix(view({ line: '', orderNo: '' })), '');
-  assert.equal(rowPrefix(view({ line: undefined, orderNo: '' })), '');
-  const tz = legacyRowHtml(view({ type: 'plant_no_timezone', line: '', orderNo: '', taskId: undefined, message: 'Plant has no time zone' }), t);
-  assert.doesNotMatch(tz, /am-pfx/);
-  assert.doesNotMatch(tz, /·\s*<\/span><span class="am-msg"/);
-  assert.match(tz, /<div class="am-main"><span class="am-msg" title="Plant has no time zone">Plant has no time zone<\/span><\/div>/);
-  assert.match(legacyRowHtml(view({ orderNo: '', taskId: undefined, type: 'overload' }), t), /<span class="am-pfx">L1 ·<\/span>/);
-});
-
 test('prefix: the part the active group-by already says is dropped, and the line when the message names it', () => {
   assert.equal(rowPrefix(view({ groupBy: 'line' })), '4711');
   assert.equal(rowPrefix(view({ groupBy: 'order' })), 'L1');
@@ -72,42 +34,6 @@ test('prefix: the part the active group-by already says is dropped, and the line
   assert.equal(rowPrefix(view({ message: 'L1 is overloaded by 3 h', msgLine: 'L1', orderNo: '' })), '');
   // a msgVars.line the message does not contain changes nothing
   assert.equal(rowPrefix(view({ message: 'something else', msgLine: 'L1' })), 'L1 · 4711');
-});
-
-test('Fix only appears on fixable types; Override only on the closed family with a taskId', () => {
-  for (const type of ['overlap', 'blackout', 'overload', 'tool-conflict']) {
-    assert.equal(rowActionsFor({ type, taskId: '1' }).fix, true, type);
-    assert.match(legacyRowHtml(view({ type }), t), /data-alert-action="fix"/);
-  }
-  assert.doesNotMatch(legacyRowHtml(view({ type: 'late' }), t), /data-alert-action="fix"/);
-  for (const type of ['closed', 'firmed-closed', 'firmed-out-of-hours']) {
-    assert.match(legacyRowHtml(view({ type }), t), /data-alert-action="override"[^>]*data-task-id="10"/);
-    assert.equal(rowActionsFor({ type }).override, false, 'no taskId, no override');
-  }
-  assert.doesNotMatch(legacyRowHtml(view({ type: 'overlap' }), t), /data-alert-action="override"/);
-  assert.doesNotMatch(legacyRowHtml(view({ type: 'closed', taskId: undefined }), t), /data-alert-action="override"/);
-});
-
-test('the second button splits the glyph from its text label; aria-label and title carry the label', () => {
-  const real = (k, v) => ({ 'btn.fix_it': '⚙ Fix', 'btn.override': '📅 Override', 'tip.fix_alert': 'Automatically resolve this alert' }[k] ?? t(k, v));
-  const fix = legacyRowHtml(view(), real);
-  assert.match(fix, /<button[^>]*class="btn sm btn-fix am-act-2"[^>]*aria-label="Fix"[^>]*title="Fix · Automatically resolve this alert"[^>]*><span class="am-glyph" aria-hidden="true">⚙<\/span><span class="lbl">Fix<\/span><\/button>/);
-  const ov = legacyRowHtml(view({ type: 'closed' }), real);
-  assert.match(ov, /<button[^>]*class="btn btn-ghost sm am-act-2"[^>]*aria-label="Override"[^>]*title="Override"[^>]*><span class="am-glyph" aria-hidden="true">📅<\/span><span class="lbl">Override<\/span><\/button>/);
-  // a label with no leading glyph is all text
-  assert.match(legacyRowHtml(view(), (k, v) => (k === 'btn.fix_it' ? 'Fix' : t(k, v))), /<span class="lbl">Fix<\/span>/);
-  // an alert with neither action has no second button
-  assert.doesNotMatch(legacyRowHtml(view({ type: 'late' }), real), /am-act-2/);
-});
-
-test('the actions are Go to, the second button and the ⋯ trigger; no Acknowledge, Diagnose or Dismiss buttons on the row', () => {
-  const html = legacyRowHtml(view(), t);
-  assert.match(html, /data-alert-action="focus" data-alert-id="a1">btn\.go_to</);
-  assert.match(html, /<button type="button" class="icon-btn sm am-row-menu" data-alert-id="a1" data-ovf-key="a1" aria-haspopup="menu" aria-expanded="false" aria-label="am\.more_actions"[^>]*>⋯<\/button>/);
-  assert.doesNotMatch(html, /data-alert-action="(ack|unack|diagnose|dismiss)"|btn\.dismiss|group_dismiss/);
-  assert.equal((html.match(/<button/g) ?? []).length, 3);
-  assert.equal((legacyRowHtml(view({ type: 'late' }), t).match(/<button/g) ?? []).length, 2);
-  assert.equal((legacyRowHtml(view({ type: 'overload', taskId: undefined }), t).match(/<button/g) ?? []).length, 3, 'a line-day alert still has Go to');
 });
 
 test('the ⋯ menu: Go to, Fix, Diagnose, Acknowledge for a fixable alert', () => {
@@ -151,45 +77,6 @@ test('the ⋯ menu under What-If: Fix / Override are disabled with the hint; ack
   assert.deepEqual([ov.disabled, ov.hintKey], [true, 'am.whatif_blocked']);
 });
 
-test('What-If disables the Fix and Override buttons with the explanatory title; Go to stays live', () => {
-  const fix = legacyRowHtml(view({ whatIf: true }), t);
-  assert.match(fix, /<button[^>]*data-alert-action="fix"[^>]*disabled[^>]*am\.whatif_blocked/);
-  const ov = legacyRowHtml(view({ type: 'closed', whatIf: true }), t);
-  assert.match(ov, /<button[^>]*data-alert-action="override"[^>]*disabled[^>]*am\.whatif_blocked/);
-  assert.match(ov, /data-alert-action="focus"/, 'Go To stays live');
-});
-
-test('Slot only appears on needs_planning rows with a taskId, never alongside Fix or Override', () => {
-  assert.equal(rowActionsFor({ type: 'needs_planning', taskId: '10' }).slot, true);
-  assert.equal(rowActionsFor({ type: 'needs_planning' }).slot, false, 'no taskId, no slot');
-  assert.equal(rowActionsFor({ type: 'needs_planning', taskId: '' }).slot, false);
-  for (const type of ['overlap', 'blackout', 'overload', 'tool-conflict', 'closed', 'firmed-closed', 'late']) {
-    assert.equal(rowActionsFor({ type, taskId: '10' }).slot, false, type);
-    assert.doesNotMatch(legacyRowHtml(view({ type }), t), /data-alert-action="slot"/, type);
-  }
-  const acts = rowActionsFor({ type: 'needs_planning', taskId: '10' });
-  assert.deepEqual([acts.fix, acts.override, acts.slot], [false, false, true], 'the sets are disjoint');
-  const html = legacyRowHtml(view({ type: 'needs_planning' }), t);
-  assert.match(html, /<button[^>]*class="btn btn-ghost sm am-act-2"[^>]*data-alert-action="slot" data-alert-id="a1" data-task-id="10"/);
-  assert.doesNotMatch(html, /data-alert-action="(fix|override)"/);
-  assert.equal((html.match(/<button/g) ?? []).length, 3, 'Go to + Slot + the menu trigger');
-  assert.doesNotMatch(legacyRowHtml(view({ type: 'needs_planning', taskId: undefined }), t), /data-alert-action="slot"/);
-  assert.equal(rowPrimaryActions({ type: 'needs_planning', taskId: '10' }, null, { whatIf: false, acked: false }).second, 'slot');
-  assert.equal(rowPrimaryActions({ type: 'needs_planning' }, { id: 7 }, { whatIf: false, acked: false }).second, 'slot', 'the order handed in stands in for a missing taskId');
-});
-
-test('the Slot button splits its glyph from the label; aria-label and title carry the text', () => {
-  const real = (k, v) => ({ 'am.slot': '◫ Slot…' }[k] ?? t(k, v));
-  const html = legacyRowHtml(view({ type: 'needs_planning' }), real);
-  assert.match(html, /<button[^>]*class="btn btn-ghost sm am-act-2"[^>]*aria-label="Slot…"[^>]*title="Slot…"[^>]*><span class="am-glyph" aria-hidden="true">◫<\/span><span class="lbl">Slot…<\/span><\/button>/);
-});
-
-test('the Slot button escapes the task id', () => {
-  const html = legacyRowHtml(view({ type: 'needs_planning', taskId: '1"><u>' }), t);
-  assert.doesNotMatch(html, /<u>/);
-  assert.match(html, /data-task-id="1&quot;&gt;&lt;u&gt;"/);
-});
-
 test('the ⋯ menu for a needs_planning row: Go to, Slot…, Diagnose, Acknowledge; Slot is locked in What-If', () => {
   const a = { type: 'needs_planning', taskId: '10', line: 'L1', time: new Date() };
   const p = rowPrimaryActions(a, null, { whatIf: false, acked: false });
@@ -201,39 +88,6 @@ test('the ⋯ menu for a needs_planning row: Go to, Slot…, Diagnose, Acknowled
   assert.deepEqual([s.disabled, s.hintKey], [true, 'am.whatif_blocked']);
   assert.ok(locked.menu.filter(m => m.action !== 'slot').every(m => !m.disabled));
   assert.deepEqual(rowPrimaryActions({ type: 'needs_planning', line: 'L1', time: new Date() }, null, { whatIf: false, acked: false }).menu.map(m => m.action), ['focus', 'diagnose', 'ack'], 'no taskId, no Slot');
-});
-
-test('What-If disables the Slot button with the explanatory title; Go to stays live', () => {
-  const html = legacyRowHtml(view({ type: 'needs_planning', whatIf: true }), t);
-  assert.match(html, /<button[^>]*data-alert-action="slot"[^>]*disabled aria-disabled="true" title="am\.whatif_blocked"/);
-  assert.match(html, /data-alert-action="focus"/);
-});
-
-test('diagnose: order alerts expand inline (help sentence first), line/day alerts open the cell briefing', () => {
-  assert.equal(rowActionsFor({ type: 'overload', line: 'L1', time: new Date() }).diagnose, 'cell');
-  assert.equal(rowActionsFor({ type: 'late', taskId: '1', line: 'L1', time: new Date() }).diagnose, 'order');
-  const diag = diagnoseHtml([{ label: 'Due', value: '2026-10-20' }], 'Why this matters · what to do');
-  assert.match(diag, /^<p class="am-diag-help" title="Why this matters · what to do">Why this matters · what to do<\/p><dl class="am-diag-grid">/);
-  assert.match(diag, /<dt>Due<\/dt><dd title="2026-10-20">2026-10-20<\/dd>/);
-  assert.doesNotMatch(diagnoseHtml([{ label: 'Due', value: 'x' }]), /am-diag-help/, 'no help sentence, no line');
-  assert.match(diagnoseHtml([], '<b>x</b>'), /&lt;b&gt;x&lt;\/b&gt;/);
-  const open = legacyRowHtml(view({ type: 'late', diagOpen: true, diagHtml: diag }), t);
-  assert.match(open, /<div class="am-diag"><p class="am-diag-help"/);
-  const cell = legacyRowHtml(view({ type: 'overload', taskId: undefined, diagOpen: true, diagHtml: 'X' }), t);
-  assert.doesNotMatch(cell, /class="am-diag"/, 'a cell diagnose never expands inline');
-  assert.ok(DIAG_H > 96, 'the panel grew by the help line');
-});
-
-test('calendar-family rows use the circled-slash glyph, others the severity glyph; acked rows carry the badge', () => {
-  assert.match(legacyRowHtml(view({ type: 'closed' }), t), /am-sev am-sev-err" aria-hidden="true">⊘/);
-  assert.match(legacyRowHtml(view({ type: 'overlap', sev: 'warn' }), t), /am-sev-warn" aria-hidden="true">⚠/);
-  assert.match(legacyRowHtml(view({ ackLabel: 'Acknowledged by Ana' }), t), /am-ack-badge[^>]*>Acknowledged by Ana</);
-  assert.doesNotMatch(legacyRowHtml(view(), t), /am-ack-badge/);
-});
-
-test('no rendered row or head mentions points, pts, exact or estimate', () => {
-  const html = legacyRowHtml(view(), t) + legacyRowHtml(view({ type: 'closed', ackLabel: 'x', overdue: true }), t) + groupHeadHtml(head(), t);
-  assert.doesNotMatch(html, /points|pts|exact|estimate|col_/i);
 });
 
 test('groupCounts: severity counts, distinct orders (taskId ∪ peerId), the whole group\'s movable and un-acked ids', () => {
@@ -299,30 +153,6 @@ test('"Move N orders" counts distinct orders, not alerts', () => {
   assert.equal(c.movableOrders, 2);
 });
 
-test('rows align: every row uses one grid with a fixed-width actions track, whatever buttons it has', () => {
-  const css = readFileSync(new URL('../../../frontend/styles.css', import.meta.url), 'utf8');
-  assert.match(css, /\.am-row \{[^}]*grid-template-columns: 14px minmax\(0, 1fr\) 240px auto;/);
-  assert.match(css, /\.am-acts \{[^}]*justify-content: flex-end;[^}]*width: 240px;/);
-  assert.match(css, /@media \(max-width: 1199px\) \{[^}]*\.am-act-2 \.lbl \{ display: none; \}[^}]*\.am-acts \{ width: 136px; \}/);
-  const cls = html => html.match(/<div class="(am-row [^"]*)"/)[1].replace(/am-row-\w+/, '');
-  assert.equal(cls(legacyRowHtml(view(), t)), cls(legacyRowHtml(view({ type: 'late' }), t)), 'Go to + Fix and Go to alone share one template');
-  assert.match(legacyRowHtml(view({ type: 'late' }), t), /<div class="am-acts">/);
-  assert.match(legacyRowHtml(view(), t), /<div class="am-acts">/);
-});
-
-test('group labels per mode and the helpers behind the rows', () => {
-  const d = { headlineFor: x => `H:${x}`, orderLabel: id => (id === '9' ? '4711 · Mat' : ''), dayOffset: () => 9, fmtDay: k => `D(${k})` };
-  assert.equal(groupLabel('category', 'setup', d, t), 'ape.cat_setup');
-  assert.equal(groupLabel('type', 'overlap', d, t), 'H:overlap');
-  assert.equal(groupLabel('line', 'none', d, t), 'am.group_unassigned');
-  assert.equal(groupLabel('order', '9', d, t), '4711 · Mat');
-  assert.equal(groupLabel('day', '2026-10-23', d, t), 'D(2026-10-23) · am.rel_in_days|n=9');
-  assert.equal(relativeDaysText(0, t), 'am.rel_today');
-  assert.equal(relativeDaysText(-3, t), 'am.rel_overdue_days|n=3');
-  assert.equal(formatPairKey('[["colorWheel","RED"]]->[["colorWheel","BLUE"]]'), 'colorWheel RED → colorWheel BLUE');
-  assert.equal(formatPairKey('unknown->[["f","x"]]'), '? → f x');
-  assert.equal(formatPairKey(null), '');
-  assert.equal(fmtNum(7), '7');
-  assert.equal(fmtNum(7.46), '7.5');
-  assert.equal(GROUP_ROW_CAP, 40);
+test('ROW_H is the 32 px compact row', () => {
+  assert.equal(ROW_H, 32);
 });

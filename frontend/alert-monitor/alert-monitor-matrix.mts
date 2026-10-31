@@ -198,10 +198,11 @@ export function matrixModel(alerts: ReadonlyArray<NimbusAlert>, lens: MonitorLen
   const cmpName = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
   const groups: MatrixGroup[] = [];
   for (const [gKey, list] of byGroup) {
-    const noisy = list.filter(r => r.head.total > 0).sort((a, b) =>
+    // A pinned machine is never folded away: it stays a row (first, per the pinned-first sort) even with no alerts.
+    const noisy = list.filter(r => r.head.total > 0 || pinned.has(r.head.key)).sort((a, b) =>
       (pinned.has(b.head.key) ? 1 : 0) - (pinned.has(a.head.key) ? 1 : 0)
       || sevRank(b.head.worst) - sevRank(a.head.worst) || b.head.total - a.head.total || cmpName(a.head.label, b.head.label));
-    const quiet = list.filter(r => r.head.total === 0).sort((a, b) =>
+    const quiet = list.filter(r => r.head.total === 0 && !pinned.has(r.head.key)).sort((a, b) =>
       (pinned.has(b.head.key) ? 1 : 0) - (pinned.has(a.head.key) ? 1 : 0) || cmpName(a.head.label, b.head.label));
     const gAcc = groupsAcc.get(gKey);
     const label = gKey === UNGROUPED_KEY ? L.ungrouped : gKey;
@@ -239,6 +240,13 @@ export function colFilter(lens: MonitorLens, colKey: string): Partial<MonitorFil
 /** What clicking a cell sets: its row and its column. */
 export function cellFilter(lens: MonitorLens, rowKey: string, colKey: string): Partial<MonitorFilter> {
   return { ...rowFilter(lens, rowKey), ...colFilter(lens, colKey) };
+}
+
+/** The filter with the dimensions `part` names emptied (toggle-off: clicking the current cell/row/column clears exactly those). */
+export function clearDims(filter: MonitorFilter, part: Partial<MonitorFilter>): MonitorFilter {
+  const next: MonitorFilter = { ...filter, machines: new Set(filter.machines), wcGroups: new Set(filter.wcGroups), days: new Set(filter.days), categories: new Set(filter.categories) };
+  for (const dim of ['machines', 'wcGroups', 'days', 'categories'] as const) if (part[dim]) (next[dim] as Set<string>).clear();
+  return next;
 }
 
 /** True when every dimension of `part` is exactly the filter's own set (the aria-pressed rule). */

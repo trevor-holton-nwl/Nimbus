@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking } from '../platform/types.mjs';
-import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, NONE_KEY, alertDayOffset, dayKeyOf, FIXABLE_ALERT_TYPES, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, NONE_KEY, alertDayOffset, dayKeyOf, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 import { dayBucketKey, horizonDayKeys } from './alert-monitor-overview.mjs';
 
@@ -30,14 +30,9 @@ export interface AlertLike {
 
 export type MonitorGroupBy = 'category' | 'type' | 'line' | 'day' | 'order' | 'none';
 
-/** Machine first: it is the default grouping and the order the Group by select lists. */
-export const MONITOR_GROUP_BYS: MonitorGroupBy[] = ['line', 'day', 'type', 'category', 'order', 'none'];
 /** The two sorts the page offers (Priority / Date); the stored `severity` / `orders` of earlier builds read as `impact`. */
 export const MONITOR_SORTS: AlertRanking[] = ['impact', 'time'];
 export const MONITOR_CATEGORIES: readonly AlertCategory[] = ALERT_CATEGORY_ORDER;
-export const DEFAULT_GROUP_BY: MonitorGroupBy = 'line';
-
-export interface LegacyMonitorView { groupBy: MonitorGroupBy; sort: AlertRanking }
 
 /** What the summary line says about the alerts the list shows. */
 export interface SummaryInput {
@@ -50,8 +45,6 @@ export interface SummaryInput {
   profile: AlertProfile | null | undefined;
   /** A leverage card's "Show alerts" is active: its chip text replaces the first clause. */
   focus: { title: string; outside: number } | null;
-  /** @deprecated The page drops the confidence link in W6b; the legacy pane still passes it. Absent = no link. */
-  confidence?: number | null | undefined;
   /** Machines carrying at least one alert in the list, and the plant's machine count; both set = "M of N machines". */
   machinesNoisy?: number;
   machinesTotal?: number;
@@ -62,11 +55,7 @@ export interface SummaryInput {
 export interface SummaryLine {
   /** The sentence up to (not including) the confidence link. */
   text: string;
-  /** "Plant confidence 71" split around the score so the pane can set the number in mono; null when there is no score. */
-  conf: { prefix: string; score: string; suffix: string } | null;
 }
-
-const _SCORE_MARK = '\u0002';
 
 /**
  * The whole-day window a profile covers when every rule shares the same `dayFrom` and `dayTo` (both set),
@@ -110,7 +99,7 @@ const _plural = (n: number, key: string, vars: Record<string, string | number>, 
 
 /** The one-sentence page summary (row 2 of the header). Counts are over the alerts the list shows. */
 export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
-  if (!input.hasPlant) return { text: t('am.empty_no_plant'), conf: null };
+  if (!input.hasPlant) return { text: t('am.empty_no_plant') };
   let errors = 0, warnings = 0;
   const orders = new Set<string>();
   for (const a of input.alerts) {
@@ -139,16 +128,7 @@ export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
     parts.push(t('am.summary_machines', { m: input.machinesNoisy, total: input.machinesTotal }));
   }
   if (typeof input.showing === 'number') parts.push(t('am.summary_showing', { v: input.showing }));
-  let conf: SummaryLine['conf'] = null;
-  const c = input.confidence;
-  if (typeof c === 'number' && isFinite(c)) {
-    const score = String(Math.round(c));
-    const [prefix, suffix] = t('am.summary_conf', { score: _SCORE_MARK }).split(_SCORE_MARK);
-    conf = prefix !== undefined && suffix !== undefined
-      ? { prefix, score, suffix }
-      : { prefix: t('am.summary_conf', { score }), score: '', suffix: '' };
-  }
-  return { text: parts.join(' · '), conf };
+  return { text: parts.join(' · ') };
 }
 
 const _DAY_MARK = '\u0001';
@@ -214,26 +194,6 @@ function _ruleLine(rule: AlertProfileRule, typesText: string, t: Translate): str
   }
 }
 
-/**
- * The group-by / sort for a profile: the user's stored choice (`alertMonitorView[profileId]`) wins, else
- * Machine grouping and the profile's own default ranking (`time` -> Date, anything else -> Priority).
- * A stored `severity` / `orders` sort (earlier builds) reads as Priority.
- */
-export function legacyViewFor(
-  profileId: string,
-  pref: Record<string, { groupBy?: unknown; sort?: unknown } | undefined> | null | undefined,
-  profile: Pick<AlertProfile, 'ranking'> | null | undefined,
-): LegacyMonitorView {
-  const stored = pref && typeof pref === 'object' ? pref[profileId] : undefined;
-  const groupBy = MONITOR_GROUP_BYS.includes(stored?.groupBy as MonitorGroupBy)
-    ? stored!.groupBy as MonitorGroupBy : DEFAULT_GROUP_BY;
-  const fallback: AlertRanking = profile?.ranking === 'time' ? 'time' : 'impact';
-  const raw = stored?.sort;
-  const sort: AlertRanking = raw === 'time' ? 'time'
-    : (raw === 'impact' || raw === 'severity' || raw === 'orders') ? 'impact' : fallback;
-  return { groupBy, sort };
-}
-
 /** What the monitor lists: alerts the profile matched, minus acknowledged ones unless asked. */
 export function visibleAlertsFor<A extends { id: string }>(
   alerts: ReadonlyArray<A>,
@@ -281,14 +241,8 @@ export function emptyStateFor(input: {
 
 /** Rows shown per group before "Show all N". */
 export const GROUP_ROW_CAP = 40;
-/** Fixed row height (px) — also the VirtualList rowH in group-by none. */
-export const ROW_H = 44;
-/**
- * Height (px) of the inline diagnose panel under an order row: 20 padding + the help sentence (two 17 px
- * lines at most, clamped) + 6 gap + three rows of the field grid (3 x 28 + 2 x 6; a queued order's Suggested slot
- * field makes the third) + slack. Keep `.am-diag` in styles.css in step.
- */
-export const DIAG_H = 166;
+/** Compact Inbox / side-list row height (px); an open row adds its detail block (the pane's `DETAIL_H`). */
+export const ROW_H = 32;
 /** The alert types a group's "Move N orders" moves: `overload` is excluded, its fix runs the line-day changeover optimizer. */
 export const MOVABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'tool-conflict']);
 /** Above this many orders "Move N orders" asks first. */
@@ -479,58 +433,6 @@ function _splitGlyph(label: string): { glyph: string; text: string } {
   return m ? { glyph: m[1]!, text: m[2]! } : { glyph: '', text: label };
 }
 
-/** The glyph stays; the text sits in `.lbl`, which the stylesheet hides below 1,200 px (the button's aria-label / title keep it). */
-function _glyphBtnInner(label: string): string {
-  const { glyph, text } = _splitGlyph(label);
-  return (glyph ? `<span class="am-glyph" aria-hidden="true">${_esc(glyph)}</span>` : '') + `<span class="lbl">${_esc(text)}</span>`;
-}
-
-/** One alert row (and, when open, its inline diagnose panel): 44 px, one line. */
-export function legacyRowHtml(v: RowView, t: Translate): string {
-  const acts = rowActionsFor(v);
-  const p = rowPrimaryActions(v, null, { whatIf: v.whatIf, acked: !!v.ackLabel });
-  const id = _esc(v.id);
-  const lock = v.whatIf ? ` disabled aria-disabled="true" title="${_esc(t('am.whatif_blocked'))}"` : '';
-  const buttons: string[] = [];
-  if (p.goto) {
-    buttons.push(`<button type="button" class="btn btn-ghost sm" data-alert-action="focus" data-alert-id="${id}">${_esc(t('btn.go_to'))}</button>`);
-  }
-  if (p.second === 'fix') {
-    const label = t('btn.fix_it');
-    const text = _splitGlyph(label).text;
-    buttons.push(`<button type="button" class="btn sm btn-fix am-act-2" data-alert-action="fix" data-alert-id="${id}" aria-label="${_esc(text)}"`
-      + (v.whatIf ? lock : ` title="${_esc(`${text} · ${t('tip.fix_alert')}`)}"`) + `>${_glyphBtnInner(label)}</button>`);
-  } else if (p.second === 'override') {
-    const label = t('btn.override');
-    const text = _splitGlyph(label).text;
-    buttons.push(`<button type="button" class="btn btn-ghost sm am-act-2" data-alert-action="override" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}" aria-label="${_esc(text)}"`
-      + (v.whatIf ? lock : ` title="${_esc(text)}"`) + `>${_glyphBtnInner(label)}</button>`);
-  } else if (p.second === 'slot') {
-    const label = t('am.slot');
-    const text = _splitGlyph(label).text;
-    buttons.push(`<button type="button" class="btn btn-ghost sm am-act-2" data-alert-action="slot" data-alert-id="${id}" data-task-id="${_esc(v.taskId)}" aria-label="${_esc(text)}"`
-      + (v.whatIf ? lock : ` title="${_esc(text)}"`) + `>${_glyphBtnInner(label)}</button>`);
-  }
-  buttons.push(`<button type="button" class="icon-btn sm am-row-menu" data-alert-id="${id}" data-ovf-key="${id}" aria-haspopup="menu" aria-expanded="false"`
-    + ` aria-label="${_esc(t('am.more_actions'))}" title="${_esc(t('am.more_actions'))}">⋯</button>`);
-
-  const prefix = rowPrefix(v);
-  const pfx = prefix ? `<span class="am-pfx">${_esc(prefix)} ·</span>` : '';
-  const ack = v.ackLabel ? `<span class="badge badge-info am-ack-badge" title="${_esc(v.ackLabel)}">${_esc(v.ackLabel)}</span>` : '';
-  const when = [v.dateText, v.relText].filter(Boolean).join(' · ');
-  const tip = [v.headline, v.help].filter(Boolean).join(' — ');
-
-  return `<div class="am-rowwrap" role="listitem" data-alert-id="${id}">`
-    + `<div class="am-row am-row-${v.sev}" title="${_esc(tip)}">`
-    + `<span class="am-sev am-sev-${v.sev}" aria-hidden="true">${_sevGlyph(v.type, v.sev)}</span>`
-    + `<div class="am-main">${pfx}<span class="am-msg" title="${_esc(v.message)}">${_esc(v.message)}</span>${ack}</div>`
-    + `<span class="am-when${v.overdue ? ' am-when-overdue' : ''}" title="${_esc(v.anchorTip)}">${_esc(when)}</span>`
-    + `<div class="am-acts">${buttons.join('')}</div>`
-    + `</div>`
-    + (v.diagOpen && acts.diagnose === 'order' ? `<div class="am-diag">${v.diagHtml}</div>` : '')
-    + `</div>`;
-}
-
 export interface GroupHeadView {
   key: string;
   label: string;
@@ -593,29 +495,6 @@ export function groupHeadHtml(v: GroupHeadView, t: Translate): string {
     + `<div class="am-gacts">${move}${more}</div></div>`;
 }
 
-export interface GroupLabelDeps {
-  headlineFor: (type: string) => string;
-  /** Order number + material for a task id (empty when the task is unknown). */
-  orderLabel: (taskId: string) => string;
-  /** Whole-day offset of a `YYYY-MM-DD` key from the plant's today. */
-  dayOffset: (dayKey: string) => number;
-  /** "Thu 23 Oct" for a `YYYY-MM-DD` key. */
-  fmtDay: (dayKey: string) => string;
-}
-
-/** Display label of a group. `none` is the single "everything" group. */
-export function groupLabel(by: MonitorGroupBy, key: string, d: GroupLabelDeps, t: Translate): string {
-  const unassigned = t('am.group_unassigned');
-  switch (by) {
-    case 'category': return t(`ape.cat_${key}`);
-    case 'type': return d.headlineFor(key);
-    case 'line': return key === 'none' ? unassigned : key;
-    case 'order': return key === 'none' ? unassigned : (d.orderLabel(key) || key);
-    case 'day': return key === 'none' ? unassigned : `${d.fmtDay(key)} · ${relativeDaysText(d.dayOffset(key), t)}`;
-    case 'none':
-    default: return t('am.group_none');
-  }
-}
 
 /* ---------------------------------------------------------------------------
    Top fixes (Task 13, reworked as a ranked list in Task 23) — pure row / section builders.
@@ -645,6 +524,8 @@ export interface LevCtx {
   whatIf: boolean;
   /** Localised label of a setup-definition field (`colorWheel` → "Color"). */
   fieldLabel: (fieldKey: string) => string;
+  /** How many of this fix's alerts are in the current view; set only while the view is a partial one (adds the `am.lev_in_view` clause). */
+  inView?: number;
 }
 
 export interface LevAction {
@@ -776,6 +657,7 @@ export function fixLineParts(item: LeverageItem, ctx: LevCtx, t: Translate): str
   if (item.family === 'optimize-window' && item.headroomHours != null && item.headroomHours <= 0) {
     parts.push(_esc(t('am.lev_no_headroom', { h: fmtNum(Math.abs(item.headroomHours)) })));
   }
+  if (ctx.inView != null) parts.push(_esc(t('am.lev_in_view', { n: ctx.inView })));
   if (ctx.remaining > 0) parts.push(`<span class="am-fix-left">${_esc(_plural(ctx.remaining, 'am.lev_remaining', { n: ctx.remaining }, t))}</span>`);
   return parts;
 }
@@ -833,6 +715,8 @@ export interface FixesSectionOpts {
   /** The first pass has not produced results yet. */
   computing: boolean;
   ctxFor: (item: LeverageItem) => LevCtx;
+  /** The list was narrowed to the current view and nothing in it is left: say so instead of the plant-wide empty copy. */
+  noneInView?: boolean;
 }
 
 /**
@@ -848,7 +732,7 @@ export function fixesSectionHtml(items: ReadonlyArray<LeverageItem>, o: FixesSec
   if (o.computing && !items.length) {
     body = `<div class="am-lev-skeleton" aria-busy="true">${_esc(t('am.lev_computing'))}</div>`;
   } else if (!items.length) {
-    body = `<div class="am-lev-empty">${_esc(t('am.lev_none'))}</div>`;
+    body = `<div class="am-lev-empty">${_esc(t(o.noneInView ? 'am.lev_none_in_view' : 'am.lev_none'))}</div>`;
   } else {
     const limit = Math.min(Math.max(o.limit, LEV_TOP_N), LEV_MAX_RENDER);
     const shown = main.slice(0, limit);

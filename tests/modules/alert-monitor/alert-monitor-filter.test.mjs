@@ -213,7 +213,6 @@ const sumIn = o => ({
 test('summaryLine: machines clause and "showing" clause, no confidence link', () => {
   const s = summaryLine(sumIn({ machinesNoisy: 12, machinesTotal: 70, showing: 4 }), t);
   assert.equal(s.text, 'am.summary_all_one|n=1 · am.summary_errors_one|e=1 · am.summary_orders_one|o=1 · am.summary_machines|m=12,total=70 · am.summary_showing|v=4');
-  assert.equal(s.conf, null, 'no confidence input, no link');
   const plain = summaryLine(sumIn(), t).text;
   assert.doesNotMatch(plain, /machines|showing/);
   assert.doesNotMatch(summaryLine(sumIn({ machinesNoisy: 1, machinesTotal: 0 }), t).text, /machines/, 'no machine total, no clause');
