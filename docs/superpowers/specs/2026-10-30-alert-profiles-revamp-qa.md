@@ -5,6 +5,8 @@ Design: `2026-10-30-alert-profiles-revamp-design.md`. Run in a plant with at lea
 ## Owed gates before this script
 
 - Postgres tests (12): `NIMBUS_TEST_DB=1 python -m pytest tests/test_alert_profile_categories.py tests/test_alert_profiles_data.py tests/test_schema_idempotent.py -q` against a local Postgres (never the Azure host).
+- Deploy gate dry run (no changes applied): `& "C:\Users\PJ29587\OneDrive - Newell Brands\Documents\AI_ML Testing\Claude\.claude\skills\promote-azure\scripts\apply-migrations.ps1" -DryRun`; read its output, then
+- Release-note hazards: (1) rows saved by the new build with `rules: []` (a blank draft, all groups on) match NOTHING on the previous image, so a rollback blanks those profiles; (2) a tab opened before the deploy sends rules only: the server keeps the stored `categories` but replaces the rules, so a pre-deploy tab can silently undo fine-tuning (the version-refresh banner nudges those tabs to reload).
 - Deploy: dry run first, then `promote-azure -Only 2026-10-30-2 -AllowDestructive` (migration 2026-10-30-2 adds `alert_profile.categories`).
 
 ## A. Profile editor
@@ -23,7 +25,7 @@ Design: `2026-10-30-alert-profiles-revamp-design.md`. Run in a plant with at lea
 
 ## B. Gantt
 
-12. Each profile category fills matching bars in its own colour; an order with two categories takes the most severe, ties go planning > late > exceptions.
+12. Each profile category fills matching bars in its own colour; an order with two categories takes the most severe, ties go capacity > conflicts > calendar > setup > planning > late > exceptions.
 13. A warn order has the amber inner ring, an err order the red ring, for every swatch colour (including slate and stone).
 14. Under All alerts: no fills, only error orders show the ring (D8).
 15. An acknowledged order shows no ring or fill; turn on Show acknowledged: it returns.
@@ -63,3 +65,6 @@ Design: `2026-10-30-alert-profiles-revamp-design.md`. Run in a plant with at lea
 
 38. Check the page chrome (title row, controls, summary, chips) and the matrix legend. Longest strings: `am.mx_legend_hint` (fr 96 chars, de 83), `am.search_ph` (fr 49), `am.ack_err_until` (fr 57 in the ack dialog). Expected: no clipping or overflow in the page; the long hint wraps rather than truncates.
 39. Long German tags against the 150 px first column of the matrix: truncated with a tooltip, not overlapping the cells.
+40. Keyboard: Tab to a matrix cell and press Enter: it applies the same filter as a click (press Enter again: it clears).
+41. Dark mode, Inbox: the facet colour dots (What) and severity bars (Where) are readable against the panel background.
+42. Open an overflow menu (a row or Top fixes menu) with a Gantt focus outline set and press Escape: the menu closes and the outline stays; press Escape again with no menu: the outline clears. An empty focus set shows no chip.

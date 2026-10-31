@@ -265,6 +265,6 @@ export const AlertProfileMatches = {
     _focusTaskIds = next;
     recompute();
   },
-  /** The orders the Gantt outlines (`current().focusIds`), or null when no focus is requested. */
-  focusTaskIds(): ReadonlySet<string> | null { return _current.focusIds; },
+  /** The orders the Gantt outlines (`view().focusIds`: the profile being viewed), or null when no focus is requested. */
+  focusTaskIds(): ReadonlySet<string> | null { return _view.focusIds; },
 };

@@ -31,6 +31,11 @@ test('legend swatch uses lg-outlined; lg-focus stays the scene hover class only'
   assert.match(css, /\.lg-scene\.lg-focus \.lg-el:not\(\.is-on\)/);
 });
 
+test('the chip is hidden at zero and Escape ignores an empty set or an open overflow menu', () => {
+  assert.match(read('shell/application-shell.mts'), /outlineBtn\.hidden = !ids \|\| ids\.size === 0/);
+  assert.match(read('scheduling/gantt.mts'), /focusTaskIds\(\)\?\.size \?\? 0\) > 0 && !Modal\.anyOpen\(\) && !OverflowMenu\.isOpen\(\)/);
+});
+
 test('CSS: alert-focus is a dashed ink outline; the red conflict outline and its legend names are gone', () => {
   const css = read('styles.css');
   assert.match(css, /\.vis-item\.alert-focus\s*\{[^}]*outline:\s*2px dashed var\(--fg\) !important/);

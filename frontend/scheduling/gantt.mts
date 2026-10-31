@@ -25,6 +25,7 @@ import { Config, Util, PerfMonitor, ErrorLog, Toast, Modal, VirtualList } from '
 import type { PasteMatcher } from '../platform/foundation.mjs';
 import { Store, UndoStack } from '../platform/store.mjs';
 import { dayStepKeys, dayStepActive, dayStepNext, dayStepLabel } from '../platform/day-stepper.mjs';
+import { OverflowMenu } from '../platform/overflow-menu.mjs';
 import { Selection } from './selection.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Utilization, Alerts } from '../insights/services.mjs';
@@ -1213,7 +1214,7 @@ export const Timeline = {
     if (!Timeline._items) return;
     const updates: Array<{ id: string; className: string }> = [];
     const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
-    const focus = AlertProfileMatches.current().focusIds;
+    const focus = AlertProfileMatches.view().focusIds;
     for (const task of scoped) {
       if (!task.start_date || !task.end_date) continue;
       const id = String(task.id);
@@ -1243,7 +1244,7 @@ export const Timeline = {
     const label = t.text || t.ORDER || String(t.id);
     const cls = [firmed ? 'order-firmed' : 'order-standard'];
     // Focus outline: only orders the planner chose to show from the Alert Monitor (not gated on the highlight pref).
-    if (AlertProfileMatches.current().focusIds?.has(String(t.id))) cls.push('alert-focus');
+    if (AlertProfileMatches.view().focusIds?.has(String(t.id))) cls.push('alert-focus');
     // "Go To" marker (markGotoTask): lives in className like the dimming below, so a rebuild
     // or single-item patch that rebuilds the item keeps it until the planner moves on.
     const goto = Timeline._gotoTarget;
@@ -6249,7 +6250,7 @@ export const Interaction = {
       if (Timeline._gotoTarget) Timeline.clearGotoTarget();
       if (Selection.size()) { e.preventDefault(); Selection.clear(); return; }
       // Nothing selected and no dialog open: Escape also clears the Alert Monitor outline.
-      if (AlertProfileMatches.focusTaskIds() && !Modal.anyOpen()) AlertProfileMatches.setFocusTaskIds(null);
+      if ((AlertProfileMatches.focusTaskIds()?.size ?? 0) > 0 && !Modal.anyOpen() && !OverflowMenu.isOpen()) AlertProfileMatches.setFocusTaskIds(null);
       return;
     }
 

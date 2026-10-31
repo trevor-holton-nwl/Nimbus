@@ -2250,8 +2250,8 @@ const App = {
     const syncOutlineChip = (): void => {
       if (!outlineBtn) return;
       const ids = AlertProfileMatches.focusTaskIds();
-      outlineBtn.hidden = !ids;
-      if (ids && outlineLabel) {
+      outlineBtn.hidden = !ids || ids.size === 0;
+      if (ids && ids.size > 0 && outlineLabel) {
         outlineLabel.textContent = Util.t(ids.size === 1 ? 'ui.gantt_outlined_one' : 'ui.gantt_outlined', { n: ids.size });
       }
     };

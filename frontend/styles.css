@@ -7762,7 +7762,7 @@ table.setup-grid .setup-grid-corner { position: sticky; top: 0; left: 0; z-index
 .lg-order-standard { background: var(--bar-standard); color: #fff; }
 .lg-order-firmed   { background: var(--bar-firmed);   color: #fff; }
 .lg-selected { box-shadow: inset 0 0 0 2px rgba(255,255,255,0.95), 0 0 0 1px var(--bg-elev), 0 0 0 3px var(--fg); }   /* .vis-selected */
-.lg-outlined { outline: 2px dashed var(--fg); outline-offset: -2px; }  /* .alert-focus */
+.lg-outlined { outline: 2px dashed var(--fg); outline-offset: 0; }  /* .alert-focus uses +1px on the real bar; 0 is the largest offset that fits the swatch's 2px inset inside its overflow:hidden box */
 .lg-dimmed   { opacity: .12; filter: saturate(0); }                                          /* .dimmed */
 .lg-split    { box-shadow: inset 0 0 0 1px rgba(255,255,255,.62); border-left: 2px dashed rgba(255,255,255,.82); } /* .split-order-segment(-continuation) */
 .lg-dist     { box-shadow: inset 0 0 0 1px rgba(255,255,255,.62); }                          /* .dist-child */

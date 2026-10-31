@@ -796,7 +796,8 @@ export function filterAlerts<A extends NimbusAlert>(alerts: ReadonlyArray<A>, f:
   const bucket = f.days.size ? makeBucketer(ctx) : null;
   const q = f.q.trim().toLowerCase();
   return alerts.filter(a => {
-    if (f.machines.size && !f.machines.has(a.line || NONE_KEY)) return false;
+    // Same file-under rule as matrixModel: a `wc:`-prefixed id would collide with a group row key, so it counts as no machine.
+    if (f.machines.size && !f.machines.has(a.line && !a.line.startsWith('wc:') ? a.line : NONE_KEY)) return false;
     if (f.wcGroups.size && !f.wcGroups.has(a.line ? (wcByLine.get(a.line) ?? UNGROUPED_KEY) : UNGROUPED_KEY)) return false;
     if (f.categories.size && !f.categories.has(_catOf(a.type))) return false;
     if (bucket && !f.days.has(bucket(a))) return false;

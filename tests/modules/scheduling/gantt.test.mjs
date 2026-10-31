@@ -994,6 +994,16 @@ function _pmHarness(t, { highlight = true, showAcked = false } = {}) {
   return m;
 }
 
+test('Timeline._itemForTask: alert-focus reads view().focusIds (the viewed profile); fills keep reading current()', (t) => {
+  _pmHarness(t);
+  const priorView = AlertProfileMatches.view;
+  t.after(() => { AlertProfileMatches.view = priorView; });
+  AlertProfileMatches.view = () => ({ ...priorView.call(AlertProfileMatches), focusIds: new Set(['pm-c']) });
+  assert.match(Timeline._itemForTask(Store.tasks['pm-c']).className, /\balert-focus\b/);
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-c']).className, /profile-match/, 'no fill: outside the current() profile');
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /alert-focus/);
+});
+
 test('Timeline._itemForTask: a profile-matched order gets profile-match + category + severity classes', (t) => {
   _pmHarness(t);
   const a = Timeline._itemForTask(Store.tasks['pm-a']).className;

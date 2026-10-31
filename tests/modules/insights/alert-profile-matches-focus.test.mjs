@@ -105,6 +105,13 @@ test('acknowledged: an order whose every matched alert is acked is not outlined 
   assert.deepEqual([...M.current().focusIds], ['t1']);
 });
 
+test('focusTaskIds() follows the VIEWED profile: a focus matching only profile B is returned under View-as B', () => {
+  M.setSessionProfile('p2');
+  M.setFocusTaskIds(new Set(['t2']));
+  assert.equal(M.current().focusIds?.size ?? 0, 0, 'the saved profile p1 does not name t2');
+  assert.deepEqual([...M.focusTaskIds()], ['t2'], 'the outline follows view()');
+});
+
 test('acknowledged: a mixed order (one alert acked, one live) is still outlined', () => {
   Store._state.alerts = [...Store._state.alerts, alert('a4', 'overload', 'warn', 't1')];
   acks.set('a1', { alertId: 'a1' });

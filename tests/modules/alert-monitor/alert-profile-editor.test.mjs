@@ -407,6 +407,25 @@ test('a colour pick patches the draft and the swatch in place: no re-render, no 
   } finally { OverflowMenu.open = priorOpen; }
 });
 
+test('the live-recount timer is cleared on close: no recount fires after close(); an open editor does recount', async () => {
+  const priorCounts = editorSeams.categoryCounts;
+  let counts = 0;
+  editorSeams.categoryCounts = (...a) => { counts++; return priorCounts(...a); };
+  try {
+    AlertProfileEditor.open({ plant: 'P1' });
+    AlertProfileEditor._test.state().draft.rules.push({ types: [], dayFrom: null, dayTo: null, minSev: null, minLateHours: null });
+    const before = counts;
+    fire('ape-body', 'input', tgt({ apeField: 'dayFrom', apeRule: '0' }, { value: '2' }));
+    await new Promise(r => setTimeout(r, 250));
+    assert.ok(counts > before, 'control: the debounced recount fires while open');
+    const mid = counts;
+    fire('ape-body', 'input', tgt({ apeField: 'dayTo', apeRule: '0' }, { value: '5' }));
+    AlertProfileEditor.close();
+    await new Promise(r => setTimeout(r, 250));
+    assert.equal(counts, mid, 'close() cancelled the pending recount');
+  } finally { editorSeams.categoryCounts = priorCounts; }
+});
+
 test('read-only: switches, swatches, selects and inputs are disabled and the palette does not open', () => {
   setUser('sam@newell.com');
   let opened = 0;

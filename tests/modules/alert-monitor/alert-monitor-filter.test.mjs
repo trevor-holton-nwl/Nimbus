@@ -210,6 +210,14 @@ const sumIn = o => ({
   hasPlant: true, alerts: [al('M1', 'overlap', at(0), { sev: 'err', taskId: 'T1' })], profileId: '__all__', profileName: 'All', profile: null, focus: null, ...o,
 });
 
+test("filterAlerts: a 'none' machine click keeps the alerts the matrix files under no-machine (wc:-prefixed line included)", () => {
+  const ctx = { ...base(), tagOf: a => a.type };
+  const a1 = al('', 'late', at(0));
+  const a2 = al('wc:Z', 'late', at(0));
+  const a3 = al('M1', 'late', at(0));
+  assert.deepEqual(filterAlerts([a1, a2, a3], mk({ machines: set('none') }), ctx).map(a => a.id), [a1.id, a2.id]);
+});
+
 test('summaryLine: machines clause and "showing" clause, no confidence link', () => {
   const s = summaryLine(sumIn({ machinesNoisy: 12, machinesTotal: 70, showing: 4 }), t);
   assert.equal(s.text, 'am.summary_all_one|n=1 · am.summary_errors_one|e=1 · am.summary_orders_one|o=1 · am.summary_machines|m=12,total=70 · am.summary_showing|v=4');
