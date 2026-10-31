@@ -7,7 +7,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { alertOrderIds, groupAlerts } from '../../../frontend/insights/alert-profiles.mjs';
-import { summaryLine, groupCounts } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
+import { groupCounts } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 
 const FRONTEND = join(fileURLToPath(import.meta.url), '..', '..', '..', '..', 'frontend');
 
@@ -27,12 +27,9 @@ test('groupAlerts counts every order a multi-holder tool conflict touches', () =
   assert.deepEqual([...groups[0].orderIds].sort(), ['a', 'b', 'c', 'd']);
 });
 
-test('Alert Monitor model: summaryLine / groupCounts count every holder as an affected order', () => {
+test('Alert Monitor model: groupCounts counts every holder as an affected order', () => {
   const alerts = [{ id: 't', sev: 'err', type: 'tool-conflict', taskId: 'd', peerId: 'a', peerIds: ['a', 'b', 'c'], line: 'L4' }];
   assert.equal(groupCounts(alerts, () => false).orders, 4);
-  const seen = [];
-  summaryLine({ hasPlant: true, alerts, focus: null, confidence: null }, (key, vars) => { seen.push([key, vars]); return key; });
-  assert.ok(seen.some(([, vars]) => vars && Object.values(vars).includes(4)), 'the summary reports 4 orders: ' + JSON.stringify(seen));
 });
 
 // ---- source gate ----

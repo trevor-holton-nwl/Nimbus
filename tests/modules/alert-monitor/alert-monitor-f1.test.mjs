@@ -92,9 +92,9 @@ test('CSS: the Inbox list fills the facet column (no max-height) and the wrapper
   assert.doesNotMatch(block('.am-ib-scroll {'), /max-height\s*:\s*calc/);
   assert.match(block('.am-ib-scroll {'), /flex:\s*1 1 auto/);
   assert.match(block('.am-ib-main {'), /display:\s*flex/);
-  assert.match(block('.am-ib {'), /min-height:\s*calc\(100vh - var\(--chrome-h\) - 300px\)/);
+  assert.match(block('.am-ib {'), /min-height:\s*calc\(100vh - var\(--chrome-h\) - 330px\)/);
   assert.match(block('.am-ib {'), /align-items:\s*stretch/);
-  assert.match(block('body.update-available .am-ib {'), /min-height:\s*calc\(100vh - var\(--chrome-h\) - 300px - var\(--update-banner-h\)\)/);
+  assert.match(block('body.update-available .am-ib {'), /min-height:\s*calc\(100vh - var\(--chrome-h\) - 330px - var\(--update-banner-h\)\)/);
   assert.doesNotMatch(CSS, /body\.update-available \.am-ib-scroll/);
 });
 

@@ -220,11 +220,8 @@ test("filterAlerts: a 'none' machine click keeps the alerts the matrix files und
   assert.deepEqual(filterAlerts([a1, a2, a3], mk({ machines: set('none') }), ctx).map(a => a.id), [a1.id, a2.id]);
 });
 
-test('summaryLine: machines clause and "showing" clause, no confidence link', () => {
-  const s = summaryLine(sumIn({ machinesNoisy: 12, machinesTotal: 70, showing: 4 }), t);
-  assert.equal(s.text, 'am.summary_all_one|n=1 · am.summary_errors_one|e=1 · am.summary_orders_one|o=1 · am.summary_machines|m=12,total=70 · am.summary_showing|v=4');
-  const plain = summaryLine(sumIn(), t).text;
-  assert.doesNotMatch(plain, /machines|showing/);
-  assert.doesNotMatch(summaryLine(sumIn({ machinesNoisy: 1, machinesTotal: 0 }), t).text, /machines/, 'no machine total, no clause');
-  assert.match(summaryLine(sumIn({ showing: 0 }), t).text, /showing\|v=0/, 'zero is still a count');
+test('summaryLine: lead, errors and warnings only; no orders, machines or "showing" clause, no confidence link', () => {
+  const s = summaryLine(sumIn(), t);
+  assert.equal(s.text, 'am.summary_all_one|n=1 · am.summary_errors_one|e=1');
+  assert.doesNotMatch(s.text, /orders|machines|showing/);
 });

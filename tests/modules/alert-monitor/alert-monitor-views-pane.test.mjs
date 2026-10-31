@@ -117,7 +117,7 @@ test('a cell click sets the filter, shows the side list, and clicking it again c
   assert.match(side(), /am\.in_view/);
   assert.match(els['am-chips'].innerHTML, /data-am-chip="machines:M1"/);
   assert.match(els['am-chips'].innerHTML, new RegExp(`data-am-chip="days:${D1}"`));
-  assert.match(els['am-summary'].innerHTML, /summary_showing/);
+  assert.match(els['am-chips'].innerHTML, /am\.filter_lead/);
   clickCell('M1', D1);
   assert.equal(els['am-side'].hidden, true);
   assert.equal(els['am-chips'].hidden, true);
