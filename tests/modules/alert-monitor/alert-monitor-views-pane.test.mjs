@@ -210,12 +210,12 @@ test('Inbox: one virtualized list of compact rows; Enter opens one detail at a t
   const key = id => els['alerts-tab'].handlers.keydown({ key: 'Enter', preventDefault() {}, target: rowEl(id) });
   const rowEl = id => { const r = { dataset: { alertId: id }, getAttribute: () => id, closest: s => (s === '.am-xrow' ? r : null) }; return r; };
   key('a1');
-  assert.equal(AlertMonitorPane._rowH({ id: 'a1' }), 128);
+  assert.equal(AlertMonitorPane._rowH({ id: 'a1' }), 118, '32 + the detail block for the 2 lines rendered (no task in the Store: no due / finish / firming)');
   assert.equal(AlertMonitorPane._rowH({ id: 'a2' }), 32);
   assert.match(vl.innerHTML, /am-xdetail/);
   key('a2');
   assert.equal(AlertMonitorPane._rowH({ id: 'a1' }), 32, 'one open row at a time');
-  assert.equal(AlertMonitorPane._rowH({ id: 'a2' }), 128);
+  assert.equal(AlertMonitorPane._rowH({ id: 'a2' }), 118);
   key('a2');
   assert.equal(AlertMonitorPane._rowH({ id: 'a2' }), 32, 'Enter again closes it');
 });
@@ -306,7 +306,7 @@ test('Inbox: a filter change scrolls the list to the top and closes a detail who
     AlertMonitorPane.render();
     const rowEl = { dataset: { alertId: 'a1' }, getAttribute: () => 'a1', closest: s => (s === '.am-xrow' ? rowEl : null) };
     els['alerts-tab'].handlers.keydown({ key: 'Enter', preventDefault() {}, target: rowEl });
-    assert.equal(AlertMonitorPane._rowH({ id: 'a1' }), 128);
+    assert.equal(AlertMonitorPane._rowH({ id: 'a1' }), 118);
     const before = tops;
     els['alerts-tab'].handlers.input({ target: { closest: sel => (sel === '[data-am-search]' ? { value: 'overload' } : null) } });
     assert.equal(tops, before + 1);

@@ -244,8 +244,12 @@ export function emptyStateFor(input: {
 
 /** Rows shown per group before "Show all N". */
 export const GROUP_ROW_CAP = 40;
-/** Compact Inbox / side-list row height (px); an open row adds its detail block (the pane's `DETAIL_H`). */
+/** Compact Inbox / side-list row height (px); an open row adds its detail block (`detailHeightFor`). */
 export const ROW_H = 32;
+/** The two-line row height once the list container is at most `NARROW_AT` px wide. */
+export const ROW_H_NARROW = 52;
+/** Container width (px) at or below which the compact row and its detail switch to the narrow layout (the CSS `@container` query has the same breakpoint). */
+export const NARROW_AT = 520;
 /** The alert types a group's "Move N orders" moves: `overload` is excluded, its fix runs the line-day changeover optimizer. */
 export const MOVABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'tool-conflict']);
 /** Above this many orders "Move N orders" asks first. */
@@ -415,6 +419,8 @@ export interface LevCtx {
   fieldLabel: (fieldKey: string) => string;
   /** How many of this fix's alerts are in the current view; set only while the view is a partial one (adds the `am.lev_in_view` clause). */
   inView?: number;
+  /** Live alerts by id: lets `levActions` tell a queued fix (no bar to show) from a placed one. */
+  alertsById?: ReadonlyMap<string, { type: string }>;
 }
 
 export interface LevAction {
@@ -457,6 +463,7 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
     { out.push({ act, labelKey, primary, ...extra }); };
   const n = item.orderIds.length;
   const a = item.action;
+  const toOrders = n > 0 && fixPrimaryAction(item, ctx.alertsById) === 'orders';
   switch (a.kind) {
     case 'open-setup-matrix':
       if (ctx.canReviewPairs) add('setup-review', 'leverage.action.setup-pair', true);
@@ -497,6 +504,13 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
   }
   if (n > 0 && !out.some(x => x.act === 'open-table')) add('open-table', 'am.open_in_table', false, { labelVars: { n } });
   if (!out.some(x => x.act === 'show-alerts')) add('show-alerts', 'am.lev_show_alerts');
+  if (toOrders) {
+    // Several orders, or queued ones with no bar: the outline "Show alerts" draws cannot show them all, so the Orders table takes
+    // the primary slot. Only that outline primary is swapped: Go To (one place on the Gantt) and fixes that write keep their button.
+    const show = out.find(x => x.primary && x.act === 'show-alerts');
+    const table = out.find(x => x.act === 'open-table');
+    if (show && table) { show.primary = false; table.primary = true; table.labelKey = 'am.open_in_orders'; table.labelVars = undefined; }
+  }
   if (item.adminOnly && !out.some(x => x.act === 'copy-summary')) add('copy-summary', 'am.lev_copy_summary');
 
   if (item.adminOnly && !ctx.isAdmin) {
@@ -595,6 +609,8 @@ export function fixRowHtml(item: LeverageItem, rank: number | null, ctx: LevCtx,
 }
 
 export interface FixesSectionOpts {
+  /** Top fixes is collapsed to its head (`alertMonitorFixes: 'collapsed'`); the count stays live. */
+  collapsed?: boolean;
   /** Admins see one list; everyone else gets the actionable list plus a collapsed "Needs an admin" list. */
   isAdmin: boolean;
   /** The "Needs an admin" disclosure is expanded. */
@@ -613,9 +629,14 @@ export interface FixesSectionOpts {
  * skeleton or the empty copy.
  */
 export function fixesSectionHtml(items: ReadonlyArray<LeverageItem>, o: FixesSectionOpts, t: Translate): string {
-  const head = `<header class="panel-head"><h3>${_esc(t('am.fixes_title'))}</h3>`
-    + `<span class="panel-hint">${_esc(t('am.fixes_hint'))}</span></header>`;
   const main = o.isAdmin ? items : items.filter(i => !i.adminOnly);
+  const collapsed = o.collapsed === true;
+  const toggle = t(collapsed ? 'am.fixes_expand' : 'am.fixes_collapse');
+  const head = `<header class="panel-head"><button type="button" class="am-fixes-toggle" data-am-action="fixes-toggle" aria-expanded="${!collapsed}"`
+    + ` aria-controls="am-fixes-body" title="${_esc(toggle)}" aria-label="${_esc(toggle)}"><span class="am-caret" aria-hidden="true">${collapsed ? '▸' : '▾'}</span></button>`
+    + `<h3>${_esc(t('am.fixes_title'))}</h3><span class="am-fixes-count">${items.length}</span>`
+    + (collapsed ? '' : `<span class="panel-hint">${_esc(t('am.fixes_hint'))}</span>`) + `</header>`;
+  if (collapsed) return `<section class="panel am-fixes am-fixes-collapsed" aria-label="${_esc(t('am.fixes_title'))}">${head}</section>`;
   const adminList = o.isAdmin ? [] : items.filter(i => i.adminOnly);
   let body: string;
   if (o.computing && !items.length) {
@@ -639,7 +660,7 @@ export function fixesSectionHtml(items: ReadonlyArray<LeverageItem>, o: FixesSec
     body = list + more + adminHtml;
     if (!body) body = `<div class="am-lev-empty">${_esc(t('am.lev_none'))}</div>`;
   }
-  return `<section class="panel am-fixes" aria-label="${_esc(t('am.fixes_title'))}">${head}${body}</section>`;
+  return `<section class="panel am-fixes" aria-label="${_esc(t('am.fixes_title'))}">${head}<div id="am-fixes-body">${body}</div></section>`;
 }
 
 /** Plain text for the owner hand-off (clipboard): title, what it clears, lines, orders. */
@@ -880,10 +901,12 @@ export function rowHtml(a: NimbusAlert, o: CompactRowOpts): string {
     + `<span class="am-sev am-sev-${a.sev}" aria-hidden="true">${_sevGlyph(a.type, a.sev)}</span>`
     + `<span class="am-gdot" style="--c:var(--bar-pm-${cat})" title="${_esc(o.groupLabel ?? cat)}"></span>`
     + `<span class="am-oid">${_esc(orderNo)}</span>`
+    + `<span class="am-sub">`
     + `<span class="am-mat" title="${_esc(o.material)}">${_esc(o.material)}</span>`
     + (o.hideMachine ? '' : `<span class="am-mc">${_esc(a.line ?? '')}</span>`)
     + `<span class="am-tag" title="${_esc(o.tag)}">${grp}${_esc(o.tag)}</span>`
     + `<span class="am-due${o.overdue ? ' am-when-overdue' : ''}">${_esc(o.dueText ?? '')}</span>`
+    + `</span>`
     + `<span class="am-acts">${btns.join('')}</span>`
     + `</div>`
     + (o.open && o.detailHtml ? o.detailHtml : '')
@@ -894,19 +917,64 @@ export interface RowDetailCtx {
   /** The full message (the Gantt-hover sentence). */
   message: string;
   material: string;
-  due: string;
-  plannedFinish: string;
-  firming: string;
+  /** Label key of the first line; an alert with no order reads `am.detail_machine_day` ("Machine · day") instead of Material. */
+  materialLabelKey?: string;
+  /** The order's lines; each is skipped when undefined (an alert with no order has none of them). */
+  due?: string;
+  plannedFinish?: string;
+  firming?: string;
+  /** `overload` only: how many orders sit on that machine-day. */
+  ordersOnDay?: number;
+  /** Render the "Day details" action (`data-alert-action="cell"`, opens the cell briefing). */
+  dayAction?: boolean;
   t: Translate;
 }
-/** The expanded row: full message, material, due, planned finish, firming. */
+
+/** The key/value lines of a detail block, in order (the message line is separate). */
+function _detailCells(c: RowDetailCtx): Array<[string, string]> {
+  const out: Array<[string, string]> = [[c.materialLabelKey ?? 'am.detail_material', c.material]];
+  if (c.due !== undefined) out.push(['am.detail_due', c.due]);
+  if (c.plannedFinish !== undefined) out.push(['am.detail_finish', c.plannedFinish]);
+  if (c.firming !== undefined) out.push(['am.detail_firming', c.firming]);
+  if (c.ordersOnDay !== undefined) out.push(['am.detail_orders_on_day', String(c.ordersOnDay)]);
+  return out;
+}
+
+const XD_COLS = 4, XD_PAD = 16, XD_MSG = 36, XD_CELL = 30, XD_GAP = 4, XD_ACT = 28, XD_LINE_NARROW = 32;
+/**
+ * The pixel height of an open row's detail block for exactly the lines `rowDetailHtml` renders (wide: the message line, then
+ * the cells four across, then the action row; narrow: one 32 px line each). The Inbox's VirtualList adds it to the row height.
+ */
+export function detailHeightFor(c: RowDetailCtx, narrow = false): number {
+  const cells = _detailCells(c).length;
+  if (narrow) return XD_PAD + XD_LINE_NARROW * (1 + cells + (c.dayAction ? 1 : 0));
+  const rows = Math.ceil(cells / XD_COLS);
+  return XD_PAD + XD_MSG + XD_GAP + rows * XD_CELL + (rows - 1) * XD_GAP + (c.dayAction ? XD_GAP + XD_ACT : 0);
+}
+
+/** The expanded row: the full message, then material (or machine and day) and, for an alert with an order, due, planned finish and firming. */
 export function rowDetailHtml(a: Pick<NimbusAlert, 'id'>, c: RowDetailCtx): string {
   const f = (cls: string, key: string, v: string) =>
     `<div${cls ? ` class="${cls}"` : ''}><b>${_esc(c.t(key))}</b>${_esc(v)}</div>`;
-  return `<div class="am-xdetail" data-alert-id="${_esc(a.id)}">`
-    + f('am-xfull', 'am.detail_alert', c.message) + f('', 'am.detail_material', c.material) + f('', 'am.detail_due', c.due)
-    + f('', 'am.detail_finish', c.plannedFinish) + f('', 'am.detail_firming', c.firming)
+  const act = c.dayAction
+    ? `<div class="am-xact"><button type="button" class="btn sm" data-alert-action="cell" data-alert-id="${_esc(a.id)}">${_esc(c.t('am.day_details'))}</button></div>` : '';
+  return `<div class="am-xdetail" style="--am-xd-h:${detailHeightFor(c)}px;--am-xd-hn:${detailHeightFor(c, true)}px" data-alert-id="${_esc(a.id)}">`
+    + f('am-xfull', 'am.detail_alert', c.message) + _detailCells(c).map(([k, v]) => f('', k, v)).join('') + act
     + `</div>`;
+}
+
+/** What a fix's (or the view's) primary "show me" button does: a lone placed order opens on the Gantt; several orders, or any queued alert (no bar exists), open the Orders table. */
+export function fixPrimaryAction(
+  item: { orderIds: ReadonlyArray<string>; alertIds: ReadonlyArray<string> },
+  alertsById: ReadonlyMap<string, { type: string }> | undefined,
+): 'gantt' | 'orders' {
+  if (item.orderIds.length === 0) return 'gantt';
+  if (item.orderIds.length > 1) return 'orders';
+  for (const id of item.alertIds) {
+    const type = alertsById?.get(id)?.type;
+    if (type === 'needs_planning' || type === 'queued_now_fits') return 'orders';
+  }
+  return 'gantt';
 }
 
 /** Top fixes scoped to the alerts in view: keeps an item when any of its alerts is in `viewIds`, in rank order, with how many are. */

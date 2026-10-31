@@ -2936,9 +2936,6 @@ body.update-available #toast-stack {
 body.update-available .lp-card-scroll {
   max-height: calc(100vh - var(--chrome-h) - 153px - var(--update-banner-h));
 }
-body.update-available .am-ib-scroll {
-  max-height: calc(100vh - var(--chrome-h) - 300px - var(--update-banner-h));
-}
 body.update-available .am-mx-scroll {
   max-height: calc(100vh - var(--chrome-h) - 250px - var(--update-banner-h));
 }
@@ -8051,6 +8048,14 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 }
 .am-fix-divider:hover { background: var(--bg-strong); color: var(--fg); }
 .am-fix-divider:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.am-fixes-toggle { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; margin: 0 4px 0 -6px; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg-mute); font: inherit; cursor: pointer; }
+.am-fixes-toggle:hover { background: var(--bg-strong); color: var(--fg); }
+.am-fixes-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.am-fixes-count { margin-left: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--fg-mute); }
+.am-fixes-collapsed .panel-head { border-bottom: 0; }
+.am-fixes .panel-head { justify-content: flex-start; align-items: center; }
+.am-fixes .panel-hint { margin-left: auto; }
+@media (max-width: 720px) { .am-fixes .panel-hint { margin-left: 0; flex-basis: 100%; } }
 .am-lev-adm { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.8; }
 .am-lev-admin { margin-left: 6px; vertical-align: middle; }
 .am-lev-skeleton, .am-lev-empty { padding: 14px 18px; font-size: 12.5px; color: var(--fg-mute); }
@@ -8099,6 +8104,8 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
   grid-template-columns: 14px 10px 92px minmax(0, 1fr) 54px 150px 58px auto; font-size: 12.5px; cursor: pointer;
 }
 .am-xrow-nomc { grid-template-columns: 14px 10px 92px minmax(0, 1fr) 150px 58px auto; }
+/* The material / machine / tag / due group: invisible to the wide grid, its own line in the narrow one. */
+.am-sub { display: contents; }
 .am-xrow:hover, .am-xrow:focus-within, .am-xrow.open { background: var(--bg-subtle); }
 .am-xrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .am-oid { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -8113,17 +8120,39 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-acts .btn[disabled], .am-acts .btn-fix[disabled] { opacity: .5; cursor: not-allowed; }
 .am-glyph { flex: 0 0 auto; }
 .am-xdetail {
-  /* Keep in step with DETAIL_H in alert-monitor-pane.mts (the VirtualList height added under the open row). */
-  height: 96px; box-sizing: border-box; overflow: auto; padding: 8px 12px 8px 44px; background: var(--bg-subtle);
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 16px; align-content: start; font-size: 12px;
+  /* The height is written by rowDetailHtml (detailHeightFor): one number for the Inbox's VirtualList and the block, for the lines rendered. */
+  height: var(--am-xd-h, 96px); box-sizing: border-box; overflow: hidden; padding: 8px 12px 8px 44px; background: var(--bg-subtle);
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px 16px; align-content: start; font-size: 12px;
 }
+.am-xdetail .am-xact { grid-column: 1 / -1; height: 28px; overflow: visible; }
 .am-xdetail > div { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11.5px; }
 .am-xdetail b { display: block; font-size: 9.5px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-mute); }
 .am-xdetail .am-xfull { grid-column: 1 / -1; white-space: normal; font-family: inherit; font-size: 12px; max-height: 36px; overflow: hidden; }
-@media (max-width: 719px) {
-  .am-xrow, .am-xrow-nomc { grid-template-columns: 14px 10px 92px minmax(0, 1fr) auto; }
-  .am-mc, .am-tag, .am-due { display: none; }
-  .am-acts { visibility: visible; }
+/* Narrow lists (the 380 px matrix side list, an Inbox under 520 px): two-line rows, a one-column key/value detail. Breakpoint = NARROW_AT. */
+@container (max-width: 520px) {
+  .am-xrow, .am-xrow-nomc {
+    grid-template-columns: 14px 10px minmax(0, 1fr) auto; grid-template-rows: 32px 20px; align-content: start; row-gap: 0; height: 52px;
+  }
+  .am-xrow > .am-sev { grid-area: 1 / 1; }
+  .am-xrow > .am-gdot { grid-area: 1 / 2; }
+  .am-xrow > .am-oid { grid-area: 1 / 3; }
+  .am-xrow > .am-acts { grid-area: 1 / 4; visibility: visible; }
+  .am-xrow > .am-sub { grid-area: 2 / 3 / 3 / -1; display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--fg-mute); }
+  .am-sub > * { min-width: 0; font-size: 12px; color: var(--fg-mute); text-align: left; }
+  .am-sub > * + *::before { content: "·"; margin-right: 6px; }
+  .am-sub > .am-mat { flex: 1 1 0; }
+  .am-sub > .am-mc, .am-sub > .am-tag { flex: 0 1 auto; }
+  .am-sub > .am-due { flex: 0 0 auto; }
+  .am-xdetail { grid-template-columns: minmax(0, 1fr); height: auto; overflow: visible; padding: 8px 12px; gap: 0; }
+  .am-xdetail > div {
+    display: grid; grid-template-columns: 96px minmax(0, 1fr); column-gap: 8px; align-items: baseline; padding: 4px 0;
+    min-width: 0; overflow: visible; white-space: normal; overflow-wrap: anywhere; text-overflow: clip;
+  }
+  .am-xdetail .am-xfull { grid-column: auto; max-height: none; }
+  .am-xdetail > .am-xact { display: block; height: auto; }
+  /* The virtualized Inbox needs a known height: one 32 px nowrap line per row (detailHeightFor(..., true)); long values ellipsise here and show in full in the side list, which wraps. */
+  .am-ib-main .am-xdetail { height: var(--am-xd-hn); overflow: hidden; padding: 8px 12px; }
+  .am-ib-main .am-xdetail > div { height: 32px; padding: 0; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 }
 
 /* Matrix */
@@ -8140,7 +8169,9 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-mx-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; }
 .am-mx-table th, .am-mx-table td { padding: 0; border-bottom: 1px solid var(--line); text-align: center; }
 .am-mx-head { position: sticky; top: 0; z-index: 3; background: var(--bg-elev); padding: 4px 2px; font-weight: 600; font-size: 11px; color: var(--fg-mute); }
-.am-mx-table th.am-mx-rh { position: sticky; left: 0; z-index: 2; background: var(--bg-elev); text-align: left; min-width: 220px; max-width: 280px; font-weight: 400; }
+.am-mx-table th.am-mx-rh { position: sticky; left: 0; z-index: 2; background: var(--bg-elev); text-align: left; width: 200px; min-width: 200px; max-width: 200px; font-weight: 400; }
+/* Every data column is 64 px: Overdue + the 7 horizon days sit beside the 380 px side list, Later / None / extra work centers scroll. */
+.am-mx-table th:not(.am-mx-rh), .am-mx-table td:not(.am-mx-rh) { width: 64px; min-width: 64px; }
 .am-mx-table th.am-mx-head.am-mx-rh { z-index: 4; padding-left: 10px; }
 .am-mx-ghead th.am-mx-rh, .am-mx-ghead td { background: var(--bg-subtle); }
 .am-mx-ghead th, .am-mx-ghead td { position: sticky; top: var(--am-mx-head-h, 29px); z-index: 2; }
@@ -8178,19 +8209,17 @@ button.am-mx-cell[aria-pressed="true"] { outline: 2px solid var(--accent); outli
 .am-mx-lg-err { background: var(--err-soft) !important; }
 .am-mx-lg-warn { background: var(--warn-soft) !important; }
 .am-mx-lg-dots { background: var(--fg-mute) !important; border-radius: 50% !important; width: 6px !important; height: 6px !important; }
-.am-side { padding: 0; min-width: 0; position: sticky; top: 0; max-height: calc(100vh - var(--chrome-h) - 250px); overflow: auto; }
+.am-side { padding: 0; min-width: 0; position: sticky; top: 0; max-height: calc(100vh - var(--chrome-h) - 250px); overflow: auto; container-type: inline-size; }
 .am-side[hidden] { display: none; }
 .am-side-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--bg-subtle); }
 .am-side-head h3 { font-size: 13px; margin: 0; font-family: var(--font-mono); }
 .am-side-acts { display: flex; flex-wrap: wrap; gap: 4px; }
 .am-side-more { margin: 8px 12px; }
-.am-side .am-xrow, .am-side .am-xrow-nomc { grid-template-columns: 14px 10px 76px minmax(0, 1fr) auto; }
-.am-side .am-mc, .am-side .am-tag, .am-side .am-due { display: none; }
-.am-side .am-acts { visibility: visible; }
 
 /* Inbox */
-.am-ib { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 12px; align-items: start; }
-@media (max-width: 979px) { .am-ib { grid-template-columns: minmax(0, 1fr); } }
+.am-ib { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 12px; align-items: stretch; min-height: calc(100vh - var(--chrome-h) - 300px); }
+body.update-available .am-ib { min-height: calc(100vh - var(--chrome-h) - 300px - var(--update-banner-h)); }
+@media (max-width: 979px) { .am-ib { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(240px, 1fr); } }
 .am-ib-facets { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .am-facet { padding: 8px 6px; }
 .am-facet-h { margin: 0 6px 4px; font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-mute); }
@@ -8212,10 +8241,11 @@ button.am-mx-cell[aria-pressed="true"] { outline: 2px solid var(--accent); outli
 .am-facet-sub { margin: 2px 0 4px 10px; padding-left: 6px; border-left: 1px solid var(--line); }
 .am-facet-q { width: 100%; height: 26px; margin: 2px 0 4px; font-size: 12px; }
 .am-facet-empty { padding: 4px 8px; color: var(--fg-mute); font-size: 12px; }
-.am-ib-main { min-width: 0; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-elev); overflow: hidden; }
+/* The list panel is as tall as the facet column (grid stretch); size containment keeps the virtual list's own height out of that row. */
+.am-ib-main { display: flex; flex-direction: column; min-width: 0; min-height: 240px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-elev); overflow: hidden; container-type: inline-size; contain: size; }
 .am-ib-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--bg-subtle); }
 .am-ib-count { font-family: var(--font-mono); font-size: 12px; color: var(--fg); }
-.am-ib-scroll { min-height: 240px; max-height: calc(100vh - var(--chrome-h) - 300px); overflow-y: auto; }
+.am-ib-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 
 /* ---- Alert profile editor (#modal-alert-profile) ---------------------------------------------- */
 .ape-modal { max-width: 860px; }

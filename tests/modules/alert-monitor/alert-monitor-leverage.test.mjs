@@ -248,7 +248,7 @@ const sec = (list, o = {}) => fixesSectionHtml(list, { isAdmin: true, adminOpen:
 test('the panel uses the standard panel-head with title and hint', () => {
   const h = sec(mk(2));
   assert.match(h, /<section class="panel am-fixes"/);
-  assert.match(h, /<header class="panel-head"><h3>am\.fixes_title<\/h3><span class="panel-hint">am\.fixes_hint<\/span><\/header>/);
+  assert.match(h, /<header class="panel-head"><button[^>]*data-am-action="fixes-toggle"[^>]*>.*?<\/button><h3>am\.fixes_title<\/h3><span class="am-fixes-count">2<\/span><span class="panel-hint">am\.fixes_hint<\/span><\/header>/);
 });
 
 test('show more: top 5, then 10 per click, never more than 50, then no button', () => {
@@ -348,14 +348,15 @@ test('setup pairs map to the review shape SetupAdmin reads (fieldKey=value | …
   }]);
 });
 
-test('needs-planning: the primary is Show these and the menu does not repeat it', () => {
+test('needs-planning: queued orders have no bar, so the primary is Open in Orders and Show these moves to the menu (F1)', () => {
   const it = npItem();
   const a = levActions(it, ctx());
-  assert.equal(a.primary.act, 'show-alerts');
-  assert.equal(a.primary.labelKey, 'leverage.action.needs-planning');
+  assert.equal(a.primary.act, 'open-table');
+  assert.equal(a.primary.labelKey, 'am.open_in_orders');
   assert.equal(a.primary.primary, true);
-  assert.equal(acts(it).filter(x => x === 'show-alerts').length, 1, 'show-alerts appears once, in the primary');
-  assert.deepEqual(a.menu.map(x => x.act), ['open-table']);
+  assert.equal(acts(it).filter(x => x === 'show-alerts').length, 1, 'show-alerts appears once, in the menu');
+  assert.equal(acts(it).filter(x => x === 'open-table').length, 1, 'open-table appears once, as the primary');
+  assert.deepEqual(a.menu.map(x => x.act), ['show-alerts']);
   assert.equal(acts(it, ctx({ isAdmin: true })).filter(x => x === 'show-alerts').length, 1);
 });
 
@@ -365,8 +366,8 @@ test('needs-planning: the title carries n and h, and the row has no "Clears N al
   assert.doesNotMatch(unq(fixLineParts(it, ctx(), t).join(' · ')), /am.fix_clears/);
   const h = fixRowHtml(it, 1, ctx(), t);
   assert.doesNotMatch(h, /am.fix_clears/);
-  assert.match(h, /data-lev-action="show-alerts"/);
-  assert.match(h, /leverage.action.needs-planning/);
+  assert.match(h, /data-lev-action="open-table"/);
+  assert.match(h, /am.open_in_orders/);
   // Other families keep the clears line.
   assert.match(unq(fixLineParts(item(), ctx(), t).join(' · ')), /am.fix_clears/);
 });

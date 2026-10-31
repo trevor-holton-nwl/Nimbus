@@ -41,12 +41,12 @@ import { Sandbox } from '../optimization/sandbox.mjs';
 import { Engine } from '../optimization/engine.mjs';
 
 import {
-  GROUP_MOVE_CONFIRM_ABOVE, ROW_H, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  GROUP_MOVE_CONFIRM_ABOVE, ROW_H, ROW_H_NARROW, NARROW_AT, detailHeightFor, fixPrimaryAction, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowPrimaryActions, groupCounts, rowHtml, rowDetailHtml, materialOf, tagOf, filterAlerts, filterChips, emptyFilter,
   filterIsEmpty, makeBucketer, UNGROUPED_KEY, fixesInView, profileWindow,
   fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
-import type { MonitorView, MonitorFilter, MonitorCtx, EmptyKind, LevCtx, FilterDim } from './alert-monitor-model.mjs';
+import type { MonitorView, MonitorFilter, MonitorCtx, EmptyKind, LevCtx, FilterDim, RowDetailCtx } from './alert-monitor-model.mjs';
 import { matrixModel, matrixHtml, cellFilter, rowFilter, colFilter, filterMatches, clearDims } from './alert-monitor-matrix.mjs';
 import { horizonDays, horizonDayKeys, _memoAnchor } from './alert-monitor-overview.mjs';
 
@@ -100,8 +100,6 @@ const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NI
 const NEW_PROFILE_ID = '__new__';
 /** Rows the matrix side list renders before "Open all N in Inbox →". */
 const SIDE_CAP = 80;
-/** Height (px) added under the open Inbox row: 4 detail lines of 18 px plus 12 px of padding and gaps (measured against `.am-xdetail`; keep in step with it). */
-const DETAIL_H = 96;
 /** Machine facet entries before its search box appears. */
 const FACET_SEARCH_ABOVE = 10;
 
@@ -517,9 +515,15 @@ function _onClick(e: Event): void {
     case 'clear-outline': AlertProfileMatches.setFocusTaskIds(null); break;   // the subscription repaints the chip
     case 'open-inbox': _persistView({ view: 'inbox' }); break;
     case 'show-gantt': if (_d) _showOnGantt(_d.filtered); break;
+    case 'open-orders': if (_d) _openOrdersInTable(_viewOrderIds(_d.filtered)); break;
     case 'move-view': _moveView(); break;
     case 'ack-view': _ackView(); break;
     case 'fixes-show-more': _showMoreFixes(); break;
+    case 'fixes-toggle':
+      Session.setPref('alertMonitorFixes', Store.pref('alertMonitorFixes') === 'collapsed' ? 'open' : 'collapsed');
+      _paint();
+      document.querySelector?.<HTMLElement>('[data-am-action="fixes-toggle"]')?.focus?.();   // the repaint replaced the button
+      break;
     case 'fixes-admin-toggle':
       _levAdminOpen = !_levAdminOpen; _paint();
       document.querySelector?.<HTMLElement>('[data-am-action="fixes-admin-toggle"]')?.focus?.();   // the repaint replaced the button
@@ -726,6 +730,11 @@ function _runAlertAction(action: string | undefined, alertId: string, taskId?: s
         _openRow = _openRow === alertId ? null : alertId;   // the detail block of this row
         _paint();
       }
+      break;
+    }
+    case 'cell': {
+      const a = Store.alerts.find(x => x.id === alertId);
+      if (a?.line && a.time) nim.AlertsUIAdapter?.showForCell?.(a.line, Util.dayKey(a.time));
       break;
     }
     case 'slot': {
@@ -1045,7 +1054,16 @@ function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
     setupActive: Store.masterPlant(plant)?.setup_active !== false,
     whatIf: Sandbox.active === true,
     fieldLabel: _levFieldLabel,
+    alertsById: _alertsById(),
   };
+}
+
+let _abSrc: ReadonlyArray<NimbusAlert> | null = null;
+let _abMap: ReadonlyMap<string, NimbusAlert> = new Map();
+/** `Store.alerts` by id, rebuilt only when the list itself was replaced (the fix rows ask once each per paint). */
+function _alertsById(): ReadonlyMap<string, NimbusAlert> {
+  if (_abSrc !== Store.alerts) { _abSrc = Store.alerts; _abMap = new Map(Store.alerts.map(a => [a.id, a])); }
+  return _abMap;
 }
 
 function _renderLeverage(s: PaintState, d: Derived | null): void {
@@ -1067,6 +1085,7 @@ function _renderLeverage(s: PaintState, d: Derived | null): void {
   _levShownItems = scopedFixes ? scopedFixes.map(x => x.item) : _levItems;
   const inView = new Map((scopedFixes ?? []).map(x => [x.item.key, x.inView] as const));
   _setHtml('am-leverage', fixesSectionHtml(_levShownItems, {
+    collapsed: Store.pref('alertMonitorFixes') === 'collapsed',
     isAdmin: Session.isAdmin(), adminOpen: _levAdminOpen, limit: _levShown, computing: !_levHave,
     noneInView: !!scopedFixes && _levItems.length > 0 && _levShownItems.length === 0,
     ctxFor: it => (scopedFixes ? { ..._levCtxFor(it, plant), inView: inView.get(it.key) } : _levCtxFor(it, plant)),
@@ -1373,6 +1392,40 @@ function _dayLabel(key: string): string {
   return _fmtDay(_noonOf(key));
 }
 
+/** Orders whose bar touches this machine-day (the overload alert's "Orders on this day"). */
+function _ordersOnDay(line: string, dayKey: string): number {
+  const plant = Store.selectedPlant;
+  const tasks = plant ? Store.tasksByPlant(plant) : [];
+  let n = 0;
+  for (const task of tasks) if (task.MACHINE === line && Util.overlapsDay(task, dayKey)) n++;
+  return n;
+}
+
+/**
+ * What the open row's detail block shows. An alert with an order shows its due, planned finish and firming; one without
+ * (overload, closed day, plant with no time zone) shows "Machine · day" instead, and an overload adds how many orders sit on
+ * that day and a Day details action. Lines that do not apply are absent, not "—".
+ */
+function _detailCtxFor(a: NimbusAlert): RowDetailCtx {
+  const task = a.taskId ? Store.tasks[a.taskId] : undefined;
+  const material = materialOf(a, Store.tasks, x => (x.time ? _fmtDay(x.time) : ''));
+  const ctx: RowDetailCtx = { message: Util.alertMessage(a), material, t };
+  if (task) {
+    const due = Util.dueInstant(task);
+    const end = Util.scheduledEnd(task);
+    ctx.due = due ? Util.fmtDTPref(due) : '—';
+    ctx.plannedFinish = end ? Util.fmtDTPref(end) : '—';
+    ctx.firming = Engine.firmingStatus(task).firmed ? Engine.firmStatusText(task) : t('am.diag_not_firmed');
+  } else {
+    ctx.materialLabelKey = 'am.detail_machine_day';
+    if (a.type === 'overload' && a.line && a.time) {
+      ctx.ordersOnDay = _ordersOnDay(a.line, Util.dayKey(a.time));
+      ctx.dayAction = true;
+    }
+  }
+  return ctx;
+}
+
 /** One compact row (Inbox and the matrix side list); the open row carries its detail block. */
 function _rowHtmlFor(a: NimbusAlert, s: PaintState, d: Derived): string {
   const task = a.taskId ? Store.tasks[a.taskId] : undefined;
@@ -1380,16 +1433,7 @@ function _rowHtmlFor(a: NimbusAlert, s: PaintState, d: Derived): string {
   const offset = anchor ? alertDayOffset(anchor, s.plantToday) : 0;
   const material = materialOf(a, Store.tasks, x => (x.time ? _fmtDay(x.time) : ''));
   const open = _openRow === a.id;
-  let detailHtml = '';
-  if (open) {
-    const due = task ? Util.dueInstant(task) : null;
-    const end = task ? Util.scheduledEnd(task) : null;
-    detailHtml = rowDetailHtml(a, {
-      message: Util.alertMessage(a), material,
-      due: due ? Util.fmtDTPref(due) : '—', plannedFinish: end ? Util.fmtDTPref(end) : '—',
-      firming: task ? (Engine.firmingStatus(task).firmed ? Engine.firmStatusText(task) : t('am.diag_not_firmed')) : '—', t,
-    });
-  }
+  const detailHtml = open ? rowDetailHtml(a, _detailCtxFor(a)) : '';
   return rowHtml(a, {
     hideMachine: d.eff.machines.size === 1, open, material, tag: tagOf(a, t), t, orderNo: _orderNoOf(a),
     groupLabel: t(`ape.cat_${categoryOf(a.type)}`), dueText: anchor ? _fmtDay(anchor) : '', overdue: !!anchor && offset < 0,
@@ -1398,11 +1442,21 @@ function _rowHtmlFor(a: NimbusAlert, s: PaintState, d: Derived): string {
 }
 
 /** "Move N" and "Show on Gantt" (and "Acknowledge N…" in the Inbox) for the alerts in view. */
+/** The order ids of every alert in view (a tool conflict names all its holders). */
+function _viewOrderIds(alerts: ReadonlyArray<NimbusAlert>): string[] {
+  const ids = new Set<string>();
+  for (const a of alerts) for (const oid of alertOrderIds(a)) ids.add(oid);
+  return [...ids];
+}
+
 function _viewButtons(d: Derived, withAck: boolean): string {
   const counts = groupCounts(d.filtered, _isAcked);
+  // Several orders, or queued ones with no bar, are shown in the Orders table first; a lone placed order opens on the Gantt.
+  const toOrders = fixPrimaryAction({ orderIds: _viewOrderIds(d.filtered), alertIds: d.filtered.map(a => a.id) }, _alertsById()) === 'orders';
   const n = counts.movableOrders;
   const lock = Sandbox.active === true ? ` disabled aria-disabled="true" title="${esc(t('am.whatif_blocked'))}"` : (n === 0 ? ' disabled' : '');
   return `<button type="button" class="btn sm" data-am-action="move-view"${lock}>${esc(t(n === 1 ? 'am.group_fix_n_one' : 'am.group_fix_n', { n }))}</button>`
+    + (toOrders ? `<button type="button" class="btn sm btn-primary" data-am-action="open-orders">${esc(t('am.open_in_orders'))}</button>` : '')
     + `<button type="button" class="btn sm btn-ghost" data-am-action="show-gantt"${d.filtered.length ? '' : ' disabled'}>${esc(t('am.show_on_gantt'))}</button>`
     + (withAck && counts.unackedIds.length
       ? `<button type="button" class="btn sm btn-ghost" data-am-action="ack-view">${esc(t('am.group_ack_n', { n: counts.unackedIds.length }))}</button>` : '');
@@ -1522,8 +1576,13 @@ function _facetsHtml(s: PaintState, d: Derived): string {
   return panel('am.facet_where', where) + panel('am.facet_when', when) + panel('am.facet_what', what);
 }
 
-/** 32 px, plus the detail block under the one open row: variable heights are supported, so an open row never overlaps the next. */
-const _inboxRowH = (a: NimbusAlert): number => ROW_H + (_openRow === a.id ? DETAIL_H : 0);
+/** 32 px (52 when narrow), plus the detail block under the one open row, sized for the lines it renders: an open row never overlaps the next. */
+const _inboxRowH = (a: NimbusAlert): number => {
+  // The list container's width picks the layout (the CSS @container query at NARROW_AT); an unmeasured list (tests, hidden tab) is wide.
+  const w = _vlEl?.clientWidth ?? 0;
+  const narrow = w > 0 && w <= NARROW_AT;
+  return (narrow ? ROW_H_NARROW : ROW_H) + (_openRow === a.id ? detailHeightFor(_detailCtxFor(a), narrow) : 0);
+};
 
 function _renderInbox(s: PaintState, d: Derived): void {
   if (_setHtml('am-body', INBOX_SHELL)) { _teardownVl(); _lastHtml.delete('am-ib-facets'); _lastHtml.delete('am-ib-bar'); }
@@ -1552,7 +1611,6 @@ function _renderInbox(s: PaintState, d: Derived): void {
     _teardownVl();
     _vlEl = mount;
     _vl = new VirtualList<NimbusAlert>(mount, {
-      // 32 px, plus the detail block under the one open row: variable heights are supported, so an open row never overlaps the next.
       getRowH: _inboxRowH,
       renderFn: a => _rowHtmlFor(a, _s!, _d!),
       mountEl: mount,
@@ -1609,6 +1667,10 @@ export const AlertMonitorPane = {
   init(): void {
     if (_wired) return;
     _wired = true;
+    // The Inbox list is as tall as the facet column and its layout follows its own width: re-measure after a window resize.
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('resize', Util.debounce(() => { if (_active && _vl) _paint(); }, 150));
+    }
     Store.subscribe((evt: StoreEvent) => {
       if (!_active) return;
       switch (evt.type) {

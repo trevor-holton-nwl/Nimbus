@@ -231,7 +231,7 @@ test('Show alerts points the Gantt at the same orders (the list is not focused);
   assert.equal(calls.focusTasks.at(-1), null);
 });
 
-test('needs-planning: Show these outlines exactly its orders on the Gantt', async () => {
+test('needs-planning: the row button opens the Orders table; Show these (the menu item) outlines exactly its orders on the Gantt', async () => {
   seed([alert('n1', { type: 'needs_planning', sev: 'warn', taskId: 'Q1' }), alert('n2', { type: 'needs_planning', sev: 'warn', taskId: 'Q2' }), alert('a9')]);
   groupItems = [item('needs-planning', {
     family: 'needs-planning', titleKey: 'leverage.title.needs-planning', titleVars: { n: 2, h: 3.5 },
@@ -240,7 +240,7 @@ test('needs-planning: Show these outlines exactly its orders on the Gantt', asyn
   })];
   AlertMonitorPane.render();
   await sleep(40);
-  assert.match(els['am-leverage'].innerHTML, /data-lev-action="show-alerts"[^>]*data-lev-key="needs-planning"/, 'Show these is the row button');
+  assert.match(els['am-leverage'].innerHTML, /data-lev-action="open-table"[^>]*data-lev-key="needs-planning"/, 'Open in Orders is the row button (queued orders have no bar)');
   clickLev('show-alerts', 'needs-planning');
   assert.deepEqual(calls.focusTasks.at(-1), ['Q1', 'Q2'], 'only the family\'s own orders, not a9\'s');
   clickAm('clear-outline');
