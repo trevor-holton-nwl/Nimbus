@@ -150,7 +150,8 @@ test('rowHtml: severity glyph, group color dot, order, material, machine, tag, d
   assert.match(html, /<span class="am-oid">4711<\/span>/);
   assert.match(html, /<span class="am-mat" title="Widget">Widget<\/span>/);
   assert.match(html, /<span class="am-mc">M1<\/span>/);
-  assert.match(html, /<span class="am-tag" title="Late 3 h"><b>Late<\/b> Late 3 h<\/span>/);
+  assert.match(html, /<span class="am-tag" title="Late 3 h">Late 3 h<\/span>/);
+  assert.doesNotMatch(html, /<b>Late/, 'the tag no longer repeats the category name');
   assert.match(html, /<span class="am-due am-when-overdue">Fri 30<\/span>/);
   assert.match(row(al('M1', 'late', at(0), { sev: 'warn' })), /am-sev am-sev-warn" aria-hidden="true">⚠/);
   assert.doesNotMatch(row(al('M1', 'late', at(0))), /am-when-overdue/);
@@ -185,6 +186,7 @@ test('rowHtml: What-If disables Fix; open appends the detail; every dynamic stri
   const detail = rowDetailHtml(a, { message: '<b>full</b>', material: 'Widget', due: 'Fri', plannedFinish: 'Sat', firming: 'Not firmed', t });
   const html = row(a, { open: true, detailHtml: detail, material: '<img src=x>', tag: '<s>', orderNo: '<u>', groupLabel: '<q>' });
   assert.doesNotMatch(html, /<img|<s>|<u>|<q>|<i>/);
+  assert.match(html, /title="&lt;q&gt;"/, 'groupLabel is still escaped into the dot title');
   assert.doesNotMatch(html, /<b>full/, 'the message is text, not markup');
   assert.match(html, /aria-expanded="true"/);
   assert.match(html, /class="am-xdetail"/);

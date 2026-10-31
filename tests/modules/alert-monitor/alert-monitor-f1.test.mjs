@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  rowHtml, rowDetailHtml, detailHeightFor, ROW_H, ROW_H_NARROW, NARROW_AT, fixPrimaryAction, levActions, fixesSectionHtml,
+  clampSideWidth, rowHtml, rowDetailHtml, detailHeightFor, ROW_H, ROW_H_NARROW, NARROW_AT, fixPrimaryAction, levActions, fixesSectionHtml,
 } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -101,7 +101,24 @@ test('CSS: the Inbox list fills the facet column (no max-height) and the wrapper
 test('CSS: matrix data columns are 64 px and the box scrolls in both axes', () => {
   assert.match(CSS, /\.am-mx-table th:not\(\.am-mx-rh\), \.am-mx-table td:not\(\.am-mx-rh\)\s*\{[^}]*width:\s*64px;[^}]*min-width:\s*64px/);
   assert.match(block('.am-mx-scroll {'), /overflow:\s*auto/);
-  assert.match(CSS, /th\.am-mx-rh\s*\{[^}]*min-width:\s*200px/);
+  assert.match(CSS, /th\.am-mx-rh\s*\{[^}]*min-width:\s*240px/);
+});
+
+test('clampSideWidth: default, bounds and the matrix floor', () => {
+  assert.equal(clampSideWidth(null), 660);
+  assert.equal(clampSideWidth(0), 380);
+  assert.equal(clampSideWidth(5000), 900);
+  assert.equal(clampSideWidth(700, 1000), 612);
+  assert.equal(clampSideWidth(700, 500), 380);
+  assert.equal(clampSideWidth('abc'), 660);
+});
+
+test('CSS: the side list handle, the width variable and the stacked layout', () => {
+  assert.match(block('.am-side-rh {'), /cursor:\s*col-resize/);
+  assert.match(CSS, /\.am-mx-layout:has\(\.am-side:not\(\[hidden\]\)\)\s*\{[^}]*var\(--am-side-w, 660px\)/);
+  const i = CSS.indexOf('@media (max-width: 979px) {', CSS.indexOf('/* Matrix */'));
+  assert.ok(i >= 0, 'the 979 px matrix block exists');
+  assert.match(CSS.slice(i, CSS.indexOf('.am-mx-main', i)), /.am-side-rh { display: none/);
 });
 
 // ---- fixPrimaryAction + levActions ---------------------------------------------------------------------------

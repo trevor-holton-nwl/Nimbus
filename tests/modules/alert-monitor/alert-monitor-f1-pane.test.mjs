@@ -149,3 +149,9 @@ test('alertMonitorFixes is in Settings.CATALOG (open by default) and in the back
   assert.match(shell, /key: 'alertMonitorFixes',\s+category: 'workflow', type: 'enum',\s+default: 'open', tier: 'user'/);
   assert.match(readFileSync(join(ROOT, 'backend', 'security', 'auth.py'), 'utf8'), /"alertMonitorFixes"/);
 });
+
+test('alertMonitorSideWidth is in Settings.CATALOG (number, default null) and in the backend allowlist', () => {
+  const shell = readFileSync(join(ROOT, 'frontend', 'shell', 'application-shell.mts'), 'utf8');
+  assert.match(shell, /key: 'alertMonitorSideWidth',\s+category: 'workflow', type: 'number',\s+default: null,\s+tier: 'user'/);
+  assert.match(readFileSync(join(ROOT, 'backend', 'security', 'auth.py'), 'utf8'), /"alertMonitorSideWidth"/);
+});
