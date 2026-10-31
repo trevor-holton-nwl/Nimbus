@@ -41,7 +41,7 @@ import { Sandbox } from '../optimization/sandbox.mjs';
 import { Engine } from '../optimization/engine.mjs';
 
 import {
-  GROUP_MOVE_CONFIRM_ABOVE, ROW_H, ROW_H_NARROW, NARROW_AT, detailHeightFor, fixPrimaryAction, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
+  GROUP_MOVE_CONFIRM_ABOVE, SIDE_W_DEFAULT, SIDE_W_MIN, SIDE_W_MAX, clampSideWidth, ROW_H, ROW_H_NARROW, NARROW_AT, detailHeightFor, fixPrimaryAction, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowPrimaryActions, groupCounts, rowHtml, rowDetailHtml, materialOf, tagOf, filterAlerts, filterChips, emptyFilter,
   filterIsEmpty, makeBucketer, UNGROUPED_KEY, fixesInView, profileWindow,
   fixesSectionHtml, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
@@ -1462,12 +1462,84 @@ function _viewButtons(d: Derived, withAck: boolean): string {
       ? `<button type="button" class="btn sm btn-ghost" data-am-action="ack-view">${esc(t('am.group_ack_n', { n: counts.unackedIds.length }))}</button>` : '');
 }
 
-const MATRIX_SHELL = '<div class="am-mx-layout"><div class="am-mx-main" id="am-mx"></div><aside class="am-side panel" id="am-side" hidden></aside></div>';
+/** The Matrix shell: the table, the side list's resize handle (hidden with the list) and the list. */
+function _matrixShellHtml(): string {
+  const label = esc(t('am.side_resize'));
+  return '<div class="am-mx-layout"><div class="am-mx-main" id="am-mx"></div>'
+    + `<div class="am-side-rh" id="am-side-rh" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${label}" title="${label}"`
+    + ` aria-valuemin="${SIDE_W_MIN}" aria-valuemax="${SIDE_W_MAX}" aria-valuenow="${SIDE_W_DEFAULT}" hidden></div>`
+    + '<aside class="am-side panel" id="am-side" hidden></aside></div>';
+}
+
+/** The side list width to show: the user's stored width, clamped to the room the page has. */
+function _sideWidth(): number {
+  return clampSideWidth(Store.pref('alertMonitorSideWidth'), _el('am-body')?.clientWidth);
+}
+
+/** Write the width as `--am-side-w` on `#am-body` (the grid inherits it) and mirror it to the handle's aria-valuenow. */
+function _applySideWidth(w: number = _sideWidth()): void {
+  _el('am-body')?.style?.setProperty?.('--am-side-w', `${w}px`);
+  _el('am-side-rh')?.setAttribute?.('aria-valuenow', String(w));
+}
+
+/** Pointer drag, keyboard and double-click on the side list's handle. The handle is recreated with each shell rebuild, so nothing leaks. */
+function _wireSideResize(): void {
+  const h = _el('am-side-rh');
+  if (!h) return;
+  const layout = (): HTMLElement | null => (_el('am-body')?.querySelector?.('.am-mx-layout') as HTMLElement | null) ?? null;
+  const layoutW = (): number | undefined => _el('am-body')?.clientWidth;
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+  let curW = 0;
+  const finish = (e: PointerEvent): void => {
+    if (!dragging) return;
+    dragging = false;
+    layout()?.classList?.remove('am-resizing');
+    document.body?.classList?.remove('am-side-resizing');
+    try { h.releasePointerCapture?.(e.pointerId); } catch { /* not captured */ }
+    Session.setPref('alertMonitorSideWidth', curW);
+  };
+  h.addEventListener('pointerdown', (e: PointerEvent) => {
+    e.preventDefault();
+    try { h.setPointerCapture?.(e.pointerId); } catch { /* unsupported */ }
+    dragging = true;
+    startX = e.clientX;
+    startW = _sideWidth();
+    curW = startW;
+    layout()?.classList?.add('am-resizing');
+    document.body?.classList?.add('am-side-resizing');
+  });
+  h.addEventListener('pointermove', (e: PointerEvent) => {
+    if (!dragging) return;
+    curW = clampSideWidth(startW + (startX - e.clientX), layoutW());
+    _applySideWidth(curW);
+  });
+  h.addEventListener('pointerup', finish);
+  h.addEventListener('pointercancel', finish);
+  h.addEventListener('keydown', (e: KeyboardEvent) => {
+    const step = e.shiftKey ? 64 : 16;
+    let w: number;
+    if (e.key === 'ArrowLeft') w = _sideWidth() + step;
+    else if (e.key === 'ArrowRight') w = _sideWidth() - step;
+    else if (e.key === 'Home') w = SIDE_W_MIN;
+    else if (e.key === 'End') w = SIDE_W_MAX;
+    else return;
+    e.preventDefault();
+    w = clampSideWidth(w, layoutW());
+    _applySideWidth(w);
+    Session.setPref('alertMonitorSideWidth', w);
+  });
+  h.addEventListener('dblclick', () => {
+    Session.setPref('alertMonitorSideWidth', null);
+    _applySideWidth(SIDE_W_DEFAULT);
+  });
+}
 const INBOX_SHELL = '<div class="am-ib"><aside class="am-ib-facets" id="am-ib-facets"></aside><section class="am-ib-main">'
   + '<div class="am-ib-bar" id="am-ib-bar"></div><div class="am-ib-scroll" id="am-ib-vl" role="list"></div></section></div>';
 
 function _renderMatrix(s: PaintState, d: Derived): void {
-  if (_setHtml('am-body', MATRIX_SHELL)) { _teardownVl(); _lastHtml.delete('am-mx'); _lastHtml.delete('am-side'); }
+  if (_setHtml('am-body', _matrixShellHtml())) { _teardownVl(); _lastHtml.delete('am-mx'); _lastHtml.delete('am-side'); _wireSideResize(); }
   const lens = s.view.lens;
   const cats = s.m.profileId === ALL_ALERTS_PROFILE_ID ? undefined
     : (() => { const ec = effectiveCategories(s.m.profile); return ALERT_CATEGORY_ORDER.filter(c => ec[c]?.on === true); })();
@@ -1485,6 +1557,7 @@ function _renderMatrix(s: PaintState, d: Derived): void {
   _setHtml('am-mx', matrixHtml(model, d.eff, t));
   _measureMatrixHead();
   _renderSide(s, d);
+  _applySideWidth();
 }
 
 /**
@@ -1502,7 +1575,8 @@ function _measureMatrixHead(): void {
 function _renderSide(s: PaintState, d: Derived): void {
   const el = _el('am-side');
   if (!el) return;
-  if (!d.active) { _setHtml('am-side', ''); el.hidden = true; return; }
+  const rh = _el('am-side-rh');
+  if (!d.active) { _setHtml('am-side', ''); el.hidden = true; if (rh) rh.hidden = true; return; }
   const n = d.filtered.length;
   const sorted = [...d.filtered].sort(compareAlerts('impact', _groupCtx(s)));
   const rows = sorted.slice(0, SIDE_CAP).map(a => _rowHtmlFor(a, s, d)).join('');
@@ -1510,6 +1584,7 @@ function _renderSide(s: PaintState, d: Derived): void {
     + (n ? `<div class="am-side-rows" role="list">${rows}</div>` : `<div class="empty-state">${esc(t('am.filter_none'))}</div>`)
     + (n > SIDE_CAP ? `<button type="button" class="btn sm btn-ghost am-side-more" data-am-action="open-inbox">${esc(t('am.open_in_inbox', { n }))}</button>` : ''));
   el.hidden = false;
+  if (rh) rh.hidden = false;
 }
 
 const _groupCtx = (s: PaintState): GroupContext => ({
@@ -1669,7 +1744,7 @@ export const AlertMonitorPane = {
     _wired = true;
     // The Inbox list is as tall as the facet column and its layout follows its own width: re-measure after a window resize.
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-      window.addEventListener('resize', Util.debounce(() => { if (_active && _vl) _paint(); }, 150));
+      window.addEventListener('resize', Util.debounce(() => { if (_active && _vl) _paint(); if (_active) _applySideWidth(); }, 150));
     }
     Store.subscribe((evt: StoreEvent) => {
       if (!_active) return;

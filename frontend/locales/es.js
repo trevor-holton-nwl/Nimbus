@@ -2862,6 +2862,7 @@ window.__NIMBUS_LOCALES.es = {
   'am.lev_in_view': '{{n}} en la vista',
   'am.mx_machines': '{{n}} máquinas',
   'am.mx_machines_one': '1 máquina',
+  'am.side_resize': 'Cambiar el ancho de la lista de alertas',
   'am.bucket_overdue': 'Vencido',
   'am.bucket_later': 'Más tarde',
   'am.bucket_none': 'Sin fecha',

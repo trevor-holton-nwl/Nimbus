@@ -3104,6 +3104,7 @@ window.__NIMBUS_LOCALES.en = {
   'am.lev_in_view': '{{n}} in view',
   'am.mx_machines': '{{n}} machines',
   'am.mx_machines_one': '1 machine',
+  'am.side_resize': 'Resize the alert list',
   'am.bucket_overdue': 'Overdue',
   'am.bucket_later': 'Later',
   'am.bucket_none': 'No date',
