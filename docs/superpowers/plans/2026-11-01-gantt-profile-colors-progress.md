@@ -10,3 +10,4 @@ Plan of record: C:\Users\PJ29587\.claude\plans\rosy-puzzling-naur.md. Branch `fi
 Results: build OK; typecheck OK; lint 0 errors (43 warnings, none new: the one in a touched file, gantt.mts:1707, predates this change); check:static-assets OK; check:legacy-surface OK; `npm test`: legacy 143/143, modules 5862 tests, 5855 pass, 0 fail, 3 skipped.
 pytest (3 alert-profile files, local Postgres, credentials supplied via the process environment only): 65 passed, 0 skipped, including the gantt_colors DB round trip. (An earlier run without credentials: 60 passed, 5 skipped.)
 Owed: browser checks (plan Verification 2-5), deploy needs the migration first (`-Only 2026-11-01-1 -AllowDestructive`), memory note update.
+- (follow-up)  reworded us.alert_profile_hint and tbl.status_profile_desc in five locales for the active-profile mechanism; locale-completeness + application-shell + orders tests: 182/182 pass.
