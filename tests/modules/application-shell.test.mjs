@@ -7,6 +7,7 @@ import { Sandbox } from '../../frontend/optimization/sandbox.mjs';
 import { Persistence } from '../../frontend/scheduling/persistence.mjs';
 import { Session } from '../../frontend/security/session.mjs';
 import { AlertProfileClient } from '../../frontend/insights/alert-profile-client.mjs';
+import { AlertProfileMatches } from '../../frontend/insights/alert-profile-matches.mjs';
 import { DistributionPane } from '../../frontend/distribution/distribution-pane.mjs';
 
 test('header Lines picker announces open state and Escape returns focus', () => {
@@ -521,11 +522,11 @@ function fakeEl(extra = {}) {
 }
 function fakeAlertPane() {
   const els = { '#us-ap-input': fakeEl(), '#us-ap-dropdown': fakeEl(), '#us-ap-combo': fakeEl(),
-    '#us-ap-manage': fakeEl(), '#us-ap-highlight': fakeEl({ checked: true }) };
+    '#us-ap-manage': fakeEl() };
   return { els, querySelector: sel => els[sel] || null };
 }
 
-test('User Settings alert-profile rows: selecting a profile writes alertProfileByPlant read-modify-write; toggle and Manage wire up', async t => {
+test('User Settings alert-profile rows: selecting a profile writes alertProfileByPlant read-modify-write and clears the session pick; Manage wires up', async t => {
   t.mock.method(Util, 't', k => k);
   t.mock.getter(Store, 'selectedPlant', () => 'P1');
   t.mock.method(Session, 'pref', k => (k === 'alertProfileByPlant' ? { P2: 'keep-me' } : undefined));
@@ -533,6 +534,7 @@ test('User Settings alert-profile rows: selecting a profile writes alertProfileB
   let resolveList; t.mock.method(AlertProfileClient, 'list', () => new Promise(r => { resolveList = r; }));
   const writes = [];
   t.mock.method(Session, 'setPref', (k, v) => { writes.push([k, v]); });
+  const sessionCalls = []; t.mock.method(AlertProfileMatches, 'setSessionProfile', id => { sessionCalls.push(id); });
   const closed = []; t.mock.method(Modal, 'close', id => { closed.push(id); });
   const gotos = []; t.mock.method(App, 'goto', tab => { gotos.push(tab); });
   try {
@@ -544,9 +546,8 @@ test('User Settings alert-profile rows: selecting a profile writes alertProfileB
     assert.match(dd.innerHTML, /Night shift/);
     dd.fire('mousedown', { preventDefault() {}, target: { closest: () => ({ dataset: { profile: 'prof-1' } }) } });
     assert.deepEqual(writes, [['alertProfileByPlant', { P2: 'keep-me', P1: 'prof-1' }]]);
-    pane.els['#us-ap-highlight'].checked = false;
-    pane.els['#us-ap-highlight'].fire('change');
-    assert.deepEqual(writes[1], ['alertProfileGanttHighlight', false]);
+    assert.deepEqual(sessionCalls, [null], 'the saved default is the active profile again: the Alert Monitor pick is cleared');
+    assert.doesNotMatch(SessionUIAdapter._alertProfileRowsHtml(), /us-ap-highlight/, 'no per-user highlight toggle any more');
     pane.els['#us-ap-manage'].fire('click');
     assert.deepEqual(closed, ['modal-user-settings']);
     assert.deepEqual(gotos, ['alerts']);

@@ -11,7 +11,7 @@ from backend.security import auth
 RULES = [{"types": ["late"], "dayFrom": None, "dayTo": None, "minSev": None, "minLateHours": None}]
 PROFILE = {"id": "abc", "plant": "P1", "name": "N", "description": "", "rules": RULES, "ranking": "impact",
            "created_by": "owner@example.com", "updated_by": "owner@example.com",
-           "created_at": "2026-10-20T08:00:00", "updated_at": "2026-10-20T08:00:00"}
+           "created_at": "2026-10-20T08:00:00", "updated_at": "2026-10-20T08:00:00", "categories": None, "gantt_colors": True}
 ACK = {"plant": "P1", "alert_id": "a1", "acknowledged_by": "owner@example.com", "reason": "r",
        "until": None, "created_at": "2026-10-20T08:00:00"}
 

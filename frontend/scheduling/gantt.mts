@@ -1191,11 +1191,11 @@ export const Timeline = {
 
   /** `profile-match profile-match-<category> profile-match-<sev>` for an order the active alert profile
    *  matches, else []. Under the built-in All alerts profile: ring only (`profile-match profile-match-err`) for error orders. Off when the
-   *  `alertProfileGanttHighlight` pref is false; an order whose every alert is acknowledged stays plain
+   *  active profile's own `gantt_colors` flag is false (a per-profile setting, not a user pref); an order whose every alert is acknowledged stays plain
    *  unless `alertsShowAcknowledged`. */
   _profileMatchClasses(taskId: string): string[] {
-    if (Store.pref('alertProfileGanttHighlight') === false) return [];
     const m = AlertProfileMatches.current();
+    if (m.profile.gantt_colors === false) return [];
     const cat = m.categoryByTask.get(taskId);
     // D8: the built-in All alerts profile has no categories (no fill); error orders still get the inner ring.
     const ringOnly = !cat && m.profile.builtIn && m.sevByTask.get(taskId) === 'err';
@@ -1214,7 +1214,7 @@ export const Timeline = {
     if (!Timeline._items) return;
     const updates: Array<{ id: string; className: string }> = [];
     const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
-    const focus = AlertProfileMatches.view().focusIds;
+    const focus = AlertProfileMatches.current().focusIds;
     for (const task of scoped) {
       if (!task.start_date || !task.end_date) continue;
       const id = String(task.id);
@@ -1244,7 +1244,7 @@ export const Timeline = {
     const label = t.text || t.ORDER || String(t.id);
     const cls = [firmed ? 'order-firmed' : 'order-standard'];
     // Focus outline: only orders the planner chose to show from the Alert Monitor (not gated on the highlight pref).
-    if (AlertProfileMatches.view().focusIds?.has(String(t.id))) cls.push('alert-focus');
+    if (AlertProfileMatches.current().focusIds?.has(String(t.id))) cls.push('alert-focus');
     // "Go To" marker (markGotoTask): lives in className like the dimming below, so a rebuild
     // or single-item patch that rebuilds the item keeps it until the planner moves on.
     const goto = Timeline._gotoTarget;

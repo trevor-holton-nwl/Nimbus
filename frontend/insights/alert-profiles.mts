@@ -452,6 +452,7 @@ export interface AlertProfileDraft {
   rules: AlertProfileRule[];
   /** Per-group switch + colour; when present it is validated and `rules` may be empty. */
   categories?: ProfileCategories | null;
+  gantt_colors?: boolean;
 }
 
 export interface ProfileValidation {

@@ -37,13 +37,13 @@ function setup(alerts, { settings = {}, view = null } = {}) {
     { machine: 'M1', wc_group: 'A' }, { machine: 'M2', wc_group: 'A' }, { machine: 'M3', wc_group: 'A' }, { machine: 'M4', wc_group: 'B' },
   ] };
   Store.setAlerts(alerts, 'test');
-  AlertProfileMatches.view = () => view ?? matches(alerts);
+  AlertProfileMatches.current = () => view ?? matches(alerts);
 }
 
 beforeEach(() => {
   els = {}; created = []; prefs = []; log = [];
   for (const k of ['doc', 'view', 'setSession', 'cached', 'setPref', 'clock', 'nimbus', 'focusIds']) prior[k] = undefined;
-  prior.doc = globalThis.document; prior.view = AlertProfileMatches.view; prior.cached = AlertProfileClient.cached;
+  prior.doc = globalThis.document; prior.view = AlertProfileMatches.current; prior.cached = AlertProfileClient.cached;
   prior.setPref = Session.setPref; prior.clock = Util.plantClock; prior.nimbus = globalThis.NIMBUS;
   prior.focus = AlertProfileMatches.setFocusTaskIds; prior.locales = globalThis.window.__NIMBUS_LOCALES;
   globalThis.document = {
@@ -68,7 +68,7 @@ beforeEach(() => {
 afterEach(() => {
   AlertMonitorPane.setActive(false);
   globalThis.document = prior.doc;
-  AlertProfileMatches.view = prior.view; AlertProfileMatches.setFocusTaskIds = prior.focus;
+  AlertProfileMatches.current = prior.view; AlertProfileMatches.setFocusTaskIds = prior.focus;
   AlertProfileClient.cached = prior.cached; Session.setPref = prior.setPref; Util.plantClock = prior.clock;
   globalThis.NIMBUS = prior.nimbus; globalThis.window.__NIMBUS_LOCALES = prior.locales;
   Store._linesByPlant = {}; Store._masterLinesByPlant = {};
@@ -244,11 +244,11 @@ test('the filter resets on a plant change and survives a profile change', () => 
   clickCell('M1', D1);
   assert.equal(els['am-chips'].hidden, false);
   const prof = { id: 'p2', plant: 'P1', name: 'Other', description: '', ranking: 'impact', rules: [], created_by: null, updated_at: null };
-  AlertProfileMatches.view = () => matches(ALERTS(), { profileId: 'p2', profile: prof });
+  AlertProfileMatches.current = () => matches(ALERTS(), { profileId: 'p2', profile: prof });
   AlertMonitorPane.render();
   assert.equal(els['am-chips'].hidden, false, 'a profile change keeps the narrowed machines and days');
   Store.setSelectedPlant('P2', 'test');
-  AlertProfileMatches.view = () => ({ ...matches(ALERTS()), plant: 'P2' });
+  AlertProfileMatches.current = () => ({ ...matches(ALERTS()), plant: 'P2' });
   AlertMonitorPane.render();
   assert.equal(els['am-chips'].hidden, true, 'a plant change resets it');
 });

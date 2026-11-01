@@ -8010,10 +8010,6 @@ body.dark .lg-pin { box-shadow: var(--shadow-sm), 0 0 0 1px rgba(255,255,255,.16
 .am-opt-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .am-opt-name, .am-opt-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .am-opt-sub { font-size: 11px; font-weight: 400; color: var(--fg-mute); }
-/* The picker list scrolls (.am-opt-scroll) while "+ New profile…" stays pinned below it, visible past the 240 px fold. */
-.am-profile-wrap .us-combo-dropdown:not([hidden]) { display: flex; flex-direction: column; overflow: hidden; }
-.am-opt-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.am-opt-new { flex: 0 0 auto; border-top: 1px solid var(--line); color: var(--accent-hot); font-weight: 600; }
 .am-seg { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 
 .am-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 24px 24px; }
@@ -8372,6 +8368,7 @@ body.update-available .am-ib { min-height: calc(100vh - var(--chrome-h) - 330px 
 .ape-types-label { font-size: 11px; font-weight: 600; color: var(--fg-mute); text-transform: uppercase; letter-spacing: 0.04em; }
 .ape-types-boxes { display: flex; flex-wrap: wrap; gap: 4px 14px; padding-top: 2px; }
 .ape-mine { margin-top: 4px; }
+.ape-gantt { margin-top: 8px; }
 .ape-copy-list { max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--r-md); margin-top: 8px; background: var(--bg-elev); }
 .ape-copy-opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .ape-copy-opt input[type="checkbox"] { width: 14px; height: 14px; margin: 0; flex: none; accent-color: var(--accent); }

@@ -2249,6 +2249,8 @@ BEGIN
       CHECK (categories IS NULL OR jsonb_typeof(categories) = 'object');
   END IF;
 END $$;
+-- "Colour the Gantt" per profile (mirrors migrations/2026-11-01-1-alert-profile-gantt-colors.sql). TRUE = fill matched bars.
+ALTER TABLE alert_profile ADD COLUMN IF NOT EXISTS gantt_colors BOOLEAN NOT NULL DEFAULT TRUE;
 
 CREATE TABLE IF NOT EXISTS alert_ack (
     plant TEXT NOT NULL, alert_id TEXT NOT NULL, acknowledged_by TEXT NOT NULL,

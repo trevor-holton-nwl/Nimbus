@@ -10,10 +10,9 @@
    panel (#am-leverage, Task 13) and the alert groups (#am-groups, Task 12) are filled by
    later tasks through the two hook functions at the bottom of the paint path.
 
-   Reads the always-on producer through AlertProfileMatches.view() (the session "View as"
-   override applied; the rest of the app follows current(), the saved default); never emits a
-   Store event. "View as" is session-only (setSessionProfile); "Make my default" is the one
-   control that writes the persisted pref.
+   Reads the always-on producer through AlertProfileMatches.current(). The header pick is the active profile for
+   the whole app this session (setSessionProfile: Gantt, minimap, bell, drawer, Orders follow it); never emits a
+   Store event. "Set as default" is the one control that writes the persisted pref.
    ========================================================================== */
 
 import { Store } from '../platform/store.mjs';
@@ -21,7 +20,7 @@ import type { StoreEvent } from '../platform/store.mjs';
 import { Util, Config, Modal, Toast, VirtualList, ErrorLog } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
 import type { AlertProfile, NimbusTask } from '../platform/types.mjs';
-import { AlertProfileMatches, applyCategoryColors } from '../insights/alert-profile-matches.mjs';
+import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import type { AlertProfileMatchSet } from '../insights/alert-profile-matches.mjs';
 import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
 import { AlertProfileEditor, canDeleteProfile } from './alert-profile-editor.mjs';
@@ -96,8 +95,6 @@ interface AmNimbus {
 }
 const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NIMBUS ?? {};
 
-/** Sentinel option id of the picker's "+ New profile…" row; it never reaches setSessionProfile. */
-const NEW_PROFILE_ID = '__new__';
 /** Rows the matrix side list renders before "Open all N in Inbox →". */
 const SIDE_CAP = 80;
 /** Machine facet entries before its search box appears. */
@@ -235,7 +232,7 @@ function _comboOptions(): Array<{ id: string; label: string }> {
 }
 
 function _viewedLabel(): string {
-  const m = AlertProfileMatches.view();
+  const m = AlertProfileMatches.current();
   return m.profileId === ALL_ALERTS_PROFILE_ID ? t('am.profile_all') : m.profile.name;
 }
 
@@ -244,11 +241,11 @@ function _defaultProfileId(plant: string, profiles: AlertProfile[]): string {
   return resolveActiveProfileId(plant, Store.userSettings as Arg, Store.roleDefaults as Arg, profiles);
 }
 
-/** "View as": session-only. Choosing the user's own default just clears the override. */
+/** The header pick is the active profile for the session (Gantt, bell, drawer, Orders follow it). Choosing the saved default just clears the override. */
 function _chooseProfile(id: string): void {
   const plant = Store.selectedPlant;
   if (!plant) return;
-  if (!_comboOptions().some(o => o.id === id)) return;   // the "+ New profile…" sentinel and stale ids never become the view
+  if (!_comboOptions().some(o => o.id === id)) return;   // stale ids never become the active profile
   const profiles = AlertProfileClient.cached(plant) ?? [];
   AlertProfileMatches.setSessionProfile(id === _defaultProfileId(plant, profiles) ? null : id);
 }
@@ -268,13 +265,7 @@ function _wireCombo(): void {
     if (a && a.scrollIntoView) a.scrollIntoView({ block: 'nearest' });
   };
   const choose = (id: string) => {
-    if (id === NEW_PROFILE_ID) {
-      // The sentinel never reaches _chooseProfile: it opens the editor on a blank draft, and a successful save hands back the view.
-      const plant = Store.selectedPlant;
-      if (plant) AlertProfileEditor.open({ plant, fromPicker: true });
-    } else {
-      _chooseProfile(id);
-    }
+    _chooseProfile(id);
     reflect(); close(); input.blur();
   };
 
@@ -282,30 +273,25 @@ function _wireCombo(): void {
     const all = _comboOptions();
     const q = (query || '').trim().toLowerCase();
     const fq = q === _viewedLabel().toLowerCase() ? '' : q;
-    // "+ New profile…" is appended after filtering, always, so it is also what a search with no matches offers.
-    _comboFiltered = [...(fq ? all.filter(o => o.label.toLowerCase().includes(fq)) : all), { id: NEW_PROFILE_ID, label: t('ape.new_profile') }];
+    _comboFiltered = fq ? all.filter(o => o.label.toLowerCase().includes(fq)) : all;
     const plant = Store.selectedPlant;
     const defId = plant ? _defaultProfileId(plant, (AlertProfileClient.cached(plant) ?? [])) : ALL_ALERTS_PROFILE_ID;
-    const vm = AlertProfileMatches.view();
+    const vm = AlertProfileMatches.current();
     const viewed = vm.profileId;
     const viewedSub = windowSummary(vm.profile, t);
-    const newHtml = (i: number) =>
-      `<div class="us-combo-option am-opt-new" role="option" aria-selected="false" data-profile="${NEW_PROFILE_ID}" data-idx="${i}">`
-      + `<span>+ ${esc(t('ape.new_profile'))}…</span></div>`;
-    if (_comboFiltered.length === 1) {
-      dropdown.innerHTML = `<div class="am-opt-scroll"><div class="us-combo-empty">${esc(t('us.no_matches'))}</div></div>${newHtml(0)}`;
+    if (_comboFiltered.length === 0) {
+      dropdown.innerHTML = `<div class="us-combo-empty">${esc(t('us.no_matches'))}</div>`;
       _comboActive = -1;
       return;
     }
     const hint = all.length === 1 && !fq ? `<div class="us-combo-empty">${esc(t('am.profile_none'))}</div>` : '';
-    const rows = _comboFiltered.slice(0, -1).map((o, i) => {
+    const rows = _comboFiltered.map((o, i) => {
       const sub = o.id === viewed && viewedSub ? `<span class="am-opt-sub">${esc(viewedSub)}</span>` : '';
       return `<div class="us-combo-option${o.id === viewed ? ' selected' : ''}" role="option" aria-selected="${o.id === viewed}" data-profile="${esc(o.id)}" data-idx="${i}">`
         + `<span class="am-opt-text"><span class="am-opt-name">${esc(o.label)}</span>${sub}</span>`
         + `${o.id === defId ? `<span class="us-combo-option-prefix">${esc(t('am.is_default'))}</span>` : ''}</div>`;
     }).join('');
-    // The option list scrolls inside .am-opt-scroll; "+ New profile…" sits outside it as a pinned footer, so it stays visible past the fold.
-    dropdown.innerHTML = `<div class="am-opt-scroll">${rows}${hint}</div>${newHtml(_comboFiltered.length - 1)}`;
+    dropdown.innerHTML = rows + hint;
     _comboActive = Math.max(0, _comboFiltered.findIndex(o => o.id === viewed));
     highlight();
   };
@@ -344,17 +330,18 @@ function _persistView(patch: Partial<MonitorView>): void {
 
 function _openProfileEditor(): void {
   const plant = Store.selectedPlant;
-  const id = AlertProfileMatches.view().profileId;
+  const id = AlertProfileMatches.current().profileId;
   if (plant && id !== ALL_ALERTS_PROFILE_ID) AlertProfileEditor.open({ plant, profileId: id });
 }
 
-/** ⋯ page menu: the two page-level toggles, both persisted prefs. */
+/** ⋯ page menu: "New profile…" (opens the editor on a blank draft; a successful save hands back the view) and the
+ *  persisted "Show acknowledged" toggle. */
 function _openPageMenu(anchor: HTMLElement): void {
+  const plant = Store.selectedPlant;
   const items: MenuItem[] = [
     {
-      id: 'highlight', label: t('am.gantt_highlight'), hint: t('us.alert_gantt_highlight_hint'),
-      checked: Store.pref('alertProfileGanttHighlight') !== false,
-      onSelect: (next: boolean) => { Session.setPref('alertProfileGanttHighlight', next); },
+      id: 'create-profile', label: `${t('ape.new_profile')}…`, disabled: !plant,
+      onSelect: () => { if (plant) AlertProfileEditor.open({ plant, fromPicker: true }); },
     },
     {
       id: 'ack', label: t('am.ack_show'), checked: Store.pref('alertsShowAcknowledged') === true,
@@ -367,7 +354,7 @@ function _openPageMenu(anchor: HTMLElement): void {
 function _makeDefault(): void {
   const plant = Store.selectedPlant;
   if (!plant) return;
-  const m = AlertProfileMatches.view();
+  const m = AlertProfileMatches.current();
   const existing = (Store.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
   Session.setPref('alertProfileByPlant', { ...existing, [plant]: m.profileId });
   AlertProfileMatches.setSessionProfile(null);   // the pref now says the same thing
@@ -579,7 +566,7 @@ function _onInput(e: Event): void {
   }
 }
 
-const _isAcked = (id: string): boolean => AlertProfileMatches.view().acked.has(id);
+const _isAcked = (id: string): boolean => AlertProfileMatches.current().acked.has(id);
 
 /** Put keyboard focus back on a ⋯ trigger a repaint replaced: the new trigger carries the same data-ovf-key. */
 function _refocusKey(key: string): boolean {
@@ -783,7 +770,7 @@ function _onChange(e: Event): void {
    ------------------------------------------------------------------------- */
 function _gatherState(): PaintState {
   const plant = Store.selectedPlant ?? null;
-  const m = AlertProfileMatches.view();
+  const m = AlertProfileMatches.current();
   const profilesRaw = plant ? AlertProfileClient.cached(plant) : null;
   const profiles = profilesRaw ?? [];
   const view = viewFor(Store.pref('alertMonitorView') as Parameters<typeof viewFor>[0], m.profileId);
@@ -902,7 +889,7 @@ function _renderChips(s: PaintState): void {
 function _renderGanttChip(): void {
   const el = _el('am-gantt-chip');
   if (!el) return;
-  const n = AlertProfileMatches.view().focusIds?.size ?? 0;
+  const n = AlertProfileMatches.current().focusIds?.size ?? 0;
   if (!n) { _setHtml('am-gantt-chip', ''); el.hidden = true; return; }
   _setHtml('am-gantt-chip', `<span class="am-gantt-n">◎ ${esc(t(n === 1 ? 'am.gantt_outline_one' : 'am.gantt_outline', { n }))}</span>`
     + `<button type="button" class="btn sm btn-ghost" data-am-action="clear-outline">${esc(t('am.gantt_outline_clear'))}</button>`);
@@ -1733,8 +1720,6 @@ function _paint(): void {
   if (!_active) return;
   _ensureShell();
   if ((Store.selectedPlant ?? null) !== _lastPlant) { _lastPlant = Store.selectedPlant ?? null; AlertMonitorPane.resetView(); }
-  // "View as" colours this page with the viewed profile's swatches (body keeps the saved default's for the Gantt).
-  applyCategoryColors(document.getElementById('alerts-tab'), AlertProfileMatches.view().profile);
   // A profile change keeps the filter: the same machines / days stay narrowed under the new rules.
   const s = _gatherState();
   _s = s;

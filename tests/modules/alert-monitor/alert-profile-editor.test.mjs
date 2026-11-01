@@ -714,21 +714,21 @@ test('fromPicker: a successful create makes the page view the new profile; a pla
 });
 
 test('fromPicker: editing the profile the page is viewing re-selects it; editing another does not', async () => {
-  const priorView = AlertProfileMatches.view;
+  const priorView = AlertProfileMatches.current;
   try {
-    AlertProfileMatches.view = () => ({ profileId: 'p1' });
+    AlertProfileMatches.current = () => ({ profileId: 'p1' });
     AlertProfileEditor.open({ plant: 'P1', profileId: 'p1', fromPicker: true });
     click('ape-foot', { apeAct: 'save' });
     await flush();
     assert.deepEqual(calls.session, ['p1']);
 
     calls.session.length = 0;
-    AlertProfileMatches.view = () => ({ profileId: 'p2' });
+    AlertProfileMatches.current = () => ({ profileId: 'p2' });
     AlertProfileEditor.open({ plant: 'P1', profileId: 'p1', fromPicker: true });
     click('ape-foot', { apeAct: 'save' });
     await flush();
     assert.deepEqual(calls.session, []);
-  } finally { AlertProfileMatches.view = priorView; }
+  } finally { AlertProfileMatches.current = priorView; }
 });
 
 test('Delete confirms with the danger tone and then removes the profile', async () => {
@@ -880,4 +880,74 @@ test('Copy to plants creates one copy per picked plant (skipping the current) an
   assert.match(toasts, /toast\.alert_profile_saved/);
   assert.match(toasts, /P3/);
   assert.match(toasts, /ape\.err_name_dup/);
+});
+
+// ---------------------------------------------------------------------------
+// "Colour the Gantt": a plant-shared per-profile flag (gantt_colors), default true.
+// ---------------------------------------------------------------------------
+test('gantt_colors round trips: absent or true reads as true, false survives draft and wire', () => {
+  const base = { id: 'g1', plant: 'P1', name: 'G', description: '', ranking: 'impact', created_by: 'me', updated_at: 'T', rules: [] };
+  assert.equal(draftFromProfile(base).gantt_colors, true, 'a legacy row without the field colours the Gantt');
+  assert.equal(draftFromProfile({ ...base, gantt_colors: true }).gantt_colors, true);
+  const off = draftFromProfile({ ...base, gantt_colors: false });
+  assert.equal(off.gantt_colors, false);
+  assert.equal(profileFromDraft(off).gantt_colors, false);
+  assert.equal(profileFromDraft(draftFromProfile(base)).gantt_colors, true);
+  assert.equal(blankDraft('P1').gantt_colors, true);
+});
+
+test('the form renders the Colour the Gantt checkbox with its hint, checked by default, disabled when read-only', () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  const html = els['ape-body'].innerHTML;
+  assert.match(html, /<input[^>]*data-ape-field="ganttColors"[^>]*checked[^>]*>/);
+  assert.match(html, /ape\.gantt_colors<\/span>/);
+  assert.match(html, /<div class="ape-hint">ape\.gantt_colors_hint<\/div>/);
+  AlertProfileEditor.close();
+  setUser('sam@newell.com');
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  assert.match(els['ape-body'].innerHTML.match(/<input[^>]*data-ape-field="ganttColors"[^>]*>/)[0], /\sdisabled/);
+});
+
+test('unticking Colour the Gantt dirties the draft and the update payload carries gantt_colors: false', async () => {
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  const s = () => AlertProfileEditor._test.state();
+  assert.equal(s().draft.gantt_colors, true);
+  fire('ape-body', 'change', tgt({ apeField: 'ganttColors' }, { checked: false }));
+  assert.equal(s().draft.gantt_colors, false);
+  assert.notEqual(JSON.stringify(profileFromDraft(s().draft)), s().baseline, 'the unsaved-edits check sees it');
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.update[0][1].gantt_colors, false);
+});
+
+test('a new draft creates with gantt_colors: true unless unticked', async () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Coloured' }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.create[0].gantt_colors, true);
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Plain bars' }));
+  fire('ape-body', 'change', tgt({ apeField: 'ganttColors' }, { checked: false }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.create[1].gantt_colors, false);
+});
+
+test('Duplicate and Copy to plants carry gantt_colors', async () => {
+  const src = { ...withCats(mine), gantt_colors: false };
+  AlertProfileClient.cached = () => [src, theirs];
+  AlertProfileClient.list = async () => [src, theirs];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-body', { apeAct: 'dup', apeId: 'p1' });
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.create[0].gantt_colors, false, 'Duplicate');
+  Store.setMasterData({ plants: [{ plant: 'P1' }, { plant: 'P2' }], lines: [] }, 'test');
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-body', { apeAct: 'copy', apeId: 'p1' });
+  fire('ape-body', 'change', tgt({ apeCopyPlant: 'P2' }, { checked: true }));
+  click('ape-body', { apeAct: 'copy-go' });
+  await flush(); await flush();
+  assert.equal(calls.create.find(c => c.plant === 'P2').gantt_colors, false, 'Copy to plants');
 });

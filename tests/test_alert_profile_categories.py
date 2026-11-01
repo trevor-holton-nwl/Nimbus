@@ -89,10 +89,29 @@ def test_update_rejects_bad_categories_before_touching_the_db(monkeypatch):
         ap.update_alert_profile("x", actor="a@x", rules=[], categories=None)
 
 
-def test_profile_cols_put_categories_at_index_ten():
-    assert [c.strip() for c in ap._PROFILE_COLS.split(",")][10] == "categories"
-    row = ap._profile_row(("i", "p", "n", "d", [], "impact", "c", "u", None, None, {"late": 1}))
-    assert row["categories"] == {"late": 1}
+def test_profile_cols_put_categories_at_index_ten_and_gantt_colors_at_eleven():
+    cols = [c.strip() for c in ap._PROFILE_COLS.split(",")]
+    assert cols[10] == "categories" and cols[11] == "gantt_colors"
+    row = ap._profile_row(("i", "p", "n", "d", [], "impact", "c", "u", None, None, {"late": 1}, False))
+    assert row["categories"] == {"late": 1} and row["gantt_colors"] is False
+
+
+def test_validate_gantt_colors_accepts_booleans_only():
+    assert ap.validate_gantt_colors(True) is True and ap.validate_gantt_colors(False) is False
+    for bad in (None, 0, 1, "true", [], {}):
+        with pytest.raises(ValueError, match="true or false"):
+            ap.validate_gantt_colors(bad)
+
+
+def test_create_and_update_reject_a_non_boolean_gantt_colors_before_the_db(monkeypatch):
+    class _NoDb:
+        def connection(self):
+            raise RuntimeError("db reached")
+    monkeypatch.setattr(ap, "_pool", _NoDb())
+    with pytest.raises(ValueError, match="gantt_colors"):
+        ap.create_alert_profile(plant="P", name="N", rules=[_rule()], ranking="impact", actor="a@x", gantt_colors="yes")
+    with pytest.raises(ValueError, match="gantt_colors"):
+        ap.update_alert_profile("x", actor="a@x", gantt_colors=1)
 
 
 # --------------------------------------------------------------------------- frontend parity
@@ -120,7 +139,7 @@ def test_categories_match_frontend_alert_category_order():
 
 PROFILE = {"id": "abc", "plant": "P1", "name": "N", "description": "", "rules": [], "ranking": "impact",
            "created_by": "owner@example.com", "updated_by": "owner@example.com",
-           "created_at": "2026-10-30T08:00:00", "updated_at": "2026-10-30T08:00:00", "categories": None}
+           "created_at": "2026-10-30T08:00:00", "updated_at": "2026-10-30T08:00:00", "categories": None, "gantt_colors": True}
 
 
 @pytest.fixture
@@ -195,6 +214,45 @@ def test_categories_round_trip_update_semantics_and_null_revert():
         with ap._pool.connection() as conn, conn.cursor() as cur:
             with pytest.raises(Exception):
                 cur.execute("UPDATE alert_profile SET categories = '[]'::jsonb WHERE id = %s", (legacy["id"],))
+    finally:
+        with ap._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM alert_profile WHERE plant=%s", (plant,))
+            cur.execute("DELETE FROM admin_audit WHERE details->>'plant' = %s", (plant,))
+
+
+def test_post_gantt_colors_defaults_true_and_passes_an_explicit_false(client):
+    c, calls = client
+    c.post("/alert-profiles", json={"plant": "P1", "name": "N", "rules": [_rule()]})
+    assert calls[-1][1]["gantt_colors"] is True
+    c.post("/alert-profiles", json={"plant": "P1", "name": "N", "rules": [_rule()], "gantt_colors": False})
+    assert calls[-1][1]["gantt_colors"] is False
+
+
+def test_put_passes_gantt_colors_when_present_and_omits_it_when_absent(client):
+    c, calls = client
+    assert c.put("/alert-profiles/abc", json={"gantt_colors": False}).status_code == 200
+    assert calls[-1][1]["gantt_colors"] is False
+    c.put("/alert-profiles/abc", json={"name": "x"})
+    assert "gantt_colors" not in calls[-1][1]
+
+
+@pytest.mark.pg
+def test_gantt_colors_round_trip_and_survives_an_update_without_the_field():
+    plant = "AG_" + uuid.uuid4().hex[:10]
+    try:
+        ap.ensure_alert_profile_tables()
+        ap.ensure_alert_profile_tables()  # bootstrap twice: the ADD COLUMN is idempotent
+        default = ap.create_alert_profile(plant=plant, name="Default", rules=[_rule(types=["late"])], ranking="impact", actor="a@x")
+        assert default["gantt_colors"] is True
+        p = ap.create_alert_profile(plant=plant, name="Plain bars", rules=[_rule(types=["late"])], ranking="impact",
+                                    actor="a@x", gantt_colors=False)
+        assert p["gantt_colors"] is False
+        assert ap.get_alert_profile(p["id"])["gantt_colors"] is False
+        u = ap.update_alert_profile(p["id"], name="Plain bars 2", actor="a@x")
+        assert u["gantt_colors"] is False, "an update without the field keeps the stored flag"
+        u = ap.update_alert_profile(p["id"], gantt_colors=True, actor="a@x")
+        assert u["gantt_colors"] is True
+        assert [x["gantt_colors"] for x in ap.list_alert_profiles(plant)] == [True, True]
     finally:
         with ap._pool.connection() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM alert_profile WHERE plant=%s", (plant,))

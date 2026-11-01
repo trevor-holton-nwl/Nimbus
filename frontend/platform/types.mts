@@ -573,6 +573,8 @@ export interface AlertProfile {
   updated_at: string | null;
   /** Per-group switch + colour. Null / absent = a legacy profile: the groups derive from `rules`, colours are the defaults. */
   categories?: ProfileCategories | null;
+  /** "Colour the Gantt": true (or absent) = matched bars are filled in their group colour on the Gantt and minimap. */
+  gantt_colors?: boolean;
   /** True only for the client-side "All alerts" pseudo-profile (never a stored row). */
   builtIn?: boolean;
 }

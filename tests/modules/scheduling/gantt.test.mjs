@@ -972,9 +972,9 @@ test('navLayout: rows while they fit, histogram beyond 30 lines', () => {
 // ---------------------------------------------------------------------------
 // Alert Monitor Task 17: profile-match fill (category) + severity ring.
 // ---------------------------------------------------------------------------
-function _pmHarness(t, { highlight = true, showAcked = false } = {}) {
+function _pmHarness(t, { ganttColors = true, builtIn = false, showAcked = false } = {}) {
   const m = AlertProfileMatches.current();
-  const prior = { cat: m.categoryByTask, sev: m.sevByTask, ids: m.taskIds, acked: m.acked };
+  const prior = { cat: m.categoryByTask, sev: m.sevByTask, ids: m.taskIds, acked: m.acked, profile: m.profile };
   const priorSettings = Store._state.userSettings;
   const priorAlerts = Store._state.alerts;
   const mk = (id) => ({ id, PRODUCTION_ORDER: id, MATERIAL_NUMBER: 'M', MACHINE: 'L-PM', plant: '5512',
@@ -984,21 +984,24 @@ function _pmHarness(t, { highlight = true, showAcked = false } = {}) {
   m.sevByTask = new Map([['pm-a', 'err'], ['pm-b', 'warn']]);
   m.taskIds = new Set(['pm-a', 'pm-b']);
   m.acked = new Map();
-  Store._state.userSettings = { ...(priorSettings || {}), alertProfileGanttHighlight: highlight, alertsShowAcknowledged: showAcked };
+  m.profile = builtIn
+    ? { id: '__all__', plant: '5512', name: 'All alerts', rules: [], builtIn: true }
+    : { id: 'pm-p', plant: '5512', name: 'PM', rules: [], gantt_colors: ganttColors };
+  Store._state.userSettings = { ...(priorSettings || {}), alertsShowAcknowledged: showAcked };
   Store._state.alerts = [];
   t.after(() => {
-    m.categoryByTask = prior.cat; m.sevByTask = prior.sev; m.taskIds = prior.ids; m.acked = prior.acked;
+    m.categoryByTask = prior.cat; m.sevByTask = prior.sev; m.taskIds = prior.ids; m.acked = prior.acked; m.profile = prior.profile;
     Store._state.userSettings = priorSettings; Store._state.alerts = priorAlerts;
     Store.setTasks([], 'test');
   });
   return m;
 }
 
-test('Timeline._itemForTask: alert-focus reads view().focusIds (the viewed profile); fills keep reading current()', (t) => {
+test('Timeline._itemForTask: alert-focus and the fills both read current().focusIds / current() (one active profile)', (t) => {
   _pmHarness(t);
-  const priorView = AlertProfileMatches.view;
-  t.after(() => { AlertProfileMatches.view = priorView; });
-  AlertProfileMatches.view = () => ({ ...priorView.call(AlertProfileMatches), focusIds: new Set(['pm-c']) });
+  const priorView = AlertProfileMatches.current;
+  t.after(() => { AlertProfileMatches.current = priorView; });
+  AlertProfileMatches.current = () => ({ ...priorView.call(AlertProfileMatches), focusIds: new Set(['pm-c']) });
   assert.match(Timeline._itemForTask(Store.tasks['pm-c']).className, /\balert-focus\b/);
   assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-c']).className, /profile-match/, 'no fill: outside the current() profile');
   assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /alert-focus/);
@@ -1016,9 +1019,20 @@ test('Timeline._itemForTask: a profile-matched order gets profile-match + catego
   assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-c']).className, /profile-match/, 'unmatched order is untouched');
 });
 
-test('Timeline._itemForTask: nothing when the highlight pref is off', (t) => {
-  _pmHarness(t, { highlight: false });
+test('Timeline._itemForTask: nothing when the gantt_colors flag of the profile is off', (t) => {
+  _pmHarness(t, { ganttColors: false });
   assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /profile-match/);
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-b']).className, /profile-match/);
+});
+
+test('Timeline._itemForTask: a built-in All alerts profile still rings an error order, with no fill', (t) => {
+  const m = _pmHarness(t, { builtIn: true });
+  m.categoryByTask = new Map();
+  const a = Timeline._itemForTask(Store.tasks['pm-a']).className;
+  assert.match(a, /\bprofile-match\b/);
+  assert.match(a, /\bprofile-match-err\b/);
+  assert.doesNotMatch(a, /profile-match-capacity/, 'no category: no fill');
+  assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-b']).className, /profile-match/, 'a warn order is not ringed under All alerts');
 });
 
 test('Timeline._itemForTask: a fully acknowledged order is not highlighted unless alertsShowAcknowledged', (t) => {
@@ -1062,8 +1076,8 @@ test('Timeline._applyProfileMatchClasses: updates only changed items, inside _su
   assert.equal(calls.length, 2, 'no-op when nothing changed');
 });
 
-test('Timeline._itemForTask: alert-focus follows focusIds, with or without the highlight pref; no alert means no outline', (t) => {
-  const m = _pmHarness(t, { highlight: false });
+test('Timeline._itemForTask: alert-focus follows focusIds, with or without the profile fills; no alert means no outline', (t) => {
+  const m = _pmHarness(t, { ganttColors: false });
   const priorFocus = m.focusIds;
   t.after(() => { m.focusIds = priorFocus; });
   m.focusIds = null;
@@ -1071,7 +1085,7 @@ test('Timeline._itemForTask: alert-focus follows focusIds, with or without the h
   Store._state.alerts = [{ id: 'al-1', taskId: 'pm-c', type: 'overload', sev: 'err' }];
   assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-c']).className, /alert-focus|conflict-order/, 'an alerted order is no longer outlined');
   m.focusIds = new Set(['pm-c']);
-  assert.match(Timeline._itemForTask(Store.tasks['pm-c']).className, /\balert-focus\b/, 'focus outlines even with the highlight pref off');
+  assert.match(Timeline._itemForTask(Store.tasks['pm-c']).className, /\balert-focus\b/, 'focus outlines even with the profile fills off');
   assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /alert-focus/);
 });
 
