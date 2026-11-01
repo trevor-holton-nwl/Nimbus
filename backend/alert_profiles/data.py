@@ -72,7 +72,7 @@ def ensure_alert_profile_tables() -> None:
         """)
         # "Colour the Gantt" per profile (mirrors migrations/2026-11-01-1-alert-profile-gantt-colors.sql and schema.sql).
         cur.execute("ALTER TABLE alert_profile ADD COLUMN IF NOT EXISTS gantt_colors BOOLEAN NOT NULL DEFAULT TRUE")
-        # "Include acknowledged alerts" per profile (mirrors migrations/2026-11-01-2-alert-profile-show-acknowledged.sql).
+        # "Include acknowledged alerts" per profile (mirrors migrations/2026-11-01-3-alert-profile-show-acknowledged.sql).
         cur.execute("ALTER TABLE alert_profile ADD COLUMN IF NOT EXISTS show_acknowledged BOOLEAN NOT NULL DEFAULT FALSE")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS alert_ack (
