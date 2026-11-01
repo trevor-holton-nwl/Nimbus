@@ -9,3 +9,4 @@ The `alertsShowAcknowledged` registry entry in `application-shell.mts` stays (ha
 Owed: browser checks; deploy needs the migration first (`-Only 2026-11-01-3-alert-profile -AllowDestructive`).
 
 Results: build OK; typecheck OK; lint 0 errors (43 warnings, same as baseline); check:static-assets OK; check:legacy-surface OK; npm test legacy 143/143, modules 5867 tests, 5860 pass, 0 fail, 3 skipped. pytest (3 alert-profile files, local Postgres): 70 passed.
+- (copy fix)  am.empty_all_acked points at the profile setting; new am.empty_all_acked_all under All alerts; deploy line names the full migration file.

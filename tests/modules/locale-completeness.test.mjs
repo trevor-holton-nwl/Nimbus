@@ -847,7 +847,7 @@ const ALERT_MONITOR_KEYS = [
   'am.diagnose', 'am.ack', 'am.ack_by', 'am.ack_by_noend', 'am.ack_title', 'am.ack_reason',
   'am.ack_until', 'am.ack_noend', 'am.ack_note', 'am.unack', 'am.ack_err_reason', 'am.ack_err_long',
   'am.ack_err_until', 'am.view_as', 'am.is_default', 'am.banner_no_timezone', 'am.create_profile_prompt',
-  'am.empty_all_acked', 'am.anchor_due', 'am.anchor_time', 'am.diag_setup', 'am.diag_reason', 'am.diag_not_firmed',
+  'am.empty_all_acked', 'am.empty_all_acked_all', 'am.anchor_due', 'am.anchor_time', 'am.diag_setup', 'am.diag_reason', 'am.diag_not_firmed',
   'am.group_unassigned', 'am.table_unavailable', 'am.set_default', 'am.edit_profile', 'am.view_profile',
   'am.page_menu', 'am.summary_window', 'am.summary_profile', 'am.summary_all', 'am.summary_window_one',
   'am.summary_profile_one', 'am.summary_all_one', 'am.summary_errors', 'am.summary_errors_one', 'am.summary_warnings',
