@@ -42,12 +42,12 @@ function setup(alerts, tasks) {
   Store._linesByPlant = { P1: ['M1', 'M2', 'M4'] };
   Store._masterLinesByPlant = { P1: [{ machine: 'M1', wc_group: 'A' }, { machine: 'M2', wc_group: 'A' }, { machine: 'M4', wc_group: 'B' }] };
   Store.setAlerts(alerts, 'test');
-  AlertProfileMatches.view = () => matches(alerts);
+  AlertProfileMatches.current = () => matches(alerts);
 }
 
 beforeEach(() => {
   els = {}; prefs = []; log = [];
-  prior.doc = globalThis.document; prior.view = AlertProfileMatches.view; prior.cached = AlertProfileClient.cached;
+  prior.doc = globalThis.document; prior.view = AlertProfileMatches.current; prior.cached = AlertProfileClient.cached;
   prior.setPref = Session.setPref; prior.clock = Util.plantClock; prior.nimbus = globalThis.NIMBUS;
   prior.focus = AlertProfileMatches.setFocusTaskIds;
   globalThis.document = {
@@ -67,7 +67,7 @@ beforeEach(() => {
 afterEach(() => {
   AlertMonitorPane.setActive(false);
   globalThis.document = prior.doc;
-  AlertProfileMatches.view = prior.view; AlertProfileMatches.setFocusTaskIds = prior.focus;
+  AlertProfileMatches.current = prior.view; AlertProfileMatches.setFocusTaskIds = prior.focus;
   AlertProfileClient.cached = prior.cached; Session.setPref = prior.setPref; Util.plantClock = prior.clock;
   globalThis.NIMBUS = prior.nimbus;
   Store.setTasks([], 'test');

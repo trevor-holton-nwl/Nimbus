@@ -130,7 +130,7 @@ test('recompute applies the default profile colours to document.body once per si
   assert.equal(body.props.get('--bar-pm-capacity'), 'var(--pal-amber)');
 });
 
-test('"View as" does not recolour the body (the page paints its own #alerts-tab)', () => {
+test('the session pick recolours the body: the picked profile swatches while picked, the default ones after it is cleared', () => {
   const body = fakeEl();
   globalThis.document = { body };
   profiles = [colored({ capacity: 'sky' })];
@@ -138,6 +138,8 @@ test('"View as" does not recolour the body (the page paints its own #alerts-tab)
   M.recompute();
   assert.equal(body.props.get('--bar-pm-capacity'), 'var(--pal-amber)', 'the default (All alerts) colours were written');
   M.setSessionProfile('p1');
-  assert.notEqual(body.props.get('--bar-pm-capacity'), 'var(--pal-sky)');
-  assert.equal(M.view().profile.id, 'p1');
+  assert.equal(body.props.get('--bar-pm-capacity'), 'var(--pal-sky)');
+  assert.equal(M.current().profile.id, 'p1');
+  M.setSessionProfile(null);
+  assert.equal(body.props.get('--bar-pm-capacity'), 'var(--pal-amber)');
 });

@@ -55,7 +55,7 @@ let deps, counts, groupItems, analyzeImpl;
 
 function seed(alerts) {
   Store.setAlerts(alerts, 'test');
-  AlertProfileMatches.view = () => ({
+  AlertProfileMatches.current = () => ({
     plant: 'P1', profileId: ALL_ALERTS_PROFILE_ID, profile: ALL_ALERTS_PROFILE,
     alertIds: new Set(alerts.map(a => a.id)), taskIds: new Set(), sevByTask: new Map(), categoryByTask: new Map(), acked: new Map(), rev: 1,
   });
@@ -65,7 +65,7 @@ beforeEach(() => {
   els = {};
   calls = { focusTasks: [], toasts: [], copied: [] };
   prior.doc = globalThis.document;
-  prior.view = AlertProfileMatches.view;
+  prior.view = AlertProfileMatches.current;
   prior.setSession = AlertProfileMatches.setSessionProfile;
   prior.setFocusTaskIds = AlertProfileMatches.setFocusTaskIds;
   prior.cached = AlertProfileClient.cached;
@@ -108,7 +108,7 @@ afterEach(() => {
   AlertMonitorPane.setActive(false);
   Object.assign(AlertMonitorPane._levDeps, prior.deps);
   globalThis.document = prior.doc;
-  AlertProfileMatches.view = prior.view;
+  AlertProfileMatches.current = prior.view;
   AlertProfileMatches.setSessionProfile = prior.setSession;
   AlertProfileMatches.setFocusTaskIds = prior.setFocusTaskIds;
   AlertProfileClient.cached = prior.cached;
@@ -377,7 +377,7 @@ test('copy summary puts the row text on the clipboard and says so', async () => 
 test('the panel also renders under the "nothing matches this profile" empty state', async () => {
   const alerts = [alert('a1')];
   Store.setAlerts(alerts, 'test');
-  AlertProfileMatches.view = () => ({
+  AlertProfileMatches.current = () => ({
     plant: 'P1', profileId: ALL_ALERTS_PROFILE_ID, profile: ALL_ALERTS_PROFILE,
     alertIds: new Set(), taskIds: new Set(), sevByTask: new Map(), categoryByTask: new Map(), acked: new Map(), rev: 1,
   });

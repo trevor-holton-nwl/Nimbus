@@ -105,38 +105,35 @@ test('settings:change recomputes only when a relevant pref changed', () => {
   off();
 });
 
-test('the session override changes view() only; current() keeps following the saved default', () => {
+test('the session pick is the active profile: current() follows it, a plant change clears it', () => {
   Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
   profiles = [prof('p1', ['overload']), prof('p2', ['late'])];
   M.recompute();
   assert.equal(M.current().profileId, 'p1');
-  assert.equal(M.view().profileId, 'p1', 'no override: the view is the default');
-  assert.deepEqual([...M.view().taskIds].sort(), [...M.current().taskIds].sort());
-  M.setSessionProfile('p2');
-  assert.equal(M.current().profileId, 'p1', 'Gantt / bell / drawer / orders are unaffected');
   assert.deepEqual([...M.current().taskIds].sort(), ['t1', 't3']);
-  assert.equal(M.view().profileId, 'p2');
-  assert.deepEqual([...M.view().taskIds], ['t2']);
-  assert.equal(M.view().rev, M.current().rev);
+  M.setSessionProfile('p2');
+  assert.equal(M.current().profileId, 'p2', 'Gantt / bell / drawer / orders follow the pick');
+  assert.deepEqual([...M.current().taskIds], ['t2']);
+  assert.equal(M.sessionProfile(), 'p2');
   M.setSessionProfile('__all__');
-  assert.equal(M.current().profileId, 'p1');
-  assert.equal(M.view().profileId, '__all__');
-  assert.equal(M.view().taskIds.size, 0);
-  assert.equal(M.view().alertIds.size, 6);
+  assert.equal(M.current().profileId, '__all__');
+  assert.equal(M.current().taskIds.size, 0);
+  assert.equal(M.current().alertIds.size, 6);
+  M.setSessionProfile('gone');
+  assert.equal(M.current().profileId, '__all__', 'a stale session id falls back to All alerts');
   M.setSessionProfile('p2');
   Store.emit({ type: 'plant:selected', plant: 'P1' });
-  assert.equal(M.current().profileId, 'p1');
-  assert.equal(M.view().profileId, 'p1', 'a plant change clears the override');
+  assert.equal(M.current().profileId, 'p1', 'a plant change clears the pick: back to the saved default');
+  assert.equal(M.sessionProfile(), null);
 });
 
-test('the focus set resolves per set and leaves the fills alone', () => {
+test('the focus set resolves against the active set and leaves the fills alone', () => {
   Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' } };
   profiles = [prof('p1', ['overload'])];
   M.recompute();
   M.setFocusTaskIds(['t2', 't1']);
   assert.deepEqual([...M.current().taskIds].sort(), ['t1', 't3'], 'fills stay ambient');
   assert.deepEqual([...M.current().focusIds], ['t1'], 't2 is outside the profile: no outline');
-  assert.deepEqual([...M.view().focusIds], ['t1']);
   M.setFocusTaskIds(null);
 });
 

@@ -39,13 +39,13 @@ function fakeMatches(o = {}) {
 
 function useProfiles(list, matches) {
   AlertProfileClient.cached = () => list;
-  AlertProfileMatches.view = () => matches;
+  AlertProfileMatches.current = () => matches;
 }
 
 beforeEach(() => {
   els = {};
   prior.doc = globalThis.document;
-  prior.view = AlertProfileMatches.view;
+  prior.view = AlertProfileMatches.current;
   prior.setSession = AlertProfileMatches.setSessionProfile;
   prior.cached = AlertProfileClient.cached;
   prior.setPref = Session.setPref;
@@ -81,7 +81,7 @@ beforeEach(() => {
 afterEach(() => {
   AlertMonitorPane.setActive(false);
   globalThis.document = prior.doc;
-  AlertProfileMatches.view = prior.view;
+  AlertProfileMatches.current = prior.view;
   AlertProfileMatches.setSessionProfile = prior.setSession;
   AlertProfileClient.cached = prior.cached;
   Session.setPref = prior.setPref;
@@ -92,7 +92,7 @@ afterEach(() => {
 
 test('no plant renders the select-a-plant empty state and the summary says only that', () => {
   Store.setSelectedPlant(null, 'test');
-  AlertProfileMatches.view = () => ({ ...fakeMatches(), plant: null });
+  AlertProfileMatches.current = () => ({ ...fakeMatches(), plant: null });
   AlertProfileClient.cached = () => null;
   AlertMonitorPane.render();
   assert.match(els['am-body'].innerHTML, /am\.empty_no_plant/);
@@ -145,37 +145,22 @@ test('the shell renders an h2 title, no KPI tiles, no category legend and no Man
   assert.match(shell, /id="am-body"/);
 });
 
-test('the profile picker offers "+ New profile…" last, also after filtering and when nothing matches', () => {
+test('the profile picker lists the profiles only (no "+ New profile…" row) and shows "No matches" when a search finds none', () => {
   useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
   AlertMonitorPane.render();
   const input = els['am-profile-input'], dd = els['am-profile-dropdown'];
   input.value = '';
   input.handlers.input();
-  assert.match(dd.innerHTML, /data-profile="__all__"[\s\S]*data-profile="p1"[\s\S]*data-profile="p2"[\s\S]*class="us-combo-option am-opt-new"[^>]*data-profile="__new__"[^>]*><span>\+ ape\.new_profile…</);
+  assert.match(dd.innerHTML, /data-profile="__all__"[\s\S]*data-profile="p1"[\s\S]*data-profile="p2"/);
+  assert.doesNotMatch(dd.innerHTML, /am-opt-new|__new__|am-opt-scroll|new_profile/);
   input.value = 'late';
   input.handlers.input();
   assert.doesNotMatch(dd.innerHTML, /data-profile="p1"/);
-  assert.match(dd.innerHTML, /data-profile="p2"[\s\S]*am-opt-new/);
+  assert.match(dd.innerHTML, /data-profile="p2"/);
   input.value = 'zzz';
   input.handlers.input();
-  assert.match(dd.innerHTML, /us\.no_matches[\s\S]*am-opt-new/);
-  assert.doesNotMatch(dd.innerHTML, /data-profile="p[12]"/);
-});
-
-test('"+ New profile…" is a pinned footer outside the scrolling option list', () => {
-  useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
-  AlertMonitorPane.render();
-  const input = els['am-profile-input'], dd = els['am-profile-dropdown'];
-  for (const q of ['', 'zzz']) {
-    input.value = q;
-    input.handlers.input();
-    const html = dd.innerHTML;
-    const cut = html.lastIndexOf('</div><div class="us-combo-option am-opt-new"');
-    assert.ok(cut > 0, 'the new-profile row follows the closing of the list region');
-    assert.ok(html.startsWith('<div class="am-opt-scroll">'));
-    assert.doesNotMatch(html.slice(0, cut), /am-opt-new/, 'and is not inside the scrolling region');
-    assert.equal((html.match(/am-opt-new/g) || []).length, 1);
-  }
+  assert.match(dd.innerHTML, /us.no_matches/);
+  assert.doesNotMatch(dd.innerHTML, /data-profile=|am-opt-new/);
 });
 
 test('the viewed option carries the window summary as a second line, and the input as aria-description', () => {
@@ -188,34 +173,20 @@ test('the viewed option carries the window summary as a second line, and the inp
   assert.doesNotMatch(els['am-profile-dropdown'].innerHTML, /data-profile="p2"[^>]*><span class="am-opt-text"><span class="am-opt-name">Late orders<\/span><span class="am-opt-sub">/);
 });
 
-test('ArrowDown then Enter on the New option opens the editor on a blank draft and never sets the view', () => {
-  const opened = [];
-  const undo = patched(AlertProfileEditor, 'open', o => opened.push(o));
-  try {
-    useProfiles([P1], fakeMatches({ profileId: 'p1', profile: P1 }));
-    AlertMonitorPane.render();
-    const input = els['am-profile-input'];
-    input.value = 'zzz';
-    input.handlers.input();                       // no matches: New is the only option
-    const key = k => input.handlers.keydown({ key: k, preventDefault() {} });
-    key('ArrowDown');
-    key('Enter');
-    assert.deepEqual(opened, [{ plant: 'P1', fromPicker: true }]);
-    assert.deepEqual(calls.session, []);
-    assert.equal(els['am-profile-dropdown'].hidden, true);
-  } finally { undo(); }
-});
-
-test('clicking the New option opens the editor; _chooseProfile ignores ids that are not options', () => {
+test('Enter on a search with no matches does nothing; ids that are not options never become the active profile', () => {
   const opened = [];
   const undo = patched(AlertProfileEditor, 'open', o => opened.push(o));
   try {
     useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
     AlertMonitorPane.render();
+    const input = els['am-profile-input'];
+    input.value = 'zzz';
+    input.handlers.input();
+    input.handlers.keydown({ key: 'Enter', preventDefault() {} });
     const pick = id => els['am-profile-dropdown'].handlers.mousedown({ preventDefault() {}, target: { closest: () => ({ dataset: { profile: id } }) } });
     pick('__new__');
     pick('bogus');
-    assert.deepEqual(opened, [{ plant: 'P1', fromPicker: true }]);
+    assert.deepEqual(opened, []);
     assert.deepEqual(calls.session, []);
   } finally { undo(); }
 });
@@ -234,7 +205,7 @@ test('Edit is hidden under All alerts; it reads View rules for a non-creator and
 
     const mine = { ...P1, created_by: 'pat' };
     AlertProfileClient.cached = () => [mine];
-    AlertProfileMatches.view = () => fakeMatches({ profileId: 'p1', profile: mine });
+    AlertProfileMatches.current = () => fakeMatches({ profileId: 'p1', profile: mine });
     AlertMonitorPane.render();
     assert.equal(els['am-edit'].hidden, false);
     assert.equal(els['am-edit'].textContent, 'Edit');
@@ -243,7 +214,7 @@ test('Edit is hidden under All alerts; it reads View rules for a non-creator and
 
     const theirs = { ...P1, created_by: 'sam' };
     AlertProfileClient.cached = () => [theirs];
-    AlertProfileMatches.view = () => fakeMatches({ profileId: 'p1', profile: theirs });
+    AlertProfileMatches.current = () => fakeMatches({ profileId: 'p1', profile: theirs });
     AlertMonitorPane.render();
     assert.equal(els['am-edit'].textContent, 'View rules');
     Session.isAdmin = () => true;
@@ -252,23 +223,28 @@ test('Edit is hidden under All alerts; it reads View rules for a non-creator and
   } finally { undo.forEach(u => u()); }
 });
 
-test('the ⋯ page menu holds the two checkbox items and each writes its own pref', () => {
+test('the ⋯ page menu holds New profile… (plain) and Show acknowledged (checkbox); New profile… opens the editor', () => {
   const seen = [];
-  const undo = patched(OverflowMenu, 'open', (anchor, items, opts) => { seen.push({ anchor, items, opts }); return { close() {} }; });
+  const opened = [];
+  const undo = [
+    patched(OverflowMenu, 'open', (anchor, items, opts) => { seen.push({ anchor, items, opts }); return { close() {} }; }),
+    patched(AlertProfileEditor, 'open', o => opened.push(o)),
+  ];
   try {
     useProfiles([P1], fakeMatches());
-    Store.setUserSettings({ alertProfileGanttHighlight: true, alertsShowAcknowledged: false }, 'test');
+    Store.setUserSettings({ alertsShowAcknowledged: false }, 'test');
     AlertMonitorPane.render();
     clickAm('page-menu');
     assert.equal(seen.length, 1);
     assert.deepEqual(seen[0].opts, { align: 'end', key: 'page' });
-    assert.deepEqual(seen[0].items.map(i => [i.id, i.checked]), [['highlight', true], ['ack', false]]);
-    assert.ok(seen[0].items[0].hint && /alert_gantt_highlight_hint/.test(seen[0].items[0].hint) || seen[0].items[0].hint?.length > 10, 'the highlight item explains the category fills');
+    assert.deepEqual(seen[0].items.map(i => [i.id, i.checked]), [['create-profile', undefined], ['ack', false]]);
+    assert.equal(seen[0].items[0].disabled, false);
     assert.equal(seen[0].items[1].hint, undefined);
-    seen[0].items[0].onSelect(false);
+    seen[0].items[0].onSelect(seen[0].items[0]);
+    assert.deepEqual(opened, [{ plant: 'P1', fromPicker: true }]);
     seen[0].items[1].onSelect(true);
-    assert.deepEqual(calls.prefs, [['alertProfileGanttHighlight', false], ['alertsShowAcknowledged', true]]);
-  } finally { undo(); }
+    assert.deepEqual(calls.prefs, [['alertsShowAcknowledged', true]]);
+  } finally { undo.forEach(u => u()); }
 });
 
 test('a repaint ends with OverflowMenu.reconcile()', () => {

@@ -41,7 +41,7 @@ test('without a focus: focusIds is null and focusTaskIds() is null', () => {
 test('orderIds is the union of alertOrderIds over matched alerts (peers included)', () => {
   assert.deepEqual([...M.current().orderIds], ['t1']);
   M.setSessionProfile('p2');
-  assert.deepEqual([...M.view().orderIds].sort(), ['t2', 't3']);
+  assert.deepEqual([...M.current().orderIds].sort(), ['t2', 't3']);
 });
 
 test('a focus keeps the fills ambient and sets focusIds = focus ∩ orderIds; fans out', () => {
@@ -71,11 +71,10 @@ test('a plant change drops the focus', () => {
   assert.equal(M.current().focusIds, null);
 });
 
-test('View-as: view() intersects with the viewed profile, current() with the saved one', () => {
+test('the focus intersects with the active (session-picked) profile', () => {
   M.setSessionProfile('p2');
   M.setFocusTaskIds(new Set(['t1', 't3']));
-  assert.deepEqual([...M.view().focusIds], ['t3'], 'the peer t3 is in the viewed profile via alertOrderIds');
-  assert.deepEqual([...M.current().focusIds], ['t1']);
+  assert.deepEqual([...M.current().focusIds], ['t3'], 'the peer t3 is in the picked profile via alertOrderIds');
 });
 
 test('focus works under All alerts (orderIds filled there), fills stay empty', () => {
@@ -105,11 +104,12 @@ test('acknowledged: an order whose every matched alert is acked is not outlined 
   assert.deepEqual([...M.current().focusIds], ['t1']);
 });
 
-test('focusTaskIds() follows the VIEWED profile: a focus matching only profile B is returned under View-as B', () => {
-  M.setSessionProfile('p2');
+test('focusTaskIds() follows the active profile: a focus matching only profile B is returned once B is picked', () => {
   M.setFocusTaskIds(new Set(['t2']));
   assert.equal(M.current().focusIds?.size ?? 0, 0, 'the saved profile p1 does not name t2');
-  assert.deepEqual([...M.focusTaskIds()], ['t2'], 'the outline follows view()');
+  M.setSessionProfile('p2');
+  assert.deepEqual([...M.current().focusIds], ['t2']);
+  assert.deepEqual([...M.focusTaskIds()], ['t2'], 'the outline follows current()');
 });
 
 test('acknowledged: a mixed order (one alert acked, one live) is still outlined', () => {
