@@ -15,6 +15,7 @@ export interface AlertProfileInput {
   ranking?: AlertRanking;
   categories?: ProfileCategories | null;
   gantt_colors?: boolean;
+  show_acknowledged?: boolean;
 }
 
 export interface AlertProfilePatch {
@@ -26,6 +27,7 @@ export interface AlertProfilePatch {
   /** Explicit null reverts the profile to derived-from-rules categories. */
   categories?: ProfileCategories | null;
   gantt_colors?: boolean;
+  show_acknowledged?: boolean;
   expected_updated_at?: string | null;
 }
 

@@ -10,10 +10,10 @@ const rule = types => ({ types, dayFrom: null, dayTo: null, minSev: null, minLat
 const prof = (id, types) => ({ id, plant: 'P1', name: id, description: '', rules: [rule(types)], ranking: 'impact' });
 const alert = (id, type, sev, taskId, extra = {}) => ({ id, type, sev, taskId, time: new Date(2026, 9, 20, 8), ...extra });
 
-let acks;
+let acks, profiles;
 beforeEach(t => {
   acks = new Map();
-  const profiles = [prof('p1', ['overload']), prof('p2', ['overlap'])];
+  profiles = [prof('p1', ['overload']), prof('p2', ['overlap'])];
   t.mock.method(AlertProfileClient, 'cached', () => profiles);
   t.mock.method(AlertProfileClient, 'list', async () => profiles);
   t.mock.method(AlertAcksClient, 'cached', () => acks);
@@ -94,14 +94,18 @@ test('D8: under All alerts sevByTask holds error orders only', () => {
   assert.deepEqual([...M.current().sevByTask.entries()], [['t2', 'err']]);
 });
 
-test('acknowledged: an order whose every matched alert is acked is not outlined unless the pref', () => {
+test('acknowledged: an order whose every matched alert is acked is not outlined unless the profile flag show_acknowledged is on', () => {
   acks.set('a1', { alertId: 'a1' });
   M.recompute();
   M.setFocusTaskIds(new Set(['t1']));
   assert.deepEqual([...M.current().focusIds], []);
-  Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' }, alertsShowAcknowledged: true };
+  profiles[0].show_acknowledged = true;
   M.recompute();
   assert.deepEqual([...M.current().focusIds], ['t1']);
+  Store._state.userSettings = { alertProfileByPlant: { P1: 'p1' }, alertsShowAcknowledged: true };
+  profiles[0].show_acknowledged = false;
+  M.recompute();
+  assert.deepEqual([...M.current().focusIds], [], 'the retired user pref no longer reveals them');
 });
 
 test('focusTaskIds() follows the active profile: a focus matching only profile B is returned once B is picked', () => {

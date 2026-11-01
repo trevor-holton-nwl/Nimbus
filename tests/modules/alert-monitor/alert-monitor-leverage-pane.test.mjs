@@ -86,7 +86,6 @@ beforeEach(() => {
   Session.setPref = () => {};
   Toast.show = (m, kind) => { calls.toasts.push([m, kind]); };
   Util.plantClock = () => new Date('2026-10-20T08:00:00');
-  Store.setUserSettings({ alertsShowAcknowledged: false }, 'test');
   Store.setSelectedPlant('P1', 'test');
   Store.setAlerts([], 'test');
   Store.setTasks([], 'test');

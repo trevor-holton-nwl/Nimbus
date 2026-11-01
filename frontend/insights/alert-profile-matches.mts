@@ -35,7 +35,7 @@ export interface AlertProfileMatchSet {
   /** Every order named by a matched alert (`alertOrderIds` union, so peers and holders count); filled under `__all__` too. */
   orderIds: Set<string>;
   /** The requested focus ∩ `orderIds` of THIS set, minus orders whose matched alerts are all acknowledged (unless
-   *  `alertsShowAcknowledged`). null when no focus is requested. The Gantt outlines exactly these. */
+   *  the profile's `show_acknowledged`). null when no focus is requested. The Gantt outlines exactly these. */
   focusIds: Set<string> | null;
   acked: Map<string, AlertAck>;
   rev: number;
@@ -44,7 +44,7 @@ export interface AlertProfileMatchSet {
 type ProfileSettingsArg = Parameters<typeof resolveActiveProfileId>[1];
 
 const CATEGORY_ORDER: readonly AlertCategory[] = ALERT_CATEGORY_ORDER;
-const RELEVANT_PREFS = ['alertProfileByPlant', 'alertsShowAcknowledged'] as const;
+const RELEVANT_PREFS = ['alertProfileByPlant'] as const;
 const DEBOUNCE_MS = 120;
 
 let _inited = false;
@@ -92,10 +92,10 @@ function _ensureLoaded(key: string, cached: unknown, load: () => Promise<unknown
 }
 
 /** Resolve the requested focus against one set: only orders the set's matched alerts name, and (unless the pref shows
- *  acknowledged alerts) only those with at least one unacknowledged matched alert. Fills stay ambient: `taskIds`,
+ *  acknowledged alerts via the profile's `show_acknowledged`) only those with at least one unacknowledged matched alert. Fills stay ambient: `taskIds`,
  *  `sevByTask` and `categoryByTask` are not touched. */
 function _applyFocus(set: AlertProfileMatchSet, focus: ReadonlySet<string>): void {
-  const showAcked = Store.pref('alertsShowAcknowledged') === true;
+  const showAcked = set.profile.show_acknowledged === true;
   let live: Set<string> | null = null;
   if (!showAcked && set.acked.size) {
     live = new Set();

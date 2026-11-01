@@ -699,7 +699,7 @@ function withProfileFixture(fn, { alerts, matches, showAcked = false } = {}) {
       'alert-drawer': { classList: { contains: c => c === 'open' } } })[id] || null };   // the drawer is open in these fixtures
     Store.setMasterData({ plants: [{ plant: 'T15-P' }], lines: [{ plant: 'T15-P', machine: 'T15-L' }] }, 'test');
     Store.setSelectedPlant('T15-P', 'test');
-    Store.setUserSettings({ ...(prior.settings ?? {}), alertsShowAcknowledged: showAcked }, 'test');
+    if (showAcked) matches = { ...matches, profile: { ...matches.profile, show_acknowledged: true } };   // the profile's own flag, not a pref
     Util.plantClock = () => T15_NOW;
     Store.setAlerts(alerts, 'test');
     AlertsUIAdapter._profileOverride = false;

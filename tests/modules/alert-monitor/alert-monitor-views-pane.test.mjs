@@ -31,7 +31,7 @@ const matches = (alerts, o = {}) => ({
 });
 
 function setup(alerts, { settings = {}, view = null } = {}) {
-  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1' }, alertsShowAcknowledged: false, alertMonitorView: null, ...settings }, 'test');
+  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1' }, alertMonitorView: null, ...settings }, 'test');
   Store._linesByPlant = { P1: ['M1', 'M2', 'M3', 'M4'] };
   Store._masterLinesByPlant = { P1: [
     { machine: 'M1', wc_group: 'A' }, { machine: 'M2', wc_group: 'A' }, { machine: 'M3', wc_group: 'A' }, { machine: 'M4', wc_group: 'B' },

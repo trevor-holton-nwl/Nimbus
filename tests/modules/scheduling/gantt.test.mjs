@@ -986,8 +986,8 @@ function _pmHarness(t, { ganttColors = true, builtIn = false, showAcked = false 
   m.acked = new Map();
   m.profile = builtIn
     ? { id: '__all__', plant: '5512', name: 'All alerts', rules: [], builtIn: true }
-    : { id: 'pm-p', plant: '5512', name: 'PM', rules: [], gantt_colors: ganttColors };
-  Store._state.userSettings = { ...(priorSettings || {}), alertsShowAcknowledged: showAcked };
+    : { id: 'pm-p', plant: '5512', name: 'PM', rules: [], gantt_colors: ganttColors, show_acknowledged: showAcked };
+  Store._state.userSettings = { ...(priorSettings || {}) };
   Store._state.alerts = [];
   t.after(() => {
     m.categoryByTask = prior.cat; m.sevByTask = prior.sev; m.taskIds = prior.ids; m.acked = prior.acked; m.profile = prior.profile;
@@ -1035,13 +1035,13 @@ test('Timeline._itemForTask: a built-in All alerts profile still rings an error 
   assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-b']).className, /profile-match/, 'a warn order is not ringed under All alerts');
 });
 
-test('Timeline._itemForTask: a fully acknowledged order is not highlighted unless alertsShowAcknowledged', (t) => {
+test('Timeline._itemForTask: a fully acknowledged order is not highlighted unless the profile flag show_acknowledged', (t) => {
   const m = _pmHarness(t);
   Store._state.alerts = [{ id: 'al-1', taskId: 'pm-a', type: 'overload', sev: 'err' }, { id: 'al-2', taskId: 'pm-b', type: 'setup-conflict', sev: 'warn' }];
   m.acked = new Map([['al-1', { alertId: 'al-1' }]]);
   assert.doesNotMatch(Timeline._itemForTask(Store.tasks['pm-a']).className, /profile-match/, 'every alert acked: hidden');
   assert.match(Timeline._itemForTask(Store.tasks['pm-b']).className, /profile-match-setup/, 'an unacked alert keeps it');
-  Store._state.userSettings = { ...Store._state.userSettings, alertsShowAcknowledged: true };
+  m.profile = { ...m.profile, show_acknowledged: true };
   assert.match(Timeline._itemForTask(Store.tasks['pm-a']).className, /profile-match-capacity/, 'show-acknowledged restores it');
 });
 
@@ -1141,7 +1141,7 @@ test('Timeline._profileMatchClasses: D8 ring follows the acknowledgement rule', 
   Store._state.alerts = [{ id: 'al-1', taskId: 'pm-a', type: 'overload', sev: 'err' }];
   m.acked = new Map([['al-1', { alertId: 'al-1' }]]);
   assert.deepEqual(Timeline._profileMatchClasses('pm-a'), [], 'every alert acked: no ring');
-  Store._state.userSettings = { ...Store._state.userSettings, alertsShowAcknowledged: true };
+  m.profile = { ...m.profile, show_acknowledged: true };
   assert.deepEqual(Timeline._profileMatchClasses('pm-a'), ['profile-match', 'profile-match-err'], 'show-acknowledged restores the ring');
 });
 

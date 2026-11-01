@@ -37,7 +37,7 @@ const matches = alerts => ({
 });
 
 function setup(alerts, tasks) {
-  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1' }, alertsShowAcknowledged: false, alertMonitorView: null }, 'test');
+  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1' }, alertMonitorView: null }, 'test');
   Store.setTasks(tasks, 'test');
   Store._linesByPlant = { P1: ['M1', 'M2', 'M4'] };
   Store._masterLinesByPlant = { P1: [{ machine: 'M1', wc_group: 'A' }, { machine: 'M2', wc_group: 'A' }, { machine: 'M4', wc_group: 'B' }] };
@@ -139,7 +139,7 @@ test('the Top fixes toggle writes alertMonitorFixes and flips it back', () => {
   AlertMonitorPane.render();
   clickAm('fixes-toggle');
   assert.deepEqual(prefs.at(-1), ['alertMonitorFixes', 'collapsed']);
-  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1' }, alertsShowAcknowledged: false, alertMonitorView: null, alertMonitorFixes: 'collapsed' }, 'test');
+  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1' }, alertMonitorView: null, alertMonitorFixes: 'collapsed' }, 'test');
   clickAm('fixes-toggle');
   assert.deepEqual(prefs.at(-1), ['alertMonitorFixes', 'open']);
 });
