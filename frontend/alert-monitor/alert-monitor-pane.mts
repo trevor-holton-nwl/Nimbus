@@ -10,10 +10,9 @@
    panel (#am-leverage, Task 13) and the alert groups (#am-groups, Task 12) are filled by
    later tasks through the two hook functions at the bottom of the paint path.
 
-   Reads the always-on producer through AlertProfileMatches.view() (the session "View as"
-   override applied; the rest of the app follows current(), the saved default); never emits a
-   Store event. "View as" is session-only (setSessionProfile); "Make my default" is the one
-   control that writes the persisted pref.
+   Reads the always-on producer through AlertProfileMatches.current(). The header pick is the active profile for
+   the whole app this session (setSessionProfile: Gantt, minimap, bell, drawer, Orders follow it); never emits a
+   Store event. "Set as default" is the one control that writes the persisted pref.
    ========================================================================== */
 
 import { Store } from '../platform/store.mjs';
@@ -21,7 +20,7 @@ import type { StoreEvent } from '../platform/store.mjs';
 import { Util, Config, Modal, Toast, VirtualList, ErrorLog } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
 import type { AlertProfile, NimbusTask } from '../platform/types.mjs';
-import { AlertProfileMatches, applyCategoryColors } from '../insights/alert-profile-matches.mjs';
+import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import type { AlertProfileMatchSet } from '../insights/alert-profile-matches.mjs';
 import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
 import { AlertProfileEditor, canDeleteProfile } from './alert-profile-editor.mjs';
@@ -235,7 +234,7 @@ function _comboOptions(): Array<{ id: string; label: string }> {
 }
 
 function _viewedLabel(): string {
-  const m = AlertProfileMatches.view();
+  const m = AlertProfileMatches.current();
   return m.profileId === ALL_ALERTS_PROFILE_ID ? t('am.profile_all') : m.profile.name;
 }
 
@@ -286,7 +285,7 @@ function _wireCombo(): void {
     _comboFiltered = [...(fq ? all.filter(o => o.label.toLowerCase().includes(fq)) : all), { id: NEW_PROFILE_ID, label: t('ape.new_profile') }];
     const plant = Store.selectedPlant;
     const defId = plant ? _defaultProfileId(plant, (AlertProfileClient.cached(plant) ?? [])) : ALL_ALERTS_PROFILE_ID;
-    const vm = AlertProfileMatches.view();
+    const vm = AlertProfileMatches.current();
     const viewed = vm.profileId;
     const viewedSub = windowSummary(vm.profile, t);
     const newHtml = (i: number) =>
@@ -344,7 +343,7 @@ function _persistView(patch: Partial<MonitorView>): void {
 
 function _openProfileEditor(): void {
   const plant = Store.selectedPlant;
-  const id = AlertProfileMatches.view().profileId;
+  const id = AlertProfileMatches.current().profileId;
   if (plant && id !== ALL_ALERTS_PROFILE_ID) AlertProfileEditor.open({ plant, profileId: id });
 }
 
@@ -367,7 +366,7 @@ function _openPageMenu(anchor: HTMLElement): void {
 function _makeDefault(): void {
   const plant = Store.selectedPlant;
   if (!plant) return;
-  const m = AlertProfileMatches.view();
+  const m = AlertProfileMatches.current();
   const existing = (Store.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
   Session.setPref('alertProfileByPlant', { ...existing, [plant]: m.profileId });
   AlertProfileMatches.setSessionProfile(null);   // the pref now says the same thing
@@ -579,7 +578,7 @@ function _onInput(e: Event): void {
   }
 }
 
-const _isAcked = (id: string): boolean => AlertProfileMatches.view().acked.has(id);
+const _isAcked = (id: string): boolean => AlertProfileMatches.current().acked.has(id);
 
 /** Put keyboard focus back on a ⋯ trigger a repaint replaced: the new trigger carries the same data-ovf-key. */
 function _refocusKey(key: string): boolean {
@@ -783,7 +782,7 @@ function _onChange(e: Event): void {
    ------------------------------------------------------------------------- */
 function _gatherState(): PaintState {
   const plant = Store.selectedPlant ?? null;
-  const m = AlertProfileMatches.view();
+  const m = AlertProfileMatches.current();
   const profilesRaw = plant ? AlertProfileClient.cached(plant) : null;
   const profiles = profilesRaw ?? [];
   const view = viewFor(Store.pref('alertMonitorView') as Parameters<typeof viewFor>[0], m.profileId);
@@ -902,7 +901,7 @@ function _renderChips(s: PaintState): void {
 function _renderGanttChip(): void {
   const el = _el('am-gantt-chip');
   if (!el) return;
-  const n = AlertProfileMatches.view().focusIds?.size ?? 0;
+  const n = AlertProfileMatches.current().focusIds?.size ?? 0;
   if (!n) { _setHtml('am-gantt-chip', ''); el.hidden = true; return; }
   _setHtml('am-gantt-chip', `<span class="am-gantt-n">◎ ${esc(t(n === 1 ? 'am.gantt_outline_one' : 'am.gantt_outline', { n }))}</span>`
     + `<button type="button" class="btn sm btn-ghost" data-am-action="clear-outline">${esc(t('am.gantt_outline_clear'))}</button>`);
@@ -1733,8 +1732,6 @@ function _paint(): void {
   if (!_active) return;
   _ensureShell();
   if ((Store.selectedPlant ?? null) !== _lastPlant) { _lastPlant = Store.selectedPlant ?? null; AlertMonitorPane.resetView(); }
-  // "View as" colours this page with the viewed profile's swatches (body keeps the saved default's for the Gantt).
-  applyCategoryColors(document.getElementById('alerts-tab'), AlertProfileMatches.view().profile);
   // A profile change keeps the filter: the same machines / days stay narrowed under the new rules.
   const s = _gatherState();
   _s = s;

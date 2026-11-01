@@ -662,7 +662,7 @@ async function _save(): Promise<void> {
     } else if (s.fromPicker) {
       // Opened from the page's picker: show what was just made, or what the page was already viewing and just changed.
       const savedId = saved?.id ?? s.draft.id;
-      if (savedId && (!s.draft.id || savedId === AlertProfileMatches.view()?.profileId)) AlertProfileMatches.setSessionProfile(savedId);
+      if (savedId && (!s.draft.id || savedId === AlertProfileMatches.current()?.profileId)) AlertProfileMatches.setSessionProfile(savedId);
     }
     AlertProfileEditor.close();
   } catch (err) {

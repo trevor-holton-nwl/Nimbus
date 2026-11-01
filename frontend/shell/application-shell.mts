@@ -982,6 +982,7 @@ const SessionUIAdapter = {
     // One key, one PATCH: read the whole map, change this plant's entry, write it back. This IS the default.
     const choose = (id: string) => {
       Session.setPref('alertProfileByPlant', { ...byPlant(), [plant]: id });
+      AlertProfileMatches.setSessionProfile(null);   // the saved default is the active profile again
       reflect(); close(); input.blur();
     };
 

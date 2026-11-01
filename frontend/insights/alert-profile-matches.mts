@@ -7,10 +7,10 @@
    Never emits a Store event (Store.emit bumps the revision and re-renders everything):
    consumers use this module's own `subscribe(fn)` fanout.
 
-   Inputs: Store.alerts / Store.tasks (plant scope), the active profile (user pref > role
-   default > All alerts, via resolveActiveProfileId over AlertProfileClient.cached) and
-   AlertAcksClient.cached. `current()` ignores the session "View as" override (the Gantt, bell,
-   drawer and Orders follow the saved default); `view()` applies it (the Alert Monitor page only). `'__all__'` matches every plant
+   Inputs: Store.alerts / Store.tasks (plant scope), the active profile (the session pick from the Alert Monitor
+   header, else user pref > role default > All alerts, via resolveActiveProfileId over AlertProfileClient.cached) and
+   AlertAcksClient.cached. `current()` is the ONE accessor: the Gantt, minimap, body colour tokens, bell, drawer,
+   Orders filter and the Alert Monitor page all follow the same set. `'__all__'` matches every plant
    alert and fills nothing (taskIds / categoryByTask stay empty; sevByTask holds error orders only, for the inner ring).
    ========================================================================== */
 
@@ -44,7 +44,7 @@ export interface AlertProfileMatchSet {
 type ProfileSettingsArg = Parameters<typeof resolveActiveProfileId>[1];
 
 const CATEGORY_ORDER: readonly AlertCategory[] = ALERT_CATEGORY_ORDER;
-const RELEVANT_PREFS = ['alertProfileByPlant', 'alertProfileGanttHighlight', 'alertsShowAcknowledged'] as const;
+const RELEVANT_PREFS = ['alertProfileByPlant', 'alertsShowAcknowledged'] as const;
 const DEBOUNCE_MS = 120;
 
 let _inited = false;
@@ -69,8 +69,6 @@ function _emptySet(): AlertProfileMatchSet {
 }
 
 let _current: AlertProfileMatchSet = _emptySet();
-/** The set with the session "View as" override applied (a copy of `_current` when no override). */
-let _view: AlertProfileMatchSet = _current;
 
 function _prefs(): string {
   try { return JSON.stringify(RELEVANT_PREFS.map(k => Store.pref(k) ?? null)); } catch { return ''; }
@@ -180,7 +178,6 @@ export function _resetColorSignature(): void { _colorSig = ''; }
 export function recompute(): void {
   const plant = Store.selectedPlant ?? null;
   let set = _emptySet();
-  let view = set;
   if (plant) {
     const profiles = AlertProfileClient.cached(plant);
     _ensureLoaded(`p:${plant}`, profiles, () => AlertProfileClient.list(plant));
@@ -188,18 +185,12 @@ export function recompute(): void {
     _ensureLoaded(`a:${plant}`, acks, () => AlertAcksClient.load(plant));
     const available = profiles ?? [];
     const prefId = resolveActiveProfileId(plant, Store.userSettings as ProfileSettingsArg, Store.roleDefaults as ProfileSettingsArg, available);
-    set = _buildSet(plant, prefId, available, acks);
-    // "View as" builds a second set only when it differs from the default; otherwise the view shares the default's
-    // content (a shallow copy, taken before the focus is resolved into each set).
-    view = _sessionProfile && _sessionProfile !== prefId
-      ? _buildSet(plant, _sessionProfile, available, acks)
-      : { ...set };
+    // The session pick (Alert Monitor header) wins over the saved default; a stale id falls back to All alerts.
+    set = _buildSet(plant, _sessionProfile ?? prefId, available, acks);
   }
-  if (_focusTaskIds) { _applyFocus(set, _focusTaskIds); if (view !== set) _applyFocus(view, _focusTaskIds); }
+  if (_focusTaskIds) _applyFocus(set, _focusTaskIds);
   set.rev = ++_rev;
-  view.rev = set.rev;
   _current = set;
-  _view = view;
   const sig = categoryColorSignature(set.profile);
   if (sig !== _colorSig) {
     _colorSig = sig;
@@ -242,20 +233,19 @@ export const AlertProfileMatches = {
     AlertAcksClient.subscribe(recompute);
     recompute();
   },
-  /** The saved-default view (session "View as" ignored): what the Gantt, bell, drawer and Orders follow. */
+  /** The active profile's matches: the session pick if any, else the saved default. Gantt, minimap, bell, drawer,
+   *  Orders and the Alert Monitor page all read this one set. */
   current(): AlertProfileMatchSet { return _current; },
-  /** The Alert Monitor's own view: `current()` with the session "View as" override applied. */
-  view(): AlertProfileMatchSet { return _view; },
   recompute,
   subscribe(fn: () => void): () => void { _subs.add(fn); return () => { _subs.delete(fn); }; },
-  /** "View as" override for this session (Alert Monitor page only; `current()` ignores it): until cleared (null) or the plant changes. */
+  /** The active-profile pick for this session (the Alert Monitor header picker; `current()` follows it app-wide): until cleared (null) or the plant changes. */
   setSessionProfile(id: string | null): void {
     _sessionProfile = id;
     recompute();
   },
   sessionProfile(): string | null { return _sessionProfile; },
   /**
-   * The "Show on Gantt" focus request: while set, `focusIds` on `current()` / `view()` holds the requested orders that
+   * The "Show on Gantt" focus request: while set, `focusIds` on `current()` holds the requested orders that
    * the set's own alerts name (and are not fully acknowledged); the Gantt outlines them while the fills stay profile-based.
    * null clears it. Fires the fanout; a plant change clears it.
    */
@@ -265,6 +255,6 @@ export const AlertProfileMatches = {
     _focusTaskIds = next;
     recompute();
   },
-  /** The orders the Gantt outlines (`view().focusIds`: the profile being viewed), or null when no focus is requested. */
-  focusTaskIds(): ReadonlySet<string> | null { return _view.focusIds; },
+  /** The orders the Gantt outlines (`current().focusIds`), or null when no focus is requested. */
+  focusTaskIds(): ReadonlySet<string> | null { return _current.focusIds; },
 };
