@@ -1632,7 +1632,7 @@ export const AlertsUIAdapter = {
     const scoped = Store.alerts.filter(a => !a.line || plantLines.has(a.line));
     const inHorizon = cutoff ? scoped.filter(a => !a.time || a.time <= cutoff) : scoped;
     const m = AlertProfileMatches.current();
-    const unacked = Store.pref('alertsShowAcknowledged') === true ? inHorizon : inHorizon.filter(a => !m.acked.has(a.id));
+    const unacked = m.profile.show_acknowledged === true ? inHorizon : inHorizon.filter(a => !m.acked.has(a.id));
     const filtering = m.profileId !== ALL_ALERTS_PROFILE_ID && !AlertsUIAdapter._profileOverride;
     const alerts = filtering ? unacked.filter(a => m.alertIds.has(a.id)) : unacked;
     return {

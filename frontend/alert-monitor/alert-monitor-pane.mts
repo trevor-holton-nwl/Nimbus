@@ -334,18 +334,13 @@ function _openProfileEditor(): void {
   if (plant && id !== ALL_ALERTS_PROFILE_ID) AlertProfileEditor.open({ plant, profileId: id });
 }
 
-/** ⋯ page menu: "New profile…" (opens the editor on a blank draft; a successful save hands back the view) and the
- *  persisted "Show acknowledged" toggle. */
+/** ⋯ page menu: "New profile…" (opens the editor on a blank draft; a successful save hands back the view). */
 function _openPageMenu(anchor: HTMLElement): void {
   const plant = Store.selectedPlant;
   const items: MenuItem[] = [
     {
       id: 'create-profile', label: `${t('ape.new_profile')}…`, disabled: !plant,
       onSelect: () => { if (plant) AlertProfileEditor.open({ plant, fromPicker: true }); },
-    },
-    {
-      id: 'ack', label: t('am.ack_show'), checked: Store.pref('alertsShowAcknowledged') === true,
-      onSelect: (next: boolean) => { Session.setPref('alertsShowAcknowledged', next); },
     },
   ];
   OverflowMenu.open(anchor, items, { align: 'end', key: 'page' });
@@ -774,7 +769,7 @@ function _gatherState(): PaintState {
   const profilesRaw = plant ? AlertProfileClient.cached(plant) : null;
   const profiles = profilesRaw ?? [];
   const view = viewFor(Store.pref('alertMonitorView') as Parameters<typeof viewFor>[0], m.profileId);
-  const showAcked = Store.pref('alertsShowAcknowledged') === true;
+  const showAcked = m.profile.show_acknowledged === true;
 
   const plantRow = plant ? Store.masterPlant(plant) : null;
   const clock = plant ? Util.plantClock(plant) : new Date();
@@ -923,7 +918,7 @@ function _emptyHtml(s: PaintState): string {
     case 'no-alerts':
       return `<div class="empty-state">${esc(t('empty.no_active_alerts'))}</div>`;
     case 'all-acked':
-      return `<div class="empty-state">${esc(t('am.empty_all_acked'))}</div>`;
+      return `<div class="empty-state">${esc(t(s.m.profileId === ALL_ALERTS_PROFILE_ID ? 'am.empty_all_acked_all' : 'am.empty_all_acked'))}</div>`;
     case 'no-match':
       return `<div class="empty-state am-empty-match"><div class="am-empty-title">${esc(t('am.empty_no_match_title'))}</div>`
         + `<div>${esc(t('am.empty_no_match_msg', { total: s.scopedCount, name: s.m.profile.name }))}</div>`

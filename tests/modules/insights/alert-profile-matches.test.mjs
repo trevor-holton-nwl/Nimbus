@@ -100,8 +100,8 @@ test('settings:change recomputes only when a relevant pref changed', () => {
   assert.equal(M.current().profileId, 'p1');
   Store.setUserSettings({ alertProfileByPlant: { P1: 'p1' } });   // same JSON
   assert.equal(n, 1);
-  Store.setUserSettings({ alertsShowAcknowledged: true });
-  assert.equal(n, 2);
+  Store.setUserSettings({ alertsShowAcknowledged: true });   // retired pref: no longer relevant
+  assert.equal(n, 1);
   off();
 });
 

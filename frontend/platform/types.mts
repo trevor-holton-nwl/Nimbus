@@ -575,6 +575,8 @@ export interface AlertProfile {
   categories?: ProfileCategories | null;
   /** "Colour the Gantt": true (or absent) = matched bars are filled in their group colour on the Gantt and minimap. */
   gantt_colors?: boolean;
+  /** "Include acknowledged alerts": true = acknowledged alerts stay listed and counted under this profile; false or absent = hidden. */
+  show_acknowledged?: boolean;
   /** True only for the client-side "All alerts" pseudo-profile (never a stored row). */
   builtIn?: boolean;
 }

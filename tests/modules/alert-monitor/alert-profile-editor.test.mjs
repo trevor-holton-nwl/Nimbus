@@ -951,3 +951,75 @@ test('Duplicate and Copy to plants carry gantt_colors', async () => {
   await flush(); await flush();
   assert.equal(calls.create.find(c => c.plant === 'P2').gantt_colors, false, 'Copy to plants');
 });
+
+// ---------------------------------------------------------------------------
+// "Include acknowledged alerts": a plant-shared per-profile flag (show_acknowledged), default false.
+// ---------------------------------------------------------------------------
+test('show_acknowledged round trips: absent or false reads as false, true survives draft and wire', () => {
+  const base = { id: 'g1', plant: 'P1', name: 'G', description: '', ranking: 'impact', created_by: 'me', updated_at: 'T', rules: [] };
+  assert.equal(draftFromProfile(base).show_acknowledged, false, 'a legacy row without the field hides acknowledged alerts');
+  assert.equal(draftFromProfile({ ...base, show_acknowledged: false }).show_acknowledged, false);
+  const on = draftFromProfile({ ...base, show_acknowledged: true });
+  assert.equal(on.show_acknowledged, true);
+  assert.equal(profileFromDraft(on).show_acknowledged, true);
+  assert.equal(profileFromDraft(draftFromProfile(base)).show_acknowledged, false);
+  assert.equal(blankDraft('P1').show_acknowledged, false);
+});
+
+test('the form renders the Include acknowledged alerts checkbox under Colour the Gantt, unchecked by default, disabled when read-only', () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  const html = els['ape-body'].innerHTML;
+  const box = html.match(/<input[^>]*data-ape-field="showAcked"[^>]*>/)[0];
+  assert.doesNotMatch(box, /checked/);
+  assert.match(html, /ape\.show_acked<\/span>/);
+  assert.match(html, /<div class="ape-hint">ape\.show_acked_hint<\/div>/);
+  assert.ok(html.indexOf('data-ape-field="showAcked"') > html.indexOf('data-ape-field="ganttColors"'), 'sits directly under Colour the Gantt');
+  AlertProfileEditor.close();
+  setUser('sam@newell.com');
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  assert.match(els['ape-body'].innerHTML.match(/<input[^>]*data-ape-field="showAcked"[^>]*>/)[0], /\sdisabled/);
+});
+
+test('ticking Include acknowledged alerts dirties the draft and the update payload carries show_acknowledged: true', async () => {
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  const s = () => AlertProfileEditor._test.state();
+  assert.equal(s().draft.show_acknowledged, false);
+  fire('ape-body', 'change', tgt({ apeField: 'showAcked' }, { checked: true }));
+  assert.equal(s().draft.show_acknowledged, true);
+  assert.notEqual(JSON.stringify(profileFromDraft(s().draft)), s().baseline, 'the unsaved-edits check sees it');
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.update[0][1].show_acknowledged, true);
+});
+
+test('a new draft creates with show_acknowledged: false unless ticked', async () => {
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Hides acked' }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.create[0].show_acknowledged, false);
+  AlertProfileEditor.open({ plant: 'P1' });
+  fire('ape-body', 'input', tgt({ apeField: 'name' }, { value: 'Shows acked' }));
+  fire('ape-body', 'change', tgt({ apeField: 'showAcked' }, { checked: true }));
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.create[1].show_acknowledged, true);
+});
+
+test('Duplicate and Copy to plants carry show_acknowledged', async () => {
+  const src = { ...withCats(mine), show_acknowledged: true };
+  AlertProfileClient.cached = () => [src, theirs];
+  AlertProfileClient.list = async () => [src, theirs];
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-body', { apeAct: 'dup', apeId: 'p1' });
+  click('ape-foot', { apeAct: 'save' });
+  await flush();
+  assert.equal(calls.create[0].show_acknowledged, true, 'Duplicate');
+  Store.setMasterData({ plants: [{ plant: 'P1' }, { plant: 'P2' }], lines: [] }, 'test');
+  AlertProfileEditor.open({ plant: 'P1', profileId: 'p1' });
+  click('ape-body', { apeAct: 'copy', apeId: 'p1' });
+  fire('ape-body', 'change', tgt({ apeCopyPlant: 'P2' }, { checked: true }));
+  click('ape-body', { apeAct: 'copy-go' });
+  await flush(); await flush();
+  assert.equal(calls.create.find(c => c.plant === 'P2').show_acknowledged, true, 'Copy to plants');
+});

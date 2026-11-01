@@ -72,6 +72,8 @@ def ensure_alert_profile_tables() -> None:
         """)
         # "Colour the Gantt" per profile (mirrors migrations/2026-11-01-1-alert-profile-gantt-colors.sql and schema.sql).
         cur.execute("ALTER TABLE alert_profile ADD COLUMN IF NOT EXISTS gantt_colors BOOLEAN NOT NULL DEFAULT TRUE")
+        # "Include acknowledged alerts" per profile (mirrors migrations/2026-11-01-3-alert-profile-show-acknowledged.sql).
+        cur.execute("ALTER TABLE alert_profile ADD COLUMN IF NOT EXISTS show_acknowledged BOOLEAN NOT NULL DEFAULT FALSE")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS alert_ack (
                 plant TEXT NOT NULL, alert_id TEXT NOT NULL, acknowledged_by TEXT NOT NULL,
@@ -127,6 +129,13 @@ def validate_gantt_colors(value) -> bool:
     """Return the flag or raise ValueError: a real boolean only (no 0/1, strings or null)."""
     if not isinstance(value, bool):
         raise ValueError("gantt_colors must be true or false")
+    return value
+
+
+def validate_show_acknowledged(value) -> bool:
+    """Return the flag or raise ValueError: a real boolean only (no 0/1, strings or null)."""
+    if not isinstance(value, bool):
+        raise ValueError("show_acknowledged must be true or false")
     return value
 
 
@@ -191,7 +200,7 @@ def _require_plant(plant) -> str:
 # --------------------------------------------------------------------------- profiles
 
 _PROFILE_COLS = ("id, plant, name, description, rules, ranking, created_by, updated_by, created_at, updated_at,"
-                 " categories, gantt_colors")
+                 " categories, gantt_colors, show_acknowledged")
 
 # update_alert_profile: "field not supplied" (keep the stored value) is distinct from an explicit None (revert to derived).
 _UNSET = object()
@@ -204,7 +213,8 @@ def _iso(v):
 def _profile_row(r) -> dict:
     return {"id": r[0], "plant": r[1], "name": r[2], "description": r[3], "rules": r[4],
             "ranking": r[5], "created_by": r[6], "updated_by": r[7],
-            "created_at": _iso(r[8]), "updated_at": _iso(r[9]), "categories": r[10], "gantt_colors": r[11]}
+            "created_at": _iso(r[8]), "updated_at": _iso(r[9]), "categories": r[10], "gantt_colors": r[11],
+            "show_acknowledged": r[12]}
 
 
 def _audit(cur, table: str, action: str, details: dict, actor) -> None:
@@ -228,23 +238,24 @@ def get_alert_profile(profile_id: str) -> dict | None:
 
 
 def create_alert_profile(*, plant, name, rules, ranking, description="", actor, categories=None,
-                         gantt_colors=True) -> dict:
+                         gantt_colors=True, show_acknowledged=False) -> dict:
     plant = _require_plant(plant)
     name = _validate_name(name)
     categories = validate_categories(categories) if categories is not None else None
     rules = validate_rules(rules, allow_empty=categories is not None)
     ranking = validate_ranking(ranking)
     gantt_colors = validate_gantt_colors(gantt_colors)
+    show_acknowledged = validate_show_acknowledged(show_acknowledged)
     description = (description or "").strip() if isinstance(description, (str, type(None))) else str(description)
     pid = uuid.uuid4().hex
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO alert_profile (id, plant, name, description, rules, ranking, created_by, updated_by,"
-                " categories, gantt_colors)"
-                f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_PROFILE_COLS}",
+                " categories, gantt_colors, show_acknowledged)"
+                f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_PROFILE_COLS}",
                 (pid, plant, name, description, Jsonb(rules), ranking, actor, actor,
-                 Jsonb(categories) if categories is not None else None, gantt_colors),
+                 Jsonb(categories) if categories is not None else None, gantt_colors, show_acknowledged),
             )
             row = _profile_row(cur.fetchone())
             _audit(cur, "alert_profile", "create", {"plant": plant, "id": pid, "name": name}, actor)
@@ -256,13 +267,13 @@ def create_alert_profile(*, plant, name, rules, ranking, description="", actor, 
 
 def update_alert_profile(profile_id, *, name=None, rules=None, ranking=None, description=None,
                          actor, expected_updated_at: str | None = None, categories=_UNSET,
-                         gantt_colors=None) -> dict | None:
+                         gantt_colors=None, show_acknowledged=None) -> dict | None:
     """Patch the supplied fields. Returns None if the profile does not exist; raises
     ValueError('stale') when expected_updated_at no longer matches the row.
 
     `categories`: omitted keeps the stored value; an explicit None reverts the profile to groups derived from its
     rules (which then needs at least one rule); a map replaces it (and lets `rules` be empty).
-    `gantt_colors`: None (omitted) keeps the stored flag; a bool replaces it."""
+    `gantt_colors`, `show_acknowledged`: None (omitted) keeps the stored flag; a bool replaces it."""
     new_name = _validate_name(name) if name is not None else None
     new_categories = _UNSET if categories is _UNSET else (
         validate_categories(categories) if categories is not None else None)
@@ -271,6 +282,7 @@ def update_alert_profile(profile_id, *, name=None, rules=None, ranking=None, des
         if rules is not None else None
     new_ranking = validate_ranking(ranking) if ranking is not None else None
     new_gantt = validate_gantt_colors(gantt_colors) if gantt_colors is not None else None
+    new_show_acked = validate_show_acknowledged(show_acknowledged) if show_acknowledged is not None else None
     try:
         with _pool.connection() as conn, conn.cursor() as cur:
             cur.execute(f"SELECT {_PROFILE_COLS} FROM alert_profile WHERE id = %s FOR UPDATE", (profile_id,))
@@ -287,16 +299,17 @@ def update_alert_profile(profile_id, *, name=None, rules=None, ranking=None, des
                 "description": (description or "").strip() if description is not None else current["description"],
                 "categories": current["categories"] if new_categories is _UNSET else new_categories,
                 "gantt_colors": new_gantt if new_gantt is not None else current["gantt_colors"],
+                "show_acknowledged": new_show_acked if new_show_acked is not None else current["show_acknowledged"],
             }
             if merged["categories"] is None and not merged["rules"]:
                 raise ValueError("A profile needs at least one rule")
             cur.execute(
                 "UPDATE alert_profile SET name = %s, description = %s, rules = %s, ranking = %s, categories = %s,"
-                " gantt_colors = %s, updated_by = %s, updated_at = NOW() WHERE id = %s"
+                " gantt_colors = %s, show_acknowledged = %s, updated_by = %s, updated_at = NOW() WHERE id = %s"
                 f" RETURNING {_PROFILE_COLS}",
                 (merged["name"], merged["description"], Jsonb(merged["rules"]), merged["ranking"],
                  Jsonb(merged["categories"]) if merged["categories"] is not None else None,
-                 merged["gantt_colors"], actor, profile_id),
+                 merged["gantt_colors"], merged["show_acknowledged"], actor, profile_id),
             )
             row = _profile_row(cur.fetchone())
             _audit(cur, "alert_profile", "update",

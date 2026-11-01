@@ -2251,6 +2251,8 @@ BEGIN
 END $$;
 -- "Colour the Gantt" per profile (mirrors migrations/2026-11-01-1-alert-profile-gantt-colors.sql). TRUE = fill matched bars.
 ALTER TABLE alert_profile ADD COLUMN IF NOT EXISTS gantt_colors BOOLEAN NOT NULL DEFAULT TRUE;
+-- "Include acknowledged alerts" per profile (mirrors migrations/2026-11-01-3-alert-profile-show-acknowledged.sql). FALSE = hide them.
+ALTER TABLE alert_profile ADD COLUMN IF NOT EXISTS show_acknowledged BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS alert_ack (
     plant TEXT NOT NULL, alert_id TEXT NOT NULL, acknowledged_by TEXT NOT NULL,

@@ -1192,7 +1192,7 @@ export const Timeline = {
   /** `profile-match profile-match-<category> profile-match-<sev>` for an order the active alert profile
    *  matches, else []. Under the built-in All alerts profile: ring only (`profile-match profile-match-err`) for error orders. Off when the
    *  active profile's own `gantt_colors` flag is false (a per-profile setting, not a user pref); an order whose every alert is acknowledged stays plain
-   *  unless `alertsShowAcknowledged`. */
+   *  unless the profile's `show_acknowledged`. */
   _profileMatchClasses(taskId: string): string[] {
     const m = AlertProfileMatches.current();
     if (m.profile.gantt_colors === false) return [];
@@ -1200,7 +1200,7 @@ export const Timeline = {
     // D8: the built-in All alerts profile has no categories (no fill); error orders still get the inner ring.
     const ringOnly = !cat && m.profile.builtIn && m.sevByTask.get(taskId) === 'err';
     if (!cat && !ringOnly) return [];
-    if (Store.pref('alertsShowAcknowledged') !== true && m.acked.size) {
+    if (m.profile.show_acknowledged !== true && m.acked.size) {
       const own = Store.alertsByTask().get(taskId);
       if (own && own.length && own.every(a => m.acked.has(a.id))) return [];
     }

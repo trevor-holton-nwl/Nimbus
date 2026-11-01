@@ -453,6 +453,7 @@ export interface AlertProfileDraft {
   /** Per-group switch + colour; when present it is validated and `rules` may be empty. */
   categories?: ProfileCategories | null;
   gantt_colors?: boolean;
+  show_acknowledged?: boolean;
 }
 
 export interface ProfileValidation {

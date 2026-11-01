@@ -70,7 +70,7 @@ beforeEach(() => {
   AlertProfileMatches.setSessionProfile = id => { calls.session.push(id); };
   Session.setPref = (k, v) => { calls.prefs.push([k, v]); };
   Util.plantClock = () => new Date('2026-10-20T08:00:00');
-  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1', P9: 'z' }, alertsShowAcknowledged: false }, 'test');
+  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1', P9: 'z' } }, 'test');
   Store.setSelectedPlant('P1', 'test');
   Store.setAlerts([], 'test');
   Store.setTasks([], 'test');
@@ -223,7 +223,7 @@ test('Edit is hidden under All alerts; it reads View rules for a non-creator and
   } finally { undo.forEach(u => u()); }
 });
 
-test('the ⋯ page menu holds New profile… (plain) and Show acknowledged (checkbox); New profile… opens the editor', () => {
+test('the ⋯ page menu holds only New profile… (plain, no Show acknowledged: that is a profile setting); it opens the editor', () => {
   const seen = [];
   const opened = [];
   const undo = [
@@ -232,18 +232,15 @@ test('the ⋯ page menu holds New profile… (plain) and Show acknowledged (chec
   ];
   try {
     useProfiles([P1], fakeMatches());
-    Store.setUserSettings({ alertsShowAcknowledged: false }, 'test');
     AlertMonitorPane.render();
     clickAm('page-menu');
     assert.equal(seen.length, 1);
     assert.deepEqual(seen[0].opts, { align: 'end', key: 'page' });
-    assert.deepEqual(seen[0].items.map(i => [i.id, i.checked]), [['create-profile', undefined], ['ack', false]]);
+    assert.deepEqual(seen[0].items.map(i => [i.id, i.checked]), [['create-profile', undefined]]);
     assert.equal(seen[0].items[0].disabled, false);
-    assert.equal(seen[0].items[1].hint, undefined);
     seen[0].items[0].onSelect(seen[0].items[0]);
     assert.deepEqual(opened, [{ plant: 'P1', fromPicker: true }]);
-    seen[0].items[1].onSelect(true);
-    assert.deepEqual(calls.prefs, [['alertsShowAcknowledged', true]]);
+    assert.deepEqual(calls.prefs, [], 'no acknowledgement pref is written');
   } finally { undo.forEach(u => u()); }
 });
 
@@ -335,11 +332,12 @@ const task = (id, o = {}) => ({
 function seed(alerts, { matched, acked, view, showAcked } = {}) {
   Store.setAlerts(alerts, 'test');
   Store.setUserSettings({
-    alertProfileByPlant: { P1: 'p1' }, alertsShowAcknowledged: !!showAcked,
+    alertProfileByPlant: { P1: 'p1' },
     // The page defaults to Machine grouping; the list tests below are about the category cards, so they store that.
     alertMonitorView: { __all__: view ?? { groupBy: 'category' } },
   }, 'test');
-  useProfiles([P1], fakeMatches({ alertIds: new Set(matched ?? alerts.map(a => a.id)), acked }));
+  useProfiles([P1], fakeMatches({ alertIds: new Set(matched ?? alerts.map(a => a.id)), acked,
+    profile: showAcked ? { ...ALL_ALERTS_PROFILE, show_acknowledged: true } : undefined }));
 }
 
 const clickAlert = (action, id, extra = {}) => els['alerts-tab'].handlers.click({
