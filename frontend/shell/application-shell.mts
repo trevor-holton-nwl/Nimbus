@@ -941,19 +941,12 @@ const SessionUIAdapter = {
         ${picker}
         <button type="button" class="btn btn-ghost sm" id="us-ap-manage" style="margin-top:8px">${Util.t('us.alert_profile_manage')}</button>
         <p class="us-field-hint">${Util.t('us.alert_profile_hint')}</p>
-        <label class="us-toggle-row" style="margin-top:8px">
-          <input type="checkbox" id="us-ap-highlight"${Session.pref('alertProfileGanttHighlight') !== false ? ' checked' : ''}>
-          <span>${Util.t('us.alert_gantt_highlight')}</span>
-        </label>
-        <p class="us-field-hint">${Util.t('us.alert_gantt_highlight_hint')}</p>
       </div>`;
   },
 
   _initAlertProfileRows(pane: Pick<HTMLElement, 'querySelector'>): void {
     const manage = pane.querySelector<HTMLElement>('#us-ap-manage');
     if (manage) manage.addEventListener('click', () => { Modal.close('modal-user-settings'); App.goto('alerts'); });
-    const hl = pane.querySelector<HTMLInputElement>('#us-ap-highlight');
-    if (hl) hl.addEventListener('change', () => { Session.setPref('alertProfileGanttHighlight', hl.checked); });
 
     const plant = Store.selectedPlant ?? null;
     const input    = pane.querySelector<HTMLInputElement>('#us-ap-input');

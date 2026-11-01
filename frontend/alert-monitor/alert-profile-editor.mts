@@ -69,6 +69,8 @@ export interface EditorDraft {
   updated_at: string | null;
   /** The seven groups: switch + colour. A deep copy, never the cached profile's object. */
   categories: ProfileCategories;
+  /** "Colour the Gantt": fill this profile's matched bars on the Gantt and minimap. */
+  gantt_colors: boolean;
   rules: RuleDraft[];
 }
 
@@ -79,6 +81,7 @@ export interface ProfileFromDraft {
   description: string;
   ranking: AlertRanking;
   categories: ProfileCategories;
+  gantt_colors: boolean;
   rules: AlertProfileRule[];
   expected_updated_at: string | null;
 }
@@ -96,7 +99,7 @@ function _cloneCategories(c: ProfileCategories): ProfileCategories {
 export function blankDraft(plant: string): EditorDraft {
   const categories = {} as ProfileCategories;
   for (const cat of ALERT_CATEGORY_ORDER) categories[cat] = { on: true, color: DEFAULT_CATEGORY_COLORS[cat] };
-  return { plant, name: '', description: '', updated_at: null, categories, rules: [] };
+  return { plant, name: '', description: '', updated_at: null, categories, gantt_colors: true, rules: [] };
 }
 
 /** Tri-state of one group's type checkboxes over the ticked types. */
@@ -211,6 +214,7 @@ export function draftFromProfile(p: AlertProfile): EditorDraft {
     description: p.description ?? '',
     updated_at: p.updated_at,
     categories: _cloneCategories(effectiveCategories(p)),
+    gantt_colors: p.gantt_colors !== false,
     rules: (p.rules ?? []).map(r => {
       const dayFrom = r.dayFrom ?? null, dayTo = r.dayTo ?? null;
       const d: RuleDraft = {
@@ -236,6 +240,7 @@ export function profileFromDraft(d: EditorDraft, existing?: { ranking?: AlertRan
     description: d.description ?? '',
     ranking: existing?.ranking ?? 'impact',
     categories: d.categories ? _cloneCategories(d.categories) : _cloneCategories(effectiveCategories({ rules: d.rules.map(_wireRule) } as AlertProfile)),
+    gantt_colors: d.gantt_colors !== false,
     rules,
     expected_updated_at: d.updated_at,
   };
@@ -519,6 +524,8 @@ function _formHtml(s: EditorState): string {
     + `<div class="ape-hint">${esc(t('ape.groups_hint'))}</div>`
     + _err(e.categories)
     + `<div class="ape-groups" role="group" aria-label="${esc(t('ape.groups'))}">${ALERT_CATEGORY_ORDER.map(cat => _groupRowHtml(s, cat, editable)).join('')}</div>`
+    + `<label class="chk-inline ape-gantt"><input type="checkbox" data-ape-field="ganttColors"${d.gantt_colors ? ' checked' : ''}${dis}><span>${esc(t('ape.gantt_colors'))}</span></label>`
+    + `<div class="ape-hint">${esc(t('ape.gantt_colors_hint'))}</div>`
     + `<details class="ape-tune" data-ape-tune${s.tuneOpen ? ' open' : ''}>`
     + `<summary><span class="ape-tune-t">${esc(t('ape.tune'))}</span><span class="ape-hint">${esc(t('ape.tune_hint'))}</span></summary>`
     + `<div class="ape-tune-body">${_tuneBodyHtml(s, editable)}</div></details>`
@@ -647,9 +654,9 @@ async function _save(): Promise<void> {
   try {
     const saved = s.draft.id
       ? await AlertProfileClient.update(s.draft.id, {
-          plant: p.plant, name: p.name, description: p.description, rules: p.rules, categories: p.categories, ranking: p.ranking, expected_updated_at: p.expected_updated_at,
+          plant: p.plant, name: p.name, description: p.description, rules: p.rules, categories: p.categories, gantt_colors: p.gantt_colors, ranking: p.ranking, expected_updated_at: p.expected_updated_at,
         })
-      : await AlertProfileClient.create({ plant: p.plant, name: p.name, description: p.description, rules: p.rules, categories: p.categories, ranking: p.ranking });
+      : await AlertProfileClient.create({ plant: p.plant, name: p.name, description: p.description, rules: p.rules, categories: p.categories, gantt_colors: p.gantt_colors, ranking: p.ranking });
     Toast.show(t('toast.alert_profile_saved', { name: p.name }), 'success');
     if (s.setMine) {
       const id = saved?.id ?? s.draft.id
@@ -712,6 +719,7 @@ async function _copyGo(): Promise<void> {
         plant: target, name: src.name, description: src.description, ranking: src.ranking,
         rules: (src.rules ?? []).map(r => ({ ...r, types: r.types == null ? null : [...r.types] })),
         categories: _cloneCategories(effectiveCategories(src)),
+        gantt_colors: src.gantt_colors !== false,
       });
       ok.push(target);
     } catch (err) {
@@ -905,6 +913,7 @@ function _onField(e: Event, kind: 'input' | 'change'): void {
       break;
     }
     case 'setMine': if (kind === 'change') s.setMine = !!el.checked; break;
+    case 'ganttColors': if (kind === 'change') { s.draft.gantt_colors = !!el.checked; _afterEdit(s); } break;
     case 'copyQuery': {
       if (!s.copy) break;
       s.copy.query = el.value;
