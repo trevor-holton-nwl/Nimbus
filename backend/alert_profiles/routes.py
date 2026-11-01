@@ -64,6 +64,7 @@ def alert_profiles_create(
             plant=plant, name=body.get("name"), rules=body.get("rules"),
             ranking=body.get("ranking", "impact"), description=body.get("description", ""), actor=actor,
             categories=body.get("categories"), gantt_colors=body.get("gantt_colors", True),
+            show_acknowledged=body.get("show_acknowledged", False),
         )
     except data.DuplicateName as e:
         raise HTTPException(status_code=409, detail="name_taken") from e
@@ -78,7 +79,8 @@ def alert_profiles_update(
     actor: str = Depends(auth.require_authenticated),
     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
 ):
-    fields = {k: body[k] for k in ("name", "description", "rules", "ranking", "categories", "gantt_colors") if k in body}
+    fields = {k: body[k] for k in ("name", "description", "rules", "ranking", "categories", "gantt_colors",
+                                                  "show_acknowledged") if k in body}
     if not fields:
         raise HTTPException(status_code=400, detail="No updatable fields supplied")
     _load_profile_for_write(profile_id, actor, allowed_plants)

@@ -89,11 +89,29 @@ def test_update_rejects_bad_categories_before_touching_the_db(monkeypatch):
         ap.update_alert_profile("x", actor="a@x", rules=[], categories=None)
 
 
-def test_profile_cols_put_categories_at_index_ten_and_gantt_colors_at_eleven():
+def test_profile_cols_put_categories_at_ten_gantt_colors_at_eleven_and_show_acknowledged_at_twelve():
     cols = [c.strip() for c in ap._PROFILE_COLS.split(",")]
-    assert cols[10] == "categories" and cols[11] == "gantt_colors"
-    row = ap._profile_row(("i", "p", "n", "d", [], "impact", "c", "u", None, None, {"late": 1}, False))
-    assert row["categories"] == {"late": 1} and row["gantt_colors"] is False
+    assert cols[10] == "categories" and cols[11] == "gantt_colors" and cols[12] == "show_acknowledged"
+    row = ap._profile_row(("i", "p", "n", "d", [], "impact", "c", "u", None, None, {"late": 1}, False, True))
+    assert row["categories"] == {"late": 1} and row["gantt_colors"] is False and row["show_acknowledged"] is True
+
+
+def test_validate_show_acknowledged_accepts_booleans_only():
+    assert ap.validate_show_acknowledged(True) is True and ap.validate_show_acknowledged(False) is False
+    for bad in (None, 0, 1, "true", [], {}):
+        with pytest.raises(ValueError, match="true or false"):
+            ap.validate_show_acknowledged(bad)
+
+
+def test_create_and_update_reject_a_non_boolean_show_acknowledged_before_the_db(monkeypatch):
+    class _NoDb:
+        def connection(self):
+            raise RuntimeError("db reached")
+    monkeypatch.setattr(ap, "_pool", _NoDb())
+    with pytest.raises(ValueError, match="show_acknowledged"):
+        ap.create_alert_profile(plant="P", name="N", rules=[_rule()], ranking="impact", actor="a@x", show_acknowledged="yes")
+    with pytest.raises(ValueError, match="show_acknowledged"):
+        ap.update_alert_profile("x", actor="a@x", show_acknowledged=1)
 
 
 def test_validate_gantt_colors_accepts_booleans_only():
@@ -139,7 +157,8 @@ def test_categories_match_frontend_alert_category_order():
 
 PROFILE = {"id": "abc", "plant": "P1", "name": "N", "description": "", "rules": [], "ranking": "impact",
            "created_by": "owner@example.com", "updated_by": "owner@example.com",
-           "created_at": "2026-10-30T08:00:00", "updated_at": "2026-10-30T08:00:00", "categories": None, "gantt_colors": True}
+           "created_at": "2026-10-30T08:00:00", "updated_at": "2026-10-30T08:00:00", "categories": None, "gantt_colors": True,
+           "show_acknowledged": False}
 
 
 @pytest.fixture
@@ -234,6 +253,45 @@ def test_put_passes_gantt_colors_when_present_and_omits_it_when_absent(client):
     assert calls[-1][1]["gantt_colors"] is False
     c.put("/alert-profiles/abc", json={"name": "x"})
     assert "gantt_colors" not in calls[-1][1]
+
+
+def test_post_show_acknowledged_defaults_false_and_passes_an_explicit_true(client):
+    c, calls = client
+    c.post("/alert-profiles", json={"plant": "P1", "name": "N", "rules": [_rule()]})
+    assert calls[-1][1]["show_acknowledged"] is False
+    c.post("/alert-profiles", json={"plant": "P1", "name": "N", "rules": [_rule()], "show_acknowledged": True})
+    assert calls[-1][1]["show_acknowledged"] is True
+
+
+def test_put_passes_show_acknowledged_when_present_and_omits_it_when_absent(client):
+    c, calls = client
+    assert c.put("/alert-profiles/abc", json={"show_acknowledged": True}).status_code == 200
+    assert calls[-1][1]["show_acknowledged"] is True
+    c.put("/alert-profiles/abc", json={"name": "x"})
+    assert "show_acknowledged" not in calls[-1][1]
+
+
+@pytest.mark.pg
+def test_show_acknowledged_round_trip_and_survives_an_update_without_the_field():
+    plant = "AS_" + uuid.uuid4().hex[:10]
+    try:
+        ap.ensure_alert_profile_tables()
+        ap.ensure_alert_profile_tables()  # bootstrap twice: the ADD COLUMN is idempotent
+        default = ap.create_alert_profile(plant=plant, name="Default", rules=[_rule(types=["late"])], ranking="impact", actor="a@x")
+        assert default["show_acknowledged"] is False
+        p = ap.create_alert_profile(plant=plant, name="Lists acked", rules=[_rule(types=["late"])], ranking="impact",
+                                    actor="a@x", show_acknowledged=True)
+        assert p["show_acknowledged"] is True
+        assert ap.get_alert_profile(p["id"])["show_acknowledged"] is True
+        u = ap.update_alert_profile(p["id"], name="Lists acked 2", actor="a@x")
+        assert u["show_acknowledged"] is True, "an update without the field keeps the stored flag"
+        u = ap.update_alert_profile(p["id"], show_acknowledged=False, actor="a@x")
+        assert u["show_acknowledged"] is False
+        assert [x["show_acknowledged"] for x in ap.list_alert_profiles(plant)] == [False, False]
+    finally:
+        with ap._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM alert_profile WHERE plant=%s", (plant,))
+            cur.execute("DELETE FROM admin_audit WHERE details->>'plant' = %s", (plant,))
 
 
 @pytest.mark.pg
