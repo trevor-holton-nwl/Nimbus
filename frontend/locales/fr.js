@@ -4219,4 +4219,5 @@ window.__NIMBUS_LOCALES.fr = {
   'planning_reason.search_limit': 'Vérification de capacité incomplète : la limite de temps a été atteinte avant que tous les créneaux disponibles soient vérifiés.',
   'planning_reason.search_limit_hint': 'Cochez Exécuter en arrière-plan dans la boîte de dialogue Optimiser pour vérifier chaque créneau.',
   'planning_reason.search_incomplete': 'La recherche heuristique s’est terminée sans prouver qu’aucune autre séquence valide n’existe.',
+  'ui.system_config_no_inspector_row': 'Ce champ n’a pas de ligne dans l’Inspecteur',
 };

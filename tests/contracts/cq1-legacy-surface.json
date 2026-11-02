@@ -480,11 +480,6 @@
       "file": "scheduling/orders.mjs",
       "attribute": "onchange",
       "expression": "NIMBUS.Table._onChipChange('status', this)"
-    },
-    {
-      "file": "scheduling/orders.mjs",
-      "attribute": "onclick",
-      "expression": "NIMBUS.Table._closeNotePopover()"
     }
   ],
   "htmlCommands": [

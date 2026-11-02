@@ -38,8 +38,6 @@ export interface NimbusTask {
   text?: string;
   MACHINE: string;
   PLANT?: string;
-  /** Distinct lowercase field used by Selection.selectedRefs; likely a legacy alias of PLANT. */
-  plant: string | null;
   RUN_TIME: number | string | null;
   start_date: Date | null;
   end_date: Date | null;

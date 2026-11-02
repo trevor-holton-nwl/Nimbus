@@ -3420,7 +3420,7 @@ export const SystemConfig = (() => {
       return `<tr>
         <td class="md-th">${Util.escapeHtml(Util.t(f.i18nInspectorKey))}</td>
         <td style="text-align:center"><input type="checkbox" data-sc-field="${Util.escapeHtml(f.key)}" data-sc-surface="grid" aria-label="${Util.escapeHtml(Util.t(f.i18nInspectorKey))}: ${Util.escapeHtml(Util.t('ui.system_config_show_grid'))}" ${gridChecked ? 'checked' : ''}></td>
-        <td style="text-align:center"><input type="checkbox" data-sc-field="${Util.escapeHtml(f.key)}" data-sc-surface="inspector" aria-label="${Util.escapeHtml(Util.t(f.i18nInspectorKey))}: ${Util.escapeHtml(Util.t('ui.system_config_show_inspector'))}" ${inspChecked ? 'checked' : ''}></td>
+        <td style="text-align:center"><input type="checkbox" data-sc-field="${Util.escapeHtml(f.key)}" data-sc-surface="inspector" aria-label="${Util.escapeHtml(Util.t(f.i18nInspectorKey))}: ${Util.escapeHtml(Util.t('ui.system_config_show_inspector'))}" ${f.inspector === false ? `disabled title="${Util.escapeHtml(Util.t('ui.system_config_no_inspector_row'))}"` : (inspChecked ? 'checked' : '')}></td>
       </tr>`;
     }).join('');
 

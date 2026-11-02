@@ -37,7 +37,7 @@ import { Session } from '../security/session.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import { Persistence } from './persistence.mjs';
 import { SetupAdmin } from '../setup/setup-admin.mjs';
-import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
+import { ORDER_FIELD_CATALOG, getField } from './order-field-catalog.mjs';
 import { planningReasonText } from './planning-reason.mjs';
 import { toolingRowHtml, warnUnknownToolId } from './order-tooling.mjs';
 import { raiseToolInventory } from '../optimization/tool-queue-confirm.mjs';
@@ -178,9 +178,7 @@ interface TableCellKeyDownEvent {
 }
 
 /** Table.init()'s onGridReady grid option. `columnApi` is AG Grid's pre-v31
- *  column-API object — merged into the main Grid API in v31, so this field is
- *  dead (assigned, never read: Table._colApi) but kept for parity with the
- *  pre-existing runtime behavior (Global Constraints: no logic changes). */
+ *  column-API object (merged into the main Grid API in v31); nothing reads it. */
 interface TableGridReadyEvent {
   api: NimbusVendor.AgGridApi;
   columnApi?: unknown;
@@ -227,10 +225,7 @@ export const Table = {
     return `${floor ? Util.fmtDTReadable(floor) : Util.t('ui.planning_window_no_start')} — ${ceiling ? Util.fmtDTReadable(ceiling) : Util.t('ui.planning_window_no_end')}`;
   },
   _api:    null as NimbusVendor.AgGridApi | null,
-  _colApi: null as unknown,
   _selectedId: null as string | null,  // for the override modal
-  _noteOutsideHandler: null as ((ev: MouseEvent) => void) | null,
-  _noteKeyHandler: null as ((ev: KeyboardEvent) => void) | null,
   // lines aliases the shared Store.selectedLines Set (same object, not a copy) —
   // the cross-screen production-line filter. See GanttFilter._selectedLines
   // for the identical convention and why it must never be reassigned.
@@ -357,7 +352,7 @@ export const Table = {
      and after a manual reset, or a stale per-user layout silently overrides
      the admin default. ───────────────────────────────────────────────────── */
   _fieldHidden(key: string): boolean {
-    const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
+    const f = getField(key);
     if (!f) return false;
     const cfg = Store.orderFieldVisibility[key];
     return !(cfg?.grid ?? f.gridDefault);
@@ -719,7 +714,6 @@ export const Table = {
       onFilterChanged:  () => { Table._captureLayout(); Table._refreshChipButtons(); },
       onGridReady: (params: TableGridReadyEvent) => {
         Table._api = params.api;
-        Table._colApi = params.columnApi;
         Table._wireQuickFilter();
         Table._initChipFilters();
         // Restore the user's saved grid layout (if the feature is on) before
@@ -1591,18 +1585,6 @@ export const Table = {
     Table._selectedId = sel.length === 1 ? String(sel[0].id) : null;
   },
 
-  _onRowClicked(event: { data?: NimbusTask }): void {
-    if (!event.data) return;
-    const task = Store.tasks[event.data.id];
-    if (task) {
-      const rightSidebar = document.getElementById('right-sidebar');
-      if (rightSidebar) {
-        rightSidebar.classList.remove('collapsed');
-        setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS);
-      }
-      Inspector.show(task);
-    }
-  },
   _alertSeverity(data: NimbusTask | null): 'err' | 'warn' | null {
     if (!data) return null;
     const ids = Store.alertsByTask().get(String(data.id)) || [];
@@ -1939,88 +1921,6 @@ export const Table = {
     });
   },
 
-  _showNotePopover(e: MouseEvent, id: string): void {
-    Table._closeNotePopover();
-    const task = Store.tasks[id];
-    if (!task) return;
-
-    const pop = document.createElement('div');
-    pop.id = 'nb-note-popover';
-    const cur = task.notes || '';
-    pop.innerHTML = `
-      <div class="nb-note-pop-header">
-        <span>Order Note</span>
-        <button class="nb-note-pop-close" onclick="NIMBUS.Table._closeNotePopover()">✕</button>
-      </div>
-      <textarea id="nb-note-ta" maxlength="500" placeholder="Add a note…">${Util.escapeHtml(cur)}</textarea>
-      <div class="nb-note-pop-footer">
-        <span id="nb-note-cnt">${cur.length}/500</span>
-        <div class="nb-note-pop-btns">
-          <button class="nb-note-cancel" onclick="NIMBUS.Table._closeNotePopover()">Cancel</button>
-          <button class="nb-note-save" data-note-id="${Util.escapeHtml(id)}">Save</button>
-        </div>
-      </div>`;
-    document.body.appendChild(pop);
-
-    const btn = (e.target as Element | null)?.closest('button') as HTMLElement ?? (e.target as HTMLElement);
-    const rect = btn.getBoundingClientRect();
-    const popW = 284;
-    let left = Math.max(4, Math.min(rect.left, window.innerWidth - popW - 4));
-    pop.style.left = left + 'px';
-    pop.style.top = '0px'; // temp placement so offsetHeight is measurable
-    requestAnimationFrame(() => {
-      const h = pop.offsetHeight;
-      const spaceAbove = rect.top - 8;
-      const spaceBelow = window.innerHeight - rect.bottom - 8;
-      let top = spaceAbove >= h || spaceAbove >= spaceBelow
-        ? Math.max(4, rect.top - h - 4)
-        : rect.bottom + 4;
-      pop.style.top = top + 'px';
-    });
-
-    const ta = document.getElementById('nb-note-ta') as HTMLTextAreaElement | null;
-    const cnt = document.getElementById('nb-note-cnt');
-    if (!ta || !cnt) { ErrorLog.error('ui', 'required DOM elements missing for note popover'); return; }
-    ta.addEventListener('input', () => {
-      cnt.textContent = ta.value.length + '/500';
-    });
-    pop.querySelector<HTMLElement>('.nb-note-save')?.addEventListener('click', (ev) => {
-      Table._saveNotePopover((ev.currentTarget as HTMLElement).dataset.noteId ?? '');
-    });
-    ta.focus();
-    ta.setSelectionRange(ta.value.length, ta.value.length);
-
-    setTimeout(() => {
-      Table._noteOutsideHandler = (ev: MouseEvent) => { if (!pop.contains(ev.target as Node)) Table._closeNotePopover(); };
-      document.addEventListener('mousedown', Table._noteOutsideHandler);
-    }, 0);
-    Table._noteKeyHandler = (ev: KeyboardEvent) => { if (ev.key === 'Escape') Table._closeNotePopover(); };
-    document.addEventListener('keydown', Table._noteKeyHandler);
-  },
-
-  _saveNotePopover(id: string): void {
-    const ta = document.getElementById('nb-note-ta') as HTMLTextAreaElement | null;
-    if (!ta) { ErrorLog.error('ui', 'required DOM element missing: nb-note-ta'); return; }
-    if (!Table._api) { ErrorLog.error('ui', 'Table._api not initialized'); return; }
-    const val = ta.value.trim().slice(0, 500) || null;
-    Inspector._updateNote(id, val);
-    Table._closeNotePopover();
-    Table._api.applyTransaction({ update: [Store.tasks[id]] });
-  },
-
-  _closeNotePopover(): void {
-    const pop = document.getElementById('nb-note-popover');
-    if (pop) pop.remove();
-    if (Table._noteOutsideHandler) {
-      document.removeEventListener('mousedown', Table._noteOutsideHandler);
-      Table._noteOutsideHandler = null;
-    }
-    if (Table._noteKeyHandler) {
-      document.removeEventListener('keydown', Table._noteKeyHandler);
-      Table._noteKeyHandler = null;
-    }
-  },
-
   /** A minimal inline date-time text editor for AG Grid. Typed as MM/DD/YYYY HH:mm (24h) so it
    *  never follows the browser locale (a native datetime-local input does). */
   _DateTimeEditor: class {
@@ -2164,11 +2064,10 @@ export const Table = {
 //    Inspector) ---------------------------------------------------------------
 
 /** Inspector._onFieldChange's `[data-field]` inputs — Inspector._render() only
- *  ever wires MACHINE (<select>), notes (<textarea>), start_date
- *  (<input>, upgraded to Flatpickr), RUN_TIME (<input type=number>), the
- *  priority attributes (PRT_01/PRT_02/PRODUCTION_VERSION), plus the open
- *  SAP-column bag via ORDER_QUANTITY_(GMEIN) — but the field name arrives as
- *  a plain string read off the DOM, not a compile-time literal. */
+ *  ever wires MACHINE / PV_MACHINE (<select>), notes (<textarea>), end_date
+ *  (<input>, upgraded to Flatpickr), RUN_TIME (<input type=number>) and the
+ *  priority attributes (PRT_01/PRT_02/PRODUCTION_VERSION) — but the field name
+ *  arrives as a plain string read off the DOM, not a compile-time literal. */
 type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
 /** P2: after clearing the MANUAL firm layer, tell the planner if the order is
@@ -2364,7 +2263,7 @@ export const Inspector = {
   // selection, so a later System Configuration change is picked up the next
   // time this panel opens.
   _fieldVisible(key: string): boolean {
-    const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
+    const f = getField(key);
     if (!f) return true;
     const cfg = Store.orderFieldVisibility[key];
     return cfg?.inspector ?? f.inspectorDefault;
@@ -2753,7 +2652,7 @@ export const Inspector = {
           <div class="insp-val">${Util.escapeHtml(task.FORM_SIZE || '—')}</div></div>` : ''}
         ${['PRT_01', 'PRT_02', 'PRODUCTION_VERSION'].map(key => {
           if (!Inspector._fieldVisible(key)) return '';
-          const field = ORDER_FIELD_CATALOG.find(c => c.key === key);
+          const field = getField(key);
           if (!field) return '';
           const value = (task as unknown as Record<string, unknown>)[key] ?? '';
           // D11: on a routing plant the production version is read-only; it changes only through PV - Machine.
@@ -2776,8 +2675,8 @@ export const Inspector = {
 
       ${task.PARENT_ORDER ? `<div class="insp-card">
         <h4>${Util.t('ui.insp_dist_title')}</h4>
-        <div class="insp-row"><label>${Util.t('ui.insp_order')}</label>
-          <div class="insp-val">${Util.escapeHtml(task.PARENT_ORDER)}${task.DISTRIBUTION_LETTER ? ' · ' + Util.escapeHtml(task.DISTRIBUTION_LETTER) : ''}</div></div>
+        ${Inspector._fieldVisible('PARENT_ORDER') || Inspector._fieldVisible('DISTRIBUTION_LETTER') ? `<div class="insp-row"><label>${Util.t('ui.insp_order')}</label>
+          <div class="insp-val">${[Inspector._fieldVisible('PARENT_ORDER') ? Util.escapeHtml(task.PARENT_ORDER) : '', Inspector._fieldVisible('DISTRIBUTION_LETTER') && task.DISTRIBUTION_LETTER ? Util.escapeHtml(task.DISTRIBUTION_LETTER) : ''].filter(Boolean).join(' · ')}</div></div>` : ''}
         <div style="font-size:12px;margin:4px 0 8px;">${Util.t('ui.insp_dist_share', { pct: distPct })}</div>
         ${distOtherSiblings.length ? `
         <div style="font-size:11px;font-weight:500;color:var(--fg-mute);margin-bottom:4px;">${Util.t('ui.insp_dist_siblings')}</div>
@@ -2811,8 +2710,8 @@ export const Inspector = {
           <div class="insp-val"><input type="text" data-field="end_date" value="${Util.toLocalInput(task.end_date)}">
             <span data-insp-variance>${Inspector._varianceBadge(task)}</span></div></div>
         ${systemMoveLine ? `<div class="insp-split-summary-note">${Util.escapeHtml(systemMoveLine)}</div>` : ''}
-        <div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
-          <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}" ${task.planning_reason?.code === 'runtime_unknown' ? '' : `disabled title="${Util.escapeHtml(Util.t('ui.insp_run_time_locked_title'))}"`}></div></div>
+        ${Inspector._fieldVisible('RUN_TIME') ? `<div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
+          <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}" ${task.planning_reason?.code === 'runtime_unknown' ? '' : `disabled title="${Util.escapeHtml(Util.t('ui.insp_run_time_locked_title'))}"`}></div></div>` : ''}
         ${task.run_time_source && Inspector._fieldVisible('run_time_basis') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_runtime_basis')}</label>
           <div class="insp-val" data-insp-basis>${Util.escapeHtml(Inspector._formatRuntimeBasis(task))}</div></div>` : ''}
@@ -2825,7 +2724,7 @@ export const Inspector = {
           'LABOR_HOURS_(MEINH)', 'MACHINE_HOURS_(MEINH)', 'NO_OF_FTE_(MEINH)'];
         const rows = moreKeys.map(key => {
           if (!Inspector._fieldVisible(key)) return '';
-          const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
+          const f = getField(key);
           if (!f) return '';
           // SAP firm flag: the raw key never reaches the browser, only `ecc_firmed` (X or —).
           const val = key === 'FIRMING_INDICATOR'
@@ -3069,10 +2968,6 @@ export const Inspector = {
       const d = Util.parseDate(value);
       if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
       requestedFinish = d;
-    } else if (field === 'start_date') {
-      // The start is derived from the finish and is no longer an input; nothing to apply.
-      Inspector._render(t);
-      return;
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(value) || 0;
       changes.RUN_TIME = h;
@@ -3098,8 +2993,6 @@ export const Inspector = {
       requestedLine = newMachine;
       requestedFinish = Table._runtimeEditAnchor(t);
       if (!requestedFinish) Object.assign(changes, Table._unplacedMachineRuntime(t, newMachine, newPv));
-    } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
-      changes[field] = parseFloat(value) || 0;
     } else if (field === 'notes') {
       changes.notes = value.trim() || null;
       Inspector._updateNote(id, changes.notes ?? null);

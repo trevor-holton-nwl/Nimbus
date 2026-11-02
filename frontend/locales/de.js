@@ -4258,4 +4258,5 @@ window.__NIMBUS_LOCALES.de = {
   'planning_reason.search_limit': 'Kapazitätsprüfung unvollständig: Das Zeitlimit wurde erreicht, bevor alle verfügbaren Lücken geprüft waren.',
   'planning_reason.search_limit_hint': 'Aktivieren Sie im Optimierungsdialog „Im Hintergrund ausführen“, um jede Lücke zu prüfen.',
   'planning_reason.search_incomplete': 'Die heuristische Suche wurde abgeschlossen, ohne zu beweisen, dass keine alternative zulässige Reihenfolge existiert.',
+  'ui.system_config_no_inspector_row': 'Dieses Feld hat keine Zeile im Inspektor',
 };

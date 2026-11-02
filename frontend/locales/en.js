@@ -4461,4 +4461,5 @@ window.__NIMBUS_LOCALES.en = {
   'planning_reason.search_limit': 'Capacity check incomplete: time limit reached before all available gaps were checked.',
   'planning_reason.search_limit_hint': 'Tick Run in background in the Optimize dialog to check every gap.',
   'planning_reason.search_incomplete': 'The heuristic search completed without proving that no alternate legal sequence exists.',
+  'ui.system_config_no_inspector_row': 'This field has no row in the Inspector',
 };

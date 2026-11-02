@@ -4218,4 +4218,5 @@ window.__NIMBUS_LOCALES.pt = {
   'planning_reason.search_limit': 'Verificação de capacidade incompleta: o limite de tempo foi atingido antes de verificar todos os intervalos disponíveis.',
   'planning_reason.search_limit_hint': 'Marque Executar em segundo plano na caixa Otimizar para verificar todos os intervalos.',
   'planning_reason.search_incomplete': 'A busca heurística terminou sem provar que não existe outra sequência válida.',
+  'ui.system_config_no_inspector_row': 'Este campo não tem linha no Inspetor',
 };
