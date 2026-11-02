@@ -76,7 +76,8 @@ def test_refresh_returns_all_writable_attributes_with_version(monkeypatch):
             return [("row", None, None, 12, [], False, "P", "needs_planning",
                      {"code": "runtime_unknown", "message": "pending"}, "routing", {"machine": "M2"},
                      "M2", "TOOL2", None, "0002", 6, 120, "MAT", datetime(2026, 10, 1, 8), True,
-                     datetime(2026, 10, 30, 16), "overtime", True)]
+                     datetime(2026, 10, 30, 16), "overtime", True,
+                     "red", "MD", "Widget", "a note", " x ")]
 
     monkeypatch.setattr(db, "_pool", _FakeSegmentPool(Cursor()))
     row = db.get_task_versions(["row"])[0]
@@ -91,6 +92,8 @@ def test_refresh_returns_all_writable_attributes_with_version(monkeypatch):
     assert row["original_start_date"] == "2026-10-01T08:00:00"
     assert row["original_end_date"] == "2026-10-30T16:00:00"
     assert row["firmed"] is True
+    assert (row["COLOR"], row["FORM_SIZE"], row["MATERIAL_DESCRIPTION"], row["notes"], row["ecc_firmed"]) == (
+        "red", "MD", "Widget", "a note", True)
 
 
 def test_distribution_child_read_serves_the_locked_original_dates(monkeypatch):

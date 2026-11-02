@@ -37,9 +37,9 @@ class PlanningReason(BaseModel):
     are emitted; nothing is padded with nulls."""
     model_config = ConfigDict(extra="allow")
 
-    code: str
-    message: str
-    step: str | None = None
+    code: str = Field(max_length=64)
+    message: str = Field(max_length=1000)
+    step: str | None = Field(default=None, max_length=64)
 
 
 class TaskDTO(BaseModel):
@@ -158,6 +158,9 @@ class TaskUpdateResult(BaseModel):
     conflicts: list[ScheduleConflict] = Field(default_factory=list)
     rejection_reasons: dict[str, str] = Field(default_factory=dict)
     start_derived: dict[str, bool] = Field(default_factory=dict)
+    # Set only when the whole transaction rolled back (status == 'error'); None otherwise.
+    error_code: str | None = None
+    cause: str | None = None
 
 
 class BulkUpdateResult(BaseModel):
@@ -207,6 +210,14 @@ class TaskVersionRow(BaseModel):
     order_quantity_gmein: float | None = Field(default=None, alias="ORDER_QUANTITY_(GMEIN)")
     MATERIAL_NUMBER: str | None = None
     PLANT: str | None = None
+    # Additive: the display/ranking inputs a /tasks load carries, so a conflict refresh after an ingest
+    # leaves setup alerts and ranking correct. Same wire keys as TaskDTO. None = not supplied.
+    COLOR: str | None = None
+    FORM_SIZE: str | None = None
+    MATERIAL_DESCRIPTION: str | None = None
+    notes: str | None = None
+    ecc_firmed: bool | None = None
+    ORDER_Y: float | None = None
     firmed: bool = False
     original_start_date: str | None = None
     # The locked SAP finish (the due date): COALESCE(original_finish_received, basic_finish_date).
@@ -242,6 +253,10 @@ class TasksRefreshResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Task date updates — shared model + validation + apply/persist/rollback
 # ---------------------------------------------------------------------------
+# Upper bound on one save/refresh batch; well above any legitimate optimizer batch (a plant is ~70 lines).
+MAX_BATCH = 20000
+
+
 class ScheduleSegmentInput(BaseModel):
     """A value-only child interval. Extra keys are rejected so callers cannot
     smuggle child identities or unrelated writable fields into the aggregate."""
@@ -266,13 +281,13 @@ class TaskDateUpdate(BaseModel):
     non-atomic mode (the client's Config.CONCURRENCY_CHECK=false escape hatch) and is
     stripped by /tasks/bulk_update.
     """
-    id: str
-    start_date: str | None = None
-    end_date: str | None = None
-    PRT_01: str | None = None
-    PRT_02: str | None = None
-    PRODUCTION_VERSION: str | None = None
-    MACHINE: str | None = None
+    id: str = Field(max_length=128)
+    start_date: str | None = Field(default=None, max_length=64)
+    end_date: str | None = Field(default=None, max_length=64)
+    PRT_01: str | None = Field(default=None, max_length=128)
+    PRT_02: str | None = Field(default=None, max_length=128)
+    PRODUCTION_VERSION: str | None = Field(default=None, max_length=128)
+    MACHINE: str | None = Field(default=None, max_length=128)
     RUN_TIME: float | None = None
     # Planner's manual firm, sent only for rows whose firm the planner toggled.
     FIRMED: bool | None = None
@@ -281,15 +296,17 @@ class TaskDateUpdate(BaseModel):
     # marker changed; an explicit null clears it (read through model_fields_set, like the
     # attributes), an omitted field leaves the stored marker alone.
     placement_exception: Literal["overtime", "overlong"] | None = None
-    base_version: int | None = None
+    base_version: int | None = Field(default=None, ge=0, le=2**31 - 1)
     force: bool = False
     # Backward scheduling OQ59 (external date writers): False says the `start_date` sent is a best guess the
     # caller did not derive from the run time. The save then skips the width check, stores `end_date` as the
     # placed finish, forces the row's stale flag, and lists the id in the response's `start_derived`.
     # Default True (the browser's own save sends starts it derived itself).
     trust_start: bool = True
-    planning_status: str | None = None
-    planning_reason: dict[str, Any] | None = None
+    planning_status: str | None = Field(default=None, max_length=32)
+    # Typed so a non-string code/message/step is a 422 here instead of a stored reason that later fails
+    # GET /tasks response validation for the whole plant.
+    planning_reason: PlanningReason | None = None
     # schedule_event history: the UI surface that produced this edit (drag, keyboard, grid, ...).
     # Advisory only: an unknown value is ignored server-side (never a 400) and recorded as 'planner'.
     source: str | None = Field(default=None, max_length=32)
@@ -319,7 +336,7 @@ class TasksUpdatePayload(BaseModel):
     consumed here. Calendars and blackout blocks now persist through the dedicated
     /plant-calendar/* endpoints (backend-authoritative); any blocks/calendars sent
     here are ignored (legacy ride-along, harmless)."""
-    tasks: list[TaskDateUpdate] = []
+    tasks: list[TaskDateUpdate] = Field(default_factory=list, max_length=MAX_BATCH)
     atomic_optimizer: bool = False
     # schedule_event history: the browser tab's id, stored on each history row (reserved for a change feed).
     client_id: str | None = Field(default=None, max_length=64)
@@ -330,4 +347,10 @@ class TasksUpdatePayload(BaseModel):
 
 class TaskRefreshPayload(BaseModel):
     """Ids the client needs to reconcile after a concurrency conflict."""
-    ids: list[str] = []
+    ids: list[str] = Field(default_factory=list, max_length=MAX_BATCH)
+
+
+class TaskNotePayload(BaseModel):
+    """POST /task/note body. A wrong-typed id/notes is a 422 (was an unhandled 500 from the dict handler)."""
+    id: str = Field(min_length=1, max_length=128)
+    notes: str | None = Field(default=None, max_length=500)

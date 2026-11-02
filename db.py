@@ -840,7 +840,8 @@ def _fetch_orders(plant, line, limit, offset, allowed_plants, *, dict_rows: bool
             params.append(horizon_end)
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += '\n    ORDER BY o.machine, COALESCE(seg.first_start, o.scheduled_start, o.scheduled_end, o.basic_start_date)'
+        # `o.id` makes the order total, so OFFSET/LIMIT paging cannot repeat or skip rows on ties.
+        sql += '\n    ORDER BY o.machine, COALESCE(seg.first_start, o.scheduled_start, o.scheduled_end, o.basic_start_date), o.id'
         if limit is not None:
             sql += " LIMIT %s"
             params.append(int(limit))
@@ -1013,7 +1014,7 @@ def backfill_machine_keys() -> int:
     return n
 
 
-def get_task_versions(ids: list[str]) -> list[dict]:
+def get_task_versions(ids: list[str], allowed_plants: list[str] | None = None) -> list[dict]:
     """
     Refetch the writable aggregate and authoritative runtime inputs with its xmin
     version in one read. No color-merge / link machinery is needed for reconciliation.
@@ -1021,8 +1022,13 @@ def get_task_versions(ids: list[str]) -> list[dict]:
     Also selects o.plant so callers can apply server-side plant scoping. The
     `plant` key is for that filtering only; callers expose it as `PLANT` only
     after authorization, using the same snapshot as the runtime inputs.
+
+    `allowed_plants` (None = unrestricted) filters in SQL, so an out-of-scope id simply is not returned
+    (the caller folds it into `missing`, same as a nonexistent id).
     """
     if not ids:
+        return []
+    if allowed_plants is not None and not allowed_plants:
         return []
     sql = f"""
         SELECT o.id,
@@ -1039,13 +1045,18 @@ def get_task_versions(ids: list[str]) -> list[dict]:
                o.manual_firmed,
                COALESCE(o.original_finish_received, o.basic_finish_date) AS original_end,
                o.placement_exception,
-               {_PLACED_SQL} AS user_scheduled
+               {_PLACED_SQL} AS user_scheduled,
+               o.color, o.form_size, o.material_description, o.notes, o.firming_indicator
         FROM orders o
         {_SCHEDULE_SEGMENTS_LATERAL_SQL}
         WHERE o.id = ANY(%s)
     """
+    params: list = [ids]
+    if allowed_plants is not None:
+        sql += "      AND o.plant = ANY(%s)\n"
+        params.append(allowed_plants)
     with _pool.connection() as conn, conn.cursor() as cur:
-        cur.execute(sql, (ids,))
+        cur.execute(sql, params)
         rows = cur.fetchall()
     return [
         {
@@ -1072,6 +1083,12 @@ def get_task_versions(ids: list[str]) -> list[dict]:
             "original_end_date": r[20].strftime("%Y-%m-%dT%H:%M:%S") if r[20] else None,
             "placement_exception": r[21],
             "user_scheduled": bool(r[22]),
+            "COLOR": r[23],
+            "FORM_SIZE": r[24],
+            "MATERIAL_DESCRIPTION": r[25],
+            "notes": r[26],
+            # Same normalisation as GET /tasks (strip + upper == 'X').
+            "ecc_firmed": str(r[27] or "").strip().upper() == "X",
         }
         for r in rows
     ]
@@ -1818,7 +1835,10 @@ def update_task_dates_bulk(items: list[dict], allowed_plants: list[str] | None =
             if has_planning and (planning_status not in ("scheduled", "needs_planning") or
                     (queued and (not isinstance(planning_reason, dict) or
                                  not isinstance(planning_reason.get("code"), str) or
-                                 not isinstance(planning_reason.get("message"), str))) or
+                                 not isinstance(planning_reason.get("message"), str) or
+                                 (planning_reason.get("step") is not None and
+                                  (not isinstance(planning_reason["step"], str) or len(planning_reason["step"]) > 64)) or
+                                 len(planning_reason["code"]) > 64 or len(planning_reason["message"]) > 1000)) or
                     (planning_status == "scheduled" and planning_reason is not None)):
                 invalid_ids.append(tid)
                 continue

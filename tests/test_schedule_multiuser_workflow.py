@@ -35,12 +35,13 @@ def planners(monkeypatch):
     monkeypatch.setattr(auth, "get_user_role", roles.get)
     monkeypatch.setattr(auth, "get_allowed_plants", lambda email: scopes.get(email, []))
 
-    def versions(ids):
+    def versions(ids, allowed_plants=None):
         return [
             {"id": order_id, "plant": rows[order_id]["plant"],
              "start_date": rows[order_id]["start"], "end_date": "2026-10-13T12:00:00",
              "row_version": rows[order_id]["version"]}
-            for order_id in ids if order_id in rows
+            for order_id in ids
+            if order_id in rows and (allowed_plants is None or rows[order_id]["plant"] in allowed_plants)
         ]
 
     def save(items, allowed_plants=None, **_kwargs):
