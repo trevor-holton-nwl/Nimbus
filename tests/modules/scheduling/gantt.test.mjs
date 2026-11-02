@@ -15,6 +15,7 @@ import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 import { AlertProfileMatches } from '../../../frontend/insights/alert-profile-matches.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 
 const require = createRequire(import.meta.url);
 // Engine.isInProgress/isFrozenHorizon default to Store.plantNow, which projects through the compute core's
@@ -2701,12 +2702,15 @@ function nwWithPlant(fn) {
   const priorPlant = Store.selectedPlant;
   Store.setSelectedPlant(NW_PLANT, 'unit-test');
   Store.ensurePlant(NW_PLANT);
+  const priorHydration = CalendarSync._hydration[NW_PLANT];
+  CalendarSync._setHydration(NW_PLANT, 'hydrated');   // _nonWorkingDesired returns [] while the plant's calendar is pending
   // Mon-Fri 06:00-18:00, weekend closed.
   for (let d = 0; d < 7; d++) Store.setPlantWorkHours(NW_PLANT, d, (d === 0 || d === 6) ? null : [6, 18], 'unit-test');
   const prior = { range: Timeline._nwRange, ids: Timeline._nwIds, items: Timeline._items, tl: Timeline._tl };
   try { return fn(); } finally {
     Timeline._nwRange = prior.range; Timeline._nwIds = prior.ids; Timeline._items = prior.items; Timeline._tl = prior.tl;
     Store.setSelectedPlant(priorPlant, 'unit-test');
+    if (priorHydration) CalendarSync._hydration[NW_PLANT] = priorHydration; else delete CalendarSync._hydration[NW_PLANT];
   }
 }
 function nwFakeItems() {

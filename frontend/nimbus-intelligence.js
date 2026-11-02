@@ -580,9 +580,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         selStats,
         sandboxActive:  !!NIMBUS.Sandbox?.active,
         anyFilterActive: !!(
-          NIMBUS.GanttFilter?.activeFilter()?.color ||
-          NIMBUS.GanttFilter?.activeFilter()?.form  ||
-          NIMBUS.GanttFilter?.activeFilter()?.text  ||
+          // isActive() covers colour, form, pasted-id and text filters (activeFilter() only holds the text box).
+          NIMBUS.GanttFilter?.isActive?.() ||
           (NIMBUS.GanttFilter?.selectedLines()?.size > 0)
         ),
         undoDepth:     NIMBUS.UndoStack?._entries?.length || 0,
