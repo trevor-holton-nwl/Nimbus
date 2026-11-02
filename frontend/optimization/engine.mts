@@ -1776,14 +1776,17 @@ export const Engine = {
     const byPlant = new Map<string, NimbusTask[]>();
     for (const task of tasks) {
       if (!task.start_date || !task.end_date || Engine.firmingStatus(task).firmed) continue;
-      const plant = task.PLANT || Store.getPlantForLine(task.MACHINE || 'Unknown') || Store.selectedPlant || '';
+      // No machine: there is no line to hold the finish on, and writing 'Unknown' would be rejected on Save
+      // (machine_unknown). Skip it; the caller counts selected minus moved as skipped in the Push toast.
+      if (!task.MACHINE) continue;
+      const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant || '';
       (byPlant.get(plant) ?? byPlant.set(plant, []).get(plant)!).push(task);
     }
     for (const [plant, group] of byPlant) {
       Calendar._beginRun(plant || null);
       try {
         for (const task of group) {
-          const changes = Engine.manualSchedulePatchFor(task, task.MACHINE || 'Unknown',
+          const changes = Engine.manualSchedulePatchFor(task, task.MACHINE,
             new Date(task.end_date!.getTime() + ms), undefined, { quiet: true });
           if (changes) patches.push({ id: task.id, changes });
         }
