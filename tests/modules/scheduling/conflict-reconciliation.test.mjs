@@ -218,3 +218,38 @@ test('a stale reply logs a tasks.conflict warn with ids, base versions and reqId
     assert.deepEqual(info.ctx, { id: 'A', base_version: 1, server_version: 5 });
   } finally { ErrorLog.warn = priorWarn; ErrorLog.info = priorInfo; }
 });
+
+test('S10-9: refresh copies ingest-rewritten colour, form, description, ORDER_Y, ecc_firmed and notes', async () => {
+  Store.updateTask('A', { COLOR: 'RED', FORM_SIZE: 'S', MATERIAL_DESCRIPTION: 'old', ORDER_Y: 1, ecc_firmed: false, notes: 'old note' }, 'persistence');
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'tasks:bulkUpdate') events.push(evt); }, 'test');
+  Util.fetchTraced = async () => response({ data: [{ ...row(), COLOR: 'BLUE', FORM_SIZE: 'L', MATERIAL_DESCRIPTION: 'new', ORDER_Y: 7, ecc_firmed: true, notes: 'server note' }], missing: [] });
+  Persistence._refreshTasks(['A']);
+  await tick();
+  const t = Store.tasks.A;
+  assert.deepEqual([t.COLOR, t.FORM_SIZE, t.MATERIAL_DESCRIPTION, t.ORDER_Y, t.ecc_firmed, t.notes], ['BLUE', 'L', 'new', 7, true, 'server note']);
+  assert.ok(events.some(e => e.source === 'refresh' && e.ids.includes('A')));
+  if (typeof off === 'function') off();
+});
+
+test('S10-9: refresh keeps a note the planner has unsaved but still updates the other attributes', async () => {
+  Store.updateTask('A', { COLOR: 'RED', notes: 'typing...' }, 'persistence');
+  Persistence.noteUnsaved = id => id === 'A';
+  Util.fetchTraced = async () => response({ data: [{ ...row(), COLOR: 'BLUE', notes: 'server note' }], missing: [] });
+  try {
+    Persistence._refreshTasks(['A']);
+    await tick();
+  } finally { Persistence.noteUnsaved = () => false; }
+  assert.equal(Store.tasks.A.notes, 'typing...');
+  assert.equal(Store.tasks.A.COLOR, 'BLUE');
+});
+
+test('S10-9: refresh from an older server leaves absent ingest fields untouched', async () => {
+  Store.updateTask('A', { COLOR: 'RED', FORM_SIZE: 'S', MATERIAL_DESCRIPTION: 'keep', ORDER_Y: 3, ecc_firmed: true, notes: 'mine' }, 'persistence');
+  Util.fetchTraced = async () => response({ data: [row()], missing: [] });
+  Persistence._refreshTasks(['A']);
+  await tick();
+  const t = Store.tasks.A;
+  assert.deepEqual([t.COLOR, t.FORM_SIZE, t.MATERIAL_DESCRIPTION, t.ORDER_Y, t.ecc_firmed, t.notes], ['RED', 'S', 'keep', 3, true, 'mine']);
+  assert.equal(t.row_version, 2);
+});

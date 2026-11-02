@@ -255,6 +255,9 @@ export const Persistence = {
   _dirtySource: new Map<string, string>(),
   // S7-2: ids whose conflict refresh failed or timed out, with what the retry needs (see _retryFailedRefreshes).
   _refreshRetry: new Map<string, { baseline: RefreshBaseline | undefined; sent: string | undefined }>(),
+  /** S10-9: true while a planner's note for this order is typing/unsaved (debounce pending or in the failed-retry set).
+   *  orders.mts registers the real predicate (persistence cannot import it); a refresh must not overwrite such a note. */
+  noteUnsaved: ((_id: string): boolean => false) as (id: string) => boolean,
   /** Stable per-tab id sent as `client_id` on every save (reserved for a future change feed). */
   get clientId(): string {
     const fresh = (): string => (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -1920,6 +1923,15 @@ export const Persistence = {
           // The server's manual firm is authoritative; _normalizeDates re-syncs firmedIds from it.
           const serverFirmed = row.firmed;
           if (typeof serverFirmed === 'boolean') tk.firmed = serverFirmed;
+          // S10-9: attributes an ingest rewrites. Only when the row carries them (older servers omit them); colour, form,
+          // description, ORDER_Y and ecc_firmed are never edited locally, a note only while no local note is unsaved.
+          const ingest = row as unknown as Partial<Pick<NimbusTask, 'COLOR' | 'FORM_SIZE' | 'MATERIAL_DESCRIPTION' | 'ORDER_Y' | 'ecc_firmed' | 'notes'>>;
+          if (ingest.COLOR != null) tk.COLOR = ingest.COLOR;
+          if (ingest.FORM_SIZE != null) tk.FORM_SIZE = ingest.FORM_SIZE;
+          if (ingest.MATERIAL_DESCRIPTION != null) tk.MATERIAL_DESCRIPTION = ingest.MATERIAL_DESCRIPTION;
+          if (ingest.ORDER_Y != null) tk.ORDER_Y = ingest.ORDER_Y;
+          if (typeof ingest.ecc_firmed === 'boolean') tk.ecc_firmed = ingest.ecc_firmed;
+          if (ingest.notes !== undefined && !Persistence.noteUnsaved(String(row.id))) tk.notes = ingest.notes;
           Store._normalizeDates(tk);
           tk.row_version = row.row_version as number | null;
           Persistence._dirtyIds.delete(String(row.id));
