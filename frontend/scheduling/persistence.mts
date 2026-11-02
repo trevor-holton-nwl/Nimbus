@@ -242,6 +242,13 @@ export const Persistence = {
   _toolInventoryWarned: new Set<string>(),
   // Seam wired by the shell: true while a Gantt drag is in flight (persistence cannot import gantt).
   _calendarRefreshBlocked: null as null | (() => boolean),
+  // Plants whose calendar / tool-inventory probe was skipped by the drag block; re-probed when the drag ends.
+  _deferredRefreshPlants: new Set<string>(),
+  runDeferredRefreshes(): Promise<boolean> {
+    const plants = [...Persistence._deferredRefreshPlants];
+    Persistence._deferredRefreshPlants.clear();
+    return Promise.all(plants.map(p => Persistence.refreshHorizons(p))).then(r => r.some(Boolean));
+  },
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // historical name: dependent optimizer/undo edits require atomic version checks
   _conflictedIds: new Set<string>(),  // retained local edits cannot adopt a server version without reconciliation
@@ -886,6 +893,7 @@ export const Persistence = {
     if (known === undefined) return;                            // no hydration baseline to compare with
     if (known === version || Persistence._calendarRefreshing.has(plant)) return;
     if (Sandbox.active || Modal.anyOpen() || Persistence._calendarRefreshBlocked?.()) {
+      if (Persistence._calendarRefreshBlocked?.()) Persistence._deferredRefreshPlants.add(plant);
       Persistence._horizonsFetchedAt[plant] = 0;                // not a real fetch: let the next entry retry at once
       return;
     }
@@ -1011,6 +1019,7 @@ export const Persistence = {
   _noteToolInventoryVersion(plant: string, version: string | null | undefined, rule: 'off' | 'hard' | undefined): void {
     const blocked = (): boolean => {
       if (Sandbox.active || Modal.anyOpen() || Persistence._calendarRefreshBlocked?.()) {
+        if (Persistence._calendarRefreshBlocked?.()) Persistence._deferredRefreshPlants.add(plant);
         Persistence._horizonsFetchedAt[plant] = 0;
         return true;
       }
