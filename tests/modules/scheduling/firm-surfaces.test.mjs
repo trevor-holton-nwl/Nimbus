@@ -3,7 +3,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { Table, Inspector, ContextMenu } from '../../../frontend/scheduling/orders.mjs';
-import { Interaction } from '../../../frontend/scheduling/gantt.mjs';
+import { Interaction, Timeline } from '../../../frontend/scheduling/gantt.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Util, Toast, Modal } from '../../../frontend/platform/foundation.mjs';
@@ -225,6 +225,7 @@ test('F key: firms what can be firmed, skips locked orders with a toast, and doe
   t.mock.method(Toast, 'show', (m) => toasts.push(m));
   t.mock.method(Alerts, 'scheduleRecompute', () => {});
   const key = () => ({ key: 'f', ctrlKey: false, metaKey: false, target: { tagName: 'DIV', closest: () => null, isContentEditable: false }, preventDefault() {} });
+  t.mock.method(Timeline, '_ganttActive', () => true);   // shortcuts act only while the Gantt tab shows
   const press = () => Interaction._onKeyDown?.(key());
   assert.equal(typeof Interaction._onKeyDown, 'function');
   const prior = Selection.ids();

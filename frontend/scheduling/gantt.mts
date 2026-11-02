@@ -2860,6 +2860,26 @@ export function bulkTouchesExpandedLine(
   return ids.some(id => oldLineOf(id) === expandedLine || newLineOf(id) === expandedLine);
 }
 
+/** True when a global Gantt shortcut must not act on this keydown target: text fields, dropdowns, buttons and
+ *  combobox widgets own their own keys (arrows, Delete, F), so the Gantt handler stays out of their way. */
+export function shortcutTargetIgnored(t: { tagName?: string; isContentEditable?: boolean; getAttribute?: (n: string) => string | null } | null | undefined): boolean {
+  if (!t) return false;
+  const tag = t.tagName || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON') return true;
+  if (t.isContentEditable) return true;
+  return typeof t.getAttribute === 'function' && t.getAttribute('role') === 'combobox';
+}
+
+/** The row an Up/Down arrow moves to: the neighbour of `current` in the rendered row order, or null at an edge
+ *  or when `current` is not a rendered row. `hasCandidates` skips rows with nothing selectable (hidden or dimmed). */
+export function neighbourRow(rows: string[], current: string, key: 'ArrowUp' | 'ArrowDown', hasCandidates: (row: string) => boolean): string | null {
+  let i = rows.indexOf(current);
+  if (i < 0) return null;
+  const step = key === 'ArrowUp' ? -1 : 1;
+  for (i += step; i >= 0 && i < rows.length; i += step) if (hasCandidates(rows[i])) return rows[i];
+  return null;
+}
+
 /** Expandable rows: with a row expanded, a multi-drag's per-companion DataSet write is skipped. vis's own
  *  drag-end writes each companion's raw data AFTER ours (overwriting it), and the rebuild that the Store
  *  write schedules (Timeline._onStore, source 'timeline') relocates the companions anyway. */
@@ -5541,7 +5561,7 @@ export const Interaction = {
     const id = Interaction._businessOrderIdForItem(props.item);
     if (!id) return;
 
-    if (shift)     Selection.selectRange(id);
+    if (shift)     Selection.selectRange(id, t => !GanttFilter.isActive() || GanttFilter.matches(t));
     else if (meta) Selection.toggle(id);
     else           Selection.set([id]);
 
@@ -5855,13 +5875,12 @@ export const Interaction = {
           // their old absolute positions. Mirrors the deleted regeneration
           // branch's own contract: "Companion parents retain the user's
           // relative drag delta."
-          // (skippedFirmed stays empty today — selIds above already excludes firmed
-          // tasks — but is preserved as-is; not this task's scope to remove.)
+          // skippedFirmed: selected firmed orders left in place (selIds above excludes them); toasted below.
           // This loop only computes and validates each companion's patch — no
           // Store or Timeline mutation happens here, since a later companion
           // failing must leave earlier companions (and the dragged item)
           // untouched too.
-          const skippedFirmed: string[] = [];
+          const skippedFirmed = Selection.ids().filter(sid => sid !== id && Store.isFirmed(sid));
           const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
           const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
           let companionFailed = false;
@@ -6229,15 +6248,17 @@ export const Interaction = {
       ContextMenu.openFromKeyboard(Selection._anchor || Selection.ids()[0], e.target as HTMLElement);
       return;
     }
-    // Ignore when typing in inputs.
-    const target = e.target as HTMLElement | null;
-    const tag = (target && target.tagName) || '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+    // Ignore when typing in inputs; dropdowns and buttons keep their own keys (arrows, Delete, F).
+    if (shortcutTargetIgnored(e.target as HTMLElement | null)) return;
 
     const mod = e.metaKey || e.ctrlKey;
 
+    // Save and Escape stay global; Undo, Delete, F and arrow navigation act only while the Gantt tab is showing.
+    const onGantt = Timeline._ganttActive();
+
     // Undo
     if (mod && !e.shiftKey && e.key.toLowerCase() === 'z') {
+      if (!onGantt) return;
       if (UndoStack._entries.length) { e.preventDefault(); UndoStack.pop(); }
       return;
     }
@@ -6257,6 +6278,8 @@ export const Interaction = {
       if ((AlertProfileMatches.focusTaskIds()?.size ?? 0) > 0 && !Modal.anyOpen() && !OverflowMenu.isOpen()) AlertProfileMatches.setFocusTaskIds(null);
       return;
     }
+
+    if (!onGantt) return;
 
     // Delete / Backspace → unschedule (NOT delete the order)
     if ((e.key === 'Delete' || e.key === 'Backspace') && Selection.size()) {
@@ -6324,30 +6347,35 @@ export const Interaction = {
     const cur = Store.tasks[currentId];
     if (!cur || !cur.start_date) return;
 
-    const allLines = [...new Set(Store.tasksArr
-      .filter(t => t.MACHINE)
-      .map(t => t.MACHINE))].sort();
+    // Rows in the order the Gantt renders them (numeric sort, line-filter aware); only orders that pass the
+    // Gantt filter (not dimmed) are selectable targets.
+    const shown = (t: NimbusTask): boolean => !GanttFilter.isActive() || GanttFilter.matches(t);
+    const curLine = cur.MACHINE || 'Unknown';
+    const onLine = (line: string): NimbusTask[] =>
+      Store.tasksArr.filter(t => (t.MACHINE || 'Unknown') === line && t.start_date && shown(t));
+    let next: NimbusTask | null = null;
 
     if (key === 'ArrowLeft' || key === 'ArrowRight') {
-      const peers = Store.tasksArr
-        .filter(t => t.MACHINE === cur.MACHINE && t.start_date)
+      const peers = onLine(curLine)
         .sort((a, b) => a.start_date!.getTime() - b.start_date!.getTime());
       const i = peers.findIndex(t => String(t.id) === currentId);
       const j = key === 'ArrowLeft' ? i - 1 : i + 1;
-      if (j >= 0 && j < peers.length) Selection.set([String(peers[j].id)]);
+      if (i >= 0 && j >= 0 && j < peers.length) next = peers[j];
     } else {
-      const li = allLines.indexOf(cur.MACHINE);
-      const lj = key === 'ArrowUp' ? li - 1 : li + 1;
-      if (lj < 0 || lj >= allLines.length) return;
-      const targetLine = allLines[lj];
+      const targetLine = neighbourRow(Timeline._visibleLines(), curLine, key, l => onLine(l).length > 0);
+      if (!targetLine) return;
       // Pick the task on the new line that's temporally closest to current.
-      const candidates = Store.tasksArr
-        .filter(t => t.MACHINE === targetLine && t.start_date);
-      if (!candidates.length) return;
-      candidates.sort((a, b) => Math.abs(a.start_date!.getTime() - cur.start_date!.getTime())
-                              - Math.abs(b.start_date!.getTime() - cur.start_date!.getTime()));
-      Selection.set([String(candidates[0].id)]);
+      next = onLine(targetLine)
+        .sort((x, y) => Math.abs(x.start_date!.getTime() - cur.start_date!.getTime())
+                      - Math.abs(y.start_date!.getTime() - cur.start_date!.getTime()))[0] ?? null;
     }
+    if (!next) return;
+    const nextId = String(next.id);
+    Selection.set([nextId]);
+    // Bring the new bar into view: its row vertically, then pan horizontally (zoom unchanged), as a click does.
+    const itemIds = Timeline.itemIdsForTask(nextId);
+    Timeline.scrollToLine(next.MACHINE || 'Unknown', { itemIds });
+    Timeline._tl?.focus(itemIds[0] || nextId, { animation: { duration: 300 }, zoom: false });
   },
 
   /** Replaces the single-task Inspector with a multi-selection summary view. */
