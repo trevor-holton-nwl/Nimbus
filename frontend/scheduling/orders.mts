@@ -1168,6 +1168,11 @@ export const Table = {
   /** True when the active profile is All alerts: the profile filter would match nothing, so it is offered disabled. */
   _profileFilterOff(): boolean { return AlertProfileMatches.current().profileId === ALL_ALERTS_PROFILE_ID; },
 
+  /** One plant-membership test for every _onStore branch: the task's own PLANT, else the plant its line maps to. */
+  _inSelectedPlant(t: NimbusTask): boolean {
+    return inSelectedPlantFor(t, Store.selectedPlant, m => Store.getPlantForLine(m));
+  },
+
   _onStore(evt: StoreEvent): void {
     if (evt.source === 'table' && evt.type !== 'firmed:change') return;
     if (!Table._api) return;
@@ -1207,7 +1212,7 @@ export const Table = {
       const ids = (evt.ids as Array<string | number> | undefined) ?? [];
       const inPlant = ids
         .map(id => Store.tasks[id])
-        .filter((t): t is NimbusTask => !!t && (t.PLANT || Store.getPlantForLine(t.MACHINE)) === Store.selectedPlant);
+        .filter((t): t is NimbusTask => !!t && Table._inSelectedPlant(t));
       const add: NimbusTask[] = [];
       const update: NimbusTask[] = [];
       for (const t of inPlant) {
@@ -1218,8 +1223,7 @@ export const Table = {
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
     } else if (evt.type === 'task:update') {
       const t = Store.tasks[String(evt.id)];
-      if (t && Store.selectedPlant
-          && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant) {
+      if (t && Store.selectedPlant && Table._inSelectedPlant(t)) {
         Table._api.applyTransaction({ update: [t] });
       }
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
@@ -1227,7 +1231,7 @@ export const Table = {
       const ids = (evt.ids as Array<string | number> | undefined) ?? [];
       const updated = ids
         .map(id => Store.tasks[id])
-        .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant);
+        .filter((t): t is NimbusTask => !!t && Table._inSelectedPlant(t));
       Table._api.applyTransaction({ update: updated });
       if (Table._chipFilters.status === 'firmed') Table._api.onFilterChanged();
     } else if (evt.type === 'alerts:change') {
@@ -1244,7 +1248,7 @@ export const Table = {
       const updated = changedIds && changedIds.length
         ? changedIds
             .map(id => Store.tasks[id])
-            .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant)
+            .filter((t): t is NimbusTask => !!t && Table._inSelectedPlant(t))
         : Store.tasksForSelectedPlant();
       if (updated.length) Table._api.applyTransaction({ update: updated });
       if (Table._chipFilters.status === 'conflict' || Table._chipFilters.status === 'atrisk') {
@@ -1434,7 +1438,13 @@ export const Table = {
     if (field === 'end_date') {
       // The typed End is the finish the planner wants; the start is derived from it (OQ1).
       const d = Util.parseDate(p.newValue);
-      if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); Table._api!.refreshCells({ rowNodes: [p.node] }); return; }
+      if (!d) {
+        // AG Grid has already written the unparsable value (null) onto the live Store task; put the finish back.
+        p.data.end_date = p.oldValue as Date | null;
+        Toast.show(Util.t('toast.invalid_date'), 'error');
+        Table._api!.refreshCells({ rowNodes: [p.node] });
+        return;
+      }
       requestedFinish = d;
       // AG Grid has already written the typed value onto the row; placement must see the end the order had
       // (a marked bar is translated by the delta from it, not stretched).
@@ -1457,10 +1467,10 @@ export const Table = {
       // path below can leave a pair string in the row.
       const parsed = Table._parsePairValue(String(p.newValue || 'Unknown'));
       const newMachine = parsed.machine || 'Unknown';
-      p.data.MACHINE = newMachine;
       // The pre-edit machine for the lock comparison (decision C, aggregate_to_detail.md §8) has to come from
-      // p.oldValue, not p.data.MACHINE.
-      const priorMachine = p.oldValue != null ? String(p.oldValue) : String(p.data.MACHINE ?? 'Unknown');
+      // p.oldValue, captured BEFORE the row is overwritten (a null oldValue falls back to the row's machine).
+      const priorMachine = String(p.oldValue ?? p.data.MACHINE ?? 'Unknown');
+      p.data.MACHINE = newMachine;
       const routing = Table._routingEnabledForTask(p.data);
       const priorPv = Runtime.normPv(p.data.PRODUCTION_VERSION) ?? '';
       const newPv = parsed.pv ?? priorPv;
@@ -2035,6 +2045,7 @@ export const Table = {
     _pairMode = false;
     _chosen: string | null = null;
     _activeIdx = 0;
+    _untouched = true;   // no keystroke or arrow yet: Enter keeps the current value
     _eGui!: HTMLDivElement;
     _input!: HTMLInputElement;
     _list!: HTMLDivElement;
@@ -2048,6 +2059,7 @@ export const Table = {
       this._pairMode = this._values.some(o => o.value.includes('|'));
       this._chosen = null;
       this._activeIdx = 0;
+      this._untouched = true;
 
       this._eGui = document.createElement('div');
       this._eGui.className = 'nse-editor';
@@ -2055,17 +2067,25 @@ export const Table = {
       this._input = this._eGui.querySelector('.nse-input')!;
       this._list  = this._eGui.querySelector('.nse-list')!;
       this._input.value = params.value || '';
-      this._input.addEventListener('input', () => this._renderList(this._input.value));
+      this._input.addEventListener('input', () => { this._untouched = false; this._renderList(this._input.value); });
       this._input.addEventListener('keydown', (e: KeyboardEvent) => this._onKeyDown(e));
-      this._renderList('');
+      this._list.setAttribute('role', 'listbox');
+      this._input.setAttribute('role', 'combobox');
+      this._input.setAttribute('aria-expanded', 'true');
+      // The row's current value (a pair's value on a routing plant, else the machine) starts highlighted.
+      const currentValue = this._pairMode && params.data
+        ? `${Runtime.normPv(params.data.PRODUCTION_VERSION) ?? ''}|${params.data.MACHINE ?? params.value ?? ''}`
+        : String(params.value ?? '');
+      this._renderList('', initialActiveIndex(this._values, currentValue));
     }
-    _renderList(q: string): void {
+    _renderList(q: string, activeIdx = 0): void {
       const query = q.toLowerCase().trim();
       this._filtered = query ? this._values.filter(o => o.label.toLowerCase().includes(query)) : this._values;
-      this._activeIdx = 0;
+      this._activeIdx = activeIdx;
       this._list.innerHTML = this._filtered.length
-        ? this._filtered.map((o, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${Util.escapeHtml(o.label)}</div>`).join('')
+        ? this._filtered.map((o, i) => `<div class="nse-opt${i === activeIdx ? ' active' : ''}" id="nse-opt-${i}" role="option" aria-selected="${i === activeIdx}" data-i="${i}">${Util.escapeHtml(o.label)}</div>`).join('')
         : `<div class="nse-empty">${Util.t('ui.no_matches')}</div>`;
+      this._syncActive(false);
       this._list.querySelectorAll('.nse-opt').forEach((el) => {
         el.addEventListener('mousedown', (e: Event) => { e.preventDefault(); this._choose(Number((el as HTMLElement).dataset.i)); });
       });
@@ -2080,16 +2100,34 @@ export const Table = {
     _onKeyDown(e: KeyboardEvent): void {
       if (e.key === 'ArrowDown') { e.preventDefault(); this._move(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); this._move(-1); }
-      else if (e.key === 'Enter') { e.preventDefault(); this._choose(this._activeIdx); }
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        // Enter on an untouched editor keeps the current value instead of reassigning to the highlighted row.
+        if (this._untouched) this._params.api.stopEditing(true);
+        else this._choose(this._activeIdx);
+      }
       else if (e.key === 'Escape') { this._params.api.stopEditing(true); }
     }
     _move(delta: number): void {
       if (!this._filtered.length) return;
+      this._untouched = false;
       this._activeIdx = (this._activeIdx + delta + this._filtered.length) % this._filtered.length;
-      this._list.querySelectorAll('.nse-opt').forEach((el, i) => el.classList.toggle('active', i === this._activeIdx));
+      this._syncActive(true);
+    }
+    /** Marks the active option (class, aria-selected, aria-activedescendant) and keeps it in view. */
+    _syncActive(scroll: boolean): void {
+      this._list.querySelectorAll('.nse-opt').forEach((el, i) => {
+        const on = i === this._activeIdx;
+        el.classList.toggle('active', on);
+        el.setAttribute('aria-selected', String(on));
+        if (on) {
+          this._input.setAttribute('aria-activedescendant', (el as HTMLElement).id);
+          if (scroll) (el as HTMLElement).scrollIntoView?.({ block: 'nearest' });
+        }
+      });
     }
     getGui(): HTMLDivElement { return this._eGui; }
-    afterGuiAttached(): void { this._input.focus(); this._input.select(); }
+    afterGuiAttached(): void { this._input.focus(); this._input.select(); this._syncActive(true); }
     getValue(): string | null {
       if (this._chosen != null) return this._chosen;
       const typed = this._input.value.trim().toLowerCase();
@@ -2124,6 +2162,44 @@ type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaEleme
  *  "Unfirm" silently no-ops from the planner's point of view. Called from
  *  every unfirm entry point: context-menu, Inspector, F-key, Dashboard. */
 /** Click-time mismatch message: still locked (frozen/running) vs. already changed elsewhere (another tab). */
+/** Index of the option whose value equals `current` (0 when none does or nothing is current). */
+export function initialActiveIndex(options: ReadonlyArray<{ value: string }>, current: string | null | undefined): number {
+  if (current == null || current === '') return 0;
+  const i = options.findIndex(o => o.value === current);
+  return i >= 0 ? i : 0;
+}
+
+/** A FastAPI error body's `detail` as one readable string: a string as-is, a 422 array as its messages joined. */
+export function formatApiDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map(d => (d && typeof d === 'object' && 'msg' in d ? String((d as { msg: unknown }).msg) : String(d))).join('; ');
+  }
+  return fallback;
+}
+
+/** True when the task belongs to `plant`: its own PLANT, else the plant its line maps to. */
+export function inSelectedPlantFor(t: { PLANT?: string | null; MACHINE?: string | null }, plant: string | null | undefined,
+  plantForLine: (machine: string) => string | null | undefined): boolean {
+  if (!plant) return false;
+  return (t.PLANT || plantForLine(t.MACHINE as string)) === plant;
+}
+
+/** Whether the open Inspector must re-render for a Store event. Pure: the subscriber supplies the open id and
+ *  whether the notes textarea holds focus. A re-render replaces the panel's innerHTML, so it is skipped for note
+ *  saves (they would swallow the next click), for events that do not name the open order, and while typing a note. */
+export function inspectorShouldRerender(evt: { type?: string; source?: string; id?: unknown; ids?: unknown },
+  currentId: string | null, notesFocused: boolean): boolean {
+  if (!currentId) return false;
+  if (notesFocused) return false;
+  if (evt.source === 'note') return false;
+  if (evt.type === 'task:update') return String(evt.id) === currentId;
+  if (evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change') {
+    return Array.isArray(evt.ids) && (evt.ids as unknown[]).some(i => String(i) === currentId);
+  }
+  return evt.type === 'tasks:bulk' || evt.type === 'setup-snapshot:replace';
+}
+
 export function firmMismatchMessage(task: NimbusTask | undefined): string {
   return Util.t(task && Engine.firmActionFor(task) === null ? 'toast.still_firmed' : 'toast.firm_state_changed');
 }
@@ -2277,15 +2353,12 @@ export const Inspector = {
         }
         return;
       }
-      if (!Inspector._currentId) return;
-      if (evt.type === 'task:update' && String(evt.id) === Inspector._currentId) {
-        Inspector._render(Store.tasks[Inspector._currentId]);
-      } else if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change'
-          || evt.type === 'setup-snapshot:replace') {
-        const t = Store.tasks[Inspector._currentId];
-        if (t) Inspector._render(t);
-        else Inspector.clear();
-      }
+      const notesFocused = typeof document !== 'undefined'
+        && !!(document.activeElement as HTMLElement | null)?.matches?.('[data-field="notes"]');
+      if (!inspectorShouldRerender(evt, Inspector._currentId, notesFocused)) return;
+      const t = Store.tasks[Inspector._currentId!];
+      if (t) Inspector._render(t);
+      else if (evt.type !== 'task:update') Inspector.clear();
     }, 'Inspector');
   },
 
@@ -2600,17 +2673,6 @@ export const Inspector = {
     // Due Date shows the due instant (Util.dueInstant), never the raw midnight SAP date.
     const dueInstant = Util.dueDisplayDate(task);
     const systemMoveLine = Inspector._systemMoveLine(task);
-    const setupDetail = Inspector._setupDetailForTask(task);
-    const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
-    const missingSetupPlaceholder = '—';
-    const firstOnMachine = Util.t('ui.setup_first_on_machine');
-    const setupPredecessorText = setupDetail.predecessorOrderId === undefined
-      ? missingSetupPlaceholder
-      : setupDetail.predecessorOrderId
-        ? Util.orderNumber(Store.tasks[setupDetail.predecessorOrderId], setupDetail.predecessorOrderId)
-        : (firstOnMachine === 'ui.setup_first_on_machine' ? 'First on machine' : firstOnMachine);
-    const setupPlant = Store.getPlantForLine(task.MACHINE) || task.PLANT || Store.selectedPlant || '';
-    const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
     // Distribution card (aggregate_to_detail.md §8): only rendered for a
     // sub-order (PARENT_ORDER set). Share % is this child's quantity over
     // the sum of all living siblings' quantities (siblings = other tasks
@@ -2708,16 +2770,16 @@ export const Inspector = {
         <div class="insp-row"><label>${Util.t('ui.insp_due_date')}</label>
           <div class="insp-val">${dueInstant ? Util.fmtDTReadable(dueInstant) : '—'}</div></div>` : ''}
         <div class="insp-row"><label>${Util.t('ui.insp_planned_start')}</label>
-          <div class="insp-val">${task.start_date ? Util.fmtDTReadable(task.start_date) : '—'}</div></div>
+          <div class="insp-val" data-insp-start>${task.start_date ? Util.fmtDTReadable(task.start_date) : '—'}</div></div>
         <div class="insp-row"><label>${Util.t('ui.insp_planned_finish')}</label>
           <div class="insp-val"><input type="text" data-field="end_date" value="${Util.toLocalInput(task.end_date)}">
-            ${Inspector._varianceBadge(task)}</div></div>
+            <span data-insp-variance>${Inspector._varianceBadge(task)}</span></div></div>
         ${systemMoveLine ? `<div class="insp-split-summary-note">${Util.escapeHtml(systemMoveLine)}</div>` : ''}
         <div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
           <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}" ${task.planning_reason?.code === 'runtime_unknown' ? '' : `disabled title="${Util.escapeHtml(Util.t('ui.insp_run_time_locked_title'))}"`}></div></div>
         ${task.run_time_source && Inspector._fieldVisible('run_time_basis') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_runtime_basis')}</label>
-          <div class="insp-val">${Util.escapeHtml(Inspector._formatRuntimeBasis(task))}</div></div>` : ''}
+          <div class="insp-val" data-insp-basis>${Util.escapeHtml(Inspector._formatRuntimeBasis(task))}</div></div>` : ''}
       </div>
 
       ${(() => {
@@ -2757,19 +2819,7 @@ export const Inspector = {
         </div>
       </div>` : ''}
 
-      <div class="insp-card insp-setup-detail" aria-label="${Util.escapeHtml(Util.t('ui.setup_detail_title'))}">
-        <h4>${Util.escapeHtml(Util.t('ui.setup_detail_title'))}</h4>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${Util.escapeHtml(setupPredecessorText)}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? missingSetupPlaceholder : `${setupDetail.standardMinutes} min`}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_source'))}</label><div class="insp-val">${Util.escapeHtml(setupSourceLabel(setupDetail.source) || missingSetupPlaceholder)}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_override'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.overrideStatus === 'none' ? Util.t('ui.setup_override_none') : (setupDetail.overrideStatus || missingSetupPlaceholder))}</div></div>
-        ${setupCapacityConflict ? `<p class="insp-setup-warning">${Util.escapeHtml(setupCapacityConflict)}</p>` : ''}
-        ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${Util.escapeHtml(Util.t('ui.setup_missing'))}: ${Util.escapeHtml(setupDetail.missingDetail)}</p>` : ''}
-        ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>Correct actual setup state</button><button class="btn btn-ghost sm" data-setup-adjust-time>Adjust setup time</button><div data-setup-editor-host></div></div>` : ''}
-      </div>
+      ${Inspector._setupCardHtml(task)}
 
       <div class="insp-card">
         <h4>${Util.t('ui.insp_notes_section')}</h4>
@@ -2813,12 +2863,7 @@ export const Inspector = {
       const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;
       app?.gotoGanttSub?.('distribution');
     });
-    body.querySelector<HTMLButtonElement>('[data-setup-correct-state]')?.addEventListener('click', () => {
-      const snapshot = Store.setupSnapshot;
-      const host = body.querySelector<HTMLElement>('[data-setup-editor-host]');
-      if (snapshot && host && setupPlant) SetupAdmin.mountStateEditor(host, snapshot, task.MACHINE, () => Inspector._refreshSetupTruth(setupPlant));
-    });
-    body.querySelector<HTMLButtonElement>('[data-setup-adjust-time]')?.addEventListener('click', () => Inspector._showSetupOverrideEditor(task, setupPlant));
+    Inspector._wireSetupCard(body, task);
     // Notes char counter (oninput fires on every keystroke)
     const notesEl = body.querySelector('[data-field="notes"]') as HTMLTextAreaElement | null;
     const notesRemEl = body.querySelector('#insp-notes-rem');
@@ -2838,6 +2883,50 @@ export const Inspector = {
       });
     }
     Inspector._fillHistory(_id);
+  },
+
+  _setupPlantFor(task: NimbusTask): string {
+    return Store.getPlantForLine(task.MACHINE) || task.PLANT || Store.selectedPlant || '';
+  },
+
+  /** The Setup detail card for an order (the full card markup; `_render` and `refreshDerived` both place it). */
+  _setupCardHtml(task: NimbusTask): string {
+    const setupDetail = Inspector._setupDetailForTask(task);
+    const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
+    const missingSetupPlaceholder = '—';
+    const firstOnMachine = Util.t('ui.setup_first_on_machine');
+    const setupPredecessorText = setupDetail.predecessorOrderId === undefined
+      ? missingSetupPlaceholder
+      : setupDetail.predecessorOrderId
+        ? Util.orderNumber(Store.tasks[setupDetail.predecessorOrderId], setupDetail.predecessorOrderId)
+        : (firstOnMachine === 'ui.setup_first_on_machine' ? 'First on machine' : firstOnMachine);
+    const setupPlant = Inspector._setupPlantFor(task);
+    const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
+    return `
+      <div class="insp-card insp-setup-detail" aria-label="${Util.escapeHtml(Util.t('ui.setup_detail_title'))}">
+        <h4>${Util.escapeHtml(Util.t('ui.setup_detail_title'))}</h4>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${Util.escapeHtml(setupPredecessorText)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? missingSetupPlaceholder : `${setupDetail.standardMinutes} min`}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_source'))}</label><div class="insp-val">${Util.escapeHtml(setupSourceLabel(setupDetail.source) || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_override'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.overrideStatus === 'none' ? Util.t('ui.setup_override_none') : (setupDetail.overrideStatus || missingSetupPlaceholder))}</div></div>
+        ${setupCapacityConflict ? `<p class="insp-setup-warning">${Util.escapeHtml(setupCapacityConflict)}</p>` : ''}
+        ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${Util.escapeHtml(Util.t('ui.setup_missing'))}: ${Util.escapeHtml(setupDetail.missingDetail)}</p>` : ''}
+        ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>Correct actual setup state</button><button class="btn btn-ghost sm" data-setup-adjust-time>Adjust setup time</button><div data-setup-editor-host></div></div>` : ''}
+      </div>`;
+  },
+
+  /** Wires the card's Correct state / Adjust time buttons (after `_render` or after the card is replaced). */
+  _wireSetupCard(body: HTMLElement, task: NimbusTask): void {
+    const setupPlant = Inspector._setupPlantFor(task);
+    body.querySelector<HTMLButtonElement>('[data-setup-correct-state]')?.addEventListener('click', () => {
+      const snapshot = Store.setupSnapshot;
+      const host = body.querySelector<HTMLElement>('[data-setup-editor-host]');
+      if (snapshot && host && setupPlant) SetupAdmin.mountStateEditor(host, snapshot, task.MACHINE, () => Inspector._refreshSetupTruth(setupPlant));
+    });
+    body.querySelector<HTMLButtonElement>('[data-setup-adjust-time]')?.addEventListener('click', () => Inspector._showSetupOverrideEditor(task, setupPlant));
   },
 
   async _refreshSetupTruth(plant: string): Promise<void> {
@@ -2867,6 +2956,11 @@ export const Inspector = {
     host.innerHTML = `<div class="setup-state-editor" data-setup-override-editor><label>Reason<input class="input" data-setup-override-reason></label>${baseline != null ? `<label>Adjustment (minutes)<input class="input" type="number" step="1" data-setup-override-adjustment value="${initialAdjustment}"></label><p class="setup-editor-note">Matrix baseline: ${baseline} min. Remaining work is baseline plus adjustment.</p>` : `<label>Total setup duration (minutes)<input class="input" type="number" min="0" step="1" data-setup-override-total></label><p class="setup-editor-note">No matrix baseline exists; this total applies only to this exact order pair.</p>`}<div class="insp-actions"><button class="btn btn-primary sm" data-setup-save-override>Save setup time</button>${existing ? '<button class="btn btn-ghost sm" data-setup-reset-override>Reset to matrix</button>' : ''}</div></div>`;
     const reason = host.querySelector<HTMLInputElement>('[data-setup-override-reason]')!;
     reason.value = existing?.reason || '';
+    // Both buttons stay disabled while a request is in flight (no double save / save-then-reset race).
+    const setBusy = (busy: boolean): void => {
+      host.querySelectorAll<HTMLButtonElement>('[data-setup-save-override], [data-setup-reset-override]')
+        .forEach(b => { b.disabled = busy; });
+    };
     host.querySelector<HTMLButtonElement>('[data-setup-save-override]')!.addEventListener('click', async () => {
       const values = Inspector._setupOverrideValues(baseline, host.querySelector<HTMLInputElement>('[data-setup-override-adjustment]')?.value || '', host.querySelector<HTMLInputElement>('[data-setup-override-total]')?.value || '');
       if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
@@ -2874,20 +2968,24 @@ export const Inspector = {
       const payload = { machine: task.MACHINE, standard_min: values.standardMin, remaining_min: values.remainingMin, signature_version: definition.signature_version, reason: reason.value.trim() };
       const url = existing ? `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}` : `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides`;
       const body = existing ? payload : { ...payload, predecessor_order_id: context.predecessorOrderId, successor_order_id: String(task.id), predecessor_values: Object.fromEntries(context.predecessorState.map(part => [part.fieldKey, part.value])), successor_values: Object.fromEntries(context.successorState.map(part => [part.fieldKey, part.value])) };
+      setBusy(true);
       try {
         const response = await Util.fetchTraced(url, { method: existing ? 'PUT' : 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify(body) });
-        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(formatApiDetail(error.detail, `HTTP ${response.status}`)); }
         Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show('Setup time saved.', 'success');
       } catch (error) { Toast.show(`Could not save setup time: ${(error as Error).message}`, 'error'); }
+      finally { setBusy(false); }
     });
     host.querySelector<HTMLButtonElement>('[data-setup-reset-override]')?.addEventListener('click', async () => {
       if (!existing) return;
       if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
+      setBusy(true);
       try {
         const response = await Util.fetchTraced(`${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}`, { method: 'DELETE', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify({ machine: task.MACHINE, signature_version: definition.signature_version, reason: reason.value.trim() }) });
-        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
+        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(formatApiDetail(error.detail, `HTTP ${response.status}`)); }
         Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show('Setup override reset to matrix.', 'success');
       } catch (error) { Toast.show(`Could not reset setup time: ${(error as Error).message}`, 'error'); }
+      finally { setBusy(false); }
     });
   },
 
@@ -3016,6 +3114,7 @@ export const Inspector = {
     Store.updateTask(id, changes, 'inspector');
     if (undoSnap) Table._pushPairUndo(id, undoSnap);
     Alerts.scheduleRecompute();
+    Inspector.refreshDerived(id);
   },
 
   // Per-id debounce timers. A single shared debounce timer (the old design) meant a
@@ -3089,6 +3188,33 @@ export const Inspector = {
     root.querySelector('[data-act="firm"]')?.addEventListener('click', () => Inspector.toggleFirm(true));
     root.querySelector('[data-act="unfirm"]')?.addEventListener('click', () => Inspector.toggleFirm(false));
     void id;
+  },
+
+  /** Patches only the DERIVED rows of the open order after an Inspector write (Planned start, variance badge,
+   *  Run time, runtime basis, Setup card). A full `_render` would replace the field being edited (focus), the
+   *  Notes textarea, Flatpickr and the History card, which is why the subscriber ignores source 'inspector'. */
+  refreshDerived(id: string | null | undefined): void {
+    if (!id || id !== Inspector._currentId) return;
+    const task = Store.tasks[id];
+    const body = document.getElementById('inspector-body');
+    if (!task || !body) return;
+    const start = body.querySelector('[data-insp-start]');
+    if (start) start.textContent = task.start_date ? Util.fmtDTReadable(task.start_date) : '—';
+    const variance = body.querySelector('[data-insp-variance]');
+    if (variance) variance.innerHTML = Inspector._varianceBadge(task);
+    const run = body.querySelector<HTMLInputElement>('[data-field="RUN_TIME"]');
+    if (run && document.activeElement !== run) run.value = String(task.RUN_TIME || 0);
+    const basis = body.querySelector('[data-insp-basis]');
+    if (basis) basis.textContent = Inspector._formatRuntimeBasis(task);
+    const card = body.querySelector<HTMLElement>('.insp-setup-detail');
+    // Leave an open setup editor alone: replacing the card would discard what the planner is typing.
+    if (card && !card.querySelector('[data-setup-override-editor]')
+        && !card.querySelector('[data-setup-editor-host]')?.hasChildNodes()) {
+      const holder = document.createElement('div');
+      holder.innerHTML = Inspector._setupCardHtml(task);
+      const fresh = holder.firstElementChild as HTMLElement | null;
+      if (fresh) { card.replaceWith(fresh); Inspector._wireSetupCard(body, task); }
+    }
   },
 
   /** Partial patch of the lock block and the firm button for the open order (C-3). Called by the Gantt's
