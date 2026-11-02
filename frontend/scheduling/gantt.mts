@@ -34,6 +34,7 @@ import { CALENDAR_ALERT_TYPES, ALERT_CATEGORY_ORDER } from '../insights/alert-pr
 import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { Persistence } from './persistence.mjs';
+import { createDragGate } from './drag-state.mjs';
 import { Table, Inspector, ContextMenu, notifyResidualFirming } from './orders.mjs';
 import type { AgGridRowNode } from './orders.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertCategory, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';
@@ -398,6 +399,7 @@ export const Timeline = {
       // left handle moves nothing (a left-edge change that still reaches the commit is reverted with a toast).
       onMoving: (item: TimelineVisItem, callback: (item: TimelineVisItem | null) => void) => {
         // Drag-time row dim hangs here (a per-frame vis callback), NOT on `timechange` (custom-time-bar events only).
+        Interaction._beginItemDrag();   // first frame of an item drag: makes Interaction._isDragging truthful (timechange never fires for items)
         try { Timeline.onItemMoving(String(item.id)); } catch (e) { ErrorLog.warn('timeline', 'row dim failed: ' + String(e)); }
         // Never strip `subgroup` here: vis runs _moveToGroup BEFORE it assigns the new data, so the
         // hovered row would register the old lane and a later orderSubgroups throws on the dangling entry.
@@ -4990,6 +4992,9 @@ export const Interaction = {
     });
 
     /* ----- Multi-drag ghost preview via timechange ----------------------- */
+    // NOTE: browser-verified 2026-11: vis-timeline emits NO timechange/timechanged for ITEM drags (custom-time bars
+    // only), so these two bindings are dead for item drags: the ghost previews and edge auto-scroll never run. Left
+    // as is on purpose; _isDragging is driven by onMoving + pointerup instead (see _beginItemDrag/_endItemDrag).
     Timeline._tl.on('timechange', props => Interaction._onTimeChange(props as VisTimeChangeProps));
     Timeline._tl.on('timechanged', ()   => Interaction._clearGhosts());
 
@@ -5001,7 +5006,7 @@ export const Interaction = {
     document.addEventListener('mousemove', this._edgeScrollTrackBound);
 
     /* ----- End of any pointer gesture: clear the drag-time row dim (vis has no cancel event for item drags) ---- */
-    this._dimPointerEndBound = () => Timeline.undimRowsForDrag();
+    this._dimPointerEndBound = () => { Timeline.undimRowsForDrag(); Interaction._endItemDrag(); };
     document.addEventListener('pointerup', this._dimPointerEndBound);
     document.addEventListener('pointercancel', this._dimPointerEndBound);
 
@@ -5781,6 +5786,7 @@ export const Interaction = {
   _onDataSetUpdate(props: InteractionDataSetUpdateProps, opts: ManualPlacementOptions = {}): void {
     // The drop ends the drag: clear the row dim before any branch (and every `continue`) below.
     Timeline.undimRowsForDrag();
+    Interaction._endItemDrag();   // defensive: the drop's update normally lands before/with pointerup
     for (const rawId of props.items) {
       const itemId = String(rawId);
       const id = Interaction._businessOrderIdForItem(itemId);
@@ -6126,6 +6132,19 @@ export const Interaction = {
   _ghostDragId: null as string | null,
   _edgeScrollRAF: null as number | null,
   _isDragging: false,
+  _dragGate: createDragGate(),
+  /** First `onMoving` frame of an item drag (idempotent): _isDragging goes true. */
+  _beginItemDrag(): void {
+    if (this._dragGate.begin()) this._isDragging = true;
+  },
+  /** pointerup / pointercancel / dropped item's DataSet update (idempotent). On the real end edge, run any
+   *  calendar / tool-inventory refresh that the drag blocked (Persistence._calendarRefreshBlocked). */
+  _endItemDrag(): void {
+    if (!this._dragGate.end()) return;
+    this._isDragging = false;
+    try { Persistence.runDeferredRefreshes().then(changed => { if (changed) Timeline._scheduleRebuild(); }, () => {}); }
+    catch (e) { ErrorLog.warn('timeline', 'deferred refresh after drag failed: ' + String(e)); }
+  },
   _lastDragEndTs: 0,          // ms of the last committed drag; gates CENTER_ON_CLICK auto-center
   _dragMouseX: null as number | null,
 
@@ -6263,6 +6282,7 @@ export const Interaction = {
 
   /** Clear ghost states from all companion items after drag ends. */
   _clearGhosts(): void {
+    this._dragGate.end();
     this._isDragging = false;
     if (this._edgeScrollRAF) { cancelAnimationFrame(this._edgeScrollRAF); this._edgeScrollRAF = null; }
 

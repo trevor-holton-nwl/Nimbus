@@ -45,6 +45,7 @@ frontend/scheduling/gantt.mjs
 frontend/scheduling/gantt-legend.mjs
 frontend/scheduling/gantt-lanes.mjs
 frontend/scheduling/nonworking-spans.mjs
+frontend/scheduling/drag-state.mjs
 frontend/scheduling/orders.mjs
 frontend/scheduling/planning-reason.mjs
 frontend/optimization/optimize-ui.mjs
