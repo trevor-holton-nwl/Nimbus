@@ -435,7 +435,7 @@ test('Timeline.rebuildSetupForLines batches setup additions, updates, and remova
   ]);
   Timeline._items = {
     getIds: () => [...records.keys()],
-    get: id => records.get(String(id)),
+    get: id => (id && typeof id === 'object') ? [...records.values()].filter(id.filter) : (records.get(String(id))),
     add: items => { calls.add++; for (const item of items) records.set(item.id, item); },
     update: items => { calls.update++; for (const item of items) records.set(item.id, item); },
     remove: ids => { calls.remove++; for (const id of ids) records.delete(String(id)); },
@@ -474,7 +474,7 @@ test('Timeline.finishSetupDrag clears retained setup-item dimming after a cancel
     className: 'setup-item setup-drag-dim', style: 'opacity:0.18;',
   }]]);
   Timeline._items = {
-    getIds: () => [...records.keys()], get: id => records.get(String(id)),
+    getIds: () => [...records.keys()], get: id => (id && typeof id === 'object') ? [...records.values()].filter(id.filter) : (records.get(String(id))),
     add(items) { for (const item of items) records.set(item.id, item); },
     update(items) { for (const item of items) records.set(item.id, { ...records.get(item.id), ...item }); },
     remove(ids) { for (const id of ids) records.delete(String(id)); },
@@ -2719,7 +2719,7 @@ function nwFakeItems() {
   return {
     records, calls,
     getIds: () => [...records.keys()],
-    get: id => records.get(String(id)) ?? null,
+    get: id => (id && typeof id === 'object') ? [...records.values()].filter(id.filter) : (records.get(String(id)) ?? null),
     add: items => { calls.add.push(items.map(i => i.id)); for (const i of items) records.set(i.id, i); },
     update: items => { calls.update.push(items.map(i => i.id)); for (const i of items) records.set(i.id, i); },
     remove: ids => { calls.remove.push([...ids]); for (const id of ids) records.delete(String(id)); },

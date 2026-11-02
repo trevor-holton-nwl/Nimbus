@@ -560,6 +560,7 @@ export const Timeline = {
         Timeline._lastFirmScanTs = Date.now();
         const next = new Set<string>();
         Timeline._clockMemo = new Map();   // U26: one plant clock per plant for the whole scan
+        Timeline._frozenEndMemo = { v: Engine.frozenHorizonEnd() };   // W7: the rolling far edge, resolved once per scan
         try {
           // S1-1/S1-10: the same line-filtered set rebuild() seeds _frozenBandIds from.
           const lineVisible = Timeline._lineVisiblePredicate();
@@ -572,7 +573,7 @@ export const Timeline = {
             for (const id of prev) if (!next.has(id)) Timeline._applyTaskPatch(id);
             for (const id of next) if (!prev.has(id)) Timeline._applyTaskPatch(id);
           }
-        } finally { Timeline._clockMemo = null; }
+        } finally { Timeline._clockMemo = null; Timeline._frozenEndMemo = null; }
         Timeline._frozenBandIds = next;
       }
       PerfMonitor.record('Timeline.ticker', performance.now() - _pmT0);
@@ -586,8 +587,14 @@ export const Timeline = {
    *  Running is included so an order that starts while the page is open gets its running lock
    *  styling without a reload (C5). */
   _inLockBand(t: NimbusTask, now: Date = Timeline._nowFor(t)): boolean {
-    return Engine.isFrozenHorizon(t, now) || Engine.isInProgress(t, now);
+    // W7: inside a rebuild pass / 30 s scan the frozen far edge (selected plant's rolling now + N days) is the
+    // same instant for every task, so it is resolved once and handed to Engine.isFrozenHorizon (same result as
+    // the per-task Engine.frozenHorizonEnd() read it replaces).
+    const memo = Timeline._frozenEndMemo;
+    return (memo ? Engine.isFrozenHorizon(t, now, memo.v) : Engine.isFrozenHorizon(t, now)) || Engine.isInProgress(t, now);
   },
+  /** Per-pass frozen far edge for _inLockBand (W7); null outside a pass. */
+  _frozenEndMemo: null as { v: Date | null } | null,
 
   /** "Now" at a plant: the server instant in the plant's zone, as the naive wall-clock Date the bars use (the
    *  one clock, OQ52). The viewer's own clock only when the plant has no valid zone (it is then blocked and
@@ -882,8 +889,18 @@ export const Timeline = {
     } else if (evt.type === 'task:update' && evt.id != null) {
       Timeline._applyTaskPatch(String(evt.id));
     } else if (evt.type === 'firmed:change') {
-      // just re-render those items' className
-      for (const id of (evt.ids as Array<string | number>)) Timeline._applyTaskPatch(String(id));
+      // just re-render those items' className. S1-5: one batched DataSet write (like tasks:bulkUpdate above);
+      // a split order (several items) still falls back to a coalesced rebuild, as _applyTaskPatch does.
+      const patches: TimelineVisItem[] = [];
+      let needRebuild = false;
+      for (const id of (evt.ids as Array<string | number>)) {
+        const sid = String(id);
+        if (Timeline.hasMultipleItemsForTask(sid)) { needRebuild = true; continue; }
+        const patch = Timeline._itemPatchFor(sid);
+        if (patch) patches.push(patch);
+      }
+      if (needRebuild) Timeline._scheduleRebuild();
+      if (patches.length) Timeline._writePatches(patches);
     } else if (evt.type === 'alerts:change') {
       if (Timeline._ganttActive()) {
         // rebuild() reconciles the alert-cell background items, so a per-task
@@ -1394,6 +1411,15 @@ export const Timeline = {
 
   /** A move invalidates adjacency-derived setup on only its source/target
    * lines; production patching remains owned by the Store subscriber. */
+  /** S1-8: the setup bars (kind 'setup') on the given lines, read with ONE filtered DataSet.get instead of
+   *  getIds() + a get() per id over every item of the plant. */
+  _setupItemsOnLines(lines: ReadonlySet<string>): TimelineVisItem[] {
+    const found = (Timeline._items as unknown as { get(opts: unknown): unknown }).get({
+      filter: (item: TimelineVisItem) => item.kind === 'setup' && !!item.group && lines.has(item.group),
+    }) as unknown;
+    return Array.isArray(found) ? found as TimelineVisItem[] : [];
+  },
+
   rebuildSetupForLines(lines: ReadonlySet<string>): void {
     if (!Timeline._items || typeof Timeline._items.getIds !== 'function' || !lines.size) return;
     const _deriveT0 = performance.now();
@@ -1404,10 +1430,7 @@ export const Timeline = {
       .map(item => [String(item.id), Timeline._decorateLane(item)] as const));
     PerfMonitor.record('Timeline.setup.derive', performance.now() - _deriveT0);
     const _diffT0 = performance.now();
-    const current = Timeline._items.getIds().map(String).filter(id => {
-      const item = Timeline._items!.get(id) as TimelineVisItem | null;
-      return item?.kind === 'setup' && !!item.group && lines.has(item.group);
-    });
+    const current = Timeline._setupItemsOnLines(lines).map(item => String(item.id));
     const currentIds = new Set(current);
     const add: TimelineVisItem[] = [], update: TimelineVisItem[] = [], remove: string[] = [];
     for (const [id, item] of desired) (currentIds.has(id) ? update : add).push(item);
@@ -1508,12 +1531,8 @@ export const Timeline = {
     const newlyAffected = new Set([...lines].filter(line => !Timeline._dragSetupLines.has(line)));
     if (!newlyAffected.size) return;
     for (const line of newlyAffected) Timeline._dragSetupLines.add(line);
-    const updates = Timeline._items.getIds().map(String).flatMap(id => {
-      const item = Timeline._items!.get(id) as TimelineVisItem | null;
-      return item?.kind === 'setup' && !!item.group && newlyAffected.has(item.group)
-        ? [{ id, className: `${item.className || 'setup-item'} setup-drag-dim`, style: 'opacity:0.18;' }]
-        : [];
-    });
+    const updates = Timeline._setupItemsOnLines(newlyAffected).map(item =>
+      ({ id: String(item.id), className: `${item.className || 'setup-item'} setup-drag-dim`, style: 'opacity:0.18;' }));
     if (!updates.length) return;
     Timeline._suppressEvents = true;
     try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = false; }
@@ -1572,12 +1591,19 @@ export const Timeline = {
    *  avoids the clear/add flicker of a wholesale replacement.               */
   rebuild(): void {
     // U26: every order of this pass reads its plant's clock; resolve each plant once, not once per order.
+    // A coalesced rebuild already queued is overtaken by this direct pass (the state it was queued for is
+    // being painted now); drop it so one user action makes one pass, not two. A later schedule queues afresh.
+    if (Timeline._rebuildRaf && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(Timeline._rebuildRaf as number);
+      Timeline._rebuildRaf = null;
+    }
     Timeline._clockMemo = new Map();
+    Timeline._frozenEndMemo = { v: Engine.frozenHorizonEnd() };   // W7: one frozen far edge per pass
     // A rebuild ends the gesture the multi-drag line-lock toast latch belongs to. The row dim is NOT cleared
     // here: a rebuild mid-drag must keep it (the group className composer reads it); drop, pointerup and a
     // plant switch clear it.
     Interaction._multiLockToast = null;
-    try { Timeline._rebuildPass(); } finally { Timeline._clockMemo = null; }
+    try { Timeline._rebuildPass(); } finally { Timeline._clockMemo = null; Timeline._frozenEndMemo = null; }
   },
 
   _rebuildPass(): void {
@@ -3169,6 +3195,7 @@ export const TimelineNav = {
   _ctx:       null as CanvasRenderingContext2D | null,
   _container: null as HTMLElement | null,
   _dirty:     true,
+  _closedDayMemo: null as { key: string; value: boolean[] } | null,   // S3-7
   _rafId:     null as number | null,
   _model:     null as _NavModel | null,
   _lastCssW:  0,
@@ -3517,13 +3544,22 @@ export const TimelineNav = {
 
     // A day is closed only when NO visible line has a work window — early
     // exit on the first open line, so the typical cost is one call per day.
-    const closedDay: boolean[] = new Array(range.dayStarts.length).fill(true);
-    for (let i = 0; i < range.dayStarts.length; i++) {
-      for (const line of lines) {
-        try {
-          if (Calendar.workWindow(line, new Date(range.dayStarts[i])) !== null) { closedDay[i] = false; break; }
-        } catch { closedDay[i] = false; break; } // treat as open on error
+    // S3-7: memoised per (day range, visible lines, Store.rev()) — every calendar / block / plant / master-data
+    // change is a Store event that bumps rev(), so a pan or resize repaint reuses the last answer.
+    const closedKey = `${Store.rev()}|${range.dayStarts[0] ?? ''}|${range.dayStarts.length}|${lines.join('')}`;
+    let closedDay: boolean[];
+    if (TimelineNav._closedDayMemo && TimelineNav._closedDayMemo.key === closedKey) {
+      closedDay = TimelineNav._closedDayMemo.value;
+    } else {
+      closedDay = new Array(range.dayStarts.length).fill(true);
+      for (let i = 0; i < range.dayStarts.length; i++) {
+        for (const line of lines) {
+          try {
+            if (Calendar.workWindow(line, new Date(range.dayStarts[i])) !== null) { closedDay[i] = false; break; }
+          } catch { closedDay[i] = false; break; } // treat as open on error
+        }
       }
+      TimelineNav._closedDayMemo = { key: closedKey, value: closedDay };
     }
 
     let histAll: Float64Array | null = null;
@@ -4568,6 +4604,8 @@ export const GanttFilter = {
   },
 
   _apply: null as (() => void) | null,  // assigned below after Util is in scope
+  /** True once a filter-active _doApply pass may have dimmed items (S3-6). */
+  _dimmedAny: false,
 
   _doApply(): void {
     if (!Timeline._items) return;
@@ -4576,7 +4614,10 @@ export const GanttFilter = {
     const bar   = document.getElementById('gantt-filterbar');
 
     const updates: Array<{ id: string; className: string }> = [];
-    const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
+    // S3-6: with no filter active and nothing dimmed by an earlier pass there is no class to change, so skip
+    // the O(tasks) scan; the badge/bar refresh below still runs.
+    const scoped = (Store.selectedPlant && (active || GanttFilter._dimmedAny)) ? Store.tasksForSelectedPlant() : [];
+    GanttFilter._dimmedAny = active;
     for (const task of scoped) {
       if (!task.start_date || !task.end_date) continue;
       const id = String(task.id);
@@ -6503,13 +6544,11 @@ export const Interaction = {
       if (!Table || !Table._api) return;
       try {
         Table._suppressSelectionEcho = true;
-        Table._api.deselectAll();
-        Table._api.forEachNode((rawNode) => {
-          const node = rawNode as AgGridRowNode;
-          if (node.data && evt.ids.includes(String(node.data.id))) {
-            node.setSelected(true, false);
-          }
-        });
+        // S4-5: diff against the grid's current selection and touch only the rows that changed.
+        const want = new Set(evt.ids.map(String));
+        const have = new Set((Table._api.getSelectedRows() as NimbusTask[]).map(r => String(r.id)));
+        for (const id of have) if (!want.has(id)) (Table._api.getRowNode(id) as AgGridRowNode | undefined)?.setSelected(false, false);
+        for (const id of want) if (!have.has(id)) (Table._api.getRowNode(id) as AgGridRowNode | undefined)?.setSelected(true, false);
       } catch (e: unknown) {
         ErrorLog.warn('interaction', `Table sync failed: ${e instanceof Error ? e.message : String(e)}`);
       } finally {
