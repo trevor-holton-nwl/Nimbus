@@ -4511,3 +4511,25 @@ test('Hierarchy.render shows the chosen day: chip, task count and order list', (
   assert.equal(shown.at(-1)[0].pct, null);                 // nothing scheduled that day: dash chip
   assert.equal(shown.at(-1)[0].tasks.length, 0);
 });
+
+test('shortcutTargetIgnored: fields, dropdowns, buttons and comboboxes own their keys', async () => {
+  const { shortcutTargetIgnored } = await import('../../../frontend/scheduling/gantt.mjs');
+  for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']) assert.equal(shortcutTargetIgnored({ tagName }), true, tagName);
+  assert.equal(shortcutTargetIgnored({ tagName: 'DIV', isContentEditable: true }), true);
+  assert.equal(shortcutTargetIgnored({ tagName: 'DIV', getAttribute: n => (n === 'role' ? 'combobox' : null) }), true);
+  assert.equal(shortcutTargetIgnored({ tagName: 'DIV', getAttribute: () => null }), false);
+  assert.equal(shortcutTargetIgnored({ tagName: 'BODY' }), false);
+  assert.equal(shortcutTargetIgnored(null), false);
+});
+
+test('neighbourRow follows the rendered row order and skips rows with nothing selectable', async () => {
+  const { neighbourRow } = await import('../../../frontend/scheduling/gantt.mjs');
+  const rows = ['M1', 'M2', 'M10'];   // numeric order, not code-unit ('M10' would sort before 'M2')
+  const any = () => true;
+  assert.equal(neighbourRow(rows, 'M2', 'ArrowDown', any), 'M10');
+  assert.equal(neighbourRow(rows, 'M2', 'ArrowUp', any), 'M1');
+  assert.equal(neighbourRow(rows, 'M1', 'ArrowUp', any), null);
+  assert.equal(neighbourRow(rows, 'M10', 'ArrowDown', any), null);
+  assert.equal(neighbourRow(rows, 'M1', 'ArrowDown', r => r !== 'M2'), 'M10');   // M2 fully dimmed: skipped
+  assert.equal(neighbourRow(rows, 'Mx', 'ArrowDown', any), null);                // current row not rendered
+});
