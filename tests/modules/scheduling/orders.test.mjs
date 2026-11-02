@@ -1476,8 +1476,8 @@ test('F1 S1: re-picking the pair with "0001" on an order storing "1" is a no-op;
 
 test('Table._SearchableLineEditor filters pair options on their label and returns the pair value', () => {
   const priorDocument = globalThis.document;
-  const input = { value: '', addEventListener() {}, focus() {}, select() {} };
-  const list = { innerHTML: '', querySelectorAll: () => [] };
+  const input = { value: '', addEventListener() {}, setAttribute() {}, focus() {}, select() {} };
+  const list = { innerHTML: '', setAttribute() {}, querySelectorAll: () => [] };
   const gui = { className: '', innerHTML: '', querySelector: sel => (sel === '.nse-input' ? input : list) };
   globalThis.document = { ...priorDocument, createElement: () => gui };
   try {
