@@ -2430,6 +2430,7 @@ test('Table.applyOverride with a PV - Machine pair: writes the pair, pushes one 
   const toastCalls = [];
   Toast.show = (msg, type) => { toastCalls.push({ msg, type }); };
   Table._api = { applyTransaction: () => {}, refreshCells: () => {} };
+  UndoStack._entries.length = 0;   // earlier tests now push undo entries; start below the MAX cap so the +1 is observable
   const undoBefore = UndoStack._entries.length;
   const newStart = new Date('2026-09-21T08:00:00');
   const newEnd = new Date('2026-09-21T10:00:00');

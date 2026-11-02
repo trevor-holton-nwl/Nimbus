@@ -577,7 +577,7 @@ test('Store.setAlerts changedIds marks a task whose alert-type set changed, not 
     Store.setAlerts([mk('a1', 'late', 't1'), mk('n1', 'queued_now_fits', 't1'), mk('a2', 'late', 't2')], 'unit-test');
     assert.deepEqual(seen.at(-1), ['t1'], 'a task that already had an alert and gained another type is marked');
     Store.setAlerts([mk('a1', 'late', 't1'), mk('n1', 'queued_now_fits', 't1'), mk('a2', 'late', 't2')], 'unit-test');
-    assert.equal(seen.at(-1), undefined, 'an identical set marks nothing');
+    assert.deepEqual(seen.at(-1), [], 'an identical set marks nothing (empty array, not unscoped)');
     Store.setAlerts([mk('a1', 'late', 't1'), mk('a2', 'late', 't2'), mk('a3', 'late', 't3')], 'unit-test');
     assert.deepEqual([...seen.at(-1)].sort(), ['t1', 't3'], 'a lost type and a brand-new task are both marked');
   } finally { off(); Store.setAlerts(priorAlerts, 'unit-test'); }
