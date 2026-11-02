@@ -122,13 +122,6 @@ export const Selection = {
       try { l(payload); } catch (e) { ErrorLog.error('selection', `listener: ${(e as Error).message}`); }
     }
   },
-
-  /** [{plant, id}] for the currently selected ids — additive convenience for
-   *  consumers that need plant scoping alongside the raw id (e.g. cross-plant
-   *  bulk actions). Existing bare-ID methods above are unchanged. */
-  selectedRefs(): Array<{ plant: string | null; id: string }> {
-    return [...this._ids].map(id => ({ plant: Store.tasks[id]?.plant ?? null, id }));
-  },
 };
 
 function _setsEqual(a: Set<string>, b: Set<string>): boolean {

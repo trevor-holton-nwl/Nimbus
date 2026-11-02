@@ -6511,102 +6511,6 @@ body.dark .sub-subtab.active { color: #ffffff; }
   .ulog-rail { position: static; max-height: none; }
 }
 
-/* =============================================================================
-   ORDERS TAB — Notes popover (📝 column)
-   ============================================================================= */
-.nb-note-btn {
-  background: none;
-  border: none;
-  padding: 2px 4px;
-  cursor: pointer;
-  font-size: 15px;
-  color: var(--fg-mute);
-  border-radius: 4px;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 100%;
-  transition: color 0.15s, background 0.15s;
-}
-.nb-note-btn:hover { background: var(--bg-subtle); color: var(--fg); }
-.nb-note-btn.nb-note-has { color: var(--accent); }
-.nb-note-btn.nb-note-has:hover { color: var(--accent-hot); }
-
-#nb-note-popover {
-  position: fixed;
-  z-index: 9999;
-  width: 284px;
-  background: var(--bg-elev, #fff);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.15);
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  overflow: hidden;
-}
-.nb-note-pop-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px 8px;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--fg-mute);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  border-bottom: 1px solid var(--line);
-}
-.nb-note-pop-close {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 14px;
-  color: var(--fg-mute);
-  padding: 0 2px;
-  line-height: 1;
-}
-.nb-note-pop-close:hover { color: var(--fg); }
-#nb-note-ta {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 10px 12px;
-  border: none;
-  border-bottom: 1px solid var(--line);
-  resize: vertical;
-  min-height: 90px;
-  font-size: 12.5px;
-  font-family: inherit;
-  color: var(--fg);
-  background: var(--bg-elev, #fff);
-  outline: none;
-  line-height: 1.5;
-}
-#nb-note-ta:focus { background: var(--bg, #fff); }
-.nb-note-pop-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  gap: 8px;
-}
-#nb-note-cnt { font-size: 11px; color: var(--fg-mute); }
-.nb-note-pop-btns { display: flex; gap: 6px; }
-.nb-note-cancel, .nb-note-save {
-  padding: 4px 12px;
-  border-radius: 5px;
-  font-size: 12px;
-  cursor: pointer;
-  border: 1px solid var(--line);
-  font-family: inherit;
-}
-.nb-note-cancel { background: none; color: var(--fg-mute); }
-.nb-note-cancel:hover { background: var(--bg-subtle); color: var(--fg); }
-.nb-note-save { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
-.nb-note-save:hover { background: var(--accent-hot); border-color: var(--accent-hot); }
-
 /* ── Notes inline cell renderer (Orders grid) ───────────────────────────── */
 .nb-note-empty { color: var(--fg-mute, #999); cursor: pointer; }
 .nb-note-empty em { font-style: italic; }
@@ -6967,7 +6871,7 @@ body.dark .lp-hm-grad { background: linear-gradient(to right, #24334a, var(--war
 
 /* Anchored "More info" popover — field-name heading + its former inline
    description, opened from the single-item .pill-ctx-menu (right-click on a
-   .sched-rule-row or a .constraint-row). Modeled on #nb-note-popover. */
+   .sched-rule-row or a .constraint-row). Modeled on the retired note popover. */
 .field-info-popover {
   position: fixed;
   z-index: 9500;

@@ -37,6 +37,16 @@ export function planningReasonText(
   }
   if (reason.code === 'segment_floor_unfittable') return t('planning_reason.segment_floor_unfittable');
   if (reason.code === 'push_limit_unmet') return t('planning_reason.push_limit_unmet');
+  // Optimizer codes whose stored message is English: resolve through the locale (the code is the contract, the message is a fallback).
+  if (reason.code === 'expired_window' || reason.code === 'missing_due_date' || reason.code === 'invalid_runtime'
+    || reason.code === 'no_fit_found' || reason.code === 'search_incomplete') {
+    return t(`planning_reason.${reason.code}`);
+  }
+  if (reason.code === 'search_limit') {
+    // Only the non-exhaustive time-limit message carries the "Run in background" hint.
+    const hint = typeof reason.message === 'string' && reason.message.includes('Run in background');
+    return hint ? `${t('planning_reason.search_limit')} ${t('planning_reason.search_limit_hint')}` : t('planning_reason.search_limit');
+  }
   if (reason.code === 'run_time_over_cap' && typeof reason.run_time === 'number' && typeof reason.cap_hours === 'number') {
     return t('planning_reason.run_time_over_cap', { hours: String(Math.round(reason.run_time * 10) / 10), cap: String(Math.round(reason.cap_hours * 10) / 10) });
   }

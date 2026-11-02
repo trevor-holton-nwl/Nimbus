@@ -116,7 +116,7 @@ test('Allowed window labels a frozen finish-floor conflict instead of showing a 
     const edge = new Date('2026-09-19T00:00:00');
     Store.setFrozenHorizonEnd(edge, 'test');
     assert.equal(Table._planningWindowLabel(order),
-      `No valid window: finish on/after ${Util.fmtDTReadable(edge)}; complete by ${Util.fmtDTReadable(ceiling)}`);
+      'ui.planning_window_none_finish');
     // Equality is valid: a window edge equal to the completion limit is not a conflict.
     Store.setFrozenHorizonEnd(ceiling, 'test');
     assert.equal(Table._planningWindowLabel(order),
@@ -139,7 +139,7 @@ test('Allowed window label reads the task plant frozen edge, not the selected pl
     Store.setMasterData({ ...priorMasterData, plants: [{ plant: 'P1', frozen_horizon_days: 0, max_pull_forward_days: 0, max_push_forward_days: 0 }] }, 'test');
     Store.setFrozenHorizonEnd(new Date('2026-09-19T00:00:00'), 'test');
     assert.equal(Store.frozenHorizonEndFor('P1'), null);
-    assert.ok(!/No valid window/.test(Table._planningWindowLabel(order)));
+    assert.ok(!/planning_window_none/.test(Table._planningWindowLabel(order)));
   } finally {
     Store.setMasterData(priorMasterData, 'test');
     Store.setFrozenHorizonEnd(priorFrozen, 'test');
@@ -497,7 +497,7 @@ test('Inspector formats setup signatures in configured order with readable label
     { fieldKey: 'prt02', value: 'T-3' },
   ], { fields: ['colorWheel', 'prt01', 'prt02'] });
 
-  assert.equal(formatted, 'Color: Ruby · PRT01: 7B10 · PRT02: T-3');
+  assert.equal(formatted, 'constraint.colorWheel: Ruby · constraint.prt01: 7B10 · constraint.prt02: T-3');
 });
 
 test('Inspector._isSetupActionTask still identifies the active/earliest-upcoming order on its line (function retained, no longer gates setup controls)', () => {
@@ -2798,7 +2798,7 @@ test('Table._planningReasonText: an overlong_never row reads "now fits" only whi
     Store.setAlerts([{ id: 'queued-now-fits-pr-1', type: 'queued_now_fits', sev: 'warn', taskId: 'pr-1', line: 'L', time: new Date() }], 'unit-test');
     assert.equal(Table._planningReasonText(task), 'planning_reason.overlong_released_pending');
     assert.equal(task.planning_reason.code, 'overlong_never', 'the stored reason is untouched');
-    assert.equal(Table._planningReasonText({ id: 'x', planning_reason: { code: 'no_fit_found', message: 'stored' } }), 'stored');
+    assert.equal(Table._planningReasonText({ id: 'x', planning_reason: { code: 'no_fit_found', message: 'stored' } }), 'planning_reason.no_fit_found');
     assert.equal(Table._planningReasonText({ id: 'x', planning_reason: null }), '');
   } finally { Util.t = priorT; Store.setAlerts(priorAlerts, 'unit-test'); }
 });

@@ -328,7 +328,7 @@ test('a generic atomic-optimizer rejection (non-conflicts error_code) still show
     await new Promise(resolve => setTimeout(resolve, 0));
     assert.equal(events.length, 0);
     assert.ok(toasts.some(t => t.type === 'warn'
-      && t.msg === 'Optimizer changes remain unsaved. Resolve the conflict or reload and optimize again.'),
+      && t.msg === 'toast.optimizer_unsaved_resolve'),
       'the branch split must not have touched the pre-existing generic wording');
     assert.equal(Store.tasks['generic-a'].row_version, 3);
   } finally {
@@ -1323,7 +1323,7 @@ test('Persistence.reload: a failed server load keeps local edits, toasts the err
     await Persistence.reload();
 
     assert.ok(calls.urls.some(u => u.includes('/tasks?plant=RL')), `reload must refetch the loaded plant, saw ${calls.urls}`);
-    assert.ok(calls.toasts.some(t => t.type === 'error' && /Reload failed/.test(t.msg)), 'user is told the reload failed');
+    assert.ok(calls.toasts.some(t => t.type === 'error' && t.msg === 'toast.reload_failed_local_edits'), 'user is told the reload failed');
     assert.equal(calls.loadCache, 0, 'a discard-reload must not substitute the offline cache');
     assert.equal(calls.reconnect, 0, 'no reconnect watcher for a manual reload');
     assert.equal(Store.tasks['reload-edit'], before, 'the local board is untouched');
