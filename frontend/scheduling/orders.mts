@@ -1245,7 +1245,8 @@ export const Table = {
       // nothing visible was ever recomputed. No redrawRows: that would re-enter
       // AG Grid's render cycle.
       const changedIds = evt.changedIds as Array<string | number> | undefined;
-      const updated = changedIds && changedIds.length
+      // An empty array means "nothing changed": no row refresh. Only an absent changedIds is unscoped.
+      const updated = changedIds
         ? changedIds
             .map(id => Store.tasks[id])
             .filter((t): t is NimbusTask => !!t && Table._inSelectedPlant(t))
@@ -1557,12 +1558,24 @@ export const Table = {
     }
 
     // A (PV, machine) pair write is one undo step (snapshot before the single Store write, push after).
-    const undoSnap = pairPv !== null ? UndoStack.snapshotTasks([id]) : null;
+    // One undo entry per manual placement edit (pair write, typed finish, run time, plain machine). AG Grid has
+    // already written the edited value onto the row (it IS the Store task), so the snapshot puts the old value back.
+    const editKind = pairPv !== null ? null : manualEditKind(field);
+    const undoSnap = (pairPv !== null || editKind)
+      ? UndoStack.snapshotTasks([id]).map(s => (field === 'end_date' || field === 'RUN_TIME') ? { ...s, [field]: p.oldValue } as NimbusTask : s)
+      : null;
     Store.updateTask(id, changes, 'table');
-    if (undoSnap) Table._pushPairUndo(id, undoSnap);
+    if (undoSnap) { if (editKind) Table._pushEditUndo(id, undoSnap, editKind); else Table._pushPairUndo(id, undoSnap); }
     Table._api!.applyTransaction({ update: [Store.tasks[id]] });
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.row_updated'), 'success', 1200);
+  },
+
+  /** One undo entry for a manual finish / run time / machine edit (snapshot taken before the write, pushed after a successful one). */
+  _pushEditUndo(id: string, snap: NimbusTask[], kind: ManualEditKind): void {
+    const task = Store.tasks[id];
+    UndoStack.push(Util.t(MANUAL_EDIT_UNDO_KEY[kind], { order: (task && (task.text || task.ORDER)) || id }),
+                   () => UndoStack.restoreTasks(snap), [id]);
   },
 
   /** One undo entry for a (PV, machine) pair write, mirroring the Gantt drop's "Move ..." entry. */
@@ -1746,9 +1759,10 @@ export const Table = {
       return;
     }
 
-    const undoSnap = pairChanged ? UndoStack.snapshotTasks([id]) : null;
+    const undoSnap = UndoStack.snapshotTasks([id]);
     Store.updateTask(id, schedule, 'table');
-    if (undoSnap) Table._pushPairUndo(id, undoSnap);
+    if (pairChanged) Table._pushPairUndo(id, undoSnap);
+    else Table._pushEditUndo(id, undoSnap, newLine !== (t.MACHINE || 'Unknown') ? 'machine' : 'finish');
     if (Table._api) Table._api.applyTransaction({ update: [Store.tasks[id]] });
     // Re-check at apply time: the window may have rolled while the modal was open, and applyFirm
     // refuses a now-locked order.
@@ -2185,6 +2199,26 @@ export function inSelectedPlantFor(t: { PLANT?: string | null; MACHINE?: string 
   return (t.PLANT || plantForLine(t.MACHINE as string)) === plant;
 }
 
+/** A note response's row_version is adopted only when nothing else touched the order meanwhile: the local version
+ *  is still the one the request was based on and the local note is still what was sent. Otherwise a genuine
+ *  concurrent edit must still surface as stale on the next date save. */
+export function shouldAdoptNoteVersion(localVersion: number | null | undefined, baseVersion: number | null | undefined,
+  localNotes: string | null | undefined, sentNotes: string | null): boolean {
+  return localVersion === baseVersion && (localNotes || null) === (sentNotes || null);
+}
+
+export type ManualEditKind = 'finish' | 'machine' | 'runtime';
+export const MANUAL_EDIT_UNDO_KEY: Record<ManualEditKind, string> = {
+  finish: 'undo.edit_finish', machine: 'undo.edit_machine', runtime: 'undo.edit_runtime',
+};
+/** Which undoable manual placement edit a grid/Inspector field is (null = not one; pair writes have their own entry). */
+export function manualEditKind(field: string | undefined): ManualEditKind | null {
+  if (field === 'end_date') return 'finish';
+  if (field === 'MACHINE') return 'machine';
+  if (field === 'RUN_TIME') return 'runtime';
+  return null;
+}
+
 /** Whether the open Inspector must re-render for a Store event. Pure: the subscriber supplies the open id and
  *  whether the notes textarea holds focus. A re-render replaces the panel's innerHTML, so it is skipped for note
  *  saves (they would swallow the next click), for events that do not name the open order, and while typing a note. */
@@ -2337,9 +2371,11 @@ export const Inspector = {
   },
 
   init(): void {
+    if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('pagehide', () => Inspector._flushNotes());
     Inspector._unsubStore = Store.subscribe(evt => {
     // A plant load/reload or a plant switch replaces the rows wholesale: another user's or SAP's edits may sit
     // behind any cached history, so drop all of it (the card refetches when it is next painted).
+    if (evt.type === 'plant:selected') Inspector._flushNotes();
     if (evt.type === 'tasks:bulk' || evt.type === 'plant:selected') Inspector.resetHistory();
     if (evt.type === 'tasks:saved') { Inspector.invalidateHistory((evt.ids ?? []) as Array<string | number>); return; }
     // Allow firmed:change through even from 'inspector' so the Firm/Unfirm
@@ -3110,9 +3146,10 @@ export const Inspector = {
         changes.planning_reason = null;
       }
     }
-    const undoSnap = pairPv !== null ? UndoStack.snapshotTasks([id]) : null;
+    const editKind = pairPv !== null ? null : manualEditKind(field);
+    const undoSnap = (pairPv !== null || editKind) ? UndoStack.snapshotTasks([id]) : null;
     Store.updateTask(id, changes, 'inspector');
-    if (undoSnap) Table._pushPairUndo(id, undoSnap);
+    if (undoSnap) { if (editKind) Table._pushEditUndo(id, undoSnap, editKind); else Table._pushPairUndo(id, undoSnap); }
     Alerts.scheduleRecompute();
     Inspector.refreshDerived(id);
   },
@@ -3127,35 +3164,76 @@ export const Inspector = {
     Store.updateTask(id, { notes }, 'note');
     Inspector._persistNote(id, notes);
   },
+  /** Notes waiting on their debounce timer (id -> latest text), so a flush does not depend on Store.tasks. */
+  _notePending: {} as Record<string, string | null>,
+  /** Notes whose save failed (id -> text); retried on the next successful note save and flushed on pagehide / plant switch. */
+  _noteRetry: {} as Record<string, string | null>,
   _persistNote(id: string, notes: string | null): void {
     clearTimeout(Inspector._noteTimers[id]);
+    Inspector._notePending[id] = notes;
     Inspector._noteTimers[id] = setTimeout(() => {
       delete Inspector._noteTimers[id];
-      const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-      Util.fetchTraced(`${Config.API_BASE}/task/note`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
-        body: JSON.stringify({ id, notes })
-      })
-        .then(async r => {
-          if (!r.ok) {
-            const parsed = await Util.parseBackendError(r);
-            ErrorLog.warn('inspector', `Note rejected (${r.status}): ${parsed.message}`,
-              { reqId, status: r.status, id }, { reqId, errorCode: parsed.errorCode });
-          } else {
-            const result = await r.json() as { versions?: Record<string, number> };
-            const version = result.versions?.[id];
-            if (version && (Store.tasks[id]?.notes || null) === (notes || null)) {
-              Store.tasks[id].row_version = version;
-            }
-            Inspector.invalidateHistory([id]);
-          }
-        })
-        .catch(e => ErrorLog.warn('inspector', `Note persist failed: ${e.message}`,
-          { reqId, id }, { reqId, errorCode: 'http.network' }));
+      delete Inspector._notePending[id];
+      void Inspector._sendNote(id, notes, false).then(ok => { if (ok) Inspector._retryFailedNotes(id); });
     }, 800);
+  },
+  /** POST one note. Resolves true on success; a failure keeps the note in the retry set and warns the planner.
+   *  keepalive lets the request outlive a closing page. The note never marks the order dirty. */
+  _sendNote(id: string, notes: string | null, keepalive: boolean): Promise<boolean> {
+    const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    const baseVersion = Store.tasks[id]?.row_version;
+    const fail = (): boolean => {
+      Inspector._noteRetry[id] = notes;
+      Toast.show(Util.t('toast.note_save_failed'), 'warn');
+      return false;
+    };
+    return Util.fetchTraced(`${Config.API_BASE}/task/note`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
+      body: JSON.stringify({ id, notes }),
+      keepalive,
+    })
+      .then(async r => {
+        if (!r.ok) {
+          const parsed = await Util.parseBackendError(r);
+          ErrorLog.warn('inspector', `Note rejected (${r.status}): ${parsed.message}`,
+            { reqId, status: r.status, id }, { reqId, errorCode: parsed.errorCode });
+          return fail();
+        }
+        delete Inspector._noteRetry[id];
+        const result = await r.json() as { versions?: Record<string, number> };
+        const version = result.versions?.[id];
+        const local = Store.tasks[id];
+        if (version && local && shouldAdoptNoteVersion(local.row_version, baseVersion, local.notes, notes)) {
+          local.row_version = version;
+        }
+        Inspector.invalidateHistory([id]);
+        return true;
+      })
+      .catch(e => {
+        ErrorLog.warn('inspector', `Note persist failed: ${e.message}`,
+          { reqId, id }, { reqId, errorCode: 'http.network' });
+        return fail();
+      });
+  },
+  /** Re-send every failed note except `exceptId` (just saved). Each failure stays queued. */
+  _retryFailedNotes(exceptId?: string): void {
+    for (const [id, notes] of Object.entries(Inspector._noteRetry)) {
+      if (id === exceptId || Inspector._noteTimers[id]) continue;
+      void Inspector._sendNote(id, notes, false);
+    }
+  },
+  /** Send every debounced and every failed note now (pagehide, plant switch). */
+  _flushNotes(): void {
+    for (const id of Object.keys(Inspector._noteTimers)) {
+      clearTimeout(Inspector._noteTimers[id]);
+      delete Inspector._noteTimers[id];
+      if (id in Inspector._notePending) Inspector._noteRetry[id] = Inspector._notePending[id];
+      delete Inspector._notePending[id];
+    }
+    for (const [id, notes] of Object.entries(Inspector._noteRetry)) void Inspector._sendNote(id, notes, true);
   },
 
   /** The lock block (C-3): the Firmed card (only while NIMBUS locks the order: manual, frozen or
