@@ -5471,6 +5471,20 @@ function evaluateLineWithFirmedBoundaries(
         predecessorOrderId = taskId(boundary.task);
         lastAdoptedBoundaryEnd = boundary.end.getTime();
       }
+      // Report-only: an active override binds a free predecessor immediately
+      // before this elapsed boundary, but no free order can be placed ahead of
+      // it. While that predecessor is still unplaced the override cannot hold;
+      // surface it (never freeze, placement unchanged).
+      const elapsedRequiredLast = boundaryLock?.requiredLastOrderId;
+      if (elapsedRequiredLast && remaining.some(task => taskId(task) === elapsedRequiredLast)) {
+        missingEdges.push(inactiveOverrideEdge(line, elapsedRequiredLast, taskId(boundary.task)));
+        explanation.push({
+          code: 'override-inactive',
+          message: `Active override binding ${elapsedRequiredLast} immediately before ${taskId(boundary.task)} cannot be kept: ${taskId(boundary.task)} is already in progress or elapsed.`,
+          line,
+          taskId: taskId(boundary.task),
+        });
+      }
       requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
       explanation.push({
         code: 'firmed-boundary-elapsed',

@@ -1674,6 +1674,46 @@ test('evaluateDueDateFirst preserves active override adjacency across each fixed
   assert.deepEqual(afterResult.unchangedLines, []);
 });
 
+test('an in-progress firmed boundary with an active free->firmed override reports override-inactive without changing placement', () => {
+  // The in-progress boundary starts at or before the cursor, so the free
+  // predecessor named by the override cannot be placed immediately before it.
+  // The branch stays never-freeze (placement unchanged) but must report the
+  // inactive override instead of silently charging a B -> A setup.
+  const freeRed = scheduledTask('elapsed-override-free-red', 1, 'RED', '2026-08-03T15:00:00');
+  const running = scheduledTask(
+    'elapsed-override-running-blue', 1, 'BLUE', '2026-08-03T09:00:00', '2026-08-03T07:00:00', '2026-08-03T09:00:00',
+  );
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('RED', 'BLUE', 0), setupRow('BLUE', 'RED', 15),
+  ], overrides: [{
+    id: 'elapsed-override', machine: 'L1', signature_version: 1,
+    predecessor_order_id: 'elapsed-override-free-red', successor_order_id: 'elapsed-override-running-blue',
+    predecessor_state_key: setupState('RED'), successor_state_key: setupState('BLUE'),
+    standard_min: 0, remaining_min: 0, status: 'active', reason: 'free before running',
+  }] });
+
+  const result = SetupScheduler.evaluateDueDateFirst(
+    setupSnapshot([freeRed, running], { firmedIds: ['elapsed-override-running-blue'] }),
+    dueDateBounds(setup),
+  );
+
+  // Placement is the never-freeze placement, identical to before the report.
+  assert.equal(patchFor(result, 'elapsed-override-running-blue'), undefined);
+  assert.equal(patchFor(result, 'elapsed-override-free-red').changes.start_date.getTime(), at('2026-08-03T09:15:00').getTime());
+  assert.deepEqual(result.unchangedLines, []);
+  assert.ok(result.missingEdges.some(edge => (
+    edge.reason === 'override-inactive'
+    && edge.predecessorOrderId === 'elapsed-override-free-red'
+    && edge.successorOrderId === 'elapsed-override-running-blue'
+  )), 'the unreachable free->running override is reported as an override-inactive edge');
+  assert.ok(result.explanation.some(reason => (
+    reason.code === 'override-inactive'
+    && reason.taskId === 'elapsed-override-running-blue'
+    && reason.message.includes('elapsed-override-free-red')
+    && reason.message.includes('elapsed-override-running-blue')
+  )), 'the explanation names both orders');
+});
+
 test('evaluateDueDateFirst honors an active override already bound between adjacent fixed orders', () => {
   // This fails if fixed -> fixed is treated as an inactive binding merely
   // because neither endpoint is free. The protected physical adjacency already
