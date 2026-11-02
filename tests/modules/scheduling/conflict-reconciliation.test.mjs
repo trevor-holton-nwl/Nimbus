@@ -103,7 +103,7 @@ for (const timing of ['before refresh dispatch', 'during refresh', 'edit and rev
   });
 }
 
-for (const failure of ['HTTP rejection', 'network failure']) test(`${failure} during conflict refresh keeps the edit dirty and prevents blind retry`, async () => {
+for (const failure of ['HTTP rejection', 'network failure']) test(`${failure} during conflict refresh keeps the edit dirty, never re-sends it blind, and retries only the refresh on the next Save (S7-2)`, async () => {
   const calls = [];
   Util.fetchTraced = async url => {
     calls.push(url);
@@ -114,10 +114,14 @@ for (const failure of ['HTTP rejection', 'network failure']) test(`${failure} du
   edit('10'); Persistence.saveAll(); await tick();
   assert.equal(Persistence._dirtyIds.has('A'), true);
   assert.equal(Store.tasks.A.row_version, 1);
-  Persistence.saveAll(); await tick(); assert.equal(calls.length, 2);
+  Persistence.saveAll(); await tick();
+  assert.equal(calls.filter(u => u.endsWith('/tasks/update')).length, 1, 'the conflicted edit is never re-sent');
+  assert.equal(calls.length, 3);
+  assert.ok(calls[2].endsWith('/tasks/refresh'), 'the failed refresh is retried');
+  assert.equal(Persistence._dirtyIds.has('A'), true);
 });
 
-test('unresolved conflict permits unrelated normal saves but blocks a dependent optimizer batch', async () => {
+test('unresolved conflict permits unrelated normal saves but blocks a dependent optimizer batch that contains it', async () => {
   let resolveRefresh;
   Util.fetchTraced = () => new Promise(resolve => { resolveRefresh = resolve; });
   Persistence._refreshTasks(['A']); edit('11');
@@ -126,8 +130,14 @@ test('unresolved conflict permits unrelated normal saves but blocks a dependent 
   Util.fetchTraced = async (_url, options) => { sent.push(JSON.parse(options.body)); return response({ versions: { B: 2 }, updated: 1, persisted: 1 }); };
   Persistence._dirtyIds.add('B'); Persistence.saveAll(); await tick();
   assert.deepEqual(sent[0].tasks.map(t => t.id), ['B']);
+  // A is conflicted and not forced, so an optimizer group of B alone is a separate request (Wave 2 split): it goes.
   Persistence._dirtyIds.add('B'); Persistence._forceIds.add('B'); Persistence.saveAll(); await tick();
-  assert.equal(sent.length, 1);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].atomic_optimizer, true);
+  assert.deepEqual(sent[1].tasks.map(t => t.id), ['B']);
+  // A conflicted row INSIDE the atomic group withholds the whole group.
+  Persistence._dirtyIds.add('B'); Persistence._forceIds.add('B'); Persistence._forceIds.add('A'); Persistence.saveAll(); await tick();
+  assert.equal(sent.length, 2);
 });
 
 test('a late conflict response cannot overwrite a newly loaded schedule', async () => {

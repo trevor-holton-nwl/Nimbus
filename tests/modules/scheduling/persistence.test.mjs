@@ -398,7 +398,7 @@ test('the load-time re-snap of ingested orders is gone: no _snapToWorkingHours, 
   assert.equal(Persistence.setCalendarService, undefined);
 });
 
-test('Persistence.saveAll still posts the documented payload shape (base_version/force/blocks/calendars)', async () => {
+test('Persistence.saveAll posts the documented payload shape (base_version/force; blocks/calendars no longer ride along, S10-7)', async () => {
   Store.setTasks([{
     id: 'pd1', MACHINE: 'L1', RUN_TIME: '1', user_scheduled: true,
     start_date: new Date('2026-08-03T08:00:00'), end_date: new Date('2026-08-03T09:00:00'),
@@ -419,8 +419,8 @@ test('Persistence.saveAll still posts the documented payload shape (base_version
     assert.equal(saveCall.opts.method, 'POST');
     const body = JSON.parse(saveCall.opts.body);
     assert.ok(Array.isArray(body.tasks), 'payload must have a tasks array');
-    assert.ok(Array.isArray(body.blocks), 'payload must always include blocks');
-    assert.ok('calendars' in body, 'payload must always include calendars');
+    assert.ok(!('blocks' in body), 'S10-7: blocks are no longer sent');
+    assert.ok(!('calendars' in body), 'S10-7: calendars are no longer sent');
     const t = body.tasks.find(x => x.id === 'pd1');
     assert.ok(t, 'dirty task must be in the payload');
     assert.ok('start_date' in t, 'task must have start_date');
@@ -492,13 +492,17 @@ test('saveAll clears terminally-rejected ids (invalid_ids/not_found_ids) so they
   Persistence._dirtyIds.add('gone');
 
   const origFetch = globalThis.fetch;
-  globalThis.fetch = () => Promise.resolve({
+  // S7-4: a rejected row is refreshed from the server so the bar snaps back; the refresh answers with the server row.
+  globalThis.fetch = (url) => Promise.resolve({
     ok: true,
-    json: () => Promise.resolve({
-      versions: { ok1: '6' }, stale: [],
-      invalid_ids: ['bad-range'], not_found_ids: ['gone'],
-      persisted: 1, updated: 3,
-    }),
+    json: () => Promise.resolve(String(url).includes('/tasks/refresh')
+      ? { data: [{ id: 'bad-range', MACHINE: 'L1', RUN_TIME: 1, row_version: 9, planning_status: 'scheduled',
+          start_date: '2026-08-03T07:00:00', end_date: '2026-08-03T08:00:00', schedule_segments: [] }], missing: [] }
+      : {
+        versions: { ok1: '6' }, stale: [],
+        invalid_ids: ['bad-range'], not_found_ids: ['gone'],
+        persisted: 1, updated: 3,
+      }),
   });
   try {
     Persistence.saveAll();
@@ -506,6 +510,9 @@ test('saveAll clears terminally-rejected ids (invalid_ids/not_found_ids) so they
     await new Promise(res => setTimeout(res, 0));
     assert.ok(!Persistence._dirtyIds.has('ok1'),       'persisted id must clear');
     assert.ok(!Persistence._dirtyIds.has('bad-range'), 'invalid_ids id must clear (terminal — do not retry forever)');
+    assert.equal(Store.tasks['bad-range'].start_date.getTime(), new Date('2026-08-03T07:00:00').getTime(), 'S7-4: the rejected bar snaps back to the server row');
+    assert.equal(Store.tasks['bad-range'].row_version, 9);
+    assert.ok(!Persistence._conflictedIds.has('bad-range'));
     assert.ok(!Persistence._dirtyIds.has('gone'),      'not_found_ids id must clear (terminal — row not in DB)');
   } finally {
     globalThis.fetch = origFetch;
@@ -882,15 +889,6 @@ test('Persistence._loadCache clears the rank cache — the offline restore hydra
   }
 });
 
-test('Persistence._loadDemo clears the rank cache — it hydrates and emits schedule:hydrated but never loads rank maps', () => {
-  Store.setPriorityRankMaps({ '': { colorWheel: { RED: 1 } } }, 'unit-test');
-  Persistence._rankMapsPlant = 'PLANT_A';
-  Persistence._loadDemo();
-  assert.deepEqual(Store.priorityRankMaps, {},
-    'demo orders belong to no real plant\'s priority lists, so any retained ranks are categorically wrong for them');
-  assert.equal(Persistence._rankMapsPlant, null);
-});
-
 // ---------------------------------------------------------------------------
 // Whole-branch review fix — the same stale-plant exposure applies to the C1/C2
 // horizon fields. Store.visibilityHorizonEnd/frozenHorizonEnd are set only on a
@@ -918,16 +916,6 @@ test('Persistence._loadCache clears stale visibility/frozen horizon state from a
   } finally {
     globalThis.localStorage.removeItem(Config.LS_KEY);
   }
-});
-
-test('Persistence._loadDemo clears stale visibility/frozen horizon state from a previously-loaded plant', () => {
-  Store.setVisibilityHorizonEnd(new Date('2026-09-01T00:00:00Z'), 'unit-test');
-  Store.setFrozenHorizonEnd(new Date('2026-08-25T00:00:00Z'), 'unit-test');
-  Persistence._loadDemo();
-  assert.equal(Store.visibilityHorizonEnd, null,
-    'demo orders belong to no real plant, so any retained visibility horizon is categorically wrong for them');
-  assert.equal(Store.frozenHorizonEnd, null,
-    'demo orders belong to no real plant, so any retained frozen horizon is categorically wrong for them');
 });
 
 test('Persistence.isLoading() returns false at rest', () => {
@@ -1161,13 +1149,10 @@ async function captureSavePayload(raw, edit) {
     assert.ok(call, 'saveAll must POST to /tasks/update');
     await new Promise(res => setTimeout(res, 0));
     const body = JSON.parse(call.opts.body);
-    // blocks/calendars are legacy ride-alongs the server ignores (see
-    // frontend/scheduling/CLAUDE.md) and carry demo-seeded, random-id Store state;
-    // pin them to empty so the fixture is deterministic.
-    assert.ok(Array.isArray(body.blocks) && 'calendars' in body, 'saveAll must still send blocks + calendars');
+    assert.ok(!('blocks' in body) && !('calendars' in body), 'saveAll no longer sends blocks/calendars (S10-7)');
     // client_id is a per-tab random UUID: pin a placeholder so the shared fixture stays deterministic.
     assert.equal(typeof body.client_id, 'string', 'saveAll must send client_id');
-    return { ...body, client_id: '<client-id>', blocks: [], calendars: {} };
+    return { ...body, client_id: '<client-id>' };
   } finally {
     globalThis.fetch = origFetch;
     Persistence._dirtyIds.clear();
@@ -1309,26 +1294,24 @@ async function withFailingTasksFetch(run) {
   const origFetch = globalThis.fetch;
   const origToast = Toast.show;
   const origLoadCache = Persistence._loadCache;
-  const origLoadDemo = Persistence._loadDemo;
   const origReconnectStart = Persistence._reconnect.start;
   const priorLoaded = Persistence._currentLoadedPlant;
   const priorAttempted = Persistence._lastAttemptedPlant;
-  const calls = { urls: [], toasts: [], loadCache: 0, loadDemo: 0, reconnect: 0 };
+  const calls = { urls: [], toasts: [], loadCache: 0, reconnect: 0 };
   globalThis.fetch = (url) => { calls.urls.push(String(url)); return Promise.resolve({ ok: false, status: 500, clone() { return this; }, json: () => Promise.resolve({}), text: () => Promise.resolve('') }); };
   Toast.show = (msg, type) => { calls.toasts.push({ msg, type }); };
-  Persistence._loadCache = () => { calls.loadCache++; return origLoadCache.call(Persistence); };
-  Persistence._loadDemo = () => { calls.loadDemo++; };
+  Persistence._loadCache = (plant) => { calls.loadCache++; return origLoadCache.call(Persistence, plant); };
   Persistence._reconnect.start = () => { calls.reconnect++; };
   try { await run(calls); } finally {
     globalThis.fetch = origFetch; Toast.show = origToast;
-    Persistence._loadCache = origLoadCache; Persistence._loadDemo = origLoadDemo;
+    Persistence._loadCache = origLoadCache;
     Persistence._reconnect.start = origReconnectStart;
     Persistence._currentLoadedPlant = priorLoaded; Persistence._lastAttemptedPlant = priorAttempted;
     Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
   }
 }
 
-test('Persistence.reload: a failed server load keeps local edits, toasts the error, and never falls back to cache/demo or starts the reconnect watcher', async () => {
+test('Persistence.reload: a failed server load keeps local edits, toasts the error, and never falls back to the cache or starts the reconnect watcher', async () => {
   await withFailingTasksFetch(async (calls) => {
     Persistence._dirtyIds.clear(); Persistence._forceIds.clear();
     Store.setTasks([{ id: 'reload-edit', PLANT: 'RL', MACHINE: 'L1', RUN_TIME: 1, row_version: 4,
@@ -1342,7 +1325,6 @@ test('Persistence.reload: a failed server load keeps local edits, toasts the err
     assert.ok(calls.urls.some(u => u.includes('/tasks?plant=RL')), `reload must refetch the loaded plant, saw ${calls.urls}`);
     assert.ok(calls.toasts.some(t => t.type === 'error' && /Reload failed/.test(t.msg)), 'user is told the reload failed');
     assert.equal(calls.loadCache, 0, 'a discard-reload must not substitute the offline cache');
-    assert.equal(calls.loadDemo, 0, 'a discard-reload must not substitute demo data');
     assert.equal(calls.reconnect, 0, 'no reconnect watcher for a manual reload');
     assert.equal(Store.tasks['reload-edit'], before, 'the local board is untouched');
     assert.ok(Persistence._dirtyIds.has('reload-edit'), 'unsaved edits remain unsaved');
@@ -1371,7 +1353,6 @@ test('Persistence.load (non-reload) with a failed server load falls back to the 
 
     assert.equal(calls.loadCache, 1, 'cache restore attempted');
     assert.ok(Store.tasks['cached-fallback'], 'cached board is shown');
-    assert.equal(calls.loadDemo, 0, 'demo is only the last resort when no cache exists');
     assert.equal(calls.reconnect, 1, 'reconnect watcher started');
     assert.ok(calls.toasts.some(t => t.type === 'warn'), 'user is warned the backend is unreachable');
     globalThis.localStorage.removeItem(Config.LS_KEY);
@@ -1653,7 +1634,9 @@ test('tasks:saved lists only persisted ids (a version came back), not invalid or
   const saved = [];
   const unsubscribe = Store.subscribe(e => { if (e.type === 'tasks:saved') saved.push(e); });
   const origFetch = globalThis.fetch;
-  globalThis.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ versions: { ok1: 2 }, invalid_ids: ['bad1'], not_found_ids: ['gone1'], stale: [], persisted: 1, updated: 1 }) });
+  globalThis.fetch = (url) => Promise.resolve({ ok: true, json: () => Promise.resolve(String(url).includes('/tasks/refresh')
+    ? { data: [{ id: 'bad1', MACHINE: 'L1', RUN_TIME: 1, row_version: 3, planning_status: 'scheduled', start_date: '2026-08-03T09:00:00', end_date: '2026-08-03T10:00:00', schedule_segments: [] }], missing: [] }
+    : { versions: { ok1: 2 }, invalid_ids: ['bad1'], not_found_ids: ['gone1'], stale: [], persisted: 1, updated: 1 }) });
   try {
     Persistence.saveAll();
     await new Promise(res => setTimeout(res, 0));

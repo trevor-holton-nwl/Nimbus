@@ -229,7 +229,7 @@ test('unchanged child receives coherent server attributes and the actual next sa
   assert.equal(Persistence._dirtyIds.has('kept'), false);
 });
 
-test('an ordinary save skips distribution conflicts while saving an unrelated task; atomic save retains both', async () => {
+test('an ordinary save skips distribution conflicts while saving an unrelated task; an atomic group holding the conflict retains both', async () => {
   const p = await fixture();
   let release;
   Util.fetchTraced = () => new Promise(resolve => { release = resolve; });
@@ -244,8 +244,10 @@ test('an ordinary save skips distribution conflicts while saving an unrelated ta
     posts.push(JSON.parse(options.body));
     return ok({ status: 'ok', persisted: 1, versions: { unrelated: 41 } });
   };
+  // Wave 2 split: the conflicted ordinary row 'kept' is not in the optimizer group, so that group goes alone.
+  Persistence._forceIds.add('kept');
   Persistence.saveAll(); await turn();
-  assert.equal(posts.length, 0);
+  assert.equal(posts.length, 0, 'a conflicted row INSIDE the atomic group withholds the whole group');
   assert.equal(Persistence._dirtyIds.has('unrelated'), true);
   Persistence._forceIds.clear();
   Persistence.saveAll(); await turn();
