@@ -155,7 +155,10 @@ def legacy_build_tasks(rows, plant, machine=None, paging=False, total=0):
                 links.append({"id": link_id_counter, "source": prev_task_id, "target": task_id, "type": "0"})
                 link_id_counter += 1
             prev_task_id = task_id
-    meta = dict(DIAGNOSTICS, **cm_stats)
+    # /tasks meta now echoes an explicit allow-list of DIAGNOSTICS keys (Wave 3 S8-8), not the whole bag.
+    from backend.scheduling.routes import _TASKS_META_DIAGNOSTIC_KEYS
+    meta = {k: DIAGNOSTICS[k] for k in _TASKS_META_DIAGNOSTIC_KEYS if k in DIAGNOSTICS}
+    meta.update(cm_stats)
     meta["rendered"] = len(data)
     meta["link_count"] = len(links)
     meta["plant_filter_active"] = plant

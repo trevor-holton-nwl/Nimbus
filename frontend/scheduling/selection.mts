@@ -10,7 +10,7 @@
 // after both modules finish loading, never at top-level evaluation.
 import { Store } from '../platform/store.mjs';
 import { Util, ErrorLog } from '../platform/foundation.mjs';
-import type { SelectionEmitKind } from '../platform/types.mjs';
+import type { SelectionEmitKind, NimbusTask } from '../platform/types.mjs';
 
 interface SelectionEmitPayload {
   kind: SelectionEmitKind;
@@ -73,8 +73,9 @@ export const Selection = {
     this._emit('toggle');
   },
 
-  /** Select every id from anchor to target on the same line (inclusive). */
-  selectRange(targetId: string | number): void {
+  /** Select every id from anchor to target on the same line (inclusive). `include` (optional) drops orders it
+   *  rejects, e.g. ones the Gantt filter dims; the anchor and target themselves always stay. */
+  selectRange(targetId: string | number, include?: (t: NimbusTask) => boolean): void {
     const target = String(targetId);
     const anchor = this._anchor;
     if (!anchor || anchor === target) { this.set([target]); return; }
@@ -87,7 +88,8 @@ export const Selection = {
     }
     const line = ta.MACHINE;
     const peers = Store.tasksArr
-      .filter(t => t.MACHINE === line && t.start_date)
+      .filter(t => t.MACHINE === line && t.start_date
+        && (!include || String(t.id) === anchor || String(t.id) === target || include(t)))
       .sort((a, b) => Number(a.start_date) - Number(b.start_date));
     const ia = peers.findIndex(t => String(t.id) === anchor);
     const it = peers.findIndex(t => String(t.id) === target);
@@ -119,13 +121,6 @@ export const Selection = {
     for (const l of this._listeners) {
       try { l(payload); } catch (e) { ErrorLog.error('selection', `listener: ${(e as Error).message}`); }
     }
-  },
-
-  /** [{plant, id}] for the currently selected ids — additive convenience for
-   *  consumers that need plant scoping alongside the raw id (e.g. cross-plant
-   *  bulk actions). Existing bare-ID methods above are unchanged. */
-  selectedRefs(): Array<{ plant: string | null; id: string }> {
-    return [...this._ids].map(id => ({ plant: Store.tasks[id]?.plant ?? null, id }));
   },
 };
 

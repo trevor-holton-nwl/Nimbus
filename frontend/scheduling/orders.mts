@@ -37,7 +37,7 @@ import { Session } from '../security/session.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import { Persistence } from './persistence.mjs';
 import { SetupAdmin } from '../setup/setup-admin.mjs';
-import { ORDER_FIELD_CATALOG } from './order-field-catalog.mjs';
+import { ORDER_FIELD_CATALOG, getField } from './order-field-catalog.mjs';
 import { planningReasonText } from './planning-reason.mjs';
 import { toolingRowHtml, warnUnknownToolId } from './order-tooling.mjs';
 import { raiseToolInventory } from '../optimization/tool-queue-confirm.mjs';
@@ -178,9 +178,7 @@ interface TableCellKeyDownEvent {
 }
 
 /** Table.init()'s onGridReady grid option. `columnApi` is AG Grid's pre-v31
- *  column-API object — merged into the main Grid API in v31, so this field is
- *  dead (assigned, never read: Table._colApi) but kept for parity with the
- *  pre-existing runtime behavior (Global Constraints: no logic changes). */
+ *  column-API object (merged into the main Grid API in v31); nothing reads it. */
 interface TableGridReadyEvent {
   api: NimbusVendor.AgGridApi;
   columnApi?: unknown;
@@ -212,25 +210,22 @@ export const Table = {
     const rules = Store.masterData?.plants.find(row => row.plant === plant);
     const bounded = rules?.max_pull_forward_days != null || rules?.max_push_forward_days != null;
     const due = Util.sapDueDate(task);
-    if (bounded && (!due || !Number.isFinite(due.getTime()))) return 'SAP due date required';
+    if (bounded && (!due || !Number.isFinite(due.getTime()))) return Util.t('ui.planning_window_due_required');
     const floor = Engine.earliestAllowedStart(task, plant);   // pull-forward start floor only
     const ceiling = Engine.latestAllowedEnd(task, plant);
     if (floor && ceiling && floor >= ceiling) {
-      return `No valid window: earliest start ${Util.fmtDTReadable(floor)}; complete by ${Util.fmtDTReadable(ceiling)}`;
+      return Util.t('ui.planning_window_none_start', { start: Util.fmtDTReadable(floor), end: Util.fmtDTReadable(ceiling) });
     }
     // The frozen horizon is a FINISH floor (2026-10-27): an unprotected order may not finish before the window edge,
     // so a completion limit before the edge leaves no valid window (equality is valid).
     const frozenEnd = Store.frozenHorizonEndFor(plant);
     if (frozenEnd && ceiling && frozenEnd > ceiling) {
-      return `No valid window: finish on/after ${Util.fmtDTReadable(frozenEnd)}; complete by ${Util.fmtDTReadable(ceiling)}`;
+      return Util.t('ui.planning_window_none_finish', { edge: Util.fmtDTReadable(frozenEnd), end: Util.fmtDTReadable(ceiling) });
     }
-    return `${floor ? Util.fmtDTReadable(floor) : 'No start limit'} — ${ceiling ? Util.fmtDTReadable(ceiling) : 'No completion limit'}`;
+    return `${floor ? Util.fmtDTReadable(floor) : Util.t('ui.planning_window_no_start')} — ${ceiling ? Util.fmtDTReadable(ceiling) : Util.t('ui.planning_window_no_end')}`;
   },
   _api:    null as NimbusVendor.AgGridApi | null,
-  _colApi: null as unknown,
   _selectedId: null as string | null,  // for the override modal
-  _noteOutsideHandler: null as ((ev: MouseEvent) => void) | null,
-  _noteKeyHandler: null as ((ev: KeyboardEvent) => void) | null,
   // lines aliases the shared Store.selectedLines Set (same object, not a copy) —
   // the cross-screen production-line filter. See GanttFilter._selectedLines
   // for the identical convention and why it must never be reassigned.
@@ -357,7 +352,7 @@ export const Table = {
      and after a manual reset, or a stale per-user layout silently overrides
      the admin default. ───────────────────────────────────────────────────── */
   _fieldHidden(key: string): boolean {
-    const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
+    const f = getField(key);
     if (!f) return false;
     const cfg = Store.orderFieldVisibility[key];
     return !(cfg?.grid ?? f.gridDefault);
@@ -719,7 +714,6 @@ export const Table = {
       onFilterChanged:  () => { Table._captureLayout(); Table._refreshChipButtons(); },
       onGridReady: (params: TableGridReadyEvent) => {
         Table._api = params.api;
-        Table._colApi = params.columnApi;
         Table._wireQuickFilter();
         Table._initChipFilters();
         // Restore the user's saved grid layout (if the feature is on) before
@@ -927,7 +921,7 @@ export const Table = {
     const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
     drop.innerHTML = visible.length
       ? visible.map(c => `<label><input type="checkbox" value="${Util.escapeHtml(c)}"${Table._chipFilters.colors.has(c) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('color', this)"> ${Util.escapeHtml(c)}</label>`).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No colors'}</div>`;
+      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : Util.t('ui.no_colors_empty')}</div>`;
   },
 
   _buildStatusChipDropdown(): void {
@@ -1168,6 +1162,11 @@ export const Table = {
   /** True when the active profile is All alerts: the profile filter would match nothing, so it is offered disabled. */
   _profileFilterOff(): boolean { return AlertProfileMatches.current().profileId === ALL_ALERTS_PROFILE_ID; },
 
+  /** One plant-membership test for every _onStore branch: the task's own PLANT, else the plant its line maps to. */
+  _inSelectedPlant(t: NimbusTask): boolean {
+    return inSelectedPlantFor(t, Store.selectedPlant, m => Store.getPlantForLine(m));
+  },
+
   _onStore(evt: StoreEvent): void {
     if (evt.source === 'table' && evt.type !== 'firmed:change') return;
     if (!Table._api) return;
@@ -1207,7 +1206,7 @@ export const Table = {
       const ids = (evt.ids as Array<string | number> | undefined) ?? [];
       const inPlant = ids
         .map(id => Store.tasks[id])
-        .filter((t): t is NimbusTask => !!t && (t.PLANT || Store.getPlantForLine(t.MACHINE)) === Store.selectedPlant);
+        .filter((t): t is NimbusTask => !!t && Table._inSelectedPlant(t));
       const add: NimbusTask[] = [];
       const update: NimbusTask[] = [];
       for (const t of inPlant) {
@@ -1218,8 +1217,7 @@ export const Table = {
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
     } else if (evt.type === 'task:update') {
       const t = Store.tasks[String(evt.id)];
-      if (t && Store.selectedPlant
-          && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant) {
+      if (t && Store.selectedPlant && Table._inSelectedPlant(t)) {
         Table._api.applyTransaction({ update: [t] });
       }
       if (Table._hasChipFilters()) Table._api.onFilterChanged();
@@ -1227,7 +1225,7 @@ export const Table = {
       const ids = (evt.ids as Array<string | number> | undefined) ?? [];
       const updated = ids
         .map(id => Store.tasks[id])
-        .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant);
+        .filter((t): t is NimbusTask => !!t && Table._inSelectedPlant(t));
       Table._api.applyTransaction({ update: updated });
       if (Table._chipFilters.status === 'firmed') Table._api.onFilterChanged();
     } else if (evt.type === 'alerts:change') {
@@ -1241,10 +1239,11 @@ export const Table = {
       // nothing visible was ever recomputed. No redrawRows: that would re-enter
       // AG Grid's render cycle.
       const changedIds = evt.changedIds as Array<string | number> | undefined;
-      const updated = changedIds && changedIds.length
+      // An empty array means "nothing changed": no row refresh. Only an absent changedIds is unscoped.
+      const updated = changedIds
         ? changedIds
             .map(id => Store.tasks[id])
-            .filter((t): t is NimbusTask => !!t && Store.getPlantForLine(t.MACHINE) === Store.selectedPlant)
+            .filter((t): t is NimbusTask => !!t && Table._inSelectedPlant(t))
         : Store.tasksForSelectedPlant();
       if (updated.length) Table._api.applyTransaction({ update: updated });
       if (Table._chipFilters.status === 'conflict' || Table._chipFilters.status === 'atrisk') {
@@ -1434,7 +1433,13 @@ export const Table = {
     if (field === 'end_date') {
       // The typed End is the finish the planner wants; the start is derived from it (OQ1).
       const d = Util.parseDate(p.newValue);
-      if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); Table._api!.refreshCells({ rowNodes: [p.node] }); return; }
+      if (!d) {
+        // AG Grid has already written the unparsable value (null) onto the live Store task; put the finish back.
+        p.data.end_date = p.oldValue as Date | null;
+        Toast.show(Util.t('toast.invalid_date'), 'error');
+        Table._api!.refreshCells({ rowNodes: [p.node] });
+        return;
+      }
       requestedFinish = d;
       // AG Grid has already written the typed value onto the row; placement must see the end the order had
       // (a marked bar is translated by the delta from it, not stretched).
@@ -1457,10 +1462,10 @@ export const Table = {
       // path below can leave a pair string in the row.
       const parsed = Table._parsePairValue(String(p.newValue || 'Unknown'));
       const newMachine = parsed.machine || 'Unknown';
-      p.data.MACHINE = newMachine;
       // The pre-edit machine for the lock comparison (decision C, aggregate_to_detail.md §8) has to come from
-      // p.oldValue, not p.data.MACHINE.
-      const priorMachine = p.oldValue != null ? String(p.oldValue) : String(p.data.MACHINE ?? 'Unknown');
+      // p.oldValue, captured BEFORE the row is overwritten (a null oldValue falls back to the row's machine).
+      const priorMachine = String(p.oldValue ?? p.data.MACHINE ?? 'Unknown');
+      p.data.MACHINE = newMachine;
       const routing = Table._routingEnabledForTask(p.data);
       const priorPv = Runtime.normPv(p.data.PRODUCTION_VERSION) ?? '';
       const newPv = parsed.pv ?? priorPv;
@@ -1547,18 +1552,30 @@ export const Table = {
     }
 
     // A (PV, machine) pair write is one undo step (snapshot before the single Store write, push after).
-    const undoSnap = pairPv !== null ? UndoStack.snapshotTasks([id]) : null;
+    // One undo entry per manual placement edit (pair write, typed finish, run time, plain machine). AG Grid has
+    // already written the edited value onto the row (it IS the Store task), so the snapshot puts the old value back.
+    const editKind = pairPv !== null ? null : manualEditKind(field);
+    const undoSnap = (pairPv !== null || editKind)
+      ? UndoStack.snapshotTasks([id]).map(s => (field === 'end_date' || field === 'RUN_TIME') ? { ...s, [field]: p.oldValue } as NimbusTask : s)
+      : null;
     Store.updateTask(id, changes, 'table');
-    if (undoSnap) Table._pushPairUndo(id, undoSnap);
+    if (undoSnap) { if (editKind) Table._pushEditUndo(id, undoSnap, editKind); else Table._pushPairUndo(id, undoSnap); }
     Table._api!.applyTransaction({ update: [Store.tasks[id]] });
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.row_updated'), 'success', 1200);
   },
 
+  /** One undo entry for a manual finish / run time / machine edit (snapshot taken before the write, pushed after a successful one). */
+  _pushEditUndo(id: string, snap: NimbusTask[], kind: ManualEditKind): void {
+    const task = Store.tasks[id];
+    UndoStack.push(Util.t(MANUAL_EDIT_UNDO_KEY[kind], { order: (task && (task.text || task.ORDER)) || id }),
+                   () => UndoStack.restoreTasks(snap), [id]);
+  },
+
   /** One undo entry for a (PV, machine) pair write, mirroring the Gantt drop's "Move ..." entry. */
   _pushPairUndo(id: string, snap: NimbusTask[]): void {
     const task = Store.tasks[id];
-    UndoStack.push(`Change production version / machine "${(task && (task.text || task.ORDER)) || id}"`,
+    UndoStack.push(Util.t('undo.pair_override', { order: (task && (task.text || task.ORDER)) || id }),
                    () => UndoStack.restoreTasks(snap), [id]);
   },
 
@@ -1568,18 +1585,6 @@ export const Table = {
     Table._selectedId = sel.length === 1 ? String(sel[0].id) : null;
   },
 
-  _onRowClicked(event: { data?: NimbusTask }): void {
-    if (!event.data) return;
-    const task = Store.tasks[event.data.id];
-    if (task) {
-      const rightSidebar = document.getElementById('right-sidebar');
-      if (rightSidebar) {
-        rightSidebar.classList.remove('collapsed');
-        setTimeout(() => { Timeline.redraw(); TimelineNav.render(); }, Config.ANIM_MS);
-      }
-      Inspector.show(task);
-    }
-  },
   _alertSeverity(data: NimbusTask | null): 'err' | 'warn' | null {
     if (!data) return null;
     const ids = Store.alertsByTask().get(String(data.id)) || [];
@@ -1736,9 +1741,10 @@ export const Table = {
       return;
     }
 
-    const undoSnap = pairChanged ? UndoStack.snapshotTasks([id]) : null;
+    const undoSnap = UndoStack.snapshotTasks([id]);
     Store.updateTask(id, schedule, 'table');
-    if (undoSnap) Table._pushPairUndo(id, undoSnap);
+    if (pairChanged) Table._pushPairUndo(id, undoSnap);
+    else Table._pushEditUndo(id, undoSnap, newLine !== (t.MACHINE || 'Unknown') ? 'machine' : 'finish');
     if (Table._api) Table._api.applyTransaction({ update: [Store.tasks[id]] });
     // Re-check at apply time: the window may have rolled while the modal was open, and applyFirm
     // refuses a now-locked order.
@@ -1889,7 +1895,7 @@ export const Table = {
           ${date ? `<span style="flex-shrink:0;font-size:10.5px;color:var(--fg-mute);white-space:nowrap;margin-top:2px">${date}</span>` : ''}
           <button data-alert-id="${Util.escapeHtml(a.id)}"
             style="flex-shrink:0;padding:2px 10px;font-size:11px;border-radius:5px;border:1px solid var(--line);background:none;cursor:pointer;color:var(--fg-mute);white-space:nowrap;margin-top:1px">
-            Go to
+            ${Util.escapeHtml(Util.t('btn.go_to'))}
           </button>
         </div>`;
     }).join('');
@@ -1899,7 +1905,7 @@ export const Table = {
     dlg.innerHTML = `
       <div style="padding:20px;min-width:320px;max-width:440px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-          <h3 style="margin:0;font-size:14px;font-weight:700">⚐ Alerts — Order <span style="color:var(--accent)">${Util.escapeHtml(po)}</span></h3>
+          <h3 style="margin:0;font-size:14px;font-weight:700">⚐ ${Util.escapeHtml(Util.t('ui.alert_popup_title', { order: '\u0001' })).replace('\u0001', `<span style="color:var(--accent)">${Util.escapeHtml(po)}</span>`)}</h3>
           <button data-alert-close style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--fg-mute)">✕</button>
         </div>
         <div>${rows}</div>
@@ -1913,88 +1919,6 @@ export const Table = {
       const btn = target?.closest('[data-alert-id]') as HTMLElement | null;
       if (btn) { dlg.close(); NIMBUS!.AlertsUIAdapter!.focus!(btn.dataset.alertId ?? ''); }
     });
-  },
-
-  _showNotePopover(e: MouseEvent, id: string): void {
-    Table._closeNotePopover();
-    const task = Store.tasks[id];
-    if (!task) return;
-
-    const pop = document.createElement('div');
-    pop.id = 'nb-note-popover';
-    const cur = task.notes || '';
-    pop.innerHTML = `
-      <div class="nb-note-pop-header">
-        <span>Order Note</span>
-        <button class="nb-note-pop-close" onclick="NIMBUS.Table._closeNotePopover()">✕</button>
-      </div>
-      <textarea id="nb-note-ta" maxlength="500" placeholder="Add a note…">${Util.escapeHtml(cur)}</textarea>
-      <div class="nb-note-pop-footer">
-        <span id="nb-note-cnt">${cur.length}/500</span>
-        <div class="nb-note-pop-btns">
-          <button class="nb-note-cancel" onclick="NIMBUS.Table._closeNotePopover()">Cancel</button>
-          <button class="nb-note-save" data-note-id="${Util.escapeHtml(id)}">Save</button>
-        </div>
-      </div>`;
-    document.body.appendChild(pop);
-
-    const btn = (e.target as Element | null)?.closest('button') as HTMLElement ?? (e.target as HTMLElement);
-    const rect = btn.getBoundingClientRect();
-    const popW = 284;
-    let left = Math.max(4, Math.min(rect.left, window.innerWidth - popW - 4));
-    pop.style.left = left + 'px';
-    pop.style.top = '0px'; // temp placement so offsetHeight is measurable
-    requestAnimationFrame(() => {
-      const h = pop.offsetHeight;
-      const spaceAbove = rect.top - 8;
-      const spaceBelow = window.innerHeight - rect.bottom - 8;
-      let top = spaceAbove >= h || spaceAbove >= spaceBelow
-        ? Math.max(4, rect.top - h - 4)
-        : rect.bottom + 4;
-      pop.style.top = top + 'px';
-    });
-
-    const ta = document.getElementById('nb-note-ta') as HTMLTextAreaElement | null;
-    const cnt = document.getElementById('nb-note-cnt');
-    if (!ta || !cnt) { ErrorLog.error('ui', 'required DOM elements missing for note popover'); return; }
-    ta.addEventListener('input', () => {
-      cnt.textContent = ta.value.length + '/500';
-    });
-    pop.querySelector<HTMLElement>('.nb-note-save')?.addEventListener('click', (ev) => {
-      Table._saveNotePopover((ev.currentTarget as HTMLElement).dataset.noteId ?? '');
-    });
-    ta.focus();
-    ta.setSelectionRange(ta.value.length, ta.value.length);
-
-    setTimeout(() => {
-      Table._noteOutsideHandler = (ev: MouseEvent) => { if (!pop.contains(ev.target as Node)) Table._closeNotePopover(); };
-      document.addEventListener('mousedown', Table._noteOutsideHandler);
-    }, 0);
-    Table._noteKeyHandler = (ev: KeyboardEvent) => { if (ev.key === 'Escape') Table._closeNotePopover(); };
-    document.addEventListener('keydown', Table._noteKeyHandler);
-  },
-
-  _saveNotePopover(id: string): void {
-    const ta = document.getElementById('nb-note-ta') as HTMLTextAreaElement | null;
-    if (!ta) { ErrorLog.error('ui', 'required DOM element missing: nb-note-ta'); return; }
-    if (!Table._api) { ErrorLog.error('ui', 'Table._api not initialized'); return; }
-    const val = ta.value.trim().slice(0, 500) || null;
-    Inspector._updateNote(id, val);
-    Table._closeNotePopover();
-    Table._api.applyTransaction({ update: [Store.tasks[id]] });
-  },
-
-  _closeNotePopover(): void {
-    const pop = document.getElementById('nb-note-popover');
-    if (pop) pop.remove();
-    if (Table._noteOutsideHandler) {
-      document.removeEventListener('mousedown', Table._noteOutsideHandler);
-      Table._noteOutsideHandler = null;
-    }
-    if (Table._noteKeyHandler) {
-      document.removeEventListener('keydown', Table._noteKeyHandler);
-      Table._noteKeyHandler = null;
-    }
   },
 
   /** A minimal inline date-time text editor for AG Grid. Typed as MM/DD/YYYY HH:mm (24h) so it
@@ -2035,6 +1959,7 @@ export const Table = {
     _pairMode = false;
     _chosen: string | null = null;
     _activeIdx = 0;
+    _untouched = true;   // no keystroke or arrow yet: Enter keeps the current value
     _eGui!: HTMLDivElement;
     _input!: HTMLInputElement;
     _list!: HTMLDivElement;
@@ -2048,6 +1973,7 @@ export const Table = {
       this._pairMode = this._values.some(o => o.value.includes('|'));
       this._chosen = null;
       this._activeIdx = 0;
+      this._untouched = true;
 
       this._eGui = document.createElement('div');
       this._eGui.className = 'nse-editor';
@@ -2055,17 +1981,25 @@ export const Table = {
       this._input = this._eGui.querySelector('.nse-input')!;
       this._list  = this._eGui.querySelector('.nse-list')!;
       this._input.value = params.value || '';
-      this._input.addEventListener('input', () => this._renderList(this._input.value));
+      this._input.addEventListener('input', () => { this._untouched = false; this._renderList(this._input.value); });
       this._input.addEventListener('keydown', (e: KeyboardEvent) => this._onKeyDown(e));
-      this._renderList('');
+      this._list.setAttribute('role', 'listbox');
+      this._input.setAttribute('role', 'combobox');
+      this._input.setAttribute('aria-expanded', 'true');
+      // The row's current value (a pair's value on a routing plant, else the machine) starts highlighted.
+      const currentValue = this._pairMode && params.data
+        ? `${Runtime.normPv(params.data.PRODUCTION_VERSION) ?? ''}|${params.data.MACHINE ?? params.value ?? ''}`
+        : String(params.value ?? '');
+      this._renderList('', initialActiveIndex(this._values, currentValue));
     }
-    _renderList(q: string): void {
+    _renderList(q: string, activeIdx = 0): void {
       const query = q.toLowerCase().trim();
       this._filtered = query ? this._values.filter(o => o.label.toLowerCase().includes(query)) : this._values;
-      this._activeIdx = 0;
+      this._activeIdx = activeIdx;
       this._list.innerHTML = this._filtered.length
-        ? this._filtered.map((o, i) => `<div class="nse-opt${i === 0 ? ' active' : ''}" data-i="${i}">${Util.escapeHtml(o.label)}</div>`).join('')
+        ? this._filtered.map((o, i) => `<div class="nse-opt${i === activeIdx ? ' active' : ''}" id="nse-opt-${i}" role="option" aria-selected="${i === activeIdx}" data-i="${i}">${Util.escapeHtml(o.label)}</div>`).join('')
         : `<div class="nse-empty">${Util.t('ui.no_matches')}</div>`;
+      this._syncActive(false);
       this._list.querySelectorAll('.nse-opt').forEach((el) => {
         el.addEventListener('mousedown', (e: Event) => { e.preventDefault(); this._choose(Number((el as HTMLElement).dataset.i)); });
       });
@@ -2080,16 +2014,34 @@ export const Table = {
     _onKeyDown(e: KeyboardEvent): void {
       if (e.key === 'ArrowDown') { e.preventDefault(); this._move(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); this._move(-1); }
-      else if (e.key === 'Enter') { e.preventDefault(); this._choose(this._activeIdx); }
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        // Enter on an untouched editor keeps the current value instead of reassigning to the highlighted row.
+        if (this._untouched) this._params.api.stopEditing(true);
+        else this._choose(this._activeIdx);
+      }
       else if (e.key === 'Escape') { this._params.api.stopEditing(true); }
     }
     _move(delta: number): void {
       if (!this._filtered.length) return;
+      this._untouched = false;
       this._activeIdx = (this._activeIdx + delta + this._filtered.length) % this._filtered.length;
-      this._list.querySelectorAll('.nse-opt').forEach((el, i) => el.classList.toggle('active', i === this._activeIdx));
+      this._syncActive(true);
+    }
+    /** Marks the active option (class, aria-selected, aria-activedescendant) and keeps it in view. */
+    _syncActive(scroll: boolean): void {
+      this._list.querySelectorAll('.nse-opt').forEach((el, i) => {
+        const on = i === this._activeIdx;
+        el.classList.toggle('active', on);
+        el.setAttribute('aria-selected', String(on));
+        if (on) {
+          this._input.setAttribute('aria-activedescendant', (el as HTMLElement).id);
+          if (scroll) (el as HTMLElement).scrollIntoView?.({ block: 'nearest' });
+        }
+      });
     }
     getGui(): HTMLDivElement { return this._eGui; }
-    afterGuiAttached(): void { this._input.focus(); this._input.select(); }
+    afterGuiAttached(): void { this._input.focus(); this._input.select(); this._syncActive(true); }
     getValue(): string | null {
       if (this._chosen != null) return this._chosen;
       const typed = this._input.value.trim().toLowerCase();
@@ -2112,11 +2064,10 @@ export const Table = {
 //    Inspector) ---------------------------------------------------------------
 
 /** Inspector._onFieldChange's `[data-field]` inputs — Inspector._render() only
- *  ever wires MACHINE (<select>), notes (<textarea>), start_date
- *  (<input>, upgraded to Flatpickr), RUN_TIME (<input type=number>), the
- *  priority attributes (PRT_01/PRT_02/PRODUCTION_VERSION), plus the open
- *  SAP-column bag via ORDER_QUANTITY_(GMEIN) — but the field name arrives as
- *  a plain string read off the DOM, not a compile-time literal. */
+ *  ever wires MACHINE / PV_MACHINE (<select>), notes (<textarea>), end_date
+ *  (<input>, upgraded to Flatpickr), RUN_TIME (<input type=number>) and the
+ *  priority attributes (PRT_01/PRT_02/PRODUCTION_VERSION) — but the field name
+ *  arrives as a plain string read off the DOM, not a compile-time literal. */
 type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
 /** P2: after clearing the MANUAL firm layer, tell the planner if the order is
@@ -2124,6 +2075,64 @@ type InspectorFieldEl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaEleme
  *  "Unfirm" silently no-ops from the planner's point of view. Called from
  *  every unfirm entry point: context-menu, Inspector, F-key, Dashboard. */
 /** Click-time mismatch message: still locked (frozen/running) vs. already changed elsewhere (another tab). */
+/** Index of the option whose value equals `current` (0 when none does or nothing is current). */
+export function initialActiveIndex(options: ReadonlyArray<{ value: string }>, current: string | null | undefined): number {
+  if (current == null || current === '') return 0;
+  const i = options.findIndex(o => o.value === current);
+  return i >= 0 ? i : 0;
+}
+
+/** A FastAPI error body's `detail` as one readable string: a string as-is, a 422 array as its messages joined. */
+export function formatApiDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map(d => (d && typeof d === 'object' && 'msg' in d ? String((d as { msg: unknown }).msg) : String(d))).join('; ');
+  }
+  return fallback;
+}
+
+/** True when the task belongs to `plant`: its own PLANT, else the plant its line maps to. */
+export function inSelectedPlantFor(t: { PLANT?: string | null; MACHINE?: string | null }, plant: string | null | undefined,
+  plantForLine: (machine: string) => string | null | undefined): boolean {
+  if (!plant) return false;
+  return (t.PLANT || plantForLine(t.MACHINE as string)) === plant;
+}
+
+/** A note response's row_version is adopted only when nothing else touched the order meanwhile: the local version
+ *  is still the one the request was based on and the local note is still what was sent. Otherwise a genuine
+ *  concurrent edit must still surface as stale on the next date save. */
+export function shouldAdoptNoteVersion(localVersion: number | null | undefined, baseVersion: number | null | undefined,
+  localNotes: string | null | undefined, sentNotes: string | null): boolean {
+  return localVersion === baseVersion && (localNotes || null) === (sentNotes || null);
+}
+
+export type ManualEditKind = 'finish' | 'machine' | 'runtime';
+export const MANUAL_EDIT_UNDO_KEY: Record<ManualEditKind, string> = {
+  finish: 'undo.edit_finish', machine: 'undo.edit_machine', runtime: 'undo.edit_runtime',
+};
+/** Which undoable manual placement edit a grid/Inspector field is (null = not one; pair writes have their own entry). */
+export function manualEditKind(field: string | undefined): ManualEditKind | null {
+  if (field === 'end_date') return 'finish';
+  if (field === 'MACHINE') return 'machine';
+  if (field === 'RUN_TIME') return 'runtime';
+  return null;
+}
+
+/** Whether the open Inspector must re-render for a Store event. Pure: the subscriber supplies the open id and
+ *  whether the notes textarea holds focus. A re-render replaces the panel's innerHTML, so it is skipped for note
+ *  saves (they would swallow the next click), for events that do not name the open order, and while typing a note. */
+export function inspectorShouldRerender(evt: { type?: string; source?: string; id?: unknown; ids?: unknown },
+  currentId: string | null, notesFocused: boolean): boolean {
+  if (!currentId) return false;
+  if (notesFocused) return false;
+  if (evt.source === 'note') return false;
+  if (evt.type === 'task:update') return String(evt.id) === currentId;
+  if (evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change') {
+    return Array.isArray(evt.ids) && (evt.ids as unknown[]).some(i => String(i) === currentId);
+  }
+  return evt.type === 'tasks:bulk' || evt.type === 'setup-snapshot:replace';
+}
+
 export function firmMismatchMessage(task: NimbusTask | undefined): string {
   return Util.t(task && Engine.firmActionFor(task) === null ? 'toast.still_firmed' : 'toast.firm_state_changed');
 }
@@ -2254,16 +2263,18 @@ export const Inspector = {
   // selection, so a later System Configuration change is picked up the next
   // time this panel opens.
   _fieldVisible(key: string): boolean {
-    const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
+    const f = getField(key);
     if (!f) return true;
     const cfg = Store.orderFieldVisibility[key];
     return cfg?.inspector ?? f.inspectorDefault;
   },
 
   init(): void {
+    if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('pagehide', () => Inspector._flushNotes());
     Inspector._unsubStore = Store.subscribe(evt => {
     // A plant load/reload or a plant switch replaces the rows wholesale: another user's or SAP's edits may sit
     // behind any cached history, so drop all of it (the card refetches when it is next painted).
+    if (evt.type === 'plant:selected') Inspector._flushNotes();
     if (evt.type === 'tasks:bulk' || evt.type === 'plant:selected') Inspector.resetHistory();
     if (evt.type === 'tasks:saved') { Inspector.invalidateHistory((evt.ids ?? []) as Array<string | number>); return; }
     // Allow firmed:change through even from 'inspector' so the Firm/Unfirm
@@ -2277,15 +2288,12 @@ export const Inspector = {
         }
         return;
       }
-      if (!Inspector._currentId) return;
-      if (evt.type === 'task:update' && String(evt.id) === Inspector._currentId) {
-        Inspector._render(Store.tasks[Inspector._currentId]);
-      } else if (evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'firmed:change'
-          || evt.type === 'setup-snapshot:replace') {
-        const t = Store.tasks[Inspector._currentId];
-        if (t) Inspector._render(t);
-        else Inspector.clear();
-      }
+      const notesFocused = typeof document !== 'undefined'
+        && !!(document.activeElement as HTMLElement | null)?.matches?.('[data-field="notes"]');
+      if (!inspectorShouldRerender(evt, Inspector._currentId, notesFocused)) return;
+      const t = Store.tasks[Inspector._currentId!];
+      if (t) Inspector._render(t);
+      else if (evt.type !== 'task:update') Inspector.clear();
     }, 'Inspector');
   },
 
@@ -2435,7 +2443,7 @@ export const Inspector = {
   _formatSetupState(state: SetupStateKey | null, definition: { fields: ReadonlyArray<string> } | null | undefined): string | null {
     if (!state || !definition) return null;
     const values = new Map(state.map(part => [part.fieldKey, part.value]));
-    const labels: Record<string, string> = { colorWheel: 'Color', prt01: 'PRT01', prt02: 'PRT02', productionVersion: 'Production version' };
+    const labels: Record<string, string> = { colorWheel: Util.t('constraint.colorWheel'), prt01: Util.t('constraint.prt01'), prt02: Util.t('constraint.prt02'), productionVersion: Util.t('constraint.productionVersion') };
     return definition.fields.map(field => `${labels[field] || field}: ${values.get(field) || '—'}`).join(' · ');
   },
 
@@ -2600,17 +2608,6 @@ export const Inspector = {
     // Due Date shows the due instant (Util.dueInstant), never the raw midnight SAP date.
     const dueInstant = Util.dueDisplayDate(task);
     const systemMoveLine = Inspector._systemMoveLine(task);
-    const setupDetail = Inspector._setupDetailForTask(task);
-    const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
-    const missingSetupPlaceholder = '—';
-    const firstOnMachine = Util.t('ui.setup_first_on_machine');
-    const setupPredecessorText = setupDetail.predecessorOrderId === undefined
-      ? missingSetupPlaceholder
-      : setupDetail.predecessorOrderId
-        ? Util.orderNumber(Store.tasks[setupDetail.predecessorOrderId], setupDetail.predecessorOrderId)
-        : (firstOnMachine === 'ui.setup_first_on_machine' ? 'First on machine' : firstOnMachine);
-    const setupPlant = Store.getPlantForLine(task.MACHINE) || task.PLANT || Store.selectedPlant || '';
-    const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
     // Distribution card (aggregate_to_detail.md §8): only rendered for a
     // sub-order (PARENT_ORDER set). Share % is this child's quantity over
     // the sum of all living siblings' quantities (siblings = other tasks
@@ -2655,7 +2652,7 @@ export const Inspector = {
           <div class="insp-val">${Util.escapeHtml(task.FORM_SIZE || '—')}</div></div>` : ''}
         ${['PRT_01', 'PRT_02', 'PRODUCTION_VERSION'].map(key => {
           if (!Inspector._fieldVisible(key)) return '';
-          const field = ORDER_FIELD_CATALOG.find(c => c.key === key);
+          const field = getField(key);
           if (!field) return '';
           const value = (task as unknown as Record<string, unknown>)[key] ?? '';
           // D11: on a routing plant the production version is read-only; it changes only through PV - Machine.
@@ -2678,8 +2675,8 @@ export const Inspector = {
 
       ${task.PARENT_ORDER ? `<div class="insp-card">
         <h4>${Util.t('ui.insp_dist_title')}</h4>
-        <div class="insp-row"><label>${Util.t('ui.insp_order')}</label>
-          <div class="insp-val">${Util.escapeHtml(task.PARENT_ORDER)}${task.DISTRIBUTION_LETTER ? ' · ' + Util.escapeHtml(task.DISTRIBUTION_LETTER) : ''}</div></div>
+        ${Inspector._fieldVisible('PARENT_ORDER') || Inspector._fieldVisible('DISTRIBUTION_LETTER') ? `<div class="insp-row"><label>${Util.t('ui.insp_order')}</label>
+          <div class="insp-val">${[Inspector._fieldVisible('PARENT_ORDER') ? Util.escapeHtml(task.PARENT_ORDER) : '', Inspector._fieldVisible('DISTRIBUTION_LETTER') && task.DISTRIBUTION_LETTER ? Util.escapeHtml(task.DISTRIBUTION_LETTER) : ''].filter(Boolean).join(' · ')}</div></div>` : ''}
         <div style="font-size:12px;margin:4px 0 8px;">${Util.t('ui.insp_dist_share', { pct: distPct })}</div>
         ${distOtherSiblings.length ? `
         <div style="font-size:11px;font-weight:500;color:var(--fg-mute);margin-bottom:4px;">${Util.t('ui.insp_dist_siblings')}</div>
@@ -2708,16 +2705,16 @@ export const Inspector = {
         <div class="insp-row"><label>${Util.t('ui.insp_due_date')}</label>
           <div class="insp-val">${dueInstant ? Util.fmtDTReadable(dueInstant) : '—'}</div></div>` : ''}
         <div class="insp-row"><label>${Util.t('ui.insp_planned_start')}</label>
-          <div class="insp-val">${task.start_date ? Util.fmtDTReadable(task.start_date) : '—'}</div></div>
+          <div class="insp-val" data-insp-start>${task.start_date ? Util.fmtDTReadable(task.start_date) : '—'}</div></div>
         <div class="insp-row"><label>${Util.t('ui.insp_planned_finish')}</label>
           <div class="insp-val"><input type="text" data-field="end_date" value="${Util.toLocalInput(task.end_date)}">
-            ${Inspector._varianceBadge(task)}</div></div>
+            <span data-insp-variance>${Inspector._varianceBadge(task)}</span></div></div>
         ${systemMoveLine ? `<div class="insp-split-summary-note">${Util.escapeHtml(systemMoveLine)}</div>` : ''}
-        <div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
-          <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}" ${task.planning_reason?.code === 'runtime_unknown' ? '' : `disabled title="${Util.escapeHtml(Util.t('ui.insp_run_time_locked_title'))}"`}></div></div>
+        ${Inspector._fieldVisible('RUN_TIME') ? `<div class="insp-row"><label>${Util.t('ui.insp_run_time')}</label>
+          <div class="insp-val"><input type="number" step="0.25" data-field="RUN_TIME" value="${task.RUN_TIME || 0}" ${task.planning_reason?.code === 'runtime_unknown' ? '' : `disabled title="${Util.escapeHtml(Util.t('ui.insp_run_time_locked_title'))}"`}></div></div>` : ''}
         ${task.run_time_source && Inspector._fieldVisible('run_time_basis') ? `
         <div class="insp-row"><label>${Util.t('ui.insp_runtime_basis')}</label>
-          <div class="insp-val">${Util.escapeHtml(Inspector._formatRuntimeBasis(task))}</div></div>` : ''}
+          <div class="insp-val" data-insp-basis>${Util.escapeHtml(Inspector._formatRuntimeBasis(task))}</div></div>` : ''}
       </div>
 
       ${(() => {
@@ -2727,7 +2724,7 @@ export const Inspector = {
           'LABOR_HOURS_(MEINH)', 'MACHINE_HOURS_(MEINH)', 'NO_OF_FTE_(MEINH)'];
         const rows = moreKeys.map(key => {
           if (!Inspector._fieldVisible(key)) return '';
-          const f = ORDER_FIELD_CATALOG.find(c => c.key === key);
+          const f = getField(key);
           if (!f) return '';
           // SAP firm flag: the raw key never reaches the browser, only `ecc_firmed` (X or —).
           const val = key === 'FIRMING_INDICATOR'
@@ -2757,19 +2754,7 @@ export const Inspector = {
         </div>
       </div>` : ''}
 
-      <div class="insp-card insp-setup-detail" aria-label="${Util.escapeHtml(Util.t('ui.setup_detail_title'))}">
-        <h4>${Util.escapeHtml(Util.t('ui.setup_detail_title'))}</h4>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${Util.escapeHtml(setupPredecessorText)}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? missingSetupPlaceholder : `${setupDetail.standardMinutes} min`}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_source'))}</label><div class="insp-val">${Util.escapeHtml(setupSourceLabel(setupDetail.source) || missingSetupPlaceholder)}</div></div>
-        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_override'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.overrideStatus === 'none' ? Util.t('ui.setup_override_none') : (setupDetail.overrideStatus || missingSetupPlaceholder))}</div></div>
-        ${setupCapacityConflict ? `<p class="insp-setup-warning">${Util.escapeHtml(setupCapacityConflict)}</p>` : ''}
-        ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${Util.escapeHtml(Util.t('ui.setup_missing'))}: ${Util.escapeHtml(setupDetail.missingDetail)}</p>` : ''}
-        ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>Correct actual setup state</button><button class="btn btn-ghost sm" data-setup-adjust-time>Adjust setup time</button><div data-setup-editor-host></div></div>` : ''}
-      </div>
+      ${Inspector._setupCardHtml(task)}
 
       <div class="insp-card">
         <h4>${Util.t('ui.insp_notes_section')}</h4>
@@ -2813,12 +2798,7 @@ export const Inspector = {
       const app = (globalThis as unknown as { NIMBUS?: { App?: { gotoGanttSub?: (sub: string) => void } } }).NIMBUS?.App;
       app?.gotoGanttSub?.('distribution');
     });
-    body.querySelector<HTMLButtonElement>('[data-setup-correct-state]')?.addEventListener('click', () => {
-      const snapshot = Store.setupSnapshot;
-      const host = body.querySelector<HTMLElement>('[data-setup-editor-host]');
-      if (snapshot && host && setupPlant) SetupAdmin.mountStateEditor(host, snapshot, task.MACHINE, () => Inspector._refreshSetupTruth(setupPlant));
-    });
-    body.querySelector<HTMLButtonElement>('[data-setup-adjust-time]')?.addEventListener('click', () => Inspector._showSetupOverrideEditor(task, setupPlant));
+    Inspector._wireSetupCard(body, task);
     // Notes char counter (oninput fires on every keystroke)
     const notesEl = body.querySelector('[data-field="notes"]') as HTMLTextAreaElement | null;
     const notesRemEl = body.querySelector('#insp-notes-rem');
@@ -2838,6 +2818,50 @@ export const Inspector = {
       });
     }
     Inspector._fillHistory(_id);
+  },
+
+  _setupPlantFor(task: NimbusTask): string {
+    return Store.getPlantForLine(task.MACHINE) || task.PLANT || Store.selectedPlant || '';
+  },
+
+  /** The Setup detail card for an order (the full card markup; `_render` and `refreshDerived` both place it). */
+  _setupCardHtml(task: NimbusTask): string {
+    const setupDetail = Inspector._setupDetailForTask(task);
+    const setupCapacityConflict = setupDetail ? Inspector._setupCapacityConflictText(setupDetail) : null;
+    const missingSetupPlaceholder = '—';
+    const firstOnMachine = Util.t('ui.setup_first_on_machine');
+    const setupPredecessorText = setupDetail.predecessorOrderId === undefined
+      ? missingSetupPlaceholder
+      : setupDetail.predecessorOrderId
+        ? Util.orderNumber(Store.tasks[setupDetail.predecessorOrderId], setupDetail.predecessorOrderId)
+        : (firstOnMachine === 'ui.setup_first_on_machine' ? 'First on machine' : firstOnMachine);
+    const setupPlant = Inspector._setupPlantFor(task);
+    const canWriteSetup = !!setupPlant && Inspector._canWriteSetup(setupPlant);
+    return `
+      <div class="insp-card insp-setup-detail" aria-label="${Util.escapeHtml(Util.t('ui.setup_detail_title'))}">
+        <h4>${Util.escapeHtml(Util.t('ui.setup_detail_title'))}</h4>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor'))}</label><div class="insp-val">${Util.escapeHtml(setupPredecessorText)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_predecessor_state'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.predecessorState || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_required'))}</label><div class="insp-val">${setupDetail.requiredMinutes == null ? missingSetupPlaceholder : `${setupDetail.requiredMinutes} min`}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_effective'))}</label><div class="insp-val">${setupDetail.effectiveMinutes == null ? missingSetupPlaceholder : `${setupDetail.effectiveMinutes} min`}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_standard'))}</label><div class="insp-val">${setupDetail.standardMinutes == null ? missingSetupPlaceholder : `${setupDetail.standardMinutes} min`}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_source'))}</label><div class="insp-val">${Util.escapeHtml(setupSourceLabel(setupDetail.source) || missingSetupPlaceholder)}</div></div>
+        <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_override'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.overrideStatus === 'none' ? Util.t('ui.setup_override_none') : (setupDetail.overrideStatus || missingSetupPlaceholder))}</div></div>
+        ${setupCapacityConflict ? `<p class="insp-setup-warning">${Util.escapeHtml(setupCapacityConflict)}</p>` : ''}
+        ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${Util.escapeHtml(Util.t('ui.setup_missing'))}: ${Util.escapeHtml(setupDetail.missingDetail)}</p>` : ''}
+        ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>${Util.escapeHtml(Util.t('ui.insp_setup_correct_state'))}</button><button class="btn btn-ghost sm" data-setup-adjust-time>${Util.escapeHtml(Util.t('ui.insp_setup_adjust_time'))}</button><div data-setup-editor-host></div></div>` : ''}
+      </div>`;
+  },
+
+  /** Wires the card's Correct state / Adjust time buttons (after `_render` or after the card is replaced). */
+  _wireSetupCard(body: HTMLElement, task: NimbusTask): void {
+    const setupPlant = Inspector._setupPlantFor(task);
+    body.querySelector<HTMLButtonElement>('[data-setup-correct-state]')?.addEventListener('click', () => {
+      const snapshot = Store.setupSnapshot;
+      const host = body.querySelector<HTMLElement>('[data-setup-editor-host]');
+      if (snapshot && host && setupPlant) SetupAdmin.mountStateEditor(host, snapshot, task.MACHINE, () => Inspector._refreshSetupTruth(setupPlant));
+    });
+    body.querySelector<HTMLButtonElement>('[data-setup-adjust-time]')?.addEventListener('click', () => Inspector._showSetupOverrideEditor(task, setupPlant));
   },
 
   async _refreshSetupTruth(plant: string): Promise<void> {
@@ -2864,30 +2888,39 @@ export const Inspector = {
     const existing = context.existing;
     const baseline = existing?.standard_min ?? context.baseline;
     const initialAdjustment = existing && baseline != null ? existing.remaining_min - baseline : 0;
-    host.innerHTML = `<div class="setup-state-editor" data-setup-override-editor><label>Reason<input class="input" data-setup-override-reason></label>${baseline != null ? `<label>Adjustment (minutes)<input class="input" type="number" step="1" data-setup-override-adjustment value="${initialAdjustment}"></label><p class="setup-editor-note">Matrix baseline: ${baseline} min. Remaining work is baseline plus adjustment.</p>` : `<label>Total setup duration (minutes)<input class="input" type="number" min="0" step="1" data-setup-override-total></label><p class="setup-editor-note">No matrix baseline exists; this total applies only to this exact order pair.</p>`}<div class="insp-actions"><button class="btn btn-primary sm" data-setup-save-override>Save setup time</button>${existing ? '<button class="btn btn-ghost sm" data-setup-reset-override>Reset to matrix</button>' : ''}</div></div>`;
+    host.innerHTML = `<div class="setup-state-editor" data-setup-override-editor><label>${Util.escapeHtml(Util.t('ui.insp_setup_reason'))}<input class="input" data-setup-override-reason></label>${baseline != null ? `<label>${Util.escapeHtml(Util.t('ui.insp_setup_adjustment_min'))}<input class="input" type="number" step="1" data-setup-override-adjustment value="${initialAdjustment}"></label><p class="setup-editor-note">${Util.escapeHtml(Util.t('ui.insp_setup_baseline_note', { baseline }))}</p>` : `<label>${Util.escapeHtml(Util.t('ui.insp_setup_total_min'))}<input class="input" type="number" min="0" step="1" data-setup-override-total></label><p class="setup-editor-note">${Util.escapeHtml(Util.t('ui.insp_setup_no_baseline_note'))}</p>`}<div class="insp-actions"><button class="btn btn-primary sm" data-setup-save-override>${Util.escapeHtml(Util.t('ui.insp_setup_save_time'))}</button>${existing ? `<button class="btn btn-ghost sm" data-setup-reset-override>${Util.escapeHtml(Util.t('ui.insp_setup_reset_matrix'))}</button>` : ''}</div></div>`;
     const reason = host.querySelector<HTMLInputElement>('[data-setup-override-reason]')!;
     reason.value = existing?.reason || '';
+    // Both buttons stay disabled while a request is in flight (no double save / save-then-reset race).
+    const setBusy = (busy: boolean): void => {
+      host.querySelectorAll<HTMLButtonElement>('[data-setup-save-override], [data-setup-reset-override]')
+        .forEach(b => { b.disabled = busy; });
+    };
     host.querySelector<HTMLButtonElement>('[data-setup-save-override]')!.addEventListener('click', async () => {
       const values = Inspector._setupOverrideValues(baseline, host.querySelector<HTMLInputElement>('[data-setup-override-adjustment]')?.value || '', host.querySelector<HTMLInputElement>('[data-setup-override-total]')?.value || '');
-      if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
-      if (!values) { Toast.show(baseline != null ? 'The remaining setup time cannot be below zero.' : 'Enter a whole-number total setup duration.', 'error'); return; }
+      if (!reason.value.trim()) { Toast.show(Util.t('toast.insp_setup_reason_required'), 'error'); reason.focus(); return; }
+      if (!values) { Toast.show(Util.t(baseline != null ? 'toast.insp_setup_remaining_negative' : 'toast.insp_setup_total_invalid'), 'error'); return; }
       const payload = { machine: task.MACHINE, standard_min: values.standardMin, remaining_min: values.remainingMin, signature_version: definition.signature_version, reason: reason.value.trim() };
       const url = existing ? `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}` : `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides`;
       const body = existing ? payload : { ...payload, predecessor_order_id: context.predecessorOrderId, successor_order_id: String(task.id), predecessor_values: Object.fromEntries(context.predecessorState.map(part => [part.fieldKey, part.value])), successor_values: Object.fromEntries(context.successorState.map(part => [part.fieldKey, part.value])) };
+      setBusy(true);
       try {
         const response = await Util.fetchTraced(url, { method: existing ? 'PUT' : 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify(body) });
-        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
-        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show('Setup time saved.', 'success');
-      } catch (error) { Toast.show(`Could not save setup time: ${(error as Error).message}`, 'error'); }
+        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(formatApiDetail(error.detail, `HTTP ${response.status}`)); }
+        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show(Util.t('toast.insp_setup_time_saved'), 'success');
+      } catch (error) { Toast.show(Util.t('toast.insp_setup_time_save_failed', { error: (error as Error).message }), 'error'); }
+      finally { setBusy(false); }
     });
     host.querySelector<HTMLButtonElement>('[data-setup-reset-override]')?.addEventListener('click', async () => {
       if (!existing) return;
-      if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
+      if (!reason.value.trim()) { Toast.show(Util.t('toast.insp_setup_reason_required'), 'error'); reason.focus(); return; }
+      setBusy(true);
       try {
         const response = await Util.fetchTraced(`${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}`, { method: 'DELETE', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify({ machine: task.MACHINE, signature_version: definition.signature_version, reason: reason.value.trim() }) });
-        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(error.detail || `HTTP ${response.status}`); }
-        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show('Setup override reset to matrix.', 'success');
-      } catch (error) { Toast.show(`Could not reset setup time: ${(error as Error).message}`, 'error'); }
+        if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(formatApiDetail(error.detail, `HTTP ${response.status}`)); }
+        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show(Util.t('toast.insp_setup_override_reset'), 'success');
+      } catch (error) { Toast.show(Util.t('toast.insp_setup_time_reset_failed', { error: (error as Error).message }), 'error'); }
+      finally { setBusy(false); }
     });
   },
 
@@ -2935,10 +2968,6 @@ export const Inspector = {
       const d = Util.parseDate(value);
       if (!d) { Toast.show(Util.t('toast.invalid_date'), 'error'); return; }
       requestedFinish = d;
-    } else if (field === 'start_date') {
-      // The start is derived from the finish and is no longer an input; nothing to apply.
-      Inspector._render(t);
-      return;
     } else if (field === 'RUN_TIME') {
       const h = parseFloat(value) || 0;
       changes.RUN_TIME = h;
@@ -2964,8 +2993,6 @@ export const Inspector = {
       requestedLine = newMachine;
       requestedFinish = Table._runtimeEditAnchor(t);
       if (!requestedFinish) Object.assign(changes, Table._unplacedMachineRuntime(t, newMachine, newPv));
-    } else if (field === 'ORDER_QUANTITY_(GMEIN)') {
-      changes[field] = parseFloat(value) || 0;
     } else if (field === 'notes') {
       changes.notes = value.trim() || null;
       Inspector._updateNote(id, changes.notes ?? null);
@@ -3012,10 +3039,12 @@ export const Inspector = {
         changes.planning_reason = null;
       }
     }
-    const undoSnap = pairPv !== null ? UndoStack.snapshotTasks([id]) : null;
+    const editKind = pairPv !== null ? null : manualEditKind(field);
+    const undoSnap = (pairPv !== null || editKind) ? UndoStack.snapshotTasks([id]) : null;
     Store.updateTask(id, changes, 'inspector');
-    if (undoSnap) Table._pushPairUndo(id, undoSnap);
+    if (undoSnap) { if (editKind) Table._pushEditUndo(id, undoSnap, editKind); else Table._pushPairUndo(id, undoSnap); }
     Alerts.scheduleRecompute();
+    Inspector.refreshDerived(id);
   },
 
   // Per-id debounce timers. A single shared debounce timer (the old design) meant a
@@ -3028,35 +3057,76 @@ export const Inspector = {
     Store.updateTask(id, { notes }, 'note');
     Inspector._persistNote(id, notes);
   },
+  /** Notes waiting on their debounce timer (id -> latest text), so a flush does not depend on Store.tasks. */
+  _notePending: {} as Record<string, string | null>,
+  /** Notes whose save failed (id -> text); retried on the next successful note save and flushed on pagehide / plant switch. */
+  _noteRetry: {} as Record<string, string | null>,
   _persistNote(id: string, notes: string | null): void {
     clearTimeout(Inspector._noteTimers[id]);
+    Inspector._notePending[id] = notes;
     Inspector._noteTimers[id] = setTimeout(() => {
       delete Inspector._noteTimers[id];
-      const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-      Util.fetchTraced(`${Config.API_BASE}/task/note`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
-        body: JSON.stringify({ id, notes })
-      })
-        .then(async r => {
-          if (!r.ok) {
-            const parsed = await Util.parseBackendError(r);
-            ErrorLog.warn('inspector', `Note rejected (${r.status}): ${parsed.message}`,
-              { reqId, status: r.status, id }, { reqId, errorCode: parsed.errorCode });
-          } else {
-            const result = await r.json() as { versions?: Record<string, number> };
-            const version = result.versions?.[id];
-            if (version && (Store.tasks[id]?.notes || null) === (notes || null)) {
-              Store.tasks[id].row_version = version;
-            }
-            Inspector.invalidateHistory([id]);
-          }
-        })
-        .catch(e => ErrorLog.warn('inspector', `Note persist failed: ${e.message}`,
-          { reqId, id }, { reqId, errorCode: 'http.network' }));
+      delete Inspector._notePending[id];
+      void Inspector._sendNote(id, notes, false).then(ok => { if (ok) Inspector._retryFailedNotes(id); });
     }, 800);
+  },
+  /** POST one note. Resolves true on success; a failure keeps the note in the retry set and warns the planner.
+   *  keepalive lets the request outlive a closing page. The note never marks the order dirty. */
+  _sendNote(id: string, notes: string | null, keepalive: boolean): Promise<boolean> {
+    const reqId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+    const baseVersion = Store.tasks[id]?.row_version;
+    const fail = (): boolean => {
+      Inspector._noteRetry[id] = notes;
+      Toast.show(Util.t('toast.note_save_failed'), 'warn');
+      return false;
+    };
+    return Util.fetchTraced(`${Config.API_BASE}/task/note`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-request-id': reqId },
+      body: JSON.stringify({ id, notes }),
+      keepalive,
+    })
+      .then(async r => {
+        if (!r.ok) {
+          const parsed = await Util.parseBackendError(r);
+          ErrorLog.warn('inspector', `Note rejected (${r.status}): ${parsed.message}`,
+            { reqId, status: r.status, id }, { reqId, errorCode: parsed.errorCode });
+          return fail();
+        }
+        delete Inspector._noteRetry[id];
+        const result = await r.json() as { versions?: Record<string, number> };
+        const version = result.versions?.[id];
+        const local = Store.tasks[id];
+        if (version && local && shouldAdoptNoteVersion(local.row_version, baseVersion, local.notes, notes)) {
+          local.row_version = version;
+        }
+        Inspector.invalidateHistory([id]);
+        return true;
+      })
+      .catch(e => {
+        ErrorLog.warn('inspector', `Note persist failed: ${e.message}`,
+          { reqId, id }, { reqId, errorCode: 'http.network' });
+        return fail();
+      });
+  },
+  /** Re-send every failed note except `exceptId` (just saved). Each failure stays queued. */
+  _retryFailedNotes(exceptId?: string): void {
+    for (const [id, notes] of Object.entries(Inspector._noteRetry)) {
+      if (id === exceptId || Inspector._noteTimers[id]) continue;
+      void Inspector._sendNote(id, notes, false);
+    }
+  },
+  /** Send every debounced and every failed note now (pagehide, plant switch). */
+  _flushNotes(): void {
+    for (const id of Object.keys(Inspector._noteTimers)) {
+      clearTimeout(Inspector._noteTimers[id]);
+      delete Inspector._noteTimers[id];
+      if (id in Inspector._notePending) Inspector._noteRetry[id] = Inspector._notePending[id];
+      delete Inspector._notePending[id];
+    }
+    for (const [id, notes] of Object.entries(Inspector._noteRetry)) void Inspector._sendNote(id, notes, true);
   },
 
   /** The lock block (C-3): the Firmed card (only while NIMBUS locks the order: manual, frozen or
@@ -3089,6 +3159,33 @@ export const Inspector = {
     root.querySelector('[data-act="firm"]')?.addEventListener('click', () => Inspector.toggleFirm(true));
     root.querySelector('[data-act="unfirm"]')?.addEventListener('click', () => Inspector.toggleFirm(false));
     void id;
+  },
+
+  /** Patches only the DERIVED rows of the open order after an Inspector write (Planned start, variance badge,
+   *  Run time, runtime basis, Setup card). A full `_render` would replace the field being edited (focus), the
+   *  Notes textarea, Flatpickr and the History card, which is why the subscriber ignores source 'inspector'. */
+  refreshDerived(id: string | null | undefined): void {
+    if (!id || id !== Inspector._currentId) return;
+    const task = Store.tasks[id];
+    const body = document.getElementById('inspector-body');
+    if (!task || !body) return;
+    const start = body.querySelector('[data-insp-start]');
+    if (start) start.textContent = task.start_date ? Util.fmtDTReadable(task.start_date) : '—';
+    const variance = body.querySelector('[data-insp-variance]');
+    if (variance) variance.innerHTML = Inspector._varianceBadge(task);
+    const run = body.querySelector<HTMLInputElement>('[data-field="RUN_TIME"]');
+    if (run && document.activeElement !== run) run.value = String(task.RUN_TIME || 0);
+    const basis = body.querySelector('[data-insp-basis]');
+    if (basis) basis.textContent = Inspector._formatRuntimeBasis(task);
+    const card = body.querySelector<HTMLElement>('.insp-setup-detail');
+    // Leave an open setup editor alone: replacing the card would discard what the planner is typing.
+    if (card && !card.querySelector('[data-setup-override-editor]')
+        && !card.querySelector('[data-setup-editor-host]')?.hasChildNodes()) {
+      const holder = document.createElement('div');
+      holder.innerHTML = Inspector._setupCardHtml(task);
+      const fresh = holder.firstElementChild as HTMLElement | null;
+      if (fresh) { card.replaceWith(fresh); Inspector._wireSetupCard(body, task); }
+    }
   },
 
   /** Partial patch of the lock block and the firm button for the open order (C-3). Called by the Gantt's
@@ -3127,6 +3224,8 @@ export const Inspector = {
     Alerts.scheduleRecompute();
   }
 };
+// S10-9: a conflict refresh must not overwrite a note the planner is typing or whose save is queued for retry.
+Persistence.noteUnsaved = (id: string): boolean => id in Inspector._notePending || id in Inspector._noteRetry;
 
 /* =============================================================================
    CONTEXT MENU — right-click on a timeline item.
@@ -3344,7 +3443,7 @@ export const Printer = {
 
     const thead = document.createElement('thead');
     const htr   = document.createElement('tr');
-    for (const h of ['Line', 'Prod. Order', 'Material', 'Description', 'Start', 'End', 'Hours']) {
+    for (const h of ['line', 'prod_order', 'material', 'desc', 'start', 'end', 'hours'].map(k => Util.t(`ui.print_col_${k}`))) {
       const th = document.createElement('th');
       th.textContent = h;
       th.style.cssText = 'text-align:left;padding:6px 8px;border-bottom:2px solid var(--line);font-size:11px;';
@@ -3391,7 +3490,7 @@ export const Printer = {
     // Plant-local wall clock (same as every on-screen time) — toISOString() exported UTC,
     // shifting each time by the viewer's UTC offset.
     const fmtDt = (d: Date | null) => d ? Util.fmtDT(d) : '';
-    const headers = ['Line', 'Production Order', 'Material Number', 'Description', 'Start', 'End', 'Hours'];
+    const headers = ['line', 'prod_order', 'material', 'desc', 'start', 'end', 'hours'].map(k => Util.t(`ui.print_col_${k}`));
     // RFC-4180 quoting + formula guard on every text field (Util.csvCell); BOM so Excel
     // reads the file as UTF-8.
     const lines = [

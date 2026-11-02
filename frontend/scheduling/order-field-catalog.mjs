@@ -1,12 +1,12 @@
 /*
- * frontend/order-field-catalog.mjs — single source of truth for which optional
+ * frontend/scheduling/order-field-catalog.mjs — single source of truth for which optional
  * Orders fields exist and their default show/hide state in the AG Grid
  * columns and the Inspector detail panel.
  *
  * Consumed by:
- *   - Table's columnDefs builder (frontend/schedule-workbench.mts)
- *   - Inspector._render() (frontend/schedule-workbench.mts)
- *   - The admin "System Configuration" sub-tab (frontend/plant-and-administration.mts)
+ *   - Table's columnDefs builder (frontend/scheduling/orders.mts)
+ *   - Inspector._render() (frontend/scheduling/orders.mts)
+ *   - The admin "System Configuration" sub-tab (frontend/admin-ops/admin-ui.mts)
  *
  * CORE fields are never in this catalog and are never hideable — they stay
  * hardcoded in Table/Inspector exactly as before this feature existed:
@@ -20,9 +20,19 @@
  * until an admin actually changes something.
  *
  * Zero-dependency leaf module: do not import anything else here, so both
- * schedule-workbench.mts and plant-and-administration.mts can depend on it
- * without adding a new edge between those two module groups.
+ * scheduling/orders.mts and admin-ops/admin-ui.mts can depend on it
+ * without adding a new edge between those two domains.
+ *
+ * Entry fields: `dbColumn` is documentation only (the orders column the value
+ * comes from); nothing at runtime reads it (one test pins it). `inspector: false`
+ * means the Inspector has no row for the field at all, so the System
+ * Configuration matrix disables that entry's Inspector checkbox.
  */
+/** The catalog entry for an exact field key, or undefined. */
+export function getField(key) {
+    return ORDER_FIELD_CATALOG.find(c => c.key === key);
+}
+
 export const ORDER_FIELD_CATALOG = [
     // Shown in Inspector today, no grid column today.
     { key: 'MATERIAL_NUMBER', dbColumn: 'material_number', type: 'text',
@@ -108,16 +118,17 @@ export const ORDER_FIELD_CATALOG = [
     { key: 'NO_OF_FTE_(MEINH)', dbColumn: 'no_of_fte', type: 'number',
         gridDefault: false, inspectorDefault: false,
         i18nGridKey: 'col.no_of_fte', i18nInspectorKey: 'ui.insp_no_of_fte' },
-    // Read-only distribution fields — never grid editable, default hidden until an admin opts in via System Configuration.
+    // Read-only distribution fields — never grid editable. The grid column is hidden until an admin opts in; the Inspector's
+    // distribution card (sub-orders only) shows them by default, as it did before the Inspector honoured this setting.
     { key: 'PARENT_ORDER', dbColumn: 'parent_production_order', type: 'text',
-        gridDefault: false, inspectorDefault: false,
+        gridDefault: false, inspectorDefault: true,
         i18nGridKey: 'col.sap_order', i18nInspectorKey: 'ui.insp_sap_order' },
     { key: 'DISTRIBUTION_LETTER', dbColumn: 'distribution_letter', type: 'text',
-        gridDefault: false, inspectorDefault: false,
+        gridDefault: false, inspectorDefault: true,
         i18nGridKey: 'col.dist_letter', i18nInspectorKey: 'ui.insp_dist_letter' },
     // Routing runtime fields — default hidden until an admin opts in via System Configuration.
     { key: 'run_time_source', dbColumn: 'run_time_source', type: 'text',
-        gridDefault: false, inspectorDefault: false,
+        gridDefault: false, inspectorDefault: false, inspector: false,
         i18nGridKey: 'col.run_time_source', i18nInspectorKey: 'ui.insp_run_time_source', gridWidth: 100 },
     { key: 'run_time_basis', dbColumn: 'run_time_basis', type: 'text',
         gridDefault: false, inspectorDefault: false,

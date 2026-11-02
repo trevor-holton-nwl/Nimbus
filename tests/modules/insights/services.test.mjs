@@ -899,7 +899,7 @@ test('needs_planning: one warn alert per queued row with the due instant as time
   assert.equal(a1.time.getTime(), future.getTime(), 'time is the due instant');
   assert.equal(a1.msgKey, 'alert.needs_planning');
   assert.equal(a1.msgVars.order, '5001');
-  assert.equal(a1.msgVars.reason, 'No legal slot');
+  assert.equal(a1.msgVars.reason, 'planning_reason.no_fit_found');
   assert.equal(a2.sev, 'err', 'a due instant already before the plant now is an error');
   assert.equal(a2.time.getTime(), past.getTime());
 }));

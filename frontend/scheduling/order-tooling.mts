@@ -1,7 +1,9 @@
 // scheduling/order-tooling.mjs: the read-only "Tooling" facts of one order (Inspector row) and the soft warning shown
 // when a planner types a tool id that has no inventory row. Pure reads of Store + the compute core's shared tool functions
-// (taskToolIds / toolOccupancyInterval / buildToolCapacity / availableCopies), so the Inspector can never disagree with the
-// Gantt alert or the optimizer. Nothing here writes, and nothing blocks an edit.
+// (taskToolIds / toolOccupancyInterval / buildToolCapacity / availableCopies), so the tool ids, occupancy interval and copy
+// counts come from the same code as the Gantt alert and the optimizer. The Inspector's "in use" figure is its own per-order
+// peak count and the plant is resolved by the local `_plantOf` (the core's `taskToolPlant` plus a selected-plant fallback),
+// so the numbers can differ from the alert in edge cases. Nothing here writes, and nothing blocks an edit.
 
 import { Util, Toast } from '../platform/foundation.mjs';
 import { Store } from '../platform/store.mjs';
@@ -21,6 +23,8 @@ export type OrderToolingState =
   | { state: 'not_loaded' }
   | { state: 'ok'; plant: string; tools: OrderToolStatus[] };
 
+// Same as the core's `taskToolPlant`, plus a `Store.selectedPlant` fallback the core does not have (kept so the Inspector
+// still resolves a plant for an order whose PLANT and line are both unmapped).
 function _plantOf(task: NimbusTask): string {
   return task.PLANT || Store.getPlantForLine(task.MACHINE || 'Unknown') || Store.selectedPlant || '';
 }

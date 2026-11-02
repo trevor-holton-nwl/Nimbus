@@ -1,7 +1,7 @@
 // scheduling/persistence.mjs — Persistence (Phase P4 of
 // docs/architecture/domain-refactor-plan.md, which split schedule-data.mts
 // (2,204 lines) into 3 domain files). Owns backend fetch + localStorage
-// cache, demo fallback, and save. Must NEVER import from
+// cache, offline-cache fallback, and save. Must NEVER import from
 // optimization/engine.mjs, calendar/calendar-engine.mjs, or
 // insights/services.mjs — only the reverse direction is allowed. The two
 // real cross-package dependencies below predate this phase (Phase 2
@@ -100,6 +100,10 @@ interface HealthResponse {
 
 /** Per-attempt ceiling for the bulk save POST (loads use 5-8 s; a real bulk save is slower). */
 const SAVE_TIMEOUT_MS = 60_000;
+// S7-7: the backend-unreachable notice stays up this long (effectively until the reconnect watcher recovers).
+const UNREACHABLE_TOAST_MS = 600_000;
+/** S7-2: ceiling for the /tasks/refresh conflict reconciliation fetch. */
+const REFRESH_TIMEOUT_MS = 15_000;
 
 /** Lazily-added fields `saveAll`'s `_post` retry closure stamps onto a plain
  *  `Error` so both the retry-vs-terminal check and the rejection log can read
@@ -119,7 +123,7 @@ interface SaveError extends Error {
  *  type, which itself depends on `Persistence`'s type (TS2307/TS7022). A
  *  named interface breaks the cycle without changing any runtime shape. */
 interface LoadStats {
-  source: 'backend' | 'cache' | 'demo' | null;
+  source: 'backend' | 'cache' | null;
   ts: string | null;
   plant: string | null;
   raw_received: number;
@@ -138,7 +142,7 @@ type SetupWriteKind = 'definition' | 'matrix' | 'state' | 'override' | 'value-de
 let _setupWriteListener: ((plant: string, kind: SetupWriteKind) => void) | null = null;
 
 /* =============================================================================
-   PERSISTENCE — backend fetch, demo fallback, save + local cache.
+   PERSISTENCE — backend fetch, save + local cache.
    ========================================================================== */
 /** D29 - one short, translated line naming WHICH orders the server rejected and why
  *  (the save response's sparse `rejection_reasons` {id: step} map), instead of a bare
@@ -155,6 +159,30 @@ export function describeRejections(reasons: Record<string, string> | undefined |
   const shown = entries.slice(0, limit).map(([id, code]) => `${id}: ${label(code)}`);
   const more = entries.length - shown.length;
   return shown.join('; ') + (more > 0 ? Util.t('ui.reject_more', { count: more }) : '');
+}
+
+/** S7-9: the quota-eviction tiers for one cache snapshot, most complete first. Every tier below the first trims
+ *  CLEAN tasks only: a dirty (unsaved) task is never evicted, because losing it loses the planner's edit. A snapshot
+ *  carrying optimizer-dirty ids is written whole (a partial dependent task set must never be cached). */
+export function cacheTiers(snapshot: StoredState): Array<Partial<StoredState>> {
+  if (snapshot._optimizerDirtyIds?.length) return [snapshot];
+  const dirty = new Set((snapshot._dirtyIds ?? []).map(String));
+  const dirtyTasks = snapshot.tasks.filter(t => dirty.has(String(t.id)));
+  const clean = snapshot.tasks.filter(t => !dirty.has(String(t.id)));
+  const keep = (n: number): Array<Record<string, unknown>> =>
+    [...clean.slice(Math.max(0, clean.length - Math.max(0, n - dirtyTasks.length))), ...dirtyTasks];
+  return [
+    snapshot,
+    { ...snapshot, tasks: keep(2000) },
+    { ...snapshot, tasks: keep(500) },
+    { _schemaVersion: snapshot._schemaVersion,
+      _buildId:       snapshot._buildId,
+      _savedAt:       snapshot._savedAt,
+      _dirtyIds:      dirtyTasks.map(t => String(t.id)),
+      selectedPlant:  snapshot.selectedPlant,
+      lineSettings:   snapshot.lineSettings,
+      tasks:          dirtyTasks },
+  ];
 }
 
 export const Persistence = {
@@ -214,6 +242,13 @@ export const Persistence = {
   _toolInventoryWarned: new Set<string>(),
   // Seam wired by the shell: true while a Gantt drag is in flight (persistence cannot import gantt).
   _calendarRefreshBlocked: null as null | (() => boolean),
+  // Plants whose calendar / tool-inventory probe was skipped by the drag block; re-probed when the drag ends.
+  _deferredRefreshPlants: new Set<string>(),
+  runDeferredRefreshes(): Promise<boolean> {
+    const plants = [...Persistence._deferredRefreshPlants];
+    Persistence._deferredRefreshPlants.clear();
+    return Promise.all(plants.map(p => Persistence.refreshHorizons(p))).then(r => r.some(Boolean));
+  },
   _dirtyIds: new Set<string>(),       // task ids mutated since last successful backend save
   _forceIds: new Set<string>(),       // historical name: dependent optimizer/undo edits require atomic version checks
   _conflictedIds: new Set<string>(),  // retained local edits cannot adopt a server version without reconciliation
@@ -225,6 +260,11 @@ export const Persistence = {
   // set by App._trackDirty from the Store event source via SOURCE_WIRE. Deliberately NOT persisted in the offline
   // cache: ids restored from the cache save without a source and the server records them as 'planner'.
   _dirtySource: new Map<string, string>(),
+  // S7-2: ids whose conflict refresh failed or timed out, with what the retry needs (see _retryFailedRefreshes).
+  _refreshRetry: new Map<string, { baseline: RefreshBaseline | undefined; sent: string | undefined }>(),
+  /** S10-9: true while a planner's note for this order is typing/unsaved (debounce pending or in the failed-retry set).
+   *  orders.mts registers the real predicate (persistence cannot import it); a refresh must not overwrite such a note. */
+  noteUnsaved: ((_id: string): boolean => false) as (id: string) => boolean,
   /** Stable per-tab id sent as `client_id` on every save (reserved for a future change feed). */
   get clientId(): string {
     const fresh = (): string => (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -270,7 +310,7 @@ export const Persistence = {
     if (!badge) return;
     const count = Persistence._dirtyIds.size;
     badge.hidden = count === 0;
-    badge.textContent = count ? `${count} unsaved` : '';
+    badge.textContent = count ? Util.t('ui.n_unsaved', { count }) : '';
   },
   // Lazily-set by _writeCacheWithQuotaGuard/_quarantineCache — declared here
   // (rather than left to first assignment) since plain object-literal
@@ -306,7 +346,7 @@ export const Persistence = {
   _saveInFlight: false,
   // Stats captured on every load, exposed via NIMBUS.Persistence.stats()
   _lastLoad: {
-    source: null,          // 'backend' | 'cache' | 'demo'
+    source: null,          // 'backend' | 'cache' (null = nothing loaded)
     ts: null,
     plant: null,           // plant filter applied to this load (null = all plants)
     raw_received: 0,       // rows as received from /tasks (after plant filter + color merge)
@@ -463,7 +503,7 @@ export const Persistence = {
         }
         if (discardLocalEdits && discardBaseline !==
             JSON.stringify(Store.tasksArr.map(t => [t.id, Persistence._refreshBaseline(t)]))) {
-          Toast.show('New edits were made while reloading. They remain unsaved; reload again to discard them.', 'warn', 8000);
+          Toast.show(Util.t('toast.reload_edits_during'), 'warn', 8000);
           return;
         }
         if (!Array.isArray(payload?.data)) throw new Error('Invalid /tasks response');
@@ -509,7 +549,9 @@ export const Persistence = {
           // with no orders still shows its saved config; the backend overlay follows.
           try {
             const rawCache = localStorage.getItem(Config.LS_KEY);
-            if (rawCache) Persistence._restoreNonTaskState(JSON.parse(rawCache));
+            const zeroCache = rawCache ? JSON.parse(rawCache) : null;
+            // S10-6: another plant's cached lines/calendars/blocks are never applied to this plant.
+            if (zeroCache && Persistence._cacheMatchesPlant(zeroCache, plant)) Persistence._restoreNonTaskState(zeroCache);
           } catch (e) { ErrorLog.warn('persistence', 'cached non-task state restore failed (zero-task path)', undefined, { stack: (e as Error)?.stack }); }
           // Fetch master-data so orderless plants/lines appear in Master Data tabs,
           // THEN hydrate calendars/blackouts from the backend (authoritative).
@@ -533,6 +575,8 @@ export const Persistence = {
             }
           }).catch(e => ErrorLog.warn('persistence', `Master-data fetch failed (zero-task path): ${e.message}`))
             .finally(() => {
+              // S7-1: a newer load() owns hydration now; this plant's calendar/rate-map/setup fan-out is stale.
+              if (loadGeneration !== Persistence._loadRequest) return;
               Promise.all([
                 CalendarSync.fetchPlantConfig(plant),
                 Persistence.loadPriorityRankMaps(plant),
@@ -592,6 +636,10 @@ export const Persistence = {
               ErrorLog.warn('persistence',
                 `Cache schema mismatch (cached=${cacheData._schemaVersion}, expected=${Config.SCHEMA_VERSION}) — discarding`);
               try { localStorage.removeItem(Config.LS_KEY); } catch {}
+              cacheData = null;
+            } else if (!Persistence._cacheMatchesPlant(cacheData, plant)) {
+              // S10-6: the cache belongs to another plant; neither its non-task state nor its task overlay applies.
+              ErrorLog.info('persistence', `Cache is for plant ${cacheData?.selectedPlant}, not ${plant} — ignored`);
               cacheData = null;
             } else {
               Persistence._restoreNonTaskState(cacheData);
@@ -686,6 +734,8 @@ export const Persistence = {
           ErrorLog.warn('persistence', `Master-data fetch failed: ${e.message}`);
           Toast.show(Util.t('toast.master_data_unavail'), 'warn', 5000);
         }).finally(() => {
+          // S7-1: see the zero-task path above.
+          if (loadGeneration !== Persistence._loadRequest) return;
           // Backend is authoritative for this plant's calendars/blackouts — overlay
           // them on top of the localStorage restore that already ran. Runs after
           // master-data so getPlantForLine/subnetwork resolve reliably. Priority rank
@@ -710,17 +760,18 @@ export const Persistence = {
         // cache/demo and clobber the newer load()'s already-rendered board.
         if (loadGeneration !== Persistence._loadRequest) return;
         if (discardLocalEdits) {
-          Toast.show('Reload failed. Your local edits remain unsaved; try reloading again when the server is available.', 'error', 8000);
+          Toast.show(Util.t('toast.reload_failed_local_edits'), 'error', 8000);
           return;
         }
-        // Only fall back to cache / demo if we never got a successful response.
+        // Only fall back to cache if we never got a successful response.
         if (stats.source !== 'backend') {
-          if (Persistence._loadCache()) {
+          if (Persistence._loadCache(plant)) {
             stats.source = 'cache';
             Toast.show(Util.t('toast.backend_unreachable_cache'), 'warn', 5000);
           } else {
-            Persistence._loadDemo();
-            stats.source = 'demo';
+            // S7-7: no demo data. An honest empty board plus a notice that stays up until the watcher reconnects.
+            Persistence._showUnreachableEmpty();
+            stats.source = null;
           }
           stats.rendered = Store.tasksArr.length;
           // Start polling /health with exponential backoff so the UI recovers
@@ -845,6 +896,7 @@ export const Persistence = {
     if (known === undefined) return;                            // no hydration baseline to compare with
     if (known === version || Persistence._calendarRefreshing.has(plant)) return;
     if (Sandbox.active || Modal.anyOpen() || Persistence._calendarRefreshBlocked?.()) {
+      if (Persistence._calendarRefreshBlocked?.()) Persistence._deferredRefreshPlants.add(plant);
       Persistence._horizonsFetchedAt[plant] = 0;                // not a real fetch: let the next entry retry at once
       return;
     }
@@ -970,6 +1022,7 @@ export const Persistence = {
   _noteToolInventoryVersion(plant: string, version: string | null | undefined, rule: 'off' | 'hard' | undefined): void {
     const blocked = (): boolean => {
       if (Sandbox.active || Modal.anyOpen() || Persistence._calendarRefreshBlocked?.()) {
+        if (Persistence._calendarRefreshBlocked?.()) Persistence._deferredRefreshPlants.add(plant);
         Persistence._horizonsFetchedAt[plant] = 0;
         return true;
       }
@@ -1131,13 +1184,30 @@ export const Persistence = {
     const restored: string[] = [];
     for (const t of backendTasks) {
       const cached = byId.get(t.id);
-      if (t.planning_status === 'needs_planning' || cached?.planning_status === 'needs_planning') continue;
       if (!cached) continue;
+      if (cached.planning_status === 'needs_planning') {
+        // S7-5: an unsaved Unschedule. Nothing to restore when the server already queues the row, or when the
+        // server row moved on after the cache was written (same version rule as a date move below).
+        if (t.planning_status === 'needs_planning') continue;
+        const queuedVersion = cached.row_version as number | null | undefined;
+        if (queuedVersion != null && t.row_version != null && queuedVersion !== t.row_version) continue;
+        t.start_date = null;
+        t.end_date = null;
+        t.scheduleSegments = [];
+        t.planning_status = 'needs_planning';
+        t.planning_reason = (cached.planning_reason as NimbusTask['planning_reason']) ?? null;
+        t.placement_exception = (cached.placement_exception as NimbusTask['placement_exception']) ?? null;
+        restored.push(String(t.id));
+        continue;
+      }
+      if (t.planning_status === 'needs_planning') continue;
       const cs  = Util.parseDate(cached.start_date);
       const ce  = Util.parseDate(cached.end_date);
       const cos = Util.parseDate(cached.original_start_date);
       if (!(cs instanceof Date) || !(ce instanceof Date)) continue;
-      if (!(cos instanceof Date) || cs.getTime() === cos.getTime()) continue;
+      // S7-5: a move is a changed start OR a changed end (a right-edge resize leaves the start alone).
+      const endMoved = t.end_date instanceof Date && ce.getTime() !== t.end_date.getTime();
+      if (!(cos instanceof Date) || (cs.getTime() === cos.getTime() && !endMoved)) continue;
       // PR-2: a cached override only represents the planner's own unsaved edit
       // if nothing has written this row server-side since it was cached. When
       // both sides carry a row_version and they disagree, the server has a
@@ -1172,7 +1242,26 @@ export const Persistence = {
     return restored;
   },
 
-  _loadCache(): boolean {
+  /** S10-6 / S7-3: a cached snapshot is only usable for the plant it was written for. A cache with no plant tag (an
+   *  older snapshot) or a call with no requested plant is accepted unchanged. */
+  _cacheMatchesPlant(data: { selectedPlant?: string | null } | null | undefined, plant: string | null | undefined): boolean {
+    if (!plant || !data?.selectedPlant) return true;
+    return data.selectedPlant === plant;
+  },
+
+  /** S7-7: the backend is unreachable and there is no usable cache. Show an empty board (never invented orders)
+   *  and a notice that stays up until the reconnect watcher recovers (its success toast replaces the need for it). */
+  _showUnreachableEmpty(): void {
+    Persistence._rankMapsPlant = null;
+    Store.setPriorityRankMaps({}, 'persistence');
+    Store.setVisibilityHorizonEnd(null, 'persistence');
+    Store.setFrozenHorizonEnd(null, 'persistence');
+    Store.setTasks([], 'persistence');
+    Persistence._currentLoadedPlant = null;
+    Toast.show(Util.t('toast.backend_unreachable_empty'), 'error', UNREACHABLE_TOAST_MS);
+  },
+
+  _loadCache(plant?: string | null): boolean {
     let raw: string | null | undefined;
     try { raw = localStorage.getItem(Config.LS_KEY); }
     catch (e) { ErrorLog.error('persistence', `localStorage unavailable: ${(e as Error).message}`); return false; }
@@ -1202,6 +1291,13 @@ export const Persistence = {
     if (!data || !Array.isArray(data.tasks)) {
       ErrorLog.warn('persistence', 'Cache shape invalid — discarding');
       try { localStorage.removeItem(Config.LS_KEY); } catch {}
+      return false;
+    }
+
+    // S7-3: another plant's cache must never render under this plant's name. Left in place (not removed): it is
+    // that plant's own offline copy, and the next successful load for this plant overwrites it.
+    if (!Persistence._cacheMatchesPlant(data, plant)) {
+      ErrorLog.info('persistence', `Cache is for plant ${data.selectedPlant}, not ${plant} — not restored`);
       return false;
     }
 
@@ -1311,74 +1407,6 @@ export const Persistence = {
     }
   },
 
-  _loadDemo(): void {
-    // Stage 3 fix (see _loadCache/load): demo seeding also emits 'schedule:hydrated'
-    // without ever loading rank maps, and its synthetic orders belong to no real
-    // plant's priority lists at all — so any ranks left in the cache would be
-    // categorically wrong for them.
-    Persistence._rankMapsPlant = null;
-    Store.setPriorityRankMaps({}, 'persistence');
-    // Same reasoning as _loadCache(): the demo's synthetic orders belong to no
-    // real plant's horizon config either, so any horizon bound left over from
-    // whatever plant was on screen before the backend became unreachable would
-    // be categorically wrong here too.
-    Store.setVisibilityHorizonEnd(null, 'persistence');
-    Store.setFrozenHorizonEnd(null, 'persistence');
-    const lines = ['Line 1', 'Line 2', 'Line 3', 'Line 4'];
-    const colors = ['WHITE', 'IVORY', 'TAN', 'BROWN', 'CHARCOAL', 'BLACK'];
-    const forms  = ['SM', 'MD', 'LG', 'XL'];
-    const today = Util.startOfDay(new Date())!;
-    const tasks: Record<string, unknown>[] = [];
-    let id = 1;
-    for (let day = 0; day < 5; day++) {
-      const dayDate = new Date(today); dayDate.setDate(today.getDate() + day);
-      for (const line of lines) {
-        let cursor = new Date(dayDate); cursor.setHours(7, 0, 0, 0);
-        const count = 4 + Math.floor(Math.random() * 4);
-        for (let i = 0; i < count; i++) {
-          const run = +(0.5 + Math.random() * 2.5).toFixed(2);
-          const start = new Date(cursor);
-          const end   = new Date(cursor.getTime() + run * Config.MS_HOUR);
-          tasks.push({
-            id: String(id),
-            text: `ORD-${String(id).padStart(4, '0')}`,
-            ORDER: `ORD-${id}`,
-            MACHINE: line,
-            COLOR: colors[(id + day) % colors.length],
-            FORM_SIZE: forms[(id + day) % forms.length],
-            MATERIAL_DESCRIPTION: `Product ${String.fromCharCode(65 + (id % 8))}-${100 + id}`,
-            MATERIAL_NUMBER: `MAT-${1000 + id}`,
-            'ORDER_QUANTITY_(GMEIN)': 500 + Math.round(Math.random() * 4000),
-            RUN_TIME: run,
-            BASIC_START_DATE: new Date(dayDate),
-            BASIC_FINISH_DATE: new Date(dayDate.getTime() + 12 * Config.MS_HOUR),
-            start_date: start,
-            end_date:   end
-          });
-          cursor = end;
-          id++;
-        }
-      }
-    }
-    // Firm a couple of example orders to showcase the feature.
-    if (tasks.length > 6) {
-      tasks[2].firmed = true;
-      tasks[10].firmed = true;
-    }
-    Store.setTasks(tasks as unknown as NimbusTask[], 'persistence');
-    // Calendars, plant, and line settings
-    for (const line of lines) {
-      Store.ensureCalendar(line);
-      Store.ensureLineSettings(line);
-    }
-    Config.KNOWN_PLANTS.forEach(p => Store.ensurePlant(p));
-    // Example blackout block (maintenance on Line 2 from 12:00-13:00 tomorrow)
-    const tomNoon = new Date(today); tomNoon.setDate(today.getDate() + 1); tomNoon.setHours(12, 0, 0, 0);
-    const tomOne  = new Date(tomNoon); tomOne.setHours(13, 0, 0, 0);
-    Store.addBlock({ line: 'Line 2', start: tomNoon, end: tomOne, reason: 'Maintenance' } as NimbusBlock, 'persistence');
-    Store.emit({ type: 'schedule:hydrated', source: 'persistence' });
-    Toast.show(Util.t('toast.demo_mode', { count: tasks.length }), 'info');
-  },
 
   /** Fields saveAll() actually writes for one task, in wire shape (post
    *  toLocalSeconds date conversion) — deliberately excludes id/base_version/force
@@ -1442,6 +1470,14 @@ export const Persistence = {
     if (serverSegments.length !== sentSegments.length
       || sentSegments.some((seg, i) => !same(seg.start_date, serverSegments[i].startDate) || !same(seg.end_date, serverSegments[i].endDate))) return false;
     const text = (v: unknown): string => (v == null ? '' : String(v));
+    // S10-2: a concurrent firm/unfirm, queue/release or exception change is a real conflict, never "the same placement".
+    if (sent.FIRMED !== undefined && !!sent.FIRMED !== !!(row as { firmed?: unknown }).firmed) return false;
+    if (sent.planning_status !== undefined && text(sent.planning_status) !== text(row.planning_status ?? 'scheduled')) return false;
+    if (sent.planning_reason !== undefined) {
+      const code = (v: unknown): string => text((v as { code?: unknown } | null | undefined)?.code);
+      if (code(sent.planning_reason) !== code(row.planning_reason)) return false;
+    }
+    if (sent.placement_exception !== undefined && text(sent.placement_exception) !== text(row.placement_exception)) return false;
     return text(sent.MACHINE) === text(row.MACHINE) && text(sent.PRT_01) === text(row.PRT_01)
       && text(sent.PRT_02) === text(row.PRT_02) && text(sent.PRODUCTION_VERSION) === text(row.PRODUCTION_VERSION)
       && (sent.RUN_TIME == null ? null : Number(sent.RUN_TIME)) === (row.RUN_TIME == null ? null : Number(row.RUN_TIME));
@@ -1454,7 +1490,7 @@ export const Persistence = {
   },
 
   _warnUnresolvedConflict(): void {
-    Toast.show('Conflicting changes remain unsaved. Reload discards these local edits and loads the server schedule.', 'warn', 8000);
+    Toast.show(Util.t('toast.conflict_unsaved_remain'), 'warn', 8000);
   },
 
   /** `opts.silent`: programmatic callers (post-promote persist, banner action) skip the
@@ -1478,22 +1514,77 @@ export const Persistence = {
       if (!opts.silent) Toast.show(Util.t('toast.save_in_progress'), 'warn', 4000);
       return;
     }
+    // S7-2: a conflict refresh that failed or timed out earlier is retried by this Save (for the ids still conflicted).
+    Persistence._retryFailedRefreshes();
+    // S7-14: an id whose order is gone from the Store can never be sent; drop it so "N unsaved" stays honest.
+    Persistence._pruneDirty();
     // Send changed task aggregates (dates, planning state, segments and editable
     // attributes). Reload clears dirty state; undo is a new dependent edit.
-    let dirtyTasks = Persistence._dirtyIds.size > 0
+    const dirtyTasks = Persistence._dirtyIds.size > 0
       ? Store.tasksArr.filter(t => Persistence._dirtyIds.has(String(t.id)))
       : [];
-    const atomicOptimizer = dirtyTasks.some(t => Persistence._forceIds.has(String(t.id)));
-    if (dirtyTasks.some(t => Persistence._conflictedIds.has(String(t.id)))) {
-      Persistence._warnUnresolvedConflict();
-      if (atomicOptimizer) return;
-      dirtyTasks = dirtyTasks.filter(t => !Persistence._conflictedIds.has(String(t.id)));
-      if (!dirtyTasks.length) return;
+    // S10-1/S10-4/S7-11: dependent optimizer/undo rows are ONE atomic request, every other row a separate
+    // non-atomic request, so a stale optimizer row never blocks manual edits (and manual stale rows still get
+    // the stale-refresh path).
+    const groups = Persistence._saveGroups(dirtyTasks);
+    if (groups.hadConflicted) Persistence._warnUnresolvedConflict();
+    const toSend = [
+      { tasks: groups.atomic, atomic: true },
+      { tasks: groups.manual, atomic: false },
+    ].filter(g => g.tasks.length > 0);
+    if (!toSend.length) {
+      if (!groups.hadConflicted && !opts.silent) Toast.show(Util.t('toast.nothing_to_save'), 'info', 3000);
+      Persistence._syncUnsaved();
+      return;
     }
     Persistence._saveInFlight = true;
     Persistence._saveCache();
+    (async () => {
+      let allSaved = true;
+      for (const g of toSend) {
+        const outcome = await Persistence._sendSaveGroup(g.tasks, g.atomic);
+        if (outcome !== 'saved') allSaved = false;
+        // The server is unreachable or timed out: a second request would only wait out the same failure.
+        if (outcome === 'unreachable') break;
+      }
+      if (allSaved) Toast.show(Util.t('toast.saved_to_backend'), 'success');
+    })()
+      .catch(e => ErrorLog.error('persistence', `Save sequencing failed: ${(e as Error).message}`))
+      .finally(() => { Persistence._saveInFlight = false; Persistence._syncUnsaved(); Persistence._saveCache(); });
+  },
+
+  /** S7-14: drop dirty/force/firm/conflict/source markers for ids with no order in the Store. */
+  _pruneDirty(): void {
+    for (const id of [...Persistence._dirtyIds]) {
+      if (Store.tasks[id]) continue;
+      Persistence._dirtyIds.delete(id);
+      Persistence._forceIds.delete(id);
+      Persistence._firmDirtyIds.delete(id);
+      Persistence._conflictedIds.delete(id);
+      Persistence._dirtySource.delete(id);
+    }
+  },
+
+  /** S10-1: split the dirty rows into the atomic optimizer/undo group and the ordinary group. A group that holds a
+   *  conflicted row is withheld whole when atomic (it is all-or-nothing); an ordinary group just omits those rows. */
+  _saveGroups(dirtyTasks: NimbusTask[]): { atomic: NimbusTask[]; manual: NimbusTask[]; hadConflicted: boolean } {
+    const isConflicted = (t: NimbusTask): boolean => Persistence._conflictedIds.has(String(t.id));
+    const forced = dirtyTasks.filter(t => Persistence._forceIds.has(String(t.id)));
+    const rest = dirtyTasks.filter(t => !Persistence._forceIds.has(String(t.id)));
+    return {
+      atomic: forced.some(isConflicted) ? [] : forced,
+      manual: rest.filter(t => !isConflicted(t)),
+      hadConflicted: dirtyTasks.some(isConflicted),
+    };
+  },
+
+  /** One /tasks/update request for one group (see saveAll). Resolves, never rejects:
+   *  'saved' = clean success, 'problem' = rejected/partial/stale (its own toast was shown),
+   *  'unreachable' = network failure or timeout (the caller stops sending further groups). */
+  async _sendSaveGroup(tasks: NimbusTask[], atomicOptimizer: boolean): Promise<'saved' | 'problem' | 'unreachable'> {
     const saveCollection = taskCollectionGeneration;
-    const refreshBaselines = new Map(dirtyTasks.map(t => [String(t.id), Persistence._refreshBaseline(t)]));
+    const refreshBaselines = new Map(tasks.map(t => [String(t.id), Persistence._refreshBaseline(t)]));
+    const sentVersions = new Map<string, number | null | undefined>(tasks.map(t => [String(t.id), t.row_version]));
     // Send only the fields the backend consumes, plus the optimistic-concurrency
     // token (row_version → base_version). Optimizer edits use atomic validation
     // and cannot bypass a concurrent editor's version.
@@ -1502,7 +1593,7 @@ export const Persistence = {
     // Date() parses as LOCAL — so a raw Date here round-trips shifted by the
     // client's UTC offset for any non-UTC user. The same rule covers every date-carrying field;
     // see Util.toLocalSeconds and _taskEditSnapshot above.
-    const taskPayload = dirtyTasks.map(t => ({
+    const taskPayload = tasks.map(t => ({
       id: t.id,
       ...Persistence._taskEditSnapshot(t),
       base_version: t.row_version ?? null,
@@ -1510,13 +1601,13 @@ export const Persistence = {
     }));
     // Snapshot of exactly what's being sent for each dirty id, keyed by id — the
     // response handler compares this against the LIVE value at response time
-    // before clearing that id's dirty flag (see the success handler below), so an
-    // edit made after this snapshot was taken (but before the response arrives)
-    // is never silently treated as saved.
+    // before clearing that id's dirty flag, so an edit made after this snapshot
+    // was taken (but before the response arrives) is never silently treated as saved.
     const sentSnapshot = new Map<string, string>(
-      dirtyTasks.map(t => [String(t.id), JSON.stringify(Persistence._taskEditSnapshot(t))])
+      tasks.map(t => [String(t.id), JSON.stringify(Persistence._taskEditSnapshot(t))])
     );
-    const body = JSON.stringify({ tasks: taskPayload, client_id: Persistence.clientId, atomic_optimizer: atomicOptimizer, blocks: Store.blocks, calendars: Store.calendars });
+    // S10-7: the backend only consumes `tasks`; blocks/calendars persist through /plant-calendar/*.
+    const body = JSON.stringify({ tasks: taskPayload, client_id: Persistence.clientId, atomic_optimizer: atomicOptimizer });
 
     // Stable reqId for this save attempt so the rejection log correlates to the
     // backend (fetchTraced reuses an x-request-id we already set).
@@ -1548,149 +1639,193 @@ export const Persistence = {
       return new Promise(res => setTimeout(res, 2000)).then(() => _post(attempt + 1));
     });
 
-    _post(1)
-      .then(result => {
-        if (saveCollection !== taskCollectionGeneration) return;
-        const runtimePreviewChanged = Object.values(result.rejection_reasons || {}).includes('runtime_preview_changed');
-        if (runtimePreviewChanged) {
-          // Rate-map changes can invalidate a locally valid preview without an
-          // order version change. Refresh the cache for the next edit/retry;
-          // ordinary stale reconciliation below still protects newer local work.
-          void Runtime.load(Store.selectedPlant);
-          ErrorLog.warn('persistence', 'Routing rates changed; rejected runtime previews require review', result.rejection_reasons);
-          Toast.show(atomicOptimizer
-            ? 'Routing rates changed. Optimizer changes remain unsaved. Review the updated rates and optimize again.'
-            : 'Routing rates changed. Rejected orders are being refreshed. Review the schedule before retrying your changes.', 'warn', 8000);
+    // The network outcome and the response handler are separate steps: a bug in the handler must never be
+    // reported as "saved locally" (S10-4).
+    let result: BulkUpdateResult;
+    try {
+      result = await _post(1);
+    } catch (err) {
+      const e = err as SaveError;
+      if (e.httpStatus) {
+        ErrorLog.error('persistence', `Backend rejected save (${e.httpStatus}): ${e.message}`,
+          { status: e.httpStatus, reqId: e.reqId },
+          { reqId: e.reqId, errorCode: e.errorCode || 'http.status' });
+        Toast.show(Util.t('toast.save_rejected', { msg: e.message }), 'error', 6000);
+        return 'problem';
+      }
+      if (e.timedOut) {
+        ErrorLog.error('persistence', `Backend save timed out after ${SAVE_TIMEOUT_MS} ms`,
+          { reqId }, { reqId, errorCode: 'http.timeout' });
+        Toast.show(Util.t('toast.save_timeout'), 'error', 8000);
+        return 'unreachable';
+      }
+      ErrorLog.warn('persistence', `Backend save failed: ${e.message}`,
+        { reqId }, { reqId, errorCode: 'http.network' });
+      Toast.show(Util.t('toast.saved_locally'), 'info');
+      return 'unreachable';
+    }
+
+    try {
+      return Persistence._applySaveResult(result, {
+        tasks, atomicOptimizer, saveCollection, refreshBaselines, sentVersions, sentSnapshot, reqId,
+      });
+    } catch (e) {
+      ErrorLog.error('persistence', `Save response handler failed: ${(e as Error).message}`,
+        { reqId }, { reqId, stack: (e as Error)?.stack });
+      Toast.show(Util.t('toast.save_handler_error'), 'error', 8000);
+      return 'problem';
+    }
+  },
+
+  /** The success side of one save group: stamp versions, clear what the server accounted for, refresh rejected and
+   *  stale rows, and toast. Returns 'saved' only when nothing needed a warning toast. */
+  _applySaveResult(result: BulkUpdateResult, ctx: {
+    tasks: NimbusTask[]; atomicOptimizer: boolean; saveCollection: number;
+    refreshBaselines: Map<string, RefreshBaseline>; sentVersions: Map<string, number | null | undefined>;
+    sentSnapshot: Map<string, string>; reqId: string;
+  }): 'saved' | 'problem' {
+    const { atomicOptimizer, saveCollection, refreshBaselines, sentVersions, sentSnapshot, reqId } = ctx;
+    const versions = result.versions || {};
+    if (saveCollection !== taskCollectionGeneration) {
+      // S7-8: the board was replaced while this request was out. Gate the dirty bookkeeping and toasts, but a row
+      // the server just wrote whose live version is still the one we sent must adopt the new version, or its next
+      // save would conflict with our own write.
+      for (const id of Object.keys(versions)) {
+        const tk = Store.tasks[id];
+        if (tk && tk.row_version === sentVersions.get(id)) tk.row_version = versions[id];
+      }
+      return 'problem';
+    }
+    const runtimePreviewChanged = Object.values(result.rejection_reasons || {}).includes('runtime_preview_changed');
+    if (runtimePreviewChanged) {
+      // Rate-map changes can invalidate a locally valid preview without an
+      // order version change. Refresh the cache for the next edit/retry;
+      // ordinary stale reconciliation below still protects newer local work.
+      void Runtime.load(Store.selectedPlant);
+      ErrorLog.warn('persistence', 'Routing rates changed; rejected runtime previews require review', result.rejection_reasons);
+      Toast.show(Util.t(atomicOptimizer ? 'toast.routing_rates_changed_optimizer' : 'toast.routing_rates_changed_rejected'), 'warn', 8000);
+    }
+    const unknownMachineCount = Object.values(result.rejection_reasons || {}).filter(r => r === 'machine_unknown').length;
+    if (unknownMachineCount) {
+      Toast.show(Util.t('toast.machine_rejected', { count: unknownMachineCount }), 'warn', 7000);
+    }
+    if (atomicOptimizer && (result.status === 'error' || (result.persisted ?? 0) !== ctx.tasks.length
+      || (result.stale || []).length || (result.invalid_ids || []).length || (result.not_found_ids || []).length)) {
+      ErrorLog.warn('persistence', 'Optimizer save rejected; all dependent changes remain unsaved', result);
+      if (result.error_code === 'schedule.conflicts') {
+        Toast.show(Util.t('toast.optimizer_conflicts', { count: (result.conflicts || []).length }), 'warn', 8000);
+      } else if (!runtimePreviewChanged) {
+        Toast.show(Util.t('toast.optimizer_unsaved_resolve'), 'warn', 8000);
+      }
+      return 'problem';
+    }
+    // Re-stamp each persisted task with its NEW row_version so the next edit
+    // carries a fresh token — without this the client would self-conflict on its
+    // own previous write. Direct field set, no emit (metadata only).
+    for (const id of Object.keys(versions)) {
+      const tk = Store.tasks[id];
+      if (tk) tk.row_version = versions[id];
+    }
+    // PR-1: ids the backend reports as no longer existing server-side —
+    // deleted by another session, a purge, a re-upload, etc. — are ghosts
+    // in Store the instant this response arrives; leaving them in place
+    // just means _saveCache re-persists them to localStorage forever. Drop
+    // them from Store (and their dirty/force flags) instead of merely
+    // treating them as "accounted for" below.
+    const notFoundIds = (result.not_found_ids || []).map(String);
+    if (notFoundIds.length) {
+      const removed = Persistence._removeMissingTasks(notFoundIds);
+      if (removed) {
+        ErrorLog.warn('persistence', `${removed} order(s) no longer exist server-side — removed from Store`, notFoundIds);
+        Toast.show(Util.t('toast.orders_removed_remotely', { count: removed }), 'warn', 6000);
+      }
+    }
+    const stale = result.stale || [];
+    const invalidSet = new Set((result.invalid_ids || []).map(String));
+    // Clear dirty/force ONLY for ids the backend actually accounted for (R7):
+    // persisted (versions) and terminally rejected (invalid range / not in DB
+    // — a corrected edit re-dirties). Stale rows stay dirty until their
+    // guarded authoritative refresh succeeds.
+    // Any sent id that is NONE of these — e.g. a row lost between SELECT FOR UPDATE
+    // and the UPDATE — stays dirty so the next save retries it instead of silently
+    // dropping the edit. Previously both sets were .clear()'d unconditionally.
+    const accounted = new Set([
+      ...Object.keys(versions),
+      ...(result.invalid_ids || []),
+      ...(result.not_found_ids || []),
+    ].map(String));
+    const savedIds: string[] = [];
+    const rejectedToRefresh: string[] = [];
+    for (const id of accounted) {
+      // R8: an id being "accounted for" by this response is necessary but not
+      // sufficient to clear its dirty flag. If the user edited this task AGAIN
+      // after this request's payload was snapshotted (sentSnapshot) but before
+      // this response arrived, the live value no longer matches what was
+      // actually sent — clearing dirty here would silently drop that newer
+      // edit (it was never transmitted, and nothing would ever retry it).
+      // Only clear when the live task still equals its sent snapshot.
+      const tk = Store.tasks[id];
+      const sentValue = sentSnapshot.get(id);
+      const stillMatchesSent = tk != null && sentValue !== undefined
+        && JSON.stringify(Persistence._taskEditSnapshot(tk)) === sentValue;
+      if (stillMatchesSent) {
+        if (invalidSet.has(id) && !Object.prototype.hasOwnProperty.call(versions, id)) {
+          // S7-4: the server refused this exact edit. Pull the server row back so the bar snaps back instead of
+          // staying on screen as an edit that is no longer pending; the refresh clears the dirty markers itself.
+          rejectedToRefresh.push(id);
+          continue;
         }
-        const unknownMachineCount = Object.values(result.rejection_reasons || {}).filter(r => r === 'machine_unknown').length;
-        if (unknownMachineCount) {
-          Toast.show(Util.t('toast.machine_rejected', { count: unknownMachineCount }), 'warn', 7000);
-        }
-        if (atomicOptimizer && (result.status === 'error' || (result.persisted ?? 0) !== taskPayload.length
-          || (result.stale || []).length || (result.invalid_ids || []).length || (result.not_found_ids || []).length)) {
-          ErrorLog.warn('persistence', 'Optimizer save rejected; all dependent changes remain unsaved', result);
-          if (result.error_code === 'schedule.conflicts') {
-            Toast.show(Util.t('toast.optimizer_conflicts', { count: (result.conflicts || []).length }), 'warn', 8000);
-          } else if (!runtimePreviewChanged) {
-            Toast.show('Optimizer changes remain unsaved. Resolve the conflict or reload and optimize again.', 'warn', 8000);
-          }
-          return;
-        }
-        // Re-stamp each persisted task with its NEW row_version so the next edit
-        // carries a fresh token — without this the client would self-conflict on its
-        // own previous write. Direct field set, no emit (metadata only).
-        const versions = result.versions || {};
-        for (const id of Object.keys(versions)) {
-          const tk = Store.tasks[id];
-          if (tk) tk.row_version = versions[id];
-        }
-        // PR-1: ids the backend reports as no longer existing server-side —
-        // deleted by another session, a purge, a re-upload, etc. — are ghosts
-        // in Store the instant this response arrives; leaving them in place
-        // just means _saveCache re-persists them to localStorage forever. Drop
-        // them from Store (and their dirty/force flags) instead of merely
-        // treating them as "accounted for" below.
-        const notFoundIds = (result.not_found_ids || []).map(String);
-        if (notFoundIds.length) {
-          const removed = Persistence._removeMissingTasks(notFoundIds);
-          if (removed) {
-            ErrorLog.warn('persistence', `${removed} order(s) no longer exist server-side — removed from Store`, notFoundIds);
-            Toast.show(Util.t('toast.orders_removed_remotely', { count: removed }), 'warn', 6000);
-          }
-        }
-        const stale = result.stale || [];
-        // Clear dirty/force ONLY for ids the backend actually accounted for (R7):
-        // persisted (versions) and terminally rejected (invalid range / not in DB
-        // — a corrected edit re-dirties). Stale rows stay dirty until their
-        // guarded authoritative refresh succeeds.
-        // Any sent id that is NONE of these — e.g. a row lost between SELECT FOR UPDATE
-        // and the UPDATE — stays dirty so the next save retries it instead of silently
-        // dropping the edit. Previously both sets were .clear()'d unconditionally.
-        const accounted = new Set([
-          ...Object.keys(versions),
-          ...(result.invalid_ids || []),
-          ...(result.not_found_ids || []),
-        ].map(String));
-        const savedIds: string[] = [];
-        for (const id of accounted) {
-          // R8: an id being "accounted for" by this response is necessary but not
-          // sufficient to clear its dirty flag. If the user edited this task AGAIN
-          // after this request's payload was snapshotted (sentSnapshot) but before
-          // this response arrived, the live value no longer matches what was
-          // actually sent — clearing dirty here would silently drop that newer
-          // edit (it was never transmitted, and nothing would ever retry it).
-          // Only clear when the live task still equals its sent snapshot.
-          const tk = Store.tasks[id];
-          const sentValue = sentSnapshot.get(id);
-          const stillMatchesSent = tk != null && sentValue !== undefined
-            && JSON.stringify(Persistence._taskEditSnapshot(tk)) === sentValue;
-          if (stillMatchesSent) {
-            Persistence._dirtyIds.delete(id);
-            Persistence._forceIds.delete(id);
-            Persistence._firmDirtyIds.delete(id);
-            Persistence._dirtySource.delete(id);
-            // Only rows the server persisted (a version came back) gained history events; invalid/not_found
-            // ids clear their dirty flag but wrote nothing.
-            if (Object.prototype.hasOwnProperty.call(versions, id)) savedIds.push(id);
-          }
-          // else: leave dirty — the next saveAll() will pick up the newer edit.
-        }
-        // Inspector History refetches the saved orders' events (the server wrote them in the save transaction).
-        if (savedIds.length) Store.emit({ type: 'tasks:saved', ids: savedIds, source: 'persistence' });
-        if (stale.length) {
-          const base_versions: Record<string, number | null> = {};
-          for (const id of stale) base_versions[String(id)] = Store.tasks[String(id)]?.row_version ?? null;
-          ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`,
-            { ids: stale, base_versions }, { errorCode: 'tasks.conflict', reqId });
-          // U25: a stale row whose server copy already holds this client's exact placement is reconciled silently;
-          // the conflict toast counts only the real conflicts (known once the refresh answers).
-          Persistence._refreshTasks(stale, refreshBaselines, { sent: sentSnapshot, onConflicts: count => {
-            if (count > 0 && !runtimePreviewChanged) Toast.show(Util.t('toast.concurrent_edit_conflict', { count }), 'warn', 7000);
-          } });
-        }
-        // N3: the server scanned the written machines inside the save
-        // transaction. Advisory — rows are persisted; surface the overlaps now
-        // instead of waiting for the next full alert recompute. Emitted as a
-        // Store event because this file must never import insights/services.
-        const conflicts = result.conflicts || [];
-        if (conflicts.length) {
-          const lines = [...new Set(conflicts.map(c => c.machine))];
-          ErrorLog.warn('persistence', `Save produced ${conflicts.length} schedule conflict(s)`, conflicts);
-          Toast.show(Util.t('toast.save_conflicts', { count: conflicts.length }), 'warn', 7000);
-          Store.emit({ type: 'schedule:conflicts', lines, source: 'persistence' });
-        }
-        const persisted = result.persisted ?? 0;
-        const total     = result.updated   ?? 0;
-        if (stale.length) {
-          // Conflicts already surfaced their own toast; don't also claim a partial-save error.
-        } else if (persisted < total) {
-          ErrorLog.warn('persistence', `Partial DB save: ${persisted}/${total} persisted`, result);
-          const rejected = describeRejections(result.rejection_reasons);
-          Toast.show(rejected
-            ? Util.t('toast.partial_db_save_reasons', { persisted, total, details: rejected })
-            : Util.t('toast.partial_db_save', { persisted, total }), 'warn', rejected ? 9000 : 6000);
-        } else {
-          ErrorLog.info('persistence', `Saved to backend (${persisted} tasks)`);
-          Toast.show(Util.t('toast.saved_to_backend'), 'success');
-        }
-      })
-      .catch(e => {
-        if (e.httpStatus) {
-          ErrorLog.error('persistence', `Backend rejected save (${e.httpStatus}): ${e.message}`,
-            { status: e.httpStatus, reqId: e.reqId },
-            { reqId: e.reqId, errorCode: e.errorCode || 'http.status' });
-          Toast.show(Util.t('toast.save_rejected', { msg: e.message }), 'error', 6000);
-        } else if (e.timedOut) {
-          ErrorLog.error('persistence', `Backend save timed out after ${SAVE_TIMEOUT_MS} ms`,
-            { reqId }, { reqId, errorCode: 'http.timeout' });
-          Toast.show(Util.t('toast.save_timeout'), 'error', 8000);
-        } else {
-          ErrorLog.warn('persistence', `Backend save failed: ${e.message}`,
-            { reqId }, { reqId, errorCode: 'http.network' });
-          Toast.show(Util.t('toast.saved_locally'), 'info');
-        }
-      })
-      .finally(() => { Persistence._saveInFlight = false; Persistence._syncUnsaved(); Persistence._saveCache(); });
+        Persistence._dirtyIds.delete(id);
+        Persistence._forceIds.delete(id);
+        Persistence._firmDirtyIds.delete(id);
+        Persistence._dirtySource.delete(id);
+        // Only rows the server persisted (a version came back) gained history events; not_found ids
+        // clear their dirty flag but wrote nothing.
+        if (Object.prototype.hasOwnProperty.call(versions, id)) savedIds.push(id);
+      }
+      // else: leave dirty — the next saveAll() will pick up the newer edit.
+    }
+    // Inspector History refetches the saved orders' events (the server wrote them in the save transaction).
+    if (savedIds.length) Store.emit({ type: 'tasks:saved', ids: savedIds, source: 'persistence' });
+    if (rejectedToRefresh.length) Persistence._refreshTasks(rejectedToRefresh, refreshBaselines, { sent: sentSnapshot });
+    if (stale.length) {
+      const base_versions: Record<string, number | null> = {};
+      for (const id of stale) base_versions[String(id)] = Store.tasks[String(id)]?.row_version ?? null;
+      ErrorLog.warn('persistence', `Concurrency conflict on ${stale.length} order(s) — refetching`,
+        { ids: stale, base_versions }, { errorCode: 'tasks.conflict', reqId });
+      // U25: a stale row whose server copy already holds this client's exact placement is reconciled silently;
+      // the conflict toast counts only the real conflicts (known once the refresh answers).
+      Persistence._refreshTasks(stale, refreshBaselines, { sent: sentSnapshot, onConflicts: count => {
+        if (count > 0 && !runtimePreviewChanged) Toast.show(Util.t('toast.concurrent_edit_conflict', { count }), 'warn', 7000);
+      } });
+    }
+    // N3: the server scanned the written machines inside the save
+    // transaction. Advisory — rows are persisted; surface the overlaps now
+    // instead of waiting for the next full alert recompute. Emitted as a
+    // Store event because this file must never import insights/services.
+    const conflicts = result.conflicts || [];
+    if (conflicts.length) {
+      const lines = [...new Set(conflicts.map(c => c.machine))];
+      ErrorLog.warn('persistence', `Save produced ${conflicts.length} schedule conflict(s)`, conflicts);
+      Toast.show(Util.t('toast.save_conflicts', { count: conflicts.length }), 'warn', 7000);
+      Store.emit({ type: 'schedule:conflicts', lines, source: 'persistence' });
+    }
+    const persisted = result.persisted ?? 0;
+    const total     = result.updated   ?? 0;
+    if (stale.length) {
+      // Conflicts already surfaced their own toast; don't also claim a partial-save error.
+      return 'problem';
+    }
+    if (persisted < total) {
+      ErrorLog.warn('persistence', `Partial DB save: ${persisted}/${total} persisted`, result);
+      const rejected = describeRejections(result.rejection_reasons);
+      Toast.show(rejected
+        ? Util.t('toast.partial_db_save_reasons', { persisted, total, details: rejected })
+        : Util.t('toast.partial_db_save', { persisted, total }), 'warn', rejected ? 9000 : 6000);
+      return 'problem';
+    }
+    ErrorLog.info('persistence', `Saved to backend (${persisted} tasks)`);
+    return 'saved';
   },
 
   /** PR-1: ids the backend reports as no longer existing server-side (refresh's
@@ -1747,9 +1882,12 @@ export const Persistence = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
+      // S7-2: a hung refresh must not leave its rows conflicted until Reload.
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     })
       .then(r => r.ok ? r.json() as Promise<TasksRefreshResponse> : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(({ data, missing }) => {
+        for (const id of ids) Persistence._refreshRetry.delete(String(id));
         if (collection !== taskCollectionGeneration) return;
         const applied: string[] = [];
         let retained = false;
@@ -1792,6 +1930,15 @@ export const Persistence = {
           // The server's manual firm is authoritative; _normalizeDates re-syncs firmedIds from it.
           const serverFirmed = row.firmed;
           if (typeof serverFirmed === 'boolean') tk.firmed = serverFirmed;
+          // S10-9: attributes an ingest rewrites. Only when the row carries them (older servers omit them); colour, form,
+          // description, ORDER_Y and ecc_firmed are never edited locally, a note only while no local note is unsaved.
+          const ingest = row as unknown as Partial<Pick<NimbusTask, 'COLOR' | 'FORM_SIZE' | 'MATERIAL_DESCRIPTION' | 'ORDER_Y' | 'ecc_firmed' | 'notes'>>;
+          if (ingest.COLOR != null) tk.COLOR = ingest.COLOR;
+          if (ingest.FORM_SIZE != null) tk.FORM_SIZE = ingest.FORM_SIZE;
+          if (ingest.MATERIAL_DESCRIPTION != null) tk.MATERIAL_DESCRIPTION = ingest.MATERIAL_DESCRIPTION;
+          if (ingest.ORDER_Y != null) tk.ORDER_Y = ingest.ORDER_Y;
+          if (typeof ingest.ecc_firmed === 'boolean') tk.ecc_firmed = ingest.ecc_firmed;
+          if (ingest.notes !== undefined && !Persistence.noteUnsaved(String(row.id))) tk.notes = ingest.notes;
           Store._normalizeDates(tk);
           tk.row_version = row.row_version as number | null;
           Persistence._dirtyIds.delete(String(row.id));
@@ -1824,6 +1971,8 @@ export const Persistence = {
         opts.onConflicts?.(Math.max(0, ids.length - silent));
       })
       .catch(e => {
+        // S7-2: remember what to retry; the next Save re-runs this refresh for the ids still conflicted.
+        for (const id of ids) Persistence._refreshRetry.set(String(id), { baseline: baselines.get(String(id)), sent: opts.sent?.get(String(id)) });
         opts.onConflicts?.(ids.length);
         ErrorLog.warn('persistence', `Conflict refetch failed: ${e.message}`, ids);
         Toast.show(Util.t('toast.conflict_refresh_failed'), 'error', 8000);
@@ -1833,6 +1982,26 @@ export const Persistence = {
         Persistence._syncUnsaved();
         Persistence._saveCache();
       });
+  },
+
+  /** S7-2: re-run a conflict refresh that failed or timed out, for the ids still conflicted and still in the Store.
+   *  Called by saveAll(); the retried call re-registers its ids if it fails again. */
+  _retryFailedRefreshes(): void {
+    if (!Persistence._refreshRetry.size) return;
+    const ids: string[] = [];
+    const baselines = new Map<string, RefreshBaseline>();
+    const sent = new Map<string, string>();
+    for (const [id, entry] of Persistence._refreshRetry) {
+      if (!Store.tasks[id] || !Persistence._conflictedIds.has(id)) continue;
+      ids.push(id);
+      if (entry.baseline) baselines.set(id, entry.baseline);
+      if (entry.sent !== undefined) sent.set(id, entry.sent);
+    }
+    Persistence._refreshRetry.clear();
+    if (!ids.length) return;
+    Persistence._refreshTasks(ids, baselines, { sent, onConflicts: count => {
+      if (count > 0) Toast.show(Util.t('toast.concurrent_edit_conflict', { count }), 'warn', 7000);
+    } });
   },
 
   /** Force a full reload from backend, bypassing cache. Returns the load Promise. */
@@ -1977,11 +2146,6 @@ export const Persistence = {
   },
 
   _writeCacheWithQuotaGuard(snapshot: StoredState): boolean {
-    const baseMeta = {
-      _schemaVersion: snapshot._schemaVersion,
-      _buildId:       snapshot._buildId,
-      _savedAt:       snapshot._savedAt,
-    };
     // NOTE (deviation from the task brief's inline guidance): the brief suggested
     // typing `tiers` as `StoredState[]` on the theory that every tier "still
     // satisfies the full shape." That is not actually true of the last (most
@@ -1995,15 +2159,7 @@ export const Persistence = {
     // is the correct, honest type for `tiers` — every tier is still a valid
     // (partial) StoredState snapshot, and JSON.stringify/localStorage.setItem
     // below don't care that some tiers omit keys.
-    const tiers: Array<Partial<StoredState>> = snapshot._optimizerDirtyIds?.length ? [snapshot] : [
-      snapshot,
-      { ...snapshot, tasks: snapshot.tasks.slice(-2000) },
-      { ...snapshot, tasks: snapshot.tasks.slice(-500) },
-      { ...baseMeta,
-        selectedPlant: snapshot.selectedPlant,
-        lineSettings:  snapshot.lineSettings,
-        tasks:         [] },
-    ];
+    const tiers: Array<Partial<StoredState>> = cacheTiers(snapshot);
     for (let i = 0; i < tiers.length; i++) {
       try {
         const payload = JSON.stringify(tiers[i]);
@@ -2078,6 +2234,7 @@ Store.subscribe(evt => {
   if (evt.type === 'tasks:bulk') {
     taskCollectionGeneration++;
     taskEditGenerations.clear();
+    Persistence._refreshRetry.clear();
     if (evt.source === 'persistence') Persistence._conflictedIds.clear();
     return;
   }
@@ -2095,3 +2252,17 @@ ErrorLog.registerStateProvider('persistence', () => ({
   firmDirty: Persistence._firmDirtyIds.size,
   autosaveDisabled: Persistence._autosaveDisabled,
 }));
+
+// S7-6: leaving the page (close, reload, navigate) with unsaved work asks first, and the cache is flushed on the
+// way out so the debounced autosave cannot lose the last edit. Guarded: headless/test realms have no real window.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('beforeunload', (e: BeforeUnloadEvent) => {
+    if (!Persistence.hasPendingWork()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+  window.addEventListener('pagehide', () => {
+    if (Sandbox.active || Persistence._autosaveDisabled) return;
+    Persistence._saveCache();
+  });
+}

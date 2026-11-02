@@ -15,6 +15,7 @@ import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
 import { AlertProfileMatches } from '../../../frontend/insights/alert-profile-matches.mjs';
+import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 
 const require = createRequire(import.meta.url);
 // Engine.isInProgress/isFrozenHorizon default to Store.plantNow, which projects through the compute core's
@@ -434,7 +435,7 @@ test('Timeline.rebuildSetupForLines batches setup additions, updates, and remova
   ]);
   Timeline._items = {
     getIds: () => [...records.keys()],
-    get: id => records.get(String(id)),
+    get: id => (id && typeof id === 'object') ? [...records.values()].filter(id.filter) : (records.get(String(id))),
     add: items => { calls.add++; for (const item of items) records.set(item.id, item); },
     update: items => { calls.update++; for (const item of items) records.set(item.id, item); },
     remove: ids => { calls.remove++; for (const id of ids) records.delete(String(id)); },
@@ -473,7 +474,7 @@ test('Timeline.finishSetupDrag clears retained setup-item dimming after a cancel
     className: 'setup-item setup-drag-dim', style: 'opacity:0.18;',
   }]]);
   Timeline._items = {
-    getIds: () => [...records.keys()], get: id => records.get(String(id)),
+    getIds: () => [...records.keys()], get: id => (id && typeof id === 'object') ? [...records.values()].filter(id.filter) : (records.get(String(id))),
     add(items) { for (const item of items) records.set(item.id, item); },
     update(items) { for (const item of items) records.set(item.id, { ...records.get(item.id), ...item }); },
     remove(ids) { for (const id of ids) records.delete(String(id)); },
@@ -2701,12 +2702,15 @@ function nwWithPlant(fn) {
   const priorPlant = Store.selectedPlant;
   Store.setSelectedPlant(NW_PLANT, 'unit-test');
   Store.ensurePlant(NW_PLANT);
+  const priorHydration = CalendarSync._hydration[NW_PLANT];
+  CalendarSync._setHydration(NW_PLANT, 'hydrated');   // _nonWorkingDesired returns [] while the plant's calendar is pending
   // Mon-Fri 06:00-18:00, weekend closed.
   for (let d = 0; d < 7; d++) Store.setPlantWorkHours(NW_PLANT, d, (d === 0 || d === 6) ? null : [6, 18], 'unit-test');
   const prior = { range: Timeline._nwRange, ids: Timeline._nwIds, items: Timeline._items, tl: Timeline._tl };
   try { return fn(); } finally {
     Timeline._nwRange = prior.range; Timeline._nwIds = prior.ids; Timeline._items = prior.items; Timeline._tl = prior.tl;
     Store.setSelectedPlant(priorPlant, 'unit-test');
+    if (priorHydration) CalendarSync._hydration[NW_PLANT] = priorHydration; else delete CalendarSync._hydration[NW_PLANT];
   }
 }
 function nwFakeItems() {
@@ -2715,7 +2719,7 @@ function nwFakeItems() {
   return {
     records, calls,
     getIds: () => [...records.keys()],
-    get: id => records.get(String(id)) ?? null,
+    get: id => (id && typeof id === 'object') ? [...records.values()].filter(id.filter) : (records.get(String(id)) ?? null),
     add: items => { calls.add.push(items.map(i => i.id)); for (const i of items) records.set(i.id, i); },
     update: items => { calls.update.push(items.map(i => i.id)); for (const i of items) records.set(i.id, i); },
     remove: ids => { calls.remove.push([...ids]); for (const id of ids) records.delete(String(id)); },
@@ -4510,4 +4514,26 @@ test('Hierarchy.render shows the chosen day: chip, task count and order list', (
   Hierarchy.render();
   assert.equal(shown.at(-1)[0].pct, null);                 // nothing scheduled that day: dash chip
   assert.equal(shown.at(-1)[0].tasks.length, 0);
+});
+
+test('shortcutTargetIgnored: fields, dropdowns, buttons and comboboxes own their keys', async () => {
+  const { shortcutTargetIgnored } = await import('../../../frontend/scheduling/gantt.mjs');
+  for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON']) assert.equal(shortcutTargetIgnored({ tagName }), true, tagName);
+  assert.equal(shortcutTargetIgnored({ tagName: 'DIV', isContentEditable: true }), true);
+  assert.equal(shortcutTargetIgnored({ tagName: 'DIV', getAttribute: n => (n === 'role' ? 'combobox' : null) }), true);
+  assert.equal(shortcutTargetIgnored({ tagName: 'DIV', getAttribute: () => null }), false);
+  assert.equal(shortcutTargetIgnored({ tagName: 'BODY' }), false);
+  assert.equal(shortcutTargetIgnored(null), false);
+});
+
+test('neighbourRow follows the rendered row order and skips rows with nothing selectable', async () => {
+  const { neighbourRow } = await import('../../../frontend/scheduling/gantt.mjs');
+  const rows = ['M1', 'M2', 'M10'];   // numeric order, not code-unit ('M10' would sort before 'M2')
+  const any = () => true;
+  assert.equal(neighbourRow(rows, 'M2', 'ArrowDown', any), 'M10');
+  assert.equal(neighbourRow(rows, 'M2', 'ArrowUp', any), 'M1');
+  assert.equal(neighbourRow(rows, 'M1', 'ArrowUp', any), null);
+  assert.equal(neighbourRow(rows, 'M10', 'ArrowDown', any), null);
+  assert.equal(neighbourRow(rows, 'M1', 'ArrowDown', r => r !== 'M2'), 'M10');   // M2 fully dimmed: skipped
+  assert.equal(neighbourRow(rows, 'Mx', 'ArrowDown', any), null);                // current row not rendered
 });

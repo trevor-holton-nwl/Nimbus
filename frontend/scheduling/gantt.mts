@@ -34,10 +34,12 @@ import { CALENDAR_ALERT_TYPES, ALERT_CATEGORY_ORDER } from '../insights/alert-pr
 import { Engine, deriveSetupObservation } from '../optimization/engine.mjs';
 import type { SetupObservation, ManualPlacementOptions } from '../optimization/engine.mjs';
 import { Persistence } from './persistence.mjs';
+import { createDragGate } from './drag-state.mjs';
 import { Table, Inspector, ContextMenu, notifyResidualFirming } from './orders.mjs';
 import type { AgGridRowNode } from './orders.mjs';
 import type { NimbusTask, NimbusBlock, NimbusPlantBlock, AlertCategory, AlertSev, UtilSevBucket, TimelineItemKind } from '../platform/types.mjs';
 import { Calendar } from '../calendar/calendar-engine.mjs';
+import { CalendarSync } from '../calendar/calendar-sync.mjs';
 import { Runtime } from '../routing/runtime-client.mjs';
 import type { DropDecision } from '../routing/runtime-client.mjs';
 import { buildNonWorkingSpans } from './nonworking-spans.mjs';
@@ -229,6 +231,7 @@ export const Timeline = {
   _frozenHorizonIds: [] as string[],        // C2 (2026-08-20): frozen-horizon zone ids, re-advanced by the same ticker below
   _rebuildNow: null as Date | null,         // the viewer's clock at the start of the last rebuild() pass (timeline min bound); firming/lock styling reads the plant clock via _nowFor
   _frozenBandIds: null as Set<string> | null, // P2: task ids currently inside the frozen horizon band, for live repaint diffing
+  _boundsKey: '',                           // S2-5: last min/max written by _applyTimeBounds (skip an unchanged setOptions)
   _zonePushedMs: 0,                         // epoch ms of the "now" last written into the zone bands; 0 = unknown, next tick pushes
   _zoneEdgeKey: '',                         // `${hzMinutes}|${frozenEndMs}` the bands were last written with; a change forces a push
   _lastLockRefreshTs: 0,                  // throttle for the open Inspector's lock-block refresh (independent of band items)
@@ -396,6 +399,7 @@ export const Timeline = {
       // left handle moves nothing (a left-edge change that still reaches the commit is reverted with a toast).
       onMoving: (item: TimelineVisItem, callback: (item: TimelineVisItem | null) => void) => {
         // Drag-time row dim hangs here (a per-frame vis callback), NOT on `timechange` (custom-time-bar events only).
+        Interaction._beginItemDrag();   // first frame of an item drag: makes Interaction._isDragging truthful (timechange never fires for items)
         try { Timeline.onItemMoving(String(item.id)); } catch (e) { ErrorLog.warn('timeline', 'row dim failed: ' + String(e)); }
         // Never strip `subgroup` here: vis runs _moveToGroup BEFORE it assigns the new data, so the
         // hovered row would register the old lane and a later orderSubgroups throws on the dangling entry.
@@ -551,18 +555,25 @@ export const Timeline = {
       // Also self-heals if the horizon changes mid-session. Cache-only boots
       // have frozenHorizonEnd null until the plant's master data (or the
       // first /tasks fetch) is in, matching the band's own absence then.
-      if (Date.now() - Timeline._lastFirmScanTs > 30_000) {
+      // S1-12: only while the Gantt tab is showing; the next rebuild re-seeds _frozenBandIds.
+      if (Timeline._ganttActive() && Date.now() - Timeline._lastFirmScanTs > 30_000) {
         Timeline._lastFirmScanTs = Date.now();
         const next = new Set<string>();
         Timeline._clockMemo = new Map();   // U26: one plant clock per plant for the whole scan
+        Timeline._frozenEndMemo = { v: Engine.frozenHorizonEnd() };   // W7: the rolling far edge, resolved once per scan
         try {
-          for (const t of Store.tasksByPlant(Store.selectedPlant)) if (Timeline._inLockBand(t)) next.add(String(t.id));
+          // S1-1/S1-10: the same line-filtered set rebuild() seeds _frozenBandIds from.
+          const lineVisible = Timeline._lineVisiblePredicate();
+          for (const t of Store.tasksByPlant(Store.selectedPlant)) {
+            if (!lineVisible(t.MACHINE || 'Unknown')) continue;
+            if (Timeline._inLockBand(t)) next.add(String(t.id));
+          }
           const prev = Timeline._frozenBandIds;
           if (prev) {
             for (const id of prev) if (!next.has(id)) Timeline._applyTaskPatch(id);
             for (const id of next) if (!prev.has(id)) Timeline._applyTaskPatch(id);
           }
-        } finally { Timeline._clockMemo = null; }
+        } finally { Timeline._clockMemo = null; Timeline._frozenEndMemo = null; }
         Timeline._frozenBandIds = next;
       }
       PerfMonitor.record('Timeline.ticker', performance.now() - _pmT0);
@@ -576,8 +587,14 @@ export const Timeline = {
    *  Running is included so an order that starts while the page is open gets its running lock
    *  styling without a reload (C5). */
   _inLockBand(t: NimbusTask, now: Date = Timeline._nowFor(t)): boolean {
-    return Engine.isFrozenHorizon(t, now) || Engine.isInProgress(t, now);
+    // W7: inside a rebuild pass / 30 s scan the frozen far edge (selected plant's rolling now + N days) is the
+    // same instant for every task, so it is resolved once and handed to Engine.isFrozenHorizon (same result as
+    // the per-task Engine.frozenHorizonEnd() read it replaces).
+    const memo = Timeline._frozenEndMemo;
+    return (memo ? Engine.isFrozenHorizon(t, now, memo.v) : Engine.isFrozenHorizon(t, now)) || Engine.isInProgress(t, now);
   },
+  /** Per-pass frozen far edge for _inLockBand (W7); null outside a pass. */
+  _frozenEndMemo: null as { v: Date | null } | null,
 
   /** "Now" at a plant: the server instant in the plant's zone, as the naive wall-clock Date the bars use (the
    *  one clock, OQ52). The viewer's own clock only when the plant has no valid zone (it is then blocked and
@@ -803,6 +820,7 @@ export const Timeline = {
     }
 
     if (evt.type === 'plant:selected') {
+      Timeline._frozenBandIds = null;   // S1-11: the next rebuild re-seeds it for the new plant
       Timeline.undimRowsForDrag();
       Timeline._expandedLine = null;
       Timeline._laneIds.clear();
@@ -839,8 +857,6 @@ export const Timeline = {
       // call (vis-timeline DataSet.update() upserts by id) instead of one DataSet
       // write per task — a per-task loop here previously dominated optimize-run cost.
       if (Timeline._ganttActive()) {
-        const sel = NIMBUS!.GanttFilter ? NIMBUS!.GanttFilter!._selectedLines : null;
-        const filtered = sel && sel.size > 0;
         const _pmT0patch = performance.now();
         const patches: TimelineVisItem[] = [];
         const ids = (evt.ids as Array<string | number> | undefined) ?? [];
@@ -858,10 +874,6 @@ export const Timeline = {
         }
         for (const id of ids) {
           const sid = String(id);
-          if (filtered) {
-            const t = Store.tasks[sid];
-            if (!t || !sel!.has(t.MACHINE || 'Unknown')) continue;
-          }
           const patch = Timeline._itemPatchFor(sid);
           if (patch) patches.push(patch);
         }
@@ -877,8 +889,18 @@ export const Timeline = {
     } else if (evt.type === 'task:update' && evt.id != null) {
       Timeline._applyTaskPatch(String(evt.id));
     } else if (evt.type === 'firmed:change') {
-      // just re-render those items' className
-      for (const id of (evt.ids as Array<string | number>)) Timeline._applyTaskPatch(String(id));
+      // just re-render those items' className. S1-5: one batched DataSet write (like tasks:bulkUpdate above);
+      // a split order (several items) still falls back to a coalesced rebuild, as _applyTaskPatch does.
+      const patches: TimelineVisItem[] = [];
+      let needRebuild = false;
+      for (const id of (evt.ids as Array<string | number>)) {
+        const sid = String(id);
+        if (Timeline.hasMultipleItemsForTask(sid)) { needRebuild = true; continue; }
+        const patch = Timeline._itemPatchFor(sid);
+        if (patch) patches.push(patch);
+      }
+      if (needRebuild) Timeline._scheduleRebuild();
+      if (patches.length) Timeline._writePatches(patches);
     } else if (evt.type === 'alerts:change') {
       if (Timeline._ganttActive()) {
         // rebuild() reconciles the alert-cell background items, so a per-task
@@ -904,6 +926,9 @@ export const Timeline = {
   _itemPatchFor(id: string): TimelineVisItem | null {
     const t = Store.tasks[id];
     if (!t || !t.start_date || !t.end_date) return null;
+    // S1-1: the one line-filter check for every patch path (bulk, single, firm, 30 s scan): a hidden
+    // machine's order must not be added to the DataSet, or the filter visibly leaks.
+    if (!Timeline._lineVisiblePredicate()(t.MACHINE || 'Unknown')) return null;
     const patch = Timeline._itemsForTask(t)[0] || null;
     // _itemForTask (via _itemsForTask) builds className fresh, with no
     // knowledge of the sibling highlight (D51) — restore it here so a
@@ -1271,7 +1296,7 @@ export const Timeline = {
       id:      String(t.id),
       group:   line,
       kind:    'order',
-      content: `<span style="padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;">${prefix}${label}${distPart}</span>`,
+      content: `<span style="padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;">${prefix}${Util.escapeHtml(label)}${distPart}</span>`,
       start:   t.start_date!,
       end:     t.end_date!,
       className: cls.join(' ')
@@ -1292,8 +1317,8 @@ export const Timeline = {
       id,
       group:   line,
       kind:    'blackout',
-      content: `<span style="font-style:italic;">✕ ${b.reason || Util.t('ui.blackouts_label', {plural: ''})}</span>`,
-      title:   `${Util.t('ui.blackouts_label', {plural: ''})}: ${b.reason || '—'}<br>${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}`,
+      content: `<span style="font-style:italic;">✕ ${Util.escapeHtml(b.reason || Util.t('ui.blackouts_label', {plural: ''}))}</span>`,
+      title:   `${Util.t('ui.blackouts_label', {plural: ''})}: ${Util.escapeHtml(b.reason || '—')}<br>${Util.fmtDTReadable(b.start)} → ${Util.fmtDTReadable(b.end)}`,
       start:   b.start as Date, end: b.end as Date,
       editable: false,
       className: 'blackout',
@@ -1386,6 +1411,15 @@ export const Timeline = {
 
   /** A move invalidates adjacency-derived setup on only its source/target
    * lines; production patching remains owned by the Store subscriber. */
+  /** S1-8: the setup bars (kind 'setup') on the given lines, read with ONE filtered DataSet.get instead of
+   *  getIds() + a get() per id over every item of the plant. */
+  _setupItemsOnLines(lines: ReadonlySet<string>): TimelineVisItem[] {
+    const found = (Timeline._items as unknown as { get(opts: unknown): unknown }).get({
+      filter: (item: TimelineVisItem) => item.kind === 'setup' && !!item.group && lines.has(item.group),
+    }) as unknown;
+    return Array.isArray(found) ? found as TimelineVisItem[] : [];
+  },
+
   rebuildSetupForLines(lines: ReadonlySet<string>): void {
     if (!Timeline._items || typeof Timeline._items.getIds !== 'function' || !lines.size) return;
     const _deriveT0 = performance.now();
@@ -1396,10 +1430,7 @@ export const Timeline = {
       .map(item => [String(item.id), Timeline._decorateLane(item)] as const));
     PerfMonitor.record('Timeline.setup.derive', performance.now() - _deriveT0);
     const _diffT0 = performance.now();
-    const current = Timeline._items.getIds().map(String).filter(id => {
-      const item = Timeline._items!.get(id) as TimelineVisItem | null;
-      return item?.kind === 'setup' && !!item.group && lines.has(item.group);
-    });
+    const current = Timeline._setupItemsOnLines(lines).map(item => String(item.id));
     const currentIds = new Set(current);
     const add: TimelineVisItem[] = [], update: TimelineVisItem[] = [], remove: string[] = [];
     for (const [id, item] of desired) (currentIds.has(id) ? update : add).push(item);
@@ -1500,12 +1531,8 @@ export const Timeline = {
     const newlyAffected = new Set([...lines].filter(line => !Timeline._dragSetupLines.has(line)));
     if (!newlyAffected.size) return;
     for (const line of newlyAffected) Timeline._dragSetupLines.add(line);
-    const updates = Timeline._items.getIds().map(String).flatMap(id => {
-      const item = Timeline._items!.get(id) as TimelineVisItem | null;
-      return item?.kind === 'setup' && !!item.group && newlyAffected.has(item.group)
-        ? [{ id, className: `${item.className || 'setup-item'} setup-drag-dim`, style: 'opacity:0.18;' }]
-        : [];
-    });
+    const updates = Timeline._setupItemsOnLines(newlyAffected).map(item =>
+      ({ id: String(item.id), className: `${item.className || 'setup-item'} setup-drag-dim`, style: 'opacity:0.18;' }));
     if (!updates.length) return;
     Timeline._suppressEvents = true;
     try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = false; }
@@ -1551,10 +1578,12 @@ export const Timeline = {
    *  `visibleSet` is the pass's already-computed `_visibleLines()` set; omitted, it is computed only when a line
    *  filter is active. */
   _lineVisiblePredicate(visibleSet?: ReadonlySet<string>): (line: string) => boolean {
-    const sel = NIMBUS!.GanttFilter ? NIMBUS!.GanttFilter!._selectedLines : null;
-    if (!(sel && sel.size > 0)) return () => true;
-    const set = visibleSet ?? new Set(Timeline._visibleLines());
-    return line => set.has(line);
+    // typeof guard: the global is absent in unit tests that never boot the shell.
+    const sel = (typeof NIMBUS !== 'undefined' && NIMBUS?.GanttFilter) ? NIMBUS.GanttFilter._selectedLines : null;
+    if (visibleSet) return lineFilterIsActive(sel) ? (line => visibleSet.has(line)) : (() => true);
+    // _visibleLines() is the plant's lines filtered by the selection, so for any order's line "visible" is
+    // exactly "selected": no per-call sort of every line (this runs once per patched order).
+    return lineFilterPredicate(sel);
   },
 
   /** Diff-based rebuild: compare desired item set to current DataSet contents
@@ -1562,12 +1591,19 @@ export const Timeline = {
    *  avoids the clear/add flicker of a wholesale replacement.               */
   rebuild(): void {
     // U26: every order of this pass reads its plant's clock; resolve each plant once, not once per order.
+    // A coalesced rebuild already queued is overtaken by this direct pass (the state it was queued for is
+    // being painted now); drop it so one user action makes one pass, not two. A later schedule queues afresh.
+    if (Timeline._rebuildRaf && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(Timeline._rebuildRaf as number);
+      Timeline._rebuildRaf = null;
+    }
     Timeline._clockMemo = new Map();
+    Timeline._frozenEndMemo = { v: Engine.frozenHorizonEnd() };   // W7: one frozen far edge per pass
     // A rebuild ends the gesture the multi-drag line-lock toast latch belongs to. The row dim is NOT cleared
     // here: a rebuild mid-drag must keep it (the group className composer reads it); drop, pointerup and a
     // plant switch clear it.
     Interaction._multiLockToast = null;
-    try { Timeline._rebuildPass(); } finally { Timeline._clockMemo = null; }
+    try { Timeline._rebuildPass(); } finally { Timeline._clockMemo = null; Timeline._frozenEndMemo = null; }
   },
 
   _rebuildPass(): void {
@@ -1612,9 +1648,7 @@ export const Timeline = {
     const plant = Store.selectedPlant;
     // Scope to GanttFilter line multi-select — without this, vis-timeline reserves
     // row height for every plant line and leaves ghost rows above the visible ones.
-    const lineFilterActive = !!NIMBUS!.GanttFilter
-      && NIMBUS!.GanttFilter!._selectedLines
-      && NIMBUS!.GanttFilter!._selectedLines!.size > 0;
+    const lineFilterActive = lineFilterIsActive(NIMBUS!.GanttFilter ? NIMBUS!.GanttFilter!._selectedLines : null);
     // Single source of truth for "what lines are rendered, and in what
     // order" — see Timeline._visibleLines(). Also reused by
     // Dashboard._gotoLine and AlertsUIAdapter.focus's line+day fallback via
@@ -1872,6 +1906,10 @@ export const Timeline = {
       // drifts every subsequent line off midnight across a DST transition.
       const d = new Date(rangeStart);
       d.setHours(0, 0, 0, 0);
+      if (!_capWarned.has('gridline') && (rangeEnd.getTime() - d.getTime()) / Config.MS_DAY > GRIDLINE_CAP + 1) {
+        _capWarned.add('gridline');
+        ErrorLog.warn('timeline', `Day gridlines capped at ${GRIDLINE_CAP}; the far end of the range has none`);
+      }
       for (let count = 0; d.getTime() <= rangeEnd.getTime() && count < GRIDLINE_CAP; count++) {
         const dk = Util.dayKey(d);
         desired.set(`day-gridline-${dk}`, {
@@ -2237,9 +2275,14 @@ export const Timeline = {
     }
     const nowMs = (Timeline._rebuildNow || new Date()).getTime();
     const maxMs = Store.visibilityHorizonEnd ? Store.visibilityHorizonEnd.getTime() : null;
+    const minBound = computeTimelineMinBound({ dataMinMs, nowMs, maxMs });
+    // S2-5: setOptions re-lays out the timeline; skip it when neither bound moved.
+    const key = `${maxMs ?? ''}|${minBound ?? ""}`;
+    if (key === Timeline._boundsKey) return;
+    Timeline._boundsKey = key;
     Timeline._tl.setOptions({
       max: Store.visibilityHorizonEnd,
-      min: computeTimelineMinBound({ dataMinMs, nowMs, maxMs }),
+      min: minBound,
     });
   },
 
@@ -2249,14 +2292,16 @@ export const Timeline = {
     return { fromMs: windowStartMs - margin, toMs: windowEndMs + margin };
   },
 
-  // PURE: the 'nonworking-*' items for a range, from the selected plant's PLANT pattern only (not the
-  // per-line hours). Ungrouped background items (vis's reserved BackgroundGroup spans every row and
+  // Reads Store + Calendar (not pure): the 'nonworking-*' items for a range, from the selected plant's PLANT pattern only (not the
+  // per-line hours). Returns [] until the plant's server calendar has landed (CalendarSync 'pending'): the
+  // client default week would shade a 7-day plant's weekend wrongly; the hydration's calendar:change rebuilds. Ungrouped background items (vis's reserved BackgroundGroup spans every row and
   // _healBackgroundBands skips ungrouped items, like day-gridline-*); kind:'zone' keeps the minimap's
   // _items subscriber out. A span starting at local midnight is 'nonworking-<dayKey>'; the one that starts
   // at an off-shift tail (window end) is 'nonworking-<dayKey>-t', so a day's head and tail never collide.
   _nonWorkingDesired(range: { fromMs: number; toMs: number }): TimelineVisItem[] {
     const plant = Store.selectedPlant;
     if (!plant) return [];
+    if (CalendarSync.calendarState(plant) === 'pending') return [];
     Store.ensurePlant(plant);
     // Unreachable at the current zoomMax (30 d): the covered range is window + 2 * max(window, 7 d) <= 90 d. Kept
     // deliberately as a guard for a future larger zoomMax.
@@ -2463,18 +2508,9 @@ export const Timeline = {
 
   setView(mode: string): void {
     if (!Timeline._tl) return;
-    const now = new Date();
-    let start: Date, end: Date;
-    if (mode === 'hour') {
-      start = Util.startOfDay(now)!;
-      end   = new Date(start.getTime() + 24 * Config.MS_HOUR);
-    } else if (mode === 'day') {
-      start = Util.startOfDay(now)!;
-      end   = new Date(start.getTime() + 3 * 24 * Config.MS_HOUR);
-    } else {
-      start = Util.startOfDay(now)!;
-      end   = new Date(start.getTime() + 7 * 24 * Config.MS_HOUR);
-    }
+    // S2-1: the plant's "now" (the one clock), not the browser's.
+    const w = plantViewWindow(mode, Timeline._plantNow(Store.selectedPlant).getTime());
+    const start = new Date(w.startMs), end = new Date(w.endMs);
     Timeline._tl.setWindow(start, end, { animation: { duration: 300 } });
     document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(b => {
       b.classList.toggle('active', b.dataset.view === mode);
@@ -2504,24 +2540,26 @@ export const Timeline = {
     // Scope to the selected plant like rebuild() (R4) — otherwise the window spans
     // every plant's orders and zooms far wider than the visible rows. Also avoids the
     // Math.min/max(...spread) call-stack risk on a system-wide task array at scale.
+    // S2-6: only the rows the line filter leaves visible (a plain loop, no Math.min(...spread)).
+    const lineVisible = Timeline._lineVisiblePredicate();
     const tasks = (Store.selectedPlant ? Store.tasksForSelectedPlant() : [])
-      .filter(t => t.start_date && t.end_date);
-    if (!tasks.length) return;
-    const minT = Math.min(...tasks.map(t => t.start_date!.getTime()));
-    const maxT = Math.max(...tasks.map(t => t.end_date!.getTime()));
-    const span = maxT - minT;
-    const pad  = span * 0.05 || Config.MS_HOUR;
-    Timeline._tl.setWindow(new Date(minT - pad), new Date(maxT + pad), { animation: { duration: 400 } });
+      .filter(t => t.start_date && t.end_date && lineVisible(t.MACHINE || 'Unknown'));
+    const w = fitWindowFor(tasks.map(t => ({ startMs: t.start_date!.getTime(), endMs: t.end_date!.getTime() })), Config.MS_HOUR);
+    if (!w) return;
+    Timeline._tl.setWindow(new Date(w.startMs), new Date(w.endMs), { animation: { duration: 400 } });
+    Timeline._clearZoomActive();
+  },
+
+  /** S2-7: after a window that matches no zoom button (Fit, Go To, day stepper) none should look selected. */
+  _clearZoomActive(): void {
+    document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(b => b.classList.remove('active'));
   },
 
   gotoNow(): void {
     if (!Timeline._tl) return;
-    const now = new Date();
-    Timeline._tl.setWindow(
-      new Date(now.getTime() - 4 * Config.MS_HOUR),
-      new Date(now.getTime() + 4 * Config.MS_HOUR),
-      { animation: { duration: 300 } }
-    );
+    const w = plantNowWindow(Timeline._plantNow(Store.selectedPlant).getTime());
+    Timeline._tl.setWindow(new Date(w.startMs), new Date(w.endMs), { animation: { duration: 300 } });
+    Timeline._clearZoomActive();
   },
 
   /** Center the window on a plant day (the Machines-pane day stepper); reuses the Go To window, with no row scroll or spotlight. */
@@ -2531,6 +2569,7 @@ export const Timeline = {
     const win = Timeline._gotoWindowFor(dateStr);
     Timeline._syncViewWindow(win.start, win.end);
     tl.setWindow(new Date(win.start), new Date(win.end), { animation: { duration: 300 } });
+    Timeline._clearZoomActive();
   },
 
   _colorIndex(line: string): number {
@@ -2554,12 +2593,8 @@ export const Timeline = {
     }
     const sortedLines = [...lineSet].sort((a, b) =>
       a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-    const lineFilterActive = !!NIMBUS!.GanttFilter
-      && NIMBUS!.GanttFilter!._selectedLines
-      && NIMBUS!.GanttFilter!._selectedLines!.size > 0;
-    return lineFilterActive
-      ? sortedLines.filter(l => NIMBUS!.GanttFilter!._selectedLines!.has(l))
-      : sortedLines;
+    const sel = NIMBUS!.GanttFilter ? NIMBUS!.GanttFilter!._selectedLines : null;
+    return lineFilterIsActive(sel) ? sortedLines.filter(lineFilterPredicate(sel)) : sortedLines;
   },
 
   // Scroll the vis-timeline vertical scroller so the group row for `line` is CENTERED in the viewport
@@ -2730,9 +2765,7 @@ export const Timeline = {
         Timeline._syncViewWindow(win.start, win.end);
         Timeline._gotoWin = win;
         tl.setWindow(new Date(win.start), new Date(win.end), { animation: { duration: 300 } });
-        document.querySelectorAll<HTMLElement>('#gantt-zoom-controls .seg-btn[data-view]').forEach(b => {
-          b.classList.toggle('active', b.dataset.view === 'day');
-        });
+        Timeline._clearZoomActive();
       }
       onWindowSet?.();
       if (!tl) { startScroll(); return; }
@@ -2795,6 +2828,38 @@ function _navAddDays(ms: number, n: number): number {
   return d.getTime();
 }
 
+const NAV_DAY_CAP = 800;
+/** One-shot ErrorLog.warn keys (S1-2/S2-2/S3-9): a cap that truncates is reported once per page load. */
+const _capWarned = new Set<string>();
+
+/** True when a Gantt line filter holds any line. */
+export function lineFilterIsActive(sel: ReadonlySet<string> | null | undefined): boolean {
+  return !!sel && sel.size > 0;
+}
+/** The one "is this machine shown?" test for an order's line: everything when no line filter is active. */
+export function lineFilterPredicate(sel: ReadonlySet<string> | null | undefined): (line: string) => boolean {
+  return lineFilterIsActive(sel) ? (line => sel!.has(line)) : (() => true);
+}
+/** Hour/Day/Week window anchored on local midnight of a "now" instant (the plant's clock, S2-1). */
+export function plantViewWindow(mode: string, nowMs: number): { startMs: number; endMs: number } {
+  const d = new Date(nowMs); d.setHours(0, 0, 0, 0);
+  const days = mode === 'hour' ? 1 : mode === 'day' ? 3 : 7;
+  const e = new Date(d); e.setDate(e.getDate() + days);   // calendar days, DST-safe
+  return { startMs: d.getTime(), endMs: e.getTime() };
+}
+/** Go To Now window: now plus/minus 4 h. */
+export function plantNowWindow(nowMs: number): { startMs: number; endMs: number } {
+  return { startMs: nowMs - 4 * 3_600_000, endMs: nowMs + 4 * 3_600_000 };
+}
+/** Fit window over the given spans with 5 % padding (minPadMs when they have no extent); null when empty. */
+export function fitWindowFor(spans: ReadonlyArray<{ startMs: number; endMs: number }>, minPadMs: number): { startMs: number; endMs: number } | null {
+  if (!spans.length) return null;
+  let minT = Infinity, maxT = -Infinity;
+  for (const s of spans) { if (s.startMs < minT) minT = s.startMs; if (s.endMs > maxT) maxT = s.endMs; }
+  const pad = (maxT - minT) * 0.05 || minPadMs;
+  return { startMs: minT - pad, endMs: maxT + pad };
+}
+
 export function navComputeRange(i: NavRangeInput): NavRange {
   const today = _navLocalMidnight(i.nowMs);
   let lo = Math.min(i.dataMinMs ?? i.nowMs, today, i.windowStartMs);
@@ -2814,7 +2879,7 @@ export function navComputeRange(i: NavRangeInput): NavRange {
 
   const dayStarts: number[] = [];
   let d = lo;
-  while (d < hi && dayStarts.length < 800) {
+  while (d < hi && dayStarts.length < NAV_DAY_CAP) {
     dayStarts.push(d);
     d = _navAddDays(d, 1);
   }
@@ -2858,6 +2923,26 @@ export function bulkTouchesExpandedLine(
 ): boolean {
   if (!expandedLine) return false;
   return ids.some(id => oldLineOf(id) === expandedLine || newLineOf(id) === expandedLine);
+}
+
+/** True when a global Gantt shortcut must not act on this keydown target: text fields, dropdowns, buttons and
+ *  combobox widgets own their own keys (arrows, Delete, F), so the Gantt handler stays out of their way. */
+export function shortcutTargetIgnored(t: { tagName?: string; isContentEditable?: boolean; getAttribute?: (n: string) => string | null } | null | undefined): boolean {
+  if (!t) return false;
+  const tag = t.tagName || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON') return true;
+  if (t.isContentEditable) return true;
+  return typeof t.getAttribute === 'function' && t.getAttribute('role') === 'combobox';
+}
+
+/** The row an Up/Down arrow moves to: the neighbour of `current` in the rendered row order, or null at an edge
+ *  or when `current` is not a rendered row. `hasCandidates` skips rows with nothing selectable (hidden or dimmed). */
+export function neighbourRow(rows: string[], current: string, key: 'ArrowUp' | 'ArrowDown', hasCandidates: (row: string) => boolean): string | null {
+  let i = rows.indexOf(current);
+  if (i < 0) return null;
+  const step = key === 'ArrowUp' ? -1 : 1;
+  for (i += step; i >= 0 && i < rows.length; i += step) if (hasCandidates(rows[i])) return rows[i];
+  return null;
 }
 
 /** Expandable rows: with a row expanded, a multi-drag's per-companion DataSet write is skipped. vis's own
@@ -3110,6 +3195,7 @@ export const TimelineNav = {
   _ctx:       null as CanvasRenderingContext2D | null,
   _container: null as HTMLElement | null,
   _dirty:     true,
+  _closedDayMemo: null as { key: string; value: boolean[] } | null,   // S3-7
   _rafId:     null as number | null,
   _model:     null as _NavModel | null,
   _lastCssW:  0,
@@ -3423,7 +3509,7 @@ export const TimelineNav = {
       // 'zone' and 'setup' items are never projected onto the minimap.
     }
 
-    const nowMs = Date.now();
+    const nowMs = Timeline._plantNow(Store.selectedPlant).getTime();   // S3-2: plant clock, like the Gantt's now line
     const win = Timeline._tl ? Timeline._tl.getWindow() : null;
     const windowStartMs = win ? win.start.getTime() : nowMs;
     const windowEndMs   = win ? win.end.getTime()   : nowMs;
@@ -3436,12 +3522,19 @@ export const TimelineNav = {
     const range = (TimelineNav._gesture && TimelineNav._frozenRange)
       ? TimelineNav._frozenRange
       : navComputeRange({ dataMinMs, dataMaxMs, windowStartMs, windowEndMs, nowMs, horizonEndMs });
+    // S2-2: navComputeRange stops at 800 days; say so once instead of silently dropping the far end.
+    if (range.dayStarts.length >= NAV_DAY_CAP && !_capWarned.has('nav')
+        && _navAddDays(range.dayStarts[range.dayStarts.length - 1], 1) < range.endMs) {
+      _capWarned.add('nav');
+      ErrorLog.warn('timeline', `Minimap range capped at ${NAV_DAY_CAP} days; the far end is not drawn`);
+    }
 
     const layout = navLayout(rowCount);
 
     const alertByDay = new Map<number, 'warn' | 'err'>();
     for (const a of Store.alerts) {
       if (!a.line || !rowOf.has(a.line)) continue;
+      if (a.type === 'needs_planning') continue;   // S3-1: same rule as alertCellMapFor, the Gantt paints nothing for these
       const t = a.time.getTime();
       if (t < range.startMs || t >= range.endMs) continue;
       const day = TimelineNav._dayIndexFor(t, range.dayStarts);
@@ -3451,13 +3544,22 @@ export const TimelineNav = {
 
     // A day is closed only when NO visible line has a work window — early
     // exit on the first open line, so the typical cost is one call per day.
-    const closedDay: boolean[] = new Array(range.dayStarts.length).fill(true);
-    for (let i = 0; i < range.dayStarts.length; i++) {
-      for (const line of lines) {
-        try {
-          if (Calendar.workWindow(line, new Date(range.dayStarts[i])) !== null) { closedDay[i] = false; break; }
-        } catch { closedDay[i] = false; break; } // treat as open on error
+    // S3-7: memoised per (day range, visible lines, Store.rev()) — every calendar / block / plant / master-data
+    // change is a Store event that bumps rev(), so a pan or resize repaint reuses the last answer.
+    const closedKey = `${Store.rev()}|${range.dayStarts[0] ?? ''}|${range.dayStarts.length}|${lines.join('')}`;
+    let closedDay: boolean[];
+    if (TimelineNav._closedDayMemo && TimelineNav._closedDayMemo.key === closedKey) {
+      closedDay = TimelineNav._closedDayMemo.value;
+    } else {
+      closedDay = new Array(range.dayStarts.length).fill(true);
+      for (let i = 0; i < range.dayStarts.length; i++) {
+        for (const line of lines) {
+          try {
+            if (Calendar.workWindow(line, new Date(range.dayStarts[i])) !== null) { closedDay[i] = false; break; }
+          } catch { closedDay[i] = false; break; } // treat as open on error
+        }
       }
+      TimelineNav._closedDayMemo = { key: closedKey, value: closedDay };
     }
 
     let histAll: Float64Array | null = null;
@@ -3677,7 +3779,7 @@ export const TimelineNav = {
     }
 
     // 8. now marker
-    const nowMs = Date.now();
+    const nowMs = model.nowMs;
     if (nowMs >= range.startMs && nowMs <= range.endMs) {
       ctx.fillStyle = theme.accent;
       ctx.fillRect(msToX(nowMs), 0, 1, cssH);
@@ -4030,7 +4132,7 @@ export const Hierarchy = {
     for (const l of Store.linesForSelectedPlant()) {
       if (!lines[l]) lines[l] = [];
     }
-    const lineNames = Object.keys(lines).sort();
+    const lineNames = Object.keys(lines).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
     let visibleNames = (GanttFilter._selectedLines.size > 0)
       ? lineNames.filter(l => GanttFilter._selectedLines.has(l))
       : lineNames;
@@ -4379,7 +4481,7 @@ export const GanttFilter = {
           `<label><input type="checkbox" value="${Util.escapeHtml(c)}"${GanttFilter._selectedColors.has(c) ? ' checked' : ''}
            onchange="NIMBUS.GanttFilter._onColorChange(this)"> ${Util.escapeHtml(c)}</label>`
         ).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? Util.t('ui.no_matches') : 'No colors'}</div>`;
+      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-faint)">${sorted.length ? Util.t('ui.no_matches') : Util.t('ui.no_colors_empty')}</div>`;
     GanttFilter._refreshColorBtn();
   },
 
@@ -4427,7 +4529,7 @@ export const GanttFilter = {
           `<label><input type="checkbox" value="${Util.escapeHtml(f)}"${GanttFilter._selectedForms.has(f) ? ' checked' : ''}
            onchange="NIMBUS.GanttFilter._onFormChange(this)"> ${Util.escapeHtml(f)}</label>`
         ).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? Util.t('ui.no_matches') : 'No forms'}</div>`;
+      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-faint)">${sorted.length ? Util.t('ui.no_matches') : Util.t('ui.no_forms_empty')}</div>`;
     GanttFilter._refreshFormBtn();
   },
 
@@ -4502,6 +4604,8 @@ export const GanttFilter = {
   },
 
   _apply: null as (() => void) | null,  // assigned below after Util is in scope
+  /** True once a filter-active _doApply pass may have dimmed items (S3-6). */
+  _dimmedAny: false,
 
   _doApply(): void {
     if (!Timeline._items) return;
@@ -4510,7 +4614,10 @@ export const GanttFilter = {
     const bar   = document.getElementById('gantt-filterbar');
 
     const updates: Array<{ id: string; className: string }> = [];
-    const scoped = Store.selectedPlant ? Store.tasksForSelectedPlant() : [];
+    // S3-6: with no filter active and nothing dimmed by an earlier pass there is no class to change, so skip
+    // the O(tasks) scan; the badge/bar refresh below still runs.
+    const scoped = (Store.selectedPlant && (active || GanttFilter._dimmedAny)) ? Store.tasksForSelectedPlant() : [];
+    GanttFilter._dimmedAny = active;
     for (const task of scoped) {
       if (!task.start_date || !task.end_date) continue;
       const id = String(task.id);
@@ -4536,7 +4643,7 @@ export const GanttFilter = {
             + (GanttFilter._selectedForms.size  > 0 ? 1 : 0)
             + (GanttFilter._pastedIds.size > 0 ? 1 : 0)
             + (GanttFilter._active.text ? 1 : 0);
-    if (badge) badge.textContent = n + ' filter' + (n !== 1 ? 's' : '');
+    if (badge) badge.textContent = Util.t(n === 1 ? 'ui.n_filters_one' : 'ui.n_filters', { count: n });
     const wrap = document.getElementById('flt-badge-wrap');
     if (wrap) wrap.hidden = (n === 0);
     if (bar) bar.classList.toggle('filter-active', active);
@@ -4780,11 +4887,20 @@ export const Interaction = {
     if (this.DEBUG) ErrorLog.info('interaction', type, data);
   },
 
+  _installRetries: 0,   // S3-9: bounded retry while the timeline is not ready (100 x 50 ms)
+
   install(): void {
     if (this._installed) return;
     if (!Timeline._tl) {
       // Timeline not ready yet — retry shortly. Bootstrap calls us after
       // Timeline.init() so this path is only hit in edge cases.
+      if (++Interaction._installRetries > 100) {
+        if (!_capWarned.has('install')) {
+          _capWarned.add('install');
+          ErrorLog.warn('interaction', 'Gantt interaction install gave up: the timeline never became ready');
+        }
+        return;
+      }
       setTimeout(() => Interaction.install(), 50);
       return;
     }
@@ -4917,6 +5033,9 @@ export const Interaction = {
     });
 
     /* ----- Multi-drag ghost preview via timechange ----------------------- */
+    // NOTE: browser-verified 2026-11: vis-timeline emits NO timechange/timechanged for ITEM drags (custom-time bars
+    // only), so these two bindings are dead for item drags: the ghost previews and edge auto-scroll never run. Left
+    // as is on purpose; _isDragging is driven by onMoving + pointerup instead (see _beginItemDrag/_endItemDrag).
     Timeline._tl.on('timechange', props => Interaction._onTimeChange(props as VisTimeChangeProps));
     Timeline._tl.on('timechanged', ()   => Interaction._clearGhosts());
 
@@ -4928,7 +5047,7 @@ export const Interaction = {
     document.addEventListener('mousemove', this._edgeScrollTrackBound);
 
     /* ----- End of any pointer gesture: clear the drag-time row dim (vis has no cancel event for item drags) ---- */
-    this._dimPointerEndBound = () => Timeline.undimRowsForDrag();
+    this._dimPointerEndBound = () => { Timeline.undimRowsForDrag(); Interaction._endItemDrag(); };
     document.addEventListener('pointerup', this._dimPointerEndBound);
     document.addEventListener('pointercancel', this._dimPointerEndBound);
 
@@ -5175,7 +5294,7 @@ export const Interaction = {
       const rel = Store.alertsByTask().get(String(id)) || [];
       const alertsHtml = rel.length
         ? `<div class="hov-alerts">${Util.escapeHtml(Util.t('ui.insp_alerts_title', { count: rel.length }))}: ${
-            rel.slice(0, 3).map(a => (a.type || a.sev || '')).filter(Boolean).join(', ')
+            rel.slice(0, 3).map(a => Util.escapeHtml(Util.alertMessage(a) || a.type || a.sev || '')).filter(Boolean).join(', ')
           }${rel.length > 3 ? '…' : ''}</div>`
         : '';
       const firmStatus = Engine.firmingStatus(t);
@@ -5541,7 +5660,7 @@ export const Interaction = {
     const id = Interaction._businessOrderIdForItem(props.item);
     if (!id) return;
 
-    if (shift)     Selection.selectRange(id);
+    if (shift)     Selection.selectRange(id, t => !GanttFilter.isActive() || GanttFilter.matches(t));
     else if (meta) Selection.toggle(id);
     else           Selection.set([id]);
 
@@ -5708,6 +5827,7 @@ export const Interaction = {
   _onDataSetUpdate(props: InteractionDataSetUpdateProps, opts: ManualPlacementOptions = {}): void {
     // The drop ends the drag: clear the row dim before any branch (and every `continue`) below.
     Timeline.undimRowsForDrag();
+    Interaction._endItemDrag();   // defensive: the drop's update normally lands before/with pointerup
     for (const rawId of props.items) {
       const itemId = String(rawId);
       const id = Interaction._businessOrderIdForItem(itemId);
@@ -5855,13 +5975,12 @@ export const Interaction = {
           // their old absolute positions. Mirrors the deleted regeneration
           // branch's own contract: "Companion parents retain the user's
           // relative drag delta."
-          // (skippedFirmed stays empty today — selIds above already excludes firmed
-          // tasks — but is preserved as-is; not this task's scope to remove.)
+          // skippedFirmed: selected firmed orders left in place (selIds above excludes them); toasted below.
           // This loop only computes and validates each companion's patch — no
           // Store or Timeline mutation happens here, since a later companion
           // failing must leave earlier companions (and the dragged item)
           // untouched too.
-          const skippedFirmed: string[] = [];
+          const skippedFirmed = Selection.ids().filter(sid => sid !== id && Store.isFirmed(sid));
           const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
           const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
           let companionFailed = false;
@@ -5929,7 +6048,7 @@ export const Interaction = {
 
           if (skippedFirmed.length) Toast.show(Util.t('toast.firmed_count_not_moved', { count: skippedFirmed.length }), 'warn');
 
-          UndoStack.push(`Move ${allIds.length} orders`,
+          UndoStack.push(Util.t('undo.move_orders', { count: allIds.length }),
             () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, allIds);
           this._clearGhosts();
           return;
@@ -6002,7 +6121,7 @@ export const Interaction = {
     Timeline.finishSetupDrag(new Set([fromLine, newLine]));
     Timeline.noteDropLines(new Set([fromLine, newLine]), new Set([newLine]));
 
-    UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
+    UndoStack.push(Util.t('undo.move_order', { order: (Store.tasks[id] && Store.tasks[id].text) || id }),
                    () => UndoStack.restoreTasks(snap), [id]);
     if (patch.PRODUCTION_VERSION != null && patch.PRODUCTION_VERSION !== fromPv) {
       Toast.show(Util.t('toast.pv_switched', { order: Util.orderNumber(t), pv: patch.PRODUCTION_VERSION, machine: newLine }), 'info', 4000);
@@ -6054,6 +6173,19 @@ export const Interaction = {
   _ghostDragId: null as string | null,
   _edgeScrollRAF: null as number | null,
   _isDragging: false,
+  _dragGate: createDragGate(),
+  /** First `onMoving` frame of an item drag (idempotent): _isDragging goes true. */
+  _beginItemDrag(): void {
+    if (this._dragGate.begin()) this._isDragging = true;
+  },
+  /** pointerup / pointercancel / dropped item's DataSet update (idempotent). On the real end edge, run any
+   *  calendar / tool-inventory refresh that the drag blocked (Persistence._calendarRefreshBlocked). */
+  _endItemDrag(): void {
+    if (!this._dragGate.end()) return;
+    this._isDragging = false;
+    try { Persistence.runDeferredRefreshes().then(changed => { if (changed) Timeline._scheduleRebuild(); }, () => {}); }
+    catch (e) { ErrorLog.warn('timeline', 'deferred refresh after drag failed: ' + String(e)); }
+  },
   _lastDragEndTs: 0,          // ms of the last committed drag; gates CENTER_ON_CLICK auto-center
   _dragMouseX: null as number | null,
 
@@ -6191,6 +6323,7 @@ export const Interaction = {
 
   /** Clear ghost states from all companion items after drag ends. */
   _clearGhosts(): void {
+    this._dragGate.end();
     this._isDragging = false;
     if (this._edgeScrollRAF) { cancelAnimationFrame(this._edgeScrollRAF); this._edgeScrollRAF = null; }
 
@@ -6229,15 +6362,17 @@ export const Interaction = {
       ContextMenu.openFromKeyboard(Selection._anchor || Selection.ids()[0], e.target as HTMLElement);
       return;
     }
-    // Ignore when typing in inputs.
-    const target = e.target as HTMLElement | null;
-    const tag = (target && target.tagName) || '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+    // Ignore when typing in inputs; dropdowns and buttons keep their own keys (arrows, Delete, F).
+    if (shortcutTargetIgnored(e.target as HTMLElement | null)) return;
 
     const mod = e.metaKey || e.ctrlKey;
 
+    // Save and Escape stay global; Undo, Delete, F and arrow navigation act only while the Gantt tab is showing.
+    const onGantt = Timeline._ganttActive();
+
     // Undo
     if (mod && !e.shiftKey && e.key.toLowerCase() === 'z') {
+      if (!onGantt) return;
       if (UndoStack._entries.length) { e.preventDefault(); UndoStack.pop(); }
       return;
     }
@@ -6257,6 +6392,8 @@ export const Interaction = {
       if ((AlertProfileMatches.focusTaskIds()?.size ?? 0) > 0 && !Modal.anyOpen() && !OverflowMenu.isOpen()) AlertProfileMatches.setFocusTaskIds(null);
       return;
     }
+
+    if (!onGantt) return;
 
     // Delete / Backspace → unschedule (NOT delete the order)
     if ((e.key === 'Delete' || e.key === 'Backspace') && Selection.size()) {
@@ -6310,12 +6447,12 @@ export const Interaction = {
     const patches = eligibleIds.map(id => ({ id, changes: Engine.plannerUnscheduleChanges() }));
     Store.updateMany(patches, 'interaction');
     Alerts.scheduleRecompute();
-    UndoStack.push(`Unschedule ${eligibleIds.length} order(s)`,
+    UndoStack.push(Util.t('undo.unschedule_orders', { count: eligibleIds.length }),
                    () => UndoStack.restoreTasks(snap), eligibleIds);
     Toast.show(
       eligibleIds.length === ids.length
         ? Util.t('toast.unscheduled_orders', { count: eligibleIds.length })
-        : `${eligibleIds.length} order(s) unscheduled; split orders were left intact.`,
+        : Util.t('toast.unscheduled_partial', { count: eligibleIds.length }),
       eligibleIds.length === ids.length ? 'success' : 'warn');
   },
 
@@ -6324,30 +6461,35 @@ export const Interaction = {
     const cur = Store.tasks[currentId];
     if (!cur || !cur.start_date) return;
 
-    const allLines = [...new Set(Store.tasksArr
-      .filter(t => t.MACHINE)
-      .map(t => t.MACHINE))].sort();
+    // Rows in the order the Gantt renders them (numeric sort, line-filter aware); only orders that pass the
+    // Gantt filter (not dimmed) are selectable targets.
+    const shown = (t: NimbusTask): boolean => !GanttFilter.isActive() || GanttFilter.matches(t);
+    const curLine = cur.MACHINE || 'Unknown';
+    const onLine = (line: string): NimbusTask[] =>
+      Store.tasksArr.filter(t => (t.MACHINE || 'Unknown') === line && t.start_date && shown(t));
+    let next: NimbusTask | null = null;
 
     if (key === 'ArrowLeft' || key === 'ArrowRight') {
-      const peers = Store.tasksArr
-        .filter(t => t.MACHINE === cur.MACHINE && t.start_date)
+      const peers = onLine(curLine)
         .sort((a, b) => a.start_date!.getTime() - b.start_date!.getTime());
       const i = peers.findIndex(t => String(t.id) === currentId);
       const j = key === 'ArrowLeft' ? i - 1 : i + 1;
-      if (j >= 0 && j < peers.length) Selection.set([String(peers[j].id)]);
+      if (i >= 0 && j >= 0 && j < peers.length) next = peers[j];
     } else {
-      const li = allLines.indexOf(cur.MACHINE);
-      const lj = key === 'ArrowUp' ? li - 1 : li + 1;
-      if (lj < 0 || lj >= allLines.length) return;
-      const targetLine = allLines[lj];
+      const targetLine = neighbourRow(Timeline._visibleLines(), curLine, key, l => onLine(l).length > 0);
+      if (!targetLine) return;
       // Pick the task on the new line that's temporally closest to current.
-      const candidates = Store.tasksArr
-        .filter(t => t.MACHINE === targetLine && t.start_date);
-      if (!candidates.length) return;
-      candidates.sort((a, b) => Math.abs(a.start_date!.getTime() - cur.start_date!.getTime())
-                              - Math.abs(b.start_date!.getTime() - cur.start_date!.getTime()));
-      Selection.set([String(candidates[0].id)]);
+      next = onLine(targetLine)
+        .sort((x, y) => Math.abs(x.start_date!.getTime() - cur.start_date!.getTime())
+                      - Math.abs(y.start_date!.getTime() - cur.start_date!.getTime()))[0] ?? null;
     }
+    if (!next) return;
+    const nextId = String(next.id);
+    Selection.set([nextId]);
+    // Bring the new bar into view: its row vertically, then pan horizontally (zoom unchanged), as a click does.
+    const itemIds = Timeline.itemIdsForTask(nextId);
+    Timeline.scrollToLine(next.MACHINE || 'Unknown', { itemIds });
+    Timeline._tl?.focus(itemIds[0] || nextId, { animation: { duration: 300 }, zoom: false });
   },
 
   /** Replaces the single-task Inspector with a multi-selection summary view. */
@@ -6363,8 +6505,8 @@ export const Interaction = {
         <div style="font-size:20px;font-weight:700;margin-bottom:8px;">
           ${Util.t('ui.orders_selected', { count: s.count })}
         </div>
-        <div style="font-size:13px;color:#666;margin-bottom:12px;">
-          ${Util.fmtHours(s.totalHours)} total run-time · ${s.lines.length} line${s.lines.length === 1 ? '' : 's'}
+        <div style="font-size:13px;color:var(--fg-mute);margin-bottom:12px;">
+          ${Util.t(s.lines.length === 1 ? 'ui.multi_summary_one' : 'ui.multi_summary', { hours: Util.fmtHours(s.totalHours), count: s.lines.length })}
           ${firmedTotal ? ` · ${Util.t('ui.multi_firmed_count', { n: firmedTotal })}` : ''}
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;">
@@ -6402,13 +6544,11 @@ export const Interaction = {
       if (!Table || !Table._api) return;
       try {
         Table._suppressSelectionEcho = true;
-        Table._api.deselectAll();
-        Table._api.forEachNode((rawNode) => {
-          const node = rawNode as AgGridRowNode;
-          if (node.data && evt.ids.includes(String(node.data.id))) {
-            node.setSelected(true, false);
-          }
-        });
+        // S4-5: diff against the grid's current selection and touch only the rows that changed.
+        const want = new Set(evt.ids.map(String));
+        const have = new Set((Table._api.getSelectedRows() as NimbusTask[]).map(r => String(r.id)));
+        for (const id of have) if (!want.has(id)) (Table._api.getRowNode(id) as AgGridRowNode | undefined)?.setSelected(false, false);
+        for (const id of want) if (!have.has(id)) (Table._api.getRowNode(id) as AgGridRowNode | undefined)?.setSelected(true, false);
       } catch (e: unknown) {
         ErrorLog.warn('interaction', `Table sync failed: ${e instanceof Error ? e.message : String(e)}`);
       } finally {

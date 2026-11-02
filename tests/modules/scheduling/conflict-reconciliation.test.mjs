@@ -103,7 +103,7 @@ for (const timing of ['before refresh dispatch', 'during refresh', 'edit and rev
   });
 }
 
-for (const failure of ['HTTP rejection', 'network failure']) test(`${failure} during conflict refresh keeps the edit dirty and prevents blind retry`, async () => {
+for (const failure of ['HTTP rejection', 'network failure']) test(`${failure} during conflict refresh keeps the edit dirty, never re-sends it blind, and retries only the refresh on the next Save (S7-2)`, async () => {
   const calls = [];
   Util.fetchTraced = async url => {
     calls.push(url);
@@ -114,10 +114,14 @@ for (const failure of ['HTTP rejection', 'network failure']) test(`${failure} du
   edit('10'); Persistence.saveAll(); await tick();
   assert.equal(Persistence._dirtyIds.has('A'), true);
   assert.equal(Store.tasks.A.row_version, 1);
-  Persistence.saveAll(); await tick(); assert.equal(calls.length, 2);
+  Persistence.saveAll(); await tick();
+  assert.equal(calls.filter(u => u.endsWith('/tasks/update')).length, 1, 'the conflicted edit is never re-sent');
+  assert.equal(calls.length, 3);
+  assert.ok(calls[2].endsWith('/tasks/refresh'), 'the failed refresh is retried');
+  assert.equal(Persistence._dirtyIds.has('A'), true);
 });
 
-test('unresolved conflict permits unrelated normal saves but blocks a dependent optimizer batch', async () => {
+test('unresolved conflict permits unrelated normal saves but blocks a dependent optimizer batch that contains it', async () => {
   let resolveRefresh;
   Util.fetchTraced = () => new Promise(resolve => { resolveRefresh = resolve; });
   Persistence._refreshTasks(['A']); edit('11');
@@ -126,8 +130,14 @@ test('unresolved conflict permits unrelated normal saves but blocks a dependent 
   Util.fetchTraced = async (_url, options) => { sent.push(JSON.parse(options.body)); return response({ versions: { B: 2 }, updated: 1, persisted: 1 }); };
   Persistence._dirtyIds.add('B'); Persistence.saveAll(); await tick();
   assert.deepEqual(sent[0].tasks.map(t => t.id), ['B']);
+  // A is conflicted and not forced, so an optimizer group of B alone is a separate request (Wave 2 split): it goes.
   Persistence._dirtyIds.add('B'); Persistence._forceIds.add('B'); Persistence.saveAll(); await tick();
-  assert.equal(sent.length, 1);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].atomic_optimizer, true);
+  assert.deepEqual(sent[1].tasks.map(t => t.id), ['B']);
+  // A conflicted row INSIDE the atomic group withholds the whole group.
+  Persistence._dirtyIds.add('B'); Persistence._forceIds.add('B'); Persistence._forceIds.add('A'); Persistence.saveAll(); await tick();
+  assert.equal(sent.length, 2);
 });
 
 test('a late conflict response cannot overwrite a newly loaded schedule', async () => {
@@ -207,4 +217,39 @@ test('a stale reply logs a tasks.conflict warn with ids, base versions and reqId
     assert.ok(info, 'a confirmed conflict logs an info');
     assert.deepEqual(info.ctx, { id: 'A', base_version: 1, server_version: 5 });
   } finally { ErrorLog.warn = priorWarn; ErrorLog.info = priorInfo; }
+});
+
+test('S10-9: refresh copies ingest-rewritten colour, form, description, ORDER_Y, ecc_firmed and notes', async () => {
+  Store.updateTask('A', { COLOR: 'RED', FORM_SIZE: 'S', MATERIAL_DESCRIPTION: 'old', ORDER_Y: 1, ecc_firmed: false, notes: 'old note' }, 'persistence');
+  const events = [];
+  const off = Store.subscribe(evt => { if (evt.type === 'tasks:bulkUpdate') events.push(evt); }, 'test');
+  Util.fetchTraced = async () => response({ data: [{ ...row(), COLOR: 'BLUE', FORM_SIZE: 'L', MATERIAL_DESCRIPTION: 'new', ORDER_Y: 7, ecc_firmed: true, notes: 'server note' }], missing: [] });
+  Persistence._refreshTasks(['A']);
+  await tick();
+  const t = Store.tasks.A;
+  assert.deepEqual([t.COLOR, t.FORM_SIZE, t.MATERIAL_DESCRIPTION, t.ORDER_Y, t.ecc_firmed, t.notes], ['BLUE', 'L', 'new', 7, true, 'server note']);
+  assert.ok(events.some(e => e.source === 'refresh' && e.ids.includes('A')));
+  if (typeof off === 'function') off();
+});
+
+test('S10-9: refresh keeps a note the planner has unsaved but still updates the other attributes', async () => {
+  Store.updateTask('A', { COLOR: 'RED', notes: 'typing...' }, 'persistence');
+  Persistence.noteUnsaved = id => id === 'A';
+  Util.fetchTraced = async () => response({ data: [{ ...row(), COLOR: 'BLUE', notes: 'server note' }], missing: [] });
+  try {
+    Persistence._refreshTasks(['A']);
+    await tick();
+  } finally { Persistence.noteUnsaved = () => false; }
+  assert.equal(Store.tasks.A.notes, 'typing...');
+  assert.equal(Store.tasks.A.COLOR, 'BLUE');
+});
+
+test('S10-9: refresh from an older server leaves absent ingest fields untouched', async () => {
+  Store.updateTask('A', { COLOR: 'RED', FORM_SIZE: 'S', MATERIAL_DESCRIPTION: 'keep', ORDER_Y: 3, ecc_firmed: true, notes: 'mine' }, 'persistence');
+  Util.fetchTraced = async () => response({ data: [row()], missing: [] });
+  Persistence._refreshTasks(['A']);
+  await tick();
+  const t = Store.tasks.A;
+  assert.deepEqual([t.COLOR, t.FORM_SIZE, t.MATERIAL_DESCRIPTION, t.ORDER_Y, t.ecc_firmed, t.notes], ['RED', 'S', 'keep', 3, true, 'mine']);
+  assert.equal(t.row_version, 2);
 });

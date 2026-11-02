@@ -113,8 +113,7 @@ test('Persistence.saveAll posts to /tasks/update with expected payload shape', a
 
   const body = JSON.parse(saveCall.opts.body);
   assert.ok(Array.isArray(body.tasks), 'payload must have a tasks array');
-  assert.ok(Array.isArray(body.blocks), 'payload must always include blocks');
-  assert.ok('calendars' in body, 'payload must always include calendars');
+  assert.ok(!('blocks' in body) && !('calendars' in body), 'S10-7: blocks/calendars no longer ride along');
 
   const t = body.tasks.find(x => x.id === 'cc03');
   assert.ok(t, 'dirty task must be in the payload');
@@ -126,8 +125,7 @@ test('Persistence.saveAll posts to /tasks/update with expected payload shape', a
 
 test('Persistence.saveAll alone does not POST (only explicit calls do)', async () => {
   // Confirm autosave does NOT trigger a backend POST — only saveAll() does.
-  // Reset dirty set; with nothing dirty, saveAll still posts (blocks/calendars
-  // always go) but NO task rows should appear.
+  // Reset dirty set; with nothing dirty, saveAll sends nothing at all (S7-14: it toasts "Nothing to save").
   Persistence._dirtyIds.clear();
   Persistence._forceIds?.clear?.();
   // Let the previous test's save settle so the in-flight guard is released.
@@ -137,12 +135,7 @@ test('Persistence.saveAll alone does not POST (only explicit calls do)', async (
   const before = fetchCalls.length;
   Persistence.saveAll();
   const calls = fetchCalls.slice(before);
-  const saveCall = calls.find(c => c.url.includes('/tasks/update'));
-  // saveAll always posts blocks/calendars, so the call must exist; the assertion
-  // below must never be skipped.
-  assert.ok(saveCall, 'saveAll must still POST /tasks/update (blocks/calendars always go)');
-  const body = JSON.parse(saveCall.opts.body);
-  assert.equal(body.tasks.length, 0, 'no dirty tasks → empty task array in payload');
+  assert.ok(!calls.some(c => c.url.includes('/tasks/update')), 'no dirty tasks → no POST');
 });
 
 // ---------------------------------------------------------------------------
