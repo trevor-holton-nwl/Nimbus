@@ -5538,6 +5538,26 @@ test('#37 gap fill keeps the setup_transition_unrecorded reason instead of overw
     'and so does the persisted planning_reason patch');
 });
 
+test('gap fill on a candidate carrying an error finding keeps queued orders\' prior reasons (no false search_limit), stays incomplete', () => {
+  const red = scheduledTask('n8-red', 1, 'RED', '2026-08-03T12:00');
+  const blue = scheduledTask('n8-zblue', 1, 'BLUE', '2026-08-03T12:00');
+  const snapshot = policySnapshot([red, blue], { unknownSetupPolicy: 'excludeFromSearch', version: 2 });
+  const bounds = dueDateBounds(UNCOVERED());
+  const primary = SetupScheduler.evaluateDueDateFirst(snapshot, bounds);
+  assert.equal(primary.dispositions.find(d => d.id === 'n8-red').reason.code, 'setup_transition_unrecorded');
+  // An unrepaired error finding (duplicate_patch) makes the candidate invalid: the walk is skipped, no time limit is hit.
+  const invalid = { ...primary, patches: [...primary.patches, primary.patches[0]] };
+  assert.ok(SetupScheduler.validateCandidate(snapshot, bounds, invalid).some(f => f.severity === 'error'));
+  const filled = SetupScheduler.fillPlanningGaps(snapshot, bounds, invalid);
+  const queued = filled.dispositions.find(d => d.id === 'n8-red');
+  assert.equal(queued.status, 'needs_planning');
+  assert.equal(queued.reason.code, 'setup_transition_unrecorded', 'the prior reason is kept, not relabelled search_limit');
+  assert.equal(filled.patches.find(p => p.id === 'n8-red').changes.planning_reason.code, 'setup_transition_unrecorded');
+  assert.equal(filled.gapFill.complete, false);
+  assert.equal(filled.gapFill.placed, 0);
+  assert.ok(filled.gapFill.unchecked >= 1, 'the unchecked count is still reported');
+});
+
 // ---------------------------------------------------------------------------
 // Setup availability: the production prefix-max index (binary search over
 // interval starts + running max of ends) must agree with a plain O(n^2)

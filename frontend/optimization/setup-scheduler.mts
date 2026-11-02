@@ -8448,6 +8448,9 @@ export function fillPlanningGaps(
     if (dispositions.get(id)?.status !== 'needs_planning') continue;
     const complete = checked.get(id) === (revision.get(line) ?? 0);
     if (!complete) unchecked++;
+    // An invalid candidate was never walked (no time limit was hit): queued orders keep their prior reason rather than a false
+    // search_limit; gapFill.complete stays false (valid && ...) and the error finding keeps Apply blocked.
+    if (!valid) continue;
     const toolHeld = toolCtx && dispositions.get(id)?.reason?.code === 'tool_contention';
     if (toolHeld) continue;                                   // still no tool-free slot: the structured tool reason stays
     const probed = complete ? toolProbed.get(id) : undefined;
