@@ -310,7 +310,7 @@ export const Persistence = {
     if (!badge) return;
     const count = Persistence._dirtyIds.size;
     badge.hidden = count === 0;
-    badge.textContent = count ? `${count} unsaved` : '';
+    badge.textContent = count ? Util.t('ui.n_unsaved', { count }) : '';
   },
   // Lazily-set by _writeCacheWithQuotaGuard/_quarantineCache — declared here
   // (rather than left to first assignment) since plain object-literal
@@ -503,7 +503,7 @@ export const Persistence = {
         }
         if (discardLocalEdits && discardBaseline !==
             JSON.stringify(Store.tasksArr.map(t => [t.id, Persistence._refreshBaseline(t)]))) {
-          Toast.show('New edits were made while reloading. They remain unsaved; reload again to discard them.', 'warn', 8000);
+          Toast.show(Util.t('toast.reload_edits_during'), 'warn', 8000);
           return;
         }
         if (!Array.isArray(payload?.data)) throw new Error('Invalid /tasks response');
@@ -760,7 +760,7 @@ export const Persistence = {
         // cache/demo and clobber the newer load()'s already-rendered board.
         if (loadGeneration !== Persistence._loadRequest) return;
         if (discardLocalEdits) {
-          Toast.show('Reload failed. Your local edits remain unsaved; try reloading again when the server is available.', 'error', 8000);
+          Toast.show(Util.t('toast.reload_failed_local_edits'), 'error', 8000);
           return;
         }
         // Only fall back to cache if we never got a successful response.
@@ -1490,7 +1490,7 @@ export const Persistence = {
   },
 
   _warnUnresolvedConflict(): void {
-    Toast.show('Conflicting changes remain unsaved. Reload discards these local edits and loads the server schedule.', 'warn', 8000);
+    Toast.show(Util.t('toast.conflict_unsaved_remain'), 'warn', 8000);
   },
 
   /** `opts.silent`: programmatic callers (post-promote persist, banner action) skip the
@@ -1703,9 +1703,7 @@ export const Persistence = {
       // ordinary stale reconciliation below still protects newer local work.
       void Runtime.load(Store.selectedPlant);
       ErrorLog.warn('persistence', 'Routing rates changed; rejected runtime previews require review', result.rejection_reasons);
-      Toast.show(atomicOptimizer
-        ? 'Routing rates changed. Optimizer changes remain unsaved. Review the updated rates and optimize again.'
-        : 'Routing rates changed. Rejected orders are being refreshed. Review the schedule before retrying your changes.', 'warn', 8000);
+      Toast.show(Util.t(atomicOptimizer ? 'toast.routing_rates_changed_optimizer' : 'toast.routing_rates_changed_rejected'), 'warn', 8000);
     }
     const unknownMachineCount = Object.values(result.rejection_reasons || {}).filter(r => r === 'machine_unknown').length;
     if (unknownMachineCount) {
@@ -1717,7 +1715,7 @@ export const Persistence = {
       if (result.error_code === 'schedule.conflicts') {
         Toast.show(Util.t('toast.optimizer_conflicts', { count: (result.conflicts || []).length }), 'warn', 8000);
       } else if (!runtimePreviewChanged) {
-        Toast.show('Optimizer changes remain unsaved. Resolve the conflict or reload and optimize again.', 'warn', 8000);
+        Toast.show(Util.t('toast.optimizer_unsaved_resolve'), 'warn', 8000);
       }
       return 'problem';
     }

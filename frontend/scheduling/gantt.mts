@@ -4445,7 +4445,7 @@ export const GanttFilter = {
           `<label><input type="checkbox" value="${Util.escapeHtml(c)}"${GanttFilter._selectedColors.has(c) ? ' checked' : ''}
            onchange="NIMBUS.GanttFilter._onColorChange(this)"> ${Util.escapeHtml(c)}</label>`
         ).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? Util.t('ui.no_matches') : 'No colors'}</div>`;
+      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-faint)">${sorted.length ? Util.t('ui.no_matches') : Util.t('ui.no_colors_empty')}</div>`;
     GanttFilter._refreshColorBtn();
   },
 
@@ -4493,7 +4493,7 @@ export const GanttFilter = {
           `<label><input type="checkbox" value="${Util.escapeHtml(f)}"${GanttFilter._selectedForms.has(f) ? ' checked' : ''}
            onchange="NIMBUS.GanttFilter._onFormChange(this)"> ${Util.escapeHtml(f)}</label>`
         ).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:#9a9285">${sorted.length ? Util.t('ui.no_matches') : 'No forms'}</div>`;
+      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-faint)">${sorted.length ? Util.t('ui.no_matches') : Util.t('ui.no_forms_empty')}</div>`;
     GanttFilter._refreshFormBtn();
   },
 
@@ -4602,7 +4602,7 @@ export const GanttFilter = {
             + (GanttFilter._selectedForms.size  > 0 ? 1 : 0)
             + (GanttFilter._pastedIds.size > 0 ? 1 : 0)
             + (GanttFilter._active.text ? 1 : 0);
-    if (badge) badge.textContent = n + ' filter' + (n !== 1 ? 's' : '');
+    if (badge) badge.textContent = Util.t(n === 1 ? 'ui.n_filters_one' : 'ui.n_filters', { count: n });
     const wrap = document.getElementById('flt-badge-wrap');
     if (wrap) wrap.hidden = (n === 0);
     if (bar) bar.classList.toggle('filter-active', active);
@@ -6007,7 +6007,7 @@ export const Interaction = {
 
           if (skippedFirmed.length) Toast.show(Util.t('toast.firmed_count_not_moved', { count: skippedFirmed.length }), 'warn');
 
-          UndoStack.push(`Move ${allIds.length} orders`,
+          UndoStack.push(Util.t('undo.move_orders', { count: allIds.length }),
             () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, allIds);
           this._clearGhosts();
           return;
@@ -6080,7 +6080,7 @@ export const Interaction = {
     Timeline.finishSetupDrag(new Set([fromLine, newLine]));
     Timeline.noteDropLines(new Set([fromLine, newLine]), new Set([newLine]));
 
-    UndoStack.push(`Move "${(Store.tasks[id] && Store.tasks[id].text) || id}"`,
+    UndoStack.push(Util.t('undo.move_order', { order: (Store.tasks[id] && Store.tasks[id].text) || id }),
                    () => UndoStack.restoreTasks(snap), [id]);
     if (patch.PRODUCTION_VERSION != null && patch.PRODUCTION_VERSION !== fromPv) {
       Toast.show(Util.t('toast.pv_switched', { order: Util.orderNumber(t), pv: patch.PRODUCTION_VERSION, machine: newLine }), 'info', 4000);
@@ -6406,12 +6406,12 @@ export const Interaction = {
     const patches = eligibleIds.map(id => ({ id, changes: Engine.plannerUnscheduleChanges() }));
     Store.updateMany(patches, 'interaction');
     Alerts.scheduleRecompute();
-    UndoStack.push(`Unschedule ${eligibleIds.length} order(s)`,
+    UndoStack.push(Util.t('undo.unschedule_orders', { count: eligibleIds.length }),
                    () => UndoStack.restoreTasks(snap), eligibleIds);
     Toast.show(
       eligibleIds.length === ids.length
         ? Util.t('toast.unscheduled_orders', { count: eligibleIds.length })
-        : `${eligibleIds.length} order(s) unscheduled; split orders were left intact.`,
+        : Util.t('toast.unscheduled_partial', { count: eligibleIds.length }),
       eligibleIds.length === ids.length ? 'success' : 'warn');
   },
 
@@ -6464,8 +6464,8 @@ export const Interaction = {
         <div style="font-size:20px;font-weight:700;margin-bottom:8px;">
           ${Util.t('ui.orders_selected', { count: s.count })}
         </div>
-        <div style="font-size:13px;color:#666;margin-bottom:12px;">
-          ${Util.fmtHours(s.totalHours)} total run-time · ${s.lines.length} line${s.lines.length === 1 ? '' : 's'}
+        <div style="font-size:13px;color:var(--fg-mute);margin-bottom:12px;">
+          ${Util.t(s.lines.length === 1 ? 'ui.multi_summary_one' : 'ui.multi_summary', { hours: Util.fmtHours(s.totalHours), count: s.lines.length })}
           ${firmedTotal ? ` · ${Util.t('ui.multi_firmed_count', { n: firmedTotal })}` : ''}
         </div>
         <div style="display:flex;flex-direction:column;gap:6px;">

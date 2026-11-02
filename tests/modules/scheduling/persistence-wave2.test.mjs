@@ -253,7 +253,7 @@ test('S10-1: a stale optimizer row leaves its group unsaved but never blocks the
     assert.equal(env.calls.filter(c => c.url.includes('/tasks/update')).length, 2, 'the manual request still goes out');
     assert.ok(!Persistence._dirtyIds.has('m1'), 'manual edit saved');
     assert.ok(Persistence._dirtyIds.has('o1') && Persistence._forceIds.has('o1'), 'optimizer edit preserved');
-    assert.ok(env.cap.toasts.some(t => /Optimizer changes remain unsaved/.test(t.msg)));
+    assert.ok(env.cap.toasts.some(t => t.msg === 'toast.optimizer_unsaved_resolve'));
     assert.ok(!env.cap.toasts.some(t => t.type === 'success'), 'no success toast when a group failed');
   } finally { env.done(); }
 });

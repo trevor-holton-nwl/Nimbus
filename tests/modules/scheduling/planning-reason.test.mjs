@@ -23,7 +23,7 @@ test('planningReasonText: overlong_never reads "now fits" only when the caller s
 
 test('planningReasonText: nowFits changes only overlong_never', () => {
   assert.equal(planningReasonText({ code: 'push_limit_unmet', message: 'm' }, t, { nowFits: true }), 'planning_reason.push_limit_unmet');
-  assert.equal(planningReasonText({ code: 'no_fit_found', message: 'stored' }, t, { nowFits: true }), 'stored');
+  assert.equal(planningReasonText({ code: 'no_fit_found', message: 'stored' }, t, { nowFits: true }), 'planning_reason.no_fit_found');
 });
 
 test('planningReasonText: run_time_over_cap fills the stored hours rounded to one decimal', () => {
@@ -41,6 +41,14 @@ test('planningReasonText: run_time_over_cap falls back to the stored message wit
 test('planningReasonText: an unknown code keeps its stored message, or empty text without one', () => {
   assert.equal(planningReasonText({ code: 'something_new', message: 'stored' }, t), 'stored');
   assert.equal(planningReasonText({ code: 'something_new' }, t), '');
+});
+
+test('planningReasonText: optimizer codes resolve through the translator', () => {
+  for (const code of ['expired_window', 'missing_due_date', 'invalid_runtime', 'no_fit_found', 'search_incomplete']) {
+    assert.equal(planningReasonText({ code, message: 'stored' }, t), `planning_reason.${code}`);
+  }
+  assert.equal(planningReasonText({ code: 'search_limit', message: 'Capacity check incomplete.' }, t), 'planning_reason.search_limit');
+  assert.equal(planningReasonText({ code: 'search_limit', message: 'x Tick Run in background in the Optimize dialog' }, t), 'planning_reason.search_limit planning_reason.search_limit_hint');
 });
 
 test('planningReasonText: a missing reason is empty text', () => {

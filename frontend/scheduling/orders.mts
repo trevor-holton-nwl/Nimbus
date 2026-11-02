@@ -212,19 +212,19 @@ export const Table = {
     const rules = Store.masterData?.plants.find(row => row.plant === plant);
     const bounded = rules?.max_pull_forward_days != null || rules?.max_push_forward_days != null;
     const due = Util.sapDueDate(task);
-    if (bounded && (!due || !Number.isFinite(due.getTime()))) return 'SAP due date required';
+    if (bounded && (!due || !Number.isFinite(due.getTime()))) return Util.t('ui.planning_window_due_required');
     const floor = Engine.earliestAllowedStart(task, plant);   // pull-forward start floor only
     const ceiling = Engine.latestAllowedEnd(task, plant);
     if (floor && ceiling && floor >= ceiling) {
-      return `No valid window: earliest start ${Util.fmtDTReadable(floor)}; complete by ${Util.fmtDTReadable(ceiling)}`;
+      return Util.t('ui.planning_window_none_start', { start: Util.fmtDTReadable(floor), end: Util.fmtDTReadable(ceiling) });
     }
     // The frozen horizon is a FINISH floor (2026-10-27): an unprotected order may not finish before the window edge,
     // so a completion limit before the edge leaves no valid window (equality is valid).
     const frozenEnd = Store.frozenHorizonEndFor(plant);
     if (frozenEnd && ceiling && frozenEnd > ceiling) {
-      return `No valid window: finish on/after ${Util.fmtDTReadable(frozenEnd)}; complete by ${Util.fmtDTReadable(ceiling)}`;
+      return Util.t('ui.planning_window_none_finish', { edge: Util.fmtDTReadable(frozenEnd), end: Util.fmtDTReadable(ceiling) });
     }
-    return `${floor ? Util.fmtDTReadable(floor) : 'No start limit'} — ${ceiling ? Util.fmtDTReadable(ceiling) : 'No completion limit'}`;
+    return `${floor ? Util.fmtDTReadable(floor) : Util.t('ui.planning_window_no_start')} — ${ceiling ? Util.fmtDTReadable(ceiling) : Util.t('ui.planning_window_no_end')}`;
   },
   _api:    null as NimbusVendor.AgGridApi | null,
   _colApi: null as unknown,
@@ -927,7 +927,7 @@ export const Table = {
     const visible = q ? sorted.filter(c => c.toLowerCase().includes(q)) : sorted;
     drop.innerHTML = visible.length
       ? visible.map(c => `<label><input type="checkbox" value="${Util.escapeHtml(c)}"${Table._chipFilters.colors.has(c) ? ' checked' : ''} onchange="NIMBUS.Table._onChipChange('color', this)"> ${Util.escapeHtml(c)}</label>`).join('')
-      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : 'No colors'}</div>`;
+      : `<div style="padding:8px 14px;font-size:12px;color:var(--fg-mute)">${sorted.length ? Util.t('ui.no_matches') : Util.t('ui.no_colors_empty')}</div>`;
   },
 
   _buildStatusChipDropdown(): void {
@@ -1581,7 +1581,7 @@ export const Table = {
   /** One undo entry for a (PV, machine) pair write, mirroring the Gantt drop's "Move ..." entry. */
   _pushPairUndo(id: string, snap: NimbusTask[]): void {
     const task = Store.tasks[id];
-    UndoStack.push(`Change production version / machine "${(task && (task.text || task.ORDER)) || id}"`,
+    UndoStack.push(Util.t('undo.pair_override', { order: (task && (task.text || task.ORDER)) || id }),
                    () => UndoStack.restoreTasks(snap), [id]);
   },
 
@@ -1913,7 +1913,7 @@ export const Table = {
           ${date ? `<span style="flex-shrink:0;font-size:10.5px;color:var(--fg-mute);white-space:nowrap;margin-top:2px">${date}</span>` : ''}
           <button data-alert-id="${Util.escapeHtml(a.id)}"
             style="flex-shrink:0;padding:2px 10px;font-size:11px;border-radius:5px;border:1px solid var(--line);background:none;cursor:pointer;color:var(--fg-mute);white-space:nowrap;margin-top:1px">
-            Go to
+            ${Util.escapeHtml(Util.t('btn.go_to'))}
           </button>
         </div>`;
     }).join('');
@@ -1923,7 +1923,7 @@ export const Table = {
     dlg.innerHTML = `
       <div style="padding:20px;min-width:320px;max-width:440px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-          <h3 style="margin:0;font-size:14px;font-weight:700">⚐ Alerts — Order <span style="color:var(--accent)">${Util.escapeHtml(po)}</span></h3>
+          <h3 style="margin:0;font-size:14px;font-weight:700">⚐ ${Util.escapeHtml(Util.t('ui.alert_popup_title', { order: '\u0001' })).replace('\u0001', `<span style="color:var(--accent)">${Util.escapeHtml(po)}</span>`)}</h3>
           <button data-alert-close style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--fg-mute)">✕</button>
         </div>
         <div>${rows}</div>
@@ -2544,7 +2544,7 @@ export const Inspector = {
   _formatSetupState(state: SetupStateKey | null, definition: { fields: ReadonlyArray<string> } | null | undefined): string | null {
     if (!state || !definition) return null;
     const values = new Map(state.map(part => [part.fieldKey, part.value]));
-    const labels: Record<string, string> = { colorWheel: 'Color', prt01: 'PRT01', prt02: 'PRT02', productionVersion: 'Production version' };
+    const labels: Record<string, string> = { colorWheel: Util.t('constraint.colorWheel'), prt01: Util.t('constraint.prt01'), prt02: Util.t('constraint.prt02'), productionVersion: Util.t('constraint.productionVersion') };
     return definition.fields.map(field => `${labels[field] || field}: ${values.get(field) || '—'}`).join(' · ');
   },
 
@@ -2950,7 +2950,7 @@ export const Inspector = {
         <div class="insp-row"><label>${Util.escapeHtml(Util.t('ui.setup_override'))}</label><div class="insp-val">${Util.escapeHtml(setupDetail.overrideStatus === 'none' ? Util.t('ui.setup_override_none') : (setupDetail.overrideStatus || missingSetupPlaceholder))}</div></div>
         ${setupCapacityConflict ? `<p class="insp-setup-warning">${Util.escapeHtml(setupCapacityConflict)}</p>` : ''}
         ${setupDetail.missingDetail ? `<p class="insp-setup-warning">${Util.escapeHtml(Util.t('ui.setup_missing'))}: ${Util.escapeHtml(setupDetail.missingDetail)}</p>` : ''}
-        ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>Correct actual setup state</button><button class="btn btn-ghost sm" data-setup-adjust-time>Adjust setup time</button><div data-setup-editor-host></div></div>` : ''}
+        ${canWriteSetup ? `<div class="insp-setup-actions"><button class="btn btn-ghost sm" data-setup-correct-state>${Util.escapeHtml(Util.t('ui.insp_setup_correct_state'))}</button><button class="btn btn-ghost sm" data-setup-adjust-time>${Util.escapeHtml(Util.t('ui.insp_setup_adjust_time'))}</button><div data-setup-editor-host></div></div>` : ''}
       </div>`;
   },
 
@@ -2989,7 +2989,7 @@ export const Inspector = {
     const existing = context.existing;
     const baseline = existing?.standard_min ?? context.baseline;
     const initialAdjustment = existing && baseline != null ? existing.remaining_min - baseline : 0;
-    host.innerHTML = `<div class="setup-state-editor" data-setup-override-editor><label>Reason<input class="input" data-setup-override-reason></label>${baseline != null ? `<label>Adjustment (minutes)<input class="input" type="number" step="1" data-setup-override-adjustment value="${initialAdjustment}"></label><p class="setup-editor-note">Matrix baseline: ${baseline} min. Remaining work is baseline plus adjustment.</p>` : `<label>Total setup duration (minutes)<input class="input" type="number" min="0" step="1" data-setup-override-total></label><p class="setup-editor-note">No matrix baseline exists; this total applies only to this exact order pair.</p>`}<div class="insp-actions"><button class="btn btn-primary sm" data-setup-save-override>Save setup time</button>${existing ? '<button class="btn btn-ghost sm" data-setup-reset-override>Reset to matrix</button>' : ''}</div></div>`;
+    host.innerHTML = `<div class="setup-state-editor" data-setup-override-editor><label>${Util.escapeHtml(Util.t('ui.insp_setup_reason'))}<input class="input" data-setup-override-reason></label>${baseline != null ? `<label>${Util.escapeHtml(Util.t('ui.insp_setup_adjustment_min'))}<input class="input" type="number" step="1" data-setup-override-adjustment value="${initialAdjustment}"></label><p class="setup-editor-note">${Util.escapeHtml(Util.t('ui.insp_setup_baseline_note', { baseline }))}</p>` : `<label>${Util.escapeHtml(Util.t('ui.insp_setup_total_min'))}<input class="input" type="number" min="0" step="1" data-setup-override-total></label><p class="setup-editor-note">${Util.escapeHtml(Util.t('ui.insp_setup_no_baseline_note'))}</p>`}<div class="insp-actions"><button class="btn btn-primary sm" data-setup-save-override>${Util.escapeHtml(Util.t('ui.insp_setup_save_time'))}</button>${existing ? `<button class="btn btn-ghost sm" data-setup-reset-override>${Util.escapeHtml(Util.t('ui.insp_setup_reset_matrix'))}</button>` : ''}</div></div>`;
     const reason = host.querySelector<HTMLInputElement>('[data-setup-override-reason]')!;
     reason.value = existing?.reason || '';
     // Both buttons stay disabled while a request is in flight (no double save / save-then-reset race).
@@ -2999,8 +2999,8 @@ export const Inspector = {
     };
     host.querySelector<HTMLButtonElement>('[data-setup-save-override]')!.addEventListener('click', async () => {
       const values = Inspector._setupOverrideValues(baseline, host.querySelector<HTMLInputElement>('[data-setup-override-adjustment]')?.value || '', host.querySelector<HTMLInputElement>('[data-setup-override-total]')?.value || '');
-      if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
-      if (!values) { Toast.show(baseline != null ? 'The remaining setup time cannot be below zero.' : 'Enter a whole-number total setup duration.', 'error'); return; }
+      if (!reason.value.trim()) { Toast.show(Util.t('toast.insp_setup_reason_required'), 'error'); reason.focus(); return; }
+      if (!values) { Toast.show(Util.t(baseline != null ? 'toast.insp_setup_remaining_negative' : 'toast.insp_setup_total_invalid'), 'error'); return; }
       const payload = { machine: task.MACHINE, standard_min: values.standardMin, remaining_min: values.remainingMin, signature_version: definition.signature_version, reason: reason.value.trim() };
       const url = existing ? `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}` : `${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides`;
       const body = existing ? payload : { ...payload, predecessor_order_id: context.predecessorOrderId, successor_order_id: String(task.id), predecessor_values: Object.fromEntries(context.predecessorState.map(part => [part.fieldKey, part.value])), successor_values: Object.fromEntries(context.successorState.map(part => [part.fieldKey, part.value])) };
@@ -3008,19 +3008,19 @@ export const Inspector = {
       try {
         const response = await Util.fetchTraced(url, { method: existing ? 'PUT' : 'POST', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify(body) });
         if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(formatApiDetail(error.detail, `HTTP ${response.status}`)); }
-        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show('Setup time saved.', 'success');
-      } catch (error) { Toast.show(`Could not save setup time: ${(error as Error).message}`, 'error'); }
+        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show(Util.t('toast.insp_setup_time_saved'), 'success');
+      } catch (error) { Toast.show(Util.t('toast.insp_setup_time_save_failed', { error: (error as Error).message }), 'error'); }
       finally { setBusy(false); }
     });
     host.querySelector<HTMLButtonElement>('[data-setup-reset-override]')?.addEventListener('click', async () => {
       if (!existing) return;
-      if (!reason.value.trim()) { Toast.show('A shop-floor reason is required.', 'error'); reason.focus(); return; }
+      if (!reason.value.trim()) { Toast.show(Util.t('toast.insp_setup_reason_required'), 'error'); reason.focus(); return; }
       setBusy(true);
       try {
         const response = await Util.fetchTraced(`${Config.API_BASE}/setup/${encodeURIComponent(plant)}/overrides/${encodeURIComponent(String(existing.id))}`, { method: 'DELETE', headers: { 'content-type': 'application/json', 'x-user-email': Session.actor() }, body: JSON.stringify({ machine: task.MACHINE, signature_version: definition.signature_version, reason: reason.value.trim() }) });
         if (!response.ok) { const error = await response.json().catch(() => ({})); throw new Error(formatApiDetail(error.detail, `HTTP ${response.status}`)); }
-        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show('Setup override reset to matrix.', 'success');
-      } catch (error) { Toast.show(`Could not reset setup time: ${(error as Error).message}`, 'error'); }
+        Persistence.noteSetupWrite(plant, 'override'); await Inspector._refreshSetupTruth(plant); Toast.show(Util.t('toast.insp_setup_override_reset'), 'success');
+      } catch (error) { Toast.show(Util.t('toast.insp_setup_time_reset_failed', { error: (error as Error).message }), 'error'); }
       finally { setBusy(false); }
     });
   },
@@ -3550,7 +3550,7 @@ export const Printer = {
 
     const thead = document.createElement('thead');
     const htr   = document.createElement('tr');
-    for (const h of ['Line', 'Prod. Order', 'Material', 'Description', 'Start', 'End', 'Hours']) {
+    for (const h of ['line', 'prod_order', 'material', 'desc', 'start', 'end', 'hours'].map(k => Util.t(`ui.print_col_${k}`))) {
       const th = document.createElement('th');
       th.textContent = h;
       th.style.cssText = 'text-align:left;padding:6px 8px;border-bottom:2px solid var(--line);font-size:11px;';
@@ -3597,7 +3597,7 @@ export const Printer = {
     // Plant-local wall clock (same as every on-screen time) — toISOString() exported UTC,
     // shifting each time by the viewer's UTC offset.
     const fmtDt = (d: Date | null) => d ? Util.fmtDT(d) : '';
-    const headers = ['Line', 'Production Order', 'Material Number', 'Description', 'Start', 'End', 'Hours'];
+    const headers = ['line', 'prod_order', 'material', 'desc', 'start', 'end', 'hours'].map(k => Util.t(`ui.print_col_${k}`));
     // RFC-4180 quoting + formula guard on every text field (Util.csvCell); BOM so Excel
     // reads the file as UTF-8.
     const lines = [
