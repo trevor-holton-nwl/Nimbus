@@ -4246,6 +4246,19 @@ test('Engine.pushFinishPatches moves finishes, skips firmed and unholdable order
   } finally { fx.restore(); }
 });
 
+test('Engine.pushFinishPatches skips a dated unfirmed order with no machine (no Unknown line patch); others still move', () => {
+  const fx = manualFixture();
+  try {
+    const mk = (id, line) => ({ id, PLANT: fx.plant, MACHINE: line, RUN_TIME: 2,
+      start_date: new Date(2026, 7, 24, 10), end_date: new Date(2026, 7, 24, 12) });
+    const tasks = [mk('nomach', ''), mk('ok', fx.line)];
+    const patches = Engine.pushFinishPatches(tasks, 3600000);
+    assert.deepEqual(patches.map(p => p.id), ['ok'], 'the no-machine order gets no patch, so nothing writes MACHINE Unknown');
+    assert.ok(patches.every(p => p.changes.MACHINE !== 'Unknown'));
+    assert.equal(tasks.length - patches.length, 1, 'the caller counts the skipped order as selected minus moved');
+  } finally { fx.restore(); }
+});
+
 // ---------------------------------------------------------------------------
 // Backward scheduling Task 2.6 (OQ3, OQ4, OQ33, OQ34, OQ51, OQ53, OQ62): the reconcile derives starts from the
 // held finish. A never-placed row is derived for DISPLAY only (a non-dirty write, Save leaves the server row
