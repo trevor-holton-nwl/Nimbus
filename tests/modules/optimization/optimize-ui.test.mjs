@@ -2612,3 +2612,34 @@ test('O9: Apply drops an order the proposal placed into a running order\'s old s
     fx.restore();
   }
 });
+
+test('S7-15: What-If discard snapshots and restores Persistence._dirtySource alongside the dirty sets', () => {
+  const priorNimbus = globalThis.NIMBUS;
+  const priorPlant = Store.selectedPlant;
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorSource = new Map(Persistence._dirtySource);
+  const priorSchedule = Alerts.scheduleRecompute;
+  globalThis.NIMBUS = {};
+  Alerts.scheduleRecompute = () => {};
+  const unsubscribeAdapter = subscribeSandboxAdapter();
+  try {
+    Store.setTasks([{ id: 'ds-kept', PLANT: 'DS', MACHINE: 'DS-L', RUN_TIME: 1 }, { id: 'ds-trial', PLANT: 'DS', MACHINE: 'DS-L', RUN_TIME: 1 }], 'unit-test');
+    Persistence._dirtySource.clear();
+    Persistence._dirtySource.set('ds-kept', 'drag');
+    Sandbox.enter('unit-test');
+    Persistence._dirtySource.set('ds-trial', 'optimizer');   // a source stamped inside the trial
+    Persistence._dirtySource.set('ds-kept', 'keyboard');     // and an overwrite of a pre-enter one
+    Sandbox.exit(false, 'unit-test');
+    assert.deepEqual([...Persistence._dirtySource], [['ds-kept', 'drag']], 'discard restores the pre-enter source map exactly');
+  } finally {
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    unsubscribeAdapter();
+    SandboxAdapter._clearSideEffectSnapshot?.();
+    Persistence._dirtySource.clear();
+    for (const [id, src] of priorSource) Persistence._dirtySource.set(id, src);
+    Alerts.scheduleRecompute = priorSchedule;
+    Store.setTasks(priorTasks, 'unit-test');
+    Store.setSelectedPlant(priorPlant, 'unit-test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});

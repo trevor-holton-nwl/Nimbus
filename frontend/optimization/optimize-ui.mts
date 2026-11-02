@@ -3159,6 +3159,7 @@ export const SandboxAdapter = {
   _dirtySnapshot: null as Set<string> | null,
   _forceSnapshot: null as Set<string> | null,
   _firmDirtySnapshot: null as Set<string> | null,
+  _dirtySourceSnapshot: null as Map<string, string> | null,
   _sideEffectSnapshotActive: false,
 
   init() {
@@ -3208,6 +3209,7 @@ export const SandboxAdapter = {
     SandboxAdapter._dirtySnapshot = new Set(Persistence._dirtyIds);
     SandboxAdapter._forceSnapshot = new Set(Persistence._forceIds);
     SandboxAdapter._firmDirtySnapshot = new Set(Persistence._firmDirtyIds);
+    SandboxAdapter._dirtySourceSnapshot = new Map(Persistence._dirtySource);
     SandboxAdapter._sideEffectSnapshotActive = true;
 
     document.body.classList.add('sandbox-mode');
@@ -3267,6 +3269,8 @@ export const SandboxAdapter = {
         for (const id of SandboxAdapter._forceSnapshot) Persistence._forceIds.add(id);
         Persistence._firmDirtyIds.clear();
         for (const id of SandboxAdapter._firmDirtySnapshot ?? []) Persistence._firmDirtyIds.add(id);
+        Persistence._dirtySource.clear();
+        for (const [id, src] of SandboxAdapter._dirtySourceSnapshot ?? []) Persistence._dirtySource.set(id, src);
         Persistence._syncUnsaved();
       }
       // RestoreDismissed intentionally has no scheduling behavior of its own:
@@ -3382,6 +3386,7 @@ export const SandboxAdapter = {
     SandboxAdapter._dirtySnapshot = null;
     SandboxAdapter._forceSnapshot = null;
     SandboxAdapter._firmDirtySnapshot = null;
+    SandboxAdapter._dirtySourceSnapshot = null;
     SandboxAdapter._sideEffectSnapshotActive = false;
   },
 
