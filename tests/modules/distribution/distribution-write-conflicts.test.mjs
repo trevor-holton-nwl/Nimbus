@@ -267,15 +267,18 @@ test('a retained distribution group updates the visible unsaved count for all it
   Store.updateTask('kept', { PRT_01: 'LOCAL' }, 'inspector');
   const badge = { hidden: true, textContent: '' };
   const originalDocument = globalThis.document;
+  const originalT = Util.t; const unsavedCalls = [];
+  Util.t = (key, vars) => { if (key === 'ui.n_unsaved') unsavedCalls.push(vars); return originalT.call(Util, key, vars); };
   globalThis.document = { getElementById: id => id === 'schedule-unsaved' ? badge : null };
   try {
     release(ok({ ...result, children: [child, { ...child, id: 'sibling', machine: 'L2' }] }));
     await pending;
-    assert.equal(badge.textContent, '2 unsaved');
+    assert.equal(unsavedCalls.at(-1)?.count, 2, 'the badge is rendered with ui.n_unsaved and a count covering both children');
+    assert.notEqual(badge.textContent, '', 'the badge shows text');
     assert.equal(badge.hidden, false);
     assert.equal(Store.tasks.sibling.row_version, 40);
     assert.equal(Persistence._conflictedIds.has('sibling'), true);
-  } finally { globalThis.document = originalDocument; }
+  } finally { globalThis.document = originalDocument; Util.t = originalT; }
 });
 
 test('a completed write for another detail applies its Store snapshot without attaching Undo to the selected order', async () => {

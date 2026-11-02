@@ -407,7 +407,7 @@ test('open renders the order, the reason, the due day and the ranked pairs with 
   const body = els['asl-body'].innerHTML;
   assert.match(body, /1001/);
   assert.match(body, /M1/);
-  assert.match(body, /No slot found/, 'the reason text');
+  assert.match(body, /planning_reason.no_fit_found/, 'the reason text (Util.t stub answers the key)');
   assert.match(body, /id="asl-day"/);
   assert.match(body, /<select id="asl-pair" class="asl-sr" aria-hidden="true" tabindex="-1">/, 'the select stays as the hidden source of truth');
   assert.match(body, /id="asl-list" role="radiogroup" aria-labelledby="asl-cands-label"/);
@@ -1224,7 +1224,7 @@ test('the lead banner shows only for push_limit_unmet, and replaces the reason l
   openIt();
   body = els['asl-body'].innerHTML;
   assert.doesNotMatch(body, /asl-lead/);
-  assert.match(body, /id="asl-reason">No slot found</, 'every other reason keeps its line');
+  assert.match(body, /id="asl-reason">planning_reason.no_fit_found</, 'every other reason keeps its line');
 });
 
 test('the radio rows and #asl-pair stay in step: a row change drives the select and the pick, a select change re-checks the row on the next render', () => {
