@@ -3331,6 +3331,8 @@ export const Inspector = {
     Alerts.scheduleRecompute();
   }
 };
+// S10-9: a conflict refresh must not overwrite a note the planner is typing or whose save is queued for retry.
+Persistence.noteUnsaved = (id: string): boolean => id in Inspector._notePending || id in Inspector._noteRetry;
 
 /* =============================================================================
    CONTEXT MENU — right-click on a timeline item.

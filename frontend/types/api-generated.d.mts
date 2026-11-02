@@ -4266,6 +4266,18 @@ export interface components {
              * @default false
              */
             firmed: boolean;
+            /** Color */
+            COLOR?: string | null;
+            /** Form Size */
+            FORM_SIZE?: string | null;
+            /** Material Description */
+            MATERIAL_DESCRIPTION?: string | null;
+            /** Notes */
+            notes?: string | null;
+            /** Ecc Firmed */
+            ecc_firmed?: boolean | null;
+            /** Order Y */
+            ORDER_Y?: number | null;
             /** Original Start Date */
             original_start_date?: string | null;
             /** Original End Date */
