@@ -40,9 +40,15 @@ DIAGNOSTICS: dict = {
 }
 
 
+MAX_WARNINGS = 50   # a persistent fault (e.g. a failing merge on every load) must not grow this without bound
+
+
 def _warn(level, msg, **ctx):
-    DIAGNOSTICS["warnings"].append({
+    warnings = DIAGNOSTICS["warnings"]
+    warnings.append({
         "level": level, "msg": msg, "ctx": ctx,
         "ts": pd.Timestamp.now('UTC').isoformat(),
     })
+    # Trim in place (a plain list, so every JSON consumer of DIAGNOSTICS keeps working): keep the newest 50.
+    del warnings[:-MAX_WARNINGS]
     _log_event(level, "load", msg, **ctx)

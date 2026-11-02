@@ -16,13 +16,14 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Annotated
 
 import pandas as pd
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from fastapi.exceptions import ResponseValidationError
-from pydantic import TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError
 
 import db
 import master_data as md
@@ -30,9 +31,11 @@ from backend.admin_ops.diagnostics_state import DIAGNOSTICS, _warn
 from backend.admin_ops.logbuffer import _current_rid, _log_event
 from backend.priority_lists import cache as plcache
 from backend.scheduling.models import (
+    MAX_BATCH,
     BulkUpdateResult,
     HorizonsResponse,
     TaskDateUpdate,
+    TaskNotePayload,
     TaskRefreshPayload,
     TasksRefreshResponse,
     TasksResponse,
@@ -311,6 +314,14 @@ def _build_task_rows(raw_rows: list[dict], plant: str | None) -> tuple[list[dict
     return data, links, stats, pre_merge_count
 
 
+# DIAGNOSTICS keys GET /tasks echoes in `meta` (the Admin pipeline panel reads color_merge_*, missed_colors and
+# pre_color_merge_count; the rest is the load-metadata bag it always carried).
+_TASKS_META_DIAGNOSTIC_KEYS = (
+    "loaded_at", "load_ms", "source_file", "raw_row_count", "unreadable_start_date", "dropped_no_finish_date",
+    "duplicate_ids_suffixed", "color_merge_misses", "color_merge_ms", "missed_colors", "emitted_task_count",
+    "unique_id_count", "lines", "warnings",
+)
+
 _perf_log = logging.getLogger("nimbus.perf")   # child of brain.py's `nimbus` JSON handler
 _SLOW_TASKS_MS = 1500
 
@@ -482,7 +493,10 @@ def build_tasks_payload(plant: str | None, machine: str | None, limit: int | Non
 
     # Merge base diagnostics with this request's color stats so the pipeline UI
     # sees plant-scoped color_merge_misses / missed_colors / emitted_task_count.
-    meta = dict(DIAGNOSTICS, **cm_stats)
+    # Explicit allow-list: DIAGNOSTICS also carries admin-only bookkeeping (sweep results, failure counters)
+    # that has no business in a planner-facing response, and anything new added there must not leak by default.
+    meta = {k: DIAGNOSTICS[k] for k in _TASKS_META_DIAGNOSTIC_KEYS if k in DIAGNOSTICS}
+    meta.update(cm_stats)
     meta["rendered"] = len(data)
     meta["link_count"] = len(links)
     meta["plant_filter_active"] = plant
@@ -586,8 +600,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
             invalid += 1
             invalid_ids.append(it.id)
             continue
-        start_dt = _to_pydt(it.start_date) if it.start_date else None
-        end_dt   = _to_pydt(it.end_date)   if it.end_date   else None
+        start_dt = _fast_pydt(it.start_date) if it.start_date else None
+        end_dt   = _fast_pydt(it.end_date)   if it.end_date   else None
         # Pydantic tracks explicitly supplied fields so an explicit null can
         # clear an attribute, while omitted attributes remain untouched.
         supplied = getattr(it, "model_fields_set", set())
@@ -617,8 +631,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 continue
             segments = []
             for segment in it.schedule_segments:
-                segment_start = _to_pydt(segment.start_date)
-                segment_end = _to_pydt(segment.end_date)
+                segment_start = _fast_pydt(segment.start_date)
+                segment_end = _fast_pydt(segment.end_date)
                 if segment_start is None or segment_end is None:
                     invalid += 1
                     invalid_ids.append(it.id)
@@ -641,7 +655,8 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
                 "base_version": it.base_version, "force": it.force}
         if has_planning:
             item["planning_status"] = it.planning_status
-            item["planning_reason"] = it.planning_reason
+            item["planning_reason"] = (it.planning_reason.model_dump(exclude_unset=True)
+                                       if it.planning_reason is not None else None)
         if has_runtime:
             item["RUN_TIME"] = it.RUN_TIME
         if has_firmed:
@@ -701,6 +716,46 @@ def _apply_task_date_updates(items: list[TaskDateUpdate], allowed_plants: list[s
     return res
 
 
+def _bulk_result(res: dict, total: int, *, label: str, **conflict_ctx) -> dict:
+    """Shared tail of POST /tasks/update and POST /tasks/bulk_update: log the partial-save and conflict
+    events and shape the BulkUpdateResult body. HTTP stays 200 either way (per-row reporting contract);
+    a whole-transaction rollback is flagged in the body (status 'error' + error_code/cause)."""
+    stale = res.get("stale", [])
+    if res["persisted"] < total:
+        _log_event("warn", "db", f"{label}: some tasks not persisted",
+                   total=total, persisted=res["persisted"], failed=res["failed"],
+                   invalid=res["invalid"], not_found=res.get("not_found", 0),
+                   stale=len(stale))
+    conflicts = res.get("conflicts", [])
+    if conflicts:
+        _log_event("info", "db", "Bulk update produced schedule conflicts",
+                   event="schedule_conflicts", count=len(conflicts),
+                   machines=sorted({c["machine"] for c in conflicts}), **conflict_ctx)
+    out = {"status": res.get("status", "ok"), "updated": total, "persisted": res["persisted"],
+           "failed": res["failed"], "invalid": res["invalid"],
+           "not_found": res.get("not_found", 0),
+           # Forward the actual rejected ids (not just counts) so the client can
+           # tell terminal rejections (invalid range / not in DB — stop retrying)
+           # from transiently-lost rows (keep dirty, retry). db.update_task_dates_bulk
+           # produces these; without them the frontend's accounted-set logic
+           # (saveAll R7) never clears a terminally-rejected id → it stays dirty and
+           # re-warns "Partial DB save" on every subsequent save.
+           "invalid_ids": res.get("invalid_ids", []),
+           "not_found_ids": res.get("not_found_ids", []),
+           "stale": stale, "versions": res.get("versions", {}),
+           "conflicts": conflicts,
+           # §8.5: sparse {id: reason} map, populated only for the routing-
+           # eligibility rejection inside db.update_task_dates_bulk — every
+           # other invalid_ids cause has no entry here. Purely additive; does
+           # not change invalid_ids' own shape.
+           "rejection_reasons": res.get("rejection_reasons", {}),
+           "start_derived": res.get("start_derived", {})}
+    if res.get("status") == "error":
+        out["error_code"] = res.get("error_code")
+        out["cause"] = res.get("cause")
+    return out
+
+
 @router.post("/task/update", response_model=TaskUpdateResult)
 def update_task(task: TaskDateUpdate,
                  actor: str = Depends(auth.require_authenticated),
@@ -720,27 +775,27 @@ def update_task(task: TaskDateUpdate,
     if res.get("invalid"):
         raise HTTPException(status_code=400, detail={"error": "invalid",
                                                      "rejection_reasons": res.get("rejection_reasons", {})})
-    return {"status": "ok", "persisted": res["persisted"], "failed": res["failed"],
-            "stale": res.get("stale", []), "versions": res.get("versions", {}),
-            "conflicts": res.get("conflicts", []),
-            "rejection_reasons": res.get("rejection_reasons", {}),
-            "start_derived": res.get("start_derived", {})}
+    out = {"status": res.get("status", "ok"), "persisted": res["persisted"], "failed": res["failed"],
+           "stale": res.get("stale", []), "versions": res.get("versions", {}),
+           "conflicts": res.get("conflicts", []),
+           "rejection_reasons": res.get("rejection_reasons", {}),
+           "start_derived": res.get("start_derived", {})}
+    if res.get("status") == "error":
+        out["error_code"] = res.get("error_code")
+        out["cause"] = res.get("cause")
+    return out
 
 
 @router.post("/task/note")
-def update_task_note(payload: dict,
+def update_task_note(payload: TaskNotePayload,
                       actor: str = Depends(auth.require_authenticated),
                       allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
     Persist a free-text note for a single task (max 500 chars).
-    Payload: { id: str, notes: str }
+    Payload: { id: str, notes: str | null }. Wrong types or a note over 500 characters are a 422.
     """
-    task_id = payload.get("id")
-    notes = payload.get("notes")
-    if not task_id:
-        raise HTTPException(status_code=400, detail="id required")
-    if notes and len(notes) > 500:
-        raise HTTPException(status_code=400, detail="Note exceeds 500 character limit")
+    task_id = payload.id
+    notes = payload.notes
     plant = db.get_order_plant(task_id)
     if plant is None or (allowed_plants is not None and plant not in allowed_plants):
         raise HTTPException(status_code=404, detail="Task not found")
@@ -773,48 +828,12 @@ def tasks_update(payload: TasksUpdatePayload,
                                    atomic_optimizer=payload.atomic_optimizer,
                                    strict_conflicts=payload.strict_conflicts,
                                    actor=actor, client_id=payload.client_id)
-    total = len(payload.tasks)
-    stale = res.get("stale", [])
-    if res["persisted"] < total:
-        _log_event("warn", "db", "Bulk update: some tasks not persisted",
-                   total=total, persisted=res["persisted"], failed=res["failed"],
-                   invalid=res["invalid"], not_found=res.get("not_found", 0),
-                   stale=len(stale))
-    conflicts = res.get("conflicts", [])
-    if conflicts:
-        _log_event("info", "db", "Bulk update produced schedule conflicts",
-                   event="schedule_conflicts", count=len(conflicts),
-                   machines=sorted({c["machine"] for c in conflicts}),
-                   strict=bool(payload.strict_conflicts and payload.atomic_optimizer))
-    # Honest body signal: HTTP status stays 200, but surface a hard-failure flag +
-    # cause when the whole transaction rolled back (default 'ok' otherwise).
-    out = {"status": res.get("status", "ok"), "updated": total, "persisted": res["persisted"],
-           "failed": res["failed"], "invalid": res["invalid"],
-           "not_found": res.get("not_found", 0),
-           # Forward the actual rejected ids (not just counts) so the client can
-           # tell terminal rejections (invalid range / not in DB — stop retrying)
-           # from transiently-lost rows (keep dirty, retry). db.update_task_dates_bulk
-           # produces these; without them the frontend's accounted-set logic
-           # (saveAll R7) never clears a terminally-rejected id → it stays dirty and
-           # re-warns "Partial DB save" on every subsequent save.
-           "invalid_ids": res.get("invalid_ids", []),
-           "not_found_ids": res.get("not_found_ids", []),
-           "stale": stale, "versions": res.get("versions", {}),
-           "conflicts": conflicts,
-           # §8.5: sparse {id: reason} map, populated only for the routing-
-           # eligibility rejection inside db.update_task_dates_bulk — every
-           # other invalid_ids cause has no entry here. Purely additive; does
-           # not change invalid_ids' own shape.
-           "rejection_reasons": res.get("rejection_reasons", {}),
-           "start_derived": res.get("start_derived", {})}
-    if res.get("status") == "error":
-        out["error_code"] = res.get("error_code")
-        out["cause"] = res.get("cause")
-    return out
+    return _bulk_result(res, len(payload.tasks), label="Bulk update",
+                        strict=bool(payload.strict_conflicts and payload.atomic_optimizer))
 
 
 @router.post("/tasks/bulk_update", response_model=BulkUpdateResult)
-def bulk_update(tasks: list[TaskDateUpdate],
+def bulk_update(tasks: Annotated[list[TaskDateUpdate], Field(max_length=MAX_BATCH)],
                  actor: str = Depends(auth.require_authenticated),
                  allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request)):
     """
@@ -838,41 +857,7 @@ def bulk_update(tasks: list[TaskDateUpdate],
     """
     stripped = [it.model_copy(update={"force": False}) if it.force else it for it in tasks]
     res = _apply_task_date_updates(stripped, allowed_plants=allowed_plants, actor=actor)
-    total = len(tasks)
-    stale = res.get("stale", [])
-    if res["persisted"] < total:
-        _log_event("warn", "db", "bulk_update: some tasks not persisted",
-                   total=total, persisted=res["persisted"], failed=res["failed"],
-                   invalid=res["invalid"], not_found=res.get("not_found", 0),
-                   stale=len(stale))
-    conflicts = res.get("conflicts", [])
-    if conflicts:
-        _log_event("info", "db", "Bulk update produced schedule conflicts",
-                   event="schedule_conflicts", count=len(conflicts),
-                   machines=sorted({c["machine"] for c in conflicts}))
-    out = {"status": res.get("status", "ok"), "updated": total, "persisted": res["persisted"],
-           "failed": res["failed"], "invalid": res["invalid"],
-           "not_found": res.get("not_found", 0),
-           # Forward the actual rejected ids (not just counts) so the client can
-           # tell terminal rejections (invalid range / not in DB — stop retrying)
-           # from transiently-lost rows (keep dirty, retry). db.update_task_dates_bulk
-           # produces these; without them the frontend's accounted-set logic
-           # (saveAll R7) never clears a terminally-rejected id → it stays dirty and
-           # re-warns "Partial DB save" on every subsequent save.
-           "invalid_ids": res.get("invalid_ids", []),
-           "not_found_ids": res.get("not_found_ids", []),
-           "stale": stale, "versions": res.get("versions", {}),
-           "conflicts": conflicts,
-           # §8.5: sparse {id: reason} map, populated only for the routing-
-           # eligibility rejection inside db.update_task_dates_bulk — every
-           # other invalid_ids cause has no entry here. Purely additive; does
-           # not change invalid_ids' own shape.
-           "rejection_reasons": res.get("rejection_reasons", {}),
-           "start_derived": res.get("start_derived", {})}
-    if res.get("status") == "error":
-        out["error_code"] = res.get("error_code")
-        out["cause"] = res.get("cause")
-    return out
+    return _bulk_result(res, len(tasks), label="bulk_update")
 
 
 @router.post("/tasks/refresh", response_model=TasksRefreshResponse,
@@ -901,13 +886,17 @@ def tasks_refresh(payload: TaskRefreshPayload,
     _refreshTasks) uses it to drop these ids from Store instead of leaving them
     as stale ghosts.
     """
-    rows = db.get_task_versions(payload.ids)
+    rows = db.get_task_versions(payload.ids, allowed_plants=allowed_plants)   # plant scope applied in SQL
     found_ids = {r["id"] for r in rows}
-    if allowed_plants is not None:
-        rows = [r for r in rows if r.get("plant") in allowed_plants]
-        found_ids = {r["id"] for r in rows}
     missing = [i for i in payload.ids if i not in found_ids]
+    # Same normalisation and rank stamping as GET /tasks, so a refreshed row ranks and sets up like a loaded one.
     for row in rows:
-        row["PLANT"] = row.pop("plant", None)
+        row["COLOR"] = _norm_attr(row.get("COLOR"))
+        row["PLANT"] = row.get("plant")
+    _stamp_order_y(rows, None)
+    for row in rows:
+        if row["ORDER_Y"] is None:
+            row["ORDER_Y"] = _DEFAULT_RANK
+        row.pop("plant", None)
         row["schedule_segments"] = _schedule_segments_to_wire(row.get("schedule_segments"))
     return {"data": rows, "missing": missing}
