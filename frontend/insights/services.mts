@@ -799,9 +799,15 @@ export const Alerts = {
   /** Everything Schedule Confidence needs besides the horizon: the pre-dismiss alerts and the machine count of the
    *  selected plant (`Store.linesForSelectedPlant()`, the same line set the utilization matrix and the alert pass use;
    *  minimum 1). The badge, its breakdown and the Alert Monitor's leverage all read this, so they cannot disagree. */
-  confidenceInput(): { alerts: NimbusAlert[]; machines: number } {
-    return { alerts: Alerts.scoringAlerts(), machines: Math.max(1, Store.linesForSelectedPlant().length) };
+  confidenceInput(): { alerts: NimbusAlert[]; machines: number; stale: boolean } {
+    return { alerts: Alerts.scoringAlerts(), machines: Math.max(1, Store.linesForSelectedPlant().length), stale: Alerts.isStale() };
   },
+
+  /** The `Store.dataRev()` the published list was computed for (null until the first publish). */
+  _publishedDataRev: null as number | null,
+  /** True when the list does not reflect the current data: nothing published yet, or the data moved since the last
+   *  publish (a late master-data, calendar or setup load). Schedule Confidence holds its paint while this is true. */
+  isStale(): boolean { return Alerts._allAlerts === null || Alerts._publishedDataRev !== Store.dataRev(); },
 
   /** Merge a fresh compute result (UNFILTERED by dismissals) into the pre-dismiss list, then publish the
    *  dismiss-filtered view to the Store. `fresh` already includes the queued-order alerts. */
@@ -809,6 +815,7 @@ export const Alerts = {
     const base = Alerts._allAlerts ?? Store.alerts ?? [];
     const all = onlyLines ? base.filter(a => !onlyLines.has(a.line)).concat(fresh) : fresh;
     Alerts._allAlerts = all;
+    Alerts._publishedDataRev = Store.dataRev();
     const dismissed = Alerts._dismissed;
     Store.setAlerts(dismissed.size ? all.filter(a => !dismissed.has(a.id)) : all.slice(), 'alerts');
   },
