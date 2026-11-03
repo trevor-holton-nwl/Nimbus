@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { Timeline, TimelineNav, DependencyOverlay, Hierarchy, GanttFilter, Interaction, navComputeRange, navLayout, navBarStyle, navClampRect, computeTimelineMinBound, tickerShouldPush, lockLeftEdge, bulkTouchesExpandedLine, companionWritesDeferred, alertCellMapFor, alertSig, frameMeterSummary, installFrameMeter, visItemEqual, zoneTickerUpdates } from '../../../frontend/scheduling/gantt.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Selection } from '../../../frontend/scheduling/selection.mjs';
-import { Util, Toast, PerfMonitor } from '../../../frontend/platform/foundation.mjs';
+import { Util, Toast, PerfMonitor, Modal } from '../../../frontend/platform/foundation.mjs';
 import { Alerts, Utilization } from '../../../frontend/insights/services.mjs';
 import { Engine } from '../../../frontend/optimization/engine.mjs';
 import { Runtime } from '../../../frontend/routing/runtime-client.mjs';
@@ -1661,7 +1661,7 @@ test('Interaction._onDataSetUpdate: a multi-select drag shifts a COMPANION\'s ex
   } finally { fx.restore(); restoreClock(); }
 });
 
-test('Interaction._onDataSetUpdate: a multi-select drag with a failing companion patch commits NOTHING — the dragged item is not partially committed (final-review fix 1)', () => {
+test('Interaction._onDataSetUpdate: a multi-select drag with a failing companion patch moves the dragged item and the rest, skips the failing one and reports it', () => {
   // Regression target: the dragged item's Store mutation must wait until every companion patch has validated.
   // A companion with RUN_TIME 0 makes manualSchedulePatchFor return null, so the whole drag reverts.
   const restoreClock = pinPlantClock(['5512']);
@@ -1703,18 +1703,15 @@ test('Interaction._onDataSetUpdate: a multi-select drag with a failing companion
   try {
     Interaction._onDataSetUpdate({ items: [anchorId] });
 
-    const stillAnchor = Store.tasks[anchorId];
-    assert.equal(stillAnchor.start_date.getTime(), anchorStart.getTime(),
-      'the dragged anchor must NOT be partially committed when a companion patch fails validation');
-    assert.equal(stillAnchor.end_date.getTime(), anchorEnd.getTime());
-    assert.equal(stillAnchor.MACHINE, line);
+    const movedAnchor = Store.tasks[anchorId];
+    assert.equal(movedAnchor.end_date.getTime(), Util.snap(droppedAnchorEnd).getTime(),
+      'the dragged anchor commits even though a companion cannot be placed');
+    assert.equal(movedAnchor.MACHINE, line);
 
     const stillCompanion = Store.tasks[companionId];
     assert.equal(stillCompanion.start_date.getTime(), companionStart.getTime(), 'the companion must also be completely unchanged');
     assert.equal(stillCompanion.end_date.getTime(), companionEnd.getTime());
-
-    assert.equal(timelineItemUpdateCalled, false,
-      'no Timeline._items.update call should happen for any companion when the batch fails validation');
+    assert.equal(fx.toasts.filter(t => /multi_drag_partial/.test(t.msg)).length, 1, 'one partial-move report');
   } finally {
     globalThis.requestAnimationFrame = priorRaf;
     fx.restore(); restoreClock();
@@ -2109,7 +2106,7 @@ test('Interaction._onDataSetUpdate: a multi-drag whose DRAGGED item is routing-i
   }
 });
 
-test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is routing-ineligible reverts the whole selection atomically, naming the companion', () => {
+test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is routing-ineligible moves the dragged item, skips the companion and reports it', () => {
   const priorScheduleRecompute = Alerts.scheduleRecompute;
   const priorScheduleRecomputeLines = Alerts.scheduleRecomputeLines;
   const priorScheduleRebuild = Timeline._scheduleRebuild;
@@ -2152,11 +2149,10 @@ test('Interaction._onDataSetUpdate: a multi-drag whose COMPANION is routing-inel
 
   try {
     Interaction._onDataSetUpdate({ items: [anchorId] });
-    assert.equal(Store.tasks[anchorId].MACHINE, line, 'the dragged anchor must not commit either — atomic revert');
-    assert.equal(Store.tasks[companionId].MACHINE, line, 'the ineligible companion stays on its machine');
-    assert.equal(itemsUpdateCalled, false, 'no Timeline item mirror update should happen when the batch is rejected');
-    assert.equal(toastCalls.length, 1, 'exactly one toast, naming the companion offender');
-    assert.match(toastCalls[0].msg, /B-9204/);
+    assert.equal(Store.tasks[anchorId].end_date.getTime(), anchorEnd.getTime() + 3600000, 'the dragged anchor commits');
+    assert.equal(Store.tasks[companionId].end_date.getTime(), companionEnd.getTime(), 'the ineligible companion stays put');
+    assert.equal(toastCalls.length, 1, 'exactly one report toast');
+    assert.match(toastCalls[0].msg, /multi_drag_partial/);
   } finally {
     Timeline._items = undefined;
     Timeline._scheduleRebuild = priorScheduleRebuild;
@@ -4565,4 +4561,99 @@ test('vis select resync: a collapsed vis selection is put back; a tap or a match
     Interaction._resyncVisSelection({ items: ['s1'], event: { type: 'press' } });
     assert.equal(set.length, before, 'an empty Selection asserts nothing');
   } finally { Timeline._tl = priorTl; fx.restore(); }
+});
+
+/* ---- multi-drag partial policy, same-gesture guard, Move by ---- */
+
+function _multiFixture(ids, line, plant = '5512') {
+  const starts = new Map();
+  Store.setTasks(ids.map((id, i) => {
+    const start = new Date('2026-08-24T08:00:00'); start.setHours(8 + i);
+    const end = new Date(start.getTime() + 4 * 3600000);
+    starts.set(id, { start, end });
+    return { id, PRODUCTION_ORDER: 'P' + id, MATERIAL_NUMBER: 'M' + id, MACHINE: line, PLANT: plant, RUN_TIME: 4, start_date: start, end_date: end };
+  }), 'test');
+  return starts;
+}
+
+test('Interaction._onDataSetUpdate: a running companion is left in place and counted in its own toast', () => {
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorRunning = Engine.isInProgress;
+  const line = 'RUNNING-COMP-LINE';
+  const pos = _multiFixture(['rc-a', 'rc-b', 'rc-run'], line);
+  Engine.isInProgress = (t) => t?.id === 'rc-run';
+  Selection.set(['rc-a', 'rc-b', 'rc-run']);
+  Interaction._multiDropHandled = null;
+  const a = pos.get('rc-a');
+  Timeline._items = { get: (i) => (i === 'rc-a' ? { start: new Date(a.start.getTime() + 2 * 86400000), end: new Date(a.end.getTime() + 2 * 86400000), group: line } : undefined), update: () => {} };
+  try {
+    Interaction._onDataSetUpdate({ items: ['rc-a'] });
+    assert.equal(Store.tasks['rc-a'].end_date.getTime(), a.end.getTime() + 2 * 86400000);
+    assert.equal(Store.tasks['rc-b'].end_date.getTime(), pos.get('rc-b').end.getTime() + 2 * 86400000, 'the idle companion moves');
+    assert.equal(Store.tasks['rc-run'].end_date.getTime(), pos.get('rc-run').end.getTime(), 'the running order stays');
+    assert.equal(fx.toasts.filter(t => /running_count_not_moved/.test(t.msg)).length, 1);
+  } finally { Engine.isInProgress = priorRunning; Interaction._multiDropHandled = null; fx.restore(); restoreClock(); }
+});
+
+test('Interaction._onDataSetUpdate: the per-item updates vis sends for one multi-drop do not re-commit or toast', () => {
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const line = 'SAME-GESTURE-LINE';
+  const pos = _multiFixture(['sg-a', 'sg-b', 'sg-c'], line);
+  Selection.set(['sg-a', 'sg-b', 'sg-c']);
+  Interaction._multiDropHandled = null;
+  const day2 = 2 * 86400000;
+  // vis overwrites every selected item with its raw drag position before each update fires.
+  const raw = {};
+  for (const [id, p] of pos) raw[id] = { start: new Date(p.start.getTime() + day2), end: new Date(p.end.getTime() + day2), group: line };
+  // The companions' raw drag positions differ from the engine-derived ones (here by 1 h): without the guard the
+  // later updates would read as a second small multi-drag.
+  for (const id of ['sg-b', 'sg-c']) { raw[id].start = new Date(raw[id].start.getTime() + 3600000); raw[id].end = new Date(raw[id].end.getTime() + 3600000); }
+  Timeline._items = { get: (i) => raw[i], update: () => {}, remove: () => {}, add: () => {} };
+  const undoBefore = UndoStack._entries.length;
+  try {
+    for (const id of ['sg-a', 'sg-b', 'sg-c']) Interaction._onDataSetUpdate({ items: [id] });
+    for (const [id, p] of pos) assert.equal(Store.tasks[id].end_date.getTime(), p.end.getTime() + day2, id + ' moved exactly once');
+    assert.equal(fx.toasts.filter(t => /left_edge_locked/.test(t.msg)).length, 0, 'no stray left-edge toast');
+    assert.equal(fx.toasts.length, 0, 'no toast at all for a clean multi-drop');
+    assert.equal(UndoStack._entries.length, undoBefore + 1, 'one undo entry');
+  } finally { Interaction._multiDropHandled = null; fx.restore(); restoreClock(); }
+});
+
+test('Interaction.moveSelectedBy: applies the patches, pushes one undo entry and reports skipped orders', () => {
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const line = 'MOVE-BY-LINE';
+  const pos = _multiFixture(['mb-a', 'mb-b', 'mb-firm'], line);
+  Store.setFirmed(['mb-firm'], true, 'test');
+  const undoBefore = UndoStack._entries.length;
+  try {
+    const moved = Interaction.moveSelectedBy(['mb-a', 'mb-b', 'mb-firm'], 2 * 86400000);
+    assert.equal(moved, 2);
+    assert.equal(Store.tasks['mb-a'].end_date.getTime(), pos.get('mb-a').end.getTime() + 2 * 86400000);
+    assert.equal(Store.tasks['mb-firm'].end_date.getTime(), pos.get('mb-firm').end.getTime(), 'the firmed order stays');
+    assert.equal(fx.toasts.filter(t => /firmed_count_not_moved/.test(t.msg)).length, 1);
+    assert.equal(UndoStack._entries.length, undoBefore + 1, 'one undo entry');
+    UndoStack.pop()?.undoFn();
+    assert.equal(Store.tasks['mb-a'].end_date.getTime(), pos.get('mb-a').end.getTime(), 'undo restores');
+  } finally { fx.restore(); restoreClock(); }
+});
+
+test('Interaction.promptMoveBy: cancel does nothing; a pick applies the delta', async () => {
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const priorChoose = Modal.choose;
+  const line = 'MOVE-BY-PROMPT-LINE';
+  const pos = _multiFixture(['mp-a'], line);
+  try {
+    Modal.choose = async () => null;
+    await Interaction.promptMoveBy(['mp-a']);
+    assert.equal(Store.tasks['mp-a'].end_date.getTime(), pos.get('mp-a').end.getTime(), 'cancel is a no-op');
+    let seen = null;
+    Modal.choose = async (o) => { seen = o; return '+1d'; };
+    await Interaction.promptMoveBy(['mp-a']);
+    assert.deepEqual(seen.options.map(o => o.value), ['-2w', '-1w', '-1d', '-1h', '+1h', '+1d', '+1w', '+2w']);
+    assert.equal(Store.tasks['mp-a'].end_date.getTime(), pos.get('mp-a').end.getTime() + 86400000);
+  } finally { Modal.choose = priorChoose; fx.restore(); restoreClock(); }
 });

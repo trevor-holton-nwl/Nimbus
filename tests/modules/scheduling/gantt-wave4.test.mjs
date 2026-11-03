@@ -52,6 +52,7 @@ test('S2-1: plantViewWindow anchors on local midnight of the given instant; hour
   assert.deepEqual(plantViewWindow('hour', now), { startMs: mid, endMs: new Date(2026, 8, 22).getTime() });
   assert.deepEqual(plantViewWindow('day', now), { startMs: mid, endMs: new Date(2026, 8, 24).getTime() });
   assert.deepEqual(plantViewWindow('week', now), { startMs: mid, endMs: new Date(2026, 8, 28).getTime() });
+  assert.deepEqual(plantViewWindow('month', now), { startMs: mid, endMs: new Date(2026, 9, 21).getTime() });
   assert.deepEqual(plantNowWindow(now), { startMs: now - 4 * 3600e3, endMs: now + 4 * 3600e3 });
 });
 
