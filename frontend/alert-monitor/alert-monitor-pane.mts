@@ -5,10 +5,10 @@
    render() on every entry and setActive(false) on leave. `_active` gates every Store /
    producer subscriber so a hidden pane does no work.
 
-   Header (rev 2): title row (profile combobox, Edit / View rules, default, ⋯ page menu), a one-sentence
-   summary line and a controls row (Group by, Sort by); then the pinned banner and the empty states. The leverage
-   panel (#am-leverage, Task 13) and the alert groups (#am-groups, Task 12) are filled by
-   later tasks through the two hook functions at the bottom of the paint path.
+   Page anatomy (frontend/alert-monitor/CLAUDE.md): a title row (profile combobox, Edit / View rules, default, ⋯ page
+   menu), a one-sentence summary line, a controls row (View Inbox | Matrix, Lens Machine | Day | Group, search) and
+   the filter strip; then the banner, the Top fixes panel (#am-leverage) and #am-body, the one re-rendered region
+   (the Matrix with its side list, or the Inbox facets and virtual list). One filter feeds both views.
 
    Reads the always-on producer through AlertProfileMatches.current(). The header pick is the active profile for
    the whole app this session (setSessionProfile: Gantt, minimap, bell, drawer, Orders follow it); never emits a
@@ -19,7 +19,7 @@ import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Util, Config, Modal, Toast, VirtualList, ErrorLog } from '../platform/foundation.mjs';
 import { Session } from '../security/session.mjs';
-import type { AlertProfile, NimbusTask } from '../platform/types.mjs';
+import type { AlertProfile } from '../platform/types.mjs';
 import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import type { AlertProfileMatchSet } from '../insights/alert-profile-matches.mjs';
 import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
@@ -86,12 +86,11 @@ interface Derived {
 
 /** The ambient `NIMBUS` members this pane reaches (the classic-script bridge; never a real import). */
 interface AmNimbus {
-  AlertsUIAdapter?: { focus?(id: string): void; showForCell?(line: string, dayKey: string): void; headlineFor?(type: string): string };
+  AlertsUIAdapter?: { focus?(id: string): void; showForCell?(line: string, dayKey: string): void };
   Table?: { _openOverrideModalForId?(id: string): void; _onPoMatApply?(): void };
   App?: { gotoGanttSub?(sub: string): void; goto?(tab: string): void; gotoMasterSub?(sub: string): void };
   Timeline?: { gotoLineDay?(line: string, dateStr: string): void };
   OptimizerPreview?: { active?: boolean };
-  Inspector?: { _formatRuntimeBasis?(task: NimbusTask): string };
 }
 const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NIMBUS ?? {};
 
@@ -99,6 +98,10 @@ const _nim = (): AmNimbus => (globalThis as unknown as { NIMBUS?: AmNimbus }).NI
 const SIDE_CAP = 80;
 /** Machine facet entries before its search box appears. */
 const FACET_SEARCH_ABOVE = 10;
+/** Quiet period before typing in a search box repaints the page (the filter itself updates on every keystroke). */
+const TYPING_PAINT_MS = 130;
+/** Added to an overload's impact when the leverage cards pick the alert to show a day for: an overload outranks any other alert. */
+const OVERLOAD_PICK_BONUS = 1000;
 
 let _wired = false;
 let _active = false;
@@ -142,6 +145,21 @@ function _setText(id: string, text: string): void {
   if (el && el.textContent !== text) el.textContent = text;
 }
 
+/** The regions inside `#am-body`: replacing the body empties them all, so their dedupe entries must go with it. */
+const _BODY_REGIONS = ['am-mx', 'am-side', 'am-ib-facets', 'am-ib-bar', 'am-ib-vl'] as const;
+
+/** `#am-body` itself (a view shell or an empty state). A replaced body drops the Inbox list and forgets what its regions held. */
+function _setBody(html: string): boolean {
+  if (!_setHtml('am-body', html)) return false;
+  _teardownVl();
+  for (const id of _BODY_REGIONS) _lastHtml.delete(id);
+  return true;
+}
+
+/** The prefs a paint reads. A `settings:change` that leaves them all as they were (the post-save adopt of our own write) needs no repaint. */
+const _PAINT_PREFS = ['alertMonitorView', 'alertMonitorSideWidth', 'alertMonitorFixes', 'alertProfileByPlant', 'pinnedLines', 'dateFormat', 'timeFormat'] as const;
+const _prefsSig = (): string => JSON.stringify([..._PAINT_PREFS.map(k => Store.pref(k) ?? null), Store.userSettings?.confidenceHorizonMinutes ?? null]);
+let _paintedPrefs: string | null = null;
 
 
 /* ---------------------------------------------------------------------------
@@ -324,8 +342,8 @@ function _wireCombo(): void {
 /** Read-modify-write of `alertMonitorView['*'] = {view, lens}` (one page-wide choice; earlier per-profile `groupBy` entries are ignored once it exists). */
 function _persistView(patch: Partial<MonitorView>): void {
   const stored = (Store.pref('alertMonitorView') as Record<string, Record<string, unknown> | undefined> | null | undefined) ?? {};
+  // setPref applies the value to the Store at once and that `settings:change` repaints the page (the subscriber below).
   Session.setPref('alertMonitorView', { ...stored, '*': { ...(stored['*'] ?? {}), ...patch } });
-  _paint();
 }
 
 function _openProfileEditor(): void {
@@ -368,12 +386,27 @@ function _filterChanged(refocus?: () => void): void {
 
 /** A matrix click: the filter this part names replaces those dimensions; clicking the filter that is already set clears exactly them. */
 function _applyPart(part: Partial<MonitorFilter>, refocus?: () => void): void {
+  const groupsBefore = _groupsKey();
   if (filterMatches(_filter, part)) { _filter = clearDims(_filter, part); } else {
     const next = { ..._filter } as unknown as Record<string, unknown>;
     for (const dim of _DIMS) if (part[dim]) next[dim] = new Set(part[dim] as Set<string>);
+    // Machines and work-center groups are one row axis: the clicked count covers exactly what it names, so a sibling choice is dropped.
+    if (part.machines) next.wcGroups = new Set();
+    else if (part.wcGroups) next.machines = new Set();
     _filter = next as unknown as MonitorFilter;
   }
+  if (_groupsKey() !== groupsBefore) _facetQ = '';
   _filterChanged(refocus);
+}
+
+const _groupsKey = (): string => [..._filter.wcGroups].sort().join('\n');
+
+/** The machine facet belongs to exactly one work-center group: it is empty unless one group is chosen, then keeps only that group's machines. */
+function _keepMachinesOfGroup(f: MonitorFilter): void {
+  if (f.wcGroups.size !== 1) { f.machines = new Set(); return; }
+  const g = [...f.wcGroups][0]!;
+  const wcByLine = _d?.wcByLine;
+  if (wcByLine) f.machines = new Set([...f.machines].filter(m => (wcByLine.get(m) ?? UNGROUPED_KEY) === g));
 }
 
 /** An Inbox facet toggle (`dim:key`); the machine facet belongs to exactly one work-center group, so it clears when that stops being true. */
@@ -382,7 +415,7 @@ function _toggleFacet(dim: FilterDim, key: string): void {
   const set = new Set(_filter[dim] as Set<string>);
   if (set.has(key)) set.delete(key); else set.add(key);
   const next = { ..._filter, [dim]: set } as MonitorFilter;
-  if (dim === 'wcGroups') { _facetQ = ''; if (set.size !== 1) next.machines = new Set(); }
+  if (dim === 'wcGroups') { _facetQ = ''; _keepMachinesOfGroup(next); }
   _filter = next;
   _filterChanged();
 }
@@ -396,7 +429,7 @@ function _removeChip(dim: FilterDim, key: string): void {
     const set = new Set(_filter[dim] as Set<string>);
     set.delete(key);
     _filter = { ..._filter, [dim]: set } as MonitorFilter;
-    if (dim === 'wcGroups' && set.size !== 1) _filter.machines = new Set();
+    if (dim === 'wcGroups') { _facetQ = ''; _keepMachinesOfGroup(_filter); }
   }
   _filterChanged();
 }
@@ -515,8 +548,7 @@ function _onClick(e: Event): void {
     case 'ack-view': _ackView(); break;
     case 'fixes-show-more': _showMoreFixes(); break;
     case 'fixes-toggle':
-      Session.setPref('alertMonitorFixes', Store.pref('alertMonitorFixes') === 'collapsed' ? 'open' : 'collapsed');
-      _paint();
+      Session.setPref('alertMonitorFixes', Store.pref('alertMonitorFixes') === 'collapsed' ? 'open' : 'collapsed');   // the settings:change repaint follows
       document.querySelector?.<HTMLElement>('[data-am-action="fixes-toggle"]')?.focus?.();   // the repaint replaced the button
       break;
     case 'fixes-admin-toggle':
@@ -550,15 +582,17 @@ function _onKeydown(e: Event): void {
 function _onInput(e: Event): void {
   const target = e.target as HTMLInputElement | null;
   const box = target?.closest?.('[data-am-search]') as HTMLInputElement | null;
-  if (box) { _filter = { ..._filter, q: String(box.value ?? '') }; _filterChanged(); return; }
-  const fq = target?.closest?.('[data-am-facet-q]') as HTMLInputElement | null;
-  if (fq) {
-    _facetQ = String(fq.value ?? '');
-    _paint();
-    const next = _el<HTMLInputElement>('am-facet-q');
-    next?.focus?.({ preventScroll: true });
-    try { next?.setSelectionRange?.(_facetQ.length, _facetQ.length); } catch { /* not a text input in a stub */ }
+  // The filter text is current at every keystroke; the repaint waits for a pause. The page search box is static and keeps
+  // its focus; the facet box is replaced by the repaint and _renderInbox puts focus and caret back on its successor.
+  if (box) {
+    _filter = { ..._filter, q: String(box.value ?? '') };
+    _levShown = LEV_TOP_N;
+    _scrollInboxTop = true;
+    _typingPaint();
+    return;
   }
+  const fq = target?.closest?.('[data-am-facet-q]') as HTMLInputElement | null;
+  if (fq) { _facetQ = String(fq.value ?? ''); _typingPaint(); }
 }
 
 const _isAcked = (id: string): boolean => AlertProfileMatches.current().acked.has(id);
@@ -615,14 +649,15 @@ function _openRowMenu(anchor: HTMLElement, alertId: string): void {
 
 /** "Move N…": confirms above GROUP_MOVE_CONFIRM_ABOVE, then runs the one-click fix on each movable alert in view in turn. Not available in What-If. */
 function _moveView(): void {
-  if (Sandbox.active || !_d) return;
+  if (Sandbox.active || !_d || _batchBusy) return;
   const counts = groupCounts(_d.filtered, () => false);
   const n = counts.movableOrders;   // distinct orders, as the button says
   if (n === 0) return;
   const ids = counts.movableIds;
-  if (n <= GROUP_MOVE_CONFIRM_ABOVE) { void _runBatchMove(ids); return; }
+  const run = (): void => { void _batchFix(ids, () => _refocusWhere('[data-am-action]', el => el.getAttribute('data-am-action') === 'move-view')); };
+  if (n <= GROUP_MOVE_CONFIRM_ABOVE) { run(); return; }
   void Modal.confirm({ title: t('am.group_fix_n', { n }), message: t('am.group_fix_confirm', { n }) })
-    .then(ok => { if (ok) void _runBatchMove(ids); });
+    .then(ok => { if (ok) run(); });
 }
 
 /** "Acknowledge N…": one reason / end date for every not-yet-acknowledged alert in view (not just the rendered rows). */
@@ -633,34 +668,44 @@ function _ackView(): void {
   if (ids.length) AlertAckModal.open({ plant, alertIds: ids });
 }
 
+/** A batch fix (Move N, a card's "Fix movable") is running: a second one would read the schedule the first is still rewriting. */
+let _batchBusy = false;
+
 /**
- * Sequential batch: `await Alerts.applyFix(id, { quiet: true })` resolves true and dismisses the alert on success (false = refused:
- * nothing changed and the alert stays, e.g. a Fix overload that would leave an error or was cancelled at the tooling confirm; the
- * batch then simply continues with the next alert), so an id that has left Store.alerts afterwards means that order moved. The moved order's other alerts (and its peers' alerts) stay in
- * Store.alerts until the debounced recompute, so any alert naming an already-moved order is skipped: it describes a
- * position that no longer exists. One summary toast.
+ * Sequential batch behind Move N and the leverage cards' "Fix movable": `await Alerts.applyFix(id, { quiet: true })` resolves true and
+ * dismisses the alert on success (false = refused: nothing changed and the alert stays, e.g. a Fix overload that would leave an
+ * error or was cancelled at the tooling confirm; the batch then simply continues with the next alert), so an id that has left
+ * Store.alerts afterwards means that fix landed. A moved order's other alerts (and its peers' alerts) stay in Store.alerts until
+ * the debounced recompute, so any alert naming an already-moved order is skipped: it describes a position that no longer exists.
+ * One at a time (a second call while one runs is ignored). One summary toast, or only the error toast when a fix throws.
  */
-async function _runBatchMove(ids: string[]): Promise<void> {
-  if (Sandbox.active) return;
-  const movedOrders = new Set<string>();
+async function _batchFix(ids: string[], onDone?: () => void): Promise<void> {
+  if (_batchBusy || Sandbox.active) return;
+  _batchBusy = true;
+  const movedKeys = new Set<string>();   // task ids of the orders that moved
+  let moved = 0;
   let blocked = 0;
+  let failed = false;
   try {
     for (const id of ids) {
       const a = Store.alerts.find(x => x.id === id);
       if (!a) continue;                                    // already gone (cleared by an earlier move or a recompute)
-      if (alertOrderIds(a).some(oid => movedOrders.has(oid))) continue;   // the order itself or ANY holder/peer already moved
+      if (alertOrderIds(a).some(oid => movedKeys.has(oid))) continue;   // the order itself or ANY holder/peer already moved
       const applied = await Alerts.applyFix(id, { quiet: true, onBlocked: () => { blocked++; } });
-      if (applied !== false && !Store.alerts.some(x => x.id === id)) movedOrders.add(String(a.taskId ?? id));
+      if (applied !== false && !Store.alerts.some(x => x.id === id)) { moved++; if (a.taskId) movedKeys.add(String(a.taskId)); }
     }
   } catch (e) {
-    Toast.show((e as Error)?.message || String(e), 'error');   // reported once; what moved before the throw is still summarised below
+    failed = true;
+    Toast.show((e as Error)?.message || String(e), 'error');   // the one report of a failed batch: no "N fixed" next to it
   } finally {
-    const moved = movedOrders.size;
-    Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
-    // Refused fixes are quiet inside the batch; one summary here instead of one toast per refused alert.
-    if (blocked > 0) Toast.show(t('toast.fix_overload_blocked_batch', { n: blocked }), 'warn', 7000);
+    _batchBusy = false;
+    if (!failed) {
+      Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
+      // Refused fixes are quiet inside the batch; one summary here instead of one toast per refused alert.
+      if (blocked > 0) Toast.show(t('toast.fix_overload_blocked_batch', { n: blocked }), 'warn', 7000);
+    }
     if (_active) _paint();
-    _refocusWhere('[data-am-action]', el => el.getAttribute('data-am-action') === 'move-view');
+    onDone?.();
   }
 }
 
@@ -678,19 +723,18 @@ function _showOnGantt(alerts: ReadonlyArray<NimbusAlert>): void {
 
 /** Shared by the group heads and the leverage cards: filter the Orders table to these order ids. */
 function _openOrdersInTable(orderIds: Iterable<string>): void {
-  const nums: string[] = [];
+  const nums = new Set<string>();
   for (const id of orderIds) {
-    const task = Store.tasks[id];
-    const no = task ? String(task.ORDER ?? task.PRODUCTION_ORDER ?? '').trim() : '';
-    if (no && !nums.includes(no)) nums.push(no);
+    const no = Util.orderNumber(Store.tasks[id], '');
+    if (no) nums.add(no);
   }
   const nim = _nim();
   const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
-  if (!nums.length || !ta || typeof nim.Table?._onPoMatApply !== 'function') {
+  if (!nums.size || !ta || typeof nim.Table?._onPoMatApply !== 'function') {
     Toast.show(t('am.table_unavailable'), 'warn');
     return;
   }
-  ta.value = nums.join('\n');
+  ta.value = [...nums].join('\n');
   nim.Table._onPoMatApply();
   nim.App?.goto?.('gantt');
   nim.App?.gotoGanttSub?.('orders');
@@ -794,7 +838,7 @@ function _gatherState(): PaintState {
 
 const _orderNoOf = (a: NimbusAlert): string => {
   const task = a.taskId ? Store.tasks[a.taskId] : undefined;
-  return task ? String(task.ORDER ?? task.PRODUCTION_ORDER ?? '') : String(a.msgVars?.order ?? '');
+  return (task ? Util.orderNumber(task, '') : '') || String(a.msgVars?.order ?? '');
 };
 
 /** The filter's context: the day columns, the due anchor memo, the plant's machines with their work-center group, and the search text sources. */
@@ -951,6 +995,7 @@ interface LevDeps {
 function _levBuildInput(s: PaintState): LeverageInput {
   const plant = s.plant as string;
   const days = Math.max(1, Math.ceil(s.horizonMinutes / 1440));
+  const conf = Alerts.confidenceInput();
   return {
     plant,
     plantNow: s.horizonStart,
@@ -965,8 +1010,8 @@ function _levBuildInput(s: PaintState): LeverageInput {
     // The replay scores over exactly this window: [start of the plant's day, +ceil(horizon/1440) days).
     baselineMatrix: Utilization.computeMatrix(s.plantToday, days) as unknown as NimbusUtilizationMatrix,
     // The score counts dismissed alerts: score over the same pre-dismiss list and machine count the badge uses, so "before" equals it.
-    scoringAlerts: Alerts.confidenceInput().alerts,
-    machines: Alerts.confidenceInput().machines,
+    scoringAlerts: conf.alerts,
+    machines: conf.machines,
   };
 }
 
@@ -995,7 +1040,8 @@ let _levShownItems: LeverageItem[] = [];   // what the panel lists now: _levItem
 let _levInput: LeverageInput | null = null;
 let _levPlant: string | null = null;      // the plant the items belong to
 let _levHave = false;                     // a first pass has produced results for _levPlant
-let _levStale = false;                    // the tab was re-entered: refresh once
+let _levStale = false;                    // the tab was re-entered and the plan moved since the last result: refresh once
+let _levRev: number | null = null;        // Store.rev() the last phase-2 result was computed at
 let _levShown = LEV_TOP_N;
 let _levAdminOpen = false;                // the "Needs an admin" disclosure; resets with the plant
 const _levReplaying = new Set<string>();  // fix keys with a minutes replay in flight (Enter + Replay must not double-run)
@@ -1016,7 +1062,7 @@ let _setupAdminP: Promise<void> | null = null;
 
 function _levReset(plant: string | null): void {
   _levAbortAll();
-  _levItems = []; _levInput = null; _levPlant = plant; _levHave = false; _levShown = LEV_TOP_N; _levAdminOpen = false;
+  _levItems = []; _levInput = null; _levPlant = plant; _levHave = false; _levRev = null; _levShown = LEV_TOP_N; _levAdminOpen = false;
   _levStaleDrops = 0;
   _levTyped.clear(); _levAttempted.clear();
 }
@@ -1026,7 +1072,7 @@ function _ensureSetupAdmin(): void {
   if (_setupAdminP) return;
   _setupAdminP = import('../setup/setup-admin.mjs').then(m => {
     _setupAdmin = m.SetupAdmin as unknown as SetupAdminLite;
-    if (_active) _paint();
+    _paintLeverage();   // only the Top fixes rows read it
   }, () => { /* the card falls back to "copy for the setup owner" */ });
 }
 
@@ -1062,6 +1108,19 @@ let _abMap: ReadonlyMap<string, NimbusAlert> = new Map();
 function _alertsById(): ReadonlyMap<string, NimbusAlert> {
   if (_abSrc !== Store.alerts) { _abSrc = Store.alerts; _abMap = new Map(Store.alerts.map(a => [a.id, a])); }
   return _abMap;
+}
+
+/**
+ * A leverage-only update (a phase landing, a replay, "Show 10 more", SetupAdmin arriving): redraw the Top fixes panel from the
+ * last paint's state. Synchronous, like _paint. Falls back to a full paint when there is no usable state yet (first paint, a
+ * plant change the producer has not caught up with).
+ */
+function _paintLeverage(): void {
+  if (!_active) return;
+  const s = _s;
+  if (!s || s.plant !== (Store.selectedPlant ?? null) || (s.plant && s.m.plant !== s.plant)) { _paint(); return; }
+  _renderLeverage(s, _d);
+  OverflowMenu.reconcile();
 }
 
 function _renderLeverage(s: PaintState, d: Derived | null): void {
@@ -1100,7 +1159,14 @@ const _levDebounced = Util.debounce(() => { if (_active && _levHave) void _levRu
 
 const _levSkipAnalysis = (): boolean => Sandbox.active === true || _nim().OptimizerPreview?.active === true;
 
+/** One leverage run. Nothing that goes wrong inside it may escape as an unhandled rejection. */
 async function _levRun(): Promise<void> {
+  try { await _levRunOnce(); } catch (e) {
+    ErrorLog.warn('alert-monitor', 'leverage run failed', { error: String((e as Error)?.message || e) });
+  }
+}
+
+async function _levRunOnce(): Promise<void> {
   if (!_active) return;
   if (_levInFlight) { _levRerun = true; return; }
   const s = _gatherState();
@@ -1120,11 +1186,12 @@ async function _levRun(): Promise<void> {
   _levPlant = plant; _levInput = input; _levItems = items; _levHave = true;
   const present = new Set(s.scoped.map(a => a.id));
   for (const id of _levAttempted) if (!present.has(id)) _levAttempted.delete(id);
-  _paint();                                    // phase 1: removal numbers, at once
+  _paintLeverage();                            // phase 1: removal numbers, at once
   if (!input || _levSkipAnalysis()) return;
   _levInFlight = true;
   const ctl = new AbortController();
   _levControllers.add(ctl);
+  let landed = false;
   try {
     let next = await _levDeps.analyze(input, _levRunner, items, { signal: ctl.signal });   // reuse the grouping phase 1 already painted
     for (const [key, minutes] of _levTyped) {
@@ -1141,7 +1208,8 @@ async function _levRun(): Promise<void> {
     }
     _levStaleDrops = 0;
     _levItems = next;
-    _paint();                                  // phase 2: setup-pair cards carry the replayed numbers
+    _levRev = rev0;
+    landed = true;
   } catch (e) {
     const why = _isAbortOrTimeout(e);
     if (why === 'timeout') {
@@ -1154,6 +1222,10 @@ async function _levRun(): Promise<void> {
     _levControllers.delete(ctl);
     _levInFlight = false;
     if (_levRerun) { _levRerun = false; if (_levHave) _levDebounced(); else void _levRun(); }
+  }
+  if (!landed) return;
+  try { _paintLeverage(); } catch (e) {        // phase 2: setup-pair cards carry the replayed numbers
+    ErrorLog.warn('alert-monitor', 'leverage render failed', { error: String((e as Error)?.message || e) });
   }
 }
 
@@ -1173,10 +1245,11 @@ async function _levMinutesEntered(key: string, raw: string): Promise<void> {
   _levControllers.add(ctl);
   try {
     const next = await _levDeps.replay(input, item, minutes, _levRunner, { signal: ctl.signal });
-    if (!_active || Store.rev() !== rev0) return;   // a newer analysis re-applies the typed minutes
+    if (!_active) return;
+    if (Store.rev() !== rev0) { _levDebounced(); return; }   // the plan moved: a new analysis re-applies the typed minutes (_levTyped)
     _levItems = _levItems.map(i => (i.key === key ? next : i));
     _levForcePaint = true;
-    try { _paint(); } finally { _levForcePaint = false; }
+    try { _paintLeverage(); } finally { _levForcePaint = false; }
   } catch (e) {
     if (_isAbortOrTimeout(e) !== 'abort') {
       ErrorLog.warn('alert-monitor', _isAbortOrTimeout(e) === 'timeout' ? 'leverage replay timed out' : 'leverage replay failed', { error: String((e as Error)?.message || e) });
@@ -1195,7 +1268,7 @@ function _showMoreFixes(): void {
   const main = Session.isAdmin() ? _levShownItems : _levShownItems.filter(i => !i.adminOnly);
   const firstNew = main[Math.min(Math.max(_levShown, LEV_TOP_N), LEV_MAX_RENDER)];
   _levShown = Math.min(_levShown + LEV_STEP, LEV_MAX_RENDER);
-  _paint();
+  _paintLeverage();
   const more = document.querySelector?.<HTMLElement>('[data-am-action="fixes-show-more"]');
   if (more) { more.focus?.(); return; }
   if (!firstNew) return;
@@ -1228,7 +1301,7 @@ function _openFixMenu(anchor: HTMLElement, key: string): void {
 
 
 function _levShowAlerts(item: LeverageItem): void {
-  const byId = new Map(Store.alerts.map(a => [a.id, a]));
+  const byId = _alertsById();
   _showOnGantt(item.alertIds.map(id => byId.get(id)).filter((a): a is NimbusAlert => !!a));
 }
 
@@ -1243,13 +1316,13 @@ async function _copyText(text: string): Promise<void> {
 
 /** The alert of a calendar / optimize card to show a day for: the heaviest overload, else the heaviest alert. */
 function _levWorstAlert(item: LeverageItem, s: PaintState): NimbusAlert | null {
-  const byId = new Map(Store.alerts.map(a => [a.id, a]));
+  const byId = _alertsById();
   let best: NimbusAlert | null = null;
   let bestKey = -1;
   for (const id of item.alertIds) {
     const a = byId.get(id);
     if (!a?.line || !a.time) continue;
-    const key = impactPoints(a, s.horizonStart, s.horizonMinutes) + (a.type === 'overload' ? 1000 : 0);
+    const key = impactPoints(a, s.horizonStart, s.horizonMinutes) + (a.type === 'overload' ? OVERLOAD_PICK_BONUS : 0);
     if (key > bestKey) { best = a; bestKey = key; }
   }
   return best;
@@ -1273,7 +1346,8 @@ function _onLevAction(act: string, key: string): void {
     case 'goto': {
       // AlertsUIAdapter.focus needs the alert's line and time; it reveals a filtered-out line, selects both orders of a pair
       // and goes through Timeline.gotoLineDay, so every Go To here is the same call the drawer's row makes.
-      const first = item.alertIds.map(id => Store.alerts.find(a => a.id === id)).find(a => a && a.line && a.time);
+      const byId = _alertsById();
+      const first = item.alertIds.map(id => byId.get(id)).find(a => a && a.line && a.time);
       if (first) nim.AlertsUIAdapter?.focus?.(first.id);
       else if (action.kind === 'calendar-day') nim.Timeline?.gotoLineDay?.(action.line, action.dayKey);
       break;
@@ -1282,26 +1356,15 @@ function _onLevAction(act: string, key: string): void {
       if (action.kind === 'calendar-day') nim.AlertsUIAdapter?.showForCell?.(action.line, action.dayKey);
       break;
     case 'diagnose-worst': {
-      const w = _levWorstAlert(item, _gatherState());
+      const w = _levWorstAlert(item, _s ?? _gatherState());
       if (w?.line && w.time) nim.AlertsUIAdapter?.showForCell?.(w.line, Util.dayKey(w.time));
       break;
     }
     case 'cal-fix':
-      if (Sandbox.active || action.kind !== 'calendar-day') return;
+      if (Sandbox.active || _batchBusy || action.kind !== 'calendar-day') return;
       item.alertIds.forEach(id => _levAttempted.add(id));
       // One at a time: a Fix overload may stop at its own confirm, and each fix reads the schedule the previous one left.
-      void (async () => {
-        let moved = 0, blocked = 0;
-        try {
-          for (const id of action.fixableAlertIds) {
-            if (await Alerts.applyFix(id, { quiet: true, onBlocked: () => { blocked++; } })) moved++;
-          }
-        } catch (error) { Toast.show((error as Error)?.message || String(error), 'error'); }
-        finally {
-          Toast.show(t(moved === 1 ? 'am.group_fix_done_one' : 'am.group_fix_done', { n: moved }), moved > 0 ? 'success' : 'warn');
-          if (blocked > 0) Toast.show(t('toast.fix_overload_blocked_batch', { n: blocked }), 'warn', 7000);
-        }
-      })();
+      void _batchFix(action.fixableAlertIds);
       break;
     case 'edit-calendar':
       if (action.kind === 'calendar-day') {
@@ -1497,6 +1560,7 @@ function _wireSideResize(): void {
   let startX = 0;
   let startW = 0;
   let curW = 0;
+  let boxW: number | undefined;   // the page width, read once at pointerdown (reading it per move forces a layout)
   const finish = (e: PointerEvent): void => {
     if (!dragging) return;
     dragging = false;
@@ -1511,14 +1575,15 @@ function _wireSideResize(): void {
     try { h.setPointerCapture?.(e.pointerId); } catch { /* unsupported */ }
     dragging = true;
     startX = e.clientX;
-    startW = _sideWidth();
+    boxW = layoutW();
+    startW = clampSideWidth(Store.pref('alertMonitorSideWidth'), boxW);
     curW = startW;
     layout()?.classList?.add('am-resizing');
     document.body?.classList?.add('am-side-resizing');
   });
   h.addEventListener('pointermove', (e: PointerEvent) => {
     if (!dragging) return;
-    curW = clampSideWidth(startW + (startX - e.clientX), layoutW());
+    curW = clampSideWidth(startW + (startX - e.clientX), boxW);
     _applySideWidth(curW);
   });
   h.addEventListener('pointerup', finish);
@@ -1545,7 +1610,7 @@ const INBOX_SHELL = '<div class="am-ib"><aside class="am-ib-facets" id="am-ib-fa
   + '<div class="am-ib-bar" id="am-ib-bar"></div><div class="am-ib-scroll" id="am-ib-vl" role="list"></div></section></div>';
 
 function _renderMatrix(s: PaintState, d: Derived): void {
-  if (_setHtml('am-body', _matrixShellHtml())) { _teardownVl(); _lastHtml.delete('am-mx'); _lastHtml.delete('am-side'); _wireSideResize(); }
+  if (_setBody(_matrixShellHtml())) _wireSideResize();
   const lens = s.view.lens;
   const cats = s.m.profileId === ALL_ALERTS_PROFILE_ID ? undefined
     : (() => { const ec = effectiveCategories(s.m.profile); return ALERT_CATEGORY_ORDER.filter(c => ec[c]?.on === true); })();
@@ -1635,11 +1700,12 @@ function _facetsHtml(s: PaintState, d: Derived): string {
     const mc = _facetCounts(s, d, ['machines'], a => a.line || 'none');
     let keys = [...mc.keys()].filter(k => (d.wcByLine.get(k) ?? UNGROUPED_KEY) === g);
     keys = [...new Set([...keys, ...f.machines])].sort((a, b) => (mc.get(b)?.n ?? 0) - (mc.get(a)?.n ?? 0) || (a < b ? -1 : 1));
-    const q = _facetQ.trim().toLowerCase();
+    const boxShown = keys.length > FACET_SEARCH_ABOVE;
+    const q = boxShown ? _facetQ.trim().toLowerCase() : '';   // a query typed earlier must not filter a list that has no box to clear it
     const shown = q ? keys.filter(k => k.toLowerCase().includes(q)) : keys;
     const mMax = Math.max(0, ...keys.map(k => mc.get(k)?.n ?? 0));
     where += `<div class="am-facet-sub">`
-      + (keys.length > FACET_SEARCH_ABOVE
+      + (boxShown
         ? `<input type="search" class="input am-facet-q" id="am-facet-q" data-am-facet-q autocomplete="off" value="${esc(_facetQ)}" placeholder="${esc(t('am.search_ph'))}" aria-label="${esc(t('am.search_ph'))}">` : '')
       + shown.map(k => _facetItem('machines', k, k === 'none' ? t('am.group_unassigned') : k, mc.get(k)?.n ?? 0, mc.get(k)?.err ?? 0, mMax, f.machines.has(k))).join('')
       + `</div>`;
@@ -1666,13 +1732,16 @@ const _inboxRowH = (a: NimbusAlert): number => {
 };
 
 function _renderInbox(s: PaintState, d: Derived): void {
-  if (_setHtml('am-body', INBOX_SHELL)) { _teardownVl(); _lastHtml.delete('am-ib-facets'); _lastHtml.delete('am-ib-bar'); }
-  const held = (globalThis.document?.activeElement ?? null) as HTMLElement | null;
+  _setBody(INBOX_SHELL);
+  // The facet box is re-created with the panel: hand focus and the caret to its successor so typing is not interrupted.
+  const held = (globalThis.document?.activeElement ?? null) as HTMLInputElement | null;
   const heldFacetQ = held?.id === 'am-facet-q';
+  const caret = heldFacetQ ? { start: held?.selectionStart ?? null, end: held?.selectionEnd ?? null } : null;
   _setHtml('am-ib-facets', _facetsHtml(s, d));
-  if (heldFacetQ) {
+  if (caret) {
     const next = _el<HTMLInputElement>('am-facet-q');
     next?.focus?.({ preventScroll: true });
+    try { if (caret.start != null && caret.end != null) next?.setSelectionRange?.(caret.start, caret.end); } catch { /* not a text input in a stub */ }
   }
   const sortBtn = (id: 'impact' | 'time', key: string): string =>
     `<button type="button" class="seg-btn${_sort === id ? ' active' : ''}" data-am-sort="${id}" aria-pressed="${_sort === id}">${esc(t(key))}</button>`;
@@ -1704,8 +1773,7 @@ function _renderInbox(s: PaintState, d: Derived): void {
 
 function _renderBody(s: PaintState, d: Derived | null): void {
   if (s.empty !== null || !s.plant || !d) {
-    _teardownVl();
-    _setHtml('am-body', _emptyHtml(s));
+    _setBody(_emptyHtml(s));
     return;
   }
   if (s.view.view === 'inbox') _renderInbox(s, d); else _renderMatrix(s, d);
@@ -1714,6 +1782,7 @@ function _renderBody(s: PaintState, d: Derived | null): void {
 function _paint(): void {
   if (!_active) return;
   _ensureShell();
+  _paintedPrefs = _prefsSig();
   if ((Store.selectedPlant ?? null) !== _lastPlant) { _lastPlant = Store.selectedPlant ?? null; AlertMonitorPane.resetView(); }
   // A profile change keeps the filter: the same machines / days stay narrowed under the new rules.
   const s = _gatherState();
@@ -1737,6 +1806,8 @@ function _paint(): void {
 }
 
 const _debouncedPaint = Util.debounce(() => { if (_active) _paint(); }, 150);
+/** The repaint after typing in a search box; the filter text itself was already updated by the keystroke. */
+const _typingPaint = Util.debounce(() => { if (_active) _paint(); }, TYPING_PAINT_MS);
 
 /* ---------------------------------------------------------------------------
    Public API
@@ -1746,19 +1817,26 @@ export const AlertMonitorPane = {
   init(): void {
     if (_wired) return;
     _wired = true;
-    // The Inbox list is as tall as the facet column and its layout follows its own width: re-measure after a window resize.
-    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-      window.addEventListener('resize', Util.debounce(() => { if (_active && _vl) _paint(); if (_active) _applySideWidth(); }, 150));
-    }
+    // The Inbox list is as tall as the facet column and its layout follows its own width; the matrix header and the side list's
+    // clamp depend on the room too: re-measure all of them once after a window resize.
+    globalThis.window?.addEventListener?.('resize', Util.debounce(() => {
+      if (!_active) return;
+      if (_vl) _paint();
+      _measureMatrixHead();
+      _applySideWidth();
+    }, 150));
     Store.subscribe((evt: StoreEvent) => {
       if (!_active) return;
       switch (evt.type) {
         case 'alerts:change': _debouncedPaint(); _levPlanMoved(); break;
-        case 'plant:selected':
-        case 'settings:change': _paint(); break;
-        case 'sandbox:entered':
+        case 'plant:selected': _paint(); break;
+        case 'settings:change':
+          // Our own writes land here twice (the optimistic apply, then the server's blob): repaint only when a pref the page shows changed.
+          if (_prefsSig() !== _paintedPrefs) _paint();
+          break;
+        case 'sandbox:entered': _paint(); break;   // row actions flip disabled with What-If (Task 12)
         case 'sandbox:exited':
-        case 'sandbox:reverted': _paint(); break;   // row actions flip disabled with What-If (Task 12)
+        case 'sandbox:reverted': _levPlanMoved(); _paint(); break;   // the plan the fixes were computed on may have changed back
         default:
           // Anything the leverage replay is computed from: orders, the setup snapshot, calendars and blackouts.
           if (evt.type.startsWith('tasks:bulk') || evt.type === 'setup-snapshot:replace' || evt.type === 'calendar:change'
@@ -1766,14 +1844,13 @@ export const AlertMonitorPane = {
           break;
       }
     }, 'alert-monitor-pane');
-    AlertProfileMatches.subscribe(() => { if (_active) _paint(); });
+    AlertProfileMatches.subscribe(() => { if (_active) _debouncedPaint(); });
     AlertProfileClient.subscribe(() => { if (_active) _paint(); });
-    globalThis.window?.addEventListener?.('resize', () => { if (_active) _measureMatrixHead(); });
   },
   /** Called by the shell on every entry to the tab. */
   render(): void {
     _active = true;
-    _levStale = true;   // events were ignored while the tab was hidden: refresh the leverage cards once
+    if (Store.rev() !== _levRev) _levStale = true;   // events were ignored while the tab was hidden: refresh the leverage cards once, if the plan moved
     _paint();
   },
   /** Forget the filter, the open row, folds and the fixes state (plant change). Does not paint. */

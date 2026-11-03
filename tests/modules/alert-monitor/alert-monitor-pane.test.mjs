@@ -68,7 +68,7 @@ beforeEach(() => {
   } };
   calls.session = []; calls.prefs = [];
   AlertProfileMatches.setSessionProfile = id => { calls.session.push(id); };
-  Session.setPref = (k, v) => { calls.prefs.push([k, v]); };
+  Session.setPref = (k, v) => { calls.prefs.push([k, v]); Store.setUserSettings({ [k]: v }, 'settings-pref'); };   // like the real one: apply, then emit
   Util.plantClock = () => new Date('2026-10-20T08:00:00');
   Store.setUserSettings({ alertProfileByPlant: { P1: 'p1', P9: 'z' } }, 'test');
   Store.setSelectedPlant('P1', 'test');
@@ -274,6 +274,7 @@ test('Set as default writes alertProfileByPlant read-modify-write; "Your default
   clickAm('make-default');
   assert.deepEqual(calls.prefs, [['alertProfileByPlant', { P1: 'p2', P9: 'z' }]]);
   assert.deepEqual(calls.session, [null]);
+  Store.setUserSettings({ alertProfileByPlant: { P1: 'p1', P9: 'z' } }, 'test');   // the stub applied the write; start the next part from the old default
 
   useProfiles([P1, P2], fakeMatches({ profileId: 'p1', profile: P1 }));
   AlertMonitorPane.render();

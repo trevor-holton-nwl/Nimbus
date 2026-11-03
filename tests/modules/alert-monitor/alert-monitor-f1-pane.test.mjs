@@ -56,7 +56,7 @@ beforeEach(() => {
     querySelectorAll() { return []; }, addEventListener() {}, removeEventListener() {}, activeElement: null,
   };
   AlertProfileClient.cached = () => [];
-  Session.setPref = (k, v) => { prefs.push([k, v]); };
+  Session.setPref = (k, v) => { prefs.push([k, v]); Store.setUserSettings({ [k]: v }, 'settings-pref'); };   // like the real one: apply, then emit
   AlertProfileMatches.setFocusTaskIds = () => {};
   Util.plantClock = () => new Date('2026-10-20T08:00:00');
   Store.setSelectedPlant('P1', 'test');
