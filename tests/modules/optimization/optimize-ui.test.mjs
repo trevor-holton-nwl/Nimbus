@@ -2528,6 +2528,24 @@ test('Gap C: an unhydrated plant calendar asks first; Cancel starts neither the 
     assert.equal(calls.bg + calls.fg, 0, 'declining runs nothing');
   }));
 
+// P0-13: run() hides the dialog before its pre-run confirms; a Cancel must bring it back with its state, not leave
+// the planner with nothing (and the next open() reseeding scope/lines/window).
+test('P0-13: cancelling the calendar confirm re-shows the Optimize dialog instead of discarding it', () =>
+  withCalendarGate('failed', false, async (calls, chk) => {
+    const modal = globalThis.document.getElementById('modal-optimize');
+    const inner = makeSandboxElement('opt-modal-inner');
+    modal.querySelector = sel => (sel === '.opt-modal' ? inner : null);
+    OptimizeDialog.open();
+    assert.equal(modal.hidden, false);
+    chk.checked = false;
+    await OptimizeDialog.run();
+    await wait(20);
+    assert.equal(calls.confirms.length, 1);
+    assert.equal(modal.hidden, false, 'Cancel leaves the dialog open');
+    assert.equal(inner.classList.contains('visible'), true, 'and visible (not faded out)');
+    assert.equal(calls.bg + calls.fg, 0);
+  }));
+
 test('Gap C: a pending calendar also asks, and "Run anyway" proceeds in both the background and foreground paths', () =>
   withCalendarGate('pending', true, async (calls, chk) => {
     chk.checked = true;

@@ -685,6 +685,15 @@ export const OptimizeDialog = (() => {
     setTimeout(() => { el.hidden = true; }, 230);
   }
 
+  /** Undo close(true) when a pre-run confirm is cancelled: the dialog comes back with every choice intact (scope, lines,
+   *  preset, custom window) instead of being discarded and reseeded by the next open(). */
+  function _reshow() {
+    const el = document.getElementById('modal-optimize');
+    if (!el) return;
+    el.hidden = false;
+    requestAnimationFrame(() => el.querySelector('.opt-modal')?.classList.add('visible'));
+  }
+
   async function run() {
     const bgRun = OptimizerPreview._backgroundRun;
     if (bgRun) {
@@ -807,7 +816,7 @@ export const OptimizeDialog = (() => {
       const ok = await Modal.confirm({
         title: Util.t('modal.no_priority_ranks_confirm_msg', { plant, fields: names }),
       });
-      if (!ok) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
+      if (!ok) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); _reshow(); return; }
     }
 
     // Gap C (2026-10-23): Optimize reads Store.plants/calendars, which fall back to the localStorage copy when the
@@ -822,13 +831,14 @@ export const OptimizeDialog = (() => {
         confirmLabel: Util.t('btn.opt_run_anyway'),
         tone: 'warn',
       });
-      if (!proceed) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); return; }
+      if (!proceed) { if (!exhaustive) OptimizerPreview.hideLoading(); restoreRunBtn(); _reshow(); return; }
     }
 
     // Tool Inventory (rule Hard only; Remove Backlog ignores the rule): the run must read loaded, current counts.
     if (_mode !== 'backlog' && !(await ensureToolInventoryForRun(plant))) {
       if (!exhaustive) OptimizerPreview.hideLoading();
       restoreRunBtn();
+      _reshow();
       return;
     }
 
