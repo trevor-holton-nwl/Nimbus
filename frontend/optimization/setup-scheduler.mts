@@ -672,9 +672,14 @@ function freeIndexSpanFor(bounds: Readonly<DueDateFirstBounds>): { from: number;
  * fields are computed eagerly; everything keyed by task/line/day is an empty
  * lazy `Map` filled in by the memo helpers below on first use.
  */
+let runContextBuilds = 0;
+/** Test hook: how many run contexts `buildRunContext` has built in this realm (monotonic). */
+export function runContextBuildCount(): number { return runContextBuilds; }
+
 export function buildRunContext(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>,
 ): SetupRunContext {
+  runContextBuilds++;
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
   const resolutionIndex = definition
@@ -7881,9 +7886,18 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
   return findings;
 }
 
-export function validateCandidateForApply(candidate: Readonly<CandidateResult>, currentSnapshot: Readonly<ScheduleSnapshot>): ValidationFinding[] {
+/** `skipStale`: the caller discards or ignores `stale_candidate` (headless apply, whose live board always differs from the
+ *  run's snapshot, and the headless run, which validates against the snapshot it just ran on), so the structural
+ *  baseline-vs-current JSON diff is not computed at all. Every other check is unchanged. */
+export function validateCandidateForApply(candidate: Readonly<CandidateResult>, currentSnapshot: Readonly<ScheduleSnapshot>, opts?: { skipStale?: boolean }): ValidationFinding[] {
   const context = candidate.validationContext;
-  return context ? validateCandidate(context.snapshot, context.bounds, candidate, currentSnapshot) : [];
+  return context ? validateCandidate(context.snapshot, context.bounds, candidate, opts?.skipStale ? undefined : currentSnapshot) : [];
+}
+
+/** Bounds for validating many candidates against ONE snapshot: the run context (indexes and memos) for `snapshot` is
+ *  built once here, so repeated `validateCandidate(snapshot, <result>, ...)` calls reuse it instead of rebuilding per call. */
+export function boundsWithRunContext(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>): Readonly<DueDateFirstBounds> {
+  return withRunContext(snapshot, hardBounds(snapshot, bounds));
 }
 
 function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, candidate: CandidateResult): CandidateResult {

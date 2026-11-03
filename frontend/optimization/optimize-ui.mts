@@ -21,7 +21,7 @@ import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
 import { runOptimizerPreview } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidate, validateCandidateForApply, toolingRuleForSnapshot } from './setup-scheduler.mjs';
+import { applyPatchesToSnapshot, boundsWithRunContext, resolveTaskPlant, validateCandidate, validateCandidateForApply, toolingRuleForSnapshot } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
 import { confirmToolQueue, toolQueueSummary, raiseToolInventory } from './tool-queue-confirm.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
@@ -1302,6 +1302,10 @@ export const OptimizerPreview = {
   _staleReason: null as string | null,
   _staleMessageKey: null as string | null,
   _taskBaseline: null as Map<string, string> | null,
+  /** `Store.rev()` at which `_revalidateTaskBaseline` last confirmed the live plant matches `_taskBaseline`; null =
+   *  never confirmed. Every Store write bumps rev, so an unchanged rev means an unchanged task set. Cleared whenever
+   *  the baseline is replaced or the preview is cleared. */
+  _baselineVerifiedRev: null as number | null,
   /** Tool facts (rule + inventory) the open preview ran on; null = unknown (never stales on tool changes). */
   _toolFingerprint: null as string | null,
   _taskWatchUnsubscribe: null as (() => void) | null,
@@ -1506,8 +1510,10 @@ export const OptimizerPreview = {
     const baseline = OptimizerPreview._taskBaseline;
     const plant = OptimizerPreview._plant;
     if (!OptimizerPreview.active || !baseline || !plant) return false;
-    const current = taskBaseline(Store.tasksArr.filter(task =>
-      resolveTaskPlant(task, { lineSettings: Store.lineSettings, masterData: Store.masterData }) === plant));
+    const rev = Store.rev();
+    if (OptimizerPreview._baselineVerifiedRev === rev) return true;
+    const taskCtx = { lineSettings: Store.lineSettings, masterData: Store.masterData };
+    const current = taskBaseline(Store.tasksArr.filter(task => resolveTaskPlant(task, taskCtx) === plant));
     let matches = current.size === baseline.size;
     if (matches) {
       for (const [id, value] of baseline) {
@@ -1515,6 +1521,7 @@ export const OptimizerPreview = {
       }
     }
     if (!matches) OptimizerPreview._markTaskStale('preview-plant task baseline changed');
+    else OptimizerPreview._baselineVerifiedRev = rev;
     return matches;
   },
 
@@ -1949,6 +1956,7 @@ export const OptimizerPreview = {
   _installPreviewResult(result: PreviewResult): void {
     OptimizerPreview._snapshot = result.snapshot;
     OptimizerPreview._taskBaseline = result.taskBaseline;
+    OptimizerPreview._baselineVerifiedRev = null;
     OptimizerPreview._toolFingerprint = result.toolFingerprint ?? null;
     OptimizerPreview._preKpis  = result.preKpis;
     OptimizerPreview._postKpis = result.postKpis;
@@ -2478,15 +2486,18 @@ export const OptimizerPreview = {
     const plant = OptimizerPreview._plant;
     if (!snap || !candidate) { Modal.close('modal-opt-preview'); return; }
     // A background result viewed after local edits: Apply becomes "apply what still fits".
-    if (!OptimizerPreview.canApply() && OptimizerPreview._canApplyPartial() && plant) {
+    const fullApply = OptimizerPreview.canApply();
+    if (!fullApply && OptimizerPreview._canApplyPartial() && plant) {
       await OptimizerPreview._runGuardedCommit(OptimizerPreview.applyPartial({ plant, candidate, snapshot: snap, taskBaseline: OptimizerPreview._taskBaseline! }));
       return;
     }
-    if (!OptimizerPreview.canApply()) {
+    if (!fullApply) {
       Toast.show(OptimizerPreview._staleMessage(), 'warn');
       return;
     }
-    const findings = validateCandidateForApply(candidate, snapshotSchedule(plant ?? undefined));
+    // One live snapshot per Apply gesture: the stale check below and the prune pass read the same board (nothing awaits between them).
+    const liveSnapshot = snapshotSchedule(plant ?? undefined);
+    const findings = validateCandidateForApply(candidate, liveSnapshot);
     if (findings.some(finding => finding.severity === 'error')) {
       candidate.validationFindings = findings;
       OptimizerPreview._render();
@@ -2501,8 +2512,9 @@ export const OptimizerPreview = {
     let keptPatches = mode === 'backlog'
       ? candidate.patches
       : candidate.patches.filter(patch => { const live = Store.tasks[String(patch.id)]; return !(live && Engine.isInProgress(live)); });
+    const keptSet = new Set<SchedulePatch>(keptPatches);
     const runningSkippedIds = candidate.patches
-      .filter(patch => !keptPatches.includes(patch)).map(patch => String(patch.id));
+      .filter(patch => !keptSet.has(patch)).map(patch => String(patch.id));
     // O9: dropping a running order frees its old slot in the plan but not on the live board, so a kept order the
     // proposal placed there would now overlap it. Re-validate the survivors against the live board, only when
     // something was actually dropped and never for Backlog (which legitimately moves running orders).
@@ -2510,7 +2522,7 @@ export const OptimizerPreview = {
     if (mode !== 'backlog' && runningSkippedIds.length && plant) {
       const running = new Set(runningSkippedIds);
       const pruned = OptimizerPreview._pruneAgainstLive({
-        plant, candidate, snapshot: snap,
+        plant, candidate, snapshot: snap, liveSnapshot,
         shouldDrop: id => running.has(id),
       });
       if (!pruned) {
@@ -3039,6 +3051,8 @@ export const OptimizerPreview = {
     plant: string;
     candidate: CandidateResult;
     snapshot: ReadonlyArray<NimbusTask>;
+    /** The caller's already-captured live board for this plant (same synchronous gesture); omitted = capture here. */
+    liveSnapshot?: ScheduleSnapshot;
     shouldDrop: (id: string, live: NimbusTask | undefined) => boolean;
   }): { kept: SchedulePatch[]; dropped: string[] } | null {
     const { candidate, plant } = args;
@@ -3073,14 +3087,16 @@ export const OptimizerPreview = {
     }
     const context = candidate.validationContext;
     if (!context) return null;
-    const live0 = snapshotSchedule(plant);
+    const live0 = args.liveSnapshot ?? snapshotSchedule(plant);
     const ms = (value: unknown): number | null => (value instanceof Date ? value.getTime() : null);
     // The message is part of the key: capacity_overlap names both orders, so a NEW overlap that lands on an order which
     // already overlapped another one live is a different finding, not the baseline one.
     const keyOf = (finding: { code: string; taskId?: string | number; message?: string }): string => `${finding.code}|${finding.taskId}|${finding.message ?? ''}`;
+    // One run context for the live board, reused by every validation below.
+    const liveBounds = boundsWithRunContext(live0, context.bounds);
     const errorsFor = (patchSet: SchedulePatch[]) => {
       const ids = new Set(patchSet.map(patch => String(patch.id)));
-      return validateCandidate(live0, context.bounds, {
+      return validateCandidate(live0, liveBounds, {
         ...candidate, patches: patchSet,
         dispositions: candidate.dispositions?.filter(item => ids.has(String(item.id))),
       }).filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate');
@@ -3090,7 +3106,9 @@ export const OptimizerPreview = {
     // live in `detail`), so this key stays stable. Dropping a patch reverts the order to its LIVE slot, which can collide with the
     // next kept patch: each pass drops at least one patch (monotone, bounded by the kept count), so the cap below is
     // min(8, kept patches): a chain of N sequential drops resolves while N + 1 passes fit, a longer chain is refused.
-    const baselineKeys = new Set(errorsFor([]).map(keyOf));
+    // Lazy and memoised: the no-patch baseline is only consulted for a finding on an order we are not applying.
+    let baselineKeysMemo: Set<string> | null = null;
+    const baselineKeys = (): Set<string> => baselineKeysMemo ??= new Set(errorsFor([]).map(keyOf));
     let kept: SchedulePatch[] = patches.filter(patch => !drop.has(String(patch.id)));
     const maxPasses = Math.min(8, kept.length);
     for (let pass = 0; pass < maxPasses; pass++) {
@@ -3102,7 +3120,7 @@ export const OptimizerPreview = {
       for (const finding of findings) {
         const id = String(finding.taskId);
         if (keptIds.has(id)) { if (!drop.has(id)) { dropWithFamily(id); dropped = true; } continue; }
-        if (finding.code === 'segments' || baselineKeys.has(keyOf(finding))) continue;
+        if (finding.code === 'segments' || baselineKeys().has(keyOf(finding))) continue;
         const other = Store.tasks[id];
         const oStart = ms(other?.start_date); const oEnd = ms(other?.end_date);
         const onLine = kept.filter(patch => !drop.has(String(patch.id))
@@ -3149,15 +3167,17 @@ export const OptimizerPreview = {
     };
     const candidate = result.candidate;
     const plant = result.plant;
+    // One live snapshot for the prune pass and the Undo entry (the prune is read-only and nothing writes the Store between them).
+    const live0 = snapshotSchedule(plant);
     const pruned = pv._pruneAgainstLive({
-      plant, candidate, snapshot: result.snapshot,
+      plant, candidate, snapshot: result.snapshot, liveSnapshot: live0,
       shouldDrop: (id, task) => !task || Engine.isInProgress(task) || taskBaseline([task]).get(id) !== result.taskBaseline.get(id),
     });
     if (!pruned) { refuse(); return; }
     const kept = pruned.kept;
     const drop = new Set(pruned.dropped);
-    const undoSnapshot = structuredClone(snapshotSchedule(plant).tasks
-      .filter(task => resolveTaskPlant(task, { lineSettings: Store.lineSettings, masterData: Store.masterData }) === plant));
+    // snapshotSchedule(plant) already holds exactly this plant's tasks, cloned.
+    const undoSnapshot = [...live0.tasks];
     pv._applying = true;
     await pv._commitPatches(kept, { ids: [...drop], reason: 'changed' }, undoSnapshot);
   },
@@ -3177,6 +3197,7 @@ export const OptimizerPreview = {
     OptimizerPreview._stopTaskWatch();
     OptimizerPreview._snapshot = null;
     OptimizerPreview._taskBaseline = null;
+    OptimizerPreview._baselineVerifiedRev = null;
     OptimizerPreview._toolFingerprint = null;
     OptimizerPreview._candidate = null;
     OptimizerPreview._preKpis  = null;

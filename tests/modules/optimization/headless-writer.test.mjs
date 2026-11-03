@@ -53,3 +53,19 @@ test('P0-21: a one-patch candidate whose only patch collides settles as ok with 
   assert.deepEqual(plan.apply, []);
   assert.equal(plan.body, null);
 });
+
+// P1-4: the live-board validations of one plan share ONE run context (it used to be rebuilt per errorsFor call), and
+// the final validateCandidateForApply no longer computes the stale diff.
+test('P1-4: a collision plan builds one run context for the live-board validation loop', async () => {
+  const { runContextBuildCount } = await import('../../../frontend/optimization/setup-scheduler.mjs');
+  const run = await runOptimizer({ plant: PLANT, wire: wireWithUnplaced(), params });
+  const target = run.patches.find(item => item.start_date && lineOf(wireWithUnplaced(), item.id));
+  const live = wireWithUnplaced();
+  live.tasks.data.push(taskRow('NEW-1', { MACHINE: lineOf(live, target.id), start_date: target.start_date, end_date: target.end_date, row_version: 1 }));
+  const first = runContextBuildCount();
+  const plan = await planApplyFromState({ plant: PLANT, runWire: wireWithUnplaced(), liveWire: live, state: run.state, params, jobId: 5 });
+  const builds = runContextBuildCount() - first;
+  assert.ok(plan.dropped.some(d => d.id === target.id), 'the collision path (several validations) ran');
+  assert.ok(!plan.findings.some(f => f.code === 'stale_candidate'), 'no stale_candidate finding');
+  assert.ok(builds <= 2, `run contexts built: ${builds}`);
+});
