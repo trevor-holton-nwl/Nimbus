@@ -1711,6 +1711,21 @@
     try { return _computeUtilizationBody(args); } finally { _clearComputeMemos(); }
   }
 
+  // ── computeLeverageBatch ───────────────────────────────────────────────────
+  // The what-if replay behind the Alert Monitor's leverage cards: ONE alerts pass per variant on a shared base
+  // payload, each with that variant's hypothetical setup observation. Shared by the worker's LEVERAGE_BATCH
+  // handler and the main-thread fallback (services.mts runLeverageBatchSync), so the two cannot drift. Only the
+  // alerts are returned: production reads nothing else, and a full utilization matrix per variant was the
+  // largest part of the structured-clone reply. ensureCalendar/ensurePlant only ADD missing top-level keys to
+  // calendars/plants (they never edit an existing entry), so every call gets its own shallow copy of the two maps
+  // instead of a deep clone: neither `base` nor the live Store maps it may alias are touched.
+  function computeLeverageBatch(base, variants) {
+    return variants.map(({ key, setup }) => ({
+      key,
+      alerts: computeAlerts({ ...base, calendars: { ...base.calendars }, plants: { ...base.plants }, setup }).alerts,
+    }));
+  }
+
   // ── Schedule Confidence formula (single source for the badge and the Alert Monitor) ──
   // score = round(100 * exp(-raw / (perMachine * machines))): a diminishing curve (never negative, no caps), scaled by
   // the plant's machine count so a big plant is not punished for being big. `raw` is the sum of alert points only
@@ -1792,7 +1807,7 @@
     getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant, workingMinutesByDay,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute
-    computeAlerts, computeUtilization,
+    computeAlerts, computeUtilization, computeLeverageBatch,
     // confidence scoring
     timeWeight, alertPoints, confidenceFromRaw, scoreConfidence,
   };
