@@ -1550,19 +1550,6 @@ export const Timeline = {
   },
 
   _dragSetupLines: new Set<string>(),
-  /** Presentation-only: called from vis' per-frame drag callback. */
-  dimSetupForDrag(lines: ReadonlySet<string>): void {
-    if (!Timeline._items || typeof Timeline._items.getIds !== 'function') return;
-    const newlyAffected = new Set([...lines].filter(line => !Timeline._dragSetupLines.has(line)));
-    if (!newlyAffected.size) return;
-    for (const line of newlyAffected) Timeline._dragSetupLines.add(line);
-    const updates = Timeline._setupItemsOnLines(newlyAffected).map(item =>
-      ({ id: String(item.id), className: `${item.className || 'setup-item'} setup-drag-dim`, style: 'opacity:0.18;' }));
-    if (!updates.length) return;
-    Timeline._suppressEvents = true;
-    try { Timeline._items.update(updates); } finally { Timeline._suppressEvents = false; }
-  },
-
   finishSetupDrag(extraLines: ReadonlySet<string> = new Set()): void {
     const lines = new Set(Timeline._dragSetupLines);
     for (const line of extraLines) lines.add(line);
@@ -6284,6 +6271,7 @@ export const Interaction = {
     this._isDragging = true;
     this._dragPointer = null;
     this._dragSetIds = null;
+    this._multiDropHandled = null;   // a fresh gesture: a second multi-drop of the same ids within 1 s must not be swallowed
     this._dragStartTs = typeof performance !== 'undefined' ? performance.now() : 0;
     this._edgeScrollLastTs = null;
     this._startEdgeScroll();

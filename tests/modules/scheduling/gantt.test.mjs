@@ -4474,6 +4474,11 @@ test('a zone-ticker update mid-drag does not end the drag gate; an order update 
   } finally { Interaction._endItemDrag(); fx.restore(); restoreClock(); }
 });
 
+test('a new drag gesture clears the same-gesture multi-drop record', () => {
+  Interaction._multiDropHandled = { ids: new Set(['a', 'b']), ts: Date.now() };
+  try { Interaction._beginItemDrag(); assert.equal(Interaction._multiDropHandled, null); } finally { Interaction._endItemDrag(); }
+});
+
 test('Timeline.rebuild is deferred while dragging and flushed once at drag end', async () => {
   const fx = _dragFx(['dg-2']);
   const priorPass = Timeline._rebuildPass;
