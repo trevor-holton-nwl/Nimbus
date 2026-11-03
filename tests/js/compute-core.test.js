@@ -1789,3 +1789,86 @@ test('B16: orders outside the matrix horizon are skipped; one touching it is att
   assert.equal(m['2026-10-14'].scheduled, 16);
   assert.deepEqual(m['2026-10-15'].tasks.sort(), ['s', 'sp']);
 });
+
+// B25: computeAlerts is a thin dispatcher over pure per-rule functions sharing one context; the rules are callable alone.
+const ruleIds = (name, args) => Core.runAlertRule(name, args).map(a => a.id);
+
+test('B25: the rule list is pinned in push order and computeAlerts is exactly the rules concatenated in that order', () => {
+  assert.deepEqual(Core.alertRuleNames, ['overlap', 'toolConflict', 'distributionSeparation', 'capacity', 'blackout', 'firmedClosed',
+    'firmedOutOfHours', 'runtimeMismatch', 'late', 'placement', 'engineFindings', 'runtimeUnknown', 'pvLotSize', 'setup']);
+  const tasks = [
+    { id: 'a', MACHINE: 'L', PLANT: 'P', ORDER: 'A', RUN_TIME: 14, start_date: D(15, 6), end_date: D(15, 20), runtime_schedule_mismatch: true,
+      original_end_date: D(15, 9), run_time_basis: { lot_size_warning: true } },
+    { id: 'b', MACHINE: 'L', PLANT: 'P', ORDER: 'B', RUN_TIME: 2, start_date: D(15, 10), end_date: D(15, 12), placement_exception: 'overtime' },
+  ];
+  const args = alertBase(tasks, { blocks: [{ line: 'L', start: D(15, 11), end: D(15, 13) }] });
+  const all = Core.computeAlerts(args).alerts.map(a => a.id);
+  const piecewise = Core.alertRuleNames.flatMap(name => ruleIds(name, args));
+  assert.deepEqual(all, piecewise);
+  assert.ok(all.length >= 6, 'the fixture reaches several rules');
+});
+
+test('B25: runAlertRule rejects an unknown rule and leaves no compute memo behind', () => {
+  assert.throws(() => Core.runAlertRule('nope', alertBase([])), /unknown alert rule: nope/);
+  assert.throws(() => Core.runAlertRule('hasOwnProperty', alertBase([])), /unknown alert rule/);
+  Core.runAlertRule('overlap', alertBase([]));
+  assert.equal(Core.getPlantForLine('L', { L: { plant: 'P2' } }, { lines: [] }), 'P2', 'no stale plant memo');
+});
+
+test('B25 ruleOverlap: a nested order overlaps its container once, touching orders do not, an order never overlaps its own pieces', () => {
+  const t = (id, s, e, extra = {}) => ({ id, MACHINE: 'L', PLANT: 'P', ORDER: id.toUpperCase(), RUN_TIME: 1, start_date: D(15, s), end_date: D(15, e), ...extra });
+  const alerts = Core.runAlertRule('overlap', alertBase([t('a', 8, 18), t('b', 9, 10), t('c', 11, 12), t('d', 18, 19)]));
+  // b and c are nested in a; d only touches a's end. The sweep reports each against the longest-ending earlier order (a).
+  assert.deepEqual(alerts.map(a => a.id), ['ovl-a-b', 'ovl-a-c']);
+  assert.equal(alerts[0].msg, 'Orders "A" and "B" overlap on L.');
+  assert.deepEqual(alerts[0].msgVars, { prev: 'A', cur: 'B', line: 'L' });
+  const split = { ...t('s', 8, 12), scheduleSegments: [{ sequence: 1, startDate: D(15, 8), endDate: D(15, 10) }, { sequence: 2, startDate: D(15, 9), endDate: D(15, 12) }] };
+  assert.deepEqual(Core.runAlertRule('overlap', alertBase([split])), [], 'overlapping pieces of ONE order are not an overlap between orders');
+});
+
+test('B25 ruleCapacity / closed reason: the text lists line blocks before plant blocks, each in entry order, and the calendar-closed case', () => {
+  const task = { id: 'c', MACHINE: 'L', PLANT: 'P', ORDER: 'C', RUN_TIME: 2, start_date: D(15, 10), end_date: D(15, 12) };
+  const args = alertBase([task], {
+    blocks: [
+      { line: null, plant: 'P', start: D(15, 8), end: D(15, 12), reason: 'a' },
+      { line: 'L', start: D(15, 8), end: D(15, 18), reason: 'b' },
+    ],
+    plantBlocks: [{ plant: 'P', start: D(15, 9), end: D(15, 11), reason: 'holiday' }, { plant: 'Q', start: D(15, 8), end: D(15, 18), reason: 'other plant' }],
+  });
+  const closed = Core.runAlertRule('capacity', args).filter(a => a.type === 'closed');
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0].msg, 'L is scheduled on 2026-10-15 but has 0h capacity — working window is 10.0h, blackouts union to 10.0h '
+    + '(global line "a" 4.0h, line "b" 10.0h, plant "holiday" 2.0h).');
+  assert.equal(closed[0].msgKey, 'alert.closed_blackouts');
+  assert.equal(closed[0].msgVars.blocks, 'global line "a" 4.0h, line "b" 10.0h, plant "holiday" 2.0h');
+  // A line calendar closed that weekday: a different reason and key, no block list.
+  const shut = Core.runAlertRule('capacity', alertBase([task], { calendars: { L: { workHours: allDays(null) } } })).filter(a => a.type === 'closed');
+  assert.equal(shut[0].msg, 'L is scheduled on 2026-10-15 but has 0h capacity — the L or plant calendar is closed that day-of-week.');
+  assert.equal(shut[0].msgKey, 'alert.closed_calendar');
+});
+
+test('B25 ruleBlackout / blocksFor scoping: a block applies to its own plant (or every plant when unscoped), never to another plant', () => {
+  const task = { id: 'k', MACHINE: 'L', PLANT: 'P', ORDER: 'K', RUN_TIME: 2, start_date: D(15, 10), end_date: D(15, 12) };
+  const hit = (extra) => ruleIds('blackout', alertBase([task], extra));
+  assert.deepEqual(hit({ blocks: [{ line: 'L', start: D(15, 11), end: D(15, 13) }] }), ['blk-k'], 'line block');
+  assert.deepEqual(hit({ blocks: [{ line: null, plant: 'P', start: D(15, 11), end: D(15, 13) }] }), ['blk-k'], 'line-less block of this plant');
+  assert.deepEqual(hit({ blocks: [{ line: null, plant: 'Q', start: D(15, 11), end: D(15, 13) }] }), [], 'line-less block of another plant');
+  assert.deepEqual(hit({ blocks: [{ line: 'M', start: D(15, 11), end: D(15, 13) }] }), [], 'another line');
+  assert.deepEqual(hit({ plantBlocks: [{ plant: 'P', start: D(15, 11), end: D(15, 13) }] }), ['blk-k'], 'plant block');
+  assert.deepEqual(hit({ plantBlocks: [{ plant: null, start: D(15, 11), end: D(15, 13) }] }), ['blk-k'], 'unscoped plant block hits every plant');
+  assert.deepEqual(hit({ plantBlocks: [{ plant: 'Q', start: D(15, 11), end: D(15, 13) }] }), [], 'plant block of another plant');
+  assert.deepEqual(hit({ blocks: [{ line: 'L', start: D(15, 12), end: D(15, 13) }] }), [], 'touching is not overlapping');
+});
+
+test('B25 ruleToolConflict: one alert per pusher, silent when the plant owns enough copies', () => {
+  const t = (id, line, s, e) => ({ id, MACHINE: line, PLANT: 'P', ORDER: id.toUpperCase(), RUN_TIME: 2, PRT_01: 'T1', start_date: D(15, s), end_date: D(15, e) });
+  const tasks = [t('a', 'L', 8, 12), t('b', 'L2', 10, 14)];
+  const one = Core.runAlertRule('toolConflict', alertBase(tasks));
+  assert.deepEqual(one.map(a => a.id), ['toolc-a|b']);
+  assert.equal(one[0].line, 'L2', 'the alert sits on the pusher (the later start)');
+  assert.equal(one[0].msgKey, 'alert.tool_conflict_no_row', 'no inventory row = one copy');
+  const two = Core.runAlertRule('toolConflict', alertBase(tasks, {
+    masterData: { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P' }], tool_inventory: [{ plant: 'P', tool_id: 'T1', total_qty: 2, out_of_service_qty: 0 }] },
+  }));
+  assert.deepEqual(two, []);
+});

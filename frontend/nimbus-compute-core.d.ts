@@ -393,6 +393,10 @@ declare global {
 
     // top-level compute
     computeAlerts(payload: ComputeAlertsPayload): { alerts: NimbusAlert[]; elapsed: number };
+    /** The alert rules in push order ('overlap', 'toolConflict', 'distributionSeparation', 'capacity', 'blackout', ...). */
+    alertRuleNames: string[];
+    /** Run ONE rule on a payload and return its alerts (un-dismissed): the seam the rule unit tests use. Throws on an unknown name. */
+    runAlertRule(name: string, payload: ComputeAlertsPayload): NimbusAlert[];
     computeUtilization(payload: ComputeUtilizationPayload): { matrix: NimbusUtilizationMatrix };
     /** One alerts pass per variant on a shared base, each with that variant's hypothetical setup observation
      *  (the leverage what-if replay). Returns alerts only; calendars/plants are shallow-copied per call. */
