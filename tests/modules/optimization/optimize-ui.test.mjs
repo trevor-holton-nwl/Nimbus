@@ -904,6 +904,27 @@ test('computePreview is state-free until present(result, { open: false }) instal
   }
 });
 
+// P0-18: the verdict row printed a hardcoded "Pruned." for every alternate; the per-alternate reason was computed and dropped.
+test('P0-18: the plan-comparison verdict row shows each alternate own reason, escaped, and falls back to "Pruned."', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview.showLoading('spt', 'SR');
+    OptimizerPreview.runWithPreview('spt', { plant: 'SR', respectCalendar: false, now: new Date('2026-08-03T08:00:00') });
+    for (let i = 0; i < 200 && fx.root.classList.contains('opt-pv-loading'); i++) await wait(10);
+    const finalists = OptimizerPreview._finalists;
+    assert.ok(finalists && finalists.length > 1, 'the fixture produced alternates');
+    finalists[1].whyNot = 'Saves 2 changeovers <b>but</b> costs 1 late order.';
+    if (finalists[2]) finalists[2].whyNot = null;
+    OptimizerPreview._render();
+    const html = fx.body.innerHTML;
+    assert.ok(html.includes('Saves 2 changeovers &lt;b&gt;but&lt;/b&gt; costs 1 late order.'), 'the alternate own reason, escaped');
+    if (finalists[2]) assert.ok(html.includes(`<strong>${Util.t('ui.opt_pv_plan_pruned')}</strong>`), 'no reason: the generic label');
+    assert.ok(!html.includes(`<strong>${Util.t('ui.opt_pv_plan_pruned')}</strong></td><td><strong>Saves`), 'the reason replaces the label, it is not appended');
+  } finally {
+    fx.restore();
+  }
+});
+
 test('single reveal: discarding while alternates compute clears the loading class and never renders', async () => {
   const fx = openSingleRevealFixture('SR', singleRevealTasks);
   try {

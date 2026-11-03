@@ -2098,7 +2098,7 @@ export const OptimizerPreview = {
         ).join('');
         const verdictCells = finalists.map((f, i) => i === 0
           ? `<td class="opt-pv-plan-applied-cell"><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_chosen'))}</strong></td>`
-          : `<td><strong>${Util.escapeHtml(Util.t('ui.opt_pv_plan_pruned'))}</strong></td>`
+          : `<td><strong>${Util.escapeHtml(f.whyNot || Util.t('ui.opt_pv_plan_pruned'))}</strong></td>`
         ).join('');
         planTableHtml = `<div class="opt-pv-plan-wrap"><table class="opt-pv-plan-table">
           <thead><tr><th></th><th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current_sub'))}</div></th>${headCells}</tr></thead>
