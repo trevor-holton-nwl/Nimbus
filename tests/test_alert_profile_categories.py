@@ -194,11 +194,11 @@ def test_post_passes_categories_through(client):
 
 def test_put_passes_explicit_null_and_omits_when_absent(client):
     c, calls = client
-    assert c.put("/alert-profiles/abc", json={"categories": None}).status_code == 200
+    assert c.put("/alert-profiles/abc", json={"categories": None, "expected_updated_at": "t"}).status_code == 200
     assert "categories" in calls[-1][1] and calls[-1][1]["categories"] is None
-    c.put("/alert-profiles/abc", json={"name": "x"})
+    c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": "t"})
     assert "categories" not in calls[-1][1]
-    c.put("/alert-profiles/abc", json={"categories": _cats()})
+    c.put("/alert-profiles/abc", json={"categories": _cats(), "expected_updated_at": "t"})
     assert calls[-1][1]["categories"] == _cats()
 
 
@@ -249,9 +249,9 @@ def test_post_gantt_colors_defaults_true_and_passes_an_explicit_false(client):
 
 def test_put_passes_gantt_colors_when_present_and_omits_it_when_absent(client):
     c, calls = client
-    assert c.put("/alert-profiles/abc", json={"gantt_colors": False}).status_code == 200
+    assert c.put("/alert-profiles/abc", json={"gantt_colors": False, "expected_updated_at": "t"}).status_code == 200
     assert calls[-1][1]["gantt_colors"] is False
-    c.put("/alert-profiles/abc", json={"name": "x"})
+    c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": "t"})
     assert "gantt_colors" not in calls[-1][1]
 
 
@@ -265,9 +265,9 @@ def test_post_show_acknowledged_defaults_false_and_passes_an_explicit_true(clien
 
 def test_put_passes_show_acknowledged_when_present_and_omits_it_when_absent(client):
     c, calls = client
-    assert c.put("/alert-profiles/abc", json={"show_acknowledged": True}).status_code == 200
+    assert c.put("/alert-profiles/abc", json={"show_acknowledged": True, "expected_updated_at": "t"}).status_code == 200
     assert calls[-1][1]["show_acknowledged"] is True
-    c.put("/alert-profiles/abc", json={"name": "x"})
+    c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": "t"})
     assert "show_acknowledged" not in calls[-1][1]
 
 

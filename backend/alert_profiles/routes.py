@@ -11,8 +11,6 @@ from backend.security import auth
 
 router = APIRouter()
 
-MAX_REASON_LEN = 200
-
 
 def _check_plant(plant, allowed_plants) -> None:
     """400 on a missing plant, 403 when it is outside the caller's scope."""
@@ -26,10 +24,14 @@ def _check_plant(plant, allowed_plants) -> None:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+def _is_admin(actor: str) -> bool:
+    return auth.get_user_role(actor) == "admin"
+
+
 def _is_owner_or_admin(actor: str, owner) -> bool:
     if owner and actor.lower() == str(owner).lower():
         return True
-    return auth.get_user_role(actor) == "admin"
+    return _is_admin(actor)
 
 
 def _load_profile_for_write(profile_id: str, actor: str, allowed_plants) -> dict:
@@ -79,19 +81,22 @@ def alert_profiles_update(
     actor: str = Depends(auth.require_authenticated),
     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
 ):
+    # A null name/description/rules/ranking/flag means "not supplied"; only `categories: null` is meaningful (revert).
     fields = {k: body[k] for k in ("name", "description", "rules", "ranking", "categories", "gantt_colors",
-                                                  "show_acknowledged") if k in body}
+                                   "show_acknowledged") if k in body and (k == "categories" or body[k] is not None)}
     if not fields:
         raise HTTPException(status_code=400, detail="No updatable fields supplied")
+    expected = body.get("expected_updated_at")
+    if not isinstance(expected, str) or not expected.strip():
+        raise HTTPException(status_code=400, detail="expected_updated_at is required")
     _load_profile_for_write(profile_id, actor, allowed_plants)
     try:
-        row = data.update_alert_profile(profile_id, actor=actor,
-                                        expected_updated_at=body.get("expected_updated_at"), **fields)
+        row = data.update_alert_profile(profile_id, actor=actor, expected_updated_at=expected, **fields)
     except data.DuplicateName as e:
         raise HTTPException(status_code=409, detail="name_taken") from e
+    except data.StaleProfile as e:
+        raise HTTPException(status_code=409, detail="stale") from e
     except ValueError as e:
-        if str(e) == "stale":
-            raise HTTPException(status_code=409, detail="stale") from e
         raise HTTPException(status_code=400, detail=str(e)) from e
     if row is None:
         raise HTTPException(status_code=404, detail="Alert profile not found")
@@ -126,25 +131,18 @@ def alert_acks_upsert(
     actor: str = Depends(auth.require_authenticated),
     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
 ):
+    """Acknowledge one alert. Changing someone else's active ack is owner-or-admin only (403)."""
     plant = body.get("plant")
     _check_plant(plant, allowed_plants)
-    alert_id = body.get("alert_id")
-    if not isinstance(alert_id, str) or not alert_id.strip():
-        raise HTTPException(status_code=400, detail="alert_id is required")
-    reason = body.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        raise HTTPException(status_code=400, detail="reason is required")
-    reason = reason.strip()
-    if len(reason) > MAX_REASON_LEN:
-        raise HTTPException(status_code=400, detail=f"reason must be at most {MAX_REASON_LEN} characters")
     try:
-        return data.upsert_alert_ack(plant=plant, alert_id=alert_id, reason=reason,
-                                     until=body.get("until"), actor=actor)
+        alert_id = data.validate_alert_id(body.get("alert_id"))
+        reason = data.validate_reason(body.get("reason"))
+        return data.upsert_alert_ack(plant=plant, alert_id=alert_id, reason=reason, until=body.get("until"),
+                                     actor=actor, is_admin=_is_admin(actor))
+    except data.AckNotOwner as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-
-
-MAX_BULK_ACK_IDS = 500
 
 
 @router.post("/alert-acks/bulk")
@@ -153,25 +151,17 @@ def alert_acks_bulk(
     actor: str = Depends(auth.require_authenticated),
     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
 ):
-    """Acknowledge up to 500 alerts of one plant with one reason/until, in one transaction."""
+    """Acknowledge up to 500 alerts of one plant with one reason/until, in one transaction. 403 (nothing written)
+    when any of them is already acknowledged by someone else and the caller is not an admin."""
     plant = body.get("plant")
     _check_plant(plant, allowed_plants)
-    alert_ids = body.get("alert_ids")
-    if not isinstance(alert_ids, list) or not alert_ids:
-        raise HTTPException(status_code=400, detail="alert_ids must be a non-empty list")
-    if len(alert_ids) > MAX_BULK_ACK_IDS:
-        raise HTTPException(status_code=400, detail=f"alert_ids must have at most {MAX_BULK_ACK_IDS} entries")
-    if any(not isinstance(a, str) or not a.strip() for a in alert_ids):
-        raise HTTPException(status_code=400, detail="alert_ids must be non-empty strings")
-    reason = body.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        raise HTTPException(status_code=400, detail="reason is required")
-    reason = reason.strip()
-    if len(reason) > MAX_REASON_LEN:
-        raise HTTPException(status_code=400, detail=f"reason must be at most {MAX_REASON_LEN} characters")
     try:
-        acks = data.upsert_alert_acks(plant=plant, alert_ids=alert_ids, reason=reason,
-                                      until=body.get("until"), actor=actor)
+        alert_ids = data.validate_alert_ids(body.get("alert_ids"))
+        reason = data.validate_reason(body.get("reason"))
+        acks = data.upsert_alert_acks(plant=plant, alert_ids=alert_ids, reason=reason, until=body.get("until"),
+                                      actor=actor, is_admin=_is_admin(actor))
+    except data.AckNotOwner as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"acks": acks, "count": len(acks)}
@@ -184,10 +174,9 @@ def alert_acks_delete(
     actor: str = Depends(auth.require_authenticated),
     allowed_plants: list[str] | None = Depends(auth.get_allowed_plants_for_request),
 ):
+    """{deleted: false} when there is no active ack; 403 when it is someone else's and the caller is not an admin."""
     _check_plant(plant, allowed_plants)
-    ack = next((a for a in data.list_alert_acks(plant) if a["alert_id"] == alert_id), None)
-    if ack is None:
-        return {"deleted": False}
-    if not _is_owner_or_admin(actor, ack["acknowledged_by"]):
-        raise HTTPException(status_code=403, detail="Only the acknowledger or an admin can remove this acknowledgement")
-    return {"deleted": data.delete_alert_ack(plant, alert_id, actor=actor)}
+    try:
+        return {"deleted": data.delete_alert_ack(plant, alert_id, actor=actor, is_admin=_is_admin(actor))}
+    except data.AckNotOwner as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e

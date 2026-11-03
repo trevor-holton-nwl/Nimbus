@@ -13,6 +13,7 @@ PROFILE = {"id": "abc", "plant": "P1", "name": "N", "description": "", "rules": 
            "created_by": "owner@example.com", "updated_by": "owner@example.com",
            "created_at": "2026-10-20T08:00:00", "updated_at": "2026-10-20T08:00:00", "categories": None, "gantt_colors": True,
            "show_acknowledged": False}
+EXP = "2026-10-20T08:00:00"   # expected_updated_at: required on every PUT
 ACK = {"plant": "P1", "alert_id": "a1", "acknowledged_by": "owner@example.com", "reason": "r",
        "until": None, "created_at": "2026-10-20T08:00:00"}
 
@@ -70,7 +71,7 @@ def test_other_plant_403_on_every_route(ctx):
 def test_put_delete_check_stored_row_plant(ctx):
     c, s = ctx
     s["monkeypatch"].setattr(data, "get_alert_profile", lambda i: {**PROFILE, "plant": "P2"})
-    assert c.put("/alert-profiles/abc", json={"name": "x"}).status_code == 403
+    assert c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": EXP}).status_code == 403
     assert c.delete("/alert-profiles/abc?plant=P1").status_code == 403
 
 
@@ -112,28 +113,43 @@ def test_create_duplicate_409(ctx):
 
 def test_put_creator_ok_other_forbidden_admin_ok(ctx):
     c, s = ctx
-    assert c.put("/alert-profiles/abc", json={"name": "x"}).status_code == 200
+    assert c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": EXP}).status_code == 200
     assert s["calls"][-1][2]["actor"] == "owner@example.com"
     s["actor"] = "OWNER@example.com"  # case-insensitive
-    assert c.put("/alert-profiles/abc", json={"name": "x"}).status_code == 200
+    assert c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": EXP}).status_code == 200
     s["actor"] = "other@example.com"
-    assert c.put("/alert-profiles/abc", json={"name": "x"}).status_code == 403
+    assert c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": EXP}).status_code == 403
     s["monkeypatch"].setattr(auth, "get_user_role", lambda u: "admin")
-    assert c.put("/alert-profiles/abc", json={"name": "x"}).status_code == 200
+    assert c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": EXP}).status_code == 200
 
 
 def test_put_404_empty_body_stale_dup_invalid(ctx):
     c, s = ctx
     assert c.put("/alert-profiles/abc", json={}).status_code == 400
     assert "update_alert_profile" not in _names(s)
+    # expected_updated_at is mandatory (absent, blank or non-string -> 400, nothing written)
+    for bad in ({}, {"expected_updated_at": None}, {"expected_updated_at": ""}, {"expected_updated_at": "  "},
+                {"expected_updated_at": 5}):
+        assert c.put("/alert-profiles/abc", json={"name": "x", **bad}).status_code == 400, bad
+    # a PUT whose supplied fields are all null is a no-op request: 400, no UPDATE
+    r = c.put("/alert-profiles/abc", json={"name": None, "description": None, "rules": None, "ranking": None,
+                                           "gantt_colors": None, "show_acknowledged": None,
+                                           "expected_updated_at": EXP})
+    assert r.status_code == 400 and r.json()["detail"] == "No updatable fields supplied"
+    assert "update_alert_profile" not in _names(s)
+    # categories: null stays meaningful, and nulls next to a real field are dropped rather than forwarded
+    assert c.put("/alert-profiles/abc", json={"categories": None, "expected_updated_at": EXP}).status_code == 200
+    assert s["calls"][-1][2]["categories"] is None
+    assert c.put("/alert-profiles/abc", json={"name": "x", "ranking": None, "expected_updated_at": EXP}).status_code == 200
+    assert "ranking" not in s["calls"][-1][2] and s["calls"][-1][2]["name"] == "x"
     s["monkeypatch"].setattr(data, "get_alert_profile", lambda i: None)
-    assert c.put("/alert-profiles/nope", json={"name": "x"}).status_code == 404
+    assert c.put("/alert-profiles/nope", json={"name": "x", "expected_updated_at": EXP}).status_code == 404
     s["monkeypatch"].setattr(data, "get_alert_profile", lambda i: PROFILE)
     s["monkeypatch"].setattr(data, "update_alert_profile", lambda *a, **k: None)  # vanished mid-flight
-    assert c.put("/alert-profiles/abc", json={"name": "x"}).status_code == 404
+    assert c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": EXP}).status_code == 404
 
     def stale(*a, **k):
-        raise ValueError("stale")
+        raise data.StaleProfile("stale")
     s["monkeypatch"].setattr(data, "update_alert_profile", stale)
     r = c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": "t"})
     assert r.status_code == 409 and r.json() == {"detail": "stale"}
@@ -141,13 +157,13 @@ def test_put_404_empty_body_stale_dup_invalid(ctx):
     def dup(*a, **k):
         raise data.DuplicateName("dup")
     s["monkeypatch"].setattr(data, "update_alert_profile", dup)
-    r = c.put("/alert-profiles/abc", json={"name": "x"})
+    r = c.put("/alert-profiles/abc", json={"name": "x", "expected_updated_at": EXP})
     assert r.status_code == 409 and r.json() == {"detail": "name_taken"}
 
     def bad(*a, **k):
         raise ValueError("ranking must be one of")
     s["monkeypatch"].setattr(data, "update_alert_profile", bad)
-    assert c.put("/alert-profiles/abc", json={"ranking": "zzz"}).status_code == 400
+    assert c.put("/alert-profiles/abc", json={"ranking": "zzz", "expected_updated_at": EXP}).status_code == 400
 
 
 def test_delete_profile(ctx):
@@ -194,16 +210,73 @@ def test_post_ack_data_valueerror_400(ctx):
     assert r.status_code == 400
 
 
-def test_delete_ack_permissions(ctx):
+def test_delete_ack_maps_data_outcomes_and_passes_admin_flag(ctx):
     c, s = ctx
     r = c.delete("/alert-acks/P1/a1")
     assert r.status_code == 200 and r.json() == {"deleted": True}
+    name, a, kw = s["calls"][-1]
+    assert name == "delete_alert_ack" and a == ("P1", "a1") and kw == {"actor": "owner@example.com", "is_admin": False}
+    # not the owner and not an admin: the data layer refuses, the route says 403
+    def refuse(*a, **k):
+        raise data.AckNotOwner("nope")
+    s["monkeypatch"].setattr(data, "delete_alert_ack", refuse)
     s["actor"] = "other@example.com"
     assert c.delete("/alert-acks/P1/a1").status_code == 403
+    # admin: the route tells the data layer, which then deletes
     s["monkeypatch"].setattr(auth, "get_user_role", lambda u: "admin")
-    assert c.delete("/alert-acks/P1/a1").status_code == 200
-    s["monkeypatch"].setattr(data, "list_alert_acks", lambda p: [])
+    seen = {}
+
+    def ok(plant, alert_id, **k):
+        seen.update(k)
+        return True
+    s["monkeypatch"].setattr(data, "delete_alert_ack", ok)
+    assert c.delete("/alert-acks/P1/a1").status_code == 200 and seen["is_admin"] is True
+    # nothing active to remove
+    s["monkeypatch"].setattr(data, "delete_alert_ack", lambda *a, **k: False)
     assert c.delete("/alert-acks/P1/a1").json() == {"deleted": False}
+
+
+def test_delete_ack_no_longer_lists_every_ack(ctx):
+    c, s = ctx
+    c.delete("/alert-acks/P1/a1")
+    assert "list_alert_acks" not in _names(s)
+
+
+def test_post_ack_someone_elses_is_403_unless_admin(ctx):
+    c, s = ctx
+    body = {"plant": "P1", "alert_id": "a1", "reason": "x"}
+
+    def refuse(**kw):
+        raise data.AckNotOwner("already acknowledged")
+    s["monkeypatch"].setattr(data, "upsert_alert_ack", refuse)
+    s["actor"] = "other@example.com"
+    r = c.post("/alert-acks", json=body)
+    assert r.status_code == 403 and "acknowledged" in r.json()["detail"]
+    seen = {}
+
+    def ok(**kw):
+        seen.update(kw)
+        return ACK
+    s["monkeypatch"].setattr(data, "upsert_alert_ack", ok)
+    s["monkeypatch"].setattr(auth, "get_user_role", lambda u: "admin")
+    assert c.post("/alert-acks", json=body).status_code == 200 and seen["is_admin"] is True
+
+
+def test_bulk_ack_someone_elses_is_403(ctx):
+    c, s = ctx
+
+    def refuse(**kw):
+        raise data.AckNotOwner("already acknowledged")
+    s["monkeypatch"].setattr(data, "upsert_alert_acks", refuse)
+    r = c.post("/alert-acks/bulk", json={"plant": "P1", "alert_ids": ["a1"], "reason": "x"})
+    assert r.status_code == 403
+
+
+def test_ack_alert_id_length_capped(ctx):
+    c, s = ctx
+    assert c.post("/alert-acks", json={"plant": "P1", "alert_id": "a" * 201, "reason": "x"}).status_code == 400
+    assert c.post("/alert-acks", json={"plant": "P1", "alert_id": "a" * 200, "reason": "x"}).status_code == 200
+    assert c.post("/alert-acks/bulk", json={"plant": "P1", "alert_ids": ["a", "b" * 201], "reason": "x"}).status_code == 400
 
 
 # ---- bulk acknowledgements -----------------------------------------------
@@ -215,7 +288,7 @@ def test_bulk_ack_happy(ctx):
     name, _, kw = s["calls"][-1]
     assert name == "upsert_alert_acks"
     assert kw == {"plant": "P1", "alert_ids": ["a1", "a2"], "reason": "because",
-                  "until": "2026-10-25T23:59:59", "actor": "owner@example.com"}
+                  "until": "2026-10-25T23:59:59", "actor": "owner@example.com", "is_admin": False}
     assert c.post("/alert-acks/bulk", json={"plant": "P1", "alert_ids": ["a1"], "reason": "x"}).status_code == 200
     assert s["calls"][-1][2]["until"] is None
 
