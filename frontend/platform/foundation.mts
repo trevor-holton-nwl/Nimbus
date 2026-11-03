@@ -23,7 +23,8 @@ type ActorResolver = () => string | undefined;
 
 /** One line's calendar rows as held in Store, handed to Util.sapDueDate through a DI seam
  *  (platform sits below Calendar/Store, so it can import neither). `rev` is the Store
- *  revision, used only to invalidate the per-line+date window cache. */
+ *  data revision (`Store.dataRev()`: alert refreshes and line-checkbox toggles do not bump it, calendar, plant,
+ *  period and master-data edits do), used only to invalidate the per-line+date window cache. */
 export interface DueCalendarSource {
   lineHours: Record<number, [number, number] | null> | null;
   plantHours: Record<number, [number, number] | null> | null;
