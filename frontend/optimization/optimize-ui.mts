@@ -37,6 +37,15 @@ import type { NimbusMasterData, NimbusTask, OptimizerMode, SplitOrderPolicy, Set
 // -- Local type declarations (CQ-1 Phase 6 Task 7 conversion; scoped to
 //    OptimizeDialog/OptimizerPreview) ----------------------------------------
 
+/** The optional Confidence hooks the What-If adapter pokes (the module lives in nimbus-intelligence.js and is only
+ *  partly typed on the NIMBUS global). Every member is optional: boot or test wiring may not have installed them. */
+interface ConfidenceSeam {
+  _invalidatePending?(clearSuppressed?: boolean): void;
+  _suppressNextAlertRefresh?(): void;
+  _scheduleStartupRecompute?(delay?: number): void;
+}
+const confidenceSeam = (): ConfidenceSeam | undefined => NIMBUS?.Confidence as ConfidenceSeam | undefined;
+
 /** Store.pref('optimizerDefaults') shape — the user's last-used optimizer
  *  settings, seeded back into the dialog on open(). Store.pref() itself
  *  returns `unknown` (an open per-user prefs bag), so this is read via an `as`
@@ -222,13 +231,13 @@ export const OptimizeDialog = (() => {
         const checked = _selectedLines.has(line) ? 'checked' : '';
         const oc = orderCounts[line] || 0;
         const excluded = (Store.lineSettings[line] || {}).excludeFromOpt;
-        const exTag = excluded ? '<span class="opt-line-excluded" title="Globally excluded from optimization">excluded</span>' : '';
-        return `<li class="opt-line-row${excluded ? ' is-excluded' : ''}" role="option" aria-selected="${!!checked}">
+        const exTag = excluded ? `<span class="opt-line-excluded" title="${Util.escapeHtml(Util.t('ui.opt_line_excluded_title'))}">${Util.escapeHtml(Util.t('ui.opt_line_excluded'))}</span>` : '';
+        return `<li class="opt-line-row${excluded ? ' is-excluded' : ''}">
             <label class="opt-line-label">
               <input type="checkbox" ${checked} data-line="${Util.escapeHtml(line)}">
               <span class="opt-line-name">${Util.escapeHtml(line)}</span>
               ${exTag}
-              <span class="opt-line-orders">${oc} order${oc === 1 ? '' : 's'}</span>
+              <span class="opt-line-orders">${Util.escapeHtml(Util.t(oc === 1 ? 'ui.opt_line_orders_one' : 'ui.opt_line_orders_other', { n: oc }))}</span>
             </label>
           </li>`;
       }).join('');
@@ -236,7 +245,7 @@ export const OptimizeDialog = (() => {
         input.addEventListener('change', () => _onLineToggle(input.dataset.line || '', input.checked)));
     }
 
-    if (count) count.textContent = `${_selectedLines.size} of ${allLines.length} selected`;
+    if (count) count.textContent = Util.t('ui.lines_selected', { sel: _selectedLines.size, total: allLines.length });
   }
 
   function filterLines(q: string) {
@@ -341,7 +350,7 @@ export const OptimizeDialog = (() => {
     }
     const firmedLabel = document.getElementById('opt-firmed-label');
     const calendarLabel = document.getElementById('opt-calendar-label');
-    if (firmedLabel) firmedLabel.title = backlog ? 'Firmed orders move when reached and remain firmed.' : Util.t('ui.opt_respect_firmed_hint');
+    if (firmedLabel) firmedLabel.title = backlog ? Util.t('ui.opt_respect_firmed_backlog_hint') : Util.t('ui.opt_respect_firmed_hint');
     if (calendarLabel) calendarLabel.title = backlog ? 'Calendar adherence is required for Remove Backlog.' : '';
   }
 
@@ -377,7 +386,7 @@ export const OptimizeDialog = (() => {
     const days = Math.round((_end.getTime() - _start.getTime()) / Config.MS_DAY);
     el.innerHTML =
       `<span class="opt-date-summary-range">${_displayDate(_start)} → ${_displayEnd(_end)}</span>` +
-      `<span class="opt-date-summary-days">&nbsp;· ${days} ${days === 1 ? 'day' : 'days'}</span>`;
+      `<span class="opt-date-summary-days">&nbsp;· ${Util.escapeHtml(Util.t(days === 1 ? 'ui.opt_days_one' : 'ui.opt_days_other', { n: days }))}</span>`;
   }
 
   function applyPreset(key: string) {
@@ -502,7 +511,7 @@ export const OptimizeDialog = (() => {
     const setBadge = (state: 'none' | 'loading' | 'active' | 'warn', icon: string, tip: string) => {
       badgeEl.className = `opt-wheel-badge compact ${state}`;
       badgeEl.title = tip;
-      badgeEl.innerHTML = `<span class="owb-icon${state === 'loading' ? ' cw-spin' : ''}">${icon}</span>`;
+      badgeEl.innerHTML = `<span aria-hidden="true" class="owb-icon${state === 'loading' ? ' cw-spin' : ''}">${icon}</span>`;
     };
 
     if (!plant) {
@@ -608,7 +617,7 @@ export const OptimizeDialog = (() => {
     // time window, and option toggles. Falls back to the historical defaults
     // (horizon preset / changeover / toolbar checkbox state) otherwise.
     let _od: OptimizerDefaults | null = null;
-    try { _od = Store.pref('optimizerDefaults') as OptimizerDefaults | null; } catch {}
+    try { _od = Store.pref('optimizerDefaults') as OptimizerDefaults | null; } catch { /* no saved defaults: the historical ones apply */ }
     // Sync option checkboxes from the Gantt toolbar's existing chk- elements.
     // P2: dropped the dead `chk-respect-fixed` read here — no such element
     // exists in index.html (confirmed via grep), so it was always null and
@@ -652,7 +661,7 @@ export const OptimizeDialog = (() => {
     // Reset the Run button HTML in case a previous session left it in the
     // "Optimizing…" state (e.g., Cancel mid-fetch).
     const runBtn = document.getElementById('opt-run-btn');
-    if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon">📈</span>${Util.t('btn.run_optimization')}`;
+    if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">📈</span>${Util.t('btn.run_optimization')}`;
     // Run in background always opens unticked; the planner opts in per run.
     const bgChkOpen = document.getElementById('opt-chk-background') as HTMLInputElement | null;
     if (bgChkOpen) bgChkOpen.checked = false;
@@ -769,7 +778,7 @@ export const OptimizeDialog = (() => {
         // In Backlog the box is forced on for the run: save what the planner chose, not the forced value.
         respectCalendar: mode === 'backlog' ? (_calendarBeforeBacklog ?? scEl?.checked ?? true) : (scEl?.checked ?? true),
       });
-    } catch {}
+    } catch (err) { ErrorLog.warn('optimizer', `Could not save optimizer defaults: ${err instanceof Error ? err.message : String(err)}`); }
 
     // Immediate visual feedback so the click feels responsive.
     const runBtn = document.getElementById('opt-run-btn') as HTMLButtonElement | null;
@@ -781,7 +790,7 @@ export const OptimizeDialog = (() => {
     };
     if (runBtn) {
       runBtn.disabled = true;
-      runBtn.innerHTML = `<span class="opt-run-icon">⏳</span>${Util.t('btn.optimizing')}`;
+      runBtn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">⏳</span>${Util.t('btn.optimizing')}`;
     }
 
     // Open the preview dialog with a spinner IMMEDIATELY — before the rank-map
@@ -1135,9 +1144,9 @@ const FINALIST_TARGET_KEYS: ReadonlyArray<{
   key: keyof OptimizerKpis;
   phrase: (n: number, worse: boolean) => string;
 }> = [
-  { key: 'changeovers', phrase: (n, worse) => `${n} ${worse ? 'more' : 'fewer'} changeover${n === 1 ? '' : 's'}` },
-  { key: 'late_count', phrase: (n, worse) => `${n} ${worse ? 'more' : 'fewer'} late order${n === 1 ? '' : 's'}` },
-  { key: 'late_h', phrase: (n, worse) => `${n.toFixed(1)} h ${worse ? 'more' : 'less'} slip` },
+  { key: 'changeovers', phrase: (n, worse) => Util.t(`ui.opt_pv_phrase_changeovers_${worse ? 'more' : 'fewer'}_${n === 1 ? 'one' : 'other'}`, { n }) },
+  { key: 'late_count', phrase: (n, worse) => Util.t(`ui.opt_pv_phrase_late_${worse ? 'more' : 'fewer'}_${n === 1 ? 'one' : 'other'}`, { n }) },
+  { key: 'late_h', phrase: (n, worse) => Util.t(worse ? 'ui.opt_pv_phrase_slip_more' : 'ui.opt_pv_phrase_slip_less', { n: n.toFixed(1) }) },
 ];
 
 /** One-sentence rationale for why an alternate finalist wasn't applied. Compares
@@ -1145,6 +1154,7 @@ const FINALIST_TARGET_KEYS: ReadonlyArray<{
  *  balance" claim, since this is a 2-wide mode-swap comparison, not a true beam
  *  (see docs/archive/OPTIMIZER-PREVIEW.md §6 fallback-tier note). */
 function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): string {
+  const and = ` ${Util.t('ui.opt_pv_join_and')} `;
   const worse: string[] = [];
   const better: string[] = [];
   for (const { key, phrase } of FINALIST_TARGET_KEYS) {
@@ -1153,9 +1163,9 @@ function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): str
     (d > 0 ? worse : better).push(phrase(Math.abs(d), d > 0));
   }
   if (!worse.length && !better.length) return Util.t('ui.opt_pv_plan_pruned_tie');
-  if (worse.length && !better.length) return Util.t('ui.opt_pv_plan_pruned_worse', { list: worse.join(' and ') });
-  if (better.length && !worse.length) return Util.t('ui.opt_pv_plan_pruned_better', { list: better.join(' and ') });
-  return Util.t('ui.opt_pv_plan_pruned_mixed', { better: better.join(' and '), worse: worse.join(' and ') });
+  if (worse.length && !better.length) return Util.t('ui.opt_pv_plan_pruned_worse', { list: worse.join(and) });
+  if (better.length && !worse.length) return Util.t('ui.opt_pv_plan_pruned_better', { list: better.join(and) });
+  return Util.t('ui.opt_pv_plan_pruned_mixed', { better: better.join(and), worse: worse.join(and) });
 }
 
 /** Tool Inventory: the plant's tooling rule plus its inventory rows, as one comparable string. A preview or a finished
@@ -1260,8 +1270,8 @@ export const OptimizerPreview = {
     const check = candidate.gapFill;
     if (!check) return '';
     return check.complete
-      ? `Capacity check: ${check.placed} more order(s) placed; the rest can't fit without moving scheduled work.`
-      : `Capacity check incomplete: ${check.placed} placed, ${check.unchecked} still unchecked.`;
+      ? Util.t('ui.opt_gapfill_complete', { placed: check.placed })
+      : Util.t('ui.opt_gapfill_incomplete', { placed: check.placed, unchecked: check.unchecked });
   },
 
   planningSummary(candidate: CandidateResult, before: ReadonlyArray<NimbusTask>): {
@@ -1330,6 +1340,13 @@ export const OptimizerPreview = {
    *  the user clicks Run, before any await/fetch — gives instant feedback so
    *  the user doesn't stare at a blurry frozen page during the wheel fetch
    *  + config-close transition + engine run. */
+  /** Planner-facing mode name ("Due Date"), not the raw mode id. */
+  _modeLabel(mode: OptimizerMode): string {
+    const key = 'us.opt_mode_' + mode;
+    const label = Util.t(key);
+    return label === key ? String(mode) : label;
+  },
+
   showLoading(mode: OptimizerMode, plant: string) {
     OptimizerPreview._installAbandonGuard();
     const body = document.getElementById('opt-preview-body');
@@ -1340,7 +1357,7 @@ export const OptimizerPreview = {
       + '    <span class="cw-spin"></span>'
       + `    <span style="font-size:14px;color:var(--fg);">${Util.escapeHtml(Util.t('ui.opt_pv_loading_title'))}</span>`
       + '  </div>'
-      + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(Util.t('ui.opt_pv_loading_sub', { mode, plant }))}</div>`
+      + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(Util.t('ui.opt_pv_loading_sub', { mode: OptimizerPreview._modeLabel(mode), plant }))}</div>`
       + '</div>';
     }
     const root = document.getElementById('modal-opt-preview');
@@ -1666,7 +1683,7 @@ export const OptimizerPreview = {
           runSeq,
           // Publish Plan A's state before the alternates compute (the modal
           // stays spinner-only; the single render still waits for the alts).
-          onPrimary: partial => { OptimizerPreview._installPreviewResult(partial); },
+          onPrimary: partial => { if (OptimizerPreview._runSeq === runSeq) OptimizerPreview._installPreviewResult(partial); },
         }));
         const result = computed instanceof Promise ? await computed : computed;
         // Race safety: bail silently unless this preview is still the one the
@@ -1697,7 +1714,7 @@ export const OptimizerPreview = {
           body.innerHTML =
             '<div style="padding:24px;text-align:center;color:var(--err);">'
           + `  <div style="font-size:14px;margin-bottom:8px;">${Util.escapeHtml(Util.t('ui.opt_pv_failed_title'))}</div>`
-          + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(errMsg || 'Unknown error')}</div>`
+          + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(errMsg || Util.t('ui.opt_unknown_error'))}</div>`
           + '</div>';
         }
         footBtns.forEach((b) => { b.disabled = false; });
@@ -2131,7 +2148,7 @@ export const OptimizerPreview = {
           : `<td><strong>${Util.escapeHtml(f.whyNot || Util.t('ui.opt_pv_plan_pruned'))}</strong></td>`
         ).join('');
         planTableHtml = `<div class="opt-pv-plan-wrap"><table class="opt-pv-plan-table">
-          <thead><tr><th></th><th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current_sub'))}</div></th>${headCells}</tr></thead>
+          <thead><tr><td></td><th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current_sub'))}</div></th>${headCells}</tr></thead>
           <tbody>${bodyRows}</tbody>
           <tfoot class="opt-pv-plan-tfoot"><tr><th scope="row">${Util.escapeHtml(Util.t('ui.opt_pv_plan_verdict_label'))}</th><td>${Util.escapeHtml(Util.t('ui.opt_pv_plan_baseline'))}</td>${verdictCells}</tr></tfoot>
         </table></div>`;
@@ -2243,7 +2260,7 @@ export const OptimizerPreview = {
     })();
 
     const staleHtml = OptimizerPreview.stale
-      ? `<div class="opt-pv-stale">${Util.escapeHtml(OptimizerPreview._staleMessage())}</div>`
+      ? `<div class="opt-pv-stale" role="status">${Util.escapeHtml(OptimizerPreview._staleMessage())}</div>`
       : '';
 
     // Never-freeze fallback banner — orders this candidate actually placed
@@ -2303,8 +2320,8 @@ export const OptimizerPreview = {
         ? ` <span class="opt-pv-pct">(${pct > 0 ? '+' : '−'}${Math.abs(pct)}%)</span>`
         : '';
       const deltaText = zero
-        ? `<span class="opt-pv-pill-icon">●</span> ${Util.escapeHtml(Util.t('ui.opt_pv_no_change'))}`
-        : `<span class="opt-pv-pill-icon">${dirCls === 'better' ? '▼' : (dirCls === 'worse' || dirCls === 'warn') ? '▲' : '◆'}</span> ${sign}${dNum}${c.unit}${pctStr}`;
+        ? `<span class="opt-pv-pill-icon" aria-hidden="true">●</span> ${Util.escapeHtml(Util.t('ui.opt_pv_no_change'))}`
+        : `<span class="opt-pv-pill-icon" aria-hidden="true">${dirCls === 'better' ? '▼' : (dirCls === 'worse' || dirCls === 'warn') ? '▲' : '◆'}</span> ${sign}${dNum}${c.unit}${pctStr}`;
 
       // Bar — visual scale of post vs pre. For neutral/no scale, hide.
       const maxV = Math.max(preV, postV, 0.0001);
@@ -2314,10 +2331,10 @@ export const OptimizerPreview = {
       return `
         <div class="opt-pv-card opt-pv-card-${dirCls}" data-key="${c.k}">
           <div class="opt-pv-card-head">
-            <span class="opt-pv-card-ico">${c.ico}</span>
+            <span class="opt-pv-card-ico" aria-hidden="true">${c.ico}</span>
             <span class="opt-pv-card-label">${Util.escapeHtml(c.label)}</span>
-            <span class="opt-pv-card-help" tabindex="0" aria-label="${Util.escapeHtml(Util.t('ui.opt_pv_card_help_aria'))}">
-              <span class="opt-pv-help-dot">?</span>
+            <span class="opt-pv-card-help" tabindex="0" role="button" aria-label="${Util.escapeHtml(Util.t('ui.opt_pv_card_help_aria'))}">
+              <span class="opt-pv-help-dot" aria-hidden="true">?</span>
               <span class="opt-pv-tip">${Util.escapeHtml(c.tip)}</span>
             </span>
           </div>
@@ -2333,8 +2350,8 @@ export const OptimizerPreview = {
             </div>
           </div>
           <div class="opt-pv-bars">
-            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">pre</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill pre" style="width:${preW}%"></i></div></div>
-            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">post</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill post ${dirCls}" style="width:${postW}%"></i></div></div>
+            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">${Util.escapeHtml(Util.t('ui.opt_pv_bar_pre'))}</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill pre" style="width:${preW}%"></i></div></div>
+            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">${Util.escapeHtml(Util.t('ui.opt_pv_bar_post'))}</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill post ${dirCls}" style="width:${postW}%"></i></div></div>
           </div>
           <div class="opt-pv-delta-pill ${dirCls}">${deltaText}</div>
         </div>`;
@@ -2347,20 +2364,20 @@ export const OptimizerPreview = {
       .filter(item => item.code !== 'missing_setup' && item.taskId && protectedIds.has(item.taskId));
     const orderLabels = new Map((OptimizerPreview._snapshot ?? []).map(task => [task.id, task.PRODUCTION_ORDER || task.ORDER || task.id]));
     const planningHtml = planning ? `<div class="opt-pv-footer-note" role="status">
-      <strong>${planning.scheduled} scheduled · ${planning.needsPlanning} Needs Planning (${planning.newlyQueued} newly queued)</strong>
-      ${planning.incomplete ? '<div>Search incomplete — best proposal found within budget.</div>' : ''}
+      <strong>${Util.escapeHtml(Util.t('ui.opt_pv_planning_summary', { scheduled: planning.scheduled, queued: planning.needsPlanning, newly: planning.newlyQueued }))}</strong>
+      ${planning.incomplete ? `<div>${Util.escapeHtml(Util.t('ui.opt_pv_search_incomplete'))}</div>` : ''}
       ${OptimizerPreview._candidate?.gapFill ? `<div>${Util.escapeHtml(OptimizerPreview.gapFillSummary(OptimizerPreview._candidate))}</div>` : ''}
       ${(OptimizerPreview._candidate?.validationFindings ?? []).filter(finding => finding.severity === 'error')
         .map(finding => `<div>${Util.escapeHtml(finding.message)}</div>`).join('')}
     </div>` : '';
 
     const protectedHtml = protectedFindings.length ? `<details class="opt-pv-section">
-      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">Protected orders requiring attention</span><span class="opt-pv-section-badge">${protectedFindings.length}</span></summary>
+      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${Util.escapeHtml(Util.t('ui.opt_pv_protected_head'))}</span><span class="opt-pv-section-badge">${protectedFindings.length}</span></summary>
       <div class="opt-pv-section-body">
-        <div>${protectedFindings.length} order(s) have existing protected-schedule conflicts — locked in place, can't be moved.</div>
+        <div>${Util.escapeHtml(Util.t('ui.opt_pv_protected_body', { n: protectedFindings.length }))}</div>
         <ul>${protectedFindings.slice(0, 50)
           .map(item => `<li>${Util.escapeHtml(String(orderLabels.get(item.taskId!) ?? item.taskId))} · ${Util.escapeHtml(item.line ?? '')}: ${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
-        ${protectedFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}
+        ${protectedFindings.length > 50 ? `<div>${Util.escapeHtml(Util.t('ui.opt_pv_first_50_orders'))}</div>` : ''}
       </div>
     </details>` : '';
 
@@ -2375,7 +2392,7 @@ export const OptimizerPreview = {
       <div class="opt-pv-section-body">
         <ul>${distributionSeparationFindings.slice(0, 50)
           .map(item => `<li>${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
-        ${distributionSeparationFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}
+        ${distributionSeparationFindings.length > 50 ? `<div>${Util.escapeHtml(Util.t('ui.opt_pv_first_50_orders'))}</div>` : ''}
       </div>
     </details>` : '';
     // Tool Inventory (all of this is empty/absent while the candidate carries no toolBlocked/toolMoved/toolPass).
@@ -2389,7 +2406,7 @@ export const OptimizerPreview = {
       <div class="opt-pv-section-body">
         <div><button type="button" class="btn btn-sm" data-opt-tool-export>${Util.escapeHtml(Util.t('ui.opt_tool_export'))}</button></div>
         <table class="opt-pv-tool-table">
-          <thead><tr><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_order'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_tool'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_avail'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_holders'))}</th><th></th></tr></thead>
+          <thead><tr><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_order'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_tool'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_avail'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_holders'))}</th><td></td></tr></thead>
           <tbody>${toolBlocked.slice(0, 50).map(entry => {
             const holders = entry.holderIds.slice(0, 5).map(labelOf).join(', ') + (entry.holderIds.length > 5 ? ` ${Util.t('ui.opt_bg_more', { count: entry.holderIds.length - 5 })}` : '');
             return `<tr${entry.cause === 'cascade' ? ' data-opt-tool-cascade' : ''}><td>${Util.escapeHtml(labelOf(entry.orderId))}${entry.cause === 'cascade' ? `<div class="opt-pv-tool-cascade">${Util.escapeHtml(Util.t('ui.opt_tool_cascade_note'))}</div>` : ''}</td><td>${Util.escapeHtml(linesById.get(String(entry.orderId)) ?? '')}</td><td>${Util.escapeHtml(entry.tool)}</td><td>${entry.available} / ${entry.inUse}</td><td>${Util.escapeHtml(holders)}</td><td><button type="button" class="btn btn-sm" data-opt-tool-raise="${Util.escapeHtml(entry.tool)}">${Util.escapeHtml(Util.t('ui.opt_tool_raise'))}</button></td></tr>`;
@@ -2419,7 +2436,7 @@ export const OptimizerPreview = {
         ${toolNoteHtml}
 
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
-          <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
+          <div class="opt-pv-verdict-icon" aria-hidden="true">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
           <div class="opt-pv-verdict-text">
             <div class="opt-pv-verdict-title">${Util.escapeHtml(verdictTitle)}</div>
             <div class="opt-pv-verdict-sub">${Util.escapeHtml(verdictSub)}</div>
@@ -2459,24 +2476,38 @@ export const OptimizerPreview = {
       button.addEventListener('click', () => { void OptimizerPreview._raiseInventory(button.dataset.optToolRaise ?? ''); });
     });
     body.querySelector<HTMLButtonElement>('[data-opt-tool-export]')?.addEventListener('click', () => {
-      const blob = new Blob(['\uFEFF' + OptimizerPreview.toolBlockedCsv(toolBlocked, labelOf, linesById)], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url;
-      link.download = `tool-blocked-${OptimizerPreview._plant || 'preview'}.csv`; link.click(); URL.revokeObjectURL(url);
+      OptimizerPreview._downloadCsv(`tool-blocked-${OptimizerPreview._plant || 'preview'}.csv`, OptimizerPreview.toolBlockedCsv(toolBlocked, labelOf, linesById));
     });
     const missingCsv = () => OptimizerPreview.missingPairsCsv(OptimizerPreview._explanation?.missingPairs || []);
     body.querySelector<HTMLButtonElement>('[data-opt-copy-missing]')?.addEventListener('click', () => {
-      navigator.clipboard?.writeText(missingCsv()).catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
+      if (!navigator.clipboard?.writeText) { Toast.show(Util.t('toast.clipboard_denied'), 'error'); return; }
+      navigator.clipboard.writeText(missingCsv())
+        .then(() => Toast.show(Util.t('toast.opt_copied'), 'success'))
+        .catch(() => Toast.show(Util.t('toast.clipboard_denied'), 'error'));
     });
     body.querySelector<HTMLButtonElement>('[data-opt-export-missing]')?.addEventListener('click', () => {
-      const blob = new Blob([missingCsv()], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url;
-      link.download = `missing-setups-${OptimizerPreview._plant || 'preview'}.csv`; link.click(); URL.revokeObjectURL(url);
+      OptimizerPreview._downloadCsv(`missing-setups-${OptimizerPreview._plant || 'preview'}.csv`, missingCsv());
     });
     body.querySelector<HTMLButtonElement>('[data-opt-review-missing]')?.addEventListener('click', async () => {
-      const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => Promise<boolean> } } }).NIMBUS?.SetupAdmin;
-      if (await setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || [])) OptimizerPreview.discard();
+      try {
+        const setupAdmin = (globalThis as unknown as { NIMBUS?: { SetupAdmin?: { reviewMissingPairs?: (plant: string | null, pairs: PreviewExplanation['missingPairs']) => Promise<boolean> } } }).NIMBUS?.SetupAdmin;
+        if (await setupAdmin?.reviewMissingPairs?.(OptimizerPreview._plant, OptimizerPreview._explanation?.missingPairs || [])) OptimizerPreview.discard();
+      } catch (err) {
+        ErrorLog.error('optimizer', `Review missing setups failed: ${err instanceof Error ? err.message : String(err)}`, err);
+      }
     });
     OptimizerPreview._syncApplyButton();
+  },
+
+  /** Download text as a UTF-8 CSV (with BOM, so Excel reads accents). The object URL is released after the click is handled. */
+  _downloadCsv(filename: string, text: string): void {
+    const blob = new Blob(['\uFEFF' + text], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   },
 
   async apply(): Promise<void> {
@@ -2502,7 +2533,7 @@ export const OptimizerPreview = {
       candidate.validationFindings = findings;
       OptimizerPreview._render();
       OptimizerPreview._syncApplyButton();
-      Toast.show('This proposal is no longer valid. Run optimization again before applying.', 'warn');
+      Toast.show(Util.t('toast.opt_proposal_invalid'), 'warn');
       return;
     }
     // This is the sole schedule-state commit for a preview candidate.
@@ -2528,7 +2559,7 @@ export const OptimizerPreview = {
       if (!pruned) {
         OptimizerPreview._render();
         OptimizerPreview._syncApplyButton();
-        Toast.show('This proposal is no longer valid. Run optimization again before applying.', 'warn');
+        Toast.show(Util.t('toast.opt_proposal_invalid'), 'warn');
         return;
       }
       const survivors = new Set(pruned.kept.map(patch => String(patch.id)));
@@ -2570,7 +2601,7 @@ export const OptimizerPreview = {
       OptimizerPreview._clear();
       Modal.close('modal-opt-preview');
     }
-    raiseToolInventory(plant, tool);
+    await raiseToolInventory(plant, tool);
     if (previewOpen) Toast.show(Util.t('toast.opt_tool_raise_closed'), 'info', 7000);
   },
 
@@ -2606,6 +2637,7 @@ export const OptimizerPreview = {
     const toolSummary = toolQueueSummary(candidate, kept);
     // No await when there is nothing to confirm: the commit stays synchronous exactly as before.
     if (toolSummary.queued.length) {
+      OptimizerPreview._applying = true;   // set before the await so a second Apply gesture cannot start a second commit
       // The confirm is async and a planner can still edit tasks behind it: remember what the kept patches' orders looked
       // like, and refuse to commit if any of them changed (or vanished) before the answer arrived.
       const before = taskBaseline(kept.map(patch => Store.tasks[String(patch.id)]).filter((task): task is NimbusTask => !!task));
@@ -2617,6 +2649,8 @@ export const OptimizerPreview = {
         OptimizerPreview._showPreviewAfterCancel();
         return false;
       }
+      // The preview can be discarded or replaced by a newer run while the confirm is open.
+      if (OptimizerPreview._candidate !== candidate) { OptimizerPreview._applying = false; return false; }
       const drifted = kept.some(patch => {
         const id = String(patch.id);
         const live = Store.tasks[id];
@@ -2632,6 +2666,8 @@ export const OptimizerPreview = {
       }
     }
     OptimizerPreview._applying = true;
+    Engine.applySchedulePatches(kept);
+    // Audit after the commit, so a failed apply never logs a run that did not happen.
     if (auditDetails && plant) {
       Util.fetchTraced(`${Config.API_BASE}/audit/log`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': Session.actor() },
@@ -2649,10 +2685,11 @@ export const OptimizerPreview = {
             tooling_rule: OptimizerPreview._toolFingerprint ? (JSON.parse(OptimizerPreview._toolFingerprint) as { r: string }).r : 'off',
             tool_blocked: toolSummary.queued.length,
             tool_moved: toolSummary.moved,
+            applied_count: kept.length,
             ...(auditDetails.searchBudgetMs !== undefined ? { search_budget_ms: auditDetails.searchBudgetMs, exhaustive: auditDetails.exhaustive === true } : {}),
           },
         }),
-      }).catch(() => {});
+      }).catch(err => ErrorLog.warn('optimizer', `Audit log failed: ${err instanceof Error ? err.message : String(err)}`));
     }
     if (mode === 'backlog' && OptimizerPreview._backlogResult && OptimizerPreview._backlogAudit) {
       const audit = OptimizerPreview._backlogAudit;
@@ -2666,7 +2703,7 @@ export const OptimizerPreview = {
             from: audit.from?.toISOString() ?? null, to: audit.to?.toISOString() ?? null,
             plant_timezone: audit.timezone, captured_run_at: audit.runAt?.toISOString() ?? null,
             backlog_found: diagnostics.backlogFound, moved: diagnostics.moved, firmed_moved: diagnostics.firmedMoved,
-            frozen_moved: diagnostics.frozenMoved,
+            frozen_moved: diagnostics.frozenMoved, applied_count: kept.length,
             invalid_runtime: diagnostics.invalidRuntimeIds.length, missing_start: diagnostics.missingStartIds.length,
             overlong: diagnostics.overlongIds.length, largest_delay_minutes: diagnostics.largestDelayMinutes,
             boundary_conflicts: diagnostics.boundaryConflicts.length,
@@ -2674,9 +2711,8 @@ export const OptimizerPreview = {
             split_order_policy: Engine.splitOrderPolicyFor(audit.plant),
           },
         }),
-      }).catch(() => {});
+      }).catch(err => ErrorLog.warn('optimizer', `Audit log failed: ${err instanceof Error ? err.message : String(err)}`));
     }
-    Engine.applySchedulePatches(kept);
     if (skipped.ids.length) {
       if (skipped.reason === 'running') {
         Toast.show(Util.t('toast.opt_apply_running_skipped', { count: skipped.ids.length }), 'warn', 7000);
@@ -2704,7 +2740,7 @@ export const OptimizerPreview = {
       if (candidate.dispositions?.some(item => item.status === 'needs_planning')) {
         const count = candidate.dispositions.filter(item => item.status === 'needs_planning').length;
         const toolNote = toolSummary.queued.length ? ` ${Util.t('ui.opt_tool_need_planning_suffix', { n: toolSummary.queued.length })}` : '';
-        Toast.show(`${count} order(s) need planning${toolNote}. Review their allowed windows and reasons in Orders.`, 'warn', 7000);
+        Toast.show(Util.t('toast.opt_orders_need_planning', { count, toolNote }), 'warn', 7000);
       } else if (unplacedOrders.orders && !candidate.dispositions) {
         Toast.show(Util.t('toast.optimize_orders_left_in_place', {
           orders: unplacedOrders.orders,
@@ -2831,7 +2867,7 @@ export const OptimizerPreview = {
         runBtn.textContent = Util.t('btn.opt_run_bg_busy');
       } else if (runBtn.textContent === Util.t('btn.opt_run_bg_busy')) {
         runBtn.disabled = !OptimizerPreview._backgroundRun && !Store.selectedPlant;
-        runBtn.innerHTML = `<span class="opt-run-icon">📈</span>${Util.t('btn.run_optimization')}`;
+        runBtn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">📈</span>${Util.t('btn.run_optimization')}`;
       }
     }
     btn.classList.toggle('is-running', running);
@@ -3268,9 +3304,9 @@ export const SandboxAdapter = {
     const banner = document.getElementById('sandbox-banner');
     if (!banner) return;
     banner.innerHTML = `
-      <span style="font-size:14px;">🔮</span>
+      <span style="font-size:14px;" aria-hidden="true">🔮</span>
       <strong>${Util.t('ui.what_if_title')}</strong> ${Util.t('ui.what_if_sub')}
-      <input class="sb-name" id="sb-scenario-name" placeholder="${Util.t('ph.name_scenario')}" value="${Util.t('ui.what_if_default_name')}">
+      <input class="sb-name" id="sb-scenario-name" aria-label="${Util.t('ph.name_scenario')}" placeholder="${Util.t('ph.name_scenario')}" value="${Util.t('ui.what_if_default_name')}">
       <div style="display:flex;gap:6px;margin-left:auto;">
         <button class="btn btn-ghost sm" id="sb-discard-btn">${Util.t('ui.discard_btn')}</button>
         <button class="btn btn-primary sm" id="sb-apply-btn">${Util.t('ui.promote_btn')}</button>
@@ -3295,7 +3331,7 @@ export const SandboxAdapter = {
     // mutating Store. The Confidence module also observes this event directly;
     // this optional seam keeps the adapter safe when boot/test wiring orders
     // the cross-module listeners differently.
-    (NIMBUS!.Confidence as { _invalidatePending?(clearSuppressed?: boolean): void } | undefined)?._invalidatePending?.(true);
+    confidenceSeam()?._invalidatePending?.(true);
     // So a discarded what-if session leaves no trace in the confidence tracker,
     // same as a discarded optimizer preview (see OptimizerPreview._confSnapshot).
     // Captured here (not in Sandbox.enter()) at the same logical moment as before —
@@ -3334,7 +3370,7 @@ export const SandboxAdapter = {
     const capturedLinePlants = applied ? SandboxAdapter._linePlantSnapshot : null;
 
     if (applied) {
-      const scenarioName = (document.getElementById('sb-scenario-name') as HTMLInputElement | null)?.value || 'What-If';
+      const scenarioName = (document.getElementById('sb-scenario-name') as HTMLInputElement | null)?.value || Util.t('ui.what_if_default_name');
       Toast.show(Util.t('toast.scenario_applied', { name: scenarioName }), 'success');
       // Promotion makes the trial side effects the new live baseline. Clear
       // the pre-sandbox copies before any persistence work can run. A later
@@ -3349,10 +3385,7 @@ export const SandboxAdapter = {
         // still true, so task replacement events can arm Confidence's debounce.
         // Cancel that pending work before restoring the detached baseline; the
         // restored score/history must remain authoritative after the 400ms wait.
-        (NIMBUS!.Confidence as {
-          _invalidatePending?(clearSuppressed?: boolean): void;
-          _suppressNextAlertRefresh?(): void;
-        } | undefined)?._invalidatePending?.();
+        confidenceSeam()?._invalidatePending?.();
         Store.setLastOptimize(
           SandboxAdapter._lastOptimizeSnapshot ? new Date(SandboxAdapter._lastOptimizeSnapshot) : null,
           'sandbox',
@@ -3379,13 +3412,8 @@ export const SandboxAdapter = {
       // this is the one existing post-discard recompute, and it must see the
       // restored dismissal set above.
       SandboxAdapter._clearSideEffectSnapshot();
-      (NIMBUS!.Confidence as {
-        _suppressNextAlertRefresh?(): void;
-        _scheduleStartupRecompute?(delay?: number): void;
-      } | undefined)?._suppressNextAlertRefresh?.();
-      (NIMBUS!.Confidence as {
-        _scheduleStartupRecompute?(delay?: number): void;
-      } | undefined)?._scheduleStartupRecompute?.();
+      confidenceSeam()?._suppressNextAlertRefresh?.();
+      confidenceSeam()?._scheduleStartupRecompute?.();
       Alerts.scheduleRecompute();
       Toast.show(Util.t('toast.scenario_discarded'), 'info');
     }
@@ -3475,7 +3503,7 @@ export const SandboxAdapter = {
       }
     }
     SandboxAdapter._linePlantSnapshot = null;
-    (NIMBUS!.Confidence as { _invalidatePending?(clearSuppressed?: boolean): void } | undefined)?._invalidatePending?.(true);
+    confidenceSeam()?._invalidatePending?.(true);
     Alerts.scheduleRecompute();
     Toast.show(Util.t('toast.scenario_discarded'), 'info');
   },

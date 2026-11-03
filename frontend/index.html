@@ -781,7 +781,7 @@ body.dark .lh-cell:hover { outline-color: rgba(255,255,255,0.35); }
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--fg-faint);
-  width: 28px;
+  width: 38px; /* fits the longest locale tags (fr "APRÈS", es "ANTES") */
   flex-shrink: 0;
 }
 .opt-pv-bar {
@@ -2948,7 +2948,7 @@ body.dark .ls-bar-wrap { background: rgba(255,255,255,0.08); }
               <button type="button" class="opt-line-mini"
                       onclick="NIMBUS.OptimizeDialog.selectAllLines(false)">Clear</button>
             </div>
-            <ul id="opt-lines-list" class="opt-lines-list" role="listbox" aria-multiselectable="true"></ul>
+            <ul id="opt-lines-list" class="opt-lines-list" data-i18n-aria-label="ui.opt_lines_list_aria" aria-label="Lines to optimize"></ul>
             <div class="opt-lines-count" id="opt-lines-count">0 of 0 selected</div>
           </div>
         </div>

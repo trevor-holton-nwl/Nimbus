@@ -1869,6 +1869,20 @@ function preservedAnchorOverrideEdges(
   });
 }
 
+/** The preserved-anchor case: both orders are still on the line, but the override's predecessor cannot sit
+ * next to the preserved first order. Reported with that wording, not as "no longer on this line". */
+function preservedAnchorOverrideReasons(
+  line: string,
+  edges: ReadonlyArray<MissingSetupEdge>,
+): CandidateReason[] {
+  return edges.map(edge => ({
+    code: 'override-inactive',
+    message: `Active override predecessor ${edge.predecessorOrderId ?? 'unknown'} cannot stay adjacent to preserved order ${edge.successorOrderId ?? 'unknown'}.`,
+    line,
+    taskId: edge.successorOrderId ?? undefined,
+  }));
+}
+
 function initialFreeOverrideLock(
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
@@ -5335,7 +5349,7 @@ function evaluateLineWithFirmedBoundaries(
     ...initialReasons,
     ...missingSuccessorOverrideReasons(line, missingSuccessorEdges),
     ...missingPredecessorOverrideReasons(line, missingPredecessorEdges),
-    ...missingPredecessorOverrideReasons(line, preservedAnchorEdges),
+    ...preservedAnchorOverrideReasons(line, preservedAnchorEdges),
     ...inactiveOutOfHorizonFirmedOverrideReasons(line, additionalInactivePostHorizonEdges),
   ];
   if (postHorizonOverrideAudit.protectedEdges.length) {
@@ -7429,7 +7443,7 @@ export function reconcileToolOutcomes(result: CandidateResult): CandidateResult 
   const blocked = new Map<string, ToolBlockedEntry>();
   for (const entry of result.toolBlocked ?? []) {
     const d = status.get(entry.orderId);
-    const cascadeKept = entry.cause === 'cascade' && (entry.reasonCode ?? d?.reason?.code) === d?.reason?.code;
+    const cascadeKept = entry.cause === 'cascade' && (entry.reasonCode === undefined || entry.reasonCode === d?.reason?.code);
     if (d?.status === 'needs_planning' && (isToolCode(d.reason?.code) || cascadeKept)) blocked.set(entry.orderId, entry);
   }
   for (const patch of result.patches) {
@@ -7995,7 +8009,9 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
       return task && end !== null && ceiling && +end > +ceiling ? pushLimitAware(bounds, task, generic) : generic;
     };
     const queueChanges = (id: string): SchedulePatch => ({ id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning' as const, planning_reason: queueReason(id) } });
-    const repairPatches = result.patches.map(patch => reasonBy.has(patch.id) ? queueChanges(patch.id) : patch);
+    // Protected orders never queue: their patches (if any) are left as they are, like their dispositions below.
+    const protectedIds = new Set((result.dispositions ?? []).filter(d => d.status === 'protected').map(d => d.id));
+    const repairPatches = result.patches.map(patch => reasonBy.has(patch.id) && !protectedIds.has(patch.id) ? queueChanges(patch.id) : patch);
     // An unchanged scheduled incumbent has no patch to rewrite: queue it with a new one (protected orders never queue).
     const patchedIds = new Set(result.patches.map(patch => patch.id));
     let queuedNew = false;
@@ -8006,7 +8022,7 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
     // Nothing to queue or relabel this pass: re-validating would only repeat the same findings.
     const sameReason = (a: { code: string; message: string } | null | undefined, b: { code: string; message: string }): boolean => !!a && a.code === b.code && a.message === b.message;
     const changedAny = queuedNew
-      || result.patches.some(patch => reasonBy.has(patch.id) && (patch.changes.planning_status !== 'needs_planning' || !sameReason(patch.changes.planning_reason, queueReason(patch.id))))
+      || result.patches.some(patch => reasonBy.has(patch.id) && !protectedIds.has(patch.id) && (patch.changes.planning_status !== 'needs_planning' || !sameReason(patch.changes.planning_reason, queueReason(patch.id))))
       || (result.dispositions ?? []).some(d => reasonBy.has(d.id) && d.status !== 'protected' && (d.status !== 'needs_planning' || !sameReason(d.reason, queueReason(d.id))));
     if (!changedAny) break;
     result = { ...result, patches: repairPatches, dispositions: repaired };
@@ -8346,7 +8362,7 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   score[SCORE_OVER_CAP] = objective.overCap;
   const diagnostics: SearchDiagnostics = {
     ...result.diagnostics,
-    budgetMs: result.diagnostics.budgetMs ?? Math.max(0, bounds.deadline),
+    budgetMs: result.diagnostics.budgetMs ?? 0,   // bounds.deadline is an absolute instant, never a budget length
     deadlineAt: result.diagnostics.deadlineAt ?? bounds.deadline,
     iterationsUsed: result.diagnostics.iterationsUsed ?? result.diagnostics.candidateCount,
     eligibleCount: result.diagnostics.eligibleCount ?? mutableTasks.length,

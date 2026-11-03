@@ -28,6 +28,26 @@ test('Sandbox discard restores plant periods added during What-If', () => {
   }
 });
 
+test('Sandbox.exit(false) hands the Store copies, so the exited snapshot never aliases live rows', () => {
+  const prior = structuredClone(Store.tasksArr);
+  const events = [];
+  const unsub = Store.subscribe(evt => { if (evt.type === 'sandbox:exited') events.push(evt); });
+  try {
+    Store.setTasks([{ id: 'alias-1', PLANT: 'SBP', MACHINE: 'L1', RUN_TIME: 1 }], 'unit-test');
+    Sandbox.enter('unit-test');
+    Store.setTasks([], 'unit-test');
+    const snap = Sandbox.exit(false, 'unit-test');
+    assert.equal(events.length, 1);
+    assert.notEqual(Store.tasks['alias-1'], snap.tasks[0], 'the Store row is not the snapshot row');
+    Store.updateTask('alias-1', { RUN_TIME: 9 }, 'unit-test');
+    assert.equal(snap.tasks[0].RUN_TIME, 1, 'later Store edits never reach the emitted snapshot');
+  } finally {
+    unsub?.();
+    if (Sandbox.active) Sandbox.exit(false, 'unit-test');
+    Store.setTasks(prior, 'unit-test');
+  }
+});
+
 test('_collectAffectedPlants flags a plant whose only change is its periods', () => {
   const prior = structuredClone(Store.plants);
   try {
