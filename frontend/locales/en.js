@@ -2110,6 +2110,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.opt_bg_more': '(+{{count}} more)',
   'ui.opt_bg_switch_plant': 'Switch to plant {{plant}}',
   'toast.opt_bg_no_worker': 'Running in the background needs a browser that supports background workers.',
+  'toast.opt_bg_stale_core': 'The background run could not start because this browser holds an outdated copy of the optimizer. Reload the page (Ctrl+F5) and run it again.',
   'ui.opt_pv_apply_fits': 'Apply what still fits',
   'ui.opt_bg_leave_warning': 'A background optimization is still running. Leaving this page will lose it.',
   'ui.opt_pv_diag_summary':             '{{method}} · {{count}} candidates · {{runtime}}',

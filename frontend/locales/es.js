@@ -1711,6 +1711,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.opt_bg_more': '(+{{count}} más)',
   'ui.opt_bg_switch_plant': 'Cambiar a la planta {{plant}}',
   'toast.opt_bg_no_worker': 'La ejecución en segundo plano requiere un navegador compatible con workers en segundo plano.',
+  'toast.opt_bg_stale_core': 'La ejecución en segundo plano no pudo iniciarse porque este navegador conserva una copia desactualizada del optimizador. Recargue la página (Ctrl+F5) y vuelva a ejecutarla.',
   'ui.opt_pv_apply_fits': 'Aplicar lo que aún encaja',
   'ui.opt_bg_leave_warning': 'Una optimización en segundo plano sigue en curso. Si sale de esta página, se perderá.',
   'ui.setup_review_filter_all':           'All',                                                       // MISSING TRANSLATION
