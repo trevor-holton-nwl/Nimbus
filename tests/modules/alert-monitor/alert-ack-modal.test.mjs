@@ -70,6 +70,17 @@ test('validateAck: until is the end of the chosen day (naive local), null with N
   assert.ok(!/[Z+]/.test(validateAck('r', '2026-10-27', false).until), 'no zone suffix or offset');
 });
 
+test('validateAck: a day that is not on the calendar is rejected with the invalid-date message', () => {
+  const bad = { ok: false, field: 'until', key: 'am.ack_err_until' };
+  assert.deepEqual(validateAck('r', '2026-02-31', false), bad);
+  assert.deepEqual(validateAck('r', '2026-13-01', false), bad);
+  assert.deepEqual(validateAck('r', '2026-00-10', false), bad);
+  assert.deepEqual(validateAck('r', '2026-04-31', false), bad);
+  assert.equal(validateAck('r', '2028-02-29', false).until, '2028-02-29T23:59:59', 'a real leap day passes');
+  assert.deepEqual(validateAck('r', '2027-02-29', false), bad, 'not a leap year');
+  assert.equal(validateAck('r', '2026-02-31', true).until, null, 'No end date ignores the picked day');
+});
+
 test('defaultUntilDay is the plant today plus seven days', () => {
   assert.equal(defaultUntilDay('P1'), '2026-10-27');
   Util.plantToday = () => new Date(2026, 11, 28);

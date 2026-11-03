@@ -36,6 +36,7 @@ import { Engine } from '../optimization/engine.mjs';
 import { Sandbox } from '../optimization/sandbox.mjs';
 import { planningReasonText } from '../scheduling/planning-reason.mjs';
 import { raiseToolInventory } from '../optimization/tool-queue-confirm.mjs';
+import { fmtNum } from './alert-monitor-model.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -161,7 +162,6 @@ export function rankSlotCandidates(task: NimbusTask, day: string, deps: SlotDeps
     || ((a.pv ?? '') < (b.pv ?? '') ? -1 : (a.pv ?? '') > (b.pv ?? '') ? 1 : 0));
 }
 
-const _MS_H = 3600e3;
 const _dateFromKey = (day: string): Date | null => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
   return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;   // local midnight built from parts
@@ -202,12 +202,12 @@ export function slotGapFinishFor(
     cursor = Math.max(cursor, e);
   }
   if (cursor < hi) gaps.push([cursor, hi]);
-  const largest = gaps.reduce((best, [s, e]) => Math.max(best, (e - s) / _MS_H), 0);
+  const largest = gaps.reduce((best, [s, e]) => Math.max(best, (e - s) / Config.MS_HOUR), 0);
   const need = typeof needHours === 'number' && Number.isFinite(needHours) && needHours > 0 ? needHours : null;
   if (need !== null) {
     for (let i = gaps.length - 1; i >= 0; i--) {
       const [s, e] = gaps[i]!;
-      if ((e - s) / _MS_H >= need - 1e-9) return { finish: new Date(e), gapHours: (e - s) / _MS_H, viaGap: true };
+      if ((e - s) / Config.MS_HOUR >= need - 1e-9) return { finish: new Date(e), gapHours: (e - s) / Config.MS_HOUR, viaGap: true };
     }
   }
   return { finish: new Date(hi), gapHours: largest, viaGap: false };
@@ -289,9 +289,6 @@ const _addDays = (day: string, n: number): string => {
   return d ? Util.dayKey(new Date(d.getFullYear(), d.getMonth(), d.getDate() + n)) : day;
 };
 
-/** One decimal, no trailing zero (6 -> "6", 4.25 -> "4.3"). */
-const _fmtH = (n: number): string => String(Math.round(n * 10) / 10);
-
 /** The option / suggestion line for a candidate. `null` (no eligible pair) reads `am.slot_none`. */
 export function formatSlotOption(
   c: SlotCandidate | null | undefined, tr: (key: string, vars?: Record<string, string | number>) => string = t,
@@ -299,8 +296,8 @@ export function formatSlotOption(
   if (!c) return tr('am.slot_none');
   if (c.closed) return tr('am.slot_option_closed', { pair: c.label });
   if (c.needHours === null || c.freeHours === null || c.capHours === null) return tr('am.slot_option_unknown', { pair: c.label });
-  const vars = { pair: c.label, free: _fmtH(c.freeHours), cap: _fmtH(c.capHours), need: _fmtH(c.needHours) };
-  return c.fits ? tr('am.slot_option', vars) : tr('am.slot_option_short', { ...vars, short: _fmtH(c.needHours - c.freeHours) });
+  const vars = { pair: c.label, free: fmtNum(c.freeHours), cap: fmtNum(c.capHours), need: fmtNum(c.needHours) };
+  return c.fits ? tr('am.slot_option', vars) : tr('am.slot_option_short', { ...vars, short: fmtNum(c.needHours - c.freeHours) });
 }
 
 /* =============================================================================
@@ -345,7 +342,7 @@ export function slotStripModel(args: {
 }): SlotStripModel | null {
   const base = _dateFromKey(args.day);
   if (!base || !args.window) return null;
-  const h = (d: Date): number => Math.min(24, Math.max(0, (d.getTime() - base.getTime()) / _MS_H));
+  const h = (d: Date): number => Math.min(24, Math.max(0, (d.getTime() - base.getTime()) / Config.MS_HOUR));
   const open = h(args.window[0]), close = h(args.window[1]);
   const off: Array<[number, number]> = [];
   if (open > 0) off.push([0, open]);
@@ -360,6 +357,14 @@ export function slotStripModel(args: {
   return { off, busy, order };
 }
 
+/** The one "does not fit" test, shared by the consequence line and `place()`'s confirm (and agreeing with `fits` in
+ *  `rankSlotCandidates`, which uses the same 1e-9 float slack) so they cannot disagree: the need is unknown, the free
+ *  hours are unknown, the need exceeds the free hours, or no free gap holds it (`!fin.viaGap`: the totals can fit while
+ *  other orders cut the free time up). */
+export function slotIsShort(c: SlotCandidate, fin: Pick<SlotFinish, 'viaGap'>): boolean {
+  return c.needHours === null || c.freeHours === null || c.needHours > c.freeHours + 1e-9 || !fin.viaGap;
+}
+
 export interface SlotConsequence { key: string; vars: Record<string, string | number>; tone: SlotCandidateState }
 
 /** The one line under the list: what "Move order" will do with the selected machine, so the walk-back, the overlap
@@ -370,8 +375,8 @@ export function slotConsequence(
   if (!fin) return { key: 'am.slot_no_window', vars: { machine: c.machine, day: fmtDay(day), days: SLOT_LOOKBACK_DAYS }, tone: 'closed' };
   if (fin.movedBack > 0) return { key: 'am.slot_cons_closed', vars: { machine: c.machine, day: fmtDay(day), moved: fmtDay(fin.day) }, tone: 'closed' };
   if (c.needHours === null) return { key: 'am.slot_cons_unknown', vars: { machine: c.machine }, tone: 'unknown' };
-  // The same test place() confirms on: the totals can fit while the free time is cut up by other orders (not viaGap).
-  const short = c.freeHours === null || c.needHours > c.freeHours || !fin.viaGap;
+  // The same test place() confirms on (slotIsShort).
+  const short = slotIsShort(c, fin);
   return { key: short ? 'am.slot_cons_short' : 'am.slot_cons_fits', vars: { machine: c.machine, when: fmtDay(fin.day) }, tone: short ? 'short' : 'fits' };
 }
 
@@ -412,10 +417,24 @@ export function canPlaceSlot(): boolean {
 }
 
 type UtilMatrix = ReturnType<typeof Utilization.computeMatrix>;
-/** One 1-day matrix per (plant, data revision, day): suggestions for many orders due the same day share it, and
+/** One 1-day matrix per (plant, data revision, day): every machine on a day shares it, and
  *  `computeMatrix` itself only keeps 6 windows. Bounded; cleared on a plant change. */
 const _capMemo = new Map<string, UtilMatrix>();
 const _CAP_MEMO_MAX = 24;
+
+/** Hours the (possibly overlapping) busy intervals cover inside [loMs, hiMs]: clipped, merged, never double-counted. */
+function _busyHoursWithin(busy: ReadonlyArray<readonly [Date, Date]>, loMs: number, hiMs: number): number {
+  const clipped = busy
+    .map(([s, e]) => [Math.max(loMs, s.getTime()), Math.min(hiMs, e.getTime())] as [number, number])
+    .filter(([s, e]) => e > s)
+    .sort((a, b) => a[0] - b[0]);
+  let total = 0, cursor = loMs;
+  for (const [s, e] of clipped) {
+    const from = Math.max(cursor, s);
+    if (e > from) { total += e - from; cursor = e; }
+  }
+  return total / Config.MS_HOUR;
+}
 
 /** The live reads behind the ranking. */
 export const liveSlotDeps: SlotDeps = {
@@ -460,16 +479,20 @@ export const liveSlotDeps: SlotDeps = {
     let free = Math.max(0, row.effectiveCapacity - row.scheduled);
     let cap = row.effectiveCapacity;
     let closed = row.capacity <= 0;
-    // On the plant's today the hours already gone are not free: shorten the capacity by the part of the working
-    // window before now, cap the free hours by what is left, and call an exhausted day closed.
+    // On the plant's today only the time still ahead counts. The cell's `scheduled` covers the WHOLE day (setup
+    // included), so the part already behind now comes out of it before it is held against what is left: the capacity
+    // shrinks by the working window before now (goneH) and the free hours are that remainder minus the work still
+    // ahead (an idle morning is not work done, so it never eats into the afternoon). An exhausted day is closed.
     const plant = Store.selectedPlant ?? '';
     const now = plant ? slotSeams.plantNow(plant) : null;
     if (now && Util.dayKey(now) === day && !closed) {
       const win = slotSeams.workWindow(machine, start);
       if (win) {
-        const goneH = Math.max(0, Math.min(now.getTime(), win[1].getTime()) - win[0].getTime()) / _MS_H;
+        const nowMs = Math.min(now.getTime(), win[1].getTime());
+        const goneH = Math.max(0, nowMs - win[0].getTime()) / Config.MS_HOUR;
         cap = Math.max(0, cap - goneH);
-        free = Math.min(free, cap);
+        const passedH = _busyHoursWithin(liveSlotDeps.busyIntervals?.(machine, day) ?? [], win[0].getTime(), nowMs);
+        free = Math.max(0, cap - Math.max(0, row.scheduled - passedH));
         closed = cap <= 0;
       }
     }
@@ -510,10 +533,6 @@ function _defaultDay(task: NimbusTask, plant: string): string {
   return defaultSlotDay(task, today, nowLeft);
 }
 
-/** Memo of `suggest`: `${taskId}|${Store.dataRev()}` -> top candidate (or null). Cleared on `plant:selected`. */
-const _suggestMemo = new Map<string, SlotCandidate | null>();
-const _SUGGEST_MEMO_MAX = 1000;
-
 /* =============================================================================
    THE DIALOG
    ========================================================================== */
@@ -521,7 +540,6 @@ const _SUGGEST_MEMO_MAX = 1000;
 interface SlotState {
   plant: string;
   taskId: string;
-  alertId: string | undefined;
   /** `slotTaskKey` of the row when the dialog opened. */
   taskKey: string;
   day: string;
@@ -644,7 +662,7 @@ function _microHtml(c: SlotCandidate, state: SlotCandidateState): string {
 function _rowHtml(c: SlotCandidate, checked: boolean, best: boolean, hidden: boolean): string {
   const state = slotCandidateState(c);
   const free = state === 'fits' || state === 'short'
-    ? `<b>${esc(t('am.slot_free_h', { free: _fmtH(c.freeHours ?? 0) }))}</b><small>${esc(t('am.slot_free_of', { cap: _fmtH(c.capHours ?? 0) }))}</small>`
+    ? `<b>${esc(t('am.slot_free_h', { free: fmtNum(c.freeHours ?? 0) }))}</b><small>${esc(t('am.slot_free_of', { cap: fmtNum(c.capHours ?? 0) }))}</small>`
     : '';
   return `<label class="asl-cand${best ? ' is-best' : ''}" data-state="${state}" data-value="${esc(c.value)}"${hidden ? ' hidden' : ''}>`
     + `<input class="asl-sr" type="radio" name="asl-cand" value="${esc(c.value)}"${checked ? ' checked data-autofocus' : ''}>`
@@ -785,7 +803,9 @@ function _onListKey(e: KeyboardEvent): void {
   else if (e.key === 'End') next = visible[visible.length - 1]!.value;
   else if (e.key in step) {
     const cur = visible.findIndex(c => c.value === _currentValue(s));
-    next = visible[cur < 0 ? 0 : (cur + step[e.key]! + visible.length) % visible.length]!.value;
+    // The chosen row may be filtered out (cur < 0): Down lands on the first visible row, Up on the last.
+    const dir = step[e.key]!;
+    next = visible[cur < 0 ? (dir > 0 ? 0 : visible.length - 1) : (cur + dir + visible.length) % visible.length]!.value;
   }
   if (next === undefined) return;
   e.preventDefault();
@@ -888,12 +908,12 @@ function _explainRefusal(task: NimbusTask, pv: string | null, machine: string): 
 
 export const AlertSlotModal = {
   /** Open the dialog for one queued order. Re-ranks nothing until the day changes. */
-  open(opts: { plant: string; taskId: string; alertId?: string }): void {
+  open(opts: { plant: string; taskId: string; alertId?: string /* accepted for the pane's call, ignored */ }): void {
     const task = opts.plant && opts.taskId ? Store.tasks[opts.taskId] : undefined;
     if (!task) return;
     const day = _defaultDay(task, opts.plant);
     const s: SlotState = {
-      plant: opts.plant, taskId: String(opts.taskId), alertId: opts.alertId, taskKey: slotTaskKey(task), day,
+      plant: opts.plant, taskId: String(opts.taskId), taskKey: slotTaskKey(task), day,
       candidates: rankSlotCandidates(task, day, liveSlotDeps), picked: null, busy: false, filter: '', previewOpen: false,
     };
     _s = s;
@@ -939,18 +959,18 @@ export const AlertSlotModal = {
     if (!first) return;
     const { pv, machine } = parsePairValue(cand.value);
     const fin = _finishFor(s, cand);
-    if (!fin) { Toast.show(t('am.slot_no_window', { machine, day: s.day, days: SLOT_LOOKBACK_DAYS }), 'warn'); return; }
+    if (!fin) { Toast.show(t('am.slot_no_window', { machine, day: _fmtDay(s.day), days: SLOT_LOOKBACK_DAYS }), 'warn'); return; }
     s.busy = true;
     try {
       // "Fits" must mean a real gap: the totals can fit while the free time is cut up by other orders (not viaGap).
-      const short = cand.needHours === null || cand.freeHours === null || cand.needHours > cand.freeHours || !fin.viaGap;
+      const short = slotIsShort(cand, fin);
       // Tool Inventory: warn (never refuse) when the slotted interval would put a tool over its copies.
       const toolOver = slotToolOverage({ task: first, machine, finish: fin.finish, needHours: cand.needHours, plant: s.plant, now: slotSeams.plantNow(s.plant) });
       if (fin.movedBack > 0 || short || toolOver) {
         const base = fin.movedBack > 0
-          ? t('am.slot_confirm_closed', { order: _orderLabel(first), machine, day: s.day, moved: fin.day })
+          ? t('am.slot_confirm_closed', { order: _orderLabel(first), machine, day: _fmtDay(s.day), moved: _fmtDay(fin.day) })
           : short
-            ? t('am.slot_confirm_short', { order: _orderLabel(first), machine, day: s.day })
+            ? t('am.slot_confirm_short', { order: _orderLabel(first), machine, day: _fmtDay(s.day) })
             : '';
         const toolClause = toolOver ? t('am.slot_confirm_tool', { tool: toolOver.tool, available: toolOver.available }) : '';
         const ok = await Modal.confirm({
@@ -1011,28 +1031,11 @@ export const AlertSlotModal = {
 
   /** True while the dialog is open for this plant (a plant switch closes it). */
   isOpenFor(plant: string | null): boolean { return !!_s && _s.plant === plant; },
-
-  /** The top-ranked candidate for the order's default day (`null` when no pair is eligible). Synchronous and
-   *  memoised per `${taskId}|${Store.dataRev()}`; the pane's Diagnose panel shows it with `formatSlotOption`. */
-  suggest(task: NimbusTask, plant: string): SlotCandidate | null {
-    const key = `${task.id}|${Store.dataRev()}`;
-    if (_suggestMemo.has(key)) return _suggestMemo.get(key) ?? null;
-    const top = rankSlotCandidates(task, _defaultDay(task, plant), liveSlotDeps)[0] ?? null;
-    if (_suggestMemo.size >= _SUGGEST_MEMO_MAX) _suggestMemo.clear();
-    _suggestMemo.set(key, top);
-    return top;
-  },
-
-  /** The day `suggest` ranked for (the dialog's default day): the pane's Diagnose line names it. */
-  suggestedDay(task: NimbusTask, plant: string): string {
-    return _defaultDay(task, plant);
-  },
 };
 
-// A plant change leaves the slot being composed meaningless, and every memo here is plant-scoped.
+// A plant change leaves the slot being composed meaningless, and the capacity memo is plant-scoped.
 Store.subscribe(evt => {
   if (evt.type !== 'plant:selected') return;
-  _suggestMemo.clear();
   _capMemo.clear();
   if (_s && _s.plant !== (evt.plant as string | null)) AlertSlotModal.close();
 }, 'alert-slot-modal');

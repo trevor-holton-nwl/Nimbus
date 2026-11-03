@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import {
   AlertSlotModal, slotSeams, liveSlotDeps, canPlaceSlot,
   parsePairValue, rankSlotCandidates, slotFinishFor, slotGapFinishFor, slotTaskKey, defaultSlotDay, formatSlotOption, SLOT_LOOKBACK_DAYS,
-  SLOT_FILTER_ABOVE, slotCandidateState, filterSlotCandidates, slotStripModel, slotConsequence,
+  SLOT_FILTER_ABOVE, slotCandidateState, filterSlotCandidates, slotStripModel, slotConsequence, slotIsShort,
 } from '../../../frontend/alert-monitor/alert-slot-modal.mjs';
 import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Util, Modal, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -730,22 +730,21 @@ test('liveSlotDeps.pairOptions: the Orders grid list when bridged, the plant lin
   } finally { Store.linesForSelectedPlant = realLines; Runtime.resolve = realResolve; }
 });
 
-test('suggest: an ineligible current pair never leads, and with no eligible pair the suggestion is null', () => {
+test('an ineligible current pair is never listed in the dialog, even when it has the most free hours', () => {
   const realResolve = Runtime.resolve;
   Runtime.resolve = (row, machine) => (row.PRODUCTION_VERSION === '0001' && machine === 'M1' ? { ok: true, hours: 2 } : { ok: false, step: 'pv_expired' });
   try {
     liveSlotDeps.pairOptions = prior.deps.pairOptions;
     capByDay['2026-10-28'] = { M1: { free: 1, cap: 8, closed: false }, M9: { free: 9, cap: 10, closed: false } };   // M9 has the most free hours
     slotSeams.nim = () => ({ Table: { _getPairOptions: () => [{ value: '0009|M9', label: 'current, not eligible' }] } });
-    assert.equal(AlertSlotModal.suggest(Store.tasks.t1, 'P1'), null, 'the only option is the ineligible current pair');
-    Store.updateTask('t1', { text: 'x' }, 'test');   // new data revision: no memo hit
+    openIt();
+    assert.deepEqual(optionOrder(), [''], 'the only option is the ineligible current pair: nothing is offered (the empty placeholder option)');
+    AlertSlotModal.close();
     slotSeams.nim = () => ({ Table: { _getPairOptions: () => [
       { value: '0009|M9', label: 'current, not eligible' }, { value: '0001|M1', label: '0001 - M1' },
     ] } });
-    const top = AlertSlotModal.suggest(Store.tasks.t1, 'P1');
-    assert.equal(top.value, '0001|M1', 'the eligible pair wins even though M9 has more free hours');
     openIt();
-    assert.deepEqual(optionOrder(), ['0001|M1'], 'and the dialog does not list the ineligible pair either');
+    assert.deepEqual(optionOrder(), ['0001|M1'], 'the eligible pair wins even though M9 has more free hours');
   } finally { Runtime.resolve = realResolve; }
 });
 
@@ -865,66 +864,6 @@ test('the Place button runs place()', async () => {
   assert.equal(calls.patch.length, 1);
 });
 
-test('suggest returns the top candidate for the default day, synchronously, memoised per task and data revision', () => {
-  let reads = 0;
-  const original = liveSlotDeps.pairOptions;
-  liveSlotDeps.pairOptions = row => { reads++; return original(row); };
-  const live = Store.tasks.t1;
-  const top = AlertSlotModal.suggest(live, 'P1');
-  assert.equal(top.machine, 'M2');
-  assert.equal(top.fits, true);
-  assert.equal(reads, 1);
-  assert.equal(AlertSlotModal.suggest(live, 'P1'), top, 'memo hit: the same object, no second read');
-  assert.equal(reads, 1);
-  Store.updateTask('t1', { text: 'edited' }, 'test');   // any data change moves Store.dataRev()
-  const again = AlertSlotModal.suggest(Store.tasks.t1, 'P1');
-  assert.equal(reads, 2, 'a new data revision recomputes');
-  assert.equal(again.machine, 'M2');
-});
-
-test('suggest memo is cleared on plant:selected, and a task with no eligible pair suggests null (memoised too)', () => {
-  let reads = 0;
-  const original = liveSlotDeps.pairOptions;
-  liveSlotDeps.pairOptions = row => { reads++; return original(row); };
-  AlertSlotModal.suggest(Store.tasks.t1, 'P1');
-  assert.equal(reads, 1);
-  // A plant switch bumps dataRev on its own, so pin the revision by reading the memo through a switch that
-  // returns to the same plant: the cleared memo is what forces the second read, not the revision.
-  const revBefore = Store.dataRev();
-  const realDataRev = Store.dataRev;
-  Store.dataRev = () => revBefore;
-  const t1 = Store.tasks.t1;
-  try {
-    assert.equal(AlertSlotModal.suggest(t1, 'P1').machine, 'M2');
-    assert.equal(reads, 1, 'same revision: a memo hit');
-    Store.setSelectedPlant('P2', 'test');
-    Store.setSelectedPlant('P1', 'test');
-    AlertSlotModal.suggest(t1, 'P1');
-    assert.equal(reads, 2, 'the memo was cleared by plant:selected');
-  } finally { Store.dataRev = realDataRev; }
-  Store.setSelectedPlant('P1', 'test');
-  if (!Store.tasks.t1) seedTask();
-  liveSlotDeps.pairOptions = () => { reads++; return []; };
-  Store.updateTask('t1', { text: 'x' }, 'test');
-  const none = AlertSlotModal.suggest(Store.tasks.t1, 'P1');
-  assert.equal(none, null);
-  const n = reads;
-  assert.equal(AlertSlotModal.suggest(Store.tasks.t1, 'P1'), null);
-  assert.equal(reads, n, 'null is memoised as well');
-  assert.equal(formatSlotOption(none, tr), 'am.slot_none');
-});
-
-test('suggest uses the due day when it is ahead of today and today when the due day is past', () => {
-  const days = [];
-  liveSlotDeps.dayCapacity = (machine, day) => { days.push(day); return capByDay['2026-10-28'][machine]; };
-  AlertSlotModal.suggest(Store.tasks.t1, 'P1');
-  assert.ok(days.length && days.every(d => d === '2026-10-28'));
-  seedTask({ original_end_date: new Date(2026, 9, 20, 14) });
-  days.length = 0;
-  AlertSlotModal.suggest(Store.tasks.t1, 'P1');
-  assert.ok(days.length && days.every(d => d === '2026-10-26'), 'a past due day falls back to the plant today');
-});
-
 /* ---------------------------------------------------------------- final fix wave (F1, F2, F4, F6, F7) */
 
 test('F1: place lands on the latest real gap before a late bar, with no confirm', async () => {
@@ -991,21 +930,19 @@ test('F2: defaultSlotDay moves to tomorrow when nothing is left today, and keeps
   assert.equal(defaultSlotDay(task({ original_end_date: null }), '2026-10-31', false), '2026-11-01', 'across a month end');
 });
 
-test('F2: with nothing left today on any eligible machine the dialog and the suggestion open on tomorrow', () => {
+test('F2: with nothing left today on any eligible machine the dialog opens on tomorrow', () => {
   seedTask({ original_end_date: new Date(2026, 9, 20, 14) });   // a past due day: would default to today
   capByDay['2026-10-26'] = { M1: { free: 0, cap: 0, closed: true }, M2: { free: 0, cap: 0, closed: true }, M3: { free: 0, cap: 0, closed: true } };
   capByDay['2026-10-27'] = { M1: { free: 5, cap: 8, closed: false }, M2: { free: 9, cap: 10, closed: false }, M3: { free: 6, cap: 8, closed: false } };
   openIt();
   assert.equal(els['asl-day'].value, '2026-10-27');
-  assert.equal(AlertSlotModal.suggestedDay(Store.tasks.t1, 'P1'), '2026-10-27');
-  assert.equal(AlertSlotModal.suggest(Store.tasks.t1, 'P1').machine, 'M2');
+  assert.equal(optionOrder()[0], 'M2', 'ranked for tomorrow');
   // one machine with time left keeps today
   AlertSlotModal.close();
   capByDay['2026-10-26'].M3 = { free: 3, cap: 4, closed: false };
   Store.updateTask('t1', { text: 'x' }, 'test');
   openIt();
   assert.equal(els['asl-day'].value, '2026-10-26');
-  assert.equal(AlertSlotModal.suggestedDay(Store.tasks.t1, 'P1'), '2026-10-26');
   // unreadable capacity does not hide today
   AlertSlotModal.close();
   delete capByDay['2026-10-26'];
@@ -1035,8 +972,8 @@ test('F2: liveSlotDeps.dayCapacity on the plant today counts only the time still
   });
   try {
     const dayCapacity = prior.deps.dayCapacity;
-    slotSeams.plantNow = () => new Date(2026, 9, 26, 14, 0);   // window 06-22: 8 h gone
-    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 8, cap: 8, closed: false }, 'free is capped by the time left');
+    slotSeams.plantNow = () => new Date(2026, 9, 26, 14, 0);   // window 06-22: 8 h gone, nothing busy behind now
+    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 7, cap: 8, closed: false }, 'the 8 h left minus the 1 h still ahead (the old code said 8)');
     assert.deepEqual(dayCapacity('M1', '2026-10-27'), { free: 15, cap: 16, closed: false }, 'another day is untouched');
     slotSeams.plantNow = () => new Date(2026, 9, 26, 3, 0);
     assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 15, cap: 16, closed: false }, 'now before the window opens');
@@ -1044,6 +981,35 @@ test('F2: liveSlotDeps.dayCapacity on the plant today counts only the time still
     assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 0, cap: 0, closed: true }, 'nothing left: treated as closed');
     slotSeams.plantNow = () => null;
     assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 15, cap: 16, closed: false }, 'no plant clock: no clamp');
+  } finally { Utilization.computeMatrix = real; }
+});
+
+test('M3: on the plant today an idle morning does not eat the afternoon: free = time left minus the work still ahead', () => {
+  const real = Utilization.computeMatrix;
+  let rev = 0;
+  // The 1-day matrix is memoised per data revision, so each scenario bumps it.
+  const cell = scheduled => { Store.updateTask('t1', { text: 'rev' + (++rev) }, 'test'); return () => ({ M1: { '2026-10-26': { scheduled, capacity: 8, effectiveCapacity: 8 } } }); };
+  const h = (hour, min = 0) => new Date(2026, 9, 26, hour, min);
+  slotSeams.workWindow = (_line, date) => [new Date(date.getFullYear(), date.getMonth(), date.getDate(), 8), new Date(date.getFullYear(), date.getMonth(), date.getDate(), 16)];   // an 8 h window
+  slotSeams.plantNow = () => h(12);   // 4 h gone, 4 h left
+  const dayCapacity = prior.deps.dayCapacity;
+  try {
+    // The worked example: nothing ran this morning, one 2 h bar this afternoon. The old code said 4 h free (min(8 - 2, 4)).
+    Utilization.computeMatrix = cell(2);
+    liveSlotDeps.busyIntervals = () => [[h(13), h(15)]];
+    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 2, cap: 4, closed: false }, '4 h left minus the 2 h bar ahead');
+    // Work that already ran this morning is behind now: it is taken out of the day's scheduled hours.
+    Utilization.computeMatrix = cell(3);
+    liveSlotDeps.busyIntervals = () => [[h(9), h(11)], [h(13), h(14)]];
+    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 3, cap: 4, closed: false }, 'only the 1 h bar still ahead counts');
+    // A bar that straddles now counts only for the part after it; overlapping intervals are not counted twice.
+    Utilization.computeMatrix = cell(2);
+    liveSlotDeps.busyIntervals = () => [[h(11), h(13)], [h(11, 30), h(12, 30)]];
+    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 3, cap: 4, closed: false }, '1 h of 11-13 is behind now (merged with its twin), 1 h ahead');
+    // Over-booked ahead never goes negative.
+    Utilization.computeMatrix = cell(9);
+    liveSlotDeps.busyIntervals = () => [];
+    assert.deepEqual(dayCapacity('M1', '2026-10-26'), { free: 0, cap: 4, closed: false });
   } finally { Utilization.computeMatrix = real; }
 });
 
@@ -1212,6 +1178,64 @@ test('slotConsequence: no window, walk-back, unknown need, short (totals or no r
   assert.deepEqual(slotConsequence(cand(), fin(), '2026-10-28', fmt), { key: 'am.slot_cons_fits', vars: { machine: 'M1', when: 'D(2026-10-28)' }, tone: 'fits' });
 });
 
+test('M1: slotIsShort is the one test: float slack counts as fitting, unknown need or free hours and a missing gap are short', () => {
+  const fin = (viaGap = true) => ({ viaGap });
+  const nearly = 4.1 - 1e-10;   // a float-noise shortfall: reads as fitting everywhere
+  assert.equal(slotIsShort(cand({ needHours: 4.1, freeHours: nearly }), fin()), false);
+  assert.equal(slotIsShort(cand({ needHours: 4.1, freeHours: 4.0 }), fin()), true, 'a real shortfall');
+  assert.equal(slotIsShort(cand({ needHours: null }), fin()), true);
+  assert.equal(slotIsShort(cand({ freeHours: null }), fin()), true);
+  assert.equal(slotIsShort(cand(), fin(false)), true, 'no free gap holds it');
+  const fmt = d => 'D(' + d + ')';
+  const f = { finish: at(22), day: '2026-10-28', movedBack: 0, viaGap: true, gapHours: 16 };
+  assert.equal(slotConsequence(cand({ needHours: 4.1, freeHours: nearly }), f, '2026-10-28', fmt).key, 'am.slot_cons_fits');
+});
+
+test('M1: a float-noise shortfall reads as fits in the row, the consequence line and place() (no short confirm)', async () => {
+  capByDay['2026-10-28'] = { M1: { free: 4.1 - 1e-10, cap: 8, closed: false } };
+  liveSlotDeps.pairOptions = () => [{ value: 'M1', label: 'M1' }];
+  liveSlotDeps.hoursFor = () => 4.1;
+  openIt();
+  assert.deepEqual(rowStates(), ['fits']);
+  assert.equal(els['asl-consequence'].textContent, 'am.slot_cons_fits');
+  await AlertSlotModal.place();
+  assert.equal(calls.confirm.length, 0, 'no short confirm');
+  assert.equal(calls.patch.length, 1);
+});
+
+test('M2: the confirm and no-window messages name days in the user date format, never the raw ISO key', async () => {
+  const seen = [];
+  const priorT = Util.t;
+  Util.t = (key, vars) => { seen.push([key, vars]); return key; };
+  const varsOf = key => seen.find(([k]) => k === key)[1];
+  try {
+    // walk-back confirm: the 28th is closed, the 27th is the landing day
+    openDays.delete('2026-10-28');
+    capByDay['2026-10-28'].M2 = { free: 0, cap: 0, closed: true };
+    liveSlotDeps.pairOptions = () => [{ value: 'M2', label: 'M2' }];
+    openIt();
+    await AlertSlotModal.place();
+    assert.equal(varsOf('am.slot_confirm_closed').day, Util._fmtDatePref(new Date(2026, 9, 28)));
+    assert.equal(varsOf('am.slot_confirm_closed').moved, Util._fmtDatePref(new Date(2026, 9, 27)));
+    assert.notEqual(varsOf('am.slot_confirm_closed').day, '2026-10-28', 'not the ISO key');
+    // short confirm
+    AlertSlotModal.close();
+    seen.length = 0;
+    openDays.add('2026-10-28');
+    capByDay['2026-10-28'].M2 = { free: 3, cap: 8, closed: false };
+    openIt();
+    await AlertSlotModal.place();
+    assert.equal(varsOf('am.slot_confirm_short').day, Util._fmtDatePref(new Date(2026, 9, 28)));
+    // no window at all
+    AlertSlotModal.close();
+    seen.length = 0;
+    openDays.clear();
+    openIt();
+    await AlertSlotModal.place();
+    assert.equal(varsOf('am.slot_no_window').day, Util._fmtDatePref(new Date(2026, 9, 28)));
+  } finally { Util.t = priorT; }
+});
+
 test('the lead banner shows only for push_limit_unmet, and replaces the reason line there', () => {
   seedTask({ planning_reason: { code: 'push_limit_unmet', message: 'stored text' } });
   openIt();
@@ -1314,6 +1338,23 @@ test('the filter box appears above SLOT_FILTER_ABOVE candidates, hides rows with
   els['asl-body'].handlers.keydown(esc2);
   assert.equal(esc2.prevented, false);
   assert.equal(AlertSlotModal.isOpenFor('P1'), true, 'the body handler never closes; the shell handler does');
+});
+
+test('keyboard: with the chosen row filtered out, ArrowDown lands on the first visible row and ArrowUp on the last', () => {
+  const many = n => Array.from({ length: n }, (_, i) => 'L' + String(i + 1).padStart(2, '0'));
+  liveSlotDeps.pairOptions = () => many(12).map(m => ({ value: m, label: m }));
+  liveSlotDeps.dayCapacity = () => ({ free: 9, cap: 10, closed: false });
+  openIt();
+  assert.equal(els['asl-pair'].value, 'L01');
+  typeFilter('L1');
+  assert.deepEqual(visibleRows(), ['L10', 'L11', 'L12'], 'L01 is hidden');
+  keyOnList('ArrowDown');
+  assert.equal(els['asl-pair'].value, 'L10', 'down from a hidden row: the first visible');
+  AlertSlotModal.close();
+  openIt();
+  typeFilter('L1');
+  keyOnList('ArrowUp');
+  assert.equal(els['asl-pair'].value, 'L12', 'up from a hidden row: the last visible');
 });
 
 test('the day preview is collapsed by default, toggles with aria-expanded, and draws the selected machine only', () => {
