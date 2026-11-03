@@ -1425,7 +1425,9 @@ function taskId(task: NimbusTask): string {
 }
 
 function stateKey(state: SetupStateKey): string {
-  return JSON.stringify(state);
+  // Canonical {fieldKey, value} order: Postgres jsonb hands override keys back
+  // as {value, fieldKey}, so stringifying the raw entries would never match.
+  return '[' + state.map(entry => JSON.stringify({ fieldKey: entry.fieldKey, value: entry.value })).join(',') + ']';
 }
 
 /** Ordinal (code-point) string comparison. `localeCompare` walks ICU

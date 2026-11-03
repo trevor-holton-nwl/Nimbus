@@ -1982,6 +1982,63 @@ test('setup-aware evaluators reserve the pre-fixed fragment for a valid initial-
   }
 });
 
+// Postgres jsonb returns object keys shorter-first ({value, fieldKey}); the
+// order side builds {fieldKey, value}. State keys must compare equal anyway.
+function jsonbOrderedState(value) {
+  return [{ value, fieldKey: 'colorWheel' }];
+}
+
+test('override state keys in jsonb {value, fieldKey} order still match (free adjacency + boundary lock)', () => {
+  const red = scheduledTask('jsonb-red', 1, 'RED', '2026-08-03T12:00:00');
+  const blue = scheduledTask('jsonb-blue', 1, 'BLUE', '2026-08-03T09:00:00');
+  const adjacencySetup = setupTruth({
+    rows: [
+      setupRow('GREEN', 'RED', 10), setupRow('RED', 'BLUE', 20),
+      setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+    ],
+    overrides: [{
+      id: 'jsonb-override', machine: 'L1', signature_version: 1,
+      predecessor_order_id: 'jsonb-red', successor_order_id: 'jsonb-blue',
+      predecessor_state_key: jsonbOrderedState('RED'), successor_state_key: jsonbOrderedState('BLUE'),
+      standard_min: 20, remaining_min: 4, status: 'active', reason: 'jsonb key order',
+    }],
+  });
+  const adj = SetupScheduler.evaluateDueDateFirst(setupSnapshot([red, blue]), dueDateBounds(adjacencySetup));
+  assert.equal(adj.missingEdges.some(edge => edge.reason === 'override-inactive'), false,
+    'reordered override keys must not read as inactive');
+  assert.deepEqual(scheduledPatches(adj).map(patch => patch.id), ['jsonb-red', 'jsonb-blue']);
+  assert.equal(patchFor(adj, 'jsonb-blue').changes.start_date.getTime(), at('2026-08-03T09:14:00').getTime());
+
+  const freeRed = scheduledTask('jsonb-initial-free-red', 1, 'RED', '2026-08-03T09:00:00');
+  const fixedBlue = scheduledTask(
+    'jsonb-initial-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const lockSetup = setupTruth({
+    rows: [setupRow('BLUE', 'RED', 0)],
+    overrides: [{
+      id: 'jsonb-initial-override', machine: 'L1', signature_version: 1,
+      predecessor_order_id: null, successor_order_id: 'jsonb-initial-fixed-blue',
+      predecessor_state_key: jsonbOrderedState('GREEN'), successor_state_key: jsonbOrderedState('BLUE'),
+      standard_min: 10, remaining_min: 10, status: 'active', reason: 'jsonb key order',
+    }],
+  });
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([freeRed, fixedBlue], { firmedIds: ['jsonb-initial-fixed-blue'] }),
+      dueDateBounds(lockSetup),
+    );
+    assert.deepEqual(scheduledPatches(result).map(patch => patch.id), ['jsonb-initial-free-red'], `${label} boundary lock holds`);
+    assert.equal(result.missingEdges.some(edge => edge.reason === 'override-inactive'), false, label);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'firmed-incoming-setup' && reason.taskId === 'jsonb-initial-fixed-blue'
+    )), `${label} audit resolves the incoming fixed setup from the override`);
+  }
+});
+
 test('setup-aware evaluators reject invalid null-predecessor overrides on fixed boundaries', () => {
   // This protects the new null-predecessor lock: it belongs only to the first
   // fixed boundary and only when its predecessor state matches persisted line
