@@ -1062,3 +1062,43 @@ test('fetchTraced maps a real 409 to errorCode http.conflict', async () => {
     assert.equal(ErrorLog.entries()[0].errorCode, 'http.conflict');
   } finally { globalThis.fetch = prevFetch; }
 });
+
+test('Config and the compute core agree on the shared capacity constants', () => {
+  const Core = globalThis.NimbusComputeCore;
+  assert.deepEqual([...Core.DEFAULT_SHIFT], [...Config.DEFAULT_SHIFT]);
+  assert.equal(Core.WEEKEND_OFF, Config.WEEKEND_OFF);
+  assert.equal(Core.OVERLOAD_THRESHOLD, Config.OVERLOAD_THRESHOLD);
+  assert.equal(Core.WARN_THRESHOLD, Config.WARN_THRESHOLD);
+  assert.equal(Core.SHOW_NEAR_CAPACITY_ALERTS, Config.SHOW_NEAR_CAPACITY_ALERTS);
+});
+
+test('Util.startOfDay returns a new Date and leaves its argument alone', () => {
+  const src = new Date(2026, 9, 15, 13, 30);
+  const before = src.getTime();
+  const day = Util.startOfDay(src);
+  assert.equal(src.getTime(), before);
+  assert.equal(day.getTime(), new Date(2026, 9, 15).getTime());
+  assert.notEqual(day, src);
+  assert.equal(Util.startOfDay('not a date'), null);
+});
+
+test('Util.alertMessage re-formats the dates the core embedded (msgDates) with the user date/time prefs', () => {
+  const Core = globalThis.NimbusComputeCore;
+  const when = new Date(2026, 9, 15, 18, 5);
+  const text = Core.fmtDTReadable(when);   // the core's fixed default: "10/15/2026 · 06:05 PM"
+  const alert = { msg: `Order "O" ends after L closes (${text}).`, msgDates: [{ text, ms: +when }] };
+  const previousWindow = globalThis.window;
+  try {
+    Util.setPreferenceResolver(key => (key === 'timeFormat' ? '24h' : undefined));
+    assert.equal(Util.alertMessage(alert), 'Order "O" ends after L closes (10/15/2026 · 18:05).');
+    // A keyed alert: string vars equal to the default text are swapped before the locale template is filled.
+    const keyed = { msg: 'x', msgKey: 'alert.test_dates_only_in_this_test', msgVars: { from: text, order: 'O' }, msgDates: [{ text, ms: +when }] };
+    globalThis.window = { __NIMBUS_LOCALES: { en: { 'alert.test_dates_only_in_this_test': '{{order}} was {{from}}' } } };
+    assert.equal(Util.alertMessage(keyed), 'O was 10/15/2026 · 18:05');
+    // No msgDates: unchanged.
+    assert.equal(Util.alertMessage({ msg: alert.msg }), alert.msg);
+  } finally {
+    Util.setPreferenceResolver(() => undefined);
+    if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow;
+  }
+});

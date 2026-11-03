@@ -51,8 +51,13 @@
   const WEEKEND_OFF                = true;
 
   // The overload rule: scheduled hours beat effective capacity by more than the tolerance. Pure.
-  function isOverloaded(scheduledH, effCapH) {
-    return effCapH > 0 && scheduledH > effCapH * OVERLOAD_THRESHOLD + OVERLOAD_TOLERANCE_H;
+  // `capH` (the line's full capacity that day, before its buffer) is optional. When given and positive, a FULLY
+  // BUFFERED day (effective capacity <= 0: the buffer reserves every working hour) is overloaded as soon as anything
+  // beyond the tolerance is scheduled on it. A truly closed day (capH 0) never matches here (the 'closed' alert
+  // covers it); omitting `capH` keeps the original rule for callers that only hold the effective figure.
+  function isOverloaded(scheduledH, effCapH, capH) {
+    if (effCapH > 0) return scheduledH > effCapH * OVERLOAD_THRESHOLD + OVERLOAD_TOLERANCE_H;
+    return capH > 0 && scheduledH > OVERLOAD_TOLERANCE_H;
   }
 
   // ── Util helpers ────────────────────────────────────────────────────────────
@@ -72,8 +77,11 @@
   }
 
   function startOfDay(d) {
-    const x = parseDate(d);
-    if (!x) return null;
+    const src = parseDate(d);
+    if (!src) return null;
+    // A clone: parseDate hands a Date argument back as-is, and a caller's Date (alertPoints' horizonStart)
+    // must never be moved to midnight under it.
+    const x = new Date(+src);
     x.setHours(0, 0, 0, 0);
     return x;
   }
@@ -520,6 +528,14 @@
     return total / MS_HOUR;
   }
 
+  // A date embedded in alert text (B27). The core formats it in its fixed default (it has no user prefs) and ALSO
+  // ships the instant, so the main thread (Util.alertMessage) swaps the default text for the user's dateFormat and
+  // timeFormat. `text` is matched verbatim against `msg` and against string `msgVars` values.
+  function msgDateRef(d) {
+    const v = parseDate(d);
+    return { text: fmtDTReadable(v), ms: +v };
+  }
+
   function fmtDTReadable(d) {
     const date = parseDate(d);
     if (!date) return '';
@@ -866,7 +882,7 @@
   function effectiveFromCapacity(line, full, lineSettings) {
     const ls = lineSettings[line];
     if (!ls) return full;
-    if (ls.bufferUnit === 'pct'   && ls.bufferPct   > 0) return full * (1 - ls.bufferPct / 100);
+    if (ls.bufferUnit === 'pct'   && ls.bufferPct   > 0) return Math.max(0, full * (1 - ls.bufferPct / 100));
     if (ls.bufferUnit === 'hours' && ls.bufferHours > 0) return Math.max(0, full - ls.bufferHours);
     return full;
   }
@@ -876,7 +892,7 @@
   // are already filtered against `dismissed`. Merging the incremental `opts.lines` scope
   // into the retained list is the caller's responsibility.
 
-  function computeAlerts({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts, setup, now, blockedPlants }) {
+  function _computeAlertsBody({ tasks, blocks, plantBlocks, calendars, plants, lineSettings, masterData, dismissed, opts, setup, now, blockedPlants }) {
     const t0 = performance.now();
 
     const onlyLines = Array.isArray(opts?.lines) && opts.lines.length
@@ -944,6 +960,10 @@
       if (!day) todayByPlant.set(plant, day = startOfDay(at instanceof Date ? new Date(+at) : at) || fallbackToday);
       return day;
     };
+    // The instant an alert with no date of its own is stamped with: the plant's wall-clock now when the caller
+    // sent one for that plant (OQ52, the same clock as todayStartFor), else this thread's clock. Alerts that fall
+    // back to a bare new Date() read a different "now" on the worker than the plant sees.
+    const fallbackTime = plant => (plant != null ? parseDate(now?.[plant]) : null) || new Date();
     // task.start_date / end_date are proper Dates (structured-clone preserves them).
     let activeTasks = tasks.filter(t => !t.end_date || t.end_date >= todayStartFor(t));
     if (onlyLines) activeTasks = activeTasks.filter(t => onlyLines.has(t.MACHINE || 'Unknown'));
@@ -1054,7 +1074,7 @@
     for (const t of tasks) {
       if (!t.PARENT_ORDER) continue;
       if (t.planning_status === 'needs_planning') continue;
-      const plant = plantOf(t.MACHINE || 'Unknown');
+      const plant = t.PLANT || plantOf(t.MACHINE || 'Unknown');
       const material = t.MATERIAL_NUMBER ?? '';
       const key = JSON.stringify([plant, t.PARENT_ORDER, material]);
       let g = distGroups.get(key);
@@ -1121,7 +1141,7 @@
       const cap = dailyCapacityHours(line, dateObj, calendars, plants, lineSettings, masterData, blocks, plantBlocks, _capIdx);
       const effCap = effectiveFromCapacity(line, cap, lineSettings);
 
-      if (isOverloaded(hours, effCap)) {
+      if (isOverloaded(hours, effCap, cap)) {
         // Two decimals when one decimal would print the same figure twice ("24.0h vs 24.0h" reads as no overload).
         const dp = hours.toFixed(1) === effCap.toFixed(1) ? 2 : 1;
         alerts.push({
@@ -1266,16 +1286,19 @@
     for (const t of activeTasks) {
       const line = t.MACHINE || 'Unknown';
       const parts = [];
+      const msgDates = [];   // the default-format dates embedded in `parts`, so the main thread can re-format them (B27)
       let alertTime = t.start_date;
       for (const interval of scheduleIntervals(t)) {
         const winS = workWindow(line, interval.start, calendars, plants, lineSettings, masterData);
         const winE = workWindow(line, interval.end,   calendars, plants, lineSettings, masterData);
         if (winS && interval.start < winS[0]) {
-          parts.push(`starts before ${line} opens (${fmtDTReadable(winS[0])})`);
+          msgDates.push(msgDateRef(winS[0]));
+          parts.push(`starts before ${line} opens (${msgDates[msgDates.length - 1].text})`);
           alertTime = interval.start;
         }
         if (winE && interval.end > winE[1]) {
-          parts.push(`ends after ${line} closes (${fmtDTReadable(winE[1])})`);
+          msgDates.push(msgDateRef(winE[1]));
+          parts.push(`ends after ${line} closes (${msgDates[msgDates.length - 1].text})`);
           alertTime = interval.start;
         }
       }
@@ -1283,6 +1306,7 @@
         alerts.push({
           id:  `firmhours-${t.id}`, sev: 'warn', type: 'firmed-out-of-hours',
           msg: `${t.firmed ? 'Firmed order' : 'Order'} "${orderNumber(t)}" ${parts.join(' and ')}.`,
+          msgDates,
           taskId: t.id, line, time: alertTime
         });
       }
@@ -1302,7 +1326,7 @@
         id: `runtime-mismatch-${t.id}`, sev: 'err', type: 'runtime-schedule-mismatch',
         msg: `The start of order "${orderNumber(t)}" may be out of date: its run time changed after the schedule was saved.`,
         msgKey: 'alert.start_may_be_stale', msgVars: { order: orderNumber(t) },
-        taskId: t.id, line, time: t.start_date || new Date(),
+        taskId: t.id, line, time: t.start_date || fallbackTime(t.PLANT || plantOf(line)),
       });
     }
 
@@ -1360,7 +1384,7 @@
           ? `Order "${vars.order}" is placed outside working hours on ${line}.`
           : `Order "${vars.order}" is longer than any working window on ${line} and is placed as one long bar.`,
         msgKey: PLACEMENT_KEYS[marker], msgVars: vars,
-        taskId: t.id, line, time: parseDate(t.start_date) || parseDate(t.end_date) || new Date(),
+        taskId: t.id, line, time: parseDate(t.start_date) || parseDate(t.end_date) || fallbackTime(t.PLANT || plantOf(line)),
       });
     }
 
@@ -1372,6 +1396,7 @@
        scope. An unknown code still renders a generic alert. */
     const ISSUE_SEV_ERR = new Set(['plant_no_timezone', 'line_no_calendar', 'no_anchor']);   // D9b: reversal_forward is 'err' only beyond the push cap (below)
     const readable = d => { const v = parseDate(d); return v ? fmtDTReadable(v) : ''; };
+    const dateRefsProp = (...ds) => { const msgDates = ds.map(d => (parseDate(d) ? msgDateRef(d) : null)).filter(Boolean); return msgDates.length ? { msgDates } : {}; };
     const plantFirstLine = new Map();   // plant -> smallest affected line (all tasks, scope-independent)
     const noteFirstLine = (plant, line) => {
       if (plant == null) return;
@@ -1396,7 +1421,7 @@
         id: `plant-no-timezone-${plant}`, sev: 'err', type: 'plant_no_timezone',
         msg: `Plant ${plant} has no valid time zone, so NIMBUS cannot derive start times for its orders.`,
         msgKey: 'alert.plant_no_timezone', msgVars: { plant },
-        line, time: now?.[plant] || new Date(),
+        line, time: fallbackTime(plant),
       });
     };
     for (const t of tasks) {
@@ -1440,7 +1465,8 @@
       }
       alerts.push({
         id: `derivation-${t.id}-${code}`, sev, type, msg, msgKey: key, msgVars: vars,
-        taskId: t.id, line, time: parseDate(t.start_date) || parseDate(t.end_date) || now?.[plant] || new Date(),
+        ...dateRefsProp(issue.from, issue.to),
+        taskId: t.id, line, time: parseDate(t.start_date) || parseDate(t.end_date) || fallbackTime(plant),
       });
     }
     // A plant announced as blocked by the clock (Store.plantNow) alerts even when none of its orders carry a note.
@@ -1462,7 +1488,7 @@
       alerts.push({
         id: `runtime-unknown-${t.id}`, sev: 'err', type: 'runtime-unknown',
         msg: reason.message || `Order "${orderNumber(t)}" runtime could not be resolved (step: ${reason.step}).`,
-        taskId: t.id, line, time: t.start_date || new Date(),
+        taskId: t.id, line, time: t.start_date || fallbackTime(t.PLANT || plantOf(line)),
       });
     }
 
@@ -1480,7 +1506,7 @@
       alerts.push({
         id: `pv-lot-size-${t.id}`, sev: 'warn', type: 'pv-lot-size',
         msg: `Order "${orderNumber(t)}" quantity is outside the resolved production version's lot-size range.`,
-        taskId: t.id, line, time: t.start_date || new Date(),
+        taskId: t.id, line, time: t.start_date || fallbackTime(t.PLANT || plantOf(line)),
       });
     }
 
@@ -1559,7 +1585,7 @@
         : setupKey(diagnostic.type, diagnostic);
       if (setupSeen.has(key)) continue;
       setupSeen.add(key);
-      const time = parseDate(diagnostic.time) || new Date();
+      const time = parseDate(diagnostic.time) || fallbackTime(plantOf(diagnostic.line || 'Unknown'));
       const pair = diagnostic.pairKey ? ` for ${formatSetupPairKey(diagnostic.pairKey)}` : '';
       const defaultMsg = SETUP_DIAGNOSTIC_DEFAULT_MSG[diagnostic.type];
       const sev = SETUP_DIAGNOSTIC_SEVERITY[diagnostic.type] || 'err';
@@ -1571,13 +1597,21 @@
       });
     }
 
-    _wwCache = null;
-    _plantMemo = null;
-    _taskPlantFallback = null;
-
     const dismissedSet = new Set(dismissed || []);
     const kept = alerts.filter(a => !dismissedSet.has(a.id));
     return { alerts: kept, elapsed: performance.now() - t0 };
+  }
+
+  // The per-call memos (_wwCache, _plantMemo, _taskPlantFallback) are module-level and exported helpers read them
+  // whenever they are non-null, so a rule that throws must not leave them set: the next caller outside a compute
+  // call would read a stale plant / working-window answer. try/finally clears them on every exit.
+  function _clearComputeMemos() {
+    _wwCache = null;
+    _plantMemo = null;
+    _taskPlantFallback = null;
+  }
+  function computeAlerts(args) {
+    try { return _computeAlertsBody(args); } finally { _clearComputeMemos(); }
   }
 
   // ── computeUtilization ─────────────────────────────────────────────────────
@@ -1585,7 +1619,7 @@
   // task IDs (the caller resolves them to objects). Pass `lines` to pin the exact line
   // set (app.js's plant-scoped set); omit it to derive from tasks ∪ Object.keys(calendars).
 
-  function computeUtilization({ tasks, lineSettings, calendars, plants, blocks, plantBlocks, masterData, startMs, days, lines: explicitLines, setup }) {
+  function _computeUtilizationBody({ tasks, lineSettings, calendars, plants, blocks, plantBlocks, masterData, startMs, days, lines: explicitLines, setup }) {
     const start = startOfDay(new Date(startMs));
     _wwCache = new Map();
     _plantMemo = new Map();
@@ -1670,10 +1704,11 @@
       }
     }
 
-    _wwCache = null;
-    _plantMemo = null;
-    _taskPlantFallback = null;
     return { matrix };
+  }
+
+  function computeUtilization(args) {
+    try { return _computeUtilizationBody(args); } finally { _clearComputeMemos(); }
   }
 
   // ── Schedule Confidence formula (single source for the badge and the Alert Monitor) ──
