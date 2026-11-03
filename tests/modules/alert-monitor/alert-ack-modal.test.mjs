@@ -4,7 +4,8 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { AlertAckModal, validateAck, defaultUntilDay, ACK_REASON_MAX } from '../../../frontend/alert-monitor/alert-ack-modal.mjs';
+import { AlertAckModal, validateAck, defaultUntilDay, ackErrorMessage, ACK_REASON_MAX } from '../../../frontend/alert-monitor/alert-ack-modal.mjs';
+import { AlertApiError } from '../../../frontend/insights/plant-lru.mjs';
 import { AlertAcksClient } from '../../../frontend/insights/alert-acks-client.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Util, Modal, Toast } from '../../../frontend/platform/foundation.mjs';
@@ -147,6 +148,45 @@ test('a failed request keeps the modal open and toasts the error', async () => {
   assert.deepEqual(calls.closed, []);
   assert.equal(calls.toast.length, 1);
   assert.equal(calls.toast[0][1], 'error');
+});
+
+test('ackErrorMessage: 403 is the not-owner text, a 400 about until is the date message, anything else keeps the server text', () => {
+  assert.equal(ackErrorMessage(new AlertApiError('Forbidden', 'Only the owner', 403)), 'am.ack_err_not_owner');
+  assert.equal(ackErrorMessage(new AlertApiError('until must be in the future', 'until must be in the future', 400)), 'am.ack_err_until');
+  assert.equal(ackErrorMessage(new AlertApiError('until must be an ISO datetime or null', 'until must be an ISO datetime or null', 400)), 'am.ack_err_until');
+  assert.equal(ackErrorMessage(new AlertApiError('reason is required', 'reason is required', 400)), 'reason is required');
+  assert.equal(ackErrorMessage(new AlertApiError('Server error', null, 500)), 'Server error');
+  assert.equal(ackErrorMessage(new Error('boom')), 'boom');
+  assert.equal(ackErrorMessage('plain'), 'plain');
+});
+
+test('a 403 on a single acknowledge toasts the not-owner text and keeps the modal open', async () => {
+  AlertAcksClient.acknowledge = async () => { throw new AlertApiError('Forbidden', 'Only the owner', 403); };
+  AlertAckModal.open({ plant: 'P1', alertId: 'a1' });
+  els['aak-reason'].value = 'x';
+  await AlertAckModal.submit();
+  assert.deepEqual(calls.closed, []);
+  assert.deepEqual(calls.toast, [['am.ack_err_not_owner', 'error']]);
+});
+
+test('a stale until (400) on a single acknowledge toasts the date message', async () => {
+  AlertAcksClient.acknowledge = async () => { throw new AlertApiError('until must be in the future', 'until must be in the future', 400); };
+  AlertAckModal.open({ plant: 'P1', alertId: 'a1' });
+  els['aak-reason'].value = 'x';
+  await AlertAckModal.submit();
+  assert.deepEqual(calls.toast, [['am.ack_err_until', 'error']]);
+});
+
+test('a 403 on a bulk acknowledge (nothing written) toasts the not-owner text and keeps the modal open', async () => {
+  const priorMany = AlertAcksClient.acknowledgeMany;
+  AlertAcksClient.acknowledgeMany = async () => { throw new AlertApiError('Forbidden', 'Only the owner', 403); };
+  try {
+    AlertAckModal.open({ plant: 'P1', alertIds: ['a1', 'a2'] });
+    els['aak-reason'].value = 'x';
+    await AlertAckModal.submit();
+    assert.deepEqual(calls.closed, []);
+    assert.deepEqual(calls.toast, [['am.ack_err_not_owner', 'error']]);
+  } finally { AlertAcksClient.acknowledgeMany = priorMany; }
 });
 
 test('bulk mode: the title counts the alerts and one submit calls acknowledgeMany once with every id', async () => {

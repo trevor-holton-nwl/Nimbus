@@ -3201,6 +3201,8 @@ window.__NIMBUS_LOCALES.fr = {
   'ui.insp_tool_over': 'au-dessus de la limite',
   'toast.tool_id_unknown': 'L\'outil {{tool}} n\'a pas de ligne d\'inventaire ; il compte pour 1 exemplaire.',
   'am.slot_confirm_tool': 'L\'outil {{tool}} dépasserait ses {{available}} exemplaires.',
+  'am.facet_search_ph': 'Filtrer les machines',
+  'am.ack_err_not_owner': 'Quelqu’un d’autre a acquitté cette alerte. Seule cette personne ou un administrateur peut la modifier.',
   'ui.tool_inventory_rule_link': 'Modifier dans les paramètres de l\'usine',
   'modal.opt_tool_raise_discard': 'La fermeture de l\'aperçu abandonne ce plan. Augmenter le stock maintenant ?',
   'toast.opt_tool_raise_closed': 'Aperçu fermé. Relancez l\'optimisation après avoir modifié le stock.',

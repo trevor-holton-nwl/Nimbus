@@ -9,7 +9,8 @@ import { AlertProfileClient } from '../../../frontend/insights/alert-profile-cli
 import { ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID } from '../../../frontend/insights/alert-profiles.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Util } from '../../../frontend/platform/foundation.mjs';
+import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
+import { AlertApiError } from '../../../frontend/insights/plant-lru.mjs';
 import { makeEl } from '../helpers/dom-stub.mjs';
 import { AlertProfileEditor } from '../../../frontend/alert-monitor/alert-profile-editor.mjs';
 import { OverflowMenu } from '../../../frontend/platform/overflow-menu.mjs';
@@ -479,6 +480,23 @@ test('after Remove acknowledgement the row\'s trigger gets focus back once the r
     await sleep(0);
     assert.deepEqual(log, ['g1']);
   } finally { undo(); }
+});
+
+test('Remove acknowledgement refused with a 403 (someone else\'s) toasts the not-owner text, not the raw server message', async () => {
+  const toasts = [];
+  const undo = [
+    patched(AlertAcksClient, 'unacknowledge', async () => { throw new AlertApiError('Forbidden', 'Only the owner', 403); }),
+    patched(Toast, 'show', (msg, type) => { toasts.push([msg, type]); }),
+  ];
+  try {
+    Store.setTasks([], 'test');
+    const acked = new Map([['g1', { alert_id: 'g1', acknowledged_by: 'pat', until: null }]]);
+    seed([alert('g1', { type: 'overlap', taskId: '1', peerId: '2' })], { acked, showAcked: true });
+    AlertMonitorPane.render();
+    openMenu('.am-row-menu', { alertId: 'g1' })[0].items.find(i => i.id === 'unack').onSelect({});
+    await sleep(0);
+    assert.deepEqual(toasts, [['am.ack_err_not_owner', 'error']]);
+  } finally { undo.forEach(u => u()); }
 });
 
 test('Override and Acknowledge make the live trigger the focus owner BEFORE the modal opens (the modal then returns focus to it)', () => {

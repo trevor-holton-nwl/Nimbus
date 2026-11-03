@@ -26,7 +26,7 @@ import { AlertProfileClient } from '../insights/alert-profile-client.mjs';
 import { AlertProfileEditor, canDeleteProfile } from './alert-profile-editor.mjs';
 import { OverflowMenu } from '../platform/overflow-menu.mjs';
 import type { MenuItem } from '../platform/overflow-menu.mjs';
-import { AlertAckModal } from './alert-ack-modal.mjs';
+import { AlertAckModal, ackErrorMessage } from './alert-ack-modal.mjs';
 import { AlertSlotModal } from './alert-slot-modal.mjs';
 import { AlertAcksClient } from '../insights/alert-acks-client.mjs';
 import {
@@ -42,7 +42,7 @@ import { Engine } from '../optimization/engine.mjs';
 import {
   GROUP_MOVE_CONFIRM_ABOVE, SIDE_W_DEFAULT, SIDE_W_MIN, SIDE_W_MAX, clampSideWidth, ROW_H, ROW_H_NARROW, NARROW_AT, detailHeightFor, fixPrimaryAction, summaryLine, windowSummary, viewFor, visibleAlertsFor, horizonAlerts, emptyStateFor,
   rowActionsFor, rowPrimaryActions, groupCounts, rowHtml, rowDetailHtml, materialOf, tagOf, filterAlerts, filterChips, emptyFilter,
-  filterIsEmpty, makeBucketer, UNGROUPED_KEY, fixesInView, profileWindow,
+  filterIsEmpty, makeBucketer, buildWcByLine, UNGROUPED_KEY, fixesInView, profileWindow,
   fixesSectionHtml, plantCalendarTarget, levActions, levTitle, levSummaryText, levPairsForReview, LEV_TOP_N, LEV_STEP, LEV_MAX_RENDER,
 } from './alert-monitor-model.mjs';
 import type { MonitorView, MonitorFilter, MonitorCtx, EmptyKind, LevCtx, FilterDim, RowDetailCtx } from './alert-monitor-model.mjs';
@@ -87,7 +87,7 @@ interface Derived {
 /** The ambient `NIMBUS` members this pane reaches (the classic-script bridge; never a real import). */
 interface AmNimbus {
   AlertsUIAdapter?: { focus?(id: string): void; showForCell?(line: string, dayKey: string): void };
-  Table?: { _openOverrideModalForId?(id: string): void; _onPoMatApply?(): void };
+  Table?: { _openOverrideModalForId?(id: string): void; _onPoMatApply?(): void; filterToOrders?(orders: string[]): boolean };
   App?: { gotoGanttSub?(sub: string): void; goto?(tab: string): void; gotoMasterSub?(sub: string): void };
   Timeline?: { gotoLineDay?(line: string, dateStr: string): void };
   OptimizerPreview?: { active?: boolean };
@@ -367,10 +367,7 @@ function _openPageMenu(anchor: HTMLElement): void {
 function _makeDefault(): void {
   const plant = Store.selectedPlant;
   if (!plant) return;
-  const m = AlertProfileMatches.current();
-  const existing = (Store.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
-  Session.setPref('alertProfileByPlant', { ...existing, [plant]: m.profileId });
-  AlertProfileMatches.setSessionProfile(null);   // the pref now says the same thing
+  AlertProfileMatches.setDefaultProfile(plant, AlertProfileMatches.current().profileId);
 }
 
 /* ---- Filter state (session-only) ---- */
@@ -729,13 +726,19 @@ function _openOrdersInTable(orderIds: Iterable<string>): void {
     if (no) nums.add(no);
   }
   const nim = _nim();
-  const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
-  if (!nums.size || !ta || typeof nim.Table?._onPoMatApply !== 'function') {
-    Toast.show(t('am.table_unavailable'), 'warn');
-    return;
+  if (typeof nim.Table?.filterToOrders === 'function') {
+    // The Orders table owns its filters: it clears the others, then filters to these orders (false: the table is not there).
+    if (!nums.size || !nim.Table.filterToOrders([...nums])) { Toast.show(t('am.table_unavailable'), 'warn'); return; }
+  } else {
+    // A table without filterToOrders: fill the PO/material box and apply it.
+    const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
+    if (!nums.size || !ta || typeof nim.Table?._onPoMatApply !== 'function') {
+      Toast.show(t('am.table_unavailable'), 'warn');
+      return;
+    }
+    ta.value = [...nums].join('\n');
+    nim.Table._onPoMatApply();
   }
-  ta.value = [...nums].join('\n');
-  nim.Table._onPoMatApply();
   nim.App?.goto?.('gantt');
   nim.App?.gotoGanttSub?.('orders');
 }
@@ -792,7 +795,7 @@ function _runAlertAction(action: string | undefined, alertId: string, taskId?: s
       const plant = Store.selectedPlant;
       if (!plant) break;
       // The client refetches and fans out on success, so the lists repaint themselves.
-      return AlertAcksClient.unacknowledge(plant, alertId).catch(e => { Toast.show((e as Error)?.message || String(e), 'error'); });
+      return AlertAcksClient.unacknowledge(plant, alertId).catch(e => { Toast.show(ackErrorMessage(e), 'error'); });
     }
     default: break;
   }
@@ -862,8 +865,7 @@ function _derive(s: PaintState): Derived {
   const eff: MonitorFilter = _filter.machines.size || !sel.size ? _filter : { ..._filter, machines: new Set(sel) };
   const active = !filterIsEmpty(eff);
   const filtered = active ? filterAlerts(s.listed, eff, ctx) : s.listed;
-  const wcByLine = new Map<string, string>();
-  for (const mc of ctx.machines) wcByLine.set(mc.id, mc.wc_group ? String(mc.wc_group) : UNGROUPED_KEY);
+  const wcByLine = buildWcByLine(ctx.machines);
   return { ctx, eff, active, filtered, viewIds: new Set(filtered.map(a => a.id)), wcByLine, bucketOf: makeBucketer(ctx) };
 }
 
@@ -938,7 +940,7 @@ function _renderGanttChip(): void {
 /** Header row 2: one sentence in mono counts over the profile's alerts (alerts, errors, warnings). */
 function _summaryHtml(s: PaintState): string {
   const line = summaryLine({
-    hasPlant: !!s.plant, alerts: s.listed, profileId: s.m.profileId, profileName: s.m.profile.name, profile: s.m.profile, focus: null,
+    hasPlant: !!s.plant, alerts: s.listed, profileId: s.m.profileId, profileName: s.m.profile.name, profile: s.m.profile,
     linesSelected: Store.selectedLines.size,
   }, t);
   return `<span>${esc(line.text)}</span>`;
@@ -1084,8 +1086,7 @@ function _levFieldLabel(fieldKey: string): string {
 
 /** A YYYY-MM-DD key in the user's date format. */
 function _fmtDayKey(day: string): string {
-  const [y, m, d] = day.split('-').map(Number);
-  return y && m && d ? Util._fmtDatePref(new Date(y, m - 1, d)) : day;
+  return Util.fmtIsoDatePref(day);
 }
 
 function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
@@ -1706,7 +1707,7 @@ function _facetsHtml(s: PaintState, d: Derived): string {
     const mMax = Math.max(0, ...keys.map(k => mc.get(k)?.n ?? 0));
     where += `<div class="am-facet-sub">`
       + (boxShown
-        ? `<input type="search" class="input am-facet-q" id="am-facet-q" data-am-facet-q autocomplete="off" value="${esc(_facetQ)}" placeholder="${esc(t('am.search_ph'))}" aria-label="${esc(t('am.search_ph'))}">` : '')
+        ? `<input type="search" class="input am-facet-q" id="am-facet-q" data-am-facet-q autocomplete="off" value="${esc(_facetQ)}" placeholder="${esc(t('am.facet_search_ph'))}" aria-label="${esc(t('am.facet_search_ph'))}">` : '')
       + shown.map(k => _facetItem('machines', k, k === 'none' ? t('am.group_unassigned') : k, mc.get(k)?.n ?? 0, mc.get(k)?.err ?? 0, mMax, f.machines.has(k))).join('')
       + `</div>`;
   }

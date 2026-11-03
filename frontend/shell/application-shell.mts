@@ -953,7 +953,7 @@ const SessionUIAdapter = {
     const dropdown = pane.querySelector<HTMLElement>('#us-ap-dropdown');
     if (!plant || !input || !dropdown) return;
 
-    const byPlant = () => (Session.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
+    const byPlant = () => (Store.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
     const profiles = () => AlertProfileClient.cached(plant) ?? [];
     const options = () => [{ id: ALL_ALERTS_PROFILE_ID, name: Util.t('am.profile_all') }, ...profiles().map(p => ({ id: p.id, name: p.name }))];
     const currentId = (): string => {
@@ -972,10 +972,9 @@ const SessionUIAdapter = {
         ? shown.map(o => `<div class="us-combo-option${o.id === sel ? ' selected' : ''}" role="option" data-profile="${Util.escapeHtml(o.id)}"><span>${Util.escapeHtml(o.name)}</span></div>`).join('')
         : `<div class="us-combo-empty">${Util.t('us.no_matches')}</div>`;
     };
-    // One key, one PATCH: read the whole map, change this plant's entry, write it back. This IS the default.
+    // One key, one PATCH (setDefaultProfile reads the whole map and writes it back): this IS the default.
     const choose = (id: string) => {
-      Session.setPref('alertProfileByPlant', { ...byPlant(), [plant]: id });
-      AlertProfileMatches.setSessionProfile(null);   // the saved default is the active profile again
+      AlertProfileMatches.setDefaultProfile(plant, id);
       reflect(); close(); input.blur();
     };
 
