@@ -839,10 +839,20 @@ function normalizeOptimizerDate(
   return hasTimezone ? plantWallClockFromInstant(timezone, instant) : instant;
 }
 
+/** The default optimizer / Remove Backlog window when the caller gives no end date. */
+const DEFAULT_HORIZON_DAYS = 35;
+
 function addLocalDays(date: Date, days: number): Date {
   const result = new Date(date);
   result.setDate(result.getDate() + days);
   return result;
+}
+
+/** The reconcile's candidate test, shared by the plant pass and the refresh wake-up: a row flagged stale or never placed,
+ *  not queued, carrying no placement exception, and with a machine. (The unsaved-edit skip is applied by the pass only.) */
+function isReconcileEligible(task: NimbusTask): boolean {
+  return !!(task.runtime_schedule_mismatch || !task.user_scheduled)
+    && task.planning_status !== 'needs_planning' && !task.placement_exception && !!task.MACHINE;
 }
 
 function finiteDate(value: unknown): Date | null {
@@ -866,15 +876,7 @@ function normalizeBacklogRunDates(plant: string, opts: Record<string, unknown>):
   if (typeof timezone !== 'string' || !timezone.trim()) {
     throw new Error(`Remove Backlog requires a configured IANA timezone for plant ${plant}`);
   }
-  const parseAbsolute = (value: unknown): Date | null => {
-    if (!hasExplicitDate(value)) return null;
-    if (value instanceof Date) return Number.isFinite(value.getTime()) ? new Date(value) : null;
-    if (typeof value === 'number' || typeof value === 'string') {
-      const parsed = new Date(value);
-      return Number.isFinite(parsed.getTime()) ? parsed : null;
-    }
-    return null;
-  };
+  const parseAbsolute = (value: unknown): Date | null => (hasExplicitDate(value) ? finiteDate(value) : null);
   const runAt = parseAbsolute(opts.runAt) ?? (hasExplicitDate(opts.runAt) ? null : Store.serverNow());
   if (!runAt) throw new Error('Remove Backlog requires a valid runAt timestamp');
   const now = Engine._plantWallNow(timezone, runAt);
@@ -883,7 +885,7 @@ function normalizeBacklogRunDates(plant: string, opts: Record<string, unknown>):
     : new Date(now);
   const to = hasExplicitDate(opts.endDate)
     ? normalizeOptimizerDate(opts.endDate, timezone)
-    : addLocalDays(now, 35);
+    : addLocalDays(now, DEFAULT_HORIZON_DAYS);
   if (!from || !to || to <= from) throw new Error('Remove Backlog requires a valid From and To date range');
   return { runAt, now, from, to };
 }
@@ -952,6 +954,14 @@ export function sourceBlocks(): ReadonlyArray<NimbusBlock> { return _candidateSn
 export function sourcePlantBlocks(): ReadonlyArray<NimbusPlantBlock> { return _candidateSnapshot?.plantBlocks ?? Store.plantBlocks; }
 function sourceLineSettings(): Readonly<Record<string, NimbusLineSetting>> { return _candidateSnapshot?.lineSettings ?? Store.lineSettings; }
 function sourceMasterData(): NimbusMasterData | null { return _candidateSnapshot?.masterData ?? Store.masterData; }
+/** The plant's IANA zone (trimmed), or null when unset. Reads the detached candidate snapshot when one is installed. */
+function plantTimezoneFor(plant: string | null | undefined): string | null {
+  return sourceMasterData()?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+}
+/** Whether the plant has the routing run-time calculation switched on (same source rule as `plantTimezoneFor`). */
+function routingEnabledFor(plant: string | null | undefined): boolean {
+  return !!sourceMasterData()?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
+}
 function sourcePriorityRankMaps() { return _candidateSnapshot?.priorityRankMaps ?? Store.priorityRankMaps; }
 function sourceSelectedPlant(): string | null { return _candidateSnapshot?.selectedPlant ?? Store.selectedPlant; }
 
@@ -1483,7 +1493,7 @@ export const Engine = {
     if (!Number.isFinite(runtimeMinutes) || runtimeMinutes <= 0) return null;
     // VI3 (D17): the plant's zone, so the run is measured in elapsed plant-zone time across a DST change.
     const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
-    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    const plantTz = plantTimezoneFor(plant);
     if (policy === 'never' && !plantTz) {
       const start = Calendar.nextAvailable(line, requestedStart, runtimeMinutes * Config.MS_MIN);
       if (!start) return null;
@@ -1512,7 +1522,7 @@ export const Engine = {
     // the plant's split policy: a continuous bar across closed time is wider than the run time and fails the server
     // width check, while pieces are judged by their sum, so the pieces are returned as the bar.
     const plant = task.PLANT || Store.getPlantForLine(line) || Store.selectedPlant;
-    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    const plantTz = plantTimezoneFor(plant);
     const runtimeMinutes = Math.round(Util.runHours(task) * 60);
     const forward = Calendar.allocateRuntime(line, task.start_date, runtimeMinutes, 'partial_allowed', plantTz);
     if (forward.kind !== 'allocated') return null;
@@ -1560,7 +1570,7 @@ export const Engine = {
     const now = Store.plantNow(plant);
     if (!now) return { kind: 'refuse', reason: 'plant_no_timezone' };
     const floor = Calendar._floorMinute(now);
-    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    const plantTz = plantTimezoneFor(plant);
     const walk = (walkPolicy: SplitOrderPolicy) => Calendar.allocateRuntimeBackward(line, finish, runtimeMinutes, walkPolicy,
       { floor, minSegmentMinutes: Engine.minProductiveSegmentMinutesFor(plant), plantTz, setupMinutes: opts.setupMinutes ?? 0 });
     let result = walk(effectivePolicy);
@@ -1594,7 +1604,7 @@ export const Engine = {
                                 opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
     Engine.lastManualRefusal = null;
     const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant;
-    const enabled = Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
+    const enabled = routingEnabledFor(plant);
     if (enabled && opts.chosenPv != null) {
       return Engine.pairSchedulePatchFor(task, opts.chosenPv, line, requestedFinish, opts);
     }
@@ -1621,7 +1631,7 @@ export const Engine = {
                        opts: ManualPlacementOptions = {}): Partial<NimbusTask> | null {
     Engine.lastManualRefusal = null;
     const plant = task.PLANT || Store.getPlantForLine(task.MACHINE) || Store.selectedPlant;
-    const enabled = Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
+    const enabled = routingEnabledFor(plant);
     const pairTask = { ...task, PRODUCTION_VERSION: pv };
     if (!enabled) {
       const plain = Engine.manualSchedulePatchFor(pairTask, line, requestedFinish, undefined, opts);
@@ -1864,10 +1874,9 @@ export const Engine = {
   _reconcileRuntimeSchedulesPass(plant: string | null, opts: ReconcileOptions = {}): void {
     if (!plant) return;
     const candidates = Store.tasksByPlant(plant).filter(task =>
-      (task.runtime_schedule_mismatch || !task.user_scheduled)
-      && task.planning_status !== 'needs_planning' && !task.placement_exception && !!task.MACHINE
+      isReconcileEligible(task)
       // A row with unsaved local edits is the planner's own work in progress: never re-derive it.
-      && (opts.ids ? opts.ids.has(String(task.id)) : !Persistence._dirtyIds.has(String(task.id))));
+      && (opts.ids ? opts.ids.has(String(task.id)) : !Persistence.isDirty(String(task.id))));
     if (!candidates.length) { Engine._setDerivePaused(plant, false); return; }
     // OQ51: only an authoritative (server) calendar may derive a start; otherwise wait for it.
     if (CalendarSync.calendarState(plant) !== 'hydrated') { Engine._setDerivePaused(plant, true); return; }
@@ -1926,7 +1935,7 @@ export const Engine = {
     }
     const policy = Engine.splitOrderPolicyFor(plant);
     const floor = Calendar._floorMinute(plantNow);
-    const plantTz = Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;   // the reversal's forward leg runs on plant-zone instants (U16)
+    const plantTz = plantTimezoneFor(plant);   // the reversal's forward leg runs on plant-zone instants (U16)
     const moveReason = (stale: boolean): string => cutover ? 'cutover' : (stale ? 'run_time_changed' : 'due_date_derivation');
     // A schedule patch always carries both edges, the segments and both session notes (the notes are cleared
     // by the next edit, Store._clearStaleNotes, unless a change-set carries them).
@@ -2196,7 +2205,7 @@ export const Engine = {
       Store.updateMany(neverPlaced.map(id => ({ id, changes: { runtime_schedule_mismatch: false } })), 'engine-runtime-reconcile-display');
       for (const id of neverPlaced) {
         if (wasDirty.has(id)) continue;
-        Persistence._dirtyIds.delete(id); Persistence._forceIds.delete(id);
+        Persistence.discardDirty(id);
       }
     }
     for (const [plant, restored] of byPlant) Engine.reconcileRuntimeSchedules(plant, { reason: 'undo', ids: restored });
@@ -2349,7 +2358,7 @@ export const Engine = {
     // The preview runs in the worker, whose live Store is empty: read the frozen end and the zone from the
     // detached snapshot when there is one, never from the live Store (V-E2-01, V-E3-07).
     const frozenEnd = _candidateSnapshot ? (_candidateSnapshot.frozenHorizonEnd ?? null) : Engine.frozenHorizonEnd();
-    const plantTz = sourceMasterData()?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
+    const plantTz = plantTimezoneFor(plant);
     const grouped = new Map<string, Array<{ task: NimbusTask; snapshotStart: Date }>>();
     const scopedTasks = sourceTasksByPlant(plant).filter(t => !lines || lines.has(t.MACHINE || 'Unknown'));
     for (const task of scopedTasks) {
@@ -2563,27 +2572,12 @@ export const Engine = {
    *  flattenConstraints can only emit keys the catalog lists.) */
   constraintEnabled(plant: string | null, key: string): boolean {
     const tree = Engine.constraintsFor(plant);
-    if (!tree) return key === 'colorWheel';
-    // `present` and `effective` are tracked separately so "configured but
-    // unreachable" (found under a disabled ancestor, or itself disabled)
-    // returns false instead of falling through to the default — that
-    // fall-through is the actual bug this replaces.
-    let present = false;
-    let effective = false;
-    const walk = (nodes: ConstraintConfig[], reachable: boolean): void => {
-      for (const node of nodes) {
-        const nodeReachable = reachable && !!node.enabled;
-        if (node.key === key) {
-          present = true;
-          if (nodeReachable) effective = true;
-        }
-        if (node.children && node.children.length) walk(node.children, nodeReachable);
-      }
-    };
-    walk(tree, true);
-    // A configured tree is authoritative about what it omits; only a genuinely
-    // empty/never-configured one gets the historical default.
-    return present ? effective : (tree.length ? false : key === 'colorWheel');
+    // Only a genuinely never-configured tree (none stored, or an empty array) gets the historical default.
+    if (!tree || !tree.length) return key === 'colorWheel';
+    // A configured tree is authoritative about what it omits or switches off: the key is enabled exactly when the one
+    // shared walk emits it (a node unreachable under a disabled ancestor, or itself disabled, is "configured but off",
+    // never the colorWheel default — the fall-through bug this replaced).
+    return Engine._walkPriorityTree(tree).some(node => node.key === key);
   },
 
   /** Pre-order DFS flatten of the (possibly nested) constraint tree — a field
@@ -2863,7 +2857,7 @@ export const Engine = {
     const explicitHorizonEnd = hasExplicitDate(opts.endDate) ? readDate(opts.endDate, 'endDate') : null;
     const horizonEnd = explicitHorizonEnd ?? (invalidDateFields.length
       ? invalidDate()
-      : addLocalDays(planningStart, 35));
+      : addLocalDays(planningStart, DEFAULT_HORIZON_DAYS));
     if (invalidDateFields.length) {
       const invalid: CandidateResult = {
         ...detachedCandidateResult([], _pmT0e),
@@ -3045,14 +3039,19 @@ export const Engine = {
     const _horizonStart = Util.startOfDay(Engine._clockFor(changed) ?? Store.serverNow())!;
     if (changed.end_date < _horizonStart) return; // aged task — don't reflow
     const line = changed.MACHINE || 'Unknown';
-    const splitPolicy = Engine.splitOrderPolicyFor(Store.getPlantForLine(line) ?? Store.selectedPlant);
+    const lineOwner = Store.getPlantForLine(line) ?? Store.selectedPlant;
+    const splitPolicy = Engine.splitOrderPolicyFor(lineOwner);
     // D3 (2026-10-27): a moved peer may not FINISH inside the frozen window. The floor reads the changed order's plant
     // clock; every attempt re-places through the calendar, which rebuilds its free intervals from that start.
     const _floorNow = Engine._clockFor(changed) ?? Store.serverNow();
     const _frozenEnd = Engine.frozenHorizonEnd();
     const _finishFloor = Engine.frozenFinishFloor(_floorNow, _frozenEnd);
+    // Per-run calendar caches (split-capable plants only) start lazily, on the first peer that is actually re-placed, so a
+    // reflow that moves nothing never indexes the blackout blocks. Always torn down in the finally below.
+    let calendarRunStarted = false;
     const placeReflowed = (p: NimbusTask, from: Date, setupMinutes: number): PlacementResult => {
       const runtimeMinutes = Math.round(Util.runHours(p) * 60);
+      if (splitPolicy !== 'never' && !calendarRunStarted) { Calendar._beginRun(lineOwner); calendarRunStarted = true; }
       return placeWithFinishFloor(
         earliest => Calendar.placeWithSetup(line, { earliestStart: earliest, runtimeMinutes, policy: splitPolicy, setup: { kind: 'resolved', minutes: setupMinutes } }),
         from, _finishFloor, setupMinutes, runtimeMinutes, splitPolicy);
@@ -3088,96 +3087,45 @@ export const Engine = {
     let cursor = new Date(changed.end_date);
     let predecessor = changed;
     const patches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
-    if (splitPolicy !== 'never') {
-      const plant = Store.getPlantForLine(line) ?? Store.selectedPlant;
-      Calendar._beginRun(plant);
-      try {
-        for (const p of peers) {
-          if (p.end_date! <= changed.start_date) continue;
-          const requiredSetupMinutes = setupMinutes(predecessor, p);
-          const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
-          if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-          // G-0.25: a row carrying an approved placement exception is as fixed as a firmed one.
-          if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p, undefined, _frozenEnd) || p.end_date! < _horizonStart) {
-            // Firmed, frozen-window, or aged orders don't move — if there's a
-            // conflict, an alert will fire — but later unfirmed peers must
-            // still be de-overlapped, and the immovable order becomes the
-            // setup predecessor they pay for.
-            cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
-            predecessor = p;
-            continue;
-          }
-          // This peer is about to be MOVED (not merely left in place) — its new FINISH must not land inside the
-          // plant's frozen window (finish floor; a straddler may start inside it).
-          const placement = placeReflowed(p, cursor, requiredSetupMinutes);
-          const changes: Partial<NimbusTask> | null = placement.kind === 'placed' && placement.productiveSegments.length
-            ? {
-              start_date: placement.productiveSegments[0].start,
-              end_date: placement.productiveSegments.at(-1)!.end,
-              scheduleSegments: placement.productiveSegments.length >= 2
-                ? placement.productiveSegments.map((segment, index) => ({ sequence: index + 1, startDate: segment.start, endDate: segment.end }))
-                : [],
-            }
-            : null;
-          if (!changes?.start_date || !changes.end_date) {
-            ErrorLog.warn('engine',
-              `Could not reflow order "${p.text || p.id}" on "${line}" within the 90-day calendar search.`,
-              { line, taskId: p.id, policy: splitPolicy });
-            break;
-          }
-          patches.push({ id: p.id, changes });
-          cursor = new Date(changes.end_date);
-          predecessor = { ...p, ...changes };
+    try {
+      for (const p of peers) {
+        // Peer ends before the changed task starts — entirely prior, cannot overlap; skip.
+        if (p.end_date! <= changed.start_date) continue;
+        const requiredSetupMinutes = setupMinutes(predecessor, p);
+        const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
+        if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
+        // G-0.25: a row carrying an approved placement exception is as fixed as a firmed one.
+        if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p, undefined, _frozenEnd) || p.end_date! < _horizonStart) {
+          // Firmed, frozen-window, or aged orders don't move — if there's a
+          // conflict, an alert will fire — but later unfirmed peers must still
+          // be de-overlapped, and the immovable order becomes the setup
+          // predecessor they pay for.
+          cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
+          predecessor = p;
+          continue;
         }
-      } finally {
-        Calendar._endRun();
+        // This peer is about to be MOVED — its new FINISH must not land inside the plant's frozen window
+        // (finish floor; a straddler may start inside it).
+        const placement = placeReflowed(p, cursor, requiredSetupMinutes);
+        if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
+          ErrorLog.warn('engine',
+            `Could not reflow order "${p.text || p.id}" on "${line}" within the 90-day calendar search.`,
+            { line, taskId: p.id, policy: splitPolicy });
+          break;
+        }
+        const changes: Partial<NimbusTask> = {
+          start_date: placement.productiveSegments[0].start,
+          end_date: placement.productiveSegments.at(-1)!.end,
+          scheduleSegments: placement.productiveSegments.length >= 2
+            ? placement.productiveSegments.map((segment, index) => ({ sequence: index + 1, startDate: segment.start, endDate: segment.end }))
+            : [],
+        };
+        patches.push({ id: p.id, changes });
+        cursor = new Date(changes.end_date!);
+        predecessor = { ...p, ...changes };
       }
-      if (patches.length) Store.updateMany(patches, 'engine');
-      // A `tool-conflict` alert is emitted on the LATER order's line, and a
-      // `distribution-separation` alert can be emitted on any sibling
-      // sub-order's line — both can be a different line than this reflow's
-      // own `line` — a moved task carrying a real PRT_01/PRT_02 tool id or a
-      // PARENT_ORDER forces a full recompute instead of trusting the
-      // single-line scope.
-      if (taskCarriesTool(changed) || taskCarriesDistribution(changed)
-        || patches.some(p => taskCarriesTool(Store.tasks[p.id]) || taskCarriesDistribution(Store.tasks[p.id])))
-        Alerts.scheduleRecompute();
-      else Alerts.scheduleRecomputeLines(new Set([line]));
-      return;
-    }
-    for (const p of peers) {
-      // Peer ends before the changed task starts — entirely prior, cannot overlap; skip.
-      if (p.end_date! <= changed.start_date) continue;
-      const requiredSetupMinutes = setupMinutes(predecessor, p);
-      const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
-      if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-      if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p, undefined, _frozenEnd) || p.end_date! < _horizonStart) {
-        // Firmed, frozen-window, or aged orders don't move — if there's a
-        // conflict, an alert will fire — but later unfirmed peers must still
-        // be de-overlapped, and the immovable order becomes the setup
-        // predecessor they pay for.
-        cursor = new Date(Math.max(cursor.getTime(), p.end_date!.getTime()));
-        predecessor = p;
-        continue;
-      }
-      // This peer is about to be MOVED — its new FINISH must not land inside the plant's frozen window.
-      const placement = placeReflowed(p, cursor, requiredSetupMinutes);
-      if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
-        ErrorLog.warn('engine',
-          `Could not reflow order "${p.text || p.id}" on "${line}" within the 90-day calendar search.`,
-          { line, taskId: p.id, policy: splitPolicy });
-        break;
-      }
-      const changes: Partial<NimbusTask> = {
-        start_date: placement.productiveSegments[0].start,
-        end_date: placement.productiveSegments.at(-1)!.end,
-        scheduleSegments: placement.productiveSegments.length >= 2
-          ? placement.productiveSegments.map((segment, index) => ({ sequence: index + 1, startDate: segment.start, endDate: segment.end }))
-          : [],
-      };
-      patches.push({ id: p.id, changes });
-      cursor = new Date(changes.end_date!);
-      predecessor = { ...p, ...changes };
+    } finally {
+      if (calendarRunStarted) Calendar._endRun();
     }
     if (patches.length) Store.updateMany(patches, 'engine');
     // Reflow only ever shifts dates within `line`, so scope the alert recompute to it —
@@ -3209,8 +3157,7 @@ Store.subscribe(evt => {
       const task = Store.tasks[String(id)];
       // Only a refreshed row the reconcile could re-derive wakes a plant-wide pass (the same candidate test as
       // reconcileRuntimeSchedules): a refresh of rows that are all placed and current needs no pass (F16).
-      if (!task || !(task.runtime_schedule_mismatch || !task.user_scheduled)
-        || task.planning_status === 'needs_planning' || task.placement_exception || !task.MACHINE) continue;
+      if (!task || !isReconcileEligible(task)) continue;
       const plant = Store.getPlantForLine(task.MACHINE);
       if (plant) plants.add(plant);
     }
@@ -3228,7 +3175,7 @@ UndoStack.willRederive = (task: NimbusTask): boolean => {
   return !!task.MACHINE && task.planning_status !== 'needs_planning' && !task.placement_exception;
 };
 // F10: the snapshot records which rows already carried unsaved edits (the platform cannot see Persistence).
-UndoStack.dirtyProbe = (id: string): boolean => Persistence._dirtyIds.has(id);
+UndoStack.dirtyProbe = (id: string): boolean => Persistence.isDirty(id);
 
 /**
  * Evaluate against the existing placement algorithm, but with its reads bound
