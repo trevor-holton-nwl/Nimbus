@@ -34,13 +34,12 @@ import { AlertProfileMatches } from '../insights/alert-profile-matches.mjs';
 import { AlertApiError } from '../insights/plant-lru.mjs';
 import {
   ALERT_CATEGORIES, ALERT_CATEGORY_ORDER, DEFAULT_CATEGORY_COLORS, FIRING_ALERT_TYPES, PALETTE,
-  categoryOf, effectiveCategories, profileCategoryCounts, validateProfile,
+  DAY_BOUND, MAX_NAME_LEN, categoryOf, effectiveCategories, profileCategoryCounts, ruleAppliesTo, validateProfile,
 } from '../insights/alert-profiles.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
 
-const MAX_NAME = 60;
 const FIRING: ReadonlySet<string> = new Set<string>(FIRING_ALERT_TYPES);
 
 /** The firing types of one group, in the group's own order. */
@@ -145,9 +144,6 @@ export function dayPresetRange(preset: DayPreset): { dayFrom: number | null; day
   }
 }
 
-/** Whether the rule names a type of group `cat` (so it narrows that group). */
-const _ruleApplies = (r: { types: readonly string[] }, cat: AlertCategory): boolean => r.types.some(x => categoryOf(x) === cat);
-
 /** Whether an applicable rule actually narrows `cat`: a day window, a severity, a late-hours floor, or a type left unticked. */
 const _ruleNarrows = (r: RuleDraft, cat: AlertCategory): boolean =>
   r.dayFrom != null || r.dayTo != null || r.minSev === 'err' || r.minLateHours != null
@@ -155,7 +151,7 @@ const _ruleNarrows = (r: RuleDraft, cat: AlertCategory): boolean =>
 
 /** The ON groups that carry a real narrowing rule (the "Fine-tuned" badge and the Fine-tune auto-open). */
 export function tunedCategories(d: { categories: ProfileCategories; rules: RuleDraft[] }): AlertCategory[] {
-  return ALERT_CATEGORY_ORDER.filter(cat => d.categories[cat]?.on && d.rules.some(r => _ruleApplies(r, cat) && _ruleNarrows(r, cat)));
+  return ALERT_CATEGORY_ORDER.filter(cat => d.categories[cat]?.on && d.rules.some(r => ruleAppliesTo(r, cat) && _ruleNarrows(r, cat)));
 }
 
 function _wireRule(r: RuleDraft): AlertProfileRule {
@@ -257,7 +253,7 @@ export function uniqueCopyName(name: string, existing: Iterable<string>): string
   const base = name.trim();
   for (let n = 1; ; n++) {
     const suffix = n === 1 ? ' (copy)' : ` (copy ${n})`;
-    const candidate = base.slice(0, MAX_NAME - suffix.length).trimEnd() + suffix;
+    const candidate = base.slice(0, MAX_NAME_LEN - suffix.length).trimEnd() + suffix;
     if (!taken.has(candidate.toLowerCase())) return candidate;
   }
 }
@@ -385,7 +381,7 @@ function _copyTargets(plant: string): string[] {
  */
 function _ensureGroupRules(d: EditorDraft): void {
   for (const cat of ALERT_CATEGORY_ORDER) {
-    if (d.categories[cat]?.on && !d.rules.some(r => _ruleApplies(r, cat))) d.rules.push(groupRule(cat));
+    if (d.categories[cat]?.on && !d.rules.some(r => ruleAppliesTo(r, cat))) d.rules.push(groupRule(cat));
   }
 }
 
@@ -464,9 +460,9 @@ function _ruleHtml(s: EditorState, cat: AlertCategory, r: RuleDraft, i: number, 
   const custom = preset === 'custom'
     ? `<div class="ape-days">`
       + `<div class="form-row"><label>${esc(t('ape.day_from'))}</label>`
-      + `<input class="input${bad('dayFrom')}" type="number" min="-365" max="365" step="1" data-ape-field="dayFrom" data-ape-rule="${i}" value="${esc(_numVal(r.dayFrom))}"${dis}>${_err(e[`rules.${i}.dayFrom`])}</div>`
+      + `<input class="input${bad('dayFrom')}" type="number" min="-${DAY_BOUND}" max="${DAY_BOUND}" step="1" data-ape-field="dayFrom" data-ape-rule="${i}" value="${esc(_numVal(r.dayFrom))}"${dis}>${_err(e[`rules.${i}.dayFrom`])}</div>`
       + `<div class="form-row"><label>${esc(t('ape.day_to'))}</label>`
-      + `<input class="input${bad('dayTo')}" type="number" min="-365" max="365" step="1" data-ape-field="dayTo" data-ape-rule="${i}" value="${esc(_numVal(r.dayTo))}"${dis}>${_err(e[`rules.${i}.dayTo`])}</div>`
+      + `<input class="input${bad('dayTo')}" type="number" min="-${DAY_BOUND}" max="${DAY_BOUND}" step="1" data-ape-field="dayTo" data-ape-rule="${i}" value="${esc(_numVal(r.dayTo))}"${dis}>${_err(e[`rules.${i}.dayTo`])}</div>`
       + `</div><div class="ape-hint">${esc(t('ape.days_hint'))}</div>${_err(e[`rules.${i}.days`])}`
     : '';
   const late = cat === 'late' || r.minLateHours != null
@@ -496,7 +492,7 @@ function _ruleHtml(s: EditorState, cat: AlertCategory, r: RuleDraft, i: number, 
 function _tuneBodyHtml(s: EditorState, editable: boolean): string {
   const d = s.draft;
   const blocks = ALERT_CATEGORY_ORDER.filter(cat => d.categories[cat].on).map(cat => {
-    const idx = d.rules.map((r, i) => (_ruleApplies(r, cat) ? i : -1)).filter(i => i >= 0);
+    const idx = d.rules.map((r, i) => (ruleAppliesTo(r, cat) ? i : -1)).filter(i => i >= 0);
     // The Add button and each rule's "matches everything" line are always in the markup (hidden when they do not apply):
     // typing in a day or late-hours box toggles them through _refreshLive, where a re-render would drop focus.
     const allNarrow = idx.every(i => _ruleNarrows(d.rules[i]!, cat));
@@ -523,7 +519,7 @@ function _formHtml(s: EditorState): string {
     + (s.serverError ? _err(s.serverError) : '')
     + (editable ? '' : `<div class="ape-hint">${esc(t('ape.not_editable'))}</div>`)
     + `<div class="form-row"><label for="ape-name">${esc(t('ape.name'))}</label>`
-    + `<input class="input${e.name ? ' is-invalid' : ''}" id="ape-name" type="text" maxlength="${MAX_NAME}" data-ape-field="name" data-ape-key="name" placeholder="${esc(t('ape.name_ph'))}" value="${esc(d.name)}"${dis}>${_err(e.name)}</div>`
+    + `<input class="input${e.name ? ' is-invalid' : ''}" id="ape-name" type="text" maxlength="${MAX_NAME_LEN}" data-ape-field="name" data-ape-key="name" placeholder="${esc(t('ape.name_ph'))}" value="${esc(d.name)}"${dis}>${_err(e.name)}</div>`
     + `<div class="ape-rules-head"><span class="ape-eyebrow">${esc(t('ape.groups'))}</span><span class="ape-live" id="ape-matches">${esc(t('ape.live_matches', { n: _totalOn(s) }))}</span></div>`
     + `<div class="ape-hint">${esc(t('ape.groups_hint'))}</div>`
     + _err(e.categories)
@@ -619,7 +615,7 @@ function _refreshLive(): void {
     if (!s.draft.categories[cat].on) continue;
     let allNarrow = true;
     s.draft.rules.forEach((r, i) => {
-      if (!_ruleApplies(r, cat)) return;
+      if (!ruleAppliesTo(r, cat)) return;
       const el = document.getElementById(`ape-range-${cat}-${i}`);
       const range = liveRange(r.dayFrom, r.dayTo, today);
       if (el) el.textContent = (r.custom || dayPresetOf(r.dayFrom, r.dayTo) === 'custom') && range ? t('ape.live_range', range) : '';
@@ -690,11 +686,7 @@ async function _save(): Promise<void> {
     if (s.setMine) {
       const id = saved?.id ?? s.draft.id
         ?? (AlertProfileClient.cached(s.plant) ?? []).find(x => x.name === name)?.id;
-      if (id) {
-        const existing = (Store.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
-        Session.setPref('alertProfileByPlant', { ...existing, [s.plant]: id });
-        AlertProfileMatches.setSessionProfile(null);   // the pref now says the same thing
-      }
+      if (id) AlertProfileMatches.setDefaultProfile(s.plant, id);
     } else if (s.fromPicker) {
       // Opened from the page's picker: show what was just made, or what the page was already viewing and just changed.
       const savedId = saved?.id ?? s.draft.id;

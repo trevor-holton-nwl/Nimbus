@@ -3448,6 +3448,8 @@ window.__NIMBUS_LOCALES.en = {
   'ui.insp_tool_over': 'over the limit',
   'toast.tool_id_unknown': 'Tool {{tool}} has no inventory row; it counts as 1 copy.',
   'am.slot_confirm_tool': 'Tool {{tool}} would be over its {{available}} copies.',
+  'am.facet_search_ph': 'Filter machines',
+  'am.ack_err_not_owner': 'Someone else acknowledged this alert. Only they or an admin can change it.',
   'ui.tool_inventory_rule_link': 'Change in plant settings',
   'modal.opt_tool_raise_discard': 'Closing the preview discards this plan. Raise inventory now?',
   'toast.opt_tool_raise_closed': 'Preview closed. Run Optimize again after changing inventory.',

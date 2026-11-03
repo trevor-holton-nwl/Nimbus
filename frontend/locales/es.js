@@ -3206,6 +3206,8 @@ window.__NIMBUS_LOCALES.es = {
   'ui.insp_tool_over': 'por encima del límite',
   'toast.tool_id_unknown': 'La herramienta {{tool}} no tiene fila de inventario; cuenta como 1 copia.',
   'am.slot_confirm_tool': 'La herramienta {{tool}} superaría sus {{available}} copias.',
+  'am.facet_search_ph': 'Filtrar máquinas',
+  'am.ack_err_not_owner': 'Otra persona reconoció esta alerta. Solo esa persona o un administrador puede cambiarlo.',
   'ui.tool_inventory_rule_link': 'Cambiar en la configuración de la planta',
   'modal.opt_tool_raise_discard': 'Al cerrar la vista previa se descarta este plan. ¿Aumentar el inventario ahora?',
   'toast.opt_tool_raise_closed': 'Vista previa cerrada. Vuelva a ejecutar Optimizar después de cambiar el inventario.',

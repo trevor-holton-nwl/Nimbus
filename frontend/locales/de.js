@@ -3245,6 +3245,8 @@ window.__NIMBUS_LOCALES.de = {
   'ui.insp_tool_over': 'über dem Limit',
   'toast.tool_id_unknown': 'Werkzeug {{tool}} hat keine Bestandszeile und zählt als 1 Exemplar.',
   'am.slot_confirm_tool': 'Werkzeug {{tool}} würde seine {{available}} Exemplare überschreiten.',
+  'am.facet_search_ph': 'Maschinen filtern',
+  'am.ack_err_not_owner': 'Jemand anderes hat diese Warnung quittiert. Nur diese Person oder ein Administrator kann das ändern.',
   'ui.tool_inventory_rule_link': 'In den Werkseinstellungen ändern',
   'modal.opt_tool_raise_discard': 'Das Schließen der Vorschau verwirft diesen Plan. Bestand jetzt erhöhen?',
   'toast.opt_tool_raise_closed': 'Vorschau geschlossen. Führen Sie die Optimierung nach der Bestandsänderung erneut aus.',

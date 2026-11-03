@@ -12,7 +12,7 @@ import { AlertProfileClient } from '../../../frontend/insights/alert-profile-cli
 import { ALL_ALERTS_PROFILE, ALL_ALERTS_PROFILE_ID } from '../../../frontend/insights/alert-profiles.mjs';
 import { Session } from '../../../frontend/security/session.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
-import { Util } from '../../../frontend/platform/foundation.mjs';
+import { Util, Toast } from '../../../frontend/platform/foundation.mjs';
 import { makeEl } from '../helpers/dom-stub.mjs';
 
 globalThis.NimbusComputeCore = globalThis.NimbusComputeCore || createRequire(import.meta.url)('../../../frontend/nimbus-compute-core.js');
@@ -132,6 +132,41 @@ test('several orders in view: Open in Orders appears, selects every order number
   clickRowh('M2');
   assert.doesNotMatch(side(), /open-orders/, 'one placed order: Show on Gantt only');
   assert.match(side(), /data-am-action="show-gantt"/);
+});
+
+test('Open in Orders uses Table.filterToOrders when the table has it: no private textarea, then the Orders sub-tab', () => {
+  setup(ALERTS(), [task('T-a1', { ORDER: '1001' }), task('T-a2', { ORDER: '1002', MACHINE: 'M2' })]);
+  els['tbl-flt-pomat-textarea'] = makeEl('ta');
+  globalThis.NIMBUS = {
+    Table: {
+      filterToOrders: orders => { log.push(['filter', orders]); return true; },
+      _onPoMatApply: () => log.push(['apply']),
+    },
+    App: { goto: t => log.push(['goto', t]), gotoGanttSub: t => log.push(['sub', t]) },
+  };
+  AlertMonitorPane.render();
+  clickRowh('wc:A');
+  clickAm('open-orders');
+  assert.deepEqual(log, [['filter', ['1001', '1002']], ['goto', 'gantt'], ['sub', 'orders']]);
+  assert.equal(els['tbl-flt-pomat-textarea'].value, '', 'the old private-DOM path is not used');
+});
+
+test('Open in Orders: filterToOrders returning false toasts am.table_unavailable and stays on the page', () => {
+  setup(ALERTS(), [task('T-a1', { ORDER: '1001' }), task('T-a2', { ORDER: '1002', MACHINE: 'M2' })]);
+  const toasts = [];
+  const priorToast = Toast.show;
+  Toast.show = (msg, type) => { toasts.push([msg, type]); };
+  globalThis.NIMBUS = {
+    Table: { filterToOrders: orders => { log.push(['filter', orders]); return false; } },
+    App: { goto: t => log.push(['goto', t]), gotoGanttSub: t => log.push(['sub', t]) },
+  };
+  try {
+    AlertMonitorPane.render();
+    clickRowh('wc:A');
+    clickAm('open-orders');
+  } finally { Toast.show = priorToast; }
+  assert.deepEqual(log, [['filter', ['1001', '1002']]]);
+  assert.deepEqual(toasts, [['am.table_unavailable', 'warn']]);
 });
 
 test('the Top fixes toggle writes alertMonitorFixes and flips it back', () => {

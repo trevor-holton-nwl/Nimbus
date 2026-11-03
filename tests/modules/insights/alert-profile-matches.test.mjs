@@ -4,6 +4,7 @@ import { Store } from '../../../frontend/platform/store.mjs';
 import { AlertProfileClient } from '../../../frontend/insights/alert-profile-client.mjs';
 import { AlertAcksClient } from '../../../frontend/insights/alert-acks-client.mjs';
 import { AlertProfileMatches as M } from '../../../frontend/insights/alert-profile-matches.mjs';
+import { Session } from '../../../frontend/security/session.mjs';
 
 const rule = (types) => ({ types, dayFrom: null, dayTo: null, minSev: null, minLateHours: null });
 const prof = (id, types) => ({ id, plant: 'P1', name: id, description: '', rules: [rule(types)], ranking: 'impact' });
@@ -192,4 +193,23 @@ test('categoryByTask ranks late ahead of exceptions at equal severity (pinned)',
   const c = M.current();
   assert.equal(c.categoryByTask.get('t1'), 'late', 'warn tie: late beats exceptions');
   assert.equal(c.categoryByTask.get('t2'), 'late', 'err tie: late beats exceptions');
+});
+
+test('setDefaultProfile writes the whole alertProfileByPlant map once (read-modify-write) and clears the session pick', t => {
+  Store._state.userSettings = { alertProfileByPlant: { P1: 'p1', P9: 'z' } };
+  profiles = [prof('p1', ['overload']), prof('p2', ['late'])];
+  const writes = [];
+  t.mock.method(Session, 'setPref', (k, v) => { writes.push([k, v]); });
+  M.setSessionProfile('p2');
+  M.setDefaultProfile('P1', 'p2');
+  assert.deepEqual(writes, [['alertProfileByPlant', { P1: 'p2', P9: 'z' }]]);
+  assert.equal(M.sessionProfile(), null, 'the saved default is the active profile again');
+});
+
+test('setDefaultProfile starts from an empty map when the pref was never set', t => {
+  Store._state.userSettings = {};
+  const writes = [];
+  t.mock.method(Session, 'setPref', (k, v) => { writes.push([k, v]); });
+  M.setDefaultProfile('P1', '__all__');
+  assert.deepEqual(writes, [['alertProfileByPlant', { P1: '__all__' }]]);
 });

@@ -16,6 +16,7 @@
 import { Store } from '../platform/store.mjs';
 import { Util, Modal, Toast } from '../platform/foundation.mjs';
 import { AlertAcksClient } from '../insights/alert-acks-client.mjs';
+import { AlertApiError } from '../insights/plant-lru.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -45,6 +46,17 @@ export function validateAck(rawReason: string, untilDay: string | null | undefin
   const day = String(untilDay ?? '').trim();
   if (!_isRealDay(day)) return { ok: false, field: 'until', key: 'am.ack_err_until' };
   return { ok: true, reason, until: `${day}T23:59:59` };
+}
+
+/** The toast text for a failed acknowledge, bulk acknowledge or remove: a 403 means someone else holds the active acknowledgement
+ *  (and, in bulk, that nothing was written); a 400 about `until` (a date already past) reads like the date field's own error;
+ *  anything else keeps the server's message. */
+export function ackErrorMessage(err: unknown): string {
+  if (err instanceof AlertApiError) {
+    if (err.status === 403) return t('am.ack_err_not_owner');
+    if (err.status === 400 && /^until\b/i.test(err.code ?? '')) return t('am.ack_err_until');
+  }
+  return (err as Error)?.message || String(err);
 }
 
 /** The default end date: the plant's today plus seven days, as YYYY-MM-DD. */
@@ -175,7 +187,7 @@ export const AlertAckModal = {
       }
       if (_s === s) AlertAckModal.close();
     } catch (err) {
-      Toast.show((err as Error)?.message || String(err), 'error');
+      Toast.show(ackErrorMessage(err), 'error');
       s.busy = false;
       if (save) save.disabled = false;
     }

@@ -460,6 +460,14 @@ test('a facet query typed while the machine box was shown no longer filters once
   assert.match(els['am-ib-facets'].innerHTML, /data-am-facet="machines:X01"/, 'and the stale query does not hide them');
 });
 
+test('the machine facet box says "Filter machines" (placeholder and aria-label), not the page search text', () => {
+  twelveMachines();
+  AlertMonitorPane.render();
+  clickFacet('wcGroups:A');
+  assert.match(els['am-ib-facets'].innerHTML, /id="am-facet-q"[^>]*placeholder="am\.facet_search_ph" aria-label="am\.facet_search_ph"/);
+  assert.doesNotMatch(els['am-ib-facets'].innerHTML, /am\.search_ph/);
+});
+
 test('a work-center change (chip or facet) forgets the machine facet query', async () => {
   twelveMachines();
   AlertMonitorPane.render();

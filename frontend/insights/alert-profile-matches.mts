@@ -16,6 +16,7 @@
 
 import { Store } from '../platform/store.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
+import { Session } from '../security/session.mjs';
 import type { AlertAck, AlertCategory, AlertProfile } from '../platform/types.mjs';
 import { AlertProfileClient } from './alert-profile-client.mjs';
 import { AlertAcksClient } from './alert-acks-client.mjs';
@@ -244,6 +245,13 @@ export const AlertProfileMatches = {
     recompute();
   },
   sessionProfile(): string | null { return _sessionProfile; },
+  /** Make `id` this plant's saved default: one key, one PATCH (read the whole `alertProfileByPlant` map, change this plant's
+   *  entry, write it back through Session.setPref), then drop the session pick, since the saved default is the active profile again. */
+  setDefaultProfile(plant: string, id: string): void {
+    const existing = (Store.pref('alertProfileByPlant') as Record<string, string> | null | undefined) ?? {};
+    Session.setPref('alertProfileByPlant', { ...existing, [plant]: id });
+    AlertProfileMatches.setSessionProfile(null);
+  },
   /**
    * The "Show on Gantt" focus request: while set, `focusIds` on `current()` holds the requested orders that
    * the set's own alerts name (and are not fully acknowledged); the Gantt outlines them while the fills stay profile-based.

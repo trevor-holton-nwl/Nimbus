@@ -3205,6 +3205,8 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.insp_tool_over': 'acima do limite',
   'toast.tool_id_unknown': 'A ferramenta {{tool}} não tem linha de inventário; conta como 1 cópia.',
   'am.slot_confirm_tool': 'A ferramenta {{tool}} ultrapassaria suas {{available}} cópias.',
+  'am.facet_search_ph': 'Filtrar máquinas',
+  'am.ack_err_not_owner': 'Outra pessoa reconheceu este alerta. Somente ela ou um administrador pode alterá-lo.',
   'ui.tool_inventory_rule_link': 'Alterar nas configurações da fábrica',
   'modal.opt_tool_raise_discard': 'Fechar a pré-visualização descarta este plano. Aumentar o inventário agora?',
   'toast.opt_tool_raise_closed': 'Pré-visualização fechada. Execute a otimização novamente após alterar o inventário.',

@@ -529,7 +529,7 @@ function fakeAlertPane() {
 test('User Settings alert-profile rows: selecting a profile writes alertProfileByPlant read-modify-write and clears the session pick; Manage wires up', async t => {
   t.mock.method(Util, 't', k => k);
   t.mock.getter(Store, 'selectedPlant', () => 'P1');
-  t.mock.method(Session, 'pref', k => (k === 'alertProfileByPlant' ? { P2: 'keep-me' } : undefined));
+  t.mock.method(Store, 'pref', k => (k === 'alertProfileByPlant' ? { P2: 'keep-me' } : undefined));
   t.mock.method(AlertProfileClient, 'cached', () => [{ id: 'prof-1', name: 'Night shift' }]);
   let resolveList; t.mock.method(AlertProfileClient, 'list', () => new Promise(r => { resolveList = r; }));
   const writes = [];
