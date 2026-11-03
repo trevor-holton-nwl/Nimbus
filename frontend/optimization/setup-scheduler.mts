@@ -357,7 +357,14 @@ export function placeWithSetup(request: Readonly<PlaceWithSetupRequest>): Placem
     return capacityFailure();
   }
 
+  // P1-5: slot capacity can never exceed the suffix sum of interval minutes
+  // less the setup, and that bound only shrinks as `first` grows, so once it
+  // cannot hold the runtime no later `first` can either.
+  const suffixMinutes: number[] = new Array(intervals.length + 1);
+  suffixMinutes[intervals.length] = 0;
+  for (let index = intervals.length - 1; index >= 0; index -= 1) suffixMinutes[index] = suffixMinutes[index + 1] + intervals[index].minutes;
   for (let first = 0; first < intervals.length; first += 1) {
+    if (suffixMinutes[first] - setup.minutes < runtimeMinutes) break;
     const firstInterval = intervals[first];
     const firstProductiveStart = new Date(firstInterval.start.getTime() + setup.minutes * 60 * 1000);
     const firstCapacity = Math.floor((firstInterval.end.getTime() - firstProductiveStart.getTime()) / (60 * 1000));
@@ -2146,10 +2153,21 @@ function orderWithAdjacency(
   adjacency: Readonly<FragmentAdjacency>,
 ): NimbusTask[] | null {
   if (adjacency.issue) return null;
+  const requiredFirst = requiredFirstOrderId(fragment, adjacency);
+  // P1-11: no pair, required-first or required-last constraint means the walk
+  // below reproduces baseOrder exactly, or null when an id repeats.
+  if (!adjacency.successorByPredecessor.size && !adjacency.predecessorBySuccessor.size && !requiredFirst && !fragment.requiredLastOrderId) {
+    const seen = new Set<string>();
+    for (const task of baseOrder) {
+      const id = taskId(task);
+      if (seen.has(id)) return null;
+      seen.add(id);
+    }
+    return [...baseOrder];
+  }
   const byId = new Map(baseOrder.map(task => [taskId(task), task]));
   const selectedIds = new Set<string>();
   const result: NimbusTask[] = [];
-  const requiredFirst = requiredFirstOrderId(fragment, adjacency);
   let baseIndex = 0;
 
   while (result.length < baseOrder.length) {
@@ -2296,6 +2314,26 @@ function orderedBySlack(
   return decorated.map(entry => entry.task);
 }
 
+interface SetupNearestRank { task: NimbusTask; covered: number; minutes: number; policy: string }
+
+function compareSetupNearest(left: SetupNearestRank, right: SetupNearestRank, dueScope: DueScope): number {
+  return left.covered - right.covered
+    || left.minutes - right.minutes
+    || ordinalCompare(left.policy, right.policy)
+    || dueTimestamp(left.task, dueScope) - dueTimestamp(right.task, dueScope)
+    || taskId(left.task).localeCompare(taskId(right.task));
+}
+
+/** P1-6: index a stable full sort would put first (the first minimal element
+ * in array order), found with one linear scan instead of a sort per pick. */
+export function bestSetupNearestIndex(ranked: ReadonlyArray<SetupNearestRank>, dueScope: DueScope): number {
+  let best = 0;
+  for (let index = 1; index < ranked.length; index += 1) {
+    if (compareSetupNearest(ranked[index], ranked[best], dueScope) < 0) best = index;
+  }
+  return best;
+}
+
 /** Build a deterministic setup-nearest seed by repeatedly selecting the
  * lowest covered transition from the current fragment predecessor. Missing
  * transitions sort after covered ones and then by setup minutes, while the
@@ -2338,14 +2376,7 @@ function orderedBySetupNearest(
         policy: policyKeyForTask(snapshot, bounds.setup.plant, line, task, bounds.runContext),
       };
     });
-    ranked.sort((left, right) => (
-      left.covered - right.covered
-      || left.minutes - right.minutes
-      || ordinalCompare(left.policy, right.policy)
-      || dueTimestamp(left.task, dueScope) - dueTimestamp(right.task, dueScope)
-      || taskId(left.task).localeCompare(taskId(right.task))
-    ));
-    const next = ranked[0].task;
+    const next = ranked[bestSetupNearestIndex(ranked, dueScope)].task;
     result.push(next);
     remaining.splice(remaining.findIndex(task => taskId(task) === taskId(next)), 1);
     predecessorState = orderState(bounds, next, definition);
@@ -4388,15 +4419,30 @@ function admittedStateUnrecordedReason(line: string, task: Readonly<NimbusTask>,
   };
 }
 
+/** P1-10: first-match (plant, machine) index per master-data lines array, built once.
+ * The snapshot is read-only for a run, so the array is never mutated afterwards. */
+const MASTER_LINE_INDEX = new WeakMap<object, Map<string, NimbusMasterData['lines'][number]>>();
+function masterLineLookup(lines: NimbusMasterData['lines'] | undefined): Map<string, NimbusMasterData['lines'][number]> | null {
+  if (!lines) return null;
+  let index = MASTER_LINE_INDEX.get(lines);
+  if (!index) {
+    index = new Map();
+    for (const row of lines) {
+      const key = `${row.plant} ${row.machine}`;
+      if (!index.has(key)) index.set(key, row);
+    }
+    MASTER_LINE_INDEX.set(lines, index);
+  }
+  return index;
+}
+
 /** Compatibility is snapshot-owned setup truth. An absent field intentionally
  * retains the legacy compatible behavior so older cached master-data payloads
  * cannot silently exclude a line. */
 function setupCompatibilityForLine(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string,
 ): { reason: string | null } | null {
-  const masterLine = snapshot.masterData?.lines.find(candidate => (
-    candidate.plant === plant && candidate.machine === line
-  ));
+  const masterLine = masterLineLookup(snapshot.masterData?.lines)?.get(`${plant} ${line}`);
   if (masterLine?.setup_compatible !== false) return null;
   return { reason: masterLine.setup_compatibility_reason ?? null };
 }
@@ -6534,7 +6580,7 @@ export function selectThroughputCandidate(
 ): CandidateResult {
   const dueScope: DueScope = { snapshot };
   const before = lateOrderFacts(snapshot.tasks, dueScope);
-  const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
+  const afterTasks = patchedTasksView(snapshot.tasks, candidate.patches);
   const after = lateOrderFacts(afterTasks, dueScope);
   const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
   const slips = [...after.entries()].flatMap(([id, fact]) => {
@@ -6638,6 +6684,19 @@ export function applyPatchesToSnapshot(tasks: ReadonlyArray<NimbusTask>, patches
   });
 }
 
+/** P1-7: shallow twin of `applyPatchesToSnapshot` for in-module read-only
+ * consumers. Patched rows are a fresh object (spread) so identity-keyed memos
+ * still miss exactly as before, but nested values stay shared with the
+ * snapshot and the patch, so callers must not write into them. The exported
+ * cloning variant stays for callers that may keep or mutate the result. */
+function patchedTasksView(tasks: ReadonlyArray<NimbusTask>, patches: ReadonlyArray<SchedulePatch>): NimbusTask[] {
+  const byId = new Map(patches.map(patch => [String(patch.id), patch.changes]));
+  return tasks.map(task => {
+    const changes = byId.get(String(task.id));
+    return changes ? { ...task, ...changes } : task;
+  });
+}
+
 /** Attach the complete apply contract to a legacy or repair candidate. These
  * paths do not run `finalizeCandidate`, but a worker response still needs
  * detached dispositions and effective firming so Apply can validate it
@@ -6650,7 +6709,7 @@ export function attachDetachedValidationContext(
 ): CandidateResult {
   const snapshot: ScheduleSnapshot = { ...baselineSnapshot, firmedIds: new Set(effectiveFirmedIds) };
   const patches = new Map(candidate.patches.map(patch => [String(patch.id), patch]));
-  const finalById = new Map(applyPatchesToSnapshot(snapshot.tasks, candidate.patches).map(task => [String(task.id), task]));
+  const finalById = new Map(patchedTasksView(snapshot.tasks, candidate.patches).map(task => [String(task.id), task]));
   const dispositions: PlanningDisposition[] = [];
   const reasonFor = (task: NimbusTask): { code: string; message: string } => (
     planningDefect(snapshot, bounds, task)
@@ -7766,6 +7825,9 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     dispositions.set(disposition.id, disposition);
   }
   const occupied = new Map<string, { interval: PlacementInterval; task: NimbusTask; protectedTask: boolean }[]>();
+  // P1-10: plant-constant reads hoisted out of the per-task loop.
+  const plantSplitPolicy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+  const plantSegmentFloor = minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
   for (const task of occupancyTasks) {
     const boundaryOnly = boundaryIds.has(taskId(task)) && !ids.has(taskId(task));
     const protectedTask = taskIsFirmed(snapshot, task) || boundaryOnly;
@@ -7810,11 +7872,11 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     if (!protectedTask && bounds.finishFloor && end < bounds.finishFloor) add('date_window', 'Production finishes inside the frozen horizon.', task, protectedTask);
     const minutes = intervals.reduce((sum, i) => sum + (+i.end - +i.start) / 60000, 0);
     if (Math.abs(minutes - Math.round(Number(task.RUN_TIME) * 60)) > 0.001) add('runtime', 'Productive duration does not match runtime.', task, protectedTask);
-    const policy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+    const policy = plantSplitPolicy;
     // The overlong decision is made from the placement origin (as `neverOverlongReason` and the placement walk do),
     // not from each order's own start, so a split placed under that decision is not flagged here.
     if (intervals.length > 1 && (policy === 'never' || (policy === 'overlong_only' && hasNominalWindow(snapshot, String(task.MACHINE), bounds.setup.plant, bounds.placementStart ?? bounds.now, Math.round(Number(task.RUN_TIME) * 60), bounds.runContext)))) add('split_policy', 'Order splitting violates plant policy.', task, protectedTask);
-    const minimum = minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
+    const minimum = plantSegmentFloor;
     for (let index = 0; index < intervals.length; index++) {
       const interval = intervals[index];
       if (index && intervals[index - 1].end > interval.start) add('segments', 'Productive segments overlap or are out of order.', task, protectedTask);
@@ -7841,7 +7903,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     if (candidate.toolPass?.failed === true) findings.push(toolOverflowFailedFinding());
   }
   // Setup occupies the calendar immediately before each productive start.
-  const proposed = applyPatchesToSnapshot(occupancyTasks, candidate.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date) && timestamp(task.end_date));
+  const proposed = patchedTasksView(occupancyTasks, candidate.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date) && timestamp(task.end_date));
   const lines = new Set(proposed.map(task => String(task.MACHINE)));
   for (const line of lines) {
     const lineTasks = proposed.filter(task => String(task.MACHINE) === line).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
@@ -7909,7 +7971,7 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
     // A queued order changes its successor's predecessor, so an unrecorded-transition error can clear itself
     // down the line: reject only the earliest such order per line per pass and let the re-validation decide the rest.
     // Every other failure is rejected outright, as before.
-    const patchedTasks = applyPatchesToSnapshot(snapshot.tasks, result.patches);
+    const patchedTasks = patchedTasksView(snapshot.tasks, result.patches);
     const startById = new Map(patchedTasks.map(task => [taskId(task), +(timestamp(task.start_date) ?? 0)]));
     const patchedById = new Map(patchedTasks.map(task => [taskId(task), task]));
     const reasonBy = new Map<string, ValidationFinding>();
@@ -8054,7 +8116,9 @@ function checkDistributionSeparation(
   patches: ReadonlyArray<SchedulePatch>,
   snapshot: Readonly<ScheduleSnapshot>,
 ): ValidationFinding[] {
-  const finalTasks = applyPatchesToSnapshot(snapshot.tasks, patches);
+  // P1-10: only a workcenter with a real max_separation can produce a finding.
+  if (!(snapshot.masterData?.workcenters ?? []).some(workcenter => workcenter.max_separation && workcenter.max_separation !== 'none')) return [];
+  const finalTasks = patchedTasksView(snapshot.tasks, patches);
 
   const machineToWorkcenter = new Map<string, string>();
   for (const line of snapshot.masterData?.lines ?? []) {
@@ -8198,7 +8262,7 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   const originals = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   const explanations = [...result.explanation];
   const score = [...result.score];
-  const final = applyPatchesToSnapshot(snapshot.tasks, result.patches);
+  const final = patchedTasksView(snapshot.tasks, result.patches);
   const mutableTasks = eligibleTasks(snapshot, bounds);
   const scopeIds = new Set(mutableTasks.map(taskId));
   const predecessorById = new Map<string, string | null>();
@@ -8218,12 +8282,18 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
     ))
     : [];
   const unknownStateIds = new Set(opaqueTasks.map(taskId));
+  // P1-10: group the ordered rows by line once (Map insertion order equals the old first-occurrence Set order).
+  const orderedFinalByLine = new Map<string, NimbusTask[]>();
+  for (const task of orderedFinal) {
+    const key = String(task.MACHINE);
+    const bucket = orderedFinalByLine.get(key);
+    if (bucket) bucket.push(task); else orderedFinalByLine.set(key, [task]);
+  }
   const missingFindingIds = new Set((result.validationFindings ?? [])
     .filter(finding => finding.code === 'missing_setup' && finding.taskId)
     .map(finding => finding.taskId!));
   const edgeReasons = new Map<string, 'successor-state-unknown' | 'scheduled-without-setup' | 'initial-state-unknown'>();
-  for (const line of new Set(orderedFinal.map(task => String(task.MACHINE)))) {
-    const lineTasks = orderedFinal.filter(task => String(task.MACHINE) === line);
+  for (const [line, lineTasks] of orderedFinalByLine) {
     let previousState = definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
     let previousUnknown = false;
     for (const task of lineTasks) {
@@ -8243,9 +8313,11 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   });
   const knownUncovered = actualMissing.filter(edge => edge.reason === 'scheduled-without-setup');
   const unknownEdges = actualMissing.length - knownUncovered.length;
+  const tailExplained = new Set(explanations.filter(reason => reason.code === 'unknown-setup-tail-placement').map(reason => reason.taskId));
   for (const task of orderedFinal) {
     if (!unknownStateIds.has(taskId(task))) continue;
-    if (!explanations.some(reason => reason.code === 'unknown-setup-tail-placement' && reason.taskId === taskId(task))) {
+    if (!tailExplained.has(taskId(task))) {
+      tailExplained.add(taskId(task));
       explanations.push({
         code: 'unknown-setup-tail-placement',
         message: `Placed ${taskId(task)} after the known setup sequence because its signature is unresolved.`,
@@ -8265,7 +8337,7 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   ]);
   const objective = objectiveFactsForCandidate(snapshot, bounds, { ...result, missingEdges: finalMissingEdges });
   score[0] = objective.hardErrors;
-  score[1] = [...new Set(orderedFinal.map(task => String(task.MACHINE)))].reduce((sum, line) => sum + policyScore(snapshot, bounds.setup.plant, line, orderedFinal.filter(task => String(task.MACHINE) === line), bounds.runContext), 0);
+  score[1] = [...orderedFinalByLine].reduce((sum, [line, lineTasks]) => sum + policyScore(snapshot, bounds.setup.plant, line, lineTasks, bounds.runContext), 0);
   score[2] = objective.lateCount;
   score[3] = objective.latenessMinutes;
   score[4] = -objective.scheduledCount;
@@ -8700,7 +8772,7 @@ export function objectiveFactsForCandidate(
   // are identical during and after evaluation.
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const ids = new Set(eligibleTasks(snapshot, bounds).map(taskId));
-  const tasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
+  const tasks = patchedTasksView(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
   let lateCount = 0; let lateness = 0; let maxLateness = 0; let setupMinutes = 0; let instability = 0;
   let overCap = 0;
   const dueScope = dueScopeFor(snapshot, bounds);

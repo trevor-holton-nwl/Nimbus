@@ -1038,7 +1038,7 @@ export const Alerts = {
       // Detached run first (never the live Store): the result is judged BEFORE anything changes. An error finding means
       // the optimizer would leave the schedule invalid, so nothing is applied, no Undo entry is pushed and the alert
       // stays. Orders it would queue for tooling need the same confirm as the Optimize preview (Cancel default).
-      const candidate = Engine.evaluateSchedule('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd }, snapshotSchedule(plant));
+      const candidate = Engine.evaluateSchedule('changeover', { lines: [line], startDate: dayStart, endDate: dayEnd, plant }, snapshotSchedule(plant));
       if (candidate.status === 'invalid_horizon' || candidate.validationFindings?.some(finding => finding.severity === 'error')) {
         if (!quiet) Toast.show(Util.t('toast.fix_overload_blocked'), 'error', 7000);
         opts?.onBlocked?.();
