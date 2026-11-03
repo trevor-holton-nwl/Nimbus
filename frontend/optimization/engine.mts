@@ -888,6 +888,14 @@ function normalizeBacklogRunDates(plant: string, opts: Record<string, unknown>):
   return { runAt, now, from, to };
 }
 
+/** The one reading of an order's run time, in whole minutes (0 when missing, unparsable or non-finite). Every
+ *  placement site and the Remove Backlog scope use it, so a sub-30-second or unit-suffixed RUN_TIME is judged
+ *  the same way everywhere. */
+function runMinutesOf(task: NimbusTask): number {
+  const minutes = Math.round(Util.runHours(task) * 60);
+  return Number.isFinite(minutes) ? minutes : 0;
+}
+
 /** Reproduce Remove Backlog's immutable selection boundary for detached Apply
  * validation. The mutable set is exactly the positive-runtime existing
  * intervals whose snapshot start is in [from, to); every other valid interval
@@ -900,7 +908,7 @@ function backlogValidationScope(
   from: Date, to: Date, held: ReadonlySet<string> = new Set(),
 ): { scopeTaskIds: string[]; boundaryTaskIds: string[] } {
   const candidates = snapshot.tasks.filter(task => {
-    const line = String(task.MACHINE ?? 'Unknown');
+    const line = String(task.MACHINE || 'Unknown');
     return resolveTaskPlant(task, snapshot) === plant
       && (!lines || lines.has(line))
       && !snapshot.lineSettings[line]?.excludeFromOpt;
@@ -908,12 +916,13 @@ function backlogValidationScope(
   const valid = candidates.flatMap(task => {
     const start = finiteDate(task.start_date);
     const end = finiteDate(task.end_date);
-    const runtimeHours = Number(task.RUN_TIME);
-    return start && end && end > start ? [{ task, start, usableRuntime: Number.isFinite(runtimeHours) && runtimeHours > 0 }] : [];
+    return start && end && end > start ? [{ task, start, usableRuntime: runMinutesOf(task) > 0 }] : [];
   });
   const selected = new Set(valid
     // `held` (holdRunning): an order left where it is is a boundary row, never a scope row the run must account for.
-    .filter(({ task, start, usableRuntime }) => usableRuntime && start >= from && start < to && !held.has(String(task.id)))
+    // A placement-exception row is skipped by the run (fixed where the planner put it), so it is boundary-only here.
+    .filter(({ task, start, usableRuntime }) => usableRuntime && !task.placement_exception
+      && start >= from && start < to && !held.has(String(task.id)))
     .map(({ task }) => String(task.id)));
   return {
     scopeTaskIds: valid.filter(({ task }) => selected.has(String(task.id))).map(({ task }) => String(task.id)),
@@ -984,8 +993,12 @@ function sourceIsFirmed(id: string | number): boolean {
   if (!_candidateSnapshot) return Store.isFirmed(id);
   const firmed = _candidateSnapshot.firmedIds;
   if (isFirmedIdSet(firmed)) return firmed.has(String(id));
-  return firmed.map(String).includes(String(id));
+  // An array is never mutated after the snapshot is built: one Set per array (V-E1-01).
+  let set = _firmedArraySets.get(firmed);
+  if (!set) { set = new Set(firmed.map(String)); _firmedArraySets.set(firmed, set); }
+  return set.has(String(id));
 }
+const _firmedArraySets = new WeakMap<readonly string[], ReadonlySet<string>>();
 
 
 
@@ -2185,12 +2198,12 @@ export const Engine = {
     const obstacles = [...(opts.obstacles ?? [])];
     nextItem: for (const item of items) {
       if (opts.stopWhen?.(item, cursor)) break;
-      const runtimeHours = Number(item.task.RUN_TIME);
-      if (!Number.isFinite(runtimeHours) || runtimeHours <= 0) {
+      const runtimeMinutes = runMinutesOf(item.task);
+      if (runtimeMinutes <= 0) {
         out.invalidRuntime.push(item);
         continue;
       }
-      const runtimeMs = Math.round(runtimeHours * 60) * Config.MS_MIN;   // whole minutes like every other path (senior review M1)
+      const runtimeMs = runtimeMinutes * Config.MS_MIN;   // whole minutes like every other path (senior review M1)
       let candidate = item.notBefore ? new Date(Math.max(item.notBefore.getTime(), cursor.getTime())) : cursor;
       let start!: Date;
       let end!: Date;
@@ -2211,7 +2224,7 @@ export const Engine = {
           if (opts.plantTz) {
             // The reversal's forward leg picks the slot AND the end in plant-zone instants (OQ46, U16), so a window
             // whose edge lies on a DST jump is neither overrun nor skipped. Overlong / unavailable were classified above.
-            const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), 'never', opts.plantTz);
+            const allocation = Calendar.allocateRuntime(line, candidate, runtimeMinutes, 'never', opts.plantTz);
             if (allocation.kind !== 'allocated') {
               // Wall-clock said overlong and plant-zone time agrees (no window holds it): the continuous-bar exception.
               if (slot.kind === 'overlong') { out.overlong.push(item); continue nextItem; }
@@ -2226,7 +2239,7 @@ export const Engine = {
           }
           if (item.task.scheduleSegments?.length && item.task.scheduleSegments.length >= 2) scheduleSegments = [];
         } else {
-          const allocation = Calendar.allocateRuntime(line, candidate, Math.round(runtimeHours * 60), policy, opts.plantTz ?? null);
+          const allocation = Calendar.allocateRuntime(line, candidate, runtimeMinutes, policy, opts.plantTz ?? null);
           if (allocation.kind !== 'allocated') {
             out.failure = { item, reason: allocation.kind === 'unavailable' ? 'no-operating-interval' : 'search-exhausted' };
             break nextItem;
@@ -2312,6 +2325,10 @@ export const Engine = {
     const lines = Array.isArray(opts.lines) && opts.lines.length
       ? new Set((opts.lines as unknown[]).map(String))
       : null;
+    // The preview runs in the worker, whose live Store is empty: read the frozen end and the zone from the
+    // detached snapshot when there is one, never from the live Store (V-E2-01, V-E3-07).
+    const frozenEnd = _candidateSnapshot ? (_candidateSnapshot.frozenHorizonEnd ?? null) : Engine.frozenHorizonEnd();
+    const plantTz = sourceMasterData()?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null;
     const grouped = new Map<string, Array<{ task: NimbusTask; snapshotStart: Date }>>();
     const scopedTasks = sourceTasksByPlant(plant).filter(t => !lines || lines.has(t.MACHINE || 'Unknown'));
     for (const task of scopedTasks) {
@@ -2326,7 +2343,8 @@ export const Engine = {
         continue;
       }
       if (!task.start_date) {
-        diagnostics.missingStartIds.push(task.id);
+        // A queued row (needs_planning) has no bar by design; only a never-placed row counts as "no start".
+        if (task.planning_status !== 'needs_planning') diagnostics.missingStartIds.push(task.id);
         continue;
       }
       const snapshotStart = finiteDate(task.start_date);
@@ -2360,7 +2378,7 @@ export const Engine = {
           line,
           items.slice(firstBacklog).map(item => ({ ...item, notBefore: item.snapshotStart >= now ? item.snapshotStart : undefined })),
           now, splitPolicy,
-          { plantTz: Store.masterData?.plants?.find(row => row.plant === plant)?.timezone?.trim() || null,
+          { plantTz,
             stopWhen: (item, cursor) => item.snapshotStart >= now && cursor <= item.snapshotStart,
             ...(holdRunning && obstaclesByLine.has(line) ? { obstacles: obstaclesByLine.get(line) } : {}) });
         for (const item of sequence.invalidRuntime) diagnostics.invalidRuntimeIds.push(item.task.id);
@@ -2373,7 +2391,7 @@ export const Engine = {
           diagnostics.calendarSearchFailures.push({ line, taskId: sequence.failure.item.task.id, reason: sequence.failure.reason });
         }
         for (const { item, start, end, scheduleSegments } of sequence.placed) {
-          const runtimeHours = Number(item.task.RUN_TIME);
+          const runtimeHours = runMinutesOf(item.task) / 60;
           const currentStart = item.snapshotStart.getTime();
           const currentEnd = finiteDate(item.task.end_date)?.getTime() ?? NaN;
           const segmentsChanged = scheduleSegments !== undefined
@@ -2384,7 +2402,7 @@ export const Engine = {
           patches.push({ id: item.task.id, changes });
           diagnostics.moved++;
           if (sourceIsFirmed(item.task.id)) diagnostics.firmedMoved++;
-          if (Engine.isFrozenHorizon(item.task, now)) diagnostics.frozenMoved++;
+          if (Engine.isFrozenHorizon(item.task, now, frozenEnd)) diagnostics.frozenMoved++;
           if (item.snapshotStart < now) diagnostics.movedRuntimeHours += runtimeHours;
           diagnostics.largestDelayMinutes = Math.max(diagnostics.largestDelayMinutes,
             Math.round((start.getTime() - item.snapshotStart.getTime()) / Config.MS_MIN));
@@ -2395,13 +2413,22 @@ export const Engine = {
     }
 
     const patchById = new Map(patches.map(patch => [patch.id, patch]));
+    // Indexed once (V-E1-01): id -> task and line -> scoped tasks (scopedTasks order kept, so the conflicts
+    // come out in the same order as the linear scan produced them).
+    const byId = new Map<string, NimbusTask>(scopedTasks.map(t => [String(t.id), t] as const));
+    const scopedByLine = new Map<string | undefined, NimbusTask[]>();
+    for (const t of scopedTasks) {
+      const list = scopedByLine.get(t.MACHINE);
+      if (list) list.push(t); else scopedByLine.set(t.MACHINE, [t]);
+    }
     for (const patch of patches) {
       const movedStart = patch.changes.start_date;
       const movedEnd = patch.changes.end_date;
       if (!movedStart || !movedEnd) continue;   // a queued (overlong_never) row has no bar to conflict
-      const movedTask = sourceTask(patch.id);
-      for (const protectedTask of scopedTasks) {
-        if (protectedTask.MACHINE !== movedTask?.MACHINE || !protectedTask.start_date || !protectedTask.end_date) continue;
+      const movedTask = byId.get(String(patch.id)) ?? sourceTask(patch.id);
+      if (!movedTask) continue;
+      for (const protectedTask of scopedByLine.get(movedTask?.MACHINE) ?? []) {
+        if (!protectedTask.start_date || !protectedTask.end_date) continue;
         // VM7: a marked bar inside the window is an obstacle too
         if ((protectedTask.start_date <= to && !protectedTask.placement_exception) || patchById.has(protectedTask.id)) continue;
         if (movedStart < protectedTask.end_date && movedEnd > protectedTask.start_date) {
