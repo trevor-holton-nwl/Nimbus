@@ -6549,7 +6549,7 @@ export function selectThroughputCandidate(
 ): CandidateResult {
   const dueScope: DueScope = { snapshot };
   const before = lateOrderFacts(snapshot.tasks, dueScope);
-  const afterTasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches);
+  const afterTasks = patchedTasksView(snapshot.tasks, candidate.patches);
   const after = lateOrderFacts(afterTasks, dueScope);
   const savings = Math.max(0, (baseline.score[5] ?? 0) - (candidate.score[5] ?? 0));
   const slips = [...after.entries()].flatMap(([id, fact]) => {
@@ -6653,6 +6653,19 @@ export function applyPatchesToSnapshot(tasks: ReadonlyArray<NimbusTask>, patches
   });
 }
 
+/** P1-7: shallow twin of `applyPatchesToSnapshot` for in-module read-only
+ * consumers. Patched rows are a fresh object (spread) so identity-keyed memos
+ * still miss exactly as before, but nested values stay shared with the
+ * snapshot and the patch, so callers must not write into them. The exported
+ * cloning variant stays for callers that may keep or mutate the result. */
+function patchedTasksView(tasks: ReadonlyArray<NimbusTask>, patches: ReadonlyArray<SchedulePatch>): NimbusTask[] {
+  const byId = new Map(patches.map(patch => [String(patch.id), patch.changes]));
+  return tasks.map(task => {
+    const changes = byId.get(String(task.id));
+    return changes ? { ...task, ...changes } : task;
+  });
+}
+
 /** Attach the complete apply contract to a legacy or repair candidate. These
  * paths do not run `finalizeCandidate`, but a worker response still needs
  * detached dispositions and effective firming so Apply can validate it
@@ -6665,7 +6678,7 @@ export function attachDetachedValidationContext(
 ): CandidateResult {
   const snapshot: ScheduleSnapshot = { ...baselineSnapshot, firmedIds: new Set(effectiveFirmedIds) };
   const patches = new Map(candidate.patches.map(patch => [String(patch.id), patch]));
-  const finalById = new Map(applyPatchesToSnapshot(snapshot.tasks, candidate.patches).map(task => [String(task.id), task]));
+  const finalById = new Map(patchedTasksView(snapshot.tasks, candidate.patches).map(task => [String(task.id), task]));
   const dispositions: PlanningDisposition[] = [];
   const reasonFor = (task: NimbusTask): { code: string; message: string } => (
     planningDefect(snapshot, bounds, task)
@@ -7856,7 +7869,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     if (candidate.toolPass?.failed === true) findings.push(toolOverflowFailedFinding());
   }
   // Setup occupies the calendar immediately before each productive start.
-  const proposed = applyPatchesToSnapshot(occupancyTasks, candidate.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date) && timestamp(task.end_date));
+  const proposed = patchedTasksView(occupancyTasks, candidate.patches).filter(task => task.planning_status !== 'needs_planning' && timestamp(task.start_date) && timestamp(task.end_date));
   const lines = new Set(proposed.map(task => String(task.MACHINE)));
   for (const line of lines) {
     const lineTasks = proposed.filter(task => String(task.MACHINE) === line).sort((a, b) => +timestamp(a.start_date)! - +timestamp(b.start_date)! || ordinalCompare(taskId(a), taskId(b)));
@@ -7915,7 +7928,7 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
     // A queued order changes its successor's predecessor, so an unrecorded-transition error can clear itself
     // down the line: reject only the earliest such order per line per pass and let the re-validation decide the rest.
     // Every other failure is rejected outright, as before.
-    const patchedTasks = applyPatchesToSnapshot(snapshot.tasks, result.patches);
+    const patchedTasks = patchedTasksView(snapshot.tasks, result.patches);
     const startById = new Map(patchedTasks.map(task => [taskId(task), +(timestamp(task.start_date) ?? 0)]));
     const patchedById = new Map(patchedTasks.map(task => [taskId(task), task]));
     const reasonBy = new Map<string, ValidationFinding>();
@@ -8060,7 +8073,7 @@ function checkDistributionSeparation(
   patches: ReadonlyArray<SchedulePatch>,
   snapshot: Readonly<ScheduleSnapshot>,
 ): ValidationFinding[] {
-  const finalTasks = applyPatchesToSnapshot(snapshot.tasks, patches);
+  const finalTasks = patchedTasksView(snapshot.tasks, patches);
 
   const machineToWorkcenter = new Map<string, string>();
   for (const line of snapshot.masterData?.lines ?? []) {
@@ -8204,7 +8217,7 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   const originals = new Map(snapshot.tasks.map(task => [taskId(task), task]));
   const explanations = [...result.explanation];
   const score = [...result.score];
-  const final = applyPatchesToSnapshot(snapshot.tasks, result.patches);
+  const final = patchedTasksView(snapshot.tasks, result.patches);
   const mutableTasks = eligibleTasks(snapshot, bounds);
   const scopeIds = new Set(mutableTasks.map(taskId));
   const predecessorById = new Map<string, string | null>();
@@ -8706,7 +8719,7 @@ export function objectiveFactsForCandidate(
   // are identical during and after evaluation.
   bounds = withRunContext(snapshot, hardBounds(snapshot, bounds));
   const ids = new Set(eligibleTasks(snapshot, bounds).map(taskId));
-  const tasks = applyPatchesToSnapshot(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
+  const tasks = patchedTasksView(snapshot.tasks, candidate.patches).filter(task => ids.has(taskId(task)));
   let lateCount = 0; let lateness = 0; let maxLateness = 0; let setupMinutes = 0; let instability = 0;
   let overCap = 0;
   const dueScope = dueScopeFor(snapshot, bounds);
