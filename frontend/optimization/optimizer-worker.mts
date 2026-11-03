@@ -35,8 +35,10 @@ export function buildOptimizerWorkerResponse(
   clock: () => number = () => performance.now(),
 ): OptimizerWorkerResponse {
   const result = evaluateOptimizerWorkerRequest(request, clock);
-  const validation = serializeOptimizerValidation(result);
   const { validationContext: _validationContext, ...candidate } = result;
+  // KPI-only requests (alternate plans) never reach Apply, so the per-task bound maps are not built or cloned back.
+  if (request.kpiOnly === true) return { runId: request.runId, candidate };
+  const validation = serializeOptimizerValidation(result);
   // An `invalid_horizon` candidate is a caller error with no schedule proposal, so it has no validation seam by design:
   // answer it as a normal response and let the dialog name the reason, instead of throwing "no validation metadata".
   if (!validation && result.status === 'invalid_horizon') return { runId: request.runId, candidate };

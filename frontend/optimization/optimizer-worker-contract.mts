@@ -9,6 +9,8 @@ export interface OptimizerWorkerRequest {
   /** Remaining primary budget measured in the sender's monotonic clock. The
    * worker converts it to its own performance.now() origin on receipt. */
   deadlineDurationMs?: number;
+  /** The caller reads only the candidate's patches/scores (an alternate's KPIs): skip serializing the validation seam. */
+  kpiOnly?: boolean;
 }
 
 /** The evaluator request for a worker request: the carried `mode` is the single source of truth, so the worker, the

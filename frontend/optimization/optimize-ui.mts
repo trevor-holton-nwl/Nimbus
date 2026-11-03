@@ -19,7 +19,8 @@ import { Sandbox } from './sandbox.mjs';
 import type { StoreEvent } from '../platform/store.mjs';
 import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
-import { runOptimizerPreview } from './optimizer-worker-client.mjs';
+import { createOptimizerWorkerSession } from './optimizer-worker-client.mjs';
+import type { OptimizerWorkerFactory, OptimizerWorkerSession } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
 import { applyPatchesToSnapshot, boundsWithRunContext, resolveTaskPlant, validateCandidate, validateCandidateForApply, toolingRuleForSnapshot } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
@@ -1242,6 +1243,8 @@ interface PreviewBacklogAudit {
 }
 interface PreviewComputeContext {
   signal?: AbortSignal; tick: () => Promise<void>; shouldStop?: () => boolean; runSeq?: number;
+  /** Test seam: the worker factory the run's worker session spawns with (default: a real module Worker). */
+  workerFactory?: OptimizerWorkerFactory | null;
   /** Called once Plan A and its explanation are ready, before any alternate
    *  runs, with the result so far (`finalists: null`). Foreground only. */
   onPrimary?: (partial: PreviewResult) => void;
@@ -1751,11 +1754,29 @@ export const OptimizerPreview = {
     return step(() => gen.next());
   },
 
-  /** The compute body as a generator: every `yield` hands a promise to the driver. */
+  /** The compute body as a generator: every `yield` hands a promise to the driver. The run owns one worker session
+   *  (the primary and its alternates share it); it is closed however the run ends: result, error, or an abort (the
+   *  signal also closes it by itself, which terminates every worker and rejects every request still in flight). */
   *_computeSteps(
     mode: OptimizerMode,
     opts: OptimizerRunOptions,
+    ctx: PreviewComputeContext,
+  ): Generator<Promise<unknown>, PreviewResult, unknown> {
+    const session = createOptimizerWorkerSession({
+      workerFactory: ctx.workerFactory, syncEvaluator: evaluateSchedule, signal: ctx.signal, maxWorkers: 1,
+    });
+    try {
+      return yield* OptimizerPreview._computeStepsWith(mode, opts, ctx, session);
+    } finally {
+      session.close();
+    }
+  },
+
+  *_computeStepsWith(
+    mode: OptimizerMode,
+    opts: OptimizerRunOptions,
     { signal, tick, shouldStop = () => false, runSeq = 0, onPrimary }: PreviewComputeContext,
+    session: OptimizerWorkerSession,
   ): Generator<Promise<unknown>, PreviewResult, unknown> {
     const startedAt = performance.now();
     const plant = opts.plant ?? Store.selectedPlant;
@@ -1795,13 +1816,10 @@ export const OptimizerPreview = {
     // (deferred) alt run below no longer inherits a full fresh one.
     const _evalPrimaryT0 = performance.now();
     const deadlineAt = performance.now() + (opts.searchBudgetMs ?? SETUP_AWARE_NORMAL_BUDGET_MS);
-    const primaryEvaluation = runOptimizerPreview({
+    const primaryEvaluation = session.run({
       runId: `optimizer-preview-${runSeq}-primary`, mode, snapshot: candidateSnapshot,
       request: previewEvaluationRequest(mode, opts, plant, deadlineAt),
-    }, {
-      signal,
-      syncEvaluator: evaluateSchedule,
-    });
+    }, { signal });
     // The primary request is already posted (a worker clones the snapshot on postMessage), so the main-thread work that
     // only the preview needs (the Undo copy, the baseline map and the Pre-KPIs) runs while the worker searches instead
     // of before it starts (V-U2-13). Nothing below mutates candidateSnapshot, so the values are the same as before.
@@ -1930,13 +1948,10 @@ export const OptimizerPreview = {
       try {
         const _evalAltT0 = performance.now();
         const altDeadlineAt = performance.now() + SETUP_AWARE_NORMAL_BUDGET_MS;
-        const altEvaluation = runOptimizerPreview({
+        const altEvaluation = session.run({
           runId: `optimizer-preview-${runSeq}-alt-${idx}`, mode: altMode, snapshot: candidateSnapshot,
           request: previewEvaluationRequest(altMode, { ...opts, searchBudgetMs: SETUP_AWARE_NORMAL_BUDGET_MS, exhaustive: false }, plant, altDeadlineAt),
-        }, {
-          signal,
-          syncEvaluator: evaluateSchedule,
-        });
+        }, { signal });
         const altCandidate = (altEvaluation instanceof Promise ? yield altEvaluation : altEvaluation) as CandidateResult;
         PerfMonitor.record('Optimize.evaluate.alt', performance.now() - _evalAltT0);
         const _applyPatchesT0b = performance.now();
