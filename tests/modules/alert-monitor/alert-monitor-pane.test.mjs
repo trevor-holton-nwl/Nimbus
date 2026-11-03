@@ -533,7 +533,7 @@ test('row Acknowledge and Remove acknowledgement live in the ⋯ menu; the row h
 });
 
 /* ---------------------------------------------------------------------------
-   Slot (needs_planning): row button + ⋯ menu open the dialog; Diagnose shows the suggested slot
+   Slot (needs_planning): row button + ⋯ menu open the dialog with the plant, order and alert id; a no-op in What-If
    ------------------------------------------------------------------------- */
 import { AlertSlotModal } from '../../../frontend/alert-monitor/alert-slot-modal.mjs';
 

@@ -58,12 +58,11 @@ const sumIn = (o = {}) => ({
   profile: prof([rule({ dayFrom: 8, dayTo: 30 })]), confidence: 71, ...o,
 });
 
-test('summaryLine: the lead is the window, profile or all-alerts variant (the retired focus input is ignored)', () => {
+test('summaryLine: the lead is the window, profile or all-alerts variant', () => {
   const alerts = [al('a', 'err', '1')];
   assert.equal(summaryLine(sumIn({ alerts }), ts).text, '1 alert in D8–30 matches Overlaps · 1 error');
   assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: 8, dayTo: null })]) }), ts).text, /^1 alert matches Overlaps · /);
   assert.match(summaryLine(sumIn({ alerts, profileId: '__all__', profile: ALL_ALERTS_PROFILE }), ts).text, /^1 alert at this plant · /);
-  assert.equal(summaryLine(sumIn({ alerts, focus: null }), ts).text, summaryLine(sumIn({ alerts }), ts).text);
   assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: -7, dayTo: 30 })]) }), ts).text, /D-7–30/);
 });
 

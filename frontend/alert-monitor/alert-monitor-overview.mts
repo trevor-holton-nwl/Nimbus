@@ -16,17 +16,6 @@ export { NONE_KEY };
 export const OVERDUE_KEY = 'overdue';
 export const LATER_KEY = 'later';
 
-// ---- Types ----------------------------------------------------------------------------------
-
-export interface OverviewDeps {
-  tasksById: Record<string, NimbusTask | undefined>;
-  /** Start of the plant-local day. */
-  plantToday: Date;
-  horizonMinutes: number;
-  window: { from: number; to: number } | null;
-  deps?: ProfileDeps;
-}
-
 /** Day columns are capped here; alerts past the cap fall in the `LATER_KEY` bucket. */
 const MAX_DAYS = 60;
 
@@ -35,7 +24,7 @@ const MAX_DAYS = 60;
  * production due path (date-only due -> calendar window walk) costs microseconds per call. Same result as `anchorTime`:
  * the due when the order carries one and it resolves, else the alert's own time.
  */
-export function _memoAnchor(d: OverviewDeps): (a: NimbusAlert, task: NimbusTask | undefined) => Date | null {
+export function _memoAnchor(d: { deps?: ProfileDeps }): (a: NimbusAlert, task: NimbusTask | undefined) => Date | null {
   const dueBy = new Map<NimbusTask, Date | null>();
   const valid = (x: unknown): x is Date => x instanceof Date && !isNaN(x.getTime());
   return (a, task) => {

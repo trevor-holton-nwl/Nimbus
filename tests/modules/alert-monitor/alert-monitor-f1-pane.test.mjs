@@ -116,39 +116,39 @@ test('Day details opens the existing cell briefing for that machine and day', ()
   assert.deepEqual(log, [['cell', 'M4', D2]]);
 });
 
-test('several orders in view: Open in Orders appears, selects every order number and switches to the Orders sub-tab; one order: no such button', () => {
+test('several orders in view: Open in Orders appears, filters the Orders table to every order number and switches to the Orders sub-tab; one order: no such button', () => {
   setup(ALERTS(), [task('T-a1', { ORDER: '1001' }), task('T-a2', { ORDER: '1002', MACHINE: 'M2' })]);
-  els['tbl-flt-pomat-textarea'] = makeEl('ta');
   globalThis.NIMBUS = {
-    Table: { _onPoMatApply: () => log.push(['apply', els['tbl-flt-pomat-textarea'].value]) },
+    Table: { filterToOrders: orders => { log.push(['filter', orders]); return true; } },
     App: { goto: t => log.push(['goto', t]), gotoGanttSub: t => log.push(['sub', t]) },
   };
   AlertMonitorPane.render();
   clickRowh('wc:A');
   assert.match(side(), /data-am-action="open-orders"[^>]*>am\.open_in_orders</);
   clickAm('open-orders');
-  assert.deepEqual(log, [['apply', '1001\n1002'], ['goto', 'gantt'], ['sub', 'orders']]);
+  assert.deepEqual(log, [['filter', ['1001', '1002']], ['goto', 'gantt'], ['sub', 'orders']]);
   clickRowh('wc:A');   // toggle off
   clickRowh('M2');
   assert.doesNotMatch(side(), /open-orders/, 'one placed order: Show on Gantt only');
   assert.match(side(), /data-am-action="show-gantt"/);
 });
 
-test('Open in Orders uses Table.filterToOrders when the table has it: no private textarea, then the Orders sub-tab', () => {
+test('Open in Orders: a table without filterToOrders toasts am.table_unavailable and stays on the page (no private-DOM fallback)', () => {
   setup(ALERTS(), [task('T-a1', { ORDER: '1001' }), task('T-a2', { ORDER: '1002', MACHINE: 'M2' })]);
-  els['tbl-flt-pomat-textarea'] = makeEl('ta');
+  const toasts = [];
+  const priorToast = Toast.show;
+  Toast.show = (msg, type) => { toasts.push([msg, type]); };
   globalThis.NIMBUS = {
-    Table: {
-      filterToOrders: orders => { log.push(['filter', orders]); return true; },
-      _onPoMatApply: () => log.push(['apply']),
-    },
+    Table: { _onPoMatApply: () => log.push(['apply']) },
     App: { goto: t => log.push(['goto', t]), gotoGanttSub: t => log.push(['sub', t]) },
   };
-  AlertMonitorPane.render();
-  clickRowh('wc:A');
-  clickAm('open-orders');
-  assert.deepEqual(log, [['filter', ['1001', '1002']], ['goto', 'gantt'], ['sub', 'orders']]);
-  assert.equal(els['tbl-flt-pomat-textarea'].value, '', 'the old private-DOM path is not used');
+  try {
+    AlertMonitorPane.render();
+    clickRowh('wc:A');
+    clickAm('open-orders');
+  } finally { Toast.show = priorToast; }
+  assert.deepEqual(log, []);
+  assert.deepEqual(toasts, [['am.table_unavailable', 'warn']]);
 });
 
 test('Open in Orders: filterToOrders returning false toasts am.table_unavailable and stays on the page', () => {

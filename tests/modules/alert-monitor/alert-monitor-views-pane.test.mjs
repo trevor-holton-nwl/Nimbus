@@ -484,7 +484,7 @@ test('the order number of an alert falls back to PRODUCTION_ORDER when ORDER is 
   Store.setTasks([{ id: 'T-a1', ORDER: '  ', PRODUCTION_ORDER: 'PO-77', MACHINE: 'M1' }, { id: 'T-a2', ORDER: 'PO-77', MACHINE: 'M1' }], 'test');
   setup(ALERTS());
   const applied = [];
-  globalThis.NIMBUS = { Table: { _onPoMatApply: () => applied.push(els['tbl-flt-pomat-textarea'].value) }, App: {} };
+  globalThis.NIMBUS = { Table: { filterToOrders: orders => { applied.push(orders.join(',')); return true; } }, App: {} };
   AlertMonitorPane.render();
   clickRowh('M1');
   clickAm('open-orders');

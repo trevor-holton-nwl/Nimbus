@@ -43,8 +43,6 @@ export interface SummaryInput {
   profileId: string;
   profileName: string;
   profile: AlertProfile | null | undefined;
-  /** Retired with the list focus (W6b): the line has no focus variant any more. The pane still passes null; drop it there. */
-  focus?: null;
   /** Lines picked in the global machine filter (read-only clause "N lines selected"); absent or 0 = none. */
   linesSelected?: number;
 }
@@ -399,6 +397,8 @@ export interface LevCtx {
   alertsById?: ReadonlyMap<string, { type: string }>;
   /** A YYYY-MM-DD day key in the user's date format (the pane passes the date-preference formatter). Absent: the key itself. */
   fmtDay?: (dayKey: string) => string;
+  /** A decimal in the user's language (the pane passes an `Intl.NumberFormat` one: "6,5" in de/es/fr/pt). Absent: `fmtNum`'s "6.5". */
+  fmtNum?: (n: number) => string;
 }
 
 export interface LevAction {
@@ -550,16 +550,16 @@ function _windowOverNoRoom(item: LeverageItem): boolean {
 
 /** The capacity clause and its consequence for an optimize window. Decided per day, not by the net sum: over (some day is
  *  overloaded by the shared rule), free (hours left, no overloaded day), or full (neither). Never prints a zero quantity. */
-function _windowCapacityParts(item: LeverageItem, t: Translate): string[] {
+function _windowCapacityParts(item: LeverageItem, t: Translate, fmt: (n: number) => string = fmtNum): string[] {
   const h = item.headroomHours;
   if (h == null) return [];
   const overDays = item.overloadDays ?? 0;
   if (overDays > 0) {
-    const clause = _plural(overDays, 'am.lev_over_window', { h: fmtNum(item.overHours ?? 0), days: overDays }, t);
+    const clause = _plural(overDays, 'am.lev_over_window', { h: fmt(item.overHours ?? 0), days: overDays }, t);
     const free = _freeHours(item);
-    return [clause, free > 0 ? t('am.lev_over_room', { h: fmtNum(free) }) : t('am.lev_over_note')];
+    return [clause, free > 0 ? t('am.lev_over_room', { h: fmt(free) }) : t('am.lev_over_note')];
   }
-  if (h > 0) return [t('am.lev_headroom', { h: fmtNum(h) })];
+  if (h > 0) return [t('am.lev_headroom', { h: fmt(h) })];
   const days = _windowDays(item);
   const all = days > 0 && item.fullDays === days;
   const clause = !all ? t('am.lev_full_window_some') : _plural(days, 'am.lev_full_window', { days }, t);
@@ -607,7 +607,7 @@ export function fixLineParts(item: LeverageItem, ctx: LevCtx, t: Translate): str
     const delta = d < 0 ? ` <span class="am-fix-down">${_esc(`−${Math.abs(d)}`)}</span>` : '';
     parts.push(`<span class="am-fix-conf">${_esc(t('am.fix_conf', { before: item.confidenceBefore, after }))}</span>${delta}`);
   }
-  if (item.family === 'optimize-window') for (const p of _windowCapacityParts(item, t)) parts.push(_esc(p));
+  if (item.family === 'optimize-window') for (const p of _windowCapacityParts(item, t, ctx.fmtNum)) parts.push(_esc(p));
   if (ctx.inView != null) parts.push(_esc(t('am.lev_in_view', { n: ctx.inView })));
   if (ctx.remaining > 0) parts.push(`<span class="am-fix-left">${_esc(_plural(ctx.remaining, 'am.lev_remaining', { n: ctx.remaining }, t))}</span>`);
   return parts;

@@ -47,7 +47,7 @@ import {
 } from './alert-monitor-model.mjs';
 import type { MonitorView, MonitorFilter, MonitorCtx, EmptyKind, LevCtx, FilterDim, RowDetailCtx } from './alert-monitor-model.mjs';
 import { matrixModel, matrixHtml, cellFilter, rowFilter, colFilter, filterMatches, clearDims } from './alert-monitor-matrix.mjs';
-import { horizonDays, horizonDayKeys, _memoAnchor } from './alert-monitor-overview.mjs';
+import { horizonDays, horizonDayKeys, _memoAnchor, OVERDUE_KEY, LATER_KEY, NONE_KEY } from './alert-monitor-overview.mjs';
 
 const t = (key: string, vars?: Record<string, string | number>): string => Util.t(key, vars);
 const esc = (s: unknown): string => Util.escapeHtml(String(s ?? ''));
@@ -87,7 +87,7 @@ interface Derived {
 /** The ambient `NIMBUS` members this pane reaches (the classic-script bridge; never a real import). */
 interface AmNimbus {
   AlertsUIAdapter?: { focus?(id: string): void; showForCell?(line: string, dayKey: string): void };
-  Table?: { _openOverrideModalForId?(id: string): void; _onPoMatApply?(): void; filterToOrders?(orders: string[]): boolean };
+  Table?: { _openOverrideModalForId?(id: string): void; filterToOrders?(orders: string[]): boolean };
   App?: { gotoGanttSub?(sub: string): void; goto?(tab: string): void; gotoMasterSub?(sub: string): void };
   Timeline?: { gotoLineDay?(line: string, dateStr: string): void };
   OptimizerPreview?: { active?: boolean };
@@ -115,7 +115,11 @@ let _filter: MonitorFilter = emptyFilter();
 let _openRow: string | null = null;           // the one Inbox row whose detail is open
 let _sort: 'impact' | 'time' = 'impact';      // the Inbox toolbar's Priority / Date sort
 let _facetQ = '';                              // the machine facet's search box
-const _collapsed = new Set<string>();         // `${lens}|${group}`: machine-lens groups the user folded
+const _collapsed = new Set<string>();         // _foldKey(lens, group): machine-lens groups the user folded
+const _foldKey = (lens: string, group: string): string => `${lens}|${group}`;
+const _MACHINE_FOLD_PREFIX = _foldKey('machine', '');
+/** The machine-lens group ids the user folded (the Matrix model's `collapsed`), recovered from the fold keys. */
+const _machineCollapsed = (): Set<string> => new Set([..._collapsed].filter(k => k.startsWith(_MACHINE_FOLD_PREFIX)).map(k => k.slice(_MACHINE_FOLD_PREFIX.length)));
 const _quietOpen = new Set<string>();         // work-center groups whose quiet machines are shown
 let _lastPlant: string | null | undefined;
 let _vl: VirtualList<NimbusAlert> | null = null;   // the Inbox list
@@ -505,7 +509,7 @@ function _onClick(e: Event): void {
   const caret = q('.am-mx-caret');
   if (caret) {
     const g = caret.getAttribute?.('data-am-group') ?? caret.dataset?.amGroup ?? '';
-    const k = `${lens}|${g}`;
+    const k = _foldKey(lens, g);
     if (_collapsed.has(k)) _collapsed.delete(k); else _collapsed.add(k);
     _paint();
     _refocusWhere('.am-mx-caret', el => el.getAttribute('data-am-group') === g);
@@ -726,19 +730,8 @@ function _openOrdersInTable(orderIds: Iterable<string>): void {
     if (no) nums.add(no);
   }
   const nim = _nim();
-  if (typeof nim.Table?.filterToOrders === 'function') {
-    // The Orders table owns its filters: it clears the others, then filters to these orders (false: the table is not there).
-    if (!nums.size || !nim.Table.filterToOrders([...nums])) { Toast.show(t('am.table_unavailable'), 'warn'); return; }
-  } else {
-    // A table without filterToOrders: fill the PO/material box and apply it.
-    const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
-    if (!nums.size || !ta || typeof nim.Table?._onPoMatApply !== 'function') {
-      Toast.show(t('am.table_unavailable'), 'warn');
-      return;
-    }
-    ta.value = [...nums].join('\n');
-    nim.Table._onPoMatApply();
-  }
+  // The Orders table owns its filters: it clears the others, then filters to these orders (false, or no table: stay here).
+  if (!nums.size || !nim.Table?.filterToOrders?.([...nums])) { Toast.show(t('am.table_unavailable'), 'warn'); return; }
   nim.App?.goto?.('gantt');
   nim.App?.gotoGanttSub?.('orders');
 }
@@ -846,7 +839,7 @@ const _orderNoOf = (a: NimbusAlert): string => {
 
 /** The filter's context: the day columns, the due anchor memo, the plant's machines with their work-center group, and the search text sources. */
 function _ctxFor(s: PaintState): MonitorCtx {
-  const anchor = _memoAnchor({ tasksById: Store.tasks, plantToday: s.plantToday, horizonMinutes: s.horizonMinutes, window: profileWindow(s.m.profile) });
+  const anchor = _memoAnchor({});
   const lines = s.plant ? Store.masterLinesForPlant(s.plant) : [];
   return {
     plantToday: s.plantToday,
@@ -1089,6 +1082,20 @@ function _fmtDayKey(day: string): string {
   return Util.fmtIsoDatePref(day);
 }
 
+/** Decimal numbers (the fix rows' hours) in the page language, one decimal at most like `fmtNum`: one formatter per language. */
+const _numFmt = new Map<string, Intl.NumberFormat>();
+function _fmtNumLocal(n: number): string {
+  const lang = Util.locale?.() || 'en';
+  let f = _numFmt.get(lang);
+  if (!f) {
+    const opts = { maximumFractionDigits: 1, useGrouping: false };
+    try { f = new Intl.NumberFormat(lang, opts); }
+    catch { f = new Intl.NumberFormat('en', opts); }
+    _numFmt.set(lang, f);
+  }
+  return f.format(n);
+}
+
 function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
   const remaining = _levAttempted.size ? item.alertIds.filter(id => _levAttempted.has(id)).length : 0;
   return {
@@ -1100,6 +1107,7 @@ function _levCtxFor(item: LeverageItem, plant: string): LevCtx {
     fieldLabel: _levFieldLabel,
     alertsById: _alertsById(),
     fmtDay: _fmtDayKey,
+    fmtNum: _fmtNumLocal,
   };
 }
 
@@ -1453,11 +1461,11 @@ function _fmtDay(d: Date): string {
 const _dayFmt = new Map<string, Intl.DateTimeFormat>();
 const _noonOf = (k: string): Date => new Date(`${k}T12:00:00`);
 
-/** A day bucket's label: `overdue` / `later` / `none` or a day key. */
+/** A day bucket's label: `OVERDUE_KEY` / `LATER_KEY` / `NONE_KEY` or a day key. */
 function _dayLabel(key: string): string {
-  if (key === 'overdue') return t('am.bucket_overdue');
-  if (key === 'later') return t('am.bucket_later');
-  if (key === 'none') return t('am.bucket_none');
+  if (key === OVERDUE_KEY) return t('am.bucket_overdue');
+  if (key === LATER_KEY) return t('am.bucket_later');
+  if (key === NONE_KEY) return t('am.bucket_none');
   return _fmtDay(_noonOf(key));
 }
 
@@ -1619,7 +1627,7 @@ function _renderMatrix(s: PaintState, d: Derived): void {
     ...d.ctx,
     pinned: new Set((Store.pref('pinnedLines') as string[] | undefined) ?? []),
     categoryOrder: cats,
-    collapsed: new Set([..._collapsed].filter(k => k.startsWith('machine|')).map(k => k.slice(8))),
+    collapsed: _machineCollapsed(),
     quietOpen: _quietOpen,
     labels: {
       day: _dayLabel, category: c => t(`ape.cat_${c}`), ungrouped: t('am.ungrouped'), noMachine: t('am.group_unassigned'),
@@ -1698,7 +1706,7 @@ function _facetsHtml(s: PaintState, d: Derived): string {
   let where = wcKeys.map(k => _facetItem('wcGroups', k, k === UNGROUPED_KEY ? t('am.ungrouped') : k, wc.get(k)?.n ?? 0, wc.get(k)?.err ?? 0, wcMax, f.wcGroups.has(k))).join('');
   if (f.wcGroups.size === 1) {
     const g = [...f.wcGroups][0]!;
-    const mc = _facetCounts(s, d, ['machines'], a => a.line || 'none');
+    const mc = _facetCounts(s, d, ['machines'], a => a.line || NONE_KEY);
     let keys = [...mc.keys()].filter(k => (d.wcByLine.get(k) ?? UNGROUPED_KEY) === g);
     keys = [...new Set([...keys, ...f.machines])].sort((a, b) => (mc.get(b)?.n ?? 0) - (mc.get(a)?.n ?? 0) || (a < b ? -1 : 1));
     const boxShown = keys.length > FACET_SEARCH_ABOVE;
@@ -1708,10 +1716,10 @@ function _facetsHtml(s: PaintState, d: Derived): string {
     where += `<div class="am-facet-sub">`
       + (boxShown
         ? `<input type="search" class="input am-facet-q" id="am-facet-q" data-am-facet-q autocomplete="off" value="${esc(_facetQ)}" placeholder="${esc(t('am.facet_search_ph'))}" aria-label="${esc(t('am.facet_search_ph'))}">` : '')
-      + shown.map(k => _facetItem('machines', k, k === 'none' ? t('am.group_unassigned') : k, mc.get(k)?.n ?? 0, mc.get(k)?.err ?? 0, mMax, f.machines.has(k))).join('')
+      + shown.map(k => _facetItem('machines', k, k === NONE_KEY ? t('am.group_unassigned') : k, mc.get(k)?.n ?? 0, mc.get(k)?.err ?? 0, mMax, f.machines.has(k))).join('')
       + `</div>`;
   }
-  const dayKeys = ['overdue', ...horizonDayKeys(s.plantToday, d.ctx.horizonDays), 'later', 'none'];
+  const dayKeys = [OVERDUE_KEY, ...horizonDayKeys(s.plantToday, d.ctx.horizonDays), LATER_KEY, NONE_KEY];
   const day = _facetCounts(s, d, ['days'], a => d.bucketOf(a));
   const dMax = Math.max(0, ...[...day.values()].map(c => c.n));
   const when = dayKeys.filter(k => (day.get(k)?.n ?? 0) > 0 || f.days.has(k))

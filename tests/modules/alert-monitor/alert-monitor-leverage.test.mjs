@@ -139,6 +139,16 @@ test('optimize-window with free hours: the free-hours clause is on the row, Opti
   assert.ok(!acts(it, ctx({ isAdmin: true })).includes('edit-plant-calendar'));
 });
 
+test('a ctx.fmtNum formatter is used for the capacity hours (de: "6,5"); without one the default stays "6.5"', () => {
+  const de = n => new Intl.NumberFormat('de', { maximumFractionDigits: 1 }).format(n);
+  assert.ok(plain(fixLineParts(optItem(), ctx({ fmtNum: de }), t).join(' · ')).includes('am.lev_headroom|{"h":"6,5"}'));
+  assert.ok(plain(fixLineParts(optItem(), ctx(), t).join(' · ')).includes('am.lev_headroom|{"h":"6.5"}'));
+  const over = optItem({ overloadDays: 1, overHours: 2.5, headroomHours: -2.5, freeHours: 1.5 });
+  const p = plain(fixLineParts(over, ctx({ fmtNum: de }), t).join(' · '));
+  assert.ok(p.includes('"h":"2,5"'), 'the over-window hours');
+  assert.ok(p.includes('am.lev_over_room|{"h":"1,5"}'), 'the room hours');
+});
+
 test('optimize-window exactly full: says at capacity on all days, the note, Optimize primary, Add hours for admin only', () => {
   const it = optItem({ headroomHours: 0, fullDays: 3, typeCounts: { late: 3 }, overloadDays: 0 });
   const p = plain(fixRowHtml(it, 1, ctx(), t));

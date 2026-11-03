@@ -77,7 +77,7 @@ test('the per-call due memo: one dueInstant call per task, same bins as the unme
     alert({ taskId: 't1', time: at(0) }), alert({ taskId: 't1', time: at(1) }), alert({ taskId: 't1', time: at(2) }),
     alert({ taskId: 'bad', time: at(1) }), alert({ taskId: 'bad', time: at(5) }),
   ];
-  const anchor = _memoAnchor({ tasksById, plantToday: TODAY, horizonMinutes: 14 * 1440, window: null, deps });
+  const anchor = _memoAnchor({ deps });
   const bucket = makeBucketer({ plantToday: TODAY, horizonDays: 14, anchorOf: a => anchor(a, tasksById[a.taskId]) });
   const keys = horizonDayKeys(TODAY, 14);
   const count = {};
@@ -90,7 +90,7 @@ test('the per-call due memo: one dueInstant call per task, same bins as the unme
 });
 
 test('the per-call due memo: no order or no due falls back to the own time; an invalid own time is no anchor', () => {
-  const anchor = _memoAnchor({ tasksById: {}, plantToday: TODAY, horizonMinutes: 1440, window: null, deps: dueDeps });
+  const anchor = _memoAnchor({ deps: dueDeps });
   const own = at(2);
   assert.equal(anchor(alert({ time: own }), undefined), own);
   assert.equal(anchor(alert({ taskId: 'T', time: own }), { original_end_date: null }), own);
