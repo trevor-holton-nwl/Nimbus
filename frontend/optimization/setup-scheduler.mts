@@ -4403,15 +4403,30 @@ function admittedStateUnrecordedReason(line: string, task: Readonly<NimbusTask>,
   };
 }
 
+/** P1-10: first-match (plant, machine) index per master-data lines array, built once.
+ * The snapshot is read-only for a run, so the array is never mutated afterwards. */
+const MASTER_LINE_INDEX = new WeakMap<object, Map<string, NimbusMasterData['lines'][number]>>();
+function masterLineLookup(lines: NimbusMasterData['lines'] | undefined): Map<string, NimbusMasterData['lines'][number]> | null {
+  if (!lines) return null;
+  let index = MASTER_LINE_INDEX.get(lines);
+  if (!index) {
+    index = new Map();
+    for (const row of lines) {
+      const key = `${row.plant} ${row.machine}`;
+      if (!index.has(key)) index.set(key, row);
+    }
+    MASTER_LINE_INDEX.set(lines, index);
+  }
+  return index;
+}
+
 /** Compatibility is snapshot-owned setup truth. An absent field intentionally
  * retains the legacy compatible behavior so older cached master-data payloads
  * cannot silently exclude a line. */
 function setupCompatibilityForLine(
   snapshot: Readonly<ScheduleSnapshot>, plant: string, line: string,
 ): { reason: string | null } | null {
-  const masterLine = snapshot.masterData?.lines.find(candidate => (
-    candidate.plant === plant && candidate.machine === line
-  ));
+  const masterLine = masterLineLookup(snapshot.masterData?.lines)?.get(`${plant} ${line}`);
   if (masterLine?.setup_compatible !== false) return null;
   return { reason: masterLine.setup_compatibility_reason ?? null };
 }
@@ -7794,6 +7809,9 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     dispositions.set(disposition.id, disposition);
   }
   const occupied = new Map<string, { interval: PlacementInterval; task: NimbusTask; protectedTask: boolean }[]>();
+  // P1-10: plant-constant reads hoisted out of the per-task loop.
+  const plantSplitPolicy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+  const plantSegmentFloor = minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
   for (const task of occupancyTasks) {
     const boundaryOnly = boundaryIds.has(taskId(task)) && !ids.has(taskId(task));
     const protectedTask = taskIsFirmed(snapshot, task) || boundaryOnly;
@@ -7838,11 +7856,11 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
     if (!protectedTask && bounds.finishFloor && end < bounds.finishFloor) add('date_window', 'Production finishes inside the frozen horizon.', task, protectedTask);
     const minutes = intervals.reduce((sum, i) => sum + (+i.end - +i.start) / 60000, 0);
     if (Math.abs(minutes - Math.round(Number(task.RUN_TIME) * 60)) > 0.001) add('runtime', 'Productive duration does not match runtime.', task, protectedTask);
-    const policy = splitOrderPolicyForSnapshot(snapshot, bounds.setup.plant);
+    const policy = plantSplitPolicy;
     // The overlong decision is made from the placement origin (as `neverOverlongReason` and the placement walk do),
     // not from each order's own start, so a split placed under that decision is not flagged here.
     if (intervals.length > 1 && (policy === 'never' || (policy === 'overlong_only' && hasNominalWindow(snapshot, String(task.MACHINE), bounds.setup.plant, bounds.placementStart ?? bounds.now, Math.round(Number(task.RUN_TIME) * 60), bounds.runContext)))) add('split_policy', 'Order splitting violates plant policy.', task, protectedTask);
-    const minimum = minProductiveSegmentMinutesForSnapshot(snapshot, bounds.setup.plant);
+    const minimum = plantSegmentFloor;
     for (let index = 0; index < intervals.length; index++) {
       const interval = intervals[index];
       if (index && intervals[index - 1].end > interval.start) add('segments', 'Productive segments overlap or are out of order.', task, protectedTask);
@@ -8073,6 +8091,8 @@ function checkDistributionSeparation(
   patches: ReadonlyArray<SchedulePatch>,
   snapshot: Readonly<ScheduleSnapshot>,
 ): ValidationFinding[] {
+  // P1-10: only a workcenter with a real max_separation can produce a finding.
+  if (!(snapshot.masterData?.workcenters ?? []).some(workcenter => workcenter.max_separation && workcenter.max_separation !== 'none')) return [];
   const finalTasks = patchedTasksView(snapshot.tasks, patches);
 
   const machineToWorkcenter = new Map<string, string>();
@@ -8237,12 +8257,18 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
     ))
     : [];
   const unknownStateIds = new Set(opaqueTasks.map(taskId));
+  // P1-10: group the ordered rows by line once (Map insertion order equals the old first-occurrence Set order).
+  const orderedFinalByLine = new Map<string, NimbusTask[]>();
+  for (const task of orderedFinal) {
+    const key = String(task.MACHINE);
+    const bucket = orderedFinalByLine.get(key);
+    if (bucket) bucket.push(task); else orderedFinalByLine.set(key, [task]);
+  }
   const missingFindingIds = new Set((result.validationFindings ?? [])
     .filter(finding => finding.code === 'missing_setup' && finding.taskId)
     .map(finding => finding.taskId!));
   const edgeReasons = new Map<string, 'successor-state-unknown' | 'scheduled-without-setup' | 'initial-state-unknown'>();
-  for (const line of new Set(orderedFinal.map(task => String(task.MACHINE)))) {
-    const lineTasks = orderedFinal.filter(task => String(task.MACHINE) === line);
+  for (const [line, lineTasks] of orderedFinalByLine) {
     let previousState = definition ? initialStateForLine(bounds, line, definition.signature_version).state : null;
     let previousUnknown = false;
     for (const task of lineTasks) {
@@ -8262,9 +8288,11 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   });
   const knownUncovered = actualMissing.filter(edge => edge.reason === 'scheduled-without-setup');
   const unknownEdges = actualMissing.length - knownUncovered.length;
+  const tailExplained = new Set(explanations.filter(reason => reason.code === 'unknown-setup-tail-placement').map(reason => reason.taskId));
   for (const task of orderedFinal) {
     if (!unknownStateIds.has(taskId(task))) continue;
-    if (!explanations.some(reason => reason.code === 'unknown-setup-tail-placement' && reason.taskId === taskId(task))) {
+    if (!tailExplained.has(taskId(task))) {
+      tailExplained.add(taskId(task));
       explanations.push({
         code: 'unknown-setup-tail-placement',
         message: `Placed ${taskId(task)} after the known setup sequence because its signature is unresolved.`,
@@ -8284,7 +8312,7 @@ function refreshFinalMetrics(snapshot: Readonly<ScheduleSnapshot>, bounds: Reado
   ]);
   const objective = objectiveFactsForCandidate(snapshot, bounds, { ...result, missingEdges: finalMissingEdges });
   score[0] = objective.hardErrors;
-  score[1] = [...new Set(orderedFinal.map(task => String(task.MACHINE)))].reduce((sum, line) => sum + policyScore(snapshot, bounds.setup.plant, line, orderedFinal.filter(task => String(task.MACHINE) === line), bounds.runContext), 0);
+  score[1] = [...orderedFinalByLine].reduce((sum, [line, lineTasks]) => sum + policyScore(snapshot, bounds.setup.plant, line, lineTasks, bounds.runContext), 0);
   score[2] = objective.lateCount;
   score[3] = objective.latenessMinutes;
   score[4] = -objective.scheduledCount;
