@@ -227,3 +227,14 @@ test('empty input still builds a model and HTML', () => {
   assert.ok(m.groups.every(g => g.rows.length === 0 && g.quiet.length === g.machineCount));
   assert.ok(matrixHtml(m, emptyFilter(), t).includes('am-mx-table'));
 });
+
+test('machine rows and groups sort by natural name order (L1, L2, L10), case-insensitively, and the day lens does too', () => {
+  const ms = ['L10', 'L2', 'L1', 'l3'].map(id => ({ id, wc_group: 'G10' })).concat(['G2', 'G1'].map(g => ({ id: 'X' + g, wc_group: g })));
+  const c = ctx({ machines: ms });
+  const m = matrixModel([], 'machine', c);
+  assert.deepEqual(m.groups.map(g => g.key), ['G1', 'G2', 'G10'], 'groups with nothing to say sort by natural name');
+  assert.deepEqual(m.groups.find(g => g.key === 'G10').quiet.map(r => r.head.key), ['L1', 'L2', 'l3', 'L10']);
+  const noisy = ['L10', 'L2', 'L1'].map(l => al(l, 'warn', 'late', at(0)));
+  assert.deepEqual(matrixModel(noisy, 'machine', c).groups.find(g => g.key === 'G10').rows.map(r => r.head.key), ['L1', 'L2', 'L10'], 'equal severity and count: natural name order');
+  assert.deepEqual(matrixModel([], 'day', c).columns.map(col => col.key), ['G1', 'G2', 'G10']);
+});

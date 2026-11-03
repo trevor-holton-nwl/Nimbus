@@ -10,6 +10,7 @@ import {
   FIXABLE_ALERT_TYPES, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES,
   anchorTime, alertDayOffset, ruleMatches, profileMatches, filterByProfile,
   impactPoints, compareAlerts, groupAlerts, validateProfile, resolveActiveProfileId,
+  movableAlertTypes, ruleAppliesTo, DAY_BOUND, MAX_NAME_LEN,
 } from '../../../frontend/insights/alert-profiles.mjs';
 
 const require = createRequire(import.meta.url);
@@ -373,6 +374,75 @@ test('compareAlerts orders: affected-order count desc (1 + peer), then anchor', 
     alert({ id: 'pair-soon', peerId: 't8', time: at(2) }),
   ];
   assert.deepEqual(sorted('orders', alerts), ['pair-soon', 'pair-late', 'single-soon']);
+});
+
+// The pre-memo comparator, verbatim: the oracle the memoised one must reproduce on every ranking.
+function legacyCompare(ranking, rc) {
+  const anchorKey = a => { const task = a.taskId ? rc.tasksById?.[a.taskId] : undefined; const x = anchorTime(a, task, rc.deps); return x ? x.getTime() : Infinity; };
+  const num = (a, b) => (a === b ? 0 : a < b ? -1 : 1);
+  const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const byAnchor = (a, b) => num(anchorKey(a), anchorKey(b));
+  const pts = a => impactPoints(a, rc.horizonStart, rc.horizonMinutes);
+  const nOrders = a => new Set([a.taskId, ...(a.peerIds ?? [a.peerId])].filter(x => x != null && x !== '')).size;
+  switch (ranking) {
+    case 'time': return (a, b) => byAnchor(a, b) || byId(a, b);
+    case 'severity': return (a, b) => num(a.sev === 'err' ? 0 : 1, b.sev === 'err' ? 0 : 1) || byAnchor(a, b) || byId(a, b);
+    case 'orders': return (a, b) => num(nOrders(b), nOrders(a)) || byAnchor(a, b) || byId(a, b);
+    default: return (a, b) => num(pts(b), pts(a)) || byAnchor(a, b) || byId(a, b);
+  }
+}
+
+const rankFixture = () => {
+  const out = [];
+  for (let i = 0; i < 40; i++) {
+    out.push(alert({
+      id: 'r' + String(i * 7 % 40).padStart(2, '0'), sev: i % 3 ? 'warn' : 'err', time: i % 9 === 0 ? undefined : at(i % 14, i % 24),
+      taskId: i % 5 === 0 ? 't' + (i % 4) : undefined, peerId: i % 6 === 0 ? 'p' + i : undefined,
+    }));
+  }
+  return out;
+};
+
+test('compareAlerts: the memoised comparators order every ranking exactly like the per-comparison ones', () => {
+  const tasksById = { t0: { id: 't0', original_end_date: at(30), due: at(30) }, t1: { id: 't1', original_end_date: at(2), due: at(2) } };
+  for (const ranking of ['impact', 'time', 'severity', 'orders']) {
+    const c = ctx({ tasksById });
+    const alerts = rankFixture();
+    const got = [...alerts].sort(compareAlerts(ranking, c)).map(a => a.id);
+    const want = [...alerts].sort(legacyCompare(ranking, c)).map(a => a.id);
+    assert.deepEqual(got, want, ranking);
+  }
+});
+
+test('compareAlerts: each sort key is computed once per alert per comparator, not once per comparison', () => {
+  const calls = new Map();
+  const tasksById = {};
+  const alerts = rankFixture().map((a, i) => { const id = 'k' + i; tasksById[id] = { id, original_end_date: at(i % 10), due: at(i % 10) }; return { ...a, id, taskId: id }; });
+  const counting = { dueInstant: t => { calls.set(t.id, (calls.get(t.id) ?? 0) + 1); return t.due; }, latenessHours: () => 0 };
+  const cmp = compareAlerts('time', ctx({ tasksById, deps: counting }));
+  [...alerts].sort(cmp);
+  [...alerts].sort(cmp);   // a second pass on the same comparator hits the cache too
+  assert.equal(calls.size, alerts.length);
+  for (const [id, n] of calls) assert.equal(n, 1, 'anchor of ' + id + ' computed once');
+  // The impact key is cached the same way: a throwing getter on a repeat read would show a second computation.
+  let reads = 0;
+  const probe = alerts.slice(0, 12).map(a => { const o = { ...a }; Object.defineProperty(o, 'sev', { get() { reads++; return 'warn'; }, enumerable: true }); return o; });
+  const impact = compareAlerts('impact', ctx());
+  probe.sort(impact);
+  const afterFirst = reads;
+  probe.sort(impact);
+  assert.ok(afterFirst > 0 && afterFirst <= 2 * probe.length, 'the first sort read each alert a bounded number of times, not once per comparison');
+  assert.equal(reads, afterFirst, 'the second sort read no alert again: impact keys came from the cache');
+});
+
+test('movableAlertTypes is the fixable set minus overload; the rule helpers take a bare types list', () => {
+  assert.deepEqual([...movableAlertTypes()].sort(), ['blackout', 'overlap', 'tool-conflict']);
+  assert.ok(!movableAlertTypes().has('overload') && FIXABLE_ALERT_TYPES.has('overload'));
+  assert.equal(ruleAppliesTo({ types: ['overlap'] }, 'conflicts'), true);
+  assert.equal(ruleAppliesTo({ types: ['late'] }, 'conflicts'), false);
+  assert.equal(ruleAppliesTo({ types: null }, 'late'), true);
+  assert.equal(DAY_BOUND, 365);
+  assert.equal(MAX_NAME_LEN, 60);
 });
 
 // ---- grouping -------------------------------------------------------------------------------

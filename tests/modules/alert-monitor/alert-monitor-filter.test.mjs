@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  viewFor, DEFAULT_VIEW, emptyFilter, filterIsEmpty, filterChips, wcGroupOf, UNGROUPED_KEY, dayBucketOf, makeBucketer, filterAlerts,
+  viewFor, DEFAULT_VIEW, emptyFilter, filterIsEmpty, filterChips, buildWcByLine, GROUP_ROW_PREFIX, UNGROUPED_KEY, dayBucketOf, makeBucketer, filterAlerts,
   materialOf, tagOf, rowHtml, rowDetailHtml, fixesInView, summaryLine,
 } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
 import { overviewData, dayBucketKey, horizonDayKeys } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
@@ -55,12 +55,14 @@ test('emptyFilter / filterIsEmpty / filterChips', () => {
   ]);
 });
 
-test('wcGroupOf: wc_group of the master line; blank, unknown and no line are the Ungrouped bucket', () => {
-  assert.equal(wcGroupOf('M1', machines), 'A');
-  assert.equal(wcGroupOf('M4', machines), UNGROUPED_KEY);
-  assert.equal(wcGroupOf('ZZ', machines), UNGROUPED_KEY);
-  assert.equal(wcGroupOf(undefined, machines), UNGROUPED_KEY);
-  assert.equal(wcGroupOf('M3', [{ machine: 'M3', wc_group: 'Z' }]), 'Z', 'master lines name the id `machine`');
+test('buildWcByLine: line id to wc_group; a blank group is the Ungrouped bucket, a missing line is absent', () => {
+  const m = buildWcByLine(machines);
+  assert.equal(m.get('M1'), 'A');
+  assert.equal(m.get('M4'), UNGROUPED_KEY);
+  assert.equal(m.has('ZZ'), false, 'the caller reads an absent line as Ungrouped');
+  assert.equal(buildWcByLine([{ machine: 'M3', wc_group: 'Z' }]).get('M3'), 'Z', 'master lines name the id `machine`');
+  assert.equal(buildWcByLine([{ wc_group: 'Z' }]).size, 0, 'an entry with no id is skipped');
+  assert.equal(GROUP_ROW_PREFIX, 'wc:');
 });
 
 test('dayBucketOf: overdue, a day key, later, none; the same rule as overviewData', () => {
@@ -209,7 +211,7 @@ test('fixesInView keeps an item when any alert is in view, preserves rank order 
 // ---- summary line --------------------------------------------------------------------------
 
 const sumIn = o => ({
-  hasPlant: true, alerts: [al('M1', 'overlap', at(0), { sev: 'err', taskId: 'T1' })], profileId: '__all__', profileName: 'All', profile: null, focus: null, ...o,
+  hasPlant: true, alerts: [al('M1', 'overlap', at(0), { sev: 'err', taskId: 'T1' })], profileId: '__all__', profileName: 'All', profile: null, ...o,
 });
 
 test("filterAlerts: a 'none' machine click keeps the alerts the matrix files under no-machine (wc:-prefixed line included)", () => {
@@ -224,4 +226,19 @@ test('summaryLine: lead, errors and warnings only; no orders, machines or "showi
   const s = summaryLine(sumIn(), t);
   assert.equal(s.text, 'am.summary_all_one|n=1 · am.summary_errors_one|e=1');
   assert.doesNotMatch(s.text, /orders|machines|showing/);
+});
+
+test('filterAlerts: the search text is built once per alert per ctx, however many passes share the ctx', () => {
+  let tagCalls = 0, matCalls = 0;
+  const ctx = { ...base(), tagOf: a => { tagCalls++; return a.type; }, materialOf: () => { matCalls++; return 'Widget'; } };
+  const alerts = [al('M1', 'late', at(0)), al('M2', 'overlap', at(0)), al('M3', 'late', at(1))];
+  const q = mk({ q: 'late' });
+  assert.deepEqual(filterAlerts(alerts, q, ctx).map(a => a.id), [alerts[0].id, alerts[2].id]);
+  assert.deepEqual(filterAlerts(alerts, mk({ q: 'WIDGET' }), ctx).length, 3, 'a second query reuses the cached text and still matches case-insensitively');
+  assert.deepEqual(filterAlerts(alerts.slice(0, 2), q, ctx).map(a => a.id), [alerts[0].id]);
+  assert.equal(tagCalls, alerts.length, 'tagOf ran once per alert');
+  assert.equal(matCalls, alerts.length, 'materialOf ran once per alert');
+  // A fresh ctx (the pane's next paint) rebuilds, so a changed source is seen.
+  const fresh = { ...ctx, tagOf: () => 'zzz' };
+  assert.deepEqual(filterAlerts(alerts, mk({ q: 'zzz' }), fresh).length, 3);
 });

@@ -57,16 +57,15 @@ const ts = (k, v) => (SUM[k] ?? k).replace(/\{\{(\w+)\}\}/g, (_, n) => String(v?
 const al = (id, sev, taskId, peerId) => ({ id, sev, type: 'overlap', taskId, peerId });
 const sumIn = (o = {}) => ({
   hasPlant: true, alerts: [], profileId: 'p1', profileName: 'Overlaps',
-  profile: prof([rule({ dayFrom: 8, dayTo: 30 })]), focus: null, confidence: 71, ...o,
+  profile: prof([rule({ dayFrom: 8, dayTo: 30 })]), confidence: 71, ...o,
 });
 
-test('summaryLine: the lead is the window, profile, all-alerts or focus variant', () => {
+test('summaryLine: the lead is the window, profile or all-alerts variant (the retired focus input is ignored)', () => {
   const alerts = [al('a', 'err', '1')];
   assert.equal(summaryLine(sumIn({ alerts }), ts).text, '1 alert in D8–30 matches Overlaps · 1 error');
   assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: 8, dayTo: null })]) }), ts).text, /^1 alert matches Overlaps · /);
   assert.match(summaryLine(sumIn({ alerts, profileId: '__all__', profile: ALL_ALERTS_PROFILE }), ts).text, /^1 alert at this plant · /);
-  assert.match(summaryLine(sumIn({ alerts, focus: { title: 'Setup pair', outside: 0 } }), ts).text, /^Showing 1 alerts for: Setup pair · /);
-  assert.match(summaryLine(sumIn({ alerts, focus: { title: 'Setup pair', outside: 2 } }), ts).text, /^Showing 1 alerts for: Setup pair \(2 outside your profile\) · /);
+  assert.equal(summaryLine(sumIn({ alerts, focus: null }), ts).text, summaryLine(sumIn({ alerts }), ts).text);
   assert.match(summaryLine(sumIn({ alerts, profile: prof([rule({ dayFrom: -7, dayTo: 30 })]) }), ts).text, /D-7–30/);
 });
 
@@ -146,6 +145,18 @@ test('horizonAlerts scopes to plant lines and the horizon cutoff', () => {
   const cutoff = new Date('2026-10-30T00:00:00');
   assert.deepEqual(horizonAlerts(alerts, new Set(['L1']), cutoff).map(a => a.id), [1, 4]);
   assert.deepEqual(horizonAlerts(alerts, new Set(['L1']), null).map(a => a.id), [1, 2, 4]);
+});
+
+test('horizonAlerts drops an alert only for a real reason: an Invalid Date time stays, an invalid cutoff cuts nothing', () => {
+  const alerts = [
+    { id: 1, line: 'L1', time: new Date('2026-10-21T00:00:00') },
+    { id: 2, line: 'L1', time: new Date('2026-12-01T00:00:00') },
+    { id: 3, line: 'L1', time: new Date(NaN) },
+    { id: 4, line: 'L1' },
+  ];
+  const cutoff = new Date('2026-10-30T00:00:00');
+  assert.deepEqual(horizonAlerts(alerts, new Set(['L1']), cutoff).map(a => a.id), [1, 3, 4], 'only the valid time past the cutoff is dropped');
+  assert.deepEqual(horizonAlerts(alerts, new Set(['L1']), new Date(NaN)).map(a => a.id), [1, 2, 3, 4], 'an invalid cutoff keeps everything');
 });
 
 test('emptyStateFor picks the right empty state', () => {

@@ -766,3 +766,13 @@ test('tool card: n counts ORDERS, the order set is the pusher plus every holder,
   assert.deepEqual(item.lines.slice().sort(), ['L4', 'L5', 'M1', 'M2', 'M3', 'M4', 'M5']);
   assert.equal(item.action.kind, 'tool');
 });
+
+test('ROUTING_UPLOAD_STEPS is the one shared list of routing-gap steps fixed by a routing upload (the monitor model reads it)', async () => {
+  const { ROUTING_UPLOAD_STEPS } = await import('../../../frontend/insights/alert-leverage.mjs');
+  assert.deepEqual([...ROUTING_UPLOAD_STEPS].sort(), ['no_operation_at_workcenter', 'no_routing', 'pv_expired', 'pv_not_found', 'pv_workcenter_mismatch']);
+  const { levActions } = await import('../../../frontend/alert-monitor/alert-monitor-model.mjs');
+  const item = step => ({ orderIds: ['o'], alertIds: ['a'], adminOnly: true, action: { kind: 'routing-gap', step, material: 'm', pv: 'p', machine: '' } });
+  const ctx = { remaining: 0, canReviewPairs: false, isAdmin: true, setupActive: true, whatIf: false, fieldLabel: k => k };
+  for (const step of ROUTING_UPLOAD_STEPS) assert.equal(levActions(item(step), ctx).primary.act, 'rg-routing', step);
+  assert.notEqual(levActions(item('no_machine'), ctx).primary.act, 'rg-routing');
+});
