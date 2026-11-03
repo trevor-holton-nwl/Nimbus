@@ -47,6 +47,7 @@
   const CONF_HISTORY_MAX         = 500;         // score history kept in memory (this session only)
   const CONF_RECOMPUTE_DEBOUNCE_MS = 400;
   const CONF_STARTUP_DELAY_MS    = 600;
+  const CONF_STALE_FALLBACK_MS   = 8000;        // a held score (load not finished, alerts behind the data) is applied anyway after this
   const CONF_DELTA_FLASH_MS      = 1900;        // the "+N / -N" chip lives a little longer than its 1.8 s CSS fade
   const BLACKOUT_LOOKAHEAD_MS    = 48 * HOUR_MS; // Right Now: blackouts starting or running within this window put orders at risk
   const UTIL_SCAN_DAYS           = 7;           // Right Now: the utilization window scanned for an overloaded line
@@ -1897,7 +1898,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      CONFIDENCE — live schedule health score 0-100 + sparkline
      ========================================================================== */
-  let breakdownPending = false;   // showBreakdown is fetching its utilization matrix (see the guard there)
+  let _confStaleTimer = null;     // the fallback that applies a held Confidence score anyway (CONF_STALE_FALLBACK_MS)
+  const _clearConfStaleTimer = () => { if (_confStaleTimer) { clearTimeout(_confStaleTimer); _confStaleTimer = null; } };
+  let breakdownPending = false;  // showBreakdown is fetching its utilization matrix (see the guard there)
   const Confidence = {
     _score:   100,
     _history: [],
@@ -1922,6 +1925,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         clearTimeout(Confidence._startupTimer);
         Confidence._startupTimer = null;
       }
+      _clearConfStaleTimer();
       if (clearSuppressed) Confidence._suppressedAlertRefreshes = 0;
     },
 
@@ -1985,6 +1989,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           // switch reset the badge above and must repaint it even if alerts/_rev match.
           Confidence._lastAlertsSrc = null;
           Confidence._lastRev = null;
+          _clearConfStaleTimer();
           const scoreEl = document.getElementById('ni-conf-score');
           if (scoreEl) { scoreEl.textContent = '—'; scoreEl.style.color = ''; }
           // Reset the ring to a neutral/empty state for the reset window — _score
@@ -2027,7 +2032,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       Confidence._updateRing();
     },
 
-    async _recompute() {
+    // `force` is only the fallback timer's: apply even though the load or the alerts have not caught up.
+    async _recompute(force = false) {
       // Frozen during an optimizer preview trial or What-If sandbox session — neither
       // is committed yet, so the score/tracker must not react until Apply/Promote.
       if (NIMBUS.OptimizerPreview?.active || NIMBUS.Sandbox?.active) return;
@@ -2039,7 +2045,23 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // fully captures the inputs. plant:selected nulls these to force a repaint.
       // Dismissed alerts still count (dismissing only hides an alert from the bell/drawer/Gantt): score the list
       // BEFORE the dismiss filter. Acknowledged alerts are in it too.
-      const { alerts, machines } = Alerts.confidenceInput();
+      const { alerts, machines, stale } = Alerts.confidenceInput();
+      // Hold the paint while the plant's load is still fanning out (master data, calendars, setup, rate maps) or the
+      // published alerts predate the latest data: a score from that list jumps once the late inputs land (late alerts
+      // only turn red once the push cap is known). The next alerts:change (the post-ready publish) re-enters here; the
+      // fallback timer applies the score anyway so a failed load never leaves the badge on "—". The unchanged-guard
+      // below is deliberately not updated, so the later recompute is not skipped.
+      if (!force && Store.tasksForSelectedPlant().length
+          && (NIMBUS.Persistence?.bootReady === false || stale)) {
+        if (!_confStaleTimer) {
+          const generation = Confidence._lifecycleGeneration;
+          _confStaleTimer = setTimeout(() => {
+            _confStaleTimer = null;
+            if (generation === Confidence._lifecycleGeneration) Confidence._recompute(true);
+          }, CONF_STALE_FALLBACK_MS);
+        }
+        return;
+      }
       const rev = Store.rev();
       if (Confidence._lastAlertsSrc === alerts && Confidence._lastRev === rev) return;
       Confidence._lastAlertsSrc = alerts;
@@ -2061,6 +2083,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     _apply(score) {
       Confidence._startupPending = false;
+      _clearConfStaleTimer();
       const prev = Confidence._score;
       // The first score of a plant (page load, plant switch: the history is empty) has nothing to differ from: the
       // placeholder 100 is not a previous score, so no "-N" chip flashes for it.

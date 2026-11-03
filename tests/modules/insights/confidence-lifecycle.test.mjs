@@ -293,7 +293,7 @@ test('#32 Confidence uses the selected plant\'s conf_score_horizon (master data)
     Store.setAlerts(alertIn2Days, 'test');
     Alerts._allAlerts = null;   // score the Store list directly (a recompute would otherwise have filled the pre-dismiss list)
     Confidence._lastAlertsSrc = null; Confidence._lastRev = null;
-    await Confidence._recompute();
+    await Confidence._recompute(true);   // forced: this fixture's list is deliberately the unpublished Store list
     return Confidence.snapshot().score;
   };
   try {
@@ -883,6 +883,8 @@ test('dismissing an alert hides it from Store.alerts but leaves the Confidence i
   const priorSchedule = Alerts.scheduleRecompute;
   const priorNimbus = globalThis.NIMBUS;
   const priorConfidence = Confidence.snapshot();
+  const priorBootReady = nimbus.Persistence.bootReady;
+  nimbus.Persistence.bootReady = true;   // the real Persistence starts not-ready; this fixture has finished "loading"
   globalThis.NIMBUS = nimbus;
   Compute.available = () => false;
   Alerts.scheduleRecompute = () => {};
@@ -918,11 +920,97 @@ test('dismissing an alert hides it from Store.alerts but leaves the Confidence i
     assert.equal(await scoreNow(), before, 'Dismiss all leaves the score alone');
   } finally {
     Confidence._invalidatePending(true);
+    nimbus.Persistence.bootReady = priorBootReady;
     Confidence.restore(priorConfidence);
     Alerts.restoreDismissed(priorDismissed);
     Alerts._allAlerts = priorAll;
     Alerts.scheduleRecompute = priorSchedule;
     Compute.available = priorAvailable;
+    Store.setAlerts(priorAlerts, 'test');
+    Store.setTasks(priorTasks, 'test');
+    Store.setSelectedPlant(priorPlant, 'test');
+    globalThis.NIMBUS = priorNimbus;
+  }
+});
+
+// ---- Load-jump gates: hold the badge until the load is complete and the alerts reflect the data ---------------------
+test('Alerts._publish records the data revision; confidenceInput().stale flips on a data change and clears on the next publish', () => {
+  const priorAll = Alerts._allAlerts;
+  const priorRev = Alerts._publishedDataRev;
+  const priorAlerts = structuredClone(Store.alerts);
+  try {
+    Alerts._allAlerts = null;
+    assert.equal(Alerts.confidenceInput().stale, true, 'nothing published yet is stale');
+    Alerts._publish([], null);
+    assert.equal(Alerts._publishedDataRev, Store.dataRev());
+    assert.equal(Alerts.confidenceInput().stale, false, 'a publish at the current data revision is fresh');
+    Store.setAlerts([], 'alerts');
+    assert.equal(Alerts.confidenceInput().stale, false, 'alerts:change does not move dataRev');
+    Store.setMasterData({ ...Store.masterData }, 'test');
+    assert.equal(Alerts.confidenceInput().stale, true, 'a late master-data load makes the published list stale');
+    Alerts._publish([], null);
+    assert.equal(Alerts.confidenceInput().stale, false, 'the next publish clears it');
+  } finally {
+    Alerts._allAlerts = priorAll;
+    Alerts._publishedDataRev = priorRev;
+    Store.setAlerts(priorAlerts, 'test');
+  }
+});
+
+test('Confidence holds while the load is not ready or the alerts are stale, applies once when both clear, and the fallback timer applies anyway', async () => {
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorPlant = Store.selectedPlant;
+  const priorAlerts = structuredClone(Store.alerts);
+  const priorAll = Alerts._allAlerts;
+  const priorAvailable = Compute.available;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorNimbus = globalThis.NIMBUS;
+  const priorConfidence = Confidence.snapshot();
+  const priorApply = Confidence._apply;
+  const priorPersistence = nimbus.Persistence;
+  let applied = 0;
+  globalThis.NIMBUS = nimbus;
+  Compute.available = () => false;
+  Alerts.scheduleRecompute = () => {};
+  nimbus.Persistence = { bootReady: false };
+  try {
+    Confidence._invalidatePending(true);
+    Store.setTasks([{ id: 'lg-1', PLANT: 'LG', MACHINE: 'LG-L', RUN_TIME: 1 }], 'test');
+    Store.setSelectedPlant('LG', 'test');   // resets the badge and the unchanged-guard
+    Alerts._publish([], null);
+    Confidence._apply = function (score) { applied++; return priorApply.call(this, score); };
+
+    await Confidence._recompute();
+    assert.equal(applied, 0, 'not bootReady: held');
+    assert.equal(Confidence._lastAlertsSrc, null, 'the unchanged-guard is not updated by a held attempt');
+
+    nimbus.Persistence.bootReady = true;
+    Store.setMasterData({ ...Store.masterData }, 'test');   // data moved after the publish: stale
+    await Confidence._recompute();
+    assert.equal(applied, 0, 'stale alerts: held');
+
+    Alerts._publish([], null);
+    await Confidence._recompute();
+    assert.equal(applied, 1, 'ready and fresh: applied');
+    await Confidence._recompute();
+    assert.equal(applied, 1, 'an unchanged recompute is still skipped (applied exactly once)');
+
+    // the fallback: a plant switch resets, the load never completes, the timer applies the score anyway
+    Store.setTasks([{ id: 'lg-2', PLANT: 'LG2', MACHINE: 'LG2-L', RUN_TIME: 1 }], 'test');
+    Store.setSelectedPlant('LG2', 'test');
+    nimbus.Persistence.bootReady = false;
+    await Confidence._recompute();
+    assert.equal(applied, 1, 'held again after the switch');
+    await wait(8100);
+    assert.equal(applied, 2, 'the fallback applied the score once the timeout passed');
+  } finally {
+    Confidence._apply = priorApply;
+    Confidence._invalidatePending(true);
+    Confidence.restore(priorConfidence);
+    nimbus.Persistence = priorPersistence;
+    Compute.available = priorAvailable;
+    Alerts.scheduleRecompute = priorSchedule;
+    Alerts._allAlerts = priorAll;
     Store.setAlerts(priorAlerts, 'test');
     Store.setTasks(priorTasks, 'test');
     Store.setSelectedPlant(priorPlant, 'test');
