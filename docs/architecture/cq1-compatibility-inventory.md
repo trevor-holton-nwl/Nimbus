@@ -1334,3 +1334,260 @@ for any other reason. This is a real, executed result, not a carried-forward
 assumption — recorded here with the same command-and-output rigor as the
 Docker check immediately above, since Phase 4 touched no `.py` files and a
 reader should not have to guess whether that made the claim untested.
+
+
+## 9. Appendix: the former `app.js` header narrative (moved here 2026-11-03)
+
+The migration history below used to be the header comment of `frontend/app.js` (plus per-module "moved to ..." tombstone comments, now deleted). It is kept verbatim as a historical record: module and file names are as of the time each task ran, and several files it names (`schedule-state.mjs`, `schedule-services.mjs`, `schedule-data.mjs`, `schedule-workbench.mjs`, `plant-and-administration.mjs`, `application-foundation.mjs`) were later split into the per-domain files listed in `frontend/shell/CLAUDE.md`. Current truth: `app-entry.mjs` bridges eight objects (`__NIMBUS_FOUNDATION`, `_STATE`, `_SERVICES`, `_DATA`, `_WORKBENCH`, `_PLANT_ADMIN`, `_SHELL`, `_MATERIAL_GRIDS`), and `app.js` destructures all eight.
+
+```text
+// Every module this file used to define now lives in one of the six real
+// ES modules bridged in frontend/app-entry.mjs. This file exists only because
+// nimbus-intelligence.js accesses NIMBUS as a bare identifier through
+// classic-script shared lexical scope (confirmed: converting it to a real
+// ES module would sever that access — see docs/architecture/
+// cq1-compatibility-inventory.md). This IS "app.js is gone or a documented
+// small launcher" per the CQ-1 design's completion criteria: nothing below
+// is a module body — it is boot orchestration and the compatibility
+// namespace this project's other consumers (index.html inline handlers,
+// nimbus-intelligence.js) still read. `_bootMain()`/`_domReadyGate()` stay
+// here (not in application-shell.mjs) because by the time they run, every
+// module they call `.init()` on is already available in this file's own
+// scope via its seven bridge destructures below — see
+// application-shell.mjs's header comment for the full rationale.
+/* =============================================================================
+   N.I.M.B.U.S. 2.0 — Application
+   Organised as modules inside a single `NIMBUS` namespace.
+
+   CQ-1 Phase 1 moved 11 of these modules out of this file into two real ES
+   modules, bridged in via app-entry.mjs (window.__NIMBUS_FOUNDATION /
+   __NIMBUS_STATE — see the destructure at the top of this IIFE):
+     Config, Util, PerfMonitor, VirtualList, ErrorLog, Toast, Modal
+                       — now defined in application-foundation.mjs
+     Store, Selection, UndoStack, Sandbox
+                       — now defined in schedule-state.mjs
+   CQ-1 Phase 2 Task 1 moved Calendar's capacity-math half and Compute out
+   into a third real ES module, bridged the same way (window.__NIMBUS_SERVICES):
+     Calendar (capacity math only), Compute
+                       — now defined in schedule-services.mjs
+   Calendar's blackout-block-tab UI half stayed here, renamed `CalendarUI`.
+   CQ-1 Phase 2 Task 2 moved Alerts' computation half and Utilization into the
+   same schedule-services.mjs module:
+     Alerts (computation only), Utilization
+                       — now defined in schedule-services.mjs
+   Alerts' drawer/bell-badge/cell-briefing-modal UI half stayed here, renamed
+   `AlertsUIAdapter`.
+   CQ-1 Phase 2 Task 3 moved Engine (optimizer + auto-reflow) into the same
+   schedule-services.mjs module, verbatim — Engine has no DOM half, so
+   nothing stayed behind in app.js besides consumers of `Engine.*`.
+   CQ-1 Phase 2 Task 4 moved Persistence and CalendarSync into a fourth real
+   ES module, bridged the same way (window.__NIMBUS_DATA):
+     Persistence, CalendarSync
+                       — now defined in schedule-data.mjs
+   Neither has a DOM half — both are pure backend-fetch/localStorage-cache/
+   backend-sync logic — so nothing stayed behind in app.js besides consumers
+   of `Persistence.*`/`CalendarSync.*`. The two real data→services dependencies
+   found during Phase 2 research (Persistence calling into Calendar's capacity
+   math, and Persistence calling Alerts.scheduleRecompute()) were resolved by
+   an injected seam (`Persistence.setCalendarService`, removed with the load-time
+   re-snap in backward scheduling Task 2.5) and a
+   Store event (`schedule:hydrated`, subscribed to once in schedule-services.mjs)
+   respectively — schedule-data.mjs still never imports schedule-services.mjs.
+   CQ-1 Phase 2 Task 5 moved Session's pure state/API half into the same
+   schedule-data.mjs module (window.__NIMBUS_DATA):
+     Session (currentUser/actor/isAdmin/allowedPlants/pref/setPref/flushPrefs/
+              signIn/signOut/refresh/onAuthDenied/updateCachedUser)
+                       — now defined in schedule-data.mjs
+   Session's DOM/settings-pane half (~600 lines: gates, the user-settings
+   modal, profile/password self-service, personalization/workflow panes)
+   stayed here, renamed `SessionUIAdapter` — mirrors the Phase 1
+   Sandbox/SandboxAdapter split exactly. `signIn`/`signOut`/`refresh` now emit
+   `{type:'session:changed', kind}` instead of calling `_applyGates()`/DOM code
+   inline; `SessionUIAdapter.init()` (called from `_bootMain()`, alongside
+   `SandboxAdapter.init()`) is the sole subscriber.
+   CQ-1 Phase 3 Task 1 moved Timeline, TimelineNav, and DependencyOverlay into
+   a fifth real ES module, bridged the same way (window.__NIMBUS_WORKBENCH):
+     Timeline, TimelineNav, DependencyOverlay
+                       — now defined in schedule-workbench.mjs
+   None of the three has a DOM-remnant half — all three moved whole. Timeline
+   still has five genuine cross-references into app.js-resident code that
+   hasn't moved into schedule-workbench.mjs yet (App.gotoGanttTimeline,
+   Inspector.show, Interaction.DEBUG, GanttFilter._selectedLines,
+   EmptyState.render) — all reached via the shared `NIMBUS` binding rather
+   than as bare identifiers; see the header comment in schedule-workbench.mjs.
+   CQ-1 Phase 3 Task 2 moved Table, Inspector, and ContextMenu into the same
+   schedule-workbench.mjs module:
+     Table, Inspector, ContextMenu
+                       — now defined in schedule-workbench.mjs
+   None of the three has a DOM-remnant half — all three moved whole. Table's
+   `_showAlertPopup` still calls `AlertsUIAdapter.focus` (via the shared
+   `NIMBUS` binding, same rationale as Timeline's five above) — a genuine
+   cross-file reference in the wrong direction (schedule-workbench.mjs calling
+   into app.js) until `AlertsUIAdapter` itself moves into schedule-workbench.mjs
+   in Task 7; Table's `_renderEmptyState`/`_NoRowsOverlay` similarly reach
+   `EmptyState.render` via `NIMBUS` (EmptyState stays in app.js — boot UI, not
+   part of this phase's module list). Timeline's `Inspector.show` cross-
+   reference above is unaffected by Inspector's move — it is left calling
+   through `NIMBUS.Inspector` rather than simplified to a same-module bare
+   reference, since both forms are equivalent at runtime and Task 2 doesn't
+   require touching Timeline's code. Likewise, Timeline's `GanttFilter.
+   _selectedLines` cross-reference above is unaffected by GanttFilter's Task 3
+   move into schedule-workbench.mjs — it is left calling through
+   `NIMBUS.GanttFilter` rather than simplified to a same-module bare
+   reference, for the identical reason.
+   CQ-1 Phase 3 Task 3 moved Hierarchy and GanttFilter into the same
+   schedule-workbench.mjs module:
+     Hierarchy, GanttFilter
+                       — now defined in schedule-workbench.mjs
+   Neither has a DOM-remnant half — both moved whole, plus the
+   `VL_HIER_LINE_H`/`VL_HIER_TASK_H` VirtualList row-height consts they use
+   (`VL_ALERT_ROW_H` stays here, travelling with AlertsUIAdapter in a later
+   task; `VL_LS_ROW_H` moves with Dashboard in Task 4 — see below). Task 3
+   also closed GanttFilter's nimbus-intelligence.js private-consumer debt:
+   `GanttFilter._selectedLines`/`_active`/`_refreshLineBtn`/`_buildLineDropdown`
+   direct reaches became `GanttFilter.selectedLines()`/`.activeFilter()`/
+   `.isolateLine(line)`/`.restoreAllLines()` — see nimbus-intelligence.js and
+   docs/architecture/cq1-compatibility-inventory.md §4 for the remaining
+   `GanttFilter._toggle*Dropdown` private-consumer rows (reached only from
+   index.html's inline onclick attributes, out of scope for this phase's
+   inline-handler migration mandate, so they stay open).
+   CQ-1 Phase 3 Task 4 moved Dashboard into the same schedule-workbench.mjs
+   module, plus its `VL_LS_ROW_H` VirtualList row-height const (see above).
+   No DOM-remnant half — it moved whole. Dashboard had two direct
+   `Store._rev`/`Store._state` touches (a memo-key read and a
+   `masterData.plants` lookup) that became `Store.rev()`/`Store.masterData`
+   (both pre-existing Phase 1 public getters), closing Dashboard's §6 row.
+   It also had three bare cross-references into app.js-resident code that
+   hasn't moved yet — `AlertsUIAdapter.renderBell()`, `EmptyState.render(...)`,
+   `App.goto(...)`/`App.gotoGanttTimeline()` — rewritten through the shared
+   `NIMBUS` binding, same rationale as Timeline's/Table's cross-references
+   above. Dashboard's module-map entry below used to read "home KPIs +
+   Chart.js charts" — stale: Dashboard has always been a hand-rolled DOM/CSS
+   heatmap, and grepping the whole codebase for real `Chart(` instantiations
+   turns up none (`AdminCockpit._dbHBarChart`/`nimbus-intelligence.js`'s
+   `Confidence._drawChart` are unrelated same-named helpers, not the CDN
+   `Chart` global), so Task 4 also removes the dead Chart.js `<script>` tag
+   from index.html.
+   CQ-1 Phase 3 Task 5 moved Interaction into the same schedule-workbench.mjs
+   module — the densest (~1,140 lines) and, before this task, the only module
+   in the whole migration with zero test coverage anywhere in the codebase.
+   Task 5 added characterization tests first, then an install()/uninstall()
+   pair: install()'s three unconditional document-level listeners
+   (mousemove/mouseleave/keydown) plus _installHoverPreview()'s separate
+   document keydown were refactored into named, stored bound references so
+   uninstall() — new, purely additive, and intentionally unwired (Gantt
+   Timeline has no unmount trigger today) — has concrete references to remove;
+   it deliberately leaves every #vis-timeline-container-scoped listener
+   attached (see the header comment on uninstall() in schedule-workbench.mjs).
+   The plan's inline-handler-migration mandate's one concrete instance —
+   _showMultiInspector's inline onclick strings — turned out to be four call
+   sites, not the three originally named (_bulkFirm(true), _bulkFirm(false),
+   Selection.clear(), and a fourth, _unscheduleSelected(), missed by the
+   plan's prose); all four now wire through real addEventListener calls
+   instead. Writing the first-ever test for _onDataSetUpdate also found the
+   module's own header comment describing firmed-order drag protection didn't
+   match the code — the comment was corrected, the logic (correctly) left
+   unchanged. One same-phase forward reference, AlertsUIAdapter.showForCell
+   (...), is left calling through the shared NIMBUS binding until
+   AlertsUIAdapter itself moves in Task 7 (same rationale as Timeline's/
+   Table's/Dashboard's forward references above). See
+   docs/architecture/cq1-compatibility-inventory.md §6 for the full writeup.
+   CQ-1 Phase 3 Task 6 moved OptimizeDialog and OptimizerPreview into the same
+   schedule-workbench.mjs module, verbatim — including OptimizerPreview's
+   _installAbandonGuard() MutationObserver and its optional-chained
+   NIMBUS.Confidence?.snapshot()/.restore() cross-file call into
+   nimbus-intelligence.js, which is unaffected by which file OptimizerPreview
+   lives in and so was left exactly as-is. Neither module had a DOM-remnant
+   half or a Store._state/_rev touch to close.
+   CQ-1 Phase 3 Task 7 moved EditCalendar, ColorWheelViewer, Printer,
+   SandboxAdapter, and AlertsUIAdapter into the same schedule-workbench.mjs
+   module. `SandboxAdapter`'s move is the design doc's explicit mandate;
+   `AlertsUIAdapter`'s is a deliberate, documented scope decision based on its
+   coupling to Timeline/Inspector/Table/Dashboard/Interaction — see
+   docs/architecture/cq1-compatibility-inventory.md. `VL_ALERT_ROW_H`
+   (AlertsUIAdapter's VirtualList row-height const) travels with it. The
+   shared hour-conversion helpers previously duplicated as `CalendarUI`'s
+   private `_hToT`/`_tToH` moved to `Util.hoursToTimeString`/
+   `.timeStringToHours` in application-foundation.mjs — `CalendarUI` (which
+   stayed here through Phase 3) and `Plant` (which also stayed here through
+   Phase 3) called the shared helper instead of `CalendarUI`'s own private
+   copy.
+   CQ-1 Phase 4 Task 1 moved CalendarUI, Plant, and ProdLines into a sixth
+   real ES module, bridged the same way (window.__NIMBUS_PLANT_ADMIN):
+     CalendarUI, Plant, ProdLines
+                       — now defined in plant-and-administration.mjs
+   `Plant`'s `App._renderSettingsPane()` call site was eliminated, not carried
+   forward: `_renderSettingsPane`'s entire body (per-plant scheduling-
+   constraint list, color-wheel enable toggle) was per-plant-admin content
+   that only ever rendered into Plant's own `#plant-tab-settings` DOM and was
+   only ever triggered from `Plant.gotoTab('settings')` — it moved bodily
+   into `Plant._renderSettingsPane()` in plant-and-administration.mjs this
+   task, even though the rest of `App` doesn't move until Task 4. The old
+   call site below is now a one-line stub, removed entirely when Task 4
+   deletes the rest of `App`. `Plant`'s Store-subscribe callback's read of
+   `App._currentTab`/`_currentMasterSub` became
+   `_activeTabResolvers.currentTab()`/`.currentMasterSub()` (an injected
+   getter seam, `PlantAdmin.setActiveTabResolvers(...)`, wired once below
+   immediately after this task's bridge destructure — the same one-directional
+   "am I currently visible?" pattern used throughout this migration).
+   CQ-1 Phase 4 Task 2 moved MasterData and LaborPlanning into the same
+   plant-and-administration.mjs module:
+     MasterData, LaborPlanning
+                       — now defined in plant-and-administration.mjs
+   `Plant`'s/`ProdLines`' `MasterData.syncLineSettings(...)` call sites are
+   left going through the shared `NIMBUS` binding
+   (`NIMBUS.MasterData.syncLineSettings(...)`) rather than simplified to a
+   same-module bare reference now that `MasterData` lives in the same file —
+   both forms are equivalent at runtime, and Task 2 doesn't require touching
+   Plant/ProdLines' code, the same reasoning Phase 3 used once its own
+   forward references' targets landed in the same file. `LaborPlanning`'s
+   `App._laborSub`/`App._currentTab` reads became `_activeTabResolvers.
+   laborSub()`/`.currentTab()` (the same injected getter seam Task 1
+   established for `Plant`). `MasterData`'s one `Store._state.masterData = {
+   ...}; Store.rebuildPlantIndex();` write became `Store.setMasterData(...)`
+   (the existing public setter from Phase 2 Task 4), closing `MasterData`'s
+   tracked §6 exception for real rather than carrying it forward by
+   relocation. `LaborPlanning` itself still has six direct
+   `Store._state.masterData` *reads*, not in this task's stated scope to
+   close — tracked as a new §6 row rather than silently dropped; see
+   docs/architecture/cq1-compatibility-inventory.md §6.
+   CQ-1 Phase 4 Task 3 moved Interface, Security, and AdminCockpit into the
+   same plant-and-administration.mjs module:
+     Interface, Security, AdminCockpit
+                       — now defined in plant-and-administration.mjs
+   All three moved verbatim, no changes. Research confirmed Interface and
+   Security are fully self-contained (zero cross-references to any other of
+   the 14 modules moved across this migration). AdminCockpit — by far the
+   largest single module moved in this entire migration (~2,260 lines) — has
+   a dispatch to MasterData.render()/Interface.render()/Security.render() in
+   its _setSub that is now a same-file bare reference: all four already
+   lived behind the same __NIMBUS_PLANT_ADMIN bridge destructure in this
+   file before this task (extended in Task 2), so there was no seam to
+   close here.
+   CQ-1 Phase 4 Task 4 moved SessionUIAdapter, showLoginScreen, EmptyState,
+   PlantSelector, and App into a seventh and final real ES module, bridged
+   the same way (window.__NIMBUS_SHELL):
+     Settings, SessionUIAdapter, showLoginScreen, EmptyState, PlantSelector, App
+                       — now defined in application-shell.mjs
+   (WelcomeSplash also moved here at the time, then was retired outright —
+   overlay, arrow SVG, and all — by the Command Band re-skin's chrome-wiring
+   task; App.registerPausable/_pausables stayed, since that's generic App
+   infrastructure, not WelcomeSplash-specific.)
+   `Settings` (the per-user settings catalog) travels with this move too —
+   see application-shell.mjs's header comment for why, since it was never
+   one of CQ-1's 14 tracked modules. `_bootMain()` and `_domReadyGate()`
+   deliberately stay in THIS file (see the launcher note at the very top) —
+   they are boot orchestration, not module bodies, and by the time they run
+   every `.init()` target they call is already resolvable through this
+   file's own bridge destructures. This is the last bridge: app.js now
+   contains no module bodies of its own.
+   See docs/architecture/cq1-compatibility-inventory.md §1 for the full
+   ownership map.
+
+   Module map (load order) — modules still defined in THIS file: none. Every
+   module has moved into one of the seven real ES modules bridged above; what
+   remains below is boot orchestration (`_bootMain`/`_domReadyGate`), the
+   DI-seam wiring, and the compatibility namespace `return {...}` at the
+   bottom of this IIFE.
+   ========================================================================== */
+```

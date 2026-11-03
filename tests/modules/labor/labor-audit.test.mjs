@@ -44,6 +44,7 @@ async function harness(t, sub = 'aggregate') {
   const nodes = Object.fromEntries(['labor-grid', 'labor-line-grid', 'labor-capacity-grid', 'labor-exceptions-list', 'labor-kpi-strip'].map(id => [id, grid()]));
   t.mock.method(Utilization, 'computeMatrix', () => ({}));
   t.mock.method(Calendar, 'effectiveCapacityHours', () => 8);
+  t.mock.method(Calendar, '_indexCapacityBlocks', () => ({}));   // labor builds the block index once per pass (needs the compute core otherwise)
   t.mock.method(Toast, 'show', () => {});
   t.mock.method(Util, 't', (key, vars) => vars ? `${key} ${JSON.stringify(vars)}` : key);
   t.mock.method(Util, 'fetchTraced', async () => ({ ok: true, json: async () => ({ rows: [] }) }));

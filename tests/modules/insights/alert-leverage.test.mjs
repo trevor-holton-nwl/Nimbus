@@ -85,7 +85,9 @@ function fixture({ tasks, masterPlant = { plant: PLANT }, plantRows = [], replay
   const snapshotBase = { ...snap0, setup, now: { [PLANT]: plantNow } };
   const startMs = new Date(2026, 9, 20).getTime();
   const base = { ...snapshotBase, dismissed: [], opts: { lines: null }, startMs, days: 14, lines: snapshotBase.lines ?? undefined };
-  const [baseline] = runLeverageBatchSync(base, [{ key: 'baseline', setup }]);
+  // The batch reply is alerts-only now; the baseline matrix (the input's `baselineMatrix`) comes straight from the core.
+  const [baselineAlerts] = runLeverageBatchSync(base, [{ key: 'baseline', setup }]);
+  const baseline = { ...baselineAlerts, matrix: Core.computeUtilization({ ...base, calendars: { ...base.calendars }, plants: { ...base.plants }, setup }).matrix };
   return {
     input: {
       plant: PLANT, plantNow, horizonMinutes: HM, alerts: baseline.alerts, tasksById, lines: new Set([LINE]),

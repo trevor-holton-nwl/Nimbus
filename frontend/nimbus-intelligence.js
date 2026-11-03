@@ -1,15 +1,18 @@
 /* =============================================================================
    N.I.M.B.U.S. Intelligence Layer  (nimbus-intelligence.js)
-   Loaded after app.js — extends window.NIMBUS with 10 intelligence modules.
+   Loaded after app.js — a classic script (it reads NIMBUS as a bare identifier) that
+   extends NIMBUS with the intelligence modules below. Plain statements, not the
+   exact module list of any other doc: line counts and module counts are not
+   repeated here because they go stale (see frontend/shell/CLAUDE.md).
 
    Modules:
-     IntelDB         — IndexedDB store backing history/patterns
+     IntelDB         — IndexedDB store backing the Time Machine history
      NeedsEngine     — "needs attention" suggestions
      DarkMode        — theme toggle
      LangSwitcher    — language selector
      CommandPalette  — Cmd+K fuzzy search overlay
      TimeMachine     — IndexedDB-backed history scrubber
-     Confidence      — live 0-100 schedule health score + sparkline
+     Confidence      — live 0-100 schedule health score (badge ring + breakdown dialog)
      (Alert cells are now native vis-timeline background items — see app.js)
      RipplePreview   — Alt-hover downstream-shift preview
      Diff            — snapshot diff viewer
@@ -36,11 +39,127 @@
   const _plantClock = () => NIMBUS.Util?.plantClock?.(Store.selectedPlant) ?? new Date();
   const _plantToday = () => NIMBUS.Util?.plantToday?.(Store.selectedPlant) ?? Util.startOfDay(new Date());
 
+  /* --- Shared constants and helpers ---------------------------------------- */
+  const MIN_MS  = 60000;
+  const HOUR_MS = 3600000;
+  const DAY_MIN = 1440;
+  const CONF_HORIZON_DEFAULT_MIN = 20160;       // 14 days
+  const CONF_HISTORY_MAX         = 500;         // score history kept in memory (this session only)
+  const CONF_RECOMPUTE_DEBOUNCE_MS = 400;
+  const CONF_STARTUP_DELAY_MS    = 600;
+  const CONF_DELTA_FLASH_MS      = 1900;        // the "+N / -N" chip lives a little longer than its 1.8 s CSS fade
+  const BLACKOUT_LOOKAHEAD_MS    = 48 * HOUR_MS; // Right Now: blackouts starting or running within this window put orders at risk
+  const UTIL_SCAN_DAYS           = 7;           // Right Now: the utilization window scanned for an overloaded line
+  const SNAPSHOT_DUE_MINS        = 20;          // Right Now: offer a checkpoint once the plant's last one is this old
+  const PALETTE_MAX_RESULTS      = 9;
+  const PALETTE_SEARCH_DEBOUNCE_MS = 60;
+  const PALETTE_FOCUS_DELAY_MS   = 30;          // after the open transition starts, so the input can take focus
+  const GOTO_SETTLE_MS           = 100;         // App.gotoGanttSub('timeline') rebuilds the Gantt in a 30 ms timeout: wait past it
+  const TM_LABEL_MAX             = 80;
+  const TM_PANEL_ROWS            = 60;          // Time Machine panel: newest entries listed
+  const DIFF_SNAP_ROWS           = 40;          // Diff dialog: newest snapshots offered
+  const SNAPSHOT_AUTO_DEBOUNCE_MS = 1000;
+  const RIPPLE_SHOW_DELAY_MS     = 80;
+  const RIPPLE_INIT_DELAY_MS     = 220;
+  const RIPPLE_DOWNSTREAM_MAX    = 5;
+  const PATTERNS_PERSIST_DEBOUNCE_MS = 400;
+
+  // Store event types a subscriber reacts to, as Sets (built once, not an array literal per event).
+  const PALETTE_INDEX_EVENTS = new Set(['tasks:bulk', 'tasks:bulkUpdate', 'plant:selected', 'task:update', 'task:remove', 'firmed:change']);
+  const BULK_TASK_EVENTS     = new Set(['tasks:bulk', 'tasks:bulkUpdate']);
+  const CONF_TASK_EVENTS     = new Set(['tasks:bulk', 'tasks:bulkUpdate', 'task:update', 'task:remove']);
+
+  // Confidence bands, one definition for every place that colours or names a score (badge text, header ring, the
+  // breakdown tier, the chart's zone bands / dots / reference lines): GOOD >= 80, AT RISK 50-79, CRITICAL < 50.
+  const BAND_GOOD_MIN = 80;
+  const BAND_RISK_MIN = 50;
+  function _band(score) { return score >= BAND_GOOD_MIN ? 'good' : score >= BAND_RISK_MIN ? 'risk' : 'critical'; }
+  // Two colour sets on purpose, NOT one: `text` is the badge score / "+N" chip (brightened tints of the dark-mode
+  // ok/warn/err triad, checked >= 4.5:1 on the fixed-dark chrome chip); `ring` is the header ring's own mockup hex.
+  // The breakdown dialog and its chart read the live --ok/--warn/--err tokens instead (see Confidence._cssVar).
+  const BAND_COLORS = {
+    good:     { text: '#4dbd7a', ring: '#4ddb9f' },
+    risk:     { text: '#e0a018', ring: '#f0c04a' },
+    critical: { text: '#e88f83', ring: '#f08a6a' },
+  };
+
+  // HTML / attribute escaping: the one shared escaper (it also escapes both quote kinds, so it is safe in attributes).
+  // Anything a translation, a label or a user-entered name puts into markup goes through it.
+  const _esc = s => Util.escapeHtml(s);
+
+  // The one ErrorLog.warn pattern for this file: ErrorLog when it is there, the console otherwise (it is the boot
+  // guard's only fallback and must never throw).
+  function _warn(msg, e, extra) {
+    const detail = { errorCode: 'internal', ...(e === undefined ? null : { err: String(e) }), ...extra };
+    if (window.NIMBUS && window.NIMBUS.ErrorLog) window.NIMBUS.ErrorLog.warn('intel', msg, detail);
+    else console.warn(`[NIMBUS.Intelligence] ${msg}`, e ?? '');
+  }
+
   // Confidence horizon: the selected plant's own conf_score_horizon (what the Plant
   // settings tab edits and shows), then the per-user setting, then 14 days. Reading only
   // the user setting made the score ignore the plant's configured horizon.
   function _confHorizonMinutes() {
-    return Store.masterPlant(Store.selectedPlant)?.conf_score_horizon ?? Store.userSettings?.confidenceHorizonMinutes ?? 20160;
+    return Store.masterPlant(Store.selectedPlant)?.conf_score_horizon ?? Store.userSettings?.confidenceHorizonMinutes ?? CONF_HORIZON_DEFAULT_MIN;
+  }
+
+  // Relative-time bucket labels are translated at display time. Pure so it is testable: `fmtDate` formats a stamp too
+  // old for a relative label (a day or more).
+  function _relTimeLabel(ts, now, fmtDate) {
+    const m = Math.floor((now - ts) / MIN_MS);
+    if (m < 1)  return t('ui.just_now');
+    if (m < 60) return t('ui.mins_ago', { n: m });
+    const h = Math.floor(m / 60);
+    if (h < 24) return m % 60 ? t('ui.hours_mins_ago', { h, m: m % 60 }) : t('ui.hours_ago', { n: h });
+    return fmtDate(ts);
+  }
+
+  // Singular / plural by key pair instead of an English "s" suffix: `key` is the plural (and zero) text, `key_one` the
+  // singular, both taking {{count}}. (English-only pluralisation was wrong in de/es/fr/pt.)
+  const _plural = (count, key, vars) => t(count === 1 ? `${key}_one` : key, { count, ...vars });
+
+  // Palette search scoring. `qt` and `tt` are already lower-cased (the index stores each row's label / sub lower-cased
+  // once, so a keystroke does not lower-case 10 000 order labels again): 3 = starts with, 2 = contains, 1 = the letters
+  // appear in order, 0 = no match.
+  function fuzzyScoreLc(qt, tt) {
+    if (tt.startsWith(qt)) return 3;
+    if (tt.includes(qt))   return 2;
+    let qi = 0;
+    for (let i = 0; i < tt.length && qi < qt.length; i++)
+      if (tt[i] === qt[qi]) qi++;
+    return qi === qt.length ? 1 : 0;
+  }
+  const PALETTE_TYPE_ORDER = { selection: 0, action: 1, line: 2, order: 3 };
+  // The best `limit` rows of `index` for query `q`, in one pass with a small sorted buffer (no score array for the
+  // whole index, no full sort). Order is exactly the old sort's: higher score first, then selection < action < line <
+  // order, then index order (the old sort was stable). A row's score is the better of its label and 0.8 x its sub-label.
+  function topPaletteMatches(index, q, limit) {
+    const qt = q.toLowerCase();
+    const top = [];
+    const beats = (a, b) => a.score !== b.score ? a.score > b.score : a.rank !== b.rank ? a.rank < b.rank : a.i < b.i;
+    for (let i = 0; i < index.length; i++) {
+      const item = index[i];
+      const labelLc = item.labelLc ?? String(item.label).toLowerCase();
+      const subLc   = item.subLc ?? String(item.sub || '').toLowerCase();
+      const score = Math.max(fuzzyScoreLc(qt, labelLc), Math.floor(fuzzyScoreLc(qt, subLc) * 0.8));
+      if (score <= 0) continue;
+      const entry = { item, score, rank: PALETTE_TYPE_ORDER[item.type] ?? 9, i };
+      if (top.length === limit && !beats(entry, top[limit - 1])) continue;
+      let pos = top.length;
+      while (pos > 0 && beats(entry, top[pos - 1])) pos--;
+      top.splice(pos, 0, entry);
+      if (top.length > limit) top.pop();
+    }
+    return top.map(x => x.item);
+  }
+
+  // Go to an order on the Gantt and open it: App.gotoGanttSub('timeline') flips the pane at once but rebuilds the
+  // Gantt in a short timeout, so the focus waits for that (there is no store event or promise for it).
+  function _focusOrderAfterGoto(id) {
+    NIMBUS.App.gotoGanttTimeline();
+    setTimeout(() => {
+      const task = NIMBUS.Store.tasks[id];
+      if (task) { NIMBUS.Inspector.show(task); NIMBUS.Timeline.focus(String(id)); }
+    }, GOTO_SETTLE_MS);
   }
 
   // H3f: command-palette actions used to push an empty undo, so Ctrl+Z reverted an
@@ -60,6 +179,28 @@
       if (off.length) Store.setFirmed(off, false, 'undo');
       Alerts.scheduleRecompute();
     }, ids);   // ids let distribution writes drop stale undo entries
+  }
+
+  // The palette's one "jump to the first conflict" path (the Right Now card, the intent and the action row used to
+  // carry three copies, one of which only worked for alerts that name an order). Routed through the alert focus
+  // (not the Gantt focus directly) so it also works for the order-less alerts (every overload / closed / calendar
+  // alert); the focus itself brings the Timeline forward. `emptyKey` is the toast shown when nothing is in conflict.
+  function _jumpToFirstConflict(emptyKey) {
+    const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
+    if (!err) { Toast.show(t(emptyKey), 'info', 1800); return; }
+    NIMBUS.AlertsUIAdapter.focus(err.id);
+  }
+
+  // Go to a machine's row on the Gantt: the shared line + day navigation (the same call an alert's Go To makes),
+  // on `dayKey` when the caller knows the day that matters (an overloaded day), else on today. Falls back to
+  // focusing any order on the line when the navigation is not available.
+  function _gotoLine(line, dayKey) {
+    NIMBUS.App.gotoGanttTimeline();
+    const day = dayKey || NIMBUS.Util?.dayKey?.(_plantToday());
+    const goto = NIMBUS.Timeline?.gotoLineDay;   // late-bound (the idiom above) so the legacy-surface ratchet does not grow
+    if (day && goto) { goto.call(NIMBUS.Timeline, line, day); return; }
+    const sample = Store.tasksForSelectedPlant().find(x => x.MACHINE === line);
+    if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
   }
 
   /* --- CSS injection ------------------------------------------------------- */
@@ -85,13 +226,13 @@
   opacity:0.32; cursor:not-allowed; filter:grayscale(0.6);
 }
 #ni-cmd-fab.ni-fab-locked:hover { transform:none; box-shadow:0 4px 16px rgba(26,27,31,0.3),0 1px 4px rgba(26,27,31,0.12); background:var(--primary); }
-#ni-cmd-fab.ni-fab-locked::after { content:'Select a plant to unlock'; }
+#ni-cmd-fab.ni-fab-locked::after { content:attr(data-locked-label); }
 #ni-cmd-fab.ni-fab-active {
   background:var(--accent);
   box-shadow:0 4px 20px rgba(var(--accent-rgb,31,95,191),0.45);
 }
 #ni-cmd-fab::after {
-  content:'ctrl + k';
+  content:attr(data-label);
   position:absolute; right:68px; bottom:50%; transform:translateY(50%);
   background:var(--primary); color:var(--primary-fg);
   font-size:11px; font-weight:600; padding:5px 12px;
@@ -127,10 +268,6 @@
 .ni-cp-input { flex:1; border:none; outline:none; background:transparent;
   font-size:15px; font-family:inherit; color:var(--fg); caret-color:var(--accent); }
 .ni-cp-input::placeholder { color:var(--fg-faint); }
-.ni-cp-kbd-badge { font-size:10px; font-weight:700; letter-spacing:0.06em;
-  background:var(--bg-subtle); border:1px solid var(--line-strong);
-  border-radius:6px; padding:2px 8px; color:var(--fg-mute);
-  flex-shrink:0; box-shadow:0 1px 0 var(--line-strong); }
 
 .ni-cp-results { flex:1; min-height:0; overflow-y:auto; padding:6px 0; }
 .ni-cp-results::-webkit-scrollbar { width:4px; }
@@ -227,12 +364,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 /* ── Language Switcher Pill ──────────────────────────────── */
 #ni-lang-pill{width:100px;min-width:70px;height:28px;padding:3px 6px;border-radius:var(--r-sm);background:var(--bg-elev);border:1px solid var(--line-strong);cursor:pointer;font-size:11px;font-weight:600;color:var(--fg);}
 #ni-lang-pill:hover{border-color:var(--accent);}
-.ni-lang-caret{font-size:9px;opacity:.7;}
-.ni-lang-dropdown{display:none;position:absolute;bottom:calc(100% + 6px);left:0;min-width:160px;background:var(--bg-elev);border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.18);z-index:9999;}
-.ni-lang-dropdown.ni-lang-open{display:block;}
-.ni-lang-opt{display:block;width:100%;padding:7px 12px;background:none;border:none;text-align:left;font-size:12px;color:var(--fg);cursor:pointer;}
-.ni-lang-opt:hover{background:var(--bg-hover,rgba(255,255,255,.06));}
-.ni-lang-opt.ni-lang-active{color:var(--accent);font-weight:600;}
 
 /* ── Command palette close button ───────────────────────── */
 .ni-cp-close-btn {
@@ -364,6 +495,46 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 .ni-breakdown-dlg { border:none; padding:0; border-radius:var(--r-xl); box-shadow:var(--shadow-lg); }
 .ni-breakdown-dlg::backdrop { background:rgba(26,27,31,0.45); }
 .ni-breakdown-dlg > div { background:var(--bg-elev); border-radius:var(--r-xl); }
+/* Confidence breakdown content (injected once with the rest, not into every dialog). */
+.ni-breakdown-dlg .ni-conf-body { padding:22px 24px; min-width:520px; max-width:580px; display:flex; flex-direction:column; gap:18px }
+.ni-breakdown-dlg .ni-conf-header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px }
+.ni-breakdown-dlg .ni-conf-score-row { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap }
+.ni-breakdown-dlg .ni-conf-score { font-size:30px; font-weight:700; line-height:1 }
+.ni-breakdown-dlg .ni-conf-score-max { font-size:13px; color:var(--fg-mute); font-weight:400; margin-left:2px }
+.ni-breakdown-dlg .ni-conf-tier { display:inline-block; font-size:10px; font-weight:700; padding:3px 10px; border-radius:10px; letter-spacing:.1em }
+.ni-breakdown-dlg .ni-conf-horizon { font-size:11px; color:var(--fg-mute); margin-top:6px }
+.ni-breakdown-dlg .ni-conf-close { background:none; border:none; cursor:pointer; font-size:18px; color:var(--fg-mute); padding:0; line-height:1 }
+.ni-breakdown-dlg .ni-conf-chart-wrap { position:relative }
+.ni-breakdown-dlg .ni-conf-chart-wrap canvas { width:100%; height:120px; display:block; border-radius:8px; background:var(--bg-subtle) }
+.ni-breakdown-dlg .ni-conf-chart-axis { display:flex; justify-content:space-between; margin-top:4px; font-size:9.5px; color:var(--fg-faint) }
+.ni-breakdown-dlg .ni-conf-tiles { display:grid; grid-template-columns:repeat(3,1fr); gap:8px }
+.ni-breakdown-dlg .ni-conf-tile { padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg-subtle); display:flex; flex-direction:column; gap:3px; font:inherit; color:inherit; text-align:left; width:100%; cursor:pointer; transition:border-color .12s, background .12s }
+.ni-breakdown-dlg .ni-conf-tile:hover:not(:disabled) { border-color:var(--fg-mute) }
+.ni-breakdown-dlg .ni-conf-tile:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+.ni-breakdown-dlg .ni-conf-tile:active:not(:disabled) { background:var(--bg) }
+.ni-breakdown-dlg .ni-conf-tile[aria-pressed="true"] { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) }
+.ni-breakdown-dlg .ni-conf-tile:disabled { cursor:default; opacity:.6 }
+.ni-breakdown-dlg .ni-conf-listwrap { position:relative }
+.ni-breakdown-dlg .ni-conf-clear { position:absolute; top:12px; right:0; background:none; border:none; padding:0; font-size:11px; color:var(--accent); cursor:pointer; text-decoration:underline }
+.ni-breakdown-dlg .ni-conf-clear:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+.ni-breakdown-dlg .ni-conf-tile-num { font-size:22px; font-weight:700; line-height:1.1 }
+.ni-breakdown-dlg .ni-conf-tile-lbl { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--fg-mute); font-weight:600 }
+.ni-breakdown-dlg .ni-conf-tile-sub { font-size:11px; color:var(--fg-mute) }
+.ni-breakdown-dlg .ni-conf-alerts { border-top:1px solid var(--line); padding-top:14px }
+.ni-breakdown-dlg .ni-conf-alerts summary { font-size:10.5px; font-weight:600; color:var(--fg-mute); text-transform:uppercase; letter-spacing:.05em; cursor:pointer; list-style:none; display:flex; align-items:center; gap:6px }
+.ni-breakdown-dlg .ni-conf-alerts summary::-webkit-details-marker { display:none }
+.ni-breakdown-dlg .ni-alerts-caret { display:inline-block; transition:transform .15s; font-size:9px }
+.ni-breakdown-dlg .ni-conf-alerts[open] .ni-alerts-caret { transform:rotate(90deg) }
+.ni-breakdown-dlg .ni-conf-alerts-list { max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; margin-top:8px }
+.ni-breakdown-dlg .ni-conf-row { display:flex; align-items:flex-start; gap:10px; padding:7px 10px; border-radius:6px; background:var(--bg-subtle) }
+.ni-breakdown-dlg .ni-conf-dot { flex-shrink:0; width:8px; height:8px; border-radius:50%; margin-top:6px }
+.ni-breakdown-dlg .ni-conf-msg { flex:1; font-size:12px; color:var(--fg); line-height:1.45 }
+.ni-breakdown-dlg .ni-conf-date { flex-shrink:0; font-size:10.5px; color:var(--fg-mute); white-space:nowrap; margin-top:3px }
+.ni-breakdown-dlg .ni-conf-goto { flex-shrink:0; padding:2px 8px; font-size:11px; border-radius:4px; border:1px solid var(--line); background:none; cursor:pointer; color:var(--fg-mute); white-space:nowrap; margin-top:1px; min-width:24px; text-align:center }
+.ni-breakdown-dlg .ni-conf-goto:hover { color:var(--fg); border-color:var(--fg-mute) }
+.ni-breakdown-dlg .ni-conf-goto-label { display:none }
+.ni-breakdown-dlg .ni-conf-goto:hover .ni-conf-goto-arrow { display:none }
+.ni-breakdown-dlg .ni-conf-goto:hover .ni-conf-goto-label { display:inline }
 
 /* ── CommandPalette: Right Now / Selection / Intent item types ───── */
 .ni-cp-section.ni-cp-section--right-now { color:var(--amber,#c68f24); }
@@ -377,7 +548,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   background:var(--amber,#c68f24); margin-right:5px; vertical-align:middle;
   animation:ni-need-pulse 1.8s ease-in-out infinite; }
 @keyframes ni-need-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.45;transform:scale(0.7)} }
-.ni-cp-hint kbd { font-family:inherit; }
 `;
     document.head.appendChild(s);
   })();
@@ -390,7 +560,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     open() {
       return new Promise((res, rej) => {
-        const req = indexedDB.open('nimbus-intel', 1);
+        // Version 2 adds `snapshot_meta`: one small row per snapshot (ts, label, plant, count, fingerprint). The
+        // `snapshots` store keeps the full records (task rows inline) exactly as version 1 wrote them, so boot reads
+        // only the metadata and a body is fetched by id when a restore or a diff needs it.
+        const req = indexedDB.open('nimbus-intel', 2);
         req.onupgradeneeded = e => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains('snapshots')) {
@@ -401,14 +574,57 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             db.createObjectStore('scenarios', { keyPath: 'name' });
           if (!db.objectStoreNames.contains('patterns'))
             db.createObjectStore('patterns', { keyPath: 'key' });
+          if (!db.objectStoreNames.contains('snapshot_meta')) {
+            const ms = db.createObjectStore('snapshot_meta', { keyPath: 'id' });
+            ms.createIndex('ts', 'ts');
+            // Rows with no plant (very old snapshots) have no valid compound key and are simply not in this index.
+            ms.createIndex('plant_ts', ['plant', 'ts']);
+            // One-time: describe the records a version 1 database already holds (read once, here, never at boot).
+            if (e.oldVersion >= 1) IntelDB.migrateLegacyMeta(e.target.transaction);
+          }
         };
-        req.onsuccess = e => { IntelDB._db = e.target.result; res(IntelDB._db); };
+        req.onsuccess = e => {
+          IntelDB._db = e.target.result;
+          // A newer tab upgrading the database must not be blocked by this one.
+          IntelDB._db.onversionchange = () => { try { IntelDB._db.close(); } catch {} IntelDB._db = null; };
+          res(IntelDB._db);
+        };
+        // An older tab still holds version 1 open, so the upgrade waits for it. Do not hold the whole boot behind that:
+        // continue without persistence now (the request completes later and persistence resumes for new snapshots).
+        req.onblocked = () => rej(new Error('IndexedDB upgrade blocked by another tab'));
         req.onerror   = e => {
-          (window.NIMBUS && window.NIMBUS.ErrorLog
-            ? window.NIMBUS.ErrorLog.warn('intel', '[IntelDB] open failed', { err: String(e.target.error), errorCode: 'internal' })
-            : console.warn('[IntelDB]', e.target.error));
+          _warn('[IntelDB] open failed', e.target.error);
           rej(e.target.error);
         };
+      });
+    },
+
+    // Upgrade handler body: a metadata row for every version 1 snapshot record. Failures are swallowed per record:
+    // the upgrade itself must never abort over history that is only a convenience.
+    migrateLegacyMeta(tx) {
+      try {
+        const metaStore = tx.objectStore('snapshot_meta');
+        const req = tx.objectStore('snapshots').openCursor();
+        req.onsuccess = ev => {
+          const cursor = ev.target.result;
+          if (!cursor) return;
+          try { metaStore.put(snapshotMetaOf(cursor.value)); } catch {}
+          cursor.continue();
+        };
+      } catch {}
+    },
+
+    // One atomic write of a snapshot: the full record into `snapshots` (autoIncrement key) and its metadata row
+    // (same id) into `snapshot_meta`. Resolves with the id; undefined when there is no database.
+    putSnapshot(body, meta) {
+      if (!IntelDB._db) return Promise.resolve();
+      return new Promise((res, rej) => {
+        const tx = IntelDB._db.transaction(['snapshots', 'snapshot_meta'], 'readwrite');
+        const req = tx.objectStore('snapshots').put(body);
+        req.onsuccess = () => { tx.objectStore('snapshot_meta').put({ ...meta, id: req.result }); };
+        tx.oncomplete = () => res(req.result);
+        tx.onerror    = e => rej(e.target.error);
+        tx.onabort    = () => rej(tx.error || new Error('IndexedDB transaction aborted'));
       });
     },
 
@@ -421,6 +637,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         const req = tx.objectStore(store).put(value);
         tx.oncomplete = () => res(req.result);
         tx.onerror    = e => rej(e.target.error);
+        // A quota or constraint abort fires onabort without a prior onerror on the transaction: without this the
+        // promise never settled and the snapshot's caller waited forever.
+        tx.onabort    = () => rej(tx.error || new Error('IndexedDB transaction aborted'));
       });
     },
 
@@ -451,46 +670,37 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
     },
 
-    getAll(store) {
-      if (!IntelDB._db) return Promise.resolve([]);
-      return new Promise((res, rej) => {
-        const tx  = IntelDB._db.transaction(store, 'readonly');
-        const req = tx.objectStore(store).getAll();
-        req.onsuccess = e => res(e.target.result || []);
-        req.onerror   = e => rej(e.target.error);
-      });
-    },
-
-    deleteRecord(store, key) {
-      if (!IntelDB._db) return Promise.resolve();
-      return new Promise((res, rej) => {
-        const tx = IntelDB._db.transaction(store, 'readwrite');
-        tx.objectStore(store).delete(key);
-        tx.oncomplete = res;
-        tx.onerror    = e => rej(e.target.error);
-      });
-    },
-
-    pruneSnapshots(keepN = 200) {
+    // Keep the newest `keepN` snapshots of ONE plant, so a busy plant never evicts another plant's history. `plant`
+    // undefined prunes across every plant (the old global rule); null prunes the rows that have no plant.
+    // Walks the metadata store with KEY cursors only (no payload is loaded) and deletes the oldest rows from both stores.
+    pruneSnapshots(keepN = 200, plant) {
       if (!IntelDB._db) return;
-      // Count, then walk the ts index with a KEY cursor (keys only: no snapshot payloads are
-      // loaded) deleting the oldest by primary key until keepN remain.
       const fn = () => {
-        const tx = IntelDB._db.transaction('snapshots', 'readwrite');
-        const os = tx.objectStore('snapshots');
-        const countReq = os.count();
-        countReq.onsuccess = () => {
-          let excess = countReq.result - keepN;
-          if (excess <= 0) return;
-          const curReq = os.index('ts').openKeyCursor();
-          curReq.onsuccess = e => {
-            const cursor = e.target.result;
-            if (!cursor || excess <= 0) return;
-            os.delete(cursor.primaryKey);
-            excess -= 1;
-            cursor.continue();
+        // Runs from an idle callback: a closed database (transaction() throws) must not surface as an uncaught error.
+        try {
+          const tx = IntelDB._db.transaction(['snapshots', 'snapshot_meta'], 'readwrite');
+          const bodies = tx.objectStore('snapshots');
+          const metas = tx.objectStore('snapshot_meta');
+          const perPlant = typeof plant === 'string' && typeof IDBKeyRange !== 'undefined';
+          const source = perPlant ? metas.index('plant_ts') : metas.index('ts');
+          const range = perPlant ? IDBKeyRange.bound([plant, -Infinity], [plant, Infinity]) : undefined;
+          const countReq = range ? source.count(range) : source.count();
+          countReq.onsuccess = () => {
+            let excess = countReq.result - keepN;
+            if (excess <= 0) return;
+            const curReq = range ? source.openKeyCursor(range) : source.openKeyCursor();
+            curReq.onsuccess = e => {
+              const cursor = e.target.result;
+              if (!cursor || excess <= 0) return;
+              bodies.delete(cursor.primaryKey);
+              metas.delete(cursor.primaryKey);
+              excess -= 1;
+              cursor.continue();
+            };
           };
-        };
+        } catch (e) {
+          _warn('IntelDB snapshot prune failed', e);
+        }
       };
       if (window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 2000 });
       else setTimeout(fn, 2000);
@@ -509,35 +719,40 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const tasks    = Store.tasksArr;
       const errAlerts  = alerts.filter(a => a.sev === 'err');
       const warnAlerts = alerts.filter(a => a.sev === 'warn');
-      const unscheduled = tasks.filter(t => !t.start_date || !t.end_date);
+      // Every order is finish-anchored: a row with a finish and no stored start is placed (its start is derived), so
+      // only a row with neither date still needs scheduling.
+      const unscheduled = tasks.filter(task => !task.start_date && !task.end_date);
 
-      // Peak utilization — use sync compute, but trigger worker refresh for next call
-      let maxUtil = 0, overloadedLine = null;
+      // Peak utilization — use sync compute, but trigger worker refresh for next call. Only days that count as
+      // overloaded under the shared rule (the alert's 0.05 h tolerance) are tracked, so a full day never reads as
+      // overloaded here while the alert says it is fine; maxUtil stays 0 when there is none.
+      let maxUtil = 0, overloadedLine = null, overloadedDay = null;
       try {
         // One clock (OQ52 / I13): the plant's today, the same start the Dashboard matrix and the prewarm use.
         const now = _plantToday();
         // computeMatrix serves the shared cache (the async prewarm fills it) and fills it itself on a miss;
         // the old extra worker post here only repeated that work and wrote an unresolved matrix.
-        const matrix = Utilization.computeMatrix(now, 7);
+        const matrix = Utilization.computeMatrix(now, UTIL_SCAN_DAYS);
 
         for (const [line, lineData] of Object.entries(matrix)) {
-          for (const row of Object.values(lineData)) {
-            if (row.effectiveCapacity > 0) {
-              const ratio = row.scheduled / row.effectiveCapacity;
-              if (ratio > maxUtil) { maxUtil = ratio; overloadedLine = line; }
+          for (const [day, row] of Object.entries(lineData)) {
+            // The row's full pre-buffer capacity (`capacity`) is the third argument, so a fully buffered day counts.
+            if (NimbusComputeCore.isOverloaded(row.scheduled, row.effectiveCapacity, row.capacity)) {
+              // A fully buffered day has no effective capacity to divide by: use the full-capacity ratio, floored at 1 so
+              // it still reads as at least full (a finite figure, never Infinity).
+              const ratio = row.effectiveCapacity > 0 ? row.scheduled / row.effectiveCapacity : Math.max(1, row.scheduled / row.capacity);
+              if (ratio > maxUtil) { maxUtil = ratio; overloadedLine = line; overloadedDay = day; }
             }
           }
         }
       } catch (e) {
-        (window.NIMBUS && window.NIMBUS.ErrorLog
-          ? window.NIMBUS.ErrorLog.warn('intel', 'NeedsEngine util scan failed', { err: String(e), errorCode: 'internal' })
-          : console.warn('[NeedsEngine] util scan failed', e));
+        _warn('NeedsEngine util scan failed', e);
       }
 
       // Last snapshot age — scoped to current plant only
       const plantSnaps = TimeMachine._plantSnaps();
       const lastSnap = plantSnaps.length ? plantSnaps[plantSnaps.length - 1] : null;
-      const minsSinceSnap = lastSnap ? Math.floor((Date.now() - lastSnap.ts) / 60000) : null;
+      const minsSinceSnap = lastSnap ? Math.floor((Date.now() - lastSnap.ts) / MIN_MS) : null;
 
       // Confidence delta (last 2 history entries)
       const ch = Confidence._history;
@@ -548,21 +763,26 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const selSize = selIds.length;
       const selStats = selSize ? (NIMBUS.Selection?.stats?.() || {}) : {};
 
-      // Blackout risk (orders within 48h of a blackout)
+      // Blackout risk (orders that touch a blackout starting or running within the next 48 h). The window is the
+      // plant's clock; a blackout already in progress counts (it has not ended yet); and a blackout only puts an
+      // order at risk when it covers that order's own line (a line blackout) or plant (a plant blackout).
       let blackoutRisk = 0;
       try {
-        const now2    = Date.now();
-        const horizon = now2 + 48 * 3600000;
-        const bkts = Store.blocks.concat(Store.plantBlocks).filter(b => b.start > now2 && b.start < horizon);
+        const now2    = _plantClock().getTime();
+        const horizon = now2 + BLACKOUT_LOOKAHEAD_MS;
+        const win = b => { const s = +new Date(b.start), e = +new Date(b.end); return { b, s, e }; };
+        const bkts = Store.blocks.concat(Store.plantBlocks).map(win)
+          .filter(w => Number.isFinite(w.s) && Number.isFinite(w.e) && w.e > now2 && w.s < horizon);
         if (bkts.length) {
-          blackoutRisk = tasks.filter(t => Util.scheduleIntervals(t).some(interval =>
-            bkts.some(b => interval.end.getTime() > b.start && interval.start.getTime() < b.end)
-          )).length;
+          blackoutRisk = tasks.filter(task => {
+            const taskPlant = task.PLANT || Store.selectedPlant;
+            const hits = bkts.filter(({ b }) => (!b.plant || b.plant === taskPlant) && (!b.line || b.line === task.MACHINE));
+            return hits.length && Util.scheduleIntervals(task).some(interval =>
+              hits.some(h => interval.end.getTime() > h.s && interval.start.getTime() < h.e));
+          }).length;
         }
       } catch (e) {
-        (window.NIMBUS && window.NIMBUS.ErrorLog
-          ? window.NIMBUS.ErrorLog.warn('intel', 'NeedsEngine blackout-risk scan failed', { err: String(e), errorCode: 'internal' })
-          : console.warn('[NeedsEngine] blackout-risk scan failed', e));
+        _warn('NeedsEngine blackout-risk scan failed', e);
       }
 
       return {
@@ -572,6 +792,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         unscheduledCount: unscheduled.length,
         maxUtil,
         overloadedLine,
+        overloadedDay,
         minsSinceSnap,
         confScore:     Confidence._score,
         confDelta,
@@ -598,19 +819,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       return [
         {
           id: 'conflict-jump',
-          label: s => t('cmdp.need_conflict_jump', { count: s.errCount, plural: s.errCount !== 1 ? 's' : '' }),
+          label: s => _plural(s.errCount, 'cmdp.need_conflict_jump'),
           sub:   () => t('cmdp.sub_scroll_to_overlap'),
           icon:  '🚨',
           score: s => s.errCount > 0 ? 90 + Math.min(s.errCount * 2, 9) : 0,
           when:  s => s.errCount > 0 && s.hasPlant,
           run()  {
             CommandPalette.close();
-            const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
-            if (!err) { Toast.show(t('toast.no_active_conflicts'), 'info', 1800); return; }
-            // Routed through AlertsUIAdapter.focus (not Timeline.focus directly) so
-            // this also works for taskId-less alerts (every overload/closed/calendar
-            // alert) instead of silently no-oping on them — see B3.
-            NIMBUS.AlertsUIAdapter.focus(err.id);
+            _jumpToFirstConflict('toast.no_active_conflicts');
           }
         },
         {
@@ -622,14 +838,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           when:  s => s.maxUtil >= 1.0 && s.hasPlant,
           run(s) {
             CommandPalette.close();
-            NIMBUS.App.gotoGanttTimeline();
-            const sample = Store.tasksArr.find(t => t.MACHINE === s.overloadedLine);
-            if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
+            _gotoLine(s.overloadedLine, s.overloadedDay);   // the overloaded day, not just any order on the line
           }
         },
         {
           id: 'unscheduled-review',
-          label: s => t('cmdp.need_unscheduled_review', { count: s.unscheduledCount, plural: s.unscheduledCount !== 1 ? 's' : '' }),
+          label: s => _plural(s.unscheduledCount, 'cmdp.need_unscheduled_review'),
           sub:   () => t('cmdp.sub_switch_to_orders_table'),
           icon:  '📋',
           score: s => s.unscheduledCount > 0 ? 60 + Math.min(s.unscheduledCount, 15) : 0,
@@ -641,14 +855,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           label: s => t('cmdp.need_snapshot_due', { mins: s.minsSinceSnap }),
           sub:   () => t('cmdp.sub_take_checkpoint'),
           icon:  '📸',
-          score: s => (s.minsSinceSnap !== null && s.minsSinceSnap >= 20)
+          score: s => (s.minsSinceSnap !== null && s.minsSinceSnap >= SNAPSHOT_DUE_MINS)
             ? 40 + Math.min(Math.floor(s.minsSinceSnap / 5), 25) : 0,
-          when:  s => s.minsSinceSnap !== null && s.minsSinceSnap >= 20 && s.hasPlant,
+          when:  s => s.minsSinceSnap !== null && s.minsSinceSnap >= SNAPSHOT_DUE_MINS && s.hasPlant,
           run()  {
             CommandPalette.close();
-            const label = `Manual · ${Util._fmtTimePref(new Date())}`;
-            TimeMachine.snapshot(label);
-            Toast.show(t('toast.snapshot_saved'), 'success', 1400);
+            TimeMachine.checkpoint('snap.manual');
           }
         },
         {
@@ -660,14 +872,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           when:  s => s.snapshotCount === 0 && s.hasPlant,
           run()  {
             CommandPalette.close();
-            const label = `First snapshot · ${Util._fmtTimePref(new Date())}`;
-            TimeMachine.snapshot(label);
-            Toast.show(t('toast.snapshot_saved'), 'success', 1400);
+            TimeMachine.checkpoint('snap.first');
           }
         },
         {
           id: 'blackout-risk',
-          label: s => t('cmdp.need_blackout_risk', { count: s.blackoutRisk, plural: s.blackoutRisk !== 1 ? 's' : '' }),
+          label: s => _plural(s.blackoutRisk, 'cmdp.need_blackout_risk'),
           sub:   () => t('cmdp.sub_review_blackout_overlap'),
           icon:  '🚫',
           score: s => s.blackoutRisk > 0 ? 75 : 0,
@@ -741,7 +951,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             CommandPalette.close();
             // Scoped to the SELECTED plant, and to orders that can still take a firm: frozen and running
             // orders are already locked (firmPlan), so they are neither counted nor written.
-            const plantIds = Store.tasksForSelectedPlant().map(t => t.id);
+            const plantIds = Store.tasksForSelectedPlant().map(task => task.id);
             const freezePlan = NIMBUS.Engine?.firmPlan?.(plantIds);
             const unfirmedIds = freezePlan?.firm ?? [];
             const lockedCount = freezePlan?.locked?.length ?? 0;
@@ -750,12 +960,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
               // Native confirm on purpose: Modal.confirm would add a NIMBUS.Modal consumer to this
               // classic script, and the legacy-surface ratchet only allows that surface to shrink.
               if (!window.confirm(t('confirm.firm_all', { count: unfirmedIds.length }))) return;
-              _pushTaskUndo('Firm All (freeze)', unfirmedIds, true);
+              _pushTaskUndo(t('undo.firm_all_freeze'), unfirmedIds, true);
               NIMBUS.Engine?.applyFirm?.(unfirmedIds, true, 'cmd-palette');
             }
             Alerts.scheduleRecompute();
-            const label = `Frozen · ${Util._fmtTimePref(new Date())}`;
-            TimeMachine.snapshot(label);
+            TimeMachine.checkpoint('snap.frozen', null, { toast: false });
             Toast.show(t('toast.freeze_saved'), 'success', 3000);
             if (lockedCount) Toast.show(t('toast.firm_skipped_locked', { n: lockedCount }), 'info');
           }
@@ -795,9 +1004,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           icon:  '📸',
           run()  {
             CommandPalette.close();
-            const label = `Intent · ${Util._fmtTimePref(new Date())}`;
-            TimeMachine.snapshot(label);
-            Toast.show(t('toast.snapshot_saved'), 'success', 1400);
+            TimeMachine.checkpoint('snap.intent');
           }
         },
         {
@@ -807,17 +1014,15 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           icon:  '🚨',
           run()  {
             CommandPalette.close();
-            const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a, b) => a.time - b.time)[0];
-            if (!err) { Toast.show(t('toast.no_conflicts_clean'), 'info', 1800); return; }
-            // Routed through AlertsUIAdapter.focus (not Timeline.focus directly) so
-            // this also works for taskId-less alerts (every overload/closed/calendar
-            // alert) instead of silently no-oping on them — see B3.
-            NIMBUS.AlertsUIAdapter.focus(err.id);
+            _jumpToFirstConflict('toast.no_conflicts_clean');
           }
         },
       ];
 
-      const results = bank.filter(intent => intent.keywords.some(kw => q.includes(kw)));
+      // A keyword must start a word: plain substring matching offered Freeze for "!shipping" (pin) and Rush for
+      // "!photo" (hot). Inflections still match ("locked", "exporting"), only a match from the middle of a word does not.
+      const startsWord = kw => new RegExp(`(?:^|[^a-z0-9])${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(q);
+      const results = bank.filter(intent => intent.keywords.some(startsWord));
       if (!results.length) {
         // Loose word-level fallback
         const words = q.split(/\s+/);
@@ -845,27 +1050,21 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _results:   [],
     _cursor:    0,
     _lastQuery: '',
-    _recent: {
-      _key: 'nimbus.recentCmds',
-      get() { try { return JSON.parse(localStorage.getItem('nimbus.recentCmds')) || []; } catch { return []; } },
-      push(label) {
-        const a = CommandPalette._recent.get().filter(l => l !== label);
-        a.unshift(label);
-        localStorage.setItem('nimbus.recentCmds', JSON.stringify(a.slice(0, 5)));
-      }
-    },
 
     init() {
       CommandPalette._buildPanel();
       document.addEventListener('keydown', e => {
-        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        // Lower-cased: with Caps Lock on, the key arrives as 'K'.
+        if ((e.metaKey || e.ctrlKey) && String(e.key || '').toLowerCase() === 'k') {
           e.preventDefault();
           if (!Store.selectedPlant) return;
           CommandPalette.open();
         }
       });
       Store.subscribe(evt => {
-        if (!evt?.type || evt.type === 'tasks:bulk' || evt.type === 'tasks:bulkUpdate' || evt.type === 'plant:selected')
+        // The index holds each order's label (name, machine, colour) and the firm-dependent selection commands, so a
+        // single edit, a removal and a firm change must drop it too, not only the bulk events.
+        if (!evt?.type || PALETTE_INDEX_EVENTS.has(evt.type))
           CommandPalette._index = null;
         if (evt?.type === 'plant:selected') {
           const fab = document.getElementById('ni-cmd-fab');
@@ -889,6 +1088,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const fab = document.createElement('button');
       fab.id = 'ni-cmd-fab';
       fab.setAttribute('aria-label', NIMBUS.Util.t('aria.open_command_palette'));
+      // The two ::after tooltips read these (CSS content cannot call t()).
+      fab.setAttribute('data-label', t('cmdp.fab_hint'));
+      fab.setAttribute('data-locked-label', t('cmdp.fab_locked_hint'));
       fab.textContent = '🧹';
       fab.addEventListener('click', () => {
         if (fab.classList.contains('ni-fab-locked')) return;
@@ -907,19 +1109,19 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           <svg class="ni-cp-search-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor">
             <circle cx="8.5" cy="8.5" r="5.5"/><path d="M14 14l3.5 3.5" stroke-linecap="round"/>
           </svg>
-          <input class="ni-cp-input" id="ni-cp-input" placeholder="${t('cmdp.search_placeholder')}" autocomplete="off" spellcheck="false">
-          <button class="ni-cp-close-btn" id="ni-cp-close-btn" title="${t('cmdp.close_button_title')}">✕</button>
+          <input class="ni-cp-input" id="ni-cp-input" placeholder="${_esc(t('cmdp.search_placeholder'))}" autocomplete="off" spellcheck="false">
+          <button class="ni-cp-close-btn" id="ni-cp-close-btn" title="${_esc(t('cmdp.close_button_title'))}">✕</button>
         </div>
         <div class="ni-cp-results" id="ni-cp-results"></div>
         <div class="ni-cp-footer">
-          <span class="ni-cp-hint"><kbd>↑↓</kbd> ${t('ui.hint_navigate')}</span>
-          <span class="ni-cp-hint"><kbd>↵</kbd> ${t('ui.hint_select')}</span>
-          <span class="ni-cp-hint"><kbd>esc</kbd> ${t('ui.hint_close')}</span>
+          <span class="ni-cp-hint"><kbd>↑↓</kbd> ${_esc(t('ui.hint_navigate'))}</span>
+          <span class="ni-cp-hint"><kbd>↵</kbd> ${_esc(t('ui.hint_select'))}</span>
+          <span class="ni-cp-hint"><kbd>esc</kbd> ${_esc(t('ui.hint_close'))}</span>
           <span class="ni-cp-index-count" id="ni-cp-index-count"></span>
-          <select id="ni-lang-pill" title="${t('tip.lang_switcher')}" aria-label="${t('tip.lang_switcher')}">
+          <select id="ni-lang-pill" title="${_esc(t('tip.lang_switcher'))}" aria-label="${_esc(t('tip.lang_switcher'))}">
             ${LangSwitcher._langs.map(l => `<option value="${l.code}"${l.code === LangSwitcher.current() ? ' selected' : ''}>${l.label} — ${l.name}</option>`).join('')}
           </select>
-          <button type="button" id="ni-dm-pill" title="${t('tip.toggle_light_dark')}" aria-label="${t('tip.toggle_light_dark')}" aria-pressed="${DarkMode.isDark()}">
+          <button type="button" id="ni-dm-pill" title="${_esc(t('tip.toggle_light_dark'))}" aria-label="${_esc(t('tip.toggle_light_dark'))}" aria-pressed="${DarkMode.isDark()}">
             <span class="ni-dm-icon" aria-hidden="true">☀️</span><span class="ni-dm-thumb"></span><span class="ni-dm-icon" aria-hidden="true">🌙</span>
           </button>
         </div>`;
@@ -945,11 +1147,16 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const input = panel.querySelector('#ni-cp-input');
       input.addEventListener('focus',  () => panel.classList.add('ni-cp-focused'));
       input.addEventListener('blur',   () => panel.classList.remove('ni-cp-focused'));
-      input.addEventListener('input',  Util.debounce(() => CommandPalette._search(input.value), 60));
+      input.addEventListener('input',  Util.debounce(() => CommandPalette._search(input.value), PALETTE_SEARCH_DEBOUNCE_MS));
       input.addEventListener('keydown', e => {
         if (e.key === 'ArrowDown') { e.preventDefault(); CommandPalette._move(1); }
         if (e.key === 'ArrowUp')   { e.preventDefault(); CommandPalette._move(-1); }
-        if (e.key === 'Enter')     { e.preventDefault(); CommandPalette._activate(); }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          // Enter inside the input debounce (PALETTE_SEARCH_DEBOUNCE_MS) would run the PREVIOUS query's top result: search what is typed first.
+          if (input.value.trim() !== CommandPalette._lastQuery) CommandPalette._search(input.value);
+          CommandPalette._activate();
+        }
         if (e.key === 'Escape')    { CommandPalette.close(); }
       });
       document.addEventListener('mousedown', e => {
@@ -961,31 +1168,26 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _buildIndex() {
       const idx = [...CommandPalette._buildSelectionCommands()];
       const tasks = Store.tasksForSelectedPlant();
-      for (const t of tasks) {
-        const order = t.ORDER || t.PRODUCTION_ORDER;
-        const label = [t.text, order, t.MATERIAL_NUMBER].filter(Boolean).join(' · ');
-        const sub   = `${t.MACHINE || '?'} · ${t.COLOR || ''}`.trim().replace(/·\s*$/, '');
+      for (const task of tasks) {
+        const order = task.ORDER || task.PRODUCTION_ORDER;
+        const label = [task.text, order, task.MATERIAL_NUMBER].filter(Boolean).join(' · ');
+        const sub   = `${task.MACHINE || '?'} · ${task.COLOR || ''}`.trim().replace(/·\s*$/, '');
+        const id    = task.id;
         idx.push({
-          type: 'order', label, sub, icon: '📦', id: t.id,
+          type: 'order', label, sub, icon: '📦', id,
           run() {
             CommandPalette.close();
-            NIMBUS.App.gotoGanttTimeline();
-            setTimeout(() => {
-              const task = NIMBUS.Store.tasks[t.id];
-              if (task) { NIMBUS.Inspector.show(task); NIMBUS.Timeline.focus(String(t.id)); }
-            }, 100);
+            _focusOrderAfterGoto(id);
           }
         });
       }
-      const lines = [...new Set(tasks.map(t => t.MACHINE).filter(Boolean))];
+      const lines = [...new Set(tasks.map(task => task.MACHINE).filter(Boolean))];
       for (const line of lines) {
         idx.push({
           type: 'line', label: t('cmdp.label_go_to_line', { line }), sub: t('cmdp.sub_scroll_to_this_line'), icon: '🏭',
           run() {
             CommandPalette.close();
-            NIMBUS.App.gotoGanttTimeline();
-            const sample = Store.tasksForSelectedPlant().find(t => t.MACHINE === line);
-            if (sample) setTimeout(() => NIMBUS.Timeline.focus(String(sample.id)), 100);
+            _gotoLine(line);
           }
         });
         idx.push({
@@ -1003,17 +1205,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         { type:'action', label:t('cmdp.label_jump_first_conflict_title'), sub:t('cmdp.sub_scroll_to_error_alert'), icon:'🚨',
           run(){
             CommandPalette.close();
-            const err = (Store.alerts || []).filter(a => a.sev === 'err').sort((a,b) => a.time - b.time)[0];
-            if (!err) { Toast.show(t('toast.no_conflicts_clean'), 'info', 1800); return; }
-            NIMBUS.App.gotoGanttTimeline();
-            setTimeout(() => { if (err.taskId) NIMBUS.Timeline.focus(String(err.taskId)); }, 100);
+            _jumpToFirstConflict('toast.no_conflicts_clean');
           } },
         { type:'action', label:t('cmdp.label_take_snapshot_title'), sub:t('cmdp.sub_save_manual_checkpoint'), icon:'📷',
           run(){
             CommandPalette.close();
-            const label = `Manual · ${Util._fmtTimePref(new Date())}`;
-            TimeMachine.snapshot(label);
-            Toast.show(t('toast.snapshot_saved'), 'success', 1400);
+            TimeMachine.checkpoint('snap.manual');
           } },
         { type:'action', label:t('cmdp.label_print_export_title'), sub:t('cmdp.sub_open_print_export_dialog'), icon:'🖨️',
           run(){ CommandPalette.close(); NIMBUS.Printer?.open?.(); } },
@@ -1024,6 +1221,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           run(){ CommandPalette.close(); NIMBUS.App.gotoGanttTimeline(); Toast.show(t('toast.ripple_howto'), 'info', 4000); } },
         { type:'action', label:t('cmdp.label_reload_data'), sub:t('cmdp.sub_reread_excel'), icon:'↺', run(){ CommandPalette.close(); NIMBUS.Persistence?.reload?.(); } }
       );
+      // Lower-case each row's text once here, not on every keystroke (topPaletteMatches reads these).
+      for (const row of idx) { row.labelLc = String(row.label).toLowerCase(); row.subLc = String(row.sub || '').toLowerCase(); }
       CommandPalette._index = idx;
       const actionCt = idx.filter(i => i.type === 'action').length;
       const lineCt   = idx.filter(i => i.type === 'line'  ).length / 2;
@@ -1038,24 +1237,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       }
     },
 
-    _fuzzy(q, text) {
-      const qt = q.toLowerCase(), tt = text.toLowerCase();
-      if (tt.startsWith(qt)) return 3;
-      if (tt.includes(qt))   return 2;
-      let qi = 0;
-      for (let i = 0; i < tt.length && qi < qt.length; i++)
-        if (tt[i] === qt[qi]) qi++;
-      return qi === qt.length ? 1 : 0;
-    },
-
     _search(query) {
       if (!CommandPalette._index) CommandPalette._buildIndex();
       const q = query.trim();
       CommandPalette._lastQuery = q;
 
-      // Intent mode: "need: ..." or "! ..."
-      if (q.startsWith('need:') || q.startsWith('!')) {
-        const intentText = q.replace(/^(need:|!)/, '').trim();
+      // Intent mode: "need: ..." or "! ..." (the prefix in any case: "Need:" typed after a capital or Caps Lock)
+      if (/^(need:|!)/i.test(q)) {
+        const intentText = q.replace(/^(need:|!)/i, '').trim();
         if (intentText) {
           CommandPalette._results = NeedsEngine.resolveIntent(intentText);
           if (!CommandPalette._results.length) {
@@ -1075,19 +1264,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       if (q) {
         // Fuzzy search across full index (includes selection commands)
-        const typeOrder = { selection: 0, action: 1, line: 2, order: 3 };
-        CommandPalette._results = CommandPalette._index
-          .map(item => ({
-            item,
-            score: Math.max(
-              CommandPalette._fuzzy(q, item.label),
-              Math.floor(CommandPalette._fuzzy(q, item.sub || '') * 0.8)
-            )
-          }))
-          .filter(x => x.score > 0)
-          .sort((a, b) => b.score - a.score || (typeOrder[a.item.type] ?? 9) - (typeOrder[b.item.type] ?? 9))
-          .slice(0, 9)
-          .map(x => x.item);
+        CommandPalette._results = topPaletteMatches(CommandPalette._index, q, PALETTE_MAX_RESULTS);
       } else {
         // Empty query: Right Now → Selection → Actions
         const rightNow   = NeedsEngine.topNeeds(4);
@@ -1103,22 +1280,25 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const el = document.getElementById('ni-cp-results');
       if (!el) return;
       if (!CommandPalette._results.length) {
-        el.innerHTML = `<div class="ni-cp-empty">${t('ui.no_results')}</div>`;
+        el.innerHTML = `<div class="ni-cp-empty">${_esc(t('ui.no_results'))}</div>`;
         return;
       }
       const q = CommandPalette._lastQuery;
-      const labels = {
-        action: 'Actions', line: 'Lines', order: 'Orders',
-        need: 'Right Now', selection: 'With Selection', intent: 'Intent'
+      // Section headings are the plural group names; the badge on a row is the singular type (the need / selection /
+      // intent rows hide it in CSS, so they have no badge text).
+      const sectionKeys = {
+        action: 'ui.actions_section', line: 'ui.lines_section', order: 'ui.orders_section',
+        need: 'ui.right_now_section', selection: 'ui.with_selection_section', intent: 'ui.intent_section'
       };
+      const badgeKeys = { action: 'cmdp.type_action', line: 'cmdp.type_line', order: 'cmdp.type_order' };
       let html = '', lastSection = null;
       CommandPalette._results.forEach((r, i) => {
         const section = r.type;
         if (section !== lastSection) {
-          const sectionLabel = labels[r.type] || r.type;
+          const sectionLabel = sectionKeys[r.type] ? t(sectionKeys[r.type]) : r.type;
           const sectionCls = r.type === 'need' ? ' ni-cp-section--right-now' : '';
           const dot = r.type === 'need' ? '<span class="ni-cp-need-dot"></span>' : '';
-          html += `<div class="ni-cp-section${sectionCls}">${dot}${sectionLabel}</div>`;
+          html += `<div class="ni-cp-section${sectionCls}">${dot}${_esc(sectionLabel)}</div>`;
           lastSection = section;
         }
         html += `
@@ -1126,9 +1306,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             <span class="ni-cp-result-icon">${r.icon || '→'}</span>
             <div class="ni-cp-result-body">
               <span class="ni-cp-result-label">${CommandPalette._highlight(r.label, q)}</span>
-              <span class="ni-cp-result-sub">${CommandPalette._esc(r.sub || '')}</span>
+              <span class="ni-cp-result-sub">${_esc(r.sub || '')}</span>
             </div>
-            <span class="ni-cp-result-type" data-t="${r.type}">${r.type}</span>
+            <span class="ni-cp-result-type" data-t="${_esc(r.type)}">${_esc(badgeKeys[r.type] ? t(badgeKeys[r.type]) : r.type)}</span>
           </div>`;
       });
       el.innerHTML = html;
@@ -1139,38 +1319,47 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     _move(dir) {
       if (!CommandPalette._results.length) return;
+      const prev = CommandPalette._cursor;
       CommandPalette._cursor = Math.max(0, Math.min(CommandPalette._results.length - 1, CommandPalette._cursor + dir));
-      CommandPalette._render();
-      document.querySelectorAll('.ni-cp-result')[CommandPalette._cursor]?.scrollIntoView?.({ block: 'nearest' });
+      // Arrow keys only move the highlight: toggle the active class on the two rows instead of rebuilding the list
+      // (a full render re-parses the markup and re-binds every row). If the DOM does not match the results (not
+      // rendered yet), fall back to a render.
+      const list = document.getElementById('ni-cp-results');
+      let rows = list?.querySelectorAll?.('.ni-cp-result');
+      if (!rows || rows.length !== CommandPalette._results.length) {
+        CommandPalette._render();
+        rows = list?.querySelectorAll?.('.ni-cp-result');
+      } else {
+        rows[prev]?.classList.remove('active');
+        rows[CommandPalette._cursor]?.classList.add('active');
+      }
+      rows?.[CommandPalette._cursor]?.scrollIntoView?.({ block: 'nearest' });
     },
 
     _activate() {
       const item = CommandPalette._results[CommandPalette._cursor];
       if (item?.run) {
-        if (item.type === 'action') CommandPalette._recent.push(item.label);
         try { item.run(); } catch (e) {
-          (window.NIMBUS && window.NIMBUS.ErrorLog
-            ? window.NIMBUS.ErrorLog.warn('intel', 'CommandPalette action failed', { err: String(e), errorCode: 'internal' })
-            : console.warn('[CommandPalette]', e));
+          _warn('CommandPalette action failed', e);
         }
       }
     },
 
-    _esc(t) {
-      return String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-    },
-
+    // Match on the RAW text and escape each piece afterwards: matching inside the already-escaped string let "a"
+    // light up the "a" of "&amp;" (a broken entity) and shifted every index after an escaped character.
     _highlight(text, q) {
-      const safe = CommandPalette._esc(text);
-      if (!q) return safe;
-      const safeLo = safe.toLowerCase(), qLo = q.toLowerCase();
-      const idx = safeLo.indexOf(qLo);
+      const raw = String(text);
+      const esc = _esc;
+      if (!q) return esc(raw);
+      const lo = raw.toLowerCase(), qLo = q.toLowerCase();
+      if (lo.length !== raw.length) return esc(raw);   // a character whose lower case changes length: no safe indexes
+      const idx = lo.indexOf(qLo);
       if (idx !== -1)
-        return safe.slice(0, idx) + '<mark>' + safe.slice(idx, idx + q.length) + '</mark>' + safe.slice(idx + q.length);
+        return esc(raw.slice(0, idx)) + '<mark>' + esc(raw.slice(idx, idx + q.length)) + '</mark>' + esc(raw.slice(idx + q.length));
       let out = '', qi = 0;
-      for (let i = 0; i < safe.length; i++) {
-        if (qi < qLo.length && safeLo[i] === qLo[qi]) { out += `<mark>${safe[i]}</mark>`; qi++; }
-        else out += safe[i];
+      for (let i = 0; i < raw.length; i++) {
+        if (qi < qLo.length && lo[i] === qLo[qi]) { out += `<mark>${esc(raw[i])}</mark>`; qi++; }
+        else out += esc(raw[i]);
       }
       return out;
     },
@@ -1196,7 +1385,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         run() {
           CommandPalette.close();
           // Undo covers only the ids that actually change.
-          _pushTaskUndo(`${newFirmed ? 'Firm' : 'Unfirm'} ${firmIds.length} orders`, firmIds, true);
+          _pushTaskUndo(_plural(firmIds.length, newFirmed ? 'undo.firm_orders' : 'undo.unfirm_orders'), firmIds, true);
           const res = NIMBUS.Engine?.applyFirm?.(firmIds, newFirmed, 'cmd-palette') || { changed: [], skipped: [] };
           Alerts.scheduleRecompute();
           const count = res.changed.length;
@@ -1265,9 +1454,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         sub:   t('cmdp.sub_save_checkpoint_now'),
         run() {
           CommandPalette.close();
-          const label = `Pre-selection · ${n} orders · ${Util._fmtTimePref(new Date())}`;
-          TimeMachine.snapshot(label);
-          Toast.show(t('toast.snapshot_saved'), 'success', 1400);
+          TimeMachine.checkpoint(n === 1 ? 'snap.pre_selection_one' : 'snap.pre_selection', { count: n });
         }
       });
 
@@ -1283,7 +1470,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       CommandPalette._search('');
       CommandPalette._panel.classList.add('ni-cp-open');
       document.getElementById('ni-cmd-fab')?.classList.add('ni-fab-active');
-      setTimeout(() => { if (CommandPalette.isOpen()) document.getElementById('ni-cp-input')?.focus(); }, 30);
+      setTimeout(() => { if (CommandPalette.isOpen()) document.getElementById('ni-cp-input')?.focus(); }, PALETTE_FOCUS_DELAY_MS);
     },
 
     close() {
@@ -1300,8 +1487,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   // Snapshot/diff encoding of a split order: sorted [startMs, endMs] pairs, or
   // null for a continuous (unsplit) order. Snapshots written before this field
   // existed have no key at all; Diff.compute treats "absent" as unknown.
-  function snapshotSegments(t) {
-    const segs = Array.isArray(t.scheduleSegments) ? t.scheduleSegments : [];
+  function snapshotSegments(task) {
+    const segs = Array.isArray(task.scheduleSegments) ? task.scheduleSegments : [];
     if (segs.length < 2) return null;
     const ms = v => (v instanceof Date ? v.getTime() : (v ? new Date(v).getTime() : NaN));
     return segs
@@ -1310,12 +1497,154 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       .sort((a, b) => a[0] - b[0]);
   }
 
+  // The one encoding of a live order as a snapshot / diff row (snapshot() stores it, Diff compares the live
+  // schedule through it), so the two can never disagree on what a row holds. Epoch ms or null for a missing or
+  // unreadable date. PRODUCTION_VERSION is kept so a restore on a routing plant can put the pair back (rows from
+  // older snapshots have none: unknown).
+  function snapshotTask(task) {
+    const ms = v => { const n = v instanceof Date ? v.getTime() : (v ? new Date(v).getTime() : NaN); return Number.isFinite(n) ? n : null; };
+    return {
+      id:               task.id,
+      PLANT:            task.PLANT || Store.selectedPlant,
+      start_date:       ms(task.start_date),
+      end_date:         ms(task.end_date),
+      MACHINE:          task.MACHINE  || '',
+      PRODUCTION_VERSION: task.PRODUCTION_VERSION || '',
+      PRODUCTION_ORDER: task.PRODUCTION_ORDER || '',
+      text:             task.text || task.MATERIAL_DESCRIPTION || '',
+      COLOR:            task.COLOR     || '',
+      FORM_SIZE:        task.FORM_SIZE || '',
+      FIRMED:           !!task.firmed,
+      scheduleSegments: snapshotSegments(task),
+    };
+  }
+
+  // Cheap content fingerprint of a plant's schedule: (id, start, end, machine, firmed, split-piece count) per order,
+  // combined order-independently, so two states that differ in any of those never share one and the walk allocates
+  // no row objects. Used to skip an auto snapshot that would repeat the previous one. `ms` values are epoch ms or null.
+  function fpMix(h, str) {
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function fpAccumulate(acc, id, start, end, machine, firmed, segs) {
+    const h = fpMix(2166136261, `${id}|${start ?? ''}|${end ?? ''}|${machine || ''}|${firmed ? 1 : 0}|${segs}`);
+    acc.n += 1;
+    acc.sum = (acc.sum + h) >>> 0;
+    acc.xor = (acc.xor ^ Math.imul(h, 2654435761)) >>> 0;
+  }
+  const fpText = acc => `${acc.n}:${acc.sum.toString(36)}:${acc.xor.toString(36)}`;
+  const fpMs = v => { const n = v instanceof Date ? v.getTime() : (v ? new Date(v).getTime() : NaN); return Number.isFinite(n) ? n : null; };
+  function fingerprintLive(tasks) {
+    const acc = { n: 0, sum: 0, xor: 0 };
+    for (const task of tasks) fpAccumulate(acc, task.id, fpMs(task.start_date), fpMs(task.end_date), task.MACHINE || '', !!task.firmed, snapshotSegments(task)?.length || 0);
+    return fpText(acc);
+  }
+  function fingerprintRows(rows) {
+    const acc = { n: 0, sum: 0, xor: 0 };
+    for (const r of rows || []) fpAccumulate(acc, r.id, fpMs(r.start_date), fpMs(r.end_date), r.MACHINE || '', !!r.FIRMED, Array.isArray(r.scheduleSegments) ? r.scheduleSegments.length : 0);
+    return fpText(acc);
+  }
+  // The small row kept for every snapshot (what the history list shows, plus the fingerprint). `count` is the number
+  // of orders for a version 2 snapshot (rows are already scoped to its plant); a version 1 snapshot held every loaded
+  // order, so its scoped count needs the Store and is left unknown (null).
+  function snapshotMetaOf(rec) {
+    const v2 = rec.schemaVersion >= 2;
+    let fp = null;
+    try { fp = fingerprintRows(rec.tasks); } catch {}
+    const meta = {
+      id: rec.id, ts: rec.ts, label: rec.label, auto: !!rec.auto, plant: rec.plant ?? null,
+      schemaVersion: rec.schemaVersion || 1,
+      count: v2 && Array.isArray(rec.tasks) ? rec.tasks.length : null,
+      fp,
+    };
+    // A label stored as a key (translated when shown) keeps its key and variables in the metadata row too.
+    if (rec.labelKey) { meta.labelKey = rec.labelKey; meta.labelVars = rec.labelVars ?? null; }
+    return meta;
+  }
+
+  // The text a snapshot is listed under. A snapshot saved by this version carries a label KEY (+ variables), so it
+  // reads in the language the planner has now, and its time follows the current time format; one saved by an older
+  // version (or an auto snapshot named after an undo entry) is a plain string, shown as it was written.
+  function snapshotLabel(snap) {
+    if (snap && snap.labelKey) {
+      const vars = { ...(snap.labelVars || {}), time: Util._fmtTimePref(new Date(snap.ts)) };
+      return t(snap.labelKey, vars);
+    }
+    return (snap && snap.label) || '';
+  }
+
+  // What a caller may hand to TimeMachine.snapshot / take as a label: a plain string, or { key, vars }.
+  function snapshotLabelFields(label) {
+    if (label && typeof label === 'object' && label.key) {
+      const labelVars = label.vars || null;
+      // `label` is the current-language text, kept alongside the key so anything reading plain `.label` still works.
+      const text = snapshotLabel({ labelKey: label.key, labelVars, ts: Date.now() });
+      return { label: String(text).substring(0, TM_LABEL_MAX), labelKey: label.key, labelVars };
+    }
+    return { label: String(label || t('snap.default')).substring(0, TM_LABEL_MAX) };
+  }
+
   /* ==========================================================================
      TIME MACHINE — durable IndexedDB snapshot history
      ========================================================================== */
-  // In-memory history cap; matches the IndexedDB prune (IntelDB.pruneSnapshots(200)).
+  // History cap PER PLANT, in memory and in IndexedDB (IntelDB.pruneSnapshots(cap, plant)): one busy plant's snapshots
+  // never evict another plant's. 50+ plants x this cap of small metadata rows is what boot may load.
   const TM_MAX_SNAPSHOTS = 200;
+  const TM_META_LOAD_LIMIT = 10000;
+  const TM_BODY_CACHE = 4;
   let timeMachineOpener = null;
+
+  // Newest `cap` entries per plant, oldest-first order kept. Rows with no plant share one group.
+  function trimPerPlant(list, cap) {
+    const seen = new Map();
+    const keep = new Array(list.length);
+    let dropped = 0;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const key = list[i].plant ?? null;
+      const n = (seen.get(key) || 0) + 1;
+      seen.set(key, n);
+      keep[i] = n <= cap;
+      if (!keep[i]) dropped++;
+    }
+    return dropped ? list.filter((_, i) => keep[i]) : list;
+  }
+  const idle = fn => { if (typeof window !== 'undefined' && window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 2000 }); else setTimeout(fn, 0); };
+
+  // Does `line` still exist in `plant`: a master-data machine of the plant, a machine the plant's line settings
+  // claim, or one that still carries orders there (the Gantt lists all three).
+  function plantHasLine(plant, line) {
+    return (Store.masterData?.lines || []).some(r => r.machine === line && (!r.plant || r.plant === plant))
+      || Store.lineSettings?.[line]?.plant === plant
+      || Store.tasksForSelectedPlant().some(x => x.MACHINE === line);
+  }
+
+  // The write that puts one order back as the snapshot row `s` had it: a skip result when it cannot be.
+  // The finish comes back and the stored start is a placeholder (the engine re-derives it, see restore()).
+  // The MACHINE comes back too when it has moved since the snapshot:
+  //  - routing plant: the (production version, machine) pair is the only PV writer there, so the move goes through
+  //    the PV-aware pairSchedulePatchFor with the snapshot's version (the order's current one when the snapshot
+  //    predates that field); a pair that no longer resolves, or a placement the engine refuses, is a skip;
+  //  - other plants: a direct MACHINE write, provided the machine still exists in the plant.
+  // A snapshot without a finish (an unplaced order) or without a machine leaves the order's machine alone.
+  function restoreRowPatch(task, s, plant, routing) {
+    const finish = s.end_date ? new Date(s.end_date) : null;
+    const base = {
+      start_date: s.start_date ? new Date(s.start_date) : null,
+      end_date:   finish,
+      // The current split envelope belongs to the current finish. Clear it before Store normalizes dates;
+      // reconcile derives fresh pieces.
+      scheduleSegments: [],
+      runtime_schedule_mismatch: true
+    };
+    const machine = s.MACHINE || '';
+    if (!machine || machine === task.MACHINE || !finish) return { changes: base };
+    if (routing) {
+      const pv = s.PRODUCTION_VERSION || task.PRODUCTION_VERSION;
+      const pair = pv ? NIMBUS.Engine?.pairSchedulePatchFor?.(task, pv, machine, finish, { quiet: true }) : null;
+      return pair ? { changes: pair } : { skip: true };
+    }
+    return plantHasLine(plant, machine) ? { changes: { ...base, MACHINE: machine } } : { skip: true };
+  }
   const TimeMachine = {
     _snapshots: [],
     _panel:     null,
@@ -1327,8 +1656,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // IndexedDB synchronously on EVERY UndoStack.push. Coalescing to one snapshot
       // ~1s after activity settles keeps that work off the hot push path. Manual
       // snapshot() calls (explicit checkpoints) stay immediate.
+      // Checked when the timer FIRES, not when it is armed: a What-If session entered inside the debounce window
+      // would otherwise snapshot the sandbox's trial schedule as if it were the plan.
       TimeMachine._snapshotAuto = Util.debounce(
-        label => TimeMachine.snapshot(label, { auto: true }), 1000
+        label => { if (!NIMBUS.Sandbox?.active) TimeMachine.snapshot(label, { auto: true }); }, SNAPSHOT_AUTO_DEBOUNCE_MS
       );
       Store.subscribe(evt => {
         if (evt.type === 'undo:pushed') TimeMachine._snapshotAuto(evt.label);
@@ -1337,50 +1668,115 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         if (evt.type === 'plant:selected' && TimeMachine._panel && !TimeMachine._panel.hidden) TimeMachine.closeUI();
       }, 'TimeMachine.panelScope');
       Store.subscribe(evt => {
-        if (['tasks:bulk','tasks:bulkUpdate'].includes(evt.type) &&
+        if (BULK_TASK_EVENTS.has(evt.type) &&
             evt.source !== 'undo' && evt.source !== 'time-machine') {
-          TimeMachine._snapshotAuto(evt.type === 'tasks:bulk' ? 'Data loaded' : 'Bulk update');
+          TimeMachine._snapshotAuto({ key: evt.type === 'tasks:bulk' ? 'snap.data_loaded' : 'snap.bulk_update' });
         }
       });
-      IntelDB.getNewest('snapshots', 'ts', TM_MAX_SNAPSHOTS).then(rows => {
-        TimeMachine._snapshots = (rows || []).sort((a, b) => a.ts - b.ts);
+      // Metadata only: the task bodies stay in IndexedDB until a restore or a diff asks for one (tasksOf).
+      IntelDB.getNewest('snapshot_meta', 'ts', TM_META_LOAD_LIMIT).then(rows => {
+        // Merge, don't replace: a snapshot taken while this read was in flight is already in memory (and in the store).
+        const loaded = rows || [];
+        const loadedTs = new Set(loaded.map(s => s.ts));
+        const early = TimeMachine._snapshots.filter(s => !loadedTs.has(s.ts));
+        const merged = (early.length ? loaded.concat(early) : loaded.slice()).sort((a, b) => a.ts - b.ts);
+        TimeMachine._snapshots = trimPerPlant(merged, TM_MAX_SNAPSHOTS);
+        // Seed the dedupe fingerprint with each plant's newest snapshot (never over one taken this session).
+        for (const s of TimeMachine._snapshots) if (s.fp) TimeMachine.lastFp.set(s.plant ?? null, s.fp);
+        for (const [plant, fp] of TimeMachine.sessionFp) TimeMachine.lastFp.set(plant, fp);
+      }).catch(e => {
+        _warn('TimeMachine history load failed', e);
       });
     },
 
+    // Counters the tests (and a curious console) read: rows built, snapshots skipped as unchanged, bodies fetched.
+    stats: { rowsBuilt: 0, deduped: 0, bodyReads: 0 },
+    lastFp: new Map(),       // plant -> fingerprint of that plant's newest snapshot
+    sessionFp: new Map(),    // plant -> fingerprint of a snapshot taken since boot (survives the boot-time seed)
+    bodyCache: new Map(),    // snapshot id -> task rows, the last few fetched
+    autoPending: false,
+    autoLabel: '',
+
+    // An explicit checkpoint saved under a translatable label (`labelKey` + `vars`; the time is added when it is
+    // shown), then the standard "Snapshot saved" toast unless `opts.toast === false`. Every palette command that takes
+    // a manual snapshot goes through here. Returns the snapshot.
+    checkpoint(labelKey, vars, opts = {}) {
+      const snap = TimeMachine.snapshot({ key: labelKey, vars: vars || null });
+      if (opts.toast !== false) Toast.show(t('toast.snapshot_saved'), 'success', 1400);
+      return snap;
+    },
+
+    // The text a snapshot is listed under (see snapshotLabel).
+    labelOf(snap) { return snapshotLabel(snap); },
+
+    // A manual snapshot (an explicit checkpoint) is built and returned at once. An auto snapshot is built off the call
+    // stack, in idle time, so a bulk event never blocks the main thread; it returns null (nothing exists yet), and is
+    // skipped when the plant's schedule is unchanged since its previous snapshot.
     snapshot(label, opts = {}) {
-      const snap = {
+      if (!opts.auto) return TimeMachine.take(label, false);
+      TimeMachine.autoLabel = label;
+      if (TimeMachine.autoPending) return null;   // one pending build sees the latest state whichever event asked
+      TimeMachine.autoPending = true;
+      const plant = Store.selectedPlant || null;
+      idle(() => {
+        TimeMachine.autoPending = false;
+        // The world may have moved on while this waited: a What-If session, or another plant selected.
+        if (NIMBUS.Sandbox?.active || (Store.selectedPlant || null) !== plant) return;
+        TimeMachine.take(TimeMachine.autoLabel, true);
+      });
+      return null;
+    },
+
+    take(label, auto) {
+      const plant = Store.selectedPlant || null;
+      const live = Store.tasksForSelectedPlant();
+      const fp = fingerprintLive(live);
+      if (auto && TimeMachine.lastFp.get(plant) === fp) { TimeMachine.stats.deduped++; return null; }
+      const tasks = live.map(snapshotTask);
+      TimeMachine.stats.rowsBuilt++;
+      TimeMachine.lastFp.set(plant, fp);
+      TimeMachine.sessionFp.set(plant, fp);
+      const meta = {
         ts:    Date.now(),
-        label: (label || 'Snapshot').substring(0, 80),
-        auto:  !!opts.auto,
-        plant: Store.selectedPlant || null,
+        ...snapshotLabelFields(label),
+        auto:  !!auto,
+        plant,
         schemaVersion: 2,
-        tasks: Store.tasksForSelectedPlant().map(t => ({
-          id:               t.id,
-          PLANT:            t.PLANT || Store.selectedPlant,
-          start_date:       t.start_date ? t.start_date.getTime() : null,
-          end_date:         t.end_date   ? t.end_date.getTime()   : null,
-          MACHINE:  t.MACHINE  || '',
-          PRODUCTION_ORDER: t.PRODUCTION_ORDER || '',
-          text:             t.text || t.MATERIAL_DESCRIPTION || '',
-          COLOR:            t.COLOR     || '',
-          FORM_SIZE:        t.FORM_SIZE || '',
-          FIRMED:           !!t.firmed,
-          scheduleSegments: snapshotSegments(t),
-        }))
+        count: tasks.length,
+        fp,
       };
-      IntelDB.put('snapshots', snap).then(id => {
-        snap.id = id || snap.id;
-        TimeMachine._snapshots.push(snap);
-        if (TimeMachine._snapshots.length > TM_MAX_SNAPSHOTS) {
-          TimeMachine._snapshots.splice(0, TimeMachine._snapshots.length - TM_MAX_SNAPSHOTS);
-        }
-        IntelDB.pruneSnapshots(TM_MAX_SNAPSHOTS);
+      const snap = { ...meta, tasks };
+      IntelDB.putSnapshot(snap, meta).then(id => {
+        // With a database the in-memory entry is metadata only (the body is read back by id when needed); without one
+        // the session's history is the only copy, so the entry keeps its rows.
+        const entry = id == null ? snap : { ...meta, id };
+        if (id != null) snap.id = id;
+        // The history load may have read this very row back already (it merges by ts): never list it twice.
+        if (id == null || !TimeMachine._snapshots.some(s => s.id === id && s.ts === snap.ts)) TimeMachine._snapshots.push(entry);
+        TimeMachine._snapshots = trimPerPlant(TimeMachine._snapshots, TM_MAX_SNAPSHOTS);
+        IntelDB.pruneSnapshots(TM_MAX_SNAPSHOTS, plant);
       }).catch(e => {
-        (window.NIMBUS && window.NIMBUS.ErrorLog
-          ? window.NIMBUS.ErrorLog.warn('intel', 'TimeMachine snapshot persist failed', { err: String(e), errorCode: 'internal' })
-          : console.warn('[TimeMachine] snapshot persist failed', e));
+        _warn('TimeMachine snapshot persist failed', e);
       });
       return snap;
+    },
+
+    // The task rows of one snapshot: inline (a snapshot taken this session without a database, or an old in-memory
+    // record) or read back from IndexedDB by id. Resolves null when the body is gone.
+    tasksOf(snap) {
+      if (Array.isArray(snap.tasks)) return Promise.resolve(snap.tasks);
+      if (snap.id == null) return Promise.resolve(null);
+      const cached = TimeMachine.bodyCache.get(snap.id);
+      if (cached) return Promise.resolve(cached);
+      TimeMachine.stats.bodyReads++;
+      return IntelDB.get('snapshots', snap.id).then(rec => {
+        const rows = Array.isArray(rec?.tasks) ? rec.tasks : null;
+        if (rows) {
+          TimeMachine.bodyCache.set(snap.id, rows);
+          if (TimeMachine.bodyCache.size > TM_BODY_CACHE) TimeMachine.bodyCache.delete(TimeMachine.bodyCache.keys().next().value);
+        }
+        return rows;
+      });
     },
 
     // Returns snapshots scoped to the currently selected plant.
@@ -1392,14 +1788,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       return TimeMachine._snapshots.filter(s => s.plant === p);
     },
 
-    _relTime(ts) {
-      const m = Math.floor((Date.now() - ts) / 60000);
-      if (m < 1)  return 'just now';
-      if (m < 60) return `${m}m ago`;
-      const h = Math.floor(m / 60);
-      if (h < 24) return `${h}h${m % 60 ? ` ${m % 60}m` : ''} ago`;
-      return Util.fmtDTShortPref(ts);
-    },
+    _relTime(ts) { return _relTimeLabel(ts, Date.now(), v => Util.fmtDTShortPref(v)); },
 
     openUI() {
       timeMachineOpener = document.activeElement;
@@ -1428,19 +1817,19 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _renderPanel() {
       const p = TimeMachine._panel;
       if (!p) return;
-      const snaps = TimeMachine._plantSnaps().slice(-60).reverse();
+      const snaps = TimeMachine._plantSnaps().slice(-TM_PANEL_ROWS).reverse();
       p.innerHTML = `
         <div class="ni-tm-head">
-          <span>${t('cmdp.label_time_machine')} <span style="font-size:11px;color:var(--fg-mute)">${t('intel.snapshot_entries', { count: snaps.length })}</span></span>
-          <button class="ni-tm-close" id="ni-tm-close-btn" aria-label="${t('btn.close')}">✕</button>
+          <span>${_esc(t('cmdp.label_time_machine'))} <span style="font-size:11px;color:var(--fg-mute)">${_esc(t('intel.snapshot_entries', { count: snaps.length }))}</span></span>
+          <button class="ni-tm-close" id="ni-tm-close-btn" aria-label="${_esc(t('btn.close'))}">✕</button>
         </div>
         <div class="ni-tm-list">
           ${snaps.length ? snaps.map(s => `
             <div class="ni-tm-row">
-              <span class="ni-tm-time">${TimeMachine._relTime(s.ts)}</span>
-              <span class="ni-tm-label" title="${Util.escapeHtml(s.label)}">${Util.escapeHtml(s.label)}</span>
-              <button class="ni-tm-restore-btn" data-ts="${s.ts}">${t('btn.restore')}</button>
-            </div>`).join('') : `<div style="padding:16px;font-size:12.5px;color:var(--fg-mute)">${t('ui.no_snapshots_tm')}</div>`}
+              <span class="ni-tm-time">${_esc(TimeMachine._relTime(s.ts))}</span>
+              <span class="ni-tm-label" title="${_esc(snapshotLabel(s))}">${_esc(snapshotLabel(s))}</span>
+              <button class="ni-tm-restore-btn" data-ts="${s.ts}">${_esc(t('btn.restore'))}</button>
+            </div>`).join('') : `<div style="padding:16px;font-size:12.5px;color:var(--fg-mute)">${_esc(t('ui.no_snapshots_tm'))}</div>`}
         </div>`;
       p.querySelector('#ni-tm-close-btn').onclick = () => TimeMachine.closeUI();
       p.querySelectorAll('.ni-tm-restore-btn').forEach(btn => {
@@ -1452,42 +1841,55 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const plant = Store.selectedPlant;
       const snap = plant && TimeMachine._snapshots.find(s => s.ts === ts && s.plant === plant);
       if (!snap) { Toast.show(t('toast.snapshot_not_found'), 'error'); return; }
+      // Rows held inline restore at once; otherwise the body is read back by id first (the click is the only moment
+      // that cost is paid). A body that is gone, or a plant switched meanwhile, is reported / dropped.
+      if (Array.isArray(snap.tasks)) return TimeMachine.applyRestore(snap, snap.tasks, plant, ts);
+      return TimeMachine.tasksOf(snap).then(rows => {
+        if (Store.selectedPlant !== plant) return;
+        if (!rows) { Toast.show(t('toast.snapshot_not_found'), 'error'); return; }
+        TimeMachine.applyRestore(snap, rows, plant, ts);
+      }).catch(e => {
+        Toast.show(t('toast.snapshot_not_found'), 'error');
+        _warn('TimeMachine snapshot read failed', e);
+      });
+    },
+
+    applyRestore(snap, rows, plant, ts) {
       const scopedIds = new Set(Store.tasksForSelectedPlant().map(task => String(task.id)));
+      const routing = !!Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
       let skipped = 0;
+      const machineSkipped = [];   // orders whose snapshot machine no longer exists or no longer takes them
       // OQ21 (group 15): a restore brings back the FINISH; the stored start is a placeholder, so each row is flagged
-      // stale and the engine re-derives the start from the finish under the current run time.
-      const patches = snap.tasks
-        .filter(s => {
-          const task = Store.tasks[s.id];
-          if (!task || !scopedIds.has(String(s.id))) return false;
-          // Bulk history restore has no explicit protection override or atomic
-          // distributed-family workflow. Leave those rows for their own editors.
-          if (task.PARENT_ORDER || task.placement_exception || NIMBUS.Engine.firmingStatus(task).firmed) { skipped++; return false; }
-          return true;
-        })
-        .map(s => ({
-          id: s.id,
-          changes: {
-            start_date: s.start_date ? new Date(s.start_date) : null,
-            end_date:   s.end_date   ? new Date(s.end_date)   : null,
-            // The current split envelope belongs to the current finish. Clear
-            // it before Store normalizes dates; reconcile derives fresh pieces.
-            scheduleSegments: [],
-            runtime_schedule_mismatch: true
-          }
-        }));
+      // stale and the engine re-derives the start from the finish under the current run time. The MACHINE comes
+      // back with it (restoreRowPatch): an order moved to another machine since the snapshot returns to the old one.
+      const patches = [];
+      for (const s of rows) {
+        const task = Store.tasks[s.id];
+        if (!task || !scopedIds.has(String(s.id))) continue;
+        // Bulk history restore has no explicit protection override or atomic
+        // distributed-family workflow. Leave those rows for their own editors.
+        if (task.PARENT_ORDER || task.placement_exception || NIMBUS.Engine.firmingStatus(task).firmed) { skipped++; continue; }
+        const row = restoreRowPatch(task, s, plant, routing);
+        if (row.skip) { machineSkipped.push(task.PRODUCTION_ORDER || task.ORDER || String(s.id)); continue; }
+        patches.push({ id: s.id, changes: row.changes });
+      }
       if (skipped) Toast.show(t('toast.snapshot_restore_skipped', { count: skipped }), 'warn', 5000);
+      if (machineSkipped.length) {
+        const shown = machineSkipped.slice(0, 5).join(', ');
+        const more = machineSkipped.length > 5 ? ` +${machineSkipped.length - 5}` : '';
+        Toast.show(t('toast.snapshot_restore_machine_skipped', { count: machineSkipped.length, orders: shown + more }), 'warn', 7000);
+      }
       if (!patches.length) return;
       const affectedIds = patches.map(p => p.id);
       const beforeSnap = UndoStack.snapshotTasks(affectedIds);
-      UndoStack.push('Before Time Machine restore', () => UndoStack.restoreTasks(beforeSnap), affectedIds);
+      UndoStack.push(t('undo.before_time_machine_restore'), () => UndoStack.restoreTasks(beforeSnap), affectedIds);
       // U31: the rows that already carried unsaved edits BEFORE this restore, read before updateMany dirties them,
       // like the undo path (afterRestore): a never-placed row with a null snapshot start keeps its dirty id.
       const wasDirty = new Set(patches.map(p => String(p.id)).filter(id => NIMBUS.UndoStack?.dirtyProbe?.(id)));
       Store.updateMany(patches, 'time-machine');
       NIMBUS.Engine?.reconcileRestored?.(patches.map(p => p.id), wasDirty);
       Alerts.scheduleRecompute();
-      Toast.show(t('toast.restored', { label: snap.label, time: TimeMachine._relTime(ts) }), 'success', 3000);
+      Toast.show(t('toast.restored', { label: snapshotLabel(snap), time: TimeMachine._relTime(ts) }), 'success', 3000);
       TimeMachine.closeUI();
     }
   };
@@ -1495,6 +1897,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      CONFIDENCE — live schedule health score 0-100 + sparkline
      ========================================================================== */
+  let breakdownPending = false;   // showBreakdown is fetching its utilization matrix (see the guard there)
   const Confidence = {
     _score:   100,
     _history: [],
@@ -1505,6 +1908,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _startupPending: false,
     _lifecycleGeneration: 0,
     _suppressedAlertRefreshes: 0,
+
+    // 'good' | 'risk' | 'critical' for a 0-100 score: the one set of cut-offs (BAND_GOOD_MIN / BAND_RISK_MIN).
+    band(score) { return _band(score); },
 
     // Invalidation is deliberately separate from debounce cancellation: a
     // Compute worker request may already be in flight when What-If exits, so
@@ -1523,7 +1929,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       Confidence._suppressedAlertRefreshes++;
     },
 
-    _scheduleStartupRecompute(delay = 600) {
+    _scheduleStartupRecompute(delay = CONF_STARTUP_DELAY_MS) {
       if (!Confidence._startupPending || Confidence._startupTimer) return;
       Confidence._startupTimer = setTimeout(() => {
         Confidence._startupTimer = null;
@@ -1540,9 +1946,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     init() {
       try { localStorage.removeItem('nimbus.confHistory'); } catch (e) {  // clear any previously persisted history
-        (window.NIMBUS && window.NIMBUS.ErrorLog
-          ? window.NIMBUS.ErrorLog.warn('intel', 'Confidence history clear failed', { err: String(e), errorCode: 'internal' })
-          : console.warn('[Confidence] history clear failed', e));
+        _warn('Confidence history clear failed', e);
       }
       // Keep a cancel seam for What-If discard. Store task replacement events
       // fire while Sandbox.active is still true and otherwise leave this timer
@@ -1553,7 +1957,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         confidenceTimer = setTimeout(() => {
           confidenceTimer = null;
           Confidence._recompute();
-        }, 400);
+        }, CONF_RECOMPUTE_DEBOUNCE_MS);
       };
       Confidence._cancelRecomputeDebounced = () => {
         clearTimeout(confidenceTimer);
@@ -1583,11 +1987,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           Confidence._lastRev = null;
           const scoreEl = document.getElementById('ni-conf-score');
           if (scoreEl) { scoreEl.textContent = '—'; scoreEl.style.color = ''; }
-          // Vestigial: #ni-conf-spark no longer exists (sparkline retired for the
-          // conic-gradient ring below) — this optional-chains to a no-op and is
-          // left as dead code rather than removed (see task-5-report.md).
-          const sparkCtx = document.getElementById('ni-conf-spark')?.getContext('2d');
-          if (sparkCtx) sparkCtx.clearRect(0, 0, 48, 20);
           // Reset the ring to a neutral/empty state for the reset window — _score
           // is already forced to 100 above, so calling _updateRing() here would
           // briefly flash a full green ring before the debounced recompute below
@@ -1597,7 +1996,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           Confidence._recomputeDebounced();
           return;
         }
-        if (['tasks:bulk','tasks:bulkUpdate','task:update','task:remove'].includes(evt.type))
+        if (CONF_TASK_EVENTS.has(evt.type))
           Confidence._recomputeDebounced();
       });
       Store.subscribe(evt => {
@@ -1646,8 +2045,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       Confidence._lastAlertsSrc = alerts;
       Confidence._lastRev = rev;
 
-      const tasks  = Store.tasksArr;
-      if (!tasks.length) { Confidence._apply(100); return; }
+      // Only the selected plant's orders count (the alerts and machine count above are scoped to it too).
+      if (!Store.tasksForSelectedPlant().length) { Confidence._apply(100); return; }
 
       const hMinutes = _confHorizonMinutes();
       const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
@@ -1663,9 +2062,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _apply(score) {
       Confidence._startupPending = false;
       const prev = Confidence._score;
+      // The first score of a plant (page load, plant switch: the history is empty) has nothing to differ from: the
+      // placeholder 100 is not a previous score, so no "-N" chip flashes for it.
+      const hadBaseline = Confidence._history.length > 0;
       Confidence._score = score;
       Confidence._history.push({ ts: Date.now(), score });
-      if (Confidence._history.length > 500) Confidence._history.shift();
+      if (Confidence._history.length > CONF_HISTORY_MAX) Confidence._history.shift();
 
       // Task 10 (Command Band dark-mode pass): the badge always sits on the
       // fixed-dark --chrome-panel background regardless of the page's own
@@ -1679,16 +2081,16 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const scoreEl = document.getElementById('ni-conf-score');
       if (scoreEl) {
         scoreEl.textContent = score;
-        scoreEl.style.color = score >= 80 ? '#4dbd7a' : score >= 50 ? '#e0a018' : '#e88f83';
+        scoreEl.style.color = BAND_COLORS[_band(score)].text;
       }
       const delta = score - prev;
-      if (Confidence._badge && Math.abs(delta) >= 5) {
+      if (hadBaseline && Confidence._badge && Math.abs(delta) >= 5) {
         const flash = document.createElement('span');
         flash.className = 'ni-conf-delta';
         flash.textContent = delta > 0 ? `+${delta}` : `${delta}`;
-        flash.style.color = delta > 0 ? '#4dbd7a' : '#e88f83';
+        flash.style.color = delta > 0 ? BAND_COLORS.good.text : BAND_COLORS.critical.text;
         Confidence._badge.appendChild(flash);
-        setTimeout(() => flash.remove(), 1900);
+        setTimeout(() => flash.remove(), CONF_DELTA_FLASH_MS);
       }
       Confidence._updateRing();
     },
@@ -1707,13 +2109,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const scoreEl = document.getElementById('ni-conf-score');
       if (scoreEl) {
         scoreEl.textContent = snap.score;
-        scoreEl.style.color = snap.score >= 80 ? '#4dbd7a' : snap.score >= 50 ? '#e0a018' : '#e88f83';
+        scoreEl.style.color = BAND_COLORS[_band(snap.score)].text;
       }
       Confidence._updateRing();
     },
 
-    // Conic-gradient ring — REPLACES the old canvas sparkline (_sparkline(),
-    // retired; it drew into a #ni-conf-spark canvas that no longer exists).
+    // Conic-gradient ring (it replaced the old canvas sparkline).
     // Color thresholds are the exact mockup hex values, deliberately NOT the
     // --ok/--warn/--err tokens: the ring is a distinct, fixed-hex color
     // treatment from the breakdown popover's own chart (_drawChart below),
@@ -1723,7 +2124,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       if (!ring) return;
       const score = Math.max(0, Math.min(100, Confidence._score));
       const deg = (score / 100) * 360;
-      const color = score >= 80 ? '#4ddb9f' : score >= 50 ? '#f0c04a' : '#f08a6a';
+      const color = BAND_COLORS[_band(score)].ring;
       ring.style.setProperty('--conf-color', color);
       ring.style.background = `conic-gradient(var(--conf-color) 0 ${deg}deg, var(--chrome-border) ${deg}deg 360deg)`;
     },
@@ -1745,11 +2146,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     async showBreakdown() {
+      // One breakdown at a time: a second click while the matrix is still being fetched (or while the dialog is open)
+      // used to stack another modal dialog on top of the first.
+      if (breakdownPending || document.querySelector('dialog.ni-breakdown-dlg')) return;
       const { alerts, machines } = Alerts.confidenceInput();   // pre-dismiss list + the plant's machine count, as the badge
       const hMinutes = _confHorizonMinutes();
-      const hDays    = Math.ceil(hMinutes / 1440);
+      const hDays    = Math.ceil(hMinutes / DAY_MIN);
       const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
-      const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * 60000);
+      const horizonEnd   = new Date(horizonStart.getTime() + hMinutes * MIN_MS);
 
       // The alerts that carry points (a late or queued order is scored by its due date, so one dated past the horizon
       // can count and a past-due one counts as due now).
@@ -1759,15 +2163,23 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       // Fetch matrix using worker when available, fall back to sync
       let matrix = null;
+      breakdownPending = true;
       try {
-        matrix = await Utilization.computeMatrixAsync(_plantToday(), hDays, { syncFallback: false });
-      } catch {
-        matrix = Utilization.computeMatrix(horizonStart, hDays);   // a user clicked the badge: paint, even if it costs a sync compute
+        try {
+          matrix = await Utilization.computeMatrixAsync(_plantToday(), hDays, { syncFallback: false });
+        } catch {
+          matrix = Utilization.computeMatrix(horizonStart, hDays);   // a user clicked the badge: paint, even if it costs a sync compute
+        }
+      } finally {
+        breakdownPending = false;   // everything below is synchronous up to the dialog being in the DOM
       }
       const overloadedLines = {};
       Object.entries(matrix).forEach(([line, lineData]) => {
         let days = 0;
-        Object.values(lineData).forEach(row => { if (row.effectiveCapacity > 0 && row.scheduled > row.effectiveCapacity) days++; });
+        // The shared overload rule (0.05 h tolerance), as the alert and the Right Now card use: a day filled exactly
+        // to capacity is not overloaded.
+        // `row.capacity` (the full pre-buffer figure) lets a fully buffered day count, as the alert does.
+        Object.values(lineData).forEach(row => { if (NimbusComputeCore.isOverloaded(row.scheduled, row.effectiveCapacity, row.capacity)) days++; });
         if (days > 0) overloadedLines[line] = days;
       });
       const overloadedCount = Object.keys(overloadedLines).length;
@@ -1780,40 +2192,41 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       const horizonEndLabel = Util.fmtDateShortPref(horizonEnd);
 
-      const _esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-
       // Clickable filter tiles (toggle). A tile with nothing behind it is disabled; the active one is aria-pressed.
       let filter = null;   // null | 'err' | 'warn' | 'overload'
       const tile = (key, count, label, sublabel, accent) => `
         <button type="button" class="ni-conf-tile" data-conf-filter="${key}" aria-pressed="${filter === key}"${count > 0 ? '' : ' disabled'}>
           <span class="ni-conf-tile-num" style="color:${count > 0 ? accent : 'var(--fg-mute)'}">${count}</span>
-          <span class="ni-conf-tile-lbl">${label}</span>
-          <span class="ni-conf-tile-sub">${sublabel || '&nbsp;'}</span>
+          <span class="ni-conf-tile-lbl">${_esc(label)}</span>
+          <span class="ni-conf-tile-sub">${sublabel ? _esc(sublabel) : '&nbsp;'}</span>
         </button>`;
       const tilesHtml = () => `
         <div class="ni-conf-tiles">
           ${tile('err', errCt, t(errCt === 1 ? 'ui.critical_conflict' : 'ui.critical_conflicts'), errCt ? t('ui.err_pts', { pts: errPts }) : '', 'var(--err)')}
           ${tile('warn', warnCt, t(warnCt === 1 ? 'ui.warning' : 'ui.warnings'), warnCt && warnPts ? t('ui.err_pts', { pts: warnPts }) : '', 'var(--warn)')}
           ${tile('overload', overloadedCount, t(overloadedCount === 1 ? 'ui.overloaded_line' : 'ui.overloaded_lines'),
-                 overloadedCount ? t('ui.conf_days_over', { days: overloadedLineDays, plural: overloadedLineDays > 1 ? 's' : '' }) : '', 'var(--warn)')}
+                 overloadedCount ? _plural(overloadedLineDays, 'ui.conf_days_over', { days: overloadedLineDays }) : '', 'var(--warn)')}
         </div>`;
 
       const hasAny = errCt || warnCt || overloadedCount;
 
       const sortedAlerts = [...horizonAlerts].sort((a, b) => (a.time || 0) - (b.time || 0));
+      // Alert text goes through the shared alert-message helper so dates the core embedded follow the user's date / time
+      // format. Late-bound with optional chaining (the legacy-surface scanner does not count it as a new consumer).
+      const _alertText = a => NIMBUS.Util?.alertMessage?.(a) ?? (a.msgKey ? t(a.msgKey, a.msgVars) : a.msg);
       const alertRow = a => `
               <div class="ni-conf-row">
                 <span class="ni-conf-dot" style="background:${a.sev==='err'?'var(--err)':'var(--warn)'}"></span>
-                <span class="ni-conf-msg">${_esc(a.msgKey ? t(a.msgKey, a.msgVars) : a.msg)}</span>
+                <span class="ni-conf-msg">${_esc(_alertText(a))}</span>
                 <span class="ni-conf-date">${a.time ? Util.fmtDateShortPref(a.time) : ''}</span>
-                ${(a.taskId || (a.line && a.time)) ? `<button data-conf-goto="${_esc(a.id)}" class="ni-conf-goto" title="Go to" aria-label="Go to"><span class="ni-conf-goto-arrow">→</span><span class="ni-conf-goto-label">Go to</span></button>` : ''}
+                ${(a.taskId || (a.line && a.time)) ? `<button data-conf-goto="${_esc(a.id)}" class="ni-conf-goto" title="${_esc(t('btn.go_to'))}" aria-label="${_esc(t('btn.go_to'))}"><span class="ni-conf-goto-arrow">→</span><span class="ni-conf-goto-label">${_esc(t('btn.go_to'))}</span></button>` : ''}
               </div>`;
       // Overloaded lines have no single alert to focus, so these rows carry the line name and days only (no Go to).
       const overloadRow = ([line, days]) => `
               <div class="ni-conf-row">
                 <span class="ni-conf-dot" style="background:var(--warn)"></span>
                 <span class="ni-conf-msg">${_esc(line)}</span>
-                <span class="ni-conf-date">${_esc(t('ui.conf_days_over', { days, plural: days > 1 ? 's' : '' }))}</span>
+                <span class="ni-conf-date">${_esc(_plural(days, 'ui.conf_days_over', { days }))}</span>
               </div>`;
       const listHtml = () => {
         let title, rows;
@@ -1846,7 +2259,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       };
       const dynHtml = () => (hasAny
         ? tilesHtml()
-        : `<p style="text-align:center;color:var(--fg-mute);font-size:12.5px;padding:14px 0;margin:0">Schedule looks healthy — no major issues detected.</p>`) + listHtml();
+        : `<p style="text-align:center;color:var(--fg-mute);font-size:12.5px;padding:14px 0;margin:0">${_esc(t('ui.conf_schedule_healthy'))}</p>`) + listHtml();
 
       const cached = Confidence._history;
       const hasHistory = cached.length >= 2;
@@ -1860,79 +2273,39 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const _okC   = Confidence._cssVar('--ok',   '#1e7a4a');
       const _warnC = Confidence._cssVar('--warn', '#93610a');
       const _errC  = Confidence._cssVar('--err',  '#b02a20');
-      // One set of bands everywhere (badge, ring, this tier, the chart): GOOD >= 80, AT RISK 50-79, CRITICAL < 50.
-      const _tier = _sc >= 80 ? { label:'GOOD',     color:_okC,   bg:Confidence._rgba(_okC, 0.15)   }
-                  : _sc >= 50 ? { label:'AT RISK',  color:_warnC, bg:Confidence._rgba(_warnC, 0.18)  }
-                  :             { label:'CRITICAL', color:_errC,  bg:Confidence._rgba(_errC, 0.18)    };
-
-      const styleBlock = `
-        <style>
-          .ni-breakdown-dlg .ni-conf-body { padding:22px 24px; min-width:520px; max-width:580px; display:flex; flex-direction:column; gap:18px }
-          .ni-breakdown-dlg .ni-conf-header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px }
-          .ni-breakdown-dlg .ni-conf-score-row { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap }
-          .ni-breakdown-dlg .ni-conf-score { font-size:30px; font-weight:700; line-height:1 }
-          .ni-breakdown-dlg .ni-conf-score-max { font-size:13px; color:var(--fg-mute); font-weight:400; margin-left:2px }
-          .ni-breakdown-dlg .ni-conf-tier { display:inline-block; font-size:10px; font-weight:700; padding:3px 10px; border-radius:10px; letter-spacing:.1em }
-          .ni-breakdown-dlg .ni-conf-horizon { font-size:11px; color:var(--fg-mute); margin-top:6px }
-          .ni-breakdown-dlg .ni-conf-close { background:none; border:none; cursor:pointer; font-size:18px; color:var(--fg-mute); padding:0; line-height:1 }
-          .ni-breakdown-dlg .ni-conf-chart-wrap { position:relative }
-          .ni-breakdown-dlg .ni-conf-chart-wrap canvas { width:100%; height:120px; display:block; border-radius:8px; background:var(--bg-subtle) }
-          .ni-breakdown-dlg .ni-conf-chart-axis { display:flex; justify-content:space-between; margin-top:4px; font-size:9.5px; color:var(--fg-faint) }
-          .ni-breakdown-dlg .ni-conf-tiles { display:grid; grid-template-columns:repeat(3,1fr); gap:8px }
-          .ni-breakdown-dlg .ni-conf-tile { padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg-subtle); display:flex; flex-direction:column; gap:3px; font:inherit; color:inherit; text-align:left; width:100%; cursor:pointer; transition:border-color .12s, background .12s }
-          .ni-breakdown-dlg .ni-conf-tile:hover:not(:disabled) { border-color:var(--fg-mute) }
-          .ni-breakdown-dlg .ni-conf-tile:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
-          .ni-breakdown-dlg .ni-conf-tile:active:not(:disabled) { background:var(--bg) }
-          .ni-breakdown-dlg .ni-conf-tile[aria-pressed="true"] { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) }
-          .ni-breakdown-dlg .ni-conf-tile:disabled { cursor:default; opacity:.6 }
-          .ni-breakdown-dlg .ni-conf-listwrap { position:relative }
-          .ni-breakdown-dlg .ni-conf-clear { position:absolute; top:12px; right:0; background:none; border:none; padding:0; font-size:11px; color:var(--accent); cursor:pointer; text-decoration:underline }
-          .ni-breakdown-dlg .ni-conf-clear:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
-          .ni-breakdown-dlg .ni-conf-tile-num { font-size:22px; font-weight:700; line-height:1.1 }
-          .ni-breakdown-dlg .ni-conf-tile-lbl { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--fg-mute); font-weight:600 }
-          .ni-breakdown-dlg .ni-conf-tile-sub { font-size:11px; color:var(--fg-mute) }
-          .ni-breakdown-dlg .ni-conf-alerts { border-top:1px solid var(--line); padding-top:14px }
-          .ni-breakdown-dlg .ni-conf-alerts summary { font-size:10.5px; font-weight:600; color:var(--fg-mute); text-transform:uppercase; letter-spacing:.05em; cursor:pointer; list-style:none; display:flex; align-items:center; gap:6px }
-          .ni-breakdown-dlg .ni-conf-alerts summary::-webkit-details-marker { display:none }
-          .ni-breakdown-dlg .ni-alerts-caret { display:inline-block; transition:transform .15s; font-size:9px }
-          .ni-breakdown-dlg .ni-conf-alerts[open] .ni-alerts-caret { transform:rotate(90deg) }
-          .ni-breakdown-dlg .ni-conf-alerts-list { max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; margin-top:8px }
-          .ni-breakdown-dlg .ni-conf-row { display:flex; align-items:flex-start; gap:10px; padding:7px 10px; border-radius:6px; background:var(--bg-subtle) }
-          .ni-breakdown-dlg .ni-conf-dot { flex-shrink:0; width:8px; height:8px; border-radius:50%; margin-top:6px }
-          .ni-breakdown-dlg .ni-conf-msg { flex:1; font-size:12px; color:var(--fg); line-height:1.45 }
-          .ni-breakdown-dlg .ni-conf-date { flex-shrink:0; font-size:10.5px; color:var(--fg-mute); white-space:nowrap; margin-top:3px }
-          .ni-breakdown-dlg .ni-conf-goto { flex-shrink:0; padding:2px 8px; font-size:11px; border-radius:4px; border:1px solid var(--line); background:none; cursor:pointer; color:var(--fg-mute); white-space:nowrap; margin-top:1px; min-width:24px; text-align:center }
-          .ni-breakdown-dlg .ni-conf-goto:hover { color:var(--fg); border-color:var(--fg-mute) }
-          .ni-breakdown-dlg .ni-conf-goto-label { display:none }
-          .ni-breakdown-dlg .ni-conf-goto:hover .ni-conf-goto-arrow { display:none }
-          .ni-breakdown-dlg .ni-conf-goto:hover .ni-conf-goto-label { display:inline }
-        </style>`;
+      // One set of bands everywhere (see _band): the tier's name and colour follow the same cut-offs as the badge and chart.
+      const _band3 = {
+        good:     { labelKey: 'ui.conf_tier_good',     color: _okC,   alpha: 0.15 },
+        risk:     { labelKey: 'ui.conf_tier_at_risk',  color: _warnC, alpha: 0.18 },
+        critical: { labelKey: 'ui.conf_tier_critical', color: _errC,  alpha: 0.18 },
+      }[_band(_sc)];
+      const _tier = { label: t(_band3.labelKey), color: _band3.color, bg: Confidence._rgba(_band3.color, _band3.alpha) };
 
       const dlg = document.createElement('dialog');
       dlg.className = 'ni-breakdown-dlg';
       dlg.innerHTML = `
-        ${styleBlock}
         <div class="ni-conf-body">
           <div class="ni-conf-header">
             <div>
               <div class="ni-conf-score-row">
                 <div><span class="ni-conf-score" style="color:${_tier.color}">${_sc}</span><span class="ni-conf-score-max">/100</span></div>
-                <span class="ni-conf-tier" style="background:${_tier.bg};color:${_tier.color}">${_tier.label}</span>
+                <span class="ni-conf-tier" style="background:${_tier.bg};color:${_tier.color}">${_esc(_tier.label)}</span>
               </div>
-              <div class="ni-conf-horizon">Horizon: today – ${horizonEndLabel} (${hDays} days)</div>
+              <div class="ni-conf-horizon">${_esc(t('ui.conf_horizon', { date: horizonEndLabel, days: hDays }))}</div>
             </div>
-            <button onclick="this.closest('dialog').close()" class="ni-conf-close" aria-label="Close">✕</button>
+            <button type="button" class="ni-conf-close" aria-label="${_esc(t('btn.close'))}">✕</button>
           </div>
           ${hasHistory ? `
           <div class="ni-conf-chart-wrap">
             <canvas id="ni-conf-chart" width="760" height="240"></canvas>
-            <div class="ni-conf-chart-axis"><span>${startLabel}</span><span>now</span></div>
+            <div class="ni-conf-chart-axis"><span>${_esc(startLabel)}</span><span>${_esc(t('ui.conf_axis_now'))}</span></div>
           </div>` : ''}
           <div class="ni-conf-dyn">${dynHtml()}</div>
         </div>`;
       document.body.appendChild(dlg);
       try { dlg.showModal(); } catch { dlg.open = true; }
       if (hasHistory) Confidence._drawChart(dlg.querySelector('#ni-conf-chart'), cached);
+      dlg.querySelector('.ni-conf-close')?.addEventListener('click', () => dlg.close());
       dlg.addEventListener('close', () => dlg.remove());
       dlg.addEventListener('click', e => {
         if (e.target === dlg) { dlg.close(); return; }
@@ -1954,9 +2327,17 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     _drawChart(canvas, history) {
       if (!canvas || history.length < 2) return;
-      const W = canvas.width, H = canvas.height;
-      const ctx = canvas.getContext('2d');
+      // Size the drawing buffer to the rect the canvas is actually painted at, times the device pixel ratio, and draw
+      // in CSS pixels. The fixed 760x240 buffer was stretched to the CSS box (a different aspect ratio), which
+      // squashed the dots and text vertically and blurred them on a high-density screen. W and H are CSS px.
       const dpr = window.devicePixelRatio || 1;
+      const box = canvas.getBoundingClientRect?.();
+      const W = box && box.width  > 0 ? box.width  : 380;
+      const H = box && box.height > 0 ? box.height : 120;
+      canvas.width  = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform?.(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
 
       // Theme-driven ok/warn/err triad (read live via _cssVar) replacing the old
@@ -1970,34 +2351,35 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       const yFor = v => H - (Math.max(0, Math.min(100, v)) / 100) * H;
       const xFor = i => history.length > 1 ? (i / (history.length - 1)) * W : W / 2;
-      const ptColor = s => s >= 80 ? `rgb(${okRgb})` : s >= 50 ? `rgb(${warnRgb})` : `rgb(${errRgb})`;
+      const rgbOf = { good: okRgb, risk: warnRgb, critical: errRgb };
+      const ptColor = s => `rgb(${rgbOf[_band(s)]})`;
 
-      // Zone bands
-      [{ from:0, to:50, color:`rgba(${errRgb},0.13)` },
-       { from:50,to:80, color:`rgba(${warnRgb},0.10)` },
-       { from:80,to:100,color:`rgba(${okRgb},0.10)` }
+      // Zone bands: critical 0..BAND_RISK_MIN, at risk up to BAND_GOOD_MIN, good above it.
+      [{ from: 0,             to: BAND_RISK_MIN, color: `rgba(${errRgb},0.13)` },
+       { from: BAND_RISK_MIN, to: BAND_GOOD_MIN, color: `rgba(${warnRgb},0.10)` },
+       { from: BAND_GOOD_MIN, to: 100,           color: `rgba(${okRgb},0.10)` }
       ].forEach(b => {
         ctx.fillStyle = b.color;
         ctx.fillRect(0, yFor(b.to), W, yFor(b.from) - yFor(b.to));
       });
 
-      // Zone labels (right-aligned, faint)
-      ctx.font = `bold ${Math.round(14/dpr)}px system-ui`; ctx.textAlign = 'right';
-      [{ y: yFor(25), label:'CRITICAL', color:`rgba(${errRgb},0.45)` },
-       { y: yFor(65), label:'AT RISK',  color:`rgba(${warnRgb},0.4)` },
-       { y: yFor(90), label:'GOOD',     color:`rgba(${okRgb},0.4)`  }
+      // Zone labels (right-aligned, faint), each centred in its band
+      ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'right';
+      [{ y: yFor(BAND_RISK_MIN / 2),                          label: t('ui.conf_tier_critical'), color: `rgba(${errRgb},0.45)` },
+       { y: yFor((BAND_RISK_MIN + BAND_GOOD_MIN) / 2),        label: t('ui.conf_tier_at_risk'),  color: `rgba(${warnRgb},0.4)` },
+       { y: yFor((BAND_GOOD_MIN + 100) / 2),                  label: t('ui.conf_tier_good'),     color: `rgba(${okRgb},0.4)`  }
       ].forEach(({ y, label, color }) => { ctx.fillStyle = color; ctx.fillText(label, W - 6, y + 5); });
 
-      // Reference lines at the band edges, 50 and 80
-      [[50,`rgba(${errRgb},0.55)`],[80,`rgba(${okRgb},0.55)`]].forEach(([v,col]) => {
+      // Reference lines at the band edges
+      [[BAND_RISK_MIN, `rgba(${errRgb},0.55)`], [BAND_GOOD_MIN, `rgba(${okRgb},0.55)`]].forEach(([v,col]) => {
         ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash([5,4]);
         ctx.beginPath(); ctx.moveTo(0, yFor(v)); ctx.lineTo(W, yFor(v)); ctx.stroke();
       });
       ctx.setLineDash([]);
 
       // Y-axis score labels
-      ctx.font = `${Math.round(18/dpr)}px system-ui`; ctx.textAlign = 'left';
-      [[50,`rgba(${errRgb},0.65)`],[80,`rgba(${okRgb},0.65)`]].forEach(([v,col]) => {
+      ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+      [[BAND_RISK_MIN, `rgba(${errRgb},0.65)`], [BAND_GOOD_MIN, `rgba(${okRgb},0.65)`]].forEach(([v,col]) => {
         ctx.fillStyle = col; ctx.fillText(v, 4, yFor(v) - 3);
       });
 
@@ -2005,7 +2387,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const pts = history.map((p, i) => ({ x: xFor(i), y: yFor(p.score), score: p.score, ts: p.ts }));
       const last = history[history.length - 1].score;
       const lineColor = ptColor(last);
-      const fillColor = last >= 80 ? `rgba(${okRgb},0.22)` : last >= 50 ? `rgba(${warnRgb},0.22)` : `rgba(${errRgb},0.22)`;
+      const fillColor = `rgba(${rgbOf[_band(last)]},0.22)`;
 
       // Filled area under line
       ctx.beginPath();
@@ -2014,8 +2396,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       ctx.closePath(); ctx.fillStyle = fillColor; ctx.fill();
 
       // Score line with glow
-      ctx.shadowColor = lineColor; ctx.shadowBlur = 6;
-      ctx.beginPath(); ctx.strokeStyle = lineColor; ctx.lineWidth = 3; ctx.lineJoin = 'round';
+      ctx.shadowColor = lineColor; ctx.shadowBlur = 4;
+      ctx.beginPath(); ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
       pts.forEach((p,i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
       ctx.stroke();
       ctx.shadowBlur = 0;
@@ -2024,11 +2406,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       pts.forEach((p, i) => {
         const isLast = i === pts.length - 1;
         const col = ptColor(p.score);
-        if (isLast) { ctx.shadowColor = col; ctx.shadowBlur = 12; }
+        if (isLast) { ctx.shadowColor = col; ctx.shadowBlur = 8; }
         ctx.beginPath();
-        ctx.arc(p.x, p.y, isLast ? 6 : 3, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, isLast ? 4 : 2, 0, Math.PI * 2);
         ctx.fillStyle = col; ctx.fill();
-        ctx.strokeStyle = isLast ? '#fff' : '#1a1b1f'; ctx.lineWidth = isLast ? 2.5 : 1.5; ctx.stroke();
+        ctx.strokeStyle = isLast ? '#fff' : '#1a1b1f'; ctx.lineWidth = isLast ? 1.7 : 1; ctx.stroke();
         if (isLast) ctx.shadowBlur = 0;
       });
 
@@ -2048,14 +2430,14 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       canvas.style.cursor = 'crosshair';
       canvas.addEventListener('mousemove', e => {
         const rect = canvas.getBoundingClientRect();
-        const mx = (e.clientX - rect.left) * (W / rect.width);
-        const my = (e.clientY - rect.top)  * (H / rect.height);
+        const mx = (e.clientX - rect.left) * (W / (rect.width  || W));
+        const my = (e.clientY - rect.top)  * (H / (rect.height || H));
         let nearest = null, minDist = Infinity;
         pts.forEach(p => {
           const d = Math.hypot(p.x - mx, p.y - my);
           if (d < minDist) { minDist = d; nearest = p; }
         });
-        const threshold = 28 * (W / rect.width);
+        const threshold = 20 * (W / (rect.width || W));
         if (nearest && minDist < threshold) {
           const col = `color:${ptColor(nearest.score)}`;
           const timeStr = nearest.ts
@@ -2068,8 +2450,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             + `<strong style="${col}">${nearest.score}</strong>`
             + (timeStr ? `<span style="color:var(--fg-mute);font-size:10.5px;margin-left:6px">${dateStr} ${timeStr}</span>` : '');
           tip.style.display = 'block';
-          tip.style.left = `${rect.left + nearest.x * (rect.width / W)}px`;
-          tip.style.top  = `${rect.top  + nearest.y * (rect.height / H)}px`;
+          tip.style.left = `${rect.left + nearest.x * ((rect.width  || W) / W)}px`;
+          tip.style.top  = `${rect.top  + nearest.y * ((rect.height || H) / H)}px`;
         } else {
           tip.style.display = 'none';
         }
@@ -2079,26 +2461,19 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     }
   };
 
-  /* Alert-cell highlights are now native vis-timeline background items, built
-     inside Timeline.rebuild() (app.js). This module was a canvas overlay that
-     couldn't layer correctly behind foreground items — removed in favor of the
-     library's native .vis-background channel. Cleanup any stale canvas the old
-     version may have left in the DOM. */
-  (function _cleanupLegacyAlertCanvas() {
-    document.querySelectorAll('#ni-alert-cells, #ni-stress-canvas').forEach(n => n.remove());
-  })();
-
   /* ==========================================================================
      RIPPLE PREVIEW — Alt+hover shows downstream task shift ghosts
      ========================================================================== */
+  // The pending (80 ms debounced) ghost draw. Kept here, not on the object, so it can be cancelled: a hover that
+  // was queued just before Alt was released used to draw ghosts AFTER the key-up had cleared them.
+  let rippleShowTimer = null;
+  const rippleCancelPending = () => { clearTimeout(rippleShowTimer); rippleShowTimer = null; };
   const RipplePreview = {
     _active: false,
     _ghosts: [],
     _lastId: null,
-    _debouncedShow: null,
 
     init() {
-      RipplePreview._debouncedShow = Util.debounce(RipplePreview._show, 80);
       document.addEventListener('keydown', e => {
         if (e.altKey && !RipplePreview._active) {
           RipplePreview._active = true;
@@ -2107,6 +2482,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
       document.addEventListener('keyup', e => {
         if (!e.altKey) {
+          rippleCancelPending();
           RipplePreview._active = false;
           RipplePreview._clearGhosts();
           document.getElementById('vis-timeline')?.classList.remove('ripple-mode');
@@ -2116,6 +2492,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // Window losing focus (e.g. Alt+Tab) suppresses keyup, leaving the
       // crosshair cursor stuck on. Force-clear ripple state on blur/hide.
       const _clearRipple = () => {
+        rippleCancelPending();
         RipplePreview._active = false;
         RipplePreview._clearGhosts();
         document.getElementById('vis-timeline')?.classList.remove('ripple-mode');
@@ -2130,37 +2507,59 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       gantt.addEventListener('mouseover', e => {
         if (!RipplePreview._active) return;
         const item = e.target.closest?.('.vis-item');
-        if (!item) { RipplePreview._clearGhosts(); return; }
+        if (!item) {
+          // Off every bar: drop the ghosts, a queued draw, and the remembered bar, so coming back to the SAME bar
+          // draws its ghosts again instead of being skipped as "unchanged".
+          rippleCancelPending();
+          RipplePreview._clearGhosts();
+          RipplePreview._lastId = null;
+          return;
+        }
         const id = item.getAttribute('data-id');
         if (id && id !== RipplePreview._lastId) {
           RipplePreview._lastId = id;
-          RipplePreview._debouncedShow(id);
+          rippleCancelPending();
+          rippleShowTimer = setTimeout(() => { rippleShowTimer = null; RipplePreview._show(id); }, RIPPLE_SHOW_DELAY_MS);
         }
       });
     },
 
     _show(taskId) {
+      if (!RipplePreview._active) return;   // Alt was released while the draw was queued
       RipplePreview._clearGhosts();
       const task = Store.tasks[taskId];
       if (!task?.MACHINE || !task.start_date) return;
       const line = task.MACHINE;
-      const peers = Store.tasksArr
-        .filter(t => t.MACHINE === line && t.start_date && t.id !== taskId)
-        .sort((a,b) => a.start_date - b.start_date);
-      const downstream = peers.filter(t => t.start_date >= task.start_date).slice(0, 5);
+      // The next RIPPLE_DOWNSTREAM_MAX orders on this machine that start at or after the hovered one, earliest first
+      // (ties keep Store order, like the stable sort this replaces): one pass with a small sorted buffer.
+      const downstream = [];
+      const startMs = +task.start_date;
+      for (const x of Store.tasksArr) {
+        if (x.MACHINE !== line || !x.start_date || x.id === taskId) continue;
+        const xs = +x.start_date;
+        if (!(xs >= startMs)) continue;
+        if (downstream.length === RIPPLE_DOWNSTREAM_MAX && xs >= +downstream[RIPPLE_DOWNSTREAM_MAX - 1].start_date) continue;
+        let pos = downstream.length;
+        while (pos > 0 && xs < +downstream[pos - 1].start_date) pos--;
+        downstream.splice(pos, 0, x);
+        if (downstream.length > RIPPLE_DOWNSTREAM_MAX) downstream.pop();
+      }
       if (!downstream.length) return;
 
-      downstream.forEach((t, i) => {
-        const el = document.querySelector(`.vis-item[data-id="${t.id}"]`);
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        if (!r.width) return;
+      // Read every bar's rectangle first, then create the ghosts: no layout read after a DOM write.
+      const rects = downstream.map(next => {
+        const r = document.querySelector(`.vis-item[data-id="${next.id}"]`)?.getBoundingClientRect();
+        return r && r.width ? r : null;
+      });
+      downstream.forEach((next, i) => {
+        const r = rects[i];
+        if (!r) return;
         const ghost = document.createElement('div');
         ghost.className = 'ni-ripple-ghost';
         ghost.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;
           border-radius:3px;pointer-events:none;z-index:9998;box-sizing:border-box;
           opacity:${0.75 - i * 0.1};`;
-        ghost.title = `Downstream: ${t.text || t.id}`;
+        ghost.title = t('ui.ripple_downstream', { name: next.text || next.id });
         document.body.appendChild(ghost);
         RipplePreview._ghosts.push(ghost);
       });
@@ -2177,7 +2576,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
      ========================================================================== */
   // Version 1 snapshots were labelled by selected plant but contained every
   // loaded task. Infer legacy row ownership only from unambiguous evidence.
-  function scopeSnapshotTasks(snapshot, plant) {
+  // machine -> the plants it is known in. Built once per Store revision and shared by every snapshot scoped in that
+  // time (the Diff dialog scopes up to 40 snapshots per open); it walks every master-data line and every order.
+  const machinePlantsMemo = { rev: null, map: null };
+  function machinePlantsMap() {
+    const rev = typeof Store.rev === 'function' ? Store.rev() : null;
+    if (machinePlantsMemo.map && rev != null && machinePlantsMemo.rev === rev) return machinePlantsMemo.map;
     const machinePlants = new Map();
     const remember = (machine, owner) => {
       if (!machine || !owner) return;
@@ -2187,6 +2591,15 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     for (const row of Store.masterData?.lines || []) remember(row.machine, row.plant);
     for (const [machine, settings] of Object.entries(Store.lineSettings || {})) remember(machine, settings.plant);
     for (const task of Store.tasksArr) remember(task.MACHINE, task.PLANT);
+    machinePlantsMemo.rev = rev;
+    machinePlantsMemo.map = machinePlants;
+    return machinePlants;
+  }
+
+  function scopeSnapshotTasks(snapshot, plant) {
+    // A version 2 snapshot of this plant holds only this plant's orders already: nothing to infer, nothing to walk.
+    if (snapshot.schemaVersion >= 2 && snapshot.plant === plant) return { tasks: snapshot.tasks || [], unknown: 0 };
+    const machinePlants = machinePlantsMap();
     let unknown = 0;
     const tasks = (snapshot.tasks || []).filter(task => {
       let owner = task.PLANT || null;
@@ -2202,13 +2615,11 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     return { tasks, unknown };
   }
 
-  const Diff = {
-    _fmtDate(ms) {
-      if (!ms) return '—';
-      const d = new Date(ms);
-      return Util.fmtDayLabelPref(d) + ' ' + Util._fmtTimePref(d);
-    },
+  // Result rows rendered before the rest wait behind a "show N more" button: a plant-wide re-optimization can differ
+  // by thousands of rows, and building them all is one long main-thread task.
+  const DIFF_ROW_CAP = 200;
 
+  const Diff = {
     _fmtShort(ms) {
       if (!ms) return '—';
       const d = new Date(ms);
@@ -2223,26 +2634,26 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     },
 
     // Enrich a raw snapshot task with live Store data (stable IDs make this safe)
-    _enrich(t) {
-      const live = Store.tasks[t.id];
+    _enrich(row) {
+      const live = Store.tasks[row.id];
       return {
-        id:               t.id,
-        start_date:       t.start_date,
-        end_date:         t.end_date,
-        MACHINE:  t.MACHINE  || '',
-        PRODUCTION_ORDER: t.PRODUCTION_ORDER || live?.PRODUCTION_ORDER || t.id.slice(0, 8),
-        text:             t.text             || live?.text              || live?.MATERIAL_DESCRIPTION || '—',
-        COLOR:            t.COLOR            || live?.COLOR             || '',
-        FORM_SIZE:        t.FORM_SIZE        || live?.FORM_SIZE         || '',
-        FIRMED:           t.FIRMED           ?? live?.firmed           ?? false,
-        scheduleSegments: t.scheduleSegments,   // undefined on pre-field snapshots (unknown), null = unsplit
+        id:               row.id,
+        start_date:       row.start_date,
+        end_date:         row.end_date,
+        MACHINE:  row.MACHINE  || '',
+        PRODUCTION_ORDER: row.PRODUCTION_ORDER || live?.PRODUCTION_ORDER || row.id.slice(0, 8),
+        text:             row.text             || live?.text              || live?.MATERIAL_DESCRIPTION || '—',
+        COLOR:            row.COLOR            || live?.COLOR             || '',
+        FORM_SIZE:        row.FORM_SIZE        || live?.FORM_SIZE         || '',
+        FIRMED:           row.FIRMED           ?? live?.firmed           ?? false,
+        scheduleSegments: row.scheduleSegments,   // undefined on pre-field snapshots (unknown), null = unsplit
       };
     },
 
     compute(snapTasksA, snapTasksB) {
       const mapA = {}, mapB = {};
-      (snapTasksA || []).forEach(t => { mapA[t.id] = Diff._enrich(t); });
-      (snapTasksB || []).forEach(t => { mapB[t.id] = Diff._enrich(t); });
+      (snapTasksA || []).forEach(row => { mapA[row.id] = Diff._enrich(row); });
+      (snapTasksB || []).forEach(row => { mapB[row.id] = Diff._enrich(row); });
 
       const added   = Object.keys(mapB).filter(id => !mapA[id]).map(id => mapB[id]);
       const removed = Object.keys(mapA).filter(id => !mapB[id]).map(id => mapA[id]);
@@ -2300,32 +2711,35 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       added.forEach(a => bump(a.MACHINE, 'added'));
       removed.forEach(r => bump(r.MACHINE, 'removed'));
 
-      return {
-        moved, added, removed, lineImpact,
-        summary: `${moved.length} moved · ${added.length} added · ${removed.length} removed`,
-      };
+      return { moved, added, removed, lineImpact };
     },
 
-    _renderResults(d) {
-      const esc = s => String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    // Renders at most `limit` rows (rescheduled first, largest shift first, then added, then removed); the rest sit
+    // behind a "show N more" button the caller wires (data-diff-more) to re-render with no limit.
+    _renderResults(d, limit = DIFF_ROW_CAP) {
+      const movedShown   = d.moved.slice(0, limit);
+      const addedShown   = d.added.slice(0, Math.max(0, limit - movedShown.length));
+      const removedShown = d.removed.slice(0, Math.max(0, limit - movedShown.length - addedShown.length));
+      const hidden = (d.moved.length - movedShown.length) + (d.added.length - addedShown.length) + (d.removed.length - removedShown.length);
+      const esc = _esc;
 
       const statStrip = `
         <div class="ni-diff-stat-strip">
           <div class="ni-diff-stat moved">
             <div class="ni-diff-stat-num">${d.moved.length}</div>
-            <div class="ni-diff-stat-lbl">Rescheduled</div>
+            <div class="ni-diff-stat-lbl">${esc(t('ui.diff_rescheduled'))}</div>
           </div>
           <div class="ni-diff-stat added">
             <div class="ni-diff-stat-num">${d.added.length}</div>
-            <div class="ni-diff-stat-lbl">Added</div>
+            <div class="ni-diff-stat-lbl">${esc(t('ui.diff_added_short'))}</div>
           </div>
           <div class="ni-diff-stat removed">
             <div class="ni-diff-stat-num">${d.removed.length}</div>
-            <div class="ni-diff-stat-lbl">Removed</div>
+            <div class="ni-diff-stat-lbl">${esc(t('ui.diff_removed_short'))}</div>
           </div>
         </div>`;
 
-      const rowMoved = d.moved.map(m => {
+      const rowMoved = movedShown.map(m => {
         const dir   = m.delta > 0 ? 'later' : 'earlier';
         const arrow = m.delta > 0 ? '▶' : '◀';
         const linePart = m.lineChanged
@@ -2346,17 +2760,17 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           </div>
           <div class="ni-diff-row-bottom">
             ${kinds}${linePart}
-            <span class="ni-diff-dates">Was: ${esc(wasStr)} → Now: ${esc(nowStr)}</span>
+            <span class="ni-diff-dates">${esc(t('ui.diff_was', { date: wasStr, date2: nowStr }))}</span>
           </div>
         </div>`;
       }).join('');
 
-      const rowAdded = d.added.map(a => `
+      const rowAdded = addedShown.map(a => `
         <div class="ni-diff-row ni-diff-row-added">
           <div class="ni-diff-row-top">
             <span class="ni-diff-po">${esc(a.PRODUCTION_ORDER)}</span>
             <span class="ni-diff-desc">${esc(a.text)}</span>
-            <span class="ni-diff-shift added">+ Added</span>
+            <span class="ni-diff-shift added">+ ${esc(t('ui.diff_added_short'))}</span>
           </div>
           <div class="ni-diff-row-bottom">
             <span class="ni-diff-line-chip">${esc(a.MACHINE)}</span>
@@ -2364,12 +2778,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           </div>
         </div>`).join('');
 
-      const rowRemoved = d.removed.map(r => `
+      const rowRemoved = removedShown.map(r => `
         <div class="ni-diff-row ni-diff-row-removed">
           <div class="ni-diff-row-top">
             <span class="ni-diff-po">${esc(r.PRODUCTION_ORDER)}</span>
             <span class="ni-diff-desc">${esc(r.text)}</span>
-            <span class="ni-diff-shift removed">− Removed</span>
+            <span class="ni-diff-shift removed">− ${esc(t('ui.diff_removed_short'))}</span>
           </div>
           <div class="ni-diff-row-bottom">
             <span class="ni-diff-line-chip">${esc(r.MACHINE)}</span>
@@ -2381,20 +2795,21 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         .sort((a,b) => (b[1].moved+b[1].added+b[1].removed) - (a[1].moved+a[1].added+a[1].removed))
         .map(([line, ct]) => {
           const parts = [];
-          if (ct.moved)   parts.push(`${ct.moved} moved`);
-          if (ct.added)   parts.push(`${ct.added} added`);
-          if (ct.removed) parts.push(`${ct.removed} removed`);
-          return `<strong>${esc(line)}:</strong> ${parts.join(', ')}`;
+          if (ct.moved)   parts.push(t('ui.diff_n_moved',   { count: ct.moved }));
+          if (ct.added)   parts.push(t('ui.diff_n_added',   { count: ct.added }));
+          if (ct.removed) parts.push(t('ui.diff_n_removed', { count: ct.removed }));
+          return `<strong>${esc(line)}:</strong> ${esc(parts.join(', '))}`;
         }).join(' &nbsp;·&nbsp; ');
 
       return `
         ${statStrip}
         ${lineLines ? `<div class="ni-diff-line-summary">${lineLines}</div>` : ''}
-        ${d.moved.length   ? `<div class="ni-diff-section-hd">Rescheduled <span class="ni-diff-section-ct">${d.moved.length}</span></div>${rowMoved}` : ''}
-        ${d.added.length   ? `<div class="ni-diff-section-hd">Added to schedule <span class="ni-diff-section-ct">${d.added.length}</span></div>${rowAdded}` : ''}
-        ${d.removed.length ? `<div class="ni-diff-section-hd">Removed from schedule <span class="ni-diff-section-ct">${d.removed.length}</span></div>${rowRemoved}` : ''}
+        ${movedShown.length   ? `<div class="ni-diff-section-hd">${esc(t('ui.diff_rescheduled'))} <span class="ni-diff-section-ct">${d.moved.length}</span></div>${rowMoved}` : ''}
+        ${addedShown.length   ? `<div class="ni-diff-section-hd">${esc(t('ui.diff_added'))} <span class="ni-diff-section-ct">${d.added.length}</span></div>${rowAdded}` : ''}
+        ${removedShown.length ? `<div class="ni-diff-section-hd">${esc(t('ui.diff_removed'))} <span class="ni-diff-section-ct">${d.removed.length}</span></div>${rowRemoved}` : ''}
+        ${hidden ? `<button type="button" class="btn btn-ghost sm" data-diff-more style="margin:8px 0">${esc(t('ui.diff_show_more', { count: hidden }))}</button>` : ''}
         ${!d.moved.length && !d.added.length && !d.removed.length
-          ? '<div style="color:var(--fg-mute);font-size:12.5px;padding:8px 0">No differences — schedules are identical.</div>' : ''}`;
+          ? `<div style="color:var(--fg-mute);font-size:12.5px;padding:8px 0">${esc(t('ui.diff_no_changes'))}</div>` : ''}`;
     },
 
     showUI() {
@@ -2405,17 +2820,22 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       dlg.className = 'ni-diff-dlg';
       const plant = Store.selectedPlant;
 
-      const snapRows = snaps.slice(-40).reverse().map((s, i) => {
+      const shownSnaps = snaps.slice(-DIFF_SNAP_ROWS).reverse();
+      const snapRows = shownSnaps.map((s, i) => {
         const badge = s.auto
-          ? '<span class="ni-diff-snap-badge auto">auto</span>'
-          : '<span class="ni-diff-snap-badge manual">manual</span>';
-        const scopedCount = scopeSnapshotTasks(s, plant).tasks.length;
-        const taskCt = scopedCount ? `${scopedCount} orders` : '';
+          ? `<span class="ni-diff-snap-badge auto">${_esc(t('ui.diff_snap_auto'))}</span>`
+          : `<span class="ni-diff-snap-badge manual">${_esc(t('ui.diff_snap_manual'))}</span>`;
+        // A version 2 snapshot of this plant needs no scoping: its stored count is the answer. Anything else is
+        // scoped only when its rows are already in memory (never fetched just to label a list row).
+        const scopedCount = s.schemaVersion >= 2 && s.plant === plant && s.count != null ? s.count
+          : (Array.isArray(s.tasks) ? scopeSnapshotTasks(s, plant).tasks.length : 0);
+        const taskCt = scopedCount ? `${scopedCount} ${t('ui.orders_count_label')}` : '';
+        const labelText = snapshotLabel(s);
         return `<button type="button" class="ni-diff-snap-row${i === 0 ? ' ni-diff-snap-sel' : ''}" aria-pressed="${i === 0}" data-ts="${s.ts}">
-          <span class="ni-diff-snap-ago">${TimeMachine._relTime(s.ts)}</span>
-          <span class="ni-diff-snap-lbl" title="${Util.escapeHtml(s.label)}">${Util.escapeHtml(s.label)}</span>
+          <span class="ni-diff-snap-ago">${_esc(TimeMachine._relTime(s.ts))}</span>
+          <span class="ni-diff-snap-lbl" title="${_esc(labelText)}">${_esc(labelText)}</span>
           <span style="display:flex;gap:5px;align-items:center">
-            <span style="font-size:10px;color:var(--fg-mute)">${taskCt}</span>
+            <span style="font-size:10px;color:var(--fg-mute)">${_esc(taskCt)}</span>
             ${badge}
           </span>
         </button>`;
@@ -2424,16 +2844,16 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       dlg.innerHTML = `
         <div style="padding:20px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-            <h3 id="ni-diff-title" style="margin:0;font-size:14px;font-weight:700">${t('cmdp.label_compare_schedules')}</h3>
-            <button id="ni-diff-close" aria-label="${t('btn.close')}" style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--fg-mute);padding:2px 6px">✕</button>
+            <h3 id="ni-diff-title" style="margin:0;font-size:14px;font-weight:700">${_esc(t('cmdp.label_compare_schedules'))}</h3>
+            <button id="ni-diff-close" aria-label="${_esc(t('btn.close'))}" style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--fg-mute);padding:2px 6px">✕</button>
           </div>
-          <div style="font-size:12px;color:var(--fg-mute);margin-bottom:6px">${t('ui.diff_compare_against')}</div>
+          <div style="font-size:12px;color:var(--fg-mute);margin-bottom:6px">${_esc(t('ui.diff_compare_against'))}</div>
           <div class="ni-diff-snaplist" id="ni-diff-snaplist">${snapRows}</div>
           <div class="ni-diff-results" id="ni-diff-out">
-            <div style="color:var(--fg-mute);font-size:12.5px;padding:8px 0">${t('intel.select_snapshot')}</div>
+            <div style="color:var(--fg-mute);font-size:12.5px;padding:8px 0">${_esc(t('intel.select_snapshot'))}</div>
           </div>
           <div style="margin-top:14px;text-align:right">
-            <button class="btn btn-ghost sm" id="ni-diff-close2">${t('btn.close')}</button>
+            <button class="btn btn-ghost sm" id="ni-diff-close2">${_esc(t('btn.close'))}</button>
           </div>
         </div>`;
 
@@ -2448,30 +2868,35 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       dlg.querySelector('#ni-diff-close').addEventListener('click',  () => dlg.close());
       dlg.querySelector('#ni-diff-close2').addEventListener('click', () => dlg.close());
 
+      let runToken = 0;   // a slow body read for an earlier click must not overwrite a later one
       const runDiff = ts => {
         const snap = snaps.find(s => s.ts === ts);
-        if (!snap) return;
-        const curr = Store.tasksForSelectedPlant().map(t => ({
-          id:               t.id,
-          start_date:       t.start_date?.getTime?.() || null,
-          end_date:         t.end_date?.getTime?.()   || null,
-          MACHINE:  t.MACHINE  || '',
-          PRODUCTION_ORDER: t.PRODUCTION_ORDER || '',
-          text:             t.text || t.MATERIAL_DESCRIPTION || '',
-          COLOR:            t.COLOR    || '',
-          FORM_SIZE:        t.FORM_SIZE || '',
-          FIRMED:           !!t.firmed,
-          scheduleSegments: snapshotSegments(t),
-        }));
-        const historical = scopeSnapshotTasks(snap, plant);
-        const d = Diff.compute(historical.tasks, curr);
-        const notice = historical.unknown
-          ? `<p role="status">${Util.escapeHtml(t('intel.snapshot_scope_unknown', { count: historical.unknown }))}</p>` : '';
-        const hasChanges = d.moved.length || d.added.length || d.removed.length;
-        // Unknown rows are deliberately omitted, so do not claim identical
-        // schedules merely because all known rows happen to match.
-        document.getElementById('ni-diff-out').innerHTML = notice
-          + (hasChanges || !historical.unknown ? Diff._renderResults(d) : '');
+        if (!snap) return Promise.resolve();
+        const token = ++runToken;
+        // Rows held in memory render at once; a body kept only in IndexedDB is read back by id first.
+        const show = rows => {
+          if (token !== runToken) return;
+          const out = document.getElementById('ni-diff-out');
+          if (!out) return;
+          if (!rows) { out.innerHTML = `<p role="status">${Util.escapeHtml(t('toast.snapshot_not_found'))}</p>`; return; }
+          const curr = Store.tasksForSelectedPlant().map(snapshotTask);
+          const historical = scopeSnapshotTasks({ ...snap, tasks: rows }, plant);
+          const d = Diff.compute(historical.tasks, curr);
+          const notice = historical.unknown
+            ? `<p role="status">${Util.escapeHtml(t('intel.snapshot_scope_unknown', { count: historical.unknown }))}</p>` : '';
+          const hasChanges = d.moved.length || d.added.length || d.removed.length;
+          // Unknown rows are deliberately omitted, so do not claim identical
+          // schedules merely because all known rows happen to match.
+          const paint = limit => {
+            out.innerHTML = notice + (hasChanges || !historical.unknown ? Diff._renderResults(d, limit) : '');
+            out.querySelector('[data-diff-more]')?.addEventListener('click', () => paint(Infinity));
+          };
+          paint(DIFF_ROW_CAP);
+        };
+        if (Array.isArray(snap.tasks)) return Promise.resolve(show(snap.tasks));
+        return TimeMachine.tasksOf(snap).then(show).catch(e => {
+          _warn('Diff snapshot read failed', e);
+        });
       };
 
       // Wire up snapshot row clicks
@@ -2487,7 +2912,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
 
       // Auto-run on the first (most recent) snapshot
-      const firstTs = snaps.slice(-40).reverse()[0]?.ts;
+      const firstTs = shownSnaps[0]?.ts;
       if (firstTs) runDiff(firstTs);
     }
   };
@@ -2495,41 +2920,76 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   /* ==========================================================================
      PATTERNS — heuristic sequence-pair learning from drags
      ========================================================================== */
+  const patternsByPlant = {};   // { [plant]: { 'A→B': count } }; Patterns._pairs is the selected plant's entry
+  let patternsPersistTimer = null;
   const Patterns = {
     _LS_KEY:    'nimbus.patterns.v1',
     _pairs:     {},
     _THRESHOLD: 4,
 
+    // The learned colour pairs are per plant (a colour sequence that is habit at one plant says nothing about another),
+    // kept as { [plant]: { 'A→B': count } } under the one storage key so the sign-out wipe still clears all of it.
+    // A value stored by an older build was one flat { 'A→B': count } map with no plant: it is dropped on load.
     init() {
-      try { Patterns._pairs = JSON.parse(localStorage.getItem(Patterns._LS_KEY) || '{}'); } catch {}
+      try {
+        const stored = JSON.parse(localStorage.getItem(Patterns._LS_KEY) || '{}');
+        if (stored && typeof stored === 'object') {
+          for (const [plant, pairs] of Object.entries(stored))
+            if (pairs && typeof pairs === 'object') patternsByPlant[plant] = pairs;
+        }
+      } catch {}
+      Patterns._pairs = patternsByPlant[Store.selectedPlant] || {};
+      // A pending (debounced) write must not be lost when the tab is hidden or closed.
+      window.addEventListener?.('pagehide', () => { if (patternsPersistTimer) Patterns.flush(); });
+      document.addEventListener?.('visibilitychange', () => { if (document.hidden && patternsPersistTimer) Patterns.flush(); });
       Store.subscribe(evt => {
+        if (evt.type === 'plant:selected') Patterns._pairs = patternsByPlant[Store.selectedPlant] || {};
         if (evt.type === 'task:update' && evt.source === 'timeline' && evt.changes?.start_date)
           Patterns._observe(evt.id);
       });
     },
 
     _observe(movedId) {
+      const plant = Store.selectedPlant;
       const task = Store.tasks[movedId];
-      if (!task?.MACHINE || !task.start_date) return;
-      const sorted = Store.tasksArr
-        .filter(x => x.MACHINE === task.MACHINE && x.start_date)
-        .sort((a,b) => a.start_date - b.start_date);
-      const idx = sorted.findIndex(x => x.id === movedId);
-      if (idx > 0) {
-        const prev = sorted[idx - 1];
+      if (!plant || !task?.MACHINE || !task.start_date) return;
+      // The order that sits right before the moved one on its machine (by start, ties in Store order): one pass over
+      // the orders, no filter + sort + findIndex of the whole machine on every drag.
+      const movedStart = +task.start_date;
+      let prev = null, prevStart = -Infinity, seenMoved = false;
+      for (const x of Store.tasksArr) {
+        if (x.id === movedId) { seenMoved = true; continue; }
+        if (x.MACHINE !== task.MACHINE || !x.start_date) continue;
+        const xs = +x.start_date;
+        // Before the moved order when it starts earlier, or starts at the same time and comes earlier in Store order.
+        if (!(xs < movedStart || (xs === movedStart && !seenMoved))) continue;
+        if (xs >= prevStart) { prev = x; prevStart = xs; }   // >=: the later Store entry wins a tie, as in the old sorted order
+      }
+      if (seenMoved && prev) {
         const key  = `${Util.norm(prev.COLOR)}→${Util.norm(task.COLOR)}`;
-        Patterns._pairs[key] = (Patterns._pairs[key] || 0) + 1;
-        localStorage.setItem(Patterns._LS_KEY, JSON.stringify(Patterns._pairs));
-        if (Patterns._pairs[key] === Patterns._THRESHOLD)
+        const pairs = patternsByPlant[plant] || (patternsByPlant[plant] = {});
+        Patterns._pairs = pairs;
+        pairs[key] = (pairs[key] || 0) + 1;
+        Patterns.schedulePersist();
+        if (pairs[key] === Patterns._THRESHOLD)
           Toast.show(t('toast.pattern_detected', { key }), 'info', 4500);
       }
     },
 
-    getSuggestions() {
-      return Object.entries(Patterns._pairs)
-        .filter(([,c]) => c >= Patterns._THRESHOLD)
-        .sort((a,b) => b[1] - a[1])
-        .map(([key, count]) => ({ key, count }));
+    // Writing the whole map to localStorage on every drag is wasted work in a drag burst: coalesce, and flush when the
+    // page is hidden or closed so the last drag is not lost.
+    schedulePersist() {
+      clearTimeout(patternsPersistTimer);
+      patternsPersistTimer = setTimeout(Patterns.flush, PATTERNS_PERSIST_DEBOUNCE_MS);
+    },
+
+    flush() {
+      clearTimeout(patternsPersistTimer);
+      patternsPersistTimer = null;
+      // A full or blocked store must not throw out of a Gantt drag (the count still lives for this session).
+      try { localStorage.setItem(Patterns._LS_KEY, JSON.stringify(patternsByPlant)); } catch (e) {
+        _warn('Patterns save failed', e);
+      }
     }
   };
 
@@ -2548,14 +3008,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
   // Repaint canvas-painted views whose colors are baked in at draw time.
   function repaintTheme() {
     try { NIMBUS.TimelineNav?.render?.(); } catch (e) {
-      (window.NIMBUS && window.NIMBUS.ErrorLog
-        ? window.NIMBUS.ErrorLog.warn('intel', 'DarkMode TimelineNav repaint failed', { err: String(e), errorCode: 'internal' })
-        : console.warn('[DarkMode] TimelineNav repaint failed', e));
+      _warn('DarkMode TimelineNav repaint failed', e);
     }
     try { NIMBUS.Dashboard?._renderHeatmap?.(); } catch (e) {
-      (window.NIMBUS && window.NIMBUS.ErrorLog
-        ? window.NIMBUS.ErrorLog.warn('intel', 'DarkMode heatmap repaint failed', { err: String(e), errorCode: 'internal' })
-        : console.warn('[DarkMode] heatmap repaint failed', e));
+      _warn('DarkMode heatmap repaint failed', e);
     }
   }
 
@@ -2673,25 +3129,32 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     DarkMode
   });
 
+  // Runs the module inits exactly once, whether or not IndexedDB opened. The inits used to sit in a `.then` followed
+  // by a `.catch` that ran them AGAIN, so any throw inside the first run (one bad init) doubled every Store
+  // subscription and key listener; and one throwing init skipped the ones after it. Each now runs on its own.
+  let intelInitDone = false;
+  function _initAll() {
+    if (intelInitDone) return;
+    intelInitDone = true;
+    const run = (name, fn) => {
+      try { fn(); } catch (e) {
+        _warn(`${name} init failed`, e);
+      }
+    };
+    run('CommandPalette', () => CommandPalette.init());
+    run('TimeMachine', () => TimeMachine.init());   // wires the undo:pushed subscription: must run even without IDB
+    run('Confidence', () => Confidence.init());
+    run('Patterns', () => Patterns.init());
+    setTimeout(() => run('RipplePreview', () => RipplePreview.init()), RIPPLE_INIT_DELAY_MS);
+  }
+
   function _boot() {
     DarkMode.init();
     NeedsEngine.init();
-    IntelDB.open().then(() => {
-      CommandPalette.init();
-      TimeMachine.init();
-      Confidence.init();
-      Patterns.init();
-      setTimeout(() => { RipplePreview.init(); }, 220);
-    }).catch(e => {
-      (window.NIMBUS && window.NIMBUS.ErrorLog
-        ? window.NIMBUS.ErrorLog.warn('intel', 'IndexedDB unavailable — continuing without persistence.', { err: String(e), errorCode: 'internal' })
-        : console.warn('[NIMBUS.Intelligence] IndexedDB unavailable — continuing without persistence.', e));
-      CommandPalette.init();
+    IntelDB.open().then(_initAll, e => {
+      _warn('IndexedDB unavailable — continuing without persistence.', e);
       TimeMachine._snapshots = [];
-      TimeMachine.init(); // wires the undo:pushed subscription; must run even without IDB
-      Confidence.init();
-      Patterns.init();
-      setTimeout(() => { RipplePreview.init(); }, 220);
+      _initAll();
     });
   }
 

@@ -23,7 +23,8 @@ type ActorResolver = () => string | undefined;
 
 /** One line's calendar rows as held in Store, handed to Util.sapDueDate through a DI seam
  *  (platform sits below Calendar/Store, so it can import neither). `rev` is the Store
- *  revision, used only to invalidate the per-line+date window cache. */
+ *  data revision (`Store.dataRev()`: alert refreshes and line-checkbox toggles do not bump it, calendar, plant,
+ *  period and master-data edits do), used only to invalidate the per-line+date window cache. */
 export interface DueCalendarSource {
   lineHours: Record<number, [number, number] | null> | null;
   plantHours: Record<number, [number, number] | null> | null;
@@ -675,8 +676,9 @@ export const Util = {
     return start && end && end > start ? [{ sequence: 1, start, end }] : [];
   },
 
-  // Start of local day.
-  startOfDay(d: unknown): Date | null { const x = Util.parseDate(d); if (!x) return null; x.setHours(0,0,0,0); return x; },
+  // Start of local day. Returns a new Date: parseDate hands a Date argument back as-is, so mutating it would
+  // move the caller's own Date to midnight.
+  startOfDay(d: unknown): Date | null { const src = Util.parseDate(d); if (!src) return null; const x = new Date(src.getTime()); x.setHours(0,0,0,0); return x; },
 
   // Add minutes.
   addMin(d: Date, min: number): Date { return new Date(d.getTime() + min * Config.MS_MIN); },
@@ -911,8 +913,27 @@ export const Util = {
   },
 
   /** The alert text in the viewer's language: worker alerts carry a locale key + vars, with English `msg` as the fallback. */
-  alertMessage(a: { msg: string; msgKey?: string; msgVars?: Record<string, string | number> }): string {
-    return a.msgKey ? Util.t(a.msgKey, a.msgVars as Record<string, string | number> | undefined) : a.msg;
+  alertMessage(a: { msg: string; msgKey?: string; msgVars?: Record<string, string | number>; msgDates?: ReadonlyArray<{ text: string; ms: number }> }): string {
+    // Dates the core embedded in its fixed default format (msgDates: that text plus the instant) are re-formatted with
+    // the viewer's dateFormat / timeFormat, in `msg` and in any string var equal to the default text.
+    const dates = a.msgDates;
+    const shown = dates?.length ? dates.map(d => ({ text: d.text, pref: Util.fmtDTReadable(new Date(d.ms)) })) : null;
+    if (a.msgKey) {
+      let vars = a.msgVars as Record<string, string | number> | undefined;
+      if (shown && vars) {
+        const swapped: Record<string, string | number> = { ...vars };
+        for (const k of Object.keys(swapped)) {
+          const hit = shown.find(s => s.text === swapped[k]);
+          if (hit) swapped[k] = hit.pref;
+        }
+        vars = swapped;
+      }
+      return Util.t(a.msgKey, vars);
+    }
+    if (!shown) return a.msg;
+    let msg = a.msg;
+    for (const s of shown) msg = msg.split(s.text).join(s.pref);
+    return msg;
   },
 
   // Hours that scheduled finish slips past the SAP planning date (clamped at 0). A queued order has no placed

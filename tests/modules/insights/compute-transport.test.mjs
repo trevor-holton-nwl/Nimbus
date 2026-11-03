@@ -100,6 +100,7 @@ test('first crash rejects every pending request and next call creates a fresh wo
   const b = assert.rejects(Compute.utilization(0, 1), /worker error/);
   workers[0].crash();
   await Promise.all([a, b]);
+  assert.equal(workers[0].terminated, true, 'the crashed worker is terminated before the reference is dropped');
   assert.equal(Compute.available(), true);
   const retry = Compute.alerts();
   assert.equal(workers.length, 2);

@@ -143,6 +143,13 @@ Util.setPlantClockResolver((plant, line) => Store.plantNow(plant || (line ? Stor
  *  blocks, plant blocks, master data, setup snapshot, selected plant). They bump rev() but not dataRev(). */
 const DATA_REV_EXCLUDED: ReadonlySet<string> = new Set(['alerts:change', 'lines:selected', 'distribution:summary', 'undo:pushed', 'settings:change', 'tasks:saved']);
 
+/** master-data tables whose save cannot change lines or line settings (see Store.masterDataChangeTouchesLines).
+ *  An allow-list of "does touch" would silently miss a future table; this skip-list only names ones that never do. */
+const MASTER_DATA_TABLES_WITHOUT_LINES: ReadonlySet<string> = new Set([
+  'tool_inventory', 'materials', 'material_plants', 'bom_items', 'roles', 'role_plants',
+  'production_version', 'routing_operation', 'routing_rules',
+]);
+
 export interface ActiveLineHours {
   workHours: WorkHours;
   /** 'period' = a dated plant period covers the day; 'default' = the plant's default week; 'none' = no plant resolves. */
@@ -787,7 +794,8 @@ export const Store = {
       if (!line) continue;
       this.ensureLineSettings(line);
       const ls = this._state.lineSettings[line];
-      const before = JSON.stringify(ls);
+      // Only these nine fields are written below, so compare just them (no per-line JSON.stringify of the whole entry).
+      const b = [ls.excludeFromOpt, ls.bottleneck, ls.bufferUnit, ls.bufferPct, ls.bufferHours, ls.plGroup, ls.plant, ls.sapWorkcenter, ls.distributionWeight];
       ls.excludeFromOpt = row.excl_optimizer === 'X';
       ls.bottleneck     = row.bottleneck === 'X';
       if (row.buffer_type === '%')        ls.bufferUnit = 'pct';
@@ -800,9 +808,18 @@ export const Store = {
       ls.plant   = (row.plant as string) || null;
       ls.sapWorkcenter = (row.sap_workcenter as string) || null;
       ls.distributionWeight = row.distribution_weight == null ? null : Number(row.distribution_weight);
-      if (JSON.stringify(ls) !== before) touched++;
+      const a = [ls.excludeFromOpt, ls.bottleneck, ls.bufferUnit, ls.bufferPct, ls.bufferHours, ls.plGroup, ls.plant, ls.sapWorkcenter, ls.distributionWeight];
+      if (a.some((v, i) => !Object.is(v, b[i]))) touched++;
     }
     return touched;
+  },
+  /** Whether a `master-data-changed` event can have changed lines or line settings. `table` is the optional
+   *  master-data table the save named; a missing table means boot/refresh/unknown and always counts. Tables that
+   *  hold nothing the Machines roster, line settings or Hierarchy read (tool inventory, materials, BOMs, roles,
+   *  routing) are skipped by the shell subscriber. */
+  masterDataChangeTouchesLines(table?: string | null): boolean {
+    if (!table) return true;
+    return !MASTER_DATA_TABLES_WITHOUT_LINES.has(table);
   },
   setLineSetting(line: string, patch: Partial<NimbusLineSetting>, source?: string): void {
     this.ensureLineSettings(line);

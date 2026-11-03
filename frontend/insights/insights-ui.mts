@@ -866,7 +866,7 @@ export const Dashboard = {
       const overloadTol = u && u.capacity > 0 ? globalThis.NimbusComputeCore!.OVERLOAD_TOLERANCE_H / u.capacity : 0;
       const sev     = u ? Utilization.sev(u.pct ?? 0, overloadAt, overloadTol) : 'ok';
       const barW    = Math.min(pct, 100);
-      const isOver  = u ? globalThis.NimbusComputeCore!.isOverloaded(u.scheduled, u.effectiveCapacity ?? u.capacity) : false;
+      const isOver  = u ? globalThis.NimbusComputeCore!.isOverloaded(u.scheduled, u.effectiveCapacity ?? u.capacity, u.capacity) : false;
       const sorted  = (byLine[line] || []).slice().sort((a, b) => (a.start_date?.getTime() || 0) - (b.start_date?.getTime() || 0));
       // Next changeover is "from now" — meaningless for a future day, so show a dash.
       const nxtCO   = isToday ? Dashboard._fmtNextCO(Dashboard._nextChangeover(sorted, now), now) : '—';
@@ -1596,7 +1596,7 @@ export const AlertsUIAdapter = {
     const ico        = isCalendar ? '⊘' : (sevIcon[a.sev] || '•');
     const fixable  = isFixableAlert(a);
     const override = OVERRIDE_ALERT_TYPES.has(a.type) && a.taskId != null;
-    const msg = a.msgKey ? Util.t(a.msgKey, a.msgVars ?? {}) : a.msg;
+    const msg = Util.alertMessage(a);
     // An acknowledged alert is only listed when "Show acknowledged" is on; it says who hid it and until when.
     const ack = ackLabel(AlertProfileMatches.current().acked.get(a.id), (k, v) => Util.t(k, v));
     return `<div class="alert-row alert-${a.sev}${isCalendar ? ' alert-calendar' : ''}" data-id="${Util.escapeHtml(a.id)}">` +

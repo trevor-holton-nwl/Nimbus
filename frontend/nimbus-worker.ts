@@ -26,13 +26,14 @@
  *                                          startMs, days, setup:{intervals,diagnostics} } }
  *  IN  { type:'LEVERAGE_BATCH', id, payload:{ base:{ ...ALERTS payload, startMs, days, lines? },
  *                                             variants:[{ key, setup:{intervals,diagnostics} }] } }
- *      Replays computeAlerts + computeUtilization once per variant on the shared base with that
- *      variant's hypothetical setup observation; calendars/plants are cloned per variant because
- *      the core's ensureCalendar/ensurePlant write defaults into them.
+ *      Replays computeAlerts once per variant on the shared base with that variant's hypothetical
+ *      setup observation (Core.computeLeverageBatch, the same function the main-thread fallback
+ *      calls); calendars/plants are shallow-copied per variant because the core's
+ *      ensureCalendar/ensurePlant write defaults into them. Replies with alerts only (no matrix).
  *  OUT { type:'ALERTS_RESULT',      id, alerts, elapsed }
  *  OUT { type:'UTILIZATION_RESULT', id, matrix }
- *  OUT { type:'LEVERAGE_BATCH_RESULT', id, results:[{ key, alerts, matrix }] }
- *  OUT { type:'ERROR',              id, error }
+ *  OUT { type:'LEVERAGE_BATCH_RESULT', id, results:[{ key, alerts }] }
+ *  OUT { type:'ERROR',              id, error }   (also for an unknown message type; id null for a null message)
  */
 'use strict';
 
@@ -56,6 +57,11 @@ type IncomingMessage =
     } };
 
 self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
+  if (data == null || typeof data !== 'object') {
+    // A null/non-object message has no id to answer on; report it like a worker-global failure (id null).
+    self.postMessage({ type: 'ERROR', id: null, error: 'malformed message', failingType: 'malformed' });
+    return;
+  }
   const { type, id, payload } = data;
   try {
     if (type === 'ALERTS') {
@@ -65,16 +71,12 @@ self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
       const { matrix } = Core.computeUtilization(payload);
       self.postMessage({ type: 'UTILIZATION_RESULT', id, matrix });
     } else if (type === 'LEVERAGE_BATCH') {
-      const { base, variants } = payload;
-      // ensureCalendar/ensurePlant only ADD missing top-level keys to calendars/plants (never edit an existing
-      // entry), so every core call gets its own shallow copy of the two maps instead of a deep clone.
-      const fresh = () => ({ calendars: { ...base.calendars }, plants: { ...base.plants } });
-      const results = variants.map(({ key, setup }) => ({
-        key,
-        alerts: Core.computeAlerts({ ...base, ...fresh(), setup }).alerts,
-        matrix: Core.computeUtilization({ ...base, ...fresh(), setup }).matrix,
-      }));
+      // One shared loop (core) for this handler and the main-thread fallback; alerts only, no matrix.
+      const results = Core.computeLeverageBatch(payload.base, payload.variants);
       self.postMessage({ type: 'LEVERAGE_BATCH_RESULT', id, results });
+    } else {
+      // Unknown message type: answer with an ERROR so a caller waiting on this id fails fast instead of hanging.
+      self.postMessage({ type: 'ERROR', id: id ?? null, jobId: id ?? undefined, error: `unknown message type: ${String(type)}`, failingType: String(type) });
     }
   } catch (err) {
     const e = err as Error;
@@ -86,13 +88,16 @@ self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
 
 // Worker-global failures (outside the onmessage try/catch): report to the main thread with
 // id null so Compute's client logs them via ErrorLog without touching any pending job.
-self.onerror = function (ev: any) {
+// WorkerGlobalScope.onerror is called with FIVE positional arguments (message, source, lineno, colno, error),
+// not an ErrorEvent, and returning true marks the error handled so it is NOT also re-dispatched to the parent's
+// Worker.onerror (which would reject every pending job and count a crash).
+self.onerror = function (msg: any, src?: string, line?: number, col?: number, err?: any) {
   try {
-    const e = ev && ev.error;
     self.postMessage({ type: 'ERROR', id: null, failingType: 'uncaught',
-      error: (e && e.message) || (ev && ev.message) || String(ev), stack: e && e.stack,
-      filename: ev && ev.filename, lineno: ev && ev.lineno });
+      error: (err && err.message) || (typeof msg === 'string' ? msg : (msg && msg.message)) || String(msg),
+      stack: err && err.stack, filename: src, lineno: line, colno: col });
   } catch {}
+  return true;
 };
 if (typeof self.addEventListener === 'function') {
   self.addEventListener('unhandledrejection', function (ev: PromiseRejectionEvent) {

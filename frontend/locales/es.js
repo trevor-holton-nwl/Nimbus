@@ -478,6 +478,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.diff_kind_machine':              'Máquina',
   'ui.diff_kind_split':                'Dividida',
   'ui.diff_finish_delta':              'fin {{delta}}',
+  'ui.diff_show_more':                 'Mostrar {{count}} más',
   'ui.no_results':                     'Sin resultados',
   'ui.all_lines':                      'Todas las Máquinas',
   'ui.no_lines':                       'Sin máquinas',
@@ -757,6 +758,29 @@ window.__NIMBUS_LOCALES.es = {
   'alert.placement_exception_overtime': 'El pedido "{{order}}" está programado fuera del horario laboral en {{line}}.',
   'alert.placement_exception_overlong': 'El pedido "{{order}}" es más largo que cualquier ventana de trabajo en {{line}} y se coloca como una sola barra larga.',
   'alert.derivation_issue': 'El pedido "{{order}}" tiene una nota de programación ({{code}}).',
+  // B26: alert text for the rules that used to ship English only (core nimbus-compute-core.js sets msgKey + msgVars; msg stays the English fallback).
+  'alert.overlap': 'Los pedidos "{{prev}}" y "{{cur}}" se solapan en {{line}}.',
+  'alert.overload': '{{line}} está sobrecargada el {{day}}: {{scheduled}} h programadas frente a {{effective}} h de capacidad efectiva ({{total}} h en total).',
+  'alert.near_capacity': '{{line}} está cerca de su capacidad el {{day}}: {{scheduled}} / {{effective}} h de capacidad efectiva ({{pct}} %).',
+  'alert.closed_calendar': '{{line}} tiene trabajo programado el {{day}} pero 0 h de capacidad — el calendario de {{line}} o de la planta está cerrado ese día de la semana.',
+  'alert.closed_blackouts': '{{line}} tiene trabajo programado el {{day}} pero 0 h de capacidad — la ventana de trabajo es de {{window}} h y los bloqueos suman {{consumed}} h ({{blocks}}).',
+  'alert.blackout': 'El pedido "{{order}}" se solapa con un bloqueo en {{line}}.',
+  'alert.firmed_closed': 'El pedido firme "{{order}}" está en un día en que el calendario de {{line}} está cerrado.',
+  'alert.order_closed': 'El pedido "{{order}}" está en un día en que el calendario de {{line}} está cerrado.',
+  'alert.firmed_out_of_hours_start': 'El pedido firme "{{order}}" empieza antes de que abra {{line}} ({{opens}}).',
+  'alert.firmed_out_of_hours_end': 'El pedido firme "{{order}}" termina después de que cierre {{line}} ({{closes}}).',
+  'alert.firmed_out_of_hours_both': 'El pedido firme "{{order}}" empieza antes de que abra {{line}} ({{opens}}) y termina después de que cierre {{line}} ({{closes}}).',
+  'alert.order_out_of_hours_start': 'El pedido "{{order}}" empieza antes de que abra {{line}} ({{opens}}).',
+  'alert.order_out_of_hours_end': 'El pedido "{{order}}" termina después de que cierre {{line}} ({{closes}}).',
+  'alert.order_out_of_hours_both': 'El pedido "{{order}}" empieza antes de que abra {{line}} ({{opens}}) y termina después de que cierre {{line}} ({{closes}}).',
+  'alert.pv_lot_size': 'La cantidad del pedido "{{order}}" queda fuera del rango de tamaño de lote de la versión de producción resuelta.',
+  'alert.setup_initial_state_unknown': 'No se puede determinar qué hay que preparar antes del pedido {{order}} en {{line}}.',
+  'alert.setup_override_inactive': 'Una anulación manual del cambio en {{line}} ya no coincide con el programa actual.',
+  'alert.setup_current_state_diverged': 'El estado de cambio registrado en {{line}} no coincide con el que esperaba el pedido {{order}}.',
+  'alert.setup_uncovered': 'No hay tiempo de cambio definido en {{line}}. Añada una regla de cambio o un valor por defecto por valor.',
+  'alert.setup_uncovered_pair': 'No hay tiempo de cambio definido para {{pair}} en {{line}}. Añada una regla de cambio o un valor por defecto por valor.',
+  'alert.setup_predecessor_state_unknown': 'Al pedido {{predecessor}} en {{line}} le faltan atributos necesarios para calcular el cambio antes de {{order}}.',
+  'alert.setup_successor_state_unknown': 'Al pedido {{order}} en {{line}} le faltan atributos necesarios para calcular su cambio.',
   // Staging de SAP (zona de aterrizaje de Mulesoft) — Admin > Interfaz > Staging
   'ui.sap_staging':                    'Staging',
   'ui.sap_staging_group':              'Staging (Mulesoft)',
@@ -1278,7 +1302,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.conf_filter_critical': 'Conflictos críticos ({{count}})',
   'ui.conf_filter_warnings': 'Advertencias ({{count}})',
   'ui.conf_filter_overloaded': 'Máquinas sobrecargadas ({{count}})',
-  'ui.conf_days_over': '{{days}} día{{plural}} sobre la capacidad',
+  'ui.conf_days_over': '{{days}} días sobre la capacidad',
   'ui.err_pts':                        '−{{pts}} pts',
 
   /* ── Time machine / diff ─────────────────────────────────────────────────── */
@@ -1711,6 +1735,7 @@ window.__NIMBUS_LOCALES.es = {
   'ui.opt_bg_more': '(+{{count}} más)',
   'ui.opt_bg_switch_plant': 'Cambiar a la planta {{plant}}',
   'toast.opt_bg_no_worker': 'La ejecución en segundo plano requiere un navegador compatible con workers en segundo plano.',
+  'toast.opt_bg_stale_core': 'La ejecución en segundo plano no pudo iniciarse porque este navegador conserva una copia desactualizada del optimizador. Recargue la página (Ctrl+F5) y vuelva a ejecutarla.',
   'ui.opt_pv_apply_fits': 'Aplicar lo que aún encaja',
   'ui.opt_bg_leave_warning': 'Una optimización en segundo plano sigue en curso. Si sale de esta página, se perderá.',
   'ui.setup_review_filter_all':           'All',                                                       // MISSING TRANSLATION
@@ -1935,20 +1960,60 @@ window.__NIMBUS_LOCALES.es = {
   'btn.setup_field_up':                'Subir',
   'btn.setup_field_down':              'Bajar',
 
+  // Intelligence layer i18n sweep (2026-11-03, code review C29): palette badges, snapshot / undo labels (stored as keys
+  // and translated when shown), relative time, Diff and Confidence breakdown strings, singular forms for the plural keys.
+  'cmdp.fab_hint':                               'ctrl + k',
+  'cmdp.fab_locked_hint':                        'Seleccione una planta para desbloquear',
+  'cmdp.type_action':                            'Acción',
+  'cmdp.type_line':                              'Máquina',
+  'cmdp.type_order':                             'Pedido',
+  'cmdp.need_conflict_jump_one':                 '{{count}} conflicto — ir al primero',
+  'cmdp.need_unscheduled_review_one':            '{{count}} pedido sin franja horaria',
+  'cmdp.need_blackout_risk_one':                 '{{count}} pedido cerca de un próximo bloqueo',
+  'snap.manual':                                 'Manual · {{time}}',
+  'snap.first':                                  'Primera instantánea · {{time}}',
+  'snap.frozen':                                 'Congelado · {{time}}',
+  'snap.intent':                                 'Intención · {{time}}',
+  'snap.pre_selection':                          'Antes de la selección · {{count}} pedidos · {{time}}',
+  'snap.pre_selection_one':                      'Antes de la selección · {{count}} pedido · {{time}}',
+  'snap.data_loaded':                            'Datos cargados',
+  'snap.bulk_update':                            'Actualización masiva',
+  'snap.default':                                'Instantánea',
+  'undo.firm_all_freeze':                        'Poner todo en firme (congelar)',
+  'undo.firm_orders':                            'Poner en firme {{count}} pedidos',
+  'undo.firm_orders_one':                        'Poner en firme {{count}} pedido',
+  'undo.unfirm_orders':                          'Quitar el firme a {{count}} pedidos',
+  'undo.unfirm_orders_one':                      'Quitar el firme a {{count}} pedido',
+  'undo.before_time_machine_restore':            'Antes de restaurar desde Time Machine',
+  'ui.hours_mins_ago':                           'hace {{h}}h {{m}}min',
+  'ui.diff_added_short':                         'Añadido',
+  'ui.diff_removed_short':                       'Eliminado',
+  'ui.diff_n_moved':                             '{{count}} movido(s)',
+  'ui.diff_n_added':                             '{{count}} añadido(s)',
+  'ui.diff_n_removed':                           '{{count}} eliminado(s)',
+  'ui.diff_snap_auto':                           'auto',
+  'ui.diff_snap_manual':                         'manual',
+  'ui.ripple_downstream':                        'Posterior: {{name}}',
+  'ui.conf_tier_good':                           'BUENO',
+  'ui.conf_tier_at_risk':                        'EN RIESGO',
+  'ui.conf_tier_critical':                       'CRÍTICO',
+  'ui.conf_axis_now':                            'ahora',
+  'ui.conf_days_over_one':                       '{{days}} día sobre la capacidad',
+
   // Command Palette (2026-09 i18n sweep)
-  'cmdp.need_conflict_jump':           '{{count}} conflict{{plural}} — jump to first',              // MISSING TRANSLATION
+  'cmdp.need_conflict_jump':           '{{count}} conflictos — ir al primero',
   'cmdp.sub_scroll_to_overlap':        'Scroll Gantt to nearest overlap or error',                   // MISSING TRANSLATION
-  'cmdp.need_overload_inspect':        '{{line}} is overloaded ({{pct}}%)',                          // MISSING TRANSLATION
+  'cmdp.need_overload_inspect':        'Sobrecarga en {{line}} ({{pct}}%)',
   'cmdp.sub_scroll_to_overloaded_line': 'Scroll Gantt to overloaded line',                            // MISSING TRANSLATION
-  'cmdp.need_unscheduled_review':      '{{count}} order{{plural}} without a time slot',              // MISSING TRANSLATION
+  'cmdp.need_unscheduled_review':      '{{count}} pedidos sin franja horaria',
   'cmdp.sub_switch_to_orders_table':   'Switch to Orders table to review',                           // MISSING TRANSLATION
-  'cmdp.need_snapshot_due':            'Last snapshot {{mins}}m ago — save now',                     // MISSING TRANSLATION
+  'cmdp.need_snapshot_due':            'Última instantánea hace {{mins}} min — guardar ahora',
   'cmdp.sub_take_checkpoint':          'Take a Time Machine checkpoint',                             // MISSING TRANSLATION
-  'cmdp.need_first_snapshot':          'No snapshots yet — save a checkpoint now',                   // MISSING TRANSLATION
+  'cmdp.need_first_snapshot':          'Aún no hay instantáneas — guarde un punto de control ahora',
   'cmdp.sub_save_first_entry':         'Save your first Time Machine entry',                         // MISSING TRANSLATION
-  'cmdp.need_blackout_risk':           '{{count}} order{{plural}} near an upcoming blackout',        // MISSING TRANSLATION
+  'cmdp.need_blackout_risk':           '{{count}} pedidos cerca de un próximo bloqueo',
   'cmdp.sub_review_blackout_overlap':  'Review orders overlapping a scheduled blackout block',       // MISSING TRANSLATION
-  'cmdp.need_sandbox_active':          'Sandbox is active — apply or discard',                       // MISSING TRANSLATION
+  'cmdp.need_sandbox_active':          'El modo Sandbox está activo — aplicar o descartar',
   'cmdp.sub_whatif_mode':              'You are in what-if mode',                                    // MISSING TRANSLATION
   'cmdp.label_compare_snapshot':       'Compare to a previous snapshot',                              // MISSING TRANSLATION
   'cmdp.sub_open_diff_viewer':         'Open the schedule diff viewer',                               // MISSING TRANSLATION
@@ -2350,6 +2415,7 @@ window.__NIMBUS_LOCALES.es = {
   "toast.calendar_changes_pending": "Calendario actualizado localmente; sincronizando cambios…",
   "toast.calendar_whatif_local": "Calendario actualizado en simulación; aplique el escenario para guardar los cambios.",
   "toast.snapshot_restore_skipped": "No se restauraron {{count}} pedidos protegidos o distribuidos. Utilice sus controles de planificación para modificarlos.",
+  "toast.snapshot_restore_machine_skipped": "No se restauraron {{count}} pedidos porque la máquina de la instantánea ya no existe o ya no los admite: {{orders}}",
   "ui.print_scope": "Ámbito",
   "ui.print_scope_all": "Todos los pedidos cargados",
   "ui.print_scope_plant": "Planta seleccionada",

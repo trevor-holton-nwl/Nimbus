@@ -884,11 +884,34 @@ test('overload tolerance: exactly full is not an alert; 10.04 h is inside the to
   assert.match(over[0].msg, /10.1h scheduled/);
 });
 
-test('Core.isOverloaded: threshold plus the 0.05 h tolerance, never on zero capacity', () => {
+test('Core.isOverloaded: threshold plus the 0.05 h tolerance; a zero effective capacity alerts only when the line had capacity (B4)', () => {
   assert.equal(Core.isOverloaded(10, 10), false);
   assert.equal(Core.isOverloaded(10.04, 10), false);
   assert.equal(Core.isOverloaded(10.06, 10), true);
+  // Without the full capacity the old rule holds: nothing is overloaded on zero effective capacity.
   assert.equal(Core.isOverloaded(1, 0), false);
+  // Fully buffered (capacity > 0, effective <= 0): any load beyond the tolerance is an overload.
+  assert.equal(Core.isOverloaded(1, 0, 10), true);
+  assert.equal(Core.isOverloaded(0.05, 0, 10), false, 'inside the tolerance');
+  assert.equal(Core.isOverloaded(0, 0, 10), false, 'no load');
+  // A truly closed line (no capacity at all) is the closed alert's business, never an overload.
+  assert.equal(Core.isOverloaded(1, 0, 0), false);
+});
+
+test('B4: a fully buffered line with scheduled hours raises an overload alert; a closed line keeps the closed alert; no load stays silent', () => {
+  const buffered = { L: { plant: 'P', bufferUnit: 'pct', bufferPct: 100 } };
+  const over = Core.computeAlerts(alertBase(fullDay([2]), { lineSettings: buffered })).alerts.filter(a => a.type === 'overload');
+  assert.equal(over.length, 1, 'fully buffered day with 2 h scheduled alerts');
+  assert.match(over[0].msg, /2\.0h scheduled vs 0\.0h effective capacity \(10\.0h total\)/);
+  // Same line, no load: nothing.
+  assert.deepEqual(Core.computeAlerts(alertBase([], { lineSettings: buffered })).alerts, []);
+  // A buffer above 100 % clamps to zero instead of going negative.
+  assert.equal(Core.effectiveFromCapacity('L', 10, { L: { bufferUnit: 'pct', bufferPct: 150 } }), 0);
+  assert.equal(Core.effectiveFromCapacity('L', 10, { L: { bufferUnit: 'hours', bufferHours: 12 } }), 0);
+  // A truly closed line (0 h capacity) with load is the closed alert, not an overload.
+  const closed = Core.computeAlerts(alertBase(fullDay([2]), { calendars: { L: { workHours: allDays(null) } } })).alerts;
+  assert.ok(closed.some(a => a.type === 'closed'));
+  assert.ok(!closed.some(a => a.type === 'overload'));
 });
 
 test('overload rule no longer buckets a multi-day bar wholly on its start day', () => {
@@ -1605,4 +1628,247 @@ test('overload message prints two decimals when one decimal would show the same 
   assert.equal(over.length, 1);
   assert.match(over[0].msg, /24\.04h scheduled vs 23\.98h effective capacity \(23\.98h total\)/);
   assert.doesNotMatch(over[0].msg, /24\.0h scheduled vs 24\.0h/);
+});
+
+// B1: startOfDay hands back a new Date; alertPoints/scoreConfidence must not move the caller's horizonStart.
+test('B1: startOfDay clones; alertPoints leaves horizonStart unchanged; scoreConfidence is order-independent', () => {
+  const src = D(15, 13, 30);
+  const before = +src;
+  const day = Core.startOfDay(src);
+  assert.equal(+src, before, 'the argument is not moved to midnight');
+  assert.equal(+day, +D(15, 0, 0));
+  assert.notEqual(day, src);
+
+  const horizonStart = D(15, 13, 30);
+  const horizonEnd = new Date(+horizonStart + 7 * 86400000);
+  const dated = { id: 'x', sev: 'err', type: 'overload', line: 'L', time: D(15, 12, 0) };   // earlier today: counts as due now
+  const points = Core.alertPoints(dated, horizonStart, horizonEnd);
+  assert.ok(points > 0);
+  assert.equal(+horizonStart, +D(15, 13, 30), 'alertPoints did not mutate horizonStart');
+
+  const alerts = [
+    dated,
+    { id: 'y', sev: 'warn', type: 'late', line: 'L', time: D(16, 9), due: D(16, 9) },
+    { id: 'z', sev: 'err', type: 'overlap', line: 'L', time: D(14, 9) },   // an earlier day: history
+  ];
+  const a = Core.scoreConfidence({ alerts, horizonStart, horizonMinutes: 7 * 1440, machines: 5 });
+  const b = Core.scoreConfidence({ alerts: alerts.slice().reverse(), horizonStart, horizonMinutes: 7 * 1440, machines: 5 });
+  assert.deepEqual(a, b);
+  assert.equal(+horizonStart, +D(15, 13, 30));
+});
+
+// B2: the module-level memos are cleared on every exit, thrown or not.
+const throwingTask = () => {
+  let reads = 0;
+  return { id: 'boom', get MACHINE() { if (++reads > 1) throw new Error('rule blew up'); return 'L'; }, PLANT: 'P', RUN_TIME: 1,
+    start_date: D(15, 9), end_date: D(15, 10) };
+};
+const memoIsClear = () => {
+  const lines = plant => ({ lines: [{ machine: 'MEMO', plant }] });
+  assert.equal(Core.getPlantForLine('MEMO', {}, lines('P1')), 'P1');
+  assert.equal(Core.getPlantForLine('MEMO', {}, lines('P2')), 'P2', 'a stale _plantMemo would still answer P1');
+};
+test('B2: computeAlerts clears its caches when a rule throws', () => {
+  assert.throws(() => Core.computeAlerts(alertBase([throwingTask()])), /rule blew up/);
+  memoIsClear();
+});
+test('B2: computeUtilization clears its caches when it throws', () => {
+  assert.throws(() => Core.computeUtilization({
+    tasks: [throwingTask()], lineSettings: { L: { plant: 'P' } }, calendars: { L: open0818 }, plants: {}, blocks: [], plantBlocks: [],
+    masterData: { lines: [{ machine: 'L', plant: 'P' }] }, startMs: +D(14), days: 3, lines: ['L'],
+  }), /rule blew up/);
+  memoIsClear();
+});
+
+// B3: an alert with no date of its own is stamped with the order's PLANT clock, not the thread's.
+test('B3: dateless alerts use the plant now (runtime mismatch, placement, runtime-unknown, pv-lot-size, setup diagnostic)', () => {
+  const nowP = D(14, 6, 15);
+  const bare = { MACHINE: 'L', PLANT: 'P', ORDER: 'O', RUN_TIME: 2 };
+  const tasks = [
+    { ...bare, id: 'mm', runtime_schedule_mismatch: true },
+    { ...bare, id: 'pe', placement_exception: 'overtime' },
+    { ...bare, id: 'ru', planning_status: 'needs_planning', planning_reason: { code: 'runtime_unknown', step: 's' } },
+    { ...bare, id: 'ls', run_time_basis: { lot_size_warning: true } },
+  ];
+  const setup = { intervals: [], diagnostics: [{ type: 'setup-uncovered', line: 'L', scope: 'P/L', pairKey: 'A->B' }] };
+  const { alerts } = Core.computeAlerts(alertBase(tasks, { setup, now: { P: nowP } }));
+  const timeOf = type => alerts.find(a => a.type === type)?.time;
+  for (const type of ['runtime-schedule-mismatch', 'placement_exception', 'runtime-unknown', 'pv-lot-size', 'setup-uncovered']) {
+    assert.ok(timeOf(type), type + ' is raised');
+    assert.equal(+timeOf(type), +nowP, type + ' carries the plant now');
+  }
+  assert.equal(+nowP, +D(14, 6, 15), 'now[plant] is left alone');
+  // With no clock for the plant the thread clock still stands in (no throw).
+  const noClock = Core.computeAlerts(alertBase(tasks.slice(0, 1), { now: {} })).alerts.find(a => a.type === 'runtime-schedule-mismatch');
+  assert.ok(noClock.time instanceof Date && !isNaN(noClock.time));
+});
+
+// B9: distribution grouping prefers the task's own PLANT, like every other rule.
+test('B9: a distribution family is grouped under the task PLANT when the machine is not in master data', () => {
+  const day1 = D(15, 9), day2 = D(16, 9);
+  const mk = (id, line, start) => ({ id, MACHINE: line, PLANT: 'PT', RUN_TIME: 2, PARENT_ORDER: 'A-1', MATERIAL_NUMBER: 'M',
+    start_date: start, end_date: new Date(+start + 2 * 3600000) });
+  const masterData = {
+    lines: [{ machine: 'L1', sap_workcenter: 'WC1' }, { machine: 'L2', sap_workcenter: 'WC1' }],
+    workcenters: [{ sap_workcenter: 'WC1', max_separation: 'day' }],
+  };
+  const { alerts } = Core.computeAlerts({
+    tasks: [mk('a', 'L1', day1), mk('b', 'L2', day2)], blocks: [], plantBlocks: [], calendars: {}, plants: {},
+    lineSettings: {}, masterData, dismissed: [], opts: {}, now: { PT: D(14, 6) },
+  });
+  assert.deepEqual(alerts.filter(a => a.type === 'distribution-separation').map(a => a.id), ['dist-sep:PT:A-1:M']);
+});
+
+// B27: dates embedded in alert text travel with their instant so the main thread can use the user's format.
+test('B27: firmed-out-of-hours and derivation alerts ship msgDates (default text + instant) matching their embedded dates', () => {
+  const t = { id: 'oh', MACHINE: 'L', PLANT: 'P', ORDER: 'O', RUN_TIME: 2, start_date: D(15, 6), end_date: D(15, 20) };
+  const { alerts } = Core.computeAlerts(alertBase([t]));
+  const hit = alerts.find(a => a.type === 'firmed-out-of-hours');
+  assert.ok(hit, 'raised');
+  assert.equal(hit.msgDates.length, 2);
+  for (const d of hit.msgDates) {
+    assert.ok(hit.msg.includes(d.text), 'the default text is embedded in msg');
+    assert.equal(d.text, Core.fmtDTReadable(new Date(d.ms)));
+  }
+  assert.deepEqual(hit.msgDates.map(d => d.ms), [+D(15, 8), +D(15, 18)]);
+
+  const issue = issueAlerts([issueTask('fm', { code: 'finish_moved_earlier', from: D(15, 17), to: D(15, 11) })])
+    .find(a => a.type === 'finish_moved_earlier');
+  assert.deepEqual(issue.msgDates.map(d => d.ms), [+D(15, 17), +D(15, 11)]);
+  assert.equal(issue.msgVars.from, issue.msgDates[0].text);
+  assert.equal(issue.msgVars.to, issue.msgDates[1].text);
+  // An alert that embeds no date carries no msgDates.
+  assert.equal(issueAlerts([issueTask('rz', { code: 'run_time_zero' })]).find(a => a.type === 'run_time_zero').msgDates, undefined);
+});
+
+// B8: the end-of-window check reads the LAST OCCUPIED instant, so a bar ending exactly at midnight is judged by the
+// window of the day it ran on (not the next day's), and a bar closing exactly on the window close stays clean.
+test('B8: a bar ending exactly at midnight is judged against the window of the day it ran on', () => {
+  const alertsFor = (t) => Core.computeAlerts(alertBase([t], { now: { P: D(14, 6) } })).alerts
+    .filter(a => a.type === 'firmed-out-of-hours');
+  // Window 08:00-18:00. Thu 10:00 -> Fri 00:00 runs 6 h past the close: flagged "ends after L closes".
+  const past = alertsFor({ id: 'm', MACHINE: 'L', PLANT: 'P', ORDER: 'M', RUN_TIME: 14, start_date: D(15, 10), end_date: D(16, 0) });
+  assert.equal(past.length, 1);
+  assert.match(past[0].msg, /ends after L closes/);
+  // Ending exactly on the close is on time.
+  assert.deepEqual(alertsFor({ id: 'c', MACHINE: 'L', PLANT: 'P', ORDER: 'C', RUN_TIME: 8, start_date: D(15, 10), end_date: D(15, 18) }), []);
+});
+
+// B18: parsed numbers are memoized per pass, but every caller still gets fresh Date instances.
+test('B18: scheduleIntervals returns fresh Dates each call, inside and outside a compute pass', () => {
+  const t = { id: 'x', start_date: '2026-10-15T08:00:00', end_date: '2026-10-15T10:00:00' };
+  const a = Core.scheduleIntervals(t), b = Core.scheduleIntervals(t);
+  assert.notEqual(a[0].start, b[0].start);
+  assert.equal(+a[0].start, +b[0].start);
+  a[0].start.setHours(0);   // a caller mutating its copy must not leak into the next read
+  assert.equal(Core.scheduleIntervals(t)[0].start.getHours(), 8);
+  const { alerts } = Core.computeAlerts(alertBase([
+    { id: 'p', MACHINE: 'L', PLANT: 'P', ORDER: 'P', RUN_TIME: 4, start_date: D(15, 8), end_date: D(15, 12) },
+    { id: 'q', MACHINE: 'L', PLANT: 'P', ORDER: 'Q', RUN_TIME: 4, start_date: D(15, 10), end_date: D(15, 14) },
+  ]));
+  const ovl = alerts.find(x => x.type === 'overlap');
+  assert.equal(+ovl.time, +D(15, 10));
+});
+
+// B16: the utilization horizon pre-filter is an overlap test, never a clip.
+test('B16: orders outside the matrix horizon are skipped; one touching it is attributed whole', () => {
+  const run = (tasks) => Core.computeUtilization({
+    tasks, lineSettings: { L: { plant: 'P' } }, calendars: { L: { workHours: allDays([0, 24]) } }, plants: {}, blocks: [], plantBlocks: [],
+    masterData: { lines: [{ machine: 'L', plant: 'P' }] }, startMs: +D(14), days: 2, lines: ['L'],
+  }).matrix.L;
+  const before = { id: 'b', MACHINE: 'L', RUN_TIME: 2, start_date: D(10, 8), end_date: D(10, 10) };
+  const after = { id: 'a', MACHINE: 'L', RUN_TIME: 2, start_date: D(20, 8), end_date: D(20, 10) };
+  const startOnly = { id: 's', MACHINE: 'L', RUN_TIME: 3, start_date: D(15, 9) };
+  const farStartOnly = { id: 'f', MACHINE: 'L', RUN_TIME: 3, start_date: D(30, 9) };
+  // A 48 h bar from Tue 12:00 to Thu 12:00 with a 24 h run: half its time falls on each day, but only 14th/15th are in the 2-day matrix
+  // (Wed 14th, Thu 15th); the share is computed over the WHOLE bar, so it is not clipped to the horizon.
+  const spanning = { id: 'sp', MACHINE: 'L', RUN_TIME: 48, start_date: D(13, 0), end_date: D(16, 0) };
+  const m = run([before, after, startOnly, farStartOnly, spanning]);
+  assert.deepEqual(Object.keys(m), ['2026-10-14', '2026-10-15']);
+  assert.equal(m['2026-10-15'].scheduled, 16 + 3, 'whole-bar share: 48 h over 3 days = 16 h/day, plus the start-only order');
+  assert.equal(m['2026-10-14'].scheduled, 16);
+  assert.deepEqual(m['2026-10-15'].tasks.sort(), ['s', 'sp']);
+});
+
+// B25: computeAlerts is a thin dispatcher over pure per-rule functions sharing one context; the rules are callable alone.
+const ruleIds = (name, args) => Core.runAlertRule(name, args).map(a => a.id);
+
+test('B25: the rule list is pinned in push order and computeAlerts is exactly the rules concatenated in that order', () => {
+  assert.deepEqual(Core.alertRuleNames, ['overlap', 'toolConflict', 'distributionSeparation', 'capacity', 'blackout', 'firmedClosed',
+    'firmedOutOfHours', 'runtimeMismatch', 'late', 'placement', 'engineFindings', 'runtimeUnknown', 'pvLotSize', 'setup']);
+  const tasks = [
+    { id: 'a', MACHINE: 'L', PLANT: 'P', ORDER: 'A', RUN_TIME: 14, start_date: D(15, 6), end_date: D(15, 20), runtime_schedule_mismatch: true,
+      original_end_date: D(15, 9), run_time_basis: { lot_size_warning: true } },
+    { id: 'b', MACHINE: 'L', PLANT: 'P', ORDER: 'B', RUN_TIME: 2, start_date: D(15, 10), end_date: D(15, 12), placement_exception: 'overtime' },
+  ];
+  const args = alertBase(tasks, { blocks: [{ line: 'L', start: D(15, 11), end: D(15, 13) }] });
+  const all = Core.computeAlerts(args).alerts.map(a => a.id);
+  const piecewise = Core.alertRuleNames.flatMap(name => ruleIds(name, args));
+  assert.deepEqual(all, piecewise);
+  assert.ok(all.length >= 6, 'the fixture reaches several rules');
+});
+
+test('B25: runAlertRule rejects an unknown rule and leaves no compute memo behind', () => {
+  assert.throws(() => Core.runAlertRule('nope', alertBase([])), /unknown alert rule: nope/);
+  assert.throws(() => Core.runAlertRule('hasOwnProperty', alertBase([])), /unknown alert rule/);
+  Core.runAlertRule('overlap', alertBase([]));
+  assert.equal(Core.getPlantForLine('L', { L: { plant: 'P2' } }, { lines: [] }), 'P2', 'no stale plant memo');
+});
+
+test('B25 ruleOverlap: a nested order overlaps its container once, touching orders do not, an order never overlaps its own pieces', () => {
+  const t = (id, s, e, extra = {}) => ({ id, MACHINE: 'L', PLANT: 'P', ORDER: id.toUpperCase(), RUN_TIME: 1, start_date: D(15, s), end_date: D(15, e), ...extra });
+  const alerts = Core.runAlertRule('overlap', alertBase([t('a', 8, 18), t('b', 9, 10), t('c', 11, 12), t('d', 18, 19)]));
+  // b and c are nested in a; d only touches a's end. The sweep reports each against the longest-ending earlier order (a).
+  assert.deepEqual(alerts.map(a => a.id), ['ovl-a-b', 'ovl-a-c']);
+  assert.equal(alerts[0].msg, 'Orders "A" and "B" overlap on L.');
+  assert.deepEqual(alerts[0].msgVars, { prev: 'A', cur: 'B', line: 'L' });
+  const split = { ...t('s', 8, 12), scheduleSegments: [{ sequence: 1, startDate: D(15, 8), endDate: D(15, 10) }, { sequence: 2, startDate: D(15, 9), endDate: D(15, 12) }] };
+  assert.deepEqual(Core.runAlertRule('overlap', alertBase([split])), [], 'overlapping pieces of ONE order are not an overlap between orders');
+});
+
+test('B25 ruleCapacity / closed reason: the text lists line blocks before plant blocks, each in entry order, and the calendar-closed case', () => {
+  const task = { id: 'c', MACHINE: 'L', PLANT: 'P', ORDER: 'C', RUN_TIME: 2, start_date: D(15, 10), end_date: D(15, 12) };
+  const args = alertBase([task], {
+    blocks: [
+      { line: null, plant: 'P', start: D(15, 8), end: D(15, 12), reason: 'a' },
+      { line: 'L', start: D(15, 8), end: D(15, 18), reason: 'b' },
+    ],
+    plantBlocks: [{ plant: 'P', start: D(15, 9), end: D(15, 11), reason: 'holiday' }, { plant: 'Q', start: D(15, 8), end: D(15, 18), reason: 'other plant' }],
+  });
+  const closed = Core.runAlertRule('capacity', args).filter(a => a.type === 'closed');
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0].msg, 'L is scheduled on 2026-10-15 but has 0h capacity — working window is 10.0h, blackouts union to 10.0h '
+    + '(global line "a" 4.0h, line "b" 10.0h, plant "holiday" 2.0h).');
+  assert.equal(closed[0].msgKey, 'alert.closed_blackouts');
+  assert.equal(closed[0].msgVars.blocks, 'global line "a" 4.0h, line "b" 10.0h, plant "holiday" 2.0h');
+  // A line calendar closed that weekday: a different reason and key, no block list.
+  const shut = Core.runAlertRule('capacity', alertBase([task], { calendars: { L: { workHours: allDays(null) } } })).filter(a => a.type === 'closed');
+  assert.equal(shut[0].msg, 'L is scheduled on 2026-10-15 but has 0h capacity — the L or plant calendar is closed that day-of-week.');
+  assert.equal(shut[0].msgKey, 'alert.closed_calendar');
+});
+
+test('B25 ruleBlackout / blocksFor scoping: a block applies to its own plant (or every plant when unscoped), never to another plant', () => {
+  const task = { id: 'k', MACHINE: 'L', PLANT: 'P', ORDER: 'K', RUN_TIME: 2, start_date: D(15, 10), end_date: D(15, 12) };
+  const hit = (extra) => ruleIds('blackout', alertBase([task], extra));
+  assert.deepEqual(hit({ blocks: [{ line: 'L', start: D(15, 11), end: D(15, 13) }] }), ['blk-k'], 'line block');
+  assert.deepEqual(hit({ blocks: [{ line: null, plant: 'P', start: D(15, 11), end: D(15, 13) }] }), ['blk-k'], 'line-less block of this plant');
+  assert.deepEqual(hit({ blocks: [{ line: null, plant: 'Q', start: D(15, 11), end: D(15, 13) }] }), [], 'line-less block of another plant');
+  assert.deepEqual(hit({ blocks: [{ line: 'M', start: D(15, 11), end: D(15, 13) }] }), [], 'another line');
+  assert.deepEqual(hit({ plantBlocks: [{ plant: 'P', start: D(15, 11), end: D(15, 13) }] }), ['blk-k'], 'plant block');
+  assert.deepEqual(hit({ plantBlocks: [{ plant: null, start: D(15, 11), end: D(15, 13) }] }), ['blk-k'], 'unscoped plant block hits every plant');
+  assert.deepEqual(hit({ plantBlocks: [{ plant: 'Q', start: D(15, 11), end: D(15, 13) }] }), [], 'plant block of another plant');
+  assert.deepEqual(hit({ blocks: [{ line: 'L', start: D(15, 12), end: D(15, 13) }] }), [], 'touching is not overlapping');
+});
+
+test('B25 ruleToolConflict: one alert per pusher, silent when the plant owns enough copies', () => {
+  const t = (id, line, s, e) => ({ id, MACHINE: line, PLANT: 'P', ORDER: id.toUpperCase(), RUN_TIME: 2, PRT_01: 'T1', start_date: D(15, s), end_date: D(15, e) });
+  const tasks = [t('a', 'L', 8, 12), t('b', 'L2', 10, 14)];
+  const one = Core.runAlertRule('toolConflict', alertBase(tasks));
+  assert.deepEqual(one.map(a => a.id), ['toolc-a|b']);
+  assert.equal(one[0].line, 'L2', 'the alert sits on the pusher (the later start)');
+  assert.equal(one[0].msgKey, 'alert.tool_conflict_no_row', 'no inventory row = one copy');
+  const two = Core.runAlertRule('toolConflict', alertBase(tasks, {
+    masterData: { lines: [{ machine: 'L', plant: 'P' }], plants: [{ plant: 'P' }], tool_inventory: [{ plant: 'P', tool_id: 'T1', total_qty: 2, out_of_service_qty: 0 }] },
+  }));
+  assert.deepEqual(two, []);
 });
