@@ -2546,6 +2546,60 @@ test('P0-13: cancelling the calendar confirm re-shows the Optimize dialog instea
     assert.equal(calls.bg + calls.fg, 0);
   }));
 
+// P0-14: no stuck spinner on early returns or exceptions.
+test('P0-14: an exception in the pre-run steps restores the Run button, drops the spinner and logs', () =>
+  withCalendarGate('failed', false, async (calls, chk) => {
+    const runBtn = globalThis.document.getElementById('opt-run-btn');
+    runBtn.innerHTML = 'RUN';
+    runBtn.disabled = false;
+    Modal.confirm = async () => { throw new Error('confirm exploded'); };
+    const priorHide = OptimizerPreview.hideLoading;
+    const priorErr = ErrorLog.error;
+    let hides = 0;
+    const logged = [];
+    OptimizerPreview.hideLoading = () => { hides++; };
+    ErrorLog.error = (...a) => { logged.push(a); };
+    try {
+      chk.checked = false;
+      await OptimizeDialog.run();   // must resolve, not reject
+      assert.equal(runBtn.innerHTML, 'RUN', 'the Run button is restored');
+      assert.equal(runBtn.disabled, false);
+      assert.ok(hides >= 1, 'the spinner is taken down');
+      assert.equal(logged.length, 1);
+      assert.match(String(logged[0][1]), /Optimize run failed/);
+      assert.equal(calls.fg + calls.bg, 0);
+    } finally {
+      OptimizerPreview.hideLoading = priorHide;
+      ErrorLog.error = priorErr;
+    }
+  }));
+
+test('P0-14: runWithPreview with an empty Store takes the spinner down without aborting the previous run or bumping the token', () => {
+  const fx = openBackgroundFixture();
+  const priorTasks = structuredClone(Store.tasksArr);
+  const priorHide = OptimizerPreview.hideLoading;
+  const priorToast = Toast.show;
+  try {
+    Store.setTasks([], 'unit-test');
+    let hides = 0;
+    OptimizerPreview.hideLoading = () => { hides++; };
+    Toast.show = () => {};
+    let aborted = false;
+    OptimizerPreview._workerAbortController = { abort() { aborted = true; } };
+    const seq = OptimizerPreview._runSeq;
+    OptimizerPreview.runWithPreview('spt', { plant: 'SR' });
+    assert.equal(hides, 1, 'the spinner is dropped');
+    assert.equal(aborted, false, 'the previous run is left alone');
+    assert.equal(OptimizerPreview._runSeq, seq, 'the run token is not bumped');
+  } finally {
+    OptimizerPreview.hideLoading = priorHide;
+    Toast.show = priorToast;
+    OptimizerPreview._workerAbortController = null;
+    Store.setTasks(priorTasks, 'unit-test');
+    fx.restore();
+  }
+});
+
 test('Gap C: a pending calendar also asks, and "Run anyway" proceeds in both the background and foreground paths', () =>
   withCalendarGate('pending', true, async (calls, chk) => {
     chk.checked = true;
