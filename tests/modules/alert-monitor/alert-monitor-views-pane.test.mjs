@@ -56,7 +56,7 @@ beforeEach(() => {
     'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
   } };
   AlertProfileClient.cached = () => [];
-  Session.setPref = (k, v) => { prefs.push([k, v]); };
+  Session.setPref = (k, v) => { prefs.push([k, v]); Store.setUserSettings({ [k]: v }, 'settings-pref'); };   // like the real one: apply, then emit
   AlertProfileMatches.setFocusTaskIds = ids => { log.push(['outline', ids ? [...ids].sort() : null]); };
   Util.plantClock = () => new Date('2026-10-20T08:00:00');
   Store.setSelectedPlant('P1', 'test');
@@ -81,6 +81,10 @@ const clickColh = col => click({ '.am-mx-colh': { dataset: { amCol: col } } });
 const clickAm = (action) => click({ '[data-am-action]': { dataset: { amAction: action } } });
 const clickFacet = v => click({ '[data-am-facet]': { dataset: { amFacet: v } } });
 const side = () => els['am-side'].innerHTML;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const TYPE_WAIT = 180;   // the repaint after typing waits for a pause (130 ms)
+const typeInSearch = q => els['alerts-tab'].handlers.input({ target: { closest: sel => (sel === '[data-am-search]' ? { value: q } : null) } });
+const typeInFacet = q => els['alerts-tab'].handlers.input({ target: { closest: sel => (sel === '[data-am-facet-q]' ? { value: q } : null) } });
 const ids = html => [...html.matchAll(/class="am-xrow[^"]*"[^>]*data-alert-id="([^"]+)"/g)].map(m => m[1]).sort();
 const INBOX = { alertMonitorView: { '*': { view: 'inbox' } } };
 
@@ -90,7 +94,7 @@ test('the view and lens buttons write alertMonitorView["*"] read-modify-write, k
   click({ '[data-am-set-view]': { dataset: { amSetView: 'inbox' } } });
   assert.deepEqual(prefs.at(-1), ['alertMonitorView', { '*': { view: 'inbox' }, p1: { groupBy: 'day' } }]);
   click({ '[data-am-set-lens]': { dataset: { amSetLens: 'group' } } });
-  assert.deepEqual(prefs.at(-1)[1]['*'], { view: 'matrix', lens: 'group' });
+  assert.deepEqual(prefs.at(-1)[1]['*'], { view: 'inbox', lens: 'group' }, 'the stub applies each write like the real setPref, so the second click builds on the first');
 });
 
 test('Matrix is the default view; the lens decides the chart; the static controls are never re-rendered', () => {
@@ -155,13 +159,14 @@ test('the group caret collapses a work-center group (per lens) and the quiet fol
   assert.match(els['am-mx'].innerHTML, /data-am-row="M1"/);
 });
 
-test('a chip ✕ removes one value; the search box is a filter dimension; Clear removes everything', () => {
+test('a chip ✕ removes one value; the search box is a filter dimension; Clear removes everything', async () => {
   setup(ALERTS());
   AlertMonitorPane.render();
   clickCell('M1', D1);
   click({ '[data-am-chip]': { dataset: { amChip: `days:${D1}` } } });
   assert.deepEqual(ids(side()), ['a1', 'a2']);
-  els['alerts-tab'].handlers.input({ target: { closest: sel => (sel === '[data-am-search]' ? { value: 'overload' } : null) } });
+  typeInSearch('overload');
+  await sleep(TYPE_WAIT);
   assert.deepEqual(ids(side()), [], 'M1 has no overload alert');
   assert.match(els['am-chips'].innerHTML, /data-am-chip="q:overload"/);
   clickAm('clear-filter');
@@ -296,7 +301,7 @@ test('the summary says "N lines selected" while the global line filter is active
   } finally { set.clear(); }
 });
 
-test('Inbox: a filter change scrolls the list to the top and closes a detail whose alert left the view', () => {
+test('Inbox: a filter change scrolls the list to the top and closes a detail whose alert left the view', async () => {
   setup(ALERTS(), { settings: INBOX });
   const proto = VirtualList.prototype;
   const prev = proto.scrollToTop;
@@ -308,7 +313,8 @@ test('Inbox: a filter change scrolls the list to the top and closes a detail who
     els['alerts-tab'].handlers.keydown({ key: 'Enter', preventDefault() {}, target: rowEl });
     assert.equal(AlertMonitorPane._rowH({ id: 'a1' }), 118);
     const before = tops;
-    els['alerts-tab'].handlers.input({ target: { closest: sel => (sel === '[data-am-search]' ? { value: 'overload' } : null) } });
+    typeInSearch('overload');
+    await sleep(TYPE_WAIT);
     assert.equal(tops, before + 1);
     assert.equal(AlertMonitorPane._rowH({ id: 'a1' }), 32, 'a1 is not in the view any more: its detail is closed');
   } finally { proto.scrollToTop = prev; }
@@ -414,4 +420,172 @@ test('Inbox then Matrix re-applies the stored width', () => {
   calls.length = 0;
   AlertMonitorPane.render();
   assert.equal(lastVar(calls), '700px');
+});
+
+// ---- review fixes: shell rebuild, hidden facet search, order numbers, batch re-entrancy, sibling clear, settings echoes ----
+
+test('Inbox -> Matrix -> Inbox with a filter that matches nothing: the new list region shows "no match" again', async () => {
+  setup(ALERTS(), { settings: INBOX });
+  AlertMonitorPane.render();
+  typeInSearch('zzz-no-such-alert');
+  await sleep(TYPE_WAIT);
+  assert.match(els['am-ib-vl'].innerHTML, /am\.filter_none/);
+  click({ '[data-am-set-view]': { dataset: { amSetView: 'matrix' } } });
+  assert.match(els['am-body'].innerHTML, /id="am-mx"/);
+  els['am-ib-vl'].innerHTML = '';   // the real DOM discards the old Inbox shell with the body; the stub keeps its element
+  click({ '[data-am-set-view]': { dataset: { amSetView: 'inbox' } } });
+  assert.match(els['am-ib-vl'].innerHTML, /am\.filter_none/, 'the dedupe memory of the discarded region is gone with it');
+});
+
+const twelveMachines = (o = {}) => {
+  const machines = Array.from({ length: 12 }, (_, i) => `X${String(i + 1).padStart(2, '0')}`);
+  setup(machines.map((m, i) => alert(`x${i}`, { line: m, ...(o.alert ? o.alert(i) : {}) })), { settings: INBOX });
+  Store._masterLinesByPlant = { P1: machines.map(m => ({ machine: m, wc_group: 'A' })) };
+  Store._linesByPlant = { P1: machines };
+};
+
+test('a facet query typed while the machine box was shown no longer filters once the box is gone', async () => {
+  twelveMachines({ alert: i => ({ type: i < 6 ? 'overlap' : 'late', sev: i < 6 ? 'err' : 'warn' }) });
+  AlertMonitorPane.render();
+  clickFacet('wcGroups:A');
+  assert.match(els['am-ib-facets'].innerHTML, /id="am-facet-q"/, 'twelve machines: the search box is there');
+  typeInFacet('X1');
+  await sleep(TYPE_WAIT);
+  assert.doesNotMatch(els['am-ib-facets'].innerHTML, /data-am-facet="machines:X01"/, 'the query narrows the list');
+  assert.match(els['am-ib-facets'].innerHTML, /data-am-facet="machines:X10"/);
+  const cat = els['am-ib-facets'].innerHTML.match(/data-am-facet="categories:(\w+)"[^>]*>(?:(?!<\/button>).)*<span class="am-facet-n">6</)?.[1];
+  assert.ok(cat, 'a category facet that leaves six machines');
+  clickFacet(`categories:${cat}`);
+  assert.doesNotMatch(els['am-ib-facets'].innerHTML, /id="am-facet-q"/, 'six machines: no box');
+  assert.match(els['am-ib-facets'].innerHTML, /data-am-facet="machines:X01"/, 'and the stale query does not hide them');
+});
+
+test('a work-center change (chip or facet) forgets the machine facet query', async () => {
+  twelveMachines();
+  AlertMonitorPane.render();
+  clickFacet('wcGroups:A');
+  typeInFacet('X1');
+  await sleep(TYPE_WAIT);
+  click({ '[data-am-chip]': { dataset: { amChip: 'wcGroups:A' } } });
+  clickFacet('wcGroups:A');
+  assert.match(els['am-ib-facets'].innerHTML, /data-am-facet="machines:X01"/, 'the box starts empty again');
+  assert.match(els['am-ib-facets'].innerHTML, /id="am-facet-q"[^>]*value=""/);
+});
+
+test('the order number of an alert falls back to PRODUCTION_ORDER when ORDER is blank (Orders table)', () => {
+  Store.setTasks([{ id: 'T-a1', ORDER: '  ', PRODUCTION_ORDER: 'PO-77', MACHINE: 'M1' }, { id: 'T-a2', ORDER: 'PO-77', MACHINE: 'M1' }], 'test');
+  setup(ALERTS());
+  const applied = [];
+  globalThis.NIMBUS = { Table: { _onPoMatApply: () => applied.push(els['tbl-flt-pomat-textarea'].value) }, App: {} };
+  AlertMonitorPane.render();
+  clickRowh('M1');
+  clickAm('open-orders');
+  assert.deepEqual(applied, ['PO-77'], 'one number: a blank ORDER does not hide the PRODUCTION_ORDER, and the duplicate is listed once');
+});
+
+test('the search finds an order by its PRODUCTION_ORDER when ORDER is blank', async () => {
+  Store.setTasks([{ id: 'T-a1', ORDER: '', PRODUCTION_ORDER: 'PO-77', MACHINE: 'M1' }], 'test');
+  setup(ALERTS());
+  AlertMonitorPane.render();
+  typeInSearch('PO-77');
+  await sleep(TYPE_WAIT);
+  assert.deepEqual(ids(side()), ['a1']);
+});
+
+test('Move N and Fix movable share one runner: a second click while it runs does nothing', async () => {
+  setup(ALERTS());
+  const toasts = [];
+  const prevFix = Alerts.applyFix, prevToast = Toast.show;
+  let release;
+  const gate = new Promise(r => { release = r; });
+  Alerts.applyFix = async (id) => { log.push(['fix', id]); await gate; Store.setAlerts(Store.alerts.filter(x => x.id !== id), 'test'); return true; };
+  Toast.show = (m, kind) => { toasts.push([m, kind]); };
+  try {
+    AlertMonitorPane.render();
+    clickRowh('M1');
+    clickAm('move-view');
+    clickAm('move-view');                             // while the first fix is still pending
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    assert.deepEqual(log.filter(x => x[0] === 'fix'), [['fix', 'a1']], 'one batch');
+    release();
+    for (let i = 0; i < 25; i++) await Promise.resolve();
+    assert.equal(toasts.length, 1, 'one summary');
+    assert.equal(toasts[0][1], 'success');
+  } finally { Alerts.applyFix = prevFix; Toast.show = prevToast; }
+});
+
+test('a batch fix that throws shows the error alone, not an "N fixed" line next to it', async () => {
+  setup(ALERTS());
+  const toasts = [];
+  const prevFix = Alerts.applyFix, prevToast = Toast.show;
+  Alerts.applyFix = async () => { throw new Error('boom'); };
+  Toast.show = (m, kind) => { toasts.push([m, kind]); };
+  try {
+    AlertMonitorPane.render();
+    clickRowh('M1');
+    clickAm('move-view');
+    for (let i = 0; i < 25; i++) await Promise.resolve();
+    assert.deepEqual(toasts, [['boom', 'error']]);
+    clickAm('move-view');                             // the runner is free again after a failure
+    for (let i = 0; i < 25; i++) await Promise.resolve();
+    assert.equal(toasts.length, 2);
+  } finally { Alerts.applyFix = prevFix; Toast.show = prevToast; }
+});
+
+test('a matrix partial on one row axis drops the other: machine then work-center group, and back', () => {
+  setup(ALERTS());
+  AlertMonitorPane.render();
+  clickRowh('M2');
+  clickRowh('wc:A');
+  assert.match(els['am-chips'].innerHTML, /data-am-chip="wcGroups:A"/);
+  assert.doesNotMatch(els['am-chips'].innerHTML, /data-am-chip="machines:/, 'the group replaced the machine');
+  assert.deepEqual(ids(side()), ['a1', 'a2', 'a3']);
+  clickRowh('M4');
+  assert.match(els['am-chips'].innerHTML, /data-am-chip="machines:M4"/);
+  assert.doesNotMatch(els['am-chips'].innerHTML, /data-am-chip="wcGroups:/, 'the machine replaced the group');
+  assert.deepEqual(ids(side()), ['a4']);
+});
+
+test('Inbox: choosing a work-center group drops a machine of another group that a matrix click had set', () => {
+  setup(ALERTS(), { settings: INBOX });
+  AlertMonitorPane.render();
+  click({ '[data-am-set-view]': { dataset: { amSetView: 'matrix' } } });
+  clickRowh('M4');                                    // machine M4 (group B)
+  click({ '[data-am-set-view]': { dataset: { amSetView: 'inbox' } } });
+  assert.match(els['am-chips'].innerHTML, /data-am-chip="machines:M4"/);
+  clickFacet('wcGroups:A');                           // exactly one group chosen, and it is not M4's
+  assert.match(els['am-chips'].innerHTML, /data-am-chip="wcGroups:A"/);
+  assert.doesNotMatch(els['am-chips'].innerHTML, /data-am-chip="machines:/, 'M4 is not in group A: it no longer narrows the view');
+});
+
+test('typing in the search box updates the filter text at once but repaints after a pause', async () => {
+  setup(ALERTS());
+  AlertMonitorPane.render();
+  clickRowh('M1');
+  typeInSearch('late');
+  assert.doesNotMatch(els['am-chips'].innerHTML, /data-am-chip="q:late"/, 'no repaint per keystroke');
+  typeInSearch('lat');
+  typeInSearch('late');
+  await sleep(TYPE_WAIT);
+  assert.match(els['am-chips'].innerHTML, /data-am-chip="q:late"/);
+  assert.deepEqual(ids(side()), ['a2']);
+});
+
+test('a view or lens click repaints once, and the server echo of the same value repaints nothing', () => {
+  setup(ALERTS());
+  AlertMonitorPane.render();
+  let paints = 0;
+  const current = AlertProfileMatches.current;
+  AlertProfileMatches.current = () => { paints++; return current(); };
+  Store.setUserSettings({ alertMonitorFixes: 'collapsed' }, 'test');   // a pref the page shows: one paint, however many reads it makes
+  const perPaint = paints;
+  assert.ok(perPaint > 0);
+  paints = 0;
+  click({ '[data-am-set-lens]': { dataset: { amSetLens: 'day' } } });
+  assert.equal(paints, perPaint, 'setPref applied and emitted; no second paint');
+  paints = 0;
+  Store.replaceUserSettings({ ...Store.userSettings }, 'settings-pref-saved');   // what the PATCH response does
+  assert.equal(paints, 0, 'nothing the page reads changed');
+  Store.setUserSettings({ unrelatedPref: 1 }, 'test');
+  assert.equal(paints, 0);
 });

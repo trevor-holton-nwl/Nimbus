@@ -615,7 +615,11 @@ test('tool card "Open tool inventory" goes to Master Data > Tool Inventory, then
   }
 });
 
-const typeSearch = q => els['alerts-tab'].handlers.input({ target: { closest: sel => (sel === '[data-am-search]' ? { value: q } : null) } });
+// The filter text updates per keystroke; the repaint waits for a pause, so wait it out.
+const typeSearch = async q => {
+  els['alerts-tab'].handlers.input({ target: { closest: sel => (sel === '[data-am-search]' ? { value: q } : null) } });
+  await sleep(180);
+};
 
 test('W6b: a filter scopes the listed fixes to the view (with the in-view clause) and rewinds "Show 10 more"', async () => {
   seed([alert('a1'), alert('a2', { type: 'late', sev: 'warn' })]);
@@ -626,7 +630,7 @@ test('W6b: a filter scopes the listed fixes to the view (with the in-view clause
   assert.equal(cards(), 5);
   clickAm('fixes-show-more');
   assert.equal(cards(), 8);
-  typeSearch('overlap');                       // a1 only (its tag is "alert.tag.overlap")
+  await typeSearch('overlap');                 // a1 only (its tag is "alert.tag.overlap")
   assert.equal(cards(), 5, 'the page rewinds to the first five; six fixes touch the view');
   assert.match(els['am-leverage'].innerHTML, /am\.lev_in_view/);
   assert.doesNotMatch(els['am-leverage'].innerHTML, /data-lev-key="k7"/);
@@ -637,8 +641,46 @@ test('W6b: no fix touches the view: the scoped empty state, not the plant-wide o
   groupItems = [item('k1', { alertIds: ['a1'] })];
   AlertMonitorPane.render();
   await sleep(40);
-  typeSearch('late');                          // a2 only
+  await typeSearch('late');                    // a2 only
   assert.match(els['am-leverage'].innerHTML, /am\.lev_none_in_view/);
-  typeSearch('');
+  await typeSearch('');
   assert.match(els['am-leverage'].innerHTML, /data-lev-key="k1"/);
+});
+
+test('a minutes replay dropped because the plan moved queues a fresh run, which applies the typed minutes', async () => {
+  seed([alert('a1')]);
+  groupItems = [setupItem({ requiresMinutes: true, assumedMinutes: null, minutesSource: null })];
+  analyzeImpl = async () => groupItems.map(i => ({ ...i }));
+  AlertMonitorPane.render();
+  await sleep(40);
+  let bumped = false;
+  deps.replay = async (input, it, minutes) => {
+    counts.replay.push(minutes);
+    if (!bumped) { bumped = true; Store.setUserSettings({ somePref: 1 }, 'test'); }   // a Store event the plan-moved subscriber does not know
+    return { ...it, requiresMinutes: false, assumedMinutes: minutes, minutesSource: 'user', method: 'replay', confidenceAfter: 80 };
+  };
+  const before = counts.analyze;
+  els['alerts-tab'].handlers.change({ target: { closest: sel => (sel === '[data-lev-minutes]' ? { dataset: { levMinutes: 'setup-pair:x' }, value: '12' } : null) } });
+  await sleep(40);
+  assert.doesNotMatch(els['am-leverage'].innerHTML, /am\.fix_conf/, 'the stale replay was not painted');
+  await sleep(600);
+  assert.equal(counts.analyze, before + 1, 'a new analysis was queued');
+  assert.deepEqual(counts.replay, [12, 12], 'and it applied what the user typed');
+  assert.match(els['am-leverage'].innerHTML, /am\.fix_conf/);
+});
+
+test('re-entering the tab recomputes the fixes only when the plan moved since the last result', async () => {
+  seed([alert('a1')]);
+  AlertMonitorPane.render();
+  await sleep(60);
+  const first = counts.group;
+  assert.equal(first, 1);
+  AlertMonitorPane.render();
+  await sleep(60);
+  assert.equal(counts.group, first, 'nothing changed: the cards are kept');
+  AlertMonitorPane.setActive(false);
+  Store.setUserSettings({ somePref: 2 }, 'test');   // any Store event bumps the revision while the tab is hidden
+  AlertMonitorPane.render();
+  await sleep(60);
+  assert.equal(counts.group, first + 1);
 });
