@@ -3180,6 +3180,18 @@ function candidateForSequence(
     productiveRuntimeMinutes: productiveRuntimeTotal(sequence),
   });
 
+  // Remove the explanation/edge entries an admission of `id` wrote. Entry-by-id (never truncation to a checkpoint
+  // length): later legitimate entries such as `due-work-unadmitted` for other orders must survive.
+  const dropAdmissionRecords = (id: string): void => {
+    for (let index = explanation.length - 1; index >= 0; index -= 1) {
+      const code = explanation[index].code;
+      if (explanation[index].taskId === id && (code === 'admitted-without-setup' || code === 'admitted-state-unrecorded' || code === 'due-date-first-placement')) explanation.splice(index, 1);
+    }
+    for (let index = missingEdges.length - 1; index >= 0; index -= 1) {
+      if (missingEdges[index].successorOrderId === id && missingEdges[index].reason === 'scheduled-without-setup') missingEdges.splice(index, 1);
+    }
+  };
+
   const adjacencyFailure = sequenceAdjacencyFailure(line, sequence, fragment, adjacency);
   if (adjacencyFailure) return constraintFailure(adjacencyFailure);
 
@@ -3334,6 +3346,11 @@ function candidateForSequence(
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       unadmitted.push(task);
       cursor = priorCursor;
+      // Roll back the uncovered-admission accounting written before placement: this order was not admitted.
+      if (uncoveredAdmission) {
+        uncoveredEdgeCount -= 1;
+        dropAdmissionRecords(taskId(task));
+      }
       explanation.push({ code: 'due-work-unadmitted', message: `No legal placement found for ${taskId(task)}.`, line, taskId: taskId(task) });
       continue;
     }
@@ -3398,6 +3415,7 @@ function candidateForSequence(
     if (setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, boundary.start, bounds.runContext)) break;
     const prior = checkpoints.pop()!;
     patches.pop(); unadmitted.push(prior.task);
+    dropAdmissionRecords(taskId(prior.task));
     predecessorState = prior.predecessorState; predecessorOrderId = prior.predecessorOrderId; cursor = prior.cursor;
     setupMinutes = prior.setupMinutes; lateCount = prior.lateCount; latenessMinutes = prior.latenessMinutes;
     maxLatenessMinutes = prior.maxLatenessMinutes;

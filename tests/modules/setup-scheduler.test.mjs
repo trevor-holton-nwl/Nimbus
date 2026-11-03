@@ -6794,3 +6794,13 @@ test('P0-7: a firmed-boundary setup straddling midnight on a 24x7 calendar is ch
   const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { respectCalendar: true, horizonEnd: at('2026-08-06T00:00:00') }));
   assert.ok(+patchFor(result, 'p07-b').changes.start_date < +patchFor(result, 'p07-a').changes.start_date, 'the RED-last ending avoids the 120-minute changeover');
 });
+
+test('P0-8: a backtracked suffix leaves no stale admitted-without-setup explanation or edge for the popped order', () => {
+  const x = scheduledTask('p08-x', 1, 'RED', '2026-08-03T18:00:00');
+  const fixed = scheduledTask('p08-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00');
+  // GREEN -> RED has no row (uncovered admission); RED -> BLUE needs 90 minutes, which cannot fit after X, so X is popped.
+  const setup = setupTruth({ rows: [setupRow('RED', 'BLUE', 90), setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0)] });
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([x, fixed], { firmedIds: ['p08-fixed-blue'] }), dueDateBounds(setup, { respectCalendar: true }));
+  assert.equal(result.explanation.some(entry => entry.code === 'admitted-without-setup' && entry.taskId === 'p08-x'), false);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'p08-x'), false);
+});
