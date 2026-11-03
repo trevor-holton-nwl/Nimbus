@@ -5,7 +5,7 @@
 // affecting the live schedule. The DOM banner/buttons, Toast messages, and
 // cross-module side effects (Confidence snapshot/restore, Persistence.saveAll,
 // CalendarSync flush/hydration) are NOT this module's concern — they live in
-// app.js's `SandboxAdapter`, which subscribes to the `sandbox:entered`/
+// optimize-ui.mts's `SandboxAdapter`, which subscribes to the `sandbox:entered`/
 // `sandbox:exited` events emitted below.
 //
 // `Store`/`UndoStack` (platform/store.mjs) are real cross-file imports
@@ -32,7 +32,7 @@ interface SandboxSnapshot {
    planners can try changes freely without affecting the live schedule. The DOM
    banner/buttons, Toast messages, and cross-module side effects (Confidence
    snapshot/restore, Persistence.saveAll, CalendarSync flush/hydration) are NOT
-   this module's concern — they live in app.js's `SandboxAdapter`, which
+   this module's concern — they live in optimize-ui.mts's `SandboxAdapter`, which
    subscribes to the `sandbox:entered`/`sandbox:exited` events emitted below.
    ========================================================================== */
 export const Sandbox = {

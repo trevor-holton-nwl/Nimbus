@@ -1,10 +1,9 @@
 // optimization/engine.mjs — Engine (Phase P4 of
-// docs/architecture/domain-refactor-plan.md, which split schedule-services.mts
-// (3,544 lines) into 4 domain files, AND broke import cycle 1 between the
-// former schedule-services.mts and optimization/setup-scheduler.mjs as part
-// of the same move — see this phase's task brief Part B and
+// docs/architecture/domain-refactor-plan.md, which split the former
+// schedule-services.mts into 4 domain files, AND broke import cycle 1 between
+// it and optimization/setup-scheduler.mjs as part of the same move — see
 // optimization/scheduler-contract.mjs's header comment). Owns the optimizer
-// (dispatch, auto-reflow), the detached candidate-evaluation machinery
+// (detached dispatch, auto-reflow), the detached candidate-evaluation machinery
 // (`_candidateSnapshot`/the `source*` accessors below, which let the SAME
 // Calendar capacity math answer either "against live Store" or "against one
 // detached candidate snapshot" depending on whether a candidate run is in
@@ -12,12 +11,12 @@
 // that used to live in setup-scheduler.mts (see below).
 //
 // Cross-file notes (real couplings, not new ones — all three predate this
-// phase, inside the single schedule-services.mts file, as sibling top-level
+// phase, inside the former single schedule-services.mts file, as sibling top-level
 // declarations the file's own comments already flagged as forward-references
 // safe only because nothing fires until well after module evaluation
 // completes):
 //   - `Calendar` (calendar/calendar-engine.mjs) is imported for placement
-//     (`Engine.runAndApply`/`autoReflow`/`reconcileRuntimeSchedules` etc. call
+//     (`Engine._evaluateDetached`/`autoReflow`/`reconcileRuntimeSchedules` etc. call
 //     Calendar directly). The REVERSE edge is real too: Calendar's own
 //     capacity methods (`workWindow`/`nextAvailable`/`allocateRuntime`/etc.)
 //     must honor the SAME detached-candidate snapshot Engine installs during
@@ -35,14 +34,14 @@
 //     SAME cycle edge (see the note on those below) rather than opening a
 //     second, independent cycle edge directly against
 //     optimization/setup-scheduler.mjs.
-//   - `Alerts`/`scheduleAlertsForPatches` (insights/services.mjs) are
-//     imported because `Alerts.applyFix`'s auto-fix action calls
+//   - `Alerts` (insights/services.mjs) is imported because
+//     `Alerts.applyFix`'s auto-fix action calls
 //     `Engine.splitOrderPolicyFor`/`schedulePatchFor`/`autoReflow`/
-//     `runAndApply` (the REVERSE edge), and this file's own
-//     `runAndApply`/`autoReflow`/`reconcileRuntimeSchedules` call
-//     `Alerts.clearDismissed`/`scheduleRecompute`/`scheduleRecomputeLines`/
-//     `scheduleAlertsForPatches`. A genuine two-way ESM cycle between this
-//     file and insights/services.mjs; safe under the same rule.
+//     `evaluateSchedule` (the REVERSE edge), and this file's own
+//     `removeBacklog`/`autoReflow`/`reconcileRuntimeSchedules` call
+//     `Alerts.clearDismissed`/`scheduleRecompute`/`scheduleRecomputeLines`.
+//     A genuine two-way ESM cycle between this file and
+//     insights/services.mjs; safe under the same rule.
 //   - `deriveSetupObservation`/`SetupObservation` are consumed by
 //     insights/services.mjs's `Compute._snap`/`Alerts`/`Utilization` (a
 //     one-directional edge — insights/services.mjs imports from here, this
@@ -109,8 +108,8 @@ import type { FirmAction, FirmPlan, FirmReason } from './firm-actions.mjs';
 // Structurally identical to the copy in calendar/calendar-engine.mjs and
 // insights/services.mjs (and platform/store.mjs's exported version) — same
 // "duplicate this trivial 3-line type per file" convention already
-// established between schedule-state.mts and schedule-services.mjs before
-// this split.
+// established between schedule-state.mts and the former schedule-services
+// before the P4 split.
 interface CalendarEntry {
   workHours: WorkHours;
 }
@@ -406,9 +405,9 @@ function buildLineIntervalIndex(orders: ReadonlyArray<{ task: NimbusTask }>): Li
   return { starts, prefixMaxEnd };
 }
 
-/** How many days back the free-time scan follows touching windows (the predecessor's end usually stops it sooner). */
 /** U24: the cutover data signature needs at least this many non-queued rows, so a tiny plant or a small re-upload keeps its per-row toasts. */
 const CUTOVER_MIN_ROWS = 10;
+/** How many days back the free-time scan follows touching windows (the predecessor's end usually stops it sooner). */
 const SETUP_AVAILABILITY_MERGE_DAYS = 14;
 
 function setupAvailabilityMinutes(
@@ -525,7 +524,8 @@ export function predecessorOnMachine(task: NimbusTask, tasks: ReadonlyArray<Nimb
 
 /** One resolution index per setup snapshot object (WeakMap, so a replaced snapshot is collected with its index).
  *  The entry also remembers the definition, the three row arrays and their lengths it was built from; an entry
- *  whose inputs no longer match (an in-place edit or a swapped array) is rebuilt, never reused. */
+ *  whose inputs no longer match (a replaced array or a changed length) is rebuilt, never reused. Rows are replaced,
+ *  never mutated in place, so an in-place edit that keeps the same arrays and lengths is NOT detected. */
 const _setupIndexBySnapshot = new WeakMap<object, {
   definition: SetupDefinition; machineRows: ReadonlyArray<unknown>; plantRows: ReadonlyArray<unknown>;
   overrides: ReadonlyArray<unknown>; machineLen: number; plantLen: number; overridesLen: number;
@@ -1091,6 +1091,8 @@ function detachedCandidateResult(
     explanation: [],
     diagnostics: {
       candidateCount: termination === 'completed' ? 1 : 0,
+      // Label for a result that never ran a search (empty scope, no plant, Remove Backlog's patches). The union member keeps
+      // its historical name (setup-scheduler.mts `SearchDiagnostics.method`); it no longer implies a legacy walk exists.
       method: 'legacy-detached',
       termination,
       runtimeMs: performance.now() - startedAt,
@@ -1106,14 +1108,18 @@ function detachedCandidateResult(
 /* =============================================================================
    ENGINE — scheduling + optimisation.
    Two run modes:
-     • runAndApply(mode): full global re-optimise, respecting fixed + calendars.
+     • evaluateSchedule(mode, opts, snapshot): the detached global re-optimise
+       (respecting firmed + calendars). It returns patches only; the caller
+       commits them (the Optimize preview's Apply, or `applySchedulePatches`).
+       The old live runAndApply tail was deleted (P3-3b); the body is
+       `Engine._evaluateDetached`.
      • autoReflow(changedId): after a manual edit, re-flow downstream orders on
        the same (line, day) around the change.
    Genuinely DOM-free (CQ-1 Phase 2 Task 3 removed the last DOM read — a
    `document.getElementById('chk-respect-fixed'/'chk-respect-calendar')`
    fallback whose target ids do not exist anywhere in the rendered markup, so
    the lookup always returned null and the `?? true` default always applied;
-   see the comment inline in runAndApply below).
+   see `respectFirmed`/`respectCalendar` in `_evaluateDetached`).
    ========================================================================== */
 export const Engine = {
   /** Evaluate the detached forward placement path (the optimizer's retained forward placement) against a deep,
@@ -1137,9 +1143,8 @@ export const Engine = {
     }
   },
 
-  /** Explicit detached setup-aware seam. Existing runAndApply/UI calls do
-   * not route here; a caller must supply both the immutable snapshot and the
-   * measured search bounds/setup truth before any setup-aware candidate exists. */
+  /** Explicit detached setup-aware seam, called by `_evaluateDetached` (and directly by tests). A caller must supply
+   * both the immutable snapshot and the measured search bounds/setup truth before any setup-aware candidate exists. */
   evaluateSetupAware(
     mode: 'due-date-first' | 'due-date' | 'spt' | 'min-changeover' | 'throughput',
     bounds: Readonly<DueDateFirstBounds>,
@@ -1166,7 +1171,7 @@ export const Engine = {
   },
 
   /** B3a: fabricates a `plant_active: true`, zero-cost `SetupSnapshot` so
-   *  `runAndApply`'s `'changeover'` path can route an inactive (or
+   *  `_evaluateDetached`'s `'changeover'` path can route an inactive (or
    *  never-configured) plant through `evaluateSetupAware` exactly like an
    *  active plant, instead of falling through to the now-retired legacy
    *  day-integrity walk. `evaluateSetupAware` throws unless
@@ -1270,7 +1275,7 @@ export const Engine = {
    *  The window is bounded on BOTH sides, matching the Gantt's
    *  `.frozen-horizon-zone` band `[now, now + frozen days]`. `now` defaults to
    *  the task's plant clock (`_clockFor`); callers carrying their own
-   *  authoritative "now" (runAndApply's runNow, removeBacklog's plant-wall
+   *  authoritative "now" (`_evaluateDetached`'s runNow, removeBacklog's plant-wall
    *  clock) pass it so one run never splits across two clocks.
    *
    *  A frozen order is implicitly pinned by every optimizer/auto-reflow
@@ -2319,8 +2324,8 @@ export const Engine = {
    * genuinely Store.isFirmed-pinned order, and is now counted separately via
    * diagnostics.frozenMoved. Since 2026-10-27 `frozenMoved` counts orders whose
    * FINISH is inside the window, including running ones (Backlog moves running
-   * orders). All other placement sites (runAndApply's firmedTasks/freeTasks
-   * split, the setup-aware evaluator's firmedIds, autoReflow) keep applying
+   * orders). All other placement sites (the setup-aware evaluator's
+   * firmedIds, autoReflow) keep applying
    * Engine.isFrozenHorizon and the finish floor (`Engine.frozenFinishFloor`). */
   removeBacklog(opts: Record<string, unknown> = {}): RemoveBacklogResult {
     const plant = (opts.plant as string | undefined) ?? sourceSelectedPlant();
