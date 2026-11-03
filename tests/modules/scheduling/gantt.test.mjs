@@ -4626,6 +4626,113 @@ test('Interaction._onDataSetUpdate: the per-item updates vis sends for one multi
   } finally { Interaction._multiDropHandled = null; fx.restore(); restoreClock(); }
 });
 
+test('F1: a firmed companion vis also drags is swallowed by the same-gesture guard; the leader moves once', () => {
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const line = 'F1-FIRMED-LINE';
+  const pos = _multiFixture(['f1-a', 'f1-b', 'f1-firm'], line);
+  Store.setFirmed(['f1-firm'], true, 'test');
+  Selection.set(['f1-a', 'f1-b', 'f1-firm']);
+  Interaction._multiDropHandled = null; Interaction._dragSetIds = null;
+  const day2 = 2 * 86400000;
+  const raw = {};
+  for (const [id, p] of pos) raw[id] = { start: new Date(p.start.getTime() + day2), end: new Date(p.end.getTime() + day2), group: line };
+  Timeline._items = { get: (i) => raw[i], update: () => {}, remove: () => {}, add: () => {} };
+  try {
+    Interaction._onDataSetUpdate({ items: ['f1-a'] });
+    assert.equal(Store.tasks['f1-a'].end_date.getTime(), pos.get('f1-a').end.getTime() + day2);
+    Interaction._onDataSetUpdate({ items: ['f1-firm'] });   // vis's later update for the firmed bar
+    assert.equal(Store.tasks['f1-firm'].end_date.getTime(), pos.get('f1-firm').end.getTime(), 'firmed order unchanged');
+    assert.equal(Store.tasks['f1-a'].end_date.getTime(), pos.get('f1-a').end.getTime() + day2, 'leader moved exactly once');
+  } finally { Interaction._multiDropHandled = null; fx.restore(); restoreClock(); }
+});
+
+test('F3: a refused dragged order guards the rest of the drag set; no companion becomes the leader', () => {
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const line = 'F3-REFUSED-LINE';
+  const pos = _multiFixture(['f3-a', 'f3-b'], line);
+  Selection.set(['f3-a', 'f3-b']);
+  Interaction._multiDropHandled = null; Interaction._dragSetIds = null;
+  const priorPatch = Engine.manualRoutingSchedulePatchFor, priorRefusal = Engine.lastManualRefusal;
+  Engine.manualRoutingSchedulePatchFor = () => null;
+  Engine.lastManualRefusal = 'finish_cannot_hold';
+  const day2 = 2 * 86400000;
+  const raw = {};
+  for (const [id, p] of pos) raw[id] = { start: new Date(p.start.getTime() + day2), end: new Date(p.end.getTime() + day2), group: line };
+  Timeline._items = { get: (i) => raw[i], update: () => {}, remove: () => {}, add: () => {} };
+  try {
+    Interaction._onDataSetUpdate({ items: ['f3-a'] });
+    assert.ok(Interaction._multiDropHandled?.ids.has('f3-b'), 'companion is guarded');
+    Engine.manualRoutingSchedulePatchFor = () => { throw new Error('a companion must not run as a leader'); };
+    Interaction._onDataSetUpdate({ items: ['f3-b'] });
+    for (const [id, p] of pos) assert.equal(Store.tasks[id].end_date.getTime(), p.end.getTime(), id + ' not moved');
+  } finally {
+    Engine.manualRoutingSchedulePatchFor = priorPatch; Engine.lastManualRefusal = priorRefusal;
+    Interaction._multiDropHandled = null; fx.restore(); restoreClock();
+  }
+});
+
+test('F2: document pointerup ends the gate on a macrotask, after vis\'s drop commit has read the drag set', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const restoreClock = pinPlantClock(['5512']);
+  const fx = _stubGanttSideEffects();
+  const line = 'F2-ORDER-LINE';
+  const pos = _multiFixture(['f2-a', 'f2-b'], line);
+  Selection.set(['f2-a']);   // the live selection alone would NOT move f2-b: only the frozen set does
+  Interaction._multiDropHandled = null;
+  const priorPatch = Timeline._applyTaskPatch;
+  const patched = [];
+  Timeline._applyTaskPatch = id => { patched.push(id); };
+  const day2 = 2 * 86400000;
+  const raw = {};
+  for (const [id, p] of pos) raw[id] = { start: new Date(p.start.getTime() + day2), end: new Date(p.end.getTime() + day2), group: line };
+  Timeline._items = { get: (i) => raw[i], update: () => {}, remove: () => {}, add: () => {} };
+  try {
+    Interaction._beginItemDrag();
+    Interaction._dragSetIds = ['f2-a', 'f2-b'];
+    Interaction._deferredWhileDragging.add('lock');
+    Interaction._deferredLockIds.add('f2-a');
+    Interaction._onDocPointerEnd('pointerup');   // document listener: runs BEFORE vis's panend/_onDragEnd
+    await Promise.resolve();
+    assert.equal(Interaction._isDragging, true, 'gate still open after the pointerup dispatch');
+    assert.deepEqual(Interaction._dragSetIds, ['f2-a', 'f2-b']);
+    assert.deepEqual(patched, [], 'deferred writers have not replayed before the drop');
+    Interaction._onDataSetUpdate({ items: ['f2-a'] });   // vis's drop update
+    assert.equal(Store.tasks['f2-b'].end_date.getTime(), pos.get('f2-b').end.getTime() + day2, 'commit saw the frozen set');
+    assert.deepEqual(patched, [], 'still nothing replayed inside the update pass');
+    await Promise.resolve();
+    assert.deepEqual(patched, ['f2-a'], 'deferred writers replay after the commit');
+    t.mock.timers.tick(0);   // the pending macrotask end is an idempotent no-op
+    assert.equal(Interaction._isDragging, false);
+  } finally { Interaction._endItemDrag(); Timeline._applyTaskPatch = priorPatch; Interaction._multiDropHandled = null; fx.restore(); restoreClock(); }
+});
+
+test('F4: pointercancel restores the dragged bars to their grabbed data and clears vis drag state', () => {
+  const fx = _dragFx(['c1']);
+  const priorTl = Timeline._tl;
+  const restored = [], emitted = [];
+  const touchParams = {
+    itemIsDragging: true,
+    itemProps: [{ data: { start: 1 }, item: { id: 'c1', setData: d => restored.push(d) } }, { item: { id: 'x' } }],
+  };
+  Timeline._tl = { itemSet: { touchParams }, body: { emitter: { emit: e => emitted.push(e) } } };
+  try {
+    Interaction._beginItemDrag();
+    Interaction._onDocPointerEnd('pointercancel');
+    assert.deepEqual(restored, [{ start: 1 }]);
+    assert.equal(touchParams.itemProps, null);
+    assert.equal(touchParams.itemIsDragging, false);
+    assert.deepEqual(emitted, ['_change']);
+    assert.equal(Interaction._isDragging, false);
+    // No itemSet shape at all: still ends the gate without throwing.
+    Timeline._tl = {};
+    Interaction._beginItemDrag();
+    Interaction._onDocPointerEnd('pointercancel');
+    assert.equal(Interaction._isDragging, false);
+  } finally { Interaction._endItemDrag(); Timeline._tl = priorTl; fx.restore(); }
+});
+
 test('Interaction.moveSelectedBy: applies the patches, pushes one undo entry and reports skipped orders', () => {
   const restoreClock = pinPlantClock(['5512']);
   const fx = _stubGanttSideEffects();

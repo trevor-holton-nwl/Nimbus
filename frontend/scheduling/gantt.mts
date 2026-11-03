@@ -4723,13 +4723,16 @@ interface PvDropCapture {
  *  documents only the real, STABLE public API) since these are internals that
  *  could change on any vis-timeline upgrade without a version bump signal. */
 interface VisInternalTimeline {
-  body?: { domProps?: { center?: { width?: number } } };
+  body?: { domProps?: { center?: { width?: number } }; emitter?: { emit?(event: string, ...args: unknown[]): void } };
   props?: { centerContainer?: { height?: number } };
   itemSet?: {
     /** Hammer manager on the item set (press recogniser is disabled after construction). */
     hammer?: { get?(name: string): { set?(opts: Record<string, unknown>): unknown } | null | undefined };
     /** Live item-drag state: one `itemProps` entry per dragged item, each with the pointer x it started from. */
-    touchParams?: { itemProps?: Array<{ initialX?: number; item?: { id?: string | number } }> | null };
+    touchParams?: {
+      itemProps?: Array<{ initialX?: number; data?: unknown; item?: { id?: string | number; setData?(data: unknown): void } }> | null;
+      itemIsDragging?: boolean;
+    };
     /** ItemSet._onDrag(panmove event): recomputes every dragged bar from `event.center` against the live window. */
     _onDrag?(event: { center: { x: number; y: number }; stopPropagation(): void; srcEvent?: unknown }): void;
     items?: Record<string, {
@@ -4835,7 +4838,7 @@ export const Interaction = {
   _justDoubleClicked: false,
   _alertcellDelegated: false,
   _edgeScrollTrackBound: null as ((e: PointerEvent) => void) | null,
-  _dimPointerEndBound: null as (() => void) | null,
+  _dimPointerEndBound: null as ((e?: Event) => void) | null,
   /** Multi-drag line-lock toast latch: every selected item fires its own DataSet update for one gesture. */
   _multiLockToast: null as { key: string; ts: number } | null,
   _hideTooltipBound: null as (() => void) | null,
@@ -5052,7 +5055,11 @@ export const Interaction = {
     document.addEventListener('pointermove', this._edgeScrollTrackBound);
 
     /* ----- End of any pointer gesture: clear the drag-time row dim (vis has no cancel event for item drags) ---- */
-    this._dimPointerEndBound = () => { Timeline.undimRowsForDrag(); Interaction._endItemDrag(); };
+    // Hammer's pointerup is bound on `window`, so these document listeners run BEFORE vis's panend -> _onDragEnd ->
+    // DataSet updates. Ending the gate (and flushing the deferred writers) on a macrotask lets the whole pointerup
+    // dispatch and vis's drop finish first, with `_dragSetIds` still set. A cancel has no drop: restore vis's
+    // drag state (vis binds no pancancel) and end now.
+    this._dimPointerEndBound = (e?: Event) => Interaction._onDocPointerEnd(e?.type);
     document.addEventListener('pointerup', this._dimPointerEndBound);
     document.addEventListener('pointercancel', this._dimPointerEndBound);
 
@@ -5955,7 +5962,8 @@ export const Interaction = {
         const placeLine = t.MACHINE || 'Unknown';
         if (lineMoved) Interaction._noteMultiDragLinesKept(id, selIds);
         if (Math.abs(deltaMs) === 0) {
-          // Pure row change: nothing to move. Put the bar back.
+          // Pure row change: nothing to move. Put the bar back; the companions' updates are swallowed too.
+          Interaction._guardDragSet(dragSet, id);
           Timeline._scheduleRebuild();
           continue;
         }
@@ -5977,6 +5985,7 @@ export const Interaction = {
         // by _routingRuntimeEnabled so a plant that hasn't turned the feature
         // on sees no behavior change (see that helper's own comment).
         if (Interaction._routingRuntimeEnabled(t.PLANT) && !Runtime.eligible(t, placeLine)) {
+          Interaction._guardDragSet(dragSet, id);
           Interaction._rejectRuntimeMove(t, placeLine);
           Timeline._scheduleRebuild();
           continue;
@@ -5987,6 +5996,7 @@ export const Interaction = {
         try {
           const draggedPatch = Engine.manualRoutingSchedulePatchFor(t, placeLine, requestedFinish, opts);
           if (!draggedPatch?.start_date || !draggedPatch.end_date) {
+            Interaction._guardDragSet(dragSet, id);
             Interaction._rejectManualPlacement(t, itemId);
             continue;
           }
@@ -6053,7 +6063,9 @@ export const Interaction = {
             new Set([...dropSourceLines, placeLine, ...companionItemUpdates.map(u => u.group)]),
             new Set([placeLine, ...companionItemUpdates.map(u => u.group)]));
 
-          Interaction._multiDropHandled = { ids: new Set(allIds), ts: Date.now() };
+          // The guard covers the WHOLE drag set, firmed and running companions included: vis still drags those bars
+          // and fires their update after this commit, which must not run as a new drag leader.
+          Interaction._multiDropHandled = { ids: new Set([...allIds, ...dragSet]), ts: Date.now() };
           Interaction._reportBatchMove({
             moved: movedIds.length, total: allIds.length + skippedFirmed.length + skippedRunning.length,
             skipped: skipped.map(x => Store.tasks[x.id]).filter((x): x is NimbusTask => !!x),
@@ -6183,6 +6195,12 @@ export const Interaction = {
 
   /** Same-gesture duplicate guard (see _onDataSetUpdate): ids the last multi commit already handled. */
   _multiDropHandled: null as { ids: Set<string>; ts: number } | null,
+  /** A refused dragged order aborts the drop: swallow the rest of the drag set's updates (their bars are restored
+   *  from the Store) so no companion becomes the leader. The leader is left out so an overtime-confirm re-entry for
+   *  it still runs. */
+  _guardDragSet(dragSet: string[], leaderId: string): void {
+    this._multiDropHandled = { ids: new Set(dragSet.filter(s => s !== leaderId)), ts: Date.now() };
+  },
   /** One report for a batch move (multi-drop and Move by): the firmed and running counts, then
    *  "N of M moved. Not moved: ..." when an order was skipped. */
   _reportBatchMove(r: { moved: number; total: number; skipped: NimbusTask[]; firmed: number; running: number }): void {
@@ -6294,6 +6312,35 @@ export const Interaction = {
     queueMicrotask(() => Interaction._flushDragDeferred());
     try { Persistence.runDeferredRefreshes().then(changed => { if (changed) Timeline._scheduleRebuild(); }, () => {}); }
     catch (e) { ErrorLog.warn('timeline', 'deferred refresh after drag failed: ' + String(e)); }
+  },
+  /** Document pointerup / pointercancel (see the listener's comment in install). */
+  _onDocPointerEnd(type?: string): void {
+    Timeline.undimRowsForDrag();
+    if (type === 'pointercancel') Interaction._cancelItemDrag();
+    else setTimeout(() => Interaction._endItemDrag(), 0);
+  },
+  /** pointercancel mid-drag: vis binds no pancancel, so `itemIsDragging` stays true and the bars stay at the raw drag
+   *  position (the deferred rebuild's equality diff would then write nothing). Put each dragged bar back to the data
+   *  it was grabbed with and clear vis's drag state (private fields, every read null-guarded like
+   *  _purgeItemSetGhosts), then end the gate. */
+  _cancelItemDrag(): void {
+    if (this._isDragging) {
+      try {
+        const tl = Timeline._tl as unknown as VisInternalTimeline | null;
+        const tp = tl?.itemSet?.touchParams;
+        if (tp) {
+          if (Array.isArray(tp.itemProps)) {
+            for (const p of tp.itemProps) {
+              if (p?.item && typeof p.item.setData === 'function' && p.data !== undefined) p.item.setData(p.data);
+            }
+          }
+          tp.itemProps = null;
+          tp.itemIsDragging = false;
+          tl?.body?.emitter?.emit?.('_change');
+        }
+      } catch (e) { ErrorLog.warn('timeline', 'drag cancel restore failed: ' + String(e)); }
+    }
+    this._endItemDrag();
   },
   _lastDragEndTs: 0,          // ms of the last committed drag; gates CENTER_ON_CLICK auto-center
 
