@@ -1769,11 +1769,6 @@ export const OptimizerPreview = {
     // comment), so no other plant's calendar entries are ever needed here.
     const candidateSnapshot = snapshotSchedule(plant);
     const scopedTasks = candidateSnapshot.tasks.filter(task => resolveTaskPlant(task, candidateSnapshot) === plant);
-    const _snapT0 = performance.now();
-    // Kept only for the Undo entry if the planner applies.
-    const snapshot = structuredClone(scopedTasks);
-    const baseline = taskBaseline(snapshot);
-    PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
 
     // KPI inputs are scoped to what the user actually selected on screen 1 —
     // time window and (optionally) a subset of lines. Otherwise the before/after
@@ -1791,11 +1786,6 @@ export const OptimizerPreview = {
       return eMs >= winStart && s <= winEnd;
     };
 
-    // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
-    const _preKpiT0 = performance.now();
-    const preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
-    PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
-
     // Evaluate the established placement algorithm against a detached read
     // model. Store changes only if the planner applies this candidate.
     // Phase 2 (Pkg D): the primary run's deadline is now an explicit,
@@ -1812,6 +1802,26 @@ export const OptimizerPreview = {
       signal,
       syncEvaluator: evaluateSchedule,
     });
+    // The primary request is already posted (a worker clones the snapshot on postMessage), so the main-thread work that
+    // only the preview needs (the Undo copy, the baseline map and the Pre-KPIs) runs while the worker searches instead
+    // of before it starts (V-U2-13). Nothing below mutates candidateSnapshot, so the values are the same as before.
+    let snapshot: NimbusTask[];
+    let baseline: Map<string, string>;
+    let preKpis: OptimizerKpis;
+    try {
+      const _snapT0 = performance.now();
+      // Kept only for the Undo entry if the planner applies.
+      snapshot = structuredClone(scopedTasks);
+      baseline = taskBaseline(snapshot);
+      PerfMonitor.record('Optimize.snapshot', performance.now() - _snapT0);
+      // Pre-KPIs from the (filtered) snapshot — it IS the current state right now.
+      const _preKpiT0 = performance.now();
+      preKpis = Util.scheduleKpis(snapshot.filter(inScope), 14, candidateSnapshot, candidateSnapshot.frozenHorizonEnd);
+      PerfMonitor.record('Optimize.preKPIs', performance.now() - _preKpiT0);
+    } catch (error) {
+      if (primaryEvaluation instanceof Promise) primaryEvaluation.catch(() => undefined);   // never an unhandled rejection
+      throw error;
+    }
     const candidate = (primaryEvaluation instanceof Promise ? yield primaryEvaluation : primaryEvaluation) as CandidateResult;
     PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
     // A reversed or unparseable window yields no proposal at all: say why instead of rendering an empty plan.
