@@ -1231,6 +1231,18 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         }
       });
 
+      // Move by...
+      cmds.push({
+        type: 'selection',
+        icon:  '📐',
+        label: t('cmdp.label_move_by', { count: n }),
+        sub:   t('cmdp.sub_move_by'),
+        run() {
+          CommandPalette.close();
+          void NIMBUS.Interaction?.promptMoveBy?.(ids);
+        }
+      });
+
       // Unschedule
       cmds.push({
         type: 'selection',

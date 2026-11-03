@@ -2840,10 +2840,10 @@ export function lineFilterIsActive(sel: ReadonlySet<string> | null | undefined):
 export function lineFilterPredicate(sel: ReadonlySet<string> | null | undefined): (line: string) => boolean {
   return lineFilterIsActive(sel) ? (line => sel!.has(line)) : (() => true);
 }
-/** Hour/Day/Week window anchored on local midnight of a "now" instant (the plant's clock, S2-1). */
+/** Hour/Day/Week/Month window anchored on local midnight of a "now" instant (the plant's clock, S2-1). */
 export function plantViewWindow(mode: string, nowMs: number): { startMs: number; endMs: number } {
   const d = new Date(nowMs); d.setHours(0, 0, 0, 0);
-  const days = mode === 'hour' ? 1 : mode === 'day' ? 3 : 7;
+  const days = mode === 'hour' ? 1 : mode === 'day' ? 3 : mode === 'month' ? 30 : 7;
   const e = new Date(d); e.setDate(e.getDate() + days);   // calendar days, DST-safe
   return { startMs: d.getTime(), endMs: e.getTime() };
 }
@@ -5836,6 +5836,15 @@ export const Interaction = {
       if (!v) continue;
       const t = Store.tasks[id];
       if (!t) continue;
+      // Same-gesture duplicate: vis fires one DataSet update per selected item and its loop overwrites the
+      // companions with raw drag positions AFTER the first update committed them. Put the Store's rows back.
+      const handled = Interaction._multiDropHandled;
+      if (handled && handled.ids.has(id) && Date.now() - handled.ts < 1000) {
+        this._log('update:ignored', { id, reason: 'same-gesture duplicate' });
+        if (companionWritesDeferred(Timeline._expandedLine)) Timeline._scheduleRebuild();
+        else Timeline._writePatches(Timeline._itemsForTask(t).map(item => Timeline._decorateLane(item)));
+        continue;
+      }
       const expectedItem = Timeline._itemsForTask(t).find(item => item.id === itemId)
         || Timeline._itemForTask(t);
 
@@ -5916,26 +5925,30 @@ export const Interaction = {
       // manualSchedulePatchFor(t, newLine, newStart) call sites for the
       // dragged item, so a locked task can never reach either one on a
       // rejected drag.
-      if (t.PARENT_ORDER && lineMoved) {
+      // The companion set is frozen at grab time when the drag recorded it (A2), else the live selection.
+      // Running orders count as firmed for a drag: left in place and counted in a toast.
+      const dragSet = Interaction._dragSetIds ?? Selection.ids();
+      const selIds = dragSet.filter(sid => sid !== id && !Store.isFirmed(sid) && !Engine.isInProgress(Store.tasks[sid]));
+      const isMulti = selIds.length > 0;
+
+      if (t.PARENT_ORDER && lineMoved && !isMulti) {
         Interaction._rejectDistMachineMove(t);
         Timeline._scheduleRebuild();
         continue;
       }
 
-      const selIds = Selection.ids().filter(sid => sid !== id && !Store.isFirmed(sid));
-
-      if (selIds.length > 0 && (Math.abs(deltaMs) > 0 || lineMoved)) {
-        // D5/D14 (all plants): a multi-drag shifts time and may span lines but never changes any order's line.
-        // A drag that lands the dragged item on another row is rejected whole, with one toast per gesture
-        // (every selected item fires its own DataSet update).
-        if (lineMoved) {
-          Interaction._noteMultiDragLineLocked(id, selIds);
+      if (isMulti && (Math.abs(deltaMs) > 0 || lineMoved)) {
+        // D5/D14 (all plants): a multi-drag changes times only. A drop that lands the dragged item on another
+        // row keeps every line (the row is ignored) with one info toast per gesture (every selected item
+        // fires its own DataSet update).
+        const placeLine = t.MACHINE || 'Unknown';
+        if (lineMoved) Interaction._noteMultiDragLinesKept(id, selIds);
+        if (Math.abs(deltaMs) === 0) {
+          // Pure row change: nothing to move. Put the bar back.
           Timeline._scheduleRebuild();
           continue;
         }
-        // Snapshot all affected tasks for undo
         const allIds = [id, ...selIds];
-        const snap = UndoStack.snapshotTasks(allIds);
 
         // Apply the dragged item — routed through manualSchedulePatchFor so an
         // already-split order (>=2 scheduleSegments) is shifted rather than
@@ -5952,8 +5965,8 @@ export const Interaction = {
         // one toast, same revert mechanism as every other failure below. Gated
         // by _routingRuntimeEnabled so a plant that hasn't turned the feature
         // on sees no behavior change (see that helper's own comment).
-        if (Interaction._routingRuntimeEnabled(t.PLANT) && !Runtime.eligible(t, newLine)) {
-          Interaction._rejectRuntimeMove(t, newLine);
+        if (Interaction._routingRuntimeEnabled(t.PLANT) && !Runtime.eligible(t, placeLine)) {
+          Interaction._rejectRuntimeMove(t, placeLine);
           Timeline._scheduleRebuild();
           continue;
         }
@@ -5961,7 +5974,7 @@ export const Interaction = {
         const batchPlant = t.PLANT || Store.getPlantForLine(t.MACHINE || 'Unknown') || Store.selectedPlant;
         Calendar._beginRun(batchPlant);
         try {
-          const draggedPatch = Engine.manualRoutingSchedulePatchFor(t, newLine, requestedFinish, opts);
+          const draggedPatch = Engine.manualRoutingSchedulePatchFor(t, placeLine, requestedFinish, opts);
           if (!draggedPatch?.start_date || !draggedPatch.end_date) {
             Interaction._rejectManualPlacement(t, itemId);
             continue;
@@ -5980,54 +5993,37 @@ export const Interaction = {
           // Store or Timeline mutation happens here, since a later companion
           // failing must leave earlier companions (and the dragged item)
           // untouched too.
-          const skippedFirmed = Selection.ids().filter(sid => sid !== id && Store.isFirmed(sid));
+          const skippedFirmed = dragSet.filter(sid => sid !== id && Store.isFirmed(sid));
+          const skippedRunning = dragSet.filter(sid => sid !== id && !Store.isFirmed(sid) && Engine.isInProgress(Store.tasks[sid]));
           const companionPatches: Array<{ id: string; changes: Partial<NimbusTask> }> = [];
           const companionItemUpdates: Array<{ id: string; start: Date; end: Date; group: string }> = [];
-          let companionFailed = false;
-          let companionLockedTask: NimbusTask | null = null;
-          let companionRuntimeIneligible: { task: NimbusTask; line: string } | null = null;
+          // A companion whose placement is refused is skipped and reported; the drop still moves the rest.
+          const skipped: Array<{ id: string; reason: string }> = [];
           for (const sid of selIds) {
             const st = Store.tasks[sid];
             if (!st || !st.start_date) continue;
-            const sNewLine  = st.MACHINE || 'Unknown';   // a multi-drag never changes a line (lineMoved was rejected above)
-            // Machine lock (decision C): a locked companion fails the whole
-            // multi-drag atomically — nothing has been committed to Store or
-            // Timeline for this drag yet, so breaking here reverts cleanly.
-            if (st.PARENT_ORDER && sNewLine !== st.MACHINE) {
-              companionFailed = true;
-              companionLockedTask = st;
-              break;
-            }
-            // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3): same
-            // atomic-abort treatment as the machine lock above — the first
-            // ineligible companion fails the whole drag before any patch is
-            // computed for it. Gated by _routingRuntimeEnabled (see its comment).
+            const sNewLine  = st.MACHINE || 'Unknown';   // a multi-drag never changes a line
+            // Routing-runtime eligibility (ROUTING_RUNTIME_DESIGN.md §8.3), gated by _routingRuntimeEnabled.
             if (Interaction._routingRuntimeEnabled(st.PLANT) && !Runtime.eligible(st, sNewLine)) {
-              companionFailed = true;
-              companionRuntimeIneligible = { task: st, line: sNewLine };
-              break;
+              skipped.push({ id: sid, reason: 'ineligible' });
+              continue;
             }
             const sRequestedFinish = new Date((st.end_date || st.start_date).getTime() + deltaMs);
-            const changes = Engine.manualRoutingSchedulePatchFor(st, sNewLine, sRequestedFinish);
+            const changes = Engine.manualRoutingSchedulePatchFor(st, sNewLine, sRequestedFinish, { quiet: true });
             if (!changes?.start_date || !changes.end_date) {
-              companionFailed = true;
-              break;
+              skipped.push({ id: sid, reason: st.PARENT_ORDER ? 'locked' : (Engine.lastManualRefusal || 'refused') });
+              continue;
             }
             companionPatches.push({ id: sid, changes });
             companionItemUpdates.push({ id: sid, start: changes.start_date, end: changes.end_date, group: sNewLine });
           }
-          if (companionFailed) {
-            if (companionLockedTask) Interaction._rejectDistMachineMove(companionLockedTask);
-            else if (companionRuntimeIneligible) Interaction._rejectRuntimeMove(companionRuntimeIneligible.task, companionRuntimeIneligible.line);
-            else if (Engine.lastManualRefusal !== 'finish_cannot_hold') Toast.show(Util.t('toast.commit_failed'), 'error');
-            Timeline._scheduleRebuild();
-            continue;
-          }
+          const movedIds = [id, ...companionPatches.map(p => p.id)];
+          const snap = UndoStack.snapshotTasks(movedIds);
 
           // Every patch validated — commit atomically: dragged item, then
           // companions, then their Timeline item mirrors.
           // Source lines are read BEFORE the commit (the Store write can move the task objects' MACHINE).
-          const dropSourceLines = [t.MACHINE || 'Unknown', ...selIds.map(sid => Store.tasks[sid]?.MACHINE || 'Unknown')];
+          const dropSourceLines = [t.MACHINE || 'Unknown', ...companionPatches.map(p => Store.tasks[p.id]?.MACHINE || 'Unknown')];
           Store.updateTask(id, draggedPatch, 'timeline');
           if (companionPatches.length) Store.updateMany(companionPatches, 'timeline');
           // With a row expanded the write is skipped (companionWritesDeferred): vis's drag-end overwrites it
@@ -6041,15 +6037,20 @@ export const Interaction = {
               ? Timeline._decorateLane({ ...cur, start: upd.start, end: upd.end, group: upd.group })
               : { id: upd.id, start: upd.start, end: upd.end, group: upd.group } as TimelineVisItem]);
           }
-          Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', newLine]));
+          Timeline.finishSetupDrag(new Set([t.MACHINE || 'Unknown', placeLine]));
           Timeline.noteDropLines(
-            new Set([...dropSourceLines, newLine, ...companionItemUpdates.map(u => u.group)]),
-            new Set([newLine, ...companionItemUpdates.map(u => u.group)]));
+            new Set([...dropSourceLines, placeLine, ...companionItemUpdates.map(u => u.group)]),
+            new Set([placeLine, ...companionItemUpdates.map(u => u.group)]));
 
-          if (skippedFirmed.length) Toast.show(Util.t('toast.firmed_count_not_moved', { count: skippedFirmed.length }), 'warn');
+          Interaction._multiDropHandled = { ids: new Set(allIds), ts: Date.now() };
+          Interaction._reportBatchMove({
+            moved: movedIds.length, total: allIds.length + skippedFirmed.length + skippedRunning.length,
+            skipped: skipped.map(x => Store.tasks[x.id]).filter((x): x is NimbusTask => !!x),
+            firmed: skippedFirmed.length, running: skippedRunning.length,
+          });
 
-          UndoStack.push(Util.t('undo.move_orders', { count: allIds.length }),
-            () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, allIds);
+          UndoStack.push(Util.t('undo.move_orders', { count: movedIds.length }),
+            () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, movedIds);
           this._clearGhosts();
           return;
         } finally { Calendar._endRun(); }
@@ -6159,15 +6160,85 @@ export const Interaction = {
     });
   },
 
-  /** One toast per multi-drag gesture: each selected item fires its own DataSet update, so latch on the
+  /** One info toast per multi-drag gesture: each selected item fires its own DataSet update, so latch on the
    *  gesture's item set within a short window (a rebuild also clears the latch). */
-  _noteMultiDragLineLocked(id: string, selIds: string[]): void {
+  _noteMultiDragLinesKept(id: string, selIds: string[]): void {
     const key = [id, ...selIds].sort().join('|');
     const now = Date.now();
     const last = Interaction._multiLockToast;
     if (last && last.key === key && now - last.ts < 2000) return;
     Interaction._multiLockToast = { key, ts: now };
-    Toast.show(Util.t('toast.multi_drag_line_locked'), 'warn', 4000);
+    Toast.show(Util.t('toast.multi_drag_lines_kept'), 'info', 4000);
+  },
+
+  /** Same-gesture duplicate guard (see _onDataSetUpdate): ids the last multi commit already handled. */
+  _multiDropHandled: null as { ids: Set<string>; ts: number } | null,
+  /** Companion ids frozen at grab time (set by the drag-gate owner); the commit prefers it over Selection. */
+  _dragSetIds: null as string[] | null,
+
+  /** One report for a batch move (multi-drop and Move by): the firmed and running counts, then
+   *  "N of M moved. Not moved: ..." when an order was skipped. */
+  _reportBatchMove(r: { moved: number; total: number; skipped: NimbusTask[]; firmed: number; running: number }): void {
+    if (r.firmed) Toast.show(Util.t('toast.firmed_count_not_moved', { count: r.firmed }), 'warn');
+    if (r.running) Toast.show(Util.t('toast.running_count_not_moved', { count: r.running }), 'warn');
+    if (!r.skipped.length) return;
+    const names = r.skipped.slice(0, 5).map(x => Util.orderNumber(x));
+    const more = r.skipped.length - names.length;
+    const orders = names.join(', ') + (more > 0 ? ` +${more}` : '');
+    Toast.show(Util.t('toast.multi_drag_partial', { moved: r.moved, total: r.total, orders }), 'warn', 6000);
+  },
+
+  /** Move the given orders' finishes by `ms` (any sign) without a drag: the Move-by command. Returns the
+   *  number moved. Firmed, frozen, running and unholdable orders stay put and are reported. */
+  moveSelectedBy(ids: string[], ms: number): number {
+    const tasks = ids.map(i => Store.tasks[i]).filter((x): x is NimbusTask => !!x);
+    if (!tasks.length || !ms) return 0;
+    const patches = Engine.pushFinishPatches(tasks, ms);
+    const movedSet = new Set(patches.map(p => p.id));
+    const running = tasks.filter(x => Engine.isInProgress(x));
+    const firmed = tasks.filter(x => Store.isFirmed(x.id) && !Engine.isInProgress(x));
+    const skipped = tasks.filter(x => !movedSet.has(x.id) && !Store.isFirmed(x.id) && !Engine.isInProgress(x));
+    if (patches.length) {
+      const moveIds = patches.map(p => p.id);
+      const snap = UndoStack.snapshotTasks(moveIds);
+      Store.updateMany(patches, 'interaction');
+      UndoStack.push(Util.t('undo.move_orders_by', { count: moveIds.length, delta: Interaction._moveByLabel(ms) }),
+        () => { UndoStack.restoreTasks(snap); Alerts.scheduleRecompute(); }, moveIds);
+      Alerts.scheduleRecompute();
+    }
+    Interaction._reportBatchMove({ moved: patches.length, total: tasks.length, skipped, firmed: firmed.length, running: running.length });
+    return patches.length;
+  },
+
+  /** Short signed label for a Move-by delta, e.g. "-1 w", "+2 h". */
+  _moveByLabel(ms: number): string {
+    const sign = ms < 0 ? '-' : '+';
+    const a = Math.abs(ms);
+    if (a % (7 * Config.MS_DAY) === 0) return `${sign}${a / (7 * Config.MS_DAY)} w`;
+    if (a % Config.MS_DAY === 0) return `${sign}${a / Config.MS_DAY} d`;
+    return `${sign}${a / Config.MS_HOUR} h`;
+  },
+
+  /** The Move-by dialog, then apply. Cancel is a no-op. */
+  async promptMoveBy(ids: string[]): Promise<void> {
+    const live = ids.filter(i => Store.tasks[i]);
+    if (!live.length) return;
+    const H = Config.MS_HOUR, D = Config.MS_DAY;
+    const opts: Array<[string, string, number]> = [
+      ['-2w', 'ui.move_by_opt_m2w', -14 * D], ['-1w', 'ui.move_by_opt_m1w', -7 * D],
+      ['-1d', 'ui.move_by_opt_m1d', -D], ['-1h', 'ui.move_by_opt_m1h', -H],
+      ['+1h', 'ui.move_by_opt_p1h', H], ['+1d', 'ui.move_by_opt_p1d', D],
+      ['+1w', 'ui.move_by_opt_p1w', 7 * D], ['+2w', 'ui.move_by_opt_p2w', 14 * D],
+    ];
+    const pick = await Modal.choose({
+      title: Util.t('ui.move_by_title'),
+      message: Util.t('ui.move_by_message', { count: live.length }),
+      options: opts.map(([value, key]) => ({ value, label: Util.t(key) })),
+    });
+    if (pick == null) return;
+    const ms = opts.find(o => o[0] === pick)?.[2];
+    if (ms == null) return;
+    Interaction.moveSelectedBy(live, ms);
   },
 
   _ghostDragId: null as string | null,
@@ -6512,6 +6583,7 @@ export const Interaction = {
         <div style="display:flex;flex-direction:column;gap:6px;">
           ${plan.firm.length ? `<button class="btn btn-ghost" data-action="firm">${Util.t('btn.firm_all')}</button>` : ''}
           ${plan.unfirm.length ? `<button class="btn btn-ghost" data-action="unfirm">${Util.t('btn.unfirm_all')}</button>` : ''}
+          <button class="btn btn-ghost" data-action="move-by">${Util.t('btn.move_selected_by')}</button>
           <button class="btn btn-ghost" data-action="unschedule">${Util.t('btn.unschedule_all')}</button>
           <button class="btn btn-ghost" data-action="clear">${Util.t('btn.clear_selection')}</button>
         </div>
@@ -6524,6 +6596,7 @@ export const Interaction = {
     // code and converted the same way).
     panel.querySelector('[data-action="firm"]')?.addEventListener('click', () => Interaction._bulkFirm(true));
     panel.querySelector('[data-action="unfirm"]')?.addEventListener('click', () => Interaction._bulkFirm(false));
+    panel.querySelector('[data-action="move-by"]')?.addEventListener('click', () => { void Interaction.promptMoveBy(Selection.ids()); });
     panel.querySelector('[data-action="unschedule"]')?.addEventListener('click', () => Interaction._unscheduleSelected());
     panel.querySelector('[data-action="clear"]')?.addEventListener('click', () => Selection.clear());
   },
