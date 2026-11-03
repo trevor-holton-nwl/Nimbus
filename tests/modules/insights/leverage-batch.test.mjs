@@ -50,7 +50,7 @@ test('buildPlantSnapshot derives setup by default and uses the override when giv
   assert.equal(buildPlantSnapshot(null).lines, null);
 });
 
-test('runLeverageBatchSync returns one {key, alerts, matrix} per variant and leaves the base untouched', () => {
+test('runLeverageBatchSync returns one {key, alerts} per variant (no matrix) and leaves the base untouched', () => {
   seed();
   const snap = buildPlantSnapshot('LP');
   const base = {
@@ -64,8 +64,7 @@ test('runLeverageBatchSync returns one {key, alerts, matrix} per variant and lea
   assert.deepEqual(results.map(r => r.key), ['v1', 'v2']);
   for (const r of results) {
     assert.ok(Array.isArray(r.alerts));
-    assert.ok(r.matrix.LL1, 'matrix covers the plant line');
-    assert.equal(Object.keys(r.matrix.LL1).length, 7);
+    assert.deepEqual(Object.keys(r).sort(), ['alerts', 'key'], 'the reply carries no utilization matrix');
   }
   assert.deepEqual({ calendars: base.calendars, plants: base.plants }, before,
     'ensureCalendar/ensurePlant writes must not leak into the base payload (or the next variant)');
@@ -84,7 +83,7 @@ test('Compute.leverageBatch falls back to the synchronous core when no Worker ex
     assert.equal(out.length, 1);
     assert.equal(out[0].key, 'only');
     assert.ok(Array.isArray(out[0].alerts));
-    assert.ok(out[0].matrix.LL1);
+    assert.equal('matrix' in out[0], false);
   } finally {
     if (prior) Object.defineProperty(globalThis, 'Worker', prior);
   }
@@ -110,7 +109,9 @@ test('compiled worker handles LEVERAGE_BATCH and matches runLeverageBatchSync', 
   const sync = runLeverageBatchSync(base, variants);
   assert.deepEqual(posted[0].results.map(r => r.key), ['v1', 'v2']);
   assert.equal(JSON.stringify(posted[0].results), JSON.stringify(sync));
-  assert.equal(Object.keys(posted[0].results[0].matrix.LL1).length, 4, 'days and lines reach computeUtilization');
+  assert.deepEqual(Object.keys(posted[0].results[0]).sort(), ['alerts', 'key'], 'no matrix in the worker reply');
+  assert.equal(JSON.stringify(posted[0].results), JSON.stringify(globalThis.NimbusComputeCore.computeLeverageBatch(base, variants)),
+    'the worker and the fallback share the one core loop');
 });
 
 test('compiled worker self.onerror takes the 5 positional args, posts an id-null ERROR and returns true (A1/A4)', async () => {
@@ -135,6 +136,24 @@ test('compiled worker self.onerror takes the 5 positional args, posts an id-null
   // A script error with no Error object (cross-origin style) still reports the message string.
   self.onerror('Script error.', '', 0, 0, null);
   assert.equal(posted[1].error, 'Script error.');
+});
+
+test('compiled worker answers an unknown message type with an ERROR on its id and reports a null message (A3)', async () => {
+  const { default: vm } = await import('node:vm');
+  const { readFileSync } = await import('node:fs');
+  const posted = [];
+  const self = { NimbusComputeCore: globalThis.NimbusComputeCore, location: { search: '' }, addEventListener() {}, postMessage: m => posted.push(m) };
+  const ctx = vm.createContext({ self, importScripts() {}, structuredClone });
+  vm.runInContext(readFileSync(new URL('../../../frontend/nimbus-worker.js', import.meta.url), 'utf8'), ctx);
+  self.onmessage({ data: { type: 'NOPE', id: 11, payload: {} } });
+  assert.equal(posted[0].type, 'ERROR');
+  assert.equal(posted[0].id, 11, 'the waiting caller is answered on its own id');
+  assert.match(posted[0].error, /unknown message type: NOPE/);
+  self.onmessage({ data: null });
+  assert.equal(posted[1].type, 'ERROR');
+  assert.equal(posted[1].id, null);
+  self.onmessage({ data: undefined });
+  assert.equal(posted.length, 3);
 });
 
 test('Compute.leverageBatch stops the worker and rejects with TimeoutError when it never answers (no main-thread rerun)', async t => {

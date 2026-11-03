@@ -125,6 +125,10 @@ interface SnapshotOpts {
   setupObservation?: NimbusSetupObservation;
   /** Default true: drop PRODUCTION_VERSION from the transported tasks. */
   stripPriorityFields?: boolean;
+  /** Scope the derived setup observation to these lines (a line-scoped alerts recompute). Tasks are never filtered. */
+  lines?: ReadonlySet<string>;
+  /** Serve the setup-less parts from the shared dataRev-keyed memo (the Compute paths only). */
+  memo?: boolean;
 }
 
 /** The masterData the alert worker receives: identical to the Store's except `tool_inventory` is projected to the
@@ -145,68 +149,122 @@ export function projectMasterDataForWorker(md: NimbusMasterData | null): NimbusM
   return { ...md, tool_inventory: compact as unknown as NimbusMasterData['tool_inventory'] };
 }
 
-/** The plant-scoped worker payload body. Shared by Compute._snap (which must not touch the plant
- *  clock registry) and the exported buildPlantSnapshot. */
-function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts = {}): { snap: WorkerSnapshotBase; lines: string[] | null } {
-  const strip = opts.stripPriorityFields !== false;
-  const override = opts.setupObservation as SetupObservation | undefined;
+type SetupAvailability = NonNullable<Parameters<typeof deriveSetupObservation>[3]>;
+
+/** The setup-less part of the plant-scoped payload plus what a setup derivation needs. The expensive pieces (the
+ *  stripped task copy, the per-line picks, the full-scope setup observation) live here so one dataRev can serve both
+ *  the alerts and the utilization request. */
+interface SnapshotParts {
+  plant: string | null;
+  strip: boolean;
+  /** Store.dataRev() and Store.setupSnapshot when built: the memo is valid only while both still match. */
+  rev: number;
+  setupSnapshot: unknown;
+  lines: string[] | null;
+  lineSet: Set<string> | null;
+  /** Un-stripped source tasks: stateForOrder reads PRT_01/PRT_02/PRODUCTION_VERSION, which transport omits. */
+  src: NimbusTask[];
+  availability: SetupAvailability;
+  base: Omit<WorkerSnapshotBase, 'setup'>;
+  /** Full-scope setup observation, filled on first use (never for a line-scoped or what-if request). */
+  setupAll: SetupObservation | null;
+}
+
+let _snapshotBuilds = 0;
+let _snapshotHits = 0;
+let _snapshotMemo: SnapshotParts | null = null;
+
+/** Test hook: how many times the snapshot parts were built vs served from the dataRev-keyed memo. */
+export function _snapshotMemoStats(): { builds: number; hits: number } { return { builds: _snapshotBuilds, hits: _snapshotHits }; }
+/** Test hook: forget the memo (a fresh module instance has none). */
+export function _snapshotMemoClear(): void { _snapshotMemo = null; }
+
+function _buildSnapshotParts(plant: string | null | undefined, strip: boolean): SnapshotParts {
+  _snapshotBuilds++;
+  const rev = Store.dataRev();
+  const setupSnapshot = Store.setupSnapshot;
   if (!plant) {
-    // Setup state must be resolved from the un-stripped source: stateForOrder
-    // reads PRODUCTION_VERSION, which is omitted from task transport.
-    // Deriving from the stripped copy would
-    // silently blank every state for any definition using those fields.
+    // Setup state is resolved from the un-stripped source (see SnapshotParts.src); deriving from the stripped copy
+    // would silently blank every state for any definition using those fields.
     const src = Store.tasksArr;
-    const setup = override ?? deriveSetupObservation(Store.setupSnapshot, src, undefined, {
-      calendars: Store._state.calendars, plants: Store._state.plants, lineSettings: Store._state.lineSettings,
-      masterData: Store._state.masterData, blocks: Store._state.blocks, plantBlocks: Store._state.plantBlocks,
-    });
     const tasks = strip ? src.map(_stripPriorityFields) : src;
-    // No plant selected — nothing is rendered; fall back to the global snapshot.
-    return { lines: null, snap: {
-      tasks,
-      blocks:       Store._state.blocks,
-      plantBlocks:  Store._state.plantBlocks,
-      calendars:    Store._state.calendars,
-      plants:       Store._state.plants,
-      lineSettings: Store._state.lineSettings,
-      masterData:   projectMasterDataForWorker(Store._state.masterData),
-      setup,
-    } };
+    // No plant selected - nothing is rendered; fall back to the global snapshot.
+    return { plant: null, strip, rev, setupSnapshot, lines: null, lineSet: null, src, setupAll: null,
+      availability: {
+        calendars: Store._state.calendars, plants: Store._state.plants, lineSettings: Store._state.lineSettings,
+        masterData: Store._state.masterData, blocks: Store._state.blocks, plantBlocks: Store._state.plantBlocks,
+      },
+      base: {
+        tasks,
+        blocks:       Store._state.blocks,
+        plantBlocks:  Store._state.plantBlocks,
+        calendars:    Store._state.calendars,
+        plants:       Store._state.plants,
+        lineSettings: Store._state.lineSettings,
+        masterData:   projectMasterDataForWorker(Store._state.masterData),
+      } };
   }
   // Plant-scoped snapshot. The structured-clone of this payload runs synchronously
   // on the main thread on every postMessage (the dominant main-thread cost of the
   // Worker.* round trip), so we send only the selected plant's data. calendars and
   // lineSettings MUST be scoped too: computeUtilization derives its line set from
   // Object.keys(calendars), and those maps accumulate entries for every line visited
-  // this session — an unscoped map would make the worker compute (and clone back) a
+  // this session - an unscoped map would make the worker compute (and clone back) a
   // matrix for lines that aren't even on screen.
   const lineList = Store._linesByPlant[plant] || [];
-  const lines = new Set(lineList);
+  const lineSet = new Set(lineList);
   const pick = <T,>(obj: Record<string, T>): Record<string, T> => {
     const out: Record<string, T> = {};
-    for (const l of lines) if (obj[l] !== undefined) out[l] = obj[l];
+    for (const l of lineSet) if (obj[l] !== undefined) out[l] = obj[l];
     return out;
   };
-  // Same rule as the no-plant branch above: derive from the un-stripped
-  // source array so stateForOrder can still read PRT_01/PRT_02/PRODUCTION_VERSION.
+  const blocks = Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lineSet.has(b.line)));
+  const plantBlocks = Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant);
+  const calendars = pick(Store._state.calendars);
+  const plants = Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {};
+  const lineSettings = pick(Store._state.lineSettings);
+  // Same rule as the no-plant branch above: derive from the un-stripped source array.
   const src = Store.tasksByPlant(plant);
-  const setup = override ?? deriveSetupObservation(Store.setupSnapshot, src, lines, {
-    calendars: pick(Store._state.calendars), plants: Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
-    lineSettings: pick(Store._state.lineSettings), masterData: Store._state.masterData,
-    blocks: Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
-    plantBlocks: Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
-  });
-  const tasks = strip ? src.map(_stripPriorityFields) : src;
-  return { lines: lineList, snap: {
-    tasks,
-    blocks:       Store._state.blocks.filter(b => (!b.plant || b.plant === plant) && (!b.line || lines.has(b.line))),
-    plantBlocks:  Store._state.plantBlocks.filter(b => !b.plant || b.plant === plant),
-    calendars:    pick(Store._state.calendars),
-    plants:       Store._state.plants[plant] ? { [plant]: Store._state.plants[plant] } : {},
-    lineSettings: pick(Store._state.lineSettings),
-    masterData:   projectMasterDataForWorker(Store._state.masterData),
-    setup,
-  } };
+  return { plant, strip, rev, setupSnapshot, lines: lineList, lineSet, src, setupAll: null,
+    availability: { calendars, plants, lineSettings, masterData: Store._state.masterData, blocks, plantBlocks },
+    base: {
+      tasks: strip ? src.map(_stripPriorityFields) : src,
+      blocks, plantBlocks, calendars, plants, lineSettings,
+      masterData: projectMasterDataForWorker(Store._state.masterData),
+    } };
+}
+
+/** The shared, dataRev-keyed parts for the Compute paths: an alerts request and a utilization request at the same
+ *  data revision (the usual pair after one edit) build the stripped task copy, the line picks and the full-scope
+ *  setup observation once. Valid only while Store.dataRev() and the setup snapshot are unchanged; the buildPlantSnapshot
+ *  export does NOT use it (its callers own and may mutate the returned maps). */
+function _snapshotParts(plant: string | null | undefined, strip: boolean): SnapshotParts {
+  const m = _snapshotMemo;
+  if (m && m.plant === (plant || null) && m.strip === strip && m.rev === Store.dataRev() && m.setupSnapshot === Store.setupSnapshot) {
+    _snapshotHits++;
+    return m;
+  }
+  return (_snapshotMemo = _buildSnapshotParts(plant, strip));
+}
+
+/** The plant-scoped worker payload body. Shared by Compute (alerts and utilization, memoized per dataRev) and the
+ *  exported buildPlantSnapshot (uncached). `opts.lines` scopes the setup derivation to those lines, exactly like the
+ *  synchronous path: every task is still shipped (tool conflicts and peers cross lines), only the derived setup
+ *  observation shrinks to the lines the compute will report on. */
+function _buildSnapshotBase(plant: string | null | undefined, opts: SnapshotOpts = {}): { snap: WorkerSnapshotBase; lines: string[] | null } {
+  const strip = opts.stripPriorityFields !== false;
+  const override = opts.setupObservation as SetupObservation | undefined;
+  const parts = opts.memo ? _snapshotParts(plant, strip) : _buildSnapshotParts(plant, strip);
+  let setup: SetupObservation;
+  if (override) setup = override;
+  else if (opts.lines && opts.lines.size) {
+    setup = deriveSetupObservation(Store.setupSnapshot, parts.src, opts.lines, parts.availability);
+  } else if (opts.memo) {
+    setup = parts.setupAll ??= deriveSetupObservation(Store.setupSnapshot, parts.src, parts.lineSet ?? undefined, parts.availability);
+  } else {
+    setup = deriveSetupObservation(Store.setupSnapshot, parts.src, parts.lineSet ?? undefined, parts.availability);
+  }
+  return { lines: parts.lines, snap: { ...parts.base, setup } };
 }
 
 /** The full alert/utilization payload for one plant, plus its line set and wall-clock fields.
@@ -295,20 +353,15 @@ function _leverageViaDedicatedWorker(base: LeverageBase, variants: LeverageVaria
 
 export type LeverageBase = ComputeAlertsPayload & { startMs: number; days: number; lines?: string[] };
 export interface LeverageVariant { key: string; setup: NimbusSetupObservation }
-export interface LeverageResult { key: string; alerts: NimbusAlert[]; matrix: NimbusUtilizationMatrix }
+/** One variant's replay: the alerts only (the reply no longer carries a utilization matrix; nothing reads it). */
+export interface LeverageResult { key: string; alerts: NimbusAlert[] }
 
 /** Main-thread equivalent of the worker's LEVERAGE_BATCH handler (used when the worker is dead or
- *  absent). calendars/plants get a shallow copy per core call: ensureCalendar/ensurePlant only ADD missing
- *  top-level keys (they never edit an existing entry), so a fresh top-level map keeps `base` (and the live
- *  Store maps it can alias) untouched without cloning every entry. */
+ *  absent): both call the one `computeLeverageBatch` in the compute core, which shallow-copies calendars/plants per
+ *  variant (ensureCalendar/ensurePlant only ADD missing top-level keys), so `base` and the live Store maps it can
+ *  alias stay untouched. */
 export function runLeverageBatchSync(base: LeverageBase, variants: LeverageVariant[]): LeverageResult[] {
-  const Core = globalThis.NimbusComputeCore!;
-  const fresh = () => ({ calendars: { ...base.calendars }, plants: { ...base.plants } });
-  return variants.map(({ key, setup }) => ({
-    key,
-    alerts: Core.computeAlerts({ ...base, ...fresh(), setup }).alerts,
-    matrix: Core.computeUtilization({ ...base, ...fresh(), setup }).matrix,
-  }));
+  return globalThis.NimbusComputeCore!.computeLeverageBatch(base, variants);
 }
 
 /* =============================================================================
@@ -316,22 +369,85 @@ export function runLeverageBatchSync(base: LeverageBase, variants: LeverageVaria
    Alerts.recompute and Utilization pre-warming post through here.
    Falls back to synchronous (main-thread) compute if the worker is unavailable.
    ========================================================================== */
+/** Upper bound on one ALERTS job on the shared worker (the utilization path has its own 20 s timeout in `_utilPump`).
+ *  On expiry the job rejects (Alerts.recompute then computes on the main thread), the worker is terminated and the
+ *  next request creates a fresh one. A timeout is not a crash: it never touches `_crashCount`. */
+const ALERTS_JOB_TIMEOUT_MS = 20000;
+/** Consecutive worker timeouts (reset by any reply) after which the shared worker is given up for the session. */
+const MAX_CONSECUTIVE_TIMEOUTS = 3;
+
+type ComputeJobType = 'ALERTS' | 'UTILIZATION';
+interface PendingJob {
+  resolve: (value: any) => void;
+  reject: (reason?: any) => void;
+  type: ComputeJobType;
+  timer?: ReturnType<typeof setTimeout>;
+}
+/** The ALERTS request waiting for the in-flight one to finish: latest-wins, never posted until then. */
+interface AlertsSlot {
+  /** Merged scope of every request folded into the slot; null = a full recompute. */
+  lines: Set<string> | null;
+  dismissed: Set<string> | undefined;
+  t0: number;
+  /** Every caller folded into this slot; all but the last are `superseded`. */
+  waiters: Array<{ resolve: (v: any) => void; reject: (e: any) => void; superseded: boolean }>;
+}
+
+function _computeError(name: string, message: string): Error {
+  return Object.assign(new Error(message), { name });
+}
+
 export const Compute = (() => {
   let _worker: Worker | null = null;
   let _dead   = false;
   let _crashCount = 0;
+  let _timeouts = 0;
   let _seq    = 0;
-  const _pending = new Map<number, { resolve: (value: any) => void; reject: (reason?: any) => void }>(); // id → { resolve, reject }
+  const _pending = new Map<number, PendingJob>(); // id → job
+  // Latest-wins coalescing for ALERTS: at most ONE alerts job on the worker at a time, plus one waiting slot. A
+  // request that arrives while a job is in flight replaces the slot (merging its line scope) instead of being cloned
+  // and posted; the payload is built only when the slot is finally sent, from the then-current Store. UTILIZATION is
+  // not coalesced here: its requests are different windows (a newer one is not a replacement) and `_utilPump` already
+  // serializes and merges them.
+  let _alertInFlight: number | null = null;
+  let _alertSlot: AlertsSlot | null = null;
+
+  /** Drop the worker without counting a crash: stop its handlers, terminate it, forget it. */
+  function _discardWorker(): void {
+    const w = _worker;
+    _worker = null;
+    if (!w) return;
+    w.onmessage = null; w.onerror = null; w.onmessageerror = null;
+    try { w.terminate(); } catch {}
+  }
+
+  /** Forget one job: remove its entry and timer, and free the alerts in-flight marker if it was that job. */
+  function _forget(id: number): PendingJob | undefined {
+    const job = _pending.get(id);
+    if (!job) return undefined;
+    _pending.delete(id);
+    if (job.timer !== undefined) clearTimeout(job.timer);
+    if (_alertInFlight === id) _alertInFlight = null;
+    return job;
+  }
+
+  function _rejectAllPending(makeError: (job: PendingJob, id: number) => Error): void {
+    const jobs = [..._pending.entries()];
+    for (const [id] of jobs) _forget(id);
+    _alertInFlight = null;
+    for (const [id, job] of jobs) job.reject(makeError(job, id));
+  }
 
   function _init(): Worker | null {
     if (_dead || _worker) return _worker;
     try {
       // Cache-bust the worker with the build id so a redeployed worker isn't served
-      // stale from the HTTP cache — otherwise mirrored Calendar/Alerts fixes here
+      // stale from the HTTP cache - otherwise mirrored Calendar/Alerts fixes here
       // would silently diverge from the worker's hand-port. (Config.BUILD_ID tracks
       // NIMBUS_BUILD_ID, kept in sync with APP_VERSION on every deploy.)
       _worker = new Worker('../nimbus-worker.js?v=' + Config.BUILD_ID);
       _worker.onmessage = ({ data }) => {
+        if (!data) return;
         // Worker-global failure (self.onerror / unhandledrejection): no job id, so it must
         // be handled before the _pending lookup below drops it. Pending jobs are untouched.
         if (data.type === 'ERROR' && data.id == null) {
@@ -340,20 +456,24 @@ export const Compute = (() => {
             { errorCode: 'worker.uncaught', stack: data.stack });
           return;
         }
-        const p = _pending.get(data.id);
+        const p = _forget(data.id);
         if (!p) return;
-        _pending.delete(data.id);
-        if (data.type === 'ERROR') {
-          // Worker reported a compute failure (see §1.7 contract): carries
-          // error/stack/failingType. Log before rejecting so the failure is
-          // visible even if the caller swallows the rejection.
-          const wMsg = `worker compute error${data.failingType ? ' (' + data.failingType + ')' : ''}: ${data.error || 'unknown'}`;
-          ErrorLog.error('worker', wMsg,
-            { failingType: data.failingType, jobId: data.jobId },
-            { errorCode: 'worker.compute', stack: data.stack });
-          p.reject(new Error(data.error));
-        } else {
-          p.resolve(data);
+        _timeouts = 0;   // the worker answered: it is not stuck
+        try {
+          if (data.type === 'ERROR') {
+            // Worker reported a compute failure (see §1.7 contract): carries
+            // error/stack/failingType. Log before rejecting so the failure is
+            // visible even if the caller swallows the rejection.
+            const wMsg = `worker compute error${data.failingType ? ' (' + data.failingType + ')' : ''}: ${data.error || 'unknown'}`;
+            ErrorLog.error('worker', wMsg,
+              { failingType: data.failingType, jobId: data.jobId },
+              { errorCode: 'worker.compute', stack: data.stack });
+            p.reject(new Error(data.error));
+          } else {
+            p.resolve(data);
+          }
+        } finally {
+          _pumpAlerts();   // a freed alerts slot sends the waiting request
         }
       };
       _worker.onmessageerror = () => {
@@ -375,17 +495,16 @@ export const Compute = (() => {
           ErrorLog[logFn]('worker', `worker crashed (attempt ${_crashCount}): ${detail.message}`, detail,
             { errorCode: 'worker.compute' });
         } catch {}
-        for (const p of _pending.values()) p.reject(new Error('worker error'));
-        _pending.clear();
+        _rejectAllPending(() => new Error('worker error'));
         // A crashed worker may still be alive (an uncaught error does not stop it); terminate it before dropping
         // the reference so a discarded worker never lingers beside its replacement.
-        try { _worker?.terminate(); } catch {}
-        _worker = null;
+        _discardWorker();
         if (_crashCount >= 2) {
           // Permanent failure: give up on the worker for the session.
           _dead = true;
         }
         // Otherwise: allow retry on next _init() call (bounded at 1 retry + permanent fail on 2nd crash).
+        _pumpAlerts();   // a waiting alerts request goes to the fresh worker (or is rejected when dead)
       };
     } catch {
       _dead = true;
@@ -394,36 +513,115 @@ export const Compute = (() => {
     return _worker;
   }
 
-  function _post(type: 'ALERTS' | 'UTILIZATION', payload: Record<string, unknown>): Promise<any> {
+  /** An ALERTS job outlived ALERTS_JOB_TIMEOUT_MS. The worker is single-threaded, so it is stuck on this job and
+   *  anything queued behind it: reject the job (callers fall back to the main thread), reject the rest as lost with
+   *  the worker, terminate it and let the next request create a fresh one. Not a crash. */
+  function _onTimeout(id: number): void {
+    if (!_pending.has(id)) return;
+    _timeouts++;
+    try {
+      ErrorLog.warn('worker', `worker job timed out after ${ALERTS_JOB_TIMEOUT_MS} ms (consecutive: ${_timeouts})`,
+        { jobId: id }, { errorCode: 'worker.timeout' });
+    } catch {}
+    _rejectAllPending((_job, jobId) => jobId === id
+      ? _computeError('ComputeTimeout', 'worker job timed out')
+      : _computeError('ComputeWorkerRestarted', 'worker restarted after a timeout'));
+    _discardWorker();
+    if (_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) _dead = true;
+    _pumpAlerts();
+  }
+
+  function _post(type: ComputeJobType, payload: Record<string, unknown>, timeoutMs?: number): Promise<any> {
     const w = _init();
     if (!w) return Promise.reject(new Error('worker unavailable'));
     return new Promise((resolve, reject) => {
       const id = ++_seq;
-      _pending.set(id, { resolve, reject });
-      const _cloneT0 = performance.now();
-      w.postMessage({ type, id, payload });
-      PerfMonitor.record('Worker.postClone:' + type, performance.now() - _cloneT0);
+      const job: PendingJob = { resolve, reject, type };
+      _pending.set(id, job);
+      if (type === 'ALERTS') _alertInFlight = id;
+      if (timeoutMs) {
+        job.timer = setTimeout(() => _onTimeout(id), timeoutMs);
+        (job.timer as { unref?: () => void } | undefined)?.unref?.();   // never keep a Node process alive
+      }
+      try {
+        const _cloneT0 = performance.now();
+        w.postMessage({ type, id, payload });
+        PerfMonitor.record('Worker.postClone:' + type, performance.now() - _cloneT0);
+      } catch (e) {
+        // A throwing postMessage (e.g. DataCloneError) must not leave an entry that never settles.
+        _forget(id);
+        reject(e instanceof Error ? e : new Error('postMessage failed'));
+      }
     });
   }
 
-  function _snap(): WorkerSnapshotBase { return _buildSnapshotBase(Store.selectedPlant).snap; }
+  /** The ALERTS payload, built at send time from the current Store. `lines` scopes the setup derivation only. */
+  function _alertsPayload(lines: Set<string> | null, dismissed: Set<string> | undefined): Record<string, unknown> {
+    const plant = Store.selectedPlant;
+    const { snap } = _buildSnapshotBase(plant, { memo: true, lines: lines?.size ? lines : undefined });
+    return {
+      ...snap,
+      ..._alertClockPayload(plant ? [plant] : []),
+      dismissed: [...(dismissed || [])],
+      opts: { lines: lines ? [...lines] : null },
+    };
+  }
+
+  /** Post one ALERTS slot and settle its waiters: the last caller gets the result (stamped with the scope that was
+   *  actually computed, which can be wider than its own request), the superseded ones are rejected with
+   *  ComputeSuperseded after it succeeded, and with the same error when it fails (each then recomputes by itself). */
+  function _sendAlerts(slot: AlertsSlot): void {
+    let request: Promise<any>;
+    try {
+      request = _post('ALERTS', _alertsPayload(slot.lines, slot.dismissed), ALERTS_JOB_TIMEOUT_MS);
+    } catch (e) {
+      request = Promise.reject(e);
+    }
+    request.then(r => {
+      PerfMonitor.record('Worker.alerts', performance.now() - slot.t0);
+      const out = slot.waiters.length > 1 ? { ...r, lines: slot.lines ? [...slot.lines] : null } : r;
+      for (const w of slot.waiters) {
+        if (w.superseded) w.reject(_computeError('ComputeSuperseded', 'alerts request superseded by a newer one'));
+        else w.resolve(out);
+      }
+    }, err => { for (const w of slot.waiters) w.reject(err); });
+  }
+
+  function _pumpAlerts(): void {
+    if (_alertInFlight !== null || !_alertSlot) return;
+    const slot = _alertSlot;
+    _alertSlot = null;
+    _sendAlerts(slot);
+  }
 
   return {
     available(): boolean { return !_dead && typeof Worker !== 'undefined'; },
 
     alerts(opts: { lines?: Set<string> } = {}, dismissed?: Set<string>): Promise<{ alerts: NimbusAlert[]; elapsed: number }> {
-      const _t0 = performance.now();
-      return _post('ALERTS', {
-        ..._snap(),
-        ..._alertClockPayload(Store.selectedPlant ? [Store.selectedPlant] : []),
-        dismissed: [...(dismissed || [])],
-        opts: { lines: opts?.lines instanceof Set ? [...opts.lines] : null },
-      }).then(r => { PerfMonitor.record('Worker.alerts', performance.now() - _t0); return r; });
+      // A line-scoped request (non-empty Set) scopes the derived setup observation to those lines (every task is
+      // still shipped); an empty or absent Set is a full recompute. Coalescing: see _alertSlot. The result carries
+      // `lines` only when it was computed for a wider scope than this request (a folded slot).
+      const lines = opts?.lines instanceof Set ? new Set(opts.lines) : null;
+      return new Promise((resolve, reject) => {
+        const waiter = { resolve, reject, superseded: false };
+        if (_alertSlot) {
+          for (const w of _alertSlot.waiters) w.superseded = true;
+          // An empty Set is a full recompute too: merging anything with a full request stays full.
+          _alertSlot.lines = _alertSlot.lines?.size && lines?.size ? new Set([..._alertSlot.lines, ...lines]) : null;
+          _alertSlot.dismissed = dismissed;
+          _alertSlot.t0 = performance.now();
+          _alertSlot.waiters.push(waiter);
+          return;
+        }
+        const slot: AlertsSlot = { lines, dismissed, t0: performance.now(), waiters: [waiter] };
+        if (_alertInFlight !== null) _alertSlot = slot;
+        else _sendAlerts(slot);
+      });
     },
 
     utilization(startMs: number, days: number): Promise<{ matrix: NimbusUtilizationMatrix }> {
       const _t0 = performance.now();
-      const { snap, lines: plantLines } = _buildSnapshotBase(Store.selectedPlant);
+      const { snap, lines: plantLines } = _buildSnapshotBase(Store.selectedPlant, { memo: true });
       // With a plant, give the core the SAME line set Utilization.computeMatrix uses (task lines plus every plant line),
       // so an idle line with no orders and no calendar entry is present whichever producer filled the shared cache.
       const lines = plantLines ? [...new Set([...snap.tasks.map(t => t.MACHINE || 'Unknown'), ...plantLines])] : undefined;
@@ -624,17 +822,25 @@ export const Alerts = {
       // settings change bumps rev() but cannot change the alert inputs, so it must not discard a good worker result.
       const reqRev = Store.dataRev();
       Compute.alerts(opts)   // never filtered by dismissals: _publish filters, Confidence needs the full list
-        .then(({ alerts, elapsed }) => {
+        .then((res) => {
+          const { alerts, elapsed } = res;
           // Record the measured cost first so the adaptive debounce sees it even when the result is discarded.
           Alerts._lastMs = elapsed;
           if (Store.dataRev() !== reqRev) {
             Alerts.scheduleRecompute();
             return;
           }
-          const onlyLines = opts.lines instanceof Set && opts.lines.size ? opts.lines : null;
+          // A request folded into a newer one (Compute's latest-wins slot) was computed for the merged scope, which
+          // the reply names in `lines` (null = full); publish with THAT scope so retained alerts are not duplicated.
+          const scope = (res as { lines?: string[] | null }).lines;
+          const onlyLines = scope !== undefined
+            ? (scope && scope.length ? new Set(scope) : null)
+            : (opts.lines instanceof Set && opts.lines.size ? opts.lines : null);
           Alerts._publish(alerts.concat(Alerts.queuedAlerts(onlyLines, true)), onlyLines);
         })
         .catch((e) => {
+          // Folded into a newer request that has just published (or will publish) the merged result: nothing to do.
+          if (e?.name === 'ComputeSuperseded') return;
           ErrorLog.warn('worker', 'compute fell back to main thread', { error: String(e?.message || e) });
           Alerts._recomputeSync(opts);
         });

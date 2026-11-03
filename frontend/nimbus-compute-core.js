@@ -102,33 +102,50 @@
 
   // One Intl.DateTimeFormat per zone: constructing it dominates the cost of a conversion and a
   // backward walk converts every free interval it touches.
+  // An INVALID zone is cached too (as `null`): Intl.DateTimeFormat throws a RangeError for it and the
+  // conversions would otherwise retry that costly construction on every call. Bounded: a zone name comes
+  // from master data, but a run of garbage values must not grow the map without limit.
+  const _TZ_CACHE_MAX = 256;
   const _tzFormatters = new Map();
   function _tzFormatter(timezone) {
-    let fmt = _tzFormatters.get(timezone);
-    if (!fmt) {
+    if (_tzFormatters.has(timezone)) return _tzFormatters.get(timezone);
+    let fmt = null;
+    try {
       fmt = new Intl.DateTimeFormat('en-US', {
         timeZone: timezone,
         year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
         second: 'numeric', hourCycle: 'h23',
       });
-      _tzFormatters.set(timezone, fmt);
+    } catch {
+      fmt = null;   // invalid zone: remembered as the sentinel
     }
+    if (_tzFormatters.size >= _TZ_CACHE_MAX) { _tzFormatters.clear(); _tzOffsets.clear(); }
+    _tzFormatters.set(timezone, fmt);
     return fmt;
+  }
+
+  // The zone's y/m/d/h/mi/s components at an instant (a Date or epoch ms), the one reader shared by both
+  // directions of the conversion. Null when the zone is invalid, the instant is unusable or a part is missing.
+  function _wallParts(timezone, instant) {
+    const fmt = _tzFormatter(timezone);
+    if (!fmt) return null;
+    try {
+      const values = {};
+      for (const part of fmt.formatToParts(instant)) {
+        if (part.type !== 'literal') values[part.type] = Number(part.value);
+      }
+      if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
+      return values;
+    } catch {
+      return null;
+    }
   }
 
   // The plant-zone wall-clock components of an instant, as a UTC-epoch number
   // (Date.UTC of y/m/d/h/mi/s). Null when the zone is invalid or a part is missing.
   function _wallAsUtcMs(timezone, instantMs) {
-    try {
-      const values = {};
-      for (const part of _tzFormatter(timezone).formatToParts(new Date(instantMs))) {
-        if (part.type !== 'literal') values[part.type] = Number(part.value);
-      }
-      if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
-      return Date.UTC(values.year, values.month - 1, values.day, values.hour, values.minute, values.second);
-    } catch {
-      return null;
-    }
+    const v = _wallParts(timezone, new Date(instantMs));
+    return v ? Date.UTC(v.year, v.month - 1, v.day, v.hour, v.minute, v.second) : null;
   }
 
   // Project an absolute instant into the naive wall-clock Date convention used by Calendar and
@@ -136,15 +153,40 @@
   // No timezone: the instant is returned as-is. Invalid zone: null.
   function plantWallClockFromInstant(timezone, instant) {
     if (!timezone) return new Date(instant);
+    const v = _wallParts(timezone, instant);
+    if (!v) return null;
     try {
-      const parts = _tzFormatter(timezone).formatToParts(instant);
-      const values = {};
-      for (const part of parts) if (part.type !== 'literal') values[part.type] = Number(part.value);
-      if (![values.year, values.month, values.day, values.hour, values.minute, values.second].every(Number.isFinite)) return null;
-      return new Date(values.year, values.month - 1, values.day, values.hour, values.minute, values.second, instant.getMilliseconds());
+      return new Date(v.year, v.month - 1, v.day, v.hour, v.minute, v.second, instant.getMilliseconds());
     } catch {
       return null;
     }
+  }
+
+  // Zone offset (ms) in force at an instant (the wall reading drops sub-second precision, so the offset does not
+  // depend on the instant's milliseconds). Null for an invalid zone. Cached per (zone, UTC hour bucket) in a bounded
+  // map: a bucket is cached only when the offset at its first and last millisecond agree (no transition inside it);
+  // a bucket that holds a transition is NOT cached and every instant in it is read exactly, so a cached answer always
+  // equals an uncached one (no zone has two transitions inside one hour).
+  const _tzOffsets = new Map();       // zone -> Map(hour bucket -> offset ms)
+  const _TZ_OFFSET_BUCKETS_MAX = 8192;
+  function _exactOffset(timezone, ms) {
+    const w = _wallAsUtcMs(timezone, ms);
+    return w === null ? null : w - Math.floor(ms / 1000) * 1000;
+  }
+  function _zoneOffsetMs(timezone, ms) {
+    if (!_tzFormatter(timezone)) return null;   // cached invalid-zone sentinel: no per-call Intl work
+    if (!Number.isFinite(ms)) return _exactOffset(timezone, ms);
+    const bucket = Math.floor(ms / MS_HOUR);
+    let perZone = _tzOffsets.get(timezone);
+    if (!perZone) { perZone = new Map(); _tzOffsets.set(timezone, perZone); }
+    const hit = perZone.get(bucket);
+    if (hit !== undefined) return hit;
+    const first = _exactOffset(timezone, bucket * MS_HOUR);
+    const last = _exactOffset(timezone, bucket * MS_HOUR + MS_HOUR - 1);
+    if (first === null || last === null || first !== last) return _exactOffset(timezone, ms);
+    if (perZone.size >= _TZ_OFFSET_BUCKETS_MAX) perZone.clear();
+    perZone.set(bucket, first);
+    return first;
   }
 
   // The inverse of plantWallClockFromInstant: read a naive wall-clock Date's local y/m/d/h/mi/s
@@ -157,11 +199,9 @@
     const asUtc = Date.UTC(wall.getFullYear(), wall.getMonth(), wall.getDate(), wall.getHours(),
       wall.getMinutes(), wall.getSeconds(), wall.getMilliseconds());
     if (!Number.isFinite(asUtc)) return null;
-    // Zone offset (ms) in force at an instant; the wall reading drops sub-second precision.
-    const offsetAt = ms => {
-      const w = _wallAsUtcMs(timezone, ms);
-      return w === null ? null : w - Math.floor(ms / 1000) * 1000;
-    };
+    const offsetAt = ms => _zoneOffsetMs(timezone, ms);
+    // The offsets a day either side are cached per hour; the okBefore/okAfter verification below runs only when
+    // they differ (a transition within a day of the wall time), exactly as before.
     const before = offsetAt(asUtc - MS_DAY);
     const after = offsetAt(asUtc + MS_DAY);
     if (before === null || after === null) return null;
@@ -1711,6 +1751,21 @@
     try { return _computeUtilizationBody(args); } finally { _clearComputeMemos(); }
   }
 
+  // ── computeLeverageBatch ───────────────────────────────────────────────────
+  // The what-if replay behind the Alert Monitor's leverage cards: ONE alerts pass per variant on a shared base
+  // payload, each with that variant's hypothetical setup observation. Shared by the worker's LEVERAGE_BATCH
+  // handler and the main-thread fallback (services.mts runLeverageBatchSync), so the two cannot drift. Only the
+  // alerts are returned: production reads nothing else, and a full utilization matrix per variant was the
+  // largest part of the structured-clone reply. ensureCalendar/ensurePlant only ADD missing top-level keys to
+  // calendars/plants (they never edit an existing entry), so every call gets its own shallow copy of the two maps
+  // instead of a deep clone: neither `base` nor the live Store maps it may alias are touched.
+  function computeLeverageBatch(base, variants) {
+    return variants.map(({ key, setup }) => ({
+      key,
+      alerts: computeAlerts({ ...base, calendars: { ...base.calendars }, plants: { ...base.plants }, setup }).alerts,
+    }));
+  }
+
   // ── Schedule Confidence formula (single source for the badge and the Alert Monitor) ──
   // score = round(100 * exp(-raw / (perMachine * machines))): a diminishing curve (never negative, no caps), scaled by
   // the plant's machine count so a big plant is not punished for being big. `raw` is the sum of alert points only
@@ -1792,7 +1847,7 @@
     getPlantForLine, ensureCalendar, ensurePlant, _dayWindow, _nextCalendarDay: nextCalendarDay, prevCalendarDay, plantWallClockFromInstant, plantInstantFromWallClock, workWindow, dueDateInstant, workingMinutesByDay,
     _indexCapacityBlocks, dailyCapacityHours, effectiveFromCapacity,
     // top-level compute
-    computeAlerts, computeUtilization,
+    computeAlerts, computeUtilization, computeLeverageBatch,
     // confidence scoring
     timeWeight, alertPoints, confidenceFromRaw, scoreConfidence,
   };

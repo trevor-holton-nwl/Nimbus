@@ -402,6 +402,12 @@ declare global {
     // top-level compute
     computeAlerts(payload: ComputeAlertsPayload): { alerts: NimbusAlert[]; elapsed: number };
     computeUtilization(payload: ComputeUtilizationPayload): { matrix: NimbusUtilizationMatrix };
+    /** One alerts pass per variant on a shared base, each with that variant's hypothetical setup observation
+     *  (the leverage what-if replay). Returns alerts only; calendars/plants are shallow-copied per call. */
+    computeLeverageBatch(
+      base: ComputeAlertsPayload & { startMs?: number; days?: number; lines?: string[] },
+      variants: ReadonlyArray<{ key: string; setup: NimbusSetupObservation }>
+    ): Array<{ key: string; alerts: NimbusAlert[] }>;
 
     // confidence scoring (shared by the badge and the Alert Monitor)
     /** Days-out multiplier: <=3 days 1.5, <=7 days 1.25, else 1.0. */
