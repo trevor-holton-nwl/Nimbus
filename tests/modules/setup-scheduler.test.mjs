@@ -6775,3 +6775,22 @@ test('tool overflow: the contention detail counts distinct other machines from t
   const wide = SetupScheduler.toolContentionDetail(mk(many), ['T1'], 'L1', ...span);
   assert.equal(wide.holders.length, 10); assert.equal(wide.inUse, 15);
 });
+
+// ---- PR2 (optimization review 2026-11): scheduler core accounting ----
+
+test('P0-7: a firmed-boundary setup straddling midnight on a 24x7 calendar is charged, so the cheaper ending wins', () => {
+  // Search-level accounting: p07-a,p07-b would end YELLOW (120 min into BLUE); p07-b,p07-a ends RED (0 min).
+  // Before the fix the straddling 120 was judged "does not fit" and never charged, so the tie fell to the id order.
+  const allDay = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const fixed = scheduledTask('p07-fixed-blue', 1, 'BLUE', '2026-08-04T02:00:00', '2026-08-04T01:00:00', '2026-08-04T02:00:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'YELLOW', 0), setupRow('RED', 'YELLOW', 0), setupRow('YELLOW', 'RED', 0),
+    setupRow('RED', 'BLUE', 0), setupRow('YELLOW', 'BLUE', 120),
+  ] });
+  const snapshot = {
+    ...setupSnapshot([scheduledTask('p07-a', 1, 'RED', '2026-08-03T18:00:00'), scheduledTask('p07-b', 1, 'YELLOW', '2026-08-03T18:00:00'), fixed], { firmedIds: ['p07-fixed-blue'] }),
+    calendars: { L1: { workHours: allDay } }, plants: { P1: { workHours: allDay } },
+  };
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { respectCalendar: true, horizonEnd: at('2026-08-06T00:00:00') }));
+  assert.ok(+patchFor(result, 'p07-b').changes.start_date < +patchFor(result, 'p07-a').changes.start_date, 'the RED-last ending avoids the 120-minute changeover');
+});

@@ -3395,7 +3395,7 @@ function candidateForSequence(
     const outgoingMinutes = chargedSetupMinutes(bounds.runContext, outgoing, setupChargeableOnLine(bounds, snapshot, line));
     if (!outgoingMinutes) break;
     const setupStart = new Date(+boundary.start - outgoingMinutes * 60000);
-    if (cursor <= setupStart && coversInterval(freeIntervalsFor(snapshot, line, bounds.setup.plant, setupStart, boundary.start, bounds.runContext), { start: setupStart, end: boundary.start })) break;
+    if (setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, boundary.start, bounds.runContext)) break;
     const prior = checkpoints.pop()!;
     patches.pop(); unadmitted.push(prior.task);
     predecessorState = prior.predecessorState; predecessorOrderId = prior.predecessorOrderId; cursor = prior.cursor;
@@ -3440,9 +3440,7 @@ function candidateForSequence(
       const minutes = chargedSetupMinutes(bounds.runContext, null, boundaryChargeable);
       if (!minutes) return;
       const setupStart = new Date(firmed.start.getTime() - minutes * 60 * 1000);
-      const fits = setupStart >= cursor && freeIntervalsFor(
-        snapshot, line, bounds.setup.plant, cursor, firmed.start, bounds.runContext,
-      ).some(interval => interval.start <= setupStart && interval.end >= firmed.start);
+      const fits = setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, firmed.start, bounds.runContext);
       if (!fits) {
         missingEdges.push({
           line,
@@ -3498,9 +3496,7 @@ function candidateForSequence(
         const setupStart = new Date(firmed.start.getTime() - resolved.effectiveMin * 60 * 1000);
         const fitsIncomingSetup = resolved.effectiveMin === 0
           ? cursor <= firmed.start
-          : setupStart >= cursor && freeIntervalsFor(
-            snapshot, line, bounds.setup.plant, cursor, firmed.start, bounds.runContext,
-          ).some(interval => interval.start <= setupStart && interval.end >= firmed.start);
+          : setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, firmed.start, bounds.runContext);
         if (!fitsIncomingSetup) {
           missingEdges.push({
             line,
@@ -8734,6 +8730,16 @@ function compareFinalObjectives(snapshot: Readonly<ScheduleSnapshot>, bounds: Re
     objectiveFactsForCandidate(snapshot, bounds, right),
     (bounds.strategy ?? 'due-date-first') as FragmentMode,
   );
+}
+
+/** True when the setup window [setupStart, boundaryStart) lies after `cursor` and is fully covered by the
+ * line's merged free time. A single-interval test wrongly fails when free time is split at midnight. */
+function setupFitsBefore(
+  snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, cursor: Date, setupStart: Date, boundaryStart: Date,
+  ctx?: SetupRunContext,
+): boolean {
+  return setupStart >= cursor
+    && coversInterval(freeIntervalsFor(snapshot, line, plant, cursor, boundaryStart, ctx), { start: setupStart, end: boundaryStart });
 }
 
 function coversInterval(free: readonly PlacementInterval[], interval: PlacementInterval): boolean {
