@@ -27,6 +27,15 @@ export type AckValidation =
   | { ok: true; reason: string; until: string | null }
   | { ok: false; field: 'reason' | 'until'; key: string };
 
+/** A YYYY-MM-DD that round-trips through a real calendar date (2026-02-31 does not). */
+function _isRealDay(day: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return false;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  const date = new Date(y, mo - 1, d);
+  return date.getFullYear() === y && date.getMonth() === mo - 1 && date.getDate() === d;
+}
+
 /** Pure: the reason is required (trimmed) and at most 200 characters; until is the end of the picked day, or null with No end date. */
 export function validateAck(rawReason: string, untilDay: string | null | undefined, noEnd: boolean): AckValidation {
   const reason = String(rawReason ?? '').trim();
@@ -34,7 +43,7 @@ export function validateAck(rawReason: string, untilDay: string | null | undefin
   if (reason.length > ACK_REASON_MAX) return { ok: false, field: 'reason', key: 'am.ack_err_long' };
   if (noEnd) return { ok: true, reason, until: null };
   const day = String(untilDay ?? '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { ok: false, field: 'until', key: 'am.ack_err_until' };
+  if (!_isRealDay(day)) return { ok: false, field: 'until', key: 'am.ack_err_until' };
   return { ok: true, reason, until: `${day}T23:59:59` };
 }
 
