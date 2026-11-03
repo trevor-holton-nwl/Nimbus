@@ -1982,6 +1982,93 @@ test('setup-aware evaluators reserve the pre-fixed fragment for a valid initial-
   }
 });
 
+// Postgres jsonb returns object keys shorter-first ({value, fieldKey}); the
+// order side builds {fieldKey, value}. State keys must compare equal anyway.
+function jsonbOrderedState(value) {
+  return [{ value, fieldKey: 'colorWheel' }];
+}
+
+test('override state keys in jsonb {value, fieldKey} order still match (free adjacency + boundary lock)', () => {
+  const red = scheduledTask('jsonb-red', 1, 'RED', '2026-08-03T12:00:00');
+  const blue = scheduledTask('jsonb-blue', 1, 'BLUE', '2026-08-03T09:00:00');
+  const adjacencySetup = setupTruth({
+    rows: [
+      setupRow('GREEN', 'RED', 10), setupRow('RED', 'BLUE', 20),
+      setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0),
+    ],
+    overrides: [{
+      id: 'jsonb-override', machine: 'L1', signature_version: 1,
+      predecessor_order_id: 'jsonb-red', successor_order_id: 'jsonb-blue',
+      predecessor_state_key: jsonbOrderedState('RED'), successor_state_key: jsonbOrderedState('BLUE'),
+      standard_min: 20, remaining_min: 4, status: 'active', reason: 'jsonb key order',
+    }],
+  });
+  const adj = SetupScheduler.evaluateDueDateFirst(setupSnapshot([red, blue]), dueDateBounds(adjacencySetup));
+  assert.equal(adj.missingEdges.some(edge => edge.reason === 'override-inactive'), false,
+    'reordered override keys must not read as inactive');
+  assert.deepEqual(scheduledPatches(adj).map(patch => patch.id), ['jsonb-red', 'jsonb-blue']);
+  assert.equal(patchFor(adj, 'jsonb-blue').changes.start_date.getTime(), at('2026-08-03T09:14:00').getTime());
+
+  const freeRed = scheduledTask('jsonb-initial-free-red', 1, 'RED', '2026-08-03T09:00:00');
+  const fixedBlue = scheduledTask(
+    'jsonb-initial-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00',
+    '2026-08-03T10:00:00', '2026-08-03T11:00:00',
+  );
+  const lockSetup = setupTruth({
+    rows: [setupRow('BLUE', 'RED', 0)],
+    overrides: [{
+      id: 'jsonb-initial-override', machine: 'L1', signature_version: 1,
+      predecessor_order_id: null, successor_order_id: 'jsonb-initial-fixed-blue',
+      predecessor_state_key: jsonbOrderedState('GREEN'), successor_state_key: jsonbOrderedState('BLUE'),
+      standard_min: 10, remaining_min: 10, status: 'active', reason: 'jsonb key order',
+    }],
+  });
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    const result = evaluate(
+      setupSnapshot([freeRed, fixedBlue], { firmedIds: ['jsonb-initial-fixed-blue'] }),
+      dueDateBounds(lockSetup),
+    );
+    assert.deepEqual(scheduledPatches(result).map(patch => patch.id), ['jsonb-initial-free-red'], `${label} boundary lock holds`);
+    assert.equal(result.missingEdges.some(edge => edge.reason === 'override-inactive'), false, label);
+    assert.ok(result.explanation.some(reason => (
+      reason.code === 'firmed-incoming-setup' && reason.taskId === 'jsonb-initial-fixed-blue'
+    )), `${label} audit resolves the incoming fixed setup from the override`);
+  }
+});
+
+test('unknown tail orders are placed once when the trailing fragment has no winner', () => {
+  const known = scheduledTask('tail-once-known', 1, 'BLUE', '2026-08-03T18:00');
+  const blanks = ['A', 'B', 'C'].map(letter => scheduledTask(`tail-once-${letter}`, 1, '', '2026-08-03T18:00'));
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    // The clock expires on the first search tick: the trailing fragment has no
+    // winner, so its whole fragment (known + blank) falls to the unknown tail.
+    let ticks = 0;
+    const result = evaluate(
+      setupSnapshot([known, ...blanks]),
+      dueDateBounds(setup, { deadline: 1, clock: () => ticks++ }),
+    );
+    for (const { id } of blanks) {
+      assert.equal(result.patches.filter(patch => patch.id === id).length, 1, `${label}: ${id} gets exactly one patch`);
+    }
+    assert.equal(result.diagnostics.unknownTailPlacedCount, 3, label);
+    const starts = blanks.map(({ id }) => patchFor(result, id).changes.start_date.getTime()).sort((x, y) => x - y);
+    for (let i = 1; i < starts.length; i += 1) {
+      assert.equal(starts[i] - starts[i - 1], 60 * 60 * 1000, `${label}: tail orders are contiguous (no phantom hole)`);
+    }
+    const sws = result.missingEdges
+      .filter(edge => edge.reason === 'scheduled-without-setup')
+      .map(edge => `${edge.predecessorOrderId}>${edge.successorOrderId}`);
+    assert.equal(new Set(sws).size, sws.length, `${label}: no duplicated scheduled-without-setup edges`);
+  }
+});
+
 test('setup-aware evaluators reject invalid null-predecessor overrides on fixed boundaries', () => {
   // This protects the new null-predecessor lock: it belongs only to the first
   // fixed boundary and only when its predecessor state matches persisted line
@@ -6687,4 +6774,115 @@ test('tool overflow: the contention detail counts distinct other machines from t
   const many = Array.from({ length: 14 }, (_, k) => item('H' + String(k).padStart(2, '0'), 'M' + k));
   const wide = SetupScheduler.toolContentionDetail(mk(many), ['T1'], 'L1', ...span);
   assert.equal(wide.holders.length, 10); assert.equal(wide.inUse, 15);
+});
+
+// ---- PR2 (optimization review 2026-11): scheduler core accounting ----
+
+test('P0-7: a firmed-boundary setup straddling midnight on a 24x7 calendar is charged, so the cheaper ending wins', () => {
+  // Search-level accounting: p07-a,p07-b would end YELLOW (120 min into BLUE); p07-b,p07-a ends RED (0 min).
+  // Before the fix the straddling 120 was judged "does not fit" and never charged, so the tie fell to the id order.
+  const allDay = Object.fromEntries(Array.from({ length: 7 }, (_, day) => [day, [0, 24]]));
+  const fixed = scheduledTask('p07-fixed-blue', 1, 'BLUE', '2026-08-04T02:00:00', '2026-08-04T01:00:00', '2026-08-04T02:00:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'RED', 0), setupRow('GREEN', 'YELLOW', 0), setupRow('RED', 'YELLOW', 0), setupRow('YELLOW', 'RED', 0),
+    setupRow('RED', 'BLUE', 0), setupRow('YELLOW', 'BLUE', 120),
+  ] });
+  const snapshot = {
+    ...setupSnapshot([scheduledTask('p07-a', 1, 'RED', '2026-08-03T18:00:00'), scheduledTask('p07-b', 1, 'YELLOW', '2026-08-03T18:00:00'), fixed], { firmedIds: ['p07-fixed-blue'] }),
+    calendars: { L1: { workHours: allDay } }, plants: { P1: { workHours: allDay } },
+  };
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { respectCalendar: true, horizonEnd: at('2026-08-06T00:00:00') }));
+  assert.ok(+patchFor(result, 'p07-b').changes.start_date < +patchFor(result, 'p07-a').changes.start_date, 'the RED-last ending avoids the 120-minute changeover');
+});
+
+test('P0-8: a backtracked suffix leaves no stale admitted-without-setup explanation or edge for the popped order', () => {
+  const x = scheduledTask('p08-x', 1, 'RED', '2026-08-03T18:00:00');
+  const fixed = scheduledTask('p08-fixed-blue', 1, 'BLUE', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00');
+  // GREEN -> RED has no row (uncovered admission); RED -> BLUE needs 90 minutes, which cannot fit after X, so X is popped.
+  const setup = setupTruth({ rows: [setupRow('RED', 'BLUE', 90), setupRow('GREEN', 'BLUE', 0), setupRow('BLUE', 'RED', 0)] });
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([x, fixed], { firmedIds: ['p08-fixed-blue'] }), dueDateBounds(setup, { respectCalendar: true }));
+  assert.equal(result.explanation.some(entry => entry.code === 'admitted-without-setup' && entry.taskId === 'p08-x'), false);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'p08-x'), false);
+});
+
+test('P0-9: a setup-incompatible line emits no missing_setup finding or scheduled-without-setup edge', () => {
+  const incompatible = scheduledTask('p09-blue', 1, 'BLUE', '2026-08-03T10:00:00');
+  const snapshot = setupSnapshot([incompatible]);
+  snapshot.masterData = {
+    plants: [{ plant: 'P1' }],
+    lines: [{ plant: 'P1', machine: 'L1', setup_compatible: false, setup_compatibility_reason: 'Tooling signature differs' }],
+  };
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] })));
+  assert.equal(result.validationFindings.some(f => f.code === 'missing_setup'), false);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'scheduled-without-setup'), false);
+  assert.ok(result.missingEdges.some(edge => edge.line === 'L1' && edge.reason === 'setup-compatibility-disabled'));
+});
+
+test('P0-10: repairCandidate queues a patch-less scheduled incumbent that has a setup error, within a bounded pass count', () => {
+  const snap = TF.toolSnapshot([
+    { id: 'A', line: 'L1', run: 1.5, tools: ['T1'], start: '2035-08-06T09:00:00', end: '2035-08-06T10:30:00', color: 'GREEN' },
+    { id: 'B', line: 'L1', run: 1, tools: ['T2'], due: '2035-08-09T08:00:00', start: '2035-08-06T11:00:00', end: '2035-08-06T12:00:00', color: 'RED' },
+  ], { inventory: [{ tool_id: 'T1', total_qty: 1 }, { tool_id: 'T2', total_qty: 1 }] });
+  snap.setupSnapshot.plant_rows = [{ machine: '', signature_version: 1, from_key: setupState('GREEN'), to_key: setupState('RED'), setup_min: 60 }];
+  snap.tasks.find(t => t.id === 'A').COLOR = 'GREEN';
+  const bounds = TF.toolBounds(snap);
+  const cand = toolCandidate([sched('A', '2035-08-06T09:00:00', '2035-08-06T10:30:00')], [dispOf('A', 'L1'), dispOf('B', 'L1')]);
+  const out = SetupScheduler.resolveToolOverflow(snap, bounds, cand);
+  const b = out.patches.find(p => p.id === 'B');
+  assert.ok(b, 'B is queued by a patch');
+  assert.equal(b.changes.planning_status, 'needs_planning');
+  assert.deepEqual((out.validationFindings ?? []).filter(f => f.severity === 'error'), []);
+});
+
+test('P0-11: a firmed order nested inside an earlier one does not become the predecessor of the first free order', () => {
+  // A (09-13) holds B (10-11) inside it. The free order follows A: BLUE -> YELLOW is free, RED -> YELLOW would cost 60 minutes.
+  const a = scheduledTask('p11-a-blue', 4, 'BLUE', '2026-08-03T13:00:00', '2026-08-03T09:00:00', '2026-08-03T13:00:00');
+  const nested = scheduledTask('p11-b-red', 1, 'RED', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00');
+  const free = scheduledTask('p11-free-yellow', 1, 'YELLOW', '2026-08-03T18:00:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'BLUE', 0), setupRow('GREEN', 'RED', 0), setupRow('BLUE', 'RED', 0), setupRow('BLUE', 'YELLOW', 0), setupRow('RED', 'YELLOW', 60),
+  ] });
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([a, nested, free], { firmedIds: ['p11-a-blue', 'p11-b-red'] }), dueDateBounds(setup));
+  assert.equal(+patchFor(result, 'p11-free-yellow').changes.start_date, +at('2026-08-03T13:00:00'));
+});
+
+test('P0-12: with respectCalendar false the queue-reason helpers do not emit calendar-window reasons', () => {
+  const snapshot = setupSnapshot([scheduledTask('p12', 12, 'RED', '2026-08-03T18:00:00')]);   // windows are 10 h
+  const setup = setupTruth({ current: null, definition: null });
+  const respecting = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { respectCalendar: true, placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-03T18:00:00') }), 'due-date');
+  assert.equal(respecting.dispositions.find(d => d.id === 'p12').reason.code, 'overlong_never', 'control: calendar respected');
+  const ignoring = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { respectCalendar: false, placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-03T10:00:00') }), 'due-date');
+  const code = ignoring.dispositions.find(d => d.id === 'p12').reason?.code;
+  assert.notEqual(code, 'overlong_never');
+  assert.notEqual(code, 'segment_floor_unfittable');
+});
+
+test('P1-9: hasNominalWindow memo (longest merged span per line/day) matches the unmemoised walk across calendars and durations', () => {
+  const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+  const calendars = {
+    standard: all([8, 18]),
+    allDay: all([0, 24]),
+    night: { 0: null, 1: [22, 24], 2: [0, 6], 3: null, 4: null, 5: null, 6: null },
+    closedWeekend: { 0: null, 1: [8, 16], 2: [8, 16], 3: [8, 16], 4: [8, 16], 5: [8, 16], 6: null },
+    nearDst: all([1, 3]),
+  };
+  const bounds = dueDateBounds(setupTruth(), { planningStart: at('2026-03-05T00:00:00'), horizonEnd: at('2026-12-01T00:00:00') });
+  for (const [name, hours] of Object.entries(calendars)) {
+    const snapshot = setupSnapshot([]);
+    snapshot.calendars = { L1: { workHours: hours } };
+    snapshot.plants = { P1: { workHours: hours } };
+    const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+    // Day starts across the spring-forward and fall-back weeks, a weekend, and mid-month.
+    for (const from of ['2026-03-05T00:00:00', '2026-03-08T12:00:00', '2026-03-14T00:00:00', '2026-08-01T09:30:00', '2026-10-31T00:00:00', '2026-11-01T06:00:00']) {
+      for (const minutes of [1, 30, 60, 120, 480, 481, 600, 601, 1440, 2000, 10000, 200000]) {
+        const plain = SetupScheduler.hasNominalWindowForTest(snapshot, 'L1', 'P1', at(from), minutes);
+        const memoised = SetupScheduler.hasNominalWindowForTest(snapshot, 'L1', 'P1', at(from), minutes, ctx);
+        const again = SetupScheduler.hasNominalWindowForTest(snapshot, 'L1', 'P1', at(from), minutes, ctx);
+        assert.equal(memoised, plain, name + ' ' + from + ' ' + minutes);
+        assert.equal(again, plain, name + ' repeat ' + from + ' ' + minutes);
+      }
+    }
+    assert.ok(ctx._nominalSpan.size > 0, name + ': the longest span is memoised on the run context');
+    assert.ok(ctx._nominalSpan.size <= 6, name + ': one memo entry per (line, day), not per call');
+  }
 });

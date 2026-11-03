@@ -625,6 +625,9 @@ export interface SetupRunContext {
   /** O5: lazy per-(line, floor minutes) memo of whether any merged working window can hold one productive
    *  segment of that length (see `unfittableReason`). */
   _floorFits: Map<string, boolean>;
+  /** P1-9: lazy per-(plant, line, dayStartMs) longest merged nominal working span (ms) over the 90-day walk
+   *  `hasNominalWindow` makes; the answer for any run time is `longest >= minutes * 60000`. */
+  _nominalSpan: Map<string, number>;
   /** Lazy per-(plant, line, dayStartMs) work-window memo for reading a date-only SAP due date
    *  (see `dueWindowForDay`); distinct from `_dayWindow` because a missing calendar row means
    *  "no calendar" here, not default hours. */
@@ -708,6 +711,7 @@ export function buildRunContext(
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
     _floorFits: new Map(),
+    _nominalSpan: new Map(),
     _dueWindow: new Map(),
     _dueInstant: new WeakMap(),
     _freeIndex: new Map(),
@@ -1086,6 +1090,8 @@ function noFitReason(
 function neverOverlongReason(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask,
 ): { code: string; message: string } | null {
+  // Placement ignores the calendar (one continuous interval), so window-based reasons do not apply.
+  if (bounds.runContext?.respectCalendar === false) return null;
   const plant = bounds.setup.plant;
   if (splitOrderPolicyForSnapshot(snapshot, plant) !== 'never') return null;
   const minutes = Math.round(Number(task.RUN_TIME) * 60);
@@ -1109,6 +1115,7 @@ function neverOverlongReason(
 function unfittableReason(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask,
 ): { code: string; message: string } | null {
+  if (bounds.runContext?.respectCalendar === false) return null;
   const plant = bounds.setup.plant;
   if (splitOrderPolicyForSnapshot(snapshot, plant) === 'never') return null;
   const minutes = Math.round(Number(task.RUN_TIME) * 60);
@@ -1425,7 +1432,9 @@ function taskId(task: NimbusTask): string {
 }
 
 function stateKey(state: SetupStateKey): string {
-  return JSON.stringify(state);
+  // Canonical {fieldKey, value} order: Postgres jsonb hands override keys back
+  // as {value, fieldKey}, so stringifying the raw entries would never match.
+  return '[' + state.map(entry => JSON.stringify({ fieldKey: entry.fieldKey, value: entry.value })).join(',') + ']';
 }
 
 /** Ordinal (code-point) string comparison. `localeCompare` walks ICU
@@ -3006,7 +3015,32 @@ function hasNominalWindow(
       yield joint ? { s: joint.start.getTime(), e: joint.end.getTime() } : null;
     }
   };
-  return fitsMergedSpan(windows(), requiredMs);
+  if (!ctx) return fitsMergedSpan(windows(), requiredMs);
+  const key = `${plant}${CTX_KEY_SEP}${line}${CTX_KEY_SEP}${day.getTime()}`;
+  let longest = ctx._nominalSpan.get(key);
+  if (longest === undefined) {
+    longest = longestMergedSpanMs(windows());
+    ctx._nominalSpan.set(key, longest);
+  }
+  return longest >= requiredMs;
+}
+
+/** Longest merged contiguous span (ms) of chronological windows (null = closed day); touching windows merge. */
+function longestMergedSpanMs(windows: Iterable<{ s: number; e: number } | null>): number {
+  let longest = 0;
+  let currentStart = 0;
+  let currentEnd = Number.NEGATIVE_INFINITY;
+  for (const win of windows) {
+    if (!win || !(win.e > win.s)) continue;
+    if (win.s <= currentEnd) {
+      if (win.e > currentEnd) currentEnd = win.e;
+    } else {
+      currentStart = win.s;
+      currentEnd = win.e;
+    }
+    if (currentEnd - currentStart > longest) longest = currentEnd - currentStart;
+  }
+  return longest;
 }
 
 /** `'due-date'` mode (2026-09-09): lateness outranks BOTH the priority-list
@@ -3178,6 +3212,18 @@ function candidateForSequence(
     productiveRuntimeMinutes: productiveRuntimeTotal(sequence),
   });
 
+  // Remove the explanation/edge entries an admission of `id` wrote. Entry-by-id (never truncation to a checkpoint
+  // length): later legitimate entries such as `due-work-unadmitted` for other orders must survive.
+  const dropAdmissionRecords = (id: string): void => {
+    for (let index = explanation.length - 1; index >= 0; index -= 1) {
+      const code = explanation[index].code;
+      if (explanation[index].taskId === id && (code === 'admitted-without-setup' || code === 'admitted-state-unrecorded' || code === 'due-date-first-placement')) explanation.splice(index, 1);
+    }
+    for (let index = missingEdges.length - 1; index >= 0; index -= 1) {
+      if (missingEdges[index].successorOrderId === id && missingEdges[index].reason === 'scheduled-without-setup') missingEdges.splice(index, 1);
+    }
+  };
+
   const adjacencyFailure = sequenceAdjacencyFailure(line, sequence, fragment, adjacency);
   if (adjacencyFailure) return constraintFailure(adjacencyFailure);
 
@@ -3332,6 +3378,11 @@ function candidateForSequence(
     if (placement.kind !== 'placed' || !placement.productiveSegments.length) {
       unadmitted.push(task);
       cursor = priorCursor;
+      // Roll back the uncovered-admission accounting written before placement: this order was not admitted.
+      if (uncoveredAdmission) {
+        uncoveredEdgeCount -= 1;
+        dropAdmissionRecords(taskId(task));
+      }
       explanation.push({ code: 'due-work-unadmitted', message: `No legal placement found for ${taskId(task)}.`, line, taskId: taskId(task) });
       continue;
     }
@@ -3393,9 +3444,10 @@ function candidateForSequence(
     const outgoingMinutes = chargedSetupMinutes(bounds.runContext, outgoing, setupChargeableOnLine(bounds, snapshot, line));
     if (!outgoingMinutes) break;
     const setupStart = new Date(+boundary.start - outgoingMinutes * 60000);
-    if (cursor <= setupStart && coversInterval(freeIntervalsFor(snapshot, line, bounds.setup.plant, setupStart, boundary.start, bounds.runContext), { start: setupStart, end: boundary.start })) break;
+    if (setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, boundary.start, bounds.runContext)) break;
     const prior = checkpoints.pop()!;
     patches.pop(); unadmitted.push(prior.task);
+    dropAdmissionRecords(taskId(prior.task));
     predecessorState = prior.predecessorState; predecessorOrderId = prior.predecessorOrderId; cursor = prior.cursor;
     setupMinutes = prior.setupMinutes; lateCount = prior.lateCount; latenessMinutes = prior.latenessMinutes;
     maxLatenessMinutes = prior.maxLatenessMinutes;
@@ -3438,9 +3490,7 @@ function candidateForSequence(
       const minutes = chargedSetupMinutes(bounds.runContext, null, boundaryChargeable);
       if (!minutes) return;
       const setupStart = new Date(firmed.start.getTime() - minutes * 60 * 1000);
-      const fits = setupStart >= cursor && freeIntervalsFor(
-        snapshot, line, bounds.setup.plant, cursor, firmed.start, bounds.runContext,
-      ).some(interval => interval.start <= setupStart && interval.end >= firmed.start);
+      const fits = setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, firmed.start, bounds.runContext);
       if (!fits) {
         missingEdges.push({
           line,
@@ -3496,9 +3546,7 @@ function candidateForSequence(
         const setupStart = new Date(firmed.start.getTime() - resolved.effectiveMin * 60 * 1000);
         const fitsIncomingSetup = resolved.effectiveMin === 0
           ? cursor <= firmed.start
-          : setupStart >= cursor && freeIntervalsFor(
-            snapshot, line, bounds.setup.plant, cursor, firmed.start, bounds.runContext,
-          ).some(interval => interval.start <= setupStart && interval.end >= firmed.start);
+          : setupFitsBefore(snapshot, line, bounds.setup.plant, cursor, setupStart, firmed.start, bounds.runContext);
         if (!fitsIncomingSetup) {
           missingEdges.push({
             line,
@@ -5380,6 +5428,15 @@ function evaluateLineWithFirmedBoundaries(
   // overwrite the effective predecessor state established by a later-ending
   // one — the same union model `placeWholeLineAsTail` already uses.
   let lastAdoptedBoundaryEnd = Number.NEGATIVE_INFINITY;
+  // Normal (non-elapsed) adoption of a firmed boundary as the next fragment's predecessor. It advances the same
+  // watermark the elapsed branch reads, so a firmed order nested inside this one can never become the predecessor.
+  const adoptBoundary = (boundary: (typeof firmed)[number], requiredFirst: string | undefined): void => {
+    fragmentStart = new Date(boundary.end);
+    predecessorState = boundary.state;
+    predecessorOrderId = taskId(boundary.task);
+    requiredFirstOrderId = requiredFirst;
+    lastAdoptedBoundaryEnd = Math.max(lastAdoptedBoundaryEnd, boundary.end.getTime());
+  };
 
   for (let boundaryIndex = 0; boundaryIndex < firmed.length; boundaryIndex += 1) {
     const boundary = firmed[boundaryIndex];
@@ -5676,10 +5733,7 @@ function evaluateLineWithFirmedBoundaries(
             predecessorOrderId,
           );
           remaining = [...tailUnadmitted, ...later];
-          fragmentStart = new Date(boundary.end);
-          predecessorState = boundary.state;
-          predecessorOrderId = taskId(boundary.task);
-          requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+          adoptBoundary(boundary, boundaryLock?.requiredFirstOrderId);
           continue;
         }
         let selectedFallback: EvaluatedBoundaryFallback | null = null;
@@ -5801,10 +5855,7 @@ function evaluateLineWithFirmedBoundaries(
             predecessorOrderId,
           );
           remaining = [...tailUnadmitted, ...later];
-          fragmentStart = new Date(boundary.end);
-          predecessorState = boundary.state;
-          predecessorOrderId = taskId(boundary.task);
-          requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+          adoptBoundary(boundary, boundaryLock?.requiredFirstOrderId);
           continue;
         }
         if (feasibleFallbacks.length === 1) {
@@ -5869,10 +5920,7 @@ function evaluateLineWithFirmedBoundaries(
         predecessorOrderId,
       );
       remaining = [...tailUnadmitted, ...later];
-      fragmentStart = new Date(boundary.end);
-      predecessorState = boundary.state;
-      predecessorOrderId = taskId(boundary.task);
-      requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+      adoptBoundary(boundary, boundaryLock?.requiredFirstOrderId);
       continue;
     }
     const tailEnd = tailCapacityEnd(
@@ -5884,10 +5932,7 @@ function evaluateLineWithFirmedBoundaries(
       missingEdges, winner.finalPredecessorOrderId ?? predecessorOrderId,
     );
     remaining = [...winner.unadmitted, ...deferredAcrossFirmed, ...tailUnadmitted, ...later];
-    fragmentStart = new Date(boundary.end);
-    predecessorState = boundary.state;
-    predecessorOrderId = taskId(boundary.task);
-    requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+    adoptBoundary(boundary, boundaryLock?.requiredFirstOrderId);
   }
 
   const trailing = searchFragment(snapshot, bounds, line, remaining, {
@@ -5932,7 +5977,9 @@ function evaluateLineWithFirmedBoundaries(
     // Budget exhaustion or unresolved coverage before any covered sequence
     // completed (Part 2b): never freeze — place the entire remaining
     // fragment as an unknown tail instead.
-    tailTasks = [...tailTasks, ...remaining];
+    // `remaining` already contains trailing.unknownTail (pulled out inside
+    // searchFragment); appending both placed those orders twice.
+    tailTasks = remaining;
   }
   const tailUnadmitted = applyUnknownTail(
     snapshot, bounds, line, mode, tailTasks, tailStart, bounds.horizonEnd, patches, explanation, missingEdges, tailPredecessorOrderId,
@@ -6039,9 +6086,10 @@ export function evaluateSptWithSetup(
   bounds = { ...bounds, searchBudget: budget };
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
-  const mutableTaskCount = eligibleTasks(snapshot, bounds).length;
+  const taskScope = buildTaskScope(snapshot, bounds);
+  const mutableTaskCount = taskScope.mutable.length;
   const byLine = new Map<string, NimbusTask[]>();
-  for (const task of evaluationTasks(snapshot, bounds)) {
+  for (const task of taskScope.evaluation) {
     const line = String(task.MACHINE ?? '');
     const group = byLine.get(line) ?? [];
     group.push(task);
@@ -6227,9 +6275,10 @@ export function evaluateDueDateFirst(
   bounds = { ...bounds, searchBudget: budget };
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
-  const mutableTaskCount = eligibleTasks(snapshot, bounds).length;
+  const taskScope = buildTaskScope(snapshot, bounds);
+  const mutableTaskCount = taskScope.mutable.length;
   const byLine = new Map<string, NimbusTask[]>();
-  for (const task of evaluationTasks(snapshot, bounds)) {
+  for (const task of taskScope.evaluation) {
     const line = String(task.MACHINE ?? '');
     const group = byLine.get(line) ?? [];
     group.push(task);
@@ -6869,7 +6918,6 @@ function buildTaskScope(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<D
       boundaries.push(task);
       continue;
     }
-    if (scopedTaskIds && !explicitlyScoped) continue;
     if (scopedTaskIds?.has(id) || intersects) {
       mutable.push(task);
       continue;
@@ -7799,7 +7847,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       if (bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch' && resolution && !resolution.covered && !protectedTask) {
         add('setup_transition_unrecorded', `No setup transition is recorded from ${setupStateLabel(state)} to ${setupStateLabel(successor)} on ${line}; this plant excludes such orders from automatic placement.`, task, protectedTask, false);
       }
-      if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: "A missing setup transition uses the plant's configured default (zero unless plantDefaultMinutes is set).", severity: 'warning', taskId: taskId(task), line });
+      if (chargeable && !resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: "A missing setup transition uses the plant's configured default (zero unless plantDefaultMinutes is set).", severity: 'warning', taskId: taskId(task), line });
       const minutes = chargedSetupMinutes(bounds.runContext, resolution, chargeable);
       if (minutes > 0) {
         const end = timestamp(task.start_date)!; const start = new Date(+end - minutes * 60000);
@@ -7855,8 +7903,21 @@ function repairCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<
       const ceiling = task ? notAfterFor(bounds, task) : null;
       return task && end !== null && ceiling && +end > +ceiling ? pushLimitAware(bounds, task, generic) : generic;
     };
-    const repairPatches = result.patches.map(patch => reasonBy.has(patch.id) ? { id: patch.id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning' as const, planning_reason: queueReason(patch.id) } } : patch);
+    const queueChanges = (id: string): SchedulePatch => ({ id, changes: { start_date: null, end_date: null, scheduleSegments: [], planning_status: 'needs_planning' as const, planning_reason: queueReason(id) } });
+    const repairPatches = result.patches.map(patch => reasonBy.has(patch.id) ? queueChanges(patch.id) : patch);
+    // An unchanged scheduled incumbent has no patch to rewrite: queue it with a new one (protected orders never queue).
+    const patchedIds = new Set(result.patches.map(patch => patch.id));
+    let queuedNew = false;
+    for (const d of result.dispositions ?? []) {
+      if (reasonBy.has(d.id) && d.status === 'scheduled' && !patchedIds.has(d.id)) { repairPatches.push(queueChanges(d.id)); queuedNew = true; }
+    }
     const repaired = (result.dispositions ?? []).map(d => reasonBy.has(d.id) && d.status !== 'protected' ? { ...d, status: 'needs_planning' as const, reason: queueReason(d.id) } : d);
+    // Nothing to queue or relabel this pass: re-validating would only repeat the same findings.
+    const sameReason = (a: { code: string; message: string } | null | undefined, b: { code: string; message: string }): boolean => !!a && a.code === b.code && a.message === b.message;
+    const changedAny = queuedNew
+      || result.patches.some(patch => reasonBy.has(patch.id) && (patch.changes.planning_status !== 'needs_planning' || !sameReason(patch.changes.planning_reason, queueReason(patch.id))))
+      || (result.dispositions ?? []).some(d => reasonBy.has(d.id) && d.status !== 'protected' && (d.status !== 'needs_planning' || !sameReason(d.reason, queueReason(d.id))));
+    if (!changedAny) break;
     result = { ...result, patches: repairPatches, dispositions: repaired };
     result = { ...result, validationFindings: validateCandidate(snapshot, bounds, result) };
   }
@@ -8730,6 +8791,16 @@ function compareFinalObjectives(snapshot: Readonly<ScheduleSnapshot>, bounds: Re
     objectiveFactsForCandidate(snapshot, bounds, right),
     (bounds.strategy ?? 'due-date-first') as FragmentMode,
   );
+}
+
+/** True when the setup window [setupStart, boundaryStart) lies after `cursor` and is fully covered by the
+ * line's merged free time. A single-interval test wrongly fails when free time is split at midnight. */
+function setupFitsBefore(
+  snapshot: Readonly<ScheduleSnapshot>, line: string, plant: string, cursor: Date, setupStart: Date, boundaryStart: Date,
+  ctx?: SetupRunContext,
+): boolean {
+  return setupStart >= cursor
+    && coversInterval(freeIntervalsFor(snapshot, line, plant, cursor, boundaryStart, ctx), { start: setupStart, end: boundaryStart });
 }
 
 function coversInterval(free: readonly PlacementInterval[], interval: PlacementInterval): boolean {
