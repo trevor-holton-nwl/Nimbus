@@ -188,6 +188,8 @@ export const Session = (() => {
   function clearLocalPlannerData(opts: { keepQueuedWork?: boolean } = {}): void {
     const quarantinePrefix = `${Config.LS_KEY}.quarantine.`;
     try {
+      // 'nimbus.recentCmds' is no longer written (the command palette's recent list was write-only and is gone); it
+      // stays on this list so a value left behind by an earlier build is still wiped on a shared PC.
       const toRemove: string[] = [Config.LS_KEY, 'nimbus.recentCmds', 'nimbus.patterns.v1'];
       // Queued unsent calendar deletes are work, not history: admin Reset keeps them.
       if (!opts.keepQueuedWork) toRemove.push('nimbus.calendar.pendingDeletes');

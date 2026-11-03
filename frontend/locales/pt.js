@@ -2349,6 +2349,7 @@ window.__NIMBUS_LOCALES.pt = {
   "toast.calendar_changes_pending": "Calendário atualizado localmente; sincronizando alterações…",
   "toast.calendar_whatif_local": "Calendário atualizado na simulação; aplique o cenário para salvar as alterações.",
   "toast.snapshot_restore_skipped": "{{count}} ordens protegidas ou distribuídas não foram restauradas. Use os controles de planejamento correspondentes para alterá-las.",
+  "toast.snapshot_restore_machine_skipped": "{{count}} ordens não foram restauradas porque a máquina do snapshot não existe mais ou não as aceita mais: {{orders}}",
   "ui.print_scope": "Escopo",
   "ui.print_scope_all": "Todas as ordens carregadas",
   "ui.print_scope_plant": "Fábrica selecionada",

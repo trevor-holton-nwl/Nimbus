@@ -2350,6 +2350,7 @@ window.__NIMBUS_LOCALES.fr = {
   "toast.calendar_changes_pending": "Calendrier mis à jour localement ; synchronisation en cours…",
   "toast.calendar_whatif_local": "Calendrier mis à jour dans la simulation ; appliquez le scénario pour enregistrer les modifications.",
   "toast.snapshot_restore_skipped": "{{count}} commandes protégées ou réparties n’ont pas été restaurées. Utilisez leurs fonctions de planification pour les modifier.",
+  "toast.snapshot_restore_machine_skipped": "{{count}} commandes n’ont pas été restaurées car la machine de l’instantané n’existe plus ou ne les accepte plus : {{orders}}",
   "ui.print_scope": "Périmètre",
   "ui.print_scope_all": "Toutes les commandes chargées",
   "ui.print_scope_plant": "Usine sélectionnée",

@@ -2591,6 +2591,7 @@ window.__NIMBUS_LOCALES.en = {
   "toast.calendar_changes_pending": "Calendar updated locally; syncing changes…",
   "toast.calendar_whatif_local": "Calendar updated in What-If; promote to save changes.",
   "toast.snapshot_restore_skipped": "{{count}} protected or distributed orders were not restored. Use their planning controls to change them.",
+  "toast.snapshot_restore_machine_skipped": "{{count}} orders were not restored because their snapshot machine no longer exists or no longer takes them: {{orders}}",
   "ui.print_scope": "Scope",
   "ui.print_scope_all": "All loaded orders",
   "ui.print_scope_plant": "Selected plant",

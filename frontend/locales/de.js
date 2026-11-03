@@ -2389,6 +2389,7 @@ window.__NIMBUS_LOCALES.de = {
   "toast.calendar_changes_pending": "Kalender lokal aktualisiert; Änderungen werden synchronisiert…",
   "toast.calendar_whatif_local": "Kalender in Was-wäre-wenn aktualisiert; übernehmen, um Änderungen zu speichern.",
   "toast.snapshot_restore_skipped": "{{count}} geschützte oder verteilte Aufträge wurden nicht wiederhergestellt. Verwenden Sie die zugehörigen Planungsfunktionen, um sie zu ändern.",
+  "toast.snapshot_restore_machine_skipped": "{{count}} Aufträge wurden nicht wiederhergestellt, weil ihre Maschine aus dem Snapshot nicht mehr existiert oder sie nicht mehr aufnimmt: {{orders}}",
   "ui.print_scope": "Umfang",
   "ui.print_scope_all": "Alle geladenen Aufträge",
   "ui.print_scope_plant": "Ausgewähltes Werk",
