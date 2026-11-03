@@ -6086,9 +6086,10 @@ export function evaluateSptWithSetup(
   bounds = { ...bounds, searchBudget: budget };
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
-  const mutableTaskCount = eligibleTasks(snapshot, bounds).length;
+  const taskScope = buildTaskScope(snapshot, bounds);
+  const mutableTaskCount = taskScope.mutable.length;
   const byLine = new Map<string, NimbusTask[]>();
-  for (const task of evaluationTasks(snapshot, bounds)) {
+  for (const task of taskScope.evaluation) {
     const line = String(task.MACHINE ?? '');
     const group = byLine.get(line) ?? [];
     group.push(task);
@@ -6274,9 +6275,10 @@ export function evaluateDueDateFirst(
   bounds = { ...bounds, searchBudget: budget };
   const plant = bounds.setup.plant;
   const definition = bounds.setup.definition;
-  const mutableTaskCount = eligibleTasks(snapshot, bounds).length;
+  const taskScope = buildTaskScope(snapshot, bounds);
+  const mutableTaskCount = taskScope.mutable.length;
   const byLine = new Map<string, NimbusTask[]>();
-  for (const task of evaluationTasks(snapshot, bounds)) {
+  for (const task of taskScope.evaluation) {
     const line = String(task.MACHINE ?? '');
     const group = byLine.get(line) ?? [];
     group.push(task);
@@ -6916,7 +6918,6 @@ function buildTaskScope(snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<D
       boundaries.push(task);
       continue;
     }
-    if (scopedTaskIds && !explicitlyScoped) continue;
     if (scopedTaskIds?.has(id) || intersects) {
       mutable.push(task);
       continue;
