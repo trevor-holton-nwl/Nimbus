@@ -321,40 +321,52 @@ test('#32 Confidence uses the selected plant\'s conf_score_horizon (master data)
 // timers), and settle() drains that queue by yielding one macrotask turn.
 const settle = () => new Promise(resolve => setImmediate(resolve));
 function fakeIntelDb() {
-  const rows = [];
+  // Two stores like the real database: `snapshots` (autoIncrement id, full records) and `snapshot_meta` (keyed by id)
+  // with its `ts` and compound `plant_ts` indexes. Callbacks fire on the microtask queue.
+  const rows = [];   // snapshots
+  const meta = [];   // snapshot_meta
   let nextId = 1;
-  const tx = (mode) => {
+  const inRange = (r, range) => !range || (r.plant === range.lower[0] && r.ts >= range.lower[1] && r.ts <= range.upper[1]);
+  const tx = () => {
     const t = { oncomplete: null, onerror: null };
-    const os = {
-      put(v) {
-        const req = { result: undefined };
-        const id = v.id ?? nextId++;
-        req.result = id; rows.push({ ...v, id });
-        queueMicrotask(() => t.oncomplete && t.oncomplete({}));
-        return req;
-      },
-      count() { const req = { result: rows.length }; queueMicrotask(() => req.onsuccess && req.onsuccess({})); return req; },
-      delete(key) { const i = rows.findIndex(r => r.id === key); if (i >= 0) rows.splice(i, 1); },
-      index() {
-        return {
-          openKeyCursor() {
-            const sorted = [...rows].sort((a, b) => a.ts - b.ts);
-            let i = 0;
-            const req = {};
-            const emit = () => queueMicrotask(() => req.onsuccess && req.onsuccess({
-              target: { result: i < sorted.length ? { primaryKey: sorted[i].id, continue() { i += 1; emit(); } } : null },
-            }));
-            emit();
-            return req;
-          },
-        };
-      },
+    t.objectStore = name => {
+      const list = name === 'snapshots' ? rows : meta;
+      return {
+        put(v) {
+          const req = { result: undefined };
+          const id = v.id ?? nextId++;
+          req.result = id;
+          const i = list.findIndex(r => r.id === id);
+          if (i >= 0) list[i] = { ...v, id }; else list.push({ ...v, id });
+          queueMicrotask(() => { req.onsuccess && req.onsuccess({}); queueMicrotask(() => t.oncomplete && t.oncomplete({})); });
+          return req;
+        },
+        get(key) { const req = { result: list.find(r => r.id === key) }; queueMicrotask(() => req.onsuccess && req.onsuccess({ target: req })); return req; },
+        count() { const req = { result: list.length }; queueMicrotask(() => req.onsuccess && req.onsuccess({})); return req; },
+        delete(key) { const i = list.findIndex(r => r.id === key); if (i >= 0) list.splice(i, 1); },
+        index() {
+          return {
+            count(range) { const req = { result: list.filter(r => inRange(r, range)).length }; queueMicrotask(() => req.onsuccess && req.onsuccess({})); return req; },
+            openKeyCursor(range) {
+              const sorted = list.filter(r => inRange(r, range)).sort((a, b) => a.ts - b.ts);
+              let i = 0;
+              const req = {};
+              const emit = () => queueMicrotask(() => req.onsuccess && req.onsuccess({
+                target: { result: i < sorted.length ? { primaryKey: sorted[i].id, continue() { i += 1; emit(); } } : null },
+              }));
+              emit();
+              return req;
+            },
+          };
+        },
+      };
     };
-    t.objectStore = () => os;
     return t;
   };
-  return { rows, transaction: (store, mode) => tx(mode) };
+  return { rows, meta, transaction: () => tx() };
 }
+// The VM realm has no IDBKeyRange: the fake reads `lower`/`upper` back from this stand-in.
+context.IDBKeyRange = { bound: (lower, upper) => ({ lower, upper }) };
 
 test('IntelDB.put resolves with the record key, not the transaction event (#26)', async () => {
   const db = nimbus.TimeMachine._IntelDB;
@@ -372,13 +384,14 @@ test('pruneSnapshots deletes only the oldest rows by key cursor, leaving keepN (
   const db = nimbus.TimeMachine._IntelDB;
   const prior = db._db, priorRic = context.window.requestIdleCallback;
   const fake = fakeIntelDb();
-  for (let i = 1; i <= 8; i += 1) fake.rows.push({ id: i, ts: i * 10 });
+  for (let i = 1; i <= 8; i += 1) { fake.rows.push({ id: i, ts: i * 10, plant: 'A' }); fake.meta.push({ id: i, ts: i * 10, plant: 'A' }); }
   db._db = fake;
   context.window.requestIdleCallback = fn => fn();
   try {
     db.pruneSnapshots(5);
     await settle();
     assert.deepEqual(fake.rows.map(r => r.id).sort((a, b) => a - b), [4, 5, 6, 7, 8], 'the 3 oldest are gone');
+    assert.deepEqual(fake.meta.map(r => r.id).sort((a, b) => a - b), [4, 5, 6, 7, 8], 'their metadata rows go with them');
   } finally { db._db = prior; context.window.requestIdleCallback = priorRic; }
 });
 
@@ -569,21 +582,21 @@ test('palette freeze with nothing left to firm pushes no undo entry and does not
 async function withTimeMachineHarness(body) {
   const { TimeMachine } = nimbus;
   const db = TimeMachine._IntelDB;
-  const prior = { put: db.put, getNewest: db.getNewest, pruneSnapshots: db.pruneSnapshots, snaps: TimeMachine._snapshots, subscribe: Store.subscribe };
+  const prior = { putSnapshot: db.putSnapshot, getNewest: db.getNewest, pruneSnapshots: db.pruneSnapshots, snaps: TimeMachine._snapshots, subscribe: Store.subscribe };
   const log = { getNewest: [], prune: [], put: [] };
-  db.put = snap => { log.put.push(snap); return Promise.resolve(log.put.length); };
+  db.putSnapshot = snap => { log.put.push(snap); return Promise.resolve(log.put.length); };
   db.pruneSnapshots = (...args) => { log.prune.push(args); };
   Store.subscribe = () => () => {};   // init() must not leave live auto-snapshot subscriptions behind
   try {
     await body({ TimeMachine, db, log });
   } finally {
-    Object.assign(db, { put: prior.put, getNewest: prior.getNewest, pruneSnapshots: prior.pruneSnapshots });
+    Object.assign(db, { putSnapshot: prior.putSnapshot, getNewest: prior.getNewest, pruneSnapshots: prior.pruneSnapshots });
     Store.subscribe = prior.subscribe;
     TimeMachine._snapshots = prior.snaps;
   }
 }
 
-test('TimeMachine.init loads at most 200 newest snapshots, oldest-first', async () => {
+test('TimeMachine.init loads snapshot METADATA (never a body), oldest-first', async () => {
   await withTimeMachineHarness(async ({ TimeMachine, db, log }) => {
     db.getNewest = (store, index, n) => {
       log.getNewest.push([store, index, n]);
@@ -591,7 +604,7 @@ test('TimeMachine.init loads at most 200 newest snapshots, oldest-first', async 
     };
     TimeMachine.init();
     await Promise.resolve(); await Promise.resolve();
-    assert.deepEqual(log.getNewest, [['snapshots', 'ts', 200]], 'loads from the snapshots store by ts with a 200 cap');
+    assert.deepEqual(log.getNewest, [['snapshot_meta', 'ts', 10000]], 'loads the small metadata store by ts, not the full-record store');
     assert.deepEqual(TimeMachine._snapshots.map(s => s.ts), [10, 20, 30], 'sorted oldest-first');
   });
 });
@@ -602,9 +615,9 @@ test('TimeMachine.snapshot prunes IndexedDB to 200 and trims the in-memory histo
     const snap = TimeMachine.snapshot('newest');
     await new Promise(resolve => setTimeout(resolve, 0));
     assert.equal(log.put.length, 1);
-    assert.deepEqual(log.prune, [[200]], 'IntelDB.pruneSnapshots is called with the 200 cap');
+    assert.deepEqual(log.prune, [[200, null]], 'IntelDB.pruneSnapshots is called with the 200 cap for the snapshot plant');
     assert.equal(TimeMachine._snapshots.length, 200, 'history stays capped at 200');
-    assert.equal(TimeMachine._snapshots[199], snap, 'newest is kept');
+    assert.equal(TimeMachine._snapshots[199].ts, snap.ts, 'newest is kept');
     assert.equal(TimeMachine._snapshots[0].label, 'old1', 'the single oldest entry is the one dropped');
 
     // Below the cap nothing is dropped.
