@@ -6845,3 +6845,14 @@ test('P0-11: a firmed order nested inside an earlier one does not become the pre
   const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([a, nested, free], { firmedIds: ['p11-a-blue', 'p11-b-red'] }), dueDateBounds(setup));
   assert.equal(+patchFor(result, 'p11-free-yellow').changes.start_date, +at('2026-08-03T13:00:00'));
 });
+
+test('P0-12: with respectCalendar false the queue-reason helpers do not emit calendar-window reasons', () => {
+  const snapshot = setupSnapshot([scheduledTask('p12', 12, 'RED', '2026-08-03T18:00:00')]);   // windows are 10 h
+  const setup = setupTruth({ current: null, definition: null });
+  const respecting = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { respectCalendar: true, placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-03T18:00:00') }), 'due-date');
+  assert.equal(respecting.dispositions.find(d => d.id === 'p12').reason.code, 'overlong_never', 'control: calendar respected');
+  const ignoring = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setup, { respectCalendar: false, placementStart: at('2026-08-03T08:00:00'), horizonEnd: at('2026-08-03T10:00:00') }), 'due-date');
+  const code = ignoring.dispositions.find(d => d.id === 'p12').reason?.code;
+  assert.notEqual(code, 'overlong_never');
+  assert.notEqual(code, 'segment_floor_unfittable');
+});

@@ -1086,6 +1086,8 @@ function noFitReason(
 function neverOverlongReason(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask,
 ): { code: string; message: string } | null {
+  // Placement ignores the calendar (one continuous interval), so window-based reasons do not apply.
+  if (bounds.runContext?.respectCalendar === false) return null;
   const plant = bounds.setup.plant;
   if (splitOrderPolicyForSnapshot(snapshot, plant) !== 'never') return null;
   const minutes = Math.round(Number(task.RUN_TIME) * 60);
@@ -1109,6 +1111,7 @@ function neverOverlongReason(
 function unfittableReason(
   snapshot: Readonly<ScheduleSnapshot>, bounds: Readonly<DueDateFirstBounds>, task: NimbusTask,
 ): { code: string; message: string } | null {
+  if (bounds.runContext?.respectCalendar === false) return null;
   const plant = bounds.setup.plant;
   if (splitOrderPolicyForSnapshot(snapshot, plant) === 'never') return null;
   const minutes = Math.round(Number(task.RUN_TIME) * 60);
