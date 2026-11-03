@@ -61,6 +61,7 @@ test('Fix overload evaluates a detached candidate (never the live runAndApply), 
     const { mode, opts, snapshot } = h.calls.evaluate[0];
     assert.equal(mode, 'changeover');
     assert.deepEqual(opts.lines, ['FX-L1']);
+    assert.equal(opts.plant, 'FX', 'the snapshot is plant-scoped, so the run is told its plant');
     assert.ok(opts.startDate instanceof Date && opts.endDate - opts.startDate === 24 * 3600 * 1000, 'the same one-day window as before');
     assert.ok(snapshot && Array.isArray(snapshot.tasks), 'a detached snapshot is passed');
     assert.equal(h.calls.applied[0].length, 2);

@@ -244,9 +244,9 @@ export function snapshotSchedule(plant?: string): ScheduleSnapshot {
     // Capture calendars from the actual scoped task lines using the same
     // task-level resolver as the detached scheduler. A reused machine code
     // may have a direct task plant that differs from line metadata.
+    // `tasks` is already the plant-filtered clone set, so no second plant filter is needed.
     const scopedLines = plant
       ? new Set(tasks
-        .filter(task => resolveTaskPlant(task, { lineSettings, masterData }) === plant)
         .map(task => String(task.MACHINE ?? ''))
         .filter(Boolean))
       : null;
@@ -615,7 +615,11 @@ function deriveSetupObservationUntimed(
   const stateForLine = new Map(setup.machine_states
     .filter(state => state.signature_version === definition.signature_version)
     .map(state => [state.machine, state]));
-  const taskById = new Map(tasks.map(task => [String(task.id), task]));
+  // P1-13: only the diagnostic messages read this, so it is built on first use.
+  let taskByIdMemo: Map<string, NimbusTask> | null = null;
+  const taskById = {
+    get: (id: string): NimbusTask | undefined => (taskByIdMemo ??= new Map(tasks.map(task => [String(task.id), task]))).get(id),
+  };
   const byLine = new Map<string, Array<{ task: NimbusTask; start: Date; end: Date }>>();
   for (const task of tasks) {
     // A truthy-only PLANT check lets NULL/empty-PLANT orders leak into any
@@ -639,6 +643,13 @@ function deriveSetupObservationUntimed(
   // Built on the first covered-pair resolution (many passes never reach one); shared across lines.
   let resolutionIndex: SetupResolutionIndex | null = null;
   const lines = new Set(byLine.keys());
+  // P1-13: active overrides grouped once (setup.overrides order kept within a machine).
+  const activeOverridesByMachine = new Map<string, Array<(typeof setup.overrides)[number]>>();
+  for (const override of setup.overrides) {
+    if (override.status !== 'active') continue;
+    const bucket = activeOverridesByMachine.get(override.machine);
+    if (bucket) bucket.push(override); else activeOverridesByMachine.set(override.machine, [override]);
+  }
   for (const override of setup.overrides) {
     // Only add an override's line when it's either explicitly in scope, or it
     // already has loaded orders. Otherwise, on the (always) unscoped Timeline
@@ -743,7 +754,7 @@ function deriveSetupObservationUntimed(
       predecessorEnd = order.end;
     }
 
-    for (const override of setup.overrides.filter(override => override.status === 'active' && override.machine === line)) {
+    for (const override of activeOverridesByMachine.get(line) ?? []) {
       const key = `${override.predecessor_order_id ?? 'initial'}|${override.successor_order_id}`;
       if (!resolvedEdges.has(key)) observation.diagnostics.push({
         type: 'override-inactive', line, scope, predecessorOrderId: override.predecessor_order_id,
@@ -1278,8 +1289,9 @@ export const Engine = {
    *  the UI can explain why it didn't move. This check alone blocks nothing;
    *  callers decide what "pinned" means. Manual drags never consult it (OD-C2c). */
   isFrozenHorizon(task: NimbusTask, now?: Date, frozenHorizonEnd?: Date | null): boolean {
+    if (!task.end_date || !Engine.hasPersistedPlacement(task)) return false;
     const end = frozenHorizonEnd === undefined ? Engine.frozenHorizonEnd() : frozenHorizonEnd;
-    if (!end || !task.end_date || !Engine.hasPersistedPlacement(task)) return false;
+    if (!end) return false;
     const at = now ?? Engine._clockFor(task);
     // A plant with no valid timezone has no clock (OQ52): not frozen, never a throw.
     return !!at && task.end_date >= at && task.end_date < end;
@@ -1392,7 +1404,7 @@ export const Engine = {
     const end = Engine.frozenHorizonEnd();
     // The edge is an instant (plant-local now + N days): date AND time, through the per-user
     // date/time display prefs (the same formatter the Inspector uses), never the browser locale.
-    const frozenUntil = end ? Util.fmtDTReadable(end) : null;
+    const frozenUntil = end && reasons.includes('frozen') ? Util.fmtDTReadable(end) : null;
     return firmReasonLabels(reasons, { t: Util.t, frozenUntil }).join(' · ');
   },
 
@@ -3294,7 +3306,8 @@ export const Engine = {
     // D3 (2026-10-27): a moved peer may not FINISH inside the frozen window. The floor reads the changed order's plant
     // clock; every attempt re-places through the calendar, which rebuilds its free intervals from that start.
     const _floorNow = Engine._clockFor(changed) ?? Store.serverNow();
-    const _finishFloor = Engine.frozenFinishFloor(_floorNow, Engine.frozenHorizonEnd());
+    const _frozenEnd = Engine.frozenHorizonEnd();
+    const _finishFloor = Engine.frozenFinishFloor(_floorNow, _frozenEnd);
     const placeReflowed = (p: NimbusTask, from: Date, setupMinutes: number): PlacementResult => {
       const runtimeMinutes = Math.round(Util.runHours(p) * 60);
       return placeWithFinishFloor(
@@ -3342,7 +3355,7 @@ export const Engine = {
           const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
           if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
           // G-0.25: a row carrying an approved placement exception is as fixed as a firmed one.
-          if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+          if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p, undefined, _frozenEnd) || p.end_date! < _horizonStart) {
             // Firmed, frozen-window, or aged orders don't move — if there's a
             // conflict, an alert will fire — but later unfirmed peers must
             // still be de-overlapped, and the immovable order becomes the
@@ -3395,7 +3408,7 @@ export const Engine = {
       const requiredSetupMinutes = setupMinutes(predecessor, p);
       const requiredStart = new Date(cursor.getTime() + requiredSetupMinutes * Config.MS_MIN);
       if (p.start_date! >= requiredStart) { cursor = new Date(p.end_date!); predecessor = p; continue; }
-      if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p) || p.end_date! < _horizonStart) {
+      if (Store.isFirmed(p.id) || p.placement_exception || Engine.isInProgress(p) || Engine.isFrozenHorizon(p, undefined, _frozenEnd) || p.end_date! < _horizonStart) {
         // Firmed, frozen-window, or aged orders don't move — if there's a
         // conflict, an alert will fire — but later unfirmed peers must still
         // be de-overlapped, and the immovable order becomes the setup
