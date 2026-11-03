@@ -2600,6 +2600,48 @@ test('P0-14: runWithPreview with an empty Store takes the spinner down without a
   }
 });
 
+// P0-15: a window that ends before it starts names its real reason; it is not an empty plan or "no validation metadata".
+test('P0-15: a reversed window shows the invalid-horizon reason in the failure card and never installs a plan', async () => {
+  const fx = openSingleRevealFixture('SR', singleRevealTasks);
+  try {
+    OptimizerPreview.showLoading('spt', 'SR');
+    OptimizerPreview.runWithPreview('spt', { plant: 'SR', respectCalendar: false, now: new Date('2026-08-03T08:00:00'),
+      startDate: new Date('2026-08-03T08:00:00'), endDate: new Date('2026-08-01T08:00:00') });
+    for (let i = 0; i < 200 && fx.root.classList.contains('opt-pv-loading'); i++) await wait(10);
+    assert.ok(!fx.root.classList.contains('opt-pv-loading'));
+    assert.match(fx.body.innerHTML, /horizon must end after/);
+    assert.equal(OptimizerPreview._previewDiagnostics?.[0]?.code, 'candidate-evaluation-failed');
+  } finally {
+    fx.restore();
+  }
+});
+
+test('P0-15: Run refuses a From at or after To before closing the dialog', () =>
+  withCalendarGate('hydrated', true, async (calls) => {
+    const modal = globalThis.document.getElementById('modal-optimize');
+    const pickers = {};
+    globalThis.flatpickr = (sel) => (pickers[sel] = { selectedDates: [], set() {}, setDate() {}, destroy() {} });
+    OptimizeDialog.setTimeMode(false);
+    OptimizeDialog.setTimeMode(true);   // rebuilds the pickers through the stub above
+    const toasts = [];
+    const priorToast = Toast.show;
+    Toast.show = (msg) => { toasts.push(String(msg)); };
+    try {
+      pickers['#opt-from-cal'].selectedDates = [new Date('2026-09-10T08:00:00')];
+      OptimizeDialog.commitFrom();
+      pickers['#opt-to-cal'].selectedDates = [new Date('2026-09-01T08:00:00')];
+      OptimizeDialog.commitTo();
+      await OptimizeDialog.run();
+      await wait(20);
+      assert.equal(calls.fg + calls.bg, 0, 'nothing runs');
+      assert.equal(modal.hidden, false, 'the dialog stays open');
+      assert.ok(toasts.some(t => /After the From|after the From|opt_window_invalid/i.test(t)), 'the planner is told why: ' + JSON.stringify(toasts));
+    } finally {
+      Toast.show = priorToast;
+      OptimizeDialog.setTimeMode(false);
+    }
+  }));
+
 test('Gap C: a pending calendar also asks, and "Run anyway" proceeds in both the background and foreground paths', () =>
   withCalendarGate('pending', true, async (calls, chk) => {
     chk.checked = true;

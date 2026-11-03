@@ -139,6 +139,12 @@ export function runOptimizerPreview(
         finish(() => reject(new Error('Optimizer worker returned no candidate.')));
         return;
       }
+      if (!data.validation && data.candidate.status === 'invalid_horizon') {
+        // No proposal and no validation seam by design (see buildOptimizerWorkerResponse): hand it back as-is.
+        const invalid = data.candidate;
+        finish(() => resolve(invalid));
+        return;
+      }
       try {
         const rehydrated = rehydrateOptimizerCandidate(
           data.candidate as CandidateResult, request.snapshot, data.validation,

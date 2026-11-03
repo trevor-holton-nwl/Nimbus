@@ -36,8 +36,11 @@ export function buildOptimizerWorkerResponse(
 ): OptimizerWorkerResponse {
   const result = evaluateOptimizerWorkerRequest(request, clock);
   const validation = serializeOptimizerValidation(result);
-  if (!validation) throw new Error('Optimizer worker produced no validation metadata.');
   const { validationContext: _validationContext, ...candidate } = result;
+  // An `invalid_horizon` candidate is a caller error with no schedule proposal, so it has no validation seam by design:
+  // answer it as a normal response and let the dialog name the reason, instead of throwing "no validation metadata".
+  if (!validation && result.status === 'invalid_horizon') return { runId: request.runId, candidate };
+  if (!validation) throw new Error('Optimizer worker produced no validation metadata.');
   return { runId: request.runId, candidate, validation };
 }
 

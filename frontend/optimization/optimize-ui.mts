@@ -716,6 +716,11 @@ export const OptimizeDialog = (() => {
       Toast.show(Util.t('toast.select_lines_to_opt'), 'warn');
       return;
     }
+    // A From at or after To is refused here, before the dialog closes, rather than as an engine failure afterwards.
+    if (winStart && winEnd && winEnd.getTime() <= winStart.getTime()) {
+      Toast.show(Util.t('toast.opt_window_invalid'), 'warn');
+      return;
+    }
     // Senior review U21 (OQ52): a plant with no valid timezone has no clock, so the optimizer refuses to place on it,
     // like the reconcile and manual paths. The dialog's own `liveClock` fallback stays for display defaults only.
     if (!Store.plantNow(plant)) {
@@ -1763,6 +1768,10 @@ export const OptimizerPreview = {
     });
     const candidate = (primaryEvaluation instanceof Promise ? yield primaryEvaluation : primaryEvaluation) as CandidateResult;
     PerfMonitor.record('Optimize.evaluate.primary', performance.now() - _evalPrimaryT0);
+    // A reversed or unparseable window yields no proposal at all: say why instead of rendering an empty plan.
+    if (candidate.status === 'invalid_horizon') {
+      throw new Error(candidate.explanation[0]?.message || Util.t('toast.opt_window_invalid'));
+    }
 
     // Post-KPIs are calculated from detached patched task values.
     const _applyPatchesT0a = performance.now();

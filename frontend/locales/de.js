@@ -59,6 +59,7 @@ window.__NIMBUS_LOCALES.de = {
   'toast.select_plant_to_opt':         'Bitte ein Werk zum Optimieren auswählen',
   'toast.optimize_plant_no_timezone': 'Für Werk {{plant}} ist keine gültige Zeitzone hinterlegt, daher optimiert NIMBUS es nicht. Bitten Sie einen Administrator, die Zeitzone dieses Werks in den Stammdaten festzulegen.',
   'toast.select_lines_to_opt':         'Bitte mindestens eine Maschine auswählen oder auf Gesamtwerk wechseln.',
+  'toast.opt_window_invalid':          'Das Enddatum mit Uhrzeit muss nach dem Startdatum mit Uhrzeit liegen.',
   'toast.opt_apply_running_skipped':  '{{count}} Auftrag/Aufträge wurden gestartet, während die Vorschau geöffnet war, und blieben unverändert.',
   'toast.opt_apply_invalid_dropped': '{{count}} Auftrag/Aufträge aus der Vorschau passen nicht mehr zum aktuellen Plan und blieben unverändert.',
   'toast.plant_no_timezone':  'Für das Werk {{plant}} ist keine gültige Zeitzone hinterlegt, daher kann NIMBUS nicht erkennen, welche Aufträge dort laufen oder eingefroren sind. Bitte einen Administrator, die Zeitzone des Werks in den Stammdaten zu setzen.',

@@ -785,3 +785,37 @@ test('Tool Inventory: compute-core-stale is thrown ONLY for a Hard plant with a 
     }
   } finally { globalThis.NimbusComputeCore = real; }
 });
+
+// P0-15: an invalid horizon is a candidate with `status: 'invalid_horizon'` and no validation seam. The worker answers it
+// as a normal response (it used to throw "no validation metadata") and the client resolves it as-is, so the dialog can
+// name the real reason; the sync path returns the same candidate.
+test('P0-15: a past-window request answers status invalid_horizon without validation or a throw, and the client resolves it', async () => {
+  const request = {
+    runId: 'invalid-horizon', mode: 'duedate',
+    snapshot: { ...structuredClone(snapshot), selectedPlant: 'P',
+      tasks: [{ id: 't1', PLANT: 'P', MACHINE: 'L1', RUN_TIME: 1, planning_status: 'scheduled',
+        start_date: new Date(2035, 7, 7, 8), end_date: new Date(2035, 7, 7, 9) }],
+      masterData: { plants: [{ plant: 'P', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }], lines: [{ plant: 'P', machine: 'L1' }] },
+      setupSnapshot: { plant: 'P', plant_active: false, definition: null, plant_rows: [], machine_rows: [], machine_states: [], overrides: [] } },
+    request: { mode: 'duedate', plant: 'P', respectCalendar: false,
+      planningStart: new Date(2035, 7, 6, 8, 0, 0), runNow: new Date(2035, 7, 6, 8, 0, 0),
+      endDate: new Date(2035, 7, 1, 0, 0, 0) },
+  };
+  const response = buildOptimizerWorkerResponse(structuredClone(request), realClock);
+  assert.equal(response.candidate.status, 'invalid_horizon');
+  assert.equal(response.validation, undefined);
+  assert.equal(response.error, undefined);
+  assert.match(response.candidate.explanation[0].message, /horizon/);
+  const sync = evaluateOptimizerWorkerRequest(structuredClone(request), realClock);
+  assert.equal(sync.status, 'invalid_horizon');
+  assert.equal(sync.explanation[0].code, response.candidate.explanation[0].code);
+
+  let worker;
+  const promise = runOptimizerPreview(request, {
+    workerFactory: () => { worker = { onmessage: null, onerror: null, postMessage() {}, terminate() {} }; return worker; },
+  });
+  worker.onmessage({ data: response });
+  const resolved = await promise;
+  assert.equal(resolved.status, 'invalid_horizon');
+  assert.equal(resolved.validationContext, undefined);
+});
