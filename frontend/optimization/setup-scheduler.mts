@@ -2298,6 +2298,26 @@ function orderedBySlack(
   return decorated.map(entry => entry.task);
 }
 
+interface SetupNearestRank { task: NimbusTask; covered: number; minutes: number; policy: string }
+
+function compareSetupNearest(left: SetupNearestRank, right: SetupNearestRank, dueScope: DueScope): number {
+  return left.covered - right.covered
+    || left.minutes - right.minutes
+    || ordinalCompare(left.policy, right.policy)
+    || dueTimestamp(left.task, dueScope) - dueTimestamp(right.task, dueScope)
+    || taskId(left.task).localeCompare(taskId(right.task));
+}
+
+/** P1-6: index a stable full sort would put first (the first minimal element
+ * in array order), found with one linear scan instead of a sort per pick. */
+export function bestSetupNearestIndex(ranked: ReadonlyArray<SetupNearestRank>, dueScope: DueScope): number {
+  let best = 0;
+  for (let index = 1; index < ranked.length; index += 1) {
+    if (compareSetupNearest(ranked[index], ranked[best], dueScope) < 0) best = index;
+  }
+  return best;
+}
+
 /** Build a deterministic setup-nearest seed by repeatedly selecting the
  * lowest covered transition from the current fragment predecessor. Missing
  * transitions sort after covered ones and then by setup minutes, while the
@@ -2340,14 +2360,7 @@ function orderedBySetupNearest(
         policy: policyKeyForTask(snapshot, bounds.setup.plant, line, task, bounds.runContext),
       };
     });
-    ranked.sort((left, right) => (
-      left.covered - right.covered
-      || left.minutes - right.minutes
-      || ordinalCompare(left.policy, right.policy)
-      || dueTimestamp(left.task, dueScope) - dueTimestamp(right.task, dueScope)
-      || taskId(left.task).localeCompare(taskId(right.task))
-    ));
-    const next = ranked[0].task;
+    const next = ranked[bestSetupNearestIndex(ranked, dueScope)].task;
     result.push(next);
     remaining.splice(remaining.findIndex(task => taskId(task) === taskId(next)), 1);
     predecessorState = orderState(bounds, next, definition);
