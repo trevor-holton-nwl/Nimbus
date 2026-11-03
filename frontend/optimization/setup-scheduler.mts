@@ -5396,6 +5396,15 @@ function evaluateLineWithFirmedBoundaries(
   // overwrite the effective predecessor state established by a later-ending
   // one — the same union model `placeWholeLineAsTail` already uses.
   let lastAdoptedBoundaryEnd = Number.NEGATIVE_INFINITY;
+  // Normal (non-elapsed) adoption of a firmed boundary as the next fragment's predecessor. It advances the same
+  // watermark the elapsed branch reads, so a firmed order nested inside this one can never become the predecessor.
+  const adoptBoundary = (boundary: (typeof firmed)[number], requiredFirst: string | undefined): void => {
+    fragmentStart = new Date(boundary.end);
+    predecessorState = boundary.state;
+    predecessorOrderId = taskId(boundary.task);
+    requiredFirstOrderId = requiredFirst;
+    lastAdoptedBoundaryEnd = Math.max(lastAdoptedBoundaryEnd, boundary.end.getTime());
+  };
 
   for (let boundaryIndex = 0; boundaryIndex < firmed.length; boundaryIndex += 1) {
     const boundary = firmed[boundaryIndex];
@@ -5692,10 +5701,7 @@ function evaluateLineWithFirmedBoundaries(
             predecessorOrderId,
           );
           remaining = [...tailUnadmitted, ...later];
-          fragmentStart = new Date(boundary.end);
-          predecessorState = boundary.state;
-          predecessorOrderId = taskId(boundary.task);
-          requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+          adoptBoundary(boundary, boundaryLock?.requiredFirstOrderId);
           continue;
         }
         let selectedFallback: EvaluatedBoundaryFallback | null = null;
@@ -5817,10 +5823,7 @@ function evaluateLineWithFirmedBoundaries(
             predecessorOrderId,
           );
           remaining = [...tailUnadmitted, ...later];
-          fragmentStart = new Date(boundary.end);
-          predecessorState = boundary.state;
-          predecessorOrderId = taskId(boundary.task);
-          requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+          adoptBoundary(boundary, boundaryLock?.requiredFirstOrderId);
           continue;
         }
         if (feasibleFallbacks.length === 1) {
@@ -5885,10 +5888,7 @@ function evaluateLineWithFirmedBoundaries(
         predecessorOrderId,
       );
       remaining = [...tailUnadmitted, ...later];
-      fragmentStart = new Date(boundary.end);
-      predecessorState = boundary.state;
-      predecessorOrderId = taskId(boundary.task);
-      requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+      adoptBoundary(boundary, boundaryLock?.requiredFirstOrderId);
       continue;
     }
     const tailEnd = tailCapacityEnd(
@@ -5900,10 +5900,7 @@ function evaluateLineWithFirmedBoundaries(
       missingEdges, winner.finalPredecessorOrderId ?? predecessorOrderId,
     );
     remaining = [...winner.unadmitted, ...deferredAcrossFirmed, ...tailUnadmitted, ...later];
-    fragmentStart = new Date(boundary.end);
-    predecessorState = boundary.state;
-    predecessorOrderId = taskId(boundary.task);
-    requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
+    adoptBoundary(boundary, boundaryLock?.requiredFirstOrderId);
   }
 
   const trailing = searchFragment(snapshot, bounds, line, remaining, {

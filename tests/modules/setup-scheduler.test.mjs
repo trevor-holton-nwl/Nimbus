@@ -6833,3 +6833,15 @@ test('P0-10: repairCandidate queues a patch-less scheduled incumbent that has a 
   assert.equal(b.changes.planning_status, 'needs_planning');
   assert.deepEqual((out.validationFindings ?? []).filter(f => f.severity === 'error'), []);
 });
+
+test('P0-11: a firmed order nested inside an earlier one does not become the predecessor of the first free order', () => {
+  // A (09-13) holds B (10-11) inside it. The free order follows A: BLUE -> YELLOW is free, RED -> YELLOW would cost 60 minutes.
+  const a = scheduledTask('p11-a-blue', 4, 'BLUE', '2026-08-03T13:00:00', '2026-08-03T09:00:00', '2026-08-03T13:00:00');
+  const nested = scheduledTask('p11-b-red', 1, 'RED', '2026-08-03T11:00:00', '2026-08-03T10:00:00', '2026-08-03T11:00:00');
+  const free = scheduledTask('p11-free-yellow', 1, 'YELLOW', '2026-08-03T18:00:00');
+  const setup = setupTruth({ rows: [
+    setupRow('GREEN', 'BLUE', 0), setupRow('GREEN', 'RED', 0), setupRow('BLUE', 'RED', 0), setupRow('BLUE', 'YELLOW', 0), setupRow('RED', 'YELLOW', 60),
+  ] });
+  const result = SetupScheduler.evaluateDueDateFirst(setupSnapshot([a, nested, free], { firmedIds: ['p11-a-blue', 'p11-b-red'] }), dueDateBounds(setup));
+  assert.equal(+patchFor(result, 'p11-free-yellow').changes.start_date, +at('2026-08-03T13:00:00'));
+});
