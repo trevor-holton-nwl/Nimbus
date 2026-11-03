@@ -1051,10 +1051,12 @@
       for (const cur of arr) {
         const prev = longest?.task.id === cur.task.id ? secondLongest : longest;
         if (prev && cur.start < prev.end) {
+          const vars = { prev: orderNumber(prev.task), cur: orderNumber(cur.task), line };
           alerts.push({
             id:  `ovl-${prev.task.id}-${cur.task.id}`,
             sev: 'err', type: 'overlap',
-            msg: `Orders "${orderNumber(prev.task)}" and "${orderNumber(cur.task)}" overlap on ${line}.`,
+            msg: `Orders "${vars.prev}" and "${vars.cur}" overlap on ${line}.`,
+            msgKey: 'alert.overlap', msgVars: vars,
             taskId: cur.task.id, peerId: prev.task.id, line, time: cur.start
           });
         }
@@ -1208,23 +1210,30 @@
       if (isOverloaded(hours, effCap, cap)) {
         // Two decimals when one decimal would print the same figure twice ("24.0h vs 24.0h" reads as no overload).
         const dp = hours.toFixed(1) === effCap.toFixed(1) ? 2 : 1;
+        const vars = { line, day, scheduled: hours.toFixed(dp), effective: effCap.toFixed(dp), total: cap.toFixed(dp) };
         alerts.push({
           id:  `ovl-day-${line}-${day}`, sev: 'err', type: 'overload',
-          msg: `${line} is overloaded on ${day}: ${hours.toFixed(dp)}h scheduled vs ${effCap.toFixed(dp)}h effective capacity (${cap.toFixed(dp)}h total).`,
+          msg: `${line} is overloaded on ${day}: ${vars.scheduled}h scheduled vs ${vars.effective}h effective capacity (${vars.total}h total).`,
+          msgKey: 'alert.overload', msgVars: vars,
           line, time: dateObj
         });
       } else if (effCap > 0 && hours > effCap * WARN_THRESHOLD) {
         // Near-capacity alerts suppressed unless SHOW_NEAR_CAPACITY_ALERTS.
-        if (SHOW_NEAR_CAPACITY_ALERTS) alerts.push({
-          id:  `warn-day-${line}-${day}`, sev: 'warn', type: 'near-capacity',
-          msg: `${line} is near capacity on ${day}: ${hours.toFixed(1)} / ${effCap.toFixed(1)}h effective capacity (${Math.round(100*hours/effCap)}%).`,
-          line, time: dateObj
-        });
+        if (SHOW_NEAR_CAPACITY_ALERTS) {
+          const vars = { line, day, scheduled: hours.toFixed(1), effective: effCap.toFixed(1), pct: Math.round(100 * hours / effCap) };
+          alerts.push({
+            id:  `warn-day-${line}-${day}`, sev: 'warn', type: 'near-capacity',
+            msg: `${line} is near capacity on ${day}: ${vars.scheduled} / ${vars.effective}h effective capacity (${vars.pct}%).`,
+            msgKey: 'alert.near_capacity', msgVars: vars,
+            line, time: dateObj
+          });
+        }
       } else if (cap === 0 && hours > 0) {
         const win = workWindow(line, dateObj, calendars, plants, lineSettings, masterData);
-        let reason;
+        let reason, msgKey, vars = { line, day };
         if (!win) {
           reason = `the ${line} or plant calendar is closed that day-of-week`;
+          msgKey = 'alert.closed_calendar';
         } else {
           const winHrs   = (win[1] - win[0]) / MS_HOUR;
           const plant    = plantOf(line);
@@ -1253,11 +1262,14 @@
             }
           }
           const consumed = mergedOverlapHours(win, intervals);
-          reason = `working window is ${winHrs.toFixed(1)}h, blackouts union to ${consumed.toFixed(1)}h (${labels.join(', ') || 'no blocks found — bug?'})`;
+          vars = { line, day, window: winHrs.toFixed(1), consumed: consumed.toFixed(1), blocks: labels.join(', ') || 'no blocks found — bug?' };
+          reason = `working window is ${vars.window}h, blackouts union to ${vars.consumed}h (${vars.blocks})`;
+          msgKey = 'alert.closed_blackouts';
         }
         alerts.push({
           id:  `closed-${line}-${day}`, sev: 'err', type: 'closed',
           msg: `${line} is scheduled on ${day} but has 0h capacity — ${reason}.`,
+          msgKey, msgVars: vars,
           line, time: dateObj
         });
       }
@@ -1327,6 +1339,7 @@
         alerts.push({
           id:  `blk-${t.id}`, sev: 'err', type: 'blackout',
           msg: `Order "${orderNumber(t)}" overlaps a blackout block on ${line}.`,
+          msgKey: 'alert.blackout', msgVars: { order: orderNumber(t), line },
           taskId: t.id, line, time: conflictTime
         });
       }
@@ -1341,6 +1354,7 @@
         alerts.push({
           id:  `firmclosed-${t.id}`, sev: 'warn', type: 'firmed-closed',
           msg: `${t.firmed ? 'Firmed order' : 'Order'} "${orderNumber(t)}" is on a day the ${line} calendar is closed.`,
+          msgKey: t.firmed ? 'alert.firmed_closed' : 'alert.order_closed', msgVars: { order: orderNumber(t), line },
           taskId: t.id, line, time: badInterval.start
         });
       }
@@ -1350,6 +1364,7 @@
     for (const t of activeTasks) {
       const line = lineOf(t);
       const parts = [];
+      const kinds = [];      // 'start' | 'end' per part, in message order: which localized template (if any) reproduces `msg`
       const msgDates = [];   // the default-format dates embedded in `parts`, so the main thread can re-format them (B27)
       let alertTime = t.start_date;
       for (const interval of scheduleIntervals(t)) {
@@ -1359,18 +1374,28 @@
         if (winS && interval.start < winS[0]) {
           msgDates.push(msgDateRef(winS[0]));
           parts.push(`starts before ${line} opens (${msgDates[msgDates.length - 1].text})`);
+          kinds.push('start');
           alertTime = interval.start;
         }
         if (winE && interval.end > winE[1]) {
           msgDates.push(msgDateRef(winE[1]));
           parts.push(`ends after ${line} closes (${msgDates[msgDates.length - 1].text})`);
+          kinds.push('end');
           alertTime = interval.start;
         }
       }
       if (parts.length) {
+        // The common shapes (one start part, one end part, or a start then an end) have a localized template; a split
+        // order with several violations keeps the English text (it lists every piece), which Util.alertMessage falls back to.
+        const shape = kinds.join('+');
+        const tail = { start: 'start', end: 'end', 'start+end': 'both' }[shape];
+        const vars = { order: orderNumber(t), line };
+        if (kinds.includes('start')) vars.opens = msgDates[kinds.indexOf('start')].text;
+        if (kinds.includes('end')) vars.closes = msgDates[kinds.indexOf('end')].text;
         alerts.push({
           id:  `firmhours-${t.id}`, sev: 'warn', type: 'firmed-out-of-hours',
           msg: `${t.firmed ? 'Firmed order' : 'Order'} "${orderNumber(t)}" ${parts.join(' and ')}.`,
+          ...(tail ? { msgKey: `alert.${t.firmed ? 'firmed' : 'order'}_out_of_hours_${tail}`, msgVars: vars } : {}),
           msgDates,
           taskId: t.id, line, time: alertTime
         });
@@ -1571,6 +1596,7 @@
       alerts.push({
         id: `pv-lot-size-${t.id}`, sev: 'warn', type: 'pv-lot-size',
         msg: `Order "${orderNumber(t)}" quantity is outside the resolved production version's lot-size range.`,
+        msgKey: 'alert.pv_lot_size', msgVars: { order: orderNumber(t) },
         taskId: t.id, line, time: t.start_date || fallbackTime(t.PLANT || plantOf(line)),
       });
     }
@@ -1631,6 +1657,11 @@
       'initial-state-unknown': 'warn', 'override-inactive': 'warn', 'current-state-diverged': 'warn',
       'setup-uncovered': 'err', 'predecessor-state-unknown': 'err', 'successor-state-unknown': 'err',
     };
+    const SETUP_DIAGNOSTIC_KEY = {
+      'initial-state-unknown': 'alert.setup_initial_state_unknown', 'override-inactive': 'alert.setup_override_inactive',
+      'current-state-diverged': 'alert.setup_current_state_diverged',
+      'predecessor-state-unknown': 'alert.setup_predecessor_state_unknown', 'successor-state-unknown': 'alert.setup_successor_state_unknown',
+    };
     const SETUP_DIAGNOSTIC_DEFAULT_MSG = {
       'initial-state-unknown': d => `Can't determine what needs to be set up before order ${orderNumberForId(d.successorOrderId)} on ${d.line}.`,
       'override-inactive': d => `A manual changeover override on ${d.line} no longer matches the current schedule.`,
@@ -1650,12 +1681,25 @@
       if (setupSeen.has(key)) continue;
       setupSeen.add(key);
       const time = parseDate(diagnostic.time) || fallbackTime(plantOf(diagnostic.line || UNKNOWN_LINE));
-      const pair = diagnostic.pairKey ? ` for ${formatSetupPairKey(diagnostic.pairKey)}` : '';
+      const pairText = diagnostic.pairKey ? formatSetupPairKey(diagnostic.pairKey) : '';
+      const pair = pairText ? ` for ${pairText}` : '';
       const defaultMsg = SETUP_DIAGNOSTIC_DEFAULT_MSG[diagnostic.type];
       const sev = SETUP_DIAGNOSTIC_SEVERITY[diagnostic.type] || 'err';
+      // A caller-supplied message is the caller's own text and is shown as is; otherwise the localized template for the type.
+      const keyed = !diagnostic.message && defaultMsg;
+      const localized = keyed ? {
+        msgKey: diagnostic.type === 'setup-uncovered' ? (pairText ? 'alert.setup_uncovered_pair' : 'alert.setup_uncovered') : SETUP_DIAGNOSTIC_KEY[diagnostic.type],
+        msgVars: {
+          line: String(diagnostic.line),
+          order: orderNumberForId(diagnostic.successorOrderId),
+          predecessor: orderNumberForId(diagnostic.predecessorOrderId),
+          ...(pairText ? { pair: pairText } : {}),
+        },
+      } : {};
       alerts.push({
         id: `${diagnostic.type}-${key}`, sev, type: diagnostic.type,
         msg: diagnostic.message || (defaultMsg ? defaultMsg(diagnostic, pair) : `Setup ${diagnostic.type.replaceAll('-', ' ')}${pair} on ${diagnostic.line}.`),
+        ...localized,
         taskId: diagnostic.successorOrderId, line: diagnostic.line, time,
         pairKey: diagnostic.pairKey ?? null, scope: diagnostic.scope ?? null,
       });
