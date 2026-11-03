@@ -773,7 +773,7 @@ test('setup timeline items never resolve to a business order across interaction 
   } finally { Timeline._items = priorItems; }
 });
 
-test('setup items are ignored by click, double-click, drag, ghost, selection, focus, dependency, hover, marquee, and context dispatch', () => {
+test('setup items are ignored by click, double-click, drag, selection, focus, dependency, hover, marquee, and context dispatch', () => {
   const setupId = 'setup:SETUP-L1:successor';
   const setupItem = { id: setupId, kind: 'setup', group: 'SETUP-L1', start: new Date('2026-08-14T07:30:00'), end: new Date('2026-08-14T08:00:00'), editable: false };
   const order = { id: 'guard-order', MACHINE: 'SETUP-L1', RUN_TIME: 1,
@@ -788,9 +788,7 @@ test('setup items are ignored by click, double-click, drag, ghost, selection, fo
     Interaction._onClick({ what: 'item', item: setupId, event: {} });
     Interaction._onDoubleClick({ what: 'item', item: setupId });
     Interaction._onDataSetUpdate({ items: [setupId] });
-    Interaction._onTimeChange({ id: setupId, time: new Date() });
     assert.deepEqual(Selection.ids(), []);
-    assert.equal(Interaction._ghostDragId, null);
     assert.equal(Timeline.businessOrderIdForItem(setupId), null, 'shared semantic dispatch gates hover, marquee, context, focus, and dependency routes');
   } finally {
     Timeline._items = priorItems;
@@ -1275,24 +1273,24 @@ test('Interaction.install is idempotent — a second call does not double-attach
   try {
     Interaction.install();
     // install() itself attaches 3 unconditional document listeners
-    // (mousemove for edge-scroll tracking, mouseleave for tooltip hiding,
+    // (pointermove for edge-scroll tracking, mouseleave for tooltip hiding,
     // keydown for _onKeyDown); _installHoverPreview() attaches a SEPARATE
     // document keydown (dismiss-on-any-key) once its #vis-timeline container
     // stub resolves truthy — 2 distinct keydown listeners in total.
     const afterFirst = {
       keydown:    _docListenerCount('keydown'),
-      mousemove:  _docListenerCount('mousemove'),
+      pointermove:  _docListenerCount('pointermove'),
       mouseleave: _docListenerCount('mouseleave'),
     };
     assert.equal(afterFirst.keydown, 2, 'install() should register exactly 2 distinct keydown listeners');
-    assert.equal(afterFirst.mousemove, 1);
+    assert.equal(afterFirst.pointermove, 1);
     assert.equal(afterFirst.mouseleave, 1);
 
     Interaction.install(); // second call — Interaction._installed guard must make this a no-op
     assert.equal(_docListenerCount('keydown'), afterFirst.keydown,
       'a second install() call must not double-attach keydown listeners');
-    assert.equal(_docListenerCount('mousemove'), afterFirst.mousemove,
-      'a second install() call must not double-attach the mousemove listener');
+    assert.equal(_docListenerCount('pointermove'), afterFirst.pointermove,
+      'a second install() call must not double-attach the pointermove listener');
     assert.equal(_docListenerCount('mouseleave'), afterFirst.mouseleave,
       'a second install() call must not double-attach the mouseleave listener');
   } finally {
@@ -1309,12 +1307,12 @@ test('Interaction.uninstall removes every document-level listener install() atta
   try {
     Interaction.install();
     assert.ok(_docListenerCount('keydown') > 0, 'sanity check: install() must have attached a keydown listener');
-    assert.ok(_docListenerCount('mousemove') > 0, 'sanity check: install() must have attached a mousemove listener');
+    assert.ok(_docListenerCount('pointermove') > 0, 'sanity check: install() must have attached a pointermove listener');
     assert.ok(_docListenerCount('mouseleave') > 0, 'sanity check: install() must have attached a mouseleave listener');
 
     Interaction.uninstall();
     assert.equal(_docListenerCount('keydown'), 0, 'uninstall() must remove BOTH keydown listeners (_onKeyDownBound and _hoverDismissBound)');
-    assert.equal(_docListenerCount('mousemove'), 0, 'uninstall() must remove the edge-scroll-tracking mousemove listener');
+    assert.equal(_docListenerCount('pointermove'), 0, 'uninstall() must remove the edge-scroll-tracking pointermove listener');
     assert.equal(_docListenerCount('mouseleave'), 0, 'uninstall() must remove the tooltip-hide mouseleave listener');
 
     // uninstall() is itself idempotent (guarded by _installed) — calling it
@@ -2531,88 +2529,6 @@ test('a right-edge resize is a finish move and pushes exactly one undo entry (A.
     assert.equal(Store.tasks[id].end_date.getTime(), new Date('2026-08-05T14:00:00').getTime());
     assert.equal(UndoStack._entries.length, before + 1);
   } finally { fx.restore(); restoreClock(); }
-});
-
-test('G4 / gate 30: the multi-drag ghost preview takes the FINISH delta, so a right-edge resize moves the ghosts of the companions by the delta the commit applies', () => {
-  const anchorId = 'ghost-anchor', companionId = 'ghost-companion';
-  const aStart = new Date('2026-08-05T08:00:00'), aEnd = new Date('2026-08-05T12:00:00');
-  const cStart = new Date('2026-08-06T08:00:00'), cEnd = new Date('2026-08-06T12:00:00');
-  const restoreClock = pinPlantClock(['5512']);
-  const fx = _stubGanttSideEffects();
-  const priorItems = Timeline._items, priorTl = Timeline._tl;
-  Store.setTasks([
-    { id: anchorId, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: aStart, end_date: aEnd },
-    { id: companionId, MACHINE: 'L2', PLANT: '5512', RUN_TIME: 4, start_date: cStart, end_date: cEnd },
-  ], 'test');
-  Selection.set([anchorId, companionId]);
-  const updates = [];
-  const priorRaf = globalThis.requestAnimationFrame, priorCaf = globalThis.cancelAnimationFrame;
-  globalThis.requestAnimationFrame = () => 1;      // the edge-scroll loop is not under test
-  globalThis.cancelAnimationFrame = () => {};
-  Timeline._items = {
-    get: (i) => (i === companionId ? { id: i, className: '' } : undefined),
-    update: (list) => updates.push(...list),
-  };
-  try {
-    // Resize: vis keeps the start (props.time is the start) and moves the end 2 h later on its live item data.
-    Timeline._tl = { itemSet: { items: { [anchorId]: { data: { start: aStart, end: new Date('2026-08-05T14:00:00') } } } } };
-    Interaction._onTimeChange({ id: anchorId, time: aStart, group: 'L1' });
-    assert.equal(updates.length, 1, 'the companion gets a ghost');
-    assert.equal(updates[0].start.getTime(), cStart.getTime() + 2 * 3600000, 'ghost start shifted by the finish delta');
-    assert.equal(updates[0].end.getTime(), cEnd.getTime() + 2 * 3600000);
-    // Body drag: both edges move together, the same delta on either basis.
-    updates.length = 0;
-    Timeline._tl = { itemSet: { items: { [anchorId]: { data: { start: new Date('2026-08-05T09:00:00'), end: new Date('2026-08-05T13:00:00') } } } } };
-    Interaction._onTimeChange({ id: anchorId, time: new Date('2026-08-05T09:00:00'), group: 'L1' });
-    assert.equal(updates[0].start.getTime(), cStart.getTime() + 3600000);
-  } finally {
-    Interaction._clearGhosts();
-    globalThis.requestAnimationFrame = priorRaf; globalThis.cancelAnimationFrame = priorCaf;
-    Timeline._items = priorItems; Timeline._tl = priorTl;
-    fx.restore(); restoreClock(); Selection.clear();
-  }
-});
-
-test('U27: a companion ghost takes the width the drop derives (backward walk), not the stored width shifted', () => {
-  const anchorId = 'ghost-u27-anchor', companionId = 'ghost-u27-companion';
-  const aStart = new Date('2026-08-05T08:00:00'), aEnd = new Date('2026-08-05T12:00:00');
-  const cStart = new Date('2026-08-06T08:00:00'), cEnd = new Date('2026-08-06T12:00:00');
-  const restoreClock = pinPlantClock(['5512']);
-  const fx = _stubGanttSideEffects();
-  const priorItems = Timeline._items, priorTl = Timeline._tl, priorPatch = Engine.manualRoutingSchedulePatchFor;
-  Store.setTasks([
-    { id: anchorId, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: aStart, end_date: aEnd },
-    { id: companionId, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: cStart, end_date: cEnd },
-  ], 'test');
-  Selection.set([anchorId, companionId]);
-  const updates = [], calls = [];
-  const priorRaf = globalThis.requestAnimationFrame, priorCaf = globalThis.cancelAnimationFrame;
-  globalThis.requestAnimationFrame = () => 1; globalThis.cancelAnimationFrame = () => {};
-  Timeline._items = { get: i => (i === companionId ? { id: i, className: '' } : undefined), update: list => updates.push(...list) };
-  // The drop's derivation across a closed day: the 4 h run starts the evening before and ends at the translated finish.
-  const derivedStart = new Date('2026-08-07T22:00:00'), derivedEnd = new Date('2026-08-10T02:00:00');
-  Engine.manualRoutingSchedulePatchFor = (task, line, finish, opts) => { calls.push({ id: task.id, line, finish, opts }); return { start_date: derivedStart, end_date: derivedEnd }; };
-  try {
-    Timeline._tl = { itemSet: { items: { [anchorId]: { data: { start: aStart, end: new Date('2026-08-05T14:00:00') } } } } };
-    Interaction._onTimeChange({ id: anchorId, time: aStart, group: 'L1' });
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].id, companionId);
-    assert.equal(calls[0].finish.getTime(), cEnd.getTime() + 2 * 3600000, 'the translated finish, as the drop computes it');
-    assert.equal(calls[0].opts.quiet, true, 'a 60 fps preview never toasts a refusal');
-    assert.equal(updates[0].start.getTime(), derivedStart.getTime());
-    assert.equal(updates[0].end.getTime(), derivedEnd.getTime(), 'ghost width equals the dropped bar width');
-    // No derivation (null): the translated stored edges are the fallback.
-    updates.length = 0;
-    Engine.manualRoutingSchedulePatchFor = () => null;
-    Interaction._onTimeChange({ id: anchorId, time: aStart, group: 'L1' });
-    assert.equal(updates[0].start.getTime(), cStart.getTime() + 2 * 3600000);
-  } finally {
-    Engine.manualRoutingSchedulePatchFor = priorPatch;
-    Interaction._clearGhosts();
-    globalThis.requestAnimationFrame = priorRaf; globalThis.cancelAnimationFrame = priorCaf;
-    Timeline._items = priorItems; Timeline._tl = priorTl;
-    fx.restore(); restoreClock(); Selection.clear();
-  }
 });
 
 test('a resize that derives the bar it already was creates no undo entry, no Store write, and springs back (A.3 #18)', () => {
@@ -4536,4 +4452,117 @@ test('neighbourRow follows the rendered row order and skips rows with nothing se
   assert.equal(neighbourRow(rows, 'M10', 'ArrowDown', any), null);
   assert.equal(neighbourRow(rows, 'M1', 'ArrowDown', r => r !== 'M2'), 'M10');   // M2 fully dimmed: skipped
   assert.equal(neighbourRow(rows, 'Mx', 'ArrowDown', any), null);                // current row not rendered
+});
+
+/* ---- Drag edge-scroll robustness: gate, drag-time deferrals, frozen drag set, select resync ---- */
+
+function _dragFx(ids) {
+  const start = new Date('2026-08-05T08:00:00'), end = new Date('2026-08-05T12:00:00');
+  const fx = _stubGanttSideEffects();
+  Store.setTasks(ids.map(id => ({ id, MACHINE: 'L1', PLANT: '5512', RUN_TIME: 4, start_date: start, end_date: end })), 'test');
+  Timeline._items = { get: i => (i === 'past-zone' ? { id: i, kind: 'zone' } : ids.includes(i) ? { id: i, start, end, group: 'L1' } : undefined), update() {} };
+  return fx;
+}
+
+test('a zone-ticker update mid-drag does not end the drag gate; an order update does', async () => {
+  const fx = _dragFx(['dg-1']);
+  const restoreClock = pinPlantClock(['5512']);
+  try {
+    Interaction._beginItemDrag();
+    assert.equal(Interaction._isDragging, true);
+    Interaction._onDataSetUpdate({ items: ['past-zone'] });
+    assert.equal(Interaction._isDragging, true, 'the ticker update must not flip the gate');
+    Interaction._onDataSetUpdate({ items: ['dg-1'] });
+    assert.equal(Interaction._isDragging, false, 'the dropped order ends it');
+    await Promise.resolve();
+  } finally { Interaction._endItemDrag(); fx.restore(); restoreClock(); }
+});
+
+test('Timeline.rebuild is deferred while dragging and flushed once at drag end', async () => {
+  const fx = _dragFx(['dg-2']);
+  const priorPass = Timeline._rebuildPass;
+  let passes = 0;
+  Timeline._rebuildPass = () => { passes++; };
+  try {
+    Interaction._beginItemDrag();
+    Timeline.rebuild();
+    Timeline.rebuild();
+    assert.equal(passes, 0, 'no pass mid-drag');
+    assert.equal(Interaction._deferredWhileDragging.has('rebuild'), true);
+    Interaction._endItemDrag();
+    await Promise.resolve();
+    assert.equal(fx.rebuilds, 1, 'one coalesced rebuild is scheduled at drag end');
+    assert.equal(Interaction._deferredWhileDragging.size, 0);
+    Timeline.rebuild();
+    assert.equal(passes, 1, 'outside a drag the pass runs');
+  } finally { Interaction._endItemDrag(); Timeline._rebuildPass = priorPass; fx.restore(); }
+});
+
+test('the profile-match and lock-band writers defer mid-drag; lock ids replay at drag end', async () => {
+  const fx = _dragFx(['dg-3']);
+  const priorPatch = Timeline._applyTaskPatch;
+  const patched = [];
+  Timeline._applyTaskPatch = id => { patched.push(id); };
+  try {
+    Interaction._beginItemDrag();
+    Timeline._applyProfileMatchClasses();
+    assert.equal(Interaction._deferredWhileDragging.has('profile'), true);
+    Interaction._deferredWhileDragging.add('lock');
+    Interaction._deferredLockIds.add('dg-3');
+    Interaction._endItemDrag();
+    await Promise.resolve();
+    assert.deepEqual(patched, ['dg-3']);
+    assert.equal(Interaction._deferredLockIds.size, 0);
+  } finally { Interaction._endItemDrag(); Timeline._applyTaskPatch = priorPatch; fx.restore(); }
+});
+
+test('_dragSetIds is captured from vis itemProps on the first frame, stays readable to the drop, then clears', async () => {
+  const fx = _dragFx(['a1', 'b1', 'c1']);
+  const priorTl = Timeline._tl;
+  try {
+    Selection.set(['a1', 'b1', 'c1']);
+    Timeline._tl = { itemSet: { touchParams: { itemProps: [{ item: { id: 'a1' } }, { item: { id: 'b1' } }] } } };
+    Interaction._beginItemDrag();
+    Interaction._captureDragSet();
+    assert.deepEqual(Interaction._dragSetIds, ['a1', 'b1'], 'vis itemProps win over the live selection');
+    Timeline._tl = { itemSet: { touchParams: { itemProps: [{ item: { id: 'c1' } }] } } };
+    Interaction._captureDragSet();
+    assert.deepEqual(Interaction._dragSetIds, ['a1', 'b1'], 'captured once per gesture');
+    Selection.set(['c1']);   // selection drifts mid-gesture
+    Interaction._endItemDrag();
+    assert.deepEqual(Interaction._dragSetIds, ['a1', 'b1'], 'still readable in the drop pass');
+    await Promise.resolve();
+    assert.equal(Interaction._dragSetIds, null);
+    assert.deepEqual([...Selection.ids()].sort(), ['a1', 'b1'], 'the grabbed set is re-asserted after the drop');
+    // No itemProps: fall back to the selection.
+    Timeline._tl = { itemSet: {} };
+    Selection.set(['b1', 'c1']);
+    Interaction._beginItemDrag();
+    Interaction._captureDragSet();
+    assert.deepEqual([...Interaction._dragSetIds].sort(), ['b1', 'c1']);
+    Interaction._endItemDrag();
+    await Promise.resolve();
+  } finally { Interaction._endItemDrag(); Timeline._tl = priorTl; fx.restore(); }
+});
+
+test('vis select resync: a collapsed vis selection is put back; a tap or a matching selection is left alone', () => {
+  const fx = _dragFx(['s1', 's2']);
+  const priorTl = Timeline._tl;
+  let visSel = ['s1'];
+  const set = [];
+  Timeline._tl = { getSelection: () => visSel, setSelection: ids => { set.push(ids); visSel = ids; } };
+  try {
+    Selection.set(['s1', 's2']);
+    set.length = 0; visSel = ['s1'];   // an installed Selection listener may already have synced the stub
+    Interaction._resyncVisSelection({ items: ['s1'], event: { type: 'tap' } });
+    assert.equal(set.length, 0, 'a tap belongs to _onClick');
+    Interaction._resyncVisSelection({ items: ['s1'], event: { type: 'press' } });
+    assert.deepEqual(set, [['s1', 's2']]);
+    Interaction._resyncVisSelection({ items: ['s1', 's2'], event: { type: 'press' } });
+    assert.equal(set.length, 1, 'already in step: no write');
+    Selection.clear();
+    visSel = ["s1"]; const before = set.length;
+    Interaction._resyncVisSelection({ items: ['s1'], event: { type: 'press' } });
+    assert.equal(set.length, before, 'an empty Selection asserts nothing');
+  } finally { Timeline._tl = priorTl; fx.restore(); }
 });
