@@ -537,6 +537,7 @@ window.__NIMBUS_LOCALES.en = {
   'ui.diff_kind_machine':              'Machine',
   'ui.diff_kind_split':                'Split',
   'ui.diff_finish_delta':              'finish {{delta}}',
+  'ui.diff_show_more':                 'Show {{count}} more',
   'ui.no_results':                     'No results',
   'ui.all_lines':                      'All Machines',
   'ui.no_lines':                       'No machines',

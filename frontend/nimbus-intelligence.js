@@ -412,7 +412,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     open() {
       return new Promise((res, rej) => {
-        const req = indexedDB.open('nimbus-intel', 1);
+        // Version 2 adds `snapshot_meta`: one small row per snapshot (ts, label, plant, count, fingerprint). The
+        // `snapshots` store keeps the full records (task rows inline) exactly as version 1 wrote them, so boot reads
+        // only the metadata and a body is fetched by id when a restore or a diff needs it.
+        const req = indexedDB.open('nimbus-intel', 2);
         req.onupgradeneeded = e => {
           const db = e.target.result;
           if (!db.objectStoreNames.contains('snapshots')) {
@@ -423,14 +426,59 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
             db.createObjectStore('scenarios', { keyPath: 'name' });
           if (!db.objectStoreNames.contains('patterns'))
             db.createObjectStore('patterns', { keyPath: 'key' });
+          if (!db.objectStoreNames.contains('snapshot_meta')) {
+            const ms = db.createObjectStore('snapshot_meta', { keyPath: 'id' });
+            ms.createIndex('ts', 'ts');
+            // Rows with no plant (very old snapshots) have no valid compound key and are simply not in this index.
+            ms.createIndex('plant_ts', ['plant', 'ts']);
+            // One-time: describe the records a version 1 database already holds (read once, here, never at boot).
+            if (e.oldVersion >= 1) IntelDB.migrateLegacyMeta(e.target.transaction);
+          }
         };
-        req.onsuccess = e => { IntelDB._db = e.target.result; res(IntelDB._db); };
+        req.onsuccess = e => {
+          IntelDB._db = e.target.result;
+          // A newer tab upgrading the database must not be blocked by this one.
+          IntelDB._db.onversionchange = () => { try { IntelDB._db.close(); } catch {} IntelDB._db = null; };
+          res(IntelDB._db);
+        };
+        // An older tab still holds version 1 open, so the upgrade waits for it. Do not hold the whole boot behind that:
+        // continue without persistence now (the request completes later and persistence resumes for new snapshots).
+        req.onblocked = () => rej(new Error('IndexedDB upgrade blocked by another tab'));
         req.onerror   = e => {
           (window.NIMBUS && window.NIMBUS.ErrorLog
             ? window.NIMBUS.ErrorLog.warn('intel', '[IntelDB] open failed', { err: String(e.target.error), errorCode: 'internal' })
             : console.warn('[IntelDB]', e.target.error));
           rej(e.target.error);
         };
+      });
+    },
+
+    // Upgrade handler body: a metadata row for every version 1 snapshot record. Failures are swallowed per record:
+    // the upgrade itself must never abort over history that is only a convenience.
+    migrateLegacyMeta(tx) {
+      try {
+        const metaStore = tx.objectStore('snapshot_meta');
+        const req = tx.objectStore('snapshots').openCursor();
+        req.onsuccess = ev => {
+          const cursor = ev.target.result;
+          if (!cursor) return;
+          try { metaStore.put(snapshotMetaOf(cursor.value)); } catch {}
+          cursor.continue();
+        };
+      } catch {}
+    },
+
+    // One atomic write of a snapshot: the full record into `snapshots` (autoIncrement key) and its metadata row
+    // (same id) into `snapshot_meta`. Resolves with the id; undefined when there is no database.
+    putSnapshot(body, meta) {
+      if (!IntelDB._db) return Promise.resolve();
+      return new Promise((res, rej) => {
+        const tx = IntelDB._db.transaction(['snapshots', 'snapshot_meta'], 'readwrite');
+        const req = tx.objectStore('snapshots').put(body);
+        req.onsuccess = () => { tx.objectStore('snapshot_meta').put({ ...meta, id: req.result }); };
+        tx.oncomplete = () => res(req.result);
+        tx.onerror    = e => rej(e.target.error);
+        tx.onabort    = () => rej(tx.error || new Error('IndexedDB transaction aborted'));
       });
     },
 
@@ -496,24 +544,30 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
     },
 
-    pruneSnapshots(keepN = 200) {
+    // Keep the newest `keepN` snapshots of ONE plant, so a busy plant never evicts another plant's history. `plant`
+    // undefined prunes across every plant (the old global rule); null prunes the rows that have no plant.
+    // Walks the metadata store with KEY cursors only (no payload is loaded) and deletes the oldest rows from both stores.
+    pruneSnapshots(keepN = 200, plant) {
       if (!IntelDB._db) return;
-      // Count, then walk the ts index with a KEY cursor (keys only: no snapshot payloads are
-      // loaded) deleting the oldest by primary key until keepN remain.
       const fn = () => {
         // Runs from an idle callback: a closed database (transaction() throws) must not surface as an uncaught error.
         try {
-          const tx = IntelDB._db.transaction('snapshots', 'readwrite');
-          const os = tx.objectStore('snapshots');
-          const countReq = os.count();
+          const tx = IntelDB._db.transaction(['snapshots', 'snapshot_meta'], 'readwrite');
+          const bodies = tx.objectStore('snapshots');
+          const metas = tx.objectStore('snapshot_meta');
+          const perPlant = typeof plant === 'string' && typeof IDBKeyRange !== 'undefined';
+          const source = perPlant ? metas.index('plant_ts') : metas.index('ts');
+          const range = perPlant ? IDBKeyRange.bound([plant, -Infinity], [plant, Infinity]) : undefined;
+          const countReq = range ? source.count(range) : source.count();
           countReq.onsuccess = () => {
             let excess = countReq.result - keepN;
             if (excess <= 0) return;
-            const curReq = os.index('ts').openKeyCursor();
+            const curReq = range ? source.openKeyCursor(range) : source.openKeyCursor();
             curReq.onsuccess = e => {
               const cursor = e.target.result;
               if (!cursor || excess <= 0) return;
-              os.delete(cursor.primaryKey);
+              bodies.delete(cursor.primaryKey);
+              metas.delete(cursor.primaryKey);
               excess -= 1;
               cursor.continue();
             };
@@ -1368,12 +1422,71 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     };
   }
 
+  // Cheap content fingerprint of a plant's schedule: (id, start, end, machine, firmed, split-piece count) per order,
+  // combined order-independently, so two states that differ in any of those never share one and the walk allocates
+  // no row objects. Used to skip an auto snapshot that would repeat the previous one. `ms` values are epoch ms or null.
+  function fpMix(h, str) {
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function fpAccumulate(acc, id, start, end, machine, firmed, segs) {
+    const h = fpMix(2166136261, `${id}|${start ?? ''}|${end ?? ''}|${machine || ''}|${firmed ? 1 : 0}|${segs}`);
+    acc.n += 1;
+    acc.sum = (acc.sum + h) >>> 0;
+    acc.xor = (acc.xor ^ Math.imul(h, 2654435761)) >>> 0;
+  }
+  const fpText = acc => `${acc.n}:${acc.sum.toString(36)}:${acc.xor.toString(36)}`;
+  const fpMs = v => { const n = v instanceof Date ? v.getTime() : (v ? new Date(v).getTime() : NaN); return Number.isFinite(n) ? n : null; };
+  function fingerprintLive(tasks) {
+    const acc = { n: 0, sum: 0, xor: 0 };
+    for (const t of tasks) fpAccumulate(acc, t.id, fpMs(t.start_date), fpMs(t.end_date), t.MACHINE || '', !!t.firmed, snapshotSegments(t)?.length || 0);
+    return fpText(acc);
+  }
+  function fingerprintRows(rows) {
+    const acc = { n: 0, sum: 0, xor: 0 };
+    for (const r of rows || []) fpAccumulate(acc, r.id, fpMs(r.start_date), fpMs(r.end_date), r.MACHINE || '', !!r.FIRMED, Array.isArray(r.scheduleSegments) ? r.scheduleSegments.length : 0);
+    return fpText(acc);
+  }
+  // The small row kept for every snapshot (what the history list shows, plus the fingerprint). `count` is the number
+  // of orders for a version 2 snapshot (rows are already scoped to its plant); a version 1 snapshot held every loaded
+  // order, so its scoped count needs the Store and is left unknown (null).
+  function snapshotMetaOf(rec) {
+    const v2 = rec.schemaVersion >= 2;
+    let fp = null;
+    try { fp = fingerprintRows(rec.tasks); } catch {}
+    return {
+      id: rec.id, ts: rec.ts, label: rec.label, auto: !!rec.auto, plant: rec.plant ?? null,
+      schemaVersion: rec.schemaVersion || 1,
+      count: v2 && Array.isArray(rec.tasks) ? rec.tasks.length : null,
+      fp,
+    };
+  }
+
   /* ==========================================================================
      TIME MACHINE — durable IndexedDB snapshot history
      ========================================================================== */
-  // In-memory history cap; matches the IndexedDB prune (IntelDB.pruneSnapshots(200)).
+  // History cap PER PLANT, in memory and in IndexedDB (IntelDB.pruneSnapshots(cap, plant)): one busy plant's snapshots
+  // never evict another plant's. 50+ plants x this cap of small metadata rows is what boot may load.
   const TM_MAX_SNAPSHOTS = 200;
+  const TM_META_LOAD_LIMIT = 10000;
+  const TM_BODY_CACHE = 4;
   let timeMachineOpener = null;
+
+  // Newest `cap` entries per plant, oldest-first order kept. Rows with no plant share one group.
+  function trimPerPlant(list, cap) {
+    const seen = new Map();
+    const keep = new Array(list.length);
+    let dropped = 0;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const key = list[i].plant ?? null;
+      const n = (seen.get(key) || 0) + 1;
+      seen.set(key, n);
+      keep[i] = n <= cap;
+      if (!keep[i]) dropped++;
+    }
+    return dropped ? list.filter((_, i) => keep[i]) : list;
+  }
+  const idle = fn => { if (typeof window !== 'undefined' && window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 2000 }); else setTimeout(fn, 0); };
 
   // Does `line` still exist in `plant`: a master-data machine of the plant, a machine the plant's line settings
   // claim, or one that still carries orders there (the Gantt lists all three).
@@ -1438,13 +1551,17 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           TimeMachine._snapshotAuto(evt.type === 'tasks:bulk' ? 'Data loaded' : 'Bulk update');
         }
       });
-      IntelDB.getNewest('snapshots', 'ts', TM_MAX_SNAPSHOTS).then(rows => {
+      // Metadata only: the task bodies stay in IndexedDB until a restore or a diff asks for one (tasksOf).
+      IntelDB.getNewest('snapshot_meta', 'ts', TM_META_LOAD_LIMIT).then(rows => {
         // Merge, don't replace: a snapshot taken while this read was in flight is already in memory (and in the store).
         const loaded = rows || [];
         const loadedTs = new Set(loaded.map(s => s.ts));
         const early = TimeMachine._snapshots.filter(s => !loadedTs.has(s.ts));
         const merged = (early.length ? loaded.concat(early) : loaded.slice()).sort((a, b) => a.ts - b.ts);
-        TimeMachine._snapshots = merged.length > TM_MAX_SNAPSHOTS ? merged.slice(merged.length - TM_MAX_SNAPSHOTS) : merged;
+        TimeMachine._snapshots = trimPerPlant(merged, TM_MAX_SNAPSHOTS);
+        // Seed the dedupe fingerprint with each plant's newest snapshot (never over one taken this session).
+        for (const s of TimeMachine._snapshots) if (s.fp) TimeMachine.lastFp.set(s.plant ?? null, s.fp);
+        for (const [plant, fp] of TimeMachine.sessionFp) TimeMachine.lastFp.set(plant, fp);
       }).catch(e => {
         (window.NIMBUS && window.NIMBUS.ErrorLog
           ? window.NIMBUS.ErrorLog.warn('intel', 'TimeMachine history load failed', { err: String(e), errorCode: 'internal' })
@@ -1452,29 +1569,84 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       });
     },
 
+    // Counters the tests (and a curious console) read: rows built, snapshots skipped as unchanged, bodies fetched.
+    stats: { rowsBuilt: 0, deduped: 0, bodyReads: 0 },
+    lastFp: new Map(),       // plant -> fingerprint of that plant's newest snapshot
+    sessionFp: new Map(),    // plant -> fingerprint of a snapshot taken since boot (survives the boot-time seed)
+    bodyCache: new Map(),    // snapshot id -> task rows, the last few fetched
+    autoPending: false,
+    autoLabel: '',
+
+    // A manual snapshot (an explicit checkpoint) is built and returned at once. An auto snapshot is built off the call
+    // stack, in idle time, so a bulk event never blocks the main thread; it returns null (nothing exists yet), and is
+    // skipped when the plant's schedule is unchanged since its previous snapshot.
     snapshot(label, opts = {}) {
-      const snap = {
+      if (!opts.auto) return TimeMachine.take(label, false);
+      TimeMachine.autoLabel = label;
+      if (TimeMachine.autoPending) return null;   // one pending build sees the latest state whichever event asked
+      TimeMachine.autoPending = true;
+      const plant = Store.selectedPlant || null;
+      idle(() => {
+        TimeMachine.autoPending = false;
+        // The world may have moved on while this waited: a What-If session, or another plant selected.
+        if (NIMBUS.Sandbox?.active || (Store.selectedPlant || null) !== plant) return;
+        TimeMachine.take(TimeMachine.autoLabel, true);
+      });
+      return null;
+    },
+
+    take(label, auto) {
+      const plant = Store.selectedPlant || null;
+      const live = Store.tasksForSelectedPlant();
+      const fp = fingerprintLive(live);
+      if (auto && TimeMachine.lastFp.get(plant) === fp) { TimeMachine.stats.deduped++; return null; }
+      const tasks = live.map(snapshotTask);
+      TimeMachine.stats.rowsBuilt++;
+      TimeMachine.lastFp.set(plant, fp);
+      TimeMachine.sessionFp.set(plant, fp);
+      const meta = {
         ts:    Date.now(),
         label: (label || 'Snapshot').substring(0, 80),
-        auto:  !!opts.auto,
-        plant: Store.selectedPlant || null,
+        auto:  !!auto,
+        plant,
         schemaVersion: 2,
-        tasks: Store.tasksForSelectedPlant().map(snapshotTask)
+        count: tasks.length,
+        fp,
       };
-      IntelDB.put('snapshots', snap).then(id => {
-        snap.id = id || snap.id;
+      const snap = { ...meta, tasks };
+      IntelDB.putSnapshot(snap, meta).then(id => {
+        // With a database the in-memory entry is metadata only (the body is read back by id when needed); without one
+        // the session's history is the only copy, so the entry keeps its rows.
+        const entry = id == null ? snap : { ...meta, id };
+        if (id != null) snap.id = id;
         // The history load may have read this very row back already (it merges by ts): never list it twice.
-        if (snap.id == null || !TimeMachine._snapshots.some(s => s.id === snap.id && s.ts === snap.ts)) TimeMachine._snapshots.push(snap);
-        if (TimeMachine._snapshots.length > TM_MAX_SNAPSHOTS) {
-          TimeMachine._snapshots.splice(0, TimeMachine._snapshots.length - TM_MAX_SNAPSHOTS);
-        }
-        IntelDB.pruneSnapshots(TM_MAX_SNAPSHOTS);
+        if (id == null || !TimeMachine._snapshots.some(s => s.id === id && s.ts === snap.ts)) TimeMachine._snapshots.push(entry);
+        TimeMachine._snapshots = trimPerPlant(TimeMachine._snapshots, TM_MAX_SNAPSHOTS);
+        IntelDB.pruneSnapshots(TM_MAX_SNAPSHOTS, plant);
       }).catch(e => {
         (window.NIMBUS && window.NIMBUS.ErrorLog
           ? window.NIMBUS.ErrorLog.warn('intel', 'TimeMachine snapshot persist failed', { err: String(e), errorCode: 'internal' })
           : console.warn('[TimeMachine] snapshot persist failed', e));
       });
       return snap;
+    },
+
+    // The task rows of one snapshot: inline (a snapshot taken this session without a database, or an old in-memory
+    // record) or read back from IndexedDB by id. Resolves null when the body is gone.
+    tasksOf(snap) {
+      if (Array.isArray(snap.tasks)) return Promise.resolve(snap.tasks);
+      if (snap.id == null) return Promise.resolve(null);
+      const cached = TimeMachine.bodyCache.get(snap.id);
+      if (cached) return Promise.resolve(cached);
+      TimeMachine.stats.bodyReads++;
+      return IntelDB.get('snapshots', snap.id).then(rec => {
+        const rows = Array.isArray(rec?.tasks) ? rec.tasks : null;
+        if (rows) {
+          TimeMachine.bodyCache.set(snap.id, rows);
+          if (TimeMachine.bodyCache.size > TM_BODY_CACHE) TimeMachine.bodyCache.delete(TimeMachine.bodyCache.keys().next().value);
+        }
+        return rows;
+      });
     },
 
     // Returns snapshots scoped to the currently selected plant.
@@ -1546,6 +1718,22 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const plant = Store.selectedPlant;
       const snap = plant && TimeMachine._snapshots.find(s => s.ts === ts && s.plant === plant);
       if (!snap) { Toast.show(t('toast.snapshot_not_found'), 'error'); return; }
+      // Rows held inline restore at once; otherwise the body is read back by id first (the click is the only moment
+      // that cost is paid). A body that is gone, or a plant switched meanwhile, is reported / dropped.
+      if (Array.isArray(snap.tasks)) return TimeMachine.applyRestore(snap, snap.tasks, plant, ts);
+      return TimeMachine.tasksOf(snap).then(rows => {
+        if (Store.selectedPlant !== plant) return;
+        if (!rows) { Toast.show(t('toast.snapshot_not_found'), 'error'); return; }
+        TimeMachine.applyRestore(snap, rows, plant, ts);
+      }).catch(e => {
+        Toast.show(t('toast.snapshot_not_found'), 'error');
+        (window.NIMBUS && window.NIMBUS.ErrorLog
+          ? window.NIMBUS.ErrorLog.warn('intel', 'TimeMachine snapshot read failed', { err: String(e), errorCode: 'internal' })
+          : console.warn('[TimeMachine] snapshot read failed', e));
+      });
+    },
+
+    applyRestore(snap, rows, plant, ts) {
       const scopedIds = new Set(Store.tasksForSelectedPlant().map(task => String(task.id)));
       const routing = !!Store.masterData?.plants?.some(p => p.plant === plant && p.routing_runtime_enabled);
       let skipped = 0;
@@ -1554,7 +1742,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       // stale and the engine re-derives the start from the finish under the current run time. The MACHINE comes
       // back with it (restoreRowPatch): an order moved to another machine since the snapshot returns to the old one.
       const patches = [];
-      for (const s of snap.tasks) {
+      for (const s of rows) {
         const task = Store.tasks[s.id];
         if (!task || !scopedIds.has(String(s.id))) continue;
         // Bulk history restore has no explicit protection override or atomic
@@ -2309,7 +2497,12 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
      ========================================================================== */
   // Version 1 snapshots were labelled by selected plant but contained every
   // loaded task. Infer legacy row ownership only from unambiguous evidence.
-  function scopeSnapshotTasks(snapshot, plant) {
+  // machine -> the plants it is known in. Built once per Store revision and shared by every snapshot scoped in that
+  // time (the Diff dialog scopes up to 40 snapshots per open); it walks every master-data line and every order.
+  const machinePlantsMemo = { rev: null, map: null };
+  function machinePlantsMap() {
+    const rev = typeof Store.rev === 'function' ? Store.rev() : null;
+    if (machinePlantsMemo.map && rev != null && machinePlantsMemo.rev === rev) return machinePlantsMemo.map;
     const machinePlants = new Map();
     const remember = (machine, owner) => {
       if (!machine || !owner) return;
@@ -2319,6 +2512,15 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     for (const row of Store.masterData?.lines || []) remember(row.machine, row.plant);
     for (const [machine, settings] of Object.entries(Store.lineSettings || {})) remember(machine, settings.plant);
     for (const task of Store.tasksArr) remember(task.MACHINE, task.PLANT);
+    machinePlantsMemo.rev = rev;
+    machinePlantsMemo.map = machinePlants;
+    return machinePlants;
+  }
+
+  function scopeSnapshotTasks(snapshot, plant) {
+    // A version 2 snapshot of this plant holds only this plant's orders already: nothing to infer, nothing to walk.
+    if (snapshot.schemaVersion >= 2 && snapshot.plant === plant) return { tasks: snapshot.tasks || [], unknown: 0 };
+    const machinePlants = machinePlantsMap();
     let unknown = 0;
     const tasks = (snapshot.tasks || []).filter(task => {
       let owner = task.PLANT || null;
@@ -2333,6 +2535,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     });
     return { tasks, unknown };
   }
+
+  // Result rows rendered before the rest wait behind a "show N more" button: a plant-wide re-optimization can differ
+  // by thousands of rows, and building them all is one long main-thread task.
+  const DIFF_ROW_CAP = 200;
 
   const Diff = {
     _fmtDate(ms) {
@@ -2438,7 +2644,13 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       };
     },
 
-    _renderResults(d) {
+    // Renders at most `limit` rows (rescheduled first, largest shift first, then added, then removed); the rest sit
+    // behind a "show N more" button the caller wires (data-diff-more) to re-render with no limit.
+    _renderResults(d, limit = DIFF_ROW_CAP) {
+      const movedShown   = d.moved.slice(0, limit);
+      const addedShown   = d.added.slice(0, Math.max(0, limit - movedShown.length));
+      const removedShown = d.removed.slice(0, Math.max(0, limit - movedShown.length - addedShown.length));
+      const hidden = (d.moved.length - movedShown.length) + (d.added.length - addedShown.length) + (d.removed.length - removedShown.length);
       const esc = s => String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
       const statStrip = `
@@ -2457,7 +2669,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           </div>
         </div>`;
 
-      const rowMoved = d.moved.map(m => {
+      const rowMoved = movedShown.map(m => {
         const dir   = m.delta > 0 ? 'later' : 'earlier';
         const arrow = m.delta > 0 ? '▶' : '◀';
         const linePart = m.lineChanged
@@ -2483,7 +2695,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         </div>`;
       }).join('');
 
-      const rowAdded = d.added.map(a => `
+      const rowAdded = addedShown.map(a => `
         <div class="ni-diff-row ni-diff-row-added">
           <div class="ni-diff-row-top">
             <span class="ni-diff-po">${esc(a.PRODUCTION_ORDER)}</span>
@@ -2496,7 +2708,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           </div>
         </div>`).join('');
 
-      const rowRemoved = d.removed.map(r => `
+      const rowRemoved = removedShown.map(r => `
         <div class="ni-diff-row ni-diff-row-removed">
           <div class="ni-diff-row-top">
             <span class="ni-diff-po">${esc(r.PRODUCTION_ORDER)}</span>
@@ -2522,9 +2734,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       return `
         ${statStrip}
         ${lineLines ? `<div class="ni-diff-line-summary">${lineLines}</div>` : ''}
-        ${d.moved.length   ? `<div class="ni-diff-section-hd">Rescheduled <span class="ni-diff-section-ct">${d.moved.length}</span></div>${rowMoved}` : ''}
-        ${d.added.length   ? `<div class="ni-diff-section-hd">Added to schedule <span class="ni-diff-section-ct">${d.added.length}</span></div>${rowAdded}` : ''}
-        ${d.removed.length ? `<div class="ni-diff-section-hd">Removed from schedule <span class="ni-diff-section-ct">${d.removed.length}</span></div>${rowRemoved}` : ''}
+        ${movedShown.length   ? `<div class="ni-diff-section-hd">Rescheduled <span class="ni-diff-section-ct">${d.moved.length}</span></div>${rowMoved}` : ''}
+        ${addedShown.length   ? `<div class="ni-diff-section-hd">Added to schedule <span class="ni-diff-section-ct">${d.added.length}</span></div>${rowAdded}` : ''}
+        ${removedShown.length ? `<div class="ni-diff-section-hd">Removed from schedule <span class="ni-diff-section-ct">${d.removed.length}</span></div>${rowRemoved}` : ''}
+        ${hidden ? `<button type="button" class="btn btn-ghost sm" data-diff-more style="margin:8px 0">${esc(t('ui.diff_show_more', { count: hidden }))}</button>` : ''}
         ${!d.moved.length && !d.added.length && !d.removed.length
           ? '<div style="color:var(--fg-mute);font-size:12.5px;padding:8px 0">No differences — schedules are identical.</div>' : ''}`;
     },
@@ -2541,7 +2754,10 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         const badge = s.auto
           ? '<span class="ni-diff-snap-badge auto">auto</span>'
           : '<span class="ni-diff-snap-badge manual">manual</span>';
-        const scopedCount = scopeSnapshotTasks(s, plant).tasks.length;
+        // A version 2 snapshot of this plant needs no scoping: its stored count is the answer. Anything else is
+        // scoped only when its rows are already in memory (never fetched just to label a list row).
+        const scopedCount = s.schemaVersion >= 2 && s.plant === plant && s.count != null ? s.count
+          : (Array.isArray(s.tasks) ? scopeSnapshotTasks(s, plant).tasks.length : 0);
         const taskCt = scopedCount ? `${scopedCount} orders` : '';
         return `<button type="button" class="ni-diff-snap-row${i === 0 ? ' ni-diff-snap-sel' : ''}" aria-pressed="${i === 0}" data-ts="${s.ts}">
           <span class="ni-diff-snap-ago">${TimeMachine._relTime(s.ts)}</span>
@@ -2580,19 +2796,37 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       dlg.querySelector('#ni-diff-close').addEventListener('click',  () => dlg.close());
       dlg.querySelector('#ni-diff-close2').addEventListener('click', () => dlg.close());
 
+      let runToken = 0;   // a slow body read for an earlier click must not overwrite a later one
       const runDiff = ts => {
         const snap = snaps.find(s => s.ts === ts);
-        if (!snap) return;
-        const curr = Store.tasksForSelectedPlant().map(snapshotTask);
-        const historical = scopeSnapshotTasks(snap, plant);
-        const d = Diff.compute(historical.tasks, curr);
-        const notice = historical.unknown
-          ? `<p role="status">${Util.escapeHtml(t('intel.snapshot_scope_unknown', { count: historical.unknown }))}</p>` : '';
-        const hasChanges = d.moved.length || d.added.length || d.removed.length;
-        // Unknown rows are deliberately omitted, so do not claim identical
-        // schedules merely because all known rows happen to match.
-        document.getElementById('ni-diff-out').innerHTML = notice
-          + (hasChanges || !historical.unknown ? Diff._renderResults(d) : '');
+        if (!snap) return Promise.resolve();
+        const token = ++runToken;
+        // Rows held in memory render at once; a body kept only in IndexedDB is read back by id first.
+        const show = rows => {
+          if (token !== runToken) return;
+          const out = document.getElementById('ni-diff-out');
+          if (!out) return;
+          if (!rows) { out.innerHTML = `<p role="status">${Util.escapeHtml(t('toast.snapshot_not_found'))}</p>`; return; }
+          const curr = Store.tasksForSelectedPlant().map(snapshotTask);
+          const historical = scopeSnapshotTasks({ ...snap, tasks: rows }, plant);
+          const d = Diff.compute(historical.tasks, curr);
+          const notice = historical.unknown
+            ? `<p role="status">${Util.escapeHtml(t('intel.snapshot_scope_unknown', { count: historical.unknown }))}</p>` : '';
+          const hasChanges = d.moved.length || d.added.length || d.removed.length;
+          // Unknown rows are deliberately omitted, so do not claim identical
+          // schedules merely because all known rows happen to match.
+          const paint = limit => {
+            out.innerHTML = notice + (hasChanges || !historical.unknown ? Diff._renderResults(d, limit) : '');
+            out.querySelector('[data-diff-more]')?.addEventListener('click', () => paint(Infinity));
+          };
+          paint(DIFF_ROW_CAP);
+        };
+        if (Array.isArray(snap.tasks)) return Promise.resolve(show(snap.tasks));
+        return TimeMachine.tasksOf(snap).then(show).catch(e => {
+          (window.NIMBUS && window.NIMBUS.ErrorLog
+            ? window.NIMBUS.ErrorLog.warn('intel', 'Diff snapshot read failed', { err: String(e), errorCode: 'internal' })
+            : console.warn('[Diff] snapshot read failed', e));
+        });
       };
 
       // Wire up snapshot row clicks

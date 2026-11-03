@@ -474,6 +474,7 @@ window.__NIMBUS_LOCALES.pt = {
   'ui.diff_kind_machine':              'Máquina',
   'ui.diff_kind_split':                'Dividida',
   'ui.diff_finish_delta':              'fim {{delta}}',
+  'ui.diff_show_more':                 'Mostrar mais {{count}}',
   'ui.no_results':                     'Sem resultados',
   'ui.all_lines':                      'Todas as Máquinas',
   'ui.no_lines':                       'Sem máquinas',
