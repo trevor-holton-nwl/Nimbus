@@ -1038,19 +1038,12 @@ interface SearchRun {
 /** True when a `SearchRun` reached a real, trustworthy conclusion — either it
  * fully completed or it converged with a confirmed winner (Phase 1e) — as
  * opposed to being cut off mid-enumeration by 'deadline'/'iteration-cap' with
- * no guarantee the result is final. Boundary-fallback enumeration (below)
- * must treat both the same: a fallback/continuation run that converged with
- * a real winner is a legitimate, usable result, not a truncated one — using
- * the strict `=== 'completed'` check on its own would silently discard a
- * converged winner and fall through to inferior unknown-tail placement.
- * Exported (rather than kept module-private like most helpers here) solely
- * so this exact truth table can be pinned by a direct unit test — see
- * tests/modules/setup-scheduler.test.mjs for why: `supportsBoundaryFallback`
- * (below) is provably unreachable with `run.winner === null` under current
- * `candidateForSequence` semantics, so the boundary-fallback branches that
- * consume this predicate cannot be driven through the public
- * `evaluateDueDateFirst`/`evaluateSptWithSetup` API to prove the fix
- * end-to-end. */
+ * no guarantee the result is final.
+ * Exported solely so this exact truth table can be pinned by a direct unit
+ * test (tests/modules/setup-scheduler.test.mjs); the firmed-boundary fallback
+ * branches that were its only production consumers were deleted as
+ * unreachable (`candidateForSequence` never returns an infeasible candidate
+ * carrying only coverage edges, so no run with `winner === null` qualified). */
 export function isSearchConclusive(termination: SearchRun['termination']): boolean {
   return termination === 'completed' || termination === 'converged';
 }
@@ -3172,8 +3165,7 @@ function compareCandidate(left: DueDateCandidate, right: DueDateCandidate,
   // (identical states resolve implicit-zero/covered), so the cap must outrank
   // it or "pushed 30 days out to save a changeover" persists. Hard
   // feasibility (score[0]) and the priority tree (policyKey) still come
-  // first. `compareBoundaryFallback` calls this without `mode`; that's fine —
-  // this tier sits before the mode-permuted terms below.
+  // first. This tier sits before the mode-permuted terms below.
   const overCapDelta = (left.score[SCORE_OVER_CAP] ?? 0) - (right.score[SCORE_OVER_CAP] ?? 0);
   if (overCapDelta) return overCapDelta;
   // Coverage tier (A2): compared outside the mode-permuted `terms` list below
@@ -3588,8 +3580,7 @@ function candidateForSequence(
         // capacity fact about a covered transition, not a coverage gap).
         // The reason stays UNCOVERED_SETUP_TRANSITION_REASON (resolved.reason)
         // rather than 'scheduled-without-setup': this is the firmed order's own
-        // incoming edge, not an order this call placed, and
-        // `candidateEntersBoundaryUncovered` keys on this exact reason.
+        // incoming edge, not an order this call placed.
         uncoveredEdgeCount += 1;
         missingEdges.push({
           line,
@@ -4558,8 +4549,6 @@ function boundaryOverrideLocks(
       if (!successor) {
         // A removed successor is reported by missingSuccessorOverrideEdges;
         // it does not justify freezing unrelated remaining work on the line.
-        if (!firmedById.has(override.successor_order_id)) continue;
-        conflict(taskId(predecessorFirmed.task), override.successor_order_id);
         continue;
       }
       const lock = lockFor(taskId(predecessorFirmed.task));
@@ -4675,303 +4664,6 @@ function belongsBeforeFirmedBoundary(task: NimbusTask, boundary: FirmedBoundary,
   // date must not pre-partition work behind the next firmed order; bounded
   // fragment placement decides what capacity can actually be admitted first.
   return true;
-}
-
-/** Represent whole free components that may safely defer around a firmed
- * boundary. A reroute is permitted only for a coverage failure or for setup
- * capacity that cannot fit before the boundary; an active free/free component
- * always moves together. */
-interface BoundaryFallbackOption {
-  retained: NimbusTask[];
-  deferred: NimbusTask[];
-}
-
-/** Only setup-coverage and firmed incoming-capacity failures can safely try a
- * different obstacle-free fragment admission. Broken override bindings and
- * unknown states remain hard failures rather than excuses to drop work. */
-function supportsBoundaryFallback(run: Readonly<SearchRun>): boolean {
-  return run.missingEdges.length > 0 && run.missingEdges.every(edge => (
-    edge.reason === UNCOVERED_SETUP_TRANSITION_REASON
-    || edge.reason === 'incoming-firmed-setup-infeasible'
-  ));
-}
-
-/** F3b secondary hardening: Part 1f's incoming-boundary leniency means
- * `candidateForSequence` still reports `feasible: true` for a fragment whose
- * LAST order's transition into `fragment.nextFirmed` is uncovered — it just
- * skips the reservation and pushes a diagnostic edge rather than freezing.
- * That is correct for the covered-core search itself, but the non-terminal
- * fallback-ambiguity count below must not treat such a "leniently tolerated"
- * route as equally genuine to one whose incoming reservation is actually
- * covered — otherwise a single order that can never really enter this
- * boundary (e.g. RED when only BLUE -> firmed is covered) counts as a second
- * "feasible" route and manufactures a false ambiguity where only one real
- * route exists. */
-function candidateEntersBoundaryUncovered(
-  candidate: Readonly<DueDateCandidate>,
-  boundaryTaskId: string,
-): boolean {
-  return candidate.missingEdges.some(edge => (
-    edge.successorOrderId === boundaryTaskId && edge.reason === UNCOVERED_SETUP_TRANSITION_REASON
-  ));
-}
-
-interface BoundaryFallbackComponentPlan {
-  components: string[][];
-  removable: boolean[];
-}
-
-/** Resolve the deterministic ordered free components eligible for a local
- * firmed-boundary fallback. A component is atomic: active free/free overrides
- * may never be split across a boundary, and required boundary endpoints can
- * never be deferred. */
-function boundaryFallbackComponentPlan(
-  snapshot: Readonly<ScheduleSnapshot>,
-  bounds: Readonly<DueDateFirstBounds>,
-  line: string,
-  admitted: ReadonlyArray<NimbusTask>,
-  fragment: Readonly<FragmentContext>,
-  freeComponents: ReadonlyMap<string, ReadonlySet<string>>,
-  mode: FragmentMode,
-): BoundaryFallbackComponentPlan | null {
-  if (!fragment.nextFirmed || !admitted.length) return null;
-  const baseOrder = mode === 'spt'
-    ? orderedByProductiveRuntime(admitted)
-    : mode === 'due-date'
-      ? orderedByDueThenPolicy(snapshot, bounds.setup.plant, line, admitted, bounds.runContext)
-      : orderedByPolicyThenDue(snapshot, bounds.setup.plant, line, admitted, bounds.runContext);
-  const adjacency = fragmentAdjacency(bounds, line, admitted, fragment);
-  const sequence = orderWithAdjacency(baseOrder, fragment, adjacency);
-  if (!sequence) return null;
-  const admittedIds = new Set(admitted.map(taskId));
-  const protectedIds = new Set([
-    fragment.requiredFirstOrderId,
-    fragment.requiredLastOrderId,
-  ].filter((id): id is string => Boolean(id)));
-  const seenComponents = new Set<string>();
-  const components: string[][] = [];
-
-  for (const task of sequence) {
-    const id = taskId(task);
-    const component = freeComponents.get(id) ?? new Set([id]);
-    const members = [...component].sort();
-    const componentKey = members.join('\u0000');
-    if (seenComponents.has(componentKey)) continue;
-    seenComponents.add(componentKey);
-    components.push(members);
-  }
-
-  return {
-    components,
-    removable: components.map(members => (
-      members.every(member => admittedIds.has(member) && !protectedIds.has(member))
-    )),
-  };
-}
-
-function fallbackOptionForDeferredIds(
-  admitted: ReadonlyArray<NimbusTask>,
-  deferredIds: ReadonlySet<string>,
-): BoundaryFallbackOption | null {
-  if (!deferredIds.size) return null;
-  const retained = admitted.filter(task => !deferredIds.has(taskId(task)));
-  const deferred = admitted.filter(task => deferredIds.has(taskId(task)));
-  return deferred.length ? { retained, deferred } : null;
-}
-
-/** Pure SPT remains limited to its established deterministic suffix fallback:
- * productive runtime selected the sequence, so setup coverage cannot introduce
- * a hidden alternate-order objective. */
-function sptBoundaryFallbackOptions(
-  snapshot: Readonly<ScheduleSnapshot>,
-  bounds: Readonly<DueDateFirstBounds>,
-  line: string,
-  admitted: ReadonlyArray<NimbusTask>,
-  fragment: Readonly<FragmentContext>,
-  freeComponents: ReadonlyMap<string, ReadonlySet<string>>,
-): BoundaryFallbackOption[] {
-  const plan = boundaryFallbackComponentPlan(
-    snapshot, bounds, line, admitted, fragment, freeComponents, 'spt',
-  );
-  if (!plan) return [];
-  const options: BoundaryFallbackOption[] = [];
-
-  const suffixDeferredIds = new Set<string>();
-  for (let index = plan.components.length - 1; index >= 0; index -= 1) {
-    const members = plan.components[index];
-    // A component that already straddles a boundary or contains a required
-    // endpoint cannot participate in a cumulative suffix.
-    if (!plan.removable[index]) break;
-    for (const member of members) suffixDeferredIds.add(member);
-    const option = fallbackOptionForDeferredIds(admitted, suffixDeferredIds);
-    if (option) options.push(option);
-  }
-  return options;
-}
-
-interface BoundaryFallbackCursor {
-  next(): BoundaryFallbackOption | null;
-  readonly termination: SearchRun['termination'];
-}
-
-/** Enumerate every non-empty subset of removable Due-date-first components
- * lazily in deterministic cardinality/sequence order. One unit of the shared
- * search budget is charged before each subset, so an exponential combination
- * space cannot escape the caller's existing cap or deadline. Phase 1.5
- * budget-honesty check (requirement 5): the `budget` passed in here is the
- * SAME `SearchBudget` object `evaluateLineWithFirmedBoundaries` received as a
- * parameter (constructed once per line by its caller) — and every
- * `searchFragment` continuation run triggered per component-subset option
- * below (both the terminal-boundary and non-terminal-boundary branches)
- * reuses that identical object reference too, never a fresh one. Confirmed
- * by inspection, not by a code change: nothing here needed fixing.
- *
- * `mode` (2026-09-09, due-date mode): despite the name/comment predating it,
- * this is reached by every non-`'spt'` mode, not only `'due-date-first'` —
- * `evaluateLineWithFirmedBoundaries` calls it for `'min-changeover'`/
- * `'throughput'`/`'due-date'` too. It is threaded straight through to
- * `boundaryFallbackComponentPlan` (rather than the previously hardcoded
- * `'due-date-first'` literal) purely so that call picks
- * `orderedByDueThenPolicy` over `orderedByPolicyThenDue` for `'due-date'`;
- * every other mode maps to the same `orderedByPolicyThenDue` branch either
- * way, so this is a no-op for them. */
-function dueDateBoundaryFallbackCursor(
-  snapshot: Readonly<ScheduleSnapshot>,
-  bounds: Readonly<DueDateFirstBounds>,
-  line: string,
-  admitted: ReadonlyArray<NimbusTask>,
-  fragment: Readonly<FragmentContext>,
-  freeComponents: ReadonlyMap<string, ReadonlySet<string>>,
-  budget: SearchBudget,
-  mode: FragmentMode,
-): BoundaryFallbackCursor {
-  const plan = boundaryFallbackComponentPlan(
-    snapshot, bounds, line, admitted, fragment, freeComponents, mode,
-  );
-  const removableComponents = plan
-    ? plan.components.filter((_, index) => plan.removable[index])
-    : [];
-  let subsetSize = removableComponents.length ? 1 : 0;
-  let subsetIndexes = subsetSize ? [0] : [];
-  let exhausted = !subsetSize;
-  let termination: SearchRun['termination'] = 'completed';
-
-  const advance = (): void => {
-    for (let index = subsetIndexes.length - 1; index >= 0; index -= 1) {
-      const maxIndex = removableComponents.length - subsetIndexes.length + index;
-      if (subsetIndexes[index] < maxIndex) {
-        subsetIndexes[index] += 1;
-        for (let trailing = index + 1; trailing < subsetIndexes.length; trailing += 1) {
-          subsetIndexes[trailing] = subsetIndexes[trailing - 1] + 1;
-        }
-        return;
-      }
-    }
-    subsetSize += 1;
-    if (subsetSize > removableComponents.length) {
-      exhausted = true;
-      return;
-    }
-    subsetIndexes = Array.from({ length: subsetSize }, (_, index) => index);
-  };
-
-  return {
-    get termination(): SearchRun['termination'] {
-      return termination;
-    },
-    next(): BoundaryFallbackOption | null {
-      if (exhausted) return null;
-      if (bounds.clock() >= bounds.deadline) {
-        termination = 'deadline';
-        exhausted = true;
-        return null;
-      }
-      if (!consumeSearchIteration(budget)) {
-        termination = 'iteration-cap';
-        exhausted = true;
-        return null;
-      }
-      const deferredIds = new Set<string>();
-      for (const index of subsetIndexes) {
-        for (const id of removableComponents[index]) deferredIds.add(id);
-      }
-      advance();
-      return fallbackOptionForDeferredIds(admitted, deferredIds);
-    },
-  };
-}
-
-interface EvaluatedBoundaryFallback {
-  option: BoundaryFallbackOption;
-  run: SearchRun;
-  continuation?: SearchRun;
-  candidate: DueDateCandidate;
-}
-
-/** A final-boundary fallback can be scored only after its deferred work has
- * been evaluated from the firmed order's outgoing state. Rebuild its complete
- * free-order candidate from actual patches so partially admitted pre-firmed
- * work is not counted twice in policy or admitted-work scoring. */
-function completeFinalBoundaryCandidate(
-  snapshot: Readonly<ScheduleSnapshot>,
-  bounds: Readonly<DueDateFirstBounds>,
-  line: string,
-  tasksById: ReadonlyMap<string, NimbusTask>,
-  preFirmed: DueDateCandidate,
-  continuation: DueDateCandidate,
-): DueDateCandidate {
-  const patches = [...preFirmed.patches, ...continuation.patches];
-  const orderedTasks = patches.map(patch => tasksById.get(patch.id)!);
-  const joinKey = (left: string, right: string): string => (
-    left && right ? `${left}\u0000${right}` : left || right
-  );
-  return {
-    feasible: true,
-    patches,
-    score: [
-      0,
-      policyScore(snapshot, bounds.setup.plant, line, orderedTasks, bounds.runContext),
-      (preFirmed.score[2] ?? 0) + (continuation.score[2] ?? 0),
-      (preFirmed.score[3] ?? 0) + (continuation.score[3] ?? 0),
-      -patches.length,
-      (preFirmed.score[5] ?? 0) + (continuation.score[5] ?? 0),
-      // A2: sum both halves' uncovered-edge counts — required, since
-      // compareBoundaryFallback routes through compareCandidate, which reads
-      // score[SCORE_UNCOVERED] directly.
-      (preFirmed.score[SCORE_UNCOVERED] ?? 0) + (continuation.score[SCORE_UNCOVERED] ?? 0),
-      // Due-date push-forward limit: sum both halves' over-cap counts for the
-      // same reason — compareCandidate reads score[SCORE_OVER_CAP] directly,
-      // and it is compared even earlier than score[SCORE_UNCOVERED] above.
-      (preFirmed.score[SCORE_OVER_CAP] ?? 0) + (continuation.score[SCORE_OVER_CAP] ?? 0),
-    ],
-    policyKey: policyKeyForSequence(snapshot, bounds.setup.plant, line, orderedTasks, bounds.runContext),
-    sequenceKey: joinKey(preFirmed.patches.map(patch => patch.id).join('|'), continuation.patches.map(patch => patch.id).join('|')),
-    unadmitted: [],
-    explanation: [...preFirmed.explanation, ...continuation.explanation],
-    missingEdges: [...preFirmed.missingEdges, ...continuation.missingEdges],
-    productiveRuntimeKey: productiveRuntimeKey(orderedTasks),
-    productiveRuntimeMinutes: productiveRuntimeTotal(orderedTasks),
-    maxLatenessMinutes: Math.max(preFirmed.maxLatenessMinutes ?? 0, continuation.maxLatenessMinutes ?? 0),
-    instabilityMinutes: (preFirmed.instabilityMinutes ?? 0) + (continuation.instabilityMinutes ?? 0),
-    ...(preFirmed.setupExclusions || continuation.setupExclusions
-      ? { setupExclusions: new Map([...(preFirmed.setupExclusions ?? []), ...(continuation.setupExclusions ?? [])]) }
-      : {}),
-  };
-}
-
-/** Final-boundary alternatives represent complete candidates, so they use the
- * same immutable lexicographic comparison as normal Due-date-first search.
- * The deferred-id key is only a deterministic tie-break after that
- * comparison. `mode` is forwarded to `compareCandidate` (2026-09-09, due-date
- * mode) so a terminal-boundary fallback comparison for `'due-date'` uses
- * `compareDueDateCandidate` too, instead of always defaulting to
- * `'due-date-first'`'s tier order. */
-function compareBoundaryFallback(
-  left: Readonly<EvaluatedBoundaryFallback>, right: Readonly<EvaluatedBoundaryFallback>, mode: FragmentMode,
-): number {
-  const candidateDelta = compareCandidate(left.candidate, right.candidate, mode);
-  if (candidateDelta) return candidateDelta;
-  return left.option.deferred.map(taskId).join('\u0000').localeCompare(right.option.deferred.map(taskId).join('\u0000'));
 }
 
 export interface UnknownTailPlacement {
@@ -5188,12 +4880,10 @@ function tailCapacityEnd(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
-  fragmentEnd: Date,
-  nextFirmed: FirmedBoundary | undefined,
+  nextFirmed: FirmedBoundary,
   finalState: SetupStateKey | null,
   finalPredecessorOrderId: string | null,
 ): Date {
-  if (!nextFirmed) return fragmentEnd;
   // Under plantDefaultMinutes an unresolvable edge (null state on either side, or an uncovered pair) still
   // reserves the plant default, the same charge `validateCandidate` makes. Under zero/excludeFromSearch
   // `chargedSetupMinutes` is 0, so tail capacity simply runs to the boundary's start as before.
@@ -5502,15 +5192,6 @@ function evaluateLineWithFirmedBoundaries(
 
   for (let boundaryIndex = 0; boundaryIndex < firmed.length; boundaryIndex += 1) {
     const boundary = firmed[boundaryIndex];
-    // F3: only a fragment before a LATER firmed boundary needs the caller to
-    // own arbitration — that is the "cannot legitimately rank two
-    // alternatives ahead of later firmed boundaries" scenario the ambiguity
-    // guard below exists for. The terminal boundary's local fallback already
-    // compares every complete candidate directly (no separate ambiguity
-    // guard is needed there), so letting its own per-boundary run resolve
-    // coverage via demotion first — exactly like the trailing fragment —
-    // is safe and matches every other never-freeze fragment's behavior.
-    const isTerminalBoundary = boundaryIndex === firmed.length - 1;
     const boundaryLock = locks.get(taskId(boundary.task));
     if (boundaryLock?.issue) {
       return unchangedLineResult(
@@ -5674,282 +5355,12 @@ function evaluateLineWithFirmedBoundaries(
       requiredLastOrderId: boundaryLock?.requiredLastOrderId,
     };
     const run = searchFragment(snapshot, bounds, line, admitted, fragment, budget, mode);
-    // A failed pre-firmed sequence may still have a fully covered route after
-    // the firmed run. Search bounded whole-component deferrals under the same
-    // shared budget; the rejected edge stays visible when a later route wins.
     let winner = accept(run, false);
-    // Tracks whichever run's unknown-tail set actually corresponds to the
-    // admitted batch that produced `winner` (Part 1c) — the plain run, or
-    // whichever fallback run below replaces it.
+    // The unknown-tail set of the admitted batch that produced `winner` (Part 1c).
     let tailSource: ReadonlyArray<NimbusTask> = run.unknownTail;
-    let deferredAcrossFirmed: NimbusTask[] = [];
-    const fallbackRuns: SearchRun[] = [];
-    const continuationRuns: SearchRun[] = [];
-    if (!winner && run.termination === 'completed' && supportsBoundaryFallback(run)) {
-      if (mode === 'spt') {
-        // SPT retains its established deterministic suffix fallback: productive
-        // runtime selected this order already, so coverage must not become a
-        // hidden alternate-order comparator.
-        const fallbackOptions = sptBoundaryFallbackOptions(
-          snapshot, bounds, line, admitted, fragment, freeComponents,
-        );
-        for (const option of fallbackOptions) {
-          const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
-          fallbackRuns.push(fallbackRun);
-          recordRun(fallbackRun);
-          if (fallbackRun.winner) {
-            winner = applyWinner(fallbackRun);
-            tailSource = fallbackRun.unknownTail;
-            deferredAcrossFirmed = option.deferred;
-            missingEdges.push(...run.missingEdges);
-            explanation.push({
-              code: 'covered-firmed-boundary-fallback',
-              message: `Deferred ${deferredAcrossFirmed.length} order(s) past firmed ${taskId(boundary.task)} to preserve a covered firmed boundary.`,
-              line,
-              taskId: taskId(boundary.task),
-            });
-            break;
-          }
-          if (fallbackRun.termination !== 'completed') break;
-        }
-      } else if (isTerminalBoundary) {
-        // Only the terminal firmed boundary can be compared locally without
-        // changing planner architecture: each option is extended through the
-        // one remaining free fragment, yielding a complete candidate.
-        const completeFallbacks: EvaluatedBoundaryFallback[] = [];
-        const fallbackCursor = dueDateBoundaryFallbackCursor(
-          snapshot, bounds, line, admitted, fragment, freeComponents, budget, mode,
-        );
-        let completeEnumeration = true;
-        for (let option = fallbackCursor.next(); option; option = fallbackCursor.next()) {
-          const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
-          fallbackRuns.push(fallbackRun);
-          recordRun(fallbackRun);
-          // A converged run (Phase 1e) reached a real, trustworthy winner —
-          // it must not be mistaken for an enumeration cut short by
-          // 'deadline'/'iteration-cap' and discarded (Critical fix).
-          if (!isSearchConclusive(fallbackRun.termination)) {
-            completeEnumeration = false;
-            break;
-          }
-          if (!fallbackRun.winner) continue;
-          const continuation = searchFragment(snapshot, bounds, line, [
-            ...fallbackRun.winner.unadmitted,
-            ...option.deferred,
-            ...later,
-          ], {
-            start: boundary.end,
-            end: bounds.horizonEnd,
-            predecessorState: boundary.state,
-            predecessorOrderId: taskId(boundary.task),
-            lineOrderIds,
-            allowsDeletedPredecessorBinding: initial.preservedAnchor !== undefined,
-            requiredFirstOrderId: boundaryLock?.requiredFirstOrderId,
-          }, budget, mode);
-          continuationRuns.push(continuation);
-          recordRun(continuation);
-          if (!isSearchConclusive(continuation.termination)) {
-            completeEnumeration = false;
-            break;
-          }
-          if (!continuation.winner || continuation.winner.unadmitted.length) continue;
-          completeFallbacks.push({
-            option,
-            run: fallbackRun,
-            continuation,
-            candidate: completeFinalBoundaryCandidate(
-              snapshot, bounds, line, freeById, fallbackRun.winner, continuation.winner,
-            ),
-          });
-        }
-        if (fallbackCursor.termination !== 'completed') {
-          completeEnumeration = false;
-          termination = worseTermination(termination, fallbackCursor.termination);
-        }
-        if (!completeEnumeration) {
-          missingEdges.push(
-            ...run.missingEdges,
-            ...fallbackRuns.flatMap(fallbackRun => fallbackRun.missingEdges),
-            ...continuationRuns.flatMap(continuation => continuation.missingEdges),
-          );
-          // Suppressed for 'due-date' (2026-09-09): see appendRejectedCoverageDiagnostics's precondition comment.
-          if (mode !== 'due-date') appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges);
-          explanation.push({
-            code: 'firmed-boundary-fallback-ambiguous',
-            message: `The bounded fallback search could not compare every route around firmed ${taskId(boundary.task)}.`,
-            line,
-            taskId: taskId(boundary.task),
-          });
-          // A7: this was the only failure path that returned `unchanged: true`
-          // with no tail placement — genuine ambiguity about which covered
-          // route to pick is not a reason to leave the orders unscheduled.
-          // Same never-freeze treatment as every other non-override failure:
-          // tail-place the fragment up to this boundary's reserved incoming
-          // setup and continue, keeping the explanation above so the reason
-          // stays visible. Override conflicts still fail closed (unaffected —
-          // this branch is only reached when `supportsBoundaryFallback(run)`
-          // already excluded 'override-inactive' edges).
-          const tailEnd = tailCapacityEnd(snapshot, bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
-          const tailUnadmitted = applyUnknownTail(
-            snapshot, bounds, line, mode, admitted, fragmentStart, tailEnd, patches, explanation, missingEdges,
-            predecessorOrderId,
-          );
-          remaining = [...tailUnadmitted, ...later];
-          fragmentStart = new Date(boundary.end);
-          predecessorState = boundary.state;
-          predecessorOrderId = taskId(boundary.task);
-          requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
-          continue;
-        }
-        let selectedFallback: EvaluatedBoundaryFallback | null = null;
-        // Complete boundary alternatives use the same mode-aware comparator
-        // as the primary search; never fall back to due-date-first ordering.
-        const fallbackCompareMode = mode;
-        for (const candidate of completeFallbacks) {
-          if (!selectedFallback || compareBoundaryFallback(candidate, selectedFallback, fallbackCompareMode) < 0) {
-            selectedFallback = candidate;
-          }
-        }
-        if (selectedFallback) {
-          missingEdges.push(...run.missingEdges);
-          // Suppressed for 'due-date' (2026-09-09): see appendRejectedCoverageDiagnostics's precondition comment.
-          if (mode !== 'due-date') {
-            const selectedFallbackEdgeKeys = winnerEdgeKeySet(selectedFallback.candidate);
-            appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges, selectedFallbackEdgeKeys);
-            appendRejectedCoverageDiagnostics(missingEdges, explanation, selectedFallback.run.missingEdges, selectedFallbackEdgeKeys);
-            appendRejectedCoverageDiagnostics(missingEdges, explanation, selectedFallback.continuation!.missingEdges, selectedFallbackEdgeKeys);
-          }
-          applyCandidate(selectedFallback.candidate);
-          explanation.push({
-            code: 'covered-firmed-boundary-fallback',
-            message: `Deferred ${selectedFallback.option.deferred.length} order(s) past firmed ${taskId(boundary.task)} to preserve a covered firmed boundary.`,
-            line,
-            taskId: taskId(boundary.task),
-          });
-          // This complete candidate already spans the firmed boundary through
-          // to the horizon end (Part 1c): place each half's unknown tail
-          // against its own capacity — the pre-firmed half up to firmed's
-          // reserved incoming setup, the continuation half up to the
-          // horizon, since there is no further fragment to defer to.
-          const preFirmedTailUnadmitted = applyUnknownTail(
-            snapshot, bounds, line, mode, selectedFallback.run.unknownTail,
-            tailCursorFor(selectedFallback.run.winner, fragmentStart),
-            tailCapacityEnd(
-              snapshot, bounds, line, boundary.start, boundary,
-              selectedFallback.run.winner!.finalState ?? predecessorState,
-              selectedFallback.run.winner!.finalPredecessorOrderId ?? predecessorOrderId,
-            ),
-            patches, explanation, missingEdges,
-            selectedFallback.run.winner!.finalPredecessorOrderId ?? predecessorOrderId,
-          );
-          const continuationTailUnadmitted = applyUnknownTail(
-            snapshot, bounds, line, mode, selectedFallback.continuation!.unknownTail,
-            tailCursorFor(selectedFallback.continuation!.winner, boundary.end),
-            bounds.horizonEnd,
-            patches, explanation, missingEdges,
-            selectedFallback.continuation!.winner!.finalPredecessorOrderId ?? taskId(boundary.task),
-          );
-          for (const task of [...preFirmedTailUnadmitted, ...continuationTailUnadmitted]) {
-            explanation.push({
-              code: 'unknown-setup-tail-unplaced',
-              message: `Left ${taskId(task)} at its current dates; no remaining capacity for tail placement.`,
-              line,
-              taskId: taskId(task),
-            });
-          }
-          return {
-            patches, score, explanation, missingEdges, candidateCount, method, termination, unchanged: false,
-          };
-        }
-      } else {
-        // A local pre-firmed fragment cannot legitimately rank two alternatives
-        // ahead of later firmed boundaries. Accept the only proven route; when
-        // there is more than one (or the shared budget stops enumeration), fail
-        // closed instead of inventing a local admission-first objective.
-        const feasibleFallbacks: EvaluatedBoundaryFallback[] = [];
-        const fallbackCursor = dueDateBoundaryFallbackCursor(
-          snapshot, bounds, line, admitted, fragment, freeComponents, budget, mode,
-        );
-        let completeEnumeration = true;
-        for (let option = fallbackCursor.next(); option; option = fallbackCursor.next()) {
-          const fallbackRun = searchFragment(snapshot, bounds, line, option.retained, fragment, budget, mode);
-          fallbackRuns.push(fallbackRun);
-          recordRun(fallbackRun);
-          // F3b secondary hardening: only count a route whose incoming
-          // reservation into this boundary is genuinely covered — not one
-          // merely tolerated by Part 1f's leniency (see
-          // `candidateEntersBoundaryUncovered`).
-          if (fallbackRun.winner && !candidateEntersBoundaryUncovered(fallbackRun.winner, taskId(boundary.task))) {
-            feasibleFallbacks.push({ option, run: fallbackRun, candidate: fallbackRun.winner });
-            if (feasibleFallbacks.length > 1) break;
-          }
-          // A converged run (Phase 1e) reached a real, trustworthy winner —
-          // it must not be mistaken for an enumeration cut short by
-          // 'deadline'/'iteration-cap' and discarded (Critical fix), which
-          // would otherwise wrongly drop even a single-feasible-fallback
-          // result below.
-          if (!isSearchConclusive(fallbackRun.termination)) {
-            completeEnumeration = false;
-            break;
-          }
-        }
-        if (fallbackCursor.termination !== 'completed') {
-          completeEnumeration = false;
-          termination = worseTermination(termination, fallbackCursor.termination);
-        }
-        if (!completeEnumeration || feasibleFallbacks.length > 1) {
-          missingEdges.push(...run.missingEdges, ...fallbackRuns.flatMap(fallbackRun => fallbackRun.missingEdges));
-          // Suppressed for 'due-date' (2026-09-09): see appendRejectedCoverageDiagnostics's precondition comment.
-          if (mode !== 'due-date') appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges);
-          explanation.push({
-            code: 'firmed-boundary-fallback-ambiguous',
-            message: completeEnumeration
-              ? `Multiple covered fallback routes remain before firmed ${taskId(boundary.task)}; no local route was selected.`
-              : `The bounded fallback search could not enumerate every route before firmed ${taskId(boundary.task)}.`,
-            line,
-            taskId: taskId(boundary.task),
-          });
-          // A7: same never-freeze treatment as the terminal-boundary branch
-          // above — genuine ambiguity about which covered route to pick, or a
-          // budget/deadline cutoff mid-enumeration, is not a reason to leave
-          // the orders unscheduled. Tail-place and continue instead of
-          // returning zero patches with `unchanged: true`.
-          const tailEnd = tailCapacityEnd(snapshot, bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
-          const tailUnadmitted = applyUnknownTail(
-            snapshot, bounds, line, mode, admitted, fragmentStart, tailEnd, patches, explanation, missingEdges,
-            predecessorOrderId,
-          );
-          remaining = [...tailUnadmitted, ...later];
-          fragmentStart = new Date(boundary.end);
-          predecessorState = boundary.state;
-          predecessorOrderId = taskId(boundary.task);
-          requiredFirstOrderId = boundaryLock?.requiredFirstOrderId;
-          continue;
-        }
-        if (feasibleFallbacks.length === 1) {
-          const selectedFallback = feasibleFallbacks[0];
-          winner = applyWinner(selectedFallback.run);
-          tailSource = selectedFallback.run.unknownTail;
-          deferredAcrossFirmed = selectedFallback.option.deferred;
-          missingEdges.push(...run.missingEdges);
-          // Suppressed for 'due-date' (2026-09-09): see appendRejectedCoverageDiagnostics's precondition comment.
-          if (mode !== 'due-date') {
-            appendRejectedCoverageDiagnostics(missingEdges, explanation, run.missingEdges, winnerEdgeKeySet(winner));
-          }
-          explanation.push({
-            code: 'covered-firmed-boundary-fallback',
-            message: `Deferred ${deferredAcrossFirmed.length} order(s) past firmed ${taskId(boundary.task)} to preserve a covered firmed boundary.`,
-            line,
-            taskId: taskId(boundary.task),
-          });
-        }
-      }
-    }
     if (!winner) {
       const attemptedEdges = [
         ...run.missingEdges,
-        ...fallbackRuns.flatMap(fallbackRun => fallbackRun.missingEdges),
-        ...continuationRuns.flatMap(continuation => continuation.missingEdges),
       ];
       missingEdges.push(...attemptedEdges);
       // An active-override conflict is an explicit user assertion and stays
@@ -5982,7 +5393,7 @@ function evaluateLineWithFirmedBoundaries(
       // same `admitted` batch could not find anything `run` didn't already.
       // Place the whole admitted+later set as a tail up to this boundary's
       // reserved incoming setup instead.
-      const tailEnd = tailCapacityEnd(snapshot, bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
+      const tailEnd = tailCapacityEnd(snapshot, bounds, line, boundary, predecessorState, predecessorOrderId);
       const tailUnadmitted = applyUnknownTail(
         snapshot, bounds, line, mode, admitted, fragmentStart, tailEnd, patches, explanation, missingEdges,
         predecessorOrderId,
@@ -5995,14 +5406,14 @@ function evaluateLineWithFirmedBoundaries(
       continue;
     }
     const tailEnd = tailCapacityEnd(
-      snapshot, bounds, line, boundary.start, boundary,
+      snapshot, bounds, line, boundary,
       winner.finalState ?? predecessorState, winner.finalPredecessorOrderId ?? predecessorOrderId,
     );
     const tailUnadmitted = applyUnknownTail(
       snapshot, bounds, line, mode, tailSource, tailCursorFor(winner, fragmentStart), tailEnd, patches, explanation,
       missingEdges, winner.finalPredecessorOrderId ?? predecessorOrderId,
     );
-    remaining = [...winner.unadmitted, ...deferredAcrossFirmed, ...tailUnadmitted, ...later];
+    remaining = [...winner.unadmitted, ...tailUnadmitted, ...later];
     fragmentStart = new Date(boundary.end);
     predecessorState = boundary.state;
     predecessorOrderId = taskId(boundary.task);
@@ -6187,14 +5598,12 @@ export function evaluateSptWithSetup(
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
   for (const [line, tasks] of orderedLines) {
-    // Every line reuses this run-scoped wall-clock budget and deadline.
-    const lineBounds: Readonly<DueDateFirstBounds> = bounds;
     // The iteration cap is shared across this evaluator's lines and fragments.
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
       // a policy/due-ordered tail placement around any firmed orders.
-      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, 'spt');
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, 'spt');
       patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       explanation.push(...wholeLine.explanation);
@@ -6202,16 +5611,12 @@ export function evaluateSptWithSetup(
       if (!wholeLine.patches.length) unchangedLines.push(line);
       continue;
     }
-    const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
-    const missingSuccessorReasonsForLine = missingSuccessorOverrideReasons(line, missingSuccessorEdgesForLine);
-    const missingPredecessorEdgesForLine = missingPredecessorOverrideEdges(bounds, line, tasks);
-    const missingPredecessorReasonsForLine = missingPredecessorOverrideReasons(line, missingPredecessorEdgesForLine);
     const compatibility = setupCompatibilityForLine(snapshot, plant, line);
     if (compatibility) {
       // Part 1e: an explicit setup_compatible=false opt-out still never
       // freezes the line — whole-line tail placement, one line-level edge,
       // no per-order override-diagnostic noise.
-      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, 'spt');
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, 'spt');
       patches.push(...wholeLine.patches);
       missingEdges.push({ line, reason: 'setup-compatibility-disabled' });
       explanation.push({
@@ -6266,7 +5671,7 @@ export function evaluateSptWithSetup(
     const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
     const result = evaluateLineWithFirmedBoundaries(
       snapshot,
-      lineBounds,
+      bounds,
       line,
       candidateTasks,
       initial.state ?? anchor?.state ?? null,
@@ -6377,14 +5782,12 @@ export function evaluateDueDateFirst(
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
   for (const [line, tasks] of orderedLines) {
-    // Every line reuses this run-scoped wall-clock budget and deadline.
-    const lineBounds: Readonly<DueDateFirstBounds> = bounds;
     // The iteration cap is shared across this evaluator's lines and fragments.
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
       // a policy/due-ordered tail placement around any firmed orders.
-      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, mode);
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, mode);
       patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       explanation.push(...wholeLine.explanation);
@@ -6392,16 +5795,12 @@ export function evaluateDueDateFirst(
       if (!wholeLine.patches.length) unchangedLines.push(line);
       continue;
     }
-    const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
-    const missingSuccessorReasonsForLine = missingSuccessorOverrideReasons(line, missingSuccessorEdgesForLine);
-    const missingPredecessorEdgesForLine = missingPredecessorOverrideEdges(bounds, line, tasks);
-    const missingPredecessorReasonsForLine = missingPredecessorOverrideReasons(line, missingPredecessorEdgesForLine);
     const compatibility = setupCompatibilityForLine(snapshot, plant, line);
     if (compatibility) {
       // Part 1e: an explicit setup_compatible=false opt-out still never
       // freezes the line — whole-line tail placement, one line-level edge,
       // no per-order override-diagnostic noise.
-      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, mode);
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, mode);
       patches.push(...wholeLine.patches);
       missingEdges.push({ line, reason: 'setup-compatibility-disabled' });
       explanation.push({
@@ -6458,7 +5857,7 @@ export function evaluateDueDateFirst(
 
     const result = evaluateLineWithFirmedBoundaries(
       snapshot,
-      lineBounds,
+      bounds,
       line,
       candidateTasks,
       initial.state ?? anchor?.state ?? null,
@@ -7439,16 +6838,15 @@ function toolOverflowFailedFinding(): ValidationFinding {
 export function reconcileToolOutcomes(result: CandidateResult): CandidateResult {
   if (result.toolPass === undefined) return result;
   const status = new Map((result.dispositions ?? []).map(d => [d.id, d]));
-  const isToolCode = (code: unknown): boolean => code === 'tool_contention' || code === 'tool_unavailable';
   const blocked = new Map<string, ToolBlockedEntry>();
   for (const entry of result.toolBlocked ?? []) {
     const d = status.get(entry.orderId);
     const cascadeKept = entry.cause === 'cascade' && (entry.reasonCode === undefined || entry.reasonCode === d?.reason?.code);
-    if (d?.status === 'needs_planning' && (isToolCode(d.reason?.code) || cascadeKept)) blocked.set(entry.orderId, entry);
+    if (d?.status === 'needs_planning' && (isToolReasonCode(d.reason?.code) || cascadeKept)) blocked.set(entry.orderId, entry);
   }
   for (const patch of result.patches) {
     const reason = patch.changes.planning_reason;
-    if (patch.changes.planning_status !== 'needs_planning' || !reason || !isToolCode(reason.code) || blocked.has(patch.id)) continue;
+    if (patch.changes.planning_status !== 'needs_planning' || !reason || !isToolReasonCode(reason.code) || blocked.has(patch.id)) continue;
     const holders = Array.isArray(reason.holders) ? reason.holders.map(String) : [];
     blocked.set(patch.id, {
       orderId: patch.id, tool: String(reason.tool_id ?? ''), available: Number(reason.available ?? 0),
