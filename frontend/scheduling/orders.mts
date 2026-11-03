@@ -1027,6 +1027,24 @@ export const Table = {
     if (Table._api) Table._api.onFilterChanged();
   },
 
+  /** Public entry for other screens (the Alert Monitor): show ONLY the given orders in the Orders table.
+   *  Clears every other active filter first via _clearChipFilters (quick filter, selected lines, colour/status/date
+   *  chips, the old PO/Material list, native AG column filters) so nothing hides an order the caller asked for, then
+   *  applies the numbers as the PO/Material list through the same path as a pasted list. Does not switch tabs (the
+   *  caller navigates). Returns false, leaving every filter untouched, when the grid / PO-Material box is not
+   *  available or no usable order number was given. */
+  filterToOrders(orderNumbers: string[]): boolean {
+    const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
+    if (!ta || !Table._api) return false;
+    const nums = [...new Set((Array.isArray(orderNumbers) ? orderNumbers : []).map(n => String(n ?? '').trim()).filter(Boolean))];
+    const usable = Util.parsePasteList(nums.join('\n')).map(Util.norm).filter(t => !/^\*+$/.test(t));   // same tokens _onPoMatApply will keep
+    if (!usable.length) return false;
+    Table._clearChipFilters();
+    ta.value = nums.join('\n');
+    Table._onPoMatApply();
+    return true;
+  },
+
   _onPoMatApply(): void {
     const ta = document.getElementById('tbl-flt-pomat-textarea') as HTMLTextAreaElement | null;
     if (!ta) return;
