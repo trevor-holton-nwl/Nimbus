@@ -36,7 +36,7 @@ import { Store, UndoStack } from '../../../frontend/platform/store.mjs';
 import { Calendar } from '../../../frontend/calendar/calendar-engine.mjs';
 import { CalendarSync } from '../../../frontend/calendar/calendar-sync.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
-import { Toast, Util, Config } from '../../../frontend/platform/foundation.mjs';
+import { Toast, Util, Config, ErrorLog } from '../../../frontend/platform/foundation.mjs';
 import { App } from '../../../frontend/shell/application-shell.mjs';
 import { evaluateOptimizerWorkerRequest } from '../../../frontend/optimization/optimizer-worker.mjs';
 import { validateCandidateForApply } from '../../../frontend/optimization/setup-scheduler.mjs';
@@ -4749,6 +4749,44 @@ describe('reconcile (finish-anchored)', () => {
       assert.deepEqual(Store.tasks.rv.derivationIssue, { code: 'reversal_forward', detail: 'cutover' }, 'the first-load pass is tagged cutover');
       assert.equal(Store.tasks.bl.derivationIssue ?? null, null, 'D14: the no-server-row line is no longer blocked');
     } finally { unstub(); fx.restore(); }
+  });
+
+  test('P0-22: rows with no operating window warn once per row across passes and the cutover summary counts them as blocked', () => {
+    const fx = recFixture();
+    const unstub = cutoverToastStub();
+    const warns = [];
+    const priorWarn = ErrorLog.warn;
+    ErrorLog.warn = (scope, msg, ctx) => { if (scope === 'engine') warns.push(ctx?.taskId); };
+    try {
+      Store.setCalendar(fx.line, { 0: null, 1: null, 2: null, 3: null, 4: null, 5: null, 6: null }, 'unit-test');
+      Store.setTasks(Array.from({ length: 10 }, (_, i) => fx.task(`w${i}`, { original_end_date: at(26, 17), runtime_schedule_mismatch: true })), 'unit-test');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(warns.length, 10, 'one warn per row on the first pass');
+      assert.deepEqual(fx.toasts.map(t => t.msg), ['toast.cutover_summary:0,0,0,10'], 'blocked rows are counted');
+      assert.equal(Store.tasks.w0.derivationIssue.code, 'no_operating_window');
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(warns.length, 10, 'the second pass re-derives the same rows without warning again');
+    } finally { ErrorLog.warn = priorWarn; unstub(); fx.restore(); }
+  });
+
+  test('P0-22: when the forward walk stops at a failing row, only that row is noted no_operating_window', () => {
+    const fx = recFixture();
+    const warns = [];
+    const priorWarn = ErrorLog.warn;
+    const priorSeq = Engine.placeForwardSequence;
+    ErrorLog.warn = (scope, msg, ctx) => { if (scope === 'engine') warns.push(ctx?.taskId); };
+    try {
+      // Due dates already past: the backward walk reaches now, so both rows queue for the forward leg.
+      Store.setTasks([
+        fx.task('f1', { original_end_date: at(19, 14), runtime_schedule_mismatch: true }),
+        fx.task('f2', { original_end_date: at(19, 15), runtime_schedule_mismatch: true }),
+      ], 'unit-test');
+      Engine.placeForwardSequence = (line, items) => ({ placed: [], invalidRuntime: [], overlong: [], failure: { item: items[0], reason: 'no-operating-interval' } });
+      Engine.reconcileRuntimeSchedules(fx.plant);
+      assert.equal(Store.tasks.f1.derivationIssue?.code, 'no_operating_window', 'the failing row is noted');
+      assert.equal(Store.tasks.f2.derivationIssue ?? null, null, 'the row after the failure was never tried and gets no note');
+      assert.deepEqual(warns, ['f1']);
+    } finally { Engine.placeForwardSequence = priorSeq; ErrorLog.warn = priorWarn; fx.restore(); }
   });
 
   test('OQ53: an ordinary re-upload (most of the plant stale but still PLACED) is not a cutover; per-row Toast and run_time_grew stand', () => {

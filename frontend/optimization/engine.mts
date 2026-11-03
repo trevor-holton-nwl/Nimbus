@@ -1874,9 +1874,11 @@ export const Engine = {
       (a ?? null) === (b ?? null) || (!!a && !!b && a.code === b.code && a.detail === b.detail
         && a.from?.getTime() === b.from?.getTime() && a.to?.getTime() === b.to?.getTime());
     // A note on a row the reconcile did not (or could not) place: session-only, never dirty, and not repeated.
-    const noteOnly = (task: NimbusTask, issue: Issue): void => {
-      if (sameIssue(task.derivationIssue, issue)) return;
+    // Returns true when it wrote a (new or changed) note, so a caller that also logs can log once per change, not every pass.
+    const noteOnly = (task: NimbusTask, issue: Issue): boolean => {
+      if (sameIssue(task.derivationIssue, issue)) return false;
       patches.push({ id: task.id, changes: { derivationIssue: issue }, dirty: false });
+      return true;
     };
     const plantNow = Store.plantNow(plant);
     // OQ53 (Task 4.2): the first load after the backward-scheduling cutover is recognised by the data signature the
@@ -2051,10 +2053,12 @@ export const Engine = {
           // OQ3: it is already producing. The start holds and the finish follows the run time (no reversal).
           const changes = Engine.heldStartPatchFor(task, line, policy);
           if (!changes) {
-            ErrorLog.warn('engine',
-              `Runtime changed for running order "${task.text || task.id}", but its finish could not be regenerated within the 90-day calendar search.`,
-              { line, taskId: task.id, policy, reason: 'runtime-schedule-mismatch' });
-            noteOnly(task, { code: 'no_operating_window' });
+            if (noteOnly(task, { code: 'no_operating_window' })) {
+              ErrorLog.warn('engine',
+                `Runtime changed for running order "${task.text || task.id}", but its finish could not be regenerated within the 90-day calendar search.`,
+                { line, taskId: task.id, policy, reason: 'runtime-schedule-mismatch' });
+            }
+            tally(stale, 'blocked');
             continue;
           }
           schedulePatch(task, stale, changes, null, moveReason(stale), 'end');
@@ -2087,13 +2091,16 @@ export const Engine = {
           if (result.reason === 'overlong_never') {
             // OQ50: it cannot be one bar under this plant's policy. Queue it; the planner releases it by editing it.
             patches.push({ id: task.id, dirty: stale, changes: Engine.overlongNeverChanges() });
+            tally(stale, 'blocked');
           } else if (result.reason === 'run_time_zero') noteOnly(task, { code: 'run_time_zero' });   // OQ13: no bar
           else if (result.reason === 'plant_no_timezone') { noteOnly(task, { code: 'plant_no_timezone' }); tally(stale, 'blocked'); }
           else {
-            ErrorLog.warn('engine',
-              `Order "${task.text || task.id}" could not be re-derived: no operating window within the 90-day calendar search.`,
-              { line, taskId: task.id, policy, reason: result.reason });
-            noteOnly(task, { code: 'no_operating_window' });
+            if (noteOnly(task, { code: 'no_operating_window' })) {
+              ErrorLog.warn('engine',
+                `Order "${task.text || task.id}" could not be re-derived: no operating window within the 90-day calendar search.`,
+                { line, taskId: task.id, policy, reason: result.reason });
+            }
+            tally(stale, 'blocked');
           }
           continue;
         }
@@ -2132,17 +2139,25 @@ export const Engine = {
           tally(item.row.stale, 'reversed');
         }
         const overlongIds = new Set(sequence.overlong.map(item => String(item.row.task.id)));
+        // The walk ends at the first item the calendar cannot place, so the rows after it were never tried: only the
+        // failing row (and any skipped for an unusable run time) is noted; the later rows keep whatever note they had.
+        const failedId = sequence.failure ? String(sequence.failure.item.row.task.id) : null;
+        const invalidIds = new Set(sequence.invalidRuntime.map(item => String(item.row.task.id)));
         for (const row of rows) {
           if (placedIds.has(String(row.task.id))) continue;
           if (overlongIds.has(String(row.task.id))) {
             // OQ50: it cannot be one bar under this plant's policy, so it is queued exactly like the backward refusal.
             patches.push({ id: row.task.id, dirty: row.stale, changes: Engine.overlongNeverChanges() });
+            tally(row.stale, 'blocked');
             continue;
           }
-          ErrorLog.warn('engine',
-            `Order "${row.task.text || row.task.id}" could not be placed forward from now: no operating window found.`,
-            { line, taskId: row.task.id, policy, reason: 'reversal-forward' });
-          noteOnly(row.task, { code: 'no_operating_window' });
+          if (String(row.task.id) !== failedId && !invalidIds.has(String(row.task.id))) continue;
+          if (noteOnly(row.task, { code: 'no_operating_window' })) {
+            ErrorLog.warn('engine',
+              `Order "${row.task.text || row.task.id}" could not be placed forward from now: no operating window found.`,
+              { line, taskId: row.task.id, policy, reason: 'reversal-forward' });
+          }
+          tally(row.stale, 'blocked');
         }
       }
     } finally {
