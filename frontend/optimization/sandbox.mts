@@ -91,12 +91,14 @@ export const Sandbox = {
         // scenario created are dropped locally, as before.
         const snapIds = new Set(snap.tasks.map((t) => String(t.id)));
         for (const t of Store.tasksArr) if (!snapIds.has(String(t.id))) Store.removeTask(t.id, 'undo');
-        UndoStack.restoreTasks(snap.tasks.map((t) => Util.clone(t)));
-        Store.replaceBlocks(snap.blocks, 'undo');
-        Store.replaceCalendars(snap.calendars, 'undo');
-        Store.replacePlants(snap.plants, 'undo');
-        Store.replacePlantBlocks(snap.plantBlocks, 'undo');
-        Store.replaceFirmedIds(snap.firmedIds, 'undo');
+        // Hand the Store copies, not the snapshot's own arrays: the Store mutates what it owns, and `snap` is still
+        // referenced (the exited event payload, a later undo) so it must not alias live state.
+        UndoStack.restoreTasks(structuredClone(snap.tasks));
+        Store.replaceBlocks(structuredClone(snap.blocks), 'undo');
+        Store.replaceCalendars(structuredClone(snap.calendars), 'undo');
+        Store.replacePlants(structuredClone(snap.plants), 'undo');
+        Store.replacePlantBlocks(structuredClone(snap.plantBlocks), 'undo');
+        Store.replaceFirmedIds(new Set(snap.firmedIds), 'undo');
         Store.emit({ type: 'sandbox:reverted', source: 'undo', promoted });
         return true;
       }, snap.tasks.map((t) => t.id));
@@ -114,12 +116,13 @@ export const Sandbox = {
       // plantBlocks:change, and replaceFirmedIds -> firmed:change.
       // docs/architecture/cq1-compatibility-inventory.md §6 and the pinned
       // event-sequence test in tests/modules/optimization/sandbox.test.mjs.
-      Store.setTasks(snap.tasks, 'sandbox');
-      Store.replaceBlocks(snap.blocks, 'sandbox');
-      Store.replaceCalendars(snap.calendars, 'sandbox');
-      Store.replacePlants(snap.plants, 'sandbox');
-      Store.replacePlantBlocks(snap.plantBlocks, 'sandbox');
-      Store.replaceFirmedIds(snap.firmedIds, 'sandbox');
+      // Copies, so the snapshot carried on sandbox:exited never aliases the rows the Store now mutates in place.
+      Store.setTasks(structuredClone(snap.tasks), 'sandbox');
+      Store.replaceBlocks(structuredClone(snap.blocks), 'sandbox');
+      Store.replaceCalendars(structuredClone(snap.calendars), 'sandbox');
+      Store.replacePlants(structuredClone(snap.plants), 'sandbox');
+      Store.replacePlantBlocks(structuredClone(snap.plantBlocks), 'sandbox');
+      Store.replaceFirmedIds(new Set(snap.firmedIds), 'sandbox');
     }
 
     this.active = false;

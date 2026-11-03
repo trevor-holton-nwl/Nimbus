@@ -1154,7 +1154,7 @@ export const Engine = {
     const _pmT0es = performance.now();
     try {
       return Engine.runAndApply(mode, { ...opts, __candidateRun: true })
-        ?? detachedCandidateResult([], performance.now());
+        ?? detachedCandidateResult([], _pmT0es);
     } finally {
       _candidateSnapshot = null;
       _candidateDiagnostics = null;
