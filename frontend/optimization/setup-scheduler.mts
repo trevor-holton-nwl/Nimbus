@@ -625,6 +625,9 @@ export interface SetupRunContext {
   /** O5: lazy per-(line, floor minutes) memo of whether any merged working window can hold one productive
    *  segment of that length (see `unfittableReason`). */
   _floorFits: Map<string, boolean>;
+  /** P1-9: lazy per-(plant, line, dayStartMs) longest merged nominal working span (ms) over the 90-day walk
+   *  `hasNominalWindow` makes; the answer for any run time is `longest >= minutes * 60000`. */
+  _nominalSpan: Map<string, number>;
   /** Lazy per-(plant, line, dayStartMs) work-window memo for reading a date-only SAP due date
    *  (see `dueWindowForDay`); distinct from `_dayWindow` because a missing calendar row means
    *  "no calendar" here, not default hours. */
@@ -708,6 +711,7 @@ export function buildRunContext(
     _lineBlocks: new Map(),
     _dayWindow: new Map(),
     _floorFits: new Map(),
+    _nominalSpan: new Map(),
     _dueWindow: new Map(),
     _dueInstant: new WeakMap(),
     _freeIndex: new Map(),
@@ -3011,7 +3015,32 @@ function hasNominalWindow(
       yield joint ? { s: joint.start.getTime(), e: joint.end.getTime() } : null;
     }
   };
-  return fitsMergedSpan(windows(), requiredMs);
+  if (!ctx) return fitsMergedSpan(windows(), requiredMs);
+  const key = `${plant}${CTX_KEY_SEP}${line}${CTX_KEY_SEP}${day.getTime()}`;
+  let longest = ctx._nominalSpan.get(key);
+  if (longest === undefined) {
+    longest = longestMergedSpanMs(windows());
+    ctx._nominalSpan.set(key, longest);
+  }
+  return longest >= requiredMs;
+}
+
+/** Longest merged contiguous span (ms) of chronological windows (null = closed day); touching windows merge. */
+function longestMergedSpanMs(windows: Iterable<{ s: number; e: number } | null>): number {
+  let longest = 0;
+  let currentStart = 0;
+  let currentEnd = Number.NEGATIVE_INFINITY;
+  for (const win of windows) {
+    if (!win || !(win.e > win.s)) continue;
+    if (win.s <= currentEnd) {
+      if (win.e > currentEnd) currentEnd = win.e;
+    } else {
+      currentStart = win.s;
+      currentEnd = win.e;
+    }
+    if (currentEnd - currentStart > longest) longest = currentEnd - currentStart;
+  }
+  return longest;
 }
 
 /** `'due-date'` mode (2026-09-09): lateness outranks BOTH the priority-list

@@ -6856,3 +6856,33 @@ test('P0-12: with respectCalendar false the queue-reason helpers do not emit cal
   assert.notEqual(code, 'overlong_never');
   assert.notEqual(code, 'segment_floor_unfittable');
 });
+
+test('P1-9: hasNominalWindow memo (longest merged span per line/day) matches the unmemoised walk across calendars and durations', () => {
+  const all = w => Object.fromEntries([0, 1, 2, 3, 4, 5, 6].map(d => [d, w]));
+  const calendars = {
+    standard: all([8, 18]),
+    allDay: all([0, 24]),
+    night: { 0: null, 1: [22, 24], 2: [0, 6], 3: null, 4: null, 5: null, 6: null },
+    closedWeekend: { 0: null, 1: [8, 16], 2: [8, 16], 3: [8, 16], 4: [8, 16], 5: [8, 16], 6: null },
+    nearDst: all([1, 3]),
+  };
+  const bounds = dueDateBounds(setupTruth(), { planningStart: at('2026-03-05T00:00:00'), horizonEnd: at('2026-12-01T00:00:00') });
+  for (const [name, hours] of Object.entries(calendars)) {
+    const snapshot = setupSnapshot([]);
+    snapshot.calendars = { L1: { workHours: hours } };
+    snapshot.plants = { P1: { workHours: hours } };
+    const ctx = SetupScheduler.buildRunContext(snapshot, bounds);
+    // Day starts across the spring-forward and fall-back weeks, a weekend, and mid-month.
+    for (const from of ['2026-03-05T00:00:00', '2026-03-08T12:00:00', '2026-03-14T00:00:00', '2026-08-01T09:30:00', '2026-10-31T00:00:00', '2026-11-01T06:00:00']) {
+      for (const minutes of [1, 30, 60, 120, 480, 481, 600, 601, 1440, 2000, 10000, 200000]) {
+        const plain = SetupScheduler.hasNominalWindowForTest(snapshot, 'L1', 'P1', at(from), minutes);
+        const memoised = SetupScheduler.hasNominalWindowForTest(snapshot, 'L1', 'P1', at(from), minutes, ctx);
+        const again = SetupScheduler.hasNominalWindowForTest(snapshot, 'L1', 'P1', at(from), minutes, ctx);
+        assert.equal(memoised, plain, name + ' ' + from + ' ' + minutes);
+        assert.equal(again, plain, name + ' repeat ' + from + ' ' + minutes);
+      }
+    }
+    assert.ok(ctx._nominalSpan.size > 0, name + ': the longest span is memoised on the run context');
+    assert.ok(ctx._nominalSpan.size <= 6, name + ': one memo entry per (line, day), not per call');
+  }
+});
