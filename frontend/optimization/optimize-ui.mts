@@ -223,7 +223,7 @@ export const OptimizeDialog = (() => {
         const oc = orderCounts[line] || 0;
         const excluded = (Store.lineSettings[line] || {}).excludeFromOpt;
         const exTag = excluded ? `<span class="opt-line-excluded" title="${Util.escapeHtml(Util.t('ui.opt_line_excluded_title'))}">${Util.escapeHtml(Util.t('ui.opt_line_excluded'))}</span>` : '';
-        return `<li class="opt-line-row${excluded ? ' is-excluded' : ''}" role="option" aria-selected="${!!checked}">
+        return `<li class="opt-line-row${excluded ? ' is-excluded' : ''}">
             <label class="opt-line-label">
               <input type="checkbox" ${checked} data-line="${Util.escapeHtml(line)}">
               <span class="opt-line-name">${Util.escapeHtml(line)}</span>
@@ -502,7 +502,7 @@ export const OptimizeDialog = (() => {
     const setBadge = (state: 'none' | 'loading' | 'active' | 'warn', icon: string, tip: string) => {
       badgeEl.className = `opt-wheel-badge compact ${state}`;
       badgeEl.title = tip;
-      badgeEl.innerHTML = `<span class="owb-icon${state === 'loading' ? ' cw-spin' : ''}">${icon}</span>`;
+      badgeEl.innerHTML = `<span aria-hidden="true" class="owb-icon${state === 'loading' ? ' cw-spin' : ''}">${icon}</span>`;
     };
 
     if (!plant) {
@@ -652,7 +652,7 @@ export const OptimizeDialog = (() => {
     // Reset the Run button HTML in case a previous session left it in the
     // "Optimizing…" state (e.g., Cancel mid-fetch).
     const runBtn = document.getElementById('opt-run-btn');
-    if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon">📈</span>${Util.t('btn.run_optimization')}`;
+    if (runBtn) runBtn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">📈</span>${Util.t('btn.run_optimization')}`;
     // Run in background always opens unticked; the planner opts in per run.
     const bgChkOpen = document.getElementById('opt-chk-background') as HTMLInputElement | null;
     if (bgChkOpen) bgChkOpen.checked = false;
@@ -781,7 +781,7 @@ export const OptimizeDialog = (() => {
     };
     if (runBtn) {
       runBtn.disabled = true;
-      runBtn.innerHTML = `<span class="opt-run-icon">⏳</span>${Util.t('btn.optimizing')}`;
+      runBtn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">⏳</span>${Util.t('btn.optimizing')}`;
     }
 
     // Open the preview dialog with a spinner IMMEDIATELY — before the rank-map
@@ -2139,7 +2139,7 @@ export const OptimizerPreview = {
           : `<td><strong>${Util.escapeHtml(f.whyNot || Util.t('ui.opt_pv_plan_pruned'))}</strong></td>`
         ).join('');
         planTableHtml = `<div class="opt-pv-plan-wrap"><table class="opt-pv-plan-table">
-          <thead><tr><th></th><th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current_sub'))}</div></th>${headCells}</tr></thead>
+          <thead><tr><td></td><th><div>${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current'))}</div><div class="opt-pv-plan-col-sub">${Util.escapeHtml(Util.t('ui.opt_pv_plan_col_current_sub'))}</div></th>${headCells}</tr></thead>
           <tbody>${bodyRows}</tbody>
           <tfoot class="opt-pv-plan-tfoot"><tr><th scope="row">${Util.escapeHtml(Util.t('ui.opt_pv_plan_verdict_label'))}</th><td>${Util.escapeHtml(Util.t('ui.opt_pv_plan_baseline'))}</td>${verdictCells}</tr></tfoot>
         </table></div>`;
@@ -2251,7 +2251,7 @@ export const OptimizerPreview = {
     })();
 
     const staleHtml = OptimizerPreview.stale
-      ? `<div class="opt-pv-stale">${Util.escapeHtml(OptimizerPreview._staleMessage())}</div>`
+      ? `<div class="opt-pv-stale" role="status">${Util.escapeHtml(OptimizerPreview._staleMessage())}</div>`
       : '';
 
     // Never-freeze fallback banner — orders this candidate actually placed
@@ -2311,8 +2311,8 @@ export const OptimizerPreview = {
         ? ` <span class="opt-pv-pct">(${pct > 0 ? '+' : '−'}${Math.abs(pct)}%)</span>`
         : '';
       const deltaText = zero
-        ? `<span class="opt-pv-pill-icon">●</span> ${Util.escapeHtml(Util.t('ui.opt_pv_no_change'))}`
-        : `<span class="opt-pv-pill-icon">${dirCls === 'better' ? '▼' : (dirCls === 'worse' || dirCls === 'warn') ? '▲' : '◆'}</span> ${sign}${dNum}${c.unit}${pctStr}`;
+        ? `<span class="opt-pv-pill-icon" aria-hidden="true">●</span> ${Util.escapeHtml(Util.t('ui.opt_pv_no_change'))}`
+        : `<span class="opt-pv-pill-icon" aria-hidden="true">${dirCls === 'better' ? '▼' : (dirCls === 'worse' || dirCls === 'warn') ? '▲' : '◆'}</span> ${sign}${dNum}${c.unit}${pctStr}`;
 
       // Bar — visual scale of post vs pre. For neutral/no scale, hide.
       const maxV = Math.max(preV, postV, 0.0001);
@@ -2322,10 +2322,10 @@ export const OptimizerPreview = {
       return `
         <div class="opt-pv-card opt-pv-card-${dirCls}" data-key="${c.k}">
           <div class="opt-pv-card-head">
-            <span class="opt-pv-card-ico">${c.ico}</span>
+            <span class="opt-pv-card-ico" aria-hidden="true">${c.ico}</span>
             <span class="opt-pv-card-label">${Util.escapeHtml(c.label)}</span>
-            <span class="opt-pv-card-help" tabindex="0" aria-label="${Util.escapeHtml(Util.t('ui.opt_pv_card_help_aria'))}">
-              <span class="opt-pv-help-dot">?</span>
+            <span class="opt-pv-card-help" tabindex="0" role="button" aria-label="${Util.escapeHtml(Util.t('ui.opt_pv_card_help_aria'))}">
+              <span class="opt-pv-help-dot" aria-hidden="true">?</span>
               <span class="opt-pv-tip">${Util.escapeHtml(c.tip)}</span>
             </span>
           </div>
@@ -2397,7 +2397,7 @@ export const OptimizerPreview = {
       <div class="opt-pv-section-body">
         <div><button type="button" class="btn btn-sm" data-opt-tool-export>${Util.escapeHtml(Util.t('ui.opt_tool_export'))}</button></div>
         <table class="opt-pv-tool-table">
-          <thead><tr><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_order'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_tool'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_avail'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_holders'))}</th><th></th></tr></thead>
+          <thead><tr><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_order'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_line'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_tool'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_avail'))}</th><th>${Util.escapeHtml(Util.t('ui.opt_tool_col_holders'))}</th><td></td></tr></thead>
           <tbody>${toolBlocked.slice(0, 50).map(entry => {
             const holders = entry.holderIds.slice(0, 5).map(labelOf).join(', ') + (entry.holderIds.length > 5 ? ` ${Util.t('ui.opt_bg_more', { count: entry.holderIds.length - 5 })}` : '');
             return `<tr${entry.cause === 'cascade' ? ' data-opt-tool-cascade' : ''}><td>${Util.escapeHtml(labelOf(entry.orderId))}${entry.cause === 'cascade' ? `<div class="opt-pv-tool-cascade">${Util.escapeHtml(Util.t('ui.opt_tool_cascade_note'))}</div>` : ''}</td><td>${Util.escapeHtml(linesById.get(String(entry.orderId)) ?? '')}</td><td>${Util.escapeHtml(entry.tool)}</td><td>${entry.available} / ${entry.inUse}</td><td>${Util.escapeHtml(holders)}</td><td><button type="button" class="btn btn-sm" data-opt-tool-raise="${Util.escapeHtml(entry.tool)}">${Util.escapeHtml(Util.t('ui.opt_tool_raise'))}</button></td></tr>`;
@@ -2427,7 +2427,7 @@ export const OptimizerPreview = {
         ${toolNoteHtml}
 
         <div class="opt-pv-verdict opt-pv-verdict-${verdictTone}">
-          <div class="opt-pv-verdict-icon">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
+          <div class="opt-pv-verdict-icon" aria-hidden="true">${verdictTone === 'better' ? '✓' : verdictTone === 'worse' ? '!' : '◐'}</div>
           <div class="opt-pv-verdict-text">
             <div class="opt-pv-verdict-title">${Util.escapeHtml(verdictTitle)}</div>
             <div class="opt-pv-verdict-sub">${Util.escapeHtml(verdictSub)}</div>
@@ -2839,7 +2839,7 @@ export const OptimizerPreview = {
         runBtn.textContent = Util.t('btn.opt_run_bg_busy');
       } else if (runBtn.textContent === Util.t('btn.opt_run_bg_busy')) {
         runBtn.disabled = !OptimizerPreview._backgroundRun && !Store.selectedPlant;
-        runBtn.innerHTML = `<span class="opt-run-icon">📈</span>${Util.t('btn.run_optimization')}`;
+        runBtn.innerHTML = `<span class="opt-run-icon" aria-hidden="true">📈</span>${Util.t('btn.run_optimization')}`;
       }
     }
     btn.classList.toggle('is-running', running);
@@ -3276,9 +3276,9 @@ export const SandboxAdapter = {
     const banner = document.getElementById('sandbox-banner');
     if (!banner) return;
     banner.innerHTML = `
-      <span style="font-size:14px;">🔮</span>
+      <span style="font-size:14px;" aria-hidden="true">🔮</span>
       <strong>${Util.t('ui.what_if_title')}</strong> ${Util.t('ui.what_if_sub')}
-      <input class="sb-name" id="sb-scenario-name" placeholder="${Util.t('ph.name_scenario')}" value="${Util.t('ui.what_if_default_name')}">
+      <input class="sb-name" id="sb-scenario-name" aria-label="${Util.t('ph.name_scenario')}" placeholder="${Util.t('ph.name_scenario')}" value="${Util.t('ui.what_if_default_name')}">
       <div style="display:flex;gap:6px;margin-left:auto;">
         <button class="btn btn-ghost sm" id="sb-discard-btn">${Util.t('ui.discard_btn')}</button>
         <button class="btn btn-primary sm" id="sb-apply-btn">${Util.t('ui.promote_btn')}</button>
