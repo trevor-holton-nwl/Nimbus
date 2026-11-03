@@ -113,6 +113,30 @@ test('compiled worker handles LEVERAGE_BATCH and matches runLeverageBatchSync', 
   assert.equal(Object.keys(posted[0].results[0].matrix.LL1).length, 4, 'days and lines reach computeUtilization');
 });
 
+test('compiled worker self.onerror takes the 5 positional args, posts an id-null ERROR and returns true (A1/A4)', async () => {
+  const { default: vm } = await import('node:vm');
+  const { readFileSync } = await import('node:fs');
+  const posted = [];
+  const self = { NimbusComputeCore: globalThis.NimbusComputeCore, location: { search: '' }, addEventListener() {}, postMessage: m => posted.push(m) };
+  const ctx = vm.createContext({ self, importScripts() {}, structuredClone });
+  vm.runInContext(readFileSync(new URL('../../../frontend/nimbus-worker.js', import.meta.url), 'utf8'), ctx);
+  const boom = new Error('kaboom');
+  const handled = self.onerror('Uncaught Error: kaboom', 'worker.js', 12, 5, boom);
+  assert.equal(handled, true, 'true marks the error handled so the parent Worker.onerror does not also reject pending jobs');
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].type, 'ERROR');
+  assert.equal(posted[0].id, null);
+  assert.equal(posted[0].failingType, 'uncaught');
+  assert.equal(posted[0].error, 'kaboom');
+  assert.equal(posted[0].filename, 'worker.js');
+  assert.equal(posted[0].lineno, 12);
+  assert.equal(posted[0].colno, 5);
+  assert.equal(posted[0].stack, boom.stack);
+  // A script error with no Error object (cross-origin style) still reports the message string.
+  self.onerror('Script error.', '', 0, 0, null);
+  assert.equal(posted[1].error, 'Script error.');
+});
+
 test('Compute.leverageBatch stops the worker and rejects with TimeoutError when it never answers (no main-thread rerun)', async t => {
   seed();
   t.mock.timers.enable({ apis: ['setTimeout'] });

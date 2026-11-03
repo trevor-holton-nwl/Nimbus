@@ -86,13 +86,16 @@ self.onmessage = function ({ data }: MessageEvent<IncomingMessage>) {
 
 // Worker-global failures (outside the onmessage try/catch): report to the main thread with
 // id null so Compute's client logs them via ErrorLog without touching any pending job.
-self.onerror = function (ev: any) {
+// WorkerGlobalScope.onerror is called with FIVE positional arguments (message, source, lineno, colno, error),
+// not an ErrorEvent, and returning true marks the error handled so it is NOT also re-dispatched to the parent's
+// Worker.onerror (which would reject every pending job and count a crash).
+self.onerror = function (msg: any, src?: string, line?: number, col?: number, err?: any) {
   try {
-    const e = ev && ev.error;
     self.postMessage({ type: 'ERROR', id: null, failingType: 'uncaught',
-      error: (e && e.message) || (ev && ev.message) || String(ev), stack: e && e.stack,
-      filename: ev && ev.filename, lineno: ev && ev.lineno });
+      error: (err && err.message) || (typeof msg === 'string' ? msg : (msg && msg.message)) || String(msg),
+      stack: err && err.stack, filename: src, lineno: line, colno: col });
   } catch {}
+  return true;
 };
 if (typeof self.addEventListener === 'function') {
   self.addEventListener('unhandledrejection', function (ev: PromiseRejectionEvent) {

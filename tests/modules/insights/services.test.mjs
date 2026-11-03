@@ -125,6 +125,57 @@ test('Alerts.recompute schedules a fresh pass when the worker result is stale', 
 });
 
 
+test('Alerts.recompute keeps a worker result when only a non-data event (alerts:change, lines:selected) landed meanwhile (A2: dataRev, not rev)', async () => {
+  const priorAvailable = Compute.available;
+  const priorAlerts = Compute.alerts;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorLastMs = Alerts._lastMs;
+  let queued = 0;
+  Store.setSelectedPlant('PLANT-STABLE', 'unit-test');
+  Compute.available = () => true;
+  Compute.alerts = async () => ({ alerts: [{ id: 'kept-a', sev: 'warn', type: 'overlap', line: 'L9', msg: 'x' }], elapsed: 42 });
+  Alerts.scheduleRecompute = () => { queued += 1; };
+  try {
+    Alerts.recompute();
+    Store.emit({ type: 'alerts:change', source: 'unit-test' });   // bumps rev(), not dataRev()
+    Store.emit({ type: 'lines:selected', source: 'unit-test' });  // same
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(queued, 0, 'a non-data event must not discard the reply');
+    assert.ok(Store.alerts.some(a => a.id === 'kept-a'), 'the reply is published');
+    assert.equal(Alerts._lastMs, 42, 'elapsed recorded for the adaptive debounce');
+  } finally {
+    Compute.available = priorAvailable;
+    Compute.alerts = priorAlerts;
+    Alerts.scheduleRecompute = priorSchedule;
+    Alerts._lastMs = priorLastMs;
+    Alerts._allAlerts = null;
+    Store.setAlerts([], 'unit-test');
+  }
+});
+
+test('Alerts.recompute records _lastMs even when a stale worker result is discarded', async () => {
+  const priorAvailable = Compute.available;
+  const priorAlerts = Compute.alerts;
+  const priorSchedule = Alerts.scheduleRecompute;
+  const priorLastMs = Alerts._lastMs;
+  Store.setSelectedPlant('PLANT-STABLE', 'unit-test');
+  Compute.available = () => true;
+  Compute.alerts = async () => ({ alerts: [], elapsed: 77 });
+  Alerts.scheduleRecompute = () => {};
+  try {
+    Alerts.recompute();
+    Store.emit({ type: 'unit-test:revision', source: 'unit-test' });   // data event: the reply is stale
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(Alerts._lastMs, 77);
+  } finally {
+    Compute.available = priorAvailable;
+    Compute.alerts = priorAlerts;
+    Alerts.scheduleRecompute = priorSchedule;
+    Alerts._lastMs = priorLastMs;
+  }
+});
+
+
 test('Alerts.scheduleRecompute/{,Lines} debounce and eventually call recompute (adaptive delay)', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] }); // virtual clock: the debounce is ticked, not slept
   let recomputeCalls = 0;
