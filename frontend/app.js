@@ -627,7 +627,9 @@ const NIMBUS = (function () {
     // Writes lineSettings directly (no per-line emit) and fires a single coalesced
     // 'lineSettings:change' at the end to avoid an O(N*M) fan-out at boot.
     Store.subscribe(evt => {
-      if (evt.type === 'master-data-changed') {
+      // evt.table (set by saves from Manage Data / Tool Inventory) lets unrelated tables (tool inventory, materials,
+      // routing, ...) skip the line re-sync and the Hierarchy/Machines repaints; no table = boot/refresh = always run.
+      if (evt.type === 'master-data-changed' && Store.masterDataChangeTouchesLines(evt.table)) {
         let touched = 0;
         try {
           touched = Store.applyMasterLinesToSettings();
