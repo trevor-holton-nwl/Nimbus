@@ -7817,7 +7817,7 @@ export function validateCandidate(snapshot: Readonly<ScheduleSnapshot>, bounds: 
       if (bounds.runContext?.unknownSetupPolicy === 'excludeFromSearch' && resolution && !resolution.covered && !protectedTask) {
         add('setup_transition_unrecorded', `No setup transition is recorded from ${setupStateLabel(state)} to ${setupStateLabel(successor)} on ${line}; this plant excludes such orders from automatic placement.`, task, protectedTask, false);
       }
-      if (!resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: "A missing setup transition uses the plant's configured default (zero unless plantDefaultMinutes is set).", severity: 'warning', taskId: taskId(task), line });
+      if (chargeable && !resolution?.covered && !bounds.setup.synthetic) findings.push({ code: 'missing_setup', message: "A missing setup transition uses the plant's configured default (zero unless plantDefaultMinutes is set).", severity: 'warning', taskId: taskId(task), line });
       const minutes = chargedSetupMinutes(bounds.runContext, resolution, chargeable);
       if (minutes > 0) {
         const end = timestamp(task.start_date)!; const start = new Date(+end - minutes * 60000);

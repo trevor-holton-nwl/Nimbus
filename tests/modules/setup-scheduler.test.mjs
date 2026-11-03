@@ -6804,3 +6804,16 @@ test('P0-8: a backtracked suffix leaves no stale admitted-without-setup explanat
   assert.equal(result.explanation.some(entry => entry.code === 'admitted-without-setup' && entry.taskId === 'p08-x'), false);
   assert.equal(result.missingEdges.some(edge => edge.reason === 'scheduled-without-setup' && edge.successorOrderId === 'p08-x'), false);
 });
+
+test('P0-9: a setup-incompatible line emits no missing_setup finding or scheduled-without-setup edge', () => {
+  const incompatible = scheduledTask('p09-blue', 1, 'BLUE', '2026-08-03T10:00:00');
+  const snapshot = setupSnapshot([incompatible]);
+  snapshot.masterData = {
+    plants: [{ plant: 'P1' }],
+    lines: [{ plant: 'P1', machine: 'L1', setup_compatible: false, setup_compatibility_reason: 'Tooling signature differs' }],
+  };
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] })));
+  assert.equal(result.validationFindings.some(f => f.code === 'missing_setup'), false);
+  assert.equal(result.missingEdges.some(edge => edge.reason === 'scheduled-without-setup'), false);
+  assert.ok(result.missingEdges.some(edge => edge.line === 'L1' && edge.reason === 'setup-compatibility-disabled'));
+});
