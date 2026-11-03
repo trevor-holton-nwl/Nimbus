@@ -2835,3 +2835,63 @@ test('S7-15: What-If discard snapshots and restores Persistence._dirtySource alo
     globalThis.NIMBUS = priorNimbus;
   }
 });
+
+/** Count reads of Store.tasksArr (the baseline compare and the snapshot are its only readers on the Apply path). */
+function countTasksArrReads(fn) {
+  const desc = Object.getOwnPropertyDescriptor(Store, 'tasksArr');
+  let reads = 0;
+  Object.defineProperty(Store, 'tasksArr', { configurable: true, get() { reads++; return desc.get.call(Store); } });
+  try { fn(); } finally { Object.defineProperty(Store, 'tasksArr', desc); }
+  return reads;
+}
+
+test('P1-3: apply() compares the task baseline once and takes one live snapshot', () => {
+  const plant = 'P13-APPLY';
+  const fixture = openTaskBaselinePreview(plant, [previewTask('p13-long', plant, 5), previewTask('p13-short', plant, 1)]);
+  try {
+    const reads = countTasksArrReads(() => OptimizerPreview.apply());
+    assert.equal(OptimizerPreview._candidate, null, 'the Apply went through');
+    assert.equal(reads, 2, 'one baseline compare (canApply) plus one snapshotSchedule, not three');
+  } finally { fixture.restore(); }
+});
+
+test('P1-3: the baseline verdict is memoised on Store.rev() and every task change still stales the preview', () => {
+  const plant = 'P13-MEMO';
+  const other = 'P13-MEMO-OTHER';
+  const mk = () => [previewTask('p13-a', plant), previewTask('p13-b', plant)];
+  // unchanged rev: second canApply does not re-read the task set
+  let fixture = openTaskBaselinePreview(plant, mk());
+  try {
+    assert.equal(OptimizerPreview.canApply(), true);
+    assert.equal(countTasksArrReads(() => { assert.equal(OptimizerPreview.canApply(), true); }), 0, 'memo hit on an unchanged revision');
+  } finally { fixture.restore(); }
+  // update
+  fixture = openTaskBaselinePreview(plant, mk());
+  try {
+    assert.equal(OptimizerPreview.canApply(), true);
+    Store.updateTask('p13-a', { RUN_TIME: 9 }, 'manual-edit');
+    assert.equal(OptimizerPreview.canApply(), false, 'update after a memoised verdict');
+    assert.equal(OptimizerPreview.stale, true);
+  } finally { fixture.restore(); }
+  // add
+  fixture = openTaskBaselinePreview(plant, mk());
+  try {
+    assert.equal(OptimizerPreview.canApply(), true);
+    Store.setTasks([...Store.tasksArr, previewTask('p13-new', plant)], 'backend');
+    assert.equal(OptimizerPreview.canApply(), false, 'added task after a memoised verdict');
+  } finally { fixture.restore(); }
+  // remove
+  fixture = openTaskBaselinePreview(plant, mk());
+  try {
+    assert.equal(OptimizerPreview.canApply(), true);
+    Store.removeTask('p13-b', 'server-delete');
+    assert.equal(OptimizerPreview.canApply(), false, 'removed task after a memoised verdict');
+  } finally { fixture.restore(); }
+  // plant move out of the preview plant
+  fixture = openTaskBaselinePreview(plant, mk());
+  try {
+    assert.equal(OptimizerPreview.canApply(), true);
+    Store.updateTask('p13-b', { PLANT: other, plant: other, MACHINE: other + '-LINE' }, 'manual-edit');
+    assert.equal(OptimizerPreview.canApply(), false, 'plant move after a memoised verdict');
+  } finally { fixture.restore(); }
+});
