@@ -11,6 +11,12 @@ export interface OptimizerWorkerRequest {
   deadlineDurationMs?: number;
 }
 
+/** The evaluator request for a worker request: the carried `mode` is the single source of truth, so the worker, the
+ *  main-thread fallback and every sync caller evaluate exactly the same shape. */
+export function evalRequestOf(request: OptimizerWorkerRequest): EvaluationRequest {
+  return { ...request.request, mode: request.mode };
+}
+
 /** Clone-safe replacement for the evaluator's function-bearing bounds. The
  * worker sends these facts back so Apply can validate the exact candidate
  * without running the expensive search a second time. */

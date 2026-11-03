@@ -3,7 +3,7 @@
 // ambient NimbusComputeCore object in every browser realm.
 import { evaluateSchedule } from './engine.mjs';
 import type { CandidateResult } from './setup-scheduler.mjs';
-import { serializeOptimizerValidation } from './optimizer-worker-contract.mjs';
+import { evalRequestOf, serializeOptimizerValidation } from './optimizer-worker-contract.mjs';
 import type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 export type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 
@@ -27,7 +27,7 @@ export function evaluateOptimizerWorkerRequest(
   clock: () => number = () => performance.now(),
 ): CandidateResult {
   const localized = localizeOptimizerDeadline(request, clock);
-  return evaluateSchedule(localized.snapshot, { ...localized.request, mode: localized.mode });
+  return evaluateSchedule(localized.snapshot, evalRequestOf(localized));
 }
 
 export function buildOptimizerWorkerResponse(

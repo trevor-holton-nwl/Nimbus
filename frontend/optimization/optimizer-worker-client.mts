@@ -4,12 +4,15 @@
 import type { CandidateResult, EvaluationRequest, ScheduleSnapshot } from './setup-scheduler.mjs';
 import { evaluateSchedule, rehydrateOptimizerCandidate, SETUP_AWARE_NORMAL_BUDGET_MS } from './engine.mjs';
 import { Config, ErrorLog, Util } from '../platform/foundation.mjs';
+import { evalRequestOf } from './optimizer-worker-contract.mjs';
 import type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 export type { OptimizerWorkerRequest, OptimizerWorkerResponse } from './optimizer-worker-contract.mjs';
 
 export interface OptimizerWorkerLike {
   onmessage: ((event: MessageEvent<OptimizerWorkerResponse>) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
+  /** A message the worker posted could not be deserialised here (optional: older fakes omit it). */
+  onmessageerror?: ((event: MessageEvent) => void) | null;
   postMessage(message: OptimizerWorkerRequest): void;
   terminate(): void;
 }
@@ -84,21 +87,31 @@ export function runOptimizerPreview(
   // The build id rides on the worker URL so the worker can load the classic compute core with the same cache-bust
   // (the corporate proxy caches .js by URL; a stale core would push every preview to the main thread).
   const defaultUrl = `${new URL('./optimizer-worker.mjs', import.meta.url).href}?v=${encodeURIComponent(String(Config.BUILD_ID))}`;
-  const worker = factory?.(options.workerUrl ?? defaultUrl) ?? null;
+  // Build the worker request BEFORE spawning: a bad deadline must throw while there is nothing to leak.
+  const workerRequest = workerRequestWithRemainingDeadline(request);
+  let worker: OptimizerWorkerLike | null = null;
+  try {
+    worker = factory?.(options.workerUrl ?? defaultUrl) ?? null;
+  } catch (error) {
+    // The browser refused to construct the worker (CSP, quota, a blocked module). An exhaustive run must not
+    // land on the main thread (see isLongRunRequest); a Normal run keeps the synchronous path.
+    if (isLongRunRequest(request)) return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    ErrorLog.warn('optimizer', 'Optimizer worker could not be created; evaluating on the main thread.', error);
+  }
   if (!worker) {
     const evaluator = options.syncEvaluator ?? evaluateSchedule;
-    return evaluator(request.snapshot, request.request);
+    return evaluator(request.snapshot, evalRequestOf(request));
   }
-
-  const workerRequest = workerRequestWithRemainingDeadline(request);
+  const liveWorker = worker;
 
   return new Promise<CandidateResult>((resolve, reject) => {
     let settled = false;
     const cleanup = (): void => {
       if (options.signal) options.signal.removeEventListener('abort', onAbort);
-      worker.onmessage = null;
-      worker.onerror = null;
-      worker.terminate();
+      liveWorker.onmessage = null;
+      liveWorker.onerror = null;
+      liveWorker.onmessageerror = null;
+      liveWorker.terminate();
     };
     const finish = (callback: () => void): void => {
       if (settled) return;
@@ -107,9 +120,9 @@ export function runOptimizerPreview(
       callback();
     };
     const onAbort = (): void => finish(() => reject(abortError()));
-    worker.onmessage = ({ data }): void => {
+    liveWorker.onmessage = ({ data }): void => {
       if (!data || data.runId !== request.runId) return;
-      if (data.error) {
+      if ('error' in data && data.error !== undefined) {   // an empty message is still a failure
         if (String(data.error).includes(COMPUTE_CORE_STALE) && isLongRunRequest(request)) {
           // No main-thread fallback for an exhaustive run (see isLongRunRequest): fail with a clear, actionable error.
           ErrorLog.warn('optimizer', 'Optimizer worker has a stale compute core; the background run was refused.');
@@ -125,14 +138,18 @@ export function runOptimizerPreview(
               ErrorLog.warn('optimizer', 'Optimizer worker has a stale compute core; evaluating on the main thread.');
             }
             try {
-              resolve((options.syncEvaluator ?? evaluateSchedule)(request.snapshot, request.request));
+              resolve((options.syncEvaluator ?? evaluateSchedule)(request.snapshot, evalRequestOf(request)));
             } catch (error) {
               reject(error);
             }
           });
           return;
         }
-        finish(() => reject(new Error(data.error)));
+        finish(() => {
+          const failure = new Error(data.error || 'Optimizer worker failed.');
+          if (data.stack) failure.stack = data.stack;   // the worker-side stack is the useful one
+          reject(failure);
+        });
         return;
       }
       if (!data.candidate) {
@@ -147,23 +164,19 @@ export function runOptimizerPreview(
       }
       try {
         const rehydrated = rehydrateOptimizerCandidate(
-          data.candidate as CandidateResult, request.snapshot, data.validation,
+          data.candidate, request.snapshot, data.validation,
         );
         finish(() => resolve(rehydrated));
       } catch (error) {
         finish(() => reject(error));
       }
     };
-    worker.onerror = (event): void => finish(() => reject(new Error(event.message || 'Optimizer worker failed.')));
-    if (options.signal) {
-      options.signal.addEventListener('abort', onAbort, { once: true });
-      if (options.signal.aborted) {
-        onAbort();
-        return;
-      }
-    }
+    liveWorker.onerror = (event): void => finish(() => reject(new Error(event.message || 'Optimizer worker failed.')));
+    liveWorker.onmessageerror = (): void => finish(() => reject(new Error('Optimizer worker response could not be read (message deserialisation failed).')));
+    // The signal was checked at the top and nothing awaited since, so it cannot already be aborted here.
+    options.signal?.addEventListener('abort', onAbort, { once: true });
     try {
-      worker.postMessage(workerRequest);
+      liveWorker.postMessage(workerRequest);
     } catch (error) {
       finish(() => reject(error));
     }

@@ -3473,7 +3473,7 @@ function rehydrateDate(value: Date | string | number | null | undefined): Date |
  * Every date lookup was captured by the worker from its detached bounds, so
  * this reconstruction does not consult live master data or setup state. */
 export function rehydrateOptimizerCandidate(
-  candidate: CandidateResult,
+  candidate: Omit<CandidateResult, 'validationContext'>,
   snapshot: ScheduleSnapshot,
   serialized?: SerializedOptimizerValidation,
 ): CandidateResult {
