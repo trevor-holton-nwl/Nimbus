@@ -37,6 +37,9 @@ declare global {
     /** Optional localized form; the drawer prefers Util.t(msgKey, msgVars) when present. */
     msgKey?: string;
     msgVars?: Record<string, string | number>;
+    /** Dates embedded in `msg` / `msgVars` in the core's fixed default format: `text` is that default text, `ms` the instant.
+     *  Util.alertMessage swaps `text` for the viewer's date/time format. Absent when the alert embeds no date. */
+    msgDates?: { text: string; ms: number }[];
     taskId?: string;
     /** The other order in a pairwise alert (overlap, tool-conflict). Prefer this over parsing `id`. */
     peerId?: string;
@@ -311,7 +314,7 @@ declare global {
     OVERLOAD_THRESHOLD: number;
     OVERLOAD_TOLERANCE_H: number;
     WARN_THRESHOLD: number;
-    isOverloaded(scheduledH: number, effCapH: number): boolean;
+    isOverloaded(scheduledH: number, effCapH: number, capH?: number): boolean;
     SHOW_NEAR_CAPACITY_ALERTS: boolean;
     DEFAULT_SHIFT: [number, number];
     WEEKEND_OFF: boolean;
