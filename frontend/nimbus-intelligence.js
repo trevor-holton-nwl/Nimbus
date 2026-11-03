@@ -1237,8 +1237,6 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       }
     },
 
-    _fuzzy(q, text) { return fuzzyScoreLc(q.toLowerCase(), text.toLowerCase()); },
-
     _search(query) {
       if (!CommandPalette._index) CommandPalette._buildIndex();
       const q = query.trim();
@@ -1910,6 +1908,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
     _startupPending: false,
     _lifecycleGeneration: 0,
     _suppressedAlertRefreshes: 0,
+
+    // 'good' | 'risk' | 'critical' for a 0-100 score: the one set of cut-offs (BAND_GOOD_MIN / BAND_RISK_MIN).
+    band(score) { return _band(score); },
 
     // Invalidation is deliberately separate from debounce cancellation: a
     // Compute worker request may already be in flight when What-If exits, so
