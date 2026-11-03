@@ -112,6 +112,8 @@ interface SessionSlot {
   spawnedAt: number;
   runs: number;
   dead: boolean;
+  /** Spawned ahead of its first request (prewarm), so its boot overlapped other work. */
+  prewarmed: boolean;
 }
 
 /** A pool of at most `maxWorkers` detached optimizer workers that serves many preview requests. Each worker runs one
@@ -155,7 +157,7 @@ export function createOptimizerWorkerSession(options: OptimizerWorkerSessionOpti
     const worker = factory(options.workerUrl ?? defaultUrl);
     if (!worker) { noWorker = true; return null; }
     stats.spawned++;
-    const slot: SessionSlot = { worker, pending: null, spawnedAt: performance.now(), runs: 0, dead: false };
+    const slot: SessionSlot = { worker, pending: null, spawnedAt: performance.now(), runs: 0, dead: false, prewarmed: false };
     slots.push(slot);
     worker.onmessage = ({ data }): void => onMessage(slot, data);
     worker.onerror = (event): void => settle(slot, true, p => p.reject(new Error(event.message || 'Optimizer worker failed.')));
@@ -234,9 +236,9 @@ export function createOptimizerWorkerSession(options: OptimizerWorkerSessionOpti
     if (!pending || !data || data.runId !== pending.request.runId) return;
     const { request } = pending;
     if (typeof data.evalMs === 'number') {
-      // The first answer of a fresh worker carries the boot; later ones show the reuse cost (clone + post back).
-      const since = slot.runs === 0 ? slot.spawnedAt : pending.postedAt;
-      PerfMonitor.record(slot.runs === 0 ? 'Optimize.workerBoot' : 'Optimize.workerReuse', performance.now() - since - data.evalMs);
+      // Round trip minus search time, measured from the post: the first request on a worker that was spawned for it
+      // pays the boot (workerBoot); a reused or pre-warmed worker shows only clone + post back (workerReuse).
+      PerfMonitor.record(slot.runs === 0 && !slot.prewarmed ? 'Optimize.workerBoot' : 'Optimize.workerReuse', performance.now() - pending.postedAt - data.evalMs);
     }
     slot.runs++;
     if ('error' in data && data.error !== undefined) {   // an empty message is still a failure
@@ -363,7 +365,9 @@ export function createOptimizerWorkerSession(options: OptimizerWorkerSessionOpti
       if (closed || stale || noWorker) return;
       while (slots.length < Math.min(maxWorkers, Math.max(0, Math.floor(count)))) {
         try {
-          if (!spawn()) return;
+          const warmed = spawn();
+          if (!warmed) return;
+          warmed.prewarmed = true;
         } catch (error) {
           ErrorLog.warn('optimizer', 'Optimizer worker could not be pre-started.', error);
           return;
