@@ -4535,8 +4535,6 @@ function boundaryOverrideLocks(
       if (!successor) {
         // A removed successor is reported by missingSuccessorOverrideEdges;
         // it does not justify freezing unrelated remaining work on the line.
-        if (!firmedById.has(override.successor_order_id)) continue;
-        conflict(taskId(predecessorFirmed.task), override.successor_order_id);
         continue;
       }
       const lock = lockFor(taskId(predecessorFirmed.task));
@@ -4868,12 +4866,10 @@ function tailCapacityEnd(
   snapshot: Readonly<ScheduleSnapshot>,
   bounds: Readonly<DueDateFirstBounds>,
   line: string,
-  fragmentEnd: Date,
-  nextFirmed: FirmedBoundary | undefined,
+  nextFirmed: FirmedBoundary,
   finalState: SetupStateKey | null,
   finalPredecessorOrderId: string | null,
 ): Date {
-  if (!nextFirmed) return fragmentEnd;
   // Under plantDefaultMinutes an unresolvable edge (null state on either side, or an uncovered pair) still
   // reserves the plant default, the same charge `validateCandidate` makes. Under zero/excludeFromSearch
   // `chargedSetupMinutes` is 0, so tail capacity simply runs to the boundary's start as before.
@@ -5383,7 +5379,7 @@ function evaluateLineWithFirmedBoundaries(
       // same `admitted` batch could not find anything `run` didn't already.
       // Place the whole admitted+later set as a tail up to this boundary's
       // reserved incoming setup instead.
-      const tailEnd = tailCapacityEnd(snapshot, bounds, line, boundary.start, boundary, predecessorState, predecessorOrderId);
+      const tailEnd = tailCapacityEnd(snapshot, bounds, line, boundary, predecessorState, predecessorOrderId);
       const tailUnadmitted = applyUnknownTail(
         snapshot, bounds, line, mode, admitted, fragmentStart, tailEnd, patches, explanation, missingEdges,
         predecessorOrderId,
@@ -5396,7 +5392,7 @@ function evaluateLineWithFirmedBoundaries(
       continue;
     }
     const tailEnd = tailCapacityEnd(
-      snapshot, bounds, line, boundary.start, boundary,
+      snapshot, bounds, line, boundary,
       winner.finalState ?? predecessorState, winner.finalPredecessorOrderId ?? predecessorOrderId,
     );
     const tailUnadmitted = applyUnknownTail(
@@ -5588,14 +5584,12 @@ export function evaluateSptWithSetup(
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
   for (const [line, tasks] of orderedLines) {
-    // Every line reuses this run-scoped wall-clock budget and deadline.
-    const lineBounds: Readonly<DueDateFirstBounds> = bounds;
     // The iteration cap is shared across this evaluator's lines and fragments.
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
       // a policy/due-ordered tail placement around any firmed orders.
-      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, 'spt');
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, 'spt');
       patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       explanation.push(...wholeLine.explanation);
@@ -5603,16 +5597,12 @@ export function evaluateSptWithSetup(
       if (!wholeLine.patches.length) unchangedLines.push(line);
       continue;
     }
-    const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
-    const missingSuccessorReasonsForLine = missingSuccessorOverrideReasons(line, missingSuccessorEdgesForLine);
-    const missingPredecessorEdgesForLine = missingPredecessorOverrideEdges(bounds, line, tasks);
-    const missingPredecessorReasonsForLine = missingPredecessorOverrideReasons(line, missingPredecessorEdgesForLine);
     const compatibility = setupCompatibilityForLine(snapshot, plant, line);
     if (compatibility) {
       // Part 1e: an explicit setup_compatible=false opt-out still never
       // freezes the line — whole-line tail placement, one line-level edge,
       // no per-order override-diagnostic noise.
-      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, 'spt');
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, 'spt');
       patches.push(...wholeLine.patches);
       missingEdges.push({ line, reason: 'setup-compatibility-disabled' });
       explanation.push({
@@ -5667,7 +5657,7 @@ export function evaluateSptWithSetup(
     const candidateTasks = anchor ? tasks.filter(task => taskId(task) !== taskId(anchor.task)) : tasks;
     const result = evaluateLineWithFirmedBoundaries(
       snapshot,
-      lineBounds,
+      bounds,
       line,
       candidateTasks,
       initial.state ?? anchor?.state ?? null,
@@ -5778,14 +5768,12 @@ export function evaluateDueDateFirst(
 
   const orderedLines = [...byLine.entries()].sort(([left], [right]) => left.localeCompare(right));
   for (const [line, tasks] of orderedLines) {
-    // Every line reuses this run-scoped wall-clock budget and deadline.
-    const lineBounds: Readonly<DueDateFirstBounds> = bounds;
     // The iteration cap is shared across this evaluator's lines and fragments.
     if (!definition || definition.plant !== plant) {
       // Part 1e: no setup definition at all means setup-awareness cannot run
       // for this line, but the line is never frozen — free orders still get
       // a policy/due-ordered tail placement around any firmed orders.
-      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, mode);
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, mode);
       patches.push(...wholeLine.patches);
       explanation.push({ code: 'setup-definition-unavailable', message: 'No compatible setup definition is available.', line });
       explanation.push(...wholeLine.explanation);
@@ -5793,16 +5781,12 @@ export function evaluateDueDateFirst(
       if (!wholeLine.patches.length) unchangedLines.push(line);
       continue;
     }
-    const missingSuccessorEdgesForLine = missingSuccessorOverrideEdges(bounds, line, tasks);
-    const missingSuccessorReasonsForLine = missingSuccessorOverrideReasons(line, missingSuccessorEdgesForLine);
-    const missingPredecessorEdgesForLine = missingPredecessorOverrideEdges(bounds, line, tasks);
-    const missingPredecessorReasonsForLine = missingPredecessorOverrideReasons(line, missingPredecessorEdgesForLine);
     const compatibility = setupCompatibilityForLine(snapshot, plant, line);
     if (compatibility) {
       // Part 1e: an explicit setup_compatible=false opt-out still never
       // freezes the line — whole-line tail placement, one line-level edge,
       // no per-order override-diagnostic noise.
-      const wholeLine = placeWholeLineAsTail(snapshot, lineBounds, line, tasks, mode);
+      const wholeLine = placeWholeLineAsTail(snapshot, bounds, line, tasks, mode);
       patches.push(...wholeLine.patches);
       missingEdges.push({ line, reason: 'setup-compatibility-disabled' });
       explanation.push({
@@ -5859,7 +5843,7 @@ export function evaluateDueDateFirst(
 
     const result = evaluateLineWithFirmedBoundaries(
       snapshot,
-      lineBounds,
+      bounds,
       line,
       candidateTasks,
       initial.state ?? anchor?.state ?? null,
@@ -6840,16 +6824,15 @@ function toolOverflowFailedFinding(): ValidationFinding {
 export function reconcileToolOutcomes(result: CandidateResult): CandidateResult {
   if (result.toolPass === undefined) return result;
   const status = new Map((result.dispositions ?? []).map(d => [d.id, d]));
-  const isToolCode = (code: unknown): boolean => code === 'tool_contention' || code === 'tool_unavailable';
   const blocked = new Map<string, ToolBlockedEntry>();
   for (const entry of result.toolBlocked ?? []) {
     const d = status.get(entry.orderId);
     const cascadeKept = entry.cause === 'cascade' && (entry.reasonCode ?? d?.reason?.code) === d?.reason?.code;
-    if (d?.status === 'needs_planning' && (isToolCode(d.reason?.code) || cascadeKept)) blocked.set(entry.orderId, entry);
+    if (d?.status === 'needs_planning' && (isToolReasonCode(d.reason?.code) || cascadeKept)) blocked.set(entry.orderId, entry);
   }
   for (const patch of result.patches) {
     const reason = patch.changes.planning_reason;
-    if (patch.changes.planning_status !== 'needs_planning' || !reason || !isToolCode(reason.code) || blocked.has(patch.id)) continue;
+    if (patch.changes.planning_status !== 'needs_planning' || !reason || !isToolReasonCode(reason.code) || blocked.has(patch.id)) continue;
     const holders = Array.isArray(reason.holders) ? reason.holders.map(String) : [];
     blocked.set(patch.id, {
       orderId: patch.id, tool: String(reason.tool_id ?? ''), available: Number(reason.available ?? 0),
