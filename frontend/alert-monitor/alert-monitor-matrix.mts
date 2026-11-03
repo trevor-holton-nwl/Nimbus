@@ -13,7 +13,7 @@
 import type { AlertCategory } from '../platform/types.mjs';
 import { ALERT_CATEGORY_ORDER, NONE_KEY, categoryOf } from '../insights/alert-profiles.mjs';
 import { horizonDayKeys } from './alert-monitor-overview.mjs';
-import { UNGROUPED_KEY, makeBucketer } from './alert-monitor-model.mjs';
+import { UNGROUPED_KEY, GROUP_ROW_PREFIX, makeBucketer, buildWcByLine } from './alert-monitor-model.mjs';
 import type { MonitorCtx, MonitorFilter, MonitorLens } from './alert-monitor-model.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -21,8 +21,13 @@ type Translate = (key: string, vars?: Record<string, string | number>) => string
 const _esc = (s: unknown): string => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-/** A group roll-up row's key in the machine lens: `wc:<group>` (a machine id is the bare id). */
-export const GROUP_ROW_PREFIX = 'wc:';
+// A group roll-up row's key in the machine lens is `wc:<group>`; the constant lives in the model (the filter shares it) and stays importable from here.
+export { GROUP_ROW_PREFIX };
+
+/** One natural-order collator for every name sort here, so machines read L1, L2, L10 (not L1, L10, L2). */
+const _collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+/** Natural compare; names the collator calls equal (case only) fall back to the raw code-unit order so the sort stays deterministic. */
+const cmpName = (a: string, b: string): number => _collator.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0);
 /** Most group-color dots a cell shows. */
 export const MAX_CELL_DOTS = 4;
 
@@ -103,8 +108,7 @@ export function matrixModel(alerts: ReadonlyArray<NimbusAlert>, lens: MonitorLen
   const dayKeys = horizonDayKeys(ctx.plantToday, ctx.horizonDays);
   const bucketCols = ['overdue', ...dayKeys, 'later', NONE_KEY];
 
-  const wcByLine = new Map<string, string>();
-  for (const m of ctx.machines) wcByLine.set(m.id, m.wc_group ? String(m.wc_group) : UNGROUPED_KEY);
+  const wcByLine = buildWcByLine(ctx.machines);
   const wcOf = (line: string | undefined): string => (line ? (wcByLine.get(line) ?? UNGROUPED_KEY) : UNGROUPED_KEY);
 
   // Columns and per-lens keys.
@@ -115,7 +119,7 @@ export function matrixModel(alerts: ReadonlyArray<NimbusAlert>, lens: MonitorLen
   if (lens === 'day') {
     for (const g of wcByLine.values()) wcKeysPresent.add(g);
     for (const a of alerts) wcKeysPresent.add(wcOf(a.line));
-    colKeys = [...wcKeysPresent].filter(k => k !== UNGROUPED_KEY).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    colKeys = [...wcKeysPresent].filter(k => k !== UNGROUPED_KEY).sort(cmpName);
     if (wcKeysPresent.has(UNGROUPED_KEY)) colKeys.push(UNGROUPED_KEY);
     rowKeyOf = bucket;
     colKeyOf = a => wcOf(a.line);
@@ -195,7 +199,6 @@ export function matrixModel(alerts: ReadonlyArray<NimbusAlert>, lens: MonitorLen
     if (list) list.push(row); else byGroup.set(m.wc, [row]);
   }
   const sevRank = (w: Worst) => (w === 'err' ? 2 : w === 'warn' ? 1 : 0);
-  const cmpName = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
   const groups: MatrixGroup[] = [];
   for (const [gKey, list] of byGroup) {
     // A pinned machine is never folded away: it stays a row (first, per the pinned-first sort) even with no alerts.

@@ -7,7 +7,8 @@
 
 import type { AlertCategory, AlertProfile, AlertProfileRule, AlertRanking, PlantPeriod } from '../platform/types.mjs';
 import { activePeriodOn } from '../calendar/calendar-periods.mjs';
-import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, NONE_KEY, alertDayOffset, dayKeyOf, isFixableAlert, isUnfixableToolAlert, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, NONE_KEY, alertDayOffset, dayKeyOf, isFixableAlert, isUnfixableToolAlert, movableAlertTypes, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
+import { ROUTING_UPLOAD_STEPS } from '../insights/alert-leverage.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
 import { dayBucketKey, horizonDayKeys } from './alert-monitor-overview.mjs';
 
@@ -29,8 +30,6 @@ export interface AlertLike {
   available?: number | null;
 }
 
-export type MonitorGroupBy = 'category' | 'type' | 'line' | 'day' | 'order' | 'none';
-
 /** The two sorts the page offers (Priority / Date); the stored `severity` / `orders` of earlier builds read as `impact`. */
 export const MONITOR_SORTS: AlertRanking[] = ['impact', 'time'];
 export const MONITOR_CATEGORIES: readonly AlertCategory[] = ALERT_CATEGORY_ORDER;
@@ -39,18 +38,18 @@ export const MONITOR_CATEGORIES: readonly AlertCategory[] = ALERT_CATEGORY_ORDER
 export interface SummaryInput {
   /** No plant selected: the line is just the select-a-plant message. */
   hasPlant: boolean;
-  /** The alerts the list below shows (profile-filtered, acknowledged excluded unless asked; the focus set in focus mode). */
+  /** The alerts the list shows (profile-filtered, acknowledged excluded unless asked). */
   alerts: ReadonlyArray<AlertLike>;
   profileId: string;
   profileName: string;
   profile: AlertProfile | null | undefined;
-  /** A leverage card's "Show alerts" is active: its chip text replaces the first clause. */
-  focus: { title: string; outside: number } | null;
+  /** Retired with the list focus (W6b): the line has no focus variant any more. The pane still passes null; drop it there. */
+  focus?: null;
   /** Lines picked in the global machine filter (read-only clause "N lines selected"); absent or 0 = none. */
   linesSelected?: number;
 }
 
-export interface SummaryLine {
+interface SummaryLine {
   /** The sentence up to (not including) the confidence link. */
   text: string;
 }
@@ -104,11 +103,7 @@ export function summaryLine(input: SummaryInput, t: Translate): SummaryLine {
   }
   const n = input.alerts.length;
   let lead: string;
-  if (input.focus) {
-    lead = input.focus.outside > 0
-      ? t('am.focus_chip_outside', { n, title: input.focus.title, k: input.focus.outside })
-      : t('am.focus_chip', { n, title: input.focus.title });
-  } else if (input.profileId === ALL_ALERTS_PROFILE_ID) {
+  if (input.profileId === ALL_ALERTS_PROFILE_ID) {
     lead = _plural(n, 'am.summary_all', { n }, t);
   } else {
     const win = profileWindow(input.profile);
@@ -203,7 +198,10 @@ export function horizonAlerts<A extends { line?: string; time?: Date | null }>(
   cutoff: Date | null,
 ): A[] {
   const scoped = alerts.filter(a => !a.line || plantLines.has(a.line));
-  return cutoff ? scoped.filter(a => !a.time || a.time <= cutoff) : scoped;
+  // An alert is dropped only for a real reason: its time is a valid instant past the cutoff. No time, or an Invalid Date,
+  // reads as "no time" and stays (a NaN comparison would otherwise drop it silently); an invalid cutoff cuts nothing.
+  if (!cutoff || isNaN(cutoff.getTime())) return scoped;
+  return scoped.filter(a => !(a.time instanceof Date) || isNaN(a.time.getTime()) || a.time <= cutoff);
 }
 
 export type EmptyKind = 'no-plant' | 'no-alerts' | 'no-match' | 'all-acked' | null;
@@ -231,8 +229,6 @@ export function emptyStateFor(input: {
    resolves Store / Util / NIMBUS reads and hands them in, so these stay DOM-free.
    ------------------------------------------------------------------------- */
 
-/** Rows shown per group before "Show all N". */
-export const GROUP_ROW_CAP = 40;
 /** Compact Inbox / side-list row height (px); an open row adds its detail block (`detailHeightFor`). */
 export const ROW_H = 32;
 /** The two-line row height once the list container is at most `NARROW_AT` px wide. */
@@ -255,15 +251,15 @@ export function clampSideWidth(px: unknown, layoutW?: number): number {
   }
   return w;
 }
-/** The alert types a group's "Move N orders" moves: `overload` is excluded, its fix runs the line-day changeover optimizer. */
-export const MOVABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'tool-conflict']);
+/** The alert types a group's "Move N orders" moves: the fixable ones minus `overload` (its fix runs the line-day changeover optimizer). */
+export const MOVABLE_ALERT_TYPES: ReadonlySet<string> = movableAlertTypes();
 /** Above this many orders "Move N orders" asks first. */
 export const GROUP_MOVE_CONFIRM_ABOVE = 5;
 
 const _esc = (s: unknown): string => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-export type DiagnoseKind = 'cell' | 'order' | 'none';
+type DiagnoseKind = 'cell' | 'order' | 'none';
 
 export interface RowActions { goto: boolean; fix: boolean; override: boolean; slot: boolean; diagnose: DiagnoseKind }
 
@@ -279,31 +275,6 @@ export function rowActionsFor(a: { type: string; taskId?: string | null; line?: 
   };
 }
 
-/** "today" / "in 9 days" / "3 days overdue" for a whole-day offset from the plant's today. */
-export function relativeDaysText(offset: number, t: Translate): string {
-  if (offset === 0) return t('am.rel_today');
-  return offset > 0 ? t('am.rel_in_days', { n: offset }) : t('am.rel_overdue_days', { n: -offset });
-}
-
-/** "from → to" text for a setup alert's pairKey (`<from>-><to>`, each half `unknown` or a JSON array of [field, value] pairs). */
-export function formatPairKey(pairKey: string | null | undefined): string {
-  if (!pairKey) return '';
-  const state = (raw: string): string => {
-    if (raw === 'unknown') return '?';
-    try {
-      const pairs = JSON.parse(raw);
-      if (Array.isArray(pairs) && pairs.length) {
-        return pairs.map(p => (Array.isArray(p) ? `${p[0]} ${p[1]}` : String(p))).join(', ');
-      }
-    } catch { /* fall through to the raw text */ }
-    return raw;
-  };
-  if (pairKey.startsWith('unknown->')) return `? → ${state(pairKey.slice(9))}`;
-  const split = pairKey.indexOf(']->');
-  if (split < 0) return pairKey;
-  return `${state(pairKey.slice(0, split + 1))} → ${state(pairKey.slice(split + 3))}`;
-}
-
 export interface GroupCounts {
   errors: number;
   warnings: number;
@@ -317,7 +288,7 @@ export interface GroupCounts {
   unackedIds: string[];
 }
 
-/** What a group head shows and offers. Counts only: a group head carries no totals. */
+/** What the view toolbar shows and offers (the "Move N" and "Acknowledge N…" buttons): counts and the ids they act on. */
 export function groupCounts<A extends AlertLike>(alerts: ReadonlyArray<A>, isAcked: (id: string) => boolean): GroupCounts {
   const orders = new Set<string>();
   const movable = new Set<string>();
@@ -440,8 +411,6 @@ export interface LevAction {
   admin?: boolean;
 }
 
-const _ROUTING_UPLOAD = new Set(['no_routing', 'pv_not_found', 'pv_expired', 'no_operation_at_workcenter', 'pv_workcenter_mismatch']);
-
 function _stateText(state: ReadonlyArray<{ fieldKey: string; value: string }>, fieldLabel: (k: string) => string): string {
   return state.map(p => `${fieldLabel(p.fieldKey)}: ${p.value}`).join(', ');
 }
@@ -506,7 +475,7 @@ export function levActions(item: LeverageItem, ctx: LevCtx): { primary: LevActio
     }
     case 'routing-gap':
       if (a.step === 'workcenter_unmapped') add('rg-workcenters', 'leverage.action.routing-gap.workcenter_unmapped', true, { admin: true });
-      else if (_ROUTING_UPLOAD.has(a.step)) add('rg-routing', 'leverage.action.routing-gap', true, { admin: true });
+      else if (ROUTING_UPLOAD_STEPS.has(a.step)) add('rg-routing', 'leverage.action.routing-gap', true, { admin: true });
       else if (a.step === 'no_machine') add('open-table', 'am.open_in_table', true, { labelVars: { n } });
       else add('copy-summary', 'am.lev_copy_summary', true);
       break;
@@ -614,8 +583,8 @@ export function fixClearsText(item: LeverageItem, t: Translate): string {
 }
 
 /**
- * Whether a fix's confidence clause ("71 → 78", the dial's ghost) is shown: a replayed, minutes-free fix whose
- * rounded after-score differs from its rounded before-score. The one predicate for the fix row and the Overview dial.
+ * Whether a fix row's confidence clause ("71 → 78") is shown: a replayed, minutes-free fix whose
+ * rounded after-score differs from its rounded before-score.
  */
 export function fixConfidenceChanged(item: LeverageItem): boolean {
   const after = item.confidenceAfter;
@@ -837,13 +806,17 @@ export const UNGROUPED_KEY = '__ungrouped__';
 
 export interface MonitorMachine { id: string; name?: string; wc_group?: string }
 
-/** A line's work-center group key (`wc_group` of the master line; blank or unknown -> UNGROUPED_KEY). */
-export function wcGroupOf(line: string | null | undefined, masterLines: ReadonlyArray<{ machine?: string; id?: string; wc_group?: string }>): string {
-  if (!line) return UNGROUPED_KEY;
+/** A group roll-up row's key in the matrix: `wc:<group>` (a machine id is the bare id). Also the file-under rule: a line id that starts with it counts as no machine. */
+export const GROUP_ROW_PREFIX = 'wc:';
+
+/** Line id -> work-center group key (`wc_group` of the master line; blank -> UNGROUPED_KEY). Accepts a master line's `machine` or a ctx machine's `id`; a line it lacks reads as UNGROUPED_KEY at the caller. */
+export function buildWcByLine(masterLines: ReadonlyArray<{ id?: string; machine?: string; wc_group?: string }>): Map<string, string> {
+  const out = new Map<string, string>();
   for (const m of masterLines) {
-    if ((m.id ?? m.machine) === line) return m.wc_group ? String(m.wc_group) : UNGROUPED_KEY;
+    const key = m.id ?? m.machine;
+    if (key != null) out.set(key, m.wc_group ? String(m.wc_group) : UNGROUPED_KEY);
   }
-  return UNGROUPED_KEY;
+  return out;
 }
 
 /** What the filter and the matrix need from the page. The pane builds it from the Store (W6b). */
@@ -867,7 +840,7 @@ function _anchor(a: NimbusAlert, ctx: Pick<MonitorCtx, 'anchorOf'>): Date | null
 }
 
 /**
- * `'overdue'`, a `YYYY-MM-DD` day key, `'later'` or `'none'`: the Overview band's own bucket rule (`dayBucketKey`),
+ * `'overdue'`, a `YYYY-MM-DD` day key, `'later'` or `'none'`: the shared day-bucket rule (`dayBucketKey`),
  * so a Matrix column and an Inbox facet never disagree on what a day is.
  */
 export function dayBucketOf(alert: NimbusAlert, plantToday: Date, horizonDays: number, anchorOf?: (a: NimbusAlert) => Date | null): string {
@@ -885,24 +858,35 @@ export function makeBucketer(ctx: Pick<MonitorCtx, 'plantToday' | 'horizonDays' 
   };
 }
 
-/** The alerts matching every active dimension (AND) and the search text. An empty filter returns the same array. */
+// The lowercase search haystack per alert, cached per ctx object: the pane builds one ctx per paint and filters with it several
+// times (the view, then each Inbox facet), so the order / material / tag lookups run once per alert per paint, not once per pass.
+const _hayCache = new WeakMap<object, Map<string, string>>();
+
+function _haystack(a: NimbusAlert, ctx: MonitorCtx): string {
+  let byId = _hayCache.get(ctx);
+  if (!byId) { byId = new Map(); _hayCache.set(ctx, byId); }
+  let hay = byId.get(a.id);
+  if (hay === undefined) {
+    hay = [a.taskId ?? '', ctx.orderNoOf?.(a) ?? (a.msgVars?.order ?? ''), a.line ?? '', ctx.materialOf?.(a) ?? '', ctx.tagOf?.(a) ?? '']
+      .join('\u0001').toLowerCase();
+    byId.set(a.id, hay);
+  }
+  return hay;
+}
+
+/** The alerts matching every active dimension (AND) and the search text. An empty filter returns the same array. The search text of an alert is cached per `ctx` object: pass a fresh ctx when the order, material or tag sources change. */
 export function filterAlerts<A extends NimbusAlert>(alerts: ReadonlyArray<A>, f: MonitorFilter, ctx: MonitorCtx): A[] {
   if (filterIsEmpty(f)) return alerts as A[];
-  const wcByLine = new Map<string, string>();
-  if (f.wcGroups.size) for (const m of ctx.machines) wcByLine.set(m.id, m.wc_group ? String(m.wc_group) : UNGROUPED_KEY);
+  const wcByLine = f.wcGroups.size ? buildWcByLine(ctx.machines) : new Map<string, string>();
   const bucket = f.days.size ? makeBucketer(ctx) : null;
   const q = f.q.trim().toLowerCase();
   return alerts.filter(a => {
     // Same file-under rule as matrixModel: a `wc:`-prefixed id would collide with a group row key, so it counts as no machine.
-    if (f.machines.size && !f.machines.has(a.line && !a.line.startsWith('wc:') ? a.line : NONE_KEY)) return false;
+    if (f.machines.size && !f.machines.has(a.line && !a.line.startsWith(GROUP_ROW_PREFIX) ? a.line : NONE_KEY)) return false;
     if (f.wcGroups.size && !f.wcGroups.has(a.line ? (wcByLine.get(a.line) ?? UNGROUPED_KEY) : UNGROUPED_KEY)) return false;
     if (f.categories.size && !f.categories.has(_catOf(a.type))) return false;
     if (bucket && !f.days.has(bucket(a))) return false;
-    if (q) {
-      const hay = [a.taskId ?? '', ctx.orderNoOf?.(a) ?? (a.msgVars?.order ?? ''), a.line ?? '', ctx.materialOf?.(a) ?? '', ctx.tagOf?.(a) ?? '']
-        .join('\u0001').toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
+    if (q && !_haystack(a, ctx).includes(q)) return false;
     return true;
   });
 }

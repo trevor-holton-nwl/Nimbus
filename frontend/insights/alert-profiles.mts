@@ -146,6 +146,10 @@ export function categoryOf(type: string): AlertCategory {
 
 /** Types the drawer and the Alert Monitor offer a one-click Fix for. */
 export const FIXABLE_ALERT_TYPES: ReadonlySet<string> = new Set(['overlap', 'blackout', 'overload', 'tool-conflict']);
+/** The types a group's "Move N orders" moves: every fixable type except `overload` (its fix runs the line-day changeover optimizer). */
+export function movableAlertTypes(): ReadonlySet<string> {
+  return new Set([...FIXABLE_ALERT_TYPES].filter(t => t !== 'overload'));
+}
 /** A tool conflict with no usable copy (available 0) can never be cleared by moving an order: the Fix action and "Move N orders" skip it. */
 export function isUnfixableToolAlert(a: { type: string; available?: number | null }): boolean {
   return a.type === 'tool-conflict' && a.available === 0;
@@ -216,9 +220,9 @@ export function ruleMatches(
  * category. Category-level on purpose: a rule `{types:['setup-violated'], dayFrom:0, dayTo:3}` narrows the whole Setup group,
  * so under a profile that switches Setup on it never lets a `setup-uncovered` alert through (the rule names another type).
  */
-export function ruleAppliesTo(rule: AlertProfileRule, cat: AlertCategory): boolean {
+export function ruleAppliesTo(rule: { types: readonly string[] | null }, cat: AlertCategory): boolean {
   if (rule.types == null) return true;
-  return (rule.types as string[]).some(t => categoryOf(t) === cat);
+  return rule.types.some(t => categoryOf(t) === cat);
 }
 
 function _isPaletteName(v: unknown): v is PaletteName {
@@ -359,22 +363,38 @@ function _cmpNum(a: number, b: number): number {
   return a === b ? 0 : a < b ? -1 : 1;   // handles Infinity - Infinity without NaN
 }
 
-/** Comparator for `Array.prototype.sort`; ties always end on alert id so the order is deterministic. */
+/** A closure-local, lazily filled key cache: each alert's key is computed once per comparator instance, not once per
+ *  comparison (a sort makes O(n log n) comparisons and each needs two keys). Keyed by the alert object. */
+function _memoKey(compute: (alert: NimbusAlert) => number): (alert: NimbusAlert) => number {
+  const cache = new Map<NimbusAlert, number>();
+  return (alert) => {
+    let v = cache.get(alert);
+    if (v === undefined) { v = compute(alert); cache.set(alert, v); }
+    return v;
+  };
+}
+
+/** Comparator for `Array.prototype.sort`; ties always end on alert id so the order is deterministic. The sort keys
+ *  (anchor, impact, affected orders) are memoised per alert for the comparator's lifetime: build one comparator per sort
+ *  and do not mutate the alerts between its calls. */
 export function compareAlerts(ranking: AlertRanking, ctx: RankContext): (a: NimbusAlert, b: NimbusAlert) => number {
   const byId = (a: NimbusAlert, b: NimbusAlert) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-  const byAnchor = (a: NimbusAlert, b: NimbusAlert) => _cmpNum(_anchorKey(a, ctx), _anchorKey(b, ctx));
+  const anchorKey = _memoKey(a => _anchorKey(a, ctx));
+  const byAnchor = (a: NimbusAlert, b: NimbusAlert) => _cmpNum(anchorKey(a), anchorKey(b));
   switch (ranking) {
     case 'time':
       return (a, b) => byAnchor(a, b) || byId(a, b);
     case 'severity':
       return (a, b) => _cmpNum(a.sev === 'err' ? 0 : 1, b.sev === 'err' ? 0 : 1) || byAnchor(a, b) || byId(a, b);
-    case 'orders':
-      return (a, b) => _cmpNum(_affectedOrders(b), _affectedOrders(a)) || byAnchor(a, b) || byId(a, b);
+    case 'orders': {
+      const orders = _memoKey(_affectedOrders);
+      return (a, b) => _cmpNum(orders(b), orders(a)) || byAnchor(a, b) || byId(a, b);
+    }
     case 'impact':
-    default:
-      return (a, b) =>
-        _cmpNum(impactPoints(b, ctx.horizonStart, ctx.horizonMinutes), impactPoints(a, ctx.horizonStart, ctx.horizonMinutes))
-        || byAnchor(a, b) || byId(a, b);
+    default: {
+      const points = _memoKey(a => impactPoints(a, ctx.horizonStart, ctx.horizonMinutes));
+      return (a, b) => _cmpNum(points(b), points(a)) || byAnchor(a, b) || byId(a, b);
+    }
   }
 }
 
@@ -462,8 +482,10 @@ export interface ProfileValidation {
   errors: Record<string, string>;
 }
 
-const DAY_BOUND = 365;
-const MAX_NAME_LEN = 60;
+/** The largest whole-day offset a rule bound may take (either sign); mirrors the server. */
+export const DAY_BOUND = 365;
+/** The longest profile name; mirrors the server. */
+export const MAX_NAME_LEN = 60;
 const MAX_RULES = 20;
 const _firing = new Set<string>(FIRING_ALERT_TYPES);
 
