@@ -117,6 +117,41 @@
   // singular, both taking {{count}}. (English-only pluralisation was wrong in de/es/fr/pt.)
   const _plural = (count, key, vars) => t(count === 1 ? `${key}_one` : key, { count, ...vars });
 
+  // Palette search scoring. `qt` and `tt` are already lower-cased (the index stores each row's label / sub lower-cased
+  // once, so a keystroke does not lower-case 10 000 order labels again): 3 = starts with, 2 = contains, 1 = the letters
+  // appear in order, 0 = no match.
+  function fuzzyScoreLc(qt, tt) {
+    if (tt.startsWith(qt)) return 3;
+    if (tt.includes(qt))   return 2;
+    let qi = 0;
+    for (let i = 0; i < tt.length && qi < qt.length; i++)
+      if (tt[i] === qt[qi]) qi++;
+    return qi === qt.length ? 1 : 0;
+  }
+  const PALETTE_TYPE_ORDER = { selection: 0, action: 1, line: 2, order: 3 };
+  // The best `limit` rows of `index` for query `q`, in one pass with a small sorted buffer (no score array for the
+  // whole index, no full sort). Order is exactly the old sort's: higher score first, then selection < action < line <
+  // order, then index order (the old sort was stable). A row's score is the better of its label and 0.8 x its sub-label.
+  function topPaletteMatches(index, q, limit) {
+    const qt = q.toLowerCase();
+    const top = [];
+    const beats = (a, b) => a.score !== b.score ? a.score > b.score : a.rank !== b.rank ? a.rank < b.rank : a.i < b.i;
+    for (let i = 0; i < index.length; i++) {
+      const item = index[i];
+      const labelLc = item.labelLc ?? String(item.label).toLowerCase();
+      const subLc   = item.subLc ?? String(item.sub || '').toLowerCase();
+      const score = Math.max(fuzzyScoreLc(qt, labelLc), Math.floor(fuzzyScoreLc(qt, subLc) * 0.8));
+      if (score <= 0) continue;
+      const entry = { item, score, rank: PALETTE_TYPE_ORDER[item.type] ?? 9, i };
+      if (top.length === limit && !beats(entry, top[limit - 1])) continue;
+      let pos = top.length;
+      while (pos > 0 && beats(entry, top[pos - 1])) pos--;
+      top.splice(pos, 0, entry);
+      if (top.length > limit) top.pop();
+    }
+    return top.map(x => x.item);
+  }
+
   // Go to an order on the Gantt and open it: App.gotoGanttSub('timeline') flips the pane at once but rebuilds the
   // Gantt in a short timeout, so the focus waits for that (there is no store event or promise for it).
   function _focusOrderAfterGoto(id) {
@@ -1186,6 +1221,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
           run(){ CommandPalette.close(); NIMBUS.App.gotoGanttTimeline(); Toast.show(t('toast.ripple_howto'), 'info', 4000); } },
         { type:'action', label:t('cmdp.label_reload_data'), sub:t('cmdp.sub_reread_excel'), icon:'↺', run(){ CommandPalette.close(); NIMBUS.Persistence?.reload?.(); } }
       );
+      // Lower-case each row's text once here, not on every keystroke (topPaletteMatches reads these).
+      for (const row of idx) { row.labelLc = String(row.label).toLowerCase(); row.subLc = String(row.sub || '').toLowerCase(); }
       CommandPalette._index = idx;
       const actionCt = idx.filter(i => i.type === 'action').length;
       const lineCt   = idx.filter(i => i.type === 'line'  ).length / 2;
@@ -1200,15 +1237,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       }
     },
 
-    _fuzzy(q, text) {
-      const qt = q.toLowerCase(), tt = text.toLowerCase();
-      if (tt.startsWith(qt)) return 3;
-      if (tt.includes(qt))   return 2;
-      let qi = 0;
-      for (let i = 0; i < tt.length && qi < qt.length; i++)
-        if (tt[i] === qt[qi]) qi++;
-      return qi === qt.length ? 1 : 0;
-    },
+    _fuzzy(q, text) { return fuzzyScoreLc(q.toLowerCase(), text.toLowerCase()); },
 
     _search(query) {
       if (!CommandPalette._index) CommandPalette._buildIndex();
@@ -1237,19 +1266,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
       if (q) {
         // Fuzzy search across full index (includes selection commands)
-        const typeOrder = { selection: 0, action: 1, line: 2, order: 3 };
-        CommandPalette._results = CommandPalette._index
-          .map(item => ({
-            item,
-            score: Math.max(
-              CommandPalette._fuzzy(q, item.label),
-              Math.floor(CommandPalette._fuzzy(q, item.sub || '') * 0.8)
-            )
-          }))
-          .filter(x => x.score > 0)
-          .sort((a, b) => b.score - a.score || (typeOrder[a.item.type] ?? 9) - (typeOrder[b.item.type] ?? 9))
-          .slice(0, PALETTE_MAX_RESULTS)
-          .map(x => x.item);
+        CommandPalette._results = topPaletteMatches(CommandPalette._index, q, PALETTE_MAX_RESULTS);
       } else {
         // Empty query: Right Now → Selection → Actions
         const rightNow   = NeedsEngine.topNeeds(4);
@@ -1304,9 +1321,21 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
 
     _move(dir) {
       if (!CommandPalette._results.length) return;
+      const prev = CommandPalette._cursor;
       CommandPalette._cursor = Math.max(0, Math.min(CommandPalette._results.length - 1, CommandPalette._cursor + dir));
-      CommandPalette._render();
-      document.querySelectorAll('.ni-cp-result')[CommandPalette._cursor]?.scrollIntoView?.({ block: 'nearest' });
+      // Arrow keys only move the highlight: toggle the active class on the two rows instead of rebuilding the list
+      // (a full render re-parses the markup and re-binds every row). If the DOM does not match the results (not
+      // rendered yet), fall back to a render.
+      const list = document.getElementById('ni-cp-results');
+      let rows = list?.querySelectorAll?.('.ni-cp-result');
+      if (!rows || rows.length !== CommandPalette._results.length) {
+        CommandPalette._render();
+        rows = list?.querySelectorAll?.('.ni-cp-result');
+      } else {
+        rows[prev]?.classList.remove('active');
+        rows[CommandPalette._cursor]?.classList.add('active');
+      }
+      rows?.[CommandPalette._cursor]?.scrollIntoView?.({ block: 'nearest' });
     },
 
     _activate() {
@@ -2015,8 +2044,8 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       Confidence._lastAlertsSrc = alerts;
       Confidence._lastRev = rev;
 
-      const tasks  = Store.tasksArr;
-      if (!tasks.length) { Confidence._apply(100); return; }
+      // Only the selected plant's orders count (the alerts and machine count above are scoped to it too).
+      if (!Store.tasksForSelectedPlant().length) { Confidence._apply(100); return; }
 
       const hMinutes = _confHorizonMinutes();
       const horizonStart = _plantClock();   // the plant clock (I13), not the viewer's
@@ -2500,17 +2529,30 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const task = Store.tasks[taskId];
       if (!task?.MACHINE || !task.start_date) return;
       const line = task.MACHINE;
-      const peers = Store.tasksArr
-        .filter(x => x.MACHINE === line && x.start_date && x.id !== taskId)
-        .sort((a,b) => a.start_date - b.start_date);
-      const downstream = peers.filter(x => x.start_date >= task.start_date).slice(0, RIPPLE_DOWNSTREAM_MAX);
+      // The next RIPPLE_DOWNSTREAM_MAX orders on this machine that start at or after the hovered one, earliest first
+      // (ties keep Store order, like the stable sort this replaces): one pass with a small sorted buffer.
+      const downstream = [];
+      const startMs = +task.start_date;
+      for (const x of Store.tasksArr) {
+        if (x.MACHINE !== line || !x.start_date || x.id === taskId) continue;
+        const xs = +x.start_date;
+        if (!(xs >= startMs)) continue;
+        if (downstream.length === RIPPLE_DOWNSTREAM_MAX && xs >= +downstream[RIPPLE_DOWNSTREAM_MAX - 1].start_date) continue;
+        let pos = downstream.length;
+        while (pos > 0 && xs < +downstream[pos - 1].start_date) pos--;
+        downstream.splice(pos, 0, x);
+        if (downstream.length > RIPPLE_DOWNSTREAM_MAX) downstream.pop();
+      }
       if (!downstream.length) return;
 
+      // Read every bar's rectangle first, then create the ghosts: no layout read after a DOM write.
+      const rects = downstream.map(next => {
+        const r = document.querySelector(`.vis-item[data-id="${next.id}"]`)?.getBoundingClientRect();
+        return r && r.width ? r : null;
+      });
       downstream.forEach((next, i) => {
-        const el = document.querySelector(`.vis-item[data-id="${next.id}"]`);
-        if (!el) return;
-        const r = el.getBoundingClientRect();
-        if (!r.width) return;
+        const r = rects[i];
+        if (!r) return;
         const ghost = document.createElement('div');
         ghost.className = 'ni-ripple-ghost';
         ghost.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;
@@ -2878,6 +2920,7 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
      PATTERNS — heuristic sequence-pair learning from drags
      ========================================================================== */
   const patternsByPlant = {};   // { [plant]: { 'A→B': count } }; Patterns._pairs is the selected plant's entry
+  let patternsPersistTimer = null;
   const Patterns = {
     _LS_KEY:    'nimbus.patterns.v1',
     _pairs:     {},
@@ -2895,6 +2938,9 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
         }
       } catch {}
       Patterns._pairs = patternsByPlant[Store.selectedPlant] || {};
+      // A pending (debounced) write must not be lost when the tab is hidden or closed.
+      window.addEventListener?.('pagehide', () => { if (patternsPersistTimer) Patterns.flush(); });
+      document.addEventListener?.('visibilitychange', () => { if (document.hidden && patternsPersistTimer) Patterns.flush(); });
       Store.subscribe(evt => {
         if (evt.type === 'plant:selected') Patterns._pairs = patternsByPlant[Store.selectedPlant] || {};
         if (evt.type === 'task:update' && evt.source === 'timeline' && evt.changes?.start_date)
@@ -2906,22 +2952,42 @@ body.dark .ni-cp-result-icon { background:var(--bg-subtle); }
       const plant = Store.selectedPlant;
       const task = Store.tasks[movedId];
       if (!plant || !task?.MACHINE || !task.start_date) return;
-      const sorted = Store.tasksArr
-        .filter(x => x.MACHINE === task.MACHINE && x.start_date)
-        .sort((a,b) => a.start_date - b.start_date);
-      const idx = sorted.findIndex(x => x.id === movedId);
-      if (idx > 0) {
-        const prev = sorted[idx - 1];
+      // The order that sits right before the moved one on its machine (by start, ties in Store order): one pass over
+      // the orders, no filter + sort + findIndex of the whole machine on every drag.
+      const movedStart = +task.start_date;
+      let prev = null, prevStart = -Infinity, seenMoved = false;
+      for (const x of Store.tasksArr) {
+        if (x.id === movedId) { seenMoved = true; continue; }
+        if (x.MACHINE !== task.MACHINE || !x.start_date) continue;
+        const xs = +x.start_date;
+        // Before the moved order when it starts earlier, or starts at the same time and comes earlier in Store order.
+        if (!(xs < movedStart || (xs === movedStart && !seenMoved))) continue;
+        if (xs >= prevStart) { prev = x; prevStart = xs; }   // >=: the later Store entry wins a tie, as in the old sorted order
+      }
+      if (seenMoved && prev) {
         const key  = `${Util.norm(prev.COLOR)}→${Util.norm(task.COLOR)}`;
         const pairs = patternsByPlant[plant] || (patternsByPlant[plant] = {});
         Patterns._pairs = pairs;
         pairs[key] = (pairs[key] || 0) + 1;
-        // A full or blocked store must not throw out of a Gantt drag (the count still lives for this session).
-        try { localStorage.setItem(Patterns._LS_KEY, JSON.stringify(patternsByPlant)); } catch (e) {
-          _warn('Patterns save failed', e);
-        }
+        Patterns.schedulePersist();
         if (pairs[key] === Patterns._THRESHOLD)
           Toast.show(t('toast.pattern_detected', { key }), 'info', 4500);
+      }
+    },
+
+    // Writing the whole map to localStorage on every drag is wasted work in a drag burst: coalesce, and flush when the
+    // page is hidden or closed so the last drag is not lost.
+    schedulePersist() {
+      clearTimeout(patternsPersistTimer);
+      patternsPersistTimer = setTimeout(Patterns.flush, PATTERNS_PERSIST_DEBOUNCE_MS);
+    },
+
+    flush() {
+      clearTimeout(patternsPersistTimer);
+      patternsPersistTimer = null;
+      // A full or blocked store must not throw out of a Gantt drag (the count still lives for this session).
+      try { localStorage.setItem(Patterns._LS_KEY, JSON.stringify(patternsByPlant)); } catch (e) {
+        _warn('Patterns save failed', e);
       }
     }
   };
