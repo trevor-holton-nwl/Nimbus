@@ -3,10 +3,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  viewFor, DEFAULT_VIEW, emptyFilter, filterIsEmpty, filterChips, buildWcByLine, GROUP_ROW_PREFIX, UNGROUPED_KEY, dayBucketOf, makeBucketer, filterAlerts,
+  viewFor, DEFAULT_VIEW, emptyFilter, filterIsEmpty, filterChips, buildWcByLine, GROUP_ROW_PREFIX, UNGROUPED_KEY, makeBucketer, filterAlerts,
   materialOf, tagOf, rowHtml, rowDetailHtml, fixesInView, summaryLine,
 } from '../../../frontend/alert-monitor/alert-monitor-model.mjs';
-import { overviewData, dayBucketKey, horizonDayKeys } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
+import { horizonDayKeys, OVERDUE_KEY, LATER_KEY, NONE_KEY } from '../../../frontend/alert-monitor/alert-monitor-overview.mjs';
 
 const t = (k, v) => `${k}${v ? '|' + Object.entries(v).map(([a, b]) => `${a}=${b}`).join(',') : ''}`;
 const today = new Date(2026, 9, 30);
@@ -65,25 +65,20 @@ test('buildWcByLine: line id to wc_group; a blank group is the Ungrouped bucket,
   assert.equal(GROUP_ROW_PREFIX, 'wc:');
 });
 
-test('dayBucketOf: overdue, a day key, later, none; the same rule as overviewData', () => {
-  assert.equal(dayBucketOf(al('M1', 'late', at(-1)), today, 7), 'overdue');
-  assert.equal(dayBucketOf(al('M1', 'late', at(0, 0)), today, 7), '2026-10-30');
-  assert.equal(dayBucketOf(al('M1', 'late', at(6, 23)), today, 7), '2026-11-05');
-  assert.equal(dayBucketOf(al('M1', 'late', at(7)), today, 7), 'later');
-  assert.equal(dayBucketOf(al('M1', 'late', null), today, 7), 'none');
-  assert.equal(dayBucketOf(al('M1', 'late', at(2)), today, 7, () => at(-3)), 'overdue', 'the resolver (order due) beats the alert time');
+test('makeBucketer: overdue, a day key, later, none; the resolver (order due) beats the alert time', () => {
+  const b = makeBucketer({ plantToday: today, horizonDays: 7 });
+  assert.equal(b(al('M1', 'late', at(-1))), OVERDUE_KEY);
+  assert.equal(b(al('M1', 'late', at(0, 0))), '2026-10-30');
+  assert.equal(b(al('M1', 'late', at(6, 23))), '2026-11-05');
+  assert.equal(b(al('M1', 'late', at(7))), LATER_KEY);
+  assert.equal(b(al('M1', 'late', null)), NONE_KEY);
+  assert.equal(makeBucketer({ plantToday: today, horizonDays: 7, anchorOf: () => at(-3) })(al('M1', 'late', at(2))), OVERDUE_KEY);
   const list = [-5, -1, 0, 1, 3, 6, 7, 20].map(d => al('M1', 'late', at(d)));
   list.push(al('M1', 'late', null));
-  const ov = overviewData(list, { tasksById: {}, plantToday: today, horizonMinutes: 7 * 1440, window: null });
   const count = {};
-  const b = makeBucketer({ plantToday: today, horizonDays: 7 });
-  for (const a of list) { count[b(a)] = (count[b(a)] ?? 0) + 1; assert.equal(b(a), dayBucketOf(a, today, 7)); }
-  assert.equal(count.overdue, ov.overdue.err + ov.overdue.warn);
-  assert.equal(count.later, ov.later.err + ov.later.warn);
-  assert.equal(count.none, ov.undated);
-  for (const d of ov.days) assert.equal(count[d.key] ?? 0, d.err + d.warn, d.key);
-  assert.deepEqual(horizonDayKeys(today, 7), ov.days.map(d => d.key));
-  assert.equal(dayBucketKey(at(1), today, 7), '2026-10-31');
+  for (const a of list) count[b(a)] = (count[b(a)] ?? 0) + 1;
+  assert.deepEqual(count, { overdue: 2, '2026-10-30': 1, '2026-10-31': 1, '2026-11-02': 1, '2026-11-05': 1, later: 2, none: 1 });
+  assert.deepEqual(horizonDayKeys(today, 7), ['2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05']);
 });
 
 test('filterAlerts: every dimension, AND across dimensions, empty returns the same array', () => {

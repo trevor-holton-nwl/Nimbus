@@ -49,8 +49,6 @@ const SUM = {
   'am.summary_all_one': '1 alert at this plant',
   'am.summary_errors': '{{e}} errors', 'am.summary_errors_one': '1 error',
   'am.summary_warnings': '{{w}} warnings', 'am.summary_warnings_one': '1 warning',
-  'am.focus_chip': 'Showing {{n}} alerts for: {{title}}',
-  'am.focus_chip_outside': 'Showing {{n}} alerts for: {{title}} ({{k}} outside your profile)',
   'am.empty_no_plant': 'Select a plant',
 };
 const ts = (k, v) => (SUM[k] ?? k).replace(/\{\{(\w+)\}\}/g, (_, n) => String(v?.[n] ?? ''));

@@ -10,7 +10,7 @@ import { activePeriodOn } from '../calendar/calendar-periods.mjs';
 import { categoryOf as _catOf, ALERT_CATEGORY_ORDER, effectiveCategories, ruleAppliesTo, alertOrderIds, ALL_ALERTS_PROFILE_ID, NONE_KEY, alertDayOffset, dayKeyOf, isFixableAlert, isUnfixableToolAlert, movableAlertTypes, OVERRIDE_ALERT_TYPES, CALENDAR_ALERT_TYPES, SLOT_ALERT_TYPES } from '../insights/alert-profiles.mjs';
 import { ROUTING_UPLOAD_STEPS } from '../insights/alert-leverage.mjs';
 import type { LeverageItem, LeveragePair } from '../insights/alert-leverage.mjs';
-import { dayBucketKey, horizonDayKeys } from './alert-monitor-overview.mjs';
+import { horizonDayKeys, OVERDUE_KEY, LATER_KEY } from './alert-monitor-overview.mjs';
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -695,14 +695,18 @@ export function fixesSectionHtml(items: ReadonlyArray<LeverageItem>, o: FixesSec
       ? `<div class="am-fix-list" role="list">${shown.map((it, i) => fixRowHtml(it, i + 1, o.ctxFor(it), t)).join('')}</div>` : '';
     const more = main.length > limit && limit < LEV_MAX_RENDER
       ? `<div class="am-more"><button type="button" class="btn sm btn-ghost" data-am-action="fixes-show-more">${_esc(t('am.fixes_more'))}</button></div>` : '';
+    // The list stops at LEV_MAX_RENDER: say how many are not shown (the planner narrows the view to reach them).
+    const truncNote = (shownN: number, total: number) => total > shownN
+      ? `<div class="am-lev-empty am-fixes-trunc">${_esc(t('am.fixes_truncated', { shown: shownN, total }))}</div>` : '';
+    const mainNote = limit >= LEV_MAX_RENDER ? truncNote(shown.length, main.length) : '';
     let adminHtml = '';
     if (adminList.length) {
       adminHtml = `<button type="button" class="am-fix-divider" aria-expanded="${o.adminOpen}" aria-controls="am-fix-admin-list" data-am-action="fixes-admin-toggle">`
         + `<span class="am-caret" aria-hidden="true">${o.adminOpen ? '▾' : '▸'}</span>${_esc(t('am.fixes_admin_divider', { n: adminList.length }))}</button>`
         + (o.adminOpen
-          ? `<div class="am-fix-list" id="am-fix-admin-list" role="list">${adminList.slice(0, LEV_MAX_RENDER).map(it => fixRowHtml(it, null, o.ctxFor(it), t)).join('')}</div>` : '');
+          ? `<div class="am-fix-list" id="am-fix-admin-list" role="list">${adminList.slice(0, LEV_MAX_RENDER).map(it => fixRowHtml(it, null, o.ctxFor(it), t)).join('')}</div>${truncNote(LEV_MAX_RENDER, adminList.length)}` : '');
     }
-    body = list + more + adminHtml;
+    body = list + more + mainNote + adminHtml;
     if (!body) body = `<div class="am-lev-empty">${_esc(t('am.lev_none'))}</div>`;
   }
   return `<section class="panel am-fixes" aria-label="${_esc(t('am.fixes_title'))}">${head}<div id="am-fixes-body">${body}</div></section>`;
@@ -840,21 +844,16 @@ function _anchor(a: NimbusAlert, ctx: Pick<MonitorCtx, 'anchorOf'>): Date | null
 }
 
 /**
- * `'overdue'`, a `YYYY-MM-DD` day key, `'later'` or `'none'`: the shared day-bucket rule (`dayBucketKey`),
- * so a Matrix column and an Inbox facet never disagree on what a day is.
+ * A cached bucketer for one pass (the day keys are built once): `OVERDUE_KEY`, a `YYYY-MM-DD` day key, `LATER_KEY` or `NONE_KEY`.
+ * The one day-bucket rule, so a Matrix column and an Inbox facet never disagree on what a day is.
  */
-export function dayBucketOf(alert: NimbusAlert, plantToday: Date, horizonDays: number, anchorOf?: (a: NimbusAlert) => Date | null): string {
-  return dayBucketKey(_anchor(alert, { anchorOf }), plantToday, horizonDays);
-}
-
-/** A cached bucketer for one pass (the day keys are built once); same result as `dayBucketOf`. */
 export function makeBucketer(ctx: Pick<MonitorCtx, 'plantToday' | 'horizonDays' | 'anchorOf'>): (a: NimbusAlert) => string {
   const keys = horizonDayKeys(ctx.plantToday, ctx.horizonDays);
   return a => {
     const anchor = _anchor(a, ctx);
     if (!anchor) return NONE_KEY;
     const off = alertDayOffset(anchor, ctx.plantToday);
-    return off < 0 ? 'overdue' : off >= ctx.horizonDays ? 'later' : keys[off]!;
+    return off < 0 ? OVERDUE_KEY : off >= ctx.horizonDays ? LATER_KEY : keys[off]!;
   };
 }
 
