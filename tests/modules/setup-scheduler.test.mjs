@@ -2039,6 +2039,36 @@ test('override state keys in jsonb {value, fieldKey} order still match (free adj
   }
 });
 
+test('unknown tail orders are placed once when the trailing fragment has no winner', () => {
+  const known = scheduledTask('tail-once-known', 1, 'BLUE', '2026-08-03T18:00');
+  const blanks = ['A', 'B', 'C'].map(letter => scheduledTask(`tail-once-${letter}`, 1, '', '2026-08-03T18:00'));
+  const setup = setupTruth({ rows: [setupRow('GREEN', 'BLUE', 0)] });
+  for (const [label, evaluate] of [
+    ['Due-date-first', SetupScheduler.evaluateDueDateFirst],
+    ['SPT', SetupScheduler.evaluateSptWithSetup],
+  ]) {
+    // The clock expires on the first search tick: the trailing fragment has no
+    // winner, so its whole fragment (known + blank) falls to the unknown tail.
+    let ticks = 0;
+    const result = evaluate(
+      setupSnapshot([known, ...blanks]),
+      dueDateBounds(setup, { deadline: 1, clock: () => ticks++ }),
+    );
+    for (const { id } of blanks) {
+      assert.equal(result.patches.filter(patch => patch.id === id).length, 1, `${label}: ${id} gets exactly one patch`);
+    }
+    assert.equal(result.diagnostics.unknownTailPlacedCount, 3, label);
+    const starts = blanks.map(({ id }) => patchFor(result, id).changes.start_date.getTime()).sort((x, y) => x - y);
+    for (let i = 1; i < starts.length; i += 1) {
+      assert.equal(starts[i] - starts[i - 1], 60 * 60 * 1000, `${label}: tail orders are contiguous (no phantom hole)`);
+    }
+    const sws = result.missingEdges
+      .filter(edge => edge.reason === 'scheduled-without-setup')
+      .map(edge => `${edge.predecessorOrderId}>${edge.successorOrderId}`);
+    assert.equal(new Set(sws).size, sws.length, `${label}: no duplicated scheduled-without-setup edges`);
+  }
+});
+
 test('setup-aware evaluators reject invalid null-predecessor overrides on fixed boundaries', () => {
   // This protects the new null-predecessor lock: it belongs only to the first
   // fixed boundary and only when its predecessor state matches persisted line

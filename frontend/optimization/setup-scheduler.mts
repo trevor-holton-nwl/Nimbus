@@ -5934,7 +5934,9 @@ function evaluateLineWithFirmedBoundaries(
     // Budget exhaustion or unresolved coverage before any covered sequence
     // completed (Part 2b): never freeze — place the entire remaining
     // fragment as an unknown tail instead.
-    tailTasks = [...tailTasks, ...remaining];
+    // `remaining` already contains trailing.unknownTail (pulled out inside
+    // searchFragment); appending both placed those orders twice.
+    tailTasks = remaining;
   }
   const tailUnadmitted = applyUnknownTail(
     snapshot, bounds, line, mode, tailTasks, tailStart, bounds.horizonEnd, patches, explanation, missingEdges, tailPredecessorOrderId,
