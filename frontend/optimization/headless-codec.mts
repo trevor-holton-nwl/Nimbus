@@ -13,7 +13,7 @@ export function encodeTagged(value: unknown, indent?: number): string {
 
 export function decodeTagged(text: string): unknown {
   return JSON.parse(text, (_key, v: unknown) => {
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
+    if (v && typeof v === 'object' && !Array.isArray(v) && ('$d' in v || '$set' in v)) {
       const keys = Object.keys(v);
       const record = v as Record<string, unknown>;
       if (keys.length === 1 && keys[0] === '$d') return record.$d === null ? new Date(Number.NaN) : new Date(record.$d as string);

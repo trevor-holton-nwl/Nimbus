@@ -4649,6 +4649,31 @@ test('hard bounds preserve a valid incumbent on timeout and reject stale or tamp
   assert.ok(SetupScheduler.validateCandidateForApply(bad, snapshot).some(f => f.code === 'date_window'));
 });
 
+test('P1-4: skipStale omits only stale_candidate; boundsWithRunContext builds one run context for many validations', () => {
+  const snapshot = setupSnapshot([scheduledTask('current', 3, 'GREEN', '2026-08-03T18:00:00', '2026-08-03T08:00:00', '2026-08-03T11:00:00')]);
+  snapshot.masterData.plants[0].max_push_forward_days = 0;
+  const result = SetupScheduler.evaluateDueDateFirst(snapshot, dueDateBounds(setupTruth(), { clock: () => 10000, deadline: 1 }));
+  const stale = structuredClone(snapshot); stale.tasks[0].RUN_TIME = 4;
+  const withStale = SetupScheduler.validateCandidateForApply(result, stale);
+  const skipped = SetupScheduler.validateCandidateForApply(result, stale, { skipStale: true });
+  assert.ok(withStale.some(f => f.code === 'stale_candidate'));
+  assert.equal(skipped.some(f => f.code === 'stale_candidate'), false, 'no stale diff with the flag');
+  assert.deepEqual(skipped, withStale.filter(f => f.code !== 'stale_candidate'), 'every other finding is unchanged');
+  const ctx = result.validationContext;
+  const before = SetupScheduler.runContextBuildCount();
+  const live = structuredClone(snapshot);   // a different object than the run's snapshot, like the live board at Apply
+  const bounds = SetupScheduler.boundsWithRunContext(live, ctx.bounds);
+  assert.equal(SetupScheduler.runContextBuildCount() - before, 1);
+  const a = SetupScheduler.validateCandidate(live, bounds, result);
+  const b = SetupScheduler.validateCandidate(live, bounds, { ...result, patches: [] });
+  SetupScheduler.validateCandidate(live, bounds, result);
+  assert.equal(SetupScheduler.runContextBuildCount() - before, 1, 'reused across validations');
+  const direct = SetupScheduler.runContextBuildCount();
+  assert.deepEqual(a, SetupScheduler.validateCandidate(live, ctx.bounds, result), 'same findings as a per-call context');
+  assert.equal(SetupScheduler.runContextBuildCount() - direct, 1, 'without the helper each call rebuilds');
+  assert.ok(Array.isArray(b));
+});
+
 test('hard bounds clip setup and split production at the ceiling and preserve equality', () => {
   const snapshot = setupSnapshot([scheduledTask('setup-overflow', 10, 'RED', '2026-08-03T18:00:00'), scheduledTask('equal', 10, 'GREEN', '2026-08-03T18:00:00')]);
   snapshot.masterData.plants[0].max_push_forward_days = 0;

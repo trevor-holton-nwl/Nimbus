@@ -21,7 +21,7 @@ import { Alerts, scheduleAlertsForPatches } from '../insights/services.mjs';
 import { Engine, snapshotSchedule, SETUP_AWARE_NORMAL_BUDGET_MS, SETUP_AWARE_EXHAUSTIVE_BUDGET_MS, effectiveFirmedIdSet, evaluateSchedule } from './engine.mjs';
 import { runOptimizerPreview } from './optimizer-worker-client.mjs';
 import type { RemoveBacklogResult } from './scheduler-contract.mjs';
-import { applyPatchesToSnapshot, resolveTaskPlant, validateCandidate, validateCandidateForApply, toolingRuleForSnapshot } from './setup-scheduler.mjs';
+import { applyPatchesToSnapshot, boundsWithRunContext, resolveTaskPlant, validateCandidate, validateCandidateForApply, toolingRuleForSnapshot } from './setup-scheduler.mjs';
 import type { CandidateDiagnostic, CandidateReason, CandidateResult, EvaluationRequest, SchedulePatch, ScheduleSnapshot } from './setup-scheduler.mjs';
 import { confirmToolQueue, toolQueueSummary, raiseToolInventory } from './tool-queue-confirm.mjs';
 import { stateForOrder } from '../setup/setup-domain.mjs';
@@ -3092,9 +3092,11 @@ export const OptimizerPreview = {
     // The message is part of the key: capacity_overlap names both orders, so a NEW overlap that lands on an order which
     // already overlapped another one live is a different finding, not the baseline one.
     const keyOf = (finding: { code: string; taskId?: string | number; message?: string }): string => `${finding.code}|${finding.taskId}|${finding.message ?? ''}`;
+    // One run context for the live board, reused by every validation below.
+    const liveBounds = boundsWithRunContext(live0, context.bounds);
     const errorsFor = (patchSet: SchedulePatch[]) => {
       const ids = new Set(patchSet.map(patch => String(patch.id)));
-      return validateCandidate(live0, context.bounds, {
+      return validateCandidate(live0, liveBounds, {
         ...candidate, patches: patchSet,
         dispositions: candidate.dispositions?.filter(item => ids.has(String(item.id))),
       }).filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate');

@@ -12,7 +12,7 @@
 import { Util } from '../platform/foundation.mjs';
 import type { NimbusTask } from '../platform/types.mjs';
 import { Engine } from './engine.mjs';
-import { applyPatchesToSnapshot, validateCandidate, validateCandidateForApply } from './setup-scheduler.mjs';
+import { applyPatchesToSnapshot, boundsWithRunContext, validateCandidate, validateCandidateForApply } from './setup-scheduler.mjs';
 import type { CandidateResult, SchedulePatch, ScheduleSnapshot, ValidationFinding } from './setup-scheduler.mjs';
 
 /** One `TaskDateUpdate` as the browser's save sends it (backend/scheduling/models.py), optimizer flavour. */
@@ -209,9 +209,11 @@ export function planApply(args: {
   if (inputsChanged) return refuse(`inputs_changed:${inputsChanged}`);
 
   const keyOf = (finding: ValidationFinding): string => `${finding.code}|${finding.taskId}|${finding.message}`;
+  // One run context for the live board, reused by every validation below (the board does not change inside this plan).
+  const liveBounds = boundsWithRunContext(validationLive, context.bounds);
   const errorsFor = (set: SchedulePatch[]): ValidationFinding[] => {
     const ids = new Set(set.map(patch => String(patch.id)));
-    return validateCandidate(validationLive, context.bounds, {
+    return validateCandidate(validationLive, liveBounds, {
       ...candidate, patches: set,
       dispositions: candidate.dispositions?.filter(item => ids.has(String(item.id))),
     }).filter(finding => finding.severity === 'error' && finding.code !== 'stale_candidate');
@@ -226,6 +228,19 @@ export function planApply(args: {
     if (findings.some(finding => !finding.taskId)) return refuse('finding_without_order');
     const keptIds = new Set(kept.map(patch => String(patch.id)));
     let changed = false;
+    // The kept set is fixed for this pass: group it by the live machine once (the drop filter stays per use).
+    let byLine: Map<unknown, SchedulePatch[]> | null = null;
+    const keptByLine = (): Map<unknown, SchedulePatch[]> => {
+      if (!byLine) {
+        byLine = new Map();
+        for (const patch of kept) {
+          const machine = liveById.get(String(patch.id))?.MACHINE;
+          const list = byLine.get(machine);
+          if (list) list.push(patch); else byLine.set(machine, [patch]);
+        }
+      }
+      return byLine;
+    };
     for (const finding of findings) {
       const id = String(finding.taskId);
       if (keptIds.has(id)) { if (!dropped.has(id)) { dropWithFamily(id, 'validation'); changed = true; } continue; }
@@ -233,7 +248,7 @@ export function planApply(args: {
       // A new collision with an order this run does not write: the kept patches on its line that meet it go.
       const other = liveById.get(id);
       const oStart = other?.start_date?.getTime(); const oEnd = other?.end_date?.getTime();
-      const onLine = kept.filter(patch => !dropped.has(String(patch.id)) && liveById.get(String(patch.id))?.MACHINE === other?.MACHINE);
+      const onLine = (keptByLine().get(other?.MACHINE) ?? []).filter(patch => !dropped.has(String(patch.id)));
       const range = (patch: SchedulePatch): [number, number] | null => {
         const a = patch.changes.start_date?.getTime(); const b = patch.changes.end_date?.getTime();
         return a === undefined || b === undefined ? null : [a, b];
@@ -262,10 +277,11 @@ export function planApply(args: {
   // Nothing dropped: the whole candidate is checked as the preview's Apply checks it. After a drop the dispositions
   // of the dropped orders no longer describe the kept set, so accounting (which compares them) is not meaningful.
   const droppedAny = dropped.size > 0;
+  const finalKeptIds = new Set(kept.map(p => String(p.id)));
   const finalCandidate: CandidateResult = droppedAny
-    ? { ...candidate, patches: kept, dispositions: candidate.dispositions?.filter(item => kept.some(p => String(p.id) === String(item.id))) }
+    ? { ...candidate, patches: kept, dispositions: candidate.dispositions?.filter(item => finalKeptIds.has(String(item.id))) }
     : candidate;
-  const findings = validateCandidateForApply(finalCandidate, validationLive)
+  const findings = validateCandidateForApply(finalCandidate, validationLive, { skipStale: true })
     .filter(finding => !(finding.code === 'stale_candidate' && finding.severity === 'error'));
   const blocking = findings.filter(finding => finding.severity === 'error' && !(droppedAny && (finding.code === 'accounting' || baseline.has(keyOf(finding)))));
   return {

@@ -283,7 +283,7 @@ async function runOptimizerImpl(input: RunInput, sink: LogSink, log: LogEntry[])
   emit('info', 'optimize', `search ended: ${candidate.diagnostics.termination}, ${candidate.patches.length} patches`, { ms: performance.now() - t2 });
 
   const serialized = serializeOptimizerValidation(candidate);
-  const validationFindings = validateCandidateForApply(candidate, snapshot);
+  const validationFindings = validateCandidateForApply(candidate, snapshot, { skipStale: true });
   const errors = validationFindings.filter(f => f.severity === 'error');
   const toolBlocked = backlogMode ? 0 : candidate.toolBlocked?.length ?? 0;
   const blockers: string[] = [];
