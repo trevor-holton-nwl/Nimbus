@@ -211,6 +211,10 @@ export const Persistence = {
   // captured before the async work starts, and compared after each response resolves;
   // a mismatch means a newer load() has since started and this response is discarded.
   _loadRequest: 0,
+  /** True once the selected plant's whole load fan-out (tasks, master data, calendars, rate maps, setup snapshot) has
+   *  resolved; cleared at the top of every load(). A plain flag, never a Store event (an event would bump the revision).
+   *  Schedule Confidence holds its first paint until this is true so the badge does not jump when late inputs arrive. */
+  bootReady: false,
   // Counts /tasks fetches currently in flight. Incremented right before the
   // fetch in load() is issued, decremented via a trailing .finally() once
   // that fetch chain settles (success, the stale-generation discard branch,
@@ -400,6 +404,7 @@ export const Persistence = {
     // counter and discards itself if a newer load() has since started. See the
     // _loadRequest field comment above for why this mirrors _setupSnapshotRequest.
     const loadGeneration = ++Persistence._loadRequest;
+    Persistence.bootReady = false;
     Persistence._lastAttemptedPlant = plant ?? null;
     const stats: LoadStats = Persistence._lastLoad = {
       source: null, ts: new Date().toISOString(), plant: plant ?? null,
@@ -584,7 +589,10 @@ export const Persistence = {
                 setupSnapshotGeneration === Persistence._setupSnapshotRequest
                   ? Persistence.loadSetupSnapshot(plant) : Promise.resolve(null),
               ])
-                .finally(() => Store.emit({ type: 'schedule:hydrated', source: 'persistence' }));
+                .finally(() => {
+                  if (loadGeneration === Persistence._loadRequest) Persistence.bootReady = true;
+                  Store.emit({ type: 'schedule:hydrated', source: 'persistence' });
+                });
             });
           return;
         }
@@ -749,7 +757,10 @@ export const Persistence = {
             setupSnapshotGeneration === Persistence._setupSnapshotRequest
               ? Persistence.loadSetupSnapshot(plant) : Promise.resolve(null),
           ])
-            .finally(() => Store.emit({ type: 'schedule:hydrated', source: 'persistence' }));
+            .finally(() => {
+              if (loadGeneration === Persistence._loadRequest) Persistence.bootReady = true;
+              Store.emit({ type: 'schedule:hydrated', source: 'persistence' });
+            });
         });
       })
       .catch(err => {
