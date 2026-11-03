@@ -222,13 +222,13 @@ export const OptimizeDialog = (() => {
         const checked = _selectedLines.has(line) ? 'checked' : '';
         const oc = orderCounts[line] || 0;
         const excluded = (Store.lineSettings[line] || {}).excludeFromOpt;
-        const exTag = excluded ? '<span class="opt-line-excluded" title="Globally excluded from optimization">excluded</span>' : '';
+        const exTag = excluded ? `<span class="opt-line-excluded" title="${Util.escapeHtml(Util.t('ui.opt_line_excluded_title'))}">${Util.escapeHtml(Util.t('ui.opt_line_excluded'))}</span>` : '';
         return `<li class="opt-line-row${excluded ? ' is-excluded' : ''}" role="option" aria-selected="${!!checked}">
             <label class="opt-line-label">
               <input type="checkbox" ${checked} data-line="${Util.escapeHtml(line)}">
               <span class="opt-line-name">${Util.escapeHtml(line)}</span>
               ${exTag}
-              <span class="opt-line-orders">${oc} order${oc === 1 ? '' : 's'}</span>
+              <span class="opt-line-orders">${Util.escapeHtml(Util.t(oc === 1 ? 'ui.opt_line_orders_one' : 'ui.opt_line_orders_other', { n: oc }))}</span>
             </label>
           </li>`;
       }).join('');
@@ -236,7 +236,7 @@ export const OptimizeDialog = (() => {
         input.addEventListener('change', () => _onLineToggle(input.dataset.line || '', input.checked)));
     }
 
-    if (count) count.textContent = `${_selectedLines.size} of ${allLines.length} selected`;
+    if (count) count.textContent = Util.t('ui.lines_selected', { sel: _selectedLines.size, total: allLines.length });
   }
 
   function filterLines(q: string) {
@@ -341,7 +341,7 @@ export const OptimizeDialog = (() => {
     }
     const firmedLabel = document.getElementById('opt-firmed-label');
     const calendarLabel = document.getElementById('opt-calendar-label');
-    if (firmedLabel) firmedLabel.title = backlog ? 'Firmed orders move when reached and remain firmed.' : Util.t('ui.opt_respect_firmed_hint');
+    if (firmedLabel) firmedLabel.title = backlog ? Util.t('ui.opt_respect_firmed_backlog_hint') : Util.t('ui.opt_respect_firmed_hint');
     if (calendarLabel) calendarLabel.title = backlog ? 'Calendar adherence is required for Remove Backlog.' : '';
   }
 
@@ -377,7 +377,7 @@ export const OptimizeDialog = (() => {
     const days = Math.round((_end.getTime() - _start.getTime()) / Config.MS_DAY);
     el.innerHTML =
       `<span class="opt-date-summary-range">${_displayDate(_start)} → ${_displayEnd(_end)}</span>` +
-      `<span class="opt-date-summary-days">&nbsp;· ${days} ${days === 1 ? 'day' : 'days'}</span>`;
+      `<span class="opt-date-summary-days">&nbsp;· ${Util.escapeHtml(Util.t(days === 1 ? 'ui.opt_days_one' : 'ui.opt_days_other', { n: days }))}</span>`;
   }
 
   function applyPreset(key: string) {
@@ -1135,9 +1135,9 @@ const FINALIST_TARGET_KEYS: ReadonlyArray<{
   key: keyof OptimizerKpis;
   phrase: (n: number, worse: boolean) => string;
 }> = [
-  { key: 'changeovers', phrase: (n, worse) => `${n} ${worse ? 'more' : 'fewer'} changeover${n === 1 ? '' : 's'}` },
-  { key: 'late_count', phrase: (n, worse) => `${n} ${worse ? 'more' : 'fewer'} late order${n === 1 ? '' : 's'}` },
-  { key: 'late_h', phrase: (n, worse) => `${n.toFixed(1)} h ${worse ? 'more' : 'less'} slip` },
+  { key: 'changeovers', phrase: (n, worse) => Util.t(`ui.opt_pv_phrase_changeovers_${worse ? 'more' : 'fewer'}_${n === 1 ? 'one' : 'other'}`, { n }) },
+  { key: 'late_count', phrase: (n, worse) => Util.t(`ui.opt_pv_phrase_late_${worse ? 'more' : 'fewer'}_${n === 1 ? 'one' : 'other'}`, { n }) },
+  { key: 'late_h', phrase: (n, worse) => Util.t(worse ? 'ui.opt_pv_phrase_slip_more' : 'ui.opt_pv_phrase_slip_less', { n: n.toFixed(1) }) },
 ];
 
 /** One-sentence rationale for why an alternate finalist wasn't applied. Compares
@@ -1145,6 +1145,7 @@ const FINALIST_TARGET_KEYS: ReadonlyArray<{
  *  balance" claim, since this is a 2-wide mode-swap comparison, not a true beam
  *  (see docs/archive/OPTIMIZER-PREVIEW.md §6 fallback-tier note). */
 function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): string {
+  const and = ` ${Util.t('ui.opt_pv_join_and')} `;
   const worse: string[] = [];
   const better: string[] = [];
   for (const { key, phrase } of FINALIST_TARGET_KEYS) {
@@ -1153,9 +1154,9 @@ function describeFinalistWhyNot(applied: OptimizerKpis, alt: OptimizerKpis): str
     (d > 0 ? worse : better).push(phrase(Math.abs(d), d > 0));
   }
   if (!worse.length && !better.length) return Util.t('ui.opt_pv_plan_pruned_tie');
-  if (worse.length && !better.length) return Util.t('ui.opt_pv_plan_pruned_worse', { list: worse.join(' and ') });
-  if (better.length && !worse.length) return Util.t('ui.opt_pv_plan_pruned_better', { list: better.join(' and ') });
-  return Util.t('ui.opt_pv_plan_pruned_mixed', { better: better.join(' and '), worse: worse.join(' and ') });
+  if (worse.length && !better.length) return Util.t('ui.opt_pv_plan_pruned_worse', { list: worse.join(and) });
+  if (better.length && !worse.length) return Util.t('ui.opt_pv_plan_pruned_better', { list: better.join(and) });
+  return Util.t('ui.opt_pv_plan_pruned_mixed', { better: better.join(and), worse: worse.join(and) });
 }
 
 /** Tool Inventory: the plant's tooling rule plus its inventory rows, as one comparable string. A preview or a finished
@@ -1260,8 +1261,8 @@ export const OptimizerPreview = {
     const check = candidate.gapFill;
     if (!check) return '';
     return check.complete
-      ? `Capacity check: ${check.placed} more order(s) placed; the rest can't fit without moving scheduled work.`
-      : `Capacity check incomplete: ${check.placed} placed, ${check.unchecked} still unchecked.`;
+      ? Util.t('ui.opt_gapfill_complete', { placed: check.placed })
+      : Util.t('ui.opt_gapfill_incomplete', { placed: check.placed, unchecked: check.unchecked });
   },
 
   planningSummary(candidate: CandidateResult, before: ReadonlyArray<NimbusTask>): {
@@ -1330,6 +1331,13 @@ export const OptimizerPreview = {
    *  the user clicks Run, before any await/fetch — gives instant feedback so
    *  the user doesn't stare at a blurry frozen page during the wheel fetch
    *  + config-close transition + engine run. */
+  /** Planner-facing mode name ("Due Date"), not the raw mode id. */
+  _modeLabel(mode: OptimizerMode): string {
+    const key = 'us.opt_mode_' + mode;
+    const label = Util.t(key);
+    return label === key ? String(mode) : label;
+  },
+
   showLoading(mode: OptimizerMode, plant: string) {
     OptimizerPreview._installAbandonGuard();
     const body = document.getElementById('opt-preview-body');
@@ -1340,7 +1348,7 @@ export const OptimizerPreview = {
       + '    <span class="cw-spin"></span>'
       + `    <span style="font-size:14px;color:var(--fg);">${Util.escapeHtml(Util.t('ui.opt_pv_loading_title'))}</span>`
       + '  </div>'
-      + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(Util.t('ui.opt_pv_loading_sub', { mode, plant }))}</div>`
+      + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(Util.t('ui.opt_pv_loading_sub', { mode: OptimizerPreview._modeLabel(mode), plant }))}</div>`
       + '</div>';
     }
     const root = document.getElementById('modal-opt-preview');
@@ -1697,7 +1705,7 @@ export const OptimizerPreview = {
           body.innerHTML =
             '<div style="padding:24px;text-align:center;color:var(--err);">'
           + `  <div style="font-size:14px;margin-bottom:8px;">${Util.escapeHtml(Util.t('ui.opt_pv_failed_title'))}</div>`
-          + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(errMsg || 'Unknown error')}</div>`
+          + `  <div style="font-size:12px;color:var(--fg-mute);">${Util.escapeHtml(errMsg || Util.t('ui.opt_unknown_error'))}</div>`
           + '</div>';
         }
         footBtns.forEach((b) => { b.disabled = false; });
@@ -2333,8 +2341,8 @@ export const OptimizerPreview = {
             </div>
           </div>
           <div class="opt-pv-bars">
-            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">pre</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill pre" style="width:${preW}%"></i></div></div>
-            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">post</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill post ${dirCls}" style="width:${postW}%"></i></div></div>
+            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">${Util.escapeHtml(Util.t('ui.opt_pv_bar_pre'))}</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill pre" style="width:${preW}%"></i></div></div>
+            <div class="opt-pv-bar-row"><span class="opt-pv-bar-tag">${Util.escapeHtml(Util.t('ui.opt_pv_bar_post'))}</span><div class="opt-pv-bar"><i class="opt-pv-bar-fill post ${dirCls}" style="width:${postW}%"></i></div></div>
           </div>
           <div class="opt-pv-delta-pill ${dirCls}">${deltaText}</div>
         </div>`;
@@ -2347,20 +2355,20 @@ export const OptimizerPreview = {
       .filter(item => item.code !== 'missing_setup' && item.taskId && protectedIds.has(item.taskId));
     const orderLabels = new Map((OptimizerPreview._snapshot ?? []).map(task => [task.id, task.PRODUCTION_ORDER || task.ORDER || task.id]));
     const planningHtml = planning ? `<div class="opt-pv-footer-note" role="status">
-      <strong>${planning.scheduled} scheduled · ${planning.needsPlanning} Needs Planning (${planning.newlyQueued} newly queued)</strong>
-      ${planning.incomplete ? '<div>Search incomplete — best proposal found within budget.</div>' : ''}
+      <strong>${Util.escapeHtml(Util.t('ui.opt_pv_planning_summary', { scheduled: planning.scheduled, queued: planning.needsPlanning, newly: planning.newlyQueued }))}</strong>
+      ${planning.incomplete ? `<div>${Util.escapeHtml(Util.t('ui.opt_pv_search_incomplete'))}</div>` : ''}
       ${OptimizerPreview._candidate?.gapFill ? `<div>${Util.escapeHtml(OptimizerPreview.gapFillSummary(OptimizerPreview._candidate))}</div>` : ''}
       ${(OptimizerPreview._candidate?.validationFindings ?? []).filter(finding => finding.severity === 'error')
         .map(finding => `<div>${Util.escapeHtml(finding.message)}</div>`).join('')}
     </div>` : '';
 
     const protectedHtml = protectedFindings.length ? `<details class="opt-pv-section">
-      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">Protected orders requiring attention</span><span class="opt-pv-section-badge">${protectedFindings.length}</span></summary>
+      <summary class="opt-pv-section-head"><span class="opt-pv-section-title">${Util.escapeHtml(Util.t('ui.opt_pv_protected_head'))}</span><span class="opt-pv-section-badge">${protectedFindings.length}</span></summary>
       <div class="opt-pv-section-body">
-        <div>${protectedFindings.length} order(s) have existing protected-schedule conflicts — locked in place, can't be moved.</div>
+        <div>${Util.escapeHtml(Util.t('ui.opt_pv_protected_body', { n: protectedFindings.length }))}</div>
         <ul>${protectedFindings.slice(0, 50)
           .map(item => `<li>${Util.escapeHtml(String(orderLabels.get(item.taskId!) ?? item.taskId))} · ${Util.escapeHtml(item.line ?? '')}: ${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
-        ${protectedFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}
+        ${protectedFindings.length > 50 ? `<div>${Util.escapeHtml(Util.t('ui.opt_pv_first_50_orders'))}</div>` : ''}
       </div>
     </details>` : '';
 
@@ -2375,7 +2383,7 @@ export const OptimizerPreview = {
       <div class="opt-pv-section-body">
         <ul>${distributionSeparationFindings.slice(0, 50)
           .map(item => `<li>${Util.escapeHtml(item.message)}</li>`).join('')}</ul>
-        ${distributionSeparationFindings.length > 50 ? '<div>Showing the first 50 findings. Review the remaining orders in Orders.</div>' : ''}
+        ${distributionSeparationFindings.length > 50 ? `<div>${Util.escapeHtml(Util.t('ui.opt_pv_first_50_orders'))}</div>` : ''}
       </div>
     </details>` : '';
     // Tool Inventory (all of this is empty/absent while the candidate carries no toolBlocked/toolMoved/toolPass).
@@ -2502,7 +2510,7 @@ export const OptimizerPreview = {
       candidate.validationFindings = findings;
       OptimizerPreview._render();
       OptimizerPreview._syncApplyButton();
-      Toast.show('This proposal is no longer valid. Run optimization again before applying.', 'warn');
+      Toast.show(Util.t('toast.opt_proposal_invalid'), 'warn');
       return;
     }
     // This is the sole schedule-state commit for a preview candidate.
@@ -2528,7 +2536,7 @@ export const OptimizerPreview = {
       if (!pruned) {
         OptimizerPreview._render();
         OptimizerPreview._syncApplyButton();
-        Toast.show('This proposal is no longer valid. Run optimization again before applying.', 'warn');
+        Toast.show(Util.t('toast.opt_proposal_invalid'), 'warn');
         return;
       }
       const survivors = new Set(pruned.kept.map(patch => String(patch.id)));
@@ -2704,7 +2712,7 @@ export const OptimizerPreview = {
       if (candidate.dispositions?.some(item => item.status === 'needs_planning')) {
         const count = candidate.dispositions.filter(item => item.status === 'needs_planning').length;
         const toolNote = toolSummary.queued.length ? ` ${Util.t('ui.opt_tool_need_planning_suffix', { n: toolSummary.queued.length })}` : '';
-        Toast.show(`${count} order(s) need planning${toolNote}. Review their allowed windows and reasons in Orders.`, 'warn', 7000);
+        Toast.show(Util.t('toast.opt_orders_need_planning', { count, toolNote }), 'warn', 7000);
       } else if (unplacedOrders.orders && !candidate.dispositions) {
         Toast.show(Util.t('toast.optimize_orders_left_in_place', {
           orders: unplacedOrders.orders,
@@ -3334,7 +3342,7 @@ export const SandboxAdapter = {
     const capturedLinePlants = applied ? SandboxAdapter._linePlantSnapshot : null;
 
     if (applied) {
-      const scenarioName = (document.getElementById('sb-scenario-name') as HTMLInputElement | null)?.value || 'What-If';
+      const scenarioName = (document.getElementById('sb-scenario-name') as HTMLInputElement | null)?.value || Util.t('ui.what_if_default_name');
       Toast.show(Util.t('toast.scenario_applied', { name: scenarioName }), 'success');
       // Promotion makes the trial side effects the new live baseline. Clear
       // the pre-sandbox copies before any persistence work can run. A later

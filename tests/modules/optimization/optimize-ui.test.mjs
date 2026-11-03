@@ -3,6 +3,7 @@
 // P3 of docs/architecture/domain-refactor-plan.md, which split that
 // mega-module into 6 domain files) to mirror the new file layout.
 import { test } from 'node:test';
+import { enLocale } from '../helpers/en-locale.mjs';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
@@ -36,10 +37,17 @@ test('preview separates scheduled demand, new queue, protected exceptions and in
 });
 
 test('preview distinguishes gap completion from the main sequence search', () => {
-  assert.equal(typeof OptimizerPreview.gapFillSummary, 'function');
-  assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: true, placed: 3, unchecked: 0 } }), /Capacity check:.*3 more order/);
-  assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: false, placed: 1, unchecked: 2 } }), /Capacity check incomplete.*2 still unchecked/);
-  assert.equal(OptimizerPreview.gapFillSummary({}), '');
+  const priorLocales = globalThis.window?.__NIMBUS_LOCALES;
+  globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = enLocale();
+  try {
+    assert.equal(typeof OptimizerPreview.gapFillSummary, 'function');
+    assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: true, placed: 3, unchecked: 0 } }), /Capacity check:.*3 more order/);
+    assert.match(OptimizerPreview.gapFillSummary({ gapFill: { complete: false, placed: 1, unchecked: 2 } }), /Capacity check incomplete.*2 still unchecked/);
+    assert.equal(OptimizerPreview.gapFillSummary({}), '');
+  } finally {
+    globalThis.window.__NIMBUS_LOCALES = priorLocales;
+  }
 });
 
 // Same split-realm/no-DOM situation documented in

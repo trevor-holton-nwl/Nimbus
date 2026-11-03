@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { OptimizeDialog, OptimizerPreview } from '../../../frontend/optimization/optimize-ui.mjs';
+import { enLocale } from '../helpers/en-locale.mjs';
 import { Store } from '../../../frontend/platform/store.mjs';
 import { Alerts } from '../../../frontend/insights/services.mjs';
 import { Persistence } from '../../../frontend/scheduling/persistence.mjs';
@@ -35,6 +36,7 @@ function fixture() {
     plantNow: Store.plantNow,
   };
   globalThis.window = globalThis.window || {};
+  globalThis.window.__NIMBUS_LOCALES = enLocale();
   globalThis.document = {
     getElementById: get, addEventListener() {}, removeEventListener() {},
     querySelector() { return null; }, querySelectorAll() { return []; }, createElement: () => makeEl('created'),
